@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import QMainWindow, QTabWidget, QWidget
 from PyQt6.QtCore import QSize
 
 from claude_partner.ui.prompt_panel import PromptPanel
+from claude_partner.ui import theme
 
 
 class MainWindow(QMainWindow):
@@ -26,6 +27,7 @@ class MainWindow(QMainWindow):
         prompt_panel: PromptPanel,
         transfer_panel: QWidget | None = None,
         device_panel: QWidget | None = None,
+        settings_panel: QWidget | None = None,
     ) -> None:
         """
         Business Logic（为什么需要这个函数）:
@@ -43,30 +45,7 @@ class MainWindow(QMainWindow):
 
         # Tab 布局
         self._tab_widget: QTabWidget = QTabWidget()
-        self._tab_widget.setStyleSheet(
-            """
-            QTabWidget::pane {
-                border: none;
-            }
-            QTabBar::tab {
-                padding: 8px 20px;
-                font-size: 13px;
-                min-width: 100px;
-            }
-            QTabBar::tab:selected {
-                color: #0078D4;
-                border-bottom: 2px solid #0078D4;
-                font-weight: bold;
-            }
-            QTabBar::tab:!selected {
-                color: #666;
-            }
-            QTabBar::tab:hover {
-                color: #0078D4;
-                background: #f0f0f0;
-            }
-            """
-        )
+        self._tab_widget.setStyleSheet(theme.tab_bar_style())
         self.setCentralWidget(self._tab_widget)
 
         # Tab 1: Prompt 管理面板
@@ -80,6 +59,10 @@ class MainWindow(QMainWindow):
         # Tab 3: 设备列表面板（占位）
         self._device_panel: QWidget = device_panel or QWidget()
         self._tab_widget.addTab(self._device_panel, "设备列表")
+
+        # Tab 4: 设置面板
+        self._settings_panel: QWidget = settings_panel or QWidget()
+        self._tab_widget.addTab(self._settings_panel, "设置")
 
     @property
     def prompt_panel(self) -> PromptPanel:

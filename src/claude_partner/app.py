@@ -28,6 +28,9 @@ from claude_partner.ui.prompt_panel import PromptPanel
 from claude_partner.ui.transfer_panel import TransferPanel
 from claude_partner.ui.device_panel import DevicePanel
 from claude_partner.ui.tray import SystemTray
+from claude_partner.ui.settings_panel import SettingsPanel
+from claude_partner.ui import theme
+from claude_partner.hotkey.listener import GlobalHotkeyManager
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -68,6 +71,8 @@ class Application:
         self._screenshot_mgr: ScreenshotManager | None = None
         self._main_window: MainWindow | None = None
         self._system_tray: SystemTray | None = None
+        self._hotkey_mgr: GlobalHotkeyManager | None = None
+        self._settings_panel: SettingsPanel | None = None
 
     async def start(self) -> None:
         """
@@ -131,7 +136,14 @@ class Application:
         self._screenshot_mgr = ScreenshotManager()
         logger.info("截图管理器创建完成")
 
-        # 11. UI 组件
+        # 11. 全局快捷键
+        self._hotkey_mgr = GlobalHotkeyManager(
+            {"screenshot": self._config.screenshot_hotkey}
+        )
+        self._hotkey_mgr.start()
+        logger.info("全局快捷键启动完成")
+
+        # 12. UI 组件
         try:
             prompt_panel = PromptPanel(self._prompt_repo, self._config)
             logger.info("PromptPanel 创建完成")
@@ -139,11 +151,14 @@ class Application:
             logger.info("TransferPanel 创建完成")
             device_panel = DevicePanel()
             logger.info("DevicePanel 创建完成")
+            self._settings_panel = SettingsPanel(self._config)
+            logger.info("SettingsPanel 创建完成")
 
             self._main_window = MainWindow(
                 prompt_panel=prompt_panel,
                 transfer_panel=transfer_panel,
                 device_panel=device_panel,
+                settings_panel=self._settings_panel,
             )
             logger.info("MainWindow 创建完成")
         except Exception as e:
@@ -236,6 +251,40 @@ class Application:
         )
         self._system_tray.quit_requested.connect(self._quit)
 
+        # 全局快捷键 → 截图
+        if self._hotkey_mgr is not None:
+            self._hotkey_mgr.hotkey_triggered.connect(self._on_hotkey)
+
+        # 设置变更 → 更新快捷键和配置
+        if self._settings_panel is not None:
+            self._settings_panel.settings_changed.connect(self._on_settings_changed)
+
+    def _on_hotkey(self, action: str) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            全局快捷键触发时需要执行对应的动作。
+
+        Code Logic（这个函数做什么）:
+            根据动作名称分发到对应的处理函数。
+        """
+        if action == "screenshot" and self._screenshot_mgr is not None:
+            self._screenshot_mgr.take_screenshot()
+
+    def _on_settings_changed(self, config: object) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            用户修改设置后需要实时更新运行中的子系统配置。
+
+        Code Logic（这个函数做什么）:
+            更新内部 config 引用，重新注册全局快捷键。
+        """
+        if isinstance(config, AppConfig):
+            self._config = config
+            if self._hotkey_mgr is not None:
+                self._hotkey_mgr.update_hotkey(
+                    "screenshot", config.screenshot_hotkey
+                )
+
     def _show_main_window(self) -> None:
         """
         Business Logic（为什么需要这个函数）:
@@ -269,6 +318,9 @@ class Application:
             反向停止：同步引擎 → mDNS → HTTP 服务 → 网络客户端 → 数据库。
         """
         logger.info("应用关闭中...")
+
+        if self._hotkey_mgr is not None:
+            self._hotkey_mgr.stop()
 
         if self._sync_engine is not None:
             await self._sync_engine.stop()
@@ -310,6 +362,7 @@ def main() -> None:
     # 创建 Qt 应用
     qt_app = QApplication(sys.argv)
     qt_app.setQuitOnLastWindowClosed(False)  # 关闭窗口不退出，由托盘管理
+    qt_app.setStyleSheet(theme.get_global_stylesheet())  # Apple 风格全局样式
 
     # 使用 qasync 事件循环
     loop = qasync.QEventLoop(qt_app)

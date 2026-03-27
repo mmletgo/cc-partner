@@ -34,6 +34,7 @@ class AppConfig:
     http_port: int  # 0 = 系统自动分配
     receive_dir: str
     db_path: str
+    screenshot_hotkey: str = "<ctrl>+<shift>+s"
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -54,6 +55,7 @@ class AppConfig:
                 http_port=data["http_port"],
                 receive_dir=data["receive_dir"],
                 db_path=data["db_path"],
+                screenshot_hotkey=data.get("screenshot_hotkey", "<ctrl>+<shift>+s"),
             )
             return config
 
@@ -84,6 +86,7 @@ class AppConfig:
             "http_port": self.http_port,
             "receive_dir": self.receive_dir,
             "db_path": self.db_path,
+            "screenshot_hotkey": self.screenshot_hotkey,
         }
         CONFIG_FILE.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
