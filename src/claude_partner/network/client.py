@@ -7,7 +7,7 @@ import logging
 logger: logging.Logger = logging.getLogger(__name__)
 
 # 默认请求超时（秒）
-DEFAULT_TIMEOUT: int = 10
+DEFAULT_TIMEOUT: int = 5
 
 
 class PeerClient:

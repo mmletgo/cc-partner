@@ -533,12 +533,12 @@ class TransferPanel(QWidget):
 
             Code Logic（这个函数做什么）:
                 await send_file 获取 TransferTask，然后调用 _add_task_widget。
+                send_file 内部会 emit progress/completed/failed 信号，
+                但 widget 可能在信号之后才创建，所以此处以 task 最终状态为准。
             """
             task: TransferTask = await self._file_sender.send_file(
                 file_path, peer_base_url, peer_device_id
             )
-            # send_file 返回时 task 可能已经是完成/失败状态
-            # 但 _add_task_widget 会在调用前检查，所以这里直接添加
             if task.id not in self._task_widgets:
                 self._add_task_widget(task)
 

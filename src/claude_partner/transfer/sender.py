@@ -111,6 +111,8 @@ class FileSender(QObject):
                 peer_base_url, metadata
             )
 
+            if "error" in init_resp and init_resp["error"]:
+                raise RuntimeError(f"连接对端失败: {init_resp['error']}")
             if not init_resp.get("accepted", False):
                 raise RuntimeError("对端拒绝接收文件")
 
