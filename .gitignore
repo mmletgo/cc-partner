@@ -4,7 +4,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-*.spec
+# 保留 claude_partner.spec，忽略其他 spec
+# *.spec
 .venv/
 venv/
 *.db
