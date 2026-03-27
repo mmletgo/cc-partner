@@ -8,6 +8,7 @@ from claude_partner.config import AppConfig
 import asyncio
 import socket
 import logging
+import threading
 from datetime import datetime
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -24,10 +25,9 @@ class DeviceDiscovery(QObject):
         无需用户手动输入 IP 地址和端口。通过 mDNS 协议实现零配置网络发现。
 
     Code Logic（这个类做什么）:
-        1. 将本机注册为 mDNS 服务，广播自身的 device_id、device_name 和 HTTP 端口
-        2. 浏览同类型的 mDNS 服务，发现其他设备上线/下线
-        3. 维护 _devices 字典跟踪在线设备，通过 Qt 信号通知 UI 层
-        注意：zeroconf 回调在后台线程执行，Qt 信号机制自动处理跨线程分发
+        整个 Zeroconf 运行在独立的后台线程和独立的 asyncio 事件循环中，
+        避免与主线程的 qasync 事件循环冲突。
+        通过 Qt 信号（线程安全）将设备发现/丢失事件通知 UI 层。
     """
 
     device_found = pyqtSignal(object)  # 发现新设备，传 Device 对象
@@ -39,7 +39,7 @@ class DeviceDiscovery(QObject):
             初始化设备发现服务，需要配置中的设备 ID 和名称来注册本机服务。
 
         Code Logic（这个函数做什么）:
-            保存配置引用，初始化内部状态（设备字典、zeroconf 实例占位符）。
+            保存配置引用，初始化内部状态。
         """
         super().__init__()
         self._config: AppConfig = config
@@ -47,26 +47,21 @@ class DeviceDiscovery(QObject):
         self._zeroconf: Zeroconf | None = None
         self._browser: ServiceBrowser | None = None
         self._service_info: ServiceInfo | None = None
+        self._thread: threading.Thread | None = None
+        self._mdns_loop: asyncio.AbstractEventLoop | None = None
 
-    async def start(self, port: int) -> None:
+    def start(self, port: int) -> None:
         """
         Business Logic（为什么需要这个函数）:
             应用启动后需要在局域网中注册自己的存在，并开始监听其他设备。
 
         Code Logic（这个函数做什么）:
-            1. 创建 Zeroconf 实例
-            2. 获取本机 IP 地址
-            3. 构造 ServiceInfo（包含 device_id 和 device_name 的 TXT 记录）
-            4. 通过 asyncio.to_thread 在后台注册服务（避免阻塞 UI）
-            5. 创建 ServiceBrowser 开始浏览同类型服务
+            在独立后台线程中创建 Zeroconf（带独立事件循环），
+            注册本机服务并启动浏览。不阻塞主线程。
         """
-        self._zeroconf = Zeroconf()
-
-        # 获取本机局域网 IP（避免 Linux 上返回 127.0.1.1 的问题）
         local_ip: str = self._get_local_ip()
         logger.info("本机 IP: %s, 端口: %d", local_ip, port)
 
-        # 构造 TXT 记录
         properties: dict[bytes, bytes] = {
             b"device_id": self._config.device_id.encode("utf-8"),
             b"device_name": self._config.device_name.encode("utf-8"),
@@ -80,34 +75,66 @@ class DeviceDiscovery(QObject):
             properties=properties,
         )
 
-        # 在线程池中注册 mDNS 服务（register_service 在某些网络环境下会阻塞数秒）
-        # 使用 asyncio.to_thread 保持在主事件循环上下文中，不阻塞 UI
-        async def _register_async() -> None:
-            """异步注册 mDNS 服务。"""
-            try:
-                assert self._zeroconf is not None
-                assert self._service_info is not None
-                await asyncio.to_thread(
-                    self._zeroconf.register_service, self._service_info
-                )
-                logger.info(
-                    "mDNS 服务已注册: %s (端口 %d)",
-                    self._config.device_name,
-                    port,
-                )
-            except Exception as e:
-                logger.error("mDNS 服务注册失败: %s", e)
-
-        # 启动注册任务（不 await，让它在后台完成）
-        asyncio.ensure_future(_register_async())
-
-        # 开始浏览服务（ServiceBrowser 自身在后台线程中运行，不会阻塞）
-        self._browser = ServiceBrowser(
-            self._zeroconf,
-            SERVICE_TYPE,
-            handlers=[self._on_service_state_change],
+        self._thread = threading.Thread(
+            target=self._run_mdns, args=(port,), daemon=True
         )
-        logger.info("mDNS 服务浏览已启动")
+        self._thread.start()
+
+    def _run_mdns(self, port: int) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            zeroconf 内部依赖 asyncio 事件循环，与主线程 qasync 循环冲突。
+            在独立线程运行独立事件循环可以完全隔离。
+
+        Code Logic（这个函数做什么）:
+            1. 创建并设置独立 asyncio 事件循环
+            2. 创建 Zeroconf 实例
+            3. 注册 mDNS 服务
+            4. 启动 ServiceBrowser 浏览
+            5. 保持事件循环运行直到 stop 被调用
+        """
+        self._mdns_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._mdns_loop)
+
+        try:
+            self._zeroconf = Zeroconf()
+
+            # 注册服务
+            assert self._service_info is not None
+            self._zeroconf.register_service(
+                self._service_info, cooperating_responders=True
+            )
+            logger.info(
+                "mDNS 服务已注册: %s (端口 %d)",
+                self._config.device_name,
+                port,
+            )
+
+            # 启动浏览
+            self._browser = ServiceBrowser(
+                self._zeroconf,
+                SERVICE_TYPE,
+                handlers=[self._on_service_state_change],
+            )
+            logger.info("mDNS 服务浏览已启动")
+
+            # 保持线程运行（zeroconf 需要这个事件循环）
+            self._mdns_loop.run_forever()
+
+        except Exception as e:
+            logger.error("mDNS 服务启动失败: %s", e, exc_info=True)
+        finally:
+            if self._zeroconf is not None:
+                if self._browser is not None:
+                    self._browser.cancel()
+                if self._service_info is not None:
+                    try:
+                        self._zeroconf.unregister_service(self._service_info)
+                    except Exception:
+                        pass
+                self._zeroconf.close()
+            if self._mdns_loop is not None:
+                self._mdns_loop.close()
 
     def stop(self) -> None:
         """
@@ -115,20 +142,14 @@ class DeviceDiscovery(QObject):
             应用关闭时需要注销 mDNS 服务，释放网络资源，通知局域网本设备下线。
 
         Code Logic（这个函数做什么）:
-            1. 取消浏览（关闭 ServiceBrowser）
-            2. 注销已注册的 ServiceInfo
-            3. 关闭 Zeroconf 实例
+            停止后台线程的事件循环，线程的 finally 块会负责清理 zeroconf 资源。
         """
-        if self._browser is not None:
-            self._browser.cancel()
-            self._browser = None
+        if self._mdns_loop is not None:
+            self._mdns_loop.call_soon_threadsafe(self._mdns_loop.stop)
 
-        if self._zeroconf is not None:
-            if self._service_info is not None:
-                self._zeroconf.unregister_service(self._service_info)
-                self._service_info = None
-            self._zeroconf.close()
-            self._zeroconf = None
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
 
         self._devices.clear()
         logger.info("mDNS 服务已停止")

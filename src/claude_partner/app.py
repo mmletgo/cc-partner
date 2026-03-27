@@ -117,9 +117,9 @@ class Application:
         actual_port: int = await self._http_server.start(self._config.http_port)
         logger.info("HTTP 服务端启动在端口 %d", actual_port)
 
-        # 8. mDNS 设备发现
+        # 8. mDNS 设备发现（在独立线程+独立事件循环中运行，不阻塞主线程）
         self._discovery = DeviceDiscovery(self._config)
-        await self._discovery.start(actual_port)
+        self._discovery.start(actual_port)
 
         # 9. 同步引擎
         self._sync_engine = SyncEngine(
@@ -302,14 +302,10 @@ def main() -> None:
     """
     # 配置日志
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    # 抑制第三方库的 DEBUG 噪音
-    logging.getLogger("zeroconf").setLevel(logging.WARNING)
-    logging.getLogger("aiohttp").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
 
     # 创建 Qt 应用
     qt_app = QApplication(sys.argv)
