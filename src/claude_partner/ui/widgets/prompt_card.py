@@ -14,6 +14,8 @@ from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QCursor
 
 from claude_partner.models.prompt import Prompt
+from claude_partner.ui import theme
+from claude_partner.ui.theme import apply_shadow
 
 
 class PromptCard(QFrame):
@@ -51,35 +53,35 @@ class PromptCard(QFrame):
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.setStyleSheet(
-            """
-            PromptCard {
-                border: 1px solid #ddd;
-                border-radius: 8px;
-                padding: 12px;
-                background: white;
-            }
-            PromptCard:hover {
-                background: #f5f5f5;
-            }
+            f"""
+            PromptCard {{
+                border: 1px solid {theme.BORDER};
+                border-radius: {theme.RADIUS_LARGE};
+                padding: 16px;
+                background: {theme.BG_PRIMARY};
+            }}
+            PromptCard:hover {{
+                background: {theme.BG_SECONDARY};
+            }}
             """
         )
 
         main_layout: QVBoxLayout = QVBoxLayout(self)
-        main_layout.setContentsMargins(12, 10, 12, 10)
-        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(20, 16, 20, 16)
+        main_layout.setSpacing(16)
 
         # 标题行：标题 + 更新时间
         header_layout: QHBoxLayout = QHBoxLayout()
         title_label: QLabel = QLabel(prompt.title or "无标题")
         title_label.setStyleSheet(
-            "font-size: 15px; font-weight: bold; color: #212121; background: transparent; border: none;"
+            f"font-size: {theme.FONT_SIZE_HEADING}; font-weight: 700; color: {theme.TEXT_PRIMARY}; background: transparent; border: none;"
         )
         title_label.setWordWrap(True)
         header_layout.addWidget(title_label, stretch=1)
 
         time_label: QLabel = QLabel(prompt.updated_at.strftime("%Y-%m-%d %H:%M"))
         time_label.setStyleSheet(
-            "font-size: 11px; color: #999; background: transparent; border: none;"
+            f"font-size: {theme.FONT_SIZE_SMALL}; color: {theme.TEXT_TERTIARY}; background: transparent; border: none;"
         )
         time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         header_layout.addWidget(time_label)
@@ -92,7 +94,7 @@ class PromptCard(QFrame):
             preview_text += "..."
         content_label: QLabel = QLabel(preview_text)
         content_label.setStyleSheet(
-            "font-size: 13px; color: #555; background: transparent; border: none;"
+            f"font-size: {theme.FONT_SIZE_BODY}; color: {theme.TEXT_SECONDARY}; background: transparent; border: none;"
         )
         content_label.setWordWrap(True)
         main_layout.addWidget(content_label)
@@ -103,31 +105,10 @@ class PromptCard(QFrame):
             tags_layout.setSpacing(4)
             tags_layout.setContentsMargins(0, 2, 0, 2)
 
-            # 预设标签颜色列表（与 tag_widget 一致）
-            tag_colors: list[tuple[str, str]] = [
-                ("#E3F2FD", "#1565C0"),
-                ("#E8F5E9", "#2E7D32"),
-                ("#FFF3E0", "#E65100"),
-                ("#F3E5F5", "#7B1FA2"),
-                ("#E0F7FA", "#00695C"),
-                ("#FBE9E7", "#BF360C"),
-                ("#EDE7F6", "#4527A0"),
-                ("#E1F5FE", "#01579B"),
-            ]
-
             for i, tag in enumerate(prompt.tags):
-                bg, fg = tag_colors[i % len(tag_colors)]
+                bg, fg = theme.TAG_COLORS[i % len(theme.TAG_COLORS)]
                 tag_label: QLabel = QLabel(tag)
-                tag_label.setStyleSheet(
-                    f"""
-                    background-color: {bg};
-                    color: {fg};
-                    border-radius: 8px;
-                    padding: 2px 8px;
-                    font-size: 11px;
-                    border: none;
-                    """
-                )
+                tag_label.setStyleSheet(theme.tag_label_style(bg, fg))
                 tags_layout.addWidget(tag_label)
             tags_layout.addStretch()
             main_layout.addLayout(tags_layout)
@@ -137,56 +118,28 @@ class PromptCard(QFrame):
         btn_layout.setContentsMargins(0, 4, 0, 0)
         btn_layout.addStretch()
 
-        btn_style: str = """
-            QPushButton {
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                padding: 4px 12px;
-                font-size: 12px;
-                background: white;
-                color: #333;
-            }
-            QPushButton:hover {
-                background: #e3f2fd;
-                border-color: #0078D4;
-                color: #0078D4;
-            }
-        """
-
         btn_copy: QPushButton = QPushButton("复制")
-        btn_copy.setStyleSheet(btn_style)
+        btn_copy.setStyleSheet(theme.button_secondary_style())
         btn_copy.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         btn_copy.clicked.connect(lambda: self.copy_clicked.emit(self._prompt_id))
         btn_layout.addWidget(btn_copy)
 
         btn_edit: QPushButton = QPushButton("编辑")
-        btn_edit.setStyleSheet(btn_style)
+        btn_edit.setStyleSheet(theme.button_secondary_style())
         btn_edit.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         btn_edit.clicked.connect(lambda: self.edit_clicked.emit(self._prompt_id))
         btn_layout.addWidget(btn_edit)
 
         btn_delete: QPushButton = QPushButton("删除")
-        btn_delete.setStyleSheet(
-            """
-            QPushButton {
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                padding: 4px 12px;
-                font-size: 12px;
-                background: white;
-                color: #D32F2F;
-            }
-            QPushButton:hover {
-                background: #FFEBEE;
-                border-color: #D32F2F;
-            }
-            """
-        )
+        btn_delete.setStyleSheet(theme.button_danger_style())
         btn_delete.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         btn_delete.clicked.connect(lambda: self.delete_clicked.emit(self._prompt_id))
         btn_layout.addWidget(btn_delete)
 
         main_layout.addLayout(btn_layout)
+
+        # 添加浮动阴影效果
+        apply_shadow(self)
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         """

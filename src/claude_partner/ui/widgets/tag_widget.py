@@ -14,6 +14,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import pyqtSignal, Qt, QRect, QSize, QPoint
 from PyQt6.QtGui import QColor
 
+from claude_partner.ui import theme
+
 
 class FlowLayout(QLayout):
     """
@@ -165,17 +167,6 @@ class TagLabel(QWidget):
 
     remove_clicked: pyqtSignal = pyqtSignal(str)
 
-    # 预设标签颜色列表（背景色, 文字色）
-    _COLORS: list[tuple[str, str]] = [
-        ("#E3F2FD", "#1565C0"),
-        ("#E8F5E9", "#2E7D32"),
-        ("#FFF3E0", "#E65100"),
-        ("#F3E5F5", "#7B1FA2"),
-        ("#E0F7FA", "#00695C"),
-        ("#FBE9E7", "#BF360C"),
-        ("#EDE7F6", "#4527A0"),
-        ("#E1F5FE", "#01579B"),
-    ]
     _color_index: int = 0
 
     def __init__(self, tag: str, parent: QWidget | None = None) -> None:
@@ -190,7 +181,7 @@ class TagLabel(QWidget):
         super().__init__(parent)
         self._tag: str = tag
 
-        bg_color, text_color = TagLabel._COLORS[TagLabel._color_index % len(TagLabel._COLORS)]
+        bg_color, text_color = theme.TAG_COLORS[TagLabel._color_index % len(theme.TAG_COLORS)]
         TagLabel._color_index += 1
 
         layout: QHBoxLayout = QHBoxLayout(self)
@@ -198,7 +189,7 @@ class TagLabel(QWidget):
         layout.setSpacing(2)
 
         label: QLabel = QLabel(tag)
-        label.setStyleSheet(f"color: {text_color}; font-size: 12px; background: transparent; border: none;")
+        label.setStyleSheet(f"color: {text_color}; font-size: {theme.FONT_SIZE_SMALL}; background: transparent; border: none;")
         layout.addWidget(label)
 
         btn_remove: QPushButton = QPushButton("\u00d7")
@@ -210,12 +201,12 @@ class TagLabel(QWidget):
                 border: none;
                 background: transparent;
                 color: {text_color};
-                font-size: 14px;
+                font-size: {theme.FONT_SIZE_BODY};
                 font-weight: bold;
                 padding: 0px;
             }}
             QPushButton:hover {{
-                color: #D32F2F;
+                color: {theme.RED};
             }}
             """
         )
@@ -226,7 +217,7 @@ class TagLabel(QWidget):
             f"""
             TagLabel {{
                 background-color: {bg_color};
-                border-radius: 10px;
+                border-radius: {theme.RADIUS_SMALL};
             }}
             """
         )
@@ -285,19 +276,7 @@ class TagWidget(QWidget):
         # 输入框
         self._input: QLineEdit = QLineEdit()
         self._input.setPlaceholderText("输入标签后按 Enter 添加...")
-        self._input.setStyleSheet(
-            """
-            QLineEdit {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 12px;
-            }
-            QLineEdit:focus {
-                border-color: #0078D4;
-            }
-            """
-        )
+        self._input.setStyleSheet(theme.input_style())
         self._input.returnPressed.connect(self._on_enter_pressed)
         main_layout.addWidget(self._input)
 

@@ -31,6 +31,7 @@ from claude_partner.models.prompt import Prompt
 from claude_partner.storage.prompt_repo import PromptRepository
 from claude_partner.config import AppConfig
 from claude_partner.ui.widgets.tag_widget import TagWidget
+from claude_partner.ui import theme
 
 
 class PromptEditDialog(QDialog):
@@ -74,51 +75,33 @@ class PromptEditDialog(QDialog):
 
         # 标题
         title_label: QLabel = QLabel("标题")
-        title_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #333;")
+        title_label.setStyleSheet(
+            f"font-size: {theme.FONT_SIZE_BODY}; font-weight: bold; color: {theme.TEXT_PRIMARY}; border: none; background: transparent;"
+        )
         layout.addWidget(title_label)
 
         self._title_input: QLineEdit = QLineEdit()
         self._title_input.setPlaceholderText("输入 Prompt 标题...")
-        self._title_input.setStyleSheet(
-            """
-            QLineEdit {
-                border: 1px solid #ccc;
-                border-radius: 6px;
-                padding: 8px 12px;
-                font-size: 14px;
-            }
-            QLineEdit:focus {
-                border-color: #0078D4;
-            }
-            """
-        )
+        self._title_input.setStyleSheet(theme.input_style())
         layout.addWidget(self._title_input)
 
         # 内容
         content_label: QLabel = QLabel("内容")
-        content_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #333;")
+        content_label.setStyleSheet(
+            f"font-size: {theme.FONT_SIZE_BODY}; font-weight: bold; color: {theme.TEXT_PRIMARY}; border: none; background: transparent;"
+        )
         layout.addWidget(content_label)
 
         self._content_input: QTextEdit = QTextEdit()
         self._content_input.setPlaceholderText("输入 Prompt 内容...")
-        self._content_input.setStyleSheet(
-            """
-            QTextEdit {
-                border: 1px solid #ccc;
-                border-radius: 6px;
-                padding: 8px;
-                font-size: 13px;
-            }
-            QTextEdit:focus {
-                border-color: #0078D4;
-            }
-            """
-        )
+        self._content_input.setStyleSheet(theme.input_style())
         layout.addWidget(self._content_input, stretch=1)
 
         # 标签
         tags_label: QLabel = QLabel("标签")
-        tags_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #333;")
+        tags_label.setStyleSheet(
+            f"font-size: {theme.FONT_SIZE_BODY}; font-weight: bold; color: {theme.TEXT_PRIMARY}; border: none; background: transparent;"
+        )
         layout.addWidget(tags_label)
 
         self._tag_widget: TagWidget = TagWidget()
@@ -226,8 +209,8 @@ class PromptPanel(QWidget):
         self._needs_refresh: bool = False
 
         main_layout: QVBoxLayout = QVBoxLayout(self)
-        main_layout.setContentsMargins(16, 12, 16, 12)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(20, 16, 20, 16)
+        main_layout.setSpacing(16)
 
         # === 顶部工具栏 ===
         toolbar_layout: QHBoxLayout = QHBoxLayout()
@@ -236,20 +219,8 @@ class PromptPanel(QWidget):
         # 搜索框
         self._search_input: QLineEdit = QLineEdit()
         self._search_input.setPlaceholderText("搜索 Prompt...")
-        self._search_input.setStyleSheet(
-            """
-            QLineEdit {
-                border: 1px solid #ccc;
-                border-radius: 6px;
-                padding: 8px 12px;
-                font-size: 13px;
-                min-width: 200px;
-            }
-            QLineEdit:focus {
-                border-color: #0078D4;
-            }
-            """
-        )
+        self._search_input.setStyleSheet(theme.input_style())
+        self._search_input.setMinimumWidth(200)
         # 使用 QTimer 实现搜索防抖
         self._search_timer: QTimer = QTimer()
         self._search_timer.setSingleShot(True)
@@ -261,75 +232,14 @@ class PromptPanel(QWidget):
         # 标签筛选下拉框
         self._tag_combo: QComboBox = QComboBox()
         self._tag_combo.setMinimumWidth(120)
-        self._tag_combo.setStyleSheet(
-            """
-            QComboBox {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                padding: 6px 10px;
-                font-size: 13px;
-                background: white;
-                min-height: 20px;
-            }
-            QComboBox:hover {
-                border-color: #0078D4;
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 24px;
-                border-left: 1px solid #ccc;
-                border-top-right-radius: 4px;
-                border-bottom-right-radius: 4px;
-                background: #f5f5f5;
-            }
-            QComboBox::down-arrow {
-                width: 10px;
-                height: 10px;
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid #666;
-            }
-            QComboBox QAbstractItemView {
-                border: 1px solid #ccc;
-                background: white;
-                selection-background-color: #E3F2FD;
-                selection-color: #333;
-                padding: 4px;
-                font-size: 13px;
-            }
-            QComboBox QAbstractItemView::item {
-                min-height: 28px;
-                padding: 4px 8px;
-            }
-            """
-        )
+        self._tag_combo.setStyleSheet(theme.combo_style())
         self._tag_combo.addItem("全部标签")
         self._tag_combo.currentTextChanged.connect(self._on_tag_filter_trigger)
         toolbar_layout.addWidget(self._tag_combo)
 
         # 新建按钮
         btn_new: QPushButton = QPushButton("+ 新建")
-        btn_new.setStyleSheet(
-            """
-            QPushButton {
-                background: #0078D4;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                padding: 8px 16px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: #005a9e;
-            }
-            QPushButton:pressed {
-                background: #004578;
-            }
-            """
-        )
+        btn_new.setStyleSheet(theme.button_primary_style())
         btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_new.clicked.connect(lambda: asyncio.ensure_future(self._on_new()))
         toolbar_layout.addWidget(btn_new)
@@ -342,14 +252,7 @@ class PromptPanel(QWidget):
         self._scroll_area.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self._scroll_area.setStyleSheet(
-            """
-            QScrollArea {
-                border: none;
-                background: transparent;
-            }
-            """
-        )
+        self._scroll_area.setStyleSheet(theme.scroll_area_style())
 
         self._card_container: QWidget = QWidget()
         self._card_container.setStyleSheet("background: transparent;")
@@ -365,7 +268,7 @@ class PromptPanel(QWidget):
         self._empty_label: QLabel = QLabel("暂无 Prompt，点击「+ 新建」创建第一条")
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setStyleSheet(
-            "color: #999; font-size: 14px; padding: 40px;"
+            f"color: {theme.TEXT_SECONDARY}; font-size: {theme.FONT_SIZE_BODY}; padding: 40px;"
         )
         self._empty_label.hide()
         main_layout.addWidget(self._empty_label)
