@@ -6,6 +6,9 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+import subprocess
+import sys
+
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -19,7 +22,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
 )
 from PyQt6.QtCore import pyqtSignal, Qt
-from PyQt6.QtGui import QCursor, QDragEnterEvent, QDropEvent
+from PyQt6.QtGui import QCursor, QDragEnterEvent, QDropEvent, QMouseEvent
 
 from claude_partner.models.device import Device
 from claude_partner.models.transfer import TransferStatus, TransferDirection, TransferTask
@@ -96,6 +99,7 @@ class TransferItemWidget(QFrame):
         super().__init__(parent)
         self._transfer_id: str = task.id
         self._task: TransferTask = task
+        self._saved_path: str | None = None  # 接收完成后的文件保存路径
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self._apply_status_style(task.status)
@@ -280,6 +284,55 @@ class TransferItemWidget(QFrame):
             返回 transfer_id 字符串。
         """
         return self._transfer_id
+
+    def set_saved_path(self, path: str) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            接收完成后记录文件保存路径，用户点击卡片时可以打开所在目录。
+
+        Code Logic（这个函数做什么）:
+            保存文件路径，设置手型光标和 tooltip 提示用户可点击。
+        """
+        self._saved_path = path
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setToolTip(f"点击打开文件所在目录: {path}")
+
+    def mousePressEvent(self, event: QMouseEvent | None) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            用户点击已完成的接收卡片时，打开文件所在目录方便查找文件。
+
+        Code Logic（这个函数做什么）:
+            如果有保存路径且是左键点击，调用系统文件管理器打开所在目录并选中文件。
+            跨平台处理：Linux 用 xdg-open，macOS 用 open，Windows 用 explorer。
+        """
+        if (
+            event is not None
+            and event.button() == Qt.MouseButton.LeftButton
+            and self._saved_path is not None
+        ):
+            import os
+            parent_dir: str = os.path.dirname(self._saved_path)
+            if not os.path.exists(parent_dir):
+                return
+            if sys.platform == "linux":
+                # 尝试用 dbus 选中文件，失败则打开目录
+                try:
+                    subprocess.Popen(
+                        ["dbus-send", "--print-reply", "--dest=org.freedesktop.FileManager1",
+                         "/org/freedesktop/FileManager1",
+                         "org.freedesktop.FileManager1.ShowItems",
+                         f"array:string:file://{self._saved_path}", "string:"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                except FileNotFoundError:
+                    subprocess.Popen(["xdg-open", parent_dir])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", self._saved_path])
+            elif sys.platform == "win32":
+                subprocess.Popen(["explorer", "/select,", self._saved_path])
+            return
+        super().mousePressEvent(event)
 
 
 class TransferPanel(QWidget):
@@ -595,15 +648,19 @@ class TransferPanel(QWidget):
             widget.update_progress(1.0)
             widget.update_status(TransferStatus.COMPLETED)
 
-    def _on_receive_completed(self, transfer_id: str, _saved_path: str) -> None:
+    def _on_receive_completed(self, transfer_id: str, saved_path: str) -> None:
         """
         Business Logic（为什么需要这个函数）:
-            接收完成的信号携带保存路径参数，需要适配到通用的完成处理逻辑。
+            接收完成时需要更新 UI 状态，并记录文件保存路径供用户点击打开。
 
         Code Logic（这个函数做什么）:
-            忽略 saved_path 参数，调用与发送完成相同的 UI 更新逻辑。
+            更新 widget 状态为 COMPLETED，将保存路径设置到 widget 上，
+            用户可以左键点击卡片打开文件所在目录。
         """
-        self._on_completed(transfer_id)
+        widget: TransferItemWidget | None = self._task_widgets.get(transfer_id)
+        if widget is not None:
+            widget.update_status(TransferStatus.COMPLETED)
+            widget.set_saved_path(saved_path)
 
     def _on_failed(self, transfer_id: str, error: str) -> None:
         """
