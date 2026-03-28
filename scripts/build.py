@@ -104,25 +104,13 @@ def main() -> None:
     system: str = platform.system().lower()
 
     if system == "darwin":
-        # macOS: .app bundle
-        app_src: Path = dist_dir / "ClaudePartner.app"
-        if app_src.exists():
-            app_dst: Path = release_dir / f"ClaudePartner-{platform_name}-{arch}.app"
-            if app_dst.exists():
-                shutil.rmtree(app_dst)
-            shutil.copytree(app_src, app_dst)
-            print(f"产物: {app_dst}")
-
-            # 同时创建 zip 方便分发
-            zip_path: Path = release_dir / f"ClaudePartner-{platform_name}-{arch}"
-            shutil.make_archive(str(zip_path), "zip", str(dist_dir), "ClaudePartner.app")
-            print(f"压缩包: {zip_path}.zip")
-
-        # 也复制单文件可执行（仅 onefile 模式下存在）
+        # macOS: onefile 模式，单个可执行文件
         exe_src: Path = dist_dir / "ClaudePartner"
         if exe_src.exists() and exe_src.is_file():
             exe_dst: Path = release_dir / f"ClaudePartner-{platform_name}-{arch}"
             shutil.copy2(exe_src, exe_dst)
+            os.chmod(exe_dst, 0o755)
+            print(f"产物: {exe_dst}")
 
     elif system == "windows":
         exe_src = dist_dir / "ClaudePartner.exe"

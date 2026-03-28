@@ -95,69 +95,25 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-if is_mac:
-    # macOS: onedir 模式，配合 BUNDLE 生成 .app
-    exe = EXE(
-        pyz,
-        a.scripts,
-        [],
-        exclude_binaries=True,
-        name='ClaudePartner',
-        debug=False,
-        bootloader_ignore_signals=False,
-        strip=False,
-        upx=True,
-        console=False,
-        disable_windowed_traceback=False,
-        argv_emulation=False,
-        target_arch=None,
-        codesign_identity=None,
-        entitlements_file=None,
-        icon=icon_file,
-    )
-    coll = COLLECT(
-        exe,
-        a.binaries,
-        a.datas,
-        strip=False,
-        upx=True,
-        upx_exclude=[],
-        name='ClaudePartner',
-    )
-    app = BUNDLE(
-        coll,
-        name='ClaudePartner.app',
-        icon=icon_file,
-        bundle_identifier='com.claude-partner.app',
-        info_plist={
-            'CFBundleName': 'Claude Partner',
-            'CFBundleDisplayName': 'Claude Partner',
-            'CFBundleVersion': '0.1.0',
-            'CFBundleShortVersionString': '0.1.0',
-            'NSHighResolutionCapable': True,
-            'LSBackgroundOnly': False,
-        },
-    )
-else:
-    # Windows/Linux: onefile 模式
-    exe = EXE(
-        pyz,
-        a.scripts,
-        a.binaries,
-        a.datas,
-        [],
-        name='ClaudePartner',
-        debug=False,
-        bootloader_ignore_signals=False,
-        strip=False,
-        upx=True,
-        upx_exclude=[],
-        runtime_tmpdir=None,
-        console=False,
-        disable_windowed_traceback=False,
-        argv_emulation=False,
-        target_arch=None,
-        codesign_identity=None,
-        entitlements_file=None,
-        icon=icon_file,
-    )
+# 所有平台统一 onefile 模式，生成单个可执行文件
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name='ClaudePartner',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=icon_file,
+)
