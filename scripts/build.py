@@ -68,9 +68,9 @@ def create_dmg(app_path: Path, dmg_path: Path) -> None:
         shutil.rmtree(staging_dir)
     staging_dir.mkdir()
 
-    # 复制 .app 到临时目录
+    # 复制 .app 到临时目录（保留符号链接，否则会破坏 bundle 结构）
     staged_app: Path = staging_dir / app_path.name
-    shutil.copytree(app_path, staged_app)
+    shutil.copytree(app_path, staged_app, symlinks=True)
 
     # 创建 Applications 符号链接
     os.symlink("/Applications", staging_dir / "Applications")
