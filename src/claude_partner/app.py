@@ -477,7 +477,25 @@ def main() -> None:
     signal.signal(signal.SIGINT, _sigterm_handler)
 
     _sig_notifier = QSocketNotifier(_sig_r.fileno(), QSocketNotifier.Type.Read)
-    _sig_notifier.activated.connect(lambda: (logger.info("收到退出信号"), loop.stop()))
+
+    def _on_exit_signal() -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            收到退出信号后需要干净地停止事件循环，且只停一次。
+
+        Code Logic（这个函数做什么）:
+            读取 socket 数据防止 QSocketNotifier 重复触发，
+            禁用 notifier，然后停止 asyncio 事件循环。
+        """
+        try:
+            _sig_r.recv(4096)
+        except OSError:
+            pass
+        _sig_notifier.setEnabled(False)
+        logger.info("收到退出信号")
+        loop.stop()
+
+    _sig_notifier.activated.connect(_on_exit_signal)
 
     # macOS 权限检查：必须在 run_forever 中执行，不能在 run_until_complete 中，
     # 因为 QMessageBox 模态对话框会触发嵌套事件循环导致 qasync 状态损坏
