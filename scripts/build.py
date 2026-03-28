@@ -118,9 +118,9 @@ def main() -> None:
             shutil.make_archive(str(zip_path), "zip", str(dist_dir), "ClaudePartner.app")
             print(f"压缩包: {zip_path}.zip")
 
-        # 也复制单文件可执行
+        # 也复制单文件可执行（仅 onefile 模式下存在）
         exe_src: Path = dist_dir / "ClaudePartner"
-        if exe_src.exists():
+        if exe_src.exists() and exe_src.is_file():
             exe_dst: Path = release_dir / f"ClaudePartner-{platform_name}-{arch}"
             shutil.copy2(exe_src, exe_dst)
 

@@ -20,7 +20,7 @@ icon_file = None
 if is_win:
     icon_file = os.path.join(scripts_dir, 'icon.ico')
 elif is_mac:
-    icon_file = os.path.join(scripts_dir, 'icon.png')
+    icon_file = os.path.join(scripts_dir, 'icon.icns')
 elif is_linux:
     icon_file = os.path.join(scripts_dir, 'icon.png')
 
@@ -85,6 +85,9 @@ a = Analysis(
         'pandas',
         'PIL',
         'cv2',
+        'PyQt5',
+        'PySide2',
+        'PySide6',
     ],
     noarchive=False,
     optimize=0,
@@ -92,33 +95,37 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name='ClaudePartner',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,  # 无控制台窗口
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=icon_file,
-    # onefile 模式：打包为单个可执行文件
-)
-
-# macOS 额外生成 .app bundle
 if is_mac:
-    app = BUNDLE(
+    # macOS: onedir 模式，配合 BUNDLE 生成 .app
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name='ClaudePartner',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=True,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=icon_file,
+    )
+    coll = COLLECT(
         exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        name='ClaudePartner',
+    )
+    app = BUNDLE(
+        coll,
         name='ClaudePartner.app',
         icon=icon_file,
         bundle_identifier='com.claude-partner.app',
@@ -130,4 +137,27 @@ if is_mac:
             'NSHighResolutionCapable': True,
             'LSBackgroundOnly': False,
         },
+    )
+else:
+    # Windows/Linux: onefile 模式
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name='ClaudePartner',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=icon_file,
     )
