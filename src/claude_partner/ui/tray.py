@@ -106,33 +106,9 @@ class SystemTray(QSystemTrayIcon):
             非 macOS 平台使用彩色图标显示在系统托盘区。
 
         Code Logic（这个函数做什么）:
-            创建 64x64 的 QPixmap，用 QPainter 绘制蓝色圆形背景，
-            在圆形中心绘制白色 "CP" 文字，返回 QIcon。
+            委托 theme.create_app_icon() 创建蓝色圆形 + 白色 CP 文字图标。
         """
-        size: int = 64
-        pixmap: QPixmap = QPixmap(size, size)
-        pixmap.fill(QColor(0, 0, 0, 0))
-
-        painter: QPainter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
-        # 绘制蓝色圆形背景
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(theme.ACCENT))
-        painter.drawEllipse(2, 2, size - 4, size - 4)
-
-        # 绘制白色 "CP" 文字
-        painter.setPen(QColor("white"))
-        font: QFont = QFont("Arial", 20, QFont.Weight.Bold)
-        painter.setFont(font)
-        painter.drawText(
-            pixmap.rect(),
-            Qt.AlignmentFlag.AlignCenter,
-            "CP",
-        )
-
-        painter.end()
-        return QIcon(pixmap)
+        return theme.create_app_icon(64)
 
     def _setup_menu(self) -> None:
         """

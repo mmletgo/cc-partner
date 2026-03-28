@@ -40,6 +40,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("Claude Partner")
+        self.setWindowIcon(theme.create_app_icon(128))
         self.resize(900, 600)
         self.setMinimumSize(QSize(600, 400))
 

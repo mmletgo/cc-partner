@@ -49,19 +49,21 @@ class ScreenshotManager(QObject):
             用户点击截图按钮或使用快捷键时触发区域截图流程。
 
         Code Logic（这个函数做什么）:
-            macOS 上为每个屏幕独立创建覆盖层（macOS 不允许单窗口跨屏）；
-            其他平台创建单一覆盖层覆盖虚拟桌面全部区域。
+            多屏时为每个屏幕独立创建覆盖层（macOS 不允许单窗口跨屏，
+            Linux 上 showFullScreen 也只覆盖单屏）；
+            单屏时创建单一覆盖层。
         """
         logger.info("take_screenshot 被调用")
-        if sys.platform == "darwin":
-            self._take_screenshot_macos()
+        screens: list[QScreen] = QGuiApplication.screens()
+        if len(screens) > 1:
+            self._take_screenshot_multi_screen(screens)
         else:
-            self._take_screenshot_default()
+            self._take_screenshot_single_screen()
 
-    def _take_screenshot_default(self) -> None:
+    def _take_screenshot_single_screen(self) -> None:
         """
         Business Logic（为什么需要这个函数）:
-            Linux / Windows 上单个全屏窗口即可覆盖所有屏幕。
+            单屏场景下用一个全屏覆盖层即可完成截图。
 
         Code Logic（这个函数做什么）:
             创建单个 ScreenshotOverlay（自动截取模式），
@@ -73,26 +75,26 @@ class ScreenshotManager(QObject):
         self._overlays.append(overlay)
         overlay.start()
 
-    def _take_screenshot_macos(self) -> None:
+    def _take_screenshot_multi_screen(self, screens: list[QScreen]) -> None:
         """
         Business Logic（为什么需要这个函数）:
-            macOS 不允许单个窗口跨屏显示，需要为每个屏幕创建独立的覆盖层，
-            使用户可以在任意屏幕上进行区域截图。
+            多屏场景下 showFullScreen 只覆盖单个屏幕（macOS 不允许跨屏窗口，
+            Linux 窗管也限制 fullscreen 到单屏），需要为每个屏幕创建独立覆盖层。
 
         Code Logic（这个函数做什么）:
-            1. 通过 NSApp 激活进程（从后台触发时必须）
+            1. macOS 上通过 NSApp 激活进程（从后台触发时必须）
             2. 遍历所有屏幕，各自截取屏幕内容
             3. 为每个屏幕创建 ScreenshotOverlay（预截取模式）
             4. 连接信号后依次启动所有覆盖层
         """
-        try:
-            from AppKit import NSApplication  # type: ignore[import-untyped]
-            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-        except ImportError:
-            logger.debug("AppKit 不可用，跳过进程激活")
+        if sys.platform == "darwin":
+            try:
+                from AppKit import NSApplication  # type: ignore[import-untyped]
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            except ImportError:
+                logger.debug("AppKit 不可用，跳过进程激活")
 
-        screens: list[QScreen] = QGuiApplication.screens()
-        logger.info("macOS 多屏截图: 检测到 %d 个屏幕", len(screens))
+        logger.info("多屏截图: 检测到 %d 个屏幕", len(screens))
 
         for screen in screens:
             geo = screen.geometry()

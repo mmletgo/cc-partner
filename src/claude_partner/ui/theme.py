@@ -9,8 +9,8 @@ Code Logic:
     提供颜色/字体/间距常量、返回 QSS 字符串的组件样式函数、以及阴影等辅助函数。
 """
 
-from PyQt6.QtCore import QPointF
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QPointF, Qt
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 
 # ── Apple 调色板 ──────────────────────────────────────────────────────────
@@ -496,6 +496,38 @@ def label_caption_style() -> str:
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────────
+
+
+def create_app_icon(size: int = 64) -> QIcon:
+    """
+    Business Logic（为什么需要这个函数）:
+        应用的窗口图标和托盘图标（非 macOS）共用同一视觉样式，
+        集中在 theme 模块避免重复绘制代码。
+
+    Code Logic（这个函数做什么）:
+        创建指定尺寸的 QPixmap，绘制蓝色圆形背景 + 白色 "CP" 文字，
+        返回 QIcon。
+    """
+    pixmap: QPixmap = QPixmap(size, size)
+    pixmap.fill(QColor(0, 0, 0, 0))
+
+    painter: QPainter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    # 蓝色圆形背景
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(ACCENT))
+    painter.drawEllipse(2, 2, size - 4, size - 4)
+
+    # 白色 "CP" 文字
+    painter.setPen(QColor("white"))
+    font_size: int = max(8, size * 20 // 64)
+    font: QFont = QFont("Arial", font_size, QFont.Weight.Bold)
+    painter.setFont(font)
+    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "CP")
+
+    painter.end()
+    return QIcon(pixmap)
 
 
 def apply_shadow(
