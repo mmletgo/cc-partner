@@ -418,12 +418,17 @@ class GlobalHotkeyManager(QObject):
             实现全局快捷键监听。
 
         Code Logic（这个函数做什么）:
-            根据 _hotkeys 字典构建 pynput GlobalHotKeys 的 bindings，
-            为每个动作创建闭包回调，回调中使用 QTimer.singleShot(0, ...)
-            将信号发射安全地调度到 Qt 主线程。
+            macOS 上先检查输入监控权限，缺失时记录警告。
+            使用 keyboard.Listener + HotKey 手动实现全局热键监听（比
+            GlobalHotKeys 更可靠，可以通过 canonical() 规范化按键后精确匹配）。
         """
+        if sys.platform == "darwin":
+            self._check_macos_permissions()
+
         self._running = True
-        bindings: dict[str, callable] = {}
+
+        # 为每个动作创建 HotKey 对象
+        hotkey_objs: list[tuple[str, keyboard.HotKey]] = []
         for action, combo in self._hotkeys.items():
             def make_callback(act: str) -> callable:
                 """
@@ -432,21 +437,126 @@ class GlobalHotkeyManager(QObject):
 
                 Code Logic（这个函数做什么）:
                     创建并返回一个闭包回调函数，该回调在被 pynput 后台线程调用时，
-                    通过 QTimer.singleShot(0, ...) 安全地在 Qt 主线程发射信号。
+                    通过 QMetaObject.invokeMethod 安全地在 Qt 主线程发射信号。
+                    不能使用 QTimer.singleShot —— 它从非 Qt 线程调用时在
+                    macOS 上无法正确投递事件到主线程。
                 """
                 def cb() -> None:
                     logger.info("快捷键触发: %s", act)
-                    QTimer.singleShot(0, lambda: self.hotkey_triggered.emit(act))
+                    QMetaObject.invokeMethod(
+                        self,
+                        "_emit_hotkey",
+                        Qt.ConnectionType.QueuedConnection,
+                        Q_ARG(str, act),
+                    )
                 return cb
-            bindings[combo] = make_callback(action)
+
+            parsed_keys = keyboard.HotKey.parse(combo)
+            hk = keyboard.HotKey(parsed_keys, make_callback(action))
+            hotkey_objs.append((action, hk))
+            logger.debug("注册热键: %s -> %s (parsed: %s)", action, combo, parsed_keys)
+
+        def on_press(key: keyboard.Key | keyboard.KeyCode) -> None:
+            """
+            Business Logic（为什么需要这个函数）:
+                接收每个按键事件，通过 canonical() 规范化后传给 HotKey 对象判断
+                是否满足组合键条件。
+
+            Code Logic（这个函数做什么）:
+                用 listener 的 canonical() 将按键事件规范化（如 cmd_l → cmd），
+                然后调用每个 HotKey.press() 进行匹配。
+            """
+            canonical = self._listener.canonical(key)  # type: ignore[union-attr]
+            for _, hk in hotkey_objs:
+                hk.press(canonical)
+
+        def on_release(key: keyboard.Key | keyboard.KeyCode) -> None:
+            """
+            Business Logic（为什么需要这个函数）:
+                按键释放时需要更新 HotKey 状态，避免重复触发。
+
+            Code Logic（这个函数做什么）:
+                用 canonical() 规范化后传给每个 HotKey.release()。
+            """
+            canonical = self._listener.canonical(key)  # type: ignore[union-attr]
+            for _, hk in hotkey_objs:
+                hk.release(canonical)
 
         try:
-            self._listener = keyboard.GlobalHotKeys(bindings)
+            self._listener = keyboard.Listener(
+                on_press=on_press, on_release=on_release
+            )
             self._listener.start()
             logger.info("pynput 全局快捷键监听已启动: %s", self._hotkeys)
         except Exception as e:
             logger.error("pynput 全局快捷键启动失败: %s", e)
             self._running = False
+
+    def _check_macos_permissions(self) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            macOS 10.15+ 要求应用获得"输入监控"权限才能通过 CGEventTap
+            捕获全局键盘事件，缺失权限时监听器可以启动但不会收到任何事件。
+
+        Code Logic（这个函数做什么）:
+            1. 尝试用 Quartz CGEventTapCreate 创建一个测试用的被动事件监听，
+               如果返回 None 说明缺少输入监控权限（最准确的检测方式）。
+            2. 若 Quartz 不可用，回退到 AXIsProcessTrusted 检查辅助功能权限。
+        """
+        # 优先用 Quartz 直接检测输入监控权限
+        try:
+            import Quartz  # type: ignore[import-untyped]
+
+            def _dummy_callback(
+                proxy: object, event_type: int, event: object, refcon: object
+            ) -> object:
+                return event
+
+            tap = Quartz.CGEventTapCreate(
+                Quartz.kCGHIDEventTap,
+                Quartz.kCGHeadInsertEventTap,
+                Quartz.kCGEventTapOptionListenOnly,
+                Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown),
+                _dummy_callback,
+                None,
+            )
+            if tap is None:
+                logger.warning(
+                    "macOS 输入监控权限未授予，全局快捷键无法工作。"
+                    "请前往：系统设置 → 隐私与安全性 → 输入监控，"
+                    "将本应用（或终端 Terminal.app）添加并启用，然后重启应用。"
+                )
+                return
+            # 清理测试用的事件监听
+            Quartz.CFMachPortInvalidate(tap)
+            logger.info("macOS 输入监控权限已确认")
+            return
+        except ImportError:
+            logger.debug("Quartz 不可用，回退到 AXIsProcessTrusted 检查")
+        except Exception as e:
+            logger.debug("Quartz 权限检查异常: %s", e)
+
+        # 回退方案：检查辅助功能权限（不能完全代替输入监控权限检查）
+        try:
+            import ctypes
+            import ctypes.util
+
+            lib_path: str | None = ctypes.util.find_library("ApplicationServices")
+            if lib_path is None:
+                return
+            lib = ctypes.cdll.LoadLibrary(lib_path)
+            lib.AXIsProcessTrusted.restype = ctypes.c_bool
+            trusted: bool = lib.AXIsProcessTrusted()
+            if not trusted:
+                logger.warning(
+                    "macOS 辅助功能权限未授予，全局快捷键可能无法工作。"
+                    "请前往：系统设置 → 隐私与安全性 → 辅助功能 / 输入监控，"
+                    "将本应用（或终端 Terminal.app）添加并启用。"
+                )
+            else:
+                logger.info("macOS 辅助功能权限已授予（输入监控权限未检测）")
+        except Exception as e:
+            logger.debug("macOS 权限检查失败（不影响功能）: %s", e)
 
     def _stop_pynput(self) -> None:
         """

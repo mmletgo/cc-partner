@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import logging
+import sys
+
 from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
@@ -15,6 +18,8 @@ from PyQt6.QtGui import (
     QPixmap,
 )
 from PyQt6.QtWidgets import QWidget
+
+logger = logging.getLogger(__name__)
 
 
 class ScreenshotOverlay(QWidget):
@@ -36,7 +41,11 @@ class ScreenshotOverlay(QWidget):
     screenshot_taken = pyqtSignal(QPixmap)
     screenshot_cancelled = pyqtSignal()
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        screenshot: QPixmap | None = None,
+        target_geometry: QRect | None = None,
+    ) -> None:
         """
         Business Logic（为什么需要这个函数）:
             初始化覆盖层窗口，设置为无边框、置顶、工具窗口样式。
@@ -44,6 +53,8 @@ class ScreenshotOverlay(QWidget):
         Code Logic（这个函数做什么）:
             配置窗口标志（无边框、置顶、工具窗口），设置十字光标，
             初始化截图和选区坐标变量。
+            可选接收预截取的截图和目标几何（macOS 多屏模式下由
+            ScreenshotManager 为每个屏幕独立创建覆盖层时传入）。
         """
         super().__init__()
         self.setWindowFlags(
@@ -54,7 +65,8 @@ class ScreenshotOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setCursor(Qt.CursorShape.CrossCursor)
 
-        self._screenshot: QPixmap | None = None
+        self._screenshot: QPixmap | None = screenshot
+        self._target_geometry: QRect | None = target_geometry
         self._origin: QPoint | None = None
         self._current: QPoint | None = None
 
@@ -65,13 +77,23 @@ class ScreenshotOverlay(QWidget):
             然后全屏显示覆盖层让用户选择区域。
 
         Code Logic（这个函数做什么）:
-            1. 获取虚拟桌面几何（所有屏幕的组合区域）
-            2. 截取整个桌面内容
-            3. 设置窗口大小为虚拟桌面大小
-            4. 全屏显示覆盖层
+            两种模式:
+            - 预截取模式（macOS 多屏）: 截图和几何由外部传入，直接显示
+            - 自动截取模式（默认）: 自行截取虚拟桌面并全屏显示
         """
+        if self._screenshot is not None and self._target_geometry is not None:
+            # 预截取模式：截图和几何由 ScreenshotManager 传入
+            self.setGeometry(self._target_geometry)
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            logger.info("覆盖层已显示（预截取模式）: %s", self._target_geometry)
+            return
+
+        # 自动截取模式
         primary_screen = QGuiApplication.primaryScreen()
         if primary_screen is None:
+            logger.error("无法获取主屏幕")
             self.screenshot_cancelled.emit()
             return
 
@@ -82,6 +104,10 @@ class ScreenshotOverlay(QWidget):
             virtual_geo.y(),
             virtual_geo.width(),
             virtual_geo.height(),
+        )
+        logger.info(
+            "截图已捕获: %dx%d, overlay 区域: %s",
+            self._screenshot.width(), self._screenshot.height(), virtual_geo,
         )
         self.setGeometry(virtual_geo)
         self.showFullScreen()

@@ -267,6 +267,7 @@ class Application:
         Code Logic（这个函数做什么）:
             根据动作名称分发到对应的处理函数。
         """
+        logger.info("_on_hotkey 收到动作: %s", action)
         if action == "screenshot" and self._screenshot_mgr is not None:
             self._screenshot_mgr.take_screenshot()
 

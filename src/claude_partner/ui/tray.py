@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QAction
 from PyQt6.QtCore import pyqtSignal, Qt
@@ -51,12 +53,65 @@ class SystemTray(QSystemTrayIcon):
             确保在任何环境下都能正常显示。
 
         Code Logic（这个函数做什么）:
-            创建 64x64 的 QPixmap，用 QPainter 绘制蓝色(#0078D4)圆形背景，
+            macOS：创建 44x44（22pt@2x）模板图标，用黑色绘制圆形和文字，
+            设置 setIsMask(True) 让系统自动适配明暗模式。
+            其他平台：创建 64x64 彩色图标（蓝色圆形 + 白色 CP 文字）。
+        """
+        if sys.platform == "darwin":
+            return self._create_macos_icon()
+        return self._create_default_icon()
+
+    def _create_macos_icon(self) -> QIcon:
+        """
+        Business Logic（为什么需要这个函数）:
+            macOS 菜单栏要求图标使用 template image 格式（单色+alpha），
+            系统根据当前外观自动着色（亮色模式深色、暗色模式浅色）。
+
+        Code Logic（这个函数做什么）:
+            创建 44x44 像素（22pt@2x Retina）的 QPixmap，直接用黑色
+            绘制 "CP" 文字（不带背景圆形），设置 setIsMask(True) 让
+            macOS 自动适配明暗模式颜色。
+        """
+        from PyQt6.QtCore import QRectF
+
+        px_size: int = 44
+        logical_size: float = 22.0
+        pixmap: QPixmap = QPixmap(px_size, px_size)
+        pixmap.setDevicePixelRatio(2.0)
+        pixmap.fill(QColor(0, 0, 0, 0))
+
+        painter: QPainter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        # 直接绘制黑色 "CP" 文字，macOS template 会自动着色
+        painter.setPen(QColor(0, 0, 0, 255))
+        font: QFont = QFont("Helvetica Neue", 12, QFont.Weight.Bold)
+        painter.setFont(font)
+        painter.drawText(
+            QRectF(0.0, 0.0, logical_size, logical_size),
+            Qt.AlignmentFlag.AlignCenter,
+            "CP",
+        )
+
+        painter.end()
+
+        icon: QIcon = QIcon(pixmap)
+        icon.setIsMask(True)
+        return icon
+
+    def _create_default_icon(self) -> QIcon:
+        """
+        Business Logic（为什么需要这个函数）:
+            非 macOS 平台使用彩色图标显示在系统托盘区。
+
+        Code Logic（这个函数做什么）:
+            创建 64x64 的 QPixmap，用 QPainter 绘制蓝色圆形背景，
             在圆形中心绘制白色 "CP" 文字，返回 QIcon。
         """
         size: int = 64
         pixmap: QPixmap = QPixmap(size, size)
-        pixmap.fill(QColor(0, 0, 0, 0))  # 透明背景
+        pixmap.fill(QColor(0, 0, 0, 0))
 
         painter: QPainter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
