@@ -178,6 +178,10 @@ class Application:
         # 连接信号
         self._connect_signals(prompt_panel, transfer_panel, device_panel)
 
+        # macOS 权限检测
+        if sys.platform == "darwin":
+            self._check_macos_permissions()
+
         # 显示主窗口并加载数据
         self._main_window.show()
         asyncio.ensure_future(prompt_panel.refresh())
@@ -258,6 +262,73 @@ class Application:
         # 设置变更 → 更新快捷键和配置
         if self._settings_panel is not None:
             self._settings_panel.settings_changed.connect(self._on_settings_changed)
+
+    def _check_macos_permissions(self) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            macOS 要求应用分别获得「屏幕录制」和「输入监控」权限，
+            打包后的 .app 与 Terminal 是不同的应用身份，需要单独授权。
+            缺失权限时截图只能捕获桌面壁纸、全局快捷键完全无效，
+            用户很难自行发现原因，需要启动时主动引导。
+
+        Code Logic（这个函数做什么）:
+            仅在 PyInstaller 打包的 frozen app 中执行检测（从 Terminal
+            运行时 CGPreflightScreenCaptureAccess 会返回误报）。
+            1. 用 CGPreflightScreenCaptureAccess 检测屏幕录制权限
+            2. 用 CGEventTapCreate 检测输入监控权限
+            3. 任一缺失时弹出 QMessageBox 提示用户去系统设置授权
+        """
+        # Terminal 运行时权限检测 API 会误报，只在打包后的 .app 中检查
+        if not getattr(sys, "frozen", False):
+            return
+
+        from PyQt6.QtWidgets import QMessageBox
+
+        missing: list[str] = []
+
+        # 检测屏幕录制权限
+        try:
+            import Quartz  # type: ignore[import-untyped]
+            if hasattr(Quartz, "CGPreflightScreenCaptureAccess"):
+                if not Quartz.CGPreflightScreenCaptureAccess():
+                    missing.append("屏幕录制（截图功能）")
+        except ImportError:
+            pass
+
+        # 检测输入监控权限（通过尝试创建 CGEventTap）
+        try:
+            import Quartz  # type: ignore[import-untyped]
+
+            def _dummy(proxy: object, etype: int, event: object, ref: object) -> object:
+                return event
+
+            tap = Quartz.CGEventTapCreate(
+                Quartz.kCGHIDEventTap,
+                Quartz.kCGHeadInsertEventTap,
+                Quartz.kCGEventTapOptionListenOnly,
+                Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown),
+                _dummy,
+                None,
+            )
+            if tap is None:
+                missing.append("输入监控（全局快捷键）")
+            else:
+                Quartz.CFMachPortInvalidate(tap)
+        except ImportError:
+            pass
+
+        if missing:
+            items = "\n".join(f"  • {m}" for m in missing)
+            QMessageBox.warning(
+                self._main_window,
+                "macOS 权限不足",
+                f"以下权限未授予，部分功能无法使用：\n\n"
+                f"{items}\n\n"
+                f"请前往：系统设置 → 隐私与安全性\n"
+                f"找到对应权限项，将 Claude Partner 添加并启用。\n"
+                f"修改权限后需要重启应用。",
+            )
+            logger.warning("macOS 权限缺失: %s", ", ".join(missing))
 
     def _on_hotkey(self, action: str) -> None:
         """

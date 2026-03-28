@@ -82,11 +82,25 @@ class ScreenshotManager(QObject):
             Linux 窗管也限制 fullscreen 到单屏），需要为每个屏幕创建独立覆盖层。
 
         Code Logic（这个函数做什么）:
-            1. macOS 上通过 NSApp 激活进程（从后台触发时必须）
-            2. 遍历所有屏幕，各自截取屏幕内容
+            1. 先截取所有屏幕内容（在激活进程之前，避免主窗口被截进去）
+            2. macOS 上通过 NSApp 激活进程（覆盖层需要前台权限才能显示）
             3. 为每个屏幕创建 ScreenshotOverlay（预截取模式）
             4. 连接信号后依次启动所有覆盖层
         """
+        logger.info("多屏截图: 检测到 %d 个屏幕", len(screens))
+
+        # 1. 先截取所有屏幕（在激活进程之前，保持原始屏幕状态）
+        screen_data: list[tuple[QPixmap, QScreen]] = []
+        for screen in screens:
+            screenshot = screen.grabWindow(0)
+            geo = screen.geometry()
+            logger.info(
+                "屏幕 %s: geo=%s, 截图=%dx%d",
+                screen.name(), geo, screenshot.width(), screenshot.height(),
+            )
+            screen_data.append((screenshot, screen))
+
+        # 2. macOS 上激活进程（覆盖层需要前台权限才能显示）
         if sys.platform == "darwin":
             try:
                 from AppKit import NSApplication  # type: ignore[import-untyped]
@@ -94,17 +108,10 @@ class ScreenshotManager(QObject):
             except ImportError:
                 logger.debug("AppKit 不可用，跳过进程激活")
 
-        logger.info("多屏截图: 检测到 %d 个屏幕", len(screens))
-
-        for screen in screens:
-            geo = screen.geometry()
-            screenshot = screen.grabWindow(0)
-            logger.info(
-                "屏幕 %s: geo=%s, 截图=%dx%d",
-                screen.name(), geo, screenshot.width(), screenshot.height(),
-            )
+        # 3. 创建并启动覆盖层
+        for screenshot, screen in screen_data:
             overlay = ScreenshotOverlay(
-                screenshot=screenshot, target_geometry=geo
+                screenshot=screenshot, target_geometry=screen.geometry()
             )
             overlay.screenshot_taken.connect(self._on_screenshot_taken)
             overlay.screenshot_cancelled.connect(self._on_cancelled)
