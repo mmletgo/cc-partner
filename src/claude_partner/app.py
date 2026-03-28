@@ -266,63 +266,75 @@ class Application:
     def _check_macos_permissions(self) -> None:
         """
         Business Logic（为什么需要这个函数）:
-            macOS 要求应用分别获得「屏幕录制」和「辅助功能/输入监控」权限，
+            macOS 要求应用分别获得「屏幕录制」和「输入监控」权限，
             打包后的 .app 与 Terminal 是不同的应用身份，需要单独授权。
             缺失权限时截图只能捕获桌面壁纸、全局快捷键完全无效。
 
         Code Logic（这个函数做什么）:
             仅在 PyInstaller 打包的 frozen app 中执行（从 Terminal
             运行时权限检测 API 会误报）。
-            1. 屏幕录制: CGPreflightScreenCaptureAccess 检测，缺失时
-               CGRequestScreenCaptureAccess 直接打开系统设置对应页面
-            2. 辅助功能/输入监控: AXIsProcessTrustedWithOptions 检测，
-               缺失时自动弹出系统授权对话框
-            3. 任一权限刚请求过，提示用户授权后重启应用
+            1. 屏幕录制: CGRequestScreenCaptureAccess 直接打开系统设置页面
+            2. 输入监控: 无请求 API，通过 URL scheme 直接打开系统设置的
+               输入监控页面，让用户手动启用开关
+            3. 任一权限缺失时提示用户授权后重启
         """
         # Terminal 运行时权限检测 API 会误报，只在打包后的 .app 中检查
         if not getattr(sys, "frozen", False):
             return
 
+        import subprocess
+
         requested: list[str] = []
 
-        # 检测并请求屏幕录制权限
+        # 检测屏幕录制权限
         try:
             import Quartz  # type: ignore[import-untyped]
             if hasattr(Quartz, "CGPreflightScreenCaptureAccess"):
                 if not Quartz.CGPreflightScreenCaptureAccess():
-                    # 直接打开系统设置 → 屏幕录制页面
                     Quartz.CGRequestScreenCaptureAccess()
-                    requested.append("屏幕录制（截图功能）")
+                    requested.append("屏幕录制")
                     logger.info("已请求 macOS 屏幕录制权限")
         except ImportError:
             pass
 
-        # 检测并请求辅助功能/输入监控权限
+        # 检测输入监控权限（通过 CGEventTap 检测，无专用请求 API）
         try:
-            from ApplicationServices import AXIsProcessTrustedWithOptions  # type: ignore[import-untyped]
-            from HIServices import kAXTrustedCheckOptionPrompt  # type: ignore[import-untyped]
+            import Quartz  # type: ignore[import-untyped]
 
-            # prompt=True: 缺失时自动弹出系统授权对话框
-            trusted: bool = AXIsProcessTrustedWithOptions(
-                {kAXTrustedCheckOptionPrompt: True}
+            def _dummy(proxy: object, etype: int, event: object, ref: object) -> object:
+                return event
+
+            tap = Quartz.CGEventTapCreate(
+                Quartz.kCGHIDEventTap,
+                Quartz.kCGHeadInsertEventTap,
+                Quartz.kCGEventTapOptionListenOnly,
+                Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown),
+                _dummy,
+                None,
             )
-            if not trusted:
-                requested.append("辅助功能/输入监控（全局快捷键）")
-                logger.info("已请求 macOS 辅助功能权限")
+            if tap is None:
+                # 输入监控无请求 API，直接打开系统设置对应页面
+                subprocess.Popen([
+                    "open",
+                    "x-apple.systempreferences:"
+                    "com.apple.preference.security?Privacy_ListenEvent",
+                ])
+                requested.append("输入监控")
+                logger.info("已打开 macOS 输入监控设置页面")
+            else:
+                Quartz.CFMachPortInvalidate(tap)
         except ImportError:
             pass
 
         if requested:
             from PyQt6.QtWidgets import QMessageBox
 
-            items = "\n".join(f"  • {m}" for m in requested)
             QMessageBox.information(
                 self._main_window,
                 "请授予权限",
-                f"Claude Partner 需要以下权限才能正常工作：\n\n"
-                f"{items}\n\n"
-                f"系统设置已打开，请在对应页面中启用本应用的权限开关。\n"
-                f"授权完成后请重启应用。",
+                "已打开系统设置对应页面，请在列表中找到\n"
+                "Claude Partner 并启用权限开关。\n\n"
+                "授权完成后请重启应用。",
             )
 
     def _on_hotkey(self, action: str) -> None:
