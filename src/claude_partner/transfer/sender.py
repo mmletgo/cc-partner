@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-CHUNK_SIZE: int = 1024 * 1024  # 1MB
+CHUNK_SIZE: int = 960 * 1024  # 960KB - 低于 aiohttp 默认 client_max_size(1MB) 以兼容未自定义限制的对端
 
 
 class FileSender(QObject):

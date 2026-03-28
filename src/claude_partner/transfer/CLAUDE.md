@@ -27,7 +27,7 @@
 - **文件名冲突**: 自动添加 `(1)`, `(2)` 后缀
 
 ## 传输协议
-- 分块大小: 1MB (CHUNK_SIZE = 1024 * 1024)
+- 分块大小: 960KB (CHUNK_SIZE = 960 * 1024)，低于 aiohttp 默认 client_max_size(1MB) 以兼容未自定义限制的对端
 - SHA256 计算: 8KB 块读取，不一次性载入内存
 - 断点续传: init_transfer 检查临时文件大小作为 resume_offset
 - 完成判定: `transferred_bytes >= size` 时自动调用 finalize
