@@ -379,10 +379,12 @@ class Application:
             用户通过托盘菜单选择退出时，需要触发应用关闭流程。
 
         Code Logic（这个函数做什么）:
-            调用 QApplication.quit() 触发应用退出，
-            实际清理在 shutdown() 中执行。
+            停止 asyncio 事件循环使 run_forever() 返回，进入 finally 块
+            执行异步清理。不能直接调用 QApplication.quit()，否则 Qt 事件
+            循环被销毁后 qasync 的 run_until_complete(_cleanup()) 会崩溃。
         """
-        QApplication.quit()
+        loop = asyncio.get_event_loop()
+        loop.stop()
 
     async def shutdown(self) -> None:
         """
@@ -475,7 +477,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _sigterm_handler)
 
     _sig_notifier = QSocketNotifier(_sig_r.fileno(), QSocketNotifier.Type.Read)
-    _sig_notifier.activated.connect(lambda: (logger.info("收到退出信号"), QApplication.quit()))
+    _sig_notifier.activated.connect(lambda: (logger.info("收到退出信号"), loop.stop()))
 
     # macOS 权限检查：必须在 run_forever 中执行，不能在 run_until_complete 中，
     # 因为 QMessageBox 模态对话框会触发嵌套事件循环导致 qasync 状态损坏
