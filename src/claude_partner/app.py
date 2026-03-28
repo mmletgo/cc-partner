@@ -179,10 +179,6 @@ class Application:
         # 连接信号
         self._connect_signals(prompt_panel, transfer_panel, device_panel)
 
-        # macOS 权限检测
-        if sys.platform == "darwin":
-            self._check_macos_permissions()
-
         # 显示主窗口并加载数据
         self._main_window.show()
         asyncio.ensure_future(prompt_panel.refresh())
@@ -458,12 +454,34 @@ def main() -> None:
         """退出时清理资源。"""
         await app.shutdown()
 
-    # macOS Dock 退出和 kill 命令发送 SIGTERM，需要转为 QApplication.quit()
-    def _handle_sigterm(*_: object) -> None:
-        logger.info("收到 SIGTERM，退出...")
-        QApplication.quit()
+    # SIGTERM 处理：macOS Dock 退出和 kill 命令发送 SIGTERM
+    # 使用 socketpair + QSocketNotifier 确保信号能在任何状态下被 Qt 事件循环处理
+    # （纯 signal.signal 在 C++ 模态对话框或 PyInstaller 中可能失效）
+    import socket
+    from PyQt6.QtCore import QSocketNotifier
 
-    signal.signal(signal.SIGTERM, _handle_sigterm)
+    _sig_r, _sig_w = socket.socketpair(type=socket.SOCK_STREAM)
+    _sig_r.setblocking(False)
+    _sig_w.setblocking(False)
+
+    def _sigterm_handler(*_: object) -> None:
+        """信号处理器：只写一个字节，由 Qt 事件循环安全处理退出。"""
+        try:
+            _sig_w.send(b"\x00")
+        except OSError:
+            pass
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+    signal.signal(signal.SIGINT, _sigterm_handler)
+
+    _sig_notifier = QSocketNotifier(_sig_r.fileno(), QSocketNotifier.Type.Read)
+    _sig_notifier.activated.connect(lambda: (logger.info("收到退出信号"), QApplication.quit()))
+
+    # macOS 权限检查：必须在 run_forever 中执行，不能在 run_until_complete 中，
+    # 因为 QMessageBox 模态对话框会触发嵌套事件循环导致 qasync 状态损坏
+    if sys.platform == "darwin":
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(500, app._check_macos_permissions)
 
     try:
         loop.run_until_complete(_run())
