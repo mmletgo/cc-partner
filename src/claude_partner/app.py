@@ -205,6 +205,20 @@ class Application:
             lambda err: logger.warning("更新检查失败: %s", err)
         )
 
+        # 更新检查结果同步到设置面板
+        self._update_checker.update_available.connect(
+            lambda info: self._settings_panel.set_update_available(info.version)
+            if self._settings_panel is not None else None
+        )
+        self._update_checker.update_not_available.connect(
+            lambda: self._settings_panel.set_update_not_available()
+            if self._settings_panel is not None else None
+        )
+        self._update_checker.check_failed.connect(
+            lambda err: self._settings_panel.set_update_check_failed(err)
+            if self._settings_panel is not None else None
+        )
+
         # 延迟 3 秒后执行首次检查
         asyncio.get_event_loop().call_later(
             3.0,
@@ -305,6 +319,9 @@ class Application:
         # 设置变更 → 更新快捷键和配置
         if self._settings_panel is not None:
             self._settings_panel.settings_changed.connect(self._on_settings_changed)
+            self._settings_panel.check_update_requested.connect(
+                self._on_settings_check_update
+            )
 
     def _check_macos_permissions(self) -> None:
         """
@@ -412,6 +429,22 @@ class Application:
                 self._hotkey_mgr.update_hotkey(
                     "screenshot", config.screenshot_hotkey
                 )
+
+    def _on_settings_check_update(self) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            用户在设置面板点击"检查更新"时，需要触发版本检查并更新面板状态。
+
+        Code Logic（这个函数做什么）:
+            设置面板为"检查中"状态，然后异步执行版本检查。
+        """
+        if self._update_checker is None:
+            return
+        if self._settings_panel is not None:
+            self._settings_panel.set_update_checking()
+        asyncio.ensure_future(
+            self._update_checker.check_for_update(__version__)
+        )
 
     def _on_update_available(self, update_info: object) -> None:
         """

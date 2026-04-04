@@ -156,7 +156,9 @@ class UpdateInstaller:
             4. 删除自身脚本
             以 DETACHED_PROCESS 标志启动该脚本，确保不受父进程退出影响。
         """
-        current_exe: str = sys.executable if getattr(sys, "frozen", False) else ""
+        current_exe: str = (
+            os.path.realpath(sys.executable) if getattr(sys, "frozen", False) else ""
+        )
         if not current_exe:
             # 开发模式下无法替换，直接用 exe_path 启动
             logger.warning("非打包模式，直接启动下载的 EXE")
@@ -171,10 +173,10 @@ class UpdateInstaller:
         script_content: str = (
             "@echo off\n"
             "echo Claude Partner 正在更新...\n"
-            f"set PID={pid}\n"
-            f"set EXE_NAME={exe_name}\n"
-            f"set NEW_EXE={exe_path}\n"
-            f"set TARGET_EXE={current_exe}\n"
+            f'set "PID={pid}"\n'
+            f'set "EXE_NAME={exe_name}"\n'
+            f'set "NEW_EXE={exe_path}"\n'
+            f'set "TARGET_EXE={current_exe}"\n'
             "\n"
             ":wait\n"
             "tasklist /FI \"PID eq %PID%\" | find \"%PID%\" >nul\n"
@@ -216,7 +218,9 @@ class UpdateInstaller:
                - 删除自身脚本
             4. 以 start_new_session 启动该脚本
         """
-        current_exe: str = sys.executable if getattr(sys, "frozen", False) else ""
+        current_exe: str = (
+            os.path.realpath(sys.executable) if getattr(sys, "frozen", False) else ""
+        )
         if not current_exe:
             logger.warning("非打包模式，无法执行 Linux 安装")
             return
@@ -247,10 +251,10 @@ class UpdateInstaller:
         script_path: Path = Path(tempfile.gettempdir()) / "claude_partner_update.sh"
         script_content: str = (
             "#!/bin/bash\n"
-            f"PID={pid}\n"
-            f"NEW_EXE={new_exe}\n"
-            f"TARGET_EXE={current_exe}\n"
-            f"EXTRACT_DIR={extract_dir}\n"
+            f'PID={pid}\n'
+            f'NEW_EXE="{new_exe}"\n'
+            f'TARGET_EXE="{current_exe}"\n'
+            f'EXTRACT_DIR="{extract_dir}"\n'
             "\n"
             "# 等待当前进程退出\n"
             "while kill -0 $PID 2>/dev/null; do\n"
@@ -258,6 +262,7 @@ class UpdateInstaller:
             "done\n"
             "\n"
             "# 替换可执行文件\n"
+            "sync\n"
             "cp -f \"$NEW_EXE\" \"$TARGET_EXE\"\n"
             "chmod +x \"$TARGET_EXE\"\n"
             "\n"

@@ -14,10 +14,13 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QMessageBox,
+    QFrame,
+    QProgressBar,
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QCursor
 
+from claude_partner import __version__
 from claude_partner.config import AppConfig
 from claude_partner.hotkey.listener import (
     HOTKEY_PRESETS,
@@ -36,15 +39,18 @@ class SettingsPanel(QWidget):
     Business Logic（为什么需要这个类）:
         用户需要配置设备名称、文件接收目录、截图快捷键等参数，
         需要一个直观的图形界面来完成这些设置操作。
+        同时用户需要查看当前版本号并检查是否有新版本可用。
 
     Code Logic（这个类做什么）:
         表单布局，读取 AppConfig 填充控件，保存时写回 config。
         包含设备名称输入框、接收目录选择、快捷键下拉选择等控件。
+        底部"关于"区域展示版本号和检查更新功能。
         保存后通过 settings_changed 信号通知外部组件配置已更新。
         所有颜色样式通过 theme 模块统一管理，支持深浅色主题切换。
     """
 
     settings_changed = pyqtSignal(object)  # 传出更新后的 AppConfig
+    check_update_requested = pyqtSignal()  # 用户点击检查更新按钮
 
     def __init__(self, config: AppConfig, parent: QWidget | None = None) -> None:
         """
@@ -169,6 +175,67 @@ class SettingsPanel(QWidget):
         btn_row.addWidget(self._save_btn)
         layout.addLayout(btn_row)
 
+        # --- 关于区域 ---
+        # 分隔线
+        self._about_separator: QFrame = QFrame()
+        self._about_separator.setFrameShape(QFrame.Shape.HLine)
+        self._about_separator.setStyleSheet(
+            f"background: {theme.BORDER}; border: none; max-height: 1px;"
+        )
+        layout.addWidget(self._about_separator)
+
+        # "关于" 标题
+        self._section_about: QLabel = QLabel("关于")
+        self._section_about.setStyleSheet(
+            f"font-size: 13px; font-weight: 600; color: {theme.TEXT_SECONDARY}; "
+            "text-transform: uppercase; border: none; background: transparent;"
+        )
+        layout.addWidget(self._section_about)
+
+        # 版本信息行
+        version_row: QHBoxLayout = QHBoxLayout()
+        self._app_name_label: QLabel = QLabel("Claude Partner")
+        self._app_name_label.setStyleSheet(
+            f"font-size: 16px; font-weight: 700; color: {theme.TEXT_PRIMARY}; "
+            "border: none; background: transparent;"
+        )
+        self._version_label: QLabel = QLabel(f"v{__version__}")
+        self._version_label.setStyleSheet(
+            f"font-size: 14px; color: {theme.TEXT_SECONDARY}; "
+            "border: none; background: transparent;"
+        )
+        version_row.addWidget(self._app_name_label)
+        version_row.addStretch()
+        version_row.addWidget(self._version_label)
+        layout.addLayout(version_row)
+
+        # 最新版本行
+        latest_row: QHBoxLayout = QHBoxLayout()
+        self._latest_version_label: QLabel = QLabel("最新版本: 未知")
+        self._latest_version_label.setStyleSheet(
+            f"font-size: 13px; color: {theme.TEXT_TERTIARY}; border: none; background: transparent;"
+        )
+        self._check_update_btn: QPushButton = QPushButton("检查更新")
+        self._check_update_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._check_update_btn.setStyleSheet(theme.button_secondary_style())
+        self._check_update_btn.clicked.connect(self._on_check_update)
+        latest_row.addWidget(self._latest_version_label)
+        latest_row.addStretch()
+        latest_row.addWidget(self._check_update_btn)
+        layout.addLayout(latest_row)
+
+        # 更新进度条（初始隐藏）
+        self._update_progress_bar: QProgressBar = QProgressBar()
+        self._update_progress_bar.setStyleSheet(theme.progress_bar_style())
+        self._update_progress_bar.hide()
+
+        # 更新状态标签（初始隐藏）
+        self._update_status_label: QLabel = QLabel("")
+        self._update_status_label.setStyleSheet(
+            f"font-size: 12px; color: {theme.TEXT_TERTIARY}; border: none; background: transparent;"
+        )
+        self._update_status_label.hide()
+
     def _reapply_styles(self) -> None:
         """
         Business Logic（为什么需要这个函数）:
@@ -225,6 +292,42 @@ class SettingsPanel(QWidget):
         # 保存按钮
         self._save_btn.setStyleSheet(theme.button_primary_style())
 
+        # 关于区域分隔线
+        self._about_separator.setStyleSheet(
+            f"background: {theme.BORDER}; border: none; max-height: 1px;"
+        )
+
+        # "关于" 标题
+        self._section_about.setStyleSheet(section_style)
+
+        # 应用名称
+        self._app_name_label.setStyleSheet(
+            f"font-size: 16px; font-weight: 700; color: {theme.TEXT_PRIMARY}; "
+            "border: none; background: transparent;"
+        )
+
+        # 版本号标签
+        self._version_label.setStyleSheet(
+            f"font-size: 14px; color: {theme.TEXT_SECONDARY}; "
+            "border: none; background: transparent;"
+        )
+
+        # 最新版本标签（重新应用当前文字颜色）
+        self._latest_version_label.setStyleSheet(
+            f"font-size: 13px; color: {theme.TEXT_TERTIARY}; border: none; background: transparent;"
+        )
+
+        # 检查更新按钮
+        self._check_update_btn.setStyleSheet(theme.button_secondary_style())
+
+        # 更新进度条
+        self._update_progress_bar.setStyleSheet(theme.progress_bar_style())
+
+        # 更新状态标签
+        self._update_status_label.setStyleSheet(
+            f"font-size: 12px; color: {theme.TEXT_TERTIARY}; border: none; background: transparent;"
+        )
+
     def _browse_dir(self) -> None:
         """
         Business Logic（为什么需要这个函数）:
@@ -260,3 +363,73 @@ class SettingsPanel(QWidget):
         self._config.save()
         self.settings_changed.emit(self._config)
         QMessageBox.information(self, "保存成功", "设置已保存")
+
+    def _on_check_update(self) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            用户点击"检查更新"按钮后，需要通知外部组件执行版本检查逻辑。
+
+        Code Logic（这个函数做什么）:
+            发射 check_update_requested 信号，由 app.py 中的连接处理实际的检查逻辑。
+        """
+        self.check_update_requested.emit()
+
+    def set_update_checking(self) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            当正在检查更新时，需要给用户明确的视觉反馈，避免重复点击。
+
+        Code Logic（这个函数做什么）:
+            将最新版本标签设为"正在检查..."，禁用检查更新按钮并修改按钮文字。
+        """
+        self._latest_version_label.setText("最新版本: 正在检查...")
+        self._latest_version_label.setStyleSheet(
+            f"font-size: 13px; color: {theme.TEXT_SECONDARY}; border: none; background: transparent;"
+        )
+        self._check_update_btn.setEnabled(False)
+        self._check_update_btn.setText("检查中...")
+
+    def set_update_available(self, version: str) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            发现新版本时，需要用醒目颜色告知用户新版本号，引导用户更新。
+
+        Code Logic（这个函数做什么）:
+            将最新版本标签设为蓝色强调色显示新版本号，恢复按钮可用状态。
+        """
+        self._latest_version_label.setText(f"最新版本: {version}")
+        self._latest_version_label.setStyleSheet(
+            f"font-size: 13px; color: {theme.ACCENT}; border: none; background: transparent;"
+        )
+        self._check_update_btn.setEnabled(True)
+        self._check_update_btn.setText("检查更新")
+
+    def set_update_not_available(self) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            已是最新版本时，需要用绿色文字让用户确知当前状态。
+
+        Code Logic（这个函数做什么）:
+            将最新版本标签设为绿色显示"已是最新"，恢复按钮可用状态。
+        """
+        self._latest_version_label.setText("最新版本: 已是最新")
+        self._latest_version_label.setStyleSheet(
+            f"font-size: 13px; color: {theme.GREEN}; border: none; background: transparent;"
+        )
+        self._check_update_btn.setEnabled(True)
+        self._check_update_btn.setText("检查更新")
+
+    def set_update_check_failed(self, error: str) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            检查更新失败时，需要用红色文字告知用户，并允许重试。
+
+        Code Logic（这个函数做什么）:
+            将最新版本标签设为红色显示"检查失败"，恢复按钮可用状态以便重试。
+        """
+        self._latest_version_label.setText("最新版本: 检查失败")
+        self._latest_version_label.setStyleSheet(
+            f"font-size: 13px; color: {theme.RED}; border: none; background: transparent;"
+        )
+        self._check_update_btn.setEnabled(True)
+        self._check_update_btn.setText("检查更新")

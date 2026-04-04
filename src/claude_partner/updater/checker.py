@@ -232,7 +232,7 @@ class UpdateChecker(QObject):
                 return
 
             update_info: UpdateInfo = UpdateInfo(
-                version=tag_name,
+                version=tag_name.lstrip("v"),
                 html_url=data.get("html_url", ""),
                 body=data.get("body", ""),
                 download_url=download_url,
