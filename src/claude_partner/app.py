@@ -31,6 +31,7 @@ from claude_partner.ui.transfer_panel import TransferPanel
 from claude_partner.ui.device_panel import DevicePanel
 from claude_partner.ui.tray import SystemTray
 from claude_partner.ui.settings_panel import SettingsPanel
+from claude_partner.ui.scratchpad_panel import ScratchpadPanel
 from claude_partner.ui import theme
 from claude_partner.hotkey.listener import GlobalHotkeyManager
 
@@ -155,11 +156,14 @@ class Application:
             logger.info("DevicePanel 创建完成")
             self._settings_panel = SettingsPanel(self._config)
             logger.info("SettingsPanel 创建完成")
+            scratchpad_panel = ScratchpadPanel()
+            logger.info("ScratchpadPanel 创建完成")
 
             self._main_window = MainWindow(
                 prompt_panel=prompt_panel,
                 transfer_panel=transfer_panel,
                 device_panel=device_panel,
+                scratchpad_panel=scratchpad_panel,
                 settings_panel=self._settings_panel,
             )
             logger.info("MainWindow 创建完成")

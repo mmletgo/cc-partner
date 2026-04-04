@@ -28,6 +28,7 @@ class MainWindow(QMainWindow):
         prompt_panel: PromptPanel,
         transfer_panel: QWidget | None = None,
         device_panel: QWidget | None = None,
+        scratchpad_panel: QWidget | None = None,
         settings_panel: QWidget | None = None,
     ) -> None:
         """
@@ -63,7 +64,11 @@ class MainWindow(QMainWindow):
         self._device_panel: QWidget = device_panel or QWidget()
         self._tab_widget.addTab(self._device_panel, "设备列表")
 
-        # Tab 4: 设置面板
+        # Tab 4: 速记本面板
+        self._scratchpad_panel: QWidget = scratchpad_panel or QWidget()
+        self._tab_widget.addTab(self._scratchpad_panel, "速记本")
+
+        # Tab 5: 设置面板
         self._settings_panel: QWidget = settings_panel or QWidget()
         self._tab_widget.addTab(self._settings_panel, "设置")
 
@@ -90,6 +95,9 @@ class MainWindow(QMainWindow):
 
         if hasattr(self._settings_panel, "_reapply_styles"):
             self._settings_panel._reapply_styles()
+
+        if hasattr(self._scratchpad_panel, "_reapply_styles"):
+            self._scratchpad_panel._reapply_styles()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """
