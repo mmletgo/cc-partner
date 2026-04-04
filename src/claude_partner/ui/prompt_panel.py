@@ -238,11 +238,11 @@ class PromptPanel(QWidget):
         toolbar_layout.addWidget(self._tag_combo)
 
         # 新建按钮
-        btn_new: QPushButton = QPushButton("+ 新建")
-        btn_new.setStyleSheet(theme.button_primary_style())
-        btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_new.clicked.connect(lambda: asyncio.ensure_future(self._on_new()))
-        toolbar_layout.addWidget(btn_new)
+        self._btn_new: QPushButton = QPushButton("+ 新建")
+        self._btn_new.setStyleSheet(theme.button_primary_style())
+        self._btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_new.clicked.connect(lambda: asyncio.ensure_future(self._on_new()))
+        toolbar_layout.addWidget(self._btn_new)
 
         main_layout.addLayout(toolbar_layout)
 
@@ -270,6 +270,23 @@ class PromptPanel(QWidget):
         )
         self._empty_label.hide()
         main_layout.addWidget(self._empty_label)
+
+    def _reapply_styles(self) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            系统主题切换时工具栏控件和空提示的颜色需要同步更新。
+
+        Code Logic（这个函数做什么）:
+            重新应用搜索框、标签筛选框、新建按钮、空提示标签的样式，
+            并重建卡片列表以使用新的主题颜色。
+        """
+        self._search_input.setStyleSheet(theme.input_style())
+        self._tag_combo.setStyleSheet(theme.combo_style())
+        self._btn_new.setStyleSheet(theme.button_primary_style())
+        self._empty_label.setStyleSheet(
+            f"color: {theme.TEXT_SECONDARY}; font-size: {theme.FONT_SIZE_BODY}; padding: 40px;"
+        )
+        self._rebuild_cards()
 
     async def refresh(self) -> None:
         """

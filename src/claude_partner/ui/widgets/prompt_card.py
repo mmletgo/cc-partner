@@ -113,7 +113,8 @@ class PromptCard(QFrame):
             tags_layout.setContentsMargins(0, 2, 0, 2)
 
             for i, tag in enumerate(prompt.tags):
-                bg, fg = theme.TAG_COLORS[i % len(theme.TAG_COLORS)]
+                colors: list[tuple[str, str]] = theme.current_tag_colors()
+                bg, fg = colors[i % len(colors)]
                 tag_label: QLabel = QLabel(tag)
                 tag_label.setStyleSheet(theme.tag_label_style(bg, fg))
                 tags_layout.addWidget(tag_label)

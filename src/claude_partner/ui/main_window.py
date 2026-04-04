@@ -67,6 +67,30 @@ class MainWindow(QMainWindow):
         self._settings_panel: QWidget = settings_panel or QWidget()
         self._tab_widget.addTab(self._settings_panel, "设置")
 
+    def _refresh_theme(self) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            系统主题切换时，主窗口需要刷新所有子面板的样式，
+            使文字、背景、边框等颜色与新主题一致。
+
+        Code Logic（这个函数做什么）:
+            重新应用 Tab 栏样式，级联调用各面板的 _reapply_styles() 方法。
+            对于 settings_panel，通过 hasattr 检查是否支持刷新。
+        """
+        self._tab_widget.setStyleSheet(theme.tab_bar_style())
+
+        # 刷新各面板样式
+        self._prompt_panel._reapply_styles()
+
+        if hasattr(self._transfer_panel, "_reapply_styles"):
+            self._transfer_panel._reapply_styles()
+
+        if hasattr(self._device_panel, "_reapply_styles"):
+            self._device_panel._reapply_styles()
+
+        if hasattr(self._settings_panel, "_reapply_styles"):
+            self._settings_panel._reapply_styles()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """
         Business Logic（为什么需要这个函数）:

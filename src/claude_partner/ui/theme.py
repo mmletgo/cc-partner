@@ -1,41 +1,112 @@
 """
-Apple 风格集中式主题模块。
+Apple 风格集中式主题模块，支持浅色/深色模式自动切换。
 
 Business Logic:
     项目 UI 需要统一的 Apple/macOS 视觉风格，包括颜色、字体、间距和组件样式。
+    同时需要适配系统深色模式，在深色主题下自动切换颜色。
     将所有主题常量和 QSS 样式函数集中在一个模块中，避免各组件重复定义样式。
 
 Code Logic:
     提供颜色/字体/间距常量、返回 QSS 字符串的组件样式函数、以及阴影等辅助函数。
+    通过 apply_theme() 函数切换浅色/深色调色板，所有模块级颜色变量随之更新。
 """
 
 from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 
-# ── Apple 调色板 ──────────────────────────────────────────────────────────
+# ── 浅色调色板（默认）────────────────────────────────────────────────────
 
-ACCENT: str = "#007AFF"
-ACCENT_HOVER: str = "#0062CC"
-ACCENT_PRESSED: str = "#004999"
+_LIGHT_PALETTE: dict[str, str] = {
+    "ACCENT": "#007AFF",
+    "ACCENT_HOVER": "#0062CC",
+    "ACCENT_PRESSED": "#004999",
+    "BG_PRIMARY": "#FFFFFF",
+    "BG_SECONDARY": "#F5F5F7",
+    "BG_TERTIARY": "#E8E8ED",
+    "BORDER": "#E5E5EA",
+    "BORDER_SUBTLE": "#F0F0F5",
+    "TEXT_PRIMARY": "#1D1D1F",
+    "TEXT_SECONDARY": "#86868B",
+    "TEXT_TERTIARY": "#AEAEB2",
+    "GREEN": "#34C759",
+    "RED": "#FF3B30",
+    "ORANGE": "#FF9500",
+    "SHADOW_LIGHT": "rgba(0, 0, 0, 0.04)",
+    "SHADOW_MEDIUM": "rgba(0, 0, 0, 0.08)",
+    "DANGER_HOVER_BG": "#FFF0F0",
+    "SCROLLBAR_HANDLE": "rgba(0, 0, 0, 0.15)",
+    "SCROLLBAR_HANDLE_HOVER": "rgba(0, 0, 0, 0.3)",
+    "STATUS_BG_TRANSFERRING": "#E8F0FE",
+    "STATUS_BG_COMPLETED": "#E6F4EA",
+    "STATUS_BG_FAILED": "#FDE7E7",
+    "STATUS_BG_CANCELLED": "#FEF7E0",
+}
 
-BG_PRIMARY: str = "#FFFFFF"
-BG_SECONDARY: str = "#F5F5F7"
-BG_TERTIARY: str = "#E8E8ED"
+# ── 深色调色板 ─────────────────────────────────────────────────────────────
 
-BORDER: str = "#E5E5EA"
-BORDER_SUBTLE: str = "#F0F0F5"
+_DARK_PALETTE: dict[str, str] = {
+    "ACCENT": "#0A84FF",
+    "ACCENT_HOVER": "#409CFF",
+    "ACCENT_PRESSED": "#0066CC",
+    "BG_PRIMARY": "#1C1C1E",
+    "BG_SECONDARY": "#2C2C2E",
+    "BG_TERTIARY": "#3A3A3C",
+    "BORDER": "#48484A",
+    "BORDER_SUBTLE": "#38383A",
+    "TEXT_PRIMARY": "#F5F5F7",
+    "TEXT_SECONDARY": "#98989D",
+    "TEXT_TERTIARY": "#636366",
+    "GREEN": "#30D158",
+    "RED": "#FF453A",
+    "ORANGE": "#FF9F0A",
+    "SHADOW_LIGHT": "rgba(0, 0, 0, 0.16)",
+    "SHADOW_MEDIUM": "rgba(0, 0, 0, 0.24)",
+    "DANGER_HOVER_BG": "#3D1F1F",
+    "SCROLLBAR_HANDLE": "rgba(255, 255, 255, 0.2)",
+    "SCROLLBAR_HANDLE_HOVER": "rgba(255, 255, 255, 0.35)",
+    "STATUS_BG_TRANSFERRING": "#1A3A5C",
+    "STATUS_BG_COMPLETED": "#1A3C2A",
+    "STATUS_BG_FAILED": "#3D1A1A",
+    "STATUS_BG_CANCELLED": "#3D3319",
+}
 
-TEXT_PRIMARY: str = "#1D1D1F"
-TEXT_SECONDARY: str = "#86868B"
-TEXT_TERTIARY: str = "#AEAEB2"
+# ── 当前模式状态 ────────────────────────────────────────────────────────────
 
-GREEN: str = "#34C759"
-RED: str = "#FF3B30"
-ORANGE: str = "#FF9500"
+_is_dark: bool = False
 
-SHADOW_LIGHT: str = "rgba(0, 0, 0, 0.04)"
-SHADOW_MEDIUM: str = "rgba(0, 0, 0, 0.08)"
+# ── 初始化模块级变量（浅色默认）──────────────────────────────────────────
+
+ACCENT: str = _LIGHT_PALETTE["ACCENT"]
+ACCENT_HOVER: str = _LIGHT_PALETTE["ACCENT_HOVER"]
+ACCENT_PRESSED: str = _LIGHT_PALETTE["ACCENT_PRESSED"]
+
+BG_PRIMARY: str = _LIGHT_PALETTE["BG_PRIMARY"]
+BG_SECONDARY: str = _LIGHT_PALETTE["BG_SECONDARY"]
+BG_TERTIARY: str = _LIGHT_PALETTE["BG_TERTIARY"]
+
+BORDER: str = _LIGHT_PALETTE["BORDER"]
+BORDER_SUBTLE: str = _LIGHT_PALETTE["BORDER_SUBTLE"]
+
+TEXT_PRIMARY: str = _LIGHT_PALETTE["TEXT_PRIMARY"]
+TEXT_SECONDARY: str = _LIGHT_PALETTE["TEXT_SECONDARY"]
+TEXT_TERTIARY: str = _LIGHT_PALETTE["TEXT_TERTIARY"]
+
+GREEN: str = _LIGHT_PALETTE["GREEN"]
+RED: str = _LIGHT_PALETTE["RED"]
+ORANGE: str = _LIGHT_PALETTE["ORANGE"]
+
+SHADOW_LIGHT: str = _LIGHT_PALETTE["SHADOW_LIGHT"]
+SHADOW_MEDIUM: str = _LIGHT_PALETTE["SHADOW_MEDIUM"]
+
+DANGER_HOVER_BG: str = _LIGHT_PALETTE["DANGER_HOVER_BG"]
+SCROLLBAR_HANDLE: str = _LIGHT_PALETTE["SCROLLBAR_HANDLE"]
+SCROLLBAR_HANDLE_HOVER: str = _LIGHT_PALETTE["SCROLLBAR_HANDLE_HOVER"]
+
+STATUS_BG_TRANSFERRING: str = _LIGHT_PALETTE["STATUS_BG_TRANSFERRING"]
+STATUS_BG_COMPLETED: str = _LIGHT_PALETTE["STATUS_BG_COMPLETED"]
+STATUS_BG_FAILED: str = _LIGHT_PALETTE["STATUS_BG_FAILED"]
+STATUS_BG_CANCELLED: str = _LIGHT_PALETTE["STATUS_BG_CANCELLED"]
 
 # ── 字体和间距 ────────────────────────────────────────────────────────────
 
@@ -65,6 +136,62 @@ TAG_COLORS: list[tuple[str, str]] = [
     ("#E1F5FE", "#0277BD"),  # 浅蓝
 ]
 
+TAG_COLORS_DARK: list[tuple[str, str]] = [
+    ("#1A3A5C", "#5AADFF"),  # 蓝
+    ("#1A3C2A", "#4CAF50"),  # 绿
+    ("#3D3319", "#FFB74D"),  # 橙
+    ("#2D1F3D", "#CE93D8"),  # 紫
+    ("#1A3D3D", "#4DB6AC"),  # 青
+    ("#3D1A1A", "#EF9A9A"),  # 红
+    ("#2A1F3D", "#B39DDB"),  # 深紫
+    ("#1A2D3D", "#64B5F6"),  # 浅蓝
+]
+
+
+# ── 主题切换 ──────────────────────────────────────────────────────────────
+
+
+def is_dark_mode() -> bool:
+    """
+    Business Logic:
+        外部组件需要知道当前是否为深色模式，以便做条件判断。
+
+    Code Logic:
+        返回模块内部 _is_dark 状态。
+    """
+    return _is_dark
+
+
+def apply_theme(dark: bool) -> str:
+    """
+    Business Logic:
+        应用启动时和系统主题切换时需要将所有颜色变量切换为对应的调色板，
+        使所有后续的样式函数调用返回正确的颜色。
+
+    Code Logic:
+        根据 dark 参数选择深色或浅色调色板，用 globals() 批量更新模块级变量，
+        返回最新的全局 QSS 字符串供 QApplication 重新应用。
+    """
+    global _is_dark
+    _is_dark = dark
+
+    palette: dict[str, str] = _DARK_PALETTE if dark else _LIGHT_PALETTE
+    for key, value in palette.items():
+        globals()[key] = value
+
+    return get_global_stylesheet()
+
+
+def current_tag_colors() -> list[tuple[str, str]]:
+    """
+    Business Logic:
+        标签颜色需要跟随主题切换，深色模式下使用低饱和度高亮标签颜色。
+
+    Code Logic:
+        根据当前 _is_dark 状态返回浅色或深色标签色板。
+    """
+    return TAG_COLORS_DARK if _is_dark else TAG_COLORS
+
 
 # ── 组件样式函数 ──────────────────────────────────────────────────────────
 
@@ -90,12 +217,12 @@ def get_global_stylesheet() -> str:
             background: transparent;
         }}
         QScrollBar::handle:vertical {{
-            background: rgba(0, 0, 0, 0.15);
+            background: {SCROLLBAR_HANDLE};
             border-radius: 3px;
             min-height: 30px;
         }}
         QScrollBar::handle:vertical:hover {{
-            background: rgba(0, 0, 0, 0.3);
+            background: {SCROLLBAR_HANDLE_HOVER};
         }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
             height: 0;
@@ -110,12 +237,12 @@ def get_global_stylesheet() -> str:
             background: transparent;
         }}
         QScrollBar::handle:horizontal {{
-            background: rgba(0, 0, 0, 0.15);
+            background: {SCROLLBAR_HANDLE};
             border-radius: 3px;
             min-width: 30px;
         }}
         QScrollBar::handle:horizontal:hover {{
-            background: rgba(0, 0, 0, 0.3);
+            background: {SCROLLBAR_HANDLE_HOVER};
         }}
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
             width: 0;
@@ -247,7 +374,7 @@ def button_danger_style() -> str:
             font-family: {FONT_FAMILY};
         }}
         QPushButton:hover {{
-            background: #FFF0F0;
+            background: {DANGER_HOVER_BG};
         }}
     """
 
@@ -271,7 +398,7 @@ def button_danger_compact_style() -> str:
             font-family: {FONT_FAMILY};
         }}
         QPushButton:hover {{
-            background: #FFF0F0;
+            background: {DANGER_HOVER_BG};
             border-color: {RED};
         }}
     """

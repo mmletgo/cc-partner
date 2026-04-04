@@ -36,10 +36,11 @@ class DeviceCard(QFrame):
             根据传入的 Device 数据构建设备卡片的完整 UI。
 
         Code Logic（这个函数做什么）:
-            保存 device_id，创建设备名称标签、地址标签和在线状态指示灯。
+            保存 device_id 和在线状态，创建设备名称标签、地址标签和在线状态指示灯。
         """
         super().__init__(parent)
         self._device_id: str = device.id
+        self._online: bool = device.online
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet(
@@ -96,6 +97,40 @@ class DeviceCard(QFrame):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         main_layout.addWidget(self._status_text)
+
+    def _reapply_styles(self) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            系统主题切换时设备卡片的颜色需要同步更新，否则文字和背景色不匹配。
+
+        Code Logic（这个函数做什么）:
+            重新应用卡片边框/背景、名称标签、地址标签、状态指示灯和状态文字的样式。
+        """
+        self.setStyleSheet(
+            f"""
+            DeviceCard {{
+                {theme.card_style()}
+            }}
+            DeviceCard:hover {{
+                background: {theme.BG_SECONDARY};
+            }}
+            """
+        )
+        self._name_label.setStyleSheet(
+            f"font-size: {theme.FONT_SIZE_BODY}; font-weight: 600; color: {theme.TEXT_PRIMARY}; "
+            f"background: transparent; border: none;"
+        )
+        self._addr_label.setStyleSheet(
+            f"font-size: {theme.FONT_SIZE_CAPTION}; color: {theme.TEXT_SECONDARY}; "
+            f"background: transparent; border: none;"
+        )
+        self._update_status_dot(self._online)
+        status_text: str = "在线" if self._online else "离线"
+        status_color: str = theme.GREEN if self._online else theme.TEXT_TERTIARY
+        self._status_text.setStyleSheet(
+            f"font-size: {theme.FONT_SIZE_CAPTION}; font-weight: 600; color: {status_color}; "
+            f"background: transparent; border: none;"
+        )
 
     def _update_status_dot(self, online: bool) -> None:
         """
@@ -189,9 +224,9 @@ class DevicePanel(QWidget):
         header_layout: QHBoxLayout = QHBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 4)
 
-        title_label: QLabel = QLabel("在线设备")
-        title_label.setStyleSheet(theme.label_title_style())
-        header_layout.addWidget(title_label)
+        self._title_label: QLabel = QLabel("在线设备")
+        self._title_label.setStyleSheet(theme.label_title_style())
+        header_layout.addWidget(self._title_label)
 
         self._count_label: QLabel = QLabel("(0)")
         self._count_label.setStyleSheet(theme.label_caption_style())
@@ -226,6 +261,22 @@ class DevicePanel(QWidget):
 
         self._scroll_area.setWidget(self._list_container)
         main_layout.addWidget(self._scroll_area)
+
+    def _reapply_styles(self) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            系统主题切换时设备面板的标题、计数和空提示样式需要同步更新。
+
+        Code Logic（这个函数做什么）:
+            重新应用标题标签、计数标签、空提示标签和所有设备卡片的样式。
+        """
+        self._title_label.setStyleSheet(theme.label_title_style())
+        self._count_label.setStyleSheet(theme.label_caption_style())
+        self._empty_label.setStyleSheet(
+            f"font-size: {theme.FONT_SIZE_BODY}; color: {theme.TEXT_TERTIARY}; padding: 30px;"
+        )
+        for card in self._device_cards.values():
+            card._reapply_styles()
 
     def add_device(self, device: Device) -> None:
         """

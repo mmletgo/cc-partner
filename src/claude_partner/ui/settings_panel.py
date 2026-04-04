@@ -24,6 +24,7 @@ from claude_partner.hotkey.listener import (
     pynput_to_display,
     display_to_pynput,
 )
+from claude_partner.ui import theme
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class SettingsPanel(QWidget):
         表单布局，读取 AppConfig 填充控件，保存时写回 config。
         包含设备名称输入框、接收目录选择、快捷键下拉选择等控件。
         保存后通过 settings_changed 信号通知外部组件配置已更新。
+        所有颜色样式通过 theme 模块统一管理，支持深浅色主题切换。
     """
 
     settings_changed = pyqtSignal(object)  # 传出更新后的 AppConfig
@@ -52,107 +54,78 @@ class SettingsPanel(QWidget):
         Code Logic（这个函数做什么）:
             接收 AppConfig 实例，创建表单布局：设备名称输入、接收目录选择、
             快捷键下拉选择、Wayland 提示（Linux）、保存按钮。
-            各控件的初始值从 config 对象读取。
+            各控件的初始值从 config 对象读取，颜色样式通过 theme 模块获取。
         """
         super().__init__(parent)
         self._config: AppConfig = config
 
-        layout = QVBoxLayout(self)
+        layout: QVBoxLayout = QVBoxLayout(self)
         layout.setContentsMargins(32, 24, 32, 24)
         layout.setSpacing(24)
 
         # 标题
-        title = QLabel("设置")
-        title.setStyleSheet(
-            "font-size: 22px; font-weight: 700; color: #1D1D1F; "
+        self._title: QLabel = QLabel("设置")
+        self._title.setStyleSheet(
+            f"font-size: 22px; font-weight: 700; color: {theme.TEXT_PRIMARY}; "
             "border: none; background: transparent;"
         )
-        layout.addWidget(title)
+        layout.addWidget(self._title)
 
         # --- 设备设置 ---
-        section1 = QLabel("设备")
-        section1.setStyleSheet(
-            "font-size: 13px; font-weight: 600; color: #86868B; "
+        self._section1: QLabel = QLabel("设备")
+        self._section1.setStyleSheet(
+            f"font-size: 13px; font-weight: 600; color: {theme.TEXT_SECONDARY}; "
             "text-transform: uppercase; border: none; background: transparent;"
         )
-        layout.addWidget(section1)
+        layout.addWidget(self._section1)
 
         # 设备名称
-        name_row = QHBoxLayout()
-        name_label = QLabel("设备名称")
-        name_label.setFixedWidth(120)
-        name_label.setStyleSheet(
-            "font-size: 14px; color: #1D1D1F; border: none; background: transparent;"
+        name_row: QHBoxLayout = QHBoxLayout()
+        self._name_label: QLabel = QLabel("设备名称")
+        self._name_label.setFixedWidth(120)
+        self._name_label.setStyleSheet(
+            f"font-size: 14px; color: {theme.TEXT_PRIMARY}; border: none; background: transparent;"
         )
-        self._name_input = QLineEdit(config.device_name)
-        self._name_input.setStyleSheet(
-            "QLineEdit { border: 1px solid #E5E5EA; border-radius: 10px; "
-            "padding: 10px 14px; font-size: 14px; background: white; }"
-            "QLineEdit:focus { border-color: #007AFF; }"
-        )
-        name_row.addWidget(name_label)
+        self._name_input: QLineEdit = QLineEdit(config.device_name)
+        self._name_input.setStyleSheet(theme.input_style())
+        name_row.addWidget(self._name_label)
         name_row.addWidget(self._name_input, stretch=1)
         layout.addLayout(name_row)
 
         # 接收目录
-        dir_row = QHBoxLayout()
-        dir_label = QLabel("接收目录")
-        dir_label.setFixedWidth(120)
-        dir_label.setStyleSheet(
-            "font-size: 14px; color: #1D1D1F; border: none; background: transparent;"
+        dir_row: QHBoxLayout = QHBoxLayout()
+        self._dir_label: QLabel = QLabel("接收目录")
+        self._dir_label.setFixedWidth(120)
+        self._dir_label.setStyleSheet(
+            f"font-size: 14px; color: {theme.TEXT_PRIMARY}; border: none; background: transparent;"
         )
-        self._dir_input = QLineEdit(config.receive_dir)
-        self._dir_input.setStyleSheet(
-            "QLineEdit { border: 1px solid #E5E5EA; border-radius: 10px; "
-            "padding: 10px 14px; font-size: 14px; background: white; }"
-            "QLineEdit:focus { border-color: #007AFF; }"
-        )
-        browse_btn = QPushButton("浏览")
-        browse_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        browse_btn.setStyleSheet(
-            "QPushButton { background: transparent; color: #007AFF; "
-            "border: 1px solid #E5E5EA; border-radius: 10px; "
-            "padding: 10px 16px; font-size: 14px; }"
-            "QPushButton:hover { background: #F5F5F7; }"
-        )
-        browse_btn.clicked.connect(self._browse_dir)
-        dir_row.addWidget(dir_label)
+        self._dir_input: QLineEdit = QLineEdit(config.receive_dir)
+        self._dir_input.setStyleSheet(theme.input_style())
+        self._browse_btn: QPushButton = QPushButton("浏览")
+        self._browse_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._browse_btn.setStyleSheet(theme.button_secondary_style())
+        self._browse_btn.clicked.connect(self._browse_dir)
+        dir_row.addWidget(self._dir_label)
         dir_row.addWidget(self._dir_input, stretch=1)
-        dir_row.addWidget(browse_btn)
+        dir_row.addWidget(self._browse_btn)
         layout.addLayout(dir_row)
 
         # --- 快捷键设置 ---
-        section2 = QLabel("快捷键")
-        section2.setStyleSheet(
-            "font-size: 13px; font-weight: 600; color: #86868B; "
+        self._section2: QLabel = QLabel("快捷键")
+        self._section2.setStyleSheet(
+            f"font-size: 13px; font-weight: 600; color: {theme.TEXT_SECONDARY}; "
             "text-transform: uppercase; border: none; background: transparent;"
         )
-        layout.addWidget(section2)
+        layout.addWidget(self._section2)
 
-        hotkey_row = QHBoxLayout()
-        hotkey_label = QLabel("截图快捷键")
-        hotkey_label.setFixedWidth(120)
-        hotkey_label.setStyleSheet(
-            "font-size: 14px; color: #1D1D1F; border: none; background: transparent;"
+        hotkey_row: QHBoxLayout = QHBoxLayout()
+        self._hotkey_label: QLabel = QLabel("截图快捷键")
+        self._hotkey_label.setFixedWidth(120)
+        self._hotkey_label.setStyleSheet(
+            f"font-size: 14px; color: {theme.TEXT_PRIMARY}; border: none; background: transparent;"
         )
-        self._hotkey_combo = QComboBox()
-        self._hotkey_combo.setStyleSheet(
-            "QComboBox { border: 1px solid #E5E5EA; border-radius: 10px; "
-            "padding: 10px 14px; font-size: 14px; background: white; min-height: 20px; }"
-            "QComboBox:hover { border-color: #007AFF; }"
-            "QComboBox::drop-down { subcontrol-origin: padding; "
-            "subcontrol-position: top right; width: 30px; "
-            "border-left: 1px solid #E5E5EA; "
-            "border-top-right-radius: 10px; border-bottom-right-radius: 10px; "
-            "background: #F5F5F7; }"
-            "QComboBox::down-arrow { width: 10px; height: 10px; image: none; "
-            "border-left: 4px solid transparent; border-right: 4px solid transparent; "
-            "border-top: 5px solid #86868B; }"
-            "QComboBox QAbstractItemView { border: 1px solid #E5E5EA; "
-            "background: white; selection-background-color: #E8F0FE; "
-            "selection-color: #1D1D1F; padding: 4px; font-size: 14px; }"
-            "QComboBox QAbstractItemView::item { min-height: 32px; padding: 6px 10px; }"
-        )
+        self._hotkey_combo: QComboBox = QComboBox()
+        self._hotkey_combo.setStyleSheet(theme.combo_style())
         # 填充预设
         current_display: str = pynput_to_display(config.screenshot_hotkey)
         for pynput_fmt, display_fmt in HOTKEY_PRESETS:
@@ -166,39 +139,91 @@ class SettingsPanel(QWidget):
             self._hotkey_combo.addItem(current_display, config.screenshot_hotkey)
             self._hotkey_combo.setCurrentIndex(self._hotkey_combo.count() - 1)
 
-        hotkey_row.addWidget(hotkey_label)
+        hotkey_row.addWidget(self._hotkey_label)
         hotkey_row.addWidget(self._hotkey_combo, stretch=1)
         layout.addLayout(hotkey_row)
 
         # Wayland 提示（仅 Linux）
+        self._wayland_note: QLabel | None = None
         if sys.platform.startswith("linux"):
-            wayland_note = QLabel(
+            self._wayland_note = QLabel(
                 "提示: Wayland 桌面环境下全局快捷键可能不可用，建议使用 X11"
             )
-            wayland_note.setStyleSheet(
-                "font-size: 11px; color: #AEAEB2; border: none; background: transparent;"
+            self._wayland_note.setStyleSheet(
+                f"font-size: 11px; color: {theme.TEXT_TERTIARY}; border: none; background: transparent;"
             )
-            wayland_note.setWordWrap(True)
-            layout.addWidget(wayland_note)
+            self._wayland_note.setWordWrap(True)
+            layout.addWidget(self._wayland_note)
 
         layout.addStretch()
 
         # 保存按钮
-        save_btn = QPushButton("保存设置")
-        save_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        save_btn.setFixedWidth(160)
-        save_btn.setStyleSheet(
-            "QPushButton { background: #007AFF; color: white; border: none; "
-            "border-radius: 10px; padding: 12px 24px; font-size: 15px; font-weight: 600; }"
-            "QPushButton:hover { background: #0062CC; }"
-            "QPushButton:pressed { background: #004999; }"
-        )
-        save_btn.clicked.connect(self._save)
+        self._save_btn: QPushButton = QPushButton("保存设置")
+        self._save_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._save_btn.setFixedWidth(160)
+        self._save_btn.setStyleSheet(theme.button_primary_style())
+        self._save_btn.clicked.connect(self._save)
 
-        btn_row = QHBoxLayout()
+        btn_row: QHBoxLayout = QHBoxLayout()
         btn_row.addStretch()
-        btn_row.addWidget(save_btn)
+        btn_row.addWidget(self._save_btn)
         layout.addLayout(btn_row)
+
+    def _reapply_styles(self) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            当应用切换深浅色主题时，设置面板中所有控件的颜色样式需要同步更新，
+            否则会出现颜色不匹配的视觉问题。
+
+        Code Logic（这个函数做什么）:
+            重新为所有保存的实例变量控件调用 theme 模块的样式函数或常量，
+            生成新的 QSS 字符串并设置到对应控件上。
+        """
+        # 标题
+        self._title.setStyleSheet(
+            f"font-size: 22px; font-weight: 700; color: {theme.TEXT_PRIMARY}; "
+            "border: none; background: transparent;"
+        )
+
+        # 分区标题
+        section_style: str = (
+            f"font-size: 13px; font-weight: 600; color: {theme.TEXT_SECONDARY}; "
+            "text-transform: uppercase; border: none; background: transparent;"
+        )
+        self._section1.setStyleSheet(section_style)
+        self._section2.setStyleSheet(section_style)
+
+        # 标签
+        label_style: str = (
+            f"font-size: 14px; color: {theme.TEXT_PRIMARY}; "
+            "border: none; background: transparent;"
+        )
+        self._name_label.setStyleSheet(label_style)
+        self._dir_label.setStyleSheet(label_style)
+
+        # 输入框
+        input_ss: str = theme.input_style()
+        self._name_input.setStyleSheet(input_ss)
+        self._dir_input.setStyleSheet(input_ss)
+
+        # 浏览按钮
+        self._browse_btn.setStyleSheet(theme.button_secondary_style())
+
+        # 快捷键标签
+        self._hotkey_label.setStyleSheet(label_style)
+
+        # 快捷键下拉框
+        self._hotkey_combo.setStyleSheet(theme.combo_style())
+
+        # Wayland 提示
+        if self._wayland_note is not None:
+            self._wayland_note.setStyleSheet(
+                f"font-size: 11px; color: {theme.TEXT_TERTIARY}; "
+                "border: none; background: transparent;"
+            )
+
+        # 保存按钮
+        self._save_btn.setStyleSheet(theme.button_primary_style())
 
     def _browse_dir(self) -> None:
         """

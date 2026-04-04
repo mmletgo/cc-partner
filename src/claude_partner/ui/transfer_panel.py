@@ -65,10 +65,10 @@ _STATUS_DISPLAY: dict[TransferStatus, tuple[str, str]] = {
 # 传输状态到卡片背景色的映射（Apple 柔和色系）
 _STATUS_BG: dict[TransferStatus, str] = {
     TransferStatus.PENDING: theme.BG_PRIMARY,
-    TransferStatus.TRANSFERRING: "#E8F0FE",
-    TransferStatus.COMPLETED: "#E6F4EA",
-    TransferStatus.FAILED: "#FDE7E7",
-    TransferStatus.CANCELLED: "#FEF7E0",
+    TransferStatus.TRANSFERRING: theme.STATUS_BG_TRANSFERRING,
+    TransferStatus.COMPLETED: theme.STATUS_BG_COMPLETED,
+    TransferStatus.FAILED: theme.STATUS_BG_FAILED,
+    TransferStatus.CANCELLED: theme.STATUS_BG_CANCELLED,
 }
 
 
@@ -174,7 +174,7 @@ class TransferItemWidget(QFrame):
         bottom_layout.addStretch()
 
         status_text, status_color = _STATUS_DISPLAY.get(
-            task.status, ("未知", "#757575")
+            task.status, ("未知", theme.TEXT_TERTIARY)
         )
         self._status_label: QLabel = QLabel(status_text)
         self._status_label.setStyleSheet(
@@ -360,11 +360,11 @@ class TransferPanel(QWidget):
         top_bar: QHBoxLayout = QHBoxLayout()
         top_bar.setSpacing(12)
 
-        device_label: QLabel = QLabel("目标设备:")
-        device_label.setStyleSheet(
+        self._device_label: QLabel = QLabel("目标设备:")
+        self._device_label.setStyleSheet(
             f"font-size: {theme.FONT_SIZE_BODY}; color: {theme.TEXT_PRIMARY}; font-weight: 600;"
         )
-        top_bar.addWidget(device_label)
+        top_bar.addWidget(self._device_label)
 
         self._device_combo: QComboBox = QComboBox()
         self._device_combo.setMinimumWidth(200)
@@ -404,6 +404,25 @@ class TransferPanel(QWidget):
 
         self._scroll_area.setWidget(self._list_container)
         main_layout.addWidget(self._scroll_area)
+
+    def _reapply_styles(self) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            主题切换时，面板内的控件样式需要重新应用以匹配新的配色方案，
+            确保用户在浅色/深色模式之间切换时 UI 表现一致。
+
+        Code Logic（这个函数做什么）:
+            重新设置 device_label、device_combo、send_btn 和 empty_label 的样式，
+            使用 theme 模块的最新颜色值生成 QSS。
+        """
+        self._device_label.setStyleSheet(
+            f"font-size: {theme.FONT_SIZE_BODY}; color: {theme.TEXT_PRIMARY}; font-weight: 600;"
+        )
+        self._device_combo.setStyleSheet(theme.combo_style())
+        self._send_btn.setStyleSheet(theme.button_primary_style())
+        self._empty_label.setStyleSheet(
+            f"font-size: {theme.FONT_SIZE_BODY}; color: {theme.TEXT_TERTIARY}; padding: 40px;"
+        )
 
     def _connect_signals(self) -> None:
         """

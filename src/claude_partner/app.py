@@ -530,7 +530,12 @@ def main() -> None:
     # 创建 Qt 应用
     qt_app = QApplication(sys.argv)
     qt_app.setQuitOnLastWindowClosed(False)  # 关闭窗口不退出，由托盘管理
-    qt_app.setStyleSheet(theme.get_global_stylesheet())  # Apple 风格全局样式
+
+    # 检测系统深色模式并应用主题
+    initial_dark: bool = (
+        qt_app.styleHints().colorScheme() == Qt.ColorScheme.Dark
+    )
+    qt_app.setStyleSheet(theme.apply_theme(initial_dark))
 
     # 使用 qasync 事件循环
     loop = qasync.QEventLoop(qt_app)
@@ -541,6 +546,23 @@ def main() -> None:
     async def _run() -> None:
         """启动应用并等待退出。"""
         await app.start()
+
+        # 系统主题切换时重新应用样式
+        def _on_color_scheme_changed(scheme: Qt.ColorScheme) -> None:
+            """
+            Business Logic（为什么需要这个函数）:
+                用户切换系统深浅色主题时，应用需要实时跟随变化。
+
+            Code Logic（这个函数做什么）:
+                根据 colorScheme 值切换 theme 调色板，重新应用全局样式表，
+                并刷新主窗口中所有面板的样式。
+            """
+            dark: bool = scheme == Qt.ColorScheme.Dark
+            qt_app.setStyleSheet(theme.apply_theme(dark))
+            if app._main_window is not None:
+                app._main_window._refresh_theme()
+
+        qt_app.styleHints().colorSchemeChanged.connect(_on_color_scheme_changed)
 
     async def _cleanup() -> None:
         """退出时清理资源。"""

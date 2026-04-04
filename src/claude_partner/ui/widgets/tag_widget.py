@@ -208,7 +208,8 @@ class TagLabel(QWidget):
         super().__init__(parent)
         self._tag: str = tag
 
-        bg_color, text_color = theme.TAG_COLORS[TagLabel._color_index % len(theme.TAG_COLORS)]
+        colors: list[tuple[str, str]] = theme.current_tag_colors()
+        bg_color, text_color = colors[TagLabel._color_index % len(colors)]
         TagLabel._color_index += 1
 
         layout: QHBoxLayout = QHBoxLayout(self)
