@@ -43,8 +43,8 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("Claude Partner")
         self.setWindowIcon(theme.create_app_icon(128))
-        self.resize(900, 600)
-        self.setMinimumSize(QSize(600, 400))
+        self.resize(900, 700)
+        self.setMinimumSize(QSize(600, 500))
 
         # Tab 布局
         self._tab_widget: QTabWidget = QTabWidget()

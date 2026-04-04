@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-partner"
-version = "0.3.0"
+version = "0.3.1"
 description = "跨平台局域网协作工具：文件传输、区域截图、Prompt管理与同步"
 requires-python = ">=3.11"
 dependencies = [
