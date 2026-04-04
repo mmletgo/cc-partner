@@ -8,6 +8,7 @@
 3. **Prompt 管理** - 记录/复制/打标签/按标签筛选的文本管理
 4. **P2P 自动互联** - 每个实例既是服务端也是客户端，局域网内 mDNS 自动发现
 5. **Prompt 同步** - 基于向量时钟的跨设备 Prompt 数据同步
+6. **自动更新** - 从 GitHub Releases 自动检测、下载和安装新版本
 
 ## 技术栈
 
@@ -29,6 +30,7 @@ src/claude_partner/
 ├── sync/           → Prompt 同步引擎，有独立 CLAUDE.md
 ├── transfer/       → 文件传输模块，有独立 CLAUDE.md
 ├── screenshot/     → 截图功能，有独立 CLAUDE.md
+├── updater/        → 自动更新模块（GitHub Releases 版本检查/下载/安装），有独立 CLAUDE.md
 └── ui/             → PyQt6 界面，有独立 CLAUDE.md
 ```
 
@@ -36,7 +38,7 @@ src/claude_partner/
 
 ### 应用入口 (app.py)
 - 使用 qasync 将 asyncio 事件循环集成到 Qt 事件循环
-- 启动顺序：数据库初始化 → HTTP 服务端 → mDNS 注册 → 同步引擎 → UI
+- 启动顺序：数据库初始化 → HTTP 服务端 → mDNS 注册 → 同步引擎 → UI → 自动更新检查
 - 关闭时反向清理所有资源
 
 ### 配置管理 (config.py)
@@ -62,3 +64,17 @@ src/claude_partner/
 - 分块 HTTP 传输（1MB/块）
 - 流程：init(元数据) → chunk(分块) → verify(SHA256校验)
 - 支持断点续传：接收端告知已接收 offset
+
+### 自动更新
+- 启动后延迟 3 秒首次检查，之后每 4 小时定时检查
+- 托盘菜单"检查更新..."支持手动触发
+- GitHub Releases API 获取最新版本，语义化版本比较
+- 自动匹配当前平台下载资源（macOS DMG / Windows EXE / Linux tar.gz）
+- 流式下载到 `~/.claude-partner/updates/`，支持进度显示和取消
+- 三平台安装策略：macOS 挂载 DMG 替换 .app / Windows CMD 脚本替换 EXE / Linux shell 脚本替换可执行文件
+- 版本号定义在 `src/claude_partner/__init__.py` 的 `__version__`
+
+### 发版流程
+- 更新 `src/claude_partner/__init__.py` 和 `pyproject.toml` 中的版本号
+- 推送 `v*` 格式的 tag（如 `git tag v0.2.0 && git push origin v0.2.0`）
+- GitHub Actions 自动构建三平台（macOS arm64/x86_64、Windows、Linux）并创建 Release
