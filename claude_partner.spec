@@ -69,6 +69,11 @@ a = Analysis(
         'claude_partner.ui.widgets.prompt_card',
         'claude_partner.ui.theme',
         'claude_partner.ui.settings_panel',
+        'claude_partner.ui.update_dialog',
+        'claude_partner.updater',
+        'claude_partner.updater.checker',
+        'claude_partner.updater.downloader',
+        'claude_partner.updater.installer',
         'claude_partner.hotkey',
         'claude_partner.hotkey.listener',
         # 第三方库隐藏导入

@@ -29,6 +29,7 @@ class SystemTray(QSystemTrayIcon):
 
     show_window_requested: pyqtSignal = pyqtSignal()
     screenshot_requested: pyqtSignal = pyqtSignal()
+    check_update_requested: pyqtSignal = pyqtSignal()
     quit_requested: pyqtSignal = pyqtSignal()
 
     def __init__(self, parent: QApplication | None = None) -> None:
@@ -128,6 +129,10 @@ class SystemTray(QSystemTrayIcon):
         screenshot_action: QAction = QAction("截图", menu)
         screenshot_action.triggered.connect(self.screenshot_requested.emit)
         menu.addAction(screenshot_action)
+
+        check_update_action: QAction = QAction("检查更新...", menu)
+        check_update_action.triggered.connect(self.check_update_requested.emit)
+        menu.addAction(check_update_action)
 
         menu.addSeparator()
 

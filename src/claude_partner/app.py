@@ -31,8 +31,13 @@ from claude_partner.ui.transfer_panel import TransferPanel
 from claude_partner.ui.device_panel import DevicePanel
 from claude_partner.ui.tray import SystemTray
 from claude_partner.ui.settings_panel import SettingsPanel
+from claude_partner.ui.update_dialog import UpdateDialog
 from claude_partner.ui import theme
 from claude_partner.hotkey.listener import GlobalHotkeyManager
+from claude_partner import __version__
+from claude_partner.updater.checker import UpdateChecker, UpdateInfo, UPDATE_CHECK_INTERVAL
+from claude_partner.updater.downloader import UpdateDownloader
+from claude_partner.updater.installer import UpdateInstaller
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -75,6 +80,8 @@ class Application:
         self._system_tray: SystemTray | None = None
         self._hotkey_mgr: GlobalHotkeyManager | None = None
         self._settings_panel: SettingsPanel | None = None
+        self._update_checker: UpdateChecker | None = None
+        self._update_check_task: asyncio.Task | None = None  # type: ignore[type-arg]
 
     async def start(self) -> None:
         """
@@ -184,6 +191,32 @@ class Application:
         self._main_window.show()
         asyncio.ensure_future(prompt_panel.refresh())
 
+        # 13. 自动更新检查
+        self._update_checker = UpdateChecker()
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.update_not_available.connect(
+            lambda: logger.info("更新检查完成，已是最新版本")
+        )
+        self._update_checker.check_failed.connect(
+            lambda err: logger.warning("更新检查失败: %s", err)
+        )
+
+        # 延迟 3 秒后执行首次检查
+        asyncio.get_event_loop().call_later(
+            3.0,
+            lambda: asyncio.ensure_future(
+                self._update_checker.check_for_update(__version__)
+            ),
+        )
+
+        # 定时检查（每 4 小时）
+        async def _periodic_update_check() -> None:
+            while True:
+                await asyncio.sleep(UPDATE_CHECK_INTERVAL)
+                if self._update_checker is not None:
+                    await self._update_checker.check_for_update(__version__)
+        self._update_check_task = asyncio.create_task(_periodic_update_check())
+
         logger.info("应用启动完成")
 
     def _connect_signals(
@@ -252,6 +285,14 @@ class Application:
             self._screenshot_mgr.take_screenshot
         )
         self._system_tray.quit_requested.connect(self._quit)
+
+        # 自动更新检查
+        self._system_tray.check_update_requested.connect(
+            lambda: asyncio.ensure_future(
+                self._update_checker.check_for_update(__version__)
+            )
+            if self._update_checker is not None else None
+        )
 
         # 全局快捷键 → 截图
         if self._hotkey_mgr is not None:
@@ -368,6 +409,42 @@ class Application:
                     "screenshot", config.screenshot_hotkey
                 )
 
+    def _on_update_available(self, update_info: object) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            发现新版本时需要弹出更新对话框，让用户了解新版本信息并选择是否更新。
+
+        Code Logic（这个函数做什么）:
+            创建 UpdateDialog，连接下载器信号，显示对话框。
+            用户点击"立即更新"时触发下载，下载完成后可点击"安装并重启"。
+        """
+        if not isinstance(update_info, UpdateInfo):
+            return
+        if self._main_window is None:
+            return
+
+        dialog = UpdateDialog(update_info, self._main_window)
+        downloader = UpdateDownloader()
+
+        def _on_download_requested() -> None:
+            dialog.show_download_state()
+            downloader.download_progress.connect(dialog.set_download_progress)
+            downloader.download_completed.connect(dialog.set_download_completed)
+            downloader.download_failed.connect(dialog.set_download_failed)
+            asyncio.ensure_future(
+                downloader.download(
+                    dialog.get_download_url(),
+                    dialog.get_download_filename(),
+                )
+            )
+
+        def _on_install_requested(file_path: str) -> None:
+            UpdateInstaller.install_and_restart(file_path)
+
+        dialog.download_requested.connect(_on_download_requested)
+        dialog.install_requested.connect(_on_install_requested)
+        dialog.show()
+
     def _show_main_window(self) -> None:
         """
         Business Logic（为什么需要这个函数）:
@@ -421,6 +498,11 @@ class Application:
 
         if self._database is not None:
             await self._database.close()
+
+        if self._update_check_task is not None:
+            self._update_check_task.cancel()
+        if self._update_checker is not None:
+            await self._update_checker.close()
 
         logger.info("应用已关闭")
 
