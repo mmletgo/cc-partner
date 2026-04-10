@@ -27,7 +27,7 @@ class DeviceCard(QFrame):
 
     Code Logic（这个类做什么）:
         使用 QFrame 容器，水平布局排列：设备名称/地址标签和在线状态指示灯。
-        样式与 PromptCard 一致的圆角边框和 hover 效果。
+        样式与 PromptCard 一致的扁平圆角边框和 hover 效果。
     """
 
     def __init__(self, device: Device, parent: QWidget | None = None) -> None:
@@ -53,7 +53,7 @@ class DeviceCard(QFrame):
             }}
             """
         )
-        theme.apply_glass_shadow(self)
+        theme.apply_shadow(self)
 
         main_layout: QHBoxLayout = QHBoxLayout(self)
         main_layout.setContentsMargins(16, 12, 16, 12)

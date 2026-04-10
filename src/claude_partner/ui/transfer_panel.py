@@ -95,7 +95,7 @@ class TransferItemWidget(QFrame):
 
         Code Logic（这个函数做什么）:
             保存 transfer_id 和 task 引用，创建方向图标、文件名标签、
-            进度条、大小/状态标签和取消按钮，设置圆角边框样式。
+            进度条、大小/状态标签和取消按钮，设置扁平圆角边框样式和柔和阴影。
         """
         super().__init__(parent)
         self._transfer_id: str = task.id
@@ -104,7 +104,7 @@ class TransferItemWidget(QFrame):
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self._apply_status_style(task.status)
-        theme.apply_glass_shadow(self)
+        theme.apply_shadow(self)
 
         main_layout: QVBoxLayout = QVBoxLayout(self)
         main_layout.setContentsMargins(14, 12, 14, 12)

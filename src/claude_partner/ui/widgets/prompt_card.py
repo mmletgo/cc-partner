@@ -15,7 +15,6 @@ from PyQt6.QtGui import QCursor
 
 from claude_partner.models.prompt import Prompt
 from claude_partner.ui import theme
-from claude_partner.ui.theme import apply_glass_shadow
 
 # 卡片固定宽度，用于网格布局中保持卡片尺寸一致
 CARD_FIXED_WIDTH: int = 340
@@ -31,7 +30,8 @@ class PromptCard(QFrame):
 
     Code Logic（这个类做什么）:
         使用 QFrame 作为容器，垂直布局依次排列：标题、内容预览、
-        标签行、操作按钮行。通过 QSS 设置圆角边框和 hover 高亮效果。
+        标签行、操作按钮行。采用 macOS 原生扁平风格，通过 QSS 设置
+        实心背景、圆角边框和 hover 高亮效果，配合轻柔阴影。
         设置固定宽度以配合 FlowLayout 网格布局。
     """
 
@@ -49,7 +49,8 @@ class PromptCard(QFrame):
 
         Code Logic（这个函数做什么）:
             保存 prompt_id，设置固定宽度（CARD_FIXED_WIDTH），创建标题标签、
-            内容预览标签、标签展示行、更新时间标签和操作按钮行，设置 QSS 样式。
+            内容预览标签、标签展示行、更新时间标签和操作按钮行，设置扁平风格 QSS 样式
+            并应用轻柔阴影。
         """
         super().__init__(parent)
         self._prompt_id: str = prompt.id
@@ -146,8 +147,8 @@ class PromptCard(QFrame):
 
         main_layout.addLayout(btn_layout)
 
-        # 添加玻璃浮动阴影效果
-        apply_glass_shadow(self)
+        # 添加轻柔阴影效果
+        theme.apply_shadow(self)
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         """
