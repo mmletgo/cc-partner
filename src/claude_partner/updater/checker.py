@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """版本检查模块：从 GitHub Releases API 检测新版本。"""
 
+import asyncio
+
 import aiohttp
 import logging
 import platform
@@ -184,7 +186,7 @@ class UpdateChecker(QObject):
             self._session = aiohttp.ClientSession(timeout=timeout)
         return self._session
 
-    async def check_for_update(self, current_version: str) -> None:
+    async def check_for_update(self, current_version: str, _retry: int = 0) -> None:
         """
         Business Logic（为什么需要这个函数）:
             应用启动或用户手动触发时，检查是否有新版本可用，
@@ -196,6 +198,7 @@ class UpdateChecker(QObject):
             2. 比较版本号，如果无新版本则直接返回
             3. 有新版本时再调用 GitHub API 获取 release 详情（下载链接等）
             4. emit update_available / update_not_available / check_failed
+            网络失败时自动重试一次（间隔 5 秒）。
         """
         try:
             session: aiohttp.ClientSession = await self._get_session()
@@ -296,13 +299,14 @@ class UpdateChecker(QObject):
             logger.info("发现新版本: %s (%s)", tag_name, download_filename)
             self.update_available.emit(update_info)
 
-        except aiohttp.ClientError as e:
-            error_msg: str = f"网络请求失败: {e}"
-            logger.error("版本检查异常: %s", e, exc_info=True)
-            self.check_failed.emit(error_msg)
-        except Exception as e:
-            error_msg: str = f"版本检查失败: {e}"
-            logger.error("版本检查异常: %s", e, exc_info=True)
+        except (aiohttp.ClientError, Exception) as e:
+            if _retry < 1:
+                logger.warning("版本检查失败，5 秒后重试: %s", e)
+                await asyncio.sleep(5)
+                await self.check_for_update(current_version, _retry=_retry + 1)
+                return
+            error_msg: str = f"网络请求失败: {e}" if isinstance(e, aiohttp.ClientError) else f"版本检查失败: {e}"
+            logger.error("版本检查异常（已重试）: %s", e, exc_info=True)
             self.check_failed.emit(error_msg)
 
     @staticmethod
