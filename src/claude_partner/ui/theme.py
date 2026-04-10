@@ -17,7 +17,7 @@ import math
 
 from PyQt6.QtCore import QPointF, QRect, QRectF, Qt
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QGraphicsDropShadowEffect, QWidget
+from PyQt6.QtWidgets import QGraphicsDropShadowEffect, QProxyStyle, QStyle, QStyleOption, QWidget
 
 # ── 浅色调色板（默认）────────────────────────────────────────────────────
 
@@ -222,6 +222,7 @@ def get_global_stylesheet() -> str:
             color: {TEXT_PRIMARY};
             background: {WINDOW_BG};
         }}
+
 
         /* ── 主窗口纯色背景 ── */
         QMainWindow {{
@@ -690,6 +691,52 @@ def label_caption_style() -> str:
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────────
+
+
+class _NoFocusRectStyle(QProxyStyle):
+    """
+    全局禁用焦点虚线框的代理样式。
+
+    Business Logic（为什么需要这个类）:
+        macOS Cocoa 原生渲染器会在获得焦点的控件（按钮、Tab 等）上绘制虚线焦点框，
+        这与扁平 UI 风格不协调。QSS 的 outline:none 对原生焦点框无效，
+        需要通过 QProxyStyle 拦截绘制调用来全局禁用。
+
+    Code Logic（这个类做什么）:
+        继承 QProxyStyle，重写 drawPrimitive 方法，当绘制元素为 PE_FrameFocusRect 时
+        直接跳过，其余元素正常绘制。
+    """
+
+    def drawPrimitive(
+        self,
+        element: QStyle.PrimitiveElement,
+        option: QStyleOption | None,
+        painter: QPainter | None,
+        widget: QWidget | None = None,
+    ) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            拦截所有原始图元绘制请求，跳过焦点框的绘制。
+
+        Code Logic（这个函数做什么）:
+            如果 element 是 PE_FrameFocusRect 则直接返回不绘制，
+            否则调用父类正常绘制。
+        """
+        if element == QStyle.PrimitiveElement.PE_FrameFocusRect:
+            return
+        super().drawPrimitive(element, option, painter, widget)
+
+
+def create_no_focus_style() -> QProxyStyle:
+    """
+    Business Logic（为什么需要这个函数）:
+        应用启动时需要全局禁用焦点虚线框，提供工厂函数供 app.py 调用
+        QApplication.setStyle()。
+
+    Code Logic（这个函数做什么）:
+        返回一个 _NoFocusRectStyle 实例，调用方通过 app.setStyle() 应用。
+    """
+    return _NoFocusRectStyle()
 
 
 def create_tab_icon(name: str, selected: bool = False) -> QIcon:

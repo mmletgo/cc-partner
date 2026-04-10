@@ -58,6 +58,7 @@ class MainWindow(QMainWindow):
         self._tab_widget: QTabWidget = QTabWidget()
         self._tab_widget.setStyleSheet(theme.tab_bar_style())
         self._tab_widget.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
+        self._tab_widget.tabBar().setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._tab_widget.setIconSize(QSize(24, 24))
         bg_layout.addWidget(self._tab_widget)
 

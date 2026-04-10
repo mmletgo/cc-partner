@@ -12,7 +12,7 @@
 
 ## 技术栈
 
-- GUI: PyQt6
+- GUI: PyQt6（macOS 原生偏好设置面板扁平风格，实心纯色背景 + 图标标签栏 + 轻柔阴影）
 - 异步网络: aiohttp + qasync (asyncio-Qt桥接)
 - 设备发现: zeroconf (mDNS)
 - 本地存储: SQLite + aiosqlite

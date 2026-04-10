@@ -748,6 +748,7 @@ def main() -> None:
     # 创建 Qt 应用
     qt_app = QApplication(sys.argv)
     qt_app.setQuitOnLastWindowClosed(False)  # 关闭窗口不退出，由托盘管理
+    qt_app.setStyle(theme.create_no_focus_style())  # 全局禁用焦点虚线框
 
     # 检测系统深色模式并应用主题
     initial_dark: bool = (

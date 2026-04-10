@@ -16,7 +16,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QDialog,
-    QDialogButtonBox,
     QTextEdit,
     QComboBox,
     QLabel,
@@ -72,15 +71,16 @@ class PromptEditDialog(QDialog):
         self.setWindowTitle("编辑 Prompt" if prompt else "新建 Prompt")
         self.setMinimumSize(500, 450)
         self.resize(550, 500)
+        self.setStyleSheet(f"QDialog {{ background: {theme.BG_PRIMARY}; }}")
 
         layout: QVBoxLayout = QVBoxLayout(self)
         layout.setSpacing(12)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setContentsMargins(24, 24, 24, 24)
 
         # 标题
         title_label: QLabel = QLabel("标题")
         title_label.setStyleSheet(
-            f"font-size: {theme.FONT_SIZE_BODY}; font-weight: bold; color: {theme.TEXT_PRIMARY}; border: none; background: transparent;"
+            f"font-size: {theme.FONT_SIZE_BODY}; font-weight: 600; color: {theme.TEXT_PRIMARY}; background: transparent;"
         )
         layout.addWidget(title_label)
 
@@ -92,7 +92,7 @@ class PromptEditDialog(QDialog):
         # 内容
         content_label: QLabel = QLabel("内容")
         content_label.setStyleSheet(
-            f"font-size: {theme.FONT_SIZE_BODY}; font-weight: bold; color: {theme.TEXT_PRIMARY}; border: none; background: transparent;"
+            f"font-size: {theme.FONT_SIZE_BODY}; font-weight: 600; color: {theme.TEXT_PRIMARY}; background: transparent;"
         )
         layout.addWidget(content_label)
 
@@ -104,7 +104,7 @@ class PromptEditDialog(QDialog):
         # 标签
         tags_label: QLabel = QLabel("标签")
         tags_label.setStyleSheet(
-            f"font-size: {theme.FONT_SIZE_BODY}; font-weight: bold; color: {theme.TEXT_PRIMARY}; border: none; background: transparent;"
+            f"font-size: {theme.FONT_SIZE_BODY}; font-weight: 600; color: {theme.TEXT_PRIMARY}; background: transparent;"
         )
         layout.addWidget(tags_label)
 
@@ -112,14 +112,22 @@ class PromptEditDialog(QDialog):
         layout.addWidget(self._tag_widget)
 
         # 按钮
-        btn_box: QDialogButtonBox = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        btn_box.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
-        btn_box.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
+        btn_layout: QHBoxLayout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        cancel_btn: QPushButton = QPushButton("取消")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.setStyleSheet(theme.button_secondary_style())
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        ok_btn: QPushButton = QPushButton("确定")
+        ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok_btn.setStyleSheet(theme.button_primary_style())
+        ok_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(ok_btn)
+
+        layout.addLayout(btn_layout)
 
         # 如果是编辑模式，填充数据
         if prompt is not None:
