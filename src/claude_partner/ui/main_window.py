@@ -52,6 +52,9 @@ class MainWindow(QMainWindow):
         self._tab_widget.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
         self.setCentralWidget(self._tab_widget)
 
+        # 玻璃设计：主窗口使用渐变底色
+        self.setStyleSheet(theme.window_bg_style())
+
         # Tab 1: Prompt 管理面板
         self._prompt_panel: PromptPanel = prompt_panel
         self._tab_widget.addTab(self._prompt_panel, "Prompt 管理")
@@ -83,6 +86,7 @@ class MainWindow(QMainWindow):
             对于 settings_panel，通过 hasattr 检查是否支持刷新。
         """
         self._tab_widget.setStyleSheet(theme.tab_bar_style())
+        self.setStyleSheet(theme.window_bg_style())
 
         # 刷新各面板样式
         self._prompt_panel._reapply_styles()

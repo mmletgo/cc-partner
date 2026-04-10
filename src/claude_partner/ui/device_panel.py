@@ -53,7 +53,7 @@ class DeviceCard(QFrame):
             }}
             """
         )
-        theme.apply_shadow(self)
+        theme.apply_glass_shadow(self)
 
         main_layout: QHBoxLayout = QHBoxLayout(self)
         main_layout.setContentsMargins(16, 12, 16, 12)

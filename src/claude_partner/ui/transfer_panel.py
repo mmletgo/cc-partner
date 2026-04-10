@@ -104,7 +104,7 @@ class TransferItemWidget(QFrame):
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self._apply_status_style(task.status)
-        theme.apply_shadow(self)
+        theme.apply_glass_shadow(self)
 
         main_layout: QVBoxLayout = QVBoxLayout(self)
         main_layout.setContentsMargins(14, 12, 14, 12)

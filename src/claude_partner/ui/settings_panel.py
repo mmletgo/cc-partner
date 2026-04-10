@@ -180,7 +180,7 @@ class SettingsPanel(QWidget):
         self._about_separator: QFrame = QFrame()
         self._about_separator.setFrameShape(QFrame.Shape.HLine)
         self._about_separator.setStyleSheet(
-            f"background: {theme.BORDER}; border: none; max-height: 1px;"
+            f"background: {theme.BORDER_SUBTLE}; border: none; max-height: 1px;"
         )
         layout.addWidget(self._about_separator)
 
@@ -294,7 +294,7 @@ class SettingsPanel(QWidget):
 
         # 关于区域分隔线
         self._about_separator.setStyleSheet(
-            f"background: {theme.BORDER}; border: none; max-height: 1px;"
+            f"background: {theme.BORDER_SUBTLE}; border: none; max-height: 1px;"
         )
 
         # "关于" 标题

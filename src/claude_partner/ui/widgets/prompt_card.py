@@ -15,7 +15,7 @@ from PyQt6.QtGui import QCursor
 
 from claude_partner.models.prompt import Prompt
 from claude_partner.ui import theme
-from claude_partner.ui.theme import apply_shadow
+from claude_partner.ui.theme import apply_glass_shadow
 
 # 卡片固定宽度，用于网格布局中保持卡片尺寸一致
 CARD_FIXED_WIDTH: int = 340
@@ -146,8 +146,8 @@ class PromptCard(QFrame):
 
         main_layout.addLayout(btn_layout)
 
-        # 添加浮动阴影效果
-        apply_shadow(self)
+        # 添加玻璃浮动阴影效果
+        apply_glass_shadow(self)
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         """
