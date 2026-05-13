@@ -4,11 +4,14 @@
 
 Business Logic:
     用户需要了解新版本的更新内容，并完成下载和安装操作。
-    该对话框提供完整的版本更新交互流程：查看更新 → 下载 → 安装重启。
+    该对话框参考 macOS 应用（如 Mos）的更新提示风格：
+    顶部图标 + 标题 + 版本对比说明，中部 Markdown 渲染的更新说明卡片，
+    底部左侧"跳过这个版本"、右侧"安装更新"。
 
 Code Logic:
     基于 QDialog 实现状态机驱动的更新对话框，状态包括
     IDLE / DOWNLOADING / READY_TO_INSTALL / CANCELLED / FAILED。
+    更新说明使用 QTextEdit.setMarkdown() 渲染。
     通过信号通知外部控制器执行实际的下载和安装操作。
 """
 
@@ -17,7 +20,7 @@ from __future__ import annotations
 from enum import Enum, auto
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QCursor
+from PyQt6.QtGui import QCursor, QPixmap
 from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -29,7 +32,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from claude_partner import __version__
 from claude_partner.ui import theme
+
+
+# 应用展示名称
+_APP_NAME: str = "Claude Partner"
 
 
 class _DialogState(Enum):
@@ -46,13 +54,15 @@ class UpdateDialog(QDialog):
     版本更新对话框，展示新版本信息并引导用户完成下载和安装。
 
     Business Logic（为什么需要这个类）:
-        当检测到新版本时，需要向用户展示版本号、更新内容和安装包大小，
-        并提供下载进度反馈和安装操作入口。
+        当检测到新版本时，需要向用户展示版本号对比、Markdown 格式的更新说明
+        和安装包大小，并提供下载进度反馈和安装操作入口。视觉风格参考 macOS
+        原生应用更新提示，营造熟悉的桌面体验。
 
     Code Logic（这个类做什么）:
         基于 QDialog 的状态机对话框，通过 _state 管理当前界面状态。
         状态转换：IDLE → DOWNLOADING → READY_TO_INSTALL，
         也可转入 CANCELLED 或 FAILED。外部通过信号驱动状态变化。
+        更新说明用 QTextEdit.setMarkdown() 渲染。
     """
 
     # 用户点击"立即更新"时发射
@@ -67,7 +77,8 @@ class UpdateDialog(QDialog):
 
         Code Logic（这个函数做什么）:
             接收 UpdateInfo 实例，初始化内部状态为 IDLE，
-            创建完整的对话框布局（标题、更新内容、文件大小、进度条、按钮），
+            创建参考 Mos 风格的更新提示布局（顶部图标+标题、
+            Markdown 渲染的更新说明卡片、底部跳过/安装按钮），
             连接按钮信号到对应的状态转换逻辑。
         """
         super().__init__(parent)
@@ -75,8 +86,8 @@ class UpdateDialog(QDialog):
         self._state: _DialogState = _DialogState.IDLE
         self._downloaded_file_path: str = ""
 
-        self.setWindowTitle("版本更新")
-        self.setMinimumWidth(420)
+        self.setWindowTitle("软件更新")
+        self.setMinimumWidth(560)
         self.setStyleSheet(theme.dialog_style())
 
         self._setup_ui()
@@ -84,74 +95,140 @@ class UpdateDialog(QDialog):
     def _setup_ui(self) -> None:
         """
         Business Logic（为什么需要这个函数）:
-            用户需要看到清晰的版本更新信息和操作按钮。
+            用户需要看到清晰的版本对比、更新说明和操作按钮。
 
         Code Logic（这个函数做什么）:
-            创建 QVBoxLayout 主布局（spacing=16, margins=24,24,24,24），
-            依次添加标题标签、更新内容区域（可选）、文件大小标签、
-            进度区域（初始隐藏）、按钮行。
+            构建三段式布局：
+            1. 顶部 header（应用图标 + 标题 + 版本对比说明）
+            2. 中部 Markdown 更新说明卡片（QTextEdit + setMarkdown）
+            3. 底部按钮行（跳过这个版本 / 安装更新）
+            进度条与状态文字位于底部按钮上方，初始隐藏。
         """
         layout: QVBoxLayout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setContentsMargins(24, 24, 24, 20)
         layout.setSpacing(16)
 
-        # 标题
-        self._title_label: QLabel = QLabel(
-            f"新版本 {self._update_info.version} 可用"
-        )
-        self._title_label.setStyleSheet(theme.label_title_style())
-        layout.addWidget(self._title_label)
+        # ── 顶部 header：图标 + 标题块 ──
+        layout.addLayout(self._build_header())
 
-        # Release Notes（如果有 body 内容）
+        # ── Markdown 更新说明卡片 ──
+        self._notes_edit: QTextEdit | None = None
         if self._update_info.body:
-            notes_title: QLabel = QLabel("更新内容：")
-            notes_title.setStyleSheet(theme.label_body_style())
-            layout.addWidget(notes_title)
+            self._notes_edit = self._build_notes_edit(self._update_info.body)
+            layout.addWidget(self._notes_edit, stretch=1)
 
-            self._notes_edit: QTextEdit = QTextEdit()
-            self._notes_edit.setReadOnly(True)
-            self._notes_edit.setMaximumHeight(120)
-            self._notes_edit.setPlainText(self._update_info.body)
-            self._notes_edit.setStyleSheet(theme.input_style())
-            layout.addWidget(self._notes_edit)
-
-        # 文件大小
-        size_mb: float = self._update_info.download_size / (1024 * 1024)
-        self._size_label: QLabel = QLabel(f"安装包大小: {size_mb:.1f} MB")
-        self._size_label.setStyleSheet(theme.label_caption_style())
-        layout.addWidget(self._size_label)
-
-        # 进度区域（初始隐藏）
+        # ── 进度区域（初始隐藏） ──
         self._progress_bar: QProgressBar = QProgressBar()
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
         self._progress_bar.setStyleSheet(theme.progress_bar_style())
         self._progress_bar.hide()
+        layout.addWidget(self._progress_bar)
 
         self._progress_label: QLabel = QLabel("")
         self._progress_label.setStyleSheet(theme.label_caption_style())
         self._progress_label.hide()
-
-        layout.addWidget(self._progress_bar)
         layout.addWidget(self._progress_label)
 
-        # 按钮行
-        btn_layout: QHBoxLayout = QHBoxLayout()
-        btn_layout.addStretch()
+        # ── 底部按钮行 ──
+        layout.addLayout(self._build_button_row())
 
-        self._secondary_btn: QPushButton = QPushButton("稍后再说")
+    def _build_header(self) -> QHBoxLayout:
+        """
+        Business Logic（为什么需要这个函数）:
+            顶部 header 是用户第一眼看到的区域，需要应用图标 +
+            "新版本的 X 已经发布" 标题 + 版本对比说明，
+            参考 macOS 原生更新提示的视觉层级。
+
+        Code Logic（这个函数做什么）:
+            构建水平布局：左侧应用图标（64x64），右侧两行文字
+            （加粗标题 + 普通说明文字，含新旧版本对比和安装包大小）。
+        """
+        header: QHBoxLayout = QHBoxLayout()
+        header.setSpacing(16)
+        header.setContentsMargins(0, 0, 0, 0)
+
+        # 左侧应用图标
+        icon_label: QLabel = QLabel()
+        icon_pixmap: QPixmap = theme.create_app_icon(64).pixmap(64, 64)
+        icon_label.setPixmap(icon_pixmap)
+        icon_label.setFixedSize(64, 64)
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        header.addWidget(icon_label, alignment=Qt.AlignmentFlag.AlignTop)
+
+        # 右侧标题块
+        text_col: QVBoxLayout = QVBoxLayout()
+        text_col.setSpacing(6)
+        text_col.setContentsMargins(0, 2, 0, 0)
+
+        self._title_label: QLabel = QLabel(f"新版本的 {_APP_NAME} 已经发布")
+        self._title_label.setStyleSheet(self._title_style())
+        text_col.addWidget(self._title_label)
+
+        size_mb: float = self._update_info.download_size / (1024 * 1024)
+        size_text: str = (
+            f"（安装包 {size_mb:.1f} MB）" if self._update_info.download_size > 0 else ""
+        )
+        self._subtitle_label: QLabel = QLabel(
+            f"{_APP_NAME} {self._update_info.version} 可供下载，"
+            f"您现在的版本是 {__version__}。要现在下载吗？{size_text}"
+        )
+        self._subtitle_label.setStyleSheet(self._subtitle_style())
+        self._subtitle_label.setWordWrap(True)
+        text_col.addWidget(self._subtitle_label)
+        text_col.addStretch()
+
+        header.addLayout(text_col, stretch=1)
+        return header
+
+    def _build_notes_edit(self, markdown_body: str) -> QTextEdit:
+        """
+        Business Logic（为什么需要这个函数）:
+            GitHub Release 的 body 通常是 Markdown 格式（含标题、列表、
+            嵌套列表等），需要按原始格式渲染以匹配仓库发布说明的视觉效果。
+
+        Code Logic（这个函数做什么）:
+            创建只读 QTextEdit，调用 setMarkdown() 渲染 GitHub 风格的
+            更新说明，并应用卡片化的边框/圆角样式。
+        """
+        edit: QTextEdit = QTextEdit()
+        edit.setReadOnly(True)
+        edit.setMarkdown(markdown_body)
+        edit.setMinimumHeight(200)
+        edit.setStyleSheet(self._notes_style())
+        return edit
+
+    def _build_button_row(self) -> QHBoxLayout:
+        """
+        Business Logic（为什么需要这个函数）:
+            按钮行需要清晰区分次要操作（跳过版本/取消）和主操作
+            （安装更新/安装并重启），参考 Mos 的"跳过这个版本"左对齐、
+            "安装更新"右对齐的布局。
+
+        Code Logic（这个函数做什么）:
+            构建水平按钮布局：左侧次要按钮（默认文本"跳过这个版本"），
+            中间弹簧，右侧主按钮（默认文本"安装更新"）。
+        """
+        btn_layout: QHBoxLayout = QHBoxLayout()
+        btn_layout.setContentsMargins(0, 4, 0, 0)
+
+        self._secondary_btn: QPushButton = QPushButton("跳过这个版本")
         self._secondary_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._secondary_btn.setStyleSheet(theme.button_secondary_style())
+        self._secondary_btn.setMinimumHeight(34)
         self._secondary_btn.clicked.connect(self.reject)
 
-        self._primary_btn: QPushButton = QPushButton("立即更新")
+        self._primary_btn: QPushButton = QPushButton("安装更新")
         self._primary_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._primary_btn.setStyleSheet(theme.button_primary_style())
+        self._primary_btn.setMinimumHeight(34)
+        self._primary_btn.setDefault(True)
         self._primary_btn.clicked.connect(self._on_primary_clicked)
 
         btn_layout.addWidget(self._secondary_btn)
+        btn_layout.addStretch()
         btn_layout.addWidget(self._primary_btn)
-        layout.addLayout(btn_layout)
+        return btn_layout
 
     def _on_primary_clicked(self) -> None:
         """
@@ -171,7 +248,7 @@ class UpdateDialog(QDialog):
     def show_download_state(self) -> None:
         """
         Business Logic（为什么需要这个函数）:
-            用户点击"立即更新"后，需要显示下载进度并防止重复操作。
+            用户点击"安装更新"后，需要显示下载进度并防止重复操作。
 
         Code Logic（这个函数做什么）:
             将状态切换为 DOWNLOADING，显示进度条和状态文字，
@@ -185,9 +262,9 @@ class UpdateDialog(QDialog):
         self._progress_label.show()
 
         self._primary_btn.setEnabled(False)
+        self._primary_btn.setText("下载中…")
         self._secondary_btn.setText("取消")
 
-        # 重新应用样式确保主题一致
         self._reapply_styles()
 
     def set_download_progress(self, progress: float) -> None:
@@ -275,12 +352,66 @@ class UpdateDialog(QDialog):
             重新设置对话框和所有子控件的 QSS 样式。
         """
         self.setStyleSheet(theme.dialog_style())
-        self._title_label.setStyleSheet(theme.label_title_style())
-        self._size_label.setStyleSheet(theme.label_caption_style())
+        self._title_label.setStyleSheet(self._title_style())
+        self._subtitle_label.setStyleSheet(self._subtitle_style())
         self._progress_bar.setStyleSheet(theme.progress_bar_style())
         self._progress_label.setStyleSheet(theme.label_caption_style())
         self._primary_btn.setStyleSheet(theme.button_primary_style())
         self._secondary_btn.setStyleSheet(theme.button_secondary_style())
 
-        if hasattr(self, "_notes_edit"):
-            self._notes_edit.setStyleSheet(theme.input_style())
+        if self._notes_edit is not None:
+            self._notes_edit.setStyleSheet(self._notes_style())
+
+    @staticmethod
+    def _title_style() -> str:
+        """
+        Business Logic（为什么需要这个函数）:
+            更新对话框的主标题需要比通用 title 更醒目一些
+            （Mos 风格：17~18px 粗体）。
+
+        Code Logic（这个函数做什么）:
+            返回 QLabel 的加粗大标题 QSS，使用 theme 颜色常量。
+        """
+        return f"""
+            font-size: 17px;
+            font-weight: 700;
+            font-family: {theme.FONT_FAMILY};
+            color: {theme.TEXT_PRIMARY};
+        """
+
+    @staticmethod
+    def _subtitle_style() -> str:
+        """
+        Business Logic（为什么需要这个函数）:
+            副标题需要与主标题形成层级对比，使用次级文字色 + 正文字号。
+
+        Code Logic（这个函数做什么）:
+            返回 QLabel 的副标题 QSS。
+        """
+        return f"""
+            font-size: {theme.FONT_SIZE_BODY};
+            font-family: {theme.FONT_FAMILY};
+            color: {theme.TEXT_SECONDARY};
+        """
+
+    @staticmethod
+    def _notes_style() -> str:
+        """
+        Business Logic（为什么需要这个函数）:
+            Markdown 渲染区需要卡片化的视觉容器：圆角、细边框、
+            柔和的内边距，整体观感接近 Mos 的更新说明卡片。
+
+        Code Logic（这个函数做什么）:
+            返回带圆角 + BORDER 细边框 + BG_PRIMARY 背景的 QTextEdit QSS。
+        """
+        return f"""
+            QTextEdit {{
+                border: 1px solid {theme.BORDER};
+                border-radius: {theme.RADIUS_MEDIUM};
+                background: {theme.BG_PRIMARY};
+                color: {theme.TEXT_PRIMARY};
+                padding: 12px 16px;
+                font-size: {theme.FONT_SIZE_BODY};
+                font-family: {theme.FONT_FAMILY};
+            }}
+        """
