@@ -36,7 +36,7 @@ from claude_partner.ui.update_dialog import UpdateDialog
 from claude_partner.ui import theme
 from claude_partner.hotkey.listener import GlobalHotkeyManager
 from claude_partner import __version__
-from claude_partner.updater.checker import UpdateChecker, UpdateInfo, UPDATE_CHECK_INTERVAL
+from claude_partner.updater.checker import UpdateChecker, UpdateInfo
 from claude_partner.updater.downloader import UpdateDownloader
 from claude_partner.updater.installer import UpdateInstaller
 
@@ -82,7 +82,6 @@ class Application:
         self._hotkey_mgr: GlobalHotkeyManager | None = None
         self._settings_panel: SettingsPanel | None = None
         self._update_checker: UpdateChecker | None = None
-        self._update_check_task: asyncio.Task | None = None  # type: ignore[type-arg]
 
     async def start(self) -> None:
         """
@@ -140,7 +139,6 @@ class Application:
         self._sync_engine = SyncEngine(
             self._config, self._prompt_repo, self._peer_client
         )
-        await self._sync_engine.start_periodic_sync(self._discovery.get_devices)
 
         # 10. 截图管理器
         self._screenshot_mgr = ScreenshotManager()
@@ -218,22 +216,6 @@ class Application:
             if self._settings_panel is not None else None
         )
 
-        # 延迟 3 秒后执行首次检查
-        asyncio.get_event_loop().call_later(
-            3.0,
-            lambda: asyncio.ensure_future(
-                self._update_checker.check_for_update(__version__)
-            ),
-        )
-
-        # 定时检查（每 4 小时）
-        async def _periodic_update_check() -> None:
-            while True:
-                await asyncio.sleep(UPDATE_CHECK_INTERVAL)
-                if self._update_checker is not None:
-                    await self._update_checker.check_for_update(__version__)
-        self._update_check_task = asyncio.create_task(_periodic_update_check())
-
         logger.info("应用启动完成")
 
     def _connect_signals(
@@ -267,11 +249,6 @@ class Application:
                 len(self._discovery.get_devices())
             )
         )
-        self._discovery.device_found.connect(
-            lambda dev: asyncio.ensure_future(
-                self._sync_engine.sync_with_peer(dev)
-            )
-        )
         self._discovery.device_lost.connect(device_panel.remove_device)
         self._discovery.device_lost.connect(
             lambda _: transfer_panel.update_devices(self._discovery.get_devices())
@@ -279,15 +256,6 @@ class Application:
         self._discovery.device_lost.connect(
             lambda _: self._system_tray.update_device_count(
                 len(self._discovery.get_devices())
-            )
-        )
-
-        # Prompt 变更 → 同步
-        prompt_panel.prompt_changed.connect(
-            lambda prompt: asyncio.ensure_future(
-                self._sync_engine.on_local_change(
-                    prompt, self._discovery.get_devices()
-                )
             )
         )
 
@@ -321,6 +289,13 @@ class Application:
             self._settings_panel.check_update_requested.connect(
                 self._on_settings_check_update
             )
+
+        # Prompt 手动同步触发
+        prompt_panel.sync_requested.connect(
+            lambda: asyncio.ensure_future(
+                self._sync_engine.sync_all(self._discovery.get_devices())
+            )
+        )
 
     def _show_main_or_welcome(self, prompt_panel: PromptPanel) -> None:
         """
@@ -519,8 +494,6 @@ class Application:
         if self._database is not None:
             await self._database.close()
 
-        if self._update_check_task is not None:
-            self._update_check_task.cancel()
         if self._update_checker is not None:
             await self._update_checker.close()
 
@@ -836,6 +809,13 @@ def main() -> None:
     finally:
         loop.run_until_complete(_cleanup())
         loop.close()
+        # 从 Finder/Dock 启动的 .app 在 macOS 上，NSApplication 主循环
+        # 不会因为 asyncio loop.stop() 自动退出，必须显式 quit Qt，
+        # 否则 Python 进程会一直挂住。从终端启动时父进程是 shell，
+        # 表现不出来；只有 Finder 启动才暴露。
+        qt_app.quit()
+        # 兜底：确保进程退出（避免 Qt/NSApp 残留线程让解释器无法 finalize）
+        os._exit(0)
 
 
 if __name__ == "__main__":

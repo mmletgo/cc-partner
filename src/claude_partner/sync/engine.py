@@ -2,8 +2,6 @@
 """同步引擎模块：协调 Prompt 在多设备间的同步流程。"""
 
 from PyQt6.QtCore import QObject, pyqtSignal
-from typing import Callable
-import asyncio
 import logging
 
 from claude_partner.config import AppConfig
@@ -15,11 +13,6 @@ from claude_partner.sync.merger import PromptMerger
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-# 防抖延迟（秒）
-DEBOUNCE_DELAY: float = 0.5
-# 定时同步间隔（秒）
-PERIODIC_SYNC_INTERVAL: float = 30.0
-
 
 class SyncEngine(QObject):
     """
@@ -27,17 +20,15 @@ class SyncEngine(QObject):
 
     Business Logic（为什么需要这个类）:
         多设备编辑 Prompt 时，需要一个中心协调器来管理同步流程：
-        何时触发同步、与谁同步、如何处理冲突。
+        与谁同步、如何处理冲突。
 
     Code Logic（这个类做什么）:
         核心同步流程（sync_with_peer）:
         1. 获取本端 summary，POST sync/pull 到对端（带本端 summary）
         2. 对端返回本端需要的 prompts，逐个与本地对比，用 merger 决定更新
         3. 获取本端有但对端没有的 prompts，POST sync/push 到对端
-        触发机制：
-        - 对端上线时立即同步（sync_all）
-        - 本地修改时 500ms 防抖后同步（on_local_change）
-        - 30 秒定时同步（start_periodic_sync）
+        触发机制：由外部（UI 层）显式调用 sync_with_peer / sync_all 触发，
+        用户在 Prompt 管理面板点击"同步"按钮时发起。
     """
 
     sync_completed = pyqtSignal()
@@ -54,15 +45,12 @@ class SyncEngine(QObject):
             同步引擎需要配置信息、本地数据仓库和网络客户端来执行同步。
 
         Code Logic（这个函数做什么）:
-            保存依赖组件引用，初始化防抖 task 和定时同步 task 为 None。
+            保存依赖组件引用。
         """
         super().__init__()
         self._config: AppConfig = config
         self._prompt_repo: PromptRepository = prompt_repo
         self._peer_client: PeerClient = peer_client
-        self._debounce_task: asyncio.Task[None] | None = None
-        self._periodic_task: asyncio.Task[None] | None = None
-        self._running: bool = False
 
     async def sync_with_peer(self, device: Device) -> None:
         """
@@ -205,86 +193,12 @@ class SyncEngine(QObject):
 
         self.sync_completed.emit()
 
-    async def on_local_change(
-        self, prompt: Prompt, devices: dict[str, Device]
-    ) -> None:
-        """
-        Business Logic（为什么需要这个函数）:
-            本地编辑 Prompt 后需要尽快同步到其他设备，但频繁编辑时
-            不应每次都触发同步，所以使用 500ms 防抖。
-
-        Code Logic（这个函数做什么）:
-            如果已有 pending 的防抖 task，先取消它。
-            创建新 task: sleep 0.5 秒后调用 sync_all。
-            如果在 0.5 秒内又有新的变更，旧 task 被取消，重新计时。
-        """
-        # 取消旧的防抖 task
-        if self._debounce_task is not None and not self._debounce_task.done():
-            self._debounce_task.cancel()
-
-        async def _debounced_sync() -> None:
-            """防抖后执行同步。"""
-            await asyncio.sleep(DEBOUNCE_DELAY)
-            await self.sync_all(devices)
-
-        self._debounce_task = asyncio.create_task(_debounced_sync())
-
-    async def start_periodic_sync(
-        self, devices_getter: Callable[[], dict[str, Device]]
-    ) -> None:
-        """
-        Business Logic（为什么需要这个函数）:
-            即使没有本地变更，也需要定期同步以获取其他设备上的变更，
-            保证数据最终一致。
-
-        Code Logic（这个函数做什么）:
-            启动一个后台 asyncio task，每 30 秒调用 sync_all。
-            使用 devices_getter 回调获取最新的在线设备列表。
-        """
-        self._running = True
-
-        async def _periodic_loop() -> None:
-            """定时同步循环。"""
-            while self._running:
-                try:
-                    await asyncio.sleep(PERIODIC_SYNC_INTERVAL)
-                    if not self._running:
-                        break
-                    devices: dict[str, Device] = devices_getter()
-                    if devices:
-                        await self.sync_all(devices)
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    logger.error("定时同步异常: %s", e, exc_info=True)
-
-        self._periodic_task = asyncio.create_task(_periodic_loop())
-        logger.info("定时同步已启动（间隔 %.0f 秒）", PERIODIC_SYNC_INTERVAL)
-
     async def stop(self) -> None:
         """
         Business Logic（为什么需要这个函数）:
-            应用关闭时需要停止所有同步活动，释放异步资源。
+            应用关闭时的占位钩子，保持与 app.py 调用接口的一致性。
 
         Code Logic（这个函数做什么）:
-            停止定时同步 task 和防抖 task，等待它们完成取消。
+            无异步任务需要停止（已无定时/防抖 task），仅记录日志。
         """
-        self._running = False
-
-        if self._periodic_task is not None and not self._periodic_task.done():
-            self._periodic_task.cancel()
-            try:
-                await self._periodic_task
-            except asyncio.CancelledError:
-                pass
-            self._periodic_task = None
-
-        if self._debounce_task is not None and not self._debounce_task.done():
-            self._debounce_task.cancel()
-            try:
-                await self._debounce_task
-            except asyncio.CancelledError:
-                pass
-            self._debounce_task = None
-
         logger.info("同步引擎已停止")

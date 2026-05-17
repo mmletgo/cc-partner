@@ -33,9 +33,9 @@
 
 ### 配置
 - API 超时: 15 秒
-- 自动检查间隔: 4 小时 (UPDATE_CHECK_INTERVAL)
-- 首次检查延迟: 3 秒（启动后）
 - aiohttp session 懒初始化（复用 PeerClient 模式）
+- 本模块只负责一次性检查/下载/安装，调度由调用方决定
+- 检查触发：托盘菜单「检查更新...」或设置面板「检查更新」按钮手动触发
 
 ## 下载器 (UpdateDownloader)
 

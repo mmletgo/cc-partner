@@ -27,8 +27,7 @@
 - `SyncEngine(QObject)`: 协调同步流程
   - `sync_with_peer(device)`: 与单个设备双向同步（pull + merge + push）
   - `sync_all(devices)`: 与所有在线设备同步
-  - `on_local_change(prompt, devices)`: 本地变更触发（500ms 防抖）
-  - `start_periodic_sync(devices_getter)`: 30 秒定时同步
+  - `stop()`: 关闭时调用的占位钩子（无异步任务需停止）
   - 信号: `sync_completed()`, `sync_error(str)`
 
 ## 同步策略
@@ -36,7 +35,7 @@
 2. 本地修改时递增本设备计数器
 3. 同步时比较向量时钟：严格领先则覆盖，并发则 LWW（Last-Writer-Wins）
 4. 合并后的 Prompt 始终包含双方时钟的合并结果
-5. 触发时机：对端上线、本地修改(500ms防抖)、定时30秒
+5. 触发时机：UI 层手动调用 sync_with_peer / sync_all（由用户在 Prompt 管理面板点击"同步"按钮触发）
 
 ## 依赖关系
 - 依赖: `models.prompt`, `config`, `storage.prompt_repo`, `network.client`

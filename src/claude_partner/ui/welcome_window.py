@@ -254,10 +254,9 @@ class WelcomeWindow(QWidget):
 
     def _setup_window(self) -> None:
         """配置窗口属性：无边框、固定大小、居中。"""
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-        )
+        # 不能加 WindowStaysOnTopHint：用户去"系统设置 → 隐私与安全性"
+        # 授权时本窗口会盖住系统设置，导致用户无法操作。
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setFixedSize(480, 520)
         self.setStyleSheet(

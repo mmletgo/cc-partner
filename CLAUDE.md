@@ -38,7 +38,7 @@ src/claude_partner/
 
 ### 应用入口 (app.py)
 - 使用 qasync 将 asyncio 事件循环集成到 Qt 事件循环
-- 启动顺序：数据库初始化 → HTTP 服务端 → mDNS 注册 → 同步引擎 → UI → 自动更新检查
+- 启动顺序：数据库初始化 → HTTP 服务端 → mDNS 注册 → 同步引擎 → UI → 更新检查器（仅初始化，不自动检查）
 - 关闭时反向清理所有资源
 
 ### 配置管理 (config.py)
@@ -58,16 +58,15 @@ src/claude_partner/
 - 每个 Prompt 携带向量时钟 {device_id: counter}
 - 修改时递增本设备计数器
 - 同步时比较向量时钟：严格领先 → 覆盖；并发 → LWW (Last-Writer-Wins)
-- 触发时机：对端上线、本地修改(500ms防抖)、定时30秒
+- 触发时机：用户在 Prompt 管理面板手动点击"同步"按钮
 
 ### 文件传输协议
 - 分块 HTTP 传输（1MB/块）
 - 流程：init(元数据) → chunk(分块) → verify(SHA256校验)
 - 支持断点续传：接收端告知已接收 offset
 
-### 自动更新
-- 启动后延迟 3 秒首次检查，之后每 4 小时定时检查
-- 托盘菜单"检查更新..."支持手动触发
+### 应用更新
+- 不再自动检查；用户通过托盘菜单「检查更新...」或设置面板「检查更新」按钮手动触发
 - GitHub Releases API 获取最新版本，语义化版本比较
 - 自动匹配当前平台下载资源（macOS DMG / Windows EXE / Linux tar.gz）
 - 流式下载到 `~/.claude-partner/updates/`，支持进度显示和取消

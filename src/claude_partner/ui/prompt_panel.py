@@ -196,6 +196,7 @@ class PromptPanel(QWidget):
     """
 
     prompt_changed: pyqtSignal = pyqtSignal(object)
+    sync_requested: pyqtSignal = pyqtSignal()
 
     def __init__(
         self,
@@ -249,6 +250,14 @@ class PromptPanel(QWidget):
         self._tag_combo.currentTextChanged.connect(self._on_tag_filter_trigger)
         toolbar_layout.addWidget(self._tag_combo)
 
+        # 同步按钮（手动触发与所有在线设备同步 Prompt）
+        self._btn_sync: QPushButton = QPushButton("同步")
+        self._btn_sync.setStyleSheet(theme.button_secondary_style())
+        self._btn_sync.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_sync.setToolTip("与所有在线设备同步 Prompt")
+        self._btn_sync.clicked.connect(self.sync_requested.emit)
+        toolbar_layout.addWidget(self._btn_sync)
+
         # 新建按钮
         self._btn_new: QPushButton = QPushButton("+ 新建")
         self._btn_new.setStyleSheet(theme.button_primary_style())
@@ -294,6 +303,7 @@ class PromptPanel(QWidget):
         """
         self._search_input.setStyleSheet(theme.input_style())
         self._tag_combo.setStyleSheet(theme.combo_style())
+        self._btn_sync.setStyleSheet(theme.button_secondary_style())
         self._btn_new.setStyleSheet(theme.button_primary_style())
         self._empty_label.setStyleSheet(
             f"color: {theme.TEXT_SECONDARY}; font-size: {theme.FONT_SIZE_BODY}; padding: 40px;"
