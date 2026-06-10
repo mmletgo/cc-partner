@@ -1,0 +1,875 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>03 — Prompts / Claude Partner</title>
+<style>
+  :root {
+    --bg: #f5f4ed;
+    --surface: #faf9f5;
+    --surface-warm: #e8e6dc;
+    --fg: #141413;
+    --fg-2: #3d3d3a;
+    --muted: #5e5d59;
+    --meta: #87867f;
+    --border: #f0eee6;
+    --border-soft: #e8e6dc;
+    --accent: #c96442;
+    --accent-on: #faf9f5;
+    --accent-soft: color-mix(in oklab, var(--accent) 14%, transparent);
+    --success: #17a34a;
+    --warn: #eab308;
+    --danger: #b53333;
+    --font-display: "Anthropic Serif", Georgia, "Times New Roman", serif;
+    --font-body: "Anthropic Sans", "Arial", system-ui, -apple-system, sans-serif;
+    --font-mono: "Anthropic Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+    --motion-fast: 150ms;
+    --motion-base: 200ms;
+    --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  [data-theme="dark"] {
+    --bg: #1f1d1b;
+    --surface: #272522;
+    --surface-warm: #322f2c;
+    --fg: #faf9f5;
+    --fg-2: #d8d6cf;
+    --muted: #a8a59e;
+    --meta: #787671;
+    --border: #2e2b29;
+    --border-soft: #262422;
+    --accent: #d97757;
+    --accent-on: #141413;
+    --accent-soft: color-mix(in oklab, var(--accent) 22%, transparent);
+    --success: #4ade80;
+    --warn: #facc15;
+    --danger: #ef6b6b;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+
+  body {
+    font-family: var(--font-body);
+    background: #1a1815;
+    background-image:
+      radial-gradient(ellipse 70% 60% at 30% 20%, rgba(201, 100, 66, 0.10), transparent 60%),
+      radial-gradient(ellipse 60% 60% at 80% 80%, rgba(245, 244, 237, 0.05), transparent 60%);
+    color: var(--fg);
+    min-height: 100vh;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+  }
+
+  /* ===== 窗口外壳 ===== */
+  .window {
+    width: 1180px;
+    height: 740px;
+    background: var(--bg);
+    border-radius: 12px;
+    box-shadow:
+      0 32px 80px rgba(0,0,0,0.5),
+      inset 0 1px 0 rgba(255,255,255,0.05);
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    grid-template-rows: 44px 1fr;
+    grid-template-areas:
+      "titlebar titlebar"
+      "sidebar  main";
+  }
+
+  /* ===== 标题栏 ===== */
+  .titlebar {
+    grid-area: titlebar;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 16px;
+    -webkit-app-region: drag;
+    user-select: none;
+  }
+  .traffic-lights {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .traffic-lights span {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    display: block;
+  }
+  .tl-close  { background: #ff5f57; }
+  .tl-min    { background: #febc2e; }
+  .tl-max    { background: #28c840; }
+
+  .titlebar-title {
+    flex: 1;
+    text-align: center;
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg-2);
+    letter-spacing: 0.01em;
+  }
+  .titlebar-right {
+    -webkit-app-region: no-drag;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid var(--border-soft);
+    background: var(--surface);
+    color: var(--fg-2);
+    border-radius: 6px;
+    font-family: var(--font-body);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--motion-fast) var(--ease-standard);
+  }
+  .btn-secondary:hover { background: var(--surface-warm); }
+  .btn-secondary svg { width: 12px; height: 12px; }
+
+  /* ===== 侧栏 ===== */
+  .sidebar {
+    grid-area: sidebar;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 14px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px 22px;
+  }
+  .brand-mark {
+    width: 26px; height: 26px;
+    border-radius: 7px;
+    background: var(--fg);
+    color: var(--bg);
+    display: grid; place-items: center;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .brand-name {
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--fg);
+    letter-spacing: -0.01em;
+  }
+
+  .nav { display: flex; flex-direction: column; gap: 2px; }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    color: var(--muted);
+    font-size: 13.5px;
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+  }
+  .nav-item:hover { background: var(--surface-warm); color: var(--fg); }
+  .nav-item.active {
+    background: var(--accent);
+    color: var(--accent-on);
+  }
+  .nav-item.active:hover { background: var(--accent); }
+  .nav-item svg { width: 16px; height: 16px; stroke-width: 1.6; }
+
+  .sidebar-status {
+    margin-top: auto;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    border-radius: 10px;
+    padding: 12px 12px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--fg-2);
+  }
+  .status-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 18%, transparent);
+  }
+  .status-row .label { color: var(--muted); }
+  .status-row .value { color: var(--fg); font-weight: 500; }
+
+  /* ===== 主内容区 ===== */
+  .main {
+    grid-area: main;
+    overflow-y: auto;
+    padding: 28px 40px 32px;
+  }
+  .main::-webkit-scrollbar { width: 10px; }
+  .main::-webkit-scrollbar-thumb { background: var(--border-soft); border-radius: 5px; }
+  .main::-webkit-scrollbar-thumb:hover { background: var(--meta); }
+
+  /* ===== 页面标题区 ===== */
+  .page-header { margin-bottom: 22px; }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .h1 {
+    font-family: var(--font-display);
+    font-size: 32px;
+    font-weight: 500;
+    letter-spacing: -0.015em;
+    line-height: 1.15;
+    color: var(--fg);
+    margin: 0 0 6px;
+  }
+  .lead {
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.55;
+    max-width: 640px;
+    margin: 0;
+  }
+
+  /* ===== 顶部工具栏 ===== */
+  .toolbar {
+    height: 56px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 28px;
+  }
+  .search {
+    flex: 1;
+    height: 36px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    transition: border-color var(--motion-fast) var(--ease-standard);
+  }
+  .search:focus-within { border-color: var(--border-soft); box-shadow: 0 0 0 1px var(--border-soft); }
+  .search svg { width: 14px; height: 14px; color: var(--meta); flex-shrink: 0; }
+  .search input {
+    flex: 1;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    font-family: var(--font-body);
+    font-size: 13.5px;
+    color: var(--fg);
+  }
+  .search input::placeholder { color: var(--meta); }
+
+  .chip-row {
+    display: flex;
+    gap: 6px;
+  }
+  .chip {
+    height: 28px;
+    padding: 0 12px;
+    border-radius: 9999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--fg-2);
+    font-family: var(--font-body);
+    font-size: 12px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    transition: background var(--motion-fast) var(--ease-standard);
+  }
+  .chip:hover { background: var(--surface-warm); }
+  .chip.active {
+    background: var(--accent);
+    color: var(--accent-on);
+    border-color: var(--accent);
+  }
+  .chip .count {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    opacity: 0.7;
+  }
+
+  .btn-primary {
+    height: 32px;
+    padding: 0 14px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--accent-on);
+    border: 0;
+    font-family: var(--font-body);
+    font-size: 12.5px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    transition: background var(--motion-fast) var(--ease-standard);
+  }
+  .btn-primary:hover { background: color-mix(in oklab, var(--accent) 88%, #000); }
+  .btn-primary svg { width: 13px; height: 13px; }
+
+  /* ===== 分组标题 ===== */
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin: 0 0 14px;
+  }
+  .section-head .h3 {
+    font-family: var(--font-display);
+    font-size: 17px;
+    font-weight: 500;
+    letter-spacing: -0.005em;
+    color: var(--fg);
+    margin: 0;
+  }
+  .section-head .count-badge {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--meta);
+    letter-spacing: 0.05em;
+  }
+  .section { margin-bottom: 32px; }
+  .section:last-of-type { margin-bottom: 12px; }
+
+  /* ===== 卡片网格 ===== */
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+
+  /* ===== Prompt 卡片 ===== */
+  .prompt-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px 14px;
+    height: 132px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    cursor: pointer;
+    transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
+  }
+  .prompt-card:hover {
+    background: var(--surface-warm);
+    border-color: var(--border-soft);
+  }
+  .prompt-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .prompt-title {
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 500;
+    line-height: 1.3;
+    color: var(--fg);
+    letter-spacing: -0.005em;
+    margin: 0;
+  }
+  .star-btn {
+    width: 24px;
+    height: 24px;
+    border: 0;
+    background: transparent;
+    border-radius: 6px;
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+    color: var(--meta);
+    flex-shrink: 0;
+    transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+  }
+  .star-btn:hover { color: var(--accent); background: var(--bg); }
+  .star-btn.is-on { color: var(--accent); }
+  .star-btn svg { width: 14px; height: 14px; }
+
+  .prompt-desc {
+    color: var(--muted);
+    font-size: 12.5px;
+    line-height: 1.55;
+    margin: 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .prompt-foot {
+    margin-top: auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .tag-row { display: flex; gap: 4px; flex-wrap: nowrap; }
+  .tag {
+    height: 18px;
+    padding: 0 7px;
+    border-radius: 4px;
+    background: var(--surface-warm);
+    color: var(--fg-2);
+    font-size: 11px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+  }
+  .usage {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--meta);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+
+  /* ===== Theme toggle (titlebar) ===== */
+  .theme-toggle {
+    -webkit-app-region: no-drag;
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface);
+    color: var(--fg-2);
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    cursor: pointer;
+    padding: 0;
+    transition: background 150ms, color 150ms, border-color 150ms;
+  }
+  .theme-toggle:hover {
+    background: var(--surface-warm);
+    color: var(--accent);
+    border-color: var(--border);
+  }
+  .theme-toggle:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+  .theme-toggle svg { width: 14px; height: 14px; display: block; }
+  .theme-toggle .icon-moon { display: none; }
+  [data-theme="dark"] .theme-toggle .icon-sun { display: none; }
+  [data-theme="dark"] .theme-toggle .icon-moon { display: block; }
+</style>
+</head>
+<body>
+  <div class="window">
+
+    <!-- ===== 标题栏：macOS 三色灯 + 标题 ===== -->
+    <header class="titlebar">
+      <div class="traffic-lights">
+        <span class="tl-close"></span>
+        <span class="tl-min"></span>
+        <span class="tl-max"></span>
+      </div>
+      <div class="titlebar-title">Prompt 库 — Claude Partner</div>
+      <div class="titlebar-right">
+        <button class="btn-secondary" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h11l5 5v11a2 2 0 0 1-2 2H4z"/><path d="M14 4v6h6"/></svg>
+          导入
+        </button>
+        <button class="theme-toggle" type="button" aria-label="切换主题" title="切换主题">
+          <svg class="icon-sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="8" cy="8" r="3"/>
+            <path d="M8 1.5v1.5"/>
+            <path d="M8 13v1.5"/>
+            <path d="M1.5 8h1.5"/>
+            <path d="M13 8h1.5"/>
+            <path d="M3.3 3.3l1.1 1.1"/>
+            <path d="M11.6 11.6l1.1 1.1"/>
+            <path d="M3.3 12.7l1.1-1.1"/>
+            <path d="M11.6 4.4l1.1-1.1"/>
+          </svg>
+          <svg class="icon-moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- ===== 侧栏：品牌 + 导航 + 状态 ===== -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">C</div>
+        <div class="brand-name">Claude Partner</div>
+      </div>
+      <nav class="nav">
+        <a class="nav-item" href="01-main.html">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11.5 12 4l9 7.5"/><path d="M5 10v10h14V10"/></svg>
+          Home
+        </a>
+        <a class="nav-item" href="02-transfer.html">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h13"/><path d="m14 4 3 3-3 3"/><path d="M20 17H7"/><path d="m10 20-3-3 3-3"/></svg>
+          Transfer
+        </a>
+        <a class="nav-item active" href="03-prompts.html">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14a1 1 0 0 1 1 1v15l-8-4-8 4V5a1 1 0 0 1 1-1z"/></svg>
+          Prompts
+        </a>
+        <a class="nav-item" href="04-devices.html">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="13" height="10" rx="1.5"/><rect x="14" y="10" width="7" height="11" rx="1.2"/><path d="M3 18h13"/></svg>
+          Devices
+        </a>
+        <a class="nav-item" href="05-settings.html">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+          Settings
+        </a>
+      </nav>
+      <div class="sidebar-status">
+        <div class="status-row">
+          <span class="status-dot"></span>
+          <span class="label">已配对</span>
+          <span class="value" style="margin-left:auto">3 台设备</span>
+        </div>
+        <div class="status-row">
+          <span class="status-dot" style="background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);"></span>
+          <span class="label">已同步</span>
+          <span class="value" style="margin-left:auto">32 prompts</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ===== 主内容 ===== -->
+    <main class="main">
+
+      <!-- 页面标题 -->
+      <div class="page-header">
+        <div class="eyebrow">LIBRARY · 32 PROMPTS</div>
+        <h1 class="h1">Prompt 库</h1>
+        <p class="lead">精心策划的提示词集合，随设备同步——随时调用你最信赖的指令。</p>
+      </div>
+
+      <!-- 顶部工具栏：搜索 + chip + 新建 -->
+      <div class="toolbar">
+        <label class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input type="text" placeholder="Search prompts…" />
+        </label>
+        <div class="chip-row">
+          <button class="chip active" type="button">All <span class="count">32</span></button>
+          <button class="chip" type="button">翻译 <span class="count">9</span></button>
+          <button class="chip" type="button">总结 <span class="count">7</span></button>
+          <button class="chip" type="button">改写 <span class="count">8</span></button>
+          <button class="chip" type="button">代码 <span class="count">8</span></button>
+        </div>
+        <button class="btn-primary" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+          新建
+        </button>
+      </div>
+
+      <!-- 收藏 -->
+      <section class="section">
+        <div class="section-head">
+          <h2 class="h3">★ 收藏</h2>
+          <span class="count-badge">3 ITEMS · PINNED</span>
+        </div>
+        <div class="card-grid">
+          <article class="prompt-card">
+            <div class="prompt-head">
+              <h3 class="prompt-title">翻译为学术英语</h3>
+              <button class="star-btn is-on" type="button" aria-label="取消收藏">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.5l2.9 6.4 6.9.7-5.2 4.7 1.5 6.8L12 17.6 5.9 21.1l1.5-6.8L2.2 9.6l6.9-.7L12 2.5z"/></svg>
+              </button>
+            </div>
+            <p class="prompt-desc">把任意中文段落改写成 Nature/Science 风格的英文学术英文，保留术语与被动语态。</p>
+            <div class="prompt-foot">
+              <div class="tag-row">
+                <span class="tag">翻译</span>
+                <span class="tag">学术</span>
+              </div>
+              <span class="usage">使用 47 次 · 2 天前</span>
+            </div>
+          </article>
+          <article class="prompt-card">
+            <div class="prompt-head">
+              <h3 class="prompt-title">总结长文为要点</h3>
+              <button class="star-btn is-on" type="button" aria-label="取消收藏">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.5l2.9 6.4 6.9.7-5.2 4.7 1.5 6.8L12 17.6 5.9 21.1l1.5-6.8L2.2 9.6l6.9-.7L12 2.5z"/></svg>
+              </button>
+            </div>
+            <p class="prompt-desc">把一篇 5000 字以上的长文压缩为 5–8 条可执行要点，附带原文出处行号。</p>
+            <div class="prompt-foot">
+              <div class="tag-row">
+                <span class="tag">总结</span>
+                <span class="tag">要点</span>
+              </div>
+              <span class="usage">使用 31 次 · 昨天</span>
+            </div>
+          </article>
+          <article class="prompt-card">
+            <div class="prompt-head">
+              <h3 class="prompt-title">代码审查 v2</h3>
+              <button class="star-btn is-on" type="button" aria-label="取消收藏">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.5l2.9 6.4 6.9.7-5.2 4.7 1.5 6.8L12 17.6 5.9 21.1l1.5-6.8L2.2 9.6l6.9-.7L12 2.5z"/></svg>
+              </button>
+            </div>
+            <p class="prompt-desc">逐行审查 PR diff，按 Bug / 性能 / 风格分组，每条给出可粘贴的修改建议。</p>
+            <div class="prompt-foot">
+              <div class="tag-row">
+                <span class="tag">代码</span>
+                <span class="tag">审查</span>
+              </div>
+              <span class="usage">使用 28 次 · 3 天前</span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- 最近使用 -->
+      <section class="section">
+        <div class="section-head">
+          <h2 class="h3">最近使用</h2>
+          <span class="count-badge">3 ITEMS · LAST 7 DAYS</span>
+        </div>
+        <div class="card-grid">
+          <article class="prompt-card">
+            <div class="prompt-head">
+              <h3 class="prompt-title">重写更亲切</h3>
+              <button class="star-btn" type="button" aria-label="收藏">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l2.9 6.4 6.9.7-5.2 4.7 1.5 6.8L12 17.6 5.9 21.1l1.5-6.8L2.2 9.6l6.9-.7L12 2.5z"/></svg>
+              </button>
+            </div>
+            <p class="prompt-desc">把正式、官腔的邮件改写为口语化、像朋友聊天的语气，保留全部信息点。</p>
+            <div class="prompt-foot">
+              <div class="tag-row">
+                <span class="tag">改写</span>
+                <span class="tag">邮件</span>
+              </div>
+              <span class="usage">使用 12 次 · 今天</span>
+            </div>
+          </article>
+          <article class="prompt-card">
+            <div class="prompt-head">
+              <h3 class="prompt-title">提取行动项</h3>
+              <button class="star-btn" type="button" aria-label="收藏">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l2.9 6.4 6.9.7-5.2 4.7 1.5 6.8L12 17.6 5.9 21.1l1.5-6.8L2.2 9.6l6.9-.7L12 2.5z"/></svg>
+              </button>
+            </div>
+            <p class="prompt-desc">从会议纪要里抽取 owner / 截止日期 / 任务描述，输出 Markdown 复选框列表。</p>
+            <div class="prompt-foot">
+              <div class="tag-row">
+                <span class="tag">总结</span>
+                <span class="tag">会议</span>
+              </div>
+              <span class="usage">使用 9 次 · 昨天</span>
+            </div>
+          </article>
+          <article class="prompt-card">
+            <div class="prompt-head">
+              <h3 class="prompt-title">解释报错</h3>
+              <button class="star-btn" type="button" aria-label="收藏">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l2.9 6.4 6.9.7-5.2 4.7 1.5 6.8L12 17.6 5.9 21.1l1.5-6.8L2.2 9.6l6.9-.7L12 2.5z"/></svg>
+              </button>
+            </div>
+            <p class="prompt-desc">粘贴 stack trace，给出根因假设 + 最小复现 + 三种可能修复方案。</p>
+            <div class="prompt-foot">
+              <div class="tag-row">
+                <span class="tag">代码</span>
+                <span class="tag">调试</span>
+              </div>
+              <span class="usage">使用 6 次 · 3 天前</span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- 全部 · 按使用频率 -->
+      <section class="section">
+        <div class="section-head">
+          <h2 class="h3">全部 · 按使用频率</h2>
+          <span class="count-badge">6 OF 32 · SORTED BY USAGE</span>
+        </div>
+        <div class="card-grid">
+          <article class="prompt-card">
+            <div class="prompt-head">
+              <h3 class="prompt-title">翻译日语 → 简体</h3>
+              <button class="star-btn" type="button" aria-label="收藏">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l2.9 6.4 6.9.7-5.2 4.7 1.5 6.8L12 17.6 5.9 21.1l1.5-6.8L2.2 9.6l6.9-.7L12 2.5z"/></svg>
+              </button>
+            </div>
+            <p class="prompt-desc">把日文小说 / 推文翻译为通顺简体中文，保留敬语与拟声词的语感。</p>
+            <div class="prompt-foot">
+              <div class="tag-row">
+                <span class="tag">翻译</span>
+                <span class="tag">日语</span>
+              </div>
+              <span class="usage">使用 84 次 · 1 周前</span>
+            </div>
+          </article>
+          <article class="prompt-card">
+            <div class="prompt-head">
+              <h3 class="prompt-title">改写更专业</h3>
+              <button class="star-btn" type="button" aria-label="收藏">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l2.9 6.4 6.9.7-5.2 4.7 1.5 6.8L12 17.6 5.9 21.1l1.5-6.8L2.2 9.6l6.9-.7L12 2.5z"/></svg>
+              </button>
+            </div>
+            <p class="prompt-desc">把口语化草稿润色为正式商业邮件 / 提案 / 报告语气,保留人称与意图。</p>
+            <div class="prompt-foot">
+              <div class="tag-row">
+                <span class="tag">改写</span>
+                <span class="tag">商业</span>
+              </div>
+              <span class="usage">使用 62 次 · 4 天前</span>
+            </div>
+          </article>
+          <article class="prompt-card">
+            <div class="prompt-head">
+              <h3 class="prompt-title">写单元测试</h3>
+              <button class="star-btn" type="button" aria-label="收藏">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l2.9 6.4 6.9.7-5.2 4.7 1.5 6.8L12 17.6 5.9 21.1l1.5-6.8L2.2 9.6l6.9-.7L12 2.5z"/></svg>
+              </button>
+            </div>
+            <p class="prompt-desc">为给定函数生成 pytest / vitest 用例,覆盖 happy path + 边界 + 异常分支。</p>
+            <div class="prompt-foot">
+              <div class="tag-row">
+                <span class="tag">代码</span>
+                <span class="tag">测试</span>
+              </div>
+              <span class="usage">使用 53 次 · 1 周前</span>
+            </div>
+          </article>
+          <article class="prompt-card">
+            <div class="prompt-head">
+              <h3 class="prompt-title">论文摘要三句话</h3>
+              <button class="star-btn" type="button" aria-label="收藏">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l2.9 6.4 6.9.7-5.2 4.7 1.5 6.8L12 17.6 5.9 21.1l1.5-6.8L2.2 9.6l6.9-.7L12 2.5z"/></svg>
+              </button>
+            </div>
+            <p class="prompt-desc">把 PDF / 长文浓缩为「背景—方法—结论」三句式摘要,适合 arXiv 速读。</p>
+            <div class="prompt-foot">
+              <div class="tag-row">
+                <span class="tag">总结</span>
+                <span class="tag">论文</span>
+              </div>
+              <span class="usage">使用 41 次 · 2 周前</span>
+            </div>
+          </article>
+          <article class="prompt-card">
+            <div class="prompt-head">
+              <h3 class="prompt-title">解释正则表达式</h3>
+              <button class="star-btn" type="button" aria-label="收藏">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l2.9 6.4 6.9.7-5.2 4.7 1.5 6.8L12 17.6 5.9 21.1l1.5-6.8L2.2 9.6l6.9-.7L12 2.5z"/></svg>
+              </button>
+            </div>
+            <p class="prompt-desc">把一段复杂 regex 拆解为人类可读的「逐 token 注释」+ 三个匹配示例。</p>
+            <div class="prompt-foot">
+              <div class="tag-row">
+                <span class="tag">代码</span>
+                <span class="tag">解释</span>
+              </div>
+              <span class="usage">使用 36 次 · 5 天前</span>
+            </div>
+          </article>
+          <article class="prompt-card">
+            <div class="prompt-head">
+              <h3 class="prompt-title">SQL 性能诊断</h3>
+              <button class="star-btn" type="button" aria-label="收藏">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l2.9 6.4 6.9.7-5.2 4.7 1.5 6.8L12 17.6 5.9 21.1l1.5-6.8L2.2 9.6l6.9-.7L12 2.5z"/></svg>
+              </button>
+            </div>
+            <p class="prompt-desc">针对慢查询给出 EXPLAIN 解读、建议的索引,以及改写后的等价 SQL。</p>
+            <div class="prompt-foot">
+              <div class="tag-row">
+                <span class="tag">代码</span>
+                <span class="tag">SQL</span>
+              </div>
+              <span class="usage">使用 29 次 · 1 周前</span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+    </main>
+  </div>
+  <script>
+(function() {
+  var STORAGE_KEY = 'cp-theme';
+  function getStored() {
+    try { return localStorage.getItem(STORAGE_KEY) || 'system'; } catch (e) { return 'system'; }
+  }
+  function setStored(v) {
+    try { localStorage.setItem(STORAGE_KEY, v); } catch (e) {}
+  }
+  function effective(t) {
+    if (t === 'system') {
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    return t;
+  }
+  function apply() {
+    document.documentElement.setAttribute('data-theme', effective(getStored()));
+  }
+  apply();
+  window.addEventListener('storage', function(e) {
+    if (e.key === STORAGE_KEY) apply();
+  });
+  var mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', function() {
+    if (getStored() === 'system') apply();
+  });
+})();
+  </script>
+<script>
+(function() {
+  var STORAGE_KEY = 'cp-theme';
+  var btn = document.querySelector('.theme-toggle');
+  if (!btn) return;
+  btn.addEventListener('click', function() {
+    var current = document.documentElement.getAttribute('data-theme');
+    var isDark = current === 'dark';
+    var next = isDark ? 'light' : 'dark';
+    if (next === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+    try { localStorage.setItem(STORAGE_KEY, next); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,739 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Partner — Screen Index</title>
+<style>
+/* ============================================
+   Design Tokens（Anthropic 暖米色系统）
+   ============================================ */
+:root {
+  --bg: #f5f4ed;
+  --surface: #faf9f5;
+  --surface-warm: #e8e6dc;
+  --fg: #141413;
+  --fg-2: #3d3d3a;
+  --muted: #5e5d59;
+  --meta: #87867f;
+  --border: #f0eee6;
+  --border-soft: #e8e6dc;
+  --accent: #c96442;
+  --accent-on: #faf9f5;
+  --accent-soft: color-mix(in oklab, var(--accent) 14%, transparent);
+  --success: #17a34a;
+  --warn: #eab308;
+  --danger: #b53333;
+  --font-display: "Anthropic Serif", Georgia, "Times New Roman", serif;
+  --font-body: "Anthropic Sans", "Arial", system-ui, -apple-system, sans-serif;
+  --font-mono: "Anthropic Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+  --motion-fast: 150ms;
+  --motion-base: 200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+
+[data-theme="dark"] {
+  --bg: #1f1d1b;
+  --surface: #272522;
+  --surface-warm: #322f2c;
+  --fg: #faf9f5;
+  --fg-2: #d8d6cf;
+  --muted: #a8a59e;
+  --meta: #787671;
+  --border: #2e2b29;
+  --border-soft: #262422;
+  --accent: #d97757;
+  --accent-on: #141413;
+  --accent-soft: color-mix(in oklab, var(--accent) 22%, transparent);
+  --success: #4ade80;
+  --warn: #facc15;
+  --danger: #ef6b6b;
+}
+
+/* ============================================
+   Reset & Base（基础排版与盒模型）
+   ============================================ */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--fg);
+  background: var(--bg);
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+/* ============================================
+   Layout（页面居中容器，最大宽 1200px）
+   ============================================ */
+.page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 40px;
+}
+
+/* ============================================
+   Hero（顶部标题区）
+   ============================================ */
+.hero {
+  padding: 96px 0 72px;
+  max-width: 880px;
+}
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--meta);
+  margin-bottom: 24px;
+  /* 全页唯一一处 terracotta 出现位置 */
+  color: var(--accent);
+}
+
+.hero h1 {
+  font-family: var(--font-display);
+  font-size: 56px;
+  font-weight: 500;
+  line-height: 1.1;
+  letter-spacing: -0.015em;
+  color: var(--fg);
+  margin-bottom: 24px;
+}
+
+.hero p.lede {
+  font-size: 20px;
+  line-height: 1.6;
+  color: var(--fg-2);
+  max-width: 720px;
+  margin-bottom: 32px;
+}
+
+.hero .meta-line {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--meta);
+  letter-spacing: 0.02em;
+}
+
+/* ============================================
+   Palette（设计系统色板条带）
+   ============================================ */
+.palette {
+  margin: 72px 0 80px;
+}
+
+.palette h2 {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--meta);
+  margin-bottom: 20px;
+}
+
+.palette-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 80px);
+  gap: 12px;
+}
+
+.swatch {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.swatch-chip {
+  width: 80px;
+  height: 80px;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+}
+
+.swatch-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.swatch-label .hex {
+  display: block;
+  color: var(--fg-2);
+}
+
+/* ============================================
+   Screens（6 张屏幕卡 3×2 网格）
+   ============================================ */
+.screens {
+  margin-bottom: 80px;
+}
+
+.screens h2 {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--meta);
+  margin-bottom: 24px;
+}
+
+.screens-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  transition: transform var(--motion-base) var(--ease-standard),
+              border-color var(--motion-base) var(--ease-standard);
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+}
+
+/* 卡片顶部 mockup 缩略区 */
+.card-mockup {
+  aspect-ratio: 16 / 10;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-soft);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 通用 mockup 元素 */
+.m-line {
+  height: 8px;
+  background: var(--surface-warm);
+  border-radius: 4px;
+}
+
+.m-line.short { width: 40%; }
+.m-line.medium { width: 65%; }
+.m-line.long { width: 100%; }
+
+.m-search {
+  height: 28px;
+  background: var(--surface-warm);
+  border-radius: 6px;
+}
+
+.m-row {
+  height: 14px;
+  background: var(--surface-warm);
+  border-radius: 4px;
+  width: 100%;
+}
+
+.m-block {
+  background: var(--surface-warm);
+  border-radius: 6px;
+}
+
+/* 卡片底部信息区 */
+.card-body {
+  padding: 18px 20px 20px;
+}
+
+.card-num {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--meta);
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+
+.card-title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--fg);
+  margin-bottom: 4px;
+}
+
+.card-desc {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+/* 各种 mockup 变体 */
+.m-home {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.m-home .m-greet { height: 12px; width: 55%; }
+.m-home .m-shortcut-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.m-home .m-shortcut-row .m-block { aspect-ratio: 1; }
+.m-home .m-list { display: flex; flex-direction: column; gap: 6px; }
+.m-home .m-list .m-row { height: 10px; }
+
+.m-transfer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+}
+.m-transfer .m-drop {
+  flex: 1;
+  border: 1.5px dashed var(--border-soft);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 6px;
+}
+.m-transfer .m-drop .m-line { background: var(--surface); }
+.m-transfer .m-progress { height: 6px; background: var(--surface-warm); border-radius: 3px; overflow: hidden; }
+.m-transfer .m-progress .m-bar { height: 100%; width: 62%; background: var(--accent); border-radius: 3px; }
+
+.m-prompts {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  height: 100%;
+}
+.m-prompts .m-block { aspect-ratio: 1.4; }
+.m-prompts .m-block .m-line { background: var(--surface); margin: 6px 0; }
+.m-prompts .m-block .m-line.short { width: 50%; }
+
+.m-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.m-devices .m-device {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--surface-warm);
+  border-radius: 6px;
+}
+.m-devices .m-device .m-dot {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--surface);
+}
+.m-devices .m-device .m-line { background: var(--surface); height: 6px; flex: 1; }
+
+.m-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.m-settings .m-section {
+  display: flex; flex-direction: column; gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.m-settings .m-section:last-child { border-bottom: none; }
+.m-settings .m-toggle {
+  width: 22px; height: 12px; background: var(--surface-warm); border-radius: 6px;
+  margin-left: auto;
+}
+.m-settings .m-row { display: flex; align-items: center; }
+.m-settings .m-row .m-line { background: var(--surface-warm); height: 6px; }
+
+.m-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  height: 100%;
+  justify-content: center;
+}
+.m-welcome .m-logo {
+  width: 32px; height: 32px; border-radius: 8px;
+  background: var(--surface-warm);
+  margin-bottom: 4px;
+}
+.m-welcome .m-line { background: var(--surface-warm); }
+.m-welcome .m-cta {
+  margin-top: 8px;
+  width: 60px; height: 18px;
+  background: var(--accent-soft);
+  border-radius: 4px;
+}
+
+/* ============================================
+   Footer（页脚）
+   ============================================ */
+.footer {
+  margin-top: 80px;
+  padding: 32px 0 64px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--meta);
+  letter-spacing: 0.02em;
+}
+
+.footer-left {
+  color: var(--meta);
+}
+
+.footer-right {
+  display: flex;
+  gap: 24px;
+}
+
+.footer-right a {
+  font-size: 12px;
+  color: var(--fg-2);
+  text-decoration: underline;
+  text-decoration-style: dashed;
+  text-decoration-color: var(--border-soft);
+  text-underline-offset: 4px;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.footer-right a:hover {
+  color: var(--accent);
+}
+
+/* ============================================
+   Responsive（响应式断点）
+   ============================================ */
+@media (max-width: 960px) {
+  .screens-grid { grid-template-columns: repeat(2, 1fr); }
+  .palette-grid { grid-template-columns: repeat(4, 80px); }
+}
+
+@media (max-width: 640px) {
+  .page { padding: 0 24px; }
+  .hero { padding: 64px 0 48px; }
+  .hero h1 { font-size: 40px; }
+  .hero p.lede { font-size: 17px; }
+  .screens-grid { grid-template-columns: 1fr; }
+  .palette-grid { grid-template-columns: repeat(4, 64px); }
+  .palette-grid .swatch-chip { width: 64px; height: 64px; }
+  .footer { flex-direction: column; gap: 16px; align-items: flex-start; }
+}
+
+/* ===== Theme toggle ===== */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 24px 0 0;
+}
+
+.theme-toggle {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  color: var(--fg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  cursor: pointer;
+  padding: 0;
+  transition: background 150ms, color 150ms, border-color 150ms;
+}
+.theme-toggle:hover {
+  background: var(--surface-warm);
+  color: var(--accent);
+  border-color: var(--border);
+}
+.theme-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.theme-toggle svg { width: 16px; height: 16px; display: block; }
+.theme-toggle .icon-moon { display: none; }
+[data-theme="dark"] .theme-toggle .icon-sun { display: none; }
+[data-theme="dark"] .theme-toggle .icon-moon { display: block; }
+</style>
+</head>
+<body>
+
+<main class="page">
+
+  <!-- ===== 顶部条（主题切换） ===== -->
+  <div class="topbar">
+    <button class="theme-toggle" type="button" aria-label="切换主题" title="切换主题">
+      <svg class="icon-sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="8" cy="8" r="3"/>
+        <path d="M8 1.5v1.5"/>
+        <path d="M8 13v1.5"/>
+        <path d="M1.5 8h1.5"/>
+        <path d="M13 8h1.5"/>
+        <path d="M3.3 3.3l1.1 1.1"/>
+        <path d="M11.6 11.6l1.1 1.1"/>
+        <path d="M3.3 12.7l1.1-1.1"/>
+        <path d="M11.6 4.4l1.1-1.1"/>
+      </svg>
+      <svg class="icon-moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z"/>
+      </svg>
+    </button>
+  </div>
+
+  <!-- ===== Hero 区 ===== -->
+  <section class="hero">
+    <div class="eyebrow">RETHINK · CLAUDE PARTNER · 2026</div>
+    <h1>为 Claude 重新设计的桌面伙伴。</h1>
+    <p class="lede">六个重新思考的屏幕。从一个安静的暖米色画布开始，每一个交互都尊重你已经在做的工作。点开任意一张卡片查看完整设计。</p>
+    <div class="meta-line">6 screens · 1 design system · Anthropic Serif / Sans / Mono</div>
+  </section>
+
+  <!-- ===== 设计系统色板 ===== -->
+  <section class="palette">
+    <h2>设计系统</h2>
+    <div class="palette-grid">
+      <div class="swatch">
+        <div class="swatch-chip" style="background: #f5f4ed;"></div>
+        <div class="swatch-label"><span class="hex">#f5f4ed</span>Parchment</div>
+      </div>
+      <div class="swatch">
+        <div class="swatch-chip" style="background: #faf9f5;"></div>
+        <div class="swatch-label"><span class="hex">#faf9f5</span>Ivory</div>
+      </div>
+      <div class="swatch">
+        <div class="swatch-chip" style="background: #e8e6dc;"></div>
+        <div class="swatch-label"><span class="hex">#e8e6dc</span>Warm Sand</div>
+      </div>
+      <div class="swatch">
+        <div class="swatch-chip" style="background: #141413;"></div>
+        <div class="swatch-label"><span class="hex">#141413</span>Near Black</div>
+      </div>
+      <div class="swatch">
+        <div class="swatch-chip" style="background: #5e5d59;"></div>
+        <div class="swatch-label"><span class="hex">#5e5d59</span>Olive Gray</div>
+      </div>
+      <div class="swatch">
+        <div class="swatch-chip" style="background: #c96442;"></div>
+        <div class="swatch-label"><span class="hex">#c96442</span>Terracotta</div>
+      </div>
+      <div class="swatch">
+        <div class="swatch-chip" style="background: #b53333;"></div>
+        <div class="swatch-label"><span class="hex">#b53333</span>Crimson</div>
+      </div>
+      <div class="swatch">
+        <div class="swatch-chip" style="background: #3898ec;"></div>
+        <div class="swatch-label"><span class="hex">#3898ec</span>Focus Blue</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 屏幕卡片网格 ===== -->
+  <section class="screens">
+    <h2>Screens</h2>
+    <div class="screens-grid">
+
+      <!-- 01 Home -->
+      <a class="card" href="01-main.html">
+        <div class="card-mockup m-home">
+          <div class="m-greet m-line"></div>
+          <div class="m-shortcut-row">
+            <div class="m-block"></div>
+            <div class="m-block"></div>
+            <div class="m-block"></div>
+          </div>
+          <div class="m-list">
+            <div class="m-row"></div>
+            <div class="m-row"></div>
+            <div class="m-row"></div>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="card-num">01</div>
+          <div class="card-title">Home</div>
+          <div class="card-desc">欢迎卡片 + 快捷入口 + 最近活动</div>
+        </div>
+      </a>
+
+      <!-- 02 Transfer -->
+      <a class="card" href="02-transfer.html">
+        <div class="card-mockup m-transfer">
+          <div class="m-drop">
+            <div class="m-line short"></div>
+            <div class="m-line medium"></div>
+          </div>
+          <div class="m-progress"><div class="m-bar"></div></div>
+        </div>
+        <div class="card-body">
+          <div class="card-num">02</div>
+          <div class="card-title">Transfer</div>
+          <div class="card-desc">拖拽文件到设备，实时进度</div>
+        </div>
+      </a>
+
+      <!-- 03 Prompts -->
+      <a class="card" href="03-prompts.html">
+        <div class="card-mockup m-prompts">
+          <div class="m-block"><div class="m-line short"></div><div class="m-line short"></div></div>
+          <div class="m-block"><div class="m-line short"></div><div class="m-line short"></div></div>
+          <div class="m-block"><div class="m-line short"></div><div class="m-line short"></div></div>
+          <div class="m-block"><div class="m-line short"></div><div class="m-line short"></div></div>
+        </div>
+        <div class="card-body">
+          <div class="card-num">03</div>
+          <div class="card-title">Prompts</div>
+          <div class="card-desc">32 个精心策划的提示词，多设备同步</div>
+        </div>
+      </a>
+
+      <!-- 04 Devices -->
+      <a class="card" href="04-devices.html">
+        <div class="card-mockup m-devices">
+          <div class="m-device"><div class="m-dot"></div><div class="m-line"></div></div>
+          <div class="m-device"><div class="m-dot"></div><div class="m-line"></div></div>
+          <div class="m-device"><div class="m-dot"></div><div class="m-line"></div></div>
+        </div>
+        <div class="card-body">
+          <div class="card-num">04</div>
+          <div class="card-title">Devices</div>
+          <div class="card-desc">扫描并配对局域网设备</div>
+        </div>
+      </a>
+
+      <!-- 05 Settings -->
+      <a class="card" href="05-settings.html">
+        <div class="card-mockup m-settings">
+          <div class="m-section">
+            <div class="m-row"><div class="m-line medium"></div><div class="m-toggle"></div></div>
+            <div class="m-row"><div class="m-line short"></div><div class="m-toggle"></div></div>
+          </div>
+          <div class="m-section">
+            <div class="m-row"><div class="m-line medium"></div></div>
+            <div class="m-row"><div class="m-line short"></div></div>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="card-num">05</div>
+          <div class="card-title">Settings</div>
+          <div class="card-desc">网络、快捷键、版本</div>
+        </div>
+      </a>
+
+      <!-- 06 Welcome -->
+      <a class="card" href="06-welcome.html">
+        <div class="card-mockup m-welcome">
+          <div class="m-logo"></div>
+          <div class="m-line short"></div>
+          <div class="m-line medium"></div>
+          <div class="m-cta"></div>
+        </div>
+        <div class="card-body">
+          <div class="card-num">06</div>
+          <div class="card-title">Welcome</div>
+          <div class="card-desc">首次启动引导，800×580 小窗口</div>
+        </div>
+      </a>
+
+    </div>
+  </section>
+
+  <!-- ===== 页脚 ===== -->
+  <footer class="footer">
+    <div class="footer-left">Claude Partner · 高保真原型 · 2026-06-10</div>
+    <div class="footer-right">
+      <a href="DESIGN.md">DESIGN.md</a>
+      <a href="javascript:void(0)">Revert</a>
+      <a href="javascript:void(0)">Open in Finder</a>
+    </div>
+  </footer>
+
+</main>
+
+<script>
+(function() {
+  var STORAGE_KEY = 'cp-theme';
+  function getStored() {
+    try { return localStorage.getItem(STORAGE_KEY) || 'system'; } catch (e) { return 'system'; }
+  }
+  function setStored(v) {
+    try { localStorage.setItem(STORAGE_KEY, v); } catch (e) {}
+  }
+  function effective(t) {
+    if (t === 'system') {
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    return t;
+  }
+  function apply() {
+    document.documentElement.setAttribute('data-theme', effective(getStored()));
+  }
+  apply();
+  window.addEventListener('storage', function(e) {
+    if (e.key === STORAGE_KEY) apply();
+  });
+  var mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', function() {
+    if (getStored() === 'system') apply();
+  });
+})();
+</script>
+
+<script>
+(function() {
+  var BTN_KEY = 'cp-theme-btn';
+  function getStored() {
+    try { return localStorage.getItem(BTN_KEY); } catch (e) { return null; }
+  }
+  function setStored(v) {
+    try { localStorage.setItem(BTN_KEY, v); } catch (e) {}
+  }
+  var btn = document.querySelector('.theme-toggle');
+  if (!btn) return;
+  btn.addEventListener('click', function() {
+    var current = document.documentElement.getAttribute('data-theme');
+    var isDark = current === 'dark';
+    var next = isDark ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    setStored(next);
+    // 通知其他打开的 tab 同步：写到一个独立的 key 触发 storage 事件
+    try {
+      var original = localStorage.getItem('cp-theme');
+      localStorage.setItem('cp-theme', original || 'system');
+    } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,929 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>File Transfer — claude-partner</title>
+<style>
+  /* ============== Design Tokens ============== */
+  :root {
+    --bg: #f5f4ed;
+    --surface: #faf9f5;
+    --surface-warm: #e8e6dc;
+    --fg: #141413;
+    --fg-2: #3d3d3a;
+    --muted: #5e5d59;
+    --meta: #87867f;
+    --border: #f0eee6;
+    --border-soft: #e8e6dc;
+    --accent: #c96442;
+    --accent-on: #faf9f5;
+    --accent-soft: color-mix(in oklab, var(--accent) 14%, transparent);
+    --success: #17a34a;
+    --warn: #eab308;
+    --danger: #b53333;
+    --font-display: "Anthropic Serif", Georgia, "Times New Roman", serif;
+    --font-body: "Anthropic Sans", "Arial", system-ui, -apple-system, sans-serif;
+    --font-mono: "Anthropic Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+    --motion-fast: 150ms;
+    --motion-base: 200ms;
+    --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  [data-theme="dark"] {
+    --bg: #1f1d1b;
+    --surface: #272522;
+    --surface-warm: #322f2c;
+    --fg: #faf9f5;
+    --fg-2: #d8d6cf;
+    --muted: #a8a59e;
+    --meta: #787671;
+    --border: #2e2b29;
+    --border-soft: #262422;
+    --accent: #d97757;
+    --accent-on: #141413;
+    --accent-soft: color-mix(in oklab, var(--accent) 22%, transparent);
+    --success: #4ade80;
+    --warn: #facc15;
+    --danger: #ef6b6b;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+
+  body {
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--fg);
+    background: #1a1815;
+    background-image:
+      radial-gradient(ellipse 80% 60% at 30% 10%, rgba(201,100,66,0.08), transparent 60%),
+      radial-gradient(ellipse 60% 60% at 80% 90%, rgba(232,230,220,0.04), transparent 60%);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+  }
+
+  /* ============== Window Chrome ============== */
+  .window {
+    width: 1180px;
+    height: 760px;
+    background: var(--bg);
+    border-radius: 12px;
+    box-shadow:
+      0 32px 80px rgba(0,0,0,0.5),
+      inset 0 1px 0 rgba(255,255,255,0.05);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .titlebar {
+    height: 44px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 16px;
+    -webkit-app-region: drag;
+    user-select: none;
+  }
+  .traffic-lights { display: flex; gap: 8px; }
+  .traffic-lights span {
+    width: 12px; height: 12px; border-radius: 50%;
+    display: block;
+  }
+  .traffic-lights .red    { background: #ff5f57; }
+  .traffic-lights .yellow { background: #febc2e; }
+  .traffic-lights .green  { background: #28c840; }
+
+  .titlebar-title {
+    flex: 1;
+    text-align: center;
+    font-size: 13px;
+    color: var(--muted);
+    letter-spacing: 0.01em;
+  }
+  .titlebar-spacer { width: 60px; }
+
+  /* ============== Layout ============== */
+  .app {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+  }
+
+  /* ============== Sidebar ============== */
+  .sidebar {
+    width: 240px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 16px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 8px 24px;
+  }
+  .brand-mark {
+    width: 28px; height: 28px;
+    border-radius: 8px;
+    background: var(--fg);
+    color: var(--bg);
+    display: grid; place-items: center;
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 500;
+  }
+  .brand-name {
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--fg);
+  }
+
+  .nav { display: flex; flex-direction: column; gap: 2px; }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    color: var(--fg-2);
+    font-size: 14px;
+    cursor: pointer;
+    transition: background var(--motion-fast) var(--ease-standard);
+  }
+  .nav-item:hover { background: var(--surface-warm); }
+  .nav-item.active {
+    background: var(--accent);
+    color: var(--accent-on);
+  }
+  .nav-item.active .nav-icon { color: var(--accent-on); }
+  .nav-icon {
+    width: 16px; height: 16px;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+  .nav-item.active .nav-icon { color: var(--accent-on); }
+
+  .sidebar-status {
+    margin-top: auto;
+    padding: 14px;
+    background: var(--surface-warm);
+    border-radius: 10px;
+    font-size: 12px;
+    color: var(--fg-2);
+    line-height: 1.7;
+  }
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .status-row + .status-row { margin-top: 6px; }
+  .status-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--success);
+  }
+  .status-meta { color: var(--meta); font-size: 11px; }
+
+  /* ============== Main ============== */
+  .main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 32px 40px 40px;
+  }
+
+  /* Page Header */
+  [data-od-id="page-header"] { margin-bottom: 28px; }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  h1 {
+    font-family: var(--font-display);
+    font-size: 32px;
+    font-weight: 500;
+    line-height: 1.15;
+    color: var(--fg);
+    letter-spacing: -0.01em;
+  }
+  .lead {
+    margin-top: 8px;
+    font-size: 14px;
+    color: var(--muted);
+    line-height: 1.6;
+    max-width: 640px;
+  }
+
+  /* ============== Drop Zone + Devices ============== */
+  [data-od-id="drop-zone"] {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 32px;
+  }
+
+  .drop-area {
+    background: var(--surface);
+    border: 2px dashed var(--border-soft);
+    border-radius: 16px;
+    padding: 48px 32px;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 280px;
+    transition: border-color var(--motion-base) var(--ease-standard),
+                background var(--motion-base) var(--ease-standard);
+  }
+  .drop-area:hover {
+    border-color: var(--accent);
+    background: var(--surface-warm);
+  }
+  .drop-icon {
+    width: 48px; height: 48px;
+    color: var(--muted);
+    margin-bottom: 18px;
+  }
+  .drop-title {
+    font-family: var(--font-display);
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--fg);
+    margin-bottom: 14px;
+  }
+  .drop-or {
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+  .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border-soft);
+    border-radius: 8px;
+    color: var(--fg);
+    font-family: var(--font-body);
+    font-size: 13px;
+    cursor: pointer;
+    transition: background var(--motion-fast) var(--ease-standard);
+  }
+  .btn-secondary:hover { background: var(--surface-warm); }
+  .drop-hint {
+    margin-top: 22px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--meta);
+    letter-spacing: 0.02em;
+  }
+
+  /* Devices panel */
+  .devices-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 22px;
+    min-height: 280px;
+  }
+  .devices-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    color: var(--meta);
+    text-transform: uppercase;
+    margin-bottom: 14px;
+    padding: 0 4px;
+  }
+  .device-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: border-color var(--motion-fast) var(--ease-standard),
+                background var(--motion-fast) var(--ease-standard);
+  }
+  .device-card:last-child { margin-bottom: 0; }
+  .device-card:hover { background: var(--surface-warm); }
+  .device-card.selected {
+    border: 2px solid var(--accent);
+    padding: 11px 13px;
+  }
+  .device-avatar {
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    background: var(--surface-warm);
+    display: grid; place-items: center;
+    color: var(--fg-2);
+    flex-shrink: 0;
+  }
+  .device-info { flex: 1; min-width: 0; }
+  .device-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg);
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .device-meta {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--meta);
+  }
+  .device-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+  .device-status .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+  }
+  .dot.online { background: var(--success); }
+  .dot.offline { background: var(--meta); }
+  .device-card.offline { opacity: 0.65; }
+  .device-card.offline .device-name { color: var(--muted); }
+
+  /* ============== Active Transfers ============== */
+  [data-od-id="active-transfers"] {
+    margin-bottom: 32px;
+  }
+  .section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  h3 {
+    font-family: var(--font-display);
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--fg);
+    line-height: 1.2;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: var(--surface-warm);
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-2);
+    letter-spacing: 0.02em;
+  }
+  .badge .pulse {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 1.4s var(--ease-standard) infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
+
+  .transfer-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 10px;
+  }
+  .transfer-card:last-child { margin-bottom: 0; }
+  .transfer-top {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  .file-icon {
+    width: 36px; height: 36px;
+    background: var(--surface-warm);
+    border-radius: 8px;
+    display: grid; place-items: center;
+    color: var(--fg-2);
+    flex-shrink: 0;
+  }
+  .file-info { flex: 1; min-width: 0; }
+  .file-name {
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--fg);
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .file-meta {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--meta);
+    letter-spacing: 0.01em;
+  }
+  .transfer-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+  .transfer-speed,
+  .transfer-eta {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg-2);
+    min-width: 64px;
+    text-align: right;
+  }
+  .transfer-eta { color: var(--muted); }
+  .btn-pause,
+  .btn-cancel {
+    padding: 6px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border-soft);
+    border-radius: 8px;
+    color: var(--fg-2);
+    font-family: var(--font-body);
+    font-size: 12px;
+    cursor: pointer;
+    transition: background var(--motion-fast) var(--ease-standard);
+  }
+  .btn-pause:hover,
+  .btn-cancel:hover { background: var(--surface-warm); }
+
+  .progress {
+    height: 6px;
+    background: var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 999px;
+    transition: width var(--motion-base) var(--ease-standard);
+  }
+  .progress-fill.empty { background: transparent; }
+
+  .progress-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 10px;
+  }
+  .progress-row .progress { flex: 1; }
+  .progress-pct {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+    min-width: 36px;
+    text-align: right;
+  }
+
+  /* ============== Transfer History ============== */
+  [data-od-id="transfer-history"] { }
+  .history {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 4px 20px;
+  }
+  .history-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 0;
+    border-top: 1px solid var(--border);
+  }
+  .history-row:first-child { border-top: none; }
+  .history-time {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--meta);
+    min-width: 84px;
+  }
+  .history-status {
+    width: 18px; height: 18px;
+    display: grid; place-items: center;
+    flex-shrink: 0;
+  }
+  .history-status.ok { color: var(--success); }
+  .history-status.fail { color: var(--danger); }
+  .history-file {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg);
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .history-target {
+    font-size: 12px;
+    color: var(--muted);
+    min-width: 180px;
+  }
+  .history-target .arrow { color: var(--meta); margin: 0 6px; }
+  .history-meta {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--meta);
+    min-width: 110px;
+    text-align: right;
+  }
+  .history-meta.fail { color: var(--danger); }
+
+  /* ===== Theme toggle (titlebar) ===== */
+  .theme-toggle {
+    -webkit-app-region: no-drag;
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface);
+    color: var(--fg-2);
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    cursor: pointer;
+    padding: 0;
+    transition: background 150ms, color 150ms, border-color 150ms;
+  }
+  .theme-toggle:hover {
+    background: var(--surface-warm);
+    color: var(--accent);
+    border-color: var(--border);
+  }
+  .theme-toggle:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+  .theme-toggle svg { width: 14px; height: 14px; display: block; }
+  .theme-toggle .icon-moon { display: none; }
+  [data-theme="dark"] .theme-toggle .icon-sun { display: none; }
+  [data-theme="dark"] .theme-toggle .icon-moon { display: block; }
+</style>
+</head>
+<body>
+  <div class="window">
+    <!-- Titlebar -->
+    <div class="titlebar">
+      <div class="traffic-lights">
+        <span class="red"></span>
+        <span class="yellow"></span>
+        <span class="green"></span>
+      </div>
+      <div class="titlebar-title">File Transfer</div>
+      <button class="theme-toggle" type="button" aria-label="切换主题" title="切换主题">
+        <svg class="icon-sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="8" cy="8" r="3"/>
+          <path d="M8 1.5v1.5"/>
+          <path d="M8 13v1.5"/>
+          <path d="M1.5 8h1.5"/>
+          <path d="M13 8h1.5"/>
+          <path d="M3.3 3.3l1.1 1.1"/>
+          <path d="M11.6 11.6l1.1 1.1"/>
+          <path d="M3.3 12.7l1.1-1.1"/>
+          <path d="M11.6 4.4l1.1-1.1"/>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z"/>
+        </svg>
+      </button>
+      <div class="titlebar-spacer"></div>
+    </div>
+
+    <div class="app">
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">c</div>
+          <div class="brand-name">claude-partner</div>
+        </div>
+
+        <nav class="nav">
+          <div class="nav-item">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 10.5 12 3l9 7.5"/>
+              <path d="M5 9.5V21h14V9.5"/>
+            </svg>
+            <span>Home</span>
+          </div>
+          <div class="nav-item active">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3v12"/>
+              <path d="m7 10 5 5 5-5"/>
+              <path d="M5 21h14"/>
+            </svg>
+            <span>Transfer</span>
+          </div>
+          <div class="nav-item">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="4" y="4" width="16" height="16" rx="2"/>
+              <path d="M8 9h8M8 13h8M8 17h5"/>
+            </svg>
+            <span>Prompts</span>
+          </div>
+          <div class="nav-item">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="6" width="13" height="11" rx="1.5"/>
+              <rect x="14" y="9" width="7" height="11" rx="1.5"/>
+            </svg>
+            <span>Devices</span>
+          </div>
+          <div class="nav-item">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>
+            </svg>
+            <span>Settings</span>
+          </div>
+        </nav>
+
+        <div class="sidebar-status">
+          <div class="status-row">
+            <span class="status-dot"></span>
+            <span>3 devices online</span>
+          </div>
+          <div class="status-row">
+            <span class="status-meta">Last sync 2 min ago</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <main class="main">
+
+        <!-- Page Header -->
+        <section data-od-id="page-header">
+          <div class="eyebrow">Transfer</div>
+          <h1>File Transfer</h1>
+          <p class="lead">把文件拖到下面，或选一台设备开始传送。所有传输走局域网，断点可续传。</p>
+        </section>
+
+        <!-- Drop Zone + Destination -->
+        <section data-od-id="drop-zone">
+
+          <!-- Left: Drop -->
+          <div class="drop-area">
+            <svg class="drop-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M24 30V8"/>
+              <path d="m17 15 7-7 7 7"/>
+              <path d="M8 32v6a2 2 0 0 0 2 2h28a2 2 0 0 0 2-2v-6"/>
+            </svg>
+            <div class="drop-title">拖拽文件到此处</div>
+            <div class="drop-or">或者</div>
+            <button class="btn-secondary">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <path d="M14 2v6h6"/>
+              </svg>
+              <span>选择文件</span>
+            </button>
+            <div class="drop-hint">支持任意大小 · 自动分块 1MB · 断点可续传 · SHA256 校验</div>
+          </div>
+
+          <!-- Right: Destination -->
+          <div class="devices-panel">
+            <div class="devices-eyebrow">Destination</div>
+
+            <div class="device-card selected">
+              <div class="device-avatar">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="3" width="20" height="14" rx="2"/>
+                  <path d="M8 21h8M12 17v4"/>
+                </svg>
+              </div>
+              <div class="device-info">
+                <div class="device-name">Hans's iMac Studio</div>
+                <div class="device-meta">192.168.1.45 · Last seen just now</div>
+              </div>
+              <div class="device-status">
+                <span class="dot online"></span>
+                <span>online</span>
+              </div>
+            </div>
+
+            <div class="device-card">
+              <div class="device-avatar">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="4" width="18" height="12" rx="1.5"/>
+                  <path d="M2 20h20M8 16v4M16 16v4"/>
+                </svg>
+              </div>
+              <div class="device-info">
+                <div class="device-name">Hans's Ubuntu Workstation</div>
+                <div class="device-meta">192.168.1.51 · Last seen 1 min ago</div>
+              </div>
+              <div class="device-status">
+                <span class="dot online"></span>
+                <span>online</span>
+              </div>
+            </div>
+
+            <div class="device-card offline">
+              <div class="device-avatar">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="4" y="3" width="16" height="12" rx="1.5"/>
+                  <path d="M8 19h8M12 15v4"/>
+                </svg>
+              </div>
+              <div class="device-info">
+                <div class="device-name">Living Room Mac mini</div>
+                <div class="device-meta">192.168.1.30 · Last seen 2h ago</div>
+              </div>
+              <div class="device-status">
+                <span class="dot offline"></span>
+                <span>offline</span>
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- Active Transfers -->
+        <section data-od-id="active-transfers">
+          <div class="section-head">
+            <h3>活动传输</h3>
+            <div class="badge"><span class="pulse"></span>1 active</div>
+          </div>
+
+          <!-- Active -->
+          <div class="transfer-card">
+            <div class="transfer-top">
+              <div class="file-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                  <path d="M14 2v6h6"/>
+                  <path d="M10 13a2 2 0 1 0 2-2 2 2 0 0 0-2 2Zm-1 4h6"/>
+                </svg>
+              </div>
+              <div class="file-info">
+                <div class="file-name">claude-partner-v0.4.2.zip</div>
+                <div class="file-meta">245 MB · → Hans's Ubuntu Workstation</div>
+              </div>
+              <div class="transfer-right">
+                <div class="transfer-speed">12.4 MB/s</div>
+                <div class="transfer-eta">ETA 4s</div>
+                <button class="btn-pause">暂停</button>
+              </div>
+            </div>
+            <div class="progress-row">
+              <div class="progress">
+                <div class="progress-fill" style="width: 78%"></div>
+              </div>
+              <div class="progress-pct">78%</div>
+            </div>
+          </div>
+
+          <!-- Queued -->
+          <div class="transfer-card">
+            <div class="transfer-top">
+              <div class="file-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                  <path d="M14 2v6h6"/>
+                  <path d="M9 14h6M9 17h4"/>
+                </svg>
+              </div>
+              <div class="file-info">
+                <div class="file-name">presentation-deck.key</div>
+                <div class="file-meta">38 MB · → Hans's iMac Studio · 排队中</div>
+              </div>
+              <div class="transfer-right">
+                <div class="transfer-speed">—</div>
+                <div class="transfer-eta">Queue · 1</div>
+                <button class="btn-cancel">取消</button>
+              </div>
+            </div>
+            <div class="progress-row">
+              <div class="progress">
+                <div class="progress-fill empty"></div>
+              </div>
+              <div class="progress-pct">0%</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- History -->
+        <section data-od-id="transfer-history">
+          <div class="section-head">
+            <h3>最近传输</h3>
+          </div>
+
+          <div class="history">
+            <div class="history-row">
+              <div class="history-time">10:42 AM</div>
+              <div class="history-status ok">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M20 6 9 17l-5-5"/>
+                </svg>
+              </div>
+              <div class="history-file">screenshot-2026-06-10.png</div>
+              <div class="history-target">→ Hans's iMac Studio</div>
+              <div class="history-meta">1.2 MB · 2s</div>
+            </div>
+
+            <div class="history-row">
+              <div class="history-time">10:15 AM</div>
+              <div class="history-status ok">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M20 6 9 17l-5-5"/>
+                </svg>
+              </div>
+              <div class="history-file">claude-partner-v0.4.2.zip</div>
+              <div class="history-target">→ Hans's Ubuntu Workstation</div>
+              <div class="history-meta">245 MB · 18s</div>
+            </div>
+
+            <div class="history-row">
+              <div class="history-time">Yesterday</div>
+              <div class="history-status fail">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M18 6 6 18M6 6l12 12"/>
+                </svg>
+              </div>
+              <div class="history-file">huge-dataset.csv</div>
+              <div class="history-target">→ Hans's iMac Studio</div>
+              <div class="history-meta fail">Failed · 设备离线</div>
+            </div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+  <script>
+(function() {
+  var STORAGE_KEY = 'cp-theme';
+  function getStored() {
+    try { return localStorage.getItem(STORAGE_KEY) || 'system'; } catch (e) { return 'system'; }
+  }
+  function setStored(v) {
+    try { localStorage.setItem(STORAGE_KEY, v); } catch (e) {}
+  }
+  function effective(t) {
+    if (t === 'system') {
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    return t;
+  }
+  function apply() {
+    document.documentElement.setAttribute('data-theme', effective(getStored()));
+  }
+  apply();
+  window.addEventListener('storage', function(e) {
+    if (e.key === STORAGE_KEY) apply();
+  });
+  var mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', function() {
+    if (getStored() === 'system') apply();
+  });
+})();
+  </script>
+<script>
+(function() {
+  var STORAGE_KEY = 'cp-theme';
+  var btn = document.querySelector('.theme-toggle');
+  if (!btn) return;
+  btn.addEventListener('click', function() {
+    var current = document.documentElement.getAttribute('data-theme');
+    var isDark = current === 'dark';
+    var next = isDark ? 'light' : 'dark';
+    if (next === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+    try { localStorage.setItem(STORAGE_KEY, next); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

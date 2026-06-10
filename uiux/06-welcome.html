@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>06 — Welcome / Claude Partner</title>
+<style>
+  :root {
+    --bg: #f5f4ed;
+    --surface: #faf9f5;
+    --surface-warm: #e8e6dc;
+    --fg: #141413;
+    --fg-2: #3d3d3a;
+    --muted: #5e5d59;
+    --meta: #87867f;
+    --border: #f0eee6;
+    --border-soft: #e8e6dc;
+    --accent: #c96442;
+    --accent-on: #faf9f5;
+    --accent-soft: color-mix(in oklab, var(--accent) 14%, transparent);
+    --success: #17a34a;
+    --warn: #eab308;
+    --danger: #b53333;
+    --font-display: "Anthropic Serif", Georgia, "Times New Roman", serif;
+    --font-body: "Anthropic Sans", "Arial", system-ui, -apple-system, sans-serif;
+    --font-mono: "Anthropic Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+    --motion-fast: 150ms;
+    --motion-base: 200ms;
+    --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  [data-theme="dark"] {
+    --bg: #1f1d1b;
+    --surface: #272522;
+    --surface-warm: #322f2c;
+    --fg: #faf9f5;
+    --fg-2: #d8d6cf;
+    --muted: #a8a59e;
+    --meta: #787671;
+    --border: #2e2b29;
+    --border-soft: #262422;
+    --accent: #d97757;
+    --accent-on: #141413;
+    --accent-soft: color-mix(in oklab, var(--accent) 22%, transparent);
+    --success: #4ade80;
+    --warn: #facc15;
+    --danger: #ef6b6b;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    font-family: var(--font-body);
+    color: var(--fg);
+    background: #1a1815;
+    background-image:
+      radial-gradient(ellipse 900px 600px at 50% 30%, rgba(201, 100, 66, 0.06), transparent 60%),
+      radial-gradient(ellipse 1200px 800px at 50% 50%, rgba(245, 244, 237, 0.04), transparent 70%);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 40px 20px;
+  }
+
+  /* ===== Window chrome ===== */
+  .window {
+    width: 880px;
+    height: 580px;
+    background: var(--surface);
+    border-radius: 12px;
+    box-shadow:
+      0 32px 80px rgba(0, 0, 0, 0.5),
+      0 8px 24px rgba(0, 0, 0, 0.35),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid rgba(255, 255, 255, 0.04);
+  }
+
+  .titlebar {
+    height: 44px;
+    flex: 0 0 44px;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    background: linear-gradient(180deg, rgba(232, 230, 220, 0.4), rgba(232, 230, 220, 0));
+    border-bottom: 1px solid var(--border-soft);
+    -webkit-app-region: drag;
+    user-select: none;
+  }
+  .traffic-lights {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .light {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: inline-block;
+    box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.12);
+  }
+  .light.close { background: #ff5f57; }
+  .light.min   { background: #febc2e; }
+  .light.max   { background: #28c840; }
+
+  .titlebar-title {
+    flex: 1;
+    text-align: center;
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+    letter-spacing: 0.01em;
+  }
+
+  /* ===== Main ===== */
+  .main {
+    flex: 1;
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+    padding: 48px 56px 40px;
+  }
+
+  .card {
+    width: 100%;
+    max-width: 640px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ===== Hero ===== */
+  .hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    margin-bottom: 36px;
+  }
+  .brand {
+    width: 48px;
+    height: 48px;
+    border-radius: 24px;
+    background: var(--accent);
+    color: var(--accent-on);
+    display: grid;
+    place-items: center;
+    font-family: var(--font-display);
+    font-size: 24px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    box-shadow:
+      0 6px 16px rgba(201, 100, 66, 0.28),
+      inset 0 1px 0 rgba(255, 255, 255, 0.18);
+    margin-bottom: 20px;
+  }
+  .hero h1 {
+    font-family: var(--font-display);
+    font-weight: 500;
+    font-size: 32px;
+    line-height: 1.15;
+    margin: 0 0 8px;
+    color: var(--fg);
+    letter-spacing: -0.01em;
+  }
+  .hero .subtitle {
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.5;
+    color: var(--muted);
+    margin: 0;
+  }
+
+  /* ===== Feature list ===== */
+  .features {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin: 0 0 28px;
+  }
+  .feature {
+    display: grid;
+    grid-template-columns: 32px 1fr auto;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .feature:last-child { border-bottom: 0; }
+  .feature .icon-wrap {
+    width: 32px;
+    height: 32px;
+    border-radius: 16px;
+    background: var(--accent-soft);
+    display: grid;
+    place-items: center;
+    color: var(--accent);
+  }
+  .feature .icon-wrap svg {
+    width: 18px;
+    height: 18px;
+    stroke-width: 1.6;
+  }
+  .feature .text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .feature .title {
+    font-family: var(--font-display);
+    font-weight: 500;
+    font-size: 16px;
+    line-height: 1.2;
+    color: var(--fg);
+  }
+  .feature .desc {
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--muted);
+  }
+  .feature .meta {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1;
+    color: var(--meta);
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: var(--surface-warm);
+    white-space: nowrap;
+  }
+
+  /* ===== CTA ===== */
+  .cta {
+    border-top: 1px solid var(--border-soft);
+    padding-top: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .hint {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--meta);
+    letter-spacing: 0.01em;
+  }
+  .cta-buttons {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .btn {
+    font-family: var(--font-body);
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1;
+    padding: 10px 18px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background var(--motion-fast) var(--ease-standard),
+                border-color var(--motion-fast) var(--ease-standard),
+                color var(--motion-fast) var(--ease-standard),
+                transform var(--motion-fast) var(--ease-standard);
+    white-space: nowrap;
+  }
+  .btn-ghost {
+    background: transparent;
+    color: var(--muted);
+    border-color: transparent;
+  }
+  .btn-ghost:hover {
+    color: var(--fg);
+    background: var(--surface-warm);
+  }
+  .btn-primary {
+    background: var(--accent);
+    color: var(--accent-on);
+    border-color: var(--accent);
+    box-shadow: 0 2px 8px rgba(201, 100, 66, 0.18);
+  }
+  .btn-primary:hover {
+    background: color-mix(in oklab, var(--accent) 88%, #000 0%);
+    transform: translateY(-1px);
+  }
+  .btn-primary:active { transform: translateY(0); }
+  .btn .arrow {
+    display: inline-block;
+    margin-left: 6px;
+    transition: transform var(--motion-fast) var(--ease-standard);
+  }
+  .btn-primary:hover .arrow { transform: translateX(2px); }
+
+  /* ===== Theme toggle (titlebar) ===== */
+  .theme-toggle {
+    -webkit-app-region: no-drag;
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface);
+    color: var(--fg-2);
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    cursor: pointer;
+    padding: 0;
+    transition: background 150ms, color 150ms, border-color 150ms;
+  }
+  .theme-toggle:hover {
+    background: var(--surface-warm);
+    color: var(--accent);
+    border-color: var(--border);
+  }
+  .theme-toggle:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+  .theme-toggle svg { width: 14px; height: 14px; display: block; }
+  .theme-toggle .icon-moon { display: none; }
+  [data-theme="dark"] .theme-toggle .icon-sun { display: none; }
+  [data-theme="dark"] .theme-toggle .icon-moon { display: block; }
+</style>
+</head>
+<body>
+  <div class="window" role="dialog" aria-label="欢迎使用 Claude Partner">
+    <div class="titlebar">
+      <div class="traffic-lights" aria-hidden="true">
+        <span class="light close"></span>
+        <span class="light min"></span>
+        <span class="light max"></span>
+      </div>
+      <div class="titlebar-title">Welcome</div>
+      <button class="theme-toggle" type="button" aria-label="切换主题" title="切换主题">
+        <svg class="icon-sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="8" cy="8" r="3"/>
+          <path d="M8 1.5v1.5"/>
+          <path d="M8 13v1.5"/>
+          <path d="M1.5 8h1.5"/>
+          <path d="M13 8h1.5"/>
+          <path d="M3.3 3.3l1.1 1.1"/>
+          <path d="M11.6 11.6l1.1 1.1"/>
+          <path d="M3.3 12.7l1.1-1.1"/>
+          <path d="M11.6 4.4l1.1-1.1"/>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z"/>
+        </svg>
+      </button>
+    </div>
+
+    <main class="main">
+      <div class="card">
+
+        <!-- Hero -->
+        <section class="hero" data-od-id="welcome-hero">
+          <div class="brand" aria-hidden="true">C</div>
+          <h1>欢迎使用 Claude Partner</h1>
+          <p class="subtitle">局域网内 Claude Code 用户的协作助手</p>
+        </section>
+
+        <!-- Features -->
+        <section class="features" data-od-id="feature-list" aria-label="核心特性">
+          <div class="feature">
+            <span class="icon-wrap" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 7h11l-3-3M20 17H9l3 3" />
+              </svg>
+            </span>
+            <div class="text">
+              <div class="title">局域网文件传输</div>
+              <div class="desc">在多台设备间拖拽文件，1MB 分块，断点续传</div>
+            </div>
+            <span class="meta">随时可用</span>
+          </div>
+
+          <div class="feature">
+            <span class="icon-wrap" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 12a8 8 0 0 1 14-5.3" />
+                <path d="M18 4v3.5h-3.5" />
+                <path d="M20 12a8 8 0 0 1-14 5.3" />
+                <path d="M6 20v-3.5h3.5" />
+              </svg>
+            </span>
+            <div class="text">
+              <div class="title">Prompt 跨设备同步</div>
+              <div class="desc">向量化时钟追踪修改，3 台设备自动保持一致</div>
+            </div>
+            <span class="meta">5 秒</span>
+          </div>
+
+          <div class="feature">
+            <span class="icon-wrap" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 7h3l2-2h6l2 2h3v12H4z" />
+                <circle cx="12" cy="13" r="3.5" />
+              </svg>
+            </span>
+            <div class="text">
+              <div class="title">区域截图</div>
+              <div class="desc">全局快捷键，框选后自动复制到剪贴板</div>
+            </div>
+            <span class="meta">⌘ ⇧ 4</span>
+          </div>
+        </section>
+
+        <!-- CTA -->
+        <section class="cta" data-od-id="welcome-cta">
+          <div class="hint">首次运行需要约 5 秒初始化</div>
+          <div class="cta-buttons">
+            <button type="button" class="btn btn-ghost">稍后设置</button>
+            <button type="button" class="btn btn-primary">
+              开始使用<span class="arrow">→</span>
+            </button>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+<script>
+(function() {
+  var STORAGE_KEY = 'cp-theme';
+  function getStored() {
+    try { return localStorage.getItem(STORAGE_KEY) || 'system'; } catch (e) { return 'system'; }
+  }
+  function setStored(v) {
+    try { localStorage.setItem(STORAGE_KEY, v); } catch (e) {}
+  }
+  function effective(t) {
+    if (t === 'system') {
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    return t;
+  }
+  function apply() {
+    document.documentElement.setAttribute('data-theme', effective(getStored()));
+  }
+  apply();
+  window.addEventListener('storage', function(e) {
+    if (e.key === STORAGE_KEY) apply();
+  });
+  var mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', function() {
+    if (getStored() === 'system') apply();
+  });
+})();
+</script>
+<script>
+(function() {
+  var STORAGE_KEY = 'cp-theme';
+  var btn = document.querySelector('.theme-toggle');
+  if (!btn) return;
+  btn.addEventListener('click', function() {
+    var current = document.documentElement.getAttribute('data-theme');
+    var isDark = current === 'dark';
+    var next = isDark ? 'light' : 'dark';
+    if (next === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+    try { localStorage.setItem(STORAGE_KEY, next); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,920 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Settings — Claude Partner</title>
+<style>
+  :root {
+    --bg: #f5f4ed;
+    --surface: #faf9f5;
+    --surface-warm: #e8e6dc;
+    --fg: #141413;
+    --fg-2: #3d3d3a;
+    --muted: #5e5d59;
+    --meta: #87867f;
+    --border: #f0eee6;
+    --border-soft: #e8e6dc;
+    --accent: #c96442;
+    --accent-on: #faf9f5;
+    --accent-soft: color-mix(in oklab, var(--accent) 14%, transparent);
+    --success: #17a34a;
+    --warn: #eab308;
+    --danger: #b53333;
+    --font-display: "Anthropic Serif", Georgia, "Times New Roman", serif;
+    --font-body: "Anthropic Sans", "Arial", system-ui, -apple-system, sans-serif;
+    --font-mono: "Anthropic Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+    --motion-fast: 150ms;
+    --motion-base: 200ms;
+    --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  [data-theme="dark"] {
+    --bg: #1f1d1b;
+    --surface: #272522;
+    --surface-warm: #322f2c;
+    --fg: #faf9f5;
+    --fg-2: #d8d6cf;
+    --muted: #a8a59e;
+    --meta: #787671;
+    --border: #2e2b29;
+    --border-soft: #262422;
+    --accent: #d97757;
+    --accent-on: #141413;
+    --accent-soft: color-mix(in oklab, var(--accent) 22%, transparent);
+    --success: #4ade80;
+    --warn: #facc15;
+    --danger: #ef6b6b;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: var(--font-body);
+    color: var(--fg);
+    background:
+      radial-gradient(ellipse 80% 60% at 20% 0%, rgba(201, 100, 66, 0.06), transparent 60%),
+      radial-gradient(ellipse 60% 50% at 100% 100%, rgba(232, 230, 220, 0.05), transparent 60%),
+      #1a1815;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .window {
+    width: 1100px;
+    height: 760px;
+    background: var(--bg);
+    border-radius: 12px;
+    box-shadow:
+      0 32px 80px rgba(0, 0, 0, 0.5),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Titlebar */
+  .titlebar {
+    height: 40px;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .traffic-lights { display: flex; gap: 8px; align-items: center; }
+  .traffic-lights .dot {
+    width: 12px; height: 12px; border-radius: 50%;
+    box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.12);
+  }
+  .traffic-lights .dot.red    { background: #ff5f57; }
+  .traffic-lights .dot.yellow { background: #febc2e; }
+  .traffic-lights .dot.green  { background: #28c840; }
+
+  .titlebar-title {
+    flex: 1;
+    text-align: center;
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+    letter-spacing: 0.01em;
+  }
+
+  .titlebar-action {
+    width: 60px;
+    display: flex;
+    justify-content: flex-end;
+  }
+  .titlebar-icon {
+    width: 18px; height: 18px;
+    color: var(--meta);
+  }
+
+  /* Body layout */
+  .body {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    min-height: 0;
+  }
+
+  /* Sidebar */
+  .sidebar {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 16px 12px;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px 18px 8px;
+  }
+  .brand-mark {
+    width: 28px; height: 28px;
+    border-radius: 8px;
+    background: var(--fg);
+    display: grid; place-items: center;
+    color: var(--bg);
+  }
+  .brand-name {
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--fg);
+    letter-spacing: -0.01em;
+  }
+  .brand-sub {
+    font-size: 11px;
+    color: var(--meta);
+    font-family: var(--font-mono);
+    margin-top: 1px;
+  }
+
+  .nav { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    color: var(--fg-2);
+    font-size: 13px;
+    font-weight: 450;
+    cursor: pointer;
+    transition: background var(--motion-fast) var(--ease-standard);
+  }
+  .nav-item:hover { background: var(--surface-warm); }
+  .nav-item .icon { width: 16px; height: 16px; color: var(--muted); flex-shrink: 0; }
+  .nav-item.active {
+    background: var(--accent-soft);
+    color: var(--fg);
+    font-weight: 500;
+  }
+  .nav-item.active .icon { color: var(--accent); }
+  .nav-item .badge {
+    margin-left: auto;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--meta);
+    background: var(--surface-warm);
+    border-radius: 4px;
+    padding: 1px 6px;
+  }
+
+  .sidebar-spacer { flex: 1; }
+
+  .status-card {
+    background: var(--surface-warm);
+    border-radius: 10px;
+    padding: 12px 12px 10px 12px;
+    margin-top: 12px;
+  }
+  .status-row {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--fg-2);
+  }
+  .status-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 22%, transparent);
+  }
+  .status-label { flex: 1; }
+  .status-value {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .status-row + .status-row { margin-top: 6px; }
+  .status-row.muted .status-value { color: var(--meta); }
+
+  /* Main */
+  .main {
+    overflow-y: auto;
+    background: var(--bg);
+  }
+  .main::-webkit-scrollbar { width: 8px; }
+  .main::-webkit-scrollbar-thumb { background: var(--border-soft); border-radius: 4px; }
+
+  .content {
+    padding: 36px 44px 32px 44px;
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 32px;
+    align-items: start;
+  }
+
+  /* Page header */
+  .page-header { grid-column: 1 / -1; margin-bottom: 8px; }
+  .eyebrow {
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--meta);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-bottom: 8px;
+  }
+  h1.page-title {
+    font-family: var(--font-display);
+    font-size: 32px;
+    font-weight: 500;
+    color: var(--fg);
+    margin: 0;
+    letter-spacing: -0.015em;
+    line-height: 1.1;
+  }
+
+  /* Tabs */
+  .tabs {
+    position: sticky;
+    top: 0;
+    padding-top: 4px;
+  }
+  .tab-list { display: flex; flex-direction: column; gap: 2px; }
+  .tab {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border-radius: 8px;
+    border-left: 3px solid transparent;
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 450;
+    cursor: pointer;
+    transition: all var(--motion-fast) var(--ease-standard);
+  }
+  .tab:hover { color: var(--fg-2); background: var(--surface); }
+  .tab.active {
+    background: var(--surface-warm);
+    border-left-color: var(--accent);
+    color: var(--fg);
+    font-weight: 500;
+  }
+  .tab .tab-hint {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--meta);
+  }
+
+  /* Panels */
+  .panel { display: flex; flex-direction: column; gap: 28px; min-width: 0; }
+
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 22px;
+  }
+
+  .section-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 14px;
+  }
+  .section h3 {
+    font-family: var(--font-display);
+    font-size: 17px;
+    font-weight: 500;
+    color: var(--fg);
+    margin: 0 0 4px 0;
+    letter-spacing: -0.005em;
+    line-height: 1.2;
+  }
+  .section .helper {
+    font-size: 12px;
+    color: var(--meta);
+    line-height: 1.5;
+  }
+
+  /* Fields */
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .field-label .label-text {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg);
+  }
+  .field-label .label-helper {
+    font-size: 12px;
+    color: var(--meta);
+  }
+  .field-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .input {
+    flex: 1;
+    font-family: var(--font-body);
+    font-size: 13px;
+    color: var(--fg);
+    background: var(--bg);
+    border: 1px solid var(--border-soft);
+    border-radius: 8px;
+    padding: 9px 12px;
+    outline: none;
+    transition: border-color var(--motion-fast) var(--ease-standard),
+      box-shadow var(--motion-fast) var(--ease-standard);
+  }
+  .input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .input.mono { font-family: var(--font-mono); font-size: 12.5px; color: var(--fg-2); }
+  .input[readonly] {
+    background: var(--surface-warm);
+    color: var(--fg-2);
+    cursor: default;
+  }
+  .link {
+    font-size: 12px;
+    color: var(--accent);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 6px 8px;
+    border-radius: 6px;
+    font-family: var(--font-body);
+    font-weight: 500;
+    transition: background var(--motion-fast) var(--ease-standard);
+  }
+  .link:hover { background: var(--accent-soft); }
+
+  .meta {
+    font-size: 11.5px;
+    font-family: var(--font-mono);
+    color: var(--meta);
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .meta .sep { color: var(--border-soft); }
+
+  /* Buttons */
+  .btn {
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 500;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: all var(--motion-fast) var(--ease-standard);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    line-height: 1.2;
+  }
+  .btn-ghost {
+    color: var(--fg-2);
+    background: transparent;
+    border-color: var(--border-soft);
+  }
+  .btn-ghost:hover { background: var(--surface-warm); }
+  .btn-primary {
+    background: var(--accent);
+    color: var(--accent-on);
+    border-color: var(--accent);
+  }
+  .btn-primary:hover {
+    background: color-mix(in oklab, var(--accent) 88%, var(--fg) 12%);
+  }
+
+  /* Toggles (rows) */
+  .toggle-list { display: flex; flex-direction: column; }
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .toggle-row:last-child { border-bottom: none; }
+  .toggle-row:first-child { padding-top: 4px; }
+  .toggle-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .toggle-text .label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg);
+  }
+  .toggle-text .sub {
+    font-size: 12px;
+    color: var(--meta);
+  }
+
+  /* Switch */
+  .switch {
+    position: relative;
+    width: 36px; height: 20px;
+    border-radius: 999px;
+    background: var(--border-soft);
+    border: 1px solid var(--border-soft);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background var(--motion-base) var(--ease-standard),
+      border-color var(--motion-base) var(--ease-standard);
+  }
+  .switch::after {
+    content: "";
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--surface);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+    transition: transform var(--motion-base) var(--ease-standard);
+  }
+  .switch.on {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .switch.on::after { transform: translateX(16px); }
+
+  /* Radio */
+  .radio-group {
+    display: flex;
+    gap: 4px;
+    background: var(--bg);
+    border: 1px solid var(--border-soft);
+    border-radius: 8px;
+    padding: 3px;
+    width: fit-content;
+  }
+  .radio {
+    position: relative;
+    padding: 6px 14px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--muted);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all var(--motion-fast) var(--ease-standard);
+  }
+  .radio:hover { color: var(--fg-2); }
+  .radio.active {
+    background: var(--surface);
+    color: var(--fg);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  }
+  .radio input { position: absolute; opacity: 0; pointer-events: none; }
+
+  /* Footer */
+  .footer {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    margin-top: 4px;
+    padding: 20px 0 4px 0;
+  }
+  .footer .dirty {
+    margin-right: auto;
+    font-size: 12px;
+    color: var(--warn);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .footer .dirty::before {
+    content: "";
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--warn);
+  }
+
+  /* ===== Theme toggle (titlebar) ===== */
+  .theme-toggle {
+    -webkit-app-region: no-drag;
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface);
+    color: var(--fg-2);
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    cursor: pointer;
+    padding: 0;
+    transition: background 150ms, color 150ms, border-color 150ms;
+  }
+  .theme-toggle:hover {
+    background: var(--surface-warm);
+    color: var(--accent);
+    border-color: var(--border);
+  }
+  .theme-toggle:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+  .theme-toggle svg { width: 14px; height: 14px; display: block; }
+  .theme-toggle .icon-moon { display: none; }
+  [data-theme="dark"] .theme-toggle .icon-sun { display: none; }
+  [data-theme="dark"] .theme-toggle .icon-moon { display: block; }
+</style>
+</head>
+<body>
+  <div class="window">
+    <!-- Titlebar -->
+    <div class="titlebar">
+      <div class="traffic-lights">
+        <span class="dot red"></span>
+        <span class="dot yellow"></span>
+        <span class="dot green"></span>
+      </div>
+      <div class="titlebar-title">Settings</div>
+      <div class="titlebar-action">
+        <svg class="titlebar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"></circle>
+          <path d="M20 20l-3.5-3.5"></path>
+        </svg>
+        <button class="theme-toggle" type="button" aria-label="切换主题" title="切换主题">
+          <svg class="icon-sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="8" cy="8" r="3"/>
+            <path d="M8 1.5v1.5"/>
+            <path d="M8 13v1.5"/>
+            <path d="M1.5 8h1.5"/>
+            <path d="M13 8h1.5"/>
+            <path d="M3.3 3.3l1.1 1.1"/>
+            <path d="M11.6 11.6l1.1 1.1"/>
+            <path d="M3.3 12.7l1.1-1.1"/>
+            <path d="M11.6 4.4l1.1-1.1"/>
+          </svg>
+          <svg class="icon-moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Body -->
+    <div class="body">
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 17l6-6 4 4 6-8"></path>
+              <circle cx="4" cy="17" r="1.2" fill="currentColor"></circle>
+              <circle cx="20" cy="7" r="1.2" fill="currentColor"></circle>
+            </svg>
+          </div>
+          <div>
+            <div class="brand-name">Claude Partner</div>
+            <div class="brand-sub">v0.4.2</div>
+          </div>
+        </div>
+
+        <nav class="nav">
+          <div class="nav-item">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 11.5L12 4l9 7.5"></path>
+              <path d="M5 10v9h14v-9"></path>
+            </svg>
+            <span>Home</span>
+          </div>
+          <div class="nav-item">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 12h12"></path>
+              <path d="M16 8l4 4-4 4"></path>
+              <path d="M20 4H8a4 4 0 0 0-4 4v0"></path>
+            </svg>
+            <span>Transfer</span>
+            <span class="badge">2</span>
+          </div>
+          <div class="nav-item">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 4h11l3 3v13H5z"></path>
+              <path d="M8 9h8M8 13h8M8 17h5"></path>
+            </svg>
+            <span>Prompts</span>
+            <span class="badge">42</span>
+          </div>
+          <div class="nav-item">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="6" width="8" height="11" rx="1"></rect>
+              <rect x="13" y="9" width="8" height="11" rx="1"></rect>
+            </svg>
+            <span>Devices</span>
+          </div>
+          <div class="nav-item active">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1A2 2 0 1 1 4.4 17l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1A2 2 0 1 1 7 4.4l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path>
+            </svg>
+            <span>Settings</span>
+          </div>
+        </nav>
+
+        <div class="sidebar-spacer"></div>
+
+        <div class="status-card">
+          <div class="status-row">
+            <span class="status-dot"></span>
+            <span class="status-label">3 devices online</span>
+          </div>
+          <div class="status-row muted">
+            <span class="status-value">Last sync</span>
+            <span class="status-value">2 min ago</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <main class="main">
+        <div class="content">
+          <header class="page-header" data-od-id="page-header">
+            <div class="eyebrow">PREFERENCES</div>
+            <h1 class="page-title">Settings</h1>
+          </header>
+
+          <!-- Tabs column -->
+          <aside class="tabs" data-od-id="settings-tabs">
+            <div class="tab-list">
+              <div class="tab active">
+                <span>General</span>
+              </div>
+              <div class="tab">
+                <span>Network</span>
+                <span class="tab-hint">LAN</span>
+              </div>
+              <div class="tab">
+                <span>Shortcuts</span>
+                <span class="tab-hint">⌘</span>
+              </div>
+              <div class="tab">
+                <span>Updates</span>
+                <span class="tab-hint">auto</span>
+              </div>
+              <div class="tab">
+                <span>About</span>
+                <span class="tab-hint">v0.4.2</span>
+              </div>
+            </div>
+          </aside>
+
+          <!-- Panel -->
+          <section class="panel" data-od-id="general-tab">
+
+            <!-- Device name -->
+            <div class="section" data-od-id="section-device-name">
+              <div class="section-header">
+                <div>
+                  <h3>Device name</h3>
+                  <div class="helper">其他设备会看到这个名字</div>
+                </div>
+              </div>
+              <div class="field">
+                <div class="field-label">
+                  <span class="label-text">Display name</span>
+                  <span class="label-helper">Used on the LAN</span>
+                </div>
+                <div class="field-row">
+                  <input class="input" type="text" value="Hans's MacBook Pro" />
+                  <button class="link" type="button">Reset hostname</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Receive folder -->
+            <div class="section" data-od-id="section-receive-folder">
+              <div class="section-header">
+                <div>
+                  <h3>Receive folder</h3>
+                  <div class="helper">默认 ~/claude-partner-files</div>
+                </div>
+              </div>
+              <div class="field">
+                <div class="field-label">
+                  <span class="label-text">Files received via LAN go to</span>
+                </div>
+                <div class="field-row">
+                  <input class="input mono" type="text" readonly value="/Users/hans/claude-partner-files" />
+                  <button class="btn btn-ghost" type="button">Choose&hellip;</button>
+                </div>
+                <div class="meta">
+                  <span>12.4 GB used</span>
+                  <span class="sep">·</span>
+                  <span>487 GB free</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Behavior -->
+            <div class="section" data-od-id="section-behavior">
+              <div class="section-header">
+                <div>
+                  <h3>Behavior</h3>
+                </div>
+              </div>
+              <div class="toggle-list">
+                <div class="toggle-row">
+                  <div class="toggle-text">
+                    <span class="label">Start Claude Partner on system login</span>
+                    <span class="sub">Launch quietly in the menu bar</span>
+                  </div>
+                  <div class="switch on" role="switch" aria-checked="true"></div>
+                </div>
+                <div class="toggle-row">
+                  <div class="toggle-text">
+                    <span class="label">Show in menu bar</span>
+                    <span class="sub">Always show transfer status</span>
+                  </div>
+                  <div class="switch on" role="switch" aria-checked="true"></div>
+                </div>
+                <div class="toggle-row">
+                  <div class="toggle-text">
+                    <span class="label">Auto-check for updates every 4 hours</span>
+                    <span class="sub">Notify when a new build is available</span>
+                  </div>
+                  <div class="switch" role="switch" aria-checked="false"></div>
+                </div>
+                <div class="toggle-row">
+                  <div class="toggle-text">
+                    <span class="label">Play sound on file transfer complete</span>
+                    <span class="sub">A subtle chime, not a fanfare</span>
+                  </div>
+                  <div class="switch" role="switch" aria-checked="false"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Theme -->
+            <div class="section" data-od-id="section-theme">
+              <div class="section-header">
+                <div>
+                  <h3>Theme</h3>
+                </div>
+              </div>
+              <div class="field">
+                <div class="field-label">
+                  <span class="label-text">Interface</span>
+                  <span class="label-helper">Synced with system appearance when on System default</span>
+                </div>
+                <div class="radio-group" role="radiogroup" aria-label="Interface theme">
+                  <label class="radio active">
+                    <input type="radio" name="theme" value="system" checked />
+                    System default
+                  </label>
+                  <label class="radio">
+                    <input type="radio" name="theme" value="light" />
+                    Light
+                  </label>
+                  <label class="radio">
+                    <input type="radio" name="theme" value="dark" />
+                    Dark
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <!-- Footer actions -->
+            <div class="footer">
+              <span class="dirty">Unsaved changes</span>
+              <button class="btn btn-ghost" type="button">Discard</button>
+              <button class="btn btn-primary" type="button">Save changes</button>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Toggles
+    document.querySelectorAll('.switch').forEach(function (sw) {
+      sw.addEventListener('click', function () {
+        sw.classList.toggle('on');
+        sw.setAttribute('aria-checked', sw.classList.contains('on') ? 'true' : 'false');
+      });
+    });
+    // Tabs
+    document.querySelectorAll('.tab').forEach(function (t) {
+      t.addEventListener('click', function () {
+        document.querySelectorAll('.tab').forEach(function (x) { x.classList.remove('active'); });
+        t.classList.add('active');
+      });
+    });
+    // Radios
+    document.querySelectorAll('.radio').forEach(function (r) {
+      r.addEventListener('click', function () {
+        document.querySelectorAll('.radio').forEach(function (x) { x.classList.remove('active'); });
+        r.classList.add('active');
+        var input = r.querySelector('input');
+        if (input) input.checked = true;
+      });
+    });
+    // Initialize radio state from localStorage
+    (function() {
+      var saved;
+      try { saved = localStorage.getItem('cp-theme') || 'system'; } catch (e) { saved = 'system'; }
+      var radios = document.querySelectorAll('input[name="theme"]');
+      radios.forEach(function(r) { r.checked = (r.value === saved); });
+      // Mark .radio parent label as .active
+      document.querySelectorAll('label.radio').forEach(function(lbl) {
+        var inp = lbl.querySelector('input[name="theme"]');
+        lbl.classList.toggle('active', inp && inp.checked);
+      });
+    })();
+    // Theme persistence: sync radio choice → localStorage → broadcast
+    document.querySelectorAll('input[name="theme"]').forEach(function(radio) {
+      radio.addEventListener('change', function() {
+        try { localStorage.setItem('cp-theme', this.value); } catch (e) {}
+        var effective = this.value === 'system'
+          ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          : this.value;
+        document.documentElement.setAttribute('data-theme', effective);
+      });
+    });
+  </script>
+<script>
+(function() {
+  var STORAGE_KEY = 'cp-theme';
+  function getStored() {
+    try { return localStorage.getItem(STORAGE_KEY) || 'system'; } catch (e) { return 'system'; }
+  }
+  function setStored(v) {
+    try { localStorage.setItem(STORAGE_KEY, v); } catch (e) {}
+  }
+  function effective(t) {
+    if (t === 'system') {
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    return t;
+  }
+  function apply() {
+    document.documentElement.setAttribute('data-theme', effective(getStored()));
+  }
+  apply();
+  window.addEventListener('storage', function(e) {
+    if (e.key === STORAGE_KEY) apply();
+  });
+  var mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', function() {
+    if (getStored() === 'system') apply();
+  });
+})();
+</script>
+<script>
+(function() {
+  var STORAGE_KEY = 'cp-theme';
+  var btn = document.querySelector('.theme-toggle');
+  if (!btn) return;
+  btn.addEventListener('click', function() {
+    var current = document.documentElement.getAttribute('data-theme');
+    var isDark = current === 'dark';
+    var next = isDark ? 'light' : 'dark';
+    if (next === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+    try { localStorage.setItem(STORAGE_KEY, next); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

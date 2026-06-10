@@ -1,0 +1,795 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Claude Partner — Devices</title>
+<style>
+  :root {
+    --bg: #f5f4ed;
+    --surface: #faf9f5;
+    --surface-warm: #e8e6dc;
+    --fg: #141413;
+    --fg-2: #3d3d3a;
+    --muted: #5e5d59;
+    --meta: #87867f;
+    --border: #f0eee6;
+    --border-soft: #e8e6dc;
+    --accent: #c96442;
+    --accent-on: #faf9f5;
+    --accent-soft: color-mix(in oklab, var(--accent) 14%, transparent);
+    --success: #17a34a;
+    --warn: #eab308;
+    --danger: #b53333;
+    --font-display: "Anthropic Serif", Georgia, "Times New Roman", serif;
+    --font-body: "Anthropic Sans", "Arial", system-ui, -apple-system, sans-serif;
+    --font-mono: "Anthropic Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+    --motion-fast: 150ms;
+    --motion-base: 200ms;
+    --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  [data-theme="dark"] {
+    --bg: #1f1d1b;
+    --surface: #272522;
+    --surface-warm: #322f2c;
+    --fg: #faf9f5;
+    --fg-2: #d8d6cf;
+    --muted: #a8a59e;
+    --meta: #787671;
+    --border: #2e2b29;
+    --border-soft: #262422;
+    --accent: #d97757;
+    --accent-on: #141413;
+    --accent-soft: color-mix(in oklab, var(--accent) 22%, transparent);
+    --success: #4ade80;
+    --warn: #facc15;
+    --danger: #ef6b6b;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+
+  body {
+    font-family: var(--font-body);
+    background: #1a1815;
+    background-image:
+      radial-gradient(ellipse 70% 60% at 30% 20%, rgba(201, 100, 66, 0.10), transparent 60%),
+      radial-gradient(ellipse 60% 60% at 80% 80%, rgba(245, 244, 237, 0.05), transparent 60%);
+    color: var(--fg);
+    min-height: 100vh;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+  }
+
+  .window {
+    width: 1180px;
+    height: 740px;
+    background: var(--bg);
+    border-radius: 12px;
+    box-shadow:
+      0 32px 80px rgba(0,0,0,0.5),
+      inset 0 1px 0 rgba(255,255,255,0.05);
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    grid-template-rows: 44px 1fr;
+    grid-template-areas:
+      "titlebar titlebar"
+      "sidebar  main";
+  }
+
+  /* ===== Titlebar ===== */
+  .titlebar {
+    grid-area: titlebar;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 16px;
+    -webkit-app-region: drag;
+    user-select: none;
+  }
+  .traffic-lights {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .traffic-lights span {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    display: block;
+  }
+  .tl-close  { background: #ff5f57; }
+  .tl-min    { background: #febc2e; }
+  .tl-max    { background: #28c840; }
+
+  .titlebar-title {
+    flex: 1;
+    text-align: center;
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg-2);
+    letter-spacing: 0.01em;
+  }
+  .titlebar-right {
+    -webkit-app-region: no-drag;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid var(--border-soft);
+    background: var(--surface);
+    color: var(--fg-2);
+    border-radius: 6px;
+    font-family: var(--font-body);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--motion-fast) var(--ease-standard);
+  }
+  .btn-secondary:hover { background: var(--surface-warm); }
+  .btn-secondary svg { width: 12px; height: 12px; }
+
+  /* ===== Sidebar ===== */
+  .sidebar {
+    grid-area: sidebar;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 14px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px 22px;
+  }
+  .brand-mark {
+    width: 26px; height: 26px;
+    border-radius: 7px;
+    background: var(--fg);
+    color: var(--bg);
+    display: grid; place-items: center;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .brand-name {
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--fg);
+    letter-spacing: -0.01em;
+  }
+
+  .nav { display: flex; flex-direction: column; gap: 2px; }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    color: var(--muted);
+    font-size: 13.5px;
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+  }
+  .nav-item:hover { background: var(--surface-warm); color: var(--fg); }
+  .nav-item.active {
+    background: var(--accent);
+    color: var(--accent-on);
+  }
+  .nav-item.active:hover { background: var(--accent); }
+  .nav-item svg { width: 16px; height: 16px; stroke-width: 1.6; }
+
+  .sidebar-status {
+    margin-top: auto;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    border-radius: 10px;
+    padding: 12px 12px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--fg-2);
+  }
+  .status-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 18%, transparent);
+  }
+  .status-row .label { color: var(--muted); }
+  .status-row .value { color: var(--fg); font-weight: 500; }
+
+  /* ===== Main ===== */
+  .main {
+    grid-area: main;
+    overflow-y: auto;
+    padding: 32px 40px 48px;
+  }
+  .main::-webkit-scrollbar { width: 10px; }
+  .main::-webkit-scrollbar-thumb { background: var(--border-soft); border-radius: 5px; }
+  .main::-webkit-scrollbar-thumb:hover { background: var(--meta); }
+
+  .page-header { margin-bottom: 24px; }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    color: var(--meta);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .h1 {
+    font-family: var(--font-display);
+    font-size: 32px;
+    font-weight: 500;
+    letter-spacing: -0.015em;
+    line-height: 1.15;
+    color: var(--fg);
+    margin: 0 0 8px;
+  }
+  .lead {
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.55;
+    max-width: 640px;
+    margin: 0;
+  }
+
+  /* ===== Network strip ===== */
+  .network-strip {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    margin-bottom: 32px;
+  }
+  .stat {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-right: 24px;
+    position: relative;
+  }
+  .stat + .stat::before {
+    content: "";
+    position: absolute;
+    left: -12px;
+    top: 6px;
+    bottom: 6px;
+    width: 1px;
+    background: var(--border-soft);
+  }
+  .stat-value {
+    font-family: var(--font-display);
+    font-size: 26px;
+    font-weight: 500;
+    color: var(--fg);
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+  }
+  .stat-label {
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .network-strip .log-link {
+    color: var(--fg-2);
+    font-size: 12.5px;
+    text-decoration: none;
+    border-bottom: 1px dashed var(--border-soft);
+    padding-bottom: 1px;
+    transition: color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .network-strip .log-link:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* ===== Section heading ===== */
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin: 0 0 14px;
+  }
+  .h3 {
+    font-family: var(--font-display);
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--fg);
+    margin: 0;
+    letter-spacing: -0.005em;
+  }
+  .section-head .count {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--meta);
+    margin-left: 8px;
+  }
+  .chevron-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: 0;
+    color: var(--meta);
+    cursor: pointer;
+    padding: 4px;
+    transition: color var(--motion-fast) var(--ease-standard);
+  }
+  .chevron-btn:hover { color: var(--fg-2); }
+  .chevron-btn svg { width: 12px; height: 12px; transition: transform var(--motion-base) var(--ease-standard); }
+
+  /* ===== Device cards ===== */
+  .device-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 32px;
+  }
+  .device-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    transition: border-color var(--motion-fast) var(--ease-standard);
+  }
+  .device-card.is-self {
+    border: 2px solid var(--accent);
+    padding: 17px 19px;
+  }
+  .device-card.is-muted { opacity: 0.6; }
+
+  .device-row1 {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .device-name {
+    font-family: var(--font-display);
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--fg);
+    line-height: 1.2;
+    letter-spacing: -0.005em;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid color-mix(in oklab, var(--accent) 28%, transparent);
+    padding: 3px 7px;
+    border-radius: 4px;
+  }
+  .device-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .device-actions a {
+    color: var(--meta);
+    text-decoration: none;
+    padding: 2px 4px;
+    transition: color var(--motion-fast) var(--ease-standard);
+  }
+  .device-actions a:hover { color: var(--fg); }
+  .device-actions .sep { color: var(--border-soft); }
+
+  .device-meta {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .device-meta .dot { color: var(--border-soft); margin: 0 6px; }
+
+  .device-row3 {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 12.5px;
+    color: var(--muted);
+    flex-wrap: wrap;
+  }
+  .device-row3 .sep { color: var(--border-soft); }
+  .device-row3 .rate { color: var(--fg-2); font-weight: 500; font-family: var(--font-mono); font-size: 12px; }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--fg-2);
+    font-size: 12.5px;
+  }
+  .pill-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 18%, transparent);
+  }
+  .pill-dot.offline {
+    background: var(--meta);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--meta) 18%, transparent);
+  }
+
+  /* ===== Add device ===== */
+  .add-device {
+    border-top: 1px solid var(--border-soft);
+    padding-top: 18px;
+    margin-top: 8px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .add-device a {
+    color: var(--fg-2);
+    text-decoration: none;
+    border-bottom: 1px dashed var(--border-soft);
+    padding-bottom: 1px;
+    margin-left: 6px;
+    transition: color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
+  }
+  .add-device a:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* ===== Theme toggle (titlebar) ===== */
+  .theme-toggle {
+    -webkit-app-region: no-drag;
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface);
+    color: var(--fg-2);
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    cursor: pointer;
+    padding: 0;
+    transition: background 150ms, color 150ms, border-color 150ms;
+  }
+  .theme-toggle:hover {
+    background: var(--surface-warm);
+    color: var(--accent);
+    border-color: var(--border);
+  }
+  .theme-toggle:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+  .theme-toggle svg { width: 14px; height: 14px; display: block; }
+  .theme-toggle .icon-moon { display: none; }
+  [data-theme="dark"] .theme-toggle .icon-sun { display: none; }
+  [data-theme="dark"] .theme-toggle .icon-moon { display: block; }
+</style>
+</head>
+<body>
+  <div class="window" role="application" aria-label="Claude Partner — Devices">
+
+    <!-- Titlebar -->
+    <header class="titlebar">
+      <div class="traffic-lights" aria-hidden="true">
+        <span class="tl-close"></span>
+        <span class="tl-min"></span>
+        <span class="tl-max"></span>
+      </div>
+      <div class="titlebar-title">Devices</div>
+      <div class="titlebar-right">
+        <button class="btn-secondary" type="button" aria-label="Rescan network">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M13.5 8a5.5 5.5 0 0 1-9.74 3.5"/>
+            <path d="M2.5 8a5.5 5.5 0 0 1 9.74-3.5"/>
+            <path d="M13 2.5v3h-3"/>
+            <path d="M3 13.5v-3h3"/>
+          </svg>
+          Rescan
+        </button>
+        <button class="theme-toggle" type="button" aria-label="切换主题" title="切换主题">
+          <svg class="icon-sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="8" cy="8" r="3"/>
+            <path d="M8 1.5v1.5"/>
+            <path d="M8 13v1.5"/>
+            <path d="M1.5 8h1.5"/>
+            <path d="M13 8h1.5"/>
+            <path d="M3.3 3.3l1.1 1.1"/>
+            <path d="M11.6 11.6l1.1 1.1"/>
+            <path d="M3.3 12.7l1.1-1.1"/>
+            <path d="M11.6 4.4l1.1-1.1"/>
+          </svg>
+          <svg class="icon-moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Sidebar -->
+    <aside class="sidebar" aria-label="Primary navigation">
+      <div class="brand">
+        <div class="brand-mark">C</div>
+        <div class="brand-name">Claude Partner</div>
+      </div>
+
+      <nav class="nav">
+        <a class="nav-item" href="#">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2.5 7.5 8 2.5l5.5 5"/>
+            <path d="M4 7v6h8V7"/>
+          </svg>
+          Home
+        </a>
+        <a class="nav-item" href="#">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2 12V6.5A1.5 1.5 0 0 1 3.5 5h9A1.5 1.5 0 0 1 14 6.5V12"/>
+            <path d="M2 12h12v1.5A1.5 1.5 0 0 1 12.5 15h-9A1.5 1.5 0 0 1 2 13.5V12Z"/>
+          </svg>
+          Transfer
+        </a>
+        <a class="nav-item" href="#">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 3h7l3 3v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/>
+            <path d="M5 8h6M5 11h4"/>
+          </svg>
+          Prompts
+        </a>
+        <a class="nav-item active" href="#" aria-current="page">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="2" y="3" width="9" height="7" rx="1.2"/>
+            <rect x="6" y="7" width="8" height="6" rx="1.2"/>
+          </svg>
+          Devices
+        </a>
+        <a class="nav-item" href="#">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="8" cy="8" r="2.2"/>
+            <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/>
+          </svg>
+          Settings
+        </a>
+      </nav>
+
+      <div class="sidebar-status" aria-label="Network status">
+        <div class="status-row">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span class="value">3 devices online</span>
+        </div>
+        <div class="status-row">
+          <span class="label">Last sync</span>
+          <span class="value" style="margin-left:auto;">2 min ago</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main">
+
+      <!-- Page header -->
+      <section class="page-header" data-od-id="page-header">
+        <div class="eyebrow">Network</div>
+        <h1 class="h1">Devices</h1>
+        <p class="lead">局域网内 4 台 Claude Partner 实例。自动通过 mDNS 发现，无需手动配置 IP。</p>
+      </section>
+
+      <!-- Network status strip -->
+      <section class="network-strip" data-od-id="network-strip" aria-label="Network summary">
+        <div class="stat">
+          <div class="stat-value">4 discovered</div>
+          <div class="stat-label">总发现数</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value">3 online</div>
+          <div class="stat-label">在线设备</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value">1.2 GB</div>
+          <div class="stat-label">本会话已传输</div>
+        </div>
+        <a class="log-link" href="#">查看 mDNS 日志
+          <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 8h10M9 4l4 4-4 4"/>
+          </svg>
+        </a>
+      </section>
+
+      <!-- Online devices -->
+      <section data-od-id="online-devices" aria-label="Online devices">
+        <div class="section-head">
+          <h3 class="h3">Online <span class="count">(3)</span></h3>
+        </div>
+        <div class="device-list">
+
+          <!-- This device -->
+          <article class="device-card is-self" aria-label="This device">
+            <div class="device-row1">
+              <div class="device-name">Hans's MacBook Pro</div>
+              <span class="chip">This device</span>
+            </div>
+            <div class="device-meta">
+              Hans-MBP-2024.local<span class="dot">·</span>192.168.1.42<span class="dot">·</span>macOS 15.4
+            </div>
+            <div class="device-row3">
+              <span class="status-pill">
+                <span class="pill-dot" aria-hidden="true"></span>online
+              </span>
+              <span class="sep">·</span>
+              <span>Last sync 2 min ago</span>
+              <span class="sep">·</span>
+              <span>Prompts: 24</span>
+              <span class="sep">·</span>
+              <span class="rate">↗ 12.4 MB/s</span>
+            </div>
+          </article>
+
+          <!-- iMac -->
+          <article class="device-card" aria-label="Hans's iMac Studio">
+            <div class="device-row1">
+              <div class="device-name">Hans's iMac Studio</div>
+              <div class="device-actions">
+                <a href="#">Edit</a><span class="sep">·</span><a href="#">Remove</a>
+              </div>
+            </div>
+            <div class="device-meta">
+              Hans-iMac.local<span class="dot">·</span>192.168.1.45<span class="dot">·</span>macOS 15.4
+            </div>
+            <div class="device-row3">
+              <span class="status-pill">
+                <span class="pill-dot" aria-hidden="true"></span>online
+              </span>
+              <span class="sep">·</span>
+              <span>Last seen just now</span>
+              <span class="sep">·</span>
+              <span>Prompts: 24 synced</span>
+            </div>
+          </article>
+
+          <!-- Ubuntu -->
+          <article class="device-card" aria-label="Hans's Ubuntu Workstation">
+            <div class="device-row1">
+              <div class="device-name">Hans's Ubuntu Workstation</div>
+              <div class="device-actions">
+                <a href="#">Edit</a><span class="sep">·</span><a href="#">Remove</a>
+              </div>
+            </div>
+            <div class="device-meta">
+              Hans-Ubuntu.local<span class="dot">·</span>192.168.1.51<span class="dot">·</span>Ubuntu 24.04
+            </div>
+            <div class="device-row3">
+              <span class="status-pill">
+                <span class="pill-dot" aria-hidden="true"></span>online
+              </span>
+              <span class="sep">·</span>
+              <span>Last seen 4 min ago</span>
+              <span class="sep">·</span>
+              <span>Prompts: 24 synced</span>
+            </div>
+          </article>
+
+        </div>
+      </section>
+
+      <!-- Offline devices -->
+      <section data-od-id="offline-devices" aria-label="Offline devices">
+        <div class="section-head">
+          <h3 class="h3">Offline <span class="count">(1)</span></h3>
+          <button class="chevron-btn" type="button" aria-label="Collapse">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m4 6 4 4 4-4"/>
+            </svg>
+          </button>
+        </div>
+        <div class="device-list">
+          <article class="device-card is-muted" aria-label="Living Room Mac mini (offline)">
+            <div class="device-row1">
+              <div class="device-name">Living Room Mac mini</div>
+              <div class="device-actions">
+                <a href="#">Remove</a>
+              </div>
+            </div>
+            <div class="device-meta">
+              Mac-mini-Server.local<span class="dot">·</span>192.168.1.30<span class="dot">·</span>macOS 14.6
+            </div>
+            <div class="device-row3">
+              <span class="status-pill">
+                <span class="pill-dot offline" aria-hidden="true"></span>offline · 2h ago
+              </span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- Add device -->
+      <div class="add-device" data-od-id="add-device">
+        没找到设备？<a href="#">手动添加 IP/端口 →</a>
+      </div>
+
+    </main>
+  </div>
+<script>
+(function() {
+  var STORAGE_KEY = 'cp-theme';
+  function getStored() {
+    try { return localStorage.getItem(STORAGE_KEY) || 'system'; } catch (e) { return 'system'; }
+  }
+  function setStored(v) {
+    try { localStorage.setItem(STORAGE_KEY, v); } catch (e) {}
+  }
+  function effective(t) {
+    if (t === 'system') {
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    return t;
+  }
+  function apply() {
+    document.documentElement.setAttribute('data-theme', effective(getStored()));
+  }
+  apply();
+  window.addEventListener('storage', function(e) {
+    if (e.key === STORAGE_KEY) apply();
+  });
+  var mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', function() {
+    if (getStored() === 'system') apply();
+  });
+})();
+</script>
+<script>
+(function() {
+  var STORAGE_KEY = 'cp-theme';
+  var btn = document.querySelector('.theme-toggle');
+  if (!btn) return;
+  btn.addEventListener('click', function() {
+    var current = document.documentElement.getAttribute('data-theme');
+    var isDark = current === 'dark';
+    var next = isDark ? 'light' : 'dark';
+    if (next === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+    try { localStorage.setItem(STORAGE_KEY, next); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

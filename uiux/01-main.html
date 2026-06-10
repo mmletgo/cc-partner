@@ -1,0 +1,772 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>01 — Home / Claude Partner</title>
+<style>
+ /* ===== Tokens (Claude / Anthropic DESIGN.md 色板) ===== */
+ :root {
+ --bg: #f5f4ed;
+ --surface: #faf9f5;
+ --surface-warm: #e8e6dc;
+ --fg: #141413;
+ --fg-2: #3d3d3a;
+ --muted: #5e5d59;
+ --meta: #87867f;
+ --border: #f0eee6;
+ --border-soft: #e8e6dc;
+ --accent: #c96442;
+ --accent-on: #faf9f5;
+ --accent-soft: color-mix(in oklab, var(--accent) 14%, transparent);
+ --success: #17a34a;
+ --warn: #eab308;
+ --danger: #b53333;
+ --font-display: "Anthropic Serif", Georgia, "Times New Roman", serif;
+ --font-body: "Anthropic Sans", "Arial", system-ui, -apple-system, sans-serif;
+ --font-mono: "Anthropic Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+ --motion-fast:150ms;
+ --motion-base:200ms;
+ --ease-standard: cubic-bezier(0.2,0,0,1);
+ }
+
+ [data-theme="dark"] {
+ --bg: #1f1d1b;
+ --surface: #272522;
+ --surface-warm: #322f2c;
+ --fg: #faf9f5;
+ --fg-2: #d8d6cf;
+ --muted: #a8a59e;
+ --meta: #787671;
+ --border: #2e2b29;
+ --border-soft: #262422;
+ --accent: #d97757;
+ --accent-on: #141413;
+ --accent-soft: color-mix(in oklab, var(--accent) 22%, transparent);
+ --success: #4ade80;
+ --warn: #facc15;
+ --danger: #ef6b6b;
+ }
+
+ * { box-sizing: border-box; }
+ html, body { margin:0; padding:0; }
+
+ body {
+ font-family: var(--font-body);
+ background: #1a1815;
+ background-image:
+ radial-gradient(ellipse 70% 60% at 30% 20%, rgba(201,100,66,0.10), transparent 60%),
+ radial-gradient(ellipse 60% 60% at 80% 80%, rgba(245,244,237,0.05), transparent 60%);
+ color: var(--fg);
+ min-height:100vh;
+ line-height:1.6;
+ -webkit-font-smoothing: antialiased;
+ -moz-osx-font-smoothing: grayscale;
+ display: flex;
+ align-items: center;
+ justify-content: center;
+ padding:40px 20px;
+ }
+
+ .window {
+ width:1180px;
+ height:740px;
+ background: var(--bg);
+ border-radius:12px;
+ box-shadow:
+0 32px 80px rgba(0,0,0,0.5),
+ inset 0 1px 0 rgba(255,255,255,0.05);
+ overflow: hidden;
+ display: grid;
+ grid-template-columns:240px1fr;
+ grid-template-rows:44px1fr;
+ grid-template-areas:
+ "titlebar titlebar"
+ "sidebar main";
+ }
+
+ /* ===== Titlebar（复用04-devices.html） ===== */
+ .titlebar {
+ grid-area: titlebar;
+ background: var(--surface);
+ border-bottom:1px solid var(--border);
+ display: flex;
+ align-items: center;
+ padding:0 16px;
+ gap:16px;
+ -webkit-app-region: drag;
+ user-select: none;
+ }
+ .traffic-lights { display: flex; gap:8px; align-items: center; }
+ .traffic-lights span {
+ width:12px; height:12px;
+ border-radius:50%;
+ display: block;
+ }
+ .tl-close { background: #ff5f57; }
+ .tl-min { background: #febc2e; }
+ .tl-max { background: #28c840; }
+
+ .titlebar-title {
+ flex:1;
+ text-align: center;
+ font-family: var(--font-body);
+ font-size:13px;
+ font-weight:500;
+ color: var(--fg-2);
+ letter-spacing:0.01em;
+ }
+ .titlebar-right {
+ -webkit-app-region: no-drag;
+ display: flex;
+ align-items: center;
+ gap:8px;
+ }
+ .btn-secondary {
+ display: inline-flex;
+ align-items: center;
+ gap:6px;
+ height:26px;
+ padding:0 10px;
+ border:1px solid var(--border-soft);
+ background: var(--surface);
+ color: var(--fg-2);
+ border-radius:6px;
+ font-family: var(--font-body);
+ font-size:12px;
+ font-weight:500;
+ cursor: pointer;
+ transition: background var(--motion-fast) var(--ease-standard);
+ }
+ .btn-secondary:hover { background: var(--surface-warm); }
+ .btn-secondary svg { width:12px; height:12px; }
+
+ /* ===== Sidebar（复用04-devices.html） ===== */
+ .sidebar {
+ grid-area: sidebar;
+ background: var(--surface);
+ border-right:1px solid var(--border);
+ display: flex;
+ flex-direction: column;
+ padding:20px 14px;
+ }
+ .brand {
+ display: flex;
+ align-items: center;
+ gap:10px;
+ padding:6px 8px 22px;
+ }
+ .brand-mark {
+ width:26px; height:26px;
+ border-radius:7px;
+ background: var(--fg);
+ color: var(--bg);
+ display: grid; place-items: center;
+ font-family: var(--font-display);
+ font-weight:600;
+ font-size:14px;
+ }
+ .brand-name {
+ font-family: var(--font-display);
+ font-size:16px;
+ font-weight:500;
+ color: var(--fg);
+ letter-spacing: -0.01em;
+ }
+
+ .nav { display: flex; flex-direction: column; gap:2px; }
+ .nav-item {
+ display: flex;
+ align-items: center;
+ gap:10px;
+ padding:8px 10px;
+ border-radius:8px;
+ color: var(--muted);
+ font-size:13.5px;
+ font-weight:500;
+ cursor: pointer;
+ text-decoration: none;
+ transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+ }
+ .nav-item:hover { background: var(--surface-warm); color: var(--fg); }
+ .nav-item.active { background: var(--accent); color: var(--accent-on); }
+ .nav-item.active:hover { background: var(--accent); }
+ .nav-item svg { width:16px; height:16px; stroke-width:1.6; }
+
+ /* =====侧栏底部状态卡（复用04-devices.html） ===== */
+ .sidebar-status {
+ margin-top: auto;
+ border:1px solid var(--border);
+ background: var(--bg);
+ border-radius:10px;
+ padding:12px 12px 10px;
+ display: flex;
+ flex-direction: column;
+ gap:6px;
+ }
+ .status-row {
+ display: flex;
+ align-items: center;
+ gap:8px;
+ font-size:12px;
+ color: var(--fg-2);
+ }
+ .status-dot {
+ width:7px; height:7px;
+ border-radius:50%;
+ background: var(--success);
+ box-shadow:0 0 0 3px color-mix(in oklab, var(--success) 18%, transparent);
+ }
+ .status-row .label { color: var(--muted); }
+ .status-row .value { color: var(--fg); font-weight:500; }
+
+ /* ===== Main容器 ===== */
+ .main {
+ grid-area: main;
+ overflow-y: auto;
+ padding:32px 40px 48px;
+ }
+ .main::-webkit-scrollbar { width:10px; }
+ .main::-webkit-scrollbar-thumb { background: var(--border-soft); border-radius:5px; }
+ .main::-webkit-scrollbar-thumb:hover { background: var(--meta); }
+
+ /* =====页面标题区（eyebrow + h1 + lead） ===== */
+ .page-header { margin-bottom:28px; }
+ .eyebrow {
+ font-family: var(--font-mono);
+ font-size:11px;
+ letter-spacing:0.12em;
+ color: var(--accent);
+ text-transform: uppercase;
+ margin-bottom:8px;
+ display: inline-flex;
+ align-items: center;
+ gap:8px;
+ }
+ .eyebrow::before {
+ content: "";
+ width:6px; height:6px;
+ border-radius:50%;
+ background: var(--accent);
+ box-shadow:0 0 0 3px var(--accent-soft);
+ }
+ .h1 {
+ font-family: var(--font-display);
+ font-size:32px;
+ font-weight:500;
+ letter-spacing: -0.015em;
+ line-height:1.15;
+ color: var(--fg);
+ margin:008px;
+ }
+ .lead {
+ color: var(--muted);
+ font-size:14px;
+ line-height:1.6;
+ max-width:640px;
+ margin:0;
+ }
+
+ /* ===== Quick Actions（4 张并排卡片） ===== */
+ .quick-actions {
+ display: grid;
+ grid-template-columns: repeat(4,1fr);
+ gap:16px;
+ margin-bottom:28px;
+ }
+ .qa-card {
+ height:132px;
+ background: var(--surface);
+ border:1px solid var(--border);
+ border-radius:12px;
+ padding:16px 16px 14px;
+ display: flex;
+ flex-direction: column;
+ gap:10px;
+ text-decoration: none;
+ color: inherit;
+ box-shadow: 0 0 0 0 transparent;
+ transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard);
+ cursor: pointer;
+ }
+ .qa-card:hover {
+ background: var(--surface-warm);
+ border-color: var(--border-soft);
+ }
+ .qa-icon {
+ width:36px; height:36px;
+ border-radius:50%;
+ background: var(--bg);
+ border:1px solid var(--border);
+ display: grid; place-items: center;
+ color: var(--fg-2);
+ }
+ .qa-icon svg { width:16px; height:16px; stroke-width:1.6; }
+ .qa-title {
+ font-family: var(--font-display);
+ font-size:15.5px;
+ font-weight:500;
+ color: var(--fg);
+ letter-spacing: -0.005em;
+ }
+ .qa-desc {
+ font-size:12.5px;
+ color: var(--muted);
+ line-height:1.5;
+ margin-top: auto;
+ }
+
+ /* ===== Network Strip（与04-devices.html 同款） ===== */
+ .network-strip {
+ background: var(--surface);
+ border:1px solid var(--border);
+ border-radius:12px;
+ padding:20px 24px;
+ display: flex;
+ align-items: center;
+ gap:24px;
+ margin-bottom:32px;
+ }
+ .stat {
+ flex:1;
+ display: flex;
+ flex-direction: column;
+ gap:2px;
+ }
+ .stat-label {
+ font-family: var(--font-mono);
+ font-size:10.5px;
+ letter-spacing:0.1em;
+ color: var(--meta);
+ text-transform: uppercase;
+ }
+ .stat-value {
+ font-family: var(--font-display);
+ font-size:18px;
+ font-weight:500;
+ color: var(--fg);
+ letter-spacing: -0.01em;
+ }
+ .log-link {
+ display: inline-flex;
+ align-items: center;
+ gap:6px;
+ color: var(--fg-2);
+ font-size:12.5px;
+ font-weight:500;
+ text-decoration: none;
+ padding:6px 10px;
+ border-radius:6px;
+ transition: background var(--motion-fast) var(--ease-standard);
+ }
+ .log-link:hover { background: var(--surface-warm); }
+ .log-link svg { width:12px; height:12px; }
+
+ /* ===== 两栏：活动 +设备快照 ===== */
+ .split {
+ display: grid;
+ grid-template-columns:1.5fr1fr;
+ gap:20px;
+ margin-bottom:28px;
+ }
+ .panel {
+ background: var(--surface);
+ border:1px solid var(--border);
+ border-radius:12px;
+ padding:18px 18px 14px;
+ }
+ .panel-head {
+ display: flex;
+ align-items: center;
+ justify-content: space-between;
+ margin-bottom:14px;
+ }
+ .panel-title {
+ font-family: var(--font-display);
+ font-size:14px;
+ font-weight:500;
+ color: var(--fg);
+ letter-spacing: -0.005em;
+ }
+ .panel-meta {
+ font-family: var(--font-mono);
+ font-size:10.5px;
+ letter-spacing:0.1em;
+ color: var(--meta);
+ text-transform: uppercase;
+ }
+
+ /* ===== Timeline ===== */
+ .timeline { display: flex; flex-direction: column; }
+ .timeline-row {
+ display: grid;
+ grid-template-columns:64px1fr;
+ align-items: center;
+ column-gap:0;
+ height:36px;
+ position: relative;
+ }
+ .timeline-row + .timeline-row {
+ border-top:1px solid var(--border);
+ }
+ .timeline-row::before {
+ content: "";
+ position: absolute;
+ left:64px;
+ top:0;
+ bottom:0;
+ width:1px;
+ background: var(--border);
+ }
+ .timeline-time {
+ font-family: var(--font-mono);
+ font-size:12px;
+ color: var(--meta);
+ padding-left:2px;
+ }
+ .timeline-text {
+ font-size:13px;
+ color: var(--fg-2);
+ padding-left:16px;
+ }
+ .timeline-text .device { color: var(--fg); font-weight:500; }
+ .timeline-text .arrow { color: var(--meta); margin:06px; }
+
+ /* =====设备快照小卡片 ===== */
+ .devices { display: flex; flex-direction: column; gap:10px; }
+ .device-card {
+ border:1px solid var(--border);
+ background: var(--bg);
+ border-radius:10px;
+ padding:12px 14px;
+ display: grid;
+ grid-template-columns:8px1fr auto;
+ align-items: center;
+ gap:12px;
+ }
+ .device-dot {
+ width:8px; height:8px;
+ border-radius:50%;
+ background: var(--success);
+ box-shadow:0 0 0 3px color-mix(in oklab, var(--success) 18%, transparent);
+ }
+ .device-dot.offline {
+ background: var(--meta);
+ box-shadow:0 0 0 3px color-mix(in oklab, var(--meta) 18%, transparent);
+ }
+ .device-line-1 {
+ font-size:13.5px;
+ color: var(--fg);
+ font-weight:500;
+ }
+ .device-line-2 {
+ font-family: var(--font-mono);
+ font-size:11.5px;
+ color: var(--meta);
+ margin-top:2px;
+ }
+ .device-badge {
+ font-family: var(--font-mono);
+ font-size:10.5px;
+ color: var(--muted);
+ text-transform: uppercase;
+ letter-spacing:0.08em;
+ }
+
+ /* ===== Theme toggle (titlebar) ===== */
+ .theme-toggle {
+ -webkit-app-region: no-drag;
+ width: 28px;
+ height: 28px;
+ display: inline-flex;
+ align-items: center;
+ justify-content: center;
+ background: var(--surface);
+ color: var(--fg-2);
+ border: 1px solid var(--border-soft);
+ border-radius: 6px;
+ cursor: pointer;
+ padding: 0;
+ transition: background 150ms, color 150ms, border-color 150ms;
+ }
+ .theme-toggle:hover {
+ background: var(--surface-warm);
+ color: var(--accent);
+ border-color: var(--border);
+ }
+ .theme-toggle:focus-visible {
+ outline: none;
+ box-shadow: var(--focus-ring);
+ }
+ .theme-toggle svg { width: 14px; height: 14px; display: block; }
+ .theme-toggle .icon-moon { display: none; }
+ [data-theme="dark"] .theme-toggle .icon-sun { display: none; }
+ [data-theme="dark"] .theme-toggle .icon-moon { display: block; }
+</style>
+</head>
+<body>
+ <div class="window">
+
+ <!-- ===== Titlebar ===== -->
+ <header class="titlebar">
+ <div class="traffic-lights">
+ <span class="tl-close"></span>
+ <span class="tl-min"></span>
+ <span class="tl-max"></span>
+ </div>
+ <div class="titlebar-title">Claude Partner</div>
+ <div class="titlebar-right">
+ <button class="btn-secondary" type="button">
+ <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M125v14M512h14"/></svg>
+ 新建会话
+ </button>
+        <button class="theme-toggle" type="button" aria-label="切换主题" title="切换主题">
+          <svg class="icon-sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="8" cy="8" r="3"/>
+            <path d="M8 1.5v1.5"/>
+            <path d="M8 13v1.5"/>
+            <path d="M1.5 8h1.5"/>
+            <path d="M13 8h1.5"/>
+            <path d="M3.3 3.3l1.1 1.1"/>
+            <path d="M11.6 11.6l1.1 1.1"/>
+            <path d="M3.3 12.7l1.1-1.1"/>
+            <path d="M11.6 4.4l1.1-1.1"/>
+          </svg>
+          <svg class="icon-moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z"/>
+          </svg>
+        </button>
+ </div>
+ </header>
+
+ <!-- ===== Sidebar ===== -->
+ <aside class="sidebar">
+ <div class="brand">
+ <div class="brand-mark">C</div>
+ <div class="brand-name">Claude Partner</div>
+ </div>
+
+ <nav class="nav">
+ <a class="nav-item active" href="01-main.html">
+ <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M311.5124l97.5"/><path d="M510v9h14v-9"/></svg>
+ Home
+ </a>
+ <a class="nav-item" href="02-transfer.html">
+ <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M77h11l-3-3"/><path d="M1717H6l33"/></svg>
+ Transfer
+ </a>
+ <a class="nav-item" href="03-prompts.html">
+ <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M123v3M1218v3M312h3M1812h3M5.65.6l2.12.1M16.316.3l2.12.1M5.618.4l2.1-2.1M16.37.7l2.1-2.1"/><circle cx="12" cy="12" r="3"/></svg>
+ Prompts
+ </a>
+ <a class="nav-item" href="04-devices.html">
+ <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="14" height="10" rx="2"/><rect x="14" y="10" width="7" height="11" rx="1.5"/><path d="M718h6"/></svg>
+ Devices
+ </a>
+ <a class="nav-item" href="05-settings.html">
+ <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.415a1.71.7000 .31.8l.1.1a22011-2.82.8l-.1-.1a1.71.7000-1.8-.31.71.7000-11.5V21a22011-40v-.1a1.71.7000-1-1.51.71.7000-1.8.3l-.1.1A220114.417l.1-.1a1.71.7000 .3-1.81.71.7000-1.5-1H3a220110-4h.1a1.71.70001.5-11.71.7000-.3-1.8l-.1-.1a220112.8-2.8l.1.1a1.71.70001.8.3h.1a1.71.70001-1.5V3a2201140v.1a1.71.700011.51.71.70001.8-.3l.1-.1a220112.82.8l-.1.1a1.71.7000-.31.8v.1a1.71.70001.51H21a2201104h-.1a1.71.7000-1.51z"/></svg>
+ Settings
+ </a>
+ </nav>
+
+ <div class="sidebar-status">
+ <div class="status-row">
+ <span class="status-dot"></span>
+ <span class="label">已连接到</span>
+ <span class="value">3 台设备</span>
+ </div>
+ <div class="status-row">
+ <span class="status-dot"></span>
+ <span class="label">本地节点</span>
+ <span class="value">192.168.1.42</span>
+ </div>
+ </div>
+ </aside>
+
+ <!-- ===== Main ===== -->
+ <main class="main">
+
+ <!--标题区 -->
+ <section class="page-header">
+ <div class="eyebrow">CONNECTED · macOS</div>
+ <h1 class="h1">欢迎回来，准备好继续对话了。</h1>
+ <p class="lead">三台设备正在同步。挑一台开始新的对话，或者把一段上下文丢给对端。</p>
+ </section>
+
+ <!-- Quick Actions -->
+ <section class="quick-actions">
+ <a class="qa-card" href="02-transfer.html">
+ <div class="qa-icon">
+ <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M45h12l-3-3"/><path d="M2019H8l33"/></svg>
+ </div>
+ <div class="qa-title">开始新对话</div>
+ <div class="qa-desc">选择一台对端设备，立刻拉起一个干净的会话窗口。</div>
+ </a>
+ <a class="qa-card" href="02-transfer.html">
+ <div class="qa-icon">
+ <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M77h11l-3-3"/><path d="M1717H6l33"/></svg>
+ </div>
+ <div class="qa-title">传输文件</div>
+ <div class="qa-desc">拖入文件或选目录，端到端发送到任意已配对设备。</div>
+ </a>
+ <a class="qa-card" href="03-prompts.html">
+ <div class="qa-icon">
+ <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m1232.25.4L209.5l-4.2415.8L1216.77.219.3l1-5.8L49.5l5.8-1.1z"/></svg>
+ </div>
+ <div class="qa-title">运行 Prompt</div>
+ <div class="qa-desc">从 prompt库里选一条，或现场改写后再跨设备执行。</div>
+ </a>
+ <a class="qa-card" href="04-devices.html">
+ <div class="qa-icon">
+ <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M123v3M1218v3M312h3M1812h3"/></svg>
+ </div>
+ <div class="qa-title">扫描设备</div>
+ <div class="qa-desc">广播局域网，发现尚未配对的手机、平板或电脑。</div>
+ </a>
+ </section>
+
+ <!-- Network Strip -->
+ <section class="network-strip">
+ <div class="stat">
+ <div class="stat-label">在线设备</div>
+ <div class="stat-value">3</div>
+ </div>
+ <div class="stat">
+ <div class="stat-label">本机 IP</div>
+ <div class="stat-value">192.168.1.42</div>
+ </div>
+ <div class="stat">
+ <div class="stat-label">今日传输</div>
+ <div class="stat-value">12</div>
+ </div>
+ <div class="stat">
+ <div class="stat-label">延迟</div>
+ <div class="stat-value">24 ms</div>
+ </div>
+ <a class="log-link" href="#">
+ 查看日志
+ <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M512h14M135l77-77"/></svg>
+ </a>
+ </section>
+
+ <!-- 最近活动 +设备快照 -->
+ <section class="split">
+
+ <!-- 最近活动 -->
+ <div class="panel">
+ <div class="panel-head">
+ <div class="panel-title">最近活动</div>
+ <div class="panel-meta">LAST6</div>
+ </div>
+ <div class="timeline">
+ <div class="timeline-row">
+ <div class="timeline-time">10:24</div>
+ <div class="timeline-text"><span class="device">MacBook</span><span class="arrow">→</span>传输 design-spec.pdf</div>
+ </div>
+ <div class="timeline-row">
+ <div class="timeline-time">10:18</div>
+ <div class="timeline-text"><span class="device">iPhone</span><span class="arrow">→</span>发送 "Translate this…" prompt</div>
+ </div>
+ <div class="timeline-row">
+ <div class="timeline-time">09:52</div>
+ <div class="timeline-text"><span class="device">iPad</span><span class="arrow">→</span>完成 prompt导入</div>
+ </div>
+ <div class="timeline-row">
+ <div class="timeline-time">昨天14:02</div>
+ <div class="timeline-text"><span class="device">MacBook</span><span class="arrow">→</span>配对成功</div>
+ </div>
+ <div class="timeline-row">
+ <div class="timeline-time">昨天11:30</div>
+ <div class="timeline-text"><span class="device">iPhone</span><span class="arrow">→</span>同步3 条剪贴板记录</div>
+ </div>
+ <div class="timeline-row">
+ <div class="timeline-time">昨天09:14</div>
+ <div class="timeline-text"><span class="device">iPad</span><span class="arrow">→</span>接收 on-call-rotation.csv</div>
+ </div>
+ </div>
+ </div>
+
+ <!--设备快照 -->
+ <div class="panel">
+ <div class="panel-head">
+ <div class="panel-title">已配对设备</div>
+ <div class="panel-meta">3 ONLINE</div>
+ </div>
+ <div class="devices">
+ <div class="device-card">
+ <div class="device-dot"></div>
+ <div>
+ <div class="device-line-1">MacBook Pro</div>
+ <div class="device-line-2">192.168.1.18 · macOS</div>
+ </div>
+ <div class="device-badge">ONLINE</div>
+ </div>
+ <div class="device-card">
+ <div class="device-dot"></div>
+ <div>
+ <div class="device-line-1">iPhone15</div>
+ <div class="device-line-2">192.168.1.27 · iOS18</div>
+ </div>
+ <div class="device-badge">ONLINE</div>
+ </div>
+ <div class="device-card">
+ <div class="device-dot offline"></div>
+ <div>
+ <div class="device-line-1">iPad Air</div>
+ <div class="device-line-2">上次在线昨天18:42</div>
+ </div>
+ <div class="device-badge">OFFLINE</div>
+ </div>
+ </div>
+ </div>
+ </section>
+
+ </main>
+ </div>
+ <script>
+(function() {
+  var STORAGE_KEY = 'cp-theme';
+  function getStored() {
+    try { return localStorage.getItem(STORAGE_KEY) || 'system'; } catch (e) { return 'system'; }
+  }
+  function setStored(v) {
+    try { localStorage.setItem(STORAGE_KEY, v); } catch (e) {}
+  }
+  function effective(t) {
+    if (t === 'system') {
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    return t;
+  }
+  function apply() {
+    document.documentElement.setAttribute('data-theme', effective(getStored()));
+  }
+  apply();
+  window.addEventListener('storage', function(e) {
+    if (e.key === STORAGE_KEY) apply();
+  });
+  var mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', function() {
+    if (getStored() === 'system') apply();
+  });
+})();
+ </script>
+<script>
+(function() {
+  var STORAGE_KEY = 'cp-theme';
+  var btn = document.querySelector('.theme-toggle');
+  if (!btn) return;
+  btn.addEventListener('click', function() {
+    var current = document.documentElement.getAttribute('data-theme');
+    var isDark = current === 'dark';
+    var next = isDark ? 'light' : 'dark';
+    if (next === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+    try { localStorage.setItem(STORAGE_KEY, next); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>
