@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
 from typing import NoReturn
 
 from PyQt6.QtWidgets import QApplication
@@ -136,8 +137,20 @@ class Application:
 
         # 7. HTTP 服务端
         self._http_server = HTTPServer(self._protocol)
+
+        # 7.1 挂载前端静态资源（必须在 start() 之前调用，因为 runner.setup() 后路由冻结）
+        if getattr(sys, "frozen", False):
+            web_dir: Path = Path(getattr(sys, "_MEIPASS", ".")) / "web" / "dist"
+        else:
+            web_dir = Path(__file__).resolve().parents[2] / "web" / "dist"
+        self._http_server.serve_static(web_dir)
+
         actual_port: int = await self._http_server.start(self._config.http_port)
         logger.info("HTTP 服务端启动在端口 %d", actual_port)
+
+        # 7.2 将实际端口同步到 API 协议层（health/config 端点返回真实端口）
+        assert self._protocol is not None
+        self._protocol.set_actual_port(actual_port)
 
         # 8. mDNS 设备发现（在独立线程+独立事件循环中运行，不阻塞主线程）
         self._discovery = DeviceDiscovery(self._config)
@@ -166,7 +179,7 @@ class Application:
         device_panel: DevicePanel | None = None
         try:
             if use_web_frontend:
-                self._main_window = WebMainWindow()
+                self._main_window = WebMainWindow(backend_port=actual_port)
                 self._main_window.show()
                 logger.info("使用新版 WebMainWindow（QWebEngineView + React）")
             else:

@@ -67,6 +67,7 @@ class APIProtocol:
         on_choose_dir: Callable[[], str] | None = None,
         on_check_update: Callable[[], Awaitable[dict]] | None = None,
         check_permissions: Callable[[], dict] | None = None,
+        actual_port: int = 0,
     ) -> None:
         """
         Business Logic（为什么需要这个函数）:
@@ -78,6 +79,7 @@ class APIProtocol:
             - on_choose_dir: 打开原生目录选择对话框
             - on_check_update: 触发更新检查并返回结果
             - check_permissions: 检查 macOS 权限状态
+            - actual_port: HTTP 服务端实际监听端口（动态分配时与配置端口不同）
             - 未提供时端点返回 501 Not Implemented（不破坏向后兼容）
         """
         self._config: AppConfig = config
@@ -92,6 +94,7 @@ class APIProtocol:
         self._on_choose_dir: Callable[[], str] | None = on_choose_dir
         self._on_check_update: Callable[[], Awaitable[dict]] | None = on_check_update
         self._check_permissions: Callable[[], dict] | None = check_permissions
+        self._actual_port: int = actual_port
 
     def setup_routes(self, app: web.Application) -> None:
         """
@@ -152,6 +155,18 @@ class APIProtocol:
         app.router.add_get("/api/permissions", self.handle_permissions)
 
     # ── 通用工具 ──
+
+    def set_actual_port(self, port: int) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            HTTP 服务端使用 port=0 动态分配端口时，实际端口在 start() 之后才确定。
+            health 和 config 端点需要返回真实的监听端口，而非配置中的占位值。
+
+        Code Logic（这个函数做什么）:
+            更新内部 _actual_port，后续 handle_health / handle_get_config 使用此值。
+        """
+        self._actual_port = port
+        logger.info("APIProtocol actual_port 已设置为 %d", port)
 
     @staticmethod
     def _prompt_to_frontend_dict(p: Prompt) -> dict:
@@ -226,7 +241,7 @@ class APIProtocol:
             "ok": True,
             "device_id": self._config.device_id,
             "device_name": self._config.device_name,
-            "http_port": self._config.http_port,
+            "http_port": self._actual_port,
             "ts": int(datetime.now(timezone.utc).timestamp()),
         }
         return web.json_response(data)
@@ -678,7 +693,7 @@ class APIProtocol:
                 "deviceName": self._config.device_name,
                 "receiveDir": self._config.receive_dir,
                 "screenshotHotkey": self._config.screenshot_hotkey,
-                "httpPort": self._config.http_port,
+                "httpPort": self._actual_port,
             }
             return web.json_response(data)
         except Exception as e:

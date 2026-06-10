@@ -26,13 +26,14 @@ from claude_partner.ui import theme
 logger: logging.Logger = logging.getLogger(__name__)
 
 
-def _resolve_frontend_url() -> QUrl:
+def _resolve_frontend_url(backend_port: int = 0) -> QUrl:
     """
     Business Logic:
         前端 URL 来源优先级：
         1. CP_FRONTEND_URL 环境变量（强制指定，便于 e2e 测试）
         2. Vite dev server (http://localhost:5173)，开发态自动启用
-        3. 打包后的 web/dist/index.html（PyInstaller frozen 或源运行）
+        3. 后端静态资源服务（http://localhost:{backend_port}/），需要 backend_port > 0
+        4. 打包后的 web/dist/index.html（file:// 降级方案）
     """
     env_url = os.environ.get("CP_FRONTEND_URL")
     if env_url:
@@ -46,7 +47,13 @@ def _resolve_frontend_url() -> QUrl:
         logger.info("dev 模式加载 Vite: %s", vite_url.toString())
         return vite_url
 
-    # production：从打包资源加载
+    # production：优先使用后端静态资源服务（同源，避免跨域问题）
+    if backend_port > 0:
+        url = QUrl(f"http://localhost:{backend_port}/")
+        logger.info("加载后端静态资源: %s", url.toString())
+        return url
+
+    # 降级：从本地文件系统加载
     if is_frozen:
         # PyInstaller 临时目录
         base = Path(getattr(sys, "_MEIPASS", ".")) / "web" / "dist"
@@ -59,7 +66,7 @@ def _resolve_frontend_url() -> QUrl:
         logger.warning("前端 dist 不存在: %s，降级到 dev", index_path)
         return QUrl("http://localhost:5173")
 
-    logger.info("加载打包前端: %s", index_path)
+    logger.info("加载本地前端文件: %s", index_path)
     return QUrl.fromLocalFile(str(index_path))
 
 
@@ -77,7 +84,15 @@ class WebMainWindow(QMainWindow):
         - 关闭事件只隐藏窗口（由 tray 真正退出应用）
     """
 
-    def __init__(self) -> None:
+    def __init__(self, backend_port: int = 0) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            创建新版主窗口，用 QWebEngineView 嵌入 React 前端。
+            需要传入后端实际监听端口，以便通过 HTTP 同源方式加载前端静态资源。
+
+        Code Logic（这个函数做什么）:
+            初始化窗口外观、QWebEngineView，通过 backend_port 解析前端 URL。
+        """
         super().__init__()
 
         self.setWindowTitle("Claude Partner")
@@ -88,10 +103,10 @@ class WebMainWindow(QMainWindow):
         # QWebEngineView 容器
         self._web: QWebEngineView = QWebEngineView()
         self._configure_web_engine()
-        self._web.setUrl(_resolve_frontend_url())
+        self._web.setUrl(_resolve_frontend_url(backend_port))
 
         self.setCentralWidget(self._web)
-        logger.info("WebMainWindow 初始化完成")
+        logger.info("WebMainWindow 初始化完成, backend_port=%d", backend_port)
 
     def _configure_web_engine(self) -> None:
         """

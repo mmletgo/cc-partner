@@ -25,6 +25,7 @@
     - `on_choose_dir`: 原生目录选择对话框回调（QFileDialog）
     - `on_check_update`: GitHub Releases 更新检查异步回调
     - `check_permissions`: macOS 权限检查回调（屏幕录制/输入监控）
+    - `actual_port`: HTTP 服务端实际监听端口（动态分配时由 app.py 通过 set_actual_port() 设置）
     - 未注册的回调对应端点返回 501/404
   - 前端 REST 端点（14 个）:
     - `GET /api/health`: 健康检查（{ok, device_id, device_name, http_port}）
@@ -52,6 +53,10 @@
 - `HTTPServer`: 封装 aiohttp 的 AppRunner + TCPSite
   - 支持 port=0 自动分配端口
   - 通过 `site._server.sockets[0].getsockname()[1]` 获取实际端口
+  - 端口文件: `~/.claude-partner/backend.port`，start() 时写入，stop() 时删除
+  - `serve_static(web_dir)`: 配置前端静态文件目录，**必须在 start() 之前调用**（runner.setup() 后路由冻结）
+  - `_register_static_routes()`: 在 start() 内 runner.setup() 之前执行，注册 /assets + SPA 回退（`/{path:.*}` → index.html）
+  - 路由优先级: /api/* 先注册 > /assets > SPA 回退（`/` + `/{path:.*}`）
 
 ### client.py - HTTP 客户端
 - `PeerClient`: 调用对端 API 的客户端
