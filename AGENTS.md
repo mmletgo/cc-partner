@@ -375,17 +375,76 @@ npm run build            # 产物在 web/dist/
 
 构建产物会被 PyInstaller 打包进 Python 包（`web/dist` → `claude_partner/web_dist/`）。
 
+### 7.5 Mock API 测试服务
+
+后端 REST 端点开发或前端联调时，可用独立 mock server 验证：
+
+```bash
+# 启动 mock API（端口 8765）
+python3 scripts/mock_api_server.py
+# 在同一终端或另一个终端启动 Vite（指向 mock）
+cd web && PY_PORT=8765 npm run dev
+# 前端 npm run build 时通过 vite proxy 自动转发 /api 到 8765
+```
+
+mock 数据：10 prompts / 3 devices / 5 transfers（覆盖 transferring/completed/failed 状态）。
+
+### 7.6 Playwright 截图验证
+
+```bash
+# 确保 Vite dev server 在 5173 运行
+python3 scripts/verify_frontend.py
+# → 输出 docs/frontend/screenshots/*.png（7 个页面）
+# → 统计 console 错误/警告，exit 0=渲染成功
+```
+
+需要 `@playwright/test` dev dep（已安装）和 `playwright` Python 包：
+```bash
+pip install playwright
+npx playwright install chromium
+```
+
+### 7.7 REST 端点集成测试
+
+```bash
+python3 scripts/test_rest_endpoints.py
+# → 创建临时 SQLite + 完整 APIProtocol
+# → 16 个端点全部验证（CRUD/设备/传输/P2P）
+# → exit 0=全部通过
+```
+
+不需要外部依赖（使用 aiohttp ClientSession 异步测试）。
+
 ## 8. 与 Python 后端协作
 
 ### 8.1 API 端点
 
-- `GET /api/health` — 健康检查
-- `GET /api/prompts` / `POST /api/prompts` / `PUT /api/prompts/:id` / `DELETE /api/prompts/:id`
-- `GET /api/devices` / `POST /api/sync`
-- `POST /api/transfer/send` / `GET /api/transfer/tasks`
-- `GET /api/events/stream` — SSE 设备状态推送
+**前端 REST（由 protocol.py 注册）**：
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| /api/health | GET | 健康检查，返回 {ok, device_id, device_name} |
+| /api/prompts | GET | Prompt 列表（支持 ?search=&tag= 过滤） |
+| /api/prompts | POST | 新建 Prompt {title, content, tag} |
+| /api/prompts/{id} | GET | 单条 Prompt（deleted 软删除返回 404） |
+| /api/prompts/{id} | PUT | 编辑 Prompt（自增 vector_clock） |
+| /api/prompts/{id} | DELETE | 软删除（自增 vector_clock 后标记 deleted） |
+| /api/devices | GET | 在线设备列表（从 DeviceDiscovery 回调） |
+| /api/sync | POST | 触发全网同步 |
+| /api/transfer/tasks | GET | 全部传输任务列表（合并 sender + receiver） |
+| /api/transfer/send | POST | 启动文件发送 {deviceId, filePath} |
+| /api/transfer/tasks/{id} | DELETE | 取消传输 |
 
-完整路由见 `src/claude_partner/network/` 下的 handlers。
+**P2P 协议（对端调用）**：
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| /api/sync/pull | POST | 接收对端摘要，返回对端需要的 prompt |
+| /api/sync/push | POST | 接收对端推送的 prompt |
+| /api/transfer/init | POST | 初始化文件接收 |
+| /api/transfer/chunk/{id} | POST | 接收文件分块 |
+| /api/transfer/status/{id} | GET | 查询接收端传输状态 |
+
+完整路由见 `src/claude_partner/network/protocol.py` 的 `setup_routes()`。
+集成测试见 `scripts/test_rest_endpoints.py`（16 个端点）。
 
 ### 8.2 添加新 API 端点
 

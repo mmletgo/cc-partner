@@ -128,6 +128,7 @@ class Application:
             get_devices=self._get_devices_for_api,
             on_transfer_send=self._file_sender.send_file,
             on_transfer_cancel=self._cancel_transfer,
+            get_transfers=self._get_transfers_for_api,
         )
 
         # 7. HTTP 服务端
@@ -277,6 +278,32 @@ class Application:
             self._file_receiver.cancel(transfer_id)
             return True
         return False
+
+    def _get_transfers_for_api(self) -> list[dict]:
+        """
+        Business Logic:
+            前端传输面板通过 /api/transfer/tasks 拉取全部传输任务列表。
+            需要合并发送端和接收端的任务，并转换为前端 camelCase 格式。
+
+        Code Logic:
+            合并 sender.list_tasks() + receiver.list_tasks()，
+            用 APIProtocol._transfer_to_frontend_dict 做字段名转换。
+        """
+        from claude_partner.network.protocol import APIProtocol as Proto
+        tasks: list = []
+        if self._file_sender is not None:
+            tasks.extend(
+                Proto._transfer_to_frontend_dict(t)
+                for t in self._file_sender.list_tasks()
+            )
+        if self._file_receiver is not None:
+            tasks.extend(
+                Proto._transfer_to_frontend_dict(t)
+                for t in self._file_receiver.list_tasks()
+            )
+        # 按 startedAt 倒序
+        tasks.sort(key=lambda t: t.get("startedAt", ""), reverse=True)
+        return tasks
 
     def _connect_signals(
         self,
