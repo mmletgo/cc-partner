@@ -256,6 +256,26 @@ class FileReceiver(QObject):
             logger.info("已删除临时文件: %s", tmp_path)
         logger.info("接收传输已取消: %s", transfer_id)
 
+    def list_tasks(self) -> list[TransferTask]:
+        """
+        Business Logic（为什么需要这个函数）:
+            前端传输面板需要展示所有接收任务（含已结束的历史任务）的列表。
+
+        Code Logic（这个函数做什么）:
+            返回内部 _tasks 字典的 values，按 created_at 倒序。
+        """
+        return sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)
+
+    def get_task(self, transfer_id: str) -> TransferTask | None:
+        """
+        Business Logic（为什么需要这个函数）:
+            取消或查询单个接收任务时需要根据 ID 获取 TransferTask 实例。
+
+        Code Logic（这个函数做什么）:
+            从 _tasks 字典中查询；不存在时返回 None。
+        """
+        return self._tasks.get(transfer_id)
+
     def _resolve_filename(self, filename: str) -> str:
         """
         Business Logic（为什么需要这个函数）:

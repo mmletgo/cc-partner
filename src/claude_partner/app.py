@@ -118,13 +118,16 @@ class Application:
         self._file_sender = FileSender(self._peer_client)
         self._file_receiver = FileReceiver(self._config)
 
-        # 6. API 协议（注册传输回调）
+        # 6. API 协议（注册传输回调 + device getter）
         self._protocol = APIProtocol(
             config=self._config,
             prompt_repo=self._prompt_repo,
             on_transfer_init=self._file_receiver.init_transfer,
             on_transfer_chunk=self._file_receiver.receive_chunk,
             get_transfer_status=self._file_receiver.get_transfer_status,
+            get_devices=self._get_devices_for_api,
+            on_transfer_send=self._file_sender.send_file,
+            on_transfer_cancel=self._cancel_transfer,
         )
 
         # 7. HTTP 服务端
@@ -230,6 +233,50 @@ class Application:
         )
 
         logger.info("应用启动完成")
+
+    def _get_devices_for_api(self) -> list[dict]:
+        """
+        Business Logic（为什么需要这个函数）:
+            前端设备面板通过 /api/devices 拉取设备列表。
+            需要把 DeviceDiscovery 内部的 Device 对象转换为前端
+            web/src/lib/types.ts Device 约定的字段（address / status / lastSeen）。
+
+        Code Logic（这个函数做什么）:
+            从 discovery.get_devices() 拿全部设备，转为 dict 列表。
+            status 由 online 字段映射（True → 'online'，False → 'offline'）。
+        """
+        if self._discovery is None:
+            return []
+        devices: list[dict] = []
+        for d in self._discovery.get_devices().values():
+            devices.append({
+                "id": d.id,
+                "name": d.name,
+                "address": d.host,
+                "port": d.port,
+                "status": "online" if d.online else "offline",
+                "lastSeen": d.last_seen.isoformat(),
+            })
+        return devices
+
+    def _cancel_transfer(self, transfer_id: str) -> bool:
+        """
+        Business Logic（为什么需要这个函数）:
+            前端传输面板的"取消"按钮调 /api/transfer/tasks/{id} DELETE。
+            需要同时检查发送端和接收端，因为同一个 transfer_id 可能存在
+            在其中一侧（取决于 direction）。
+
+        Code Logic（这个函数做什么）:
+            优先查 sender，再查 receiver。任一命中即调用其 cancel()。
+            返回是否成功找到并取消。
+        """
+        if self._file_sender is not None and self._file_sender.get_task(transfer_id) is not None:
+            self._file_sender.cancel(transfer_id)
+            return True
+        if self._file_receiver is not None and self._file_receiver.get_task(transfer_id) is not None:
+            self._file_receiver.cancel(transfer_id)
+            return True
+        return False
 
     def _connect_signals(
         self,

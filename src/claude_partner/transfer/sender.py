@@ -197,3 +197,24 @@ class FileSender(QObject):
         """
         self._cancelled.add(transfer_id)
         logger.info("请求取消传输: %s", transfer_id)
+
+    def list_tasks(self) -> list[TransferTask]:
+        """
+        Business Logic（为什么需要这个函数）:
+            前端文件传输面板需要展示所有发送任务（含已结束的历史任务）的列表，
+            供 UI 渲染和状态展示。
+
+        Code Logic（这个函数做什么）:
+            返回内部 _tasks 字典的 values，按 created_at 倒序。
+        """
+        return sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)
+
+    def get_task(self, transfer_id: str) -> TransferTask | None:
+        """
+        Business Logic（为什么需要这个函数）:
+            取消或查询单个传输任务时需要根据 ID 获取 TransferTask 实例。
+
+        Code Logic（这个函数做什么）:
+            从 _tasks 字典中查询；不存在时返回 None。
+        """
+        return self._tasks.get(transfer_id)

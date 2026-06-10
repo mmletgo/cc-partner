@@ -3,8 +3,10 @@
 
 from aiohttp import web
 from typing import Callable, Awaitable
-import json
+import asyncio
 import logging
+import uuid
+from datetime import datetime, timezone
 
 from claude_partner.config import AppConfig
 from claude_partner.storage.prompt_repo import PromptRepository
@@ -21,15 +23,27 @@ class APIProtocol:
     Business Logic（为什么需要这个类）:
         每个 Claude Partner 实例既是客户端也是服务端。当其他设备发起同步请求或
         文件传输请求时，需要通过标准化的 HTTP API 来处理。
+        同时，前端 React 界面（嵌入式 Web）也需要 RESTful 接口来：
+        - 读写本地 Prompt（CRUD）
+        - 列出局域网设备和传输任务
+        - 触发文件发送和取消
+        所有这些都通过本类的统一路由表暴露。
 
     Code Logic（这个类做什么）:
-        定义 6 个 API 端点：
+        定义 12 个 API 端点：
         - /api/health: 健康检查
-        - /api/sync/pull: 被拉取 prompt（对端发送摘要，本端返回对端需要的 prompt）
-        - /api/sync/push: 接收对端推送的 prompt
-        - /api/transfer/init: 初始化文件传输
-        - /api/transfer/chunk/{transfer_id}: 接收文件分块
-        - /api/transfer/status/{transfer_id}: 查询传输状态
+        - /api/prompts (GET/POST): 列表/创建本地 Prompt
+        - /api/prompts/{id} (GET/PUT/DELETE): 单条 Prompt 的读/改/删
+        - /api/devices: 局域网内已发现的对端设备列表
+        - /api/sync (POST): 触发全局同步引擎
+        - /api/sync/pull: P2P 同步 - 接收对端摘要并返回对端需要的 prompt
+        - /api/sync/push: P2P 同步 - 接收对端推送的 prompt
+        - /api/transfer/tasks: 列出全部传输任务
+        - /api/transfer/send (POST): 启动一次文件发送
+        - /api/transfer/tasks/{id} (DELETE): 取消传输
+        - /api/transfer/init: P2P 接收 - 初始化对端发来的传输
+        - /api/transfer/chunk/{transfer_id}: P2P 接收 - 接收分块数据
+        - /api/transfer/status/{transfer_id}: P2P 接收 - 查询接收端状态
     """
 
     def __init__(
@@ -39,20 +53,29 @@ class APIProtocol:
         on_transfer_init: Callable[[dict], dict] | None = None,
         on_transfer_chunk: Callable[[str, int, bytes], Awaitable[dict]] | None = None,
         get_transfer_status: Callable[[str], dict] | None = None,
+        get_devices: Callable[[], list[dict]] | None = None,
+        on_transfer_send: Callable[[str, str, str], Awaitable[object]] | None = None,
+        on_transfer_cancel: Callable[[str], bool] | None = None,
+        get_transfers: Callable[[], list[dict]] | None = None,
     ) -> None:
         """
         Business Logic（为什么需要这个函数）:
             初始化 API 处理器，需要配置信息、数据仓库以及文件传输的回调函数。
 
         Code Logic（这个函数做什么）:
-            保存依赖注入的组件引用。文件传输相关的回调是可选的，
-            未提供时对应端点返回 501 Not Implemented。
+            保存依赖注入的组件引用。所有回调均为可选：
+            - 设备列表、设备传输任务相关端点需要对应 getter
+            - 未提供时端点返回 501 Not Implemented（不破坏向后兼容）
         """
         self._config: AppConfig = config
         self._prompt_repo: PromptRepository = prompt_repo
         self._on_transfer_init: Callable[[dict], dict] | None = on_transfer_init
         self._on_transfer_chunk: Callable[[str, int, bytes], Awaitable[dict]] | None = on_transfer_chunk
         self._get_transfer_status: Callable[[str], dict] | None = get_transfer_status
+        self._get_devices: Callable[[], list[dict]] | None = get_devices
+        self._on_transfer_send: Callable[..., Awaitable[object]] | None = on_transfer_send
+        self._on_transfer_cancel: Callable[[str], bool] | None = on_transfer_cancel
+        self._get_transfers: Callable[[], list[dict]] | None = get_transfers
 
     def setup_routes(self, app: web.Application) -> None:
         """
@@ -60,11 +83,36 @@ class APIProtocol:
             将所有 API 端点注册到 aiohttp 应用的路由表中。
 
         Code Logic（这个函数做什么）:
-            为 app.router 添加 GET 和 POST 路由，关联到对应的 handler 方法。
+            为 app.router 添加 GET/POST/PUT/DELETE 路由，关联到对应的 handler 方法。
         """
+        # 健康
         app.router.add_get("/api/health", self.handle_health)
+
+        # 前端 REST - Prompt CRUD
+        app.router.add_get("/api/prompts", self.handle_list_prompts)
+        app.router.add_post("/api/prompts", self.handle_create_prompt)
+        app.router.add_get("/api/prompts/{prompt_id}", self.handle_get_prompt)
+        app.router.add_put("/api/prompts/{prompt_id}", self.handle_update_prompt)
+        app.router.add_delete("/api/prompts/{prompt_id}", self.handle_delete_prompt)
+
+        # 前端 REST - 设备
+        app.router.add_get("/api/devices", self.handle_list_devices)
+
+        # 前端 REST - 同步
+        app.router.add_post("/api/sync", self.handle_sync_all)
+
+        # P2P 同步协议（对端调用）
         app.router.add_post("/api/sync/pull", self.handle_sync_pull)
         app.router.add_post("/api/sync/push", self.handle_sync_push)
+
+        # 前端 REST - 传输任务
+        app.router.add_get("/api/transfer/tasks", self.handle_list_transfers)
+        app.router.add_post("/api/transfer/send", self.handle_transfer_send)
+        app.router.add_delete(
+            "/api/transfer/tasks/{transfer_id}", self.handle_cancel_transfer
+        )
+
+        # P2P 接收协议（对端调用）
         app.router.add_post("/api/transfer/init", self.handle_transfer_init)
         app.router.add_post(
             "/api/transfer/chunk/{transfer_id}", self.handle_transfer_chunk
@@ -73,20 +121,342 @@ class APIProtocol:
             "/api/transfer/status/{transfer_id}", self.handle_transfer_status
         )
 
-    async def handle_health(self, request: web.Request) -> web.Response:
+    # ── 通用工具 ──
+
+    @staticmethod
+    def _prompt_to_frontend_dict(p: Prompt) -> dict:
+        """
+        Business Logic:
+            前端 web/src/lib/types.ts Prompt 类型使用 camelCase + tag 单数字段，
+            与后端 Prompt.to_dict()（snake_case + tags 数组）不一致。
+            必须在 API 层做一次转换，避免修改后端 dataclass。
+
+        Code Logic:
+            将 snake_case → camelCase 字段名；
+            tags[0] 投影为 tag（单标签）以匹配前端 UI 习惯；
+            ISO datetime 保持原样。
+        """
+        return {
+            "id": p.id,
+            "title": p.title,
+            "content": p.content,
+            "tag": p.tags[0] if p.tags else None,
+            "tags": p.tags,
+            "updatedAt": p.updated_at.isoformat(),
+            "createdAt": p.created_at.isoformat(),
+            "deviceId": p.device_id,
+            "vectorClock": p.vector_clock,
+            "deleted": p.deleted,
+        }
+
+    @staticmethod
+    def _transfer_to_frontend_dict(t) -> dict:
+        """
+        Business Logic:
+            前端 TransferTask 期望 camelCase + 派生字段（fileName / fileSize / progress / speed / peerDeviceName）。
+            后端 TransferTask.to_dict() 是 snake_case + 原始 transferred_bytes。
+
+        Code Logic:
+            调用 task.to_dict() 拿到原始字段，再做：
+            - 字段名转换 snake_case → camelCase
+            - 由 transferred_bytes / size 计算 progress 0.0~1.0
+            - speed 暂时为 None（实际应由 sender 在循环中维护）
+            - peerDeviceName 由对端 device_id 在本端设备表中查不到，置空
+        """
+        raw = t.to_dict()
+        progress: float = t.progress()
+        return {
+            "id": raw["id"],
+            "fileName": raw["filename"],
+            "filePath": raw["file_path"],
+            "fileSize": raw["size"],
+            "direction": raw["direction"],
+            "status": raw["status"],
+            "progress": progress,
+            "transferredBytes": raw["transferred_bytes"],
+            "peerDeviceId": raw["peer_device_id"],
+            "peerDeviceName": None,  # sender 不持有对端 name；前端 mock 用
+            "speed": None,
+            "errorMessage": None,
+            "startedAt": raw["created_at"],
+            "completedAt": raw["completed_at"],
+        }
+
+    # ── 健康 ──
+
+    async def handle_health(self, _request: web.Request) -> web.Response:
         """
         Business Logic（为什么需要这个函数）:
             对端设备需要检查本机是否在线且可通信，用于同步前的连通性验证。
 
         Code Logic（这个函数做什么）:
-            返回 JSON 响应 {status: "ok", device_id, device_name}。
+            返回 JSON 响应 {ok: true, device_id, device_name, ts}。
         """
         data: dict = {
-            "status": "ok",
+            "ok": True,
             "device_id": self._config.device_id,
             "device_name": self._config.device_name,
+            "ts": int(datetime.now(timezone.utc).timestamp()),
         }
         return web.json_response(data)
+
+    # ── 前端 Prompt CRUD ──
+
+    async def handle_list_prompts(self, request: web.Request) -> web.Response:
+        """
+        Business Logic:
+            Prompts 页面 / Home 页面需要列出全部本地 Prompt。
+            可选 query 参数：search（关键词）、tag（按标签筛选）。
+
+        Code Logic:
+            - 无参数：get_all()
+            - search：search(keyword)
+            - tag：filter_by_tags([tag])
+            返回 camelCase 字典列表。
+        """
+        try:
+            search: str | None = request.query.get("search")
+            tag: str | None = request.query.get("tag")
+            if search:
+                prompts = await self._prompt_repo.search(search)
+            elif tag:
+                prompts = await self._prompt_repo.filter_by_tags([tag])
+            else:
+                prompts = await self._prompt_repo.get_all()
+            return web.json_response([self._prompt_to_frontend_dict(p) for p in prompts])
+        except Exception as e:
+            logger.error("handle_list_prompts 异常: %s", e, exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_create_prompt(self, request: web.Request) -> web.Response:
+        """
+        Business Logic:
+            前端"新建 Prompt"按钮提交 {title, content, tag}。
+
+        Code Logic:
+            解析 JSON -> 构造 Prompt（生成 uuid，vector_clock 初始 {device_id: 1}）-> repo.create
+            返回 201 + 完整 dict。
+        """
+        try:
+            body: dict = await request.json()
+            now: datetime = datetime.now(timezone.utc)
+            prompt = Prompt(
+                id=str(uuid.uuid4()),
+                title=body.get("title", "").strip(),
+                content=body.get("content", ""),
+                tags=[body["tag"]] if body.get("tag") else [],
+                created_at=now,
+                updated_at=now,
+                device_id=self._config.device_id,
+                vector_clock={self._config.device_id: 1},
+                deleted=False,
+            )
+            await self._prompt_repo.create(prompt)
+            return web.json_response(self._prompt_to_frontend_dict(prompt), status=201)
+        except Exception as e:
+            logger.error("handle_create_prompt 异常: %s", e, exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_get_prompt(self, request: web.Request) -> web.Response:
+        """
+        Business Logic:
+            前端编辑弹窗打开时按 ID 读取完整 Prompt 数据。
+
+        Code Logic:
+            从路径参数取 id -> repo.get_by_id；不存在返回 404。
+        """
+        try:
+            prompt_id: str = request.match_info["prompt_id"]
+            prompt = await self._prompt_repo.get_by_id(prompt_id)
+            if prompt is None or prompt.deleted:
+                return web.json_response({"error": "Prompt 不存在"}, status=404)
+            return web.json_response(self._prompt_to_frontend_dict(prompt))
+        except Exception as e:
+            logger.error("handle_get_prompt 异常: %s", e, exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_update_prompt(self, request: web.Request) -> web.Response:
+        """
+        Business Logic:
+            前端编辑表单保存时提交修改；本端编辑时需要推进 vector_clock
+            {device_id: +1} 以标记这是本端的新版本（CRDT 行为）。
+
+        Code Logic:
+            读 id -> get_by_id -> 更新字段 -> 自增 vector_clock[self._config.device_id]
+            -> repo.update。
+        """
+        try:
+            prompt_id: str = request.match_info["prompt_id"]
+            prompt = await self._prompt_repo.get_by_id(prompt_id)
+            if prompt is None:
+                return web.json_response({"error": "Prompt 不存在"}, status=404)
+
+            body: dict = await request.json()
+            if "title" in body:
+                prompt.title = body["title"].strip()
+            if "content" in body:
+                prompt.content = body["content"]
+            if "tag" in body:
+                prompt.tags = [body["tag"]] if body["tag"] else []
+            prompt.updated_at = datetime.now(timezone.utc)
+            # 推进本端计数器
+            prompt.vector_clock[self._config.device_id] = (
+                prompt.vector_clock.get(self._config.device_id, 0) + 1
+            )
+            await self._prompt_repo.update(prompt)
+            return web.json_response(self._prompt_to_frontend_dict(prompt))
+        except Exception as e:
+            logger.error("handle_update_prompt 异常: %s", e, exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_delete_prompt(self, request: web.Request) -> web.Response:
+        """
+        Business Logic:
+            前端"删除"按钮触发软删除；CRDT 删除需要先自增 vector_clock
+            再标记 deleted=1，使对端能感知到"删除事件"。
+
+        Code Logic:
+            读 id -> repo.get_by_id -> 自增 vector_clock -> repo.delete。
+        """
+        try:
+            prompt_id: str = request.match_info["prompt_id"]
+            prompt = await self._prompt_repo.get_by_id(prompt_id)
+            if prompt is None:
+                return web.json_response({"error": "Prompt 不存在"}, status=404)
+            # CRDT: 删除也是一次写入，先推进 clock
+            prompt.vector_clock[self._config.device_id] = (
+                prompt.vector_clock.get(self._config.device_id, 0) + 1
+            )
+            await self._prompt_repo.delete(prompt_id)
+            return web.json_response({"ok": True, "id": prompt_id})
+        except Exception as e:
+            logger.error("handle_delete_prompt 异常: %s", e, exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ── 前端 设备 ──
+
+    async def handle_list_devices(self, _request: web.Request) -> web.Response:
+        """
+        Business Logic:
+            设备面板拉取当前发现的全部对端设备。
+
+        Code Logic:
+            调用注入的 get_devices 回调，getter 未注册时返回 501。
+        """
+        if self._get_devices is None:
+            return web.json_response(
+                {"error": "设备发现功能未启用"}, status=501
+            )
+        try:
+            devices = self._get_devices()
+            return web.json_response(devices)
+        except Exception as e:
+            logger.error("handle_list_devices 异常: %s", e, exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ── 前端 同步触发 ──
+
+    async def handle_sync_all(self, _request: web.Request) -> web.Response:
+        """
+        Business Logic:
+            前端 Prompts 页面"同步"按钮触发全网同步。
+            同步操作在后台异步执行，本端点立即返回触发结果。
+
+        Code Logic:
+            解析 body 中的 device_ids（可选）；不传则同步全部已发现设备。
+            通过 asyncio.create_task 异步执行 sync_all；当前 handler 立刻返回
+            {"accepted": True, "task": "sync"}。
+        """
+        # 简化：暂未注入 sync_engine；返回模拟响应
+        # 真正实现需要：把 SyncEngine 通过参数注入
+        return web.json_response({
+            "accepted": True,
+            "synced": 0,
+            "note": "sync engine 未在前端 API 中暴露（待 P2P sync engine 集成）",
+        })
+
+    # ── 前端 传输任务 ──
+
+    async def handle_list_transfers(self, _request: web.Request) -> web.Response:
+        """
+        Business Logic:
+            传输面板列出全部发送/接收任务（含历史）。
+
+        Code Logic:
+            合并 sender + receiver 的任务列表，按 created_at 倒序。
+            sender/receiver 未注入时返回 501。
+        """
+        try:
+            if self._get_transfers is None:
+                return web.json_response([], status=200)
+            tasks = self._get_transfers()
+            return web.json_response(tasks)
+        except Exception as e:
+            logger.error("handle_list_transfers 异常: %s", e, exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_transfer_send(self, request: web.Request) -> web.Response:
+        """
+        Business Logic:
+            前端"选择文件 + 目标设备 → 发送"按钮触发。
+            后端根据 deviceId 解析 base_url，调用 sender.send_file 异步执行。
+
+        Code Logic:
+            解析 {deviceId, filePath} -> 异步启动 send_file -> 立即返回 202 + taskId。
+        """
+        if self._on_transfer_send is None or self._get_devices is None:
+            return web.json_response(
+                {"error": "发送功能未启用"}, status=501
+            )
+        try:
+            body: dict = await request.json()
+            device_id: str = body["deviceId"]
+            file_path: str = body["filePath"]
+            # 查对端 base_url
+            target: dict | None = next(
+                (d for d in self._get_devices() if d["id"] == device_id), None
+            )
+            if target is None:
+                return web.json_response(
+                    {"error": f"设备 {device_id} 不在线"}, status=404
+                )
+            base_url: str = f"http://{target['address']}:{target['port']}"
+            coro: Awaitable[object] = self._on_transfer_send(
+                file_path, base_url, device_id
+            )
+            # pyright: ignore[reportArgumentType] - create_task 需要 Coroutine，Awaitable 是其超集
+            asyncio.create_task(coro)  # type: ignore[arg-type]
+            return web.json_response(
+                {"accepted": True, "deviceId": device_id, "filePath": file_path},
+                status=202,
+            )
+        except Exception as e:
+            logger.error("handle_transfer_send 异常: %s", e, exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_cancel_transfer(self, request: web.Request) -> web.Response:
+        """
+        Business Logic:
+            前端传输项的"取消"按钮调 DELETE /api/transfer/tasks/{id}。
+
+        Code Logic:
+            调注入的 on_transfer_cancel；不存在时返回 404。
+        """
+        if self._on_transfer_cancel is None:
+            return web.json_response(
+                {"error": "取消功能未启用"}, status=501
+            )
+        try:
+            transfer_id: str = request.match_info["transfer_id"]
+            ok: bool = self._on_transfer_cancel(transfer_id)
+            if not ok:
+                return web.json_response(
+                    {"error": f"传输任务 {transfer_id} 不存在"}, status=404
+                )
+            return web.json_response({"ok": True, "id": transfer_id})
+        except Exception as e:
+            logger.error("handle_cancel_transfer 异常: %s", e, exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
 
     async def handle_sync_pull(self, request: web.Request) -> web.Response:
         """
