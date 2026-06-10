@@ -251,24 +251,28 @@ class Application:
         assert self._screenshot_mgr is not None
         assert self._system_tray is not None
         assert self._main_window is not None
+        # 本地绑定消除 Pyright 的 None 推断
+        discovery = self._discovery
+        sync_engine = self._sync_engine
+        system_tray = self._system_tray
 
         # 设备发现 → UI + 同步
-        self._discovery.device_found.connect(device_panel.add_device)
-        self._discovery.device_found.connect(
-            lambda dev: transfer_panel.update_devices(self._discovery.get_devices())
+        discovery.device_found.connect(device_panel.add_device)
+        discovery.device_found.connect(
+            lambda dev: transfer_panel.update_devices(discovery.get_devices())
         )
-        self._discovery.device_found.connect(
-            lambda dev: self._system_tray.update_device_count(
-                len(self._discovery.get_devices())
+        discovery.device_found.connect(
+            lambda dev: system_tray.update_device_count(
+                len(discovery.get_devices())
             )
         )
-        self._discovery.device_lost.connect(device_panel.remove_device)
-        self._discovery.device_lost.connect(
-            lambda _: transfer_panel.update_devices(self._discovery.get_devices())
+        discovery.device_lost.connect(device_panel.remove_device)
+        discovery.device_lost.connect(
+            lambda _: transfer_panel.update_devices(discovery.get_devices())
         )
-        self._discovery.device_lost.connect(
-            lambda _: self._system_tray.update_device_count(
-                len(self._discovery.get_devices())
+        discovery.device_lost.connect(
+            lambda _: system_tray.update_device_count(
+                len(discovery.get_devices())
             )
         )
 
@@ -306,7 +310,7 @@ class Application:
         # Prompt 手动同步触发
         prompt_panel.sync_requested.connect(
             lambda: asyncio.ensure_future(
-                self._sync_engine.sync_all(self._discovery.get_devices())
+                sync_engine.sync_all(discovery.get_devices())
             )
         )
 
@@ -365,8 +369,12 @@ class Application:
             self._welcome_window = None
 
         assert self._main_window is not None
-        prompt_panel: PromptPanel = self._main_window.prompt_panel
-        self._show_main_window_and_load(prompt_panel)
+        # WebMainWindow 不含 prompt_panel 属性（前端通过 fetch 取数据）
+        if isinstance(self._main_window, MainWindow):
+            prompt_panel: PromptPanel = self._main_window.prompt_panel
+            self._show_main_window_and_load(prompt_panel)
+        else:
+            self._main_window.show()
 
     def _show_main_window_and_load(self, prompt_panel: PromptPanel) -> None:
         """显示主窗口并加载 Prompt 数据。"""
