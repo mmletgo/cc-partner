@@ -19,7 +19,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QLabel,
     QMessageBox,
-    QFrame,
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from PyQt6.QtGui import QGuiApplication
@@ -219,7 +218,10 @@ class PromptPanel(QWidget):
         main_layout.setSpacing(16)
 
         # === 顶部工具栏 ===
-        toolbar_layout: QHBoxLayout = QHBoxLayout()
+        toolbar_widget: QWidget = QWidget()
+        toolbar_widget.setStyleSheet("background: transparent;")
+        toolbar_layout: QHBoxLayout = QHBoxLayout(toolbar_widget)
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
         toolbar_layout.setSpacing(8)
 
         # 搜索框
@@ -250,17 +252,13 @@ class PromptPanel(QWidget):
         self._btn_new.clicked.connect(lambda: asyncio.ensure_future(self._on_new()))
         toolbar_layout.addWidget(self._btn_new)
 
-        main_layout.addLayout(toolbar_layout)
-
-        # 分隔线
-        separator: QFrame = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setStyleSheet(f"color: {theme.BORDER}; background: transparent;")
-        separator.setFixedHeight(1)
-        main_layout.addWidget(separator)
+        main_layout.addWidget(toolbar_widget)
 
         # === 标签筛选行（独立一行） ===
-        tag_filter_layout: QHBoxLayout = QHBoxLayout()
+        tag_filter_widget: QWidget = QWidget()
+        tag_filter_widget.setStyleSheet("background: transparent;")
+        tag_filter_layout: QHBoxLayout = QHBoxLayout(tag_filter_widget)
+        tag_filter_layout.setContentsMargins(0, 0, 0, 0)
         tag_filter_layout.setSpacing(6)
 
         tag_filter_label: QLabel = QLabel("标签筛选:")
@@ -277,7 +275,7 @@ class PromptPanel(QWidget):
         tag_filter_layout.addWidget(self._tag_combo)
         tag_filter_layout.addStretch()
 
-        main_layout.addLayout(tag_filter_layout)
+        main_layout.addWidget(tag_filter_widget)
 
         # === 卡片滚动区域 ===
         self._scroll_area: QScrollArea = QScrollArea()
