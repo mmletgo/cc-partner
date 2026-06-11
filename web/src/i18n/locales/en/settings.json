@@ -1,1 +1,68 @@
-{}
+{
+  "title": "Settings",
+  "subtitle": "Manage device name, shortcuts, sync strategy, and version info.",
+  "loading": "Loading…",
+  "loadFailed": "Failed to load: {{error}}",
+  "basic": {
+    "title": "Basic",
+    "deviceName": "Device name",
+    "deviceNameHelper": "The name other devices see on the local network.",
+    "receiveDir": "Receive directory",
+    "receiveDirHelper": "Files received over the local network are saved here.",
+    "selectFolder": "Choose…",
+    "selecting": "Choosing…"
+  },
+  "shortcut": {
+    "title": "Shortcuts",
+    "screenshot": { "label": "Screenshot shortcut", "helper": "Select an area and copy it to the clipboard." },
+    "toggleWindow": { "label": "Toggle window", "helper": "Show/hide the main window." },
+    "openSettings": { "label": "Open settings", "helper": "Jump straight to this panel." },
+    "quickSend": { "label": "Quick send", "helper": "Pick a file and send it to the most recent device." }
+  },
+  "sync": {
+    "title": "Sync & storage",
+    "autoSync": { "label": "Enable auto-sync", "helper": "Automatically sync Prompts with other devices when online." },
+    "saveHistory": { "label": "Save transfer history", "helper": "Keep transfer records in the local database for 30 days." },
+    "encryptSensitive": { "label": "Encrypt sensitive Prompts", "helper": "Add extra encryption for Prompts containing keys/tokens." },
+    "enabled": "On",
+    "disabled": "Off"
+  },
+  "about": {
+    "title": "About",
+    "versionLabel": "Version",
+    "buildLabel": "Build date",
+    "sourceLabel": "Update source",
+    "source": "GitHub Releases",
+    "latestVersion": "Latest version",
+    "checkUpdate": "Check for updates",
+    "checking": "Checking…",
+    "newVersionFound": "New version v{{version}} found",
+    "upToDate": "You're on the latest version",
+    "downloadUpdate": "Download update ({{size}})",
+    "installAndRestart": "Install and restart",
+    "installing": "Installing…",
+    "downloadCompleted": "Download complete—the app will restart when you proceed.",
+    "downloadFailed": "Download failed",
+    "retryDownload": "Retry download",
+    "downloadCancelled": "Download cancelled",
+    "redownload": "Download again",
+    "noAsset": "No installer found for your platform. Please download it manually from GitHub Releases.",
+    "checkingHint": "Checking for updates…",
+    "cancel": "Cancel"
+  },
+  "action": {
+    "save": "Save",
+    "saving": "Saving…",
+    "resetDefault": "Reset to defaults"
+  },
+  "status": {
+    "dirtyHint": "You have unsaved changes",
+    "savedAt": "Saved at {{time}}"
+  },
+  "error": {
+    "saveFailed": "Save failed",
+    "checkFailed": "Failed to check for updates",
+    "loadConfigFailed": "Failed to load config",
+    "startDownloadFailed": "Failed to start download"
+  }
+}

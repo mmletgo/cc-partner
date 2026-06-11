@@ -1,1 +1,68 @@
-{}
+{
+  "title": "设置",
+  "subtitle": "管理设备名、快捷键、同步策略与版本信息。",
+  "loading": "加载中…",
+  "loadFailed": "加载失败：{{error}}",
+  "basic": {
+    "title": "基本设置",
+    "deviceName": "设备名称",
+    "deviceNameHelper": "其他设备在局域网中看到的名字。",
+    "receiveDir": "接收目录",
+    "receiveDirHelper": "通过局域网接收到的文件会保存到此目录。",
+    "selectFolder": "选择…",
+    "selecting": "选择中…"
+  },
+  "shortcut": {
+    "title": "快捷键",
+    "screenshot": { "label": "截图快捷键", "helper": "框选区域并复制到剪贴板。" },
+    "toggleWindow": { "label": "切换窗口", "helper": "显示/隐藏主窗口。" },
+    "openSettings": { "label": "打开设置", "helper": "直接定位到本面板。" },
+    "quickSend": { "label": "快速发送", "helper": "选择文件并发送到最近设备。" }
+  },
+  "sync": {
+    "title": "同步与存储",
+    "autoSync": { "label": "启用自动同步", "helper": "联网后自动与其他设备同步 Prompt。" },
+    "saveHistory": { "label": "保存传输历史", "helper": "在本地数据库保留 30 天的传输记录。" },
+    "encryptSensitive": { "label": "加密敏感 Prompt", "helper": "对包含密钥/令牌的 Prompt 启用额外加密。" },
+    "enabled": "启用",
+    "disabled": "禁用"
+  },
+  "about": {
+    "title": "关于",
+    "versionLabel": "版本号",
+    "buildLabel": "构建日期",
+    "sourceLabel": "更新来源",
+    "source": "GitHub Releases",
+    "latestVersion": "最新版本",
+    "checkUpdate": "检查更新",
+    "checking": "检查中…",
+    "newVersionFound": "发现新版本 v{{version}}",
+    "upToDate": "当前为最新版本",
+    "downloadUpdate": "下载更新（{{size}}）",
+    "installAndRestart": "安装并重启",
+    "installing": "安装中…",
+    "downloadCompleted": "下载完成，点击后应用将重启。",
+    "downloadFailed": "下载失败",
+    "retryDownload": "重试下载",
+    "downloadCancelled": "下载已取消",
+    "redownload": "重新下载",
+    "noAsset": "未找到当前平台的安装包，请前往 GitHub Releases 手动下载。",
+    "checkingHint": "正在检查更新…",
+    "cancel": "取消"
+  },
+  "action": {
+    "save": "保存",
+    "saving": "保存中…",
+    "resetDefault": "恢复默认"
+  },
+  "status": {
+    "dirtyHint": "有未保存的修改",
+    "savedAt": "已保存于 {{time}}"
+  },
+  "error": {
+    "saveFailed": "保存失败",
+    "checkFailed": "检查更新失败",
+    "loadConfigFailed": "加载配置失败",
+    "startDownloadFailed": "启动下载失败"
+  }
+}

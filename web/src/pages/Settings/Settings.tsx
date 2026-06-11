@@ -13,28 +13,31 @@
  *     受控的 onClick + role="switch" + aria-checked
  *   - 底部按钮组：恢复默认走 ghost 风格重置状态、保存走 primary 风格
  *     调用后端 API 持久化
+ *   - 所有用户可见文案经 i18next 翻译（settings ns + common ns）
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { Card, Button, Input, Pill } from '@/components/primitives';
 import { CheckIcon, XIcon, DevicesIcon, FolderIcon, KeyboardIcon, SyncIcon, InfoIcon, DownloadIcon } from '@/lib/icons';
 import { configApi } from '@/api/config';
 import type { VersionInfo, UpdateCheckResult, UpdateDownloadStatus } from '@/lib/types';
 import styles from './Settings.module.css';
 
-/** 单个快捷键字段定义 */
+/** 单个快捷键字段定义（label/helper 在渲染时按 i18n 解析，这里只存可本地化的 id） */
 interface ShortcutField {
   id: string;
-  label: string;
-  helper: string;
+  /** label/helper 的 i18n 子键，对应 shortcut.<key>.{label,helper} */
+  labelKey: 'screenshot' | 'toggleWindow' | 'openSettings' | 'quickSend';
   value: string;
 }
 
-/** 同步与存储开关定义 */
+/** 同步与存储开关定义（label/helper 同样按 i18n 解析） */
 interface ToggleField {
   id: string;
-  label: string;
-  helper: string;
+  /** label/helper 的 i18n 子键，对应 sync.<key>.{label,helper} */
+  labelKey: 'autoSync' | 'saveHistory' | 'encryptSensitive';
   enabled: boolean;
 }
 
@@ -46,22 +49,32 @@ interface SettingsState {
   toggles: ToggleField[];
 }
 
-/** 快捷键默认值 */
-const DEFAULT_SHORTCUTS: ShortcutField[] = [
-  { id: 'screenshot', label: '截图快捷键', helper: '框选区域并复制到剪贴板', value: 'Cmd+Shift+S' },
-  { id: 'toggle-window', label: '切换窗口', helper: '显示/隐藏主窗口', value: 'Cmd+Shift+P' },
-  { id: 'open-settings', label: '打开设置', helper: '直接定位到本面板', value: 'Cmd+,' },
-  { id: 'quick-send', label: '快速发送', helper: '选择文件并发送到最近设备', value: 'Cmd+Shift+U' },
+/** 快捷键字段定义（值本地化，文案走 t） */
+const SHORTCUT_FIELDS: ShortcutField[] = [
+  { id: 'screenshot', labelKey: 'screenshot', value: 'Cmd+Shift+S' },
+  { id: 'toggle-window', labelKey: 'toggleWindow', value: 'Cmd+Shift+P' },
+  { id: 'open-settings', labelKey: 'openSettings', value: 'Cmd+,' },
+  { id: 'quick-send', labelKey: 'quickSend', value: 'Cmd+Shift+U' },
 ];
 
-/** 同步与存储开关默认值 */
-const DEFAULT_TOGGLES: ToggleField[] = [
-  { id: 'auto-sync', label: '启用自动同步', helper: '联网后自动与其他设备同步 Prompt', enabled: true },
-  { id: 'save-history', label: '保存传输历史', helper: '在本地数据库保留 30 天的传输记录', enabled: true },
-  { id: 'encrypt-prompts', label: '加密敏感 Prompt', helper: '对包含密钥/令牌的 Prompt 启用额外加密', enabled: false },
+/** 同步与存储开关定义（enabled 走默认值，文案走 t） */
+const TOGGLE_FIELDS: ToggleField[] = [
+  { id: 'auto-sync', labelKey: 'autoSync', enabled: true },
+  { id: 'save-history', labelKey: 'saveHistory', enabled: true },
+  { id: 'encrypt-prompts', labelKey: 'encryptSensitive', enabled: false },
 ];
 
-/** 生成默认状态 */
+/** 默认快捷键字段（深拷贝，避免污染常量） */
+const DEFAULT_SHORTCUTS: ShortcutField[] = SHORTCUT_FIELDS.map((s) => ({ ...s }));
+
+/** 默认同步开关（深拷贝，避免污染常量） */
+const DEFAULT_TOGGLES: ToggleField[] = TOGGLE_FIELDS.map((t) => ({ ...t }));
+
+/**
+ * 生成默认状态
+ *
+ * @returns 仅含可本地化 id 的默认 SettingsState
+ */
 function createDefaultState(): SettingsState {
   return {
     deviceName: '',
@@ -72,11 +85,32 @@ function createDefaultState(): SettingsState {
 }
 
 /**
+ * 计算更新检查结果的提示文本
+ *
+ * @param updateResult 更新检查结果
+ * @param checkingUpdate 是否正在检查
+ * @param t i18next 翻译函数（settings ns）
+ * @returns 当前应展示的提示文本
+ */
+function buildUpdateHint(
+  updateResult: UpdateCheckResult | null,
+  checkingUpdate: boolean,
+  t: TFunction<'settings'>,
+): string {
+  if (checkingUpdate) return t('about.checkingHint');
+  if (!updateResult) return t('about.upToDate');
+  if (updateResult.error) return updateResult.error;
+  if (updateResult.hasUpdate) return t('about.newVersionFound', { version: updateResult.version });
+  return t('about.upToDate');
+}
+
+/**
  * Settings 页面组件
  *
  * @returns Settings 路由的根容器
  */
 export function Settings() {
+  const { t } = useTranslation(['settings', 'common']);
   const [state, setState] = useState<SettingsState>(createDefaultState);
   const initialStateRef = useRef<SettingsState>(state);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
@@ -94,6 +128,12 @@ export function Settings() {
   const isDirty = useMemo(() => {
     return JSON.stringify(state) !== JSON.stringify(initialStateRef.current);
   }, [state]);
+
+  // 渲染更新检查结果的提示文本
+  const updateHint = useMemo(
+    () => buildUpdateHint(updateResult, checkingUpdate, t),
+    [updateResult, checkingUpdate, t],
+  );
 
   /**
    * 通用字段更新：merge 浅层部分字段
@@ -165,7 +205,7 @@ export function Settings() {
       if (result.path) {
         patchState({ receiveDir: result.path });
       }
-    } catch (err) {
+    } catch {
       // 目录选择取消或失败时静默处理
     } finally {
       setChoosingDir(false);
@@ -187,7 +227,7 @@ export function Settings() {
       setSavedAt(new Date());
     } catch (err) {
       // 保存失败时在 UI 提示错误
-      setLoadError(err instanceof Error ? err.message : '保存失败');
+      setLoadError(err instanceof Error ? err.message : t('error.saveFailed'));
     } finally {
       setSaving(false);
     }
@@ -206,7 +246,7 @@ export function Settings() {
     } catch (err) {
       setUpdateResult({
         hasUpdate: false,
-        error: err instanceof Error ? err.message : '检查更新失败',
+        error: err instanceof Error ? err.message : t('error.checkFailed'),
       });
     } finally {
       setCheckingUpdate(false);
@@ -241,7 +281,7 @@ export function Settings() {
         setVersionInfo(version);
       } catch (err) {
         if (cancelled) return;
-        setLoadError(err instanceof Error ? err.message : '加载配置失败');
+        setLoadError(err instanceof Error ? err.message : t('error.loadConfigFailed'));
       } finally {
         if (!cancelled) {
           setLoading(false);
@@ -251,6 +291,8 @@ export function Settings() {
 
     void loadConfig();
     return () => { cancelled = true; };
+    // 仅在挂载时执行一次；t 在错误分支兜底，但依赖项保持挂载语义
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 下载进行中时轮询进度状态，每 800ms 一次；进入终态（completed/failed/cancelled）后停止
@@ -293,7 +335,7 @@ export function Settings() {
       setDownloadStatus({
         status: 'failed',
         progress: 0,
-        error: err instanceof Error ? err.message : '启动下载失败',
+        error: err instanceof Error ? err.message : t('error.startDownloadFailed'),
         filePath: '',
         url: '',
         filename: '',
@@ -330,15 +372,6 @@ export function Settings() {
     }
   };
 
-  // 渲染更新检查结果的提示文本
-  const updateHint = useMemo(() => {
-    if (checkingUpdate) return '正在检查更新…';
-    if (!updateResult) return '当前为最新版本';
-    if (updateResult.error) return updateResult.error;
-    if (updateResult.hasUpdate) return `发现新版本 v${updateResult.version}`;
-    return '当前为最新版本';
-  }, [updateResult, checkingUpdate]);
-
   // 加载状态
   if (loading) {
     return (
@@ -346,8 +379,8 @@ export function Settings() {
         <div className={styles.container}>
           <header className={styles.header}>
             <span className={styles.eyebrow}>PREFERENCES</span>
-            <h1 className={styles.title}>设置</h1>
-            <p className={styles.lead}>加载中…</p>
+            <h1 className={styles.title}>{t('settings:title')}</h1>
+            <p className={styles.lead}>{t('settings:loading')}</p>
           </header>
         </div>
       </div>
@@ -361,9 +394,9 @@ export function Settings() {
         <div className={styles.container}>
           <header className={styles.header}>
             <span className={styles.eyebrow}>PREFERENCES</span>
-            <h1 className={styles.title}>设置</h1>
+            <h1 className={styles.title}>{t('settings:title')}</h1>
             <p className={styles.lead} style={{ color: 'var(--color-danger)' }}>
-              加载失败：{loadError}
+              {t('settings:loadFailed', { error: loadError })}
             </p>
           </header>
         </div>
@@ -377,19 +410,19 @@ export function Settings() {
         {/* 页面头部 */}
         <header className={styles.header}>
           <span className={styles.eyebrow}>PREFERENCES</span>
-          <h1 className={styles.title}>设置</h1>
-          <p className={styles.lead}>管理设备名、快捷键、同步策略与版本信息</p>
+          <h1 className={styles.title}>{t('settings:title')}</h1>
+          <p className={styles.lead}>{t('settings:subtitle')}</p>
         </header>
 
         {/* Card 1: 基本设置 */}
         <Card variant="flat" padding="md">
           <Card.Header>
-            <h2 className={styles.sectionTitle}>基本设置</h2>
+            <h2 className={styles.sectionTitle}>{t('settings:basic.title')}</h2>
           </Card.Header>
           <Card.Body padding="md">
             <div className={styles.field}>
               <label className={styles.label} htmlFor="settings-device-name">
-                设备名称
+                {t('settings:basic.deviceName')}
               </label>
               <div className={styles.inputRow}>
                 <Input
@@ -400,12 +433,12 @@ export function Settings() {
                   icon={<DevicesIcon />}
                 />
               </div>
-              <p className={styles.helper}>其他设备在局域网中看到的名字</p>
+              <p className={styles.helper}>{t('settings:basic.deviceNameHelper')}</p>
             </div>
 
             <div className={styles.field}>
               <label className={styles.label} htmlFor="settings-receive-dir">
-                接收目录
+                {t('settings:basic.receiveDir')}
               </label>
               <div className={styles.inputRow}>
                 <Input
@@ -416,10 +449,10 @@ export function Settings() {
                   icon={<FolderIcon />}
                 />
                 <Button variant="secondary" size="md" onClick={handleChooseDir} disabled={choosingDir}>
-                  {choosingDir ? '选择中…' : '选择…'}
+                  {choosingDir ? t('settings:basic.selecting') : t('settings:basic.selectFolder')}
                 </Button>
               </div>
-              <p className={styles.helper}>通过局域网接收到的文件会保存到此目录</p>
+              <p className={styles.helper}>{t('settings:basic.receiveDirHelper')}</p>
             </div>
           </Card.Body>
         </Card>
@@ -427,15 +460,19 @@ export function Settings() {
         {/* Card 2: 快捷键 */}
         <Card variant="flat" padding="md">
           <Card.Header>
-            <h2 className={styles.sectionTitle}>快捷键</h2>
+            <h2 className={styles.sectionTitle}>{t('settings:shortcut.title')}</h2>
           </Card.Header>
           <Card.Body padding="md">
             <div className={styles.shortcutList}>
               {state.shortcuts.map((s) => (
                 <div key={s.id} className={styles.shortcutRow}>
                   <div className={styles.shortcutText}>
-                    <span className={styles.shortcutLabel}>{s.label}</span>
-                    <span className={styles.shortcutHelper}>{s.helper}</span>
+                    <span className={styles.shortcutLabel}>
+                      {t(`settings:shortcut.${s.labelKey}.label`)}
+                    </span>
+                    <span className={styles.shortcutHelper}>
+                      {t(`settings:shortcut.${s.labelKey}.helper`)}
+                    </span>
                   </div>
                   <div className={styles.shortcutInput}>
                     <Input
@@ -455,33 +492,38 @@ export function Settings() {
         {/* Card 3: 同步与存储 */}
         <Card variant="flat" padding="md">
           <Card.Header>
-            <h2 className={styles.sectionTitle}>同步与存储</h2>
+            <h2 className={styles.sectionTitle}>{t('settings:sync.title')}</h2>
           </Card.Header>
           <Card.Body padding="md">
             <div className={styles.toggleList}>
-              {state.toggles.map((t) => (
+              {state.toggles.map((t2) => (
                 <button
-                  key={t.id}
+                  key={t2.id}
                   type="button"
                   className={styles.toggleRow}
-                  onClick={() => handleToggleClick(t.id)}
+                  onClick={() => handleToggleClick(t2.id)}
                   role="switch"
-                  aria-checked={t.enabled}
+                  aria-checked={t2.enabled}
+                  aria-label={t(`settings:sync.${t2.labelKey}.label`)}
                 >
                   <div className={styles.toggleText}>
-                    <span className={styles.toggleLabel}>{t.label}</span>
-                    <span className={styles.toggleHelper}>{t.helper}</span>
+                    <span className={styles.toggleLabel}>
+                      {t(`settings:sync.${t2.labelKey}.label`)}
+                    </span>
+                    <span className={styles.toggleHelper}>
+                      {t(`settings:sync.${t2.labelKey}.helper`)}
+                    </span>
                   </div>
                   <span className={styles.toggleState}>
-                    {t.enabled ? (
+                    {t2.enabled ? (
                       <Pill tone="success" dot>
                         <CheckIcon size={12} />
-                        启用
+                        {t('settings:sync.enabled')}
                       </Pill>
                     ) : (
                       <Pill tone="neutral" dot>
                         <XIcon size={12} />
-                        禁用
+                        {t('settings:sync.disabled')}
                       </Pill>
                     )}
                   </span>
@@ -494,23 +536,23 @@ export function Settings() {
         {/* Card 4: 关于 */}
         <Card variant="flat" padding="md">
           <Card.Header>
-            <h2 className={styles.sectionTitle}>关于</h2>
+            <h2 className={styles.sectionTitle}>{t('settings:about.title')}</h2>
           </Card.Header>
           <Card.Body padding="md">
             <dl className={styles.metaList}>
               <div className={styles.metaRow}>
-                <dt className={styles.metaKey}>版本号</dt>
+                <dt className={styles.metaKey}>{t('settings:about.versionLabel')}</dt>
                 <dd className={styles.metaValue}>
                   <Pill tone="accent">v{versionInfo?.version ?? '—'}</Pill>
                 </dd>
               </div>
               <div className={styles.metaRow}>
-                <dt className={styles.metaKey}>构建日期</dt>
+                <dt className={styles.metaKey}>{t('settings:about.buildLabel')}</dt>
                 <dd className={styles.metaValue}>{versionInfo?.buildDate ?? '—'}</dd>
               </div>
               <div className={styles.metaRow}>
-                <dt className={styles.metaKey}>更新来源</dt>
-                <dd className={styles.metaValue}>GitHub Releases</dd>
+                <dt className={styles.metaKey}>{t('settings:about.sourceLabel')}</dt>
+                <dd className={styles.metaValue}>{t('settings:about.source')}</dd>
               </div>
             </dl>
             <div className={styles.aboutActions}>
@@ -521,7 +563,7 @@ export function Settings() {
                 onClick={handleCheckUpdate}
                 disabled={checkingUpdate}
               >
-                {checkingUpdate ? '检查中…' : '检查更新'}
+                {checkingUpdate ? t('settings:about.checking') : t('settings:about.checkUpdate')}
               </Button>
               <span className={styles.aboutHint}>
                 <InfoIcon size={14} />
@@ -533,7 +575,7 @@ export function Settings() {
             {updateResult?.hasUpdate ? (
               <div className={styles.updateBlock}>
                 <div className={styles.metaRow}>
-                  <span className={styles.metaKey}>最新版本</span>
+                  <span className={styles.metaKey}>{t('settings:about.latestVersion')}</span>
                   <Pill tone="accent">v{updateResult.version}</Pill>
                 </div>
                 {updateResult.body ? (
@@ -557,7 +599,7 @@ export function Settings() {
                       icon={<XIcon size={14} />}
                       onClick={handleCancelDownload}
                     >
-                      取消
+                      {t('settings:about.cancel')}
                     </Button>
                   </div>
                 ) : downloadStatus?.status === 'completed' ? (
@@ -569,14 +611,14 @@ export function Settings() {
                       onClick={handleInstall}
                       disabled={installing}
                     >
-                      {installing ? '安装中…' : '安装并重启'}
+                      {installing ? t('settings:about.installing') : t('settings:about.installAndRestart')}
                     </Button>
-                    <span className={styles.aboutHint}>下载完成，点击后应用将重启</span>
+                    <span className={styles.aboutHint}>{t('settings:about.downloadCompleted')}</span>
                   </div>
                 ) : downloadStatus?.status === 'failed' ? (
                   <div className={styles.updateActions}>
                     <span className={styles.updateError}>
-                      {downloadStatus.error || '下载失败'}
+                      {downloadStatus.error || t('settings:about.downloadFailed')}
                     </span>
                     <Button
                       variant="secondary"
@@ -584,19 +626,19 @@ export function Settings() {
                       icon={<DownloadIcon size={14} />}
                       onClick={handleDownload}
                     >
-                      重试下载
+                      {t('settings:about.retryDownload')}
                     </Button>
                   </div>
                 ) : downloadStatus?.status === 'cancelled' ? (
                   <div className={styles.updateActions}>
-                    <span className={styles.aboutHint}>下载已取消</span>
+                    <span className={styles.aboutHint}>{t('settings:about.downloadCancelled')}</span>
                     <Button
                       variant="secondary"
                       size="sm"
                       icon={<DownloadIcon size={14} />}
                       onClick={handleDownload}
                     >
-                      重新下载
+                      {t('settings:about.redownload')}
                     </Button>
                   </div>
                 ) : updateResult.downloadUrl ? (
@@ -607,14 +649,13 @@ export function Settings() {
                       icon={<DownloadIcon size={14} />}
                       onClick={handleDownload}
                     >
-                      下载更新
-                      {updateResult.size ? `（${formatSize(updateResult.size)}）` : ''}
+                      {updateResult.size
+                        ? t('settings:about.downloadUpdate', { size: formatSize(updateResult.size) })
+                        : t('settings:about.downloadUpdate', { size: '' })}
                     </Button>
                   </div>
                 ) : (
-                  <span className={styles.aboutHint}>
-                    未找到当前平台的安装包，请前往 GitHub Releases 手动下载
-                  </span>
+                  <span className={styles.aboutHint}>{t('settings:about.noAsset')}</span>
                 )}
               </div>
             ) : null}
@@ -625,17 +666,19 @@ export function Settings() {
         <div className={styles.footer}>
           <div className={styles.footerLeft}>
             {isDirty ? (
-              <span className={styles.dirtyHint}>有未保存的修改</span>
+              <span className={styles.dirtyHint}>{t('settings:status.dirtyHint')}</span>
             ) : savedAt ? (
-              <span className={styles.savedHint}>已保存于 {formatTime(savedAt)}</span>
+              <span className={styles.savedHint}>
+                {t('settings:status.savedAt', { time: formatTime(savedAt) })}
+              </span>
             ) : null}
           </div>
           <div className={styles.footerActions}>
             <Button variant="ghost" onClick={handleResetDefaults} disabled={!isDirty}>
-              恢复默认
+              {t('settings:action.resetDefault')}
             </Button>
             <Button variant="primary" onClick={handleSave} disabled={!isDirty || saving}>
-              {saving ? '保存中…' : '保存'}
+              {saving ? t('settings:action.saving') : t('settings:action.save')}
             </Button>
           </div>
         </div>
