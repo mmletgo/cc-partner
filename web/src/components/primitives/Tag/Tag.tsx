@@ -11,6 +11,7 @@
  */
 
 import type { HTMLAttributes, ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { XIcon } from '@/lib/icons';
 import styles from './Tag.module.css';
 
@@ -36,6 +37,7 @@ export interface TagProps extends HTMLAttributes<HTMLSpanElement> {
  * @returns <span> 元素
  */
 export function Tag(props: TagProps) {
+  const { t } = useTranslation(['common']);
   const { children, color = 'default', size = 'md', onClose, className, onClick, ...rest } = props;
 
   const classes = [styles.tag, styles[`color-${color}`], styles[`size-${size}`], className]
@@ -56,7 +58,7 @@ export function Tag(props: TagProps) {
     <span data-color={color} data-size={size} className={classes} onClick={onClick} {...rest}>
       <span>{children}</span>
       {onClose ? (
-        <button type="button" className={styles.close} onClick={handleClose} aria-label="移除标签">
+        <button type="button" className={styles.close} onClick={handleClose} aria-label={t('common:tag.removeLabel')}>
           <XIcon size={10} />
         </button>
       ) : null}

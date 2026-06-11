@@ -37,5 +37,8 @@
   },
   "empty": {
     "noResults": "暂无结果"
+  },
+  "tag": {
+    "removeLabel": "移除标签"
   }
 }
