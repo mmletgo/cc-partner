@@ -2,32 +2,31 @@
  * Welcome 欢迎/权限引导页
  *
  * Business Logic（为什么需要这个页面）:
- *   macOS 等系统要求桌面工具在首次使用前明确申请"屏幕录制 / 输入监控 / 通知"等敏感权限，
- *   否则后续功能（截图、快捷键、系统通知）会静默失败。Welcome 页在路由层
- *   独立于 AppShell（不进入主窗口），给用户一个"先授权再用"的明确引导。
+ *   macOS 等系统要求桌面工具在首次使用前明确申请「屏幕录制 / 输入监控」等
+ *   敏感权限，否则后续功能（截图、全局快捷键）会静默失败。Welcome 页在路由层
+ *   独立于 AppShell（不进入主窗口），给首次使用的用户一个「先授权再用」的引导。
  *
  * Code Logic（这个页面做什么）:
- *   - 全屏深色背景（#1a1815 + 双 terracotta 光晕）模拟 macOS 权限弹窗
- *   - 居中 Window 容器（480x520）展示 logo / 标题 / 三条权限卡 / CTA 按钮
- *   - 三条权限卡用 PermissionCard：屏幕录制 / 输入监控 / 通知
- *   - 权限状态由 useEffect + setInterval 每 2s 调用 configApi.permissions() 轮询
- *   - 所有权限就绪后自动停止轮询
- *   - "继续使用"按钮在权限全部就绪后启用，跳转到首页
+ *   - 全屏深色背景模拟 macOS 权限弹窗，居中 Window 容器展示 logo/标题/权限卡/CTA
+ *   - 两条权限卡：屏幕录制 / 输入监控（通知权限已移除，本项目无系统通知功能）
+ *   - 用 usePermissions({ stopWhenGranted: true }) 轮询，全部授权后自动停止
+ *   - PermissionCard 的「去设置」点击 → requestMissing()（弹系统授权框 + 打开设置面板）
+ *   - 「继续使用」/「暂时跳过」都会写入 PERMISSION_ONBOARDED_KEY 后导航到首页，
+ *     避免每次启动重复跳转
  *   - 所有 hooks 集中在组件顶部，early return 之前
  */
 
-import { useEffect, useState, useCallback, useRef } from 'react';
-import type { ReactElement } from 'react';
+import { useCallback, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Button } from '@/components/primitives';
 import { PermissionCard } from '@/components/domain';
-import { configApi } from '@/api/config';
+import { usePermissions, PERMISSION_ONBOARDED_KEY } from '@/hooks/usePermissions';
+import type { PermissionsStatus } from '@/lib/types';
 import {
   InfoIcon,
   KeyboardIcon,
-  AlertIcon,
   ArrowRightIcon,
 } from '@/lib/icons';
 import styles from './Welcome.module.css';
@@ -42,22 +41,16 @@ interface PermissionEntry {
 }
 
 /**
- * 将后端 PermissionsStatus 转换为 PermissionEntry 列表
+ * 将后端 PermissionsStatus 转换为 PermissionEntry 列表（屏幕录制 + 输入监控）
  *
  * @param status - 后端返回的权限状态
  * @param t - i18next 翻译函数（welcome ns）
  * @returns 用于渲染的权限条目数组
  */
-function mapPermissions(
-  status: {
-    screenCapture: { granted: boolean };
-    inputMonitoring: { granted: boolean };
-  },
-  t: TFunction<'welcome'>,
-): PermissionEntry[] {
+function mapPermissions(status: PermissionsStatus, t: TFunction<'welcome'>): PermissionEntry[] {
   return [
     {
-      id: 'screenRecording',
+      id: 'screenCapture',
       icon: <InfoIcon />,
       title: t('permission.screenRecording.title'),
       description: t('permission.screenRecording.description'),
@@ -70,91 +63,30 @@ function mapPermissions(
       description: t('permission.inputMonitoring.description'),
       granted: status.inputMonitoring.granted,
     },
-    {
-      id: 'notifications',
-      icon: <AlertIcon />,
-      title: t('permission.notifications.title'),
-      description: t('permission.notifications.description'),
-      granted: true, // 通知不需要特殊权限
-    },
   ];
 }
 
 /**
  * Welcome 页面根组件
- *
- * Business Logic:
- *   首次使用时引导用户授予系统权限，确保截图、快捷键等核心功能可用。
- *
- * Code Logic:
- *   通过 configApi.permissions() 每 2 秒轮询后端权限状态，
- *   全部授权后停止轮询并启用"继续使用"按钮。
- *
- * @returns 全屏权限引导页（不进入 AppShell）
  */
 export function Welcome() {
   const { t } = useTranslation(['welcome']);
   const navigate = useNavigate();
-  const [permissions, setPermissions] = useState<PermissionEntry[]>([]);
-  // 用于在回调中读取最新 permissions 而不重新注册 effect
-  const permissionsRef = useRef<PermissionEntry[]>(permissions);
+  const { status, loading, allGranted, requestMissing } = usePermissions({
+    stopWhenGranted: true,
+  });
 
-  // 在 effect 中同步 ref（避免 render body 写 ref）
-  useEffect(() => {
-    permissionsRef.current = permissions;
-  }, [permissions]);
+  const handleRequest = useCallback(() => {
+    void requestMissing();
+  }, [requestMissing]);
 
-  // 轮询真实权限状态：每 2 秒调用后端 API
-  useEffect(() => {
-    let timerId: ReturnType<typeof setInterval> | null = null;
-
-    const checkPermissions = async () => {
-      try {
-        const status = await configApi.permissions();
-        const entries = mapPermissions(status, t);
-        setPermissions(entries);
-
-        // 所有权限都已授权，停止轮询
-        if (entries.every((p) => p.granted)) {
-          if (timerId !== null) {
-            window.clearInterval(timerId);
-            timerId = null;
-          }
-        }
-      } catch {
-        // API 调用失败时保持当前状态，下次轮询重试
-      }
-    };
-
-    // 首次立即检查
-    void checkPermissions();
-
-    // 每 2 秒轮询
-    timerId = window.setInterval(() => {
-      void checkPermissions();
-    }, 2000);
-
-    return () => {
-      if (timerId !== null) {
-        window.clearInterval(timerId);
-      }
-    };
-  }, [t]);
-
-  const allGranted = permissions.length > 0 && permissions.every((p) => p.granted);
-
-  // 暂时跳过：导航到首页
-  const handleSkip = useCallback(() => {
+  const finishOnboarding = useCallback(() => {
+    localStorage.setItem(PERMISSION_ONBOARDED_KEY, '1');
     navigate('/');
   }, [navigate]);
 
-  // 继续使用：权限已就绪，导航到首页
-  const handleContinue = useCallback(() => {
-    navigate('/');
-  }, [navigate]);
-
-  // loading 状态：permissions 为空表示首次 API 请求尚未返回
-  if (permissions.length === 0) {
+  // loading：首次 API 请求尚未返回（hooks 在 early return 之前）
+  if (loading || !status) {
     return (
       <div className={styles.backdrop}>
         <div className={styles.window} role="dialog" aria-label={t('welcome:title')}>
@@ -168,6 +100,8 @@ export function Welcome() {
     );
   }
 
+  const entries = mapPermissions(status, t);
+
   return (
     <div className={styles.backdrop}>
       <div className={styles.window} role="dialog" aria-label={t('welcome:title')}>
@@ -179,13 +113,14 @@ export function Welcome() {
         <p className={styles.subtitle}>{t('welcome:subtitle')}</p>
 
         <div className={styles.permissionList} aria-label={t('welcome:permissionListAriaLabel')}>
-          {permissions.map((p) => (
+          {entries.map((p) => (
             <PermissionCard
               key={p.id}
               icon={p.icon}
               title={p.title}
               description={p.description}
               granted={p.granted}
+              onRequestAccess={handleRequest}
             />
           ))}
         </div>
@@ -195,14 +130,14 @@ export function Welcome() {
             {allGranted ? t('welcome:permissionReady') : t('welcome:waitingPermission')}
           </span>
           <div className={styles.actions}>
-            <Button variant="ghost" size="md" onClick={handleSkip}>
+            <Button variant="ghost" size="md" onClick={finishOnboarding}>
               {t('welcome:skip')}
             </Button>
             <Button
               variant="primary"
               size="md"
               disabled={!allGranted}
-              onClick={handleContinue}
+              onClick={finishOnboarding}
               iconRight={<ArrowRightIcon />}
             >
               {t('welcome:continue')}

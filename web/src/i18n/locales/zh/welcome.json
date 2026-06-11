@@ -15,10 +15,6 @@
     "inputMonitoring": {
       "title": "输入监控",
       "description": "允许全局快捷键"
-    },
-    "notifications": {
-      "title": "通知权限",
-      "description": "允许发送系统通知"
     }
   },
   "permissionCard": {

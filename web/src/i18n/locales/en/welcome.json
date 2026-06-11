@@ -15,10 +15,6 @@
     "inputMonitoring": {
       "title": "Input Monitoring",
       "description": "Allow global keyboard shortcuts"
-    },
-    "notifications": {
-      "title": "Notifications",
-      "description": "Allow sending system notifications"
     }
   },
   "permissionCard": {
