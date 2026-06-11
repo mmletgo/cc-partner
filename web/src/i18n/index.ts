@@ -37,7 +37,17 @@ import zhSettings from './locales/zh/settings.json';
 export type AppLanguage = 'en' | 'zh';
 export const LANGUAGE_STORAGE_KEY = 'cp-lang';
 
-/** 检测初始语言:localStorage > 系统语言 > en */
+/**
+ * 检测初始语言
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   首次进入应用时,按用户已保存的偏好或系统语言决定初始显示语言,
+ *   避免每次刷新都回到默认英文。
+ *
+ * Code Logic（这个函数做什么）:
+ *   读取 localStorage['cp-lang'],有效则用;否则按 navigator.language
+ *   是否以 zh 开头推断;都不满足回退 'en'。
+ */
 export function detectLanguage(): AppLanguage {
   if (typeof window === 'undefined') return 'en';
   const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
