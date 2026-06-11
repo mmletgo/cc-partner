@@ -1,1 +1,15 @@
-{}
+{
+  "title": "Devices",
+  "onlineCount": "{{count}} online",
+  "onlineCount_other": "{{count}} online",
+  "desc": "Peer instances discovered automatically via mDNS on the LAN.",
+  "localInfo": "This device",
+  "loading": "Loading…",
+  "fetchSelfFailed": "Failed to load device info",
+  "fetchListFailed": "Failed to load devices",
+  "searchPlaceholder": "Search by device name…",
+  "emptyTitle": "No other devices found",
+  "emptyHint": "Make sure other devices are on the same LAN as this one.",
+  "lastSeenPrefix": "Last seen",
+  "cardAria": "Device {{name}}"
+}

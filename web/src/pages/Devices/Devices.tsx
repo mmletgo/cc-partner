@@ -18,6 +18,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Card, Pill, Button, Input } from '@/components/primitives';
 import { DeviceCard } from '@/components/domain';
 import { devicesApi } from '@/api/devices';
@@ -60,6 +61,7 @@ function toSelfDevice(resp: HealthResponse): SelfDeviceInfo {
  * @returns Devices 路由的根容器
  */
 export function Devices() {
+  const { t } = useTranslation(['devices', 'common']);
   const [devices, setDevices] = useState<Device[]>([]);
   const [selfDevice, setSelfDevice] = useState<SelfDeviceInfo | null>(null);
   const [selfLoading, setSelfLoading] = useState<boolean>(true);
@@ -80,11 +82,11 @@ export function Devices() {
       const resp = await devicesApi.health();
       setSelfDevice(toSelfDevice(resp));
     } catch (err) {
-      setSelfError(err instanceof Error ? err.message : '获取本机信息失败');
+      setSelfError(err instanceof Error ? err.message : t('devices:fetchSelfFailed'));
     } finally {
       setSelfLoading(false);
     }
-  }, []);
+  }, [t]);
 
   /**
    * 拉取设备列表；按后端契约映射为前端 Device 类型。
@@ -96,11 +98,11 @@ export function Devices() {
       setDevices(list);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '拉取设备列表失败');
+      setError(err instanceof Error ? err.message : t('devices:fetchListFailed'));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   // 首次挂载时获取本机信息
   useEffect(() => {
@@ -156,12 +158,12 @@ export function Devices() {
         <header className={styles.header}>
           <div className={styles.headerText}>
             <h1 className={styles.title}>
-              在线设备
+              {t('devices:title')}
               <Pill tone={onlineCount > 0 ? 'success' : 'neutral'} className={styles.countPill}>
-                {onlineCount} 个在线
+                {t('devices:onlineCount', { count: onlineCount })}
               </Pill>
             </h1>
-            <p className={styles.lead}>局域网内通过 mDNS 自动发现的对端实例</p>
+            <p className={styles.lead}>{t('devices:desc')}</p>
           </div>
           <Button
             variant="secondary"
@@ -170,7 +172,7 @@ export function Devices() {
             onClick={handleRefresh}
             loading={loading}
           >
-            刷新
+            {t('common:action.refresh')}
           </Button>
         </header>
 
@@ -180,17 +182,17 @@ export function Devices() {
             <div className={styles.selfRow}>
               <div className={styles.selfLabel}>
                 <span className={styles.selfDot} aria-hidden="true" />
-                <span>本机信息</span>
+                <span>{t('devices:localInfo')}</span>
               </div>
               <div className={styles.selfMeta}>
-                <span className={styles.selfName}>加载中…</span>
+                <span className={styles.selfName}>{t('devices:loading')}</span>
               </div>
             </div>
           ) : selfError ? (
             <div className={styles.selfRow}>
               <div className={styles.selfLabel}>
                 <span className={styles.selfDot} aria-hidden="true" />
-                <span>本机信息</span>
+                <span>{t('devices:localInfo')}</span>
               </div>
               <div className={styles.selfMeta}>
                 <span className={styles.selfName} style={{ color: 'var(--color-danger)' }}>
@@ -198,7 +200,7 @@ export function Devices() {
                 </span>
                 <span className={styles.selfSep}>·</span>
                 <Button variant="secondary" size="sm" onClick={fetchSelfDevice}>
-                  重试
+                  {t('common:action.retry')}
                 </Button>
               </div>
             </div>
@@ -206,7 +208,7 @@ export function Devices() {
             <div className={styles.selfRow}>
               <div className={styles.selfLabel}>
                 <span className={styles.selfDot} aria-hidden="true" />
-                <span>本机信息</span>
+                <span>{t('devices:localInfo')}</span>
               </div>
               <div className={styles.selfMeta}>
                 <span className={styles.selfName}>{selfDevice.name}</span>
@@ -216,7 +218,7 @@ export function Devices() {
                 </span>
                 <span className={styles.selfSep}>·</span>
                 <Pill tone="accent" className={styles.selfPill}>
-                  在线
+                  {t('common:status.device.online')}
                 </Pill>
               </div>
             </div>
@@ -229,7 +231,7 @@ export function Devices() {
             type="search"
             value={search}
             onChange={handleSearchChange}
-            placeholder="按设备名搜索…"
+            placeholder={t('devices:searchPlaceholder')}
             icon={<DevicesIcon />}
           />
         </div>
@@ -251,8 +253,8 @@ export function Devices() {
           </div>
         ) : filteredDevices.length === 0 ? (
           <div className={styles.empty}>
-            <p className={styles.emptyTitle}>暂无发现其他设备</p>
-            <p className={styles.emptyHint}>请确保其他设备与本机在同一局域网内</p>
+            <p className={styles.emptyTitle}>{t('devices:emptyTitle')}</p>
+            <p className={styles.emptyHint}>{t('devices:emptyHint')}</p>
           </div>
         ) : (
           <div className={styles.grid}>

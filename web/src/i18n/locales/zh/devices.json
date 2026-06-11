@@ -1,1 +1,14 @@
-{}
+{
+  "title": "在线设备",
+  "onlineCount": "{{count}} 个在线",
+  "desc": "局域网内通过 mDNS 自动发现的对端实例",
+  "localInfo": "本机信息",
+  "loading": "加载中…",
+  "fetchSelfFailed": "获取本机信息失败",
+  "fetchListFailed": "拉取设备列表失败",
+  "searchPlaceholder": "按设备名搜索…",
+  "emptyTitle": "暂无发现其他设备",
+  "emptyHint": "请确保其他设备与本机在同一局域网内",
+  "lastSeenPrefix": "最后活跃",
+  "cardAria": "设备 {{name}}"
+}
