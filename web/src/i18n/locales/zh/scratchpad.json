@@ -1,1 +1,11 @@
-{}
+{
+  "title": "速记本",
+  "desc": "临时记录你的想法，内容不会保存，关闭页面时自动清空。",
+  "copyAll": "复制全部",
+  "clear": "清空",
+  "charCount": "{{n}} 字",
+  "placeholder": "在这里写下你的想法…",
+  "contentAriaLabel": "速记本内容",
+  "clearConfirmTitle": "确认清空？",
+  "clearConfirmText": "所有内容将被清空，该操作不可撤销。"
+}

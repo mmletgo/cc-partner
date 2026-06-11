@@ -1,1 +1,11 @@
-{}
+{
+  "title": "Scratchpad",
+  "desc": "Jot down quick thoughts—nothing is saved, and it clears automatically when the page closes.",
+  "copyAll": "Copy all",
+  "clear": "Clear",
+  "charCount": "{{n}} chars",
+  "placeholder": "Write down your thoughts…",
+  "contentAriaLabel": "Scratchpad content",
+  "clearConfirmTitle": "Clear all?",
+  "clearConfirmText": "All content will be cleared. This action cannot be undone."
+}

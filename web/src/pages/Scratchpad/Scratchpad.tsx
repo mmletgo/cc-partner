@@ -14,11 +14,13 @@
  */
 
 import { useCallback, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Button, Card } from '@/components/primitives';
 import { CopyIcon, TrashIcon, XIcon } from '@/lib/icons';
 import styles from './Scratchpad.module.css';
 
 export function Scratchpad() {
+  const { t } = useTranslation(['scratchpad', 'common']);
   const [text, setText] = useState('');
   const [pendingClear, setPendingClear] = useState(false);
 
@@ -52,21 +54,19 @@ export function Scratchpad() {
       {/* 页面头部 */}
       <header className={styles.pageHeader}>
         <span className={styles.eyebrow}>TOOLS</span>
-        <h1 className={styles.title}>速记本</h1>
-        <p className={styles.lead}>
-          临时记录你的想法，内容不会保存，关闭页面时自动清空。
-        </p>
+        <h1 className={styles.title}>{t('scratchpad:title')}</h1>
+        <p className={styles.lead}>{t('scratchpad:desc')}</p>
       </header>
 
       {/* 工具栏 */}
       <div className={styles.toolbar}>
         <Button variant="primary" size="sm" icon={<CopyIcon />} onClick={handleCopyAll}>
-          复制全部
+          {t('scratchpad:copyAll')}
         </Button>
         <Button variant="secondary" size="sm" icon={<TrashIcon />} onClick={handleClearRequest}>
-          清空
+          {t('scratchpad:clear')}
         </Button>
-        <span className={styles.charCount}>{charCount} 字</span>
+        <span className={styles.charCount}>{t('scratchpad:charCount', { n: charCount })}</span>
       </div>
 
       {/* 编辑区 */}
@@ -74,8 +74,8 @@ export function Scratchpad() {
         className={styles.editor}
         value={text}
         onChange={(e) => setText(e.target.value)}
-        placeholder="在这里写下你的想法…"
-        aria-label="速记本内容"
+        placeholder={t('scratchpad:placeholder')}
+        aria-label={t('scratchpad:contentAriaLabel')}
       />
 
       {/* 清空确认弹层 */}
@@ -83,15 +83,15 @@ export function Scratchpad() {
         <div className={styles.modalMask} role="dialog" aria-modal="true" aria-labelledby="clear-title">
           <Card variant="elevated" className={styles.modal}>
             <h3 id="clear-title" className={styles.modalTitle}>
-              确认清空？
+              {t('scratchpad:clearConfirmTitle')}
             </h3>
-            <p className={styles.modalText}>所有内容将被清空，该操作不可撤销。</p>
+            <p className={styles.modalText}>{t('scratchpad:clearConfirmText')}</p>
             <div className={styles.modalActions}>
               <Button variant="secondary" size="sm" icon={<XIcon />} onClick={cancelClear}>
-                取消
+                {t('common:action.cancel')}
               </Button>
               <Button variant="danger" size="sm" icon={<TrashIcon />} onClick={confirmClear}>
-                清空
+                {t('scratchpad:clear')}
               </Button>
             </div>
           </Card>
