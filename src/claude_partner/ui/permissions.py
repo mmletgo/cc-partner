@@ -14,6 +14,7 @@ Code Logic（这个模块做什么）:
 
 from __future__ import annotations
 
+import subprocess
 import sys
 
 
@@ -69,3 +70,60 @@ def check_input_monitoring_access() -> bool:
     except ImportError:
         pass
     return True
+
+
+# 权限类型 → macOS「系统设置 → 隐私与安全」对应面板的 URL scheme
+_PERMISSION_SETTINGS_URLS: dict[str, str] = {
+    "screenCapture": (
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+    ),
+    "inputMonitoring": (
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+    ),
+}
+
+
+def request_screen_capture_access() -> bool:
+    """
+    Business Logic（为什么需要这个函数）:
+        屏幕录制权限需要主动请求以触发系统授权弹窗（首次使用时），
+        供前端「去设置/请求授权」流程调用，避免用户不知道要去哪里开启。
+
+    Code Logic（这个函数做什么）:
+        调用 Quartz.CGRequestScreenCaptureAccess()（macOS 10.15+）。
+        非 macOS 返回 False；Quartz 不可用或无该 API 时返回 False。
+        注意：该 API 仅在「未决定」状态下弹系统对话框，已被用户拒绝时
+        直接返回 False 且不再弹窗，此时需配合 open_permission_settings
+        引导用户到设置面板手动开启。
+    """
+    if sys.platform != "darwin":
+        return False
+    try:
+        import Quartz  # type: ignore[import-untyped]
+        if hasattr(Quartz, "CGRequestScreenCaptureAccess"):
+            return bool(Quartz.CGRequestScreenCaptureAccess())  # type: ignore[attr-defined]
+    except ImportError:
+        pass
+    return False
+
+
+def open_permission_settings(perm_type: str) -> bool:
+    """
+    Business Logic（为什么需要这个函数）:
+        用户需要手动在「系统设置 → 隐私与安全」中开启对应权限，
+        本函数直接打开对应面板，免去用户手动查找，提升授权转化。
+
+    Code Logic（这个函数做什么）:
+        通过 subprocess.Popen 非阻塞调用 `open <url-scheme>` 打开面板。
+        仅 macOS 生效；未知 perm_type 或非 macOS 返回 False。
+    """
+    if sys.platform != "darwin":
+        return False
+    url: str | None = _PERMISSION_SETTINGS_URLS.get(perm_type)
+    if not url:
+        return False
+    try:
+        subprocess.Popen(["open", url])
+        return True
+    except Exception:
+        return False
