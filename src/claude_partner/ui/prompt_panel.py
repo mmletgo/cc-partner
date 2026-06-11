@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
 
 from PyQt6.QtWidgets import (
     QWidget,
@@ -20,10 +19,8 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QLabel,
     QMessageBox,
-    QSizePolicy,
-    QFrame,
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QEvent, QObject
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from PyQt6.QtGui import QGuiApplication
 
 from claude_partner.models.prompt import Prompt
@@ -31,11 +28,6 @@ from claude_partner.storage.prompt_repo import PromptRepository
 from claude_partner.config import AppConfig
 from claude_partner.ui.widgets.tag_widget import TagWidget, FlowLayout
 from claude_partner.ui import theme
-
-import logging
-
-_prompt_edit_logger = logging.getLogger(__name__)
-
 
 class PromptEditDialog(QDialog):
     """
@@ -242,14 +234,6 @@ class PromptPanel(QWidget):
         self._search_input.textChanged.connect(lambda _: self._search_timer.start())
         toolbar_layout.addWidget(self._search_input, stretch=1)
 
-        # 标签筛选下拉框
-        self._tag_combo: QComboBox = QComboBox()
-        self._tag_combo.setMinimumWidth(120)
-        self._tag_combo.setStyleSheet(theme.combo_style())
-        self._tag_combo.addItem("全部标签")
-        self._tag_combo.currentTextChanged.connect(self._on_tag_filter_trigger)
-        toolbar_layout.addWidget(self._tag_combo)
-
         # 同步按钮（手动触发与所有在线设备同步 Prompt）
         self._btn_sync: QPushButton = QPushButton("同步")
         self._btn_sync.setStyleSheet(theme.button_secondary_style())
@@ -266,6 +250,26 @@ class PromptPanel(QWidget):
         toolbar_layout.addWidget(self._btn_new)
 
         main_layout.addLayout(toolbar_layout)
+
+        # === 标签筛选行（独立一行） ===
+        tag_filter_layout: QHBoxLayout = QHBoxLayout()
+        tag_filter_layout.setSpacing(6)
+
+        tag_filter_label: QLabel = QLabel("标签筛选:")
+        tag_filter_label.setStyleSheet(
+            f"font-size: {theme.FONT_SIZE_BODY}; color: {theme.TEXT_SECONDARY}; background: transparent;"
+        )
+        tag_filter_layout.addWidget(tag_filter_label)
+
+        self._tag_combo: QComboBox = QComboBox()
+        self._tag_combo.setMinimumWidth(120)
+        self._tag_combo.setStyleSheet(theme.combo_style())
+        self._tag_combo.addItem("全部标签")
+        self._tag_combo.currentTextChanged.connect(self._on_tag_filter_trigger)
+        tag_filter_layout.addWidget(self._tag_combo)
+        tag_filter_layout.addStretch()
+
+        main_layout.addLayout(tag_filter_layout)
 
         # === 卡片滚动区域 ===
         self._scroll_area: QScrollArea = QScrollArea()
@@ -400,6 +404,8 @@ class PromptPanel(QWidget):
         # 清空现有卡片
         while self._card_layout.count() > 0:
             item = self._card_layout.takeAt(0)
+            if item is None:
+                continue
             widget: QWidget | None = item.widget()
             if widget is not None:
                 widget.deleteLater()
@@ -423,6 +429,7 @@ class PromptPanel(QWidget):
             card.delete_clicked.connect(
                 lambda pid: asyncio.ensure_future(self._on_delete(pid))
             )
+            card.tag_clicked.connect(self._on_card_tag_clicked)
             self._card_layout.addWidget(card)
 
     def _on_search_trigger(self) -> None:
@@ -470,6 +477,22 @@ class PromptPanel(QWidget):
         else:
             self._current_tag_filter = tag
         await self.refresh()
+
+    def _on_card_tag_clicked(self, tag: str) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            用户点击卡片上的标签时，希望通过该标签直接筛选 Prompt 列表。
+
+        Code Logic（这个函数做什么）:
+            设置当前标签筛选条件，同步更新下拉框选中项，触发异步刷新。
+        """
+        self._current_tag_filter = tag
+        idx: int = self._tag_combo.findText(tag)
+        if idx >= 0:
+            self._tag_combo.blockSignals(True)
+            self._tag_combo.setCurrentIndex(idx)
+            self._tag_combo.blockSignals(False)
+        asyncio.ensure_future(self.refresh())
 
     async def _on_new(self) -> None:
         """
