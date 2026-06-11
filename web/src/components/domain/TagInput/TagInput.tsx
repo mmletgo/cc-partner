@@ -13,6 +13,7 @@
  */
 
 import { useCallback, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Tag } from '@/components/primitives';
 import styles from './TagInput.module.css';
 
@@ -34,6 +35,7 @@ export interface TagInputProps {
  * @returns flex 容器内嵌 Tag chips + 文本输入框
  */
 export function TagInput({ tags, onChange, placeholder, className }: TagInputProps) {
+  const { t } = useTranslation(['prompts']);
   const [inputValue, setInputValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -114,7 +116,7 @@ export function TagInput({ tags, onChange, placeholder, className }: TagInputPro
         onChange={(e) => setInputValue(e.target.value)}
         onKeyDown={handleKeyDown}
         onBlur={handleBlur}
-        placeholder={placeholder ?? '输入标签后按 Enter 添加'}
+        placeholder={placeholder ?? t('prompts:tagInputPlaceholder')}
       />
     </div>
   );

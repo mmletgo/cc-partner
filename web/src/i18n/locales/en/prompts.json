@@ -1,1 +1,24 @@
-{}
+{
+  "eyebrow": "Library · {{count}} Prompts",
+  "title": "Prompt Library",
+  "subtitle": "A curated collection of prompts, synced across devices—your trusted commands, ready to call on demand.",
+  "searchPlaceholder": "Search prompts…",
+  "searchAriaLabel": "Search prompts",
+  "sync": "Sync",
+  "filterByTagAriaLabel": "Filter by tag",
+  "allTag": "All",
+  "loadFailed": "Failed to load list: {{error}}",
+  "loadFailedGeneric": "Failed to load prompt list",
+  "empty": "No prompts yet",
+  "emptyHintCreate": "Click the \"New\" button above to create your first prompt",
+  "emptyFiltered": "No matching prompts",
+  "emptyFilteredHint": "Try a different keyword or clear the tag filter",
+  "deleteTitle": "Delete prompt?",
+  "deleteConfirm": "This action cannot be undone. Are you sure you want to delete this prompt?",
+  "titlePlaceholder": "Title",
+  "titleAriaLabel": "Prompt title",
+  "contentPlaceholder": "Prompt content…",
+  "contentAriaLabel": "Prompt content",
+  "tagInputPlaceholder": "Type a tag and press Enter to add",
+  "skeletonAriaLabel": "Loading prompts"
+}

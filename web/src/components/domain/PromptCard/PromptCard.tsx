@@ -16,6 +16,7 @@
 
 import { memo, useCallback } from 'react';
 import type { CSSProperties } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Button, Card, Tag } from '@/components/primitives';
 import { CopyIcon, EditIcon, TrashIcon } from '@/lib/icons';
 import styles from './PromptCard.module.css';
@@ -62,6 +63,7 @@ function formatTimestamp(iso: string): string {
  * @returns elevated 卡片，hover 时浮起
  */
 function PromptCardInner({ prompt, onEdit, onDelete, onCopy, className, style }: PromptCardProps) {
+  const { t } = useTranslation(['common']);
   const handleCopy = useCallback(() => {
     onCopy?.();
   }, [onCopy]);
@@ -98,24 +100,24 @@ function PromptCardInner({ prompt, onEdit, onDelete, onCopy, className, style }:
             size="sm"
             icon={<CopyIcon />}
             onClick={handleCopy}
-            aria-label="复制 Prompt"
-            title="复制"
+            aria-label={t('common:action.copy')}
+            title={t('common:action.copy')}
           />
           <Button
             variant="ghost"
             size="sm"
             icon={<EditIcon />}
             onClick={handleEdit}
-            aria-label="编辑 Prompt"
-            title="编辑"
+            aria-label={t('common:action.edit')}
+            title={t('common:action.edit')}
           />
           <Button
             variant="danger"
             size="sm"
             icon={<TrashIcon />}
             onClick={handleDelete}
-            aria-label="删除 Prompt"
-            title="删除"
+            aria-label={t('common:action.delete')}
+            title={t('common:action.delete')}
           />
         </div>
         <time className={styles.timestamp} dateTime={prompt.updatedAt}>

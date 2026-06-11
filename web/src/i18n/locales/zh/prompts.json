@@ -1,1 +1,24 @@
-{}
+{
+  "eyebrow": "Library · {{count}} Prompts",
+  "title": "Prompt 库",
+  "subtitle": "精心策划的提示词集合，随设备同步——随时调用你最信赖的指令。",
+  "searchPlaceholder": "搜索 Prompt…",
+  "searchAriaLabel": "搜索 Prompt",
+  "sync": "同步",
+  "filterByTagAriaLabel": "按标签筛选",
+  "allTag": "全部",
+  "loadFailed": "列表加载失败：{{error}}",
+  "loadFailedGeneric": "Prompt 列表加载失败",
+  "empty": "尚未添加 Prompt",
+  "emptyHintCreate": "点击上方“新建”按钮创建你的第一条 Prompt",
+  "emptyFiltered": "没有匹配的 Prompt",
+  "emptyFilteredHint": "试试更换关键词或清除标签筛选",
+  "deleteTitle": "删除 Prompt？",
+  "deleteConfirm": "该操作不可撤销，确认要删除这条 Prompt 吗？",
+  "titlePlaceholder": "标题",
+  "titleAriaLabel": "Prompt 标题",
+  "contentPlaceholder": "Prompt 内容…",
+  "contentAriaLabel": "Prompt 内容",
+  "tagInputPlaceholder": "输入标签后按 Enter 添加",
+  "skeletonAriaLabel": "加载 Prompts"
+}

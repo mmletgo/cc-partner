@@ -17,6 +17,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Button, Card, Input, Tag } from '@/components/primitives';
 import { TagInput } from '@/components/domain/TagInput';
 import { promptsApi } from '@/api/prompts';
@@ -39,6 +40,8 @@ type LoadState = 'loading' | 'success' | 'error';
  * Prompts 页面主组件
  */
 export function Prompts() {
+  const { t } = useTranslation(['prompts', 'common']);
+
   // ── 列表数据 ──
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [loadState, setLoadState] = useState<LoadState>('loading');
@@ -72,9 +75,9 @@ export function Prompts() {
     } catch (err) {
       setPrompts((prev) => prev);
       setLoadState('error');
-      setLoadError(err instanceof Error ? err.message : 'Prompt 列表加载失败');
+      setLoadError(err instanceof Error ? err.message : t('prompts:loadFailedGeneric'));
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void loadPrompts();
@@ -226,11 +229,9 @@ export function Prompts() {
     <div className={styles.page}>
       {/* 页面头部 */}
       <header className={styles.pageHeader}>
-        <span className={styles.eyebrow}>Library · {prompts.length} Prompts</span>
-        <h1 className={styles.title}>Prompt 库</h1>
-        <p className={styles.lead}>
-          精心策划的提示词集合，随设备同步——随时调用你最信赖的指令。
-        </p>
+        <span className={styles.eyebrow}>{t('prompts:eyebrow', { count: prompts.length })}</span>
+        <h1 className={styles.title}>{t('prompts:title')}</h1>
+        <p className={styles.lead}>{t('prompts:subtitle')}</p>
       </header>
 
       {/* 工具栏 */}
@@ -241,24 +242,24 @@ export function Prompts() {
               type="search"
               value={searchInput}
               onChange={handleSearchInput}
-              placeholder="Search prompts…"
+              placeholder={t('prompts:searchPlaceholder')}
               icon={<SearchIcon />}
-              aria-label="搜索 Prompt"
+              aria-label={t('prompts:searchAriaLabel')}
               className={styles.search}
             />
           </div>
           <div className={styles.toolbarActions}>
             <Button variant="secondary" size="sm" icon={<SyncIcon />} onClick={handleSync}>
-              同步
+              {t('prompts:sync')}
             </Button>
             <Button variant="primary" size="sm" icon={<PlusIcon />} onClick={handleCreate}>
-              新建
+              {t('common:action.new')}
             </Button>
           </div>
         </div>
-        <div className={styles.chipRow} role="group" aria-label="按标签筛选">
+        <div className={styles.chipRow} role="group" aria-label={t('prompts:filterByTagAriaLabel')}>
           <FilterChip
-            label="All"
+            label={t('prompts:allTag')}
             count={tagCounts.all ?? 0}
             active={activeTag === 'all'}
             onClick={() => setActiveTag('all')}
@@ -278,7 +279,7 @@ export function Prompts() {
       {/* 错误提示条 */}
       {loadState === 'error' ? (
         <p className={styles.notice} role="status">
-          列表加载失败：{loadError}
+          {loadError ? t('prompts:loadFailed', { error: loadError }) : t('prompts:loadFailedGeneric')}
         </p>
       ) : null}
 
@@ -290,13 +291,13 @@ export function Prompts() {
           <div className={styles.empty}>
             {prompts.length === 0 ? (
               <>
-                <p>尚未添加 Prompt</p>
-                <p className={styles.emptyHint}>点击上方"新建"按钮创建你的第一条 Prompt</p>
+                <p>{t('prompts:empty')}</p>
+                <p className={styles.emptyHint}>{t('prompts:emptyHintCreate')}</p>
               </>
             ) : (
               <>
-                <p>没有匹配的 Prompt</p>
-                <p className={styles.emptyHint}>试试更换关键词或清除标签筛选</p>
+                <p>{t('prompts:emptyFiltered')}</p>
+                <p className={styles.emptyHint}>{t('prompts:emptyFilteredHint')}</p>
               </>
             )}
           </div>
@@ -345,15 +346,15 @@ export function Prompts() {
         <div className={styles.modalMask} role="dialog" aria-modal="true" aria-labelledby="confirm-title">
           <Card variant="elevated" className={styles.modal}>
             <h3 id="confirm-title" className={styles.modalTitle}>
-              删除 Prompt？
+              {t('prompts:deleteTitle')}
             </h3>
-            <p className={styles.modalText}>该操作不可撤销，确认要删除这条 Prompt 吗？</p>
+            <p className={styles.modalText}>{t('prompts:deleteConfirm')}</p>
             <div className={styles.modalActions}>
               <Button variant="secondary" size="sm" onClick={() => setPendingDeleteId(null)}>
-                取消
+                {t('common:action.cancel')}
               </Button>
               <Button variant="danger" size="sm" icon={<TrashIcon />} onClick={confirmDelete}>
-                删除
+                {t('common:action.delete')}
               </Button>
             </div>
           </Card>
@@ -402,6 +403,7 @@ function PromptCardView({
   onEdit: () => void;
   onDelete: () => void;
 }) {
+  const { t } = useTranslation(['prompts', 'common']);
   return (
     <Card variant="elevated" className={styles.promptCard}>
       <Card.Header className={styles.promptHeader}>
@@ -412,16 +414,16 @@ function PromptCardView({
             size="sm"
             icon={<EditIcon />}
             onClick={onEdit}
-            aria-label="编辑"
-            title="编辑"
+            aria-label={t('common:action.edit')}
+            title={t('common:action.edit')}
           />
           <Button
             variant="ghost"
             size="sm"
             icon={<TrashIcon />}
             onClick={onDelete}
-            aria-label="删除"
-            title="删除"
+            aria-label={t('common:action.delete')}
+            title={t('common:action.delete')}
           />
         </div>
       </Card.Header>
@@ -453,6 +455,7 @@ function EditPromptCard({
   onSave: (e?: FormEvent) => void;
   onCancel: () => void;
 }) {
+  const { t } = useTranslation(['prompts', 'common']);
   return (
     <Card variant="elevated" className={[styles.promptCard, styles.promptCardEditing].join(' ')}>
       <form className={styles.editForm} onSubmit={onSave}>
@@ -461,8 +464,8 @@ function EditPromptCard({
             className={styles.editTitle}
             value={draft.title}
             onChange={(e) => onChange({ ...draft, title: e.target.value })}
-            placeholder="标题"
-            aria-label="Prompt 标题"
+            placeholder={t('prompts:titlePlaceholder')}
+            aria-label={t('prompts:titleAriaLabel')}
             autoFocus={isNew}
           />
         </Card.Header>
@@ -471,15 +474,15 @@ function EditPromptCard({
             className={styles.editContent}
             value={draft.content}
             onChange={(e) => onChange({ ...draft, content: e.target.value })}
-            placeholder="Prompt 内容…"
-            aria-label="Prompt 内容"
+            placeholder={t('prompts:contentPlaceholder')}
+            aria-label={t('prompts:contentAriaLabel')}
             rows={4}
           />
           <div className={styles.editMeta}>
             <TagInput
               tags={draft.tags}
               onChange={(tags) => onChange({ ...draft, tags })}
-              placeholder="输入标签后按 Enter 添加"
+              placeholder={t('prompts:tagInputPlaceholder')}
             />
           </div>
         </Card.Body>
@@ -491,7 +494,7 @@ function EditPromptCard({
             onClick={onCancel}
             type="button"
           >
-            取消
+            {t('common:action.cancel')}
           </Button>
           <Button
             variant="primary"
@@ -500,7 +503,7 @@ function EditPromptCard({
             type="submit"
             disabled={!draft.content.trim()}
           >
-            保存
+            {t('common:action.save')}
           </Button>
         </Card.Footer>
       </form>
@@ -510,8 +513,9 @@ function EditPromptCard({
 
 /** 网格骨架屏 */
 function GridSkeleton() {
+  const { t } = useTranslation(['prompts']);
   return (
-    <ul className={styles.grid} aria-busy="true" aria-label="加载 Prompts">
+    <ul className={styles.grid} aria-busy="true" aria-label={t('prompts:skeletonAriaLabel')}>
       {[0, 1, 2, 3, 4, 5].map((i) => (
         <li key={i} className={styles.skeletonCard}>
           <span className={styles.skeletonBlock} style={{ width: '60%', height: 14 }} />
