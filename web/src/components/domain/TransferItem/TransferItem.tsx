@@ -15,6 +15,7 @@
 
 import { memo, useCallback } from 'react';
 import type { CSSProperties } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Button, Card, Pill, ProgressBar } from '@/components/primitives';
 import { CheckIcon, DownloadIcon, PauseIcon, PlayIcon, SendIcon, XIcon } from '@/lib/icons';
 import styles from './TransferItem.module.css';
@@ -54,14 +55,6 @@ const STATUS_TONE = {
   completed: 'success',
   failed: 'danger',
   cancelled: 'warn',
-} as const;
-
-const STATUS_LABEL = {
-  pending: '等待中',
-  transferring: '传输中',
-  completed: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
 } as const;
 
 const STATUS_BG = {
@@ -109,8 +102,9 @@ function formatSpeed(bytesPerSec: number): string {
  * 渲染文件传输列表项
  */
 function TransferItemInner({ task, onPause, onResume, onCancel, onRetry, onOpen, className, style }: TransferItemProps) {
+  const { t } = useTranslation(['common']);
   const tone = STATUS_TONE[task.status];
-  const label = STATUS_LABEL[task.status];
+  const label = t(`common:status.transfer.${task.status}`);
   const bg = STATUS_BG[task.status];
   const border = STATUS_BORDER[task.status];
   // ProgressBar 不支持 neutral，未传输/未开始的也用 accent 表示「进行中」色
@@ -150,7 +144,7 @@ function TransferItemInner({ task, onPause, onResume, onCancel, onRetry, onOpen,
             <div className={styles.fileName} title={task.fileName}>
               {task.fileName}
             </div>
-            <div className={styles.peer}>{task.peerDevice ?? (task.direction === 'send' ? '发送至对端' : '接收自对端')}</div>
+            <div className={styles.peer}>{task.peerDevice ?? t(`common:direction.${task.direction}`)}</div>
             {isProgressVisible ? (
               <div className={styles.progressRow}>
                 <ProgressBar value={task.progress} tone={progressTone} className={styles.progress} />
@@ -181,16 +175,16 @@ function TransferItemInner({ task, onPause, onResume, onCancel, onRetry, onOpen,
                     size="sm"
                     icon={<PauseIcon />}
                     onClick={handlePause}
-                    aria-label="暂停传输"
-                    title="暂停"
+                    aria-label={t('common:action.pause')}
+                    title={t('common:action.pause')}
                   />
                   <Button
                     variant="danger"
                     size="sm"
                     icon={<XIcon />}
                     onClick={handleCancel}
-                    aria-label="取消传输"
-                    title="取消"
+                    aria-label={t('common:action.cancel')}
+                    title={t('common:action.cancel')}
                   />
                 </>
               ) : null}
@@ -200,8 +194,8 @@ function TransferItemInner({ task, onPause, onResume, onCancel, onRetry, onOpen,
                   size="sm"
                   icon={<XIcon />}
                   onClick={handleCancel}
-                  aria-label="取消传输"
-                  title="取消"
+                  aria-label={t('common:action.cancel')}
+                  title={t('common:action.cancel')}
                 />
               ) : null}
               {task.status === 'failed' ? (
@@ -210,10 +204,10 @@ function TransferItemInner({ task, onPause, onResume, onCancel, onRetry, onOpen,
                   size="sm"
                   icon={<PlayIcon />}
                   onClick={handleRetry}
-                  aria-label="重试传输"
-                  title="重试"
+                  aria-label={t('common:action.retry')}
+                  title={t('common:action.retry')}
                 >
-                  重试
+                  {t('common:action.retry')}
                 </Button>
               ) : null}
               {task.status === 'cancelled' && onResume ? (
@@ -222,10 +216,10 @@ function TransferItemInner({ task, onPause, onResume, onCancel, onRetry, onOpen,
                   size="sm"
                   icon={<PlayIcon />}
                   onClick={handleResume}
-                  aria-label="继续传输"
-                  title="继续"
+                  aria-label={t('common:action.continue')}
+                  title={t('common:action.continue')}
                 >
-                  继续
+                  {t('common:action.continue')}
                 </Button>
               ) : null}
               {task.status === 'completed' ? (
@@ -234,8 +228,8 @@ function TransferItemInner({ task, onPause, onResume, onCancel, onRetry, onOpen,
                   size="sm"
                   icon={<CheckIcon />}
                   onClick={handleOpen}
-                  aria-label="打开文件"
-                  title="打开"
+                  aria-label={t('common:action.open')}
+                  title={t('common:action.open')}
                 />
               ) : null}
             </div>

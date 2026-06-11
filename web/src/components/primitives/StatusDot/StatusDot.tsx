@@ -11,6 +11,7 @@
  */
 
 import type { HTMLAttributes } from 'react';
+import { useTranslation } from 'react-i18next';
 import styles from './StatusDot.module.css';
 
 export type StatusDotStatus = 'online' | 'offline' | 'busy' | 'away';
@@ -24,13 +25,6 @@ export interface StatusDotProps extends HTMLAttributes<HTMLSpanElement> {
   className?: string;
 }
 
-const statusLabels: Record<StatusDotStatus, string> = {
-  online: '在线',
-  offline: '离线',
-  busy: '忙碌',
-  away: '离开',
-};
-
 /**
  * 渲染统一 StatusDot
  *
@@ -39,6 +33,8 @@ const statusLabels: Record<StatusDotStatus, string> = {
  */
 export function StatusDot(props: StatusDotProps) {
   const { status, size = 'md', className, ...rest } = props;
+  const { t } = useTranslation(['common']);
+  const label = t(`common:status.device.${status}`);
 
   const classes = [styles.dot, styles[`status-${status}`], styles[`size-${size}`], className]
     .filter(Boolean)
@@ -47,7 +43,7 @@ export function StatusDot(props: StatusDotProps) {
   return (
     <span
       role="status"
-      aria-label={statusLabels[status]}
+      aria-label={label}
       data-status={status}
       data-size={size}
       className={classes}
