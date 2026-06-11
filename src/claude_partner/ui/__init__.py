@@ -1,20 +1,14 @@
 # -*- coding: utf-8 -*-
-"""UI 包：导出主窗口和面板组件。"""
+"""UI 包：基于 QWebEngineView 的主窗口 + 系统托盘。
 
-from claude_partner.ui.main_window import MainWindow
-from claude_partner.ui.prompt_panel import PromptPanel
-from claude_partner.ui.transfer_panel import TransferPanel
-from claude_partner.ui.device_panel import DevicePanel
-from claude_partner.ui.scratchpad_panel import ScratchpadPanel
+旧版 PyQt6 原生面板（MainWindow/PromptPanel/TransferPanel 等）已废弃移除，
+界面统一由 web/ React 前端通过 QWebEngineView 嵌入渲染。
+"""
+
+from claude_partner.ui.web_main_window import WebMainWindow
 from claude_partner.ui.tray import SystemTray
-from claude_partner.ui.welcome_window import WelcomeWindow
 
 __all__: list[str] = [
-    "MainWindow",
-    "PromptPanel",
-    "TransferPanel",
-    "DevicePanel",
-    "ScratchpadPanel",
+    "WebMainWindow",
     "SystemTray",
-    "WelcomeWindow",
 ]

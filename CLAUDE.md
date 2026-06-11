@@ -12,8 +12,9 @@
 
 ## 技术栈
 
-- GUI: PyQt6（macOS 原生偏好设置面板扁平风格，实心纯色背景 + 图标标签栏 + 轻柔阴影）
-- 异步网络: aiohttp + qasync (asyncio-Qt桥接)
+- 前端 GUI: React + TypeScript + Vite（`web/` 目录，`npm run dev` 开发）
+- 宿主外壳: PyQt6 + QWebEngineView（嵌入 React 前端）+ 系统托盘
+- 异步后端: aiohttp + qasync (asyncio-Qt桥接)
 - 设备发现: zeroconf (mDNS)
 - 本地存储: SQLite + aiosqlite
 - 打包: PyInstaller
@@ -31,15 +32,17 @@ src/claude_partner/
 ├── transfer/       → 文件传输模块，有独立 CLAUDE.md
 ├── screenshot/     → 截图功能，有独立 CLAUDE.md
 ├── updater/        → 自动更新模块（GitHub Releases 版本检查/下载/安装），有独立 CLAUDE.md
-└── ui/             → PyQt6 界面，有独立 CLAUDE.md
+└── ui/             → PyQt6 宿主外壳（WebMainWindow/托盘/主题/权限检查），有独立 CLAUDE.md
+web/                → React 前端，有独立 CLAUDE.md
 ```
 
 ## 核心架构
 
 ### 应用入口 (app.py)
 - 使用 qasync 将 asyncio 事件循环集成到 Qt 事件循环
-- 启动顺序：数据库初始化 → HTTP 服务端 → mDNS 注册 → 同步引擎 → UI → 更新检查器（仅初始化，不自动检查）
+- 启动顺序：数据库初始化 → HTTP 服务端 → mDNS 注册 → 同步引擎 → 截图/快捷键 → WebMainWindow → 系统托盘
 - 关闭时反向清理所有资源
+- 界面统一由 React 前端渲染（QWebEngineView 嵌入），不再有 PyQt6 原生面板
 
 ### 配置管理 (config.py)
 - 设备 ID（UUID，首次运行生成并持久化）
@@ -66,7 +69,7 @@ src/claude_partner/
 - 支持断点续传：接收端告知已接收 offset
 
 ### 应用更新
-- 不再自动检查；用户通过托盘菜单「检查更新...」或设置面板「检查更新」按钮手动触发
+- 不自动检查；用户通过前端设置面板「检查更新」按钮手动触发（调 POST /api/updater/check）
 - GitHub Releases API 获取最新版本，语义化版本比较
 - 自动匹配当前平台下载资源（macOS DMG / Windows EXE / Linux tar.gz）
 - 流式下载到 `~/.claude-partner/updates/`，支持进度显示和取消

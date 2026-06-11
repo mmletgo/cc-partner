@@ -26,21 +26,11 @@ from claude_partner.sync.engine import SyncEngine
 from claude_partner.transfer.sender import FileSender
 from claude_partner.transfer.receiver import FileReceiver
 from claude_partner.screenshot.capture import ScreenshotManager
-from claude_partner.ui.main_window import MainWindow
 from claude_partner.ui.web_main_window import WebMainWindow
-from claude_partner.ui.prompt_panel import PromptPanel
-from claude_partner.ui.transfer_panel import TransferPanel
-from claude_partner.ui.device_panel import DevicePanel
 from claude_partner.ui.tray import SystemTray
-from claude_partner.ui.settings_panel import SettingsPanel
-from claude_partner.ui.scratchpad_panel import ScratchpadPanel
-from claude_partner.ui.update_dialog import UpdateDialog
 from claude_partner.ui import theme
 from claude_partner.hotkey.listener import GlobalHotkeyManager
 from claude_partner import __version__
-from claude_partner.updater.checker import UpdateChecker, UpdateInfo
-from claude_partner.updater.downloader import UpdateDownloader
-from claude_partner.updater.installer import UpdateInstaller
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -79,11 +69,9 @@ class Application:
         self._discovery: DeviceDiscovery | None = None
         self._sync_engine: SyncEngine | None = None
         self._screenshot_mgr: ScreenshotManager | None = None
-        self._main_window: MainWindow | WebMainWindow | None = None
+        self._main_window: WebMainWindow | None = None
         self._system_tray: SystemTray | None = None
         self._hotkey_mgr: GlobalHotkeyManager | None = None
-        self._settings_panel: SettingsPanel | None = None
-        self._update_checker: UpdateChecker | None = None
 
     async def start(self) -> None:
         """
@@ -172,41 +160,16 @@ class Application:
         self._hotkey_mgr.start()
         logger.info("全局快捷键启动完成")
 
-        # 12. UI 组件 - 根据 CP_FRONTEND 选择新版 WebMainWindow 或旧 MainWindow
-        use_web_frontend = os.environ.get("CP_FRONTEND", "web") == "web"
-        prompt_panel: PromptPanel | None = None
-        transfer_panel: TransferPanel | None = None
-        device_panel: DevicePanel | None = None
+        # 12. 主窗口（QWebEngineView 嵌入 React 前端）
         try:
-            if use_web_frontend:
-                self._main_window = WebMainWindow(backend_port=actual_port)
-                self._main_window.show()
-                logger.info("使用新版 WebMainWindow（QWebEngineView + React）")
-            else:
-                prompt_panel = PromptPanel(self._prompt_repo, self._config)
-                logger.info("PromptPanel 创建完成")
-                transfer_panel = TransferPanel(self._file_sender, self._file_receiver)
-                logger.info("TransferPanel 创建完成")
-                device_panel = DevicePanel()
-                logger.info("DevicePanel 创建完成")
-                self._settings_panel = SettingsPanel(self._config)
-                logger.info("SettingsPanel 创建完成")
-                scratchpad_panel = ScratchpadPanel()
-                logger.info("ScratchpadPanel 创建完成")
-
-                self._main_window = MainWindow(
-                    prompt_panel=prompt_panel,
-                    transfer_panel=transfer_panel,
-                    device_panel=device_panel,
-                    scratchpad_panel=scratchpad_panel,
-                    settings_panel=self._settings_panel,
-                )
-                logger.info("使用旧版 MainWindow（QTabWidget）")
+            self._main_window = WebMainWindow(backend_port=actual_port)
+            self._main_window.show()
+            logger.info("WebMainWindow 创建完成（QWebEngineView + React）")
         except Exception as e:
-            logger.error("UI 创建失败: %s", e, exc_info=True)
+            logger.error("主窗口创建失败: %s", e, exc_info=True)
             raise
 
-        # 12. 系统托盘
+        # 13. 系统托盘
         try:
             self._system_tray = SystemTray()
             self._system_tray.show()
@@ -216,39 +179,8 @@ class Application:
             # 托盘失败不阻止应用启动
             self._system_tray = None
 
-        # 连接信号（仅旧版 MainWindow 需要）
-        if not use_web_frontend:
-            assert prompt_panel is not None
-            assert transfer_panel is not None
-            assert device_panel is not None
-            self._connect_signals(prompt_panel, transfer_panel, device_panel)
-
-            # 显示主窗口或欢迎页并加载数据
-            self._show_main_or_welcome(prompt_panel)
-
-        # 13. 自动更新检查
-        self._update_checker = UpdateChecker()
-        self._update_checker.update_available.connect(self._on_update_available)
-        self._update_checker.update_not_available.connect(
-            lambda: logger.info("更新检查完成，已是最新版本")
-        )
-        self._update_checker.check_failed.connect(
-            lambda err: logger.warning("更新检查失败: %s", err)
-        )
-
-        # 更新检查结果同步到设置面板
-        self._update_checker.update_available.connect(
-            lambda info: self._settings_panel.set_update_available(info.version)
-            if self._settings_panel is not None else None
-        )
-        self._update_checker.update_not_available.connect(
-            lambda: self._settings_panel.set_update_not_available()
-            if self._settings_panel is not None else None
-        )
-        self._update_checker.check_failed.connect(
-            lambda err: self._settings_panel.set_update_check_failed(err)
-            if self._settings_panel is not None else None
-        )
+        # 14. 连接托盘与全局信号（始终生效）
+        self._connect_global_signals()
 
         logger.info("应用启动完成")
 
@@ -321,9 +253,8 @@ class Application:
             并将检查结果返回给 API 层响应给前端。
 
         Code Logic:
-            调用 UpdateChecker.check_for_update 异步执行版本检查。
-            由于 UpdateChecker 基于信号机制，这里通过手动调用 GitHub API
-            获取结果并构造返回字典：{hasUpdate, version, body}。
+            手动调用 GitHub Releases API 获取最新版本，
+            与本地 __version__ 语义化比较后构造返回字典：{hasUpdate, version, body}。
         """
         import aiohttp
         from claude_partner.updater.checker import (
@@ -383,11 +314,11 @@ class Application:
             让用户了解当前哪些功能可能因权限缺失而不可用。
 
         Code Logic:
-            复用 welcome_window.py 中的 check_screen_capture_access 和
+            调用 permissions.py 中的 check_screen_capture_access 和
             check_input_monitoring_access 函数，返回 camelCase 字典。
             非 macOS 打包环境直接返回已授权。
         """
-        from claude_partner.ui.welcome_window import (
+        from claude_partner.ui.permissions import (
             check_screen_capture_access,
             check_input_monitoring_access,
         )
@@ -422,156 +353,47 @@ class Application:
         tasks.sort(key=lambda t: t.get("startedAt", ""), reverse=True)
         return tasks
 
-    def _connect_signals(
-        self,
-        prompt_panel: PromptPanel,
-        transfer_panel: TransferPanel,
-        device_panel: DevicePanel,
-    ) -> None:
+    def _connect_global_signals(self) -> None:
         """
         Business Logic（为什么需要这个函数）:
-            各子系统间需要通过信号连接协作，如设备发现通知 UI 更新，
-            Prompt 变更触发同步等。
+            系统托盘、设备发现、全局快捷键需要通过信号连接协作：
+            托盘菜单控制窗口显隐与截图，设备发现更新托盘在线计数，
+            快捷键触发截图。界面交互（列表/筛选/同步）由 React 前端
+            通过 HTTP API 自行处理，无需此处连接。
 
         Code Logic（这个函数做什么）:
-            连接 DeviceDiscovery → DevicePanel/TransferPanel/SyncEngine，
-            PromptPanel → SyncEngine，SystemTray → MainWindow/ScreenshotManager 等信号。
+            连接 SystemTray → 显示窗口/截图/退出，DeviceDiscovery →
+            托盘在线计数，GlobalHotkeyManager → 截图动作。
         """
-        assert self._discovery is not None
-        assert self._sync_engine is not None
         assert self._screenshot_mgr is not None
-        assert self._system_tray is not None
-        assert self._main_window is not None
-        # 本地绑定消除 Pyright 的 None 推断
-        discovery = self._discovery
-        sync_engine = self._sync_engine
-        system_tray = self._system_tray
+        screenshot_mgr = self._screenshot_mgr
 
-        # 设备发现 → UI + 同步
-        discovery.device_found.connect(device_panel.add_device)
-        discovery.device_found.connect(
-            lambda dev: transfer_panel.update_devices(discovery.get_devices())
-        )
-        discovery.device_found.connect(
-            lambda dev: system_tray.update_device_count(
-                len(discovery.get_devices())
+        # 系统托盘 → 窗口/截图/退出
+        if self._system_tray is not None:
+            self._system_tray.show_window_requested.connect(self._show_main_window)
+            self._system_tray.screenshot_requested.connect(
+                screenshot_mgr.take_screenshot
             )
-        )
-        discovery.device_lost.connect(device_panel.remove_device)
-        discovery.device_lost.connect(
-            lambda _: transfer_panel.update_devices(discovery.get_devices())
-        )
-        discovery.device_lost.connect(
-            lambda _: system_tray.update_device_count(
-                len(discovery.get_devices())
+            self._system_tray.quit_requested.connect(self._quit)
+
+        # 设备发现 → 托盘在线计数
+        if self._discovery is not None and self._system_tray is not None:
+            discovery = self._discovery
+            system_tray = self._system_tray
+            discovery.device_found.connect(
+                lambda _dev: system_tray.update_device_count(
+                    len(discovery.get_devices())
+                )
             )
-        )
-
-        # 同步完成 → 刷新 UI
-        self._sync_engine.sync_completed.connect(
-            lambda: asyncio.ensure_future(prompt_panel.refresh())
-        )
-
-        # 系统托盘
-        self._system_tray.show_window_requested.connect(self._show_main_window)
-        self._system_tray.screenshot_requested.connect(
-            self._screenshot_mgr.take_screenshot
-        )
-        self._system_tray.quit_requested.connect(self._quit)
-
-        # 自动更新检查
-        self._system_tray.check_update_requested.connect(
-            lambda: asyncio.ensure_future(
-                self._update_checker.check_for_update(__version__)
+            discovery.device_lost.connect(
+                lambda _dev: system_tray.update_device_count(
+                    len(discovery.get_devices())
+                )
             )
-            if self._update_checker is not None else None
-        )
 
         # 全局快捷键 → 截图
         if self._hotkey_mgr is not None:
             self._hotkey_mgr.hotkey_triggered.connect(self._on_hotkey)
-
-        # 设置变更 → 更新快捷键和配置
-        if self._settings_panel is not None:
-            self._settings_panel.settings_changed.connect(self._on_settings_changed)
-            self._settings_panel.check_update_requested.connect(
-                self._on_settings_check_update
-            )
-
-        # Prompt 手动同步触发
-        prompt_panel.sync_requested.connect(
-            lambda: asyncio.ensure_future(
-                sync_engine.sync_all(discovery.get_devices())
-            )
-        )
-
-    def _show_main_or_welcome(self, prompt_panel: PromptPanel) -> None:
-        """
-        Business Logic（为什么需要这个函数）:
-            macOS 打包应用首次启动或权限缺失时，需要先展示权限引导页
-            而非直接进入主界面。权限齐全则直接进入主窗口。
-
-        Code Logic（这个函数做什么）:
-            在 macOS frozen 环境下检查权限，缺失则创建 WelcomeWindow，
-            否则直接显示 MainWindow 并加载数据。
-        """
-        if sys.platform == "darwin" and getattr(sys, "frozen", False):
-            from claude_partner.ui.welcome_window import (
-                WelcomeWindow,
-                needs_welcome,
-                check_screen_capture_access,
-                check_input_monitoring_access,
-                request_screen_capture,
-                request_input_monitoring,
-            )
-
-            if needs_welcome():
-                self._welcome_window: WelcomeWindow | None = WelcomeWindow(
-                    check_screen_capture=check_screen_capture_access,
-                    check_input_monitoring=check_input_monitoring_access,
-                    request_screen_capture=request_screen_capture,
-                    request_input_monitoring=request_input_monitoring,
-                )
-                self._welcome_window.all_permissions_granted.connect(
-                    self._on_permissions_ready
-                )
-                self._welcome_window.skip_requested.connect(
-                    self._on_permissions_ready
-                )
-                self._welcome_window.show()
-                logger.info("权限缺失，显示欢迎引导页")
-                return
-            else:
-                logger.info("macOS 权限齐全，直接进入主窗口")
-
-        # 非 macOS 或权限齐全，直接显示主窗口
-        self._show_main_window_and_load(prompt_panel)
-
-    def _on_permissions_ready(self) -> None:
-        """
-        Business Logic:
-            用户完成权限授权或跳过欢迎页后，需要关闭欢迎页并显示主窗口。
-
-        Code Logic:
-            关闭 WelcomeWindow，显示 MainWindow 并加载 Prompt 数据。
-        """
-        if hasattr(self, "_welcome_window") and self._welcome_window is not None:
-            self._welcome_window.close()
-            self._welcome_window = None
-
-        assert self._main_window is not None
-        # WebMainWindow 不含 prompt_panel 属性（前端通过 fetch 取数据）
-        if isinstance(self._main_window, MainWindow):
-            prompt_panel: PromptPanel = self._main_window.prompt_panel
-            self._show_main_window_and_load(prompt_panel)
-        else:
-            self._main_window.show()
-
-    def _show_main_window_and_load(self, prompt_panel: PromptPanel) -> None:
-        """显示主窗口并加载 Prompt 数据。"""
-        assert self._main_window is not None
-        self._main_window.show()
-        asyncio.ensure_future(prompt_panel.refresh())
 
     def _on_hotkey(self, action: str) -> None:
         """
@@ -584,73 +406,6 @@ class Application:
         logger.info("_on_hotkey 收到动作: %s", action)
         if action == "screenshot" and self._screenshot_mgr is not None:
             self._screenshot_mgr.take_screenshot()
-
-    def _on_settings_changed(self, config: object) -> None:
-        """
-        Business Logic（为什么需要这个函数）:
-            用户修改设置后需要实时更新运行中的子系统配置。
-
-        Code Logic（这个函数做什么）:
-            更新内部 config 引用，重新注册全局快捷键。
-        """
-        if isinstance(config, AppConfig):
-            self._config = config
-            if self._hotkey_mgr is not None:
-                self._hotkey_mgr.update_hotkey(
-                    "screenshot", config.screenshot_hotkey
-                )
-
-    def _on_settings_check_update(self) -> None:
-        """
-        Business Logic（为什么需要这个函数）:
-            用户在设置面板点击"检查更新"时，需要触发版本检查并更新面板状态。
-
-        Code Logic（这个函数做什么）:
-            设置面板为"检查中"状态，然后异步执行版本检查。
-        """
-        if self._update_checker is None:
-            return
-        if self._settings_panel is not None:
-            self._settings_panel.set_update_checking()
-        asyncio.ensure_future(
-            self._update_checker.check_for_update(__version__)
-        )
-
-    def _on_update_available(self, update_info: object) -> None:
-        """
-        Business Logic（为什么需要这个函数）:
-            发现新版本时需要弹出更新对话框，让用户了解新版本信息并选择是否更新。
-
-        Code Logic（这个函数做什么）:
-            创建 UpdateDialog，连接下载器信号，显示对话框。
-            用户点击"立即更新"时触发下载，下载完成后可点击"安装并重启"。
-        """
-        if not isinstance(update_info, UpdateInfo):
-            return
-        if self._main_window is None:
-            return
-
-        dialog = UpdateDialog(update_info, self._main_window)
-        downloader = UpdateDownloader()
-
-        def _on_download_requested() -> None:
-            dialog.show_download_state()
-            downloader.download_progress.connect(dialog.set_download_progress)
-            downloader.download_completed.connect(dialog.set_download_completed)
-            downloader.download_failed.connect(dialog.set_download_failed)
-            asyncio.ensure_future(
-                downloader.download(
-                    dialog.get_download_url(),
-                    dialog.get_download_filename(),
-                )
-            )
-
-        def _on_install_requested(file_path: str) -> None:
-            UpdateInstaller.install_and_restart(file_path)
-
-        dialog.download_requested.connect(_on_download_requested)
-        dialog.install_requested.connect(_on_install_requested)
-        dialog.show()
 
     def _show_main_window(self) -> None:
         """
@@ -705,9 +460,6 @@ class Application:
 
         if self._database is not None:
             await self._database.close()
-
-        if self._update_checker is not None:
-            await self._update_checker.close()
 
         logger.info("应用已关闭")
 
@@ -936,8 +688,10 @@ def main() -> None:
     qt_app.setStyle(theme.create_no_focus_style())  # 全局禁用焦点虚线框
 
     # 检测系统深色模式并应用主题
+    style_hints = qt_app.styleHints()
     initial_dark: bool = (
-        qt_app.styleHints().colorScheme() == Qt.ColorScheme.Dark
+        style_hints is not None
+        and style_hints.colorScheme() == Qt.ColorScheme.Dark
     )
     qt_app.setStyleSheet(theme.apply_theme(initial_dark))
 
@@ -958,15 +712,14 @@ def main() -> None:
                 用户切换系统深浅色主题时，应用需要实时跟随变化。
 
             Code Logic（这个函数做什么）:
-                根据 colorScheme 值切换 theme 调色板，重新应用全局样式表，
-                并刷新主窗口中所有面板的样式。
+                根据 colorScheme 值切换 theme 调色板，重新应用 Qt 全局样式表。
+                前端 React 通过 CSS prefers-color-scheme 自动适配，无需后端通知。
             """
             dark: bool = scheme == Qt.ColorScheme.Dark
             qt_app.setStyleSheet(theme.apply_theme(dark))
-            if app._main_window is not None:
-                app._main_window._refresh_theme()
 
-        qt_app.styleHints().colorSchemeChanged.connect(_on_color_scheme_changed)
+        if style_hints is not None:
+            style_hints.colorSchemeChanged.connect(_on_color_scheme_changed)
 
     async def _cleanup() -> None:
         """退出时清理资源。"""
