@@ -1,0 +1,29 @@
+/* PermissionStatusBadge - 侧栏底部授权状态徽标
+ * margin-top: auto 让它贴 Sidebar .content 底部（紧邻 footer 分割线之上）
+ */
+.badge {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.badge:hover {
+  background: var(--surface-hover, var(--surface));
+  filter: brightness(0.97);
+}
+
+.text {
+  font-weight: var(--weight-medium);
+}

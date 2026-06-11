@@ -28,3 +28,5 @@ export type { PermissionCardProps } from './PermissionCard';
 
 export { TagInput } from './TagInput';
 export type { TagInputProps } from './TagInput';
+
+export { PermissionStatusBadge } from './PermissionStatusBadge';

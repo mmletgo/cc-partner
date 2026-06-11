@@ -40,5 +40,9 @@
   },
   "tag": {
     "removeLabel": "移除标签"
+  },
+  "permission": {
+    "needsGrant": "需要授权",
+    "tapToGrant": "点击授权"
   }
 }

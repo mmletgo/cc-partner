@@ -30,6 +30,7 @@ import { Sidebar } from '../Sidebar';
 import { NavItem } from '../NavItem';
 import { ThemeToggle } from '../ThemeToggle';
 import { LanguageSwitcher } from '../LanguageSwitcher';
+import { PermissionStatusBadge } from '@/components/domain';
 import styles from './AppShell.module.css';
 
 export interface AppShellProps {
@@ -72,6 +73,7 @@ export function AppShell({ children }: AppShellProps) {
           <NavItem to="/devices" label={t('nav:devices')} icon={<DevicesIcon />} />
           <NavItem to="/settings" label={t('nav:settings')} icon={<SettingsIcon />} />
         </nav>
+        <PermissionStatusBadge />
       </Sidebar>
       <main className={styles.main}>{children ?? <Outlet />}</main>
     </div>

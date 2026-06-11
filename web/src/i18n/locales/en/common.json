@@ -40,5 +40,9 @@
   },
   "tag": {
     "removeLabel": "Remove tag"
+  },
+  "permission": {
+    "needsGrant": "Permission needed",
+    "tapToGrant": "Tap to grant"
   }
 }
