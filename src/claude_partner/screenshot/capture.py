@@ -54,11 +54,48 @@ class ScreenshotManager(QObject):
             单屏时创建单一覆盖层。
         """
         logger.info("take_screenshot 被调用")
+        # macOS 权限预检：屏幕录制未授权时弹提示引导，避免静默截到空白 pixmap
+        if not self._ensure_screen_capture_permission():
+            return
         screens: list[QScreen] = QGuiApplication.screens()
         if len(screens) > 1:
             self._take_screenshot_multi_screen(screens)
         else:
             self._take_screenshot_single_screen()
+
+    def _ensure_screen_capture_permission(self) -> bool:
+        """
+        Business Logic（为什么需要这个函数）:
+            macOS 截图依赖屏幕录制权限，未授权时 grabWindow 会返回空白 pixmap，
+            用户毫无感知地截到空图。本方法在截图前预检，未授权时弹原生提示
+            引导用户前往系统设置授权，而非静默失败。
+
+        Code Logic（这个函数做什么）:
+            check_screen_capture_access() 为 True 直接放行；为 False 时弹
+            QMessageBox 询问是否打开系统设置，用户确认则调用
+            open_permission_settings('screenCapture')。非 macOS 打包环境
+            check 恒为 True，直接放行。返回是否允许继续截图。
+        """
+        from PyQt6.QtWidgets import QMessageBox
+
+        from claude_partner.ui.permissions import (
+            check_screen_capture_access,
+            open_permission_settings,
+        )
+        if check_screen_capture_access():
+            return True
+        logger.warning("屏幕录制权限未授权，弹出提示")
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("屏幕录制权限")
+        box.setText("截图需要「屏幕录制」权限，当前未授权，截到的内容将为空白。")
+        box.setInformativeText("是否打开「系统设置 → 隐私与安全」来授权？")
+        open_btn = box.addButton("打开设置", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("稍后", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is open_btn:
+            open_permission_settings("screenCapture")
+        return False
 
     def _take_screenshot_single_screen(self) -> None:
         """

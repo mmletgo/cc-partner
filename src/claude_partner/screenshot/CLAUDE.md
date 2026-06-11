@@ -25,6 +25,7 @@
 
 ### ScreenshotManager (`capture.py`)
 - **功能**: 管理截图流程，连接覆盖层信号，处理剪贴板操作
+- **权限预检**（macOS）: `take_screenshot` 入口先 `check_screen_capture_access`，未授权时弹 `QMessageBox` 提示并引导打开系统设置，避免静默截到空白 pixmap（开发环境 check 恒为已授权，仅打包后真实触发）
 - **信号**: `screenshot_ready(QPixmap)`
 - **多屏模式**（macOS / Linux 多屏）: 为每个屏幕独立创建 ScreenshotOverlay（macOS 不允许单窗口跨屏，Linux showFullScreen 也只覆盖单屏），通过 `QScreen.grabWindow(0)` 各自截取屏幕内容；macOS 额外使用 `NSApp.activateIgnoringOtherApps_` 确保覆盖层前台显示
 - **单屏模式**: 单一覆盖层覆盖虚拟桌面全部区域
