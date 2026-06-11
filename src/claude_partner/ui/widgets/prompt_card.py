@@ -8,7 +8,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPushButton,
     QWidget,
-    QSizePolicy,
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QCursor
@@ -38,6 +37,7 @@ class PromptCard(QFrame):
     copy_clicked: pyqtSignal = pyqtSignal(str)
     edit_clicked: pyqtSignal = pyqtSignal(str)
     delete_clicked: pyqtSignal = pyqtSignal(str)
+    tag_clicked: pyqtSignal = pyqtSignal(str)
 
     # 内容预览最大字符数
     _PREVIEW_MAX_CHARS: int = 100
@@ -118,6 +118,10 @@ class PromptCard(QFrame):
                 bg, fg = colors[i % len(colors)]
                 tag_label: QLabel = QLabel(tag)
                 tag_label.setStyleSheet(theme.tag_label_style(bg, fg))
+                tag_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                tag_label.mousePressEvent = (  # type: ignore[assignment,unused-argument]
+                    lambda _a0, t=tag: self._on_tag_clicked(t)
+                )
                 tags_layout.addWidget(tag_label)
             tags_layout.addStretch()
             main_layout.addLayout(tags_layout)
@@ -150,7 +154,7 @@ class PromptCard(QFrame):
         # 添加轻柔阴影效果
         theme.apply_shadow(self)
 
-    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+    def mousePressEvent(self, a0) -> None:  # type: ignore[override]
         """
         Business Logic（为什么需要这个函数）:
             用户点击卡片空白区域时应触发编辑操作。
@@ -158,9 +162,19 @@ class PromptCard(QFrame):
         Code Logic（这个函数做什么）:
             在鼠标按下事件中发射 edit_clicked 信号。
         """
-        if event.button() == Qt.MouseButton.LeftButton:
+        if a0 is not None and a0.button() == Qt.MouseButton.LeftButton:  # type: ignore[union-attr]
             self.edit_clicked.emit(self._prompt_id)
-        super().mousePressEvent(event)
+        super().mousePressEvent(a0)
+
+    def _on_tag_clicked(self, tag: str) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            用户点击卡片上的标签时，希望通过该标签筛选 Prompt 列表。
+
+        Code Logic（这个函数做什么）:
+            发射 tag_clicked 信号，传递被点击的标签文本。
+        """
+        self.tag_clicked.emit(tag)
 
     @property
     def prompt_id(self) -> str:

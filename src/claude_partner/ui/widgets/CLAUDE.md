@@ -36,7 +36,7 @@
 - 展示：标题、内容预览(前100字)、标签 pill 行（彩色圆角标签）、更新时间
 - 操作按钮：复制、编辑、删除
 - 点击卡片空白区域触发编辑
-- 信号：`copy_clicked(str)`, `edit_clicked(str)`, `delete_clicked(str)` 均传 prompt_id
+- 信号：`copy_clicked(str)`, `edit_clicked(str)`, `delete_clicked(str)`, `tag_clicked(str)` 均传 prompt_id（tag_clicked 传标签文本）
 
 ## 依赖
 - `claude_partner.models.prompt.Prompt`（PromptCard 使用）
