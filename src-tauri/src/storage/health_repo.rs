@@ -68,6 +68,7 @@ impl HealthRepo {
     ///     用于触达判定或前端展示。
     /// Code Logic: SELECT 全字段 WHERE ts >= ? ORDER BY ts，逐行 try_get 还原为
     ///     ActivityRecord（is_active: i64 != 0）。
+    #[allow(dead_code)]
     pub async fn get_activities_since(
         &self,
         since_ts: i64,
@@ -134,6 +135,7 @@ impl HealthRepo {
     /// Business Logic: 用户点击「喝水」按钮时记录该时刻，water_records 用于后续
     ///     喝水频率统计 / 提醒。以 ts 为主键，INSERT OR REPLACE 保证同一时间戳幂等。
     /// Code Logic: INSERT OR REPLACE INTO water_records (ts) VALUES (?)。
+    #[allow(dead_code)]
     pub async fn insert_water(&self, ts: i64) -> Result<(), AppError> {
         sqlx::query("INSERT OR REPLACE INTO water_records (ts) VALUES (?)")
             .bind(ts)

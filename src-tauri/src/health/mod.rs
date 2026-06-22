@@ -136,7 +136,7 @@ async fn handle_sample(app: &AppHandle, state: &AppState, sample: ActivitySample
 
     if should_remind {
         // 贪睡未到期则静默;免打扰时段静默;notify_enabled 关闭则不 emit。
-        let snoozed = state.health.snooze_until.lock().unwrap().map_or(false, |t| t > now);
+        let snoozed = state.health.snooze_until.lock().unwrap().is_some_and(|t| t > now);
         let dnd = is_in_dnd(now, cfg.dnd_start.as_deref(), cfg.dnd_end.as_deref());
         if !snoozed && !dnd && cfg.notify_enabled {
             // 仅 emit 事件载荷;系统通知由前端监听后弹出(文案走 i18n)。

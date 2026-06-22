@@ -14,6 +14,7 @@ pub mod transfer_repo;
 
 pub use cc_history_repo::ClaudeHistoryRepo;
 pub use claude_md_repo::ClaudeMdRepo;
-pub use health_repo::{ActivityRecord, HealthRepo};
+// health_repo 的 ActivityRecord / HealthRepo 通过全限定路径 `crate::storage::health_repo::...`
+// 引用（health 模块内部），不在此 re-export，避免 unused_imports 告警。
 pub use prompt_repo::PromptRepo;
 pub use transfer_repo::TransferRepo;

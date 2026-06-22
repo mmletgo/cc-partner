@@ -30,6 +30,7 @@ pub trait ActivitySampler {
 /// Mock 采样器(测试用):按预设 `seq` 序列循环返回,索引越界回退为 inactive。
 ///
 /// 用于驱动状态机单测与 daemon 集成测试,避免依赖真实键鼠输入。
+#[allow(dead_code)]
 pub struct MockSampler {
     /// 预设的活跃序列;`sample()` 依次返回每个值,越界后恒为 false。
     pub seq: Vec<bool>,
@@ -40,6 +41,7 @@ pub struct MockSampler {
 impl MockSampler {
     /// Business Logic:测试需要一个可精确控的活动源,以验证状态机在「活跃/不活跃」不同组合下的推进。
     /// Code Logic:传入布尔序列构造,记录初始下标 0。
+    #[allow(dead_code)]
     pub fn new(seq: Vec<bool>) -> Self {
         Self { seq, idx: 0 }
     }

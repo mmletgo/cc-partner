@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::commands::{
     cc_history as cc_history_cmd, claude_md as claude_md_cmd, config as config_cmd,
-    devices as device_cmd,
+    devices as device_cmd, health as health_cmd,
     permissions as permissions_cmd, prompts as prompt_cmd, screenshot as screenshot_cmd,
     sync as sync_cmd, transfer as transfer_cmd, updater as updater_cmd,
 };
@@ -190,6 +190,13 @@ pub fn run() {
         // process 提供 restart 能力（rust 侧用 app.request_restart()）
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // M10 健康提醒：notification 供前端弹出久坐提醒（后端仅 emit 事件，通知文案/弹窗走前端），
+        // autostart 提供开机自启能力（macOS 用 LaunchAgent；第二参 args 为 None 表示无额外启动参数）。
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             // 日志统一由 run() 开头的 tracing_subscriber 接管（tracing 宏 + 经 tracing-log 桥接 log）。
             // 不再注册 tauri-plugin-log：它也会设置全局 log logger，与 tracing_subscriber 冲突，
@@ -209,6 +216,11 @@ pub fn run() {
                 let transfer_repo = Arc::new(TransferRepo::new(pool.clone()));
                 let cc_history_repo = Arc::new(ClaudeHistoryRepo::new(pool.clone()));
                 let claude_md_repo = Arc::new(ClaudeMdRepo::new(pool.clone()));
+                // 健康提醒：仓库（共享 pool）+ 运行时（状态机/贪睡/暂停）+ daemon 取消令牌占位
+                let health_repo = Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone()));
+                let health = Arc::new(crate::health::HealthRuntime::new());
+                let health_cancel =
+                    Arc::new(Mutex::new(None::<tokio_util::sync::CancellationToken>));
                 let state = AppState {
                     config: Arc::new(RwLock::new(config)),
                     db: pool,
@@ -233,6 +245,10 @@ pub fn run() {
                     // Claude Code 历史：仓库 + 采集器取消令牌（start 在 manage 之后调用）
                     cc_history_repo,
                     cc_collector_cancel: Arc::new(Mutex::new(None)),
+                    // 健康提醒：运行时 + 仓库 + daemon 取消令牌（start 在 manage 之后调用）
+                    health,
+                    health_repo,
+                    health_cancel,
                 };
 
                 // 4) 启动 axum HTTP server（绑定动态端口，回填 actual_http_port）
@@ -261,6 +277,17 @@ pub fn run() {
                 let state: tauri::State<'_, AppState> = app.state();
                 let cancel = crate::cc::collector::start(state.inner().clone());
                 *state.cc_collector_cancel.lock().unwrap() = Some(cancel);
+            }
+
+            // 启动健康监测 daemon（采样线程 + 处理 task），取消令牌存入 AppState 供应用退出时优雅停止。
+            // start_health_daemon 内部用 tauri::async_runtime::spawn，同步段调用安全（无需当前线程 reactor）。
+            {
+                let state: tauri::State<'_, AppState> = app.state();
+                let cancel = crate::health::start_health_daemon(
+                    app.handle().clone(),
+                    Arc::new(state.inner().clone()),
+                );
+                *state.health_cancel.lock().unwrap() = Some(cancel);
             }
 
             // M7：创建系统托盘（图标 + 菜单 + 双击显窗），失败仅记录不阻断启动
@@ -319,6 +346,14 @@ pub fn run() {
             cc_history_cmd::get_cc_prompt,
             cc_history_cmd::refresh_cc_history,
             cc_history_cmd::delete_cc_prompt,
+            // M10 健康提醒（7 命令：状态/开关/暂停/贪睡/跳过/配置/统计）
+            health_cmd::get_health_status,
+            health_cmd::toggle_health_enabled,
+            health_cmd::toggle_health_paused,
+            health_cmd::snooze_reminder,
+            health_cmd::skip_reminder,
+            health_cmd::update_health_config,
+            health_cmd::get_activity_stats,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {
@@ -337,6 +372,11 @@ pub fn run() {
                 if let Some(t) = state.cc_collector_cancel.lock().unwrap().take() {
                     t.cancel();
                     tracing::info!("CC 历史采集器已停止");
+                }
+                // 停止健康监测 daemon（采样线程 + 处理 task）
+                if let Some(t) = state.health_cancel.lock().unwrap().take() {
+                    t.cancel();
+                    tracing::info!("健康监测 daemon 已停止");
                 }
                 tracing::info!("应用已退出，mDNS 已注销");
             }

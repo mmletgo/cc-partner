@@ -10,6 +10,7 @@ pub mod cc_history;
 pub mod claude_md;
 pub mod config;
 pub mod devices;
+pub mod health;
 pub mod permissions;
 pub mod prompts;
 pub mod screenshot;

@@ -39,7 +39,11 @@ pub enum MachineState {
 }
 
 /// 一次推进的输出。
+///
+/// `state`/`reminder_closed_window` 当前 daemon 仅消费 `should_remind`；相位与被关闭窗口
+/// 供后续统计/前端展示扩展使用，故整体 `#[allow(dead_code)]`。
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct StateOutcome {
     /// 推进后的状态机相位。
     pub state: MachineState,
