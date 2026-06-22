@@ -1,0 +1,45 @@
+/* Overlay 选区页样式：全屏透明、十字光标、禁止选中文本 */
+/* Business Logic: overlay 窗口本身透明，背景图（桌面截图）铺满让用户像在直接框选屏幕；选区外半透明遮罩。 */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  margin: 0;
+  padding: 0;
+  cursor: crosshair;
+  user-select: none;
+  -webkit-user-select: none;
+  background-color: transparent;
+  background-size: cover;
+  background-position: top left;
+  background-repeat: no-repeat;
+  overflow: hidden;
+}
+
+/* 选区外半透明遮罩（黑色 alpha≈0.4），通过四块拼接实现"挖洞"效果 */
+.mask {
+  position: absolute;
+  background-color: rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+/* 高亮选区边框（蓝色虚线，对照 Python QPen #007AFF DashLine） */
+.selection {
+  position: absolute;
+  border: 2px dashed #007aff;
+  background-color: transparent;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.error {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: #fff;
+  font-size: 16px;
+  background-color: rgba(0, 0, 0, 0.7);
+  padding: 12px 20px;
+  border-radius: 6px;
+}

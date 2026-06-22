@@ -96,13 +96,14 @@ Claude Partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计
 ## 4. 技术架构
 
 ### 4.1 技术栈
-- 语言：Python 3.11+
-- GUI：PyQt6
-- 异步：asyncio + qasync（Qt-asyncio 桥接）
-- 网络：aiohttp（HTTP 服务端/客户端）
-- 发现：zeroconf（mDNS）
-- 存储：SQLite + aiosqlite
-- 打包：PyInstaller
+- 桌面宿主：Tauri 2（Rust 主进程）
+- 语言：Rust（后端）+ TypeScript（前端）
+- 网络：axum（HTTP 服务端，跨设备 P2P）+ reqwest（peer client）
+- 发现：mdns-sd（mDNS）
+- 存储：SQLite + sqlx
+- 抓屏/剪贴板：xcap + arboard
+- 通信：Tauri `invoke()` IPC（本地前端 ↔ Rust）
+- 打包/更新：Tauri CLI + tauri-plugin-updater
 
 ### 4.2 数据模型
 

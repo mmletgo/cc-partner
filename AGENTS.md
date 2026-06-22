@@ -13,11 +13,12 @@
 - **自动更新** — GitHub Releases 检测 / 下载 / 安装
 
 **技术栈**：
-- **后端**: Python 3.11+ · PyQt6 · aiohttp · aiosqlite · zeroconf
-- **前端**: React 18 · TypeScript · Vite 5 · React Router v6 · CSS Modules
-- **打包**: PyInstaller（前端构建产物作为 Python 包的资源嵌入）
+- **桌面宿主**: Tauri 2（Rust 主进程）
+- **后端**: Rust · axum HTTP server · reqwest peer client · mdns-sd 发现 · sqlx (SQLite) · xcap 抓屏 · arboard 剪贴板 · tracing 日志
+- **前端**: React 19 · TypeScript · Vite · React Router v6 · CSS Modules
+- **打包/更新**: Tauri CLI · tauri-plugin-updater · tauri-plugin-global-shortcut · tauri-plugin-process · tauri-plugin-dialog
 
-桌面端架构：PyQt6 窗口内嵌 QWebEngineView，加载前端构建产物。前端通过 `fetch('/api/...')` 调用 aiohttp HTTP 服务；Python 后端无侵入。
+桌面端架构：Tauri 2 主进程用 Rust 实现全部后端能力，前端复用 `web/` 的 React。本地前端通过 `@tauri-apps/api` 的 `invoke()` 调用 Rust `#[tauri::command]`（无本地端口暴露）；跨设备 P2P 走 axum HTTP server（动态端口）+ reqwest 客户端 + mdns-sd 发现。两条通道共享同一份 `AppState`。
 
 ## 2. 目录结构
 
@@ -66,18 +67,16 @@ claude-partner/
 │   │   └── assets/
 │   ├── public/
 │   ├── index.html
-│   ├── vite.config.ts            # 含 /api proxy → aiohttp
+│   ├── vite.config.ts            # Tauri dev 时由 tauri 自动接管，无 /api proxy
 │   ├── tsconfig.json
 │   └── package.json
-├── src/claude_partner/           # Python 后端（保持）
-│   ├── app.py
-│   ├── ui/
-│   │   ├── main_window.py        # QWebEngineView 加载前端
-│   │   ├── welcome_window.py
-│   │   ├── tray.py
-│   │   └── widgets/              # 旧 Qt Widgets（fallback）
-│   ├── models/  storage/  network/  sync/  transfer/  screenshot/  updater/  hotkey/
-│   └── ...
+├── src-tauri/                    # Tauri 2 Rust 后端（见 src-tauri/CLAUDE.md）
+│   ├── src/                      # lib.rs(入口) config/state/error/commands/models/storage/sync/net/transfer/screenshot/permissions/hotkey/tray
+│   ├── migrations/               # SQL schema 文档
+│   ├── capabilities/             # Tauri 权限清单（default.json）
+│   ├── icons/                    # 应用图标
+│   ├── tauri.conf.json           # Tauri 配置 + bundle + updater（版本号单一来源）
+│   └── Cargo.toml
 ├── uiux/                         # 设计稿（参考资源，不参与构建）
 ├── docs/
 │   ├── prd.md
@@ -349,15 +348,15 @@ export function ComponentName() { ... }
 
 ```bash
 cd web
-npm install              # 首次
-npm run dev              # http://localhost:5173
+npm install                          # 首次
+./node_modules/.bin/tauri dev        # 同时起 Vite dev server + Rust 主进程，热重载
 ```
 
-Vite dev server 启动后会代理 `/api` 请求到 aiohttp 端口（默认 8000，可通过 `PY_PORT=9000 npm run dev` 覆盖）。
+本地前端与 Rust 后端通过 Tauri `invoke()` IPC 通信，无 `/api` proxy、无本地端口暴露。
 
 ### 7.2 访问设计系统预览
 
-开发模式下访问 `http://localhost:5173/design-system` 查看所有组件。生产构建后该路由不可访问。
+开发模式下访问 `http://localhost:1420/design-system` 查看所有组件（Tauri dev 默认占用 1420 端口）。生产构建后该路由不可访问。
 
 ### 7.3 类型检查
 
@@ -370,100 +369,66 @@ npx tsc --noEmit
 
 ```bash
 cd web
-npm run build            # 产物在 web/dist/
+./node_modules/.bin/tauri build      # 产物在 src-tauri/target/release/bundle/
 ```
 
-构建产物会被 PyInstaller 打包进 Python 包（`web/dist` → `claude_partner/web_dist/`）。
+Tauri 自动打包三平台本平台产物（macOS→dmg/app、Windows→nsis/msi、Linux→AppImage/deb），前端构建产物嵌入应用。
 
-### 7.5 Mock API 测试服务
+## 8. 与 Rust 后端协作
 
-后端 REST 端点开发或前端联调时，可用独立 mock server 验证：
+### 8.1 通信通道
 
-```bash
-# 启动 mock API（端口 8765）
-python3 scripts/mock_api_server.py
-# 在同一终端或另一个终端启动 Vite（指向 mock）
-cd web && PY_PORT=8765 npm run dev
-# 前端 npm run build 时通过 vite proxy 自动转发 /api 到 8765
-```
+- **本地前端 ↔ Rust**：Tauri `invoke('<command>')` IPC（`#[tauri::command]`）。前端 `web/src/api/` 底层走 `@tauri-apps/api/core` 的 `invoke`，组件层无感知。
+- **跨设备 P2P**：axum HTTP server（动态端口），供对端 reqwest 调用。仅用于设备间通信，前端不直接访问。
 
-mock 数据：10 prompts / 3 devices / 5 transfers（覆盖 transferring/completed/failed 状态）。
+### 8.2 前端 invoke 命令（由 `src-tauri/src/commands/` 注册）
 
-### 7.6 Playwright 截图验证
+| 命令 | 说明 |
+|------|------|
+| ping | 健康检查 |
+| config.get_config / config.update_config | 配置读写（update_config 支持快捷键热更新） |
+| config.get_version | 应用版本号 |
+| prompts.list / get / create / update / delete / list_tags | Prompt CRUD（delete 为软删除，自增 vector_clock） |
+| trigger_sync | 触发全网 Prompt 同步，返回 {accepted, synced, note} |
+| list_transfers / send_transfer / cancel_transfer | 文件传输任务管理 |
+| check_permissions / request_permission | macOS 权限检查与申请（屏幕录制 / 输入监控） |
+| check_update / download_update / get_download_status / cancel_download / install_update | 自动更新 5 命令 |
+| start_region_capture / get_display_snapshot / crop_and_copy / cancel_region_capture | 区域截图 |
 
-```bash
-# 确保 Vite dev server 在 5173 运行
-python3 scripts/verify_frontend.py
-# → 输出 docs/frontend/screenshots/*.png（7 个页面）
-# → 统计 console 错误/警告，exit 0=渲染成功
-```
+### 8.3 P2P HTTP 端点（对端调用，由 `src-tauri/src/net/routes/` 注册）
 
-需要 `@playwright/test` dev dep（已安装）和 `playwright` Python 包：
-```bash
-pip install playwright
-npx playwright install chromium
-```
-
-### 7.7 REST 端点集成测试
-
-```bash
-python3 scripts/test_rest_endpoints.py
-# → 创建临时 SQLite + 完整 APIProtocol
-# → 16 个端点全部验证（CRUD/设备/传输/P2P）
-# → exit 0=全部通过
-```
-
-不需要外部依赖（使用 aiohttp ClientSession 异步测试）。
-
-## 8. 与 Python 后端协作
-
-### 8.1 API 端点
-
-**前端 REST（由 protocol.py 注册）**：
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| /api/health | GET | 健康检查，返回 {ok, device_id, device_name} |
-| /api/prompts | GET | Prompt 列表（支持 ?search=&tag= 过滤） |
-| /api/prompts | POST | 新建 Prompt {title, content, tag} |
-| /api/prompts/{id} | GET | 单条 Prompt（deleted 软删除返回 404） |
-| /api/prompts/{id} | PUT | 编辑 Prompt（自增 vector_clock） |
-| /api/prompts/{id} | DELETE | 软删除（自增 vector_clock 后标记 deleted） |
-| /api/devices | GET | 在线设备列表（从 DeviceDiscovery 回调） |
-| /api/sync | POST | 触发全网同步 |
-| /api/transfer/tasks | GET | 全部传输任务列表（合并 sender + receiver） |
-| /api/transfer/send | POST | 启动文件发送 {deviceId, filePath} |
-| /api/transfer/tasks/{id} | DELETE | 取消传输 |
-
-**P2P 协议（对端调用）**：
-| 端点 | 方法 | 说明 |
-|------|------|------|
+| /api/health | GET | {ok, device_id, device_name, http_port, ts} |
 | /api/sync/pull | POST | 接收对端摘要，返回对端需要的 prompt |
 | /api/sync/push | POST | 接收对端推送的 prompt |
 | /api/transfer/init | POST | 初始化文件接收 |
-| /api/transfer/chunk/{id} | POST | 接收文件分块 |
+| /api/transfer/chunk/{id} | POST | 接收文件分块（header `X-Chunk-Offset`） |
 | /api/transfer/status/{id} | GET | 查询接收端传输状态 |
 
-完整路由见 `src/claude_partner/network/protocol.py` 的 `setup_routes()`。
-集成测试见 `scripts/test_rest_endpoints.py`（16 个端点）。
+### 8.4 添加新能力
 
-### 8.2 添加新 API 端点
+1. **Rust 端**: 在 `src-tauri/src/commands/<module>.rs` 加 `#[tauri::command]`，在 `lib.rs` 的 `invoke_handler!` 注册；需要 P2P 则在 `net/routes/` 加 axum 路由
+2. **前端**: 在 `web/src/api/<module>.ts` 加对应 `invoke` 封装
+3. 类型同步更新（Rust `#[serde(rename_all="camelCase")]` 对齐前端，前端 `lib/types.ts`）
 
-1. **Python 端**: 在 `src/claude_partner/network/` 下新增 handler
-2. **前端**: 在 `web/src/api/<module>.ts` 添加对应函数
-3. 类型定义同步更新（前端 `types/`、后端 `models/`）
+### 8.5 事件订阅（Tauri emit/listen，替代 SSE）
 
-### 8.3 SSE 订阅
+Rust 侧用 `app_handle.emit("<event>", payload)`，前端 `listen("<event>", cb)`：
 
 ```tsx
+import { listen } from '@tauri-apps/api/event';
+
 useEffect(() => {
-  const es = new EventSource('/api/events/stream');
-  es.addEventListener('device-online', (e) => {
-    const device = JSON.parse(e.data);
+  const unlisten = listen('transfer:progress', (e) => {
+    const { id, transferredBytes, size, progress } = e.payload;
     // ...
   });
-  return () => es.close();
+  return () => { unlisten.then(fn => fn()); };
 }, []);
 ```
+
+常用事件：`transfer:progress` / `transfer:completed` / `transfer:failed` / `transfer:cancelled` / `region-capture:result` / `update:download-progress`。
 
 ## 9. 后续开发注意事项
 
@@ -471,12 +436,12 @@ useEffect(() => {
 2. **不要在 primitives 写业务逻辑** — 业务在 domain
 3. **不要在 domain 跨组件 import** — 提到 page 层
 4. **不要修改 uiux/ 目录** — 它是设计稿参考
-5. **不要删除旧 PyQt6 widgets** — 作为 fallback
-6. **新组件必须更新 AGENTS.md 组件清单**
-7. **新增 icon 必须在 `lib/icons.tsx` 集中管理**
-8. **TypeScript 必须 strict 通过** — `npx tsc --noEmit`
-9. **优先扩展已有组件，谨慎新建**
-10. **设计 token 新增必须同时给浅色/深色两套值**
+5. **新组件必须更新 AGENTS.md 组件清单**
+6. **新增 icon 必须在 `lib/icons.tsx` 集中管理**
+7. **TypeScript 必须 strict 通过** — `npx tsc --noEmit`
+8. **优先扩展已有组件，谨慎新建**
+9. **设计 token 新增必须同时给浅色/深色两套值**
+10. **前端调后端一律走 `web/src/api/` 的 invoke 封装，不要直接 fetch** — Rust 命令在 `src-tauri/src/commands/` 注册，新命令记得在 `lib.rs` 的 invoke_handler 加入
 
 ## 10. 关键文件索引
 
@@ -489,8 +454,9 @@ useEffect(() => {
 | `web/src/components/layout/*` | 布局组件 | 低 |
 | `web/src/components/domain/*` | 业务组件 | 中（业务迭代） |
 | `web/src/pages/*` | 页面 | 高 |
-| `src/claude_partner/ui/main_window.py` | PyQt6 主窗口 | 低（仅集成） |
-| `claude_partner.spec` | PyInstaller 打包配置 | 低 |
+| `src-tauri/src/lib.rs` | Tauri 入口 + 命令注册 + setup 装配 | 中（新增命令时改） |
+| `src-tauri/src/commands/*` | Rust invoke 命令层 | 中（后端迭代） |
+| `src-tauri/tauri.conf.json` | Tauri 配置 + bundle + updater（版本号单一来源） | 低（发版改） |
 
 ---
 

@@ -2,37 +2,32 @@
 
 ## 概述
 
-基于 React + TypeScript + Vite 的前端界面，通过 fetch 调用后端 aiohttp HTTP API。
+基于 React + TypeScript + Vite 的前端界面，宿主为 **Tauri 2**，通过 `invoke()` IPC 调用 Rust 后端命令（`src-tauri/`）。迁移自 PyQt + aiohttp，前端已无任何本地 HTTP 调用。
 
 ## 开发命令
 
 - `npm run dev` — 启动 Vite 开发服务器（端口 5173）
-- `npm run build` — 打包到 dist/
+- `npm run build` — 打包到 dist/（tsc 类型检查 + vite 构建）
 - `npm run lint` — ESLint 检查
+- 完整开发（前端 + Rust）：仓库根 `./web/node_modules/.bin/tauri dev`（自动拉起 vite + cargo run + 热重载）
 
 ## 架构
 
-- **API 客户端**: `src/api/client.ts` — BASE_URL 为空字符串，使用 `window.location.origin` 构建请求 URL
-- **API 模块**: `src/api/prompts.ts`, `src/api/config.ts` 等 — 各资源 RESTful 调用
+- **API 客户端**: `src/api/client.ts` — 基于 `@tauri-apps/api/core` 的 `invoke` 薄封装；Rust 后端 reject 的错误（`{error:"消息"}`）经 `normalizeError` 规整为带 `message` 的 `Error`，无 HTTP status 概念
+- **API 模块**: `src/api/prompts.ts`、`config.ts`、`devices.ts`、`transfer.ts` — 各资源方法调 `invoke('命令名', args)`，命令名对应 Rust `#[tauri::command]`，参数 camelCase。后端命令随 M1–M8 里程碑逐步落地，详见 `src-tauri/CLAUDE.md`
 - **页面**: `src/pages/` — Home（最近 Prompts）/ Prompts（列表管理，自定义多标签 + 动态标签筛选）/ Scratchpad（速记本，纯内存临时记事）/ Settings / Transfer / Devices
 - **路由**: `src/App.tsx` — React Router，`/` → Home，`/prompts` → Prompts，`/scratchpad` → Scratchpad 等
-- **macOS 权限流程**: 首次启动 `OnboardingGuard`(`App.tsx`)检测权限未就绪 → 跳 `/welcome`(`usePermissions` 轮询，`PermissionCard` 点击触发后端 `POST /api/permissions/request` 弹系统授权框 + 打开设置面板)；完成引导写 `localStorage cp-permission-onboarded`。平时侧栏底部 `PermissionStatusBadge`(AppShell)常驻兜底，未授权时可点击触发同一授权流程。
-- **自定义 Hook**: `src/hooks/` — `useTheme`（浅/深主题切换与跨组件同步）、`useAppVersion`（应用版本号，统一从后端 `/api/version` 获取，**禁止前端硬编码版本号**，唯一权威来源是后端 `__init__.py` 的 `__version__`）、`useLanguage`（中英文切换，复刻 useTheme 的 localStorage + 自定义事件同步范式）、`usePermissions`（macOS 权限状态轮询 + 请求授权，导出 `PERMISSION_ONBOARDED_KEY` 供 OnboardingGuard/Welcome 共享）
+- **区域截图选区页**: `src/pages/Screenshot/Overlay.tsx` — 独立于 AppShell/OnboardingGuard，路由 `/screenshot-overlay?display={i}`，由 Tauri 选区窗口（每屏一个透明置顶窗口）直接加载。鼠标拖动框选（半透明遮罩挖洞 + 蓝色虚线边框），mouseup 宽高≥10 调 `crop_and_copy` 裁剪写剪贴板，ESC/右键调 `cancel_region_capture`。坐标用逻辑像素 + `window.devicePixelRatio` 传 Rust 换算物理像素。**hooks 必须在 early return 之前**（项目规则 20）。详见 `src-tauri/CLAUDE.md` M6 节
+- **macOS 权限流程**: 首次启动 `OnboardingGuard`(`App.tsx`)检测权限未就绪 → 跳 `/welcome`(`usePermissions` 轮询 `invoke('check_permissions')`，`PermissionCard` 点击触发 `invoke('request_permission')` 弹系统授权框 + 打开设置面板；**后端命令 M7 实现**)；完成引导写 `localStorage cp-permission-onboarded`。平时侧栏底部 `PermissionStatusBadge`(AppShell)常驻兜底，未授权时可点击触发同一授权流程
+- **自定义 Hook**: `src/hooks/` — `useTheme`（浅/深主题切换与跨组件同步）、`useAppVersion`（应用版本号，统一经 `invoke('get_version')` 获取，**禁止前端硬编码版本号**，唯一权威来源是 `tauri.conf.json` 的 `version`）、`useLanguage`（中英文切换，复刻 useTheme 的 localStorage + 自定义事件同步范式）、`usePermissions`（macOS 权限状态轮询 + 请求授权，导出 `PERMISSION_ONBOARDED_KEY` 供 OnboardingGuard/Welcome 共享）
 - **i18n**: `src/i18n/` — react-i18next 多 namespace（en/zh）；语言检测 localStorage(`cp-lang`) > `navigator.language` > en；切换器在 Sidebar 底部。**禁止在组件里硬编码用户可见中/英文字面量**，一律走 `src/i18n/locales/{en,zh}/<ns>.json` + `t('<ns>:<key>')`。详见下方「i18n 国际化」。
 
-## Vite 代理（开发模式）
-
-自定义 Vite 插件 `dynamicApiProxy` 将 `/api` 请求代理到后端：
-- 每次请求读取 `~/.claude-partner/backend.port` 获取后端动态端口
-- 使用 Node.js 内置 `http` 模块实现代理，无额外依赖
-
-**重要**: 不能使用 `connect` 的 path-based mounting（`server.middlewares.use('/api', handler)`），
-在 Vite 8 中该写法不会拦截 `/api` 请求。必须用 `server.middlewares.use((req, res, next) => { if (req.url?.startsWith('/api')) ... })` 手动检查 URL 前缀。
+> 迁移到 Tauri 后已移除 Vite `dynamicApiProxy` 插件与 `~/.claude-partner/backend.port` 机制——前端走 invoke，无需 HTTP 代理。
 
 ## 打包部署
 
-- `npm run build` 输出到 `dist/`，后端通过 `HTTPServer.serve_static()` 提供静态文件服务
-- 后端 SPA 回退路由 `/{path:.*}` 返回 `index.html`，支持前端路由刷新
+- `npm run build` 输出到 `dist/`，由 Tauri 打包嵌入应用（`tauri.conf.json` 的 `frontendDist=../web/dist`）
+- 生产构建：仓库根 `./web/node_modules/.bin/tauri build`（产出 dmg/nsis/appimage 等）
 
 ## i18n 国际化
 

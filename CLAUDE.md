@@ -2,8 +2,8 @@
 
 ## 项目概述
 
-支持 Mac/Windows/Ubuntu 三端的桌面工具，核心功能：
-1. **局域网文件传输** - 任意大小文件的分块传输，支持断点续传
+支持 Mac/Windows/Ubuntu 三端的桌面工具，基于 **Tauri 2 + Rust 后端 + React 前端**。核心功能：
+1. **局域网文件传输** - 任意大小文件分块传输，支持断点续传
 2. **区域截图** - 框选截图后保存到剪贴板，可直接粘贴到 Claude Code
 3. **Prompt 管理** - 记录/复制/打标签/按标签筛选的文本管理
 4. **P2P 自动互联** - 每个实例既是服务端也是客户端，局域网内 mDNS 自动发现
@@ -12,72 +12,55 @@
 
 ## 技术栈
 
-- 前端 GUI: React + TypeScript + Vite（`web/` 目录，`npm run dev` 开发）
-- 宿主外壳: PyQt6 + QWebEngineView（嵌入 React 前端）+ 系统托盘
-- 异步后端: aiohttp + qasync (asyncio-Qt桥接)
-- 设备发现: zeroconf (mDNS)
-- 本地存储: SQLite + aiosqlite
-- 打包: PyInstaller
+- 桌面宿主: **Tauri 2**（Rust 主进程）
+- 后端: Rust（axum HTTP server + reqwest peer client + mdns-sd 发现 + sqlx/SQLite + xcap 抓屏 + arboard 剪贴板 + sha2 校验 + tracing 日志）
+- 前端 GUI: React 19 + TypeScript + Vite（`web/` 目录）
+- Tauri 插件: global-shortcut（截图快捷键）、updater（自动更新）、process（安装后重启）、dialog
+- 本地存储: SQLite（sqlx，直接读写旧 `~/.claude-partner/data.db`）
 
 ## 代码结构
 
 ```
-src/claude_partner/
-├── app.py          → 应用入口和生命周期管理，见下方说明
-├── config.py       → 配置管理，见下方说明
-├── models/         → 数据模型，有独立 CLAUDE.md
-├── storage/        → SQLite 存储层，有独立 CLAUDE.md
-├── network/        → 网络通信层（mDNS发现 + HTTP API），有独立 CLAUDE.md
-├── sync/           → Prompt 同步引擎，有独立 CLAUDE.md
-├── transfer/       → 文件传输模块，有独立 CLAUDE.md
-├── screenshot/     → 截图功能，有独立 CLAUDE.md
-├── updater/        → 自动更新模块（GitHub Releases 版本检查/下载/安装），有独立 CLAUDE.md
-└── ui/             → PyQt6 宿主外壳（WebMainWindow/托盘/主题/权限检查），有独立 CLAUDE.md
-web/                → React 前端，有独立 CLAUDE.md
+src-tauri/   → Rust 后端（Tauri 主进程：配置/存储/网络/同步/传输/截图/权限/托盘/快捷键/更新），见 src-tauri/CLAUDE.md
+web/         → React 前端（复用迁移前代码，通过 @tauri-apps/api invoke 调 Rust），见 web/CLAUDE.md
+scripts/     → bump-version.mjs（发版版本号同步）+ icon 图标源
+.github/     → workflows/release-tauri.yml（三平台 CI，签发 Release + latest.json）
+docs/        → 需求/设计文档
+uiux/        → 设计稿参考资源
 ```
 
 ## 核心架构
 
-### 应用入口 (app.py)
-- 使用 qasync 将 asyncio 事件循环集成到 Qt 事件循环
-- 启动顺序：数据库初始化 → HTTP 服务端 → mDNS 注册 → 同步引擎 → 截图/快捷键 → WebMainWindow → 系统托盘
-- 关闭时反向清理所有资源
-- 界面统一由 React 前端渲染（QWebEngineView 嵌入），不再有 PyQt6 原生面板
+### 双通道通信（务必遵守）
+- **本地前端 ↔ Rust**：Tauri `invoke()` IPC（`#[tauri::command]`）。无本地端口暴露、无 CORS、无启动端口竞态。
+- **跨设备 P2P**：axum HTTP server（`port=0` 动态分配），供对端 reqwest 调用 `/api/health`、`/api/sync/{pull,push}`、`/api/transfer/{init,chunk,status}`。
+- 两条通道共享同一份 `AppState`（`Arc<RwLock<...>>`），由 `app.manage()` 注入命令层、`with_state()` 注入 axum。
 
-### 配置管理 (config.py)
-- 设备 ID（UUID，首次运行生成并持久化）
-- HTTP 服务端口（动态分配）
-- 文件接收保存路径
-- 数据库路径
-- 配置存储在 ~/.claude-partner/config.json
+### 应用入口（`src-tauri/src/lib.rs`）
+Tauri Builder + setup 装配。启动顺序：tracing 初始化 → load config（`~/.claude-partner/config.json`，缺失生成默认）→ init_db（WAL + CREATE TABLE IF NOT EXISTS，兼容旧库）→ AppState → axum HTTP server（动态端口）→ mDNS 注册 → 系统托盘 → 全局快捷键。关闭时反向清理（`RunEvent::Exit` 注销 mDNS）。
 
-### P2P 网络协议
-- mDNS 服务类型: `_claude-partner._tcp.local.`
-- 每个实例注册 mDNS 服务（含 device_id, name, port）
-- 发现对端后通过 HTTP API 通信
-- API 端点: /api/health, /api/sync/pull, /api/sync/push, /api/transfer/*
+### 配置管理（`src-tauri/src/config.rs`）
+设备 ID（UUID，首次生成持久化）、HTTP 服务端口（动态分配）、文件接收保存路径、数据库路径、截图快捷键。配置存 `~/.claude-partner/config.json`。
 
 ### Prompt 同步策略
-- 每个 Prompt 携带向量时钟 {device_id: counter}
-- 修改时递增本设备计数器
-- 同步时比较向量时钟：严格领先 → 覆盖；并发 → LWW (Last-Writer-Wins)
-- 触发时机：用户在 Prompt 管理面板手动点击"同步"按钮
+向量时钟 `{device_id: counter}`，修改时递增本设备计数器；同步比较：严格领先 → 覆盖；并发 → LWW（最后修改者胜），并发且时间戳相等时用 device_id 字典序 tie-break（较纯 LWW 更确定）。手动触发（前端「同步」按钮 → `invoke('trigger_sync')`）。
 
-### 文件传输协议
-- 分块 HTTP 传输（1MB/块）
-- 流程：init(元数据) → chunk(分块) → verify(SHA256校验)
-- 支持断点续传：接收端告知已接收 offset
-
-### 应用更新
-- 不自动检查；前端设置面板「检查更新」按钮手动触发（POST /api/updater/check，返回 downloadUrl/filename/size）
-- 发现新版本后前端「下载更新」按钮流式下载（POST /api/updater/download），进度条轮询 GET /api/updater/download/status（800ms）
-- 支持取消下载（POST /api/updater/download/cancel）；下载完成后「安装并重启」（POST /api/updater/install）
-- GitHub Releases API 语义化版本比较，match_platform_asset 自动匹配当前平台资源
-- 流式下载到 `~/.claude-partner/updates/`（64KB chunk，.downloading 临时文件原子重命名）
-- 三平台安装策略：macOS 挂载 DMG 替换 .app / Windows CMD 脚本替换 EXE / Linux shell 脚本替换可执行文件
-- 版本号定义在 `src/claude_partner/__init__.py` 的 `__version__`
+### 自动更新（`commands/updater.rs` + tauri-plugin-updater）
+前端「检查更新」→ `check_update`；有更新「下载」→ `download_update`（emit `update:download-progress`）；「安装并重启」→ `install_update`（`spawn_blocking` 跑 `update.install` + `app.request_restart()`）。endpoint 指向 GitHub Releases 的 `latest.json`（M9 CI 产出，minisign 签名校验）。
 
 ### 发版流程
-- 更新 `src/claude_partner/__init__.py` 和 `pyproject.toml` 中的版本号
-- 推送 `v*` 格式的 tag（如 `git tag v0.2.0 && git push origin v0.2.0`）
-- GitHub Actions 自动构建三平台（macOS arm64/x86_64、Windows、Linux）并创建 Release
+1. `node scripts/bump-version.mjs <新版本号>`（同步 `tauri.conf.json` + `Cargo.toml` + `web/package.json`；**版本号单一来源是 `tauri.conf.json` 的 version**）
+2. 提交改动
+3. `git tag v<版本号> && git push origin v<版本号>` 触发 `release-tauri.yml`
+4. CI 用 tauri-action 矩阵构建 macOS(aarch64) / Windows / Linux 三平台，签发 Release 并产出 `latest.json`（含各平台签名下载 URL）
+
+> **macOS 暂用 ad-hoc 签名**（`signingIdentity: "-"`，开发/测试免 Apple Developer ID）。正式分发需后续配 Apple Developer ID + notarization。
+> **updater 端到端校验**需在 repo Settings → Secrets 配 `TAURI_SIGNING_PRIVATE_KEY`（`~/.tauri/claude-partner.updater.key` 内容，空密码免配 PASSWORD）。未配则 CI 不签名、latest.json 无 signature，updater 校验失败。
+
+## 关键陷阱
+
+- **数据兼容**：直接读写旧 `~/.claude-partner/data.db`，建表全用 `CREATE TABLE IF NOT EXISTS` 保用户数据；`tags`/`vector_clock` 是标准 JSON TEXT；`datetime` 兼容有无时区偏移两种格式。
+- **向量时钟 tie-break 差异**：Rust merger 在并发且时间戳相等时用 device_id 字典序 tie-break，较迁移前纯 LWW 更确定（避免双端抖动）——极端并发场景行为有细微差异，属预期。
+- **日志用 `tracing`/`tracing-subscriber`，禁止引入 `tauri-plugin-log`**（与 tracing_subscriber 冲突 panic）。
+- **macOS 透明窗口**：`transparent(true)` 需 tauri crate 开 `macos-private-api` feature 且 `tauri.conf.json` 设 `app.macOSPrivateApi: true`（两者必须匹配）。
+- **macOS 权限 FFI 不写 `#[link]`**：CoreGraphics framework 已被 Tauri 依赖链链接，显式 `#[link(name="CoreGraphics")]` 反而报 library not found。

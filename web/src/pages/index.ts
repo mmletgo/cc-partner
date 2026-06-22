@@ -29,3 +29,6 @@ export { DesignSystem } from './DesignSystem';
 
 export { Scratchpad } from './Scratchpad';
 export type { } from './Scratchpad';
+
+// 区域截图选区页（独立于 AppShell，由 Tauri 选区窗口加载 /screenshot-overlay）
+export { Overlay } from './Screenshot/Overlay';

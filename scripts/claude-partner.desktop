@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Claude Partner
-Comment=Cross-platform LAN collaboration tool
-Exec=/opt/claude-partner/ClaudePartner
-Icon=/opt/claude-partner/icon.png
-Type=Application
-Categories=Utility;Network;
-StartupWMClass=ClaudePartner
-Terminal=false

@@ -8,16 +8,16 @@ Claude Partner 前端是**桌面端内嵌 Web 应用**：
 
 ```
 ┌─────────────────────────────────────┐
-│ PyQt6 窗口 (main_window.py)          │
+│ Tauri 2 主进程 (Rust)                │
 │  ┌───────────────────────────────┐  │
-│  │ QWebEngineView                │  │
+│  │ Webview 窗口                  │  │
 │  │  ┌─────────────────────────┐  │  │
 │  │  │ React + Vite 前端        │  │  │
 │  │  │  - 路由：/ /prompts/...  │  │  │
-│  │  │  - fetch /api/* → aiohttp│  │  │
+│  │  │  - invoke() → Rust 命令  │  │  │
 │  │  └─────────────────────────┘  │  │
 │  └───────────────────────────────┘  │
-│  托盘 / 快捷键 / aiohttp 都在 Python │
+│  托盘 / 快捷键 / axum 都在 Rust       │
 └─────────────────────────────────────┘
 ```
 
@@ -31,18 +31,18 @@ Claude Partner 前端是**桌面端内嵌 Web 应用**：
 | `web/src/components/layout/` | 布局组件（AppShell/TitleBar/Sidebar/...） |
 | `web/src/components/domain/` | 业务组件（PromptCard/DeviceCard/...） |
 | `web/src/pages/` | 6 个路由页面 + DesignSystem 预览 |
-| `web/src/api/` | fetch 封装（prompts/devices/transfer） |
+| `web/src/api/` | invoke 封装（prompts/devices/transfer，调 Rust 命令） |
 | `AGENTS.md` | ⭐ 必读：组件复用规范 |
 
 ## 启动 dev server
 
 ```bash
 cd web
-npm install           # 首次
-PY_PORT=8765 npm run dev   # Vite 启动 5173，/api 代理到 8765
+npm install                        # 首次
+./node_modules/.bin/tauri dev      # Vite + Rust 主进程，热重载
 ```
 
-打开 `http://localhost:5173` 查看主窗口；`/design-system` 查看组件库。
+Tauri dev 默认占用 1420 端口；`/design-system` 查看组件库。
 
 ## 一天开发流程
 
@@ -102,8 +102,8 @@ mkdir web/src/pages/MyPage
 
 | 问题 | 排查 |
 |------|------|
-| 页面空白 | F12 打开控制台看 Vite proxy 错误 |
-| fetch 404 | 检查 vite.config.ts 的 PY_PORT 是否正确 |
+| 页面空白 | F12 打开控制台看 invoke / Rust 错误 |
+| invoke 报错 | 检查 `src-tauri/src/commands/` 是否注册该命令 + `lib.rs` invoke_handler |
 | 主题没切换 | 检查 `useTheme` 是否在组件树顶层 |
 | TypeScript 错误 | `cd web && npx tsc --noEmit` |
 | 组件样式没生效 | 确认 import 了 `tokens.css` + `reset.css` |

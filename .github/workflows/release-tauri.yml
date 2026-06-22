@@ -1,0 +1,92 @@
+# Build & Release (Tauri) — M9 新增的三平台 Tauri 打包发版 CI
+#
+# 触发条件与旧 release.yml（Python/PyInstaller）一致：push v* tag。
+# 注意：M9 阶段推 v* tag 会同时触发本 workflow 与旧 release.yml，
+#       即同一 tag 会并行跑 Python + Tauri 两套构建。这是预期的过渡行为，
+#       M10 删除旧 release.yml + Python 代码后，将只剩 Tauri 一套。
+#
+# 产物：tauri-apps/tauri-action 自动构建三平台安装包（dmg/nsis-msi/appimage-deb），
+#       对安装包签名（TAURI_SIGNING_PRIVATE_KEY），上传到 GitHub Release，
+#       并生成 latest.json（含各平台签名后的下载 URL + signature）附到 Release，
+#       供 M8 updater endpoint 使用。
+
+name: Build & Release (Tauri)
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  publish-tauri:
+    strategy:
+      # 单个平台构建失败不阻断其他平台（与旧 release.yml 的多 job 行为一致）
+      fail-fast: false
+      matrix:
+        include:
+          # macOS arm64（与旧 release.yml 的 macos-arm64 对齐）
+          - platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'
+          # Windows x86_64（nsis + msi）
+          - platform: 'windows-latest'
+            args: ''
+          # Linux x86_64（appimage + deb）；ubuntu-22.04 带 webkit2gtk-4.1
+          - platform: 'ubuntu-22.04'
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # macOS 指定 aarch64 目标；其他平台用默认 host target
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+
+      - name: Install Linux system dependencies (webkit2gtk-4.1 等 Tauri 运行/构建依赖)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            patchelf \
+            xdg-utils
+
+      - name: Install frontend dependencies (web/)
+        run: cd web && npm ci
+
+      - name: Build & publish with tauri-action
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # M8 updater 签名私钥（空密码，无需 TAURI_SIGNING_PRIVATE_KEY_PASSWORD）。
+          # 用户需把 ~/.tauri/claude-partner.updater.key 的内容配到 repo secret
+          # TAURI_SIGNING_PRIVATE_KEY。tauri-action 检测到该 env 即对安装包签名，
+          # 并把签名信息写进 latest.json 供 updater 校验。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        with:
+          # 复用触发 CI 的 tag 名作为 Release tag，不另起 releaseName/releaseBody，
+          # 由 GitHub 自动生成 release notes（与旧 release.yml generate_release_notes 一致）
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Release ${{ github.ref_name }}'
+          releaseDraft: false
+          prerelease: false
+          # Windows 用 nsis 安装包（非 msi）作为 updater 的下载源
+          updaterJsonPreferNsis: true
+          # 透传各平台的 build target 参数
+          args: ${{ matrix.args }}

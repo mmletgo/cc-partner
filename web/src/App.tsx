@@ -9,6 +9,7 @@ import { Devices } from './pages/Devices';
 import { Settings } from './pages/Settings';
 import { Welcome } from './pages/Welcome';
 import { DesignSystem } from './pages/DesignSystem';
+import { Overlay } from './pages/Screenshot/Overlay';
 import { configApi } from './api/config';
 import { PERMISSION_ONBOARDED_KEY } from './hooks/usePermissions';
 
@@ -66,6 +67,8 @@ function OnboardingGuard() {
 export default function App() {
   return (
     <Routes>
+      {/* 区域截图选区页：独立于 AppShell/OnboardingGuard，由 Tauri 选区窗口直接加载 */}
+      <Route path="/screenshot-overlay" element={<Overlay />} />
       <Route path="/welcome" element={<Welcome />} />
       <Route element={<OnboardingGuard />}>
         <Route element={<AppShell />}>
