@@ -170,9 +170,18 @@ export function Overlay() {
   }, [enterEditing]);
 
   // === editing 阶段：在 canvas 上画标注 ===
-  const onCanvasMouseDown = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
+  // 用 pointer 事件 + setPointerCapture：拖拽时即使鼠标移出 canvas 边界（到选区外遮罩区域），
+  // pointermove/pointerup 仍路由回 canvas，pointerup 必触发——避免 mouseup 丢失导致
+  // draggingRef 残留 true、draft 不入栈也不清空（review Minor 1）。
+  const onCanvasPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
       if (!snapshot) return;
+      // 捕获指针，保证后续 pointermove/pointerup 都送达 canvas（哪怕移出边界）
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // 某些环境/已释放时可能抛异常，忽略——最坏退化为原 mouse 行为
+      }
       const rect = e.currentTarget.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
@@ -182,8 +191,8 @@ export function Overlay() {
     [tool, color, snapshot],
   );
 
-  const onCanvasMouseMove = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const onCanvasPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
       if (!draggingRef.current || !draft) return;
       const rect = e.currentTarget.getBoundingClientRect();
       setDraft({ ...draft, x2: e.clientX - rect.left, y2: e.clientY - rect.top });
@@ -191,7 +200,7 @@ export function Overlay() {
     [draft],
   );
 
-  const onCanvasMouseUp = useCallback(() => {
+  const onCanvasPointerUp = useCallback(() => {
     if (!draggingRef.current || !draft) return;
     draggingRef.current = false;
     // 仅保留尺寸非零的标注
@@ -262,9 +271,9 @@ export function Overlay() {
                     ref={canvasRef}
                     className={styles.canvas}
                     style={{ left: sel.x, top: sel.y, width: sel.w, height: sel.h }}
-                    onMouseDown={onCanvasMouseDown}
-                    onMouseMove={onCanvasMouseMove}
-                    onMouseUp={onCanvasMouseUp}
+                    onPointerDown={onCanvasPointerDown}
+                    onPointerMove={onCanvasPointerMove}
+                    onPointerUp={onCanvasPointerUp}
                   />
                   {/* 工具条 */}
                   <div className={styles.toolbarWrap} style={toolbarStyle}>
