@@ -41,11 +41,18 @@ export function Settings() {
   /**
    * 提交一次配置变更:用「当前完整 cfg + 本次 patch」合成新对象,
    * 乐观更新本地状态后再整体回写后端,确保未变更字段不被清零。
+   * 后端回写失败时回滚到 prev 并记录错误,避免本地状态与后端不一致。
    */
   const update = async (patch: Partial<HealthConfig>) => {
+    const prev = cfg;
     const next = { ...cfg, ...patch };
     setCfg(next);
-    await healthApi.updateConfig(next);
+    try {
+      await healthApi.updateConfig(next);
+    } catch (e) {
+      console.error('update_health_config failed, rolling back', e);
+      setCfg(prev);
+    }
   };
 
   return (

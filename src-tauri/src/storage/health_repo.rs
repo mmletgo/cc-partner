@@ -142,16 +142,20 @@ impl HealthRepo {
             .collect()
     }
 
-    /// 按小时(UTC 0-23)聚合 [since_ts, +∞) 内的活跃分钟数,返回长度 24 的数组。
+    /// 按本地小时(0-23)聚合 [since_ts, +∞) 内的活跃分钟数,返回长度 24 的数组。
     ///
     /// Business Logic: 统计页需要展示「一天 24 小时每个时段的活跃分布」,帮助用户
-    ///     了解工作节奏(例如上午/下午/深夜的活动峰值)。
-    /// Code Logic: SQL 层 `(ts / 3600 % 24)` 取 UTC 小时桶,`COUNT(*) GROUP BY h`;
+    ///     了解工作节奏(例如上午/下午/深夜的活动峰值)。用户体感中的「上午 10 点」
+    ///     是本地时区的 10 点,用 UTC 桶在东八区会整体偏移 8 小时,图表错位。
+    ///
+    /// Code Logic: SQL 层用 SQLite `strftime('%H', datetime(ts,'unixepoch','localtime'))`
+    ///     把时间戳按系统本地时区取小时(00-23 字符串),CAST INTEGER 后 GROUP BY;
     ///     先初始化 24 个 0,再把查询结果填入对应桶(范围外忽略,保长度恒 24)。
     pub async fn get_hourly_activity(&self, since_ts: i64) -> Result<Vec<i64>, AppError> {
         let mut hours = vec![0i64; 24];
         let rows = sqlx::query(
-            "SELECT (ts / 3600 % 24) AS h, COUNT(*) AS mins FROM activity_records \
+            "SELECT CAST(strftime('%H', datetime(ts, 'unixepoch', 'localtime')) AS INTEGER) AS h, \
+             COUNT(*) AS mins FROM activity_records \
              WHERE ts >= ? AND is_active = 1 GROUP BY h",
         )
         .bind(since_ts)
@@ -285,5 +289,59 @@ mod tests {
         repo.insert_water(9999).await.unwrap();
         // 不 panic 即通过（INSERT OR REPLACE 幂等）
         repo.insert_water(9999).await.unwrap();
+    }
+
+    /// 按本地小时桶聚合:插入「本地今天指定小时」的若干分钟活跃记录,
+    /// 断言落在正确的本地小时桶。用 chrono 构造本地某小时的 ts,使测试与时区无关。
+    #[tokio::test]
+    async fn test_hourly_activity_local_buckets() {
+        use chrono::{Datelike, Local, NaiveDate, TimeZone};
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+
+        let today = Local::now().naive_local().date();
+        let date =
+            NaiveDate::from_ymd_opt(today.year(), today.month(), today.day()).expect("valid today");
+        // 本地 9:00 与 9:01 两条活跃记录 + 一条 9:02 闲置(不计入活跃桶)
+        let ts_900 = Local
+            .from_local_datetime(&date.and_hms_opt(9, 0, 0).unwrap())
+            .single()
+            .unwrap()
+            .timestamp();
+        let ts_901 = Local
+            .from_local_datetime(&date.and_hms_opt(9, 1, 0).unwrap())
+            .single()
+            .unwrap()
+            .timestamp();
+        let ts_902 = Local
+            .from_local_datetime(&date.and_hms_opt(9, 2, 0).unwrap())
+            .single()
+            .unwrap()
+            .timestamp();
+        for ts in [ts_900, ts_901] {
+            repo.insert_activity(&ActivityRecord {
+                ts,
+                is_active: true,
+                process_name: None,
+                window_title: None,
+            })
+            .await
+            .unwrap();
+        }
+        repo.insert_activity(&ActivityRecord {
+            ts: ts_902,
+            is_active: false,
+            process_name: None,
+            window_title: None,
+        })
+        .await
+        .unwrap();
+
+        let hours = repo.get_hourly_activity(0).await.unwrap();
+        assert_eq!(hours.len(), 24);
+        // 本地 9 点桶应有 2 条活跃分钟,其余桶为 0
+        assert_eq!(hours[9], 2);
+        let sum: i64 = hours.iter().sum();
+        assert_eq!(sum, 2);
     }
 }

@@ -25,9 +25,6 @@ import { Settings } from './Settings';
 /** 页面刷新间隔(ms) */
 const REFRESH_INTERVAL_MS = 30000;
 
-/** 一天的秒数,用于计算 startOfDay 传给 get_activity_stats */
-const SECONDS_PER_DAY = 86400;
-
 /**
  * 将运行时 phase 映射为完整静态 i18n key 字面量(i18next v26 的 t() 对动态
  * 拼接字符串无法做编译期 key 校验,故存完整 key 字面量联合,直接传给 t())。
@@ -52,12 +49,14 @@ export function Health() {
 
   /**
    * 刷新状态 + 今日统计 + 今日活动明细图表。
-   * startOfDay 取当日 UTC 0 点的秒级时间戳,作为 get_activity_stats / get_activity_detail 的 sinceTs。
+   * startOfDay 取「本地当日 0 点」的秒级时间戳(先把 Date 的时/分/秒/毫秒清零,再取整秒),
+   * 作为 get_activity_stats / get_activity_detail 的 sinceTs。
    */
   const refresh = useCallback(async () => {
     setStatus(await healthApi.getStatus());
-    const startOfDay =
-      Math.floor(Date.now() / 1000) - (Math.floor(Date.now() / 1000) % SECONDS_PER_DAY);
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    const startOfDay = Math.floor(d.getTime() / 1000);
     setStats(await healthApi.getStats(startOfDay));
     setDetail(await healthApi.getDetail(startOfDay));
     setLoading(false);
@@ -73,18 +72,30 @@ export function Health() {
 
   if (loading || !status) return <div className={styles.loading}>{t('common:loading')}</div>;
 
-  /** 切换监测开关(乐观更新本地 status) */
+  /** 切换监测开关:乐观更新本地 status,后端失败时回滚 enabled 并提示 */
   const toggleEnabled = async () => {
-    const next = !status.enabled;
+    const prev = status.enabled;
+    const next = !prev;
     setStatus({ ...status, enabled: next });
-    await healthApi.toggleEnabled(next);
+    try {
+      await healthApi.toggleEnabled(next);
+    } catch (e) {
+      console.error('toggle_health_enabled failed, rolling back', e);
+      setStatus((s) => (s ? { ...s, enabled: prev } : s));
+    }
   };
 
-  /** 切换暂停/恢复(乐观更新本地 status) */
+  /** 切换暂停/恢复:乐观更新本地 status,后端失败时回滚 paused 并提示 */
   const togglePaused = async () => {
-    const next = !status.paused;
+    const prev = status.paused;
+    const next = !prev;
     setStatus({ ...status, paused: next });
-    await healthApi.togglePaused(next);
+    try {
+      await healthApi.togglePaused(next);
+    } catch (e) {
+      console.error('toggle_health_paused failed, rolling back', e);
+      setStatus((s) => (s ? { ...s, paused: prev } : s));
+    }
   };
 
   return (
