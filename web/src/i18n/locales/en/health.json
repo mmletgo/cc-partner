@@ -1,0 +1,24 @@
+{
+  "title": "Health Reminder",
+  "status": {
+    "idle": "Idle",
+    "working": "Working",
+    "resting": "Resting"
+  },
+  "enableMonitoring": "Enable sedentary monitoring",
+  "pause": "Pause monitoring",
+  "resume": "Resume monitoring",
+  "workWindowMinutes": "Work window (minutes)",
+  "breakMinutes": "Break threshold (minutes)",
+  "notifyEnabled": "System notification reminders",
+  "recordWindowTitle": "Record window title (for stats)",
+  "dndStart": "Do-not-disturb start",
+  "dndEnd": "Do-not-disturb end",
+  "todayStats": "Today's stats",
+  "activeMinutes": "Active {{n}} min",
+  "idleMinutes": "Idle {{n}} min",
+  "reminderTitle": "Time to stand up and move 🌿",
+  "reminderBody": "You've been working for a while. Stand up and stretch a bit.",
+  "snoozed": "Reminder snoozed",
+  "skipped": "Reminder skipped"
+}

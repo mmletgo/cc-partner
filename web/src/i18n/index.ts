@@ -25,6 +25,7 @@ import enClaudeMd from './locales/en/claudeMd.json';
 import enWelcome from './locales/en/welcome.json';
 import enSettings from './locales/en/settings.json';
 import enCcHistory from './locales/en/ccHistory.json';
+import enHealth from './locales/en/health.json';
 
 import zhCommon from './locales/zh/common.json';
 import zhNav from './locales/zh/nav.json';
@@ -37,6 +38,7 @@ import zhClaudeMd from './locales/zh/claudeMd.json';
 import zhWelcome from './locales/zh/welcome.json';
 import zhSettings from './locales/zh/settings.json';
 import zhCcHistory from './locales/zh/ccHistory.json';
+import zhHealth from './locales/zh/health.json';
 
 export type AppLanguage = 'en' | 'zh';
 export const LANGUAGE_STORAGE_KEY = 'cp-lang';
@@ -73,6 +75,7 @@ export const resources = {
     welcome: enWelcome,
     settings: enSettings,
     ccHistory: enCcHistory,
+    health: enHealth,
   },
   zh: {
     common: zhCommon,
@@ -86,6 +89,7 @@ export const resources = {
     welcome: zhWelcome,
     settings: zhSettings,
     ccHistory: zhCcHistory,
+    health: zhHealth,
   },
 } as const;
 

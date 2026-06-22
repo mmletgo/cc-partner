@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Routes, Route, Navigate, Outlet, useNavigate } from 'react-router-dom';
 import { listen } from '@tauri-apps/api/event';
+import { sendNotification } from '@tauri-apps/plugin-notification';
+import { useTranslation } from 'react-i18next';
 import { AppShell } from './components/layout/AppShell';
 import { Home } from './pages/Home';
 import { Transfer } from './pages/Transfer';
@@ -10,6 +12,7 @@ import { Scratchpad } from './pages/Scratchpad';
 import { ClaudeMd } from './pages/ClaudeMd';
 import { Devices } from './pages/Devices';
 import { Settings } from './pages/Settings';
+import { Health } from './pages/Health';
 import { Welcome } from './pages/Welcome';
 import { DesignSystem } from './pages/DesignSystem';
 import { Overlay } from './pages/Screenshot/Overlay';
@@ -97,10 +100,34 @@ function PermissionNeededListener() {
   return null;
 }
 
+/**
+ * HealthReminderListener - 监听后端「久坐提醒」事件,弹系统通知。
+ *
+ * Business Logic: 后端 health daemon 判定连续工作达阈值且未贪睡、不在免打扰时段、
+ *   notify_enabled 时 emit `health:reminder`;本组件监听后用 tauri-plugin-notification
+ *   弹系统通知(标题/正文走 i18n)。挂在 <Routes> 同级,不影响路由渲染,仅副作用监听。
+ */
+function HealthReminderListener() {
+  const { t } = useTranslation(['health', 'common']);
+  useEffect(() => {
+    const unlisten = listen('health:reminder', () => {
+      void sendNotification({
+        title: t('health:reminderTitle'),
+        body: t('health:reminderBody'),
+      });
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, [t]);
+  return null;
+}
+
 export default function App() {
   return (
     <>
       <PermissionNeededListener />
+      <HealthReminderListener />
       <Routes>
         {/* 区域截图选区页：独立于 AppShell/OnboardingGuard，由 Tauri 选区窗口直接加载 */}
         <Route path="/screenshot-overlay" element={<Overlay />} />
@@ -115,6 +142,7 @@ export default function App() {
             <Route path="/claude-md" element={<ClaudeMd />} />
             <Route path="/devices" element={<Devices />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/health" element={<Health />} />
             {isDev && <Route path="/design-system" element={<DesignSystem />} />}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>

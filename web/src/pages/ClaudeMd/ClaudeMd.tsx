@@ -55,9 +55,11 @@ export function ClaudeMd() {
     }
   }, [showToast]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- 合法 fetch-in-effect,setState 在 await 后异步执行 */
   useEffect(() => {
     void load();
   }, [load]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // 卸载时清掉可能挂着的 toast 定时器，避免 setState on unmounted
   useEffect(() => {

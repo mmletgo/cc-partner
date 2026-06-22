@@ -38,6 +38,7 @@
   "empty": {
     "noResults": "暂无结果"
   },
+  "loading": "加载中…",
   "tag": {
     "removeLabel": "移除标签"
   },

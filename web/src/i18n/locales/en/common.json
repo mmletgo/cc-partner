@@ -38,6 +38,7 @@
   "empty": {
     "noResults": "No results"
   },
+  "loading": "Loading…",
   "tag": {
     "removeLabel": "Remove tag"
   },

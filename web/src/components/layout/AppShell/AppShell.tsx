@@ -26,6 +26,7 @@ import {
   ClaudeMdIcon,
   DevicesIcon,
   SettingsIcon,
+  HealthIcon,
 } from '../../../lib/icons';
 import { useAppVersion } from '../../../hooks/useAppVersion';
 import { Sidebar } from '../Sidebar';
@@ -76,6 +77,7 @@ export function AppShell({ children }: AppShellProps) {
           <NavItem to="/claude-md" label={t('nav:claudeMd')} icon={<ClaudeMdIcon />} />
           <NavItem to="/devices" label={t('nav:devices')} icon={<DevicesIcon />} />
           <NavItem to="/settings" label={t('nav:settings')} icon={<SettingsIcon />} />
+          <NavItem to="/health" label={t('nav:health')} icon={<HealthIcon />} />
         </nav>
         <PermissionStatusBadge />
       </Sidebar>

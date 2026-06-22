@@ -1,0 +1,24 @@
+{
+  "title": "健康提醒",
+  "status": {
+    "idle": "空闲",
+    "working": "工作中",
+    "resting": "休息中"
+  },
+  "enableMonitoring": "开启久坐监测",
+  "pause": "暂停监测",
+  "resume": "恢复监测",
+  "workWindowMinutes": "工作窗口(分钟)",
+  "breakMinutes": "休息判定(分钟)",
+  "notifyEnabled": "系统通知提醒",
+  "recordWindowTitle": "记录窗口标题(统计用)",
+  "dndStart": "免打扰开始",
+  "dndEnd": "免打扰结束",
+  "todayStats": "今日统计",
+  "activeMinutes": "活跃 {{n}} 分钟",
+  "idleMinutes": "休息 {{n}} 分钟",
+  "reminderTitle": "该起来活动一下啦 🌿",
+  "reminderBody": "连续工作已久,站起来走走、伸展一下吧。",
+  "snoozed": "已推迟提醒",
+  "skipped": "已跳过本次提醒"
+}

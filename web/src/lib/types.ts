@@ -89,6 +89,7 @@ export interface UpdateDownloadStatus {
 export interface PermissionsStatus {
   screenCapture: { granted: boolean };
   inputMonitoring: { granted: boolean };
+  accessibility: { granted: boolean };
 }
 
 export type PermissionType = 'screenCapture' | 'inputMonitoring';
@@ -144,4 +145,62 @@ export interface CcHistoryItem {
   createdAt: string;
   /** 软删除标记 */
   deleted: boolean;
+}
+
+/**
+ * 健康提醒配置（与后端 config.rs::HealthConfig 对齐，camelCase）。
+ * 整体覆盖式回写（update_health_config 接收完整对象）。
+ */
+export interface HealthConfig {
+  /** 是否开启久坐监测 */
+  enabled: boolean;
+  /** 连续工作多久触发提醒（秒） */
+  workWindowSeconds: number;
+  /** 停歇多久判定为休息、关闭工作窗口（秒） */
+  breakSeconds: number;
+  /** 是否记录前台窗口标题（统计用） */
+  recordWindowTitle: boolean;
+  /** 活动明细保留天数 */
+  retainDays: number;
+  /** 是否在提醒时弹系统通知 */
+  notifyEnabled: boolean;
+  /** 免打扰开始 "HH:MM"，null 表示不限制 */
+  dndStart: string | null;
+  /** 免打扰结束 "HH:MM"，null 表示不限制 */
+  dndEnd: string | null;
+}
+
+/** 健康提醒运行时状态相位 */
+export type HealthPhase = 'idle' | 'working' | 'resting';
+
+/**
+ * 健康提醒运行时状态（get_health_status 返回，camelCase）。
+ * 派生自状态机 + 配置 + 内存标记，非落盘数据。
+ */
+export interface HealthStatus {
+  /** 是否开启监测 */
+  enabled: boolean;
+  /** 是否手动暂停 */
+  paused: boolean;
+  /** 当前相位 */
+  phase: HealthPhase;
+  /** 当前工作窗口开始时间戳（秒），null 表示无活动窗口 */
+  windowStartTs: number | null;
+  /** 工作窗口阈值（秒，来自配置） */
+  workWindowSeconds: number;
+  /** 休息判定阈值（秒，来自配置） */
+  breakSeconds: number;
+  /** 贪睡到期时间戳（秒），null 表示未贪睡 */
+  snoozeUntil: number | null;
+}
+
+/**
+ * 活动统计（get_activity_stats 返回，camelCase）。
+ * 由 activity_records 表 SUM 聚合得出。
+ */
+export interface ActivityStats {
+  /** 活跃分钟数 */
+  activeMinutes: number;
+  /** 闲置分钟数 */
+  idleMinutes: number;
 }

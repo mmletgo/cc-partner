@@ -221,3 +221,9 @@ export const ClaudeMdIcon = ({ size, ...rest }: IconProps) => (
     <path d="M6 8h4M6 10h4M6 12h2" />
   </svg>
 );
+
+export const HealthIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="M1.5 8h2l1.5-3.5L7.5 12 10 5l1.5 3h3" />
+  </svg>
+);

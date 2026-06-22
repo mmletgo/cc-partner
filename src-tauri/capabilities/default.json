@@ -11,6 +11,7 @@
     "core:event:default",
     "dialog:default",
     "updater:default",
-    "process:default"
+    "process:default",
+    "notification:default"
   ]
 }
