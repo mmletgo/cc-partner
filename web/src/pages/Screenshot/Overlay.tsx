@@ -3,14 +3,16 @@
  *
  * Business Logic（为什么需要这个组件）:
  *   用户在屏幕上框选区域截图，松手后裁剪写剪贴板，可直接粘贴到 Claude Code。
- *   迁移自 Python ScreenshotOverlay（Qt 自绘），改用 React 渲染选区：拖动时绘制半透明遮罩 +
- *   高亮矩形；ESC/右键/点空白取消。该页独立于 OnboardingGuard/Layout，由 Tauri 选区窗口
- *   直接加载（`/screenshot-overlay?display={i}`），每个显示器一个窗口实例。
+ *   采用 macOS 原生风格：选区窗口真透明，直接透出真实桌面（不用桌面截图作背景）；
+ *   拖动框选时选区外盖半透明遮罩变暗、选区内保持清晰。ESC/右键/点空白取消。
+ *   该页独立于 OnboardingGuard/Layout，由 Tauri 选区窗口直接加载
+ *   （`/screenshot-overlay?display={i}`），每个显示器一个窗口实例。
  *
  * Code Logic（这个组件做什么）:
- *   - onMount：invoke('get_display_snapshot', { display }) 拿该屏 PNG base64 作全屏背景，
- *     让用户"像在直接框选屏幕"（overlay 本身透明）。
- *   - mousedown 记起点，mousemove 实时更新选区矩形（一个遮罩 div 挖洞 + 蓝色虚线边框），
+ *   - onMount：强制 html/body 背景透明，覆盖全局 reset.css 的 `body { background: var(--bg) }`
+ *     （主题底色，浅色=#f5f4ed）。transparent 窗口需 html/body 全链路透明，否则会显示主题底色
+ *     而非透出桌面（=白屏）；onUnmount 恢复原值。
+ *   - mousedown 记起点，mousemove 实时更新选区矩形（四块遮罩挖洞 + 蓝色虚线边框），
  *     mouseup 确定选区 → invoke('crop_and_copy', { display, x, y, w, h, dpr }) 裁剪写剪贴板。
  *   - ESC/右键 → invoke('cancel_region_capture')。
  *   - 坐标用逻辑像素（CSS px），dpr 一起传给 Rust，Rust ×dpr 换算物理像素裁剪（xcap 帧即物理像素）。
@@ -41,27 +43,23 @@ function parseDisplay(): number {
 
 export function Overlay() {
   // hooks 必须在任何 early return 之前调用（项目规则 20）
-  const [bg, setBg] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
   const displayRef = useRef<number>(parseDisplay());
   const draggingRef = useRef<boolean>(false);
 
-  // onMount：抓取该屏背景（overlay 已显示，此时抓的是桌面；主窗口是否被截入由 Rust 抓屏时机决定）
+  // 强制页面背景透明：transparent 窗口需 html/body 全链路透明，否则全局 reset.css 的
+  // body { background: var(--bg) }（主题底色，浅色=#f5f4ed）会让窗口显示为白屏而非透出桌面。
+  // onUnmount 恢复原值（窗口随截图结束销毁，恢复仅为卫生）。
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const dataUrl = await invoke<string>('get_display_snapshot', {
-          display: displayRef.current,
-        });
-        if (!cancelled) setBg(dataUrl);
-      } catch (e) {
-        if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
-      }
-    })();
+    const html = document.documentElement;
+    const body = document.body;
+    const prevHtml = html.style.background;
+    const prevBody = body.style.background;
+    html.style.background = 'transparent';
+    body.style.background = 'transparent';
     return () => {
-      cancelled = true;
+      html.style.background = prevHtml;
+      body.style.background = prevBody;
     };
   }, []);
 
@@ -128,7 +126,7 @@ export function Overlay() {
             h: Math.round(prev.h),
             dpr: window.devicePixelRatio,
           }).catch(() => {
-            // 失败静默（M6 不弹错），由 Rust 端 emit 取消或前端兜底
+            // 失败静默，由 Rust 端 emit 取消或前端兜底
           });
         } else {
           // 选区过小视为取消（对照 Python mouseRelease 无效选区 → cancelled）
@@ -149,15 +147,6 @@ export function Overlay() {
     [cancel],
   );
 
-  // 背景加载失败：显示提示遮罩（不直接 return，保持 hooks 顺序）
-  if (loadError) {
-    return (
-      <div className={styles.overlay}>
-        <div className={styles.error}>{loadError}</div>
-      </div>
-    );
-  }
-
   return (
     <div
       className={styles.overlay}
@@ -165,7 +154,6 @@ export function Overlay() {
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
       onContextMenu={onContextMenu}
-      style={bg ? { backgroundImage: `url("${bg}")` } : undefined}
     >
       {/* 选区遮罩 + 高亮矩形（鼠标拖动时显示） */}
       {selection && selection.w > 0 && selection.h > 0 && (

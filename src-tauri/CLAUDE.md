@@ -71,18 +71,18 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 
 ## M6 已落地行为约定（移植自 Python screenshot/，对照 overlay.py + capture.py）
 
-- **抓屏本体**：`xcap = "0.4"` 跨平台抓屏。`Monitor::all()` 枚举显示器，顺序单进程内稳定；`monitor.capture_image()` 返回 `image::RgbaImage`（**物理像素**，Retina 即逻辑 ×scale_factor）。`monitor.x()/y()/width()/height()` 均为物理像素、`scale_factor()` 返回 `f32`。抓屏入口（`overlay::start_region_capture`）已做屏幕录制权限预检：未授权则显示主窗口 + emit `screenshot:permission-needed` 引导授权，不抓空白图（见 M7 权限节 + 前端 `PermissionNeededListener`）。
-- **选区覆盖窗口（每屏一个）**：macOS 不允许单窗口跨屏（与 Python 一致），`overlay::start_region_capture` 枚举 `Monitor::all()`，**每个显示器建一个** `WebviewWindowBuilder` 窗口，`decorations(false).transparent(true).always_on_top(true).focused(true).skip_taskbar(true).resizable(false).accept_first_mouse(true)`，label = `screenshot-overlay-{i}`，url = `/screenshot-overlay?display={i}`。窗口几何对齐该显示器：xcap 物理几何 ÷ scale_factor → 逻辑像素喂 `set_position/set_size`（Tauri 窗口几何按逻辑像素）。`close_all_overlays` 按前缀 `screenshot-overlay-` 关闭全部。
+- **抓屏本体**：`xcap = "0.4"` 跨平台抓屏。`Monitor::all()` 枚举显示器，顺序单进程内稳定；`monitor.capture_image()` 返回 `image::RgbaImage`（**物理像素**，Retina 即逻辑 ×scale_factor）。`monitor.x()/y()/width()/height()` 均为物理像素、`scale_factor()` 返回 `f32`。
+  > **单位差异（已订正）**：macOS 上 `monitor.x()/y()` 来自 CGDisplayBounds 是**逻辑点**、`width()/height()` 是**物理像素**；窗口几何换算须据此区分（见下条「选区覆盖窗口」）。抓屏入口（`overlay::start_region_capture`）已做屏幕录制权限预检：未授权则显示主窗口 + emit `screenshot:permission-needed` 引导授权，不抓空白图（见 M7 权限节 + 前端 `PermissionNeededListener`）。
+- **选区覆盖窗口（每屏一个）**：macOS 不允许单窗口跨屏（与 Python 一致），`overlay::start_region_capture` 枚举 `Monitor::all()`，**每个显示器建一个** `WebviewWindowBuilder` 窗口，`decorations(false).transparent(true).always_on_top(true).focused(true).skip_taskbar(true).resizable(false).accept_first_mouse(true)`，label = `screenshot-overlay-{i}`，url = `/screenshot-overlay?display={i}`。窗口几何：位置直接用 `monitor.x()/y()`（逻辑点），尺寸用 `width()/height() ÷ scale_factor`（物理→逻辑）喂 `set_position/set_size`（Tauri 窗口几何按逻辑像素）。旧实现误把 x/y 也除 scale，混合 DPR 多屏下窗口位置偏移/重叠到错屏（已修）；建窗口时 `tracing::info!` 打印每屏 raw/logical 几何便于核对。`close_all_overlays` 按前缀 `screenshot-overlay-` 关闭全部。
 - **透明窗口前置条件**：`transparent(true)` 需 `tauri` crate 开 `macos-private-api` feature + `tauri.conf.json` 设 `app.macOSPrivateApi: true`（两者必须匹配，否则 build.rs 报 allowlist 错误）。
 - **DPR 坐标转换**：前端 React Overlay 把逻辑像素坐标 + `window.devicePixelRatio` 传给 Rust；`capture::crop_and_copy` 用 `(v as f64 * dpr).round()` 换算物理像素 rect 后 `image::imageops::crop_imm` 裁剪（image 0.25 的 crop_imm 直接返回 `SubImage`，非 Result，`.to_image()` 拷出独立 RgbaImage）。裁剪前 clamp 到帧边界防越界。与 Python `int(selection.x() * dpr)` 语义一致。
 - **剪贴板写入**：`arboard = "3"`（features=image-data）直接写图片，比 tauri-plugin-clipboard-manager 更直接。`ImageData{width,height,bytes: RGBA 连续缓冲.into()}` → `Clipboard::new()?.set_image()`。RGBA bytes 由 `RgbaImage::into_raw()` 提供（已连续）。对照 Python `clipboard.setPixmap`。
-- **背景图**：`capture::snapshot_to_png_base64` 把整屏帧 PNG 编码 + base64（`data:image/png;base64,...`）返回前端 Overlay 作全屏 `<img>` 背景，让用户"像在直接框选屏幕"（overlay 本身透明）。前端 Overlay onMount（窗口已显示后）调 `get_display_snapshot`。
-- **命令层**（`commands/screenshot.rs`，lib.rs invoke_handler 注册 4 个）：
+- **真透明架构（macOS 原生风格）**：选区窗口 `transparent(true)` 真透出真实桌面（**不用桌面截图背景**），故已移除 `snapshot_to_png_base64`/`get_display_snapshot`。前端 Overlay onMount 强制 html/body `background:transparent`，覆盖全局 `reset.css` 的 `body { background: var(--bg) }`（主题底色，浅色=#f5f4ed），否则 transparent 窗口会显示主题底色而非透出桌面（=白屏）。框选时四块半透明遮罩盖选区外挖洞，选区内透出桌面清晰。
+- **命令层**（`commands/screenshot.rs`，lib.rs invoke_handler 注册 3 个）：
   - `start_region_capture(app)` → 先预检屏幕录制权限，未授权则显示主窗口 + emit `screenshot:permission-needed` 引导（不抓屏）；已授权则每屏建 overlay 窗口
-  - `get_display_snapshot(display) -> String` → 该屏 PNG base64 背景
   - `crop_and_copy(app, display, x, y, w, h, dpr)` → 裁剪写剪贴板 + emit `region-capture:result` {ok:true} + 关全部 overlay
   - `cancel_region_capture(app)` → emit `region-capture:result` {cancelled:true} + 关全部 overlay
-- **前端选区页**：`web/src/pages/Screenshot/Overlay.tsx`，独立于 AppShell/OnboardingGuard，App.tsx 加路由 `/screenshot-overlay`（顶层，不在守卫内）。鼠标拖动绘制半透明遮罩（四块拼接挖洞）+ 蓝色虚线选区边框；mouseup 宽高≥10 才调 crop_and_copy，否则 cancel；ESC/右键 → cancel。hooks 在 early return 之前（项目规则 20）。
+- **前端选区页**：`web/src/pages/Screenshot/Overlay.tsx`，独立于 AppShell/OnboardingGuard，App.tsx 加路由 `/screenshot-overlay`（顶层，不在守卫内）。**macOS 原生透明风格**：窗口真透明透出真实桌面（onMount 强制 html/body background:transparent），框选时四块半透明遮罩挖洞 + 蓝色虚线选区边框（选区内透出桌面清晰）；mouseup 宽高≥10 调 crop_and_copy 裁剪写剪贴板，否则 cancel；ESC/右键 → cancel。hooks 在 early return 之前（项目规则 20）。
 - **权限（capabilities）**：选区窗口 label 前缀 `screenshot-overlay-*` 需在 `capabilities/default.json` 的 `windows` 列表加入通配，否则 overlay 页 invoke 被拒；同时加 `core:event:default`（供 emit/listen region-capture:result）。
 
 ## M7 已落地行为约定（移植自 Python `hotkey/listener.py` + `ui/tray.py` + `ui/permissions.py`）

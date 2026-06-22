@@ -1,5 +1,5 @@
 /* Overlay 选区页样式：全屏透明、十字光标、禁止选中文本 */
-/* Business Logic: overlay 窗口本身透明，背景图（桌面截图）铺满让用户像在直接框选屏幕；选区外半透明遮罩。 */
+/* Business Logic: overlay 窗口真透明（直接透出真实桌面）；框选时四块半透明遮罩盖住选区外（挖洞），选区内保持清晰。 */
 
 .overlay {
   position: fixed;
@@ -10,9 +10,6 @@
   user-select: none;
   -webkit-user-select: none;
   background-color: transparent;
-  background-size: cover;
-  background-position: top left;
-  background-repeat: no-repeat;
   overflow: hidden;
 }
 
@@ -30,16 +27,4 @@
   background-color: transparent;
   pointer-events: none;
   box-sizing: border-box;
-}
-
-.error {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  color: #fff;
-  font-size: 16px;
-  background-color: rgba(0, 0, 0, 0.7);
-  padding: 12px 20px;
-  border-radius: 6px;
 }

@@ -8,7 +8,6 @@
 //! Code Logic（这个模块做什么）:
 //!     - `capture::capture_monitor`：抓取指定显示器的整屏帧（物理像素 RgbaImage）。
 //!     - `capture::crop_and_copy`：按物理像素 rect 裁剪并写剪贴板。
-//!     - `capture::snapshot_to_png_base64`：抓该屏帧编码成 PNG base64 返回前端作背景。
 //!     - `overlay::start_region_capture`：枚举显示器，每个显示器创建一个透明置顶全屏窗口。
 //!     - `overlay::close_all_overlays`：关闭所有选区窗口。
 

@@ -10,9 +10,6 @@
 //!     - `capture_monitor(display_index)`：取 `xcap::Monitor::all()` 第 index 个显示器抓整屏。
 //!     - `crop_and_copy(display_index, x, y, w, h, dpr)`：重抓该屏帧，按 ×dpr 换算物理像素 rect，
 //!       `image::imageops::crop_imm` 裁剪，`arboard::Clipboard::set_image` 写剪贴板。
-//!     - `snapshot_to_png_base64(display_index)`：抓该屏帧 PNG 编码 + base64 返回前端 Overlay 背景。
-
-use std::io::Cursor;
 
 use arboard::{Clipboard, ImageData};
 use image::RgbaImage;
@@ -110,19 +107,4 @@ pub fn crop_and_copy(
     cb.set_image(img_data)
         .map_err(|e| AppError::Bad(format!("写入剪贴板失败: {e}")))?;
     Ok(())
-}
-
-/// 抓取指定显示器帧并编码成 PNG base64（前端 Overlay 作全屏背景）。
-///
-/// Business Logic: Overlay 窗口本身透明，需把桌面截图作为背景让用户"像在直接框选屏幕"。
-///     Python 用预截取的 QPixmap 直接绘制；Rust 把 PNG base64 传给前端 `<img>` 显示。
-/// Code Logic: `capture_monitor` → PNG 编码到 `Cursor<Vec<u8>>` → `base64::engine::STANDARD`。
-pub fn snapshot_to_png_base64(display_index: usize) -> Result<String, AppError> {
-    let img = capture_monitor(display_index)?;
-    let mut buf = Cursor::new(Vec::with_capacity(512 * 1024));
-    img.write_to(&mut buf, image::ImageFormat::Png)
-        .map_err(|e| AppError::Bad(format!("PNG 编码失败: {e}")))?;
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
-    Ok(format!("data:image/png;base64,{b64}"))
 }

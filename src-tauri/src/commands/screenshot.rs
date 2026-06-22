@@ -6,7 +6,6 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `start_region_capture(app)`：每屏建透明置顶选区窗口。
-//!     - `get_display_snapshot(display)`：返回该屏 PNG base64（前端 Overlay 背景）。
 //!     - `crop_and_copy(app, display, x, y, w, h, dpr)`：逻辑坐标×dpr 裁剪写剪贴板，
 //!       emit `region-capture:result` {ok:true}，并关全部 overlay。
 //!     - `cancel_region_capture(app)`：emit `region-capture:result` {cancelled:true}，关全部 overlay。
@@ -25,15 +24,6 @@ use crate::screenshot::{capture, overlay};
 #[tauri::command]
 pub async fn start_region_capture(app: AppHandle) -> Result<(), AppError> {
     overlay::start_region_capture(&app)
-}
-
-/// 获取指定显示器的 PNG base64 背景图。
-///
-/// Business Logic: Overlay 透明，需把桌面截图作背景让用户"像在直接框选屏幕"。
-/// Code Logic: 调 `capture::snapshot_to_png_base64`。返回 `data:image/png;base64,...` 形式供前端 `<img>`。
-#[tauri::command]
-pub async fn get_display_snapshot(display: usize) -> Result<String, AppError> {
-    capture::snapshot_to_png_base64(display)
 }
 
 /// 裁剪用户框选区域并写入剪贴板。

@@ -210,7 +210,6 @@ pub fn run() {
             transfer_cmd::send_transfer,
             transfer_cmd::cancel_transfer,
             screenshot_cmd::start_region_capture,
-            screenshot_cmd::get_display_snapshot,
             screenshot_cmd::crop_and_copy,
             screenshot_cmd::cancel_region_capture,
             permissions_cmd::check_permissions,
