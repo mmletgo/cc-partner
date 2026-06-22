@@ -377,6 +377,7 @@ pub fn run() {
             health_cmd::skip_reminder,
             health_cmd::update_health_config,
             health_cmd::get_activity_stats,
+            health_cmd::record_water,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {

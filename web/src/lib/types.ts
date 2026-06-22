@@ -168,6 +168,10 @@ export interface HealthConfig {
   dndStart: string | null;
   /** 免打扰结束 "HH:MM"，null 表示不限制 */
   dndEnd: string | null;
+  /** 是否开启喝水提醒 */
+  waterEnabled: boolean;
+  /** 喝水提醒间隔（秒） */
+  waterIntervalSeconds: number;
 }
 
 /** 健康提醒运行时状态相位 */

@@ -97,6 +97,12 @@ pub struct HealthConfig {
     /// 免打扰结束 "HH:MM"(不含),支持跨午夜(如 22:00-07:00)
     #[serde(default)]
     pub dnd_end: Option<String>,
+    /// 喝水提醒开关,默认开启(用户决策:久坐与喝水双提醒)
+    #[serde(default = "default_true")]
+    pub water_enabled: bool,
+    /// 喝水提醒间隔(秒),默认 1 小时(3600 秒)
+    #[serde(default = "default_water_interval")]
+    pub water_interval_seconds: i64,
 }
 
 impl Default for HealthConfig {
@@ -115,6 +121,8 @@ impl Default for HealthConfig {
             notify_enabled: true,
             dnd_start: None,
             dnd_end: None,
+            water_enabled: true,
+            water_interval_seconds: 60 * 60,
         }
     }
 }
@@ -142,6 +150,12 @@ fn default_break() -> i64 { 5 * 60 }
 /// Business Logic: 健康明细保留 90 天,超期清理避免无限增长。
 /// Code Logic: 返回 `90`,供 `#[serde(default = "default_retain_days")]` 调用。
 fn default_retain_days() -> i64 { 90 }
+
+/// serde 单字段缺失回退:喝水提醒默认间隔 1 小时(3600 秒)。
+///
+/// Business Logic: 久坐用户每小时提醒一次喝水,避免长时间忘饮水。
+/// Code Logic: 返回 `60 * 60`,供 `#[serde(default = "default_water_interval")]` 调用。
+fn default_water_interval() -> i64 { 60 * 60 }
 
 /// 应用全局配置。字段命名与 Python `AppConfig` dataclass 一致（snake_case 用于磁盘持久化）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,12 +271,15 @@ mod tests {
             receive_dir: "/r".into(), db_path: "/db".into(), screenshot_hotkey: "<cmd>+s".into(),
             health: HealthConfig { enabled: false, work_window_seconds: 30*60, break_seconds: 3*60,
                 record_window_title: false, retain_days: 30, notify_enabled: false,
-                dnd_start: Some("22:00".into()), dnd_end: Some("07:00".into()) },
+                dnd_start: Some("22:00".into()), dnd_end: Some("07:00".into()),
+                water_enabled: true, water_interval_seconds: 1800 },
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.health.work_window_seconds, 30 * 60);
         assert!(!back.health.enabled);
         assert_eq!(back.health.dnd_start.as_deref(), Some("22:00"));
+        assert!(back.health.water_enabled);
+        assert_eq!(back.health.water_interval_seconds, 1800);
     }
 }

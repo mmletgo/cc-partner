@@ -9,6 +9,7 @@
 pub mod monitor;
 pub mod reminder;
 pub mod state;
+pub mod water;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -25,6 +26,7 @@ use crate::state::AppState;
 use self::monitor::{ActivitySample, ActivitySampler, DeviceQuerySampler};
 use self::reminder::is_in_dnd;
 use self::state::{HealthStateMachine, HealthThresholds};
+use self::water::{should_remind_water, WaterState};
 
 /// 健康监测运行时共享状态(跨 daemon task 与命令层)。
 pub struct HealthRuntime {
@@ -34,16 +36,20 @@ pub struct HealthRuntime {
     pub snooze_until: Mutex<Option<i64>>,
     /// 是否整体暂停监测(paused 状态由命令层置位,daemon 采样时据此跳过提醒)。
     pub paused: AtomicBool,
+    /// 喝水提醒计时状态(上次喝水时间戳 + 是否有待响应提醒);daemon 采样时据此判定是否
+    /// emit `health:water`,命令层 `record_water` 更新 last_drink_ts 并清 pending。
+    pub water: Mutex<WaterState>,
 }
 impl HealthRuntime {
     /// Business Logic: daemon 与命令层(前端「暂停/贪睡」按钮)需要共享同一份
-    ///                  状态机/贪睡/暂停标记,该构造产出初始全空闲的运行时。
-    /// Code Logic: 新建 Idle 初态状态机,贪睡置 None,暂停置 false。
+    ///                  状态机/贪睡/暂停/喝水计时标记,该构造产出初始全空闲的运行时。
+    /// Code Logic: 新建 Idle 初态状态机,贪睡置 None,暂停置 false,喝水状态以当前时间初始化。
     pub fn new() -> Self {
         Self {
             machine: Mutex::new(HealthStateMachine::new()),
             snooze_until: Mutex::new(None),
             paused: AtomicBool::new(false),
+            water: Mutex::new(WaterState::new(Utc::now().timestamp())),
         }
     }
 }
@@ -141,6 +147,23 @@ async fn handle_sample(app: &AppHandle, state: &AppState, sample: ActivitySample
         if !snoozed && !dnd && cfg.notify_enabled {
             // 仅 emit 事件载荷;系统通知由前端监听后弹出(文案走 i18n)。
             let _ = app.emit("health:reminder", serde_json::json!({ "workWindowSeconds": cfg.work_window_seconds }));
+        }
+    }
+
+    // 喝水提醒:启用 + 超过间隔 + 无未响应提醒时,置 pending 并(非 DND)emit health:water。
+    if should_remind_water(
+        &state.health.water.lock().unwrap(),
+        now,
+        cfg.water_enabled,
+        cfg.water_interval_seconds,
+    ) {
+        {
+            let mut w = state.health.water.lock().unwrap();
+            w.pending_remind = true;
+        }
+        let dnd = is_in_dnd(now, cfg.dnd_start.as_deref(), cfg.dnd_end.as_deref());
+        if !dnd {
+            let _ = app.emit("health:water", serde_json::json!({}));
         }
     }
 

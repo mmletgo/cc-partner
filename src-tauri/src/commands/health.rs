@@ -41,6 +41,10 @@ pub struct HealthConfigDto {
     pub dnd_start: Option<String>,
     /// 免打扰结束 "HH:MM"（不含），支持跨午夜。
     pub dnd_end: Option<String>,
+    /// 喝水提醒开关。
+    pub water_enabled: bool,
+    /// 喝水提醒间隔（秒）。
+    pub water_interval_seconds: i64,
 }
 impl From<HealthConfig> for HealthConfigDto {
     /// 把磁盘配置 `HealthConfig` 转成前端可用的 camelCase DTO。
@@ -54,6 +58,8 @@ impl From<HealthConfig> for HealthConfigDto {
             notify_enabled: h.notify_enabled,
             dnd_start: h.dnd_start,
             dnd_end: h.dnd_end,
+            water_enabled: h.water_enabled,
+            water_interval_seconds: h.water_interval_seconds,
         }
     }
 }
@@ -182,6 +188,8 @@ pub async fn update_health_config(
         cfg.health.notify_enabled = config.notify_enabled;
         cfg.health.dnd_start = config.dnd_start.clone();
         cfg.health.dnd_end = config.dnd_end.clone();
+        cfg.health.water_enabled = config.water_enabled;
+        cfg.health.water_interval_seconds = config.water_interval_seconds;
         cfg.save()?;
     }
     Ok(state.config.read().unwrap().health.clone().into())
@@ -195,4 +203,22 @@ pub async fn update_health_config(
 pub async fn get_activity_stats(state: State<'_, AppState>, since_ts: i64) -> Result<ActivityStatsDto, AppError> {
     let (active, idle) = state.health_repo.aggregate_minutes(since_ts).await?;
     Ok(ActivityStatsDto { active_minutes: active, idle_minutes: idle })
+}
+
+/// 记录一次喝水(更新喝水计时状态 + 清未响应提醒 + 落库 water_records)。
+///
+/// Business Logic: 前端「我喝了水」按钮(或收到 `health:water` 提醒后响应);重置下次喝水
+///                  计时起点,并清除 pending_remind,使 daemon 在下一间隔后才能再次提醒。
+/// Code Logic: 拿当前 UTC 时间戳,更新 `HealthRuntime.water` 的 last_drink_ts 并置
+///             pending_remind=false,再 `insert_water(now)` 落库(INSERT OR REPLACE 幂等)。
+#[tauri::command]
+pub async fn record_water(state: State<'_, AppState>) -> Result<(), AppError> {
+    let now = chrono::Utc::now().timestamp();
+    {
+        let mut w = state.health.water.lock().unwrap();
+        w.last_drink_ts = now;
+        w.pending_remind = false;
+    }
+    state.health_repo.insert_water(now).await?;
+    Ok(())
 }
