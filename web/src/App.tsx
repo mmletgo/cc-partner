@@ -16,6 +16,7 @@ import { Health } from './pages/Health';
 import { Welcome } from './pages/Welcome';
 import { DesignSystem } from './pages/DesignSystem';
 import { Overlay } from './pages/Screenshot/Overlay';
+import HealthOverlay from './pages/HealthOverlay';
 import { configApi } from './api/config';
 import { PERMISSION_ONBOARDED_KEY } from './hooks/usePermissions';
 
@@ -131,6 +132,8 @@ export default function App() {
       <Routes>
         {/* 区域截图选区页：独立于 AppShell/OnboardingGuard，由 Tauri 选区窗口直接加载 */}
         <Route path="/screenshot-overlay" element={<Overlay />} />
+        {/* 全屏健康提醒遮罩页：独立于 AppShell/OnboardingGuard，由 Tauri 透明置顶遮罩窗口直接加载 */}
+        <Route path="/health-overlay" element={<HealthOverlay />} />
         <Route path="/welcome" element={<Welcome />} />
         <Route element={<OnboardingGuard />}>
           <Route element={<AppShell />}>

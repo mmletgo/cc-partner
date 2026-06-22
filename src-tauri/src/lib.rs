@@ -378,6 +378,7 @@ pub fn run() {
             health_cmd::update_health_config,
             health_cmd::get_activity_stats,
             health_cmd::record_water,
+            health_cmd::close_health_overlay,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {

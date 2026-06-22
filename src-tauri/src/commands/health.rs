@@ -45,6 +45,8 @@ pub struct HealthConfigDto {
     pub water_enabled: bool,
     /// 喝水提醒间隔（秒）。
     pub water_interval_seconds: i64,
+    /// 全屏遮罩提醒开关(Plan 2);开启后触发久坐提醒时每屏弹透明置顶遮罩窗口。
+    pub reminder_fullscreen: bool,
 }
 impl From<HealthConfig> for HealthConfigDto {
     /// 把磁盘配置 `HealthConfig` 转成前端可用的 camelCase DTO。
@@ -60,6 +62,7 @@ impl From<HealthConfig> for HealthConfigDto {
             dnd_end: h.dnd_end,
             water_enabled: h.water_enabled,
             water_interval_seconds: h.water_interval_seconds,
+            reminder_fullscreen: h.reminder_fullscreen,
         }
     }
 }
@@ -190,6 +193,7 @@ pub async fn update_health_config(
         cfg.health.dnd_end = config.dnd_end.clone();
         cfg.health.water_enabled = config.water_enabled;
         cfg.health.water_interval_seconds = config.water_interval_seconds;
+        cfg.health.reminder_fullscreen = config.reminder_fullscreen;
         cfg.save()?;
     }
     Ok(state.config.read().unwrap().health.clone().into())
@@ -220,5 +224,16 @@ pub async fn record_water(state: State<'_, AppState>) -> Result<(), AppError> {
         w.pending_remind = false;
     }
     state.health_repo.insert_water(now).await?;
+    Ok(())
+}
+
+/// 关闭所有全屏健康提醒遮罩窗口(供前端遮罩页「推迟/跳过」按钮调用)。
+///
+/// Business Logic: 用户在全屏遮罩上点击推迟/跳过后需关闭遮罩,恢复正常桌面使用。
+/// Code Logic: 委托 `crate::health::close_health_overlay`,遍历 webview_windows 关闭
+///             label 前缀 `health-overlay-` 的全部窗口。
+#[tauri::command]
+pub async fn close_health_overlay(app: tauri::AppHandle) -> Result<(), AppError> {
+    crate::health::close_health_overlay(&app);
     Ok(())
 }

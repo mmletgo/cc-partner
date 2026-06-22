@@ -172,6 +172,8 @@ export interface HealthConfig {
   waterEnabled: boolean;
   /** 喝水提醒间隔（秒） */
   waterIntervalSeconds: number;
+  /** 是否开启全屏遮罩提醒（触发久坐提醒时每屏弹透明置顶遮罩） */
+  reminderFullscreen: boolean;
 }
 
 /** 健康提醒运行时状态相位 */

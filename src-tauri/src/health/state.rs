@@ -201,7 +201,7 @@ mod tests {
         m.advance(true, 0, &t);
         let _ = m.advance(true, 120, &t);   // 提醒 1
         m.advance(false, 120 + 300, &t);    // 有效休息
-        let out = m.advance(true, 120 + 600, &t); // 新窗口
+        let _ = m.advance(true, 120 + 600, &t); // 新窗口
         let out = m.advance(true, 120 + 600 + 120, &t); // 新窗口满
         assert!(out.should_remind, "新窗口应能再次提醒");
     }

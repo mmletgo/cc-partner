@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::Utc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -147,6 +147,12 @@ async fn handle_sample(app: &AppHandle, state: &AppState, sample: ActivitySample
         if !snoozed && !dnd && cfg.notify_enabled {
             // 仅 emit 事件载荷;系统通知由前端监听后弹出(文案走 i18n)。
             let _ = app.emit("health:reminder", serde_json::json!({ "workWindowSeconds": cfg.work_window_seconds }));
+            // Plan 2: 开启全屏遮罩开关时,emit 后额外每屏弹出透明置顶遮罩窗口强制打断。
+            if cfg.reminder_fullscreen {
+                if let Err(e) = open_health_overlay(app) {
+                    tracing::warn!("打开全屏健康遮罩失败: {e}");
+                }
+            }
         }
     }
 
@@ -173,4 +179,65 @@ async fn handle_sample(app: &AppHandle, state: &AppState, sample: ActivitySample
         tracing::warn!("活动记录清理失败: {e}");
     }
     Ok(())
+}
+
+/// 打开全屏健康提醒遮罩窗口(每屏一个,复用截图透明窗口构建模式)。
+///
+/// Business Logic: 用户开启 `reminder_fullscreen` 后,久坐提醒触发时需在每块屏幕覆盖
+///     一个透明置顶遮罩窗口强制打断,展示推迟/跳过按钮。macOS 单窗口不能跨屏(与截图同理),
+///     故枚举每块显示器建独立窗口。
+/// Code Logic: 枚举 `xcap::Monitor::all()`,每个显示器用 `WebviewWindowBuilder` 建
+///     decorations(false)/transparent(true)/always_on_top(true)/focused(true)/
+///     skip_taskbar(true)/resizable(false) 的窗口,label = `health-overlay-{i}`,
+///     url = `/health-overlay?display={i}`。窗口几何直接用 xcap 的 x()/y()/width()/height()
+///     (均为逻辑点,不除 scale,与截图 overlay 一致)。已存在同名窗口则跳过(去重)。
+///     透明窗口前置条件 `app.macOSPrivateApi: true` 已在 tauri.conf.json 开启。
+pub fn open_health_overlay(app: &AppHandle) -> Result<(), AppError> {
+    let monitors = xcap::Monitor::all()
+        .map_err(|e| AppError::Bad(format!("枚举显示器失败: {e}")))?;
+
+    for (i, monitor) in monitors.into_iter().enumerate() {
+        let label = format!("health-overlay-{i}");
+        // 已存在同名窗口(上次未清理)则跳过,避免重复创建报错。
+        if app.get_webview_window(&label).is_some() {
+            continue;
+        }
+        // macOS: xcap 的 x()/y()/width()/height() 均为逻辑点,直接喂窗口几何,不除 scale。
+        let mx = monitor.x().unwrap_or(0);
+        let my = monitor.y().unwrap_or(0);
+        let mw = monitor.width().unwrap_or(1920) as f64;
+        let mh = monitor.height().unwrap_or(1080) as f64;
+
+        tracing::info!(
+            display = i,
+            x = mx, y = my, w = mw, h = mh,
+            "健康提醒遮罩窗口几何(逻辑点)"
+        );
+
+        WebviewWindowBuilder::new(app, &label, WebviewUrl::App(format!("/health-overlay?display={i}").into()))
+            .title("健康提醒")
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .focused(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .inner_size(mw, mh)
+            .position(mx as f64, my as f64)
+            .build()
+            .map_err(|e| AppError::Bad(format!("创建健康遮罩窗口失败: {e}")))?;
+    }
+    Ok(())
+}
+
+/// 关闭所有全屏健康提醒遮罩窗口。
+///
+/// Business Logic: 用户在遮罩上点击推迟/跳过后需关闭全部遮罩窗口,恢复桌面使用。
+/// Code Logic: 遍历 `app.webview_windows()`,label 以 `health-overlay-` 前缀开头则 close()。
+pub fn close_health_overlay(app: &AppHandle) {
+    for (label, win) in app.webview_windows() {
+        if label.starts_with("health-overlay-") {
+            let _ = win.close();
+        }
+    }
 }

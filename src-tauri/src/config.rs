@@ -103,6 +103,10 @@ pub struct HealthConfig {
     /// 喝水提醒间隔(秒),默认 1 小时(3600 秒)
     #[serde(default = "default_water_interval")]
     pub water_interval_seconds: i64,
+    /// 全屏遮罩提醒开关(Plan 2),默认关闭;开启后触发久坐提醒时每屏弹出透明置顶遮罩窗口。
+    /// `#[serde(default)]` 兼容旧 config.json 无此字段(回退 false)。
+    #[serde(default)]
+    pub reminder_fullscreen: bool,
 }
 
 impl Default for HealthConfig {
@@ -123,6 +127,7 @@ impl Default for HealthConfig {
             dnd_end: None,
             water_enabled: true,
             water_interval_seconds: 60 * 60,
+            reminder_fullscreen: false,
         }
     }
 }
@@ -272,7 +277,7 @@ mod tests {
             health: HealthConfig { enabled: false, work_window_seconds: 30*60, break_seconds: 3*60,
                 record_window_title: false, retain_days: 30, notify_enabled: false,
                 dnd_start: Some("22:00".into()), dnd_end: Some("07:00".into()),
-                water_enabled: true, water_interval_seconds: 1800 },
+                water_enabled: true, water_interval_seconds: 1800, reminder_fullscreen: true },
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
@@ -281,5 +286,6 @@ mod tests {
         assert_eq!(back.health.dnd_start.as_deref(), Some("22:00"));
         assert!(back.health.water_enabled);
         assert_eq!(back.health.water_interval_seconds, 1800);
+        assert!(back.health.reminder_fullscreen, "reminder_fullscreen 应随配置 roundtrip");
     }
 }
