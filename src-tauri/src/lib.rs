@@ -99,11 +99,15 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, error::AppError> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 初始化 tracing 日志（输出到 stderr），让 tracing::info!/error! 在 axum/mDNS/sync 等模块生效。
-    // 优先读 RUST_LOG 环境变量，缺省回退到 info 级别。必须在 setup 闭包外、Builder 构造前调用。
+    // 优先读 RUST_LOG 环境变量，缺省回退到 "info,mdns_sd=off"。必须在 setup 闭包外、Builder 构造前调用。
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
+            // mdns_sd=off 过滤库噪音：mdns-sd 0.11 收到针对本机 hostname 的 A/AAAA 查询时，会对每个
+            // 接口视图查地址；纯 IPv6 link-local 视图（fe80::）上无 IPv4，库会打 error
+            // "Cannot find valid addrs for TYPE_A response"——属日志噪音（A 记录实际走 IPv4 视图正常响应，
+            // 不影响 P2P 发现）。mDNS 关键错误已在 discovery.rs 用项目自有 tracing 宏记录，故安全关闭。
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,mdns_sd=off")),
         )
         .try_init();
 
