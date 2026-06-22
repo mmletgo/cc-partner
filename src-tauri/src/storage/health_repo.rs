@@ -117,6 +117,56 @@ impl HealthRepo {
         }
     }
 
+    /// 按进程名聚合 [since_ts, +∞) 内的活跃分钟数,倒序返回(应用使用时长排行)。
+    ///
+    /// Business Logic: 统计页需要展示「今天在哪些 app 上花了多少分钟」,帮助用户
+    ///     了解屏幕使用时长分布。仅统计活跃(is_active=1)且有 process_name 的行。
+    /// Code Logic: SQL 层 `COUNT(*) ... GROUP BY process_name ORDER BY mins DESC`,
+    ///     process_name 为 NULL/空串的行在 WHERE 过滤掉;逐行还原 (process_name, mins)。
+    pub async fn get_app_usage(&self, since_ts: i64) -> Result<Vec<(String, i64)>, AppError> {
+        let rows = sqlx::query(
+            "SELECT process_name, COUNT(*) AS mins FROM activity_records \
+             WHERE ts >= ? AND is_active = 1 AND process_name IS NOT NULL AND process_name <> '' \
+             GROUP BY process_name ORDER BY mins DESC",
+        )
+        .bind(since_ts)
+        .fetch_all(&self.db)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                Ok((
+                    r.try_get::<Option<String>, _>("process_name")?.unwrap_or_default(),
+                    r.try_get("mins")?,
+                ))
+            })
+            .collect()
+    }
+
+    /// 按小时(UTC 0-23)聚合 [since_ts, +∞) 内的活跃分钟数,返回长度 24 的数组。
+    ///
+    /// Business Logic: 统计页需要展示「一天 24 小时每个时段的活跃分布」,帮助用户
+    ///     了解工作节奏(例如上午/下午/深夜的活动峰值)。
+    /// Code Logic: SQL 层 `(ts / 3600 % 24)` 取 UTC 小时桶,`COUNT(*) GROUP BY h`;
+    ///     先初始化 24 个 0,再把查询结果填入对应桶(范围外忽略,保长度恒 24)。
+    pub async fn get_hourly_activity(&self, since_ts: i64) -> Result<Vec<i64>, AppError> {
+        let mut hours = vec![0i64; 24];
+        let rows = sqlx::query(
+            "SELECT (ts / 3600 % 24) AS h, COUNT(*) AS mins FROM activity_records \
+             WHERE ts >= ? AND is_active = 1 GROUP BY h",
+        )
+        .bind(since_ts)
+        .fetch_all(&self.db)
+        .await?;
+        for r in rows {
+            let h: i64 = r.try_get("h")?;
+            let mins: i64 = r.try_get("mins")?;
+            if (0..24).contains(&h) {
+                hours[h as usize] = mins;
+            }
+        }
+        Ok(hours)
+    }
+
     /// 删除 ts < cutoff_ts 的活动明细。
     ///
     /// Business Logic: activity_records 会随时间无限增长，daemon 需定期清理超出

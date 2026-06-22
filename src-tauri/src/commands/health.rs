@@ -100,6 +100,26 @@ pub struct ActivityStatsDto {
     pub idle_minutes: i64,
 }
 
+/// 单个 app 的活跃分钟数排行项（camelCase，对齐前端 AppUsageItem）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUsageItem {
+    /// 进程名（process_name）。
+    pub name: String,
+    /// 统计窗口内该 app 的活跃分钟数。
+    pub minutes: i64,
+}
+
+/// 活动明细统计 DTO（camelCase，对齐前端 ActivityDetail）:app 排行 + 24 小时分布。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityDetailDto {
+    /// 按活跃分钟倒序的 app 使用时长排行。
+    pub app_usage: Vec<AppUsageItem>,
+    /// 长度恒为 24 的数组,下标为 UTC 小时(0-23),值为该小时活跃分钟数。
+    pub hourly: Vec<i64>,
+}
+
 /// 读取健康提醒当前状态（配置开关 + 运行时相位/暂停/贪睡）。
 ///
 /// Business Logic: 前端轮询展示「工作中/休息中、是否暂停、贪睡何时到期」。
@@ -207,6 +227,28 @@ pub async fn update_health_config(
 pub async fn get_activity_stats(state: State<'_, AppState>, since_ts: i64) -> Result<ActivityStatsDto, AppError> {
     let (active, idle) = state.health_repo.aggregate_minutes(since_ts).await?;
     Ok(ActivityStatsDto { active_minutes: active, idle_minutes: idle })
+}
+
+/// 查询 [since_ts, +∞) 区间内的活动明细统计(app 使用时长排行 + 24 小时活跃分布)。
+///
+/// Business Logic: 前端统计页用 recharts 柱状图展示「app 使用时长排行(top8)」和
+///                 「一天 24 小时活跃分布」,帮助用户了解屏幕使用习惯。
+/// Code Logic: 委托 `HealthRepo::get_app_usage`(按 process_name 聚合倒序) +
+///             `HealthRepo::get_hourly_activity`(长度 24 的活跃分钟数组)组装 DTO。
+#[tauri::command]
+pub async fn get_activity_detail(
+    state: State<'_, AppState>,
+    since_ts: i64,
+) -> Result<ActivityDetailDto, AppError> {
+    let app_usage = state
+        .health_repo
+        .get_app_usage(since_ts)
+        .await?
+        .into_iter()
+        .map(|(n, m)| AppUsageItem { name: n, minutes: m })
+        .collect();
+    let hourly = state.health_repo.get_hourly_activity(since_ts).await?;
+    Ok(ActivityDetailDto { app_usage, hourly })
 }
 
 /// 记录一次喝水(更新喝水计时状态 + 清未响应提醒 + 落库 water_records)。

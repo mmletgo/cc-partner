@@ -12,7 +12,7 @@
  */
 
 import { invoke } from './client';
-import type { HealthConfig, HealthStatus, ActivityStats } from '@/lib/types';
+import type { HealthConfig, HealthStatus, ActivityStats, ActivityDetail } from '@/lib/types';
 
 export const healthApi = {
   /** 读取当前健康提醒状态（相位 / 暂停 / 贪睡到期 / 配置阈值） */
@@ -43,4 +43,8 @@ export const healthApi = {
   /** 读取自 sinceTs 以来的活跃/闲置分钟数统计 */
   getStats: (sinceTs: number) =>
     invoke<ActivityStats>('get_activity_stats', { sinceTs }),
+
+  /** 读取自 sinceTs 以来的活动明细(app 排行 + 24 小时分布) */
+  getDetail: (sinceTs: number) =>
+    invoke<ActivityDetail>('get_activity_detail', { sinceTs }),
 };

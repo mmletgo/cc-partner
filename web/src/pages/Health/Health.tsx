@@ -17,8 +17,9 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Pill, Button } from '@/components/primitives';
 import { healthApi } from '@/api/health';
-import type { ActivityStats, HealthStatus, HealthPhase } from '@/lib/types';
+import type { ActivityStats, ActivityDetail, HealthStatus, HealthPhase } from '@/lib/types';
 import styles from './Health.module.css';
+import { StatsChart } from './StatsChart';
 
 /** 页面刷新间隔(ms) */
 const REFRESH_INTERVAL_MS = 30000;
@@ -45,17 +46,19 @@ export function Health() {
   const { t } = useTranslation(['health', 'common']);
   const [status, setStatus] = useState<HealthStatus | null>(null);
   const [stats, setStats] = useState<ActivityStats | null>(null);
+  const [detail, setDetail] = useState<ActivityDetail | null>(null);
   const [loading, setLoading] = useState(true);
 
   /**
-   * 刷新状态 + 今日统计。
-   * startOfDay 取当日 UTC 0 点的秒级时间戳,作为 get_activity_stats 的 sinceTs。
+   * 刷新状态 + 今日统计 + 今日活动明细图表。
+   * startOfDay 取当日 UTC 0 点的秒级时间戳,作为 get_activity_stats / get_activity_detail 的 sinceTs。
    */
   const refresh = useCallback(async () => {
     setStatus(await healthApi.getStatus());
     const startOfDay =
       Math.floor(Date.now() / 1000) - (Math.floor(Date.now() / 1000) % SECONDS_PER_DAY);
     setStats(await healthApi.getStats(startOfDay));
+    setDetail(await healthApi.getDetail(startOfDay));
     setLoading(false);
   }, []);
 
@@ -126,6 +129,13 @@ export function Health() {
             </ul>
           )}
         </Card>
+
+        {/* 今日活动明细图表(app 使用时长排行 + 24 小时活跃分布) */}
+        {detail && (
+          <Card variant="outlined" padding="md" className={styles.section}>
+            <StatsChart detail={detail} />
+          </Card>
+        )}
 
         {/* 工作窗口/休息/通知/记录标题/免打扰 配置项:Plan 2 完善为完整表单,
             Plan 1 先留状态展示(阈值读自 status) */}

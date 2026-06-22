@@ -210,3 +210,24 @@ export interface ActivityStats {
   /** 闲置分钟数 */
   idleMinutes: number;
 }
+
+/**
+ * 单个 app 的活跃分钟数排行项（get_activity_detail 返回，camelCase）。
+ */
+export interface AppUsageItem {
+  /** 进程名 */
+  name: string;
+  /** 活跃分钟数 */
+  minutes: number;
+}
+
+/**
+ * 活动明细统计（get_activity_detail 返回，camelCase）。
+ * app 使用时长排行 + 24 小时活跃分布，供 StatsChart 图表渲染。
+ */
+export interface ActivityDetail {
+  /** 按活跃分钟倒序的 app 使用时长排行 */
+  appUsage: AppUsageItem[];
+  /** 长度恒为 24 的数组，下标为 UTC 小时（0-23），值为该小时活跃分钟数 */
+  hourly: number[];
+}
