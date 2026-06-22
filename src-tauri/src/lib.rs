@@ -304,9 +304,11 @@ pub fn run() {
                     .enabled;
                 let autostart = app.autolaunch();
                 if want_autostart {
-                    let _ = autostart.enable();
-                } else {
-                    let _ = autostart.disable();
+                    if let Err(e) = autostart.enable() {
+                        tracing::warn!("开机自启 enable 失败: {e}");
+                    }
+                } else if let Err(e) = autostart.disable() {
+                    tracing::warn!("开机自启 disable 失败: {e}");
                 }
                 tracing::info!("开机自启: {}", if want_autostart { "已启用" } else { "已禁用" });
             }

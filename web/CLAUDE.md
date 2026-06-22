@@ -14,15 +14,17 @@
 ## 架构
 
 - **API 客户端**: `src/api/client.ts` — 基于 `@tauri-apps/api/core` 的 `invoke` 薄封装；Rust 后端 reject 的错误（`{error:"消息"}`）经 `normalizeError` 规整为带 `message` 的 `Error`，无 HTTP status 概念
-- **API 模块**: `src/api/prompts.ts`、`ccHistory.ts`、`claudeMd.ts`、`config.ts`、`devices.ts`、`transfer.ts` — 各资源方法调 `invoke('命令名', args)`，命令名对应 Rust `#[tauri::command]`，参数 camelCase。后端命令随 M1–M8 里程碑逐步落地，详见 `src-tauri/CLAUDE.md`
-- **页面**: `src/pages/` — Home（最近 Prompts）/ Prompts（列表管理，自定义多标签 + 动态标签筛选）/ CcHistory（从本地 Claude Code session 采集的用户输入 prompt，按项目分组的时间线，可搜索/复制/转存为 Prompt/删除；后端采集与同步见 `src-tauri/CLAUDE.md`「Claude Code 历史采集与同步」节）/ Scratchpad（速记本，纯内存临时记事）/ ClaudeMd（应用内编辑 user 级 `~/.claude/CLAUDE.md`，手动同步到局域网设备）/ Settings / Transfer / Devices
-- **路由**: `src/App.tsx` — React Router，`/` → Home，`/prompts` → Prompts，`/cc-history` → CcHistory，`/scratchpad` → Scratchpad，`/claude-md` → ClaudeMd 等
+- **API 模块**: `src/api/prompts.ts`、`ccHistory.ts`、`claudeMd.ts`、`config.ts`、`devices.ts`、`transfer.ts`、`health.ts` — 各资源方法调 `invoke('命令名', args)`，命令名对应 Rust `#[tauri::command]`，参数 camelCase。后端命令随 M1–M10 里程碑逐步落地，详见 `src-tauri/CLAUDE.md`
+- **页面**: `src/pages/` — Home（最近 Prompts）/ Prompts（列表管理，自定义多标签 + 动态标签筛选）/ CcHistory（从本地 Claude Code session 采集的用户输入 prompt，按项目分组的时间线，可搜索/复制/转存为 Prompt/删除；后端采集与同步见 `src-tauri/CLAUDE.md`「Claude Code 历史采集与同步」节）/ Scratchpad（速记本，纯内存临时记事）/ ClaudeMd（应用内编辑 user 级 `~/.claude/CLAUDE.md`，手动同步到局域网设备）/ Health（健康提醒状态页：当前相位/开关监测/暂停恢复/今日活跃统计）/ Settings / Transfer / Devices
+- **路由**: `src/App.tsx` — React Router，`/` → Home，`/prompts` → Prompts，`/cc-history` → CcHistory，`/scratchpad` → Scratchpad，`/claude-md` → ClaudeMd，`/health` → Health 等
 - **区域截图选区页**: `src/pages/Screenshot/Overlay.tsx` — 独立于 AppShell/OnboardingGuard，路由 `/screenshot-overlay?display={i}`，由 Tauri 选区窗口（每屏一个透明置顶窗口）直接加载。**微信截图风格 + 三态状态机**（`mode: idle | selecting | editing`）：
   - **idle**：整屏半透明黑色遮罩；mousedown（左键）进 selecting 开始框选。
   - **selecting**：拖拽框选，四块遮罩挖洞 + 蓝色虚线边框（选区内清晰）；mouseup 有效选区（宽高≥10）进 editing。
   - **editing**：进编辑前先 `hiding=true` 隐藏遮罩/边框 + 双 rAF 等渲染透明，再调 `get_region_snapshot` 抓**纯桌面选区** PNG 作 canvas 背景底图（避免把蓝色边框/遮罩抓入快照）；canvas 用 `useAnnotationCanvas` hook（`src/pages/Screenshot/useAnnotationCanvas.ts`）重绘「快照底图 + 全部标注」+ `ScreenshotToolbar` 组件（`src/pages/Screenshot/ScreenshotToolbar.tsx`，矩形/箭头工具、6 色板 `COLORS`、撤销/确认/取消）；确认时 canvas.toDataURL 合成「桌面选区 + 标注」→ `save_clipboard_image` 写剪贴板（**所见即所得，Rust 不画标注**）；选区过小 / ESC / 右键 → cancel。窗口真透明（onMount 强制 html/body `background:transparent` 覆盖全局主题底色，否则白屏）。坐标用逻辑像素 + `window.devicePixelRatio` 传 Rust 换算物理像素。
   - **hooks 必须在 early return 之前**（项目规则 20）。详见 `src-tauri/CLAUDE.md` M6 节
-- **macOS 权限流程**: 首次启动 `OnboardingGuard`(`App.tsx`)检测权限未就绪 → **主动引导**：对未授权项调 `invoke('request_permission')`（screenCapture 传 `openSettings=false` 仅弹系统框、inputMonitoring 传 `true` 开设置面板）→ 跳 `/welcome`(`usePermissions` 轮询 `invoke('check_permissions')`，`PermissionCard` 点击触发同一授权流程；**后端命令 M7 实现**)；完成引导写 `localStorage cp-permission-onboarded`。截图快捷键/托盘触发时若屏幕录制未授权，后端 `start_region_capture` 不抓空白图，而是显示主窗口 + emit `screenshot:permission-needed`，前端顶层 `PermissionNeededListener`(`App.tsx`)监听后跳 `/welcome`。平时侧栏底部 `PermissionStatusBadge`(AppShell)常驻兜底，未授权时可点击触发同一授权流程；设置页「权限管理」Card(复用 `PermissionCard` + 共享 util `lib/permissionEntries.tsx` 的 `mapPermissions`，Welcome 与 Settings 共用避免重复)提供随时查看状态 / 单项重新授权的常驻入口
+- **健康提醒页**: `src/pages/Health/Health.tsx`（路由 `/health`，样式 `Health.module.css`）— 久坐监测状态展示 + 控制。后端 daemon 每分钟采样键鼠活跃度推进工作/休息状态机，连续工作达阈值触发久坐提醒（后端 daemon 与状态机见 `src-tauri/CLAUDE.md`「健康提醒」节）。`healthApi`(`src/api/health.ts`)封装 7 个命令（`get_health_status`/`toggle_health_enabled`/`toggle_health_paused`/`snooze_reminder`/`skip_reminder`/`update_health_config`/`get_activity_stats`）。页面并行取 status + stats（startOfDay 起），每 30s 轮询刷新；开关 enabled / 暂停 paused 走乐观更新。hooks 全部在 early return 之前（项目规则 20）。i18n namespace `health`（相位/状态/按钮文案）。Plan 1 聚焦「状态 + 开关 + 暂停 + 基础统计」闭环，完整配置表单（工作窗口/休息/免打扰/记录标题）在 Plan 2 补。
+- **健康提醒系统通知监听**: `App.tsx` 顶层挂 `HealthReminderListener`（与 `PermissionNeededListener` 同层、AppShell 之外）— 后端触发久坐提醒时 emit `health:reminder`（载荷 `{workWindowSeconds}`），本组件 `listen('health:reminder', ...)` 收到后用 `@tauri-apps/plugin-notification` 的 `sendNotification` 弹原生系统通知（标题/正文走 i18n `health:reminderTitle`/`health:reminderBody`，随当前语言切换）。
+- **macOS 权限流程**: 首次启动 `OnboardingGuard`(`App.tsx`)检测权限未就绪 → **主动引导**：对未授权项调 `invoke('request_permission')`（screenCapture 传 `openSettings=false` 仅弹系统框、inputMonitoring 传 `true` 开设置面板）→ 跳 `/welcome`(`usePermissions` 轮询 `invoke('check_permissions')`，`PermissionCard` 点击触发同一授权流程；**后端命令 M7 实现**)；完成引导写 `localStorage cp-permission-onboarded`。截图快捷键/托盘触发时若屏幕录制未授权，后端 `start_region_capture` 不抓空白图，而是显示主窗口 + emit `screenshot:permission-needed`，前端顶层 `PermissionNeededListener`(`App.tsx`)监听后跳 `/welcome`。平时侧栏底部 `PermissionStatusBadge`(AppShell)常驻兜底，未授权时可点击触发同一授权流程；设置页「权限管理」Card(复用 `PermissionCard` + 共享 util `lib/permissionEntries.tsx` 的 `mapPermissions`，Welcome 与 Settings 共用避免重复)提供随时查看状态 / 单项重新授权的常驻入口。健康提醒键鼠采样需 macOS Accessibility 权限，复用同一权限流程（侧栏 `PermissionStatusBadge` / 设置页权限 Card 引导授权）
 - **自定义 Hook**: `src/hooks/` — `useTheme`（浅/深主题切换与跨组件同步）、`useAppVersion`（应用版本号，统一经 `invoke('get_version')` 获取，**禁止前端硬编码版本号**，唯一权威来源是 `tauri.conf.json` 的 `version`）、`useLanguage`（中英文切换，复刻 useTheme 的 localStorage + 自定义事件同步范式）、`usePermissions`（macOS 权限状态轮询 + 请求授权，导出 `PERMISSION_ONBOARDED_KEY` 供 OnboardingGuard/Welcome 共享）
 - **i18n**: `src/i18n/` — react-i18next 多 namespace（en/zh）；语言检测 localStorage(`cp-lang`) > `navigator.language` > en；切换器在 Sidebar 底部。**禁止在组件里硬编码用户可见中/英文字面量**，一律走 `src/i18n/locales/{en,zh}/<ns>.json` + `t('<ns>:<key>')`。详见下方「i18n 国际化」。
 
@@ -36,7 +38,7 @@
 ## i18n 国际化
 
 - **库**: react-i18next + i18next，初始化在 `src/i18n/index.ts`（`declare module` 类型扩展，`t()` 的 key 编译期校验，拼错即 tsc 报错）
-- **命名空间**: `common`（动作/状态枚举/方向，跨页共享）、`nav`、各页面一个（home/prompts/ccHistory/transfer/devices/scratchpad/claudeMd/welcome/settings）
+- **命名空间**: `common`（动作/状态枚举/方向，跨页共享）、`nav`、各页面一个（home/prompts/ccHistory/transfer/devices/scratchpad/claudeMd/welcome/settings/health）
 - **写法约定**（i18next v26 类型硬要求）:
   - 组件内 `const { t } = useTranslation([用到的所有ns数组]);`，所有 `t('ns:key')` **带 ns 前缀**
   - 模块级 helper 接收 `t: TFunction<'ns'>`，内部调用**省略 ns 前缀**
