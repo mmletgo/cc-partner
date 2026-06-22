@@ -50,3 +50,10 @@ base64 = "0.22"
 # tauri-plugin-process 提供 app.restart() 安装后重启
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# M10 健康提醒:device_query(macOS 键鼠状态查询)、rdev(Windows/Linux 全局事件)、
+# active-win-pos-rs(活动窗口标题/进程名)、notification(系统通知)、autostart(开机自启)
+device_query = "1.1"
+rdev = "0.5"
+active-win-pos-rs = "0.10"
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
