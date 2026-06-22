@@ -6,4 +6,5 @@
 //! - `reminder`:提醒生命周期 + 免打扰
 //! - daemon 入口 `start_health_daemon`(Task 6 实现)
 
+pub mod monitor;
 pub mod state;
