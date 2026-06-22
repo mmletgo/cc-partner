@@ -44,6 +44,20 @@ struct CcSyncPushResp {
     accepted: u64,
 }
 
+/// ssh-target/sync/pull 响应体（字段名对照 routes/ssh_target_sync.rs 的 SshSyncPullResp）。
+#[derive(Debug, serde::Deserialize)]
+struct SshTargetPullResp {
+    #[serde(default)]
+    targets: Vec<crate::models::ssh_target::SshTargetRow>,
+}
+
+/// ssh-target/sync/push 响应体（字段名对照 routes/ssh_target_sync.rs 的 SshSyncPushResp）。
+#[derive(Debug, serde::Deserialize)]
+struct SshTargetPushResp {
+    #[serde(default)]
+    accepted: u64,
+}
+
 /// claude_md/pull 响应体（字段名对照 ClaudeMdPullResp 的 `{claude_md: Option<ClaudeMdRow>}`）。
 #[derive(Debug, serde::Deserialize)]
 struct ClaudeMdPullResp {
@@ -406,6 +420,88 @@ impl PeerClient {
             }
             Err(e) => {
                 tracing::error!("cc_sync_push 异常 ({base_url}): {e}");
+                false
+            }
+        }
+    }
+
+    /// SSH 目标同步 pull：向对端发送本端 SSH 目标摘要，获取对端认为本端需要的 SSH 目标。
+    ///
+    /// Business Logic: SSH 同步第一步——把本端摘要发给对端，对端比对后返回本端需要更新的
+    ///     SSH 目标完整数据。走独立链路 `/api/ssh-target/sync/pull`，与 prompts 同步解耦。
+    ///
+    /// Code Logic: POST `{base_url}/api/ssh-target/sync/pull`，请求体 `{summaries: [...]}`，
+    ///     期望响应 `{targets: [SshTargetRow snake_case, ...]}`。失败返回空 Vec（不阻断同步）。
+    pub async fn ssh_target_pull(
+        &self,
+        base_url: &str,
+        local_summary: Vec<serde_json::Value>,
+    ) -> Vec<crate::models::ssh_target::SshTargetRow> {
+        let url = format!("{base_url}/api/ssh-target/sync/pull");
+        let body = serde_json::json!({ "summaries": local_summary });
+        match self.client.post(&url).json(&body).send().await {
+            Ok(resp) if resp.status().as_u16() == 200 => {
+                match resp.json::<SshTargetPullResp>().await {
+                    Ok(data) => {
+                        tracing::info!(
+                            "ssh_target_pull 从 {base_url} 获取 {} 条 SSH 目标",
+                            data.targets.len()
+                        );
+                        data.targets
+                    }
+                    Err(e) => {
+                        tracing::error!("ssh_target_pull 解析响应失败 ({base_url}): {e}");
+                        Vec::new()
+                    }
+                }
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    "ssh_target_pull 失败 ({base_url}): HTTP {}",
+                    resp.status()
+                );
+                Vec::new()
+            }
+            Err(e) => {
+                tracing::error!("ssh_target_pull 异常 ({base_url}): {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// SSH 目标同步 push：将本端有而对端缺少的 SSH 目标推送给对端。
+    ///
+    /// Business Logic: SSH 同步第二步——把本端独有或领先的 SSH 目标推过去。
+    ///
+    /// Code Logic: POST `{base_url}/api/ssh-target/sync/push`，请求体 `{targets: [...]}`，
+    ///     期望响应 `{accepted: <count>}`。HTTP 200 即视为成功。
+    pub async fn ssh_target_push(
+        &self,
+        base_url: &str,
+        targets: &[crate::models::ssh_target::SshTargetRow],
+    ) -> bool {
+        let url = format!("{base_url}/api/ssh-target/sync/push");
+        let body = serde_json::json!({ "targets": targets });
+        match self.client.post(&url).json(&body).send().await {
+            Ok(resp) if resp.status().as_u16() == 200 => match resp.json::<SshTargetPushResp>().await {
+                Ok(data) => {
+                    tracing::info!(
+                        "ssh_target_push 到 {base_url} 成功，对端接收 {} 条",
+                        data.accepted
+                    );
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!("ssh_target_push 响应解析失败 ({base_url}): {e}");
+                    true
+                }
+            },
+            Ok(resp) => {
+                tracing::warn!("ssh_target_push 失败 ({base_url}): HTTP {}", resp.status());
+                false
+            }
+            Err(e) => {
+                tracing::error!("ssh_target_push 异常 ({base_url}): {e}");
                 false
             }
         }

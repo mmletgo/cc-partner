@@ -13,6 +13,7 @@ pub mod devices;
 pub mod permissions;
 pub mod prompts;
 pub mod screenshot;
+pub mod ssh_target;
 pub mod sync;
 pub mod transfer;
 pub mod updater;

@@ -72,6 +72,8 @@ pub struct AppState {
     pub update_cancel_token: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// Claude Code 历史仓库（claude_history / claude_history_scan_state 表访问）
     pub cc_history_repo: Arc<ClaudeHistoryRepo>,
+    /// SSH 目标仓库（ssh_targets 表访问，跨设备同步）
+    pub ssh_target_repo: Arc<crate::storage::SshTargetRepo>,
     /// CC 历史采集器的取消令牌（应用退出时 cancel 优雅停止后台扫描任务）
     pub cc_collector_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
 }

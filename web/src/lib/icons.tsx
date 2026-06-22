@@ -221,3 +221,11 @@ export const ClaudeMdIcon = ({ size, ...rest }: IconProps) => (
     <path d="M6 8h4M6 10h4M6 12h2" />
   </svg>
 );
+
+export const TerminalIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+    <path d="M4 6l2.5 2L4 10" />
+    <path d="M8.5 10h4" />
+  </svg>
+);
