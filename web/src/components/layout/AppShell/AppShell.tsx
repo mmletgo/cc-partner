@@ -25,6 +25,7 @@ import {
   ScratchpadIcon,
   ClaudeMdIcon,
   DevicesIcon,
+  TerminalIcon,
   SettingsIcon,
 } from '../../../lib/icons';
 import { useAppVersion } from '../../../hooks/useAppVersion';
@@ -75,6 +76,7 @@ export function AppShell({ children }: AppShellProps) {
           <NavItem to="/scratchpad" label={t('nav:scratchpad')} icon={<ScratchpadIcon />} />
           <NavItem to="/claude-md" label={t('nav:claudeMd')} icon={<ClaudeMdIcon />} />
           <NavItem to="/devices" label={t('nav:devices')} icon={<DevicesIcon />} />
+          <NavItem to="/ssh" label={t('nav:ssh')} icon={<TerminalIcon />} />
           <NavItem to="/settings" label={t('nav:settings')} icon={<SettingsIcon />} />
         </nav>
         <PermissionStatusBadge />

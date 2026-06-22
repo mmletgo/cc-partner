@@ -145,3 +145,43 @@ export interface CcHistoryItem {
   /** 软删除标记 */
   deleted: boolean;
 }
+
+/**
+ * SSH 连接目标配置（对齐后端 SshTargetDto，camelCase）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   SSH 页为每个连接目标（局域网设备 IP 或手填 IP）保存用户名/端口，前端需消费后端
+ *   list_ssh_targets / upsert_ssh_target 返回的 camelCase DTO。
+ *
+ * Code Logic（字段说明）:
+ *   host 为主键（IP 或 hostname）；port 默认 22；username 空串表示用本机默认用户名；
+ *   label 为可选备注；updatedAt 为最近更新时间（ISO，同步合并 LWW 依据）。
+ */
+export interface SshTarget {
+  /** 主机 IP 或 hostname */
+  host: string;
+  /** SSH 端口，默认 22 */
+  port: number;
+  /** SSH 用户名（空串 = 用本机默认用户名） */
+  username: string;
+  /** 可选备注 */
+  label?: string;
+  /** 更新时间（ISO） */
+  updatedAt: string;
+}
+
+/**
+ * 本机操作系统信息（对齐后端 get_os_info 返回）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   SSH 页配置指南区需按本机系统渲染连接端用法，platform 由后端归一化后返回。
+ *
+ * Code Logic（字段说明）:
+ *   platform 归一化为 mac/windows/ubuntu；raw 为 std::env::consts::OS 原始值（macos/windows/linux 等）。
+ */
+export interface OsInfo {
+  /** 归一化平台：mac / windows / ubuntu */
+  platform: 'mac' | 'windows' | 'ubuntu';
+  /** 原始 OS 字符串 */
+  raw: string;
+}

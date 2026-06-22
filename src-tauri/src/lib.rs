@@ -35,11 +35,12 @@ use crate::commands::{
     cc_history as cc_history_cmd, claude_md as claude_md_cmd, config as config_cmd,
     devices as device_cmd,
     permissions as permissions_cmd, prompts as prompt_cmd, screenshot as screenshot_cmd,
-    sync as sync_cmd, transfer as transfer_cmd, updater as updater_cmd,
+    ssh_target as ssh_target_cmd, sync as sync_cmd, transfer as transfer_cmd,
+    updater as updater_cmd,
 };
 use crate::net::{discovery, http_server, peer_client::PeerClient};
 use crate::state::AppState;
-use crate::storage::{ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, TransferRepo};
+use crate::storage::{ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, SshTargetRepo, TransferRepo};
 use crate::transfer::registry::TransferRegistry;
 use tauri::Manager;
 
@@ -119,6 +120,19 @@ const CLAUDE_MD_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS claude_md (
     device_id TEXT NOT NULL,
     vector_clock TEXT NOT NULL
 )";
+
+/// SSH 连接目标表（每 host 一行：用户名/端口/向量时钟，跨设备同步）。
+const SSH_TARGET_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ssh_targets (
+    host TEXT PRIMARY KEY,
+    port INTEGER NOT NULL DEFAULT 22,
+    username TEXT NOT NULL,
+    label TEXT,
+    device_id TEXT NOT NULL,
+    vector_clock TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted INTEGER DEFAULT 0
+)";
 /// 初始化数据库连接池：开启 WAL，手动建表，返回 SqlitePool。
 ///
 /// Business Logic: 单连接语义与 Python aiosqlite 一致（max_connections(1)）。
@@ -148,6 +162,8 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, error::AppError> {
     }
     // user 级 CLAUDE.md 单例表
     sqlx::query(CLAUDE_MD_SCHEMA).execute(&pool).await?;
+    // SSH 连接目标表（host 主键 + 端口 + 用户名 + 向量时钟，跨设备同步）
+    sqlx::query(SSH_TARGET_SCHEMA).execute(&pool).await?;
     Ok(pool)
 }
 
@@ -192,12 +208,14 @@ pub fn run() {
                 let transfer_repo = Arc::new(TransferRepo::new(pool.clone()));
                 let cc_history_repo = Arc::new(ClaudeHistoryRepo::new(pool.clone()));
                 let claude_md_repo = Arc::new(ClaudeMdRepo::new(pool.clone()));
+                let ssh_target_repo = Arc::new(SshTargetRepo::new(pool.clone()));
                 let state = AppState {
                     config: Arc::new(RwLock::new(config)),
                     db: pool,
                     prompt_repo,
                     transfer_repo,
                     claude_md_repo,
+                    ssh_target_repo,
                     device_id: Arc::new(device_id),
                     devices: Arc::new(RwLock::new(std::collections::HashMap::new())),
                     actual_http_port: Arc::new(AtomicU16::new(0)),
@@ -302,6 +320,11 @@ pub fn run() {
             cc_history_cmd::get_cc_prompt,
             cc_history_cmd::refresh_cc_history,
             cc_history_cmd::delete_cc_prompt,
+            // SSH 目标（4 命令：列表 / 新增更新 / 删除 / 本机 OS 检测）
+            ssh_target_cmd::list_ssh_targets,
+            ssh_target_cmd::upsert_ssh_target,
+            ssh_target_cmd::delete_ssh_target,
+            ssh_target_cmd::get_os_info,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {

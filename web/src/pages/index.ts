@@ -19,6 +19,9 @@ export type { } from './Transfer';
 export { Devices } from './Devices';
 export type { } from './Devices';
 
+export { Ssh } from './Ssh';
+export type { } from './Ssh';
+
 export { Settings } from './Settings';
 export type { } from './Settings';
 

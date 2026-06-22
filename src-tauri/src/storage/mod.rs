@@ -9,9 +9,11 @@
 pub mod cc_history_repo;
 pub mod claude_md_repo;
 pub mod prompt_repo;
+pub mod ssh_target_repo;
 pub mod transfer_repo;
 
 pub use cc_history_repo::ClaudeHistoryRepo;
 pub use claude_md_repo::ClaudeMdRepo;
 pub use prompt_repo::PromptRepo;
+pub use ssh_target_repo::SshTargetRepo;
 pub use transfer_repo::TransferRepo;

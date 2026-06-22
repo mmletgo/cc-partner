@@ -1,0 +1,180 @@
+/* Ssh 页面样式
+ * 居中限宽 container + 头部 + 卡片（连接目标区 / 配置指南区）
+ * 所有颜色/间距/圆角/字体走 design token，与 Devices.module.css 风格一致
+ */
+
+/* ── 页面根 + container ── */
+.page {
+  width: 100%;
+  min-height: 100%;
+  background: var(--bg);
+}
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: var(--space-8) var(--space-8) var(--space-12);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  box-sizing: border-box;
+}
+
+/* ── 头部 ── */
+.header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.headerText {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.headerText h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-3xl);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+  letter-spacing: var(--tracking-tight);
+  line-height: var(--leading-tight);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.osPill {
+  font-size: var(--text-sm);
+  padding: 2px var(--space-3);
+}
+
+.lead {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  max-width: 640px;
+}
+
+/* ── 区块标题 ── */
+.sectionTitle {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+}
+
+/* ── 连接目标列表 ── */
+.targetList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.targetRow {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 96px 1fr auto;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.targetHost {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.targetHostMeta {
+  color: var(--muted);
+}
+
+.targetActions {
+  display: flex;
+  gap: var(--space-1);
+}
+
+/* ── 手动添加行 ── */
+.manualRow {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 96px 1fr auto;
+  gap: var(--space-2);
+  align-items: center;
+  padding-top: var(--space-3);
+  margin-top: var(--space-3);
+  border-top: 1px dashed var(--border-soft);
+}
+
+/* ── 错误提示 ── */
+.errorBox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--danger-soft);
+  color: var(--danger);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+
+/* ── 加载 / 空态 ── */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-12) var(--space-6);
+  border: 1px dashed var(--border-soft);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.emptyTitle {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+}
+
+/* ── 配置指南区 ── */
+.guideCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.guideBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.guideLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+}
+
+.guideText {
+  font-size: var(--text-sm);
+  color: var(--fg-2);
+  line-height: var(--leading-relaxed);
+  white-space: pre-line;
+}
