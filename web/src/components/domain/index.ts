@@ -30,3 +30,6 @@ export { TagInput } from './TagInput';
 export type { TagInputProps } from './TagInput';
 
 export { PermissionStatusBadge } from './PermissionStatusBadge';
+
+export { CcHistoryCard } from './CcHistoryCard';
+export type { CcHistoryCardProps } from './CcHistoryCard';

@@ -16,7 +16,7 @@
 use crate::config::AppConfig;
 use crate::models::device::Device;
 use crate::net::peer_client::PeerClient;
-use crate::storage::{PromptRepo, TransferRepo};
+use crate::storage::{ClaudeHistoryRepo, PromptRepo, TransferRepo};
 use crate::transfer::registry::TransferRegistry;
 use mdns_sd::ServiceDaemon;
 use sqlx::SqlitePool;
@@ -68,6 +68,10 @@ pub struct AppState {
     pub update_download_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// M8 当前下载任务的取消令牌（cancel_download 时 cancel()，spawn 体内 is_cancelled 判定为 Cancelled）
     pub update_cancel_token: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// Claude Code 历史仓库（claude_history / claude_history_scan_state 表访问）
+    pub cc_history_repo: Arc<ClaudeHistoryRepo>,
+    /// CC 历史采集器的取消令牌（应用退出时 cancel 优雅停止后台扫描任务）
+    pub cc_collector_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
 }
 
 impl AppState {

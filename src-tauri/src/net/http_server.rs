@@ -11,7 +11,7 @@
 //!       AppState.actual_http_port（AtomicU16），tokio::spawn(axum::serve)。
 //!     - body limit 暂设 2MB（M5 chunk 会调整）。
 
-use crate::net::routes::{health, sync, transfer};
+use crate::net::routes::{cc_history, health, sync, transfer};
 use crate::state::AppState;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
@@ -45,6 +45,15 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route("/api/transfer/init", post(transfer::transfer_init))
         .route("/api/transfer/chunk/:id", post(transfer::transfer_chunk))
         .route("/api/transfer/status/:id", get(transfer::transfer_status))
+        // Claude Code 历史同步协议（独立链路）：cc-history/sync/{pull,push}，snake_case 互通
+        .route(
+            "/api/cc-history/sync/pull",
+            post(cc_history::cc_sync_pull),
+        )
+        .route(
+            "/api/cc-history/sync/push",
+            post(cc_history::cc_sync_push),
+        )
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
         .with_state(state.clone());
 

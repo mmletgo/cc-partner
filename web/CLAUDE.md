@@ -14,9 +14,9 @@
 ## 架构
 
 - **API 客户端**: `src/api/client.ts` — 基于 `@tauri-apps/api/core` 的 `invoke` 薄封装；Rust 后端 reject 的错误（`{error:"消息"}`）经 `normalizeError` 规整为带 `message` 的 `Error`，无 HTTP status 概念
-- **API 模块**: `src/api/prompts.ts`、`config.ts`、`devices.ts`、`transfer.ts` — 各资源方法调 `invoke('命令名', args)`，命令名对应 Rust `#[tauri::command]`，参数 camelCase。后端命令随 M1–M8 里程碑逐步落地，详见 `src-tauri/CLAUDE.md`
-- **页面**: `src/pages/` — Home（最近 Prompts）/ Prompts（列表管理，自定义多标签 + 动态标签筛选）/ Scratchpad（速记本，纯内存临时记事）/ Settings / Transfer / Devices
-- **路由**: `src/App.tsx` — React Router，`/` → Home，`/prompts` → Prompts，`/scratchpad` → Scratchpad 等
+- **API 模块**: `src/api/prompts.ts`、`ccHistory.ts`、`config.ts`、`devices.ts`、`transfer.ts` — 各资源方法调 `invoke('命令名', args)`，命令名对应 Rust `#[tauri::command]`，参数 camelCase。后端命令随 M1–M8 里程碑逐步落地，详见 `src-tauri/CLAUDE.md`
+- **页面**: `src/pages/` — Home（最近 Prompts）/ Prompts（列表管理，自定义多标签 + 动态标签筛选）/ CcHistory（从本地 Claude Code session 采集的用户输入 prompt，按项目分组的时间线，可搜索/复制/转存为 Prompt/删除；后端采集与同步见 `src-tauri/CLAUDE.md`「Claude Code 历史采集与同步」节）/ Scratchpad（速记本，纯内存临时记事）/ Settings / Transfer / Devices
+- **路由**: `src/App.tsx` — React Router，`/` → Home，`/prompts` → Prompts，`/cc-history` → CcHistory，`/scratchpad` → Scratchpad 等
 - **区域截图选区页**: `src/pages/Screenshot/Overlay.tsx` — 独立于 AppShell/OnboardingGuard，路由 `/screenshot-overlay?display={i}`，由 Tauri 选区窗口（每屏一个透明置顶窗口）直接加载。**微信截图风格**：进入即整屏半透明黑色遮罩（onMount 强制 html/body `background:transparent` 覆盖全局主题底色，否则白屏），框选时退化为四块遮罩挖洞 + 蓝色虚线边框（选区内清晰），mouseup 有效选区先 `hiding=true` 隐藏遮罩/边框 + 双 rAF 等渲染透明，再调 `crop_and_copy` 抓纯桌面裁剪（避免蓝色边框入图），ESC/右键调 `cancel_region_capture`。坐标用逻辑像素 + `window.devicePixelRatio` 传 Rust 换算物理像素。**hooks 必须在 early return 之前**（项目规则 20）。详见 `src-tauri/CLAUDE.md` M6 节
 - **macOS 权限流程**: 首次启动 `OnboardingGuard`(`App.tsx`)检测权限未就绪 → **主动引导**：对未授权项调 `invoke('request_permission')`（screenCapture 传 `openSettings=false` 仅弹系统框、inputMonitoring 传 `true` 开设置面板）→ 跳 `/welcome`(`usePermissions` 轮询 `invoke('check_permissions')`，`PermissionCard` 点击触发同一授权流程；**后端命令 M7 实现**)；完成引导写 `localStorage cp-permission-onboarded`。截图快捷键/托盘触发时若屏幕录制未授权，后端 `start_region_capture` 不抓空白图，而是显示主窗口 + emit `screenshot:permission-needed`，前端顶层 `PermissionNeededListener`(`App.tsx`)监听后跳 `/welcome`。平时侧栏底部 `PermissionStatusBadge`(AppShell)常驻兜底，未授权时可点击触发同一授权流程；设置页「权限管理」Card(复用 `PermissionCard` + 共享 util `lib/permissionEntries.tsx` 的 `mapPermissions`，Welcome 与 Settings 共用避免重复)提供随时查看状态 / 单项重新授权的常驻入口
 - **自定义 Hook**: `src/hooks/` — `useTheme`（浅/深主题切换与跨组件同步）、`useAppVersion`（应用版本号，统一经 `invoke('get_version')` 获取，**禁止前端硬编码版本号**，唯一权威来源是 `tauri.conf.json` 的 `version`）、`useLanguage`（中英文切换，复刻 useTheme 的 localStorage + 自定义事件同步范式）、`usePermissions`（macOS 权限状态轮询 + 请求授权，导出 `PERMISSION_ONBOARDED_KEY` 供 OnboardingGuard/Welcome 共享）
@@ -32,7 +32,7 @@
 ## i18n 国际化
 
 - **库**: react-i18next + i18next，初始化在 `src/i18n/index.ts`（`declare module` 类型扩展，`t()` 的 key 编译期校验，拼错即 tsc 报错）
-- **命名空间**: `common`（动作/状态枚举/方向，跨页共享）、`nav`、各页面一个（home/prompts/transfer/devices/scratchpad/welcome/settings）
+- **命名空间**: `common`（动作/状态枚举/方向，跨页共享）、`nav`、各页面一个（home/prompts/ccHistory/transfer/devices/scratchpad/welcome/settings）
 - **写法约定**（i18next v26 类型硬要求）:
   - 组件内 `const { t } = useTranslation([用到的所有ns数组]);`，所有 `t('ns:key')` **带 ns 前缀**
   - 模块级 helper 接收 `t: TFunction<'ns'>`，内部调用**省略 ns 前缀**

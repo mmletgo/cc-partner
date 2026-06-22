@@ -18,9 +18,11 @@ src/
 ├── state.rs           — AppState（config: RwLock + db pool + prompt_repo + device_id）[已实现]
 ├── error.rs           — AppError（thiserror + serde 成 {error:"msg"}）              [已实现]
 ├── config.rs          — AppConfig：读旧 ~/.claude-partner/config.json，缺失生成默认 [已实现]
-├── commands/          — #[tauri::command]：prompts（list/get/create/update/delete/list_tags）+ config（get/update/get_version）+ ping [已实现 Prompt/配置/版本，设备/传输/同步/更新/权限待后续里程碑]
+├── cc/                — Claude Code 历史采集（collector）+ 合并（merger，复用 sync/vector_clock）+ 同步（engine）+ 模型 [已实现]
+├── commands/          — #[tauri::command]：prompts + cc_history + config + devices + sync + transfer + screenshot + permissions + updater [已实现]
 ├── models/prompt.rs   — PromptRow（snake_case，DB/同步）+ PromptDto（camelCase，前端） [已实现]
 ├── storage/prompt_repo.rs — sqlx 运行期 query（非宏），list/get/create/update/soft_delete/list_tags [已实现]
+├── storage/cc_history_repo.rs — claude_history 表 CRUD + bulk_ingest(IGNORE)/bulk_upsert(REPLACE) + scan_state [已实现]
 ├── sync/              — 向量时钟 + LWW 合并 + engine              [M4]
 ├── net/               — mdns-sd 发现 + axum server + reqwest client [已实现 M3]
 ├── transfer/          — 分块传输 + SHA256 + 断点续传              [M5]
@@ -172,6 +174,26 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
   - `updaterJsonPreferNsis: true` —— Windows updater 用 nsis 安装包（非 msi）作下载源。
 - **签名 secret（用户待配）**：tauri-action 引用 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}`。用户需把 `~/.tauri/claude-partner.updater.key` 的**内容**配到 repo 的同名 secret（Settings → Secrets and variables → Actions）。**M8 用空密码，故无需配 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`**。未配 secret 时 CI 构建不签名、latest.json 无 signature，updater 校验会失败。
 - **发版流程**：1) `node scripts/bump-version.mjs <新版本号>`（同步 tauri.conf.json + Cargo.toml + web/package.json）；2) 提交；3) `git tag v<版本号> && git push origin v<版本号>` 触发 CI。
+
+## Claude Code 历史采集与同步已落地行为约定（src/cc/ + storage/cc_history_repo.rs + commands/cc_history.rs + net/routes/cc_history.rs）
+
+- **功能定位**：自动采集本机 Claude Code 所有 session jsonl 里的「用户输入 prompt」，按项目(cwd)归类存入新表 `claude_history`，并跨设备同步（复用向量时钟基础设施但走独立同步链路）。前端入口「CC 历史」页面。
+- **数据来源**：`~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`（跨平台用 `dirs::home_dir()`）。真实项目路径取 jsonl 行的 `cwd` 字段（**不反推目录名**，因目录名是把 `/` 编码成 `-` 的不可逆编码）。
+- **jsonl 行解析（cc/collector.rs）**：宽松反序列化（`#[serde(default)]` + 未知字段忽略 + content 为 `Option<Value>`）。camelCase 字段需 `#[serde(rename)]`：`sessionId`/`gitBranch`/`version`（Rust 字段名 snake_case，rename 到 jsonl 的 camelCase）。过滤条件：`type=="user" && message.role=="user" && content 为 Value::String && trim 非空 && 不以 '/' 开头(slash命令) && 不以 '!' 开头(bash命令) && uuid/cwd/timestamp 齐全` → 产出 Extracted。content 为 array（工具结果回显）跳过。sessionId 缺失回退 `unknown-{timestamp}`。
+- **两条入库路径严格分离（关键约束）**：
+  - **采集** `cc_history_repo.bulk_ingest` → `INSERT OR IGNORE`，**绝不覆盖已存在行**（否则会把同步合并出的 vector_clock 因果历史打回 {device_id:1}）；返回 rows_affected 累加 = 新插入数。
+  - **同步** `cc_history_repo.bulk_upsert` → `INSERT OR REPLACE`（合并决策由 merger 在调用前完成）。
+- **vector_clock 采集恒 `{本机device_id:1}` 且永不递增**；仅 `delete_cc_prompt` 软删除时 `increment` 本设备计数器（CRDT 删除是一次写入，需让对端感知）。这与 prompts（每次 update/delete 都递增）不同——cc 历史是只读采集 + 可删除，无编辑语义。
+- **增量去重（scan_state）**：`claude_history_scan_state` 表存每个 jsonl 文件的 `(mtime_sec, size)`；扫描时比对，未变跳过。fs IO 全部在 `tokio::task::spawn_blocking` 内（枚举目录、读 metadata、`BufReader::lines()` 流式解析），不阻塞 async runtime；device_id 在 await 前 clone 出 String。单行解析失败 `tracing::warn` 跳过不中断。
+- **id 规则**：`{session_id}:{uuid}`（同 session 内 uuid 唯一，跨 session 用 session_id 前缀隔离）。
+- **采集器生命周期（cc/collector.rs::start）**：`tokio::spawn` 后台任务 → 立即 `scan_once` 一次 → `interval(300s)` + `MissedTickBehavior::Skip`，先 `tick()` 吃掉首次立即触发 → `loop { select!{ cancel.cancelled()=>break, ticker.tick()=>scan_once } }`。scan_once 错误仅 `tracing::error` 不 panic。返回 `CancellationToken` 存入 `AppState.cc_collector_cancel`，应用 `RunEvent::Exit` 时 `cancel()` 优雅停止。
+- **同步链路（cc/engine.rs::cc_sync_with_peer，独立于 prompts）**：由 `sync/engine.rs::sync_with_peer` 末尾追加调用（`let _ = cc_sync_with_peer(state, device).await;`，cc 失败仅 warn 不影响 prompts 同步计数）。流程同构 sync_with_peer：health → 本端 summaries → `peer_client.cc_sync_pull` → 逐条 `get` + `merge_cc_history`（仅变化才收集）→ `bulk_upsert` → 重新取全量算补集 `cc_sync_push`。
+- **合并（cc/merger.rs）**：`should_update_cc`/`wins_concurrent_cc`/`merge_cc_history`，**直接 use `crate::sync::vector_clock::{compare,merge}`**（不重复实现向量时钟）。策略与 sync/merger.rs 完全一致：严格领先覆盖、并发 LWW、时间戳相等用 device_id 字典序 tie-break（确定性）。deleted 历史照常参与同步传播。
+- **P2P 端点（net/routes/cc_history.rs，snake_case 互通）**：`POST /api/cc-history/sync/pull`（body `{summaries:[{id,vector_clock}]}` 返回 `{items:[ClaudeHistoryRow]}`）+ `POST /api/cc-history/sync/push`（body `{items:[...]}`，逐条 merge 后 bulk_upsert，返回 `{accepted}`）。http_server.rs Router 已注册。peer_client 加 `cc_sync_pull`/`cc_sync_push` 两方法（URL `{base_url}/api/cc-history/sync/{pull,push}`，失败返回空/false 不阻断）。
+- **数据模型（cc/models.rs）**：`ClaudeHistoryRow`（snake_case，DB/同步，含 project_path/project_name/session_id/content/git_branch?/cc_version?/occurred_at/device_id/vector_clock/created_at/updated_at/deleted）+ `ClaudeHistoryDto`（camelCase，前端）+ `CcProjectDto`（camelCase：projectPath/projectName/count/lastOccurredAt，list_projects 聚合产出）。`derive_project_name` 取 project_path 末段。
+- **命令层（commands/cc_history.rs，lib.rs invoke_handler 注册 5 个）**：`list_cc_projects`/`list_cc_prompts(projectPath,search?)`/`get_cc_prompt(id)`/`refresh_cc_history`(调 scan_once 返回 `{ok,collected}`)/`delete_cc_prompt(id)`(软删除 + increment vector_clock)。
+- **建表（lib.rs）**：常量 `CC_HISTORY_SCHEMA`/`CC_SCAN_STATE_SCHEMA`/`CC_INDEXES`（idx_ch_proj=project_path+occurred_at DESC、idx_ch_dev=device_id），在 init_db 内 TRANSFER_SCHEMA 之后执行。CC_INDEXES 含多条语句，sqlx 默认不开多语句，按 `;` split 逐条 execute。
+- **AppState 扩展**：`cc_history_repo: Arc<ClaudeHistoryRepo>`、`cc_collector_cancel: Arc<Mutex<Option<CancellationToken>>>`。
 
 ## 关键约定
 

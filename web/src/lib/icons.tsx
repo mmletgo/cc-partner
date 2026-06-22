@@ -205,3 +205,11 @@ export const ScratchpadIcon = ({ size, ...rest }: IconProps) => (
     <path d="M6 8h4M6 10.5h3" />
   </svg>
 );
+
+export const HistoryIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="M2.5 7.5a5.5 5.5 0 1 0 1.7-3.95" />
+    <path d="M3 1.5v3h3" />
+    <path d="M8 5v3.2l2 1.3" />
+  </svg>
+);

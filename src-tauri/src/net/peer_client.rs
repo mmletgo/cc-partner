@@ -30,6 +30,20 @@ struct SyncPushResp {
     accepted: u64,
 }
 
+/// cc-history/sync/pull 响应体（字段名对照 routes/cc_history.rs 的 CcSyncPullResp）。
+#[derive(Debug, serde::Deserialize)]
+struct CcSyncPullResp {
+    #[serde(default)]
+    items: Vec<crate::cc::models::ClaudeHistoryRow>,
+}
+
+/// cc-history/sync/push 响应体（字段名对照 routes/cc_history.rs 的 CcSyncPushResp）。
+#[derive(Debug, serde::Deserialize)]
+struct CcSyncPushResp {
+    #[serde(default)]
+    accepted: u64,
+}
+
 /// 对端 HTTP 客户端，封装 reqwest::Client。
 ///
 /// Business Logic: 所有对端调用复用同一 Client（内部连接池），提升效率。
@@ -231,6 +245,88 @@ impl PeerClient {
         resp.json::<serde_json::Value>()
             .await
             .map_err(|e| format!("status 响应解析失败: {e}"))
+    }
+
+    /// Claude Code 历史同步 pull：向对端发送本端 cc 历史摘要，获取对端认为本端需要的 cc 历史。
+    ///
+    /// Business Logic: CC 历史同步第一步——把本端摘要发给对端，对端比对后返回本端需要更新的
+    ///     cc 历史完整数据。走独立链路 `/api/cc-history/sync/pull`，与 prompts 同步解耦。
+    ///
+    /// Code Logic: POST `{base_url}/api/cc-history/sync/pull`，请求体 `{summaries: [...]}`，
+    ///     期望响应 `{items: [ClaudeHistoryRow snake_case, ...]}`。失败返回空 Vec（不阻断同步）。
+    pub async fn cc_sync_pull(
+        &self,
+        base_url: &str,
+        local_summary: Vec<serde_json::Value>,
+    ) -> Vec<crate::cc::models::ClaudeHistoryRow> {
+        let url = format!("{base_url}/api/cc-history/sync/pull");
+        let body = serde_json::json!({ "summaries": local_summary });
+        match self.client.post(&url).json(&body).send().await {
+            Ok(resp) if resp.status().as_u16() == 200 => {
+                match resp.json::<CcSyncPullResp>().await {
+                    Ok(data) => {
+                        tracing::info!(
+                            "cc_sync_pull 从 {base_url} 获取 {} 条 CC 历史",
+                            data.items.len()
+                        );
+                        data.items
+                    }
+                    Err(e) => {
+                        tracing::error!("cc_sync_pull 解析响应失败 ({base_url}): {e}");
+                        Vec::new()
+                    }
+                }
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    "cc_sync_pull 失败 ({base_url}): HTTP {}",
+                    resp.status()
+                );
+                Vec::new()
+            }
+            Err(e) => {
+                tracing::error!("cc_sync_pull 异常 ({base_url}): {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Claude Code 历史同步 push：将本端有而对端缺少的 cc 历史推送给对端。
+    ///
+    /// Business Logic: CC 历史同步第二步——把本端独有或领先的 cc 历史推过去。
+    ///
+    /// Code Logic: POST `{base_url}/api/cc-history/sync/push`，请求体 `{items: [...]}`，
+    ///     期望响应 `{accepted: <count>}`。HTTP 200 即视为成功。
+    pub async fn cc_sync_push(
+        &self,
+        base_url: &str,
+        items: &[crate::cc::models::ClaudeHistoryRow],
+    ) -> bool {
+        let url = format!("{base_url}/api/cc-history/sync/push");
+        let body = serde_json::json!({ "items": items });
+        match self.client.post(&url).json(&body).send().await {
+            Ok(resp) if resp.status().as_u16() == 200 => match resp.json::<CcSyncPushResp>().await {
+                Ok(data) => {
+                    tracing::info!(
+                        "cc_sync_push 到 {base_url} 成功，对端接收 {} 条",
+                        data.accepted
+                    );
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!("cc_sync_push 响应解析失败 ({base_url}): {e}");
+                    true
+                }
+            },
+            Ok(resp) => {
+                tracing::warn!("cc_sync_push 失败 ({base_url}): HTTP {}", resp.status());
+                false
+            }
+            Err(e) => {
+                tracing::error!("cc_sync_push 异常 ({base_url}): {e}");
+                false
+            }
+        }
     }
 }
 

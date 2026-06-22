@@ -21,6 +21,7 @@ import {
   HomeIcon,
   TransferIcon,
   PromptsIcon,
+  HistoryIcon,
   ScratchpadIcon,
   DevicesIcon,
   SettingsIcon,
@@ -69,6 +70,7 @@ export function AppShell({ children }: AppShellProps) {
           <NavItem to="/" label={t('nav:home')} icon={<HomeIcon />} />
           <NavItem to="/transfer" label={t('nav:transfer')} icon={<TransferIcon />} />
           <NavItem to="/prompts" label={t('nav:prompts')} icon={<PromptsIcon />} />
+          <NavItem to="/cc-history" label={t('nav:ccHistory')} icon={<HistoryIcon />} />
           <NavItem to="/scratchpad" label={t('nav:scratchpad')} icon={<ScratchpadIcon />} />
           <NavItem to="/devices" label={t('nav:devices')} icon={<DevicesIcon />} />
           <NavItem to="/settings" label={t('nav:settings')} icon={<SettingsIcon />} />

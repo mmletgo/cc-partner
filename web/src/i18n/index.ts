@@ -23,6 +23,7 @@ import enDevices from './locales/en/devices.json';
 import enScratchpad from './locales/en/scratchpad.json';
 import enWelcome from './locales/en/welcome.json';
 import enSettings from './locales/en/settings.json';
+import enCcHistory from './locales/en/ccHistory.json';
 
 import zhCommon from './locales/zh/common.json';
 import zhNav from './locales/zh/nav.json';
@@ -33,6 +34,7 @@ import zhDevices from './locales/zh/devices.json';
 import zhScratchpad from './locales/zh/scratchpad.json';
 import zhWelcome from './locales/zh/welcome.json';
 import zhSettings from './locales/zh/settings.json';
+import zhCcHistory from './locales/zh/ccHistory.json';
 
 export type AppLanguage = 'en' | 'zh';
 export const LANGUAGE_STORAGE_KEY = 'cp-lang';
@@ -67,6 +69,7 @@ export const resources = {
     scratchpad: enScratchpad,
     welcome: enWelcome,
     settings: enSettings,
+    ccHistory: enCcHistory,
   },
   zh: {
     common: zhCommon,
@@ -78,6 +81,7 @@ export const resources = {
     scratchpad: zhScratchpad,
     welcome: zhWelcome,
     settings: zhSettings,
+    ccHistory: zhCcHistory,
   },
 } as const;
 

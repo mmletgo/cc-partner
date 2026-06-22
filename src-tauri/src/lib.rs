@@ -11,6 +11,7 @@
 //!     setup 闭包内：load config → 建 SqlitePool（WAL + 手动建表）→ 构造 AppState → manage。
 //!     所有命令在 invoke_handler 注册。保留 M0 的 ping。
 
+mod cc;
 mod commands;
 mod config;
 mod error;
@@ -31,13 +32,13 @@ use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::commands::{
-    config as config_cmd, devices as device_cmd, permissions as permissions_cmd,
-    prompts as prompt_cmd, screenshot as screenshot_cmd, sync as sync_cmd,
-    transfer as transfer_cmd, updater as updater_cmd,
+    cc_history as cc_history_cmd, config as config_cmd, devices as device_cmd,
+    permissions as permissions_cmd, prompts as prompt_cmd, screenshot as screenshot_cmd,
+    sync as sync_cmd, transfer as transfer_cmd, updater as updater_cmd,
 };
 use crate::net::{discovery, http_server, peer_client::PeerClient};
 use crate::state::AppState;
-use crate::storage::{PromptRepo, TransferRepo};
+use crate::storage::{ClaudeHistoryRepo, PromptRepo, TransferRepo};
 use crate::transfer::registry::TransferRegistry;
 use tauri::Manager;
 
@@ -77,6 +78,38 @@ const TRANSFER_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS transfer_history (
     completed_at TEXT
 )";
 
+/// Claude Code 历史 prompt 表（采集入库 + 跨设备同步）。
+///
+/// Business Logic: 存储从 ~/.claude/projects jsonl 采集的用户输入 prompt，按 project_path 归类。
+///     vector_clock 采集恒 {device_id:1}，仅 delete_cc_prompt 软删除时递增；deleted 软删除传播。
+const CC_HISTORY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS claude_history (
+    id TEXT PRIMARY KEY,
+    project_path TEXT NOT NULL,
+    project_name TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    git_branch TEXT,
+    cc_version TEXT,
+    occurred_at TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    vector_clock TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted INTEGER DEFAULT 0
+)";
+
+/// CC 历史采集扫描状态表（增量去重：记录每个 jsonl 文件的 mtime/size，未变则跳过）。
+const CC_SCAN_STATE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS claude_history_scan_state (
+    file_path TEXT PRIMARY KEY,
+    mtime_sec INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    scanned_at TEXT NOT NULL
+)";
+
+/// CC 历史表索引（项目路径+时间倒序查询、设备_id 查询加速）。
+const CC_INDEXES: &str = "CREATE INDEX IF NOT EXISTS idx_ch_proj ON claude_history(project_path, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ch_dev ON claude_history(device_id)";
+
 /// 初始化数据库连接池：开启 WAL，手动建表，返回 SqlitePool。
 ///
 /// Business Logic: 单连接语义与 Python aiosqlite 一致（max_connections(1)）。
@@ -93,6 +126,17 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, error::AppError> {
     // 手动建表（不用 migrate! 宏，规避旧库无 _sqlx_migrations 表的坑）
     sqlx::query(PROMPTS_SCHEMA).execute(&pool).await?;
     sqlx::query(TRANSFER_SCHEMA).execute(&pool).await?;
+    // Claude Code 历史表 + 扫描状态表（在 TRANSFER_SCHEMA 之后执行）
+    sqlx::query(CC_HISTORY_SCHEMA).execute(&pool).await?;
+    sqlx::query(CC_SCAN_STATE_SCHEMA).execute(&pool).await?;
+    // CC 索引：CC_INDEXES 含多条语句，sqlx 默认不开启多语句，按 ';' 拆分逐条执行
+    for stmt in CC_INDEXES.split(';') {
+        let s = stmt.trim();
+        if s.is_empty() {
+            continue;
+        }
+        sqlx::query(s).execute(&pool).await?;
+    }
     Ok(pool)
 }
 
@@ -135,6 +179,7 @@ pub fn run() {
                 let device_id = config.device_id.clone();
                 let prompt_repo = Arc::new(PromptRepo::new(pool.clone()));
                 let transfer_repo = Arc::new(TransferRepo::new(pool.clone()));
+                let cc_history_repo = Arc::new(ClaudeHistoryRepo::new(pool.clone()));
                 let state = AppState {
                     config: Arc::new(RwLock::new(config)),
                     db: pool,
@@ -155,6 +200,9 @@ pub fn run() {
                     update_bytes: Arc::new(Mutex::new(None)),
                     update_download_task: Arc::new(Mutex::new(None)),
                     update_cancel_token: Arc::new(Mutex::new(None)),
+                    // Claude Code 历史：仓库 + 采集器取消令牌（start 在 manage 之后调用）
+                    cc_history_repo,
+                    cc_collector_cancel: Arc::new(Mutex::new(None)),
                 };
 
                 // 4) 启动 axum HTTP server（绑定动态端口，回填 actual_http_port）
@@ -176,6 +224,14 @@ pub fn run() {
 
             // 注入共享状态供命令层使用（axum/mDNS 已持有同一份 Arc 的 Clone）
             app.manage(state);
+
+            // 启动 Claude Code 历史采集器（立即扫一次 + 每 5 分钟增量扫描），
+            // 取消令牌存入 AppState 供应用退出时优雅停止。
+            {
+                let state: tauri::State<'_, AppState> = app.state();
+                let cancel = crate::cc::collector::start(state.inner().clone());
+                *state.cc_collector_cancel.lock().unwrap() = Some(cancel);
+            }
 
             // M7：创建系统托盘（图标 + 菜单 + 双击显窗），失败仅记录不阻断启动
             if let Err(e) = tray::build_tray(app.handle()) {
@@ -224,6 +280,12 @@ pub fn run() {
             updater_cmd::get_download_status,
             updater_cmd::cancel_download,
             updater_cmd::install_update,
+            // Claude Code 历史（5 命令：项目列表 / 项目内 prompt 列表 / 详情 / 手动刷新 / 删除）
+            cc_history_cmd::list_cc_projects,
+            cc_history_cmd::list_cc_prompts,
+            cc_history_cmd::get_cc_prompt,
+            cc_history_cmd::refresh_cc_history,
+            cc_history_cmd::delete_cc_prompt,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {
@@ -238,6 +300,11 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 let state: tauri::State<'_, AppState> = app_handle.state();
                 discovery::stop_discovery(&state);
+                // 停止 Claude Code 历史采集器后台任务
+                if let Some(t) = state.cc_collector_cancel.lock().unwrap().take() {
+                    t.cancel();
+                    tracing::info!("CC 历史采集器已停止");
+                }
                 tracing::info!("应用已退出，mDNS 已注销");
             }
         });

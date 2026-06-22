@@ -6,6 +6,7 @@
 //! Code Logic: 通过 `State<'_, AppState>` 注入依赖；参数与返回均 camelCase 对齐前端；
 //!     所有命令返回 `Result<T, AppError>`，错误序列化为 `{"error": "..."}` 给前端。
 
+pub mod cc_history;
 pub mod config;
 pub mod devices;
 pub mod permissions;
