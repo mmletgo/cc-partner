@@ -4,10 +4,10 @@
  * Business Logic（为什么需要这个模块）:
  *   久坐监测 / 工作休息状态机 / 系统通知提醒需要前端读写：开关监测、
  *   手动暂停/贪睡/跳过、读取当前状态与今日活跃统计、整体配置回写。
- *   本模块封装这 7 个 invoke 调用，供 Health 页消费。
+ *   本模块封装这 8 个 invoke 调用，供 Health 页与 toast 消费。
  *
  * Code Logic（这个模块做什么）:
- *   基于 invoke 封装 7 个命令，返回类型化的 Promise，参数字段 camelCase
+ *   基于 invoke 封装 8 个命令，返回类型化的 Promise，参数字段 camelCase
  *   对齐 Rust #[tauri::command] 签名。
  */
 
@@ -32,6 +32,9 @@ export const healthApi = {
 
   /** 跳过本次提醒（重置状态机回 Idle + 清贪睡） */
   skip: () => invoke<void>('skip_reminder'),
+
+  /** 记录一次喝水（health:water 提醒 toast 的「已喝水」按钮调用） */
+  recordWater: () => invoke<void>('record_water'),
 
   /** 整体覆盖 config.health（工作窗口/休息/通知/记录标题/免打扰/保留天数） */
   updateConfig: (config: HealthConfig) =>

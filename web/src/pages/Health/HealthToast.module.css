@@ -1,0 +1,52 @@
+/* 健康提醒 toast 样式
+ * 主窗口右下角常驻悬浮卡,复用 design token + 与 Health 页一致的视觉语言
+ */
+
+.toast {
+  position: fixed;
+  right: var(--space-6);
+  bottom: var(--space-6);
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 300px;
+  padding: var(--space-4) var(--space-5);
+  background: var(--bg-elevated, var(--bg));
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  box-sizing: border-box;
+}
+
+/* 喝水 toast 上移避免与久坐 toast 重叠 */
+.toastWater {
+  bottom: auto;
+  top: var(--space-6);
+  right: var(--space-6);
+  background: var(--accent-soft);
+  border-color: color-mix(in oklab, var(--accent) 30%, transparent);
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+  line-height: var(--leading-tight);
+}
+
+.body {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}

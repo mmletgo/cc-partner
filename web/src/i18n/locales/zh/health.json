@@ -19,6 +19,12 @@
   "idleMinutes": "休息 {{n}} 分钟",
   "reminderTitle": "该起来活动一下啦 🌿",
   "reminderBody": "连续工作已久,站起来走走、伸展一下吧。",
+  "snooze5": "推迟 5 分钟",
+  "snooze10": "推迟 10 分钟",
+  "skip": "跳过本次",
+  "waterTitle": "该喝水啦 💧",
+  "waterBody": "记得补充水分,喝口水再继续。",
+  "drank": "已喝水",
   "snoozed": "已推迟提醒",
   "skipped": "已跳过本次提醒"
 }

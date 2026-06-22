@@ -19,6 +19,12 @@
   "idleMinutes": "Idle {{n}} min",
   "reminderTitle": "Time to stand up and move 🌿",
   "reminderBody": "You've been working for a while. Stand up and stretch a bit.",
+  "snooze5": "Snooze 5 min",
+  "snooze10": "Snooze 10 min",
+  "skip": "Skip this time",
+  "waterTitle": "Time to drink water 💧",
+  "waterBody": "Remember to stay hydrated. Have a sip of water.",
+  "drank": "Drank water",
   "snoozed": "Reminder snoozed",
   "skipped": "Reminder skipped"
 }
