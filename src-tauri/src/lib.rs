@@ -12,6 +12,7 @@
 //!     所有命令在 invoke_handler 注册。保留 M0 的 ping。
 
 mod cc;
+mod cloud_sync;
 mod commands;
 mod config;
 mod error;
@@ -32,7 +33,8 @@ use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::commands::{
-    cc_history as cc_history_cmd, claude_md as claude_md_cmd, config as config_cmd,
+    cc_history as cc_history_cmd, claude_md as claude_md_cmd, cloud_sync as cloud_sync_cmd,
+    config as config_cmd,
     devices as device_cmd,
     permissions as permissions_cmd, prompts as prompt_cmd, screenshot as screenshot_cmd,
     sync as sync_cmd, transfer as transfer_cmd, updater as updater_cmd,
@@ -216,6 +218,8 @@ pub fn run() {
                     // Claude Code 历史：仓库 + 采集器取消令牌（start 在 manage 之后调用）
                     cc_history_repo,
                     cc_collector_cancel: Arc::new(Mutex::new(None)),
+                    // 云端同步：后台 scheduler 取消令牌（start 在 manage 之后调用）
+                    cloud_sync_cancel: Arc::new(Mutex::new(None)),
                 };
 
                 // 4) 启动 axum HTTP server（绑定动态端口，回填 actual_http_port）
@@ -244,6 +248,14 @@ pub fn run() {
                 let state: tauri::State<'_, AppState> = app.state();
                 let cancel = crate::cc::collector::start(state.inner().clone());
                 *state.cc_collector_cancel.lock().unwrap() = Some(cancel);
+            }
+
+            // 启动云端同步后台 scheduler（无条件启动；内部每 tick 按 config 的 enabled/auto/
+            // interval 决定是否真同步）。取消令牌存入 AppState 供应用退出时优雅停止。
+            {
+                let state: tauri::State<'_, AppState> = app.state();
+                let cancel = crate::cloud_sync::scheduler::start(state.inner().clone());
+                *state.cloud_sync_cancel.lock().unwrap() = Some(cancel);
             }
 
             // M7：创建系统托盘（图标 + 菜单 + 双击显窗），失败仅记录不阻断启动
@@ -302,6 +314,11 @@ pub fn run() {
             cc_history_cmd::get_cc_prompt,
             cc_history_cmd::refresh_cc_history,
             cc_history_cmd::delete_cc_prompt,
+            // 云端同步（GitHub 私有仓库）：配置读写 / 手动触发 / 测试连通
+            cloud_sync_cmd::get_cloud_sync_config,
+            cloud_sync_cmd::update_cloud_sync_config,
+            cloud_sync_cmd::trigger_cloud_sync_cmd,
+            cloud_sync_cmd::test_cloud_sync,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {
@@ -320,6 +337,11 @@ pub fn run() {
                 if let Some(t) = state.cc_collector_cancel.lock().unwrap().take() {
                     t.cancel();
                     tracing::info!("CC 历史采集器已停止");
+                }
+                // 停止云端同步后台 scheduler
+                if let Some(t) = state.cloud_sync_cancel.lock().unwrap().take() {
+                    t.cancel();
+                    tracing::info!("云端同步 scheduler 已停止");
                 }
                 tracing::info!("应用已退出，mDNS 已注销");
             }

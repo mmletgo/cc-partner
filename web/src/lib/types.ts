@@ -49,6 +49,55 @@ export interface AppConfig {
   httpPort: number;
 }
 
+/**
+ * GitHub 私有仓库云端同步配置
+ * 字段与 Rust 后端 get_cloud_sync_config / update_cloud_sync_config 命令返回对齐（camelCase）。
+ */
+export interface CloudSyncConfig {
+  /** 仓库地址，如 git@github.com:user/repo.git 或 https URL；未配置时为 null */
+  repoUrl: string | null;
+  /** 是否启用云端同步 */
+  enabled: boolean;
+  /** 是否自动定时同步 */
+  auto: boolean;
+  /** 自动同步间隔（秒） */
+  intervalSecs: number;
+  /** 同步分支；留空（null）用仓库默认分支 */
+  branch: string | null;
+}
+
+/**
+ * 触发一次云端同步的结果
+ * 字段与 Rust 后端 trigger_cloud_sync_cmd 命令返回对齐（camelCase）。
+ */
+export interface CloudSyncResult {
+  /** 同步是否成功 */
+  ok: boolean;
+  /** 本次拉取条数 */
+  pulled: number;
+  /** 本次推送条数 */
+  pushed: number;
+  /** 备注（成功/失败说明） */
+  note: string;
+  /** 同步完成时间（ISO） */
+  syncedAt: string;
+}
+
+/**
+ * 云端同步连通性测试结果
+ * 字段与 Rust 后端 test_cloud_sync 命令返回对齐（camelCase）。
+ */
+export interface TestCloudSyncResult {
+  /** 测试是否通过 */
+  ok: boolean;
+  /** 本机 git 版本（获取失败时为 null） */
+  gitVersion: string | null;
+  /** 仓库默认分支（获取失败时为 null） */
+  defaultBranch: string | null;
+  /** 失败原因（成功时为 null） */
+  error: string | null;
+}
+
 export interface VersionInfo {
   version: string;
   buildDate: string;

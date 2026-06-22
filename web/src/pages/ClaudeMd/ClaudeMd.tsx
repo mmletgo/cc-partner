@@ -56,6 +56,9 @@ export function ClaudeMd() {
   }, [showToast]);
 
   useEffect(() => {
+    // 挂载时拉取 CLAUDE.md：fetch 后 setState 是合法的 mount-load 模式，
+    // set-state-in-effect 规则对此误报，局部豁免。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
 

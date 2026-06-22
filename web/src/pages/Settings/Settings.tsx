@@ -25,7 +25,15 @@ import { CheckIcon, XIcon, DevicesIcon, FolderIcon, KeyboardIcon, SyncIcon, Info
 import { configApi } from '@/api/config';
 import { usePermissions } from '@/hooks/usePermissions';
 import { mapPermissions } from '@/lib/permissionEntries';
-import type { VersionInfo, UpdateCheckResult, UpdateDownloadStatus, PermissionType } from '@/lib/types';
+import type {
+  VersionInfo,
+  UpdateCheckResult,
+  UpdateDownloadStatus,
+  PermissionType,
+  CloudSyncConfig,
+  CloudSyncResult,
+  TestCloudSyncResult,
+} from '@/lib/types';
 import styles from './Settings.module.css';
 
 /** 单个快捷键字段定义（label/helper 在渲染时按 i18n 解析，这里只存可本地化的 id） */
@@ -50,6 +58,15 @@ interface SettingsState {
   receiveDir: string;
   shortcuts: ShortcutField[];
   toggles: ToggleField[];
+}
+
+/** 云端同步 Card 的可编辑表单值（受控输入，与已应用配置分离） */
+interface CloudSyncForm {
+  repoUrl: string;
+  branch: string;
+  enabled: boolean;
+  auto: boolean;
+  intervalSecs: number;
 }
 
 /** 快捷键字段定义（值本地化，文案走 t） */
@@ -107,6 +124,45 @@ function buildUpdateHint(
   return t('about.upToDate');
 }
 
+/** 云端同步表单的默认值（用于初次加载前的占位） */
+const DEFAULT_CLOUD_SYNC_FORM: CloudSyncForm = {
+  repoUrl: '',
+  branch: '',
+  enabled: false,
+  auto: false,
+  intervalSecs: 300,
+};
+
+/**
+ * 将后端返回的 CloudSyncConfig 映射为受控表单值
+ *
+ * @param config 后端云端同步配置（可能为 null）
+ * @returns 表单初始值
+ */
+function cloudSyncConfigToForm(config: CloudSyncConfig | null): CloudSyncForm {
+  if (!config) return { ...DEFAULT_CLOUD_SYNC_FORM };
+  return {
+    repoUrl: config.repoUrl ?? '',
+    branch: config.branch ?? '',
+    enabled: config.enabled,
+    auto: config.auto,
+    intervalSecs: config.intervalSecs,
+  };
+}
+
+/**
+ * 把 ISO 时间字符串格式化为 "HH:MM:SS" 本地时间
+ *
+ * @param iso ISO 时间字符串
+ * @returns 形如 "12:34:56" 的本地时间
+ */
+function formatIsoTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 /**
  * Settings 页面组件
  *
@@ -127,6 +183,16 @@ export function Settings() {
   const [installing, setInstalling] = useState(false);
   const [saving, setSaving] = useState(false);
   const [choosingDir, setChoosingDir] = useState(false);
+
+  // 云端同步（GitHub 私有仓库）独立操作块：表单值 / 已应用配置 / 上次同步结果 / 测试结果 / 各动作 loading
+  const [cloudSyncForm, setCloudSyncForm] = useState<CloudSyncForm>({ ...DEFAULT_CLOUD_SYNC_FORM });
+  const [cloudSync, setCloudSync] = useState<CloudSyncConfig | null>(null);
+  const [syncResult, setSyncResult] = useState<CloudSyncResult | null>(null);
+  const [testResult, setTestResult] = useState<TestCloudSyncResult | null>(null);
+  const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   // macOS 权限状态（设置页手动授权入口，持续轮询以反映用户在系统设置的变更）
   const [tWelcome] = useTranslation('welcome');
@@ -285,9 +351,10 @@ export function Settings() {
 
     async function loadConfig() {
       try {
-        const [config, version] = await Promise.all([
+        const [config, version, cloudSyncConfig] = await Promise.all([
           configApi.get(),
           configApi.version(),
+          configApi.getCloudSyncConfig(),
         ]);
         if (cancelled) return;
 
@@ -306,6 +373,9 @@ export function Settings() {
         // 把已加载配置作为"未保存"比较的基准快照
         setInitialState(loaded);
         setVersionInfo(version);
+        // 云端同步：初始化已应用配置与受控表单值
+        setCloudSync(cloudSyncConfig);
+        setCloudSyncForm(cloudSyncConfigToForm(cloudSyncConfig));
       } catch (err) {
         if (cancelled) return;
         setLoadError(err instanceof Error ? err.message : t('error.loadConfigFailed'));
@@ -396,6 +466,82 @@ export function Settings() {
       // 安装失败静默，用户可重试
     } finally {
       setInstalling(false);
+    }
+  };
+
+  /**
+   * 更新云端同步表单的某个字段（浅合并）
+   *
+   * @param partial 待合并的字段
+   */
+  const patchCloudSyncForm = useCallback((partial: Partial<CloudSyncForm>) => {
+    setCloudSyncForm((prev) => ({ ...prev, ...partial }));
+  }, []);
+
+  /**
+   * 云端同步「测试连接」：探测 git 可用性与仓库默认分支
+   */
+  const handleTestCloudSync = async () => {
+    setTesting(true);
+    setCloudSyncError(null);
+    setTestResult(null);
+    try {
+      const result = await configApi.testCloudSync();
+      setTestResult(result);
+    } catch (err) {
+      setTestResult({
+        ok: false,
+        gitVersion: null,
+        defaultBranch: null,
+        error: err instanceof Error ? err.message : t('cloudSync.testFailed', { error: '' }).trim(),
+      });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  /**
+   * 云端同步「应用配置」：把当前表单值提交到后端，并用返回值刷新已应用配置
+   */
+  const handleApplyCloudSync = async () => {
+    setApplying(true);
+    setCloudSyncError(null);
+    try {
+      const updated = await configApi.updateCloudSyncConfig({
+        repoUrl: cloudSyncForm.repoUrl.trim() || null,
+        enabled: cloudSyncForm.enabled,
+        auto: cloudSyncForm.auto,
+        intervalSecs: cloudSyncForm.intervalSecs,
+        branch: cloudSyncForm.branch.trim() || null,
+      });
+      setCloudSync(updated);
+      setCloudSyncForm(cloudSyncConfigToForm(updated));
+    } catch (err) {
+      setCloudSyncError(err instanceof Error ? err.message : t('cloudSync.applyFailed'));
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  /**
+   * 云端同步「立即同步」：触发一次 pull + push，展示结果
+   */
+  const handleSyncNow = async () => {
+    setSyncing(true);
+    setCloudSyncError(null);
+    try {
+      const result = await configApi.triggerCloudSync();
+      setSyncResult(result);
+    } catch (err) {
+      setSyncResult({
+        ok: false,
+        pulled: 0,
+        pushed: 0,
+        note: err instanceof Error ? err.message : t('cloudSync.syncFailed', { time: '', note: '' }),
+        syncedAt: new Date().toISOString(),
+      });
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -582,6 +728,218 @@ export function Settings() {
                 </button>
               ))}
             </div>
+          </Card.Body>
+        </Card>
+
+        {/* Card: 云端同步（GitHub 私有仓库，独立操作块，不混入底部统一 Save） */}
+        <Card variant="flat" padding="md">
+          <Card.Header>
+            <h2 className={styles.sectionTitle}>{t('settings:cloudSync.title')}</h2>
+          </Card.Header>
+          <Card.Body padding="md">
+            <p className={styles.helper}>{t('settings:cloudSync.subtitle')}</p>
+
+            {/* 仓库地址 */}
+            <div className={styles.field}>
+              <label className={styles.label} htmlFor="settings-cloud-repo-url">
+                {t('settings:cloudSync.repoUrl.label')}
+              </label>
+              <Input
+                id="settings-cloud-repo-url"
+                type="text"
+                value={cloudSyncForm.repoUrl}
+                onChange={(e) => patchCloudSyncForm({ repoUrl: e.target.value })}
+                mono
+              />
+              <p className={styles.helper}>{t('settings:cloudSync.repoUrl.helper')}</p>
+            </div>
+
+            {/* 分支 */}
+            <div className={styles.field}>
+              <label className={styles.label} htmlFor="settings-cloud-branch">
+                {t('settings:cloudSync.branch.label')}
+              </label>
+              <Input
+                id="settings-cloud-branch"
+                type="text"
+                value={cloudSyncForm.branch}
+                onChange={(e) => patchCloudSyncForm({ branch: e.target.value })}
+                mono
+              />
+              <p className={styles.helper}>{t('settings:cloudSync.branch.helper')}</p>
+            </div>
+
+            {/* 同步间隔 */}
+            <div className={styles.field}>
+              <label className={styles.label} htmlFor="settings-cloud-interval">
+                {t('settings:cloudSync.interval.label')}
+              </label>
+              <Input
+                id="settings-cloud-interval"
+                type="number"
+                value={cloudSyncForm.intervalSecs}
+                onChange={(e) =>
+                  patchCloudSyncForm({ intervalSecs: Number(e.target.value) || 0 })
+                }
+                mono
+              />
+              <p className={styles.helper}>{t('settings:cloudSync.interval.helper')}</p>
+            </div>
+
+            {/* 启用 / 自动定时 Toggle，复用同步与存储 Card 的视觉风格 */}
+            <div className={styles.toggleList}>
+              <button
+                type="button"
+                className={styles.toggleRow}
+                onClick={() => patchCloudSyncForm({ enabled: !cloudSyncForm.enabled })}
+                role="switch"
+                aria-checked={cloudSyncForm.enabled}
+                aria-label={t('settings:cloudSync.enabled.label')}
+              >
+                <div className={styles.toggleText}>
+                  <span className={styles.toggleLabel}>
+                    {t('settings:cloudSync.enabled.label')}
+                  </span>
+                  <span className={styles.toggleHelper}>
+                    {t('settings:cloudSync.enabled.helper')}
+                  </span>
+                </div>
+                <span className={styles.toggleState}>
+                  {cloudSyncForm.enabled ? (
+                    <Pill tone="success" dot>
+                      <CheckIcon size={12} />
+                      {t('settings:sync.enabled')}
+                    </Pill>
+                  ) : (
+                    <Pill tone="neutral" dot>
+                      <XIcon size={12} />
+                      {t('settings:sync.disabled')}
+                    </Pill>
+                  )}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                className={styles.toggleRow}
+                onClick={() => patchCloudSyncForm({ auto: !cloudSyncForm.auto })}
+                role="switch"
+                aria-checked={cloudSyncForm.auto}
+                aria-label={t('settings:cloudSync.auto.label')}
+              >
+                <div className={styles.toggleText}>
+                  <span className={styles.toggleLabel}>
+                    {t('settings:cloudSync.auto.label')}
+                  </span>
+                  <span className={styles.toggleHelper}>
+                    {t('settings:cloudSync.auto.helper')}
+                  </span>
+                </div>
+                <span className={styles.toggleState}>
+                  {cloudSyncForm.auto ? (
+                    <Pill tone="success" dot>
+                      <CheckIcon size={12} />
+                      {t('settings:sync.enabled')}
+                    </Pill>
+                  ) : (
+                    <Pill tone="neutral" dot>
+                      <XIcon size={12} />
+                      {t('settings:sync.disabled')}
+                    </Pill>
+                  )}
+                </span>
+              </button>
+            </div>
+
+            {/* 当前已应用配置快照（与表单待编辑值区分） */}
+            {cloudSync ? (
+              <div className={styles.metaRow}>
+                <span className={styles.metaKey}>{t('settings:cloudSync.appliedConfig')}</span>
+                <span className={styles.metaValue}>
+                  {cloudSync.enabled ? t('settings:sync.enabled') : t('settings:sync.disabled')}
+                  {' · '}
+                  {cloudSync.repoUrl || '—'}
+                  {cloudSync.branch ? ` · ${cloudSync.branch}` : ''}
+                </span>
+              </div>
+            ) : null}
+
+            {/* 操作按钮组 */}
+            <div className={styles.aboutActions}>
+              <Button
+                variant="secondary"
+                size="md"
+                icon={<SyncIcon />}
+                onClick={handleTestCloudSync}
+                disabled={testing}
+              >
+                {testing ? t('settings:cloudSync.testing') : t('settings:cloudSync.testConnection')}
+              </Button>
+              <Button
+                variant="secondary"
+                size="md"
+                onClick={handleApplyCloudSync}
+                disabled={applying}
+              >
+                {applying ? t('settings:cloudSync.applying') : t('settings:cloudSync.apply')}
+              </Button>
+              <Button
+                variant="primary"
+                size="md"
+                icon={<SyncIcon />}
+                onClick={handleSyncNow}
+                disabled={syncing}
+              >
+                {syncing ? t('settings:cloudSync.syncing') : t('settings:cloudSync.syncNow')}
+              </Button>
+            </div>
+
+            {/* 测试结果 */}
+            {testResult ? (
+              <span
+                className={styles.aboutHint}
+                style={testResult.ok ? {} : { color: 'var(--color-danger)' }}
+              >
+                <InfoIcon size={14} />
+                <span>
+                  {testResult.ok
+                    ? t('settings:cloudSync.testOk', {
+                        gitVersion: testResult.gitVersion ?? '—',
+                        branch: testResult.defaultBranch ?? '—',
+                      })
+                    : t('settings:cloudSync.testFailed', {
+                        error: testResult.error ?? '',
+                      })}
+                </span>
+              </span>
+            ) : null}
+
+            {/* 上次同步结果 */}
+            {syncResult ? (
+              <div className={styles.metaRow}>
+                <span className={styles.metaKey}>{t('settings:cloudSync.lastSync')}</span>
+                <span
+                  className={styles.metaValue}
+                  style={syncResult.ok ? {} : { color: 'var(--color-danger)' }}
+                >
+                  {syncResult.ok
+                    ? t('settings:cloudSync.syncSuccess', {
+                        time: formatIsoTime(syncResult.syncedAt),
+                        pulled: syncResult.pulled,
+                        pushed: syncResult.pushed,
+                      })
+                    : t('settings:cloudSync.syncFailed', {
+                        time: formatIsoTime(syncResult.syncedAt),
+                        note: syncResult.note,
+                      })}
+                </span>
+              </div>
+            ) : null}
+
+            {/* 应用配置 / 同步失败错误提示 */}
+            {cloudSyncError ? (
+              <span className={styles.updateError}>{cloudSyncError}</span>
+            ) : null}
           </Card.Body>
         </Card>
 

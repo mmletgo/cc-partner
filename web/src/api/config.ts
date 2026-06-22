@@ -19,10 +19,22 @@ import type {
   PermissionsStatus,
   PermissionType,
   PermissionRequestResult,
+  CloudSyncConfig,
+  CloudSyncResult,
+  TestCloudSyncResult,
 } from '@/lib/types';
 
 /** 可写的配置字段（对齐 Rust update_config 参数） */
 export type ConfigUpdate = Pick<AppConfig, 'deviceName' | 'receiveDir' | 'screenshotHotkey'>;
+
+/** 云端同步可更新字段（对齐 Rust update_cloud_sync_cmd 参数，全部可选部分更新） */
+export interface CloudSyncConfigUpdate {
+  repoUrl?: string | null;
+  enabled?: boolean;
+  auto?: boolean;
+  intervalSecs?: number;
+  branch?: string | null;
+}
 
 export const configApi = {
   /** 获取当前应用配置 */
@@ -66,4 +78,20 @@ export const configApi = {
    */
   requestPermission: (type: PermissionType, openSettings?: boolean) =>
     invoke<PermissionRequestResult>('request_permission', { type, openSettings }),
+
+  /** 获取 GitHub 私有仓库云端同步配置 */
+  getCloudSyncConfig: () => invoke<CloudSyncConfig>('get_cloud_sync_config'),
+
+  /** 更新云端同步配置（全部字段可选，部分更新） */
+  updateCloudSyncConfig: (payload: CloudSyncConfigUpdate) =>
+    invoke<CloudSyncConfig>(
+      'update_cloud_sync_config',
+      payload as unknown as Record<string, unknown>,
+    ),
+
+  /** 立即触发一次云端同步（pull + push） */
+  triggerCloudSync: () => invoke<CloudSyncResult>('trigger_cloud_sync_cmd'),
+
+  /** 测试云端同步连通性（git 可用性 + 仓库默认分支探测） */
+  testCloudSync: () => invoke<TestCloudSyncResult>('test_cloud_sync'),
 };

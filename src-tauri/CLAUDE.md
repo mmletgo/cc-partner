@@ -19,7 +19,8 @@ src/
 ├── error.rs           — AppError（thiserror + serde 成 {error:"msg"}）              [已实现]
 ├── config.rs          — AppConfig：读旧 ~/.claude-partner/config.json，缺失生成默认 [已实现]
 ├── cc/                — Claude Code 历史采集（collector）+ 合并（merger，复用 sync/vector_clock）+ 同步（engine）+ 模型 [已实现]
-├── commands/          — #[tauri::command]：prompts + cc_history + config + devices + sync + transfer + screenshot + permissions + updater [已实现]
+├── cloud_sync/        — GitHub 私有仓库云端同步（git_cli 系统 git 封装 + snapshot 工作区↔DB 导入导出 + engine 流程编排 + scheduler 轮询） [已实现]
+├── commands/          — #[tauri::command]：prompts + cc_history + cloud_sync + config + devices + sync + transfer + screenshot + permissions + updater [已实现]
 ├── models/prompt.rs   — PromptRow（snake_case，DB/同步）+ PromptDto（camelCase，前端） [已实现]
 ├── storage/prompt_repo.rs — sqlx 运行期 query（非宏），list/get/create/update/soft_delete/list_tags [已实现]
 ├── storage/cc_history_repo.rs — claude_history 表 CRUD + bulk_ingest(IGNORE)/bulk_upsert(REPLACE) + scan_state [已实现]
@@ -216,6 +217,24 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 - **同步挂载（`sync/engine.rs::trigger_sync`）**：对端遍历前 `reconcile_from_file` 一次；每个对端 `sync_with_peer`（prompts）后追加 `sync_claude_md_with_peer`（失败 warn 不阻断，**不影响 synced 计数**，计数语义保持"prompts 同步成功"）。单对端流程：health → pull → merge 落库+写文件 → 重读本地 → `compare` 决策 push（对端无数据且本地非空，或本地领先/并发）。
 - **命令层（`commands/claude_md.rs`，lib.rs invoke_handler 注册 2 个）**：`get_claude_md`（reconcile + 读 DB，None 返回空 dto）、`update_claude_md`（写文件 + `increment` vc + upsert）。同步复用 `trigger_sync`（前端 CLAUDE.md 页与 Prompts 页同步按钮都调它，一次同步全部可同步数据）。
 - **建表（lib.rs）**：常量 `CLAUDE_MD_SCHEMA`，`init_db` 内 `TRANSFER_SCHEMA` 后执行。AppState 扩展 `claude_md_repo: Arc<ClaudeMdRepo>`。
+
+## 云端同步（GitHub 私有仓库）已落地行为约定（cloud_sync/ + commands/cloud_sync.rs + config.rs 字段）
+
+- **核心模型**：把一个 GitHub 私有仓库当作"中心化对端"。**本地 SQLite + 向量时钟是权威源**，git 只承担传输与历史承载——不参与合并，只保证最终文件一致。一次同步 = detect_git → ensure_repo → 定分支 → import(merge 进本地) → export(写回工作区) → commit → push 循环。冲突解决完全复用既有 `merge_prompt`/`merge_claude_md`/`merge_cc_history`（向量时钟 + LWW + device_id tie-break），与局域网同步语义一致。同步范围与局域网一致：prompts + CLAUDE.md + CC 历史（含软删除传播）。
+- **系统 git CLI**（不引入 git 库）：`cloud_sync/git_cli.rs` 用 `tokio::process::Command` 封装系统 git，应用**不管理认证**（复用本机 git 凭证 / SSH key / credential helper / token）。`detect_git()` 跑 `git --version` 探测（失败给平台提示，Windows 提示装 Git for Windows）；`run(git, workdir, args, timeout)` 统一入口：`.current_dir(workdir)`、stdout/stderr piped、`tokio::time::timeout` 包裹、非零退出转 `AppError::generic`（含 stderr）。clone/fetch/push 180s 超时，其余 30s。`push` 用自定义 `PushError::{Rejected, Other(AppError)}` 区分"被远端拒绝（可重试）"与"普通失败"（stderr 含 rejected/non-fast-forward/fetch first → Rejected）。
+- **工作区路径**：`~/.claude-partner/cloud-sync/`（`engine::cloud_sync_workdir()` 复用 `config::config_dir()`，config_dir 已提升为 pub）。首次 clone 远端到此 + `set_local_identity`（local user.name/email = Claude Partner / claude-partner@local，不污染全局 git 配置）；后续复用。
+- **工作区文件结构**（`cloud_sync/snapshot.rs`）：
+  - `prompts/<id>.json` → PromptRow；`claude_md/claude_md.json` → ClaudeMdRow（单例固定名）；`claude_history/<id>.json` → ClaudeHistoryRow。
+  - **文件名安全化（关键）**：id 可能含 Windows 非法字符（CC 历史 id 是 `{session_id}:{uuid}` 含冒号）。`id_to_filename` / `filename_to_id` 用 **hex 编码** id 的 UTF-8 字节做可逆映射（输出仅 `[0-9a-f]`，跨平台安全，round-trip 一致）。export 和 import 必须用同一映射（已配 7 个单测覆盖含冒号 / 斜杠 / 中文 / 空串 / 非法 hex 回退）。
+- **import_to_db**：扫 prompts/*.json + claude_md/claude_md.json + claude_history/*.json → 逐条本地 get：None 直接收，Some 则 `merge_*`，仅当合并结果在 vector_clock/updated_at/content/title/deleted(claude_md 还看 device_id) 有差异才收集 → `bulk_upsert`。开头先 `reconcile_from_file`（CLAUDE.md 文件↔DB 对账，纳入应用外编辑）。返回 `ImportStats{prompts, claude_md_updated, cc_history}`。单文件解析失败 `tracing::warn` 跳过不中断。
+- **export_from_db**：覆盖式——先 `clear_dir_contents` 清空 prompts/ 与 claude_history/（保留目录），再 `get_all_for_sync()`（全量含 deleted）逐条 `serde_json::to_string_pretty` + `fs::write` UTF-8；deleted 照写以传播软删除。本地无 CLAUDE.md 时移除工作区可能残留的旧 claude_md.json。返回 `ExportStats{prompts, claude_md, cc_history}`。
+- **push rejected 收敛**（`engine::trigger_cloud_sync`）：每轮 = fetch(远端有引用时) → reset --hard origin/<branch>(远端有引用时) → import → export → commit → push。commit message 形如 `cloud sync from <device_id> @ <ISO 时间戳>`，便于多设备同步审计与回滚定位。commit 无变化则跳过 push 视为成功（pull 已吸收远端）。push 返回 `PushError::Rejected` 时再 fetch+reset+import+export+commit+push 一轮（最多 1 次重试 = 总共 2 轮）。`has_remote_branch`（`git rev-parse --verify origin/HEAD`）判断全新空仓库无远端引用时跳过 fetch/reset 容错。pulled = 各轮 import 条数总和，pushed = 最后一轮 export 条数。任一步骤失败返回 `CloudSyncResult{ok:false, note:友好中文}`，绝不 panic。
+- **test_connection**：detect_git → git_version；若配了 repo_url：工作区已存在则 fetch 测连通 + `default_remote_branch`；无工作区则 clone 到临时目录 `cp-cloud-sync-test-<uuid>` 测连通（测完删除），返回默认分支。未配 url 仅返回 git 可用。无 commit/push 副作用。
+- **配置字段**（`AppConfig`，全部 `#[serde(default)]` 保旧 config.json 兼容）：`cloud_sync_repo_url: Option<String>`、`cloud_sync_enabled: bool`、`cloud_sync_auto: bool`、`cloud_sync_interval_secs: u64`（默认 600，`default_cloud_sync_interval()`）、`cloud_sync_branch: Option<String>`。load() 首次生成默认值补 None/false/false/600/None。
+- **4 个命令**（`commands/cloud_sync.rs`，参数 snake_case，返回 camelCase 对齐锁定契约）：`get_cloud_sync_config`、`update_cloud_sync_config(repoUrl?,enabled?,auto?,intervalSecs?,branch?)`（空串 url/branch 归一为 None，interval 最小 30s）、`trigger_cloud_sync_cmd`（手动触发，不受 enabled/auto 限制）、`test_cloud_sync`。
+- **DTO 锁定契约（前端依赖）**：`CloudSyncConfigDto`{repoUrl,enabled,auto,intervalSecs,branch}、`CloudSyncResult`{ok,pulled,pushed,note,syncedAt}、`TestCloudSyncResult`{ok,gitVersion,defaultBranch,error}。
+- **scheduler**（`cloud_sync/scheduler.rs`）：`start(state) -> CancellationToken` spawn 后台任务，`loop { select!{ cancel => break, sleep(interval) => tick } }`。**每 tick 重读 config**：interval = `cloud_sync_interval_secs`（实时生效），`!enabled || !auto` 则 continue（仍按新 interval 等待），否则跑 `trigger_cloud_sync`（错误仅 tracing::error）。首次先 sleep 再检查（不立即跑）。setup **无条件启动**（内部按 config 决定），故配置变更无需重启 scheduler。返回的 token 存 `AppState.cloud_sync_cancel`，`RunEvent::Exit` 时 cancel。
+- **AppState 扩展**：`cloud_sync_cancel: Arc<Mutex<Option<CancellationToken>>>`。`config_dir` 由 private 提升为 pub（cloud_sync 复用）。无新表（init_db 不变）、无新依赖（用 tokio::process + std::fs + 既有 tokio-util/chrono/dirs/uuid）。
 
 ## 关键约定
 

@@ -17,8 +17,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-/// 配置文件和数据文件的根目录：`~/.claude-partner`
-fn config_dir() -> PathBuf {
+/// 配置文件和数据文件的根目录：`~/.claude-partner`。
+///
+/// pub 供 cloud_sync 等模块复用同一根目录派生子路径（如 `~/.claude-partner/cloud-sync/`）。
+pub fn config_dir() -> PathBuf {
     // dirs::config_dir 在各平台指向用户配置目录；但 Python 用的是 home/.claude-partner
     // 为与旧数据兼容，这里统一用 home_dir 拼接，与 Python 完全一致
     dirs::home_dir()
@@ -41,6 +43,14 @@ fn default_receive_dir() -> PathBuf {
     dirs::home_dir()
         .expect("无法定位用户 home 目录，环境异常")
         .join("ClaudePartnerFiles")
+}
+
+/// 云端同步（GitHub 私有仓库）的默认轮询间隔（秒）= 10 分钟。
+///
+/// Business Logic: 自动同步的合理默认节奏：既不至于过于频繁（无谓 IO/git 操作），
+///     也不至于太慢（用户切设备后等待过久）。10 分钟是一个保守默认，用户可在设置页调小。
+fn default_cloud_sync_interval() -> u64 {
+    600
 }
 
 /// 平台相关默认截图快捷键：macOS 用 `<cmd>+<shift>+s`，其他平台 `<ctrl>+<shift>+s`
@@ -76,6 +86,22 @@ pub struct AppConfig {
     pub db_path: String,
     /// 截图快捷键
     pub screenshot_hotkey: String,
+    /// 云端同步（GitHub 私有仓库）的远端仓库 URL（如 git@github.com:user/repo.git）。
+    /// None 表示未配置云端同步；配置后 scheduler 才会真正 clone/fetch/push。
+    #[serde(default)]
+    pub cloud_sync_repo_url: Option<String>,
+    /// 云端同步总开关（前端设置页可切换）。false 时 scheduler 每 tick 仅空转不执行同步。
+    #[serde(default)]
+    pub cloud_sync_enabled: bool,
+    /// 是否启用自动同步（scheduler 后台轮询）。false 时只支持手动触发 trigger_cloud_sync。
+    #[serde(default)]
+    pub cloud_sync_auto: bool,
+    /// 自动同步轮询间隔（秒），默认 600（10 分钟）。scheduler 每 tick 重读此值实时生效。
+    #[serde(default = "default_cloud_sync_interval")]
+    pub cloud_sync_interval_secs: u64,
+    /// 指定同步用分支（如 main）。None 时使用远端默认分支（origin/HEAD）。
+    #[serde(default)]
+    pub cloud_sync_branch: Option<String>,
 }
 
 impl AppConfig {
@@ -104,6 +130,11 @@ impl AppConfig {
                 receive_dir: default_receive_dir().to_string_lossy().to_string(),
                 db_path: default_db_path().to_string_lossy().to_string(),
                 screenshot_hotkey: default_screenshot_hotkey(),
+                cloud_sync_repo_url: None,
+                cloud_sync_enabled: false,
+                cloud_sync_auto: false,
+                cloud_sync_interval_secs: default_cloud_sync_interval(),
+                cloud_sync_branch: None,
             };
             cfg.save()?;
             Ok(cfg)

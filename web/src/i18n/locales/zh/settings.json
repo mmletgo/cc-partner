@@ -27,6 +27,28 @@
     "enabled": "启用",
     "disabled": "禁用"
   },
+  "cloudSync": {
+    "title": "云端同步",
+    "subtitle": "通过 GitHub 私有仓库跨网络同步。需在本机已配置 git 访问权限（SSH key 或 HTTPS 凭证）。",
+    "repoUrl": { "label": "仓库地址", "helper": "如 git@github.com:user/repo.git 或 HTTPS URL。" },
+    "branch": { "label": "分支（可选）", "helper": "留空则使用仓库默认分支。" },
+    "enabled": { "label": "启用云端同步", "helper": "将 Prompt 与 CLAUDE.md 同步到 GitHub 仓库。" },
+    "auto": { "label": "自动定时同步", "helper": "按设定间隔自动同步。" },
+    "interval": { "label": "同步间隔", "helper": "自动同步的间隔时间，单位秒。" },
+    "testConnection": "测试连接",
+    "testing": "测试中…",
+    "apply": "应用配置",
+    "applying": "应用中…",
+    "syncNow": "立即同步",
+    "syncing": "同步中…",
+    "lastSync": "上次同步",
+    "syncSuccess": "{{time}} 同步成功（拉取 {{pulled}}，推送 {{pushed}}）",
+    "syncFailed": "{{time}} 同步失败：{{note}}",
+    "testOk": "连接成功。Git {{gitVersion}}，默认分支 {{branch}}。",
+    "testFailed": "测试失败：{{error}}",
+    "applyFailed": "应用配置失败",
+    "appliedConfig": "已应用配置"
+  },
   "about": {
     "title": "关于",
     "versionLabel": "版本号",

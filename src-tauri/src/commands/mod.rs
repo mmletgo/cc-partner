@@ -8,6 +8,7 @@
 
 pub mod cc_history;
 pub mod claude_md;
+pub mod cloud_sync;
 pub mod config;
 pub mod devices;
 pub mod permissions;

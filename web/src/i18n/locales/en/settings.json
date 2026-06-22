@@ -27,6 +27,28 @@
     "enabled": "On",
     "disabled": "Off"
   },
+  "cloudSync": {
+    "title": "Cloud sync",
+    "subtitle": "Sync across networks via a GitHub private repository. Git access (SSH key or HTTPS credentials) must be configured on this machine.",
+    "repoUrl": { "label": "Repository URL", "helper": "e.g. git@github.com:user/repo.git or an HTTPS URL." },
+    "branch": { "label": "Branch (optional)", "helper": "Leave empty to use the repository default branch." },
+    "enabled": { "label": "Enable cloud sync", "helper": "Sync Prompts and CLAUDE.md to the GitHub repository." },
+    "auto": { "label": "Auto sync on a schedule", "helper": "Automatically sync at the configured interval." },
+    "interval": { "label": "Sync interval", "helper": "Interval between automatic syncs, in seconds." },
+    "testConnection": "Test connection",
+    "testing": "Testing…",
+    "apply": "Apply",
+    "applying": "Applying…",
+    "syncNow": "Sync now",
+    "syncing": "Syncing…",
+    "lastSync": "Last sync",
+    "syncSuccess": "Sync succeeded at {{time}} (pulled {{pulled}}, pushed {{pushed}})",
+    "syncFailed": "Sync failed at {{time}}: {{note}}",
+    "testOk": "Connected. Git {{gitVersion}}, default branch {{branch}}.",
+    "testFailed": "Test failed: {{error}}",
+    "applyFailed": "Failed to apply configuration",
+    "appliedConfig": "Applied config"
+  },
   "about": {
     "title": "About",
     "versionLabel": "Version",
