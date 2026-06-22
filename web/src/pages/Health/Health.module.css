@@ -83,9 +83,3 @@
   gap: var(--space-1);
   color: var(--fg);
 }
-
-.hint {
-  margin: 0;
-  color: var(--fg-muted);
-  font-size: var(--text-sm);
-}

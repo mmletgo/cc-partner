@@ -20,6 +20,7 @@ import { healthApi } from '@/api/health';
 import type { ActivityStats, ActivityDetail, HealthStatus, HealthPhase } from '@/lib/types';
 import styles from './Health.module.css';
 import { StatsChart } from './StatsChart';
+import { Settings } from './Settings';
 
 /** 页面刷新间隔(ms) */
 const REFRESH_INTERVAL_MS = 30000;
@@ -137,15 +138,9 @@ export function Health() {
           </Card>
         )}
 
-        {/* 工作窗口/休息/通知/记录标题/免打扰 配置项:Plan 2 完善为完整表单,
-            Plan 1 先留状态展示(阈值读自 status) */}
-        <Card variant="outlined" padding="md" className={styles.section}>
-          <h3 className={styles.subtitle}>{t('health:workWindowMinutes')}</h3>
-          <p className={styles.hint}>
-            {Math.round(status.workWindowSeconds / 60)} / {t('health:breakMinutes')}:
-            {Math.round(status.breakSeconds / 60)}
-          </p>
-        </Card>
+        {/* 完整配置表单(Plan 2 Task 5):工作窗口/休息/通知/全屏/记录标题/喝水/免打扰/保留天数/总开关,
+            受控表单每次提交完整 HealthConfig 对象,避免整体覆盖式回写清零未传字段 */}
+        <Settings />
       </div>
     </div>
   );

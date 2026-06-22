@@ -1,0 +1,59 @@
+/* Health 配置表单样式
+ * 复用 Health.module.css 的 design token,与 Health 页其余 Card 风格一致
+ */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.subtitle {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  color: var(--fg);
+  cursor: pointer;
+  user-select: none;
+}
+
+.labelText {
+  flex: 1;
+}
+
+.checkbox {
+  margin: 0;
+  cursor: pointer;
+}
+
+.numberInput,
+.timeInput {
+  width: 110px;
+  padding: var(--space-1) var(--space-2);
+  box-sizing: border-box;
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.dndRow {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.dndRow .field {
+  flex: 1;
+}

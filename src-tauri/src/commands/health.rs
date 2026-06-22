@@ -120,6 +120,18 @@ pub struct ActivityDetailDto {
     pub hourly: Vec<i64>,
 }
 
+/// 读取完整健康提醒配置（全部字段，供前端配置表单初始化）。
+///
+/// Business Logic: 前端设置页的完整配置表单需要一个命令一次性拉到当前所有配置项
+///                 (工作窗口/休息/通知/全屏/记录标题/喝水/免打扰/保留天数)。
+///                 `get_health_status` 只含运行时相位 + 阈值,不含全量配置字段,
+///                 故补此命令避免前端拼凑配置。
+/// Code Logic: 读 `state.config` 的 health 拷贝,`From<HealthConfig>` 转 DTO 返回。
+#[tauri::command]
+pub async fn get_health_config(state: State<'_, AppState>) -> Result<HealthConfigDto, AppError> {
+    Ok(state.config.read().unwrap().health.clone().into())
+}
+
 /// 读取健康提醒当前状态（配置开关 + 运行时相位/暂停/贪睡）。
 ///
 /// Business Logic: 前端轮询展示「工作中/休息中、是否暂停、贪睡何时到期」。

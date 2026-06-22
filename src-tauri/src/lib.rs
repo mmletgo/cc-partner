@@ -369,7 +369,8 @@ pub fn run() {
             cc_history_cmd::get_cc_prompt,
             cc_history_cmd::refresh_cc_history,
             cc_history_cmd::delete_cc_prompt,
-            // M10 健康提醒（7 命令：状态/开关/暂停/贪睡/跳过/配置/统计）
+            // M10 健康提醒（状态/开关/暂停/贪睡/跳过/配置/统计）
+            health_cmd::get_health_config,
             health_cmd::get_health_status,
             health_cmd::toggle_health_enabled,
             health_cmd::toggle_health_paused,

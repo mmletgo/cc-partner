@@ -18,6 +18,9 @@ export const healthApi = {
   /** 读取当前健康提醒状态（相位 / 暂停 / 贪睡到期 / 配置阈值） */
   getStatus: () => invoke<HealthStatus>('get_health_status'),
 
+  /** 读取完整健康配置（全部字段，供设置表单初始化，避免 updateConfig 部分字段清零） */
+  getConfig: () => invoke<HealthConfig>('get_health_config'),
+
   /** 开启/关闭久坐监测（落盘 config.health.enabled） */
   toggleEnabled: (enabled: boolean) =>
     invoke<HealthConfig>('toggle_health_enabled', { enabled }),
