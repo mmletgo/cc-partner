@@ -55,14 +55,8 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route("/api/transfer/chunk/:id", post(transfer::transfer_chunk))
         .route("/api/transfer/status/:id", get(transfer::transfer_status))
         // Claude Code 历史同步协议（独立链路）：cc-history/sync/{pull,push}，snake_case 互通
-        .route(
-            "/api/cc-history/sync/pull",
-            post(cc_history::cc_sync_pull),
-        )
-        .route(
-            "/api/cc-history/sync/push",
-            post(cc_history::cc_sync_push),
-        )
+        .route("/api/cc-history/sync/pull", post(cc_history::cc_sync_pull))
+        .route("/api/cc-history/sync/push", post(cc_history::cc_sync_push))
         // SSH 目标同步协议（独立链路）：ssh-target/sync/{pull,push}，snake_case 互通
         .route(
             "/api/ssh-target/sync/pull",
@@ -80,9 +74,7 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
 
     // 取实际监听端口并回填 AppState（供 mDNS 注册 + health handler 返回）
     let actual_port = listener.local_addr()?.port();
-    state
-        .actual_http_port
-        .store(actual_port, Ordering::SeqCst);
+    state.actual_http_port.store(actual_port, Ordering::SeqCst);
 
     // 后台运行 axum serve（serve 持有 listener 与 app 所有权，直到进程退出）
     // axum::serve 返回的 future 为 Send，可直接 spawn 到 tokio runtime。

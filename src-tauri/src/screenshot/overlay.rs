@@ -36,8 +36,8 @@ pub fn start_region_capture(app: &AppHandle) -> Result<(), AppError> {
         return Ok(());
     }
 
-    let monitors = xcap::Monitor::all()
-        .map_err(|e| AppError::Bad(format!("枚举显示器失败: {e}")))?;
+    let monitors =
+        xcap::Monitor::all().map_err(|e| AppError::Bad(format!("枚举显示器失败: {e}")))?;
 
     for (i, monitor) in monitors.into_iter().enumerate() {
         // macOS 单位：xcap 的 x()/y()/width()/height() 均为**逻辑点**（points）；
@@ -57,8 +57,15 @@ pub fn start_region_capture(app: &AppHandle) -> Result<(), AppError> {
 
         tracing::info!(
             display = i,
-            raw_x = mx, raw_y = my, raw_w = mw, raw_h = mh,
-            scale, logical_x, logical_y, logical_w, logical_h,
+            raw_x = mx,
+            raw_y = my,
+            raw_w = mw,
+            raw_h = mh,
+            scale,
+            logical_x,
+            logical_y,
+            logical_w,
+            logical_h,
             "截图选区窗口几何（raw_*: xcap 原值；logical_*: 喂给 Tauri 的逻辑像素）"
         );
 

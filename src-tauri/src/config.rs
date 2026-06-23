@@ -146,31 +146,41 @@ impl Default for HealthConfig {
 ///
 /// Business Logic: enabled/record_window_title/notify_enabled 三个开关默认开启。
 /// Code Logic: 返回 `true` 字面量,供 `#[serde(default = "default_true")]` 调用。
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 /// serde 单字段缺失回退:工作窗口默认 45 分钟(2700 秒)。
 ///
 /// Business Logic: 久坐监测以 45 分钟为标准工作窗口。
 /// Code Logic: 返回 `45 * 60`,供 `#[serde(default = "default_work_window")]` 调用。
-fn default_work_window() -> i64 { 45 * 60 }
+fn default_work_window() -> i64 {
+    45 * 60
+}
 
 /// serde 单字段缺失回退:有效休息默认 5 分钟(300 秒)。
 ///
 /// Business Logic: 连续无操作达 5 分钟才判定为一次有效休息。
 /// Code Logic: 返回 `5 * 60`,供 `#[serde(default = "default_break")]` 调用。
-fn default_break() -> i64 { 5 * 60 }
+fn default_break() -> i64 {
+    5 * 60
+}
 
 /// serde 单字段缺失回退:明细保留默认 90 天。
 ///
 /// Business Logic: 健康明细保留 90 天,超期清理避免无限增长。
 /// Code Logic: 返回 `90`,供 `#[serde(default = "default_retain_days")]` 调用。
-fn default_retain_days() -> i64 { 90 }
+fn default_retain_days() -> i64 {
+    90
+}
 
 /// serde 单字段缺失回退:喝水提醒默认间隔 1 小时(3600 秒)。
 ///
 /// Business Logic: 久坐用户每小时提醒一次喝水,避免长时间忘饮水。
 /// Code Logic: 返回 `60 * 60`,供 `#[serde(default = "default_water_interval")]` 调用。
-fn default_water_interval() -> i64 { 60 * 60 }
+fn default_water_interval() -> i64 {
+    60 * 60
+}
 
 /// 应用全局配置。字段命名与 Python `AppConfig` dataclass 一致（snake_case 用于磁盘持久化）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,24 +306,40 @@ mod tests {
             "receive_dir":"/tmp","db_path":"/tmp/data.db","screenshot_hotkey":"<cmd>+<shift>+s"
         }"#;
         let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
-        assert!(cfg.health.enabled, "旧 config 缺 health 字段时应回退默认 enabled=true");
+        assert!(
+            cfg.health.enabled,
+            "旧 config 缺 health 字段时应回退默认 enabled=true"
+        );
         assert_eq!(cfg.health.work_window_seconds, 45 * 60);
     }
 
     #[test]
     fn test_health_config_roundtrip() {
         let cfg = AppConfig {
-            device_id: "d".into(), device_name: "n".into(), http_port: 0,
-            receive_dir: "/r".into(), db_path: "/db".into(), screenshot_hotkey: "<cmd>+s".into(),
+            device_id: "d".into(),
+            device_name: "n".into(),
+            http_port: 0,
+            receive_dir: "/r".into(),
+            db_path: "/db".into(),
+            screenshot_hotkey: "<cmd>+s".into(),
             cloud_sync_repo_url: None,
             cloud_sync_enabled: false,
             cloud_sync_auto: false,
             cloud_sync_interval_secs: default_cloud_sync_interval(),
             cloud_sync_branch: None,
-            health: HealthConfig { enabled: false, work_window_seconds: 30*60, break_seconds: 3*60,
-                record_window_title: false, retain_days: 30, notify_enabled: false,
-                dnd_start: Some("22:00".into()), dnd_end: Some("07:00".into()),
-                water_enabled: true, water_interval_seconds: 1800, reminder_fullscreen: true },
+            health: HealthConfig {
+                enabled: false,
+                work_window_seconds: 30 * 60,
+                break_seconds: 3 * 60,
+                record_window_title: false,
+                retain_days: 30,
+                notify_enabled: false,
+                dnd_start: Some("22:00".into()),
+                dnd_end: Some("07:00".into()),
+                water_enabled: true,
+                water_interval_seconds: 1800,
+                reminder_fullscreen: true,
+            },
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
@@ -322,6 +348,9 @@ mod tests {
         assert_eq!(back.health.dnd_start.as_deref(), Some("22:00"));
         assert!(back.health.water_enabled);
         assert_eq!(back.health.water_interval_seconds, 1800);
-        assert!(back.health.reminder_fullscreen, "reminder_fullscreen 应随配置 roundtrip");
+        assert!(
+            back.health.reminder_fullscreen,
+            "reminder_fullscreen 应随配置 roundtrip"
+        );
     }
 }

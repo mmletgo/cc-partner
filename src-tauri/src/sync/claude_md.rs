@@ -171,12 +171,7 @@ mod tests {
     use super::*;
 
     /// 构造测试用 ClaudeMdRow（仅填同步相关字段）。
-    fn row(
-        device_id: &str,
-        updated_at: &str,
-        content: &str,
-        vc: &[(&str, u64)],
-    ) -> ClaudeMdRow {
+    fn row(device_id: &str, updated_at: &str, content: &str, vc: &[(&str, u64)]) -> ClaudeMdRow {
         let vector_clock: HashMap<String, u64> =
             vc.iter().map(|(k, v)| (k.to_string(), *v)).collect();
         ClaudeMdRow {
@@ -255,8 +250,18 @@ mod tests {
     #[test]
     fn merge_combines_vector_clock_per_key_max() {
         // 无论谁胜出，向量时钟都是双方逐 key max
-        let local = row("d1", "2024-01-01T00:00:00+00:00", "local", &[("d1", 3), ("d2", 1)]);
-        let remote = row("d2", "2024-01-01T00:00:00+00:00", "remote", &[("d1", 1), ("d2", 4)]);
+        let local = row(
+            "d1",
+            "2024-01-01T00:00:00+00:00",
+            "local",
+            &[("d1", 3), ("d2", 1)],
+        );
+        let remote = row(
+            "d2",
+            "2024-01-01T00:00:00+00:00",
+            "remote",
+            &[("d1", 1), ("d2", 4)],
+        );
         let merged = merge_claude_md(&local, &remote);
         assert_eq!(merged.vector_clock.get("d1"), Some(&3)); // max(3,1)
         assert_eq!(merged.vector_clock.get("d2"), Some(&4)); // max(1,4)

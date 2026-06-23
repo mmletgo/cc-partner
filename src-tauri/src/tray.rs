@@ -49,9 +49,11 @@ pub fn build_tray(app: &AppHandle) -> Result<(), AppError> {
     let menu = Menu::with_items(app, &[&show_item, &shot_item, &pause_item, &quit_item])?;
 
     TrayIconBuilder::with_id("main-tray")
-        .icon(app.default_window_icon().cloned().ok_or_else(|| {
-            AppError::generic("缺少默认窗口图标，无法创建托盘")
-        })?)
+        .icon(
+            app.default_window_icon()
+                .cloned()
+                .ok_or_else(|| AppError::generic("缺少默认窗口图标，无法创建托盘"))?,
+        )
         .menu(&menu)
         .show_menu_on_left_click(false)
         .tooltip("Claude Partner")

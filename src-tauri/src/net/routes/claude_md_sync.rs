@@ -103,7 +103,8 @@ pub async fn claude_md_push(
         Some(local_row) => {
             // 合并决策胜出方 + 向量时钟
             let merged = crate::sync::claude_md::merge_claude_md(&local_row, &req.claude_md);
-            if merged.content != local_row.content || merged.vector_clock != local_row.vector_clock {
+            if merged.content != local_row.content || merged.vector_clock != local_row.vector_clock
+            {
                 state.claude_md_repo.upsert(&merged).await?;
                 crate::sync::claude_md::write_file_if_changed(&merged.content).await?;
                 true

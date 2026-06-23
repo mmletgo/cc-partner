@@ -172,8 +172,20 @@ mod tests {
     #[test]
     fn concurrent_equal_timestamp_device_id_tiebreak() {
         // 并发且时间戳相等：device_id 字典序更大者胜（确定性）
-        let local = row("p1", "aaa", "2024-01-01T00:00:00+00:00", &[("aaa", 1)], false);
-        let remote = row("p1", "zzz", "2024-01-01T00:00:00+00:00", &[("zzz", 1)], false);
+        let local = row(
+            "p1",
+            "aaa",
+            "2024-01-01T00:00:00+00:00",
+            &[("aaa", 1)],
+            false,
+        );
+        let remote = row(
+            "p1",
+            "zzz",
+            "2024-01-01T00:00:00+00:00",
+            &[("zzz", 1)],
+            false,
+        );
         // remote device_id "zzz" > local "aaa" → remote 胜
         let merged = merge_prompt(&local, &remote);
         assert_eq!(merged.device_id, "zzz");
@@ -189,8 +201,20 @@ mod tests {
     #[test]
     fn merge_always_combines_vector_clock() {
         // 无论谁胜出，向量时钟都应合并双方
-        let local = row("p1", "d1", "2024-01-01T00:00:00+00:00", &[("d1", 3), ("d2", 1)], false);
-        let remote = row("p1", "d2", "2024-01-01T00:00:00+00:00", &[("d1", 1), ("d2", 4)], false);
+        let local = row(
+            "p1",
+            "d1",
+            "2024-01-01T00:00:00+00:00",
+            &[("d1", 3), ("d2", 1)],
+            false,
+        );
+        let remote = row(
+            "p1",
+            "d2",
+            "2024-01-01T00:00:00+00:00",
+            &[("d1", 1), ("d2", 4)],
+            false,
+        );
         let merged = merge_prompt(&local, &remote);
         assert_eq!(merged.vector_clock.get("d1"), Some(&3)); // max(3,1)
         assert_eq!(merged.vector_clock.get("d2"), Some(&4)); // max(1,4)

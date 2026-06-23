@@ -20,12 +20,16 @@ pub fn hotkey_pynput_to_plugin(hotkey: &str) -> String {
         .map(|part| {
             let p = part.trim().to_ascii_lowercase();
             match p.as_str() {
-                "<cmd>" | "<cmd_r>" | "<cmd_l>" | "<win>" | "<ctrl>" | "<ctrl_l>" | "<ctrl_r>"
-                => "CommandOrControl".to_string(),
+                "<cmd>" | "<cmd_r>" | "<cmd_l>" | "<win>" | "<ctrl>" | "<ctrl_l>" | "<ctrl_r>" => {
+                    "CommandOrControl".to_string()
+                }
                 "<shift>" | "<shift_l>" | "<shift_r>" => "Shift".to_string(),
                 "<alt>" | "<alt_l>" | "<alt_r>" | "<option>" => "Option".to_string(),
                 // 修饰键之外的普通键：去掉尖括号后大写（如 "s" → "S"）
-                other => other.trim_start_matches('<').trim_end_matches('>').to_uppercase(),
+                other => other
+                    .trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .to_uppercase(),
             }
         })
         .collect::<Vec<_>>()

@@ -455,7 +455,10 @@ mod tests {
 
     #[test]
     fn derive_project_name_from_path() {
-        assert_eq!(ClaudeHistoryRow::derive_project_name("/Users/hans/foo"), "foo");
+        assert_eq!(
+            ClaudeHistoryRow::derive_project_name("/Users/hans/foo"),
+            "foo"
+        );
         assert_eq!(ClaudeHistoryRow::derive_project_name("/foo/bar/baz"), "baz");
         // 根路径无末段 → 回退原路径
         assert_eq!(ClaudeHistoryRow::derive_project_name("/"), "/");

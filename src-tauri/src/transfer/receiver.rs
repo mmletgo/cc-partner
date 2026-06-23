@@ -243,23 +243,11 @@ pub async fn finalize_transfer(
     }
 
     // 解析文件名冲突并重命名
-    let receive_dir = PathBuf::from(
-        &state
-            .config
-            .read()
-            .expect("config 读锁中毒")
-            .receive_dir,
-    );
+    let receive_dir = PathBuf::from(&state.config.read().expect("config 读锁中毒").receive_dir);
     let final_filename = resolve_filename(&receive_dir, &task.filename);
     let final_path = receive_dir.join(&final_filename);
     if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
-        on_receive_failed(
-            state,
-            app_handle,
-            transfer_id,
-            &format!("重命名失败: {e}"),
-        )
-        .await;
+        on_receive_failed(state, app_handle, transfer_id, &format!("重命名失败: {e}")).await;
         return Ok(());
     }
 

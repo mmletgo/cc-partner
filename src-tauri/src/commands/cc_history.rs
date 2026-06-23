@@ -23,9 +23,7 @@ fn now_iso() -> String {
 
 /// 列出所有有 Claude Code 历史的项目（聚合 count + 最近活动时间），按最近活动降序。
 #[tauri::command]
-pub async fn list_cc_projects(
-    state: State<'_, AppState>,
-) -> Result<Vec<CcProjectDto>, AppError> {
+pub async fn list_cc_projects(state: State<'_, AppState>) -> Result<Vec<CcProjectDto>, AppError> {
     state.cc_history_repo.list_projects().await
 }
 
@@ -61,9 +59,7 @@ pub async fn get_cc_prompt(
 /// Business Logic: 采集器后台每 5 分钟自动扫一次，用户也可在前端点"刷新"立即触发。
 /// Code Logic: 调 collector::scan_once，collected = 新入库数。
 #[tauri::command]
-pub async fn refresh_cc_history(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, AppError> {
+pub async fn refresh_cc_history(state: State<'_, AppState>) -> Result<serde_json::Value, AppError> {
     let collected = collector::scan_once(state.inner()).await?;
     Ok(serde_json::json!({ "ok": true, "collected": collected }))
 }

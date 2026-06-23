@@ -21,7 +21,10 @@ impl WaterState {
     ///                  这样开机后需等待一个完整间隔才触发首次提醒,而非开机即提醒。
     /// Code Logic: 以传入的 `now_ts` 作 last_drink_ts,pending_remind 置 false。
     pub fn new(now_ts: i64) -> Self {
-        Self { last_drink_ts: now_ts, pending_remind: false }
+        Self {
+            last_drink_ts: now_ts,
+            pending_remind: false,
+        }
     }
 }
 

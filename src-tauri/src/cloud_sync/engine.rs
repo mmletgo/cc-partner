@@ -232,7 +232,8 @@ pub async fn trigger_cloud_sync(state: &AppState) -> CloudSyncResult {
                     ok: false,
                     pulled: total_pulled,
                     pushed: last_export.total(),
-                    note: "推送被远端拒绝（其他设备刚更新），重试后仍未成功，请稍后再试".to_string(),
+                    note: "推送被远端拒绝（其他设备刚更新），重试后仍未成功，请稍后再试"
+                        .to_string(),
                     synced_at: chrono::Utc::now().to_rfc3339(),
                 };
             }
@@ -394,9 +395,8 @@ async fn ensure_repo(state: &AppState, git: &Path) -> Result<(PathBuf, String), 
         )
     };
 
-    let repo_url = repo_url.ok_or_else(|| {
-        AppError::generic("未配置云端同步仓库 URL，请在设置页填写后再同步")
-    })?;
+    let repo_url = repo_url
+        .ok_or_else(|| AppError::generic("未配置云端同步仓库 URL，请在设置页填写后再同步"))?;
     if repo_url.trim().is_empty() {
         return Err(AppError::generic(
             "云端同步仓库 URL 为空，请在设置页填写后再同步",

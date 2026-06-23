@@ -128,7 +128,10 @@ impl PeerClient {
         match self.client.post(&url).json(&body).send().await {
             Ok(resp) if resp.status().as_u16() == 200 => match resp.json::<SyncPullResp>().await {
                 Ok(data) => {
-                    tracing::info!("sync_pull 从 {base_url} 获取 {} 条 prompt", data.prompts.len());
+                    tracing::info!(
+                        "sync_pull 从 {base_url} 获取 {} 条 prompt",
+                        data.prompts.len()
+                    );
                     data.prompts
                 }
                 Err(e) => {
@@ -163,7 +166,10 @@ impl PeerClient {
         match self.client.post(&url).json(&body).send().await {
             Ok(resp) if resp.status().as_u16() == 200 => match resp.json::<SyncPushResp>().await {
                 Ok(data) => {
-                    tracing::info!("sync_push 到 {base_url} 成功，对端接收 {} 条", data.accepted);
+                    tracing::info!(
+                        "sync_push 到 {base_url} 成功，对端接收 {} 条",
+                        data.accepted
+                    );
                     true
                 }
                 Err(e) => {
@@ -204,7 +210,9 @@ impl PeerClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| crate::error::AppError::generic(format!("claude_md_pull 请求失败: {e}")))?;
+            .map_err(|e| {
+                crate::error::AppError::generic(format!("claude_md_pull 请求失败: {e}"))
+            })?;
         if resp.status().as_u16() != 200 {
             return Err(crate::error::AppError::generic(format!(
                 "claude_md_pull 失败: HTTP {}",
@@ -238,7 +246,9 @@ impl PeerClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| crate::error::AppError::generic(format!("claude_md_push 请求失败: {e}")))?;
+            .map_err(|e| {
+                crate::error::AppError::generic(format!("claude_md_push 请求失败: {e}"))
+            })?;
         if resp.status().as_u16() != 200 {
             return Err(crate::error::AppError::generic(format!(
                 "claude_md_push 失败: HTTP {}",
@@ -374,10 +384,7 @@ impl PeerClient {
                 }
             }
             Ok(resp) => {
-                tracing::warn!(
-                    "cc_sync_pull 失败 ({base_url}): HTTP {}",
-                    resp.status()
-                );
+                tracing::warn!("cc_sync_pull 失败 ({base_url}): HTTP {}", resp.status());
                 Vec::new()
             }
             Err(e) => {
@@ -401,19 +408,21 @@ impl PeerClient {
         let url = format!("{base_url}/api/cc-history/sync/push");
         let body = serde_json::json!({ "items": items });
         match self.client.post(&url).json(&body).send().await {
-            Ok(resp) if resp.status().as_u16() == 200 => match resp.json::<CcSyncPushResp>().await {
-                Ok(data) => {
-                    tracing::info!(
-                        "cc_sync_push 到 {base_url} 成功，对端接收 {} 条",
-                        data.accepted
-                    );
-                    true
+            Ok(resp) if resp.status().as_u16() == 200 => {
+                match resp.json::<CcSyncPushResp>().await {
+                    Ok(data) => {
+                        tracing::info!(
+                            "cc_sync_push 到 {base_url} 成功，对端接收 {} 条",
+                            data.accepted
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!("cc_sync_push 响应解析失败 ({base_url}): {e}");
+                        true
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("cc_sync_push 响应解析失败 ({base_url}): {e}");
-                    true
-                }
-            },
+            }
             Ok(resp) => {
                 tracing::warn!("cc_sync_push 失败 ({base_url}): HTTP {}", resp.status());
                 false
@@ -456,10 +465,7 @@ impl PeerClient {
                 }
             }
             Ok(resp) => {
-                tracing::warn!(
-                    "ssh_target_pull 失败 ({base_url}): HTTP {}",
-                    resp.status()
-                );
+                tracing::warn!("ssh_target_pull 失败 ({base_url}): HTTP {}", resp.status());
                 Vec::new()
             }
             Err(e) => {
@@ -483,19 +489,21 @@ impl PeerClient {
         let url = format!("{base_url}/api/ssh-target/sync/push");
         let body = serde_json::json!({ "targets": targets });
         match self.client.post(&url).json(&body).send().await {
-            Ok(resp) if resp.status().as_u16() == 200 => match resp.json::<SshTargetPushResp>().await {
-                Ok(data) => {
-                    tracing::info!(
-                        "ssh_target_push 到 {base_url} 成功，对端接收 {} 条",
-                        data.accepted
-                    );
-                    true
+            Ok(resp) if resp.status().as_u16() == 200 => {
+                match resp.json::<SshTargetPushResp>().await {
+                    Ok(data) => {
+                        tracing::info!(
+                            "ssh_target_push 到 {base_url} 成功，对端接收 {} 条",
+                            data.accepted
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!("ssh_target_push 响应解析失败 ({base_url}): {e}");
+                        true
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("ssh_target_push 响应解析失败 ({base_url}): {e}");
-                    true
-                }
-            },
+            }
             Ok(resp) => {
                 tracing::warn!("ssh_target_push 失败 ({base_url}): HTTP {}", resp.status());
                 false

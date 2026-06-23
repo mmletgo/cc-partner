@@ -167,7 +167,7 @@ mod tests {
         let inc = increment(&clock, "d1");
         assert_eq!(inc.get("d1"), Some(&2));
         assert_eq!(inc.get("d2"), Some(&5)); // 其他 key 不变
-        // 不修改原时钟（纯函数）
+                                             // 不修改原时钟（纯函数）
         assert_eq!(clock.get("d1"), Some(&1));
         // 新 key：从 0 起加为 1
         let inc2 = increment(&clock, "d3");

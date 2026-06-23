@@ -86,7 +86,8 @@ pub async fn cc_sync_pull(
             }
             Some(remote_clock) => {
                 let relation = compare(&p.vector_clock, remote_clock);
-                if matches!(relation, ClockOrder::After) || matches!(relation, ClockOrder::Concurrent)
+                if matches!(relation, ClockOrder::After)
+                    || matches!(relation, ClockOrder::Concurrent)
                 {
                     items.push(p.clone());
                 }

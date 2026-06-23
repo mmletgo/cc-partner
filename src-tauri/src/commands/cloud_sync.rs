@@ -73,11 +73,7 @@ pub async fn update_cloud_sync_config(
         let mut cfg = state.config.write().unwrap();
         if let Some(u) = repo_url {
             // 空串视为未配置（统一为 None）
-            cfg.cloud_sync_repo_url = if u.trim().is_empty() {
-                None
-            } else {
-                Some(u)
-            };
+            cfg.cloud_sync_repo_url = if u.trim().is_empty() { None } else { Some(u) };
         }
         if let Some(e) = enabled {
             cfg.cloud_sync_enabled = e;
@@ -90,11 +86,7 @@ pub async fn update_cloud_sync_config(
             cfg.cloud_sync_interval_secs = i.max(30);
         }
         if let Some(b) = branch {
-            cfg.cloud_sync_branch = if b.trim().is_empty() {
-                None
-            } else {
-                Some(b)
-            };
+            cfg.cloud_sync_branch = if b.trim().is_empty() { None } else { Some(b) };
         }
         cfg.save()?;
     }
@@ -116,8 +108,6 @@ pub async fn trigger_cloud_sync_cmd(
 ///
 /// Business Logic: 前端"测试连接"按钮调用，验证 git 可用 + 远端可达 + 返回默认分支。
 #[tauri::command]
-pub async fn test_cloud_sync(
-    state: State<'_, AppState>,
-) -> Result<TestCloudSyncResult, AppError> {
+pub async fn test_cloud_sync(state: State<'_, AppState>) -> Result<TestCloudSyncResult, AppError> {
     Ok(engine::test_connection(state.inner()).await)
 }

@@ -163,7 +163,10 @@ pub async fn get_health_status(state: State<'_, AppState>) -> Result<HealthStatu
 /// Business Logic: 前端「启用/停用久坐监测」开关；关闭后 daemon 仅写库不触发提醒。
 /// Code Logic: 拿 config 写锁改字段后 `cfg.save()`，返回更新后的配置 DTO。
 #[tauri::command]
-pub async fn toggle_health_enabled(state: State<'_, AppState>, enabled: bool) -> Result<HealthConfigDto, AppError> {
+pub async fn toggle_health_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<HealthConfigDto, AppError> {
     {
         let mut cfg = state.config.write().unwrap();
         cfg.health.enabled = enabled;
@@ -177,7 +180,10 @@ pub async fn toggle_health_enabled(state: State<'_, AppState>, enabled: bool) ->
 /// Business Logic: 前端「暂时暂停」按钮；置位后 daemon 采样时跳过提醒（仍写库）。
 /// Code Logic: 直接 `store` 原子布尔，无需持久化（重启即失效）。
 #[tauri::command]
-pub async fn toggle_health_paused(state: State<'_, AppState>, paused: bool) -> Result<(), AppError> {
+pub async fn toggle_health_paused(
+    state: State<'_, AppState>,
+    paused: bool,
+) -> Result<(), AppError> {
     state.health.paused.store(paused, Ordering::Relaxed);
     Ok(())
 }
@@ -236,9 +242,15 @@ pub async fn update_health_config(
 /// Business Logic: 前端统计页展示「最近 N 分钟活跃多久、闲置多久」。
 /// Code Logic: 委托 `HealthRepo::aggregate_minutes`（SQL 层 SUM(CASE WHEN ...)）。
 #[tauri::command]
-pub async fn get_activity_stats(state: State<'_, AppState>, since_ts: i64) -> Result<ActivityStatsDto, AppError> {
+pub async fn get_activity_stats(
+    state: State<'_, AppState>,
+    since_ts: i64,
+) -> Result<ActivityStatsDto, AppError> {
     let (active, idle) = state.health_repo.aggregate_minutes(since_ts).await?;
-    Ok(ActivityStatsDto { active_minutes: active, idle_minutes: idle })
+    Ok(ActivityStatsDto {
+        active_minutes: active,
+        idle_minutes: idle,
+    })
 }
 
 /// 查询 [since_ts, +∞) 区间内的活动明细统计(app 使用时长排行 + 24 小时活跃分布)。
@@ -257,7 +269,10 @@ pub async fn get_activity_detail(
         .get_app_usage(since_ts)
         .await?
         .into_iter()
-        .map(|(n, m)| AppUsageItem { name: n, minutes: m })
+        .map(|(n, m)| AppUsageItem {
+            name: n,
+            minutes: m,
+        })
         .collect();
     let hourly = state.health_repo.get_hourly_activity(since_ts).await?;
     Ok(ActivityDetailDto { app_usage, hourly })

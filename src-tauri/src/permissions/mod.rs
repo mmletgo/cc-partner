@@ -115,15 +115,15 @@ pub struct RequestPermissionResult {
 #[cfg(target_os = "macos")]
 fn settings_url(perm_type: &str) -> Option<&'static str> {
     match perm_type {
-        "screenCapture" => Some(
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
-        ),
-        "inputMonitoring" => Some(
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
-        ),
-        "accessibility" => Some(
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-        ),
+        "screenCapture" => {
+            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        }
+        "inputMonitoring" => {
+            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+        }
+        "accessibility" => {
+            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        }
         _ => None,
     }
 }
@@ -205,23 +205,14 @@ pub fn check_permissions() -> PermissionsStatus {
 /// 打开 macOS 系统设置对应面板（对照 Python `open_permission_settings`）。
 ///
 /// Business Logic: 用户被拒绝或忽略授权弹框后，需直接跳转到对应面板手动开启。
-/// Code Logic: 非阻塞 `open <url-scheme>`；非 macOS 或未知类型返回 false。
+/// Code Logic: 非阻塞 `open <url-scheme>`。macOS-only——唯一调用方 `request_permission` 的
+///     调用点全在 `#[cfg(target_os = "macos")]` 块内，非 macOS 调不到，故整函数 mac-only。
+#[cfg(target_os = "macos")]
 pub fn open_permission_settings(perm_type: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        let Some(url) = settings_url(perm_type) else {
-            return false;
-        };
-        std::process::Command::new("open")
-            .arg(url)
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = perm_type;
-        false
-    }
+    let Some(url) = settings_url(perm_type) else {
+        return false;
+    };
+    std::process::Command::new("open").arg(url).spawn().is_ok()
 }
 
 /// 请求权限（对照 Python `request_screen_capture_access` + `open_permission_settings`）。
@@ -233,10 +224,7 @@ pub fn open_permission_settings(perm_type: &str) -> bool {
 ///     - 启动主动引导按权限类型差异化传参：screenCapture 弹框即可（open_settings=false），
 ///       inputMonitoring 只能靠开面板引导（open_settings=true）。
 ///     - 非 macOS：返回 `{ok:true, requested:false, opened:false}`。
-pub fn request_permission(
-    perm_type: &str,
-    open_settings: Option<bool>,
-) -> RequestPermissionResult {
+pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> RequestPermissionResult {
     let open_settings = open_settings.unwrap_or(true);
     #[cfg(target_os = "macos")]
     {

@@ -109,7 +109,11 @@ pub fn start_health_daemon(app: AppHandle, state: std::sync::Arc<AppState>) -> C
 ///
 /// 跨 await 不持 RwLockReadGuard:开头 `state.config.read().unwrap().health.clone()`
 /// 先 clone 出配置副本并释放读锁,后续 await 安全。
-async fn handle_sample(app: &AppHandle, state: &AppState, sample: ActivitySample) -> Result<(), AppError> {
+async fn handle_sample(
+    app: &AppHandle,
+    state: &AppState,
+    sample: ActivitySample,
+) -> Result<(), AppError> {
     let cfg = state.config.read().unwrap().health.clone();
     let now = Utc::now().timestamp();
     // 对齐到分钟桶(同分钟重采覆盖),取该分钟起始时间戳。
@@ -121,7 +125,11 @@ async fn handle_sample(app: &AppHandle, state: &AppState, sample: ActivitySample
         ts: minute_ts,
         is_active: sample.is_active,
         process_name: sample.process_name.clone(),
-        window_title: if cfg.record_window_title { sample.window_title.clone() } else { None },
+        window_title: if cfg.record_window_title {
+            sample.window_title.clone()
+        } else {
+            None
+        },
     };
     state.health_repo.insert_activity(&rec).await?;
 
@@ -142,11 +150,19 @@ async fn handle_sample(app: &AppHandle, state: &AppState, sample: ActivitySample
 
     if should_remind {
         // 贪睡未到期则静默;免打扰时段静默;notify_enabled 关闭则不 emit。
-        let snoozed = state.health.snooze_until.lock().unwrap().is_some_and(|t| t > now);
+        let snoozed = state
+            .health
+            .snooze_until
+            .lock()
+            .unwrap()
+            .is_some_and(|t| t > now);
         let dnd = is_in_dnd(now, cfg.dnd_start.as_deref(), cfg.dnd_end.as_deref());
         if !snoozed && !dnd && cfg.notify_enabled {
             // 仅 emit 事件载荷;系统通知由前端监听后弹出(文案走 i18n)。
-            let _ = app.emit("health:reminder", serde_json::json!({ "workWindowSeconds": cfg.work_window_seconds }));
+            let _ = app.emit(
+                "health:reminder",
+                serde_json::json!({ "workWindowSeconds": cfg.work_window_seconds }),
+            );
             // Plan 2: 开启全屏遮罩开关时,emit 后额外每屏弹出透明置顶遮罩窗口强制打断。
             if cfg.reminder_fullscreen {
                 if let Err(e) = open_health_overlay(app) {
@@ -193,8 +209,8 @@ async fn handle_sample(app: &AppHandle, state: &AppState, sample: ActivitySample
 ///     (均为逻辑点,不除 scale,与截图 overlay 一致)。已存在同名窗口则跳过(去重)。
 ///     透明窗口前置条件 `app.macOSPrivateApi: true` 已在 tauri.conf.json 开启。
 pub fn open_health_overlay(app: &AppHandle) -> Result<(), AppError> {
-    let monitors = xcap::Monitor::all()
-        .map_err(|e| AppError::Bad(format!("枚举显示器失败: {e}")))?;
+    let monitors =
+        xcap::Monitor::all().map_err(|e| AppError::Bad(format!("枚举显示器失败: {e}")))?;
 
     for (i, monitor) in monitors.into_iter().enumerate() {
         let label = format!("health-overlay-{i}");
@@ -210,22 +226,29 @@ pub fn open_health_overlay(app: &AppHandle) -> Result<(), AppError> {
 
         tracing::info!(
             display = i,
-            x = mx, y = my, w = mw, h = mh,
+            x = mx,
+            y = my,
+            w = mw,
+            h = mh,
             "健康提醒遮罩窗口几何(逻辑点)"
         );
 
-        WebviewWindowBuilder::new(app, &label, WebviewUrl::App(format!("/health-overlay?display={i}").into()))
-            .title("健康提醒")
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .focused(true)
-            .skip_taskbar(true)
-            .resizable(false)
-            .inner_size(mw, mh)
-            .position(mx as f64, my as f64)
-            .build()
-            .map_err(|e| AppError::Bad(format!("创建健康遮罩窗口失败: {e}")))?;
+        WebviewWindowBuilder::new(
+            app,
+            &label,
+            WebviewUrl::App(format!("/health-overlay?display={i}").into()),
+        )
+        .title("健康提醒")
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .focused(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .inner_size(mw, mh)
+        .position(mx as f64, my as f64)
+        .build()
+        .map_err(|e| AppError::Bad(format!("创建健康遮罩窗口失败: {e}")))?;
     }
     Ok(())
 }

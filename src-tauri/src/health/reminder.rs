@@ -22,9 +22,15 @@ use chrono::{Local, NaiveTime, TimeZone, Timelike};
 ///     - 跨午夜区间（start_mins > end_mins，如 22:00~07:00）: 命中条件为
 ///       now_mins ∈ [start, 24:00) ∪ [00:00, end)。
 pub fn is_in_dnd(now_ts: i64, dnd_start: Option<&str>, dnd_end: Option<&str>) -> bool {
-    let (Some(s), Some(e)) = (dnd_start, dnd_end) else { return false; };
-    let (Ok(start), Ok(end)) = (NaiveTime::parse_from_str(s, "%H:%M"), NaiveTime::parse_from_str(e, "%H:%M"))
-        else { return false; };
+    let (Some(s), Some(e)) = (dnd_start, dnd_end) else {
+        return false;
+    };
+    let (Ok(start), Ok(end)) = (
+        NaiveTime::parse_from_str(s, "%H:%M"),
+        NaiveTime::parse_from_str(e, "%H:%M"),
+    ) else {
+        return false;
+    };
     let local = Local
         .timestamp_opt(now_ts, 0)
         .single()
@@ -48,8 +54,8 @@ mod tests {
     /// 无论在东八区还是 UTC，构造「本地 12:00」的 ts，断言逻辑都应一致。
     fn local_ts(hour: u32, min: u32) -> i64 {
         let today = Local::now().naive_local().date();
-        let date = NaiveDate::from_ymd_opt(today.year(), today.month(), today.day())
-            .expect("valid today");
+        let date =
+            NaiveDate::from_ymd_opt(today.year(), today.month(), today.day()).expect("valid today");
         let time = date.and_hms_opt(hour, min, 0).expect("valid hms");
         Local
             .from_local_datetime(&time)
@@ -60,20 +66,20 @@ mod tests {
 
     #[test]
     fn no_dnd_when_missing_bounds() {
-        assert!(!is_in_dnd(local_ts(12, 0), None, None));           // 本地 12:00,无 dnd
-        assert!(!is_in_dnd(local_ts(12, 0), Some("09:00"), None));  // 缺一端
+        assert!(!is_in_dnd(local_ts(12, 0), None, None)); // 本地 12:00,无 dnd
+        assert!(!is_in_dnd(local_ts(12, 0), Some("09:00"), None)); // 缺一端
     }
     #[test]
     fn normal_range_inclusive_start_exclusive_end() {
-        assert!(is_in_dnd(local_ts(12, 0), Some("09:00"), Some("17:00")));   // 本地 12:00 in
-        assert!(!is_in_dnd(local_ts(8, 0), Some("09:00"), Some("17:00")));   // 本地 08:00 out
-        assert!(!is_in_dnd(local_ts(17, 0), Some("09:00"), Some("17:00")));  // 本地 17:00 out(不含)
+        assert!(is_in_dnd(local_ts(12, 0), Some("09:00"), Some("17:00"))); // 本地 12:00 in
+        assert!(!is_in_dnd(local_ts(8, 0), Some("09:00"), Some("17:00"))); // 本地 08:00 out
+        assert!(!is_in_dnd(local_ts(17, 0), Some("09:00"), Some("17:00"))); // 本地 17:00 out(不含)
     }
     #[test]
     fn overnight_range() {
-        assert!(is_in_dnd(local_ts(22, 0), Some("22:00"), Some("07:00")));   // 本地 22:00 in
-        assert!(is_in_dnd(local_ts(3, 0), Some("22:00"), Some("07:00")));    // 本地 03:00 in
-        assert!(!is_in_dnd(local_ts(10, 0), Some("22:00"), Some("07:00")));  // 本地 10:00 out
+        assert!(is_in_dnd(local_ts(22, 0), Some("22:00"), Some("07:00"))); // 本地 22:00 in
+        assert!(is_in_dnd(local_ts(3, 0), Some("22:00"), Some("07:00"))); // 本地 03:00 in
+        assert!(!is_in_dnd(local_ts(10, 0), Some("22:00"), Some("07:00"))); // 本地 10:00 out
     }
     #[test]
     fn invalid_format_is_not_dnd() {

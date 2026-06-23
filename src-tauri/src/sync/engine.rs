@@ -128,16 +128,16 @@ async fn sync_with_peer(
         .collect();
 
     // 3. Pull：发本端 summaries，拿回对端认为本端需要的 prompts
-    let remote_prompts: Vec<PromptRow> = state
-        .peer_client
-        .sync_pull(&base_url, summary_values)
-        .await;
+    let remote_prompts: Vec<PromptRow> =
+        state.peer_client.sync_pull(&base_url, summary_values).await;
 
     let mut prompts_to_upsert: Vec<PromptRow> = Vec::new();
     for remote in &remote_prompts {
-        let local_row = state.prompt_repo.get(&remote.id).await.map_err(|e| {
-            format!("查询本地 prompt {} 失败: {e}", remote.id)
-        })?;
+        let local_row = state
+            .prompt_repo
+            .get(&remote.id)
+            .await
+            .map_err(|e| format!("查询本地 prompt {} 失败: {e}", remote.id))?;
         match local_row {
             None => {
                 // 本地没有 → 直接接收
@@ -272,10 +272,17 @@ async fn sync_claude_md_with_peer(
     });
 
     // 4. Pull：拉回对端版本。错误（含 404 旧版本对端未实现此路由）→ warn + 视 None 继续。
-    let remote = match state.peer_client.claude_md_pull(&base_url, &local_row.vector_clock).await {
+    let remote = match state
+        .peer_client
+        .claude_md_pull(&base_url, &local_row.vector_clock)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!("从 {} claude_md_pull 失败（可能是旧版本对端）: {e}", device.name);
+            tracing::warn!(
+                "从 {} claude_md_pull 失败（可能是旧版本对端）: {e}",
+                device.name
+            );
             None
         }
     };

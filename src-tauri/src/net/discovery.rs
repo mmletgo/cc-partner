@@ -67,23 +67,9 @@ pub async fn start_discovery(state: &AppState, port: u16) -> Result<(), String> 
 
     // 服务实例名用 device_id（对照 Python name=f"{device_id}.{SERVICE_TYPE}"，my_name 不含 type 后缀）
     let service_info = match &local_ip {
-        Some(ip) => ServiceInfo::new(
-            SERVICE_TYPE,
-            &device_id,
-            &host_name,
-            *ip,
-            port,
-            properties,
-        ),
-        None => ServiceInfo::new(
-            SERVICE_TYPE,
-            &device_id,
-            &host_name,
-            "",
-            port,
-            properties,
-        )
-        .map(|info| info.enable_addr_auto()), // 无显式 IP 时让库自动更新接口地址
+        Some(ip) => ServiceInfo::new(SERVICE_TYPE, &device_id, &host_name, *ip, port, properties),
+        None => ServiceInfo::new(SERVICE_TYPE, &device_id, &host_name, "", port, properties)
+            .map(|info| info.enable_addr_auto()), // 无显式 IP 时让库自动更新接口地址
     }
     .map_err(|e| format!("构造 ServiceInfo 失败: {e}"))?;
 
@@ -134,11 +120,7 @@ pub fn stop_discovery(state: &AppState) {
         }
     }
     // 清空对端设备表
-    state
-        .devices
-        .write()
-        .expect("devices 写锁中毒")
-        .clear();
+    state.devices.write().expect("devices 写锁中毒").clear();
     tracing::info!("mDNS 发现已停止");
 }
 
@@ -183,10 +165,7 @@ fn handle_resolved(state: &AppState, info: ServiceInfo, my_device_id: &str) {
     let device_id = match info.get_property_val_str(TXT_KEY_DEVICE_ID) {
         Some(id) if !id.is_empty() => id.to_string(),
         _ => {
-            tracing::warn!(
-                "mDNS 服务缺少 device_id TXT：{}",
-                info.get_fullname()
-            );
+            tracing::warn!("mDNS 服务缺少 device_id TXT：{}", info.get_fullname());
             return;
         }
     };
@@ -204,10 +183,7 @@ fn handle_resolved(state: &AppState, info: ServiceInfo, my_device_id: &str) {
     // 取首个 IPv4 地址（与 Python 取 addresses[0] 一致；IPv6 场景回退到任一地址）
     let host = first_ipv4(&info).unwrap_or_else(|| "0.0.0.0".to_string());
     if host == "0.0.0.0" {
-        tracing::warn!(
-            "mDNS 服务无法解析 IPv4 地址：{}",
-            info.get_fullname()
-        );
+        tracing::warn!("mDNS 服务无法解析 IPv4 地址：{}", info.get_fullname());
         return;
     }
 
@@ -257,10 +233,7 @@ fn first_ipv4(info: &ServiceInfo) -> Option<String> {
         }
     }
     // 全 IPv6 场景回退到任一地址的字符串形式
-    info.get_addresses()
-        .iter()
-        .next()
-        .map(|ip| ip.to_string())
+    info.get_addresses().iter().next().map(|ip| ip.to_string())
 }
 
 /// 探测本机局域网 IPv4 地址，对照 Python `_get_local_ip`。

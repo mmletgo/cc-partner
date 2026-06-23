@@ -25,8 +25,8 @@ mod screenshot;
 mod state;
 mod storage;
 mod sync;
-mod tray;
 mod transfer;
+mod tray;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
@@ -35,8 +35,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::commands::{
     cc_history as cc_history_cmd, claude_md as claude_md_cmd, cloud_sync as cloud_sync_cmd,
-    config as config_cmd,
-    devices as device_cmd, health as health_cmd,
+    config as config_cmd, devices as device_cmd, health as health_cmd,
     permissions as permissions_cmd, prompts as prompt_cmd, screenshot as screenshot_cmd,
     ssh_target as ssh_target_cmd, sync as sync_cmd, transfer as transfer_cmd,
     updater as updater_cmd,
@@ -112,7 +111,8 @@ const CC_SCAN_STATE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS claude_history_sc
 )";
 
 /// CC 历史表索引（项目路径+时间倒序查询、设备_id 查询加速）。
-const CC_INDEXES: &str = "CREATE INDEX IF NOT EXISTS idx_ch_proj ON claude_history(project_path, occurred_at DESC);
+const CC_INDEXES: &str =
+    "CREATE INDEX IF NOT EXISTS idx_ch_proj ON claude_history(project_path, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ch_dev ON claude_history(device_id)";
 
 /// user 级 CLAUDE.md 单例表（全表仅一行，id 恒为 "claude_md"）。
@@ -236,7 +236,8 @@ pub fn run() {
                 let claude_md_repo = Arc::new(ClaudeMdRepo::new(pool.clone()));
                 let ssh_target_repo = Arc::new(SshTargetRepo::new(pool.clone()));
                 // 健康提醒：仓库（共享 pool）+ 运行时（状态机/贪睡/暂停）+ daemon 取消令牌占位
-                let health_repo = Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone()));
+                let health_repo =
+                    Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone()));
                 let health = Arc::new(crate::health::HealthRuntime::new());
                 let health_cancel =
                     Arc::new(Mutex::new(None::<tokio_util::sync::CancellationToken>));
@@ -326,12 +327,7 @@ pub fn run() {
             {
                 use tauri_plugin_autostart::ManagerExt;
                 let state: tauri::State<'_, AppState> = app.state();
-                let want_autostart = state
-                    .config
-                    .read()
-                    .expect("config 读锁中毒")
-                    .health
-                    .enabled;
+                let want_autostart = state.config.read().expect("config 读锁中毒").health.enabled;
                 let autostart = app.autolaunch();
                 if want_autostart {
                     if let Err(e) = autostart.enable() {
@@ -340,7 +336,14 @@ pub fn run() {
                 } else if let Err(e) = autostart.disable() {
                     tracing::warn!("开机自启 disable 失败: {e}");
                 }
-                tracing::info!("开机自启: {}", if want_autostart { "已启用" } else { "已禁用" });
+                tracing::info!(
+                    "开机自启: {}",
+                    if want_autostart {
+                        "已启用"
+                    } else {
+                        "已禁用"
+                    }
+                );
             }
 
             // M7：创建系统托盘（图标 + 菜单 + 双击显窗），失败仅记录不阻断启动
@@ -357,7 +360,11 @@ pub fn run() {
                     .expect("config 读锁中毒")
                     .screenshot_hotkey
                     .clone();
-                hotkey::register_screenshot_hotkey(app.handle(), &hotkey, hotkey::screenshot_handler);
+                hotkey::register_screenshot_hotkey(
+                    app.handle(),
+                    &hotkey,
+                    hotkey::screenshot_handler,
+                );
             }
             Ok(())
         })

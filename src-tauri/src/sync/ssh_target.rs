@@ -139,11 +139,13 @@ pub async fn ssh_target_sync_with_peer(
     // 4. Push：本端有而对端 pull 未返回的，推送给对端
     let remote_hosts: std::collections::HashSet<String> =
         remote_items.iter().map(|p| p.host.clone()).collect();
-    let remote_clock_map: std::collections::HashMap<String, &std::collections::HashMap<String, u64>> =
-        remote_items
-            .iter()
-            .map(|p| (p.host.clone(), &p.vector_clock))
-            .collect();
+    let remote_clock_map: std::collections::HashMap<
+        String,
+        &std::collections::HashMap<String, u64>,
+    > = remote_items
+        .iter()
+        .map(|p| (p.host.clone(), &p.vector_clock))
+        .collect();
 
     let local_all_after = state
         .ssh_target_repo
@@ -172,7 +174,10 @@ pub async fn ssh_target_sync_with_peer(
 
     if !push_items.is_empty() {
         let n = push_items.len();
-        let success = state.peer_client.ssh_target_push(&base_url, &push_items).await;
+        let success = state
+            .peer_client
+            .ssh_target_push(&base_url, &push_items)
+            .await;
         if success {
             tracing::info!("向 {} 推送了 {} 条 SSH 目标", device.name, n);
         } else {
@@ -252,8 +257,20 @@ mod tests {
 
     #[test]
     fn concurrent_equal_timestamp_device_id_tiebreak() {
-        let local = row("h", "aaa", "2024-01-01T00:00:00+00:00", &[("aaa", 1)], false);
-        let remote = row("h", "zzz", "2024-01-01T00:00:00+00:00", &[("zzz", 1)], false);
+        let local = row(
+            "h",
+            "aaa",
+            "2024-01-01T00:00:00+00:00",
+            &[("aaa", 1)],
+            false,
+        );
+        let remote = row(
+            "h",
+            "zzz",
+            "2024-01-01T00:00:00+00:00",
+            &[("zzz", 1)],
+            false,
+        );
         let merged = merge_ssh_target(&local, &remote);
         assert_eq!(merged.device_id, "zzz");
         let merged2 = merge_ssh_target(&remote, &local);
@@ -262,8 +279,20 @@ mod tests {
 
     #[test]
     fn merge_always_combines_vector_clock() {
-        let local = row("h", "d1", "2024-01-01T00:00:00+00:00", &[("d1", 3), ("d2", 1)], false);
-        let remote = row("h", "d2", "2024-01-01T00:00:00+00:00", &[("d1", 1), ("d2", 4)], false);
+        let local = row(
+            "h",
+            "d1",
+            "2024-01-01T00:00:00+00:00",
+            &[("d1", 3), ("d2", 1)],
+            false,
+        );
+        let remote = row(
+            "h",
+            "d2",
+            "2024-01-01T00:00:00+00:00",
+            &[("d1", 1), ("d2", 4)],
+            false,
+        );
         let merged = merge_ssh_target(&local, &remote);
         assert_eq!(merged.vector_clock.get("d1"), Some(&3));
         assert_eq!(merged.vector_clock.get("d2"), Some(&4));

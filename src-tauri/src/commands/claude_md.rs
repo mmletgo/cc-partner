@@ -27,9 +27,7 @@ use tauri::State;
 ///     对账失败不阻断读取（仅记 warn 日志），降级返回 DB 当前版本，保证 UI 可用。
 /// Code Logic: reconcile_from_file → claude_md_repo.get → None 返回空 DTO、Some 返回 to_dto。
 #[tauri::command]
-pub async fn get_claude_md(
-    state: State<'_, AppState>,
-) -> Result<ClaudeMdDto, AppError> {
+pub async fn get_claude_md(state: State<'_, AppState>) -> Result<ClaudeMdDto, AppError> {
     // 先对账：文件被应用外编辑时以文件为准推进 DB 向量时钟
     if let Err(e) = crate::sync::claude_md::reconcile_from_file(state.inner()).await {
         tracing::warn!("claude_md 对账失败: {e}");

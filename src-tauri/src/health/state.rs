@@ -62,7 +62,9 @@ pub struct HealthStateMachine {
 impl HealthStateMachine {
     /// 构造一个处于 Idle 初态的状态机。
     pub fn new() -> Self {
-        Self { state: MachineState::Idle }
+        Self {
+            state: MachineState::Idle,
+        }
     }
 
     /// 推进一拍:根据本分钟是否有键鼠活动更新相位,并判定是否触发久坐提醒。
@@ -85,18 +87,26 @@ impl HealthStateMachine {
 
         // 1) 相位流转
         let next = match (&self.state, active) {
-            (MachineState::Idle, true)
-            | (MachineState::Resting { .. }, true) => {
-                MachineState::Working(WorkingState { window_start_ts: now_ts, last_active_ts: now_ts, reminded: false })
+            (MachineState::Idle, true) | (MachineState::Resting { .. }, true) => {
+                MachineState::Working(WorkingState {
+                    window_start_ts: now_ts,
+                    last_active_ts: now_ts,
+                    reminded: false,
+                })
             }
-            (MachineState::Working(w), true) => {
-                MachineState::Working(WorkingState { last_active_ts: now_ts, ..w.clone() })
+            (MachineState::Working(w), true) => MachineState::Working(WorkingState {
+                last_active_ts: now_ts,
+                ..w.clone()
+            }),
+            (MachineState::Idle, false) | (MachineState::Resting { .. }, false) => {
+                self.state.clone()
             }
-            (MachineState::Idle, false) | (MachineState::Resting { .. }, false) => self.state.clone(),
             (MachineState::Working(w), false) => {
                 if now_ts - w.last_active_ts >= cfg.break_seconds {
                     closed_window = Some((w.window_start_ts, now_ts));
-                    MachineState::Resting { rest_start_ts: now_ts }
+                    MachineState::Resting {
+                        rest_start_ts: now_ts,
+                    }
                 } else {
                     self.state.clone() // 短暂停歇,保持 Working
                 }
@@ -108,7 +118,10 @@ impl HealthStateMachine {
         let final_state = if let MachineState::Working(w) = &next {
             if !w.reminded && now_ts - w.window_start_ts >= cfg.work_window_seconds {
                 should_remind = true;
-                MachineState::Working(WorkingState { reminded: true, ..w.clone() })
+                MachineState::Working(WorkingState {
+                    reminded: true,
+                    ..w.clone()
+                })
             } else {
                 next.clone()
             }
@@ -117,7 +130,11 @@ impl HealthStateMachine {
         };
 
         self.state = final_state.clone();
-        StateOutcome { state: final_state, reminder_closed_window: closed_window, should_remind }
+        StateOutcome {
+            state: final_state,
+            reminder_closed_window: closed_window,
+            should_remind,
+        }
     }
 }
 
@@ -132,7 +149,10 @@ mod tests {
     use super::*;
 
     fn thr() -> HealthThresholds {
-        HealthThresholds { work_window_seconds: 45 * 60, break_seconds: 5 * 60 }
+        HealthThresholds {
+            work_window_seconds: 45 * 60,
+            break_seconds: 5 * 60,
+        }
     }
 
     #[test]
@@ -146,9 +166,9 @@ mod tests {
     #[test]
     fn short_pause_does_not_break_window() {
         let mut m = HealthStateMachine::new();
-        m.advance(true, 1000, &thr());           // 开始工作
-        m.advance(true, 1000 + 60, &thr());      // 1 分钟后活跃
-        // 停 3 分钟(< break 5 分钟):应仍 Working
+        m.advance(true, 1000, &thr()); // 开始工作
+        m.advance(true, 1000 + 60, &thr()); // 1 分钟后活跃
+                                            // 停 3 分钟(< break 5 分钟):应仍 Working
         let out = m.advance(false, 1000 + 60 + 180, &thr());
         assert!(matches!(out.state, MachineState::Working(_)));
         assert!(out.reminder_closed_window.is_none());
@@ -162,7 +182,10 @@ mod tests {
         // 停 5 分钟(>= break):应进 Resting 并关闭窗口
         let out = m.advance(false, 1060 + 300, &thr());
         assert!(matches!(out.state, MachineState::Resting { .. }));
-        assert!(out.reminder_closed_window.is_some(), "应报告被关闭的工作窗口");
+        assert!(
+            out.reminder_closed_window.is_some(),
+            "应报告被关闭的工作窗口"
+        );
     }
 
     #[test]
@@ -177,7 +200,10 @@ mod tests {
     #[test]
     fn remind_when_window_exceeds_threshold_without_rest() {
         let mut m = HealthStateMachine::new();
-        let t = HealthThresholds { work_window_seconds: 120, break_seconds: 300 };
+        let t = HealthThresholds {
+            work_window_seconds: 120,
+            break_seconds: 300,
+        };
         m.advance(true, 0, &t);
         // 连续活跃到窗口满 120s
         let out = m.advance(true, 120, &t);
@@ -187,9 +213,12 @@ mod tests {
     #[test]
     fn do_not_remind_twice_in_same_window() {
         let mut m = HealthStateMachine::new();
-        let t = HealthThresholds { work_window_seconds: 120, break_seconds: 300 };
+        let t = HealthThresholds {
+            work_window_seconds: 120,
+            break_seconds: 300,
+        };
         m.advance(true, 0, &t);
-        let _ = m.advance(true, 120, &t);   // 已提醒
+        let _ = m.advance(true, 120, &t); // 已提醒
         let out = m.advance(true, 200, &t);
         assert!(!out.should_remind, "同窗口不重复提醒");
     }
@@ -197,10 +226,13 @@ mod tests {
     #[test]
     fn remind_again_after_rest_and_new_window() {
         let mut m = HealthStateMachine::new();
-        let t = HealthThresholds { work_window_seconds: 120, break_seconds: 300 };
+        let t = HealthThresholds {
+            work_window_seconds: 120,
+            break_seconds: 300,
+        };
         m.advance(true, 0, &t);
-        let _ = m.advance(true, 120, &t);   // 提醒 1
-        m.advance(false, 120 + 300, &t);    // 有效休息
+        let _ = m.advance(true, 120, &t); // 提醒 1
+        m.advance(false, 120 + 300, &t); // 有效休息
         let _ = m.advance(true, 120 + 600, &t); // 新窗口
         let out = m.advance(true, 120 + 600 + 120, &t); // 新窗口满
         assert!(out.should_remind, "新窗口应能再次提醒");

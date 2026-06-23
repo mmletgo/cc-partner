@@ -135,7 +135,8 @@ impl HealthRepo {
         rows.iter()
             .map(|r| {
                 Ok((
-                    r.try_get::<Option<String>, _>("process_name")?.unwrap_or_default(),
+                    r.try_get::<Option<String>, _>("process_name")?
+                        .unwrap_or_default(),
                     r.try_get("mins")?,
                 ))
             })

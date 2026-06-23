@@ -109,7 +109,11 @@ impl Default for UpdateDownloadStatus {
 /// Business Logic: 前端需展示安装包文件名，latest.json 的 url 是直链，文件名在其路径末段。
 /// Code Logic: split('/').last() 取末段；percent-encoding 的空格等不处理（文件名通常无特殊字符）。
 fn filename_from_url(url: &str) -> String {
-    url.rsplit('/').next().filter(|s| !s.is_empty()).map(|s| s.to_string()).unwrap_or_default()
+    url.rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_default()
 }
 
 /// 检查更新。
@@ -122,9 +126,14 @@ fn filename_from_url(url: &str) -> String {
 ///     - None：hasUpdate=false（已是最新）
 ///     - Err：hasUpdate=false + error 字段（不 panic，返回给前端展示）
 #[tauri::command]
-pub async fn check_update(app: AppHandle, state: State<'_, AppState>) -> Result<UpdateCheckResult, AppError> {
+pub async fn check_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<UpdateCheckResult, AppError> {
     // 用 updater_builder 而非 updater()，便于未来按需注入 headers/target；当前用默认配置
-    let updater = app.updater().map_err(|e| AppError::generic(format!("更新器初始化失败: {e}")))?;
+    let updater = app
+        .updater()
+        .map_err(|e| AppError::generic(format!("更新器初始化失败: {e}")))?;
     match updater.check().await {
         Ok(Some(update)) => {
             let version = update.version.clone();
@@ -190,7 +199,11 @@ pub async fn download_update(
     filename: Option<String>,
 ) -> Result<serde_json::Value, AppError> {
     // 取出缓存的 Update clone（download/install 基于 check 阶段的同一对象）
-    let update_opt = state.update_pending.lock().expect("update_pending 锁中毒").clone();
+    let update_opt = state
+        .update_pending
+        .lock()
+        .expect("update_pending 锁中毒")
+        .clone();
     let update = update_opt.ok_or_else(|| {
         AppError::generic("尚未检查到可用更新，请先调用 check_update".to_string())
     })?;
@@ -313,7 +326,9 @@ pub async fn download_update(
 
 /// 查询下载状态（前端进度条轮询）。
 #[tauri::command]
-pub async fn get_download_status(state: State<'_, AppState>) -> Result<UpdateDownloadStatus, AppError> {
+pub async fn get_download_status(
+    state: State<'_, AppState>,
+) -> Result<UpdateDownloadStatus, AppError> {
     let status = state.update_status.read().expect("update_status 读锁中毒");
     Ok(status.clone())
 }
@@ -335,7 +350,10 @@ pub async fn cancel_download(state: State<'_, AppState>) -> Result<serde_json::V
         t.cancel();
     }
     // 再 abort 任务句柄强制中断 reqwest 流
-    let mut task_guard = state.update_download_task.lock().expect("update_download_task 锁中毒");
+    let mut task_guard = state
+        .update_download_task
+        .lock()
+        .expect("update_download_task 锁中毒");
     if let Some(handle) = task_guard.take() {
         handle.abort();
         // 主动置 cancelled 兜底（abort 后 spawn 体未必执行 match 分支）
@@ -355,7 +373,10 @@ pub async fn cancel_download(state: State<'_, AppState>) -> Result<serde_json::V
 ///     （macOS 解 tar.gz 替换 .app / Windows 起 nsis/msi / Linux 替换 appimage/deb/rpm，均自带），
 ///     随后 app.request_restart() 重启。install 失败返回错误给前端。
 #[tauri::command]
-pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Result<serde_json::Value, AppError> {
+pub async fn install_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, AppError> {
     // 校验下载已完成
     {
         let status = state.update_status.read().expect("update_status 读锁中毒");
@@ -369,10 +390,16 @@ pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Resul
         .lock()
         .expect("update_bytes 锁中毒")
         .take();
-    let bytes = bytes_opt.ok_or_else(|| AppError::generic("安装包数据缺失，请重新下载".to_string()))?;
+    let bytes =
+        bytes_opt.ok_or_else(|| AppError::generic("安装包数据缺失，请重新下载".to_string()))?;
 
-    let update_opt = state.update_pending.lock().expect("update_pending 锁中毒").clone();
-    let update = update_opt.ok_or_else(|| AppError::generic("更新元数据缺失，请重新检查更新".to_string()))?;
+    let update_opt = state
+        .update_pending
+        .lock()
+        .expect("update_pending 锁中毒")
+        .clone();
+    let update = update_opt
+        .ok_or_else(|| AppError::generic("更新元数据缺失，请重新检查更新".to_string()))?;
 
     tracing::info!("开始安装更新并重启...");
     // install 是同步阻塞调用（内部 fs 操作 + 可能起外部安装进程），用 spawn_blocking 避免阻塞 async 运行时

@@ -23,9 +23,7 @@ use tauri::{AppHandle, State};
 /// Code Logic: 合并 registry.list()（活跃）与 transfer_repo.list()（历史，去重活跃 id），
 ///     按 created_at 倒序，转为 TransferTaskDto。
 #[tauri::command]
-pub async fn list_transfers(
-    state: State<'_, AppState>,
-) -> Result<Vec<TransferTaskDto>, AppError> {
+pub async fn list_transfers(state: State<'_, AppState>) -> Result<Vec<TransferTaskDto>, AppError> {
     let active = state.transfers.list();
     let history = state.transfer_repo.list().await?;
 
@@ -55,8 +53,12 @@ pub async fn send_transfer(
     device_id: String,
     file_path: String,
 ) -> Result<serde_json::Value, AppError> {
-    let transfer_id =
-        sender::start_sending(state.inner().clone(), app_handle, device_id.clone(), file_path.clone())?;
+    let transfer_id = sender::start_sending(
+        state.inner().clone(),
+        app_handle,
+        device_id.clone(),
+        file_path.clone(),
+    )?;
     tracing::info!("已发起传输任务 {transfer_id} → {device_id}");
     Ok(serde_json::json!({
         "accepted": true,

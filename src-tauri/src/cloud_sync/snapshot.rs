@@ -167,10 +167,7 @@ fn ssh_target_changed(merged: &SshTargetRow, local: &SshTargetRow) -> bool {
 /// 4. claude_history/*.json：merge_cc_history，变化才 bulk_upsert；
 /// 5. ssh_targets/*.json：merge_ssh_target，变化才 bulk_upsert（host 为主键，文件名 hex 还原）；
 /// 6. 返回 ImportStats。
-pub async fn import_to_db(
-    state: &AppState,
-    workdir: &Path,
-) -> Result<ImportStats, AppError> {
+pub async fn import_to_db(state: &AppState, workdir: &Path) -> Result<ImportStats, AppError> {
     let mut stats = ImportStats::default();
 
     // 1. CLAUDE.md 文件↔DB 对账（纳入应用外编辑）
@@ -196,14 +193,20 @@ pub async fn import_to_db(
             let text = match fs::read_to_string(&path) {
                 Ok(t) => t,
                 Err(e) => {
-                    tracing::warn!("cloud_sync import: 读取 {} 失败（跳过）: {e}", path.display());
+                    tracing::warn!(
+                        "cloud_sync import: 读取 {} 失败（跳过）: {e}",
+                        path.display()
+                    );
                     continue;
                 }
             };
             let remote: PromptRow = match serde_json::from_str(&text) {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!("cloud_sync import: 解析 {} 失败（跳过）: {e}", path.display());
+                    tracing::warn!(
+                        "cloud_sync import: 解析 {} 失败（跳过）: {e}",
+                        path.display()
+                    );
                     continue;
                 }
             };
@@ -279,14 +282,20 @@ pub async fn import_to_db(
             let text = match fs::read_to_string(&path) {
                 Ok(t) => t,
                 Err(e) => {
-                    tracing::warn!("cloud_sync import: 读取 {} 失败（跳过）: {e}", path.display());
+                    tracing::warn!(
+                        "cloud_sync import: 读取 {} 失败（跳过）: {e}",
+                        path.display()
+                    );
                     continue;
                 }
             };
             let remote: ClaudeHistoryRow = match serde_json::from_str(&text) {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!("cloud_sync import: 解析 {} 失败（跳过）: {e}", path.display());
+                    tracing::warn!(
+                        "cloud_sync import: 解析 {} 失败（跳过）: {e}",
+                        path.display()
+                    );
                     continue;
                 }
             };
@@ -330,19 +339,29 @@ pub async fn import_to_db(
             let text = match fs::read_to_string(&path) {
                 Ok(t) => t,
                 Err(e) => {
-                    tracing::warn!("cloud_sync import: 读取 {} 失败（跳过）: {e}", path.display());
+                    tracing::warn!(
+                        "cloud_sync import: 读取 {} 失败（跳过）: {e}",
+                        path.display()
+                    );
                     continue;
                 }
             };
             let remote: SshTargetRow = match serde_json::from_str(&text) {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!("cloud_sync import: 解析 {} 失败（跳过）: {e}", path.display());
+                    tracing::warn!(
+                        "cloud_sync import: 解析 {} 失败（跳过）: {e}",
+                        path.display()
+                    );
                     continue;
                 }
             };
             // 文件名还原的 host 与文件内容 host 应一致；以还原 host 为准做本地查找
-            let lookup_host = if remote.host == host { host.clone() } else { host };
+            let lookup_host = if remote.host == host {
+                host.clone()
+            } else {
+                host
+            };
             match state.ssh_target_repo.get(&lookup_host).await? {
                 None => {
                     // 本地没有 → 直接接收远端版本（确保 host 用还原值）
@@ -381,10 +400,7 @@ pub async fn import_to_db(
 /// 4. cc_history 全量写 claude_history/<id_to_filename>.json；
 /// 5. ssh_targets 全量写 ssh_targets/<id_to_filename(host)>.json；
 /// 6. 返回 ExportStats。
-pub async fn export_from_db(
-    state: &AppState,
-    workdir: &Path,
-) -> Result<ExportStats, AppError> {
+pub async fn export_from_db(state: &AppState, workdir: &Path) -> Result<ExportStats, AppError> {
     let mut stats = ExportStats::default();
 
     let prompts_dir = workdir.join(PROMPTS_DIR);
@@ -466,7 +482,10 @@ fn clear_dir_contents(dir: &Path) -> Result<(), AppError> {
             fs::remove_file(&path)
         };
         if let Err(e) = res {
-            tracing::warn!("cloud_sync export: 清理 {} 失败（继续）: {e}", path.display());
+            tracing::warn!(
+                "cloud_sync export: 清理 {} 失败（继续）: {e}",
+                path.display()
+            );
         }
     }
     Ok(())
@@ -495,10 +514,7 @@ mod tests {
         // CC 历史 id 含冒号（session_id:uuid），文件系统（尤其 Windows）不允许冒号
         let id = "abc123-def456:7890aabb";
         let fname = id_to_filename(id);
-        assert!(
-            !fname.contains(':'),
-            "文件名不应含冒号: {fname}"
-        );
+        assert!(!fname.contains(':'), "文件名不应含冒号: {fname}");
         assert_eq!(filename_to_id(&fname), id);
     }
 

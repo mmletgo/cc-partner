@@ -52,9 +52,7 @@ pub fn detect_git() -> Result<PathBuf, AppError> {
             } else {
                 "（请安装 git 并确保 git 在 PATH 中）"
             };
-            Err(AppError::generic(format!(
-                "未检测到可用的 git 命令{hint}"
-            )))
+            Err(AppError::generic(format!("未检测到可用的 git 命令{hint}")))
         }
     }
 }
@@ -83,9 +81,9 @@ pub async fn run(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let child = cmd.spawn().map_err(|e| {
-        AppError::generic(format!("启动 git 失败（{}）: {e}", args.join(" ")))
-    })?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| AppError::generic(format!("启动 git 失败（{}）: {e}", args.join(" "))))?;
 
     let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(o)) => o,
@@ -172,11 +170,7 @@ pub async fn set_local_identity(git: &Path, workdir: &Path) -> Result<(), AppErr
     run(
         git,
         workdir,
-        &[
-            "config",
-            "user.email",
-            "claude-partner@local",
-        ],
+        &["config", "user.email", "claude-partner@local"],
         Duration::from_secs(LOCAL_TIMEOUT_SECS),
     )
     .await?;
@@ -449,9 +443,6 @@ mod tests {
             }
         }
         assert_eq!(classify(PushError::Rejected), "rejected");
-        assert_eq!(
-            classify(PushError::Other(AppError::generic("x"))),
-            "other"
-        );
+        assert_eq!(classify(PushError::Other(AppError::generic("x"))), "other");
     }
 }

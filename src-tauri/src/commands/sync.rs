@@ -18,9 +18,7 @@ use tauri::State;
 /// Business Logic: 用户点击"同步"按钮时调用，与所有在线对端双向同步 Prompt。
 /// Code Logic: 转发到 `sync::engine::trigger_sync`；返回 SyncResult（accepted/synced/note）。
 #[tauri::command]
-pub async fn trigger_sync(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, AppError> {
+pub async fn trigger_sync(state: State<'_, AppState>) -> Result<serde_json::Value, AppError> {
     let result = engine::trigger_sync(state.inner()).await;
     // 序列化为 {accepted, synced, note}（serde_json::Value 透传，前端取 synced）
     let value = serde_json::to_value(&result)?;

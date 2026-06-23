@@ -40,10 +40,7 @@ pub async fn list_prompts(
 
 /// 按 ID 获取单条 Prompt；不存在或已删除返回 NotFound。
 #[tauri::command]
-pub async fn get_prompt(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<PromptDto, AppError> {
+pub async fn get_prompt(state: State<'_, AppState>, id: String) -> Result<PromptDto, AppError> {
     let row = state.prompt_repo.get(&id).await?;
     match row {
         Some(p) if !p.deleted => Ok(p.to_dto()),

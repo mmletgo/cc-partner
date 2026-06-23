@@ -268,11 +268,9 @@ impl ClaudeHistoryRepo {
 
     /// 读取全部扫描状态，返回 {file_path: (mtime_sec, size)}，供采集器增量比对。
     pub async fn get_scan_states(&self) -> Result<HashMap<String, (i64, i64)>, AppError> {
-        let rows = sqlx::query(
-            "SELECT file_path, mtime_sec, size FROM claude_history_scan_state",
-        )
-        .fetch_all(&self.db)
-        .await?;
+        let rows = sqlx::query("SELECT file_path, mtime_sec, size FROM claude_history_scan_state")
+            .fetch_all(&self.db)
+            .await?;
         let mut out = HashMap::with_capacity(rows.len());
         for r in &rows {
             let file_path: String = r.try_get("file_path")?;
@@ -368,7 +366,9 @@ mod tests {
     async fn bulk_upsert_replaces_existing() {
         // upsert 已存在 id → 覆盖内容与时钟
         let repo = setup_repo().await;
-        repo.bulk_ingest(&[row("a", "/p", "hello", 1)]).await.unwrap();
+        repo.bulk_ingest(&[row("a", "/p", "hello", 1)])
+            .await
+            .unwrap();
         repo.bulk_upsert(&[row("a", "/p", "CHANGED", 9)])
             .await
             .unwrap();
@@ -418,7 +418,9 @@ mod tests {
     #[tokio::test]
     async fn soft_delete_marks_deleted_and_updates_clock() {
         let repo = setup_repo().await;
-        repo.bulk_ingest(&[row("a", "/p", "hello", 1)]).await.unwrap();
+        repo.bulk_ingest(&[row("a", "/p", "hello", 1)])
+            .await
+            .unwrap();
         let mut vc = HashMap::new();
         vc.insert("d1".to_string(), 2u64);
         repo.soft_delete("a", "2024-01-02T00:00:00+00:00", &vc)

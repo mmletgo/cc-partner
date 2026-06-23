@@ -36,10 +36,7 @@ pub struct HealthResponse {
 /// Code Logic: device_id/device_name 从 config RwLock 读；http_port 从 AtomicU16 读；
 ///             ts 取 Utc::now().timestamp()（对照 Python int(datetime.now(timezone.utc).timestamp())）。
 pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let cfg = state
-        .config
-        .read()
-        .expect("config 读锁中毒");
+    let cfg = state.config.read().expect("config 读锁中毒");
     let port = state.actual_http_port.load(Ordering::SeqCst);
     Json(HealthResponse {
         ok: true,

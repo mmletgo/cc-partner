@@ -122,7 +122,8 @@ pub async fn cc_sync_with_peer(
             Some(remote_clock) => {
                 // 本端 vs 对端：本端领先或并发 → 推送（对端会做 LWW 合并）
                 let relation = compare(&p.vector_clock, remote_clock);
-                if matches!(relation, ClockOrder::After) || matches!(relation, ClockOrder::Concurrent)
+                if matches!(relation, ClockOrder::After)
+                    || matches!(relation, ClockOrder::Concurrent)
                 {
                     // 仅当不在 remote_ids（避免重复推送 pull 已带走的）时推送
                     if !remote_ids.contains(&p.id) {
