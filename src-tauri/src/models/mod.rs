@@ -9,5 +9,6 @@
 pub mod claude_md;
 pub mod device;
 pub mod prompt;
+pub mod scratchpad;
 pub mod ssh_target;
 pub mod transfer;

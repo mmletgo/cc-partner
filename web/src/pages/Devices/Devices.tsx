@@ -2,33 +2,28 @@
  * Devices 页面 - 局域网设备管理
  *
  * Business Logic（为什么需要这个页面）:
- *   局域网 P2P 是 cc-partner 的核心传输通道；用户需要看到当前网络上
- *   通过 mDNS 自动发现的对端设备，了解每个设备的状态、地址和端口，并
- *   知道本机在网络中的标识（方便区分"自己"）。本机信息单独高亮，以便
- *   用户在多设备场景下立即定位自己。
+ *   局域网 P2P 是 cc-partner 的核心传输通道；用户需要把当前网络上
+ *   通过 mDNS 自动发现的对端设备直接作为 SSH 连接目标管理，同时知道
+ *   本机在网络中的标识（方便区分"自己"）。本机信息单独高亮，以便用户
+ *   在多设备场景下立即定位自己。
  *
  * Code Logic（这个页面做什么）:
  *   - 页面头部展示标题 + 在线数量 Pill + 副标题 + 手动刷新按钮
  *   - 顶部 outlined Card 显示本机信息（通过 /api/health 获取，设备名 + IP + 端口 + 状态）
- *   - 主区域用 auto-fill 网格渲染 DeviceCard，加载/空/错误态分别走
- *     skeleton / empty hint / error block
- *   - SSH 目标管理直接并入设备页：局域网设备自动成为连接目标，也可手动添加 IP；
+ *   - SSH 目标管理是设备页主操作区：局域网设备自动成为连接目标，也可手动添加 IP；
  *     行内保存 username/port，一键复制 ssh 命令，配置可跨设备同步
  *   - 启动后用 setInterval 每 5 秒拉取一次设备列表；
  *     卸载时清除 interval 防止内存泄漏
  *   - 容器居中、限宽，保证在大窗口下也保持可读
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Pill, Button, Input } from '@/components/primitives';
-import { DeviceCard } from '@/components/domain';
 import { devicesApi } from '@/api/devices';
 import type { HealthResponse } from '@/api/devices';
 import { sshApi } from '@/api/ssh';
 import {
   SyncIcon,
-  DevicesIcon,
   AlertIcon,
   CopyIcon,
   TrashIcon,
@@ -116,7 +111,6 @@ export function Devices() {
   const [manualLabel, setManualLabel] = useState<string>('');
   const [edits, setEdits] = useState<Record<string, { username: string; port: string }>>({});
   const [tick, setTick] = useState<number>(0);
-  const [search, setSearch] = useState<string>('');
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   /**
@@ -210,11 +204,6 @@ export function Devices() {
     };
   }, []);
 
-  // 派生数据：搜索过滤
-  const filteredDevices = devices.filter((d) =>
-    d.name.toLowerCase().includes(search.trim().toLowerCase()),
-  );
-
   const onlineCount = devices.filter((d) => d.status === 'online').length;
 
   const targetByHost = useMemo(() => new Map(targets.map((target) => [target.host, target])), [
@@ -285,15 +274,6 @@ export function Devices() {
     },
     [t],
   );
-
-  /**
-   * 处理搜索输入
-   *
-   * @param e input change 事件
-   */
-  const handleSearchChange = (e: ChangeEvent<HTMLInputElement>) => {
-    setSearch(e.target.value);
-  };
 
   /**
    * 手动触发刷新：递增 tick，下一次 effect 会重新拉取
@@ -491,17 +471,6 @@ export function Devices() {
           ) : null}
         </Card>
 
-        {/* 搜索栏 */}
-        <div className={styles.searchRow}>
-          <Input
-            type="search"
-            value={search}
-            onChange={handleSearchChange}
-            placeholder={t('devices:searchPlaceholder')}
-            icon={<DevicesIcon />}
-          />
-        </div>
-
         {/* 错误提示 */}
         {error ? (
           <div className={styles.errorBox} role="alert">
@@ -509,26 +478,6 @@ export function Devices() {
             <span>{error}</span>
           </div>
         ) : null}
-
-        {/* 设备网格 */}
-        {loading && devices.length === 0 ? (
-          <div className={styles.grid} aria-busy="true">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className={styles.skeleton} aria-hidden="true" />
-            ))}
-          </div>
-        ) : filteredDevices.length === 0 ? (
-          <div className={styles.empty}>
-            <p className={styles.emptyTitle}>{t('devices:emptyTitle')}</p>
-            <p className={styles.emptyHint}>{t('devices:emptyHint')}</p>
-          </div>
-        ) : (
-          <div className={styles.grid}>
-            {filteredDevices.map((device) => (
-              <DeviceCard key={device.id} device={device} />
-            ))}
-          </div>
-        )}
 
         {/* SSH 连接目标 */}
         <Card variant="outlined" padding="md" className={styles.sshCard}>
@@ -565,7 +514,7 @@ export function Devices() {
             </div>
           ) : null}
 
-          {sshLoading && sshTargetRows.length === 0 ? (
+          {(sshLoading || loading) && sshTargetRows.length === 0 ? (
             <div className={styles.empty}>
               <SyncIcon /> {t('ssh:loading')}
             </div>
@@ -625,7 +574,7 @@ export function Devices() {
                         if (e.key === 'Enter') commitSshEdit(row.host);
                       }}
                     />
-                    <span className={styles.targetLabel}>{row.label ?? ''}</span>
+                    <span className={styles.targetLabel}>{row.label ?? row.deviceName ?? ''}</span>
                     <div className={styles.targetActions}>
                       <Button
                         variant="secondary"

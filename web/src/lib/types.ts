@@ -13,6 +13,28 @@ export interface Prompt {
   vectorClock?: Record<string, number>;
 }
 
+/**
+ * 速记本单例文本（对齐 Rust ScratchpadDto）。
+ */
+export interface Scratchpad {
+  id: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+  deviceId: string;
+  vectorClock: Record<string, number>;
+  deleted: boolean;
+}
+
+/**
+ * 局域网同步结果（对齐 Rust SyncResult）。
+ */
+export interface LanSyncResult {
+  accepted: boolean;
+  synced: number;
+  note: string;
+}
+
 export interface Device {
   id: string;
   name: string;
@@ -148,6 +170,14 @@ export interface ClaudeCliTestResult {
   ok: boolean;
   version?: string | null;
   error?: string | null;
+}
+
+/**
+ * Prompt 优化响应（对齐 Rust optimize_prompt 返回）。
+ */
+export interface PromptOptimizeResponse {
+  optimizedZh: string;
+  optimizedEn: string;
 }
 
 export interface VersionInfo {

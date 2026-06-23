@@ -1,0 +1,19 @@
+{
+  "eyebrow": "Prompt 优化",
+  "title": "Prompt 优化",
+  "description": "把原始编程任务整理成适合 Claude Code 执行的中英文结构化 Prompt。",
+  "inputTitle": "原始 Prompt",
+  "inputPlaceholder": "粘贴要优化的需求、任务说明或草稿 Prompt…",
+  "inputAriaLabel": "原始 Prompt 输入",
+  "optimize": "优化",
+  "optimizing": "优化中",
+  "resultsAriaLabel": "Prompt 优化结果",
+  "zhTitle": "中文优化版",
+  "enTitle": "English optimized",
+  "zhAriaLabel": "中文优化版 Prompt",
+  "enAriaLabel": "English optimized prompt",
+  "resultPlaceholder": "优化结果会显示在这里。",
+  "copied": "已复制",
+  "copyFailed": "复制失败，请手动选择文本复制",
+  "errorFallback": "优化失败，请稍后重试"
+}

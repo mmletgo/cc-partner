@@ -27,16 +27,23 @@
 }
 
 .list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
 }
 
 .empty {
+  grid-column: 1 / -1;
   padding: var(--space-8);
   border: 1px dashed var(--border-soft);
   border-radius: var(--radius-md);
   color: var(--muted);
   font-size: var(--text-sm);
   text-align: center;
+}
+
+@media (max-width: 980px) {
+  .list {
+    grid-template-columns: 1fr;
+  }
 }

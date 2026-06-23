@@ -30,3 +30,15 @@ CREATE TABLE IF NOT EXISTS transfer_history (
     created_at TEXT NOT NULL,
     completed_at TEXT
 );
+
+-- scratchpad 表：速记本单例文本
+-- 全表仅一行，id 恒为 "scratchpad"；清空内容是 content=""，不是 deleted=1。
+CREATE TABLE IF NOT EXISTS scratchpad (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    vector_clock TEXT NOT NULL,
+    deleted INTEGER DEFAULT 0
+);

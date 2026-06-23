@@ -1,6 +1,6 @@
 /* Devices 页面样式
  * 整体走居中 container，标题 + 计数 Pill 同列展示
- * 设备网格用 auto-fill 适配不同视口宽度
+ * 连接目标 Card 合并展示局域网自动发现设备与手动目标
  * 所有颜色/间距/圆角/阴影都走 design token
  */
 
@@ -131,13 +131,6 @@
   font-size: var(--text-xs);
 }
 
-/* ── 搜索 ── */
-.searchRow {
-  display: flex;
-  width: 100%;
-  max-width: 360px;
-}
-
 /* ── 错误提示 ── */
 .errorBox {
   display: inline-flex;
@@ -148,43 +141,6 @@
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-md);
   font-size: var(--text-sm);
-}
-
-/* ── 设备网格 ── */
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: var(--space-5);
-}
-
-/* ── 加载骨架 ── */
-.skeleton {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  height: 132px;
-  position: relative;
-  overflow: hidden;
-}
-
-.skeleton::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--surface-warm) 50%,
-    transparent 100%
-  );
-  transform: translateX(-100%);
-  animation: skeleton-shimmer 1.4s infinite;
-}
-
-@keyframes skeleton-shimmer {
-  to {
-    transform: translateX(100%);
-  }
 }
 
 /* ── 空态 ── */

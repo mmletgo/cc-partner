@@ -7,72 +7,129 @@
  *   降低"忘记保存"和意外丢失内容的认知负担。
  *
  * Code Logic（这个页面做什么）:
- *   - 从 localStorage 初始化内容，并在内容变化时自动写回本地
+ *   - 从 Rust/SQLite 初始化单例内容，并在内容变化后 debounce 自动保存
  *   - 实时字符计数显示
  *   - 复制全部：navigator.clipboard.writeText
- *   - 清空：二次确认 modal 后清空状态和本地缓存
+ *   - 清空：二次确认 modal 后写入空内容
+ *   - 局域网同步：调用 scratchpadApi.syncLan 后刷新内容
+ *   - GitHub 同步：调用 configApi.triggerCloudSync 后刷新内容
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { configApi } from '@/api/config';
+import { scratchpadApi } from '@/api/scratchpad';
 import { Button, Card } from '@/components/primitives';
-import { CopyIcon, TrashIcon, XIcon } from '@/lib/icons';
+import { CopyIcon, SyncIcon, TrashIcon, UploadIcon, XIcon } from '@/lib/icons';
 import styles from './Scratchpad.module.css';
 
-const SCRATCHPAD_STORAGE_KEY = 'cp-scratchpad-content';
-
-/**
- * Business Logic（为什么需要）:
- *   速记本内容需要在应用关闭后继续保留，页面初始化时应恢复上次输入。
- *
- * Code Logic（做什么）:
- *   安全读取 localStorage；浏览器存储不可用时降级为空内容。
- */
-function readStoredScratchpad(): string {
-  try {
-    return window.localStorage.getItem(SCRATCHPAD_STORAGE_KEY) ?? '';
-  } catch {
-    return '';
-  }
-}
-
-/**
- * Business Logic（为什么需要）:
- *   用户输入后无需点击保存，内容应自动落到本机持久化存储。
- *
- * Code Logic（做什么）:
- *   非空内容写入 localStorage；空内容移除存储项，避免留下无意义缓存。
- */
-function persistScratchpad(nextText: string): void {
-  try {
-    if (nextText.length === 0) {
-      window.localStorage.removeItem(SCRATCHPAD_STORAGE_KEY);
-      return;
-    }
-
-    window.localStorage.setItem(SCRATCHPAD_STORAGE_KEY, nextText);
-  } catch {
-    // localStorage 可能因隐私模式或配额限制不可用，避免打断输入流程。
-  }
-}
+const AUTOSAVE_DELAY_MS = 500;
 
 /**
  * Business Logic（为什么需要）:
  *   用户需要一个可随手记录、自动保留内容的本机速记空间。
  *
  * Code Logic（做什么）:
- *   管理速记文本、字符计数、复制和清空确认，并通过 localStorage 自动持久化。
+ *   管理速记文本、加载/保存/同步状态、字符计数、复制和清空确认；
+ *   所有持久化与同步都通过 Tauri invoke 交给 Rust 后端。
  */
 export function Scratchpad() {
   const { t } = useTranslation(['scratchpad', 'common']);
-  const [text, setText] = useState(readStoredScratchpad);
+  const [text, setText] = useState('');
   const [pendingClear, setPendingClear] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [lanSyncing, setLanSyncing] = useState(false);
+  const [cloudSyncing, setCloudSyncing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const loadedRef = useRef(false);
+  const skipNextSaveRef = useRef(false);
+  const saveTimerRef = useRef<number | null>(null);
 
   const charCount = text.length;
 
+  const applyServerContent = useCallback((content: string) => {
+    setText((current) => {
+      if (current !== content) {
+        skipNextSaveRef.current = true;
+      }
+      return content;
+    });
+    loadedRef.current = true;
+  }, []);
+
+  const loadScratchpad = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const scratchpad = await scratchpadApi.get();
+      applyServerContent(scratchpad.content);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('scratchpad:loadFailed'));
+    } finally {
+      setLoading(false);
+    }
+  }, [applyServerContent, t]);
+
   useEffect(() => {
-    persistScratchpad(text);
-  }, [text]);
+    const id = window.setTimeout(() => {
+      void loadScratchpad();
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [loadScratchpad]);
+
+  useEffect(() => {
+    if (!loadedRef.current) return undefined;
+    if (skipNextSaveRef.current) {
+      skipNextSaveRef.current = false;
+      return undefined;
+    }
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+
+    setSaving(true);
+    setStatus(null);
+    saveTimerRef.current = window.setTimeout(() => {
+      void scratchpadApi
+        .update(text)
+        .then((scratchpad) => {
+          setStatus(t('scratchpad:savedAt', { time: new Date(scratchpad.updatedAt).toLocaleTimeString() }));
+        })
+        .catch((err) => {
+          setError(err instanceof Error ? err.message : t('scratchpad:saveFailed'));
+        })
+        .finally(() => {
+          setSaving(false);
+          saveTimerRef.current = null;
+        });
+    }, AUTOSAVE_DELAY_MS);
+
+    return () => {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [text, t]);
+
+  const savePendingNow = useCallback(async () => {
+    if (!loadedRef.current || saveTimerRef.current === null) return;
+    window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = null;
+    setSaving(true);
+    try {
+      const scratchpad = await scratchpadApi.update(text);
+      setStatus(
+        t('scratchpad:savedAt', {
+          time: new Date(scratchpad.updatedAt).toLocaleTimeString(),
+        }),
+      );
+    } finally {
+      setSaving(false);
+    }
+  }, [text, t]);
 
   const handleCopyAll = useCallback(async () => {
     if (!text) return;
@@ -97,11 +154,48 @@ export function Scratchpad() {
     setPendingClear(false);
   }, []);
 
+  const refreshAfterSync = useCallback(async () => {
+    const scratchpad = await scratchpadApi.get();
+    applyServerContent(scratchpad.content);
+  }, [applyServerContent]);
+
+  const handleLanSync = useCallback(async () => {
+    setLanSyncing(true);
+    setError(null);
+    setStatus(null);
+    try {
+      await savePendingNow();
+      const result = await scratchpadApi.syncLan();
+      await refreshAfterSync();
+      setStatus(t('scratchpad:lanSyncDone', { count: result.synced }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('scratchpad:lanSyncFailed'));
+    } finally {
+      setLanSyncing(false);
+    }
+  }, [refreshAfterSync, savePendingNow, t]);
+
+  const handleCloudSync = useCallback(async () => {
+    setCloudSyncing(true);
+    setError(null);
+    setStatus(null);
+    try {
+      await savePendingNow();
+      const result = await configApi.triggerCloudSync();
+      await refreshAfterSync();
+      setStatus(result.ok ? t('scratchpad:cloudSyncDone', { note: result.note }) : result.note);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('scratchpad:cloudSyncFailed'));
+    } finally {
+      setCloudSyncing(false);
+    }
+  }, [refreshAfterSync, savePendingNow, t]);
+
   return (
     <div className={styles.page}>
       {/* 页面头部 */}
       <header className={styles.pageHeader}>
-        <span className={styles.eyebrow}>TOOLS</span>
+        <span className={styles.eyebrow}>{t('scratchpad:eyebrow')}</span>
         <h1 className={styles.title}>{t('scratchpad:title')}</h1>
         <p className={styles.lead}>{t('scratchpad:desc')}</p>
       </header>
@@ -114,7 +208,20 @@ export function Scratchpad() {
         <Button variant="secondary" size="sm" icon={<TrashIcon />} onClick={handleClearRequest}>
           {t('scratchpad:clear')}
         </Button>
+        <Button variant="secondary" size="sm" icon={<SyncIcon />} loading={lanSyncing} onClick={handleLanSync}>
+          {lanSyncing ? t('scratchpad:lanSyncing') : t('scratchpad:syncLan')}
+        </Button>
+        <Button variant="secondary" size="sm" icon={<UploadIcon />} loading={cloudSyncing} onClick={handleCloudSync}>
+          {cloudSyncing ? t('scratchpad:cloudSyncing') : t('scratchpad:syncCloud')}
+        </Button>
         <span className={styles.charCount}>{t('scratchpad:charCount', { n: charCount })}</span>
+      </div>
+
+      <div className={styles.statusRow} aria-live="polite">
+        {loading ? <span>{t('scratchpad:loading')}</span> : null}
+        {!loading && saving ? <span>{t('scratchpad:saving')}</span> : null}
+        {!loading && !saving && status ? <span>{status}</span> : null}
+        {error ? <span className={styles.error}>{error}</span> : null}
       </div>
 
       {/* 编辑区 */}
@@ -124,6 +231,7 @@ export function Scratchpad() {
         onChange={(e) => setText(e.target.value)}
         placeholder={t('scratchpad:placeholder')}
         aria-label={t('scratchpad:contentAriaLabel')}
+        disabled={loading}
       />
 
       {/* 清空确认弹层 */}

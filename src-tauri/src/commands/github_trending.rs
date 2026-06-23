@@ -9,8 +9,9 @@
 //!     - `list_github_trending_repos`：读当天缓存；未命中则抓 GitHub、调用 Claude CLI、写缓存。
 //!     - `get/update_github_trending_config`：设置页读写 CLI 路径、模型、缓存时长。
 //!     - `test_claude_cli`：只执行 `claude --version` 验证本机 CLI 可用性。
-//!     - 私有 helper 负责 HTML 解析、SQLite cache、Claude CLI 结构化输出解析。
+//!     - 私有 helper 负责 HTML 解析、SQLite cache；Claude CLI 结构化执行复用 `claude_cli`。
 
+use crate::claude_cli;
 use crate::config::GithubTrendingConfig;
 use crate::error::AppError;
 use crate::state::AppState;
@@ -23,7 +24,6 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
 use tauri::State;
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 const TRENDING_URL: &str = "https://github.com/trending?since=weekly";
@@ -524,7 +524,6 @@ async fn generate_explanations(
     config: &GithubTrendingConfig,
     repos: &[GithubTrendingRepoDto],
 ) -> Result<HashMap<String, AiRepoExplanation>, AppError> {
-    let cli = normalized_cli_path(config);
     let schema = json!({
         "type": "object",
         "additionalProperties": false,
@@ -570,49 +569,17 @@ async fn generate_explanations(
         serde_json::to_string_pretty(&input)?
     );
 
-    let mut cmd = Command::new(cli);
-    cmd.args(claude_generation_args(config, &schema.to_string()))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AppError::generic(format!("启动 Claude CLI 失败: {e}")))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(|e| AppError::generic(format!("写入 Claude CLI prompt 失败: {e}")))?;
-    }
-    let output = match tokio::time::timeout(
-        Duration::from_secs(CLAUDE_TIMEOUT_SECS),
-        child.wait_with_output(),
+    let parsed = claude_cli::run_structured_json::<AiOutput>(
+        &config.claude_cli_path,
+        &config.claude_model,
+        &schema.to_string(),
+        &prompt,
+        CLAUDE_TIMEOUT_SECS,
+        "生成解说",
     )
-    .await
-    {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
-            return Err(AppError::generic(format!("等待 Claude CLI 输出失败: {e}")));
-        }
-        Err(_) => {
-            return Err(AppError::generic(format!(
-                "Claude CLI 生成解说超时（{} 秒）",
-                CLAUDE_TIMEOUT_SECS
-            )));
-        }
-    };
+    .await?;
 
-    if !output.status.success() {
-        return Err(AppError::generic(format!(
-            "Claude CLI 生成解说失败: {}",
-            claude_failure_detail(&output.stderr, &output.stdout)
-        )));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_ai_output(&stdout)
+    Ok(ai_output_to_map(parsed))
 }
 
 /// 构造 Claude CLI 生成解说的参数列表。
@@ -625,44 +592,23 @@ async fn generate_explanations(
 ///     根据配置返回 `claude --bare -p ...` 后续参数，保留模型和结构化输出约束，
 ///     但不包含 `--max-budget-usd`。
 fn claude_generation_args(config: &GithubTrendingConfig, schema: &str) -> Vec<String> {
-    vec![
-        "--bare".to_string(),
-        "-p".to_string(),
-        "--output-format".to_string(),
-        "json".to_string(),
-        "--json-schema".to_string(),
-        schema.to_string(),
-        "--no-session-persistence".to_string(),
-        "--tools".to_string(),
-        "".to_string(),
-        "--model".to_string(),
-        if config.claude_model.trim().is_empty() {
-            "sonnet".to_string()
-        } else {
-            config.claude_model.trim().to_string()
-        },
-    ]
+    claude_cli::build_pure_headless_args(&config.claude_model, schema)
 }
 
 /// 解析 Claude CLI 输出，兼容直接结构化 JSON 与 `--output-format json` 的 result 包装。
 fn parse_ai_output(stdout: &str) -> Result<HashMap<String, AiRepoExplanation>, AppError> {
-    let value: serde_json::Value = serde_json::from_str(stdout.trim())?;
-    let parsed = if value.get("repos").is_some() {
-        serde_json::from_value::<AiOutput>(value)?
-    } else if let Some(structured_output) = value.get("structured_output") {
-        serde_json::from_value::<AiOutput>(structured_output.clone())?
-    } else if let Some(result) = value.get("result") {
-        if result.is_object() {
-            serde_json::from_value::<AiOutput>(result.clone())?
-        } else if let Some(text) = result.as_str() {
-            serde_json::from_str::<AiOutput>(text.trim())?
-        } else {
-            return Err(AppError::generic("Claude CLI 输出 result 不是可解析 JSON"));
-        }
-    } else {
-        return Err(AppError::generic("Claude CLI 输出缺少 repos/result 字段"));
-    };
+    let parsed = claude_cli::parse_structured_output::<AiOutput>(stdout)?;
+    Ok(ai_output_to_map(parsed))
+}
 
+/// 将 Claude CLI 结构化输出按 fullName 建索引。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GitHub Trending 返回的是仓库列表，后续合并解说时需要按 fullName 快速找到对应条目。
+///
+/// Code Logic（这个函数做什么）:
+///     跳过空 fullName 条目，其余条目放入 HashMap，后出现的同名条目覆盖前值。
+fn ai_output_to_map(parsed: AiOutput) -> HashMap<String, AiRepoExplanation> {
     let mut map = HashMap::new();
     for item in parsed.repos {
         if item.full_name.trim().is_empty() {
@@ -670,7 +616,7 @@ fn parse_ai_output(stdout: &str) -> Result<HashMap<String, AiRepoExplanation>, A
         }
         map.insert(item.full_name.clone(), item);
     }
-    Ok(map)
+    map
 }
 
 /// 从 Claude CLI 非零退出的输出中提取用户可读错误。
@@ -683,55 +629,7 @@ fn parse_ai_output(stdout: &str) -> Result<HashMap<String, AiRepoExplanation>, A
 ///     优先返回 stderr；否则解析 stdout JSON 的 errors/result/subtype 字段；仍无可读内容时回退到
 ///     旧的“命令返回非零状态”兜底文案。
 fn claude_failure_detail(stderr: &[u8], stdout: &[u8]) -> String {
-    let stderr_text = String::from_utf8_lossy(stderr).trim().to_string();
-    if !stderr_text.is_empty() {
-        return stderr_text;
-    }
-
-    let stdout_text = String::from_utf8_lossy(stdout).trim().to_string();
-    if stdout_text.is_empty() {
-        return "命令返回非零状态".to_string();
-    }
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&stdout_text) {
-        if let Some(errors) = value.get("errors").and_then(|v| v.as_array()) {
-            let joined = errors
-                .iter()
-                .filter_map(|item| item.as_str())
-                .collect::<Vec<_>>()
-                .join("; ");
-            if !joined.is_empty() {
-                return joined;
-            }
-        }
-        if let Some(result) = value.get("result").and_then(|v| v.as_str()) {
-            if !result.trim().is_empty() {
-                return result.trim().to_string();
-            }
-        }
-        if let Some(subtype) = value.get("subtype").and_then(|v| v.as_str()) {
-            return subtype.to_string();
-        }
-    }
-
-    truncate_error_text(&stdout_text)
-}
-
-/// 截断过长的 CLI 输出，避免错误提示塞入完整 JSON。
-///
-/// Business Logic（为什么需要这个函数）:
-///     首页错误横幅只需要显示诊断摘要，不能被长 stdout 或完整模型输出撑爆。
-///
-/// Code Logic（这个函数做什么）:
-///     保留前 500 个 Unicode scalar，超出时追加省略号；未超出则原样返回。
-fn truncate_error_text(text: &str) -> String {
-    const MAX_ERROR_CHARS: usize = 500;
-    let mut chars = text.chars();
-    let truncated = chars.by_ref().take(MAX_ERROR_CHARS).collect::<String>();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
-    }
+    claude_cli::failure_detail(stderr, stdout)
 }
 
 /// 将 Claude 解说合并回仓库列表。
@@ -750,7 +648,7 @@ fn merge_explanations(
 
 /// 运行 `claude --version` 测试 CLI。
 async fn run_claude_version(config: &GithubTrendingConfig) -> ClaudeCliTestResult {
-    let cli = normalized_cli_path(config);
+    let cli = claude_cli::normalize_cli_path(&config.claude_cli_path);
     let mut cmd = Command::new(cli);
     cmd.arg("--version")
         .stdin(Stdio::null())
@@ -794,16 +692,6 @@ async fn run_claude_version(config: &GithubTrendingConfig) -> ClaudeCliTestResul
             version: None,
             error: Some(String::from_utf8_lossy(&output.stderr).trim().to_string()),
         }
-    }
-}
-
-/// 返回有效 CLI 路径。
-fn normalized_cli_path(config: &GithubTrendingConfig) -> &str {
-    let trimmed = config.claude_cli_path.trim();
-    if trimmed.is_empty() {
-        "claude"
-    } else {
-        trimmed
     }
 }
 

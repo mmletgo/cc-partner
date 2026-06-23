@@ -7,6 +7,7 @@ import { Transfer } from './pages/Transfer';
 import { Prompts } from './pages/Prompts';
 import { CcHistory } from './pages/CcHistory';
 import { Scratchpad } from './pages/Scratchpad';
+import { PromptOptimizer } from './pages/PromptOptimizer';
 import { ClaudeMd } from './pages/ClaudeMd';
 import { ClaudeCodeAssets } from './pages/ClaudeCodeAssets';
 import { Devices } from './pages/Devices';
@@ -117,6 +118,7 @@ export default function App() {
             <Route path="/prompts" element={<Prompts />} />
             <Route path="/cc-history" element={<CcHistory />} />
             <Route path="/scratchpad" element={<Scratchpad />} />
+            <Route path="/prompt-optimizer" element={<PromptOptimizer />} />
             <Route path="/claude-md" element={<ClaudeMd />} />
             <Route path="/claude-code" element={<ClaudeCodeAssets />} />
             <Route path="/devices" element={<Devices />} />

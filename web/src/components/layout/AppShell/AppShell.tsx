@@ -19,6 +19,7 @@ import { Outlet } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   HomeIcon,
+  EditIcon,
   TransferIcon,
   PromptsIcon,
   HistoryIcon,
@@ -73,15 +74,16 @@ export function AppShell({ children }: AppShellProps) {
         </div>
         <nav className={styles.navList} aria-label="primary">
           <NavItem to="/" label={t('nav:home')} icon={<HomeIcon />} />
-          <NavItem to="/transfer" label={t('nav:transfer')} icon={<TransferIcon />} />
           <NavItem to="/prompts" label={t('nav:prompts')} icon={<PromptsIcon />} />
           <NavItem to="/cc-history" label={t('nav:ccHistory')} icon={<HistoryIcon />} />
           <NavItem to="/scratchpad" label={t('nav:scratchpad')} icon={<ScratchpadIcon />} />
+          <NavItem to="/prompt-optimizer" label={t('nav:promptOptimizer')} icon={<EditIcon />} />
+          <NavItem to="/transfer" label={t('nav:transfer')} icon={<TransferIcon />} />
           <NavItem to="/claude-md" label={t('nav:claudeMd')} icon={<ClaudeMdIcon />} />
           <NavItem to="/claude-code" label={t('nav:claudeCode')} icon={<TerminalIcon />} />
           <NavItem to="/devices" label={t('nav:devices')} icon={<DevicesIcon />} />
-          <NavItem to="/settings" label={t('nav:settings')} icon={<SettingsIcon />} />
           <NavItem to="/health" label={t('nav:health')} icon={<HealthIcon />} />
+          <NavItem to="/settings" label={t('nav:settings')} icon={<SettingsIcon />} />
         </nav>
         <PermissionStatusBadge />
       </Sidebar>

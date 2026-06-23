@@ -1,10 +1,11 @@
 {
-  "home": "Home",
+  "home": "GitHub Trending",
   "transfer": "Transfer",
   "prompts": "Prompts",
   "ccHistory": "Claude History",
   "scratchpad": "Scratchpad",
-  "claudeMd": "CLAUDE.md",
+  "promptOptimizer": "Prompt Optimizer",
+  "claudeMd": "CLAUDE.MD",
   "claudeCode": "Claude Code",
   "devices": "Devices",
   "settings": "Settings",

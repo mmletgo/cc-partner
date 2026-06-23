@@ -272,5 +272,8 @@ async fn sync_with_peer(
     // 同步链路末尾追加 SSH 目标同步（独立链路，失败仅 warn 不影响 prompts 同步计数）
     let _ = crate::sync::ssh_target::ssh_target_sync_with_peer(state, device).await;
 
+    // 同步链路末尾追加速记本同步（单例文本；失败仅 warn 不影响 prompts 同步计数）
+    let _ = crate::sync::scratchpad::scratchpad_sync_with_peer(state, device).await;
+
     Ok(())
 }

@@ -12,7 +12,8 @@
 //!     - body limit 暂设 2MB（M5 chunk 会调整）。
 
 use crate::net::routes::{
-    cc_history, claude_code_assets, claude_md_sync, health, ssh_target_sync, sync, transfer,
+    cc_history, claude_code_assets, claude_md_sync, health, scratchpad_sync, ssh_target_sync, sync,
+    transfer,
 };
 use crate::state::AppState;
 use axum::extract::DefaultBodyLimit;
@@ -67,6 +68,15 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/ssh-target/sync/push",
             post(ssh_target_sync::ssh_target_sync_push),
+        )
+        // 速记本同步协议（单例文本）：scratchpad/sync/{pull,push}
+        .route(
+            "/api/scratchpad/sync/pull",
+            post(scratchpad_sync::scratchpad_pull),
+        )
+        .route(
+            "/api/scratchpad/sync/push",
+            post(scratchpad_sync::scratchpad_push),
         )
         // Claude Code assets 选择性拉取：inventory + 按 selectors 生成 zip bundle
         .route(

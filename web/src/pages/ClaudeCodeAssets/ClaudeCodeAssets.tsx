@@ -5,9 +5,8 @@
  *   用户需要在 cc-partner 中集中管理 Claude Code 个人级 assets，并从局域网设备选择性拉取。
  *
  * Code Logic（这个页面做什么）:
- *   - 拉取本机 assets，支持搜索、分类筛选、启停、卸载；
- *   - 提供本机路径/JSON 安装表单；
- *   - 拉取局域网设备远端 inventory，支持当前筛选列表全选与选择性 pull。
+ *   - 拉取本机 assets，支持搜索、分类筛选、启停、卸载，并按类别展示启用/警告统计；
+ *   - 用页内 tab 在本机资产与局域网拉取之间切换，搜索与类型筛选对两个 tab 均生效。
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -17,20 +16,21 @@ import { claudeCodeAssetsApi } from '@/api/claudeCodeAssets';
 import { devicesApi } from '@/api/devices';
 import { Button, Card, Input, Pill } from '@/components/primitives';
 import { ClaudeAssetRow, RemoteAssetPicker, remoteAssetKey } from '@/components/domain';
-import { AlertIcon, DownloadIcon, PlusIcon, SearchIcon, SyncIcon, TerminalIcon } from '@/lib/icons';
+import { AlertIcon, DownloadIcon, SearchIcon, SyncIcon, TerminalIcon } from '@/lib/icons';
 import type {
   ClaudeCodeAsset,
   ClaudeCodeAssetInstallReport,
   ClaudeCodeAssetKind,
   ClaudeCodeAssetSelector,
-  ClaudeCodeInstallSource,
   Device,
 } from '@/lib/types';
 import styles from './ClaudeCodeAssets.module.css';
 
 type KindFilter = ClaudeCodeAssetKind | 'all';
+type AssetTab = 'remote' | 'local';
 
 const KIND_OPTIONS: KindFilter[] = ['all', 'skill', 'command', 'plugin', 'mcp'];
+const ASSET_TABS: AssetTab[] = ['local', 'remote'];
 
 /**
  * 生成本地/远端资产 key。
@@ -71,15 +71,10 @@ export function ClaudeCodeAssets() {
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [selectedRemoteKeys, setSelectedRemoteKeys] = useState<Set<string>>(new Set());
   const [overwrite, setOverwrite] = useState<boolean>(false);
-  const [installKind, setInstallKind] = useState<ClaudeCodeAssetKind>('skill');
-  const [installPath, setInstallPath] = useState<string>('');
-  const [installName, setInstallName] = useState<string>('');
-  const [installJson, setInstallJson] = useState<string>('');
-  const [installOverwrite, setInstallOverwrite] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<AssetTab>('local');
   const [loading, setLoading] = useState<boolean>(true);
   const [remoteLoading, setRemoteLoading] = useState<boolean>(false);
   const [actionKey, setActionKey] = useState<string | null>(null);
-  const [installing, setInstalling] = useState<boolean>(false);
   const [pulling, setPulling] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [remoteError, setRemoteError] = useState<string | null>(null);
@@ -147,9 +142,14 @@ export function ClaudeCodeAssets() {
   );
 
   const counts = useMemo(() => {
-    const enabled = assets.filter((asset) => asset.enabled).length;
-    const warnings = assets.filter((asset) => asset.warnings.length > 0).length;
-    return { total: assets.length, enabled, warnings };
+    return KIND_OPTIONS.filter((option): option is ClaudeCodeAssetKind => option !== 'all').map((option) => {
+      const kindAssets = assets.filter((asset) => asset.kind === option);
+      return {
+        kind: option,
+        enabled: kindAssets.filter((asset) => asset.enabled).length,
+        warnings: kindAssets.filter((asset) => asset.warnings.length > 0).length,
+      };
+    });
   }, [assets]);
 
   /**
@@ -182,36 +182,6 @@ export function ClaudeCodeAssets() {
       setError(err instanceof Error ? err.message : t('claudeCodeAssets:actionFailed'));
     } finally {
       setActionKey(null);
-    }
-  };
-
-  /**
-   * 处理本机安装表单提交。
-   */
-  const handleInstall = async () => {
-    try {
-      setInstalling(true);
-      setError(null);
-      let config: unknown;
-      if (installKind === 'mcp') {
-        config = installJson.trim() ? JSON.parse(installJson) : undefined;
-      }
-      const source: ClaudeCodeInstallSource = {
-        kind: installKind,
-        path: installKind === 'mcp' ? installPath.trim() || null : installPath.trim(),
-        name: installName.trim() || null,
-        config,
-        overwrite: installOverwrite,
-      };
-      setReport(await claudeCodeAssetsApi.install(source));
-      setInstallPath('');
-      setInstallName('');
-      setInstallJson('');
-      await refreshAssets();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('claudeCodeAssets:installFailed'));
-    } finally {
-      setInstalling(false);
     }
   };
 
@@ -273,13 +243,20 @@ export function ClaudeCodeAssets() {
             <h1 className={styles.title}>
               <TerminalIcon />
               {t('claudeCodeAssets:title')}
-              <Pill tone="accent">{counts.total}</Pill>
+              <Pill tone="accent">{assets.length}</Pill>
             </h1>
-            <div className={styles.summary}>
-              <Pill tone="success" dot>{t('claudeCodeAssets:enabledCount', { count: counts.enabled })}</Pill>
-              <Pill tone={counts.warnings > 0 ? 'warn' : 'neutral'} dot>
-                {t('claudeCodeAssets:warningCount', { count: counts.warnings })}
-              </Pill>
+            <div className={styles.kindSummary} aria-label={t('claudeCodeAssets:categorySummaryLabel')}>
+              {counts.map((item) => (
+                <span key={item.kind} className={styles.kindSummaryItem}>
+                  <span className={styles.kindName}>{t(`claudeCodeAssets:kinds.${item.kind}`)}</span>
+                  <span className={[styles.metric, item.enabled > 0 ? styles.metricSuccess : styles.metricNeutral].join(' ')}>
+                    {t('claudeCodeAssets:enabledShort', { count: item.enabled })}
+                  </span>
+                  <span className={[styles.metric, item.warnings > 0 ? styles.metricWarn : styles.metricNeutral].join(' ')}>
+                    {t('claudeCodeAssets:warningShort', { count: item.warnings })}
+                  </span>
+                </span>
+              ))}
             </div>
           </div>
           <Button variant="secondary" icon={<SyncIcon />} loading={loading} onClick={refreshAssets}>
@@ -316,6 +293,21 @@ export function ClaudeCodeAssets() {
           </Card>
         ) : null}
 
+        <div className={styles.tabs} role="tablist" aria-label={t('claudeCodeAssets:tabsLabel')}>
+          {ASSET_TABS.map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab}
+              className={activeTab === tab ? styles.tabActive : styles.tab}
+              onClick={() => setActiveTab(tab)}
+            >
+              {tab === 'remote' ? t('claudeCodeAssets:remoteTitle') : t('claudeCodeAssets:localTitle')}
+            </button>
+          ))}
+        </div>
+
         <Card variant="outlined" className={styles.toolsCard}>
           <Card.Body>
             <div className={styles.filters}>
@@ -342,7 +334,71 @@ export function ClaudeCodeAssets() {
           </Card.Body>
         </Card>
 
-        <section className={styles.grid}>
+        {activeTab === 'remote' ? (
+          <Card variant="outlined" className={styles.remotePanel}>
+            <Card.Header>
+              <div className={styles.sectionHeader}>
+                <h2>{t('claudeCodeAssets:remoteTitle')}</h2>
+                {selectedDevice ? <Pill tone="accent">{selectedDevice.name}</Pill> : null}
+              </div>
+            </Card.Header>
+            <Card.Body>
+              <div className={styles.remoteControls}>
+                <label className={styles.field}>
+                  <span>{t('claudeCodeAssets:deviceLabel')}</span>
+                  <select value={selectedDeviceId} onChange={(e) => setSelectedDeviceId(e.currentTarget.value)}>
+                    <option value="">{t('claudeCodeAssets:selectDevice')}</option>
+                    {devices.map((device) => (
+                      <option key={device.id} value={device.id}>
+                        {device.name} · {device.address}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <Button
+                  variant="secondary"
+                  icon={<SyncIcon />}
+                  loading={remoteLoading}
+                  disabled={!selectedDeviceId}
+                  onClick={loadRemoteAssets}
+                >
+                  {t('claudeCodeAssets:loadRemote')}
+                </Button>
+                <label className={styles.checkLine}>
+                  <input
+                    type="checkbox"
+                    checked={overwrite}
+                    onChange={(e) => setOverwrite(e.currentTarget.checked)}
+                  />
+                  {t('claudeCodeAssets:overwrite')}
+                </label>
+                <Button
+                  variant="primary"
+                  icon={<DownloadIcon />}
+                  loading={pulling}
+                  disabled={!selectedDeviceId || selectedRemoteKeys.size === 0}
+                  onClick={handlePull}
+                >
+                  {t('claudeCodeAssets:pullSelected', { count: selectedRemoteKeys.size })}
+                </Button>
+              </div>
+              {remoteError ? (
+                <div className={styles.errorBox}>
+                  <AlertIcon />
+                  {remoteError}
+                </div>
+              ) : null}
+              <RemoteAssetPicker
+                assets={remoteAssets}
+                selectedKeys={selectedRemoteKeys}
+                kind={kind}
+                search={search}
+                onSelect={handleRemoteSelect}
+                onSelectMany={handleRemoteSelectMany}
+              />
+            </Card.Body>
+          </Card>
+        ) : (
           <Card variant="flat" className={styles.panel}>
             <Card.Header>
               <div className={styles.sectionHeader}>
@@ -370,139 +426,7 @@ export function ClaudeCodeAssets() {
               </div>
             </Card.Body>
           </Card>
-
-          <Card variant="flat" className={styles.panel}>
-            <Card.Header>
-              <div className={styles.sectionHeader}>
-                <h2>{t('claudeCodeAssets:installTitle')}</h2>
-                <Pill tone="neutral">{t(`claudeCodeAssets:kinds.${installKind}`)}</Pill>
-              </div>
-            </Card.Header>
-            <Card.Body>
-              <div className={styles.form}>
-                <label className={styles.field}>
-                  <span>{t('claudeCodeAssets:kindLabel')}</span>
-                  <select
-                    value={installKind}
-                    onChange={(e) => setInstallKind(e.currentTarget.value as ClaudeCodeAssetKind)}
-                  >
-                    {KIND_OPTIONS.filter((option): option is ClaudeCodeAssetKind => option !== 'all').map((option) => (
-                      <option key={option} value={option}>
-                        {t(`claudeCodeAssets:kinds.${option}`)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className={styles.field}>
-                  <span>{t('claudeCodeAssets:nameLabel')}</span>
-                  <Input
-                    value={installName}
-                    onChange={(e) => setInstallName(e.currentTarget.value)}
-                    placeholder={t('claudeCodeAssets:namePlaceholder')}
-                  />
-                </label>
-                <label className={styles.field}>
-                  <span>{installKind === 'mcp' ? t('claudeCodeAssets:pathOrJsonLabel') : t('claudeCodeAssets:pathLabel')}</span>
-                  <Input
-                    value={installPath}
-                    onChange={(e) => setInstallPath(e.currentTarget.value)}
-                    placeholder={t('claudeCodeAssets:pathPlaceholder')}
-                  />
-                </label>
-                {installKind === 'mcp' ? (
-                  <label className={styles.field}>
-                    <span>{t('claudeCodeAssets:mcpJsonLabel')}</span>
-                    <textarea
-                      value={installJson}
-                      onChange={(e) => setInstallJson(e.currentTarget.value)}
-                      placeholder={t('claudeCodeAssets:mcpJsonPlaceholder')}
-                    />
-                  </label>
-                ) : null}
-                <label className={styles.checkLine}>
-                  <input
-                    type="checkbox"
-                    checked={installOverwrite}
-                    onChange={(e) => setInstallOverwrite(e.currentTarget.checked)}
-                  />
-                  {t('claudeCodeAssets:overwrite')}
-                </label>
-                <Button
-                  variant="primary"
-                  icon={<PlusIcon />}
-                  loading={installing}
-                  onClick={handleInstall}
-                >
-                  {t('claudeCodeAssets:install')}
-                </Button>
-              </div>
-            </Card.Body>
-          </Card>
-        </section>
-
-        <Card variant="outlined" className={styles.remotePanel}>
-          <Card.Header>
-            <div className={styles.sectionHeader}>
-              <h2>{t('claudeCodeAssets:remoteTitle')}</h2>
-              {selectedDevice ? <Pill tone="accent">{selectedDevice.name}</Pill> : null}
-            </div>
-          </Card.Header>
-          <Card.Body>
-            <div className={styles.remoteControls}>
-              <label className={styles.field}>
-                <span>{t('claudeCodeAssets:deviceLabel')}</span>
-                <select value={selectedDeviceId} onChange={(e) => setSelectedDeviceId(e.currentTarget.value)}>
-                  <option value="">{t('claudeCodeAssets:selectDevice')}</option>
-                  {devices.map((device) => (
-                    <option key={device.id} value={device.id}>
-                      {device.name} · {device.address}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <Button
-                variant="secondary"
-                icon={<SyncIcon />}
-                loading={remoteLoading}
-                disabled={!selectedDeviceId}
-                onClick={loadRemoteAssets}
-              >
-                {t('claudeCodeAssets:loadRemote')}
-              </Button>
-              <label className={styles.checkLine}>
-                <input
-                  type="checkbox"
-                  checked={overwrite}
-                  onChange={(e) => setOverwrite(e.currentTarget.checked)}
-                />
-                {t('claudeCodeAssets:overwrite')}
-              </label>
-              <Button
-                variant="primary"
-                icon={<DownloadIcon />}
-                loading={pulling}
-                disabled={!selectedDeviceId || selectedRemoteKeys.size === 0}
-                onClick={handlePull}
-              >
-                {t('claudeCodeAssets:pullSelected', { count: selectedRemoteKeys.size })}
-              </Button>
-            </div>
-            {remoteError ? (
-              <div className={styles.errorBox}>
-                <AlertIcon />
-                {remoteError}
-              </div>
-            ) : null}
-            <RemoteAssetPicker
-              assets={remoteAssets}
-              selectedKeys={selectedRemoteKeys}
-              kind={kind}
-              search={search}
-              onSelect={handleRemoteSelect}
-              onSelectMany={handleRemoteSelectMany}
-            />
-          </Card.Body>
-        </Card>
+        )}
       </div>
     </div>
   );

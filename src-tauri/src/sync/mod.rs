@@ -11,5 +11,6 @@
 pub mod claude_md;
 pub mod engine;
 pub mod merger;
+pub mod scratchpad;
 pub mod ssh_target;
 pub mod vector_clock;

@@ -58,6 +58,20 @@ struct SshTargetPushResp {
     accepted: u64,
 }
 
+/// scratchpad/sync/pull 响应体（字段名对照 routes/scratchpad_sync.rs 的 ScratchpadPullResp）。
+#[derive(Debug, serde::Deserialize)]
+struct ScratchpadPullResp {
+    #[serde(default)]
+    scratchpad: Option<crate::models::scratchpad::ScratchpadRow>,
+}
+
+/// scratchpad/sync/push 响应体（字段名对照 routes/scratchpad_sync.rs 的 ScratchpadPushResp）。
+#[derive(Debug, serde::Deserialize)]
+struct ScratchpadPushResp {
+    #[serde(default)]
+    accepted: bool,
+}
+
 /// claude_md/push 响应体（字段名对照 ClaudeMdPushResp 的 `{accepted: bool}`）。
 #[derive(Debug, serde::Deserialize)]
 struct ClaudeMdPushResp {
@@ -219,6 +233,77 @@ impl PeerClient {
             crate::error::AppError::generic(format!("claude_md_push 响应解析失败: {e}"))
         })?;
         Ok(data.accepted)
+    }
+
+    /// 速记本同步 pull：向对端发送本端 vector_clock，获取对端认为本端需要的速记本版本。
+    ///
+    /// Business Logic: Scratchpad 是单例文本，pull 不需要 summaries 列表；只比较一份向量时钟。
+    /// Code Logic: POST `{base_url}/api/scratchpad/sync/pull`，失败返回 None 以兼容旧版本对端。
+    pub async fn scratchpad_pull(
+        &self,
+        base_url: &str,
+        vector_clock: &std::collections::HashMap<String, u64>,
+    ) -> Option<crate::models::scratchpad::ScratchpadRow> {
+        let url = format!("{base_url}/api/scratchpad/sync/pull");
+        let body = serde_json::json!({ "vector_clock": vector_clock });
+        match self.client.post(&url).json(&body).send().await {
+            Ok(resp) if resp.status().as_u16() == 200 => {
+                match resp.json::<ScratchpadPullResp>().await {
+                    Ok(data) => data.scratchpad,
+                    Err(e) => {
+                        tracing::warn!("scratchpad_pull 响应解析失败 ({base_url}): {e}");
+                        None
+                    }
+                }
+            }
+            Ok(resp) => {
+                tracing::debug!("scratchpad_pull 跳过 ({base_url}): HTTP {}", resp.status());
+                None
+            }
+            Err(e) => {
+                tracing::debug!("scratchpad_pull 异常 ({base_url}): {e}");
+                None
+            }
+        }
+    }
+
+    /// 速记本同步 push：向对端推送本端当前速记本版本。
+    ///
+    /// Business Logic: pull 后无论对端是否返回版本，都推送一次本端当前版本；对端会 merge/no-op，
+    ///     这样可覆盖“本端领先、对端 pull 返回 None”的单例场景。
+    /// Code Logic: POST `{base_url}/api/scratchpad/sync/push`，HTTP 200 且 JSON 可解析即视为成功。
+    pub async fn scratchpad_push(
+        &self,
+        base_url: &str,
+        row: &crate::models::scratchpad::ScratchpadRow,
+    ) -> bool {
+        let url = format!("{base_url}/api/scratchpad/sync/push");
+        let body = serde_json::json!({ "scratchpad": row });
+        match self.client.post(&url).json(&body).send().await {
+            Ok(resp) if resp.status().as_u16() == 200 => {
+                match resp.json::<ScratchpadPushResp>().await {
+                    Ok(data) => {
+                        tracing::info!(
+                            "scratchpad_push 到 {base_url} 完成，accepted={}",
+                            data.accepted
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!("scratchpad_push 响应解析失败 ({base_url}): {e}");
+                        true
+                    }
+                }
+            }
+            Ok(resp) => {
+                tracing::debug!("scratchpad_push 跳过 ({base_url}): HTTP {}", resp.status());
+                false
+            }
+            Err(e) => {
+                tracing::debug!("scratchpad_push 异常 ({base_url}): {e}");
+                false
+            }
+        }
     }
 
     /// 获取对端 Claude Code assets inventory。

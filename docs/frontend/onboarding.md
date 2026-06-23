@@ -30,8 +30,8 @@ cc-partner 前端是**桌面端内嵌 Web 应用**：
 | `web/src/components/primitives/` | 原子组件（Button/Card/Input/...） |
 | `web/src/components/layout/` | 布局组件（AppShell/TitleBar/Sidebar/...） |
 | `web/src/components/domain/` | 业务组件（PromptCard/DeviceCard/...） |
-| `web/src/pages/` | 6 个路由页面 + DesignSystem 预览 |
-| `web/src/api/` | invoke 封装（prompts/devices/transfer，调 Rust 命令） |
+| `web/src/pages/` | 路由页面（Home/Prompts/CcHistory/Scratchpad/PromptOptimizer/Transfer/Devices/Settings/Health 等）+ DesignSystem 预览 |
+| `web/src/api/` | invoke 封装（prompts/promptOptimizer/scratchpad/devices/transfer/health 等，调 Rust 命令） |
 | `AGENTS.md` | ⭐ 必读：组件复用规范 |
 
 ## 启动 dev server

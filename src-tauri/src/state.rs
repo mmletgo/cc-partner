@@ -16,7 +16,7 @@
 use crate::config::AppConfig;
 use crate::models::device::Device;
 use crate::net::peer_client::PeerClient;
-use crate::storage::{ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, TransferRepo};
+use crate::storage::{ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, TransferRepo};
 use crate::transfer::registry::TransferRegistry;
 use mdns_sd::ServiceDaemon;
 use sqlx::SqlitePool;
@@ -41,6 +41,8 @@ pub struct AppState {
     pub transfer_repo: Arc<TransferRepo>,
     /// CLAUDE.md 单例仓库（user 级 CLAUDE.md 同步）
     pub claude_md_repo: Arc<ClaudeMdRepo>,
+    /// 速记本单例仓库（scratchpad 表访问，自动保存 + 局域网/GitHub 同步）
+    pub scratchpad_repo: Arc<ScratchpadRepo>,
     /// 本机设备 ID（从 config 取出，高频只读访问，单独缓存一份 String）
     pub device_id: Arc<String>,
     /// 已发现的对端设备表 {device_id: Device}（mDNS 发现写入，list_devices 读取）

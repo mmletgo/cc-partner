@@ -1,0 +1,19 @@
+{
+  "eyebrow": "Prompt optimizer",
+  "title": "Prompt Optimizer",
+  "description": "Turn a rough coding task into structured Chinese and English prompts for Claude Code.",
+  "inputTitle": "Original prompt",
+  "inputPlaceholder": "Paste the requirement, task brief, or rough prompt to optimize…",
+  "inputAriaLabel": "Original prompt input",
+  "optimize": "Optimize",
+  "optimizing": "Optimizing",
+  "resultsAriaLabel": "Prompt optimization results",
+  "zhTitle": "中文优化版",
+  "enTitle": "English optimized",
+  "zhAriaLabel": "Chinese optimized prompt",
+  "enAriaLabel": "English optimized prompt",
+  "resultPlaceholder": "Optimized output will appear here.",
+  "copied": "Copied",
+  "copyFailed": "Copy failed. Select the text and copy manually.",
+  "errorFallback": "Optimization failed. Try again later."
+}

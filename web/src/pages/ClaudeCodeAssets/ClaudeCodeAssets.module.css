@@ -43,13 +43,6 @@
   flex-wrap: wrap;
 }
 
-.summary {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-}
-
 .errorBox {
   display: inline-flex;
   align-items: center;
@@ -59,6 +52,49 @@
   color: var(--danger);
   background: var(--danger-soft);
   font-size: var(--text-sm);
+}
+
+.kindSummary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.kindSummaryItem {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+}
+
+.kindName {
+  color: var(--fg);
+  font-weight: var(--weight-medium);
+}
+
+.metric {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.metricSuccess {
+  color: var(--success);
+}
+
+.metricWarn {
+  color: var(--warn);
+}
+
+.metricNeutral {
+  color: var(--muted);
 }
 
 .report {
@@ -87,6 +123,37 @@
   background: var(--surface-warm);
   color: var(--muted);
   font-size: var(--text-xs);
+}
+
+.tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-warm);
+  align-self: flex-start;
+}
+
+.tab,
+.tabActive {
+  min-height: 34px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-4);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.tabActive {
+  background: var(--accent);
+  color: var(--accent-on);
+  box-shadow: var(--shadow-xs);
 }
 
 .toolsCard {
@@ -130,13 +197,6 @@
   background: var(--accent);
 }
 
-.grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.8fr);
-  gap: var(--space-5);
-  align-items: start;
-}
-
 .panel,
 .remotePanel {
   background: var(--surface);
@@ -160,24 +220,19 @@
 }
 
 .assetList {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
 }
 
 .empty {
+  grid-column: 1 / -1;
   padding: var(--space-8);
   border: 1px dashed var(--border-soft);
   border-radius: var(--radius-md);
   color: var(--muted);
   font-size: var(--text-sm);
   text-align: center;
-}
-
-.form {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
 }
 
 .field {
@@ -193,12 +248,13 @@
   font-size: var(--text-xs);
 }
 
-.field select,
-.field textarea {
+.field select {
   width: 100%;
   box-sizing: border-box;
+  min-height: 34px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  padding: 0 var(--space-3);
   background: var(--surface);
   color: var(--fg);
   font: inherit;
@@ -206,20 +262,7 @@
   transition: all var(--motion-fast) var(--ease-standard);
 }
 
-.field select {
-  min-height: 34px;
-  padding: 0 var(--space-3);
-}
-
-.field textarea {
-  min-height: 132px;
-  resize: vertical;
-  padding: var(--space-3);
-  font-family: var(--font-mono);
-}
-
-.field select:focus,
-.field textarea:focus {
+.field select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
@@ -249,9 +292,18 @@
 
 @media (max-width: 980px) {
   .filters,
-  .grid,
+  .assetList,
   .remoteControls {
     grid-template-columns: 1fr;
+  }
+
+  .tabs {
+    align-self: stretch;
+  }
+
+  .tab,
+  .tabActive {
+    flex: 1;
   }
 
   .segmented {

@@ -243,12 +243,13 @@ pub async fn trigger_cloud_sync(state: &AppState) -> CloudSyncResult {
                 };
             }
         };
-        total_pulled += import_stats.prompts + import_stats.cc_history + import_stats.ssh_targets;
+        total_pulled += import_stats.total();
         tracing::info!(
-            "cloud_sync: import 完成 prompts={} cc={} ssh={}",
+            "cloud_sync: import 完成 prompts={} cc={} ssh={} scratchpad={}",
             import_stats.prompts,
             import_stats.cc_history,
-            import_stats.ssh_targets
+            import_stats.ssh_targets,
+            import_stats.scratchpad
         );
 
         // 6. export（本地权威 → 工作区）
@@ -265,10 +266,11 @@ pub async fn trigger_cloud_sync(state: &AppState) -> CloudSyncResult {
             }
         };
         tracing::info!(
-            "cloud_sync: export 完成 prompts={} cc={} ssh={}",
+            "cloud_sync: export 完成 prompts={} cc={} ssh={} scratchpad={}",
             last_export.prompts,
             last_export.cc_history,
-            last_export.ssh_targets
+            last_export.ssh_targets,
+            last_export.scratchpad
         );
 
         // 7. commit（message 带设备 ID + 时间戳，便于多设备同步审计与回滚定位；无变化则跳过 push）

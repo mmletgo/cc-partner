@@ -30,6 +30,9 @@ export { DesignSystem } from './DesignSystem';
 export { Scratchpad } from './Scratchpad';
 export type { } from './Scratchpad';
 
+export { PromptOptimizer } from './PromptOptimizer';
+export type { } from './PromptOptimizer';
+
 export { ClaudeCodeAssets } from './ClaudeCodeAssets';
 
 // 区域截图选区页（独立于 AppShell，由 Tauri 选区窗口加载 /screenshot-overlay）

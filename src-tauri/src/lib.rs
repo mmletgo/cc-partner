@@ -12,6 +12,7 @@
 //!     所有命令在 invoke_handler 注册。保留 M0 的 ping。
 
 mod cc;
+mod claude_cli;
 mod claude_code_assets;
 mod cloud_sync;
 mod commands;
@@ -38,13 +39,16 @@ use crate::commands::{
     cc_history as cc_history_cmd, claude_code_assets as claude_code_assets_cmd,
     claude_md as claude_md_cmd, cloud_sync as cloud_sync_cmd, config as config_cmd,
     devices as device_cmd, github_trending as github_trending_cmd, health as health_cmd,
-    permissions as permissions_cmd, prompts as prompt_cmd, screenshot as screenshot_cmd,
+    permissions as permissions_cmd, prompt_optimizer as prompt_optimizer_cmd,
+    prompts as prompt_cmd, scratchpad as scratchpad_cmd, screenshot as screenshot_cmd,
     ssh_target as ssh_target_cmd, sync as sync_cmd, transfer as transfer_cmd,
     updater as updater_cmd,
 };
 use crate::net::{discovery, http_server, peer_client::PeerClient};
 use crate::state::AppState;
-use crate::storage::{ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, SshTargetRepo, TransferRepo};
+use crate::storage::{
+    ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, SshTargetRepo, TransferRepo,
+};
 use crate::transfer::registry::TransferRegistry;
 use tauri::Manager;
 
@@ -139,6 +143,17 @@ const SSH_TARGET_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ssh_targets (
     deleted INTEGER DEFAULT 0
 )";
 
+/// 速记本单例表（全表仅一行，id 恒为 "scratchpad"）。
+const SCRATCHPAD_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS scratchpad (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    vector_clock TEXT NOT NULL,
+    deleted INTEGER DEFAULT 0
+)";
+
 /// 健康提醒 - 每分钟活动采样表（分钟级 unix 时间戳为主键，同分钟重采覆盖）。
 const HEALTH_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS activity_records (
     ts INTEGER PRIMARY KEY,
@@ -195,6 +210,8 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, error::AppError> {
     sqlx::query(CLAUDE_MD_SCHEMA).execute(&pool).await?;
     // SSH 连接目标表（host 主键 + 端口 + 用户名 + 向量时钟，跨设备同步）
     sqlx::query(SSH_TARGET_SCHEMA).execute(&pool).await?;
+    // 速记本单例表（单个自动保存文本，跨设备/云同步）
+    sqlx::query(SCRATCHPAD_SCHEMA).execute(&pool).await?;
     // 健康提醒：活动采样表 + 喝水记录表（在 CLAUDE_MD_SCHEMA 之后执行）
     sqlx::query(HEALTH_SCHEMA).execute(&pool).await?;
     sqlx::query(WATER_SCHEMA).execute(&pool).await?;
@@ -255,6 +272,7 @@ pub fn run() {
                 let cc_history_repo = Arc::new(ClaudeHistoryRepo::new(pool.clone()));
                 let claude_md_repo = Arc::new(ClaudeMdRepo::new(pool.clone()));
                 let ssh_target_repo = Arc::new(SshTargetRepo::new(pool.clone()));
+                let scratchpad_repo = Arc::new(ScratchpadRepo::new(pool.clone()));
                 // 健康提醒：仓库（共享 pool）+ 运行时（状态机/贪睡/暂停）+ daemon 取消令牌占位
                 let health_repo =
                     Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone()));
@@ -267,6 +285,7 @@ pub fn run() {
                     prompt_repo,
                     transfer_repo,
                     claude_md_repo,
+                    scratchpad_repo,
                     ssh_target_repo,
                     device_id: Arc::new(device_id),
                     devices: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -406,6 +425,9 @@ pub fn run() {
             claude_md_cmd::get_claude_md,
             claude_md_cmd::update_claude_md,
             claude_md_cmd::push_claude_md,
+            scratchpad_cmd::get_scratchpad,
+            scratchpad_cmd::update_scratchpad,
+            scratchpad_cmd::sync_scratchpad,
             transfer_cmd::list_transfers,
             transfer_cmd::send_transfer,
             transfer_cmd::cancel_transfer,
@@ -449,6 +471,8 @@ pub fn run() {
             github_trending_cmd::get_github_trending_config,
             github_trending_cmd::update_github_trending_config,
             github_trending_cmd::test_claude_cli,
+            // Prompt 优化（复用 Claude CLI pure/headless helper，不保存历史）
+            prompt_optimizer_cmd::optimize_prompt,
             // M10 健康提醒（11 命令：配置/状态/开关/暂停/贪睡/跳过/配置回写/统计/活动明细/喝水/全屏遮罩）
             health_cmd::get_health_config,
             health_cmd::get_health_status,

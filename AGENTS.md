@@ -9,6 +9,8 @@
 - **局域网文件传输** — 任意大小分块传输，支持断点续传
 - **区域截图** — 框选截图保存到剪贴板，可直接粘贴到 Claude Code
 - **Prompt 管理** — 记录 / 复制 / 打标签 / 跨设备同步
+- **Prompt 优化** — 调用本机 Claude Code CLI pure/headless 模式生成中英文优化版 Prompt
+- **速记本** — 单个自动保存文本，支持局域网与 GitHub 同步
 - **P2P 自动互联** — 局域网内 mDNS 自动发现
 - **自动更新** — GitHub Releases 检测 / 下载 / 安装
 
@@ -58,6 +60,7 @@ cc-partner/
 │   │   │   ├── Home/             # 01-main.html
 │   │   │   ├── Transfer/         # 02-transfer.html
 │   │   │   ├── Prompts/          # 03-prompts.html
+│   │   │   ├── PromptOptimizer/  # Prompt 优化（本机 Claude CLI pure/headless）
 │   │   │   ├── Devices/          # 04-devices.html
 │   │   │   ├── Settings/         # 05-settings.html
 │   │   │   ├── Welcome/          # 06-welcome.html
@@ -394,8 +397,10 @@ Tauri 自动打包三平台本平台产物（macOS→dmg/app、Windows→nsis/ms
 | config.get_config / config.update_config | 配置读写（update_config 支持快捷键热更新） |
 | config.get_version | 应用版本号 |
 | prompts.list / get / create / update / delete / list_tags | Prompt CRUD（delete 为软删除，自增 vector_clock） |
+| optimize_prompt | 调用本机 Claude Code CLI pure/headless 模式优化用户输入，返回中英文 Prompt |
 | trigger_sync | 触发全网 Prompt 同步，返回 {accepted, synced, note} |
 | get_claude_md / update_claude_md / push_claude_md | CLAUDE.md 读取 / 保存 / 主动推送本机配置到局域网设备和 GitHub 云端 |
+| get_scratchpad / update_scratchpad / sync_scratchpad | 速记本单例读取 / 自动保存 / 局域网同步 |
 | list_transfers / send_transfer / cancel_transfer | 文件传输任务管理 |
 | check_permissions / request_permission | macOS 权限检查与申请（屏幕录制 / 输入监控） |
 | check_update / download_update / get_download_status / cancel_download / install_update | 自动更新 5 命令 |
@@ -409,6 +414,8 @@ Tauri 自动打包三平台本平台产物（macOS→dmg/app、Windows→nsis/ms
 | /api/health | GET | {ok, device_id, device_name, http_port, ts} |
 | /api/sync/pull | POST | 接收对端摘要，返回对端需要的 prompt |
 | /api/sync/push | POST | 接收对端推送的 prompt |
+| /api/scratchpad/sync/pull | POST | 接收对端速记本向量时钟，返回本端速记本 |
+| /api/scratchpad/sync/push | POST | 接收对端推送的速记本并合并 |
 | /api/transfer/init | POST | 初始化文件接收 |
 | /api/transfer/chunk/{id} | POST | 接收文件分块（header `X-Chunk-Offset`） |
 | /api/transfer/status/{id} | GET | 查询接收端传输状态 |

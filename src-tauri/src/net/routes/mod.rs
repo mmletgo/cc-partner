@@ -11,6 +11,7 @@ pub mod cc_history;
 pub mod claude_code_assets;
 pub mod claude_md_sync;
 pub mod health;
+pub mod scratchpad_sync;
 pub mod ssh_target_sync;
 pub mod sync;
 pub mod transfer;

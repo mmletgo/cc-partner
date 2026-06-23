@@ -10,6 +10,7 @@ pub mod cc_history_repo;
 pub mod claude_md_repo;
 pub mod health_repo;
 pub mod prompt_repo;
+pub mod scratchpad_repo;
 pub mod ssh_target_repo;
 pub mod transfer_repo;
 
@@ -18,5 +19,6 @@ pub use claude_md_repo::ClaudeMdRepo;
 // health_repo 的 ActivityRecord / HealthRepo 通过全限定路径 `crate::storage::health_repo::...`
 // 引用（health 模块内部），不在此 re-export，避免 unused_imports 告警。
 pub use prompt_repo::PromptRepo;
+pub use scratchpad_repo::ScratchpadRepo;
 pub use ssh_target_repo::SshTargetRepo;
 pub use transfer_repo::TransferRepo;
