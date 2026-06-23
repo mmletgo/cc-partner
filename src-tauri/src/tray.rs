@@ -11,6 +11,7 @@
 use crate::error::AppError;
 use crate::screenshot::overlay;
 use tauri::{
+    image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
@@ -24,6 +25,29 @@ const MENU_SCREENSHOT: &str = "tray_screenshot";
 const MENU_PAUSE: &str = "tray_pause";
 /// 退出菜单项 id。
 const MENU_QUIT: &str = "tray_quit";
+
+/// 构造托盘图标。
+///
+/// Business Logic: 用户会把托盘作为后台常驻入口；macOS 菜单栏需要单色 template icon，
+///     彩色 Dock 图标缩小后会显得突兀，也无法自动适配深浅色菜单栏。
+/// Code Logic: 优先从编译期嵌入的 `icons/tray-icon.png` 解码为 Tauri Image；若解码失败，
+///     回退到默认窗口图标，避免图标资源异常时阻断托盘创建。
+fn app_tray_icon(app: &AppHandle) -> Result<Image<'static>, AppError> {
+    match image::load_from_memory(include_bytes!("../icons/tray-icon.png")) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (width, height) = rgba.dimensions();
+            Ok(Image::new_owned(rgba.into_raw(), width, height))
+        }
+        Err(e) => {
+            tracing::warn!("读取内嵌托盘图标失败，回退默认窗口图标: {e}");
+            app.default_window_icon()
+                .cloned()
+                .map(Image::to_owned)
+                .ok_or_else(|| AppError::generic("缺少默认窗口图标，无法创建托盘"))
+        }
+    }
+}
 
 /// 显示主窗口（若已隐藏则 show + set_focus）。
 ///
@@ -49,11 +73,8 @@ pub fn build_tray(app: &AppHandle) -> Result<(), AppError> {
     let menu = Menu::with_items(app, &[&show_item, &shot_item, &pause_item, &quit_item])?;
 
     TrayIconBuilder::with_id("main-tray")
-        .icon(
-            app.default_window_icon()
-                .cloned()
-                .ok_or_else(|| AppError::generic("缺少默认窗口图标，无法创建托盘"))?,
-        )
+        .icon(app_tray_icon(app)?)
+        .icon_as_template(true)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .tooltip("cc-partner")

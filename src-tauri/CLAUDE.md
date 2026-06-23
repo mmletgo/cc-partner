@@ -115,7 +115,7 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
   - **注册**：v2 的 `on_shortcut(shortcut, handler)` 需随快捷键传入 handler（不是 Builder 全局 handler）；`register_screenshot_hotkey(app, hotkey, handler)` 先 `unregister_all` 再 `on_shortcut`。handler = `screenshot_handler`，按下时直接调 `screenshot::overlay::start_region_capture`（Rust 直接起 overlay，不依赖前端 emit）。
   - **热更新**：`commands::config::update_config` 加 `app: AppHandle` 参数，screenshotHotkey 变更后 `register_screenshot_hotkey(app, new_hotkey, screenshot_handler)` 重注册。
   - setup 里读 `config.screenshot_hotkey` 注册。
-- **系统托盘（tray.rs，对照 tray.py）**：`TrayIconBuilder` id=`main-tray`，图标用 `app.default_window_icon()`（复用 icons/），tooltip=`cc-partner`。菜单三项：显示主窗口 / 截图（直接调 overlay::start_region_capture）/ 退出（`app.exit(0)`）。**左键单击托盘**显示主窗口（Python 是双击；Tauri 2 托盘 Click 事件更顺手，行为等价）。需 `tauri` crate 开 `tray-icon` feature。
+- **系统托盘（tray.rs，对照 tray.py）**：`TrayIconBuilder` id=`main-tray`，托盘图标优先用 `include_bytes!("../icons/tray-icon.png")` 解码，且 `icon_as_template(true)` 使用 macOS template icon 语义（菜单栏自动适配深浅色）；失败才回退 `app.default_window_icon()`，tooltip=`cc-partner`。菜单三项：显示主窗口 / 截图（直接调 overlay::start_region_capture）/ 退出（`app.exit(0)`）。**左键单击托盘**显示主窗口（Python 是双击；Tauri 2 托盘 Click 事件更顺手，行为等价）。需 `tauri` crate 开 `tray-icon` feature。`build.rs` 显式 `rerun-if-changed` 监听 `tauri.conf.json` 与 `icons/*`，确保更换图标会触发 Rust 重编译并刷新嵌入图标。托盘源图在 `scripts/cc-partner-tray-icon.svg`，应保持透明背景、单色形状。
 - **关闭钩子（lib.rs）**：`.build(...)` 后链 `.run(|app_handle, event| {...})`，在 `RunEvent::Exit` 调 `discovery::stop_discovery(&state)` 优雅注销 mDNS（对照 Python 关闭清理顺序）。`stop_discovery` 之前的 `#[allow(dead_code)]` 已移除。
 - **error.rs 扩展**：新增 `AppError::Tauri(#[from] tauri::Error)`（托盘/菜单 API 返回 tauri::Error）+ `AppError::generic()` 便捷构造。
 

@@ -38,19 +38,10 @@
 .brand {
   width: 48px;
   height: 48px;
-  border-radius: 50%;
-  background: var(--accent);
-  color: var(--accent-on);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--font-display);
-  font-size: var(--text-2xl);
-  font-weight: var(--weight-bold);
-  letter-spacing: var(--tracking-wide);
-  box-shadow:
-    0 6px 16px rgba(201, 100, 66, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  display: block;
+  border-radius: var(--radius-md);
+  object-fit: cover;
+  box-shadow: var(--shadow-sm);
   margin: 0 auto var(--space-3);
 }
 

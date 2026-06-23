@@ -78,6 +78,7 @@ cc-partner/
 │   ├── icons/                    # 应用图标
 │   ├── tauri.conf.json           # Tauri 配置 + bundle + updater（版本号单一来源）
 │   └── Cargo.toml
+├── scripts/                      # 发版脚本 + 应用图标源（app 图标透明外圈；tray 图标为 macOS template）
 ├── uiux/                         # 设计稿（参考资源，不参与构建）
 ├── docs/
 │   ├── prd.md

@@ -37,6 +37,7 @@ import { LanguageSwitcher } from '../LanguageSwitcher';
 import { PermissionStatusBadge } from '@/components/domain';
 import ReminderToast from '@/pages/Health/ReminderToast';
 import WaterToast from '@/pages/Health/WaterToast';
+import appIconUrl from '@/assets/app-icon.png';
 import styles from './AppShell.module.css';
 
 export interface AppShellProps {
@@ -67,9 +68,7 @@ export function AppShell({ children }: AppShellProps) {
         }
       >
         <div className={styles.logo}>
-          <span className={styles.logoMark} aria-hidden="true">
-            cc
-          </span>
+          <img className={styles.logoMark} src={appIconUrl} alt="" aria-hidden="true" />
           <span className={styles.logoText}>{appName}</span>
         </div>
         <nav className={styles.navList} aria-label="primary">

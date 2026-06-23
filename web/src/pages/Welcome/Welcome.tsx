@@ -24,6 +24,7 @@ import { PermissionCard } from '@/components/domain';
 import { usePermissions, PERMISSION_ONBOARDED_KEY } from '@/hooks/usePermissions';
 import { ArrowRightIcon } from '@/lib/icons';
 import { mapPermissions } from '@/lib/permissionEntries';
+import appIconUrl from '@/assets/app-icon.png';
 import styles from './Welcome.module.css';
 
 /**
@@ -50,9 +51,7 @@ export function Welcome() {
     return (
       <div className={styles.backdrop}>
         <div className={styles.window} role="dialog" aria-label={t('welcome:title')}>
-          <div className={styles.brand} aria-hidden="true">
-            CP
-          </div>
+          <img className={styles.brand} src={appIconUrl} alt="" aria-hidden="true" />
           <h1 className={styles.title}>{t('welcome:title')}</h1>
           <p className={styles.subtitle}>{t('welcome:checkingPermission')}</p>
         </div>
@@ -65,9 +64,7 @@ export function Welcome() {
   return (
     <div className={styles.backdrop}>
       <div className={styles.window} role="dialog" aria-label={t('welcome:title')}>
-        <div className={styles.brand} aria-hidden="true">
-          CP
-        </div>
+        <img className={styles.brand} src={appIconUrl} alt="" aria-hidden="true" />
 
         <h1 className={styles.title}>{t('welcome:title')}</h1>
         <p className={styles.subtitle}>{t('welcome:subtitle')}</p>

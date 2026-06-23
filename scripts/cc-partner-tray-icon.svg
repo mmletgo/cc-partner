@@ -1,0 +1,8 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>cc-partner macOS tray template icon</title>
+  <g stroke="#000000" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M31 18C24 13 15 16 11 25C6 36 13 49 27 48C32 48 36 46 39 43"/>
+    <path d="M33 46C40 51 49 48 53 39C58 28 51 15 37 16C32 16 28 18 25 21"/>
+  </g>
+  <path d="M25 32H39" stroke="#000000" stroke-width="8" stroke-linecap="round"/>
+</svg>
