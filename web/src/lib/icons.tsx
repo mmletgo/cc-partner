@@ -265,3 +265,11 @@ export const RefreshIcon = ({ size, ...rest }: IconProps) => (
     <path d="M11.8 1.8v2.6H9.2M4.2 14.2v-2.6h2.6" />
   </svg>
 );
+
+export const BellIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="M8 1.5v1" />
+    <path d="M4 6a4 4 0 0 1 8 0c0 3 1.5 4.5 2 5.5H2c.5-1 2-2.5 2-5.5Z" />
+    <path d="M6.8 13.2a1.3 1.3 0 0 0 2.4 0" />
+  </svg>
+);

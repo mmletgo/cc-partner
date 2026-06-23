@@ -19,6 +19,10 @@
     "inputMonitoring": {
       "title": "输入监控",
       "description": "健康提醒检测键盘活动需要"
+    },
+    "notification": {
+      "title": "通知",
+      "description": "接收健康提醒等系统通知"
     }
   },
   "permissionCard": {

@@ -19,6 +19,10 @@
     "inputMonitoring": {
       "title": "Input Monitoring",
       "description": "Health reminder detects keyboard activity"
+    },
+    "notification": {
+      "title": "Notifications",
+      "description": "Receive system notifications like health reminders"
     }
   },
   "permissionCard": {

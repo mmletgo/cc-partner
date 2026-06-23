@@ -241,9 +241,11 @@ export interface PermissionsStatus {
   screenCapture: { granted: boolean };
   inputMonitoring: { granted: boolean };
   accessibility: { granted: boolean };
+  /** 通知权限（前端 JS API 检测合并；后端 check_permissions 不含此字段） */
+  notification: { granted: boolean };
 }
 
-export type PermissionType = 'screenCapture' | 'inputMonitoring' | 'accessibility';
+export type PermissionType = 'screenCapture' | 'inputMonitoring' | 'accessibility' | 'notification';
 
 export interface PermissionRequestResult {
   ok: boolean;
