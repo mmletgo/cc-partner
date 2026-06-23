@@ -404,7 +404,7 @@ Tauri 自动打包三平台本平台产物（macOS→dmg/app、Windows→nsis/ms
 | list_transfers / send_transfer / cancel_transfer | 文件传输任务管理 |
 | check_permissions / request_permission | macOS 权限检查与申请（屏幕录制 / 输入监控） |
 | check_update / download_update / get_download_status / cancel_download / install_update | 自动更新 5 命令 |
-| start_region_capture / get_display_snapshot / crop_and_copy / cancel_region_capture | 区域截图 |
+| start_region_capture / get_region_snapshot / save_clipboard_image / cancel_region_capture | 区域截图 |
 | list_github_trending_repos / get_github_trending_config / update_github_trending_config / test_claude_cli | GitHub 周热门项目 + Claude CLI 双语解说配置 |
 
 ### 8.3 P2P HTTP 端点（对端调用，由 `src-tauri/src/net/routes/` 注册）

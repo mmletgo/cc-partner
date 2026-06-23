@@ -7,8 +7,8 @@
  *   - editing：选区确定，canvas 画桌面快照 + 标注，工具条选矩形/箭头/颜色/撤销/确认/取消
  *   确认 → canvas.toDataURL 合成 → save_clipboard_image 写剪贴板。ESC/取消 → 关闭。
  *
- * Code Logic: 状态机 + selectionRef（mouseup 读最新选区）+ hiding（进编辑/确认前隐藏遮罩与边框，
- *   让 Rust 抓纯桌面 / canvas 合成不含遮罩）。hooks 在所有 early return 之前（项目规则 20）。
+ * Code Logic: 状态机 + selectionRef（mouseup 读最新选区）+ hiding（抓快照时隐藏遮罩/边框/canvas，
+ *   让 Rust 抓纯桌面；工具条独立渲染，避免等待快照加载）。hooks 在所有 early return 之前（项目规则 20）。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -28,6 +28,13 @@ interface Selection {
   h: number;
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   每个显示器对应一个独立截图 Overlay 窗口，前端需要知道当前窗口负责哪块屏幕。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从 URL query 的 `display` 读取显示器序号，非法值统一回退到 0。
+ */
 function parseDisplay(): number {
   const params = new URLSearchParams(window.location.search);
   const raw = params.get('display');
@@ -35,6 +42,14 @@ function parseDisplay(): number {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
 }
 
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   用户需要用接近微信截图的流程框选屏幕区域，并在框选完成后立即看到标注工具条。
+ *
+ * Code Logic（这个组件做什么）:
+ *   管理 idle/selecting/editing 三态；mouseup 后立即进入 editing 渲染工具条，
+ *   同时短暂隐藏选区视觉元素并异步抓纯桌面快照，快照完成后再挂载 canvas 标注层。
+ */
 export function Overlay() {
   const [mode, setMode] = useState<Mode>('idle');
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -127,15 +142,19 @@ export function Overlay() {
     [],
   );
 
-  // mouseup 有效选区 → 进 editing（抓快照）
+  // mouseup 有效选区 → 立即进 editing 显示工具条，同时异步抓快照
   const enterEditing = useCallback(async () => {
     const sel = selectionRef.current;
     if (!sel || sel.w < 10 || sel.h < 10) {
       void cancel();
       return;
     }
+    setMode('editing');
+    setSnapshot(null);
+    setDraft(null);
+    setAnnotations([]);
     setBusy(true);
-    setHiding(true); // 隐藏遮罩/边框，Rust 抓纯桌面
+    setHiding(true); // 只隐藏遮罩/边框/canvas，工具条继续显示
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     try {
       const dataUrl = await invoke<string>('get_region_snapshot', {
@@ -154,9 +173,9 @@ export function Overlay() {
       });
       setSnapshot(img);
       setHiding(false);
-      setMode('editing');
     } catch {
       setHiding(false);
+      setSnapshot(null);
       setMode('idle'); // 快照失败回 idle 让用户重选
     } finally {
       setBusy(false);
@@ -228,6 +247,7 @@ export function Overlay() {
   }, [busy]);
 
   const showSelection = selection && selection.w > 0 && selection.h > 0;
+  const showEditing = mode === 'editing' && selection;
 
   // editing 工具条位置：默认选区下方居中，贴近下边则翻到上方
   const tbH = 44;
@@ -252,46 +272,50 @@ export function Overlay() {
         void cancel();
       }}
     >
-      {/* hiding=true 时只透出桌面（进编辑/确认时不显示遮罩/边框/canvas） */}
-      {!hiding &&
-        (mode === 'editing' && snapshot ? (
-          <>
-            {/* 此分支仅在 editing 且有快照时进入（用户已 enterEditing，selection 必非空），取一次收敛非空断言 */}
-            {(() => {
-              const sel = selection!;
-              return (
-                <>
-                  {/* 选区外四块遮罩 */}
-                  <div className={styles.mask} style={{ left: 0, top: 0, right: 0, bottom: `calc(100% - ${sel.y}px)` }} />
-                  <div className={styles.mask} style={{ left: 0, top: `${sel.y + sel.h}px`, right: 0, bottom: 0 }} />
-                  <div className={styles.mask} style={{ left: 0, top: `${sel.y}px`, width: `${sel.x}px`, height: `${sel.h}px` }} />
-                  <div className={styles.mask} style={{ left: `${sel.x + sel.w}px`, top: `${sel.y}px`, right: 0, height: `${sel.h}px` }} />
-                  {/* canvas：选区内，画快照 + 标注 */}
-                  <canvas
-                    ref={canvasRef}
-                    className={styles.canvas}
-                    style={{ left: sel.x, top: sel.y, width: sel.w, height: sel.h }}
-                    onPointerDown={onCanvasPointerDown}
-                    onPointerMove={onCanvasPointerMove}
-                    onPointerUp={onCanvasPointerUp}
+      {showEditing ? (
+        <>
+          {/* 此分支仅在 editing 且 selection 非空时进入，取一次收敛非空断言 */}
+          {(() => {
+            const sel = selection!;
+            return (
+              <>
+                {/* hiding=true 时选区视觉元素暂时透明，避免进入 Rust 快照；工具条保持可见 */}
+                {!hiding && (
+                  <>
+                    {/* 选区外四块遮罩 */}
+                    <div className={styles.mask} style={{ left: 0, top: 0, right: 0, bottom: `calc(100% - ${sel.y}px)` }} />
+                    <div className={styles.mask} style={{ left: 0, top: `${sel.y + sel.h}px`, right: 0, bottom: 0 }} />
+                    <div className={styles.mask} style={{ left: 0, top: `${sel.y}px`, width: `${sel.x}px`, height: `${sel.h}px` }} />
+                    <div className={styles.mask} style={{ left: `${sel.x + sel.w}px`, top: `${sel.y}px`, right: 0, height: `${sel.h}px` }} />
+                    {snapshot && (
+                      <canvas
+                        ref={canvasRef}
+                        className={styles.canvas}
+                        style={{ left: sel.x, top: sel.y, width: sel.w, height: sel.h }}
+                        onPointerDown={onCanvasPointerDown}
+                        onPointerMove={onCanvasPointerMove}
+                        onPointerUp={onCanvasPointerUp}
+                      />
+                    )}
+                  </>
+                )}
+                {/* 工具条不等待 snapshot，框选结束后立即出现 */}
+                <div className={styles.toolbarWrap} style={toolbarStyle}>
+                  <ScreenshotToolbar
+                    tool={tool}
+                    onToolChange={setTool}
+                    color={color}
+                    onColorChange={setColor}
+                    onUndo={undo}
+                    onConfirm={confirm}
+                    onCancel={() => void cancel()}
                   />
-                  {/* 工具条 */}
-                  <div className={styles.toolbarWrap} style={toolbarStyle}>
-                    <ScreenshotToolbar
-                      tool={tool}
-                      onToolChange={setTool}
-                      color={color}
-                      onColorChange={setColor}
-                      onUndo={undo}
-                      onConfirm={confirm}
-                      onCancel={() => void cancel()}
-                    />
-                  </div>
-                </>
-              );
-            })()}
-          </>
-        ) : showSelection ? (
+                </div>
+              </>
+            );
+          })()}
+        </>
+      ) : !hiding && showSelection ? (
           <>
             {/* showSelection 已保证 selection 非空（w>0 && h>0），取一次收敛非空断言 */}
             {(() => {
@@ -308,10 +332,10 @@ export function Overlay() {
               );
             })()}
           </>
-        ) : (
-          /* idle：整屏遮罩 */
-          <div className={styles.mask} style={{ inset: 0 }} />
-        ))}
+      ) : !hiding ? (
+        /* idle：整屏遮罩 */
+        <div className={styles.mask} style={{ inset: 0 }} />
+      ) : null}
     </div>
   );
 }
