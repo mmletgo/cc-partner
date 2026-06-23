@@ -1,5 +1,5 @@
 /* Settings 页面样式
- * 单列 720px container，多个 Card 垂直堆叠
+ * 单列 720px container，页内 tab 分组后每组 Card 垂直堆叠
  * 颜色/间距/圆角/动效统一走 design token
  */
 
@@ -55,6 +55,55 @@
   max-width: 560px;
 }
 
+/* ── 页内 tabs ── */
+.tabs {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-warm);
+}
+
+.tab,
+.tabActive {
+  min-height: 34px;
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.tab:hover {
+  color: var(--fg);
+  background: var(--surface);
+}
+
+.tab:focus-visible,
+.tabActive:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.tabActive {
+  background: var(--accent);
+  color: var(--accent-on);
+  box-shadow: var(--shadow-xs);
+}
+
+.tabPanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
 /* ── Section title ── */
 .sectionTitle {
   margin: 0;
@@ -89,6 +138,10 @@
   margin: 0;
   font-size: var(--text-sm);
   color: var(--muted);
+}
+
+.dangerText {
+  color: var(--danger);
 }
 
 .inputRow {
@@ -395,6 +448,16 @@
   .shortcutRow,
   .twoColumnFields {
     grid-template-columns: 1fr;
+  }
+
+  .tabs {
+    align-self: stretch;
+    overflow-x: auto;
+  }
+
+  .tab,
+  .tabActive {
+    flex: 1 0 auto;
   }
 
   .metaRow,

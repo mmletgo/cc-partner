@@ -3,6 +3,13 @@
   "subtitle": "管理设备名、截图快捷键、云端同步与版本信息。",
   "loading": "加载中…",
   "loadFailed": "加载失败：{{error}}",
+  "tabsLabel": "设置分区",
+  "tabs": {
+    "general": "常规",
+    "sync": "同步",
+    "ai": "AI",
+    "about": "关于"
+  },
   "basic": {
     "title": "基本设置",
     "deviceName": "设备名称",

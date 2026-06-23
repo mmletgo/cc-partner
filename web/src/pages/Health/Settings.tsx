@@ -12,7 +12,7 @@
  *   - mount 时 getConfig 拉取当前完整配置初始化受控表单
  *   - update(patch):setCfg({...cfg, ...patch}) + updateConfig(完整对象),乐观更新
  *   - 分钟输入:workWindowSeconds/breakSeconds/waterIntervalSeconds ↔ 分钟整数双向换算(×60)
- *   - dndStart/dndEnd 用 `<input type="time">`,空串 ↔ null
+ *   - dndStart/dndEnd 用 HH:MM 文本草稿输入,失焦/回车时校验提交,空串 ↔ null
  *   - hooks 全部在 early return 之前(项目规则 20)
  */
 import { useCallback, useEffect, useState } from 'react';
@@ -57,6 +57,48 @@ interface TimeFieldProps {
   /** 时间变更回调 */
   onChange: (value: string | null) => void;
 }
+
+/** HH:MM 时间格式校验,24 小时制 */
+const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/**
+ * 归一化免打扰时间草稿
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   原生 `input type="time"` 在空值时逐字符输入不会形成有效 value,用户会感觉免打扰时间无法调整。
+ *   这里支持用户输入 `09:30`、`9:30`、`0930`、`930`,并在提交时统一成 `HH:MM`。
+ *
+ * Code Logic（这个函数做什么）:
+ *   空串返回 null;合法 HH:MM 原样/补零返回;纯数字 3/4 位按小时分钟解析;
+ *   不合法返回 undefined,由调用方决定回滚显示值。
+ */
+const normalizeTimeDraft = (draft: string): string | null | undefined => {
+  const trimmed = draft.trim();
+  if (trimmed === '') return null;
+  if (TIME_PATTERN.test(trimmed)) return trimmed;
+
+  const colonMatch = trimmed.match(/^(\d{1,2}):(\d{2})$/);
+  if (colonMatch) {
+    const hour = Number(colonMatch[1]);
+    const minute = Number(colonMatch[2]);
+    if (hour <= 23 && minute <= 59) {
+      return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    }
+    return undefined;
+  }
+
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length === 3 || digits.length === 4) {
+    const splitAt = digits.length - 2;
+    const hour = Number(digits.slice(0, splitAt));
+    const minute = Number(digits.slice(splitAt));
+    if (hour <= 23 && minute <= 59) {
+      return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    }
+  }
+
+  return undefined;
+};
 
 /**
  * 渲染设置页开关行
@@ -130,19 +172,51 @@ function NumberField(props: NumberFieldProps) {
  *   免打扰起止时间可以为空,用户需要能直接清空或选择本地时间。
  *
  * Code Logic（这个函数做什么）:
- *   渲染原生 time input,把空串转换为 null,保持后端 HealthConfig 语义。
+ *   渲染 HH:MM 文本草稿输入,失焦/回车时提交;空串转换为 null,保持后端 HealthConfig 语义。
  */
 function TimeField(props: TimeFieldProps) {
   const { label, value, onChange } = props;
+  const [draft, setDraft] = useState(value ?? '');
+
+  /**
+   * 提交当前草稿值
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   用户输入免打扰时间时需要先完成 `HH:MM` 草稿,不能每个按键都立即整体回写配置。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调 normalizeTimeDraft 校验并归一化;合法则同步显示并触发 onChange,非法则回滚到最近有效值。
+   */
+  const commitDraft = () => {
+    const next = normalizeTimeDraft(draft);
+    if (next === undefined) {
+      setDraft(value ?? '');
+      return;
+    }
+    setDraft(next ?? '');
+    if (next !== value) {
+      onChange(next);
+    }
+  };
 
   return (
     <label className={styles.timeRow}>
       <span className={styles.labelText}>{label}</span>
-      <input
-        type="time"
+      <Input
+        type="text"
+        size="sm"
+        mono
+        inputMode="numeric"
+        placeholder="HH:MM"
+        value={draft}
         className={styles.timeInput}
-        value={value ?? ''}
-        onChange={(event) => onChange(event.target.value || null)}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commitDraft}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.currentTarget.blur();
+          }
+        }}
       />
     </label>
   );
@@ -250,11 +324,13 @@ export function Settings() {
           <h3 className={styles.groupTitle}>{t('health:quietHoursGroup')}</h3>
           <div className={styles.twoColumn}>
             <TimeField
+              key={`dnd-start-${cfg.dndStart ?? 'empty'}`}
               label={t('health:dndStart')}
               value={cfg.dndStart}
               onChange={(value) => { void update({ dndStart: value }); }}
             />
             <TimeField
+              key={`dnd-end-${cfg.dndEnd ?? 'empty'}`}
               label={t('health:dndEnd')}
               value={cfg.dndEnd}
               onChange={(value) => { void update({ dndEnd: value }); }}

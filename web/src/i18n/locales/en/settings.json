@@ -3,6 +3,13 @@
   "subtitle": "Manage device name, screenshot shortcut, cloud sync, and version info.",
   "loading": "Loading…",
   "loadFailed": "Failed to load: {{error}}",
+  "tabsLabel": "Settings sections",
+  "tabs": {
+    "general": "General",
+    "sync": "Sync",
+    "ai": "AI",
+    "about": "About"
+  },
   "basic": {
     "title": "Basic",
     "deviceName": "Device name",

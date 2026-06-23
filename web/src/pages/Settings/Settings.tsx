@@ -7,7 +7,8 @@
  *   把整张配置表发送到后端持久化，区分"未保存修改"和"已保存配置"。
  *
  * Code Logic（这个页面做什么）:
- *   - Card 区块：基本设置 / 权限管理 / 截图快捷键 / 云端同步 / 关于
+ *   - 子 tab：常规 / 同步 / AI / 关于，把既有 Card 按查看任务分组
+ *   - Card 区块：基本设置 / 权限管理 / 截图快捷键 / 云端同步 / GitHub Trending / 关于
  *   - 组件挂载时从后端加载配置和版本信息
  *   - Toggle 控件内联实现，避免引入额外 Switch 组件；状态切换走
  *     受控的 onClick + role="switch" + aria-checked
@@ -16,7 +17,7 @@
  *   - 所有用户可见文案经 i18next 翻译（settings ns + common ns）
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { ChangeEvent } from 'react';
+import type { ChangeEvent, KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Card, Button, Input, Pill } from '@/components/primitives';
@@ -70,6 +71,23 @@ interface GithubTrendingForm {
   claudeModel: string;
   cacheTtlHours: number;
 }
+
+/** Settings 页内子 tab id */
+type SettingsTabId = 'general' | 'sync' | 'ai' | 'about';
+
+/** Settings 页内子 tab 定义 */
+interface SettingsTab {
+  id: SettingsTabId;
+  labelKey: SettingsTabId;
+}
+
+/** Settings 页内子 tab 顺序：按用户查看任务组织，而不是按底层配置来源组织 */
+const SETTINGS_TABS: SettingsTab[] = [
+  { id: 'general', labelKey: 'general' },
+  { id: 'sync', labelKey: 'sync' },
+  { id: 'ai', labelKey: 'ai' },
+  { id: 'about', labelKey: 'about' },
+];
 
 /** 快捷键字段定义（值本地化，文案走 t） */
 const SHORTCUT_FIELDS: ShortcutField[] = [
@@ -192,6 +210,7 @@ export function Settings() {
   const [installing, setInstalling] = useState(false);
   const [saving, setSaving] = useState(false);
   const [choosingDir, setChoosingDir] = useState(false);
+  const [activeTab, setActiveTab] = useState<SettingsTabId>('general');
 
   // 云端同步（GitHub 私有仓库）独立操作块：表单值 / 已应用配置 / 上次同步结果 / 测试结果 / 各动作 loading
   const [cloudSyncForm, setCloudSyncForm] = useState<CloudSyncForm>({ ...DEFAULT_CLOUD_SYNC_FORM });
@@ -216,6 +235,33 @@ export function Settings() {
   // macOS 权限状态（设置页手动授权入口，持续轮询以反映用户在系统设置的变更）
   const [tWelcome] = useTranslation('welcome');
   const { status: permStatus, loading: permLoading, refresh: refreshPermissions } = usePermissions();
+
+  /**
+   * 页内 tab 键盘切换：支持左右方向键 / Home / End，保持 tablist 可访问性
+   *
+   * @param e 当前 tab button 的键盘事件
+   * @param currentIndex 当前 tab 在 SETTINGS_TABS 中的索引
+   */
+  const handleTabKeyDown = useCallback((e: KeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
+    let nextIndex: number | null = null;
+    if (e.key === 'ArrowRight') {
+      nextIndex = (currentIndex + 1) % SETTINGS_TABS.length;
+    } else if (e.key === 'ArrowLeft') {
+      nextIndex = (currentIndex - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length;
+    } else if (e.key === 'Home') {
+      nextIndex = 0;
+    } else if (e.key === 'End') {
+      nextIndex = SETTINGS_TABS.length - 1;
+    }
+
+    if (nextIndex === null) return;
+    e.preventDefault();
+    const nextTab = SETTINGS_TABS[nextIndex];
+    setActiveTab(nextTab.id);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`settings-tab-${nextTab.id}`)?.focus();
+    });
+  }, []);
 
   /**
    * 单项权限「去设置」：请求该项权限（默认弹框 + 开面板）后刷新状态
@@ -628,7 +674,7 @@ export function Settings() {
           <header className={styles.header}>
             <span className={styles.eyebrow}>PREFERENCES</span>
             <h1 className={styles.title}>{t('settings:title')}</h1>
-            <p className={styles.lead} style={{ color: 'var(--danger)' }}>
+            <p className={`${styles.lead} ${styles.dangerText}`}>
               {t('settings:loadFailed', { error: loadError })}
             </p>
           </header>
@@ -647,6 +693,32 @@ export function Settings() {
           <p className={styles.lead}>{t('settings:subtitle')}</p>
         </header>
 
+        <div className={styles.tabs} role="tablist" aria-label={t('settings:tabsLabel')}>
+          {SETTINGS_TABS.map((tab, index) => (
+            <button
+              key={tab.id}
+              id={`settings-tab-${tab.id}`}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              aria-controls={`settings-panel-${tab.id}`}
+              tabIndex={activeTab === tab.id ? 0 : -1}
+              className={activeTab === tab.id ? styles.tabActive : styles.tab}
+              onClick={() => setActiveTab(tab.id)}
+              onKeyDown={(e) => handleTabKeyDown(e, index)}
+            >
+              {t(`settings:tabs.${tab.labelKey}`)}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === 'general' ? (
+          <div
+            id="settings-panel-general"
+            className={styles.tabPanel}
+            role="tabpanel"
+            aria-labelledby="settings-tab-general"
+          >
         {/* Card 1: 基本设置 */}
         <Card variant="flat" padding="md">
           <Card.Header>
@@ -747,6 +819,36 @@ export function Settings() {
           </Card.Body>
         </Card>
 
+        {/* 底部按钮组：只保存常规 tab 的基础配置 */}
+        <div className={styles.footer}>
+          <div className={styles.footerLeft}>
+            {isDirty ? (
+              <span className={styles.dirtyHint}>{t('settings:status.dirtyHint')}</span>
+            ) : savedAt ? (
+              <span className={styles.savedHint}>
+                {t('settings:status.savedAt', { time: formatTime(savedAt) })}
+              </span>
+            ) : null}
+          </div>
+          <div className={styles.footerActions}>
+            <Button variant="ghost" onClick={handleResetDefaults} disabled={!isDirty}>
+              {t('settings:action.resetDefault')}
+            </Button>
+            <Button variant="primary" onClick={handleSave} disabled={!isDirty || saving}>
+              {saving ? t('settings:action.saving') : t('settings:action.save')}
+            </Button>
+          </div>
+        </div>
+          </div>
+        ) : null}
+
+        {activeTab === 'sync' ? (
+          <div
+            id="settings-panel-sync"
+            className={styles.tabPanel}
+            role="tabpanel"
+            aria-labelledby="settings-tab-sync"
+          >
         {/* Card: 云端同步（GitHub 私有仓库，独立操作块，不混入底部统一 Save） */}
         <Card variant="flat" padding="md">
           <Card.Header>
@@ -912,10 +1014,7 @@ export function Settings() {
 
             {/* 测试结果 */}
             {testResult ? (
-              <span
-                className={styles.aboutHint}
-                style={testResult.ok ? {} : { color: 'var(--danger)' }}
-              >
+              <span className={`${styles.aboutHint} ${testResult.ok ? '' : styles.dangerText}`}>
                 <InfoIcon size={14} />
                 <span>
                   {testResult.ok
@@ -934,10 +1033,7 @@ export function Settings() {
             {syncResult ? (
               <div className={styles.metaRow}>
                 <span className={styles.metaKey}>{t('settings:cloudSync.lastSync')}</span>
-                <span
-                  className={styles.metaValue}
-                  style={syncResult.ok ? {} : { color: 'var(--danger)' }}
-                >
+                <span className={`${styles.metaValue} ${syncResult.ok ? '' : styles.dangerText}`}>
                   {syncResult.ok
                     ? t('settings:cloudSync.syncSuccess', {
                         time: formatIsoTime(syncResult.syncedAt),
@@ -958,7 +1054,16 @@ export function Settings() {
             ) : null}
           </Card.Body>
         </Card>
+          </div>
+        ) : null}
 
+        {activeTab === 'ai' ? (
+          <div
+            id="settings-panel-ai"
+            className={styles.tabPanel}
+            role="tabpanel"
+            aria-labelledby="settings-tab-ai"
+          >
         {/* Card: GitHub Trending / Claude 解说 */}
         <Card variant="flat" padding="md">
           <Card.Header>
@@ -1090,10 +1195,7 @@ export function Settings() {
             </div>
 
             {claudeCliTest ? (
-              <span
-                className={styles.aboutHint}
-                style={claudeCliTest.ok ? {} : { color: 'var(--danger)' }}
-              >
+              <span className={`${styles.aboutHint} ${claudeCliTest.ok ? '' : styles.dangerText}`}>
                 <InfoIcon size={14} />
                 <span>
                   {claudeCliTest.ok
@@ -1112,6 +1214,16 @@ export function Settings() {
             ) : null}
           </Card.Body>
         </Card>
+          </div>
+        ) : null}
+
+        {activeTab === 'about' ? (
+          <div
+            id="settings-panel-about"
+            className={styles.tabPanel}
+            role="tabpanel"
+            aria-labelledby="settings-tab-about"
+          >
 
         {/* Card 4: 关于 */}
         <Card variant="flat" padding="md">
@@ -1239,27 +1351,8 @@ export function Settings() {
             ) : null}
           </Card.Body>
         </Card>
-
-        {/* 底部按钮组 */}
-        <div className={styles.footer}>
-          <div className={styles.footerLeft}>
-            {isDirty ? (
-              <span className={styles.dirtyHint}>{t('settings:status.dirtyHint')}</span>
-            ) : savedAt ? (
-              <span className={styles.savedHint}>
-                {t('settings:status.savedAt', { time: formatTime(savedAt) })}
-              </span>
-            ) : null}
           </div>
-          <div className={styles.footerActions}>
-            <Button variant="ghost" onClick={handleResetDefaults} disabled={!isDirty}>
-              {t('settings:action.resetDefault')}
-            </Button>
-            <Button variant="primary" onClick={handleSave} disabled={!isDirty || saving}>
-              {saving ? t('settings:action.saving') : t('settings:action.save')}
-            </Button>
-          </div>
-        </div>
+        ) : null}
       </div>
     </div>
   );
