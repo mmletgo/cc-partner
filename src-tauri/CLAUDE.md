@@ -17,7 +17,7 @@ src/
 ├── main.rs / lib.rs   — Tauri Builder + 命令注册 + setup 装配（load config → init_db → AppState）
 ├── state.rs           — AppState（config: RwLock + db pool + prompt_repo + device_id）[已实现]
 ├── error.rs           — AppError（thiserror + serde 成 {error:"msg"}）              [已实现]
-├── config.rs          — AppConfig：读 ~/.cc-partner/config.json，缺失生成默认；目录首次启动从旧 ~/.claude-partner 重命名迁移；load() 额外做字段级迁移——把 config.json 残留的 db_path 绝对路径前缀 `~/.claude-partner/` 改写为 `~/.cc-partner/`（fs::rename 不改文件内容，必须在 load 时修补否则 init_db 找不到文件 panic）；macOS 旧 `<ctrl>` 快捷键自动替换 `<cmd>` [已实现]
+├── config.rs          — AppConfig：读 ~/.cc-partner/config.json，缺失生成默认；目录首次启动从旧 ~/.claude-partner 重命名迁移；load() 额外做字段级迁移——把 config.json 残留的 db_path 绝对路径前缀 `~/.claude-partner/` 改写为 `~/.cc-partner/`（fs::rename 不改文件内容，必须在 load 时修补否则 init_db 找不到文件 panic）；提供设置页恢复默认所需的基础偏好默认值与云同步默认值；macOS 旧 `<ctrl>` 快捷键自动替换 `<cmd>` [已实现]
 ├── cc/                — Claude Code 历史采集（collector）+ 合并（merger，复用 sync/vector_clock）+ 同步（engine）+ 模型 [已实现]
 ├── claude_cli.rs      — Claude Code CLI pure/headless 结构化调用共享 helper（GitHub Trending + Prompt 优化复用）[已实现]
 ├── cloud_sync/        — GitHub 私有仓库云端同步（git_cli 系统 git 封装 + snapshot 工作区↔DB 导入导出 + engine 流程编排 + scheduler 轮询） [已实现]
@@ -49,6 +49,7 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 - **delete 是软删除**：`soft_delete` 设 `deleted=1` + `updated_at=now` + 写回推进后的 vector_clock（修正了 Python handler 自增 clock 却未落库的 bug）。
 - **PromptDto** 比 Row 多 `tag`（tags[0] 投影，兼容旧前端），对照 Python `_prompt_to_frontend_dict`。
 - **httpPort**：M1 未实际监听 HTTP，`get_config` 返回配置值（0）；M3 axum 接入后改为真实端口。
+- **配置命令**：`get_config` 返回当前持久化配置；`get_default_config` 返回设备名/接收目录/截图快捷键的环境默认值（当前 device_id/http_port 保持不变），供设置页“恢复默认”使用；`update_config` 是 patch 语义，只覆盖传入字段。
 
 ## M3 已落地行为约定（移植自 Python network/，逐方法对照）
 
@@ -261,7 +262,7 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 - **push rejected 收敛**（`engine::trigger_cloud_sync`）：每轮 = fetch(远端有引用时) → reset --hard origin/<branch>(远端有引用时) → import → export → commit → push。commit message 形如 `cloud sync from <device_id> @ <ISO 时间戳>`，便于多设备同步审计与回滚定位。commit 无变化则跳过 push 视为成功（pull 已吸收远端）。push 返回 `PushError::Rejected` 时再 fetch+reset+import+export+commit+push 一轮（最多 1 次重试 = 总共 2 轮）。`has_remote_branch`（`git rev-parse --verify origin/HEAD`）判断全新空仓库无远端引用时跳过 fetch/reset 容错。pulled = 各轮 import 条数总和，pushed = 最后一轮 export 条数。任一步骤失败返回 `CloudSyncResult{ok:false, note:友好中文}`，绝不 panic。
 - **test_connection**：detect_git → git_version；若配了 repo_url：工作区已存在则 fetch 测连通 + `default_remote_branch`；无工作区则 clone 到临时目录 `cp-cloud-sync-test-<uuid>` 测连通（测完删除），返回默认分支。未配 url 仅返回 git 可用。无 commit/push 副作用。
 - **配置字段**（`AppConfig`，全部 `#[serde(default)]` 保旧 config.json 兼容）：`cloud_sync_repo_url: Option<String>`、`cloud_sync_enabled: bool`、`cloud_sync_auto: bool`、`cloud_sync_interval_secs: u64`（默认 600，`default_cloud_sync_interval()`）、`cloud_sync_branch: Option<String>`。load() 首次生成默认值补 None/false/false/600/None。
-- **4 个命令**（`commands/cloud_sync.rs`，参数 snake_case，返回 camelCase 对齐锁定契约）：`get_cloud_sync_config`、`update_cloud_sync_config(repoUrl?,enabled?,auto?,intervalSecs?,branch?)`（空串 url/branch 归一为 None，interval 最小 30s）、`trigger_cloud_sync_cmd`（手动触发，不受 enabled/auto 限制）、`test_cloud_sync`。
+- **5 个命令**（`commands/cloud_sync.rs`，参数 snake_case，返回 camelCase 对齐锁定契约）：`get_cloud_sync_config`、`get_default_cloud_sync_config`（None/false/false/600/None，供设置页恢复默认）、`update_cloud_sync_config(repoUrl?,enabled?,auto?,intervalSecs?,branch?)`（空串 url/branch 归一为 None，interval 最小 30s）、`trigger_cloud_sync_cmd`（手动触发，不受 enabled/auto 限制）、`test_cloud_sync`。
 - **DTO 锁定契约（前端依赖）**：`CloudSyncConfigDto`{repoUrl,enabled,auto,intervalSecs,branch}、`CloudSyncResult`{ok,pulled,pushed,note,syncedAt}、`TestCloudSyncResult`{ok,gitVersion,defaultBranch,error}。
 - **scheduler**（`cloud_sync/scheduler.rs`）：`start(state) -> CancellationToken` 用 **`tauri::async_runtime::spawn`**（非 `tokio::spawn`——本函数在 lib.rs setup 同步段、block_on 之外被调用，主线程无 Tokio reactor，`tokio::spawn` 会 panic "there is no reactor running"）启动后台任务，`loop { select!{ cancel => break, sleep(interval) => tick } }`。**每 tick 重读 config**：interval = `cloud_sync_interval_secs`（实时生效），`!enabled || !auto` 则 continue（仍按新 interval 等待），否则跑 `trigger_cloud_sync`（错误仅 tracing::error）。首次先 sleep 再检查（不立即跑）。setup **无条件启动**（内部按 config 决定），故配置变更无需重启 scheduler。返回的 token 存 `AppState.cloud_sync_cancel`，`RunEvent::Exit` 时 cancel。
 - **AppState 扩展**：`cloud_sync_cancel: Arc<Mutex<Option<CancellationToken>>>`。`config_dir` 由 private 提升为 pub（cloud_sync 复用）。无新表（init_db 不变）、无新依赖（用 tokio::process + std::fs + 既有 tokio-util/chrono/dirs/uuid）。
@@ -272,7 +273,7 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 - **缓存策略**：`github_trending_cache` 表按 key `weekly:any:25:<UTC YYYY-MM-DD>` 存完整 payload JSON、`fetched_at`、`expires_at`、`ai_status`、`ai_error`、`ai_retry_attempted`。当天且未过期直接返回缓存（`fromCache=true`），不重新抓 GitHub、不重新调用 Claude CLI；但旧版本写入的“命令返回非零状态”泛化失败缓存会在 AI 仍启用且 `ai_retry_attempted=false` 时用缓存 repo 轻量重试一次，随后写回 `ai_retry_attempted=true`。刷新 GitHub 失败但有旧缓存时返回旧缓存并标记 `stale=true`；无旧缓存才返回错误。
 - **Claude CLI 解说**：启用时一次性把 Top 25 元数据通过 stdin 传给本地 Claude Code CLI，命令形态：`claude --bare -p --output-format json --json-schema <schema> --no-session-persistence --tools "" --model <model>`。`--bare` 用于跳过项目上下文/记忆/插件预加载，避免这类纯结构化摘要任务加载无关上下文。后端不再传 `--max-budget-usd`，避免长榜单生成被本应用的人为预算上限中断。要求输出 `{repos:[{fullName, explanationZh, explanationEn}]}`，后端兼容直接 JSON、`--output-format json` 的 `result` 包装，以及新版 CLI 的 `structured_output` 字段。CLI 非零退出时同时检查 stderr 与 stdout JSON 的 `errors/result/subtype`，避免 stderr 为空时只显示“命令返回非零状态”。其他 CLI 失败仍缓存原始榜单，`aiStatus=failed` + `aiError`，避免同一天频繁重试。
 - **配置字段**：`AppConfig.github_trending: GithubTrendingConfig`（`#[serde(default)]` 兼容旧 config.json；旧配置残留的 `max_budget_usd` 会被忽略），字段 `ai_enabled`、`claude_cli_path`（默认 `claude`）、`claude_model`（默认 `sonnet`）、`cache_ttl_hours`（默认 24，命令层 clamp 1..168）。
-- **4 个命令**（`commands/github_trending.rs`，lib.rs invoke_handler 注册）：`list_github_trending_repos`、`get_github_trending_config`、`update_github_trending_config(aiEnabled?,claudeCliPath?,claudeModel?,cacheTtlHours?)`、`test_claude_cli(claudeCliPath?)`（只跑 `--version`，可测试表单里的未保存路径）。
+- **5 个命令**（`commands/github_trending.rs`，lib.rs invoke_handler 注册）：`list_github_trending_repos`、`get_github_trending_config`、`get_default_github_trending_config`（供设置页 AI tab 恢复默认）、`update_github_trending_config(aiEnabled?,claudeCliPath?,claudeModel?,cacheTtlHours?)`、`test_claude_cli(claudeCliPath?)`（只跑 `--version`，可测试表单里的未保存路径）。
 - **外链打开**：前端仓库卡片用 `@tauri-apps/plugin-opener` 打开系统浏览器；Rust Builder 注册 `tauri_plugin_opener::init()`，capabilities 加 `opener:default`。
 
 ## Prompt 优化与 Claude CLI pure/headless helper 已落地行为约定（claude_cli.rs + commands/prompt_optimizer.rs）

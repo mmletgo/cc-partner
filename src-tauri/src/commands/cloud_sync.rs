@@ -7,12 +7,14 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `get_cloud_sync_config`：读 config 转 CloudSyncConfigDto。
+//!     - `get_default_cloud_sync_config`：返回后端云同步默认值，供设置页恢复默认。
 //!     - `update_cloud_sync_config`：写锁应用 patch → save() → 返回最新 DTO。
 //!       scheduler 无需重启（setup 无条件启动，内部每 tick 按 config 决定）。
 //!     - `trigger_cloud_sync_cmd`：调 engine::trigger_cloud_sync。
 //!     - `test_cloud_sync`：调 engine::test_connection。
 
 use crate::cloud_sync::engine::{self, CloudSyncResult, TestCloudSyncResult};
+use crate::config::default_cloud_sync_values;
 use crate::error::AppError;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
@@ -54,6 +56,22 @@ pub async fn get_cloud_sync_config(
 ) -> Result<CloudSyncConfigDto, AppError> {
     let cfg = state.config.read().unwrap();
     Ok(to_dto(&cfg))
+}
+
+/// 读取云端同步默认配置。
+///
+/// Business Logic: 设置页同步 tab 需要一键回到应用默认配置，默认值由 Rust 配置层统一定义。
+/// Code Logic: 不读取或写入当前配置，直接把 default_cloud_sync_values 转为前端 DTO。
+#[tauri::command]
+pub async fn get_default_cloud_sync_config() -> Result<CloudSyncConfigDto, AppError> {
+    let (repo_url, enabled, auto, interval_secs, branch) = default_cloud_sync_values();
+    Ok(CloudSyncConfigDto {
+        repo_url,
+        enabled,
+        auto,
+        interval_secs,
+        branch,
+    })
 }
 
 /// 更新云端同步配置（所有字段可选 patch），并持久化。

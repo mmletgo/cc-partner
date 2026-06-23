@@ -136,6 +136,35 @@ fn default_device_name() -> String {
         .unwrap_or_else(|| APP_NAME.to_string())
 }
 
+/// 生成可由设置页恢复的偏好默认值。
+///
+/// Business Logic（为什么需要）:
+///     设置页“恢复默认”需要使用后端环境感知默认值（hostname、home 下接收目录、
+///     平台快捷键），避免前端用空字符串或硬编码路径覆盖真实基础设置。
+///
+/// Code Logic（这个函数做什么）:
+///     调用现有默认值函数，返回 `(device_name, receive_dir, screenshot_hotkey)`；
+///     receive_dir 转成字符串以便命令层直接组装 DTO。
+pub(crate) fn default_preference_values() -> (String, String, String) {
+    (
+        default_device_name(),
+        default_receive_dir().to_string_lossy().to_string(),
+        default_screenshot_hotkey(),
+    )
+}
+
+/// 生成云端同步的默认偏好值。
+///
+/// Business Logic（为什么需要）:
+///     设置页同步 tab 的“恢复默认”应与 AppConfig 首次生成的云同步默认值一致，
+///     避免前端维护第二套默认常量导致漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 repo_url/enabled/auto/interval_secs/branch 的默认元组，供命令层组装 DTO。
+pub(crate) fn default_cloud_sync_values() -> (Option<String>, bool, bool, u64, Option<String>) {
+    (None, false, false, default_cloud_sync_interval(), None)
+}
+
 /// GitHub 周热门首页配置。
 ///
 /// Business Logic（为什么需要这个结构）:

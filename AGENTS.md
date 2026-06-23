@@ -394,18 +394,19 @@ Tauri 自动打包三平台本平台产物（macOS→dmg/app、Windows→nsis/ms
 | 命令 | 说明 |
 |------|------|
 | ping | 健康检查 |
-| config.get_config / config.update_config | 配置读写（update_config 支持快捷键热更新） |
+| config.get_config / config.get_default_config / config.update_config | 配置读写；恢复默认取后端环境默认值，update_config 支持快捷键热更新 |
 | config.get_version | 应用版本号 |
 | prompts.list / get / create / update / delete / list_tags | Prompt CRUD（delete 为软删除，自增 vector_clock） |
 | optimize_prompt | 调用本机 Claude Code CLI pure/headless 模式优化用户输入，返回中英文 Prompt |
 | trigger_sync | 触发全网 Prompt 同步，返回 {accepted, synced, note} |
 | get_claude_md / update_claude_md / push_claude_md | CLAUDE.md 读取 / 保存 / 主动推送本机配置到局域网设备和 GitHub 云端 |
 | get_scratchpad / update_scratchpad / sync_scratchpad | 速记本单例读取 / 自动保存 / 局域网同步 |
+| get_cloud_sync_config / get_default_cloud_sync_config / update_cloud_sync_config / trigger_cloud_sync_cmd / test_cloud_sync | GitHub 私有仓库云端同步配置 / 恢复默认 / 手动同步 / 连通性测试 |
 | list_transfers / send_transfer / cancel_transfer | 文件传输任务管理 |
 | check_permissions / request_permission | macOS 权限检查与申请（屏幕录制 / 输入监控） |
 | check_update / download_update / get_download_status / cancel_download / install_update | 自动更新 5 命令 |
 | start_region_capture / get_region_snapshot / save_clipboard_image / cancel_region_capture | 区域截图 |
-| list_github_trending_repos / get_github_trending_config / update_github_trending_config / test_claude_cli | GitHub 周热门项目 + Claude CLI 双语解说配置 |
+| list_github_trending_repos / get_github_trending_config / get_default_github_trending_config / update_github_trending_config / test_claude_cli | GitHub 周热门项目 + Claude CLI 双语解说配置 / 恢复默认 |
 
 ### 8.3 P2P HTTP 端点（对端调用，由 `src-tauri/src/net/routes/` 注册）
 

@@ -416,6 +416,7 @@ pub fn run() {
             prompt_cmd::delete_prompt,
             prompt_cmd::list_tags,
             config_cmd::get_config,
+            config_cmd::get_default_config,
             config_cmd::update_config,
             config_cmd::get_version,
             config_cmd::choose_dir,
@@ -463,12 +464,14 @@ pub fn run() {
             ssh_target_cmd::get_os_info,
             // 云端同步（GitHub 私有仓库）：配置读写 / 手动触发 / 测试连通
             cloud_sync_cmd::get_cloud_sync_config,
+            cloud_sync_cmd::get_default_cloud_sync_config,
             cloud_sync_cmd::update_cloud_sync_config,
             cloud_sync_cmd::trigger_cloud_sync_cmd,
             cloud_sync_cmd::test_cloud_sync,
             // GitHub Trending 首页（榜单缓存 + Claude CLI 双语解说）
             github_trending_cmd::list_github_trending_repos,
             github_trending_cmd::get_github_trending_config,
+            github_trending_cmd::get_default_github_trending_config,
             github_trending_cmd::update_github_trending_config,
             github_trending_cmd::test_claude_cli,
             // Prompt 优化（复用 Claude CLI pure/headless helper，不保存历史）

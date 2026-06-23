@@ -134,6 +134,7 @@ fn build_optimize_instruction(prompt: &str) -> String {
 ///
 /// Code Logic（这个函数做什么）:
 ///     委托共享 `claude_cli::parse_structured_output`，返回 `PromptOptimizeResponseDto`。
+#[cfg(test)]
 fn parse_prompt_optimize_output(stdout: &str) -> Result<PromptOptimizeResponseDto, AppError> {
     claude_cli::parse_structured_output::<PromptOptimizeResponseDto>(stdout)
 }

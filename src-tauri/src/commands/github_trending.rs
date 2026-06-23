@@ -7,7 +7,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `list_github_trending_repos`：读当天缓存；未命中则抓 GitHub、调用 Claude CLI、写缓存。
-//!     - `get/update_github_trending_config`：设置页读写 CLI 路径、模型、缓存时长。
+//!     - `get/default/update_github_trending_config`：设置页读写/恢复 CLI 路径、模型、缓存时长。
 //!     - `test_claude_cli`：只执行 `claude --version` 验证本机 CLI 可用性。
 //!     - 私有 helper 负责 HTML 解析、SQLite cache；Claude CLI 结构化执行复用 `claude_cli`。
 
@@ -130,6 +130,15 @@ pub async fn get_github_trending_config(
 ) -> Result<GithubTrendingConfigDto, AppError> {
     let cfg = state.config.read().unwrap();
     Ok(config_to_dto(&cfg.github_trending))
+}
+
+/// 读取 GitHub Trending / Claude 解说默认配置。
+///
+/// Business Logic: 设置页 AI tab 需要一键回到应用默认 CLI 路径、模型和缓存策略。
+/// Code Logic: 不读取或写入当前配置，直接返回 GithubTrendingConfig::default() 对应 DTO。
+#[tauri::command]
+pub async fn get_default_github_trending_config() -> Result<GithubTrendingConfigDto, AppError> {
+    Ok(config_to_dto(&GithubTrendingConfig::default()))
 }
 
 /// 更新 GitHub Trending / Claude 解说配置。
@@ -591,11 +600,13 @@ async fn generate_explanations(
 /// Code Logic（这个函数做什么）:
 ///     根据配置返回 `claude --bare -p ...` 后续参数，保留模型和结构化输出约束，
 ///     但不包含 `--max-budget-usd`。
+#[cfg(test)]
 fn claude_generation_args(config: &GithubTrendingConfig, schema: &str) -> Vec<String> {
     claude_cli::build_pure_headless_args(&config.claude_model, schema)
 }
 
 /// 解析 Claude CLI 输出，兼容直接结构化 JSON 与 `--output-format json` 的 result 包装。
+#[cfg(test)]
 fn parse_ai_output(stdout: &str) -> Result<HashMap<String, AiRepoExplanation>, AppError> {
     let parsed = claude_cli::parse_structured_output::<AiOutput>(stdout)?;
     Ok(ai_output_to_map(parsed))
@@ -628,6 +639,7 @@ fn ai_output_to_map(parsed: AiOutput) -> HashMap<String, AiRepoExplanation> {
 /// Code Logic（这个函数做什么）:
 ///     优先返回 stderr；否则解析 stdout JSON 的 errors/result/subtype 字段；仍无可读内容时回退到
 ///     旧的“命令返回非零状态”兜底文案。
+#[cfg(test)]
 fn claude_failure_detail(stderr: &[u8], stdout: &[u8]) -> String {
     claude_cli::failure_detail(stderr, stdout)
 }

@@ -7,9 +7,11 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     - get_config: 读 RwLock 配置，转 ConfigDto（camelCase）。
+//!     - get_default_config: 返回环境感知默认偏好，供设置页恢复默认。
 //!     - update_config: 应用 deviceName/receiveDir/screenshotHotkey patch 后 save() 回 config.json。
 //!     - get_version: 返回 {version, buildDate}，version 取 CARGO_PKG_VERSION。
 
+use crate::config::default_preference_values;
 use crate::error::AppError;
 use crate::hotkey::{register_screenshot_hotkey, screenshot_handler};
 use crate::state::AppState;
@@ -40,6 +42,24 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<ConfigDto, AppErro
         device_name: cfg.device_name.clone(),
         receive_dir: cfg.receive_dir.clone(),
         screenshot_hotkey: cfg.screenshot_hotkey.clone(),
+        http_port: cfg.http_port,
+    })
+}
+
+/// 读取应用偏好的环境默认值。
+///
+/// Business Logic: 设置页“恢复默认”需要得到 hostname、默认接收目录和平台默认快捷键，
+///     不能在前端硬编码或用空字符串代替。
+/// Code Logic: 保留当前 device_id/http_port，只替换可编辑偏好字段为默认值后返回 ConfigDto。
+#[tauri::command]
+pub async fn get_default_config(state: State<'_, AppState>) -> Result<ConfigDto, AppError> {
+    let cfg = state.config.read().unwrap();
+    let (device_name, receive_dir, screenshot_hotkey) = default_preference_values();
+    Ok(ConfigDto {
+        device_id: cfg.device_id.clone(),
+        device_name,
+        receive_dir,
+        screenshot_hotkey,
         http_port: cfg.http_port,
     })
 }

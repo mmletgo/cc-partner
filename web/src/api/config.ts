@@ -8,6 +8,7 @@
  * Code Logic:
  *   基于 invoke 封装各命令调用，返回类型化的 Promise。
  *   仅 deviceName/receiveDir/screenshotHotkey 可写（对齐 Rust update_config 签名）。
+ *   恢复默认通过 get_default_config 读取后端环境默认值，避免前端硬编码主机名/用户目录。
  */
 
 import { invoke } from './client';
@@ -39,6 +40,9 @@ export interface CloudSyncConfigUpdate {
 export const configApi = {
   /** 获取当前应用配置 */
   get: () => invoke<AppConfig>('get_config'),
+
+  /** 获取应用偏好默认值（设备名/接收目录/截图快捷键） */
+  getDefaults: () => invoke<AppConfig>('get_default_config'),
 
   /** 更新应用配置（仅 deviceName/receiveDir/screenshotHotkey 可写） */
   update: (data: Partial<AppConfig>) => invoke<AppConfig>('update_config', data),
@@ -81,6 +85,9 @@ export const configApi = {
 
   /** 获取 GitHub 私有仓库云端同步配置 */
   getCloudSyncConfig: () => invoke<CloudSyncConfig>('get_cloud_sync_config'),
+
+  /** 获取 GitHub 私有仓库云端同步默认配置 */
+  getDefaultCloudSyncConfig: () => invoke<CloudSyncConfig>('get_default_cloud_sync_config'),
 
   /** 更新云端同步配置（全部字段可选，部分更新） */
   updateCloudSyncConfig: (payload: CloudSyncConfigUpdate) =>

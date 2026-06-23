@@ -29,9 +29,20 @@ import { usePermissions } from '@/hooks/usePermissions';
 import { mapPermissions } from '@/lib/permissionEntries';
 import {
   formatShortcutForDisplay,
-  getDefaultShortcutValue,
   resolveShortcutRecording,
 } from './shortcutRecorder';
+import {
+  buildConfigUpdate,
+  cloudSyncConfigToForm,
+  cloudSyncFormToUpdate,
+  createPendingSettingsState,
+  githubTrendingConfigToForm,
+  isSettingsStateDirty,
+  PENDING_CLOUD_SYNC_FORM,
+  PENDING_GITHUB_TRENDING_FORM,
+  settingsStateFromConfig,
+} from './settingsState';
+import type { CloudSyncForm, GithubTrendingForm, SettingsState } from './settingsState';
 import type {
   VersionInfo,
   UpdateCheckResult,
@@ -44,38 +55,6 @@ import type {
   GithubTrendingConfig,
 } from '@/lib/types';
 import styles from './Settings.module.css';
-
-/** 单个快捷键字段定义（label/helper 在渲染时按 i18n 解析，这里只存可本地化的 id） */
-interface ShortcutField {
-  id: string;
-  /** label/helper 的 i18n 子键，对应 shortcut.<key>.{label,helper} */
-  labelKey: 'screenshot';
-  value: string;
-}
-
-/** Settings 页面整体表单状态 */
-interface SettingsState {
-  deviceName: string;
-  receiveDir: string;
-  shortcuts: ShortcutField[];
-}
-
-/** 云端同步 Card 的可编辑表单值（受控输入，与已应用配置分离） */
-interface CloudSyncForm {
-  repoUrl: string;
-  branch: string;
-  enabled: boolean;
-  auto: boolean;
-  intervalSecs: number;
-}
-
-/** GitHub Trending / Claude CLI 解说 Card 的受控表单值 */
-interface GithubTrendingForm {
-  aiEnabled: boolean;
-  claudeCliPath: string;
-  claudeModel: string;
-  cacheTtlHours: number;
-}
 
 /** Settings 页内子 tab id */
 type SettingsTabId = 'general' | 'sync' | 'ai' | 'about';
@@ -93,38 +72,6 @@ const SETTINGS_TABS: SettingsTab[] = [
   { id: 'ai', labelKey: 'ai' },
   { id: 'about', labelKey: 'about' },
 ];
-
-/** 快捷键字段定义（值由运行平台决定，文案走 t） */
-const SHORTCUT_FIELDS: Pick<ShortcutField, 'id' | 'labelKey'>[] = [
-  { id: 'screenshot', labelKey: 'screenshot' },
-];
-
-/**
- * 生成默认快捷键字段
- *
- * Business Logic（为什么需要）:
- *   用户点击“恢复默认”时，设置页必须写回后端可注册的 pynput 格式，
- *   而不是仅用于 UI 展示的快捷键文本。
- *
- * Code Logic（做什么）:
- *   基于平台默认快捷键生成每个快捷键字段的新对象，避免复用常量对象导致状态污染。
- */
-function createDefaultShortcuts(): ShortcutField[] {
-  return SHORTCUT_FIELDS.map((s) => ({ ...s, value: getDefaultShortcutValue() }));
-}
-
-/**
- * 生成默认状态
- *
- * @returns 仅含可本地化 id 的默认 SettingsState
- */
-function createDefaultState(): SettingsState {
-  return {
-    deviceName: '',
-    receiveDir: '',
-    shortcuts: createDefaultShortcuts(),
-  };
-}
 
 /**
  * 计算更新检查结果的提示文本
@@ -144,53 +91,6 @@ function buildUpdateHint(
   if (updateResult.error) return updateResult.error;
   if (updateResult.hasUpdate) return t('about.newVersionFound', { version: updateResult.version });
   return t('about.upToDate');
-}
-
-/** 云端同步表单的默认值（用于初次加载前的占位） */
-const DEFAULT_CLOUD_SYNC_FORM: CloudSyncForm = {
-  repoUrl: '',
-  branch: '',
-  enabled: false,
-  auto: false,
-  intervalSecs: 300,
-};
-
-/** GitHub Trending 表单默认值（加载后会被后端配置覆盖） */
-const DEFAULT_GITHUB_TRENDING_FORM: GithubTrendingForm = {
-  aiEnabled: true,
-  claudeCliPath: 'claude',
-  claudeModel: 'sonnet',
-  cacheTtlHours: 24,
-};
-
-/**
- * 将后端返回的 CloudSyncConfig 映射为受控表单值
- *
- * @param config 后端云端同步配置（可能为 null）
- * @returns 表单初始值
- */
-function cloudSyncConfigToForm(config: CloudSyncConfig | null): CloudSyncForm {
-  if (!config) return { ...DEFAULT_CLOUD_SYNC_FORM };
-  return {
-    repoUrl: config.repoUrl ?? '',
-    branch: config.branch ?? '',
-    enabled: config.enabled,
-    auto: config.auto,
-    intervalSecs: config.intervalSecs,
-  };
-}
-
-/**
- * 将后端返回的 GithubTrendingConfig 映射为受控表单值
- */
-function githubTrendingConfigToForm(config: GithubTrendingConfig | null): GithubTrendingForm {
-  if (!config) return { ...DEFAULT_GITHUB_TRENDING_FORM };
-  return {
-    aiEnabled: config.aiEnabled,
-    claudeCliPath: config.claudeCliPath || 'claude',
-    claudeModel: config.claudeModel || 'sonnet',
-    cacheTtlHours: config.cacheTtlHours,
-  };
 }
 
 /**
@@ -213,9 +113,10 @@ function formatIsoTime(iso: string): string {
  */
 export function Settings() {
   const { t } = useTranslation(['settings', 'common']);
-  const [state, setState] = useState<SettingsState>(createDefaultState);
+  const [state, setState] = useState<SettingsState>(createPendingSettingsState);
   // 最近一次"已保存/已加载"的配置快照，用于检测是否处于未保存状态
-  const [initialState, setInitialState] = useState<SettingsState>(createDefaultState);
+  const [initialState, setInitialState] = useState<SettingsState>(createPendingSettingsState);
+  const [defaultState, setDefaultState] = useState<SettingsState>(createPendingSettingsState);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -230,7 +131,10 @@ export function Settings() {
   const [recordingShortcutId, setRecordingShortcutId] = useState<string | null>(null);
 
   // 云端同步（GitHub 私有仓库）独立操作块：表单值 / 已应用配置 / 上次同步结果 / 测试结果 / 各动作 loading
-  const [cloudSyncForm, setCloudSyncForm] = useState<CloudSyncForm>({ ...DEFAULT_CLOUD_SYNC_FORM });
+  const [cloudSyncForm, setCloudSyncForm] = useState<CloudSyncForm>({ ...PENDING_CLOUD_SYNC_FORM });
+  const [defaultCloudSyncForm, setDefaultCloudSyncForm] = useState<CloudSyncForm>({
+    ...PENDING_CLOUD_SYNC_FORM,
+  });
   const [cloudSync, setCloudSync] = useState<CloudSyncConfig | null>(null);
   const [syncResult, setSyncResult] = useState<CloudSyncResult | null>(null);
   const [testResult, setTestResult] = useState<TestCloudSyncResult | null>(null);
@@ -241,7 +145,10 @@ export function Settings() {
 
   // GitHub Trending / Claude CLI 解说配置：独立于底部统一 Save，即时应用。
   const [githubTrendingForm, setGithubTrendingForm] = useState<GithubTrendingForm>({
-    ...DEFAULT_GITHUB_TRENDING_FORM,
+    ...PENDING_GITHUB_TRENDING_FORM,
+  });
+  const [defaultGithubTrendingForm, setDefaultGithubTrendingForm] = useState<GithubTrendingForm>({
+    ...PENDING_GITHUB_TRENDING_FORM,
   });
   const [githubTrendingConfig, setGithubTrendingConfig] = useState<GithubTrendingConfig | null>(null);
   const [claudeCliTest, setClaudeCliTest] = useState<ClaudeCliTestResult | null>(null);
@@ -299,7 +206,7 @@ export function Settings() {
 
   // 计算是否处于"未保存"状态：当前 state 与最近一次已保存/已加载的快照是否一致
   const isDirty = useMemo(() => {
-    return JSON.stringify(state) !== JSON.stringify(initialState);
+    return isSettingsStateDirty(state, initialState);
   }, [state, initialState]);
 
   // 渲染更新检查结果的提示文本
@@ -412,11 +319,16 @@ export function Settings() {
   );
 
   /**
-   * 恢复默认：重置 state 到默认值
+   * 恢复默认：重置 state 到后端提供的环境默认值
+   *
+   * Business Logic（为什么需要）:
+   *   用户保存自定义快捷键后仍应能随时恢复系统默认值，同时不能把基础设置重置为空。
+   *
+   * Code Logic（做什么）:
+   *   使用加载阶段从后端取得的默认配置快照更新表单；是否需要保存仍由 isDirty 重新计算。
    */
   const handleResetDefaults = () => {
-    const next = createDefaultState();
-    setState(next);
+    setState(defaultState);
   };
 
   /**
@@ -442,13 +354,11 @@ export function Settings() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await configApi.update({
-        deviceName: state.deviceName,
-        receiveDir: state.receiveDir,
-        screenshotHotkey: state.shortcuts.find((s) => s.id === 'screenshot')?.value,
-      });
+      const updatedConfig = await configApi.update(buildConfigUpdate(state, initialState));
+      const savedState = settingsStateFromConfig(updatedConfig);
+      setState(savedState);
       // 保存成功后，把已保存快照更新为当前 state，使 isDirty 归零
-      setInitialState(state);
+      setInitialState(savedState);
       setSavedAt(new Date());
     } catch (err) {
       // 保存失败时在 UI 提示错误
@@ -484,34 +394,40 @@ export function Settings() {
 
     async function loadConfig() {
       try {
-        const [config, version, cloudSyncConfig, githubTrendingLoaded] = await Promise.all([
+        const [
+          config,
+          defaultConfig,
+          version,
+          cloudSyncConfig,
+          defaultCloudSyncConfig,
+          githubTrendingLoaded,
+          defaultGithubTrendingLoaded,
+        ] = await Promise.all([
           configApi.get(),
+          configApi.getDefaults(),
           configApi.version(),
           configApi.getCloudSyncConfig(),
+          configApi.getDefaultCloudSyncConfig(),
           githubTrendingApi.getConfig(),
+          githubTrendingApi.getDefaultConfig(),
         ]);
         if (cancelled) return;
 
-        const loaded: SettingsState = {
-          deviceName: config.deviceName,
-          receiveDir: config.receiveDir,
-          shortcuts: createDefaultShortcuts().map((s) => {
-            if (s.id === 'screenshot') {
-              return { ...s, value: config.screenshotHotkey || s.value };
-            }
-            return { ...s };
-          }),
-        };
+        const loaded = settingsStateFromConfig(config);
+        const defaults = settingsStateFromConfig(defaultConfig);
         setState(loaded);
         // 把已加载配置作为"未保存"比较的基准快照
         setInitialState(loaded);
+        setDefaultState(defaults);
         setVersionInfo(version);
         // 云端同步：初始化已应用配置与受控表单值
         setCloudSync(cloudSyncConfig);
         setCloudSyncForm(cloudSyncConfigToForm(cloudSyncConfig));
+        setDefaultCloudSyncForm(cloudSyncConfigToForm(defaultCloudSyncConfig));
         // GitHub Trending：初始化已应用配置与受控表单值
         setGithubTrendingConfig(githubTrendingLoaded);
         setGithubTrendingForm(githubTrendingConfigToForm(githubTrendingLoaded));
+        setDefaultGithubTrendingForm(githubTrendingConfigToForm(defaultGithubTrendingLoaded));
       } catch (err) {
         if (cancelled) return;
         setLoadError(err instanceof Error ? err.message : t('error.loadConfigFailed'));
@@ -615,6 +531,20 @@ export function Settings() {
   }, []);
 
   /**
+   * 云端同步「恢复默认」：把表单重置为后端默认配置
+   *
+   * Business Logic（为什么需要）:
+   *   同步 tab 也需要一键恢复默认，且默认值必须与 Rust 配置默认值保持一致。
+   *
+   * Code Logic（做什么）:
+   *   使用加载时保存的默认表单快照覆盖当前表单；是否落盘仍由用户点击“应用配置”决定。
+   */
+  const handleResetCloudSyncDefaults = useCallback(() => {
+    setCloudSyncForm(defaultCloudSyncForm);
+    setCloudSyncError(null);
+  }, [defaultCloudSyncForm]);
+
+  /**
    * 云端同步「测试连接」：探测 git 可用性与仓库默认分支
    */
   const handleTestCloudSync = async () => {
@@ -643,13 +573,7 @@ export function Settings() {
     setApplying(true);
     setCloudSyncError(null);
     try {
-      const updated = await configApi.updateCloudSyncConfig({
-        repoUrl: cloudSyncForm.repoUrl.trim() || null,
-        enabled: cloudSyncForm.enabled,
-        auto: cloudSyncForm.auto,
-        intervalSecs: cloudSyncForm.intervalSecs,
-        branch: cloudSyncForm.branch.trim() || null,
-      });
+      const updated = await configApi.updateCloudSyncConfig(cloudSyncFormToUpdate(cloudSyncForm));
       setCloudSync(updated);
       setCloudSyncForm(cloudSyncConfigToForm(updated));
     } catch (err) {
@@ -687,6 +611,20 @@ export function Settings() {
   const patchGithubTrendingForm = useCallback((partial: Partial<GithubTrendingForm>) => {
     setGithubTrendingForm((prev) => ({ ...prev, ...partial }));
   }, []);
+
+  /**
+   * GitHub Trending / Claude CLI「恢复默认」：把 AI 表单重置为后端默认配置
+   *
+   * Business Logic（为什么需要）:
+   *   AI tab 用户可能改过 CLI 路径、模型或缓存时间，需要随时回到应用内置默认。
+   *
+   * Code Logic（做什么）:
+   *   使用加载时保存的默认表单快照覆盖当前表单；持久化仍由“应用配置”按钮完成。
+   */
+  const handleResetGithubTrendingDefaults = useCallback(() => {
+    setGithubTrendingForm(defaultGithubTrendingForm);
+    setGithubTrendingError(null);
+  }, [defaultGithubTrendingForm]);
 
   /**
    * GitHub Trending「应用配置」：保存 Claude CLI 路径、模型与缓存设置
@@ -924,7 +862,7 @@ export function Settings() {
             ) : null}
           </div>
           <div className={styles.footerActions}>
-            <Button variant="ghost" onClick={handleResetDefaults} disabled={!isDirty}>
+            <Button variant="ghost" onClick={handleResetDefaults}>
               {t('settings:action.resetDefault')}
             </Button>
             <Button variant="primary" onClick={handleSave} disabled={!isDirty || saving}>
@@ -1085,6 +1023,13 @@ export function Settings() {
                 disabled={testing}
               >
                 {testing ? t('settings:cloudSync.testing') : t('settings:cloudSync.testConnection')}
+              </Button>
+              <Button
+                variant="ghost"
+                size="md"
+                onClick={handleResetCloudSyncDefaults}
+              >
+                {t('settings:action.resetDefault')}
               </Button>
               <Button
                 variant="secondary"
@@ -1274,6 +1219,13 @@ export function Settings() {
                 {testingClaudeCli
                   ? t('settings:githubTrending.testing')
                   : t('settings:githubTrending.testCli')}
+              </Button>
+              <Button
+                variant="ghost"
+                size="md"
+                onClick={handleResetGithubTrendingDefaults}
+              >
+                {t('settings:action.resetDefault')}
               </Button>
               <Button
                 variant="primary"
