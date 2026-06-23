@@ -188,7 +188,7 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
   - 旧的 Python/PyInstaller `release.yml` 已于 M10 删除，现在仓库为纯 Tauri 结构，推 `v*` tag 只跑这一套 Tauri 构建。
   - 用 `tauri-apps/tauri-action@v0` 官方 action，矩阵 `macos-latest`(`--target aarch64-apple-darwin`) + `windows-latest` + `ubuntu-22.04`，`fail-fast: false`。
   - 步骤：checkout → setup-node 20 → Rust stable（macOS 装 aarch64 target）→ Linux 装 webkit2gtk-4.1-dev 等依赖 → `cd web && npm ci` → tauri-action 构建+签名+上传 Release。
-  - tauri-action 自动生成 `latest.json`（含各平台签名后下载 URL + signature，供 M8 updater endpoint），并 merge 多平台矩阵结果。
+  - **latest.json 当前缺失（tauri-action 上游 bug，v0.6.0 起发现）**：`@v0`(=v0.6.2) 与 dev commit `61337b43` 的 artifacts 收集均不收集 updater `.sig`（与 tauri v2 updater bundle 兼容缺陷），导致 `upload-version-json` 报 "Signature not found for the updater JSON" 跳过 latest.json 生成。release 仅含三平台安装包（无 latest.json/.sig），M8 updater 端到端校验暂不可用（手动下载安装不受影响）。待 tauri-action 上游修复 artifacts 收集后，`@v0` 浮动 tag 自动跟进即可恢复，无需改本仓库代码。注：`assetNamePattern`（旧 input 名 + 不存在的 `[filename]` 占位符）曾导致同平台资产撞名 already_exists，已移除，改用 tauri-action 默认命名（普通产物保留原文件名，macOS updater tarball 自动加 `_版本_架构`，全局唯一）。
   - `updaterJsonPreferNsis: true` —— Windows updater 用 nsis 安装包（非 msi）作下载源。
 - **签名 secret（用户待配）**：tauri-action 引用 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}`。用户需把 `~/.tauri/cc-partner.updater.key` 的**内容**配到 repo 的同名 secret（Settings → Secrets and variables → Actions）。**M8 用空密码，故无需配 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`**。未配 secret 时 CI 构建不签名、latest.json 无 signature，updater 校验会失败。
 - **发版流程**：1) `node scripts/bump-version.mjs <新版本号>`（同步 tauri.conf.json + Cargo.toml + web/package.json）；2) 提交；3) `git tag v<版本号> && git push origin v<版本号>` 触发 CI。
