@@ -12,6 +12,7 @@
 //!     所有命令在 invoke_handler 注册。保留 M0 的 ping。
 
 mod cc;
+mod claude_code_assets;
 mod cloud_sync;
 mod commands;
 mod config;
@@ -34,8 +35,9 @@ use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::commands::{
-    cc_history as cc_history_cmd, claude_md as claude_md_cmd, cloud_sync as cloud_sync_cmd,
-    config as config_cmd, devices as device_cmd, health as health_cmd,
+    cc_history as cc_history_cmd, claude_code_assets as claude_code_assets_cmd,
+    claude_md as claude_md_cmd, cloud_sync as cloud_sync_cmd, config as config_cmd,
+    devices as device_cmd, health as health_cmd,
     permissions as permissions_cmd, prompts as prompt_cmd, screenshot as screenshot_cmd,
     ssh_target as ssh_target_cmd, sync as sync_cmd, transfer as transfer_cmd,
     updater as updater_cmd,
@@ -407,6 +409,13 @@ pub fn run() {
             cc_history_cmd::get_cc_prompt,
             cc_history_cmd::refresh_cc_history,
             cc_history_cmd::delete_cc_prompt,
+            // Claude Code assets（本机管理 + 局域网选择性拉取）
+            claude_code_assets_cmd::list_claude_code_assets,
+            claude_code_assets_cmd::set_claude_code_asset_enabled,
+            claude_code_assets_cmd::install_claude_code_asset,
+            claude_code_assets_cmd::uninstall_claude_code_asset,
+            claude_code_assets_cmd::list_remote_claude_code_assets,
+            claude_code_assets_cmd::pull_claude_code_assets,
             // SSH 目标（4 命令：列表 / 新增更新 / 删除 / 本机 OS 检测）
             ssh_target_cmd::list_ssh_targets,
             ssh_target_cmd::upsert_ssh_target,

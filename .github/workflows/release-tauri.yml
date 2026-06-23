@@ -103,7 +103,7 @@ jobs:
           prerelease: false
           # Windows 用 nsis 安装包（非 msi）作为 updater 的下载源
           updaterJsonPreferNsis: true
-          # 上传到 Release 的 asset 名加 平台_架构 前缀（保留原文件名，避免双语 msi/安装包同名冲突）
-          assetNamePattern: '{{platform}}_{{arch}}_{{filename}}'
+          # 上传到 Release 的 asset 名加 平台_架构 前缀（[filename] 保留原文件名，避免双语 msi/安装包同名冲突）
+          assetNamePattern: '[platform]_[arch]_[filename]'
           # 透传各平台的 build target 参数
           args: ${{ matrix.args }}

@@ -11,7 +11,9 @@
 //!       AppState.actual_http_port（AtomicU16），tokio::spawn(axum::serve)。
 //!     - body limit 暂设 2MB（M5 chunk 会调整）。
 
-use crate::net::routes::{cc_history, claude_md_sync, health, ssh_target_sync, sync, transfer};
+use crate::net::routes::{
+    cc_history, claude_code_assets, claude_md_sync, health, ssh_target_sync, sync, transfer,
+};
 use crate::state::AppState;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
@@ -65,6 +67,15 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/ssh-target/sync/push",
             post(ssh_target_sync::ssh_target_sync_push),
+        )
+        // Claude Code assets 选择性拉取：inventory + 按 selectors 生成 zip bundle
+        .route(
+            "/api/claude-code/assets/inventory",
+            get(claude_code_assets::assets_inventory),
+        )
+        .route(
+            "/api/claude-code/assets/bundle",
+            post(claude_code_assets::assets_bundle),
         )
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
         .with_state(state.clone());

@@ -8,6 +8,7 @@
 //!     字段命名与对端约定一致（sync/cc-history 用 snake_case 互通，transfer 字段对照 Python）。
 
 pub mod cc_history;
+pub mod claude_code_assets;
 pub mod claude_md_sync;
 pub mod health;
 pub mod ssh_target_sync;
