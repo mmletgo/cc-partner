@@ -532,9 +532,6 @@ export function Scratchpad() {
           <h1 className={styles.title}>{t('scratchpad:title')}</h1>
           <p className={styles.lead}>{t('scratchpad:desc')}</p>
         </div>
-        <Button variant="primary" size="sm" icon={<PlusIcon />} onClick={handleCreatePage} disabled={loading}>
-          {t('scratchpad:newPage')}
-        </Button>
       </header>
 
       <div className={styles.statusRow} aria-live="polite">
@@ -573,6 +570,16 @@ export function Scratchpad() {
                 </button>
               );
             })}
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<PlusIcon />}
+              onClick={handleCreatePage}
+              disabled={loading}
+              className={styles.createPageButton}
+            >
+              {t('scratchpad:newPage')}
+            </Button>
           </div>
         </aside>
 
