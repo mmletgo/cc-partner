@@ -24,6 +24,11 @@
   --warn: #eab308;
   --danger: #b53333;
   --danger-soft: color-mix(in oklab, var(--danger) 12%, transparent);
+  --terminal-bg: #141210;
+  --terminal-chrome: #211f1c;
+  --terminal-fg: #f5f1e8;
+  --terminal-muted: #9b968b;
+  --terminal-border: #302d29;
 
   /* ── 字体 ── */
   --font-display: "Anthropic Serif", Georgia, "Times New Roman", serif;
@@ -128,6 +133,11 @@
   --warn: #facc15;
   --danger: #ef6b6b;
   --danger-soft: color-mix(in oklab, var(--danger) 18%, transparent);
+  --terminal-bg: #141210;
+  --terminal-chrome: #211f1c;
+  --terminal-fg: #f5f1e8;
+  --terminal-muted: #9b968b;
+  --terminal-border: #302d29;
 
   --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.2);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2), 0 2px 8px rgba(0, 0, 0, 0.3);

@@ -18,6 +18,7 @@ import enCommon from './locales/en/common.json';
 import enNav from './locales/en/nav.json';
 import enHome from './locales/en/home.json';
 import enPrompts from './locales/en/prompts.json';
+import enWorkbench from './locales/en/workbench.json';
 import enTransfer from './locales/en/transfer.json';
 import enDevices from './locales/en/devices.json';
 import enScratchpad from './locales/en/scratchpad.json';
@@ -34,6 +35,7 @@ import zhCommon from './locales/zh/common.json';
 import zhNav from './locales/zh/nav.json';
 import zhHome from './locales/zh/home.json';
 import zhPrompts from './locales/zh/prompts.json';
+import zhWorkbench from './locales/zh/workbench.json';
 import zhTransfer from './locales/zh/transfer.json';
 import zhDevices from './locales/zh/devices.json';
 import zhScratchpad from './locales/zh/scratchpad.json';
@@ -74,6 +76,7 @@ export const resources = {
     nav: enNav,
     home: enHome,
     prompts: enPrompts,
+    workbench: enWorkbench,
     transfer: enTransfer,
     devices: enDevices,
     scratchpad: enScratchpad,
@@ -91,6 +94,7 @@ export const resources = {
     nav: zhNav,
     home: zhHome,
     prompts: zhPrompts,
+    workbench: zhWorkbench,
     transfer: zhTransfer,
     devices: zhDevices,
     scratchpad: zhScratchpad,

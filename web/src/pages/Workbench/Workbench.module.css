@@ -1,0 +1,585 @@
+/* 工作台页面样式：主工作区 + 右侧检查器，所有颜色/间距/圆角来自 design tokens。 */
+
+.page {
+  width: 100%;
+  height: 100%;
+  min-width: 720px;
+  min-height: 100%;
+  display: grid;
+  grid-template-columns: minmax(520px, 1fr) minmax(300px, 360px);
+  background: var(--bg);
+  color: var(--fg);
+  overflow: hidden;
+}
+
+.centerPane,
+.inspectorPane {
+  min-width: 0;
+  min-height: 0;
+}
+
+.inspectorPane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  overflow: auto;
+  border-left: 1px solid var(--border-soft);
+  background: color-mix(in oklab, var(--surface) 78%, var(--bg));
+}
+
+.centerPane {
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.workspaceHeader,
+.cardTitleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.workspaceTitle,
+.cardTitle {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-normal);
+}
+
+.workspaceTitle {
+  font-size: var(--text-3xl);
+}
+
+.cardTitle {
+  font-size: var(--text-md);
+}
+
+.workspacePath,
+.muted,
+.pathInfoPath {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.statusCard,
+.filesCard {
+  flex: 0 0 auto;
+}
+
+.fileActions,
+.pathInfo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.fileActionButtons,
+.renameRow,
+.statusButtonRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.layoutSwitch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: var(--space-1);
+  background: var(--bg);
+}
+
+.layoutButton {
+  width: 26px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.layoutButton:hover {
+  color: var(--fg);
+  background: var(--surface);
+}
+
+.layoutButton[data-active='true'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.treeIcon,
+.workspaceTitleGroup {
+  display: inline-flex;
+  align-items: center;
+}
+
+.sessionName,
+.pathInfoName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.treeEmpty,
+.terminalPlaceholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.errorBox {
+  border: 1px solid var(--danger-soft);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.noticeBox {
+  border: 1px solid color-mix(in oklab, var(--success) 30%, var(--border-soft));
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: color-mix(in oklab, var(--success) 12%, var(--surface));
+  color: var(--success);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.workspaceHeader {
+  min-height: 104px;
+  padding: var(--space-7) var(--space-6) var(--space-3);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg);
+}
+
+.workspaceTitleGroup {
+  min-width: 0;
+  gap: var(--space-3);
+}
+
+.workspaceTitleGroup > div {
+  min-width: 0;
+}
+
+.workspaceTitleRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.sessionBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border-radius: var(--radius-full);
+  padding: 0 var(--space-3);
+  background: color-mix(in oklab, var(--accent) 12%, var(--surface));
+  color: var(--accent);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.workspacePath {
+  margin: var(--space-2) 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contextBar {
+  min-height: 60px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-6);
+  border-bottom: 1px solid var(--border-soft);
+  background: color-mix(in oklab, var(--surface) 35%, var(--bg));
+  color: var(--fg-2);
+  font-size: var(--text-sm);
+}
+
+.contextLabel,
+.contextSlash {
+  color: var(--meta);
+}
+
+.contextPath {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionTabs {
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  overflow-x: auto;
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.sessionTab {
+  height: 36px;
+  max-width: 220px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.sessionTab:hover {
+  border-color: var(--accent-soft);
+}
+
+.sessionTab[data-active='true'] {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 8%, var(--surface));
+}
+
+.newSessionButton {
+  flex: 0 0 auto;
+}
+
+.sessionTabs .layoutSwitch {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.sessionDot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-full);
+  background: var(--meta);
+}
+
+.sessionDot[data-status='running'] {
+  background: var(--success);
+}
+
+.sessionDot[data-status='disconnected'] {
+  background: var(--danger);
+}
+
+.terminalPanel {
+  min-height: 0;
+  display: grid;
+  gap: 0;
+  margin: var(--space-4) var(--space-6) var(--space-6);
+  border: 1px solid var(--terminal-border);
+  border-radius: var(--radius-md);
+  background: var(--terminal-bg);
+  overflow: hidden;
+}
+
+.terminalPanel[data-layout='single'] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.terminalPanel[data-layout='single'] .terminalHost {
+  min-height: 320px;
+}
+
+.terminalPanel[data-layout='double'] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.terminalPanel[data-layout='double'] .terminalHost {
+  min-height: 220px;
+}
+
+.terminalPanel[data-layout='quad'] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+
+.terminalPaneFrame {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border: 1px solid transparent;
+  border-radius: 0;
+  overflow: hidden;
+  background: var(--terminal-bg);
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.terminalPaneFrame[data-active='true'] {
+  border-color: color-mix(in oklab, var(--accent) 40%, var(--terminal-border));
+}
+
+.terminalPaneHeader {
+  min-width: 0;
+  height: 36px;
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--terminal-border);
+  background: var(--terminal-chrome);
+  color: var(--terminal-fg);
+}
+
+.terminalPaneStatus {
+  color: var(--terminal-muted);
+  font-size: var(--text-xs);
+}
+
+.terminalHost {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: var(--space-3);
+  box-sizing: border-box;
+  background: var(--terminal-bg);
+}
+
+.terminalHost :global(.xterm) {
+  height: 100%;
+}
+
+.terminalPlaceholder {
+  position: absolute;
+  inset: var(--space-5);
+  border: 1px dashed var(--terminal-border);
+  border-radius: var(--radius-md);
+  color: var(--terminal-muted);
+}
+
+.statusGrid,
+.pathInfoGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0;
+}
+
+.statusGrid div,
+.pathInfoGrid div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: baseline;
+}
+
+.statusGrid dt,
+.pathInfoGrid dt {
+  color: var(--meta);
+  font-size: var(--text-xs);
+}
+
+.statusGrid dd,
+.pathInfoGrid dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusActions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-soft);
+}
+
+.filesCard {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.treePanel {
+  min-height: 220px;
+  max-height: 42vh;
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.treeList {
+  display: flex;
+  flex-direction: column;
+}
+
+.treeBranch {
+  min-width: 0;
+}
+
+.treeRow {
+  width: 100%;
+  height: 30px;
+  display: grid;
+  grid-template-columns: 16px 18px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: var(--space-1);
+  border: 0;
+  padding: 0 var(--space-2) 0 var(--space-2);
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+  text-align: left;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.treeRow:hover {
+  background: color-mix(in oklab, var(--accent) 6%, transparent);
+}
+
+.treeRow[data-selected='true'] {
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.treeChevron {
+  display: inline-flex;
+  align-items: center;
+  color: var(--meta);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.treeChevron[data-expanded='true'] {
+  transform: rotate(90deg);
+}
+
+.treeName {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.treeLoading {
+  color: var(--meta);
+}
+
+.pathInfo {
+  border-top: 1px solid var(--border-soft);
+  padding-top: var(--space-3);
+}
+
+.pathInfoHeader {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pathInfoPath {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.renameRow {
+  align-items: stretch;
+}
+
+.renameRow > :first-child {
+  flex: 1 1 140px;
+}
+
+@media (max-width: 1180px) {
+  .page {
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+    overflow: auto;
+  }
+
+  .inspectorPane {
+    min-height: 420px;
+    border-left: 0;
+    border-top: 1px solid var(--border-soft);
+  }
+
+  .centerPane {
+    min-height: calc(100vh + var(--space-24));
+  }
+}
+
+@media (max-width: 820px) {
+  .page {
+    height: auto;
+    min-width: 0;
+    min-height: 100%;
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .inspectorPane {
+    border: 0;
+  }
+
+  .workspaceHeader {
+    padding: var(--space-6) var(--space-5) var(--space-3);
+  }
+
+  .contextBar,
+  .sessionTabs {
+    padding-right: var(--space-5);
+    padding-left: var(--space-5);
+  }
+
+  .terminalPanel {
+    margin-right: var(--space-5);
+    margin-left: var(--space-5);
+  }
+
+  .centerPane {
+    min-height: calc(100vh + var(--space-24));
+  }
+}

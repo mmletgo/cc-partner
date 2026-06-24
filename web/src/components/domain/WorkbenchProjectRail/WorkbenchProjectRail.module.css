@@ -1,0 +1,183 @@
+/* WorkbenchProjectRail - 侧栏设置项下方的项目文件夹入口。 */
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-soft);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.title {
+  color: var(--meta);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.addForm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: var(--space-2);
+  background: color-mix(in oklab, var(--surface) 70%, var(--bg));
+}
+
+.addActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.projectList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+}
+
+.projectItem {
+  position: relative;
+  width: 100%;
+  min-height: 82px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--fg);
+  overflow: hidden;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.projectItem:hover {
+  border-color: var(--accent-soft);
+  box-shadow: var(--shadow-xs);
+}
+
+.projectItem[data-active='true'] {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 7%, var(--surface));
+}
+
+.projectSelectButton {
+  width: 100%;
+  min-height: 80px;
+  display: flex;
+  align-items: stretch;
+  border: 0;
+  padding: var(--space-3);
+  padding-right: var(--space-6);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.projectText {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.projectName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projectPath {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projectMeta {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--fg-2);
+  font-size: var(--text-xs);
+}
+
+.projectStatusDot {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--warn);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--warn) 14%, transparent);
+}
+
+.projectStatusDot[data-active='true'] {
+  background: var(--success);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--success) 14%, transparent);
+}
+
+.projectRemoveButton {
+  position: absolute;
+  right: var(--space-1);
+  bottom: var(--space-1);
+  opacity: 0;
+}
+
+.projectItem:hover .projectRemoveButton,
+.projectRemoveButton:focus-visible {
+  opacity: 1;
+}
+
+.emptyProject {
+  min-height: 112px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: 1px dashed var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--space-4);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.errorBox {
+  border: 1px solid var(--danger-soft);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}

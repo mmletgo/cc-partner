@@ -6,7 +6,7 @@
  *   避免页面层关心具体子路径。
  *
  * Code Logic（这个入口做什么）:
- *   统一 re-export 4 个业务组件及其类型。
+ *   统一 re-export 业务组件及其类型。
  */
 
 export { PromptCard } from './PromptCard';
@@ -42,3 +42,5 @@ export type { ClaudeAssetRowProps } from './ClaudeAssetRow';
 
 export { RemoteAssetPicker, remoteAssetKey } from './RemoteAssetPicker';
 export type { RemoteAssetPickerProps } from './RemoteAssetPicker';
+
+export { WorkbenchProjectRail } from './WorkbenchProjectRail';

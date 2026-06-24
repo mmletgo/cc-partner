@@ -8,6 +8,7 @@ import { Home } from './pages/Home';
 import { Transfer } from './pages/Transfer';
 import { Prompts } from './pages/Prompts';
 import { CcHistory } from './pages/CcHistory';
+import { Workbench } from './pages/Workbench';
 import { Scratchpad } from './pages/Scratchpad';
 import { PromptOptimizer } from './pages/PromptOptimizer';
 import { ClaudeMd } from './pages/ClaudeMd';
@@ -21,6 +22,7 @@ import { Overlay } from './pages/Screenshot/Overlay';
 import HealthOverlay from './pages/HealthOverlay';
 import { configApi } from './api/config';
 import { PERMISSION_ONBOARDED_KEY } from './hooks/usePermissions';
+import { WorkbenchProjectsProvider } from './hooks/useWorkbenchProjects';
 import { checkNotificationGranted } from './lib/notification';
 
 const isDev = import.meta.env.DEV;
@@ -174,11 +176,18 @@ export default function App() {
         <Route path="/health-overlay" element={<HealthOverlay />} />
         <Route path="/welcome" element={<Welcome />} />
         <Route element={<OnboardingGuard />}>
-          <Route element={<AppShell />}>
+          <Route
+            element={
+              <WorkbenchProjectsProvider>
+                <AppShell />
+              </WorkbenchProjectsProvider>
+            }
+          >
             <Route path="/" element={<Home />} />
             <Route path="/transfer" element={<Transfer />} />
             <Route path="/prompts" element={<Prompts />} />
             <Route path="/cc-history" element={<CcHistory />} />
+            <Route path="/workbench" element={<Workbench />} />
             <Route path="/scratchpad" element={<Scratchpad />} />
             <Route path="/prompt-optimizer" element={<PromptOptimizer />} />
             <Route path="/claude-md" element={<ClaudeMd />} />

@@ -63,3 +63,5 @@ tauri-plugin-opener = "2"
 # Claude Code Assets: portable LAN bundles + safe directory walking
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 walkdir = "2"
+# Workbench: cross-platform PTY for interactive Claude Code sessions
+portable-pty = "0.9.0"

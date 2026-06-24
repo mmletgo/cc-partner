@@ -9,7 +9,7 @@
  *
  * Code Logic（这个组件做什么）:
  *   - 全屏 flex 布局：左侧 Sidebar（240px）+ 右侧 main 区域
- *   - Sidebar 内包含 Logo、导航项、footer（版本号 + ThemeToggle）
+ *   - Sidebar 内包含 Logo、导航项、项目文件夹入口、footer（版本号 + ThemeToggle）
  *   - 右侧 main 区域是 <Outlet /> 出口，由 React Router 注入子页面，
  *     main 自带 overflow: auto 实现独立滚动
  *
@@ -35,7 +35,7 @@ import { Sidebar } from '../Sidebar';
 import { NavItem } from '../NavItem';
 import { ThemeToggle } from '../ThemeToggle';
 import { LanguageSwitcher } from '../LanguageSwitcher';
-import { PermissionStatusBadge } from '@/components/domain';
+import { PermissionStatusBadge, WorkbenchProjectRail } from '@/components/domain';
 // 应用内健康 toast 已停用（改用系统通知 HealthReminderListener + 全屏遮罩 HealthOverlay），
 // 组件代码保留以便恢复。先测试系统级提醒是否够用。
 // import ReminderToast from '@/pages/Health/ReminderToast';
@@ -87,6 +87,7 @@ export function AppShell({ children }: AppShellProps) {
           <NavItem to="/health" label={t('nav:health')} icon={<HealthIcon />} />
           <NavItem to="/settings" label={t('nav:settings')} icon={<SettingsIcon />} />
         </nav>
+        <WorkbenchProjectRail />
         <PermissionStatusBadge />
       </Sidebar>
       <main className={styles.main}>{children ?? <Outlet />}</main>

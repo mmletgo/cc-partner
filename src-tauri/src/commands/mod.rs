@@ -23,3 +23,4 @@ pub mod ssh_target;
 pub mod sync;
 pub mod transfer;
 pub mod updater;
+pub mod workbench;

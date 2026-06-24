@@ -29,6 +29,7 @@ mod storage;
 mod sync;
 mod transfer;
 mod tray;
+mod workbench;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
@@ -42,12 +43,13 @@ use crate::commands::{
     permissions as permissions_cmd, prompt_optimizer as prompt_optimizer_cmd,
     prompts as prompt_cmd, scratchpad as scratchpad_cmd, screenshot as screenshot_cmd,
     ssh_target as ssh_target_cmd, sync as sync_cmd, transfer as transfer_cmd,
-    updater as updater_cmd,
+    updater as updater_cmd, workbench as workbench_cmd,
 };
 use crate::net::{discovery, http_server, peer_client::PeerClient};
 use crate::state::AppState;
 use crate::storage::{
     ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, SshTargetRepo, TransferRepo,
+    WorkbenchProjectRepo,
 };
 use crate::transfer::registry::TransferRegistry;
 use tauri::Manager;
@@ -180,6 +182,25 @@ const GITHUB_TRENDING_CACHE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS github_tr
     ai_status TEXT NOT NULL,
     ai_error TEXT
 )";
+
+/// 工作台本机项目表（最近项目列表持久化）。
+///
+/// Business Logic（为什么需要这个常量）:
+///     用户添加到工作台的本机项目需要在应用重启后保留，并按最近打开时间排序。
+///
+/// Code Logic（这个常量做什么）:
+///     定义 workbench_projects 表结构；项目内容仍在磁盘目录中，本表只保存项目元数据。
+const WORKBENCH_PROJECT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    last_opened_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)";
 /// 初始化数据库连接池：开启 WAL，手动建表，返回 SqlitePool。
 ///
 /// Business Logic: 单连接语义与 Python aiosqlite 一致（max_connections(1)）。
@@ -221,6 +242,8 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, error::AppError> {
     sqlx::query(GITHUB_TRENDING_CACHE_SCHEMA)
         .execute(&pool)
         .await?;
+    // 工作台最近项目列表（本机 MVP：只保存项目元数据，不涉及终端会话持久化）
+    sqlx::query(WORKBENCH_PROJECT_SCHEMA).execute(&pool).await?;
     Ok(pool)
 }
 
@@ -275,6 +298,9 @@ pub fn run() {
                 let claude_md_repo = Arc::new(ClaudeMdRepo::new(pool.clone()));
                 let ssh_target_repo = Arc::new(SshTargetRepo::new(pool.clone()));
                 let scratchpad_repo = Arc::new(ScratchpadRepo::new(pool.clone()));
+                let workbench_project_repo = Arc::new(WorkbenchProjectRepo::new(pool.clone()));
+                let workbench_sessions =
+                    Arc::new(crate::workbench::sessions::WorkbenchSessionRegistry::new());
                 // 健康提醒：仓库（共享 pool）+ 运行时（状态机/贪睡/暂停）+ daemon 取消令牌占位
                 let health_repo =
                     Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone()));
@@ -306,6 +332,8 @@ pub fn run() {
                     update_cancel_token: Arc::new(Mutex::new(None)),
                     // Claude Code 历史：仓库 + 采集器取消令牌（start 在 manage 之后调用）
                     cc_history_repo,
+                    workbench_project_repo,
+                    workbench_sessions,
                     cc_collector_cancel: Arc::new(Mutex::new(None)),
                     // 云端同步：后台 scheduler 取消令牌（start 在 manage 之后调用）
                     cloud_sync_cancel: Arc::new(Mutex::new(None)),
@@ -497,6 +525,25 @@ pub fn run() {
             health_cmd::skip_water_reminder,
             health_cmd::snooze_water_reminder,
             health_cmd::close_health_overlay,
+            // 工作台（本机项目 + Claude Code PTY 终端 + 项目文件树）
+            workbench_cmd::list_workbench_projects,
+            workbench_cmd::add_workbench_project,
+            workbench_cmd::remove_workbench_project,
+            workbench_cmd::touch_workbench_project,
+            workbench_cmd::list_workbench_sessions,
+            workbench_cmd::create_workbench_session,
+            workbench_cmd::write_workbench_session_input,
+            workbench_cmd::resize_workbench_session,
+            workbench_cmd::stop_workbench_session,
+            workbench_cmd::restart_workbench_session,
+            workbench_cmd::close_workbench_session,
+            workbench_cmd::rename_workbench_session,
+            workbench_cmd::list_workbench_dir,
+            workbench_cmd::get_workbench_path_info,
+            workbench_cmd::create_workbench_file,
+            workbench_cmd::create_workbench_dir,
+            workbench_cmd::rename_workbench_path,
+            workbench_cmd::delete_workbench_path,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {
@@ -525,6 +572,11 @@ pub fn run() {
                 if let Some(t) = state.health_cancel.lock().unwrap().take() {
                     t.cancel();
                     tracing::info!("健康监测 daemon 已停止");
+                }
+                // 停止工作台中仍运行的 Claude Code PTY 会话，避免应用退出后留下子进程。
+                let cleaned = state.workbench_sessions.shutdown_all();
+                if cleaned > 0 {
+                    tracing::info!("工作台会话已清理: {cleaned}");
                 }
                 tracing::info!("应用已退出，mDNS 已注销");
             }

@@ -21,7 +21,7 @@ src/
 ├── cc/                — Claude Code 历史采集（collector）+ 合并（merger，复用 sync/vector_clock）+ 同步（engine）+ 模型 [已实现]
 ├── claude_cli.rs      — Claude Code CLI pure/headless 结构化调用共享 helper（GitHub Trending + Prompt 优化复用）[已实现]
 ├── cloud_sync/        — GitHub 私有仓库云端同步（git_cli 系统 git 封装 + snapshot 工作区↔DB 导入导出 + engine 流程编排 + scheduler 轮询） [已实现]
-├── commands/          — #[tauri::command]：prompts + prompt_optimizer + scratchpad + cc_history + cloud_sync + github_trending + config + devices + sync + transfer + screenshot + permissions + updater + ssh_target + health [已实现]
+├── commands/          — #[tauri::command]：prompts + prompt_optimizer + scratchpad + cc_history + cloud_sync + github_trending + config + devices + sync + transfer + screenshot + permissions + updater + ssh_target + health + workbench [已实现]
 ├── models/prompt.rs   — PromptRow（snake_case，DB/同步）+ PromptDto（camelCase，前端） [已实现]
 ├── models/scratchpad.rs — ScratchpadRow（多页面，DB/同步）+ ScratchpadPageDto/SummaryDto（camelCase，前端） [已实现]
 ├── storage/prompt_repo.rs — sqlx 运行期 query（非宏），list/get/create/update/soft_delete/list_tags [已实现]
@@ -32,6 +32,7 @@ src/
 ├── net/               — mdns-sd 发现 + axum server + reqwest client [已实现 M3]
 ├── transfer/          — 分块传输 + SHA256 + 断点续传              [M5]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
+├── workbench/         — 本机项目工作台：项目记录 + Claude Code PTY 会话 + 安全文件树 [已实现]
 ├── permissions/       — macOS 权限 FFI（CGPreflight/CGRequest/CGEventTap） [M7 已实现]
 ├── hotkey.rs          — pynput→plugin 快捷键格式转换 + 注册/热更新  [M7 已实现]
 ├── tray.rs            — 系统托盘（Tauri 2 tray API）              [M7 已实现]
@@ -39,6 +40,18 @@ src/
 └── commands/updater.rs — 自动更新 5 命令（check/download/status/cancel/install，对齐前端 types.ts）[M8 已实现]
 migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TABLE IF NOT EXISTS 兼容旧库）
 ```
+
+## 工作台已落地行为约定（workbench/ + storage/workbench_project_repo.rs + commands/workbench.rs）
+
+- **功能定位**：Workbench 是本机项目运行态工作台，前端入口 `/workbench`。一期只覆盖本机或已挂载局域网目录；远端 cc-partner 项目浏览、远端 PTY 和文件预览后续单独扩展。
+- **项目记录**：`workbench_projects` 表持久化最近项目，字段 `id/name/kind/device_id/device_name/path/last_opened_at/created_at/updated_at`；`add_workbench_project(path)` 在 blocking pool 中 canonicalize 并要求目录存在，同一路径复用项目 id，只更新时间；`remove_workbench_project` 只移除记录，不删除磁盘项目。
+- **会话注册表**：`WorkbenchSessionRegistry` 是内存态，不持久化终端日志。`create_workbench_session(projectId)` 读取项目根路径，并复用 `AppConfig.github_trending.claude_cli_path` 作为交互式 `claude` 命令，在该目录中通过 `portable-pty` 启动 PTY。
+- **终端事件**：后端 emit `workbench:terminal-output`（`sessionId/chunk/seq/ts`）和 `workbench:terminal-status`（`sessionId/status/exitCode/ts`）；前端按 sessionId 维护 buffer。普通 Vite 浏览器无 Tauri event internals 时前端必须跳过 listen，避免调试白屏。
+- **会话操作**：支持 `write_workbench_session_input`、`resize_workbench_session`、`stop_workbench_session`、`restart_workbench_session`、`close_workbench_session`、`rename_workbench_session`。`restart_workbench_session` 会关闭旧 PTY，并在同项目创建继承名称的新 session；前端需用返回的新 session 替换旧 tab。
+- **退出清理**：`RunEvent::Exit` 必须调用 `state.workbench_sessions.shutdown_all()`，drain registry 并 kill 仍运行的 PTY child，避免应用退出后留下 Claude Code 子进程。
+- **文件树安全边界**：`workbench/fs.rs` 对所有相对路径做项目根内解析，拒绝 `..` 越界、绝对路径、跨根 symlink、覆盖重命名和删除项目根。文件系统命令全部用 `spawn_blocking` 包裹同步 IO。
+- **命令层**：`commands/workbench.rs` 是 thin layer，负责读取项目 row、包裹 blocking FS、返回 camelCase DTO；不要在前端直接访问文件系统或绕过 `web/src/api/workbench.ts`。
+- **验证命令**：相关 Rust 验证优先跑 `cd src-tauri && cargo test workbench:: && cargo check`；前端联动验证跑 `cd web && npm run build`，必要时再用浏览器检查 `/workbench`。
 
 ## M1 已落地行为约定（移植自 Python，逐方法对照）
 

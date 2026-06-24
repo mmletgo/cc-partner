@@ -200,6 +200,109 @@ export interface PromptOptimizeResponse {
   optimizedEn: string;
 }
 
+/** 工作台项目来源类型：本期仅 local，后续扩展局域网设备项目。 */
+export type WorkbenchProjectKind = 'local' | string;
+
+/**
+ * 工作台项目 DTO（对齐 Rust WorkbenchProjectDto，camelCase）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   工作台需要展示用户添加过的项目文件夹，并把 projectId 传给终端与文件树命令。
+ *
+ * Code Logic（字段说明）:
+ *   path 是本机或已挂载局域网目录的绝对路径；lastOpenedAt 用于最近项目排序。
+ */
+export interface WorkbenchProject {
+  id: string;
+  name: string;
+  kind: WorkbenchProjectKind;
+  deviceId: string;
+  deviceName: string;
+  path: string;
+  lastOpenedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 工作台终端会话状态。 */
+export type WorkbenchSessionStatus = 'running' | 'exited' | 'disconnected' | string;
+
+/**
+ * 工作台 Claude Code 终端会话 DTO。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   一个项目可开启多个 Claude Code 终端，前端需展示 tab、状态、尺寸和退出信息。
+ *
+ * Code Logic（字段说明）:
+ *   session 只在应用运行期存在；终端输出通过 workbench:terminal-output 事件增量推送。
+ */
+export interface WorkbenchSession {
+  id: string;
+  projectId: string;
+  name: string;
+  command: string;
+  status: WorkbenchSessionStatus;
+  cols: number;
+  rows: number;
+  startedAt: string;
+  exitedAt: string | null;
+  exitCode: number | null;
+}
+
+/** 工作台文件节点类型：文件或文件夹。 */
+export type WorkbenchPathKind = 'file' | 'dir' | string;
+
+/**
+ * 工作台文件树节点 DTO。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   右侧检查器本期展示可交互项目文件夹，后续文件预览会基于同一节点模型扩展。
+ *
+ * Code Logic（字段说明）:
+ *   path 是相对项目根的路径，children 为 null/undefined 表示尚未加载或非目录。
+ */
+export interface WorkbenchFileNode {
+  name: string;
+  path: string;
+  kind: WorkbenchPathKind;
+  size: number | null;
+  modifiedAt: string | null;
+  children?: WorkbenchFileNode[] | null;
+}
+
+/**
+ * 工作台单路径信息 DTO。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   创建、重命名、选中路径后，前端需要最新元信息刷新文件树和检查器详情。
+ *
+ * Code Logic（字段说明）:
+ *   与 WorkbenchFileNode 去掉 children 后一致，表示单个路径的 metadata。
+ */
+export interface WorkbenchPathInfo {
+  name: string;
+  path: string;
+  kind: WorkbenchPathKind;
+  size: number | null;
+  modifiedAt: string | null;
+}
+
+/** 工作台终端输出事件 payload（listen('workbench:terminal-output')）。 */
+export interface WorkbenchTerminalOutputEvent {
+  sessionId: string;
+  chunk: string;
+  seq: number;
+  ts: number;
+}
+
+/** 工作台终端状态事件 payload（listen('workbench:terminal-status')）。 */
+export interface WorkbenchTerminalStatusEvent {
+  sessionId: string;
+  status: WorkbenchSessionStatus;
+  exitCode: number | null;
+  ts: number;
+}
+
 export interface VersionInfo {
   version: string;
   buildDate: string;

@@ -16,7 +16,9 @@
 use crate::config::AppConfig;
 use crate::models::device::Device;
 use crate::net::peer_client::PeerClient;
-use crate::storage::{ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, TransferRepo};
+use crate::storage::{
+    ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, TransferRepo, WorkbenchProjectRepo,
+};
 use crate::transfer::registry::TransferRegistry;
 use mdns_sd::ServiceDaemon;
 use sqlx::SqlitePool;
@@ -76,6 +78,12 @@ pub struct AppState {
     pub cc_history_repo: Arc<ClaudeHistoryRepo>,
     /// SSH 目标仓库（ssh_targets 表访问，跨设备同步）
     pub ssh_target_repo: Arc<crate::storage::SshTargetRepo>,
+    /// 工作台项目仓库（workbench_projects 表访问，本机最近项目持久化）
+    #[allow(dead_code)]
+    pub workbench_project_repo: Arc<WorkbenchProjectRepo>,
+    /// 工作台 PTY 会话注册表（内存态，应用退出即关闭）
+    #[allow(dead_code)]
+    pub workbench_sessions: Arc<crate::workbench::sessions::WorkbenchSessionRegistry>,
     /// CC 历史采集器的取消令牌（应用退出时 cancel 优雅停止后台扫描任务）
     pub cc_collector_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// 云端同步（GitHub 私有仓库）后台 scheduler 的取消令牌（应用退出时 cancel 优雅停止）

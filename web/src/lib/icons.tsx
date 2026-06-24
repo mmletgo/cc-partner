@@ -157,6 +157,25 @@ export const FolderIcon = ({ size, ...rest }: IconProps) => (
   </svg>
 );
 
+export const FileIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="M4.5 2h5L12 4.5V13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 .5-1Z" />
+    <path d="M9.5 2v3h3" />
+  </svg>
+);
+
+export const ChevronRightIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="m6 4 4 4-4 4" />
+  </svg>
+);
+
+export const StopIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <rect x="4" y="4" width="8" height="8" rx="1.2" />
+  </svg>
+);
+
 export const KeyboardIcon = ({ size, ...rest }: IconProps) => (
   <svg {...baseProps(size)} {...rest}>
     <rect x="2" y="4" width="12" height="8" rx="1.5" />
