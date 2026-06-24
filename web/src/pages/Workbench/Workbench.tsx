@@ -44,6 +44,7 @@ import type {
   WorkbenchTerminalStatusEvent,
 } from '@/lib/types';
 import styles from './Workbench.module.css';
+import { TERMINAL_LAYOUT_LIMIT, visibleTerminalSessions } from './terminalSessionOrder';
 import { terminalPanePixelSize } from './terminalSizing';
 import type { TerminalLayoutMode } from './terminalSizing';
 
@@ -86,12 +87,6 @@ const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 6;
 const MAX_TERMINAL_BUFFER_CHARS = 200_000;
 const TERMINAL_PANE_HEADER_PX = 36;
-
-const TERMINAL_LAYOUT_LIMIT: Record<TerminalLayoutMode, number> = {
-  single: 1,
-  double: 2,
-  quad: 4,
-};
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -548,7 +543,6 @@ export function Workbench() {
   const { activeProjectId, activeProject } = useWorkbenchProjects();
   const [sessions, setSessions] = useState<WorkbenchSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [recentSessionIds, setRecentSessionIds] = useState<string[]>([]);
   const [terminalLayout, setTerminalLayout] = useState<TerminalLayoutMode>('single');
   const [sessionNameDraft, setSessionNameDraft] = useState<string>('');
   const [sessionBusy, setSessionBusy] = useState<boolean>(false);
@@ -567,7 +561,6 @@ export function Workbench() {
   const [terminalRevision, setTerminalRevision] = useState<number>(0);
   const [runtimeNow, setRuntimeNow] = useState<number>(() => Date.now());
   const activeProjectIdRef = useRef<string | null>(null);
-  const activeSessionIdRef = useRef<string | null>(null);
   const knownSessionIdsRef = useRef<Set<string>>(new Set());
   const terminalPanelRef = useRef<HTMLElement | null>(null);
 
@@ -575,24 +568,10 @@ export function Workbench() {
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [activeSessionId, sessions],
   );
-  const visibleSessions = useMemo(() => {
-    const limit = TERMINAL_LAYOUT_LIMIT[terminalLayout];
-    const orderedIds = [
-      ...(activeSessionId ? [activeSessionId] : []),
-      ...recentSessionIds,
-      ...sessions.map((session) => session.id),
-    ];
-    const seen = new Set<string>();
-    return orderedIds
-      .filter((id) => {
-        if (seen.has(id)) return false;
-        seen.add(id);
-        return sessions.some((session) => session.id === id);
-      })
-      .slice(0, limit)
-      .map((id) => sessions.find((session) => session.id === id))
-      .filter((session): session is WorkbenchSession => Boolean(session));
-  }, [activeSessionId, recentSessionIds, sessions, terminalLayout]);
+  const visibleSessions = useMemo(
+    () => visibleTerminalSessions({ sessions, activeSessionId, layout: terminalLayout }),
+    [activeSessionId, sessions, terminalLayout],
+  );
   const selectedParentPath = selectedInfo
     ? selectedInfo.kind === 'dir'
       ? selectedInfo.path
@@ -618,7 +597,6 @@ export function Workbench() {
 
   const focusSession = useCallback((sessionId: string) => {
     setActiveSessionId(sessionId);
-    setRecentSessionIds((current) => [sessionId, ...current.filter((id) => id !== sessionId)]);
   }, []);
 
   const loadSessions = useCallback(
@@ -692,29 +670,7 @@ export function Workbench() {
   }, [activeProjectId]);
 
   useEffect(() => {
-    activeSessionIdRef.current = activeSessionId;
-  }, [activeSessionId]);
-
-  useEffect(() => {
     knownSessionIdsRef.current = new Set(sessions.map((session) => session.id));
-  }, [sessions]);
-
-  useEffect(() => {
-    if (!activeSessionId) return;
-    return deferEffect(() => {
-      setRecentSessionIds((current) => [
-        activeSessionId,
-        ...current.filter((id) => id !== activeSessionId),
-      ]);
-    });
-  }, [activeSessionId]);
-
-  useEffect(() => {
-    return deferEffect(() => {
-      setRecentSessionIds((current) =>
-        current.filter((id) => sessions.some((session) => session.id === id)),
-      );
-    });
   }, [sessions]);
 
   useEffect(() => {
@@ -734,7 +690,6 @@ export function Workbench() {
         knownSessionIdsRef.current = new Set();
         setSessions([]);
         setActiveSessionId(null);
-        setRecentSessionIds([]);
         setRootNodes([]);
         setChildrenByPath({});
         setExpandedPaths(new Set());
@@ -748,7 +703,6 @@ export function Workbench() {
       setExpandedPaths(new Set());
       setSelectedPath(null);
       setSelectedInfo(null);
-      setRecentSessionIds([]);
       setFileNotice(null);
       void loadSessions(activeProjectId);
       void loadDir('');
@@ -916,7 +870,6 @@ export function Workbench() {
           return next;
         });
         knownSessionIdsRef.current.delete(sessionId);
-        setRecentSessionIds((current) => current.filter((id) => id !== sessionId));
         setTerminalBuffers((current) => {
           const next = { ...current };
           delete next[sessionId];
