@@ -15,7 +15,7 @@ use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchPathInfo, WorkbenchProjectDto, WorkbenchProjectRow,
     WorkbenchSessionDto,
 };
-use crate::workbench::sessions::{kill_persisted_backend, PaneSplitDirection};
+use crate::workbench::sessions::{kill_persisted_backend, PaneCloseOutcome, PaneSplitDirection};
 use crate::workbench::{fs as workbench_fs, projects};
 use chrono::Utc;
 use std::path::PathBuf;
@@ -372,17 +372,25 @@ pub async fn split_workbench_pane(
 /// 关闭当前 tmux pane。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户需要关闭当前 pane；最后一个 pane 应通过关闭 window 处理，避免误杀整个 tab。
+///     用户点击分屏工具栏 X 时，需要关闭当前 active pane；最后一个 pane 会关闭整个 window。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用 registry 统计并关闭当前 active pane，成功返回 sessionId。
+///     调用 registry 关闭当前 active pane；若关闭了 window，则销毁持久后端并删除 SQLite row。
 #[tauri::command]
 pub async fn close_workbench_pane(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    state.workbench_sessions.close_active_pane(&session_id)?;
-    Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
+    match state.workbench_sessions.close_active_pane(&session_id)? {
+        PaneCloseOutcome::PaneClosed => {
+            Ok(serde_json::json!({ "ok": true, "sessionId": session_id, "closedWindow": false }))
+        }
+        PaneCloseOutcome::WindowClosed(row) => {
+            kill_persisted_backend(&row);
+            state.workbench_session_repo.delete(&session_id).await?;
+            Ok(serde_json::json!({ "ok": true, "sessionId": session_id, "closedWindow": true }))
+        }
+    }
 }
 
 /// 关闭工作台终端 tab。

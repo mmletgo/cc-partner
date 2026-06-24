@@ -60,6 +60,25 @@ pub enum PaneSplitDirection {
     Down,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneClosePlan {
+    KillPane,
+    CloseWindow,
+}
+
+/// pane 关闭结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     分屏工具栏 X 关闭最后一个 pane 时，底层 tmux 会关闭整个 window，前端需要同步删除 tab。
+///
+/// Code Logic（这个枚举做什么）:
+///     区分普通 pane 关闭与最后一个 pane 导致的 window 关闭，并在后者携带需要清理的 row。
+#[derive(Debug, Clone)]
+pub enum PaneCloseOutcome {
+    PaneClosed,
+    WindowClosed(WorkbenchSessionRow),
+}
+
 impl PaneSplitDirection {
     /// Business Logic（为什么需要这个函数）:
     ///     前端通过字符串参数请求 pane 分屏方向，后端需要做显式校验。
@@ -84,6 +103,19 @@ impl PaneSplitDirection {
             Self::Right => "-h",
             Self::Down => "-v",
         }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     用户点击分屏工具栏 X 时应关闭当前 active pane；只有最后一个 pane 时应关闭整个 window，不应报错。
+///
+/// Code Logic（这个函数做什么）:
+///     根据当前 window 的 pane 数决定执行 kill-pane 还是关闭 window。
+fn pane_close_plan(pane_count: usize) -> PaneClosePlan {
+    if pane_count > 1 {
+        PaneClosePlan::KillPane
+    } else {
+        PaneClosePlan::CloseWindow
     }
 }
 
@@ -679,10 +711,34 @@ fn create_tmux_window(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     关闭最后一个 pane 会关闭所属 window；项目 tmux session 只剩最后一个 window 时必须销毁整个 session。
+///
+/// Code Logic（这个函数做什么）:
+///     根据 window_id 与当前 window_count 构造 kill-window 或 kill-session 参数。
+fn tmux_destroy_backend_args(
+    session_name: &str,
+    window_id: Option<&str>,
+    window_count: Option<usize>,
+) -> Vec<String> {
+    match (window_id, window_count) {
+        (Some(window_id), Some(count)) if count > 1 => vec![
+            "kill-window".to_string(),
+            "-t".to_string(),
+            tmux_window_target(session_name, window_id),
+        ],
+        _ => vec![
+            "kill-session".to_string(),
+            "-t".to_string(),
+            session_name.to_string(),
+        ],
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     用户关闭终端 tab 时，如果该 tab 使用 tmux 承载上下文，应销毁对应 tmux session，避免后台残留。
 ///
 /// Code Logic（这个函数做什么）:
-///     执行 `tmux kill-window -t <session:window>`；旧记录没有 window id 时才退回 kill-session。
+///     多 window 项目执行 `kill-window -t <session:window>`；最后一个 window 或旧记录退回 kill-session。
 pub fn kill_persisted_backend(row: &WorkbenchSessionRow) {
     if row.backend != TMUX_BACKEND {
         return;
@@ -693,13 +749,21 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) {
     let Some(tmux) = available_tmux_command() else {
         return;
     };
+    let window_count = run_tmux_command(
+        &tmux,
+        &["list-windows", "-t", session_name, "-F", "#{window_id}"],
+    )
+    .ok()
+    .map(|windows| {
+        windows
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+    });
+    let args =
+        tmux_destroy_backend_args(session_name, row.backend_window_id.as_deref(), window_count);
     let mut command = tmux.std_command();
-    if let Some(window_id) = row.backend_window_id.as_deref() {
-        let target = tmux_window_target(session_name, window_id);
-        command.args(["kill-window", "-t", &target]);
-    } else {
-        command.args(["kill-session", "-t", session_name]);
-    }
+    command.args(args.iter().map(String::as_str));
     let output = command.output();
     if let Err(error) = output {
         tracing::debug!("销毁工作台 tmux 会话失败: {error}");
@@ -1262,29 +1326,34 @@ impl WorkbenchSessionRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     用户需要关闭当前 pane，但不能误把最后一个 pane 关闭成整个 window 消失。
+    ///     用户点击分屏工具栏 X 时，需要关闭当前 active pane；最后一个 pane 则关闭整个 window。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     先 `list-panes` 统计 pane 数；多于一个才执行 `kill-pane -t <target>`。
-    pub fn close_active_pane(&self, session_id: &str) -> Result<(), AppError> {
-        let handle = self.get_handle(session_id)?;
-        let handle = handle.lock().expect("workbench session 锁中毒");
-        if handle.row.status != "running" {
-            return Err(AppError::generic("工作台会话未运行"));
-        }
-        let target = tmux_window_target_for_row(&handle.row)?;
+    ///     先 `list-panes` 统计 pane 数；多于一个执行 `kill-pane -t <target>`，只有一个则关闭 session/window。
+    pub fn close_active_pane(&self, session_id: &str) -> Result<PaneCloseOutcome, AppError> {
+        let target = {
+            let handle = self.get_handle(session_id)?;
+            let handle = handle.lock().expect("workbench session 锁中毒");
+            if handle.row.status != "running" {
+                return Err(AppError::generic("工作台会话未运行"));
+            }
+            tmux_window_target_for_row(&handle.row)?
+        };
         let Some(tmux) = available_tmux_command() else {
             return Err(AppError::generic("未找到 tmux，无法关闭 pane"));
         };
         let panes = run_tmux_command(&tmux, &["list-panes", "-t", &target, "-F", "#{pane_id}"])?;
         let pane_count = panes.lines().filter(|line| !line.trim().is_empty()).count();
-        if pane_count <= 1 {
-            return Err(AppError::generic(
-                "当前 window 只有一个 pane，请关闭整个 window",
-            ));
+        match pane_close_plan(pane_count) {
+            PaneClosePlan::KillPane => {
+                run_tmux_command(&tmux, &["kill-pane", "-t", &target])?;
+                Ok(PaneCloseOutcome::PaneClosed)
+            }
+            PaneClosePlan::CloseWindow => {
+                let row = self.close(session_id)?;
+                Ok(PaneCloseOutcome::WindowClosed(row))
+            }
         }
-        run_tmux_command(&tmux, &["kill-pane", "-t", &target])?;
-        Ok(())
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1932,6 +2001,35 @@ mod tests {
                 "-c",
                 "/Users/hans/project",
             ]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     分屏工具栏的 X 应关闭当前 active pane；只有最后一个 pane 时应关闭 window，而不是报错。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 pane 数为 1 或 0 时选择关闭 window，pane 数大于 1 时选择 kill-pane。
+    #[test]
+    fn single_pane_close_plan_closes_window_instead_of_error() {
+        assert_eq!(pane_close_plan(0), PaneClosePlan::CloseWindow);
+        assert_eq!(pane_close_plan(1), PaneClosePlan::CloseWindow);
+        assert_eq!(pane_close_plan(2), PaneClosePlan::KillPane);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     关闭最后一个 pane 会关闭所属 window；如果它也是项目 tmux session 的最后一个 window，必须销毁 session。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 window_count 为 1 时生成 kill-session，多 window 时才生成 kill-window。
+    #[test]
+    fn tmux_destroy_backend_args_kill_session_for_last_window() {
+        assert_eq!(
+            tmux_destroy_backend_args("cc-partner-project-p1", Some("@1"), Some(1)),
+            vec!["kill-session", "-t", "cc-partner-project-p1"]
+        );
+        assert_eq!(
+            tmux_destroy_backend_args("cc-partner-project-p1", Some("@1"), Some(2)),
+            vec!["kill-window", "-t", "cc-partner-project-p1:@1"]
         );
     }
 

@@ -95,9 +95,9 @@ export const workbenchApi = {
         },
       ),
 
-    /** 关闭当前 tmux pane；最后一个 pane 应通过关闭 window 处理。 */
+    /** 关闭当前 tmux pane；最后一个 pane 会关闭所属 terminal window。 */
     closePane: (sessionId: string) =>
-      invoke<{ ok: boolean; sessionId: string }>('close_workbench_pane', {
+      invoke<{ ok: boolean; sessionId: string; closedWindow: boolean }>('close_workbench_pane', {
         sessionId,
       }),
 

@@ -814,13 +814,27 @@ export function Workbench() {
     if (!activeSession) return;
     try {
       setSessionError(null);
-      await workbenchApi.sessions.closePane(activeSession.id);
+      const result = await workbenchApi.sessions.closePane(activeSession.id);
+      if (result.closedWindow) {
+        setSessions((current) => {
+          const next = current.filter((session) => session.id !== result.sessionId);
+          updateActiveSession(next);
+          return next;
+        });
+        knownSessionIdsRef.current.delete(result.sessionId);
+        setTerminalBuffers((current) => {
+          const next = { ...current };
+          delete next[result.sessionId];
+          return next;
+        });
+        setTerminalRevision((current) => current + 1);
+      }
     } catch (error) {
       setSessionError(
         displayErrorMessage(error, t('workbench:errors.closePane'), desktopUnavailableMessage),
       );
     }
-  }, [activeSession, desktopUnavailableMessage, t]);
+  }, [activeSession, desktopUnavailableMessage, t, updateActiveSession]);
 
   const handleInput = useCallback(async (sessionId: string, data: string) => {
     try {
