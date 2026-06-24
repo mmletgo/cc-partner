@@ -96,13 +96,13 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 - **真透明架构（macOS 原生风格）**：选区窗口 `transparent(true)` 真透出真实桌面（**不用桌面截图背景**），故已移除 `snapshot_to_png_base64`/`get_display_snapshot`。前端 Overlay onMount 强制 html/body `background:transparent`，覆盖全局 `reset.css` 的 `body { background: var(--bg) }`（主题底色，浅色=#f5f4ed），否则 transparent 窗口会显示主题底色而非透出桌面（=白屏）。框选时四块半透明遮罩盖选区外挖洞，选区内透出桌面清晰。
 - **命令层**（`commands/screenshot.rs`，lib.rs invoke_handler 注册 4 个，**编辑工具条流程已替换旧的 crop_and_copy 单步流程**）：
   - `start_region_capture(app)` → 先预检屏幕录制权限，未授权则显示主窗口 + emit `screenshot:permission-needed` 引导（不抓屏）；已授权则每屏建 overlay 窗口
-  - `get_region_snapshot(display, x, y, w, h, dpr) → PNG base64 data URL`：抓该屏**纯桌面选区**（前端在 invoke 前已 `hiding=true` 隐藏遮罩/边框/canvas，但工具条可继续显示且通常位于选区外），供编辑模式 canvas 作背景底图（调 `capture::region_to_png_base64`）
+  - `get_region_snapshot(display, x, y, w, h, dpr) → PNG base64 data URL`：抓该屏**纯桌面选区**（前端先绘制 editing 工具条与外侧 outline 选区框，等首帧可见后 invoke；选区框和遮罩均在 crop 外，不进入快照），供编辑模式 canvas 作背景底图（调 `capture::region_to_png_base64`）
   - `save_clipboard_image(app, dataUrl)` → 把前端 canvas 合成的「桌面选区 + 标注」PNG data URL 解码写剪贴板（`capture::save_clipboard_from_png`）+ emit `region-capture:result` {ok:true} + `close_all_overlays`
   - `cancel_region_capture(app)` → emit `region-capture:result` {cancelled:true} + 关全部 overlay
 - **前端选区页**：`web/src/pages/Screenshot/Overlay.tsx`，独立于 AppShell/OnboardingGuard，App.tsx 加路由 `/screenshot-overlay`（顶层，不在守卫内）。**微信截图风格 + 三态状态机**（`mode: idle | selecting | editing`）：
   - **idle**：整屏半透明黑色遮罩；mousedown（左键）进 selecting 开始框选。
   - **selecting**：拖拽框选，四块遮罩（选区外暗、选区内挖洞清晰）+ 蓝色虚线选区边框；mouseup 有效选区（宽高≥10）进 editing。
-  - **editing**：mouseup 后立即进入 editing 并渲染 `ScreenshotToolbar`（矩形/箭头工具、6 色板、撤销/确认/取消），工具条不等待快照返回；同时 `hiding=true` 只隐藏遮罩/边框/canvas + 双 rAF 等渲染透明，再调 `get_region_snapshot` 抓**纯桌面选区** PNG 作 canvas 背景底图（避免把蓝色边框/遮罩抓入快照）；快照加载后 canvas 上用 `useAnnotationCanvas` hook 重绘「快照底图 + 全部标注」。确认时 canvas.toDataURL 合成「桌面选区 + 标注」→ `save_clipboard_image` 写剪贴板（**所见即所得，Rust 不画标注**）；选区过小 / ESC / 右键 → cancel。hooks 在所有 early return 之前（项目规则 20）。窗口真透明（onMount 强制 html/body background:transparent 覆盖主题底色防白屏）。
+  - **editing**：mouseup 后立即进入 editing 并渲染 `ScreenshotToolbar`（矩形/箭头工具、6 色板、撤销/确认/取消）与外侧 outline 选区框；工具条和选区框先完成首帧绘制，再调 `get_region_snapshot` 抓**纯桌面选区** PNG 作 canvas 背景底图（选区框画在 crop 外侧，选区外遮罩不进入 crop，避免快照捕获前闪烁/空白帧）；快照加载后 canvas 上用 `useAnnotationCanvas` hook 重绘「快照底图 + 全部标注」。确认时 canvas.toDataURL 合成「桌面选区 + 标注」→ `save_clipboard_image` 写剪贴板（**所见即所得，Rust 不画标注**）；选区过小 / ESC / 右键 → cancel。hooks 在所有 early return 之前（项目规则 20）。窗口真透明（onMount 强制 html/body background:transparent 覆盖主题底色防白屏）。
 - **权限（capabilities）**：选区窗口 label 前缀 `screenshot-overlay-*` 需在 `capabilities/default.json` 的 `windows` 列表加入通配，否则 overlay 页 invoke 被拒；同时加 `core:event:default`（供 emit/listen region-capture:result）。
 
 ## M7 已落地行为约定（移植自 Python `hotkey/listener.py` + `ui/tray.py` + `ui/permissions.py`）

@@ -19,6 +19,7 @@
   --accent-on: #faf9f5;
   --accent-soft: color-mix(in oklab, var(--accent) 14%, transparent);
   --accent-hover: color-mix(in oklab, var(--accent) 90%, #141413);
+  --screenshot-selection: #007aff;
   --success: #17a34a;
   --warn: #eab308;
   --danger: #b53333;
@@ -122,6 +123,7 @@
   --accent-on: #141413;
   --accent-soft: color-mix(in oklab, var(--accent) 22%, transparent);
   --accent-hover: color-mix(in oklab, var(--accent) 80%, #faf9f5);
+  --screenshot-selection: #007aff;
   --success: #4ade80;
   --warn: #facc15;
   --danger: #ef6b6b;

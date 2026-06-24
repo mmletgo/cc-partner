@@ -27,6 +27,25 @@ const isDev = import.meta.env.DEV;
 
 type GuardState = 'loading' | 'pass' | 'redirect';
 
+interface TauriInternalsWindow extends Window {
+  __TAURI_INTERNALS__?: {
+    transformCallback?: unknown;
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   生产桌面端运行在 Tauri 内，顶层事件监听依赖 Tauri event internals；但 Playwright/Vite 浏览器调试
+ *   会在普通浏览器中加载同一路由，缺少 internals 时不应让页面白屏或抛未处理异常。
+ *
+ * Code Logic（这个函数做什么）:
+ *   检测 window.__TAURI_INTERNALS__.transformCallback 是否存在且为函数，作为是否可注册 Tauri event listener 的边界。
+ */
+function canListenToTauriEvents(): boolean {
+  const internals = (window as TauriInternalsWindow).__TAURI_INTERNALS__;
+  return typeof internals?.transformCallback === 'function';
+}
+
 /**
  * OnboardingGuard - 首次启动权限引导守卫
  *
@@ -89,6 +108,7 @@ function OnboardingGuard() {
 function PermissionNeededListener() {
   const navigate = useNavigate();
   useEffect(() => {
+    if (!canListenToTauriEvents()) return undefined;
     const unlisten = listen('screenshot:permission-needed', () => {
       navigate('/welcome', { replace: true });
     });
@@ -118,6 +138,7 @@ function PermissionNeededListener() {
 function HealthReminderListener() {
   const { t } = useTranslation(['health']);
   useEffect(() => {
+    if (!canListenToTauriEvents()) return undefined;
     // 发系统通知:授权才发,失败静默(系统通知是久坐/喝水的主提醒通道)
     const notify = async (title: string, body: string) => {
       try {

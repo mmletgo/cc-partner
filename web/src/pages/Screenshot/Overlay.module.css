@@ -20,10 +20,10 @@
   pointer-events: none;
 }
 
-/* 高亮选区边框（蓝色虚线，对照 Python QPen #007AFF DashLine） */
+/* 高亮选区框：outline 画在选区外侧，避免进入 Rust 抓取的 crop 内容 */
 .selection {
   position: absolute;
-  border: 2px dashed #007aff;
+  outline: 2px dashed var(--screenshot-selection);
   background-color: transparent;
   pointer-events: none;
   box-sizing: border-box;
