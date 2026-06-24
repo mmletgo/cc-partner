@@ -32,7 +32,7 @@ src/
 ├── net/               — mdns-sd 发现 + axum server + reqwest client [已实现 M3]
 ├── transfer/          — 分块传输 + SHA256 + 断点续传              [M5]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
-├── workbench/         — 本机项目工作台：项目记录 + 普通 PTY 终端会话 + 安全文件树 [已实现]
+├── workbench/         — 本机项目工作台：项目记录 + 可恢复 PTY/tmux 终端会话 + 安全文件树 [已实现]
 ├── permissions/       — macOS 权限 FFI（CGPreflight/CGRequest/CGEventTap） [M7 已实现]
 ├── hotkey.rs          — pynput→plugin 快捷键格式转换 + 注册/热更新  [M7 已实现]
 ├── tray.rs            — 系统托盘（Tauri 2 tray API）              [M7 已实现]
@@ -45,7 +45,7 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 
 - **功能定位**：Workbench 是本机项目运行态工作台，前端入口 `/workbench`。一期只覆盖本机或已挂载局域网目录；远端 cc-partner 项目浏览、远端 PTY 和文件预览后续单独扩展。
 - **项目记录**：`workbench_projects` 表持久化最近项目，字段 `id/name/kind/device_id/device_name/path/last_opened_at/created_at/updated_at`；`add_workbench_project(path)` 在 blocking pool 中 canonicalize 并要求目录存在，同一路径复用项目 id，只更新时间；`remove_workbench_project` 只移除记录，不删除磁盘项目。
-- **会话恢复**：`workbench_sessions` 表持久化终端 tab 元数据（项目、名称、命令、状态、尺寸、backend/backend_id）；`WorkbenchSessionRegistry` 只保存运行期 PTY/attach 句柄。`list_workbench_sessions(projectId?)` 会从 SQLite 恢复缺失会话，再合并持久化列表与 registry 实时状态。macOS/Linux 优先用 `tmux` 承载真实 shell 上下文（常见路径含 `/opt/homebrew/bin/tmux`），应用退出只 kill 当前 attach，重启后重新 attach；无 tmux 或恢复失败时回退普通 PTY，新 shell 仍在项目根目录启动。
+- **会话恢复**：`workbench_sessions` 表持久化终端 tab 元数据（项目、名称、命令、状态、尺寸、backend/backend_id）；`WorkbenchSessionRegistry` 只保存运行期 PTY/attach 句柄。`list_workbench_sessions(projectId?)` 会从 SQLite 恢复缺失会话，再合并持久化列表与 registry 实时状态。macOS/Linux 优先用原生 `tmux` 承载真实 shell 上下文（常见路径含 `/opt/homebrew/bin/tmux`）；Windows 优先探测默认 WSL 发行版的 `wsl.exe --exec tmux -V`，用 WSL 内的 tmux 承载上下文，盘符项目路径转换为 `/mnt/<drive>/...`，`\\wsl$\<distro>\...` / `\\wsl.localhost\<distro>\...` 转为 Linux 路径。应用退出只 kill 当前 attach，重启后重新 attach；无 tmux、WSL 路径不可转换或恢复失败时回退普通 PTY，新 shell 仍在项目根目录启动。
 - **会话创建**：`create_workbench_session(projectId, initialCols?, initialRows?)` 读取项目根路径，并在该目录中通过 `portable-pty` 启动系统 shell（macOS/Linux 取 `SHELL`，Windows 取 `ComSpec`，缺失时回退 `/bin/sh`/`cmd.exe`）；工作台只打开普通终端，不自动运行 `claude`。前端应在创建前测量当前终端 pane 的真实 viewport cols/rows 并传给后端，且 xterm/FitAddon 的父节点必须是无 padding viewport，避免交互式程序首屏按默认尺寸或错误列宽绘制后错位。
 - **终端事件**：后端 emit `workbench:terminal-output`（`sessionId/chunk/seq/ts`）和 `workbench:terminal-status`（`sessionId/status/exitCode/ts`）；PTY reader 必须跨 read chunk 做流式 UTF-8 解码，避免中文/符号被拆包后在前端显示为 `�`；前端按 sessionId 维护 buffer。普通 Vite 浏览器无 Tauri event internals 时前端必须跳过 listen，避免调试白屏。
 - **会话操作**：支持 `write_workbench_session_input`、`resize_workbench_session`、`close_workbench_session`、`rename_workbench_session`；resize/rename 写回 `workbench_sessions`。关闭 tab 会从 registry 移除、删除 SQLite 会话记录，并在 backend=tmux 时 `kill-session` 销毁真实上下文。`child.kill()` 返回 No such process / raw os error 3 代表子进程已被系统回收，应视为已停止，不向前端展示 IO 错误。

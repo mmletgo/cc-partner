@@ -4,7 +4,7 @@
 //!     工作台允许用户在同一项目下开启多个本机项目终端，用户希望应用重启后终端 tab 与可重连上下文仍可恢复。
 //!
 //! Code Logic（这个模块做什么）:
-//!     使用 portable-pty 创建 PTY；macOS/Linux 优先通过 tmux 承载真实 shell 上下文，应用重启后重新 attach。
+//!     使用 portable-pty 创建 PTY；macOS/Linux 原生 tmux、Windows WSL tmux 可承载真实 shell 上下文，应用重启后重新 attach。
 //!     内存保存运行期句柄，通过 Tauri event 推送终端输出和状态变化。
 
 #![allow(dead_code)]
@@ -33,6 +33,129 @@ const TMUX_BACKEND: &str = "tmux";
 const FALLBACK_TERMINAL_COMMAND: &str = "cmd.exe";
 #[cfg(not(windows))]
 const FALLBACK_TERMINAL_COMMAND: &str = "/bin/sh";
+
+/// tmux 工作目录路径模式。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     Windows 上的 tmux 运行在 WSL 内部，不能直接识别宿主 Windows 盘符路径。
+///
+/// Code Logic（这个枚举做什么）:
+///     标记 tmux 命令应使用原生项目路径，还是先把 Windows 项目路径转换为 WSL mount 路径。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TmuxCwdMode {
+    Native,
+    Wsl,
+}
+
+/// 可用 tmux 命令描述。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     工作台需要在 macOS/Linux 调用原生 tmux，也需要在 Windows 复用 WSL 中的 tmux 来保留终端上下文。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存可执行程序、固定前缀参数和 cwd 路径模式，统一生成 std::process::Command 与 portable-pty CommandBuilder。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TmuxCommand {
+    program: String,
+    prefix_args: Vec<String>,
+    cwd_mode: TmuxCwdMode,
+}
+
+impl TmuxCommand {
+    /// Business Logic（为什么需要这个函数）:
+    ///     macOS/Linux 上的 tmux 可以直接用原生命令执行，并使用项目的原生文件系统路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造无固定前缀参数、cwd 模式为 Native 的 tmux 命令描述。
+    fn native(program: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+            prefix_args: Vec::new(),
+            cwd_mode: TmuxCwdMode::Native,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Windows 用户可把 tmux 安装在 WSL 中，工作台应通过 wsl.exe 调用它以获得可恢复上下文。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 `wsl.exe --exec tmux` 命令描述，并标记 cwd 需要转换成 WSL mount 路径。
+    fn wsl() -> Self {
+        Self {
+            program: "wsl.exe".to_string(),
+            prefix_args: vec!["--exec".to_string(), "tmux".to_string()],
+            cwd_mode: TmuxCwdMode::Wsl,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     探测、创建、查询和销毁 tmux session 都需要使用同一套命令前缀。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 std::process::Command，并预先附加固定前缀参数。
+    fn std_command(&self) -> StdCommand {
+        let mut command = StdCommand::new(&self.program);
+        command.args(&self.prefix_args);
+        command
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     PTY attach 需要通过 portable-pty 的 CommandBuilder 启动，并复用 tmux 命令前缀。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 CommandBuilder，并逐个追加固定前缀参数。
+    fn command_builder(&self) -> CommandBuilder {
+        let mut command = CommandBuilder::new(&self.program);
+        command.args(self.prefix_args.iter().map(String::as_str));
+        command
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     创建 tmux session 时，`-c` 工作目录必须是 tmux 所在环境可识别的路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Native 模式原样返回项目路径；WSL 模式把 Windows 盘符路径转换为 `/mnt/<drive>/...`。
+    fn project_cwd(&self, project_path: &str) -> Result<String, AppError> {
+        match self.cwd_mode {
+            TmuxCwdMode::Native => Ok(project_path.to_string()),
+            TmuxCwdMode::Wsl => windows_path_to_wsl_path(project_path).ok_or_else(|| {
+                AppError::generic(format!("项目路径无法转换为 WSL 路径: {project_path}"))
+            }),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     WSL 内的 tmux 应启动 Linux 默认 shell，而不能把 Windows 的 cmd.exe 当作 Linux 命令执行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Native 模式返回传入 shell 命令；WSL 模式返回 None，让 tmux 使用 WSL 用户默认 shell。
+    fn shell_command_for_new_session<'a>(&self, shell_command: &'a str) -> Option<&'a str> {
+        match self.cwd_mode {
+            TmuxCwdMode::Native => Some(shell_command),
+            TmuxCwdMode::Wsl => None,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     前端会展示会话命令，Windows+WSL tmux 会话不应误显示为宿主 Windows 的 `cmd.exe`。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Native 模式保留真实 shell 命令；WSL 模式展示实际 PTY attach 命令。
+    fn display_command_for_session(&self, session_name: &str, shell_command: &str) -> String {
+        match self.cwd_mode {
+            TmuxCwdMode::Native => shell_command.to_string(),
+            TmuxCwdMode::Wsl => {
+                let mut parts = Vec::with_capacity(self.prefix_args.len() + 4);
+                parts.push(self.program.clone());
+                parts.extend(self.prefix_args.clone());
+                parts.push("attach-session".to_string());
+                parts.push("-t".to_string());
+                parts.push(session_name.to_string());
+                parts.join(" ")
+            }
+        }
+    }
+}
 
 /// 工作台终端输出事件 payload。
 ///
@@ -191,14 +314,99 @@ fn default_terminal_command_from_env(command: Option<OsString>) -> String {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     重启应用后要继续已有终端上下文，普通 PTY 无法跨进程存活；macOS/Linux 可借助 tmux 保留 shell 进程。
+///     Windows 宿主路径需要传给 WSL 内的 tmux，必须转换成 Linux 可识别的 mount 路径。
 ///
 /// Code Logic（这个函数做什么）:
-///     Windows 直接返回 None；Unix 上依次探测 PATH 与常见 Homebrew/Linux tmux 路径，返回可执行命令。
-fn available_tmux_command() -> Option<String> {
+///     支持 `C:\dir`、`C:/dir` 和 `\\?\C:\dir` 三类常见绝对路径；UNC/相对路径返回 None。
+fn windows_path_to_wsl_path(path: &str) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+    if path.starts_with('/') {
+        return Some(path.to_string());
+    }
+
+    let without_extended_prefix = path.strip_prefix(r"\\?\").unwrap_or(path);
+    if let Some(linux_path) = wsl_unc_path_to_linux_path(without_extended_prefix) {
+        return Some(linux_path);
+    }
+
+    let bytes = without_extended_prefix.as_bytes();
+    if bytes.len() < 3 || bytes[1] != b':' {
+        return None;
+    }
+
+    let drive = bytes[0] as char;
+    if !drive.is_ascii_alphabetic() {
+        return None;
+    }
+    if bytes[2] != b'\\' && bytes[2] != b'/' {
+        return None;
+    }
+
+    let rest = without_extended_prefix[3..].trim_start_matches(['\\', '/']);
+    let rest = rest.replace('\\', "/");
+    if rest.is_empty() {
+        Some(format!("/mnt/{}", drive.to_ascii_lowercase()))
+    } else {
+        Some(format!("/mnt/{}/{}", drive.to_ascii_lowercase(), rest))
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Windows 用户可能通过资源管理器选择 WSL 文件系统路径，形式是 `\\wsl$\<distro>\...`。
+///
+/// Code Logic（这个函数做什么）:
+///     识别 `\\wsl$\distro\path` 和 `\\wsl.localhost\distro\path`，丢弃 distro 段并转为 Linux 绝对路径。
+fn wsl_unc_path_to_linux_path(path: &str) -> Option<String> {
+    let lower = path.to_ascii_lowercase();
+    let prefix = if lower.starts_with(r"\\wsl$\") {
+        r"\\wsl$\"
+    } else if lower.starts_with(r"\\wsl.localhost\") {
+        r"\\wsl.localhost\"
+    } else {
+        return None;
+    };
+
+    let rest = &path[prefix.len()..];
+    if rest.is_empty() {
+        return None;
+    }
+    let first_separator = rest.find(['\\', '/']);
+    let path_in_distro = match first_separator {
+        Some(index) => &rest[index + 1..],
+        None => "",
+    };
+    let path_in_distro = path_in_distro
+        .trim_start_matches(['\\', '/'])
+        .replace('\\', "/");
+    if path_in_distro.is_empty() {
+        Some("/".to_string())
+    } else {
+        Some(format!("/{path_in_distro}"))
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     重启应用后要继续已有终端上下文，普通 PTY 无法跨进程存活；可借助 tmux 保留 shell 进程。
+///
+/// Code Logic（这个函数做什么）:
+///     Windows 探测 WSL 内的 `tmux`；Unix 上依次探测 PATH 与常见 Homebrew/Linux tmux 路径，返回命令描述。
+fn available_tmux_command() -> Option<TmuxCommand> {
     #[cfg(windows)]
     {
-        None
+        let candidate = TmuxCommand::wsl();
+        if candidate
+            .std_command()
+            .args(["-V"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            Some(candidate)
+        } else {
+            None
+        }
     }
     #[cfg(not(windows))]
     {
@@ -217,7 +425,7 @@ fn available_tmux_command() -> Option<String> {
                     .map(|output| output.status.success())
                     .unwrap_or(false)
             })
-            .map(|candidate| (*candidate).to_string())
+            .map(|candidate| TmuxCommand::native(*candidate))
     }
 }
 
@@ -235,8 +443,8 @@ fn tmux_session_name(session_id: &str) -> String {
 ///
 /// Code Logic（这个函数做什么）:
 ///     执行 `tmux has-session -t <name>`，返回 status 是否成功。
-fn tmux_has_session(tmux: &str, session_name: &str) -> bool {
-    StdCommand::new(tmux)
+fn tmux_has_session(tmux: &TmuxCommand, session_name: &str) -> bool {
+    tmux.std_command()
         .args(["has-session", "-t", session_name])
         .output()
         .map(|output| output.status.success())
@@ -249,22 +457,19 @@ fn tmux_has_session(tmux: &str, session_name: &str) -> bool {
 /// Code Logic（这个函数做什么）:
 ///     执行 `tmux new-session -d -s <name> -c <cwd> <shell>`；失败转为 AppError 供上层 fallback。
 fn create_tmux_session(
-    tmux: &str,
+    tmux: &TmuxCommand,
     session_name: &str,
     cwd: &str,
     shell_command: &str,
 ) -> Result<(), AppError> {
-    let output = StdCommand::new(tmux)
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            session_name,
-            "-c",
-            cwd,
-            shell_command,
-        ])
-        .output()?;
+    let tmux_cwd = tmux.project_cwd(cwd)?;
+    let mut command = tmux.std_command();
+    command.args(["new-session", "-d", "-s", session_name, "-c", &tmux_cwd]);
+    if let Some(shell_command) = tmux.shell_command_for_new_session(shell_command) {
+        command.arg(shell_command);
+    }
+
+    let output = command.output()?;
     if output.status.success() {
         Ok(())
     } else {
@@ -293,7 +498,8 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) {
     let Some(tmux) = available_tmux_command() else {
         return;
     };
-    let output = StdCommand::new(&tmux)
+    let output = tmux
+        .std_command()
         .args(["kill-session", "-t", session_name])
         .output();
     if let Err(error) = output {
@@ -311,7 +517,7 @@ fn command_builder_for_row(row: &WorkbenchSessionRow) -> CommandBuilder {
         if let (Some(tmux), Some(session_name)) =
             (available_tmux_command(), row.backend_id.as_deref())
         {
-            let mut cmd = CommandBuilder::new(tmux);
+            let mut cmd = tmux.command_builder();
             cmd.args(["attach-session", "-t", session_name]);
             return cmd;
         }
@@ -456,24 +662,28 @@ impl WorkbenchSessionRegistry {
         let now = chrono::Utc::now().to_rfc3339();
         let (cols, rows) = initial_terminal_size(initial_cols, initial_rows);
         let terminal_command = default_terminal_command();
-        let (backend, backend_id) = match available_tmux_command() {
+        let (backend, backend_id, command) = match available_tmux_command() {
             Some(tmux) => {
                 let tmux_id = tmux_session_name(&session_id);
                 match create_tmux_session(&tmux, &tmux_id, &project.path, &terminal_command) {
-                    Ok(()) => (TMUX_BACKEND.to_string(), Some(tmux_id)),
+                    Ok(()) => {
+                        let display_command =
+                            tmux.display_command_for_session(&tmux_id, &terminal_command);
+                        (TMUX_BACKEND.to_string(), Some(tmux_id), display_command)
+                    }
                     Err(error) => {
                         tracing::warn!("工作台 tmux 后端不可用，回退普通 PTY: {error}");
-                        (RAW_PTY_BACKEND.to_string(), None)
+                        (RAW_PTY_BACKEND.to_string(), None, terminal_command.clone())
                     }
                 }
             }
-            None => (RAW_PTY_BACKEND.to_string(), None),
+            None => (RAW_PTY_BACKEND.to_string(), None, terminal_command.clone()),
         };
         let row = WorkbenchSessionRow {
             id: session_id.clone(),
             project_id: project.id.clone(),
             name: project.name.clone(),
-            command: terminal_command.clone(),
+            command,
             status: "running".to_string(),
             cols,
             rows,
@@ -513,6 +723,7 @@ impl WorkbenchSessionRegistry {
                         tracing::warn!("恢复工作台 tmux 会话失败，回退普通 PTY: {error}");
                         row.backend = RAW_PTY_BACKEND.to_string();
                         row.backend_id = None;
+                        row.command = default_terminal_command();
                     }
                 }
                 if row.backend == TMUX_BACKEND {
@@ -522,6 +733,7 @@ impl WorkbenchSessionRegistry {
                 tracing::warn!("恢复工作台终端时未找到 tmux，回退普通 PTY");
                 row.backend = RAW_PTY_BACKEND.to_string();
                 row.backend_id = None;
+                row.command = default_terminal_command();
             }
         }
 
@@ -995,6 +1207,60 @@ mod tests {
 
         assert_eq!(command, "/bin/zsh");
         assert_ne!(command, "claude");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Windows 用户的项目目录通常是盘符路径，WSL 内的 tmux 只能识别 `/mnt/<drive>/...` 路径。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 Windows 盘符路径、正斜杠路径和扩展长度路径都能转换成 WSL 可用路径。
+    #[test]
+    fn windows_project_paths_convert_to_wsl_mount_paths() {
+        assert_eq!(
+            windows_path_to_wsl_path(r"C:\Users\hans\web_project\cc-partner"),
+            Some("/mnt/c/Users/hans/web_project/cc-partner".to_string())
+        );
+        assert_eq!(windows_path_to_wsl_path(r"C:\"), Some("/mnt/c".to_string()));
+        assert_eq!(
+            windows_path_to_wsl_path("D:/work/cc-partner"),
+            Some("/mnt/d/work/cc-partner".to_string())
+        );
+        assert_eq!(
+            windows_path_to_wsl_path(r"\\?\E:\repo with space\app"),
+            Some("/mnt/e/repo with space/app".to_string())
+        );
+        assert_eq!(
+            windows_path_to_wsl_path(r"\\wsl$\Ubuntu\home\hans\repo"),
+            Some("/home/hans/repo".to_string())
+        );
+        assert_eq!(
+            windows_path_to_wsl_path(r"\\wsl.localhost\Ubuntu\home\hans\repo"),
+            Some("/home/hans/repo".to_string())
+        );
+        assert_eq!(windows_path_to_wsl_path(r"C:relative\path"), None);
+        assert_eq!(windows_path_to_wsl_path(r"\\server\share\repo"), None);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Windows 上应复用用户 WSL 里的 tmux，而不是因为宿主系统没有原生 tmux 就放弃上下文恢复。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 WSL tmux 后端描述，断言它通过 `wsl.exe --exec tmux` 调用且工作目录使用 WSL 路径。
+    #[test]
+    fn wsl_tmux_backend_invokes_tmux_through_wsl() {
+        let backend = TmuxCommand::wsl();
+
+        assert_eq!(backend.program, "wsl.exe");
+        assert_eq!(backend.prefix_args, vec!["--exec", "tmux"]);
+        assert_eq!(
+            backend.project_cwd(r"C:\Users\hans\project").unwrap(),
+            "/mnt/c/Users/hans/project"
+        );
+        assert_eq!(backend.shell_command_for_new_session("cmd.exe"), None);
+        assert_eq!(
+            backend.display_command_for_session("cc-partner-session", "cmd.exe"),
+            "wsl.exe --exec tmux attach-session -t cc-partner-session"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
