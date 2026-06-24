@@ -15,6 +15,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { Button, Card, Pill, ProgressBar } from '@/components/primitives';
 import type { PillTone } from '@/components/primitives';
 import { healthApi } from '@/api/health';
@@ -22,7 +23,6 @@ import type { ActivityStats, ActivityDetail, HealthStatus, HealthPhase } from '@
 import { HealthIcon, PauseIcon, PlayIcon } from '@/lib/icons';
 import styles from './Health.module.css';
 import { StatsChart } from './StatsChart';
-import { Settings } from './Settings';
 
 /** 页面刷新间隔(ms) */
 const REFRESH_INTERVAL_MS = 30000;
@@ -114,6 +114,7 @@ const formatClock = (seconds: number): string => {
  */
 export function Health() {
   const { t } = useTranslation(['health', 'common']);
+  const navigate = useNavigate();
   const [status, setStatus] = useState<HealthStatus | null>(null);
   const [stats, setStats] = useState<ActivityStats | null>(null);
   const [detail, setDetail] = useState<ActivityDetail | null>(null);
@@ -198,6 +199,13 @@ export function Health() {
             <p className={styles.lead}>{t('health:lead')}</p>
           </div>
           <div className={styles.headerActions}>
+            <Button
+              variant="secondary"
+              size="md"
+              onClick={() => navigate('/settings?tab=health')}
+            >
+              {t('health:goToSettings')}
+            </Button>
             <Button
               variant={status.enabled ? 'secondary' : 'primary'}
               size="md"
@@ -290,8 +298,6 @@ export function Health() {
             </Card.Body>
           </Card>
         )}
-
-        <Settings />
       </div>
     </div>
   );
