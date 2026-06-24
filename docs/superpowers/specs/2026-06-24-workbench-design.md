@@ -226,7 +226,7 @@ cc-partner 当前已经具备局域网设备发现、SSH 目标管理、Claude C
 - 管理 PTY 生命周期。
 - 写入用户输入。
 - 处理 resize。
-- 停止/重启/关闭会话。
+- 关闭会话。
 - 推送输出事件。
 - 返回会话状态。
 
@@ -236,8 +236,6 @@ cc-partner 当前已经具备局域网设备发现、SSH 目标管理、Claude C
 - `create_workbench_session(projectId, kind)`
 - `write_workbench_session_input(sessionId, data)`
 - `resize_workbench_session(sessionId, cols, rows)`
-- `stop_workbench_session(sessionId)`
-- `restart_workbench_session(sessionId)`
 - `close_workbench_session(sessionId)`
 - `rename_workbench_session(sessionId, name)`
 

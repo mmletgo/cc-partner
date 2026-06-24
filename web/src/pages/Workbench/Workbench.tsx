@@ -30,8 +30,6 @@ import {
   FileIcon,
   FolderIcon,
   PlusIcon,
-  RefreshIcon,
-  StopIcon,
   SyncIcon,
   TrashIcon,
   XIcon,
@@ -850,62 +848,6 @@ export function Workbench() {
     }
   }, []);
 
-  const handleStopSession = useCallback(
-    async (sessionId: string) => {
-      try {
-        const session = await workbenchApi.sessions.stop(sessionId);
-        setSessions((current) =>
-          current.map((item) => (item.id === session.id ? session : item)),
-        );
-      } catch (error) {
-        setSessionError(
-          displayErrorMessage(
-            error,
-            t('workbench:errors.stopSession'),
-            desktopUnavailableMessage,
-          ),
-        );
-      }
-    },
-    [desktopUnavailableMessage, t],
-  );
-
-  const handleRestartSession = useCallback(
-    async (sessionId: string) => {
-      try {
-        setSessionBusy(true);
-        setSessionError(null);
-        const initialSize = measureInitialTerminalSize(terminalPanelRef.current, terminalLayout);
-        const session = await workbenchApi.sessions.restart(sessionId, initialSize);
-        setSessions((current) => [
-          ...current.filter((item) => item.id !== sessionId && item.id !== session.id),
-          session,
-        ]);
-        knownSessionIdsRef.current.delete(sessionId);
-        knownSessionIdsRef.current.add(session.id);
-        setTerminalBuffers((current) => {
-          const next = { ...current };
-          delete next[sessionId];
-          next[session.id] = '';
-          return next;
-        });
-        focusSession(session.id);
-        setTerminalRevision((current) => current + 1);
-      } catch (error) {
-        setSessionError(
-          displayErrorMessage(
-            error,
-            t('workbench:errors.restartSession'),
-            desktopUnavailableMessage,
-          ),
-        );
-      } finally {
-        setSessionBusy(false);
-      }
-    },
-    [desktopUnavailableMessage, focusSession, t, terminalLayout],
-  );
-
   const handleCloseSession = useCallback(
     async (sessionId: string) => {
       try {
@@ -1150,17 +1092,6 @@ export function Workbench() {
               <span className={styles.sessionName}>{session.name}</span>
               <Button
                 variant="icon"
-                icon={<StopIcon />}
-                title={t('workbench:stopTerminal')}
-                aria-label={t('workbench:stopTerminal')}
-                disabled={session.status !== 'running'}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void handleStopSession(session.id);
-                }}
-              />
-              <Button
-                variant="icon"
                 icon={<XIcon />}
                 title={t('workbench:closeTerminal')}
                 aria-label={t('workbench:closeTerminal')}
@@ -1319,25 +1250,6 @@ export function Workbench() {
                 onClick={() => void handleRenameSession()}
               >
                 {t('workbench:renameSession')}
-              </Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                icon={<RefreshIcon />}
-                loading={sessionBusy}
-                disabled={!activeSession}
-                onClick={() => activeSession && void handleRestartSession(activeSession.id)}
-              >
-                {t('workbench:restartTerminal')}
-              </Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                icon={<StopIcon />}
-                disabled={!activeSession || activeSession.status !== 'running'}
-                onClick={() => activeSession && void handleStopSession(activeSession.id)}
-              >
-                {t('workbench:stopTerminal')}
               </Button>
               <Button
                 size="sm"

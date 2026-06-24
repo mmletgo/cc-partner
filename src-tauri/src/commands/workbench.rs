@@ -57,20 +57,6 @@ where
         .map_err(|error| AppError::generic(format!("工作台文件任务执行失败: {error}")))?
 }
 
-/// Business Logic（为什么需要这个函数）:
-///     会话操作后需要返回最新 DTO，供前端刷新 tab 状态和右侧检查器。
-///
-/// Code Logic（这个函数做什么）:
-///     从 registry 列表中按 session_id 查找会话，缺失时返回 not_found。
-fn find_session(state: &AppState, session_id: &str) -> Result<WorkbenchSessionDto, AppError> {
-    state
-        .workbench_sessions
-        .list(None)
-        .into_iter()
-        .find(|session| session.id == session_id)
-        .ok_or_else(|| AppError::not_found("工作台会话不存在"))
-}
-
 /// 列出工作台最近项目。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -254,56 +240,6 @@ pub async fn resize_workbench_session(
 ) -> Result<serde_json::Value, AppError> {
     state.workbench_sessions.resize(&session_id, cols, rows)?;
     Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
-}
-
-/// 停止工作台终端进程。
-///
-/// Business Logic（为什么需要这个函数）:
-///     用户需要终止当前 Claude Code 会话，但可以暂时保留 tab 查看退出状态。
-///
-/// Code Logic（这个函数做什么）:
-///     调用 registry stop 终止进程，并返回当前会话 DTO；退出 watcher 随后会发 exited 事件。
-#[tauri::command]
-pub async fn stop_workbench_session(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<WorkbenchSessionDto, AppError> {
-    state.workbench_sessions.stop(&session_id)?;
-    find_session(&state, &session_id)
-}
-
-/// 重启工作台终端进程。
-///
-/// Business Logic（为什么需要这个函数）:
-///     用户需要在同一个项目上下文中重新启动 Claude Code 会话，以恢复退出或卡住的终端。
-///
-/// Code Logic（这个函数做什么）:
-///     读取旧会话的项目和名称，关闭旧 PTY 后按前端或旧会话尺寸创建新会话，并把名称继承给新会话返回。
-#[tauri::command]
-pub async fn restart_workbench_session(
-    state: State<'_, AppState>,
-    app_handle: AppHandle,
-    session_id: String,
-    initial_cols: Option<u16>,
-    initial_rows: Option<u16>,
-) -> Result<WorkbenchSessionDto, AppError> {
-    let previous = find_session(&state, &session_id)?;
-    let project = get_project(&state, &previous.project_id).await?;
-    let cli_path = {
-        let config = state.config.read().expect("config 读锁中毒");
-        config.github_trending.claude_cli_path.clone()
-    };
-    state.workbench_sessions.close(&session_id)?;
-    let restarted = state.workbench_sessions.create(
-        app_handle,
-        project,
-        cli_path,
-        initial_cols.or(Some(previous.cols)),
-        initial_rows.or(Some(previous.rows)),
-    )?;
-    state
-        .workbench_sessions
-        .rename(&restarted.id, &previous.name)
 }
 
 /// 关闭工作台终端 tab。

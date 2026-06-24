@@ -102,7 +102,6 @@ list_workbench_sessions(projectId?: string): WorkbenchSession[]
 create_workbench_session(projectId: string): WorkbenchSession
 write_workbench_session_input(sessionId: string, data: string): { ok: boolean }
 resize_workbench_session(sessionId: string, cols: number, rows: number): { ok: boolean }
-stop_workbench_session(sessionId: string): { ok: boolean }
 close_workbench_session(sessionId: string): { ok: boolean }
 rename_workbench_session(sessionId: string, name: string): WorkbenchSession
 
@@ -746,7 +745,6 @@ pub fn list(&self, project_id: Option<&str>) -> Vec<WorkbenchSessionDto>
 pub fn create(&self, app: AppHandle, project: WorkbenchProjectRow, cli_path: String) -> Result<WorkbenchSessionDto, AppError>
 pub fn write_input(&self, session_id: &str, data: &str) -> Result<(), AppError>
 pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), AppError>
-pub fn stop(&self, session_id: &str) -> Result<(), AppError>
 pub fn close(&self, session_id: &str) -> Result<(), AppError>
 pub fn rename(&self, session_id: &str, name: &str) -> Result<WorkbenchSessionDto, AppError>
 ```
@@ -1026,7 +1024,6 @@ export const workbenchApi = {
     invoke<{ ok: boolean }>('write_workbench_session_input', { sessionId, data }),
   resizeSession: (sessionId: string, cols: number, rows: number) =>
     invoke<{ ok: boolean }>('resize_workbench_session', { sessionId, cols, rows }),
-  stopSession: (sessionId: string) => invoke<{ ok: boolean }>('stop_workbench_session', { sessionId }),
   closeSession: (sessionId: string) => invoke<{ ok: boolean }>('close_workbench_session', { sessionId }),
   renameSession: (sessionId: string, name: string) =>
     invoke<WorkbenchSession>('rename_workbench_session', { sessionId, name }),

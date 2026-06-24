@@ -71,18 +71,6 @@ export const workbenchApi = {
         rows,
       }),
 
-    /** 停止终端进程，但保留会话 tab。 */
-    stop: (sessionId: string) =>
-      invoke<WorkbenchSession>('stop_workbench_session', { sessionId }),
-
-    /** 重启终端进程，并返回新建的继承命名会话。 */
-    restart: (sessionId: string, initialSize?: WorkbenchTerminalSize) =>
-      invoke<WorkbenchSession>('restart_workbench_session', {
-        sessionId,
-        initialCols: initialSize?.cols ?? null,
-        initialRows: initialSize?.rows ?? null,
-      }),
-
     /** 关闭终端 tab，并释放后端 PTY 资源。 */
     close: (sessionId: string) =>
       invoke<{ ok: boolean; sessionId: string }>('close_workbench_session', {

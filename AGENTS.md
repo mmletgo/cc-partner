@@ -419,7 +419,7 @@ node scripts/bump-version.mjs <新版本号>
 | check_update / download_update / get_download_status / cancel_download / install_update | 自动更新 5 命令 |
 | start_region_capture / get_region_snapshot / save_clipboard_image / cancel_region_capture | 区域截图 |
 | list_github_trending_repos / get_github_trending_config / get_default_github_trending_config / update_github_trending_config / test_claude_cli | GitHub 周热门项目 + Claude CLI 双语解说配置 / 恢复默认 |
-| list_workbench_projects / add_workbench_project / remove_workbench_project / touch_workbench_project / list_workbench_sessions / create_workbench_session / write_workbench_session_input / resize_workbench_session / stop_workbench_session / restart_workbench_session / close_workbench_session / rename_workbench_session / list_workbench_dir / get_workbench_path_info / create_workbench_file / create_workbench_dir / rename_workbench_path / delete_workbench_path | 工作台本机项目、Claude Code PTY 会话和项目文件树 |
+| list_workbench_projects / add_workbench_project / remove_workbench_project / touch_workbench_project / list_workbench_sessions / create_workbench_session / write_workbench_session_input / resize_workbench_session / close_workbench_session / rename_workbench_session / list_workbench_dir / get_workbench_path_info / create_workbench_file / create_workbench_dir / rename_workbench_path / delete_workbench_path | 工作台本机项目、Claude Code PTY 会话和项目文件树 |
 
 ### 8.3 P2P HTTP 端点（对端调用，由 `src-tauri/src/net/routes/` 注册）
 
