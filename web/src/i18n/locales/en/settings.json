@@ -71,7 +71,7 @@
   },
   "health": {
     "title": "Health reminder",
-    "subtitle": "Tune sedentary-monitor work/break thresholds, reminder style, water reminders, quiet hours, and privacy.",
+    "subtitle": "Tune health monitoring work/break thresholds, water interval, quiet hours, notifications, and privacy.",
     "appliedConfig": "Applied config",
     "applyFailed": "Failed to apply health config"
   },

@@ -8,7 +8,8 @@
  * Code Logic（做什么）:
  *   先注册 css-stub loader(HealthPanel.tsx 经 @/components/primitives 间接 import *.module.css,
  *   tsx 无 CSS loader,需 stub 成空对象);再动态 import HealthPanel 取 timePartsToConfig,
- *   验证空值/null 映射、四个 section、四个 select、00-23 小时选项以及健康网格 CSS 覆盖顺序。
+ *   验证空值/null 映射、三个 section、四个 select、00-23 小时选项以及健康网格 CSS 覆盖顺序。
+ *   健康监测开启后久坐/喝水/全屏遮罩始终启用,因此不应再渲染喝水启用或全屏遮罩开关。
  *   node:module 这一行用 @ts-expect-error 抑制类型错误(见下方行内注释)。
  */
 
@@ -74,17 +75,31 @@ const rendered = renderToStaticMarkup(
 );
 
 const sectionCount = rendered.match(/<section/g)?.length ?? 0;
-if (sectionCount !== 4) {
-  throw new Error(`HealthPanel expected 4 settings sections, got ${sectionCount}`);
+if (sectionCount !== 3) {
+  throw new Error(`HealthPanel expected 3 settings sections, got ${sectionCount}`);
 }
 
-for (const title of ['健康提醒', '提醒方向', '免打扰', '通知与隐私']) {
+for (const title of ['健康提醒', '免打扰', '通知与隐私']) {
   if (!rendered.includes(title)) {
     throw new Error(`HealthPanel missing section title: ${title}`);
   }
 }
 
-console.log('HealthPanel layout: 4 section cards rendered');
+if (rendered.includes('提醒方向')) {
+  throw new Error('HealthPanel must not render a separate reminder style section');
+}
+
+const waterIntervalIndex = rendered.indexOf('喝水提醒间隔(分钟)');
+const quietHoursIndex = rendered.indexOf('settings-health-quiet-hours-title');
+if (waterIntervalIndex === -1 || quietHoursIndex === -1 || waterIntervalIndex > quietHoursIndex) {
+  throw new Error('HealthPanel should render water interval inside the first health reminder section');
+}
+
+if (rendered.includes('全屏遮罩提醒') || rendered.includes('按间隔显示应用内喝水提醒。')) {
+  throw new Error('HealthPanel must not render fullscreen or water reminder enablement toggles');
+}
+
+console.log('HealthPanel layout: 3 section cards rendered and water interval stays in health reminder section');
 
 const selectCount = rendered.match(/<select/g)?.length ?? 0;
 if (selectCount !== 4) {

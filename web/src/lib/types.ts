@@ -417,11 +417,11 @@ export interface HealthConfig {
   dndStart: string | null;
   /** 免打扰结束 "HH:MM"，null 表示不限制 */
   dndEnd: string | null;
-  /** 是否开启喝水提醒 */
+  /** 喝水提醒历史开关；业务上随健康监测固定启用，不再展示独立设置项 */
   waterEnabled: boolean;
   /** 喝水提醒间隔（秒） */
   waterIntervalSeconds: number;
-  /** 是否开启全屏遮罩提醒（触发久坐提醒时每屏弹透明置顶遮罩） */
+  /** 全屏遮罩历史开关；业务上随健康监测固定启用，不再展示独立设置项 */
   reminderFullscreen: boolean;
 }
 

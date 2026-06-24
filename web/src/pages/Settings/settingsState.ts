@@ -77,7 +77,7 @@ export const PENDING_HEALTH_FORM: HealthForm = {
   dndEnd: null,
   waterEnabled: true,
   waterIntervalSeconds: 60 * 60,
-  reminderFullscreen: false,
+  reminderFullscreen: true,
 };
 
 /** 快捷键字段定义（值由运行平台或后端配置决定，文案走 t） */
@@ -199,15 +199,19 @@ export function githubTrendingConfigToForm(config: GithubTrendingConfig | null):
  * 将后端 HealthConfig 映射为健康 tab 受控表单值
  *
  * Business Logic（为什么需要）:
- *   健康 tab 需用同一套映射处理当前配置和恢复默认配置,与其他 tab 的 *ConfigToForm 模式对齐;
- *   表单层持有独立拷贝,避免外部直接改到后端返回对象或占位常量。
+ *   健康 tab 需用同一套映射处理当前配置和恢复默认配置,与其他 tab 的 *ConfigToForm 模式对齐。
+ *   喝水提醒和全屏遮罩现在随健康监测固定启用,旧配置中的 false 不能继续进入表单或提交。
  *
  * Code Logic（做什么）:
- *   null 返回占位默认的新拷贝;非 null 返回字段拷贝(恒等映射 + null 安全,dndStart/dndEnd 等可空字段原样保留)。
+ *   null 返回占位默认的新拷贝;非 null 返回字段拷贝,并把 waterEnabled/reminderFullscreen 归一为 true。
  */
 export function healthConfigToForm(config: HealthConfig | null): HealthForm {
-  if (!config) return { ...PENDING_HEALTH_FORM };
-  return { ...config };
+  const source = config ?? PENDING_HEALTH_FORM;
+  return {
+    ...source,
+    waterEnabled: true,
+    reminderFullscreen: true,
+  };
 }
 
 /**

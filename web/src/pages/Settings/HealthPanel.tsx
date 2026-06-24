@@ -2,8 +2,8 @@
  * 健康提醒设置面板 - 设置页「健康提醒」tab 的纯渲染组件
  *
  * Business Logic（为什么需要这个组件）:
- *   健康提醒配置从 Health 监控页迁移到设置页;用户在此表单编辑久坐监测的全部参数
- *   (工作/休息阈值、提醒方式、喝水、免打扰、隐私),通过「恢复默认」「应用配置」提交,
+ *   健康提醒配置从 Health 监控页迁移到设置页;用户在此表单编辑健康监测参数
+ *   (工作/休息阈值、喝水间隔、免打扰、通知与隐私),通过「恢复默认」「应用配置」提交,
  *   与同步/AI tab 的表单编辑 + 手动应用模式一致。本组件只负责渲染,状态由 Settings.tsx 顶层持有。
  *
  * Code Logic（这个组件做什么）:
@@ -121,7 +121,7 @@ interface HealthSectionProps {
  * 渲染开关行
  *
  * Business Logic（为什么需要这个组件）:
- *   健康配置的布尔项(监测开关/通知/全屏/喝水/记录窗口标题)需要统一的开关交互,
+ *   健康配置的布尔项(监测开关/通知/记录窗口标题)需要统一的开关交互,
  *   复用设置页 toggleRow + Pill 视觉,与同步/AI tab 一致。
  *
  * Code Logic（这个组件做什么）:
@@ -235,7 +235,7 @@ function TimeRow({ label, value, onChange }: TimeRowProps) {
  *
  * Business Logic（为什么需要这个组件）:
  *   健康提醒 tab 的字段较多,单一卡片连续堆叠会显得拥挤;按常规设置页的方式拆成
- *   「健康提醒 / 提醒方向 / 免打扰 / 通知与隐私」四个栏目,便于扫描和定位。
+ *   「健康提醒 / 免打扰 / 通知与隐私」三个栏目,便于扫描和定位。
  *
  * Code Logic（这个组件做什么）:
  *   渲染语义化 section,内部复用 Card.Header/Card.Body;标题 id 与 aria-labelledby 关联。
@@ -262,14 +262,14 @@ function HealthSection({ id, title, lead, children }: HealthSectionProps) {
  * 健康提醒设置面板组件
  *
  * Business Logic（为什么需要这个组件）:
- *   设置页健康 tab 的纯渲染入口,聚合健康提醒/提醒方向/免打扰/通知与隐私四组受控字段,
+ *   设置页健康 tab 的纯渲染入口,聚合健康提醒/免打扰/通知与隐私三组受控字段,
  *   底部提供「恢复默认」「应用配置」按钮 + 已应用配置快照 + 错误提示。
  *
  * Code Logic（这个组件做什么）:
  *   useTranslation 在顶部(无 early return,项目规则 20);
- *   渲染四个 section Card,字段 onChange 经 onPatch 浅合并回传父组件。
+ *   渲染三个 section Card,字段 onChange 经 onPatch 浅合并回传父组件。
  *
- * @returns 健康提醒/提醒方向/免打扰/通知与隐私 四组受控字段 + 恢复默认/应用配置按钮
+ * @returns 健康提醒/免打扰/通知与隐私 三组受控字段 + 恢复默认/应用配置按钮
  */
 export function HealthPanel({
   form,
@@ -313,31 +313,14 @@ export function HealthPanel({
             value={Math.round(form.breakSeconds / 60)}
             onChange={(v) => onPatch({ breakSeconds: v * 60 })}
           />
-        </div>
-      </HealthSection>
-
-      <HealthSection id="settings-health-reminder-style" title={t('health:reminderGroup')}>
-        <div className={styles.toggleList}>
-          <ToggleRow
-            label={t('health:reminderFullscreen')}
-            helper={t('health:fullscreenDescription')}
-            checked={form.reminderFullscreen}
-            onToggle={(v) => onPatch({ reminderFullscreen: v })}
-          />
-          <ToggleRow
-            label={t('health:waterEnabled')}
-            helper={t('health:waterDescription')}
-            checked={form.waterEnabled}
-            onToggle={(v) => onPatch({ waterEnabled: v })}
+          <NumberRow
+            label={t('health:waterIntervalMinutes')}
+            helper={t('health:waterIntervalDescription')}
+            min={1}
+            value={Math.round(form.waterIntervalSeconds / 60)}
+            onChange={(v) => onPatch({ waterIntervalSeconds: v * 60 })}
           />
         </div>
-        <NumberRow
-          label={t('health:waterIntervalMinutes')}
-          helper={t('health:waterIntervalDescription')}
-          min={1}
-          value={Math.round(form.waterIntervalSeconds / 60)}
-          onChange={(v) => onPatch({ waterIntervalSeconds: v * 60 })}
-        />
       </HealthSection>
 
       <HealthSection id="settings-health-quiet-hours" title={t('health:quietHoursGroup')}>

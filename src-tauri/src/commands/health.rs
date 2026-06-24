@@ -4,6 +4,7 @@
 //!     前端轮询 `get_health_status` 展示当前工作/休息相位与开关，操作按钮触发
 //!     `toggle_health_enabled`/`toggle_health_paused`/`snooze_reminder`/`skip_reminder`，
 //!     配置项变更走 `update_health_config`，统计页用 `get_activity_stats` 拉活跃/闲置分钟数。
+//!     喝水提醒与全屏遮罩随健康监测固定启用，旧配置中的关闭值会在命令边界归一。
 //!
 //! Code Logic: 通过 `State<'_, AppState>` 注入共享状态；DTO 一律 `#[serde(rename_all="camelCase")]`
 //!     对齐前端 types。配置类命令直接读写 `state.config`（RwLock）并 `cfg.save()` 落盘；
@@ -21,7 +22,7 @@ use crate::state::AppState;
 /// 健康提醒配置 DTO（camelCase，对齐前端）。
 ///
 /// Business Logic: 前端设置页用一份扁平结构展示/编辑全部健康配置。
-/// Code Logic: 字段与 `HealthConfig` 一一对应，`From<HealthConfig>` 完成转换。
+/// Code Logic: 字段与 `HealthConfig` 基本对应，`From<HealthConfig>` 完成转换并把固定启用字段归一为 true。
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthConfigDto {
@@ -41,11 +42,11 @@ pub struct HealthConfigDto {
     pub dnd_start: Option<String>,
     /// 免打扰结束 "HH:MM"（不含），支持跨午夜。
     pub dnd_end: Option<String>,
-    /// 喝水提醒开关。
+    /// 喝水提醒历史开关；前端不再展示，命令返回固定 true。
     pub water_enabled: bool,
     /// 喝水提醒间隔（秒）。
     pub water_interval_seconds: i64,
-    /// 全屏遮罩提醒开关(Plan 2);开启后触发久坐提醒时每屏弹透明置顶遮罩窗口。
+    /// 全屏遮罩提醒历史开关；前端不再展示，命令返回固定 true。
     pub reminder_fullscreen: bool,
 }
 impl From<HealthConfig> for HealthConfigDto {
@@ -60,9 +61,9 @@ impl From<HealthConfig> for HealthConfigDto {
             notify_enabled: h.notify_enabled,
             dnd_start: h.dnd_start,
             dnd_end: h.dnd_end,
-            water_enabled: h.water_enabled,
+            water_enabled: true,
             water_interval_seconds: h.water_interval_seconds,
-            reminder_fullscreen: h.reminder_fullscreen,
+            reminder_fullscreen: true,
         }
     }
 }
@@ -224,7 +225,7 @@ pub async fn skip_reminder(state: State<'_, AppState>) -> Result<(), AppError> {
 /// 更新健康提醒配置（整体覆盖写 config.health 并落盘）。
 ///
 /// Business Logic: 前端设置页「保存」；把 DTO 写回磁盘配置并持久化。
-/// Code Logic: 拿 config 写锁逐字段覆盖 + `cfg.save()`，返回更新后的配置 DTO。
+/// Code Logic: 拿 config 写锁逐字段覆盖 + 固定启用字段归一为 true + `cfg.save()`，返回更新后的配置 DTO。
 #[tauri::command]
 pub async fn update_health_config(
     state: State<'_, AppState>,
@@ -240,9 +241,9 @@ pub async fn update_health_config(
         cfg.health.notify_enabled = config.notify_enabled;
         cfg.health.dnd_start = config.dnd_start.clone();
         cfg.health.dnd_end = config.dnd_end.clone();
-        cfg.health.water_enabled = config.water_enabled;
+        cfg.health.water_enabled = true;
         cfg.health.water_interval_seconds = config.water_interval_seconds;
-        cfg.health.reminder_fullscreen = config.reminder_fullscreen;
+        cfg.health.reminder_fullscreen = true;
         cfg.save()?;
     }
     Ok(state.config.read().unwrap().health.clone().into())
@@ -378,6 +379,6 @@ mod default_config_tests {
         assert_eq!(dto.dnd_end, None);
         assert!(dto.water_enabled);
         assert_eq!(dto.water_interval_seconds, 60 * 60);
-        assert!(!dto.reminder_fullscreen);
+        assert!(dto.reminder_fullscreen);
     }
 }

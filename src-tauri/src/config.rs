@@ -204,8 +204,9 @@ impl Default for GithubTrendingConfig {
 /// 健康提醒配置(久坐监测 + 喝水提醒)。
 ///
 /// Business Logic（为什么需要这个结构）:
-///     M10 健康提醒功能需要可配置的久坐监测参数(工作窗口、有效休息时长、明细保留天数)、
-///     系统通知开关与免打扰时段。这些偏好需跨多次运行持久化,且旧用户升级时其 config.json
+///     M10 健康提醒功能需要可配置的久坐监测参数(工作窗口、有效休息时长、喝水间隔、明细保留天数)、
+///     系统通知开关与免打扰时段。喝水提醒与全屏遮罩随健康监测固定启用,不再给用户独立开关。
+///     这些偏好需跨多次运行持久化,且旧用户升级时其 config.json
 ///     尚无 health 字段,故每个字段均用 `#[serde(default = "...")]` 回退默认值,保证向后兼容。
 ///
 /// Code Logic（这个结构做什么）:
@@ -237,15 +238,15 @@ pub struct HealthConfig {
     /// 免打扰结束 "HH:MM"(不含),支持跨午夜(如 22:00-07:00)
     #[serde(default)]
     pub dnd_end: Option<String>,
-    /// 喝水提醒开关,默认开启(用户决策:久坐与喝水双提醒)
+    /// 喝水提醒历史开关,运行时固定按健康监测总开关启用;保留字段用于读取旧配置。
     #[serde(default = "default_true")]
     pub water_enabled: bool,
     /// 喝水提醒间隔(秒),默认 1 小时(3600 秒)
     #[serde(default = "default_water_interval")]
     pub water_interval_seconds: i64,
-    /// 全屏遮罩提醒开关(Plan 2),默认关闭;开启后触发久坐提醒时每屏弹出透明置顶遮罩窗口。
-    /// `#[serde(default)]` 兼容旧 config.json 无此字段(回退 false)。
-    #[serde(default)]
+    /// 全屏遮罩提醒历史开关,运行时固定启用;保留字段用于读取旧配置和 DTO 兼容。
+    /// 缺字段时回退 true,确保升级后默认启动全屏遮罩提醒。
+    #[serde(default = "default_true")]
     pub reminder_fullscreen: bool,
 }
 
@@ -253,7 +254,8 @@ impl Default for HealthConfig {
     /// 提供健康提醒配置全套默认值。
     ///
     /// Business Logic: 久坐监测默认开启,45 分钟工作窗口 + 5 分钟有效休息,
-    ///                  记录窗口标题,明细保留 90 天,通知开启,无免打扰。
+    ///                  喝水提醒与全屏遮罩随健康监测启用,记录窗口标题,
+    ///                  明细保留 90 天,通知开启,无免打扰。
     /// Code Logic: 返回各字段默认值常量,与 serde 单字段缺失时的 default_* 回退值一致。
     fn default() -> Self {
         Self {
@@ -267,14 +269,14 @@ impl Default for HealthConfig {
             dnd_end: None,
             water_enabled: true,
             water_interval_seconds: 60 * 60,
-            reminder_fullscreen: false,
+            reminder_fullscreen: true,
         }
     }
 }
 
 /// serde 单字段缺失回退:布尔默认 true。
 ///
-/// Business Logic: enabled/record_window_title/notify_enabled 三个开关默认开启。
+/// Business Logic: enabled/record_window_title/notify_enabled 等布尔偏好默认开启。
 /// Code Logic: 返回 `true` 字面量,供 `#[serde(default = "default_true")]` 调用。
 fn default_true() -> bool {
     true
@@ -440,6 +442,8 @@ mod tests {
         assert!(h.record_window_title);
         assert_eq!(h.retain_days, 90);
         assert!(h.dnd_start.is_none());
+        assert!(h.water_enabled);
+        assert!(h.reminder_fullscreen);
     }
 
     #[test]

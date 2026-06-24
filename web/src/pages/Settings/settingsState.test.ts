@@ -152,14 +152,18 @@ function testHealthConfigToFormNull(): void {
   const form = healthConfigToForm(null);
   assertDeepEqual(form, PENDING_HEALTH_FORM);
   assertNotSameRef(form, PENDING_HEALTH_FORM);
+  assertDeepEqual(form.waterEnabled, true);
+  assertDeepEqual(form.reminderFullscreen, true);
 }
 
 /**
  * Business Logic（为什么需要）:
- *   已有后端配置(含部分字段为 null,如 dndStart/dndEnd)需原样进入表单,且恒等映射不可返回同一引用。
+ *   已有后端配置(含部分字段为 null,如 dndStart/dndEnd)需进入表单,且健康监测开启后
+ *   喝水提醒与全屏遮罩不再允许单独关闭,表单层要归一为 true。
  *
  * Code Logic（做什么）:
- *   构造含 null dnd 的 HealthConfig,断言返回字段深度相等且非同一引用。
+ *   构造含 null dnd 且旧开关为 false 的 HealthConfig,断言返回对象非同一引用,
+ *   其他字段保持原值,waterEnabled/reminderFullscreen 被归一为 true。
  */
 function testHealthConfigToFormConfig(): void {
   const cfg: HealthConfig = {
@@ -173,10 +177,14 @@ function testHealthConfigToFormConfig(): void {
     dndEnd: null,
     waterEnabled: false,
     waterIntervalSeconds: 1800,
-    reminderFullscreen: true,
+    reminderFullscreen: false,
   };
   const form = healthConfigToForm(cfg);
-  assertDeepEqual(form, cfg);
+  assertDeepEqual(form, {
+    ...cfg,
+    waterEnabled: true,
+    reminderFullscreen: true,
+  });
   assertNotSameRef(form, cfg);
 }
 

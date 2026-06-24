@@ -28,33 +28,33 @@ impl WaterState {
     }
 }
 
-/// 是否该提醒喝水:启用 + 超过间隔 + 无未响应提醒。
+/// 是否该提醒喝水:超过间隔 + 无未响应提醒。
 ///
-/// Business Logic: 仅当喝水提醒开启、距上次喝水已达设定间隔、且当前没有未响应的
-///                  喝水提醒时,才应触发新提醒(三者缺一不可,避免打扰/重复)。
-/// Code Logic: 纯函数判定 `enabled && !pending && (now - last_drink) >= interval`。
-pub fn should_remind_water(state: &WaterState, now_ts: i64, enabled: bool, interval: i64) -> bool {
-    enabled && !state.pending_remind && (now_ts - state.last_drink_ts) >= interval
+/// Business Logic: 喝水提醒随健康监测总开关固定启用;调用方已在监测关闭/暂停时提前返回。
+///                  本函数只判断距上次喝水是否已达设定间隔,以及当前是否没有未响应提醒。
+/// Code Logic: 纯函数判定 `!pending && (now - last_drink) >= interval`。
+pub fn should_remind_water(state: &WaterState, now_ts: i64, interval: i64) -> bool {
+    !state.pending_remind && (now_ts - state.last_drink_ts) >= interval
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn remind_after_interval_when_enabled() {
+    fn remind_after_interval() {
         let s = WaterState::new(0);
-        assert!(!should_remind_water(&s, 100, true, 3600)); // 未到间隔
-        assert!(should_remind_water(&s, 3600, true, 3600)); // 到间隔
+        assert!(!should_remind_water(&s, 100, 3600)); // 未到间隔
+        assert!(should_remind_water(&s, 3600, 3600)); // 到间隔
     }
     #[test]
     fn no_remind_when_pending() {
         let mut s = WaterState::new(0);
         s.pending_remind = true;
-        assert!(!should_remind_water(&s, 99999, true, 3600));
+        assert!(!should_remind_water(&s, 99999, 3600));
     }
     #[test]
-    fn no_remind_when_disabled() {
+    fn remind_is_controlled_by_health_monitoring_not_a_water_switch() {
         let s = WaterState::new(0);
-        assert!(!should_remind_water(&s, 99999, false, 3600));
+        assert!(should_remind_water(&s, 99999, 3600));
     }
 }

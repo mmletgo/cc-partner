@@ -50,7 +50,7 @@ export const healthApi = {
   snoozeWater: (minutes: number) =>
     invoke<void>('snooze_water_reminder', { minutes }),
 
-  /** 整体覆盖 config.health（工作窗口/休息/通知/记录标题/免打扰/保留天数） */
+  /** 整体覆盖 config.health（工作窗口/休息/喝水间隔/通知/记录标题/免打扰/保留天数；固定启用字段由后端归一） */
   updateConfig: (config: HealthConfig) =>
     invoke<HealthConfig>('update_health_config', { config }),
 

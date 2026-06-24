@@ -149,7 +149,7 @@ async fn handle_sample(
     };
 
     if should_remind {
-        // 贪睡未到期则静默;免打扰时段静默;notify_enabled 关闭则不 emit。
+        // 贪睡未到期则静默;免打扰时段静默;notify_enabled 仅控制系统通知事件,全屏遮罩固定启用。
         let snoozed = state
             .health
             .snooze_until
@@ -157,27 +157,25 @@ async fn handle_sample(
             .unwrap()
             .is_some_and(|t| t > now);
         let dnd = is_in_dnd(now, cfg.dnd_start.as_deref(), cfg.dnd_end.as_deref());
-        if !snoozed && !dnd && cfg.notify_enabled {
-            // emit 事件载荷;前端 HealthReminderListener 监听后弹 i18n 系统通知(统一通知出口),
-            // 并提供贪睡/跳过操作。后端不再发系统通知(避免双通知)。
-            let _ = app.emit(
-                "health:reminder",
-                serde_json::json!({ "workWindowSeconds": cfg.work_window_seconds }),
-            );
-            // Plan 2: 开启全屏遮罩开关时,emit 后额外每屏弹出透明置顶遮罩窗口强制打断。
-            if cfg.reminder_fullscreen {
-                if let Err(e) = open_health_overlay(app, "reminder") {
-                    tracing::warn!("打开全屏健康遮罩失败: {e}");
-                }
+        if !snoozed && !dnd {
+            if cfg.notify_enabled {
+                // emit 事件载荷;前端 HealthReminderListener 监听后弹 i18n 系统通知(统一通知出口)。
+                let _ = app.emit(
+                    "health:reminder",
+                    serde_json::json!({ "workWindowSeconds": cfg.work_window_seconds }),
+                );
+            }
+            // 全屏遮罩随健康监测固定启用,不再受独立配置项控制。
+            if let Err(e) = open_health_overlay(app, "reminder") {
+                tracing::warn!("打开全屏健康遮罩失败: {e}");
             }
         }
     }
 
-    // 喝水提醒:启用 + 超过间隔 + 无未响应提醒时,置 pending 并(非 DND)emit health:water。
+    // 喝水提醒:健康监测启用 + 超过间隔 + 无未响应提醒时,置 pending 并(非 DND)提醒。
     if should_remind_water(
         &state.health.water.lock().unwrap(),
         now,
-        cfg.water_enabled,
         cfg.water_interval_seconds,
     ) {
         {
@@ -186,15 +184,14 @@ async fn handle_sample(
         }
         let dnd = is_in_dnd(now, cfg.dnd_start.as_deref(), cfg.dnd_end.as_deref());
         if !dnd {
-            // emit 喝水事件;前端 HealthReminderListener 监听后弹 i18n 系统通知(统一通知出口)。
-            // 后端不再发系统通知(避免双通知)。
-            let _ = app.emit("health:water", serde_json::json!({}));
-            // Plan 2: 开启全屏遮罩开关时,emit 后额外每屏弹出透明置顶遮罩窗口强制打断
-            // (与久坐提醒同 gate 同模式,type=water)。
-            if cfg.reminder_fullscreen {
-                if let Err(e) = open_health_overlay(app, "water") {
-                    tracing::warn!("打开全屏健康遮罩失败: {e}");
-                }
+            if cfg.notify_enabled {
+                // emit 喝水事件;前端 HealthReminderListener 监听后弹 i18n 系统通知(统一通知出口)。
+                // 后端不再发系统通知(避免双通知)。
+                let _ = app.emit("health:water", serde_json::json!({}));
+            }
+            // 全屏遮罩随健康监测固定启用,喝水提醒同样打开 type=water 遮罩。
+            if let Err(e) = open_health_overlay(app, "water") {
+                tracing::warn!("打开全屏健康遮罩失败: {e}");
             }
         }
     }
@@ -209,7 +206,7 @@ async fn handle_sample(
 
 /// 打开全屏健康提醒遮罩窗口(每屏一个,复用截图透明窗口构建模式)。
 ///
-/// Business Logic: 用户开启 `reminder_fullscreen` 后,久坐/喝水提醒触发时需在每块屏幕覆盖
+/// Business Logic: 健康监测启用后,久坐/喝水提醒触发时需在每块屏幕覆盖
 ///     一个透明置顶遮罩窗口强制打断,展示推迟/跳过(久坐另有「开始休息」倒计时;喝水另有
 ///     「已饮水」/延迟/跳过)按钮。macOS 单窗口不能跨屏(与截图同理),故枚举每块显示器建独立窗口。
 /// Code Logic: 枚举 `xcap::Monitor::all()`,每个显示器用 `WebviewWindowBuilder` 建
