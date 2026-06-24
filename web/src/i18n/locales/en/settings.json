@@ -54,12 +54,12 @@
     "appliedConfig": "Applied config"
   },
   "githubTrending": {
-    "title": "GitHub Trending / Claude explanations",
-    "subtitle": "The homepage fetches GitHub weekly trending repositories once per day. When enabled, the local Claude Code CLI generates bilingual explanations and caches them locally.",
-    "aiEnabled": { "label": "Enable Claude explanations", "helper": "When off, the homepage still shows GitHub descriptions but does not call Claude CLI." },
-    "claudeCliPath": { "label": "Claude CLI path", "helper": "Use claude, or a full path such as /home/you/.local/bin/claude." },
-    "claudeModel": { "label": "Model", "helper": "Claude Code CLI model alias or full model name. Defaults to sonnet." },
-    "cacheTtlHours": { "label": "Cache TTL (hours)", "helper": "Defaults to 24 hours. Cached UTC-day results do not refetch or regenerate." },
+    "title": "AI tools (Claude CLI)",
+    "subtitle": "Configure the local Claude Code CLI shared by GitHub Trending explanations and Prompt Optimizer. Trending explanations are cached locally; Prompt Optimizer only shows and copies the current result.",
+    "aiEnabled": { "label": "Enable GitHub explanations", "helper": "When off, the homepage still shows GitHub descriptions. Prompt Optimizer can still call Claude CLI with this path and model." },
+    "claudeCliPath": { "label": "Claude CLI path", "helper": "Used by GitHub explanations and Prompt Optimizer. Use claude, or a full path such as /home/you/.local/bin/claude." },
+    "claudeModel": { "label": "Model", "helper": "Claude Code CLI model alias or full model name for GitHub explanations and Prompt Optimizer. Defaults to sonnet." },
+    "cacheTtlHours": { "label": "Cache TTL (hours)", "helper": "Defaults to 24 hours. Only GitHub Trending fetches and explanations use this cache; Prompt Optimizer is not cached." },
     "appliedConfig": "Applied config",
     "testCli": "Test Claude CLI",
     "testing": "Testing…",
@@ -67,7 +67,7 @@
     "applying": "Applying…",
     "testOk": "Claude CLI is available: {{version}}",
     "testFailed": "Claude CLI test failed: {{error}}",
-    "applyFailed": "Failed to apply GitHub Trending config"
+    "applyFailed": "Failed to apply Claude CLI config"
   },
   "health": {
     "title": "Health reminder",

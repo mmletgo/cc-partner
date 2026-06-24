@@ -25,7 +25,7 @@ export interface CloudSyncForm {
   intervalSecs: number;
 }
 
-/** GitHub Trending / Claude CLI 解说 Card 的受控表单值 */
+/** AI tab 中 GitHub 解说开关与共用 Claude CLI 配置的受控表单值 */
 export interface GithubTrendingForm {
   aiEnabled: boolean;
   claudeCliPath: string;
@@ -57,7 +57,7 @@ export const PENDING_CLOUD_SYNC_FORM: CloudSyncForm = {
   intervalSecs: 600,
 };
 
-/** GitHub Trending 表单加载前占位值；真实默认值由后端 get_default_github_trending_config 覆盖。 */
+/** AI 表单加载前占位值；真实默认值由后端 get_default_github_trending_config 覆盖。 */
 export const PENDING_GITHUB_TRENDING_FORM: GithubTrendingForm = {
   aiEnabled: true,
   claudeCliPath: 'claude',

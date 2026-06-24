@@ -163,7 +163,7 @@ export function Settings() {
   const [applying, setApplying] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
-  // GitHub Trending / Claude CLI 解说配置：独立于底部统一 Save，即时应用。
+  // Claude CLI / AI 能力配置：GitHub 解说开关与 GitHub/Prompt 优化共用的 CLI 路径、模型配置。
   const [githubTrendingForm, setGithubTrendingForm] = useState<GithubTrendingForm>({
     ...PENDING_GITHUB_TRENDING_FORM,
   });
@@ -645,14 +645,14 @@ export function Settings() {
   };
 
   /**
-   * 更新 GitHub Trending 表单字段
+   * 更新 Claude CLI / AI 表单字段
    */
   const patchGithubTrendingForm = useCallback((partial: Partial<GithubTrendingForm>) => {
     setGithubTrendingForm((prev) => ({ ...prev, ...partial }));
   }, []);
 
   /**
-   * GitHub Trending / Claude CLI「恢复默认」：把 AI 表单重置为后端默认配置
+   * Claude CLI / AI「恢复默认」：把 AI 表单重置为后端默认配置
    *
    * Business Logic（为什么需要）:
    *   AI tab 用户可能改过 CLI 路径、模型或缓存时间，需要随时回到应用内置默认。
@@ -666,7 +666,7 @@ export function Settings() {
   }, [defaultGithubTrendingForm]);
 
   /**
-   * GitHub Trending「应用配置」：保存 Claude CLI 路径、模型与缓存设置
+   * Claude CLI / AI「应用配置」：保存 GitHub 解说开关、Claude CLI 路径、模型与缓存设置
    */
   const handleApplyGithubTrending = async () => {
     setApplyingGithubTrending(true);
@@ -1204,7 +1204,7 @@ export function Settings() {
             role="tabpanel"
             aria-labelledby="settings-tab-ai"
           >
-        {/* Card: GitHub Trending / Claude 解说 */}
+        {/* Card: Claude CLI / AI 能力 */}
         <Card variant="flat" padding="md">
           <Card.Header>
             <h2 className={styles.sectionTitle}>{t('settings:githubTrending.title')}</h2>

@@ -54,12 +54,12 @@
     "appliedConfig": "已应用配置"
   },
   "githubTrending": {
-    "title": "GitHub Trending / Claude 解说",
-    "subtitle": "首页每天抓取一次 GitHub 周热门项目。启用后会调用本地 Claude Code CLI 批量生成中英文解说，并缓存到本地数据库。",
-    "aiEnabled": { "label": "启用 Claude 解说", "helper": "关闭后首页仍展示 GitHub 原始简介，但不调用 Claude CLI。" },
-    "claudeCliPath": { "label": "Claude CLI 路径", "helper": "可填写 claude，或完整路径如 /home/you/.local/bin/claude。" },
-    "claudeModel": { "label": "模型", "helper": "Claude Code CLI 的模型别名或完整模型名，默认 sonnet。" },
-    "cacheTtlHours": { "label": "缓存时长（小时）", "helper": "默认 24 小时；同一 UTC 日期内命中缓存时不会重新抓取或生成。" },
+    "title": "AI 能力（Claude CLI）",
+    "subtitle": "配置本机 Claude Code CLI，供 GitHub 周热门项目解说和 Prompt 优化共用。GitHub 解说会本地缓存；Prompt 优化只展示和复制当前结果。",
+    "aiEnabled": { "label": "启用 GitHub 项目解说", "helper": "关闭后首页仍展示 GitHub 原始简介；Prompt 优化仍会使用下方 CLI 路径和模型进行单次调用。" },
+    "claudeCliPath": { "label": "Claude CLI 路径", "helper": "用于 GitHub 解说和 Prompt 优化；可填写 claude，或完整路径如 /home/you/.local/bin/claude。" },
+    "claudeModel": { "label": "模型", "helper": "用于 GitHub 解说和 Prompt 优化的 Claude Code CLI 模型别名或完整模型名，默认 sonnet。" },
+    "cacheTtlHours": { "label": "缓存时长（小时）", "helper": "默认 24 小时；仅作用于 GitHub 周热门抓取与解说缓存，Prompt 优化不缓存。" },
     "appliedConfig": "已应用配置",
     "testCli": "测试 Claude CLI",
     "testing": "测试中…",
@@ -67,7 +67,7 @@
     "applying": "应用中…",
     "testOk": "Claude CLI 可用：{{version}}",
     "testFailed": "Claude CLI 测试失败：{{error}}",
-    "applyFailed": "应用 GitHub Trending 配置失败"
+    "applyFailed": "应用 Claude CLI 配置失败"
   },
   "health": {
     "title": "健康提醒",
