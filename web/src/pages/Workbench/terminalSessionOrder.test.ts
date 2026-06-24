@@ -20,6 +20,7 @@ function session(id: string, name: string, startedAt: string): WorkbenchSession 
     startedAt,
     exitedAt: null,
     exitCode: null,
+    supportsPanes: true,
   };
 }
 
@@ -51,25 +52,22 @@ assertIds(
   visibleTerminalSessions({
     sessions,
     activeSessionId: 'third',
-    layout: 'double',
   }),
-  ['first', 'second'],
+  ['third'],
 );
 
 assertIds(
   visibleTerminalSessions({
     sessions,
     activeSessionId: 'fifth',
-    layout: 'quad',
   }),
-  ['first', 'second', 'third', 'fourth'],
+  ['fifth'],
 );
 
 assertIds(
   visibleTerminalSessions({
     sessions,
     activeSessionId: 'third',
-    layout: 'single',
   }),
   ['third'],
 );
@@ -78,7 +76,6 @@ assertIds(
   visibleTerminalSessions({
     sessions,
     activeSessionId: null,
-    layout: 'single',
   }),
   ['first'],
 );

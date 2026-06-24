@@ -217,6 +217,20 @@ export const MoreIcon = ({ size, ...rest }: IconProps) => (
   </svg>
 );
 
+export const SplitRightIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <rect x="2.5" y="2.5" width="11" height="11" rx="1.5" />
+    <path d="M8 2.5v11M5 8h6M9 6l2 2-2 2" />
+  </svg>
+);
+
+export const SplitDownIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <rect x="2.5" y="2.5" width="11" height="11" rx="1.5" />
+    <path d="M2.5 8h11M8 5v6M6 9l2 2 2-2" />
+  </svg>
+);
+
 export const ScratchpadIcon = ({ size, ...rest }: IconProps) => (
   <svg {...baseProps(size)} {...rest}>
     <path d="M4.5 1.5h6l3 3v9a1.5 1.5 0 0 1-1.5 1.5h-7.5A1.5 1.5 0 0 1 3.5 14V3a1.5 1.5 0 0 1 1-1.5Z" />

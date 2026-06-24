@@ -47,6 +47,46 @@ enum TmuxCwdMode {
     Wsl,
 }
 
+/// tmux pane 分屏方向。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     用户在工作台 window 内需要像 tmux 一样创建左右或上下 pane。
+///
+/// Code Logic（这个枚举做什么）:
+///     将前端方向参数映射到 tmux split-window 的 `-h` / `-v` 参数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneSplitDirection {
+    Right,
+    Down,
+}
+
+impl PaneSplitDirection {
+    /// Business Logic（为什么需要这个函数）:
+    ///     前端通过字符串参数请求 pane 分屏方向，后端需要做显式校验。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 API 字符串 `right` / `down` 转成枚举；其他值返回 AppError。
+    pub fn from_api(value: &str) -> Result<Self, AppError> {
+        match value {
+            "right" => Ok(Self::Right),
+            "down" => Ok(Self::Down),
+            _ => Err(AppError::generic("不支持的 pane 分屏方向")),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     pane 分屏命令必须使用 tmux 原生命令参数，避免 UI 表达和真实布局不一致。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Right 生成左右分屏 `-h`，Down 生成上下分屏 `-v`。
+    fn tmux_flag(self) -> &'static str {
+        match self {
+            Self::Right => "-h",
+            Self::Down => "-v",
+        }
+    }
+}
+
 /// 可用 tmux 命令描述。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -141,7 +181,7 @@ impl TmuxCommand {
     ///
     /// Code Logic（这个函数做什么）:
     ///     Native 模式保留真实 shell 命令；WSL 模式展示实际 PTY attach 命令。
-    fn display_command_for_session(&self, session_name: &str, shell_command: &str) -> String {
+    fn display_command_for_session(&self, target: &str, shell_command: &str) -> String {
         match self.cwd_mode {
             TmuxCwdMode::Native => shell_command.to_string(),
             TmuxCwdMode::Wsl => {
@@ -150,7 +190,7 @@ impl TmuxCommand {
                 parts.extend(self.prefix_args.clone());
                 parts.push("attach-session".to_string());
                 parts.push("-t".to_string());
-                parts.push(session_name.to_string());
+                parts.push(target.to_string());
                 parts.join(" ")
             }
         }
@@ -439,7 +479,25 @@ fn tmux_session_name(session_id: &str) -> String {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     恢复会话时需要判断原 tmux session 是否仍存在，存在则 attach，不存在则按同一名称重建。
+///     真实 tmux 映射下，一个工作台项目应稳定对应一个 tmux session，项目内 tab 才能成为 window。
+///
+/// Code Logic（这个函数做什么）:
+///     用 project_id 派生项目级 tmux session 名称，并去掉连字符减少 tmux target 兼容风险。
+fn tmux_project_session_name(project_id: &str) -> String {
+    format!("cc-partner-project-{}", project_id.replace('-', ""))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     后端 attach、split、kill-pane、rename-window 都需要指向项目 tmux session 内的特定 window。
+///
+/// Code Logic（这个函数做什么）:
+///     组合 tmux session 名与 window id，生成 `session:@window` target。
+fn tmux_window_target(session_name: &str, window_id: &str) -> String {
+    format!("{session_name}:{window_id}")
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     创建 window 前需要知道项目级 tmux session 是否已存在，存在则 new-window，不存在则 new-session。
 ///
 /// Code Logic（这个函数做什么）:
 ///     执行 `tmux has-session -t <name>`，返回 status 是否成功。
@@ -452,26 +510,74 @@ fn tmux_has_session(tmux: &TmuxCommand, session_name: &str) -> bool {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     新建或恢复终端时，如果 tmux session 不存在，需要在项目根目录中创建它以承载真实 shell 上下文。
+///     恢复 window 时需要判断目标 window 是否仍存在，存在则 attach，不存在则重新创建。
 ///
 /// Code Logic（这个函数做什么）:
-///     执行 `tmux new-session -d -s <name> -c <cwd> <shell>`；失败转为 AppError 供上层 fallback。
-fn create_tmux_session(
+///     执行 `tmux display-message -p -t <target> #{window_id}`；target 可为 session 或 session:@window。
+fn tmux_target_exists(tmux: &TmuxCommand, target: &str) -> bool {
+    tmux.std_command()
+        .args(["display-message", "-p", "-t", target, "#{window_id}"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     新建或恢复 tab 时，需要在项目级 tmux session 内创建一个 window 承载真实 shell 上下文。
+///
+/// Code Logic（这个函数做什么）:
+///     session 不存在时执行 `tmux new-session -d -s <session> -n <window>`；存在时执行 `tmux new-window`；
+///     两者都用 `-P -F #{window_id}` 读取真实 window id。
+fn create_tmux_window(
     tmux: &TmuxCommand,
     session_name: &str,
+    window_name: &str,
     cwd: &str,
     shell_command: &str,
-) -> Result<(), AppError> {
+) -> Result<String, AppError> {
     let tmux_cwd = tmux.project_cwd(cwd)?;
     let mut command = tmux.std_command();
-    command.args(["new-session", "-d", "-s", session_name, "-c", &tmux_cwd]);
+    if tmux_has_session(tmux, session_name) {
+        command.args([
+            "new-window",
+            "-d",
+            "-t",
+            session_name,
+            "-n",
+            window_name,
+            "-c",
+            &tmux_cwd,
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]);
+    } else {
+        command.args([
+            "new-session",
+            "-d",
+            "-s",
+            session_name,
+            "-n",
+            window_name,
+            "-c",
+            &tmux_cwd,
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]);
+    }
     if let Some(shell_command) = tmux.shell_command_for_new_session(shell_command) {
         command.arg(shell_command);
     }
 
     let output = command.output()?;
     if output.status.success() {
-        Ok(())
+        let window_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if window_id.is_empty() {
+            Err(AppError::generic("创建 tmux window 失败: 未返回 window_id"))
+        } else {
+            Ok(window_id)
+        }
     } else {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let message = if detail.is_empty() {
@@ -479,7 +585,9 @@ fn create_tmux_session(
         } else {
             detail
         };
-        Err(AppError::generic(format!("创建 tmux 会话失败: {message}")))
+        Err(AppError::generic(format!(
+            "创建 tmux window 失败: {message}"
+        )))
     }
 }
 
@@ -487,7 +595,7 @@ fn create_tmux_session(
 ///     用户关闭终端 tab 时，如果该 tab 使用 tmux 承载上下文，应销毁对应 tmux session，避免后台残留。
 ///
 /// Code Logic（这个函数做什么）:
-///     执行 `tmux kill-session -t <name>`；session 已不存在视为成功，其他错误仅记录 debug。
+///     执行 `tmux kill-window -t <session:window>`；旧记录没有 window id 时才退回 kill-session。
 pub fn kill_persisted_backend(row: &WorkbenchSessionRow) {
     if row.backend != TMUX_BACKEND {
         return;
@@ -498,10 +606,14 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) {
     let Some(tmux) = available_tmux_command() else {
         return;
     };
-    let output = tmux
-        .std_command()
-        .args(["kill-session", "-t", session_name])
-        .output();
+    let mut command = tmux.std_command();
+    if let Some(window_id) = row.backend_window_id.as_deref() {
+        let target = tmux_window_target(session_name, window_id);
+        command.args(["kill-window", "-t", &target]);
+    } else {
+        command.args(["kill-session", "-t", session_name]);
+    }
+    let output = command.output();
     if let Err(error) = output {
         tracing::debug!("销毁工作台 tmux 会话失败: {error}");
     }
@@ -518,11 +630,82 @@ fn command_builder_for_row(row: &WorkbenchSessionRow) -> CommandBuilder {
             (available_tmux_command(), row.backend_id.as_deref())
         {
             let mut cmd = tmux.command_builder();
-            cmd.args(["attach-session", "-t", session_name]);
+            let target = row
+                .backend_window_id
+                .as_deref()
+                .map(|window_id| tmux_window_target(session_name, window_id))
+                .unwrap_or_else(|| session_name.to_string());
+            cmd.args(["attach-session", "-t", &target]);
             return cmd;
         }
     }
     CommandBuilder::new(row.command.clone())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     tmux window/pane 操作都需要从持久化 row 找到精确 target。
+///
+/// Code Logic（这个函数做什么）:
+///     对 tmux row 组合 `backend_id` 与 `backend_window_id`；缺少 window id 的旧记录退回 session target。
+fn tmux_target_for_row(row: &WorkbenchSessionRow) -> Result<String, AppError> {
+    if row.backend != TMUX_BACKEND {
+        return Err(AppError::generic("当前终端后端不支持 tmux pane 操作"));
+    }
+    let Some(session_name) = row.backend_id.as_deref() else {
+        return Err(AppError::generic("tmux 会话缺少 session 标识"));
+    };
+    Ok(row
+        .backend_window_id
+        .as_deref()
+        .map(|window_id| tmux_window_target(session_name, window_id))
+        .unwrap_or_else(|| session_name.to_string()))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     pane/window 操作只应作用于真实 tmux window；旧记录缺 window id 时必须先迁移。
+///
+/// Code Logic（这个函数做什么）:
+///     对 tmux row 要求同时存在 backend_id 和 backend_window_id，并返回 `session:@window` target。
+fn tmux_window_target_for_row(row: &WorkbenchSessionRow) -> Result<String, AppError> {
+    if row.backend != TMUX_BACKEND {
+        return Err(AppError::generic("当前终端后端不支持 tmux pane 操作"));
+    }
+    let Some(session_name) = row.backend_id.as_deref() else {
+        return Err(AppError::generic("tmux window 缺少 session 标识"));
+    };
+    let Some(window_id) = row.backend_window_id.as_deref() else {
+        return Err(AppError::generic("tmux window 缺少 window 标识"));
+    };
+    Ok(tmux_window_target(session_name, window_id))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     从旧版本升级来的 tmux row 可能只有 per-tab session，没有 window id，需要迁移到真实 window 模型。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 tmux row 是否缺少 backend_window_id。
+fn tmux_row_requires_window_recreation(row: &WorkbenchSessionRow) -> bool {
+    row.backend == TMUX_BACKEND && row.backend_window_id.is_none()
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     pane 操作失败时需要向前端返回可诊断错误，而不是静默无效。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 tmux 命令，成功返回 stdout，失败把 stderr 转为 AppError。
+fn run_tmux_command(tmux: &TmuxCommand, args: &[&str]) -> Result<String, AppError> {
+    let output = tmux.std_command().args(args).output()?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if detail.is_empty() {
+            "未知错误".to_string()
+        } else {
+            detail
+        };
+        Err(AppError::generic(format!("tmux 命令失败: {message}")))
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -662,22 +845,44 @@ impl WorkbenchSessionRegistry {
         let now = chrono::Utc::now().to_rfc3339();
         let (cols, rows) = initial_terminal_size(initial_cols, initial_rows);
         let terminal_command = default_terminal_command();
-        let (backend, backend_id, command) = match available_tmux_command() {
+        let (backend, backend_id, backend_window_id, command) = match available_tmux_command() {
             Some(tmux) => {
-                let tmux_id = tmux_session_name(&session_id);
-                match create_tmux_session(&tmux, &tmux_id, &project.path, &terminal_command) {
-                    Ok(()) => {
+                let project_tmux_id = tmux_project_session_name(&project.id);
+                match create_tmux_window(
+                    &tmux,
+                    &project_tmux_id,
+                    &project.name,
+                    &project.path,
+                    &terminal_command,
+                ) {
+                    Ok(window_id) => {
+                        let target = tmux_window_target(&project_tmux_id, &window_id);
                         let display_command =
-                            tmux.display_command_for_session(&tmux_id, &terminal_command);
-                        (TMUX_BACKEND.to_string(), Some(tmux_id), display_command)
+                            tmux.display_command_for_session(&target, &terminal_command);
+                        (
+                            TMUX_BACKEND.to_string(),
+                            Some(project_tmux_id),
+                            Some(window_id),
+                            display_command,
+                        )
                     }
                     Err(error) => {
                         tracing::warn!("工作台 tmux 后端不可用，回退普通 PTY: {error}");
-                        (RAW_PTY_BACKEND.to_string(), None, terminal_command.clone())
+                        (
+                            RAW_PTY_BACKEND.to_string(),
+                            None,
+                            None,
+                            terminal_command.clone(),
+                        )
                     }
                 }
             }
-            None => (RAW_PTY_BACKEND.to_string(), None, terminal_command.clone()),
+            None => (
+                RAW_PTY_BACKEND.to_string(),
+                None,
+                None,
+                terminal_command.clone(),
+            ),
         };
         let row = WorkbenchSessionRow {
             id: session_id.clone(),
@@ -692,6 +897,7 @@ impl WorkbenchSessionRegistry {
             exit_code: None,
             backend,
             backend_id,
+            backend_window_id,
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
         };
@@ -715,24 +921,50 @@ impl WorkbenchSessionRegistry {
                 let session_name = row
                     .backend_id
                     .clone()
-                    .unwrap_or_else(|| tmux_session_name(&row.id));
-                if !tmux_has_session(&tmux, &session_name) {
-                    if let Err(error) =
-                        create_tmux_session(&tmux, &session_name, &project.path, &row.command)
-                    {
-                        tracing::warn!("恢复工作台 tmux 会话失败，回退普通 PTY: {error}");
-                        row.backend = RAW_PTY_BACKEND.to_string();
-                        row.backend_id = None;
-                        row.command = default_terminal_command();
+                    .unwrap_or_else(|| tmux_project_session_name(&project.id));
+                let target_exists = if tmux_row_requires_window_recreation(&row) {
+                    false
+                } else {
+                    row.backend_window_id
+                        .as_deref()
+                        .map(|window_id| {
+                            tmux_target_exists(&tmux, &tmux_window_target(&session_name, window_id))
+                        })
+                        .unwrap_or_else(|| tmux_target_exists(&tmux, &session_name))
+                };
+                if !target_exists {
+                    let terminal_command = default_terminal_command();
+                    match create_tmux_window(
+                        &tmux,
+                        &tmux_project_session_name(&project.id),
+                        &row.name,
+                        &project.path,
+                        &terminal_command,
+                    ) {
+                        Ok(window_id) => {
+                            let project_tmux_id = tmux_project_session_name(&project.id);
+                            let target = tmux_window_target(&project_tmux_id, &window_id);
+                            row.backend_id = Some(project_tmux_id);
+                            row.backend_window_id = Some(window_id);
+                            row.command =
+                                tmux.display_command_for_session(&target, &terminal_command);
+                        }
+                        Err(error) => {
+                            tracing::warn!("恢复工作台 tmux 会话失败，回退普通 PTY: {error}");
+                            row.backend = RAW_PTY_BACKEND.to_string();
+                            row.backend_id = None;
+                            row.backend_window_id = None;
+                            row.command = default_terminal_command();
+                        }
                     }
-                }
-                if row.backend == TMUX_BACKEND {
+                } else if row.backend == TMUX_BACKEND {
                     row.backend_id = Some(session_name);
                 }
             } else {
                 tracing::warn!("恢复工作台终端时未找到 tmux，回退普通 PTY");
                 row.backend = RAW_PTY_BACKEND.to_string();
                 row.backend_id = None;
+                row.backend_window_id = None;
                 row.command = default_terminal_command();
             }
         }
@@ -822,6 +1054,58 @@ impl WorkbenchSessionRegistry {
             }
             SessionProcess::Fake => Ok(()),
         }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户需要在当前 tmux window 内创建左右或上下 pane，复用 tmux 的真实布局能力。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     找到会话 row 的 tmux target，执行 `tmux split-window -h/-v -t <target>`。
+    pub fn split_pane(
+        &self,
+        session_id: &str,
+        direction: PaneSplitDirection,
+    ) -> Result<(), AppError> {
+        let handle = self.get_handle(session_id)?;
+        let handle = handle.lock().expect("workbench session 锁中毒");
+        if handle.row.status != "running" {
+            return Err(AppError::generic("工作台会话未运行"));
+        }
+        let target = tmux_window_target_for_row(&handle.row)?;
+        let Some(tmux) = available_tmux_command() else {
+            return Err(AppError::generic("未找到 tmux，无法创建 pane"));
+        };
+        run_tmux_command(
+            &tmux,
+            &["split-window", direction.tmux_flag(), "-t", &target],
+        )?;
+        Ok(())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户需要关闭当前 pane，但不能误把最后一个 pane 关闭成整个 window 消失。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先 `list-panes` 统计 pane 数；多于一个才执行 `kill-pane -t <target>`。
+    pub fn close_active_pane(&self, session_id: &str) -> Result<(), AppError> {
+        let handle = self.get_handle(session_id)?;
+        let handle = handle.lock().expect("workbench session 锁中毒");
+        if handle.row.status != "running" {
+            return Err(AppError::generic("工作台会话未运行"));
+        }
+        let target = tmux_window_target_for_row(&handle.row)?;
+        let Some(tmux) = available_tmux_command() else {
+            return Err(AppError::generic("未找到 tmux，无法关闭 pane"));
+        };
+        let panes = run_tmux_command(&tmux, &["list-panes", "-t", &target, "-F", "#{pane_id}"])?;
+        let pane_count = panes.lines().filter(|line| !line.trim().is_empty()).count();
+        if pane_count <= 1 {
+            return Err(AppError::generic(
+                "当前 window 只有一个 pane，请关闭整个 window",
+            ));
+        }
+        run_tmux_command(&tmux, &["kill-pane", "-t", &target])?;
+        Ok(())
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -928,7 +1212,19 @@ impl WorkbenchSessionRegistry {
     pub fn rename(&self, session_id: &str, name: &str) -> Result<WorkbenchSessionRow, AppError> {
         let handle = self.get_handle(session_id)?;
         let mut handle = handle.lock().expect("workbench session 锁中毒");
-        handle.row.name = name.trim().to_string();
+        let next_name = name.trim().to_string();
+        if handle.row.backend == TMUX_BACKEND {
+            if let Some(tmux) = available_tmux_command() {
+                if let Ok(target) = tmux_window_target_for_row(&handle.row) {
+                    if let Err(error) =
+                        run_tmux_command(&tmux, &["rename-window", "-t", &target, &next_name])
+                    {
+                        tracing::debug!("重命名 tmux window 失败: {error}");
+                    }
+                }
+            }
+        }
+        handle.row.name = next_name;
         handle.row.updated_at = chrono::Utc::now().to_rfc3339();
         Ok(handle.row.clone())
     }
@@ -967,6 +1263,7 @@ impl WorkbenchSessionRegistry {
             exit_code: None,
             backend: RAW_PTY_BACKEND.to_string(),
             backend_id: None,
+            backend_window_id: None,
             created_at: "2026-06-24T00:00:00Z".to_string(),
             updated_at: "2026-06-24T00:00:00Z".to_string(),
         };
@@ -1261,6 +1558,61 @@ mod tests {
             backend.display_command_for_session("cc-partner-session", "cmd.exe"),
             "wsl.exe --exec tmux attach-session -t cc-partner-session"
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     真实 tmux 映射下，一个项目应稳定对应一个 tmux session，项目内 tab 对应 window。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言项目 ID 派生出稳定 session 名，window target 使用 `session:@window` 语法。
+    #[test]
+    fn tmux_project_session_and_window_target_are_stable() {
+        let project_session = tmux_project_session_name("project-1234-abcd");
+
+        assert_eq!(project_session, "cc-partner-project-project1234abcd");
+        assert_eq!(
+            tmux_window_target(&project_session, "@7"),
+            "cc-partner-project-project1234abcd:@7"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     pane 操作应复用 tmux 原生命令，避免前端伪分屏和真实终端布局分裂。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 split right/down 会生成 tmux `split-window -h/-v` 参数。
+    #[test]
+    fn tmux_split_direction_maps_to_tmux_arguments() {
+        assert_eq!(PaneSplitDirection::Right.tmux_flag(), "-h");
+        assert_eq!(PaneSplitDirection::Down.tmux_flag(), "-v");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧版本把 tab 映射成独立 tmux session；升级后应迁移到项目 session 内的 window。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造缺少 backend_window_id 的 tmux row，断言恢复流程会判定它需要重建 window。
+    #[test]
+    fn old_tmux_rows_without_window_id_require_window_recreation() {
+        let row = WorkbenchSessionRow {
+            id: "s1".to_string(),
+            project_id: "p1".to_string(),
+            name: "Terminal".to_string(),
+            command: "/bin/zsh".to_string(),
+            status: "running".to_string(),
+            cols: DEFAULT_COLS,
+            rows: DEFAULT_ROWS,
+            started_at: "2026-06-24T00:00:00Z".to_string(),
+            exited_at: None,
+            exit_code: None,
+            backend: TMUX_BACKEND.to_string(),
+            backend_id: Some("cc-partner-legacy".to_string()),
+            backend_window_id: None,
+            created_at: "2026-06-24T00:00:00Z".to_string(),
+            updated_at: "2026-06-24T00:00:00Z".to_string(),
+        };
+
+        assert!(tmux_row_requires_window_recreation(&row));
     }
 
     /// Business Logic（为什么需要这个测试）:

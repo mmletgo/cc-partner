@@ -30,6 +30,8 @@ import {
   FileIcon,
   FolderIcon,
   PlusIcon,
+  SplitDownIcon,
+  SplitRightIcon,
   SyncIcon,
   TrashIcon,
   XIcon,
@@ -42,7 +44,7 @@ import type {
   WorkbenchTerminalStatusEvent,
 } from '@/lib/types';
 import styles from './Workbench.module.css';
-import { TERMINAL_LAYOUT_LIMIT, visibleTerminalSessions } from './terminalSessionOrder';
+import { visibleTerminalSessions } from './terminalSessionOrder';
 import { terminalPanePixelSize } from './terminalSizing';
 import type { TerminalLayoutMode } from './terminalSizing';
 
@@ -541,7 +543,6 @@ export function Workbench() {
   const { activeProjectId, activeProject } = useWorkbenchProjects();
   const [sessions, setSessions] = useState<WorkbenchSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [terminalLayout, setTerminalLayout] = useState<TerminalLayoutMode>('single');
   const [sessionNameDraft, setSessionNameDraft] = useState<string>('');
   const [sessionBusy, setSessionBusy] = useState<boolean>(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -567,8 +568,8 @@ export function Workbench() {
     [activeSessionId, sessions],
   );
   const visibleSessions = useMemo(
-    () => visibleTerminalSessions({ sessions, activeSessionId, layout: terminalLayout }),
-    [activeSessionId, sessions, terminalLayout],
+    () => visibleTerminalSessions({ sessions, activeSessionId }),
+    [activeSessionId, sessions],
   );
   const selectedParentPath = selectedInfo
     ? selectedInfo.kind === 'dir'
@@ -584,6 +585,9 @@ export function Workbench() {
     activeSession?.exitedAt ?? null,
     runtimeNow,
     emptyValue,
+  );
+  const canUsePanes = Boolean(
+    activeSession?.supportsPanes && activeSession.status === 'running',
   );
 
   const updateActiveSession = useCallback((nextSessions: WorkbenchSession[]) => {
@@ -759,7 +763,7 @@ export function Workbench() {
     try {
       setSessionBusy(true);
       setSessionError(null);
-      const initialSize = measureInitialTerminalSize(terminalPanelRef.current, terminalLayout);
+      const initialSize = measureInitialTerminalSize(terminalPanelRef.current, 'single');
       const session = await workbenchApi.sessions.create(projectId, initialSize);
       if (activeProjectIdRef.current !== projectId) return;
       setSessions((current) => [...current, session]);
@@ -779,7 +783,38 @@ export function Workbench() {
     } finally {
       setSessionBusy(false);
     }
-  }, [desktopUnavailableMessage, focusSession, t, terminalLayout]);
+  }, [desktopUnavailableMessage, focusSession, t]);
+
+  const handleSplitPane = useCallback(
+    async (direction: 'right' | 'down') => {
+      if (!activeSession) return;
+      try {
+        setSessionError(null);
+        await workbenchApi.sessions.splitPane(activeSession.id, direction);
+      } catch (error) {
+        setSessionError(
+          displayErrorMessage(
+            error,
+            t('workbench:errors.splitPane'),
+            desktopUnavailableMessage,
+          ),
+        );
+      }
+    },
+    [activeSession, desktopUnavailableMessage, t],
+  );
+
+  const handleClosePane = useCallback(async () => {
+    if (!activeSession) return;
+    try {
+      setSessionError(null);
+      await workbenchApi.sessions.closePane(activeSession.id);
+    } catch (error) {
+      setSessionError(
+        displayErrorMessage(error, t('workbench:errors.closePane'), desktopUnavailableMessage),
+      );
+    }
+  }, [activeSession, desktopUnavailableMessage, t]);
 
   const handleInput = useCallback(async (sessionId: string, data: string) => {
     try {
@@ -997,11 +1032,6 @@ export function Workbench() {
         ? t('workbench:pathKinds.file')
         : selectedInfo.kind
     : emptyValue;
-  const layoutLabel = (mode: TerminalLayoutMode): string => {
-    if (mode === 'single') return t('workbench:layouts.single');
-    if (mode === 'double') return t('workbench:layouts.double');
-    return t('workbench:layouts.quad');
-  };
   const workspaceLine = activeProject
     ? `${activeProject.deviceName} · ${activeProject.path}`
     : t('workbench:noProjectHint');
@@ -1065,26 +1095,37 @@ export function Workbench() {
           >
             {t('workbench:newSession')}
           </Button>
-          <div className={styles.layoutSwitch} aria-label={t('workbench:layoutSwitch')}>
-            {(['single', 'double', 'quad'] as TerminalLayoutMode[]).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                className={styles.layoutButton}
-                data-active={terminalLayout === mode || undefined}
-                aria-label={layoutLabel(mode)}
-                title={layoutLabel(mode)}
-                onClick={() => setTerminalLayout(mode)}
-              >
-                {TERMINAL_LAYOUT_LIMIT[mode]}
-              </button>
-            ))}
+          <div className={styles.paneActions} aria-label={t('workbench:paneActions')}>
+            <Button
+              variant="icon"
+              icon={<SplitRightIcon />}
+              title={t('workbench:splitPaneRight')}
+              aria-label={t('workbench:splitPaneRight')}
+              disabled={!canUsePanes}
+              onClick={() => void handleSplitPane('right')}
+            />
+            <Button
+              variant="icon"
+              icon={<SplitDownIcon />}
+              title={t('workbench:splitPaneDown')}
+              aria-label={t('workbench:splitPaneDown')}
+              disabled={!canUsePanes}
+              onClick={() => void handleSplitPane('down')}
+            />
+            <Button
+              variant="icon"
+              icon={<XIcon />}
+              title={t('workbench:closePane')}
+              aria-label={t('workbench:closePane')}
+              disabled={!canUsePanes}
+              onClick={() => void handleClosePane()}
+            />
           </div>
         </section>
 
         <section
           className={styles.terminalPanel}
-          data-layout={terminalLayout}
+          data-layout="single"
           ref={terminalPanelRef}
         >
           {visibleSessions.length === 0 ? (

@@ -37,6 +37,27 @@ impl WorkbenchSessionRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     数据库相关修改必须兼容旧库；旧版本 workbench_sessions 没有 tmux window 标识列。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用 PRAGMA table_info 检查列名，缺失时 ALTER TABLE ADD COLUMN backend_window_id TEXT。
+    pub async fn ensure_schema(&self) -> Result<(), AppError> {
+        let columns = sqlx::query("PRAGMA table_info(workbench_sessions)")
+            .fetch_all(&self.pool)
+            .await?;
+        let has_backend_window_id = columns
+            .iter()
+            .filter_map(|row| row.try_get::<String, _>("name").ok())
+            .any(|name| name == "backend_window_id");
+        if !has_backend_window_id {
+            sqlx::query("ALTER TABLE workbench_sessions ADD COLUMN backend_window_id TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     Workbench 页面进入项目时，需要列出该项目所有未关闭的历史终端 tab。
     ///
     /// Code Logic（这个函数做什么）:
@@ -48,7 +69,7 @@ impl WorkbenchSessionRepo {
         let rows = if let Some(project_id) = project_id {
             sqlx::query(
                 "SELECT id, project_id, name, command, status, cols, rows, started_at, exited_at, \
-                 exit_code, backend, backend_id, created_at, updated_at \
+                 exit_code, backend, backend_id, backend_window_id, created_at, updated_at \
                  FROM workbench_sessions WHERE project_id = ? ORDER BY started_at ASC",
             )
             .bind(project_id)
@@ -57,7 +78,7 @@ impl WorkbenchSessionRepo {
         } else {
             sqlx::query(
                 "SELECT id, project_id, name, command, status, cols, rows, started_at, exited_at, \
-                 exit_code, backend, backend_id, created_at, updated_at \
+                 exit_code, backend, backend_id, backend_window_id, created_at, updated_at \
                  FROM workbench_sessions ORDER BY started_at ASC",
             )
             .fetch_all(&self.pool)
@@ -74,7 +95,7 @@ impl WorkbenchSessionRepo {
     pub async fn get(&self, id: &str) -> Result<Option<WorkbenchSessionRow>, AppError> {
         let row = sqlx::query(
             "SELECT id, project_id, name, command, status, cols, rows, started_at, exited_at, \
-             exit_code, backend, backend_id, created_at, updated_at \
+             exit_code, backend, backend_id, backend_window_id, created_at, updated_at \
              FROM workbench_sessions WHERE id = ?",
         )
         .bind(id)
@@ -92,8 +113,8 @@ impl WorkbenchSessionRepo {
         sqlx::query(
             "INSERT OR REPLACE INTO workbench_sessions \
              (id, project_id, name, command, status, cols, rows, started_at, exited_at, exit_code, \
-              backend, backend_id, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              backend, backend_id, backend_window_id, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.project_id)
@@ -107,6 +128,7 @@ impl WorkbenchSessionRepo {
         .bind(row.exit_code)
         .bind(&row.backend)
         .bind(&row.backend_id)
+        .bind(&row.backend_window_id)
         .bind(&row.created_at)
         .bind(&row.updated_at)
         .execute(&self.pool)
@@ -162,6 +184,7 @@ fn row_to_session(row: &SqliteRow) -> Result<WorkbenchSessionRow, AppError> {
         exit_code: row.try_get("exit_code")?,
         backend: row.try_get("backend")?,
         backend_id: row.try_get("backend_id")?,
+        backend_window_id: row.try_get("backend_window_id")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -192,7 +215,7 @@ mod tests {
              id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, command TEXT NOT NULL, \
              status TEXT NOT NULL, cols INTEGER NOT NULL, rows INTEGER NOT NULL, started_at TEXT NOT NULL, \
              exited_at TEXT, exit_code INTEGER, backend TEXT NOT NULL, backend_id TEXT, \
-             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+             backend_window_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
         )
         .execute(&pool)
         .await
@@ -219,6 +242,7 @@ mod tests {
             exit_code: None,
             backend: "tmux".to_string(),
             backend_id: Some(format!("cc-partner-{id}")),
+            backend_window_id: Some(format!("@{id}")),
             created_at: started_at.to_string(),
             updated_at: started_at.to_string(),
         }
@@ -243,6 +267,7 @@ mod tests {
         assert_eq!(listed[0].id, "s1");
         assert_eq!(listed[0].project_id, "p1");
         assert_eq!(listed[0].backend, "tmux");
+        assert_eq!(listed[0].backend_window_id.as_deref(), Some("@s1"));
     }
 
     /// Business Logic（为什么需要这个测试）:

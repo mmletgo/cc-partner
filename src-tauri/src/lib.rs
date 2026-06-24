@@ -222,6 +222,7 @@ const WORKBENCH_SESSION_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_ses
     exit_code INTEGER,
     backend TEXT NOT NULL,
     backend_id TEXT,
+    backend_window_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 )";
@@ -269,6 +270,9 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, error::AppError> {
     // 工作台最近项目列表 + 终端会话元数据（PTY 句柄运行期重建）
     sqlx::query(WORKBENCH_PROJECT_SCHEMA).execute(&pool).await?;
     sqlx::query(WORKBENCH_SESSION_SCHEMA).execute(&pool).await?;
+    WorkbenchSessionRepo::new(pool.clone())
+        .ensure_schema()
+        .await?;
     Ok(pool)
 }
 
@@ -561,6 +565,8 @@ pub fn run() {
             workbench_cmd::create_workbench_session,
             workbench_cmd::write_workbench_session_input,
             workbench_cmd::resize_workbench_session,
+            workbench_cmd::split_workbench_pane,
+            workbench_cmd::close_workbench_pane,
             workbench_cmd::close_workbench_session,
             workbench_cmd::rename_workbench_session,
             workbench_cmd::list_workbench_dir,

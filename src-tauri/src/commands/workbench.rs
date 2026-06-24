@@ -15,7 +15,7 @@ use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchPathInfo, WorkbenchProjectDto, WorkbenchProjectRow,
     WorkbenchSessionDto,
 };
-use crate::workbench::sessions::kill_persisted_backend;
+use crate::workbench::sessions::{kill_persisted_backend, PaneSplitDirection};
 use crate::workbench::{fs as workbench_fs, projects};
 use chrono::Utc;
 use std::path::PathBuf;
@@ -307,6 +307,42 @@ pub async fn resize_workbench_session(
 ) -> Result<serde_json::Value, AppError> {
     let row = state.workbench_sessions.resize(&session_id, cols, rows)?;
     state.workbench_session_repo.upsert(&row).await?;
+    Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
+}
+
+/// 分割当前 tmux window 的 pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     工作台采用真实 tmux 映射后，用户需要在当前 window 内创建左右或上下 pane。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 direction 字符串，调用 registry 执行 tmux split-window，成功返回 sessionId 和 direction。
+#[tauri::command]
+pub async fn split_workbench_pane(
+    state: State<'_, AppState>,
+    session_id: String,
+    direction: String,
+) -> Result<serde_json::Value, AppError> {
+    let split_direction = PaneSplitDirection::from_api(&direction)?;
+    state
+        .workbench_sessions
+        .split_pane(&session_id, split_direction)?;
+    Ok(serde_json::json!({ "ok": true, "sessionId": session_id, "direction": direction }))
+}
+
+/// 关闭当前 tmux pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户需要关闭当前 pane；最后一个 pane 应通过关闭 window 处理，避免误杀整个 tab。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 registry 统计并关闭当前 active pane，成功返回 sessionId。
+#[tauri::command]
+pub async fn close_workbench_pane(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    state.workbench_sessions.close_active_pane(&session_id)?;
     Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
 }
 

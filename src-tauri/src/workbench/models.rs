@@ -73,13 +73,13 @@ impl WorkbenchProjectRow {
     }
 }
 
-/// 工作台终端会话 DTO。
+/// 工作台 terminal window DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     前端需要展示本机项目终端会话状态、尺寸和退出信息。
+///     前端需要展示本机项目 terminal window 状态、尺寸和退出信息。
 ///
 /// Code Logic（这个结构体做什么）:
-///     定义会话列表与会话状态事件可复用的数据形状，字段使用 camelCase 序列化。
+///     定义 window 列表与状态事件可复用的数据形状，字段使用 camelCase 序列化。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchSessionDto {
@@ -93,15 +93,16 @@ pub struct WorkbenchSessionDto {
     pub started_at: String,
     pub exited_at: Option<String>,
     pub exit_code: Option<i32>,
+    pub supports_panes: bool,
 }
 
-/// 工作台终端会话数据库行模型。
+/// 工作台 terminal window 数据库行模型。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     用户希望重启应用后之前打开的终端 tab 仍可恢复，因此会话元数据需要独立于运行期 PTY 持久保存。
+///     用户希望重启应用后之前打开的 terminal window 仍可恢复，因此 window 元数据需要独立于运行期 PTY 持久保存。
 ///
 /// Code Logic（这个结构体做什么）:
-///     对齐 SQLite `workbench_sessions` 表字段；backend/backend_id 记录可重连终端后端（如 tmux）信息，
+///     对齐 SQLite `workbench_sessions` 表字段；backend_id 记录项目 tmux session，backend_window_id 记录 tmux window，
 ///     DTO 投影仍只暴露前端展示所需字段。
 #[derive(Debug, Clone)]
 pub struct WorkbenchSessionRow {
@@ -117,6 +118,7 @@ pub struct WorkbenchSessionRow {
     pub exit_code: Option<i32>,
     pub backend: String,
     pub backend_id: Option<String>,
+    pub backend_window_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -139,6 +141,7 @@ impl WorkbenchSessionRow {
             started_at: self.started_at.clone(),
             exited_at: self.exited_at.clone(),
             exit_code: self.exit_code,
+            supports_panes: self.backend == "tmux" && self.backend_window_id.is_some(),
         }
     }
 }

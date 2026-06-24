@@ -2,7 +2,7 @@
  * 工作台 API - 通过 Tauri invoke 调用 Rust 后端的本机项目、终端和文件树命令。
  *
  * Business Logic（为什么需要这个模块）:
- *   工作台页面需要统一管理项目文件夹、多个普通终端和右侧文件树交互。
+ *   工作台页面需要统一管理项目文件夹、terminal window/pane 和右侧文件树交互。
  *   组件层不应直接拼 invoke 命令名，避免命令参数分散。
  *
  * Code Logic（这个模块做什么）:
@@ -23,6 +23,8 @@ interface WorkbenchTerminalSize {
   rows: number;
 }
 
+export type WorkbenchPaneSplitDirection = 'right' | 'down';
+
 export const workbenchApi = {
   projects: {
     /** 列出工作台最近项目，后端按 lastOpenedAt 倒序返回。 */
@@ -42,13 +44,13 @@ export const workbenchApi = {
   },
 
   sessions: {
-    /** 列出运行期终端会话；projectId 为空则返回全部。 */
+    /** 列出 terminal window；projectId 为空则返回全部。 */
     list: (projectId?: string) =>
       invoke<WorkbenchSession[]>('list_workbench_sessions', {
         projectId: projectId ?? null,
       }),
 
-    /** 在指定项目根目录创建一个普通 shell PTY 会话。 */
+    /** 在指定项目下创建一个 terminal window。 */
     create: (projectId: string, initialSize?: WorkbenchTerminalSize) =>
       invoke<WorkbenchSession>('create_workbench_session', {
         projectId,
@@ -56,7 +58,7 @@ export const workbenchApi = {
         initialRows: initialSize?.rows ?? null,
       }),
 
-    /** 向指定终端会话写入输入数据。 */
+    /** 向指定 terminal window 的 PTY attach 写入输入数据。 */
     writeInput: (sessionId: string, data: string) =>
       invoke<{ ok: boolean; sessionId: string }>('write_workbench_session_input', {
         sessionId,
@@ -71,13 +73,29 @@ export const workbenchApi = {
         rows,
       }),
 
+    /** 在当前 tmux window 内创建一个 pane。 */
+    splitPane: (sessionId: string, direction: WorkbenchPaneSplitDirection) =>
+      invoke<{ ok: boolean; sessionId: string; direction: WorkbenchPaneSplitDirection }>(
+        'split_workbench_pane',
+        {
+          sessionId,
+          direction,
+        },
+      ),
+
+    /** 关闭当前 tmux pane；最后一个 pane 应通过关闭 window 处理。 */
+    closePane: (sessionId: string) =>
+      invoke<{ ok: boolean; sessionId: string }>('close_workbench_pane', {
+        sessionId,
+      }),
+
     /** 关闭终端 tab，并释放后端 PTY 资源。 */
     close: (sessionId: string) =>
       invoke<{ ok: boolean; sessionId: string }>('close_workbench_session', {
         sessionId,
       }),
 
-    /** 重命名终端 tab。 */
+    /** 重命名 terminal window。 */
     rename: (sessionId: string, name: string) =>
       invoke<WorkbenchSession>('rename_workbench_session', { sessionId, name }),
   },

@@ -228,13 +228,13 @@ export interface WorkbenchProject {
 export type WorkbenchSessionStatus = 'running' | 'exited' | 'disconnected' | string;
 
 /**
- * 工作台项目终端会话 DTO。
+ * 工作台项目 terminal window DTO。
  *
  * Business Logic（为什么需要这个类型）:
- *   一个项目可开启多个项目终端，前端需展示可恢复 tab、状态、尺寸和退出信息。
+ *   一个项目可开启多个 terminal window，tmux backend 下 window 内 pane 由 tmux 管理。
  *
  * Code Logic（字段说明）:
- *   session 元数据由后端持久化；终端输出通过 workbench:terminal-output 事件增量推送。
+ *   window 元数据由后端持久化；终端输出通过 workbench:terminal-output 事件增量推送。
  */
 export interface WorkbenchSession {
   id: string;
@@ -247,6 +247,7 @@ export interface WorkbenchSession {
   startedAt: string;
   exitedAt: string | null;
   exitCode: number | null;
+  supportsPanes: boolean;
 }
 
 /** 工作台文件节点类型：文件或文件夹。 */

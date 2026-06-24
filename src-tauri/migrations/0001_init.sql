@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS workbench_sessions (
     exit_code INTEGER,
     backend TEXT NOT NULL,
     backend_id TEXT,
+    backend_window_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
