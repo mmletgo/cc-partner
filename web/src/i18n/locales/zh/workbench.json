@@ -72,6 +72,7 @@
     "chooseDir": "选择文件夹失败",
     "sessions": "读取终端失败",
     "createSession": "创建终端失败",
+    "focusSession": "切换终端 window 失败",
     "splitPane": "分割 pane 失败",
     "closePane": "关闭 pane 失败",
     "closeSession": "关闭终端失败",

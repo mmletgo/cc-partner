@@ -310,6 +310,39 @@ pub async fn resize_workbench_session(
     Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
 }
 
+/// 聚焦工作台终端 window。
+///
+/// Business Logic（为什么需要这个函数）:
+///     顶部 app tab 与真实 tmux window 一一绑定，用户切换 tab 时终端内容也必须切到对应 window。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 registry 对 tmux-backed 会话执行 select-window；raw PTY fallback 直接视为成功。
+#[tauri::command]
+pub async fn focus_workbench_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    state.workbench_sessions.focus_window(&session_id)?;
+    Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
+}
+
+/// 获取项目当前聚焦的工作台终端 window。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户可在 tmux 底部 status bar 或快捷键中切换 window，顶部 app tab 需要跟随真实 tmux current window。
+///
+/// Code Logic（这个函数做什么）:
+///     校验项目存在，读取项目 tmux session 当前 window id，并映射成 Workbench sessionId 返回。
+#[tauri::command]
+pub async fn get_focused_workbench_session(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<serde_json::Value, AppError> {
+    let _ = get_project(&state, &project_id).await?;
+    let session_id = state.workbench_sessions.focused_session_id(&project_id)?;
+    Ok(serde_json::json!({ "sessionId": session_id }))
+}
+
 /// 分割当前 tmux window 的 pane。
 ///
 /// Business Logic（为什么需要这个函数）:

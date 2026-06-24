@@ -88,6 +88,8 @@ const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 6;
 const MAX_TERMINAL_BUFFER_CHARS = 200_000;
 const TERMINAL_PANE_HEADER_PX = 36;
+const TMUX_FOCUS_SYNC_INTERVAL_MS = 700;
+const LOCAL_FOCUS_GRACE_MS = 500;
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -519,6 +521,7 @@ export function Workbench() {
   const activeProjectIdRef = useRef<string | null>(null);
   const knownSessionIdsRef = useRef<Set<string>>(new Set());
   const terminalPanelRef = useRef<HTMLElement | null>(null);
+  const lastLocalFocusAtRef = useRef<number>(0);
 
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
@@ -556,8 +559,53 @@ export function Workbench() {
   }, []);
 
   const focusSession = useCallback((sessionId: string) => {
+    lastLocalFocusAtRef.current = Date.now();
     setActiveSessionId(sessionId);
   }, []);
+
+  useEffect(() => {
+    if (!activeSessionId) return undefined;
+    let cancelled = false;
+    void workbenchApi.sessions.focus(activeSessionId).catch((error) => {
+      if (cancelled) return;
+      setSessionError(
+        displayErrorMessage(
+          error,
+          t('workbench:errors.focusSession'),
+          desktopUnavailableMessage,
+        ),
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSessionId, desktopUnavailableMessage, t]);
+
+  useEffect(() => {
+    if (!activeProjectId || sessions.length === 0) return undefined;
+    let cancelled = false;
+
+    const syncFocusedSession = () => {
+      if (Date.now() - lastLocalFocusAtRef.current < LOCAL_FOCUS_GRACE_MS) return;
+      void workbenchApi.sessions
+        .focused(activeProjectId)
+        .then(({ sessionId }) => {
+          if (cancelled || !sessionId) return;
+          if (!sessions.some((session) => session.id === sessionId)) return;
+          setActiveSessionId((current) => (current === sessionId ? current : sessionId));
+        })
+        .catch(() => {
+          // tmux focus sync 是辅助状态同步；失败不应打断终端输入和显示。
+        });
+    };
+
+    syncFocusedSession();
+    const timer = window.setInterval(syncFocusedSession, TMUX_FOCUS_SYNC_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeProjectId, sessions]);
 
   const loadSessions = useCallback(
     async (projectId: string) => {

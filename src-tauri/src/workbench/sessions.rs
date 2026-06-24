@@ -535,6 +535,55 @@ fn tmux_attach_window_args(session_name: &str, window_target: &str) -> Vec<Strin
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     app 顶部 tab 切换时，用户看到的 tmux 当前 window 必须同步切到该 tab 绑定的真实 window。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 `select-window -t <session:@window>` 参数列表，切换项目 tmux session 的 current window。
+fn tmux_select_window_args(window_target: &str) -> Vec<String> {
+    vec![
+        "select-window".to_string(),
+        "-t".to_string(),
+        window_target.to_string(),
+    ]
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     用户可通过 tmux 底部状态栏或快捷键切换 window，cc-partner 需要读取真实 current window。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 `display-message -p -t <session> #{window_id}` 参数，查询项目 tmux session 当前 window id。
+fn tmux_current_window_args(session_name: &str) -> Vec<String> {
+    vec![
+        "display-message".to_string(),
+        "-p".to_string(),
+        "-t".to_string(),
+        session_name.to_string(),
+        "#{window_id}".to_string(),
+    ]
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     后端读到 tmux current window 后，需要映射回前端顶部 app tab 的 sessionId。
+///
+/// Code Logic（这个函数做什么）:
+///     在同一 project/backend_id 下按 backend_window_id 匹配当前 window，命中时返回 Workbench session id。
+fn focused_session_id_for_tmux_window<'a>(
+    rows: impl IntoIterator<Item = &'a WorkbenchSessionRow>,
+    project_id: &str,
+    backend_id: &str,
+    window_id: &str,
+) -> Option<String> {
+    rows.into_iter()
+        .find(|row| {
+            row.project_id == project_id
+                && row.backend == TMUX_BACKEND
+                && row.backend_id.as_deref() == Some(backend_id)
+                && row.backend_window_id.as_deref() == Some(window_id)
+        })
+        .map(|row| row.id.clone())
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     创建 window 前需要知道项目级 tmux session 是否已存在，存在则 new-window，不存在则 new-session。
 ///
 /// Code Logic（这个函数做什么）:
@@ -1125,6 +1174,67 @@ impl WorkbenchSessionRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     顶部 app tab 对应 tmux window；用户切换 tab 时，终端里的 tmux current window 必须同步切换。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     对 tmux-backed session 取出绑定 window target 并执行 `select-window -t`；raw PTY fallback 无需处理。
+    pub fn focus_window(&self, session_id: &str) -> Result<(), AppError> {
+        let handle = self.get_handle(session_id)?;
+        let handle = handle.lock().expect("workbench session 锁中毒");
+        if handle.row.status != "running" {
+            return Err(AppError::generic("工作台会话未运行"));
+        }
+        if handle.row.backend != TMUX_BACKEND {
+            return Ok(());
+        }
+        let target = tmux_window_target_for_row(&handle.row)?;
+        let Some(tmux) = available_tmux_command() else {
+            return Err(AppError::generic("未找到 tmux，无法切换 window"));
+        };
+        let args = tmux_select_window_args(&target);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_tmux_command(&tmux, &arg_refs)?;
+        Ok(())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户可在 tmux status bar 内切换 window，顶部 app tab 应跟随真实 tmux current window。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     找出项目 tmux session，读取当前 window id，并映射回 registry 中的 Workbench session id。
+    pub fn focused_session_id(&self, project_id: &str) -> Result<Option<String>, AppError> {
+        let rows: Vec<WorkbenchSessionRow> = self
+            .sessions
+            .lock()
+            .expect("workbench sessions 锁中毒")
+            .values()
+            .map(|handle| handle.lock().expect("workbench session 锁中毒").row.clone())
+            .collect();
+        let Some(backend_id) = rows
+            .iter()
+            .find(|row| row.project_id == project_id && row.backend == TMUX_BACKEND)
+            .and_then(|row| row.backend_id.clone())
+        else {
+            return Ok(None);
+        };
+        let Some(tmux) = available_tmux_command() else {
+            return Err(AppError::generic("未找到 tmux，无法读取当前 window"));
+        };
+        let args = tmux_current_window_args(&backend_id);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let window_id = run_tmux_command(&tmux, &arg_refs)?.trim().to_string();
+        if window_id.is_empty() {
+            return Ok(None);
+        }
+        Ok(focused_session_id_for_tmux_window(
+            rows.iter(),
+            project_id,
+            &backend_id,
+            &window_id,
+        ))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     用户需要在当前 tmux window 内创建左右或上下 pane，复用 tmux 的真实布局能力。
     ///
     /// Code Logic（这个函数做什么）:
@@ -1489,6 +1599,31 @@ fn now_millis() -> i64 {
 mod tests {
     use super::*;
 
+    /// Business Logic（为什么需要这个函数）:
+    ///     tmux window 映射测试需要快速构造持久化 row，避免启动真实 PTY 或 tmux。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回一个 running tmux WorkbenchSessionRow，backend_id 使用 project_id 派生的项目 session 名。
+    fn fake_tmux_row(session_id: &str, project_id: &str, window_id: &str) -> WorkbenchSessionRow {
+        WorkbenchSessionRow {
+            id: session_id.to_string(),
+            project_id: project_id.to_string(),
+            name: session_id.to_string(),
+            command: "/bin/sh".to_string(),
+            status: "running".to_string(),
+            cols: DEFAULT_COLS,
+            rows: DEFAULT_ROWS,
+            started_at: "2026-06-24T00:00:00Z".to_string(),
+            exited_at: None,
+            exit_code: None,
+            backend: TMUX_BACKEND.to_string(),
+            backend_id: Some(tmux_project_session_name(project_id)),
+            backend_window_id: Some(window_id.to_string()),
+            created_at: "2026-06-24T00:00:00Z".to_string(),
+            updated_at: "2026-06-24T00:00:00Z".to_string(),
+        }
+    }
+
     /// Business Logic（为什么需要这个测试）:
     ///     新启动应用时还没有工作台终端，前端会话列表应为空数组。
     ///
@@ -1699,6 +1834,68 @@ mod tests {
                 "cc-partner-project-project1234abcd:@7",
             ]
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     顶部 app tab 切换时，底部 tmux 当前 window 也必须跟着切换到 tab 绑定的真实 window。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 focus 操作使用 `select-window -t <session:@window>` 切项目 tmux session 的 current window。
+    #[test]
+    fn tmux_select_window_args_targets_bound_window() {
+        let args = tmux_select_window_args("cc-partner-project-project1234abcd:@7");
+
+        assert_eq!(
+            args,
+            vec![
+                "select-window",
+                "-t",
+                "cc-partner-project-project1234abcd:@7",
+            ]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户在 tmux 底部状态栏切换 window 后，cc-partner 需要读取项目 tmux session 的当前 window。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言查询 current window 使用 `display-message -p -t <session> #{window_id}`。
+    #[test]
+    fn tmux_current_window_args_read_session_current_window_id() {
+        let args = tmux_current_window_args("cc-partner-project-project1234abcd");
+
+        assert_eq!(
+            args,
+            vec![
+                "display-message",
+                "-p",
+                "-t",
+                "cc-partner-project-project1234abcd",
+                "#{window_id}",
+            ]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     后端读到 tmux current window 后，需要映射回前端顶部应该选中的 app tab。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造同一项目 tmux session 内两个 window row，断言 window id 命中第二个 sessionId。
+    #[test]
+    fn focused_session_id_matches_project_backend_window_id() {
+        let mut first = fake_tmux_row("session-1", "project-1", "@1");
+        let second = fake_tmux_row("session-2", "project-1", "@2");
+        let other_project = fake_tmux_row("session-3", "project-2", "@2");
+        first.backend_id = Some("cc-partner-project-project1".to_string());
+
+        let focused = focused_session_id_for_tmux_window(
+            [&first, &second, &other_project],
+            "project-1",
+            "cc-partner-project-project1",
+            "@2",
+        );
+
+        assert_eq!(focused, Some("session-2".to_string()));
     }
 
     /// Business Logic（为什么需要这个测试）:

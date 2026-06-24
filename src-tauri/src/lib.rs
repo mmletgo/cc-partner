@@ -565,6 +565,8 @@ pub fn run() {
             workbench_cmd::create_workbench_session,
             workbench_cmd::write_workbench_session_input,
             workbench_cmd::resize_workbench_session,
+            workbench_cmd::focus_workbench_session,
+            workbench_cmd::get_focused_workbench_session,
             workbench_cmd::split_workbench_pane,
             workbench_cmd::close_workbench_pane,
             workbench_cmd::close_workbench_session,

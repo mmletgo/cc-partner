@@ -73,6 +73,18 @@ export const workbenchApi = {
         rows,
       }),
 
+    /** 聚焦 terminal window，并同步切换底层 tmux current window。 */
+    focus: (sessionId: string) =>
+      invoke<{ ok: boolean; sessionId: string }>('focus_workbench_session', {
+        sessionId,
+      }),
+
+    /** 读取项目 tmux current window 对应的 terminal session。 */
+    focused: (projectId: string) =>
+      invoke<{ sessionId: string | null }>('get_focused_workbench_session', {
+        projectId,
+      }),
+
     /** 在当前 tmux window 内创建一个 pane。 */
     splitPane: (sessionId: string, direction: WorkbenchPaneSplitDirection) =>
       invoke<{ ok: boolean; sessionId: string; direction: WorkbenchPaneSplitDirection }>(
