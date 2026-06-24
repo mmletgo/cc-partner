@@ -9,12 +9,12 @@
  *   先注册 css-stub loader(HealthPanel.tsx 经 @/components/primitives 间接 import *.module.css,
  *   tsx 无 CSS loader,需 stub 成空对象);再动态 import HealthPanel 取 normalizeTimeDraft,
  *   遍历 9 组「输入→期望」用例,结果严格不等则抛错让 node 进程非零退出。
- *   项目 tsconfig 不含 @types/node,node:module 这一行用 @ts-expect-error 抑制类型错误
- *   (运行时 tsx 正常解析;node:module 是 node 内置,无需安装)。
+ *   node:module 这一行用 @ts-expect-error 抑制类型错误(见下方行内注释)。
  */
 
-// node:module 需 @types/node,项目 tsconfig 未启用;运行时为 node 内置,抑制该行类型检查。
-// @ts-expect-error - 项目 tsconfig 不含 @types/node,node:module 类型缺失,运行时 tsx 正常
+// node:module 类型由 @types/node 提供,但本仓库 tsconfig 未在 compilerOptions.types 显式纳入 node,
+// tsx 测试上下文下类型缺失,故局部抑制(运行时 tsx 正常解析;node:module 是 node 内置,无需安装)。
+// @ts-expect-error - 本仓库 tsconfig 未在 compilerOptions.types 纳入 node,node:module 类型缺失,运行时 tsx 正常
 import { register } from 'node:module';
 register('./css-stub.mjs', import.meta.url);
 

@@ -372,5 +372,3 @@ export function HealthPanel({
     </Card>
   );
 }
-
-HealthPanel.displayName = 'HealthPanel';
