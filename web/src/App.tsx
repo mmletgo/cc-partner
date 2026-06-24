@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Routes, Route, Navigate, Outlet, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
+import { sendNotification } from '@tauri-apps/plugin-notification';
 import { AppShell } from './components/layout/AppShell';
 import { Home } from './pages/Home';
 import { Transfer } from './pages/Transfer';
@@ -19,6 +21,7 @@ import { Overlay } from './pages/Screenshot/Overlay';
 import HealthOverlay from './pages/HealthOverlay';
 import { configApi } from './api/config';
 import { PERMISSION_ONBOARDED_KEY } from './hooks/usePermissions';
+import { checkNotificationGranted } from './lib/notification';
 
 const isDev = import.meta.env.DEV;
 
@@ -96,10 +99,47 @@ function PermissionNeededListener() {
   return null;
 }
 
+/**
+ * HealthReminderListener - 健康提醒系统通知监听
+ *
+ * Business Logic（为什么需要这个组件）:
+ *   后端 health daemon 判定连续工作达阈值(且未贪睡/不在免打扰/notify_enabled)时 emit
+ *   `health:reminder`。app 最小化/在后台时应用内 toast(ReminderToast)看不见,需要原生
+ *   系统通知触达用户。本组件监听后弹系统通知,与应用内 toast/全屏遮罩互补。挂在 App
+ *   顶层(与 PermissionNeededListener 同层),任意路由下都生效。
+ *
+ * Code Logic（这个组件做什么）:
+ *   - listen `health:reminder` → checkNotificationGranted(复用 lib/notification)→ sendNotification
+ *   - 未授权或发送失败静默(应用内 toast/全屏遮罩仍会触发)
+ *   - 标题/正文走 i18n health ns(reminderTitle/reminderBody),随当前语言切换
+ *   - hooks 在 early return 之前(项目规则 20)
+ */
+function HealthReminderListener() {
+  const { t } = useTranslation(['health']);
+  useEffect(() => {
+    const unlisten = listen('health:reminder', async () => {
+      try {
+        if (!(await checkNotificationGranted())) return;
+        sendNotification({
+          title: t('health:reminderTitle'),
+          body: t('health:reminderBody'),
+        });
+      } catch {
+        // 未授权通知权限或发送失败时静默;应用内 toast/全屏遮罩仍会触发
+      }
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, [t]);
+  return null;
+}
+
 export default function App() {
   return (
     <>
       <PermissionNeededListener />
+      <HealthReminderListener />
       <Routes>
         {/* 区域截图选区页：独立于 AppShell/OnboardingGuard，由 Tauri 选区窗口直接加载 */}
         <Route path="/screenshot-overlay" element={<Overlay />} />
