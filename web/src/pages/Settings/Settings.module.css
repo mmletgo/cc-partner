@@ -104,6 +104,27 @@
   gap: var(--space-5);
 }
 
+/* ── Health tab 分栏目 ── */
+.healthSection {
+  display: block;
+}
+
+.healthFieldGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.helper + .toggleList {
+  margin-top: var(--space-4);
+}
+
+.toggleList + .healthFieldGrid {
+  margin-top: var(--space-5);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border-soft);
+}
+
 /* ── Section title ── */
 .sectionTitle {
   margin: 0;
@@ -126,6 +147,55 @@
   margin-top: var(--space-5);
   padding-top: var(--space-5);
   border-top: 1px solid var(--border-soft);
+}
+
+.healthFieldGrid > .field,
+.healthFieldGrid > .field + .field {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.timePicker {
+  display: inline-grid;
+  grid-template-columns: minmax(84px, 1fr) auto minmax(84px, 1fr);
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.timeSelect {
+  width: 100%;
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.timeSelect:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.timeSelect:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.timeSelect:disabled {
+  color: var(--muted);
+  background: var(--surface-warm);
+  cursor: not-allowed;
+}
+
+.timeSeparator {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
 }
 
 .label {
@@ -453,7 +523,8 @@
   }
 
   .shortcutRow,
-  .twoColumnFields {
+  .twoColumnFields,
+  .healthFieldGrid {
     grid-template-columns: 1fr;
   }
 
