@@ -6,6 +6,7 @@
   "tabsLabel": "Settings sections",
   "tabs": {
     "general": "General",
+    "health": "Health",
     "sync": "Sync",
     "ai": "AI",
     "about": "About"
@@ -68,6 +69,12 @@
     "testFailed": "Claude CLI test failed: {{error}}",
     "applyFailed": "Failed to apply GitHub Trending config"
   },
+  "health": {
+    "title": "Health reminder",
+    "subtitle": "Tune sedentary-monitor work/break thresholds, reminder style, water reminders, quiet hours, and privacy.",
+    "appliedConfig": "Applied config",
+    "applyFailed": "Failed to apply health config"
+  },
   "about": {
     "title": "About",
     "versionLabel": "Version",
@@ -98,11 +105,13 @@
   "action": {
     "save": "Save",
     "saving": "Saving…",
+    "apply": "Apply",
+    "applying": "Applying…",
     "resetDefault": "Reset to defaults"
   },
   "status": {
-    "dirtyHint": "You have unsaved changes",
-    "savedAt": "Saved at {{time}}"
+    "dirtyHint": "You have unapplied changes",
+    "savedAt": "Applied at {{time}}"
   },
   "error": {
     "saveFailed": "Save failed",

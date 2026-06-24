@@ -6,6 +6,7 @@
   "tabsLabel": "设置分区",
   "tabs": {
     "general": "常规",
+    "health": "健康提醒",
     "sync": "同步",
     "ai": "AI",
     "about": "关于"
@@ -68,6 +69,12 @@
     "testFailed": "Claude CLI 测试失败：{{error}}",
     "applyFailed": "应用 GitHub Trending 配置失败"
   },
+  "health": {
+    "title": "健康提醒",
+    "subtitle": "调整久坐监测的工作/休息阈值、提醒方式、喝水提醒、免打扰时段与隐私设置。",
+    "appliedConfig": "已应用配置",
+    "applyFailed": "应用健康提醒配置失败"
+  },
   "about": {
     "title": "关于",
     "versionLabel": "版本号",
@@ -98,11 +105,13 @@
   "action": {
     "save": "保存",
     "saving": "保存中…",
+    "apply": "应用配置",
+    "applying": "应用中…",
     "resetDefault": "恢复默认"
   },
   "status": {
-    "dirtyHint": "有未保存的修改",
-    "savedAt": "已保存于 {{time}}"
+    "dirtyHint": "有未应用的修改",
+    "savedAt": "已应用于 {{time}}"
   },
   "error": {
     "saveFailed": "保存失败",

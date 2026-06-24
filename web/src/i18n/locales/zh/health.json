@@ -11,6 +11,7 @@
   "disableMonitoring": "关闭监测",
   "pause": "暂停监测",
   "resume": "恢复监测",
+  "goToSettings": "配置",
   "statusOverview": "当前状态",
   "monitoringOn": "健康监测正在运行",
   "monitoringOff": "健康监测已关闭",

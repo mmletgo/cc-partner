@@ -11,6 +11,7 @@
   "disableMonitoring": "Disable monitoring",
   "pause": "Pause monitoring",
   "resume": "Resume monitoring",
+  "goToSettings": "Configure",
   "statusOverview": "Current status",
   "monitoringOn": "Health monitoring is running",
   "monitoringOff": "Health monitoring is off",
