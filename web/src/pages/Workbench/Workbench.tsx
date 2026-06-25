@@ -48,6 +48,9 @@ import type {
   PromptOptimizerFillLanguage,
   WorkbenchFileNode,
   WorkbenchGitCommit,
+  WorkbenchMergeProgressEvent,
+  WorkbenchMergeStage,
+  WorkbenchMergeStageId,
   WorkbenchPathInfo,
   WorkbenchSession,
   WorkbenchTerminalStatusEvent,
@@ -81,6 +84,7 @@ import {
   canRemoveWorktree,
   composeWorktreeBranchName,
   DEFAULT_WORKTREE_BRANCH_PREFIX,
+  formatWorkbenchMergeStages,
   formatCommitRelativeTime,
   hasGitHistory,
   sessionsForWorktree,
@@ -148,6 +152,8 @@ const MIN_TERMINAL_ROWS = 6;
 const TERMINAL_PANE_HEADER_PX = 36;
 const TMUX_FOCUS_SYNC_INTERVAL_MS = 700;
 const LOCAL_FOCUS_GRACE_MS = 500;
+
+const INITIAL_MERGE_STAGE_ID: WorkbenchMergeStageId = 'checkSource';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -683,6 +689,8 @@ export function Workbench() {
   const [gitCommits, setGitCommits] = useState<WorkbenchGitCommit[]>([]);
   const [gitHistoryLoading, setGitHistoryLoading] = useState<boolean>(false);
   const [gitHistoryError, setGitHistoryError] = useState<string | null>(null);
+  const [mergeProgressWorktreeId, setMergeProgressWorktreeId] = useState<string | null>(null);
+  const [mergeStages, setMergeStages] = useState<WorkbenchMergeStage[]>([]);
   const [runtimeNow, setRuntimeNow] = useState<number>(() => Date.now());
   const [promptPanelOpen, setPromptPanelOpen] = useState<boolean>(false);
   const [promptInput, setPromptInput] = useState<string>('');
@@ -705,6 +713,7 @@ export function Workbench() {
   const promptPanelOpenRef = useRef<boolean>(false);
   const cursorAnchorRef = useRef<TerminalCursorAnchor | null>(null);
   const lastLocalFocusAtRef = useRef<number>(0);
+  const mergeProgressWorktreeIdRef = useRef<string | null>(null);
 
   const activeWorktree = useMemo(
     () => worktrees.find((worktree) => worktree.id === activeWorktreeId) ?? worktrees[0] ?? null,
@@ -728,6 +737,10 @@ export function Workbench() {
     [sessions],
   );
   const gitGraphRows = useMemo(() => buildGitGraphRows(gitCommits), [gitCommits]);
+  const renderedMergeStages = useMemo(
+    () => (mergeStages.length > 0 ? formatWorkbenchMergeStages(mergeStages) : []),
+    [mergeStages],
+  );
   const renderedActiveSessionId = activeSession?.id ?? visibleSessions[0]?.id ?? null;
   const selectedParentPath = selectedInfo
     ? selectedInfo.kind === 'dir'
@@ -752,6 +765,40 @@ export function Workbench() {
   const composedWorktreeBranchName = composeWorktreeBranchName(
     createWorktreeBranchPrefix,
     createWorktreeBranchSuffixDraft,
+  );
+  const mergeStageLabel = useCallback(
+    (stageId: WorkbenchMergeStageId): string => {
+      switch (stageId) {
+        case 'checkSource':
+          return t('workbench:mergeStages.labels.checkSource');
+        case 'closeSessions':
+          return t('workbench:mergeStages.labels.closeSessions');
+        case 'mergeMain':
+          return t('workbench:mergeStages.labels.mergeMain');
+        case 'resolveConflicts':
+          return t('workbench:mergeStages.labels.resolveConflicts');
+        case 'cleanup':
+          return t('workbench:mergeStages.labels.cleanup');
+      }
+    },
+    [t],
+  );
+  const mergeStageFallbackMessage = useCallback(
+    (stage: WorkbenchMergeStage): string => {
+      switch (stage.status) {
+        case 'pending':
+          return t('workbench:mergeStages.status.pending');
+        case 'running':
+          return t('workbench:mergeStages.status.running');
+        case 'completed':
+          return t('workbench:mergeStages.status.completed');
+        case 'failed':
+          return t('workbench:mergeStages.status.failed');
+        case 'skipped':
+          return t('workbench:mergeStages.status.skipped');
+      }
+    },
+    [t],
   );
 
   const updateActiveSession = useCallback((nextSessions: WorkbenchSession[]) => {
@@ -974,6 +1021,10 @@ export function Workbench() {
   }, [promptPanelOpen]);
 
   useEffect(() => {
+    mergeProgressWorktreeIdRef.current = mergeProgressWorktreeId;
+  }, [mergeProgressWorktreeId]);
+
+  useEffect(() => {
     knownSessionIdsRef.current = new Set(sessions.map((session) => session.id));
   }, [sessions]);
 
@@ -1050,6 +1101,8 @@ export function Workbench() {
         setSelectedInfo(null);
         setGitCommits([]);
         setGitHistoryError(null);
+        setMergeProgressWorktreeId(null);
+        setMergeStages([]);
         return;
       }
       setRootNodes([]);
@@ -1066,6 +1119,8 @@ export function Workbench() {
       setFileNotice(null);
       setGitCommits([]);
       setGitHistoryError(null);
+      setMergeProgressWorktreeId(null);
+      setMergeStages([]);
       void loadWorktrees(activeProjectId);
       void loadSessions(activeProjectId);
     });
@@ -1119,6 +1174,33 @@ export function Workbench() {
     );
     return () => {
       void statusUnlisten.then((fn) => fn());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!canListenToTauriEvents()) return undefined;
+    const mergeUnlisten = listen<WorkbenchMergeProgressEvent>(
+      'workbench:merge-progress',
+      (event) => {
+        const payload = event.payload;
+        const activeProjectId = activeProjectIdRef.current;
+        if (!activeProjectId || payload.projectId !== activeProjectId) return;
+        const trackedWorktreeId = mergeProgressWorktreeIdRef.current;
+        if (trackedWorktreeId && trackedWorktreeId !== payload.worktreeId) return;
+        if (!trackedWorktreeId) {
+          mergeProgressWorktreeIdRef.current = payload.worktreeId;
+          setMergeProgressWorktreeId(payload.worktreeId);
+        }
+        setMergeStages((current) =>
+          formatWorkbenchMergeStages([
+            ...current.filter((stage) => stage.id !== payload.stage.id),
+            payload.stage,
+          ]),
+        );
+      },
+    );
+    return () => {
+      void mergeUnlisten.then((fn) => fn());
     };
   }, []);
 
@@ -1481,20 +1563,65 @@ export function Workbench() {
     if (!window.confirm(t('workbench:worktrees.mergeConfirm', { name: activeWorktree.name }))) {
       return;
     }
+    const projectId = activeWorktree.projectId;
+    const worktreeId = activeWorktree.id;
     try {
       setWorktreeBusy('merge');
       setWorktreeError(null);
-      await workbenchApi.worktrees.merge(activeWorktree.id);
-      await loadWorktrees(activeWorktree.projectId);
+      setMergeProgressWorktreeId(worktreeId);
+      mergeProgressWorktreeIdRef.current = worktreeId;
+      setMergeStages(
+        formatWorkbenchMergeStages([
+          {
+            id: INITIAL_MERGE_STAGE_ID,
+            status: 'running',
+            message: t('workbench:mergeStages.messages.checkSource'),
+          },
+        ]),
+      );
+      const result = await workbenchApi.worktrees.merge(worktreeId);
+      setMergeStages(formatWorkbenchMergeStages(result.stages));
+      await loadWorktrees(projectId);
+      await loadSessions(projectId);
+      sessionsForWorktree(sessions, worktreeId).forEach((session) => {
+        removeTerminalBuffer(session.id);
+      });
+      void refreshProjectSessionStats(projectId);
       if (inspectorTab === 'history') await loadGitHistory();
     } catch (error) {
+      const message = displayErrorMessage(
+        error,
+        t('workbench:errors.mergeWorktree'),
+        desktopUnavailableMessage,
+      );
+      setMergeStages((current) => {
+        const formatted = formatWorkbenchMergeStages(current);
+        if (formatted.some((stage) => stage.status === 'failed')) return formatted;
+        const failedStage = formatted.find((stage) => stage.status === 'running') ?? formatted[0];
+        return formatted.map((stage) =>
+          stage.id === failedStage.id ? { ...stage, status: 'failed', message } : stage,
+        );
+      });
+      await loadWorktrees(projectId);
+      await loadSessions(projectId);
       setWorktreeError(
-        displayErrorMessage(error, t('workbench:errors.mergeWorktree'), desktopUnavailableMessage),
+        message,
       );
     } finally {
       setWorktreeBusy(null);
     }
-  }, [activeWorktree, desktopUnavailableMessage, inspectorTab, loadGitHistory, loadWorktrees, t]);
+  }, [
+    activeWorktree,
+    desktopUnavailableMessage,
+    inspectorTab,
+    loadGitHistory,
+    loadSessions,
+    loadWorktrees,
+    refreshProjectSessionStats,
+    removeTerminalBuffer,
+    sessions,
+    t,
+  ]);
 
   const handleRemoveWorktree = useCallback(async () => {
     if (!activeWorktree || activeWorktree.isMain) return;
@@ -2321,6 +2448,28 @@ export function Workbench() {
                 </Button>
               </div>
             </div>
+
+            {renderedMergeStages.length > 0 ? (
+              <div className={styles.mergeStagePanel} role="status" aria-live="polite">
+                {renderedMergeStages.map((stage) => (
+                  <div
+                    key={stage.id}
+                    className={styles.mergeStageItem}
+                    data-status={stage.status}
+                  >
+                    <span className={styles.mergeStageDot} aria-hidden="true" />
+                    <div className={styles.mergeStageCopy}>
+                      <span className={styles.mergeStageLabel}>
+                        {mergeStageLabel(stage.id)}
+                      </span>
+                      <span className={styles.mergeStageMessage}>
+                        {stage.message || mergeStageFallbackMessage(stage)}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
 
             {gitHistoryError ? <div className={styles.errorBox}>{gitHistoryError}</div> : null}
 

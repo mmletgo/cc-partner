@@ -1,4 +1,10 @@
-import type { WorkbenchGitCommit, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import type {
+  WorkbenchGitCommit,
+  WorkbenchMergeStage,
+  WorkbenchMergeStageId,
+  WorkbenchSession,
+  WorkbenchWorktree,
+} from '@/lib/types';
 
 export type WorktreeTone = 'neutral' | 'warning' | 'danger';
 export const WORKTREE_BRANCH_PREFIXES = [
@@ -28,6 +34,13 @@ export interface WorkbenchGitGraphRow {
 }
 
 const GIT_GRAPH_COLOR_COUNT = 6;
+export const WORKBENCH_MERGE_STAGE_IDS: WorkbenchMergeStageId[] = [
+  'checkSource',
+  'closeSessions',
+  'mergeMain',
+  'resolveConflicts',
+  'cleanup',
+];
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -111,13 +124,32 @@ export function canPushWorktree(
  *   Git 历史工具条的 merge 只适用于功能 worktree 合回主工作区。
  *
  * Code Logic（这个函数做什么）:
- *   active worktree 存在、非主工作区、clean 且没有其他 worktree 操作时返回 true。
+ *   active worktree 存在、非主工作区且没有其他 worktree 操作时返回 true；
+ *   dirty 检查交给后端实时执行，避免依赖可能过期的轮询快照。
  */
 export function canMergeWorktree(
   activeWorktree: WorkbenchWorktree | null,
   worktreeBusy: string | null,
 ): boolean {
-  return activeWorktree !== null && !activeWorktree.isMain && activeWorktree.status.clean && worktreeBusy === null;
+  return activeWorktree !== null && !activeWorktree.isMain && worktreeBusy === null;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   一键合并会跨越多个后端阶段，UI 需要稳定顺序展示每一阶段，即使某些阶段尚未开始或被跳过。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 canonical 阶段 id 补齐缺失阶段；已有阶段保留 status/message，未知阶段忽略。
+ */
+export function formatWorkbenchMergeStages(
+  stages: WorkbenchMergeStage[],
+): WorkbenchMergeStage[] {
+  const byId = new Map(stages.map((stage) => [stage.id, stage]));
+  return WORKBENCH_MERGE_STAGE_IDS.map((id) => {
+    const stage = byId.get(id);
+    if (stage) return stage;
+    return { id, status: 'pending', message: '' };
+  });
 }
 
 /**

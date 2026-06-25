@@ -98,6 +98,28 @@ impl WorkbenchSessionRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     merge 或移除非主 worktree 时，只能关闭该 worktree 下的 terminal window，不能影响同项目其他工作区。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 project_id + worktree_id 查询会话记录，保持 started_at 创建顺序返回。
+    pub async fn list_by_worktree(
+        &self,
+        project_id: &str,
+        worktree_id: &str,
+    ) -> Result<Vec<WorkbenchSessionRow>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, project_id, worktree_id, name, command, cwd, status, cols, rows, started_at, exited_at, \
+             exit_code, backend, backend_id, backend_window_id, created_at, updated_at \
+             FROM workbench_sessions WHERE project_id = ? AND worktree_id = ? ORDER BY started_at ASC",
+        )
+        .bind(project_id)
+        .bind(worktree_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_session).collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     close/rename/resize 等命令需要按 session_id 找到持久化会话。
     ///
     /// Code Logic（这个函数做什么）:
@@ -169,6 +191,24 @@ impl WorkbenchSessionRepo {
     pub async fn delete_by_project(&self, project_id: &str) -> Result<(), AppError> {
         sqlx::query("DELETE FROM workbench_sessions WHERE project_id = ?")
             .bind(project_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     worktree merge 完成并删除磁盘工作区后，该 worktree 的 terminal metadata 不应在应用重启后恢复。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 project_id + worktree_id 删除匹配会话记录，不触碰主工作区或其他 worktree。
+    pub async fn delete_by_worktree(
+        &self,
+        project_id: &str,
+        worktree_id: &str,
+    ) -> Result<(), AppError> {
+        sqlx::query("DELETE FROM workbench_sessions WHERE project_id = ? AND worktree_id = ?")
+            .bind(project_id)
+            .bind(worktree_id)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -264,6 +304,22 @@ mod tests {
         }
     }
 
+    /// Business Logic（为什么需要这个函数）:
+    ///     Workbench merge 清理只应关闭目标 worktree 的终端，不能误删同项目其他 worktree 或主工作区窗口。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     基于通用 row helper 生成带 worktree_id 的会话记录。
+    fn row_for_worktree(
+        id: &str,
+        project_id: &str,
+        worktree_id: Option<&str>,
+        started_at: &str,
+    ) -> WorkbenchSessionRow {
+        let mut row = row(id, project_id, started_at);
+        row.worktree_id = worktree_id.map(str::to_string);
+        row
+    }
+
     /// Business Logic（为什么需要这个测试）:
     ///     应用重启后需要从 SQLite 恢复之前打开的终端 tab。
     ///
@@ -322,5 +378,76 @@ mod tests {
         repo.delete("s1").await.unwrap();
 
         assert!(repo.get("s1").await.unwrap().is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     merge 非主 worktree 前，后端需要列出该 worktree 的全部持久化 terminal window，
+    ///     以便逐个销毁运行期/后台资源。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入同项目不同 worktree 的会话，断言 list_by_worktree 只返回目标 worktree。
+    #[tokio::test]
+    async fn list_by_worktree_filters_project_and_worktree() {
+        let repo = setup_repo().await;
+        repo.upsert(&row_for_worktree(
+            "s1",
+            "p1",
+            Some("wt1"),
+            "2026-06-24T00:00:00Z",
+        ))
+        .await
+        .unwrap();
+        repo.upsert(&row_for_worktree(
+            "s2",
+            "p1",
+            Some("wt2"),
+            "2026-06-24T00:01:00Z",
+        ))
+        .await
+        .unwrap();
+        repo.upsert(&row_for_worktree(
+            "s3",
+            "p2",
+            Some("wt1"),
+            "2026-06-24T00:02:00Z",
+        ))
+        .await
+        .unwrap();
+
+        let listed = repo.list_by_worktree("p1", "wt1").await.unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "s1");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     merge 成功后的 cleanup 阶段要确保目标 worktree 不再恢复旧 terminal metadata。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入多个 worktree 会话后按 worktree 删除，断言只删除目标 worktree 记录。
+    #[tokio::test]
+    async fn delete_by_worktree_removes_only_target_worktree_sessions() {
+        let repo = setup_repo().await;
+        repo.upsert(&row_for_worktree(
+            "s1",
+            "p1",
+            Some("wt1"),
+            "2026-06-24T00:00:00Z",
+        ))
+        .await
+        .unwrap();
+        repo.upsert(&row_for_worktree(
+            "s2",
+            "p1",
+            Some("wt2"),
+            "2026-06-24T00:01:00Z",
+        ))
+        .await
+        .unwrap();
+
+        repo.delete_by_worktree("p1", "wt1").await.unwrap();
+
+        assert!(repo.get("s1").await.unwrap().is_none());
+        assert!(repo.get("s2").await.unwrap().is_some());
     }
 }

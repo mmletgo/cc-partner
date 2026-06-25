@@ -12,7 +12,7 @@ use crate::workbench::models::{
     WorkbenchGitCommitDto, WorkbenchGitRefDto, WorkbenchGitRefKindDto, WorkbenchGitStatusDto,
 };
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
 
 /// `git worktree list --porcelain` 的单项解析结果。
 ///
@@ -55,7 +55,37 @@ pub struct StagedCommitChanges {
     pub truncated: bool,
 }
 
+/// Git merge 尝试的分类结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     Workbench 一键 merge 遇到冲突时需要进入 Claude Code 自动解决阶段，而不是把 Git 非零退出
+///     直接作为终止错误返回给用户。
+///
+/// Code Logic（这个枚举做什么）:
+///     区分 merge 已完成和 merge 进入冲突状态两类可继续处理的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeBranchOutcome {
+    Merged,
+    Conflicted,
+}
+
 const MAX_COMMIT_DIFF_CHARS: usize = 24_000;
+
+/// Business Logic（为什么需要这个函数）:
+///     多个 Git helper 都需要把失败输出整理成用户可读错误，避免只展示退出码。
+///
+/// Code Logic（这个函数做什么）:
+///     优先取 stderr，缺失时取 stdout，两者都为空时返回统一兜底文案。
+fn git_failure_message(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    if detail.is_empty() {
+        "未知 Git 错误".to_string()
+    } else {
+        detail
+    }
+}
 
 /// Business Logic（为什么需要这个函数）:
 ///     Git worktree 管理命令都需要执行系统 git，并在失败时返回可读错误。
@@ -67,15 +97,10 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, AppError> {
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).to_string());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if !stderr.is_empty() { stderr } else { stdout };
-    let message = if detail.is_empty() {
-        "未知 Git 错误".to_string()
-    } else {
-        detail
-    };
-    Err(AppError::generic(format!("Git 命令失败: {message}")))
+    Err(AppError::generic(format!(
+        "Git 命令失败: {}",
+        git_failure_message(&output)
+    )))
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -365,15 +390,100 @@ fn list_remotes(path: &Path) -> Result<Vec<String>, AppError> {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     用户希望在 Workbench 中把功能 worktree 合并回主工作区所在分支。
+///     用户希望在 Workbench 中把功能 worktree 合并回主工作区所在分支；如果发生冲突，
+///     后端还需要保留 merge 状态供 Claude Code 继续处理。
 ///
 /// Code Logic（这个函数做什么）:
-///     在主工作区路径执行 `git merge --no-ff <branch>`，保留功能分支合并记录。
-pub fn merge_branch(main_path: &Path, branch: &str) -> Result<(), AppError> {
+///     在主工作区路径执行 `git merge --no-ff <branch>`；成功返回 Merged，非零退出后若检测到
+///     unmerged path 则返回 Conflicted，否则返回普通 Git 错误。
+pub fn merge_branch(main_path: &Path, branch: &str) -> Result<MergeBranchOutcome, AppError> {
     if branch.trim().is_empty() {
         return Err(AppError::generic("当前 worktree 没有可合并的分支"));
     }
-    run_git(main_path, &["merge", "--no-ff", branch])?;
+    let output = Command::new("git")
+        .args(["merge", "--no-ff", branch])
+        .current_dir(main_path)
+        .output()?;
+    if output.status.success() {
+        return Ok(MergeBranchOutcome::Merged);
+    }
+    if unresolved_conflict_files(main_path)
+        .map(|files| !files.is_empty())
+        .unwrap_or(false)
+    {
+        return Ok(MergeBranchOutcome::Conflicted);
+    }
+    Err(AppError::generic(format!(
+        "Git 命令失败: {}",
+        git_failure_message(&output)
+    )))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Claude Code 冲突解决阶段需要知道当前有哪些 Git unmerged 文件，才能构造有限、明确的输入。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 `git diff --name-only --diff-filter=U -z`，按 NUL 分隔解析未解决冲突文件相对路径。
+pub fn unresolved_conflict_files(path: &Path) -> Result<Vec<String>, AppError> {
+    let output = run_git(path, &["diff", "--name-only", "--diff-filter=U", "-z"])?;
+    Ok(output
+        .split('\0')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToString::to_string)
+        .collect())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge 冲突自动解决失败时，后端需要判断是否还能安全执行 `git merge --abort`。
+///
+/// Code Logic（这个函数做什么）:
+///     用 `git rev-parse -q --verify MERGE_HEAD` 判断当前仓库是否处于 merge 进行中。
+pub fn merge_in_progress(path: &Path) -> bool {
+    run_git(path, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        .map(|output| !output.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Claude Code 仍无法解决冲突时，后端应尽量回滚主工作区 merge 状态，避免用户项目卡在半合并状态。
+///
+/// Code Logic（这个函数做什么）:
+///     当前存在 MERGE_HEAD 时执行 `git merge --abort`；没有 merge 状态时直接 no-op。
+pub fn abort_merge(path: &Path) -> Result<(), AppError> {
+    if merge_in_progress(path) {
+        run_git(path, &["merge", "--abort"])?;
+    }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Claude Code 改写冲突文件后，后端需要把解决结果加入 index，并在仍有冲突时给出明确错误。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 `git add -A` 后重新读取 unmerged 文件；若仍有冲突则返回包含文件列表的业务错误。
+pub fn stage_all_merge_resolution(path: &Path) -> Result<(), AppError> {
+    run_git(path, &["add", "-A"])?;
+    let remaining = unresolved_conflict_files(path)?;
+    if !remaining.is_empty() {
+        return Err(AppError::generic(format!(
+            "仍有未解决的 merge 冲突: {}",
+            remaining.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     冲突被自动解决后，用户不应再手动执行 git commit；后端应完成 Git 已准备好的 merge commit。
+///
+/// Code Logic（这个函数做什么）:
+///     当前存在 MERGE_HEAD 时执行 `git commit --no-edit` 使用 Git 生成的 merge message；
+///     没有 merge 状态时视为无需提交并 no-op。
+pub fn commit_merge_no_edit(path: &Path) -> Result<(), AppError> {
+    if merge_in_progress(path) {
+        run_git(path, &["commit", "--no-edit"])?;
+    }
     Ok(())
 }
 
@@ -911,6 +1021,88 @@ UU web/src/App.tsx
         let message = err.to_string();
         assert!(message.contains("origin"));
         assert!(message.contains("upstream"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Workbench 一键 merge 遇到冲突时不能把冲突当作普通 Git fatal 直接丢给用户；
+    ///     后续阶段需要识别冲突文件并交给 Claude Code 尝试解决。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建真实 Git 冲突，断言 merge_branch 返回 Conflicted、保留 MERGE_HEAD，并能列出未解决文件。
+    #[test]
+    fn merge_branch_reports_conflict_for_claude_resolution() {
+        let root = temp_git_dir("workbench-merge-conflict");
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "main"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+        git_test_command(&repo, &["checkout", "-b", "feature/conflict"]);
+        fs::write(repo.join("README.md"), "feature\n").expect("write feature");
+        git_test_command(&repo, &["commit", "-am", "feature change"]);
+        git_test_command(&repo, &["checkout", "main"]);
+        fs::write(repo.join("README.md"), "main\n").expect("write main");
+        git_test_command(&repo, &["commit", "-am", "main change"]);
+
+        let outcome = merge_branch(&repo, "feature/conflict").expect("merge should be classed");
+        let conflicts = unresolved_conflict_files(&repo).expect("read conflicts");
+
+        assert_eq!(outcome, MergeBranchOutcome::Conflicted);
+        assert_eq!(conflicts, vec!["README.md"]);
+        assert!(merge_in_progress(&repo));
+
+        let _ = abort_merge(&repo);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Claude Code 成功改写冲突文件后，后端应自动 stage 并完成 merge commit，
+    ///     用户不应再手动回到主 worktree 执行 git add/commit。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     手动模拟 Claude 已写入解决后的文件，执行 stage_all_merge_resolution + commit_merge_no_edit，
+    ///     断言 merge 状态结束且 HEAD 是双父 merge commit。
+    #[test]
+    fn commit_merge_no_edit_completes_resolved_conflict_merge() {
+        let root = temp_git_dir("workbench-merge-resolution");
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "main"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+        git_test_command(&repo, &["checkout", "-b", "feature/conflict"]);
+        fs::write(repo.join("README.md"), "feature\n").expect("write feature");
+        git_test_command(&repo, &["commit", "-am", "feature change"]);
+        git_test_command(&repo, &["checkout", "main"]);
+        fs::write(repo.join("README.md"), "main\n").expect("write main");
+        git_test_command(&repo, &["commit", "-am", "main change"]);
+
+        assert_eq!(
+            merge_branch(&repo, "feature/conflict").expect("merge outcome"),
+            MergeBranchOutcome::Conflicted
+        );
+        fs::write(repo.join("README.md"), "main\nfeature\n").expect("write resolved");
+        stage_all_merge_resolution(&repo).expect("stage resolution");
+        assert!(unresolved_conflict_files(&repo)
+            .expect("read conflicts")
+            .is_empty());
+
+        commit_merge_no_edit(&repo).expect("commit merge");
+        let parents = git_test_command(&repo, &["rev-list", "--parents", "-n", "1", "HEAD"]);
+        let parent_count = parents.split_whitespace().count() - 1;
+
+        assert!(!merge_in_progress(&repo));
+        assert_eq!(parent_count, 2);
 
         let _ = fs::remove_dir_all(root);
     }

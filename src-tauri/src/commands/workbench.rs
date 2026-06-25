@@ -22,13 +22,28 @@ use crate::workbench::sessions::{
 };
 use crate::workbench::{fs as workbench_fs, git as workbench_git, projects};
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::path::Component;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 const COMMIT_MESSAGE_TIMEOUT_SECS: u64 = 180;
+const MERGE_CONFLICT_RESOLUTION_TIMEOUT_SECS: u64 = 300;
+const MERGE_STAGE_CHECK_SOURCE: &str = "checkSource";
+const MERGE_STAGE_CLOSE_SESSIONS: &str = "closeSessions";
+const MERGE_STAGE_MERGE_MAIN: &str = "mergeMain";
+const MERGE_STAGE_RESOLVE_CONFLICTS: &str = "resolveConflicts";
+const MERGE_STAGE_CLEANUP: &str = "cleanup";
+const MERGE_STAGE_IDS: [&str; 5] = [
+    MERGE_STAGE_CHECK_SOURCE,
+    MERGE_STAGE_CLOSE_SESSIONS,
+    MERGE_STAGE_MERGE_MAIN,
+    MERGE_STAGE_RESOLVE_CONFLICTS,
+    MERGE_STAGE_CLEANUP,
+];
 
 /// Claude Code 生成的 Workbench commit message 结构化响应。
 ///
@@ -40,6 +55,89 @@ const COMMIT_MESSAGE_TIMEOUT_SECS: u64 = 180;
 #[derive(Debug, Clone, Deserialize)]
 struct WorkbenchCommitMessageResponse {
     message: String,
+}
+
+/// Workbench merge 命令返回 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     前端需要展示一键 merge 每个阶段的最终状态，而不只是一个布尔成功值。
+///
+/// Code Logic（这个结构体做什么）:
+///     使用 camelCase 序列化 `{ok, worktreeId, stages}`，stages 内含固定 stage id/status/message。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchMergeResultDto {
+    ok: bool,
+    worktree_id: String,
+    stages: Vec<WorkbenchMergeStageDto>,
+}
+
+/// Workbench merge 阶段 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     前端进度条需要知道当前阶段是等待、运行、完成、失败还是跳过。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 stage id、status 和用户可读 message，字段名与前端约定保持一致。
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkbenchMergeStageDto {
+    id: String,
+    status: String,
+    message: String,
+}
+
+/// Workbench merge 进度事件 payload。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     merge 是多阶段长操作，前端需要通过事件实时更新，而不是只等待命令返回。
+///
+/// Code Logic（这个结构体做什么）:
+///     序列化 `{projectId, worktreeId, stage}` 并通过 `workbench:merge-progress` emit，
+///     让多项目窗口只接收自己项目的进度。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkbenchMergeProgressEvent {
+    project_id: String,
+    worktree_id: String,
+    stage: WorkbenchMergeStageDto,
+}
+
+/// Claude Code merge 冲突解决响应。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     自动冲突解决需要 Claude 返回每个冲突文件的完整解决后内容，后端才能安全写回。
+///
+/// Code Logic（这个结构体做什么）:
+///     对齐 JSON schema 顶层 `files` 数组。
+#[derive(Debug, Clone, Deserialize)]
+struct WorkbenchMergeResolutionResponse {
+    files: Vec<WorkbenchMergeResolvedFile>,
+}
+
+/// Claude Code 返回的单个已解决文件。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     每个冲突文件都需要独立校验相对路径和内容，防止模型输出越界路径或残留冲突标记。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存相对 path 与完整文件 content。
+#[derive(Debug, Clone, Deserialize)]
+struct WorkbenchMergeResolvedFile {
+    path: String,
+    content: String,
+}
+
+/// 传给 Claude Code 的单个冲突文件输入。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     Claude 解决冲突时必须看到 Git 相对路径和带 conflict marker 的当前文件全文。
+///
+/// Code Logic（这个结构体做什么）:
+///     在构造 prompt 前保存 path/content，便于测试 prompt 内容。
+#[derive(Debug, Clone)]
+struct MergeConflictFileInput {
+    path: String,
+    content: String,
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -717,40 +815,693 @@ pub async fn push_workbench_worktree(
 /// 合并当前 worktree 到主工作区。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户完成功能 worktree 后，需要一键回到主工作区执行 merge，但必须先避免脏工作区和冲突状态。
+///     用户完成功能 worktree 后，需要一键合并回主工作区；后端应自动处理源工作区检查、终端关闭、
+///     主工作区 merge、Claude Code 冲突解决和 worktree 清理，并持续给前端阶段进度。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验目标非主 worktree、源/主工作区干净且无冲突，再在主工作区执行 `git merge --no-ff <branch>`。
+///     按 checkSource/closeSessions/mergeMain/resolveConflicts/cleanup 五阶段推进；每阶段开始/完成/失败
+///     emit `workbench:merge-progress`，成功返回 `{ok, worktreeId, stages}`，失败先 emit failed 再返回 AppError。
 #[tauri::command]
 pub async fn merge_workbench_worktree(
+    app: AppHandle,
     state: State<'_, AppState>,
     worktree_id: String,
-) -> Result<serde_json::Value, AppError> {
-    let row = state
-        .workbench_worktree_repo
-        .get(&worktree_id)
-        .await?
-        .ok_or_else(|| AppError::not_found("工作台 worktree 不存在"))?;
+) -> Result<WorkbenchMergeResultDto, AppError> {
+    let mut stages = initial_merge_stages();
+
+    let row = match state.workbench_worktree_repo.get(&worktree_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return Err(AppError::not_found("工作台 worktree 不存在")),
+        Err(error) => return Err(error),
+    };
+    let project_id = row.project_id.clone();
+    set_merge_stage(
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CHECK_SOURCE,
+        "running",
+        "正在检查源 worktree 状态",
+    );
     if row.is_main {
-        return Err(AppError::generic("主工作区不需要合并到自己"));
+        return Err(fail_merge_stage(
+            &app,
+            &project_id,
+            &worktree_id,
+            &mut stages,
+            MERGE_STAGE_CHECK_SOURCE,
+            AppError::generic("主工作区不需要合并到自己"),
+        ));
     }
-    let project = get_project(&state, &row.project_id).await?;
-    let main = ensure_main_worktree(&state, &project).await?;
-    let source_status = workbench_git::status(Path::new(&row.path))?;
+    let project = stage_result(
+        get_project(&state, &row.project_id).await,
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CHECK_SOURCE,
+    )?;
+    let main = stage_result(
+        ensure_main_worktree(&state, &project).await,
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CHECK_SOURCE,
+    )?;
+    let source_status = stage_result(
+        workbench_git::status(Path::new(&row.path)),
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CHECK_SOURCE,
+    )?;
     if !source_status.clean {
-        return Err(AppError::generic("请先提交或清理当前 worktree 的改动"));
+        return Err(fail_merge_stage(
+            &app,
+            &project_id,
+            &worktree_id,
+            &mut stages,
+            MERGE_STAGE_CHECK_SOURCE,
+            AppError::generic("源 worktree 有未提交改动，请先提交或清理后再合并"),
+        ));
     }
-    let main_status = workbench_git::status(Path::new(&main.path))?;
+    let branch = stage_result(
+        row.branch
+            .clone()
+            .or(source_status.branch)
+            .ok_or_else(|| AppError::generic("当前 worktree 没有可合并的分支")),
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CHECK_SOURCE,
+    )?;
+    set_merge_stage(
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CHECK_SOURCE,
+        "completed",
+        "源 worktree 已确认干净",
+    );
+
+    set_merge_stage(
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CLOSE_SESSIONS,
+        "running",
+        "正在关闭该 worktree 下的终端窗口",
+    );
+    let closed_sessions = stage_result(
+        close_sessions_for_worktree(&state, &row.project_id, &row.id).await,
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CLOSE_SESSIONS,
+    )?;
+    set_merge_stage(
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CLOSE_SESSIONS,
+        "completed",
+        format!("已关闭 {closed_sessions} 个终端窗口"),
+    );
+
+    set_merge_stage(
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_MERGE_MAIN,
+        "running",
+        "正在主工作区执行 git merge --no-ff",
+    );
+    let main_path = Path::new(&main.path);
+    let main_status = stage_result(
+        workbench_git::status(main_path),
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_MERGE_MAIN,
+    )?;
     if !main_status.clean {
-        return Err(AppError::generic("主工作区有未提交改动，不能合并"));
+        return Err(fail_merge_stage(
+            &app,
+            &project_id,
+            &worktree_id,
+            &mut stages,
+            MERGE_STAGE_MERGE_MAIN,
+            AppError::generic("主工作区有未提交改动，请先提交或清理后再合并"),
+        ));
     }
-    let branch = row
-        .branch
-        .clone()
-        .or(source_status.branch)
-        .ok_or_else(|| AppError::generic("当前 worktree 没有可合并的分支"))?;
-    workbench_git::merge_branch(Path::new(&main.path), &branch)?;
-    Ok(serde_json::json!({ "ok": true, "worktreeId": worktree_id }))
+    let merge_outcome = stage_result(
+        workbench_git::merge_branch(main_path, &branch),
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_MERGE_MAIN,
+    )?;
+    match merge_outcome {
+        workbench_git::MergeBranchOutcome::Merged => {
+            set_merge_stage(
+                &app,
+                &project_id,
+                &worktree_id,
+                &mut stages,
+                MERGE_STAGE_MERGE_MAIN,
+                "completed",
+                "主工作区 merge 已完成",
+            );
+            set_merge_stage(
+                &app,
+                &project_id,
+                &worktree_id,
+                &mut stages,
+                MERGE_STAGE_RESOLVE_CONFLICTS,
+                "skipped",
+                "merge 未产生冲突，跳过自动冲突解决",
+            );
+        }
+        workbench_git::MergeBranchOutcome::Conflicted => {
+            set_merge_stage(
+                &app,
+                &project_id,
+                &worktree_id,
+                &mut stages,
+                MERGE_STAGE_MERGE_MAIN,
+                "completed",
+                "merge 出现冲突，进入自动解决阶段",
+            );
+            set_merge_stage(
+                &app,
+                &project_id,
+                &worktree_id,
+                &mut stages,
+                MERGE_STAGE_RESOLVE_CONFLICTS,
+                "running",
+                "正在调用 Claude Code 尝试解决 merge 冲突",
+            );
+            if let Err(error) = resolve_merge_conflicts_with_claude(&state, main_path).await {
+                let message = abort_merge_after_failed_resolution(main_path, &error);
+                return Err(fail_merge_stage(
+                    &app,
+                    &project_id,
+                    &worktree_id,
+                    &mut stages,
+                    MERGE_STAGE_RESOLVE_CONFLICTS,
+                    AppError::generic(message),
+                ));
+            }
+            set_merge_stage(
+                &app,
+                &project_id,
+                &worktree_id,
+                &mut stages,
+                MERGE_STAGE_RESOLVE_CONFLICTS,
+                "completed",
+                "Claude Code 已解决冲突并完成 merge commit",
+            );
+        }
+    }
+
+    set_merge_stage(
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CLEANUP,
+        "running",
+        "正在删除 worktree 元数据和磁盘工作区",
+    );
+    stage_result(
+        cleanup_merged_worktree(&state, &project, &row).await,
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CLEANUP,
+    )?;
+    set_merge_stage(
+        &app,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CLEANUP,
+        "completed",
+        "已删除 worktree 元数据和磁盘工作区",
+    );
+
+    Ok(WorkbenchMergeResultDto {
+        ok: true,
+        worktree_id,
+        stages,
+    })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge 命令和进度事件都需要同一份固定阶段列表，避免前端收到未知或缺失阶段。
+///
+/// Code Logic（这个函数做什么）:
+///     按前端约定的五个 stage id 生成 pending 初始状态。
+fn initial_merge_stages() -> Vec<WorkbenchMergeStageDto> {
+    MERGE_STAGE_IDS
+        .iter()
+        .map(|id| WorkbenchMergeStageDto {
+            id: (*id).to_string(),
+            status: "pending".to_string(),
+            message: "等待执行".to_string(),
+        })
+        .collect()
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     前端需要实时看到 merge 阶段开始、完成、跳过和失败状态，不能只等命令返回。
+///
+/// Code Logic（这个函数做什么）:
+///     更新本地 stages 中对应项，并 emit `workbench:merge-progress` 事件；emit 失败只记录日志，不中断 merge。
+fn set_merge_stage(
+    app: &AppHandle,
+    project_id: &str,
+    worktree_id: &str,
+    stages: &mut [WorkbenchMergeStageDto],
+    stage_id: &str,
+    status: &str,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    let stage = stages
+        .iter_mut()
+        .find(|stage| stage.id == stage_id)
+        .expect("merge stage id 必须来自固定列表");
+    stage.status = status.to_string();
+    stage.message = message;
+    let event = WorkbenchMergeProgressEvent {
+        project_id: project_id.to_string(),
+        worktree_id: worktree_id.to_string(),
+        stage: stage.clone(),
+    };
+    if let Err(error) = app.emit("workbench:merge-progress", event) {
+        tracing::warn!("发送 Workbench merge 进度事件失败: {error}");
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge 阶段内部任一错误都应先通知前端 failed stage，再通过 Tauri command 返回 AppError。
+///
+/// Code Logic（这个函数做什么）:
+///     将 Result::Err 映射为 fail_merge_stage，Result::Ok 原样返回。
+fn stage_result<T>(
+    result: Result<T, AppError>,
+    app: &AppHandle,
+    project_id: &str,
+    worktree_id: &str,
+    stages: &mut [WorkbenchMergeStageDto],
+    stage_id: &str,
+) -> Result<T, AppError> {
+    result.map_err(|error| fail_merge_stage(app, project_id, worktree_id, stages, stage_id, error))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     失败路径需要统一把真实错误消息同步到进度事件，前端才能在对应阶段展示可读失败原因。
+///
+/// Code Logic（这个函数做什么）:
+///     把 stage 标记为 failed 并返回原 AppError，保持命令错误语义不变。
+fn fail_merge_stage(
+    app: &AppHandle,
+    project_id: &str,
+    worktree_id: &str,
+    stages: &mut [WorkbenchMergeStageDto],
+    stage_id: &str,
+    error: AppError,
+) -> AppError {
+    let message = error.to_string();
+    set_merge_stage(
+        app,
+        project_id,
+        worktree_id,
+        stages,
+        stage_id,
+        "failed",
+        message,
+    );
+    error
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge 源 worktree 前，后端要自动关闭该 worktree 下所有 terminal window/pane，
+///     用户不应再被要求手动关闭。
+///
+/// Code Logic（这个函数做什么）:
+///     读取该 worktree 的持久化 session row；优先关闭运行期 registry 句柄，再销毁 tmux/window 后端，
+///     最后删除 SQLite row。registry 缺失但 row 存在时仍清理持久后端。
+async fn close_sessions_for_worktree(
+    state: &AppState,
+    project_id: &str,
+    worktree_id: &str,
+) -> Result<usize, AppError> {
+    let sessions = state
+        .workbench_session_repo
+        .list_by_worktree(project_id, worktree_id)
+        .await?;
+    let mut closed = 0_usize;
+    for row in sessions {
+        match state.workbench_sessions.close(&row.id) {
+            Ok(closed_row) => {
+                kill_persisted_backend(&closed_row);
+            }
+            Err(AppError::NotFound(_)) => {
+                kill_persisted_backend(&row);
+            }
+            Err(error) => return Err(error),
+        }
+        state.workbench_session_repo.delete(&row.id).await?;
+        closed += 1;
+    }
+    Ok(closed)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge 成功后，已合并 worktree 不应继续占用 terminal metadata、SQLite worktree row 或磁盘 worktree。
+///
+/// Code Logic（这个函数做什么）:
+///     再次删除该 worktree 下残留 session row，执行 `git worktree remove`，最后删除 worktree 元数据。
+async fn cleanup_merged_worktree(
+    state: &AppState,
+    project: &WorkbenchProjectRow,
+    row: &WorkbenchWorktreeRow,
+) -> Result<(), AppError> {
+    state
+        .workbench_session_repo
+        .delete_by_worktree(&row.project_id, &row.id)
+        .await?;
+    let repo_root = workbench_git::repo_root(Path::new(&project.path))?;
+    workbench_git::remove_worktree(Path::new(&repo_root), Path::new(&row.path), false)?;
+    state.workbench_worktree_repo.delete(&row.id).await?;
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge 冲突时，后端需要调用本机 Claude Code CLI 在主 worktree 项目上下文下尝试生成解决结果。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 Git 未解决冲突文件，调用结构化 Claude CLI，校验并写回结果，确认无 conflict marker 后 stage all，
+///     最后使用 Git 默认 merge message 完成 merge commit。
+async fn resolve_merge_conflicts_with_claude(
+    state: &AppState,
+    main_path: &Path,
+) -> Result<usize, AppError> {
+    let conflict_paths = workbench_git::unresolved_conflict_files(main_path)?;
+    if conflict_paths.is_empty() {
+        return Ok(0);
+    }
+    let conflict_inputs = read_merge_conflict_files(main_path, &conflict_paths)?;
+    let (cli_path, model) = {
+        let cfg = state.config.read().unwrap();
+        (
+            cfg.github_trending.claude_cli_path.clone(),
+            cfg.github_trending.claude_model.clone(),
+        )
+    };
+    let schema = merge_conflict_resolution_schema();
+    let instruction = build_merge_conflict_resolution_instruction(&conflict_inputs);
+    let response = claude_cli::run_structured_json_with_cwd::<WorkbenchMergeResolutionResponse>(
+        &cli_path,
+        &model,
+        &schema.to_string(),
+        &instruction,
+        Some(main_path),
+        MERGE_CONFLICT_RESOLUTION_TIMEOUT_SECS,
+        "解决 merge 冲突",
+    )
+    .await?;
+    apply_merge_resolution_files(main_path, &conflict_paths, response.files)?;
+    ensure_conflict_markers_removed(main_path, &conflict_paths)?;
+    workbench_git::stage_all_merge_resolution(main_path)?;
+    let remaining = workbench_git::unresolved_conflict_files(main_path)?;
+    if !remaining.is_empty() {
+        return Err(AppError::generic(format!(
+            "Claude Code 处理后仍有未解决冲突: {}",
+            remaining.join(", ")
+        )));
+    }
+    workbench_git::commit_merge_no_edit(main_path)?;
+    Ok(conflict_inputs.len())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     自动解决冲突失败后，主工作区应尽量回到 merge 前状态，避免留下半合并工作区。
+///
+/// Code Logic（这个函数做什么）:
+///     尝试执行 `git merge --abort`，返回包含原始错误和 abort 结果的用户可读消息。
+fn abort_merge_after_failed_resolution(main_path: &Path, error: &AppError) -> String {
+    let original = error.to_string();
+    match workbench_git::abort_merge(main_path) {
+        Ok(()) => format!("{original}；已尝试执行 git merge --abort 回滚主工作区"),
+        Err(abort_error) => format!(
+            "{original}；同时执行 git merge --abort 失败，请手动检查主工作区: {abort_error}"
+        ),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Claude Code 解决冲突前必须看到当前冲突文件全文，尤其是 Git conflict marker 两侧内容。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 Git 相对路径安全后读取 UTF-8 文本；非文本或读取失败返回可读错误。
+fn read_merge_conflict_files(
+    root: &Path,
+    paths: &[String],
+) -> Result<Vec<MergeConflictFileInput>, AppError> {
+    paths
+        .iter()
+        .map(|path| {
+            validate_merge_resolution_path(path)?;
+            let full_path = safe_merge_resolution_path(root, path)?;
+            let content = std::fs::read_to_string(&full_path).map_err(|error| {
+                AppError::generic(format!(
+                    "读取冲突文件 {} 失败（仅支持 UTF-8 文本冲突自动解决）: {error}",
+                    path
+                ))
+            })?;
+            Ok(MergeConflictFileInput {
+                path: path.clone(),
+                content,
+            })
+        })
+        .collect()
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Claude 输出是模型生成内容，后端写回前必须确认路径属于本次冲突文件，且内容不含残留冲突标记。
+///
+/// Code Logic（这个函数做什么）:
+///     建立允许 path 集合；逐个校验 path/content 后写入主 worktree 文件，并要求所有冲突文件都有返回。
+fn apply_merge_resolution_files(
+    root: &Path,
+    conflict_paths: &[String],
+    files: Vec<WorkbenchMergeResolvedFile>,
+) -> Result<(), AppError> {
+    let allowed = conflict_paths.iter().cloned().collect::<HashSet<_>>();
+    let mut applied = HashSet::new();
+    for file in files {
+        validate_merge_resolution_path(&file.path)?;
+        if !allowed.contains(&file.path) {
+            return Err(AppError::generic(format!(
+                "Claude Code 返回了非本次冲突文件路径: {}",
+                file.path
+            )));
+        }
+        if content_has_conflict_markers(&file.content) {
+            return Err(AppError::generic(format!(
+                "Claude Code 返回的 {} 仍包含 merge 冲突标记",
+                file.path
+            )));
+        }
+        let full_path = safe_merge_resolution_path(root, &file.path)?;
+        std::fs::write(full_path, file.content)?;
+        applied.insert(file.path);
+    }
+    let missing = conflict_paths
+        .iter()
+        .filter(|path| !applied.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(AppError::generic(format!(
+            "Claude Code 未返回以下冲突文件的解决内容: {}",
+            missing.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     即使 Claude 返回了所有文件，后端也要在 git add 前复查磁盘内容，避免把 conflict marker 提交进仓库。
+///
+/// Code Logic（这个函数做什么）:
+///     逐个读取原冲突文件；存在文本内容且含 marker 时返回错误，文件已被删除则交给 git add -A 处理。
+fn ensure_conflict_markers_removed(root: &Path, paths: &[String]) -> Result<(), AppError> {
+    for path in paths {
+        let full_path = safe_merge_resolution_path(root, path)?;
+        if !full_path.exists() {
+            continue;
+        }
+        let content = std::fs::read_to_string(&full_path)
+            .map_err(|error| AppError::generic(format!("复查冲突文件 {} 失败: {error}", path)))?;
+        if content_has_conflict_markers(&content) {
+            return Err(AppError::generic(format!("{} 仍包含 merge 冲突标记", path)));
+        }
+    }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Claude CLI 结构化输出需要固定契约，确保后端拿到可写回的文件路径和完整内容。
+///
+/// Code Logic（这个函数做什么）:
+///     返回只允许 `{files:[{path,content}]}` 的 JSON schema。
+fn merge_conflict_resolution_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["files"],
+        "properties": {
+            "files": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["path", "content"],
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Repository-relative path for one conflicted file."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The complete resolved file content with all conflict markers removed."
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Claude Code 需要明确知道这是在当前项目上下文中解决 Git merge 冲突，并且只能返回结构化文件内容。
+///
+/// Code Logic（这个函数做什么）:
+///     把每个冲突文件 path/content 组装进英文任务指令，要求返回完整内容且不得保留 conflict marker。
+fn build_merge_conflict_resolution_instruction(files: &[MergeConflictFileInput]) -> String {
+    let mut sections = String::new();
+    for file in files {
+        sections.push_str(&format!(
+            "\nFile: {}\n```text\n{}\n```\n",
+            file.path, file.content
+        ));
+    }
+    format!(
+        "You are resolving Git merge conflicts in the current Claude Code project context.\n\
+         Use the repository instructions and code context available from the current working directory.\n\
+         Requirements:\n\
+         - Return only the structured JSON object required by the schema.\n\
+         - The `files` array must include every conflicted file listed below.\n\
+         - Each `content` value must be the complete final file content, not a patch.\n\
+         - Do not leave conflict markers such as <<<<<<<, |||||||, =======, or >>>>>>>.\n\
+         - Preserve user intent from both sides when possible; when unsure, make the smallest coherent resolution.\n\
+         - Do not include Markdown fences, explanations, or extra properties in JSON.\n\n\
+         Conflicted files:\n{sections}"
+    )
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Claude 输出的路径不能被直接信任，否则可能越过主 worktree 根目录覆盖任意文件。
+///
+/// Code Logic（这个函数做什么）:
+///     拒绝空路径、绝对路径、Windows prefix/root 和 `..`；普通相对路径返回 Ok。
+fn validate_merge_resolution_path(path: &str) -> Result<(), AppError> {
+    if path.trim().is_empty() {
+        return Err(AppError::generic("冲突文件路径不能为空"));
+    }
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return Err(AppError::generic("冲突文件路径不能是绝对路径"));
+    }
+    let mut has_normal = false;
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) => has_normal = true,
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(AppError::generic("冲突文件路径不能越过工作区根目录"));
+            }
+        }
+    }
+    if !has_normal {
+        return Err(AppError::generic("冲突文件路径不能为空"));
+    }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Claude Code 自动写回冲突文件时，不能通过 symlink 父目录或 symlink 文件越过 worktree 根目录。
+///
+/// Code Logic（这个函数做什么）:
+///     先做相对路径语法校验，再 canonicalize root 和父目录，要求父目录仍在 root 内；
+///     若目标已存在且是 symlink，则拒绝自动写回。
+fn safe_merge_resolution_path(root: &Path, path: &str) -> Result<PathBuf, AppError> {
+    validate_merge_resolution_path(path)?;
+    let root = root
+        .canonicalize()
+        .map_err(|error| AppError::generic(format!("解析主工作区路径失败: {error}")))?;
+    let full_path = root.join(path);
+    let parent = full_path
+        .parent()
+        .ok_or_else(|| AppError::generic("冲突文件路径缺少父目录"))?;
+    let parent = parent
+        .canonicalize()
+        .map_err(|error| AppError::generic(format!("解析冲突文件父目录失败: {error}")))?;
+    if !parent.starts_with(&root) {
+        return Err(AppError::generic("冲突文件路径不能越过工作区根目录"));
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(&full_path) {
+        if metadata.file_type().is_symlink() {
+            return Err(AppError::generic(format!(
+                "冲突文件路径不能是符号链接: {}",
+                path
+            )));
+        }
+    }
+    Ok(full_path)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Git 允许用户把仍含 conflict marker 的文件 `git add`，自动流程必须主动阻止这类错误提交。
+///
+/// Code Logic（这个函数做什么）:
+///     按行识别常见 Git conflict marker：`<<<<<<<`、`|||||||`、单独 `=======`、`>>>>>>>`。
+fn content_has_conflict_markers(content: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim_end();
+        trimmed.starts_with("<<<<<<<")
+            || trimmed.starts_with("|||||||")
+            || trimmed == "======="
+            || trimmed.starts_with(">>>>>>>")
+    })
 }
 
 /// 删除一个非主 worktree。
@@ -1211,6 +1962,148 @@ mod tests {
 
         assert_eq!(schema["required"][0], "message");
         assert_eq!(schema["properties"]["message"]["type"], "string");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Claude Code 自动解决 merge 冲突时，后端需要稳定 JSON 契约来接收完整文件内容。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     读取 schema JSON，断言顶层 required files，且每个 item 必须包含 path/content。
+    #[test]
+    fn merge_conflict_resolution_schema_requires_files_with_content() {
+        let schema = merge_conflict_resolution_schema();
+
+        assert_eq!(schema["required"][0], "files");
+        assert_eq!(schema["properties"]["files"]["type"], "array");
+        assert_eq!(
+            schema["properties"]["files"]["items"]["required"][0],
+            "path"
+        );
+        assert_eq!(
+            schema["properties"]["files"]["items"]["required"][1],
+            "content"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     前端需要按 projectId 过滤 merge 进度事件，防止其他项目的后台 merge 污染当前 UI。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造事件 payload 并序列化为 JSON，断言 serde camelCase 输出包含 projectId/worktreeId。
+    #[test]
+    fn merge_progress_event_serializes_project_id_for_frontend_filtering() {
+        let event = WorkbenchMergeProgressEvent {
+            project_id: "project-1".to_string(),
+            worktree_id: "worktree-1".to_string(),
+            stage: WorkbenchMergeStageDto {
+                id: MERGE_STAGE_CHECK_SOURCE.to_string(),
+                status: "running".to_string(),
+                message: "checking".to_string(),
+            },
+        };
+
+        let value = serde_json::to_value(event).expect("serialize event");
+
+        assert_eq!(value["projectId"], "project-1");
+        assert_eq!(value["worktreeId"], "worktree-1");
+        assert_eq!(value["stage"]["id"], MERGE_STAGE_CHECK_SOURCE);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Claude Code 需要看到每个冲突文件的相对路径和带 conflict marker 的原文，
+    ///     才能返回可直接写回的解决后完整内容。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造冲突文件输入，断言 prompt 包含路径、内容和禁止保留 conflict marker 的约束。
+    #[test]
+    fn merge_conflict_instruction_contains_files_and_output_contract() {
+        let files = vec![MergeConflictFileInput {
+            path: "README.md".to_string(),
+            content: "<<<<<<< HEAD\nmain\n=======\nfeature\n>>>>>>> branch\n".to_string(),
+        }];
+
+        let instruction = build_merge_conflict_resolution_instruction(&files);
+
+        assert!(instruction.contains("README.md"));
+        assert!(instruction.contains("<<<<<<< HEAD"));
+        assert!(instruction.contains("Return only"));
+        assert!(instruction.contains("files"));
+        assert!(instruction.contains("Do not leave conflict markers"));
+        assert!(instruction.contains("|||||||"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Claude 输出的 path 来自模型，后端写文件前必须防止绝对路径或 `..` 越界覆盖用户其他文件。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     校验相对普通路径可用，绝对路径和父目录路径被拒绝。
+    #[test]
+    fn validate_merge_resolution_path_rejects_unsafe_paths() {
+        assert!(validate_merge_resolution_path("src/lib.rs").is_ok());
+        assert!(validate_merge_resolution_path("/tmp/evil").is_err());
+        assert!(validate_merge_resolution_path("../evil").is_err());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     自动冲突解决会写回 Claude Code 生成的文件内容，必须保证普通相对路径仍解析在 worktree 内。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造临时根目录和普通文件，断言 safe_merge_resolution_path 返回 root 下路径。
+    #[test]
+    fn safe_merge_resolution_path_accepts_normal_path_inside_root() {
+        let root =
+            std::env::temp_dir().join(format!("cc-partner-safe-merge-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).expect("create test root");
+        std::fs::write(root.join("src/lib.rs"), "fn main() {}\n").expect("write file");
+
+        let resolved = safe_merge_resolution_path(&root, "src/lib.rs").expect("resolve path");
+
+        assert_eq!(resolved, root.canonicalize().unwrap().join("src/lib.rs"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     冲突文件若是 symlink，直接写回会跟随链接覆盖工作区外文件，自动流程必须拒绝。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     在 Unix 上创建指向外部文件的 symlink，断言 safe_merge_resolution_path 拒绝该路径。
+    #[cfg(unix)]
+    #[test]
+    fn safe_merge_resolution_path_rejects_symlink_file() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("cc-partner-safe-merge-{}", uuid::Uuid::new_v4()));
+        let outside = std::env::temp_dir().join(format!(
+            "cc-partner-safe-merge-outside-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create test root");
+        std::fs::write(&outside, "outside\n").expect("write outside");
+        symlink(&outside, root.join("conflicted.txt")).expect("create symlink");
+
+        let error = safe_merge_resolution_path(&root, "conflicted.txt")
+            .expect_err("symlink should be rejected");
+
+        assert!(error.to_string().contains("符号链接"));
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(outside);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Git 只要 `git add` 就可能把仍含 conflict marker 的文本标为已解决，后端必须先拦截。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言常见 conflict marker 行会被识别，普通 Markdown 分隔线不会误判。
+    #[test]
+    fn content_has_conflict_markers_detects_git_markers() {
+        assert!(content_has_conflict_markers("<<<<<<< HEAD\nx\n"));
+        assert!(content_has_conflict_markers("||||||| base\nx\n"));
+        assert!(content_has_conflict_markers("=======\n"));
+        assert!(content_has_conflict_markers(">>>>>>> feature\n"));
+        assert!(!content_has_conflict_markers("title\n---\nbody\n"));
     }
 
     /// Business Logic（为什么需要这个测试）:

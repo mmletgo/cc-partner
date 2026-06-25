@@ -14,6 +14,7 @@ import { invoke } from './client';
 import type {
   WorkbenchFileNode,
   WorkbenchGitCommit,
+  WorkbenchMergeResult,
   WorkbenchPathInfo,
   WorkbenchProject,
   WorkbenchSession,
@@ -71,7 +72,7 @@ export const workbenchApi = {
 
     /** 合并当前 worktree 分支到主工作区。 */
     merge: (worktreeId: string) =>
-      invoke<{ ok: boolean; worktreeId: string }>('merge_workbench_worktree', { worktreeId }),
+      invoke<WorkbenchMergeResult>('merge_workbench_worktree', { worktreeId }),
 
     /** 删除非主 worktree；force 用于强制移除 Git worktree。 */
     remove: (worktreeId: string, force = false) =>

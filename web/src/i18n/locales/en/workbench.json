@@ -68,6 +68,25 @@
       "conflict_other": "{{count}} conflicts"
     }
   },
+  "mergeStages": {
+    "labels": {
+      "checkSource": "Check current worktree",
+      "closeSessions": "Close terminal windows/panes",
+      "mergeMain": "Merge into main worktree",
+      "resolveConflicts": "Claude Code resolves conflicts",
+      "cleanup": "Clean up worktree"
+    },
+    "status": {
+      "pending": "Pending",
+      "running": "Running",
+      "completed": "Completed",
+      "failed": "Failed",
+      "skipped": "Skipped"
+    },
+    "messages": {
+      "checkSource": "Checking whether the current worktree has uncommitted changes"
+    }
+  },
   "paneActions": "Pane actions",
   "promptOptimizer": {
     "open": "Prompt optimizer",

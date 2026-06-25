@@ -301,6 +301,67 @@ export interface WorkbenchWorktree {
   updatedAt: string;
 }
 
+/** Workbench 一键合并阶段状态。 */
+export type WorkbenchMergeStageStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'skipped';
+
+/** Workbench 一键合并阶段 id。 */
+export type WorkbenchMergeStageId =
+  | 'checkSource'
+  | 'closeSessions'
+  | 'mergeMain'
+  | 'resolveConflicts'
+  | 'cleanup';
+
+/**
+ * Workbench 一键合并阶段 DTO。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   一键合并会跨越检查、关闭终端、合并、AI 解冲突和清理，前端需要逐阶段展示进度。
+ *
+ * Code Logic（字段说明）:
+ *   id/status 由后端阶段机产生；message 是后端给用户看的当前阶段说明或失败原因。
+ */
+export interface WorkbenchMergeStage {
+  id: WorkbenchMergeStageId;
+  status: WorkbenchMergeStageStatus;
+  message: string;
+}
+
+/**
+ * Workbench 一键合并结果 DTO。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   合并完成后前端需要知道 worktree 已被合并清理，并展示完整阶段结果。
+ *
+ * Code Logic（字段说明）:
+ *   stages 按后端实际执行结果返回；前端 helper 会补齐缺失阶段用于稳定渲染。
+ */
+export interface WorkbenchMergeResult {
+  ok: boolean;
+  worktreeId: string;
+  stages: WorkbenchMergeStage[];
+}
+
+/**
+ * Workbench 一键合并进度事件 payload。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   多项目或多窗口同时存在时，前端只能展示当前项目的 merge 进度，不能被其他项目事件串台。
+ *
+ * Code Logic（字段说明）:
+ *   projectId/worktreeId 用于事件过滤；stage 是当前阶段的最新状态。
+ */
+export interface WorkbenchMergeProgressEvent {
+  projectId: string;
+  worktreeId: string;
+  stage: WorkbenchMergeStage;
+}
+
 /**
  * 工作台 Git 引用类型。
  *

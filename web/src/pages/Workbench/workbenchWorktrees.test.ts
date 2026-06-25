@@ -6,6 +6,7 @@ import {
   canMergeWorktree,
   canPushWorktree,
   canRemoveWorktree,
+  formatWorkbenchMergeStages,
   formatCommitRelativeTime,
   hasGitHistory,
   composeWorktreeBranchName,
@@ -158,8 +159,8 @@ function testGitHistoryActionAvailability(): void {
   if (canMergeWorktree(mainWorktree, null)) {
     throw new Error('expected main worktree to block merge');
   }
-  if (canMergeWorktree({ ...feature, status: { ...feature.status, changed: 1, clean: false } }, null)) {
-    throw new Error('expected dirty worktree to block merge');
+  if (!canMergeWorktree({ ...feature, status: { ...feature.status, changed: 1, clean: false } }, null)) {
+    throw new Error('expected dirty snapshot to still allow merge click for backend validation');
   }
   if (!canRemoveWorktree(feature, null)) {
     throw new Error('expected non-main worktree to allow remove');
@@ -314,6 +315,30 @@ function testBuildGitGraphRowsForMergeHistory(): void {
   }
 }
 
+/**
+ * Business Logic（为什么需要这个测试）:
+ *   一键合并会跨越检查、关闭终端、合并、冲突修复和清理多个阶段，用户需要看到后端真实阶段。
+ *
+ * Code Logic（这个测试做什么）:
+ *   构造后端返回的阶段 DTO，断言前端 helper 会按固定顺序补齐缺失阶段并保留失败消息。
+ */
+function testFormatWorkbenchMergeStages(): void {
+  const stages = formatWorkbenchMergeStages([
+    { id: 'checkSource', status: 'completed', message: 'Source is clean' },
+    { id: 'mergeMain', status: 'failed', message: 'Merge conflict remains' },
+  ]);
+
+  if (stages.map((stage) => stage.id).join(',') !== 'checkSource,closeSessions,mergeMain,resolveConflicts,cleanup') {
+    throw new Error(`expected canonical merge stage order, got ${JSON.stringify(stages)}`);
+  }
+  if (stages[1]?.status !== 'pending') {
+    throw new Error(`expected missing closeSessions stage to be pending, got ${JSON.stringify(stages[1])}`);
+  }
+  if (stages[2]?.status !== 'failed' || stages[2]?.message !== 'Merge conflict remains') {
+    throw new Error(`expected failed merge message to be preserved, got ${JSON.stringify(stages[2])}`);
+  }
+}
+
 testSessionsForWorktree();
 testActiveWorktreeRootPath();
 testWorktreeStatusTone();
@@ -325,3 +350,4 @@ testWorktreeChangeCount();
 testFormatCommitRelativeTime();
 testHasGitHistory();
 testBuildGitGraphRowsForMergeHistory();
+testFormatWorkbenchMergeStages();
