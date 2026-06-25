@@ -12,7 +12,7 @@
  *   - hooks 全部在 early return 之前，避免 React hooks 调用顺序问题
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
@@ -26,7 +26,10 @@ import { WorkbenchDependencyCard } from '@/components/domain';
 import { Button, Card, Input, Pill } from '@/components/primitives';
 import { useWorkbenchDependency } from '@/hooks/workbenchDependencyContext';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
-import { useWorkbenchTerminalBuffers } from '@/hooks/workbenchTerminalBuffersContext';
+import {
+  useWorkbenchTerminalBuffer,
+  useWorkbenchTerminalBuffers,
+} from '@/hooks/workbenchTerminalBuffersContext';
 import {
   ChevronRightIcon,
   CopyIcon,
@@ -58,6 +61,7 @@ import {
   promptOptimizerShortcutAction,
   reducePromptOptimizerShortcut,
   resetPromptOptimizerTextState,
+  shouldCommitPromptOptimizerPanelPosition,
 } from './promptOptimizerWidget';
 import { mountedTerminalSessions, visibleTerminalSessions } from './terminalSessionOrder';
 import { workbenchTerminalOptions, workbenchTerminalTheme } from './terminalOptions';
@@ -116,8 +120,6 @@ interface FileTreeNodeProps extends FileTreeProps {
 
 interface TerminalPaneProps {
   session: WorkbenchSession | null;
-  buffer: string;
-  revision: number;
   placeholder: string;
   inputEnabled: boolean;
   onInput: (sessionId: string, data: string) => void;
@@ -422,11 +424,9 @@ function statusTone(status: string): 'neutral' | 'success' | 'warn' | 'danger' {
  *   session 变化时创建/销毁 Terminal；buffer revision 变化时只写入新增输出；
  *   仅 inputEnabled=true 的 active 终端转发 onData；ResizeObserver 触发 FitAddon.fit 后把 cols/rows clamp 后回传后端。
  */
-function TerminalPane(props: TerminalPaneProps) {
+const TerminalPane = memo(function TerminalPane(props: TerminalPaneProps) {
   const {
     session,
-    buffer,
-    revision,
     placeholder,
     inputEnabled,
     onInput,
@@ -444,6 +444,7 @@ function TerminalPane(props: TerminalPaneProps) {
     onCursorAnchorChange,
   );
   const sessionId = session?.id ?? null;
+  const { buffer, revision } = useWorkbenchTerminalBuffer(sessionId);
 
   useEffect(() => {
     bufferRef.current = buffer;
@@ -564,7 +565,7 @@ function TerminalPane(props: TerminalPaneProps) {
       {!session ? <div className={styles.terminalPlaceholder}>{placeholder}</div> : null}
     </div>
   );
-}
+});
 
 /**
  * Business Logic（为什么需要这个组件）:
@@ -652,12 +653,8 @@ export function Workbench() {
   const { t } = useTranslation(['workbench', 'common', 'promptOptimizer']);
   const { status: dependencyStatus } = useWorkbenchDependency();
   const { activeProjectId, activeProject, refreshProjectSessionStats } = useWorkbenchProjects();
-  const {
-    buffers: terminalBuffers,
-    revision: terminalRevision,
-    resetBuffer: resetTerminalBuffer,
-    removeBuffer: removeTerminalBuffer,
-  } = useWorkbenchTerminalBuffers();
+  const { resetBuffer: resetTerminalBuffer, removeBuffer: removeTerminalBuffer } =
+    useWorkbenchTerminalBuffers();
   const [sessions, setSessions] = useState<WorkbenchSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionNameDraft, setSessionNameDraft] = useState<string>('');
@@ -705,6 +702,8 @@ export function Workbench() {
   const worktreeBranchInputRef = useRef<HTMLInputElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const promptShortcutStateRef = useRef(createPromptOptimizerShortcutState());
+  const promptPanelOpenRef = useRef<boolean>(false);
+  const cursorAnchorRef = useRef<TerminalCursorAnchor | null>(null);
   const lastLocalFocusAtRef = useRef<number>(0);
 
   const activeWorktree = useMemo(
@@ -971,6 +970,10 @@ export function Workbench() {
   }, [activeWorktreeId]);
 
   useEffect(() => {
+    promptPanelOpenRef.current = promptPanelOpen;
+  }, [promptPanelOpen]);
+
+  useEffect(() => {
     knownSessionIdsRef.current = new Set(sessions.map((session) => session.id));
   }, [sessions]);
 
@@ -1219,13 +1222,25 @@ export function Workbench() {
   const openPromptOptimizerPanel = useCallback(() => {
     const reset = resetPromptOptimizerTextState();
     setPromptInput(reset.input);
+    const area = terminalAreaRef.current;
+    const anchor = cursorAnchorRef.current;
+    if (area && anchor) {
+      setPromptPanelPosition(promptOptimizerPanelPosition(area.getBoundingClientRect(), anchor));
+    }
     setPromptPanelOpen(true);
   }, []);
 
   const handleCursorAnchorChange = useCallback((anchor: TerminalCursorAnchor | null) => {
+    cursorAnchorRef.current = anchor;
     const area = terminalAreaRef.current;
     if (!area || !anchor) return;
-    setPromptPanelPosition(promptOptimizerPanelPosition(area.getBoundingClientRect(), anchor));
+    const nextPosition = promptOptimizerPanelPosition(area.getBoundingClientRect(), anchor);
+    if (!promptPanelOpenRef.current) return;
+    setPromptPanelPosition((current) =>
+      shouldCommitPromptOptimizerPanelPosition(true, current, nextPosition)
+        ? nextPosition
+        : current,
+    );
   }, []);
 
   const runPromptOptimization = useCallback(
@@ -1968,8 +1983,6 @@ export function Workbench() {
             {visibleSessions.length === 0 ? (
               <TerminalPane
                 session={null}
-                buffer=""
-                revision={terminalRevision}
                 placeholder={
                   activeProject
                     ? t('workbench:terminalPlaceholder')
@@ -2003,8 +2016,6 @@ export function Workbench() {
                 </div>
                 <TerminalPane
                   session={session}
-                  buffer={terminalBuffers[session.id] ?? ''}
-                  revision={terminalRevision}
                   placeholder={t('workbench:terminalPlaceholder')}
                   onInput={handleInput}
                   onResize={handleResize}

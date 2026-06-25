@@ -6,7 +6,7 @@
  *   会丢失 TUI 屏幕态并出现错位。缓存 Provider 必须跟随 AppShell 常驻。
  *
  * Code Logic（这个模块做什么）:
- *   监听 `workbench:terminal-output` 事件，按 sessionId 累积输出 buffer 和 revision，并提供重置/删除方法。
+ *   监听 `workbench:terminal-output` 事件，写入 session 级外部 store，并提供重置/删除方法。
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -14,10 +14,8 @@ import type { ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import type { WorkbenchTerminalOutputEvent } from '@/lib/types';
 import {
-  appendWorkbenchTerminalOutput,
-  removeWorkbenchTerminalBuffer,
-  resetWorkbenchTerminalBuffer,
-  type WorkbenchTerminalBuffers,
+  createWorkbenchTerminalBufferStore,
+  type WorkbenchTerminalBufferStore,
 } from './workbenchTerminalBuffer';
 import {
   WorkbenchTerminalBuffersContext,
@@ -53,23 +51,22 @@ function canListenToTauriEvents(): boolean {
  *   终端输出缓存需要跨 Workbench 路由卸载保留，确保切出再切回时可 replay 已收到的 PTY/tmux 输出。
  *
  * Code Logic（这个组件做什么）:
- *   维护 buffers/revision，常驻监听后端 terminal-output 事件，并暴露 reset/remove 操作给 Workbench 页面。
+ *   创建稳定的终端 buffer store，常驻监听后端 terminal-output 事件，并暴露 reset/remove 操作给 Workbench 页面。
  */
 export function WorkbenchTerminalBuffersProvider({
   children,
 }: WorkbenchTerminalBuffersProviderProps) {
-  const [buffers, setBuffers] = useState<WorkbenchTerminalBuffers>({});
-  const [revision, setRevision] = useState<number>(0);
+  const [store] = useState<WorkbenchTerminalBufferStore>(() =>
+    createWorkbenchTerminalBufferStore(),
+  );
 
   const resetBuffer = useCallback((sessionId: string) => {
-    setBuffers((current) => resetWorkbenchTerminalBuffer(current, sessionId));
-    setRevision((current) => current + 1);
-  }, []);
+    store.reset(sessionId);
+  }, [store]);
 
   const removeBuffer = useCallback((sessionId: string) => {
-    setBuffers((current) => removeWorkbenchTerminalBuffer(current, sessionId));
-    setRevision((current) => current + 1);
-  }, []);
+    store.remove(sessionId);
+  }, [store]);
 
   useEffect(() => {
     if (!canListenToTauriEvents()) return undefined;
@@ -77,25 +74,21 @@ export function WorkbenchTerminalBuffersProvider({
       'workbench:terminal-output',
       (event) => {
         const payload = event.payload;
-        setBuffers((current) =>
-          appendWorkbenchTerminalOutput(current, payload.sessionId, payload.chunk),
-        );
-        setRevision((current) => current + 1);
+        store.append(payload.sessionId, payload.chunk);
       },
     );
     return () => {
       void outputUnlisten.then((fn) => fn());
     };
-  }, []);
+  }, [store]);
 
   const value = useMemo<WorkbenchTerminalBuffersContextValue>(
     () => ({
-      buffers,
-      revision,
+      store,
       resetBuffer,
       removeBuffer,
     }),
-    [buffers, removeBuffer, resetBuffer, revision],
+    [removeBuffer, resetBuffer, store],
   );
 
   return (

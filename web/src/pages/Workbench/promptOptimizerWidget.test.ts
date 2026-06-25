@@ -5,6 +5,7 @@ import {
   createPromptOptimizerShortcutState,
   promptOptimizerInsertPayload,
   promptOptimizerInputKeyAction,
+  shouldCommitPromptOptimizerPanelPosition,
   promptOptimizerShortcutAction,
   reducePromptOptimizerShortcut,
   promptOptimizerWorkingDirectory,
@@ -204,6 +205,24 @@ assertEqual(
   }),
   '中文结果\n',
   'insert payload preserves existing trailing newline',
+);
+
+assertEqual(
+  shouldCommitPromptOptimizerPanelPosition(false, { left: 16, top: 24 }, { left: 40, top: 48 }),
+  false,
+  'closed panel should not commit cursor position changes',
+);
+
+assertEqual(
+  shouldCommitPromptOptimizerPanelPosition(true, { left: 16, top: 24 }, { left: 16, top: 24 }),
+  false,
+  'open panel should skip identical cursor position changes',
+);
+
+assertEqual(
+  shouldCommitPromptOptimizerPanelPosition(true, { left: 16, top: 24 }, { left: 40, top: 48 }),
+  true,
+  'open panel should commit changed cursor position',
 );
 
 assertEqual(

@@ -1,5 +1,6 @@
 import {
   appendWorkbenchTerminalOutput,
+  createWorkbenchTerminalBufferStore,
   removeWorkbenchTerminalBuffer,
   resetWorkbenchTerminalBuffer,
 } from './workbenchTerminalBuffer';
@@ -25,5 +26,27 @@ assert(resetBuffers['session-a'] === '', 'reset should keep session with empty b
 
 const removedBuffers = removeWorkbenchTerminalBuffer(resetBuffers, 'session-a');
 assert(!('session-a' in removedBuffers), 'remove should delete session buffer');
+
+const store = createWorkbenchTerminalBufferStore({}, 20);
+let sessionANotifications = 0;
+let sessionBNotifications = 0;
+
+const unsubscribeA = store.subscribe('session-a', () => {
+  sessionANotifications += 1;
+});
+const unsubscribeB = store.subscribe('session-b', () => {
+  sessionBNotifications += 1;
+});
+
+store.append('session-a', 'hello');
+
+assert(store.getBuffer('session-a') === 'hello', 'store should cache appended session output');
+assert(store.getRevision('session-a') === 1, 'store should bump changed session revision');
+assert(store.getRevision('session-b') === 0, 'store should not bump unrelated session revision');
+assert(sessionANotifications === 1, 'store should notify changed session subscribers');
+assert(sessionBNotifications === 0, 'store should not notify unrelated session subscribers');
+
+unsubscribeA();
+unsubscribeB();
 
 console.log('workbenchTerminalBuffer.test.ts passed');

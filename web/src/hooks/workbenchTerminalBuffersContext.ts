@@ -8,14 +8,18 @@
  *   定义 Context value、创建 React Context，并提供 useWorkbenchTerminalBuffers 读取上下文。
  */
 
-import { createContext, useContext } from 'react';
-import type { WorkbenchTerminalBuffers } from './workbenchTerminalBuffer';
+import { createContext, useCallback, useContext, useMemo, useSyncExternalStore } from 'react';
+import type { WorkbenchTerminalBufferStore } from './workbenchTerminalBuffer';
 
 export interface WorkbenchTerminalBuffersContextValue {
-  buffers: WorkbenchTerminalBuffers;
-  revision: number;
+  store: WorkbenchTerminalBufferStore;
   resetBuffer: (sessionId: string) => void;
   removeBuffer: (sessionId: string) => void;
+}
+
+export interface WorkbenchTerminalBufferSnapshot {
+  buffer: string;
+  revision: number;
 }
 
 export const WorkbenchTerminalBuffersContext =
@@ -36,4 +40,31 @@ export function useWorkbenchTerminalBuffers(): WorkbenchTerminalBuffersContextVa
     );
   }
   return value;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   每个 xterm pane 只需要响应自身 session 的输出，不能让某个终端输出导致整个 Workbench 重渲染。
+ *
+ * Code Logic（这个函数做什么）:
+ *   使用 useSyncExternalStore 订阅指定 session 的 revision，并按 revision 读取当前 buffer。
+ */
+export function useWorkbenchTerminalBuffer(
+  sessionId: string | null,
+): WorkbenchTerminalBufferSnapshot {
+  const { store } = useWorkbenchTerminalBuffers();
+  const subscribe = useCallback(
+    (listener: () => void) => store.subscribe(sessionId, listener),
+    [sessionId, store],
+  );
+  const getSnapshot = useCallback(() => store.getRevision(sessionId), [sessionId, store]);
+  const revision = useSyncExternalStore(subscribe, getSnapshot, () => 0);
+
+  return useMemo(
+    () => ({
+      buffer: store.getBuffer(sessionId),
+      revision,
+    }),
+    [revision, sessionId, store],
+  );
 }

@@ -43,6 +43,11 @@ export interface PromptOptimizerTextState {
   message: string | null;
 }
 
+export interface PromptOptimizerPanelPositionLike {
+  left: number;
+  top: number;
+}
+
 export type PromptOptimizerShortcutAction = 'open' | 'close' | 'optimize';
 export type PromptOptimizerInputKeyAction = 'ignore' | 'newline' | 'optimize';
 
@@ -105,6 +110,21 @@ export function resetPromptOptimizerTextState(
     result: createEmptyPromptOptimizeResponse(),
     message: null,
   };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   终端光标移动非常高频，Prompt 优化浮层关闭时不应因为光标位置变化触发 Workbench 重渲染。
+ *
+ * Code Logic（这个函数做什么）:
+ *   只有浮层打开且 left/top 发生变化时返回 true，供 React state 更新前做轻量 gate。
+ */
+export function shouldCommitPromptOptimizerPanelPosition(
+  panelOpen: boolean,
+  current: PromptOptimizerPanelPositionLike,
+  next: PromptOptimizerPanelPositionLike,
+): boolean {
+  return panelOpen && (current.left !== next.left || current.top !== next.top);
 }
 
 /**
