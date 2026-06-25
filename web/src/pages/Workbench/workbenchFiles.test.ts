@@ -1,6 +1,8 @@
 import {
   detectWorkbenchFileType,
   fileCapabilitiesForType,
+  formatJsonText,
+  formatTomlText,
   reduceFileTabs,
   validateJsonText,
   validateTomlText,
@@ -31,15 +33,25 @@ async function main(): Promise<void> {
   assert(detectWorkbenchFileType('config.toml', null) === 'toml', 'toml extension detected');
   assert(detectWorkbenchFileType('data.sqlite', null) === 'sqlite', 'sqlite extension detected');
   assert(detectWorkbenchFileType('logo.png', null) === 'image', 'png extension detected');
+  assert(detectWorkbenchFileType('settings.jsonc', null) === 'unsupported', 'jsonc is not treated as strict json');
 
   const jsonCaps = fileCapabilitiesForType('json');
   assert(jsonCaps.canEdit, 'json is editable');
   assert(jsonCaps.canFormat, 'json can format');
   assert(jsonCaps.mustValidateBeforeSave, 'json validates before save');
 
+  const markdownCaps = fileCapabilitiesForType('markdown');
+  assert(markdownCaps.availableModes.includes('source'), 'markdown exposes source mode');
+  assert(markdownCaps.availableModes.includes('wysiwyg'), 'markdown exposes wysiwyg mode');
+  assert(markdownCaps.availableModes.includes('split'), 'markdown exposes split mode');
+
+  const codeCaps = fileCapabilitiesForType('code');
+  assert(!codeCaps.availableModes.includes('wysiwyg'), 'code does not expose wysiwyg mode');
+
   const csvCaps = fileCapabilitiesForType('csv');
   assert(!csvCaps.canEdit, 'csv is not editable');
   assert(csvCaps.canPreview, 'csv can preview');
+  assert(!csvCaps.availableModes.includes('editor'), 'csv does not expose editor mode');
 
   const tabs = reduceFileTabs(
     { tabs: [], activeTabId: null, view: 'terminal' },
@@ -52,16 +64,74 @@ async function main(): Promise<void> {
         detectedType: 'markdown',
         mode: 'wysiwyg',
         dirty: false,
+        savedVersion: 'v1',
       },
     },
   );
   assert(tabs.activeTabId === 'readme', 'opened tab becomes active');
   assert(tabs.view === 'files', 'opening file switches to files view');
 
+  const dirtyTabs = reduceFileTabs(tabs, { type: 'dirtyChanged', id: 'readme', dirty: true });
+  const sourceTabs = reduceFileTabs(dirtyTabs, { type: 'modeChanged', id: 'readme', mode: 'source' });
+  assert(sourceTabs.tabs[0]?.dirty === true, 'dirty action marks tab dirty');
+  assert(sourceTabs.tabs[0]?.mode === 'source', 'mode action updates tab mode');
+
+  const reopenedTabs = reduceFileTabs(sourceTabs, {
+    type: 'opened',
+    tab: {
+      id: 'readme',
+      path: 'docs/README.md',
+      name: 'README copy.md',
+      detectedType: 'markdown',
+      mode: 'wysiwyg',
+      dirty: false,
+      savedVersion: 'v2',
+    },
+  });
+  assert(reopenedTabs.tabs.length === 1, 'reopening existing tab keeps one tab');
+  assert(reopenedTabs.tabs[0]?.dirty === true, 'reopening existing tab preserves dirty state');
+  assert(reopenedTabs.tabs[0]?.mode === 'source', 'reopening existing tab preserves mode');
+  assert(reopenedTabs.tabs[0]?.path === 'docs/README.md', 'reopening existing tab refreshes path metadata');
+
+  const savedTabs = reduceFileTabs(reopenedTabs, { type: 'saved', id: 'readme', savedVersion: 'v3' });
+  assert(savedTabs.tabs[0]?.dirty === false, 'saved action clears dirty state');
+  assert(savedTabs.tabs[0]?.savedVersion === 'v3', 'saved action updates saved version');
+
+  const secondTabs = reduceFileTabs(savedTabs, {
+    type: 'opened',
+    tab: {
+      id: 'config',
+      path: 'config.toml',
+      name: 'config.toml',
+      detectedType: 'toml',
+      mode: 'editor',
+      dirty: false,
+      savedVersion: 'cfg1',
+    },
+  });
+  const closedActiveTabs = reduceFileTabs(secondTabs, { type: 'closed', id: 'config' });
+  assert(closedActiveTabs.activeTabId === 'readme', 'closing active tab activates previous tab');
+  assert(closedActiveTabs.view === 'files', 'closing active tab keeps files view when tabs remain');
+
   assert(validateJsonText('{"ok":true}').ok, 'valid json accepted');
   assert(!validateJsonText('{bad').ok, 'invalid json rejected');
   assert(validateTomlText('title = "cc-partner"').ok, 'valid toml accepted');
   assert(!validateTomlText('title = ').ok, 'invalid toml rejected');
+
+  const formattedJson = formatJsonText('{"ok":true}');
+  assert(formattedJson.ok && formattedJson.text === '{\n  "ok": true\n}\n', 'valid json formatted');
+  assert(!formatJsonText('{bad').ok, 'invalid json format rejected');
+
+  const formattedToml = formatTomlText('title = "cc-partner"');
+  assert(
+    formattedToml.ok && formattedToml.text !== null && formattedToml.text.includes('title = "cc-partner"'),
+    'valid toml formatted',
+  );
+  assert(!formatTomlText('title = ').ok, 'invalid toml format rejected');
+
+  const mutableCaps = fileCapabilitiesForType('markdown');
+  mutableCaps.availableModes.push('viewer');
+  assert(!fileCapabilitiesForType('markdown').availableModes.includes('viewer'), 'capabilities return copied modes');
 }
 
 void main();

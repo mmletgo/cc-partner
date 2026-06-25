@@ -1,4 +1,4 @@
-import { parse as parseToml } from 'smol-toml';
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 
 export type WorkbenchDetectedFileType =
   | 'image'
@@ -20,6 +20,7 @@ export interface WorkbenchFileCapabilities {
   canFormat: boolean;
   mustValidateBeforeSave: boolean;
   defaultMode: WorkbenchFileMode;
+  availableModes: WorkbenchFileMode[];
 }
 
 export interface WorkbenchFileTab {
@@ -29,6 +30,7 @@ export interface WorkbenchFileTab {
   detectedType: WorkbenchDetectedFileType;
   mode: WorkbenchFileMode;
   dirty: boolean;
+  savedVersion: string | null;
 }
 
 export type WorkbenchFileWorkspaceView = 'terminal' | 'files';
@@ -45,6 +47,7 @@ export type WorkbenchFileTabsAction =
   | { type: 'closed'; id: string }
   | { type: 'modeChanged'; id: string; mode: WorkbenchFileMode }
   | { type: 'dirtyChanged'; id: string; dirty: boolean }
+  | { type: 'saved'; id: string; savedVersion: string | null }
   | { type: 'viewChanged'; view: WorkbenchFileWorkspaceView };
 
 export interface ValidationResult {
@@ -52,9 +55,15 @@ export interface ValidationResult {
   message: string | null;
 }
 
+export interface FormatResult {
+  ok: boolean;
+  text: string | null;
+  message: string | null;
+}
+
 const IMAGE_EXTENSIONS = new Set(['avif', 'bmp', 'gif', 'ico', 'jpeg', 'jpg', 'png', 'svg', 'webp']);
 const MARKDOWN_EXTENSIONS = new Set(['markdown', 'md', 'mdown', 'mkd']);
-const JSON_EXTENSIONS = new Set(['json', 'jsonc']);
+const JSON_EXTENSIONS = new Set(['json']);
 const TOML_EXTENSIONS = new Set(['toml']);
 const CSV_EXTENSIONS = new Set(['csv', 'tsv']);
 const SQLITE_EXTENSIONS = new Set(['db', 'sqlite', 'sqlite3']);
@@ -105,6 +114,7 @@ const FILE_CAPABILITIES: Record<WorkbenchDetectedFileType, WorkbenchFileCapabili
     canFormat: false,
     mustValidateBeforeSave: false,
     defaultMode: 'viewer',
+    availableModes: ['viewer'],
   },
   markdown: {
     canPreview: true,
@@ -112,6 +122,7 @@ const FILE_CAPABILITIES: Record<WorkbenchDetectedFileType, WorkbenchFileCapabili
     canFormat: false,
     mustValidateBeforeSave: false,
     defaultMode: 'wysiwyg',
+    availableModes: ['source', 'wysiwyg', 'split'],
   },
   code: {
     canPreview: true,
@@ -119,6 +130,7 @@ const FILE_CAPABILITIES: Record<WorkbenchDetectedFileType, WorkbenchFileCapabili
     canFormat: false,
     mustValidateBeforeSave: false,
     defaultMode: 'editor',
+    availableModes: ['editor'],
   },
   json: {
     canPreview: true,
@@ -126,6 +138,7 @@ const FILE_CAPABILITIES: Record<WorkbenchDetectedFileType, WorkbenchFileCapabili
     canFormat: true,
     mustValidateBeforeSave: true,
     defaultMode: 'editor',
+    availableModes: ['editor'],
   },
   toml: {
     canPreview: true,
@@ -133,6 +146,7 @@ const FILE_CAPABILITIES: Record<WorkbenchDetectedFileType, WorkbenchFileCapabili
     canFormat: true,
     mustValidateBeforeSave: true,
     defaultMode: 'editor',
+    availableModes: ['editor'],
   },
   csv: {
     canPreview: true,
@@ -140,6 +154,7 @@ const FILE_CAPABILITIES: Record<WorkbenchDetectedFileType, WorkbenchFileCapabili
     canFormat: false,
     mustValidateBeforeSave: false,
     defaultMode: 'viewer',
+    availableModes: ['viewer'],
   },
   sqlite: {
     canPreview: true,
@@ -147,6 +162,7 @@ const FILE_CAPABILITIES: Record<WorkbenchDetectedFileType, WorkbenchFileCapabili
     canFormat: false,
     mustValidateBeforeSave: false,
     defaultMode: 'viewer',
+    availableModes: ['viewer'],
   },
   text: {
     canPreview: true,
@@ -154,6 +170,7 @@ const FILE_CAPABILITIES: Record<WorkbenchDetectedFileType, WorkbenchFileCapabili
     canFormat: false,
     mustValidateBeforeSave: false,
     defaultMode: 'editor',
+    availableModes: ['editor'],
   },
   binary: {
     canPreview: false,
@@ -161,6 +178,7 @@ const FILE_CAPABILITIES: Record<WorkbenchDetectedFileType, WorkbenchFileCapabili
     canFormat: false,
     mustValidateBeforeSave: false,
     defaultMode: 'viewer',
+    availableModes: ['viewer'],
   },
   unsupported: {
     canPreview: false,
@@ -168,6 +186,7 @@ const FILE_CAPABILITIES: Record<WorkbenchDetectedFileType, WorkbenchFileCapabili
     canFormat: false,
     mustValidateBeforeSave: false,
     defaultMode: 'viewer',
+    availableModes: ['viewer'],
   },
 };
 
@@ -238,10 +257,11 @@ export function detectWorkbenchFileType(filename: string, mime: string | null): 
  *   Workbench 文件 tab 需要基于文件类型统一决定是否允许编辑、预览、格式化和保存前校验。
  *
  * Code Logic（这个函数做什么）:
- *   返回文件类型对应的能力对象，调用方据此选择 viewer/editor/formatter/validator。
+ *   返回文件类型对应能力对象的浅拷贝，并复制 availableModes，避免调用方污染共享配置。
  */
 export function fileCapabilitiesForType(type: WorkbenchDetectedFileType): WorkbenchFileCapabilities {
-  return FILE_CAPABILITIES[type];
+  const capabilities = FILE_CAPABILITIES[type];
+  return { ...capabilities, availableModes: [...capabilities.availableModes] };
 }
 
 /**
@@ -249,7 +269,7 @@ export function fileCapabilitiesForType(type: WorkbenchDetectedFileType): Workbe
  *   打开文件后 Workbench 需要把文件 tab 激活，并从终端视图切到文件工作区。
  *
  * Code Logic（这个函数做什么）:
- *   按 action 纯函数更新 tabs、activeTabId、view；重复打开同一 tab 时替换旧 tab 并置为 active。
+ *   按 action 纯函数更新 tabs、activeTabId、view；重复打开同一 tab 时只刷新 metadata 并保留 dirty/mode 等用户态。
  */
 export function reduceFileTabs(
   state: WorkbenchFileTabsState,
@@ -258,7 +278,16 @@ export function reduceFileTabs(
   switch (action.type) {
     case 'opened': {
       const nextTabs = state.tabs.some((tab) => tab.id === action.tab.id)
-        ? state.tabs.map((tab) => (tab.id === action.tab.id ? action.tab : tab))
+        ? state.tabs.map((tab) =>
+            tab.id === action.tab.id
+              ? {
+                  ...tab,
+                  path: action.tab.path,
+                  name: action.tab.name,
+                  detectedType: action.tab.detectedType,
+                }
+              : tab,
+          )
         : [...state.tabs, action.tab];
       return { tabs: nextTabs, activeTabId: action.tab.id, view: 'files' };
     }
@@ -282,6 +311,14 @@ export function reduceFileTabs(
       return {
         ...state,
         tabs: state.tabs.map((tab) => (tab.id === action.id ? { ...tab, dirty: action.dirty } : tab)),
+      };
+    }
+    case 'saved': {
+      return {
+        ...state,
+        tabs: state.tabs.map((tab) =>
+          tab.id === action.id ? { ...tab, dirty: false, savedVersion: action.savedVersion } : tab,
+        ),
       };
     }
     case 'viewChanged':
@@ -318,5 +355,37 @@ export function validateTomlText(text: string): ValidationResult {
     return { ok: true, message: null };
   } catch (error: unknown) {
     return { ok: false, message: error instanceof Error ? error.message : 'Invalid TOML' };
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   JSON 文件编辑器提供格式化按钮时，需要用同一套严格 JSON 语义避免格式化 JSONC 等非支持格式。
+ *
+ * Code Logic（这个函数做什么）:
+ *   先用 JSON.parse 校验并解析，再用 JSON.stringify 以 2 空格缩进输出并补末尾换行；失败返回错误消息。
+ */
+export function formatJsonText(text: string): FormatResult {
+  try {
+    const parsedValue: unknown = JSON.parse(text);
+    return { ok: true, text: `${JSON.stringify(parsedValue, null, 2)}\n`, message: null };
+  } catch (error: unknown) {
+    return { ok: false, text: null, message: error instanceof Error ? error.message : 'Invalid JSON' };
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   TOML 文件编辑器提供格式化按钮时，需要复用保存前同源语义校验并输出规范 TOML。
+ *
+ * Code Logic（这个函数做什么）:
+ *   使用 smol-toml parse 解析，再用 stringify 重新序列化；失败返回错误消息。
+ */
+export function formatTomlText(text: string): FormatResult {
+  try {
+    const parsedValue = parseToml(text);
+    return { ok: true, text: stringifyToml(parsedValue), message: null };
+  } catch (error: unknown) {
+    return { ok: false, text: null, message: error instanceof Error ? error.message : 'Invalid TOML' };
   }
 }
