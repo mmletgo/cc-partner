@@ -154,6 +154,21 @@ export function formatWorkbenchMergeStages(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   一键合并成功后阶段条只是完成反馈，不应长期占用 Git 历史区域空间；失败状态则需要保留给用户排查。
+ *
+ * Code Logic（这个函数做什么）:
+ *   复用 canonical 阶段顺序，只有 cleanup completed 且没有 failed/running 阶段时判定为可自动隐藏。
+ */
+export function shouldAutoDismissMergeStages(stages: WorkbenchMergeStage[]): boolean {
+  const formatted = formatWorkbenchMergeStages(stages);
+  return (
+    formatted.some((stage) => stage.id === 'cleanup' && stage.status === 'completed') &&
+    formatted.every((stage) => stage.status !== 'failed' && stage.status !== 'running')
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   移除 worktree 是生命周期管理动作，不能对主工作区或 busy 状态开放。
  *
  * Code Logic（这个函数做什么）:

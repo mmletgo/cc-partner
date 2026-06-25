@@ -88,6 +88,7 @@ import {
   formatCommitRelativeTime,
   hasGitHistory,
   sessionsForWorktree,
+  shouldAutoDismissMergeStages,
   WORKTREE_BRANCH_PREFIXES,
   worktreeChangeCount,
   worktreeStatusTone,
@@ -152,6 +153,7 @@ const MIN_TERMINAL_ROWS = 6;
 const TERMINAL_PANE_HEADER_PX = 36;
 const TMUX_FOCUS_SYNC_INTERVAL_MS = 700;
 const LOCAL_FOCUS_GRACE_MS = 500;
+const MERGE_STAGE_AUTO_DISMISS_MS = 2500;
 
 const INITIAL_MERGE_STAGE_ID: WorkbenchMergeStageId = 'checkSource';
 
@@ -714,6 +716,7 @@ export function Workbench() {
   const cursorAnchorRef = useRef<TerminalCursorAnchor | null>(null);
   const lastLocalFocusAtRef = useRef<number>(0);
   const mergeProgressWorktreeIdRef = useRef<string | null>(null);
+  const mergeStageDismissTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
 
   const activeWorktree = useMemo(
     () => worktrees.find((worktree) => worktree.id === activeWorktreeId) ?? worktrees[0] ?? null,
@@ -799,6 +802,54 @@ export function Workbench() {
       }
     },
     [t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户可能连续发起 merge 或切换项目，旧的自动隐藏计时器不能误清新一轮进度。
+   *
+   * Code Logic（这个函数做什么）:
+   *   如果存在 merge 阶段条隐藏计时器，则取消并清空 ref。
+   */
+  const clearMergeStageDismissTimer = useCallback(() => {
+    if (mergeStageDismissTimerRef.current === null) return;
+    window.clearTimeout(mergeStageDismissTimerRef.current);
+    mergeStageDismissTimerRef.current = null;
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   项目切换或成功完成后的阶段条应释放 Git 历史区域空间。
+   *
+   * Code Logic（这个函数做什么）:
+   *   取消隐藏计时器，清空当前追踪 worktree 与阶段列表。
+   */
+  const clearMergeStagePanel = useCallback(() => {
+    clearMergeStageDismissTimer();
+    mergeProgressWorktreeIdRef.current = null;
+    setMergeProgressWorktreeId(null);
+    setMergeStages([]);
+  }, [clearMergeStageDismissTimer]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   成功 merge 后用户只需要短暂看到完成反馈，不应长期保留状态条占位。
+   *
+   * Code Logic（这个函数做什么）:
+   *   为指定 worktree 安排延迟隐藏；触发时若已经开始追踪别的 worktree，则不清理新状态。
+   */
+  const scheduleMergeStagePanelDismiss = useCallback(
+    (worktreeId: string) => {
+      clearMergeStageDismissTimer();
+      mergeStageDismissTimerRef.current = window.setTimeout(() => {
+        mergeStageDismissTimerRef.current = null;
+        if (mergeProgressWorktreeIdRef.current !== worktreeId) return;
+        mergeProgressWorktreeIdRef.current = null;
+        setMergeProgressWorktreeId(null);
+        setMergeStages([]);
+      }, MERGE_STAGE_AUTO_DISMISS_MS);
+    },
+    [clearMergeStageDismissTimer],
   );
 
   const updateActiveSession = useCallback((nextSessions: WorkbenchSession[]) => {
@@ -1048,6 +1099,8 @@ export function Workbench() {
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => clearMergeStageDismissTimer, [clearMergeStageDismissTimer]);
+
   useEffect(() => {
     let cancelled = false;
     void configApi
@@ -1085,6 +1138,7 @@ export function Workbench() {
 
   useEffect(() => {
     return deferEffect(() => {
+      clearMergeStagePanel();
       if (!activeProjectId) {
         knownSessionIdsRef.current = new Set();
         setSessions([]);
@@ -1101,8 +1155,6 @@ export function Workbench() {
         setSelectedInfo(null);
         setGitCommits([]);
         setGitHistoryError(null);
-        setMergeProgressWorktreeId(null);
-        setMergeStages([]);
         return;
       }
       setRootNodes([]);
@@ -1119,12 +1171,10 @@ export function Workbench() {
       setFileNotice(null);
       setGitCommits([]);
       setGitHistoryError(null);
-      setMergeProgressWorktreeId(null);
-      setMergeStages([]);
       void loadWorktrees(activeProjectId);
       void loadSessions(activeProjectId);
     });
-  }, [activeProjectId, loadSessions, loadWorktrees]);
+  }, [activeProjectId, clearMergeStagePanel, loadSessions, loadWorktrees]);
 
   useEffect(() => {
     return deferEffect(() => {
@@ -1566,6 +1616,7 @@ export function Workbench() {
     const projectId = activeWorktree.projectId;
     const worktreeId = activeWorktree.id;
     try {
+      clearMergeStageDismissTimer();
       setWorktreeBusy('merge');
       setWorktreeError(null);
       setMergeProgressWorktreeId(worktreeId);
@@ -1580,7 +1631,11 @@ export function Workbench() {
         ]),
       );
       const result = await workbenchApi.worktrees.merge(worktreeId);
-      setMergeStages(formatWorkbenchMergeStages(result.stages));
+      const finalStages = formatWorkbenchMergeStages(result.stages);
+      setMergeStages(finalStages);
+      if (shouldAutoDismissMergeStages(finalStages)) {
+        scheduleMergeStagePanelDismiss(worktreeId);
+      }
       await loadWorktrees(projectId);
       await loadSessions(projectId);
       sessionsForWorktree(sessions, worktreeId).forEach((session) => {
@@ -1594,6 +1649,7 @@ export function Workbench() {
         t('workbench:errors.mergeWorktree'),
         desktopUnavailableMessage,
       );
+      clearMergeStageDismissTimer();
       setMergeStages((current) => {
         const formatted = formatWorkbenchMergeStages(current);
         if (formatted.some((stage) => stage.status === 'failed')) return formatted;
@@ -1612,6 +1668,7 @@ export function Workbench() {
     }
   }, [
     activeWorktree,
+    clearMergeStageDismissTimer,
     desktopUnavailableMessage,
     inspectorTab,
     loadGitHistory,
@@ -1619,6 +1676,7 @@ export function Workbench() {
     loadWorktrees,
     refreshProjectSessionStats,
     removeTerminalBuffer,
+    scheduleMergeStagePanelDismiss,
     sessions,
     t,
   ]);

@@ -7,6 +7,7 @@ import {
   canPushWorktree,
   canRemoveWorktree,
   formatWorkbenchMergeStages,
+  shouldAutoDismissMergeStages,
   formatCommitRelativeTime,
   hasGitHistory,
   composeWorktreeBranchName,
@@ -339,6 +340,40 @@ function testFormatWorkbenchMergeStages(): void {
   }
 }
 
+/**
+ * Business Logic（为什么需要这个测试）:
+ *   merge 成功后的阶段条应该自动释放空间，但失败阶段必须保留错误信息供用户处理。
+ *
+ * Code Logic（这个测试做什么）:
+ *   分别构造成功 cleanup completed、失败 mergeMain failed 和仍运行中的阶段，断言自动隐藏判定。
+ */
+function testShouldAutoDismissMergeStages(): void {
+  if (!shouldAutoDismissMergeStages([
+    { id: 'checkSource', status: 'completed', message: '' },
+    { id: 'closeSessions', status: 'completed', message: '' },
+    { id: 'mergeMain', status: 'completed', message: '' },
+    { id: 'resolveConflicts', status: 'skipped', message: '' },
+    { id: 'cleanup', status: 'completed', message: '' },
+  ])) {
+    throw new Error('expected completed merge stages to auto dismiss');
+  }
+
+  if (shouldAutoDismissMergeStages([
+    { id: 'checkSource', status: 'completed', message: '' },
+    { id: 'mergeMain', status: 'failed', message: 'conflict remains' },
+    { id: 'cleanup', status: 'pending', message: '' },
+  ])) {
+    throw new Error('expected failed merge stages to stay visible');
+  }
+
+  if (shouldAutoDismissMergeStages([
+    { id: 'checkSource', status: 'completed', message: '' },
+    { id: 'cleanup', status: 'running', message: 'cleaning' },
+  ])) {
+    throw new Error('expected running merge stages to stay visible');
+  }
+}
+
 testSessionsForWorktree();
 testActiveWorktreeRootPath();
 testWorktreeStatusTone();
@@ -351,3 +386,4 @@ testFormatCommitRelativeTime();
 testHasGitHistory();
 testBuildGitGraphRowsForMergeHistory();
 testFormatWorkbenchMergeStages();
+testShouldAutoDismissMergeStages();
