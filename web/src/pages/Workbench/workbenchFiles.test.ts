@@ -34,6 +34,10 @@ async function main(): Promise<void> {
   assert(detectWorkbenchFileType('data.sqlite', null) === 'sqlite', 'sqlite extension detected');
   assert(detectWorkbenchFileType('logo.png', null) === 'image', 'png extension detected');
   assert(detectWorkbenchFileType('settings.jsonc', null) === 'unsupported', 'jsonc is not treated as strict json');
+  assert(
+    detectWorkbenchFileType('settings.jsonc', 'application/json') === 'unsupported',
+    'jsonc extension overrides json mime fallback',
+  );
 
   const jsonCaps = fileCapabilitiesForType('json');
   assert(jsonCaps.canEdit, 'json is editable');

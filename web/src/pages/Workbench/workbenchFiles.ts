@@ -64,6 +64,7 @@ export interface FormatResult {
 const IMAGE_EXTENSIONS = new Set(['avif', 'bmp', 'gif', 'ico', 'jpeg', 'jpg', 'png', 'svg', 'webp']);
 const MARKDOWN_EXTENSIONS = new Set(['markdown', 'md', 'mdown', 'mkd']);
 const JSON_EXTENSIONS = new Set(['json']);
+const UNSUPPORTED_JSON_EXTENSIONS = new Set(['jsonc']);
 const TOML_EXTENSIONS = new Set(['toml']);
 const CSV_EXTENSIONS = new Set(['csv', 'tsv']);
 const SQLITE_EXTENSIONS = new Set(['db', 'sqlite', 'sqlite3']);
@@ -233,6 +234,7 @@ export function detectWorkbenchFileType(filename: string, mime: string | null): 
   const extension = extensionFromFilename(filename);
   if (extension && IMAGE_EXTENSIONS.has(extension)) return 'image';
   if (extension && MARKDOWN_EXTENSIONS.has(extension)) return 'markdown';
+  if (extension && UNSUPPORTED_JSON_EXTENSIONS.has(extension)) return 'unsupported';
   if (extension && JSON_EXTENSIONS.has(extension)) return 'json';
   if (extension && TOML_EXTENSIONS.has(extension)) return 'toml';
   if (extension && CSV_EXTENSIONS.has(extension)) return 'csv';
