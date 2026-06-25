@@ -359,13 +359,31 @@ pub enum WorkbenchDetectedFileType {
     Unsupported,
 }
 
+/// Workbench 文件工作区显示模式 DTO。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     前端打开文件后需要知道默认进入只读预览、代码编辑、Markdown 所见即所得、源码或分屏模式。
+///
+/// Code Logic（这个枚举做什么）:
+///     用 lowercase 字符串序列化为 viewer/editor/wysiwyg/source/split，与前端 `WorkbenchFileMode` 对齐。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkbenchFileMode {
+    Viewer,
+    Editor,
+    Wysiwyg,
+    Source,
+    Split,
+}
+
 /// Workbench 文件能力 DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     文件工作区工具栏需要根据文件类型隐藏不可用操作，避免用户对只读预览执行保存或格式化。
 ///
 /// Code Logic（这个结构体做什么）:
-///     以 camelCase 字段告诉前端文件是否可预览、可编辑、可格式化，以及保存前是否必须校验。
+///     以 camelCase 字段告诉前端文件是否可预览、可编辑、可格式化、保存前是否必须校验，
+///     以及默认模式和可切换模式列表。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchFileCapabilities {
@@ -373,6 +391,8 @@ pub struct WorkbenchFileCapabilities {
     pub can_edit: bool,
     pub can_format: bool,
     pub must_validate_before_save: bool,
+    pub default_mode: WorkbenchFileMode,
+    pub available_modes: Vec<WorkbenchFileMode>,
 }
 
 /// Workbench 文本内容 DTO。

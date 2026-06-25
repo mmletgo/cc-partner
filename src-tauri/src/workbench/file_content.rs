@@ -12,8 +12,16 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 use crate::error::AppError;
 use sha2::{Digest, Sha256};
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_FINAL_HASH_CHECK_HOOK: RefCell<Option<Box<dyn Fn() + 'static>>> = RefCell::new(None);
+}
 
 /// 单个可编辑文本文件的最大字节数。
 ///
@@ -69,8 +77,8 @@ pub fn read_text_file(path: &Path) -> Result<(String, String), AppError> {
 ///     用户保存文件时，Workbench 必须拒绝覆盖外部已修改内容，并尽量保证写入过程不会留下半截文件。
 ///
 /// Code Logic（这个函数做什么）:
-///     检查内容大小与当前文件 hash；hash 一致时写入同目录唯一临时文件，flush/sync 后 rename 替换目标，
-///     成功返回新文件 SHA256，失败时尽量删除临时文件。
+///     检查内容大小与当前文件 hash；hash 一致时写入同目录唯一临时文件，继承目标权限后再次检查目标 hash，
+///     最后用 rename 替换目标并返回新 hash。该流程是缩小窗口的乐观锁，不是文件系统级强 CAS。
 pub fn save_text_file_atomic(
     path: &Path,
     content: &str,
@@ -78,14 +86,23 @@ pub fn save_text_file_atomic(
 ) -> Result<String, AppError> {
     ensure_editable_size(content.len() as u64)?;
 
-    let current_hash = sha256_file_hex(path)?;
-    if current_hash != base_hash {
-        return Err(AppError::generic("文件已被修改，请重新打开文件后再保存"));
-    }
+    ensure_base_hash_matches(path, base_hash)?;
 
     let temporary_path = temporary_save_path(path)?;
     let write_result = write_temporary_file(&temporary_path, content);
     if let Err(err) = write_result {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(err);
+    }
+
+    if let Err(err) = inherit_target_permissions(path, &temporary_path) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(err);
+    }
+
+    run_before_final_hash_check_hook_for_test();
+
+    if let Err(err) = ensure_base_hash_matches(path, base_hash) {
         let _ = fs::remove_file(&temporary_path);
         return Err(err);
     }
@@ -171,21 +188,93 @@ fn write_temporary_file(path: &Path, content: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     保存流程需要在打开时和 rename 前各校验一次 baseHash，拒绝覆盖外部编辑器改动。
+///
+/// Code Logic（这个函数做什么）:
+///     计算当前目标文件 SHA256 并与 base_hash 比较，不一致时返回统一冲突错误。
+fn ensure_base_hash_matches(path: &Path, base_hash: &str) -> Result<(), AppError> {
+    let current_hash = sha256_file_hex(path)?;
+    if current_hash != base_hash {
+        return Err(AppError::generic("文件已被修改，请重新打开文件后再保存"));
+    }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     原子保存会用新临时文件替换目标文件，必须保留脚本 executable bit 和 readonly 等基础权限语义。
+///
+/// Code Logic（这个函数做什么）:
+///     读取目标文件 metadata.permissions() 并设置到临时文件；失败时返回错误，让调用方删除临时文件并停止保存。
+fn inherit_target_permissions(target_path: &Path, temporary_path: &Path) -> Result<(), AppError> {
+    let permissions = fs::metadata(target_path)?.permissions();
+    fs::set_permissions(temporary_path, permissions)?;
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     单测需要稳定模拟“临时文件写好后、rename 前目标文件被外部修改”的并发窗口。
+///
+/// Code Logic（这个函数做什么）:
+///     在测试构建中运行一次注册的 hook；生产构建中没有该函数调用效果。
+#[cfg(test)]
+fn run_before_final_hash_check_hook_for_test() {
+    BEFORE_FINAL_HASH_CHECK_HOOK.with(|hook| {
+        let hook = hook.borrow_mut().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    });
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     生产代码不应携带测试 hook 行为，但同一保存流程需要在非测试构建中可编译。
+///
+/// Code Logic（这个函数做什么）:
+///     非测试构建下提供空实现，让保存路径不受测试辅助逻辑影响。
+#[cfg(not(test))]
+fn run_before_final_hash_check_hook_for_test() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
+    use tempfile::TempDir;
 
     /// Business Logic（为什么需要这个函数）:
     ///     文件内容测试需要互不影响的真实目录，验证 rename/hash/UTF-8 行为。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在系统临时目录下创建带 UUID 的目录，并返回路径给单测清理。
-    fn temp_dir(prefix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).expect("create temp dir");
-        dir
+    ///     使用 tempfile 创建 RAII 临时目录，测试 panic 时也由 Drop 尽量清理。
+    fn temp_dir() -> TempDir {
+        tempfile::tempdir().expect("create temp dir")
+    }
+
+    /// Business Logic（为什么需要这个结构体）:
+    ///     TOCTOU 单测会注册一次全局 hook，测试结束时必须清理以免影响其他测试。
+    ///
+    /// Code Logic（这个结构体做什么）:
+    ///     Drop 时清空 BEFORE_FINAL_HASH_CHECK_HOOK。
+    struct TestHookGuard;
+
+    impl Drop for TestHookGuard {
+        fn drop(&mut self) {
+            BEFORE_FINAL_HASH_CHECK_HOOK.with(|hook| {
+                *hook.borrow_mut() = None;
+            });
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     保存流程是同步函数，测试需要在固定位置插入外部修改来验证二次 hash 检查。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     注册一个只执行一次的 hook，并返回 RAII guard 在测试结束时清理。
+    fn set_before_final_hash_check_hook_for_test(hook: impl Fn() + 'static) -> TestHookGuard {
+        BEFORE_FINAL_HASH_CHECK_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(hook));
+        });
+        TestHookGuard
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -245,14 +334,13 @@ mod tests {
     ///     两次写入不同内容并分别计算 SHA256，断言 hash 不相同。
     #[test]
     fn hash_changes_after_file_content_changes() {
-        let dir = temp_dir("ccp-file-content-hash");
-        let path = dir.join("note.txt");
+        let dir = temp_dir();
+        let path = dir.path().join("note.txt");
         fs::write(&path, "first").expect("write first");
         let first = sha256_file_hex(&path).expect("hash first");
         fs::write(&path, "second").expect("write second");
         let second = sha256_file_hex(&path).expect("hash second");
         assert_ne!(first, second);
-        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -262,12 +350,26 @@ mod tests {
     ///     写入非法字节，断言 read_text_file 返回 UTF-8 相关错误。
     #[test]
     fn read_text_file_rejects_non_utf8() {
-        let dir = temp_dir("ccp-file-content-utf8");
-        let path = dir.join("bad.txt");
+        let dir = temp_dir();
+        let path = dir.path().join("bad.txt");
         fs::write(&path, [0xff, 0xfe, 0xfd]).expect("write invalid utf8");
         let err = read_text_file(&path).expect_err("non UTF-8 rejected");
         assert!(err.to_string().contains("UTF-8"));
-        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     超过 5MB 的文件不应被读入编辑器，避免 Workbench 阻塞或占用过多内存。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入比 MAX_EDITABLE_TEXT_BYTES 大 1 字节的 UTF-8 文件，断言 read_text_file 拒绝。
+    #[test]
+    fn read_text_file_rejects_oversized_file() {
+        let dir = temp_dir();
+        let path = dir.path().join("large.txt");
+        fs::write(&path, vec![b'a'; (MAX_EDITABLE_TEXT_BYTES + 1) as usize])
+            .expect("write large file");
+        let err = read_text_file(&path).expect_err("oversized read rejected");
+        assert!(err.to_string().contains("上限"));
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -277,14 +379,107 @@ mod tests {
     ///     用错误 baseHash 保存，断言返回冲突错误且原文件内容保持不变。
     #[test]
     fn save_text_file_atomic_rejects_base_hash_mismatch_without_overwrite() {
-        let dir = temp_dir("ccp-file-content-conflict");
-        let path = dir.join("note.txt");
+        let dir = temp_dir();
+        let path = dir.path().join("note.txt");
         fs::write(&path, "current").expect("write current");
         let err =
             save_text_file_atomic(&path, "new", "stale-hash").expect_err("stale hash rejected");
         assert!(err.to_string().contains("已被修改") || err.to_string().contains("hash"));
         assert_eq!(fs::read_to_string(&path).expect("read current"), "current");
-        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     初次 hash 校验通过后，rename 前仍可能发生外部修改，Workbench 不能覆盖这个窗口里的改动。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 test hook 在临时文件写好后改写目标文件，断言保存拒绝且保留外部修改内容。
+    #[test]
+    fn save_text_file_atomic_rechecks_hash_before_rename() {
+        let dir = temp_dir();
+        let path = dir.path().join("note.txt");
+        fs::write(&path, "old").expect("write old");
+        let base_hash = sha256_file_hex(&path).expect("base hash");
+        let hook_path = path.clone();
+        let _guard = set_before_final_hash_check_hook_for_test(move || {
+            fs::write(&hook_path, "external").expect("external write");
+        });
+
+        let err = save_text_file_atomic(&path, "new", &base_hash)
+            .expect_err("external write before rename rejected");
+        assert!(err.to_string().contains("已被修改") || err.to_string().contains("hash"));
+        assert_eq!(
+            fs::read_to_string(&path).expect("read external"),
+            "external"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     保存超限内容同样会阻塞 UI 并可能导致大文件误写，必须在落盘前拒绝。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用正确 baseHash 保存超过上限 1 字节的内容，断言拒绝且原文件不变。
+    #[test]
+    fn save_text_file_atomic_rejects_oversized_content_without_overwrite() {
+        let dir = temp_dir();
+        let path = dir.path().join("note.txt");
+        fs::write(&path, "old").expect("write old");
+        let base_hash = sha256_file_hex(&path).expect("base hash");
+        let content = "a".repeat((MAX_EDITABLE_TEXT_BYTES + 1) as usize);
+        let err = save_text_file_atomic(&path, &content, &base_hash)
+            .expect_err("oversized save rejected");
+        assert!(err.to_string().contains("上限"));
+        assert_eq!(fs::read_to_string(&path).expect("read old"), "old");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     保存脚本文件时不能丢 executable bit，否则用户原本可执行的脚本会失效。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Unix 下把文件权限设为 755，保存后断言可执行位仍存在。
+    #[cfg(unix)]
+    #[test]
+    fn save_text_file_atomic_preserves_unix_executable_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir();
+        let path = dir.path().join("script.sh");
+        fs::write(&path, "#!/bin/sh\necho old\n").expect("write script");
+        let mut permissions = fs::metadata(&path).expect("script metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).expect("set executable");
+        let base_hash = sha256_file_hex(&path).expect("base hash");
+
+        save_text_file_atomic(&path, "#!/bin/sh\necho new\n", &base_hash).expect("save script");
+
+        let mode = fs::metadata(&path)
+            .expect("script metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     非 Unix 平台也应尽量保留 readonly 这类基础权限语义。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     非 Unix 下把文件设为 readonly，保存后断言 readonly 标记仍存在。
+    #[cfg(not(unix))]
+    #[test]
+    fn save_text_file_atomic_preserves_readonly_flag() {
+        let dir = temp_dir();
+        let path = dir.path().join("config.txt");
+        fs::write(&path, "old").expect("write config");
+        let base_hash = sha256_file_hex(&path).expect("base hash");
+        let mut permissions = fs::metadata(&path).expect("config metadata").permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).expect("set readonly");
+
+        save_text_file_atomic(&path, "new", &base_hash).expect("save config");
+
+        assert!(fs::metadata(&path)
+            .expect("config metadata")
+            .permissions()
+            .readonly());
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -294,14 +489,13 @@ mod tests {
     ///     用正确 baseHash 保存新内容，断言返回新 hash、文件内容和磁盘 hash 一致。
     #[test]
     fn save_text_file_atomic_updates_file_and_returns_new_hash() {
-        let dir = temp_dir("ccp-file-content-save");
-        let path = dir.join("note.txt");
+        let dir = temp_dir();
+        let path = dir.path().join("note.txt");
         fs::write(&path, "old").expect("write old");
         let base_hash = sha256_file_hex(&path).expect("base hash");
         let new_hash = save_text_file_atomic(&path, "new", &base_hash).expect("save text");
         assert_ne!(base_hash, new_hash);
         assert_eq!(fs::read_to_string(&path).expect("read new"), "new");
         assert_eq!(sha256_file_hex(&path).expect("hash new"), new_hash);
-        fs::remove_dir_all(dir).expect("cleanup");
     }
 }
