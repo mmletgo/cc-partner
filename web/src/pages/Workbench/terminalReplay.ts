@@ -25,10 +25,13 @@ function scheduleTerminalReplayGateRelease(release: () => void): void {
  *   工作台 terminal 首次挂载或 buffer 截断后会重放历史 PTY 输出，历史输出中的 tmux 查询序列不应再次写回后端。
  *
  * Code Logic（这个函数做什么）:
- *   返回当前 xterm onData 是否应作为真实用户输入转发给 PTY。
+ *   同时检查 terminal 是否为 active 可交互实例，以及 replay gate 是否正在屏蔽历史输出副作用。
  */
-export function shouldForwardTerminalInput(gate: TerminalReplayGate): boolean {
-  return !gate.current;
+export function shouldForwardTerminalInput(
+  gate: TerminalReplayGate,
+  inputEnabled = true,
+): boolean {
+  return inputEnabled && !gate.current;
 }
 
 /**

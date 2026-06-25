@@ -67,5 +67,9 @@ scheduledReleases[0]?.();
 
 assert(!gate.current, 'replay should release suppression after delayed gate release');
 assert(shouldForwardTerminalInput(gate), 'live input should be forwarded after replay');
+assert(
+  !shouldForwardTerminalInput(gate, false),
+  'inactive mounted terminals must not forward xterm-generated input',
+);
 
 console.log('terminalReplay.test.ts passed');

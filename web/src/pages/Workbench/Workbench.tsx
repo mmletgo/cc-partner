@@ -115,6 +115,7 @@ interface TerminalPaneProps {
   buffer: string;
   revision: number;
   placeholder: string;
+  inputEnabled: boolean;
   onInput: (sessionId: string, data: string) => void;
   onResize: (sessionId: string, cols: number, rows: number) => void;
   onCursorAnchorChange?: (anchor: TerminalCursorAnchor | null) => void;
@@ -415,15 +416,25 @@ function statusTone(status: string): 'neutral' | 'success' | 'warn' | 'danger' {
  *
  * Code Logic（这个组件做什么）:
  *   session 变化时创建/销毁 Terminal；buffer revision 变化时只写入新增输出；
- *   ResizeObserver 触发 FitAddon.fit 后把 cols/rows clamp 后回传后端。
+ *   仅 inputEnabled=true 的 active 终端转发 onData；ResizeObserver 触发 FitAddon.fit 后把 cols/rows clamp 后回传后端。
  */
 function TerminalPane(props: TerminalPaneProps) {
-  const { session, buffer, revision, placeholder, onInput, onResize, onCursorAnchorChange } = props;
+  const {
+    session,
+    buffer,
+    revision,
+    placeholder,
+    inputEnabled,
+    onInput,
+    onResize,
+    onCursorAnchorChange,
+  } = props;
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const bufferRef = useRef<string>('');
   const writtenLengthRef = useRef<number>(0);
   const replayGateRef = useRef<boolean>(false);
+  const inputEnabledRef = useRef<boolean>(inputEnabled);
   const resizeTimerRef = useRef<number | null>(null);
   const cursorAnchorCallbackRef = useRef<TerminalPaneProps['onCursorAnchorChange']>(
     onCursorAnchorChange,
@@ -433,6 +444,10 @@ function TerminalPane(props: TerminalPaneProps) {
   useEffect(() => {
     bufferRef.current = buffer;
   }, [buffer]);
+
+  useEffect(() => {
+    inputEnabledRef.current = inputEnabled;
+  }, [inputEnabled]);
 
   useEffect(() => {
     cursorAnchorCallbackRef.current = onCursorAnchorChange;
@@ -462,7 +477,7 @@ function TerminalPane(props: TerminalPaneProps) {
       }
     };
     const dataDisposable = terminal.onData((data: string) => {
-      if (!shouldForwardTerminalInput(replayGateRef)) return;
+      if (!shouldForwardTerminalInput(replayGateRef, inputEnabledRef.current)) return;
       onInput(sessionId, data);
     });
     const cursorDisposable = terminal.onCursorMove(emitCursorAnchor);
@@ -1958,6 +1973,7 @@ export function Workbench() {
                 }
                 onInput={handleInput}
                 onResize={handleResize}
+                inputEnabled={false}
                 onCursorAnchorChange={handleCursorAnchorChange}
               />
             ) : null}
@@ -1988,6 +2004,7 @@ export function Workbench() {
                   placeholder={t('workbench:terminalPlaceholder')}
                   onInput={handleInput}
                   onResize={handleResize}
+                  inputEnabled={session.id === renderedActiveSessionId}
                   onCursorAnchorChange={
                     session.id === renderedActiveSessionId ? handleCursorAnchorChange : undefined
                   }
