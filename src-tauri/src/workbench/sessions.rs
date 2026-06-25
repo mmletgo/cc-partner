@@ -424,7 +424,7 @@ fn tmux_worktree_session_name(
         .filter(|value| !value.is_empty())
         .unwrap_or(&worktree_id);
     format!(
-        "cc-partner-worktree-{}-{}-{}",
+        "{}-{}-{}",
         tmux_session_component(project_name),
         tmux_session_component(display_worktree_name),
         tmux_session_id_suffix(&worktree_id)
@@ -1899,13 +1899,10 @@ mod tests {
             Some("main"),
         );
 
-        assert_eq!(
-            worktree_session,
-            "cc-partner-worktree-cc-partner-main-1234abcdmain"
-        );
+        assert_eq!(worktree_session, "cc-partner-main-1234abcdmain");
         assert_eq!(
             tmux_window_target(&worktree_session, "@7"),
-            "cc-partner-worktree-cc-partner-main-1234abcdmain:@7"
+            "cc-partner-main-1234abcdmain:@7"
         );
     }
 
@@ -1925,8 +1922,9 @@ mod tests {
 
         assert_eq!(
             worktree_session,
-            "cc-partner-worktree-cc-partner-feature-pandocanvas-84b44f3d8e25"
+            "cc-partner-feature-pandocanvas-84b44f3d8e25"
         );
+        assert!(!worktree_session.starts_with("cc-partner-worktree-"));
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -1950,14 +1948,8 @@ mod tests {
         );
 
         assert_ne!(main_session, feature_session);
-        assert_eq!(
-            main_session,
-            "cc-partner-worktree-cc-partner-main-project1main"
-        );
-        assert_eq!(
-            feature_session,
-            "cc-partner-worktree-cc-partner-feature-ui-worktree2"
-        );
+        assert_eq!(main_session, "cc-partner-main-project1main");
+        assert_eq!(feature_session, "cc-partner-feature-ui-worktree2");
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -2078,10 +2070,8 @@ mod tests {
     ///     断言迁移使用 `rename-session -t <old> <new>` 参数。
     #[test]
     fn tmux_rename_session_args_preserve_existing_context() {
-        let args = tmux_rename_session_args(
-            "cc-partner-worktree-old-id",
-            "cc-partner-worktree-readable-name",
-        );
+        let args =
+            tmux_rename_session_args("cc-partner-worktree-old-id", "cc-partner-readable-name");
 
         assert_eq!(
             args,
@@ -2089,7 +2079,7 @@ mod tests {
                 "rename-session",
                 "-t",
                 "cc-partner-worktree-old-id",
-                "cc-partner-worktree-readable-name",
+                "cc-partner-readable-name",
             ]
         );
     }
