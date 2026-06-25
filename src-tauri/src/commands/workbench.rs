@@ -316,8 +316,8 @@ async fn merged_session_dtos(
 ///     应用重启后，进入工作台项目时应自动恢复之前打开的终端 tab 和可重连上下文。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取持久化会话；registry 已有则跳过；项目存在则调用 registry.restore，成功后写回最新 row，
-///     项目缺失则删除孤儿会话。
+///     读取持久化会话；registry 已有则跳过；项目存在时补齐可读 worktree 名再调用 registry.restore，
+///     成功后写回最新 row，项目缺失则删除孤儿会话。
 async fn restore_persisted_sessions(
     state: &AppState,
     app_handle: AppHandle,
@@ -332,10 +332,22 @@ async fn restore_persisted_sessions(
             state.workbench_session_repo.delete(&row.id).await?;
             continue;
         };
-        match state
-            .workbench_sessions
-            .restore(app_handle.clone(), project, row.clone())
-        {
+        let worktree_name =
+            match resolve_worktree(state, &project, row.worktree_id.as_deref()).await {
+                Ok(worktree) => Some(worktree.name),
+                Err(error) => {
+                    tracing::debug!(
+                        "恢复工作台终端时无法解析 worktree 名称，使用内部 id 兜底: {error}"
+                    );
+                    None
+                }
+            };
+        match state.workbench_sessions.restore(
+            app_handle.clone(),
+            project,
+            row.clone(),
+            worktree_name,
+        ) {
             Ok(restored) => {
                 state.workbench_session_repo.upsert(&restored).await?;
             }
@@ -844,6 +856,7 @@ pub async fn create_workbench_session(
         project,
         worktree.path.clone(),
         Some(worktree.id.clone()),
+        Some(worktree.name.clone()),
         initial_cols,
         initial_rows,
     )?;

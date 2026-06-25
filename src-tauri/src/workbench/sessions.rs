@@ -27,6 +27,7 @@ const DEFAULT_COLS: u16 = 98;
 const DEFAULT_ROWS: u16 = 32;
 const MIN_TERMINAL_COLS: u16 = 20;
 const MIN_TERMINAL_ROWS: u16 = 6;
+const TMUX_SESSION_ID_SUFFIX_LEN: usize = 12;
 const RAW_PTY_BACKEND: &str = "pty";
 const TMUX_BACKEND: &str = "tmux";
 #[cfg(windows)]
@@ -349,19 +350,47 @@ fn wsl_unc_path_to_linux_path(path: &str) -> Option<String> {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     worktree 级 tmux session 名需要规避 `:`、`/` 等 tmux target 特殊字符，避免解析歧义。
+///     worktree 级 tmux session 名会展示在 tmux status 中，需要既可读又规避 target 特殊字符。
 ///
 /// Code Logic（这个函数做什么）:
-///     只保留 ASCII 字母数字作为 session name 组件；空值使用 `root` 兜底。
+///     保留 ASCII 字母数字并把其他字符折叠为 `-`；空值使用 `root` 兜底。
 fn tmux_session_component(value: &str) -> String {
-    let component: String = value
-        .chars()
-        .filter(|value| value.is_ascii_alphanumeric())
-        .collect();
+    let mut component = String::new();
+    let mut last_dash = false;
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            component.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            component.push('-');
+            last_dash = true;
+        }
+    }
+    let component = component.trim_matches('-').to_string();
     if component.is_empty() {
         "root".to_string()
     } else {
         component
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     可读 session 名清洗后可能碰撞，仍需要携带短稳定 id 片段保持 worktree 隔离。
+///
+/// Code Logic（这个函数做什么）:
+///     复用 session 组件清洗逻辑，只取末尾 ASCII 字母数字作为短后缀；空值使用 `root`。
+fn tmux_session_id_suffix(value: &str) -> String {
+    let component: String = tmux_session_component(value)
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect();
+    if component.is_empty() {
+        return "root".to_string();
+    }
+    if component.len() <= TMUX_SESSION_ID_SUFFIX_LEN {
+        component
+    } else {
+        component[component.len() - TMUX_SESSION_ID_SUFFIX_LEN..].to_string()
     }
 }
 
@@ -379,16 +408,26 @@ fn effective_worktree_id(project_id: &str, worktree_id: Option<&str>) -> String 
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     不同 worktree 的 terminal window 必须互相隔离，不能共享 tmux 底部 window 列表。
+///     不同 worktree 的 terminal window 必须互相隔离，同时用户在 tmux status 中应看到可读 worktree 名。
 ///
 /// Code Logic（这个函数做什么）:
-///     用 project_id + worktree_id 派生 worktree 级 tmux session 名称；主工作区使用确定性 fallback。
-fn tmux_worktree_session_name(project_id: &str, worktree_id: Option<&str>) -> String {
+///     优先用 project/worktree 的展示名派生 session 名，并追加短 id 后缀保持唯一；缺少 worktree 名时使用确定性 worktree id fallback。
+fn tmux_worktree_session_name(
+    project_name: &str,
+    project_id: &str,
+    worktree_id: Option<&str>,
+    worktree_name: Option<&str>,
+) -> String {
     let worktree_id = effective_worktree_id(project_id, worktree_id);
+    let display_worktree_name = worktree_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&worktree_id);
     format!(
-        "cc-partner-worktree-{}-{}",
-        tmux_session_component(project_id),
-        tmux_session_component(&worktree_id)
+        "cc-partner-worktree-{}-{}-{}",
+        tmux_session_component(project_name),
+        tmux_session_component(display_worktree_name),
+        tmux_session_id_suffix(&worktree_id)
     )
 }
 
@@ -471,6 +510,20 @@ fn tmux_current_window_args(session_name: &str) -> Vec<String> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     session 命名规则升级后，旧 tmux session 应尽量改名到新可读名称，保留原 shell 上下文。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 `rename-session -t <old> <new>` 参数列表。
+fn tmux_rename_session_args(old_session_name: &str, new_session_name: &str) -> Vec<String> {
+    vec![
+        "rename-session".to_string(),
+        "-t".to_string(),
+        old_session_name.to_string(),
+        new_session_name.to_string(),
+    ]
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     后端读到 tmux current window 后，需要映射回前端顶部 app tab 的 sessionId。
 ///
 /// Code Logic（这个函数做什么）:
@@ -517,6 +570,40 @@ fn tmux_target_exists(tmux: &TmuxCommand, target: &str) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     恢复旧版本持久化会话时，应把仍存在的旧 tmux session 尽量迁移成新的可读名称，而不是丢弃上下文重建。
+///
+/// Code Logic（这个函数做什么）:
+///     当前 session 存在、目标 session 不存在时执行 `rename-session`；失败则返回旧名以继续 attach 旧上下文。
+fn migrate_tmux_session_name(
+    tmux: &TmuxCommand,
+    current_session_name: Option<&str>,
+    desired_session_name: &str,
+) -> String {
+    let Some(current_session_name) = current_session_name else {
+        return desired_session_name.to_string();
+    };
+    if current_session_name == desired_session_name {
+        return desired_session_name.to_string();
+    }
+    if !tmux_target_exists(tmux, current_session_name) {
+        return desired_session_name.to_string();
+    }
+    if tmux_target_exists(tmux, desired_session_name) {
+        return desired_session_name.to_string();
+    }
+
+    let args = tmux_rename_session_args(current_session_name, desired_session_name);
+    let args_ref = args.iter().map(String::as_str).collect::<Vec<_>>();
+    match run_tmux_command(tmux, &args_ref) {
+        Ok(_) => desired_session_name.to_string(),
+        Err(error) => {
+            tracing::warn!("迁移工作台 tmux session 名失败，继续使用旧 session: {error}");
+            current_session_name.to_string()
+        }
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -923,6 +1010,7 @@ impl WorkbenchSessionRegistry {
         project: WorkbenchProjectRow,
         cwd: String,
         worktree_id: Option<String>,
+        worktree_name: Option<String>,
         initial_cols: Option<u16>,
         initial_rows: Option<u16>,
     ) -> Result<WorkbenchSessionRow, AppError> {
@@ -932,8 +1020,12 @@ impl WorkbenchSessionRegistry {
         let terminal_command = default_terminal_command();
         let (backend, backend_id, backend_window_id, command) = match available_tmux_command() {
             Some(tmux) => {
-                let worktree_tmux_id =
-                    tmux_worktree_session_name(&project.id, worktree_id.as_deref());
+                let worktree_tmux_id = tmux_worktree_session_name(
+                    &project.name,
+                    &project.id,
+                    worktree_id.as_deref(),
+                    worktree_name.as_deref(),
+                );
                 match create_tmux_window(
                     &tmux,
                     &worktree_tmux_id,
@@ -1000,20 +1092,30 @@ impl WorkbenchSessionRegistry {
     ///     应用重启后，持久化的终端 tab 需要重新绑定运行期 PTY；tmux 后端可继续原 shell 上下文。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     根据持久化 row.backend 恢复 tmux session 或回退普通 PTY，然后用 row.cwd 启动 reader/exit watcher。
+    ///     根据持久化 row.backend 恢复 tmux session，必要时把旧 session 改名为可读名称；失败则回退普通 PTY，然后用 row.cwd 启动 reader/exit watcher。
     pub fn restore(
         &self,
         app: AppHandle,
         project: WorkbenchProjectRow,
         mut row: WorkbenchSessionRow,
+        worktree_name: Option<String>,
     ) -> Result<WorkbenchSessionRow, AppError> {
         if row.cwd.trim().is_empty() {
             row.cwd = project.path.clone();
         }
         if row.backend == TMUX_BACKEND {
             if let Some(tmux) = available_tmux_command() {
-                let session_name =
-                    tmux_worktree_session_name(&project.id, row.worktree_id.as_deref());
+                let desired_session_name = tmux_worktree_session_name(
+                    &project.name,
+                    &project.id,
+                    row.worktree_id.as_deref(),
+                    worktree_name.as_deref(),
+                );
+                let session_name = migrate_tmux_session_name(
+                    &tmux,
+                    row.backend_id.as_deref(),
+                    &desired_session_name,
+                );
                 let terminal_command = default_terminal_command();
                 let target_exists = if tmux_row_requires_window_recreation(&row) {
                     false
@@ -1623,7 +1725,12 @@ mod tests {
             exited_at: None,
             exit_code: None,
             backend: TMUX_BACKEND.to_string(),
-            backend_id: Some(tmux_worktree_session_name(project_id, worktree_id)),
+            backend_id: Some(tmux_worktree_session_name(
+                project_id,
+                project_id,
+                worktree_id,
+                None,
+            )),
             backend_window_id: Some(window_id.to_string()),
             created_at: "2026-06-24T00:00:00Z".to_string(),
             updated_at: "2026-06-24T00:00:00Z".to_string(),
@@ -1785,16 +1892,40 @@ mod tests {
     ///     断言 project + worktree 派生出稳定 session 名，window target 使用 `session:@window` 语法。
     #[test]
     fn tmux_worktree_session_and_window_target_are_stable() {
-        let worktree_session =
-            tmux_worktree_session_name("project-1234-abcd", Some("project-1234-abcd:main"));
+        let worktree_session = tmux_worktree_session_name(
+            "cc-partner",
+            "project-1234-abcd",
+            Some("project-1234-abcd:main"),
+            Some("main"),
+        );
 
         assert_eq!(
             worktree_session,
-            "cc-partner-worktree-project1234abcd-project1234abcdmain"
+            "cc-partner-worktree-cc-partner-main-1234abcdmain"
         );
         assert_eq!(
             tmux_window_target(&worktree_session, "@7"),
-            "cc-partner-worktree-project1234abcd-project1234abcdmain:@7"
+            "cc-partner-worktree-cc-partner-main-1234abcdmain:@7"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户会直接看到 tmux status 左侧的 session 名，内部 worktree id/hash 不应成为主要可读名称。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 session 名优先使用用户可见 worktree 名，并用 worktree id 的短组件保持稳定区分。
+    #[test]
+    fn tmux_worktree_session_prefers_readable_worktree_name() {
+        let worktree_session = tmux_worktree_session_name(
+            "cc-partner",
+            "project-84b44f3d8e25",
+            Some("internal-worktree-84b44f3d8e25"),
+            Some("feature/PandoCanvas"),
+        );
+
+        assert_eq!(
+            worktree_session,
+            "cc-partner-worktree-cc-partner-feature-pandocanvas-84b44f3d8e25"
         );
     }
 
@@ -1805,12 +1936,51 @@ mod tests {
     ///     断言同一 project_id 搭配不同 worktree_id 会生成不同 backend_id。
     #[test]
     fn tmux_worktree_session_differs_between_worktrees() {
-        let main_session = tmux_worktree_session_name("project-1", Some("project-1:main"));
-        let feature_session = tmux_worktree_session_name("project-1", Some("worktree-2"));
+        let main_session = tmux_worktree_session_name(
+            "cc-partner",
+            "project-1",
+            Some("project-1:main"),
+            Some("main"),
+        );
+        let feature_session = tmux_worktree_session_name(
+            "cc-partner",
+            "project-1",
+            Some("worktree-2"),
+            Some("feature/ui"),
+        );
 
         assert_ne!(main_session, feature_session);
-        assert_eq!(main_session, "cc-partner-worktree-project1-project1main");
-        assert_eq!(feature_session, "cc-partner-worktree-project1-worktree2");
+        assert_eq!(
+            main_session,
+            "cc-partner-worktree-cc-partner-main-project1main"
+        );
+        assert_eq!(
+            feature_session,
+            "cc-partner-worktree-cc-partner-feature-ui-worktree2"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     可读 worktree 名可能在清洗后相同，但底层 tmux session 仍必须按真实 worktree 隔离。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造两个显示名清洗后相同、内部 id 不同的 worktree，断言 session 名不会碰撞。
+    #[test]
+    fn tmux_worktree_session_keeps_worktree_isolation_when_names_collide() {
+        let slash_session = tmux_worktree_session_name(
+            "cc-partner",
+            "project-1",
+            Some("worktree-alpha-123456789abc"),
+            Some("feature/ui"),
+        );
+        let dash_session = tmux_worktree_session_name(
+            "cc-partner",
+            "project-1",
+            Some("worktree-beta-abcdef123456"),
+            Some("feature-ui"),
+        );
+
+        assert_ne!(slash_session, dash_session);
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -1897,6 +2067,29 @@ mod tests {
                 "-t",
                 "cc-partner-project-project1234abcd",
                 "#{window_id}",
+            ]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     session 命名规则升级时，仍存在的旧 tmux session 应通过 rename 保留 shell 上下文。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言迁移使用 `rename-session -t <old> <new>` 参数。
+    #[test]
+    fn tmux_rename_session_args_preserve_existing_context() {
+        let args = tmux_rename_session_args(
+            "cc-partner-worktree-old-id",
+            "cc-partner-worktree-readable-name",
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "rename-session",
+                "-t",
+                "cc-partner-worktree-old-id",
+                "cc-partner-worktree-readable-name",
             ]
         );
     }
