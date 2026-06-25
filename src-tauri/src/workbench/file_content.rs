@@ -77,8 +77,10 @@ pub fn read_text_file(path: &Path) -> Result<(String, String), AppError> {
 ///     用户保存文件时，Workbench 必须拒绝覆盖外部已修改内容，并尽量保证写入过程不会留下半截文件。
 ///
 /// Code Logic（这个函数做什么）:
-///     检查内容大小与当前文件 hash；hash 一致时写入同目录唯一临时文件，继承目标权限后再次检查目标 hash，
-///     最后用 rename 替换目标并返回新 hash。该流程是缩小窗口的乐观锁，不是文件系统级强 CAS。
+///     检查内容大小与当前文件 hash；hash 一致时写入同目录唯一临时文件，继承目标文件的 std Permissions
+///     后再次检查目标 hash，最后用 rename 替换目标并返回新 hash。该流程是缩小窗口的乐观锁，不是文件系统级强 CAS；
+///     权限继承仅覆盖 Unix mode bits / Windows readonly 等 `std::fs::Permissions` 能表达的基础语义，不承诺保留 ACL、
+///     xattrs 或 macOS 扩展属性。
 pub fn save_text_file_atomic(
     path: &Path,
     content: &str,
@@ -91,24 +93,24 @@ pub fn save_text_file_atomic(
     let temporary_path = temporary_save_path(path)?;
     let write_result = write_temporary_file(&temporary_path, content);
     if let Err(err) = write_result {
-        let _ = fs::remove_file(&temporary_path);
+        cleanup_temporary_file(&temporary_path);
         return Err(err);
     }
 
     if let Err(err) = inherit_target_permissions(path, &temporary_path) {
-        let _ = fs::remove_file(&temporary_path);
+        cleanup_temporary_file(&temporary_path);
         return Err(err);
     }
 
     run_before_final_hash_check_hook_for_test();
 
     if let Err(err) = ensure_base_hash_matches(path, base_hash) {
-        let _ = fs::remove_file(&temporary_path);
+        cleanup_temporary_file(&temporary_path);
         return Err(err);
     }
 
     if let Err(err) = fs::rename(&temporary_path, path) {
-        let _ = fs::remove_file(&temporary_path);
+        cleanup_temporary_file(&temporary_path);
         return Err(AppError::from(err));
     }
 
@@ -202,14 +204,31 @@ fn ensure_base_hash_matches(path: &Path, base_hash: &str) -> Result<(), AppError
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     原子保存会用新临时文件替换目标文件，必须保留脚本 executable bit 和 readonly 等基础权限语义。
+///     原子保存会用新临时文件替换目标文件，必须尽量保留 std Permissions 能表达的基础权限语义。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取目标文件 metadata.permissions() 并设置到临时文件；失败时返回错误，让调用方删除临时文件并停止保存。
+///     读取目标文件 metadata.permissions() 并设置到临时文件；这会保留 Unix mode bits / Windows readonly 等基础语义，
+///     但不承诺保留 ACL、xattrs 或 macOS 扩展属性。失败时返回错误，让调用方删除临时文件并停止保存。
 fn inherit_target_permissions(target_path: &Path, temporary_path: &Path) -> Result<(), AppError> {
     let permissions = fs::metadata(target_path)?.permissions();
     fs::set_permissions(temporary_path, permissions)?;
     Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     保存失败时应尽最大努力删除同目录临时文件；Windows readonly 临时文件直接 remove 可能失败。
+///
+/// Code Logic（这个函数做什么）:
+///     先读取临时文件权限，若 readonly 则尝试解除 readonly，再执行 remove_file；所有错误都被忽略。
+fn cleanup_temporary_file(path: &Path) {
+    if let Ok(metadata) = fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        if permissions.readonly() {
+            permissions.set_readonly(false);
+            let _ = fs::set_permissions(path, permissions);
+        }
+    }
+    let _ = fs::remove_file(path);
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -275,6 +294,23 @@ mod tests {
             *slot.borrow_mut() = Some(Box::new(hook));
         });
         TestHookGuard
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     冲突保存失败时应清理同目录临时文件，避免项目目录里积累隐藏残留。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     统计目录下符合 `.note.txt.*.tmp` 命名模式的临时保存文件。
+    fn count_note_temp_files(dir: &TempDir) -> usize {
+        fs::read_dir(dir.path())
+            .expect("read temp dir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(".note.txt.") && name.ends_with(".tmp")
+            })
+            .count()
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -414,6 +450,47 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     rename 前发现二次 hash 冲突时，临时文件必须被清理，不能污染用户项目目录。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 hook 制造二次 hash 冲突，断言保存失败后不存在 `.note.txt.*.tmp` 残留。
+    #[test]
+    fn save_text_file_atomic_cleans_temp_file_after_final_hash_conflict() {
+        let dir = temp_dir();
+        let path = dir.path().join("note.txt");
+        fs::write(&path, "old").expect("write old");
+        let base_hash = sha256_file_hex(&path).expect("base hash");
+        let hook_path = path.clone();
+        let _guard = set_before_final_hash_check_hook_for_test(move || {
+            fs::write(&hook_path, "external").expect("external write");
+        });
+
+        let err = save_text_file_atomic(&path, "new", &base_hash)
+            .expect_err("external write before rename rejected");
+        assert!(err.to_string().contains("已被修改") || err.to_string().contains("hash"));
+        assert_eq!(count_note_temp_files(&dir), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Windows 上 readonly 临时文件可能无法直接删除，清理 helper 需要先尽力解除 readonly。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建 readonly 临时文件后调用 cleanup_temporary_file，断言文件最终不存在。
+    #[test]
+    fn cleanup_temporary_file_removes_readonly_temp_file() {
+        let dir = temp_dir();
+        let path = dir.path().join(".note.txt.manual.tmp");
+        fs::write(&path, "temp").expect("write temp");
+        let mut permissions = fs::metadata(&path).expect("temp metadata").permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).expect("set readonly");
+
+        cleanup_temporary_file(&path);
+
+        assert!(!path.exists());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     保存超限内容同样会阻塞 UI 并可能导致大文件误写，必须在落盘前拒绝。
     ///
     /// Code Logic（这个测试做什么）:
@@ -432,13 +509,13 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     保存脚本文件时不能丢 executable bit，否则用户原本可执行的脚本会失效。
+    ///     保存脚本文件时不能改变完整 Unix mode，否则用户原本可执行/私有语义会失效。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     Unix 下把文件权限设为 755，保存后断言可执行位仍存在。
+    ///     Unix 下把文件权限设为 755，保存后断言低 9 位完整 mode 仍为 755。
     #[cfg(unix)]
     #[test]
-    fn save_text_file_atomic_preserves_unix_executable_bits() {
+    fn save_text_file_atomic_preserves_unix_executable_mode() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = temp_dir();
@@ -455,7 +532,34 @@ mod tests {
             .expect("script metadata")
             .permissions()
             .mode();
-        assert_eq!(mode & 0o111, 0o111);
+        assert_eq!(mode & 0o777, 0o755);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     私密配置文件保存后不能被 umask 或临时文件默认权限放宽，否则可能泄露敏感配置。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Unix 下把文件权限设为 600，保存后断言低 9 位完整 mode 仍为 600。
+    #[cfg(unix)]
+    #[test]
+    fn save_text_file_atomic_preserves_unix_private_config_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir();
+        let path = dir.path().join("secret.env");
+        fs::write(&path, "TOKEN=old\n").expect("write secret");
+        let mut permissions = fs::metadata(&path).expect("secret metadata").permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&path, permissions).expect("set private mode");
+        let base_hash = sha256_file_hex(&path).expect("base hash");
+
+        save_text_file_atomic(&path, "TOKEN=new\n", &base_hash).expect("save secret");
+
+        let mode = fs::metadata(&path)
+            .expect("secret metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     /// Business Logic（为什么需要这个测试）:
