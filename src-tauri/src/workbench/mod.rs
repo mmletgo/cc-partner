@@ -9,8 +9,10 @@
 
 pub mod dependencies;
 pub mod file_content;
+pub mod file_preview;
 pub mod fs;
 pub mod git;
 pub mod models;
 pub mod projects;
 pub mod sessions;
+pub mod sqlite_preview;
