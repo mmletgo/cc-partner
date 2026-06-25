@@ -516,6 +516,37 @@ async fn resolve_workbench_file_path(
     .await
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     保存文件时不能信任前端声明的文件类型，必须以后端检测出的真实文件名为准，避免只读文件被伪装成文本覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     按文件名检测类型；只允许 Markdown/Code/Text/Json/Toml，且 JSON/TOML 会先解析校验但不改变用户内容。
+fn validate_save_file_type(
+    metadata_name: &str,
+    content: &str,
+) -> Result<WorkbenchDetectedFileType, AppError> {
+    let detected_type = file_preview::detect_file_type(metadata_name);
+    match detected_type {
+        WorkbenchDetectedFileType::Json => {
+            file_content::format_structured_content("json", content)?;
+        }
+        WorkbenchDetectedFileType::Toml => {
+            file_content::format_structured_content("toml", content)?;
+        }
+        WorkbenchDetectedFileType::Markdown
+        | WorkbenchDetectedFileType::Code
+        | WorkbenchDetectedFileType::Text => {}
+        WorkbenchDetectedFileType::Image
+        | WorkbenchDetectedFileType::Csv
+        | WorkbenchDetectedFileType::Sqlite
+        | WorkbenchDetectedFileType::Binary
+        | WorkbenchDetectedFileType::Unsupported => {
+            return Err(AppError::generic("此文件类型不支持文本保存"));
+        }
+    }
+    Ok(detected_type)
+}
+
 /// 列出工作台最近项目。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -1708,8 +1739,8 @@ pub async fn open_workbench_file(
 ///     文件工作区编辑器需要安全保存 Markdown、代码、文本和结构化配置，同时防止覆盖外部修改。
 ///
 /// Code Logic（这个函数做什么）:
-///     只允许文本类检测类型；JSON/TOML 先做语义校验但不强制格式化用户内容；
-///     随后解析安全文件路径，调用原子保存 helper，并返回最新 metadata 与 hash 基线。
+///     先解析安全文件路径并以后端 metadata.name 重新检测真实类型；JSON/TOML 做语义校验但不强制格式化；
+///     随后调用原子保存 helper，并返回最新 metadata 与 hash 基线。
 #[tauri::command]
 pub async fn save_workbench_text_file(
     state: State<'_, AppState>,
@@ -1718,33 +1749,14 @@ pub async fn save_workbench_text_file(
     path: String,
     content: String,
     base_hash: String,
-    detected_type: WorkbenchDetectedFileType,
 ) -> Result<WorkbenchSaveTextResultDto, AppError> {
-    match detected_type {
-        WorkbenchDetectedFileType::Json => {
-            file_content::format_structured_content("json", &content)?;
-        }
-        WorkbenchDetectedFileType::Toml => {
-            file_content::format_structured_content("toml", &content)?;
-        }
-        WorkbenchDetectedFileType::Markdown
-        | WorkbenchDetectedFileType::Code
-        | WorkbenchDetectedFileType::Text => {}
-        WorkbenchDetectedFileType::Image
-        | WorkbenchDetectedFileType::Csv
-        | WorkbenchDetectedFileType::Sqlite
-        | WorkbenchDetectedFileType::Binary
-        | WorkbenchDetectedFileType::Unsupported => {
-            return Err(AppError::generic("此文件类型不支持文本保存"));
-        }
-    }
-
     let project = get_project(&state, &project_id).await?;
     let worktree = resolve_worktree(&state, &project, worktree_id.as_deref()).await?;
     let root = PathBuf::from(worktree.path);
     let save_root = root.clone();
     let save_path = path.clone();
-    let (_, file_path) = resolve_workbench_file_path(root, path).await?;
+    let (opened_metadata, file_path) = resolve_workbench_file_path(root, path).await?;
+    validate_save_file_type(&opened_metadata.name, &content)?;
     let base_hash = run_blocking_fs(move || {
         file_content::save_text_file_atomic(&file_path, &content, &base_hash)
     })
@@ -2161,6 +2173,44 @@ pub async fn delete_workbench_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     保存命令必须按后端真实文件名判断能力，防止调用者把只读 CSV 伪装成 text 后覆盖。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     直接校验保存类型 helper，断言 data.csv 被识别为 Csv 并拒绝文本保存。
+    #[test]
+    fn validate_save_file_type_rejects_csv_even_if_caller_wanted_text() {
+        let error =
+            validate_save_file_type("data.csv", "a,b\n1,2\n").expect_err("csv should be readonly");
+
+        assert!(error.to_string().contains("不支持文本保存"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     JSON 配置保存前必须由后端做语义校验，避免写入无效配置导致项目工具链损坏。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     以 .json 文件名触发结构化校验，断言非法 JSON 被拒绝。
+    #[test]
+    fn validate_save_file_type_rejects_invalid_json() {
+        let error = validate_save_file_type("config.json", "{bad json")
+            .expect_err("invalid json should be rejected");
+
+        assert!(error.to_string().contains("JSON 格式无效"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Markdown 是 Workbench 文件编辑器的可保存文本类型，应继续允许正常保存。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     以 .md 文件名调用保存类型校验，断言返回 Markdown 且无错误。
+    #[test]
+    fn validate_save_file_type_allows_markdown() {
+        let detected_type = validate_save_file_type("note.md", "# Note\n").expect("markdown ok");
+
+        assert_eq!(detected_type, WorkbenchDetectedFileType::Markdown);
+    }
 
     /// Business Logic（为什么需要这个测试）:
     ///     Workbench AI commit 必须让 Claude 基于 staged diff 生成提交信息，而不是泛泛猜测。

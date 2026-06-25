@@ -12,7 +12,6 @@
 
 import { invoke } from './client';
 import type {
-  WorkbenchDetectedFileType,
   WorkbenchFileNode,
   WorkbenchFormatResult,
   WorkbenchGitCommit,
@@ -193,13 +192,12 @@ export const workbenchApi = {
         path,
       }),
 
-    /** 保存可编辑文本文件；baseHash 用于后端乐观锁校验。 */
+    /** 保存可编辑文本文件；后端按真实文件名检测类型，baseHash 用于乐观锁校验。 */
     saveText: (
       projectId: string,
       path: string,
       content: string,
       baseHash: string,
-      detectedType: WorkbenchDetectedFileType,
       worktreeId?: string | null,
     ) =>
       invoke<WorkbenchSaveTextResult>('save_workbench_text_file', {
@@ -208,7 +206,6 @@ export const workbenchApi = {
         path,
         content,
         baseHash,
-        detectedType,
       }),
 
     /** 格式化 JSON/TOML 内容，不直接保存文件。 */
