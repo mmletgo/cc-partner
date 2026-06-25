@@ -437,10 +437,10 @@ pub async fn commit_workbench_worktree(
 /// 推送当前 worktree 分支。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户提交后需要把功能分支推送到 origin，以便备份或协作。
+///     用户提交后需要把功能分支推送到 Git remote，以便备份或协作。
 ///
 /// Code Logic（这个函数做什么）:
-///     获取 row.branch 或当前 Git 分支，执行 `git push -u origin <branch>`。
+///     获取 row.branch 或当前 Git 分支，委托 workbench_git 按 upstream/origin/唯一 remote 选择推送目标。
 #[tauri::command]
 pub async fn push_workbench_worktree(
     state: State<'_, AppState>,

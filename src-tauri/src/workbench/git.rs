@@ -26,6 +26,19 @@ pub struct ParsedWorktree {
     pub is_main: bool,
 }
 
+/// Workbench push 操作的远端选择结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     用户仓库可能已经设置 upstream，也可能只有非 origin 的单个 remote。
+///
+/// Code Logic（这个枚举做什么）:
+///     区分复用现有 upstream 的普通 `git push`，以及首次推送时需要 `-u <remote> <branch>`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PushTarget {
+    Upstream,
+    Remote(String),
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     Git worktree 管理命令都需要执行系统 git，并在失败时返回可读错误。
 ///
@@ -136,13 +149,83 @@ pub fn commit_all(path: &Path, message: &str) -> Result<bool, AppError> {
 ///     用户完成 worktree commit 后，需要把对应分支推送到远端以便协作或备份。
 ///
 /// Code Logic（这个函数做什么）:
-///     执行 `git push -u origin <branch>`。
+///     已有 upstream 时执行普通 `git push`；否则选择 origin 或唯一 remote 执行 `git push -u <remote> <branch>`。
 pub fn push_branch(path: &Path, branch: &str) -> Result<(), AppError> {
     if branch.trim().is_empty() {
         return Err(AppError::generic("当前 worktree 没有可推送的分支"));
     }
-    run_git(path, &["push", "-u", "origin", branch])?;
+    match resolve_push_target(path)? {
+        PushTarget::Upstream => {
+            run_git(path, &["push"])?;
+        }
+        PushTarget::Remote(remote) => {
+            run_git(path, &["push", "-u", &remote, branch])?;
+        }
+    }
     Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Push 按钮应尊重用户仓库已有远端配置，不能假设所有项目都有 origin。
+///
+/// Code Logic（这个函数做什么）:
+///     若当前分支已有 upstream，返回 Upstream；否则从 `git remote` 中选择 origin 或唯一 remote。
+fn resolve_push_target(path: &Path) -> Result<PushTarget, AppError> {
+    if has_upstream(path) {
+        return Ok(PushTarget::Upstream);
+    }
+
+    let remotes = list_remotes(path)?;
+    if remotes.is_empty() {
+        return Err(AppError::generic(
+            "当前 Git 仓库没有配置 Git remote，无法推送。请先在项目目录执行 `git remote add origin <url>` 后重试。",
+        ));
+    }
+    if remotes.iter().any(|remote| remote == "origin") {
+        return Ok(PushTarget::Remote("origin".to_string()));
+    }
+    if remotes.len() == 1 {
+        return Ok(PushTarget::Remote(remotes[0].clone()));
+    }
+
+    Err(AppError::generic(format!(
+        "当前 Git 仓库有多个 Git remote（{}），但当前分支没有 upstream。请先在终端设置 upstream，或添加/使用 origin 后重试。",
+        remotes.join(", ")
+    )))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     已经跟踪远端分支的 worktree 应复用用户现有 upstream 配置。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 `git rev-parse --abbrev-ref --symbolic-full-name @{u}`，成功且输出非空即视为存在 upstream。
+fn has_upstream(path: &Path) -> bool {
+    run_git(
+        path,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{u}",
+        ],
+    )
+    .map(|output| !output.trim().is_empty())
+    .unwrap_or(false)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     首次 push 时需要知道仓库配置了哪些 remote，以选择安全默认值或给出可操作错误。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 `git remote` 并返回去空白后的 remote 名称列表。
+fn list_remotes(path: &Path) -> Result<Vec<String>, AppError> {
+    let output = run_git(path, &["remote"])?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|remote| !remote.is_empty())
+        .map(ToString::to_string)
+        .collect())
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -318,6 +401,9 @@ fn status_code_has_conflict(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use uuid::Uuid;
 
     /// Business Logic（为什么需要这个测试）:
     ///     Git worktree 管理层需要识别主工作区和链接 worktree，供前端渲染 worktree strip。
@@ -380,5 +466,96 @@ UU web/src/App.tsx
         assert_eq!(branch_slug("feat/worktree ui!!"), "feat-worktree-ui");
         assert_eq!(branch_slug("  hotfix  "), "hotfix");
         assert_eq!(branch_slug("///"), "worktree");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户项目可能只配置了非 origin 的单个远端，Workbench push 不应硬编码 origin。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建真实 Git 仓库和 bare remote，只添加 backup remote，断言 push_branch 可以推送当前分支。
+    #[test]
+    fn push_branch_uses_single_configured_remote_when_origin_missing() {
+        let root = temp_git_dir("workbench-push-single-remote");
+        let repo = root.join("repo");
+        let remote = root.join("backup.git");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "feature/worktree-push"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "hello\n").expect("write readme");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+        git_test_command(&root, &["init", "--bare", remote.to_string_lossy().as_ref()]);
+        git_test_command(
+            &repo,
+            &["remote", "add", "backup", remote.to_string_lossy().as_ref()],
+        );
+
+        push_branch(&repo, "feature/worktree-push").expect("push with single non-origin remote");
+        git_test_command(
+            &remote,
+            &["rev-parse", "--verify", "refs/heads/feature/worktree-push"],
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户在没有配置任何远端的本地项目里点 Push 时，需要看到可操作提示，而不是 Git fatal。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建无 remote 的真实 Git 仓库，断言 push_branch 返回包含配置 remote 引导的业务错误。
+    #[test]
+    fn push_branch_reports_missing_remote_before_git_fatal() {
+        let root = temp_git_dir("workbench-push-no-remote");
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "feature/local-only"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "hello\n").expect("write readme");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+
+        let err = push_branch(&repo, "feature/local-only").expect_err("missing remote should fail");
+        let message = err.to_string();
+        assert!(message.contains("没有配置 Git remote"));
+        assert!(message.contains("git remote add origin <url>"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Git 集成测试需要隔离目录，避免污染用户项目或复用历史状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在系统临时目录下生成带 UUID 的测试目录路径。
+    fn temp_git_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试需要反复执行 Git CLI，并在失败时输出完整上下文便于定位。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在指定 cwd 下执行 git 命令，非零退出时 panic 并打印 stdout/stderr。
+    fn git_test_command(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        if output.status.success() {
+            return String::from_utf8_lossy(&output.stdout).to_string();
+        }
+        panic!(
+            "git {:?} failed in {}:\nstdout:\n{}\nstderr:\n{}",
+            args,
+            cwd.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
