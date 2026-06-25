@@ -364,7 +364,7 @@ fn is_empty_csv_row(row: &[String]) -> bool {
 ///     CSV 第一行只有在明显像列名且下一行明显像数据时才能作为 header，否则应保留为数据行。
 ///
 /// Code Logic（这个函数做什么）:
-///     要求首行每列都是 identifier-ish 列名，并且第二行至少一个字段呈现数字、布尔、日期时间或自然文本特征。
+///     要求首行每列都是 identifier-ish 列名，并且第二行至少一个字段呈现数字、布尔或日期时间特征。
 fn is_obvious_header_row(row: &[String], next_row: Option<&Vec<String>>) -> bool {
     !row.is_empty()
         && row.iter().all(|value| is_header_name_cell(value))
@@ -398,14 +398,11 @@ fn is_header_name_cell(value: &str) -> bool {
 ///     CSV header 判断需要第二行提供数据证据，避免 `Ada,Lovelace` 被误删为列名。
 ///
 /// Code Logic（这个函数做什么）:
-///     识别数字、布尔、日期时间，以及包含空白的自然文本作为明显数据单元格。
+///     只识别数字、布尔和日期时间这类结构化信号作为明显数据单元格。
 fn is_obvious_data_cell(value: &str) -> bool {
     let trimmed = value.trim();
     !trimmed.is_empty()
-        && (is_number_cell(trimmed)
-            || is_boolean_cell(trimmed)
-            || is_date_or_time_cell(trimmed)
-            || is_natural_text_cell(trimmed))
+        && (is_number_cell(trimmed) || is_boolean_cell(trimmed) || is_date_or_time_cell(trimmed))
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -436,15 +433,6 @@ fn is_date_or_time_cell(value: &str) -> bool {
         && value
             .chars()
             .any(|character| matches!(character, '-' | '/' | ':'))
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     第二行出现 `Ada Lovelace` 这类带空格自然文本时，首行更可能是真实 header。
-///
-/// Code Logic（这个函数做什么）:
-///     判断字段是否同时包含字母和空白字符。
-fn is_natural_text_cell(value: &str) -> bool {
-    value.chars().any(char::is_alphabetic) && value.chars().any(char::is_whitespace)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -678,6 +666,30 @@ mod tests {
             vec![
                 vec!["Ada".to_string(), "Lovelace".to_string()],
                 vec!["Grace".to_string(), "Hopper".to_string()],
+            ]
+        );
+        assert!(!preview.truncated);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     无 header 的姓名/城市 CSV 常含空格自然文本，不能因此把第一行误删成 header。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入首列带空格的人名 CSV，断言 fallback columns 且 rows 保留两行原始数据。
+    #[test]
+    fn preview_csv_file_keeps_natural_text_first_row_when_header_is_ambiguous() {
+        let dir = temp_dir();
+        let path = dir.path().join("natural-text.csv");
+        fs::write(&path, "Ada Lovelace,London\nGrace Hopper,New York\n").expect("write csv");
+
+        let preview = preview_csv_file(&path, 10).expect("preview csv");
+
+        assert_eq!(preview.columns, vec!["column_1", "column_2"]);
+        assert_eq!(
+            preview.rows,
+            vec![
+                vec!["Ada Lovelace".to_string(), "London".to_string()],
+                vec!["Grace Hopper".to_string(), "New York".to_string()],
             ]
         );
         assert!(!preview.truncated);
