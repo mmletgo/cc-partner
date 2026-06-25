@@ -8,6 +8,7 @@
 //!     导出本机项目、文件系统、PTY sessions 与 DTO 模块。
 
 pub mod dependencies;
+pub mod file_content;
 pub mod fs;
 pub mod git;
 pub mod models;

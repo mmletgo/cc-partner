@@ -335,3 +335,141 @@ pub struct WorkbenchPathInfo {
     pub size: Option<u64>,
     pub modified_at: Option<String>,
 }
+
+/// Workbench 文件检测类型。
+///
+/// Business Logic（为什么需要这个类型）:
+///     前端文件工作区需要知道一个文件应由图片预览、Markdown 编辑器、代码编辑器、
+///     CSV/SQLite 只读预览还是普通文本编辑器打开。
+///
+/// Code Logic（这个类型做什么）:
+///     用 serde lowercase 序列化为前端 helper 使用的稳定枚举字符串。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkbenchDetectedFileType {
+    Image,
+    Markdown,
+    Code,
+    Json,
+    Toml,
+    Csv,
+    Sqlite,
+    Text,
+    Binary,
+    Unsupported,
+}
+
+/// Workbench 文件能力 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     文件工作区工具栏需要根据文件类型隐藏不可用操作，避免用户对只读预览执行保存或格式化。
+///
+/// Code Logic（这个结构体做什么）:
+///     以 camelCase 字段告诉前端文件是否可预览、可编辑、可格式化，以及保存前是否必须校验。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchFileCapabilities {
+    pub can_preview: bool,
+    pub can_edit: bool,
+    pub can_format: bool,
+    pub must_validate_before_save: bool,
+}
+
+/// Workbench 文本内容 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     可编辑文件打开后必须携带内容和保存基线，防止外部编辑器修改被 Workbench 静默覆盖。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 UTF-8 文本、打开时的 SHA256 hash 和可选修改时间，字段序列化为 camelCase。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchTextContent {
+    pub content: String,
+    pub base_hash: String,
+    pub base_modified_at: Option<String>,
+}
+
+/// Workbench CSV 预览 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     CSV 第一版只读展示表格，用户需要看到表头、预览行以及是否被行数限制截断。
+///
+/// Code Logic（这个结构体做什么）:
+///     columns 表示表头或 fallback 列名，rows 保存 JSON-safe 字符串矩阵，truncated 表示预览未覆盖全量文件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchCsvPreview {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub truncated: bool,
+}
+
+/// Workbench 图片预览 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     图片文件需要在 Workbench 内只读查看，不能按文本读取导致乱码或内存浪费。
+///
+/// Code Logic（这个结构体做什么）:
+///     data_url 供前端 img 直接渲染，mime 标识图片类型，width/height 在可解码时返回。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchImagePreview {
+    pub data_url: String,
+    pub mime: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+/// Workbench SQLite 预览 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     SQLite 第一版只允许只读浏览表结构和少量行，避免通过文件工作区误写数据库。
+///
+/// Code Logic（这个结构体做什么）:
+///     tables 保存用户表名，selected_table/columns/rows 表示当前表预览，truncated 表示只返回前 N 行。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchSqlitePreview {
+    pub tables: Vec<String>,
+    pub selected_table: Option<String>,
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub truncated: bool,
+}
+
+/// Workbench 文件打开响应 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     前端打开文件时需要一次拿到元信息、检测类型、能力和具体内容或预览数据。
+///
+/// Code Logic（这个结构体做什么）:
+///     用互斥 Option 字段承载文本、图片、CSV、SQLite 预览；不支持或超限时通过 notice 告知原因。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchOpenFileDto {
+    pub metadata: WorkbenchPathInfo,
+    pub detected_type: WorkbenchDetectedFileType,
+    pub capabilities: WorkbenchFileCapabilities,
+    pub text: Option<WorkbenchTextContent>,
+    pub image: Option<WorkbenchImagePreview>,
+    pub csv: Option<WorkbenchCsvPreview>,
+    pub sqlite: Option<WorkbenchSqlitePreview>,
+    pub truncated: bool,
+    pub notice: Option<String>,
+}
+
+/// Workbench 文本保存响应 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     保存成功后前端需要刷新文件 metadata，并更新下一次保存使用的 hash 基线。
+///
+/// Code Logic（这个结构体做什么）:
+///     返回最新路径信息、保存后 SHA256 hash 和可选修改时间，字段序列化为 camelCase。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchSaveTextResultDto {
+    pub metadata: WorkbenchPathInfo,
+    pub base_hash: String,
+    pub base_modified_at: Option<String>,
+}
