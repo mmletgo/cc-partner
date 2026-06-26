@@ -51,6 +51,14 @@ const HTML_TAG_PATTERN = /<([a-zA-Z][\w:-]*)(\s[^<>]*?)?>/g;
 const STYLE_BLOCK_PATTERN = /<style\b([^>]*)>([\s\S]*?)<\/style>/gi;
 /** CSS url(...) 匹配，支持单双引号和无引号 URL。 */
 const CSS_URL_PATTERN = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^'")]*?))\s*\)/gi;
+/** Markdown inline image 匹配；覆盖 `![alt](url "title")` 的常见写法。 */
+const MARKDOWN_INLINE_IMAGE_PATTERN =
+  /!\[([^\]\n]*)\]\(\s*(<([^>\n]+)>|([^)\s]+))(?:\s+((?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\))))?\s*\)/g;
+/** Markdown reference image 使用匹配；用于收集哪些 label 是图片引用而不是普通链接。 */
+const MARKDOWN_REFERENCE_IMAGE_USE_PATTERN = /!\[([^\]\n]*)\]\[([^\]\n]*)\]/g;
+/** Markdown reference definition 匹配；只重写被图片引用使用过的定义。 */
+const MARKDOWN_REFERENCE_DEFINITION_PATTERN =
+  /^([ \t]{0,3})\[([^\]\n]+)\]:[ \t]*(<([^>\n]+)>|(\S+))(?:[ \t]+((?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\))))?[ \t]*$/gm;
 /** srcset 候选项内部 URL 与 descriptor 的分隔符。 */
 const SRCSET_SEPARATOR_PATTERN = /\s+/;
 
@@ -162,6 +170,104 @@ export async function rewriteHtmlPreviewAssets(
     }
     return rewrittenTag;
   });
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Markdown 预览中的图片同样需要加载项目内相对资源，但不能让预览层把外链或根外文件带入渲染。
+ *
+ * Code Logic（这个函数做什么）:
+ *   重写 inline image 和被图片引用使用过的 reference definition；普通链接保持原样，不安全或读取失败的图片 URL 置空。
+ */
+export async function rewriteMarkdownPreviewAssets(
+  markdown: string,
+  options: RewriteHtmlPreviewAssetsOptions,
+): Promise<string> {
+  const context: HtmlRewriteContext = {
+    documentPath: options.documentPath,
+    loadAsset: options.loadAsset,
+  };
+  const imageReferenceLabels = collectMarkdownImageReferenceLabels(markdown);
+  const markdownWithInlineImages = await replaceAsync(
+    markdown,
+    MARKDOWN_INLINE_IMAGE_PATTERN,
+    async (match) => {
+      const alt = match[1] ?? '';
+      const rawUrl = match[3] ?? match[4] ?? '';
+      const title = match[5] ? ` ${match[5]}` : '';
+      const rewrittenUrl = await rewriteMarkdownImageUrl(rawUrl, context);
+      return `![${alt}](${rewrittenUrl}${title})`;
+    },
+  );
+
+  return replaceAsync(
+    markdownWithInlineImages,
+    MARKDOWN_REFERENCE_DEFINITION_PATTERN,
+    async (match) => {
+      const indent = match[1] ?? '';
+      const label = match[2] ?? '';
+      const rawUrl = match[4] ?? match[5] ?? '';
+      const title = match[6] ? ` ${match[6]}` : '';
+
+      if (!imageReferenceLabels.has(normalizeMarkdownReferenceLabel(label))) {
+        return match[0];
+      }
+
+      const rewrittenUrl = await rewriteMarkdownImageUrl(rawUrl, context);
+      return `${indent}[${label}]: ${rewrittenUrl}${title}`;
+    },
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Markdown reference definition 可能也服务普通链接，只有图片引用用到的 label 才能按图片资源策略处理。
+ *
+ * Code Logic（这个函数做什么）:
+ *   扫描 `![alt][label]` 形式并规范化 label；空 label 按 Markdown 约定回退 alt 文本。
+ */
+function collectMarkdownImageReferenceLabels(markdown: string): Set<string> {
+  const labels = new Set<string>();
+  let match: RegExpExecArray | null;
+  const regex = new RegExp(MARKDOWN_REFERENCE_IMAGE_USE_PATTERN.source, 'g');
+
+  while ((match = regex.exec(markdown)) !== null) {
+    const alt = match[1] ?? '';
+    const label = match[2] ?? '';
+    labels.add(normalizeMarkdownReferenceLabel(label || alt));
+  }
+
+  return labels;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Markdown reference label 忽略大小写并折叠空白，预览资源重写需要和 Markdown 解析语义一致。
+ *
+ * Code Logic（这个函数做什么）:
+ *   trim 后把连续空白折叠为单空格并转小写，用作 Set key。
+ */
+function normalizeMarkdownReferenceLabel(label: string): string {
+  return label.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Markdown 图片 URL 是预览资源入口，必须复用 HTML 预览同一套项目内相对路径策略。
+ *
+ * Code Logic（这个函数做什么）:
+ *   安全 URL 通过 loader 转 data URL；外链、绝对路径、data/blob 或读取失败时返回空字符串。
+ */
+async function rewriteMarkdownImageUrl(
+  rawUrl: string,
+  context: HtmlRewriteContext,
+): Promise<string> {
+  if (!isPreviewAssetUrlEligible(rawUrl)) {
+    return '';
+  }
+
+  const asset = await context.loadAsset(context.documentPath, rawUrl);
+  return asset?.dataUrl ?? '';
 }
 
 /**

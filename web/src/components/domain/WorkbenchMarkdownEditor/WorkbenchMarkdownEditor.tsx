@@ -13,6 +13,7 @@
  */
 
 import type { Editor } from '@tiptap/core';
+import { Image } from '@tiptap/extension-image';
 import { Markdown } from '@tiptap/markdown';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
@@ -20,20 +21,52 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { WorkbenchCodeEditor } from '../WorkbenchCodeEditor';
+import { isPreviewAssetUrlEligible } from '../WorkbenchHtmlPreview/htmlAssets';
+import type { WorkbenchHtmlAssetLoader } from '../WorkbenchHtmlPreview/htmlAssets';
 import styles from './WorkbenchMarkdownEditor.module.css';
 
 export type WorkbenchMarkdownMode = 'wysiwyg' | 'source' | 'split';
 
 export interface WorkbenchMarkdownEditorProps {
   value: string;
+  documentPath?: string;
   mode: WorkbenchMarkdownMode;
   /** 只读态：保留浏览和模式切换，但禁止修改 Markdown 内容 */
   readOnly?: boolean;
+  loadAsset?: WorkbenchHtmlAssetLoader;
   onModeChange: (mode: WorkbenchMarkdownMode) => void;
   onChange: (value: string) => void;
 }
 
-const MARKDOWN_EDITOR_EXTENSIONS = [StarterKit, Markdown];
+/**
+ * Workbench Markdown 图片节点。
+ *
+ * Business Logic（为什么需要这个扩展）:
+ *   Markdown 预览不能让浏览器先按原始相对路径或外链发起请求，资源必须经 Workbench 后端安全内联。
+ *
+ * Code Logic（这个扩展做什么）:
+ *   复用 Tiptap Image 的 Markdown parse/render 能力，但渲染 DOM 时把 src 置空，并把原始 src 放到 data 属性等待 effect 重写。
+ */
+const WorkbenchMarkdownImage = Image.extend({
+  renderHTML({ HTMLAttributes }) {
+    const { src, ...restAttributes } = HTMLAttributes as {
+      src?: unknown;
+      [key: string]: unknown;
+    };
+    const originalSrc = typeof src === 'string' ? src : '';
+
+    return [
+      'img',
+      {
+        ...restAttributes,
+        src: '',
+        'data-workbench-original-src': originalSrc,
+      },
+    ];
+  },
+});
+
+const MARKDOWN_EDITOR_EXTENSIONS = [StarterKit, WorkbenchMarkdownImage, Markdown];
 
 /**
  * 尝试把 Markdown 写入 Tiptap 编辑器
@@ -71,13 +104,16 @@ function trySetEditorMarkdown(editor: Editor, markdown: string): boolean {
  */
 export function WorkbenchMarkdownEditor({
   value,
+  documentPath,
   mode,
   readOnly = false,
+  loadAsset,
   onModeChange,
   onChange,
 }: WorkbenchMarkdownEditorProps): ReactElement {
   const { t } = useTranslation(['workbench']);
   const onChangeRef = useRef(onChange);
+  const wysiwygPaneRef = useRef<HTMLDivElement | null>(null);
   const [sourceValue, setSourceValue] = useState(value);
   const [syncError, setSyncError] = useState(false);
 
@@ -108,6 +144,48 @@ export function WorkbenchMarkdownEditor({
   useEffect(() => {
     editor?.setEditable(!readOnly);
   }, [editor, readOnly]);
+
+  /**
+   * Business Logic（为什么需要这个副作用）:
+   *   Markdown WYSIWYG 预览需要展示项目内相对图片，但不能把 data URL 写回编辑器文档或源文件。
+   *
+   * Code Logic（这个副作用做什么）:
+   *   在 Tiptap 渲染 DOM 后扫描 img[src]，把项目内相对 src 替换为后端 data URL；不安全或失败资源清空 src。
+   */
+  useEffect(() => {
+    const container = wysiwygPaneRef.current;
+    if (!container || !documentPath || !loadAsset || (mode !== 'wysiwyg' && mode !== 'split')) {
+      return;
+    }
+
+    let cancelled = false;
+    const images = Array.from(container.querySelectorAll<HTMLImageElement>('img[src]'));
+
+    for (const image of images) {
+      const originalSrc = image.getAttribute('data-workbench-original-src') ?? image.getAttribute('src') ?? '';
+      image.setAttribute('data-workbench-original-src', originalSrc);
+
+      if (!isPreviewAssetUrlEligible(originalSrc)) {
+        image.setAttribute('src', '');
+        continue;
+      }
+
+      void loadAsset(documentPath, originalSrc)
+        .then((asset) => {
+          if (cancelled) return;
+          image.setAttribute('src', asset?.dataUrl ?? '');
+        })
+        .catch(() => {
+          if (!cancelled) {
+            image.setAttribute('src', '');
+          }
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [documentPath, editor, loadAsset, mode, sourceValue]);
 
   useEffect(() => {
     let nextSourceValue: string | undefined;
@@ -213,7 +291,7 @@ export function WorkbenchMarkdownEditor({
 
         <div className={styles.markdownBody} data-mode={mode}>
           {showWysiwygPane ? (
-            <div className={styles.wysiwygPane}>
+            <div ref={wysiwygPaneRef} className={styles.wysiwygPane}>
               <EditorContent editor={editor} className={styles.editorContent} />
             </div>
           ) : null}

@@ -80,6 +80,10 @@ async function main(): Promise<void> {
     new URL('../../components/domain/WorkbenchHtmlPreview/WorkbenchHtmlPreview.tsx', import.meta.url),
     'utf8',
   );
+  const markdownEditorSource = readFileSync(
+    new URL('../../components/domain/WorkbenchMarkdownEditor/WorkbenchMarkdownEditor.tsx', import.meta.url),
+    'utf8',
+  );
   const workspaceNavSource = readFileSync(
     new URL('../../components/layout/WorkbenchWorkspaceNav/WorkbenchWorkspaceNav.tsx', import.meta.url),
     'utf8',
@@ -185,6 +189,21 @@ async function main(): Promise<void> {
     fileWorkspaceSource,
     'loadAsset={loadHtmlAsset}',
     'file workspace passes HTML asset loader into preview component',
+  );
+  assertContains(
+    fileWorkspaceSource,
+    'documentPath={activeTab.path}\n            mode={coerceMarkdownMode(activeTab.mode)}',
+    'file workspace passes shared asset loader into Markdown editor',
+  );
+  assertContains(
+    markdownEditorSource,
+    "from '@tiptap/extension-image'",
+    'Markdown editor registers Tiptap image extension',
+  );
+  assertContains(
+    markdownEditorSource,
+    "src: ''",
+    'Markdown editor prevents raw image src loading before asset rewrite',
   );
   assertNotContains(
     fileWorkspaceSource,

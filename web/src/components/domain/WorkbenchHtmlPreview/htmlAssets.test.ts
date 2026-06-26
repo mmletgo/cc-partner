@@ -2,6 +2,7 @@ import {
   isPreviewAssetUrlEligible,
   rewriteCssAssetUrls,
   rewriteHtmlPreviewAssets,
+  rewriteMarkdownPreviewAssets,
 } from './htmlAssets';
 // @ts-expect-error - 本仓库 tsconfig 未在 compilerOptions.types 纳入 node,node:process 类型缺失,运行时 tsx 正常
 import { exit } from 'node:process';
@@ -171,6 +172,63 @@ async function testNonResourceLinkIsPreserved(): Promise<void> {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   Markdown 预览也需要展示项目内相对图片，但不能把源 Markdown 改写为 data URL 后保存回文件。
+ *
+ * Code Logic（这个函数做什么）:
+ *   模拟 inline/reference 图片资源，断言只允许项目内相对图片被替换，普通链接保持源文本语义且外链图片不继续加载。
+ */
+async function testMarkdownImageAssetRewrite(): Promise<void> {
+  const loadAsset = createAssetLoader({
+    'docs/readme.md\0../assets/logo.png': {
+      path: 'assets/logo.png',
+      mime: 'image/png',
+      size: 4,
+      dataUrl: 'data:image/png;base64,bG9nbw==',
+      text: null,
+    },
+    'docs/readme.md\0./images/chart.svg': {
+      path: 'docs/images/chart.svg',
+      mime: 'image/svg+xml',
+      size: 5,
+      dataUrl: 'data:image/svg+xml;base64,Y2hhcnQ=',
+      text: '<svg />',
+    },
+  });
+  const markdown = [
+    '![Logo](../assets/logo.png "Project logo")',
+    '[normal link](../assets/logo.png)',
+    '![Remote](https://example.com/remote.png)',
+    '![Chart][chart]',
+    '',
+    '[chart]: ./images/chart.svg "Chart"',
+  ].join('\n');
+
+  const rewritten = await rewriteMarkdownPreviewAssets(markdown, {
+    documentPath: 'docs/readme.md',
+    loadAsset,
+  });
+
+  assert(
+    rewritten.includes('![Logo](data:image/png;base64,bG9nbw== "Project logo")'),
+    'inline Markdown image src is rewritten to data URL',
+  );
+  assert(
+    rewritten.includes('[normal link](../assets/logo.png)'),
+    'ordinary Markdown link keeps original relative href',
+  );
+  assert(
+    rewritten.includes('![Remote]()'),
+    'remote Markdown image src is removed from preview markdown',
+  );
+  assert(rewritten.includes('![Chart][chart]'), 'reference image usage is preserved');
+  assert(
+    rewritten.includes('[chart]: data:image/svg+xml;base64,Y2hhcnQ= "Chart"'),
+    'reference image definition is rewritten to data URL',
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   Workbench HTML 资源重写是 iframe 预览的安全边界，测试入口需要覆盖 URL、CSS 和 HTML 三类行为。
  *
  * Code Logic（这个函数做什么）:
@@ -181,6 +239,7 @@ async function main(): Promise<void> {
   await testCssUrlRewrite();
   await testHtmlAssetRewrite();
   await testNonResourceLinkIsPreserved();
+  await testMarkdownImageAssetRewrite();
 }
 
 void main()

@@ -1821,13 +1821,13 @@ pub async fn preview_workbench_sqlite(
     sqlite_preview::preview_sqlite_file(&file_path, table, limit_rows.unwrap_or(100)).await
 }
 
-/// 读取 HTML 预览所需的项目内相对资源。
+/// 读取 HTML/Markdown 预览所需的项目内相对资源。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     sandbox iframe 的 srcDoc 无法直接访问 worktree 文件，HTML 预览需要后端把当前文档引用的相对资源安全内联。
+///     HTML sandbox iframe 和 Markdown WYSIWYG 预览不能直接访问 worktree 文件，需要后端把当前文档引用的相对资源安全内联。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析 project/worktree 根、HTML 文档路径和资源相对路径，在 blocking pool 中只读读取根内文件并返回 data URL。
+///     解析 project/worktree 根、当前文档路径和资源相对路径，在 blocking pool 中只读读取根内文件并返回 data URL。
 #[tauri::command]
 pub async fn preview_workbench_html_asset(
     state: State<'_, AppState>,

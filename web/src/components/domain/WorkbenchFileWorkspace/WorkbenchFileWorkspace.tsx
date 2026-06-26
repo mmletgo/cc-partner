@@ -355,8 +355,10 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
         fileContent = (
           <WorkbenchMarkdownEditor
             value={activeTab.content}
+            documentPath={activeTab.path}
             mode={coerceMarkdownMode(activeTab.mode)}
             readOnly={saving}
+            loadAsset={loadHtmlAsset}
             onModeChange={handleMarkdownModeChange}
             onChange={handleContentChange}
           />

@@ -1,10 +1,10 @@
-//! workbench/html_assets.rs — Workbench HTML 预览资源读取
+//! workbench/html_assets.rs — Workbench HTML/Markdown 预览资源读取
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     Workbench HTML iframe 使用 sandbox srcDoc 渲染，项目内相对 CSS、图片等资源需要由后端安全读取后内联。
+//!     Workbench HTML iframe 和 Markdown WYSIWYG 预览需要展示项目内相对资源，这些资源需要由后端安全读取后内联。
 //!
 //! Code Logic（这个模块做什么）:
-//!     以 active worktree 根、HTML 文档路径和资源相对路径为输入，只读解析根内既有文件，
+//!     以 active worktree 根、当前文档路径和资源相对路径为输入，只读解析根内既有文件，
 //!     拒绝外链、绝对路径、根外路径和跨根 symlink，并返回 data URL 供前端改写 srcDoc。
 
 use crate::error::AppError;

@@ -443,10 +443,10 @@ pub struct WorkbenchImagePreview {
     pub height: Option<u32>,
 }
 
-/// Workbench HTML 预览资源 DTO。
+/// Workbench HTML/Markdown 预览资源 DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     HTML iframe 预览需要把项目内相对 CSS、图片和字体资源安全内联，避免 iframe 直接访问本机文件。
+///     HTML iframe 与 Markdown WYSIWYG 预览需要把项目内相对 CSS、图片和字体资源安全内联，避免前端直接访问本机文件。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     返回资源相对路径、MIME、大小、data URL，以及文本类资源的 UTF-8 内容供前端二次重写 CSS url()。
