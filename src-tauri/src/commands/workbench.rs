@@ -14,15 +14,16 @@ use crate::error::AppError;
 use crate::state::AppState;
 use crate::workbench::models::{
     WorkbenchDetectedFileType, WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchGitStatusDto,
-    WorkbenchOpenFileDto, WorkbenchPathInfo, WorkbenchProjectDto, WorkbenchProjectRow,
-    WorkbenchSaveTextResultDto, WorkbenchSessionDto, WorkbenchSqlitePreview, WorkbenchTextContent,
-    WorkbenchWorktreeDto, WorkbenchWorktreeRow,
+    WorkbenchHtmlAssetDto, WorkbenchOpenFileDto, WorkbenchPathInfo, WorkbenchProjectDto,
+    WorkbenchProjectRow, WorkbenchSaveTextResultDto, WorkbenchSessionDto, WorkbenchSqlitePreview,
+    WorkbenchTextContent, WorkbenchWorktreeDto, WorkbenchWorktreeRow,
 };
 use crate::workbench::sessions::{
     kill_persisted_backend, pane_count_for_row, PaneCloseOutcome, PaneSplitDirection,
 };
 use crate::workbench::{
-    file_content, file_preview, fs as workbench_fs, git as workbench_git, projects, sqlite_preview,
+    file_content, file_preview, fs as workbench_fs, git as workbench_git, html_assets, projects,
+    sqlite_preview,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -1820,6 +1821,28 @@ pub async fn preview_workbench_sqlite(
     sqlite_preview::preview_sqlite_file(&file_path, table, limit_rows.unwrap_or(100)).await
 }
 
+/// 读取 HTML 预览所需的项目内相对资源。
+///
+/// Business Logic（为什么需要这个函数）:
+///     sandbox iframe 的 srcDoc 无法直接访问 worktree 文件，HTML 预览需要后端把当前文档引用的相对资源安全内联。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 project/worktree 根、HTML 文档路径和资源相对路径，在 blocking pool 中只读读取根内文件并返回 data URL。
+#[tauri::command]
+pub async fn preview_workbench_html_asset(
+    state: State<'_, AppState>,
+    project_id: String,
+    worktree_id: Option<String>,
+    document_path: String,
+    asset_path: String,
+) -> Result<WorkbenchHtmlAssetDto, AppError> {
+    let project = get_project(&state, &project_id).await?;
+    let worktree = resolve_worktree(&state, &project, worktree_id.as_deref()).await?;
+    let root = PathBuf::from(worktree.path);
+    run_blocking_fs(move || html_assets::preview_html_asset(&root, &document_path, &asset_path))
+        .await
+}
+
 /// 列出工作台终端会话。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2246,6 +2269,116 @@ mod tests {
                 .expect("html ok");
 
         assert_eq!(detected_type, WorkbenchDetectedFileType::Html);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     HTML 预览中的 `../assets/logo.png` 这类资源必须按当前 HTML 文件位置解析，并以内联 data URL 返回给前端 iframe。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 docs/page.html 与 assets/logo.png，调用 HTML 资源预览 helper，断言路径、MIME 和 data URL 正确。
+    #[test]
+    fn html_preview_asset_resolves_relative_to_document_path() {
+        let root =
+            std::env::temp_dir().join(format!("cc-partner-html-asset-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("docs")).expect("create docs");
+        std::fs::create_dir_all(root.join("assets")).expect("create assets");
+        std::fs::write(
+            root.join("docs/page.html"),
+            "<img src=\"../assets/logo.png\">",
+        )
+        .expect("write html");
+        std::fs::write(root.join("assets/logo.png"), [0x89, b'P', b'N', b'G'])
+            .expect("write image");
+
+        let asset = crate::workbench::html_assets::preview_html_asset(
+            &root,
+            "docs/page.html",
+            "../assets/logo.png",
+        )
+        .expect("preview html asset");
+
+        assert_eq!(asset.path, "assets/logo.png");
+        assert_eq!(asset.mime, "image/png");
+        assert!(asset.data_url.starts_with("data:image/png;base64,"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     HTML 预览资源只能来自 worktree 根内相对文件，不能把 http/data/blob 或绝对路径交给后端读取。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造一个 HTML 文档后，用多种非项目内资源路径调用 helper，断言全部被拒绝。
+    #[test]
+    fn html_preview_asset_rejects_external_urls_and_absolute_paths() {
+        let root =
+            std::env::temp_dir().join(format!("cc-partner-html-asset-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("docs")).expect("create docs");
+        std::fs::write(
+            root.join("docs/page.html"),
+            "<link rel=\"stylesheet\" href=\"style.css\">",
+        )
+        .expect("write html");
+
+        for asset_path in [
+            "https://example.com/style.css",
+            "data:text/css,body{}",
+            "blob:https://example.com/id",
+            "#local-fragment",
+            "/etc/passwd",
+            "\\\\server\\share\\secret.css",
+            "\\windows-root\\secret.css",
+            "C:\\Users\\hans\\secret.txt",
+        ] {
+            let error = crate::workbench::html_assets::preview_html_asset(
+                &root,
+                "docs/page.html",
+                asset_path,
+            )
+            .expect_err("unsafe asset path should be rejected");
+            assert!(
+                error.to_string().contains("相对路径")
+                    || error.to_string().contains("项目目录之外"),
+                "unexpected error for {asset_path}: {error}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     项目内 symlink 若指向 worktree 根外，HTML 预览不能跟随读取，否则会泄露用户磁盘其他文件。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     在 Unix 上创建指向根外 CSS 文件的 symlink，断言 HTML 资源 helper 拒绝读取。
+    #[cfg(unix)]
+    #[test]
+    fn html_preview_asset_rejects_symlink_pointing_outside_root() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("cc-partner-html-asset-{}", uuid::Uuid::new_v4()));
+        let outside = std::env::temp_dir().join(format!(
+            "cc-partner-html-asset-outside-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join("docs")).expect("create docs");
+        std::fs::write(
+            root.join("docs/page.html"),
+            "<link rel=\"stylesheet\" href=\"leak.css\">",
+        )
+        .expect("write html");
+        std::fs::write(&outside, "body{color:red}").expect("write outside");
+        symlink(&outside, root.join("docs/leak.css")).expect("create symlink");
+
+        let error =
+            crate::workbench::html_assets::preview_html_asset(&root, "docs/page.html", "leak.css")
+                .expect_err("outside symlink should be rejected");
+
+        assert!(error.to_string().contains("项目目录之外"));
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(outside);
     }
 
     /// Business Logic（为什么需要这个测试）:

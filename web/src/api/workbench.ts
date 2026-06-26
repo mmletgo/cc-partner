@@ -15,6 +15,7 @@ import type {
   WorkbenchFileNode,
   WorkbenchFormatResult,
   WorkbenchGitCommit,
+  WorkbenchHtmlAsset,
   WorkbenchMergeResult,
   WorkbenchOpenFile,
   WorkbenchPathInfo,
@@ -226,6 +227,20 @@ export const workbenchApi = {
         path,
         table: table ?? null,
         limitRows,
+      }),
+
+    /** 读取 HTML 预览中的项目内相对资源，返回可内联 data URL。 */
+    previewHtmlAsset: (
+      projectId: string,
+      documentPath: string,
+      assetPath: string,
+      worktreeId?: string | null,
+    ) =>
+      invoke<WorkbenchHtmlAsset>('preview_workbench_html_asset', {
+        projectId,
+        worktreeId: worktreeId ?? null,
+        documentPath,
+        assetPath,
       }),
 
     /** 在父目录下创建空文件。 */

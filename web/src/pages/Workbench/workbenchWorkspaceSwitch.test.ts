@@ -173,8 +173,18 @@ async function main(): Promise<void> {
   );
   assertContains(
     htmlPreviewSource,
-    'srcDoc={value}',
-    'HTML preview iframe renders current HTML source',
+    'srcDoc={iframeSrcDoc}',
+    'HTML preview iframe renders rewritten HTML source',
+  );
+  assertContains(
+    htmlPreviewSource,
+    'previewResult?.source === value',
+    'HTML preview ignores stale async asset rewrite results',
+  );
+  assertContains(
+    fileWorkspaceSource,
+    'loadAsset={loadHtmlAsset}',
+    'file workspace passes HTML asset loader into preview component',
   );
   assertNotContains(
     fileWorkspaceSource,

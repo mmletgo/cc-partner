@@ -619,6 +619,7 @@ pub fn run() {
             workbench_cmd::save_workbench_text_file,
             workbench_cmd::format_workbench_structured_content,
             workbench_cmd::preview_workbench_sqlite,
+            workbench_cmd::preview_workbench_html_asset,
             workbench_cmd::create_workbench_file,
             workbench_cmd::create_workbench_dir,
             workbench_cmd::rename_workbench_path,

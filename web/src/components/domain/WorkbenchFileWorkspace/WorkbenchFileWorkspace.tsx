@@ -21,6 +21,7 @@ import { WorkbenchCodeEditor } from '../WorkbenchCodeEditor';
 import { WorkbenchCsvPreview } from '../WorkbenchCsvPreview';
 import { WorkbenchHtmlPreview } from '../WorkbenchHtmlPreview';
 import type { WorkbenchHtmlMode } from '../WorkbenchHtmlPreview';
+import type { WorkbenchHtmlAssetLoader } from '../WorkbenchHtmlPreview/htmlAssets';
 import { WorkbenchImagePreview } from '../WorkbenchImagePreview';
 import { WorkbenchMarkdownEditor } from '../WorkbenchMarkdownEditor';
 import type { WorkbenchMarkdownMode } from '../WorkbenchMarkdownEditor';
@@ -46,6 +47,7 @@ export interface WorkbenchFileWorkspaceProps {
   onReturnToTerminal: () => void;
   onContentChange: (id: string, value: string) => void;
   onModeChange: (id: string, mode: WorkbenchOpenFileTab['mode']) => void;
+  loadHtmlAsset?: WorkbenchHtmlAssetLoader;
   onSave: (id: string) => void;
   onFormat: (id: string) => void;
   onSelectSqliteTable: (id: string, table: string) => void;
@@ -202,6 +204,7 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
     onReturnToTerminal,
     onContentChange,
     onModeChange,
+    loadHtmlAsset,
     onSave,
     onFormat,
     onSelectSqliteTable,
@@ -363,8 +366,10 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
         fileContent = (
           <WorkbenchHtmlPreview
             value={activeTab.content}
+            documentPath={activeTab.path}
             mode={coerceHtmlMode(activeTab.mode)}
             readOnly={saving}
+            loadAsset={loadHtmlAsset}
             onModeChange={handleHtmlModeChange}
             onChange={handleContentChange}
           />

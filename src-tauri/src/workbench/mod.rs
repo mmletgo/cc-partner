@@ -12,6 +12,7 @@ pub mod file_content;
 pub mod file_preview;
 pub mod fs;
 pub mod git;
+pub mod html_assets;
 pub mod models;
 pub mod projects;
 pub mod sessions;

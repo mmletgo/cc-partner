@@ -50,6 +50,7 @@ import type {
   PromptOptimizerFillLanguage,
   WorkbenchFileNode,
   WorkbenchGitCommit,
+  WorkbenchHtmlAsset,
   WorkbenchMergeProgressEvent,
   WorkbenchMergeStage,
   WorkbenchMergeStageId,
@@ -1988,6 +1989,33 @@ export function Workbench() {
     [desktopUnavailableMessage, setFileTabsState, t],
   );
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   HTML 预览组件只知道当前文件路径，项目/worktree 上下文由页面层持有，因此资源读取必须经页面层转接。
+   *
+   * Code Logic（这个函数做什么）:
+   *   捕获当前 projectId/worktreeId，调用 workbench files API 获取 data URL；失败返回 null 让预览移除该资源引用。
+   */
+  const handleLoadHtmlAsset = useCallback(
+    async (documentPath: string, assetPath: string): Promise<WorkbenchHtmlAsset | null> => {
+      const projectId = activeProjectId;
+      if (!projectId) return null;
+      const worktreeId = activeWorktreeId;
+
+      try {
+        return await workbenchApi.files.previewHtmlAsset(
+          projectId,
+          documentPath,
+          assetPath,
+          worktreeId,
+        );
+      } catch {
+        return null;
+      }
+    },
+    [activeProjectId, activeWorktreeId],
+  );
+
   const handleSelectNode = useCallback(
     (node: WorkbenchFileNode) => {
       setSelectedPath(node.path);
@@ -3035,6 +3063,7 @@ export function Workbench() {
               onReturnToTerminal={handleReturnToTerminal}
               onContentChange={handleFileContentChange}
               onModeChange={handleFileModeChange}
+              loadHtmlAsset={handleLoadHtmlAsset}
               onSave={handleSaveFileTab}
               onFormat={handleFormatFileTab}
               onSelectSqliteTable={handleSelectSqliteTable}

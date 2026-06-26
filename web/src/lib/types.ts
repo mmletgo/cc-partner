@@ -520,6 +520,15 @@ export interface WorkbenchImagePreview {
   height: number | null;
 }
 
+/** HTML 预览资源内联数据。 */
+export interface WorkbenchHtmlAsset {
+  path: string;
+  mime: string;
+  size: number;
+  dataUrl: string;
+  text: string | null;
+}
+
 /** CSV/TSV 只读表格预览数据。 */
 export interface WorkbenchCsvPreview {
   columns: string[];

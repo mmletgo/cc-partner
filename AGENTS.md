@@ -429,6 +429,7 @@ node scripts/bump-version.mjs <新版本号>
 | start_region_capture / get_region_snapshot / save_clipboard_image / cancel_region_capture | 区域截图 |
 | list_github_trending_repos / get_github_trending_config / get_default_github_trending_config / update_github_trending_config / test_claude_cli | GitHub 周热门项目 + Claude CLI 双语解说配置 / 恢复默认 |
 | list_workbench_projects / add_workbench_project / remove_workbench_project / touch_workbench_project / list_workbench_worktrees / create_workbench_worktree / commit_workbench_worktree / push_workbench_worktree / merge_workbench_worktree / remove_workbench_worktree / list_workbench_git_commits / list_workbench_sessions / create_workbench_session / write_workbench_session_input / resize_workbench_session / focus_workbench_session / get_focused_workbench_session / split_workbench_pane / close_workbench_pane / close_workbench_session / rename_workbench_session / list_workbench_dir / get_workbench_path_info / open_workbench_file / save_workbench_text_file / format_workbench_structured_content / preview_workbench_sqlite / create_workbench_file / create_workbench_dir / rename_workbench_path / delete_workbench_path | 工作台本机项目、Git worktree、带本地/远端 ref 标识的 Git 提交树、tmux-backed terminal window/pane、工作区文件树和文件浏览/编辑 |
+| preview_workbench_html_asset | Workbench HTML sandbox 预览读取当前 active worktree 根内的相对 CSS/图片等资源并返回 data URL；拒绝外链、绝对路径、根外路径和跨根 symlink |
 
 ### 8.3 P2P HTTP 端点（对端调用，由 `src-tauri/src/net/routes/` 注册）
 

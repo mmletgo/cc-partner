@@ -443,6 +443,23 @@ pub struct WorkbenchImagePreview {
     pub height: Option<u32>,
 }
 
+/// Workbench HTML 预览资源 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     HTML iframe 预览需要把项目内相对 CSS、图片和字体资源安全内联，避免 iframe 直接访问本机文件。
+///
+/// Code Logic（这个结构体做什么）:
+///     返回资源相对路径、MIME、大小、data URL，以及文本类资源的 UTF-8 内容供前端二次重写 CSS url()。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchHtmlAssetDto {
+    pub path: String,
+    pub mime: String,
+    pub size: u64,
+    pub data_url: String,
+    pub text: Option<String>,
+}
+
 /// Workbench SQLite 预览 DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:
