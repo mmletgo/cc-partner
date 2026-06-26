@@ -2843,7 +2843,9 @@ export function Workbench() {
               </Button>
               <div className={styles.paneActions} aria-label={t('workbench:paneActions')}>
                 <Button
-                  variant="icon"
+                  className={styles.terminalActionButton}
+                  variant="secondary"
+                  size="sm"
                   icon={<EditIcon />}
                   title={t('workbench:promptOptimizer.open')}
                   aria-label={t('workbench:promptOptimizer.open')}
@@ -2855,39 +2857,57 @@ export function Workbench() {
                       openPromptOptimizerPanel();
                     }
                   }}
-                />
+                >
+                  {t('workbench:promptOptimizer.open')}
+                </Button>
                 <Button
-                  variant="icon"
+                  className={styles.terminalActionButton}
+                  variant="secondary"
+                  size="sm"
                   icon={<FileIcon />}
                   title={t('workbench:fileWorkspace.openFiles')}
                   aria-label={t('workbench:fileWorkspace.openFiles')}
                   disabled={fileTabs.length === 0}
                   onClick={handleReturnToFiles}
-                />
+                >
+                  {t('workbench:fileWorkspace.openFiles')}
+                </Button>
                 <Button
-                  variant="icon"
+                  className={styles.terminalActionButton}
+                  variant="secondary"
+                  size="sm"
                   icon={<SplitRightIcon />}
                   title={t('workbench:splitPaneRight')}
                   aria-label={t('workbench:splitPaneRight')}
                   disabled={!canUsePanes}
                   onClick={() => void handleSplitPane('right')}
-                />
+                >
+                  {t('workbench:splitPaneRight')}
+                </Button>
                 <Button
-                  variant="icon"
+                  className={styles.terminalActionButton}
+                  variant="secondary"
+                  size="sm"
                   icon={<SplitDownIcon />}
                   title={t('workbench:splitPaneDown')}
                   aria-label={t('workbench:splitPaneDown')}
                   disabled={!canUsePanes}
                   onClick={() => void handleSplitPane('down')}
-                />
+                >
+                  {t('workbench:splitPaneDown')}
+                </Button>
                 <Button
-                  variant="icon"
+                  className={styles.terminalActionButton}
+                  variant="secondary"
+                  size="sm"
                   icon={<XIcon />}
                   title={t('workbench:closePane')}
                   aria-label={t('workbench:closePane')}
                   disabled={!canUsePanes}
                   onClick={() => void handleClosePane()}
-                />
+                >
+                  {t('workbench:closePane')}
+                </Button>
               </div>
             </section>
 

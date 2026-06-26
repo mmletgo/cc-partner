@@ -419,18 +419,10 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
           <div className={styles.fileToolbar}>
             <div className={styles.fileTitleBlock}>
               <strong className={styles.fileName}>{activeTab.name}</strong>
-              <span className={styles.filePath}>{activeTab.path}</span>
+              <span className={styles.filePath} title={activeTab.path}>
+                {activeTab.path}
+              </span>
             </div>
-            <dl className={styles.fileMeta}>
-              <div className={styles.metaItem}>
-                <dt>{t('workbench:fileWorkspace.type')}</dt>
-                <dd>{activeTab.opened.detectedType}</dd>
-              </div>
-              <div className={styles.metaItem}>
-                <dt>{t('workbench:fileWorkspace.path')}</dt>
-                <dd title={activeTab.path}>{activeTab.path}</dd>
-              </div>
-            </dl>
             <div className={styles.toolbarActions}>
               {activeTab.opened.capabilities.canFormat ? (
                 <Button

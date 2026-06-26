@@ -18,21 +18,55 @@ function assertContains(source: string, expected: string, message: string): void
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   终端工具栏的文件预览按钮需要锁住可回归检查的最小契约：有打开文件才可点、点击切到文件层、
- *   且中英文 tooltip 与文件预览返回终端入口对称。
+ *   Workbench 文件预览头部需要避免重复信息占用高度，测试要能明确阻止类型/路径 meta 行回归。
  *
  * Code Logic（这个函数做什么）:
- *   静态读取 Workbench 页面和 workbench i18n 资源，检查切换回调、按钮绑定、禁用条件和文案 key。
+ *   检查源码不包含指定片段；如果仍包含则抛出带上下文的错误。
+ */
+function assertNotContains(source: string, unexpected: string, message: string): void {
+  if (source.includes(unexpected)) {
+    throw new Error(message);
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   终端工具栏的文件预览按钮需要锁住可回归检查的最小契约：有打开文件才可点、点击切到文件层、
+ *   且中英文 tooltip 与文件预览返回终端入口对称；终端和文件预览按钮组需要同样显示文案。
+ *
+ * Code Logic（这个函数做什么）:
+ *   静态读取 Workbench 页面、文件工作区和 workbench i18n 资源，检查切换回调、按钮绑定、禁用条件、
+ *   文案 key 以及文件预览单行头部布局。
  */
 async function main(): Promise<void> {
   const workbenchSource = readFileSync(new URL('./Workbench.tsx', import.meta.url), 'utf8');
+  const fileWorkspaceSource = readFileSync(
+    new URL('../../components/domain/WorkbenchFileWorkspace/WorkbenchFileWorkspace.tsx', import.meta.url),
+    'utf8',
+  );
   const zhLocale = readFileSync(new URL('../../i18n/locales/zh/workbench.json', import.meta.url), 'utf8');
   const enLocale = readFileSync(new URL('../../i18n/locales/en/workbench.json', import.meta.url), 'utf8');
 
   assertContains(workbenchSource, 'const handleReturnToFiles = useCallback', 'terminal -> files callback exists');
   assertContains(workbenchSource, "setWorkspaceView('files');", 'callback opens file workspace layer');
   assertContains(workbenchSource, 'disabled={fileTabs.length === 0}', 'file preview button is disabled with no opened tabs');
+  assertContains(workbenchSource, 'className={styles.terminalActionButton}', 'terminal action buttons use text style class');
   assertContains(workbenchSource, "t('workbench:fileWorkspace.openFiles')", 'button uses localized file preview label');
+  assertContains(
+    fileWorkspaceSource,
+    '<span className={styles.filePath} title={activeTab.path}>',
+    'file path renders inline with file title',
+  );
+  assertNotContains(
+    fileWorkspaceSource,
+    '<dl className={styles.fileMeta}>',
+    'file preview toolbar does not render a separate metadata row',
+  );
+  assertNotContains(
+    fileWorkspaceSource,
+    "t('workbench:fileWorkspace.type')",
+    'file preview toolbar no longer shows detected type',
+  );
   assertContains(zhLocale, '"openFiles": "文件预览"', 'zh file preview label exists');
   assertContains(enLocale, '"openFiles": "File preview"', 'en file preview label exists');
 }

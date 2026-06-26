@@ -129,11 +129,9 @@
 .paneActions {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  padding: var(--space-1);
-  background: var(--bg);
+  justify-content: flex-end;
+  gap: var(--space-2);
+  min-width: 0;
 }
 
 .treeIcon,
@@ -467,12 +465,16 @@
 
 .sessionTabs .paneActions {
   margin-left: auto;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
 }
 
 .paneActions :global(button[data-active='true']) {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+.terminalActionButton {
+  flex: 0 0 auto;
 }
 
 .sessionDot {
