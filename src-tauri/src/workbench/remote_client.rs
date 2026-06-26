@@ -18,9 +18,9 @@ use crate::workbench::remote_protocol::{
     RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq, RemoteCreateWorktreeReq,
     RemoteDeletePathReq, RemoteFocusedSessionReq, RemoteFocusedSessionResp, RemoteGitCommitsReq,
     RemoteListDirReq, RemoteListSessionsReq, RemoteOpenFileReq, RemotePathInfoReq,
-    RemoteProjectReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq,
-    RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSessionReq, RemoteSplitPaneReq,
-    RemoteWorktreeReq, RemoteWriteSessionInputReq,
+    RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq,
+    RemoteRenameSessionReq, RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSessionReq,
+    RemoteSplitPaneReq, RemoteWorktreeReq, RemoteWriteSessionInputReq,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -738,6 +738,29 @@ impl RemoteWorkbenchClient {
         .await
     }
 
+    /// 流式优化 Prompt 并写入远端终端。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     本机 remote shortcut 的 Prompt 优化浮层应在项目所在设备读取 CLAUDE.md 并写入该设备 terminal。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/prompt-optimizer/stream-to-session`，用 very-long timeout 等待对端 CLI 流式完成。
+    pub async fn stream_prompt_optimizer_to_session(
+        &self,
+        base_url: &str,
+        req: RemotePromptOptimizerReq,
+    ) -> Result<Value, AppError> {
+        self.post_json(
+            endpoint_url(
+                base_url,
+                "/api/workbench/prompt-optimizer/stream-to-session",
+            ),
+            &req,
+            prompt_optimizer_timeout_kind(),
+        )
+        .await
+    }
+
     /// Business Logic（为什么需要这个函数）:
     ///     远端 Workbench GET 调用都需要统一处理网络错误、HTTP 状态码和 JSON 解析错误。
     ///
@@ -853,6 +876,15 @@ fn merge_worktree_timeout_kind() -> RemoteRequestTimeoutKind {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     远端 Prompt 优化会包住对端 180s Claude CLI 流式任务，本机 HTTP 客户端不能提前超时。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 Prompt 优化代理请求专用的超长 timeout 类别，供方法和测试复用。
+fn prompt_optimizer_timeout_kind() -> RemoteRequestTimeoutKind {
+    RemoteRequestTimeoutKind::VeryLong
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     调用方可能传入带尾斜杠的 base URL，远端客户端应始终拼出唯一规范路径。
 ///
 /// Code Logic（这个函数做什么）:
@@ -927,7 +959,7 @@ mod tests {
         WorkbenchPathInfo, WorkbenchRemoteDirectoryEntryDto, WorkbenchSaveTextResultDto,
         WorkbenchSessionDto, WorkbenchWorktreeDto,
     };
-    use crate::workbench::remote_protocol::RemoteCreateSessionReq;
+    use crate::workbench::remote_protocol::{RemoteCreateSessionReq, RemotePromptOptimizerReq};
     use axum::extract::State;
     use axum::routing::post;
     use axum::{http::StatusCode, Json, Router};
@@ -1009,6 +1041,22 @@ mod tests {
         );
         assert!(remote_request_timeout(commit_worktree_timeout_kind()) >= Duration::from_secs(180));
         assert!(remote_request_timeout(merge_worktree_timeout_kind()) >= Duration::from_secs(300));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端 Prompt 优化会包住对端 Claude CLI 流式任务，本机客户端必须使用覆盖 180 秒的超长超时。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     校验 Prompt 优化代理请求 timeout kind 使用 very-long，避免未来误改成长短请求超时。
+    #[test]
+    fn prompt_optimizer_uses_very_long_timeout() {
+        assert_eq!(
+            prompt_optimizer_timeout_kind(),
+            RemoteRequestTimeoutKind::VeryLong
+        );
+        assert!(
+            remote_request_timeout(prompt_optimizer_timeout_kind()) >= Duration::from_secs(180)
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -1271,5 +1319,59 @@ mod tests {
         assert_eq!(body["worktreeId"], "inner-worktree");
         assert_eq!(body["initialCols"], 120);
         assert_eq!(body["initialRows"], 36);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     本机 remote shortcut 触发 Prompt 优化时，请求体必须保留远端工作目录和远端 local sessionId。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动临时 HTTP 服务接收 prompt-optimizer 请求，断言 camelCase body 与响应解析正确。
+    #[tokio::test]
+    async fn stream_prompt_optimizer_posts_remote_context_and_parses_json() {
+        let seen_body = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/api/workbench/prompt-optimizer/stream-to-session",
+                post(
+                    |State(seen_body): State<Arc<Mutex<Option<Value>>>>,
+                     Json(body): Json<Value>| async move {
+                        *seen_body.lock().unwrap() = Some(body);
+                        Json(serde_json::json!({
+                            "ok": true,
+                            "sessionId": "inner-session"
+                        }))
+                    },
+                ),
+            )
+            .with_state(seen_body.clone());
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = RemoteWorkbenchClient::new();
+
+        let result = client
+            .stream_prompt_optimizer_to_session(
+                &format!("http://{addr}"),
+                RemotePromptOptimizerReq {
+                    prompt: "优化这个任务".to_string(),
+                    working_directory: "/remote/repo".to_string(),
+                    target_language: "zh".to_string(),
+                    session_id: "inner-session".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["sessionId"], "inner-session");
+        let body = seen_body.lock().unwrap().clone().unwrap();
+        assert_eq!(body["prompt"], "优化这个任务");
+        assert_eq!(body["workingDirectory"], "/remote/repo");
+        assert_eq!(body["targetLanguage"], "zh");
+        assert_eq!(body["sessionId"], "inner-session");
     }
 }

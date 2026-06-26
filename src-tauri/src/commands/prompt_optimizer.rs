@@ -9,8 +9,13 @@
 //!     `claude_cli` headless helper，并返回 camelCase DTO；Workbench 可传项目目录加载 CLAUDE.md。
 
 use crate::claude_cli;
+use crate::commands::workbench::device_base_url;
 use crate::error::AppError;
 use crate::state::AppState;
+use crate::workbench::{
+    remote_client::RemoteWorkbenchClient, remote_ids::parse_remote_entity_id,
+    remote_protocol::RemotePromptOptimizerReq,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -165,12 +170,48 @@ pub async fn stream_optimize_prompt_to_workbench_session(
     target_language: String,
     session_id: String,
 ) -> Result<Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        return remote_stream_optimize_prompt_to_workbench_session(
+            &state,
+            prompt,
+            working_directory,
+            target_language,
+            session_id,
+            parsed.device_id,
+            parsed.inner_id,
+        )
+        .await;
+    }
+
+    local_stream_optimize_prompt_to_workbench_session(
+        &state,
+        prompt,
+        working_directory,
+        target_language,
+        session_id,
+    )
+    .await
+}
+
+/// 在本机流式优化 Prompt 并写入 Workbench 终端。
+///
+/// Business Logic（为什么需要这个函数）:
+///     本机终端和远端 HTTP 路由都需要复用同一套本地 Claude CLI 流式优化逻辑。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 prompt/session/目标语种，解析本机工作目录后运行 Claude CLI，并把文本增量写入本机 session。
+pub(crate) async fn local_stream_optimize_prompt_to_workbench_session(
+    state: &AppState,
+    prompt: String,
+    working_directory: Option<String>,
+    target_language: String,
+    session_id: String,
+) -> Result<Value, AppError> {
     validate_prompt_input(&prompt)?;
     if session_id.trim().is_empty() {
         return Err(AppError::generic("工作台终端会话不能为空"));
     }
-    let target_language = PromptOptimizeTargetLanguage::parse(Some(target_language))?
-        .ok_or_else(|| AppError::generic("Workbench Prompt 优化必须指定目标语种"))?;
+    let (target_language, _) = parse_required_target_language(target_language)?;
     let working_directory = resolve_working_directory(working_directory)?;
     let (cli_path, model) = {
         let cfg = state.config.read().unwrap();
@@ -195,6 +236,42 @@ pub async fn stream_optimize_prompt_to_workbench_session(
     .await?;
 
     Ok(json!({ "ok": true, "sessionId": session_id }))
+}
+
+/// 把 Workbench Prompt 优化转发到远端设备。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户操作 remote shortcut 时，Prompt 优化应读取远端项目上下文并写入远端 terminal，而不是在本机执行。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 prompt、目标语种和远端工作目录；剥离 remote session 前缀后调用对端 HTTP 路由，返回本机 remote sessionId。
+async fn remote_stream_optimize_prompt_to_workbench_session(
+    state: &AppState,
+    prompt: String,
+    working_directory: Option<String>,
+    target_language: String,
+    local_session_id: String,
+    device_id: String,
+    remote_session_id: String,
+) -> Result<Value, AppError> {
+    validate_prompt_input(&prompt)?;
+    let (_, target_language) = parse_required_target_language(target_language)?;
+    let working_directory = remote_working_directory(working_directory)?;
+    let base_url = device_base_url(state, &device_id)?;
+    let client = RemoteWorkbenchClient::new();
+    let _ = client
+        .stream_prompt_optimizer_to_session(
+            &base_url,
+            RemotePromptOptimizerReq {
+                prompt,
+                working_directory,
+                target_language,
+                session_id: remote_session_id,
+            },
+        )
+        .await?;
+
+    Ok(json!({ "ok": true, "sessionId": local_session_id }))
 }
 
 /// 校验原始 Prompt 输入。
@@ -237,6 +314,40 @@ fn resolve_working_directory(input: Option<String>) -> Result<Option<PathBuf>, A
     path.canonicalize()
         .map(Some)
         .map_err(|error| AppError::generic(format!("解析 Prompt 优化工作目录失败: {error}")))
+}
+
+/// 解析 Workbench 流式 Prompt 优化必填目标语种。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Workbench 小组件必须明确写入中文或英文，远端转发还需要保留规范化后的语种字符串。
+///
+/// Code Logic（这个函数做什么）:
+///     trim 输入并解析为目标语种枚举；空值或未知值返回业务错误，同时返回规范化 `zh` / `en` 字符串。
+fn parse_required_target_language(
+    input: String,
+) -> Result<(PromptOptimizeTargetLanguage, String), AppError> {
+    let canonical = input.trim().to_string();
+    let target = PromptOptimizeTargetLanguage::parse(Some(canonical.clone()))?
+        .ok_or_else(|| AppError::generic("Workbench Prompt 优化必须指定目标语种"))?;
+    Ok((target, canonical))
+}
+
+/// 解析远端 Prompt 优化工作目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的工作目录是远端设备路径，本机不能提前 canonicalize，但必须确保传给对端的是非空远端路径。
+///
+/// Code Logic（这个函数做什么）:
+///     None 或空白字符串返回业务错误；非空时只 trim 字符串并原样交给远端设备校验。
+fn remote_working_directory(input: Option<String>) -> Result<String, AppError> {
+    let Some(raw) = input else {
+        return Err(AppError::generic("远端 Prompt 优化必须指定远端工作目录"));
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::generic("远端 Prompt 优化必须指定远端工作目录"));
+    }
+    Ok(trimmed.to_string())
 }
 
 /// 构造 Prompt 优化结构化输出 schema。
@@ -475,6 +586,27 @@ mod tests {
         assert!(schema["properties"].get("optimizedEn").is_none());
 
         assert!(PromptOptimizeTargetLanguage::parse(Some("fr".to_string())).is_err());
+    }
+
+    #[test]
+    fn required_target_language_trims_and_rejects_blank() {
+        let (target, canonical) =
+            parse_required_target_language("  en  ".to_string()).expect("english target");
+
+        assert_eq!(target, PromptOptimizeTargetLanguage::En);
+        assert_eq!(canonical, "en");
+        assert!(parse_required_target_language("   ".to_string()).is_err());
+        assert!(parse_required_target_language("fr".to_string()).is_err());
+    }
+
+    #[test]
+    fn remote_working_directory_requires_non_empty_path_without_local_resolution() {
+        let path =
+            remote_working_directory(Some("  /remote/project  ".to_string())).expect("remote path");
+
+        assert_eq!(path, "/remote/project");
+        assert!(remote_working_directory(None).is_err());
+        assert!(remote_working_directory(Some("\n\t".to_string())).is_err());
     }
 
     #[test]

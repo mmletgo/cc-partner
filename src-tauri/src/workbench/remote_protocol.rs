@@ -326,3 +326,19 @@ pub struct RemoteRenameSessionReq {
     pub session_id: String,
     pub name: String,
 }
+
+/// 远端 Prompt 优化写入终端请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     本机 Workbench 连接远端 terminal 时，Prompt 优化必须在项目所在设备运行并写入远端终端。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存原始 prompt、远端工作目录、目标语种和远端 local sessionId，字段使用 camelCase。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePromptOptimizerReq {
+    pub prompt: String,
+    pub working_directory: String,
+    pub target_language: String,
+    pub session_id: String,
+}

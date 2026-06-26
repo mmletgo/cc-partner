@@ -603,7 +603,7 @@ fn device_base_url_from_devices(
 ///
 /// Code Logic（这个函数做什么）:
 ///     读取 `state.devices`，委托纯 helper 生成 base URL；只在同步代码段持有读锁，不跨 await。
-fn device_base_url(state: &AppState, device_id: &str) -> Result<String, AppError> {
+pub(crate) fn device_base_url(state: &AppState, device_id: &str) -> Result<String, AppError> {
     let devices = state.devices.read().expect("devices 读锁中毒");
     device_base_url_from_devices(&devices, device_id)
 }

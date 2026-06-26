@@ -6,6 +6,7 @@
 //! Code Logic（这个模块做什么）:
 //!     将远端目录 helper 和本机项目添加逻辑包装为 axum handler，供其他设备调用。
 
+use crate::commands::prompt_optimizer::local_stream_optimize_prompt_to_workbench_session;
 use crate::commands::workbench::{
     add_local_workbench_project_from_path, local_close_workbench_pane,
     local_close_workbench_session, local_commit_workbench_worktree, local_create_workbench_dir,
@@ -31,15 +32,16 @@ use crate::workbench::remote_protocol::{
     RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq, RemoteCreateWorktreeReq,
     RemoteDeletePathReq, RemoteFocusedSessionReq, RemoteFocusedSessionResp, RemoteGitCommitsReq,
     RemoteListDirReq, RemoteListSessionsReq, RemoteOpenFileReq, RemotePathInfoReq,
-    RemoteProjectReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq,
-    RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSessionReq, RemoteSplitPaneReq,
-    RemoteWorktreeReq, RemoteWriteSessionInputReq,
+    RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq,
+    RemoteRenameSessionReq, RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSessionReq,
+    RemoteSplitPaneReq, RemoteWorktreeReq, RemoteWriteSessionInputReq,
 };
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::header;
 use axum::response::Response;
 use axum::Json;
+use serde_json::Value;
 use std::convert::Infallible;
 use std::path::Path;
 use tokio_stream::wrappers::BroadcastStream;
@@ -702,6 +704,30 @@ pub async fn rename_workbench_session(
     ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
     Ok(Json(
         local_rename_workbench_session(&state, req.session_id, req.name).await?,
+    ))
+}
+
+/// 在远端设备本机项目上下文中流式优化 Prompt 并写入终端。
+///
+/// Business Logic（为什么需要这个函数）:
+///     本机 remote shortcut 触发 Prompt 优化时，真实 Claude CLI 和 terminal 写入都必须发生在项目所在设备。
+///
+/// Code Logic（这个函数做什么）:
+///     接收远端 local sessionId 与远端工作目录，确认 session 属于本机 local 项目后复用本地流式优化 helper。
+pub async fn stream_prompt_optimizer_to_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemotePromptOptimizerReq>,
+) -> Result<Json<Value>, AppError> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
+    Ok(Json(
+        local_stream_optimize_prompt_to_workbench_session(
+            &state,
+            req.prompt,
+            Some(req.working_directory),
+            req.target_language,
+            req.session_id,
+        )
+        .await?,
     ))
 }
 

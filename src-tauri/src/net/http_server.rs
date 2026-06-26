@@ -200,6 +200,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/workbench/sessions/rename",
             post(workbench::rename_workbench_session),
         )
+        .route(
+            "/api/workbench/prompt-optimizer/stream-to-session",
+            post(workbench::stream_prompt_optimizer_to_session),
+        )
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
         .with_state(state.clone());
 
