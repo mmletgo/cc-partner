@@ -11,7 +11,7 @@
  */
 
 import { useCallback, useMemo } from 'react';
-import type { MouseEvent, ReactElement } from 'react';
+import type { KeyboardEvent, MouseEvent, ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/primitives';
 import { CheckIcon, RefreshIcon, TerminalIcon, XIcon } from '@/lib/icons';
@@ -88,6 +88,33 @@ function createTabAriaIds(tabId: string): { tabButtonId: string; tabPanelId: str
     tabButtonId: `workbench-file-tab-${safePart}`,
     tabPanelId: `workbench-file-panel-${safePart}`,
   };
+}
+
+/**
+ * 聚焦指定文件 tab 按钮
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   键盘用户在 tablist 内用方向键切换文件时，需要焦点跟随切换后的 tab，否则 roving focus 状态与视觉选中不一致。
+ *
+ * Code Logic（这个函数做什么）:
+ *   复用 createTabAriaIds 生成安全 button id，在下一帧查找 DOM 节点并调用 focus；非浏览器环境直接跳过。
+ */
+function focusTabButton(tabId: string): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const { tabButtonId } = createTabAriaIds(tabId);
+  const focusButton = () => {
+    document.getElementById(tabButtonId)?.focus();
+  };
+
+  if (typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(focusButton);
+    return;
+  }
+
+  window.setTimeout(focusButton, 0);
 }
 
 /**
@@ -200,6 +227,49 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
     [onClose],
   );
 
+  const handleTabKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLButtonElement>) => {
+      const currentId = event.currentTarget.dataset.tabId;
+
+      if (!currentId || tabs.length === 0) {
+        return;
+      }
+
+      const currentIndex = tabs.findIndex((tab) => tab.id === currentId);
+
+      if (currentIndex < 0) {
+        return;
+      }
+
+      let nextIndex: number | null = null;
+
+      switch (event.key) {
+        case 'ArrowRight':
+        case 'ArrowDown':
+          nextIndex = (currentIndex + 1) % tabs.length;
+          break;
+        case 'ArrowLeft':
+        case 'ArrowUp':
+          nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+          break;
+        case 'Home':
+          nextIndex = 0;
+          break;
+        case 'End':
+          nextIndex = tabs.length - 1;
+          break;
+        default:
+          return;
+      }
+
+      event.preventDefault();
+      const nextTab = tabs[nextIndex];
+      onActivate(nextTab.id);
+      focusTabButton(nextTab.id);
+    },
+    [onActivate, tabs],
+  );
+
   const handleContentChange = useCallback(
     (nextValue: string) => {
       if (activeTabStableId) {
@@ -308,11 +378,12 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
                 role="tab"
                 className={styles.tabButton}
                 data-tab-id={tab.id}
-                aria-controls={tabAriaIds.tabPanelId}
+                aria-controls={active ? tabAriaIds.tabPanelId : undefined}
                 aria-selected={active}
                 tabIndex={active ? 0 : -1}
                 title={tab.path}
                 onClick={handleTabActivate}
+                onKeyDown={handleTabKeyDown}
               >
                 <span className={styles.tabName}>{tab.name}</span>
                 {tab.dirty ? (
