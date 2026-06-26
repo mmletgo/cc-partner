@@ -2,14 +2,19 @@ import {
   collectTabsForPath,
   detectWorkbenchFileType,
   dirtyTabNames,
+  dropExpandedPathTree,
+  dropPathTreeEntries,
   fileCapabilitiesForType,
   formatJsonText,
   formatTomlText,
   isLatestRequest,
+  isSameOrDescendantPath,
+  parseWorkbenchDirRequestKey,
   reduceFileTabs,
   validateJsonText,
   validateTomlText,
   workbenchDirRequestKey,
+  workbenchDirRequestKeyMatchesPath,
 } from './workbenchFiles';
 
 /**
@@ -173,6 +178,30 @@ async function main(): Promise<void> {
   const worktreeSrcKey = workbenchDirRequestKey('project-1', 'wt-1', 'src');
   assert(mainRootKey !== worktreeRootKey, 'dir request key separates main workspace from worktree');
   assert(worktreeRootKey !== worktreeSrcKey, 'dir request key separates paths');
+  assert(parseWorkbenchDirRequestKey(worktreeSrcKey)?.path === 'src', 'dir request key parses path');
+  assert(parseWorkbenchDirRequestKey('not-json') === null, 'invalid dir request key is ignored');
+  assert(isSameOrDescendantPath('src/App.tsx', 'src'), 'descendant path matches parent directory');
+  assert(!isSameOrDescendantPath('src-old/App.tsx', 'src'), 'sibling prefix does not match parent directory');
+  assert(
+    workbenchDirRequestKeyMatchesPath(workbenchDirRequestKey('project-1', 'wt-1', 'src/components'), 'project-1', 'wt-1', 'src'),
+    'dir request key matcher includes descendant paths',
+  );
+  assert(
+    !workbenchDirRequestKeyMatchesPath(workbenchDirRequestKey('project-1', 'wt-2', 'src/components'), 'project-1', 'wt-1', 'src'),
+    'dir request key matcher isolates worktrees',
+  );
+  const cachedChildren = {
+    src: ['main.ts'],
+    'src/components': ['Button.tsx'],
+    docs: ['guide.md'],
+  };
+  const droppedChildren = dropPathTreeEntries(cachedChildren, 'src');
+  assert(!('src' in droppedChildren), 'dropping path tree removes exact directory cache');
+  assert(!('src/components' in droppedChildren), 'dropping path tree removes descendant directory cache');
+  assert('docs' in droppedChildren, 'dropping path tree keeps unrelated directory cache');
+  const expanded = dropExpandedPathTree(new Set(['src', 'src/components', 'docs']), 'src');
+  assert(!expanded.has('src') && !expanded.has('src/components'), 'dropping expanded path tree removes subtree');
+  assert(expanded.has('docs'), 'dropping expanded path tree keeps unrelated expanded path');
   assert(!isLatestRequest(2, 1), 'older request seq is not latest');
   assert(isLatestRequest(2, 2), 'matching request seq is latest');
 }

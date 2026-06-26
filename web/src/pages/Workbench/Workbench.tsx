@@ -98,10 +98,13 @@ import type { WorktreeBranchPrefix } from './workbenchWorktrees';
 import {
   collectTabsForPath,
   dirtyTabNames,
+  dropExpandedPathTree,
+  dropPathTreeEntries,
   isLatestRequest,
   validateJsonText,
   validateTomlText,
   workbenchDirRequestKey,
+  workbenchDirRequestKeyMatchesPath,
 } from './workbenchFiles';
 import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
 
@@ -1099,6 +1102,24 @@ export function Workbench() {
     },
     [desktopUnavailableMessage, t],
   );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   删除或重命名目录后，旧目录子树的异步加载响应不能再写回文件树。
+   *
+   * Code Logic（这个函数做什么）:
+   *   遍历当前目录请求序号表，命中同 project/worktree/path 子树的 key 就递增序号，使旧响应 stale。
+   */
+  const invalidateDirRequestsForPath = useCallback((path: string) => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return;
+    const worktreeId = activeWorktreeIdRef.current;
+    for (const [requestKey, requestSeq] of Object.entries(dirRequestSeqRef.current)) {
+      if (workbenchDirRequestKeyMatchesPath(requestKey, projectId, worktreeId, path)) {
+        dirRequestSeqRef.current[requestKey] = requestSeq + 1;
+      }
+    }
+  }, []);
 
   const loadGitHistory = useCallback(async () => {
     const projectId = activeProjectIdRef.current;
@@ -2440,6 +2461,16 @@ export function Workbench() {
         return;
       }
       openFileRequestSeqRef.current += 1;
+      if (selectedInfo.kind === 'dir') {
+        invalidateDirRequestsForPath(originalPath);
+        invalidateDirRequestsForPath(renamed.path);
+        setChildrenByPath((current) =>
+          dropPathTreeEntries(dropPathTreeEntries(current, originalPath), renamed.path),
+        );
+        setExpandedPaths((current) =>
+          dropExpandedPathTree(dropExpandedPathTree(current, originalPath), renamed.path),
+        );
+      }
       const renamedTabIds = new Map<string, string>();
       const nextTabs = fileTabsRef.current.map((tab) => {
         const nextPath = renamedPathForTab(tab.path, originalPath, renamed.path);
@@ -2485,7 +2516,15 @@ export function Workbench() {
         displayErrorMessage(error, t('workbench:errors.renamePath'), desktopUnavailableMessage),
       );
     }
-  }, [desktopUnavailableMessage, refreshParentDir, renameName, selectedInfo, setFileTabsState, t]);
+  }, [
+    desktopUnavailableMessage,
+    invalidateDirRequestsForPath,
+    refreshParentDir,
+    renameName,
+    selectedInfo,
+    setFileTabsState,
+    t,
+  ]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -2525,6 +2564,11 @@ export function Workbench() {
         return;
       }
       openFileRequestSeqRef.current += 1;
+      if (selectedInfo.kind === 'dir') {
+        invalidateDirRequestsForPath(path);
+        setChildrenByPath((current) => dropPathTreeEntries(current, path));
+        setExpandedPaths((current) => dropExpandedPathTree(current, path));
+      }
       const removedTabIds = new Set(
         collectTabsForPath(fileTabsRef.current, path, selectedInfo.kind).map((tab) => tab.id),
       );
@@ -2553,7 +2597,14 @@ export function Workbench() {
         displayErrorMessage(error, t('workbench:errors.deletePath'), desktopUnavailableMessage),
       );
     }
-  }, [desktopUnavailableMessage, refreshParentDir, selectedInfo, setFileTabsState, t]);
+  }, [
+    desktopUnavailableMessage,
+    invalidateDirRequestsForPath,
+    refreshParentDir,
+    selectedInfo,
+    setFileTabsState,
+    t,
+  ]);
 
   const handleCopySelectedPath = useCallback(async () => {
     if (!selectedInfo) return;

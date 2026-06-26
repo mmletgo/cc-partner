@@ -67,6 +67,12 @@ export interface WorkbenchPathTabCandidate {
   dirty: boolean;
 }
 
+export interface WorkbenchDirRequestParts {
+  projectId: string;
+  worktreeId: string | null;
+  path: string;
+}
+
 const IMAGE_EXTENSIONS = new Set(['avif', 'bmp', 'gif', 'ico', 'jpeg', 'jpg', 'png', 'svg', 'tif', 'tiff', 'webp']);
 const MARKDOWN_EXTENSIONS = new Set(['markdown', 'md', 'mdown', 'mdx', 'mkd']);
 const JSON_EXTENSIONS = new Set(['json']);
@@ -262,9 +268,62 @@ export function collectTabsForPath<Tab extends WorkbenchPathTabCandidate>(
   kind: 'file' | 'dir' | string,
 ): Tab[] {
   if (kind === 'dir') {
-    return tabs.filter((tab) => tab.path === path || (!path ? tab.path.length > 0 : tab.path.startsWith(`${path}/`)));
+    return tabs.filter((tab) => isSameOrDescendantPath(tab.path, path));
   }
   return tabs.filter((tab) => tab.path === path);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   删除或重命名目录后，文件树缓存和已展开状态需要同步清掉该目录子树，避免展示不存在的旧节点。
+ *
+ * Code Logic（这个函数做什么）:
+ *   对同一路径直接命中；非空目录路径用 `path/` 前缀判断后代；根路径命中所有非空相对路径。
+ */
+export function isSameOrDescendantPath(path: string, targetPath: string): boolean {
+  if (path === targetPath) return true;
+  if (!targetPath) return path.length > 0;
+  return path.startsWith(`${targetPath}/`);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   目录删除/重命名后，缓存中的旧子目录列表不能继续驱动文件树 UI。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从 Record 中移除 key 等于目标目录或位于目标目录后代的项；没有变化时返回原对象。
+ */
+export function dropPathTreeEntries<TValue>(entries: Record<string, TValue>, path: string): Record<string, TValue> {
+  let changed = false;
+  const nextEntries: Record<string, TValue> = {};
+  for (const [entryPath, value] of Object.entries(entries)) {
+    if (isSameOrDescendantPath(entryPath, path)) {
+      changed = true;
+      continue;
+    }
+    nextEntries[entryPath] = value;
+  }
+  return changed ? nextEntries : entries;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   目录删除/重命名后，被移除子树不应继续保持展开状态。
+ *
+ * Code Logic（这个函数做什么）:
+ *   复制 Set 并过滤目标目录及其后代路径；没有变化时返回原 Set。
+ */
+export function dropExpandedPathTree(paths: Set<string>, path: string): Set<string> {
+  let changed = false;
+  const nextPaths = new Set<string>();
+  for (const entryPath of paths) {
+    if (isSameOrDescendantPath(entryPath, path)) {
+      changed = true;
+      continue;
+    }
+    nextPaths.add(entryPath);
+  }
+  return changed ? nextPaths : paths;
 }
 
 /**
@@ -287,6 +346,53 @@ export function dirtyTabNames<Tab extends WorkbenchPathTabCandidate>(tabs: Tab[]
  */
 export function workbenchDirRequestKey(projectId: string, worktreeId: string | null, path: string): string {
   return JSON.stringify([projectId, worktreeId ?? 'main', path]);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   路径变更后需要让对应目录子树的旧请求失效，必须先从请求 key 中还原项目/worktree/path。
+ *
+ * Code Logic（这个函数做什么）:
+ *   解析 `workbenchDirRequestKey` 生成的 JSON tuple；不符合格式时返回 null。
+ */
+export function parseWorkbenchDirRequestKey(key: string): WorkbenchDirRequestParts | null {
+  try {
+    const parts: unknown = JSON.parse(key);
+    if (!Array.isArray(parts) || parts.length !== 3) return null;
+    const [projectId, worktreeId, path] = parts;
+    if (typeof projectId !== 'string' || typeof worktreeId !== 'string' || typeof path !== 'string') {
+      return null;
+    }
+    return {
+      projectId,
+      worktreeId: worktreeId === 'main' ? null : worktreeId,
+      path,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   删除/重命名目录后，只有同项目、同 worktree、同子树范围内的目录请求需要作废。
+ *
+ * Code Logic（这个函数做什么）:
+ *   解析请求 key 后比较 projectId/worktreeId，并用路径子树判断目标请求是否受影响。
+ */
+export function workbenchDirRequestKeyMatchesPath(
+  key: string,
+  projectId: string,
+  worktreeId: string | null,
+  path: string,
+): boolean {
+  const parts = parseWorkbenchDirRequestKey(key);
+  return Boolean(
+    parts &&
+      parts.projectId === projectId &&
+      parts.worktreeId === worktreeId &&
+      isSameOrDescendantPath(parts.path, path),
+  );
 }
 
 /**
