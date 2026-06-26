@@ -33,11 +33,11 @@
   --git-ref-local: var(--screenshot-selection);
   --git-ref-remote: #a855f7;
   --git-ref-tag: var(--warn);
-  --terminal-bg: #141210;
-  --terminal-chrome: #211f1c;
-  --terminal-fg: #f5f1e8;
-  --terminal-muted: #9b968b;
-  --terminal-border: #302d29;
+  --terminal-bg: #faf9f5;
+  --terminal-chrome: #f0eee6;
+  --terminal-fg: #141413;
+  --terminal-muted: #6f6d67;
+  --terminal-border: #d9d5c9;
 
   /* ── 字体 ── */
   --font-display: "Anthropic Serif", Georgia, "Times New Roman", serif;
