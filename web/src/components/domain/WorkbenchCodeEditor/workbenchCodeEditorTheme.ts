@@ -4,10 +4,6 @@ import { EditorView } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
 
 export const WORKBENCH_ONE_DARK_PRO_COLORS = {
-  background: '#282c34',
-  darkBackground: '#21252b',
-  highlightBackground: '#2c313a',
-  selection: '#3e4451',
   cursor: '#528bff',
   foreground: '#abb2bf',
   muted: '#7d8799',
@@ -21,11 +17,11 @@ export const WORKBENCH_ONE_DARK_PRO_COLORS = {
   invalid: '#ffffff',
 } as const;
 
-const WORKBENCH_ONE_DARK_PRO_THEME = EditorView.theme(
+export const WORKBENCH_CODE_EDITOR_THEME: Extension = EditorView.theme(
   {
     '&': {
-      color: WORKBENCH_ONE_DARK_PRO_COLORS.foreground,
-      backgroundColor: WORKBENCH_ONE_DARK_PRO_COLORS.background,
+      color: 'var(--fg)',
+      backgroundColor: 'var(--surface)',
     },
     '.cm-content': {
       caretColor: WORKBENCH_ONE_DARK_PRO_COLORS.cursor,
@@ -34,59 +30,59 @@ const WORKBENCH_ONE_DARK_PRO_THEME = EditorView.theme(
       borderLeftColor: WORKBENCH_ONE_DARK_PRO_COLORS.cursor,
     },
     '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
-      backgroundColor: WORKBENCH_ONE_DARK_PRO_COLORS.selection,
+      backgroundColor: 'var(--accent-soft)',
     },
     '.cm-panels': {
-      backgroundColor: WORKBENCH_ONE_DARK_PRO_COLORS.darkBackground,
-      color: WORKBENCH_ONE_DARK_PRO_COLORS.foreground,
+      backgroundColor: 'var(--surface-warm)',
+      color: 'var(--fg)',
     },
     '.cm-searchMatch': {
-      backgroundColor: '#72a1ff59',
-      outline: '1px solid #457dff',
+      backgroundColor: 'var(--accent-soft)',
+      outline: '1px solid var(--accent)',
     },
     '.cm-searchMatch.cm-searchMatch-selected': {
-      backgroundColor: '#6199ff2f',
+      backgroundColor: 'color-mix(in oklab, var(--accent) 22%, transparent)',
     },
     '.cm-activeLine': {
-      backgroundColor: '#6699ff0b',
+      backgroundColor: 'var(--accent-soft)',
     },
     '.cm-selectionMatch': {
-      backgroundColor: '#aafe661a',
+      backgroundColor: 'color-mix(in oklab, var(--success) 14%, transparent)',
     },
     '&.cm-focused .cm-matchingBracket, &.cm-focused .cm-nonmatchingBracket': {
-      backgroundColor: '#bad0f847',
+      backgroundColor: 'color-mix(in oklab, var(--accent) 22%, transparent)',
     },
     '.cm-gutters': {
-      backgroundColor: WORKBENCH_ONE_DARK_PRO_COLORS.background,
-      color: WORKBENCH_ONE_DARK_PRO_COLORS.muted,
+      backgroundColor: 'var(--bg)',
+      color: 'var(--meta)',
       border: 'none',
     },
     '.cm-activeLineGutter': {
-      backgroundColor: WORKBENCH_ONE_DARK_PRO_COLORS.highlightBackground,
+      backgroundColor: 'var(--surface-warm)',
     },
     '.cm-foldPlaceholder': {
       backgroundColor: 'transparent',
       border: 'none',
-      color: WORKBENCH_ONE_DARK_PRO_COLORS.foreground,
+      color: 'var(--fg)',
     },
     '.cm-tooltip': {
       border: 'none',
-      backgroundColor: '#353a42',
+      backgroundColor: 'var(--surface-warm)',
+      color: 'var(--fg)',
     },
     '.cm-tooltip .cm-tooltip-arrow:before': {
       borderTopColor: 'transparent',
       borderBottomColor: 'transparent',
     },
     '.cm-tooltip .cm-tooltip-arrow:after': {
-      borderTopColor: '#353a42',
-      borderBottomColor: '#353a42',
+      borderTopColor: 'var(--surface-warm)',
+      borderBottomColor: 'var(--surface-warm)',
     },
     '.cm-tooltip-autocomplete > ul > li[aria-selected]': {
-      backgroundColor: WORKBENCH_ONE_DARK_PRO_COLORS.highlightBackground,
-      color: WORKBENCH_ONE_DARK_PRO_COLORS.foreground,
+      backgroundColor: 'var(--accent-soft)',
+      color: 'var(--fg)',
     },
-  },
-  { dark: true },
+  }
 );
 
 const WORKBENCH_ONE_DARK_PRO_HIGHLIGHT = HighlightStyle.define([
@@ -146,7 +142,6 @@ const WORKBENCH_ONE_DARK_PRO_HIGHLIGHT = HighlightStyle.define([
   { tag: tags.invalid, color: WORKBENCH_ONE_DARK_PRO_COLORS.invalid },
 ]);
 
-export const WORKBENCH_ONE_DARK_PRO_EXTENSION: Extension = [
-  WORKBENCH_ONE_DARK_PRO_THEME,
+export const WORKBENCH_ONE_DARK_PRO_SYNTAX_EXTENSION: Extension = [
   syntaxHighlighting(WORKBENCH_ONE_DARK_PRO_HIGHLIGHT),
 ];

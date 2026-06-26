@@ -6,7 +6,8 @@
  *   展示语法高亮、行号、折叠与搜索等基础编辑能力，同时在只读预览和可编辑文件之间复用同一套交互体验。
  *
  * Code Logic（这个组件做什么）:
- *   - 封装 @uiw/react-codemirror，统一 CodeMirror 的基础 setup、One Dark Pro 高亮主题和 100% 高度布局
+ *   - 封装 @uiw/react-codemirror，统一 CodeMirror 的基础 setup、随应用主题变化的编辑器背景和 100% 高度布局
+ *   - 单独注入 One Dark Pro 语法高亮扩展，避免 @uiw 默认 light theme 覆盖工作台视觉背景
  *   - 根据 language prop 通过 useMemo 计算语言扩展，未知语言返回空数组并按纯文本渲染
  *   - 将 CodeMirror 的 onChange value 透传给调用方，由上层负责保存、脏状态和文件生命周期
  */
@@ -16,7 +17,10 @@ import type { BasicSetupOptions } from '@uiw/react-codemirror';
 import { useCallback, useMemo } from 'react';
 import type { ReactElement } from 'react';
 import { getWorkbenchCodeEditorLanguageExtensions } from './workbenchCodeEditorLanguage';
-import { WORKBENCH_ONE_DARK_PRO_EXTENSION } from './workbenchCodeEditorTheme';
+import {
+  WORKBENCH_CODE_EDITOR_THEME,
+  WORKBENCH_ONE_DARK_PRO_SYNTAX_EXTENSION,
+} from './workbenchCodeEditorTheme';
 import styles from './WorkbenchCodeEditor.module.css';
 
 export interface WorkbenchCodeEditorProps {
@@ -42,7 +46,7 @@ const WORKBENCH_CODE_EDITOR_BASIC_SETUP: BasicSetupOptions = {
  *   切换只读和编辑模式，避免页面层重复配置 CodeMirror。
  *
  * Code Logic（这个组件做什么）:
- *   使用 useMemo 按 language 缓存语言扩展并追加 One Dark Pro theme/highlight，渲染 100% 高度的 CodeMirror，
+ *   使用 useMemo 按 language 缓存语言扩展并追加 One Dark Pro syntax highlight，渲染带自定义 theme prop 的 100% 高度 CodeMirror，
  *   并启用行号、折叠 gutter、当前行高亮、括号匹配和搜索快捷键；内容变化时只把最新字符串回传给 onChange。
  */
 export function WorkbenchCodeEditor({
@@ -52,7 +56,7 @@ export function WorkbenchCodeEditor({
   onChange,
 }: WorkbenchCodeEditorProps): ReactElement {
   const extensions = useMemo(
-    () => [...getWorkbenchCodeEditorLanguageExtensions(language), WORKBENCH_ONE_DARK_PRO_EXTENSION],
+    () => [...getWorkbenchCodeEditorLanguageExtensions(language), WORKBENCH_ONE_DARK_PRO_SYNTAX_EXTENSION],
     [language],
   );
   const handleChange = useCallback(
@@ -70,6 +74,7 @@ export function WorkbenchCodeEditor({
         editable={!readOnly}
         readOnly={readOnly}
         extensions={extensions}
+        theme={WORKBENCH_CODE_EDITOR_THEME}
         onChange={handleChange}
         basicSetup={WORKBENCH_CODE_EDITOR_BASIC_SETUP}
       />
