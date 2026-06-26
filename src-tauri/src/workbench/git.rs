@@ -104,6 +104,81 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, AppError> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     用户合并并删除 worktree 后，本地分支引用可能仍残留；再次创建同名 worktree 前需要判断分支名是否仍被占用。
+///
+/// Code Logic（这个函数做什么）:
+///     使用 `git show-ref --verify --quiet refs/heads/<branch>` 检查本地分支是否存在，退出码 1 视为不存在。
+fn local_branch_exists(repo_path: &Path, branch: &str) -> Result<bool, AppError> {
+    if branch.trim().is_empty() {
+        return Ok(false);
+    }
+    let local_ref = format!("refs/heads/{branch}");
+    let output = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", &local_ref])
+        .current_dir(repo_path)
+        .output()?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+    Err(AppError::generic(format!(
+        "Git 命令失败: {}",
+        git_failure_message(&output)
+    )))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     只有已经合入目标基线的旧分支才可以由 Workbench 自动删除，避免覆盖用户尚未合并的工作。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 `git merge-base --is-ancestor <branch> <base>`；退出码 0 表示 branch 已被 base 包含，1 表示未合并。
+fn local_branch_merged_into(
+    repo_path: &Path,
+    branch: &str,
+    base_ref: &str,
+) -> Result<bool, AppError> {
+    let output = Command::new("git")
+        .args(["merge-base", "--is-ancestor", branch, base_ref])
+        .current_dir(repo_path)
+        .output()?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+    Err(AppError::generic(format!(
+        "Git 命令失败: {}",
+        git_failure_message(&output)
+    )))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Workbench 自动清理已完成 worktree 时，也应释放对应本地分支名，避免用户下次创建同名工作区失败。
+///
+/// Code Logic（这个函数做什么）:
+///     若本地分支存在且已合入 base_ref，则用 `git branch -D <branch>` 删除；未合并时返回业务错误。
+pub fn delete_local_branch_if_merged(
+    repo_path: &Path,
+    branch: &str,
+    base_ref: &str,
+) -> Result<bool, AppError> {
+    let branch = branch.trim();
+    if branch.is_empty() || !local_branch_exists(repo_path, branch)? {
+        return Ok(false);
+    }
+    if !local_branch_merged_into(repo_path, branch, base_ref)? {
+        return Err(AppError::generic(format!(
+            "本地分支 {branch} 已存在且尚未合并到 {base_ref}，请换一个分支名，或先手动处理该分支"
+        )));
+    }
+    run_git(repo_path, &["branch", "-D", branch])?;
+    Ok(true)
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     用户添加的项目可能是子目录，worktree 操作必须先找到 Git 仓库根目录。
 ///
 /// Code Logic（这个函数做什么）:
@@ -183,7 +258,7 @@ pub fn current_branch(path: &Path) -> Option<String> {
 ///     用户输入分支名后，Workbench 需要在本机创建对应 Git worktree 和新分支。
 ///
 /// Code Logic（这个函数做什么）:
-///     执行 `git worktree add -b <branch> <path> <base>`；base 为空时使用 HEAD。
+///     先清理已合并的同名旧本地分支，再执行 `git worktree add -b <branch> <path> <base>`；base 为空时使用 HEAD。
 pub fn create_worktree(
     repo_path: &Path,
     worktree_path: &Path,
@@ -194,6 +269,7 @@ pub fn create_worktree(
     let base_ref = base
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("HEAD");
+    delete_local_branch_if_merged(repo_path, branch, base_ref)?;
     run_git(
         repo_path,
         &["worktree", "add", "-b", branch, &target, base_ref],
@@ -807,6 +883,53 @@ UU web/src/App.tsx
         assert_eq!(status.behind, 1);
         assert_eq!(status.changed, 3);
         assert_eq!(status.conflicts, 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户通过 Workbench 合并并清理旧 worktree 后，Git 本地分支可能残留；再次创建同名 worktree 不应报 branch already exists。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建已合入 HEAD 的同名旧分支，调用 create_worktree，断言后端会清理旧分支并基于当前 HEAD 重建 worktree。
+    #[test]
+    fn create_worktree_reuses_name_after_merged_branch_cleanup() {
+        let root = temp_git_dir("workbench-create-stale-branch");
+        let repo = root.join("repo");
+        let worktree = root.join("feature-test-worktree");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "main"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+        git_test_command(&repo, &["checkout", "-b", "feature/test"]);
+        fs::write(repo.join("feature.txt"), "feature\n").expect("write feature");
+        git_test_command(&repo, &["add", "feature.txt"]);
+        git_test_command(&repo, &["commit", "-m", "feature"]);
+        git_test_command(&repo, &["checkout", "main"]);
+        git_test_command(
+            &repo,
+            &["merge", "--no-ff", "feature/test", "-m", "merge feature"],
+        );
+        let merged_head = git_test_command(&repo, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+
+        create_worktree(&repo, &worktree, "feature/test", Some("HEAD"))
+            .expect("create worktree from reusable branch name");
+
+        let worktree_head = git_test_command(&worktree, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+        assert_eq!(worktree_head, merged_head);
+        assert_eq!(
+            git_test_command(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+            "feature/test"
+        );
+
+        let _ = remove_worktree(&repo, &worktree, true);
+        let _ = fs::remove_dir_all(root);
     }
 
     /// Business Logic（为什么需要这个测试）:

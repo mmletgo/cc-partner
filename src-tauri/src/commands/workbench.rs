@@ -1115,7 +1115,7 @@ pub async fn merge_workbench_worktree(
         &mut stages,
         MERGE_STAGE_CLEANUP,
         "running",
-        "正在删除 worktree 元数据和磁盘工作区",
+        "正在删除 worktree 元数据、磁盘工作区和已合并分支",
     );
     stage_result(
         cleanup_merged_worktree(&state, &project, &row).await,
@@ -1132,7 +1132,7 @@ pub async fn merge_workbench_worktree(
         &mut stages,
         MERGE_STAGE_CLEANUP,
         "completed",
-        "已删除 worktree 元数据和磁盘工作区",
+        "已删除 worktree 元数据、磁盘工作区和已合并分支",
     );
 
     Ok(WorkbenchMergeResultDto {
@@ -1280,6 +1280,9 @@ async fn cleanup_merged_worktree(
         .await?;
     let repo_root = workbench_git::repo_root(Path::new(&project.path))?;
     workbench_git::remove_worktree(Path::new(&repo_root), Path::new(&row.path), false)?;
+    if let Some(branch) = row.branch.as_deref() {
+        workbench_git::delete_local_branch_if_merged(Path::new(&repo_root), branch, "HEAD")?;
+    }
     state.workbench_worktree_repo.delete(&row.id).await?;
     Ok(())
 }
