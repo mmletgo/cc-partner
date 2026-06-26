@@ -12,6 +12,7 @@
  */
 
 import CodeMirror from '@uiw/react-codemirror';
+import type { BasicSetupOptions } from '@uiw/react-codemirror';
 import type { Extension } from '@codemirror/state';
 import { css } from '@codemirror/lang-css';
 import { html } from '@codemirror/lang-html';
@@ -23,7 +24,7 @@ import { rust } from '@codemirror/lang-rust';
 import { StreamLanguage } from '@codemirror/language';
 import { shell } from '@codemirror/legacy-modes/mode/shell';
 import { toml } from '@codemirror/legacy-modes/mode/toml';
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import type { ReactElement } from 'react';
 import styles from './WorkbenchCodeEditor.module.css';
 
@@ -33,6 +34,14 @@ export interface WorkbenchCodeEditorProps {
   readOnly?: boolean;
   onChange: (value: string) => void;
 }
+
+const WORKBENCH_CODE_EDITOR_BASIC_SETUP: BasicSetupOptions = {
+  lineNumbers: true,
+  foldGutter: true,
+  highlightActiveLine: true,
+  bracketMatching: true,
+  searchKeymap: true,
+};
 
 /**
  * 计算 CodeMirror 语言扩展
@@ -109,6 +118,12 @@ export function WorkbenchCodeEditor({
   onChange,
 }: WorkbenchCodeEditorProps): ReactElement {
   const extensions = useMemo(() => languageExtensions(language), [language]);
+  const handleChange = useCallback(
+    (next: string) => {
+      onChange(next);
+    },
+    [onChange],
+  );
 
   return (
     <div className={styles.editorShell}>
@@ -118,14 +133,8 @@ export function WorkbenchCodeEditor({
         editable={!readOnly}
         readOnly={readOnly}
         extensions={extensions}
-        onChange={(next) => onChange(next)}
-        basicSetup={{
-          lineNumbers: true,
-          foldGutter: true,
-          highlightActiveLine: true,
-          bracketMatching: true,
-          searchKeymap: true,
-        }}
+        onChange={handleChange}
+        basicSetup={WORKBENCH_CODE_EDITOR_BASIC_SETUP}
       />
     </div>
   );
