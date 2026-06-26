@@ -1180,12 +1180,32 @@ export function Workbench() {
   }, [sessions]);
 
   useEffect(() => {
-    fileTabsRef.current = fileTabs;
-  }, [fileTabs]);
-
-  useEffect(() => {
     activeFileTabIdRef.current = activeFileTabId;
   }, [activeFileTabId]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   文件 tab 的异步 stale guard 依赖 fileTabsRef 读取最新内容；如果只等 React effect 同步 ref，
+   *   编辑、保存或预览请求返回的窄窗口内可能读到旧 tab 状态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   基于 fileTabsRef.current 计算下一份 tabs，立即写入 ref，再调用 React setState；不把副作用放进
+   *   React functional updater，避免 Strict Mode 下 updater 重放带来不一致。
+   */
+  const setFileTabsState = useCallback(
+    (
+      updater:
+        | WorkbenchOpenFileTab[]
+        | ((currentTabs: WorkbenchOpenFileTab[]) => WorkbenchOpenFileTab[]),
+    ) => {
+      const currentTabs = fileTabsRef.current;
+      const nextTabs = typeof updater === 'function' ? updater(currentTabs) : updater;
+      fileTabsRef.current = nextTabs;
+      setFileTabs(nextTabs);
+      return nextTabs;
+    },
+    [],
+  );
 
   useEffect(() => {
     return deferEffect(() => {
@@ -1251,7 +1271,6 @@ export function Workbench() {
         openFileRequestSeqRef.current += 1;
         formatRequestSeqRef.current = {};
         sqlitePreviewRequestSeqRef.current = {};
-        fileTabsRef.current = [];
         activeFileTabIdRef.current = null;
         knownSessionIdsRef.current = new Set();
         setSessions([]);
@@ -1266,7 +1285,7 @@ export function Workbench() {
         setExpandedPaths(new Set());
         setSelectedPath(null);
         setSelectedInfo(null);
-        setFileTabs([]);
+        setFileTabsState([]);
         setActiveFileTabId(null);
         setWorkspaceView('terminal');
         setFileSaving(false);
@@ -1279,7 +1298,6 @@ export function Workbench() {
       openFileRequestSeqRef.current += 1;
       formatRequestSeqRef.current = {};
       sqlitePreviewRequestSeqRef.current = {};
-      fileTabsRef.current = [];
       activeFileTabIdRef.current = null;
       setRootNodes([]);
       knownSessionIdsRef.current = new Set();
@@ -1292,7 +1310,7 @@ export function Workbench() {
       setExpandedPaths(new Set());
       setSelectedPath(null);
       setSelectedInfo(null);
-      setFileTabs([]);
+      setFileTabsState([]);
       setActiveFileTabId(null);
       setWorkspaceView('terminal');
       setFileSaving(false);
@@ -1303,21 +1321,20 @@ export function Workbench() {
       void loadWorktrees(activeProjectId);
       void loadSessions(activeProjectId);
     });
-  }, [activeProjectId, clearMergeStagePanel, loadSessions, loadWorktrees]);
+  }, [activeProjectId, clearMergeStagePanel, loadSessions, loadWorktrees, setFileTabsState]);
 
   useEffect(() => {
     return deferEffect(() => {
       openFileRequestSeqRef.current += 1;
       formatRequestSeqRef.current = {};
       sqlitePreviewRequestSeqRef.current = {};
-      fileTabsRef.current = [];
       activeFileTabIdRef.current = null;
       setRootNodes([]);
       setChildrenByPath({});
       setExpandedPaths(new Set());
       setSelectedPath(null);
       setSelectedInfo(null);
-      setFileTabs([]);
+      setFileTabsState([]);
       setActiveFileTabId(null);
       setWorkspaceView('terminal');
       setFileSaving(false);
@@ -1329,7 +1346,7 @@ export function Workbench() {
         void loadDir('');
       }
     });
-  }, [activeProjectId, activeWorktreeId, loadDir]);
+  }, [activeProjectId, activeWorktreeId, loadDir, setFileTabsState]);
 
   useEffect(() => {
     if (inspectorTab !== 'history') return undefined;
@@ -1903,7 +1920,7 @@ export function Workbench() {
           mode: opened.capabilities.defaultMode,
         };
 
-        setFileTabs((currentTabs) => {
+        setFileTabsState((currentTabs) => {
           const existingTab = currentTabs.find((tab) => tab.id === tabId);
           if (!existingTab) {
             return [...currentTabs, freshTab];
@@ -1930,7 +1947,7 @@ export function Workbench() {
         );
       }
     },
-    [desktopUnavailableMessage, t],
+    [desktopUnavailableMessage, setFileTabsState, t],
   );
 
   const handleSelectNode = useCallback(
@@ -1983,21 +2000,21 @@ export function Workbench() {
    */
   const handleCloseFileTab = useCallback(
     (id: string) => {
-      if (!fileTabs.some((tab) => tab.id === id)) return;
+      const currentTabs = fileTabsRef.current;
+      if (!currentTabs.some((tab) => tab.id === id)) return;
       const removedTabIds = new Set([id]);
-      const nextTabs = fileTabs.filter((tab) => tab.id !== id);
+      const nextTabs = currentTabs.filter((tab) => tab.id !== id);
       const nextActiveTabId = nextActiveFileTabIdAfterRemoval(
-        fileTabs,
+        currentTabs,
         removedTabIds,
         activeFileTabIdRef.current,
       );
-      fileTabsRef.current = nextTabs;
       activeFileTabIdRef.current = nextActiveTabId;
-      setFileTabs(nextTabs);
+      setFileTabsState(nextTabs);
       setActiveFileTabId(nextActiveTabId);
       setWorkspaceView(nextActiveTabId ? 'files' : 'terminal');
     },
-    [fileTabs],
+    [setFileTabsState],
   );
 
   /**
@@ -2019,10 +2036,10 @@ export function Workbench() {
    *   按 tab id 更新 content 并设置 dirty=true，其他 tab 保持不变。
    */
   const handleFileContentChange = useCallback((id: string, value: string) => {
-    setFileTabs((currentTabs) =>
+    setFileTabsState((currentTabs) =>
       currentTabs.map((tab) => (tab.id === id ? { ...tab, content: value, dirty: true } : tab)),
     );
-  }, []);
+  }, [setFileTabsState]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -2032,10 +2049,10 @@ export function Workbench() {
    *   按 tab id 写入新的 mode，不改变文件内容和保存状态。
    */
   const handleFileModeChange = useCallback((id: string, mode: WorkbenchOpenFileTab['mode']) => {
-    setFileTabs((currentTabs) =>
+    setFileTabsState((currentTabs) =>
       currentTabs.map((tab) => (tab.id === id ? { ...tab, mode } : tab)),
     );
-  }, []);
+  }, [setFileTabsState]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -2071,7 +2088,7 @@ export function Workbench() {
    */
   const handleSaveFileTab = useCallback(
     async (id: string) => {
-      const tab = fileTabs.find((candidate) => candidate.id === id);
+      const tab = fileTabsRef.current.find((candidate) => candidate.id === id);
       if (!tab) return;
 
       const baseHash = tab.opened.text?.baseHash;
@@ -2108,7 +2125,7 @@ export function Workbench() {
           return;
         }
 
-        setFileTabs((currentTabs) =>
+        setFileTabsState((currentTabs) =>
           currentTabs.map((currentTab) => {
             if (currentTab.id !== id) return currentTab;
             return {
@@ -2156,9 +2173,9 @@ export function Workbench() {
     },
     [
       desktopUnavailableMessage,
-      fileTabs,
       loadPathInfo,
       refreshParentDir,
+      setFileTabsState,
       selectedPath,
       t,
       validateStructuredFileTab,
@@ -2175,7 +2192,7 @@ export function Workbench() {
    */
   const handleFormatFileTab = useCallback(
     async (id: string) => {
-      const tab = fileTabs.find((candidate) => candidate.id === id);
+      const tab = fileTabsRef.current.find((candidate) => candidate.id === id);
       if (!tab) return;
       const kind =
         tab.opened.detectedType === 'json' || tab.opened.detectedType === 'toml'
@@ -2209,16 +2226,7 @@ export function Workbench() {
         ) {
           return;
         }
-        fileTabsRef.current = fileTabsRef.current.map((currentTab) =>
-          currentTab.id === id
-            ? {
-                ...currentTab,
-                content: result.formatted,
-                dirty: true,
-              }
-            : currentTab,
-        );
-        setFileTabs((currentTabs) =>
+        setFileTabsState((currentTabs) =>
           currentTabs.map((currentTab) =>
             currentTab.id === id && currentTab.content === submittedContent
               ? {
@@ -2246,7 +2254,7 @@ export function Workbench() {
         );
       }
     },
-    [desktopUnavailableMessage, fileTabs, t, validateStructuredFileTab],
+    [desktopUnavailableMessage, setFileTabsState, t, validateStructuredFileTab],
   );
 
   /**
@@ -2259,7 +2267,7 @@ export function Workbench() {
    */
   const handleSelectSqliteTable = useCallback(
     async (id: string, table: string) => {
-      const tab = fileTabs.find((candidate) => candidate.id === id);
+      const tab = fileTabsRef.current.find((candidate) => candidate.id === id);
       const projectId = activeProjectIdRef.current;
       if (!tab || !projectId) return;
       const worktreeId = activeWorktreeIdRef.current;
@@ -2283,18 +2291,7 @@ export function Workbench() {
         ) {
           return;
         }
-        fileTabsRef.current = fileTabsRef.current.map((currentTab) =>
-          currentTab.id === id
-            ? {
-                ...currentTab,
-                opened: {
-                  ...currentTab.opened,
-                  sqlite,
-                },
-              }
-            : currentTab,
-        );
-        setFileTabs((currentTabs) =>
+        setFileTabsState((currentTabs) =>
           currentTabs.map((currentTab) =>
             currentTab.id === id
               ? {
@@ -2321,7 +2318,7 @@ export function Workbench() {
         );
       }
     },
-    [desktopUnavailableMessage, fileTabs, t],
+    [desktopUnavailableMessage, setFileTabsState, t],
   );
 
   const handleCreateEntry = useCallback(
@@ -2428,8 +2425,7 @@ export function Workbench() {
           },
         };
       });
-      fileTabsRef.current = nextTabs;
-      setFileTabs(nextTabs);
+      setFileTabsState(nextTabs);
       const nextActiveFileTabId = activeFileTabIdRef.current
         ? renamedTabIds.get(activeFileTabIdRef.current) ?? activeFileTabIdRef.current
         : null;
@@ -2450,7 +2446,7 @@ export function Workbench() {
         displayErrorMessage(error, t('workbench:errors.renamePath'), desktopUnavailableMessage),
       );
     }
-  }, [desktopUnavailableMessage, refreshParentDir, renameName, selectedInfo, t]);
+  }, [desktopUnavailableMessage, refreshParentDir, renameName, selectedInfo, setFileTabsState, t]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -2489,9 +2485,8 @@ export function Workbench() {
         activeFileTabIdRef.current,
       );
       const nextTabs = fileTabsRef.current.filter((tab) => !removedTabIds.has(tab.id));
-      fileTabsRef.current = nextTabs;
       activeFileTabIdRef.current = nextActiveTabId;
-      setFileTabs(nextTabs);
+      setFileTabsState(nextTabs);
       setActiveFileTabId(nextActiveTabId);
       setWorkspaceView(nextActiveTabId ? 'files' : 'terminal');
       setSelectedPath(null);
@@ -2509,7 +2504,7 @@ export function Workbench() {
         displayErrorMessage(error, t('workbench:errors.deletePath'), desktopUnavailableMessage),
       );
     }
-  }, [desktopUnavailableMessage, refreshParentDir, selectedInfo, t]);
+  }, [desktopUnavailableMessage, refreshParentDir, selectedInfo, setFileTabsState, t]);
 
   const handleCopySelectedPath = useCallback(async () => {
     if (!selectedInfo) return;
