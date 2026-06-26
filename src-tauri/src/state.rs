@@ -91,6 +91,12 @@ pub struct AppState {
     /// 工作台 PTY 会话注册表（运行期 PTY/tmux attach 句柄，元数据由 workbench_session_repo 持久化）
     #[allow(dead_code)]
     pub workbench_sessions: Arc<crate::workbench::sessions::WorkbenchSessionRegistry>,
+    /// Workbench 远端事件广播通道（本机 terminal/merge 事件发布为 NDJSON，供局域网远端订阅）
+    pub workbench_remote_events:
+        tokio::sync::broadcast::Sender<crate::workbench::remote_events::WorkbenchRemoteEvent>,
+    /// Workbench 远端事件桥接登记表（本机订阅其他设备 `/api/workbench/events`，按设备去重）
+    pub workbench_remote_event_bridges:
+        Arc<crate::workbench::remote_events::RemoteEventBridgeRegistry>,
     /// 工作台 tmux 依赖安装/检测状态机（供 check/install/status/cancel 四个命令共享）
     pub workbench_dependency:
         Arc<crate::workbench::dependencies::WorkbenchDependencyInstallRuntime>,

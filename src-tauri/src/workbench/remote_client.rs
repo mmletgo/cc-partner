@@ -12,12 +12,14 @@ use crate::error::AppError;
 use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchOpenFileDto, WorkbenchPathInfo,
     WorkbenchProjectDto, WorkbenchRemoteDirectoryEntryDto, WorkbenchRemotePathInfoDto,
-    WorkbenchRemoteRootDto, WorkbenchSaveTextResultDto, WorkbenchWorktreeDto,
+    WorkbenchRemoteRootDto, WorkbenchSaveTextResultDto, WorkbenchSessionDto, WorkbenchWorktreeDto,
 };
 use crate::workbench::remote_protocol::{
-    RemoteCreatePathReq, RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteGitCommitsReq,
-    RemoteListDirReq, RemoteOpenFileReq, RemotePathInfoReq, RemoteProjectReq, RemoteRenamePathReq,
-    RemoteSaveTextReq,
+    RemoteCreatePathReq, RemoteCreateSessionReq, RemoteCreateWorktreeReq, RemoteDeletePathReq,
+    RemoteFocusedSessionReq, RemoteFocusedSessionResp, RemoteGitCommitsReq, RemoteListDirReq,
+    RemoteListSessionsReq, RemoteOpenFileReq, RemotePathInfoReq, RemoteProjectReq,
+    RemoteRenamePathReq, RemoteRenameSessionReq, RemoteResizeSessionReq, RemoteSaveTextReq,
+    RemoteSessionReq, RemoteSplitPaneReq, RemoteWriteSessionInputReq,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -388,6 +390,241 @@ impl RemoteWorkbenchClient {
         .await
     }
 
+    /// 列出远端终端会话。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     本机 remote shortcut 进入项目后，需要展示该远端项目下已有的 terminal window。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/list`，请求体 `{projectId?}`，解析 session DTO 列表。
+    pub async fn list_sessions(
+        &self,
+        base_url: &str,
+        project_id: Option<&str>,
+    ) -> Result<Vec<WorkbenchSessionDto>, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/sessions/list"),
+            &RemoteListSessionsReq {
+                project_id: project_id.map(str::to_string),
+            },
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 创建远端终端会话。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户在 remote shortcut 上新建 terminal window 时，真实 PTY/tmux 必须创建在远端设备。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/create`，解析远端创建出的 session DTO。
+    pub async fn create_session(
+        &self,
+        base_url: &str,
+        req: RemoteCreateSessionReq,
+    ) -> Result<WorkbenchSessionDto, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/sessions/create"),
+            &req,
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
+    /// 向远端终端写入输入。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     本机 xterm 捕获键盘输入后，需要转发到远端设备的对应 PTY writer。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/write`，成功后忽略对端 `{ok}` 响应。
+    pub async fn write_input(
+        &self,
+        base_url: &str,
+        session_id: &str,
+        data: &str,
+    ) -> Result<(), AppError> {
+        let _: serde_json::Value = self
+            .post_json(
+                endpoint_url(base_url, "/api/workbench/sessions/write"),
+                &RemoteWriteSessionInputReq {
+                    session_id: session_id.to_string(),
+                    data: data.to_string(),
+                },
+                RemoteRequestTimeoutKind::Short,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 调整远端终端尺寸。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     本机 terminal viewport 变化时，远端 PTY/tmux 也需要收到新的 cols/rows。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/resize`，成功后忽略对端 `{ok}` 响应。
+    pub async fn resize(
+        &self,
+        base_url: &str,
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), AppError> {
+        let _: serde_json::Value = self
+            .post_json(
+                endpoint_url(base_url, "/api/workbench/sessions/resize"),
+                &RemoteResizeSessionReq {
+                    session_id: session_id.to_string(),
+                    cols,
+                    rows,
+                },
+                RemoteRequestTimeoutKind::Short,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 聚焦远端终端 window。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     本机顶部 tab 切换到 remote terminal 时，远端 tmux current window 需要同步切换。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/focus`，成功后忽略对端 `{ok}` 响应。
+    pub async fn focus(&self, base_url: &str, session_id: &str) -> Result<(), AppError> {
+        let _: serde_json::Value = self
+            .post_json(
+                endpoint_url(base_url, "/api/workbench/sessions/focus"),
+                &RemoteSessionReq {
+                    session_id: session_id.to_string(),
+                },
+                RemoteRequestTimeoutKind::Short,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 查询远端当前聚焦终端 window。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户在远端 tmux status bar 内切换 window 后，本机 UI 需要知道当前 active session。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/focused`，解析远端 local sessionId 或 None。
+    pub async fn focused(
+        &self,
+        base_url: &str,
+        project_id: &str,
+        worktree_id: Option<&str>,
+    ) -> Result<Option<String>, AppError> {
+        let response: RemoteFocusedSessionResp = self
+            .post_json(
+                endpoint_url(base_url, "/api/workbench/sessions/focused"),
+                &RemoteFocusedSessionReq {
+                    project_id: project_id.to_string(),
+                    worktree_id: worktree_id.map(str::to_string),
+                },
+                RemoteRequestTimeoutKind::Short,
+            )
+            .await?;
+        Ok(response.session_id)
+    }
+
+    /// 创建远端 tmux pane 分屏。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote terminal 需要复用远端 tmux 的真实 pane 布局能力。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/split-pane`，成功后忽略对端 `{ok}` 响应。
+    pub async fn split_pane(
+        &self,
+        base_url: &str,
+        session_id: &str,
+        direction: &str,
+    ) -> Result<(), AppError> {
+        let _: serde_json::Value = self
+            .post_json(
+                endpoint_url(base_url, "/api/workbench/sessions/split-pane"),
+                &RemoteSplitPaneReq {
+                    session_id: session_id.to_string(),
+                    direction: direction.to_string(),
+                },
+                RemoteRequestTimeoutKind::Short,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 关闭远端当前 pane。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户关闭 remote terminal pane 时，真实 kill-pane/close-window 应在远端设备执行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/close-pane`，解析 `closedWindow` 布尔值。
+    pub async fn close_pane(&self, base_url: &str, session_id: &str) -> Result<bool, AppError> {
+        let response: serde_json::Value = self
+            .post_json(
+                endpoint_url(base_url, "/api/workbench/sessions/close-pane"),
+                &RemoteSessionReq {
+                    session_id: session_id.to_string(),
+                },
+                RemoteRequestTimeoutKind::Short,
+            )
+            .await?;
+        Ok(response
+            .get("closedWindow")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
+    }
+
+    /// 关闭远端终端会话。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户关闭 remote terminal tab 时，远端 registry、SQLite 和 PTY/tmux 后端都应清理。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/close`，成功后忽略对端 `{ok}` 响应。
+    pub async fn close_session(&self, base_url: &str, session_id: &str) -> Result<(), AppError> {
+        let _: serde_json::Value = self
+            .post_json(
+                endpoint_url(base_url, "/api/workbench/sessions/close"),
+                &RemoteSessionReq {
+                    session_id: session_id.to_string(),
+                },
+                RemoteRequestTimeoutKind::Short,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 重命名远端终端会话。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户给 remote terminal tab 改名时，远端 tmux window 与持久化 row 需要同步更新。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/rename`，解析更新后的 session DTO。
+    pub async fn rename_session(
+        &self,
+        base_url: &str,
+        session_id: &str,
+        name: &str,
+    ) -> Result<WorkbenchSessionDto, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/sessions/rename"),
+            &RemoteRenameSessionReq {
+                session_id: session_id.to_string(),
+                name: name.to_string(),
+            },
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
     /// Business Logic（为什么需要这个函数）:
     ///     远端 Workbench GET 调用都需要统一处理网络错误、HTTP 状态码和 JSON 解析错误。
     ///
@@ -554,8 +791,9 @@ mod tests {
     use super::*;
     use crate::workbench::models::{
         WorkbenchPathInfo, WorkbenchRemoteDirectoryEntryDto, WorkbenchSaveTextResultDto,
-        WorkbenchWorktreeDto,
+        WorkbenchSessionDto, WorkbenchWorktreeDto,
     };
+    use crate::workbench::remote_protocol::RemoteCreateSessionReq;
     use axum::extract::State;
     use axum::routing::post;
     use axum::{http::StatusCode, Json, Router};
@@ -811,5 +1049,70 @@ mod tests {
         assert_eq!(items[0].id, "inner-main");
         let body = seen_body.lock().unwrap().clone().unwrap();
         assert_eq!(body["projectId"], "inner-project");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     本机 remote shortcut 创建 terminal window 时，真实会话必须创建在远端设备的 local project 下。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动临时 HTTP 服务接收 sessions/create 请求，断言 client 发送 camelCase body 并解析 session DTO。
+    #[tokio::test]
+    async fn create_session_posts_camel_case_body_and_parses_session() {
+        let seen_body = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/api/workbench/sessions/create",
+                post(
+                    |State(seen_body): State<Arc<Mutex<Option<Value>>>>,
+                     Json(body): Json<Value>| async move {
+                        *seen_body.lock().unwrap() = Some(body);
+                        Json(WorkbenchSessionDto {
+                            id: "inner-session".to_string(),
+                            project_id: "inner-project".to_string(),
+                            worktree_id: Some("inner-worktree".to_string()),
+                            name: "Remote App".to_string(),
+                            command: "/bin/zsh".to_string(),
+                            cwd: "/repo".to_string(),
+                            status: "running".to_string(),
+                            cols: 120,
+                            rows: 36,
+                            started_at: "2026-06-26T00:00:00Z".to_string(),
+                            exited_at: None,
+                            exit_code: None,
+                            supports_panes: true,
+                            pane_count: 1,
+                        })
+                    },
+                ),
+            )
+            .with_state(seen_body.clone());
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = RemoteWorkbenchClient::new();
+
+        let session = client
+            .create_session(
+                &format!("http://{addr}"),
+                RemoteCreateSessionReq {
+                    project_id: "inner-project".to_string(),
+                    worktree_id: Some("inner-worktree".to_string()),
+                    initial_cols: Some(120),
+                    initial_rows: Some(36),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(session.id, "inner-session");
+        let body = seen_body.lock().unwrap().clone().unwrap();
+        assert_eq!(body["projectId"], "inner-project");
+        assert_eq!(body["worktreeId"], "inner-worktree");
+        assert_eq!(body["initialCols"], 120);
+        assert_eq!(body["initialRows"], 36);
     }
 }

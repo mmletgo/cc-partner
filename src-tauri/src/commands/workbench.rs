@@ -26,10 +26,13 @@ use crate::workbench::sessions::{
 use crate::workbench::{
     file_content, file_preview, fs as workbench_fs, git as workbench_git, html_assets, projects,
     remote_client::RemoteWorkbenchClient,
+    remote_events::{
+        publish_workbench_remote_event, WorkbenchMergeProgressPayload, WorkbenchRemoteEvent,
+    },
     remote_ids::{parse_remote_entity_id, remote_entity_id, remote_project_id},
     remote_protocol::{
-        RemoteCreatePathReq, RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteRenamePathReq,
-        RemoteSaveTextReq,
+        RemoteCreatePathReq, RemoteCreateSessionReq, RemoteCreateWorktreeReq, RemoteDeletePathReq,
+        RemoteRenamePathReq, RemoteSaveTextReq,
     },
     sqlite_preview,
 };
@@ -719,6 +722,45 @@ fn map_remote_worktree_dtos(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     远端返回的 terminal session id/worktree id 只能在远端设备内部使用，本机 UI 需要带设备前缀的统一 ID。
+///
+/// Code Logic（这个函数做什么）:
+///     遍历远端 session DTO，把 session id 和可选 worktree id 映射为 `remote:<device_id>:<inner>`；
+///     project_id 在项目上下文调用中改成本机 remote shortcut id，否则退化为远端 project 的 remote entity id。
+fn map_remote_session_dtos(
+    device_id: &str,
+    local_project_id: &str,
+    items: Vec<WorkbenchSessionDto>,
+) -> Vec<WorkbenchSessionDto> {
+    map_remote_session_dtos_with_project(device_id, Some(local_project_id), items)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     session-id-only 命令没有本机 shortcut projectId，但返回 DTO 仍不能泄露裸远端 id。
+///
+/// Code Logic（这个函数做什么）:
+///     将 session/worktree id 加设备前缀；project_id 有本机 shortcut 时使用 shortcut，否则用 remote entity id 兜底。
+fn map_remote_session_dtos_with_project(
+    device_id: &str,
+    local_project_id: Option<&str>,
+    items: Vec<WorkbenchSessionDto>,
+) -> Vec<WorkbenchSessionDto> {
+    items
+        .into_iter()
+        .map(|mut item| {
+            item.id = remote_entity_id(device_id, &item.id);
+            item.project_id = local_project_id
+                .map(str::to_string)
+                .unwrap_or_else(|| remote_entity_id(device_id, &item.project_id));
+            item.worktree_id = item
+                .worktree_id
+                .map(|worktree_id| remote_entity_id(device_id, &worktree_id));
+            item
+        })
+        .collect()
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     本机前端传回的 remote worktreeId 需要剥掉设备前缀后才能发给远端设备。
 ///
 /// Code Logic（这个函数做什么）:
@@ -736,6 +778,33 @@ fn remote_inner_worktree_id(
         return Err(AppError::generic("远端 worktree 不属于当前设备"));
     }
     Ok(Some(parsed.inner_id))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     session-id-only terminal 命令需要从统一 remote sessionId 中取得远端真实 sessionId。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 `remote:<device_id>:<inner_session_id>`，并校验设备 ID 与当前转发目标一致。
+fn remote_inner_session_id(device_id: &str, session_id: &str) -> Result<String, AppError> {
+    let parsed = parse_remote_entity_id(session_id)
+        .ok_or_else(|| AppError::generic("远端 session ID 格式无效"))?;
+    if parsed.device_id != device_id {
+        return Err(AppError::generic("远端 session 不属于当前设备"));
+    }
+    Ok(parsed.inner_id)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端 terminal 输出依赖长连接事件桥，list/create 之后必须确保对应设备只有一个桥接任务在运行。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 AppState 中的 RemoteEventBridgeRegistry 按 device_id 去重启动 `/api/workbench/events` 连接。
+fn ensure_remote_event_bridge(state: &AppState, device_id: &str, base_url: &str) {
+    state.workbench_remote_event_bridges.ensure_bridge(
+        device_id.to_string(),
+        base_url.to_string(),
+        state.app_handle.clone(),
+    );
 }
 
 /// 添加或重新打开一个本机项目文件夹的共享实现。
@@ -1517,6 +1586,14 @@ fn set_merge_stage(
         worktree_id: worktree_id.to_string(),
         stage: stage.clone(),
     };
+    publish_workbench_remote_event(
+        app,
+        WorkbenchRemoteEvent::MergeProgress(WorkbenchMergeProgressPayload {
+            project_id: project_id.to_string(),
+            worktree_id: worktree_id.to_string(),
+            stage: serde_json::to_value(stage.clone()).unwrap_or(Value::Null),
+        }),
+    );
     if let Err(error) = app.emit("workbench:merge-progress", event) {
         tracing::warn!("发送 Workbench merge 进度事件失败: {error}");
     }
@@ -2275,14 +2352,44 @@ pub async fn preview_workbench_html_asset(
 ///
 /// Code Logic（这个函数做什么）:
 ///     先从 SQLite 按需恢复缺失会话，再合并持久化列表和 registry 实时状态返回。
+pub(crate) async fn local_list_workbench_sessions(
+    state: &AppState,
+    app_handle: AppHandle,
+    project_id: Option<String>,
+) -> Result<Vec<WorkbenchSessionDto>, AppError> {
+    restore_persisted_sessions(state, app_handle, project_id.as_deref()).await?;
+    merged_session_dtos(state, project_id.as_deref()).await
+}
+
+/// 列出工作台终端会话。
+///
+/// Business Logic（为什么需要这个函数）:
+///     前端需要按项目查看本机或远端 terminal window；未选项目时保持本机列表，避免轮询全部远端设备。
+///
+/// Code Logic（这个函数做什么）:
+///     project_id 指向 remote shortcut 时转发到远端并映射 session/worktree id；否则调用本地 helper。
 #[tauri::command]
 pub async fn list_workbench_sessions(
     state: State<'_, AppState>,
     app_handle: AppHandle,
     project_id: Option<String>,
 ) -> Result<Vec<WorkbenchSessionDto>, AppError> {
-    restore_persisted_sessions(&state, app_handle, project_id.as_deref()).await?;
-    merged_session_dtos(&state, project_id.as_deref()).await
+    if let Some(project_id_value) = project_id.as_deref() {
+        let project = get_project(&state, project_id_value).await?;
+        if project.kind == "remote" {
+            let context = ensure_remote_project_context(&state, &project).await?;
+            let items = RemoteWorkbenchClient::new()
+                .list_sessions(&context.base_url, Some(&context.inner_project_id))
+                .await?;
+            ensure_remote_event_bridge(&state, &context.device_id, &context.base_url);
+            return Ok(map_remote_session_dtos(
+                &context.device_id,
+                &context.local_project_id,
+                items,
+            ));
+        }
+    }
+    local_list_workbench_sessions(&state, app_handle, project_id).await
 }
 
 /// 在项目目录中创建一个普通 PTY 终端会话。
@@ -2293,17 +2400,16 @@ pub async fn list_workbench_sessions(
 /// Code Logic（这个函数做什么）:
 ///     读取项目路径；调用 session registry 按前端初始尺寸创建 shell/tmux 会话，写入 SQLite，
 ///     并通过 Tauri event 推送输出与状态。
-#[tauri::command]
-pub async fn create_workbench_session(
-    state: State<'_, AppState>,
+pub(crate) async fn local_create_workbench_session(
+    state: &AppState,
     app_handle: AppHandle,
     project_id: String,
     worktree_id: Option<String>,
     initial_cols: Option<u16>,
     initial_rows: Option<u16>,
 ) -> Result<WorkbenchSessionDto, AppError> {
-    let project = get_project(&state, &project_id).await?;
-    let worktree = resolve_worktree(&state, &project, worktree_id.as_deref()).await?;
+    let project = get_project(state, &project_id).await?;
+    let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let row = state.workbench_sessions.create(
         app_handle,
         project,
@@ -2317,6 +2423,54 @@ pub async fn create_workbench_session(
     Ok(row.to_dto())
 }
 
+/// 在项目目录中创建一个普通 PTY 终端会话。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在 remote shortcut 上打开终端时，真实 shell 应运行在远端设备；本机项目仍走本机 registry。
+///
+/// Code Logic（这个函数做什么）:
+///     remote 项目恢复远端 local projectId，剥离 remote worktreeId 后调用远端 create-session 并映射 DTO。
+#[tauri::command]
+pub async fn create_workbench_session(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    project_id: String,
+    worktree_id: Option<String>,
+    initial_cols: Option<u16>,
+    initial_rows: Option<u16>,
+) -> Result<WorkbenchSessionDto, AppError> {
+    let project = get_project(&state, &project_id).await?;
+    if project.kind == "remote" {
+        let context = ensure_remote_project_context(&state, &project).await?;
+        let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
+        let item = RemoteWorkbenchClient::new()
+            .create_session(
+                &context.base_url,
+                RemoteCreateSessionReq {
+                    project_id: context.inner_project_id,
+                    worktree_id: inner_worktree_id,
+                    initial_cols,
+                    initial_rows,
+                },
+            )
+            .await?;
+        ensure_remote_event_bridge(&state, &context.device_id, &context.base_url);
+        return map_remote_session_dtos(&context.device_id, &context.local_project_id, vec![item])
+            .into_iter()
+            .next()
+            .ok_or_else(|| AppError::generic("远端 session 创建结果为空"));
+    }
+    local_create_workbench_session(
+        &state,
+        app_handle,
+        project_id,
+        worktree_id,
+        initial_cols,
+        initial_rows,
+    )
+    .await
+}
+
 /// 向工作台终端写入输入。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2324,14 +2478,38 @@ pub async fn create_workbench_session(
 ///
 /// Code Logic（这个函数做什么）:
 ///     查找 session writer，写入 UTF-8 字符串并 flush，成功返回 sessionId。
+pub(crate) async fn local_write_workbench_session_input(
+    state: &AppState,
+    session_id: String,
+    data: String,
+) -> Result<serde_json::Value, AppError> {
+    state.workbench_sessions.write_input(&session_id, &data)?;
+    Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
+}
+
+/// 向工作台终端写入输入。
+///
+/// Business Logic（为什么需要这个函数）:
+///     本机与 remote terminal 都通过同一前端 API 接收 xterm 输入。
+///
+/// Code Logic（这个函数做什么）:
+///     remote sessionId 解析设备和 inner id 后转发；local sessionId 调用本地 helper。
 #[tauri::command]
 pub async fn write_workbench_session_input(
     state: State<'_, AppState>,
     session_id: String,
     data: String,
 ) -> Result<serde_json::Value, AppError> {
-    state.workbench_sessions.write_input(&session_id, &data)?;
-    Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(&state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .write_input(&base_url, &inner_session_id, &data)
+            .await?;
+        ensure_remote_event_bridge(&state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_write_workbench_session_input(&state, session_id, data).await
 }
 
 /// 调整工作台终端尺寸。
@@ -2341,9 +2519,8 @@ pub async fn write_workbench_session_input(
 ///
 /// Code Logic（这个函数做什么）:
 ///     更新 registry 中的 row 尺寸，调用 MasterPty::resize，并写回 SQLite。
-#[tauri::command]
-pub async fn resize_workbench_session(
-    state: State<'_, AppState>,
+pub(crate) async fn local_resize_workbench_session(
+    state: &AppState,
     session_id: String,
     cols: u16,
     rows: u16,
@@ -2353,6 +2530,32 @@ pub async fn resize_workbench_session(
     Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
 }
 
+/// 调整工作台终端尺寸。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal 的尺寸变化也必须转发到远端 PTY/tmux，保证交互式程序布局正确。
+///
+/// Code Logic（这个函数做什么）:
+///     remote sessionId 走远端 resize；local sessionId 调用本地 helper。
+#[tauri::command]
+pub async fn resize_workbench_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(&state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .resize(&base_url, &inner_session_id, cols, rows)
+            .await?;
+        ensure_remote_event_bridge(&state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_resize_workbench_session(&state, session_id, cols, rows).await
+}
+
 /// 聚焦工作台终端 window。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2360,13 +2563,36 @@ pub async fn resize_workbench_session(
 ///
 /// Code Logic（这个函数做什么）:
 ///     调用 registry 对 tmux-backed 会话执行 select-window；raw PTY fallback 直接视为成功。
+pub(crate) async fn local_focus_workbench_session(
+    state: &AppState,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    state.workbench_sessions.focus_window(&session_id)?;
+    Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
+}
+
+/// 聚焦工作台终端 window。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal tab 切换时，远端 tmux current window 需要同步切换。
+///
+/// Code Logic（这个函数做什么）:
+///     remote sessionId 走远端 focus；local sessionId 调用本地 helper。
 #[tauri::command]
 pub async fn focus_workbench_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    state.workbench_sessions.focus_window(&session_id)?;
-    Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(&state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .focus(&base_url, &inner_session_id)
+            .await?;
+        ensure_remote_event_bridge(&state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_focus_workbench_session(&state, session_id).await
 }
 
 /// 获取当前 worktree 聚焦的工作台终端 window。
@@ -2382,7 +2608,21 @@ pub async fn get_focused_workbench_session(
     project_id: String,
     worktree_id: Option<String>,
 ) -> Result<serde_json::Value, AppError> {
-    let _ = get_project(&state, &project_id).await?;
+    let project = get_project(&state, &project_id).await?;
+    if project.kind == "remote" {
+        let context = ensure_remote_project_context(&state, &project).await?;
+        let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
+        let session_id = RemoteWorkbenchClient::new()
+            .focused(
+                &context.base_url,
+                &context.inner_project_id,
+                inner_worktree_id.as_deref(),
+            )
+            .await?
+            .map(|inner| remote_entity_id(&context.device_id, &inner));
+        ensure_remote_event_bridge(&state, &context.device_id, &context.base_url);
+        return Ok(serde_json::json!({ "sessionId": session_id }));
+    }
     let session_id = state
         .workbench_sessions
         .focused_session_id(&project_id, worktree_id.as_deref())?;
@@ -2396,9 +2636,8 @@ pub async fn get_focused_workbench_session(
 ///
 /// Code Logic（这个函数做什么）:
 ///     校验 direction 字符串，读取会话 row，调用 registry 按 row.cwd 执行带 cwd 的 tmux split-window。
-#[tauri::command]
-pub async fn split_workbench_pane(
-    state: State<'_, AppState>,
+pub(crate) async fn local_split_workbench_pane(
+    state: &AppState,
     session_id: String,
     direction: String,
 ) -> Result<serde_json::Value, AppError> {
@@ -2414,6 +2653,33 @@ pub async fn split_workbench_pane(
     Ok(serde_json::json!({ "ok": true, "sessionId": session_id, "direction": direction }))
 }
 
+/// 分割当前 tmux window 的 pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal 也需要支持 pane 分屏，真实 split-window 在远端设备执行。
+///
+/// Code Logic（这个函数做什么）:
+///     remote sessionId 走远端 split-pane；local sessionId 调用本地 helper。
+#[tauri::command]
+pub async fn split_workbench_pane(
+    state: State<'_, AppState>,
+    session_id: String,
+    direction: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(&state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .split_pane(&base_url, &inner_session_id, &direction)
+            .await?;
+        ensure_remote_event_bridge(&state, &parsed.device_id, &base_url);
+        return Ok(
+            serde_json::json!({ "ok": true, "sessionId": session_id, "direction": direction }),
+        );
+    }
+    local_split_workbench_pane(&state, session_id, direction).await
+}
+
 /// 关闭当前 tmux pane。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2421,9 +2687,8 @@ pub async fn split_workbench_pane(
 ///
 /// Code Logic（这个函数做什么）:
 ///     调用 registry 关闭当前 active pane；若关闭了 window，则销毁持久后端并删除 SQLite row。
-#[tauri::command]
-pub async fn close_workbench_pane(
-    state: State<'_, AppState>,
+pub(crate) async fn local_close_workbench_pane(
+    state: &AppState,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
     match state.workbench_sessions.close_active_pane(&session_id)? {
@@ -2438,6 +2703,32 @@ pub async fn close_workbench_pane(
     }
 }
 
+/// 关闭当前 tmux pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal 关闭 pane 时，远端设备需要返回是否关闭了整个 window。
+///
+/// Code Logic（这个函数做什么）:
+///     remote sessionId 走远端 close-pane 并保留本机 remote sessionId；local sessionId 调用本地 helper。
+#[tauri::command]
+pub async fn close_workbench_pane(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(&state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        let closed_window = RemoteWorkbenchClient::new()
+            .close_pane(&base_url, &inner_session_id)
+            .await?;
+        ensure_remote_event_bridge(&state, &parsed.device_id, &base_url);
+        return Ok(
+            serde_json::json!({ "ok": true, "sessionId": session_id, "closedWindow": closed_window }),
+        );
+    }
+    local_close_workbench_pane(&state, session_id).await
+}
+
 /// 关闭工作台终端 tab。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2445,9 +2736,8 @@ pub async fn close_workbench_pane(
 ///
 /// Code Logic（这个函数做什么）:
 ///     优先关闭 registry 中的运行期句柄；若 registry 已无该会话但 SQLite 仍有记录，则清理持久后端并删除记录。
-#[tauri::command]
-pub async fn close_workbench_session(
-    state: State<'_, AppState>,
+pub(crate) async fn local_close_workbench_session(
+    state: &AppState,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
     match state.workbench_sessions.close(&session_id) {
@@ -2468,6 +2758,30 @@ pub async fn close_workbench_session(
     Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
 }
 
+/// 关闭工作台终端 tab。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户关闭 remote terminal tab 时，应清理远端设备上的真实 terminal window。
+///
+/// Code Logic（这个函数做什么）:
+///     remote sessionId 走远端 close；local sessionId 调用本地 helper。
+#[tauri::command]
+pub async fn close_workbench_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(&state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .close_session(&base_url, &inner_session_id)
+            .await?;
+        ensure_remote_event_bridge(&state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_close_workbench_session(&state, session_id).await
+}
+
 /// 重命名工作台终端会话。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2475,9 +2789,8 @@ pub async fn close_workbench_session(
 ///
 /// Code Logic（这个函数做什么）:
 ///     更新运行期 row 或持久化 row 的 name 字段并返回最新会话。
-#[tauri::command]
-pub async fn rename_workbench_session(
-    state: State<'_, AppState>,
+pub(crate) async fn local_rename_workbench_session(
+    state: &AppState,
     session_id: String,
     name: String,
 ) -> Result<WorkbenchSessionDto, AppError> {
@@ -2499,6 +2812,34 @@ pub async fn rename_workbench_session(
         }
         Err(error) => Err(error),
     }
+}
+
+/// 重命名工作台终端会话。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal tab 重命名应写入远端 registry/SQLite/tmux window，本机只接收映射后的 DTO。
+///
+/// Code Logic（这个函数做什么）:
+///     remote sessionId 走远端 rename 并映射返回 DTO；local sessionId 调用本地 helper。
+#[tauri::command]
+pub async fn rename_workbench_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    name: String,
+) -> Result<WorkbenchSessionDto, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(&state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        let item = RemoteWorkbenchClient::new()
+            .rename_session(&base_url, &inner_session_id, &name)
+            .await?;
+        ensure_remote_event_bridge(&state, &parsed.device_id, &base_url);
+        return map_remote_session_dtos_with_project(&parsed.device_id, None, vec![item])
+            .into_iter()
+            .next()
+            .ok_or_else(|| AppError::generic("远端 session 重命名结果为空"));
+    }
+    local_rename_workbench_session(&state, session_id, name).await
 }
 
 /// 列出项目目录下的一级文件节点。
@@ -2921,6 +3262,56 @@ mod tests {
 
         assert_eq!(mapped[0].id, "remote:device-a:inner-main");
         assert_eq!(mapped[0].project_id, "remote:device-a:project-hash");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端 terminal session 返回给本机前端时，sessionId 和 worktreeId 都必须带设备前缀，
+    ///     但 projectId 应保持本机 remote shortcut 项目 ID 以便页面按项目过滤。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造远端 session DTO，经过映射 helper 后断言 session/worktree 使用 remote entity ID。
+    #[test]
+    fn map_remote_session_dtos_prefixes_session_and_worktree_ids() {
+        let items = vec![WorkbenchSessionDto {
+            id: "inner-session".to_string(),
+            project_id: "inner-project".to_string(),
+            worktree_id: Some("inner-worktree".to_string()),
+            name: "Remote App".to_string(),
+            command: "/bin/zsh".to_string(),
+            cwd: "/remote/repo".to_string(),
+            status: "running".to_string(),
+            cols: 120,
+            rows: 36,
+            started_at: "2026-06-26T00:00:00Z".to_string(),
+            exited_at: None,
+            exit_code: None,
+            supports_panes: true,
+            pane_count: 2,
+        }];
+
+        let mapped = map_remote_session_dtos("device-a", "remote:device-a:project-hash", items);
+
+        assert_eq!(mapped[0].id, "remote:device-a:inner-session");
+        assert_eq!(mapped[0].project_id, "remote:device-a:project-hash");
+        assert_eq!(
+            mapped[0].worktree_id.as_deref(),
+            Some("remote:device-a:inner-worktree")
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     session-id-only terminal commands 必须确认 remote session 属于当前设备，避免把 A 设备会话输入写到 B 设备。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     解析 device-a 的 session 成功，解析 device-b 的 session 返回稳定中文错误。
+    #[test]
+    fn remote_inner_session_id_validates_device() {
+        let inner = remote_inner_session_id("device-a", "remote:device-a:inner-session").unwrap();
+        assert_eq!(inner, "inner-session");
+
+        let error = remote_inner_session_id("device-a", "remote:device-b:inner-session")
+            .expect_err("device mismatch should be rejected");
+        assert_eq!(error.to_string(), "远端 session 不属于当前设备");
     }
 
     /// Business Logic（为什么需要这个测试）:

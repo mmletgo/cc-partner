@@ -17,6 +17,7 @@ pub mod models;
 pub mod projects;
 pub mod remote_client;
 pub mod remote_directory;
+pub mod remote_events;
 pub mod remote_ids;
 pub mod remote_protocol;
 pub mod sessions;

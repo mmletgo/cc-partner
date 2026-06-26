@@ -7,10 +7,14 @@
 //!     将远端目录 helper 和本机项目添加逻辑包装为 axum handler，供其他设备调用。
 
 use crate::commands::workbench::{
-    add_local_workbench_project_from_path, local_create_workbench_dir, local_create_workbench_file,
-    local_create_workbench_worktree, local_delete_workbench_path, local_get_workbench_path_info,
-    local_list_workbench_dir, local_list_workbench_git_commits, local_list_workbench_worktrees,
-    local_open_workbench_file, local_rename_workbench_path, local_save_workbench_text_file,
+    add_local_workbench_project_from_path, local_close_workbench_pane,
+    local_close_workbench_session, local_create_workbench_dir, local_create_workbench_file,
+    local_create_workbench_session, local_create_workbench_worktree, local_delete_workbench_path,
+    local_focus_workbench_session, local_get_workbench_path_info, local_list_workbench_dir,
+    local_list_workbench_git_commits, local_list_workbench_sessions,
+    local_list_workbench_worktrees, local_open_workbench_file, local_rename_workbench_path,
+    local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_text_file,
+    local_split_workbench_pane, local_write_workbench_session_input,
 };
 use crate::error::AppError;
 use crate::state::AppState;
@@ -18,17 +22,25 @@ use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchOpenFileDto, WorkbenchPathInfo,
     WorkbenchProjectDto, WorkbenchProjectRow, WorkbenchRemoteDirectoryEntryDto,
     WorkbenchRemotePathInfoDto, WorkbenchRemoteRootDto, WorkbenchSaveTextResultDto,
-    WorkbenchWorktreeDto,
+    WorkbenchSessionDto, WorkbenchWorktreeDto,
 };
 use crate::workbench::remote_directory;
 use crate::workbench::remote_protocol::{
-    RemoteCreatePathReq, RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteGitCommitsReq,
-    RemoteListDirReq, RemoteOpenFileReq, RemotePathInfoReq, RemoteProjectReq, RemoteRenamePathReq,
-    RemoteSaveTextReq,
+    RemoteCreatePathReq, RemoteCreateSessionReq, RemoteCreateWorktreeReq, RemoteDeletePathReq,
+    RemoteFocusedSessionReq, RemoteFocusedSessionResp, RemoteGitCommitsReq, RemoteListDirReq,
+    RemoteListSessionsReq, RemoteOpenFileReq, RemotePathInfoReq, RemoteProjectReq,
+    RemoteRenamePathReq, RemoteRenameSessionReq, RemoteResizeSessionReq, RemoteSaveTextReq,
+    RemoteSessionReq, RemoteSplitPaneReq, RemoteWriteSessionInputReq,
 };
+use axum::body::Body;
 use axum::extract::State;
+use axum::http::header;
+use axum::response::Response;
 use axum::Json;
+use std::convert::Infallible;
 use std::path::Path;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
 
 /// 远端路径请求体。
 ///
@@ -82,6 +94,23 @@ async fn ensure_remote_gateway_local_project_id(
         .await?
         .ok_or_else(|| AppError::not_found("远端 Workbench 项目不存在"))?;
     ensure_remote_gateway_local_project(&project)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     session-id-only 远端路由也必须避免把 remote shortcut session 递归代理回其他设备。
+///
+/// Code Logic（这个函数做什么）:
+///     从 session row 读取 project_id，再复用项目 kind guard；会话缺失时返回 NotFound。
+async fn ensure_remote_gateway_local_session_id(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(), AppError> {
+    let row = state
+        .workbench_session_repo
+        .get(session_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("远端 Workbench 会话不存在"))?;
+    ensure_remote_gateway_local_project_id(state, &row.project_id).await
 }
 
 /// 返回远端设备可浏览的目录根入口。
@@ -357,6 +386,217 @@ pub async fn delete_workbench_path(
     ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
     Ok(Json(
         local_delete_workbench_path(&state, req.project_id, req.worktree_id, req.path).await?,
+    ))
+}
+
+/// 订阅本机 Workbench 远端事件流。
+///
+/// Business Logic（为什么需要这个函数）:
+///     其他局域网设备需要持续接收本机 terminal 输出、终端状态和 merge 进度，用于 remote shortcut UI。
+///
+/// Code Logic（这个函数做什么）:
+///     从 AppState broadcast channel 订阅事件，序列化为 NDJSON，通过 axum streaming body 输出。
+pub async fn workbench_events(State(state): State<AppState>) -> Response<Body> {
+    let receiver = state.workbench_remote_events.subscribe();
+    let stream = BroadcastStream::new(receiver).filter_map(|event| match event {
+        Ok(event) => serde_json::to_string(&event)
+            .ok()
+            .map(|line| Ok::<String, Infallible>(format!("{line}\n"))),
+        Err(error) => {
+            tracing::debug!("Workbench 远端事件流跳过消息: {error}");
+            None
+        }
+    });
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/x-ndjson"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    response
+}
+
+/// 列出远端设备本机项目终端会话。
+///
+/// Business Logic（为什么需要这个函数）:
+///     对端 remote shortcut 打开后，需要通过 HTTP 拉取项目所在设备上的 terminal window。
+///
+/// Code Logic（这个函数做什么）:
+///     接收可选 projectId；有 projectId 时先确认它是本机 local 项目，再委托本地 session helper。
+pub async fn list_workbench_sessions(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteListSessionsReq>,
+) -> Result<Json<Vec<WorkbenchSessionDto>>, AppError> {
+    if let Some(project_id) = req.project_id.as_deref() {
+        ensure_remote_gateway_local_project_id(&state, project_id).await?;
+    }
+    Ok(Json(
+        local_list_workbench_sessions(&state, state.app_handle.clone(), req.project_id).await?,
+    ))
+}
+
+/// 在远端设备本机项目中创建终端会话。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 新建 terminal window 时，真实 PTY/tmux 会话必须在项目所在设备启动。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 projectId/worktreeId/尺寸，确认 projectId 是 local 后委托本地 create session helper。
+pub async fn create_workbench_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteCreateSessionReq>,
+) -> Result<Json<WorkbenchSessionDto>, AppError> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
+    Ok(Json(
+        local_create_workbench_session(
+            &state,
+            state.app_handle.clone(),
+            req.project_id,
+            req.worktree_id,
+            req.initial_cols,
+            req.initial_rows,
+        )
+        .await?,
+    ))
+}
+
+/// 向远端设备本机终端写入输入。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal 输入必须写入项目所在设备的 PTY writer。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session 属于本机 local 项目后调用本地 write helper。
+pub async fn write_workbench_session_input(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteWriteSessionInputReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
+    Ok(Json(
+        local_write_workbench_session_input(&state, req.session_id, req.data).await?,
+    ))
+}
+
+/// 调整远端设备本机终端尺寸。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal viewport 变化必须同步到项目所在设备的 PTY/tmux。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session 属于本机 local 项目后调用本地 resize helper。
+pub async fn resize_workbench_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteResizeSessionReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
+    Ok(Json(
+        local_resize_workbench_session(&state, req.session_id, req.cols, req.rows).await?,
+    ))
+}
+
+/// 聚焦远端设备本机终端 window。
+///
+/// Business Logic（为什么需要这个函数）:
+///     本机切换 remote terminal tab 时，项目所在设备上的 tmux current window 也要切换。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session 属于本机 local 项目后调用本地 focus helper。
+pub async fn focus_workbench_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSessionReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
+    Ok(Json(
+        local_focus_workbench_session(&state, req.session_id).await?,
+    ))
+}
+
+/// 查询远端设备本机项目当前聚焦终端。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal 用户可能在远端 tmux status bar 内切换 window，本机 UI 需要同步 active tab。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 projectId 是 local 后调用 registry focused 查询，并包装为 `{sessionId}`。
+pub async fn focused_workbench_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteFocusedSessionReq>,
+) -> Result<Json<RemoteFocusedSessionResp>, AppError> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
+    let session_id = state
+        .workbench_sessions
+        .focused_session_id(&req.project_id, req.worktree_id.as_deref())?;
+    Ok(Json(RemoteFocusedSessionResp { session_id }))
+}
+
+/// 分割远端设备本机终端 pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal 的 pane 分屏必须在项目所在设备上的 tmux window 内执行。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session 属于本机 local 项目后调用本地 split-pane helper。
+pub async fn split_workbench_pane(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSplitPaneReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
+    Ok(Json(
+        local_split_workbench_pane(&state, req.session_id, req.direction).await?,
+    ))
+}
+
+/// 关闭远端设备本机终端当前 pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal 关闭 pane 时，最后一个 pane 可能会关闭整个 window，本机 UI 需要知道结果。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session 属于本机 local 项目后调用本地 close-pane helper。
+pub async fn close_workbench_pane(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSessionReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
+    Ok(Json(
+        local_close_workbench_pane(&state, req.session_id).await?,
+    ))
+}
+
+/// 关闭远端设备本机终端会话。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal tab 关闭时，项目所在设备应清理真实 PTY/tmux 后端和 SQLite row。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session 属于本机 local 项目后调用本地 close session helper。
+pub async fn close_workbench_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSessionReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
+    Ok(Json(
+        local_close_workbench_session(&state, req.session_id).await?,
+    ))
+}
+
+/// 重命名远端设备本机终端会话。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal tab 改名需要同步项目所在设备的 registry、SQLite 和 tmux window。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session 属于本机 local 项目后调用本地 rename helper。
+pub async fn rename_workbench_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteRenameSessionReq>,
+) -> Result<Json<WorkbenchSessionDto>, AppError> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
+    Ok(Json(
+        local_rename_workbench_session(&state, req.session_id, req.name).await?,
     ))
 }
 

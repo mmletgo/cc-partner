@@ -360,6 +360,9 @@ pub fn run() {
                 let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::new(pool.clone()));
                 let workbench_sessions =
                     Arc::new(crate::workbench::sessions::WorkbenchSessionRegistry::new());
+                let (workbench_remote_events, _) = tokio::sync::broadcast::channel(1024);
+                let workbench_remote_event_bridges =
+                    Arc::new(crate::workbench::remote_events::RemoteEventBridgeRegistry::new());
                 let workbench_dependency = Arc::new(
                     crate::workbench::dependencies::WorkbenchDependencyInstallRuntime::new(),
                 );
@@ -398,6 +401,8 @@ pub fn run() {
                     workbench_session_repo,
                     workbench_worktree_repo,
                     workbench_sessions,
+                    workbench_remote_events,
+                    workbench_remote_event_bridges,
                     workbench_dependency,
                     cc_collector_cancel: Arc::new(Mutex::new(None)),
                     // 云端同步：后台 scheduler 取消令牌（start 在 manage 之后调用）

@@ -12,8 +12,11 @@
 use crate::error::AppError;
 use crate::workbench::dependencies::{available_tmux_command, TmuxCommand};
 use crate::workbench::models::{WorkbenchProjectRow, WorkbenchSessionDto, WorkbenchSessionRow};
+use crate::workbench::remote_events::{
+    publish_workbench_remote_event, WorkbenchRemoteEvent, WorkbenchTerminalOutputPayload,
+    WorkbenchTerminalStatusPayload,
+};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{ErrorKind, Read, Write};
@@ -117,38 +120,6 @@ fn pane_count_from_tmux_output(output: &str) -> usize {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .count()
-}
-
-/// 工作台终端输出事件 payload。
-///
-/// Business Logic（为什么需要这个结构体）:
-///     前端 xterm 需要按会话接收增量输出，并用 seq 维持调试和乱序排查能力。
-///
-/// Code Logic（这个结构体做什么）:
-///     序列化为 camelCase Tauri event payload，包含会话 ID、输出块、序号和毫秒时间戳。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TerminalOutputEvent {
-    session_id: String,
-    chunk: String,
-    seq: u64,
-    ts: i64,
-}
-
-/// 工作台终端状态事件 payload。
-///
-/// Business Logic（为什么需要这个结构体）:
-///     前端需要知道会话何时进入运行、退出或断开状态，以更新工作台右侧状态和终端 tab。
-///
-/// Code Logic（这个结构体做什么）:
-///     序列化为 camelCase Tauri event payload，包含状态和可选退出码。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TerminalStatusEvent {
-    session_id: String,
-    status: String,
-    exit_code: Option<i32>,
-    ts: i64,
 }
 
 /// 工作台终端 UTF-8 流式解码器。
@@ -1716,12 +1687,13 @@ fn emit_terminal_output(app: &AppHandle, session_id: &str, seq: &mut u64, chunk:
         return;
     }
     *seq += 1;
-    let event = TerminalOutputEvent {
+    let event = WorkbenchTerminalOutputPayload {
         session_id: session_id.to_string(),
         chunk,
         seq: *seq,
         ts: now_millis(),
     };
+    publish_workbench_remote_event(app, WorkbenchRemoteEvent::TerminalOutput(event.clone()));
     if let Err(error) = app.emit("workbench:terminal-output", event) {
         tracing::warn!("发送工作台终端输出事件失败: {error}");
     }
@@ -1783,12 +1755,13 @@ fn spawn_exit_watcher(
 /// Code Logic（这个函数做什么）:
 ///     构造 `TerminalStatusEvent` 并通过 `workbench:terminal-status` 发送。
 fn emit_status(app: &AppHandle, session_id: &str, status: &str, exit_code: Option<i32>) {
-    let event = TerminalStatusEvent {
+    let event = WorkbenchTerminalStatusPayload {
         session_id: session_id.to_string(),
         status: status.to_string(),
         exit_code,
         ts: now_millis(),
     };
+    publish_workbench_remote_event(app, WorkbenchRemoteEvent::TerminalStatus(event.clone()));
     if let Err(error) = app.emit("workbench:terminal-status", event) {
         tracing::warn!("发送工作台终端状态事件失败: {error}");
     }

@@ -159,3 +159,129 @@ pub struct RemoteDeletePathReq {
     pub worktree_id: Option<String>,
     pub path: String,
 }
+
+/// 远端终端会话列表请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     本机 remote shortcut 只应按当前选中的远端项目拉取 terminal window，避免后台轮询全部设备。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存可选远端 local projectId；缺失时表示远端设备只返回本机本地范围内的会话。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteListSessionsReq {
+    pub project_id: Option<String>,
+}
+
+/// 远端创建终端会话请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     用户在 remote shortcut 上新建 terminal window 时，真实 PTY/tmux 会话必须创建在项目所在设备。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存远端 local projectId、可选 worktreeId 和前端测量出的初始终端尺寸。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteCreateSessionReq {
+    pub project_id: String,
+    pub worktree_id: Option<String>,
+    pub initial_cols: Option<u16>,
+    pub initial_rows: Option<u16>,
+}
+
+/// 远端终端输入请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     xterm 输入需要按 sessionId 转发到远端设备的 PTY writer。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存远端 local sessionId 和 UTF-8 输入数据，字段使用 camelCase。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWriteSessionInputReq {
+    pub session_id: String,
+    pub data: String,
+}
+
+/// 远端终端 resize 请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     本机 terminal viewport 变化时，远端 PTY/tmux 也必须同步行列数。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存远端 local sessionId 与新的 cols/rows。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteResizeSessionReq {
+    pub session_id: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// 远端终端 sessionId 请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     focus、close-pane、close-session 等操作只需要定位一个远端 terminal window。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存远端 local sessionId，供多个 session 路由复用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSessionReq {
+    pub session_id: String,
+}
+
+/// 远端当前聚焦会话查询请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     tmux status bar 内切换 window 后，本机顶部 tab 需要向远端查询当前 worktree 的 focused session。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存远端 local projectId 和可选 worktreeId。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteFocusedSessionReq {
+    pub project_id: String,
+    pub worktree_id: Option<String>,
+}
+
+/// 远端当前聚焦会话响应体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     focused 查询可能没有运行中的 tmux window，响应必须能表达空结果。
+///
+/// Code Logic（这个结构体做什么）:
+///     使用 camelCase `{sessionId}`，值为远端 local sessionId 或 null。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteFocusedSessionResp {
+    pub session_id: Option<String>,
+}
+
+/// 远端 pane 分屏请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     remote terminal 也需要支持左右/上下 pane 分屏，真实 tmux 操作在远端设备执行。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存远端 local sessionId 和 direction 字符串。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSplitPaneReq {
+    pub session_id: String,
+    pub direction: String,
+}
+
+/// 远端终端重命名请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     用户给 remote terminal tab 起名时，需要同步改远端 registry/SQLite/tmux window 名称。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存远端 local sessionId 和新名称。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteRenameSessionReq {
+    pub session_id: String,
+    pub name: String,
+}
