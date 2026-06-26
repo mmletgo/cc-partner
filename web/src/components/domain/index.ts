@@ -49,6 +49,8 @@ export { WorkbenchImagePreview } from './WorkbenchImagePreview';
 export type { WorkbenchImagePreviewProps } from './WorkbenchImagePreview';
 export { WorkbenchCsvPreview } from './WorkbenchCsvPreview';
 export type { WorkbenchCsvPreviewProps } from './WorkbenchCsvPreview';
+export { WorkbenchHtmlPreview } from './WorkbenchHtmlPreview';
+export type { WorkbenchHtmlMode, WorkbenchHtmlPreviewProps } from './WorkbenchHtmlPreview';
 export { WorkbenchSqlitePreview } from './WorkbenchSqlitePreview';
 export type { WorkbenchSqlitePreviewProps } from './WorkbenchSqlitePreview';
 export { WorkbenchFileWorkspace } from './WorkbenchFileWorkspace';

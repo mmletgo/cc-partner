@@ -109,6 +109,15 @@
     },
     "syncError": "Markdown content failed to sync. Keep the current mode content and try again."
   },
+  "htmlPreview": {
+    "modeBar": "HTML preview mode",
+    "modes": {
+      "wysiwyg": "Preview",
+      "source": "Source",
+      "split": "Split"
+    },
+    "frameTitle": "Rendered HTML preview"
+  },
   "filePreviews": {
     "truncated": "Only the first rows are shown.",
     "emptyRows": "No rows to preview",

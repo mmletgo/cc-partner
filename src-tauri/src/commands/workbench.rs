@@ -520,7 +520,7 @@ async fn resolve_workbench_file_path(
 ///     保存文件时不能信任前端声明的文件类型，必须以后端检测出的真实文件名为准，避免只读文件被伪装成文本覆盖。
 ///
 /// Code Logic（这个函数做什么）:
-///     按文件名检测类型；只允许 Markdown/Code/Text/Json/Toml/Yaml，且结构化文件会先解析校验但不改变用户内容。
+///     按文件名检测类型；只允许 Markdown/HTML/Code/Text/Json/Toml/Yaml，且结构化文件会先解析校验但不改变用户内容。
 fn validate_save_file_type(
     metadata_name: &str,
     content: &str,
@@ -537,6 +537,7 @@ fn validate_save_file_type(
             file_content::format_structured_content("yaml", content)?;
         }
         WorkbenchDetectedFileType::Markdown
+        | WorkbenchDetectedFileType::Html
         | WorkbenchDetectedFileType::Code
         | WorkbenchDetectedFileType::Text => {}
         WorkbenchDetectedFileType::Image
@@ -1648,7 +1649,7 @@ pub async fn list_workbench_git_commits(
 ///     文件工作区需要一次拿到文件 metadata、类型能力和可用的内容/预览数据，供前端打开 tab。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析 project/worktree 和安全文件路径，按后端检测类型分发到文本、图片、CSV 或 SQLite 预览；
+///     解析 project/worktree 和安全文件路径，按后端检测类型分发到文本（含 Markdown/HTML）、图片、CSV 或 SQLite 预览；
 ///     内容超限、非 UTF-8 或预览失败时返回 notice，不让一次预览失败阻断文件 tab 打开。
 #[tauri::command]
 pub async fn open_workbench_file(
@@ -1677,6 +1678,7 @@ pub async fn open_workbench_file(
 
     match detected_type {
         WorkbenchDetectedFileType::Markdown
+        | WorkbenchDetectedFileType::Html
         | WorkbenchDetectedFileType::Code
         | WorkbenchDetectedFileType::Json
         | WorkbenchDetectedFileType::Toml
@@ -2230,6 +2232,20 @@ mod tests {
         let detected_type = validate_save_file_type("note.md", "# Note\n").expect("markdown ok");
 
         assert_eq!(detected_type, WorkbenchDetectedFileType::Markdown);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     HTML 文件在 Workbench 中既要能源码编辑也要能渲染预览，因此保存命令必须允许写回原始源码。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     以 .html 文件名调用保存类型校验，断言返回 Html 且不触发结构化格式化校验。
+    #[test]
+    fn validate_save_file_type_allows_html() {
+        let detected_type =
+            validate_save_file_type("index.html", "<!doctype html><title>Preview</title>")
+                .expect("html ok");
+
+        assert_eq!(detected_type, WorkbenchDetectedFileType::Html);
     }
 
     /// Business Logic（为什么需要这个测试）:

@@ -6,8 +6,8 @@
  *   容器负责统一展示 tab、文件元信息、保存/格式化动作和不同文件类型的预览/编辑入口。
  *
  * Code Logic（这个组件做什么）:
- *   接收已打开文件 tabs 和 activeTabId，按 active tab 的 detectedType 分发到 Markdown、图片、CSV、
- *   SQLite 或代码编辑组件；所有内容修改、模式切换、保存、格式化和表选择都通过 props 回调上抛。
+ *   接收已打开文件 tabs 和 activeTabId，按 active tab 的 detectedType 分发到 Markdown、HTML、图片、
+ *   CSV、SQLite 或代码编辑组件；所有内容修改、模式切换、保存、格式化和表选择都通过 props 回调上抛。
  */
 
 import { useCallback, useMemo } from 'react';
@@ -19,6 +19,8 @@ import { CheckIcon, RefreshIcon, TerminalIcon, XIcon } from '@/lib/icons';
 import type { WorkbenchFileMode, WorkbenchOpenFile } from '@/lib/types';
 import { WorkbenchCodeEditor } from '../WorkbenchCodeEditor';
 import { WorkbenchCsvPreview } from '../WorkbenchCsvPreview';
+import { WorkbenchHtmlPreview } from '../WorkbenchHtmlPreview';
+import type { WorkbenchHtmlMode } from '../WorkbenchHtmlPreview';
 import { WorkbenchImagePreview } from '../WorkbenchImagePreview';
 import { WorkbenchMarkdownEditor } from '../WorkbenchMarkdownEditor';
 import type { WorkbenchMarkdownMode } from '../WorkbenchMarkdownEditor';
@@ -50,6 +52,7 @@ export interface WorkbenchFileWorkspaceProps {
 }
 
 const MARKDOWN_MODES = new Set<WorkbenchMarkdownMode>(['wysiwyg', 'source', 'split']);
+const HTML_MODES = new Set<WorkbenchHtmlMode>(['wysiwyg', 'source', 'split']);
 
 const FILENAME_LANGUAGE_HINTS: Record<string, string> = {
   bashrc: 'shell',
@@ -129,6 +132,19 @@ function focusTabButton(tabId: string): void {
  */
 function coerceMarkdownMode(mode: WorkbenchOpenFileTab['mode']): WorkbenchMarkdownMode {
   return MARKDOWN_MODES.has(mode as WorkbenchMarkdownMode) ? (mode as WorkbenchMarkdownMode) : 'wysiwyg';
+}
+
+/**
+ * 约束 HTML 预览模式
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   Workbench 通用文件 mode 包含 viewer/editor，但 HTML 预览只支持源码、预览和分屏三种模式。
+ *
+ * Code Logic（这个函数做什么）:
+ *   调用 HTML 组件导出的 type guard；不支持时回退 wysiwyg，HTML 语境下该值表示渲染预览。
+ */
+function coerceHtmlMode(mode: WorkbenchOpenFileTab['mode']): WorkbenchHtmlMode {
+  return HTML_MODES.has(mode as WorkbenchHtmlMode) ? (mode as WorkbenchHtmlMode) : 'wysiwyg';
 }
 
 /**
@@ -289,6 +305,22 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
     [activeTabStableId, onModeChange],
   );
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   HTML 文件复用 Workbench 的 source/wysiwyg/split 模式状态，切换预览方式时需要写回当前 tab。
+   *
+   * Code Logic（这个函数做什么）:
+   *   捕获当前 active tab id，将 HTML 组件的三模式值透传给页面层 onModeChange。
+   */
+  const handleHtmlModeChange = useCallback(
+    (nextMode: WorkbenchHtmlMode) => {
+      if (activeTabStableId) {
+        onModeChange(activeTabStableId, nextMode);
+      }
+    },
+    [activeTabStableId, onModeChange],
+  );
+
   const handleSave = useCallback(() => {
     if (activeTabStableId) {
       onSave(activeTabStableId);
@@ -323,6 +355,17 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
             mode={coerceMarkdownMode(activeTab.mode)}
             readOnly={saving}
             onModeChange={handleMarkdownModeChange}
+            onChange={handleContentChange}
+          />
+        );
+        break;
+      case 'html':
+        fileContent = (
+          <WorkbenchHtmlPreview
+            value={activeTab.content}
+            mode={coerceHtmlMode(activeTab.mode)}
+            readOnly={saving}
+            onModeChange={handleHtmlModeChange}
             onChange={handleContentChange}
           />
         );

@@ -41,7 +41,7 @@ pub const MAX_CSV_BYTES: u64 = 2 * 1024 * 1024;
 ///     前端文件查看器需要后端按文件名给出权威类型，避免 UI helper 和后端读写能力不一致。
 ///
 /// Code Logic（这个函数做什么）:
-///     提取文件名和扩展名，按图片、Markdown、JSON、TOML、YAML、CSV/TSV、SQLite、代码、文本、
+///     提取文件名和扩展名，按图片、Markdown、HTML、JSON、TOML、YAML、CSV/TSV、SQLite、代码、文本、
 ///     已知二进制和未知类型返回 `WorkbenchDetectedFileType`；jsonc 明确归为 Unsupported。
 pub fn detect_file_type(name: &str) -> WorkbenchDetectedFileType {
     let file_name = Path::new(name)
@@ -71,6 +71,7 @@ pub fn detect_file_type(name: &str) -> WorkbenchDetectedFileType {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg" | "tif" | "tiff"
         | "avif" => WorkbenchDetectedFileType::Image,
         "md" | "markdown" | "mdx" | "mdown" | "mkd" => WorkbenchDetectedFileType::Markdown,
+        "html" | "htm" => WorkbenchDetectedFileType::Html,
         "json" => WorkbenchDetectedFileType::Json,
         "toml" => WorkbenchDetectedFileType::Toml,
         "yaml" | "yml" => WorkbenchDetectedFileType::Yaml,
@@ -78,10 +79,11 @@ pub fn detect_file_type(name: &str) -> WorkbenchDetectedFileType {
         "db" | "sqlite" | "sqlite3" => WorkbenchDetectedFileType::Sqlite,
         "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "py" | "go" | "java" | "c" | "h"
         | "cc" | "cpp" | "cxx" | "hpp" | "cs" | "swift" | "kt" | "kts" | "php" | "rb" | "sh"
-        | "bash" | "zsh" | "fish" | "ps1" | "sql" | "html" | "htm" | "css" | "scss" | "sass"
-        | "less" | "vue" | "svelte" | "xml" | "graphql" | "gql" | "proto" | "lua" | "pl" | "pm"
-        | "r" | "dart" | "ex" | "exs" | "erl" | "hrl" | "clj" | "cljs" | "fs" | "fsx" | "scala"
-        | "gradle" => WorkbenchDetectedFileType::Code,
+        | "bash" | "zsh" | "fish" | "ps1" | "sql" | "css" | "scss" | "sass" | "less" | "vue"
+        | "svelte" | "xml" | "graphql" | "gql" | "proto" | "lua" | "pl" | "pm" | "r" | "dart"
+        | "ex" | "exs" | "erl" | "hrl" | "clj" | "cljs" | "fs" | "fsx" | "scala" | "gradle" => {
+            WorkbenchDetectedFileType::Code
+        }
         "txt" | "text" | "log" | "env" | "ini" | "conf" | "config" | "properties" | "lock"
         | "gitignore" | "dockerignore" | "editorconfig" | "gitattributes" => {
             WorkbenchDetectedFileType::Text
@@ -103,18 +105,9 @@ pub fn capabilities_for_type(kind: &WorkbenchDetectedFileType) -> WorkbenchFileC
         WorkbenchDetectedFileType::Json
         | WorkbenchDetectedFileType::Toml
         | WorkbenchDetectedFileType::Yaml => editable_capabilities(true),
-        WorkbenchDetectedFileType::Markdown => WorkbenchFileCapabilities {
-            can_preview: true,
-            can_edit: true,
-            can_format: false,
-            must_validate_before_save: false,
-            default_mode: WorkbenchFileMode::Wysiwyg,
-            available_modes: vec![
-                WorkbenchFileMode::Source,
-                WorkbenchFileMode::Wysiwyg,
-                WorkbenchFileMode::Split,
-            ],
-        },
+        WorkbenchDetectedFileType::Markdown | WorkbenchDetectedFileType::Html => {
+            source_preview_capabilities()
+        }
         WorkbenchDetectedFileType::Code | WorkbenchDetectedFileType::Text => {
             editable_capabilities(false)
         }
@@ -215,6 +208,26 @@ fn editable_capabilities(structured: bool) -> WorkbenchFileCapabilities {
         must_validate_before_save: structured,
         default_mode: WorkbenchFileMode::Editor,
         available_modes: vec![WorkbenchFileMode::Editor],
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Markdown 与 HTML 都需要在源码、渲染预览和分屏之间切换，且保存时仍写回原始源码。
+///
+/// Code Logic（这个函数做什么）:
+///     返回可编辑、不可格式化、无需结构化校验的 source/wysiwyg/split 三模式能力，默认进入 wysiwyg 预览。
+fn source_preview_capabilities() -> WorkbenchFileCapabilities {
+    WorkbenchFileCapabilities {
+        can_preview: true,
+        can_edit: true,
+        can_format: false,
+        must_validate_before_save: false,
+        default_mode: WorkbenchFileMode::Wysiwyg,
+        available_modes: vec![
+            WorkbenchFileMode::Source,
+            WorkbenchFileMode::Wysiwyg,
+            WorkbenchFileMode::Split,
+        ],
     }
 }
 
@@ -492,7 +505,7 @@ mod tests {
     ///     文件类型决定 Workbench 使用编辑器、预览器还是拒绝打开，必须覆盖常用扩展名和 jsonc 例外。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     对 markdown/json/toml/csv/sqlite/image/code/text/jsonc/未知扩展名分别断言检测结果。
+    ///     对 markdown/html/json/toml/csv/sqlite/image/code/text/jsonc/未知扩展名分别断言检测结果。
     #[test]
     fn detect_file_type_covers_supported_extensions_and_jsonc_exception() {
         assert_eq!(
@@ -506,6 +519,14 @@ mod tests {
         assert_eq!(
             detect_file_type("README.mkd"),
             WorkbenchDetectedFileType::Markdown
+        );
+        assert_eq!(
+            detect_file_type("index.html"),
+            WorkbenchDetectedFileType::Html
+        );
+        assert_eq!(
+            detect_file_type("partial.htm"),
+            WorkbenchDetectedFileType::Html
         );
         assert_eq!(
             detect_file_type("package.json"),
@@ -564,10 +585,10 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     只读预览、Markdown 模式和结构化文件校验能力会直接控制前端工具栏按钮。
+    ///     只读预览、Markdown/HTML 模式和结构化文件校验能力会直接控制前端工具栏按钮。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     断言 CSV/SQLite 不可编辑，Markdown 可用 source/wysiwyg/split，JSON/TOML 可格式化且保存前校验。
+    ///     断言 CSV/SQLite 不可编辑，Markdown/HTML 可用 source/wysiwyg/split，JSON/TOML 可格式化且保存前校验。
     #[test]
     fn capabilities_match_preview_and_editor_modes() {
         let csv = capabilities_for_type(&WorkbenchDetectedFileType::Csv);
@@ -588,6 +609,21 @@ mod tests {
         assert_eq!(markdown.default_mode, WorkbenchFileMode::Wysiwyg);
         assert_eq!(
             markdown.available_modes,
+            vec![
+                WorkbenchFileMode::Source,
+                WorkbenchFileMode::Wysiwyg,
+                WorkbenchFileMode::Split,
+            ]
+        );
+
+        let html = capabilities_for_type(&WorkbenchDetectedFileType::Html);
+        assert!(html.can_preview);
+        assert!(html.can_edit);
+        assert!(!html.can_format);
+        assert!(!html.must_validate_before_save);
+        assert_eq!(html.default_mode, WorkbenchFileMode::Wysiwyg);
+        assert_eq!(
+            html.available_modes,
             vec![
                 WorkbenchFileMode::Source,
                 WorkbenchFileMode::Wysiwyg,

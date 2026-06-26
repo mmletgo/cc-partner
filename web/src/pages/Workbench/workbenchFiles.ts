@@ -4,6 +4,7 @@ import { parseDocument as parseYamlDocument } from 'yaml';
 export type WorkbenchDetectedFileType =
   | 'image'
   | 'markdown'
+  | 'html'
   | 'code'
   | 'json'
   | 'toml'
@@ -77,6 +78,7 @@ export interface WorkbenchDirRequestParts {
 
 const IMAGE_EXTENSIONS = new Set(['avif', 'bmp', 'gif', 'ico', 'jpeg', 'jpg', 'png', 'svg', 'tif', 'tiff', 'webp']);
 const MARKDOWN_EXTENSIONS = new Set(['markdown', 'md', 'mdown', 'mdx', 'mkd']);
+const HTML_EXTENSIONS = new Set(['html', 'htm']);
 const JSON_EXTENSIONS = new Set(['json']);
 const UNSUPPORTED_JSON_EXTENSIONS = new Set(['jsonc']);
 const TOML_EXTENSIONS = new Set(['toml']);
@@ -137,8 +139,6 @@ const CODE_EXTENSIONS = new Set([
   'h',
   'hpp',
   'hrl',
-  'html',
-  'htm',
   'java',
   'justfile',
   'js',
@@ -183,6 +183,14 @@ const FILE_CAPABILITIES: Record<WorkbenchDetectedFileType, WorkbenchFileCapabili
     availableModes: ['viewer'],
   },
   markdown: {
+    canPreview: true,
+    canEdit: true,
+    canFormat: false,
+    mustValidateBeforeSave: false,
+    defaultMode: 'wysiwyg',
+    availableModes: ['source', 'wysiwyg', 'split'],
+  },
+  html: {
     canPreview: true,
     canEdit: true,
     canFormat: false,
@@ -449,7 +457,7 @@ function normalizeMime(mime: string | null): string | null {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   文件查看器打开文件前必须知道应使用图片预览、Markdown 编辑器、代码编辑器还是只读预览。
+ *   文件查看器打开文件前必须知道应使用图片预览、Markdown/HTML 预览编辑器、代码编辑器还是只读预览。
  *
  * Code Logic（这个函数做什么）:
  *   先按扩展名识别项目常见文件；扩展名缺失时用 mime 兜底判断文本、图片和二进制类型。
@@ -458,6 +466,7 @@ export function detectWorkbenchFileType(filename: string, mime: string | null): 
   const extension = extensionFromFilename(filename);
   if (extension && IMAGE_EXTENSIONS.has(extension)) return 'image';
   if (extension && MARKDOWN_EXTENSIONS.has(extension)) return 'markdown';
+  if (extension && HTML_EXTENSIONS.has(extension)) return 'html';
   if (extension && UNSUPPORTED_JSON_EXTENSIONS.has(extension)) return 'unsupported';
   if (extension && JSON_EXTENSIONS.has(extension)) return 'json';
   if (extension && TOML_EXTENSIONS.has(extension)) return 'toml';

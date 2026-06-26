@@ -105,6 +105,15 @@
     },
     "syncError": "Markdown 内容同步失败，请保留当前模式内容并重试。"
   },
+  "htmlPreview": {
+    "modeBar": "HTML 预览模式",
+    "modes": {
+      "wysiwyg": "预览",
+      "source": "源码",
+      "split": "分屏"
+    },
+    "frameTitle": "HTML 渲染预览"
+  },
   "filePreviews": {
     "truncated": "仅显示前几行内容。",
     "emptyRows": "暂无可预览行",

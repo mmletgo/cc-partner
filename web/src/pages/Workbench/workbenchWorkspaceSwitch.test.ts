@@ -76,6 +76,10 @@ async function main(): Promise<void> {
     new URL('../../components/domain/WorkbenchFileWorkspace/WorkbenchFileWorkspace.tsx', import.meta.url),
     'utf8',
   );
+  const htmlPreviewSource = readFileSync(
+    new URL('../../components/domain/WorkbenchHtmlPreview/WorkbenchHtmlPreview.tsx', import.meta.url),
+    'utf8',
+  );
   const workspaceNavSource = readFileSync(
     new URL('../../components/layout/WorkbenchWorkspaceNav/WorkbenchWorkspaceNav.tsx', import.meta.url),
     'utf8',
@@ -137,6 +141,41 @@ async function main(): Promise<void> {
     '<div className={styles.toolbarActions}>',
     'file actions render in the tab header row',
   );
+  assertContains(
+    fileWorkspaceSource,
+    "from '../WorkbenchHtmlPreview';",
+    'HTML preview component is imported by file workspace',
+  );
+  assertContains(
+    fileWorkspaceSource,
+    "case 'html':",
+    'file workspace dispatches HTML files to the HTML preview component',
+  );
+  assertContains(
+    fileWorkspaceSource,
+    '<WorkbenchHtmlPreview',
+    'file workspace renders the HTML preview component',
+  );
+  assertContains(
+    htmlPreviewSource,
+    'role="group"',
+    'HTML preview mode switch uses segmented control group semantics',
+  );
+  assertContains(
+    htmlPreviewSource,
+    'aria-pressed={option.mode === mode}',
+    'HTML preview mode buttons expose pressed state',
+  );
+  assertContains(
+    htmlPreviewSource,
+    'sandbox=""',
+    'HTML preview iframe stays fully sandboxed',
+  );
+  assertContains(
+    htmlPreviewSource,
+    'srcDoc={value}',
+    'HTML preview iframe renders current HTML source',
+  );
   assertNotContains(
     fileWorkspaceSource,
     '<div className={styles.fileToolbar}>',
@@ -164,8 +203,10 @@ async function main(): Promise<void> {
   );
   assertContains(zhLocale, '"actions": "文件操作"', 'zh file actions label exists');
   assertContains(zhLocale, '"openFiles": "文件预览"', 'zh file preview label exists');
+  assertContains(zhLocale, '"htmlPreview"', 'zh HTML preview copy exists');
   assertContains(enLocale, '"actions": "File actions"', 'en file actions label exists');
   assertContains(enLocale, '"openFiles": "File preview"', 'en file preview label exists');
+  assertContains(enLocale, '"htmlPreview"', 'en HTML preview copy exists');
 }
 
 void main();

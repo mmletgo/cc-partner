@@ -339,7 +339,7 @@ pub struct WorkbenchPathInfo {
 /// Workbench 文件检测类型。
 ///
 /// Business Logic（为什么需要这个类型）:
-///     前端文件工作区需要知道一个文件应由图片预览、Markdown 编辑器、代码编辑器、
+///     前端文件工作区需要知道一个文件应由图片预览、Markdown/HTML 预览编辑器、代码编辑器、
 ///     CSV/SQLite 只读预览还是普通文本编辑器打开。
 ///
 /// Code Logic（这个类型做什么）:
@@ -349,6 +349,7 @@ pub struct WorkbenchPathInfo {
 pub enum WorkbenchDetectedFileType {
     Image,
     Markdown,
+    Html,
     Code,
     Json,
     Toml,

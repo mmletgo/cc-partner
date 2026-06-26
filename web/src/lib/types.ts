@@ -477,10 +477,11 @@ export interface WorkbenchPathInfo {
   modifiedAt: string | null;
 }
 
-/** Workbench 文件内容检测类型，和 Rust WorkbenchDetectedFileType 对齐。 */
+/** Workbench 文件内容检测类型，和 Rust WorkbenchDetectedFileType 对齐，HTML 独立于普通 code 类型。 */
 export type WorkbenchDetectedFileType =
   | 'image'
   | 'markdown'
+  | 'html'
   | 'code'
   | 'json'
   | 'toml'

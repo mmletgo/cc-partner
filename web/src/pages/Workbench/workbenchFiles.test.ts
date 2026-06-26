@@ -49,6 +49,8 @@ async function main(): Promise<void> {
   assert(detectWorkbenchFileType('.npmrc', null) === 'text', '.npmrc detected as text');
   assert(detectWorkbenchFileType('src/App.tsx', null) === 'code', 'tsx extension detected as code');
   assert(detectWorkbenchFileType('src/index.mjs', null) === 'code', 'mjs extension detected as code');
+  assert(detectWorkbenchFileType('index.html', null) === 'html', 'html extension detected');
+  assert(detectWorkbenchFileType('partial.htm', null) === 'html', 'htm extension detected');
   assert(detectWorkbenchFileType('data.csv', null) === 'csv', 'csv extension detected');
   assert(detectWorkbenchFileType('config.toml', null) === 'toml', 'toml extension detected');
   assert(detectWorkbenchFileType('config.yaml', null) === 'yaml', 'yaml extension detected');
@@ -77,6 +79,14 @@ async function main(): Promise<void> {
   assert(markdownCaps.availableModes.includes('source'), 'markdown exposes source mode');
   assert(markdownCaps.availableModes.includes('wysiwyg'), 'markdown exposes wysiwyg mode');
   assert(markdownCaps.availableModes.includes('split'), 'markdown exposes split mode');
+
+  const htmlCaps = fileCapabilitiesForType('html');
+  assert(htmlCaps.canPreview, 'html can preview');
+  assert(htmlCaps.canEdit, 'html is editable');
+  assert(!htmlCaps.canFormat, 'html does not format');
+  assert(htmlCaps.availableModes.includes('source'), 'html exposes source mode');
+  assert(htmlCaps.availableModes.includes('wysiwyg'), 'html exposes preview mode via wysiwyg');
+  assert(htmlCaps.availableModes.includes('split'), 'html exposes split mode');
 
   const codeCaps = fileCapabilitiesForType('code');
   assert(!codeCaps.availableModes.includes('wysiwyg'), 'code does not expose wysiwyg mode');

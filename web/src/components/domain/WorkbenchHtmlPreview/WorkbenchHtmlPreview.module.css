@@ -1,0 +1,103 @@
+.htmlShell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: var(--space-3);
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.modeBar {
+  display: inline-grid;
+  grid-auto-flow: column;
+  justify-self: start;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-warm);
+}
+
+.modeButton {
+  min-width: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  cursor: pointer;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.modeButton:hover,
+.modeButton:focus-visible {
+  color: var(--fg);
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.modeButton:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.modeButton[data-active="true"] {
+  color: var(--fg);
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+}
+
+.htmlBody {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  gap: var(--space-3);
+}
+
+.htmlBody[data-mode="source"],
+.htmlBody[data-mode="wysiwyg"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.htmlBody[data-mode="split"] {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.sourcePane,
+.previewPane {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.sourcePane {
+  overflow: hidden;
+}
+
+.previewPane {
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.previewFrame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: var(--surface);
+}
+
+@media (max-width: 860px) {
+  .htmlBody[data-mode="split"] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
