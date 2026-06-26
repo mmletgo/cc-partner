@@ -119,6 +119,7 @@
   },
   "fileWorkspace": {
     "tabs": "Open files",
+    "openFiles": "File preview",
     "returnTerminal": "Return to terminal",
     "save": "Save",
     "format": "Format",

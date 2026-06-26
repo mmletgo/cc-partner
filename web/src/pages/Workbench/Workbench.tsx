@@ -2077,6 +2077,21 @@ export function Workbench() {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   用户从文件预览返回终端后，仍需要从终端工具栏一键回到已打开的文件工作区，形成对称导航。
+   *
+   * Code Logic（这个函数做什么）:
+   *   优先恢复当前 active 文件 tab；如果 ref 丢失但仍有打开文件，则选择第一个 tab 并切换到 files 视图。
+   */
+  const handleReturnToFiles = useCallback(() => {
+    const targetTabId = activeFileTabIdRef.current ?? fileTabsRef.current[0]?.id ?? null;
+    if (!targetTabId) return;
+    activeFileTabIdRef.current = targetTabId;
+    setActiveFileTabId(targetTabId);
+    setWorkspaceView('files');
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   用户编辑文件内容时需要标记未保存状态，避免保存按钮和 tab 脏标记失真。
    *
    * Code Logic（这个函数做什么）:
@@ -2840,6 +2855,14 @@ export function Workbench() {
                       openPromptOptimizerPanel();
                     }
                   }}
+                />
+                <Button
+                  variant="icon"
+                  icon={<FileIcon />}
+                  title={t('workbench:fileWorkspace.openFiles')}
+                  aria-label={t('workbench:fileWorkspace.openFiles')}
+                  disabled={fileTabs.length === 0}
+                  onClick={handleReturnToFiles}
                 />
                 <Button
                   variant="icon"

@@ -115,6 +115,7 @@
   },
   "fileWorkspace": {
     "tabs": "已打开文件",
+    "openFiles": "文件预览",
     "returnTerminal": "返回终端",
     "save": "保存",
     "format": "格式化",
