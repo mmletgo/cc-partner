@@ -8,6 +8,12 @@
   background: var(--surface);
 }
 
+.editorShell:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  outline: none;
+}
+
 .editorShell :global(.cm-editor) {
   height: 100%;
   font-family: var(--font-mono);

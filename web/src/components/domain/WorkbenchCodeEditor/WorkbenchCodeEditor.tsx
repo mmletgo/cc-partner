@@ -62,7 +62,6 @@ function languageExtensions(language: string): Extension[] {
     case 'jsx':
       return [javascript({ jsx: true })];
     case 'json':
-    case 'jsonc':
       return [json()];
     case 'markdown':
     case 'md':
@@ -117,6 +116,7 @@ export function WorkbenchCodeEditor({
         value={value}
         height="100%"
         editable={!readOnly}
+        readOnly={readOnly}
         extensions={extensions}
         onChange={(next) => onChange(next)}
         basicSetup={{
