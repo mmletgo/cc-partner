@@ -349,13 +349,15 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
             </div>
           </div>
 
-          {activeTab.opened.notice ? (
-            <div className={styles.fileNotice} role="status">
-              {activeTab.opened.notice}
-            </div>
-          ) : null}
+          <div className={styles.fileContentStack}>
+            {activeTab.opened.notice ? (
+              <div className={styles.fileNotice} role="status">
+                {activeTab.opened.notice}
+              </div>
+            ) : null}
 
-          <div className={styles.fileContent}>{fileContent}</div>
+            <div className={styles.fileContent}>{fileContent}</div>
+          </div>
         </div>
       ) : (
         <div className={styles.emptyState}>
