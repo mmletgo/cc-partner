@@ -236,8 +236,58 @@ export interface PromptOptimizeResponse {
   optimizedEn: string;
 }
 
-/** 工作台项目来源类型：本期仅 local，后续扩展局域网设备项目。 */
-export type WorkbenchProjectKind = 'local' | string;
+/** 工作台项目来源类型：本机项目或局域网远端项目。 */
+export type WorkbenchProjectKind = 'local' | 'remote' | string;
+
+/**
+ * Workbench 远端可浏览根目录。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   用户需要在局域网设备上直接选择项目文件夹，前端先展示远端声明的可浏览入口。
+ *
+ * Code Logic（字段说明）:
+ *   label 是 UI 展示名；path 是远端设备上的绝对路径；kind 用于区分 home/volume 等后端来源。
+ */
+export interface WorkbenchRemoteRoot {
+  label: string;
+  path: string;
+  kind: string;
+}
+
+/**
+ * Workbench 远端目录项。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   远端项目选择器需要浏览局域网设备目录，并提示哪些目录看起来是 Git 项目。
+ *
+ * Code Logic（字段说明）:
+ *   kind 标识文件/目录；modifiedAt 为远端时间戳或 null；isGitRepo 表示该目录是否包含 Git 仓库特征。
+ */
+export interface WorkbenchRemoteDirectoryEntry {
+  name: string;
+  path: string;
+  kind: 'dir' | 'file' | string;
+  modifiedAt: string | null;
+  isGitRepo: boolean;
+}
+
+/**
+ * Workbench 远端路径信息。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   用户选择远端目录后，前端需要知道路径是否可读、是否项目目录，以及建议的项目名。
+ *
+ * Code Logic（字段说明）:
+ *   readable/isGitRepo 由后端探测；suggestedProjectName 用于打开远端项目后命名。
+ */
+export interface WorkbenchRemotePathInfo {
+  name: string;
+  path: string;
+  kind: 'dir' | 'file' | string;
+  readable: boolean;
+  isGitRepo: boolean;
+  suggestedProjectName: string;
+}
 
 /**
  * 工作台项目 DTO（对齐 Rust WorkbenchProjectDto，camelCase）。

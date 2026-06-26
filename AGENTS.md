@@ -254,6 +254,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | ClaudeAssetRow | asset, onToggle, onRemove, onSelect | Claude Code 资产行 |
 | RemoteAssetPicker | assets, selectedKeys, kind, search, onSelectMany | 局域网远端资产选择器 |
 | WorkbenchProjectRail | - | 侧栏设置项下方的项目文件夹入口 |
+| WorkbenchRemoteProjectPicker | onProjectOpened, onCancel, openProject | Workbench 局域网远端项目目录选择器 |
 | WorkbenchDependencyCard | compact, className | Workbench tmux 依赖状态与安装引导卡片 |
 | WorkbenchCodeEditor | value, language, readOnly, onChange | Workbench 代码/源码文件的 CodeMirror 编辑器 |
 | WorkbenchMarkdownEditor | value, mode, onModeChange, onChange | Workbench Markdown WYSIWYG/source/split 编辑器 |

@@ -5,7 +5,7 @@
  *   侧栏项目文件夹入口和 Workbench 页面需要共享当前项目、项目列表和项目操作。
  *
  * Code Logic（这个模块做什么）:
- *   定义 WorkbenchProjectsContextValue、创建 React Context，并提供 useWorkbenchProjects 读取上下文。
+ *   定义 WorkbenchProjectsContextValue、创建 React Context，并提供本机/远端项目操作与 useWorkbenchProjects 读取上下文。
  */
 
 import { createContext, useContext } from 'react';
@@ -23,6 +23,7 @@ export interface WorkbenchProjectsContextValue {
   loadProjects: () => Promise<void>;
   refreshProjectSessionStats: (projectId?: string) => Promise<void>;
   chooseAndAddProject: () => Promise<WorkbenchProject | null>;
+  openRemoteProject: (deviceId: string, path: string) => Promise<WorkbenchProject | null>;
   selectProject: (project: WorkbenchProject) => Promise<WorkbenchProject>;
   removeProject: (projectId: string) => Promise<void>;
 }

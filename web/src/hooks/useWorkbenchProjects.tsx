@@ -6,7 +6,7 @@
  *   需要一个共享状态源，避免侧栏和页面各自维护选中项目导致不同步。
  *
  * Code Logic（这个模块做什么）:
- *   提供 WorkbenchProjectsProvider，集中管理项目列表加载、系统目录选择并添加、
+ *   提供 WorkbenchProjectsProvider，集中管理项目列表加载、系统目录选择并添加、远端项目打开、
  *   选择、移除、terminal window/pane 统计和当前项目持久化。
  */
 
@@ -16,6 +16,7 @@ import { useTranslation } from 'react-i18next';
 import { workbenchApi } from '@/api/workbench';
 import { configApi } from '@/api/config';
 import type { WorkbenchProject } from '@/lib/types';
+import { insertWorkbenchProjectAtTop } from '@/lib/workbenchRemoteProjects';
 import {
   projectSessionStats,
   sessionStatsByProject,
@@ -111,7 +112,7 @@ export interface WorkbenchProjectsProviderProps {
  *   左侧栏项目文件夹列表是进入工作台的全局入口，Workbench 页面需要复用同一份当前项目状态。
  *
  * Code Logic（这个组件做什么）:
- *   拉取项目列表、持久化当前项目 ID，并提供添加/选择/移除项目和刷新终端统计的业务动作。
+ *   拉取项目列表、持久化当前项目 ID，并提供本机添加、远端打开、选择/移除项目和刷新终端统计的业务动作。
  */
 export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProviderProps) {
   const { t } = useTranslation(['workbench']);
@@ -186,10 +187,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       const trimmedPath = path.trim();
       if (!trimmedPath) return null;
       const project = await workbenchApi.projects.add(trimmedPath);
-      setProjects((current) => {
-        const withoutDuplicate = current.filter((item) => item.id !== project.id);
-        return [project, ...withoutDuplicate];
-      });
+      setProjects((current) => insertWorkbenchProjectAtTop(current, project));
       setActiveProjectId(project.id);
       return project;
     },
@@ -234,15 +232,39 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
     }
   }, [addProjectFromPath, desktopUnavailableMessage, projectBusy, refreshProjectSessionStats, t]);
 
+  const openRemoteProject = useCallback(
+    async (deviceId: string, path: string) => {
+      const trimmedPath = path.trim();
+      if (!deviceId || !trimmedPath) return null;
+      try {
+        setProjectBusy(true);
+        setProjectError(null);
+        const project = await workbenchApi.remote.openProject(deviceId, trimmedPath);
+        setProjects((current) => insertWorkbenchProjectAtTop(current, project));
+        setActiveProjectId(project.id);
+        void refreshProjectSessionStats(project.id);
+        return project;
+      } catch (error) {
+        const message = displayWorkbenchErrorMessage(
+          error,
+          t('workbench:errors.openRemoteProject'),
+          desktopUnavailableMessage,
+        );
+        setProjectError(message);
+        throw new Error(message, { cause: error });
+      } finally {
+        setProjectBusy(false);
+      }
+    },
+    [desktopUnavailableMessage, refreshProjectSessionStats, setActiveProjectId, t],
+  );
+
   const selectProject = useCallback(
     async (project: WorkbenchProject) => {
       setActiveProjectId(project.id);
       try {
         const touched = await workbenchApi.projects.touch(project.id);
-        setProjects((current) => {
-          const withoutCurrent = current.filter((item) => item.id !== touched.id);
-          return [touched, ...withoutCurrent];
-        });
+        setProjects((current) => insertWorkbenchProjectAtTop(current, touched));
         void refreshProjectSessionStats(touched.id);
         return touched;
       } catch {
@@ -299,6 +321,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       loadProjects,
       refreshProjectSessionStats,
       chooseAndAddProject,
+      openRemoteProject,
       selectProject,
       removeProject,
     }),
@@ -307,6 +330,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       activeProjectId,
       chooseAndAddProject,
       loadProjects,
+      openRemoteProject,
       projectBusy,
       projectError,
       projectSessionStatsMap,

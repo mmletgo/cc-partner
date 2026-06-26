@@ -10,6 +10,38 @@
   "removeProject": "移除项目",
   "emptyProjects": "还没有项目文件夹",
   "openWorkbench": "进入工作台",
+  "projectSources": {
+    "local": "本机项目",
+    "localDescription": "选择这台电脑上的项目文件夹",
+    "remote": "局域网设备",
+    "remoteDescription": "浏览在线设备上的项目文件夹"
+  },
+  "remoteProjectPicker": {
+    "title": "打开远端项目",
+    "subtitle": "选择在线局域网设备上的文件夹，直接加入 Workbench 项目列表。",
+    "close": "关闭",
+    "devices": "在线设备",
+    "noDevices": "没有在线设备",
+    "roots": "可浏览位置",
+    "noRoots": "该设备没有可浏览位置",
+    "browser": "远端目录",
+    "parent": "上一级",
+    "loadingDir": "正在读取目录",
+    "emptyDirectory": "目录为空",
+    "gitRepo": "Git",
+    "browse": "浏览",
+    "selection": "当前选择",
+    "selectedPath": "选择路径",
+    "readable": "可读",
+    "notReadable": "不可读",
+    "openProject": "打开项目",
+    "errors": {
+      "devices": "读取在线设备失败",
+      "roots": "读取远端根目录失败",
+      "dir": "读取远端目录失败",
+      "open": "打开远端项目失败"
+    }
+  },
   "projectWindowCount": "{{count}} window",
   "projectPaneCount": "{{count}} pane",
   "dependency": {
@@ -198,6 +230,7 @@
     "projects": "读取项目失败",
     "desktopUnavailable": "工作台需要在 Tauri 桌面应用中使用",
     "addProject": "添加项目失败",
+    "openRemoteProject": "打开远端项目失败",
     "removeProject": "移除项目失败",
     "chooseDir": "选择文件夹失败",
     "worktrees": "读取 worktree 失败",

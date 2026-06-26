@@ -23,9 +23,65 @@
 }
 
 .actions {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
+}
+
+.sourcePopover {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: var(--z-overlay);
+  width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--space-2);
+  box-shadow: var(--shadow-md);
+}
+
+.sourceOption {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+  padding: var(--space-3);
+  text-align: left;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.sourceOption:hover {
+  border-color: var(--accent-soft);
+  box-shadow: var(--shadow-xs);
+}
+
+.sourceOption > span {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.sourceOption > span > span:first-child {
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.sourceOption > span > span:last-child {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
 }
 
 .projectList {
@@ -174,4 +230,20 @@
   color: var(--danger);
   font-size: var(--text-sm);
   line-height: var(--leading-normal);
+}
+
+.modalBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in oklab, var(--bg) 64%, transparent);
+  padding: var(--space-4);
+}
+
+.modalDialog {
+  max-width: 100%;
+  max-height: 100%;
 }

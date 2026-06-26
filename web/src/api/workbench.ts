@@ -6,7 +6,7 @@
  *   组件层不应直接拼 invoke 命令名，避免命令参数分散。
  *
  * Code Logic（这个模块做什么）:
- *   按 projects / sessions / files 三个业务分组封装 Rust workbench 命令；
+ *   按 projects / remote / sessions / files 等业务分组封装 Rust workbench 命令；
  *   所有参数使用 camelCase，返回类型对齐 `src/lib/types.ts`。
  */
 
@@ -20,6 +20,9 @@ import type {
   WorkbenchOpenFile,
   WorkbenchPathInfo,
   WorkbenchProject,
+  WorkbenchRemoteDirectoryEntry,
+  WorkbenchRemotePathInfo,
+  WorkbenchRemoteRoot,
   WorkbenchSaveTextResult,
   WorkbenchSession,
   WorkbenchSqlitePreview,
@@ -49,6 +52,24 @@ export const workbenchApi = {
     /** 更新最近打开时间，并返回最新项目 DTO。 */
     touch: (projectId: string) =>
       invoke<WorkbenchProject>('touch_workbench_project', { projectId }),
+  },
+
+  remote: {
+    /** 列出指定局域网设备允许浏览的 Workbench 根目录。 */
+    roots: (deviceId: string) =>
+      invoke<WorkbenchRemoteRoot[]>('list_workbench_remote_roots', { deviceId }),
+
+    /** 列出指定局域网设备远端路径下的一级目录项。 */
+    listDir: (deviceId: string, path: string) =>
+      invoke<WorkbenchRemoteDirectoryEntry[]>('list_workbench_remote_dir', { deviceId, path }),
+
+    /** 获取指定局域网设备远端路径的信息。 */
+    info: (deviceId: string, path: string) =>
+      invoke<WorkbenchRemotePathInfo>('get_workbench_remote_path_info', { deviceId, path }),
+
+    /** 直接打开局域网设备上的远端项目目录，并返回可加入最近项目列表的 DTO。 */
+    openProject: (deviceId: string, path: string) =>
+      invoke<WorkbenchProject>('open_workbench_remote_project', { deviceId, path }),
   },
 
   worktrees: {
