@@ -11,25 +11,27 @@
 
 use crate::claude_cli;
 use crate::error::AppError;
+use crate::models::device::Device;
 use crate::state::AppState;
 use crate::workbench::models::{
     WorkbenchDetectedFileType, WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchGitStatusDto,
     WorkbenchHtmlAssetDto, WorkbenchOpenFileDto, WorkbenchPathInfo, WorkbenchProjectDto,
-    WorkbenchProjectRow, WorkbenchSaveTextResultDto, WorkbenchSessionDto, WorkbenchSqlitePreview,
-    WorkbenchTextContent, WorkbenchWorktreeDto, WorkbenchWorktreeRow,
+    WorkbenchProjectRow, WorkbenchRemoteDirectoryEntryDto, WorkbenchRemotePathInfoDto,
+    WorkbenchRemoteRootDto, WorkbenchSaveTextResultDto, WorkbenchSessionDto,
+    WorkbenchSqlitePreview, WorkbenchTextContent, WorkbenchWorktreeDto, WorkbenchWorktreeRow,
 };
 use crate::workbench::sessions::{
     kill_persisted_backend, pane_count_for_row, PaneCloseOutcome, PaneSplitDirection,
 };
 use crate::workbench::{
     file_content, file_preview, fs as workbench_fs, git as workbench_git, html_assets, projects,
-    sqlite_preview,
+    remote_client::RemoteWorkbenchClient, remote_ids::remote_project_id, sqlite_preview,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, State};
@@ -567,6 +569,87 @@ pub async fn list_workbench_projects(
     Ok(rows.iter().map(WorkbenchProjectRow::to_dto).collect())
 }
 
+/// 从设备表解析远端设备 base URL。
+///
+/// Business Logic（为什么需要这个函数）:
+///     远端 Workbench 命令必须先确认目标设备仍在 mDNS 发现表中，否则应提示设备离线。
+///
+/// Code Logic（这个函数做什么）:
+///     从传入的设备 HashMap 按 device_id 查找设备，命中后调用 `Device::base_url`，缺失返回中文错误。
+fn device_base_url_from_devices(
+    devices: &HashMap<String, Device>,
+    device_id: &str,
+) -> Result<String, AppError> {
+    let device = devices
+        .get(device_id)
+        .ok_or_else(|| AppError::generic("远端设备不在线"))?;
+    Ok(device.base_url())
+}
+
+/// 从 AppState 解析远端设备 base URL。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Tauri 远端 Workbench 命令只拿到 deviceId，需要通过当前发现设备表找到对端 HTTP 入口。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 `state.devices`，委托纯 helper 生成 base URL；只在同步代码段持有读锁，不跨 await。
+fn device_base_url(state: &AppState, device_id: &str) -> Result<String, AppError> {
+    let devices = state.devices.read().expect("devices 读锁中毒");
+    device_base_url_from_devices(&devices, device_id)
+}
+
+/// 读取当前发现设备名。
+///
+/// Business Logic（为什么需要这个函数）:
+///     远端快捷方式应优先展示本机发现表中的最新设备名，对端返回值只作为兜底。
+///
+/// Code Logic（这个函数做什么）:
+///     从 `state.devices` 读取设备名快照；设备缺失时返回 None，不跨 await 持锁。
+fn device_name_from_state(state: &AppState, device_id: &str) -> Option<String> {
+    let devices = state.devices.read().expect("devices 读锁中毒");
+    devices.get(device_id).map(|device| device.name.clone())
+}
+
+/// 构造本地远端项目快捷方式 row。
+///
+/// Business Logic（为什么需要这个函数）:
+///     打开远端项目后，本机只保存一个最近项目快捷方式，后续操作再通过远端路径和设备 ID 解析。
+///
+/// Code Logic（这个函数做什么）:
+///     用 `remote_project_id(device_id, remote.path)` 生成稳定 ID，kind 固定为 remote；
+///     已存在同 ID row 时复用 id/created_at，只更新时间和展示字段。
+fn build_remote_project_shortcut_row(
+    device_id: &str,
+    current_device_name: Option<&str>,
+    remote: &WorkbenchProjectDto,
+    existing: Option<&WorkbenchProjectRow>,
+    now: &str,
+) -> WorkbenchProjectRow {
+    let id = existing
+        .as_ref()
+        .map(|project| project.id.clone())
+        .unwrap_or_else(|| remote_project_id(device_id, &remote.path));
+    let device_name = current_device_name
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| remote.device_name.clone());
+
+    WorkbenchProjectRow {
+        id,
+        name: remote.name.clone(),
+        kind: "remote".to_string(),
+        device_id: device_id.to_string(),
+        device_name,
+        path: remote.path.clone(),
+        last_opened_at: now.to_string(),
+        created_at: existing
+            .as_ref()
+            .map(|project| project.created_at.clone())
+            .unwrap_or_else(|| now.to_string()),
+        updated_at: now.to_string(),
+    }
+}
+
 /// 添加或重新打开一个本机项目文件夹的共享实现。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -627,6 +710,92 @@ pub async fn add_workbench_project(
     path: String,
 ) -> Result<WorkbenchProjectDto, AppError> {
     add_local_workbench_project_from_path(&state, path).await
+}
+
+/// 列出远端设备可浏览的根目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户从局域网设备添加项目时，需要先选择远端设备上的常用目录入口。
+///
+/// Code Logic（这个函数做什么）:
+///     根据 deviceId 解析 base URL，调用远端 Workbench client 的 roots 接口并返回 DTO 列表。
+#[tauri::command]
+pub async fn list_workbench_remote_roots(
+    state: State<'_, AppState>,
+    device_id: String,
+) -> Result<Vec<WorkbenchRemoteRootDto>, AppError> {
+    let base_url = device_base_url(&state, &device_id)?;
+    RemoteWorkbenchClient::new().roots(&base_url).await
+}
+
+/// 列出远端设备某个目录下的一级条目。
+///
+/// Business Logic（为什么需要这个函数）:
+///     远端项目选择器需要逐层浏览对端文件系统，直到用户选中目标项目目录。
+///
+/// Code Logic（这个函数做什么）:
+///     根据 deviceId 解析 base URL，POST path 到远端 list-dir 接口并返回目录条目 DTO。
+#[tauri::command]
+pub async fn list_workbench_remote_dir(
+    state: State<'_, AppState>,
+    device_id: String,
+    path: String,
+) -> Result<Vec<WorkbenchRemoteDirectoryEntryDto>, AppError> {
+    let base_url = device_base_url(&state, &device_id)?;
+    RemoteWorkbenchClient::new()
+        .list_dir(&base_url, &path)
+        .await
+}
+
+/// 获取远端设备路径信息。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户选中远端路径时，前端需要展示是否可读、是否为 Git 仓库以及建议项目名。
+///
+/// Code Logic（这个函数做什么）:
+///     根据 deviceId 解析 base URL，POST path 到远端 info 接口并返回路径信息 DTO。
+#[tauri::command]
+pub async fn get_workbench_remote_path_info(
+    state: State<'_, AppState>,
+    device_id: String,
+    path: String,
+) -> Result<WorkbenchRemotePathInfoDto, AppError> {
+    let base_url = device_base_url(&state, &device_id)?;
+    RemoteWorkbenchClient::new()
+        .path_info(&base_url, &path)
+        .await
+}
+
+/// 打开远端项目并保存本地快捷方式。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在本机选择另一台设备上的项目目录后，需要在本机最近项目列表中出现一个 remote 项目入口。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 deviceId → 调远端 open-project → 用远端规范路径构造稳定 remote 项目 row → upsert 本地 SQLite。
+#[tauri::command]
+pub async fn open_workbench_remote_project(
+    state: State<'_, AppState>,
+    device_id: String,
+    path: String,
+) -> Result<WorkbenchProjectDto, AppError> {
+    let base_url = device_base_url(&state, &device_id)?;
+    let current_device_name = device_name_from_state(&state, &device_id);
+    let remote = RemoteWorkbenchClient::new()
+        .open_project(&base_url, &path)
+        .await?;
+    let remote_id = remote_project_id(&device_id, &remote.path);
+    let existing = state.workbench_project_repo.get(&remote_id).await?;
+    let now = now_iso();
+    let row = build_remote_project_shortcut_row(
+        &device_id,
+        current_device_name.as_deref(),
+        &remote,
+        existing.as_ref(),
+        &now,
+    );
+    state.workbench_project_repo.upsert(&row).await?;
+    Ok(row.to_dto())
 }
 
 /// 从工作台最近项目中移除记录。
@@ -2219,6 +2388,84 @@ pub async fn delete_workbench_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::device::Device;
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端 Workbench 命令只能调用当前已发现且在线的设备，离线时需要返回稳定中文错误。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用内存 HashMap 构造一个设备，断言 helper 返回 base URL；缺失设备返回“远端设备不在线”。
+    #[test]
+    fn device_base_url_from_devices_returns_url_and_offline_error() {
+        let mut devices = HashMap::new();
+        devices.insert(
+            "device-a".to_string(),
+            Device {
+                id: "device-a".to_string(),
+                name: "Remote Mac".to_string(),
+                host: "192.168.1.9".to_string(),
+                port: 14210,
+                last_seen: Utc::now(),
+                online: true,
+            },
+        );
+
+        let url = device_base_url_from_devices(&devices, "device-a").unwrap();
+        let missing = device_base_url_from_devices(&devices, "missing").unwrap_err();
+
+        assert_eq!(url, "http://192.168.1.9:14210");
+        assert_eq!(missing.to_string(), "远端设备不在线");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     打开远端项目会在本机保存一个快捷方式，该快捷方式必须稳定复用同一 ID 并标记为 remote。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用远端返回的项目 DTO 和已有 row 构造本地快捷方式，断言 kind、id 和 created_at 复用规则。
+    #[test]
+    fn build_remote_project_shortcut_row_preserves_remote_kind_and_stable_id() {
+        let remote = WorkbenchProjectDto {
+            id: "remote-side-local-id".to_string(),
+            name: "Remote App".to_string(),
+            kind: "local".to_string(),
+            device_id: "remote-device".to_string(),
+            device_name: "Remote Mac".to_string(),
+            path: "/Users/hans/web_project/app".to_string(),
+            last_opened_at: "2026-06-25T00:00:00Z".to_string(),
+            created_at: "2026-06-25T00:00:00Z".to_string(),
+            updated_at: "2026-06-25T00:00:00Z".to_string(),
+        };
+        let existing = WorkbenchProjectRow {
+            id: crate::workbench::remote_ids::remote_project_id(
+                "device-a",
+                "/Users/hans/web_project/app",
+            ),
+            name: "Old Name".to_string(),
+            kind: "remote".to_string(),
+            device_id: "device-a".to_string(),
+            device_name: "Old Device".to_string(),
+            path: "/Users/hans/web_project/app".to_string(),
+            last_opened_at: "2026-06-24T00:00:00Z".to_string(),
+            created_at: "2026-06-24T00:00:00Z".to_string(),
+            updated_at: "2026-06-24T00:00:00Z".to_string(),
+        };
+
+        let row = build_remote_project_shortcut_row(
+            "device-a",
+            Some("Current Device"),
+            &remote,
+            Some(&existing),
+            "2026-06-26T00:00:00Z",
+        );
+
+        assert_eq!(row.kind, "remote");
+        assert_eq!(row.id, existing.id);
+        assert_eq!(row.created_at, existing.created_at);
+        assert_eq!(row.device_name, "Current Device");
+        assert_eq!(row.last_opened_at, "2026-06-26T00:00:00Z");
+    }
 
     /// Business Logic（为什么需要这个测试）:
     ///     保存命令必须按后端真实文件名判断能力，防止调用者把只读 CSV 伪装成 text 后覆盖。

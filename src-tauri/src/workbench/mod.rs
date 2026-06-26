@@ -15,6 +15,7 @@ pub mod git;
 pub mod html_assets;
 pub mod models;
 pub mod projects;
+pub mod remote_client;
 pub mod remote_directory;
 pub mod remote_ids;
 pub mod sessions;

@@ -594,6 +594,10 @@ pub fn run() {
             // 工作台（本机项目 + Claude Code PTY 终端 + 项目文件树）
             workbench_cmd::list_workbench_projects,
             workbench_cmd::add_workbench_project,
+            workbench_cmd::list_workbench_remote_roots,
+            workbench_cmd::list_workbench_remote_dir,
+            workbench_cmd::get_workbench_remote_path_info,
+            workbench_cmd::open_workbench_remote_project,
             workbench_cmd::remove_workbench_project,
             workbench_cmd::touch_workbench_project,
             workbench_cmd::list_workbench_worktrees,
