@@ -113,6 +113,18 @@
     "mime": "MIME",
     "dimensions": "尺寸"
   },
+  "fileWorkspace": {
+    "tabs": "已打开文件",
+    "returnTerminal": "返回终端",
+    "save": "保存",
+    "format": "格式化",
+    "dirty": "有未保存改动",
+    "type": "类型",
+    "path": "路径",
+    "previewUnavailable": "该文件无法预览",
+    "empty": "未打开文件",
+    "closeTab": "关闭 {{name}}"
+  },
   "splitPaneRight": "左右分屏",
   "splitPaneDown": "上下分屏",
   "closePane": "关闭当前 pane",

@@ -51,3 +51,8 @@ export { WorkbenchCsvPreview } from './WorkbenchCsvPreview';
 export type { WorkbenchCsvPreviewProps } from './WorkbenchCsvPreview';
 export { WorkbenchSqlitePreview } from './WorkbenchSqlitePreview';
 export type { WorkbenchSqlitePreviewProps } from './WorkbenchSqlitePreview';
+export { WorkbenchFileWorkspace } from './WorkbenchFileWorkspace';
+export type {
+  WorkbenchFileWorkspaceProps,
+  WorkbenchOpenFileTab,
+} from './WorkbenchFileWorkspace';

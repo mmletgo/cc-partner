@@ -259,6 +259,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | WorkbenchImagePreview | preview, name | Workbench 图片只读预览 |
 | WorkbenchCsvPreview | preview | Workbench CSV 只读表格预览 |
 | WorkbenchSqlitePreview | preview, onSelectTable | Workbench SQLite 只读表/数据预览 |
+| WorkbenchFileWorkspace | tabs, activeTabId, callbacks | Workbench 文件 tab 工作区容器 |
 
 ## 5. 开发规范
 

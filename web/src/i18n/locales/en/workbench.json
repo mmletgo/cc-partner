@@ -117,6 +117,18 @@
     "mime": "MIME",
     "dimensions": "Dimensions"
   },
+  "fileWorkspace": {
+    "tabs": "Open files",
+    "returnTerminal": "Return to terminal",
+    "save": "Save",
+    "format": "Format",
+    "dirty": "Unsaved changes",
+    "type": "Type",
+    "path": "Path",
+    "previewUnavailable": "This file cannot be previewed",
+    "empty": "No file is open",
+    "closeTab": "Close {{name}}"
+  },
   "splitPaneRight": "Split right",
   "splitPaneDown": "Split down",
   "closePane": "Close current pane",
