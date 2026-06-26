@@ -485,110 +485,78 @@ pub(crate) fn tmux_attach_window_args(session_name: &str, window_target: &str) -
 ///     Workbench 的终端主题由前端 xterm 控制，tmux status bar 不能继承用户全局 `.tmux.conf` 中的固定深色背景。
 ///
 /// Code Logic（这个函数做什么）:
-///     生成一组 tmux option 命令：先移除旧版 Workbench 写入的本地 format 覆盖，再只追加 terminal default 背景。
+///     生成一组浅色/深色都安全的 tmux status option 命令；保留 session/window 标签结构，但不保留全局 tmux 主题里的硬编码颜色。
 fn tmux_status_theme_commands(session_name: &str) -> Vec<Vec<String>> {
     vec![
         vec![
             "set-option".to_string(),
-            "-u".to_string(),
             "-t".to_string(),
             session_name.to_string(),
             "status-style".to_string(),
+            "fg=default,bg=default".to_string(),
         ],
         vec![
             "set-option".to_string(),
-            "-u".to_string(),
             "-t".to_string(),
             session_name.to_string(),
             "status-left-style".to_string(),
+            "fg=default,bg=default".to_string(),
         ],
         vec![
             "set-option".to_string(),
-            "-u".to_string(),
             "-t".to_string(),
             session_name.to_string(),
             "status-right-style".to_string(),
+            "fg=default,bg=default".to_string(),
         ],
         vec![
             "set-option".to_string(),
-            "-u".to_string(),
             "-t".to_string(),
             session_name.to_string(),
             "status-left".to_string(),
+            "#[bold]#S › ".to_string(),
         ],
         vec![
             "set-option".to_string(),
-            "-u".to_string(),
             "-t".to_string(),
             session_name.to_string(),
             "status-right".to_string(),
+            "%H:%M | %Y-%m-%d ".to_string(),
         ],
         vec![
             "set-window-option".to_string(),
-            "-u".to_string(),
             "-t".to_string(),
             session_name.to_string(),
             "window-status-style".to_string(),
+            "fg=default,bg=default".to_string(),
         ],
         vec![
             "set-window-option".to_string(),
-            "-u".to_string(),
             "-t".to_string(),
             session_name.to_string(),
             "window-status-current-style".to_string(),
+            "fg=black,bg=colour111,bold".to_string(),
         ],
         vec![
             "set-window-option".to_string(),
-            "-u".to_string(),
             "-t".to_string(),
             session_name.to_string(),
             "window-status-format".to_string(),
+            " #I:#W#F ".to_string(),
         ],
         vec![
             "set-window-option".to_string(),
-            "-u".to_string(),
             "-t".to_string(),
             session_name.to_string(),
             "window-status-current-format".to_string(),
+            " #I:#W#F ".to_string(),
         ],
         vec![
             "set-window-option".to_string(),
-            "-u".to_string(),
             "-t".to_string(),
             session_name.to_string(),
             "window-status-separator".to_string(),
-        ],
-        vec![
-            "set-option".to_string(),
-            "-a".to_string(),
-            "-t".to_string(),
-            session_name.to_string(),
-            "status-style".to_string(),
-            "bg=default".to_string(),
-        ],
-        vec![
-            "set-option".to_string(),
-            "-a".to_string(),
-            "-t".to_string(),
-            session_name.to_string(),
-            "status-left-style".to_string(),
-            "bg=default".to_string(),
-        ],
-        vec![
-            "set-option".to_string(),
-            "-a".to_string(),
-            "-t".to_string(),
-            session_name.to_string(),
-            "status-right-style".to_string(),
-            "bg=default".to_string(),
-        ],
-        vec![
-            "set-window-option".to_string(),
-            "-a".to_string(),
-            "-t".to_string(),
-            session_name.to_string(),
-            "window-status-style".to_string(),
-            "bg=default".to_string(),
+            " ".to_string(),
         ],
     ]
 }
@@ -1412,6 +1380,11 @@ impl WorkbenchSessionRegistry {
         let Some(tmux) = available_tmux_command() else {
             return Err(AppError::generic("未找到 tmux，无法切换 window"));
         };
+        if let Some(session_name) = handle.row.backend_id.as_deref() {
+            if let Err(error) = apply_workbench_tmux_status_theme(&tmux, session_name) {
+                tracing::debug!("切换工作台 tmux window 时应用 status 样式失败: {error}");
+            }
+        }
         let args = tmux_select_window_args(&target);
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         run_tmux_command(&tmux, &arg_refs)?;
@@ -2158,12 +2131,12 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     工作台浅色/深色主题切换时，tmux 底部 status bar 不应继承用户 tmux 配置里的深色背景，也不应破坏用户原本的 window 标签风格。
+    ///     工作台浅色/深色主题切换时，tmux 底部 status bar 不应继承用户 tmux 配置里的深色背景、彩色右侧时间或 underline。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     断言 Workbench 只对背景样式追加 terminal default 覆盖，不重写 status/window format 或添加 underline。
+    ///     断言 Workbench 使用无内嵌颜色的 status/window format，并保留 session/window 标签的结构。
     #[test]
-    fn tmux_status_theme_commands_only_override_backgrounds() {
+    fn tmux_status_theme_commands_use_light_safe_label_style() {
         let commands = tmux_status_theme_commands("cc-partner-project-project1234abcd");
 
         assert_eq!(
@@ -2171,108 +2144,85 @@ mod tests {
             vec![
                 vec![
                     "set-option",
-                    "-u",
                     "-t",
                     "cc-partner-project-project1234abcd",
                     "status-style",
+                    "fg=default,bg=default",
                 ],
                 vec![
                     "set-option",
-                    "-u",
                     "-t",
                     "cc-partner-project-project1234abcd",
                     "status-left-style",
+                    "fg=default,bg=default",
                 ],
                 vec![
                     "set-option",
-                    "-u",
                     "-t",
                     "cc-partner-project-project1234abcd",
                     "status-right-style",
+                    "fg=default,bg=default",
                 ],
                 vec![
                     "set-option",
-                    "-u",
                     "-t",
                     "cc-partner-project-project1234abcd",
                     "status-left",
+                    "#[bold]#S › ",
                 ],
                 vec![
                     "set-option",
-                    "-u",
                     "-t",
                     "cc-partner-project-project1234abcd",
                     "status-right",
+                    "%H:%M | %Y-%m-%d ",
                 ],
                 vec![
                     "set-window-option",
-                    "-u",
                     "-t",
                     "cc-partner-project-project1234abcd",
                     "window-status-style",
+                    "fg=default,bg=default",
                 ],
                 vec![
                     "set-window-option",
-                    "-u",
                     "-t",
                     "cc-partner-project-project1234abcd",
                     "window-status-current-style",
+                    "fg=black,bg=colour111,bold",
                 ],
                 vec![
                     "set-window-option",
-                    "-u",
                     "-t",
                     "cc-partner-project-project1234abcd",
                     "window-status-format",
+                    " #I:#W#F ",
                 ],
                 vec![
                     "set-window-option",
-                    "-u",
                     "-t",
                     "cc-partner-project-project1234abcd",
                     "window-status-current-format",
+                    " #I:#W#F ",
                 ],
                 vec![
                     "set-window-option",
-                    "-u",
                     "-t",
                     "cc-partner-project-project1234abcd",
                     "window-status-separator",
-                ],
-                vec![
-                    "set-option",
-                    "-a",
-                    "-t",
-                    "cc-partner-project-project1234abcd",
-                    "status-style",
-                    "bg=default",
-                ],
-                vec![
-                    "set-option",
-                    "-a",
-                    "-t",
-                    "cc-partner-project-project1234abcd",
-                    "status-left-style",
-                    "bg=default",
-                ],
-                vec![
-                    "set-option",
-                    "-a",
-                    "-t",
-                    "cc-partner-project-project1234abcd",
-                    "status-right-style",
-                    "bg=default",
-                ],
-                vec![
-                    "set-window-option",
-                    "-a",
-                    "-t",
-                    "cc-partner-project-project1234abcd",
-                    "window-status-style",
-                    "bg=default",
+                    " ",
                 ],
             ]
         );
+        let joined = commands
+            .iter()
+            .flat_map(|command| command.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!joined.contains("underscore"));
+        assert!(!joined.contains("fg=#"));
+        assert!(!joined.contains("bg=#"));
     }
 
     /// Business Logic（为什么需要这个测试）:
