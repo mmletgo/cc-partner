@@ -22,7 +22,8 @@ import '@xterm/xterm/css/xterm.css';
 import { configApi } from '@/api/config';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
 import { workbenchApi } from '@/api/workbench';
-import { WorkbenchDependencyCard } from '@/components/domain';
+import { WorkbenchDependencyCard, WorkbenchFileWorkspace } from '@/components/domain';
+import type { WorkbenchOpenFileTab } from '@/components/domain';
 import { Button, Card, Input, Pill } from '@/components/primitives';
 import { useWorkbenchDependency } from '@/hooks/workbenchDependencyContext';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
@@ -94,6 +95,11 @@ import {
   worktreeStatusTone,
 } from './workbenchWorktrees';
 import type { WorktreeBranchPrefix } from './workbenchWorktrees';
+import {
+  validateJsonText,
+  validateTomlText,
+} from './workbenchFiles';
+import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
 
 interface TauriInternalsWindow extends Window {
   __TAURI_INTERNALS__?: {
@@ -685,6 +691,10 @@ export function Workbench() {
   const [fileLoadingPath, setFileLoadingPath] = useState<string | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [fileNotice, setFileNotice] = useState<string | null>(null);
+  const [fileTabs, setFileTabs] = useState<WorkbenchOpenFileTab[]>([]);
+  const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
+  const [workspaceView, setWorkspaceView] = useState<WorkbenchFileWorkspaceView>('terminal');
+  const [fileSaving, setFileSaving] = useState<boolean>(false);
   const [newEntryName, setNewEntryName] = useState<string>('');
   const [renameName, setRenameName] = useState<string>('');
   const [inspectorTab, setInspectorTab] = useState<WorkbenchInspectorTab>('files');
@@ -1153,6 +1163,12 @@ export function Workbench() {
         setExpandedPaths(new Set());
         setSelectedPath(null);
         setSelectedInfo(null);
+        setFileTabs([]);
+        setActiveFileTabId(null);
+        setWorkspaceView('terminal');
+        setFileSaving(false);
+        setFileError(null);
+        setFileNotice(null);
         setGitCommits([]);
         setGitHistoryError(null);
         return;
@@ -1168,6 +1184,11 @@ export function Workbench() {
       setExpandedPaths(new Set());
       setSelectedPath(null);
       setSelectedInfo(null);
+      setFileTabs([]);
+      setActiveFileTabId(null);
+      setWorkspaceView('terminal');
+      setFileSaving(false);
+      setFileError(null);
       setFileNotice(null);
       setGitCommits([]);
       setGitHistoryError(null);
@@ -1183,6 +1204,11 @@ export function Workbench() {
       setExpandedPaths(new Set());
       setSelectedPath(null);
       setSelectedInfo(null);
+      setFileTabs([]);
+      setActiveFileTabId(null);
+      setWorkspaceView('terminal');
+      setFileSaving(false);
+      setFileError(null);
       setFileNotice(null);
       setGitCommits([]);
       setGitHistoryError(null);
@@ -1417,7 +1443,7 @@ export function Workbench() {
   );
 
   const triggerPromptOptimizerShortcut = useCallback(() => {
-    if (!activeProjectIdRef.current) return;
+    if (!activeProjectIdRef.current || workspaceView !== 'terminal') return;
     const action = promptOptimizerShortcutAction(promptPanelOpen, promptInput);
     if (action === 'open') {
       openPromptOptimizerPanel();
@@ -1428,7 +1454,7 @@ export function Workbench() {
       return;
     }
     void runPromptOptimization();
-  }, [openPromptOptimizerPanel, promptInput, promptPanelOpen, runPromptOptimization]);
+  }, [openPromptOptimizerPanel, promptInput, promptPanelOpen, runPromptOptimization, workspaceView]);
 
   useEffect(() => {
     const handleShortcutEvent = (event: KeyboardEvent) => {
@@ -1723,6 +1749,80 @@ export function Workbench() {
     [childrenByPath, loadDir],
   );
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户从右侧文件树点选文件时，需要在 Workbench 中打开文件工作区，同时保留终端会话上下文。
+   *
+   * Code Logic（这个函数做什么）:
+   *   对当前 project/worktree 发起 open 文件请求；响应回来后校验是否仍是同一上下文，创建或刷新文件 tab，
+   *   已有 dirty tab 保留用户编辑内容和模式，只更新后端 metadata/preview。
+   */
+  const handleOpenFile = useCallback(
+    async (node: WorkbenchFileNode) => {
+      if (node.kind !== 'file') return;
+      const projectId = activeProjectIdRef.current;
+      if (!projectId) return;
+      const worktreeId = activeWorktreeIdRef.current;
+
+      try {
+        setFileError(null);
+        setFileNotice(null);
+        const opened = await workbenchApi.files.open(projectId, node.path, worktreeId);
+        if (
+          activeProjectIdRef.current !== projectId ||
+          activeWorktreeIdRef.current !== worktreeId
+        ) {
+          return;
+        }
+
+        const tabId = `${worktreeId ?? 'main'}:${opened.metadata.path}`;
+        const freshTab: WorkbenchOpenFileTab = {
+          id: tabId,
+          path: opened.metadata.path,
+          name: opened.metadata.name,
+          opened,
+          content: opened.text?.content ?? '',
+          dirty: false,
+          mode: opened.capabilities.defaultMode,
+        };
+
+        setFileTabs((currentTabs) => {
+          const existingTab = currentTabs.find((tab) => tab.id === tabId);
+          if (!existingTab) {
+            return [...currentTabs, freshTab];
+          }
+
+          return currentTabs.map((tab) => {
+            if (tab.id !== tabId) return tab;
+            if (tab.dirty) {
+              return {
+                ...tab,
+                path: opened.metadata.path,
+                name: opened.metadata.name,
+                opened,
+              };
+            }
+
+            return freshTab;
+          });
+        });
+        setActiveFileTabId(tabId);
+        setWorkspaceView('files');
+      } catch (error) {
+        if (
+          activeProjectIdRef.current !== projectId ||
+          activeWorktreeIdRef.current !== worktreeId
+        ) {
+          return;
+        }
+        setFileError(
+          displayErrorMessage(error, t('workbench:errors.openFile'), desktopUnavailableMessage),
+        );
+      }
+    },
+    [desktopUnavailableMessage, t],
+  );
+
   const handleSelectNode = useCallback(
     (node: WorkbenchFileNode) => {
       setSelectedPath(node.path);
@@ -1735,8 +1835,11 @@ export function Workbench() {
       });
       setRenameName(node.name);
       void loadPathInfo(node.path);
+      if (node.kind === 'file') {
+        void handleOpenFile(node);
+      }
     },
-    [loadPathInfo],
+    [handleOpenFile, loadPathInfo],
   );
 
   const refreshParentDir = useCallback(
@@ -1746,6 +1849,320 @@ export function Workbench() {
       if (parent === '') await loadDir('');
     },
     [loadDir],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户在文件工作区点击 tab 时，需要切回文件视图并激活对应文件，而不是影响右侧检查器 tab。
+   *
+   * Code Logic（这个函数做什么）:
+   *   只更新 activeFileTabId 和 workspaceView，具体 tab 内容由 WorkbenchFileWorkspace 根据 id 渲染。
+   */
+  const handleActivateFileTab = useCallback((id: string) => {
+    setActiveFileTabId(id);
+    setWorkspaceView('files');
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户关闭文件 tab 后，工作区需要选择相邻文件继续显示；全部关闭时自动回到终端。
+   *
+   * Code Logic（这个函数做什么）:
+   *   基于当前 tabs 移除目标 tab；关闭 active tab 时优先选前一个邻居，否则选第一个剩余 tab。
+   */
+  const handleCloseFileTab = useCallback(
+    (id: string) => {
+      const closingIndex = fileTabs.findIndex((tab) => tab.id === id);
+      if (closingIndex < 0) return;
+
+      const nextTabs = fileTabs.filter((tab) => tab.id !== id);
+      setFileTabs(nextTabs);
+
+      if (nextTabs.length === 0) {
+        setActiveFileTabId(null);
+        setWorkspaceView('terminal');
+        return;
+      }
+
+      if (activeFileTabId !== id) {
+        return;
+      }
+
+      const nextActiveTab = nextTabs[Math.max(0, closingIndex - 1)] ?? nextTabs.at(-1) ?? null;
+      setActiveFileTabId(nextActiveTab?.id ?? null);
+      setWorkspaceView('files');
+    },
+    [activeFileTabId, fileTabs],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   文件浏览/编辑完成后，用户需要回到原本常驻的终端工作区继续操作。
+   *
+   * Code Logic（这个函数做什么）:
+   *   将中心工作区视图切回 terminal；终端 DOM 一直保持挂载，只是恢复可见和可输入。
+   */
+  const handleReturnToTerminal = useCallback(() => {
+    setWorkspaceView('terminal');
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户编辑文件内容时需要标记未保存状态，避免保存按钮和 tab 脏标记失真。
+   *
+   * Code Logic（这个函数做什么）:
+   *   按 tab id 更新 content 并设置 dirty=true，其他 tab 保持不变。
+   */
+  const handleFileContentChange = useCallback((id: string, value: string) => {
+    setFileTabs((currentTabs) =>
+      currentTabs.map((tab) => (tab.id === id ? { ...tab, content: value, dirty: true } : tab)),
+    );
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Markdown 等文件支持多种查看/编辑模式，用户切换模式后应随 tab 保持。
+   *
+   * Code Logic（这个函数做什么）:
+   *   按 tab id 写入新的 mode，不改变文件内容和保存状态。
+   */
+  const handleFileModeChange = useCallback((id: string, mode: WorkbenchOpenFileTab['mode']) => {
+    setFileTabs((currentTabs) =>
+      currentTabs.map((tab) => (tab.id === id ? { ...tab, mode } : tab)),
+    );
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   JSON/TOML 保存前必须先做前端语法校验，避免明显错误内容覆盖项目文件。
+   *
+   * Code Logic（这个函数做什么）:
+   *   根据后端 detectedType 选择对应校验器；非结构化文本不做额外校验。
+   */
+  const validateStructuredFileTab = useCallback(
+    (tab: WorkbenchOpenFileTab): string | null => {
+      if (tab.opened.detectedType === 'json') {
+        const result = validateJsonText(tab.content);
+        return result.ok ? null : result.message;
+      }
+
+      if (tab.opened.detectedType === 'toml') {
+        const result = validateTomlText(tab.content);
+        return result.ok ? null : result.message;
+      }
+
+      return null;
+    },
+    [],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户保存文件 tab 时，需要使用后端 baseHash 乐观锁写回当前 worktree，并刷新文件树元信息。
+   *
+   * Code Logic（这个函数做什么）:
+   *   找到目标 tab、校验 JSON/TOML、调用 saveText；响应仍属于当前 project/worktree 时更新 tab 的保存基线、
+   *   清除 dirty 状态，并刷新选中路径信息和父目录列表。
+   */
+  const handleSaveFileTab = useCallback(
+    async (id: string) => {
+      const tab = fileTabs.find((candidate) => candidate.id === id);
+      if (!tab) return;
+
+      const baseHash = tab.opened.text?.baseHash;
+      if (!baseHash) {
+        setFileError(t('workbench:errors.saveFile'));
+        return;
+      }
+
+      const validationMessage = validateStructuredFileTab(tab);
+      if (validationMessage) {
+        setFileError(`${t('workbench:errors.saveFile')}: ${validationMessage}`);
+        return;
+      }
+
+      const projectId = activeProjectIdRef.current;
+      if (!projectId) return;
+      const worktreeId = activeWorktreeIdRef.current;
+
+      try {
+        setFileSaving(true);
+        setFileError(null);
+        setFileNotice(null);
+        const saved = await workbenchApi.files.saveText(
+          projectId,
+          tab.path,
+          tab.content,
+          baseHash,
+          worktreeId,
+        );
+        if (
+          activeProjectIdRef.current !== projectId ||
+          activeWorktreeIdRef.current !== worktreeId
+        ) {
+          return;
+        }
+
+        setFileTabs((currentTabs) =>
+          currentTabs.map((currentTab) => {
+            if (currentTab.id !== id) return currentTab;
+            return {
+              ...currentTab,
+              path: saved.metadata.path,
+              name: saved.metadata.name,
+              dirty: false,
+              opened: {
+                ...currentTab.opened,
+                metadata: saved.metadata,
+                text: currentTab.opened.text
+                  ? {
+                      ...currentTab.opened.text,
+                      content: tab.content,
+                      baseHash: saved.baseHash,
+                      baseModifiedAt: saved.baseModifiedAt,
+                    }
+                  : currentTab.opened.text,
+              },
+              content: tab.content,
+            };
+          }),
+        );
+        await refreshParentDir(tab.path);
+        if (selectedPath === tab.path) {
+          await loadPathInfo(tab.path);
+        }
+        setFileNotice(t('workbench:fileWorkspace.saved'));
+        setFileError(null);
+      } catch (error) {
+        if (
+          activeProjectIdRef.current !== projectId ||
+          activeWorktreeIdRef.current !== worktreeId
+        ) {
+          return;
+        }
+        setFileError(
+          displayErrorMessage(error, t('workbench:errors.saveFile'), desktopUnavailableMessage),
+        );
+      } finally {
+        if (activeProjectIdRef.current === projectId && activeWorktreeIdRef.current === worktreeId) {
+          setFileSaving(false);
+        }
+      }
+    },
+    [
+      desktopUnavailableMessage,
+      fileTabs,
+      loadPathInfo,
+      refreshParentDir,
+      selectedPath,
+      t,
+      validateStructuredFileTab,
+    ],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户需要在保存前格式化 JSON/TOML，但格式化不应自动写盘。
+   *
+   * Code Logic（这个函数做什么）:
+   *   先用前端校验器阻止非法内容，再调用后端格式化命令获得统一输出，并把 tab 标记为 dirty。
+   */
+  const handleFormatFileTab = useCallback(
+    async (id: string) => {
+      const tab = fileTabs.find((candidate) => candidate.id === id);
+      if (!tab) return;
+      const kind =
+        tab.opened.detectedType === 'json' || tab.opened.detectedType === 'toml'
+          ? tab.opened.detectedType
+          : null;
+      if (!kind) return;
+
+      const validationMessage = validateStructuredFileTab(tab);
+      if (validationMessage) {
+        setFileError(`${t('workbench:errors.formatFile')}: ${validationMessage}`);
+        return;
+      }
+
+      try {
+        setFileError(null);
+        setFileNotice(null);
+        const result = await workbenchApi.files.formatStructured(kind, tab.content);
+        setFileTabs((currentTabs) =>
+          currentTabs.map((currentTab) =>
+            currentTab.id === id
+              ? {
+                  ...currentTab,
+                  content: result.formatted,
+                  dirty: true,
+                }
+              : currentTab,
+          ),
+        );
+        setFileNotice(t('workbench:fileWorkspace.formatted'));
+      } catch (error) {
+        setFileError(
+          displayErrorMessage(error, t('workbench:errors.formatFile'), desktopUnavailableMessage),
+        );
+      }
+    },
+    [desktopUnavailableMessage, fileTabs, t, validateStructuredFileTab],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   SQLite 文件预览需要按用户选择的表重新加载行数据，而不是重新打开整个文件 tab。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 previewSqlite 获取指定表前 100 行；响应仍属于当前 project/worktree 时只替换 tab.opened.sqlite。
+   */
+  const handleSelectSqliteTable = useCallback(
+    async (id: string, table: string) => {
+      const tab = fileTabs.find((candidate) => candidate.id === id);
+      const projectId = activeProjectIdRef.current;
+      if (!tab || !projectId) return;
+      const worktreeId = activeWorktreeIdRef.current;
+
+      try {
+        setFileError(null);
+        const sqlite = await workbenchApi.files.previewSqlite(
+          projectId,
+          tab.path,
+          table,
+          100,
+          worktreeId,
+        );
+        if (
+          activeProjectIdRef.current !== projectId ||
+          activeWorktreeIdRef.current !== worktreeId
+        ) {
+          return;
+        }
+        setFileTabs((currentTabs) =>
+          currentTabs.map((currentTab) =>
+            currentTab.id === id
+              ? {
+                  ...currentTab,
+                  opened: {
+                    ...currentTab.opened,
+                    sqlite,
+                  },
+                }
+              : currentTab,
+          ),
+        );
+      } catch (error) {
+        if (
+          activeProjectIdRef.current !== projectId ||
+          activeWorktreeIdRef.current !== worktreeId
+        ) {
+          return;
+        }
+        setFileError(
+          displayErrorMessage(error, t('workbench:errors.previewSqlite'), desktopUnavailableMessage),
+        );
+      }
+    },
+    [desktopUnavailableMessage, fileTabs, t],
   );
 
   const handleCreateEntry = useCallback(
@@ -2051,167 +2468,199 @@ export function Workbench() {
           ) : null}
         </div>
 
-        <section className={styles.sessionTabs} aria-label={t('workbench:terminalTabs')}>
-          {scopedSessions.map((session) => (
-            <button
-              key={session.id}
-              type="button"
-              className={styles.sessionTab}
-              data-active={session.id === activeSessionId || undefined}
-              onClick={() => focusSession(session.id)}
-            >
-              <span className={styles.sessionDot} data-status={session.status} />
-              <span className={styles.sessionName}>{session.name}</span>
-              <Button
-                variant="icon"
-                icon={<XIcon />}
-                title={t('workbench:closeTerminal')}
-                aria-label={t('workbench:closeTerminal')}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void handleCloseSession(session.id);
-                }}
-              />
-            </button>
-          ))}
-          <Button
-            className={styles.newSessionButton}
-            variant="secondary"
-            size="sm"
-            icon={<PlusIcon />}
-            loading={sessionBusy}
-            disabled={!activeProjectId || !activeWorktree}
-            onClick={() => void handleCreateSession()}
+        <div className={styles.mainWorkspace}>
+          <div
+            className={styles.terminalLayer}
+            data-hidden={workspaceView === 'files' || undefined}
           >
-            {t('workbench:newSession')}
-          </Button>
-          <div className={styles.paneActions} aria-label={t('workbench:paneActions')}>
-            <Button
-              variant="icon"
-              icon={<EditIcon />}
-              title={t('workbench:promptOptimizer.open')}
-              aria-label={t('workbench:promptOptimizer.open')}
-              data-active={promptPanelOpen || undefined}
-              onClick={() => {
-                if (promptPanelOpen) {
-                  setPromptPanelOpen(false);
-                } else {
-                  openPromptOptimizerPanel();
-                }
-              }}
-            />
-            <Button
-              variant="icon"
-              icon={<SplitRightIcon />}
-              title={t('workbench:splitPaneRight')}
-              aria-label={t('workbench:splitPaneRight')}
-              disabled={!canUsePanes}
-              onClick={() => void handleSplitPane('right')}
-            />
-            <Button
-              variant="icon"
-              icon={<SplitDownIcon />}
-              title={t('workbench:splitPaneDown')}
-              aria-label={t('workbench:splitPaneDown')}
-              disabled={!canUsePanes}
-              onClick={() => void handleSplitPane('down')}
-            />
-            <Button
-              variant="icon"
-              icon={<XIcon />}
-              title={t('workbench:closePane')}
-              aria-label={t('workbench:closePane')}
-              disabled={!canUsePanes}
-              onClick={() => void handleClosePane()}
-            />
-          </div>
-        </section>
-
-        <div className={styles.terminalArea} ref={terminalAreaRef}>
-          {promptPanelOpen ? (
-            <aside
-              className={styles.promptOptimizerPanel}
-              style={promptPanelStyle}
-              aria-label={t('workbench:promptOptimizer.panelAriaLabel')}
-            >
-              <textarea
-                ref={promptInputRef}
-                className={styles.promptOptimizerInput}
-                value={promptInput}
-                onChange={(event) => setPromptInput(event.target.value)}
-                onKeyDown={(event) => {
-                  const action = promptOptimizerInputKeyAction(
-                    {
-                      key: event.key,
-                      shiftKey: event.shiftKey,
-                      isComposing: event.nativeEvent.isComposing,
-                    },
-                    promptInput,
-                  );
-                  if (action !== 'optimize') return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  void runPromptOptimization();
-                }}
-                placeholder={t('promptOptimizer:inputPlaceholder')}
-                aria-label={t('promptOptimizer:inputAriaLabel')}
-                disabled={promptOptimizing}
-              />
-            </aside>
-          ) : null}
-
-          <section
-            className={styles.terminalPanel}
-            data-layout="single"
-            ref={terminalPanelRef}
-          >
-            {visibleSessions.length === 0 ? (
-              <TerminalPane
-                session={null}
-                placeholder={
-                  activeProject
-                    ? t('workbench:terminalPlaceholder')
-                    : t('workbench:terminalNoProject')
-                }
-                onInput={handleInput}
-                onResize={handleResize}
-                inputEnabled={false}
-                onCursorAnchorChange={handleCursorAnchorChange}
-              />
-            ) : null}
-            {mountedSessions.map((session) => (
-              <div
-                key={session.id}
-                className={styles.terminalPaneFrame}
-                data-active={session.id === renderedActiveSessionId || undefined}
-                onClick={() => focusSession(session.id)}
-              >
-                <div className={styles.terminalPaneHeader}>
+            <section className={styles.sessionTabs} aria-label={t('workbench:terminalTabs')}>
+              {scopedSessions.map((session) => (
+                <button
+                  key={session.id}
+                  type="button"
+                  className={styles.sessionTab}
+                  data-active={session.id === activeSessionId || undefined}
+                  onClick={() => focusSession(session.id)}
+                >
                   <span className={styles.sessionDot} data-status={session.status} />
                   <span className={styles.sessionName}>{session.name}</span>
-                  <span className={styles.terminalPaneStatus}>
-                    {session.status === 'running'
-                      ? t('workbench:sessionStatus.running')
-                      : session.status === 'exited'
-                        ? t('workbench:sessionStatus.exited')
-                        : session.status === 'disconnected'
-                          ? t('workbench:sessionStatus.disconnected')
-                          : session.status}
-                  </span>
-                </div>
-                <TerminalPane
-                  session={session}
-                  placeholder={t('workbench:terminalPlaceholder')}
-                  onInput={handleInput}
-                  onResize={handleResize}
-                  inputEnabled={session.id === renderedActiveSessionId}
-                  onCursorAnchorChange={
-                    session.id === renderedActiveSessionId ? handleCursorAnchorChange : undefined
-                  }
+                  <Button
+                    variant="icon"
+                    icon={<XIcon />}
+                    title={t('workbench:closeTerminal')}
+                    aria-label={t('workbench:closeTerminal')}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void handleCloseSession(session.id);
+                    }}
+                  />
+                </button>
+              ))}
+              <Button
+                className={styles.newSessionButton}
+                variant="secondary"
+                size="sm"
+                icon={<PlusIcon />}
+                loading={sessionBusy}
+                disabled={!activeProjectId || !activeWorktree}
+                onClick={() => void handleCreateSession()}
+              >
+                {t('workbench:newSession')}
+              </Button>
+              <div className={styles.paneActions} aria-label={t('workbench:paneActions')}>
+                <Button
+                  variant="icon"
+                  icon={<EditIcon />}
+                  title={t('workbench:promptOptimizer.open')}
+                  aria-label={t('workbench:promptOptimizer.open')}
+                  data-active={promptPanelOpen || undefined}
+                  onClick={() => {
+                    if (promptPanelOpen) {
+                      setPromptPanelOpen(false);
+                    } else {
+                      openPromptOptimizerPanel();
+                    }
+                  }}
+                />
+                <Button
+                  variant="icon"
+                  icon={<SplitRightIcon />}
+                  title={t('workbench:splitPaneRight')}
+                  aria-label={t('workbench:splitPaneRight')}
+                  disabled={!canUsePanes}
+                  onClick={() => void handleSplitPane('right')}
+                />
+                <Button
+                  variant="icon"
+                  icon={<SplitDownIcon />}
+                  title={t('workbench:splitPaneDown')}
+                  aria-label={t('workbench:splitPaneDown')}
+                  disabled={!canUsePanes}
+                  onClick={() => void handleSplitPane('down')}
+                />
+                <Button
+                  variant="icon"
+                  icon={<XIcon />}
+                  title={t('workbench:closePane')}
+                  aria-label={t('workbench:closePane')}
+                  disabled={!canUsePanes}
+                  onClick={() => void handleClosePane()}
                 />
               </div>
-            ))}
-          </section>
+            </section>
+
+            <div className={styles.terminalArea} ref={terminalAreaRef}>
+              {promptPanelOpen ? (
+                <aside
+                  className={styles.promptOptimizerPanel}
+                  style={promptPanelStyle}
+                  aria-label={t('workbench:promptOptimizer.panelAriaLabel')}
+                >
+                  <textarea
+                    ref={promptInputRef}
+                    className={styles.promptOptimizerInput}
+                    value={promptInput}
+                    onChange={(event) => setPromptInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      const action = promptOptimizerInputKeyAction(
+                        {
+                          key: event.key,
+                          shiftKey: event.shiftKey,
+                          isComposing: event.nativeEvent.isComposing,
+                        },
+                        promptInput,
+                      );
+                      if (action !== 'optimize') return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      void runPromptOptimization();
+                    }}
+                    placeholder={t('promptOptimizer:inputPlaceholder')}
+                    aria-label={t('promptOptimizer:inputAriaLabel')}
+                    disabled={promptOptimizing}
+                  />
+                </aside>
+              ) : null}
+
+              <section
+                className={styles.terminalPanel}
+                data-layout="single"
+                ref={terminalPanelRef}
+              >
+                {visibleSessions.length === 0 ? (
+                  <TerminalPane
+                    session={null}
+                    placeholder={
+                      activeProject
+                        ? t('workbench:terminalPlaceholder')
+                        : t('workbench:terminalNoProject')
+                    }
+                    onInput={handleInput}
+                    onResize={handleResize}
+                    inputEnabled={false}
+                    onCursorAnchorChange={
+                      workspaceView === 'terminal' ? handleCursorAnchorChange : undefined
+                    }
+                  />
+                ) : null}
+                {mountedSessions.map((session) => (
+                  <div
+                    key={session.id}
+                    className={styles.terminalPaneFrame}
+                    data-active={session.id === renderedActiveSessionId || undefined}
+                    onClick={() => focusSession(session.id)}
+                  >
+                    <div className={styles.terminalPaneHeader}>
+                      <span className={styles.sessionDot} data-status={session.status} />
+                      <span className={styles.sessionName}>{session.name}</span>
+                      <span className={styles.terminalPaneStatus}>
+                        {session.status === 'running'
+                          ? t('workbench:sessionStatus.running')
+                          : session.status === 'exited'
+                            ? t('workbench:sessionStatus.exited')
+                            : session.status === 'disconnected'
+                              ? t('workbench:sessionStatus.disconnected')
+                              : session.status}
+                      </span>
+                    </div>
+                    <TerminalPane
+                      session={session}
+                      placeholder={t('workbench:terminalPlaceholder')}
+                      onInput={handleInput}
+                      onResize={handleResize}
+                      inputEnabled={
+                        workspaceView === 'terminal' && session.id === renderedActiveSessionId
+                      }
+                      onCursorAnchorChange={
+                        workspaceView === 'terminal' && session.id === renderedActiveSessionId
+                          ? handleCursorAnchorChange
+                          : undefined
+                      }
+                    />
+                  </div>
+                ))}
+              </section>
+            </div>
+          </div>
+
+          <div
+            className={styles.fileLayer}
+            data-hidden={workspaceView !== 'files' || undefined}
+          >
+            <WorkbenchFileWorkspace
+              tabs={fileTabs}
+              activeTabId={activeFileTabId}
+              saving={fileSaving}
+              onActivate={handleActivateFileTab}
+              onClose={handleCloseFileTab}
+              onReturnToTerminal={handleReturnToTerminal}
+              onContentChange={handleFileContentChange}
+              onModeChange={handleFileModeChange}
+              onSave={handleSaveFileTab}
+              onFormat={handleFormatFileTab}
+              onSelectSqliteTable={handleSelectSqliteTable}
+            />
+          </div>
         </div>
       </main>
 

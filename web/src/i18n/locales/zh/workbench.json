@@ -123,7 +123,9 @@
     "path": "路径",
     "previewUnavailable": "该文件无法预览",
     "empty": "未打开文件",
-    "closeTab": "关闭 {{name}}"
+    "closeTab": "关闭 {{name}}",
+    "saved": "文件已保存",
+    "formatted": "内容已格式化"
   },
   "splitPaneRight": "左右分屏",
   "splitPaneDown": "上下分屏",
@@ -199,6 +201,10 @@
     "closeSession": "关闭终端失败",
     "renameSession": "重命名会话失败",
     "files": "读取文件夹失败",
+    "openFile": "打开文件失败",
+    "saveFile": "保存文件失败",
+    "formatFile": "格式化文件失败",
+    "previewSqlite": "预览 SQLite 失败",
     "gitHistory": "读取 Git 历史失败",
     "pathInfo": "读取路径信息失败",
     "createPath": "创建路径失败",

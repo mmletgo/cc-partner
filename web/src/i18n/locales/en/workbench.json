@@ -127,7 +127,9 @@
     "path": "Path",
     "previewUnavailable": "This file cannot be previewed",
     "empty": "No file is open",
-    "closeTab": "Close {{name}}"
+    "closeTab": "Close {{name}}",
+    "saved": "File saved",
+    "formatted": "Content formatted"
   },
   "splitPaneRight": "Split right",
   "splitPaneDown": "Split down",
@@ -203,6 +205,10 @@
     "closeSession": "Failed to close terminal",
     "renameSession": "Failed to rename session",
     "files": "Failed to load folder",
+    "openFile": "Failed to open file",
+    "saveFile": "Failed to save file",
+    "formatFile": "Failed to format file",
+    "previewSqlite": "Failed to preview SQLite",
     "gitHistory": "Failed to load Git history",
     "pathInfo": "Failed to load path info",
     "createPath": "Failed to create path",
