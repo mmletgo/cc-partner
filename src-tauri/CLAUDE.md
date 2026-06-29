@@ -30,6 +30,7 @@ src/
 ├── storage/health_repo.rs — activity_records/water_records 读写 + aggregate_minutes 统计 [已实现]
 ├── sync/              — 向量时钟 + LWW 合并 + engine              [M4]
 ├── net/               — mdns-sd 发现 + axum server + reqwest client [已实现 M3]
+├── mobile/            — 移动端局域网 `/mobile` 访问 URL 生成（过滤 localhost/loopback）[已实现]
 ├── transfer/          — 分块传输 + SHA256 + 断点续传              [M5]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
 ├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥 [已实现]
@@ -80,6 +81,7 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 - **事件循环**：用 mdns-sd re-export 的 `Receiver<ServiceEvent>`，`recv()` 阻塞等待（daemon shutdown 后 channel 断开自然退出）；Resolved → 写 devices 表，Removed(`fullname` 去 type 后缀得 device_id) → 剔除。
 - **动态端口**：axum `TcpListener::bind(("0.0.0.0", 0))`，`local_addr().port()` 取实际端口回填 `AppState.actual_http_port: AtomicU16`；mDNS 注册用该端口（启动顺序：先 axum 拿端口 → 再 mDNS 注册）。
 - **/api/health**：`GET` 返回 `{ok, device_id, device_name, http_port, ts}`（字段名 snake_case，对照 Python `handle_health`，供对端 peer_client 解析；对端仅判 status==200）。
+- **/api/mobile/access-info**：`GET` 返回 camelCase `{deviceName, port, urls}`，供桌面端生成手机访问 `/mobile` 的链接/二维码。URL 使用 `actual_http_port` 与 `local_lan_ip()` 候选地址生成，必须过滤空值、`localhost`、`127.0.0.1`、`::1` 与其它 loopback 地址；验证命令：`cargo test mobile::tests::access_info_filters_loopback_urls --lib`。
 - **body limit**：axum `DefaultBodyLimit::max(32MB)`，同时覆盖 M5 chunk（960KB）和 Workbench 远端文本保存（5MB 高转义 JSON + 开销）；不要降回 2MB/8MB，否则 2MB~5MB 的远端可编辑文本会打开成功但保存失败。
 - **AppState 共享**：axum `with_state(state.clone())` 与 invoke `State<'_, AppState>` 共享同一份 `Arc`；devices = `Arc<RwLock<HashMap<String, Device>>>`，actual_http_port = `Arc<AtomicU16>`，discovery = `Arc<Mutex<Option<ServiceDaemon>>>`。
 - **peer_client**：`reqwest::Client`（rustls-tls，无系统 OpenSSL 依赖）；`health(addr, port)` GET `/api/health`，10s 超时，status==200 返回 true；`sync_pull/sync_push`（M4）POST 对端 `/api/sync/{pull,push}`，入参出参字段对照 Python（summaries/prompts/vector_clock/accepted），snake_case；transfer 方法预留（TODO M5）。

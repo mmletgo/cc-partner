@@ -12,8 +12,8 @@
 //!     - body limit 覆盖文件传输 chunk 和 Workbench 远端文本保存。
 
 use crate::net::routes::{
-    cc_history, claude_code_assets, claude_md_sync, health, scratchpad_sync, ssh_target_sync, sync,
-    transfer, workbench,
+    cc_history, claude_code_assets, claude_md_sync, health, mobile, scratchpad_sync,
+    ssh_target_sync, sync, transfer, workbench,
 };
 use crate::state::AppState;
 use axum::extract::DefaultBodyLimit;
@@ -40,6 +40,8 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
     // axum Router：with_state 注入 AppState，与 invoke 命令层共享同一份 Arc
     let app: Router = Router::new()
         .route("/api/health", get(health::health))
+        // 移动端访问入口：返回手机可访问的局域网 /mobile URL（过滤 localhost/loopback）
+        .route("/api/mobile/access-info", get(mobile::access_info))
         // P2P 同步协议（M4）：对端调 pull/push，字段对照 Python protocol.py
         .route("/api/sync/pull", post(sync::sync_pull))
         .route("/api/sync/push", post(sync::sync_push))

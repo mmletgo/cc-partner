@@ -20,6 +20,7 @@ mod config;
 mod error;
 mod health;
 mod hotkey;
+mod mobile;
 mod models;
 mod net;
 mod permissions;

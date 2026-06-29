@@ -246,7 +246,7 @@ fn first_ipv4(info: &ServiceInfo) -> Option<String> {
 ///        这是最可靠的跨平台方式获取出站接口 IP。
 ///     2. 过滤 loopback；若得到非回环地址即返回。
 ///     3. 失败返回 None（调用方回退到 addr_auto）。
-fn local_lan_ip() -> Option<IpAddr> {
+pub fn local_lan_ip() -> Option<IpAddr> {
     use std::net::UdpSocket;
     // 用 UDP "连接" 公网地址探测出站接口 IP（对照 Python socket.connect(("8.8.8.8",80))）
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
