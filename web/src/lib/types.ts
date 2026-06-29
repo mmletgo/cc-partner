@@ -93,6 +93,21 @@ export interface AppConfig {
   httpPort: number;
 }
 
+/**
+ * 移动端局域网访问入口信息。
+ *
+ * Business Logic（为什么需要这个接口）:
+ *   桌面端需要把当前设备可供手机浏览器访问的 `/mobile` URL 展示给用户或二维码组件。
+ *
+ * Code Logic（字段说明）:
+ *   deviceName/port 来自后端当前配置和实际 HTTP 端口；urls 是过滤 loopback 后的同源访问地址列表。
+ */
+export interface MobileAccessInfo {
+  deviceName: string;
+  port: number;
+  urls: string[];
+}
+
 export type PromptOptimizerFillLanguage = 'zh' | 'en';
 
 export type WorkbenchDependencyState =
@@ -651,6 +666,21 @@ export interface WorkbenchTerminalStatusEvent {
   exitCode: number | null;
   ts: number;
 }
+
+/**
+ * Workbench HTTP NDJSON 事件。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   移动端普通浏览器无法使用 Tauri event，需要通过 `/api/workbench/events` 一条长连接接收多类 Workbench 事件。
+ *
+ * Code Logic（类型说明）:
+ *   对齐 Rust `#[serde(tag="type", content="payload", rename_all="camelCase")]`；
+ *   terminalOutput/status 复用桌面事件 payload，mergeProgress 复用已有阶段进度 payload。
+ */
+export type WorkbenchHttpEvent =
+  | { type: 'terminalOutput'; payload: WorkbenchTerminalOutputEvent }
+  | { type: 'terminalStatus'; payload: WorkbenchTerminalStatusEvent }
+  | { type: 'mergeProgress'; payload: WorkbenchMergeProgressEvent };
 
 export interface VersionInfo {
   version: string;
