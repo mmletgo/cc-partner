@@ -98,15 +98,13 @@ mod tests {
     use super::{build_mobile_access_info, MobileAccessInfoDto};
     use crate::config::AppConfig;
 
-    /// Business Logic（为什么需要这个测试）:
-    ///     桌面端需要把移动端访问地址展示为链接和二维码，返回 localhost/loopback 会导致手机无法访问。
+    /// Business Logic（为什么需要这个函数）:
+    ///     mobile access info 测试只关心设备名、端口与 URL 过滤结果，需要稳定的最小配置样本。
     ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造包含 localhost、127.0.0.1 和局域网 IP 的候选列表，断言只保留局域网 `/mobile` URL，
-    ///     同时保留设备名和实际 HTTP 端口。
-    #[test]
-    fn access_info_filters_loopback_urls() {
-        let config = AppConfig {
+    /// Code Logic（这个函数做什么）:
+    ///     构造带默认字段的 AppConfig，避免每个测试重复初始化与当前断言无关的配置项。
+    fn test_config() -> AppConfig {
+        AppConfig {
             device_id: "device-1".to_string(),
             device_name: "Hans Mac".to_string(),
             http_port: 0,
@@ -122,7 +120,18 @@ mod tests {
             cloud_sync_branch: None,
             health: Default::default(),
             github_trending: Default::default(),
-        };
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     桌面端需要把移动端访问地址展示为链接和二维码，返回 localhost/loopback 会导致手机无法访问。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造包含 localhost、127.0.0.1 和局域网 IP 的候选列表，断言只保留局域网 `/mobile` URL，
+    ///     同时保留设备名和实际 HTTP 端口。
+    #[test]
+    fn access_info_filters_loopback_urls() {
+        let config = test_config();
 
         let info = build_mobile_access_info(
             &config,
@@ -141,6 +150,98 @@ mod tests {
                 port: 14203,
                 urls: vec!["http://192.168.1.23:14203/mobile".to_string()],
             }
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户机器枚举网卡地址时可能拿到空字符串、空白字符串或带空白的有效 LAN IP，二维码不能因此失效。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造空值、纯空白和带空白 IPv4 候选地址，断言空白被过滤且有效地址 trim 后生成 URL。
+    #[test]
+    fn access_info_trims_candidates_and_filters_blank_hosts() {
+        let config = test_config();
+
+        let info = build_mobile_access_info(
+            &config,
+            14203,
+            vec![
+                String::new(),
+                "   ".to_string(),
+                "  192.168.1.23  ".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            info.urls,
+            vec!["http://192.168.1.23:14203/mobile".to_string()]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     127.0.0.0/8 的任意地址和 IPv6 loopback 都只能本机访问，展示给手机会得到不可用二维码。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造非 127.0.0.1 的 IPv4 loopback、::1 与一个 LAN IP，断言仅 LAN IP 被保留。
+    #[test]
+    fn access_info_filters_extended_loopback_hosts() {
+        let config = test_config();
+
+        let info = build_mobile_access_info(
+            &config,
+            14203,
+            vec![
+                "127.12.3.4".to_string(),
+                "::1".to_string(),
+                "192.168.1.23".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            info.urls,
+            vec!["http://192.168.1.23:14203/mobile".to_string()]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同一个局域网地址可能从多个枚举来源重复出现，移动端入口列表不应展示重复二维码。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造重复 IPv4 候选地址，并混入带空白的同一地址，断言归一化后只输出一次。
+    #[test]
+    fn access_info_deduplicates_hosts_after_normalization() {
+        let config = test_config();
+
+        let info = build_mobile_access_info(
+            &config,
+            14203,
+            vec![
+                "192.168.1.23".to_string(),
+                "192.168.1.23".to_string(),
+                " 192.168.1.23 ".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            info.urls,
+            vec!["http://192.168.1.23:14203/mobile".to_string()]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     局域网设备可能只有 IPv6 地址，手机扫码链接需要使用合法 URL host 方括号格式。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造非 loopback IPv6 候选地址，断言输出 URL 使用 `http://[ipv6]:port/mobile` 格式。
+    #[test]
+    fn access_info_formats_non_loopback_ipv6_hosts() {
+        let config = test_config();
+
+        let info = build_mobile_access_info(&config, 14203, vec!["2001:db8::5".to_string()]);
+
+        assert_eq!(
+            info.urls,
+            vec!["http://[2001:db8::5]:14203/mobile".to_string()]
         );
     }
 }
