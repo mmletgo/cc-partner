@@ -139,7 +139,7 @@ export function MobileTerminalPanel({
   const replayGateRef = useRef<boolean>(false);
   const replayReadyRef = useRef<boolean>(false);
   const inputEnabledRef = useRef<boolean>(false);
-  const resizeTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const resizeTimerRef = useRef<number | null>(null);
   const replayRequestIdRef = useRef<number>(0);
   const lastResizeRef = useRef<{ sessionId: string; cols: number; rows: number } | null>(null);
   const lastFocusedSessionIdRef = useRef<string | null>(null);

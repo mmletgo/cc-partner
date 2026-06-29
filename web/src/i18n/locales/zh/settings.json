@@ -93,6 +93,17 @@
     "appliedConfig": "已应用配置",
     "applyFailed": "应用健康提醒配置失败"
   },
+  "mobileAccess": {
+    "title": "移动端 Workbench",
+    "description": "在同一局域网内用手机浏览器访问当前工作台。",
+    "warning": "仅限个人可信局域网使用；移动端可操作终端输入、文件修改和 Git。",
+    "loading": "正在获取局域网访问地址…",
+    "empty": "未检测到可供手机访问的局域网地址。",
+    "copy": "复制链接",
+    "copied": "已复制",
+    "refresh": "刷新",
+    "qrLabel": "移动端 Workbench 访问二维码"
+  },
   "about": {
     "title": "关于",
     "versionLabel": "版本号",

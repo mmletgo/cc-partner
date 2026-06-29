@@ -10,14 +10,9 @@
  *   tsx 无 CSS loader,需 stub 成空对象);再动态 import HealthPanel 取 timePartsToConfig,
  *   验证空值/null 映射、三个 section、四个 select、00-23 小时选项以及健康网格 CSS 覆盖顺序。
  *   健康监测开启后久坐/喝水/全屏遮罩始终启用,因此不应再渲染喝水启用或全屏遮罩开关。
- *   node:module 这一行用 @ts-expect-error 抑制类型错误(见下方行内注释)。
  */
 
-// node:module 类型由 @types/node 提供,但本仓库 tsconfig 未在 compilerOptions.types 显式纳入 node,
-// tsx 测试上下文下类型缺失,故局部抑制(运行时 tsx 正常解析;node:module 是 node 内置,无需安装)。
-// @ts-expect-error - 本仓库 tsconfig 未在 compilerOptions.types 纳入 node,node:module 类型缺失,运行时 tsx 正常
 import { register } from 'node:module';
-// @ts-expect-error - 同上,node:fs/promises 是脚本式测试读取 CSS 源码所需的 node 内置模块
 import { readFile } from 'node:fs/promises';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';

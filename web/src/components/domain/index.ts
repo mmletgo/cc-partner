@@ -37,6 +37,9 @@ export type { CcHistoryCardProps } from './CcHistoryCard';
 export { GithubRepoCard } from './GithubRepoCard';
 export type { GithubRepoCardProps } from './GithubRepoCard';
 
+export { MobileAccessCard } from './MobileAccessCard';
+export type { MobileAccessCardProps } from './MobileAccessCard';
+
 export { ClaudeAssetRow } from './ClaudeAssetRow';
 export type { ClaudeAssetRowProps } from './ClaudeAssetRow';
 

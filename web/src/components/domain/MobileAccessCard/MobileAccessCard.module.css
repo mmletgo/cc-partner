@@ -1,0 +1,128 @@
+/* MobileAccessCard - 桌面端移动访问链接与二维码。 */
+
+.card {
+  border-color: var(--border-soft);
+}
+
+.compact {
+  background: color-mix(in oklab, var(--surface) 84%, var(--bg));
+}
+
+.header {
+  padding-bottom: var(--space-2);
+}
+
+.titleGroup {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.title {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+}
+
+.description,
+.warning,
+.state,
+.error {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.description {
+  color: var(--muted);
+}
+
+.warning {
+  color: var(--warning);
+}
+
+.state {
+  color: var(--muted);
+}
+
+.error {
+  color: var(--danger);
+}
+
+.body {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.contentGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 196px;
+  align-items: start;
+  gap: var(--space-4);
+}
+
+.urlList {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.url {
+  display: block;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-warm);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.qr {
+  width: 196px;
+  min-height: 196px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: var(--space-2);
+  background: var(--surface);
+}
+
+.qr svg {
+  width: 180px;
+  height: 180px;
+  display: block;
+}
+
+.compact .contentGrid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.compact .qr {
+  width: 160px;
+  min-height: 160px;
+}
+
+.compact .qr svg {
+  width: 144px;
+  height: 144px;
+}
+
+@media (max-width: 760px) {
+  .contentGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

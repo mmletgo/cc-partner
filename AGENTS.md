@@ -56,6 +56,7 @@ cc-partner/
 │   │   │       ├── DeviceCard/
 │   │   │       ├── TransferItem/
 │   │   │       ├── GithubRepoCard/
+│   │   │       ├── MobileAccessCard/
 │   │   │       ├── WorkbenchProjectRail/
 │   │   │       └── PermissionCard/
 │   │   ├── pages/                # 页面（每个一个文件夹）
@@ -251,6 +252,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | TransferItem | task, onPause, onCancel, onRetry | 传输项 |
 | PermissionCard | icon, title, description, granted | 权限卡片 |
 | GithubRepoCard | repo, language, onOpen | GitHub 周热门项目卡片 |
+| MobileAccessCard | compact, className | 局域网移动端 Workbench 访问链接与二维码卡片 |
 | ClaudeAssetRow | asset, onToggle, onRemove, onSelect | Claude Code 资产行 |
 | RemoteAssetPicker | assets, selectedKeys, kind, search, onSelectMany | 局域网远端资产选择器 |
 | WorkbenchProjectRail | - | 侧栏设置项下方的项目文件夹入口 |

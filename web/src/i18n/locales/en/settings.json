@@ -93,6 +93,17 @@
     "appliedConfig": "Applied config",
     "applyFailed": "Failed to apply health config"
   },
+  "mobileAccess": {
+    "title": "Mobile Workbench",
+    "description": "Open this Workbench from a phone browser on the same local network.",
+    "warning": "Use only on a trusted personal LAN. Mobile can operate terminal input, file edits, and Git.",
+    "loading": "Getting local network access URLs…",
+    "empty": "No local network URL is available for mobile access.",
+    "copy": "Copy link",
+    "copied": "Copied",
+    "refresh": "Refresh",
+    "qrLabel": "Mobile Workbench access QR code"
+  },
   "about": {
     "title": "About",
     "versionLabel": "Version",

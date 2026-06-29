@@ -4,7 +4,6 @@ import {
   rewriteHtmlPreviewAssets,
   rewriteMarkdownPreviewAssets,
 } from './htmlAssets';
-// @ts-expect-error - 本仓库 tsconfig 未在 compilerOptions.types 纳入 node,node:process 类型缺失,运行时 tsx 正常
 import { exit } from 'node:process';
 import type { WorkbenchHtmlAsset } from '@/lib/types';
 

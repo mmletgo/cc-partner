@@ -22,7 +22,11 @@ import '@xterm/xterm/css/xterm.css';
 import { configApi } from '@/api/config';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
 import { workbenchApi } from '@/api/workbench';
-import { WorkbenchDependencyCard, WorkbenchFileWorkspace } from '@/components/domain';
+import {
+  MobileAccessCard,
+  WorkbenchDependencyCard,
+  WorkbenchFileWorkspace,
+} from '@/components/domain';
 import type { WorkbenchOpenFileTab } from '@/components/domain';
 import { WorkbenchWorkspaceNav } from '@/components/layout';
 import { Button, Card, Input, Pill } from '@/components/primitives';
@@ -813,7 +817,7 @@ export function Workbench() {
   const cursorAnchorRef = useRef<TerminalCursorAnchor | null>(null);
   const lastLocalFocusAtRef = useRef<number>(0);
   const mergeProgressWorktreeIdRef = useRef<string | null>(null);
-  const mergeStageDismissTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const mergeStageDismissTimerRef = useRef<number | null>(null);
   const fileTabsRef = useRef<WorkbenchOpenFileTab[]>([]);
   const activeFileTabIdRef = useRef<string | null>(null);
   const openFileRequestSeqRef = useRef<number>(0);
@@ -3357,6 +3361,8 @@ export function Workbench() {
             </div>
           </div>
         </Card>
+
+        <MobileAccessCard compact />
 
         <div className={styles.inspectorTabs} role="tablist" aria-label={t('workbench:inspectorTabs')}>
           <button

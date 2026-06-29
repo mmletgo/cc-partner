@@ -11,7 +11,6 @@ import {
   remoteParentPath,
   sortRemoteDirectoryEntries,
 } from '../../lib/workbenchRemoteProjects';
-// @ts-expect-error - 本仓库 tsconfig 未在 compilerOptions.types 纳入 node,node:process 类型缺失,运行时 tsx 正常
 import { exit } from 'node:process';
 
 /**

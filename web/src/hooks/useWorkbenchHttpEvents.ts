@@ -192,7 +192,7 @@ export function useWorkbenchHttpEvents({
 
     const abortController = new AbortController();
     let stopped = false;
-    let reconnectTimer: ReturnType<typeof window.setTimeout> | null = null;
+    let reconnectTimer: number | null = null;
 
     /**
      * Business Logic（为什么需要这个函数）:

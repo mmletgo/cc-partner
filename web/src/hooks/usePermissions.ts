@@ -65,7 +65,7 @@ export function usePermissions(
   }, []);
 
   useEffect(() => {
-    let timer: ReturnType<typeof setInterval> | null = null;
+    let timer: number | null = null;
     let stopped = false;
 
     const poll = async () => {

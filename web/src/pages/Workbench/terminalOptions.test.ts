@@ -1,4 +1,3 @@
-// @ts-expect-error - 本测试由 tsx 在 Node 环境运行；前端 tsconfig 不引入 Node 全局类型，避免污染 DOM timer 类型。
 import { readFileSync } from 'node:fs';
 import { workbenchTerminalOptions } from './terminalOptions';
 

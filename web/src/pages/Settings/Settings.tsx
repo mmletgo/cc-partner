@@ -22,7 +22,7 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { useSearchParams } from 'react-router-dom';
 import { Card, Button, Input, Pill } from '@/components/primitives';
-import { PermissionCard, WorkbenchDependencyCard } from '@/components/domain';
+import { MobileAccessCard, PermissionCard, WorkbenchDependencyCard } from '@/components/domain';
 import { CheckIcon, XIcon, DevicesIcon, FolderIcon, KeyboardIcon, SyncIcon, InfoIcon, DownloadIcon } from '@/lib/icons';
 import { configApi } from '@/api/config';
 import { healthApi } from '@/api/health';
@@ -1075,6 +1075,7 @@ export function Settings() {
             role="tabpanel"
             aria-labelledby="settings-tab-dependencies"
           >
+            <MobileAccessCard />
             <WorkbenchDependencyCard />
           </div>
         ) : null}
