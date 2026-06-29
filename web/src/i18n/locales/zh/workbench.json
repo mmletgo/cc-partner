@@ -92,6 +92,30 @@
       "error": "加载失败",
       "remoteUnsupported": "手机端暂不支持打开远端项目快捷方式"
     },
+    "terminalPanel": {
+      "title": "终端",
+      "tabsAriaLabel": "移动端终端窗口",
+      "actionsAriaLabel": "移动端 pane 操作",
+      "terminalAriaLabel": "移动端终端输出",
+      "noProject": "先选择项目",
+      "noSession": "当前 worktree 还没有终端窗口",
+      "newWindow": "新窗口",
+      "splitRight": "左右分屏",
+      "splitDown": "上下分屏",
+      "closePane": "关闭 pane",
+      "closeWindow": "关闭窗口",
+      "paneCount": "{{count}} pane",
+      "errors": {
+        "focus": "切换终端失败",
+        "replay": "加载终端历史失败",
+        "write": "写入终端失败",
+        "resize": "调整终端尺寸失败",
+        "create": "创建终端失败",
+        "split": "分屏失败",
+        "closePane": "关闭 pane 失败",
+        "closeWindow": "关闭窗口失败"
+      }
+    },
     "status": {
       "project": "项目",
       "worktree": "worktree",

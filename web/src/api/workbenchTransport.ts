@@ -11,6 +11,7 @@
  */
 
 import { workbenchApi } from './workbench';
+import type { WorkbenchPaneSplitDirection } from './workbench';
 import type {
   WorkbenchFileNode,
   WorkbenchGitCommit,
@@ -61,9 +62,29 @@ export interface WorkbenchTransport {
       initialSize?: WorkbenchTerminalSize,
       worktreeId?: string | null,
     ) => Promise<WorkbenchSession>;
-    writeInput: (sessionId: string, data: string) => Promise<{ ok: boolean; sessionId: string }>;
-    resize: (sessionId: string, cols: number, rows: number) => Promise<{ ok: boolean; sessionId: string }>;
+    writeInput: (
+      sessionId: string,
+      data: string,
+    ) => Promise<{ ok: boolean; sessionId: string }>;
+    resize: (
+      sessionId: string,
+      cols: number,
+      rows: number,
+    ) => Promise<{ ok: boolean; sessionId: string }>;
     replay: (sessionId: string) => Promise<WorkbenchSessionReplay>;
+    focus: (sessionId: string) => Promise<{ ok: boolean; sessionId: string }>;
+    focused: (
+      projectId: string,
+      worktreeId?: string | null,
+    ) => Promise<{ sessionId: string | null }>;
+    splitPane: (
+      sessionId: string,
+      direction: WorkbenchPaneSplitDirection,
+    ) => Promise<{ ok: boolean; sessionId: string; direction: WorkbenchPaneSplitDirection }>;
+    closePane: (
+      sessionId: string,
+    ) => Promise<{ ok: boolean; sessionId: string; closedWindow: boolean }>;
+    close: (sessionId: string) => Promise<{ ok: boolean; sessionId: string }>;
   };
   files: {
     listDir: (
@@ -138,6 +159,11 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
     writeInput: (sessionId, data) => workbenchApi.sessions.writeInput(sessionId, data),
     resize: (sessionId, cols, rows) => workbenchApi.sessions.resize(sessionId, cols, rows),
     replay: async (sessionId) => createEmptyDesktopReplay(sessionId),
+    focus: (sessionId) => workbenchApi.sessions.focus(sessionId),
+    focused: (projectId, worktreeId) => workbenchApi.sessions.focused(projectId, worktreeId),
+    splitPane: (sessionId, direction) => workbenchApi.sessions.splitPane(sessionId, direction),
+    closePane: (sessionId) => workbenchApi.sessions.closePane(sessionId),
+    close: (sessionId) => workbenchApi.sessions.close(sessionId),
   },
   files: {
     listDir: (projectId, path, worktreeId) =>

@@ -20,7 +20,7 @@ export interface MobileProjectPanelProps {
  *   手机进入 `/mobile` 后需要先选择最近 Workbench 本机项目，后续 worktree、terminal session 和状态栏都依赖该项目上下文。
  *
  * Code Logic（这个组件做什么）:
- *   渲染最近项目列表、刷新入口、加载态、错误态和空态；local 项目点击后把 DTO 交给父组件，remote shortcut 展示为禁用并显示提示。
+ *   渲染最近项目列表、刷新入口、加载态、错误态和空态；local 项目点击后把 DTO 交给父组件，remote shortcut 保持可聚焦并用 aria-disabled 展示提示。
  */
 export function MobileProjectPanel({
   projects,
@@ -83,10 +83,17 @@ export function MobileProjectPanel({
               aria-pressed={isActive}
               aria-disabled={!canSelect}
               aria-describedby={canSelect ? undefined : unsupportedNoticeId}
-              disabled={!canSelect}
-              onClick={() => {
-                if (canSelect) {
-                  onSelect(project);
+              onClick={(event) => {
+                if (!canSelect) {
+                  event.preventDefault();
+                  return;
+                }
+                onSelect(project);
+              }}
+              onKeyDown={(event) => {
+                if (canSelect) return;
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
                 }
               }}
             >

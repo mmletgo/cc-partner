@@ -307,7 +307,7 @@
   transition: all var(--motion-fast) var(--ease-standard);
 }
 
-.mobileListItem:hover:not(:disabled) {
+.mobileListItem:hover:not(:disabled):not(.mobileListItemDisabled) {
   border-color: var(--accent);
   background: var(--accent-soft);
 }
@@ -394,6 +394,216 @@
   color: var(--accent);
   background: var(--accent-soft);
   border-color: color-mix(in oklab, var(--accent) 45%, var(--border-soft));
+}
+
+.mobileTerminalPanel {
+  min-height: calc(100dvh - var(--space-24) - var(--space-12));
+}
+
+.mobileTerminalToolbar {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.mobileTerminalTabs,
+.mobileTerminalActions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  overflow-x: auto;
+  padding-bottom: var(--space-1);
+}
+
+.mobileSessionTab {
+  min-width: min(62vw, calc(var(--space-24) * 2));
+  max-width: min(76vw, calc(var(--space-24) * 3));
+  height: calc(var(--space-8) + var(--space-2));
+  padding: 0 var(--space-1) 0 var(--space-2);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--space-7);
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.mobileSessionTab[data-active='true'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.mobileSessionSelectButton {
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  display: grid;
+  grid-template-columns: var(--space-2) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  color: inherit;
+  background: transparent;
+  border: 0;
+  text-align: left;
+}
+
+.mobileSessionDot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--meta);
+}
+
+.mobileSessionDot[data-status='running'] {
+  background: var(--success);
+}
+
+.mobileSessionDot[data-status='disconnected'] {
+  background: var(--danger);
+}
+
+.mobileSessionName,
+.mobileSessionPaneCount {
+  min-width: 0;
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mobileSessionName {
+  font-weight: var(--weight-semibold);
+}
+
+.mobileSessionPaneCount {
+  color: var(--muted);
+}
+
+.mobileTerminalTabClose,
+.mobileTerminalActionButton,
+.mobileTerminalPrimaryButton {
+  min-height: var(--space-8);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-normal);
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.mobileTerminalTabClose {
+  width: var(--space-7);
+  height: var(--space-7);
+  min-height: var(--space-7);
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+}
+
+.mobileTerminalPrimaryButton,
+.mobileTerminalActionButton {
+  padding: var(--space-1) var(--space-2);
+}
+
+.mobileTerminalPrimaryButton {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in oklab, var(--accent) 45%, var(--border-soft));
+}
+
+.mobileTerminalTabClose:hover:not(:disabled),
+.mobileTerminalActionButton:hover:not(:disabled),
+.mobileTerminalPrimaryButton:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.mobileTerminalTabClose:disabled,
+.mobileTerminalActionButton:disabled,
+.mobileTerminalPrimaryButton:disabled {
+  cursor: not-allowed;
+  color: var(--muted);
+  background: var(--surface-warm);
+}
+
+.mobileTerminalSurface {
+  position: relative;
+  min-width: 0;
+  min-height: calc(var(--space-24) * 3);
+  height: min(62dvh, calc(var(--space-24) * 6));
+  background: var(--terminal-bg);
+  border: 1px solid var(--terminal-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.mobileTerminalHost {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  min-height: 0;
+  background: var(--terminal-bg);
+}
+
+.mobileTerminalHost[data-hidden='true'] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.mobileTerminalViewport {
+  position: absolute;
+  inset: var(--space-2);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mobileTerminalViewport :global(.xterm) {
+  width: 100%;
+  height: 100%;
+}
+
+.mobileTerminalEmpty {
+  position: absolute;
+  inset: var(--space-3);
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: var(--space-3);
+  color: var(--terminal-muted);
+  background: var(--terminal-bg);
+  border: 1px dashed var(--terminal-border);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.mobileSessionSelectButton:focus-visible,
+.mobileTerminalTabClose:focus-visible,
+.mobileTerminalActionButton:focus-visible,
+.mobileTerminalPrimaryButton:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .placeholder {

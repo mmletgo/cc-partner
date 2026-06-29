@@ -94,6 +94,31 @@
       "error": "Load failed",
       "remoteUnsupported": "Remote project shortcuts are not supported on mobile yet"
     },
+    "terminalPanel": {
+      "title": "Terminal",
+      "tabsAriaLabel": "Mobile terminal windows",
+      "actionsAriaLabel": "Mobile pane actions",
+      "terminalAriaLabel": "Mobile terminal output",
+      "noProject": "Select a project first",
+      "noSession": "This worktree has no terminal window yet",
+      "newWindow": "New window",
+      "splitRight": "Split right",
+      "splitDown": "Split down",
+      "closePane": "Close pane",
+      "closeWindow": "Close window",
+      "paneCount": "{{count}} pane",
+      "paneCount_other": "{{count}} panes",
+      "errors": {
+        "focus": "Failed to switch terminal",
+        "replay": "Failed to load terminal history",
+        "write": "Failed to write to terminal",
+        "resize": "Failed to resize terminal",
+        "create": "Failed to create terminal",
+        "split": "Failed to split pane",
+        "closePane": "Failed to close pane",
+        "closeWindow": "Failed to close window"
+      }
+    },
     "status": {
       "project": "Project",
       "worktree": "worktree",

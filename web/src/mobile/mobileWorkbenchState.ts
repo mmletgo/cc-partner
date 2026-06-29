@@ -75,16 +75,22 @@ export function selectPreferredMobileWorktree(
  *   移动端切换项目或 worktree 后需要自动选择一个 terminal window，减少用户进入终端面板后的空态。
  *
  * Code Logic（这个函数做什么）:
- *   优先返回绑定 active worktree 的 session；没有匹配时返回首个 running session；仍没有则返回首项或 null。
+ *   依次选择 matching worktree 且 running、任意 matching worktree、任意 running、首项；空列表返回 null。
  */
 export function selectPreferredMobileSession(
   sessions: WorkbenchSession[],
   activeWorktreeId: string | null,
 ): WorkbenchSession | null {
+  const matchingRunningSession = activeWorktreeId
+    ? sessions.find(
+        (session) => session.worktreeId === activeWorktreeId && session.status === 'running',
+      )
+    : undefined;
   const matchingSession = activeWorktreeId
     ? sessions.find((session) => session.worktreeId === activeWorktreeId)
     : undefined;
   return (
+    matchingRunningSession ??
     matchingSession ??
     sessions.find((session) => session.status === 'running') ??
     sessions[0] ??

@@ -210,6 +210,33 @@ function testPreferredSessionUsesMatchingWorktreeBeforeRunning(): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   当前 worktree 可能同时有历史断开的 terminal window 和仍在运行的窗口，移动端应优先恢复可交互的 running 窗口。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造同一 worktree 下 disconnected/running 两个 session，断言 helper 选择 matching 且 running 的窗口。
+ */
+function testPreferredSessionUsesRunningMatchingBeforeStoppedMatching(): void {
+  const stoppedMatching = createSession({
+    id: 'stopped-matching',
+    name: 'stopped matching',
+    worktreeId: 'main',
+    status: 'disconnected',
+  });
+  const runningMatching = createSession({
+    id: 'running-matching',
+    name: 'running matching',
+    worktreeId: 'main',
+    status: 'running',
+  });
+
+  assertEqual(
+    selectPreferredMobileSession([stoppedMatching, runningMatching], 'main')?.id ?? null,
+    'running-matching',
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   当前 worktree 没有 terminal window 时，移动端应优先展示仍在运行的 session。
  *
  * Code Logic（这个函数做什么）:
@@ -231,4 +258,5 @@ testCanSelectMobileProjectOnlyAllowsLocalProjects();
 testPreferredWorktreeUsesMainBeforeFirst();
 testPreferredWorktreeFallsBackToFirstOrNull();
 testPreferredSessionUsesMatchingWorktreeBeforeRunning();
+testPreferredSessionUsesRunningMatchingBeforeStoppedMatching();
 testPreferredSessionFallsBackToRunningFirstOrNull();

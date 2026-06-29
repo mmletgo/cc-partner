@@ -3,6 +3,7 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import { MobileTerminalPanel } from './components/MobileTerminalPanel';
 import { MobileProjectPanel } from './components/MobileProjectPanel';
 import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
 import { MobileWorktreePanel } from './components/MobileWorktreePanel';
@@ -50,6 +51,7 @@ export function MobileWorkbench(): ReactElement {
   const [error, setError] = useState<string | null>(null);
   const projectsRequestIdRef = useRef<number>(0);
   const projectDetailsRequestIdRef = useRef<number>(0);
+  const sessionsRequestIdRef = useRef<number>(0);
   const { t } = useTranslation(['workbench']);
 
   const panelPlaceholders: Record<MobileWorkbenchPanel, { title: string; label: string }> = {
@@ -113,6 +115,39 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   移动端终端面板在新建 window、分屏或关闭 pane/window 后，需要重新读取后端权威 terminal window 列表。
+   *
+   * Code Logic（这个函数做什么）:
+   *   基于当前 active project 请求 sessions.list，用 request id 防止旧响应覆盖；保留仍存在的 active session，否则按当前 worktree 重新选择。
+   */
+  const refreshSessions = useCallback(async (): Promise<void> => {
+    if (!activeProject) return;
+    const projectId = activeProject.id;
+    const worktreeId = activeWorktree?.id ?? null;
+    const requestId = sessionsRequestIdRef.current + 1;
+    sessionsRequestIdRef.current = requestId;
+
+    try {
+      const nextSessions = await httpWorkbenchTransport.sessions.list(projectId);
+      if (sessionsRequestIdRef.current !== requestId) return;
+      setSessions(nextSessions);
+      setActiveSession((current) => {
+        const currentSession = current
+          ? nextSessions.find(
+              (session) =>
+                session.id === current.id && (!worktreeId || session.worktreeId === worktreeId),
+            )
+          : null;
+        return currentSession ?? selectPreferredMobileSession(nextSessions, worktreeId);
+      });
+    } catch (reason) {
+      if (sessionsRequestIdRef.current !== requestId) return;
+      setError(getErrorMessage(reason));
+    }
+  }, [activeProject, activeWorktree?.id]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   用户选择本机项目后，移动端需要加载该项目的 worktree 和 terminal window；远端快捷方式当前只能提示不可用。
    *
    * Code Logic（这个函数做什么）:
@@ -128,6 +163,7 @@ export function MobileWorkbench(): ReactElement {
 
     const requestId = projectDetailsRequestIdRef.current + 1;
     projectDetailsRequestIdRef.current = requestId;
+    sessionsRequestIdRef.current += 1;
     setProjectDetailsLoading(true);
     setError(null);
     setActiveProject(project);
@@ -196,6 +232,7 @@ export function MobileWorkbench(): ReactElement {
     return () => {
       projectsRequestIdRef.current += 1;
       projectDetailsRequestIdRef.current += 1;
+      sessionsRequestIdRef.current += 1;
     };
   }, [loadProjects]);
 
@@ -214,6 +251,17 @@ export function MobileWorkbench(): ReactElement {
         worktrees={worktrees}
         activeWorktreeId={activeWorktree?.id ?? null}
         onSelect={handleSelectWorktree}
+      />
+    ) : panel === 'terminal' ? (
+      <MobileTerminalPanel
+        project={activeProject}
+        worktree={activeWorktree}
+        sessions={sessions}
+        activeSession={activeSession}
+        busy={projectDetailsLoading}
+        onSessionsChange={setSessions}
+        onActiveSessionChange={setActiveSession}
+        onRefreshSessions={refreshSessions}
       />
     ) : (
       <section className={styles.panel} aria-labelledby="mobile-panel-title">

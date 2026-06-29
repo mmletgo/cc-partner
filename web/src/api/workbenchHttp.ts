@@ -19,6 +19,7 @@ import type {
   WorkbenchSessionReplay,
   WorkbenchWorktree,
 } from '@/lib/types';
+import type { WorkbenchPaneSplitDirection } from './workbench';
 import type { WorkbenchTransport } from './workbenchTransport';
 
 /**
@@ -106,7 +107,7 @@ export async function getJson<T>(path: string): Promise<T> {
  *   手机浏览器访问 `/mobile` 时必须用同源 HTTP 操作桌面端 Workbench 能力。
  *
  * Code Logic（这个常量做什么）:
- *   将 WorkbenchTransport 分组方法映射到 `/api/workbench/...` routes；Task 6 前 projects.list endpoint 先保留声明。
+ *   将 WorkbenchTransport 分组方法映射到 `/api/workbench/...` routes，保持与桌面 Tauri adapter 相同的业务语义。
  */
 export const httpWorkbenchTransport: WorkbenchTransport = {
   projects: {
@@ -142,6 +143,32 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
       }),
     replay: (sessionId) =>
       postJson<WorkbenchSessionReplay>('/api/workbench/sessions/replay', { sessionId }),
+    focus: (sessionId) =>
+      postJson<{ ok: boolean; sessionId: string }>('/api/workbench/sessions/focus', {
+        sessionId,
+      }),
+    focused: (projectId, worktreeId) =>
+      postJson<{ sessionId: string | null }>('/api/workbench/sessions/focused', {
+        projectId,
+        worktreeId: worktreeId ?? null,
+      }),
+    splitPane: (sessionId, direction) =>
+      postJson<{ ok: boolean; sessionId: string; direction: WorkbenchPaneSplitDirection }>(
+        '/api/workbench/sessions/split-pane',
+        {
+          sessionId,
+          direction,
+        },
+      ),
+    closePane: (sessionId) =>
+      postJson<{ ok: boolean; sessionId: string; closedWindow: boolean }>(
+        '/api/workbench/sessions/close-pane',
+        { sessionId },
+      ),
+    close: (sessionId) =>
+      postJson<{ ok: boolean; sessionId: string }>('/api/workbench/sessions/close', {
+        sessionId,
+      }),
   },
   files: {
     listDir: (projectId, path, worktreeId) =>
