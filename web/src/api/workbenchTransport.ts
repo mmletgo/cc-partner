@@ -133,7 +133,7 @@ export interface WorkbenchTransport {
     streamToTerminal: (
       prompt: string,
       options: {
-        workingDirectory: string;
+        workingDirectory?: string | null;
         targetLanguage: PromptOptimizerFillLanguage;
         sessionId: string;
       },

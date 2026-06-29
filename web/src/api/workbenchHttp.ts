@@ -237,7 +237,7 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
         '/api/workbench/prompt-optimizer/stream-to-session',
         {
           prompt,
-          workingDirectory: options.workingDirectory,
+          workingDirectory: options.workingDirectory ?? null,
           targetLanguage: options.targetLanguage,
           sessionId: options.sessionId,
         },
