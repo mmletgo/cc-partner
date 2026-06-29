@@ -9,7 +9,7 @@
 //!     - `start_http_server`：构造 axum Router（with_state(AppState)，挂载全部 /api 路由），
 //!       TcpListener::bind(("0.0.0.0", 0)) 绑定动态端口，取 local_addr 实际端口回填
 //!       AppState.actual_http_port（AtomicU16），tokio::spawn(axum::serve)。
-//!     - `/mobile` fallback：从 web/dist 读取 mobile.html 与静态资源，非 /mobile 未知路径仍返回 404。
+//!     - `/mobile` fallback：通过 Tauri asset resolver 读取 frontendDist 嵌入资源，非 /mobile 未知路径仍返回 404。
 //!     - body limit 覆盖文件传输 chunk 和 Workbench 远端文本保存。
 
 use crate::net::routes::{
@@ -24,7 +24,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::sync::atomic::Ordering;
 use tower::service_fn;
 
@@ -42,7 +42,7 @@ fn is_mobile_spa_path(path: &str) -> bool {
     path == "/mobile" || path.starts_with("/mobile/")
 }
 
-/// axum fallback service：按 `/mobile` SPA 规则返回静态资源或 404。
+/// axum fallback service：按 `/mobile` SPA 规则返回 Tauri 静态资源或 404。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     桌面端生成的局域网手机访问 URL 指向 `/mobile`，手机浏览器刷新任意 SPA 子路由时需要回退到
@@ -51,7 +51,10 @@ fn is_mobile_spa_path(path: &str) -> bool {
 /// Code Logic（这个函数做什么）:
 ///     非 `/mobile` 路径直接 404；`/mobile`/`/mobile/` 返回 shell；`/mobile/<rest>` 优先读取静态资源，
 ///     资源缺失时回退 shell；shell 缺失时返回纯文本 404。
-async fn serve_mobile_spa(req: Request<Body>) -> Result<Response<Body>, Infallible> {
+async fn serve_mobile_spa(
+    state: AppState,
+    req: Request<Body>,
+) -> Result<Response<Body>, Infallible> {
     let path = req.uri().path();
 
     if !is_mobile_spa_path(path) {
@@ -65,15 +68,15 @@ async fn serve_mobile_spa(req: Request<Body>) -> Result<Response<Body>, Infallib
     }
 
     if path == "/mobile" || path == "/mobile/" {
-        if let Some(response) = mobile_asset_response("mobile.html").await {
+        if let Some(response) = mobile_asset_response(&state, "mobile.html").await {
             return Ok(response);
         }
     } else if let Some(asset_path) = path.strip_prefix("/mobile/") {
-        if let Some(response) = mobile_asset_response(asset_path).await {
+        if let Some(response) = mobile_asset_response(&state, asset_path).await {
             return Ok(response);
         }
 
-        if let Some(response) = mobile_asset_response("mobile.html").await {
+        if let Some(response) = mobile_asset_response(&state, "mobile.html").await {
             return Ok(response);
         }
     }
@@ -87,18 +90,19 @@ async fn serve_mobile_spa(req: Request<Body>) -> Result<Response<Body>, Infallib
     Ok(response)
 }
 
-/// 读取移动端 SPA 的构建产物并转换为 HTTP 响应。
+/// 将 `/mobile` 请求路径规范化为 Tauri frontendDist asset key。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     手机端页面由后续前端构建生成到 `web/dist/mobile.html` 与 `web/dist/assets/*`，后端需要直接服务这些文件。
-///     路径来自局域网 HTTP 请求，必须限制在 dist 目录内。
+///     `/mobile` 是局域网 HTTP 访问前缀，打包后的真实静态资源 key 位于 frontendDist 根目录；
+///     后端必须先剥离该前缀，才能从 Tauri 嵌入资源读取 `mobile.html` 与 `assets/*`。
 ///
 /// Code Logic（这个函数做什么）:
-///     将 `/mobile/...` 或已剥离的相对路径归一化为 dist 内相对路径；用 `Component` 拒绝绝对路径、父目录
-///     和其它非普通路径组件；读取文件成功则带 content-type 返回，失败返回 None。
-async fn mobile_asset_response(path: &str) -> Option<Response<Body>> {
+///     接收完整 `/mobile/...` 或已剥离的相对路径；用 `Component` 拒绝空路径、绝对路径、父目录和其它
+///     非普通路径组件；返回用 `/` 拼接的 asset key。
+fn mobile_asset_key(path: &str) -> Option<String> {
     let logical_path = match path {
         "/mobile" | "/mobile/" => "mobile.html",
+        _ if path.starts_with('/') && !path.starts_with("/mobile/") => return None,
         _ => path.strip_prefix("/mobile/").unwrap_or(path),
     };
     let requested_path = Path::new(logical_path);
@@ -107,32 +111,126 @@ async fn mobile_asset_response(path: &str) -> Option<Response<Body>> {
         return None;
     }
 
-    let mut safe_path = PathBuf::new();
+    let mut safe_segments = Vec::new();
     for component in requested_path.components() {
         match component {
-            Component::Normal(segment) => safe_path.push(segment),
+            Component::Normal(segment) => {
+                let segment = segment.to_str()?;
+                if segment.is_empty() || segment.contains('\\') {
+                    return None;
+                }
+                safe_segments.push(segment);
+            }
             _ => return None,
         }
     }
 
-    if safe_path.as_os_str().is_empty() {
+    if safe_segments.is_empty() {
         return None;
     }
 
+    Some(safe_segments.join("/"))
+}
+
+/// 读取移动端 SPA 的 Tauri asset 并转换为 HTTP 响应。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端页面由前端构建写入 Tauri `frontendDist`，生产打包后源码相对目录不存在，必须从 Tauri
+///     asset resolver 读取嵌入资源；开发/测试环境可在 resolver 缺失时读 dist 兜底。
+///
+/// Code Logic（这个函数做什么）:
+///     将请求路径归一化为 asset key；优先调用精确 Tauri asset 查询；命中时用 asset bytes/mime/CSP 生成响应；
+///     未命中时再尝试 dev/test filesystem fallback。
+async fn mobile_asset_response(state: &AppState, path: &str) -> Option<Response<Body>> {
+    let asset_key = mobile_asset_key(path)?;
+
+    if let Some(asset) = mobile_tauri_asset(state, &asset_key) {
+        let content_type = mobile_content_type_header(asset.mime_type(), &asset_key);
+        let csp_header = asset
+            .csp_header()
+            .and_then(|value| HeaderValue::from_str(value).ok());
+        let mut response = Response::new(Body::from(asset.bytes));
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type);
+        if let Some(csp_header) = csp_header {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_SECURITY_POLICY, csp_header);
+        }
+        return Some(response);
+    }
+
+    mobile_dev_dist_asset_response(&asset_key).await
+}
+
+/// 从 Tauri asset resolver 精确读取移动端资源。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Tauri asset resolver 在生产态找不到某个 key 时会自动回退到 `index.html`；`/mobile` 必须由本模块
+///     自己回退到 `mobile.html`，否则手机端深层路径可能误拿桌面 shell。
+///
+/// Code Logic（这个函数做什么）:
+///     若当前包内有嵌入资源，则先遍历 resolver asset key，只有 exact match 才调用 `get`；若没有嵌入资源
+///     （典型 devUrl 开发态），直接调用 `get` 让 Tauri 按 frontendDist 目录读取。
+fn mobile_tauri_asset(state: &AppState, asset_key: &str) -> Option<tauri::Asset> {
+    let resolver = state.app_handle.asset_resolver();
+    let mut has_embedded_assets = false;
+    let mut has_exact_asset = false;
+
+    for (key, _) in resolver.iter() {
+        has_embedded_assets = true;
+        if key.as_ref().trim_start_matches('/') == asset_key {
+            has_exact_asset = true;
+            break;
+        }
+    }
+
+    if has_embedded_assets && !has_exact_asset {
+        return None;
+    }
+
+    resolver.get(asset_key.to_string())
+}
+
+/// 从源码树 dist 目录读取移动端资源作为开发/测试兜底。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Tauri dev 模式通常由 asset resolver 回退读取 `frontendDist`，但部分单测或本地开发环境可能没有完整
+///     Tauri webview 上下文；保留文件系统读取只作为额外兜底，不能作为生产路径。
+///
+/// Code Logic（这个函数做什么）:
+///     使用已规范化的 asset key 拼出 `../web/dist` 内路径；读取成功则按扩展名 fallback MIME 返回响应。
+async fn mobile_dev_dist_asset_response(asset_key: &str) -> Option<Response<Body>> {
     let dist_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../web/dist")
-        .join(&safe_path);
+        .join(asset_key);
     let bytes = tokio::fs::read(dist_path).await.ok()?;
 
-    let content_type = safe_path
-        .to_str()
-        .map(mobile_content_type)
-        .unwrap_or("application/octet-stream");
     let mut response = Response::new(Body::from(bytes));
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        mobile_content_type_header("", asset_key),
+    );
     Some(response)
+}
+
+/// 生成移动端响应的 content-type header。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Tauri asset resolver 能提供构建期 MIME；若 resolver 未提供或提供非法值，仍要保证浏览器按静态资源类型加载。
+///
+/// Code Logic（这个函数做什么）:
+///     优先把非空 asset MIME 转为 HeaderValue；为空或转换失败时，按 asset key 扩展名使用本地 MIME 映射。
+fn mobile_content_type_header(asset_mime: &str, asset_key: &str) -> HeaderValue {
+    let asset_mime = asset_mime.trim();
+    if !asset_mime.is_empty() {
+        if let Ok(value) = HeaderValue::from_str(asset_mime) {
+            return value;
+        }
+    }
+
+    HeaderValue::from_static(mobile_content_type(asset_key))
 }
 
 /// 返回移动端静态资源的 content-type。
@@ -172,6 +270,7 @@ fn mobile_content_type(path: &str) -> &'static str {
 ///     3. local_addr().port() 取实际端口，回填 AppState.actual_http_port。
 ///     4. tokio::spawn(axum::serve(listener, app)) 在后台运行（不阻塞 setup）。
 pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
+    let fallback_state = state.clone();
     // axum Router：with_state 注入 AppState，与 invoke 命令层共享同一份 Arc
     let app: Router = Router::new()
         .route("/api/health", get(health::health))
@@ -349,7 +448,9 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::stream_prompt_optimizer_to_session),
         )
         // 移动端 SPA fallback：只服务 /mobile 命名空间；其它未知路径保持 404。
-        .fallback_service(service_fn(serve_mobile_spa))
+        .fallback_service(service_fn(move |req| {
+            serve_mobile_spa(fallback_state.clone(), req)
+        }))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
         .with_state(state.clone());
 
@@ -423,36 +524,50 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     `/mobile` 静态服务暴露在局域网，必须拒绝目录穿越和绝对路径，避免读取构建目录外文件。
+    ///     `/mobile` HTTP 路径只是局域网访问前缀，Tauri 打包资源内实际 key 不包含 `/mobile` 前缀。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     直接调用静态资源 helper，断言 `..`、绝对路径和嵌套回退穿越都不会产生响应。
-    #[tokio::test]
-    async fn mobile_asset_response_rejects_unsafe_paths() {
-        assert!(mobile_asset_response("../mobile.html").await.is_none());
-        assert!(mobile_asset_response("/etc/passwd").await.is_none());
-        assert!(mobile_asset_response("assets/../../secret.js")
-            .await
-            .is_none());
+    ///     断言移动端入口映射到 `mobile.html`，静态资源映射到前端 dist 相对路径，危险路径返回 None。
+    #[test]
+    fn mobile_asset_key_normalizes_http_path_without_mobile_prefix() {
+        assert_eq!(mobile_asset_key("/mobile").as_deref(), Some("mobile.html"));
+        assert_eq!(mobile_asset_key("/mobile/").as_deref(), Some("mobile.html"));
+        assert_eq!(
+            mobile_asset_key("/mobile/assets/index.js").as_deref(),
+            Some("assets/index.js")
+        );
+        assert_eq!(
+            mobile_asset_key("assets/index.css").as_deref(),
+            Some("assets/index.css")
+        );
+
+        assert_eq!(mobile_asset_key("/"), None);
+        assert_eq!(mobile_asset_key("/mobile/../mobile.html"), None);
+        assert_eq!(mobile_asset_key("/mobile/assets/../../secret.js"), None);
+        assert_eq!(mobile_asset_key("/etc/passwd"), None);
+        assert_eq!(mobile_asset_key(""), None);
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     axum fallback 只能服务 `/mobile` SPA；桌面路由或未知路径仍应保持 404，不应被移动端入口吞掉。
+    ///     `/mobile` 静态服务暴露在局域网，必须拒绝目录穿越和绝对路径，避免读取构建目录外文件。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     构造一个非 `/mobile` 请求直接进入 fallback service，断言返回 404。
-    #[tokio::test]
-    async fn mobile_spa_fallback_keeps_unknown_paths_not_found() {
-        let request = Request::builder()
-            .uri("/workbench")
-            .body(Body::empty())
-            .expect("request should build");
+    ///     直接调用路径规范化 helper，断言 `..`、绝对路径和嵌套回退穿越都不会产生 asset key。
+    #[test]
+    fn mobile_asset_key_rejects_unsafe_paths() {
+        assert!(mobile_asset_key("../mobile.html").is_none());
+        assert!(mobile_asset_key("/etc/passwd").is_none());
+        assert!(mobile_asset_key("assets/../../secret.js").is_none());
+    }
 
-        let response = serve_mobile_spa(request)
-            .await
-            .expect("mobile fallback should not fail");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    /// Business Logic（为什么需要这个测试）:
+    ///     axum fallback 只能服务 `/mobile` SPA；桌面路由或未知路径仍应保持不匹配，不应被移动端入口吞掉。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     通过 path matching helper 断言非 `/mobile` 路径不进入移动端 SPA 处理。
+    #[test]
+    fn mobile_spa_fallback_keeps_unknown_paths_not_found() {
+        assert!(!is_mobile_spa_path("/workbench"));
     }
 
     /// Business Logic（为什么需要这个测试）:
