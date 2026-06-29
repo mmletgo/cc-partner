@@ -17,11 +17,17 @@ import {
   type MobileWorkbenchPanel,
 } from './mobileWorkbenchState';
 import {
+  runMobileWorktreeMergeFlow,
+  runMobileWorktreeRefreshFlow,
   shouldConfirmMobileFileDirtyContextSwitch,
   type MobileFileDirtySnapshot,
   type MobileFilePanelContext,
 } from './mobilePanelState';
 import styles from './MobileWorkbench.module.css';
+
+export interface MobileRefreshWorktreesOptions {
+  skipFileContextConfirm?: boolean;
+}
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -126,25 +132,53 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   Files 面板即使被其它移动端面板遮住，也必须在 project/worktree 切换前保护未保存草稿。
+   *   destructive worktree 操作需要先询问用户是否允许离开 Files 草稿，但不能在后端成功前清空草稿。
    *
    * Code Logic（这个函数做什么）:
-   *   使用 Files 面板上报的 dirty snapshot 与目标 context 比较；需要确认时复用既有 i18n 文案，确认后递增 discard token 让 Files 面板跳过重复确认。
+   *   只比较 dirty snapshot 与目标 context 并按需弹确认；不修改任何 React state。
    */
-  const confirmFileContextSwitch = useCallback(
+  const confirmFileContextSwitchOnly = useCallback(
     (targetContext: MobileFilePanelContext | null): boolean => {
       if (!shouldConfirmMobileFileDirtyContextSwitch(filesDirtySnapshot, targetContext)) {
         return true;
       }
-      const shouldDiscard = window.confirm(
-        t('workbench:mobile.filesPanel.discardContextConfirm'),
-      );
-      if (!shouldDiscard) return false;
-      setFilesDirtySnapshot({ dirty: false, context: null });
-      setFilesDiscardContextToken((current) => current + 1);
-      return true;
+      return window.confirm(t('workbench:mobile.filesPanel.discardContextConfirm'));
     },
     [filesDirtySnapshot, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户已确认放弃 Files 草稿后，父级需要让常驻 Files 面板在下一次 context 响应中跳过重复确认。
+   *
+   * Code Logic（这个函数做什么）:
+   *   清空 dirty snapshot 并递增 discard token；调用方负责保证只在确认后或后端 destructive 操作成功后调用。
+   */
+  const discardConfirmedFileContextSwitch = useCallback((): void => {
+    setFilesDirtySnapshot({ dirty: false, context: null });
+    setFilesDiscardContextToken((current) => current + 1);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   普通 project/worktree 切换会立即离开当前 Files 上下文，确认通过后可以立刻丢弃草稿。
+   *
+   * Code Logic（这个函数做什么）:
+   *   复用只确认 helper；如果确实需要离开 dirty context，确认通过后清 dirty snapshot 并递增 discard token。
+   */
+  const confirmFileContextSwitch = useCallback(
+    (targetContext: MobileFilePanelContext | null): boolean => {
+      const shouldDiscard = shouldConfirmMobileFileDirtyContextSwitch(
+        filesDirtySnapshot,
+        targetContext,
+      );
+      if (!confirmFileContextSwitchOnly(targetContext)) return false;
+      if (shouldDiscard) {
+        discardConfirmedFileContextSwitch();
+      }
+      return true;
+    },
+    [confirmFileContextSwitchOnly, discardConfirmedFileContextSwitch, filesDirtySnapshot],
   );
 
   /**
@@ -240,7 +274,9 @@ export function MobileWorkbench(): ReactElement {
    * Code Logic（这个函数做什么）:
    *   调用 worktrees.list(projectId)，用 request id 防止旧项目响应覆盖；若当前 active worktree 已不存在则经 dirty guard 选择主工作区或首项。
    */
-  const refreshWorktrees = useCallback(async (): Promise<void> => {
+  const refreshWorktrees = useCallback(async (
+    options: MobileRefreshWorktreesOptions = {},
+  ): Promise<void> => {
     if (!activeProject) return;
     const projectId = activeProject.id;
     const requestId = worktreesRequestIdRef.current + 1;
@@ -250,14 +286,17 @@ export function MobileWorkbench(): ReactElement {
       const nextWorktrees = await httpWorkbenchTransport.worktrees.list(projectId);
       if (worktreesRequestIdRef.current !== requestId) return;
       const current = activeWorktreeRef.current;
-      const nextActive =
-        (current ? nextWorktrees.find((worktree) => worktree.id === current.id) : null) ??
-        selectPreferredMobileWorktree(nextWorktrees);
-      setWorktrees(nextWorktrees);
-      if (!confirmFileContextSwitch(createMobileFilePanelContext(activeProject, nextActive))) {
-        return;
-      }
-      setActiveWorktreeWithSession(nextActive);
+      runMobileWorktreeRefreshFlow({
+        nextWorktrees,
+        currentActiveWorktreeId: current?.id ?? null,
+        skipActivePreflight: options.skipFileContextConfirm,
+        confirmActiveWorktreeChange: (nextActive) =>
+          confirmFileContextSwitch(createMobileFilePanelContext(activeProject, nextActive)),
+        applyRefresh: (plan) => {
+          setWorktrees(plan.nextWorktrees);
+          setActiveWorktreeWithSession(plan.nextActive);
+        },
+      });
     } catch (reason) {
       if (worktreesRequestIdRef.current !== requestId) return;
       setError(getErrorMessage(reason));
@@ -370,20 +409,30 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   Worktree 面板在删除 active worktree 后可能需要把 active 上下文清到主工作区或空状态，也必须保护 Files 草稿。
+   *   删除或 merge active worktree 前只需要确认用户愿意离开 Files 草稿，不能提前切换上下文或清空草稿。
    *
    * Code Logic（这个函数做什么）:
-   *   对目标 worktree 生成 Files context，通过父级 dirty guard 后再同步 active worktree 与 session。
+   *   为 destructive 操作提供 confirm-only callback；确认取消时调用方不得继续后端操作。
    */
-  const handleActiveWorktreeChange = useCallback(
-    (worktree: WorkbenchWorktree | null): boolean => {
-      if (!confirmFileContextSwitch(createMobileFilePanelContext(activeProject, worktree))) {
-        return false;
-      }
+  const handleConfirmActiveWorktreeChange = useCallback(
+    (worktree: WorkbenchWorktree | null): boolean =>
+      confirmFileContextSwitchOnly(createMobileFilePanelContext(activeProject, worktree)),
+    [activeProject, confirmFileContextSwitchOnly],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   destructive worktree 后端操作成功后，移动端才可以丢弃旧 Files 草稿并切到回落 worktree。
+   *
+   * Code Logic（这个函数做什么）:
+   *   清理 Files dirty snapshot/discard token，然后同步 active worktree 与匹配 session。
+   */
+  const handleApplyActiveWorktreeChange = useCallback(
+    (worktree: WorkbenchWorktree | null): void => {
+      discardConfirmedFileContextSwitch();
       setActiveWorktreeWithSession(worktree);
-      return true;
     },
-    [activeProject, confirmFileContextSwitch, setActiveWorktreeWithSession],
+    [discardConfirmedFileContextSwitch, setActiveWorktreeWithSession],
   );
 
   /**
@@ -406,6 +455,38 @@ export function MobileWorkbench(): ReactElement {
       }
     },
     [],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   mobile Git merge 会删除源 worktree，必须先确认 Files 草稿，再让后端执行 merge；后端失败时不能丢草稿。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用 destructive merge helper 串联 confirm-only、HTTP merge、成功后丢弃草稿和跳过重复确认的 worktree 刷新。
+   */
+  const handleMergeWorktree = useCallback(
+    async (sourceWorktree: WorkbenchWorktree): Promise<boolean> => {
+      const result = await runMobileWorktreeMergeFlow({
+        worktrees,
+        sourceWorktree,
+        confirmActiveWorktreeChange: (nextActive) =>
+          handleConfirmActiveWorktreeChange(nextActive),
+        mergeWorktree: async () => {
+          await httpWorkbenchTransport.worktrees.merge(sourceWorktree.id);
+        },
+        applyMergeSuccess: async () => {
+          discardConfirmedFileContextSwitch();
+          await refreshWorktrees({ skipFileContextConfirm: true });
+        },
+      });
+      return result === 'applied';
+    },
+    [
+      discardConfirmedFileContextSwitch,
+      handleConfirmActiveWorktreeChange,
+      refreshWorktrees,
+      worktrees,
+    ],
   );
 
   useEffect(() => {
@@ -437,7 +518,8 @@ export function MobileWorkbench(): ReactElement {
         busy={projectDetailsLoading}
         onSelect={handleSelectWorktree}
         onWorktreesChange={handleWorktreesChange}
-        onActiveWorktreeChange={handleActiveWorktreeChange}
+        onConfirmActiveWorktreeChange={handleConfirmActiveWorktreeChange}
+        onActiveWorktreeChange={handleApplyActiveWorktreeChange}
         onRefreshWorktrees={refreshWorktrees}
       />
     ) : panel === 'files' ? null : panel === 'git' ? (
@@ -445,6 +527,7 @@ export function MobileWorkbench(): ReactElement {
         project={activeProject}
         worktree={activeWorktree}
         onWorktreeChange={handleWorktreeChange}
+        onMergeWorktree={handleMergeWorktree}
         onRefreshWorktrees={refreshWorktrees}
       />
     ) : panel === 'prompt' ? (

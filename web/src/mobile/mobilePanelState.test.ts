@@ -6,6 +6,9 @@ import {
   shouldSkipMobileFileContextConfirmForDiscardToken,
   shouldInvalidateMobileFileOpenOnDirectoryLoad,
   getMobileWorktreeRemovalPlan,
+  runMobileWorktreeMergeFlow,
+  runMobileWorktreeRefreshFlow,
+  runMobileWorktreeRemovalFlow,
   shouldReloadMobileGitCommitsAfterAction,
   shouldSkipMobileFileContextReload,
   type MobileFilePanelContext,
@@ -24,6 +27,31 @@ function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected) {
     throw new Error(`${message}: expected ${String(expected)}, received ${String(actual)}`);
   }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   destructive worktree 流程测试需要断言异步后端失败会继续向调用方抛出，避免组件误判成功并丢草稿。
+ *
+ * Code Logic（这个函数做什么）:
+ *   执行 promise factory；若没有抛错则失败，若抛错则断言错误消息与预期一致。
+ */
+async function assertRejects(
+  run: () => Promise<unknown>,
+  expectedMessage: string,
+  message: string,
+): Promise<void> {
+  try {
+    await run();
+  } catch (reason) {
+    assertEqual(
+      reason instanceof Error ? reason.message : String(reason),
+      expectedMessage,
+      message,
+    );
+    return;
+  }
+  throw new Error(`${message}: expected rejection`);
 }
 
 /**
@@ -288,6 +316,169 @@ function testInactiveWorktreeRemovalSkipsPreflight(): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   删除 active worktree 的确认只是 destructive preflight，不能在后端真正删除前切 active、写列表或丢弃 Files 草稿。
+ *
+ * Code Logic（这个函数做什么）:
+ *   用未完成的 remove promise 卡住后端阶段，断言确认与后端已开始但 apply 回调尚未执行。
+ */
+async function testActiveRemoveConfirmStageDoesNotApplyState(): Promise<void> {
+  const main = createWorktree('main', true);
+  const feature = createWorktree('feature/remove-me', false);
+  const events: string[] = [];
+  let resolveRemove!: () => void;
+
+  const flow = runMobileWorktreeRemovalFlow({
+    worktrees: [main, feature],
+    activeWorktreeId: feature.id,
+    removingWorktree: feature,
+    confirmActiveWorktreeChange: () => {
+      events.push('confirm');
+      return true;
+    },
+    removeWorktree: async () => {
+      events.push('backend');
+      await new Promise<void>((resolve) => {
+        resolveRemove = resolve;
+      });
+    },
+    applyRemoval: () => {
+      events.push('apply');
+    },
+  });
+
+  assertEqual(
+    events.join('>'),
+    'confirm>backend',
+    'remove preflight should not apply before backend resolves',
+  );
+  resolveRemove();
+  await flow;
+  assertEqual(
+    events.join('>'),
+    'confirm>backend>apply',
+    'remove success should apply after backend resolves',
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   后端删除 active worktree 失败时，磁盘 worktree 仍存在，移动端不能切走 active 或清空 dirty draft。
+ *
+ * Code Logic（这个函数做什么）:
+ *   模拟 removeWorktree reject，断言流程向外抛错且 applyRemoval 从未执行。
+ */
+async function testActiveRemoveBackendFailureDoesNotApplyState(): Promise<void> {
+  const main = createWorktree('main', true);
+  const feature = createWorktree('feature/remove-me', false);
+  let didApply = false;
+
+  await assertRejects(
+    () =>
+      runMobileWorktreeRemovalFlow({
+        worktrees: [main, feature],
+        activeWorktreeId: feature.id,
+        removingWorktree: feature,
+        confirmActiveWorktreeChange: () => true,
+        removeWorktree: async () => {
+          throw new Error('remove failed');
+        },
+        applyRemoval: () => {
+          didApply = true;
+        },
+      }),
+    'remove failed',
+    'remove backend failure should bubble to component error handling',
+  );
+  assertEqual(didApply, false, 'remove backend failure should not apply active/list/discard');
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   删除 active worktree 成功后，移动端才可以切到回落 worktree、刷新列表并丢弃旧 Files 草稿。
+ *
+ * Code Logic（这个函数做什么）:
+ *   模拟成功删除，断言 applyRemoval 收到已移除源 worktree 的列表和主工作区 nextActive。
+ */
+async function testActiveRemoveBackendSuccessAppliesNextState(): Promise<void> {
+  const main = createWorktree('main', true);
+  const feature = createWorktree('feature/remove-me', false);
+  let appliedActiveId: string | null = null;
+  let appliedWorktreeIds = '';
+
+  const result = await runMobileWorktreeRemovalFlow({
+    worktrees: [main, feature],
+    activeWorktreeId: feature.id,
+    removingWorktree: feature,
+    confirmActiveWorktreeChange: () => true,
+    removeWorktree: async () => undefined,
+    applyRemoval: (plan) => {
+      appliedActiveId = plan.nextActive?.id ?? null;
+      appliedWorktreeIds = plan.nextWorktrees.map((worktree) => worktree.id).join(',');
+    },
+  });
+
+  assertEqual(result, 'applied', 'remove success should report applied transition');
+  assertEqual(appliedActiveId, main.id, 'remove success should apply fallback active worktree');
+  assertEqual(appliedWorktreeIds, main.id, 'remove success should apply list without removed worktree');
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   merge 会删除源 active worktree，必须在调用后端 merge 前先询问 Files dirty guard；用户取消时不能触碰后端。
+ *
+ * Code Logic（这个函数做什么）:
+ *   模拟 confirm 返回 false，断言 mergeWorktree 与 applyMergeSuccess 均不执行。
+ */
+async function testMergeCancelledByDirtyGuardDoesNotCallBackend(): Promise<void> {
+  const main = createWorktree('main', true);
+  const feature = createWorktree('feature/merge-me', false);
+  let didCallBackend = false;
+  let didApply = false;
+
+  const result = await runMobileWorktreeMergeFlow({
+    worktrees: [main, feature],
+    sourceWorktree: feature,
+    confirmActiveWorktreeChange: () => false,
+    mergeWorktree: async () => {
+      didCallBackend = true;
+    },
+    applyMergeSuccess: async () => {
+      didApply = true;
+    },
+  });
+
+  assertEqual(result, 'cancelled', 'merge cancelled by dirty guard should report cancelled');
+  assertEqual(didCallBackend, false, 'merge cancelled by dirty guard should not call backend');
+  assertEqual(didApply, false, 'merge cancelled by dirty guard should not apply state');
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   refreshWorktrees 发现 active 已不存在时，需要先确认能否离开 dirty context；取消时不能先写入后端返回的新列表。
+ *
+ * Code Logic（这个函数做什么）:
+ *   传入不含当前 active 的 nextWorktrees，模拟确认取消，断言 applyRefresh 不执行。
+ */
+function testRefreshWorktreesCancelDoesNotApplyListOrActive(): void {
+  const main = createWorktree('main', true);
+  const feature = createWorktree('feature/deleted-elsewhere', false);
+  let didApply = false;
+
+  const result = runMobileWorktreeRefreshFlow({
+    nextWorktrees: [main],
+    currentActiveWorktreeId: feature.id,
+    confirmActiveWorktreeChange: () => false,
+    applyRefresh: () => {
+      didApply = true;
+    },
+  });
+
+  assertEqual(result, 'cancelled', 'refresh cancelled by dirty guard should report cancelled');
+  assertEqual(didApply, false, 'refresh cancelled by dirty guard should not apply list or active');
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   context key 是文件面板 stale guard 的基础，null worktree 必须有稳定表示。
  *
  * Code Logic（这个函数做什么）:
@@ -302,16 +493,32 @@ function testContextKeyIsStable(): void {
   assertEqual(getMobileFileContextKey(null), '', 'null context should produce empty key');
 }
 
-testReturningToLoadedContextSkipsReload();
-testDirtyContextSwitchBlockBoundary();
-testDirtySnapshotDifferentTargetRequiresParentConfirm();
-testDirtySnapshotSameTargetSkipsParentConfirm();
-testDiscardTokenChangeSkipsInternalContextConfirm();
-testOpenResponseRequiresLatestRequestAndCurrentContext();
-testRootDirectoryLoadInvalidatesOpenRequests();
-testMergeRefreshSkipsCommitReload();
-testActiveWorktreeRemovalRequiresPreflight();
-testInactiveWorktreeRemovalSkipsPreflight();
-testContextKeyIsStable();
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   本文件同时包含同步状态 helper 测试和 destructive worktree 异步时序测试，需要顺序执行并让失败使进程退出。
+ *
+ * Code Logic（这个函数做什么）:
+ *   依次调用所有测试函数；异步 destructive 流程用 await 串行执行，最后输出通过标记。
+ */
+async function runTests(): Promise<void> {
+  testReturningToLoadedContextSkipsReload();
+  testDirtyContextSwitchBlockBoundary();
+  testDirtySnapshotDifferentTargetRequiresParentConfirm();
+  testDirtySnapshotSameTargetSkipsParentConfirm();
+  testDiscardTokenChangeSkipsInternalContextConfirm();
+  testOpenResponseRequiresLatestRequestAndCurrentContext();
+  testRootDirectoryLoadInvalidatesOpenRequests();
+  testMergeRefreshSkipsCommitReload();
+  testActiveWorktreeRemovalRequiresPreflight();
+  testInactiveWorktreeRemovalSkipsPreflight();
+  await testActiveRemoveConfirmStageDoesNotApplyState();
+  await testActiveRemoveBackendFailureDoesNotApplyState();
+  await testActiveRemoveBackendSuccessAppliesNextState();
+  await testMergeCancelledByDirtyGuardDoesNotCallBackend();
+  testRefreshWorktreesCancelDoesNotApplyListOrActive();
+  testContextKeyIsStable();
 
-console.log('mobilePanelState.test.ts passed');
+  console.log('mobilePanelState.test.ts passed');
+}
+
+void runTests();

@@ -13,7 +13,8 @@ export interface MobileGitPanelProps {
   project: WorkbenchProject | null;
   worktree: WorkbenchWorktree | null;
   onWorktreeChange?: (worktree: WorkbenchWorktree) => void;
-  onRefreshWorktrees?: () => Promise<void> | void;
+  onMergeWorktree: (worktree: WorkbenchWorktree) => Promise<boolean>;
+  onRefreshWorktrees?: (options?: { skipFileContextConfirm?: boolean }) => Promise<void> | void;
 }
 
 /**
@@ -54,6 +55,7 @@ export function MobileGitPanel({
   project,
   worktree,
   onWorktreeChange,
+  onMergeWorktree,
   onRefreshWorktrees,
 }: MobileGitPanelProps): ReactElement {
   const { t } = useTranslation(['workbench']);
@@ -185,21 +187,25 @@ export function MobileGitPanel({
    *   功能 worktree 完成后，手机端需要能触发合并回主工作区，沿用后端既有 merge 流程。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 worktrees.merge；完成后刷新父级 worktree 列表并清空当前提交，不再用可能已删除的源 worktree 拉提交历史。
+   *   委托父级执行 dirty guard 与后端 merge；取消时不改本地提交，成功后清空源 worktree commits。
    */
   const handleMerge = useCallback(async (): Promise<void> => {
     if (!worktree || worktree.isMain) return;
     setActionBusy('merge');
     setError(null);
     try {
-      await httpWorkbenchTransport.worktrees.merge(worktree.id);
-      await refreshAfterAction('merge');
+      const didMerge = await onMergeWorktree(worktree);
+      if (!didMerge) return;
+      requestIdRef.current += 1;
+      setCommits([]);
+      setError(null);
+      setLoading(false);
     } catch (reason) {
       setError(`${t('workbench:errors.mergeWorktree')}: ${getErrorMessage(reason)}`);
     } finally {
       setActionBusy(null);
     }
-  }, [refreshAfterAction, t, worktree]);
+  }, [onMergeWorktree, t, worktree]);
 
   const actionDisabled = actionBusy !== null || !worktree;
 

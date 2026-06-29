@@ -19,6 +19,33 @@ export interface MobileWorktreeRemovalPlan {
   requiresActivePreflight: boolean;
 }
 
+export type MobileWorktreeDestructiveFlowResult = 'applied' | 'cancelled';
+
+export interface MobileWorktreeRemovalFlowOptions {
+  worktrees: WorkbenchWorktree[];
+  activeWorktreeId: string | null;
+  removingWorktree: WorkbenchWorktree;
+  confirmActiveWorktreeChange: (nextActive: WorkbenchWorktree | null) => boolean;
+  removeWorktree: (plan: MobileWorktreeRemovalPlan) => Promise<void>;
+  applyRemoval: (plan: MobileWorktreeRemovalPlan) => void | Promise<void>;
+}
+
+export interface MobileWorktreeMergeFlowOptions {
+  worktrees: WorkbenchWorktree[];
+  sourceWorktree: WorkbenchWorktree;
+  confirmActiveWorktreeChange: (nextActive: WorkbenchWorktree | null) => boolean;
+  mergeWorktree: () => Promise<void>;
+  applyMergeSuccess: (plan: MobileWorktreeRemovalPlan) => void | Promise<void>;
+}
+
+export interface MobileWorktreeRefreshFlowOptions {
+  nextWorktrees: WorkbenchWorktree[];
+  currentActiveWorktreeId: string | null;
+  skipActivePreflight?: boolean;
+  confirmActiveWorktreeChange: (nextActive: WorkbenchWorktree | null) => boolean;
+  applyRefresh: (plan: Pick<MobileWorktreeRemovalPlan, 'nextWorktrees' | 'nextActive'>) => void;
+}
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   删除 active worktree 会离开当前 Files 草稿上下文，必须先让父级 dirty guard 决定是否允许，再调用后端删除。
@@ -38,6 +65,90 @@ export function getMobileWorktreeRemovalPlan(
     : worktrees.find((worktree) => worktree.id === activeWorktreeId) ?? null;
 
   return { nextWorktrees, nextActive, requiresActivePreflight };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   删除 active worktree 是破坏性操作，必须先确认是否允许离开 dirty Files 草稿，但只能在后端删除成功后才应用 UI 状态。
+ *
+ * Code Logic（这个函数做什么）:
+ *   计算删除计划；active 删除先执行只读确认，取消时不调用后端；后端成功后才调用 applyRemoval。
+ */
+export async function runMobileWorktreeRemovalFlow(
+  options: MobileWorktreeRemovalFlowOptions,
+): Promise<MobileWorktreeDestructiveFlowResult> {
+  const plan = getMobileWorktreeRemovalPlan(
+    options.worktrees,
+    options.activeWorktreeId,
+    options.removingWorktree,
+  );
+
+  if (
+    plan.requiresActivePreflight &&
+    !options.confirmActiveWorktreeChange(plan.nextActive)
+  ) {
+    return 'cancelled';
+  }
+
+  await options.removeWorktree(plan);
+  await options.applyRemoval(plan);
+  return 'applied';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   merge 成功会删除源 worktree，移动端必须在后端 merge 前先保护 active Files 草稿。
+ *
+ * Code Logic（这个函数做什么）:
+ *   复用删除计划算出 merge 后目标 active；确认取消时不触碰后端，后端成功后才执行成功应用回调。
+ */
+export async function runMobileWorktreeMergeFlow(
+  options: MobileWorktreeMergeFlowOptions,
+): Promise<MobileWorktreeDestructiveFlowResult> {
+  const plan = getMobileWorktreeRemovalPlan(
+    options.worktrees,
+    options.sourceWorktree.id,
+    options.sourceWorktree,
+  );
+
+  if (!options.confirmActiveWorktreeChange(plan.nextActive)) {
+    return 'cancelled';
+  }
+
+  await options.mergeWorktree();
+  await options.applyMergeSuccess(plan);
+  return 'applied';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   刷新 worktree 列表时当前 active 可能已被后端删除，移动端不能在用户取消 dirty guard 前先写入新列表。
+ *
+ * Code Logic（这个函数做什么）:
+ *   先计算下一 active；需要离开当前 active 且未显式跳过 guard 时先确认，确认通过后才调用 applyRefresh。
+ */
+export function runMobileWorktreeRefreshFlow(
+  options: MobileWorktreeRefreshFlowOptions,
+): MobileWorktreeDestructiveFlowResult {
+  const currentStillExists = options.currentActiveWorktreeId
+    ? options.nextWorktrees.some((worktree) => worktree.id === options.currentActiveWorktreeId)
+    : false;
+  const nextActive = currentStillExists
+    ? options.nextWorktrees.find((worktree) => worktree.id === options.currentActiveWorktreeId) ??
+      null
+    : selectPreferredMobileWorktree(options.nextWorktrees);
+
+  if (
+    !options.skipActivePreflight &&
+    options.currentActiveWorktreeId &&
+    !currentStillExists &&
+    !options.confirmActiveWorktreeChange(nextActive)
+  ) {
+    return 'cancelled';
+  }
+
+  options.applyRefresh({ nextWorktrees: options.nextWorktrees, nextActive });
+  return 'applied';
 }
 
 /**
