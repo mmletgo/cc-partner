@@ -3,6 +3,10 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import type { WorkbenchGitCommit, WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
+import {
+  shouldReloadMobileGitCommitsAfterAction,
+  type MobileGitPanelAction,
+} from '../mobilePanelState';
 import styles from '../MobileWorkbench.module.css';
 
 export interface MobileGitPanelProps {
@@ -114,12 +118,20 @@ export function MobileGitPanel({
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   Git 操作完成后父组件需要同步最新 worktree 状态，Git 面板也要刷新提交历史。
+   *   Git 操作完成后父组件需要同步最新 worktree 状态；merge 后源 worktree 可能被删除，不能再用旧 id 刷新提交历史。
    *
    * Code Logic（这个函数做什么）:
-   *   调用可选父级刷新回调，然后重新读取 commit 列表；失败由具体操作函数处理。
+   *   commit/push 后刷新 worktree 与 commits；merge 后让旧 commits 请求失效、清空当前提交，再只刷新 worktrees。
    */
-  const refreshAfterAction = useCallback(async (): Promise<void> => {
+  const refreshAfterAction = useCallback(async (action: MobileGitPanelAction): Promise<void> => {
+    if (!shouldReloadMobileGitCommitsAfterAction(action)) {
+      requestIdRef.current += 1;
+      setCommits([]);
+      setError(null);
+      setLoading(false);
+      await onRefreshWorktrees?.();
+      return;
+    }
     await onRefreshWorktrees?.();
     await loadCommits();
   }, [loadCommits, onRefreshWorktrees]);
@@ -138,7 +150,7 @@ export function MobileGitPanel({
     try {
       const nextWorktree = await httpWorkbenchTransport.worktrees.commit(worktree.id, null);
       onWorktreeChange?.(nextWorktree);
-      await refreshAfterAction();
+      await refreshAfterAction('commit');
     } catch (reason) {
       setError(`${t('workbench:errors.commitWorktree')}: ${getErrorMessage(reason)}`);
     } finally {
@@ -160,7 +172,7 @@ export function MobileGitPanel({
     try {
       const nextWorktree = await httpWorkbenchTransport.worktrees.push(worktree.id);
       onWorktreeChange?.(nextWorktree);
-      await refreshAfterAction();
+      await refreshAfterAction('push');
     } catch (reason) {
       setError(`${t('workbench:errors.pushWorktree')}: ${getErrorMessage(reason)}`);
     } finally {
@@ -173,7 +185,7 @@ export function MobileGitPanel({
    *   功能 worktree 完成后，手机端需要能触发合并回主工作区，沿用后端既有 merge 流程。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 worktrees.merge；完成后刷新父级 worktree 列表和提交历史，不在移动端复制桌面进度 UI。
+   *   调用 worktrees.merge；完成后刷新父级 worktree 列表并清空当前提交，不再用可能已删除的源 worktree 拉提交历史。
    */
   const handleMerge = useCallback(async (): Promise<void> => {
     if (!worktree || worktree.isMain) return;
@@ -181,7 +193,7 @@ export function MobileGitPanel({
     setError(null);
     try {
       await httpWorkbenchTransport.worktrees.merge(worktree.id);
-      await refreshAfterAction();
+      await refreshAfterAction('merge');
     } catch (reason) {
       setError(`${t('workbench:errors.mergeWorktree')}: ${getErrorMessage(reason)}`);
     } finally {

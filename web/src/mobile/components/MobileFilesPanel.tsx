@@ -3,6 +3,13 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import { ChevronRightIcon, FileIcon, FolderIcon } from '@/lib/icons';
+import {
+  isMobileFileOpenResponseCurrent,
+  shouldBlockMobileFileContextSwitch,
+  shouldInvalidateMobileFileOpenOnDirectoryLoad,
+  shouldSkipMobileFileContextReload,
+  type MobileFilePanelContext,
+} from '../mobilePanelState';
 import type {
   WorkbenchFileNode,
   WorkbenchOpenFile,
@@ -10,11 +17,6 @@ import type {
   WorkbenchWorktree,
 } from '@/lib/types';
 import styles from '../MobileWorkbench.module.css';
-
-interface LoadedFileContext {
-  projectId: string;
-  worktreeId: string | null;
-}
 
 export interface MobileFilesPanelProps {
   project: WorkbenchProject | null;
@@ -63,7 +65,7 @@ export function MobileFilesPanel({ project, worktree }: MobileFilesPanelProps): 
   const [currentDir, setCurrentDir] = useState<string>('');
   const [nodes, setNodes] = useState<WorkbenchFileNode[]>([]);
   const [opened, setOpened] = useState<WorkbenchOpenFile | null>(null);
-  const [openedContext, setOpenedContext] = useState<LoadedFileContext | null>(null);
+  const [openedContext, setOpenedContext] = useState<MobileFilePanelContext | null>(null);
   const [draft, setDraft] = useState<string>('');
   const [dirty, setDirty] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
@@ -73,7 +75,7 @@ export function MobileFilesPanel({ project, worktree }: MobileFilesPanelProps): 
   const listRequestIdRef = useRef<number>(0);
   const openRequestIdRef = useRef<number>(0);
   const dirtyRef = useRef<boolean>(false);
-  const loadedContextRef = useRef<LoadedFileContext | null>(null);
+  const loadedContextRef = useRef<MobileFilePanelContext | null>(null);
   const contextKey = `${project?.id ?? ''}:${worktree?.id ?? ''}`;
 
   const canGoUp = currentDir.length > 0;
@@ -85,15 +87,18 @@ export function MobileFilesPanel({ project, worktree }: MobileFilesPanelProps): 
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   目录加载要绑定请求发起时的项目和 worktree，避免用户快速切换后旧响应写回文件列表。
+   *   目录加载要绑定请求发起时的项目和 worktree，避免用户快速切换后旧响应写回文件列表或旧 open 响应覆盖根目录重载。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 files.listDir，使用 request id 校验响应顺序，并同步当前目录、文件列表和加载态。
+   *   调用 files.listDir，使用 request id 校验响应顺序；根目录加载会递增 open request id，让未完成的文件打开请求失效。
    */
   const loadDirectory = useCallback(
-    async (context: LoadedFileContext, path: string): Promise<void> => {
+    async (context: MobileFilePanelContext, path: string): Promise<void> => {
       const requestId = listRequestIdRef.current + 1;
       listRequestIdRef.current = requestId;
+      if (shouldInvalidateMobileFileOpenOnDirectoryLoad(path)) {
+        openRequestIdRef.current += 1;
+      }
       setLoading(true);
       setError(null);
 
@@ -123,9 +128,6 @@ export function MobileFilesPanel({ project, worktree }: MobileFilesPanelProps): 
 
   useEffect(() => {
     const nextContext = project ? { projectId: project.id, worktreeId: worktree?.id ?? null } : null;
-    const previousKey = loadedContextRef.current
-      ? `${loadedContextRef.current.projectId}:${loadedContextRef.current.worktreeId ?? ''}`
-      : '';
 
     if (!nextContext) {
       listRequestIdRef.current += 1;
@@ -141,7 +143,12 @@ export function MobileFilesPanel({ project, worktree }: MobileFilesPanelProps): 
       return;
     }
 
-    if (previousKey && previousKey !== contextKey && dirtyRef.current) {
+    if (shouldSkipMobileFileContextReload(loadedContextRef.current, nextContext, openedContext)) {
+      setContextBlocked(false);
+      return;
+    }
+
+    if (shouldBlockMobileFileContextSwitch(loadedContextRef.current, nextContext, dirtyRef.current)) {
       const shouldDiscard = window.confirm(
         t('workbench:mobile.filesPanel.discardContextConfirm'),
       );
@@ -151,12 +158,13 @@ export function MobileFilesPanel({ project, worktree }: MobileFilesPanelProps): 
       }
     }
 
+    openRequestIdRef.current += 1;
     setOpened(null);
     setOpenedContext(null);
     setDraft('');
     setDirty(false);
     void loadDirectory(nextContext, '');
-  }, [contextKey, loadDirectory, project, t, worktree?.id]);
+  }, [contextKey, loadDirectory, openedContext, project, t, worktree?.id]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -197,7 +205,16 @@ export function MobileFilesPanel({ project, worktree }: MobileFilesPanelProps): 
           node.path,
           context.worktreeId,
         );
-        if (openRequestIdRef.current !== requestId) return;
+        if (
+          !isMobileFileOpenResponseCurrent(
+            requestId,
+            openRequestIdRef.current,
+            context,
+            loadedContextRef.current,
+          )
+        ) {
+          return;
+        }
         setOpened(nextOpened);
         setOpenedContext(context);
         setDraft(nextOpened.text?.content ?? '');
@@ -284,6 +301,7 @@ export function MobileFilesPanel({ project, worktree }: MobileFilesPanelProps): 
     const shouldDiscard = window.confirm(t('workbench:mobile.filesPanel.discardFileConfirm'));
     if (!shouldDiscard) return;
     const nextContext = { projectId: project.id, worktreeId: worktree?.id ?? null };
+    openRequestIdRef.current += 1;
     setOpened(null);
     setOpenedContext(null);
     setDraft('');
