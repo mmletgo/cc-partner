@@ -100,6 +100,7 @@
     "loading": "Getting local network access URLs…",
     "empty": "No local network URL is available for mobile access.",
     "copy": "Copy link",
+    "copyUnavailable": "Clipboard access is unavailable here. Select and copy the link manually.",
     "copied": "Copied",
     "refresh": "Refresh",
     "qrLabel": "Mobile Workbench access QR code"

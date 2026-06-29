@@ -1,6 +1,7 @@
 import {
   canSelectMobileProject,
   closeMobileNav,
+  getInitialMobileNavOpen,
   openMobileNav,
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
@@ -132,6 +133,17 @@ function testOpenMobileNavReturnsTrue(): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   用户确认手机竖屏导航默认常开，只有主动收起后才显示顶部展开小按钮。
+ *
+ * Code Logic（这个函数做什么）:
+ *   调用默认导航状态 helper，断言初始状态为打开。
+ */
+function testInitialMobileNavOpenDefaultsToTrue(): void {
+  assertEqual(getInitialMobileNavOpen(), true);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   用户选择导航项或点击遮罩后需要关闭移动端抽屉，关闭 helper 必须返回关闭态。
  *
  * Code Logic（这个函数做什么）:
@@ -253,6 +265,7 @@ function testPreferredSessionFallsBackToRunningFirstOrNull(): void {
 
 testSelectMobilePanelReturnsNextPanel();
 testOpenMobileNavReturnsTrue();
+testInitialMobileNavOpenDefaultsToTrue();
 testCloseMobileNavReturnsFalse();
 testCanSelectMobileProjectOnlyAllowsLocalProjects();
 testPreferredWorktreeUsesMainBeforeFirst();

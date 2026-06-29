@@ -65,6 +65,7 @@ export function MobileAccessCard(props: MobileAccessCardProps) {
     }
   }, []);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- 组件挂载与 URL 变化时需要拉取/生成外部 access-info 与二维码 */
   useEffect(() => {
     void loadAccessInfo();
   }, [loadAccessInfo]);
@@ -87,6 +88,7 @@ export function MobileAccessCard(props: MobileAccessCardProps) {
       cancelled = true;
     };
   }, [primaryUrl]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -97,6 +99,10 @@ export function MobileAccessCard(props: MobileAccessCardProps) {
    */
   const copyPrimaryUrl = useCallback(async (): Promise<void> => {
     if (!primaryUrl) return;
+    if (typeof navigator.clipboard?.writeText !== 'function') {
+      setError(t('mobileAccess.copyUnavailable'));
+      return;
+    }
     setCopying(true);
     setError(null);
     try {
@@ -107,7 +113,7 @@ export function MobileAccessCard(props: MobileAccessCardProps) {
     } finally {
       setCopying(false);
     }
-  }, [primaryUrl]);
+  }, [primaryUrl, t]);
 
   return (
     <Card className={[styles.card, compact ? styles.compact : null, className].filter(Boolean).join(' ')}>

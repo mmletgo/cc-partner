@@ -48,6 +48,17 @@ export function closeMobileNav(): boolean {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   用户确认手机竖屏导航默认常开，收起后才退化为顶部展开小按钮。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回移动端 shell 初始抽屉状态；当前规范为默认打开。
+ */
+export function getInitialMobileNavOpen(): boolean {
+  return true;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   移动端 Workbench 当前只支持手机直连本机项目；桌面端 remote shortcut 需要展示但不能进入必然失败的二级远端网关路径。
  *
  * Code Logic（这个函数做什么）:

@@ -17,6 +17,7 @@ import {
   type MobileWorkbenchPanel,
 } from './mobileWorkbenchState';
 import {
+  getMobileWorktreeMergeAppliedState,
   runMobileWorktreeMergeFlow,
   runMobileWorktreeRefreshFlow,
   shouldConfirmMobileFileDirtyContextSwitch,
@@ -27,6 +28,7 @@ import styles from './MobileWorkbench.module.css';
 
 export interface MobileRefreshWorktreesOptions {
   skipFileContextConfirm?: boolean;
+  expectedProjectId?: string;
 }
 
 /**
@@ -86,6 +88,7 @@ export function MobileWorkbench(): ReactElement {
   const projectDetailsRequestIdRef = useRef<number>(0);
   const worktreesRequestIdRef = useRef<number>(0);
   const sessionsRequestIdRef = useRef<number>(0);
+  const activeProjectRef = useRef<WorkbenchProject | null>(null);
   const activeWorktreeRef = useRef<WorkbenchWorktree | null>(null);
   const sessionsRef = useRef<WorkbenchSession[]>([]);
   const { t } = useTranslation(['workbench']);
@@ -121,6 +124,10 @@ export function MobileWorkbench(): ReactElement {
     },
   };
   const placeholder = panelPlaceholders[panel];
+
+  useEffect(() => {
+    activeProjectRef.current = activeProject;
+  }, [activeProject]);
 
   useEffect(() => {
     activeWorktreeRef.current = activeWorktree;
@@ -250,6 +257,7 @@ export function MobileWorkbench(): ReactElement {
     try {
       const nextSessions = await httpWorkbenchTransport.sessions.list(projectId);
       if (sessionsRequestIdRef.current !== requestId) return;
+      if (activeProjectRef.current?.id !== projectId) return;
       sessionsRef.current = nextSessions;
       setSessions(nextSessions);
       setActiveSession((current) => {
@@ -279,12 +287,17 @@ export function MobileWorkbench(): ReactElement {
   ): Promise<void> => {
     if (!activeProject) return;
     const projectId = activeProject.id;
+    if (options.expectedProjectId && options.expectedProjectId !== projectId) return;
     const requestId = worktreesRequestIdRef.current + 1;
     worktreesRequestIdRef.current = requestId;
 
     try {
       const nextWorktrees = await httpWorkbenchTransport.worktrees.list(projectId);
       if (worktreesRequestIdRef.current !== requestId) return;
+      if (activeProjectRef.current?.id !== projectId) return;
+      if (options.expectedProjectId && activeProjectRef.current?.id !== options.expectedProjectId) {
+        return;
+      }
       const current = activeWorktreeRef.current;
       runMobileWorktreeRefreshFlow({
         nextWorktrees,
@@ -404,6 +417,13 @@ export function MobileWorkbench(): ReactElement {
    *   只写入 worktree 列表，避免绕过 Files dirty snapshot 直接改变 active worktree。
    */
   const handleWorktreesChange = useCallback((nextWorktrees: WorkbenchWorktree[]): void => {
+    const currentProjectId = activeProjectRef.current?.id ?? null;
+    if (
+      currentProjectId &&
+      nextWorktrees.some((worktree) => worktree.projectId !== currentProjectId)
+    ) {
+      return;
+    }
     setWorktrees(nextWorktrees);
   }, []);
 
@@ -444,6 +464,7 @@ export function MobileWorkbench(): ReactElement {
    */
   const handleWorktreeChange = useCallback(
     (updatedWorktree: WorkbenchWorktree): void => {
+      if (activeProjectRef.current?.id !== updatedWorktree.projectId) return;
       setWorktrees((current) =>
         current.map((worktree) =>
           worktree.id === updatedWorktree.id ? updatedWorktree : worktree,
@@ -466,6 +487,7 @@ export function MobileWorkbench(): ReactElement {
    */
   const handleMergeWorktree = useCallback(
     async (sourceWorktree: WorkbenchWorktree): Promise<boolean> => {
+      const operationProjectId = activeProjectRef.current?.id ?? null;
       const result = await runMobileWorktreeMergeFlow({
         worktrees,
         sourceWorktree,
@@ -474,9 +496,16 @@ export function MobileWorkbench(): ReactElement {
         mergeWorktree: async () => {
           await httpWorkbenchTransport.worktrees.merge(sourceWorktree.id);
         },
-        applyMergeSuccess: async () => {
+        applyMergeSuccess: async (plan) => {
+          if (activeProjectRef.current?.id !== operationProjectId) return;
+          const appliedState = getMobileWorktreeMergeAppliedState(plan);
           discardConfirmedFileContextSwitch();
-          await refreshWorktrees({ skipFileContextConfirm: true });
+          setWorktrees(appliedState.nextWorktrees);
+          setActiveWorktreeWithSession(appliedState.nextActive);
+          await refreshWorktrees({
+            skipFileContextConfirm: true,
+            expectedProjectId: operationProjectId ?? undefined,
+          });
         },
       });
       return result === 'applied';
@@ -485,10 +514,12 @@ export function MobileWorkbench(): ReactElement {
       discardConfirmedFileContextSwitch,
       handleConfirmActiveWorktreeChange,
       refreshWorktrees,
+      setActiveWorktreeWithSession,
       worktrees,
     ],
   );
 
+  /* eslint-disable react-hooks/set-state-in-effect -- 移动端入口挂载时需要加载最近项目列表 */
   useEffect(() => {
     void loadProjects();
 
@@ -499,6 +530,7 @@ export function MobileWorkbench(): ReactElement {
       sessionsRequestIdRef.current += 1;
     };
   }, [loadProjects]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const panelContent =
     panel === 'projects' ? (

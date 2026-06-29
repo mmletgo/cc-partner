@@ -1,4 +1,9 @@
-import { prepareInitialReplayBuffer } from './mobileTerminalReplay';
+import {
+  planMobileReplayReadyBufferWrite,
+  prepareInitialReplayBuffer,
+  shouldForwardMobileTerminalInput,
+} from './mobileTerminalReplay';
+import type { TerminalReplayGate } from '@/pages/Workbench/terminalReplay';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -52,5 +57,31 @@ assertEqual(
   'replay-history',
   'unaligned live buffer should keep replay as safe baseline',
 );
+
+const gate: TerminalReplayGate = { current: false };
+assertEqual(
+  shouldForwardMobileTerminalInput(gate, false, true),
+  false,
+  'mobile terminal input should stay blocked before replay is ready',
+);
+assertEqual(
+  shouldForwardMobileTerminalInput(gate, true, true),
+  true,
+  'mobile terminal input should forward after replay is ready',
+);
+gate.current = true;
+assertEqual(
+  shouldForwardMobileTerminalInput(gate, true, true),
+  false,
+  'mobile terminal input should stay blocked while replay gate is active',
+);
+
+const readyPlan = planMobileReplayReadyBufferWrite('screen-a', 'screen-a-tail');
+assertEqual(
+  readyPlan.mode,
+  'append',
+  'replay-ready live buffer should be reconciled immediately',
+);
+assertEqual(readyPlan.data, '-tail', 'replay-ready live buffer should append only new tail');
 
 console.log('mobileTerminalReplay.test.ts passed');

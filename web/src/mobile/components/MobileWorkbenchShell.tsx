@@ -14,6 +14,7 @@ import {
 } from '@/lib/icons';
 import {
   closeMobileNav,
+  getInitialMobileNavOpen,
   openMobileNav,
   selectMobilePanel,
   type MobileWorkbenchPanel,
@@ -112,7 +113,7 @@ export function MobileWorkbenchShell({
   onPanelChange,
   children,
 }: MobileWorkbenchShellProps): ReactElement {
-  const [isNavOpen, setIsNavOpen] = useState<boolean>(false);
+  const [isNavOpen, setIsNavOpen] = useState<boolean>(() => getInitialMobileNavOpen());
   const { t } = useTranslation(['workbench']);
 
   /**

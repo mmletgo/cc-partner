@@ -1,6 +1,9 @@
 import {
   getMobileFileContextKey,
+  getMobileWorktreeMergeAppliedState,
   isMobileFileOpenResponseCurrent,
+  isMobileFileSaveResponseCurrent,
+  isMobileGitActionResponseCurrent,
   shouldBlockMobileFileContextSwitch,
   shouldConfirmMobileFileDirtyContextSwitch,
   shouldSkipMobileFileContextConfirmForDiscardToken,
@@ -232,6 +235,39 @@ function testOpenResponseRequiresLatestRequestAndCurrentContext(): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   保存文本文件期间用户可能切换文件或 worktree，旧 save 响应不能清掉新草稿的 dirty 状态。
+ *
+ * Code Logic（这个函数做什么）:
+ *   同时校验 request id、context key 和文件 path，任一变化都应判定为 stale。
+ */
+function testSaveResponseRequiresLatestContextAndPath(): void {
+  const context = createContext('project-1', 'worktree-1');
+  const otherContext = createContext('project-1', 'worktree-2');
+
+  assertEqual(
+    isMobileFileSaveResponseCurrent(3, 3, context, context, 'src/a.ts', 'src/a.ts'),
+    true,
+    'latest save response for same context/path should be current',
+  );
+  assertEqual(
+    isMobileFileSaveResponseCurrent(2, 3, context, context, 'src/a.ts', 'src/a.ts'),
+    false,
+    'older save response should be stale',
+  );
+  assertEqual(
+    isMobileFileSaveResponseCurrent(3, 3, context, otherContext, 'src/a.ts', 'src/a.ts'),
+    false,
+    'save response from previous context should be stale',
+  );
+  assertEqual(
+    isMobileFileSaveResponseCurrent(3, 3, context, context, 'src/a.ts', 'src/b.ts'),
+    false,
+    'save response for previous opened file should be stale',
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   重新加载根目录代表文件面板回到新的上下文基线，未完成的 open 请求必须失效。
  *
  * Code Logic（这个函数做什么）:
@@ -454,6 +490,57 @@ async function testMergeCancelledByDirtyGuardDoesNotCallBackend(): Promise<void>
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   merge 成功会删除源 active worktree，即使后续权威刷新失败，移动端也不能继续指向已删除源 worktree。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造 merge 删除源 worktree 的计划，断言应用态先移除源列表并切回主工作区。
+ */
+function testMergeSuccessAppliedStateUsesRemovalPlan(): void {
+  const main = createWorktree('main', true);
+  const feature = createWorktree('feature/merge-me', false);
+  const state = getMobileWorktreeMergeAppliedState({
+    nextWorktrees: [main],
+    nextActive: main,
+    requiresActivePreflight: true,
+  });
+
+  assertEqual(
+    state.nextWorktrees.some((worktree) => worktree.id === feature.id),
+    false,
+    'merge applied state should not keep removed source worktree',
+  );
+  assertEqual(state.nextActive?.id ?? null, main.id, 'merge applied state should switch to main');
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Git commit/push/merge 等长操作完成时，用户可能已经切到其它项目或 worktree，旧响应不能污染当前 UI。
+ *
+ * Code Logic（这个函数做什么）:
+ *   比较操作发起时和响应时的 project/worktree context，断言任一变化都视为 stale。
+ */
+function testGitActionResponseRequiresSameContext(): void {
+  const context = createContext('project-1', 'worktree-1');
+
+  assertEqual(
+    isMobileGitActionResponseCurrent(context, context),
+    true,
+    'same project/worktree action response should be current',
+  );
+  assertEqual(
+    isMobileGitActionResponseCurrent(context, createContext('project-2', 'worktree-1')),
+    false,
+    'git action response from previous project should be stale',
+  );
+  assertEqual(
+    isMobileGitActionResponseCurrent(context, createContext('project-1', 'worktree-2')),
+    false,
+    'git action response from previous worktree should be stale',
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   refreshWorktrees 发现 active 已不存在时，需要先确认能否离开 dirty context；取消时不能先写入后端返回的新列表。
  *
  * Code Logic（这个函数做什么）:
@@ -507,6 +594,7 @@ async function runTests(): Promise<void> {
   testDirtySnapshotSameTargetSkipsParentConfirm();
   testDiscardTokenChangeSkipsInternalContextConfirm();
   testOpenResponseRequiresLatestRequestAndCurrentContext();
+  testSaveResponseRequiresLatestContextAndPath();
   testRootDirectoryLoadInvalidatesOpenRequests();
   testMergeRefreshSkipsCommitReload();
   testActiveWorktreeRemovalRequiresPreflight();
@@ -515,6 +603,8 @@ async function runTests(): Promise<void> {
   await testActiveRemoveBackendFailureDoesNotApplyState();
   await testActiveRemoveBackendSuccessAppliesNextState();
   await testMergeCancelledByDirtyGuardDoesNotCallBackend();
+  testMergeSuccessAppliedStateUsesRemovalPlan();
+  testGitActionResponseRequiresSameContext();
   testRefreshWorktreesCancelDoesNotApplyListOrActive();
   testContextKeyIsStable();
 

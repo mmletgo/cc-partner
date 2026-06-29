@@ -14,6 +14,7 @@ pub mod config;
 pub mod devices;
 pub mod github_trending;
 pub mod health;
+pub mod mobile;
 pub mod permissions;
 pub mod prompt_optimizer;
 pub mod prompts;

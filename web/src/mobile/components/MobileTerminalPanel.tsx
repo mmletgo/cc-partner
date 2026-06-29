@@ -14,11 +14,14 @@ import { PlusIcon, SplitDownIcon, SplitRightIcon, XIcon } from '@/lib/icons';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import {
   planTerminalBufferWrite,
-  shouldForwardTerminalInput,
   writeTerminalReplay,
 } from '@/pages/Workbench/terminalReplay';
 import { workbenchTerminalOptions, workbenchTerminalTheme } from '@/pages/Workbench/terminalOptions';
-import { prepareInitialReplayBuffer } from '../mobileTerminalReplay';
+import {
+  planMobileReplayReadyBufferWrite,
+  prepareInitialReplayBuffer,
+  shouldForwardMobileTerminalInput,
+} from '../mobileTerminalReplay';
 import { selectPreferredMobileSession } from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
 
@@ -246,6 +249,27 @@ export function MobileTerminalPanel({
 
     /**
      * Business Logic（为什么需要这个函数）:
+     *   HTTP replay ready 前可能已有 NDJSON live buffer，replay 完成后必须立即补写，避免终端停在旧屏。
+     *
+     * Code Logic（这个函数做什么）:
+     *   对 writtenBuffer 与当前 live buffer 计算 diff；append 直接写入，replay 则清屏后重放最新 buffer。
+     */
+    const flushLiveBufferAfterReplay = (): void => {
+      if (disposed) return;
+      const plan = planMobileReplayReadyBufferWrite(writtenBufferRef.current, bufferRef.current);
+      if (plan.mode === 'none') return;
+      if (plan.mode === 'replay') {
+        terminal.clear();
+        writeTerminalReplay(terminal, plan.data, replayGateRef);
+        writtenBufferRef.current = bufferRef.current;
+        return;
+      }
+      terminal.write(plan.data);
+      writtenBufferRef.current = bufferRef.current;
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
      *   手机旋转、地址栏收缩或分屏后需要同步 xterm 与后端 PTY 尺寸。
      *
      * Code Logic（这个函数做什么）:
@@ -275,7 +299,15 @@ export function MobileTerminalPanel({
     };
 
     const dataDisposable = terminal.onData((data: string) => {
-      if (!shouldForwardTerminalInput(replayGateRef, inputEnabledRef.current)) return;
+      if (
+        !shouldForwardMobileTerminalInput(
+          replayGateRef,
+          replayReadyRef.current,
+          inputEnabledRef.current,
+        )
+      ) {
+        return;
+      }
       void httpWorkbenchTransport.sessions.writeInput(sessionId, data).catch((reason) => {
         if (disposed) return;
         setPanelError(
@@ -304,6 +336,7 @@ export function MobileTerminalPanel({
         writeTerminalReplay(terminal, initial.data, replayGateRef);
         writtenBufferRef.current = initial.writtenBuffer;
         replayReadyRef.current = true;
+        flushLiveBufferAfterReplay();
       })
       .catch((reason) => {
         if (disposed || replayRequestIdRef.current !== requestId) return;
@@ -313,6 +346,7 @@ export function MobileTerminalPanel({
           writtenBufferRef.current = liveBuffer;
         }
         replayReadyRef.current = true;
+        flushLiveBufferAfterReplay();
         setPanelError(
           `${t('workbench:mobile.terminalPanel.errors.replay')}: ${getErrorMessage(
             reason,
@@ -427,7 +461,7 @@ export function MobileTerminalPanel({
     resetBuffer,
     sessions,
     t,
-    worktree?.id,
+    worktree,
   ]);
 
   /**
@@ -497,7 +531,7 @@ export function MobileTerminalPanel({
     sessions,
     t,
     visibleSession,
-    worktree?.id,
+    worktree,
   ]);
 
   /**
@@ -532,14 +566,14 @@ export function MobileTerminalPanel({
       }
     },
     [
-      activeSession?.id,
+      activeSession,
       onActiveSessionChange,
       onRefreshSessions,
       onSessionsChange,
       removeBuffer,
       sessions,
       t,
-      worktree?.id,
+      worktree,
     ],
   );
 

@@ -5,7 +5,9 @@ import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import type { WorkbenchGitCommit, WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
 import {
   shouldReloadMobileGitCommitsAfterAction,
+  isMobileGitActionResponseCurrent,
   type MobileGitPanelAction,
+  type MobileGitActionContext,
 } from '../mobilePanelState';
 import styles from '../MobileWorkbench.module.css';
 
@@ -14,7 +16,10 @@ export interface MobileGitPanelProps {
   worktree: WorkbenchWorktree | null;
   onWorktreeChange?: (worktree: WorkbenchWorktree) => void;
   onMergeWorktree: (worktree: WorkbenchWorktree) => Promise<boolean>;
-  onRefreshWorktrees?: (options?: { skipFileContextConfirm?: boolean }) => Promise<void> | void;
+  onRefreshWorktrees?: (options?: {
+    skipFileContextConfirm?: boolean;
+    expectedProjectId?: string;
+  }) => Promise<void> | void;
 }
 
 /**
@@ -64,6 +69,7 @@ export function MobileGitPanel({
   const [actionBusy, setActionBusy] = useState<'commit' | 'push' | 'merge' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef<number>(0);
+  const currentContextRef = useRef<MobileGitActionContext | null>(null);
   const statusLabel = useMemo(() => {
     if (!worktree) return t('workbench:mobile.gitPanel.noWorktree');
     if (worktree.status.conflicts > 0) {
@@ -74,6 +80,12 @@ export function MobileGitPanel({
     }
     return t('workbench:worktrees.status.clean');
   }, [t, worktree]);
+
+  useEffect(() => {
+    currentContextRef.current = project
+      ? { projectId: project.id, worktreeId: worktree?.id ?? null }
+      : null;
+  }, [project, worktree?.id]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -109,14 +121,16 @@ export function MobileGitPanel({
         setLoading(false);
       }
     }
-  }, [project, t, worktree?.id]);
+  }, [project, t, worktree]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- Git 面板在 project/worktree 变化时需要重新加载提交列表 */
   useEffect(() => {
     void loadCommits();
     return () => {
       requestIdRef.current += 1;
     };
   }, [loadCommits]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -125,16 +139,20 @@ export function MobileGitPanel({
    * Code Logic（这个函数做什么）:
    *   commit/push 后刷新 worktree 与 commits；merge 后让旧 commits 请求失效、清空当前提交，再只刷新 worktrees。
    */
-  const refreshAfterAction = useCallback(async (action: MobileGitPanelAction): Promise<void> => {
+  const refreshAfterAction = useCallback(async (
+    action: MobileGitPanelAction,
+    actionContext: MobileGitActionContext,
+  ): Promise<void> => {
     if (!shouldReloadMobileGitCommitsAfterAction(action)) {
       requestIdRef.current += 1;
       setCommits([]);
       setError(null);
       setLoading(false);
-      await onRefreshWorktrees?.();
+      await onRefreshWorktrees?.({ expectedProjectId: actionContext.projectId });
       return;
     }
-    await onRefreshWorktrees?.();
+    await onRefreshWorktrees?.({ expectedProjectId: actionContext.projectId });
+    if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
     await loadCommits();
   }, [loadCommits, onRefreshWorktrees]);
 
@@ -146,19 +164,21 @@ export function MobileGitPanel({
    *   调用 worktrees.commit(worktreeId, null)，成功后通知父组件更新 active worktree 并刷新列表/提交历史。
    */
   const handleCommit = useCallback(async (): Promise<void> => {
-    if (!worktree) return;
+    if (!project || !worktree) return;
+    const actionContext = { projectId: project.id, worktreeId: worktree.id };
     setActionBusy('commit');
     setError(null);
     try {
       const nextWorktree = await httpWorkbenchTransport.worktrees.commit(worktree.id, null);
+      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
       onWorktreeChange?.(nextWorktree);
-      await refreshAfterAction('commit');
+      await refreshAfterAction('commit', actionContext);
     } catch (reason) {
       setError(`${t('workbench:errors.commitWorktree')}: ${getErrorMessage(reason)}`);
     } finally {
       setActionBusy(null);
     }
-  }, [onWorktreeChange, refreshAfterAction, t, worktree]);
+  }, [onWorktreeChange, project, refreshAfterAction, t, worktree]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -168,19 +188,21 @@ export function MobileGitPanel({
    *   调用 worktrees.push，成功后同步 active worktree 状态并刷新 worktree/commit 数据。
    */
   const handlePush = useCallback(async (): Promise<void> => {
-    if (!worktree) return;
+    if (!project || !worktree) return;
+    const actionContext = { projectId: project.id, worktreeId: worktree.id };
     setActionBusy('push');
     setError(null);
     try {
       const nextWorktree = await httpWorkbenchTransport.worktrees.push(worktree.id);
+      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
       onWorktreeChange?.(nextWorktree);
-      await refreshAfterAction('push');
+      await refreshAfterAction('push', actionContext);
     } catch (reason) {
       setError(`${t('workbench:errors.pushWorktree')}: ${getErrorMessage(reason)}`);
     } finally {
       setActionBusy(null);
     }
-  }, [onWorktreeChange, refreshAfterAction, t, worktree]);
+  }, [onWorktreeChange, project, refreshAfterAction, t, worktree]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -190,12 +212,14 @@ export function MobileGitPanel({
    *   委托父级执行 dirty guard 与后端 merge；取消时不改本地提交，成功后清空源 worktree commits。
    */
   const handleMerge = useCallback(async (): Promise<void> => {
-    if (!worktree || worktree.isMain) return;
+    if (!project || !worktree || worktree.isMain) return;
+    const actionContext = { projectId: project.id, worktreeId: worktree.id };
     setActionBusy('merge');
     setError(null);
     try {
       const didMerge = await onMergeWorktree(worktree);
       if (!didMerge) return;
+      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
       requestIdRef.current += 1;
       setCommits([]);
       setError(null);
@@ -205,7 +229,7 @@ export function MobileGitPanel({
     } finally {
       setActionBusy(null);
     }
-  }, [onMergeWorktree, t, worktree]);
+  }, [onMergeWorktree, project, t, worktree]);
 
   const actionDisabled = actionBusy !== null || !worktree;
 

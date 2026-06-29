@@ -420,6 +420,7 @@ node scripts/bump-version.mjs <新版本号>
 |------|------|
 | ping | 健康检查 |
 | config.get_config / config.get_default_config / config.update_config | 配置读写；恢复默认取后端环境默认值，update_config 支持快捷键热更新 |
+| get_mobile_access_info | 桌面端获取可信局域网 `/mobile` 访问链接与二维码数据；普通手机浏览器对应 HTTP `/api/mobile/access-info` |
 | config.get_version | 应用版本号 |
 | prompts.list / get / create / update / delete / list_tags | Prompt CRUD（delete 为软删除，自增 vector_clock） |
 | optimize_prompt / stream_optimize_prompt_to_workbench_session | 调用 Claude Code CLI 优化用户输入；普通页返回中英文 Prompt，Workbench 可按设置语种用 stream-json 把优化结果流式写入当前终端，远端项目会代理到远端设备执行 |

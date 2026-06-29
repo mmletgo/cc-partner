@@ -5,6 +5,7 @@ import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import { ChevronRightIcon, FileIcon, FolderIcon } from '@/lib/icons';
 import {
   isMobileFileOpenResponseCurrent,
+  isMobileFileSaveResponseCurrent,
   shouldBlockMobileFileContextSwitch,
   shouldInvalidateMobileFileOpenOnDirectoryLoad,
   shouldSkipMobileFileContextConfirmForDiscardToken,
@@ -84,7 +85,10 @@ export function MobileFilesPanel({
   const [contextBlocked, setContextBlocked] = useState<boolean>(false);
   const listRequestIdRef = useRef<number>(0);
   const openRequestIdRef = useRef<number>(0);
+  const saveRequestIdRef = useRef<number>(0);
   const dirtyRef = useRef<boolean>(false);
+  const openedRef = useRef<WorkbenchOpenFile | null>(null);
+  const openedContextRef = useRef<MobileFilePanelContext | null>(null);
   const loadedContextRef = useRef<MobileFilePanelContext | null>(null);
   const discardContextTokenRef = useRef<number>(discardContextToken);
   const contextKey = `${project?.id ?? ''}:${worktree?.id ?? ''}`;
@@ -95,6 +99,14 @@ export function MobileFilesPanel({
   useEffect(() => {
     dirtyRef.current = dirty;
   }, [dirty]);
+
+  useEffect(() => {
+    openedRef.current = opened;
+  }, [opened]);
+
+  useEffect(() => {
+    openedContextRef.current = openedContext;
+  }, [openedContext]);
 
   useEffect(() => {
     onDirtyContextChange?.({
@@ -156,6 +168,7 @@ export function MobileFilesPanel({
     [t, updateLoadedContext],
   );
 
+  /* eslint-disable react-hooks/set-state-in-effect -- project/worktree props 变化时需要同步文件面板上下文状态 */
   useEffect(() => {
     const parentDiscardedContext = shouldSkipMobileFileContextConfirmForDiscardToken(
       discardContextTokenRef.current,
@@ -212,6 +225,7 @@ export function MobileFilesPanel({
     updateLoadedContext,
     worktree?.id,
   ]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -288,16 +302,34 @@ export function MobileFilesPanel({
    */
   const handleSave = useCallback(async (): Promise<void> => {
     if (!opened || !opened.text || !openedContext || !canEditOpenedFile) return;
+    const requestId = saveRequestIdRef.current + 1;
+    saveRequestIdRef.current = requestId;
+    const requestContext = openedContext;
+    const requestPath = opened.metadata.path;
+    const requestDraft = draft;
+    const requestBaseHash = opened.text.baseHash;
     setSaving(true);
     setError(null);
     try {
       const result = await httpWorkbenchTransport.files.saveText(
-        openedContext.projectId,
-        opened.metadata.path,
-        draft,
-        opened.text.baseHash,
-        openedContext.worktreeId,
+        requestContext.projectId,
+        requestPath,
+        requestDraft,
+        requestBaseHash,
+        requestContext.worktreeId,
       );
+      if (
+        !isMobileFileSaveResponseCurrent(
+          requestId,
+          saveRequestIdRef.current,
+          requestContext,
+          openedContextRef.current,
+          requestPath,
+          openedRef.current?.metadata.path ?? null,
+        )
+      ) {
+        return;
+      }
       setOpened((current) =>
         current
           ? {
@@ -306,7 +338,7 @@ export function MobileFilesPanel({
               text: current.text
                 ? {
                     ...current.text,
-                    content: draft,
+                    content: requestDraft,
                     baseHash: result.baseHash,
                     baseModifiedAt: result.baseModifiedAt,
                   }
@@ -316,10 +348,13 @@ export function MobileFilesPanel({
       );
       setDirty(false);
     } catch (reason) {
+      if (saveRequestIdRef.current !== requestId) return;
       const message = reason instanceof Error ? reason.message : String(reason);
       setError(`${t('workbench:errors.saveFile')}: ${message}`);
     } finally {
-      setSaving(false);
+      if (saveRequestIdRef.current === requestId) {
+        setSaving(false);
+      }
     }
   }, [canEditOpenedFile, draft, opened, openedContext, t]);
 
@@ -385,7 +420,7 @@ export function MobileFilesPanel({
         <button
           type="button"
           className={styles.secondaryButton}
-          disabled={!loadedContextRef.current || loading || contextBlocked}
+          disabled={!loadedContext || loading || contextBlocked}
           onClick={() => {
             const context = loadedContextRef.current;
             if (!context) return;

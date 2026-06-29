@@ -15,7 +15,10 @@ export interface MobileWorktreePanelProps {
   onWorktreesChange?: (worktrees: WorkbenchWorktree[]) => void;
   onConfirmActiveWorktreeChange?: (worktree: WorkbenchWorktree | null) => boolean;
   onActiveWorktreeChange?: (worktree: WorkbenchWorktree | null) => void;
-  onRefreshWorktrees?: (options?: { skipFileContextConfirm?: boolean }) => Promise<void> | void;
+  onRefreshWorktrees?: (options?: {
+    skipFileContextConfirm?: boolean;
+    expectedProjectId?: string;
+  }) => Promise<void> | void;
 }
 
 /**
@@ -98,7 +101,7 @@ export function MobileWorktreePanel({
       const didApplyActive = applyWorktrees(nextWorktrees, created);
       setBranchName('');
       if (didApplyActive) {
-        await onRefreshWorktrees?.();
+        await onRefreshWorktrees?.({ expectedProjectId: project.id });
       }
     } catch (reason) {
       setError(`${t('workbench:errors.createWorktree')}: ${getErrorMessage(reason)}`);
@@ -144,6 +147,7 @@ export function MobileWorktreePanel({
         if (result === 'applied') {
           await onRefreshWorktrees?.({
             skipFileContextConfirm: activeWorktreeId === worktree.id,
+            expectedProjectId: worktree.projectId,
           });
         }
       } catch (reason) {

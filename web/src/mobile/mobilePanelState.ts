@@ -46,6 +46,8 @@ export interface MobileWorktreeRefreshFlowOptions {
   applyRefresh: (plan: Pick<MobileWorktreeRemovalPlan, 'nextWorktrees' | 'nextActive'>) => void;
 }
 
+export type MobileGitActionContext = MobileFilePanelContext;
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   删除 active worktree 会离开当前 Files 草稿上下文，必须先让父级 dirty guard 决定是否允许，再调用后端删除。
@@ -153,6 +155,19 @@ export function runMobileWorktreeRefreshFlow(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   merge 成功会删除源 worktree，后续权威刷新即使失败，移动端也应立即离开已删除源 worktree。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从 destructive worktree 计划中提取应先应用到 UI 的 worktree 列表与 active worktree。
+ */
+export function getMobileWorktreeMergeAppliedState(
+  plan: MobileWorktreeRemovalPlan,
+): Pick<MobileWorktreeRemovalPlan, 'nextWorktrees' | 'nextActive'> {
+  return { nextWorktrees: plan.nextWorktrees, nextActive: plan.nextActive };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   文件面板需要用稳定 key 判断草稿、目录和异步请求是否仍属于同一个 project/worktree。
  *
  * Code Logic（这个函数做什么）:
@@ -250,6 +265,28 @@ export function isMobileFileOpenResponseCurrent(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   保存文件响应可能晚于文件切换或 worktree 切换返回，旧响应不能覆盖当前打开文件或清 dirty。
+ *
+ * Code Logic（这个函数做什么）:
+ *   同时校验请求 id、发起 context 与当前 context 的 key，以及发起保存的 path 与当前打开 path。
+ */
+export function isMobileFileSaveResponseCurrent(
+  requestId: number,
+  latestRequestId: number,
+  requestContext: MobileFilePanelContext,
+  loadedContext: MobileFilePanelContext | null,
+  requestPath: string,
+  openedPath: string | null,
+): boolean {
+  return (
+    requestId === latestRequestId &&
+    getMobileFileContextKey(requestContext) === getMobileFileContextKey(loadedContext) &&
+    requestPath === openedPath
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   根目录重载代表文件面板重新建立 context 基线，正在返回的旧 open 请求必须失效。
  *
  * Code Logic（这个函数做什么）:
@@ -268,4 +305,18 @@ export function shouldInvalidateMobileFileOpenOnDirectoryLoad(path: string): boo
  */
 export function shouldReloadMobileGitCommitsAfterAction(action: MobileGitPanelAction): boolean {
   return action !== 'merge';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Git 长操作返回时用户可能已切换项目或 worktree，旧响应不能污染当前移动端 UI。
+ *
+ * Code Logic（这个函数做什么）:
+ *   比较操作发起 context 与当前 context 的稳定 key；相同才允许回写状态。
+ */
+export function isMobileGitActionResponseCurrent(
+  requestContext: MobileGitActionContext,
+  currentContext: MobileGitActionContext | null,
+): boolean {
+  return getMobileFileContextKey(requestContext) === getMobileFileContextKey(currentContext);
 }
