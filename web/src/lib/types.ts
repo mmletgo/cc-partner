@@ -489,6 +489,22 @@ export interface WorkbenchSession {
   paneCount: number;
 }
 
+/**
+ * 工作台终端最近输出 replay DTO。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   移动端首次打开远端终端时，需要先拉取最近输出，再订阅增量事件。
+ *
+ * Code Logic（字段说明）:
+ *   buffer 是后端按 Unicode char 边界保留的最近输出；lastSeq 用于前端衔接后续 terminal-output 事件。
+ */
+export interface WorkbenchSessionReplay {
+  sessionId: string;
+  buffer: string;
+  truncated: boolean;
+  lastSeq: number;
+}
+
 /** 工作台文件节点类型：文件或文件夹。 */
 export type WorkbenchPathKind = 'file' | 'dir' | string;
 

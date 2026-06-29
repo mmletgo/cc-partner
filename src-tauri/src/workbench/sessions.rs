@@ -17,6 +17,7 @@ use crate::workbench::remote_events::{
     WorkbenchTerminalStatusPayload,
 };
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{ErrorKind, Read, Write};
@@ -31,6 +32,7 @@ const DEFAULT_ROWS: u16 = 32;
 const MIN_TERMINAL_COLS: u16 = 20;
 const MIN_TERMINAL_ROWS: u16 = 6;
 const TMUX_SESSION_ID_SUFFIX_LEN: usize = 12;
+const SESSION_REPLAY_MAX_CHARS: usize = 120_000;
 const RAW_PTY_BACKEND: &str = "pty";
 const TMUX_BACKEND: &str = "tmux";
 #[cfg(windows)]
@@ -171,6 +173,100 @@ impl TerminalUtf8Decoder {
         }
         let pending = std::mem::take(&mut self.pending);
         Some(String::from_utf8_lossy(&pending).into_owned())
+    }
+}
+
+/// 工作台终端会话 replay 快照。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     移动端首次打开终端时无法收到历史 Tauri event，需要通过 HTTP 拉取最近输出后再接增量事件。
+///
+/// Code Logic（这个结构体做什么）:
+///     以 camelCase 序列化 sessionId、最近输出 buffer、是否截断和最后 seq，供 Rust route 与前端类型对齐。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchSessionReplayDto {
+    pub session_id: String,
+    pub buffer: String,
+    pub truncated: bool,
+    pub last_seq: u64,
+}
+
+/// 工作台终端最近输出 ring buffer。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     移动端进入远端终端时需要看到最近屏幕输出，而不是只能等待新事件。
+///
+/// Code Logic（这个结构体做什么）:
+///     以字符数量为容量上限保存输出尾部，记录是否曾截断以及最新 terminal output seq。
+#[derive(Debug, Clone)]
+struct SessionReplayBuffer {
+    max_chars: usize,
+    buffer: String,
+    truncated: bool,
+    last_seq: u64,
+}
+
+impl SessionReplayBuffer {
+    /// Business Logic（为什么需要这个函数）:
+    ///     每个 Workbench session 创建或恢复时都需要初始化自己的最近输出缓存。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造空 buffer，并记录最大保留 Unicode scalar 数量。
+    fn new(max_chars: usize) -> Self {
+        Self {
+            max_chars,
+            buffer: String::new(),
+            truncated: false,
+            last_seq: 0,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     终端 reader 每收到一个非空输出 chunk，都要让移动端 replay 能补上这段历史输出。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     追加 UTF-8 文本、更新 last_seq，并在超过 max_chars 时按 char 边界保留尾部。
+    fn append(&mut self, chunk: &str, seq: u64) {
+        self.buffer.push_str(chunk);
+        self.last_seq = seq;
+        self.truncate_to_limit();
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     replay 截断不能破坏中文或 emoji，否则移动端渲染可能出现乱码或 panic。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     当字符数超过上限时，从 chars 迭代器重建最后 max_chars 个字符，避免按字节切开 UTF-8。
+    fn truncate_to_limit(&mut self) {
+        let char_count = self.buffer.chars().count();
+        if char_count <= self.max_chars {
+            return;
+        }
+
+        self.truncated = true;
+        if self.max_chars == 0 {
+            self.buffer.clear();
+            return;
+        }
+
+        let mut kept: Vec<char> = self.buffer.chars().rev().take(self.max_chars).collect();
+        kept.reverse();
+        self.buffer = kept.into_iter().collect();
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     HTTP replay route 需要返回当前 session 的一致性快照，避免暴露内部可变 buffer。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     克隆当前 buffer 状态并补入调用方传入的 session_id。
+    fn snapshot(&self, session_id: &str) -> WorkbenchSessionReplayDto {
+        WorkbenchSessionReplayDto {
+            session_id: session_id.to_string(),
+            buffer: self.buffer.clone(),
+            truncated: self.truncated,
+            last_seq: self.last_seq,
+        }
     }
 }
 
@@ -1013,9 +1109,10 @@ fn decode_utf8_chunk(bytes: &[u8], pending: &mut Vec<u8>) -> String {
 ///     工作台会话的元数据持久化在 SQLite，但多个命令仍需要按 session_id 查找并操作当前 PTY attach。
 ///
 /// Code Logic（这个结构体做什么）:
-///     用 HashMap 保存 session_id 到会话句柄的映射；外层 Arc 允许后台读写线程更新状态。
+///     用 HashMap 保存 session_id 到会话句柄和 replay buffer 的映射；外层 Arc 允许后台读写线程更新状态。
 pub struct WorkbenchSessionRegistry {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>>,
+    replay_buffers: Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
 }
 
 impl WorkbenchSessionRegistry {
@@ -1023,10 +1120,11 @@ impl WorkbenchSessionRegistry {
     ///     AppState 初始化时需要创建空的工作台会话注册表。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造空 HashMap，并包裹 Arc<Mutex<_>> 供命令和后台线程共享。
+    ///     构造空会话 HashMap 与 replay buffer HashMap，并包裹 Arc<Mutex<_>> 供命令和后台线程共享。
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            replay_buffers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1067,6 +1165,36 @@ impl WorkbenchSessionRegistry {
             .lock()
             .expect("workbench sessions 锁中毒")
             .contains_key(session_id)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     HTTP replay route 需要校验 session 是否仍在运行期 registry 中，但不应暴露私有句柄类型。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     复用 contains 的只读 HashMap 检查，作为路由层的公开语义化 helper。
+    pub fn session_exists(&self, session_id: &str) -> bool {
+        self.contains(session_id)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     移动端首次打开终端时需要取得该 session 最近输出，缺少历史时也应得到空快照。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 replay_buffers 克隆对应 session 快照；不存在时返回 lastSeq=0 的空 DTO。
+    pub fn replay(&self, session_id: &str) -> WorkbenchSessionReplayDto {
+        let buffers = self
+            .replay_buffers
+            .lock()
+            .expect("workbench replay buffers 锁中毒");
+        buffers.get(session_id).map_or_else(
+            || WorkbenchSessionReplayDto {
+                session_id: session_id.to_string(),
+                buffer: String::new(),
+                truncated: false,
+                last_seq: 0,
+            },
+            |buffer| buffer.snapshot(session_id),
+        )
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1304,9 +1432,15 @@ impl WorkbenchSessionRegistry {
             .lock()
             .expect("workbench sessions 锁中毒")
             .insert(session_id.clone(), handle.clone());
+        self.ensure_replay_buffer(&session_id);
 
         emit_status(&app, &session_id, "running", None);
-        spawn_reader_thread(app.clone(), session_id.clone(), reader);
+        spawn_reader_thread(
+            app.clone(),
+            session_id.clone(),
+            reader,
+            self.replay_buffers.clone(),
+        );
         spawn_exit_watcher(app, self.sessions.clone(), session_id.clone(), handle);
 
         Ok(row)
@@ -1508,6 +1642,10 @@ impl WorkbenchSessionRegistry {
             .expect("workbench sessions 锁中毒")
             .remove(session_id)
             .ok_or_else(|| AppError::not_found("工作台会话不存在"))?;
+        self.replay_buffers
+            .lock()
+            .expect("workbench replay buffers 锁中毒")
+            .remove(session_id);
         let mut handle = handle.lock().expect("workbench session 锁中毒");
         let was_running = handle.row.status == "running";
         match &mut handle.process {
@@ -1599,6 +1737,19 @@ impl WorkbenchSessionRegistry {
             .ok_or_else(|| AppError::not_found("工作台会话不存在"))
     }
 
+    /// Business Logic（为什么需要这个函数）:
+    ///     创建、恢复或测试插入会话时，需要确保 replay map 有对应 session 的缓存槽位。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在 replay_buffers 中按 session_id 懒插入默认容量的 SessionReplayBuffer。
+    fn ensure_replay_buffer(&self, session_id: &str) {
+        self.replay_buffers
+            .lock()
+            .expect("workbench replay buffers 锁中毒")
+            .entry(session_id.to_string())
+            .or_insert_with(|| SessionReplayBuffer::new(SESSION_REPLAY_MAX_CHARS));
+    }
+
     #[cfg(test)]
     /// Business Logic（为什么需要这个函数）:
     ///     list 过滤测试需要构造不同项目的会话，但不应启动真实 PTY 或依赖本机 Claude CLI。
@@ -1635,6 +1786,7 @@ impl WorkbenchSessionRegistry {
                     process: SessionProcess::Fake,
                 })),
             );
+        self.ensure_replay_buffer(session_id);
     }
 }
 
@@ -1653,8 +1805,13 @@ impl Default for WorkbenchSessionRegistry {
 ///     前端终端需要持续接收 PTY stdout/stderr 合并后的输出。
 ///
 /// Code Logic（这个函数做什么）:
-///     在后台线程循环读取 reader，把每个字节块转换为 UTF-8 lossless chunk 后 emit。
-fn spawn_reader_thread(app: AppHandle, session_id: String, mut reader: Box<dyn Read + Send>) {
+///     在后台线程循环读取 reader，把每个字节块转换为 UTF-8 lossless chunk 后写入 replay buffer 并 emit。
+fn spawn_reader_thread(
+    app: AppHandle,
+    session_id: String,
+    mut reader: Box<dyn Read + Send>,
+    replay_buffers: Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
+) {
     thread::spawn(move || {
         let mut buf = [0_u8; 8192];
         let mut seq: u64 = 0;
@@ -1663,7 +1820,13 @@ fn spawn_reader_thread(app: AppHandle, session_id: String, mut reader: Box<dyn R
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    emit_terminal_output(&app, &session_id, &mut seq, decoder.decode(&buf[..n]));
+                    emit_terminal_output(
+                        &app,
+                        &session_id,
+                        &mut seq,
+                        decoder.decode(&buf[..n]),
+                        &replay_buffers,
+                    );
                 }
                 Err(error) => {
                     tracing::debug!("读取工作台终端输出结束: {error}");
@@ -1672,7 +1835,7 @@ fn spawn_reader_thread(app: AppHandle, session_id: String, mut reader: Box<dyn R
             }
         }
         if let Some(chunk) = decoder.finish() {
-            emit_terminal_output(&app, &session_id, &mut seq, chunk);
+            emit_terminal_output(&app, &session_id, &mut seq, chunk, &replay_buffers);
         }
     });
 }
@@ -1681,12 +1844,26 @@ fn spawn_reader_thread(app: AppHandle, session_id: String, mut reader: Box<dyn R
 ///     终端输出事件需要统一递增 seq，且纯 pending chunk 未完成时不应发送空事件。
 ///
 /// Code Logic（这个函数做什么）:
-///     非空 chunk 才构造 `TerminalOutputEvent` 并通过 `workbench:terminal-output` emit。
-fn emit_terminal_output(app: &AppHandle, session_id: &str, seq: &mut u64, chunk: String) {
+///     非空 chunk 才递增 seq、写入 replay buffer，并构造 `TerminalOutputEvent` 通过 `workbench:terminal-output` emit。
+fn emit_terminal_output(
+    app: &AppHandle,
+    session_id: &str,
+    seq: &mut u64,
+    chunk: String,
+    replay_buffers: &Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
+) {
     if chunk.is_empty() {
         return;
     }
     *seq += 1;
+    {
+        let mut buffers = replay_buffers
+            .lock()
+            .expect("workbench replay buffers 锁中毒");
+        if let Some(buffer) = buffers.get_mut(session_id) {
+            buffer.append(&chunk, *seq);
+        }
+    }
     let event = WorkbenchTerminalOutputPayload {
         session_id: session_id.to_string(),
         chunk,
@@ -1870,6 +2047,26 @@ mod tests {
 
         assert_eq!(format!("{first}{second}"), text);
         assert_eq!(decoder.finish(), None);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     移动端首次打开远端终端时需要拉取最近输出，且历史输出超过内存上限时只能保留尾部。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用小容量 replay buffer 追加超过上限的中文和 emoji 输出，断言按 char 边界截断、truncated 与 lastSeq 正确。
+    #[test]
+    fn session_replay_buffer_keeps_recent_output_with_last_seq() {
+        let mut buffer = SessionReplayBuffer::new(3);
+
+        buffer.append("hello", 1);
+        buffer.append("世界🙂", 2);
+        buffer.append("再见", 3);
+        let snapshot = buffer.snapshot("session-1");
+
+        assert_eq!(snapshot.session_id, "session-1");
+        assert_eq!(snapshot.buffer, "🙂再见");
+        assert!(snapshot.truncated);
+        assert_eq!(snapshot.last_seq, 3);
     }
 
     /// Business Logic（为什么需要这个测试）:

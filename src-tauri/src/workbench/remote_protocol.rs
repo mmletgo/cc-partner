@@ -305,6 +305,19 @@ pub struct RemoteSessionReq {
     pub session_id: String,
 }
 
+/// 远端终端 replay 请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     移动端首次打开远端终端时，需要在订阅增量事件前按 sessionId 拉取最近输出。
+///
+/// Code Logic（这个结构体做什么）:
+///     使用 camelCase 序列化 `{sessionId}`，供 client 与 axum route 共用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteReplaySessionReq {
+    pub session_id: String,
+}
+
 /// 远端当前聚焦会话查询请求体。
 ///
 /// Business Logic（为什么需要这个结构体）:

@@ -33,10 +33,11 @@ use crate::workbench::remote_protocol::{
     RemoteDeletePathReq, RemoteFocusedSessionReq, RemoteFocusedSessionResp, RemoteGitCommitsReq,
     RemoteListDirReq, RemoteListSessionsReq, RemoteOpenFileReq, RemotePathInfoReq,
     RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteProjectReq, RemotePromptOptimizerReq,
-    RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq, RemoteResizeSessionReq,
-    RemoteSaveTextReq, RemoteSessionReq, RemoteSplitPaneReq, RemoteWorktreeReq,
-    RemoteWriteSessionInputReq,
+    RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq, RemoteReplaySessionReq,
+    RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSessionReq, RemoteSplitPaneReq,
+    RemoteWorktreeReq, RemoteWriteSessionInputReq,
 };
+use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::header;
@@ -576,6 +577,24 @@ pub async fn workbench_events(State(state): State<AppState>) -> Response<Body> {
     response
 }
 
+/// 拉取远端设备本机终端最近输出。
+///
+/// Business Logic（为什么需要这个函数）:
+///     移动端首次打开 terminal 时错过了历史事件，需要先 replay 最近输出，再接 `/api/workbench/events` 增量。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 sessionId，先确认它属于对端本机 local 项目且仍在运行期 registry 中，再返回 replay DTO。
+pub async fn replay_workbench_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteReplaySessionReq>,
+) -> Result<Json<WorkbenchSessionReplayDto>, AppError> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
+    if !state.workbench_sessions.session_exists(&req.session_id) {
+        return Err(AppError::not_found("工作台会话不存在"));
+    }
+    Ok(Json(state.workbench_sessions.replay(&req.session_id)))
+}
+
 /// 列出远端设备本机项目终端会话。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -785,7 +804,9 @@ pub async fn stream_prompt_optimizer_to_session(
 mod tests {
     use super::*;
     use crate::workbench::models::WorkbenchProjectRow;
-    use crate::workbench::remote_protocol::{RemoteListDirReq, RemoteSaveTextReq};
+    use crate::workbench::remote_protocol::{
+        RemoteListDirReq, RemoteReplaySessionReq, RemoteSaveTextReq,
+    };
 
     /// Business Logic（为什么需要这个函数）:
     ///     route guard 测试只关心项目 kind，不需要真实数据库项目。
@@ -917,6 +938,21 @@ mod tests {
         assert_eq!(req.project_id, "project-1");
         assert!(req.worktree_id.is_none());
         assert!(req.path.is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     移动端连接远端终端前需要通过 HTTP 指定 sessionId 拉取最近输出。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 camelCase JSON 反序列化 replay 请求体，断言字段进入共享请求 DTO。
+    #[test]
+    fn remote_replay_session_req_accepts_camel_case_body() {
+        let req: RemoteReplaySessionReq = serde_json::from_value(serde_json::json!({
+            "sessionId": "session-1"
+        }))
+        .unwrap();
+
+        assert_eq!(req.session_id, "session-1");
     }
 
     /// Business Logic（为什么需要这个测试）:

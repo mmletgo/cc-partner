@@ -412,6 +412,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::create_workbench_session),
         )
         .route(
+            "/api/workbench/sessions/replay",
+            post(workbench::replay_workbench_session),
+        )
+        .route(
             "/api/workbench/sessions/write",
             post(workbench::write_workbench_session_input),
         )
