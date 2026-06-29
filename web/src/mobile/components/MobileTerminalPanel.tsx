@@ -18,17 +18,13 @@ import {
   writeTerminalReplay,
 } from '@/pages/Workbench/terminalReplay';
 import { workbenchTerminalOptions, workbenchTerminalTheme } from '@/pages/Workbench/terminalOptions';
+import { prepareInitialReplayBuffer } from '../mobileTerminalReplay';
 import { selectPreferredMobileSession } from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
 
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 6;
 const DEFAULT_TERMINAL_SIZE = { cols: 80, rows: 24 };
-
-interface InitialReplayBuffer {
-  data: string;
-  writtenBuffer: string;
-}
 
 export interface MobileTerminalPanelProps {
   project: WorkbenchProject | null;
@@ -96,27 +92,6 @@ function measureMobileTerminalSize(container: HTMLElement | null): typeof DEFAUL
     terminal.dispose();
     host.remove();
   }
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   移动端首次打开终端时会同时拥有 HTTP replay 快照和 NDJSON 增量缓存，二者不能重复写入 xterm。
- *
- * Code Logic（这个函数做什么）:
- *   用桌面端 replay diff helper 判断 live buffer 是否是 replay 的延续；返回要写入 xterm 的初始内容以及后续增量比较基线。
- */
-function prepareInitialReplayBuffer(replayBuffer: string, liveBuffer: string): InitialReplayBuffer {
-  if (!liveBuffer) return { data: replayBuffer, writtenBuffer: replayBuffer };
-  if (!replayBuffer) return { data: liveBuffer, writtenBuffer: liveBuffer };
-
-  const plan = planTerminalBufferWrite(replayBuffer, liveBuffer);
-  if (plan.mode === 'append') {
-    return { data: `${replayBuffer}${plan.data}`, writtenBuffer: liveBuffer };
-  }
-  if (plan.mode === 'none') {
-    return { data: replayBuffer, writtenBuffer: replayBuffer };
-  }
-  return { data: `${replayBuffer}${liveBuffer}`, writtenBuffer: liveBuffer };
 }
 
 /**
@@ -224,14 +199,15 @@ export function MobileTerminalPanel({
    *   app tab 选中态必须同步到底层 tmux current window，避免手机 UI 与真实 tmux window 分裂。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 HTTP focus route；失败时把本地化错误写入面板错误区。
+   *   调用 HTTP focus route；成功后记录已聚焦 session，失败时清空去重基线并把本地化错误写入面板错误区。
    */
   const focusSessionById = useCallback(
     async (nextSessionId: string): Promise<void> => {
-      lastFocusedSessionIdRef.current = nextSessionId;
       try {
         await httpWorkbenchTransport.sessions.focus(nextSessionId);
+        lastFocusedSessionIdRef.current = nextSessionId;
       } catch (reason) {
+        lastFocusedSessionIdRef.current = null;
         setPanelError(
           `${t('workbench:mobile.terminalPanel.errors.focus')}: ${getErrorMessage(
             reason,
