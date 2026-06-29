@@ -1,3 +1,6 @@
+import type { WorkbenchWorktree } from '@/lib/types';
+import { selectPreferredMobileWorktree } from './mobileWorkbenchState';
+
 export interface MobileFilePanelContext {
   projectId: string;
   worktreeId: string | null;
@@ -9,6 +12,33 @@ export interface MobileFileDirtySnapshot {
 }
 
 export type MobileGitPanelAction = 'commit' | 'push' | 'merge';
+
+export interface MobileWorktreeRemovalPlan {
+  nextWorktrees: WorkbenchWorktree[];
+  nextActive: WorkbenchWorktree | null;
+  requiresActivePreflight: boolean;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   删除 active worktree 会离开当前 Files 草稿上下文，必须先让父级 dirty guard 决定是否允许，再调用后端删除。
+ *
+ * Code Logic（这个函数做什么）:
+ *   根据当前列表、active worktree id 和待删除 worktree，预先计算删除后的列表、目标 active worktree，以及是否需要 active preflight。
+ */
+export function getMobileWorktreeRemovalPlan(
+  worktrees: WorkbenchWorktree[],
+  activeWorktreeId: string | null,
+  removingWorktree: WorkbenchWorktree,
+): MobileWorktreeRemovalPlan {
+  const nextWorktrees = worktrees.filter((worktree) => worktree.id !== removingWorktree.id);
+  const requiresActivePreflight = activeWorktreeId === removingWorktree.id;
+  const nextActive = requiresActivePreflight
+    ? selectPreferredMobileWorktree(nextWorktrees)
+    : worktrees.find((worktree) => worktree.id === activeWorktreeId) ?? null;
+
+  return { nextWorktrees, nextActive, requiresActivePreflight };
+}
 
 /**
  * Business Logic（为什么需要这个函数）:

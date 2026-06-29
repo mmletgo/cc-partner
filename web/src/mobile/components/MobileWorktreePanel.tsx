@@ -3,7 +3,7 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import type { WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
-import { selectPreferredMobileWorktree } from '../mobileWorkbenchState';
+import { getMobileWorktreeRemovalPlan } from '../mobilePanelState';
 import styles from '../MobileWorkbench.module.css';
 
 export interface MobileWorktreePanelProps {
@@ -57,7 +57,7 @@ export function MobileWorktreePanel({
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   创建或删除 worktree 后，父组件需要同步列表，并在父级允许时同步 active worktree。
+   *   创建 worktree 后，父组件需要同步列表，并在父级允许时同步 active worktree。
    *
    * Code Logic（这个函数做什么）:
    *   调用父级列表回调；active 非空时复用既有 onSelect，空 active 才走 onActiveWorktreeChange，并把父级是否接受切换转换为 boolean。
@@ -71,6 +71,26 @@ export function MobileWorktreePanel({
       return onActiveWorktreeChange?.(null) !== false;
     },
     [onActiveWorktreeChange, onSelect, onWorktreesChange],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   删除 active worktree 前必须先让父级 Files dirty guard 决定是否允许离开当前草稿上下文。
+   *
+   * Code Logic（这个函数做什么）:
+   *   优先调用专门的 active worktree 变更回调；缺失时对非空目标回退到 onSelect，并把父级是否接受切换转换为 boolean。
+   */
+  const preflightActiveWorktreeChange = useCallback(
+    (nextActive: WorkbenchWorktree | null): boolean => {
+      if (onActiveWorktreeChange) {
+        return onActiveWorktreeChange(nextActive) !== false;
+      }
+      if (nextActive) {
+        return onSelect(nextActive) !== false;
+      }
+      return true;
+    },
+    [onActiveWorktreeChange, onSelect],
   );
 
   /**
@@ -109,7 +129,7 @@ export function MobileWorktreePanel({
    *   用户需要能从手机端清理已完成的功能 worktree，但主工作区不能被删除。
    *
    * Code Logic（这个函数做什么）:
-   *   删除前使用 window.confirm 二次确认；调用 worktrees.remove(force=false)，成功后从列表移除并选择主工作区或首项。
+   *   删除前使用 window.confirm 二次确认；active 删除先触发父级 dirty guard，允许后再调用 worktrees.remove(force=false)，成功后从列表移除。
    */
   const handleRemoveWorktree = useCallback(
     async (worktree: WorkbenchWorktree): Promise<void> => {
@@ -122,23 +142,30 @@ export function MobileWorktreePanel({
       setActionBusy(`remove-${worktree.id}`);
       setError(null);
       try {
-        await httpWorkbenchTransport.worktrees.remove(worktree.id, false);
-        const nextWorktrees = worktrees.filter((item) => item.id !== worktree.id);
-        const nextActive =
-          activeWorktreeId === worktree.id
-            ? selectPreferredMobileWorktree(nextWorktrees)
-            : worktrees.find((item) => item.id === activeWorktreeId) ?? null;
-        const didApplyActive = applyWorktrees(nextWorktrees, nextActive);
-        if (didApplyActive) {
-          await onRefreshWorktrees?.();
+        const removalPlan = getMobileWorktreeRemovalPlan(worktrees, activeWorktreeId, worktree);
+        if (
+          removalPlan.requiresActivePreflight &&
+          !preflightActiveWorktreeChange(removalPlan.nextActive)
+        ) {
+          return;
         }
+        await httpWorkbenchTransport.worktrees.remove(worktree.id, false);
+        onWorktreesChange?.(removalPlan.nextWorktrees);
+        await onRefreshWorktrees?.();
       } catch (reason) {
         setError(`${t('workbench:errors.removeWorktree')}: ${getErrorMessage(reason)}`);
       } finally {
         setActionBusy(null);
       }
     },
-    [activeWorktreeId, applyWorktrees, onRefreshWorktrees, t, worktrees],
+    [
+      activeWorktreeId,
+      onRefreshWorktrees,
+      onWorktreesChange,
+      preflightActiveWorktreeChange,
+      t,
+      worktrees,
+    ],
   );
 
   return (

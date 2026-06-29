@@ -5,11 +5,13 @@ import {
   shouldConfirmMobileFileDirtyContextSwitch,
   shouldSkipMobileFileContextConfirmForDiscardToken,
   shouldInvalidateMobileFileOpenOnDirectoryLoad,
+  getMobileWorktreeRemovalPlan,
   shouldReloadMobileGitCommitsAfterAction,
   shouldSkipMobileFileContextReload,
   type MobileFilePanelContext,
   type MobileFileDirtySnapshot,
 } from './mobilePanelState';
+import type { WorkbenchWorktree } from '@/lib/types';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -33,6 +35,36 @@ function assertEqual<T>(actual: T, expected: T, message: string): void {
  */
 function createContext(projectId: string, worktreeId: string | null): MobileFilePanelContext {
   return { projectId, worktreeId };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端 worktree 删除测试需要构造完整 DTO，避免测试断言依赖不完整对象。
+ *
+ * Code Logic（这个函数做什么）:
+ *   接收 worktree id 与主工作区标记，返回带干净 Git 状态的 WorkbenchWorktree。
+ */
+function createWorktree(id: string, isMain: boolean): WorkbenchWorktree {
+  return {
+    id,
+    projectId: 'project-1',
+    name: id,
+    branch: isMain ? 'main' : id,
+    baseBranch: isMain ? null : 'main',
+    path: `/repo/${id}`,
+    isMain,
+    status: {
+      branch: isMain ? 'main' : id,
+      changed: 0,
+      ahead: 0,
+      behind: 0,
+      conflicts: 0,
+      clean: true,
+      canPush: false,
+    },
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+  };
 }
 
 /**
@@ -217,6 +249,45 @@ function testMergeRefreshSkipsCommitReload(): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   删除 active worktree 前必须先让父级 Files dirty guard 决定是否允许离开当前草稿上下文。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造删除 active 功能 worktree 的计划，断言它需要 active preflight，并预先算出回落到主工作区。
+ */
+function testActiveWorktreeRemovalRequiresPreflight(): void {
+  const main = createWorktree('main', true);
+  const feature = createWorktree('feature/remove-me', false);
+
+  const plan = getMobileWorktreeRemovalPlan([main, feature], feature.id, feature);
+
+  assertEqual(plan.requiresActivePreflight, true, 'active removal should preflight guard');
+  assertEqual(plan.nextActive?.id ?? null, main.id, 'active removal should fall back to main');
+  assertEqual(
+    plan.nextWorktrees.some((worktree) => worktree.id === feature.id),
+    false,
+    'removed worktree should be absent from next list',
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   删除非 active worktree 不会离开当前 Files 草稿上下文，不能多弹一次 dirty guard。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造删除非 active 功能 worktree 的计划，断言它不需要 preflight，且 active worktree 保持不变。
+ */
+function testInactiveWorktreeRemovalSkipsPreflight(): void {
+  const main = createWorktree('main', true);
+  const feature = createWorktree('feature/remove-me', false);
+
+  const plan = getMobileWorktreeRemovalPlan([main, feature], main.id, feature);
+
+  assertEqual(plan.requiresActivePreflight, false, 'inactive removal should skip preflight');
+  assertEqual(plan.nextActive?.id ?? null, main.id, 'inactive removal should keep active');
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   context key 是文件面板 stale guard 的基础，null worktree 必须有稳定表示。
  *
  * Code Logic（这个函数做什么）:
@@ -239,6 +310,8 @@ testDiscardTokenChangeSkipsInternalContextConfirm();
 testOpenResponseRequiresLatestRequestAndCurrentContext();
 testRootDirectoryLoadInvalidatesOpenRequests();
 testMergeRefreshSkipsCommitReload();
+testActiveWorktreeRemovalRequiresPreflight();
+testInactiveWorktreeRemovalSkipsPreflight();
 testContextKeyIsStable();
 
 console.log('mobilePanelState.test.ts passed');
