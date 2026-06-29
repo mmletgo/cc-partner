@@ -796,7 +796,7 @@ pub async fn rename_workbench_session(
 ///     本机 remote shortcut 触发 Prompt 优化时，真实 Claude CLI 和 terminal 写入都必须发生在项目所在设备。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收远端 local sessionId 与远端工作目录，确认 session 属于本机 local 项目后复用本地流式优化 helper。
+///     接收远端 local sessionId 与可选远端工作目录，确认 session 属于本机 local 项目后复用本地流式优化 helper。
 pub async fn stream_prompt_optimizer_to_session(
     State(state): State<AppState>,
     Json(req): Json<RemotePromptOptimizerReq>,
@@ -806,7 +806,7 @@ pub async fn stream_prompt_optimizer_to_session(
         local_stream_optimize_prompt_to_workbench_session(
             &state,
             req.prompt,
-            Some(req.working_directory),
+            req.working_directory,
             req.target_language,
             req.session_id,
         )

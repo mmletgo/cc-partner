@@ -1518,7 +1518,7 @@ mod tests {
                 &format!("http://{addr}"),
                 RemotePromptOptimizerReq {
                     prompt: "优化这个任务".to_string(),
-                    working_directory: "/remote/repo".to_string(),
+                    working_directory: Some("/remote/repo".to_string()),
                     target_language: "zh".to_string(),
                     session_id: "inner-session".to_string(),
                 },

@@ -379,12 +379,71 @@ pub struct RemoteRenameSessionReq {
 ///     本机 Workbench 连接远端 terminal 时，Prompt 优化必须在项目所在设备运行并写入远端终端。
 ///
 /// Code Logic（这个结构体做什么）:
-///     保存原始 prompt、远端工作目录、目标语种和远端 local sessionId，字段使用 camelCase。
+///     保存原始 prompt、可选远端工作目录、目标语种和远端 local sessionId，字段使用 camelCase。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemotePromptOptimizerReq {
     pub prompt: String,
-    pub working_directory: String,
+    pub working_directory: Option<String>,
     pub target_language: String,
     pub session_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     移动端普通浏览器调用 Prompt 优化 HTTP 路由时，workingDirectory 允许传 null 表示无项目上下文。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化 camelCase 请求体，断言 JSON null 被解析为 None。
+    #[test]
+    fn remote_prompt_optimizer_req_accepts_null_working_directory() {
+        let req: RemotePromptOptimizerReq = serde_json::from_value(json!({
+            "prompt": "优化这个任务",
+            "workingDirectory": null,
+            "targetLanguage": "zh",
+            "sessionId": "session-1"
+        }))
+        .expect("null workingDirectory should be accepted");
+
+        assert!(req.working_directory.is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     HTTP optional 字段省略时也必须成立，否则 `{ workingDirectory? }` 契约不完整。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化缺少 workingDirectory 的请求体，断言字段默认为 None。
+    #[test]
+    fn remote_prompt_optimizer_req_accepts_missing_working_directory() {
+        let req: RemotePromptOptimizerReq = serde_json::from_value(json!({
+            "prompt": "优化这个任务",
+            "targetLanguage": "zh",
+            "sessionId": "session-1"
+        }))
+        .expect("missing workingDirectory should be accepted");
+
+        assert!(req.working_directory.is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     桌面远端 Workbench 仍会发送具体远端项目路径，不能因为可选契约丢失该路径。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化带字符串 workingDirectory 的请求体，断言字符串原样保留在 Some 中。
+    #[test]
+    fn remote_prompt_optimizer_req_preserves_string_working_directory() {
+        let req: RemotePromptOptimizerReq = serde_json::from_value(json!({
+            "prompt": "优化这个任务",
+            "workingDirectory": "/remote/repo",
+            "targetLanguage": "zh",
+            "sessionId": "session-1"
+        }))
+        .expect("string workingDirectory should be accepted");
+
+        assert_eq!(req.working_directory.as_deref(), Some("/remote/repo"));
+    }
 }

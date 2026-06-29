@@ -264,7 +264,7 @@ async fn remote_stream_optimize_prompt_to_workbench_session(
             &base_url,
             RemotePromptOptimizerReq {
                 prompt,
-                working_directory,
+                working_directory: Some(working_directory),
                 target_language,
                 session_id: remote_session_id,
             },
