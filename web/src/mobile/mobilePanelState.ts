@@ -3,6 +3,11 @@ export interface MobileFilePanelContext {
   worktreeId: string | null;
 }
 
+export interface MobileFileDirtySnapshot {
+  dirty: boolean;
+  context: MobileFilePanelContext | null;
+}
+
 export type MobileGitPanelAction = 'commit' | 'push' | 'merge';
 
 /**
@@ -50,6 +55,37 @@ export function shouldBlockMobileFileContextSwitch(
   const loadedKey = getMobileFileContextKey(loadedContext);
   const nextKey = getMobileFileContextKey(nextContext);
   return Boolean(dirty && loadedKey && nextKey && loadedKey !== nextKey);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Files 面板在移动端导航切到其它面板后仍可能持有未保存草稿，父级切换 project/worktree 前必须先判断是否需要确认。
+ *
+ * Code Logic（这个函数做什么）:
+ *   读取 dirty snapshot 里的 context key，与目标 context key 比较；dirty 且目标不同才返回 true。
+ */
+export function shouldConfirmMobileFileDirtyContextSwitch(
+  snapshot: MobileFileDirtySnapshot,
+  targetContext: MobileFilePanelContext | null,
+): boolean {
+  if (!snapshot.dirty) return false;
+  const dirtyKey = getMobileFileContextKey(snapshot.context);
+  const targetKey = getMobileFileContextKey(targetContext);
+  return Boolean(dirtyKey && targetKey && dirtyKey !== targetKey);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   父级已经确认丢弃 dirty 草稿后，Files 面板响应 context props 变化时不能再次打断用户。
+ *
+ * Code Logic（这个函数做什么）:
+ *   比较上一次和当前 discard token；token 变化表示父级已处理确认，返回 true 让内部 context effect 跳过 confirm。
+ */
+export function shouldSkipMobileFileContextConfirmForDiscardToken(
+  previousToken: number,
+  currentToken: number,
+): boolean {
+  return previousToken !== currentToken;
 }
 
 /**

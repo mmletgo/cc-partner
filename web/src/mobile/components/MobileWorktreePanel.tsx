@@ -11,9 +11,9 @@ export interface MobileWorktreePanelProps {
   worktrees: WorkbenchWorktree[];
   activeWorktreeId: string | null;
   busy?: boolean;
-  onSelect: (worktree: WorkbenchWorktree) => void;
+  onSelect: (worktree: WorkbenchWorktree) => boolean | void;
   onWorktreesChange?: (worktrees: WorkbenchWorktree[]) => void;
-  onActiveWorktreeChange?: (worktree: WorkbenchWorktree | null) => void;
+  onActiveWorktreeChange?: (worktree: WorkbenchWorktree | null) => boolean | void;
   onRefreshWorktrees?: () => Promise<void> | void;
 }
 
@@ -57,16 +57,18 @@ export function MobileWorktreePanel({
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   创建或删除 worktree 后，父组件需要立即同步列表和 active worktree，避免终端、文件、Git 面板继续指向已删除上下文。
+   *   创建或删除 worktree 后，父组件需要同步列表，并在父级允许时同步 active worktree。
    *
    * Code Logic（这个函数做什么）:
-   *   调用父级列表/active 回调；active 非空时复用既有 onSelect，保持原选择路径兼容。
+   *   调用父级列表回调；active 非空时复用既有 onSelect，空 active 才走 onActiveWorktreeChange，并把父级是否接受切换转换为 boolean。
    */
   const applyWorktrees = useCallback(
-    (nextWorktrees: WorkbenchWorktree[], nextActive: WorkbenchWorktree | null): void => {
+    (nextWorktrees: WorkbenchWorktree[], nextActive: WorkbenchWorktree | null): boolean => {
       onWorktreesChange?.(nextWorktrees);
-      onActiveWorktreeChange?.(nextActive);
-      if (nextActive) onSelect(nextActive);
+      if (nextActive) {
+        return onSelect(nextActive) !== false;
+      }
+      return onActiveWorktreeChange?.(null) !== false;
     },
     [onActiveWorktreeChange, onSelect, onWorktreesChange],
   );
@@ -90,9 +92,11 @@ export function MobileWorktreePanel({
         null,
       );
       const nextWorktrees = [...worktrees.filter((item) => item.id !== created.id), created];
-      applyWorktrees(nextWorktrees, created);
+      const didApplyActive = applyWorktrees(nextWorktrees, created);
       setBranchName('');
-      await onRefreshWorktrees?.();
+      if (didApplyActive) {
+        await onRefreshWorktrees?.();
+      }
     } catch (reason) {
       setError(`${t('workbench:errors.createWorktree')}: ${getErrorMessage(reason)}`);
     } finally {
@@ -124,8 +128,10 @@ export function MobileWorktreePanel({
           activeWorktreeId === worktree.id
             ? selectPreferredMobileWorktree(nextWorktrees)
             : worktrees.find((item) => item.id === activeWorktreeId) ?? null;
-        applyWorktrees(nextWorktrees, nextActive);
-        await onRefreshWorktrees?.();
+        const didApplyActive = applyWorktrees(nextWorktrees, nextActive);
+        if (didApplyActive) {
+          await onRefreshWorktrees?.();
+        }
       } catch (reason) {
         setError(`${t('workbench:errors.removeWorktree')}: ${getErrorMessage(reason)}`);
       } finally {

@@ -16,6 +16,11 @@ import {
   selectPreferredMobileWorktree,
   type MobileWorkbenchPanel,
 } from './mobileWorkbenchState';
+import {
+  shouldConfirmMobileFileDirtyContextSwitch,
+  type MobileFileDirtySnapshot,
+  type MobileFilePanelContext,
+} from './mobilePanelState';
 import styles from './MobileWorkbench.module.css';
 
 /**
@@ -30,6 +35,20 @@ function getErrorMessage(reason: unknown): string {
     return reason.message;
   }
   return String(reason);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端 Files 面板的 dirty 草稿绑定 project/worktree，父级在切换上下文前需要生成同一种 context 进行比较。
+ *
+ * Code Logic（这个函数做什么）:
+ *   接收当前目标 project/worktree；没有 project 时返回 null，否则返回 MobileFilePanelContext，worktree 缺失时使用 null。
+ */
+function createMobileFilePanelContext(
+  project: WorkbenchProject | null,
+  worktree: WorkbenchWorktree | null,
+): MobileFilePanelContext | null {
+  return project ? { projectId: project.id, worktreeId: worktree?.id ?? null } : null;
 }
 
 /**
@@ -51,6 +70,11 @@ export function MobileWorkbench(): ReactElement {
   const [activeSession, setActiveSession] = useState<WorkbenchSession | null>(null);
   const [projectsLoading, setProjectsLoading] = useState<boolean>(false);
   const [projectDetailsLoading, setProjectDetailsLoading] = useState<boolean>(false);
+  const [filesDirtySnapshot, setFilesDirtySnapshot] = useState<MobileFileDirtySnapshot>({
+    dirty: false,
+    context: null,
+  });
+  const [filesDiscardContextToken, setFilesDiscardContextToken] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
   const projectsRequestIdRef = useRef<number>(0);
   const projectDetailsRequestIdRef = useRef<number>(0);
@@ -99,6 +123,29 @@ export function MobileWorkbench(): ReactElement {
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Files 面板即使被其它移动端面板遮住，也必须在 project/worktree 切换前保护未保存草稿。
+   *
+   * Code Logic（这个函数做什么）:
+   *   使用 Files 面板上报的 dirty snapshot 与目标 context 比较；需要确认时复用既有 i18n 文案，确认后递增 discard token 让 Files 面板跳过重复确认。
+   */
+  const confirmFileContextSwitch = useCallback(
+    (targetContext: MobileFilePanelContext | null): boolean => {
+      if (!shouldConfirmMobileFileDirtyContextSwitch(filesDirtySnapshot, targetContext)) {
+        return true;
+      }
+      const shouldDiscard = window.confirm(
+        t('workbench:mobile.filesPanel.discardContextConfirm'),
+      );
+      if (!shouldDiscard) return false;
+      setFilesDirtySnapshot({ dirty: false, context: null });
+      setFilesDiscardContextToken((current) => current + 1);
+      return true;
+    },
+    [filesDirtySnapshot, t],
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -191,7 +238,7 @@ export function MobileWorkbench(): ReactElement {
    *   Worktree 创建、删除、提交、推送或合并后，移动端所有面板都要重新读取后端权威 worktree 列表。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 worktrees.list(projectId)，用 request id 防止旧项目响应覆盖；若当前 active worktree 已不存在则选择主工作区或首项。
+   *   调用 worktrees.list(projectId)，用 request id 防止旧项目响应覆盖；若当前 active worktree 已不存在则经 dirty guard 选择主工作区或首项。
    */
   const refreshWorktrees = useCallback(async (): Promise<void> => {
     if (!activeProject) return;
@@ -207,12 +254,15 @@ export function MobileWorkbench(): ReactElement {
         (current ? nextWorktrees.find((worktree) => worktree.id === current.id) : null) ??
         selectPreferredMobileWorktree(nextWorktrees);
       setWorktrees(nextWorktrees);
+      if (!confirmFileContextSwitch(createMobileFilePanelContext(activeProject, nextActive))) {
+        return;
+      }
       setActiveWorktreeWithSession(nextActive);
     } catch (reason) {
       if (worktreesRequestIdRef.current !== requestId) return;
       setError(getErrorMessage(reason));
     }
-  }, [activeProject, setActiveWorktreeWithSession]);
+  }, [activeProject, confirmFileContextSwitch, setActiveWorktreeWithSession]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -226,6 +276,13 @@ export function MobileWorkbench(): ReactElement {
       projectDetailsRequestIdRef.current += 1;
       setProjectDetailsLoading(false);
       setError(t('workbench:mobile.projectPanel.remoteUnsupported'));
+      return;
+    }
+    if (activeProject?.id === project.id) {
+      setPanel('terminal');
+      return;
+    }
+    if (!confirmFileContextSwitch(createMobileFilePanelContext(project, null))) {
       return;
     }
 
@@ -269,7 +326,7 @@ export function MobileWorkbench(): ReactElement {
         setProjectDetailsLoading(false);
       }
     }
-  }, [t]);
+  }, [activeProject?.id, confirmFileContextSwitch, t]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -290,29 +347,43 @@ export function MobileWorkbench(): ReactElement {
    *   写入 active worktree，并从当前 sessions 中选择匹配 session、running session 或首项。
    */
   const handleSelectWorktree = useCallback(
-    (worktree: WorkbenchWorktree): void => {
+    (worktree: WorkbenchWorktree): boolean => {
+      if (!confirmFileContextSwitch(createMobileFilePanelContext(activeProject, worktree))) {
+        return false;
+      }
       setActiveWorktreeWithSession(worktree);
+      return true;
     },
-    [setActiveWorktreeWithSession],
+    [activeProject, confirmFileContextSwitch, setActiveWorktreeWithSession],
   );
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   worktree 面板本地增删列表后，父组件必须同步列表并保证 active worktree 仍存在。
+   *   worktree 面板本地增删列表后，父组件必须同步列表；active 切换由受 dirty guard 保护的回调单独处理。
    *
    * Code Logic（这个函数做什么）:
-   *   写入 worktree 列表；若当前 active id 不在新列表中，选择主工作区或首项并同步 active session。
+   *   只写入 worktree 列表，避免绕过 Files dirty snapshot 直接改变 active worktree。
    */
-  const handleWorktreesChange = useCallback(
-    (nextWorktrees: WorkbenchWorktree[]): void => {
-      const current = activeWorktreeRef.current;
-      const nextActive =
-        (current ? nextWorktrees.find((worktree) => worktree.id === current.id) : null) ??
-        selectPreferredMobileWorktree(nextWorktrees);
-      setWorktrees(nextWorktrees);
-      setActiveWorktreeWithSession(nextActive);
+  const handleWorktreesChange = useCallback((nextWorktrees: WorkbenchWorktree[]): void => {
+    setWorktrees(nextWorktrees);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Worktree 面板在删除 active worktree 后可能需要把 active 上下文清到主工作区或空状态，也必须保护 Files 草稿。
+   *
+   * Code Logic（这个函数做什么）:
+   *   对目标 worktree 生成 Files context，通过父级 dirty guard 后再同步 active worktree 与 session。
+   */
+  const handleActiveWorktreeChange = useCallback(
+    (worktree: WorkbenchWorktree | null): boolean => {
+      if (!confirmFileContextSwitch(createMobileFilePanelContext(activeProject, worktree))) {
+        return false;
+      }
+      setActiveWorktreeWithSession(worktree);
+      return true;
     },
-    [setActiveWorktreeWithSession],
+    [activeProject, confirmFileContextSwitch, setActiveWorktreeWithSession],
   );
 
   /**
@@ -366,12 +437,10 @@ export function MobileWorkbench(): ReactElement {
         busy={projectDetailsLoading}
         onSelect={handleSelectWorktree}
         onWorktreesChange={handleWorktreesChange}
-        onActiveWorktreeChange={setActiveWorktreeWithSession}
+        onActiveWorktreeChange={handleActiveWorktreeChange}
         onRefreshWorktrees={refreshWorktrees}
       />
-    ) : panel === 'files' ? (
-      <MobileFilesPanel project={activeProject} worktree={activeWorktree} />
-    ) : panel === 'git' ? (
+    ) : panel === 'files' ? null : panel === 'git' ? (
       <MobileGitPanel
         project={activeProject}
         worktree={activeWorktree}
@@ -420,6 +489,14 @@ export function MobileWorkbench(): ReactElement {
       onPanelChange={setPanel}
     >
       {panelContent}
+      <div hidden={panel !== 'files'}>
+        <MobileFilesPanel
+          project={activeProject}
+          worktree={activeWorktree}
+          discardContextToken={filesDiscardContextToken}
+          onDirtyContextChange={setFilesDirtySnapshot}
+        />
+      </div>
     </MobileWorkbenchShell>
   );
 }

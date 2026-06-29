@@ -2,10 +2,13 @@ import {
   getMobileFileContextKey,
   isMobileFileOpenResponseCurrent,
   shouldBlockMobileFileContextSwitch,
+  shouldConfirmMobileFileDirtyContextSwitch,
+  shouldSkipMobileFileContextConfirmForDiscardToken,
   shouldInvalidateMobileFileOpenOnDirectoryLoad,
   shouldReloadMobileGitCommitsAfterAction,
   shouldSkipMobileFileContextReload,
   type MobileFilePanelContext,
+  type MobileFileDirtySnapshot,
 } from './mobilePanelState';
 
 /**
@@ -74,6 +77,68 @@ function testDirtyContextSwitchBlockBoundary(): void {
     shouldBlockMobileFileContextSwitch(current, next, false),
     false,
     'clean changed context should not block',
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Files 面板被隐藏但仍挂载时，父级在切换项目或 worktree 前必须能用 dirty snapshot 判断是否需要确认。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造 dirty snapshot 与不同目标上下文，断言父级切换守卫需要弹出确认。
+ */
+function testDirtySnapshotDifferentTargetRequiresParentConfirm(): void {
+  const snapshot: MobileFileDirtySnapshot = {
+    dirty: true,
+    context: createContext('project-1', 'worktree-1'),
+  };
+  const next = createContext('project-1', 'worktree-2');
+
+  assertEqual(
+    shouldConfirmMobileFileDirtyContextSwitch(snapshot, next),
+    true,
+    'dirty snapshot should require parent confirm when target context differs',
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   用户重新选择当前 project/worktree 时不能误弹确认或清空草稿，否则会破坏 Task8 的“切回原上下文保留草稿”要求。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造 dirty snapshot 与相同目标上下文，断言父级切换守卫不需要确认。
+ */
+function testDirtySnapshotSameTargetSkipsParentConfirm(): void {
+  const context = createContext('project-1', 'worktree-1');
+  const snapshot: MobileFileDirtySnapshot = {
+    dirty: true,
+    context,
+  };
+
+  assertEqual(
+    shouldConfirmMobileFileDirtyContextSwitch(snapshot, context),
+    false,
+    'dirty snapshot should not require parent confirm when target context is unchanged',
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   父级已经确认丢弃 dirty 草稿后，Files 面板响应 props context 变化时不能再次弹出同一条确认。
+ *
+ * Code Logic（这个函数做什么）:
+ *   比较上一次与当前 discard token，断言 token 变化时内部 context confirm 应被跳过，token 不变时不跳过。
+ */
+function testDiscardTokenChangeSkipsInternalContextConfirm(): void {
+  assertEqual(
+    shouldSkipMobileFileContextConfirmForDiscardToken(1, 2),
+    true,
+    'changed discard token should skip internal context confirm',
+  );
+  assertEqual(
+    shouldSkipMobileFileContextConfirmForDiscardToken(2, 2),
+    false,
+    'unchanged discard token should keep normal internal confirm behavior',
   );
 }
 
@@ -168,6 +233,9 @@ function testContextKeyIsStable(): void {
 
 testReturningToLoadedContextSkipsReload();
 testDirtyContextSwitchBlockBoundary();
+testDirtySnapshotDifferentTargetRequiresParentConfirm();
+testDirtySnapshotSameTargetSkipsParentConfirm();
+testDiscardTokenChangeSkipsInternalContextConfirm();
 testOpenResponseRequiresLatestRequestAndCurrentContext();
 testRootDirectoryLoadInvalidatesOpenRequests();
 testMergeRefreshSkipsCommitReload();
