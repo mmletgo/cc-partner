@@ -11,6 +11,7 @@
 import type {
   WorkbenchFileNode,
   WorkbenchGitCommit,
+  WorkbenchMergeResult,
   WorkbenchOpenFile,
   WorkbenchPathInfo,
   WorkbenchProject,
@@ -117,6 +118,30 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
   worktrees: {
     list: (projectId) =>
       postJson<WorkbenchWorktree[]>('/api/workbench/worktrees/list', { projectId }),
+    create: (projectId, branchName, baseBranch) =>
+      postJson<WorkbenchWorktree>('/api/workbench/worktrees/create', {
+        projectId,
+        branchName,
+        baseBranch: baseBranch ?? null,
+      }),
+    commit: (worktreeId, message) =>
+      postJson<WorkbenchWorktree>('/api/workbench/worktrees/commit', {
+        worktreeId,
+        message: message ?? null,
+      }),
+    push: (worktreeId) =>
+      postJson<WorkbenchWorktree>('/api/workbench/worktrees/push', {
+        worktreeId,
+      }),
+    merge: (worktreeId) =>
+      postJson<WorkbenchMergeResult>('/api/workbench/worktrees/merge', {
+        worktreeId,
+      }),
+    remove: (worktreeId, force = false) =>
+      postJson<{ ok: boolean; worktreeId: string }>('/api/workbench/worktrees/remove', {
+        worktreeId,
+        force,
+      }),
   },
   sessions: {
     list: (projectId) =>
@@ -205,5 +230,17 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
         worktreeId: worktreeId ?? null,
         limit,
       }),
+  },
+  prompt: {
+    streamToTerminal: (prompt, options) =>
+      postJson<{ ok: boolean; sessionId: string }>(
+        '/api/workbench/prompt-optimizer/stream-to-session',
+        {
+          prompt,
+          workingDirectory: options.workingDirectory,
+          targetLanguage: options.targetLanguage,
+          sessionId: options.sessionId,
+        },
+      ),
   },
 };

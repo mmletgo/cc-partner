@@ -116,6 +116,72 @@
         "closeWindow": "关闭窗口失败"
       }
     },
+    "filesPanel": {
+      "title": "文件",
+      "root": "根目录",
+      "noProject": "先选择项目",
+      "empty": "当前目录为空",
+      "noFile": "选择一个文件查看内容",
+      "up": "上一级",
+      "save": "保存",
+      "saving": "保存中",
+      "truncated": "文件内容已截断显示",
+      "listAriaLabel": "移动端文件列表",
+      "editorAriaLabel": "移动端文本编辑器",
+      "discardContextConfirm": "当前文件有未保存改动。是否丢弃改动并切换到新的项目或 worktree？",
+      "discardFileConfirm": "当前文件有未保存改动。是否丢弃改动？",
+      "contextBlocked": "已保留未保存内容。保存或放弃当前草稿后再加载当前 worktree。",
+      "discardAndLoad": "放弃并加载当前 worktree",
+      "readonlyUnsupported": "{{type}} 文件暂不支持移动端编辑",
+      "imageSummary": "{{mime}} · {{width}} × {{height}}",
+      "csvSummary": "CSV 只读预览",
+      "sqliteSummary": "SQLite 只读预览：{{table}} · {{count}} 张表",
+      "size": {
+        "bytes": "{{value}} B",
+        "kb": "{{value}} KB",
+        "mb": "{{value}} MB"
+      }
+    },
+    "gitPanel": {
+      "title": "Git",
+      "noProject": "先选择项目",
+      "noWorktree": "未选择 worktree",
+      "statusAriaLabel": "当前 worktree Git 状态",
+      "commitsAriaLabel": "Git 提交列表",
+      "status": "状态",
+      "branch": "分支",
+      "aheadBehind": "同步",
+      "aheadBehindValue": "领先 {{ahead}} / 落后 {{behind}}",
+      "committing": "提交中",
+      "pushing": "推送中",
+      "merging": "合并中",
+      "commitMeta": "{{author}} · {{date}}"
+    },
+    "worktreePanel": {
+      "title": "Worktrees",
+      "noProject": "先选择项目",
+      "branchLabel": "新分支名",
+      "branchPlaceholder": "feature/mobile-task",
+      "creating": "创建中",
+      "removing": "移除中",
+      "removeConfirm": "确定移除 worktree“{{name}}”？请先确认不再需要该工作区。"
+    },
+    "promptPanel": {
+      "title": "Prompt",
+      "noWorktree": "先选择 worktree",
+      "noSession": "先选择或创建终端窗口",
+      "promptLabel": "原始 Prompt",
+      "promptPlaceholder": "输入需要优化并写入当前终端的 Prompt",
+      "languageLabel": "目标语言",
+      "languages": {
+        "zh": "中文",
+        "en": "English"
+      },
+      "send": "写入当前终端",
+      "sending": "写入中",
+      "sent": "已开始写入当前终端",
+      "error": "Prompt 优化失败"
+    },
     "status": {
       "project": "项目",
       "worktree": "worktree",

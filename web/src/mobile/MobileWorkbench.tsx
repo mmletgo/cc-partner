@@ -3,6 +3,9 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import { MobileFilesPanel } from './components/MobileFilesPanel';
+import { MobileGitPanel } from './components/MobileGitPanel';
+import { MobilePromptPanel } from './components/MobilePromptPanel';
 import { MobileTerminalPanel } from './components/MobileTerminalPanel';
 import { MobileProjectPanel } from './components/MobileProjectPanel';
 import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
@@ -51,7 +54,10 @@ export function MobileWorkbench(): ReactElement {
   const [error, setError] = useState<string | null>(null);
   const projectsRequestIdRef = useRef<number>(0);
   const projectDetailsRequestIdRef = useRef<number>(0);
+  const worktreesRequestIdRef = useRef<number>(0);
   const sessionsRequestIdRef = useRef<number>(0);
+  const activeWorktreeRef = useRef<WorkbenchWorktree | null>(null);
+  const sessionsRef = useRef<WorkbenchSession[]>([]);
   const { t } = useTranslation(['workbench']);
 
   const panelPlaceholders: Record<MobileWorkbenchPanel, { title: string; label: string }> = {
@@ -85,6 +91,39 @@ export function MobileWorkbench(): ReactElement {
     },
   };
   const placeholder = panelPlaceholders[panel];
+
+  useEffect(() => {
+    activeWorktreeRef.current = activeWorktree;
+  }, [activeWorktree]);
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   移动端 worktree 变化会影响状态栏、终端、文件和 Git 面板，必须同步切换到同一 worktree 下的优先 session。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写入 active worktree ref/state，并基于最新 sessions ref 选择匹配 terminal session。
+   */
+  const setActiveWorktreeWithSession = useCallback((worktree: WorkbenchWorktree | null): void => {
+    activeWorktreeRef.current = worktree;
+    setActiveWorktree(worktree);
+    setActiveSession(selectPreferredMobileSession(sessionsRef.current, worktree?.id ?? null));
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   终端面板更新 session 列表后，父组件要同步 ref，供 worktree 切换时选择最新 session。
+   *
+   * Code Logic（这个函数做什么）:
+   *   同步 sessions ref 和 React state，不改变 active session。
+   */
+  const handleSessionsChange = useCallback((nextSessions: WorkbenchSession[]): void => {
+    sessionsRef.current = nextSessions;
+    setSessions(nextSessions);
+  }, []);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -130,6 +169,7 @@ export function MobileWorkbench(): ReactElement {
     try {
       const nextSessions = await httpWorkbenchTransport.sessions.list(projectId);
       if (sessionsRequestIdRef.current !== requestId) return;
+      sessionsRef.current = nextSessions;
       setSessions(nextSessions);
       setActiveSession((current) => {
         const currentSession = current
@@ -148,6 +188,34 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   Worktree 创建、删除、提交、推送或合并后，移动端所有面板都要重新读取后端权威 worktree 列表。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 worktrees.list(projectId)，用 request id 防止旧项目响应覆盖；若当前 active worktree 已不存在则选择主工作区或首项。
+   */
+  const refreshWorktrees = useCallback(async (): Promise<void> => {
+    if (!activeProject) return;
+    const projectId = activeProject.id;
+    const requestId = worktreesRequestIdRef.current + 1;
+    worktreesRequestIdRef.current = requestId;
+
+    try {
+      const nextWorktrees = await httpWorkbenchTransport.worktrees.list(projectId);
+      if (worktreesRequestIdRef.current !== requestId) return;
+      const current = activeWorktreeRef.current;
+      const nextActive =
+        (current ? nextWorktrees.find((worktree) => worktree.id === current.id) : null) ??
+        selectPreferredMobileWorktree(nextWorktrees);
+      setWorktrees(nextWorktrees);
+      setActiveWorktreeWithSession(nextActive);
+    } catch (reason) {
+      if (worktreesRequestIdRef.current !== requestId) return;
+      setError(getErrorMessage(reason));
+    }
+  }, [activeProject, setActiveWorktreeWithSession]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   用户选择本机项目后，移动端需要加载该项目的 worktree 和 terminal window；远端快捷方式当前只能提示不可用。
    *
    * Code Logic（这个函数做什么）:
@@ -163,6 +231,7 @@ export function MobileWorkbench(): ReactElement {
 
     const requestId = projectDetailsRequestIdRef.current + 1;
     projectDetailsRequestIdRef.current = requestId;
+    worktreesRequestIdRef.current += 1;
     sessionsRequestIdRef.current += 1;
     setProjectDetailsLoading(true);
     setError(null);
@@ -186,7 +255,9 @@ export function MobileWorkbench(): ReactElement {
       );
 
       setWorktrees(nextWorktrees);
+      activeWorktreeRef.current = nextActiveWorktree;
       setActiveWorktree(nextActiveWorktree);
+      sessionsRef.current = nextSessions;
       setSessions(nextSessions);
       setActiveSession(nextActiveSession);
       setPanel('terminal');
@@ -220,10 +291,50 @@ export function MobileWorkbench(): ReactElement {
    */
   const handleSelectWorktree = useCallback(
     (worktree: WorkbenchWorktree): void => {
-      setActiveWorktree(worktree);
-      setActiveSession(selectPreferredMobileSession(sessions, worktree.id));
+      setActiveWorktreeWithSession(worktree);
     },
-    [sessions],
+    [setActiveWorktreeWithSession],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   worktree 面板本地增删列表后，父组件必须同步列表并保证 active worktree 仍存在。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写入 worktree 列表；若当前 active id 不在新列表中，选择主工作区或首项并同步 active session。
+   */
+  const handleWorktreesChange = useCallback(
+    (nextWorktrees: WorkbenchWorktree[]): void => {
+      const current = activeWorktreeRef.current;
+      const nextActive =
+        (current ? nextWorktrees.find((worktree) => worktree.id === current.id) : null) ??
+        selectPreferredMobileWorktree(nextWorktrees);
+      setWorktrees(nextWorktrees);
+      setActiveWorktreeWithSession(nextActive);
+    },
+    [setActiveWorktreeWithSession],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Git 操作返回新的 worktree DTO 后，移动端需要更新列表和当前 active 状态，而不必等待下一轮全量刷新。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用返回的 worktree 替换同 id 项；若它是当前 active worktree，同时更新 active worktree ref/state。
+   */
+  const handleWorktreeChange = useCallback(
+    (updatedWorktree: WorkbenchWorktree): void => {
+      setWorktrees((current) =>
+        current.map((worktree) =>
+          worktree.id === updatedWorktree.id ? updatedWorktree : worktree,
+        ),
+      );
+      if (activeWorktreeRef.current?.id === updatedWorktree.id) {
+        activeWorktreeRef.current = updatedWorktree;
+        setActiveWorktree(updatedWorktree);
+      }
+    },
+    [],
   );
 
   useEffect(() => {
@@ -232,6 +343,7 @@ export function MobileWorkbench(): ReactElement {
     return () => {
       projectsRequestIdRef.current += 1;
       projectDetailsRequestIdRef.current += 1;
+      worktreesRequestIdRef.current += 1;
       sessionsRequestIdRef.current += 1;
     };
   }, [loadProjects]);
@@ -248,10 +360,26 @@ export function MobileWorkbench(): ReactElement {
       />
     ) : panel === 'worktrees' ? (
       <MobileWorktreePanel
+        project={activeProject}
         worktrees={worktrees}
         activeWorktreeId={activeWorktree?.id ?? null}
+        busy={projectDetailsLoading}
         onSelect={handleSelectWorktree}
+        onWorktreesChange={handleWorktreesChange}
+        onActiveWorktreeChange={setActiveWorktreeWithSession}
+        onRefreshWorktrees={refreshWorktrees}
       />
+    ) : panel === 'files' ? (
+      <MobileFilesPanel project={activeProject} worktree={activeWorktree} />
+    ) : panel === 'git' ? (
+      <MobileGitPanel
+        project={activeProject}
+        worktree={activeWorktree}
+        onWorktreeChange={handleWorktreeChange}
+        onRefreshWorktrees={refreshWorktrees}
+      />
+    ) : panel === 'prompt' ? (
+      <MobilePromptPanel worktree={activeWorktree} session={activeSession} />
     ) : panel === 'terminal' ? (
       <MobileTerminalPanel
         project={activeProject}
@@ -259,7 +387,7 @@ export function MobileWorkbench(): ReactElement {
         sessions={sessions}
         activeSession={activeSession}
         busy={projectDetailsLoading}
-        onSessionsChange={setSessions}
+        onSessionsChange={handleSessionsChange}
         onActiveSessionChange={setActiveSession}
         onRefreshSessions={refreshSessions}
       />

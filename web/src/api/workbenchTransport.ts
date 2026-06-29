@@ -12,9 +12,11 @@
 
 import { workbenchApi } from './workbench';
 import type { WorkbenchPaneSplitDirection } from './workbench';
+import { promptOptimizerApi } from './promptOptimizer';
 import type {
   WorkbenchFileNode,
   WorkbenchGitCommit,
+  WorkbenchMergeResult,
   WorkbenchOpenFile,
   WorkbenchPathInfo,
   WorkbenchProject,
@@ -22,6 +24,7 @@ import type {
   WorkbenchSession,
   WorkbenchSessionReplay,
   WorkbenchWorktree,
+  PromptOptimizerFillLanguage,
 } from '@/lib/types';
 
 /**
@@ -54,6 +57,15 @@ export interface WorkbenchTransport {
   };
   worktrees: {
     list: (projectId: string) => Promise<WorkbenchWorktree[]>;
+    create: (
+      projectId: string,
+      branchName: string,
+      baseBranch?: string | null,
+    ) => Promise<WorkbenchWorktree>;
+    commit: (worktreeId: string, message?: string | null) => Promise<WorkbenchWorktree>;
+    push: (worktreeId: string) => Promise<WorkbenchWorktree>;
+    merge: (worktreeId: string) => Promise<WorkbenchMergeResult>;
+    remove: (worktreeId: string, force?: boolean) => Promise<{ ok: boolean; worktreeId: string }>;
   };
   sessions: {
     list: (projectId?: string | null) => Promise<WorkbenchSession[]>;
@@ -117,6 +129,16 @@ export interface WorkbenchTransport {
       limit?: number,
     ) => Promise<WorkbenchGitCommit[]>;
   };
+  prompt: {
+    streamToTerminal: (
+      prompt: string,
+      options: {
+        workingDirectory: string;
+        targetLanguage: PromptOptimizerFillLanguage;
+        sessionId: string;
+      },
+    ) => Promise<{ ok: boolean; sessionId: string }>;
+  };
 }
 
 /**
@@ -151,6 +173,12 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
   },
   worktrees: {
     list: (projectId) => workbenchApi.worktrees.list(projectId),
+    create: (projectId, branchName, baseBranch) =>
+      workbenchApi.worktrees.create(projectId, branchName, baseBranch),
+    commit: (worktreeId, message) => workbenchApi.worktrees.commit(worktreeId, message),
+    push: (worktreeId) => workbenchApi.worktrees.push(worktreeId),
+    merge: (worktreeId) => workbenchApi.worktrees.merge(worktreeId),
+    remove: (worktreeId, force) => workbenchApi.worktrees.remove(worktreeId, force),
   },
   sessions: {
     list: (projectId) => workbenchApi.sessions.list(projectId ?? undefined),
@@ -176,5 +204,13 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
   git: {
     listCommits: (projectId, worktreeId, limit) =>
       workbenchApi.git.listCommits(projectId, worktreeId, limit),
+  },
+  prompt: {
+    streamToTerminal: (prompt, options) =>
+      promptOptimizerApi.streamToTerminal(prompt, {
+        workingDirectory: options.workingDirectory,
+        targetLanguage: options.targetLanguage,
+        sessionId: options.sessionId,
+      }),
   },
 };

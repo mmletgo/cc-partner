@@ -119,6 +119,72 @@
         "closeWindow": "Failed to close window"
       }
     },
+    "filesPanel": {
+      "title": "Files",
+      "root": "Root",
+      "noProject": "Select a project first",
+      "empty": "This folder is empty",
+      "noFile": "Select a file to view it",
+      "up": "Up",
+      "save": "Save",
+      "saving": "Saving",
+      "truncated": "File content is truncated",
+      "listAriaLabel": "Mobile file list",
+      "editorAriaLabel": "Mobile text editor",
+      "discardContextConfirm": "The current file has unsaved changes. Discard them and switch to the new project or worktree?",
+      "discardFileConfirm": "The current file has unsaved changes. Discard them?",
+      "contextBlocked": "Unsaved content is kept. Save or discard this draft before loading the current worktree.",
+      "discardAndLoad": "Discard and load current worktree",
+      "readonlyUnsupported": "{{type}} files are not editable on mobile yet",
+      "imageSummary": "{{mime}} · {{width}} × {{height}}",
+      "csvSummary": "CSV read-only preview",
+      "sqliteSummary": "SQLite read-only preview: {{table}} · {{count}} tables",
+      "size": {
+        "bytes": "{{value}} B",
+        "kb": "{{value}} KB",
+        "mb": "{{value}} MB"
+      }
+    },
+    "gitPanel": {
+      "title": "Git",
+      "noProject": "Select a project first",
+      "noWorktree": "No worktree selected",
+      "statusAriaLabel": "Current worktree Git status",
+      "commitsAriaLabel": "Git commit list",
+      "status": "Status",
+      "branch": "Branch",
+      "aheadBehind": "Sync",
+      "aheadBehindValue": "Ahead {{ahead}} / behind {{behind}}",
+      "committing": "Committing",
+      "pushing": "Pushing",
+      "merging": "Merging",
+      "commitMeta": "{{author}} · {{date}}"
+    },
+    "worktreePanel": {
+      "title": "Worktrees",
+      "noProject": "Select a project first",
+      "branchLabel": "New branch name",
+      "branchPlaceholder": "feature/mobile-task",
+      "creating": "Creating",
+      "removing": "Removing",
+      "removeConfirm": "Remove worktree “{{name}}”? Make sure this workspace is no longer needed."
+    },
+    "promptPanel": {
+      "title": "Prompt",
+      "noWorktree": "Select a worktree first",
+      "noSession": "Select or create a terminal window first",
+      "promptLabel": "Original prompt",
+      "promptPlaceholder": "Enter the prompt to optimize and write into the current terminal",
+      "languageLabel": "Target language",
+      "languages": {
+        "zh": "中文",
+        "en": "English"
+      },
+      "send": "Write to current terminal",
+      "sending": "Writing",
+      "sent": "Started writing to the current terminal",
+      "error": "Prompt optimization failed"
+    },
     "status": {
       "project": "Project",
       "worktree": "worktree",
