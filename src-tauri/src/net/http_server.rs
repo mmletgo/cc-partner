@@ -9,7 +9,7 @@
 //!     - `start_http_server`：构造 axum Router（with_state(AppState)，挂载全部 /api 路由），
 //!       TcpListener::bind(("0.0.0.0", 0)) 绑定动态端口，取 local_addr 实际端口回填
 //!       AppState.actual_http_port（AtomicU16），tokio::spawn(axum::serve)。
-//!     - `/mobile` fallback：通过 Tauri asset resolver 读取 frontendDist 嵌入资源，非 /mobile 未知路径仍返回 404。
+//!     - `/mobile` fallback：通过 Tauri asset resolver 读取 frontendDist 嵌入资源，并精确服务 `/assets/*` 构建资源。
 //!     - body limit 覆盖文件传输 chunk 和 Workbench 远端文本保存。
 
 use crate::net::routes::{
@@ -31,15 +31,15 @@ use tower::service_fn;
 /// axum body 大小上限（字节）。32MB，容纳 M5 chunk（960KB）+ Workbench 远端文本保存（5MB 高转义 JSON）+ 开销。
 const BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
-/// 判断请求路径是否属于移动端 SPA 命名空间。
+/// 判断请求路径是否属于移动端静态入口命名空间。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     手机端入口只应接管 `/mobile` 与其子路径；P2P API、桌面 Workbench 等其它路径必须维持原路由语义。
+///     手机端入口只应接管 `/mobile` shell 与 Vite 生成的 `/assets/*` 资源；P2P API、桌面 Workbench 等其它路径必须维持原路由语义。
 ///
 /// Code Logic（这个函数做什么）:
-///     对 path 做精确前缀判断：`/mobile` 和 `/mobile/...` 返回 true，其它路径返回 false。
+///     对 path 做精确前缀判断：`/mobile`、`/mobile/...` 和 `/assets/...` 返回 true，其它路径返回 false。
 fn is_mobile_spa_path(path: &str) -> bool {
-    path == "/mobile" || path.starts_with("/mobile/")
+    path == "/mobile" || path.starts_with("/mobile/") || path.starts_with("/assets/")
 }
 
 /// axum fallback service：按 `/mobile` SPA 规则返回 Tauri 静态资源或 404。
@@ -49,8 +49,8 @@ fn is_mobile_spa_path(path: &str) -> bool {
 ///     `mobile.html`，但未知非移动端路径不能被错误接管。
 ///
 /// Code Logic（这个函数做什么）:
-///     非 `/mobile` 路径直接 404；`/mobile`/`/mobile/` 返回 shell；`/mobile/<rest>` 优先读取静态资源，
-///     资源缺失时回退 shell；shell 缺失时返回纯文本 404。
+///     非移动端静态路径直接 404；`/mobile`/`/mobile/` 返回 shell；`/assets/*` 只按 exact asset key 读取，
+///     资源缺失时直接 404；`/mobile/<rest>` 保留 SPA 子路由回退 shell，shell 缺失时返回纯文本 404。
 async fn serve_mobile_spa(
     state: AppState,
     req: Request<Body>,
@@ -71,8 +71,30 @@ async fn serve_mobile_spa(
         if let Some(response) = mobile_asset_response(&state, "mobile.html").await {
             return Ok(response);
         }
+    } else if path.starts_with("/assets/") {
+        if let Some(response) = mobile_asset_response(&state, path).await {
+            return Ok(response);
+        }
+
+        let mut response = Response::new(Body::from("Asset not found"));
+        *response.status_mut() = StatusCode::NOT_FOUND;
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        return Ok(response);
     } else if let Some(asset_path) = path.strip_prefix("/mobile/") {
         if let Some(response) = mobile_asset_response(&state, asset_path).await {
+            return Ok(response);
+        }
+
+        if asset_path.starts_with("assets/") {
+            let mut response = Response::new(Body::from("Asset not found"));
+            *response.status_mut() = StatusCode::NOT_FOUND;
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
             return Ok(response);
         }
 
@@ -93,19 +115,30 @@ async fn serve_mobile_spa(
 /// 将 `/mobile` 请求路径规范化为 Tauri frontendDist asset key。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     `/mobile` 是局域网 HTTP 访问前缀，打包后的真实静态资源 key 位于 frontendDist 根目录；
-///     后端必须先剥离该前缀，才能从 Tauri 嵌入资源读取 `mobile.html` 与 `assets/*`。
+///     `/mobile` 是局域网 HTTP shell 前缀，Vite 多入口产物会引用 frontendDist 根下的 `/assets/*`；
+///     后端必须把这两种 HTTP 路径规范化为真实 Tauri asset key。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收完整 `/mobile/...` 或已剥离的相对路径；用 `Component` 拒绝空路径、绝对路径、父目录和其它
-///     非普通路径组件；返回用 `/` 拼接的 asset key。
+///     接收完整 `/mobile/...`、`/assets/...` 或已剥离的相对路径；用 `Component` 拒绝空路径、绝对路径、
+///     父目录和其它非普通路径组件；返回用 `/` 拼接的 asset key。
 fn mobile_asset_key(path: &str) -> Option<String> {
     let logical_path = match path {
-        "/mobile" | "/mobile/" => "mobile.html",
-        _ if path.starts_with('/') && !path.starts_with("/mobile/") => return None,
-        _ => path.strip_prefix("/mobile/").unwrap_or(path),
+        "/mobile" | "/mobile/" => "mobile.html".to_string(),
+        _ if path.starts_with("/mobile/") => path
+            .strip_prefix("/mobile/")
+            .unwrap_or_default()
+            .to_string(),
+        _ if path.starts_with("/assets/") => {
+            let asset_path = path.strip_prefix("/assets/").unwrap_or_default();
+            if asset_path.is_empty() {
+                return None;
+            }
+            format!("assets/{asset_path}")
+        }
+        _ if path.starts_with('/') => return None,
+        _ => path.to_string(),
     };
-    let requested_path = Path::new(logical_path);
+    let requested_path = Path::new(&logical_path);
 
     if logical_path.is_empty() || requested_path.is_absolute() {
         return None;
@@ -493,6 +526,8 @@ mod tests {
         assert!(is_mobile_spa_path("/mobile"));
         assert!(is_mobile_spa_path("/mobile/"));
         assert!(is_mobile_spa_path("/mobile/assets/index.js"));
+        assert!(is_mobile_spa_path("/assets/mobile.js"));
+        assert!(is_mobile_spa_path("/assets/index.css"));
 
         assert!(!is_mobile_spa_path("/api/workbench/events"));
         assert!(!is_mobile_spa_path("/api/mobile/access-info"));
@@ -539,6 +574,14 @@ mod tests {
         assert_eq!(
             mobile_asset_key("/mobile/assets/index.js").as_deref(),
             Some("assets/index.js")
+        );
+        assert_eq!(
+            mobile_asset_key("/assets/mobile.js").as_deref(),
+            Some("assets/mobile.js")
+        );
+        assert_eq!(
+            mobile_asset_key("/assets/index.css").as_deref(),
+            Some("assets/index.css")
         );
         assert_eq!(
             mobile_asset_key("assets/index.css").as_deref(),

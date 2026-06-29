@@ -193,14 +193,10 @@
 
 .panel {
   min-height: calc(100dvh - var(--space-24) - var(--space-12));
-  padding: var(--space-4);
+  padding: var(--space-2) 0 0;
   display: grid;
   align-content: start;
   gap: var(--space-4);
-  background: var(--surface);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-xs);
 }
 
 .panelHeader {
@@ -278,6 +274,6 @@
 
   .panel {
     min-height: calc(100dvh - var(--space-20) - var(--space-8));
-    padding: var(--space-5);
+    padding: var(--space-2) 0 0;
   }
 }

@@ -306,3 +306,16 @@ export const BellIcon = ({ size, ...rest }: IconProps) => (
     <path d="M6.8 13.2a1.3 1.3 0 0 0 2.4 0" />
   </svg>
 );
+
+/**
+ * Business Logic（为什么需要）:
+ *   移动端 Workbench 顶部按钮需要统一的菜单图标，避免组件内硬编码字符。
+ *
+ * Code Logic（做什么）:
+ *   渲染三条横线的 16x16 stroke SVG，并继承通用 icon 尺寸与描边规范。
+ */
+export const MenuIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="M3 4h10M3 8h10M3 12h10" />
+  </svg>
+);

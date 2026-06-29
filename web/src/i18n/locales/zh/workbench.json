@@ -76,6 +76,62 @@
   "noProjectHint": "添加或选择一个项目文件夹后开始工作",
   "newSession": "新窗口",
   "projectContextLabel": "项目",
+  "mobile": {
+    "topTitle": "Workbench",
+    "kicker": "Mobile Workbench",
+    "openNavigation": "打开导航",
+    "closeNavigation": "关闭导航",
+    "navAriaLabel": "移动端工作台面板",
+    "drawerAriaLabel": "移动端导航",
+    "railAriaLabel": "宽屏导航",
+    "statusAriaLabel": "当前工作台状态",
+    "noProject": "未选择项目",
+    "projectFallback": "项目",
+    "status": {
+      "project": "项目",
+      "worktree": "worktree",
+      "session": "session"
+    },
+    "nav": {
+      "projects": "项目",
+      "terminal": "终端",
+      "files": "文件",
+      "git": "Git",
+      "worktrees": "Worktrees",
+      "prompt": "Prompt",
+      "settings": "设置"
+    },
+    "placeholders": {
+      "projects": {
+        "title": "项目",
+        "label": "选择项目"
+      },
+      "terminal": {
+        "title": "终端",
+        "label": "等待会话"
+      },
+      "files": {
+        "title": "文件",
+        "label": "等待项目"
+      },
+      "git": {
+        "title": "Git",
+        "label": "等待仓库"
+      },
+      "worktrees": {
+        "title": "Worktrees",
+        "label": "等待项目"
+      },
+      "prompt": {
+        "title": "Prompt",
+        "label": "等待输入"
+      },
+      "settings": {
+        "title": "设置",
+        "label": "移动端"
+      }
+    }
+  },
   "worktrees": {
     "label": "Worktree 管理",
     "empty": "暂无 worktree",

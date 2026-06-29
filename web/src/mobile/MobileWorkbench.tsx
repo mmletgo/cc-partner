@@ -1,18 +1,9 @@
 import { useState } from 'react';
 import type { ReactElement } from 'react';
+import { useTranslation } from 'react-i18next';
 import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
 import type { MobileWorkbenchPanel } from './mobileWorkbenchState';
 import styles from './MobileWorkbench.module.css';
-
-const PANEL_PLACEHOLDERS: Record<MobileWorkbenchPanel, { title: string; label: string }> = {
-  projects: { title: '项目', label: '选择项目' },
-  terminal: { title: '终端', label: '等待会话' },
-  files: { title: '文件', label: '等待项目' },
-  git: { title: 'Git', label: '等待仓库' },
-  worktrees: { title: 'Worktrees', label: '等待项目' },
-  prompt: { title: 'Prompt', label: '等待输入' },
-  settings: { title: '设置', label: '移动端' },
-};
 
 /**
  * MobileWorkbench（移动端工作台占位页面）
@@ -25,11 +16,42 @@ const PANEL_PLACEHOLDERS: Record<MobileWorkbenchPanel, { title: string; label: s
  */
 export function MobileWorkbench(): ReactElement {
   const [panel, setPanel] = useState<MobileWorkbenchPanel>('projects');
-  const [activeProject] = useState<string | null>(null);
-  const [activeWorktree] = useState<string | null>(null);
-  const [activeSession] = useState<string | null>(null);
+  const { t } = useTranslation(['workbench']);
+  const activeProject: string | null = null;
+  const activeWorktree: string | null = null;
+  const activeSession: string | null = null;
 
-  const placeholder = PANEL_PLACEHOLDERS[panel];
+  const panelPlaceholders: Record<MobileWorkbenchPanel, { title: string; label: string }> = {
+    projects: {
+      title: t('workbench:mobile.placeholders.projects.title'),
+      label: t('workbench:mobile.placeholders.projects.label'),
+    },
+    terminal: {
+      title: t('workbench:mobile.placeholders.terminal.title'),
+      label: t('workbench:mobile.placeholders.terminal.label'),
+    },
+    files: {
+      title: t('workbench:mobile.placeholders.files.title'),
+      label: t('workbench:mobile.placeholders.files.label'),
+    },
+    git: {
+      title: t('workbench:mobile.placeholders.git.title'),
+      label: t('workbench:mobile.placeholders.git.label'),
+    },
+    worktrees: {
+      title: t('workbench:mobile.placeholders.worktrees.title'),
+      label: t('workbench:mobile.placeholders.worktrees.label'),
+    },
+    prompt: {
+      title: t('workbench:mobile.placeholders.prompt.title'),
+      label: t('workbench:mobile.placeholders.prompt.label'),
+    },
+    settings: {
+      title: t('workbench:mobile.placeholders.settings.title'),
+      label: t('workbench:mobile.placeholders.settings.label'),
+    },
+  };
+  const placeholder = panelPlaceholders[panel];
 
   return (
     <MobileWorkbenchShell
@@ -41,7 +63,7 @@ export function MobileWorkbench(): ReactElement {
     >
       <section className={styles.panel} aria-labelledby="mobile-panel-title">
         <div className={styles.panelHeader}>
-          <p className={styles.panelKicker}>Mobile Workbench</p>
+          <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
           <h1 id="mobile-panel-title">{placeholder.title}</h1>
         </div>
         <div className={styles.placeholder}>{placeholder.label}</div>

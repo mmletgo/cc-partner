@@ -78,6 +78,62 @@
   "noProjectHint": "Add or select a project folder to start working",
   "newSession": "New window",
   "projectContextLabel": "Project",
+  "mobile": {
+    "topTitle": "Workbench",
+    "kicker": "Mobile Workbench",
+    "openNavigation": "Open navigation",
+    "closeNavigation": "Close navigation",
+    "navAriaLabel": "Mobile Workbench panels",
+    "drawerAriaLabel": "Mobile navigation",
+    "railAriaLabel": "Wide navigation",
+    "statusAriaLabel": "Current workbench status",
+    "noProject": "No project selected",
+    "projectFallback": "Project",
+    "status": {
+      "project": "Project",
+      "worktree": "worktree",
+      "session": "session"
+    },
+    "nav": {
+      "projects": "Projects",
+      "terminal": "Terminal",
+      "files": "Files",
+      "git": "Git",
+      "worktrees": "Worktrees",
+      "prompt": "Prompt",
+      "settings": "Settings"
+    },
+    "placeholders": {
+      "projects": {
+        "title": "Projects",
+        "label": "Select a project"
+      },
+      "terminal": {
+        "title": "Terminal",
+        "label": "Waiting for a session"
+      },
+      "files": {
+        "title": "Files",
+        "label": "Waiting for a project"
+      },
+      "git": {
+        "title": "Git",
+        "label": "Waiting for a repository"
+      },
+      "worktrees": {
+        "title": "Worktrees",
+        "label": "Waiting for a project"
+      },
+      "prompt": {
+        "title": "Prompt",
+        "label": "Waiting for input"
+      },
+      "settings": {
+        "title": "Settings",
+        "label": "Mobile"
+      }
+    }
+  },
   "worktrees": {
     "label": "Worktree management",
     "empty": "No worktrees",

@@ -1,10 +1,12 @@
 import { useCallback, useState } from 'react';
 import type { ComponentType, ReactElement, ReactNode, SVGProps } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   FileIcon,
   FolderIcon,
   ForkIcon,
   HistoryIcon,
+  MenuIcon,
   PromptsIcon,
   SettingsIcon,
   TerminalIcon,
@@ -22,18 +24,17 @@ type MobileNavIcon = ComponentType<SVGProps<SVGSVGElement> & { size?: number }>;
 
 interface MobileNavItem {
   panel: MobileWorkbenchPanel;
-  label: string;
   icon: MobileNavIcon;
 }
 
 const MOBILE_NAV_ITEMS: readonly MobileNavItem[] = [
-  { panel: 'projects', label: '项目', icon: FolderIcon },
-  { panel: 'terminal', label: '终端', icon: TerminalIcon },
-  { panel: 'files', label: '文件', icon: FileIcon },
-  { panel: 'git', label: 'Git', icon: HistoryIcon },
-  { panel: 'worktrees', label: 'Worktrees', icon: ForkIcon },
-  { panel: 'prompt', label: 'Prompt', icon: PromptsIcon },
-  { panel: 'settings', label: '设置', icon: SettingsIcon },
+  { panel: 'projects', icon: FolderIcon },
+  { panel: 'terminal', icon: TerminalIcon },
+  { panel: 'files', icon: FileIcon },
+  { panel: 'git', icon: HistoryIcon },
+  { panel: 'worktrees', icon: ForkIcon },
+  { panel: 'prompt', icon: PromptsIcon },
+  { panel: 'settings', icon: SettingsIcon },
 ];
 
 export interface MobileWorkbenchShellProps {
@@ -60,8 +61,19 @@ interface MobilePanelNavProps {
  *   遍历 MOBILE_NAV_ITEMS 渲染 button 导航项，根据 activePanel 标记当前项，并把点击事件交给父组件。
  */
 function MobilePanelNav({ activePanel, onSelect }: MobilePanelNavProps): ReactElement {
+  const { t } = useTranslation(['workbench']);
+  const labels: Record<MobileWorkbenchPanel, string> = {
+    projects: t('workbench:mobile.nav.projects'),
+    terminal: t('workbench:mobile.nav.terminal'),
+    files: t('workbench:mobile.nav.files'),
+    git: t('workbench:mobile.nav.git'),
+    worktrees: t('workbench:mobile.nav.worktrees'),
+    prompt: t('workbench:mobile.nav.prompt'),
+    settings: t('workbench:mobile.nav.settings'),
+  };
+
   return (
-    <nav className={styles.navList} aria-label="Mobile Workbench panels">
+    <nav className={styles.navList} aria-label={t('workbench:mobile.navAriaLabel')}>
       {MOBILE_NAV_ITEMS.map((item) => {
         const Icon = item.icon;
         const isActive = item.panel === activePanel;
@@ -75,7 +87,7 @@ function MobilePanelNav({ activePanel, onSelect }: MobilePanelNavProps): ReactEl
             onClick={() => onSelect(item.panel)}
           >
             <Icon size={16} aria-hidden="true" />
-            <span>{item.label}</span>
+            <span>{labels[item.panel]}</span>
           </button>
         );
       })}
@@ -101,6 +113,7 @@ export function MobileWorkbenchShell({
   children,
 }: MobileWorkbenchShellProps): ReactElement {
   const [isNavOpen, setIsNavOpen] = useState<boolean>(false);
+  const { t } = useTranslation(['workbench']);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -145,15 +158,15 @@ export function MobileWorkbenchShell({
         <button
           type="button"
           className={styles.menuButton}
-          aria-label="打开导航"
+          aria-label={t('workbench:mobile.openNavigation')}
           aria-expanded={isNavOpen}
           onClick={handleOpenNav}
         >
-          <span aria-hidden="true">☰</span>
+          <MenuIcon size={16} aria-hidden="true" />
         </button>
         <div className={styles.titleBlock}>
-          <p className={styles.topTitle}>Workbench</p>
-          <p className={styles.topMeta}>{project ?? '未选择项目'}</p>
+          <p className={styles.topTitle}>{t('workbench:mobile.topTitle')}</p>
+          <p className={styles.topMeta}>{project ?? t('workbench:mobile.noProject')}</p>
         </div>
       </header>
 
@@ -162,19 +175,19 @@ export function MobileWorkbenchShell({
           <button
             type="button"
             className={styles.backdrop}
-            aria-label="关闭导航"
+            aria-label={t('workbench:mobile.closeNavigation')}
             onClick={handleCloseNav}
           />
-          <aside className={styles.drawer} aria-label="移动端导航">
+          <aside className={styles.drawer} aria-label={t('workbench:mobile.drawerAriaLabel')}>
             <div className={styles.drawerHeader}>
               <div className={styles.titleBlock}>
-                <p className={styles.topTitle}>Workbench</p>
-                <p className={styles.topMeta}>{project ?? '项目'}</p>
+                <p className={styles.topTitle}>{t('workbench:mobile.topTitle')}</p>
+                <p className={styles.topMeta}>{project ?? t('workbench:mobile.projectFallback')}</p>
               </div>
               <button
                 type="button"
                 className={styles.closeButton}
-                aria-label="关闭导航"
+                aria-label={t('workbench:mobile.closeNavigation')}
                 onClick={handleCloseNav}
               >
                 <XIcon size={16} aria-hidden="true" />
@@ -185,19 +198,21 @@ export function MobileWorkbenchShell({
         </>
       ) : null}
 
-      <aside className={styles.rail} aria-label="宽屏导航">
+      <aside className={styles.rail} aria-label={t('workbench:mobile.railAriaLabel')}>
         <div className={styles.railHeader}>
-          <p className={styles.topTitle}>Workbench</p>
-          <p className={styles.topMeta}>{project ?? '未选择项目'}</p>
+          <p className={styles.topTitle}>{t('workbench:mobile.topTitle')}</p>
+          <p className={styles.topMeta}>{project ?? t('workbench:mobile.noProject')}</p>
         </div>
         <MobilePanelNav activePanel={panel} onSelect={handleSelectPanel} />
       </aside>
 
       <main className={styles.content}>
-        <div className={styles.statusRow} aria-label="当前工作台状态">
-          <span className={styles.statusPill}>{project ?? '项目'}</span>
-          <span className={styles.statusPill}>{worktree ?? 'worktree'}</span>
-          <span className={styles.statusPill}>{session ?? 'session'}</span>
+        <div className={styles.statusRow} aria-label={t('workbench:mobile.statusAriaLabel')}>
+          <span className={styles.statusPill}>{project ?? t('workbench:mobile.status.project')}</span>
+          <span className={styles.statusPill}>
+            {worktree ?? t('workbench:mobile.status.worktree')}
+          </span>
+          <span className={styles.statusPill}>{session ?? t('workbench:mobile.status.session')}</span>
         </div>
         {children}
       </main>
