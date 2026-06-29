@@ -360,6 +360,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route("/api/workbench/fs/list", post(workbench::remote_list_dir))
         .route("/api/workbench/fs/info", post(workbench::remote_path_info))
         .route(
+            "/api/workbench/projects/list",
+            get(workbench::list_projects),
+        )
+        .route(
             "/api/workbench/projects/open",
             post(workbench::open_remote_project),
         )

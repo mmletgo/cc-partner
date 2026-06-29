@@ -195,6 +195,20 @@ pub async fn open_remote_project(
     ))
 }
 
+/// 列出当前设备的最近 Workbench 项目。
+///
+/// Business Logic（为什么需要这个函数）:
+///     移动端 `/mobile` 运行在普通浏览器中，不能使用 Tauri invoke，需要通过 HTTP 读取最近项目列表作为入口。
+///
+/// Code Logic（这个函数做什么）:
+///     从 workbench_projects 仓库读取项目 row，并复用 WorkbenchProjectRow::to_dto 转成 camelCase DTO。
+pub async fn list_projects(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<WorkbenchProjectDto>>, AppError> {
+    let rows = state.workbench_project_repo.list().await?;
+    Ok(Json(rows.iter().map(WorkbenchProjectRow::to_dto).collect()))
+}
+
 /// 列出远端设备本机项目的 worktree。
 ///
 /// Business Logic（为什么需要这个函数）:

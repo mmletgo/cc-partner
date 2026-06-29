@@ -1,3 +1,5 @@
+import type { WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+
 export type MobileWorkbenchPanel =
   | 'projects'
   | 'terminal'
@@ -42,4 +44,39 @@ export function openMobileNav(): boolean {
  */
 export function closeMobileNav(): boolean {
   return false;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端选择项目后需要自动落到最合理的 worktree，状态栏、终端和文件面板都依赖这个上下文。
+ *
+ * Code Logic（这个函数做什么）:
+ *   优先返回 isMain 的 worktree；没有主工作区标记时返回首项；空列表返回 null。
+ */
+export function selectPreferredMobileWorktree(
+  worktrees: WorkbenchWorktree[],
+): WorkbenchWorktree | null {
+  return worktrees.find((worktree) => worktree.isMain) ?? worktrees[0] ?? null;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端切换项目或 worktree 后需要自动选择一个 terminal window，减少用户进入终端面板后的空态。
+ *
+ * Code Logic（这个函数做什么）:
+ *   优先返回绑定 active worktree 的 session；没有匹配时返回首个 running session；仍没有则返回首项或 null。
+ */
+export function selectPreferredMobileSession(
+  sessions: WorkbenchSession[],
+  activeWorktreeId: string | null,
+): WorkbenchSession | null {
+  const matchingSession = activeWorktreeId
+    ? sessions.find((session) => session.worktreeId === activeWorktreeId)
+    : undefined;
+  return (
+    matchingSession ??
+    sessions.find((session) => session.status === 'running') ??
+    sessions[0] ??
+    null
+  );
 }

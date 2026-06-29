@@ -1,25 +1,55 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
+import { httpWorkbenchTransport } from '@/api/workbenchHttp';
+import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import { MobileProjectPanel } from './components/MobileProjectPanel';
 import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
-import type { MobileWorkbenchPanel } from './mobileWorkbenchState';
+import { MobileWorktreePanel } from './components/MobileWorktreePanel';
+import {
+  selectPreferredMobileSession,
+  selectPreferredMobileWorktree,
+  type MobileWorkbenchPanel,
+} from './mobileWorkbenchState';
 import styles from './MobileWorkbench.module.css';
 
 /**
- * MobileWorkbench（移动端工作台占位页面）
+ * Business Logic（为什么需要这个函数）:
+ *   移动端 HTTP 请求失败时需要展示可读错误，并兼容非 Error 抛出值。
+ *
+ * Code Logic（这个函数做什么）:
+ *   把 unknown reason 规整为字符串；优先使用 Error.message，空值回退 String(reason)。
+ */
+function getErrorMessage(reason: unknown): string {
+  if (reason instanceof Error && reason.message.trim()) {
+    return reason.message;
+  }
+  return String(reason);
+}
+
+/**
+ * MobileWorkbench（移动端工作台页面）
  *
  * Business Logic（为什么需要这个组件）:
- *   Task 5 需要先搭出 `/mobile` 的 Workbench shell，让后续项目、终端、文件和 Git 面板能逐步接入。
+ *   `/mobile` 需要通过 HTTP 加载最近项目，并在用户选择项目后加载对应 worktree 与 terminal session 上下文。
  *
  * Code Logic（这个组件做什么）:
- *   管理当前面板与项目/worktree/session 占位状态，渲染响应式 MobileWorkbenchShell，并在内容区显示当前面板占位。
+ *   管理 active panel/project/worktree/session 状态，调用 httpWorkbenchTransport 拉取数据，用 request id 避免 stale 请求覆盖新选择。
  */
 export function MobileWorkbench(): ReactElement {
   const [panel, setPanel] = useState<MobileWorkbenchPanel>('projects');
+  const [projects, setProjects] = useState<WorkbenchProject[]>([]);
+  const [activeProject, setActiveProject] = useState<WorkbenchProject | null>(null);
+  const [worktrees, setWorktrees] = useState<WorkbenchWorktree[]>([]);
+  const [activeWorktree, setActiveWorktree] = useState<WorkbenchWorktree | null>(null);
+  const [sessions, setSessions] = useState<WorkbenchSession[]>([]);
+  const [activeSession, setActiveSession] = useState<WorkbenchSession | null>(null);
+  const [projectsLoading, setProjectsLoading] = useState<boolean>(false);
+  const [projectDetailsLoading, setProjectDetailsLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+  const projectsRequestIdRef = useRef<number>(0);
+  const projectDetailsRequestIdRef = useRef<number>(0);
   const { t } = useTranslation(['workbench']);
-  const activeProject: string | null = null;
-  const activeWorktree: string | null = null;
-  const activeSession: string | null = null;
 
   const panelPlaceholders: Record<MobileWorkbenchPanel, { title: string; label: string }> = {
     projects: {
@@ -53,21 +83,159 @@ export function MobileWorkbench(): ReactElement {
   };
   const placeholder = panelPlaceholders[panel];
 
-  return (
-    <MobileWorkbenchShell
-      panel={panel}
-      project={activeProject}
-      worktree={activeWorktree}
-      session={activeSession}
-      onPanelChange={setPanel}
-    >
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机端进入 `/mobile` 后需要立即看到最近项目列表，也需要支持用户手动刷新。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 HTTP projects.list，使用递增 request id 丢弃旧响应，并更新项目列表加载态与错误态。
+   */
+  const loadProjects = useCallback(async (): Promise<void> => {
+    const requestId = projectsRequestIdRef.current + 1;
+    projectsRequestIdRef.current = requestId;
+    setProjectsLoading(true);
+    setError(null);
+
+    try {
+      const nextProjects = await httpWorkbenchTransport.projects.list();
+      if (projectsRequestIdRef.current !== requestId) return;
+      setProjects(nextProjects);
+    } catch (reason) {
+      if (projectsRequestIdRef.current !== requestId) return;
+      setError(getErrorMessage(reason));
+    } finally {
+      if (projectsRequestIdRef.current === requestId) {
+        setProjectsLoading(false);
+      }
+    }
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户选择项目后，移动端需要加载该项目的 worktree 和 terminal window，作为其它面板的共享上下文。
+   *
+   * Code Logic（这个函数做什么）:
+   *   并行请求 worktrees/sessions，选择主 worktree 与匹配 session；成功后切到 terminal 面板，旧请求通过 request id 丢弃。
+   */
+  const selectProject = useCallback(async (project: WorkbenchProject): Promise<void> => {
+    const requestId = projectDetailsRequestIdRef.current + 1;
+    projectDetailsRequestIdRef.current = requestId;
+    setProjectDetailsLoading(true);
+    setError(null);
+    setActiveProject(project);
+    setWorktrees([]);
+    setActiveWorktree(null);
+    setSessions([]);
+    setActiveSession(null);
+
+    try {
+      const [nextWorktrees, nextSessions] = await Promise.all([
+        httpWorkbenchTransport.worktrees.list(project.id),
+        httpWorkbenchTransport.sessions.list(project.id),
+      ]);
+      if (projectDetailsRequestIdRef.current !== requestId) return;
+
+      const nextActiveWorktree = selectPreferredMobileWorktree(nextWorktrees);
+      const nextActiveSession = selectPreferredMobileSession(
+        nextSessions,
+        nextActiveWorktree?.id ?? null,
+      );
+
+      setWorktrees(nextWorktrees);
+      setActiveWorktree(nextActiveWorktree);
+      setSessions(nextSessions);
+      setActiveSession(nextActiveSession);
+      setPanel('terminal');
+    } catch (reason) {
+      if (projectDetailsRequestIdRef.current !== requestId) return;
+      setError(getErrorMessage(reason));
+    } finally {
+      if (projectDetailsRequestIdRef.current === requestId) {
+        setProjectDetailsLoading(false);
+      }
+    }
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   项目列表面板的刷新按钮需要触发异步加载，但按钮事件本身不消费 Promise。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 loadProjects 并显式丢弃 Promise，错误由 loadProjects 内部写入状态。
+   */
+  const handleRefreshProjects = useCallback((): void => {
+    void loadProjects();
+  }, [loadProjects]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户切换 worktree 后，移动端状态栏和终端面板应同步到同一 worktree 的优先 session。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写入 active worktree，并从当前 sessions 中选择匹配 session、running session 或首项。
+   */
+  const handleSelectWorktree = useCallback(
+    (worktree: WorkbenchWorktree): void => {
+      setActiveWorktree(worktree);
+      setActiveSession(selectPreferredMobileSession(sessions, worktree.id));
+    },
+    [sessions],
+  );
+
+  useEffect(() => {
+    void loadProjects();
+
+    return () => {
+      projectsRequestIdRef.current += 1;
+      projectDetailsRequestIdRef.current += 1;
+    };
+  }, [loadProjects]);
+
+  const panelContent =
+    panel === 'projects' ? (
+      <MobileProjectPanel
+        projects={projects}
+        activeProjectId={activeProject?.id ?? null}
+        loading={projectsLoading}
+        error={error}
+        onSelect={selectProject}
+        onRefresh={handleRefreshProjects}
+      />
+    ) : panel === 'worktrees' ? (
+      <MobileWorktreePanel
+        worktrees={worktrees}
+        activeWorktreeId={activeWorktree?.id ?? null}
+        onSelect={handleSelectWorktree}
+      />
+    ) : (
       <section className={styles.panel} aria-labelledby="mobile-panel-title">
         <div className={styles.panelHeader}>
           <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
           <h1 id="mobile-panel-title">{placeholder.title}</h1>
         </div>
-        <div className={styles.placeholder}>{placeholder.label}</div>
+        {projectDetailsLoading ? (
+          <p className={styles.panelState}>{t('workbench:loading')}</p>
+        ) : (
+          <div className={styles.placeholder}>{placeholder.label}</div>
+        )}
+        {error ? (
+          <p className={styles.panelError}>
+            <span>{t('workbench:mobile.projectPanel.error')}</span>
+            <span>{error}</span>
+          </p>
+        ) : null}
       </section>
+    );
+
+  return (
+    <MobileWorkbenchShell
+      panel={panel}
+      project={activeProject?.name ?? null}
+      worktree={activeWorktree?.name ?? null}
+      session={activeSession?.name ?? null}
+      onPanelChange={setPanel}
+    >
+      {panelContent}
     </MobileWorkbenchShell>
   );
 }

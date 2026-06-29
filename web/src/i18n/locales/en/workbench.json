@@ -89,6 +89,10 @@
     "statusAriaLabel": "Current workbench status",
     "noProject": "No project selected",
     "projectFallback": "Project",
+    "projectPanel": {
+      "title": "Projects",
+      "error": "Load failed"
+    },
     "status": {
       "project": "Project",
       "worktree": "worktree",
