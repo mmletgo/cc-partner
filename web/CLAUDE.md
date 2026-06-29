@@ -9,7 +9,7 @@
 - `npm run dev` — 启动 Vite 开发服务器（端口 5173）
 - `npm run build` — 打包到 dist/（tsc 类型检查 + vite 构建）
 - `npm run lint` — ESLint 检查
-- `npx --yes tsx src/mobile/mobileWorkbenchState.test.ts && npx --yes tsx src/mobile/mobileTerminalReplay.test.ts` — Mobile Workbench shell 导航、默认 worktree/session 选择与 terminal replay helper 回归测试
+- `npx --yes tsx src/mobile/mobilePanelState.test.ts && npx --yes tsx src/mobile/mobileWorkbenchState.test.ts && npx --yes tsx src/mobile/mobileTerminalReplay.test.ts` — Mobile Workbench shell 导航、文件/Git 面板状态 helper、默认 worktree/session 选择与 terminal replay helper 回归测试
 - `npx playwright test tests/screenshot-overlay.spec.ts --project=chromium` — 截图 Overlay 工具条时序回归测试（会自动拉起 Vite）
 - `npx --yes tsx src/pages/Settings/HealthPanel.test.ts && npx --yes tsx src/pages/Settings/shortcutRecorder.test.ts && npx --yes tsx src/pages/Settings/settingsState.test.ts` — Settings 健康提醒布局/时间选择、快捷键录制与状态/payload 回归测试
 - `npx --yes tsx src/hooks/workbenchHttpEvents.test.ts` — Mobile Workbench HTTP NDJSON parser chunk/pending 回归测试

@@ -242,6 +242,12 @@ export function MobileGitPanel({
               behind: worktree?.status.behind ?? 0,
             })}
           </strong>
+          <span>{t('workbench:mobile.gitPanel.canPush')}</span>
+          <strong>
+            {worktree?.status.canPush
+              ? t('workbench:mobile.gitPanel.canPushAllowed')
+              : t('workbench:mobile.gitPanel.canPushBlocked')}
+          </strong>
         </div>
         <div className={styles.mobileToolbar}>
           <button
