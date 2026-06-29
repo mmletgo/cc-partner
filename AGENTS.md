@@ -12,6 +12,7 @@
 - **Prompt 优化** — 调用本机 Claude Code CLI pure/headless 模式生成中英文优化版 Prompt
 - **速记本** — 多页面自动保存文本，支持页面标题、局域网与 GitHub 同步
 - **工作台** — 指定本机或局域网远端项目文件夹，管理 Git worktree、多个项目终端、可交互工作区文件树、文件浏览/编辑工作区和 Git 提交树
+- **移动端 Workbench** — 可信局域网内通过 `/mobile` 手机浏览器远程操作本机 Workbench，桌面端展示访问链接与二维码
 - **P2P 自动互联** — 局域网内 mDNS 自动发现
 - **自动更新** — GitHub Releases 检测 / 下载 / 安装
 
