@@ -1,6 +1,7 @@
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { WorkbenchProject } from '@/lib/types';
+import { canSelectMobileProject } from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
 
 export interface MobileProjectPanelProps {
@@ -16,10 +17,10 @@ export interface MobileProjectPanelProps {
  * MobileProjectPanel（移动端项目选择面板）
  *
  * Business Logic（为什么需要这个组件）:
- *   手机进入 `/mobile` 后需要先选择最近 Workbench 项目，后续 worktree、terminal session 和状态栏都依赖该项目上下文。
+ *   手机进入 `/mobile` 后需要先选择最近 Workbench 本机项目，后续 worktree、terminal session 和状态栏都依赖该项目上下文。
  *
  * Code Logic（这个组件做什么）:
- *   渲染最近项目列表、刷新入口、加载态、错误态和空态；点击项目时把完整 WorkbenchProject DTO 交给父组件加载详情。
+ *   渲染最近项目列表、刷新入口、加载态、错误态和空态；local 项目点击后把 DTO 交给父组件，remote shortcut 展示为禁用并显示提示。
  */
 export function MobileProjectPanel({
   projects,
@@ -63,6 +64,8 @@ export function MobileProjectPanel({
       <div className={styles.mobileList}>
         {projects.map((project) => {
           const isActive = project.id === activeProjectId;
+          const canSelect = canSelectMobileProject(project);
+          const unsupportedNoticeId = `mobile-project-${project.id}-unsupported`;
           const kindLabel =
             project.kind === 'remote'
               ? t('workbench:remoteBadge')
@@ -76,9 +79,16 @@ export function MobileProjectPanel({
               type="button"
               className={`${styles.mobileListItem} ${
                 isActive ? styles.mobileListItemActive : ''
-              }`}
+              } ${canSelect ? '' : styles.mobileListItemDisabled}`}
               aria-pressed={isActive}
-              onClick={() => onSelect(project)}
+              aria-disabled={!canSelect}
+              aria-describedby={canSelect ? undefined : unsupportedNoticeId}
+              disabled={!canSelect}
+              onClick={() => {
+                if (canSelect) {
+                  onSelect(project);
+                }
+              }}
             >
               <span className={styles.mobileListTitleRow}>
                 <strong className={styles.mobileListTitle}>{project.name}</strong>
@@ -92,6 +102,11 @@ export function MobileProjectPanel({
               </span>
               <span className={styles.mobileListPath}>{project.path}</span>
               <span className={styles.mobileListMeta}>{project.deviceName}</span>
+              {canSelect ? null : (
+                <span id={unsupportedNoticeId} className={styles.mobileListNotice}>
+                  {t('workbench:mobile.projectPanel.remoteUnsupported')}
+                </span>
+              )}
             </button>
           );
         })}

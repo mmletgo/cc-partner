@@ -307,9 +307,20 @@
   transition: all var(--motion-fast) var(--ease-standard);
 }
 
-.mobileListItem:hover {
+.mobileListItem:hover:not(:disabled) {
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+
+.mobileListItem:disabled,
+.mobileListItemDisabled {
+  cursor: not-allowed;
+  color: var(--muted);
+  background: var(--surface-warm);
+}
+
+.mobileListItemDisabled .mobileListTitle {
+  color: var(--muted);
 }
 
 .mobileListItemActive {
@@ -351,6 +362,16 @@
 
 .mobileListMeta {
   color: var(--meta);
+}
+
+.mobileListNotice {
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-normal);
+  overflow-wrap: anywhere;
 }
 
 .mobileBadge {

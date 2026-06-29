@@ -89,7 +89,8 @@
     "projectFallback": "项目",
     "projectPanel": {
       "title": "项目",
-      "error": "加载失败"
+      "error": "加载失败",
+      "remoteUnsupported": "手机端暂不支持打开远端项目快捷方式"
     },
     "status": {
       "project": "项目",

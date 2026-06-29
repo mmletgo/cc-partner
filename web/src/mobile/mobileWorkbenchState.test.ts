@@ -1,4 +1,5 @@
 import {
+  canSelectMobileProject,
   closeMobileNav,
   openMobileNav,
   selectPreferredMobileSession,
@@ -6,7 +7,7 @@ import {
   selectMobilePanel,
   type MobileWorkbenchPanel,
 } from './mobileWorkbenchState';
-import type { WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -83,6 +84,29 @@ function createSession(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   移动端项目列表需要区分可直接加载的本机项目和暂不支持二级代理的远端快捷方式，测试要构造最小合法 DTO。
+ *
+ * Code Logic（这个函数做什么）:
+ *   接收局部字段并补齐 WorkbenchProject 的必填字段，返回可复用测试对象。
+ */
+function createProject(
+  overrides: Partial<WorkbenchProject> & Pick<WorkbenchProject, 'id' | 'name' | 'kind'>,
+): WorkbenchProject {
+  return {
+    id: overrides.id,
+    name: overrides.name,
+    kind: overrides.kind,
+    deviceId: overrides.deviceId ?? 'device-1',
+    deviceName: overrides.deviceName ?? 'This Mac',
+    path: overrides.path ?? `/tmp/${overrides.name}`,
+    lastOpenedAt: overrides.lastOpenedAt ?? '2026-06-29T00:00:00Z',
+    createdAt: overrides.createdAt ?? '2026-06-29T00:00:00Z',
+    updatedAt: overrides.updatedAt ?? '2026-06-29T00:00:00Z',
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   移动端 Workbench shell 需要稳定切换当前面板，后续业务面板接入时不应破坏默认导航契约。
  *
  * Code Logic（这个函数做什么）:
@@ -115,6 +139,21 @@ function testOpenMobileNavReturnsTrue(): void {
  */
 function testCloseMobileNavReturnsFalse(): void {
   assertEqual(closeMobileNav(), false);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   `/mobile` 当前只支持直连加载本机项目，远端快捷方式应展示但不可选择，避免用户点入必然失败的二级代理路径。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造 local 与 remote 两类项目，断言 helper 只允许 local 项目进入详情加载。
+ */
+function testCanSelectMobileProjectOnlyAllowsLocalProjects(): void {
+  const localProject = createProject({ id: 'local', name: 'local-app', kind: 'local' });
+  const remoteProject = createProject({ id: 'remote', name: 'remote-app', kind: 'remote' });
+
+  assertEqual(canSelectMobileProject(localProject), true);
+  assertEqual(canSelectMobileProject(remoteProject), false);
 }
 
 /**
@@ -188,6 +227,7 @@ function testPreferredSessionFallsBackToRunningFirstOrNull(): void {
 testSelectMobilePanelReturnsNextPanel();
 testOpenMobileNavReturnsTrue();
 testCloseMobileNavReturnsFalse();
+testCanSelectMobileProjectOnlyAllowsLocalProjects();
 testPreferredWorktreeUsesMainBeforeFirst();
 testPreferredWorktreeFallsBackToFirstOrNull();
 testPreferredSessionUsesMatchingWorktreeBeforeRunning();

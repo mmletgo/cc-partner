@@ -7,6 +7,7 @@ import { MobileProjectPanel } from './components/MobileProjectPanel';
 import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
 import { MobileWorktreePanel } from './components/MobileWorktreePanel';
 import {
+  canSelectMobileProject,
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
   type MobileWorkbenchPanel,
@@ -112,12 +113,19 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户选择项目后，移动端需要加载该项目的 worktree 和 terminal window，作为其它面板的共享上下文。
+   *   用户选择本机项目后，移动端需要加载该项目的 worktree 和 terminal window；远端快捷方式当前只能提示不可用。
    *
    * Code Logic（这个函数做什么）:
-   *   并行请求 worktrees/sessions，选择主 worktree 与匹配 session；成功后切到 terminal 面板，旧请求通过 request id 丢弃。
+   *   非 local 项目直接写入提示并让旧详情请求失效；local 项目并行请求 worktrees/sessions，选择主 worktree 与匹配 session，成功后切到 terminal 面板。
    */
   const selectProject = useCallback(async (project: WorkbenchProject): Promise<void> => {
+    if (!canSelectMobileProject(project)) {
+      projectDetailsRequestIdRef.current += 1;
+      setProjectDetailsLoading(false);
+      setError(t('workbench:mobile.projectPanel.remoteUnsupported'));
+      return;
+    }
+
     const requestId = projectDetailsRequestIdRef.current + 1;
     projectDetailsRequestIdRef.current = requestId;
     setProjectDetailsLoading(true);
@@ -154,7 +162,7 @@ export function MobileWorkbench(): ReactElement {
         setProjectDetailsLoading(false);
       }
     }
-  }, []);
+  }, [t]);
 
   /**
    * Business Logic（为什么需要这个函数）:

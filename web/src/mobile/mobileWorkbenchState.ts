@@ -1,4 +1,4 @@
-import type { WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 
 export type MobileWorkbenchPanel =
   | 'projects'
@@ -44,6 +44,17 @@ export function openMobileNav(): boolean {
  */
 export function closeMobileNav(): boolean {
   return false;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端 Workbench 当前只支持手机直连本机项目；桌面端 remote shortcut 需要展示但不能进入必然失败的二级远端网关路径。
+ *
+ * Code Logic（这个函数做什么）:
+ *   接收 WorkbenchProject DTO，只有 kind 为 local 时返回 true，其它项目类型返回 false。
+ */
+export function canSelectMobileProject(project: WorkbenchProject): boolean {
+  return project.kind === 'local';
 }
 
 /**
