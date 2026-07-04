@@ -16,6 +16,7 @@
 use crate::config::AppConfig;
 use crate::models::device::Device;
 use crate::net::peer_client::PeerClient;
+use crate::orchestrator::repo::OrchestratorRepo;
 use crate::storage::{
     ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, TransferRepo,
     WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
@@ -110,6 +111,9 @@ pub struct AppState {
     pub health_repo: Arc<crate::storage::health_repo::HealthRepo>,
     /// 健康监测 daemon 的取消令牌（应用退出时 cancel 优雅停止采样/处理任务）
     pub health_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// Orchestrator 任务编排仓储（任务队列、事件和证据持久化）
+    #[allow(dead_code)]
+    pub orchestrator_repo: Arc<OrchestratorRepo>,
 }
 
 impl AppState {

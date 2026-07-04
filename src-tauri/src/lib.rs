@@ -23,6 +23,7 @@ mod hotkey;
 mod mobile;
 mod models;
 mod net;
+mod orchestrator;
 mod permissions;
 mod screenshot;
 mod state;
@@ -48,6 +49,7 @@ use crate::commands::{
     workbench_dependencies as workbench_dependency_cmd,
 };
 use crate::net::{discovery, http_server, peer_client::PeerClient};
+use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
 use crate::storage::{
     ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, SshTargetRepo, TransferRepo,
@@ -302,6 +304,7 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, error::AppError> {
     WorkbenchSessionRepo::new(pool.clone())
         .ensure_schema()
         .await?;
+    OrchestratorRepo::init_schema(&pool).await?;
     Ok(pool)
 }
 
@@ -359,6 +362,7 @@ pub fn run() {
                 let workbench_project_repo = Arc::new(WorkbenchProjectRepo::new(pool.clone()));
                 let workbench_session_repo = Arc::new(WorkbenchSessionRepo::new(pool.clone()));
                 let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::new(pool.clone()));
+                let orchestrator_repo = Arc::new(OrchestratorRepo::new(pool.clone()));
                 let workbench_sessions =
                     Arc::new(crate::workbench::sessions::WorkbenchSessionRegistry::new());
                 let (workbench_remote_events, _) = tokio::sync::broadcast::channel(1024);
@@ -412,6 +416,7 @@ pub fn run() {
                     health,
                     health_repo,
                     health_cancel,
+                    orchestrator_repo,
                 };
 
                 // 4) 启动 axum HTTP server（绑定动态端口，回填 actual_http_port）

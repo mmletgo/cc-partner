@@ -31,6 +31,7 @@ src/
 ├── sync/              — 向量时钟 + LWW 合并 + engine              [M4]
 ├── net/               — mdns-sd 发现 + axum server + reqwest client [已实现 M3]
 ├── mobile/            — 移动端局域网 `/mobile` 访问 URL 生成（过滤 localhost/loopback）[已实现]
+├── orchestrator/      — 自动编排器基础：任务模型、状态机、SQLite repo(schema/tasks/events/evidence) [基础已实现]
 ├── transfer/          — 分块传输 + SHA256 + 断点续传              [M5]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
 ├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥 [已实现]
@@ -41,6 +42,14 @@ src/
 └── commands/updater.rs — 自动更新 5 命令（check/download/status/cancel/install，对齐前端 types.ts）[M8 已实现]
 migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TABLE IF NOT EXISTS 兼容旧库）
 ```
+
+## Orchestrator 基础约定（src/orchestrator/）
+
+- **功能定位**：Orchestrator 是内置自动编排器的后端基础层，当前只负责任务模型、状态机、SQLite schema/repo 和 `AppState.orchestrator_repo` 初始化；不包含调度器、Workbench Runner、验证执行、交付或前端页面。
+- **状态机**：`orchestrator/state.rs::next_status` 只允许 Draft→Queued→Preparing→Running→Verifying→Delivering→Done 的 happy path；`Block`/`Abort` 可从任意状态进入 `Blocked`/`Aborted`，`Noop` 保持原状态，非法阶段输入保持原状态。
+- **持久化**：`orchestrator/repo.rs::OrchestratorRepo::init_schema` 在 `lib.rs::init_db` 内执行，建 `orchestrator_tasks`、`orchestrator_project_configs`、`orchestrator_task_events`、`orchestrator_task_evidence` 及索引。仓储沿用运行期 `sqlx::query`，不用 sqlx 宏；时间戳用 `Utc::now().to_rfc3339()`，id 用 `Uuid::new_v4()`。
+- **任务仓储语义**：`create_task` 创建 Draft/default priority 0/attempt 0；`list_tasks(project_id?, status?)` 统一按 `priority DESC, created_at ASC`；`update_task_status` 只更新状态、阻塞原因和 `updated_at`，保持任务身份字段不变；event/evidence 仅追加不覆盖。
+- **验证命令**：Orchestrator 相关改动优先跑 `cd src-tauri && cargo test orchestrator::state --lib && cargo test orchestrator::repo --lib && cargo check`。
 
 ## 工作台已落地行为约定（workbench/ + storage/workbench_project_repo.rs + commands/workbench.rs + commands/workbench_dependencies.rs）
 
