@@ -102,6 +102,21 @@ export function orchestratorCreateResultMatchesProject(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   Orchestrator action 请求可能在用户切换到同项目另一任务后才返回，旧响应不得把详情选区抢回旧任务。
+ *
+ * Code Logic（这个函数做什么）:
+ *   当前 selection 为空时选中返回任务；当前仍是返回任务时保持不变；当前已是其它任务时保留用户最新选择。
+ */
+export function resolveOrchestratorActionSelection(
+  currentSelectedTaskId: string | null,
+  responseTaskId: string,
+): string {
+  if (!currentSelectedTaskId) return responseTaskId;
+  return currentSelectedTaskId === responseTaskId ? responseTaskId : currentSelectedTaskId;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   只有草稿任务应允许用户手动加入队列，避免运行中或已完成任务被重复排队。
  *
  * Code Logic（这个函数做什么）:

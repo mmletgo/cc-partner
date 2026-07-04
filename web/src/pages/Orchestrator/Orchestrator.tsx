@@ -10,10 +10,10 @@
  *   - 按 activeProject 拉取 Orchestrator 任务列表并按状态分组展示
  *   - 按 activeProject 拉取项目策略，并按 selected task 拉取 evidence
  *   - 提供 title/goal/acceptanceCriteria 三个单行输入创建任务
- *   - 允许选中的 draft 任务切换为 queued，并只更新当前列表中的同一任务
+ *   - 允许选中的 draft 任务切换为 queued；action 响应只替换列表，同项目任务切换后不抢回 selection
  *   - 创建成功后把新任务插入列表顶部、选中新任务并清空表单
- *   - Running 任务可触发后端验证，Blocked 任务可打开 Workbench deep link、重试或终止
- *   - 不实现 Task 7 自动交付
+ *   - Running 任务可触发后端验证与交付，Blocked 任务可打开 Workbench deep link、重试或终止
+ *   - full-auto 交付由后端 complete 命令执行，前端只负责触发命令和展示状态/evidence
  *   - hooks 全部位于渲染分支之前，避免 early return 破坏调用顺序
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -32,6 +32,7 @@ import {
   ORCHESTRATOR_STATUSES,
   orchestratorCreateResultMatchesProject,
   orchestratorStatusTone,
+  resolveOrchestratorActionSelection,
   resolveOrchestratorTaskLoad,
 } from '@/lib/orchestrator';
 import type {
@@ -473,7 +474,7 @@ export function Orchestrator(): JSX.Element {
         error: null,
       };
     });
-    setSelectedTaskId(nextTask.id);
+    setSelectedTaskId((current) => resolveOrchestratorActionSelection(current, nextTask.id));
   }, []);
 
   const handleQueueSelectedTask = useCallback(async () => {

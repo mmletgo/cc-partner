@@ -8,6 +8,7 @@ import {
   groupOrchestratorTasks,
   ORCHESTRATOR_STATUSES,
   orchestratorCreateResultMatchesProject,
+  resolveOrchestratorActionSelection,
   orchestratorStatusTone,
   resolveOrchestratorTaskLoad,
 } from './orchestrator';
@@ -107,6 +108,14 @@ assert(
 assert(
   !orchestratorCreateResultMatchesProject(null, 'project-1'),
   'orchestratorCreateResultMatchesProject should reject create results when active project was cleared',
+);
+assert(
+  resolveOrchestratorActionSelection('task-b', 'task-a') === 'task-b',
+  'resolveOrchestratorActionSelection should not steal selection back to an old action response',
+);
+assert(
+  resolveOrchestratorActionSelection(null, 'task-a') === 'task-a',
+  'resolveOrchestratorActionSelection should select the returned task when selection is empty',
 );
 
 assert(

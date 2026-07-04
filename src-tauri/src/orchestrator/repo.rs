@@ -378,7 +378,8 @@ impl OrchestratorRepo {
     ///     Runner 创建出任务 worktree 和 terminal 后，需要把可接管现场持久化到任务行。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     写入 branch_name/worktree_id/session_id，把状态切到 Running，清空 blocked_reason，并首次设置 started_at。
+    ///     仅当任务仍为 Preparing 时写入 branch_name/worktree_id/session_id，把状态切到 Running，
+    ///     清空 blocked_reason，并首次设置 started_at；未命中时返回当前任务且不覆盖 Abort/Block。
     pub async fn mark_task_running(
         &self,
         task_id: &str,
@@ -391,7 +392,7 @@ impl OrchestratorRepo {
             "UPDATE orchestrator_tasks \
              SET status = ?, branch_name = ?, worktree_id = ?, session_id = ?, \
                  blocked_reason = ?, started_at = COALESCE(started_at, ?), updated_at = ? \
-             WHERE id = ?",
+             WHERE id = ? AND status = ?",
         )
         .bind(OrchestratorTaskStatus::Running.as_str())
         .bind(branch_name)
@@ -401,6 +402,7 @@ impl OrchestratorRepo {
         .bind(&now)
         .bind(now.clone())
         .bind(task_id)
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
         .execute(&self.pool)
         .await?;
         self.get_task(task_id).await
@@ -1431,6 +1433,34 @@ mod tests {
         assert_eq!(running.worktree_id.as_deref(), Some("worktree-1"));
         assert_eq!(running.session_id.as_deref(), Some("session-1"));
         assert!(running.started_at.is_some());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户可能在 Runner 准备 worktree/terminal 期间终止任务，Runner 的迟到成功回写不得覆盖终止状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Preparing 任务后先模拟用户终止为 Aborted，再调用 mark_task_running，断言状态与 runner 字段都未被改写。
+    #[tokio::test]
+    async fn mark_task_running_does_not_override_aborted_task() {
+        let (_pool, repo) = setup_repo().await;
+        let task = task_row("task-1", "project-1", OrchestratorTaskStatus::Preparing);
+        repo.create_task(&task).await.unwrap();
+        repo.set_task_status(&task.id, OrchestratorTaskStatus::Aborted, None)
+            .await
+            .unwrap();
+
+        let returned = repo
+            .mark_task_running(&task.id, "agent/task-1-test", "worktree-1", "session-1")
+            .await
+            .unwrap();
+        let persisted = repo.get_task(&task.id).await.unwrap();
+
+        assert_eq!(returned.status, OrchestratorTaskStatus::Aborted);
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
+        assert!(persisted.branch_name.is_none());
+        assert!(persisted.worktree_id.is_none());
+        assert!(persisted.session_id.is_none());
+        assert!(persisted.started_at.is_none());
     }
 
     /// Business Logic（为什么需要这个函数）:
