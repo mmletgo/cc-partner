@@ -68,6 +68,44 @@ interface OrchestratorCreateForm {
   acceptanceCriteria: string;
 }
 
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   Orchestrator 任务列表必须严格归属于当前 Workbench 项目，项目切换时不能短暂展示旧项目任务。
+ *
+ * Code Logic（这个类型做什么）:
+ *   把一次任务列表请求的 projectId、任务结果和错误一起保存，渲染阶段只使用 projectId 匹配当前项目的结果。
+ */
+interface OrchestratorTaskListResult {
+  projectId: string;
+  tasks: OrchestratorTask[];
+  error: string | null;
+}
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   项目策略卡必须展示当前项目的策略，旧项目响应不能覆盖或闪现到新项目界面。
+ *
+ * Code Logic（这个类型做什么）:
+ *   把项目策略请求结果与 projectId 绑定，渲染时通过 projectId 匹配决定是否可见以及是否仍处于加载态。
+ */
+interface OrchestratorProjectConfigResult {
+  projectId: string;
+  config: OrchestratorProjectConfig | null;
+  error: string | null;
+}
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   创建/入队这类用户动作的错误只应该在触发动作的项目下展示，项目切换后不能残留旧错误。
+ *
+ * Code Logic（这个类型做什么）:
+ *   保存动作发生时的 projectId 和错误文案，渲染阶段按当前 activeProjectId 过滤。
+ */
+interface OrchestratorActionError {
+  projectId: string | null;
+  message: string;
+}
+
 const EMPTY_FORM: OrchestratorCreateForm = {
   title: '',
   goal: '',
@@ -125,29 +163,52 @@ function formatTaskTimestamp(value: string): string {
 export function Orchestrator(): JSX.Element {
   const { t } = useTranslation(['orchestrator', 'nav', 'common']);
   const { activeProject, projectsLoading } = useWorkbenchProjects();
-  const [tasks, setTasks] = useState<OrchestratorTask[]>([]);
+  const [taskListResult, setTaskListResult] = useState<OrchestratorTaskListResult | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [form, setForm] = useState<OrchestratorCreateForm>(EMPTY_FORM);
-  const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [queueingTaskId, setQueueingTaskId] = useState<string | null>(null);
-  const [projectConfig, setProjectConfig] = useState<OrchestratorProjectConfig | null>(null);
-  const [projectConfigLoading, setProjectConfigLoading] = useState(true);
-  const [projectConfigError, setProjectConfigError] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [projectConfigResult, setProjectConfigResult] =
+    useState<OrchestratorProjectConfigResult | null>(null);
+  const [actionError, setActionError] = useState<OrchestratorActionError | null>(null);
   const activeProjectId = activeProject?.id ?? null;
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
-  const taskListProjectIdRef = useRef<string | null>(null);
-  activeProjectIdRef.current = activeProjectId;
+  const taskLoadDecision = useMemo(
+    () => resolveOrchestratorTaskLoad(projectsLoading, activeProjectId),
+    [activeProjectId, projectsLoading],
+  );
+
+  useEffect(() => {
+    activeProjectIdRef.current = activeProjectId;
+  }, [activeProjectId]);
+
+  const activeTaskListResult =
+    taskLoadDecision.kind === 'load' && taskListResult?.projectId === taskLoadDecision.projectId
+      ? taskListResult
+      : null;
+  const tasks = useMemo(() => activeTaskListResult?.tasks ?? [], [activeTaskListResult]);
+  const loading =
+    taskLoadDecision.kind === 'waiting' ||
+    (taskLoadDecision.kind === 'load' && !activeTaskListResult);
+  const taskLoadError = activeTaskListResult?.error ?? null;
+  const activeProjectConfigResult =
+    taskLoadDecision.kind === 'load' &&
+    projectConfigResult?.projectId === taskLoadDecision.projectId
+      ? projectConfigResult
+      : null;
+  const projectConfig = activeProjectConfigResult?.config ?? null;
+  const projectConfigLoading =
+    taskLoadDecision.kind === 'waiting' ||
+    (taskLoadDecision.kind === 'load' && !activeProjectConfigResult);
+  const projectConfigError = activeProjectConfigResult?.error ?? null;
+  const visibleActionError =
+    actionError?.projectId === activeProjectId ? actionError.message : null;
+  const error = visibleActionError ?? taskLoadError;
 
   const groups = useMemo(() => groupOrchestratorTasks(tasks), [tasks]);
   const selectedTask = useMemo(() => {
     return tasks.find((task) => task.id === selectedTaskId) ?? tasks[0] ?? null;
   }, [selectedTaskId, tasks]);
-  const taskLoadDecision = useMemo(
-    () => resolveOrchestratorTaskLoad(projectsLoading, activeProjectId),
-    [activeProjectId, projectsLoading],
-  );
   const selectedTaskCanQueue = canQueueOrchestratorTaskForProject(selectedTask, activeProjectId);
 
   const canCreate =
@@ -158,40 +219,15 @@ export function Orchestrator(): JSX.Element {
     !creating;
 
   useEffect(() => {
-    if (taskLoadDecision.kind === 'waiting') {
-      taskListProjectIdRef.current = null;
-      setTasks([]);
-      setSelectedTaskId(null);
-      setQueueingTaskId(null);
-      setLoading(true);
-      setError(null);
-      return undefined;
-    }
-
-    if (taskLoadDecision.kind === 'empty') {
-      taskListProjectIdRef.current = null;
-      setTasks([]);
-      setSelectedTaskId(null);
-      setLoading(false);
-      setError(null);
-      return undefined;
-    }
+    if (taskLoadDecision.kind !== 'load') return undefined;
 
     let cancelled = false;
     const projectId = taskLoadDecision.projectId;
-    if (taskListProjectIdRef.current !== projectId) {
-      taskListProjectIdRef.current = projectId;
-      setTasks([]);
-      setSelectedTaskId(null);
-      setQueueingTaskId(null);
-    }
-    setLoading(true);
-    setError(null);
     void orchestratorApi
       .listTasks(projectId)
       .then((nextTasks) => {
         if (cancelled || activeProjectIdRef.current !== projectId) return;
-        setTasks(nextTasks);
+        setTaskListResult({ projectId, tasks: nextTasks, error: null });
         setSelectedTaskId((current) => {
           if (current && nextTasks.some((task) => task.id === current)) return current;
           return nextTasks[0]?.id ?? null;
@@ -199,10 +235,12 @@ export function Orchestrator(): JSX.Element {
       })
       .catch((err: unknown) => {
         if (cancelled || activeProjectIdRef.current !== projectId) return;
-        setError(displayOrchestratorErrorMessage(err, t('orchestrator:errors.load')));
-      })
-      .finally(() => {
-        if (!cancelled && activeProjectIdRef.current === projectId) setLoading(false);
+        setTaskListResult({
+          projectId,
+          tasks: [],
+          error: displayOrchestratorErrorMessage(err, t('orchestrator:errors.load')),
+        });
+        setSelectedTaskId(null);
       });
     return () => {
       cancelled = true;
@@ -210,41 +248,23 @@ export function Orchestrator(): JSX.Element {
   }, [taskLoadDecision, t]);
 
   useEffect(() => {
-    if (taskLoadDecision.kind === 'waiting') {
-      setProjectConfig(null);
-      setProjectConfigLoading(true);
-      setProjectConfigError(null);
-      return undefined;
-    }
-
-    if (taskLoadDecision.kind === 'empty') {
-      setProjectConfig(null);
-      setProjectConfigLoading(false);
-      setProjectConfigError(null);
-      return undefined;
-    }
+    if (taskLoadDecision.kind !== 'load') return undefined;
 
     let cancelled = false;
     const projectId = taskLoadDecision.projectId;
-    setProjectConfig(null);
-    setProjectConfigLoading(true);
-    setProjectConfigError(null);
     void orchestratorApi
       .getProjectConfig(projectId)
       .then((config) => {
         if (cancelled || activeProjectIdRef.current !== projectId) return;
-        setProjectConfig(config);
+        setProjectConfigResult({ projectId, config, error: null });
       })
       .catch((err: unknown) => {
         if (cancelled || activeProjectIdRef.current !== projectId) return;
-        setProjectConfigError(
-          displayOrchestratorErrorMessage(err, t('orchestrator:errors.policy')),
-        );
-      })
-      .finally(() => {
-        if (!cancelled && activeProjectIdRef.current === projectId) {
-          setProjectConfigLoading(false);
-        }
+        setProjectConfigResult({
+          projectId,
+          config: null,
+          error: displayOrchestratorErrorMessage(err, t('orchestrator:errors.policy')),
+        });
       });
     return () => {
       cancelled = true;
@@ -262,7 +282,7 @@ export function Orchestrator(): JSX.Element {
     async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
       if (!activeProject) {
-        setError(t('orchestrator:errors.noProject'));
+        setActionError({ projectId: activeProjectId, message: t('orchestrator:errors.noProject') });
         return;
       }
       const projectId = activeProject.id;
@@ -273,26 +293,38 @@ export function Orchestrator(): JSX.Element {
         acceptanceCriteria: form.acceptanceCriteria.trim(),
       };
       if (!payload.title || !payload.goal || !payload.acceptanceCriteria) {
-        setError(t('orchestrator:errors.required'));
+        setActionError({ projectId, message: t('orchestrator:errors.required') });
         return;
       }
       setCreating(true);
-      setError(null);
+      setActionError(null);
       try {
         const created = await orchestratorApi.createTask(payload);
         if (!orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
           return;
         }
-        setTasks((current) => [created, ...current.filter((task) => task.id !== created.id)]);
+        setTaskListResult((current) => ({
+          projectId,
+          tasks: [
+            created,
+            ...(current?.projectId === projectId ? current.tasks : []).filter(
+              (task) => task.id !== created.id,
+            ),
+          ],
+          error: null,
+        }));
         setSelectedTaskId(created.id);
         setForm(EMPTY_FORM);
       } catch (err) {
-        setError(displayOrchestratorErrorMessage(err, t('orchestrator:errors.create')));
+        setActionError({
+          projectId,
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.create')),
+        });
       } finally {
         setCreating(false);
       }
     },
-    [activeProject, form, t],
+    [activeProject, activeProjectId, form, t],
   );
 
   const handleQueueSelectedTask = useCallback(async () => {
@@ -305,7 +337,7 @@ export function Orchestrator(): JSX.Element {
     const taskId = selectedTask.id;
     const projectId = selectedTask.projectId;
     setQueueingTaskId(taskId);
-    setError(null);
+    setActionError(null);
     try {
       const queued = await orchestratorApi.queueTask(taskId);
       if (
@@ -314,14 +346,24 @@ export function Orchestrator(): JSX.Element {
       ) {
         return;
       }
-      setTasks((current) => current.map((task) => (task.id === queued.id ? queued : task)));
+      setTaskListResult((current) => {
+        if (!current || current.projectId !== projectId) return current;
+        return {
+          ...current,
+          tasks: current.tasks.map((task) => (task.id === queued.id ? queued : task)),
+          error: null,
+        };
+      });
       setSelectedTaskId(queued.id);
     } catch (err) {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
-        setError(displayOrchestratorErrorMessage(err, t('orchestrator:errors.queue')));
+        setActionError({
+          projectId,
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.queue')),
+        });
       }
     } finally {
-      setQueueingTaskId(null);
+      setQueueingTaskId((current) => (current === taskId ? null : current));
     }
   }, [selectedTask, t]);
 
