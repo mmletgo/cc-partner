@@ -13,7 +13,7 @@ use crate::commands::workbench::{
     local_write_workbench_session_input,
 };
 use crate::error::AppError;
-use crate::orchestrator::models::OrchestratorTaskRow;
+use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
 use crate::orchestrator::prompt::build_task_prompt;
 use crate::state::AppState;
 use tauri::AppHandle;
@@ -28,7 +28,7 @@ const DEFAULT_TERMINAL_ROWS: u16 = 32;
 ///
 /// Code Logic（这个函数做什么）:
 ///     校验任务绑定本机 Workbench 项目，生成安全分支名，复用 Workbench 本机 helper 创建 worktree/session，
-///     写入 `claude` 与任务 Prompt，最后把任务状态和现场 id 持久化为 Running。
+///     先用 Preparing 条件更新把任务状态和现场 id 持久化为 Running；只有挂账成功后才写入 `claude` 与任务 Prompt。
 pub async fn prepare_visible_runner(
     state: &AppState,
     app_handle: AppHandle,
@@ -58,14 +58,20 @@ pub async fn prepare_visible_runner(
         Some(DEFAULT_TERMINAL_ROWS),
     )
     .await?;
+
+    let running_task = state
+        .orchestrator_repo
+        .mark_task_running(&task.id, &branch_name, &worktree.id, &session.id)
+        .await?;
+    if running_task.status != OrchestratorTaskStatus::Running {
+        return Ok(running_task);
+    }
+
     local_write_workbench_session_input(state, session.id.clone(), "claude\n".to_string()).await?;
     let prompt = build_task_prompt(task, &worktree.path);
     local_write_workbench_session_input(state, session.id.clone(), format!("{prompt}\n")).await?;
 
-    state
-        .orchestrator_repo
-        .mark_task_running(&task.id, &branch_name, &worktree.id, &session.id)
-        .await
+    Ok(running_task)
 }
 
 /// Business Logic（为什么需要这个函数）:

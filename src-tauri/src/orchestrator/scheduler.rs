@@ -83,7 +83,7 @@ pub fn start_orchestrator_scheduler(app_handle: AppHandle, state: AppState) -> C
 ///
 /// Code Logic（这个函数做什么）:
 ///     遍历 enabled 项目配置，在 repo 事务内按并发容量原子 claim 一个 Queued 任务并交给 runner；
-///     runner 失败时仅在任务仍为 Preparing 时把任务置为 Blocked 并追加事件，成功时计入 dispatched。
+///     runner 失败时仅在任务仍为 Preparing 或 bootstrap Running 时把任务置为 Blocked 并追加事件，成功时计入 dispatched。
 pub async fn dispatch_once(state: &AppState, app_handle: AppHandle) -> Result<usize, AppError> {
     let configs = state
         .orchestrator_repo
@@ -113,17 +113,17 @@ pub async fn dispatch_once(state: &AppState, app_handle: AppHandle) -> Result<us
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Runner 准备失败可能与用户 Abort 并发发生，失败补偿必须尊重用户终止，不把 Aborted 改回 Blocked。
+///     Runner 准备失败可能发生在挂账 Running 前后，也可能与用户 Abort 并发发生；失败补偿必须尊重用户终止。
 ///
 /// Code Logic（这个函数做什么）:
-///     使用 expected-status 原子转移仅允许 Preparing→Blocked；命中后追加 blocked event，
+///     使用 expected-status 原子转移仅允许 Preparing/Running→Blocked；命中后追加 blocked event，
 ///     未命中时读取并返回当前任务，不写 blocked event。
 async fn record_runner_failure(
     repo: &OrchestratorRepo,
     task_id: &str,
     reason: &str,
 ) -> Result<OrchestratorTaskRow, AppError> {
-    let Some(blocked_task) = repo
+    let blocked_task = if let Some(task) = repo
         .try_transition_task_status(
             task_id,
             OrchestratorTaskStatus::Preparing,
@@ -131,7 +131,19 @@ async fn record_runner_failure(
             Some(reason),
         )
         .await?
-    else {
+    {
+        task
+    } else if let Some(task) = repo
+        .try_transition_task_status(
+            task_id,
+            OrchestratorTaskStatus::Running,
+            OrchestratorTaskStatus::Blocked,
+            Some(reason),
+        )
+        .await?
+    {
+        task
+    } else {
         return repo.get_task(task_id).await;
     };
 
@@ -255,5 +267,41 @@ mod tests {
         assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
         assert!(persisted.blocked_reason.is_none());
         assert_eq!(event_count, 0);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Runner 已挂账为 Running 后写入终端仍可能失败，此时任务应进入 Blocked 并保留可接管现场。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Running 任务后执行 runner 失败记录 helper，断言状态变为 Blocked、原因保留且 event 只写一条。
+    #[tokio::test]
+    async fn runner_failure_after_running_blocks_and_writes_event() {
+        let (pool, repo) = setup_repo().await;
+        let mut task = task_row("task-1", OrchestratorTaskStatus::Running);
+        task.branch_name = Some("agent/task-1-test".to_string());
+        task.worktree_id = Some("worktree-1".to_string());
+        task.session_id = Some("session-1".to_string());
+        repo.create_task(&task).await.unwrap();
+
+        let returned = record_runner_failure(&repo, &task.id, "prompt write failed")
+            .await
+            .unwrap();
+        let persisted = repo.get_task(&task.id).await.unwrap();
+        let event_count = sqlx::query("SELECT COUNT(*) AS count FROM orchestrator_task_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .try_get::<i64, _>("count")
+            .unwrap();
+
+        assert_eq!(returned.status, OrchestratorTaskStatus::Blocked);
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Blocked);
+        assert_eq!(
+            persisted.blocked_reason.as_deref(),
+            Some("prompt write failed")
+        );
+        assert_eq!(persisted.worktree_id.as_deref(), Some("worktree-1"));
+        assert_eq!(persisted.session_id.as_deref(), Some("session-1"));
+        assert_eq!(event_count, 1);
     }
 }
