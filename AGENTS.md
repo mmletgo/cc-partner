@@ -13,6 +13,7 @@
 - **速记本** — 多页面自动保存文本，支持页面标题、局域网与 GitHub 同步
 - **工作台** — 指定本机或局域网远端项目文件夹，管理 Git worktree、多个项目终端、可交互工作区文件树、文件浏览/编辑工作区和 Git 提交树
 - **移动端 Workbench** — 可信局域网内通过 `/mobile` 手机浏览器远程操作本机 Workbench，桌面端展示访问链接与二维码
+- **Orchestrator 自动编排器** — 项目级任务队列、可见 Runner、验证 evidence 与 full-auto 交付
 - **P2P 自动互联** — 局域网内 mDNS 自动发现
 - **自动更新** — GitHub Releases 检测 / 下载 / 安装
 
@@ -66,6 +67,7 @@ cc-partner/
 │   │   │   ├── Prompts/          # 03-prompts.html
 │   │   │   ├── PromptOptimizer/  # Prompt 优化（本机 Claude CLI pure/headless）
 │   │   │   ├── Workbench/        # 本机/远端项目文件夹 + 多项目终端 + 文件树/文件工作区 + Git 提交树
+│   │   │   ├── Orchestrator/     # 自动编排器全局任务看板
 │   │   │   ├── Devices/          # 04-devices.html
 │   │   │   ├── Settings/         # 05-settings.html
 │   │   │   ├── Welcome/          # 06-welcome.html
@@ -80,7 +82,8 @@ cc-partner/
 │   ├── tsconfig.json
 │   └── package.json
 ├── src-tauri/                    # Tauri 2 Rust 后端（见 src-tauri/CLAUDE.md）
-│   ├── src/                      # lib.rs(入口) config/state/error/commands/models/storage/sync/net/transfer/screenshot/workbench/permissions/hotkey/tray
+│   ├── src/                      # lib.rs(入口) config/state/error/commands/models/storage/sync/net/transfer/screenshot/workbench/orchestrator/permissions/hotkey/tray
+│   │   └── orchestrator/         # 自动编排器任务、调度、Runner 和交付逻辑
 │   ├── migrations/               # SQL schema 文档
 │   ├── capabilities/             # Tauri 权限清单（default.json）
 │   ├── icons/                    # 应用图标

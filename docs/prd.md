@@ -233,6 +233,18 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 文件内容浏览/编辑：图片只读预览；CSV 只读表格预览；SQLite 只读枚举表并预览前 100 行，不执行用户 SQL；代码、Markdown、HTML、JSON、TOML、YAML 和普通文本走文件工作区编辑，代码编辑器需要高亮插件体验；Markdown 支持源码、预览和分栏模式，预览模式可直接编辑，体验接近 Typora，预览中的相对图片通过 active worktree 根内只读资源通道内联，外链、data/blob、绝对路径、根外路径和跨根 symlink 不加载且不写回源 Markdown；HTML 支持源码、sandbox 渲染预览和分栏模式，预览可加载 active worktree 根内相对 CSS、图片、字体和媒体资源，外链、data/blob、绝对路径、根外路径和跨根 symlink 不加载，外部/内联 CSS 的相对 `url()` 按 CSS 文件自身路径解析；JSON/TOML/YAML 提供格式化按钮，保存前必须做语义校验；保存文本文件使用 baseHash 乐观锁防止覆盖外部修改
 - 当前仍不做 Git diff 面板、PR 创建、交互式冲突解决、会话日志持久化归档和批量同步副本；运行期 replay buffer 仅用于移动端首屏和终端重挂载恢复最近输出，不等同于持久会话日志
 
+### 2.16 Orchestrator 自动编排器
+
+**描述**：在 Workbench 项目之上提供自动编排器，用内部任务队列把需求拆成可排队、可运行、可验证和可交付的项目级任务。
+
+**功能点**：
+- 任务队列按项目隔离，支持创建 Draft、入队、Running 完成后触发验证、Blocked 重试和终止
+- 项目级策略控制是否启用 scheduler、最大并发、验证命令、full-auto 交付开关、保留 worktree 规则和重试上限
+- Runner 必须使用 Workbench 可见的 tmux terminal 和任务 worktree，方便用户随时 takeover 或观察 Claude Code 执行现场
+- 后端 complete 命令负责执行验证命令并在通过或跳过验证后按策略完成 commit、推送任务分支、合并主工作区和推送主分支
+- 任务进入 Blocked 时保留原因、worktree/session 入口和 evidence 链；Evidence 记录验证输出、交付阶段结果和失败摘要，供前端任务看板展示与追溯
+- Orchestrator 只拥有全局任务看板和编排状态；Workbench 继续拥有项目现场、terminal takeover、文件和 Git 操作
+
 ## 3. 非功能需求
 
 ### 3.1 跨平台

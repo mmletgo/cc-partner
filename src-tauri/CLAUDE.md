@@ -31,7 +31,7 @@ src/
 ├── sync/              — 向量时钟 + LWW 合并 + engine              [M4]
 ├── net/               — mdns-sd 发现 + axum server + reqwest client [已实现 M3]
 ├── mobile/            — 移动端局域网 `/mobile` 访问 URL 生成（过滤 localhost/loopback）[已实现]
-├── orchestrator/      — 自动编排器后端：任务模型、状态机、SQLite repo、scheduler、Workbench 可见 Runner、Prompt 生成 [部分已实现]
+├── orchestrator/      — 自动编排器后端：任务模型、状态机、SQLite repo、scheduler、Workbench 可见 Runner、Prompt 生成、验证与交付 [已实现]
 ├── transfer/          — 分块传输 + SHA256 + 断点续传              [M5]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
 ├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥 [已实现]
@@ -55,7 +55,7 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 - **交付语义**：`orchestrator/delivery.rs::deliver_task(context,task_id)` 只处理 Delivering 任务；进入 pipeline 后先获取进程内 per-task delivery lock（静态 `Mutex<HashSet<task_id>>` + Drop guard，不持有 MutexGuard 跨 await），锁竞争失败直接返回当前任务且不执行 Git side effect 或写 evidence；项目策略的 `auto_commit/auto_push_task_branch/auto_merge_to_main/auto_push_main` 必须全部为 true，任一关闭都置 Blocked 而不是静默跳过。交付阶段固定为 commit、push branch、merge main、push main：commit 使用确定性手写 message `orchestrator: <title>` 复用 Workbench commit helper，避免依赖 Claude CLI；无可提交改动也写 passed evidence 并记录 current head；push branch 先推任务分支；merge main 复用 Workbench merge helper，merge 成功后源 worktree 可能已被清理；push main 必须从主工作区 cwd 推送当前主分支。每个阶段写 kind=`delivery` evidence，title 包含阶段名，summary 使用 `passed`/`failed`；配置读取、worktree/project 仓储读取、缺失 worktree/project、关闭 delivery flags 等进入 Delivering 后的可预期 preflight 错误都必须写 failed delivery evidence 并仅在当前仍为 Delivering 时置 Blocked；最终 Done/Blocked 写入都必须确认当前仍是 Delivering，未命中返回当前任务且不得覆盖 Aborted。branch push 后 merge 失败用 `merge main failed: ...`，merge 已落本地但 push main 失败用 `main merged locally but push main failed: ...`，主工作区 dirty 的 blocked_reason 必须包含英文 `main worktree is dirty`。
 - **命令层**：`list_orchestrator_tasks(project_id?)` 按项目读队列；`create_orchestrator_task(request)` 创建 Draft；`queue_orchestrator_task(task_id)` 只能通过仓储安全方法把 Draft 任务入队并返回完整 DTO，不能强制回退 Running/Done/Blocked/Aborted 等非 Draft 任务；`list_orchestrator_task_evidence(task_id)` 返回 evidence DTO；`complete_orchestrator_agent_run(task_id)` 通过 Running→Verifying 原子状态转移触发验证，通过/跳过验证后用 Verifying→Delivering 条件转换触发自动交付，重复点击或并发推进时不得重复验证/重复 delivery evidence；命令层捕获 delivery pipeline 未预期 Err 并仅在任务仍为 Delivering 时写 failed delivery evidence + Blocked，避免永久 Delivering；`retry_orchestrator_task(task_id)` 通过 Blocked→Queued 原子状态转移清空 blocked_reason，不立即 dispatch，任务已被 scheduler 领取时不得回退；`abort_orchestrator_task(task_id)` 置 Aborted，不删除 worktree/session；`get_orchestrator_project_config(project_id)` 返回项目策略 DTO；`dispatch_orchestrator_once()` 手动执行一次 scheduler dispatch，返回 `{dispatched}`。
 - **运行时接线**：`AppState.orchestrator_cancel` 保存 scheduler `CancellationToken`；`lib.rs` 在 `app.manage(state)` 后启动 scheduler，在 `RunEvent::Exit` 中 cancel 并记录日志，模式对齐 cloud sync/health 后台任务。
-- **验证命令**：Orchestrator 相关改动优先跑 `cd src-tauri && cargo test orchestrator::prompt --lib && cargo test orchestrator::repo --lib && cargo test orchestrator::delivery --lib && cargo test orchestrator::runner --lib && cargo test orchestrator::scheduler --lib && cargo test commands::orchestrator --lib && cargo check`。
+- **验证命令**：Orchestrator 聚焦验证优先跑 `cd src-tauri && cargo test orchestrator:: --lib && cargo check`；命令层改动另加 `cargo test commands::orchestrator --lib`。
 
 ## 工作台已落地行为约定（workbench/ + storage/workbench_project_repo.rs + commands/workbench.rs + commands/workbench_dependencies.rs）
 
