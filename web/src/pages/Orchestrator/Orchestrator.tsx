@@ -4,7 +4,7 @@
  * Business Logic（为什么需要这个页面）:
  *   用户需要在当前 Workbench 项目下管理项目级自动化任务队列，创建任务、查看任务详情，并把 draft 任务手动入队。
  *   页面同时只读展示当前项目策略，帮助用户确认并发、验证命令以及提交/推送/合并等执行边界。
- *   当前前端只提供任务、验证证据与 blocked 控制入口，不做 Task 7 交付流水线，也不做 Workbench deep link。
+ *   当前前端只提供任务、验证证据与 blocked 控制入口，并可把任务定位回对应 Workbench 上下文。
  *
  * Code Logic（这个组件做什么）:
  *   - 按 activeProject 拉取 Orchestrator 任务列表并按状态分组展示
@@ -12,8 +12,8 @@
  *   - 提供 title/goal/acceptanceCriteria 三个单行输入创建任务
  *   - 允许选中的 draft 任务切换为 queued，并只更新当前列表中的同一任务
  *   - 创建成功后把新任务插入列表顶部、选中新任务并清空表单
- *   - Running 任务可触发后端验证，Blocked 任务可打开 Workbench、重试或终止
- *   - 不实现 Task 7 自动交付，也不处理 Task 8 Workbench deep link 跳转
+ *   - Running 任务可触发后端验证，Blocked 任务可打开 Workbench deep link、重试或终止
+ *   - 不实现 Task 7 自动交付
  *   - hooks 全部位于渲染分支之前，避免 early return 破坏调用顺序
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -222,6 +222,23 @@ function evidenceSummaryTone(summary: string): 'neutral' | 'success' | 'warn' | 
  */
 function evidenceSummaryLabelKey(summary: string): OrchestratorEvidenceSummaryLabelKey {
   return EVIDENCE_SUMMARY_LABEL_KEYS[summary] ?? 'orchestrator:evidence.summary.generic';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Blocked 任务的修复入口应尽量回到任务关联的 Workbench 项目、worktree 和终端窗口。
+ *
+ * Code Logic（这个函数做什么）:
+ *   根据任务中存在的 id 构造 `/workbench` deep link；缺少任务或缺少某个 id 时省略对应 query 参数。
+ */
+function buildWorkbenchTaskUrl(task: OrchestratorTask | null): string {
+  if (!task) return '/workbench';
+  const params = new URLSearchParams();
+  if (task.projectId) params.set('projectId', task.projectId);
+  if (task.worktreeId) params.set('worktreeId', task.worktreeId);
+  if (task.sessionId) params.set('sessionId', task.sessionId);
+  const query = params.toString();
+  return query ? `/workbench?${query}` : '/workbench';
 }
 
 /**
@@ -540,8 +557,8 @@ export function Orchestrator(): JSX.Element {
   }, [completingTaskId, replaceTaskInCurrentProject, selectedTask, t]);
 
   const handleOpenWorkbench = useCallback(() => {
-    navigate('/workbench');
-  }, [navigate]);
+    navigate(buildWorkbenchTaskUrl(selectedTask));
+  }, [navigate, selectedTask]);
 
   const handleRetryTask = useCallback(async () => {
     if (

@@ -15,6 +15,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useLocation } from 'react-router-dom';
 import { listen } from '@tauri-apps/api/event';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -68,6 +69,7 @@ import type {
   WorkbenchWorktree,
 } from '@/lib/types';
 import styles from './Workbench.module.css';
+import { parseWorkbenchDeepLink } from './workbenchDeepLink';
 import {
   canFillPromptIntoTerminal,
   createPromptOptimizerShortcutState,
@@ -755,10 +757,25 @@ function FileTree(props: NestedFileTreeProps) {
  */
 export function Workbench() {
   const { t } = useTranslation(['workbench', 'common', 'promptOptimizer']);
+  const location = useLocation();
   const { status: dependencyStatus } = useWorkbenchDependency();
-  const { activeProjectId, activeProject, refreshProjectSessionStats } = useWorkbenchProjects();
+  const {
+    projects,
+    activeProjectId,
+    activeProject,
+    selectProject,
+    refreshProjectSessionStats,
+  } = useWorkbenchProjects();
   const { resetBuffer: resetTerminalBuffer, removeBuffer: removeTerminalBuffer } =
     useWorkbenchTerminalBuffers();
+  const locationSearch = location.search;
+  const workbenchDeepLink = useMemo(
+    () => parseWorkbenchDeepLink(locationSearch),
+    [locationSearch],
+  );
+  const deepLinkProjectId = workbenchDeepLink.projectId;
+  const deepLinkWorktreeId = workbenchDeepLink.worktreeId;
+  const deepLinkSessionId = workbenchDeepLink.sessionId;
   const [sessions, setSessions] = useState<WorkbenchSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionNameDraft, setSessionNameDraft] = useState<string>('');
@@ -825,6 +842,17 @@ export function Workbench() {
   const formatRequestSeqRef = useRef<Record<string, number>>({});
   const sqlitePreviewRequestSeqRef = useRef<Record<string, number>>({});
   const dirRequestSeqRef = useRef<Record<string, number>>({});
+  const deepLinkApplicationRef = useRef<{
+    search: string;
+    projectId: string | null;
+    worktreeId: string | null;
+    sessionId: string | null;
+  }>({
+    search: locationSearch,
+    projectId: null,
+    worktreeId: null,
+    sessionId: null,
+  });
 
   const activeWorktree = useMemo(
     () => worktrees.find((worktree) => worktree.id === activeWorktreeId) ?? worktrees[0] ?? null,
@@ -1264,6 +1292,68 @@ export function Workbench() {
   useEffect(() => {
     activeWorktreeIdRef.current = activeWorktreeId;
   }, [activeWorktreeId]);
+
+  useEffect(() => {
+    deepLinkApplicationRef.current = {
+      search: locationSearch,
+      projectId: null,
+      worktreeId: null,
+      sessionId: null,
+    };
+  }, [locationSearch]);
+
+  useEffect(() => {
+    if (!deepLinkProjectId) return;
+    const applied = deepLinkApplicationRef.current;
+    if (applied.search !== locationSearch || applied.projectId === deepLinkProjectId) return;
+    if (activeProjectId === deepLinkProjectId) {
+      applied.projectId = deepLinkProjectId;
+      return;
+    }
+    const targetProject = projects.find((project) => project.id === deepLinkProjectId);
+    if (!targetProject) return;
+    applied.projectId = deepLinkProjectId;
+    void selectProject(targetProject);
+  }, [activeProjectId, deepLinkProjectId, locationSearch, projects, selectProject]);
+
+  useEffect(() => {
+    if (!deepLinkWorktreeId) return;
+    if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
+    const applied = deepLinkApplicationRef.current;
+    if (applied.search !== locationSearch || applied.worktreeId === deepLinkWorktreeId) return;
+    if (!worktrees.some((worktree) => worktree.id === deepLinkWorktreeId)) return;
+    applied.worktreeId = deepLinkWorktreeId;
+    setActiveWorktreeId((current) =>
+      current === deepLinkWorktreeId ? current : deepLinkWorktreeId,
+    );
+  }, [
+    activeProjectId,
+    deepLinkProjectId,
+    deepLinkWorktreeId,
+    locationSearch,
+    worktrees,
+  ]);
+
+  useEffect(() => {
+    if (!deepLinkSessionId) return;
+    if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
+    if (deepLinkWorktreeId && activeWorktreeId !== deepLinkWorktreeId) return;
+    const applied = deepLinkApplicationRef.current;
+    if (applied.search !== locationSearch || applied.sessionId === deepLinkSessionId) return;
+    if (!scopedSessions.some((session) => session.id === deepLinkSessionId)) return;
+    applied.sessionId = deepLinkSessionId;
+    if (activeSessionId !== deepLinkSessionId) focusSession(deepLinkSessionId);
+  }, [
+    activeProjectId,
+    activeSessionId,
+    activeWorktreeId,
+    deepLinkProjectId,
+    deepLinkSessionId,
+    deepLinkWorktreeId,
+    focusSession,
+    locationSearch,
+    scopedSessions,
+  ]);
 
   useEffect(() => {
     promptPanelOpenRef.current = promptPanelOpen;
