@@ -432,6 +432,44 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     完成验证、重试等用户动作可能与 scheduler 并发发生，状态推进必须在数据库内一次性校验当前状态，避免旧点击覆盖新状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     执行 `UPDATE ... WHERE id=? AND status=?` 条件更新；命中则返回更新后 Row，未命中时读取当前任务并返回中文业务错误，缺失任务沿用 not_found。
+    pub async fn transition_task_status(
+        &self,
+        task_id: &str,
+        expected_status: OrchestratorTaskStatus,
+        next_status: OrchestratorTaskStatus,
+        blocked_reason: Option<&str>,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(next_status.as_str())
+        .bind(blocked_reason)
+        .bind(now)
+        .bind(task_id)
+        .bind(expected_status.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(task_id).await;
+        }
+
+        let current = self.get_task(task_id).await?;
+        Err(AppError::generic(format!(
+            "任务状态已变化，无法从 {} 切换到 {}，当前状态为 {}",
+            expected_status.as_str(),
+            next_status.as_str(),
+            current.status.as_str()
+        )))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     用户手动入队只应作用于草稿任务，避免运行中、已完成、阻塞或已终止任务被回退到队列。
     ///
     /// Code Logic（这个函数做什么）:
@@ -842,6 +880,59 @@ mod tests {
             assert_eq!(persisted.status, status);
             assert_eq!(persisted.blocked_reason, blocked_reason);
         }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     完成验证和重试任务都依赖 expected-status 原子转移，状态已被其它流程推进时不得被旧操作覆盖。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 Running 任务但要求 Blocked->Queued 转移，断言返回错误且数据库状态仍为 Running。
+    #[tokio::test]
+    async fn transition_task_status_rejects_unexpected_status_without_mutating_task() {
+        let (_pool, repo) = setup_repo().await;
+        let created = task_row("task-1", "project-1", OrchestratorTaskStatus::Running);
+        repo.create_task(&created).await.unwrap();
+
+        let result = repo
+            .transition_task_status(
+                &created.id,
+                OrchestratorTaskStatus::Blocked,
+                OrchestratorTaskStatus::Queued,
+                None,
+            )
+            .await;
+        let persisted = repo.get_task(&created.id).await.unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Running);
+        assert!(persisted.blocked_reason.is_none());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Agent 完成后只能由 Running 任务进入 Verifying，成功路径必须返回更新后的完整任务 Row。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Running 任务后执行 Running->Verifying 条件更新，断言返回值和持久化状态一致。
+    #[tokio::test]
+    async fn transition_task_status_moves_running_to_verifying() {
+        let (_pool, repo) = setup_repo().await;
+        let created = task_row("task-1", "project-1", OrchestratorTaskStatus::Running);
+        repo.create_task(&created).await.unwrap();
+
+        let updated = repo
+            .transition_task_status(
+                &created.id,
+                OrchestratorTaskStatus::Running,
+                OrchestratorTaskStatus::Verifying,
+                None,
+            )
+            .await
+            .unwrap();
+        let persisted = repo.get_task(&created.id).await.unwrap();
+
+        assert_eq!(updated.status, OrchestratorTaskStatus::Verifying);
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Verifying);
+        assert_eq!(updated.id, created.id);
     }
 
     /// Business Logic（为什么需要这个函数）:

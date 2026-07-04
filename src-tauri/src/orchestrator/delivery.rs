@@ -9,7 +9,16 @@
 use crate::error::AppError;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+
+const DEFAULT_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const OUTPUT_TRUNCATED_MARKER: &str = "[output truncated]";
 
 /// 单条验证命令的 shell 调用规格。
 ///
@@ -24,6 +33,32 @@ struct ShellCommandSpec {
     args: Vec<String>,
 }
 
+/// 单条验证命令的执行结果。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     验证 evidence 需要同时展示命令退出状态、stdout/stderr 和是否截断，失败错误也复用同一份格式化输出。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存已按上限截断并转成 UTF-8 文本的 stdout/stderr、退出状态和截断标记。
+struct VerificationCommandOutput {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+    truncated: bool,
+}
+
+/// 单个输出流的受限读取结果。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     stdout/stderr 需要边读边丢弃超出预算的内容，避免验证命令产生海量输出时撑爆内存或 evidence。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存当前流在共享预算内保留下来的字节，以及该流是否发生截断。
+struct LimitedPipeOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     Agent 声称完成后，系统需要在对应 worktree 中执行项目配置的验证命令，并把输出保存为 evidence。
 ///
@@ -34,15 +69,30 @@ pub async fn run_verification_commands(
     cwd: &Path,
     commands: &[String],
 ) -> Result<String, AppError> {
+    run_verification_commands_with_limits(
+        cwd,
+        commands,
+        DEFAULT_VERIFICATION_TIMEOUT,
+        DEFAULT_MAX_OUTPUT_BYTES,
+    )
+    .await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     测试和未来配置需要能用短 timeout/小输出上限验证行为，而生产入口仍使用安全默认值。
+///
+/// Code Logic（这个函数做什么）:
+///     逐条执行验证命令；每条命令应用 timeout 和 stdout+stderr 总量截断，非零退出返回包含截断输出的 AppError。
+pub async fn run_verification_commands_with_limits(
+    cwd: &Path,
+    commands: &[String],
+    timeout: Duration,
+    max_output_bytes: usize,
+) -> Result<String, AppError> {
     let mut combined = String::new();
     for command in commands {
-        let output = run_shell_command(cwd, command).await?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let section = format!(
-            "$ {command}\nexit: {}\nstdout:\n{stdout}\nstderr:\n{stderr}\n",
-            output.status
-        );
+        let output = run_shell_command(cwd, command, timeout, max_output_bytes).await?;
+        let section = format_verification_output(command, &output);
         combined.push_str(&section);
         combined.push('\n');
         if !output.status.success() {
@@ -59,8 +109,13 @@ pub async fn run_verification_commands(
 ///
 /// Code Logic（这个函数做什么）:
 ///     macOS/Linux 优先使用 `$SHELL -lc`，空值回退 `sh -lc`；Windows 使用 `cmd /C`；
-///     并把 stdout/stderr 全量捕获返回。
-async fn run_shell_command(cwd: &Path, command: &str) -> Result<std::process::Output, AppError> {
+///     子进程设置 kill_on_drop 兜底，stdout/stderr 由后台任务流式读取并共享总预算；wait 由 timeout 包裹，超时显式 kill。
+async fn run_shell_command(
+    cwd: &Path,
+    command: &str,
+    timeout: Duration,
+    max_output_bytes: usize,
+) -> Result<VerificationCommandOutput, AppError> {
     let shell_command = build_shell_command(command);
     let mut child = Command::new(&shell_command.program);
     child.args(&shell_command.args);
@@ -69,10 +124,134 @@ async fn run_shell_command(cwd: &Path, command: &str) -> Result<std::process::Ou
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    child
-        .output()
-        .await
-        .map_err(|err| AppError::generic(format!("启动验证命令失败: {command}: {err}")))
+    child.kill_on_drop(true);
+    let mut process = child
+        .spawn()
+        .map_err(|err| AppError::generic(format!("启动验证命令失败: {command}: {err}")))?;
+
+    let stdout = process
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::generic(format!("捕获验证命令 stdout 失败: {command}")))?;
+    let stderr = process
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::generic(format!("捕获验证命令 stderr 失败: {command}")))?;
+    let remaining_budget = Arc::new(Mutex::new(max_output_bytes));
+    let stdout_task = spawn_limited_pipe_reader(stdout, remaining_budget.clone());
+    let stderr_task = spawn_limited_pipe_reader(stderr, remaining_budget);
+
+    let status = match tokio::time::timeout(timeout, process.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(err)) => {
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(AppError::generic(format!(
+                "执行验证命令失败: {command}: {err}"
+            )));
+        }
+        Err(_) => {
+            let _ = process.kill().await;
+            let _ = join_limited_pipe_output("stdout", stdout_task).await;
+            let _ = join_limited_pipe_output("stderr", stderr_task).await;
+            return Err(AppError::generic(format!(
+                "验证命令超时: {command}（timeout={}秒）",
+                timeout.as_secs_f64()
+            )));
+        }
+    };
+
+    let stdout_output = join_limited_pipe_output("stdout", stdout_task).await?;
+    let stderr_output = join_limited_pipe_output("stderr", stderr_task).await?;
+    let truncated = stdout_output.truncated || stderr_output.truncated;
+    Ok(VerificationCommandOutput {
+        status,
+        stdout: String::from_utf8_lossy(&stdout_output.bytes).to_string(),
+        stderr: String::from_utf8_lossy(&stderr_output.bytes).to_string(),
+        truncated,
+    })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     stdout 与 stderr 必须并发读取，避免某个 pipe 写满后阻塞子进程，导致验证命令假死。
+///
+/// Code Logic（这个函数做什么）:
+///     为任意 AsyncRead pipe 启动 tokio 任务，调用 read_limited_pipe 按共享预算保存输出。
+fn spawn_limited_pipe_reader<R>(
+    reader: R,
+    remaining_budget: Arc<Mutex<usize>>,
+) -> JoinHandle<Result<LimitedPipeOutput, std::io::Error>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(read_limited_pipe(reader, remaining_budget))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     验证流程需要把输出读取任务的 panic/IO 错误转换成 AppError，避免后台 join 错误泄漏为不清晰失败。
+///
+/// Code Logic（这个函数做什么）:
+///     await JoinHandle，分别处理任务 join 失败和 pipe 读取 IO 失败，并补充 stdout/stderr 名称。
+async fn join_limited_pipe_output(
+    stream_name: &str,
+    task: JoinHandle<Result<LimitedPipeOutput, std::io::Error>>,
+) -> Result<LimitedPipeOutput, AppError> {
+    task.await
+        .map_err(|err| AppError::generic(format!("读取验证命令 {stream_name} 任务失败: {err}")))?
+        .map_err(|err| AppError::generic(format!("读取验证命令 {stream_name} 失败: {err}")))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     验证命令输出需要在读取过程中执行预算限制，而不是等命令结束后再截断完整缓冲。
+///
+/// Code Logic（这个函数做什么）:
+///     循环读取 pipe；每个 chunk 只把共享剩余预算内的字节追加到结果，超出部分继续读取但丢弃并标记 truncated。
+async fn read_limited_pipe<R>(
+    mut reader: R,
+    remaining_budget: Arc<Mutex<usize>>,
+) -> Result<LimitedPipeOutput, std::io::Error>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0_u8; 8192];
+
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+
+        let mut remaining = remaining_budget.lock().await;
+        let keep = (*remaining).min(read);
+        if keep > 0 {
+            bytes.extend_from_slice(&buffer[..keep]);
+            *remaining -= keep;
+        }
+        if keep < read {
+            truncated = true;
+        }
+    }
+
+    Ok(LimitedPipeOutput { bytes, truncated })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     验证 evidence 和失败错误必须使用同一种文本格式，确保成功、失败、截断时前端展示一致。
+///
+/// Code Logic（这个函数做什么）:
+///     格式化命令、exit、stdout、stderr；若输出被截断，在段落末尾追加固定 marker。
+fn format_verification_output(command: &str, output: &VerificationCommandOutput) -> String {
+    let mut section = format!(
+        "$ {command}\nexit: {}\nstdout:\n{}\nstderr:\n{}\n",
+        output.status, output.stdout, output.stderr
+    );
+    if output.truncated {
+        section.push_str(OUTPUT_TRUNCATED_MARKER);
+        section.push('\n');
+    }
+    section
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -156,6 +335,79 @@ mod tests {
 
         assert!(message.contains("printf failure"));
         assert!(message.contains("failure"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     验证命令可能卡住，任务不能无限停留在 Verifying，超时需要终止子进程并返回可展示错误。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用极短 timeout 执行跨平台 sleep 命令，断言错误包含原命令和 timeout 信息。
+    #[tokio::test]
+    async fn verification_command_timeout_returns_error_with_command_and_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let error = run_verification_commands_with_limits(
+            dir.path(),
+            &[sleep_command()],
+            std::time::Duration::from_millis(50),
+            1024,
+        )
+        .await
+        .expect_err("sleep should timeout");
+        let message = error.to_string();
+
+        assert!(message.contains("timeout") || message.contains("超时"));
+        assert!(message.contains("sleep") || message.contains("ping"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     验证命令可能输出大量日志，evidence 需要有大小上限，避免 SQLite 和前端详情页被巨量文本拖垮。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     执行跨平台大输出命令并设置小输出上限，断言成功输出被截断且带 truncated 标记。
+    #[tokio::test]
+    async fn verification_command_output_is_truncated_with_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let output = run_verification_commands_with_limits(
+            dir.path(),
+            &[large_output_command()],
+            std::time::Duration::from_secs(5),
+            64,
+        )
+        .await
+        .expect("large output command should succeed");
+
+        assert!(output.contains("[output truncated]"));
+        assert!(output.len() < 512);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     超时测试需要一条不会依赖 Unix 工具的 Windows 等价命令，保证 CI 多平台稳定。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Windows 用 ping 本机延迟，Unix/macOS 用 sleep，返回 shell 可执行字符串。
+    #[cfg(test)]
+    fn sleep_command() -> String {
+        if cfg!(windows) {
+            "ping 127.0.0.1 -n 3 >NUL".to_string()
+        } else {
+            "sleep 2".to_string()
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     输出截断测试需要稳定制造超过上限的 stdout，且不依赖项目外部文件。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Windows 用 powershell 输出重复字符，Unix/macOS 用 yes+head 生成有限大输出。
+    #[cfg(test)]
+    fn large_output_command() -> String {
+        if cfg!(windows) {
+            "powershell -NoProfile -Command \"Write-Output ('x' * 2048)\"".to_string()
+        } else {
+            "yes x | head -n 2048".to_string()
+        }
     }
 
     /// Business Logic（为什么需要这个函数）:

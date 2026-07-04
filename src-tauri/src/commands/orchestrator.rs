@@ -86,6 +86,7 @@ fn build_dispatch_once_response(dispatched: usize) -> serde_json::Value {
 ///
 /// Code Logic（这个函数做什么）:
 ///     检查任务状态是否为 Running；不满足时返回中文业务错误。
+#[cfg(test)]
 fn ensure_task_can_complete_agent_run(task: &OrchestratorTaskRow) -> Result<(), AppError> {
     if task.status != OrchestratorTaskStatus::Running {
         return Err(AppError::generic(format!(
@@ -101,6 +102,7 @@ fn ensure_task_can_complete_agent_run(task: &OrchestratorTaskRow) -> Result<(), 
 ///
 /// Code Logic（这个函数做什么）:
 ///     当前状态为 Blocked 时返回 Queued；其它状态返回中文业务错误。
+#[cfg(test)]
 fn retry_orchestrator_task_target_status(
     status: OrchestratorTaskStatus,
 ) -> Result<OrchestratorTaskStatus, AppError> {
@@ -140,6 +142,19 @@ struct VerificationEvidence {
     content: String,
 }
 
+/// 验证失败后需要落库的阻塞结果。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     任务进入 Verifying 后，任一可预期错误都必须同时产生 failed evidence 和 Blocked 原因，避免流程半停在 Verifying。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存最终 blocked_reason 与对应 verificationOutput evidence，便于 side-effect helper 统一落库。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerificationFailureOutcome {
+    reason: String,
+    evidence: VerificationEvidence,
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     验证前置失败也必须落为 failed verificationOutput evidence，用户才能在任务详情看到可审计原因。
 ///
@@ -151,6 +166,31 @@ fn verification_failure_evidence(reason: &str) -> VerificationEvidence {
         title: "验证命令",
         summary: "failed",
         content: reason.to_string(),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     已经进入 Verifying 的任务若遇到配置解析、worktree 读取或验证执行错误，需要统一生成 Blocked 原因与 failed evidence。
+///
+/// Code Logic（这个函数做什么）:
+///     将业务上下文和 AppError 拼接成中文 reason，并复用 verification_failure_evidence 生成 evidence 内容。
+fn verification_failure_outcome(context: &str, err: &AppError) -> VerificationFailureOutcome {
+    let reason = format!("{context}: {err}");
+    VerificationFailureOutcome {
+        evidence: verification_failure_evidence(&reason),
+        reason,
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     缺少 worktree 这类已知失败原因没有底层错误对象，也要走同一 outcome 结构，保持 evidence/Blocked 契约一致。
+///
+/// Code Logic（这个函数做什么）:
+///     直接把 reason 包装成 VerificationFailureOutcome，并让 evidence content 与 blocked_reason 完全一致。
+fn verification_failure_outcome_from_reason(reason: &str) -> VerificationFailureOutcome {
+    VerificationFailureOutcome {
+        reason: reason.to_string(),
+        evidence: verification_failure_evidence(reason),
     }
 }
 
@@ -197,15 +237,43 @@ async fn block_task_with_reason(
 ///     验证命令无法启动或无法定位 worktree 时，任务既要 Blocked，也要保留 failed verification evidence。
 ///
 /// Code Logic（这个函数做什么）:
-///     先用 verification_failure_evidence 构造证据并 add_evidence，再复用 block_task_with_reason 写 Blocked。
+///     先追加 outcome.evidence，再用 outcome.reason 写 Blocked，确保两处展示内容一致。
+async fn block_task_with_verification_outcome(
+    state: &AppState,
+    task_id: &str,
+    outcome: &VerificationFailureOutcome,
+) -> Result<OrchestratorTaskDto, AppError> {
+    add_verification_evidence(state, task_id, &outcome.evidence).await?;
+    block_task_with_reason(state, task_id, &outcome.reason).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     验证命令无法启动或无法定位 worktree 时，任务既要 Blocked，也要保留 failed verification evidence。
+///
+/// Code Logic（这个函数做什么）:
+///     把静态失败原因转换成 VerificationFailureOutcome，再复用统一 side-effect helper 落 evidence 和 Blocked。
 async fn block_task_with_verification_failure(
     state: &AppState,
     task_id: &str,
     reason: &str,
 ) -> Result<OrchestratorTaskDto, AppError> {
-    let evidence = verification_failure_evidence(reason);
-    add_verification_evidence(state, task_id, &evidence).await?;
-    block_task_with_reason(state, task_id, reason).await
+    let outcome = verification_failure_outcome_from_reason(reason);
+    block_task_with_verification_outcome(state, task_id, &outcome).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Verifying 后的 repo/config/delivery 错误都必须统一转成 failed evidence + Blocked，不能把错误直接抛出导致任务永久 Verifying。
+///
+/// Code Logic（这个函数做什么）:
+///     使用 context + AppError 构造 VerificationFailureOutcome，再调用统一 side-effect helper 落库。
+async fn block_task_with_verification_error(
+    state: &AppState,
+    task_id: &str,
+    context: &str,
+    err: AppError,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let outcome = verification_failure_outcome(context, &err);
+    block_task_with_verification_outcome(state, task_id, &outcome).await
 }
 
 /// 查询 Orchestrator 任务列表。
@@ -316,19 +384,21 @@ pub async fn dispatch_orchestrator_once(
 ///     用户在 Workbench 中看到 Claude Code 完成后，需要从 Orchestrator 触发项目验证，并把输出归档为 evidence。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验任务为 Running，切到 Verifying，读取项目验证命令和 worktree cwd，执行验证；
-///     成功写 passed/skipped evidence 并推进 Delivering，失败写 failed evidence 并置 Blocked。
+///     用 expected-status 原子转移执行 Running->Verifying；之后读取项目验证命令和 worktree cwd，执行验证；
+///     Verifying 后的可预期错误统一写 failed evidence 并置 Blocked，成功写 passed/skipped evidence 并推进 Delivering。
 #[tauri::command]
 pub async fn complete_orchestrator_agent_run(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<OrchestratorTaskDto, AppError> {
-    let task = state.orchestrator_repo.get_task(&task_id).await?;
-    ensure_task_can_complete_agent_run(&task)?;
-
-    state
+    let task = state
         .orchestrator_repo
-        .set_task_status(&task.id, OrchestratorTaskStatus::Verifying, None)
+        .transition_task_status(
+            &task_id,
+            OrchestratorTaskStatus::Running,
+            OrchestratorTaskStatus::Verifying,
+            None,
+        )
         .await?;
 
     let Some(worktree_id) = task.worktree_id.as_deref() else {
@@ -340,19 +410,43 @@ pub async fn complete_orchestrator_agent_run(
         .await;
     };
 
-    let Some(worktree) = state.workbench_worktree_repo.get(worktree_id).await? else {
-        return block_task_with_verification_failure(
-            state.inner(),
-            &task.id,
-            &format!("找不到任务 worktree: {worktree_id}"),
-        )
-        .await;
+    let worktree = match state.workbench_worktree_repo.get(worktree_id).await {
+        Ok(Some(worktree)) => worktree,
+        Ok(None) => {
+            return block_task_with_verification_failure(
+                state.inner(),
+                &task.id,
+                &format!("找不到任务 worktree: {worktree_id}"),
+            )
+            .await;
+        }
+        Err(err) => {
+            return block_task_with_verification_error(
+                state.inner(),
+                &task.id,
+                "读取任务 worktree 失败",
+                err,
+            )
+            .await;
+        }
     };
     let cwd = PathBuf::from(&worktree.path);
-    let config = state
+    let config = match state
         .orchestrator_repo
         .get_or_create_project_config(&task.project_id)
-        .await?;
+        .await
+    {
+        Ok(config) => config,
+        Err(err) => {
+            return block_task_with_verification_error(
+                state.inner(),
+                &task.id,
+                "读取项目验证策略失败",
+                err,
+            )
+            .await;
+        }
+    };
 
     if config.verification_commands.is_empty() {
         state
@@ -396,8 +490,7 @@ pub async fn complete_orchestrator_agent_run(
             Ok(OrchestratorTaskDto::from(delivering))
         }
         Err(err) => {
-            let reason = format!("验证失败: {err}");
-            block_task_with_verification_failure(state.inner(), &task.id, &reason).await
+            block_task_with_verification_error(state.inner(), &task.id, "验证失败", err).await
         }
     }
 }
@@ -408,17 +501,20 @@ pub async fn complete_orchestrator_agent_run(
 ///     用户处理完 blocked 原因后，需要把任务重新放回队列，但不应立即 dispatch。
 ///
 /// Code Logic（这个函数做什么）:
-///     只允许 Blocked 状态转 Queued，并清空 blocked_reason；worktree/session 不做删除。
+///     通过 repo expected-status 原子转移只允许 Blocked->Queued，并清空 blocked_reason；worktree/session 不做删除。
 #[tauri::command]
 pub async fn retry_orchestrator_task(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<OrchestratorTaskDto, AppError> {
-    let task = state.orchestrator_repo.get_task(&task_id).await?;
-    let target = retry_orchestrator_task_target_status(task.status)?;
     let updated = state
         .orchestrator_repo
-        .set_task_status(&task.id, target, None)
+        .transition_task_status(
+            &task_id,
+            OrchestratorTaskStatus::Blocked,
+            OrchestratorTaskStatus::Queued,
+            None,
+        )
         .await?;
     Ok(OrchestratorTaskDto::from(updated))
 }
@@ -589,6 +685,24 @@ mod tests {
         assert_eq!(evidence.title, "验证命令");
         assert_eq!(evidence.summary, "failed");
         assert_eq!(evidence.content, "任务缺少 worktree，无法运行验证命令。");
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     任务进入 Verifying 后，策略 JSON 损坏这类可预期错误必须统一转成 failed evidence 和 Blocked 原因。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用验证失败 outcome helper，断言上下文和底层错误会进入 reason 与 evidence content。
+    #[test]
+    fn verification_failure_outcome_includes_context_error_and_failed_evidence() {
+        let error = AppError::generic("Orchestrator 验证命令解析失败: expected value");
+
+        let outcome = verification_failure_outcome("读取项目验证策略失败", &error);
+
+        assert!(outcome.reason.contains("读取项目验证策略失败"));
+        assert!(outcome.reason.contains("expected value"));
+        assert_eq!(outcome.evidence.kind, "verificationOutput");
+        assert_eq!(outcome.evidence.summary, "failed");
+        assert_eq!(outcome.evidence.content, outcome.reason);
     }
 
     /// Business Logic（为什么需要这个函数）:
