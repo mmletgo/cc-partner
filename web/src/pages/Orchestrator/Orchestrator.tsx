@@ -2,8 +2,9 @@
  * Orchestrator 页面 - 自动化任务编排入口
  *
  * Business Logic（为什么需要这个页面）:
- *   用户需要在当前 Workbench 项目下创建自动化任务，并快速查看任务队列、当前任务详情和证据区域占位。
- *   Task 3 只交付前端 shell，不启动 scheduler/runner，也不读取真实 evidence。
+ *   用户需要在当前 Workbench 项目下管理项目级自动化任务队列，创建任务、查看任务详情，并把 draft 任务手动入队。
+ *   页面同时只读展示当前项目策略，帮助用户确认并发、验证命令以及提交/推送/合并等执行边界。
+ *   当前前端只提供任务与项目策略入口，不启动 scheduler/runner/delivery，也不打开 Workbench deep link。
  *
  * Code Logic（这个组件做什么）:
  *   - 按 activeProject 拉取 Orchestrator 任务列表并按状态分组展示
@@ -11,6 +12,7 @@
  *   - 提供 title/goal/acceptanceCriteria 三个单行输入创建任务
  *   - 允许选中的 draft 任务切换为 queued，并只更新当前列表中的同一任务
  *   - 创建成功后把新任务插入列表顶部、选中新任务并清空表单
+ *   - 不启动 scheduler/runner/delivery，也不处理 Workbench deep link 跳转
  *   - hooks 全部位于渲染分支之前，避免 early return 破坏调用顺序
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
