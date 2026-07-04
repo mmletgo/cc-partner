@@ -404,7 +404,6 @@ export function Orchestrator(): JSX.Element {
                 <>
                   <div className={styles.detailTitleRow}>
                     <h3 className={styles.detailTitle}>{selectedTask.title}</h3>
-                    <span className={styles.detailId}>{selectedTask.id}</span>
                   </div>
                   <div className={styles.detailBlock}>
                     <span className={styles.label}>{t('orchestrator:detail.goal')}</span>

@@ -1,4 +1,4 @@
-/* Orchestrator 页面 shell：任务队列、详情、创建表单与证据占位。 */
+/* Orchestrator 页面 shell：任务队列、详情、创建表单与项目策略展示。 */
 
 .page {
   width: 100%;
@@ -219,16 +219,6 @@
   line-height: var(--leading-tight);
   letter-spacing: var(--tracking-normal);
   color: var(--fg);
-  overflow-wrap: anywhere;
-}
-
-.detailId {
-  flex: 0 1 auto;
-  min-width: 0;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: var(--leading-normal);
-  color: var(--meta);
   overflow-wrap: anywhere;
 }
 
