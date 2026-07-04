@@ -251,6 +251,46 @@ export interface PromptOptimizeResponse {
   optimizedEn: string;
 }
 
+/** Orchestrator 任务生命周期状态（对齐 Rust OrchestratorTaskStatus）。 */
+export type OrchestratorTaskStatus =
+  | 'draft'
+  | 'queued'
+  | 'preparing'
+  | 'running'
+  | 'verifying'
+  | 'delivering'
+  | 'done'
+  | 'blocked'
+  | 'aborted';
+
+/**
+ * Orchestrator 任务 DTO（对齐 Rust OrchestratorTaskDto，camelCase）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   前端后续任务队列页面需要展示任务目标、验收标准、执行关联和阻塞状态。
+ *
+ * Code Logic（字段说明）:
+ *   status 表示任务生命周期；worktree/session/branch 为后续 runner 绑定信息，当前创建时可为空。
+ */
+export interface OrchestratorTask {
+  id: string;
+  projectId: string;
+  title: string;
+  goal: string;
+  acceptanceCriteria: string;
+  status: OrchestratorTaskStatus;
+  priority: number;
+  branchName: string | null;
+  worktreeId: string | null;
+  sessionId: string | null;
+  blockedReason: string | null;
+  attempt: number;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
 /** 工作台项目来源类型：本机项目或局域网远端项目。 */
 export type WorkbenchProjectKind = 'local' | 'remote' | string;
 

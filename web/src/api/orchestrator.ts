@@ -1,0 +1,85 @@
+/**
+ * Orchestrator API - 通过 Tauri invoke 调用 Rust 编排任务命令
+ *
+ * Business Logic（为什么需要这个模块）:
+ *   Orchestrator 前端页面后续需要读取项目任务队列并创建草稿任务。
+ *
+ * Code Logic（这个模块做什么）:
+ *   封装 list/create 两个 invoke，并导出纯参数构造 helper 供契约测试覆盖。
+ */
+
+import { invoke } from './client';
+import type { OrchestratorTask } from '@/lib/types';
+
+/**
+ * 创建 Orchestrator 任务的前端请求。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   用户创建任务时只填写项目、标题、目标、验收标准和可选优先级。
+ *
+ * Code Logic（这个类型做什么）:
+ *   字段保持 camelCase，直接对应 Rust CreateOrchestratorTaskRequest 的 serde 入参。
+ */
+export interface CreateOrchestratorTaskRequest {
+  projectId: string;
+  title: string;
+  goal: string;
+  acceptanceCriteria: string;
+  priority?: number;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   任务列表既支持项目筛选，也支持空项目参数查看全局任务，参数需要稳定归一。
+ *
+ * Code Logic（这个函数做什么）:
+ *   projectId 首尾空白会被 trim；空值或空白字符串统一转为 null。
+ */
+export function buildListOrchestratorTasksInvokeArgs(
+  projectId?: string | null,
+): Record<string, unknown> {
+  return {
+    projectId: projectId?.trim() || null,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   创建任务时前端必须把 request 作为单个命名参数传给 Tauri command，避免字段散落。
+ *
+ * Code Logic（这个函数做什么）:
+ *   仅包装 `{ request }`，不重命名、不清理字段，让后端负责业务校验与文本归一。
+ */
+export function buildCreateOrchestratorTaskInvokeArgs(
+  request: CreateOrchestratorTaskRequest,
+): Record<string, unknown> {
+  return { request };
+}
+
+export const orchestratorApi = {
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Orchestrator 任务页需要读取某个项目下的任务列表。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 list_orchestrator_tasks，并通过 helper 归一化 projectId 参数。
+   */
+  listTasks: (projectId?: string | null) =>
+    invoke<OrchestratorTask[]>(
+      'list_orchestrator_tasks',
+      buildListOrchestratorTasksInvokeArgs(projectId),
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户提交任务表单后，需要创建后端草稿任务并返回完整 DTO。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 create_orchestrator_task，并保持 request 字段原样交给后端校验。
+   */
+  createTask: (request: CreateOrchestratorTaskRequest) =>
+    invoke<OrchestratorTask>(
+      'create_orchestrator_task',
+      buildCreateOrchestratorTaskInvokeArgs(request),
+    ),
+};

@@ -42,10 +42,10 @@ use crate::commands::{
     cc_history as cc_history_cmd, claude_code_assets as claude_code_assets_cmd,
     claude_md as claude_md_cmd, cloud_sync as cloud_sync_cmd, config as config_cmd,
     devices as device_cmd, github_trending as github_trending_cmd, health as health_cmd,
-    mobile as mobile_cmd, permissions as permissions_cmd, prompt_optimizer as prompt_optimizer_cmd,
-    prompts as prompt_cmd, scratchpad as scratchpad_cmd, screenshot as screenshot_cmd,
-    ssh_target as ssh_target_cmd, sync as sync_cmd, transfer as transfer_cmd,
-    updater as updater_cmd, workbench as workbench_cmd,
+    mobile as mobile_cmd, orchestrator as orchestrator_cmd, permissions as permissions_cmd,
+    prompt_optimizer as prompt_optimizer_cmd, prompts as prompt_cmd, scratchpad as scratchpad_cmd,
+    screenshot as screenshot_cmd, ssh_target as ssh_target_cmd, sync as sync_cmd,
+    transfer as transfer_cmd, updater as updater_cmd, workbench as workbench_cmd,
     workbench_dependencies as workbench_dependency_cmd,
 };
 use crate::net::{discovery, http_server, peer_client::PeerClient};
@@ -588,6 +588,9 @@ pub fn run() {
             // Prompt 优化（复用 Claude CLI pure/headless helper，不保存历史）
             prompt_optimizer_cmd::optimize_prompt,
             prompt_optimizer_cmd::stream_optimize_prompt_to_workbench_session,
+            // Orchestrator 任务 API（任务列表 / 创建草稿任务）
+            orchestrator_cmd::list_orchestrator_tasks,
+            orchestrator_cmd::create_orchestrator_task,
             // M10 健康提醒（14 命令：配置/状态/开关/暂停/贪睡/跳过/配置回写/统计/活动明细/喝水/跳过喝水/延迟喝水/全屏遮罩/恢复默认）
             health_cmd::get_health_config,
             health_cmd::get_default_health_config,
