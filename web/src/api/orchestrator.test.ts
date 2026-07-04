@@ -1,5 +1,6 @@
 import {
   buildCreateOrchestratorTaskInvokeArgs,
+  buildOrchestratorTaskIdInvokeArgs,
   buildGetOrchestratorProjectConfigInvokeArgs,
   buildListOrchestratorTasksInvokeArgs,
   buildQueueOrchestratorTaskInvokeArgs,
@@ -56,6 +57,13 @@ const configArgs = buildGetOrchestratorProjectConfigInvokeArgs(' project-1 ');
 assert(
   JSON.stringify(configArgs) === JSON.stringify({ projectId: 'project-1' }),
   'getProjectConfig should trim projectId before invoking backend',
+);
+
+const taskIdArgs = buildOrchestratorTaskIdInvokeArgs(' task-1 ');
+
+assert(
+  JSON.stringify(taskIdArgs) === JSON.stringify({ taskId: 'task-1' }),
+  'task id commands should trim taskId before invoking backend',
 );
 
 console.log('orchestrator.test.ts passed');

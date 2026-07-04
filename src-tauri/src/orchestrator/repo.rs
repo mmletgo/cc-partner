@@ -4,7 +4,8 @@
 
 use crate::error::AppError;
 use crate::orchestrator::models::{
-    OrchestratorProjectConfigDto, OrchestratorTaskRow, OrchestratorTaskStatus,
+    OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskRow,
+    OrchestratorTaskStatus,
 };
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
@@ -18,6 +19,7 @@ const PROJECT_CONFIG_COLUMNS: &str = "project_id, enabled, max_concurrent_tasks,
     verification_commands_json, auto_commit, auto_push_task_branch, auto_merge_to_main, \
     auto_push_main, retry_limit, retain_worktree_on_done, retain_worktree_on_blocked, \
     created_at, updated_at";
+const EVIDENCE_COLUMNS: &str = "id, task_id, kind, title, summary, content, created_at";
 
 pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestrator_tasks (
   id TEXT PRIMARY KEY,
@@ -530,6 +532,25 @@ impl OrchestratorRepo {
         .await?;
         Ok(())
     }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Orchestrator 详情页需要按任务读取验证输出和交付证据，且不能混入其它任务的记录。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 task_id 查询 orchestrator_task_evidence，并按 created_at ASC、id ASC 稳定排序后转换 DTO。
+    pub async fn list_evidence(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<OrchestratorEvidenceDto>, AppError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {EVIDENCE_COLUMNS} FROM orchestrator_task_evidence \
+             WHERE task_id = ? ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_evidence).collect()
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -600,6 +621,23 @@ fn row_to_project_config(row: &SqliteRow) -> Result<OrchestratorProjectConfigDto
         retain_worktree_on_blocked: sqlite_bool(row.try_get("retain_worktree_on_blocked")?),
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+    })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Evidence 表字段需要统一投影为前端 DTO，避免命令层直接依赖 SQLite row。
+///
+/// Code Logic（这个函数做什么）:
+///     从 SqliteRow 读取 orchestrator_task_evidence 全字段并组装 OrchestratorEvidenceDto。
+fn row_to_evidence(row: &SqliteRow) -> Result<OrchestratorEvidenceDto, AppError> {
+    Ok(OrchestratorEvidenceDto {
+        id: row.try_get("id")?,
+        task_id: row.try_get("task_id")?,
+        kind: row.try_get("kind")?,
+        title: row.try_get("title")?,
+        summary: row.try_get("summary")?,
+        content: row.try_get("content")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 
@@ -1147,5 +1185,32 @@ mod tests {
         assert_eq!(running.worktree_id.as_deref(), Some("worktree-1"));
         assert_eq!(running.session_id.as_deref(), Some("session-1"));
         assert!(running.started_at.is_some());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     验证阶段写入的 evidence 必须能按任务读取，页面才能展示当前任务的验证输出。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     追加一条 verificationOutput 证据，再按 task_id 读取并断言 kind 与内容保持原样。
+    #[tokio::test]
+    async fn evidence_is_listed_by_task() {
+        let (_pool, repo) = setup_repo().await;
+
+        repo.add_evidence(
+            "task-1",
+            "verificationOutput",
+            "npm test",
+            "passed",
+            "output",
+        )
+        .await
+        .unwrap();
+        let items = repo.list_evidence("task-1").await.unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "verificationOutput");
+        assert_eq!(items[0].title, "npm test");
+        assert_eq!(items[0].summary, "passed");
+        assert_eq!(items[0].content, "output");
     }
 }

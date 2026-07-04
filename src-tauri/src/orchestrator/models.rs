@@ -175,6 +175,26 @@ pub struct OrchestratorProjectConfigDto {
     pub updated_at: String,
 }
 
+/// Orchestrator 任务证据 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     Agent 完成后，验证命令输出需要作为可审计证据展示给用户，帮助用户判断任务是否可交付。
+///
+/// Code Logic（这个结构体做什么）:
+///     字段与 orchestrator_task_evidence 表一一对应，使用 camelCase 序列化给前端。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct OrchestratorEvidenceDto {
+    pub id: String,
+    pub task_id: String,
+    pub kind: String,
+    pub title: String,
+    pub summary: String,
+    pub content: String,
+    pub created_at: String,
+}
+
 impl OrchestratorTaskRow {
     /// Business Logic（为什么需要这个函数）:
     ///     命令层返回任务时不应暴露内部枚举和 snake_case 语义，需要统一 DTO 转换入口。

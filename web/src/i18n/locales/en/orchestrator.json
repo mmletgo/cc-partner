@@ -32,7 +32,12 @@
     "updatedAt": "Updated",
     "unassigned": "Unassigned",
     "blockedReason": "Blocked Reason",
-    "queue": "Queue"
+    "noBlockedReason": "The task is blocked, but no detailed reason was returned.",
+    "queue": "Queue",
+    "completeAgentRun": "Claude Code finished, start verification",
+    "openWorkbench": "Open Workbench",
+    "retry": "Retry",
+    "abort": "Abort"
   },
   "create": {
     "title": "Create Task",
@@ -47,9 +52,18 @@
   },
   "evidence": {
     "title": "Evidence",
-    "subtitle": "After a task runs, verification output and delivery records will appear here.",
+    "subtitle": "Verification output and delivery records appear here.",
     "placeholderLabel": "Placeholder",
-    "placeholderBody": "Select a task to review run results, verification output, and delivery records here."
+    "placeholderBody": "Select a task to review run results, verification output, and delivery records here.",
+    "loading": "Loading evidence...",
+    "emptyTitle": "No evidence yet",
+    "emptyBody": "Command output appears here after task verification.",
+    "summary": {
+      "passed": "Passed",
+      "failed": "Failed",
+      "skipped": "Skipped",
+      "generic": "Record"
+    }
   },
   "policy": {
     "title": "Project Policy",
@@ -77,6 +91,10 @@
     "create": "Failed to create the task.",
     "queue": "Failed to queue the task.",
     "policy": "Failed to load project policy.",
+    "evidence": "Failed to load evidence.",
+    "complete": "Failed to start verification.",
+    "retry": "Failed to retry the task.",
+    "abort": "Failed to abort the task.",
     "noProject": "Select a Workbench project from the sidebar first.",
     "required": "Fill in title, goal, and acceptance criteria."
   }

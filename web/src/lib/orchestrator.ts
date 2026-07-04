@@ -128,6 +128,36 @@ export function canQueueOrchestratorTaskForProject(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   Running 任务详情才应显示“Claude Code 已完成，开始验证”，且项目切换后不能操作旧项目任务。
+ *
+ * Code Logic（这个函数做什么）:
+ *   对 null 做安全短路；仅当 task.status 为 running 且 projectId 匹配当前项目时返回 true。
+ */
+export function canCompleteAgentRunForProject(
+  task: OrchestratorTask | null,
+  currentProjectId: string | null | undefined,
+): boolean {
+  if (!task || task.status !== 'running') return false;
+  return task.projectId === currentProjectId;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Blocked 任务详情才应显示打开 Workbench、重试和终止控制，避免误操作其它状态任务。
+ *
+ * Code Logic（这个函数做什么）:
+ *   对 null 做安全短路；仅当 task.status 为 blocked 且 projectId 匹配当前项目时返回 true。
+ */
+export function canControlBlockedTaskForProject(
+  task: OrchestratorTask | null,
+  currentProjectId: string | null | undefined,
+): boolean {
+  if (!task || task.status !== 'blocked') return false;
+  return task.projectId === currentProjectId;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   队列和详情区域需要用一致颜色表达任务状态，并且只能使用 Pill 已支持的 tone。
  *
  * Code Logic（这个函数做什么）:

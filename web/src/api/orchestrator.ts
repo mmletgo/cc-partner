@@ -9,7 +9,7 @@
  */
 
 import { invoke } from './client';
-import type { OrchestratorProjectConfig, OrchestratorTask } from '@/lib/types';
+import type { OrchestratorEvidence, OrchestratorProjectConfig, OrchestratorTask } from '@/lib/types';
 
 /**
  * 创建 Orchestrator 任务的前端请求。
@@ -64,6 +64,17 @@ export function buildCreateOrchestratorTaskInvokeArgs(
  *   taskId 首尾空白会被 trim，再包装成 `{ taskId }` 供 invoke 使用。
  */
 export function buildQueueOrchestratorTaskInvokeArgs(taskId: string): Record<string, unknown> {
+  return buildOrchestratorTaskIdInvokeArgs(taskId);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   多个 Orchestrator 命令都只接收 taskId，统一参数归一能避免 helper 行为漂移。
+ *
+ * Code Logic（这个函数做什么）:
+ *   taskId 首尾空白会被 trim，再包装成 `{ taskId }` 供 invoke 使用。
+ */
+export function buildOrchestratorTaskIdInvokeArgs(taskId: string): Record<string, unknown> {
   return { taskId: taskId.trim() };
 }
 
@@ -132,4 +143,50 @@ export const orchestratorApi = {
       'get_orchestrator_project_config',
       buildGetOrchestratorProjectConfigInvokeArgs(projectId),
     ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   任务详情需要读取当前任务的验证输出与交付证据。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 list_orchestrator_task_evidence，并通过统一 taskId helper 归一参数。
+   */
+  listEvidence: (taskId: string) =>
+    invoke<OrchestratorEvidence[]>(
+      'list_orchestrator_task_evidence',
+      buildOrchestratorTaskIdInvokeArgs(taskId),
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户确认 Claude Code 已完成后，需要触发后端验证并推进任务状态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 complete_orchestrator_agent_run，并返回更新后的任务 DTO。
+   */
+  completeAgentRun: (taskId: string) =>
+    invoke<OrchestratorTask>(
+      'complete_orchestrator_agent_run',
+      buildOrchestratorTaskIdInvokeArgs(taskId),
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Blocked 任务处理完原因后，需要重新进入队列等待后续调度。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 retry_orchestrator_task，并返回更新后的任务 DTO。
+   */
+  retryTask: (taskId: string) =>
+    invoke<OrchestratorTask>('retry_orchestrator_task', buildOrchestratorTaskIdInvokeArgs(taskId)),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户决定停止任务时，需要把任务置为 Aborted 但保留 worktree/session。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 abort_orchestrator_task，并返回更新后的任务 DTO。
+   */
+  abortTask: (taskId: string) =>
+    invoke<OrchestratorTask>('abort_orchestrator_task', buildOrchestratorTaskIdInvokeArgs(taskId)),
 };

@@ -605,6 +605,10 @@ pub fn run() {
             orchestrator_cmd::create_orchestrator_task,
             orchestrator_cmd::queue_orchestrator_task,
             orchestrator_cmd::get_orchestrator_project_config,
+            orchestrator_cmd::list_orchestrator_task_evidence,
+            orchestrator_cmd::complete_orchestrator_agent_run,
+            orchestrator_cmd::retry_orchestrator_task,
+            orchestrator_cmd::abort_orchestrator_task,
             orchestrator_cmd::dispatch_orchestrator_once,
             // M10 健康提醒（14 命令：配置/状态/开关/暂停/贪睡/跳过/配置回写/统计/活动明细/喝水/跳过喝水/延迟喝水/全屏遮罩/恢复默认）
             health_cmd::get_health_config,

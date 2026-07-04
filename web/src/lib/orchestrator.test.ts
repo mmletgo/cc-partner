@@ -3,6 +3,8 @@ import type { PillTone } from '@/components/primitives';
 import {
   canQueueOrchestratorTask,
   canQueueOrchestratorTaskForProject,
+  canCompleteAgentRunForProject,
+  canControlBlockedTaskForProject,
   groupOrchestratorTasks,
   ORCHESTRATOR_STATUSES,
   orchestratorCreateResultMatchesProject,
@@ -135,6 +137,31 @@ assert(
 assert(
   !canQueueOrchestratorTaskForProject(null, 'project-1'),
   'canQueueOrchestratorTaskForProject should reject null tasks',
+);
+
+assert(
+  canCompleteAgentRunForProject(createTask('running-same-project', 'running'), 'project-1'),
+  'canCompleteAgentRunForProject should allow running tasks from the active project',
+);
+assert(
+  !canCompleteAgentRunForProject(createTask('running-other-project', 'running', 'project-2'), 'project-1'),
+  'canCompleteAgentRunForProject should reject running tasks from another project',
+);
+assert(
+  !canCompleteAgentRunForProject(createTask('queued-complete', 'queued'), 'project-1'),
+  'canCompleteAgentRunForProject should reject non-running tasks',
+);
+assert(
+  canControlBlockedTaskForProject(createTask('blocked-same-project', 'blocked'), 'project-1'),
+  'canControlBlockedTaskForProject should allow blocked tasks from the active project',
+);
+assert(
+  !canControlBlockedTaskForProject(createTask('blocked-other-project', 'blocked', 'project-2'), 'project-1'),
+  'canControlBlockedTaskForProject should reject blocked tasks from another project',
+);
+assert(
+  !canControlBlockedTaskForProject(createTask('running-blocked-control', 'running'), 'project-1'),
+  'canControlBlockedTaskForProject should reject non-blocked tasks',
 );
 
 console.log('orchestrator.test.ts passed');

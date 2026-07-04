@@ -1,9 +1,11 @@
 use crate::error::AppError;
 use crate::orchestrator::models::{
-    OrchestratorProjectConfigDto, OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus,
+    OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskDto,
+    OrchestratorTaskRow, OrchestratorTaskStatus,
 };
 use crate::state::AppState;
 use chrono::Utc;
+use std::path::PathBuf;
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
@@ -79,6 +81,67 @@ fn build_dispatch_once_response(dispatched: usize) -> serde_json::Value {
     serde_json::json!({ "dispatched": dispatched })
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     Agent 完成按钮只能用于 Running 任务，避免草稿、排队、交付或终态任务被误推进验证阶段。
+///
+/// Code Logic（这个函数做什么）:
+///     检查任务状态是否为 Running；不满足时返回中文业务错误。
+fn ensure_task_can_complete_agent_run(task: &OrchestratorTaskRow) -> Result<(), AppError> {
+    if task.status != OrchestratorTaskStatus::Running {
+        return Err(AppError::generic(format!(
+            "只有运行中的任务可以开始验证，当前状态为 {}",
+            task.status.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Blocked UI 的重试按钮只应重新排队阻塞任务，避免运行中任务被强行回退。
+///
+/// Code Logic（这个函数做什么）:
+///     当前状态为 Blocked 时返回 Queued；其它状态返回中文业务错误。
+fn retry_orchestrator_task_target_status(
+    status: OrchestratorTaskStatus,
+) -> Result<OrchestratorTaskStatus, AppError> {
+    if status == OrchestratorTaskStatus::Blocked {
+        Ok(OrchestratorTaskStatus::Queued)
+    } else {
+        Err(AppError::generic(format!(
+            "只有阻塞任务可以重试，当前状态为 {}",
+            status.as_str()
+        )))
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     用户终止任务时只需要进入 Aborted 状态，worktree/session 保留给用户人工处理。
+///
+/// Code Logic（这个函数做什么）:
+///     返回固定 Aborted 目标状态，命令层负责持久化且不删除任何执行现场。
+fn abort_orchestrator_task_target_status(
+    _status: OrchestratorTaskStatus,
+) -> OrchestratorTaskStatus {
+    OrchestratorTaskStatus::Aborted
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     验证失败、缺少 worktree 或找不到 worktree 时，任务应进入 Blocked 并保留明确原因。
+///
+/// Code Logic（这个函数做什么）:
+///     调用仓储 set_task_status 写入 Blocked 和 blocked_reason，再转换为 DTO。
+async fn block_task_with_reason(
+    state: &AppState,
+    task_id: &str,
+    reason: &str,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let task = state
+        .orchestrator_repo
+        .set_task_status(task_id, OrchestratorTaskStatus::Blocked, Some(reason))
+        .await?;
+    Ok(OrchestratorTaskDto::from(task))
+}
+
 /// 查询 Orchestrator 任务列表。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -133,6 +196,21 @@ pub async fn get_orchestrator_project_config(
         .await
 }
 
+/// 查询 Orchestrator 任务证据列表。
+///
+/// Business Logic（为什么需要这个函数）:
+///     任务详情右侧 evidence 卡需要读取当前任务的验证输出与交付证据。
+///
+/// Code Logic（这个函数做什么）:
+///     透传 task_id 给仓储 list_evidence，并返回 camelCase DTO 列表。
+#[tauri::command]
+pub async fn list_orchestrator_task_evidence(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<Vec<OrchestratorEvidenceDto>, AppError> {
+    state.orchestrator_repo.list_evidence(&task_id).await
+}
+
 /// 将 Orchestrator 草稿任务加入队列。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -164,6 +242,149 @@ pub async fn dispatch_orchestrator_once(
     let dispatched =
         crate::orchestrator::scheduler::dispatch_once(state.inner(), app_handle).await?;
     Ok(build_dispatch_once_response(dispatched))
+}
+
+/// 标记 Agent 已完成并执行验证命令。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在 Workbench 中看到 Claude Code 完成后，需要从 Orchestrator 触发项目验证，并把输出归档为 evidence。
+///
+/// Code Logic（这个函数做什么）:
+///     校验任务为 Running，切到 Verifying，读取项目验证命令和 worktree cwd，执行验证；
+///     成功写 passed/skipped evidence 并推进 Delivering，失败写 failed evidence 并置 Blocked。
+#[tauri::command]
+pub async fn complete_orchestrator_agent_run(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let task = state.orchestrator_repo.get_task(&task_id).await?;
+    ensure_task_can_complete_agent_run(&task)?;
+    let Some(worktree_id) = task.worktree_id.as_deref() else {
+        return block_task_with_reason(
+            state.inner(),
+            &task.id,
+            "任务缺少 worktree，无法运行验证命令。",
+        )
+        .await;
+    };
+
+    state
+        .orchestrator_repo
+        .set_task_status(&task.id, OrchestratorTaskStatus::Verifying, None)
+        .await?;
+
+    let config = state
+        .orchestrator_repo
+        .get_or_create_project_config(&task.project_id)
+        .await?;
+    let Some(worktree) = state.workbench_worktree_repo.get(worktree_id).await? else {
+        return block_task_with_reason(
+            state.inner(),
+            &task.id,
+            &format!("找不到任务 worktree: {worktree_id}"),
+        )
+        .await;
+    };
+    let cwd = PathBuf::from(&worktree.path);
+
+    if config.verification_commands.is_empty() {
+        state
+            .orchestrator_repo
+            .add_evidence(
+                &task.id,
+                "verificationOutput",
+                "验证命令",
+                "skipped",
+                "未配置验证命令，跳过验证。",
+            )
+            .await?;
+        let delivering = state
+            .orchestrator_repo
+            .set_task_status(&task.id, OrchestratorTaskStatus::Delivering, None)
+            .await?;
+        return Ok(OrchestratorTaskDto::from(delivering));
+    }
+
+    match crate::orchestrator::delivery::run_verification_commands(
+        &cwd,
+        &config.verification_commands,
+    )
+    .await
+    {
+        Ok(output) => {
+            state
+                .orchestrator_repo
+                .add_evidence(
+                    &task.id,
+                    "verificationOutput",
+                    "验证命令",
+                    "passed",
+                    &output,
+                )
+                .await?;
+            let delivering = state
+                .orchestrator_repo
+                .set_task_status(&task.id, OrchestratorTaskStatus::Delivering, None)
+                .await?;
+            Ok(OrchestratorTaskDto::from(delivering))
+        }
+        Err(err) => {
+            let reason = format!("验证失败: {err}");
+            state
+                .orchestrator_repo
+                .add_evidence(
+                    &task.id,
+                    "verificationOutput",
+                    "验证命令",
+                    "failed",
+                    &reason,
+                )
+                .await?;
+            block_task_with_reason(state.inner(), &task.id, &reason).await
+        }
+    }
+}
+
+/// 重试阻塞的 Orchestrator 任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户处理完 blocked 原因后，需要把任务重新放回队列，但不应立即 dispatch。
+///
+/// Code Logic（这个函数做什么）:
+///     只允许 Blocked 状态转 Queued，并清空 blocked_reason；worktree/session 不做删除。
+#[tauri::command]
+pub async fn retry_orchestrator_task(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let task = state.orchestrator_repo.get_task(&task_id).await?;
+    let target = retry_orchestrator_task_target_status(task.status)?;
+    let updated = state
+        .orchestrator_repo
+        .set_task_status(&task.id, target, None)
+        .await?;
+    Ok(OrchestratorTaskDto::from(updated))
+}
+
+/// 终止 Orchestrator 任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户需要从 blocked UI 或队列中终止不再继续的任务，同时保留现场用于人工检查。
+///
+/// Code Logic（这个函数做什么）:
+///     将任务状态设置为 Aborted，清空 blocked_reason，不删除 worktree/session。
+#[tauri::command]
+pub async fn abort_orchestrator_task(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let task = state.orchestrator_repo.get_task(&task_id).await?;
+    let target = abort_orchestrator_task_target_status(task.status);
+    let updated = state
+        .orchestrator_repo
+        .set_task_status(&task.id, target, None)
+        .await?;
+    Ok(OrchestratorTaskDto::from(updated))
 }
 
 #[cfg(test)]
@@ -261,5 +482,74 @@ mod tests {
         let value = build_dispatch_once_response(2);
 
         assert_eq!(value["dispatched"], serde_json::json!(2));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Agent 完成按钮只允许 Running 任务进入验证，避免用户把草稿或已结束任务误推进状态机。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 Running 与 Draft 任务，断言完成校验 helper 只接受 Running。
+    #[test]
+    fn complete_agent_run_guard_accepts_only_running_tasks() {
+        let running = OrchestratorTaskRow {
+            id: "task-running".to_string(),
+            project_id: "project-1".to_string(),
+            title: "运行中".to_string(),
+            goal: "goal".to_string(),
+            acceptance_criteria: "criteria".to_string(),
+            status: OrchestratorTaskStatus::Running,
+            priority: 0,
+            branch_name: None,
+            worktree_id: Some("worktree-1".to_string()),
+            session_id: None,
+            blocked_reason: None,
+            attempt: 0,
+            created_at: "2026-07-05T00:00:00Z".to_string(),
+            updated_at: "2026-07-05T00:00:00Z".to_string(),
+            started_at: None,
+            finished_at: None,
+        };
+        let draft = OrchestratorTaskRow {
+            status: OrchestratorTaskStatus::Draft,
+            ..running.clone()
+        };
+
+        assert!(ensure_task_can_complete_agent_run(&running).is_ok());
+        let error = ensure_task_can_complete_agent_run(&draft).expect_err("draft must fail");
+        assert!(error.to_string().contains("运行中"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Blocked 任务的重试按钮只能把阻塞任务重新排队，不应允许 Running/Done 等状态被回退。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用重试状态 helper，断言 Blocked 返回 Queued，Running 返回业务错误。
+    #[test]
+    fn retry_status_guard_accepts_only_blocked_tasks() {
+        assert_eq!(
+            retry_orchestrator_task_target_status(OrchestratorTaskStatus::Blocked).unwrap(),
+            OrchestratorTaskStatus::Queued
+        );
+
+        let error = retry_orchestrator_task_target_status(OrchestratorTaskStatus::Running)
+            .expect_err("running retry must fail");
+        assert!(error.to_string().contains("阻塞"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     终止按钮只是把任务转为 Aborted，不删除 worktree 或 session。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用终止状态 helper，断言任意输入状态都会得到 Aborted。
+    #[test]
+    fn abort_status_helper_always_targets_aborted() {
+        assert_eq!(
+            abort_orchestrator_task_target_status(OrchestratorTaskStatus::Running),
+            OrchestratorTaskStatus::Aborted
+        );
+        assert_eq!(
+            abort_orchestrator_task_target_status(OrchestratorTaskStatus::Queued),
+            OrchestratorTaskStatus::Aborted
+        );
     }
 }

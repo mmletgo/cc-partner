@@ -32,7 +32,12 @@
     "updatedAt": "更新时间",
     "unassigned": "未绑定",
     "blockedReason": "阻塞原因",
-    "queue": "加入队列"
+    "noBlockedReason": "任务已阻塞，但后端没有返回具体原因。",
+    "queue": "加入队列",
+    "completeAgentRun": "Claude Code 已完成，开始验证",
+    "openWorkbench": "打开 Workbench",
+    "retry": "重试",
+    "abort": "终止"
   },
   "create": {
     "title": "创建任务",
@@ -47,9 +52,18 @@
   },
   "evidence": {
     "title": "证据",
-    "subtitle": "任务运行后，验证输出和交付记录会显示在这里。",
+    "subtitle": "验证输出和交付记录会显示在这里。",
     "placeholderLabel": "占位",
-    "placeholderBody": "选择任务后，可在这里查看运行结果、验证输出和交付记录。"
+    "placeholderBody": "选择任务后，可在这里查看运行结果、验证输出和交付记录。",
+    "loading": "正在加载证据…",
+    "emptyTitle": "暂无证据",
+    "emptyBody": "任务完成验证后会在这里显示命令输出。",
+    "summary": {
+      "passed": "通过",
+      "failed": "失败",
+      "skipped": "跳过",
+      "generic": "记录"
+    }
   },
   "policy": {
     "title": "项目策略",
@@ -77,6 +91,10 @@
     "create": "任务创建失败。",
     "queue": "任务入队失败。",
     "policy": "项目策略加载失败。",
+    "evidence": "证据加载失败。",
+    "complete": "验证启动失败。",
+    "retry": "任务重试失败。",
+    "abort": "任务终止失败。",
     "noProject": "请先在侧栏选择一个 Workbench 项目。",
     "required": "请填写标题、目标和验收标准。"
   }

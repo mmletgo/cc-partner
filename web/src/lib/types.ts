@@ -300,6 +300,25 @@ export interface OrchestratorTask {
 }
 
 /**
+ * Orchestrator 任务证据 DTO（对齐 Rust OrchestratorEvidenceDto，camelCase）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   前端任务详情需要展示验证命令输出和后续交付证据，帮助用户判断任务是否可继续交付。
+ *
+ * Code Logic（字段说明）:
+ *   kind/summary 用于区分证据类型和结果，content 保存可展开的原始输出文本。
+ */
+export interface OrchestratorEvidence {
+  id: string;
+  taskId: string;
+  kind: string;
+  title: string;
+  summary: string;
+  content: string;
+  createdAt: string;
+}
+
+/**
  * Orchestrator 项目策略 DTO（对齐 Rust OrchestratorProjectConfigDto，camelCase）。
  *
  * Business Logic（为什么需要这个类型）:
