@@ -12,13 +12,22 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 const DEFAULT_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const PROCESS_REAP_GRACE_TIMEOUT: Duration = Duration::from_millis(200);
+const PIPE_READER_JOIN_GRACE_TIMEOUT: Duration = Duration::from_millis(200);
 const OUTPUT_TRUNCATED_MARKER: &str = "[output truncated]";
+#[cfg(unix)]
+const SIGKILL: std::os::raw::c_int = 9;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn killpg(pgrp: std::os::raw::c_int, sig: std::os::raw::c_int) -> std::os::raw::c_int;
+}
 
 /// 单条验证命令的 shell 调用规格。
 ///
@@ -109,7 +118,8 @@ pub async fn run_verification_commands_with_limits(
 ///
 /// Code Logic（这个函数做什么）:
 ///     macOS/Linux 优先使用 `$SHELL -lc`，空值回退 `sh -lc`；Windows 使用 `cmd /C`；
-///     子进程设置 kill_on_drop 兜底，stdout/stderr 由后台任务流式读取并共享总预算；wait 由 timeout 包裹，超时显式 kill。
+///     Unix/macOS 把 shell 放入独立进程组；子进程设置 kill_on_drop 兜底，stdout/stderr 由后台任务流式读取并共享总预算；
+///     wait 由 timeout 包裹，超时终止进程树并给 reader 一个短 grace 后 abort。
 async fn run_shell_command(
     cwd: &Path,
     command: &str,
@@ -125,9 +135,12 @@ async fn run_shell_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     child.kill_on_drop(true);
+    #[cfg(unix)]
+    child.process_group(0);
     let mut process = child
         .spawn()
         .map_err(|err| AppError::generic(format!("启动验证命令失败: {command}: {err}")))?;
+    let process_group_id = process.id();
 
     let stdout = process
         .stdout
@@ -151,9 +164,19 @@ async fn run_shell_command(
             )));
         }
         Err(_) => {
-            let _ = process.kill().await;
-            let _ = join_limited_pipe_output("stdout", stdout_task).await;
-            let _ = join_limited_pipe_output("stderr", stderr_task).await;
+            terminate_shell_process_tree(&mut process, process_group_id).await;
+            let _ = join_limited_pipe_output_with_grace(
+                "stdout",
+                stdout_task,
+                PIPE_READER_JOIN_GRACE_TIMEOUT,
+            )
+            .await;
+            let _ = join_limited_pipe_output_with_grace(
+                "stderr",
+                stderr_task,
+                PIPE_READER_JOIN_GRACE_TIMEOUT,
+            )
+            .await;
             return Err(AppError::generic(format!(
                 "验证命令超时: {command}（timeout={}秒）",
                 timeout.as_secs_f64()
@@ -170,6 +193,44 @@ async fn run_shell_command(
         stderr: String::from_utf8_lossy(&stderr_output.bytes).to_string(),
         truncated,
     })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     验证命令超时时，watch/dev server 等孙进程可能继续持有 stdout/stderr pipe，必须尽量终止整棵进程树。
+///
+/// Code Logic（这个函数做什么）:
+///     Unix/macOS 先向独立进程组发送 SIGKILL，再对直接子进程执行 start_kill 兜底；所有平台都只等待短 grace 回收进程。
+async fn terminate_shell_process_tree(process: &mut Child, process_group_id: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(process_group_id) = process_group_id {
+        let _ = kill_unix_process_group(process_group_id);
+    }
+    #[cfg(not(unix))]
+    let _ = process_group_id;
+
+    let _ = process.start_kill();
+    let _ = tokio::time::timeout(PROCESS_REAP_GRACE_TIMEOUT, process.wait()).await;
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Unix/macOS 上验证 shell 使用独立进程组，超时时需要用进程组信号覆盖后台子进程。
+///
+/// Code Logic（这个函数做什么）:
+///     把 tokio 返回的子进程 pid 转成平台 c_int，并调用 POSIX killpg 发送 SIGKILL。
+#[cfg(unix)]
+fn kill_unix_process_group(process_group_id: u32) -> Result<(), std::io::Error> {
+    let pgid: std::os::raw::c_int = process_group_id.try_into().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "process group id out of range",
+        )
+    })?;
+    let result = unsafe { killpg(pgid, SIGKILL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -199,6 +260,31 @@ async fn join_limited_pipe_output(
     task.await
         .map_err(|err| AppError::generic(format!("读取验证命令 {stream_name} 任务失败: {err}")))?
         .map_err(|err| AppError::generic(format!("读取验证命令 {stream_name} 失败: {err}")))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     超时分支不能无限等待 stdout/stderr reader；即便管道仍被孙进程持有，也要快速让任务退出 Verifying。
+///
+/// Code Logic（这个函数做什么）:
+///     对 JoinHandle 设置短 grace timeout；reader 正常结束则复用 join 错误映射，grace 超时则 abort 任务并返回 AppError。
+async fn join_limited_pipe_output_with_grace(
+    stream_name: &str,
+    mut task: JoinHandle<Result<LimitedPipeOutput, std::io::Error>>,
+    grace_timeout: Duration,
+) -> Result<LimitedPipeOutput, AppError> {
+    match tokio::time::timeout(grace_timeout, &mut task).await {
+        Ok(result) => result
+            .map_err(|err| {
+                AppError::generic(format!("读取验证命令 {stream_name} 任务失败: {err}"))
+            })?
+            .map_err(|err| AppError::generic(format!("读取验证命令 {stream_name} 失败: {err}"))),
+        Err(_) => {
+            task.abort();
+            Err(AppError::generic(format!(
+                "读取验证命令 {stream_name} 超时"
+            )))
+        }
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -358,6 +444,37 @@ mod tests {
 
         assert!(message.contains("timeout") || message.contains("超时"));
         assert!(message.contains("sleep") || message.contains("ping"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     验证命令超时时，即使命令启动的后台子进程继续持有 stdout/stderr pipe，任务也不能卡在 Verifying。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在 Unix/macOS 上启动继承 pipe 的后台 sleep，并用外层短 timeout 断言验证 helper 自身会快速返回超时错误。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_returns_even_when_child_process_keeps_pipe_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let command = "sleep 5 & echo child-started; wait".to_string();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            run_verification_commands_with_limits(
+                dir.path(),
+                &[command.clone()],
+                std::time::Duration::from_millis(50),
+                1024,
+            ),
+        )
+        .await;
+
+        let error = result
+            .expect("timeout branch should not wait for inherited pipe EOF")
+            .expect_err("verification should return a timeout error");
+        let message = error.to_string();
+
+        assert!(message.contains("timeout") || message.contains("超时"));
+        assert!(message.contains(&command));
     }
 
     /// Business Logic（为什么需要这个函数）:
