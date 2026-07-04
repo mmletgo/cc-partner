@@ -11,7 +11,7 @@
  *   - 创建成功后把新任务插入列表顶部、选中新任务并清空表单
  *   - hooks 全部位于渲染分支之前，避免 early return 破坏调用顺序
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, JSX } from 'react';
 import { useTranslation } from 'react-i18next';
 import { orchestratorApi } from '@/api/orchestrator';
@@ -21,7 +21,9 @@ import { PlusIcon } from '@/lib/icons';
 import {
   groupOrchestratorTasks,
   ORCHESTRATOR_STATUSES,
+  orchestratorCreateResultMatchesProject,
   orchestratorStatusTone,
+  resolveOrchestratorTaskLoad,
 } from '@/lib/orchestrator';
 import type { OrchestratorTask, OrchestratorTaskStatus } from '@/lib/types';
 import styles from './Orchestrator.module.css';
@@ -113,32 +115,53 @@ function formatTaskTimestamp(value: string): string {
  */
 export function Orchestrator(): JSX.Element {
   const { t } = useTranslation(['orchestrator', 'nav', 'common']);
-  const { activeProject } = useWorkbenchProjects();
+  const { activeProject, projectsLoading } = useWorkbenchProjects();
   const [tasks, setTasks] = useState<OrchestratorTask[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [form, setForm] = useState<OrchestratorCreateForm>(EMPTY_FORM);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const activeProjectId = activeProject?.id ?? null;
+  const activeProjectIdRef = useRef<string | null>(activeProjectId);
+  activeProjectIdRef.current = activeProjectId;
 
   const groups = useMemo(() => groupOrchestratorTasks(tasks), [tasks]);
   const selectedTask = useMemo(() => {
     return tasks.find((task) => task.id === selectedTaskId) ?? tasks[0] ?? null;
   }, [selectedTaskId, tasks]);
+  const taskLoadDecision = useMemo(
+    () => resolveOrchestratorTaskLoad(projectsLoading, activeProjectId),
+    [activeProjectId, projectsLoading],
+  );
 
   const canCreate =
-    Boolean(activeProject) &&
+    Boolean(activeProjectId) &&
     form.title.trim().length > 0 &&
     form.goal.trim().length > 0 &&
     form.acceptanceCriteria.trim().length > 0 &&
     !creating;
 
   useEffect(() => {
+    if (taskLoadDecision.kind === 'waiting') {
+      setLoading(true);
+      setError(null);
+      return undefined;
+    }
+
+    if (taskLoadDecision.kind === 'empty') {
+      setTasks([]);
+      setSelectedTaskId(null);
+      setLoading(false);
+      setError(null);
+      return undefined;
+    }
+
     let cancelled = false;
     setLoading(true);
     setError(null);
     void orchestratorApi
-      .listTasks(activeProject?.id ?? null)
+      .listTasks(taskLoadDecision.projectId)
       .then((nextTasks) => {
         if (cancelled) return;
         setTasks(nextTasks);
@@ -157,7 +180,7 @@ export function Orchestrator(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [activeProject?.id, t]);
+  }, [taskLoadDecision, t]);
 
   const updateFormField = useCallback(
     (field: keyof OrchestratorCreateForm, value: string) => {
@@ -173,8 +196,9 @@ export function Orchestrator(): JSX.Element {
         setError(t('orchestrator:errors.noProject'));
         return;
       }
+      const projectId = activeProject.id;
       const payload = {
-        projectId: activeProject.id,
+        projectId,
         title: form.title.trim(),
         goal: form.goal.trim(),
         acceptanceCriteria: form.acceptanceCriteria.trim(),
@@ -187,6 +211,9 @@ export function Orchestrator(): JSX.Element {
       setError(null);
       try {
         const created = await orchestratorApi.createTask(payload);
+        if (!orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
+          return;
+        }
         setTasks((current) => [created, ...current.filter((task) => task.id !== created.id)]);
         setSelectedTaskId(created.id);
         setForm(EMPTY_FORM);

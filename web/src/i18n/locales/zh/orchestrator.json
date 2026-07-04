@@ -35,7 +35,7 @@
   },
   "create": {
     "title": "创建任务",
-    "subtitle": "当前阶段只创建任务记录，执行链路由后续任务接入。",
+    "subtitle": "创建后会进入当前项目的任务队列。",
     "taskTitle": "标题",
     "taskTitlePlaceholder": "例如：实现登录表单校验",
     "goal": "目标",
@@ -46,9 +46,9 @@
   },
   "evidence": {
     "title": "证据",
-    "subtitle": "执行日志、测试输出和交付记录会在后续任务接入。",
+    "subtitle": "任务运行后，验证输出和交付记录会显示在这里。",
     "placeholderLabel": "占位",
-    "placeholderBody": "Task 3 只提供页面 shell；真实 evidence loading 不在本次范围内。"
+    "placeholderBody": "选择任务后，可在这里查看运行结果、验证输出和交付记录。"
   },
   "errors": {
     "load": "任务列表加载失败。",

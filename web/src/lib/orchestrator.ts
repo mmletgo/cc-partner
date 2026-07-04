@@ -20,6 +20,18 @@ export type OrchestratorStatusTone = PillTone;
 export type OrchestratorTaskGroups = Record<OrchestratorTaskStatus, OrchestratorTask[]>;
 
 /**
+ * Business Logic（为什么需要这个类型）:
+ *   Orchestrator 页面必须等 Workbench 项目状态稳定后，才能决定是否加载任务，避免无项目时误查全局任务。
+ *
+ * Code Logic（这个类型做什么）:
+ *   waiting 表示项目 Provider 仍在加载；empty 表示没有 active project；load 携带明确 projectId。
+ */
+export type OrchestratorTaskLoadDecision =
+  | { kind: 'waiting' }
+  | { kind: 'empty' }
+  | { kind: 'load'; projectId: string };
+
+/**
  * Business Logic（为什么需要这个常量）:
  *   Orchestrator 页面需要稳定的状态展示顺序，避免后端返回顺序影响前端队列布局。
  *
@@ -56,6 +68,36 @@ export function groupOrchestratorTasks(tasks: OrchestratorTask[]): OrchestratorT
   }
 
   return groups;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   页面需要明确区分“项目列表还在加载”和“加载完成但没有项目”，避免把空项目当作全局任务查询。
+ *
+ * Code Logic（这个函数做什么）:
+ *   projectsLoading 为 true 时返回 waiting；activeProjectId 为空时返回 empty；否则返回携带 projectId 的 load。
+ */
+export function resolveOrchestratorTaskLoad(
+  projectsLoading: boolean,
+  activeProjectId: string | null | undefined,
+): OrchestratorTaskLoadDecision {
+  if (projectsLoading) return { kind: 'waiting' };
+  if (!activeProjectId) return { kind: 'empty' };
+  return { kind: 'load', projectId: activeProjectId };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   用户创建任务期间可能切换项目，旧项目的返回结果不能插入当前项目队列。
+ *
+ * Code Logic（这个函数做什么）:
+ *   比较当前 activeProjectId 与提交时捕获的 projectId，只有完全一致才允许应用创建结果。
+ */
+export function orchestratorCreateResultMatchesProject(
+  currentProjectId: string | null | undefined,
+  submittedProjectId: string,
+): boolean {
+  return currentProjectId === submittedProjectId;
 }
 
 /**

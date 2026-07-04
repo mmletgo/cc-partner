@@ -1,5 +1,12 @@
 import type { OrchestratorTask, OrchestratorTaskStatus } from './types';
-import { groupOrchestratorTasks, orchestratorStatusTone } from './orchestrator';
+import type { PillTone } from '@/components/primitives';
+import {
+  groupOrchestratorTasks,
+  ORCHESTRATOR_STATUSES,
+  orchestratorCreateResultMatchesProject,
+  orchestratorStatusTone,
+  resolveOrchestratorTaskLoad,
+} from './orchestrator';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -51,8 +58,52 @@ assert(groups.blocked.length === 1, 'groupOrchestratorTasks should put blocked t
 assert(groups.blocked[0]?.id === blocked.id, 'blocked group should keep original blocked task');
 assert(groups.running.length === 1, 'groupOrchestratorTasks should keep running task in running group');
 
+for (const status of ORCHESTRATOR_STATUSES) {
+  assert(Array.isArray(groups[status]), `groupOrchestratorTasks should create an array for ${status}`);
+}
+
+const supportedTones = new Set<PillTone>(['neutral', 'success', 'warn', 'danger', 'accent']);
+
+for (const status of ORCHESTRATOR_STATUSES) {
+  assert(
+    supportedTones.has(orchestratorStatusTone(status)),
+    `orchestratorStatusTone should return a supported PillTone for ${status}`,
+  );
+}
+
 assert(orchestratorStatusTone('done') === 'success', 'done status should use success tone');
 assert(orchestratorStatusTone('blocked') === 'danger', 'blocked status should use danger tone');
 assert(orchestratorStatusTone('running') === 'accent', 'running status should use accent tone');
+assert(orchestratorStatusTone('queued') === 'neutral', 'queued status should use neutral tone');
+assert(orchestratorStatusTone('aborted') === 'danger', 'aborted status should use danger tone');
+
+assert(
+  JSON.stringify(resolveOrchestratorTaskLoad(true, 'project-1')) ===
+    JSON.stringify({ kind: 'waiting' }),
+  'resolveOrchestratorTaskLoad should wait while Workbench projects are loading',
+);
+assert(
+  JSON.stringify(resolveOrchestratorTaskLoad(false, null)) ===
+    JSON.stringify({ kind: 'empty' }),
+  'resolveOrchestratorTaskLoad should stay empty after project loading completes without active project',
+);
+assert(
+  JSON.stringify(resolveOrchestratorTaskLoad(false, 'project-1')) ===
+    JSON.stringify({ kind: 'load', projectId: 'project-1' }),
+  'resolveOrchestratorTaskLoad should load only for a concrete active project id',
+);
+
+assert(
+  orchestratorCreateResultMatchesProject('project-1', 'project-1'),
+  'orchestratorCreateResultMatchesProject should accept matching project ids',
+);
+assert(
+  !orchestratorCreateResultMatchesProject('project-2', 'project-1'),
+  'orchestratorCreateResultMatchesProject should reject stale create results after project switch',
+);
+assert(
+  !orchestratorCreateResultMatchesProject(null, 'project-1'),
+  'orchestratorCreateResultMatchesProject should reject create results when active project was cleared',
+);
 
 console.log('orchestrator.test.ts passed');

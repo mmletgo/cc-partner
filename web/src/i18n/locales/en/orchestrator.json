@@ -35,7 +35,7 @@
   },
   "create": {
     "title": "Create Task",
-    "subtitle": "This phase only creates the task record. Execution wiring comes in later tasks.",
+    "subtitle": "Created tasks appear in the current project's queue.",
     "taskTitle": "Title",
     "taskTitlePlaceholder": "Example: implement login form validation",
     "goal": "Goal",
@@ -46,9 +46,9 @@
   },
   "evidence": {
     "title": "Evidence",
-    "subtitle": "Execution logs, test output, and delivery records will be wired in later tasks.",
+    "subtitle": "After a task runs, verification output and delivery records will appear here.",
     "placeholderLabel": "Placeholder",
-    "placeholderBody": "Task 3 only provides the page shell; real evidence loading is outside this scope."
+    "placeholderBody": "Select a task to review run results, verification output, and delivery records here."
   },
   "errors": {
     "load": "Failed to load tasks.",
