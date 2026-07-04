@@ -299,6 +299,33 @@ export interface OrchestratorTask {
   finishedAt: string | null;
 }
 
+/**
+ * Orchestrator 项目策略 DTO（对齐 Rust OrchestratorProjectConfigDto，camelCase）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   Orchestrator 页面需要展示当前 Workbench 项目的自动化策略，让用户确认是否启用、并发数、
+ *   验证命令以及自动提交/推送/合并等开关。
+ *
+ * Code Logic（字段说明）:
+ *   verificationCommands 为后端 JSON 配置解析后的命令数组；其余 boolean 字段直接驱动策略卡状态展示。
+ */
+export interface OrchestratorProjectConfig {
+  projectId: string;
+  enabled: boolean;
+  maxConcurrentTasks: number;
+  branchPrefix: string;
+  verificationCommands: string[];
+  autoCommit: boolean;
+  autoPushTaskBranch: boolean;
+  autoMergeToMain: boolean;
+  autoPushMain: boolean;
+  retryLimit: number;
+  retainWorktreeOnDone: boolean;
+  retainWorktreeOnBlocked: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** 工作台项目来源类型：本机项目或局域网远端项目。 */
 export type WorkbenchProjectKind = 'local' | 'remote' | string;
 

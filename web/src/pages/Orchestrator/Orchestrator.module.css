@@ -71,7 +71,7 @@
 
 .queue,
 .detail,
-.evidence {
+.policy {
   min-width: 0;
 }
 
@@ -107,10 +107,18 @@
 
 .queueBody,
 .detailBody,
-.evidenceBody {
+.policyBody {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+}
+
+.detailActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
 }
 
 .group {
@@ -243,7 +251,6 @@
 
 .detailText,
 .blockedReason p,
-.evidencePlaceholder p,
 .emptyBody,
 .muted {
   margin: 0;
@@ -284,6 +291,76 @@
   overflow-wrap: anywhere;
 }
 
+.policyGrid {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-3);
+}
+
+.policyGrid > div {
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.policyGrid dt {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--meta);
+}
+
+.policyGrid dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
+.policyCommands {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.commandList {
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  list-style: none;
+}
+
+.commandItem {
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  overflow-wrap: anywhere;
+}
+
+.policyError {
+  padding: var(--space-3);
+  border: 1px solid color-mix(in oklab, var(--danger) 38%, var(--border));
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  overflow-wrap: anywhere;
+}
+
 .blockedReason {
   padding: var(--space-3);
   border: 1px solid color-mix(in oklab, var(--danger) 35%, var(--border));
@@ -307,7 +384,6 @@
   overflow: hidden;
 }
 
-.evidencePlaceholder,
 .empty {
   display: flex;
   flex-direction: column;

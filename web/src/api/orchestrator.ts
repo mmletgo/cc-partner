@@ -9,7 +9,7 @@
  */
 
 import { invoke } from './client';
-import type { OrchestratorTask } from '@/lib/types';
+import type { OrchestratorProjectConfig, OrchestratorTask } from '@/lib/types';
 
 /**
  * 创建 Orchestrator 任务的前端请求。
@@ -56,6 +56,30 @@ export function buildCreateOrchestratorTaskInvokeArgs(
   return { request };
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   入队任务命令只需要 taskId，但参数名必须稳定匹配 Rust queue_orchestrator_task。
+ *
+ * Code Logic（这个函数做什么）:
+ *   taskId 首尾空白会被 trim，再包装成 `{ taskId }` 供 invoke 使用。
+ */
+export function buildQueueOrchestratorTaskInvokeArgs(taskId: string): Record<string, unknown> {
+  return { taskId: taskId.trim() };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   项目策略读取必须绑定明确项目，参数名需要稳定匹配 Rust get_orchestrator_project_config。
+ *
+ * Code Logic（这个函数做什么）:
+ *   projectId 首尾空白会被 trim，再包装成 `{ projectId }` 供 invoke 使用。
+ */
+export function buildGetOrchestratorProjectConfigInvokeArgs(
+  projectId: string,
+): Record<string, unknown> {
+  return { projectId: projectId.trim() };
+}
+
 export const orchestratorApi = {
   /**
    * Business Logic（为什么需要这个函数）:
@@ -81,5 +105,31 @@ export const orchestratorApi = {
     invoke<OrchestratorTask>(
       'create_orchestrator_task',
       buildCreateOrchestratorTaskInvokeArgs(request),
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户确认草稿任务后，需要把任务切换为排队状态并刷新当前列表中的任务 DTO。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 queue_orchestrator_task，并通过 helper 归一化 taskId 参数。
+   */
+  queueTask: (taskId: string) =>
+    invoke<OrchestratorTask>(
+      'queue_orchestrator_task',
+      buildQueueOrchestratorTaskInvokeArgs(taskId),
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   策略卡需要显示当前项目真实 Orchestrator 配置，缺失配置由后端按默认值创建。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 get_orchestrator_project_config，并通过 helper 归一化 projectId 参数。
+   */
+  getProjectConfig: (projectId: string) =>
+    invoke<OrchestratorProjectConfig>(
+      'get_orchestrator_project_config',
+      buildGetOrchestratorProjectConfigInvokeArgs(projectId),
     ),
 };

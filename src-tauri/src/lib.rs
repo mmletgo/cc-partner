@@ -588,9 +588,11 @@ pub fn run() {
             // Prompt 优化（复用 Claude CLI pure/headless helper，不保存历史）
             prompt_optimizer_cmd::optimize_prompt,
             prompt_optimizer_cmd::stream_optimize_prompt_to_workbench_session,
-            // Orchestrator 任务 API（任务列表 / 创建草稿任务）
+            // Orchestrator 任务 API（任务列表 / 创建草稿任务 / 入队 / 项目策略展示）
             orchestrator_cmd::list_orchestrator_tasks,
             orchestrator_cmd::create_orchestrator_task,
+            orchestrator_cmd::queue_orchestrator_task,
+            orchestrator_cmd::get_orchestrator_project_config,
             // M10 健康提醒（14 命令：配置/状态/开关/暂停/贪睡/跳过/配置回写/统计/活动明细/喝水/跳过喝水/延迟喝水/全屏遮罩/恢复默认）
             health_cmd::get_health_config,
             health_cmd::get_default_health_config,

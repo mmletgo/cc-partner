@@ -31,7 +31,8 @@
     "createdAt": "Created",
     "updatedAt": "Updated",
     "unassigned": "Unassigned",
-    "blockedReason": "Blocked Reason"
+    "blockedReason": "Blocked Reason",
+    "queue": "Queue"
   },
   "create": {
     "title": "Create Task",
@@ -50,9 +51,32 @@
     "placeholderLabel": "Placeholder",
     "placeholderBody": "Select a task to review run results, verification output, and delivery records here."
   },
+  "policy": {
+    "title": "Project Policy",
+    "subtitle": "Automation policy for the current project.",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "on": "On",
+    "off": "Off",
+    "emptyTitle": "No project policy",
+    "emptyBody": "Select a Workbench project to view its automation policy.",
+    "maxConcurrentTasks": "Max Concurrent Tasks",
+    "branchPrefix": "Branch Prefix",
+    "retryLimit": "Retry Limit",
+    "autoCommit": "Auto Commit",
+    "autoPushTaskBranch": "Auto Push Task Branch",
+    "autoMergeToMain": "Auto Merge To Main",
+    "autoPushMain": "Auto Push Main",
+    "retainWorktreeOnDone": "Retain Worktree On Done",
+    "retainWorktreeOnBlocked": "Retain Worktree On Blocked",
+    "verificationCommands": "Verification Commands",
+    "noVerificationCommands": "No verification commands configured."
+  },
   "errors": {
     "load": "Failed to load tasks.",
     "create": "Failed to create the task.",
+    "queue": "Failed to queue the task.",
+    "policy": "Failed to load project policy.",
     "noProject": "Select a Workbench project from the sidebar first.",
     "required": "Fill in title, goal, and acceptance criteria."
   }

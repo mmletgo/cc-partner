@@ -147,6 +147,34 @@ pub struct OrchestratorTaskDto {
     pub finished_at: Option<String>,
 }
 
+/// Orchestrator 项目策略前端 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     每个 Workbench 项目都需要独立的自动编排策略，用户必须能看到当前项目是否启用自动执行、
+///     并发数、分支前缀、验证命令和自动提交/推送/合并等关键开关。
+///
+/// Code Logic（这个结构体做什么）:
+///     字段与 orchestrator_project_config 表一一对应，使用 camelCase 序列化给前端展示。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct OrchestratorProjectConfigDto {
+    pub project_id: String,
+    pub enabled: bool,
+    pub max_concurrent_tasks: i64,
+    pub branch_prefix: String,
+    pub verification_commands: Vec<String>,
+    pub auto_commit: bool,
+    pub auto_push_task_branch: bool,
+    pub auto_merge_to_main: bool,
+    pub auto_push_main: bool,
+    pub retry_limit: i64,
+    pub retain_worktree_on_done: bool,
+    pub retain_worktree_on_blocked: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 impl OrchestratorTaskRow {
     /// Business Logic（为什么需要这个函数）:
     ///     命令层返回任务时不应暴露内部枚举和 snake_case 语义，需要统一 DTO 转换入口。

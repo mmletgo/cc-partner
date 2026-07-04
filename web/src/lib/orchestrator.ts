@@ -102,6 +102,17 @@ export function orchestratorCreateResultMatchesProject(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   只有草稿任务应允许用户手动加入队列，避免运行中或已完成任务被重复排队。
+ *
+ * Code Logic（这个函数做什么）:
+ *   对 null 做安全短路；仅当 task.status 为 draft 时返回 true。
+ */
+export function canQueueOrchestratorTask(task: OrchestratorTask | null): boolean {
+  return task?.status === 'draft';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   队列和详情区域需要用一致颜色表达任务状态，并且只能使用 Pill 已支持的 tone。
  *
  * Code Logic（这个函数做什么）:

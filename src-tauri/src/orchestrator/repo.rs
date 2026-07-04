@@ -3,7 +3,9 @@
 #![allow(dead_code)]
 
 use crate::error::AppError;
-use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
+use crate::orchestrator::models::{
+    OrchestratorProjectConfigDto, OrchestratorTaskRow, OrchestratorTaskStatus,
+};
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
@@ -12,6 +14,10 @@ use uuid::Uuid;
 const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_criteria, status, priority, \
     branch_name, worktree_id, session_id, blocked_reason, attempt, created_at, updated_at, \
     started_at, finished_at";
+const PROJECT_CONFIG_COLUMNS: &str = "project_id, enabled, max_concurrent_tasks, branch_prefix, \
+    verification_commands_json, auto_commit, auto_push_task_branch, auto_merge_to_main, \
+    auto_push_main, retry_limit, retain_worktree_on_done, retain_worktree_on_blocked, \
+    created_at, updated_at";
 
 pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestrator_tasks (
   id TEXT PRIMARY KEY,
@@ -92,7 +98,7 @@ const ORCHESTRATOR_TASK_EVIDENCE_INDEX: &str =
 ///     自动编排器需要把任务队列、状态变化事件和验证证据持久化，供后续调度器与页面共享。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有 SQLite pool，并提供任务 CRUD、状态更新、事件和证据追加方法。
+///     持有 SQLite pool，并提供任务 CRUD、项目策略读取、状态更新、事件和证据追加方法。
 #[derive(Clone)]
 pub struct OrchestratorRepo {
     pool: SqlitePool,
@@ -215,11 +221,49 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     状态机推进后需要只更新任务状态和阻塞原因，保持任务身份字段不变。
+    ///     Orchestrator 页面需要显示当前项目策略；新项目第一次进入时应自动拥有一份默认策略。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     对缺失 project_id 执行 INSERT OR IGNORE 写入 full-auto-but-disabled 默认值，再读取并解析 DTO。
+    pub async fn get_or_create_project_config(
+        &self,
+        project_id: &str,
+    ) -> Result<OrchestratorProjectConfigDto, AppError> {
+        let project_id = project_id.trim();
+        if project_id.is_empty() {
+            return Err(AppError::generic("项目不能为空"));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT OR IGNORE INTO orchestrator_project_config \
+             (project_id, enabled, max_concurrent_tasks, branch_prefix, verification_commands_json, \
+              auto_commit, auto_push_task_branch, auto_merge_to_main, auto_push_main, retry_limit, \
+              retain_worktree_on_done, retain_worktree_on_blocked, created_at, updated_at) \
+             VALUES (?, 0, 1, 'agent', '[]', 1, 1, 1, 1, 0, 0, 1, ?, ?)",
+        )
+        .bind(project_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        let row = sqlx::query(&format!(
+            "SELECT {PROJECT_CONFIG_COLUMNS} FROM orchestrator_project_config WHERE project_id = ?"
+        ))
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        row_to_project_config(&row)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     队列动作和状态机推进后需要只更新任务状态和阻塞原因，保持任务身份字段不变。
     ///
     /// Code Logic（这个函数做什么）:
     ///     只更新 status、blocked_reason 和 updated_at，再读取完整任务返回。
-    pub async fn update_task_status(
+    pub async fn set_task_status(
         &self,
         task_id: &str,
         status: OrchestratorTaskStatus,
@@ -237,6 +281,20 @@ impl OrchestratorRepo {
         .execute(&self.pool)
         .await?;
         self.get_task(task_id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     早期调用点仍使用 update_task_status；保留兼容可避免后续计划任务重构被一次性阻塞。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     直接转发到 set_task_status，使旧 API 与新命名共享同一实现。
+    pub async fn update_task_status(
+        &self,
+        task_id: &str,
+        status: OrchestratorTaskStatus,
+        blocked_reason: Option<&str>,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        self.set_task_status(task_id, status, blocked_reason).await
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -322,6 +380,50 @@ fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppError> {
         updated_at: row.try_get("updated_at")?,
         started_at: row.try_get("started_at")?,
         finished_at: row.try_get("finished_at")?,
+    })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     项目策略表用 INTEGER 0/1 保存布尔值，前端 DTO 需要真实 boolean 以便直接展示开关状态。
+///
+/// Code Logic（这个函数做什么）:
+///     将 SQLite INTEGER 按非零即 true 的规则转换为 bool。
+fn sqlite_bool(value: i64) -> bool {
+    value != 0
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     验证命令以 JSON 文本持久化，读取策略时需要还原为字符串数组供前端逐条展示。
+///
+/// Code Logic（这个函数做什么）:
+///     使用 serde_json 解析 Vec<String>；解析失败返回 AppError，暴露损坏配置数据。
+fn parse_verification_commands(value: &str) -> Result<Vec<String>, AppError> {
+    serde_json::from_str::<Vec<String>>(value)
+        .map_err(|err| AppError::generic(format!("Orchestrator 验证命令解析失败: {err}")))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     仓储读取项目策略时需要统一处理 bool 转换和 verification_commands JSON 解析。
+///
+/// Code Logic（这个函数做什么）:
+///     从 SqliteRow 提取 orchestrator_project_config 全字段并组装 OrchestratorProjectConfigDto。
+fn row_to_project_config(row: &SqliteRow) -> Result<OrchestratorProjectConfigDto, AppError> {
+    let verification_commands_json: String = row.try_get("verification_commands_json")?;
+    Ok(OrchestratorProjectConfigDto {
+        project_id: row.try_get("project_id")?,
+        enabled: sqlite_bool(row.try_get("enabled")?),
+        max_concurrent_tasks: row.try_get("max_concurrent_tasks")?,
+        branch_prefix: row.try_get("branch_prefix")?,
+        verification_commands: parse_verification_commands(&verification_commands_json)?,
+        auto_commit: sqlite_bool(row.try_get("auto_commit")?),
+        auto_push_task_branch: sqlite_bool(row.try_get("auto_push_task_branch")?),
+        auto_merge_to_main: sqlite_bool(row.try_get("auto_merge_to_main")?),
+        auto_push_main: sqlite_bool(row.try_get("auto_push_main")?),
+        retry_limit: row.try_get("retry_limit")?,
+        retain_worktree_on_done: sqlite_bool(row.try_get("retain_worktree_on_done")?),
+        retain_worktree_on_blocked: sqlite_bool(row.try_get("retain_worktree_on_blocked")?),
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 
@@ -460,13 +562,13 @@ mod tests {
     /// Code Logic（这个函数做什么）:
     ///     创建 Draft 后更新为 Queued，断言 id/project/title 保持不变且状态改变。
     #[tokio::test]
-    async fn update_task_status_preserves_identity() {
+    async fn set_task_status_preserves_identity() {
         let (_pool, repo) = setup_repo().await;
         let created = task_row("task-1", "project-1", OrchestratorTaskStatus::Draft);
         repo.create_task(&created).await.unwrap();
 
         let updated = repo
-            .update_task_status(&created.id, OrchestratorTaskStatus::Queued, None)
+            .set_task_status(&created.id, OrchestratorTaskStatus::Queued, None)
             .await
             .unwrap();
 
@@ -475,6 +577,28 @@ mod tests {
         assert_eq!(updated.title, "Task task-1");
         assert_eq!(updated.goal, "Goal task-1");
         assert_eq!(updated.status, OrchestratorTaskStatus::Queued);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     项目策略默认应提供完整自动化开关组合，但必须保持 disabled，避免用户未确认前自动执行任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     通过 get_or_create_project_config 创建缺失项目配置，并断言 full auto 相关默认值与 enabled=false。
+    #[tokio::test]
+    async fn config_defaults_to_full_auto_but_disabled() {
+        let (_pool, repo) = setup_repo().await;
+        let config = repo
+            .get_or_create_project_config("project-1")
+            .await
+            .unwrap();
+
+        assert!(!config.enabled);
+        assert_eq!(config.max_concurrent_tasks, 1);
+        assert!(config.auto_commit);
+        assert!(config.auto_push_task_branch);
+        assert!(config.auto_merge_to_main);
+        assert!(config.auto_push_main);
+        assert!(config.retain_worktree_on_blocked);
     }
 
     /// Business Logic（为什么需要这个函数）:

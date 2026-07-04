@@ -1,6 +1,7 @@
 import type { OrchestratorTask, OrchestratorTaskStatus } from './types';
 import type { PillTone } from '@/components/primitives';
 import {
+  canQueueOrchestratorTask,
   groupOrchestratorTasks,
   ORCHESTRATOR_STATUSES,
   orchestratorCreateResultMatchesProject,
@@ -100,5 +101,15 @@ assert(
   !orchestratorCreateResultMatchesProject(null, 'project-1'),
   'orchestratorCreateResultMatchesProject should reject create results when active project was cleared',
 );
+
+assert(
+  canQueueOrchestratorTask(createTask('draft-queue', 'draft')),
+  'canQueueOrchestratorTask should allow draft tasks to enter the queue',
+);
+assert(
+  !canQueueOrchestratorTask(createTask('running-queue', 'running')),
+  'canQueueOrchestratorTask should reject running tasks',
+);
+assert(!canQueueOrchestratorTask(null), 'canQueueOrchestratorTask should reject null tasks');
 
 console.log('orchestrator.test.ts passed');

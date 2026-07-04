@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use crate::orchestrator::models::{
-    OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus,
+    OrchestratorProjectConfigDto, OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus,
 };
 use crate::state::AppState;
 use chrono::Utc;
@@ -104,6 +104,43 @@ pub async fn create_orchestrator_task(
     let row = build_orchestrator_task_row(request)?;
     state.orchestrator_repo.create_task(&row).await?;
     Ok(OrchestratorTaskDto::from(row))
+}
+
+/// 查询项目 Orchestrator 策略。
+///
+/// Business Logic（为什么需要这个函数）:
+///     页面右侧策略卡需要展示当前 Workbench 项目的自动化策略，缺失时按默认策略初始化。
+///
+/// Code Logic（这个函数做什么）:
+///     委托仓储 get_or_create_project_config，并返回 camelCase DTO。
+#[tauri::command]
+pub async fn get_orchestrator_project_config(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<OrchestratorProjectConfigDto, AppError> {
+    state
+        .orchestrator_repo
+        .get_or_create_project_config(&project_id)
+        .await
+}
+
+/// 将 Orchestrator 草稿任务加入队列。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户确认草稿任务后，需要把任务状态切换为 Queued，供后续调度器按队列处理。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 repo.set_task_status 把指定 task_id 更新为 queued，并把完整任务 Row 转换为 DTO。
+#[tauri::command]
+pub async fn queue_orchestrator_task(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let task = state
+        .orchestrator_repo
+        .set_task_status(&task_id, OrchestratorTaskStatus::Queued, None)
+        .await?;
+    Ok(OrchestratorTaskDto::from(task))
 }
 
 #[cfg(test)]

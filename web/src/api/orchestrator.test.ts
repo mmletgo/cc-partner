@@ -1,6 +1,8 @@
 import {
   buildCreateOrchestratorTaskInvokeArgs,
+  buildGetOrchestratorProjectConfigInvokeArgs,
   buildListOrchestratorTasksInvokeArgs,
+  buildQueueOrchestratorTaskInvokeArgs,
 } from './orchestrator';
 
 /**
@@ -40,6 +42,20 @@ const createArgs = buildCreateOrchestratorTaskInvokeArgs(request);
 assert(
   JSON.stringify(createArgs) === JSON.stringify({ request }),
   'createTask should wrap request without renaming fields',
+);
+
+const queueArgs = buildQueueOrchestratorTaskInvokeArgs(' task-1 ');
+
+assert(
+  JSON.stringify(queueArgs) === JSON.stringify({ taskId: 'task-1' }),
+  'queueTask should trim taskId before invoking backend',
+);
+
+const configArgs = buildGetOrchestratorProjectConfigInvokeArgs(' project-1 ');
+
+assert(
+  JSON.stringify(configArgs) === JSON.stringify({ projectId: 'project-1' }),
+  'getProjectConfig should trim projectId before invoking backend',
 );
 
 console.log('orchestrator.test.ts passed');
