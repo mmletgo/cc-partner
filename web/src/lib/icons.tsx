@@ -263,6 +263,22 @@ export const TerminalIcon = ({ size, ...rest }: IconProps) => (
   </svg>
 );
 
+/**
+ * Business Logic（为什么需要）:
+ *   侧栏需要为 Orchestrator 自动化入口提供统一的 16x16 图标，避免导航项只靠文字识别。
+ *
+ * Code Logic（做什么）:
+ *   渲染三节点编排流的 stroke SVG，并复用 baseProps 保持尺寸、描边和 viewBox 一致。
+ */
+export const OrchestratorIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <circle cx="4" cy="4" r="1.8" />
+    <circle cx="12" cy="4" r="1.8" />
+    <circle cx="8" cy="12" r="1.8" />
+    <path d="M5.6 4h4.8M4.8 5.6 7.2 10.4M11.2 5.6 8.8 10.4" />
+  </svg>
+);
+
 export const HealthIcon = ({ size, ...rest }: IconProps) => (
   <svg {...baseProps(size)} {...rest}>
     <path d="M1.5 8h2l1.5-3.5L7.5 12 10 5l1.5 3h3" />

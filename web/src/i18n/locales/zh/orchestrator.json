@@ -1,0 +1,59 @@
+{
+  "title": "自动化任务编排",
+  "subtitle": "把当前 Workbench 项目中的开发目标整理成可排队、可验证、可交付的任务。",
+  "noProject": "未选择项目",
+  "emptyTitle": "暂无任务",
+  "emptyBody": "先选择 Workbench 项目并创建一个任务，后续执行状态会出现在这里。",
+  "status": {
+    "draft": "草稿",
+    "queued": "排队中",
+    "preparing": "准备中",
+    "running": "运行中",
+    "verifying": "验证中",
+    "delivering": "交付中",
+    "done": "已完成",
+    "blocked": "已阻塞",
+    "aborted": "已终止"
+  },
+  "queue": {
+    "title": "任务队列",
+    "subtitle": "按生命周期状态查看当前项目任务。",
+    "taskAria": "选择任务 {{title}}",
+    "priority": "优先级 {{priority}}"
+  },
+  "detail": {
+    "title": "任务详情",
+    "subtitle": "查看目标、验收标准和执行绑定信息。",
+    "goal": "目标",
+    "acceptanceCriteria": "验收标准",
+    "branch": "分支",
+    "attempt": "尝试次数",
+    "createdAt": "创建时间",
+    "updatedAt": "更新时间",
+    "unassigned": "未绑定",
+    "blockedReason": "阻塞原因"
+  },
+  "create": {
+    "title": "创建任务",
+    "subtitle": "当前阶段只创建任务记录，执行链路由后续任务接入。",
+    "taskTitle": "标题",
+    "taskTitlePlaceholder": "例如：实现登录表单校验",
+    "goal": "目标",
+    "goalPlaceholder": "描述希望自动化完成的结果",
+    "acceptanceCriteria": "验收标准",
+    "acceptanceCriteriaPlaceholder": "描述如何判断任务完成",
+    "submit": "创建任务"
+  },
+  "evidence": {
+    "title": "证据",
+    "subtitle": "执行日志、测试输出和交付记录会在后续任务接入。",
+    "placeholderLabel": "占位",
+    "placeholderBody": "Task 3 只提供页面 shell；真实 evidence loading 不在本次范围内。"
+  },
+  "errors": {
+    "load": "任务列表加载失败。",
+    "create": "任务创建失败。",
+    "noProject": "请先在侧栏选择一个 Workbench 项目。",
+    "required": "请填写标题、目标和验收标准。"
+  }
+}

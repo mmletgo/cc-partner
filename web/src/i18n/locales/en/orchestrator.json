@@ -1,0 +1,59 @@
+{
+  "title": "Automation Orchestrator",
+  "subtitle": "Turn the current Workbench project goal into queued, verifiable, and deliverable tasks.",
+  "noProject": "No project selected",
+  "emptyTitle": "No tasks yet",
+  "emptyBody": "Select a Workbench project and create a task. Execution status will appear here later.",
+  "status": {
+    "draft": "Draft",
+    "queued": "Queued",
+    "preparing": "Preparing",
+    "running": "Running",
+    "verifying": "Verifying",
+    "delivering": "Delivering",
+    "done": "Done",
+    "blocked": "Blocked",
+    "aborted": "Aborted"
+  },
+  "queue": {
+    "title": "Task Queue",
+    "subtitle": "Review current project tasks by lifecycle status.",
+    "taskAria": "Select task {{title}}",
+    "priority": "Priority {{priority}}"
+  },
+  "detail": {
+    "title": "Task Detail",
+    "subtitle": "Review the goal, acceptance criteria, and execution bindings.",
+    "goal": "Goal",
+    "acceptanceCriteria": "Acceptance Criteria",
+    "branch": "Branch",
+    "attempt": "Attempts",
+    "createdAt": "Created",
+    "updatedAt": "Updated",
+    "unassigned": "Unassigned",
+    "blockedReason": "Blocked Reason"
+  },
+  "create": {
+    "title": "Create Task",
+    "subtitle": "This phase only creates the task record. Execution wiring comes in later tasks.",
+    "taskTitle": "Title",
+    "taskTitlePlaceholder": "Example: implement login form validation",
+    "goal": "Goal",
+    "goalPlaceholder": "Describe the result automation should produce",
+    "acceptanceCriteria": "Acceptance Criteria",
+    "acceptanceCriteriaPlaceholder": "Describe how completion will be judged",
+    "submit": "Create Task"
+  },
+  "evidence": {
+    "title": "Evidence",
+    "subtitle": "Execution logs, test output, and delivery records will be wired in later tasks.",
+    "placeholderLabel": "Placeholder",
+    "placeholderBody": "Task 3 only provides the page shell; real evidence loading is outside this scope."
+  },
+  "errors": {
+    "load": "Failed to load tasks.",
+    "create": "Failed to create the task.",
+    "noProject": "Select a Workbench project from the sidebar first.",
+    "required": "Fill in title, goal, and acceptance criteria."
+  }
+}
