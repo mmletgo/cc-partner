@@ -432,24 +432,110 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     自动交付完整成功后，任务需要进入 Done、清空阻塞原因并记录 finished_at，供队列和详情页展示真实完成时间。
+    ///     自动交付完整成功后，任务需要进入 Done；但用户可能在交付期间终止任务，Done 写入不能覆盖 Aborted。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     将 status 置为 done，blocked_reason 置空，updated_at/finished_at 写入同一个 UTC ISO 时间，再读取完整任务返回。
+    ///     仅当当前状态仍为 Delivering 时将 status 置为 done、清空 blocked_reason 并写 finished_at；
+    ///     条件未命中时读取并返回当前任务，不改写终止或其它状态。
     pub async fn finish_task_done(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ?, finished_at = ? \
-             WHERE id = ?",
+             WHERE id = ? AND status = ?",
         )
         .bind(OrchestratorTaskStatus::Done.as_str())
         .bind(Option::<&str>::None)
         .bind(&now)
         .bind(&now)
         .bind(task_id)
+        .bind(OrchestratorTaskStatus::Delivering.as_str())
         .execute(&self.pool)
         .await?;
         self.get_task(task_id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     自动交付失败后任务应进入 Blocked；但用户终止状态优先，失败兜底不得覆盖 Aborted。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当当前状态仍为 Delivering 时写入 Blocked 和 blocked_reason；未命中时返回当前任务。
+    pub async fn block_task_if_delivering(
+        &self,
+        task_id: &str,
+        reason: &str,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(OrchestratorTaskStatus::Blocked.as_str())
+        .bind(reason)
+        .bind(now)
+        .bind(task_id)
+        .bind(OrchestratorTaskStatus::Delivering.as_str())
+        .execute(&self.pool)
+        .await?;
+        self.get_task(task_id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     验证阶段失败应进入 Blocked；但用户可能在验证运行期间终止任务，失败处理不能覆盖 Aborted。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当当前状态仍为 Verifying 时写入 Blocked 和 blocked_reason；未命中时返回当前任务。
+    pub async fn block_task_if_verifying(
+        &self,
+        task_id: &str,
+        reason: &str,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(OrchestratorTaskStatus::Blocked.as_str())
+        .bind(reason)
+        .bind(now)
+        .bind(task_id)
+        .bind(OrchestratorTaskStatus::Verifying.as_str())
+        .execute(&self.pool)
+        .await?;
+        self.get_task(task_id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     验证成功后推进 Delivering 可能与用户 Abort 并发发生；调用方需要知道是否成功取得下一阶段执行权。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     执行 `UPDATE ... WHERE id=? AND status=?` 条件更新；命中返回 Some(更新后 Row)，
+    ///     未命中时确认任务仍存在并返回 None，不把当前状态当作业务错误。
+    pub async fn try_transition_task_status(
+        &self,
+        task_id: &str,
+        expected_status: OrchestratorTaskStatus,
+        next_status: OrchestratorTaskStatus,
+        blocked_reason: Option<&str>,
+    ) -> Result<Option<OrchestratorTaskRow>, AppError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(next_status.as_str())
+        .bind(blocked_reason)
+        .bind(now)
+        .bind(task_id)
+        .bind(expected_status.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(task_id).await.map(Some);
+        }
+
+        self.get_task(task_id).await?;
+        Ok(None)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -954,6 +1040,54 @@ mod tests {
         assert_eq!(updated.status, OrchestratorTaskStatus::Verifying);
         assert_eq!(persisted.status, OrchestratorTaskStatus::Verifying);
         assert_eq!(updated.id, created.id);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Verifying→Delivering 需要可跳过的 expected-status 转换，状态被 Abort 抢先改变时命令层应返回当前任务而不是报错覆盖。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Aborted 任务后尝试按 Verifying 预期切到 Delivering，断言返回 None 且持久化状态不变。
+    #[tokio::test]
+    async fn try_transition_task_status_returns_none_for_unexpected_status() {
+        let (_pool, repo) = setup_repo().await;
+        let created = task_row("task-1", "project-1", OrchestratorTaskStatus::Aborted);
+        repo.create_task(&created).await.unwrap();
+
+        let transitioned = repo
+            .try_transition_task_status(
+                &created.id,
+                OrchestratorTaskStatus::Verifying,
+                OrchestratorTaskStatus::Delivering,
+                None,
+            )
+            .await
+            .unwrap();
+        let persisted = repo.get_task(&created.id).await.unwrap();
+
+        assert!(transitioned.is_none());
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户可能在 delivery 完成写 Done 前终止任务，完成写入不得覆盖用户终止状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Delivering 任务后先模拟用户终止为 Aborted，再调用完成 helper，断言任务仍保持 Aborted。
+    #[tokio::test]
+    async fn finish_task_done_does_not_override_aborted_task() {
+        let (_pool, repo) = setup_repo().await;
+        let created = task_row("task-1", "project-1", OrchestratorTaskStatus::Delivering);
+        repo.create_task(&created).await.unwrap();
+        repo.set_task_status(&created.id, OrchestratorTaskStatus::Aborted, None)
+            .await
+            .unwrap();
+
+        let finished = repo.finish_task_done(&created.id).await.unwrap();
+        let persisted = repo.get_task(&created.id).await.unwrap();
+
+        assert_eq!(finished.status, OrchestratorTaskStatus::Aborted);
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
+        assert!(persisted.finished_at.is_none());
     }
 
     /// Business Logic（为什么需要这个函数）:

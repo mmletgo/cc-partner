@@ -3,6 +3,7 @@ use crate::orchestrator::models::{
     OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskDto,
     OrchestratorTaskRow, OrchestratorTaskStatus,
 };
+use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
 use chrono::Utc;
 use std::path::PathBuf;
@@ -155,6 +156,18 @@ struct VerificationFailureOutcome {
     evidence: VerificationEvidence,
 }
 
+/// 验证完成后进入交付阶段的条件转换结果。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     验证期间用户可能终止任务，命令层需要区分是否真正从 Verifying 取得 Delivering 执行权。
+///
+/// Code Logic（这个结构体做什么）:
+///     transitioned=true 表示 Verifying->Delivering 原子转换命中；false 表示状态已变化，task 为当前最新任务。
+struct ConditionalDeliveryTransition {
+    transitioned: bool,
+    task: OrchestratorTaskRow,
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     验证前置失败也必须落为 failed verificationOutput evidence，用户才能在任务详情看到可审计原因。
 ///
@@ -220,7 +233,7 @@ async fn add_verification_evidence(
 ///     验证失败、缺少 worktree 或找不到 worktree 时，任务应进入 Blocked 并保留明确原因。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用仓储 set_task_status 写入 Blocked 和 blocked_reason，再转换为 DTO。
+///     仅当任务仍处于 Verifying 时写入 Blocked 和 blocked_reason，再转换为 DTO；已 Abort 时返回当前任务。
 async fn block_task_with_reason(
     state: &AppState,
     task_id: &str,
@@ -228,9 +241,85 @@ async fn block_task_with_reason(
 ) -> Result<OrchestratorTaskDto, AppError> {
     let task = state
         .orchestrator_repo
-        .set_task_status(task_id, OrchestratorTaskStatus::Blocked, Some(reason))
+        .block_task_if_verifying(task_id, reason)
         .await?;
     Ok(OrchestratorTaskDto::from(task))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     验证通过或跳过后只有仍处于 Verifying 的任务可以进入 Delivering，避免用户 Abort 被旧流程覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     调用仓储 try_transition_task_status 做 Verifying->Delivering 条件写；未命中时读取当前任务并标记 skipped。
+async fn transition_verified_task_to_delivering(
+    repo: &OrchestratorRepo,
+    task_id: &str,
+) -> Result<ConditionalDeliveryTransition, AppError> {
+    match repo
+        .try_transition_task_status(
+            task_id,
+            OrchestratorTaskStatus::Verifying,
+            OrchestratorTaskStatus::Delivering,
+            None,
+        )
+        .await?
+    {
+        Some(task) => Ok(ConditionalDeliveryTransition {
+            transitioned: true,
+            task,
+        }),
+        None => Ok(ConditionalDeliveryTransition {
+            transitioned: false,
+            task: repo.get_task(task_id).await?,
+        }),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     命令层调用 delivery pipeline 时若遇到未被 pipeline 内部归一的错误，任务也不能永久停在 Delivering。
+///
+/// Code Logic（这个函数做什么）:
+///     将错误转换为 delivery failed evidence + Blocked；状态已被 Abort 等流程改变时只返回当前任务，不覆盖。
+async fn block_task_with_delivery_error(
+    state: &AppState,
+    task_id: &str,
+    err: AppError,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let reason = format!("自动交付失败: {err}");
+    let task = state
+        .orchestrator_repo
+        .block_task_if_delivering(task_id, &reason)
+        .await?;
+    if task.status == OrchestratorTaskStatus::Blocked
+        && task.blocked_reason.as_deref() == Some(reason.as_str())
+    {
+        state
+            .orchestrator_repo
+            .add_evidence(task_id, "delivery", "delivery", "failed", &reason)
+            .await?;
+    }
+    Ok(OrchestratorTaskDto::from(task))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     验证完成后命令层需要运行自动交付，并对未预期错误做最终兜底。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 AppDeliveryContext 调用 delivery::deliver_task；成功返回 summary.task，失败时条件 Block 当前 Delivering 任务。
+async fn run_delivery_for_task(
+    state: &AppState,
+    app_handle: AppHandle,
+    task_id: &str,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let delivery_context =
+        crate::orchestrator::delivery::AppDeliveryContext::new(state, app_handle);
+    match crate::orchestrator::delivery::deliver_task(&delivery_context, task_id).await {
+        Ok(summary) => {
+            tracing::debug!(task_id = %task_id, stages = ?summary.stages, "Orchestrator 自动交付完成");
+            Ok(summary.task)
+        }
+        Err(err) => block_task_with_delivery_error(state, task_id, err).await,
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -461,16 +550,14 @@ pub async fn complete_orchestrator_agent_run(
                 "未配置验证命令，跳过验证。",
             )
             .await?;
-        let delivering = state
-            .orchestrator_repo
-            .set_task_status(&task.id, OrchestratorTaskStatus::Delivering, None)
-            .await?;
-        let delivery_context =
-            crate::orchestrator::delivery::AppDeliveryContext::new(state.inner(), app_handle);
-        let summary =
-            crate::orchestrator::delivery::deliver_task(&delivery_context, &delivering.id).await?;
-        tracing::debug!(task_id = %delivering.id, stages = ?summary.stages, "Orchestrator 自动交付完成");
-        return Ok(summary.task);
+        let delivery_transition =
+            transition_verified_task_to_delivering(state.orchestrator_repo.as_ref(), &task.id)
+                .await?;
+        if !delivery_transition.transitioned {
+            return Ok(OrchestratorTaskDto::from(delivery_transition.task));
+        }
+        return run_delivery_for_task(state.inner(), app_handle, &delivery_transition.task.id)
+            .await;
     }
 
     match crate::orchestrator::delivery::run_verification_commands(
@@ -490,17 +577,13 @@ pub async fn complete_orchestrator_agent_run(
                     &output,
                 )
                 .await?;
-            let delivering = state
-                .orchestrator_repo
-                .set_task_status(&task.id, OrchestratorTaskStatus::Delivering, None)
-                .await?;
-            let delivery_context =
-                crate::orchestrator::delivery::AppDeliveryContext::new(state.inner(), app_handle);
-            let summary =
-                crate::orchestrator::delivery::deliver_task(&delivery_context, &delivering.id)
+            let delivery_transition =
+                transition_verified_task_to_delivering(state.orchestrator_repo.as_ref(), &task.id)
                     .await?;
-            tracing::debug!(task_id = %delivering.id, stages = ?summary.stages, "Orchestrator 自动交付完成");
-            Ok(summary.task)
+            if !delivery_transition.transitioned {
+                return Ok(OrchestratorTaskDto::from(delivery_transition.task));
+            }
+            run_delivery_for_task(state.inner(), app_handle, &delivery_transition.task.id).await
         }
         Err(err) => {
             block_task_with_verification_error(state.inner(), &task.id, "验证失败", err).await
@@ -556,6 +639,54 @@ pub async fn abort_orchestrator_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     命令层测试需要 Orchestrator 仓储验证真实 SQLite 条件更新语义，避免只测纯函数。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建单连接内存 SQLite、初始化 Orchestrator schema，并返回可供命令 helper 使用的 repo。
+    async fn setup_orchestrator_repo() -> OrchestratorRepo {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .expect("sqlite options")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("sqlite pool");
+        OrchestratorRepo::init_schema(&pool)
+            .await
+            .expect("orchestrator schema");
+        OrchestratorRepo::new(pool)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     命令层状态转换测试需要稳定构造 Verifying/Aborted 任务行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回字段完整的测试任务 Row，调用方传入 id 和 status，其它字段使用固定值。
+    fn command_task_row(id: &str, status: OrchestratorTaskStatus) -> OrchestratorTaskRow {
+        OrchestratorTaskRow {
+            id: id.to_string(),
+            project_id: "project-1".to_string(),
+            title: format!("Task {id}"),
+            goal: "goal".to_string(),
+            acceptance_criteria: "criteria".to_string(),
+            status,
+            priority: 0,
+            branch_name: None,
+            worktree_id: Some("worktree-1".to_string()),
+            session_id: None,
+            blocked_reason: None,
+            attempt: 0,
+            created_at: "2026-07-05T00:00:00Z".to_string(),
+            updated_at: "2026-07-05T00:00:00Z".to_string(),
+            started_at: None,
+            finished_at: None,
+        }
+    }
 
     /// Business Logic（为什么需要这个函数）:
     ///     Orchestrator 任务创建命令必须拒绝没有项目归属的任务，避免调度器后续无法定位工作台项目。
@@ -648,6 +779,27 @@ mod tests {
         let value = build_dispatch_once_response(2);
 
         assert_eq!(value["dispatched"], serde_json::json!(2));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     验证通过后进入 Delivering 必须用 expected-status，不能覆盖验证期间用户点击 Abort 的结果。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Aborted 任务并调用命令层交付转换 helper，断言 transitioned=false 且数据库仍为 Aborted。
+    #[tokio::test]
+    async fn delivery_transition_skips_when_task_is_no_longer_verifying() {
+        let repo = setup_orchestrator_repo().await;
+        let task = command_task_row("task-aborted", OrchestratorTaskStatus::Aborted);
+        repo.create_task(&task).await.expect("insert task");
+
+        let transition = transition_verified_task_to_delivering(&repo, &task.id)
+            .await
+            .expect("transition result");
+        let persisted = repo.get_task(&task.id).await.expect("persisted task");
+
+        assert!(!transition.transitioned);
+        assert_eq!(transition.task.status, OrchestratorTaskStatus::Aborted);
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
     }
 
     /// Business Logic（为什么需要这个函数）:

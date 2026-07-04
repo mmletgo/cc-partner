@@ -17,9 +17,10 @@ use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
 use crate::storage::{WorkbenchProjectRepo, WorkbenchWorktreeRepo};
 use crate::workbench::git as workbench_git;
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tauri::AppHandle;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -35,6 +36,51 @@ const OUTPUT_TRUNCATED_MARKER: &str = "[output truncated]";
 #[cfg(unix)]
 const SIGKILL: std::os::raw::c_int = 9;
 const DELIVERY_EVIDENCE_KIND: &str = "delivery";
+static DELIVERY_TASK_LOCKS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
+
+/// 单任务 delivery 执行权守卫。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     同一个 Orchestrator 任务不能同时执行两条自动交付流水线，否则会重复提交、推送、合并并写重复 evidence。
+///
+/// Code Logic（这个结构体做什么）:
+///     记录已领取的 task_id；Drop 时从进程内 HashSet 移除，且不持有 MutexGuard 跨 await。
+struct DeliveryTaskGuard {
+    task_id: String,
+}
+
+impl Drop for DeliveryTaskGuard {
+    /// Business Logic（为什么需要这个函数）:
+    ///     delivery pipeline 结束后必须释放任务执行权，后续用户重试或再次触发才能继续处理。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在 Drop 中短暂锁定全局 HashSet 并移除 task_id；锁中毒时静默跳过，避免 Drop panic。
+    fn drop(&mut self) {
+        if let Some(locks) = DELIVERY_TASK_LOCKS.get() {
+            if let Ok(mut locked) = locks.lock() {
+                locked.remove(&self.task_id);
+            }
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     自动交付需要 per-task 执行权，防止重复点击或并发命令同时执行 Git side effect。
+///
+/// Code Logic（这个函数做什么）:
+///     短暂锁定全局 HashSet；首次插入 task_id 返回守卫，已存在返回 None，不持有锁跨 await。
+fn try_acquire_delivery_task_guard(task_id: &str) -> Result<Option<DeliveryTaskGuard>, AppError> {
+    let locks = DELIVERY_TASK_LOCKS.get_or_init(|| StdMutex::new(HashSet::new()));
+    let mut locked = locks
+        .lock()
+        .map_err(|_| AppError::generic("Orchestrator delivery lock 已损坏"))?;
+    if !locked.insert(task_id.to_string()) {
+        return Ok(None);
+    }
+    Ok(Some(DeliveryTaskGuard {
+        task_id: task_id.to_string(),
+    }))
+}
 
 #[cfg(unix)]
 unsafe extern "C" {
@@ -257,11 +303,33 @@ where
             task.status.as_str()
         )));
     }
-    let config = context
+    let Some(_delivery_guard) = try_acquire_delivery_task_guard(&task.id)? else {
+        let current = context.orchestrator_repo().get_task(&task.id).await?;
+        return Ok(DeliverySummary {
+            task: OrchestratorTaskDto::from(current),
+            stages: Vec::new(),
+        });
+    };
+    let mut stages = Vec::new();
+    let config = match context
         .orchestrator_repo()
         .get_or_create_project_config(&task.project_id)
-        .await?;
-    let mut stages = Vec::new();
+        .await
+    {
+        Ok(config) => config,
+        Err(err) => {
+            let reason = format!("delivery config failed: {err}");
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &reason,
+                "delivery config",
+                &reason,
+                &mut stages,
+            )
+            .await;
+        }
+    };
 
     if let Some(reason) = disabled_delivery_flag_reason(&config) {
         return block_delivery_task(
@@ -286,9 +354,9 @@ where
         )
         .await;
     };
-    let worktree = match context.workbench_worktree_repo().get(&worktree_id).await? {
-        Some(worktree) => worktree,
-        None => {
+    let worktree = match context.workbench_worktree_repo().get(&worktree_id).await {
+        Ok(Some(worktree)) => worktree,
+        Ok(None) => {
             return block_delivery_task(
                 context.orchestrator_repo(),
                 &task.id,
@@ -299,21 +367,51 @@ where
             )
             .await;
         }
+        Err(err) => {
+            let reason = format!("read task worktree failed: {err}");
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &reason,
+                "delivery config",
+                &reason,
+                &mut stages,
+            )
+            .await;
+        }
     };
-    let Some(project) = context
+    let project = match context
         .workbench_project_repo()
         .get(&worktree.project_id)
-        .await?
-    else {
-        return block_delivery_task(
-            context.orchestrator_repo(),
-            &task.id,
-            &format!("workbench project not found: {}", worktree.project_id),
-            "delivery config",
-            &format!("Workbench project not found: {}", worktree.project_id),
-            &mut stages,
-        )
-        .await;
+        .await
+    {
+        Ok(Some(project)) => project,
+        Ok(None) => {
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &format!("workbench project not found: {}", worktree.project_id),
+                "delivery config",
+                &format!("Workbench project not found: {}", worktree.project_id),
+                &mut stages,
+            )
+            .await;
+        }
+        Err(err) => {
+            let reason = format!(
+                "read workbench project failed: {}: {err}",
+                worktree.project_id
+            );
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &reason,
+                "delivery config",
+                &reason,
+                &mut stages,
+            )
+            .await;
+        }
     };
     let task_branch = worktree
         .branch
@@ -890,7 +988,8 @@ async fn add_delivery_evidence(
 ///     自动交付任一阶段失败都不能让任务停在 Delivering；用户需要看到 Blocked 状态和失败 evidence。
 ///
 /// Code Logic（这个函数做什么）:
-///     先追加 failed delivery evidence，再用 blocked_reason 把任务置为 Blocked，并返回 DeliverySummary。
+///     先尝试在当前仍为 Delivering 时原子写 Blocked；命中后追加 failed delivery evidence。
+///     如果任务已被用户终止或其它流程推进，则直接返回当前任务，不覆盖终止状态。
 async fn block_delivery_task(
     orchestrator_repo: &OrchestratorRepo,
     task_id: &str,
@@ -899,18 +998,22 @@ async fn block_delivery_task(
     evidence_content: &str,
     stages: &mut Vec<String>,
 ) -> Result<DeliverySummary, AppError> {
-    add_delivery_evidence(
-        orchestrator_repo,
-        task_id,
-        evidence_title,
-        "failed",
-        evidence_content,
-    )
-    .await?;
-    stages.push(evidence_title.to_string());
     let task = orchestrator_repo
-        .set_task_status(task_id, OrchestratorTaskStatus::Blocked, Some(reason))
+        .block_task_if_delivering(task_id, reason)
         .await?;
+    if task.status == OrchestratorTaskStatus::Blocked
+        && task.blocked_reason.as_deref() == Some(reason)
+    {
+        add_delivery_evidence(
+            orchestrator_repo,
+            task_id,
+            evidence_title,
+            "failed",
+            evidence_content,
+        )
+        .await?;
+        stages.push(evidence_title.to_string());
+    }
     Ok(DeliverySummary {
         task: OrchestratorTaskDto::from(task),
         stages: stages.clone(),
@@ -930,7 +1033,13 @@ mod tests {
     use std::path::Path;
     use std::process::Command as StdCommand;
     use std::str::FromStr;
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex as StdMutex,
+    };
+    use tokio::sync::Notify;
+
+    static DELIVERY_TEST_TASK_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
     /// Business Logic（为什么需要这个函数）:
     ///     验证命令成功时需要返回 stdout/stderr 合并输出，作为任务 evidence 展示给用户。
@@ -1137,11 +1246,33 @@ mod tests {
     ///     自动交付需要同时访问 SQLite 与真实 Git 仓库；测试必须隔离这些资源，避免污染真实用户项目。
     ///
     /// Code Logic（这个结构体做什么）:
-    ///     持有最小 Orchestrator/Workbench 仓储，并实现 DeliveryContext 供 deliver_task 调用。
+    ///     持有最小 Orchestrator/Workbench 仓储、SQLite pool 和可控测试钩子，并实现 DeliveryContext 供 deliver_task 调用。
+    #[derive(Clone)]
     struct DeliveryTestHarness {
+        pool: SqlitePool,
         orchestrator_repo: Arc<OrchestratorRepo>,
         workbench_project_repo: Arc<WorkbenchProjectRepo>,
         workbench_worktree_repo: Arc<WorkbenchWorktreeRepo>,
+        controls: Arc<DeliveryTestControls>,
+    }
+
+    /// Orchestrator 交付测试控制钩子。
+    ///
+    /// Business Logic（为什么需要这个结构体）:
+    ///     并发交付与用户终止都发生在 delivery pipeline 中途，测试需要可控地暂停阶段或模拟用户 Abort。
+    ///
+    /// Code Logic（这个结构体做什么）:
+    ///     用原子计数记录 Git side effect 调用次数，用 Notify 暂停首个 commit，并保存需要在阶段中模拟 Aborted 的任务 id。
+    #[derive(Default)]
+    struct DeliveryTestControls {
+        pause_next_commit: AtomicBool,
+        commit_started: Notify,
+        release_commit: Notify,
+        commit_calls: AtomicUsize,
+        push_calls: AtomicUsize,
+        merge_calls: AtomicUsize,
+        abort_after_merge_task_id: StdMutex<Option<String>>,
+        abort_before_push_error_task_id: StdMutex<Option<String>>,
     }
 
     impl DeliveryContext for DeliveryTestHarness {
@@ -1182,6 +1313,15 @@ mod tests {
             worktree_id: String,
             message: Option<String>,
         ) -> Result<(), AppError> {
+            self.controls.commit_calls.fetch_add(1, Ordering::SeqCst);
+            if self
+                .controls
+                .pause_next_commit
+                .swap(false, Ordering::SeqCst)
+            {
+                self.controls.commit_started.notify_waiters();
+                self.controls.release_commit.notified().await;
+            }
             let row = self
                 .workbench_worktree_repo
                 .get(&worktree_id)
@@ -1202,6 +1342,19 @@ mod tests {
         /// Code Logic（这个函数做什么）:
         ///     从 worktree row 取分支并调用 workbench_git::push_branch。
         async fn push_task_worktree(&self, worktree_id: String) -> Result<(), AppError> {
+            self.controls.push_calls.fetch_add(1, Ordering::SeqCst);
+            let abort_task_id = self
+                .controls
+                .abort_before_push_error_task_id
+                .lock()
+                .expect("abort before push lock")
+                .take();
+            if let Some(task_id) = abort_task_id {
+                self.orchestrator_repo
+                    .set_task_status(&task_id, OrchestratorTaskStatus::Aborted, None)
+                    .await?;
+                return Err(AppError::generic("simulated push failure after abort"));
+            }
             let row = self
                 .workbench_worktree_repo
                 .get(&worktree_id)
@@ -1225,6 +1378,7 @@ mod tests {
             &self,
             worktree_id: String,
         ) -> Result<String, AppError> {
+            self.controls.merge_calls.fetch_add(1, Ordering::SeqCst);
             let row = self
                 .workbench_worktree_repo
                 .get(&worktree_id)
@@ -1270,6 +1424,17 @@ mod tests {
                 )?;
             }
             self.workbench_worktree_repo.delete(&row.id).await?;
+            let abort_task_id = self
+                .controls
+                .abort_after_merge_task_id
+                .lock()
+                .expect("abort after merge lock")
+                .take();
+            if let Some(task_id) = abort_task_id {
+                self.orchestrator_repo
+                    .set_task_status(&task_id, OrchestratorTaskStatus::Aborted, None)
+                    .await?;
+            }
             Ok(format!("merge outcome: {outcome:?}"))
         }
     }
@@ -1285,9 +1450,11 @@ mod tests {
         let workbench_project_repo = Arc::new(WorkbenchProjectRepo::new(pool.clone()));
         let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::new(pool.clone()));
         DeliveryTestHarness {
+            pool,
             orchestrator_repo,
             workbench_project_repo,
             workbench_worktree_repo,
+            controls: Arc::new(DeliveryTestControls::default()),
         }
     }
 
@@ -1420,7 +1587,10 @@ mod tests {
     ) -> String {
         let project_id = "project-delivery";
         let worktree_id = "worktree-delivery";
-        let task_id = "task-delivery";
+        let task_id = format!(
+            "task-delivery-{}",
+            DELIVERY_TEST_TASK_COUNTER.fetch_add(1, Ordering::SeqCst)
+        );
         let now = Utc::now().to_rfc3339();
         harness
             .workbench_project_repo
@@ -1474,7 +1644,7 @@ mod tests {
             })
             .await
             .expect("insert task");
-        task_id.to_string()
+        task_id
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1521,6 +1691,252 @@ mod tests {
         assert!(joined.contains("push branch"));
         assert!(joined.contains("merge main"));
         assert!(joined.contains("push main"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     同一个 Delivering 任务被重复点击或并发触发时，只能有一个 delivery pipeline 执行 Git side effect。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     暂停首个 commit 阶段并在暂停期间发起第二次 deliver_task，断言第二次快速返回且 commit/push/merge 只执行一次。
+    #[tokio::test]
+    async fn duplicate_delivery_call_does_not_execute_git_side_effects_twice() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("task.txt"), "single delivery lock\n")
+            .expect("write task file");
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+        harness
+            .controls
+            .pause_next_commit
+            .store(true, Ordering::SeqCst);
+        let commit_started = harness.controls.commit_started.notified();
+        let first_harness = harness.clone();
+        let first_task_id = task_id.clone();
+        let first = tokio::spawn(async move { deliver_task(&first_harness, &first_task_id).await });
+        commit_started.await;
+
+        let second = deliver_task(&harness, &task_id)
+            .await
+            .expect("second delivery should not run side effects");
+        harness.controls.release_commit.notify_one();
+        let first = first
+            .await
+            .expect("first delivery join")
+            .expect("first delivery result");
+        let evidence = harness
+            .orchestrator_repo
+            .list_evidence(&task_id)
+            .await
+            .expect("delivery evidence");
+
+        assert_eq!(second.stages, Vec::<String>::new());
+        assert_eq!(first.task.status, OrchestratorTaskStatus::Done);
+        assert_eq!(
+            harness.controls.commit_calls.load(Ordering::SeqCst),
+            1,
+            "commit should be claimed by exactly one delivery call"
+        );
+        assert_eq!(harness.controls.push_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.controls.merge_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(evidence.len(), 4);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户可能在 delivery 已完成 Git 操作但尚未写 Done 前点击终止，最终状态不得被 Done 覆盖。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在 merge 阶段成功后模拟用户把任务置为 Aborted，再断言 deliver_task 返回和数据库持久化状态仍是 Aborted。
+    #[tokio::test]
+    async fn delivery_does_not_mark_done_when_task_aborted_before_finish() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("task.txt"), "abort before done\n").expect("write task file");
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+        *harness
+            .controls
+            .abort_after_merge_task_id
+            .lock()
+            .expect("abort after merge lock") = Some(task_id.clone());
+
+        let delivered = deliver_task(&harness, &task_id)
+            .await
+            .expect("delivery should return current task");
+        let persisted = harness
+            .orchestrator_repo
+            .get_task(&task_id)
+            .await
+            .expect("persisted task");
+
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Aborted);
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
+        assert!(persisted.finished_at.is_none());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     delivery 失败路径也可能与用户终止并发，失败兜底不得把 Aborted 任务覆盖为 Blocked。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在 push branch 阶段先模拟用户终止再返回错误，断言 block_delivery_task 不能覆盖 Aborted。
+    #[tokio::test]
+    async fn delivery_failure_does_not_block_when_task_was_aborted() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("task.txt"), "abort before block\n").expect("write task file");
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+        *harness
+            .controls
+            .abort_before_push_error_task_id
+            .lock()
+            .expect("abort before push lock") = Some(task_id.clone());
+
+        let delivered = deliver_task(&harness, &task_id)
+            .await
+            .expect("delivery should return current task");
+        let persisted = harness
+            .orchestrator_repo
+            .get_task(&task_id)
+            .await
+            .expect("persisted task");
+
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Aborted);
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Delivering 后如果项目策略 JSON 损坏，delivery 不能直接返回错误导致任务永久停在 Delivering。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写入损坏的 verification_commands_json 触发配置读取错误，断言任务进入 Blocked 且写入 failed delivery evidence。
+    #[tokio::test]
+    async fn delivery_blocks_and_writes_failed_evidence_when_config_preflight_fails() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+        sqlx::query(
+            "INSERT INTO orchestrator_project_config \
+             (project_id, verification_commands_json, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind("project-delivery")
+        .bind("not-json")
+        .bind(Utc::now().to_rfc3339())
+        .bind(Utc::now().to_rfc3339())
+        .execute(&harness.pool)
+        .await
+        .expect("insert invalid config");
+
+        let delivered = deliver_task(&harness, &task_id)
+            .await
+            .expect("preflight failure should block task");
+        let evidence = harness
+            .orchestrator_repo
+            .list_evidence(&task_id)
+            .await
+            .expect("delivery evidence");
+
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Blocked);
+        assert!(delivered
+            .task
+            .blocked_reason
+            .unwrap_or_default()
+            .contains("delivery config"));
+        assert!(evidence
+            .iter()
+            .any(|item| item.kind == DELIVERY_EVIDENCE_KIND && item.summary == "failed"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Delivering 任务缺少 worktree_id 时无法定位任务分支，应阻塞并留下 delivery evidence 供用户处理。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     直接创建无 worktree_id 的 Delivering 任务，断言 delivery 返回 Blocked 和 failed evidence。
+    #[tokio::test]
+    async fn delivery_blocks_missing_worktree_id_with_failed_evidence() {
+        let harness = setup_delivery_harness().await;
+        let now = Utc::now().to_rfc3339();
+        let task_id = "task-missing-worktree";
+        harness
+            .orchestrator_repo
+            .create_task(&OrchestratorTaskRow {
+                id: task_id.to_string(),
+                project_id: "project-delivery".to_string(),
+                title: "Missing worktree".to_string(),
+                goal: "Block gracefully".to_string(),
+                acceptance_criteria: "failed evidence".to_string(),
+                status: OrchestratorTaskStatus::Delivering,
+                priority: 0,
+                branch_name: None,
+                worktree_id: None,
+                session_id: None,
+                blocked_reason: None,
+                attempt: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                started_at: None,
+                finished_at: None,
+            })
+            .await
+            .expect("insert task");
+
+        let delivered = deliver_task(&harness, task_id)
+            .await
+            .expect("missing worktree should block");
+        let evidence = harness
+            .orchestrator_repo
+            .list_evidence(task_id)
+            .await
+            .expect("delivery evidence");
+
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Blocked);
+        assert!(delivered
+            .task
+            .blocked_reason
+            .unwrap_or_default()
+            .contains("worktree_id"));
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].summary, "failed");
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     full-auto delivery 要求四个交付开关全部开启，关闭任一开关应显式 Blocked 而不是静默跳过。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     把 auto_push_main 置为 0 后执行 delivery，断言任务 Blocked 且 failed evidence 记录关闭的 flag。
+    #[tokio::test]
+    async fn delivery_blocks_disabled_delivery_flags_with_failed_evidence() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+        harness
+            .orchestrator_repo
+            .get_or_create_project_config("project-delivery")
+            .await
+            .expect("default config");
+        sqlx::query(
+            "UPDATE orchestrator_project_config SET auto_push_main = 0 WHERE project_id = ?",
+        )
+        .bind("project-delivery")
+        .execute(&harness.pool)
+        .await
+        .expect("disable push main");
+
+        let delivered = deliver_task(&harness, &task_id)
+            .await
+            .expect("disabled flags should block");
+        let evidence = harness
+            .orchestrator_repo
+            .list_evidence(&task_id)
+            .await
+            .expect("delivery evidence");
+
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Blocked);
+        assert!(delivered
+            .task
+            .blocked_reason
+            .unwrap_or_default()
+            .contains("auto_push_main"));
+        assert!(evidence
+            .iter()
+            .any(|item| item.content.contains("auto_push_main")));
     }
 
     /// Business Logic（为什么需要这个函数）:
