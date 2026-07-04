@@ -1,0 +1,86 @@
+<h2>移动端完整 Workbench：B 方案修订</h2>
+<p class="subtitle">基于你的反馈：左侧功能 Rail 不应长期占用手机宽度；默认收起为顶部一个展开按钮，需要时从左侧滑出。</p>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">竖屏默认：顶部展开按钮 + 主面板满宽</div>
+    <div class="mockup-body">
+      <div style="max-width:300px;margin:auto;border:1px solid #d8d2c5;border-radius:24px;padding:10px;background:#f7f4ed;color:#1d2528;font-family:system-ui,sans-serif">
+        <div style="height:18px;text-align:center;color:#766f63;font-size:10px">cc-partner.local/mobile</div>
+        <div style="display:flex;align-items:center;gap:7px;background:#fff;border:1px solid #ddd4c4;border-radius:12px;padding:8px;margin-bottom:8px">
+          <div style="width:30px;height:30px;border-radius:9px;background:#e5dfd2;display:grid;place-items:center;font-weight:700">☰</div>
+          <div style="flex:1;font-size:11px">
+            <div style="font-weight:700">cc-partner</div>
+            <div style="color:#766f63">feature/mobile-workbench · 1 window</div>
+          </div>
+          <div style="font-size:10px;background:#edf3f4;border-radius:8px;padding:5px 7px">终端</div>
+        </div>
+        <div style="background:#13161a;color:#dfe7ec;border-radius:12px;height:245px;padding:10px;font-family:monospace;font-size:11px;line-height:1.45">
+          $ claude<br>
+          <span style="color:#8b949e">Reading AGENTS.md...</span><br><br>
+          <span style="color:#7ee787">●</span> worktree: feature/mobile<br>
+          <span style="color:#ffa657">▸</span> output stream...
+        </div>
+        <div style="display:flex;gap:6px;margin-top:8px;font-size:10px">
+          <div style="flex:1;background:#fff;border:1px solid #ddd4c4;border-radius:9px;padding:7px;text-align:center">新窗口</div>
+          <div style="flex:1;background:#fff;border:1px solid #ddd4c4;border-radius:9px;padding:7px;text-align:center">分屏</div>
+          <div style="flex:1;background:#c96442;color:white;border-radius:9px;padding:7px;text-align:center">Prompt</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup">
+    <div class="mockup-header">展开后：左侧抽屉覆盖，不挤压主面板</div>
+    <div class="mockup-body">
+      <div style="max-width:300px;margin:auto;border:1px solid #d8d2c5;border-radius:24px;padding:10px;background:#f7f4ed;color:#1d2528;font-family:system-ui,sans-serif;position:relative;overflow:hidden">
+        <div style="height:18px;text-align:center;color:#766f63;font-size:10px">cc-partner.local/mobile</div>
+        <div style="position:absolute;inset:28px 10px 10px 10px;background:rgba(18,24,28,.24);border-radius:16px;z-index:1"></div>
+        <div style="position:absolute;left:10px;top:28px;bottom:10px;width:112px;background:#efe8db;border-right:1px solid #d4c9b8;border-radius:16px 0 0 16px;z-index:2;padding:9px;box-sizing:border-box;font-size:11px">
+          <div style="font-weight:700;margin-bottom:8px">Workbench</div>
+          <div style="display:grid;gap:6px">
+            <div style="background:#c96442;color:white;border-radius:8px;padding:7px">终端</div>
+            <div style="background:#fff;border-radius:8px;padding:7px">文件</div>
+            <div style="background:#fff;border-radius:8px;padding:7px">Git</div>
+            <div style="background:#fff;border-radius:8px;padding:7px">Worktree</div>
+            <div style="background:#fff;border-radius:8px;padding:7px">Prompt</div>
+            <div style="background:#fff;border-radius:8px;padding:7px">设置</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:7px;background:#fff;border:1px solid #ddd4c4;border-radius:12px;padding:8px;margin-bottom:8px">
+          <div style="width:30px;height:30px;border-radius:9px;background:#e5dfd2;display:grid;place-items:center;font-weight:700">×</div>
+          <div style="flex:1;font-size:11px">
+            <div style="font-weight:700">cc-partner</div>
+            <div style="color:#766f63">feature/mobile-workbench</div>
+          </div>
+        </div>
+        <div style="background:#13161a;color:#dfe7ec;border-radius:12px;height:245px;padding:10px;font-family:monospace;font-size:11px;line-height:1.45">
+          $ claude<br>
+          <span style="color:#8b949e">...</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>交互规则建议</h3>
+  <p>手机竖屏默认收起导航，顶部左侧是展开按钮；点击后左侧抽屉覆盖主内容，点遮罩或关闭按钮收起。平板、横屏或宽度足够时，Rail 可以固定显示，保持桌面版效率。</p>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="confirm-drawer" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>确认这个导航模型</h3>
+      <p>竖屏顶部按钮 + 覆盖式抽屉，宽屏固定 Rail。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="needs-bottom-shortcuts" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>需要底部快捷栏</h3>
+      <p>在顶部按钮之外，底部常驻终端/文件/Git 三个高频入口。</p>
+    </div>
+  </div>
+</div>

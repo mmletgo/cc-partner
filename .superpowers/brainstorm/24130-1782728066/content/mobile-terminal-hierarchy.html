@@ -1,0 +1,77 @@
+<h2>移动端 Workbench：Worktree / Window / Pane 显示模型</h2>
+<p class="subtitle">关键原则：移动端管理上下文和窗口选择；pane 的布局继续由 tmux 在终端画面内渲染。</p>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">层级关系</div>
+    <div class="mockup-body">
+      <div style="display:grid;gap:10px;font-family:system-ui,sans-serif">
+        <div style="border:1px solid #d9d1c2;border-radius:10px;padding:10px;background:#fff">
+          <strong>Project</strong>
+          <div style="color:#766f63;margin-top:4px">cc-partner</div>
+        </div>
+        <div style="display:flex;justify-content:center;color:#9a907f">↓</div>
+        <div style="border:1px solid #d9d1c2;border-radius:10px;padding:10px;background:#fff">
+          <strong>Worktree</strong>
+          <div style="display:flex;gap:6px;margin-top:8px;font-size:12px">
+            <span style="background:#c96442;color:white;border-radius:999px;padding:4px 8px">feature/mobile</span>
+            <span style="background:#eee8dd;border-radius:999px;padding:4px 8px">main</span>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:center;color:#9a907f">↓</div>
+        <div style="border:1px solid #d9d1c2;border-radius:10px;padding:10px;background:#fff">
+          <strong>Window</strong>
+          <div style="display:flex;gap:6px;margin-top:8px;font-size:12px">
+            <span style="background:#1f2930;color:white;border-radius:8px;padding:5px 8px">Claude</span>
+            <span style="background:#eee8dd;border-radius:8px;padding:5px 8px">Shell</span>
+            <span style="background:#eee8dd;border-radius:8px;padding:5px 8px">Tests</span>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:center;color:#9a907f">↓</div>
+        <div style="border:1px solid #d9d1c2;border-radius:10px;padding:10px;background:#fff">
+          <strong>Pane</strong>
+          <div style="color:#766f63;margin-top:4px">不做 React tab；由 tmux split 在 xterm 内显示</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup">
+    <div class="mockup-header">一个 window 有多个 pane 时</div>
+    <div class="mockup-body">
+      <div style="max-width:310px;margin:auto;border:1px solid #d8d2c5;border-radius:24px;padding:10px;background:#f7f4ed;color:#1d2528;font-family:system-ui,sans-serif">
+        <div style="display:flex;align-items:center;gap:7px;background:#fff;border:1px solid #ddd4c4;border-radius:12px;padding:8px;margin-bottom:8px">
+          <div style="width:30px;height:30px;border-radius:9px;background:#e5dfd2;display:grid;place-items:center;font-weight:700">☰</div>
+          <div style="flex:1;font-size:11px">
+            <div style="font-weight:700">cc-partner · feature/mobile</div>
+            <div style="color:#766f63">Window: Claude · 3 panes</div>
+          </div>
+          <div style="font-size:10px;background:#edf3f4;border-radius:8px;padding:5px 7px">切换</div>
+        </div>
+        <div style="display:flex;gap:5px;overflow:hidden;margin-bottom:8px;font-size:10px">
+          <div style="background:#1f2930;color:white;border-radius:8px;padding:6px 8px">Claude</div>
+          <div style="background:#fff;border:1px solid #ddd4c4;border-radius:8px;padding:6px 8px">Shell</div>
+          <div style="background:#fff;border:1px solid #ddd4c4;border-radius:8px;padding:6px 8px">Tests</div>
+        </div>
+        <div style="background:#11161a;color:#dfe7ec;border-radius:12px;height:245px;padding:8px;font-family:monospace;font-size:10px;line-height:1.35;box-sizing:border-box">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;height:205px">
+            <div style="border:1px solid #4b5560;padding:6px;overflow:hidden">$ claude<br><span style="color:#8b949e">editing...</span></div>
+            <div style="border:1px solid #4b5560;padding:6px;overflow:hidden">$ npm test<br><span style="color:#8b949e">running...</span></div>
+            <div style="grid-column:1/3;border:1px solid #4b5560;padding:6px;overflow:hidden">$ git status<br><span style="color:#7ee787">clean</span></div>
+          </div>
+          <div style="height:22px;margin-top:5px;background:#26313a;color:#b7c4cc;border-radius:5px;padding:4px;box-sizing:border-box">cc-partner › 0:Claude* 1:Shell 2:Tests</div>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:8px;font-size:10px">
+          <div style="flex:1;background:#fff;border:1px solid #ddd4c4;border-radius:9px;padding:7px;text-align:center">左右分屏</div>
+          <div style="flex:1;background:#fff;border:1px solid #ddd4c4;border-radius:9px;padding:7px;text-align:center">上下分屏</div>
+          <div style="flex:1;background:#fff;border:1px solid #ddd4c4;border-radius:9px;padding:7px;text-align:center">关闭 pane</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>处理规则</h3>
+  <p><strong>Worktree</strong> 是顶部上下文选择器；切换后加载该 worktree 的 window 列表、文件树和 Git 状态。<strong>Window</strong> 是移动端可切换的一级终端标签。<strong>Pane</strong> 不拆成 React 子面板，而是保留在 xterm 中，由 tmux 负责 split layout、active pane 和 status bar。</p>
+</div>

@@ -1,0 +1,89 @@
+<h2>移动端完整 Workbench：布局骨架选择</h2>
+<p class="subtitle">目标是保留桌面版能力，但让手机上能高频操作终端、文件、Git、worktree 和 Prompt 优化。请先看哪种空间组织更接近你的使用方式。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="max-width:260px;margin:auto;border:1px solid #d8d2c5;border-radius:22px;padding:10px;background:#151719;color:#dfe7ec;font-family:system-ui,sans-serif">
+        <div style="height:18px;display:flex;justify-content:center;align-items:center;color:#8b949e;font-size:10px">cc-partner.local/mobile</div>
+        <div style="display:flex;gap:6px;margin:8px 0">
+          <div style="flex:1;background:#24313a;border-radius:8px;padding:7px;font-size:11px">cc-partner</div>
+          <div style="width:34px;background:#2f3e49;border-radius:8px"></div>
+        </div>
+        <div style="background:#0c0f12;border:1px solid #30363d;border-radius:10px;height:220px;padding:10px;font-family:monospace;font-size:11px;line-height:1.45">
+          $ claude<br>
+          <span style="color:#8b949e">Running in feature/mobile-workbench</span><br><br>
+          <span style="color:#7ee787">●</span> terminal active<br>
+          <span style="color:#ffa657">▸</span> output stream...
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px;font-size:10px;text-align:center">
+          <div style="background:#2f81f7;border-radius:8px;padding:7px 0">终端</div>
+          <div style="background:#26313a;border-radius:8px;padding:7px 0">文件</div>
+          <div style="background:#26313a;border-radius:8px;padding:7px 0">Git</div>
+          <div style="background:#26313a;border-radius:8px;padding:7px 0">树</div>
+          <div style="background:#26313a;border-radius:8px;padding:7px 0">AI</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. 底部 Tab 全功能壳</h3>
+      <p>终端、文件、Git、worktree、Prompt 优化都是一级 Tab。手机上最直接，学习成本低，但跨面板联动要靠顶部项目/工作区栏维持上下文。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="max-width:260px;margin:auto;border:1px solid #d8d2c5;border-radius:22px;padding:10px;background:#f7f4ed;color:#1d2528;font-family:system-ui,sans-serif">
+        <div style="height:18px;display:flex;justify-content:center;align-items:center;color:#766f63;font-size:10px">cc-partner.local/mobile</div>
+        <div style="display:flex;gap:8px">
+          <div style="width:54px;background:#e5dfd2;border-radius:10px;padding:8px 5px;font-size:10px;display:grid;gap:7px">
+            <div style="background:#c96442;color:white;border-radius:7px;padding:6px 0;text-align:center">Term</div>
+            <div style="background:#fff;border-radius:7px;padding:6px 0;text-align:center">Files</div>
+            <div style="background:#fff;border-radius:7px;padding:6px 0;text-align:center">Git</div>
+            <div style="background:#fff;border-radius:7px;padding:6px 0;text-align:center">AI</div>
+          </div>
+          <div style="flex:1">
+            <div style="background:white;border:1px solid #ddd4c4;border-radius:10px;padding:8px;font-size:11px;margin-bottom:8px">cc-partner · main ▾</div>
+            <div style="background:#13161a;color:#dfe7ec;border-radius:10px;height:226px;padding:10px;font-family:monospace;font-size:11px;line-height:1.45">
+              $ git status<br>
+              <span style="color:#8b949e">worktree clean</span><br><br>
+              $ claude
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. 左侧薄 Rail + 主面板</h3>
+      <p>更接近桌面 Workbench 的心智模型：项目/工作区上下文固定，功能区从左侧切换。横屏和平板体验好，竖屏会牺牲一点主内容宽度。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="max-width:260px;margin:auto;border:1px solid #d8d2c5;border-radius:22px;padding:10px;background:#f6f7f7;color:#162024;font-family:system-ui,sans-serif">
+        <div style="height:18px;display:flex;justify-content:center;align-items:center;color:#66737a;font-size:10px">cc-partner.local/mobile</div>
+        <div style="background:#fff;border:1px solid #dde3e4;border-radius:12px;padding:9px;margin-bottom:8px;font-size:11px">
+          <div style="font-weight:700">cc-partner · feature/mobile</div>
+          <div style="color:#66737a;margin-top:3px">Terminal running · 2 files dirty</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:8px;font-size:11px">
+          <div style="background:#11161a;color:#dfe7ec;border-radius:10px;height:112px;padding:9px;font-family:monospace">$ claude<br><span style="color:#8b949e">...</span></div>
+          <div style="background:#fff;border:1px solid #dde3e4;border-radius:10px;height:112px;padding:9px">src/<br> pages/<br> Workbench.tsx</div>
+          <div style="background:#fff;border:1px solid #dde3e4;border-radius:10px;height:72px;padding:9px">Git<br><span style="color:#66737a">3 commits ahead</span></div>
+          <div style="background:#fff;border:1px solid #dde3e4;border-radius:10px;height:72px;padding:9px">Actions<br><span style="color:#66737a">Commit · Push · AI</span></div>
+        </div>
+        <div style="background:#dfe8eb;border-radius:12px;padding:8px;text-align:center;font-size:11px">点开任一卡片进入全屏细节</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. 总览卡片 + 下钻全屏</h3>
+      <p>首屏同时看终端、文件、Git 状态和动作入口；点任一区域进入全屏操作。信息密度最高，但实现复杂，终端实时输出在缩略卡里需要谨慎处理。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>我当前建议</h3>
+  <p>如果坚持“完整 Workbench 首期可用”，我建议以 <strong>B. 左侧薄 Rail + 主面板</strong> 为主，窄屏可自动退化成底部 Tab。它最接近现有桌面模型，代码复用和用户认知成本都最低。</p>
+</div>
