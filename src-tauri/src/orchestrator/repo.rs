@@ -13,7 +13,7 @@ const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_criteria, st
     branch_name, worktree_id, session_id, blocked_reason, attempt, created_at, updated_at, \
     started_at, finished_at";
 
-const ORCHESTRATOR_TASKS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestrator_tasks (
+pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestrator_tasks (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   title TEXT NOT NULL,
@@ -40,10 +40,10 @@ const ORCHESTRATOR_TASKS_STATUS_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_orchestrator_tasks_status \
      ON orchestrator_tasks(status, priority, created_at)";
 
-const ORCHESTRATOR_PROJECT_CONFIGS_SCHEMA: &str =
-    "CREATE TABLE IF NOT EXISTS orchestrator_project_configs (
+pub const ORCHESTRATOR_PROJECT_CONFIG_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS orchestrator_project_config (
   project_id TEXT PRIMARY KEY,
-  enabled INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 0,
   max_concurrent_tasks INTEGER NOT NULL DEFAULT 1,
   branch_prefix TEXT NOT NULL DEFAULT 'agent',
   verification_commands_json TEXT NOT NULL DEFAULT '[]',
@@ -51,18 +51,17 @@ const ORCHESTRATOR_PROJECT_CONFIGS_SCHEMA: &str =
   auto_push_task_branch INTEGER NOT NULL DEFAULT 1,
   auto_merge_to_main INTEGER NOT NULL DEFAULT 1,
   auto_push_main INTEGER NOT NULL DEFAULT 1,
-  retry_limit INTEGER NOT NULL DEFAULT 1,
+  retry_limit INTEGER NOT NULL DEFAULT 0,
   retain_worktree_on_done INTEGER NOT NULL DEFAULT 0,
   retain_worktree_on_blocked INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 )";
 
-const ORCHESTRATOR_TASK_EVENTS_SCHEMA: &str =
-    "CREATE TABLE IF NOT EXISTS orchestrator_task_events (
+pub const ORCHESTRATOR_EVENT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestrator_task_events (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
-  event_type TEXT NOT NULL,
+  kind TEXT NOT NULL,
   message TEXT NOT NULL,
   payload_json TEXT,
   created_at TEXT NOT NULL
@@ -72,14 +71,14 @@ const ORCHESTRATOR_TASK_EVENTS_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_orchestrator_task_events_task \
      ON orchestrator_task_events(task_id, created_at)";
 
-const ORCHESTRATOR_TASK_EVIDENCE_SCHEMA: &str =
+pub const ORCHESTRATOR_EVIDENCE_SCHEMA: &str =
     "CREATE TABLE IF NOT EXISTS orchestrator_task_evidence (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
   kind TEXT NOT NULL,
   title TEXT NOT NULL,
+  summary TEXT NOT NULL,
   content TEXT NOT NULL,
-  exit_code INTEGER,
   created_at TEXT NOT NULL
 )";
 
@@ -116,13 +115,13 @@ impl OrchestratorRepo {
     ///     逐条执行 CREATE TABLE/CREATE INDEX IF NOT EXISTS，兼容旧库且不使用 sqlx 迁移宏。
     pub async fn init_schema(pool: &SqlitePool) -> Result<(), AppError> {
         for statement in [
-            ORCHESTRATOR_TASKS_SCHEMA,
+            ORCHESTRATOR_TASK_SCHEMA,
             ORCHESTRATOR_TASKS_PROJECT_STATUS_INDEX,
             ORCHESTRATOR_TASKS_STATUS_INDEX,
-            ORCHESTRATOR_PROJECT_CONFIGS_SCHEMA,
-            ORCHESTRATOR_TASK_EVENTS_SCHEMA,
+            ORCHESTRATOR_PROJECT_CONFIG_SCHEMA,
+            ORCHESTRATOR_EVENT_SCHEMA,
             ORCHESTRATOR_TASK_EVENTS_INDEX,
-            ORCHESTRATOR_TASK_EVIDENCE_SCHEMA,
+            ORCHESTRATOR_EVIDENCE_SCHEMA,
             ORCHESTRATOR_TASK_EVIDENCE_INDEX,
         ] {
             sqlx::query(statement).execute(pool).await?;
@@ -131,63 +130,50 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     用户后续在前端创建编排任务时，需要生成草稿任务并持久化。
+    ///     命令层会先完成校验、生成 id/时间戳并构造 Row，仓储只负责按 Row 持久化。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     生成 UUID 和 UTC 时间戳，以 Draft/default priority/attempt=0 写入任务表并返回完整 Row。
-    pub async fn create_task(
-        &self,
-        project_id: &str,
-        title: &str,
-        goal: &str,
-        acceptance_criteria: &str,
-    ) -> Result<OrchestratorTaskRow, AppError> {
-        let id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
+    ///     将调用方传入的 OrchestratorTaskRow 全字段插入 orchestrator_tasks，不改写业务字段。
+    pub async fn create_task(&self, row: &OrchestratorTaskRow) -> Result<(), AppError> {
         sqlx::query(
             "INSERT INTO orchestrator_tasks \
              (id, project_id, title, goal, acceptance_criteria, status, priority, branch_name, \
               worktree_id, session_id, blocked_reason, attempt, created_at, updated_at, \
               started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, NULL, NULL)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(&id)
-        .bind(project_id)
-        .bind(title)
-        .bind(goal)
-        .bind(acceptance_criteria)
-        .bind(OrchestratorTaskStatus::Draft.as_str())
-        .bind(0_i64)
-        .bind(0_i64)
-        .bind(&now)
-        .bind(&now)
+        .bind(&row.id)
+        .bind(&row.project_id)
+        .bind(&row.title)
+        .bind(&row.goal)
+        .bind(&row.acceptance_criteria)
+        .bind(row.status.as_str())
+        .bind(row.priority)
+        .bind(&row.branch_name)
+        .bind(&row.worktree_id)
+        .bind(&row.session_id)
+        .bind(&row.blocked_reason)
+        .bind(row.attempt)
+        .bind(&row.created_at)
+        .bind(&row.updated_at)
+        .bind(&row.started_at)
+        .bind(&row.finished_at)
         .execute(&self.pool)
         .await?;
-        self.get_task(&id).await
+        Ok(())
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     任务列表需要按项目和状态筛选，并按调度优先级排序。
+    ///     任务列表需要支持按项目筛选或返回全局任务，并按调度优先级排序。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     按 project_id/status 四种筛选组合选择 SQL，结果统一按 priority DESC, created_at ASC 排序。
+    ///     根据可选 project_id 选择 SQL，结果统一按 priority DESC, created_at ASC 排序。
     pub async fn list_tasks(
         &self,
         project_id: Option<&str>,
-        status: Option<OrchestratorTaskStatus>,
     ) -> Result<Vec<OrchestratorTaskRow>, AppError> {
-        let rows = match (project_id, status) {
-            (Some(project_id), Some(status)) => {
-                sqlx::query(&format!(
-                    "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
-                     WHERE project_id = ? AND status = ? ORDER BY priority DESC, created_at ASC"
-                ))
-                .bind(project_id)
-                .bind(status.as_str())
-                .fetch_all(&self.pool)
-                .await?
-            }
-            (Some(project_id), None) => {
+        let rows = match project_id {
+            Some(project_id) => {
                 sqlx::query(&format!(
                     "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
                      WHERE project_id = ? ORDER BY priority DESC, created_at ASC"
@@ -196,16 +182,7 @@ impl OrchestratorRepo {
                 .fetch_all(&self.pool)
                 .await?
             }
-            (None, Some(status)) => {
-                sqlx::query(&format!(
-                    "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
-                     WHERE status = ? ORDER BY priority DESC, created_at ASC"
-                ))
-                .bind(status.as_str())
-                .fetch_all(&self.pool)
-                .await?
-            }
-            (None, None) => {
+            None => {
                 sqlx::query(&format!(
                     "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
                      ORDER BY priority DESC, created_at ASC"
@@ -270,18 +247,18 @@ impl OrchestratorRepo {
     pub async fn add_event(
         &self,
         task_id: &str,
-        event_type: &str,
+        kind: &str,
         message: &str,
         payload_json: Option<&str>,
     ) -> Result<(), AppError> {
         sqlx::query(
             "INSERT INTO orchestrator_task_events \
-             (id, task_id, event_type, message, payload_json, created_at) \
+             (id, task_id, kind, message, payload_json, created_at) \
              VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(task_id)
-        .bind(event_type)
+        .bind(kind)
         .bind(message)
         .bind(payload_json)
         .bind(Utc::now().to_rfc3339())
@@ -300,20 +277,20 @@ impl OrchestratorRepo {
         task_id: &str,
         kind: &str,
         title: &str,
+        summary: &str,
         content: &str,
-        exit_code: Option<i64>,
     ) -> Result<(), AppError> {
         sqlx::query(
             "INSERT INTO orchestrator_task_evidence \
-             (id, task_id, kind, title, content, exit_code, created_at) \
+             (id, task_id, kind, title, summary, content, created_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(task_id)
         .bind(kind)
         .bind(title)
+        .bind(summary)
         .bind(content)
-        .bind(exit_code)
         .bind(Utc::now().to_rfc3339())
         .execute(&self.pool)
         .await?;
@@ -351,6 +328,7 @@ fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orchestrator::models::OrchestratorTaskDto;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use sqlx::Row;
     use std::str::FromStr;
@@ -375,23 +353,65 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     基础 schema 初始化必须能支撑任务创建和列表读取，这是后续命令层的最低依赖。
+    ///     仓储测试需要模拟命令层已经构造好的任务 Row，确保 repo 不替调用方决定任务字段。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     初始化内存库后创建一条任务，再按项目查询列表验证表可用。
+    ///     基于传入 id/project/status 构造完整 OrchestratorTaskRow，其它字段使用稳定测试值。
+    fn task_row(id: &str, project_id: &str, status: OrchestratorTaskStatus) -> OrchestratorTaskRow {
+        OrchestratorTaskRow {
+            id: id.to_string(),
+            project_id: project_id.to_string(),
+            title: format!("Task {id}"),
+            goal: format!("Goal {id}"),
+            acceptance_criteria: format!("Criteria {id}"),
+            status,
+            priority: 0,
+            branch_name: None,
+            worktree_id: None,
+            session_id: None,
+            blocked_reason: None,
+            attempt: 0,
+            created_at: "2026-07-05T00:00:00Z".to_string(),
+            updated_at: "2026-07-05T00:00:00Z".to_string(),
+            started_at: None,
+            finished_at: None,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     基础 schema 初始化必须能支撑任务创建、列表读取和项目配置默认策略。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     初始化内存库后插入任务并查询列表，再验证 project_config 的 enabled/retry_limit 默认值。
     #[tokio::test]
     async fn init_schema_creates_tables() {
-        let (_pool, repo) = setup_repo().await;
+        let (pool, repo) = setup_repo().await;
+        let task = task_row("task-1", "project-1", OrchestratorTaskStatus::Draft);
 
-        let created = repo
-            .create_task("project-1", "Task A", "Goal A", "Criteria A")
-            .await
-            .unwrap();
-        let listed = repo.list_tasks(Some("project-1"), None).await.unwrap();
+        repo.create_task(&task).await.unwrap();
+        let listed = repo.list_tasks(Some("project-1")).await.unwrap();
+        sqlx::query(
+            "INSERT INTO orchestrator_project_config (project_id, created_at, updated_at) \
+             VALUES (?, ?, ?)",
+        )
+        .bind("project-1")
+        .bind("2026-07-05T00:00:00Z")
+        .bind("2026-07-05T00:00:00Z")
+        .execute(&pool)
+        .await
+        .unwrap();
+        let config = sqlx::query(
+            "SELECT enabled, retry_limit FROM orchestrator_project_config WHERE project_id = ?",
+        )
+        .bind("project-1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
-        assert_eq!(created.status, OrchestratorTaskStatus::Draft);
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, created.id);
+        assert_eq!(listed[0].id, task.id);
+        assert_eq!(config.try_get::<i64, _>("enabled").unwrap(), 0);
+        assert_eq!(config.try_get::<i64, _>("retry_limit").unwrap(), 0);
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -402,14 +422,10 @@ mod tests {
     #[tokio::test]
     async fn create_and_list_task_orders_by_priority_and_created() {
         let (pool, repo) = setup_repo().await;
-        let older = repo
-            .create_task("project-1", "Older", "Goal", "Criteria")
-            .await
-            .unwrap();
-        let newer = repo
-            .create_task("project-1", "Newer", "Goal", "Criteria")
-            .await
-            .unwrap();
+        let older = task_row("older", "project-1", OrchestratorTaskStatus::Queued);
+        let newer = task_row("newer", "project-1", OrchestratorTaskStatus::Queued);
+        repo.create_task(&older).await.unwrap();
+        repo.create_task(&newer).await.unwrap();
         sqlx::query("UPDATE orchestrator_tasks SET priority = ?, created_at = ? WHERE id = ?")
             .bind(1_i64)
             .bind("2026-07-05T00:00:00Z")
@@ -425,7 +441,8 @@ mod tests {
             .await
             .unwrap();
 
-        let listed = repo.list_tasks(Some("project-1"), None).await.unwrap();
+        let listed = repo.list_tasks(Some("project-1")).await.unwrap();
+        let dto = OrchestratorTaskDto::from(listed[0].clone());
 
         assert_eq!(
             listed
@@ -434,6 +451,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![newer.id.as_str(), older.id.as_str()]
         );
+        assert_eq!(dto.status, OrchestratorTaskStatus::Queued);
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -444,10 +462,8 @@ mod tests {
     #[tokio::test]
     async fn update_task_status_preserves_identity() {
         let (_pool, repo) = setup_repo().await;
-        let created = repo
-            .create_task("project-1", "Task A", "Goal A", "Criteria A")
-            .await
-            .unwrap();
+        let created = task_row("task-1", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&created).await.unwrap();
 
         let updated = repo
             .update_task_status(&created.id, OrchestratorTaskStatus::Queued, None)
@@ -456,8 +472,8 @@ mod tests {
 
         assert_eq!(updated.id, created.id);
         assert_eq!(updated.project_id, "project-1");
-        assert_eq!(updated.title, "Task A");
-        assert_eq!(updated.goal, "Goal A");
+        assert_eq!(updated.title, "Task task-1");
+        assert_eq!(updated.goal, "Goal task-1");
         assert_eq!(updated.status, OrchestratorTaskStatus::Queued);
     }
 
@@ -465,14 +481,12 @@ mod tests {
     ///     调度、验证和交付阶段需要把事件和证据持久化，后续详情页才能追溯执行过程。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     追加一条 event 与 evidence，再按 task_id 查询对应表确认内容和 exit_code 已落库。
+    ///     追加一条 event 与 evidence，再按 task_id 查询对应表确认 kind/summary/content 已落库。
     #[tokio::test]
     async fn events_and_evidence_are_persisted() {
         let (pool, repo) = setup_repo().await;
-        let task = repo
-            .create_task("project-1", "Task A", "Goal A", "Criteria A")
-            .await
-            .unwrap();
+        let task = task_row("task-1", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&task).await.unwrap();
 
         repo.add_event(
             &task.id,
@@ -482,12 +496,12 @@ mod tests {
         )
         .await
         .unwrap();
-        repo.add_evidence(&task.id, "command", "cargo test", "ok", Some(0))
+        repo.add_evidence(&task.id, "command", "cargo test", "tests passed", "ok")
             .await
             .unwrap();
 
         let events = sqlx::query(
-            "SELECT event_type, message, payload_json FROM orchestrator_task_events \
+            "SELECT kind, message, payload_json FROM orchestrator_task_events \
              WHERE task_id = ? ORDER BY created_at ASC",
         )
         .bind(&task.id)
@@ -495,7 +509,7 @@ mod tests {
         .await
         .unwrap();
         let evidence = sqlx::query(
-            "SELECT kind, title, content, exit_code FROM orchestrator_task_evidence \
+            "SELECT kind, title, summary, content FROM orchestrator_task_evidence \
              WHERE task_id = ? ORDER BY created_at ASC",
         )
         .bind(&task.id)
@@ -504,10 +518,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0].try_get::<String, _>("event_type").unwrap(),
-            "queued"
-        );
+        assert_eq!(events[0].try_get::<String, _>("kind").unwrap(), "queued");
         assert_eq!(
             events[0].try_get::<String, _>("message").unwrap(),
             "任务已进入队列"
@@ -524,10 +535,76 @@ mod tests {
             evidence[0].try_get::<String, _>("title").unwrap(),
             "cargo test"
         );
-        assert_eq!(evidence[0].try_get::<String, _>("content").unwrap(), "ok");
         assert_eq!(
-            evidence[0].try_get::<Option<i64>, _>("exit_code").unwrap(),
-            Some(0)
+            evidence[0].try_get::<String, _>("summary").unwrap(),
+            "tests passed"
         );
+        assert_eq!(evidence[0].try_get::<String, _>("content").unwrap(), "ok");
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Orchestrator 首页需要能展示所有项目的任务，不能强制带 project_id 筛选。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入两个不同项目的任务，调用 list_tasks(None) 后断言全局列表包含两条。
+    #[tokio::test]
+    async fn list_tasks_none_returns_global_list() {
+        let (_pool, repo) = setup_repo().await;
+        let first = task_row("task-1", "project-1", OrchestratorTaskStatus::Queued);
+        let second = task_row("task-2", "project-2", OrchestratorTaskStatus::Queued);
+        repo.create_task(&first).await.unwrap();
+        repo.create_task(&second).await.unwrap();
+
+        let listed = repo.list_tasks(None).await.unwrap();
+
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|task| task.id == first.id));
+        assert!(listed.iter().any(|task| task.id == second.id));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     命令层读取不存在任务时应得到项目统一 not-found 错误，而不是空 Row 或 panic。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查询缺失 id 并断言仓储返回 Err，保持当前代码库 AppError::not_found 风格。
+    #[tokio::test]
+    async fn get_task_returns_not_found_for_missing_task() {
+        let (_pool, repo) = setup_repo().await;
+
+        let result = repo.get_task("missing-task").await;
+
+        assert!(result.is_err());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     数据库中若出现未知状态字符串，应显式失败，避免调度器误处理损坏数据。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     手动写入非法 status 任务，再通过 get_task 读取并断言返回错误。
+    #[tokio::test]
+    async fn get_task_returns_error_for_invalid_status() {
+        let (pool, repo) = setup_repo().await;
+        sqlx::query(
+            "INSERT INTO orchestrator_tasks \
+             (id, project_id, title, goal, acceptance_criteria, status, priority, attempt, \
+              created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("bad-status")
+        .bind("project-1")
+        .bind("Bad")
+        .bind("Goal")
+        .bind("Criteria")
+        .bind("not-a-status")
+        .bind(0_i64)
+        .bind(0_i64)
+        .bind("2026-07-05T00:00:00Z")
+        .bind("2026-07-05T00:00:00Z")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = repo.get_task("bad-status").await;
+
+        assert!(result.is_err());
     }
 }

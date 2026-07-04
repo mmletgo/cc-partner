@@ -121,11 +121,11 @@ pub struct OrchestratorTaskRow {
 /// Orchestrator 任务前端 DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     前端页面后续需要 camelCase 字段和字符串状态展示任务列表。
+///     前端页面后续需要 camelCase 字段和统一的枚举状态展示任务列表。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     从数据库 Row 投影为可序列化 DTO，字段名通过 serde 统一转 camelCase。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 pub struct OrchestratorTaskDto {
@@ -134,7 +134,7 @@ pub struct OrchestratorTaskDto {
     pub title: String,
     pub goal: String,
     pub acceptance_criteria: String,
-    pub status: String,
+    pub status: OrchestratorTaskStatus,
     pub priority: i64,
     pub branch_name: Option<String>,
     pub worktree_id: Option<String>,
@@ -152,26 +152,37 @@ impl OrchestratorTaskRow {
     ///     命令层返回任务时不应暴露内部枚举和 snake_case 语义，需要统一 DTO 转换入口。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     克隆 Row 字段并把 status 转为 SQLite/前端共用的小写字符串。
+    ///     克隆 Row 后复用 From<OrchestratorTaskRow>，保持 DTO 投影入口兼容旧调用点。
     #[allow(dead_code)]
     pub fn to_dto(&self) -> OrchestratorTaskDto {
+        OrchestratorTaskDto::from(self.clone())
+    }
+}
+
+impl From<OrchestratorTaskRow> for OrchestratorTaskDto {
+    /// Business Logic（为什么需要这个函数）:
+    ///     命令层后续会在创建或列表查询后把任务 Row 直接转换为前端 DTO。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     消费 OrchestratorTaskRow 并逐字段投影，status 保持枚举类型交给 serde 输出。
+    fn from(row: OrchestratorTaskRow) -> Self {
         OrchestratorTaskDto {
-            id: self.id.clone(),
-            project_id: self.project_id.clone(),
-            title: self.title.clone(),
-            goal: self.goal.clone(),
-            acceptance_criteria: self.acceptance_criteria.clone(),
-            status: self.status.as_str().to_string(),
-            priority: self.priority,
-            branch_name: self.branch_name.clone(),
-            worktree_id: self.worktree_id.clone(),
-            session_id: self.session_id.clone(),
-            blocked_reason: self.blocked_reason.clone(),
-            attempt: self.attempt,
-            created_at: self.created_at.clone(),
-            updated_at: self.updated_at.clone(),
-            started_at: self.started_at.clone(),
-            finished_at: self.finished_at.clone(),
+            id: row.id,
+            project_id: row.project_id,
+            title: row.title,
+            goal: row.goal,
+            acceptance_criteria: row.acceptance_criteria,
+            status: row.status,
+            priority: row.priority,
+            branch_name: row.branch_name,
+            worktree_id: row.worktree_id,
+            session_id: row.session_id,
+            blocked_reason: row.blocked_reason,
+            attempt: row.attempt,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            started_at: row.started_at,
+            finished_at: row.finished_at,
         }
     }
 }

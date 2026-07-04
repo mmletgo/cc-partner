@@ -47,8 +47,8 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 
 - **功能定位**：Orchestrator 是内置自动编排器的后端基础层，当前只负责任务模型、状态机、SQLite schema/repo 和 `AppState.orchestrator_repo` 初始化；不包含调度器、Workbench Runner、验证执行、交付或前端页面。
 - **状态机**：`orchestrator/state.rs::next_status` 只允许 Draft→Queued→Preparing→Running→Verifying→Delivering→Done 的 happy path；`Block`/`Abort` 可从任意状态进入 `Blocked`/`Aborted`，`Noop` 保持原状态，非法阶段输入保持原状态。
-- **持久化**：`orchestrator/repo.rs::OrchestratorRepo::init_schema` 在 `lib.rs::init_db` 内执行，建 `orchestrator_tasks`、`orchestrator_project_configs`、`orchestrator_task_events`、`orchestrator_task_evidence` 及索引。仓储沿用运行期 `sqlx::query`，不用 sqlx 宏；时间戳用 `Utc::now().to_rfc3339()`，id 用 `Uuid::new_v4()`。
-- **任务仓储语义**：`create_task` 创建 Draft/default priority 0/attempt 0；`list_tasks(project_id?, status?)` 统一按 `priority DESC, created_at ASC`；`update_task_status` 只更新状态、阻塞原因和 `updated_at`，保持任务身份字段不变；event/evidence 仅追加不覆盖。
+- **持久化**：`orchestrator/repo.rs::OrchestratorRepo::init_schema` 在 `lib.rs::init_db` 内执行，建 `orchestrator_tasks`、`orchestrator_project_config`、`orchestrator_task_events`、`orchestrator_task_evidence` 及索引。`orchestrator_project_config.enabled` 和 `retry_limit` 默认都是 0；event 表字段为 `id/task_id/kind/message/payload_json/created_at`；evidence 表字段为 `id/task_id/kind/title/summary/content/created_at`。仓储沿用运行期 `sqlx::query`，不用 sqlx 宏；事件/证据 id 用 `Uuid::new_v4()`、时间戳用 `Utc::now().to_rfc3339()`。
+- **任务仓储语义**：`create_task(&OrchestratorTaskRow)` 只插入调用方构造好的完整 row，不替命令层决定 id/title/goal/created_at；`list_tasks(project_id?)` 统一按 `priority DESC, created_at ASC`，`None` 返回全局列表；`get_task` 缺失时返回 `AppError::not_found`，非法 status 字符串返回错误；`update_task_status` 只更新状态、阻塞原因和 `updated_at`，保持任务身份字段不变；event/evidence 仅追加不覆盖。
 - **验证命令**：Orchestrator 相关改动优先跑 `cd src-tauri && cargo test orchestrator::state --lib && cargo test orchestrator::repo --lib && cargo check`。
 
 ## 工作台已落地行为约定（workbench/ + storage/workbench_project_repo.rs + commands/workbench.rs + commands/workbench_dependencies.rs）
