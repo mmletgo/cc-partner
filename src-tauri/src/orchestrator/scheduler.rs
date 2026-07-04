@@ -81,7 +81,7 @@ pub fn start_orchestrator_scheduler(app_handle: AppHandle, state: AppState) -> C
 ///     scheduler tick 和手动命令都需要执行同一套领取逻辑，避免 UI 手动触发与后台行为不一致。
 ///
 /// Code Logic（这个函数做什么）:
-///     遍历 enabled 项目配置，检查 active 数量与并发上限，原子 claim 一个 Queued 任务并交给 runner；
+///     遍历 enabled 项目配置，在 repo 事务内按并发容量原子 claim 一个 Queued 任务并交给 runner；
 ///     runner 失败时把任务置为 Blocked 并追加事件，成功时计入 dispatched。
 pub async fn dispatch_once(state: &AppState, app_handle: AppHandle) -> Result<usize, AppError> {
     let configs = state
@@ -90,17 +90,9 @@ pub async fn dispatch_once(state: &AppState, app_handle: AppHandle) -> Result<us
         .await?;
     let mut dispatched = 0usize;
     for config in configs {
-        let active = state
-            .orchestrator_repo
-            .count_active_tasks(&config.project_id)
-            .await?;
-        if dispatch_capacity(config.max_concurrent_tasks, active) <= 0 {
-            continue;
-        }
-
         let Some(task) = state
             .orchestrator_repo
-            .claim_next_queued_task(&config.project_id)
+            .claim_next_queued_task_with_capacity(&config.project_id, config.max_concurrent_tasks)
             .await?
         else {
             continue;
@@ -136,6 +128,7 @@ pub async fn dispatch_once(state: &AppState, app_handle: AppHandle) -> Result<us
 ///
 /// Code Logic（这个函数做什么）:
 ///     返回 max_concurrent_tasks - active_count 的非负剩余容量；非正上限直接返回 0。
+#[cfg(test)]
 pub(crate) fn dispatch_capacity(max_concurrent_tasks: i64, active_count: i64) -> i64 {
     if max_concurrent_tasks <= 0 {
         return 0;

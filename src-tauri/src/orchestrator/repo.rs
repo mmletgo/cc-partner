@@ -296,16 +296,39 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     调度器领取任务必须避免重复调度同一 Queued 任务，同时保持优先级高、创建早的任务先执行。
+    ///     调度器领取任务必须在同一个仓储原子边界内校验项目并发容量，避免后台 tick 与手动 dispatch 同时看到空闲槽位后各自领取任务。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在单个事务中读取下一个 Queued 任务，并用带 status 条件的 UPDATE 原子切换为 Preparing。
-    ///     若没有可领取任务或并发竞争导致 UPDATE 未命中，则返回 None。
-    pub async fn claim_next_queued_task(
+    ///     在单个事务中处理 max<=0、active 状态计数、Queued 任务选择、带 status 条件的 Preparing 更新和更新后 Row 读取。
+    ///     active 达到上限、无 Queued 任务或并发竞争导致 UPDATE 未命中时返回 None。
+    pub async fn claim_next_queued_task_with_capacity(
         &self,
         project_id: &str,
+        max_concurrent_tasks: i64,
     ) -> Result<Option<OrchestratorTaskRow>, AppError> {
         let mut tx = self.pool.begin().await?;
+        if max_concurrent_tasks <= 0 {
+            tx.commit().await?;
+            return Ok(None);
+        }
+
+        let active = sqlx::query(
+            "SELECT COUNT(*) AS count FROM orchestrator_tasks \
+             WHERE project_id = ? AND status IN (?, ?, ?, ?)",
+        )
+        .bind(project_id)
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(OrchestratorTaskStatus::Running.as_str())
+        .bind(OrchestratorTaskStatus::Verifying.as_str())
+        .bind(OrchestratorTaskStatus::Delivering.as_str())
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get::<i64, _>("count")?;
+        if active >= max_concurrent_tasks {
+            tx.commit().await?;
+            return Ok(None);
+        }
+
         let selected = sqlx::query(&format!(
             "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
              WHERE project_id = ? AND status = ? \
@@ -1018,7 +1041,7 @@ mod tests {
             .unwrap();
 
         let claimed = repo
-            .claim_next_queued_task("project-1")
+            .claim_next_queued_task_with_capacity("project-1", 1)
             .await
             .unwrap()
             .expect("claimed task");
@@ -1029,6 +1052,78 @@ mod tests {
         assert_eq!(claimed.status, OrchestratorTaskStatus::Preparing);
         assert_eq!(low_persisted.status, OrchestratorTaskStatus::Queued);
         assert_eq!(draft_persisted.status, OrchestratorTaskStatus::Draft);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     max_concurrent_tasks=1 时，后台 tick 与手动 dispatch 不能各自领取一个任务打穿项目并发上限。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入两条 Queued 任务，连续调用容量内领取两次，断言第二次返回 None 且 active 数量仍为 1。
+    #[tokio::test]
+    async fn claim_next_queued_task_with_capacity_stops_at_single_slot_limit() {
+        let (_pool, repo) = setup_repo().await;
+        repo.create_task(&task_row(
+            "task-1",
+            "project-1",
+            OrchestratorTaskStatus::Queued,
+        ))
+        .await
+        .unwrap();
+        repo.create_task(&task_row(
+            "task-2",
+            "project-1",
+            OrchestratorTaskStatus::Queued,
+        ))
+        .await
+        .unwrap();
+
+        let first = repo
+            .claim_next_queued_task_with_capacity("project-1", 1)
+            .await
+            .unwrap();
+        let second = repo
+            .claim_next_queued_task_with_capacity("project-1", 1)
+            .await
+            .unwrap();
+        let active = repo.count_active_tasks("project-1").await.unwrap();
+
+        assert!(first.is_some());
+        assert!(second.is_none());
+        assert_eq!(active, 1);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     max_concurrent_tasks=2 时，调度器应允许两个执行槽位被领取，但第三个必须等待下一轮容量释放。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入三条 Queued 任务，连续容量内领取三次，断言前两次成功、第三次返回 None 且 active 数量为 2。
+    #[tokio::test]
+    async fn claim_next_queued_task_with_capacity_allows_two_slots_only() {
+        let (_pool, repo) = setup_repo().await;
+        for id in ["task-1", "task-2", "task-3"] {
+            repo.create_task(&task_row(id, "project-1", OrchestratorTaskStatus::Queued))
+                .await
+                .unwrap();
+        }
+
+        let first = repo
+            .claim_next_queued_task_with_capacity("project-1", 2)
+            .await
+            .unwrap();
+        let second = repo
+            .claim_next_queued_task_with_capacity("project-1", 2)
+            .await
+            .unwrap();
+        let third = repo
+            .claim_next_queued_task_with_capacity("project-1", 2)
+            .await
+            .unwrap();
+        let active = repo.count_active_tasks("project-1").await.unwrap();
+
+        assert!(first.is_some());
+        assert!(second.is_some());
+        assert!(third.is_none());
+        assert_eq!(active, 2);
     }
 
     /// Business Logic（为什么需要这个函数）:
