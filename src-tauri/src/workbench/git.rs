@@ -255,6 +255,29 @@ pub fn current_branch(path: &Path) -> Option<String> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     Orchestrator delivery evidence 需要记录 commit 阶段前后的 HEAD，以便用户确认自动提交是否产生了新提交。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 `git rev-parse --verify HEAD`；有 HEAD 时返回完整 hash，空仓库或 unborn HEAD 返回 None，其它 Git 错误转 AppError。
+pub fn head_hash(path: &Path) -> Result<Option<String>, AppError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(path)
+        .output()?;
+    if output.status.success() {
+        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!hash.is_empty()).then_some(hash));
+    }
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    Err(AppError::generic(format!(
+        "Git 命令失败: {}",
+        git_failure_message(&output)
+    )))
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     用户输入分支名后，Workbench 需要在本机创建对应 Git worktree 和新分支。
 ///
 /// Code Logic（这个函数做什么）:
@@ -395,6 +418,18 @@ pub fn push_branch(path: &Path, branch: &str) -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Orchestrator 自动 merge 成功后，源任务 worktree 会被清理，主分支推送必须从主工作区 cwd 读取当前分支并执行。
+///
+/// Code Logic（这个函数做什么）:
+///     在传入的主工作区路径读取当前分支名，再复用 push_branch 的 upstream/origin 安全规则推送，成功返回分支名供 evidence 记录。
+pub fn push_main_worktree_current_branch(path: &Path) -> Result<String, AppError> {
+    let branch =
+        current_branch(path).ok_or_else(|| AppError::generic("主工作区没有可推送的当前分支"))?;
+    push_branch(path, &branch)?;
+    Ok(branch)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1077,6 +1112,42 @@ UU web/src/App.tsx
             &remote,
             &["rev-parse", "--verify", "refs/heads/feature/worktree-push"],
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Orchestrator 自动交付在 task worktree 被清理后只能从主工作区推送当前主分支，不能依赖源 worktree。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建真实 Git 仓库与 bare origin，在 main 上产生提交，调用 main push helper 并断言 origin/main 收到该提交。
+    #[test]
+    fn push_main_worktree_current_branch_pushes_current_branch() {
+        let root = temp_git_dir("workbench-push-main-current-branch");
+        let repo = root.join("repo");
+        let remote = root.join("origin.git");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "main"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        git_test_command(
+            &root,
+            &["init", "--bare", remote.to_string_lossy().as_ref()],
+        );
+        git_test_command(
+            &repo,
+            &["remote", "add", "origin", remote.to_string_lossy().as_ref()],
+        );
+        fs::write(repo.join("README.md"), "main push\n").expect("write readme");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "main change"]);
+
+        let branch = push_main_worktree_current_branch(&repo).expect("push current main branch");
+
+        assert_eq!(branch, "main");
+        let remote_content = git_test_command(&remote, &["show", "refs/heads/main:README.md"]);
+        assert_eq!(remote_content.trim(), "main push");
 
         let _ = fs::remove_dir_all(root);
     }

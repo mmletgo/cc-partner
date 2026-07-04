@@ -385,10 +385,12 @@ pub async fn dispatch_orchestrator_once(
 ///
 /// Code Logic（这个函数做什么）:
 ///     用 expected-status 原子转移执行 Running->Verifying；之后读取项目验证命令和 worktree cwd，执行验证；
-///     Verifying 后的可预期错误统一写 failed evidence 并置 Blocked，成功写 passed/skipped evidence 并推进 Delivering。
+///     Verifying 后的可预期错误统一写 failed evidence 并置 Blocked，成功写 passed/skipped evidence 并推进 Delivering；
+///     随后立即调用 delivery pipeline，返回最终 Done 或 Blocked 任务 DTO。
 #[tauri::command]
 pub async fn complete_orchestrator_agent_run(
     state: State<'_, AppState>,
+    app_handle: AppHandle,
     task_id: String,
 ) -> Result<OrchestratorTaskDto, AppError> {
     let task = state
@@ -463,7 +465,12 @@ pub async fn complete_orchestrator_agent_run(
             .orchestrator_repo
             .set_task_status(&task.id, OrchestratorTaskStatus::Delivering, None)
             .await?;
-        return Ok(OrchestratorTaskDto::from(delivering));
+        let delivery_context =
+            crate::orchestrator::delivery::AppDeliveryContext::new(state.inner(), app_handle);
+        let summary =
+            crate::orchestrator::delivery::deliver_task(&delivery_context, &delivering.id).await?;
+        tracing::debug!(task_id = %delivering.id, stages = ?summary.stages, "Orchestrator 自动交付完成");
+        return Ok(summary.task);
     }
 
     match crate::orchestrator::delivery::run_verification_commands(
@@ -487,7 +494,13 @@ pub async fn complete_orchestrator_agent_run(
                 .orchestrator_repo
                 .set_task_status(&task.id, OrchestratorTaskStatus::Delivering, None)
                 .await?;
-            Ok(OrchestratorTaskDto::from(delivering))
+            let delivery_context =
+                crate::orchestrator::delivery::AppDeliveryContext::new(state.inner(), app_handle);
+            let summary =
+                crate::orchestrator::delivery::deliver_task(&delivery_context, &delivering.id)
+                    .await?;
+            tracing::debug!(task_id = %delivering.id, stages = ?summary.stages, "Orchestrator 自动交付完成");
+            Ok(summary.task)
         }
         Err(err) => {
             block_task_with_verification_error(state.inner(), &task.id, "验证失败", err).await

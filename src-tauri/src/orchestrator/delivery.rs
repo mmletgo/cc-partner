@@ -1,16 +1,27 @@
 //! Orchestrator 验证与交付入口。
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     Agent 完成后需要在任务 worktree 中执行项目验证命令，并把输出作为 evidence 保存。
+//!     Agent 完成后需要在任务 worktree 中执行项目验证命令，并在验证通过后自动完成提交、推送、
+//!     合并到主工作区和推送主分支，把每个阶段作为 evidence 保存。
 //!
 //! Code Logic（这个模块做什么）:
-//!     提供验证命令执行 helper；后续 Task 7 交付流水线不得放在本模块本轮实现中。
+//!     提供验证命令执行 helper 和 full-auto delivery pipeline；交付失败会写 failed delivery evidence
+//!     并把任务置为 Blocked，避免任务永久停留 Delivering。
 
+use crate::commands::workbench::{
+    local_commit_workbench_worktree, local_merge_workbench_worktree, local_push_workbench_worktree,
+};
 use crate::error::AppError;
+use crate::orchestrator::models::{OrchestratorTaskDto, OrchestratorTaskStatus};
+use crate::orchestrator::repo::OrchestratorRepo;
+use crate::state::AppState;
+use crate::storage::{WorkbenchProjectRepo, WorkbenchWorktreeRepo};
+use crate::workbench::git as workbench_git;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::AppHandle;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -23,6 +34,7 @@ const PIPE_READER_JOIN_GRACE_TIMEOUT: Duration = Duration::from_millis(200);
 const OUTPUT_TRUNCATED_MARKER: &str = "[output truncated]";
 #[cfg(unix)]
 const SIGKILL: std::os::raw::c_int = 9;
+const DELIVERY_EVIDENCE_KIND: &str = "delivery";
 
 #[cfg(unix)]
 unsafe extern "C" {
@@ -66,6 +78,421 @@ struct VerificationCommandOutput {
 struct LimitedPipeOutput {
     bytes: Vec<u8>,
     truncated: bool,
+}
+
+/// Orchestrator 自动交付结果。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     命令层需要知道交付后任务的最终状态，同时测试需要看到交付阶段是否执行。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存最终任务 DTO 和本次 delivery pipeline 追加的阶段标题列表。
+#[derive(Debug, Clone)]
+pub struct DeliverySummary {
+    pub task: OrchestratorTaskDto,
+    pub stages: Vec<String>,
+}
+
+/// Orchestrator delivery 运行时依赖。
+///
+/// Business Logic（为什么需要这个 trait）:
+///     生产环境需要复用 AppState 和 Tauri AppHandle，测试环境需要在不启动桌面事件循环的情况下验证真实 Git/SQLite 交付语义。
+///
+/// Code Logic（这个 trait 做什么）:
+///     抽象 delivery pipeline 需要的仓储与三个 Workbench 阶段动作；生产实现委托 Workbench helper，测试实现委托临时 Git repo。
+#[allow(async_fn_in_trait)]
+pub(crate) trait DeliveryContext: Sync {
+    /// Business Logic（为什么需要这个函数）:
+    ///     delivery pipeline 需要读取任务、配置、写 evidence 并推进任务状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 Orchestrator 仓储引用。
+    fn orchestrator_repo(&self) -> &OrchestratorRepo;
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     merge main 和 push main 阶段需要知道主工作区路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 Workbench 项目仓储引用。
+    fn workbench_project_repo(&self) -> &WorkbenchProjectRepo;
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     commit/push/merge task branch 都依赖 task.worktree_id 对应的 Workbench worktree 记录。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 Workbench worktree 仓储引用。
+    fn workbench_worktree_repo(&self) -> &WorkbenchWorktreeRepo;
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     full-auto delivery 第一阶段必须把 task worktree 的改动提交到任务分支。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     使用确定性提交信息提交 worktree 全部改动；无改动时应视为成功。
+    async fn commit_task_worktree(
+        &self,
+        worktree_id: String,
+        message: Option<String>,
+    ) -> Result<(), AppError>;
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     full-auto delivery 需要先把任务分支推到远端，确保 merge 前已有可审计备份。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     推送 task worktree 当前分支，遵循 Workbench 的 upstream/origin 安全规则。
+    async fn push_task_worktree(&self, worktree_id: String) -> Result<(), AppError>;
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     full-auto delivery 需要把任务分支合并回主工作区，并在成功后清理任务 worktree。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     执行 merge main 阶段，返回可写入 evidence 的阶段结果摘要。
+    async fn merge_task_worktree_to_main(&self, worktree_id: String) -> Result<String, AppError>;
+}
+
+/// 生产环境 delivery context。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     Orchestrator 命令层需要把 AppState 和 AppHandle 组合后交给通用 delivery pipeline，
+///     同时保留 Workbench merge progress 事件。
+///
+/// Code Logic（这个结构体做什么）:
+///     持有只读 AppState 引用和可 clone 的 AppHandle，trait 方法直接委托现有 Workbench 本机 helper。
+pub(crate) struct AppDeliveryContext<'a> {
+    state: &'a AppState,
+    app: AppHandle,
+}
+
+impl<'a> AppDeliveryContext<'a> {
+    /// Business Logic（为什么需要这个函数）:
+    ///     命令层每次完成验证后需要创建一次短生命周期 delivery context。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     保存 AppState 引用和 AppHandle，供 trait 方法复用。
+    pub(crate) fn new(state: &'a AppState, app: AppHandle) -> Self {
+        Self { state, app }
+    }
+}
+
+impl DeliveryContext for AppDeliveryContext<'_> {
+    /// Business Logic（为什么需要这个函数）:
+    ///     生产 delivery 需要读写 Orchestrator 任务、策略和 evidence。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 AppState 中返回 OrchestratorRepo 引用。
+    fn orchestrator_repo(&self) -> &OrchestratorRepo {
+        self.state.orchestrator_repo.as_ref()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     生产 delivery 需要读取主 Workbench 项目路径来执行 merge 和 push main。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 AppState 中返回 WorkbenchProjectRepo 引用。
+    fn workbench_project_repo(&self) -> &WorkbenchProjectRepo {
+        self.state.workbench_project_repo.as_ref()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     生产 delivery 需要读取任务 worktree 元数据。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 AppState 中返回 WorkbenchWorktreeRepo 引用。
+    fn workbench_worktree_repo(&self) -> &WorkbenchWorktreeRepo {
+        self.state.workbench_worktree_repo.as_ref()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     full-auto delivery 第一阶段必须复用 Workbench commit 语义，保持用户手动提交和自动提交一致。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 local_commit_workbench_worktree，并丢弃刷新 DTO，只向 pipeline 暴露成功或错误。
+    async fn commit_task_worktree(
+        &self,
+        worktree_id: String,
+        message: Option<String>,
+    ) -> Result<(), AppError> {
+        local_commit_workbench_worktree(self.state, worktree_id, message)
+            .await
+            .map(|_| ())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     自动交付需要用 Workbench 既有远端选择规则推送任务分支。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 local_push_workbench_worktree，并丢弃刷新 DTO，只向 pipeline 暴露成功或错误。
+    async fn push_task_worktree(&self, worktree_id: String) -> Result<(), AppError> {
+        local_push_workbench_worktree(self.state, worktree_id)
+            .await
+            .map(|_| ())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     自动交付合并回主工作区时仍要给 Workbench 前端发送 merge progress。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 local_merge_workbench_worktree，并把返回 DTO 格式化为 evidence 文本。
+    async fn merge_task_worktree_to_main(&self, worktree_id: String) -> Result<String, AppError> {
+        let result =
+            local_merge_workbench_worktree(self.app.clone(), self.state, worktree_id).await?;
+        Ok(format!("{result:?}"))
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     验证成功后的 Delivering 任务应自动完成 commit、push 任务分支、merge main 和 push main，
+///     让 full-auto 策略无需用户手动收尾。
+///
+/// Code Logic（这个函数做什么）:
+///     校验任务状态与项目 full-auto flags；按顺序复用 Workbench 本机 helper 执行四个阶段；
+///     每个阶段成功写 passed delivery evidence，失败写 failed evidence 并把任务置为 Blocked；全部成功后置 Done。
+pub(crate) async fn deliver_task<C>(context: &C, task_id: &str) -> Result<DeliverySummary, AppError>
+where
+    C: DeliveryContext,
+{
+    let task = context.orchestrator_repo().get_task(task_id).await?;
+    if task.status != OrchestratorTaskStatus::Delivering {
+        return Err(AppError::generic(format!(
+            "只有 Delivering 任务可以交付，当前状态为 {}",
+            task.status.as_str()
+        )));
+    }
+    let config = context
+        .orchestrator_repo()
+        .get_or_create_project_config(&task.project_id)
+        .await?;
+    let mut stages = Vec::new();
+
+    if let Some(reason) = disabled_delivery_flag_reason(&config) {
+        return block_delivery_task(
+            context.orchestrator_repo(),
+            &task.id,
+            &reason,
+            "delivery config",
+            &format!("Full-auto delivery requires all delivery flags to be enabled.\n{reason}"),
+            &mut stages,
+        )
+        .await;
+    }
+
+    let Some(worktree_id) = task.worktree_id.clone() else {
+        return block_delivery_task(
+            context.orchestrator_repo(),
+            &task.id,
+            "task is missing worktree_id",
+            "delivery config",
+            "Task is Delivering but has no worktree_id, so delivery cannot locate the task branch.",
+            &mut stages,
+        )
+        .await;
+    };
+    let worktree = match context.workbench_worktree_repo().get(&worktree_id).await? {
+        Some(worktree) => worktree,
+        None => {
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &format!("task worktree not found: {worktree_id}"),
+                "delivery config",
+                &format!("Task worktree not found: {worktree_id}"),
+                &mut stages,
+            )
+            .await;
+        }
+    };
+    let Some(project) = context
+        .workbench_project_repo()
+        .get(&worktree.project_id)
+        .await?
+    else {
+        return block_delivery_task(
+            context.orchestrator_repo(),
+            &task.id,
+            &format!("workbench project not found: {}", worktree.project_id),
+            "delivery config",
+            &format!("Workbench project not found: {}", worktree.project_id),
+            &mut stages,
+        )
+        .await;
+    };
+    let task_branch = worktree
+        .branch
+        .clone()
+        .or_else(|| workbench_git::current_branch(Path::new(&worktree.path)))
+        .unwrap_or_else(|| "unknown".to_string());
+    let task_path = worktree.path.clone();
+    let main_path = project.path.clone();
+
+    let commit_message = format!("orchestrator: {}", task.title.trim());
+    let before_head = match workbench_git::head_hash(Path::new(&task_path)) {
+        Ok(head) => head,
+        Err(err) => {
+            let reason = format!("commit failed: read task HEAD failed: {err}");
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &reason,
+                "commit",
+                &reason,
+                &mut stages,
+            )
+            .await;
+        }
+    };
+    if let Err(err) = context
+        .commit_task_worktree(worktree_id.clone(), Some(commit_message))
+        .await
+    {
+        let reason = format!("commit failed: {err}");
+        return block_delivery_task(
+            context.orchestrator_repo(),
+            &task.id,
+            &reason,
+            "commit",
+            &reason,
+            &mut stages,
+        )
+        .await;
+    }
+    let after_head = match workbench_git::head_hash(Path::new(&task_path)) {
+        Ok(head) => head,
+        Err(err) => {
+            let reason = format!("commit failed: read task HEAD after commit failed: {err}");
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &reason,
+                "commit",
+                &reason,
+                &mut stages,
+            )
+            .await;
+        }
+    };
+    let commit_content = format_commit_evidence(before_head.as_deref(), after_head.as_deref());
+    add_delivery_evidence(
+        context.orchestrator_repo(),
+        &task.id,
+        "commit",
+        "passed",
+        &commit_content,
+    )
+    .await?;
+    stages.push("commit".to_string());
+
+    if let Err(err) = context.push_task_worktree(worktree_id.clone()).await {
+        let reason = format!("push branch failed: {err}");
+        return block_delivery_task(
+            context.orchestrator_repo(),
+            &task.id,
+            &reason,
+            "push branch",
+            &format!("branch: {task_branch}\n{reason}"),
+            &mut stages,
+        )
+        .await;
+    }
+    add_delivery_evidence(
+        context.orchestrator_repo(),
+        &task.id,
+        "push branch",
+        "passed",
+        &format!("branch: {task_branch}\nTask branch pushed successfully."),
+    )
+    .await?;
+    stages.push("push branch".to_string());
+
+    let main_status = match workbench_git::status(Path::new(&main_path)) {
+        Ok(status) => status,
+        Err(err) => {
+            let reason = format!("merge main failed: {err}");
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &reason,
+                "merge main",
+                &format!("main path: {main_path}\n{reason}"),
+                &mut stages,
+            )
+            .await;
+        }
+    };
+    if !main_status.clean {
+        let reason = "merge main failed: main worktree is dirty; 主工作区有未提交改动，请先提交或清理后再合并";
+        return block_delivery_task(
+            context.orchestrator_repo(),
+            &task.id,
+            reason,
+            "merge main",
+            &format!("main path: {main_path}\n{reason}"),
+            &mut stages,
+        )
+        .await;
+    }
+
+    match context
+        .merge_task_worktree_to_main(worktree_id.clone())
+        .await
+    {
+        Ok(result) => {
+            add_delivery_evidence(
+                context.orchestrator_repo(),
+                &task.id,
+                "merge main",
+                "passed",
+                &result,
+            )
+            .await?;
+            stages.push("merge main".to_string());
+        }
+        Err(err) => {
+            let reason = normalize_merge_failure_reason(&err);
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &reason,
+                "merge main",
+                &reason,
+                &mut stages,
+            )
+            .await;
+        }
+    }
+
+    match workbench_git::push_main_worktree_current_branch(Path::new(&main_path)) {
+        Ok(branch) => {
+            add_delivery_evidence(
+                context.orchestrator_repo(),
+                &task.id,
+                "push main",
+                "passed",
+                &format!("branch: {branch}\nMain branch pushed successfully."),
+            )
+            .await?;
+            stages.push("push main".to_string());
+        }
+        Err(err) => {
+            let reason = format!("main merged locally but push main failed: {err}");
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &reason,
+                "push main",
+                &reason,
+                &mut stages,
+            )
+            .await;
+        }
+    }
+
+    let done = context
+        .orchestrator_repo()
+        .finish_task_done(&task.id)
+        .await?;
+    Ok(DeliverySummary {
+        task: OrchestratorTaskDto::from(done),
+        stages,
+    })
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -381,9 +808,129 @@ fn build_shell_command_with_shell(command: &str, shell_env: Option<&str>) -> She
     }
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     项目策略允许单独关闭提交、推送、合并或主分支推送，但 Task 7 full-auto delivery 要求四项全开。
+///
+/// Code Logic（这个函数做什么）:
+///     收集关闭的 delivery flags；全部开启返回 None，否则返回可写入 blocked_reason 的英文说明。
+fn disabled_delivery_flag_reason(
+    config: &crate::orchestrator::models::OrchestratorProjectConfigDto,
+) -> Option<String> {
+    let mut disabled = Vec::new();
+    if !config.auto_commit {
+        disabled.push("auto_commit");
+    }
+    if !config.auto_push_task_branch {
+        disabled.push("auto_push_task_branch");
+    }
+    if !config.auto_merge_to_main {
+        disabled.push("auto_merge_to_main");
+    }
+    if !config.auto_push_main {
+        disabled.push("auto_push_main");
+    }
+    if disabled.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "full-auto delivery flags disabled: {}",
+            disabled.join(", ")
+        ))
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     delivery evidence 需要让用户分辨“本次有新提交”和“没有改动但当前 HEAD 已可交付”。
+///
+/// Code Logic（这个函数做什么）:
+///     对比 commit 前后 HEAD；相同或缺失时写 no changes/current head，变化时写新 commit hash。
+fn format_commit_evidence(before_head: Option<&str>, after_head: Option<&str>) -> String {
+    match (before_head, after_head) {
+        (Some(before), Some(after)) if before != after => {
+            format!("commit: {after}\nprevious: {before}")
+        }
+        (_, Some(after)) => format!("no changes to commit\ncurrent head: {after}"),
+        _ => "no changes to commit\ncurrent head: unavailable".to_string(),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Workbench merge 的中文 dirty main 错误需要在 Orchestrator blocked_reason 中归一为计划指定英文串，
+///     方便测试、日志和跨语言 UI 稳定识别。
+///
+/// Code Logic（这个函数做什么）:
+///     识别主工作区 dirty 文案并前置 `main worktree is dirty`；其它错误保留 merge main failed 前缀。
+fn normalize_merge_failure_reason(err: &AppError) -> String {
+    let message = err.to_string();
+    if message.contains("主工作区有未提交改动") {
+        format!("merge main failed: main worktree is dirty; {message}")
+    } else {
+        format!("merge main failed: {message}")
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     每个交付阶段的结果都要进入 evidence 列表，前端无需理解内部状态机也能展示审计轨迹。
+///
+/// Code Logic（这个函数做什么）:
+///     使用固定 kind=`delivery` 追加 evidence，summary 只传 passed/failed/skipped 这类前端已支持短值。
+async fn add_delivery_evidence(
+    orchestrator_repo: &OrchestratorRepo,
+    task_id: &str,
+    title: &str,
+    summary: &str,
+    content: &str,
+) -> Result<(), AppError> {
+    orchestrator_repo
+        .add_evidence(task_id, DELIVERY_EVIDENCE_KIND, title, summary, content)
+        .await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     自动交付任一阶段失败都不能让任务停在 Delivering；用户需要看到 Blocked 状态和失败 evidence。
+///
+/// Code Logic（这个函数做什么）:
+///     先追加 failed delivery evidence，再用 blocked_reason 把任务置为 Blocked，并返回 DeliverySummary。
+async fn block_delivery_task(
+    orchestrator_repo: &OrchestratorRepo,
+    task_id: &str,
+    reason: &str,
+    evidence_title: &str,
+    evidence_content: &str,
+    stages: &mut Vec<String>,
+) -> Result<DeliverySummary, AppError> {
+    add_delivery_evidence(
+        orchestrator_repo,
+        task_id,
+        evidence_title,
+        "failed",
+        evidence_content,
+    )
+    .await?;
+    stages.push(evidence_title.to_string());
+    let task = orchestrator_repo
+        .set_task_status(task_id, OrchestratorTaskStatus::Blocked, Some(reason))
+        .await?;
+    Ok(DeliverySummary {
+        task: OrchestratorTaskDto::from(task),
+        stages: stages.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
+    use crate::orchestrator::repo::OrchestratorRepo;
+    use crate::storage::{WorkbenchProjectRepo, WorkbenchWorktreeRepo};
+    use crate::workbench::models::{WorkbenchProjectRow, WorkbenchWorktreeRow};
+    use chrono::Utc;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command as StdCommand;
+    use std::str::FromStr;
+    use std::sync::Arc;
 
     /// Business Logic（为什么需要这个函数）:
     ///     验证命令成功时需要返回 stdout/stderr 合并输出，作为任务 evidence 展示给用户。
@@ -582,5 +1129,434 @@ mod tests {
             command.args,
             vec!["/C".to_string(), "cargo test".to_string()]
         );
+    }
+
+    /// Orchestrator 交付测试夹具。
+    ///
+    /// Business Logic（为什么需要这个结构体）:
+    ///     自动交付需要同时访问 SQLite 与真实 Git 仓库；测试必须隔离这些资源，避免污染真实用户项目。
+    ///
+    /// Code Logic（这个结构体做什么）:
+    ///     持有最小 Orchestrator/Workbench 仓储，并实现 DeliveryContext 供 deliver_task 调用。
+    struct DeliveryTestHarness {
+        orchestrator_repo: Arc<OrchestratorRepo>,
+        workbench_project_repo: Arc<WorkbenchProjectRepo>,
+        workbench_worktree_repo: Arc<WorkbenchWorktreeRepo>,
+    }
+
+    impl DeliveryContext for DeliveryTestHarness {
+        /// Business Logic（为什么需要这个函数）:
+        ///     delivery 单测需要读写 Orchestrator 任务、策略和 evidence。
+        ///
+        /// Code Logic（这个函数做什么）:
+        ///     返回内存 SQLite 对应的 OrchestratorRepo 引用。
+        fn orchestrator_repo(&self) -> &OrchestratorRepo {
+            self.orchestrator_repo.as_ref()
+        }
+
+        /// Business Logic（为什么需要这个函数）:
+        ///     delivery 单测需要读取临时 Git main 工作区路径。
+        ///
+        /// Code Logic（这个函数做什么）:
+        ///     返回内存 SQLite 对应的 WorkbenchProjectRepo 引用。
+        fn workbench_project_repo(&self) -> &WorkbenchProjectRepo {
+            self.workbench_project_repo.as_ref()
+        }
+
+        /// Business Logic（为什么需要这个函数）:
+        ///     delivery 单测需要读取临时 task worktree 元数据。
+        ///
+        /// Code Logic（这个函数做什么）:
+        ///     返回内存 SQLite 对应的 WorkbenchWorktreeRepo 引用。
+        fn workbench_worktree_repo(&self) -> &WorkbenchWorktreeRepo {
+            self.workbench_worktree_repo.as_ref()
+        }
+
+        /// Business Logic（为什么需要这个函数）:
+        ///     单测要验证 delivery commit 阶段真实产生 Git 提交，但不能依赖 Claude CLI 生成消息。
+        ///
+        /// Code Logic（这个函数做什么）:
+        ///     从 worktree row 取路径，使用传入的手写 message 执行 `git add -A && git commit`；无改动视为成功。
+        async fn commit_task_worktree(
+            &self,
+            worktree_id: String,
+            message: Option<String>,
+        ) -> Result<(), AppError> {
+            let row = self
+                .workbench_worktree_repo
+                .get(&worktree_id)
+                .await?
+                .ok_or_else(|| AppError::not_found("工作台 worktree 不存在"))?;
+            let message = message
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| AppError::generic("测试交付缺少 commit message"))?;
+            workbench_git::commit_all(Path::new(&row.path), message)?;
+            Ok(())
+        }
+
+        /// Business Logic（为什么需要这个函数）:
+        ///     单测要验证任务分支会被真实推送到 bare origin。
+        ///
+        /// Code Logic（这个函数做什么）:
+        ///     从 worktree row 取分支并调用 workbench_git::push_branch。
+        async fn push_task_worktree(&self, worktree_id: String) -> Result<(), AppError> {
+            let row = self
+                .workbench_worktree_repo
+                .get(&worktree_id)
+                .await?
+                .ok_or_else(|| AppError::not_found("工作台 worktree 不存在"))?;
+            let branch = row
+                .branch
+                .clone()
+                .or_else(|| workbench_git::current_branch(Path::new(&row.path)))
+                .ok_or_else(|| AppError::generic("当前 worktree 没有可推送的分支"))?;
+            workbench_git::push_branch(Path::new(&row.path), &branch)?;
+            Ok(())
+        }
+
+        /// Business Logic（为什么需要这个函数）:
+        ///     单测要验证任务分支能真实 merge 到 main，并在成功后清理 task worktree 元数据。
+        ///
+        /// Code Logic（这个函数做什么）:
+        ///     检查源/主工作区干净状态，执行 git merge，删除临时 worktree 与已合并本地分支，再删除 SQLite row。
+        async fn merge_task_worktree_to_main(
+            &self,
+            worktree_id: String,
+        ) -> Result<String, AppError> {
+            let row = self
+                .workbench_worktree_repo
+                .get(&worktree_id)
+                .await?
+                .ok_or_else(|| AppError::not_found("工作台 worktree 不存在"))?;
+            if row.is_main {
+                return Err(AppError::generic("主工作区不需要合并到自己"));
+            }
+            let project = self
+                .workbench_project_repo
+                .get(&row.project_id)
+                .await?
+                .ok_or_else(|| AppError::not_found("工作台项目不存在"))?;
+            let source_status = workbench_git::status(Path::new(&row.path))?;
+            if !source_status.clean {
+                return Err(AppError::generic(
+                    "源 worktree 有未提交改动，请先提交或清理后再合并",
+                ));
+            }
+            let branch = row
+                .branch
+                .clone()
+                .or(source_status.branch)
+                .ok_or_else(|| AppError::generic("当前 worktree 没有可合并的分支"))?;
+            let main_path = Path::new(&project.path);
+            let main_status = workbench_git::status(main_path)?;
+            if !main_status.clean {
+                return Err(AppError::generic(
+                    "主工作区有未提交改动，请先提交或清理后再合并",
+                ));
+            }
+            let outcome = workbench_git::merge_branch(main_path, &branch)?;
+            if outcome == workbench_git::MergeBranchOutcome::Conflicted {
+                return Err(AppError::generic("测试交付不处理 merge 冲突"));
+            }
+            let repo_root = workbench_git::repo_root(main_path)?;
+            workbench_git::remove_worktree(Path::new(&repo_root), Path::new(&row.path), false)?;
+            if let Some(branch) = row.branch.as_deref() {
+                workbench_git::delete_local_branch_if_merged(
+                    Path::new(&repo_root),
+                    branch,
+                    "HEAD",
+                )?;
+            }
+            self.workbench_worktree_repo.delete(&row.id).await?;
+            Ok(format!("merge outcome: {outcome:?}"))
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     delivery 单测需要真实仓储，但不能连接用户真实 `~/.cc-partner/data.db`。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建内存 SQLite、必要 Workbench/Orchestrator schema 和最小 DeliveryContext。
+    async fn setup_delivery_harness() -> DeliveryTestHarness {
+        let pool = setup_delivery_pool().await;
+        let orchestrator_repo = Arc::new(OrchestratorRepo::new(pool.clone()));
+        let workbench_project_repo = Arc::new(WorkbenchProjectRepo::new(pool.clone()));
+        let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::new(pool.clone()));
+        DeliveryTestHarness {
+            orchestrator_repo,
+            workbench_project_repo,
+            workbench_worktree_repo,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     自动交付测试只需要 Orchestrator 与 Workbench 的最小表集合，应避免加载完整应用数据库。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建单连接内存 SQLite，初始化 Orchestrator schema，并补建项目、worktree 和 session 表。
+    async fn setup_delivery_pool() -> SqlitePool {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .expect("sqlite options")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("sqlite pool");
+        OrchestratorRepo::init_schema(&pool)
+            .await
+            .expect("orchestrator schema");
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS workbench_projects (\
+             id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL, \
+             device_name TEXT NOT NULL, path TEXT NOT NULL, last_opened_at TEXT NOT NULL, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("workbench projects schema");
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS workbench_worktrees (\
+             id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, branch TEXT, \
+             base_branch TEXT, path TEXT NOT NULL, is_main INTEGER NOT NULL, created_at TEXT NOT NULL, \
+             updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("workbench worktrees schema");
+        pool
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     自动交付必须在真实 Git 语义下验证 push、merge 和 main push，而不是 mock 命令输出。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 bare origin、clone 到 main 工作区、初始化 main 提交，并创建任务 worktree 分支。
+    fn setup_git_delivery_repo() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let origin = dir.path().join("origin.git");
+        let repo = dir.path().join("repo");
+        let task_worktree = dir.path().join("task-worktree");
+        git(
+            dir.path(),
+            &["init", "--bare", origin.to_string_lossy().as_ref()],
+        );
+        git(
+            dir.path(),
+            &[
+                "clone",
+                origin.to_string_lossy().as_ref(),
+                repo.to_string_lossy().as_ref(),
+            ],
+        );
+        configure_git_identity(&repo);
+        git(&repo, &["checkout", "-b", "main"]);
+        fs::write(repo.join("README.md"), "initial\n").expect("write readme");
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "initial"]);
+        git(&repo, &["push", "-u", "origin", "main"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "agent/task-7",
+                task_worktree.to_string_lossy().as_ref(),
+                "main",
+            ],
+        );
+        (dir, origin, repo, task_worktree)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Git commit 在测试环境中不能依赖开发者全局 user.name/user.email。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     为测试仓库写入 local Git 身份。
+    fn configure_git_identity(repo: &Path) {
+        git(repo, &["config", "user.email", "delivery-test@example.com"]);
+        git(repo, &["config", "user.name", "Delivery Test"]);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Git 集成测试失败时需要直接暴露完整 stdout/stderr，便于定位临时仓库状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在 cwd 下执行系统 git；非零退出 panic 并打印命令与输出。
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let output = StdCommand::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        if !output.status.success() {
+            panic!(
+                "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+                args,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     delivery pipeline 依赖 Workbench 项目、任务 worktree 和 Orchestrator task 三类记录。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将临时 Git repo 的 main/worktree 路径写入 Workbench 仓储，并创建 Delivering 任务。
+    async fn insert_delivery_task(
+        harness: &DeliveryTestHarness,
+        repo: &Path,
+        task_worktree: &Path,
+    ) -> String {
+        let project_id = "project-delivery";
+        let worktree_id = "worktree-delivery";
+        let task_id = "task-delivery";
+        let now = Utc::now().to_rfc3339();
+        harness
+            .workbench_project_repo
+            .upsert(&WorkbenchProjectRow {
+                id: project_id.to_string(),
+                name: "Delivery Repo".to_string(),
+                kind: "local".to_string(),
+                device_id: "device-test".to_string(),
+                device_name: "Delivery Test".to_string(),
+                path: repo.to_string_lossy().to_string(),
+                last_opened_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            })
+            .await
+            .expect("insert project");
+        harness
+            .workbench_worktree_repo
+            .upsert(&WorkbenchWorktreeRow {
+                id: worktree_id.to_string(),
+                project_id: project_id.to_string(),
+                name: "agent/task-7".to_string(),
+                branch: Some("agent/task-7".to_string()),
+                base_branch: Some("main".to_string()),
+                path: task_worktree.to_string_lossy().to_string(),
+                is_main: false,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            })
+            .await
+            .expect("insert worktree");
+        harness
+            .orchestrator_repo
+            .create_task(&OrchestratorTaskRow {
+                id: task_id.to_string(),
+                project_id: project_id.to_string(),
+                title: "Task 7 delivery".to_string(),
+                goal: "Deliver task automatically".to_string(),
+                acceptance_criteria: "origin main contains task file".to_string(),
+                status: OrchestratorTaskStatus::Delivering,
+                priority: 0,
+                branch_name: Some("agent/task-7".to_string()),
+                worktree_id: Some(worktree_id.to_string()),
+                session_id: None,
+                blocked_reason: None,
+                attempt: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                started_at: None,
+                finished_at: None,
+            })
+            .await
+            .expect("insert task");
+        task_id.to_string()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Full-auto delivery 必须完成 commit、push task branch、merge main 和 push main，用户无需手动收尾。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在临时 bare origin + local clone + task worktree 上运行 deliver_task，断言远端任务分支和 main 都包含改动，
+    ///     任务状态为 Done，并写入四个交付阶段 evidence。
+    #[tokio::test]
+    async fn full_delivery_pushes_task_branch_and_main() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, origin, repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("task.txt"), "delivered by task 7\n")
+            .expect("write task file");
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+
+        let delivered = deliver_task(&harness, &task_id)
+            .await
+            .expect("deliver task");
+
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Done);
+        assert_eq!(
+            delivered.stages,
+            vec!["commit", "push branch", "merge main", "push main"]
+        );
+        git(
+            &origin,
+            &["rev-parse", "--verify", "refs/heads/agent/task-7"],
+        );
+        let main_file = git(&origin, &["show", "refs/heads/main:task.txt"]);
+        assert!(main_file.contains("delivered by task 7"));
+        let evidence = harness
+            .orchestrator_repo
+            .list_evidence(&task_id)
+            .await
+            .expect("delivery evidence");
+        let joined = evidence
+            .iter()
+            .map(|item| format!("{} {}", item.title, item.content))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_ascii_lowercase();
+        assert!(joined.contains("commit"));
+        assert!(joined.contains("push branch"));
+        assert!(joined.contains("merge main"));
+        assert!(joined.contains("push main"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     主工作区存在未提交改动时，自动交付不能强行 merge，必须阻塞并保留可审计原因。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在 main 工作区制造 dirty 文件后运行 deliver_task，断言任务 Blocked、原因包含指定英文串，
+    ///     且 origin/main 没有收到任务分支改动。
+    #[tokio::test]
+    async fn delivery_blocks_when_main_worktree_is_dirty() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, origin, repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(
+            task_worktree.join("task.txt"),
+            "dirty main should block delivery\n",
+        )
+        .expect("write task file");
+        fs::write(repo.join("local-only.txt"), "uncommitted main change\n").expect("dirty main");
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+
+        let delivered = deliver_task(&harness, &task_id)
+            .await
+            .expect("delivery should return blocked task");
+
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Blocked);
+        assert_eq!(
+            delivered.stages,
+            vec!["commit", "push branch", "merge main"]
+        );
+        let reason = delivered.task.blocked_reason.unwrap_or_default();
+        assert!(reason.contains("main worktree is dirty"));
+        let main_show = StdCommand::new("git")
+            .args(["show", "refs/heads/main:task.txt"])
+            .current_dir(&origin)
+            .output()
+            .expect("git show origin main task file");
+        assert!(!main_show.status.success());
     }
 }

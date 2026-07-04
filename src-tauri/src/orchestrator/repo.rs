@@ -432,6 +432,27 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     自动交付完整成功后，任务需要进入 Done、清空阻塞原因并记录 finished_at，供队列和详情页展示真实完成时间。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 status 置为 done，blocked_reason 置空，updated_at/finished_at 写入同一个 UTC ISO 时间，再读取完整任务返回。
+    pub async fn finish_task_done(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ?, finished_at = ? \
+             WHERE id = ?",
+        )
+        .bind(OrchestratorTaskStatus::Done.as_str())
+        .bind(Option::<&str>::None)
+        .bind(&now)
+        .bind(&now)
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
+        self.get_task(task_id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     完成验证、重试等用户动作可能与 scheduler 并发发生，状态推进必须在数据库内一次性校验当前状态，避免旧点击覆盖新状态。
     ///
     /// Code Logic（这个函数做什么）:
