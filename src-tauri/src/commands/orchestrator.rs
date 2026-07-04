@@ -127,19 +127,16 @@ pub async fn get_orchestrator_project_config(
 /// 将 Orchestrator 草稿任务加入队列。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户确认草稿任务后，需要把任务状态切换为 Queued，供后续调度器按队列处理。
+///     用户确认草稿任务后，需要把任务状态切换为 Queued；非草稿任务不能被回退入队。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用 repo.set_task_status 把指定 task_id 更新为 queued，并把完整任务 Row 转换为 DTO。
+///     调用 repo.queue_task 原子校验 Draft 状态并更新为 queued，再把完整任务 Row 转换为 DTO。
 #[tauri::command]
 pub async fn queue_orchestrator_task(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<OrchestratorTaskDto, AppError> {
-    let task = state
-        .orchestrator_repo
-        .set_task_status(&task_id, OrchestratorTaskStatus::Queued, None)
-        .await?;
+    let task = state.orchestrator_repo.queue_task(&task_id).await?;
     Ok(OrchestratorTaskDto::from(task))
 }
 

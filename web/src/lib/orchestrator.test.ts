@@ -2,6 +2,7 @@ import type { OrchestratorTask, OrchestratorTaskStatus } from './types';
 import type { PillTone } from '@/components/primitives';
 import {
   canQueueOrchestratorTask,
+  canQueueOrchestratorTaskForProject,
   groupOrchestratorTasks,
   ORCHESTRATOR_STATUSES,
   orchestratorCreateResultMatchesProject,
@@ -27,10 +28,14 @@ function assert(condition: boolean, message: string): void {
  * Code Logic（这个函数做什么）:
  *   接收 id 与 status，返回一个字段完整且时间戳稳定的 OrchestratorTask。
  */
-function createTask(id: string, status: OrchestratorTaskStatus): OrchestratorTask {
+function createTask(
+  id: string,
+  status: OrchestratorTaskStatus,
+  projectId = 'project-1',
+): OrchestratorTask {
   return {
     id,
-    projectId: 'project-1',
+    projectId,
     title: `task-${id}`,
     goal: 'goal',
     acceptanceCriteria: 'acceptance',
@@ -111,5 +116,25 @@ assert(
   'canQueueOrchestratorTask should reject running tasks',
 );
 assert(!canQueueOrchestratorTask(null), 'canQueueOrchestratorTask should reject null tasks');
+
+assert(
+  canQueueOrchestratorTaskForProject(createTask('draft-same-project', 'draft'), 'project-1'),
+  'canQueueOrchestratorTaskForProject should allow draft tasks from the active project',
+);
+assert(
+  !canQueueOrchestratorTaskForProject(
+    createTask('draft-other-project', 'draft', 'project-2'),
+    'project-1',
+  ),
+  'canQueueOrchestratorTaskForProject should reject draft tasks from another project',
+);
+assert(
+  !canQueueOrchestratorTaskForProject(createTask('running-same-project', 'running'), 'project-1'),
+  'canQueueOrchestratorTaskForProject should reject running tasks from the active project',
+);
+assert(
+  !canQueueOrchestratorTaskForProject(null, 'project-1'),
+  'canQueueOrchestratorTaskForProject should reject null tasks',
+);
 
 console.log('orchestrator.test.ts passed');

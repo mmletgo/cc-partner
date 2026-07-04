@@ -284,6 +284,36 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     用户手动入队只应作用于草稿任务，避免运行中、已完成、阻塞或已终止任务被回退到队列。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用带 status=draft 条件的原子 UPDATE 切换到 queued；未更新时读取当前任务并返回中文业务错误。
+    pub async fn queue_task(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(OrchestratorTaskStatus::Queued.as_str())
+        .bind(Option::<&str>::None)
+        .bind(now)
+        .bind(task_id)
+        .bind(OrchestratorTaskStatus::Draft.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(task_id).await;
+        }
+
+        let current = self.get_task(task_id).await?;
+        Err(AppError::generic(format!(
+            "只有草稿任务可以入队，当前状态为 {}",
+            current.status.as_str()
+        )))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     早期调用点仍使用 update_task_status；保留兼容可避免后续计划任务重构被一次性阻塞。
     ///
     /// Code Logic（这个函数做什么）:
@@ -577,6 +607,57 @@ mod tests {
         assert_eq!(updated.title, "Task task-1");
         assert_eq!(updated.goal, "Goal task-1");
         assert_eq!(updated.status, OrchestratorTaskStatus::Queued);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户只能把草稿任务送入队列，避免运行中或已完成任务被人工重复排队。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Draft 任务后调用安全入队方法，断言任务进入 Queued 且身份字段保持不变。
+    #[tokio::test]
+    async fn queue_task_allows_draft_task() {
+        let (_pool, repo) = setup_repo().await;
+        let created = task_row("task-1", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&created).await.unwrap();
+
+        let queued = repo.queue_task(&created.id).await.unwrap();
+
+        assert_eq!(queued.id, created.id);
+        assert_eq!(queued.project_id, created.project_id);
+        assert_eq!(queued.title, created.title);
+        assert_eq!(queued.status, OrchestratorTaskStatus::Queued);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     非草稿任务可能已经在执行、完成或阻塞，重复入队会回退状态并丢失阻塞原因。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     分别构造 Running、Done、Blocked 任务并调用安全入队方法，断言返回错误且数据库行保持原状态。
+    #[tokio::test]
+    async fn queue_task_rejects_non_draft_without_mutating_task() {
+        let (_pool, repo) = setup_repo().await;
+        let cases = [
+            ("running-task", OrchestratorTaskStatus::Running, None),
+            ("done-task", OrchestratorTaskStatus::Done, None),
+            (
+                "blocked-task",
+                OrchestratorTaskStatus::Blocked,
+                Some("等待人工确认".to_string()),
+            ),
+        ];
+
+        for (id, status, blocked_reason) in cases {
+            let mut created = task_row(id, "project-1", status);
+            created.blocked_reason = blocked_reason.clone();
+            repo.create_task(&created).await.unwrap();
+
+            let result = repo.queue_task(&created.id).await;
+            let persisted = repo.get_task(&created.id).await.unwrap();
+
+            assert!(result.is_err());
+            assert_eq!(persisted.status, status);
+            assert_eq!(persisted.blocked_reason, blocked_reason);
+        }
     }
 
     /// Business Logic（为什么需要这个函数）:

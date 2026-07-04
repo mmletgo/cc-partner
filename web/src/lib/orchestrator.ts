@@ -113,6 +113,21 @@ export function canQueueOrchestratorTask(task: OrchestratorTask | null): boolean
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   项目切换期间旧项目任务可能仍在本地状态中，入队按钮必须只允许当前项目的草稿任务操作。
+ *
+ * Code Logic（这个函数做什么）:
+ *   先复用草稿状态校验，再要求任务 projectId 与当前 activeProjectId 完全一致。
+ */
+export function canQueueOrchestratorTaskForProject(
+  task: OrchestratorTask | null,
+  currentProjectId: string | null | undefined,
+): boolean {
+  if (!task || task.status !== 'draft') return false;
+  return task.projectId === currentProjectId;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   队列和详情区域需要用一致颜色表达任务状态，并且只能使用 Pill 已支持的 tone。
  *
  * Code Logic（这个函数做什么）:
