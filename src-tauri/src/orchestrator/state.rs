@@ -41,6 +41,11 @@ pub fn next_status(
 mod tests {
     use super::*;
 
+    /// Business Logic（为什么需要这个函数）:
+    ///     Orchestrator 的正常任务执行链路必须能从草稿一路推进到完成，供后续调度器复用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     逐步输入 happy path 的阶段 outcome，并断言每一步状态都符合既定状态机。
     #[test]
     fn happy_path_reaches_done() {
         let status = next_status(OrchestratorTaskStatus::Draft, TaskStageOutcome::Queue);
@@ -57,6 +62,11 @@ mod tests {
         assert_eq!(status, OrchestratorTaskStatus::Done);
     }
 
+    /// Business Logic（为什么需要这个函数）:
+    ///     任务在任意执行阶段都可能遇到无法继续的问题，需要统一进入 Blocked 供人工处理。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 Running 和 Delivering 两个阶段输入 Block outcome，断言状态机都返回 Blocked。
     #[test]
     fn any_status_can_block() {
         assert_eq!(
@@ -69,6 +79,11 @@ mod tests {
         );
     }
 
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户或系统中止任务应从任意阶段进入 Aborted；无变化事件则不应扰动当前状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     分别验证 Abort 的全局终止语义，以及 Noop 对当前状态的保持语义。
     #[test]
     fn abort_and_noop_are_global_outcomes() {
         assert_eq!(
