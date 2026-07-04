@@ -125,6 +125,57 @@ fn abort_orchestrator_task_target_status(
     OrchestratorTaskStatus::Aborted
 }
 
+/// 验证 evidence 的写入参数。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     验证失败路径需要按同一 evidence 契约写入，避免前置失败和命令失败产生不同展示形态。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 add_evidence 需要的 kind/title/summary/content 四个参数；静态字段用 &'static str，内容按 String 持有。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerificationEvidence {
+    kind: &'static str,
+    title: &'static str,
+    summary: &'static str,
+    content: String,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     验证前置失败也必须落为 failed verificationOutput evidence，用户才能在任务详情看到可审计原因。
+///
+/// Code Logic（这个函数做什么）:
+///     把失败原因转换为 add_evidence 的固定 kind/title/summary 参数与 content 文本。
+fn verification_failure_evidence(reason: &str) -> VerificationEvidence {
+    VerificationEvidence {
+        kind: "verificationOutput",
+        title: "验证命令",
+        summary: "failed",
+        content: reason.to_string(),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     completion 流程需要确保 failed verification evidence 真正写入仓储，而不是只构造参数。
+///
+/// Code Logic（这个函数做什么）:
+///     将 VerificationEvidence 拆成 OrchestratorRepo::add_evidence 参数并追加到当前任务。
+async fn add_verification_evidence(
+    state: &AppState,
+    task_id: &str,
+    evidence: &VerificationEvidence,
+) -> Result<(), AppError> {
+    state
+        .orchestrator_repo
+        .add_evidence(
+            task_id,
+            evidence.kind,
+            evidence.title,
+            evidence.summary,
+            &evidence.content,
+        )
+        .await
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     验证失败、缺少 worktree 或找不到 worktree 时，任务应进入 Blocked 并保留明确原因。
 ///
@@ -140,6 +191,21 @@ async fn block_task_with_reason(
         .set_task_status(task_id, OrchestratorTaskStatus::Blocked, Some(reason))
         .await?;
     Ok(OrchestratorTaskDto::from(task))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     验证命令无法启动或无法定位 worktree 时，任务既要 Blocked，也要保留 failed verification evidence。
+///
+/// Code Logic（这个函数做什么）:
+///     先用 verification_failure_evidence 构造证据并 add_evidence，再复用 block_task_with_reason 写 Blocked。
+async fn block_task_with_verification_failure(
+    state: &AppState,
+    task_id: &str,
+    reason: &str,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let evidence = verification_failure_evidence(reason);
+    add_verification_evidence(state, task_id, &evidence).await?;
+    block_task_with_reason(state, task_id, reason).await
 }
 
 /// 查询 Orchestrator 任务列表。
@@ -259,8 +325,14 @@ pub async fn complete_orchestrator_agent_run(
 ) -> Result<OrchestratorTaskDto, AppError> {
     let task = state.orchestrator_repo.get_task(&task_id).await?;
     ensure_task_can_complete_agent_run(&task)?;
+
+    state
+        .orchestrator_repo
+        .set_task_status(&task.id, OrchestratorTaskStatus::Verifying, None)
+        .await?;
+
     let Some(worktree_id) = task.worktree_id.as_deref() else {
-        return block_task_with_reason(
+        return block_task_with_verification_failure(
             state.inner(),
             &task.id,
             "任务缺少 worktree，无法运行验证命令。",
@@ -268,17 +340,8 @@ pub async fn complete_orchestrator_agent_run(
         .await;
     };
 
-    state
-        .orchestrator_repo
-        .set_task_status(&task.id, OrchestratorTaskStatus::Verifying, None)
-        .await?;
-
-    let config = state
-        .orchestrator_repo
-        .get_or_create_project_config(&task.project_id)
-        .await?;
     let Some(worktree) = state.workbench_worktree_repo.get(worktree_id).await? else {
-        return block_task_with_reason(
+        return block_task_with_verification_failure(
             state.inner(),
             &task.id,
             &format!("找不到任务 worktree: {worktree_id}"),
@@ -286,6 +349,10 @@ pub async fn complete_orchestrator_agent_run(
         .await;
     };
     let cwd = PathBuf::from(&worktree.path);
+    let config = state
+        .orchestrator_repo
+        .get_or_create_project_config(&task.project_id)
+        .await?;
 
     if config.verification_commands.is_empty() {
         state
@@ -330,17 +397,7 @@ pub async fn complete_orchestrator_agent_run(
         }
         Err(err) => {
             let reason = format!("验证失败: {err}");
-            state
-                .orchestrator_repo
-                .add_evidence(
-                    &task.id,
-                    "verificationOutput",
-                    "验证命令",
-                    "failed",
-                    &reason,
-                )
-                .await?;
-            block_task_with_reason(state.inner(), &task.id, &reason).await
+            block_task_with_verification_failure(state.inner(), &task.id, &reason).await
         }
     }
 }
@@ -517,6 +574,21 @@ mod tests {
         assert!(ensure_task_can_complete_agent_run(&running).is_ok());
         let error = ensure_task_can_complete_agent_run(&draft).expect_err("draft must fail");
         assert!(error.to_string().contains("运行中"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     缺少 worktree 或找不到 worktree 这类验证前置失败，也必须作为 failed verification evidence 展示给用户。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用验证失败 evidence helper，断言 kind/title/summary/content 精确匹配 add_evidence 入参契约。
+    #[test]
+    fn verification_failure_evidence_uses_failed_verification_contract() {
+        let evidence = verification_failure_evidence("任务缺少 worktree，无法运行验证命令。");
+
+        assert_eq!(evidence.kind, "verificationOutput");
+        assert_eq!(evidence.title, "验证命令");
+        assert_eq!(evidence.summary, "failed");
+        assert_eq!(evidence.content, "任务缺少 worktree，无法运行验证命令。");
     }
 
     /// Business Logic（为什么需要这个函数）:
