@@ -251,7 +251,15 @@ export interface PromptOptimizeResponse {
   optimizedEn: string;
 }
 
-/** Orchestrator 任务生命周期状态（对齐 Rust OrchestratorTaskStatus）。 */
+/**
+ * Orchestrator 任务生命周期状态。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   前端需要按统一状态展示任务从草稿、排队、执行、验证、交付到终态的生命周期。
+ *
+ * Code Logic（这个类型做什么）:
+ *   以字符串字面量枚举锁定 Rust OrchestratorTaskStatus 序列化后的状态值，供 DTO 和筛选逻辑复用。
+ */
 export type OrchestratorTaskStatus =
   | 'draft'
   | 'queued'

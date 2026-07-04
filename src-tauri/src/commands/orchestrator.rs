@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn build_task_row_trims_fields_and_sets_defaults() {
         let request = CreateOrchestratorTaskRequest {
-            project_id: "project-1".to_string(),
+            project_id: "  project-1  ".to_string(),
             title: "  实现 API  ".to_string(),
             goal: "  暴露任务命令  ".to_string(),
             acceptance_criteria: "  测试通过  ".to_string(),
