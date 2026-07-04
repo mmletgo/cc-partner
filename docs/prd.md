@@ -11,6 +11,8 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 在多台设备间快速传输文件
 - 一键区域截图并粘贴到 Claude Code
 - 集中管理常用 Prompt，跨设备同步
+- 浏览、搜索、复用和跨设备同步 Claude Code 历史 Prompt
+- 在应用内编辑 user 级 `~/.claude/CLAUDE.md`，并主动推送到局域网设备和 GitHub 云端
 - 使用多页面速记本记录临时文本，并在局域网与 GitHub 间同步
 - 在项目文件夹维度管理 Git worktree、多个普通终端 window/pane，并直接操作当前工作区文件树
 - 通过可信局域网 `/mobile` 入口在手机浏览器操作 Workbench 项目、worktree、终端、文件和 Git
@@ -27,7 +29,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 分块传输（1MB/块），显示传输进度
 - 断点续传：传输中断后可从已完成的位置继续
 - SHA256 校验确保文件完整性
-- 支持拖拽文件到应用窗口发起传输
+- 支持拖拽文件到应用窗口发起传输；当前前端发送闭环需接入后端 `send_transfer` 后才视为完整可用
 - 文件接收后保存到用户配置的目录
 
 ### 2.2 区域截图
@@ -56,14 +58,40 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 标签管理：添加/移除标签
 - 按标签筛选 Prompt 列表
 - 文本搜索（搜索标题和内容）
-- 按创建时间/更新时间排序
+- 列表按后端返回顺序展示；当前页面提供搜索和标签筛选，不提供显式排序控件
 - Prompt 优化：用户输入原始编程任务 Prompt 后，调用本机 Claude Code CLI 的 pure/headless 模式生成中文优化版与等价英文优化版
 - Prompt 优化结果只用于当前页面展示和复制，不保存历史、不入库、不跨设备同步、不做缓存
 - Prompt 优化输出必须以需求方视角写成可直接粘贴给 Claude Code 的委托式 Prompt，不得生成“请确认/是否需要/请指定”等继续询问用户的澄清句；原始信息不足时只能写成待补充占位或执行假设，除非原始 Prompt 明确要求文档或文件输出，否则不得新增 `docs/`、写文件、持久化等确认要求
 - Prompt 优化结果区以中文/英文双卡片展示，每张卡片内部包含标题与复制操作区、分隔线和只读文本内容区
 - 工作台终端界面可通过工具栏或快捷键唤出 Prompt 优化浮层；浮层只显示一个原始 Prompt 输入框，不显示优化按钮、填入终端按钮、双语结果标题/结果区或关闭按钮；优化时应以当前项目根目录作为 Claude Code 工作目录，使其可读取项目 CLAUDE.md 上下文，并只按设置页选择的中文/英文语种生成一个优化版 Prompt；默认快捷键为轻按 Control 单键，首次触发打开浮层并聚焦原始 Prompt 输入框；浮层打开后再次触发快捷键时，如果输入框为空则直接关闭浮层，如果输入框非空则自动优化；输入框内非空时按 Enter 与再次触发快捷键等价，Shift+Enter 保留换行，输入法 composing 状态下的 Enter 不提交；后端把优化后的 Prompt 边生成边流式写入当前运行中的终端，完成后自动关闭浮层；填入只插入文本，不自动追加回车或执行命令
 
-### 2.4 设备自动发现与互联
+### 2.4 Claude Code 历史
+
+**描述**：采集本机 Claude Code 历史会话中的用户输入 Prompt，按项目维度浏览、复用和同步。
+
+**功能点**：
+- 从本机 Claude Code 历史目录采集用户输入 Prompt，并按项目路径聚合展示
+- 项目列表展示每个项目的 Prompt 数量和最近更新时间
+- 项目内 Prompt 时间线支持文本搜索、详情查看和一键复制
+- 支持把历史 Prompt 一键转存到正式 Prompt 库
+- 支持删除单条历史 Prompt，删除结果参与跨设备同步
+- 支持手动刷新采集，并在全局同步中通过独立 `cc-history` 链路跨设备合并
+- Claude Code 历史纳入 GitHub 私有仓库云端同步范围
+
+### 2.5 user 级 CLAUDE.md 管理
+
+**描述**：在应用内编辑 user 级 `~/.claude/CLAUDE.md`，并由用户主动推送到局域网设备和 GitHub 云端。
+
+**功能点**：
+- 进入页面时读取 `~/.claude/CLAUDE.md`，并与本地 SQLite 同步元数据对账
+- 提供文本编辑器、未保存状态提示、字符统计和保存操作
+- 保存时写回本机 `~/.claude/CLAUDE.md`，并推进本机向量时钟
+- 推送时先保存当前编辑内容，再把本机版本主动推送到在线局域网设备
+- 推送时同时把 `CLAUDE.md` 写入 GitHub 私有仓库云端同步工作区并提交该文件
+- `CLAUDE.md` 不参与普通全局自动同步和普通 GitHub 云端同步导入，避免远端版本自动覆盖本机编辑器内容
+- P2P 协议保留 `pull/push` 端点，但产品语义以用户主动推送本机版本为主
+
+### 2.6 设备自动发现与互联
 
 **描述**：局域网内的 cc-partner 实例自动发现彼此并建立连接。
 
@@ -74,19 +102,35 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 设备上线/下线实时通知
 - 每个实例同时作为 HTTP 服务端和客户端
 
-### 2.5 Prompt 跨设备同步
+### 2.7 局域网跨设备同步
 
-**描述**：Prompt 数据在所有连接的设备间自动同步。
+**描述**：Prompt、Claude Code 历史、速记本页面和 SSH 连接目标在所有连接的设备间同步。
 
 **功能点**：
-- 新设备上线时自动拉取/推送 Prompt
-- 本地修改后自动同步到对端（500ms 防抖）
-- 定时同步（每 30 秒）
-- 向量时钟追踪版本，避免丢失更新
-- 并发冲突采用 Last-Writer-Wins 策略
-- 仅同步 Prompt 数据，不同步文件
+- 新设备上线时自动拉取/推送 Prompt，并在同一轮同步中合并 Claude Code 历史、速记本页面和 SSH 连接目标
+- Prompt 本地修改后自动同步到对端（500ms 防抖）
+- 定时触发全局同步（每 30 秒）
+- 各类同步数据均使用向量时钟追踪版本，避免丢失更新
+- 并发冲突采用 Last-Writer-Wins 策略，时间戳相等时按设备 ID 稳定决策
+- 软删除数据需要参与同步传播，避免刷新或同步后复活
+- 全局同步不传输普通文件，不同步 Workbench 工作区文件副本；文件传输和 Workbench 远端代理走独立通道
+- `CLAUDE.md` 不进入普通全局自动同步，只通过 `CLAUDE.md` 页面主动推送
 
-### 2.6 速记本
+### 2.8 GitHub 私有仓库云端同步
+
+**描述**：把用户配置的 GitHub 私有仓库作为中心化同步对端，承载多设备之间的离线数据交换与审计历史。
+
+**功能点**：
+- 设置页同步 tab 配置私有仓库 URL、分支、启用状态、自动同步开关和同步间隔
+- 支持测试 Git 连通性、手动触发同步和后台定时自动同步
+- 同步范围包含 Prompt、Claude Code 历史、SSH 连接目标和 Scratchpad 多页面数据
+- 同步导入时按各业务对象的向量时钟和 LWW 规则与本机 SQLite 合并
+- 同步导出时把当前本机数据快照写成 JSON 文件并提交到配置分支
+- 软删除记录也写入云端快照，用于跨设备传播删除语义
+- `CLAUDE.md` 不参与普通云端自动同步导入/导出，仅由 `CLAUDE.md` 页面主动推送本机版本到云端
+- 云端同步不管理 Git 认证，复用用户本机 git 凭证、SSH key 或 credential helper
+
+### 2.9 速记本
 
 **描述**：提供多页面自动保存文本区域，用于快速记录临时想法、片段和待办。
 
@@ -100,7 +144,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 支持手动触发一次同步，同时执行局域网同步与 GitHub 云端同步，并纳入全局云端同步范围
 - 旧版单页速记本内容升级后保留为标题“速记本”的第一页
 
-### 2.7 SSH 连接目标管理
+### 2.10 SSH 连接目标管理
 
 **描述**：以连接目标列表集中展示局域网设备和手动目标，并提供 SSH 连接配置管理，配置跨设备同步。
 
@@ -112,7 +156,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 提供 mac/ubuntu/windows 三端开启 SSH 服务的配置指南
 - 按本机操作系统展示对应的连接端（ssh 客户端）用法
 
-### 2.8 健康提醒
+### 2.11 健康提醒
 
 **描述**：监测久坐行为，在长时间连续工作后提醒用户休息，降低健康风险。
 
@@ -129,7 +173,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 设置页健康提醒 tab：以「健康提醒 / 免打扰 / 通知与隐私」三个分栏目 Card 展示配置表单
 - 完整配置表单：健康监测总开关、工作窗口/休息时长、喝水提醒间隔、通知开关、记录窗口标题、免打扰起止 24 小时制时间选择器、数据保留天数；久坐提醒、喝水提醒和全屏遮罩不提供独立开关，均随健康监测启用
 
-### 2.9 GitHub 周热门项目
+### 2.12 GitHub 周热门项目
 
 **描述**：「Github热门」菜单页展示 GitHub 周热门项目，并可选使用本机 Claude CLI 生成中英文项目解说。
 
@@ -141,7 +185,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - Claude CLI 解说失败时首页仍展示 GitHub 原始简介，并显示可诊断的失败原因
 - 旧的泛化失败缓存不会永久阻挡修复后的解说生成，应用可在合理条件下重新尝试生成
 
-### 2.10 Claude Code 资产管理
+### 2.13 Claude Code 资产管理
 
 **描述**：集中查看本机 Claude Code skills、commands、plugins 与 MCP 配置，并从局域网设备选择性拉取。
 
@@ -154,7 +198,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 本机资产 tab 支持搜索、类型筛选、启用/关闭与卸载
 - 页面不提供本机安装卡片，新增资产优先通过文件系统或局域网拉取路径完成
 
-### 2.11 用户设置
+### 2.14 用户设置
 
 **描述**：提供集中偏好设置入口，管理基础配置、权限、快捷键、工作台运行依赖、同步、Claude CLI/AI 能力和版本更新。
 
@@ -165,7 +209,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 常规 / 同步 / AI 页签的恢复默认按钮始终可点击；常规恢复为后端按当前设备环境生成的默认设备名、默认接收目录和平台默认截图快捷键，同步和 AI 分别恢复为后端定义的云端同步默认配置与 Claude CLI/AI 默认配置
 - 同步、AI 和关于页签分别管理云端同步、Claude CLI/AI 能力和应用更新；AI 页签中的 CLI 路径与模型供 GitHub 项目解说和 Prompt 优化共用，启用开关与缓存时长仅作用于 GitHub 项目解说；AI 页签同时管理 Workbench Prompt 优化浮层快捷键与自动填入语言，默认轻按 Control、默认填入中文优化版；同步和 AI 的恢复默认只重置表单，仍需用户点击“应用配置”持久化
 
-### 2.12 工作台
+### 2.15 工作台
 
 **描述**：以项目文件夹为中心管理 Git worktree、普通交互式终端、当前工作区文件夹、文件内容浏览/编辑和 Git 提交树。支持本机目录、已挂载局域网目录，以及通过可信局域网直连选择远端 cc-partner 设备项目目录；用户可直接浏览已发现设备的目录并选择远端项目文件夹，文件、Git、worktree、终端和 Prompt 优化均代理到远端设备执行。
 
@@ -187,7 +231,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - Prompt 优化浮层：终端工具栏提供 Prompt 优化入口，默认也可轻按 Control 唤起；浮层悬浮在当前终端输入光标附近，只渲染一个原始 Prompt 输入框，每次从关闭态重新打开时清空输入；首次快捷键触发打开并聚焦原始 Prompt 输入框；浮层打开后再次触发快捷键时，空输入直接关闭浮层，非空输入才自动优化；输入框内非空时按 Enter 与再次触发快捷键等价，Shift+Enter 保留换行，输入法 composing 状态下的 Enter 不提交；后端按设置语言把优化后的 Prompt 边生成边流式写入当前 running active session，完成后自动关闭浮层；优化请求绑定 active worktree 根目录以加载该工作区 CLAUDE.md 上下文，但输出仍必须是需求方视角的直接委托式 Prompt，不能把项目文档规则扩展成向用户确认 `docs/` 或写文件的澄清问题；小组件不显示“优化/填入终端/中文优化版/English optimized/关闭”等按钮或双语结果区，且不请求双语优化
 - 项目文件夹：右侧文件树绑定 active worktree 根目录，支持刷新、展开/收起、选中文件/文件夹、新建文件、新建文件夹、重命名、删除确认、复制相对路径，并展示名称、类型、相对路径、大小、修改时间和父目录；点击文件节点在中心文件工作区打开 tab，预览 tab 标签直接显示文件相对路径，格式化/保存/返回终端按钮与 tab 同行显示，不再渲染第二行文件头部或类型标签；支持多文件 tab 激活/关闭，全部关闭后回到终端；文件 tab 未关闭时，终端工具栏的文件预览入口位于按钮组最右侧，用户可在终端和文件工作区之间双向切换；项目或 worktree 切换时清空文件工作区，旧异步请求不得污染新上下文；重命名/删除路径后已打开 tab 必须同步新路径或关闭
 - 文件内容浏览/编辑：图片只读预览；CSV 只读表格预览；SQLite 只读枚举表并预览前 100 行，不执行用户 SQL；代码、Markdown、HTML、JSON、TOML、YAML 和普通文本走文件工作区编辑，代码编辑器需要高亮插件体验；Markdown 支持源码、预览和分栏模式，预览模式可直接编辑，体验接近 Typora，预览中的相对图片通过 active worktree 根内只读资源通道内联，外链、data/blob、绝对路径、根外路径和跨根 symlink 不加载且不写回源 Markdown；HTML 支持源码、sandbox 渲染预览和分栏模式，预览可加载 active worktree 根内相对 CSS、图片、字体和媒体资源，外链、data/blob、绝对路径、根外路径和跨根 symlink 不加载，外部/内联 CSS 的相对 `url()` 按 CSS 文件自身路径解析；JSON/TOML/YAML 提供格式化按钮，保存前必须做语义校验；保存文本文件使用 baseHash 乐观锁防止覆盖外部修改
-- 当前仍不做 Git diff 面板、交互式冲突解决、会话日志持久回放和批量同步副本
+- 当前仍不做 Git diff 面板、PR 创建、交互式冲突解决、会话日志持久化归档和批量同步副本；运行期 replay buffer 仅用于移动端首屏和终端重挂载恢复最近输出，不等同于持久会话日志
 
 ## 3. 非功能需求
 
@@ -234,6 +278,39 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 | vector_clock | dict[str, int] | 向量时钟 |
 | deleted | bool | 软删除标记 |
 
+#### ScratchpadPage
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | str (UUID) | 主键 |
+| title | str | 页面标题，空标题归一为“未命名” |
+| content | str | 页面正文 |
+| created_at | datetime | 创建时间 |
+| updated_at | datetime | 更新时间 |
+| device_id | str | 最后修改设备 ID |
+| vector_clock | dict[str, int] | 向量时钟 |
+| deleted | bool | 软删除标记 |
+
+#### ClaudeHistory
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | str | 历史 Prompt 唯一 ID |
+| project_path | str | Claude Code 会话所属项目路径 |
+| content | str | 用户输入 Prompt 内容 |
+| created_at | datetime | 历史记录时间 |
+| updated_at | datetime | 最近同步更新时间 |
+| device_id | str | 来源或最后修改设备 ID |
+| vector_clock | dict[str, int] | 向量时钟 |
+| deleted | bool | 软删除标记 |
+
+#### ClaudeMd
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | str | 单例 ID，固定为 `claude_md` |
+| content | str | user 级 `~/.claude/CLAUDE.md` 内容 |
+| updated_at | datetime | 最近更新时间 |
+| device_id | str | 最后修改设备 ID |
+| vector_clock | dict[str, int] | 向量时钟 |
+
 #### Device
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -262,7 +339,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 |------|------|------|
 | id | str (UUID) | 主键 |
 | name | str | 项目显示名 |
-| kind | str | 项目类型，第一期为 local（本机/已挂载目录） |
+| kind | str | 项目类型：local（本机/已挂载目录）或 remote（局域网远端快捷方式） |
 | device_id | str | 所属设备 ID |
 | device_name | str | 所属设备名称 |
 | path | str | canonical 项目根路径 |
@@ -314,10 +391,27 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | /api/health | 健康检查 |
+| GET | /api/mobile/access-info | 获取可信局域网 `/mobile` 访问链接与二维码数据 |
 | POST | /api/sync/pull | 拉取 Prompt（含向量时钟摘要） |
 | POST | /api/sync/push | 推送 Prompt |
+| POST | /api/scratchpad/sync/pull | 拉取 Scratchpad 页面（含向量时钟摘要） |
+| POST | /api/scratchpad/sync/push | 推送 Scratchpad 页面 |
+| POST | /api/cc-history/sync/pull | 拉取 Claude Code 历史 Prompt |
+| POST | /api/cc-history/sync/push | 推送 Claude Code 历史 Prompt |
+| POST | /api/ssh-target/sync/pull | 拉取 SSH 目标（含向量时钟摘要） |
+| POST | /api/ssh-target/sync/push | 推送 SSH 目标 |
+| POST | /api/sync/claude_md/pull | 拉取 user 级 CLAUDE.md（兼容协议） |
+| POST | /api/sync/claude_md/push | 主动推送 user 级 CLAUDE.md |
 | POST | /api/transfer/init | 发起文件传输 |
 | POST | /api/transfer/chunk/{id} | 发送文件块 |
 | GET | /api/transfer/status/{id} | 查询传输状态 |
-| POST | /api/ssh-target/sync/pull | 拉取 SSH 目标（含向量时钟摘要） |
-| POST | /api/ssh-target/sync/push | 推送 SSH 目标 |
+| GET | /api/claude-code/assets/inventory | 获取本机 Claude Code assets inventory，供对端选择性拉取 |
+| POST | /api/claude-code/assets/bundle | 按 selectors 打包 Claude Code assets 供对端拉取 |
+| GET/POST | /api/workbench/fs/* | Workbench 远端目录根、目录列表和路径信息 |
+| GET/POST | /api/workbench/projects/* | Workbench 移动端项目列表与远端项目打开 |
+| POST | /api/workbench/worktrees/* | Workbench worktree 列表、创建、查询、commit、push、merge、remove |
+| POST | /api/workbench/git/commits | 查询 active worktree 的 Git 提交 DAG |
+| POST | /api/workbench/files/* | Workbench 文件树、文件打开/保存、预览、创建、重命名和删除 |
+| GET | /api/workbench/events | Workbench HTTP NDJSON 事件流（移动端与远端事件桥） |
+| POST | /api/workbench/sessions/* | Workbench terminal window/pane 列表、创建、replay、输入、resize、focus、分屏、关闭和重命名 |
+| POST | /api/workbench/prompt-optimizer/stream-to-session | 移动端/远端 Workbench Prompt 优化并流式写入目标终端 |
