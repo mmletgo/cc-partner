@@ -47,19 +47,14 @@ function createTask(id: string, status: OrchestratorTaskStatus): OrchestratorTas
   };
 }
 
-const queued = createTask('queued-1', 'queued');
-const blocked = createTask('blocked-1', 'blocked');
-const running = createTask('running-1', 'running');
-const groups = groupOrchestratorTasks([queued, blocked, running]);
-
-assert(groups.queued.length === 1, 'groupOrchestratorTasks should put queued tasks into queued group');
-assert(groups.queued[0]?.id === queued.id, 'queued group should keep original queued task');
-assert(groups.blocked.length === 1, 'groupOrchestratorTasks should put blocked tasks into blocked group');
-assert(groups.blocked[0]?.id === blocked.id, 'blocked group should keep original blocked task');
-assert(groups.running.length === 1, 'groupOrchestratorTasks should keep running task in running group');
+const allStatusTasks = ORCHESTRATOR_STATUSES.map((status) => createTask(`${status}-1`, status));
+const groups = groupOrchestratorTasks(allStatusTasks);
 
 for (const status of ORCHESTRATOR_STATUSES) {
-  assert(Array.isArray(groups[status]), `groupOrchestratorTasks should create an array for ${status}`);
+  const task = groups[status][0];
+  assert(groups[status].length === 1, `groupOrchestratorTasks should group exactly one ${status} task`);
+  assert(task?.status === status, `groupOrchestratorTasks should keep ${status} task status`);
+  assert(task?.id === `${status}-1`, `groupOrchestratorTasks should keep original ${status} task id`);
 }
 
 const supportedTones = new Set<PillTone>(['neutral', 'success', 'warn', 'danger', 'accent']);
