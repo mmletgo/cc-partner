@@ -417,6 +417,7 @@ pub fn run() {
                     health_repo,
                     health_cancel,
                     orchestrator_repo,
+                    orchestrator_cancel: Arc::new(Mutex::new(None)),
                 };
 
                 // 4) 启动 axum HTTP server（绑定动态端口，回填 actual_http_port）
@@ -453,6 +454,17 @@ pub fn run() {
                 let state: tauri::State<'_, AppState> = app.state();
                 let cancel = crate::cloud_sync::scheduler::start(state.inner().clone());
                 *state.cloud_sync_cancel.lock().unwrap() = Some(cancel);
+            }
+
+            // 启动 Orchestrator 后台 scheduler（每 10 秒按项目策略领取一个 Queued 任务）。
+            // 取消令牌存入 AppState，应用退出时优雅停止。
+            {
+                let state: tauri::State<'_, AppState> = app.state();
+                let cancel = crate::orchestrator::scheduler::start_orchestrator_scheduler(
+                    app.handle().clone(),
+                    state.inner().clone(),
+                );
+                *state.orchestrator_cancel.lock().unwrap() = Some(cancel);
             }
 
             // 启动健康监测 daemon（采样线程 + 处理 task），取消令牌存入 AppState 供应用退出时优雅停止。
@@ -593,6 +605,7 @@ pub fn run() {
             orchestrator_cmd::create_orchestrator_task,
             orchestrator_cmd::queue_orchestrator_task,
             orchestrator_cmd::get_orchestrator_project_config,
+            orchestrator_cmd::dispatch_orchestrator_once,
             // M10 健康提醒（14 命令：配置/状态/开关/暂停/贪睡/跳过/配置回写/统计/活动明细/喝水/跳过喝水/延迟喝水/全屏遮罩/恢复默认）
             health_cmd::get_health_config,
             health_cmd::get_default_health_config,
@@ -673,6 +686,11 @@ pub fn run() {
                 if let Some(t) = state.cloud_sync_cancel.lock().unwrap().take() {
                     t.cancel();
                     tracing::info!("云端同步 scheduler 已停止");
+                }
+                // 停止 Orchestrator 后台 scheduler
+                if let Some(t) = state.orchestrator_cancel.lock().unwrap().take() {
+                    t.cancel();
+                    tracing::info!("Orchestrator scheduler 已停止");
                 }
                 // 停止健康监测 daemon（采样线程 + 处理 task）
                 if let Some(t) = state.health_cancel.lock().unwrap().take() {

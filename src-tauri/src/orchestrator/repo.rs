@@ -259,6 +259,129 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     后台调度器只能处理已启用自动编排的项目，默认 disabled 项目必须完全跳过。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查询 enabled=1 的项目策略，按 project_id 稳定排序后转换为 OrchestratorProjectConfigDto。
+    pub async fn list_enabled_project_configs(
+        &self,
+    ) -> Result<Vec<OrchestratorProjectConfigDto>, AppError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {PROJECT_CONFIG_COLUMNS} FROM orchestrator_project_config \
+             WHERE enabled = 1 ORDER BY project_id ASC"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_project_config).collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     项目级并发上限只应计算已经被调度器接管或正在后续阶段处理的任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     统计 Preparing/Running/Verifying/Delivering 四个 active 状态数量，返回 SQLite COUNT 结果。
+    pub async fn count_active_tasks(&self, project_id: &str) -> Result<i64, AppError> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS count FROM orchestrator_tasks \
+             WHERE project_id = ? AND status IN (?, ?, ?, ?)",
+        )
+        .bind(project_id)
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(OrchestratorTaskStatus::Running.as_str())
+        .bind(OrchestratorTaskStatus::Verifying.as_str())
+        .bind(OrchestratorTaskStatus::Delivering.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.try_get("count")?)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     调度器领取任务必须避免重复调度同一 Queued 任务，同时保持优先级高、创建早的任务先执行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在单个事务中读取下一个 Queued 任务，并用带 status 条件的 UPDATE 原子切换为 Preparing。
+    ///     若没有可领取任务或并发竞争导致 UPDATE 未命中，则返回 None。
+    pub async fn claim_next_queued_task(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<OrchestratorTaskRow>, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let selected = sqlx::query(&format!(
+            "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
+             WHERE project_id = ? AND status = ? \
+             ORDER BY priority DESC, created_at ASC LIMIT 1"
+        ))
+        .bind(project_id)
+        .bind(OrchestratorTaskStatus::Queued.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(row) = selected else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let task_id: String = row.try_get("id")?;
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(Option::<&str>::None)
+        .bind(now)
+        .bind(&task_id)
+        .bind(OrchestratorTaskStatus::Queued.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+
+        let row = sqlx::query(&format!(
+            "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
+        ))
+        .bind(&task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(row_to_task(&row)?))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Runner 创建出任务 worktree 和 terminal 后，需要把可接管现场持久化到任务行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写入 branch_name/worktree_id/session_id，把状态切到 Running，清空 blocked_reason，并首次设置 started_at。
+    pub async fn mark_task_running(
+        &self,
+        task_id: &str,
+        branch_name: &str,
+        worktree_id: &str,
+        session_id: &str,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, branch_name = ?, worktree_id = ?, session_id = ?, \
+                 blocked_reason = ?, started_at = COALESCE(started_at, ?), updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(OrchestratorTaskStatus::Running.as_str())
+        .bind(branch_name)
+        .bind(worktree_id)
+        .bind(session_id)
+        .bind(Option::<&str>::None)
+        .bind(&now)
+        .bind(now.clone())
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
+        self.get_task(task_id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     队列动作和状态机推进后需要只更新任务状态和阻塞原因，保持任务身份字段不变。
     ///
     /// Code Logic（这个函数做什么）:
@@ -811,5 +934,123 @@ mod tests {
         let result = repo.get_task("bad-status").await;
 
         assert!(result.is_err());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     调度器只能扫描用户显式启用自动编排的项目，默认 disabled 项目不得被后台领取任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建两个项目配置，仅把一个更新为 enabled=1，再断言 enabled 列表只返回该项目。
+    #[tokio::test]
+    async fn list_enabled_project_configs_returns_only_enabled_projects() {
+        let (pool, repo) = setup_repo().await;
+        repo.get_or_create_project_config("project-enabled")
+            .await
+            .unwrap();
+        repo.get_or_create_project_config("project-disabled")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE orchestrator_project_config SET enabled = 1 WHERE project_id = ?")
+            .bind("project-enabled")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let configs = repo.list_enabled_project_configs().await.unwrap();
+
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].project_id, "project-enabled");
+        assert!(configs[0].enabled);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     项目级并发控制只应统计 Preparing/Running/Verifying/Delivering，Queued 和终态不占用执行槽位。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     为同一项目插入所有关键状态任务，断言 active count 仅包含四个执行中阶段。
+    #[tokio::test]
+    async fn count_active_tasks_counts_only_in_progress_statuses() {
+        let (_pool, repo) = setup_repo().await;
+        for (id, status) in [
+            ("queued", OrchestratorTaskStatus::Queued),
+            ("preparing", OrchestratorTaskStatus::Preparing),
+            ("running", OrchestratorTaskStatus::Running),
+            ("verifying", OrchestratorTaskStatus::Verifying),
+            ("delivering", OrchestratorTaskStatus::Delivering),
+            ("done", OrchestratorTaskStatus::Done),
+            ("blocked", OrchestratorTaskStatus::Blocked),
+        ] {
+            repo.create_task(&task_row(id, "project-1", status))
+                .await
+                .unwrap();
+        }
+
+        let active = repo.count_active_tasks("project-1").await.unwrap();
+
+        assert_eq!(active, 4);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     调度器领取任务必须原子地把 Queued 切到 Preparing，避免两个 tick 或手动触发重复调度同一任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入高低优先级 Queued 与 Draft 任务，claim 一次后断言只领取最高优先级 Queued 且状态变 Preparing。
+    #[tokio::test]
+    async fn claim_next_queued_task_claims_only_queued_task() {
+        let (pool, repo) = setup_repo().await;
+        let high = task_row("high", "project-1", OrchestratorTaskStatus::Queued);
+        let low = task_row("low", "project-1", OrchestratorTaskStatus::Queued);
+        let draft = task_row("draft", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&high).await.unwrap();
+        repo.create_task(&low).await.unwrap();
+        repo.create_task(&draft).await.unwrap();
+        sqlx::query("UPDATE orchestrator_tasks SET priority = ? WHERE id = ?")
+            .bind(10_i64)
+            .bind(&high.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE orchestrator_tasks SET priority = ? WHERE id = ?")
+            .bind(1_i64)
+            .bind(&low.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let claimed = repo
+            .claim_next_queued_task("project-1")
+            .await
+            .unwrap()
+            .expect("claimed task");
+        let low_persisted = repo.get_task(&low.id).await.unwrap();
+        let draft_persisted = repo.get_task(&draft.id).await.unwrap();
+
+        assert_eq!(claimed.id, high.id);
+        assert_eq!(claimed.status, OrchestratorTaskStatus::Preparing);
+        assert_eq!(low_persisted.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(draft_persisted.status, OrchestratorTaskStatus::Draft);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Runner 创建出 worktree 和 terminal 后，任务行必须持久化现场入口，供用户从 Orchestrator 接管。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Preparing 任务后写入 branch/worktree/session，断言状态进入 Running 且关联字段落库。
+    #[tokio::test]
+    async fn mark_task_running_persists_runner_fields() {
+        let (_pool, repo) = setup_repo().await;
+        let task = task_row("task-1", "project-1", OrchestratorTaskStatus::Preparing);
+        repo.create_task(&task).await.unwrap();
+
+        let running = repo
+            .mark_task_running(&task.id, "agent/task-1-test", "worktree-1", "session-1")
+            .await
+            .unwrap();
+
+        assert_eq!(running.status, OrchestratorTaskStatus::Running);
+        assert_eq!(running.branch_name.as_deref(), Some("agent/task-1-test"));
+        assert_eq!(running.worktree_id.as_deref(), Some("worktree-1"));
+        assert_eq!(running.session_id.as_deref(), Some("session-1"));
+        assert!(running.started_at.is_some());
     }
 }

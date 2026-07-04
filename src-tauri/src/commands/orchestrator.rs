@@ -4,7 +4,7 @@ use crate::orchestrator::models::{
 };
 use crate::state::AppState;
 use chrono::Utc;
-use tauri::State;
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 /// 创建 Orchestrator 任务的命令入参。
@@ -68,6 +68,15 @@ fn build_orchestrator_task_row(
         started_at: None,
         finished_at: None,
     })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     手动 dispatch 命令需要返回本次实际领取的任务数量，供 UI 和测试判断触发效果。
+///
+/// Code Logic（这个函数做什么）:
+///     把 dispatched 数量包装成 `{ "dispatched": <usize> }` JSON Value。
+fn build_dispatch_once_response(dispatched: usize) -> serde_json::Value {
+    serde_json::json!({ "dispatched": dispatched })
 }
 
 /// 查询 Orchestrator 任务列表。
@@ -138,6 +147,23 @@ pub async fn queue_orchestrator_task(
 ) -> Result<OrchestratorTaskDto, AppError> {
     let task = state.orchestrator_repo.queue_task(&task_id).await?;
     Ok(OrchestratorTaskDto::from(task))
+}
+
+/// 手动触发一次 Orchestrator 调度。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户或测试需要立即触发一次队列领取，而不是等待后台 scheduler 的 10 秒 tick。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 scheduler::dispatch_once 复用后台调度逻辑，并返回本次 dispatched 任务数。
+#[tauri::command]
+pub async fn dispatch_orchestrator_once(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<serde_json::Value, AppError> {
+    let dispatched =
+        crate::orchestrator::scheduler::dispatch_once(state.inner(), app_handle).await?;
+    Ok(build_dispatch_once_response(dispatched))
 }
 
 #[cfg(test)]
@@ -223,5 +249,17 @@ mod tests {
         assert!(!row.id.trim().is_empty());
         assert!(!row.created_at.trim().is_empty());
         assert_eq!(row.created_at, row.updated_at);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     手动 dispatch 命令需要给前端和测试返回稳定的 dispatched 数量，便于确认本次触发领取了多少任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用响应构造 helper，并断言 JSON 中的 dispatched 字段保留原始数量。
+    #[test]
+    fn dispatch_response_contains_dispatched_count() {
+        let value = build_dispatch_once_response(2);
+
+        assert_eq!(value["dispatched"], serde_json::json!(2));
     }
 }

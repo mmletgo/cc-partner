@@ -8,5 +8,8 @@
 //!     暴露 Orchestrator 的数据模型、状态机和 SQLite 仓储。
 
 pub mod models;
+pub mod prompt;
 pub mod repo;
+pub mod runner;
+pub mod scheduler;
 pub mod state;

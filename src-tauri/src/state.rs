@@ -114,6 +114,8 @@ pub struct AppState {
     /// Orchestrator 任务编排仓储（任务队列、事件和证据持久化）
     #[allow(dead_code)]
     pub orchestrator_repo: Arc<OrchestratorRepo>,
+    /// Orchestrator 后台 scheduler 的取消令牌（应用退出时 cancel，停止自动领取任务）
+    pub orchestrator_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
 }
 
 impl AppState {

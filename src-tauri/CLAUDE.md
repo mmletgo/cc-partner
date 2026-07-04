@@ -31,7 +31,7 @@ src/
 ├── sync/              — 向量时钟 + LWW 合并 + engine              [M4]
 ├── net/               — mdns-sd 发现 + axum server + reqwest client [已实现 M3]
 ├── mobile/            — 移动端局域网 `/mobile` 访问 URL 生成（过滤 localhost/loopback）[已实现]
-├── orchestrator/      — 自动编排器基础：任务模型、状态机、SQLite repo(schema/tasks/events/evidence) [基础已实现]
+├── orchestrator/      — 自动编排器后端：任务模型、状态机、SQLite repo、scheduler、Workbench 可见 Runner、Prompt 生成 [部分已实现]
 ├── transfer/          — 分块传输 + SHA256 + 断点续传              [M5]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
 ├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥 [已实现]
@@ -45,13 +45,15 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 
 ## Orchestrator 基础约定（src/orchestrator/）
 
-- **功能定位**：Orchestrator 是内置自动编排器的后端基础层，当前负责任务模型、状态机、SQLite schema/repo、项目策略读取和基础任务命令；不包含调度器、Workbench Runner、验证执行或交付。
+- **功能定位**：Orchestrator 是内置自动编排器的后端层，当前负责任务模型、状态机、SQLite schema/repo、项目策略读取、基础任务命令、项目级 scheduler、Workbench 可见 Runner 和任务 Prompt 生成；验证执行、证据归档、交付、blocked UI 和前端联动仍属后续任务。
 - **状态机**：`orchestrator/state.rs::next_status` 只允许 Draft→Queued→Preparing→Running→Verifying→Delivering→Done 的 happy path；`Block`/`Abort` 可从任意状态进入 `Blocked`/`Aborted`，`Noop` 保持原状态，非法阶段输入保持原状态。
 - **持久化**：`orchestrator/repo.rs::OrchestratorRepo::init_schema` 在 `lib.rs::init_db` 内执行，建 `orchestrator_tasks`、`orchestrator_project_config`、`orchestrator_task_events`、`orchestrator_task_evidence` 及索引。`orchestrator_project_config` 默认是 full auto but disabled：`enabled=0`、`max_concurrent_tasks=1`、`auto_commit/auto_push_task_branch/auto_merge_to_main/auto_push_main=1`、`retry_limit=0`、`retain_worktree_on_done=0`、`retain_worktree_on_blocked=1`；event 表字段为 `id/task_id/kind/message/payload_json/created_at`；evidence 表字段为 `id/task_id/kind/title/summary/content/created_at`。仓储沿用运行期 `sqlx::query`，不用 sqlx 宏；事件/证据 id 用 `Uuid::new_v4()`、时间戳用 `Utc::now().to_rfc3339()`。
 - **任务仓储语义**：`create_task(&OrchestratorTaskRow)` 只插入调用方构造好的完整 row，不替命令层决定 id/title/goal/created_at；`list_tasks(project_id?)` 统一按 `priority DESC, created_at ASC`，`None` 返回全局列表；`get_task` 缺失时返回 `AppError::not_found`，非法 status 字符串返回错误；`queue_task(task_id)` 只能把 Draft 原子更新为 Queued，非 Draft 返回业务错误且不得改写状态或 blocked_reason；`set_task_status` 只更新状态、阻塞原因和 `updated_at`，保持任务身份字段不变，旧 `update_task_status` 只做兼容转发；event/evidence 仅追加不覆盖。
 - **项目策略语义**：`get_or_create_project_config(project_id)` 会在策略缺失时插入默认配置并返回 `OrchestratorProjectConfigDto`（camelCase，`verification_commands_json` 解析为 `verificationCommands: string[]`）；空项目 id 返回业务错误。命令层 `get_orchestrator_project_config(project_id)` 只读取/创建并展示策略，不提供编辑。
-- **命令层**：`list_orchestrator_tasks(project_id?)` 按项目读队列；`create_orchestrator_task(request)` 创建 Draft；`queue_orchestrator_task(task_id)` 只能通过仓储安全方法把 Draft 任务入队并返回完整 DTO，不能强制回退 Running/Done/Blocked/Aborted 等非 Draft 任务；`get_orchestrator_project_config(project_id)` 返回项目策略 DTO。当前仍不启动 scheduler/runner/verification/delivery。
-- **验证命令**：Orchestrator 相关改动优先跑 `cd src-tauri && cargo test orchestrator::state --lib && cargo test orchestrator::repo --lib && cargo test commands::orchestrator --lib && cargo check`。
+- **scheduler/Runner 语义**：`orchestrator/scheduler.rs::start_orchestrator_scheduler(app_handle,state)` 在 `lib.rs` setup 后启动，每 10 秒扫描 enabled 项目；`dispatch_once` 与手动命令共用同一逻辑：按项目统计 Preparing/Running/Verifying/Delivering active 数，未达 `max_concurrent_tasks` 时原子 claim 一个 Queued 任务为 Preparing。`orchestrator/runner.rs::prepare_visible_runner` 只支持本机 Workbench 项目，分支名固定为 `agent/<task-id-short>-<slug-title>`，复用 `commands/workbench.rs` 的 `local_create_workbench_worktree`、`local_create_workbench_session`、`local_write_workbench_session_input` 创建 worktree/terminal 并写入 `claude\n` 和任务 Prompt；成功后任务置 Running 并持久化 `branch_name/worktree_id/session_id`。runner 失败由 scheduler 置 Blocked、写 `blocked_reason` 并追加 event，不做 evidence、verification、delivery、提交、推送、合并或 worktree 清理。
+- **命令层**：`list_orchestrator_tasks(project_id?)` 按项目读队列；`create_orchestrator_task(request)` 创建 Draft；`queue_orchestrator_task(task_id)` 只能通过仓储安全方法把 Draft 任务入队并返回完整 DTO，不能强制回退 Running/Done/Blocked/Aborted 等非 Draft 任务；`get_orchestrator_project_config(project_id)` 返回项目策略 DTO；`dispatch_orchestrator_once()` 手动执行一次 scheduler dispatch，返回 `{dispatched}`。
+- **运行时接线**：`AppState.orchestrator_cancel` 保存 scheduler `CancellationToken`；`lib.rs` 在 `app.manage(state)` 后启动 scheduler，在 `RunEvent::Exit` 中 cancel 并记录日志，模式对齐 cloud sync/health 后台任务。
+- **验证命令**：Orchestrator 相关改动优先跑 `cd src-tauri && cargo test orchestrator::prompt --lib && cargo test orchestrator::repo --lib && cargo test orchestrator::runner --lib && cargo test orchestrator::scheduler --lib && cargo test commands::orchestrator --lib && cargo check`。
 
 ## 工作台已落地行为约定（workbench/ + storage/workbench_project_repo.rs + commands/workbench.rs + commands/workbench_dependencies.rs）
 
