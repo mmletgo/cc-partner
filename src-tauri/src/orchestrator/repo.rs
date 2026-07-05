@@ -223,7 +223,8 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     Orchestrator 页面需要显示当前项目策略；新项目第一次进入时应自动拥有一份默认策略。
+    ///     legacy 项目策略仍用于页面展示和调试历史数据；新项目第一次进入时应自动拥有一份默认策略。
+    ///     Phase 3 后 scheduler、验证和 delivery 运行时不再读取该表。
     ///
     /// Code Logic（这个函数做什么）:
     ///     对缺失 project_id 执行 INSERT OR IGNORE 写入 full-auto-but-disabled 默认值，再读取并解析 DTO。
@@ -261,7 +262,7 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     后台调度器只能处理已启用自动编排的项目，默认 disabled 项目必须完全跳过。
+    ///     legacy 项目策略列表仅用于展示/调试旧项目配置；运行时调度已改读 AppConfig.orchestrator。
     ///
     /// Code Logic（这个函数做什么）:
     ///     查询 enabled=1 的项目策略，按 project_id 稳定排序后转换为 OrchestratorProjectConfigDto。
@@ -288,6 +289,27 @@ impl OrchestratorRepo {
              WHERE project_id = ? AND status IN (?, ?, ?, ?)",
         )
         .bind(project_id)
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(OrchestratorTaskStatus::Running.as_str())
+        .bind(OrchestratorTaskStatus::Verifying.as_str())
+        .bind(OrchestratorTaskStatus::Delivering.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.try_get("count")?)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Phase 3 的调度容量属于本设备全局配置，必须统计所有本机 local Workbench 项目的执行中任务。
+    ///     远端项目只是快捷方式，不能占用或触发本机 Runner 容量。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     通过 workbench_projects join 过滤 kind='local'，统计 Preparing/Running/Verifying/Delivering 四个 active 状态。
+    pub async fn count_active_local_tasks(&self) -> Result<i64, AppError> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS count FROM orchestrator_tasks task \
+             INNER JOIN workbench_projects project ON project.id = task.project_id \
+             WHERE project.kind = 'local' AND task.status IN (?, ?, ?, ?)",
+        )
         .bind(OrchestratorTaskStatus::Preparing.as_str())
         .bind(OrchestratorTaskStatus::Running.as_str())
         .bind(OrchestratorTaskStatus::Verifying.as_str())
@@ -372,6 +394,89 @@ impl OrchestratorRepo {
         .await?;
         tx.commit().await?;
         Ok(Some(row_to_task(&row)?))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     全局 scheduler 一次 tick 需要按设备级剩余容量，在所有本机 local Workbench 项目中领取 queued 任务。
+    ///     remote 项目必须跳过，避免本机在远端快捷方式上创建 worktree/terminal。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在单个事务内完成 active local 计数、剩余容量计算、local queued 选择和 Queued→Preparing 条件更新。
+    ///     最多领取 limit-active 个任务，排序保持 priority DESC, created_at ASC；limit<=0 或容量已满返回空 Vec。
+    pub async fn claim_next_local_queued_tasks_with_global_capacity(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<OrchestratorTaskRow>, AppError> {
+        let mut tx = self.pool.begin().await?;
+        if limit <= 0 {
+            tx.commit().await?;
+            return Ok(Vec::new());
+        }
+
+        let active = sqlx::query(
+            "SELECT COUNT(*) AS count FROM orchestrator_tasks task \
+             INNER JOIN workbench_projects project ON project.id = task.project_id \
+             WHERE project.kind = 'local' AND task.status IN (?, ?, ?, ?)",
+        )
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(OrchestratorTaskStatus::Running.as_str())
+        .bind(OrchestratorTaskStatus::Verifying.as_str())
+        .bind(OrchestratorTaskStatus::Delivering.as_str())
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get::<i64, _>("count")?;
+        let remaining = limit - active;
+        if remaining <= 0 {
+            tx.commit().await?;
+            return Ok(Vec::new());
+        }
+
+        let selected = sqlx::query(&format!(
+            "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
+             WHERE id IN (\
+               SELECT task.id FROM orchestrator_tasks task \
+               INNER JOIN workbench_projects project ON project.id = task.project_id \
+               WHERE project.kind = 'local' AND task.status = ? \
+               ORDER BY task.priority DESC, task.created_at ASC LIMIT ?\
+             ) \
+             ORDER BY priority DESC, created_at ASC"
+        ))
+        .bind(OrchestratorTaskStatus::Queued.as_str())
+        .bind(remaining)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let mut claimed = Vec::new();
+        for row in selected {
+            let task_id: String = row.try_get("id")?;
+            let now = Utc::now().to_rfc3339();
+            let result = sqlx::query(
+                "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+                 WHERE id = ? AND status = ?",
+            )
+            .bind(OrchestratorTaskStatus::Preparing.as_str())
+            .bind(Option::<&str>::None)
+            .bind(now)
+            .bind(&task_id)
+            .bind(OrchestratorTaskStatus::Queued.as_str())
+            .execute(&mut *tx)
+            .await?;
+
+            if result.rows_affected() != 1 {
+                continue;
+            }
+
+            let updated = sqlx::query(&format!(
+                "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
+            ))
+            .bind(&task_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            claimed.push(row_to_task(&updated)?);
+        }
+
+        tx.commit().await?;
+        Ok(claimed)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -813,6 +918,46 @@ mod tests {
         OrchestratorRepo::init_schema(&pool).await.unwrap();
         let repo = OrchestratorRepo::new(pool.clone());
         (pool, repo)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     全局调度容量只针对本机 Workbench 项目生效，repo 单测需要最小 workbench_projects 表来模拟项目来源。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在内存 SQLite 中创建 claim 查询所需的 workbench_projects 字段子集。
+    async fn create_workbench_projects_table(pool: &SqlitePool) {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS workbench_projects (\
+             id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL, \
+             device_name TEXT NOT NULL, path TEXT NOT NULL, last_opened_at TEXT NOT NULL, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     全局调度测试要区分 local/remote Workbench 项目，确保远端快捷方式不会被本机 scheduler 领取。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入一条最小 Workbench 项目记录，kind 由调用方指定。
+    async fn insert_workbench_project(pool: &SqlitePool, id: &str, kind: &str) {
+        sqlx::query(
+            "INSERT INTO workbench_projects \
+             (id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at) \
+             VALUES (?, ?, ?, 'device-test', 'Device Test', ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(format!("Project {id}"))
+        .bind(kind)
+        .bind(format!("/tmp/{id}"))
+        .bind("2026-07-05T00:00:00Z")
+        .bind("2026-07-05T00:00:00Z")
+        .bind("2026-07-05T00:00:00Z")
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1297,6 +1442,106 @@ mod tests {
         let active = repo.count_active_tasks("project-1").await.unwrap();
 
         assert_eq!(active, 4);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Phase 3 后并发容量是设备级全局容量，只应统计所有本机 local Workbench 项目的执行中任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入 local、remote 和缺失 Workbench 项目的 active 任务，断言全局本机计数只包含 local 项目。
+    #[tokio::test]
+    async fn count_active_local_tasks_counts_only_local_workbench_projects() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "local-a", "local").await;
+        insert_workbench_project(&pool, "local-b", "local").await;
+        insert_workbench_project(&pool, "remote-a", "remote").await;
+        for (id, project_id, status) in [
+            (
+                "local-preparing",
+                "local-a",
+                OrchestratorTaskStatus::Preparing,
+            ),
+            ("local-running", "local-b", OrchestratorTaskStatus::Running),
+            (
+                "remote-running",
+                "remote-a",
+                OrchestratorTaskStatus::Running,
+            ),
+            (
+                "missing-running",
+                "missing",
+                OrchestratorTaskStatus::Running,
+            ),
+            ("local-queued", "local-a", OrchestratorTaskStatus::Queued),
+        ] {
+            repo.create_task(&task_row(id, project_id, status))
+                .await
+                .unwrap();
+        }
+
+        let active = repo.count_active_local_tasks().await.unwrap();
+
+        assert_eq!(active, 2);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     全局 scheduler 需要在所有本机 local 项目之间按统一优先级领取任务，并跳过远端项目。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先制造 1 个本机 active 任务，再按全局 limit=3 领取 queued，断言只领取剩余 2 个 local 任务且排序正确。
+    #[tokio::test]
+    async fn claim_next_local_queued_tasks_with_global_capacity_claims_remaining_local_slots() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "local-a", "local").await;
+        insert_workbench_project(&pool, "local-b", "local").await;
+        insert_workbench_project(&pool, "remote-a", "remote").await;
+        repo.create_task(&task_row(
+            "active-local",
+            "local-a",
+            OrchestratorTaskStatus::Running,
+        ))
+        .await
+        .unwrap();
+        for (id, project_id, priority) in [
+            ("remote-high", "remote-a", 100_i64),
+            ("local-high", "local-b", 50_i64),
+            ("local-low", "local-a", 10_i64),
+            ("local-wait", "local-b", 1_i64),
+        ] {
+            repo.create_task(&task_row(id, project_id, OrchestratorTaskStatus::Queued))
+                .await
+                .unwrap();
+            sqlx::query("UPDATE orchestrator_tasks SET priority = ? WHERE id = ?")
+                .bind(priority)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let claimed = repo
+            .claim_next_local_queued_tasks_with_global_capacity(3)
+            .await
+            .unwrap();
+        let remote = repo.get_task("remote-high").await.unwrap();
+        let waiting = repo.get_task("local-wait").await.unwrap();
+        let active = repo.count_active_local_tasks().await.unwrap();
+
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local-high", "local-low"]
+        );
+        assert!(claimed
+            .iter()
+            .all(|task| task.status == OrchestratorTaskStatus::Preparing));
+        assert_eq!(remote.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(waiting.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(active, 3);
     }
 
     /// Business Logic（为什么需要这个函数）:

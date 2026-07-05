@@ -1,3 +1,4 @@
+use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
 use crate::orchestrator::models::{
     OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskDto,
@@ -80,6 +81,17 @@ fn build_orchestrator_task_row(
 ///     把 dispatched 数量包装成 `{ "dispatched": <usize> }` JSON Value。
 fn build_dispatch_once_response(dispatched: usize) -> serde_json::Value {
     serde_json::json!({ "dispatched": dispatched })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Agent 完成后的验证命令已迁移为设备级全局设置，不能再读取 legacy 项目策略表。
+///
+/// Code Logic（这个函数做什么）:
+///     从 OrchestratorAutomationConfig 克隆 verification_commands，调用方可在 await 前释放 config 读锁。
+fn verification_commands_for_agent_completion(
+    config: &OrchestratorAutomationConfig,
+) -> Vec<String> {
+    config.verification_commands.clone()
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -404,7 +416,8 @@ pub async fn create_orchestrator_task(
 /// 查询项目 Orchestrator 策略。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     页面右侧策略卡需要展示当前 Workbench 项目的自动化策略，缺失时按默认策略初始化。
+///     legacy 策略卡仍可展示/调试当前 Workbench 项目的旧自动化策略，缺失时按默认策略初始化。
+///     Phase 3 后 scheduler、验证和 delivery 运行时统一读取 AppConfig.orchestrator。
 ///
 /// Code Logic（这个函数做什么）:
 ///     委托仓储 get_or_create_project_config，并返回 camelCase DTO。
@@ -522,24 +535,12 @@ pub async fn complete_orchestrator_agent_run(
         }
     };
     let cwd = PathBuf::from(&worktree.path);
-    let config = match state
-        .orchestrator_repo
-        .get_or_create_project_config(&task.project_id)
-        .await
-    {
-        Ok(config) => config,
-        Err(err) => {
-            return block_task_with_verification_error(
-                state.inner(),
-                &task.id,
-                "读取项目验证策略失败",
-                err,
-            )
-            .await;
-        }
+    let verification_commands = {
+        let config = state.config.read().expect("config 读锁中毒");
+        verification_commands_for_agent_completion(&config.orchestrator)
     };
 
-    if config.verification_commands.is_empty() {
+    if verification_commands.is_empty() {
         state
             .orchestrator_repo
             .add_evidence(
@@ -560,11 +561,8 @@ pub async fn complete_orchestrator_agent_run(
             .await;
     }
 
-    match crate::orchestrator::delivery::run_verification_commands(
-        &cwd,
-        &config.verification_commands,
-    )
-    .await
+    match crate::orchestrator::delivery::run_verification_commands(&cwd, &verification_commands)
+        .await
     {
         Ok(output) => {
             state
@@ -639,6 +637,7 @@ pub async fn abort_orchestrator_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::OrchestratorAutomationConfig;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
 
@@ -782,6 +781,26 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     Agent 完成验证命令已迁移到全局 AppConfig，项目策略里的 legacy 命令不能再影响运行时验证。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造全局 Orchestrator 配置并断言命令层 helper 只返回全局 verification_commands。
+    #[test]
+    fn agent_completion_verification_commands_come_from_global_config() {
+        let config = OrchestratorAutomationConfig {
+            verification_commands: vec!["cargo test orchestrator::delivery --lib".to_string()],
+            ..OrchestratorAutomationConfig::default()
+        };
+
+        let commands = verification_commands_for_agent_completion(&config);
+
+        assert_eq!(
+            commands,
+            vec!["cargo test orchestrator::delivery --lib".to_string()]
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     验证通过后进入 Delivering 必须用 expected-status，不能覆盖验证期间用户点击 Abort 的结果。
     ///
     /// Code Logic（这个函数做什么）:
@@ -853,18 +872,18 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     任务进入 Verifying 后，策略 JSON 损坏这类可预期错误必须统一转成 failed evidence 和 Blocked 原因。
+    ///     任务进入 Verifying 后，读取 worktree 失败这类可预期错误必须统一转成 failed evidence 和 Blocked 原因。
     ///
     /// Code Logic（这个函数做什么）:
     ///     调用验证失败 outcome helper，断言上下文和底层错误会进入 reason 与 evidence content。
     #[test]
     fn verification_failure_outcome_includes_context_error_and_failed_evidence() {
-        let error = AppError::generic("Orchestrator 验证命令解析失败: expected value");
+        let error = AppError::generic("数据库读取失败: locked");
 
-        let outcome = verification_failure_outcome("读取项目验证策略失败", &error);
+        let outcome = verification_failure_outcome("读取任务 worktree 失败", &error);
 
-        assert!(outcome.reason.contains("读取项目验证策略失败"));
-        assert!(outcome.reason.contains("expected value"));
+        assert!(outcome.reason.contains("读取任务 worktree 失败"));
+        assert!(outcome.reason.contains("locked"));
         assert_eq!(outcome.evidence.kind, "verificationOutput");
         assert_eq!(outcome.evidence.summary, "failed");
         assert_eq!(outcome.evidence.content, outcome.reason);

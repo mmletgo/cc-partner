@@ -1,11 +1,12 @@
-//! Orchestrator project-scoped scheduler.
+//! Orchestrator global scheduler.
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     自动编排器需要按项目配置定期领取 Queued 任务，并把任务交给可见 Workbench Runner。
+//!     自动编排器需要按设备级全局配置定期领取本机 Queued 任务，并把任务交给可见 Workbench Runner。
 //!
 //! Code Logic（这个模块做什么）:
 //!     提供后台 scheduler runtime、单次 dispatch 入口和并发容量相关纯 helper。
 
+use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
 use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
 use crate::orchestrator::repo::OrchestratorRepo;
@@ -82,23 +83,18 @@ pub fn start_orchestrator_scheduler(app_handle: AppHandle, state: AppState) -> C
 ///     scheduler tick 和手动命令都需要执行同一套领取逻辑，避免 UI 手动触发与后台行为不一致。
 ///
 /// Code Logic（这个函数做什么）:
-///     遍历 enabled 项目配置，在 repo 事务内按并发容量原子 claim 一个 Queued 任务并交给 runner；
+///     每次从 AppState 读取全局 Orchestrator 配置，在 repo 事务内按全局本机容量批量 claim Queued 任务并交给 runner；
 ///     runner 失败时仅在任务仍为 Preparing 或 bootstrap Running 时把任务置为 Blocked 并追加事件，成功时计入 dispatched。
 pub async fn dispatch_once(state: &AppState, app_handle: AppHandle) -> Result<usize, AppError> {
-    let configs = state
-        .orchestrator_repo
-        .list_enabled_project_configs()
-        .await?;
+    let config = state
+        .config
+        .read()
+        .expect("config 读锁中毒")
+        .orchestrator
+        .clone();
+    let tasks = claim_tasks_for_dispatch(state.orchestrator_repo.as_ref(), &config).await?;
     let mut dispatched = 0usize;
-    for config in configs {
-        let Some(task) = state
-            .orchestrator_repo
-            .claim_next_queued_task_with_capacity(&config.project_id, config.max_concurrent_tasks)
-            .await?
-        else {
-            continue;
-        };
-
+    for task in tasks {
         match prepare_visible_runner(state, app_handle.clone(), &task).await {
             Ok(_) => {
                 dispatched += 1;
@@ -110,6 +106,22 @@ pub async fn dispatch_once(state: &AppState, app_handle: AppHandle) -> Result<us
         }
     }
     Ok(dispatched)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     后台 scheduler 和手动 dispatch 应共享全局开关与容量解释，测试也需要绕开 Tauri AppHandle 只验证领取语义。
+///
+/// Code Logic（这个函数做什么）:
+///     enabled=false 时返回空；enabled=true 时委托 repo 在事务内按全局本机容量领取 local queued 任务。
+async fn claim_tasks_for_dispatch(
+    repo: &OrchestratorRepo,
+    config: &OrchestratorAutomationConfig,
+) -> Result<Vec<OrchestratorTaskRow>, AppError> {
+    if !config.enabled {
+        return Ok(Vec::new());
+    }
+    repo.claim_next_local_queued_tasks_with_global_capacity(config.max_concurrent_tasks)
+        .await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -173,6 +185,7 @@ pub(crate) fn dispatch_capacity(max_concurrent_tasks: i64, active_count: i64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::OrchestratorAutomationConfig;
     use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
     use crate::orchestrator::repo::OrchestratorRepo;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -197,6 +210,46 @@ mod tests {
         OrchestratorRepo::init_schema(&pool).await.unwrap();
         let repo = OrchestratorRepo::new(pool.clone());
         (pool, repo)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     scheduler Phase 3 只领取本机 local Workbench 项目的任务，单测需要最小项目表模拟 local/remote。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 claim 查询依赖的 workbench_projects 表。
+    async fn create_workbench_projects_table(pool: &SqlitePool) {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS workbench_projects (\
+             id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL, \
+             device_name TEXT NOT NULL, path TEXT NOT NULL, last_opened_at TEXT NOT NULL, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     调度测试需要显式声明项目是 local 还是 remote，避免误把远端快捷方式当成本机执行目标。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入一条 Workbench 项目记录，除 kind/id 外字段使用稳定测试值。
+    async fn insert_workbench_project(pool: &SqlitePool, id: &str, kind: &str) {
+        sqlx::query(
+            "INSERT INTO workbench_projects \
+             (id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at) \
+             VALUES (?, ?, ?, 'device-test', 'Device Test', ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(format!("Project {id}"))
+        .bind(kind)
+        .bind(format!("/tmp/{id}"))
+        .bind("2026-07-05T00:00:00Z")
+        .bind("2026-07-05T00:00:00Z")
+        .bind("2026-07-05T00:00:00Z")
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -226,6 +279,35 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     scheduler 全局容量测试需要在多个项目之间分布任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     复用基础任务构造，再覆盖 project_id。
+    fn task_row_for_project(
+        id: &str,
+        project_id: &str,
+        status: OrchestratorTaskStatus,
+    ) -> OrchestratorTaskRow {
+        OrchestratorTaskRow {
+            project_id: project_id.to_string(),
+            ..task_row(id, status)
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     调度测试只关心 enabled 和全局并发上限，其它自动交付开关使用默认值即可。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 OrchestratorAutomationConfig，并覆盖 enabled/max_concurrent_tasks。
+    fn global_config(enabled: bool, max_concurrent_tasks: i64) -> OrchestratorAutomationConfig {
+        OrchestratorAutomationConfig {
+            enabled,
+            max_concurrent_tasks,
+            ..OrchestratorAutomationConfig::default()
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     项目并发上限为 0 或负数时必须视为不调度，避免错误配置触发自动执行。
     ///
     /// Code Logic（这个函数做什么）:
@@ -236,6 +318,159 @@ mod tests {
         assert_eq!(super::dispatch_capacity(-2, 0), 0);
         assert_eq!(super::dispatch_capacity(2, 2), 0);
         assert_eq!(super::dispatch_capacity(3, 1), 2);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     全局 Orchestrator 开关关闭时，后台 scheduler 即使存在 queued local 任务也必须 dispatch 0。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入 local queued 任务后用 enabled=false 配置执行领取 helper，断言返回空且任务仍为 Queued。
+    #[tokio::test]
+    async fn global_disabled_config_claims_no_tasks() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        repo.create_task(&task_row("task-queued", OrchestratorTaskStatus::Queued))
+            .await
+            .unwrap();
+
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(false, 4))
+            .await
+            .unwrap();
+        let persisted = repo.get_task("task-queued").await.unwrap();
+
+        assert!(claimed.is_empty());
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Queued);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     全局并发上限应在所有本机 local 项目之间共享，而不是每个项目各自拥有一份容量。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     制造 1 个 active local 任务和 3 个 queued local 任务，max=3 时只能再领取 2 个。
+    #[tokio::test]
+    async fn global_capacity_is_shared_across_local_projects() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "local-a", "local").await;
+        insert_workbench_project(&pool, "local-b", "local").await;
+        repo.create_task(&task_row_for_project(
+            "active",
+            "local-a",
+            OrchestratorTaskStatus::Running,
+        ))
+        .await
+        .unwrap();
+        for (id, project_id, priority) in [
+            ("queued-high", "local-b", 30_i64),
+            ("queued-mid", "local-a", 20_i64),
+            ("queued-low", "local-b", 10_i64),
+        ] {
+            repo.create_task(&task_row_for_project(
+                id,
+                project_id,
+                OrchestratorTaskStatus::Queued,
+            ))
+            .await
+            .unwrap();
+            sqlx::query("UPDATE orchestrator_tasks SET priority = ? WHERE id = ?")
+                .bind(priority)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 3))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["queued-high", "queued-mid"]
+        );
+        assert_eq!(
+            repo.get_task("queued-low").await.unwrap().status,
+            OrchestratorTaskStatus::Queued
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     远端 Workbench shortcut 不能由本机 scheduler 启动 Runner，否则会在错误设备上创建 worktree/terminal。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     同时插入 remote 高优先级任务和 local 低优先级任务，断言只领取 local。
+    #[tokio::test]
+    async fn remote_workbench_projects_are_skipped_by_global_claim() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "local-a", "local").await;
+        insert_workbench_project(&pool, "remote-a", "remote").await;
+        repo.create_task(&task_row_for_project(
+            "remote-high",
+            "remote-a",
+            OrchestratorTaskStatus::Queued,
+        ))
+        .await
+        .unwrap();
+        repo.create_task(&task_row_for_project(
+            "local-low",
+            "local-a",
+            OrchestratorTaskStatus::Queued,
+        ))
+        .await
+        .unwrap();
+        sqlx::query("UPDATE orchestrator_tasks SET priority = 100 WHERE id = 'remote-high'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 5))
+            .await
+            .unwrap();
+
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, "local-low");
+        assert_eq!(
+            repo.get_task("remote-high").await.unwrap().status,
+            OrchestratorTaskStatus::Queued
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Phase 3 runtime 不再读取 legacy project_config；旧表里的 disabled/max=0 不能阻止全局开启后的 dispatch。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写入 disabled 且 max=0 的项目策略，再用全局 enabled/max=1 领取任务，断言任务仍被领取。
+    #[tokio::test]
+    async fn legacy_project_config_does_not_affect_global_dispatch_claim() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        repo.get_or_create_project_config("project-1")
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE orchestrator_project_config SET enabled = 0, max_concurrent_tasks = 0 WHERE project_id = ?",
+        )
+        .bind("project-1")
+        .execute(&pool)
+        .await
+        .unwrap();
+        repo.create_task(&task_row("task-queued", OrchestratorTaskStatus::Queued))
+            .await
+            .unwrap();
+
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 1))
+            .await
+            .unwrap();
+
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, "task-queued");
+        assert_eq!(claimed[0].status, OrchestratorTaskStatus::Preparing);
     }
 
     /// Business Logic（为什么需要这个函数）:

@@ -11,6 +11,7 @@
 use crate::commands::workbench::{
     local_commit_workbench_worktree, local_merge_workbench_worktree, local_push_workbench_worktree,
 };
+use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
 use crate::orchestrator::models::{OrchestratorTaskDto, OrchestratorTaskStatus};
 use crate::orchestrator::repo::OrchestratorRepo;
@@ -145,9 +146,16 @@ pub struct DeliverySummary {
 ///     生产环境需要复用 AppState 和 Tauri AppHandle，测试环境需要在不启动桌面事件循环的情况下验证真实 Git/SQLite 交付语义。
 ///
 /// Code Logic（这个 trait 做什么）:
-///     抽象 delivery pipeline 需要的仓储与三个 Workbench 阶段动作；生产实现委托 Workbench helper，测试实现委托临时 Git repo。
+///     抽象 delivery pipeline 需要的全局配置、仓储与三个 Workbench 阶段动作；生产实现委托 Workbench helper，测试实现委托临时 Git repo。
 #[allow(async_fn_in_trait)]
 pub(crate) trait DeliveryContext: Sync {
+    /// Business Logic（为什么需要这个函数）:
+    ///     delivery 运行时策略已迁移为设备级全局配置，自动交付开关不能再读取 legacy 项目策略表。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回当前 OrchestratorAutomationConfig；生产从 AppState.config 克隆，测试从可变 harness 配置克隆。
+    fn orchestrator_config(&self) -> OrchestratorAutomationConfig;
+
     /// Business Logic（为什么需要这个函数）:
     ///     delivery pipeline 需要读取任务、配置、写 evidence 并推进任务状态。
     ///
@@ -221,7 +229,21 @@ impl<'a> AppDeliveryContext<'a> {
 
 impl DeliveryContext for AppDeliveryContext<'_> {
     /// Business Logic（为什么需要这个函数）:
-    ///     生产 delivery 需要读写 Orchestrator 任务、策略和 evidence。
+    ///     生产 delivery 需要使用 Settings 自动化 tab 保存的全局 Orchestrator 运行偏好。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 AppState.config 读锁中克隆 orchestrator 配置，避免持锁跨 await。
+    fn orchestrator_config(&self) -> OrchestratorAutomationConfig {
+        self.state
+            .config
+            .read()
+            .expect("config 读锁中毒")
+            .orchestrator
+            .clone()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     生产 delivery 需要读写 Orchestrator 任务和 evidence。
     ///
     /// Code Logic（这个函数做什么）:
     ///     从 AppState 中返回 OrchestratorRepo 引用。
@@ -311,25 +333,7 @@ where
         });
     };
     let mut stages = Vec::new();
-    let config = match context
-        .orchestrator_repo()
-        .get_or_create_project_config(&task.project_id)
-        .await
-    {
-        Ok(config) => config,
-        Err(err) => {
-            let reason = format!("delivery config failed: {err}");
-            return block_delivery_task(
-                context.orchestrator_repo(),
-                &task.id,
-                &reason,
-                "delivery config",
-                &reason,
-                &mut stages,
-            )
-            .await;
-        }
-    };
+    let config = context.orchestrator_config();
 
     if let Some(reason) = disabled_delivery_flag_reason(&config) {
         return block_delivery_task(
@@ -907,13 +911,11 @@ fn build_shell_command_with_shell(command: &str, shell_env: Option<&str>) -> She
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     项目策略允许单独关闭提交、推送、合并或主分支推送，但 Task 7 full-auto delivery 要求四项全开。
+///     全局配置允许单独关闭提交、推送、合并或主分支推送，但 full-auto delivery 要求四项全开。
 ///
 /// Code Logic（这个函数做什么）:
 ///     收集关闭的 delivery flags；全部开启返回 None，否则返回可写入 blocked_reason 的英文说明。
-fn disabled_delivery_flag_reason(
-    config: &crate::orchestrator::models::OrchestratorProjectConfigDto,
-) -> Option<String> {
+fn disabled_delivery_flag_reason(config: &OrchestratorAutomationConfig) -> Option<String> {
     let mut disabled = Vec::new();
     if !config.auto_commit {
         disabled.push("auto_commit");
@@ -1023,6 +1025,7 @@ async fn block_delivery_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::OrchestratorAutomationConfig;
     use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
     use crate::orchestrator::repo::OrchestratorRepo;
     use crate::storage::{WorkbenchProjectRepo, WorkbenchWorktreeRepo};
@@ -1254,6 +1257,21 @@ mod tests {
         workbench_project_repo: Arc<WorkbenchProjectRepo>,
         workbench_worktree_repo: Arc<WorkbenchWorktreeRepo>,
         controls: Arc<DeliveryTestControls>,
+        orchestrator_config: Arc<StdMutex<OrchestratorAutomationConfig>>,
+    }
+
+    impl DeliveryTestHarness {
+        /// Business Logic（为什么需要这个函数）:
+        ///     delivery Phase 3 运行时读取全局 Orchestrator 配置，单测需要按 case 临时关闭不同交付开关。
+        ///
+        /// Code Logic（这个函数做什么）:
+        ///     覆盖测试 harness 中保存的 OrchestratorAutomationConfig。
+        fn set_orchestrator_config(&self, config: OrchestratorAutomationConfig) {
+            *self
+                .orchestrator_config
+                .lock()
+                .expect("orchestrator config lock") = config;
+        }
     }
 
     /// Orchestrator 交付测试控制钩子。
@@ -1277,7 +1295,19 @@ mod tests {
 
     impl DeliveryContext for DeliveryTestHarness {
         /// Business Logic（为什么需要这个函数）:
-        ///     delivery 单测需要读写 Orchestrator 任务、策略和 evidence。
+        ///     delivery 单测需要按 case 控制全局 Orchestrator 交付开关。
+        ///
+        /// Code Logic（这个函数做什么）:
+        ///     从 harness 的 Mutex 中克隆当前测试配置。
+        fn orchestrator_config(&self) -> OrchestratorAutomationConfig {
+            self.orchestrator_config
+                .lock()
+                .expect("orchestrator config lock")
+                .clone()
+        }
+
+        /// Business Logic（为什么需要这个函数）:
+        ///     delivery 单测需要读写 Orchestrator 任务和 evidence。
         ///
         /// Code Logic（这个函数做什么）:
         ///     返回内存 SQLite 对应的 OrchestratorRepo 引用。
@@ -1455,6 +1485,7 @@ mod tests {
             workbench_project_repo,
             workbench_worktree_repo,
             controls: Arc::new(DeliveryTestControls::default()),
+            orchestrator_config: Arc::new(StdMutex::new(OrchestratorAutomationConfig::default())),
         }
     }
 
@@ -1803,14 +1834,16 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     Delivering 后如果项目策略 JSON 损坏，delivery 不能直接返回错误导致任务永久停在 Delivering。
+    ///     Phase 3 后 legacy 项目策略只用于展示/调试，损坏的旧策略 JSON 不能影响全局 delivery 运行时。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     写入损坏的 verification_commands_json 触发配置读取错误，断言任务进入 Blocked 且写入 failed delivery evidence。
+    ///     写入损坏的 verification_commands_json 后执行 delivery，断言任务仍按全局默认配置完成且没有 failed delivery evidence。
     #[tokio::test]
-    async fn delivery_blocks_and_writes_failed_evidence_when_config_preflight_fails() {
+    async fn delivery_ignores_invalid_legacy_project_config() {
         let harness = setup_delivery_harness().await;
         let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("task.txt"), "legacy config ignored\n")
+            .expect("write task file");
         let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
         sqlx::query(
             "INSERT INTO orchestrator_project_config \
@@ -1826,20 +1859,15 @@ mod tests {
 
         let delivered = deliver_task(&harness, &task_id)
             .await
-            .expect("preflight failure should block task");
+            .expect("legacy config should be ignored");
         let evidence = harness
             .orchestrator_repo
             .list_evidence(&task_id)
             .await
             .expect("delivery evidence");
 
-        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Blocked);
-        assert!(delivered
-            .task
-            .blocked_reason
-            .unwrap_or_default()
-            .contains("delivery config"));
-        assert!(evidence
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Done);
+        assert!(!evidence
             .iter()
             .any(|item| item.kind == DELIVERY_EVIDENCE_KIND && item.summary == "failed"));
     }
@@ -1897,14 +1925,19 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     full-auto delivery 要求四个交付开关全部开启，关闭任一开关应显式 Blocked 而不是静默跳过。
+    ///     legacy 项目策略里的 delivery flags 不再控制运行时，旧表关闭 auto_push_main 不能阻塞全局 delivery。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     把 auto_push_main 置为 0 后执行 delivery，断言任务 Blocked 且 failed evidence 记录关闭的 flag。
+    ///     把项目策略 auto_push_main 置为 0 后执行 delivery，断言任务仍按全局默认配置完成。
     #[tokio::test]
-    async fn delivery_blocks_disabled_delivery_flags_with_failed_evidence() {
+    async fn delivery_ignores_disabled_legacy_project_delivery_flags() {
         let harness = setup_delivery_harness().await;
         let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(
+            task_worktree.join("task.txt"),
+            "legacy delivery flags ignored\n",
+        )
+        .expect("write task file");
         let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
         harness
             .orchestrator_repo
@@ -1921,22 +1954,67 @@ mod tests {
 
         let delivered = deliver_task(&harness, &task_id)
             .await
-            .expect("disabled flags should block");
+            .expect("legacy disabled flag should be ignored");
         let evidence = harness
             .orchestrator_repo
             .list_evidence(&task_id)
             .await
             .expect("delivery evidence");
 
-        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Blocked);
-        assert!(delivered
-            .task
-            .blocked_reason
-            .unwrap_or_default()
-            .contains("auto_push_main"));
-        assert!(evidence
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Done);
+        assert!(!evidence
             .iter()
-            .any(|item| item.content.contains("auto_push_main")));
+            .any(|item| item.summary == "failed" && item.content.contains("auto_push_main")));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Phase 3 delivery flags 已迁移到全局 AppConfig，关闭任一全局开关都必须阻塞任务并写入 evidence。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     对四个 delivery flag 分别构造关闭配置，执行 delivery 后断言 Blocked、blocked_reason 和 evidence 都指向该 flag。
+    #[tokio::test]
+    async fn delivery_blocks_each_disabled_global_delivery_flag_with_failed_evidence() {
+        for disabled_flag in [
+            "auto_commit",
+            "auto_push_task_branch",
+            "auto_merge_to_main",
+            "auto_push_main",
+        ] {
+            let harness = setup_delivery_harness().await;
+            let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+            let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+            let mut config = OrchestratorAutomationConfig::default();
+            match disabled_flag {
+                "auto_commit" => config.auto_commit = false,
+                "auto_push_task_branch" => config.auto_push_task_branch = false,
+                "auto_merge_to_main" => config.auto_merge_to_main = false,
+                "auto_push_main" => config.auto_push_main = false,
+                _ => unreachable!("unknown delivery flag"),
+            }
+            harness.set_orchestrator_config(config);
+
+            let delivered = deliver_task(&harness, &task_id)
+                .await
+                .expect("disabled global flag should block");
+            let evidence = harness
+                .orchestrator_repo
+                .list_evidence(&task_id)
+                .await
+                .expect("delivery evidence");
+
+            assert_eq!(delivered.task.status, OrchestratorTaskStatus::Blocked);
+            assert!(delivered
+                .task
+                .blocked_reason
+                .unwrap_or_default()
+                .contains(disabled_flag));
+            assert!(evidence
+                .iter()
+                .any(|item| item.summary == "failed" && item.content.contains(disabled_flag)));
+            assert_eq!(harness.controls.commit_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(harness.controls.push_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(harness.controls.merge_calls.load(Ordering::SeqCst), 0);
+        }
     }
 
     /// Business Logic（为什么需要这个函数）:
