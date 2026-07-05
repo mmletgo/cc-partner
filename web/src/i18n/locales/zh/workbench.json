@@ -100,6 +100,8 @@
       "noProject": "先选择项目",
       "noSession": "当前 worktree 还没有终端窗口",
       "newWindow": "新窗口",
+      "addPane": "新增 pane",
+      "switchPane": "切换 pane",
       "splitRight": "左右分屏",
       "splitDown": "上下分屏",
       "closePane": "关闭 pane",
@@ -112,6 +114,8 @@
         "resize": "调整终端尺寸失败",
         "create": "创建终端失败",
         "split": "分屏失败",
+        "switchPane": "切换 pane 失败",
+        "zoomPane": "切换单 pane 视图失败",
         "closePane": "关闭 pane 失败",
         "closeWindow": "关闭窗口失败"
       }

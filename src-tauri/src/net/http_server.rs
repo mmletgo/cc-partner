@@ -473,6 +473,14 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::split_workbench_pane),
         )
         .route(
+            "/api/workbench/sessions/switch-pane",
+            post(workbench::switch_workbench_pane),
+        )
+        .route(
+            "/api/workbench/sessions/zoom-pane",
+            post(workbench::zoom_workbench_pane),
+        )
+        .route(
             "/api/workbench/sessions/close-pane",
             post(workbench::close_workbench_pane),
         )

@@ -295,7 +295,7 @@ pub struct RemoteResizeSessionReq {
 /// 远端终端 sessionId 请求体。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     focus、close-pane、close-session 等操作只需要定位一个远端 terminal window。
+///     focus、switch-pane、zoom-pane、close-pane、close-session 等操作只需要定位一个远端 terminal window。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     保存远端 local sessionId，供多个 session 路由复用。

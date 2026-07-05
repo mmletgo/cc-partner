@@ -17,7 +17,8 @@ use crate::commands::workbench::{
     local_open_workbench_file, local_preview_workbench_html_asset, local_preview_workbench_sqlite,
     local_push_workbench_worktree, local_remove_workbench_worktree, local_rename_workbench_path,
     local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_text_file,
-    local_split_workbench_pane, local_write_workbench_session_input, WorkbenchMergeResultDto,
+    local_split_workbench_pane, local_switch_workbench_pane, local_write_workbench_session_input,
+    local_zoom_workbench_pane, WorkbenchMergeResultDto,
 };
 use crate::error::AppError;
 use crate::state::AppState;
@@ -736,6 +737,40 @@ pub async fn split_workbench_pane(
     ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
     Ok(Json(
         local_split_workbench_pane(&state, req.session_id, req.direction).await?,
+    ))
+}
+
+/// 切换远端设备本机终端到下一个 pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal 的 active pane 切换必须发生在项目所在设备的 tmux window 内。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session 属于本机 local 项目后调用本地 switch-pane helper。
+pub async fn switch_workbench_pane(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSessionReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
+    Ok(Json(
+        local_switch_workbench_pane(&state, req.session_id).await?,
+    ))
+}
+
+/// 确保远端设备本机终端 active pane 以单 pane 视图显示。
+///
+/// Business Logic（为什么需要这个函数）:
+///     mobile terminal 在多 pane window 内也只应展示当前 active pane，zoom 操作必须发生在远端 tmux。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session 属于本机 local 项目后调用本地 zoom-pane helper。
+pub async fn zoom_workbench_pane(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSessionReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
+    Ok(Json(
+        local_zoom_workbench_pane(&state, req.session_id).await?,
     ))
 }
 

@@ -93,6 +93,8 @@ export interface WorkbenchTransport {
       sessionId: string,
       direction: WorkbenchPaneSplitDirection,
     ) => Promise<{ ok: boolean; sessionId: string; direction: WorkbenchPaneSplitDirection }>;
+    switchPane: (sessionId: string) => Promise<{ ok: boolean; sessionId: string }>;
+    zoomPane: (sessionId: string) => Promise<{ ok: boolean; sessionId: string }>;
     closePane: (
       sessionId: string,
     ) => Promise<{ ok: boolean; sessionId: string; closedWindow: boolean }>;
@@ -190,6 +192,8 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
     focus: (sessionId) => workbenchApi.sessions.focus(sessionId),
     focused: (projectId, worktreeId) => workbenchApi.sessions.focused(projectId, worktreeId),
     splitPane: (sessionId, direction) => workbenchApi.sessions.splitPane(sessionId, direction),
+    switchPane: (sessionId) => workbenchApi.sessions.switchPane(sessionId),
+    zoomPane: (sessionId) => workbenchApi.sessions.zoomPane(sessionId),
     closePane: (sessionId) => workbenchApi.sessions.closePane(sessionId),
     close: (sessionId) => workbenchApi.sessions.close(sessionId),
   },

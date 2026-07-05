@@ -12,14 +12,16 @@ function assert(condition: boolean, message: string): void {
 }
 
 const capturedBodies: unknown[] = [];
+const capturedUrls: string[] = [];
 const originalFetch = globalThis.fetch;
 
-globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  capturedUrls.push(String(input));
   capturedBodies.push(JSON.parse(String(init?.body ?? '{}')) as unknown);
-  return new Response(JSON.stringify({ ok: true, sessionId: 'session-1' }), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' },
-  });
+  return {
+    ok: true,
+    json: async () => ({ ok: true, sessionId: 'session-1' }),
+  } as Response;
 };
 
 try {
@@ -37,6 +39,28 @@ try {
         sessionId: 'session-1',
       }),
     'streamToTerminal should normalize omitted workingDirectory to null',
+  );
+
+  await httpWorkbenchTransport.sessions.switchPane('session-1');
+
+  assert(
+    capturedUrls[1] === '/api/workbench/sessions/switch-pane',
+    'switchPane should call the switch-pane HTTP route',
+  );
+  assert(
+    JSON.stringify(capturedBodies[1]) === JSON.stringify({ sessionId: 'session-1' }),
+    'switchPane should send sessionId only',
+  );
+
+  await httpWorkbenchTransport.sessions.zoomPane('session-1');
+
+  assert(
+    capturedUrls[2] === '/api/workbench/sessions/zoom-pane',
+    'zoomPane should call the zoom-pane HTTP route',
+  );
+  assert(
+    JSON.stringify(capturedBodies[2]) === JSON.stringify({ sessionId: 'session-1' }),
+    'zoomPane should send sessionId only',
   );
 } finally {
   globalThis.fetch = originalFetch;

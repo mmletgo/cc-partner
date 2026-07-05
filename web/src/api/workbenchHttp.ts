@@ -185,6 +185,14 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
           direction,
         },
       ),
+    switchPane: (sessionId) =>
+      postJson<{ ok: boolean; sessionId: string }>('/api/workbench/sessions/switch-pane', {
+        sessionId,
+      }),
+    zoomPane: (sessionId) =>
+      postJson<{ ok: boolean; sessionId: string }>('/api/workbench/sessions/zoom-pane', {
+        sessionId,
+      }),
     closePane: (sessionId) =>
       postJson<{ ok: boolean; sessionId: string; closedWindow: boolean }>(
         '/api/workbench/sessions/close-pane',

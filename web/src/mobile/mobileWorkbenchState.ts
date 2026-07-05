@@ -1,4 +1,5 @@
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import type { WorkbenchPaneSplitDirection } from '@/api/workbench';
 
 export type MobileWorkbenchPanel =
   | 'projects'
@@ -107,4 +108,40 @@ export function selectPreferredMobileSession(
     sessions[0] ??
     null
   );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   手机端不需要暴露左右/上下分屏选择，但新增 pane 仍要映射到真实 tmux split-pane 能力。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回移动端新增 pane 的固定 split 方向；竖屏默认使用 down，让 pane 在视觉上更符合上下堆叠。
+ */
+export function getMobileCreatePaneDirection(): WorkbenchPaneSplitDirection {
+  return 'down';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端 pane 新增/关闭按钮需要统一判断当前 terminal window 是否支持真实 tmux pane 操作。
+ *
+ * Code Logic（这个函数做什么）:
+ *   接收当前 session 与操作占用态，只有存在支持 panes 的 session 且未 busy 时返回 true。
+ */
+export function canRunMobilePaneMutation(
+  session: WorkbenchSession | null,
+  busy: boolean,
+): boolean {
+  return Boolean(session?.supportsPanes && !busy);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   单 pane window 中切换 pane 没有可见效果，移动端应禁用该操作避免误导用户。
+ *
+ * Code Logic（这个函数做什么）:
+ *   在通用 pane mutation 可用性基础上要求 paneCount 大于 1。
+ */
+export function canSwitchMobilePane(session: WorkbenchSession | null, busy: boolean): boolean {
+  return canRunMobilePaneMutation(session, busy) && (session?.paneCount ?? 0) > 1;
 }

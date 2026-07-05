@@ -713,6 +713,46 @@ impl RemoteWorkbenchClient {
         Ok(())
     }
 
+    /// 切换远端当前 window 到下一个 pane。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote terminal 用户在多个 pane 间切换时，active pane 状态必须由远端 tmux 更新。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/switch-pane`，成功后忽略对端 `{ok}` 响应。
+    pub async fn switch_pane(&self, base_url: &str, session_id: &str) -> Result<(), AppError> {
+        let _: serde_json::Value = self
+            .post_json(
+                endpoint_url(base_url, "/api/workbench/sessions/switch-pane"),
+                &RemoteSessionReq {
+                    session_id: session_id.to_string(),
+                },
+                RemoteRequestTimeoutKind::Short,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 确保远端当前 active pane 以单 pane 视图显示。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     mobile terminal 连接远端项目时，也要隐藏 tmux 分屏布局，只显示远端 active pane。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/zoom-pane`，成功后忽略对端 `{ok}` 响应。
+    pub async fn zoom_pane(&self, base_url: &str, session_id: &str) -> Result<(), AppError> {
+        let _: serde_json::Value = self
+            .post_json(
+                endpoint_url(base_url, "/api/workbench/sessions/zoom-pane"),
+                &RemoteSessionReq {
+                    session_id: session_id.to_string(),
+                },
+                RemoteRequestTimeoutKind::Short,
+            )
+            .await?;
+        Ok(())
+    }
+
     /// 关闭远端当前 pane。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -1479,6 +1519,88 @@ mod tests {
         assert_eq!(body["worktreeId"], "inner-worktree");
         assert_eq!(body["initialCols"], 120);
         assert_eq!(body["initialRows"], 36);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     本机 remote shortcut 切换 pane 时，真实 active pane 必须在远端 tmux window 内更新。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动临时 HTTP 服务接收 switch-pane 请求，断言 client 调用约定路径并发送 camelCase sessionId。
+    #[tokio::test]
+    async fn switch_pane_posts_session_id_to_switch_pane_route() {
+        let seen_body = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/api/workbench/sessions/switch-pane",
+                post(
+                    |State(seen_body): State<Arc<Mutex<Option<Value>>>>,
+                     Json(body): Json<Value>| async move {
+                        *seen_body.lock().unwrap() = Some(body);
+                        Json(serde_json::json!({
+                            "ok": true,
+                            "sessionId": "inner-session"
+                        }))
+                    },
+                ),
+            )
+            .with_state(seen_body.clone());
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = RemoteWorkbenchClient::new();
+
+        client
+            .switch_pane(&format!("http://{addr}"), "inner-session")
+            .await
+            .unwrap();
+
+        let body = seen_body.lock().unwrap().clone().unwrap();
+        assert_eq!(body["sessionId"], "inner-session");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     移动端远端 terminal 的单 pane 视图需要通过远端 tmux zoom 实现。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动临时 HTTP 服务接收 zoom-pane 请求，断言 client 调用约定路径并发送 camelCase sessionId。
+    #[tokio::test]
+    async fn zoom_pane_posts_session_id_to_zoom_pane_route() {
+        let seen_body = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/api/workbench/sessions/zoom-pane",
+                post(
+                    |State(seen_body): State<Arc<Mutex<Option<Value>>>>,
+                     Json(body): Json<Value>| async move {
+                        *seen_body.lock().unwrap() = Some(body);
+                        Json(serde_json::json!({
+                            "ok": true,
+                            "sessionId": "inner-session"
+                        }))
+                    },
+                ),
+            )
+            .with_state(seen_body.clone());
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = RemoteWorkbenchClient::new();
+
+        client
+            .zoom_pane(&format!("http://{addr}"), "inner-session")
+            .await
+            .unwrap();
+
+        let body = seen_body.lock().unwrap().clone().unwrap();
+        assert_eq!(body["sessionId"], "inner-session");
     }
 
     /// Business Logic（为什么需要这个测试）:

@@ -102,6 +102,8 @@
       "noProject": "Select a project first",
       "noSession": "This worktree has no terminal window yet",
       "newWindow": "New window",
+      "addPane": "New pane",
+      "switchPane": "Switch pane",
       "splitRight": "Split right",
       "splitDown": "Split down",
       "closePane": "Close pane",
@@ -115,6 +117,8 @@
         "resize": "Failed to resize terminal",
         "create": "Failed to create terminal",
         "split": "Failed to split pane",
+        "switchPane": "Failed to switch pane",
+        "zoomPane": "Failed to switch single-pane view",
         "closePane": "Failed to close pane",
         "closeWindow": "Failed to close window"
       }

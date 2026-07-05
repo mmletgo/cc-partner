@@ -5,12 +5,11 @@ import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
-import type { WorkbenchPaneSplitDirection } from '@/api/workbench';
 import {
   useWorkbenchTerminalBuffer,
   useWorkbenchTerminalBuffers,
 } from '@/hooks/workbenchTerminalBuffersContext';
-import { PlusIcon, SplitDownIcon, SplitRightIcon, XIcon } from '@/lib/icons';
+import { ArrowRightIcon, PlusIcon, XIcon } from '@/lib/icons';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import {
   planTerminalBufferWrite,
@@ -22,7 +21,12 @@ import {
   prepareInitialReplayBuffer,
   shouldForwardMobileTerminalInput,
 } from '../mobileTerminalReplay';
-import { selectPreferredMobileSession } from '../mobileWorkbenchState';
+import {
+  canRunMobilePaneMutation,
+  canSwitchMobilePane,
+  getMobileCreatePaneDirection,
+  selectPreferredMobileSession,
+} from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
 
 const MIN_TERMINAL_COLS = 20;
@@ -168,7 +172,8 @@ export function MobileTerminalPanel({
   const sessionId = visibleSession?.id ?? null;
   const { buffer, revision } = useWorkbenchTerminalBuffer(sessionId);
   const isActionDisabled = busy || actionBusy !== null;
-  const canUsePaneActions = Boolean(visibleSession?.supportsPanes);
+  const canUsePaneActions = canRunMobilePaneMutation(visibleSession, isActionDisabled);
+  const canSwitchPane = canSwitchMobilePane(visibleSession, isActionDisabled);
 
   useEffect(() => {
     bufferRef.current = buffer;
@@ -222,14 +227,57 @@ export function MobileTerminalPanel({
     [t],
   );
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   移动端屏幕只能高效操作单个 pane，进入多 pane window 后必须隐藏 tmux 分屏布局。
+   *
+   * Code Logic（这个函数做什么）:
+   *   仅对 running tmux-backed session 调用 HTTP zoom-pane route；后端会幂等判断 paneCount/zoom 状态。
+   */
+  const ensurePaneZoomedById = useCallback(
+    async (session: WorkbenchSession): Promise<void> => {
+      if (session.status !== 'running' || !session.supportsPanes) return;
+      try {
+        await httpWorkbenchTransport.sessions.zoomPane(session.id);
+      } catch (reason) {
+        setPanelError(
+          `${t('workbench:mobile.terminalPanel.errors.zoomPane')}: ${getErrorMessage(
+            reason,
+            t('workbench:errors.sessions'),
+          )}`,
+        );
+      }
+    },
+    [t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   移动端切换 terminal window 时，前端 active session、tmux current window 和单 pane 展示状态必须一起同步。
+   *
+   * Code Logic（这个函数做什么）:
+   *   先调用 focus 同步 tmux window，再按 session 能力调用 zoom-pane 确保当前 active pane 全屏显示。
+   */
+  const focusSessionAndZoomById = useCallback(
+    async (session: WorkbenchSession): Promise<void> => {
+      await focusSessionById(session.id);
+      await ensurePaneZoomedById(session);
+    },
+    [ensurePaneZoomedById, focusSessionById],
+  );
+
   useEffect(() => {
     if (!sessionId) {
       lastFocusedSessionIdRef.current = null;
       return;
     }
-    if (lastFocusedSessionIdRef.current === sessionId) return;
-    void focusSessionById(sessionId);
-  }, [focusSessionById, sessionId]);
+    if (lastFocusedSessionIdRef.current === sessionId) {
+      if (visibleSession) void ensurePaneZoomedById(visibleSession);
+      return;
+    }
+    if (!visibleSession) return;
+    void focusSessionAndZoomById(visibleSession);
+  }, [ensurePaneZoomedById, focusSessionAndZoomById, sessionId, visibleSession]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -413,9 +461,9 @@ export function MobileTerminalPanel({
   const handleSelectSession = useCallback(
     (session: WorkbenchSession): void => {
       onActiveSessionChange(session);
-      void focusSessionById(session.id);
+      void focusSessionAndZoomById(session);
     },
-    [focusSessionById, onActiveSessionChange],
+    [focusSessionAndZoomById, onActiveSessionChange],
   );
 
   /**
@@ -440,7 +488,7 @@ export function MobileTerminalPanel({
       onSessionsChange(nextSessions);
       resetBuffer(session.id);
       onActiveSessionChange(session);
-      await focusSessionById(session.id);
+      await focusSessionAndZoomById(session);
       await onRefreshSessions?.();
     } catch (reason) {
       setPanelError(
@@ -453,7 +501,7 @@ export function MobileTerminalPanel({
       setActionBusy(null);
     }
   }, [
-    focusSessionById,
+    focusSessionAndZoomById,
     onActiveSessionChange,
     onRefreshSessions,
     onSessionsChange,
@@ -466,18 +514,20 @@ export function MobileTerminalPanel({
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   分屏必须由 tmux 创建真实 pane，移动端不能维护自己的 pane 布局模型。
+   *   手机端新增 pane 必须由 tmux 创建真实 pane，但不需要让用户选择左右/上下分屏方向。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 HTTP split-pane route，完成后刷新 session 列表以同步 paneCount。
+   *   使用移动端固定 split 方向调用 HTTP split-pane route，完成后刷新 session 列表以同步 paneCount。
    */
-  const handleSplitPane = useCallback(
-    async (direction: WorkbenchPaneSplitDirection): Promise<void> => {
+  const handleCreatePane = useCallback(
+    async (): Promise<void> => {
       if (!visibleSession) return;
-      setActionBusy(`split-${direction}`);
+      setActionBusy('create-pane');
       setPanelError(null);
       try {
+        const direction = getMobileCreatePaneDirection();
         await httpWorkbenchTransport.sessions.splitPane(visibleSession.id, direction);
+        await ensurePaneZoomedById(visibleSession);
         await onRefreshSessions?.();
       } catch (reason) {
         setPanelError(
@@ -490,8 +540,34 @@ export function MobileTerminalPanel({
         setActionBusy(null);
       }
     },
-    [onRefreshSessions, t, visibleSession],
+    [ensurePaneZoomedById, onRefreshSessions, t, visibleSession],
   );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机端用户无法方便地按 tmux 快捷键，工具栏需要一键切到当前 window 的下一个 pane。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 HTTP switch-pane route；该操作不改变 session 列表，只让后端 tmux 选择下一个 active pane。
+   */
+  const handleSwitchPane = useCallback(async (): Promise<void> => {
+    if (!visibleSession) return;
+    setActionBusy('switch-pane');
+    setPanelError(null);
+    try {
+      await httpWorkbenchTransport.sessions.switchPane(visibleSession.id);
+      await ensurePaneZoomedById(visibleSession);
+    } catch (reason) {
+      setPanelError(
+        `${t('workbench:mobile.terminalPanel.errors.switchPane')}: ${getErrorMessage(
+          reason,
+          t('workbench:errors.sessions'),
+        )}`,
+      );
+    } finally {
+      setActionBusy(null);
+    }
+  }, [ensurePaneZoomedById, t, visibleSession]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -511,6 +587,8 @@ export function MobileTerminalPanel({
         onSessionsChange(nextSessions);
         removeBuffer(result.sessionId);
         onActiveSessionChange(selectPreferredMobileSession(nextSessions, worktree?.id ?? null));
+      } else {
+        await ensurePaneZoomedById(visibleSession);
       }
       await onRefreshSessions?.();
     } catch (reason) {
@@ -527,6 +605,7 @@ export function MobileTerminalPanel({
     onActiveSessionChange,
     onRefreshSessions,
     onSessionsChange,
+    ensurePaneZoomedById,
     removeBuffer,
     sessions,
     t,
@@ -668,29 +747,29 @@ export function MobileTerminalPanel({
           <button
             type="button"
             className={styles.mobileTerminalActionButton}
-            disabled={!canUsePaneActions || isActionDisabled}
-            aria-label={t('workbench:mobile.terminalPanel.splitRight')}
-            title={t('workbench:mobile.terminalPanel.splitRight')}
-            onClick={() => void handleSplitPane('right')}
+            disabled={!canUsePaneActions}
+            aria-label={t('workbench:mobile.terminalPanel.addPane')}
+            title={t('workbench:mobile.terminalPanel.addPane')}
+            onClick={() => void handleCreatePane()}
           >
-            <SplitRightIcon size={16} aria-hidden="true" />
-            <span>{t('workbench:mobile.terminalPanel.splitRight')}</span>
+            <PlusIcon size={16} aria-hidden="true" />
+            <span>{t('workbench:mobile.terminalPanel.addPane')}</span>
           </button>
           <button
             type="button"
             className={styles.mobileTerminalActionButton}
-            disabled={!canUsePaneActions || isActionDisabled}
-            aria-label={t('workbench:mobile.terminalPanel.splitDown')}
-            title={t('workbench:mobile.terminalPanel.splitDown')}
-            onClick={() => void handleSplitPane('down')}
+            disabled={!canSwitchPane}
+            aria-label={t('workbench:mobile.terminalPanel.switchPane')}
+            title={t('workbench:mobile.terminalPanel.switchPane')}
+            onClick={() => void handleSwitchPane()}
           >
-            <SplitDownIcon size={16} aria-hidden="true" />
-            <span>{t('workbench:mobile.terminalPanel.splitDown')}</span>
+            <ArrowRightIcon size={16} aria-hidden="true" />
+            <span>{t('workbench:mobile.terminalPanel.switchPane')}</span>
           </button>
           <button
             type="button"
             className={styles.mobileTerminalActionButton}
-            disabled={!canUsePaneActions || isActionDisabled}
+            disabled={!canUsePaneActions}
             aria-label={t('workbench:mobile.terminalPanel.closePane')}
             title={t('workbench:mobile.terminalPanel.closePane')}
             onClick={() => void handleClosePane()}

@@ -172,6 +172,18 @@ export const workbenchApi = {
         },
       ),
 
+    /** 切换到当前 tmux window 的下一个 pane。 */
+    switchPane: (sessionId: string) =>
+      invoke<{ ok: boolean; sessionId: string }>('switch_workbench_pane', {
+        sessionId,
+      }),
+
+    /** 确保当前 tmux active pane 以单 pane 视图显示。 */
+    zoomPane: (sessionId: string) =>
+      invoke<{ ok: boolean; sessionId: string }>('zoom_workbench_pane', {
+        sessionId,
+      }),
+
     /** 关闭当前 tmux pane；最后一个 pane 会关闭所属 terminal window。 */
     closePane: (sessionId: string) =>
       invoke<{ ok: boolean; sessionId: string; closedWindow: boolean }>('close_workbench_pane', {

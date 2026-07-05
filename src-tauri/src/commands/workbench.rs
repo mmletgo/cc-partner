@@ -17,7 +17,7 @@ use crate::workbench::models::{
     WorkbenchDetectedFileType, WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchGitStatusDto,
     WorkbenchHtmlAssetDto, WorkbenchOpenFileDto, WorkbenchPathInfo, WorkbenchProjectDto,
     WorkbenchProjectRow, WorkbenchRemoteDirectoryEntryDto, WorkbenchRemotePathInfoDto,
-    WorkbenchRemoteRootDto, WorkbenchSaveTextResultDto, WorkbenchSessionDto,
+    WorkbenchRemoteRootDto, WorkbenchSaveTextResultDto, WorkbenchSessionDto, WorkbenchSessionRow,
     WorkbenchSqlitePreview, WorkbenchTextContent, WorkbenchWorktreeDto, WorkbenchWorktreeRow,
 };
 use crate::workbench::sessions::{
@@ -3107,6 +3107,110 @@ pub async fn split_workbench_pane(
     local_split_workbench_pane(&state, session_id, direction).await
 }
 
+/// 切换当前 tmux window 到下一个 pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在同一个 terminal window 分出多个 pane 后，需要快速循环切换 active pane。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session row 存在后调用 registry 在 running tmux-backed session 上执行 select-pane，并返回 `{ok, sessionId}`。
+pub(crate) async fn local_switch_workbench_pane(
+    state: &AppState,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    let _row = state
+        .workbench_session_repo
+        .get(&session_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("工作台会话不存在"))?;
+    state.workbench_sessions.switch_to_next_pane(&session_id)?;
+    Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
+}
+
+/// 切换当前 tmux window 到下一个 pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal 也需要支持 pane 间切换，真实 select-pane 必须在项目所在设备执行。
+///
+/// Code Logic（这个函数做什么）:
+///     remote sessionId 走远端 switch-pane；local sessionId 调用本地 helper。
+#[tauri::command]
+pub async fn switch_workbench_pane(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(&state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .switch_pane(&base_url, &inner_session_id)
+            .await?;
+        ensure_remote_event_bridge_for_device(&state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_switch_workbench_pane(&state, session_id).await
+}
+
+/// 确保当前 tmux active pane 以单 pane 视图显示。
+///
+/// Business Logic（为什么需要这个函数）:
+///     移动端屏幕空间有限，新增/切换/关闭 pane 后应只显示当前 active pane，而不是保留桌面分屏布局。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session row 存在；raw/disconnected session 返回 no-op，tmux-backed running session 调用 registry 幂等 ensure-zoom。
+pub(crate) async fn local_zoom_workbench_pane(
+    state: &AppState,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    let row = state
+        .workbench_session_repo
+        .get(&session_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("工作台会话不存在"))?;
+    if !should_attempt_session_zoom(&row) {
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    state
+        .workbench_sessions
+        .ensure_active_pane_zoomed(&session_id)?;
+    Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
+}
+
+/// 判断 session 是否需要尝试 tmux zoom。
+///
+/// Business Logic（为什么需要这个函数）:
+///     移动端单 pane 视图只适用于 running tmux window；raw PTY 或 disconnected window 不应因为 zoom-pane 报错。
+///
+/// Code Logic（这个函数做什么）:
+///     读取持久化 row 的 status/backend/window id，只有 running + tmux + window id 同时满足时返回 true。
+fn should_attempt_session_zoom(row: &WorkbenchSessionRow) -> bool {
+    row.status == "running" && row.backend == "tmux" && row.backend_window_id.is_some()
+}
+
+/// 确保当前 tmux active pane 以单 pane 视图显示。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal 的移动端单 pane 视图也必须由项目所在设备的 tmux window 负责。
+///
+/// Code Logic（这个函数做什么）:
+///     remote sessionId 走远端 zoom-pane；local sessionId 调用本地 helper。
+#[tauri::command]
+pub async fn zoom_workbench_pane(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(&state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .zoom_pane(&base_url, &inner_session_id)
+            .await?;
+        ensure_remote_event_bridge_for_device(&state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_zoom_workbench_pane(&state, session_id).await
+}
+
 /// 关闭当前 tmux pane。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -3632,6 +3736,47 @@ mod tests {
 
         assert_eq!(url, "http://192.168.1.9:14210");
         assert_eq!(missing.to_string(), "远端设备不在线");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     移动端 zoom-pane 是单 pane 展示增强，不应让 raw PTY 或 disconnected window 出现额外错误。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 session row，断言只有 running tmux window 需要调用 registry ensure-zoom。
+    #[test]
+    fn session_zoom_attempt_only_for_running_tmux_window() {
+        let mut row = WorkbenchSessionRow {
+            id: "session-1".to_string(),
+            project_id: "project-1".to_string(),
+            worktree_id: Some("worktree-1".to_string()),
+            name: "Terminal".to_string(),
+            command: "shell".to_string(),
+            cwd: "/repo".to_string(),
+            status: "running".to_string(),
+            cols: 80,
+            rows: 24,
+            started_at: "2026-07-05T00:00:00Z".to_string(),
+            exited_at: None,
+            exit_code: None,
+            backend: "tmux".to_string(),
+            backend_id: Some("cc-partner-project".to_string()),
+            backend_window_id: Some("@2".to_string()),
+            created_at: "2026-07-05T00:00:00Z".to_string(),
+            updated_at: "2026-07-05T00:00:00Z".to_string(),
+        };
+
+        assert!(should_attempt_session_zoom(&row));
+
+        row.status = "disconnected".to_string();
+        assert!(!should_attempt_session_zoom(&row));
+
+        row.status = "running".to_string();
+        row.backend = "pty".to_string();
+        assert!(!should_attempt_session_zoom(&row));
+
+        row.backend = "tmux".to_string();
+        row.backend_window_id = None;
+        assert!(!should_attempt_session_zoom(&row));
     }
 
     /// Business Logic（为什么需要这个测试）:

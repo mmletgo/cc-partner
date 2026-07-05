@@ -1,6 +1,9 @@
 import {
   canSelectMobileProject,
+  canRunMobilePaneMutation,
+  canSwitchMobilePane,
   closeMobileNav,
+  getMobileCreatePaneDirection,
   getInitialMobileNavOpen,
   openMobileNav,
   selectPreferredMobileSession,
@@ -263,6 +266,54 @@ function testPreferredSessionFallsBackToRunningFirstOrNull(): void {
   assertEqual(selectPreferredMobileSession([], 'main'), null);
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   手机端不再让用户选择左右/上下分屏，新增 pane 要有稳定默认方向来适配竖屏操作。
+ *
+ * Code Logic（这个函数做什么）:
+ *   调用移动端 pane 创建方向 helper，断言默认使用 tmux 上下分割方向。
+ */
+function testMobileCreatePaneDirectionUsesDown(): void {
+  assertEqual(getMobileCreatePaneDirection(), 'down');
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   pane 新增/关闭必须只在当前 terminal window 支持 tmux pane 且没有异步操作占用时开放。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造支持/不支持 panes 的 session，断言 mutation 可用性受 supportsPanes 与 busy 共同控制。
+ */
+function testMobilePaneMutationRequiresSupportedIdleSession(): void {
+  const supported = createSession({ id: 'supported', name: 'Supported', supportsPanes: true });
+  const unsupported = createSession({
+    id: 'unsupported',
+    name: 'Unsupported',
+    supportsPanes: false,
+  });
+
+  assertEqual(canRunMobilePaneMutation(supported, false), true);
+  assertEqual(canRunMobilePaneMutation(supported, true), false);
+  assertEqual(canRunMobilePaneMutation(unsupported, false), false);
+  assertEqual(canRunMobilePaneMutation(null, false), false);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   切换 pane 在单 pane window 内没有可见效果，移动端应避免展示可点击但无意义的操作。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造单 pane 与多 pane session，断言只有多 pane 且空闲时允许切换。
+ */
+function testMobilePaneSwitchRequiresMultiplePanes(): void {
+  const singlePane = createSession({ id: 'single', name: 'Single', paneCount: 1 });
+  const multiPane = createSession({ id: 'multi', name: 'Multi', paneCount: 2 });
+
+  assertEqual(canSwitchMobilePane(singlePane, false), false);
+  assertEqual(canSwitchMobilePane(multiPane, false), true);
+  assertEqual(canSwitchMobilePane(multiPane, true), false);
+}
+
 testSelectMobilePanelReturnsNextPanel();
 testOpenMobileNavReturnsTrue();
 testInitialMobileNavOpenDefaultsToTrue();
@@ -273,3 +324,6 @@ testPreferredWorktreeFallsBackToFirstOrNull();
 testPreferredSessionUsesMatchingWorktreeBeforeRunning();
 testPreferredSessionUsesRunningMatchingBeforeStoppedMatching();
 testPreferredSessionFallsBackToRunningFirstOrNull();
+testMobileCreatePaneDirectionUsesDown();
+testMobilePaneMutationRequiresSupportedIdleSession();
+testMobilePaneSwitchRequiresMultiplePanes();

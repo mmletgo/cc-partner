@@ -1041,6 +1041,69 @@ fn tmux_split_window_args(direction: PaneSplitDirection, target: &str, cwd: &str
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     用户需要在当前 terminal window 内循环切换 active pane，操作范围必须锁定到该 tmux window。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 `tmux select-pane -t <window-target>.+` 参数列表。
+fn tmux_select_next_pane_args(target: &str) -> Vec<String> {
+    vec![
+        "select-pane".to_string(),
+        "-t".to_string(),
+        format!("{target}.+"),
+    ]
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     移动端需要把当前 active pane 显示为单 pane 视图，但不能改变所属 tmux window。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 `tmux resize-pane -Z -t <window-target>` 参数列表；调用前必须已确认当前未 zoom，避免反向取消 zoom。
+fn tmux_zoom_active_pane_args(target: &str) -> Vec<String> {
+    vec![
+        "resize-pane".to_string(),
+        "-Z".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ]
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     ensure-zoom 需要先读取当前 tmux window 是否已经 zoom，避免重复调用 `resize-pane -Z` 反而取消 zoom。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 `display-message -p -t <target> #{window_zoomed_flag}` 参数列表。
+fn tmux_window_zoomed_args(target: &str) -> Vec<String> {
+    vec![
+        "display-message".to_string(),
+        "-p".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+        "#{window_zoomed_flag}".to_string(),
+    ]
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     tmux 输出是文本协议，后端需要把 window_zoomed_flag 转为布尔值用于幂等 ensure-zoom。
+///
+/// Code Logic（这个函数做什么）:
+///     任一非空行 trim 后等于 `1` 时返回 true，其它情况返回 false。
+fn tmux_window_zoomed_from_output(output: &str) -> bool {
+    output.lines().any(|line| line.trim() == "1")
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     移动端新增、切换或关闭 pane 后，要保证用户仍只看到当前 active pane。
+///
+/// Code Logic（这个函数做什么）:
+///     查询 tmux window zoom flag 并返回布尔值，供 ensure-zoom 决策。
+fn tmux_window_is_zoomed(tmux: &TmuxCommand, target: &str) -> Result<bool, AppError> {
+    let args = tmux_window_zoomed_args(target);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run_tmux_command(tmux, &arg_refs)?;
+    Ok(tmux_window_zoomed_from_output(&output))
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     用户关闭终端或应用退出清理时，终端子进程可能已经自然退出并被系统回收，此时 kill 返回 No such process 不应打扰用户。
 ///
 /// Code Logic（这个函数做什么）:
@@ -1563,6 +1626,58 @@ impl WorkbenchSessionRegistry {
         };
         let tmux_cwd = tmux.project_cwd(&handle.row.cwd)?;
         let args = tmux_split_window_args(direction, &target, &tmux_cwd);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_tmux_command(&tmux, &arg_refs)?;
+        Ok(())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户需要从键盘或工具栏把当前 terminal window 的 active pane 切到下一个 pane。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     找到 running tmux-backed session 的 window target，并执行 `select-pane -t <target>.+`。
+    pub fn switch_to_next_pane(&self, session_id: &str) -> Result<(), AppError> {
+        let target = {
+            let handle = self.get_handle(session_id)?;
+            let handle = handle.lock().expect("workbench session 锁中毒");
+            if handle.row.status != "running" {
+                return Err(AppError::generic("工作台会话未运行"));
+            }
+            tmux_window_target_for_row(&handle.row)?
+        };
+        let Some(tmux) = available_tmux_command() else {
+            return Err(AppError::generic("未找到 tmux，无法切换 pane"));
+        };
+        let args = tmux_select_next_pane_args(&target);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_tmux_command(&tmux, &arg_refs)?;
+        Ok(())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     移动端 pane 操作后应始终只显示当前 active pane，而不是显示 tmux 左右/上下分屏布局。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     raw/disconnected session 直接 no-op；running tmux-backed session 单 pane 直接返回，多 pane 时仅在未 zoom 时执行 `resize-pane -Z`。
+    pub fn ensure_active_pane_zoomed(&self, session_id: &str) -> Result<(), AppError> {
+        let target = {
+            let handle = self.get_handle(session_id)?;
+            let handle = handle.lock().expect("workbench session 锁中毒");
+            if handle.row.status != "running" {
+                return Ok(());
+            }
+            if handle.row.backend != TMUX_BACKEND || handle.row.backend_window_id.is_none() {
+                return Ok(());
+            }
+            tmux_window_target_for_row(&handle.row)?
+        };
+        let Some(tmux) = available_tmux_command() else {
+            return Err(AppError::generic("未找到 tmux，无法缩放 pane"));
+        };
+        if tmux_pane_count(&tmux, &target)? <= 1 || tmux_window_is_zoomed(&tmux, &target)? {
+            return Ok(());
+        }
+        let args = tmux_zoom_active_pane_args(&target);
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         run_tmux_command(&tmux, &arg_refs)?;
         Ok(())
@@ -2535,6 +2650,36 @@ mod tests {
                 "-c",
                 "/Users/hans/project",
             ]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户需要在同一个 terminal window 内循环切换到下一个 pane，不能创建新 pane 或跨 window 切换。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 next-pane 操作生成 `select-pane -t <window-target>.+` 参数。
+    #[test]
+    fn tmux_select_next_pane_args_targets_next_pane_in_current_window() {
+        let args = tmux_select_next_pane_args("cc-partner-project-p1:@2");
+
+        assert_eq!(
+            args,
+            vec!["select-pane", "-t", "cc-partner-project-p1:@2.+"]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     移动端需要始终只显示当前 active pane，后端必须能把当前 pane zoom 到整个 window。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 ensure zoom 操作生成 `resize-pane -Z -t <window-target>` 参数。
+    #[test]
+    fn tmux_zoom_active_pane_args_targets_current_window() {
+        let args = tmux_zoom_active_pane_args("cc-partner-project-p1:@2");
+
+        assert_eq!(
+            args,
+            vec!["resize-pane", "-Z", "-t", "cc-partner-project-p1:@2"]
         );
     }
 
