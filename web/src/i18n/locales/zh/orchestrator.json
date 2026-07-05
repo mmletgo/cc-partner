@@ -42,6 +42,13 @@
     "acceptanceCriteria": "验收标准",
     "branch": "分支",
     "attempt": "尝试次数",
+    "attemptLabel": "第 {{attempt}} 轮",
+    "noAttempt": "尚未开始",
+    "activeSession": "终端现场",
+    "executionDevice": "执行设备",
+    "latestVerifierResult": "最新验证器结果",
+    "latestRepairPrompt": "最新修复指令",
+    "priorAttempts": "历史开发尝试",
     "createdAt": "创建时间",
     "updatedAt": "更新时间",
     "unassigned": "未绑定",
@@ -54,6 +61,13 @@
     "abort": "终止",
     "localTask": "本机任务",
     "remoteTask": "远端 {{deviceName}}"
+  },
+  "progress": {
+    "running": "第 {{attempt}} 轮正在当前终端中运行。",
+    "remoteRunning": "第 {{attempt}} 轮正在 {{deviceName}} 上运行。",
+    "verifying": "第 {{attempt}} 轮正在执行验证与验证器复核。",
+    "repairing": "第 {{attempt}} 轮正在准备修复运行。",
+    "remoteOutbox": "等待发送到 {{deviceName}}。"
   },
   "create": {
     "title": "创建任务",
@@ -79,7 +93,17 @@
       "failed": "失败",
       "blocked": "阻塞",
       "skipped": "跳过",
+      "running": "运行中",
       "generic": "记录"
+    },
+    "kind": {
+      "developmentAttempt": "开发尝试",
+      "verificationOutput": "验证输出",
+      "verificationReview": "验证器复核",
+      "repairPrompt": "修复指令",
+      "remoteOutbox": "远端 outbox",
+      "delivery": "自动交付",
+      "generic": "证据"
     }
   },
   "policy": {

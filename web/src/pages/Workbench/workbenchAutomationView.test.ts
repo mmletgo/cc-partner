@@ -72,6 +72,31 @@ async function main(): Promise<void> {
     'const handleOpenAutomationTaskWorkbench = useCallback',
     'Workbench switches back to terminal when automation task opens its workbench context',
   );
+  assertContains(
+    orchestratorSource,
+    'buildWorkbenchDeepLink({',
+    'Orchestrator task links use the shared Workbench deep link builder',
+  );
+  assertContains(
+    orchestratorSource,
+    'views: current?.projectId === projectId ? current.views : []',
+    'Orchestrator preserves the selected task list when a remote refresh fails',
+  );
+  assertContains(
+    orchestratorSource,
+    "orchestratorTaskProgressMessage(selectedTaskView, t)",
+    'Orchestrator task detail renders progress copy for running/verifying/repairing attempts',
+  );
+  assertContains(
+    orchestratorSource,
+    "orchestratorEvidenceKindLabel(item.kind, t)",
+    'Orchestrator evidence renders localized evidence kind labels',
+  );
+  assertNotContains(
+    orchestratorSource,
+    'setSelectedTaskId(null);',
+    'Remote offline task refresh should not clear the selected task',
+  );
   assertContains(workbenchSource, "t('workbench:automationWorkspace.open')", 'terminal toolbar uses localized automation label');
   assertContains(workbenchSource, "t('workbench:automationWorkspace.returnTerminal')", 'automation view has localized return action');
   assertContains(workbenchStyles, '.automationLayer {', 'automation layer has a dedicated style block');

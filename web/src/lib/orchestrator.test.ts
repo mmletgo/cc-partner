@@ -1,4 +1,10 @@
-import type { OrchestratorTask, OrchestratorTaskStatus } from './types';
+import type { TFunction } from 'i18next';
+import type {
+  OrchestratorRemoteOutboxItem,
+  OrchestratorTask,
+  OrchestratorTaskStatus,
+  OrchestratorTaskView,
+} from './types';
 import type { PillTone } from '@/components/primitives';
 import {
   canQueueOrchestratorTask,
@@ -7,9 +13,13 @@ import {
   canControlBlockedTaskForProject,
   groupOrchestratorTasks,
   ORCHESTRATOR_STATUSES,
+  orchestratorAttemptLabel,
   orchestratorCreateResultMatchesProject,
+  orchestratorEvidenceKindLabel,
+  orchestratorEvidenceKindTone,
   resolveOrchestratorActionSelection,
   orchestratorStatusTone,
+  orchestratorTaskProgressMessage,
   resolveOrchestratorTaskLoad,
 } from './orchestrator';
 
@@ -35,6 +45,7 @@ function createTask(
   id: string,
   status: OrchestratorTaskStatus,
   projectId = 'project-1',
+  attempt = 0,
 ): OrchestratorTask {
   return {
     id,
@@ -48,13 +59,46 @@ function createTask(
     worktreeId: null,
     sessionId: null,
     blockedReason: null,
-    attempt: 0,
+    attempt,
     createdAt: '2026-07-05T00:00:00Z',
     updatedAt: '2026-07-05T00:00:00Z',
     startedAt: null,
     finishedAt: null,
   };
 }
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Orchestrator helper 的文案契约必须验证 i18n key 和插值参数，避免组件绕过 namespace 硬编码文案。
+ *
+ * Code Logic（这个函数做什么）:
+ *   提供最小 TFunction stub，只覆盖本测试关心的 orchestrator namespace key，并支持 {{attempt}}/{{deviceName}} 插值。
+ */
+function createTranslator(): TFunction<'orchestrator'> {
+  const translations: Record<string, string> = {
+    'evidence.kind.developmentAttempt': 'Development attempt',
+    'evidence.kind.verificationReview': 'Verification review',
+    'evidence.kind.repairPrompt': 'Repair prompt',
+    'evidence.kind.remoteOutbox': 'Remote outbox',
+    'evidence.kind.generic': 'Evidence',
+    'detail.attemptLabel': 'Attempt {{attempt}}',
+    'detail.noAttempt': 'Not started',
+    'progress.running': 'Attempt {{attempt}} is running in the active terminal.',
+    'progress.remoteRunning': 'Attempt {{attempt}} is running on {{deviceName}}.',
+    'progress.verifying': 'Attempt {{attempt}} is being verified.',
+    'progress.repairing': 'Attempt {{attempt}} is preparing a repair run.',
+    'progress.remoteOutbox': 'Waiting to send to {{deviceName}}.',
+  };
+
+  return ((key: string, options?: Record<string, unknown>) => {
+    const template = translations[key] ?? key;
+    return template.replace(/\{\{(\w+)\}\}/g, (_, name: string) =>
+      String(options?.[name] ?? ''),
+    );
+  }) as TFunction<'orchestrator'>;
+}
+
+const t = createTranslator();
 
 const allStatusTasks = ORCHESTRATOR_STATUSES.map((status) => createTask(`${status}-1`, status));
 const groups = groupOrchestratorTasks(allStatusTasks);
@@ -80,6 +124,92 @@ assert(orchestratorStatusTone('blocked') === 'danger', 'blocked status should us
 assert(orchestratorStatusTone('running') === 'accent', 'running status should use accent tone');
 assert(orchestratorStatusTone('queued') === 'neutral', 'queued status should use neutral tone');
 assert(orchestratorStatusTone('aborted') === 'danger', 'aborted status should use danger tone');
+
+assert(
+  orchestratorEvidenceKindLabel('developmentAttempt', t) === 'Development attempt',
+  'developmentAttempt evidence kind should use localized label',
+);
+assert(
+  orchestratorEvidenceKindLabel('verificationReview', t) === 'Verification review',
+  'verificationReview evidence kind should use localized label',
+);
+assert(
+  orchestratorEvidenceKindLabel('repairPrompt', t) === 'Repair prompt',
+  'repairPrompt evidence kind should use localized label',
+);
+assert(
+  orchestratorEvidenceKindLabel('remoteOutbox', t) === 'Remote outbox',
+  'remoteOutbox evidence kind should use localized label',
+);
+assert(
+  orchestratorEvidenceKindTone('developmentAttempt') === 'accent',
+  'developmentAttempt evidence kind should use accent tone',
+);
+assert(
+  orchestratorEvidenceKindTone('verificationReview') === 'success',
+  'verificationReview evidence kind should use success tone',
+);
+assert(
+  orchestratorEvidenceKindTone('repairPrompt') === 'warn',
+  'repairPrompt evidence kind should use warn tone',
+);
+assert(
+  orchestratorEvidenceKindTone('remoteOutbox') === 'neutral',
+  'remoteOutbox evidence kind should use neutral tone',
+);
+
+const runningTask = createTask('running-progress', 'running', 'project-1', 1);
+const verifyingTask = createTask('verifying-progress', 'verifying', 'project-1', 2);
+const repairingTask = createTask('repairing-progress', 'preparing', 'project-1', 3);
+const remoteRunningView: OrchestratorTaskView = {
+  origin: 'remote',
+  task: runningTask,
+  deviceId: 'device-a',
+  deviceName: 'Studio Mac',
+};
+const pendingRemoteItem: OrchestratorRemoteOutboxItem = {
+  id: 'outbox-1',
+  deviceId: 'device-a',
+  deviceName: 'Studio Mac',
+  remoteProjectPath: '/Users/hans/project',
+  remoteProjectId: null,
+  requestJson: '{}',
+  status: 'pending',
+  remoteTaskId: null,
+  lastError: null,
+  createdAt: '2026-07-05T00:00:00Z',
+  updatedAt: '2026-07-05T00:00:00Z',
+  sentAt: null,
+};
+
+assert(
+  orchestratorAttemptLabel(runningTask, t) === 'Attempt 1',
+  'running task should expose current attempt label',
+);
+assert(
+  orchestratorTaskProgressMessage({ origin: 'local', task: runningTask }, t) ===
+    'Attempt 1 is running in the active terminal.',
+  'running task should expose running progress copy',
+);
+assert(
+  orchestratorTaskProgressMessage(remoteRunningView, t) === 'Attempt 1 is running on Studio Mac.',
+  'remote running task should expose remote device progress copy',
+);
+assert(
+  orchestratorTaskProgressMessage({ origin: 'local', task: verifyingTask }, t) ===
+    'Attempt 2 is being verified.',
+  'verifying task should expose verifier progress copy',
+);
+assert(
+  orchestratorTaskProgressMessage({ origin: 'local', task: repairingTask }, t) ===
+    'Attempt 3 is preparing a repair run.',
+  'preparing task after the first attempt should expose repair progress copy',
+);
+assert(
+  orchestratorTaskProgressMessage({ origin: 'pendingRemote', item: pendingRemoteItem }, t) ===
+    'Waiting to send to Studio Mac.',
+  'pending remote task should expose outbox progress copy',
+);
 
 assert(
   JSON.stringify(resolveOrchestratorTaskLoad(true, 'project-1')) ===

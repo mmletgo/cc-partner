@@ -13,7 +13,9 @@ use crate::commands::workbench::{
     local_write_workbench_session_input,
 };
 use crate::error::AppError;
-use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
+use crate::orchestrator::models::{
+    OrchestratorTaskRow, OrchestratorTaskStatus, EVIDENCE_KIND_DEVELOPMENT_ATTEMPT,
+};
 use crate::orchestrator::prompt::{
     build_initial_task_prompt, build_repair_task_prompt, RepairPromptContext,
 };
@@ -35,6 +37,19 @@ const DEFAULT_TERMINAL_ROWS: u16 = 32;
 struct RunnerWorktree {
     id: String,
     path: String,
+}
+
+/// Runner 启动 attempt 时要写入的 developmentAttempt evidence。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     前端任务详情需要展示历史开发尝试，后端必须在每轮 runner 启动前留下可审计记录。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 add_evidence 所需 title/summary/content，其中 summary 使用 running 表示该轮开发已挂账启动。
+struct DevelopmentAttemptEvidence {
+    title: String,
+    summary: &'static str,
+    content: String,
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -161,6 +176,23 @@ pub async fn prepare_runner_attempt(
     {
         return Ok(current);
     }
+    let attempt_evidence =
+        development_attempt_evidence(attempt, &branch_name, &worktree.id, &session.id);
+    state
+        .orchestrator_repo
+        .add_evidence(
+            &task.id,
+            EVIDENCE_KIND_DEVELOPMENT_ATTEMPT,
+            &attempt_evidence.title,
+            attempt_evidence.summary,
+            &attempt_evidence.content,
+        )
+        .await?;
+    if let Some(current) =
+        stop_runner_input_if_task_changed(state, &task.id, attempt, &session.id).await?
+    {
+        return Ok(current);
+    }
     local_write_workbench_session_input(state, session.id.clone(), format!("claude\n{prompt}\n"))
         .await?;
 
@@ -195,6 +227,26 @@ fn active_runner_matches(task: &OrchestratorTaskRow, attempt: i64, session_id: &
     task.status == OrchestratorTaskStatus::Running
         && task.attempt == attempt
         && task.session_id.as_deref() == Some(session_id)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     每轮开发 Claude 启动都需要可审计 evidence，方便前端展示 attempt 历史并定位 active session。
+///
+/// Code Logic（这个函数做什么）:
+///     使用 attempt/branch/worktree/session 生成 developmentAttempt evidence 文本，不复制完整 prompt。
+fn development_attempt_evidence(
+    attempt: i64,
+    branch_name: &str,
+    worktree_id: &str,
+    session_id: &str,
+) -> DevelopmentAttemptEvidence {
+    DevelopmentAttemptEvidence {
+        title: format!("开发尝试 {attempt}"),
+        summary: "running",
+        content: format!(
+            "attempt: {attempt}\nbranch: {branch_name}\nworktreeId: {worktree_id}\nsessionId: {session_id}"
+        ),
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -483,5 +535,22 @@ mod tests {
 
         task.status = OrchestratorTaskStatus::Aborted;
         assert!(!super::active_runner_matches(&task, 2, "session-1"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     前端 attempt 历史依赖 developmentAttempt evidence，title/summary/content 契约必须稳定。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 attempt evidence，断言标题、summary 和 session/worktree 内容可被详情页展示。
+    #[test]
+    fn development_attempt_evidence_records_runner_context() {
+        let evidence =
+            super::development_attempt_evidence(3, "agent/task-fix", "worktree-1", "session-1");
+
+        assert_eq!(evidence.title, "开发尝试 3");
+        assert_eq!(evidence.summary, "running");
+        assert!(evidence.content.contains("branch: agent/task-fix"));
+        assert!(evidence.content.contains("worktreeId: worktree-1"));
+        assert!(evidence.content.contains("sessionId: session-1"));
     }
 }

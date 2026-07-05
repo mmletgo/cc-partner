@@ -1,5 +1,6 @@
 import type { PillTone } from '@/components/primitives';
-import type { OrchestratorTask, OrchestratorTaskStatus } from './types';
+import type { TFunction } from 'i18next';
+import type { OrchestratorTask, OrchestratorTaskStatus, OrchestratorTaskView } from './types';
 
 /**
  * Business Logic（为什么需要这个类型）:
@@ -9,6 +10,15 @@ import type { OrchestratorTask, OrchestratorTaskStatus } from './types';
  *   直接复用 primitives/Pill 的 tone 联合类型，保证 helper 返回值与组件 prop 类型一致。
  */
 export type OrchestratorStatusTone = PillTone;
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   Orchestrator helper 会生成用户可见文案，必须通过 orchestrator namespace 的 i18n 函数取值。
+ *
+ * Code Logic（这个类型做什么）:
+ *   复用 i18next TFunction 并限定默认 namespace，便于 helper 内部使用无 namespace 前缀的 key。
+ */
+type OrchestratorTranslator = TFunction<'orchestrator'>;
 
 /**
  * Business Logic（为什么需要这个类型）:
@@ -49,6 +59,107 @@ export const ORCHESTRATOR_STATUSES: readonly OrchestratorTaskStatus[] = [
   'blocked',
   'aborted',
 ];
+
+const EVIDENCE_KIND_LABEL_KEYS = {
+  developmentAttempt: 'evidence.kind.developmentAttempt',
+  verificationOutput: 'evidence.kind.verificationOutput',
+  verificationReview: 'evidence.kind.verificationReview',
+  repairPrompt: 'evidence.kind.repairPrompt',
+  remoteOutbox: 'evidence.kind.remoteOutbox',
+  delivery: 'evidence.kind.delivery',
+} as const;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Evidence kind 是后端持久化短值，详情页和证据列表需要把它稳定映射为本地化标签。
+ *
+ * Code Logic（这个函数做什么）:
+ *   对已知 evidence kind 返回对应 i18n 文案；未知 kind 使用 generic 兜底，避免直接暴露存储值。
+ */
+export function orchestratorEvidenceKindLabel(
+  kind: string,
+  t: OrchestratorTranslator,
+): string {
+  const key =
+    EVIDENCE_KIND_LABEL_KEYS[kind as keyof typeof EVIDENCE_KIND_LABEL_KEYS] ??
+    'evidence.kind.generic';
+  return t(key);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Evidence 列表需要用稳定 tone 区分开发尝试、验证审查、修复指令和远端 outbox 记录。
+ *
+ * Code Logic（这个函数做什么）:
+ *   将后端 kind 短值映射到 Pill 支持的 tone；未知 kind 采用 neutral。
+ */
+export function orchestratorEvidenceKindTone(kind: string): OrchestratorStatusTone {
+  switch (kind) {
+    case 'developmentAttempt':
+      return 'accent';
+    case 'verificationReview':
+      return 'success';
+    case 'repairPrompt':
+      return 'warn';
+    case 'remoteOutbox':
+      return 'neutral';
+    case 'verificationOutput':
+      return 'accent';
+    case 'delivery':
+      return 'success';
+    default:
+      return 'neutral';
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   自动验证/修复循环需要把当前轮次显示为“第 N 轮/Attempt N”，避免用户只看到裸数字。
+ *
+ * Code Logic（这个函数做什么）:
+ *   attempt 大于 0 时用 i18n 插值生成轮次标签；尚未开始的任务返回 noAttempt 文案。
+ */
+export function orchestratorAttemptLabel(
+  task: OrchestratorTask,
+  t: OrchestratorTranslator,
+): string {
+  if (task.attempt <= 0) return t('detail.noAttempt');
+  return t('detail.attemptLabel', { attempt: task.attempt });
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   任务详情需要用一句话说明当前 attempt 正在开发、验证、准备修复或等待远端发送。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 OrchestratorTaskView origin/status 选择 i18n 文案；pendingRemote 使用 outbox 文案，
+ *   preparing 且 attempt>1 视为修复轮准备中，其余状态返回 null 让 UI 不显示进度提示。
+ */
+export function orchestratorTaskProgressMessage(
+  view: OrchestratorTaskView | null,
+  t: OrchestratorTranslator,
+): string | null {
+  if (!view) return null;
+  if (view.origin === 'pendingRemote') {
+    return t('progress.remoteOutbox', { deviceName: view.item.deviceName });
+  }
+
+  const { task } = view;
+  if (task.attempt <= 0) return null;
+  if (task.status === 'running') {
+    if (view.origin === 'remote') {
+      return t('progress.remoteRunning', { attempt: task.attempt, deviceName: view.deviceName });
+    }
+    return t('progress.running', { attempt: task.attempt });
+  }
+  if (task.status === 'verifying') {
+    return t('progress.verifying', { attempt: task.attempt });
+  }
+  if (task.status === 'preparing' && task.attempt > 1) {
+    return t('progress.repairing', { attempt: task.attempt });
+  }
+  return null;
+}
 
 /**
  * Business Logic（为什么需要这个函数）:

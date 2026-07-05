@@ -29,8 +29,12 @@ import {
   canControlBlockedTaskForProject,
   canQueueOrchestratorTaskForProject,
   ORCHESTRATOR_STATUSES,
+  orchestratorAttemptLabel,
   orchestratorCreateResultMatchesProject,
+  orchestratorEvidenceKindLabel,
+  orchestratorEvidenceKindTone,
   orchestratorStatusTone,
+  orchestratorTaskProgressMessage,
   resolveOrchestratorActionSelection,
   resolveOrchestratorTaskLoad,
 } from '@/lib/orchestrator';
@@ -50,6 +54,7 @@ import type {
   OrchestratorTaskStatus,
   OrchestratorTaskView,
 } from '@/lib/types';
+import { buildWorkbenchDeepLink } from '@/pages/Workbench/workbenchDeepLink';
 import styles from './Orchestrator.module.css';
 
 /**
@@ -82,6 +87,7 @@ type OrchestratorEvidenceSummaryLabelKey =
   | 'orchestrator:evidence.summary.failed'
   | 'orchestrator:evidence.summary.blocked'
   | 'orchestrator:evidence.summary.skipped'
+  | 'orchestrator:evidence.summary.running'
   | 'orchestrator:evidence.summary.generic';
 
 /**
@@ -197,6 +203,7 @@ const EVIDENCE_SUMMARY_LABEL_KEYS: Record<string, OrchestratorEvidenceSummaryLab
   failed: 'orchestrator:evidence.summary.failed',
   blocked: 'orchestrator:evidence.summary.blocked',
   skipped: 'orchestrator:evidence.summary.skipped',
+  running: 'orchestrator:evidence.summary.running',
 };
 
 const PENDING_REMOTE_STATUS_LABEL_KEYS: Record<
@@ -247,12 +254,14 @@ function formatTaskTimestamp(value: string): string {
  * Code Logic（这个函数做什么）:
  *   将 summary 短值映射到 Pill 支持的 tone；未知值按 neutral 展示。
  */
-function evidenceSummaryTone(summary: string): 'neutral' | 'success' | 'warn' | 'danger' {
+function evidenceSummaryTone(summary: string): 'neutral' | 'success' | 'warn' | 'danger' | 'accent' {
   switch (summary) {
     case 'passed':
       return 'success';
     case 'failed':
       return 'danger';
+    case 'running':
+      return 'accent';
     case 'blocked':
     case 'skipped':
       return 'warn';
@@ -296,19 +305,48 @@ function evidenceSummaryLabelKey(summary: string): OrchestratorEvidenceSummaryLa
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   任务详情需要从完整 evidence 列表中提取最新 verifier 结论和修复指令，避免用户在长列表里手动寻找。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从尾到头查找指定 kind 的第一条 evidence；未找到时返回 null，不改变原数组顺序。
+ */
+function latestEvidenceByKind(
+  items: OrchestratorEvidence[],
+  kind: string,
+): OrchestratorEvidence | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index].kind === kind) return items[index];
+  }
+  return null;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   详情页需要展示历史开发轮次，后端当前通过 developmentAttempt evidence 暴露可审计记录。
+ *
+ * Code Logic（这个函数做什么）:
+ *   过滤指定 kind 的 evidence 并保持后端返回顺序，供 UI 列表稳定渲染。
+ */
+function evidenceItemsByKind(
+  items: OrchestratorEvidence[],
+  kind: string,
+): OrchestratorEvidence[] {
+  return items.filter((item) => item.kind === kind);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   Blocked 任务的修复入口应尽量回到任务关联的 Workbench 项目、worktree 和终端窗口。
  *
  * Code Logic（这个函数做什么）:
  *   根据任务中存在的 id 构造 `/workbench` deep link；缺少任务或缺少某个 id 时省略对应 query 参数。
  */
 function buildWorkbenchTaskUrl(task: OrchestratorTask | null): string {
-  if (!task) return '/workbench';
-  const params = new URLSearchParams();
-  if (task.projectId) params.set('projectId', task.projectId);
-  if (task.worktreeId) params.set('worktreeId', task.worktreeId);
-  if (task.sessionId) params.set('sessionId', task.sessionId);
-  const query = params.toString();
-  return query ? `/workbench?${query}` : '/workbench';
+  return buildWorkbenchDeepLink({
+    projectId: task?.projectId ?? null,
+    worktreeId: task?.worktreeId ?? null,
+    sessionId: task?.sessionId ?? null,
+  });
 }
 
 /**
@@ -388,6 +426,11 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     selectedTask,
     activeProjectId,
   );
+  const selectedTaskCanOpenWorkbench = Boolean(
+    selectedTask?.projectId && (selectedTask.worktreeId || selectedTask.sessionId),
+  );
+  const selectedTaskProgressMessage = orchestratorTaskProgressMessage(selectedTaskView, t);
+  const selectedTaskTerminalLabel = selectedTask?.sessionId ?? selectedTask?.worktreeId ?? null;
   const activeEvidenceResult =
     selectedTask &&
     taskLoadDecision.kind === 'load' &&
@@ -396,6 +439,18 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
       ? evidenceResult
       : null;
   const evidenceItems = activeEvidenceResult?.items ?? [];
+  const latestVerifierEvidence = useMemo(
+    () => latestEvidenceByKind(evidenceItems, 'verificationReview'),
+    [evidenceItems],
+  );
+  const latestRepairPromptEvidence = useMemo(
+    () => latestEvidenceByKind(evidenceItems, 'repairPrompt'),
+    [evidenceItems],
+  );
+  const developmentAttemptEvidenceItems = useMemo(
+    () => evidenceItemsByKind(evidenceItems, 'developmentAttempt'),
+    [evidenceItems],
+  );
   const evidenceLoading =
     Boolean(selectedTask) &&
     taskLoadDecision.kind === 'load' &&
@@ -428,12 +483,11 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
       })
       .catch((err: unknown) => {
         if (cancelled || activeProjectIdRef.current !== projectId) return;
-        setTaskListResult({
+        setTaskListResult((current) => ({
           projectId,
-          views: [],
+          views: current?.projectId === projectId ? current.views : [],
           error: displayOrchestratorErrorMessage(err, t('orchestrator:errors.load')),
-        });
-        setSelectedTaskId(null);
+        }));
       });
     return () => {
       cancelled = true;
@@ -894,6 +948,9 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                   <div className={styles.detailTitleRow}>
                     <h3 className={styles.detailTitle}>{selectedTask.title}</h3>
                   </div>
+                  {selectedTaskProgressMessage ? (
+                    <p className={styles.progressMessage}>{selectedTaskProgressMessage}</p>
+                  ) : null}
                   <div className={styles.detailBlock}>
                     <span className={styles.label}>{t('orchestrator:detail.goal')}</span>
                     <p className={styles.detailText}>{selectedTask.goal}</p>
@@ -911,8 +968,33 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                     </div>
                     <div>
                       <dt>{t('orchestrator:detail.attempt')}</dt>
-                      <dd>{selectedTask.attempt}</dd>
+                      <dd>{orchestratorAttemptLabel(selectedTask, t)}</dd>
                     </div>
+                    <div>
+                      <dt>{t('orchestrator:detail.activeSession')}</dt>
+                      <dd>
+                        {selectedTaskTerminalLabel && selectedTaskCanOpenWorkbench ? (
+                          <button
+                            type="button"
+                            className={styles.inlineLinkButton}
+                            onClick={handleOpenWorkbench}
+                          >
+                            {selectedTaskTerminalLabel}
+                          </button>
+                        ) : (
+                          t('orchestrator:detail.unassigned')
+                        )}
+                      </dd>
+                    </div>
+                    {selectedRenderableTask?.origin === 'remote' ? (
+                      <div>
+                        <dt>{t('orchestrator:detail.executionDevice')}</dt>
+                        <dd>
+                          {selectedRenderableTask.deviceName ??
+                            t('orchestrator:queue.unknownDevice')}
+                        </dd>
+                      </div>
+                    ) : null}
                     <div>
                       <dt>{t('orchestrator:detail.createdAt')}</dt>
                       <dd>{formatTaskTimestamp(selectedTask.createdAt)}</dd>
@@ -926,6 +1008,53 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                     <div className={styles.blockedReason}>
                       <span className={styles.label}>{t('orchestrator:detail.blockedReason')}</span>
                       <p>{selectedTask.blockedReason ?? t('orchestrator:detail.noBlockedReason')}</p>
+                    </div>
+                  ) : null}
+                  {latestVerifierEvidence ? (
+                    <div className={styles.detailEvidenceSummary}>
+                      <div className={styles.detailEvidenceHeader}>
+                        <span className={styles.label}>
+                          {t('orchestrator:detail.latestVerifierResult')}
+                        </span>
+                        <Pill tone={evidenceSummaryTone(latestVerifierEvidence.summary)}>
+                          {t(evidenceSummaryLabelKey(latestVerifierEvidence.summary))}
+                        </Pill>
+                      </div>
+                      <pre className={styles.detailEvidenceContent}>
+                        {latestVerifierEvidence.content}
+                      </pre>
+                    </div>
+                  ) : null}
+                  {latestRepairPromptEvidence ? (
+                    <div className={styles.detailEvidenceSummary}>
+                      <div className={styles.detailEvidenceHeader}>
+                        <span className={styles.label}>
+                          {t('orchestrator:detail.latestRepairPrompt')}
+                        </span>
+                        <Pill tone={orchestratorEvidenceKindTone(latestRepairPromptEvidence.kind)}>
+                          {orchestratorEvidenceKindLabel(latestRepairPromptEvidence.kind, t)}
+                        </Pill>
+                      </div>
+                      <pre className={styles.detailEvidenceContent}>
+                        {latestRepairPromptEvidence.content}
+                      </pre>
+                    </div>
+                  ) : null}
+                  {developmentAttemptEvidenceItems.length > 0 ? (
+                    <div className={styles.attemptHistory}>
+                      <span className={styles.label}>
+                        {t('orchestrator:detail.priorAttempts')}
+                      </span>
+                      <ul className={styles.attemptHistoryList}>
+                        {developmentAttemptEvidenceItems.map((item) => (
+                          <li className={styles.attemptHistoryItem} key={item.id}>
+                            <span>{item.title}</span>
+                            <Pill tone={evidenceSummaryTone(item.summary)}>
+                              {t(evidenceSummaryLabelKey(item.summary))}
+                            </Pill>
+                          </li>
+                        ))}
+                      </ul>
                     </div>
                   ) : null}
                   {selectedTaskCanControlBlocked ? (
@@ -1064,9 +1193,14 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                             {formatTaskTimestamp(item.createdAt)}
                           </p>
                         </div>
-                        <Pill tone={evidenceSummaryTone(item.summary)}>
-                          {t(evidenceSummaryLabelKey(item.summary))}
-                        </Pill>
+                        <div className={styles.evidencePills}>
+                          <Pill tone={orchestratorEvidenceKindTone(item.kind)}>
+                            {orchestratorEvidenceKindLabel(item.kind, t)}
+                          </Pill>
+                          <Pill tone={evidenceSummaryTone(item.summary)}>
+                            {t(evidenceSummaryLabelKey(item.summary))}
+                          </Pill>
+                        </div>
                       </div>
                       <pre className={styles.evidenceContent}>{item.content}</pre>
                     </li>
