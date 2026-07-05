@@ -5,6 +5,60 @@
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 
+/// 开发尝试 evidence kind。
+///
+/// Business Logic（为什么需要这个常量）:
+///     自动编排任务会积累多轮开发 attempt，前端和远端同步需要稳定 kind 字符串识别开发尝试证据。
+///
+/// Code Logic（这个常量做什么）:
+///     集中定义 `orchestrator_task_evidence.kind` 中 developmentAttempt 的存储值，避免调用点硬编码。
+pub const EVIDENCE_KIND_DEVELOPMENT_ATTEMPT: &str = "developmentAttempt";
+
+/// 验证命令输出 evidence kind。
+///
+/// Business Logic（为什么需要这个常量）:
+///     Agent 完成后必须保存验证命令输出，供用户和 verifier 判断任务是否满足验收标准。
+///
+/// Code Logic（这个常量做什么）:
+///     集中定义 `orchestrator_task_evidence.kind` 中 verificationOutput 的存储值。
+pub const EVIDENCE_KIND_VERIFICATION_OUTPUT: &str = "verificationOutput";
+
+/// Claude verifier 审查结果 evidence kind。
+///
+/// Business Logic（为什么需要这个常量）:
+///     Phase8 引入 headless verifier Claude，用户需要看到模型审查结论与风险说明。
+///
+/// Code Logic（这个常量做什么）:
+///     集中定义 `orchestrator_task_evidence.kind` 中 verificationReview 的存储值。
+pub const EVIDENCE_KIND_VERIFICATION_REVIEW: &str = "verificationReview";
+
+/// 修复指令 evidence kind。
+///
+/// Business Logic（为什么需要这个常量）:
+///     verifier 判定失败后生成的 repair prompt 需要持久化，方便用户理解下一轮 Claude 的修复目标。
+///
+/// Code Logic（这个常量做什么）:
+///     集中定义 `orchestrator_task_evidence.kind` 中 repairPrompt 的存储值。
+pub const EVIDENCE_KIND_REPAIR_PROMPT: &str = "repairPrompt";
+
+/// 远端 outbox evidence kind。
+///
+/// Business Logic（为什么需要这个常量）:
+///     远端任务离线队列与 mirror 同步需要稳定 kind 字符串描述 outbox 相关证据。
+///
+/// Code Logic（这个常量做什么）:
+///     集中定义 `orchestrator_task_evidence.kind` 中 remoteOutbox 的存储值。
+pub const EVIDENCE_KIND_REMOTE_OUTBOX: &str = "remoteOutbox";
+
+/// 自动交付 evidence kind。
+///
+/// Business Logic（为什么需要这个常量）:
+///     full-auto delivery 的 commit/push/merge/push-main 阶段需要统一归类，便于前端展示交付轨迹。
+///
+/// Code Logic（这个常量做什么）:
+///     集中定义 `orchestrator_task_evidence.kind` 中 delivery 的存储值。
+pub const EVIDENCE_KIND_DELIVERY: &str = "delivery";
+
 /// Orchestrator 任务生命周期状态。
 ///
 /// Business Logic（为什么需要这个枚举）:
@@ -84,6 +138,8 @@ pub enum TaskStageOutcome {
     RunnerReady,
     AgentFinished,
     VerificationPassed,
+    VerificationFailed,
+    VerificationInfraFailed,
     DeliveryPassed,
     Block,
     Abort,

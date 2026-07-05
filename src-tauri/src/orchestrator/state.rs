@@ -27,6 +27,12 @@ pub fn next_status(
         (OrchestratorTaskStatus::Verifying, TaskStageOutcome::VerificationPassed) => {
             OrchestratorTaskStatus::Delivering
         }
+        (OrchestratorTaskStatus::Verifying, TaskStageOutcome::VerificationFailed) => {
+            OrchestratorTaskStatus::Preparing
+        }
+        (OrchestratorTaskStatus::Verifying, TaskStageOutcome::VerificationInfraFailed) => {
+            OrchestratorTaskStatus::Blocked
+        }
         (OrchestratorTaskStatus::Delivering, TaskStageOutcome::DeliveryPassed) => {
             OrchestratorTaskStatus::Done
         }
@@ -93,6 +99,54 @@ mod tests {
         assert_eq!(
             next_status(OrchestratorTaskStatus::Running, TaskStageOutcome::Noop),
             OrchestratorTaskStatus::Running
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     verifier 判定代码未满足任务目标时，任务应回到 Preparing，随后复用同一 worktree 启动修复 runner。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 Verifying 输入 VerificationFailed，断言状态机返回 Preparing。
+    #[test]
+    fn verification_failed_returns_to_preparing() {
+        assert_eq!(
+            next_status(
+                OrchestratorTaskStatus::Verifying,
+                TaskStageOutcome::VerificationFailed
+            ),
+            OrchestratorTaskStatus::Preparing
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     verifier 基础设施失败无法自动修复，任务应阻塞等待用户处理 CLI、JSON 或 diff 读取问题。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 Verifying 输入 VerificationInfraFailed，断言状态机返回 Blocked。
+    #[test]
+    fn verification_infra_failed_blocks_task() {
+        assert_eq!(
+            next_status(
+                OrchestratorTaskStatus::Verifying,
+                TaskStageOutcome::VerificationInfraFailed
+            ),
+            OrchestratorTaskStatus::Blocked
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     verifier 判定通过仍应保持原有交付路径，进入 Delivering 后由 delivery pipeline 处理 Git 副作用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 Verifying 输入 VerificationPassed，断言状态机返回 Delivering。
+    #[test]
+    fn verification_passed_enters_delivering() {
+        assert_eq!(
+            next_status(
+                OrchestratorTaskStatus::Verifying,
+                TaskStageOutcome::VerificationPassed
+            ),
+            OrchestratorTaskStatus::Delivering
         );
     }
 }

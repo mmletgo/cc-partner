@@ -244,7 +244,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 远端项目的 Orchestrator 任务以远端 cc-partner 为权威来源；本机 remote shortcut 只通过 P2P Orchestrator route 创建、列出、入队、重试、终止和读取 evidence，不把远端任务复制成本机可调度任务。远端设备离线时，本机允许创建 pending remote task，写入本机 outbox 并展示“待发送到远端”；设备恢复在线后后台 dispatcher 自动投递，投递使用稳定 clientRequestId 防止超时重试重复创建，sending 超过 5 分钟会恢复 pending 重试，投递成功后必须在同一事务内保存远端 task id 并更新远端任务 mirror。远端 mirror 只用于离线展示最近快照，本机 scheduler、验证和交付不得消费 mirror 行
 - Runner 必须使用 Workbench 可见的 tmux terminal 和任务 worktree，方便用户随时 takeover 或观察 Claude Code 执行现场；每轮 Runner attempt 记录 prompt、worktree、session 和状态，首轮创建任务 worktree，Blocked retry 或后续修复轮复用同一 worktree、新建终端 session，并使用新的 attempt 序号
 - Claude Code 开发 Prompt 必须要求完成代码、测试/验证和必要证据说明后，最后单独输出 `ORCHESTRATOR_DEV_DONE`；后端监听可见开发终端输出，只在检测到换行终结的独立哨兵行且该 session/attempt 仍是任务 active runner 后自动进入既有验证/交付流程，手动“完成 Agent 运行”命令仍作为用户 fallback
-- 后端自动执行验证命令并调用验证 Claude 做最终裁决；验证未通过时在同一 worktree 新建 terminal/Claude 继续修复，直到通过或用户终止
+- 后端自动执行验证命令并调用验证 Claude 做最终裁决；验证命令非零退出作为 verifier 输入，不直接阻塞任务，只有命令启动/读取/超时、verifier CLI/JSON/schema、diff 读取等基础设施失败才进入 Blocked；验证未通过时在同一 worktree 新建 terminal/Claude 继续修复，直到通过或用户终止
 - 目标态验证通过后按全局自动化配置完成 commit、推送任务分支、合并主工作区和推送主分支
 - 任务进入 Blocked 或循环修复时保留原因、worktree/session 入口和 evidence 链；Evidence 记录验证输出、验证 Claude 裁决、修复 Prompt、交付阶段结果和失败摘要，供前端任务看板展示与追溯
 - OrchestratorPanel 只拥有项目级任务看板和编排状态；Workbench 拥有其 workspace view 挂载、项目现场、terminal takeover、文件和 Git 操作

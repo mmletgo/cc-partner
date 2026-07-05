@@ -13,7 +13,9 @@ use crate::commands::workbench::{
 };
 use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
-use crate::orchestrator::models::{OrchestratorTaskDto, OrchestratorTaskStatus};
+use crate::orchestrator::models::{
+    OrchestratorTaskDto, OrchestratorTaskStatus, EVIDENCE_KIND_DELIVERY,
+};
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
 use crate::storage::{WorkbenchProjectRepo, WorkbenchWorktreeRepo};
@@ -36,7 +38,6 @@ const PIPE_READER_JOIN_GRACE_TIMEOUT: Duration = Duration::from_millis(200);
 const OUTPUT_TRUNCATED_MARKER: &str = "[output truncated]";
 #[cfg(unix)]
 const SIGKILL: std::os::raw::c_int = 9;
-const DELIVERY_EVIDENCE_KIND: &str = "delivery";
 static DELIVERY_TASK_LOCKS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 
 /// 单任务 delivery 执行权守卫。
@@ -159,6 +160,20 @@ struct LimitedPipeOutput {
 pub struct DeliverySummary {
     pub task: OrchestratorTaskDto,
     pub stages: Vec<String>,
+}
+
+/// verifier 专用验证命令报告。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     Phase8 中验证命令非零退出不是基础设施失败，而是 verifier Claude 审查任务完成度的输入。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存命令整体是否通过、evidence summary 短值和可落库的格式化输出内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationCommandReport {
+    pub passed: bool,
+    pub summary: String,
+    pub content: String,
 }
 
 /// Orchestrator delivery 运行时依赖。
@@ -650,10 +665,8 @@ where
 /// Code Logic（这个函数做什么）:
 ///     逐条用平台 shell 在 cwd 中执行命令，成功时返回包含命令、stdout、stderr 的合并文本；
 ///     任一命令非零退出时返回包含失败命令和输出的 AppError。
-pub async fn run_verification_commands(
-    cwd: &Path,
-    commands: &[String],
-) -> Result<String, AppError> {
+#[cfg(test)]
+async fn run_verification_commands(cwd: &Path, commands: &[String]) -> Result<String, AppError> {
     run_verification_commands_with_limits(
         cwd,
         commands,
@@ -664,11 +677,68 @@ pub async fn run_verification_commands(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     verifier 需要读取完整验证输出；命令非零退出应进入审查上下文，而不是直接阻塞任务。
+///
+/// Code Logic（这个函数做什么）:
+///     使用生产 timeout 和输出上限执行 verifier 专用验证命令，返回 passed/failed/skipped report；启动、读取、timeout 错误仍返回 Err。
+pub async fn run_validation_commands_for_verifier(
+    cwd: &Path,
+    commands: &[String],
+) -> Result<ValidationCommandReport, AppError> {
+    run_validation_commands_for_verifier_with_limits(
+        cwd,
+        commands,
+        DEFAULT_VERIFICATION_TIMEOUT,
+        DEFAULT_MAX_OUTPUT_BYTES,
+    )
+    .await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     单测需要用短 timeout 验证基础设施错误路径，同时生产代码继续使用安全默认限制。
+///
+/// Code Logic（这个函数做什么）:
+///     逐条执行验证命令并累积格式化输出；非零退出只把 report.passed 置为 false，所有命令仍继续执行。
+pub async fn run_validation_commands_for_verifier_with_limits(
+    cwd: &Path,
+    commands: &[String],
+    timeout: Duration,
+    max_output_bytes: usize,
+) -> Result<ValidationCommandReport, AppError> {
+    if commands.is_empty() {
+        return Ok(ValidationCommandReport {
+            passed: true,
+            summary: "skipped".to_string(),
+            content: "未配置验证命令，跳过验证。".to_string(),
+        });
+    }
+
+    let mut combined = String::new();
+    let mut passed = true;
+    for command in commands {
+        let output = run_shell_command(cwd, command, timeout, max_output_bytes).await?;
+        let section = format_verification_output(command, &output);
+        combined.push_str(&section);
+        combined.push('\n');
+        if !output.status.success() {
+            passed = false;
+        }
+    }
+
+    Ok(ValidationCommandReport {
+        passed,
+        summary: if passed { "passed" } else { "failed" }.to_string(),
+        content: combined,
+    })
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     测试和未来配置需要能用短 timeout/小输出上限验证行为，而生产入口仍使用安全默认值。
 ///
 /// Code Logic（这个函数做什么）:
 ///     逐条执行验证命令；每条命令应用 timeout 和 stdout+stderr 总量截断，非零退出返回包含截断输出的 AppError。
-pub async fn run_verification_commands_with_limits(
+#[cfg(test)]
+async fn run_verification_commands_with_limits(
     cwd: &Path,
     commands: &[String],
     timeout: Duration,
@@ -1029,7 +1099,7 @@ async fn add_delivery_evidence(
     content: &str,
 ) -> Result<(), AppError> {
     orchestrator_repo
-        .add_evidence(task_id, DELIVERY_EVIDENCE_KIND, title, summary, content)
+        .add_evidence(task_id, EVIDENCE_KIND_DELIVERY, title, summary, content)
         .await
 }
 
@@ -1154,6 +1224,70 @@ mod tests {
 
         assert!(message.contains("printf failure"));
         assert!(message.contains("failure"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Phase8 中验证命令非零退出是 verifier Claude 的业务输入，不能直接作为基础设施错误阻塞任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用 verifier 专用验证 helper 执行非零命令，断言返回 failed report 而不是 Err，并保留命令输出。
+    #[tokio::test]
+    async fn verifier_validation_report_treats_nonzero_exit_as_failed_report() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let report = run_validation_commands_for_verifier_with_limits(
+            dir.path(),
+            &["printf failure >&2; exit 7".to_string()],
+            std::time::Duration::from_secs(5),
+            4096,
+        )
+        .await
+        .expect("nonzero exit should be report input");
+
+        assert!(!report.passed);
+        assert_eq!(report.summary, "failed");
+        assert!(report.content.contains("printf failure"));
+        assert!(report.content.contains("exit"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     空验证命令仍要产生可审计 skipped evidence，并交给 verifier 结合 diff 判断任务是否满足目标。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用 verifier 专用验证 helper 的空命令分支，断言 report 为 passed/skipped 且内容说明跳过。
+    #[tokio::test]
+    async fn verifier_validation_report_skips_empty_commands() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let report = run_validation_commands_for_verifier(dir.path(), &[])
+            .await
+            .expect("empty commands");
+
+        assert!(report.passed);
+        assert_eq!(report.summary, "skipped");
+        assert!(report.content.contains("未配置验证命令"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     命令超时属于验证基础设施失败，系统不能把不完整输出交给 verifier 继续裁决。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     使用短 timeout 执行阻塞命令，断言 verifier 专用 helper 仍返回 Err。
+    #[tokio::test]
+    async fn verifier_validation_report_keeps_timeout_as_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let error = run_validation_commands_for_verifier_with_limits(
+            dir.path(),
+            &[sleep_command()],
+            std::time::Duration::from_millis(50),
+            1024,
+        )
+        .await
+        .expect_err("timeout should be infrastructure error");
+        let message = error.to_string();
+
+        assert!(message.contains("timeout") || message.contains("超时"));
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1958,7 +2092,7 @@ mod tests {
         assert_eq!(delivered.task.status, OrchestratorTaskStatus::Done);
         assert!(!evidence
             .iter()
-            .any(|item| item.kind == DELIVERY_EVIDENCE_KIND && item.summary == "failed"));
+            .any(|item| item.kind == EVIDENCE_KIND_DELIVERY && item.summary == "failed"));
     }
 
     /// Business Logic（为什么需要这个函数）:

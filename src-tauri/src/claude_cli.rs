@@ -416,13 +416,14 @@ where
 ///     不同 Claude CLI 版本可能返回直接 JSON、`structured_output` 或 `result` 包装。
 ///
 /// Code Logic（这个函数做什么）:
-///     先解析 stdout 为 JSON Value，再依次尝试直接反序列化、structured_output、result object、
-///     result string。
+///     先剥离整段 fenced JSON，再解析 stdout 为 JSON Value；随后依次尝试直接反序列化、structured_output、
+///     result object、result string（result string 也允许 fenced JSON）。
 pub(crate) fn parse_structured_output<T>(stdout: &str) -> Result<T, AppError>
 where
     T: DeserializeOwned,
 {
-    let value: serde_json::Value = serde_json::from_str(stdout.trim())?;
+    let stripped_stdout = strip_markdown_fenced_json(stdout);
+    let value: serde_json::Value = serde_json::from_str(&stripped_stdout)?;
     if let Ok(parsed) = serde_json::from_value::<T>(value.clone()) {
         return Ok(parsed);
     }
@@ -434,13 +435,38 @@ where
             return Ok(serde_json::from_value::<T>(result.clone())?);
         }
         if let Some(text) = result.as_str() {
-            return Ok(serde_json::from_str::<T>(text.trim())?);
+            let stripped_result = strip_markdown_fenced_json(text);
+            return Ok(serde_json::from_str::<T>(&stripped_result)?);
         }
         return Err(AppError::generic("Claude CLI 输出 result 不是可解析 JSON"));
     }
     Err(AppError::generic(
         "Claude CLI 输出缺少结构化 JSON/structured_output/result 字段",
     ))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Claude CLI 或模型偶尔把结构化 JSON 放进 markdown fenced code block；结构化解析不应因此误判为失败。
+///
+/// Code Logic（这个函数做什么）:
+///     如果整段文本是 fenced code block，则提取 fence 内容；否则返回 trim 后文本。
+fn strip_markdown_fenced_json(value: &str) -> String {
+    let trimmed = value.trim();
+    let lines = trimmed.lines().collect::<Vec<_>>();
+    if lines.len() >= 2
+        && lines
+            .first()
+            .is_some_and(|line| line.trim_start().starts_with("```"))
+    {
+        if let Some(end) = lines
+            .iter()
+            .rposition(|line| line.trim_start().starts_with("```"))
+            .filter(|index| *index > 0)
+        {
+            return lines[1..end].join("\n").trim().to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 /// 从 Claude CLI 非零退出输出中提取用户可读错误。
@@ -558,11 +584,19 @@ mod tests {
         let string: SampleOutput =
             parse_structured_output(r#"{"result":"{\"value\":\"string\"}"}"#)
                 .expect("result string");
+        let fenced_direct: SampleOutput =
+            parse_structured_output("```json\n{\"value\":\"fenced\"}\n```").expect("fenced");
+        let fenced_result: SampleOutput = parse_structured_output(
+            "{\"result\":\"```json\\n{\\\"value\\\":\\\"fenced-result\\\"}\\n```\"}",
+        )
+        .expect("fenced result");
 
         assert_eq!(direct.value, "direct");
         assert_eq!(structured.value, "wrapped");
         assert_eq!(object.value, "object");
         assert_eq!(string.value, "string");
+        assert_eq!(fenced_direct.value, "fenced");
+        assert_eq!(fenced_result.value, "fenced-result");
     }
 
     #[test]

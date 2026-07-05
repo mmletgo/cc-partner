@@ -3,16 +3,21 @@ use crate::error::AppError;
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
     OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskAttemptRow,
-    OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus,
+    OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus, EVIDENCE_KIND_DELIVERY,
+    EVIDENCE_KIND_REPAIR_PROMPT, EVIDENCE_KIND_VERIFICATION_OUTPUT,
+    EVIDENCE_KIND_VERIFICATION_REVIEW,
 };
 use crate::orchestrator::outbox::{
     create_pending_remote_task, is_remote_network_error, mirror_payload_from_task,
     open_remote_project_for_shortcut, sync_remote_task_mirror_for_project,
     OrchestratorRemoteOutboxDto, RemoteMirrorTask,
 };
+use crate::orchestrator::prompt::RepairPromptContext;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
 use crate::orchestrator::repo::OrchestratorRepo;
+use crate::orchestrator::runner::prepare_repair_runner;
+use crate::orchestrator::verifier::{self, VerifierReview};
 use crate::state::AppState;
 use crate::workbench::models::WorkbenchProjectRow;
 use crate::workbench::remote_ids::{parse_remote_entity_id, remote_entity_id};
@@ -469,6 +474,18 @@ struct ConditionalDeliveryTransition {
     task: OrchestratorTaskRow,
 }
 
+/// 验证失败后回到修复准备阶段的条件转换结果。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     verifier 判定失败后，任务可能已被用户 Abort；命令层必须知道是否真正取得 Verifying->Preparing 执行权。
+///
+/// Code Logic（这个结构体做什么）:
+///     transitioned=true 表示原子转换命中；false 表示状态已变化，task 为当前最新任务。
+struct ConditionalRepairTransition {
+    transitioned: bool,
+    task: OrchestratorTaskRow,
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     验证前置失败也必须落为 failed verificationOutput evidence，用户才能在任务详情看到可审计原因。
 ///
@@ -476,10 +493,69 @@ struct ConditionalDeliveryTransition {
 ///     把失败原因转换为 add_evidence 的固定 kind/title/summary 参数与 content 文本。
 fn verification_failure_evidence(reason: &str) -> VerificationEvidence {
     VerificationEvidence {
-        kind: "verificationOutput",
+        kind: EVIDENCE_KIND_VERIFICATION_OUTPUT,
         title: "验证命令",
         summary: "failed",
         content: reason.to_string(),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     verifier 审查结果需要作为独立 evidence 展示，让用户区分命令输出和模型裁决。
+///
+/// Code Logic（这个函数做什么）:
+///     将 VerifierReview 转成 verificationReview evidence；summary 固定为 passed/failed。
+fn verification_review_evidence(review: &VerifierReview) -> VerificationEvidence {
+    let summary = if review.passed { "passed" } else { "failed" };
+    let repair_prompt = review.repair_prompt.as_deref().unwrap_or("(none)");
+    let risk_notes = if review.risk_notes.is_empty() {
+        "(none)".to_string()
+    } else {
+        review.risk_notes.join("\n- ")
+    };
+    VerificationEvidence {
+        kind: EVIDENCE_KIND_VERIFICATION_REVIEW,
+        title: "Claude 验证器",
+        summary,
+        content: format!(
+            "passed: {}\nreason: {}\nriskNotes: {}\nrepairPrompt: {}",
+            review.passed, review.reason, risk_notes, repair_prompt
+        ),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     verifier 基础设施失败也要留下 failed verification evidence，避免任务只显示 Blocked 而没有诊断内容。
+///
+/// Code Logic（这个函数做什么）:
+///     把 context 和底层错误拼成 verificationReview failed evidence 与 blocked_reason。
+fn verification_review_failure_outcome(
+    context: &str,
+    err: &AppError,
+) -> VerificationFailureOutcome {
+    let reason = format!("{context}: {err}");
+    VerificationFailureOutcome {
+        reason: reason.clone(),
+        evidence: VerificationEvidence {
+            kind: EVIDENCE_KIND_VERIFICATION_REVIEW,
+            title: "Claude 验证器",
+            summary: "failed",
+            content: reason,
+        },
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     verifier 失败时交给下一轮 Claude 的 repair prompt 必须持久化，便于用户审计自动修复方向。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 repairPrompt evidence，summary 使用 failed 表示本次验证未通过。
+fn repair_prompt_evidence(repair_prompt: &str) -> VerificationEvidence {
+    VerificationEvidence {
+        kind: EVIDENCE_KIND_REPAIR_PROMPT,
+        title: "修复指令",
+        summary: "failed",
+        content: repair_prompt.to_string(),
     }
 }
 
@@ -577,6 +653,52 @@ async fn transition_verified_task_to_delivering(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     verifier 判定失败后只有仍处于 Verifying 的任务可以回到 Preparing，避免用户 Abort 被旧流程覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     调用仓储 try_transition_task_status 做 Verifying->Preparing 条件写；未命中时读取当前任务并标记未转换。
+async fn transition_failed_verification_task_to_preparing(
+    repo: &OrchestratorRepo,
+    task_id: &str,
+) -> Result<ConditionalRepairTransition, AppError> {
+    match repo
+        .try_transition_task_status(
+            task_id,
+            OrchestratorTaskStatus::Verifying,
+            OrchestratorTaskStatus::Preparing,
+            None,
+        )
+        .await?
+    {
+        Some(task) => Ok(ConditionalRepairTransition {
+            transitioned: true,
+            task,
+        }),
+        None => Ok(ConditionalRepairTransition {
+            transitioned: false,
+            task: repo.get_task(task_id).await?,
+        }),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     用户可能在验证命令执行后、verifier CLI 启动前终止任务；此时不应继续消耗 Claude CLI 或启动修复。
+///
+/// Code Logic（这个函数做什么）:
+///     重读任务状态；仍为 Verifying 返回 None，状态已变化则返回当前任务 DTO。
+async fn stop_verification_if_task_changed(
+    repo: &OrchestratorRepo,
+    task_id: &str,
+) -> Result<Option<OrchestratorTaskDto>, AppError> {
+    let current = repo.get_task(task_id).await?;
+    if current.status == OrchestratorTaskStatus::Verifying {
+        Ok(None)
+    } else {
+        Ok(Some(OrchestratorTaskDto::from(current)))
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     命令层调用 delivery pipeline 时若遇到未被 pipeline 内部归一的错误，任务也不能永久停在 Delivering。
 ///
 /// Code Logic（这个函数做什么）:
@@ -596,7 +718,13 @@ async fn block_task_with_delivery_error(
     {
         state
             .orchestrator_repo
-            .add_evidence(task_id, "delivery", "delivery", "failed", &reason)
+            .add_evidence(
+                task_id,
+                EVIDENCE_KIND_DELIVERY,
+                "delivery",
+                "failed",
+                &reason,
+            )
             .await?;
     }
     Ok(OrchestratorTaskDto::from(task))
@@ -680,6 +808,95 @@ async fn block_task_with_verification_error(
 ) -> Result<OrchestratorTaskDto, AppError> {
     let outcome = verification_failure_outcome(context, &err);
     block_task_with_verification_outcome(state, task_id, &outcome).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     verifier CLI、JSON、diff 读取等基础设施失败都应写 failed review evidence，并只在任务仍 Verifying 时阻塞。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 verificationReview failed outcome，复用统一 evidence + Blocked side-effect helper。
+async fn block_task_with_verification_review_error(
+    state: &AppState,
+    task_id: &str,
+    context: &str,
+    err: AppError,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let outcome = verification_review_failure_outcome(context, &err);
+    block_task_with_verification_outcome(state, task_id, &outcome).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     修复 runner 准备失败时任务不能永久停在 Preparing 或 runner bootstrap 的 Running 状态。
+///
+/// Code Logic（这个函数做什么）:
+///     按 scheduler 语义尝试 Preparing->Blocked，再尝试 Running->Blocked；未命中时返回当前任务，不覆盖 Abort/Block。
+async fn block_task_with_repair_runner_error(
+    state: &AppState,
+    task_id: &str,
+    err: AppError,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let reason = format!("修复 Runner 准备失败: {err}");
+    let repo = state.orchestrator_repo.as_ref();
+    let blocked = if let Some(task) = repo
+        .try_transition_task_status(
+            task_id,
+            OrchestratorTaskStatus::Preparing,
+            OrchestratorTaskStatus::Blocked,
+            Some(&reason),
+        )
+        .await?
+    {
+        Some(task)
+    } else {
+        repo.try_transition_task_status(
+            task_id,
+            OrchestratorTaskStatus::Running,
+            OrchestratorTaskStatus::Blocked,
+            Some(&reason),
+        )
+        .await?
+    };
+    let task = if let Some(task) = blocked {
+        repo.add_event(task_id, "blocked", &reason, None).await?;
+        task
+    } else {
+        repo.get_task(task_id).await?
+    };
+    Ok(OrchestratorTaskDto::from(task))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     verifier 判定失败后应写 repairPrompt evidence，并在任务仍 Verifying 时回到 Preparing 启动同 worktree 修复轮。
+///
+/// Code Logic（这个函数做什么）:
+///     先做 Verifying->Preparing 条件转换；命中后追加 repairPrompt evidence 并调用 prepare_repair_runner，
+///     准备失败时按 runner failure 语义条件阻塞。
+async fn start_repair_runner_for_failed_review(
+    state: &AppState,
+    app_handle: AppHandle,
+    task_id: &str,
+    review: &VerifierReview,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let repair_prompt = review
+        .repair_prompt
+        .as_deref()
+        .ok_or_else(|| AppError::generic("verifier failed review 缺少 repairPrompt"))?;
+    let repair_transition =
+        transition_failed_verification_task_to_preparing(state.orchestrator_repo.as_ref(), task_id)
+            .await?;
+    if !repair_transition.transitioned {
+        return Ok(OrchestratorTaskDto::from(repair_transition.task));
+    }
+    add_verification_evidence(state, task_id, &repair_prompt_evidence(repair_prompt)).await?;
+
+    let repair_context = RepairPromptContext {
+        verifier_reason: &review.reason,
+        repair_prompt,
+    };
+    match prepare_repair_runner(state, app_handle, &repair_transition.task, repair_context).await {
+        Ok(task) => Ok(OrchestratorTaskDto::from(task)),
+        Err(err) => block_task_with_repair_runner_error(state, task_id, err).await,
+    }
 }
 
 /// 查询 Orchestrator 任务列表。
@@ -1087,7 +1304,8 @@ pub(crate) async fn complete_orchestrator_agent_run_for_attempt(
 ///     手动完成和 sentinel 完成在成功取得 Verifying 执行权后，后续 attempt 完成、验证、delivery 语义必须完全一致。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收已被原子切到 Verifying 的任务 Row，标记 active attempt completed，再执行原有验证命令与 delivery pipeline。
+///     接收已被原子切到 Verifying 的任务 Row，标记 active attempt completed，执行验证命令并写 evidence；
+///     非零验证输出交给 verifier Claude 裁决，passed=true 进入 delivery，passed=false 回 Preparing 启动修复 runner。
 async fn complete_orchestrator_agent_run_after_verifying_transition(
     state: &AppState,
     app_handle: AppHandle,
@@ -1135,17 +1353,79 @@ async fn complete_orchestrator_agent_run_after_verifying_transition(
         verification_commands_for_agent_completion(&config.orchestrator)
     };
 
-    if verification_commands.is_empty() {
-        state
-            .orchestrator_repo
-            .add_evidence(
+    let validation_report =
+        match crate::orchestrator::delivery::run_validation_commands_for_verifier(
+            &cwd,
+            &verification_commands,
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(err) => {
+                return block_task_with_verification_error(
+                    state,
+                    &task.id,
+                    "验证命令基础设施失败",
+                    err,
+                )
+                .await;
+            }
+        };
+    state
+        .orchestrator_repo
+        .add_evidence(
+            &task.id,
+            EVIDENCE_KIND_VERIFICATION_OUTPUT,
+            "验证命令",
+            &validation_report.summary,
+            &validation_report.content,
+        )
+        .await?;
+    if let Some(current) =
+        stop_verification_if_task_changed(state.orchestrator_repo.as_ref(), &task.id).await?
+    {
+        return Ok(current);
+    }
+
+    let diff = match verifier::collect_worktree_diff(&cwd) {
+        Ok(diff) => diff,
+        Err(err) => {
+            return block_task_with_verification_review_error(
+                state,
                 &task.id,
-                "verificationOutput",
-                "验证命令",
-                "skipped",
-                "未配置验证命令，跳过验证。",
+                "读取 worktree diff 失败",
+                err,
             )
-            .await?;
+            .await;
+        }
+    };
+    if let Some(current) =
+        stop_verification_if_task_changed(state.orchestrator_repo.as_ref(), &task.id).await?
+    {
+        return Ok(current);
+    }
+    let review =
+        match verifier::run_verifier_claude(state, &task, &cwd, &validation_report.content, &diff)
+            .await
+        {
+            Ok(review) => review,
+            Err(err) => {
+                return block_task_with_verification_review_error(
+                    state,
+                    &task.id,
+                    "Claude verifier 失败",
+                    err,
+                )
+                .await;
+            }
+        };
+    if let Some(current) =
+        stop_verification_if_task_changed(state.orchestrator_repo.as_ref(), &task.id).await?
+    {
+        return Ok(current);
+    }
+    add_verification_evidence(state, &task.id, &verification_review_evidence(&review)).await?;
+    if review.passed {
         let delivery_transition =
             transition_verified_task_to_delivering(state.orchestrator_repo.as_ref(), &task.id)
                 .await?;
@@ -1155,30 +1435,7 @@ async fn complete_orchestrator_agent_run_after_verifying_transition(
         return run_delivery_for_task(state, app_handle, &delivery_transition.task.id).await;
     }
 
-    match crate::orchestrator::delivery::run_verification_commands(&cwd, &verification_commands)
-        .await
-    {
-        Ok(output) => {
-            state
-                .orchestrator_repo
-                .add_evidence(
-                    &task.id,
-                    "verificationOutput",
-                    "验证命令",
-                    "passed",
-                    &output,
-                )
-                .await?;
-            let delivery_transition =
-                transition_verified_task_to_delivering(state.orchestrator_repo.as_ref(), &task.id)
-                    .await?;
-            if !delivery_transition.transitioned {
-                return Ok(OrchestratorTaskDto::from(delivery_transition.task));
-            }
-            run_delivery_for_task(state, app_handle, &delivery_transition.task.id).await
-        }
-        Err(err) => block_task_with_verification_error(state, &task.id, "验证失败", err).await,
-    }
+    start_repair_runner_for_failed_review(state, app_handle, &task.id, &review).await
 }
 
 /// 重试阻塞的 Orchestrator 任务。
@@ -1639,6 +1896,71 @@ mod tests {
         assert_eq!(outcome.evidence.kind, "verificationOutput");
         assert_eq!(outcome.evidence.summary, "failed");
         assert_eq!(outcome.evidence.content, outcome.reason);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     verifier 审查结果会直接驱动 delivery 或 repair，evidence summary 必须稳定反映 passed 布尔值。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     分别构造 passed/failed VerifierReview，断言 evidence kind 和 summary 对齐 Phase8 契约。
+    #[test]
+    fn verification_review_evidence_uses_pass_fail_summary() {
+        let passed = VerifierReview {
+            passed: true,
+            reason: "满足验收".to_string(),
+            repair_prompt: None,
+            risk_notes: Vec::new(),
+        };
+        let failed = VerifierReview {
+            passed: false,
+            reason: "测试失败".to_string(),
+            repair_prompt: Some("修复测试失败".to_string()),
+            risk_notes: vec!["需要复跑 cargo test".to_string()],
+        };
+
+        let passed_evidence = verification_review_evidence(&passed);
+        let failed_evidence = verification_review_evidence(&failed);
+
+        assert_eq!(passed_evidence.kind, EVIDENCE_KIND_VERIFICATION_REVIEW);
+        assert_eq!(passed_evidence.summary, "passed");
+        assert_eq!(failed_evidence.summary, "failed");
+        assert!(failed_evidence.content.contains("修复测试失败"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     verifier 失败时 repairPrompt evidence 是下一轮自动修复的审计入口，kind/summary 不能与验证输出混淆。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用 repair prompt evidence helper，断言 kind、summary 和 content 精确匹配。
+    #[test]
+    fn repair_prompt_evidence_uses_repair_prompt_contract() {
+        let evidence = repair_prompt_evidence("只修复 orchestrator completion 流程");
+
+        assert_eq!(evidence.kind, EVIDENCE_KIND_REPAIR_PROMPT);
+        assert_eq!(evidence.title, "修复指令");
+        assert_eq!(evidence.summary, "failed");
+        assert_eq!(evidence.content, "只修复 orchestrator completion 流程");
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     verifier 判定失败后，如果用户已经 Abort，系统不能把任务回退到 Preparing 并启动新 runner。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Aborted 任务并调用 repair 转换 helper，断言 transitioned=false 且数据库仍为 Aborted。
+    #[tokio::test]
+    async fn repair_transition_skips_when_task_is_no_longer_verifying() {
+        let repo = setup_orchestrator_repo().await;
+        let task = command_task_row("task-aborted-repair", OrchestratorTaskStatus::Aborted);
+        repo.create_task(&task).await.expect("insert task");
+
+        let transition = transition_failed_verification_task_to_preparing(&repo, &task.id)
+            .await
+            .expect("transition result");
+        let persisted = repo.get_task(&task.id).await.expect("persisted task");
+
+        assert!(!transition.transitioned);
+        assert_eq!(transition.task.status, OrchestratorTaskStatus::Aborted);
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
     }
 
     /// Business Logic（为什么需要这个函数）:

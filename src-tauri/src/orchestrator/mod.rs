@@ -19,3 +19,4 @@ pub mod repo;
 pub mod runner;
 pub mod scheduler;
 pub mod state;
+pub mod verifier;

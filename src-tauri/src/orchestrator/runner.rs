@@ -93,7 +93,7 @@ pub async fn prepare_repair_runner(
 ///
 /// Code Logic（这个函数做什么）:
 ///     校验本机项目；attempt=1 创建新 worktree，attempt>1 复用 task.worktree_id；随后创建 session，
-///     用 Preparing 条件更新任务 active runner 字段，写入 running attempt 记录，最后按 `claude\n`、prompt 顺序写终端。
+///     用 Preparing 条件更新任务 active runner 字段；写 attempt/terminal 前重读 active runner，避免 Abort 后仍启动旧 Claude。
 pub async fn prepare_runner_attempt(
     state: &AppState,
     app_handle: AppHandle,
@@ -140,6 +140,11 @@ pub async fn prepare_runner_attempt(
     } else {
         prompt
     };
+    if let Some(current) =
+        stop_runner_input_if_task_changed(state, &task.id, attempt, &session.id).await?
+    {
+        return Ok(current);
+    }
     state
         .orchestrator_repo
         .add_attempt(
@@ -151,10 +156,45 @@ pub async fn prepare_runner_attempt(
             "running",
         )
         .await?;
-    local_write_workbench_session_input(state, session.id.clone(), "claude\n".to_string()).await?;
-    local_write_workbench_session_input(state, session.id.clone(), format!("{prompt}\n")).await?;
+    if let Some(current) =
+        stop_runner_input_if_task_changed(state, &task.id, attempt, &session.id).await?
+    {
+        return Ok(current);
+    }
+    local_write_workbench_session_input(state, session.id.clone(), format!("claude\n{prompt}\n"))
+        .await?;
 
     Ok(running_task)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Runner 挂账为 Running 后用户仍可能立即 Abort；此时不能继续写 attempt 或向 terminal 注入 Claude prompt。
+///
+/// Code Logic（这个函数做什么）:
+///     重读任务并校验 status/attempt/session 仍是当前 runner；失配时返回当前任务，命中时返回 None 允许继续。
+async fn stop_runner_input_if_task_changed(
+    state: &AppState,
+    task_id: &str,
+    attempt: i64,
+    session_id: &str,
+) -> Result<Option<OrchestratorTaskRow>, AppError> {
+    let current = state.orchestrator_repo.get_task(task_id).await?;
+    if active_runner_matches(&current, attempt, session_id) {
+        Ok(None)
+    } else {
+        Ok(Some(current))
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     active runner 的状态校验需要在多个 side effect 前复用，避免不同调用点条件不一致。
+///
+/// Code Logic（这个函数做什么）:
+///     判断任务仍为 Running，attempt 相同，且 session_id 仍指向本次刚创建的 terminal session。
+fn active_runner_matches(task: &OrchestratorTaskRow, attempt: i64, session_id: &str) -> bool {
+    task.status == OrchestratorTaskStatus::Running
+        && task.attempt == attempt
+        && task.session_id.as_deref() == Some(session_id)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -424,5 +464,24 @@ mod tests {
         assert_eq!(super::initial_runner_attempt(&retry).unwrap(), 2);
         let error = super::initial_runner_attempt(&invalid_retry).expect_err("missing worktree");
         assert!(error.to_string().contains("worktree"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Runner 挂账后若用户 Abort 或 active session 被替换，旧异步流程不能继续写 terminal 启动 Claude。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 Running/Aborted/session mismatch 三种任务行，断言 active runner 守卫只接受完全匹配的当前 runner。
+    #[test]
+    fn active_runner_matches_requires_running_attempt_and_session() {
+        let mut task = runner_task_row(Some("worktree-1"), 2);
+        task.status = OrchestratorTaskStatus::Running;
+        task.session_id = Some("session-1".to_string());
+
+        assert!(super::active_runner_matches(&task, 2, "session-1"));
+        assert!(!super::active_runner_matches(&task, 3, "session-1"));
+        assert!(!super::active_runner_matches(&task, 2, "session-2"));
+
+        task.status = OrchestratorTaskStatus::Aborted;
+        assert!(!super::active_runner_matches(&task, 2, "session-1"));
     }
 }
