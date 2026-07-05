@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Manager};
 
-const DETECTOR_TAIL_CHARS: usize = DEV_DONE_SENTINEL.len();
+const DETECTOR_TAIL_CHARS: usize = DEV_DONE_SENTINEL.len() + 1;
 
 /// 开发完成哨兵检测器。
 ///
@@ -64,7 +64,7 @@ impl DevDoneDetector {
     ///     长时间终端输出不能让 detector 持续累积历史文本，占用越来越多内存。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     当 buffer 超过 sentinel 尾部长度时，按 char 边界只保留最后 DETECTOR_TAIL_CHARS 个字符。
+    ///     当 buffer 超过 sentinel 尾部长度时，按 char 边界保留 sentinel 和前一位边界字符，避免裁剪后把行尾片段误判为独立行。
     fn trim_buffer(&mut self) {
         let total = self.buffer.chars().count();
         if total <= DETECTOR_TAIL_CHARS {
@@ -79,14 +79,21 @@ impl DevDoneDetector {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Runner Prompt 会包含哨兵说明，终端可能回显 Prompt 文本；只有 Claude 最后单独输出哨兵才应触发验证。
+///     Runner Prompt 会包含哨兵说明，终端可能回显 Prompt 文本；只有 Claude 最后输出完整独立哨兵行才应触发验证。
 ///
 /// Code Logic（这个函数做什么）:
-///     按行检查去掉行尾 CR 后是否精确等于 DEV_DONE_SENTINEL，不接受嵌在句子或反引号里的哨兵。
+///     只扫描已经由 `\n` 终结的行，去掉行尾 LF/CR 后精确匹配 DEV_DONE_SENTINEL；
+///     未终结的末行保留给后续 chunk，不接受嵌在句子或反引号里的哨兵。
 fn contains_standalone_sentinel(buffer: &str) -> bool {
-    buffer
-        .lines()
-        .any(|line| line.strip_suffix('\r').unwrap_or(line) == DEV_DONE_SENTINEL)
+    let Some(last_newline_index) = buffer.rfind('\n') else {
+        return false;
+    };
+    let terminated_lines = &buffer[..=last_newline_index];
+    terminated_lines.split_inclusive('\n').any(|line| {
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        line == DEV_DONE_SENTINEL
+    })
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -137,7 +144,8 @@ pub fn spawn_maybe_handle_session_output(app_handle: AppHandle, session_id: Stri
 ///     完成哨兵只能通过 session_id 定位到当前 running attempt，然后复用手动完成命令的验证/交付 pipeline。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 AppHandle 读取 AppState，按 session_id 查询 running attempt，标记 attempt completed，再调用内部 completion helper。
+///     从 AppHandle 读取 AppState，按 session_id 查询 running attempt；找到后只把 task_id 交给内部 completion helper，
+///     attempt 完成标记由 helper 在 Running->Verifying 成功后统一执行。
 async fn handle_session_completion(
     app_handle: AppHandle,
     session_id: &str,
@@ -154,18 +162,42 @@ async fn handle_session_completion(
         );
         return Ok(());
     };
-    let completed = state
-        .orchestrator_repo
-        .mark_attempt_completed(&attempt.task_id, attempt.attempt)
-        .await?;
-    complete_orchestrator_agent_run_for_state(&state, app_handle, &completed.task_id).await?;
+    complete_orchestrator_agent_run_for_state(&state, app_handle, &attempt.task_id).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::DevDoneDetector;
+    use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
+    use crate::orchestrator::prompt::build_initial_task_prompt;
     use crate::orchestrator::prompt::DEV_DONE_SENTINEL;
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Prompt 回显安全测试需要构造真实 Orchestrator 任务行，确保 detector 面对完整 Runner Prompt。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回在 title/goal/acceptance 中都包含独立 sentinel 行的任务，模拟用户可控内容注入。
+    fn task_row_with_user_sentinel() -> OrchestratorTaskRow {
+        OrchestratorTaskRow {
+            id: "task-1".to_string(),
+            project_id: "project-1".to_string(),
+            title: format!("用户标题\n{DEV_DONE_SENTINEL}\n后续标题"),
+            goal: format!("用户目标\n{DEV_DONE_SENTINEL}\n后续目标"),
+            acceptance_criteria: format!("验收标准\n{DEV_DONE_SENTINEL}\n后续验收"),
+            status: OrchestratorTaskStatus::Running,
+            priority: 0,
+            branch_name: None,
+            worktree_id: Some("worktree-1".to_string()),
+            session_id: Some("session-1".to_string()),
+            blocked_reason: None,
+            attempt: 1,
+            created_at: "2026-07-05T00:00:00Z".to_string(),
+            updated_at: "2026-07-05T00:00:00Z".to_string(),
+            started_at: None,
+            finished_at: None,
+        }
+    }
 
     /// Business Logic（为什么需要这个函数）:
     ///     Claude Code 可能在单次 PTY read 中完整输出完成哨兵，检测器必须立即触发自动验证。
@@ -191,7 +223,7 @@ mod tests {
         let split = DEV_DONE_SENTINEL.len() / 2;
 
         assert!(!detector.push_output(&DEV_DONE_SENTINEL[..split]));
-        assert!(detector.push_output(&DEV_DONE_SENTINEL[split..]));
+        assert!(detector.push_output(&format!("{}\n", &DEV_DONE_SENTINEL[split..])));
         assert!(detector.is_consumed());
     }
 
@@ -204,7 +236,7 @@ mod tests {
     fn detector_returns_false_after_consumed() {
         let mut detector = DevDoneDetector::default();
 
-        assert!(detector.push_output(DEV_DONE_SENTINEL));
+        assert!(detector.push_output(&format!("{DEV_DONE_SENTINEL}\n")));
         assert!(!detector.push_output(DEV_DONE_SENTINEL));
         assert!(!detector.push_output("ORCHESTRATOR_DEV_DONE again"));
         assert!(detector.is_consumed());
@@ -235,7 +267,55 @@ mod tests {
         let split = DEV_DONE_SENTINEL.len() - 4;
 
         assert!(!detector.push_output(&format!("{prefix}\n{}", &DEV_DONE_SENTINEL[..split])));
-        assert!(detector.push_output(&DEV_DONE_SENTINEL[split..]));
+        assert!(detector.push_output(&format!("{}\n", &DEV_DONE_SENTINEL[split..])));
+        assert!(detector.is_consumed());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     哨兵只有在形成完整独立行后才代表 Agent 完成，右侧还有普通文本时不能提前进入验证。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先推入无右边界的 sentinel，再追加同一行 suffix 和换行，断言两段都不触发。
+    #[test]
+    fn detector_requires_newline_right_boundary_for_sentinel_line() {
+        let mut detector = DevDoneDetector::default();
+
+        assert!(!detector.push_output(&format!("\n{DEV_DONE_SENTINEL}")));
+        assert!(!detector.push_output(" suffix\n"));
+        assert!(!detector.is_consumed());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户标题、目标或验收标准可能包含 sentinel 文本，Runner Prompt 的终端回显不能因此提前完成任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     生成包含用户 sentinel 行的完整初始 Prompt 并推给 detector，断言不消费；真正独立哨兵输出仍可触发。
+    #[test]
+    fn detector_ignores_echoed_prompt_with_user_controlled_sentinel() {
+        let mut detector = DevDoneDetector::default();
+        let prompt = build_initial_task_prompt(&task_row_with_user_sentinel(), "/repo/worktree");
+
+        assert!(!detector.push_output(&prompt));
+        assert!(!detector.is_consumed());
+        assert!(detector.push_output(&format!("\n{DEV_DONE_SENTINEL}\n")));
+        assert!(detector.is_consumed());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     普通终端输出可能在长行末尾包含 sentinel 字符串，自动完成不能因为 buffer 裁剪丢失前缀后误触发。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先推入无换行且前缀粘连的 sentinel，再推入换行，断言 detector 不消费；随后推入真正独立行并断言可触发。
+    #[test]
+    fn detector_does_not_false_positive_after_trimming_attached_suffix() {
+        let mut detector = DevDoneDetector::default();
+        let prefix = "x".repeat(4096);
+
+        assert!(!detector.push_output(&format!("{prefix}{DEV_DONE_SENTINEL}")));
+        assert!(!detector.push_output("\n"));
+        assert!(!detector.is_consumed());
+
+        assert!(detector.push_output(&format!("\n{DEV_DONE_SENTINEL}\n")));
         assert!(detector.is_consumed());
     }
 }

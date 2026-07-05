@@ -2,8 +2,8 @@ use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
-    OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskDto,
-    OrchestratorTaskRow, OrchestratorTaskStatus,
+    OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskAttemptRow,
+    OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus,
 };
 use crate::orchestrator::outbox::{
     create_pending_remote_task, is_remote_network_error, mirror_payload_from_task,
@@ -603,6 +603,22 @@ async fn block_task_with_delivery_error(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     手动完成和 terminal sentinel 共用 completion pipeline；只要任务成功从 Running 进入 Verifying，
+///     当前 active running attempt 就应标记为 completed，避免重复 sentinel 或重复点击再次定位到旧 attempt。
+///
+/// Code Logic（这个函数做什么）:
+///     使用任务行上的 active attempt 编号调用 OrchestratorRepo::mark_attempt_completed；缺少 attempt 时返回业务错误。
+async fn mark_active_running_attempt_completed(
+    repo: &OrchestratorRepo,
+    task: &OrchestratorTaskRow,
+) -> Result<OrchestratorTaskAttemptRow, AppError> {
+    if task.attempt <= 0 {
+        return Err(AppError::generic("任务缺少 active attempt，无法标记完成"));
+    }
+    repo.mark_attempt_completed(&task.id, task.attempt).await
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     验证完成后命令层需要运行自动交付，并对未预期错误做最终兜底。
 ///
 /// Code Logic（这个函数做什么）:
@@ -1040,6 +1056,13 @@ pub(crate) async fn complete_orchestrator_agent_run_for_state(
         )
         .await?;
 
+    if let Err(err) =
+        mark_active_running_attempt_completed(state.orchestrator_repo.as_ref(), &task).await
+    {
+        return block_task_with_verification_error(state, &task.id, "标记任务尝试完成失败", err)
+            .await;
+    }
+
     let Some(worktree_id) = task.worktree_id.as_deref() else {
         return block_task_with_verification_failure(
             state,
@@ -1471,6 +1494,46 @@ mod tests {
         assert!(!transition.transitioned);
         assert_eq!(transition.task.status, OrchestratorTaskStatus::Aborted);
         assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     手动完成按钮与 sentinel 共用 completion helper，Running->Verifying 成功后必须把当前 active attempt 标为 completed。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Running 任务和 running attempt，模拟 helper 的状态转移后调用 active attempt 完成 helper，
+    ///     断言 session 反查不再返回 running attempt。
+    #[tokio::test]
+    async fn completion_helper_marks_active_running_attempt_completed_after_verifying() {
+        let repo = setup_orchestrator_repo().await;
+        let mut task = command_task_row("task-running", OrchestratorTaskStatus::Running);
+        task.attempt = 1;
+        task.worktree_id = Some("worktree-1".to_string());
+        task.session_id = Some("session-1".to_string());
+        repo.create_task(&task).await.expect("insert task");
+        repo.add_attempt(&task.id, 1, "worktree-1", "session-1", "prompt", "running")
+            .await
+            .expect("insert attempt");
+
+        let verifying = repo
+            .transition_task_status(
+                &task.id,
+                OrchestratorTaskStatus::Running,
+                OrchestratorTaskStatus::Verifying,
+                None,
+            )
+            .await
+            .expect("transition to verifying");
+        let completed = mark_active_running_attempt_completed(&repo, &verifying)
+            .await
+            .expect("complete active attempt");
+        let running = repo
+            .get_running_attempt_by_session("session-1")
+            .await
+            .expect("query running attempt");
+
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.completed_at.is_some(), true);
+        assert!(running.is_none());
     }
 
     /// Business Logic（为什么需要这个函数）:

@@ -32,6 +32,26 @@ pub struct RepairPromptContext<'a> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     任务标题、目标、验收标准和修复上下文都来自用户或模型输出，不能让其中的 sentinel 原样形成独立终端行。
+///
+/// Code Logic（这个函数做什么）:
+///     对用户可控文本 trim 后逐行加 Markdown 引用前缀 `> `；空文本输出占位行，保持 Prompt 可读且避免裸哨兵行。
+fn render_user_block(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return "> （未填写）".to_string();
+    }
+    trimmed
+        .lines()
+        .map(|line| {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            format!("> {line}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     可见 Runner 启动 Claude Code 后，需要把任务边界、验收标准和项目位置一次性交给执行 worker。
 ///
 /// Code Logic（这个函数做什么）:
@@ -49,7 +69,7 @@ pub fn build_task_prompt(task: &OrchestratorTaskRow, project_path: &str) -> Stri
 pub fn build_initial_task_prompt(task: &OrchestratorTaskRow, worktree_path: &str) -> String {
     format!(
         "请在当前项目中完成 Orchestrator 任务。\n\n\
-任务标题：{}\n\n\
+任务标题：\n{}\n\n\
 任务目标：\n{}\n\n\
 验收标准：\n{}\n\n\
 项目路径：{}\n\n\
@@ -60,9 +80,9 @@ pub fn build_initial_task_prompt(task: &OrchestratorTaskRow, worktree_path: &str
 4. 不要自行清理、删除、合并当前 worktree，也不要自动提交或推送；保留现场供 Orchestrator/Workbench 接管。\n\
 5. 只有在你已经完成代码、更改过的相关测试/验证、并给出必要证据说明后，最后单独输出 `{}`。\n\
 6. 未完成代码、未运行必要测试/验证或还没有证据说明时，绝对不要输出 `{}`。\n",
-        task.title.trim(),
-        task.goal.trim(),
-        task.acceptance_criteria.trim(),
+        render_user_block(&task.title),
+        render_user_block(&task.goal),
+        render_user_block(&task.acceptance_criteria),
         worktree_path.trim(),
         DEV_DONE_SENTINEL,
         DEV_DONE_SENTINEL
@@ -81,7 +101,7 @@ pub fn build_repair_task_prompt(
 ) -> String {
     format!(
         "请在当前项目中修复 Orchestrator 任务。\n\n\
-任务标题：{}\n\n\
+任务标题：\n{}\n\n\
 任务目标：\n{}\n\n\
 验收标准：\n{}\n\n\
 项目路径：{}\n\n\
@@ -94,12 +114,12 @@ Repair prompt：\n{}\n\n\
 4. 不要自行清理、删除、合并当前 worktree，也不要自动提交或推送；保留现场供 Orchestrator/Workbench 接管。\n\
 5. 只有在你已经完成代码、更改过的相关测试/验证、并给出必要证据说明后，最后单独输出 `{}`。\n\
 6. 未完成代码、未运行必要测试/验证或还没有证据说明时，绝对不要输出 `{}`。\n",
-        task.title.trim(),
-        task.goal.trim(),
-        task.acceptance_criteria.trim(),
+        render_user_block(&task.title),
+        render_user_block(&task.goal),
+        render_user_block(&task.acceptance_criteria),
         worktree_path.trim(),
-        context.verifier_reason.trim(),
-        context.repair_prompt.trim(),
+        render_user_block(context.verifier_reason),
+        render_user_block(context.repair_prompt),
         DEV_DONE_SENTINEL,
         DEV_DONE_SENTINEL
     )
@@ -190,5 +210,36 @@ mod tests {
         assert!(prompt.contains("测试/验证"));
         assert!(prompt.contains("必要证据说明"));
         assert!(prompt.contains("未完成"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户可控任务文本和 repair 上下文可能包含 sentinel，Prompt 回显不能生成原样独立哨兵行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 title/goal/acceptance/verifier_reason/repair_prompt 都包含独立 sentinel 行的 Prompt，
+    ///     断言输出中不存在 trim 后等于 sentinel 的行，同时保留带引用前缀的可读文本。
+    #[test]
+    fn user_controlled_prompt_blocks_do_not_emit_standalone_sentinel_lines() {
+        let mut task = task_row();
+        task.title = format!("标题\n{}\n后续标题", super::DEV_DONE_SENTINEL);
+        task.goal = format!("目标\n{}\n后续目标", super::DEV_DONE_SENTINEL);
+        task.acceptance_criteria = format!("验收\n{}\n后续验收", super::DEV_DONE_SENTINEL);
+        let context = RepairPromptContext {
+            verifier_reason: concat!("验证失败\n", "ORCHESTRATOR_DEV_DONE", "\n重新检查"),
+            repair_prompt: concat!("修复要求\n", "ORCHESTRATOR_DEV_DONE", "\n只改相关文件"),
+        };
+
+        let initial = build_initial_task_prompt(&task, "/repo/worktree");
+        let repair = build_repair_task_prompt(&task, "/repo/worktree", &context);
+
+        for prompt in [&initial, &repair] {
+            assert!(
+                !prompt
+                    .lines()
+                    .any(|line| line.strip_suffix('\r').unwrap_or(line) == super::DEV_DONE_SENTINEL),
+                "prompt must not contain a raw standalone sentinel line:\n{prompt}"
+            );
+            assert!(prompt.contains("> ORCHESTRATOR_DEV_DONE"));
+        }
     }
 }

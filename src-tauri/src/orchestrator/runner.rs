@@ -51,16 +51,17 @@ pub async fn prepare_visible_runner(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     首轮 Runner 需要创建新的隔离 worktree 和可见终端，并注入初始任务 Prompt。
+///     首轮或 Blocked retry 调度需要创建/复用隔离 worktree 和可见终端，并注入初始任务 Prompt。
 ///
 /// Code Logic（这个函数做什么）:
-///     以 attempt=1 调用统一 attempt 准备流程；prompt 由 prepare_runner_attempt 在 worktree 路径确定后生成。
+///     根据任务当前 attempt/worktree 选择本次 runner attempt；prompt 由 prepare_runner_attempt 在 worktree 路径确定后生成。
 pub async fn prepare_initial_runner(
     state: &AppState,
     app_handle: AppHandle,
     task: &OrchestratorTaskRow,
 ) -> Result<OrchestratorTaskRow, AppError> {
-    prepare_runner_attempt(state, app_handle, task, String::new(), 1).await
+    let attempt = initial_runner_attempt(task)?;
+    prepare_runner_attempt(state, app_handle, task, String::new(), attempt).await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -154,6 +155,29 @@ pub async fn prepare_runner_attempt(
     local_write_workbench_session_input(state, session.id.clone(), format!("{prompt}\n")).await?;
 
     Ok(running_task)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Blocked 任务 retry 后再次被 scheduler 领取时，不能重复使用已经写入 attempt history 的轮次号。
+///
+/// Code Logic（这个函数做什么）:
+///     task.attempt<=0 说明首轮尚未成功挂账，返回 1；已有 attempt 且有 worktree 时返回 attempt+1；
+///     已有 attempt 但缺少 worktree 视为现场不完整并返回业务错误。
+fn initial_runner_attempt(task: &OrchestratorTaskRow) -> Result<i64, AppError> {
+    if task.attempt <= 0 {
+        return Ok(1);
+    }
+    if task
+        .worktree_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+    {
+        return Ok(task.attempt + 1);
+    }
+    Err(AppError::generic(
+        "任务已有 attempt 但缺少 worktree，无法继续调度",
+    ))
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -382,6 +406,23 @@ mod tests {
 
         let error = super::worktree_seed_for_attempt(&task, 2).expect_err("missing worktree");
 
+        assert!(error.to_string().contains("worktree"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Blocked 任务 retry 后会保留已有 worktree 与上一轮 attempt，再次调度必须使用下一轮 attempt 避免唯一约束冲突。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     校验 bootstrap 前 attempt=0 仍选择首轮，已有 worktree 的 retry 选择 attempt+1，数据不完整时返回业务错误。
+    #[test]
+    fn initial_runner_attempt_selects_next_attempt_for_retry_with_worktree() {
+        let bootstrap = runner_task_row(None, 0);
+        let retry = runner_task_row(Some("worktree-1"), 1);
+        let invalid_retry = runner_task_row(None, 1);
+
+        assert_eq!(super::initial_runner_attempt(&bootstrap).unwrap(), 1);
+        assert_eq!(super::initial_runner_attempt(&retry).unwrap(), 2);
+        let error = super::initial_runner_attempt(&invalid_retry).expect_err("missing worktree");
         assert!(error.to_string().contains("worktree"));
     }
 }
