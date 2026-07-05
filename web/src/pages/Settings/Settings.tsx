@@ -7,8 +7,8 @@
  *   把整张配置表发送到后端持久化，区分"未保存修改"和"已保存配置"。
  *
  * Code Logic（这个页面做什么）:
- *   - 子 tab：常规 / 同步 / AI / 关于，把既有 Card 按查看任务分组
- *   - Card 区块：基本设置 / 权限管理 / 截图快捷键 / 云端同步 / GitHub Trending / 关于
+ *   - 子 tab：常规 / 依赖环境 / 健康提醒 / 同步 / AI / 自动化 / 关于，把既有 Card 按查看任务分组
+ *   - Card 区块：基本设置 / 权限管理 / 截图快捷键 / 云端同步 / GitHub Trending / 自动化 / 关于
  *   - 组件挂载时从后端加载配置和版本信息
  *   - Toggle 控件内联实现，避免引入额外 Switch 组件；状态切换走
  *     受控的 onClick + role="switch" + aria-checked
@@ -26,15 +26,24 @@ import { PermissionCard, WorkbenchDependencyCard } from '@/components/domain';
 import { CheckIcon, XIcon, DevicesIcon, FolderIcon, KeyboardIcon, SyncIcon, InfoIcon, DownloadIcon } from '@/lib/icons';
 import { configApi } from '@/api/config';
 import { healthApi } from '@/api/health';
+import { orchestratorConfigApi } from '@/api/orchestratorConfig';
 import { requestNotificationPermission } from '@/lib/notification';
 import { githubTrendingApi } from '@/api/githubTrending';
 import { usePermissions } from '@/hooks/usePermissions';
 import { mapPermissions } from '@/lib/permissionEntries';
+import { AutomationSettingsPanel } from './AutomationSettingsPanel';
 import { HealthPanel } from './HealthPanel';
 import {
   formatShortcutForDisplay,
   resolveShortcutRecording,
 } from './shortcutRecorder';
+import {
+  automationConfigToForm,
+  automationFormToPatch,
+  isAutomationFormDirty,
+  PENDING_AUTOMATION_SETTINGS_FORM,
+} from './automationSettingsState';
+import type { AutomationSettingsForm } from './automationSettingsState';
 import {
   buildConfigUpdate,
   cloudSyncConfigToForm,
@@ -73,7 +82,7 @@ import type {
 import styles from './Settings.module.css';
 
 /** Settings 页内子 tab id */
-type SettingsTabId = 'general' | 'dependencies' | 'health' | 'sync' | 'ai' | 'about';
+type SettingsTabId = 'general' | 'dependencies' | 'health' | 'sync' | 'ai' | 'automation' | 'about';
 
 /** Settings 页内子 tab 定义 */
 interface SettingsTab {
@@ -88,6 +97,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   { id: 'health', labelKey: 'health' },
   { id: 'sync', labelKey: 'sync' },
   { id: 'ai', labelKey: 'ai' },
+  { id: 'automation', labelKey: 'automation' },
   { id: 'about', labelKey: 'about' },
 ];
 
@@ -156,6 +166,7 @@ export function Settings() {
       initialTab === 'health' ||
       initialTab === 'sync' ||
       initialTab === 'ai' ||
+      initialTab === 'automation' ||
       initialTab === 'about'
       ? (initialTab as SettingsTabId)
       : 'general',
@@ -209,6 +220,20 @@ export function Settings() {
   const [healthConfig, setHealthConfig] = useState<HealthConfig | null>(null);
   const [applyingHealth, setApplyingHealth] = useState(false);
   const [healthError, setHealthError] = useState<string | null>(null);
+
+  // Orchestrator 自动化配置：Settings 独立 tab，Phase 2 只做前端表单读写，不接运行时调度。
+  const [automationForm, setAutomationForm] = useState<AutomationSettingsForm>({
+    ...PENDING_AUTOMATION_SETTINGS_FORM,
+  });
+  const [initialAutomationForm, setInitialAutomationForm] = useState<AutomationSettingsForm>({
+    ...PENDING_AUTOMATION_SETTINGS_FORM,
+  });
+  const [defaultAutomationForm, setDefaultAutomationForm] = useState<AutomationSettingsForm>({
+    ...PENDING_AUTOMATION_SETTINGS_FORM,
+  });
+  const [savingAutomation, setSavingAutomation] = useState(false);
+  const [automationError, setAutomationError] = useState<string | null>(null);
+  const [automationSaved, setAutomationSaved] = useState(false);
 
   // macOS 权限状态（设置页手动授权入口，持续轮询以反映用户在系统设置的变更）
   const [tWelcome] = useTranslation('welcome');
@@ -266,6 +291,11 @@ export function Settings() {
   const isDirty = useMemo(() => {
     return isSettingsStateDirty(state, initialState);
   }, [state, initialState]);
+
+  // 自动化 tab 是否存在未应用修改，比较当前表单与最近一次加载/保存快照。
+  const automationDirty = useMemo(() => {
+    return isAutomationFormDirty(automationForm, initialAutomationForm);
+  }, [automationForm, initialAutomationForm]);
 
   // 渲染更新检查结果的提示文本
   const updateHint = useMemo(
@@ -469,6 +499,16 @@ export function Settings() {
   useEffect(() => {
     let cancelled = false;
 
+    /**
+     * 加载 Settings 页面所需的全部配置
+     *
+     * Business Logic（为什么需要这个函数）:
+     *   Settings 各 tab 共享同一次初始化流程，用户进入页面时需要同时获得当前配置、默认值和版本信息，
+     *   自动化 tab 也必须与同步/AI/健康 tab 一样取得当前值与恢复默认基准。
+     *
+     * Code Logic（这个函数做什么）:
+     *   并行调用各配置 API；返回后先检查 cancelled guard，再把后端 DTO 映射为各 tab 的受控表单状态。
+     */
     async function loadConfig() {
       try {
         const [
@@ -481,6 +521,8 @@ export function Settings() {
           defaultGithubTrendingLoaded,
           healthLoaded,
           defaultHealthLoaded,
+          automationLoaded,
+          defaultAutomationLoaded,
         ] = await Promise.all([
           configApi.get(),
           configApi.getDefaults(),
@@ -491,6 +533,8 @@ export function Settings() {
           githubTrendingApi.getDefaultConfig(),
           healthApi.getConfig(),
           healthApi.getDefaultConfig(),
+          orchestratorConfigApi.get(),
+          orchestratorConfigApi.getDefaults(),
         ]);
         if (cancelled) return;
 
@@ -517,6 +561,11 @@ export function Settings() {
         setHealthConfig(healthLoaded);
         setHealthForm(healthConfigToForm(healthLoaded));
         setDefaultHealthForm(healthConfigToForm(defaultHealthLoaded));
+        // Orchestrator 自动化：初始化当前表单、已应用快照与后端默认表单
+        const loadedAutomationForm = automationConfigToForm(automationLoaded);
+        setAutomationForm(loadedAutomationForm);
+        setInitialAutomationForm(loadedAutomationForm);
+        setDefaultAutomationForm(automationConfigToForm(defaultAutomationLoaded));
       } catch (err) {
         if (cancelled) return;
         setLoadError(err instanceof Error ? err.message : t('error.loadConfigFailed'));
@@ -842,6 +891,63 @@ export function Settings() {
       setHealthError(err instanceof Error ? err.message : t('settings:health.applyFailed'));
     } finally {
       setApplyingHealth(false);
+    }
+  };
+
+  /**
+   * 更新 Orchestrator 自动化表单
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   自动化 tab 是受控表单，用户改动任一字段后应清掉上次保存成功/失败提示，避免旧状态误导当前编辑。
+   *
+   * Code Logic（这个函数做什么）:
+   *   接收完整 nextForm 写入状态，同时重置 saved/error 标记；是否 dirty 由 automationDirty 派生计算。
+   */
+  const handleAutomationFormChange = useCallback((nextForm: AutomationSettingsForm) => {
+    setAutomationForm(nextForm);
+    setAutomationError(null);
+    setAutomationSaved(false);
+  }, []);
+
+  /**
+   * Orchestrator 自动化「恢复默认」：把表单重置为后端默认配置
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   用户应能把自动化策略恢复到应用默认值，但恢复默认不应立刻落盘，需由用户再次点击应用配置确认。
+   *
+   * Code Logic（这个函数做什么）:
+   *   使用加载阶段保存的 defaultAutomationForm 覆盖当前表单，并清理保存状态提示。
+   */
+  const handleResetAutomationDefaults = useCallback(() => {
+    setAutomationForm(defaultAutomationForm);
+    setAutomationError(null);
+    setAutomationSaved(false);
+  }, [defaultAutomationForm]);
+
+  /**
+   * Orchestrator 自动化「应用配置」：提交自动化表单到后端并刷新基准快照
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   自动化配置由 Phase 1 后端命令持久化；保存成功后 UI 必须以返回值为准，展示后端归一化后的验证命令。
+   *
+   * Code Logic（这个函数做什么）:
+   *   把表单转成 update patch 调用 update_orchestrator_config；成功后用返回 DTO 重新生成 form/initial，
+   *   失败则展示错误并保留用户当前输入。
+   */
+  const handleSaveAutomation = async () => {
+    setSavingAutomation(true);
+    setAutomationError(null);
+    setAutomationSaved(false);
+    try {
+      const updated = await orchestratorConfigApi.update(automationFormToPatch(automationForm));
+      const savedForm = automationConfigToForm(updated);
+      setAutomationForm(savedForm);
+      setInitialAutomationForm(savedForm);
+      setAutomationSaved(true);
+    } catch (err) {
+      setAutomationError(err instanceof Error ? err.message : t('settings:automation.applyFailed'));
+    } finally {
+      setSavingAutomation(false);
     }
   };
 
@@ -1618,6 +1724,27 @@ export function Settings() {
             ) : null}
           </Card.Body>
         </Card>
+          </div>
+        ) : null}
+
+        {activeTab === 'automation' ? (
+          <div
+            id="settings-panel-automation"
+            className={styles.tabPanel}
+            role="tabpanel"
+            aria-labelledby="settings-tab-automation"
+          >
+            <AutomationSettingsPanel
+              form={automationForm}
+              defaults={defaultAutomationForm}
+              dirty={automationDirty}
+              saving={savingAutomation}
+              error={automationError}
+              saved={automationSaved}
+              onChange={handleAutomationFormChange}
+              onResetDefaults={handleResetAutomationDefaults}
+              onSave={handleSaveAutomation}
+            />
           </div>
         ) : null}
 

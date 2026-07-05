@@ -10,6 +10,7 @@
     "health": "健康提醒",
     "sync": "同步",
     "ai": "AI",
+    "automation": "自动化",
     "about": "关于"
   },
   "basic": {
@@ -86,6 +87,29 @@
     "apply": "应用配置",
     "applying": "应用中…",
     "applyFailed": "应用 Prompt 优化设置失败"
+  },
+  "automation": {
+    "title": "自动化",
+    "description": "配置 Orchestrator 自动领取任务、验证命令和 full-auto 交付策略。这些设置会作为当前设备的全局策略保存。",
+    "enabled": "启用自动领取任务",
+    "enabledHint": "允许 Orchestrator 调度器从队列中自动领取并执行任务。",
+    "maxConcurrentTasks": "并发任务上限",
+    "maxConcurrentTasksHint": "同一设备最多同时运行的自动化任务数，范围 1-8。",
+    "verificationCommands": "验证命令",
+    "verificationCommandsHint": "每行一条命令；保存后由后端统一清理空行并校验长度。",
+    "deliveryTitle": "交付动作",
+    "deliveryDescription": "控制验证通过后的自动提交、推送与合并步骤。",
+    "autoCommit": "自动提交任务改动",
+    "autoCommitHint": "验证通过后自动生成提交并提交任务 worktree 中的改动。",
+    "autoPushTaskBranch": "自动推送任务分支",
+    "autoPushTaskBranchHint": "提交后将任务分支推送到远端仓库。",
+    "autoMergeToMain": "自动合并到主工作区",
+    "autoMergeToMainHint": "任务分支验证通过后自动合并回主工作区。",
+    "autoPushMain": "自动推送主分支",
+    "autoPushMainHint": "主工作区合并完成后自动推送主分支。",
+    "applyFailed": "应用自动化配置失败",
+    "saved": "自动化配置已应用",
+    "dirty": "有未应用的自动化修改"
   },
   "health": {
     "title": "健康提醒",

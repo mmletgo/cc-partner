@@ -10,6 +10,7 @@
     "health": "Health",
     "sync": "Sync",
     "ai": "AI",
+    "automation": "Automation",
     "about": "About"
   },
   "basic": {
@@ -86,6 +87,29 @@
     "apply": "Apply",
     "applying": "Applying…",
     "applyFailed": "Failed to apply Prompt optimizer settings"
+  },
+  "automation": {
+    "title": "Automation",
+    "description": "Configure Orchestrator automatic task pickup, verification commands, and full-auto delivery. These settings are saved as this device's global policy.",
+    "enabled": "Enable automatic task pickup",
+    "enabledHint": "Allow the Orchestrator scheduler to automatically claim and run queued tasks.",
+    "maxConcurrentTasks": "Max concurrent tasks",
+    "maxConcurrentTasksHint": "Maximum automation tasks this device may run at the same time. Range: 1-8.",
+    "verificationCommands": "Verification commands",
+    "verificationCommandsHint": "One command per line. The backend cleans empty lines and validates length when saved.",
+    "deliveryTitle": "Delivery actions",
+    "deliveryDescription": "Control automatic commit, push, and merge steps after verification passes.",
+    "autoCommit": "Automatically commit task changes",
+    "autoCommitHint": "After verification passes, generate a commit and commit changes in the task worktree.",
+    "autoPushTaskBranch": "Automatically push task branch",
+    "autoPushTaskBranchHint": "Push the task branch to the remote repository after committing.",
+    "autoMergeToMain": "Automatically merge to main workspace",
+    "autoMergeToMainHint": "Merge the verified task branch back into the main workspace.",
+    "autoPushMain": "Automatically push main branch",
+    "autoPushMainHint": "Push the main branch after the main workspace merge completes.",
+    "applyFailed": "Failed to apply automation config",
+    "saved": "Automation config applied",
+    "dirty": "You have unapplied automation changes"
   },
   "health": {
     "title": "Health reminder",
