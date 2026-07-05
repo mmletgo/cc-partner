@@ -22,6 +22,17 @@ export interface MobileTerminalChromeVisibility {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   移动端打开 `/mobile` 时应先展示最近项目列表，让用户明确选择要操作的项目。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回移动端 Workbench 的初始面板，当前固定为 projects。
+ */
+export function getInitialMobileWorkbenchPanel(): MobileWorkbenchPanel {
+  return 'projects';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   移动端 Workbench shell 的导航点击需要以纯函数方式选择下一个面板，便于组件和测试共享契约。
  *
  * Code Logic（这个函数做什么）:
@@ -78,13 +89,13 @@ export function getMobileTerminalChromeVisibility(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   用户确认手机竖屏导航默认常开，收起后才退化为顶部展开小按钮。
+ *   移动端默认展示项目列表内容，导航抽屉不应在首屏遮挡项目卡片。
  *
  * Code Logic（这个函数做什么）:
- *   返回移动端 shell 初始抽屉状态；当前规范为默认打开。
+ *   返回移动端 shell 初始抽屉状态；当前规范为默认关闭。
  */
 export function getInitialMobileNavOpen(): boolean {
-  return true;
+  return false;
 }
 
 /**

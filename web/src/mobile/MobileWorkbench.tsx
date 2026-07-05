@@ -14,6 +14,7 @@ import { MobileWorktreePanel } from './components/MobileWorktreePanel';
 import {
   canOpenMobileWorktreeSwitcher,
   canSelectMobileProject,
+  getInitialMobileWorkbenchPanel,
   selectMobileWorktreeWorkspacePanel,
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
@@ -72,7 +73,7 @@ function createMobileFilePanelContext(
  *   管理 active panel/project/worktree/session 状态，调用 httpWorkbenchTransport 拉取数据，用 request id 避免 stale 请求覆盖新选择。
  */
 export function MobileWorkbench(): ReactElement {
-  const [panel, setPanel] = useState<MobileWorkbenchPanel>('projects');
+  const [panel, setPanel] = useState<MobileWorkbenchPanel>(() => getInitialMobileWorkbenchPanel());
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
   const [activeProject, setActiveProject] = useState<WorkbenchProject | null>(null);
   const [worktrees, setWorktrees] = useState<WorkbenchWorktree[]>([]);

@@ -7,6 +7,7 @@ import {
   closeMobileNav,
   getMobileTerminalChromeVisibility,
   getMobileCreatePaneDirection,
+  getInitialMobileWorkbenchPanel,
   getInitialMobileNavOpen,
   getMobileWorktreeStatusKind,
   openMobileNav,
@@ -141,13 +142,24 @@ function testOpenMobileNavReturnsTrue(): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   用户确认手机竖屏导航默认常开，只有主动收起后才显示顶部展开小按钮。
+ *   移动端打开 `/mobile` 时应直接展示项目列表，让用户先选择要操作的项目。
  *
  * Code Logic（这个函数做什么）:
- *   调用默认导航状态 helper，断言初始状态为打开。
+ *   调用默认面板 helper，断言初始面板为 projects。
  */
-function testInitialMobileNavOpenDefaultsToTrue(): void {
-  assertEqual(getInitialMobileNavOpen(), true);
+function testInitialMobileWorkbenchPanelDefaultsToProjects(): void {
+  assertEqual(getInitialMobileWorkbenchPanel(), 'projects');
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端打开项目列表时不应被默认展开的侧边栏遮挡，用户需要时再主动打开导航。
+ *
+ * Code Logic（这个函数做什么）:
+ *   调用默认导航状态 helper，断言初始状态为关闭。
+ */
+function testInitialMobileNavOpenDefaultsToFalse(): void {
+  assertEqual(getInitialMobileNavOpen(), false);
 }
 
 /**
@@ -459,7 +471,8 @@ function testMobileTerminalFullscreenChromeOnlyKeepsPaneActionsAndExit(): void {
 
 testSelectMobilePanelReturnsNextPanel();
 testOpenMobileNavReturnsTrue();
-testInitialMobileNavOpenDefaultsToTrue();
+testInitialMobileWorkbenchPanelDefaultsToProjects();
+testInitialMobileNavOpenDefaultsToFalse();
 testCloseMobileNavReturnsFalse();
 testCanSelectMobileProjectOnlyAllowsLocalProjects();
 testMobileWorktreeStatusKindPrioritizesConflictThenDirty();
