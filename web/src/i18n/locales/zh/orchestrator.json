@@ -61,6 +61,7 @@
     "summary": {
       "passed": "通过",
       "failed": "失败",
+      "blocked": "阻塞",
       "skipped": "跳过",
       "generic": "记录"
     }

@@ -61,6 +61,7 @@
     "summary": {
       "passed": "Passed",
       "failed": "Failed",
+      "blocked": "Blocked",
       "skipped": "Skipped",
       "generic": "Record"
     }

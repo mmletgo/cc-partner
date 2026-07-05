@@ -118,6 +118,28 @@ pub struct OrchestratorTaskRow {
     pub finished_at: Option<String>,
 }
 
+/// Orchestrator 任务尝试数据库行模型。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     自动验证/修复循环会为同一个任务产生多轮 Claude Code 开发尝试；系统需要保留每一轮可见 terminal、
+///     prompt 和完成时间，供后续 sentinel、evidence 和任务详情追溯。
+///
+/// Code Logic（这个结构体做什么）:
+///     字段与 orchestrator_task_attempts 表一一对应；status 目前保存为稳定字符串，后续 runner 接入时再收敛为枚举。
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct OrchestratorTaskAttemptRow {
+    pub id: String,
+    pub task_id: String,
+    pub attempt: i64,
+    pub worktree_id: String,
+    pub session_id: String,
+    pub prompt: String,
+    pub status: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
 /// Orchestrator 任务前端 DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:

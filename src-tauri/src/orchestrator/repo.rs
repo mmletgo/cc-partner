@@ -4,8 +4,8 @@
 
 use crate::error::AppError;
 use crate::orchestrator::models::{
-    OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskRow,
-    OrchestratorTaskStatus,
+    OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskAttemptRow,
+    OrchestratorTaskRow, OrchestratorTaskStatus,
 };
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
@@ -20,6 +20,8 @@ const PROJECT_CONFIG_COLUMNS: &str = "project_id, enabled, max_concurrent_tasks,
     auto_push_main, retry_limit, retain_worktree_on_done, retain_worktree_on_blocked, \
     created_at, updated_at";
 const EVIDENCE_COLUMNS: &str = "id, task_id, kind, title, summary, content, created_at";
+const ATTEMPT_COLUMNS: &str = "id, task_id, attempt, worktree_id, session_id, prompt, status, \
+    created_at, completed_at";
 
 pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestrator_tasks (
   id TEXT PRIMARY KEY,
@@ -94,6 +96,24 @@ const ORCHESTRATOR_TASK_EVIDENCE_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_orchestrator_task_evidence_task \
      ON orchestrator_task_evidence(task_id, created_at)";
 
+pub const ORCHESTRATOR_TASK_ATTEMPT_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS orchestrator_task_attempts (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  worktree_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  completed_at TEXT,
+  UNIQUE(task_id, attempt)
+)";
+
+const ORCHESTRATOR_TASK_ATTEMPTS_SESSION_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_orchestrator_task_attempts_session \
+     ON orchestrator_task_attempts(session_id, status)";
+
 /// Orchestrator 仓储，封装任务、事件和证据表访问。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -131,6 +151,8 @@ impl OrchestratorRepo {
             ORCHESTRATOR_TASK_EVENTS_INDEX,
             ORCHESTRATOR_EVIDENCE_SCHEMA,
             ORCHESTRATOR_TASK_EVIDENCE_INDEX,
+            ORCHESTRATOR_TASK_ATTEMPT_SCHEMA,
+            ORCHESTRATOR_TASK_ATTEMPTS_SESSION_INDEX,
         ] {
             sqlx::query(statement).execute(pool).await?;
         }
@@ -477,6 +499,107 @@ impl OrchestratorRepo {
 
         tx.commit().await?;
         Ok(claimed)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     每一轮 Claude Code 开发尝试都需要持久化 prompt、worktree 和可见 terminal session，
+    ///     后续 completion sentinel 与任务详情才能把输出映射回具体任务轮次。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     生成 attempt id 和 created_at，插入 orchestrator_task_attempts；task_id+attempt 唯一约束由 SQLite 保证。
+    pub async fn add_attempt(
+        &self,
+        task_id: &str,
+        attempt: i64,
+        worktree_id: &str,
+        session_id: &str,
+        prompt: &str,
+        status: &str,
+    ) -> Result<OrchestratorTaskAttemptRow, AppError> {
+        if task_id.trim().is_empty() {
+            return Err(AppError::generic("任务不能为空"));
+        }
+        if attempt <= 0 {
+            return Err(AppError::generic("任务尝试轮次必须大于 0"));
+        }
+        if worktree_id.trim().is_empty() {
+            return Err(AppError::generic("任务尝试缺少 worktree"));
+        }
+        if session_id.trim().is_empty() {
+            return Err(AppError::generic("任务尝试缺少 session"));
+        }
+        if status.trim().is_empty() {
+            return Err(AppError::generic("任务尝试状态不能为空"));
+        }
+
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO orchestrator_task_attempts \
+             (id, task_id, attempt, worktree_id, session_id, prompt, status, created_at, completed_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(task_id.trim())
+        .bind(attempt)
+        .bind(worktree_id.trim())
+        .bind(session_id.trim())
+        .bind(prompt)
+        .bind(status.trim())
+        .bind(&now)
+        .bind(Option::<&str>::None)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(OrchestratorTaskAttemptRow {
+            id,
+            task_id: task_id.trim().to_string(),
+            attempt,
+            worktree_id: worktree_id.trim().to_string(),
+            session_id: session_id.trim().to_string(),
+            prompt: prompt.to_string(),
+            status: status.trim().to_string(),
+            created_at: now,
+            completed_at: None,
+        })
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     开发 terminal 输出 completion sentinel 后，系统需要标记对应尝试已完成，避免同一轮重复触发验证。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 task_id+attempt 更新 status=completed 和 completed_at；找不到记录时返回 not_found。
+    pub async fn mark_attempt_completed(
+        &self,
+        task_id: &str,
+        attempt: i64,
+    ) -> Result<OrchestratorTaskAttemptRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_task_attempts SET status = ?, completed_at = ? \
+             WHERE task_id = ? AND attempt = ?",
+        )
+        .bind("completed")
+        .bind(&now)
+        .bind(task_id)
+        .bind(attempt)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(AppError::not_found(format!(
+                "Orchestrator 任务尝试不存在: {task_id}#{attempt}"
+            )));
+        }
+
+        let row = sqlx::query(&format!(
+            "SELECT {ATTEMPT_COLUMNS} FROM orchestrator_task_attempts \
+             WHERE task_id = ? AND attempt = ?"
+        ))
+        .bind(task_id)
+        .bind(attempt)
+        .fetch_one(&self.pool)
+        .await?;
+        row_to_attempt(&row)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -890,6 +1013,25 @@ fn row_to_evidence(row: &SqliteRow) -> Result<OrchestratorEvidenceDto, AppError>
         summary: row.try_get("summary")?,
         content: row.try_get("content")?,
         created_at: row.try_get("created_at")?,
+    })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     任务尝试表后续会被 runner、completion sentinel 和详情接口共同读取，必须统一 SQLite row 解析。
+///
+/// Code Logic（这个函数做什么）:
+///     从 SqliteRow 读取 orchestrator_task_attempts 全字段并组装 OrchestratorTaskAttemptRow。
+fn row_to_attempt(row: &SqliteRow) -> Result<OrchestratorTaskAttemptRow, AppError> {
+    Ok(OrchestratorTaskAttemptRow {
+        id: row.try_get("id")?,
+        task_id: row.try_get("task_id")?,
+        attempt: row.try_get("attempt")?,
+        worktree_id: row.try_get("worktree_id")?,
+        session_id: row.try_get("session_id")?,
+        prompt: row.try_get("prompt")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        completed_at: row.try_get("completed_at")?,
     })
 }
 
@@ -1542,6 +1684,37 @@ mod tests {
         assert_eq!(remote.status, OrchestratorTaskStatus::Queued);
         assert_eq!(waiting.status, OrchestratorTaskStatus::Queued);
         assert_eq!(active, 3);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Phase 7 的 terminal completion sentinel 依赖 attempt history；schema 和仓储方法必须先能稳定记录和完成一轮尝试。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     新增 running attempt 后调用 mark_attempt_completed，断言 status/completed_at 更新且 prompt/session 保持不变。
+    #[tokio::test]
+    async fn add_attempt_and_mark_attempt_completed_persists_attempt_history() {
+        let (_pool, repo) = setup_repo().await;
+
+        let created = repo
+            .add_attempt(
+                "task-1",
+                1,
+                "worktree-1",
+                "session-1",
+                "implement task\nORCHESTRATOR_DEV_DONE",
+                "running",
+            )
+            .await
+            .unwrap();
+        let completed = repo.mark_attempt_completed("task-1", 1).await.unwrap();
+
+        assert_eq!(created.task_id, "task-1");
+        assert_eq!(created.status, "running");
+        assert_eq!(completed.id, created.id);
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.session_id, "session-1");
+        assert_eq!(completed.prompt, "implement task\nORCHESTRATOR_DEV_DONE");
+        assert!(completed.completed_at.is_some());
     }
 
     /// Business Logic（为什么需要这个函数）:

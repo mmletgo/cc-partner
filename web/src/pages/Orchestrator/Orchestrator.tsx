@@ -71,6 +71,7 @@ type OrchestratorStatusLabelKey =
 type OrchestratorEvidenceSummaryLabelKey =
   | 'orchestrator:evidence.summary.passed'
   | 'orchestrator:evidence.summary.failed'
+  | 'orchestrator:evidence.summary.blocked'
   | 'orchestrator:evidence.summary.skipped'
   | 'orchestrator:evidence.summary.generic';
 
@@ -172,6 +173,7 @@ const STATUS_LABEL_KEYS: Record<OrchestratorTaskStatus, OrchestratorStatusLabelK
 const EVIDENCE_SUMMARY_LABEL_KEYS: Record<string, OrchestratorEvidenceSummaryLabelKey> = {
   passed: 'orchestrator:evidence.summary.passed',
   failed: 'orchestrator:evidence.summary.failed',
+  blocked: 'orchestrator:evidence.summary.blocked',
   skipped: 'orchestrator:evidence.summary.skipped',
 };
 
@@ -219,6 +221,7 @@ function evidenceSummaryTone(summary: string): 'neutral' | 'success' | 'warn' | 
       return 'success';
     case 'failed':
       return 'danger';
+    case 'blocked':
     case 'skipped':
       return 'warn';
     default:

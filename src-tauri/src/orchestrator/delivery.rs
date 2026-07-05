@@ -83,6 +83,27 @@ fn try_acquire_delivery_task_guard(task_id: &str) -> Result<Option<DeliveryTaskG
     }))
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     用户可以在 delivery pipeline 的任意阶段终止任务；一旦任务不再是 Delivering，
+///     后续 Git push/merge 这类不可逆副作用必须立即停止。
+///
+/// Code Logic（这个函数做什么）:
+///     重新读取任务当前状态；若仍为 Delivering 返回 None 继续流程，否则返回当前任务和已完成阶段列表。
+async fn stop_delivery_if_task_changed(
+    repo: &OrchestratorRepo,
+    task_id: &str,
+    stages: &[String],
+) -> Result<Option<DeliverySummary>, AppError> {
+    let current = repo.get_task(task_id).await?;
+    if current.status == OrchestratorTaskStatus::Delivering {
+        return Ok(None);
+    }
+    Ok(Some(DeliverySummary {
+        task: OrchestratorTaskDto::from(current),
+        stages: stages.to_vec(),
+    }))
+}
+
 #[cfg(unix)]
 unsafe extern "C" {
     fn killpg(pgrp: std::os::raw::c_int, sig: std::os::raw::c_int) -> std::os::raw::c_int;
@@ -313,7 +334,8 @@ impl DeliveryContext for AppDeliveryContext<'_> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     校验任务状态与项目 full-auto flags；按顺序复用 Workbench 本机 helper 执行四个阶段；
-///     每个阶段成功写 passed delivery evidence，失败写 failed evidence 并把任务置为 Blocked；全部成功后置 Done。
+///     每个阶段成功写 passed delivery evidence，失败写 failed evidence 并把任务置为 Blocked；
+///     全局交付开关关闭时写 blocked evidence；全部成功后置 Done。
 pub(crate) async fn deliver_task<C>(context: &C, task_id: &str) -> Result<DeliverySummary, AppError>
 where
     C: DeliveryContext,
@@ -336,11 +358,12 @@ where
     let config = context.orchestrator_config();
 
     if let Some(reason) = disabled_delivery_flag_reason(&config) {
-        return block_delivery_task(
+        return block_delivery_task_with_summary(
             context.orchestrator_repo(),
             &task.id,
             &reason,
             "delivery config",
+            "blocked",
             &format!("Full-auto delivery requires all delivery flags to be enabled.\n{reason}"),
             &mut stages,
         )
@@ -482,6 +505,12 @@ where
     .await?;
     stages.push("commit".to_string());
 
+    if let Some(summary) =
+        stop_delivery_if_task_changed(context.orchestrator_repo(), &task.id, &stages).await?
+    {
+        return Ok(summary);
+    }
+
     if let Err(err) = context.push_task_worktree(worktree_id.clone()).await {
         let reason = format!("push branch failed: {err}");
         return block_delivery_task(
@@ -503,6 +532,12 @@ where
     )
     .await?;
     stages.push("push branch".to_string());
+
+    if let Some(summary) =
+        stop_delivery_if_task_changed(context.orchestrator_repo(), &task.id, &stages).await?
+    {
+        return Ok(summary);
+    }
 
     let main_status = match workbench_git::status(Path::new(&main_path)) {
         Ok(status) => status,
@@ -532,6 +567,12 @@ where
         .await;
     }
 
+    if let Some(summary) =
+        stop_delivery_if_task_changed(context.orchestrator_repo(), &task.id, &stages).await?
+    {
+        return Ok(summary);
+    }
+
     match context
         .merge_task_worktree_to_main(worktree_id.clone())
         .await
@@ -559,6 +600,12 @@ where
             )
             .await;
         }
+    }
+
+    if let Some(summary) =
+        stop_delivery_if_task_changed(context.orchestrator_repo(), &task.id, &stages).await?
+    {
+        return Ok(summary);
     }
 
     match workbench_git::push_main_worktree_current_branch(Path::new(&main_path)) {
@@ -973,7 +1020,7 @@ fn normalize_merge_failure_reason(err: &AppError) -> String {
 ///     每个交付阶段的结果都要进入 evidence 列表，前端无需理解内部状态机也能展示审计轨迹。
 ///
 /// Code Logic（这个函数做什么）:
-///     使用固定 kind=`delivery` 追加 evidence，summary 只传 passed/failed/skipped 这类前端已支持短值。
+///     使用固定 kind=`delivery` 追加 evidence，summary 只传 passed/failed/blocked/skipped 这类前端已支持短值。
 async fn add_delivery_evidence(
     orchestrator_repo: &OrchestratorRepo,
     task_id: &str,
@@ -1000,6 +1047,33 @@ async fn block_delivery_task(
     evidence_content: &str,
     stages: &mut Vec<String>,
 ) -> Result<DeliverySummary, AppError> {
+    block_delivery_task_with_summary(
+        orchestrator_repo,
+        task_id,
+        reason,
+        evidence_title,
+        "failed",
+        evidence_content,
+        stages,
+    )
+    .await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     交付失败和交付开关关闭都要阻塞任务，但 evidence summary 语义不同：
+///     真实阶段错误是 failed，策略 gate 关闭是 blocked。
+///
+/// Code Logic（这个函数做什么）:
+///     在任务仍为 Delivering 时写 Blocked；命中后按调用方指定 summary 追加 delivery evidence。
+async fn block_delivery_task_with_summary(
+    orchestrator_repo: &OrchestratorRepo,
+    task_id: &str,
+    reason: &str,
+    evidence_title: &str,
+    evidence_summary: &str,
+    evidence_content: &str,
+    stages: &mut Vec<String>,
+) -> Result<DeliverySummary, AppError> {
     let task = orchestrator_repo
         .block_task_if_delivering(task_id, reason)
         .await?;
@@ -1010,7 +1084,7 @@ async fn block_delivery_task(
             orchestrator_repo,
             task_id,
             evidence_title,
-            "failed",
+            evidence_summary,
             evidence_content,
         )
         .await?;
@@ -1773,14 +1847,16 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     用户可能在 delivery 已完成 Git 操作但尚未写 Done 前点击终止，最终状态不得被 Done 覆盖。
+    ///     用户可能在 delivery 已 merge 到本地主工作区但尚未 push main 前点击终止，最终状态不得被 Done 覆盖，
+    ///     且不得继续把 main 推送到远端。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在 merge 阶段成功后模拟用户把任务置为 Aborted，再断言 deliver_task 返回和数据库持久化状态仍是 Aborted。
+    ///     在 merge 阶段成功后模拟用户把任务置为 Aborted，再断言 deliver_task 返回/数据库状态仍是 Aborted，
+    ///     并验证 origin/main 没有收到 task 文件。
     #[tokio::test]
     async fn delivery_does_not_mark_done_when_task_aborted_before_finish() {
         let harness = setup_delivery_harness().await;
-        let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        let (_dir, origin, repo, task_worktree) = setup_git_delivery_repo();
         fs::write(task_worktree.join("task.txt"), "abort before done\n").expect("write task file");
         let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
         *harness
@@ -1801,6 +1877,19 @@ mod tests {
         assert_eq!(delivered.task.status, OrchestratorTaskStatus::Aborted);
         assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
         assert!(persisted.finished_at.is_none());
+        assert_eq!(
+            delivered.stages,
+            vec!["commit", "push branch", "merge main"]
+        );
+        let main_show = StdCommand::new("git")
+            .args(["show", "refs/heads/main:task.txt"])
+            .current_dir(&origin)
+            .output()
+            .expect("git show origin main task file");
+        assert!(
+            !main_show.status.success(),
+            "origin/main must not be pushed after user abort"
+        );
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2010,7 +2099,7 @@ mod tests {
                 .contains(disabled_flag));
             assert!(evidence
                 .iter()
-                .any(|item| item.summary == "failed" && item.content.contains(disabled_flag)));
+                .any(|item| item.summary == "blocked" && item.content.contains(disabled_flag)));
             assert_eq!(harness.controls.commit_calls.load(Ordering::SeqCst), 0);
             assert_eq!(harness.controls.push_calls.load(Ordering::SeqCst), 0);
             assert_eq!(harness.controls.merge_calls.load(Ordering::SeqCst), 0);
