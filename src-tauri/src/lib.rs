@@ -42,7 +42,8 @@ use crate::commands::{
     cc_history as cc_history_cmd, claude_code_assets as claude_code_assets_cmd,
     claude_md as claude_md_cmd, cloud_sync as cloud_sync_cmd, config as config_cmd,
     devices as device_cmd, github_trending as github_trending_cmd, health as health_cmd,
-    mobile as mobile_cmd, orchestrator as orchestrator_cmd, permissions as permissions_cmd,
+    mobile as mobile_cmd, orchestrator as orchestrator_cmd,
+    orchestrator_config as orchestrator_config_cmd, permissions as permissions_cmd,
     prompt_optimizer as prompt_optimizer_cmd, prompts as prompt_cmd, scratchpad as scratchpad_cmd,
     screenshot as screenshot_cmd, ssh_target as ssh_target_cmd, sync as sync_cmd,
     transfer as transfer_cmd, updater as updater_cmd, workbench as workbench_cmd,
@@ -610,6 +611,10 @@ pub fn run() {
             orchestrator_cmd::retry_orchestrator_task,
             orchestrator_cmd::abort_orchestrator_task,
             orchestrator_cmd::dispatch_orchestrator_once,
+            // Orchestrator 全局自动化配置（设备级 AppConfig，不写项目策略表）
+            orchestrator_config_cmd::get_orchestrator_config,
+            orchestrator_config_cmd::get_default_orchestrator_config,
+            orchestrator_config_cmd::update_orchestrator_config,
             // M10 健康提醒（14 命令：配置/状态/开关/暂停/贪睡/跳过/配置回写/统计/活动明细/喝水/跳过喝水/延迟喝水/全屏遮罩/恢复默认）
             health_cmd::get_health_config,
             health_cmd::get_default_health_config,

@@ -193,6 +193,65 @@ pub(crate) fn default_cloud_sync_values() -> (Option<String>, bool, bool, u64, O
     (None, false, false, default_cloud_sync_interval(), None)
 }
 
+/// Orchestrator 自动化并发上限默认值。
+///
+/// Business Logic（为什么需要这个函数）:
+///     自动编排器默认只能同时推进一个任务，避免用户首次启用时对本机 Git/终端资源造成过大压力。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 serde 字段级默认值 1，供旧 config.json 缺少该字段时回退。
+fn default_orchestrator_max_concurrent_tasks() -> i64 {
+    1
+}
+
+/// Orchestrator 自动化全局配置。
+///
+/// Business Logic（为什么需要这个结构）:
+///     自动化策略属于本设备运行偏好，不需要按项目分叉；Settings 自动化 tab 需要持久化
+///     scheduler 开关、并发上限、验证命令和 full-auto delivery 开关。
+///
+/// Code Logic（这个结构做什么）:
+///     纯 serde 配置载体，落盘在 AppConfig.orchestrator 下；所有字段有默认值，保证旧
+///     config.json 缺少 orchestrator 字段时可正常反序列化。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestratorAutomationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_orchestrator_max_concurrent_tasks")]
+    pub max_concurrent_tasks: i64,
+    #[serde(default)]
+    pub verification_commands: Vec<String>,
+    #[serde(default = "default_true")]
+    pub auto_commit: bool,
+    #[serde(default = "default_true")]
+    pub auto_push_task_branch: bool,
+    #[serde(default = "default_true")]
+    pub auto_merge_to_main: bool,
+    #[serde(default = "default_true")]
+    pub auto_push_main: bool,
+}
+
+impl Default for OrchestratorAutomationConfig {
+    /// 提供 Orchestrator 自动化配置全套默认值。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧配置升级和设置页恢复默认都需要一致的 full-auto-but-disabled 默认策略。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     enabled=false、max_concurrent_tasks=1、验证命令为空，四个 delivery flag=true。
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_concurrent_tasks: default_orchestrator_max_concurrent_tasks(),
+            verification_commands: Vec::new(),
+            auto_commit: true,
+            auto_push_task_branch: true,
+            auto_merge_to_main: true,
+            auto_push_main: true,
+        }
+    }
+}
+
 /// GitHub 周热门首页配置。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -383,6 +442,9 @@ pub struct AppConfig {
     /// (无 health 字段)反序列化时整体回退 `HealthConfig::default()`。
     #[serde(default)]
     pub health: HealthConfig,
+    /// Orchestrator 自动化全局配置。`#[serde(default)]` 兼容旧 config.json。
+    #[serde(default)]
+    pub orchestrator: OrchestratorAutomationConfig,
     /// GitHub 周热门首页与 Claude CLI 解说配置。`#[serde(default)]` 兼容旧 config.json。
     #[serde(default)]
     pub github_trending: GithubTrendingConfig,
@@ -432,6 +494,7 @@ impl AppConfig {
                 cloud_sync_interval_secs: default_cloud_sync_interval(),
                 cloud_sync_branch: None,
                 health: HealthConfig::default(),
+                orchestrator: OrchestratorAutomationConfig::default(),
                 github_trending: GithubTrendingConfig::default(),
             };
             cfg.save()?;
@@ -499,6 +562,9 @@ mod tests {
         assert_eq!(cfg.github_trending.claude_cli_path, "claude");
         assert_eq!(cfg.prompt_optimizer_hotkey, "<ctrl>");
         assert_eq!(cfg.prompt_optimizer_fill_language, "zh");
+        assert!(!cfg.orchestrator.enabled);
+        assert_eq!(cfg.orchestrator.max_concurrent_tasks, 1);
+        assert!(cfg.orchestrator.auto_commit);
     }
 
     #[test]
@@ -530,6 +596,7 @@ mod tests {
                 water_interval_seconds: 1800,
                 reminder_fullscreen: true,
             },
+            orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
@@ -565,6 +632,7 @@ mod tests {
             cloud_sync_interval_secs: default_cloud_sync_interval(),
             cloud_sync_branch: None,
             health: HealthConfig::default(),
+            orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
         }
     }

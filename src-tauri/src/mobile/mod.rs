@@ -119,6 +119,7 @@ mod tests {
             cloud_sync_interval_secs: 600,
             cloud_sync_branch: None,
             health: Default::default(),
+            orchestrator: Default::default(),
             github_trending: Default::default(),
         }
     }
