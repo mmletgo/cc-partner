@@ -324,7 +324,7 @@ export interface OrchestratorRemoteOutboxItem {
   deviceId: string;
   deviceName: string;
   remoteProjectPath: string;
-  remoteProjectId: string;
+  remoteProjectId: string | null;
   requestJson: string;
   status: OrchestratorRemoteOutboxStatus;
   remoteTaskId: string | null;
