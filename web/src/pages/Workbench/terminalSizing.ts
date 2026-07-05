@@ -17,6 +17,24 @@ interface TerminalPixelSize {
   height: number;
 }
 
+interface TerminalSizeRefreshSession {
+  status: string;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端终端可能把共享 tmux/PTY 会话 resize 到手机尺寸，桌面端需要提供手动恢复到当前窗口尺寸的入口。
+ *
+ * Code Logic（这个函数做什么）:
+ *   仅 running session 且当前项目可写时允许触发手动 resize；缺少 session、已退出 session 或远端离线均返回 false。
+ */
+export function canRefreshTerminalSize(
+  session: TerminalSizeRefreshSession | null,
+  writeDisabled: boolean,
+): boolean {
+  return Boolean(session && session.status === 'running' && !writeDisabled);
+}
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   创建或重启工作台终端前，需要按当前工作台布局预估单个 pane 的外框尺寸。

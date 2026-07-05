@@ -348,6 +348,7 @@
   "splitPaneRight": "Split right",
   "splitPaneDown": "Split down",
   "closePane": "Close current pane",
+  "fitTerminalSize": "Fit size",
   "terminalEnterFullscreen": "Fullscreen",
   "terminalExitFullscreen": "Exit fullscreen",
   "terminalTabs": "Terminal sessions",

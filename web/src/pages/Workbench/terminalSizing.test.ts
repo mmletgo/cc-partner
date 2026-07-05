@@ -1,4 +1,8 @@
-import { terminalPanePixelSize, terminalViewportPixelSize } from './terminalSizing';
+import {
+  canRefreshTerminalSize,
+  terminalPanePixelSize,
+  terminalViewportPixelSize,
+} from './terminalSizing';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -63,5 +67,19 @@ assertSize(
   }),
   { width: 476, height: 290 },
 );
+
+const runningSession = { status: 'running' };
+if (!canRefreshTerminalSize(runningSession, false)) {
+  throw new Error('running session should allow manual terminal size refresh');
+}
+if (canRefreshTerminalSize(runningSession, true)) {
+  throw new Error('remote offline session should block manual terminal size refresh');
+}
+if (canRefreshTerminalSize({ status: 'exited' }, false)) {
+  throw new Error('exited session should block manual terminal size refresh');
+}
+if (canRefreshTerminalSize(null, false)) {
+  throw new Error('missing session should block manual terminal size refresh');
+}
 
 console.log('terminalSizing.test.ts passed');

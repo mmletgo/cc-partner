@@ -50,6 +50,7 @@ import {
   MaximizeIcon,
   MinimizeIcon,
   PlusIcon,
+  RefreshIcon,
   SplitDownIcon,
   SplitRightIcon,
   SyncIcon,
@@ -88,7 +89,7 @@ import {
   shouldForwardTerminalInput,
   writeTerminalReplay,
 } from './terminalReplay';
-import { terminalPanePixelSize } from './terminalSizing';
+import { canRefreshTerminalSize, terminalPanePixelSize } from './terminalSizing';
 import type { TerminalLayoutMode } from './terminalSizing';
 import {
   activeWorktreeRootPath,
@@ -157,6 +158,7 @@ interface TerminalPaneProps {
   inputEnabled: boolean;
   onInput: (sessionId: string, data: string) => void;
   onResize: (sessionId: string, cols: number, rows: number) => void;
+  resizeRequestKey?: number;
   onCursorAnchorChange?: (anchor: TerminalCursorAnchor | null) => void;
 }
 
@@ -539,6 +541,7 @@ const TerminalPane = memo(function TerminalPane(props: TerminalPaneProps) {
     inputEnabled,
     onInput,
     onResize,
+    resizeRequestKey = 0,
     onCursorAnchorChange,
   } = props;
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -548,6 +551,7 @@ const TerminalPane = memo(function TerminalPane(props: TerminalPaneProps) {
   const replayGateRef = useRef<boolean>(false);
   const inputEnabledRef = useRef<boolean>(inputEnabled);
   const resizeTimerRef = useRef<number | null>(null);
+  const forceResizeRef = useRef<(() => void) | null>(null);
   const cursorAnchorCallbackRef = useRef<TerminalPaneProps['onCursorAnchorChange']>(
     onCursorAnchorChange,
   );
@@ -617,6 +621,7 @@ const TerminalPane = memo(function TerminalPane(props: TerminalPaneProps) {
       resizeTimerRef.current = window.setTimeout(resize, 80);
     });
     observer.observe(viewport);
+    forceResizeRef.current = resize;
     resize();
     terminalRef.current = terminal;
 
@@ -631,10 +636,16 @@ const TerminalPane = memo(function TerminalPane(props: TerminalPaneProps) {
       cursorAnchorCallbackRef.current?.(null);
       terminal.dispose();
       terminalRef.current = null;
+      forceResizeRef.current = null;
       writtenBufferRef.current = '';
       replayGateRef.current = false;
     };
   }, [onInput, onResize, sessionId]);
+
+  useEffect(() => {
+    if (resizeRequestKey <= 0) return;
+    forceResizeRef.current?.();
+  }, [resizeRequestKey]);
 
   useEffect(() => {
     const applyTheme = () => {
@@ -784,6 +795,7 @@ export function Workbench() {
   const [sessionBusy, setSessionBusy] = useState<boolean>(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [terminalFullscreen, setTerminalFullscreen] = useState<boolean>(false);
+  const [terminalResizeRequestKey, setTerminalResizeRequestKey] = useState<number>(0);
   const [remoteOfflineProjectId, setRemoteOfflineProjectId] = useState<string | null>(null);
   const [worktrees, setWorktrees] = useState<WorkbenchWorktree[]>([]);
   const [activeWorktreeId, setActiveWorktreeId] = useState<string | null>(null);
@@ -912,6 +924,7 @@ export function Workbench() {
     remoteOfflineProjectId,
   );
   const remoteWriteDisabled = remoteProjectOffline;
+  const canRefreshCurrentTerminalSize = canRefreshTerminalSize(activeSession, remoteWriteDisabled);
   const promptWorkingDirectory = activeRootPath || undefined;
   const composedWorktreeBranchName = composeWorktreeBranchName(
     createWorktreeBranchPrefix,
@@ -1903,6 +1916,18 @@ export function Workbench() {
       // 容器 resize 高频触发，失败不阻断终端显示。
     }
   }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   移动端使用同一终端后可能把共享 tmux/PTY 尺寸改成手机视口，桌面用户需要一键恢复为当前 PC 终端尺寸。
+   *
+   * Code Logic（这个函数做什么）:
+   *   在可用时递增 resize request key，由当前可见 TerminalPane 使用自身 xterm 实例重新 fit 并复用现有后端 resize。
+   */
+  const handleRefreshTerminalSize = useCallback(() => {
+    if (!canRefreshCurrentTerminalSize) return;
+    setTerminalResizeRequestKey((current) => current + 1);
+  }, [canRefreshCurrentTerminalSize]);
 
   const handleCloseSession = useCallback(
     async (sessionId: string) => {
@@ -3241,6 +3266,18 @@ export function Workbench() {
                     className={styles.terminalActionButton}
                     variant="secondary"
                     size="sm"
+                    icon={<RefreshIcon />}
+                    title={t('workbench:fitTerminalSize')}
+                    aria-label={t('workbench:fitTerminalSize')}
+                    disabled={!canRefreshCurrentTerminalSize}
+                    onClick={handleRefreshTerminalSize}
+                  >
+                    {t('workbench:fitTerminalSize')}
+                  </Button>
+                  <Button
+                    className={styles.terminalActionButton}
+                    variant="secondary"
+                    size="sm"
                     icon={<SplitRightIcon />}
                     title={t('workbench:splitPaneRight')}
                     aria-label={t('workbench:splitPaneRight')}
@@ -3355,6 +3392,7 @@ export function Workbench() {
                     }
                     onInput={handleInput}
                     onResize={handleResize}
+                    resizeRequestKey={0}
                     inputEnabled={false}
                     onCursorAnchorChange={
                       workspaceView === 'terminal' ? handleCursorAnchorChange : undefined
@@ -3386,6 +3424,9 @@ export function Workbench() {
                       placeholder={t('workbench:terminalPlaceholder')}
                       onInput={handleInput}
                       onResize={handleResize}
+                      resizeRequestKey={
+                        session.id === renderedActiveSessionId ? terminalResizeRequestKey : 0
+                      }
                       inputEnabled={
                         workspaceView === 'terminal' &&
                         session.id === renderedActiveSessionId &&
