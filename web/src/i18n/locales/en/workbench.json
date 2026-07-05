@@ -89,6 +89,12 @@
     "statusAriaLabel": "Current workbench status",
     "noProject": "No project selected",
     "projectFallback": "Project",
+    "worktreeQuickSwitch": {
+      "title": "Switch worktree",
+      "refresh": "Refresh",
+      "manage": "Manage",
+      "close": "Close"
+    },
     "projectPanel": {
       "title": "Projects",
       "error": "Load failed",

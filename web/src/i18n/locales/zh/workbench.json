@@ -87,6 +87,12 @@
     "statusAriaLabel": "当前工作台状态",
     "noProject": "未选择项目",
     "projectFallback": "项目",
+    "worktreeQuickSwitch": {
+      "title": "切换 Worktree",
+      "refresh": "刷新",
+      "manage": "完整管理",
+      "close": "关闭"
+    },
     "projectPanel": {
       "title": "项目",
       "error": "加载失败",
