@@ -1056,6 +1056,43 @@ pub(crate) async fn complete_orchestrator_agent_run_for_state(
         )
         .await?;
 
+    complete_orchestrator_agent_run_after_verifying_transition(state, app_handle, task).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     terminal sentinel 只代表产生该输出的具体 session/attempt 完成，旧 session 的迟到哨兵不得推进当前 active runner。
+///
+/// Code Logic（这个函数做什么）:
+///     用 task_id + expected attempt + expected session 原子校验 Running runner 后切到 Verifying；未命中时返回当前任务 no-op。
+pub(crate) async fn complete_orchestrator_agent_run_for_attempt(
+    state: &AppState,
+    app_handle: AppHandle,
+    task_id: &str,
+    attempt: i64,
+    session_id: &str,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let Some(task) = state
+        .orchestrator_repo
+        .try_transition_running_attempt_to_verifying(task_id, attempt, session_id)
+        .await?
+    else {
+        let current = state.orchestrator_repo.get_task(task_id).await?;
+        return Ok(OrchestratorTaskDto::from(current));
+    };
+
+    complete_orchestrator_agent_run_after_verifying_transition(state, app_handle, task).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     手动完成和 sentinel 完成在成功取得 Verifying 执行权后，后续 attempt 完成、验证、delivery 语义必须完全一致。
+///
+/// Code Logic（这个函数做什么）:
+///     接收已被原子切到 Verifying 的任务 Row，标记 active attempt completed，再执行原有验证命令与 delivery pipeline。
+async fn complete_orchestrator_agent_run_after_verifying_transition(
+    state: &AppState,
+    app_handle: AppHandle,
+    task: OrchestratorTaskRow,
+) -> Result<OrchestratorTaskDto, AppError> {
     if let Err(err) =
         mark_active_running_attempt_completed(state.orchestrator_repo.as_ref(), &task).await
     {

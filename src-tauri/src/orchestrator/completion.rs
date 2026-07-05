@@ -7,7 +7,7 @@
 //! Code Logic（这个模块做什么）:
 //!     提供开发完成哨兵的纯检测器和终端输出 hook 入口；hook 的异步副作用在实现阶段保持非阻塞。
 
-use crate::commands::orchestrator::complete_orchestrator_agent_run_for_state;
+use crate::commands::orchestrator::complete_orchestrator_agent_run_for_attempt;
 use crate::error::AppError;
 use crate::orchestrator::prompt::DEV_DONE_SENTINEL;
 use crate::state::AppState;
@@ -144,8 +144,8 @@ pub fn spawn_maybe_handle_session_output(app_handle: AppHandle, session_id: Stri
 ///     完成哨兵只能通过 session_id 定位到当前 running attempt，然后复用手动完成命令的验证/交付 pipeline。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 AppHandle 读取 AppState，按 session_id 查询 running attempt；找到后只把 task_id 交给内部 completion helper，
-///     attempt 完成标记由 helper 在 Running->Verifying 成功后统一执行。
+///     从 AppHandle 读取 AppState，按 session_id 查询 running attempt；找到后把 task_id、attempt 和 session_id
+///     交给内部 completion helper 做 active runner 原子校验，attempt 完成标记由 helper 统一执行。
 async fn handle_session_completion(
     app_handle: AppHandle,
     session_id: &str,
@@ -162,7 +162,14 @@ async fn handle_session_completion(
         );
         return Ok(());
     };
-    complete_orchestrator_agent_run_for_state(&state, app_handle, &attempt.task_id).await?;
+    complete_orchestrator_agent_run_for_attempt(
+        &state,
+        app_handle,
+        &attempt.task_id,
+        attempt.attempt,
+        &attempt.session_id,
+    )
+    .await?;
     Ok(())
 }
 

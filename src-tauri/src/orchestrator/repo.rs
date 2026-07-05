@@ -1007,6 +1007,47 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     terminal sentinel 来自某个具体 session/attempt，旧 session 的迟到哨兵不能推进当前 active runner。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     原子校验任务仍为 Running 且 active attempt/session 匹配后切到 Verifying；未命中确认任务存在并返回 None。
+    pub async fn try_transition_running_attempt_to_verifying(
+        &self,
+        task_id: &str,
+        attempt: i64,
+        session_id: &str,
+    ) -> Result<Option<OrchestratorTaskRow>, AppError> {
+        if attempt <= 0 {
+            return Err(AppError::generic("任务尝试轮次必须大于 0"));
+        }
+        if session_id.trim().is_empty() {
+            return Err(AppError::generic("任务尝试缺少 session"));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ? AND attempt = ? AND session_id = ?",
+        )
+        .bind(OrchestratorTaskStatus::Verifying.as_str())
+        .bind(Option::<&str>::None)
+        .bind(now)
+        .bind(task_id)
+        .bind(OrchestratorTaskStatus::Running.as_str())
+        .bind(attempt)
+        .bind(session_id.trim())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(task_id).await.map(Some);
+        }
+
+        self.get_task(task_id).await?;
+        Ok(None)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     完成验证、重试等用户动作可能与 scheduler 并发发生，状态推进必须在数据库内一次性校验当前状态，避免旧点击覆盖新状态。
     ///
     /// Code Logic（这个函数做什么）:
@@ -2242,6 +2283,47 @@ mod tests {
 
         assert!(transitioned.is_none());
         assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧 terminal session 的迟到 completion sentinel 不能推进当前 active runner attempt。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 Running 任务 active attempt=2/session-2，先用旧 attempt/session 尝试转移并断言 no-op，再用匹配值转到 Verifying。
+    #[tokio::test]
+    async fn try_transition_running_attempt_to_verifying_requires_active_attempt_and_session() {
+        let (_pool, repo) = setup_repo().await;
+        let mut created = task_row("task-1", "project-1", OrchestratorTaskStatus::Running);
+        created.attempt = 2;
+        created.session_id = Some("session-2".to_string());
+        created.worktree_id = Some("worktree-1".to_string());
+        repo.create_task(&created).await.unwrap();
+
+        let stale_attempt = repo
+            .try_transition_running_attempt_to_verifying(&created.id, 1, "session-1")
+            .await
+            .unwrap();
+        let stale_session = repo
+            .try_transition_running_attempt_to_verifying(&created.id, 2, "session-1")
+            .await
+            .unwrap();
+        let persisted = repo.get_task(&created.id).await.unwrap();
+
+        assert!(stale_attempt.is_none());
+        assert!(stale_session.is_none());
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Running);
+        assert_eq!(persisted.attempt, 2);
+        assert_eq!(persisted.session_id.as_deref(), Some("session-2"));
+
+        let transitioned = repo
+            .try_transition_running_attempt_to_verifying(&created.id, 2, "session-2")
+            .await
+            .unwrap()
+            .expect("active runner should transition");
+
+        assert_eq!(transitioned.status, OrchestratorTaskStatus::Verifying);
+        assert_eq!(transitioned.attempt, 2);
+        assert_eq!(transitioned.session_id.as_deref(), Some("session-2"));
     }
 
     /// Business Logic（为什么需要这个函数）:
