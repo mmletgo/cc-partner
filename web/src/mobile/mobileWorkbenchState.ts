@@ -76,14 +76,13 @@ export function canSelectMobileProject(project: WorkbenchProject): boolean {
  *   移动端 worktree 列表和 Git 面板需要共享同一套状态分类，让 clean、dirty、conflict 展示保持一致。
  *
  * Code Logic（这个函数做什么）:
- *   先判断 hasConflicts 标记，其次判断 clean 布尔值；返回 conflict、dirty 或 clean 三态。
+ *   先判断真实 DTO 的 conflicts 计数，其次判断 clean 布尔值；返回 conflict、dirty 或 clean 三态。
  */
 export function getMobileWorktreeStatusKind(
   worktree: WorkbenchWorktree,
 ): MobileWorktreeStatusKind {
-  const status = worktree.status as WorkbenchWorktree['status'] & { hasConflicts?: boolean };
-  if (status.hasConflicts === true) return 'conflict';
-  if (!status.clean) return 'dirty';
+  if (worktree.status.conflicts > 0) return 'conflict';
+  if (!worktree.status.clean) return 'dirty';
   return 'clean';
 }
 

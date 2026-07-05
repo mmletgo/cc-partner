@@ -145,7 +145,7 @@ assertIncludes(openMarkup, '切换 Worktree', 'quick switch should render title'
 assertIncludes(openMarkup, 'main', 'quick switch should render main worktree');
 assertIncludes(openMarkup, '主工作区', 'quick switch should render main badge');
 assertIncludes(openMarkup, 'feature/mobile', 'quick switch should render feature worktree');
-assertIncludes(openMarkup, '2 处改动', 'status label should use mobile status helper semantics');
+assertIncludes(openMarkup, '1 处冲突', 'status label should use mobile status helper semantics');
 
 const noProjectMarkup = renderToStaticMarkup(
   createElement(MobileWorktreeQuickSwitch, { ...baseProps, project: null, worktrees: [] }),

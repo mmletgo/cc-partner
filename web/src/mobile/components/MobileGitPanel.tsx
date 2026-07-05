@@ -6,6 +6,7 @@ import type { WorkbenchGitCommit, WorkbenchProject, WorkbenchWorktree } from '@/
 import {
   shouldReloadMobileGitCommitsAfterAction,
   isMobileGitActionResponseCurrent,
+  isMobileGitMergeResponseCurrent,
   type MobileGitPanelAction,
   type MobileGitActionContext,
 } from '../mobilePanelState';
@@ -219,7 +220,7 @@ export function MobileGitPanel({
     try {
       const didMerge = await onMergeWorktree(worktree);
       if (!didMerge) return;
-      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+      if (!isMobileGitMergeResponseCurrent(actionContext, currentContextRef.current)) return;
       requestIdRef.current += 1;
       setCommits([]);
       setError(null);

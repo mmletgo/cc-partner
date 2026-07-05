@@ -3,7 +3,17 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import type { WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
+import {
+  DEFAULT_WORKTREE_BRANCH_PREFIX,
+  WORKTREE_BRANCH_PREFIXES,
+  composeWorktreeBranchName,
+  type WorktreeBranchPrefix,
+} from '@/lib/workbenchWorktreeBranches';
 import { runMobileWorktreeRemovalFlow } from '../mobilePanelState';
+import {
+  canRunMobileWorktreeDestructiveAction,
+  getMobileWorktreeStatusKind,
+} from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
 
 export interface MobileWorktreePanelProps {
@@ -19,6 +29,7 @@ export interface MobileWorktreePanelProps {
     skipFileContextConfirm?: boolean;
     expectedProjectId?: string;
   }) => Promise<void> | void;
+  onMergeWorktree?: (worktree: WorkbenchWorktree) => Promise<boolean> | boolean;
 }
 
 /**
@@ -37,10 +48,10 @@ function getErrorMessage(reason: unknown): string {
  * MobileWorktreePanel（移动端 worktree 列表面板）
  *
  * Business Logic（为什么需要这个组件）:
- *   移动端用户需要切换 active worktree，驱动终端、文件和 Git 面板使用同一个工作区上下文。
+ *   移动端用户需要完整管理项目 worktree，驱动终端、文件和 Git 面板使用同一个工作区上下文。
  *
  * Code Logic（这个组件做什么）:
- *   渲染 worktree 名称、分支、主工作区标识和 Git 状态摘要；同时提供创建和删除非主 worktree 的 HTTP 操作入口。
+ *   渲染 worktree 名称、分支、路径、状态、同步和推送摘要；同时提供 prefix/suffix 创建、merge 和删除非主 worktree 的操作入口。
  */
 export function MobileWorktreePanel({
   project,
@@ -52,11 +63,16 @@ export function MobileWorktreePanel({
   onConfirmActiveWorktreeChange,
   onActiveWorktreeChange,
   onRefreshWorktrees,
+  onMergeWorktree,
 }: MobileWorktreePanelProps): ReactElement {
   const { t } = useTranslation(['workbench']);
-  const [branchName, setBranchName] = useState<string>('');
+  const [branchPrefix, setBranchPrefix] = useState<WorktreeBranchPrefix>(
+    DEFAULT_WORKTREE_BRANCH_PREFIX,
+  );
+  const [branchSuffix, setBranchSuffix] = useState<string>('');
   const [actionBusy, setActionBusy] = useState<'create' | string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const composedBranchName = composeWorktreeBranchName(branchPrefix, branchSuffix);
   const isEmpty = worktrees.length === 0;
   const isActionDisabled = busy || actionBusy !== null;
 
@@ -84,22 +100,21 @@ export function MobileWorktreePanel({
    *   手机端需要能从当前项目创建一个功能 worktree，供后续终端、文件和 Git 面板共同使用。
    *
    * Code Logic（这个函数做什么）:
-   *   读取表单分支名，调用 worktrees.create(projectId, branchName, null)，成功后追加到列表并设为 active。
+   *   组合表单前缀与后缀，调用 worktrees.create(projectId, composedBranchName, null)，成功后追加到列表并设为 active。
    */
   const handleCreateWorktree = useCallback(async (): Promise<void> => {
-    const trimmedBranchName = branchName.trim();
-    if (!project || !trimmedBranchName) return;
+    if (!project || !composedBranchName) return;
     setActionBusy('create');
     setError(null);
     try {
       const created = await httpWorkbenchTransport.worktrees.create(
         project.id,
-        trimmedBranchName,
+        composedBranchName,
         null,
       );
       const nextWorktrees = [...worktrees.filter((item) => item.id !== created.id), created];
       const didApplyActive = applyWorktrees(nextWorktrees, created);
-      setBranchName('');
+      setBranchSuffix('');
       if (didApplyActive) {
         await onRefreshWorktrees?.({ expectedProjectId: project.id });
       }
@@ -108,7 +123,30 @@ export function MobileWorktreePanel({
     } finally {
       setActionBusy(null);
     }
-  }, [applyWorktrees, branchName, onRefreshWorktrees, project, t, worktrees]);
+  }, [applyWorktrees, composedBranchName, onRefreshWorktrees, project, t, worktrees]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   功能 worktree 完成后，用户需要能在完整 Worktrees 面板里直接合并回主工作区。
+   *
+   * Code Logic（这个函数做什么）:
+   *   非主且非 busy 时调用父级 merge flow；父级负责成功后的列表刷新，避免子级重复刷新把成功操作误报为失败。
+   */
+  const handleMergeWorktree = useCallback(
+    async (worktree: WorkbenchWorktree): Promise<void> => {
+      if (!canRunMobileWorktreeDestructiveAction(worktree, isActionDisabled)) return;
+      setActionBusy(`merge-${worktree.id}`);
+      setError(null);
+      try {
+        await onMergeWorktree?.(worktree);
+      } catch (reason) {
+        setError(`${t('workbench:errors.mergeWorktree')}: ${getErrorMessage(reason)}`);
+      } finally {
+        setActionBusy(null);
+      }
+    },
+    [isActionDisabled, onMergeWorktree, t],
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -119,7 +157,7 @@ export function MobileWorktreePanel({
    */
   const handleRemoveWorktree = useCallback(
     async (worktree: WorkbenchWorktree): Promise<void> => {
-      if (worktree.isMain) return;
+      if (!canRunMobileWorktreeDestructiveAction(worktree, isActionDisabled)) return;
       const shouldRemove = window.confirm(
         t('workbench:mobile.worktreePanel.removeConfirm', { name: worktree.name }),
       );
@@ -164,6 +202,7 @@ export function MobileWorktreePanel({
       onWorktreesChange,
       t,
       worktrees,
+      isActionDisabled,
     ],
   );
 
@@ -187,19 +226,34 @@ export function MobileWorktreePanel({
 
       <div className={styles.mobileFormInline}>
         <label className={styles.mobileField}>
-          <span>{t('workbench:mobile.worktreePanel.branchLabel')}</span>
+          <span>{t('workbench:worktrees.prefixLabel')}</span>
+          <select
+            className={styles.mobileSelect}
+            value={branchPrefix}
+            disabled={!project || isActionDisabled}
+            onChange={(event) => setBranchPrefix(event.target.value as WorktreeBranchPrefix)}
+          >
+            {WORKTREE_BRANCH_PREFIXES.map((prefix) => (
+              <option key={prefix} value={prefix}>
+                {prefix}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className={styles.mobileField}>
+          <span>{t('workbench:worktrees.suffixLabel')}</span>
           <input
             className={styles.mobileInput}
-            value={branchName}
+            value={branchSuffix}
             disabled={!project || isActionDisabled}
-            placeholder={t('workbench:mobile.worktreePanel.branchPlaceholder')}
-            onChange={(event) => setBranchName(event.target.value)}
+            placeholder={t('workbench:worktrees.suffixPlaceholder')}
+            onChange={(event) => setBranchSuffix(event.target.value)}
           />
         </label>
         <button
           type="button"
           className={styles.mobileTerminalPrimaryButton}
-          disabled={!project || !branchName.trim() || isActionDisabled}
+          disabled={!project || !composedBranchName || isActionDisabled}
           onClick={() => void handleCreateWorktree()}
         >
           {actionBusy === 'create'
@@ -215,12 +269,24 @@ export function MobileWorktreePanel({
       <div className={styles.mobileList}>
         {worktrees.map((worktree) => {
           const isActive = worktree.id === activeWorktreeId;
+          const statusKind = getMobileWorktreeStatusKind(worktree);
           const statusLabel =
-            worktree.status.conflicts > 0
+            statusKind === 'conflict'
               ? t('workbench:worktrees.status.conflict', { count: worktree.status.conflicts })
-              : worktree.status.changed > 0
+              : statusKind === 'dirty'
                 ? t('workbench:worktrees.status.dirty', { count: worktree.status.changed })
                 : t('workbench:worktrees.status.clean');
+          const syncLabel = `${t('workbench:mobile.worktreePanel.sync')} · ${t(
+            'workbench:mobile.gitPanel.aheadBehindValue',
+            {
+              ahead: worktree.status.ahead,
+              behind: worktree.status.behind,
+            },
+          )}`;
+          const canRunDestructiveAction = canRunMobileWorktreeDestructiveAction(
+            worktree,
+            isActionDisabled,
+          );
 
           return (
             <article
@@ -251,13 +317,36 @@ export function MobileWorktreePanel({
                 <span className={styles.mobileListPath}>
                   {worktree.branch ?? t('workbench:emptyValue')}
                 </span>
-                <span className={styles.mobileListMeta}>{statusLabel}</span>
+                <span className={styles.mobileListMeta}>{worktree.path}</span>
+                <span className={styles.mobileBadgeRow}>
+                  <span className={styles.mobileBadge}>{statusLabel}</span>
+                  <span className={styles.mobileBadge}>{syncLabel}</span>
+                  <span
+                    className={`${styles.mobileBadge} ${
+                      worktree.status.canPush ? styles.mobileBadgeAccent : ''
+                    }`}
+                  >
+                    {worktree.status.canPush
+                      ? t('workbench:mobile.gitPanel.canPushAllowed')
+                      : t('workbench:mobile.gitPanel.canPushBlocked')}
+                  </span>
+                </span>
               </button>
               <div className={styles.mobileToolbar}>
                 <button
                   type="button"
                   className={styles.secondaryButton}
-                  disabled={worktree.isMain || isActionDisabled}
+                  disabled={!canRunDestructiveAction}
+                  onClick={() => void handleMergeWorktree(worktree)}
+                >
+                  {actionBusy === `merge-${worktree.id}`
+                    ? t('workbench:mobile.worktreePanel.merging')
+                    : t('workbench:worktrees.merge')}
+                </button>
+                <button
+                  type="button"
+                  className={styles.secondaryButton}
+                  disabled={!canRunDestructiveAction}
                   onClick={() => void handleRemoveWorktree(worktree)}
                 >
                   {actionBusy === `remove-${worktree.id}`

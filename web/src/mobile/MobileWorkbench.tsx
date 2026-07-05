@@ -541,16 +541,22 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   mobile Git merge 会删除源 worktree，必须先确认 Files 草稿，再让后端执行 merge；后端失败时不能丢草稿。
+   *   mobile Git merge 会删除源 worktree，必须先确认用户合并意图；只有合并 active worktree 时才需要处理 Files dirty 草稿切换。
    *
    * Code Logic（这个函数做什么）:
-   *   用 destructive merge helper 串联 confirm-only、HTTP merge、成功后丢弃草稿和跳过重复确认的 worktree 刷新。
+   *   先执行 merge confirm，再用 destructive merge helper 串联可选 dirty guard、HTTP merge、成功后移除源列表并按计划刷新 worktree。
    */
   const handleMergeWorktree = useCallback(
     async (sourceWorktree: WorkbenchWorktree): Promise<boolean> => {
+      const shouldMerge = window.confirm(
+        t('workbench:worktrees.mergeConfirm', { name: sourceWorktree.name }),
+      );
+      if (!shouldMerge) return false;
+
       const operationProjectId = activeProjectRef.current?.id ?? null;
       const result = await runMobileWorktreeMergeFlow({
         worktrees,
+        activeWorktreeId: activeWorktreeRef.current?.id ?? null,
         sourceWorktree,
         confirmActiveWorktreeChange: (nextActive) =>
           handleConfirmActiveWorktreeChange(nextActive),
@@ -560,11 +566,13 @@ export function MobileWorkbench(): ReactElement {
         applyMergeSuccess: async (plan) => {
           if (activeProjectRef.current?.id !== operationProjectId) return;
           const appliedState = getMobileWorktreeMergeAppliedState(plan);
-          discardConfirmedFileContextSwitch();
           setWorktrees(appliedState.nextWorktrees);
-          setActiveWorktreeWithSession(appliedState.nextActive);
+          if (plan.requiresActivePreflight) {
+            discardConfirmedFileContextSwitch();
+            setActiveWorktreeWithSession(appliedState.nextActive);
+          }
           await refreshWorktrees({
-            skipFileContextConfirm: true,
+            skipFileContextConfirm: plan.requiresActivePreflight,
             expectedProjectId: operationProjectId ?? undefined,
           });
         },
@@ -576,6 +584,7 @@ export function MobileWorkbench(): ReactElement {
       handleConfirmActiveWorktreeChange,
       refreshWorktrees,
       setActiveWorktreeWithSession,
+      t,
       worktrees,
     ],
   );
@@ -614,6 +623,7 @@ export function MobileWorkbench(): ReactElement {
         onConfirmActiveWorktreeChange={handleConfirmActiveWorktreeChange}
         onActiveWorktreeChange={handleApplyActiveWorktreeChange}
         onRefreshWorktrees={refreshWorktrees}
+        onMergeWorktree={handleMergeWorktree}
       />
     ) : panel === 'files' ? null : panel === 'git' ? (
       <MobileGitPanel

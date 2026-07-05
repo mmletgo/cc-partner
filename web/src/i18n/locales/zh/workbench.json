@@ -176,7 +176,9 @@
       "branchLabel": "新分支名",
       "branchPlaceholder": "feature/mobile-task",
       "creating": "创建中",
+      "merging": "合并中",
       "removing": "移除中",
+      "sync": "同步",
       "removeConfirm": "确定移除 worktree“{{name}}”？请先确认不再需要该工作区。"
     },
     "promptPanel": {
