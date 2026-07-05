@@ -14,6 +14,7 @@ import { MobileWorktreePanel } from './components/MobileWorktreePanel';
 import {
   canOpenMobileWorktreeSwitcher,
   canSelectMobileProject,
+  selectMobileWorktreeWorkspacePanel,
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
   type MobileWorkbenchPanel,
@@ -513,6 +514,25 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   用户在 Worktrees 面板点击工作区卡片后，希望成功切换 active worktree 并直接进入对应终端工作现场。
+   *
+   * Code Logic（这个函数做什么）:
+   *   复用受 dirty guard 保护的 worktree 选择逻辑；只有选择成功时才按 helper 切到 terminal 面板。
+   */
+  const handleOpenWorktreeWorkspace = useCallback(
+    (worktree: WorkbenchWorktree): boolean => {
+      const accepted = handleSelectWorktree(worktree);
+      const nextPanel = selectMobileWorktreeWorkspacePanel(accepted);
+      if (nextPanel) {
+        setPanel(nextPanel);
+      }
+      return accepted;
+    },
+    [handleSelectWorktree],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   worktree 面板本地增删列表后，父组件必须同步列表；active 切换由受 dirty guard 保护的回调单独处理。
    *
    * Code Logic（这个函数做什么）:
@@ -679,7 +699,7 @@ export function MobileWorkbench(): ReactElement {
         worktrees={worktrees}
         activeWorktreeId={activeWorktree?.id ?? null}
         busy={worktreeControlsBusy}
-        onSelect={handleSelectWorktree}
+        onSelect={handleOpenWorktreeWorkspace}
         onWorktreesChange={handleWorktreesChange}
         onConfirmActiveWorktreeChange={handleConfirmActiveWorktreeChange}
         onActiveWorktreeChange={handleApplyActiveWorktreeChange}

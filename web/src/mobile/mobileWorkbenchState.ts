@@ -116,6 +116,19 @@ export function canRunMobileWorktreeDestructiveAction(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   用户在移动端 Worktrees 面板点击工作区时，期望成功切换后直接进入对应 Workbench 操作现场。
+ *
+ * Code Logic（这个函数做什么）:
+ *   接收 worktree 选择是否被父级 dirty guard 接受；成功时返回 terminal 面板，失败时返回 null 表示保持当前面板。
+ */
+export function selectMobileWorktreeWorkspacePanel(
+  accepted: boolean,
+): MobileWorkbenchPanel | null {
+  return accepted ? 'terminal' : null;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   移动端选择项目后需要自动落到最合理的 worktree，状态栏、终端和文件面板都依赖这个上下文。
  *
  * Code Logic（这个函数做什么）:

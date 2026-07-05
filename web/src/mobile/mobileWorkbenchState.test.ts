@@ -9,6 +9,7 @@ import {
   getInitialMobileNavOpen,
   getMobileWorktreeStatusKind,
   openMobileNav,
+  selectMobileWorktreeWorkspacePanel,
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
   selectMobilePanel,
@@ -278,6 +279,18 @@ function testMobileWorktreeDestructiveActionRequiresIdleNonMainWorktree(): void 
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   用户在移动端 Worktrees 面板点击工作区时，期望成功切换后直接进入对应 Workbench 操作现场。
+ *
+ * Code Logic（这个函数做什么）:
+ *   断言选择成功会跳到 terminal 面板；选择被 dirty guard 拦截时保持当前面板不变。
+ */
+function testWorktreeWorkspaceClickNavigatesToTerminalOnlyAfterAcceptedSelection(): void {
+  assertEqual(selectMobileWorktreeWorkspacePanel(true), 'terminal');
+  assertEqual(selectMobileWorktreeWorkspacePanel(false), null);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   移动端选择项目后应优先进入主工作区，避免默认落到随机 feature worktree。
  *
  * Code Logic（这个函数做什么）:
@@ -427,6 +440,7 @@ testCanSelectMobileProjectOnlyAllowsLocalProjects();
 testMobileWorktreeStatusKindPrioritizesConflictThenDirty();
 testMobileWorktreeSwitcherRequiresIdleLocalProject();
 testMobileWorktreeDestructiveActionRequiresIdleNonMainWorktree();
+testWorktreeWorkspaceClickNavigatesToTerminalOnlyAfterAcceptedSelection();
 testPreferredWorktreeUsesMainBeforeFirst();
 testPreferredWorktreeFallsBackToFirstOrNull();
 testPreferredSessionUsesMatchingWorktreeBeforeRunning();
