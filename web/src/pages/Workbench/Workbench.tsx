@@ -3307,20 +3307,6 @@ export function Workbench() {
                       className={styles.terminalActionButton}
                       variant="secondary"
                       size="sm"
-                      icon={<OrchestratorIcon />}
-                      title={t('workbench:automationWorkspace.open')}
-                      aria-label={t('workbench:automationWorkspace.open')}
-                      data-active={workspaceView === 'automation' || undefined}
-                      onClick={handleOpenAutomationWorkspace}
-                    >
-                      {t('workbench:automationWorkspace.open')}
-                    </Button>
-                  ) : null}
-                  {!terminalFullscreen ? (
-                    <Button
-                      className={styles.terminalActionButton}
-                      variant="secondary"
-                      size="sm"
                       icon={<EditIcon />}
                       title={t('workbench:promptOptimizer.open')}
                       aria-label={t('workbench:promptOptimizer.open')}
@@ -3401,6 +3387,20 @@ export function Workbench() {
                   >
                     {terminalFullscreenLabel}
                   </Button>
+                  {!terminalFullscreen ? (
+                    <Button
+                      className={styles.terminalActionButton}
+                      variant="secondary"
+                      size="sm"
+                      icon={<OrchestratorIcon />}
+                      title={t('workbench:automationWorkspace.open')}
+                      aria-label={t('workbench:automationWorkspace.open')}
+                      data-active={workspaceView === 'automation' || undefined}
+                      onClick={handleOpenAutomationWorkspace}
+                    >
+                      {t('workbench:automationWorkspace.open')}
+                    </Button>
+                  ) : null}
                   {!terminalFullscreen ? (
                     <Button
                       className={styles.terminalActionButton}
