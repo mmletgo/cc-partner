@@ -2,17 +2,17 @@
 
 - 日期：2026-07-05
 - 状态：方案已确认，待实现计划
-- 范围：Workbench 自动化工作区、Orchestrator 后端、局域网远端 Workbench/Orchestrator 协议、项目策略编辑
+- 范围：Workbench 自动化工作区、Settings 自动化配置、Orchestrator 后端、局域网远端 Workbench/Orchestrator 协议
 
 ## 1. 背景
 
 当前 Orchestrator 已经具备项目任务队列、项目策略读取、Workbench 可见 Runner、验证命令执行、delivery evidence 和 full-auto Git 交付能力。但现状有三个明显缺口：
 
-1. 项目并发上限等策略只存在于后端 `orchestrator_project_config` 表，前端只能展示，不能设置。
+1. 并发上限等自动化策略目前按项目落在后端 `orchestrator_project_config` 表，前端只能展示，不能设置；实际产品使用上这些策略不需要项目级差异，更适合放到 cc-partner 设置页的全局自动化 tab。
 2. Runner 只支持本机 Workbench 项目。远端项目会在 `prepare_visible_runner` 阶段直接失败。
 3. 开发完成后的验证需要用户手动点击，且验证失败后任务进入 Blocked，不会自动把失败原因交给新的 Claude 继续修复。
 
-本设计把自动化能力升级为：项目策略可配置、局域网远端项目由远端设备自治执行、本机可离线暂存远端任务、开发与验证形成 Claude 闭环。
+本设计把自动化能力升级为：全局自动化配置可编辑、局域网远端项目由远端设备自治执行、本机可离线暂存远端任务、开发与验证形成 Claude 闭环。
 
 ## 2. 已确认决策
 
@@ -21,10 +21,11 @@
 3. 远端项目采用远端自治。远端项目的队列、Runner、验证循环和交付都由远端设备自己的 cc-partner 接管，本机只负责展示、操作和同步。
 4. 远端设备离线时，本机允许创建 pending 任务。远端上线后自动投递给远端 Orchestrator。
 5. 验证未通过后的修复使用同一个任务 worktree，但创建新的 terminal window 和新的开发 Claude，把失败反馈作为修复 Prompt 注入。
+6. 自动化配置不做项目级配置，统一放到 cc-partner Settings 的“自动化”tab。远端自治时使用远端设备自己的全局自动化配置。
 
 ## 3. 目标
 
-1. 在 Workbench 自动化策略卡中提供项目策略编辑能力，覆盖启用开关、并发上限、验证命令和自动交付开关。
+1. 在 Settings 中新增“自动化”tab，提供全局自动化配置，覆盖启用开关、并发上限、验证命令和自动交付开关。
 2. 本机项目继续由本机 Orchestrator 执行，远端项目由远端 Orchestrator 自治执行。
 3. 本机在远端离线时允许创建 pending remote task，并在远端恢复在线后自动投递。
 4. 开发任务完成后自动进入验证闭环，不再依赖用户手动点击“开始验证”。
@@ -42,16 +43,18 @@
 
 ## 5. 用户体验
 
-### 5.1 项目策略编辑
+### 5.1 Settings 自动化配置
 
-自动化工作区的策略卡从只读展示升级为可编辑：
+Settings 新增“自动化”tab，作为本设备 Orchestrator 的唯一配置入口：
 
-- `enabled`：是否允许 scheduler 自动领取该项目任务。
-- `maxConcurrentTasks`：项目并发任务上限，前端输入范围 1 到 8，后端拒绝小于 1 或大于 8。
+- `enabled`：是否允许本设备 scheduler 自动领取任务。
+- `maxConcurrentTasks`：本设备自动化并发任务上限，前端输入范围 1 到 8，后端拒绝小于 1 或大于 8。
 - `verificationCommands`：多行命令列表，空行忽略。
 - `autoCommit`、`autoPushTaskBranch`、`autoMergeToMain`、`autoPushMain`：full-auto delivery 四阶段开关。
 
-保存后立即刷新策略卡。scheduler 每个 tick 重新读取数据库策略，因此无需重启应用。
+保存后立即生效。scheduler 每个 tick 重新读取全局自动化配置，因此无需重启应用。
+
+Workbench 自动化工作区不再承担配置编辑职责，只展示当前设备或远端设备返回的自动化配置摘要与状态。远端项目由远端设备执行时，本机不能用自己的 Settings 覆盖远端执行策略；远端执行策略以远端设备 Settings 为准。
 
 ### 5.2 远端项目任务创建
 
@@ -69,7 +72,7 @@
 2. 创建开发 terminal window。
 3. 启动开发 Claude 并注入任务 Prompt。
 4. 开发 Claude 结束或声明完成后，后端自动进入验证阶段。
-5. 后端执行项目验证命令，收集输出。
+5. 后端执行 Settings 自动化 tab 中配置的验证命令，收集输出。
 6. 后端启动验证 Claude，输入任务目标、验收标准、验证命令输出、当前 Git diff 和必要的文件摘要。
 7. 验证 Claude 输出结构化裁决。
 8. 如果裁决为通过，任务进入 Delivering。
@@ -114,20 +117,21 @@ Verifying + verifier fail -> Running
 
 ## 7. 后端架构
 
-### 7.1 项目策略更新命令
+### 7.1 全局自动化配置命令
 
 新增命令：
 
-- `update_orchestrator_project_config(projectId, patch)`
+- `get_orchestrator_config()`
+- `get_default_orchestrator_config()`
+- `update_orchestrator_config(patch)`
 
 后端校验：
 
-- `projectId` 非空。
 - `maxConcurrentTasks` 在 1 到 8。
 - `verificationCommands` trim 后过滤空行，序列化为 JSON 数组。
 - delivery 四个开关可以单独关闭，但如果任务进入 Delivering 时任一关闭，现有 delivery pipeline 继续 Blocked，避免静默跳过交付阶段。
 
-前端 `orchestratorApi` 增加 `updateProjectConfig`。
+配置持久化建议放入 `AppConfig` 或独立 `orchestrator_config` 单例表，不能继续以 project id 作为配置主键。前端在 Settings API 中增加自动化配置读写方法，Orchestrator API 只保留任务与 evidence 操作。
 
 ### 7.2 远端自治 API
 
@@ -139,8 +143,7 @@ Verifying + verifier fail -> Running
 - `GET /api/orchestrator/tasks/{id}/evidence`
 - `POST /api/orchestrator/tasks/{id}/retry`
 - `POST /api/orchestrator/tasks/{id}/abort`
-- `GET /api/orchestrator/project-config?projectId=...`
-- `POST /api/orchestrator/project-config/update`
+- `GET /api/orchestrator/config`
 
 这些 endpoint 在远端设备上复用本机 Tauri command 的业务逻辑，不复制第二套状态机。
 
@@ -232,19 +235,28 @@ sentinel 只作为自动推进信号，不作为质量判定。质量由验证�
 
 ## 8. 前端架构
 
-### 8.1 OrchestratorPanel
+### 8.1 Settings 自动化 tab
+
+Settings 新增自动化 tab：
+
+- 读取 `get_orchestrator_config` 和 `get_default_orchestrator_config`。
+- 表单编辑 `enabled`、`maxConcurrentTasks`、`verificationCommands`、delivery flags。
+- 保存调用 `update_orchestrator_config`。
+- 恢复默认只重置表单，仍需用户点击保存后持久化，行为对齐现有 Settings 其它 tab。
+
+### 8.2 OrchestratorPanel
 
 OrchestratorPanel 保持只拥有任务看板、任务详情、创建表单、Evidence 和策略卡。
 
 新增：
 
-- 策略编辑模式。
+- 自动化配置摘要展示，提示配置入口在 Settings。
 - pending remote task 样式。
 - attempt 轮次展示。
 - 验证闭环状态展示，例如“第 4 轮开发中”“验证 Claude 未通过，正在重新修复”。
 - 远端自治提示：远端项目的自动化由设备名对应的远端 cc-partner 执行。
 
-### 8.2 Workbench deep link
+### 8.3 Workbench deep link
 
 远端 task mirror 的 `projectId/worktreeId/sessionId` 使用现有 remote id 前缀规则。打开 Workbench 时：
 
@@ -280,16 +292,17 @@ Evidence 按 task id、created_at、id 稳定排序。
 
 后端：
 
-- 项目策略更新校验：并发范围、验证命令 trim、delivery flags 保存。
+- 全局自动化配置更新校验：并发范围、验证命令 trim、delivery flags 保存。
 - pending outbox：离线创建、上线投递、协议失败、重复投递幂等。
-- 远端 Orchestrator HTTP endpoints：创建、列表、evidence、retry、abort、配置更新。
+- 远端 Orchestrator HTTP endpoints：创建、列表、evidence、retry、abort、配置读取。
 - scheduler：本机项目本机领取，远端项目不由本机 scheduler 领取。
 - 验证闭环：验证命令失败但验证 Claude 判定 fail 后进入下一轮 Running；判定 pass 后进入 Delivering。
 - verifier JSON 解析失败进入 Blocked。
 
 前端：
 
-- 策略卡编辑和保存。
+- Settings 自动化 tab 编辑和保存。
+- OrchestratorPanel 配置摘要与 Settings 入口展示。
 - pending remote task 展示。
 - 远端离线时创建任务进入 pending。
 - 远端在线时任务列表展示远端真实任务和 pending 合并结果。
@@ -310,7 +323,7 @@ Evidence 按 task id、created_at、id 稳定排序。
 
 ## 13. 实施顺序建议
 
-1. 项目策略 update 命令和前端编辑入口。
+1. 全局自动化配置命令和 Settings 自动化 tab。
 2. 远端 Orchestrator HTTP API 与 remote client。
 3. pending outbox 和远端任务镜像展示。
 4. Runner 自动完成 sentinel。

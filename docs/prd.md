@@ -239,11 +239,12 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 **描述**：在 Workbench 项目之上提供自动编排器，用内部任务队列把需求拆成可排队、可运行、可验证和可交付的项目级任务。
 
 **功能点**：
-- 任务队列按项目隔离，支持创建 Draft、入队、Running 完成后触发验证、Blocked 重试和终止
-- 项目级策略控制是否启用 scheduler、最大并发、验证命令、full-auto 交付开关、保留 worktree 规则和重试上限
+- 任务队列按项目隔离，支持创建 Draft、入队、自动验证闭环、Blocked 重试和终止
+- 自动化配置统一放在 Settings 的独立 tab 中，控制 scheduler 启用、最大并发、验证命令、full-auto 交付开关和重试相关行为，不做项目级策略
 - Runner 必须使用 Workbench 可见的 tmux terminal 和任务 worktree，方便用户随时 takeover 或观察 Claude Code 执行现场
-- 后端 complete 命令负责执行验证命令并在通过或跳过验证后按策略完成 commit、推送任务分支、合并主工作区和推送主分支
-- 任务进入 Blocked 时保留原因、worktree/session 入口和 evidence 链；Evidence 记录验证输出、交付阶段结果和失败摘要，供前端任务看板展示与追溯
+- 后端自动执行验证命令并调用验证 Claude 做最终裁决；验证未通过时在同一 worktree 新建 terminal/Claude 继续修复，直到通过或用户终止
+- 验证通过后按全局自动化配置完成 commit、推送任务分支、合并主工作区和推送主分支
+- 任务进入 Blocked 或循环修复时保留原因、worktree/session 入口和 evidence 链；Evidence 记录验证输出、验证 Claude 裁决、修复 Prompt、交付阶段结果和失败摘要，供前端任务看板展示与追溯
 - OrchestratorPanel 只拥有项目级任务看板和编排状态；Workbench 拥有其 workspace view 挂载、项目现场、terminal takeover、文件和 Git 操作
 
 ## 3. 非功能需求
