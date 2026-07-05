@@ -238,6 +238,38 @@ mod tests {
         assert!(updated.auto_push_main);
     }
 
+    /// 验证并发上限边界值 1 和 8 可保存。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     设置页允许用户在最小和最大并发边界之间选择，边界值本身必须是合法配置。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     分别传入 maxConcurrentTasks=1 和 8，断言 patch 成功并写入目标值。
+    #[test]
+    fn apply_patch_accepts_min_and_max_concurrent_task_boundaries() {
+        let current = sample_current_config();
+
+        let min_updated = apply_orchestrator_config_patch(
+            &current,
+            OrchestratorAutomationConfigPatch {
+                max_concurrent_tasks: Some(1),
+                ..Default::default()
+            },
+        )
+        .expect("min boundary should pass");
+        let max_updated = apply_orchestrator_config_patch(
+            &current,
+            OrchestratorAutomationConfigPatch {
+                max_concurrent_tasks: Some(8),
+                ..Default::default()
+            },
+        )
+        .expect("max boundary should pass");
+
+        assert_eq!(min_updated.max_concurrent_tasks, 1);
+        assert_eq!(max_updated.max_concurrent_tasks, 8);
+    }
+
     /// 验证并发上限不能为 0。
     ///
     /// Business Logic（为什么需要这个测试）:

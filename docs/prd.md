@@ -240,10 +240,10 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 
 **功能点**：
 - 任务队列按项目隔离，支持创建 Draft、入队、自动验证闭环、Blocked 重试和终止
-- 自动化配置统一放在 Settings 的独立 tab 中，控制 scheduler 启用、最大并发、验证命令、full-auto 交付开关和重试相关行为；运行偏好按设备持久化在全局 AppConfig，不做项目级策略。验证命令以多行文本维护，保存时 trim/filter 空行并限制数量与长度
+- 自动化配置统一放在 Settings 的独立 tab 中，控制 scheduler 启用、最大并发、验证命令、full-auto 交付开关和重试相关行为；运行偏好按设备持久化在全局 AppConfig，不做项目级策略。Phase 1 后端仅提供持久化结构和读写命令；scheduler、验证和 delivery 的运行时消费后续阶段切换。验证命令以多行文本维护，保存时 trim/filter 空行并限制数量与长度
 - Runner 必须使用 Workbench 可见的 tmux terminal 和任务 worktree，方便用户随时 takeover 或观察 Claude Code 执行现场
 - 后端自动执行验证命令并调用验证 Claude 做最终裁决；验证未通过时在同一 worktree 新建 terminal/Claude 继续修复，直到通过或用户终止
-- 验证通过后按全局自动化配置完成 commit、推送任务分支、合并主工作区和推送主分支
+- 目标态验证通过后按全局自动化配置完成 commit、推送任务分支、合并主工作区和推送主分支
 - 任务进入 Blocked 或循环修复时保留原因、worktree/session 入口和 evidence 链；Evidence 记录验证输出、验证 Claude 裁决、修复 Prompt、交付阶段结果和失败摘要，供前端任务看板展示与追溯
 - OrchestratorPanel 只拥有项目级任务看板和编排状态；Workbench 拥有其 workspace view 挂载、项目现场、terminal takeover、文件和 Git 操作
 
