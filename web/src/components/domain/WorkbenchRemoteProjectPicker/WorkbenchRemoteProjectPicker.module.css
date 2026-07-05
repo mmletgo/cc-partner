@@ -2,7 +2,7 @@
 
 .picker {
   width: min(720px, calc(100vw - var(--space-8)));
-  max-height: min(760px, calc(100vh - var(--space-8)));
+  height: min(760px, calc(100vh - var(--space-8)));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -42,8 +42,13 @@
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "devices browser"
+    "roots browser"
+    "selection selection";
   gap: var(--space-4);
-  overflow: auto;
+  overflow: hidden;
 }
 
 .section,
@@ -55,8 +60,23 @@
   gap: var(--space-2);
 }
 
-.browser,
-.selection,
+.devicesSection {
+  grid-area: devices;
+}
+
+.rootsSection {
+  grid-area: roots;
+  min-height: 0;
+}
+
+.browser {
+  grid-area: browser;
+}
+
+.selection {
+  grid-area: selection;
+}
+
 .errorBox {
   grid-column: 1 / -1;
 }
@@ -76,8 +96,19 @@
 .entryList {
   min-height: 0;
   display: flex;
-  flex-direction: column;
   gap: var(--space-2);
+}
+
+.deviceList,
+.entryList {
+  flex-direction: column;
+}
+
+.rootList {
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: auto;
+  padding-right: var(--space-1);
 }
 
 .deviceButton,
@@ -141,7 +172,8 @@
 }
 
 .rootButton {
-  padding: var(--space-3);
+  min-height: 50px;
+  padding: var(--space-2) var(--space-3);
 }
 
 .rootText,
@@ -191,8 +223,14 @@
   white-space: nowrap;
 }
 
+.browser {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .entryList {
-  max-height: 260px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   padding-right: var(--space-1);
 }
@@ -266,6 +304,13 @@
 @media (max-width: 720px) {
   .body {
     grid-template-columns: 1fr;
+    grid-template-rows: auto auto minmax(260px, 1fr) auto;
+    grid-template-areas:
+      "devices"
+      "roots"
+      "browser"
+      "selection";
+    overflow: auto;
   }
 
   .section,
@@ -273,5 +318,9 @@
   .selection,
   .errorBox {
     grid-column: 1;
+  }
+
+  .rootList {
+    max-height: 120px;
   }
 }

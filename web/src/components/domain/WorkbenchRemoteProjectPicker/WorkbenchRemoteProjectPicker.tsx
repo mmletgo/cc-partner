@@ -5,7 +5,7 @@
  *   Workbench 需要允许用户直接从在线局域网设备选择项目文件夹，不要求该项目先被远端 Workbench 预添加。
  *
  * Code Logic（这个组件做什么）:
- *   加载在线设备、远端可浏览根目录和当前目录项；用户选择目录后调用 openProject 并把打开的项目回传给父组件。
+ *   加载在线设备、远端可浏览根目录和当前目录项；用户选择目录后调用 openProject，并把打开的项目回传给父组件。
  */
 
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
@@ -501,7 +501,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
 
   return (
     <Card className={styles.picker} variant="elevated" padding="none">
-      <Card.Header className={styles.header}>
+      <Card.Header className={styles.header} padding="md">
         <div className={styles.heading}>
           <h2>{t('workbench:remoteProjectPicker.title')}</h2>
           <p>{t('workbench:remoteProjectPicker.subtitle')}</p>
@@ -516,10 +516,13 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
         />
       </Card.Header>
 
-      <Card.Body className={styles.body}>
+      <Card.Body className={styles.body} padding="md">
         {error ? <div className={styles.errorBox}>{error}</div> : null}
 
-        <section className={styles.section} aria-label={t('workbench:remoteProjectPicker.devices')}>
+        <section
+          className={`${styles.section} ${styles.devicesSection}`}
+          aria-label={t('workbench:remoteProjectPicker.devices')}
+        >
           <div className={styles.sectionHeader}>
             <span>{t('workbench:remoteProjectPicker.devices')}</span>
             {devicesLoading ? <Pill tone="neutral">{t('workbench:loading')}</Pill> : null}
@@ -545,7 +548,10 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
           </div>
         </section>
 
-        <section className={styles.section} aria-label={t('workbench:remoteProjectPicker.roots')}>
+        <section
+          className={`${styles.section} ${styles.rootsSection}`}
+          aria-label={t('workbench:remoteProjectPicker.roots')}
+        >
           <div className={styles.sectionHeader}>
             <span>{t('workbench:remoteProjectPicker.roots')}</span>
             {rootsLoading ? <Pill tone="neutral">{t('workbench:loading')}</Pill> : null}
@@ -649,7 +655,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
         </section>
       </Card.Body>
 
-      <Card.Footer className={styles.footer}>
+      <Card.Footer className={styles.footer} padding="md">
         <Button variant="ghost" disabled={openBusy} onClick={handleCancel}>
           {t('workbench:remoteProjectPicker.close')}
         </Button>

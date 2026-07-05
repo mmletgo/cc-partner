@@ -23,7 +23,7 @@
 - **前端**: React 19 · TypeScript · Vite · React Router v6 · CSS Modules
 - **打包/更新**: Tauri CLI · tauri-plugin-updater · tauri-plugin-global-shortcut · tauri-plugin-process · tauri-plugin-dialog
 
-桌面端架构：Tauri 2 主进程用 Rust 实现全部后端能力，前端复用 `web/` 的 React。本地前端通过 `@tauri-apps/api` 的 `invoke()` 调用 Rust `#[tauri::command]`（无本地端口暴露）；跨设备 P2P 走 axum HTTP server（固定首选端口，端口被占则自动 +1）+ reqwest 客户端 + mdns-sd 发现。两条通道共享同一份 `AppState`。
+桌面端架构：Tauri 2 主进程用 Rust 实现全部后端能力，前端复用 `web/` 的 React。本地前端通过 `@tauri-apps/api` 的 `invoke()` 调用 Rust `#[tauri::command]`（无本地端口暴露）；跨设备 P2P 走 axum HTTP server（固定首选端口，端口被占则自动 +1）+ reqwest 客户端 + mdns-sd 发现。局域网能力依赖防火墙放行 UDP 5353(mDNS) 与实际 P2P HTTP TCP 端口（默认 62116，详见 README）。两条通道共享同一份 `AppState`。
 
 ## 2. 目录结构
 

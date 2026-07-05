@@ -85,6 +85,54 @@ sudo dpkg -i cc-partner_*.deb
 - 搜索局域网内的其他 cc-partner 设备
 - 显示已发现的在线设备
 
+### 局域网防火墙端口
+
+如果设备能被发现但文件传输、移动端 Workbench 或打开远端项目失败，请先确认两台电脑都在同一局域网，并允许以下入站端口：
+
+| 用途 | 协议/端口 | 说明 |
+|------|-----------|------|
+| 设备发现 | UDP 5353 | mDNS / Bonjour，用于发现 `_cc-partner._tcp.local.` 设备 |
+| P2P HTTP / Workbench | TCP 62116 | 默认服务端口，文件传输、Prompt 同步、移动端 Workbench、打开远端项目都走该 HTTP 服务 |
+
+如果 TCP 62116 被占用，cc-partner 会自动递增到下一个可用端口；以应用内显示的移动端访问链接或 `/api/health` 返回的 `http_port` 为准。
+
+**macOS**
+
+macOS 系统防火墙通常按 App 放行。首次出现“是否允许传入连接”时选择“允许”。如果需要手动放行已安装应用：
+
+```bash
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /Applications/cc-partner.app
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /Applications/cc-partner.app
+```
+
+源码开发模式下，如果弹窗询问 `app` 或调试二进制是否允许传入连接，也需要选择“允许”。如果使用 Little Snitch、LuLu 等第三方防火墙，请允许 UDP 5353 和当前 P2P HTTP TCP 端口。
+
+**Windows**
+
+首次启动出现 Windows Defender 防火墙提示时，勾选“专用网络”并允许访问。也可以用管理员 PowerShell 手动添加规则：
+
+```powershell
+New-NetFirewallRule -DisplayName "cc-partner P2P HTTP" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 62116
+New-NetFirewallRule -DisplayName "cc-partner mDNS" -Direction Inbound -Action Allow -Protocol UDP -LocalPort 5353
+```
+
+**Ubuntu / Linux (ufw)**
+
+如果启用了 `ufw`：
+
+```bash
+sudo ufw allow 62116/tcp comment 'cc-partner P2P HTTP'
+sudo ufw allow 5353/udp comment 'cc-partner mDNS'
+sudo ufw reload
+```
+
+验证远端 HTTP 是否可访问：
+
+```bash
+curl http://<远端 IP>:62116/api/health
+curl http://<远端 IP>:62116/api/workbench/fs/roots
+```
+
 ### 传输文件
 
 1. 确保两台电脑都打开了 cc-partner，并且在**同一个局域网**（同一个 Wi-Fi）
@@ -184,7 +232,7 @@ cc-partner 使用 **P2P 架构**，每个实例既是服务端也是客户端：
 
 ### 两台电脑互相看不到？
 - 确认两台电脑在**同一个局域网**（同一个 Wi-Fi 或同一个路由器下）
-- 检查防火墙是否阻止了 mDNS（UDP 5353 端口）和 HTTP 连接
+- 检查防火墙是否阻止了 mDNS（UDP 5353）和 P2P HTTP（默认 TCP 62116，端口被占用时会自动递增）
 - 如果使用了 VPN，可能会影响局域网发现，尝试断开 VPN
 
 ### 文件传输失败？

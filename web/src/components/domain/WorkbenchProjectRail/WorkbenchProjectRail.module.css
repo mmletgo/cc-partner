@@ -34,10 +34,11 @@
   top: calc(100% + var(--space-2));
   right: 0;
   z-index: var(--z-overlay);
-  width: 260px;
+  width: min(260px, calc(var(--sidebar-width) - var(--space-6)));
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  box-sizing: border-box;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
   background: var(--surface);
@@ -58,6 +59,11 @@
   padding: var(--space-3);
   text-align: left;
   transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.sourceOption > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
 }
 
 .sourceOption:hover {
