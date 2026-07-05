@@ -11,6 +11,8 @@ pub mod config;
 pub mod delivery;
 pub mod models;
 pub mod prompt;
+pub mod remote_client;
+pub mod remote_protocol;
 pub mod repo;
 pub mod runner;
 pub mod scheduler;

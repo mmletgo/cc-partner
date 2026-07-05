@@ -35,7 +35,7 @@ pub struct CreateOrchestratorTaskRequest {
 ///
 /// Code Logic（这个函数做什么）:
 ///     校验 project/title/goal 非空，生成 UUID 和 UTC 时间戳，返回完整 OrchestratorTaskRow。
-fn build_orchestrator_task_row(
+pub(crate) fn build_orchestrator_task_row(
     request: CreateOrchestratorTaskRequest,
 ) -> Result<OrchestratorTaskRow, AppError> {
     let project_id = request.project_id.trim();

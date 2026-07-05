@@ -13,7 +13,7 @@
 //!     - body limit 覆盖文件传输 chunk 和 Workbench 远端文本保存。
 
 use crate::net::routes::{
-    cc_history, claude_code_assets, claude_md_sync, health, mobile, scratchpad_sync,
+    cc_history, claude_code_assets, claude_md_sync, health, mobile, orchestrator, scratchpad_sync,
     ssh_target_sync, sync, transfer, workbench,
 };
 use crate::state::AppState;
@@ -499,6 +499,32 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/workbench/prompt-optimizer/stream-to-session",
             post(workbench::stream_prompt_optimizer_to_session),
         )
+        // Orchestrator 远端协议：remote shortcut 操作转发到项目所在设备的本机任务队列
+        .route(
+            "/api/orchestrator/tasks/create",
+            post(orchestrator::create_task),
+        )
+        .route(
+            "/api/orchestrator/tasks/list",
+            post(orchestrator::list_tasks),
+        )
+        .route(
+            "/api/orchestrator/tasks/evidence",
+            post(orchestrator::get_evidence),
+        )
+        .route(
+            "/api/orchestrator/tasks/queue",
+            post(orchestrator::queue_task),
+        )
+        .route(
+            "/api/orchestrator/tasks/retry",
+            post(orchestrator::retry_task),
+        )
+        .route(
+            "/api/orchestrator/tasks/abort",
+            post(orchestrator::abort_task),
+        )
+        .route("/api/orchestrator/config", get(orchestrator::get_config))
         // 移动端 SPA fallback：只服务 /mobile 命名空间；其它未知路径保持 404。
         .fallback_service(service_fn(move |req| {
             serve_mobile_spa(fallback_state.clone(), req)
