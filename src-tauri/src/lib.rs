@@ -458,7 +458,7 @@ pub fn run() {
                 *state.cloud_sync_cancel.lock().unwrap() = Some(cancel);
             }
 
-            // 启动 Orchestrator 后台 scheduler（每 10 秒按项目策略领取一个 Queued 任务）。
+            // 启动 Orchestrator 后台 scheduler（每 10 秒按全局自动化配置领取 Queued 任务）。
             // 取消令牌存入 AppState，应用退出时优雅停止。
             {
                 let state: tauri::State<'_, AppState> = app.state();
@@ -614,7 +614,7 @@ pub fn run() {
             // Prompt 优化（复用 Claude CLI pure/headless helper，不保存历史）
             prompt_optimizer_cmd::optimize_prompt,
             prompt_optimizer_cmd::stream_optimize_prompt_to_workbench_session,
-            // Orchestrator 任务 API（任务列表 / 创建草稿任务 / 入队 / 项目策略展示）
+            // Orchestrator 任务 API（任务列表 / 创建草稿任务 / 入队 / evidence / legacy 配置兼容读取）
             orchestrator_cmd::list_orchestrator_tasks,
             orchestrator_cmd::create_orchestrator_task,
             orchestrator_cmd::queue_orchestrator_task,
@@ -631,7 +631,7 @@ pub fn run() {
             orchestrator_cmd::retry_orchestrator_task,
             orchestrator_cmd::abort_orchestrator_task,
             orchestrator_cmd::dispatch_orchestrator_once,
-            // Orchestrator 全局自动化配置（设备级 AppConfig，不写项目策略表）
+            // Orchestrator 全局自动化配置（设备级 AppConfig，不写 legacy 项目配置表）
             orchestrator_config_cmd::get_orchestrator_config,
             orchestrator_config_cmd::get_default_orchestrator_config,
             orchestrator_config_cmd::update_orchestrator_config,

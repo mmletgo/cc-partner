@@ -178,7 +178,7 @@ pub const ORCHESTRATOR_REMOTE_TASK_CREATE_REQUEST_SCHEMA: &str =
 ///     自动编排器需要把任务队列、状态变化事件和验证证据持久化，供后续调度器与页面共享。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有 SQLite pool，并提供任务 CRUD、项目策略读取、状态更新、事件和证据追加方法。
+///     持有 SQLite pool，并提供任务 CRUD、legacy 项目配置读取、状态更新、事件和证据追加方法。
 #[derive(Clone)]
 pub struct OrchestratorRepo {
     pool: SqlitePool,
@@ -440,8 +440,8 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     legacy 项目策略仍用于页面展示和调试历史数据；新项目第一次进入时应自动拥有一份默认策略。
-    ///     Phase 3 后 scheduler、验证和 delivery 运行时不再读取该表。
+    ///     legacy 项目配置表仍需支持旧数据兼容和调试读取；新项目缺失记录时保持可创建默认行。
+    ///     Settings 自动化 tab 已成为唯一用户配置入口，scheduler、验证和 delivery 运行时不再读取该表。
     ///
     /// Code Logic（这个函数做什么）:
     ///     对缺失 project_id 执行 INSERT OR IGNORE 写入 full-auto-but-disabled 默认值，再读取并解析 DTO。
@@ -479,10 +479,10 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     legacy 项目策略列表仅用于展示/调试旧项目配置；运行时调度已改读 AppConfig.orchestrator。
+    ///     legacy 项目配置列表仅用于兼容/调试旧数据；运行时调度已改读 AppConfig.orchestrator。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     查询 enabled=1 的项目策略，按 project_id 稳定排序后转换为 OrchestratorProjectConfigDto。
+    ///     查询 enabled=1 的 legacy 配置，按 project_id 稳定排序后转换为 OrchestratorProjectConfigDto。
     pub async fn list_enabled_project_configs(
         &self,
     ) -> Result<Vec<OrchestratorProjectConfigDto>, AppError> {
@@ -1801,7 +1801,7 @@ fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppError> {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     项目策略表用 INTEGER 0/1 保存布尔值，前端 DTO 需要真实 boolean 以便直接展示开关状态。
+///     legacy 项目配置表用 INTEGER 0/1 保存布尔值，兼容 DTO 需要真实 boolean。
 ///
 /// Code Logic（这个函数做什么）:
 ///     将 SQLite INTEGER 按非零即 true 的规则转换为 bool。
@@ -1810,7 +1810,7 @@ fn sqlite_bool(value: i64) -> bool {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     验证命令以 JSON 文本持久化，读取策略时需要还原为字符串数组供前端逐条展示。
+///     legacy 验证命令以 JSON 文本持久化，兼容读取时需要还原为字符串数组。
 ///
 /// Code Logic（这个函数做什么）:
 ///     使用 serde_json 解析 Vec<String>；解析失败返回 AppError，暴露损坏配置数据。
@@ -1820,7 +1820,7 @@ fn parse_verification_commands(value: &str) -> Result<Vec<String>, AppError> {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     仓储读取项目策略时需要统一处理 bool 转换和 verification_commands JSON 解析。
+///     仓储读取 legacy 项目配置时需要统一处理 bool 转换和 verification_commands JSON 解析。
 ///
 /// Code Logic（这个函数做什么）:
 ///     从 SqliteRow 提取 orchestrator_project_config 全字段并组装 OrchestratorProjectConfigDto。
@@ -2349,7 +2349,7 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     项目策略默认应提供完整自动化开关组合，但必须保持 disabled，避免用户未确认前自动执行任务。
+    ///     legacy 项目配置默认应提供完整自动化开关组合，但必须保持 disabled，避免旧数据被误用于自动执行。
     ///
     /// Code Logic（这个函数做什么）:
     ///     通过 get_or_create_project_config 创建缺失项目配置，并断言 full auto 相关默认值与 enabled=false。

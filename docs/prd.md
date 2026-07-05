@@ -215,7 +215,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 
 **功能点**：
 - 工作台布局：项目文件夹列表紧跟全局左侧栏“设置”菜单项下方，作为进入工作台的入口，不再设置独立“工作台”主导航项；主区域依次展示工作台标题、terminal sessions 标识、worktree 管理层、依赖提示槽和中心工作区；中心工作区在当前 worktree 的终端层与文件 tab 工作区之间切换，预览文件时终端可以隐藏但 xterm DOM 必须保持挂载并停止接收输入；终端工具栏按钮与文件工作区工具栏保持一致，均显示图标和文字；桌面端终端全屏按钮位于 pane 操作导航栏，全屏时隐藏 Workbench 外围内容和文件预览入口，但保留 terminal window tabs、pane 操作、退出全屏按钮和当前终端输出，确保全屏中仍可切换 window；文件预览按钮仅在已有打开文件 tab 时启用，点击后回到当前或首个文件 tab，与文件工作区的返回终端按钮对称；右侧检查器承载当前 window 状态，并提供当前 worktree 文件夹 / Git 提交树 tab，窄宽下排到首屏终端之后
-- 自动化工作区：Orchestrator 自动化迁入 Workbench 中心工作区，作为与终端层、文件 tab 工作区同级的第三种 workspace view；终端工具栏提供自动化入口，且该入口固定放在“文件预览”入口前一位；自动化层顶部复用 Workbench workspace 导航并提供返回终端动作，主体嵌入项目级任务队列、详情/创建、Evidence 和策略内容；切到自动化时终端可隐藏但 xterm DOM 必须保持挂载并停止接收输入。嵌入模式下 blocked 任务的“打开 Workbench”入口应应用任务 deep link 并切回终端视图，让对应项目 / worktree / session 聚焦结果可见。旧 `/orchestrator` 深链应重定向到 `/workbench`，侧栏不再提供独立自动化主导航项
+- 自动化工作区：Orchestrator 自动化迁入 Workbench 中心工作区，作为与终端层、文件 tab 工作区同级的第三种 workspace view；终端工具栏提供自动化入口，且该入口固定放在“文件预览”入口前一位；自动化层顶部复用 Workbench workspace 导航并提供返回终端动作，主体嵌入项目级任务队列、详情/创建和 Evidence；切到自动化时终端可隐藏但 xterm DOM 必须保持挂载并停止接收输入。嵌入模式下 blocked 任务的“打开 Workbench”入口应应用任务 deep link 并切回终端视图，让对应项目 / worktree / session 聚焦结果可见。旧 `/orchestrator` 深链应重定向到 `/workbench`，侧栏不再提供独立自动化主导航项
 - 添加项目文件夹：用户点击项目文件夹区右上角 `+` 后可选择本机项目或局域网设备项目；本机项目继续使用系统目录选择器；局域网设备项目展示已发现设备并打开应用内远端目录选择器，用户可直接浏览远端设备目录、选中项目文件夹并进入 Workbench，不要求该项目已在远端 Workbench 中预先添加或授权；选中远端路径后本机保存 remote project shortcut，远端设备自动创建或复用对应项目记录
 - 远端项目离线处理：远端项目卡片应标识 Remote/远端与设备名；当远端设备不在线时，当前远端项目展示离线提示，并暂停终端输入、分屏/关闭 pane、session 重命名/关闭、worktree 创建/commit/push/merge/remove、文件新建/保存/格式化/重命名/删除和 Prompt 优化等写操作；侧栏移除 remote shortcut 仍可执行；后续任一 sessions/worktrees/files/git/pathInfo 读取成功后恢复可写状态
 - 项目切换：左侧栏项目文件夹列表切换当前项目，中央 worktree/window 列表和右侧文件夹按当前项目刷新；每个项目卡片右下角显示已打开 terminal window 数与 pane 总数，而不是固定“进入工作台”文案；旧项目的异步请求结果不得覆盖新项目 UI
@@ -240,14 +240,14 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 
 **功能点**：
 - 任务队列按项目隔离，支持创建 Draft、入队、自动验证闭环、Blocked 重试和终止
-- 自动化配置统一放在 Settings 的独立 tab 中，控制 scheduler 启用、最大并发、验证命令、full-auto 交付开关和重试相关行为；运行偏好按设备持久化在全局 AppConfig，不做项目级策略。scheduler、验证和 delivery 运行时均读取全局自动化配置；旧项目策略仅保留为历史展示/调试入口。验证命令以多行文本维护，保存时 trim/filter 空行并限制数量与长度
+- 自动化配置统一放在 Settings 的独立 tab 中，控制 scheduler 启用、最大并发、验证命令、full-auto 交付开关和重试相关行为；运行偏好按设备持久化在全局 AppConfig，不做项目级策略。scheduler、验证和 delivery 运行时均读取全局自动化配置；后端 legacy `orchestrator_project_config` 仅保留存储、兼容和调试接口，不作为用户可见配置路径或运行时语义。验证命令以多行文本维护，保存时 trim/filter 空行并限制数量与长度
 - 远端项目的 Orchestrator 任务以远端 cc-partner 为权威来源；本机 remote shortcut 只通过 P2P Orchestrator route 创建、列出、入队、重试、终止和读取 evidence，不把远端任务复制成本机可调度任务。远端设备离线时，本机允许创建 pending remote task，写入本机 outbox 并展示“待发送到远端”；设备恢复在线后后台 dispatcher 自动投递，投递使用稳定 clientRequestId 防止超时重试重复创建，sending 超过 5 分钟会恢复 pending 重试，投递成功后必须在同一事务内保存远端 task id 并更新远端任务 mirror。远端 mirror 只用于离线展示最近快照，本机 scheduler、验证和交付不得消费 mirror 行
 - Runner 必须使用 Workbench 可见的 tmux terminal 和任务 worktree，方便用户随时 takeover 或观察 Claude Code 执行现场；每轮 Runner attempt 记录 prompt、worktree、session 和状态，首轮创建任务 worktree，Blocked retry 或后续修复轮复用同一 worktree、新建终端 session，并使用新的 attempt 序号
 - Claude Code 开发 Prompt 必须要求完成代码、测试/验证和必要证据说明后，最后单独输出 `ORCHESTRATOR_DEV_DONE`；后端监听可见开发终端输出，只在检测到换行终结的独立哨兵行且该 session/attempt 仍是任务 active runner 后自动进入既有验证/交付流程，手动“完成 Agent 运行”命令仍作为用户 fallback
 - 后端自动执行验证命令并调用验证 Claude 做最终裁决；验证命令非零退出作为 verifier 输入，不直接阻塞任务，只有命令启动/读取/超时、verifier CLI/JSON/schema、diff 读取等基础设施失败才进入 Blocked；验证未通过时在同一 worktree 新建 terminal/Claude 继续修复，直到通过或用户终止
 - 目标态验证通过后按全局自动化配置完成 commit、推送任务分支、合并主工作区和推送主分支
 - 任务进入 Blocked 或循环修复时保留原因、worktree/session 入口和 evidence 链；Evidence 记录验证输出、验证 Claude 裁决、修复 Prompt、交付阶段结果和失败摘要，供前端任务看板展示与追溯
-- OrchestratorPanel 只拥有项目级任务看板和编排状态；Workbench 拥有其 workspace view 挂载、项目现场、terminal takeover、文件和 Git 操作
+- OrchestratorPanel 只拥有项目级任务看板、任务详情/创建、Evidence 和编排状态，不展示项目级策略或配置；Workbench 拥有其 workspace view 挂载、项目现场、terminal takeover、文件和 Git 操作
 
 ## 3. 非功能需求
 

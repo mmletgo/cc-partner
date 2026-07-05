@@ -106,32 +106,10 @@
       "generic": "证据"
     }
   },
-  "policy": {
-    "title": "项目策略",
-    "subtitle": "当前项目的自动化执行策略。",
-    "enabled": "已启用",
-    "disabled": "未启用",
-    "on": "开启",
-    "off": "关闭",
-    "emptyTitle": "暂无项目策略",
-    "emptyBody": "选择 Workbench 项目后会显示该项目的自动化策略。",
-    "maxConcurrentTasks": "最大并发任务",
-    "branchPrefix": "分支前缀",
-    "retryLimit": "重试次数",
-    "autoCommit": "自动提交",
-    "autoPushTaskBranch": "自动推送任务分支",
-    "autoMergeToMain": "自动合并到主工作区",
-    "autoPushMain": "自动推送主工作区",
-    "retainWorktreeOnDone": "完成后保留 worktree",
-    "retainWorktreeOnBlocked": "阻塞后保留 worktree",
-    "verificationCommands": "验证命令",
-    "noVerificationCommands": "未配置验证命令。"
-  },
   "errors": {
     "load": "任务列表加载失败。",
     "create": "任务创建失败。",
     "queue": "任务入队失败。",
-    "policy": "项目策略加载失败。",
     "evidence": "证据加载失败。",
     "complete": "验证启动失败。",
     "retry": "任务重试失败。",

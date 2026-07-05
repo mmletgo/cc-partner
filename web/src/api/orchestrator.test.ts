@@ -1,10 +1,11 @@
+import { readFileSync } from 'node:fs';
 import {
   ORCHESTRATOR_REMOTE_COMMANDS,
   buildCreateOrchestratorTaskViewInvokeArgs,
-  buildGetOrchestratorConfigForProjectInvokeArgs,
   buildListOrchestratorTaskViewsInvokeArgs,
   buildListOrchestratorTaskEvidenceForProjectInvokeArgs,
   buildOrchestratorTaskViewActionInvokeArgs,
+  orchestratorApi,
 } from './orchestrator';
 
 /**
@@ -44,8 +45,23 @@ assert(
   'listEvidence should use the project-scoped evidence backend command',
 );
 assert(
-  ORCHESTRATOR_REMOTE_COMMANDS.getProjectConfig === 'get_orchestrator_config_for_project',
-  'getProjectConfig should use the project-scoped automation config backend command',
+  !('getProjectConfig' in ORCHESTRATOR_REMOTE_COMMANDS),
+  'orchestrator task API should not expose project-scoped automation config',
+);
+assert(
+  !('getProjectConfig' in orchestratorApi),
+  'orchestrator task API public surface should not expose project-scoped automation config',
+);
+
+const orchestratorApiSource = readFileSync(new URL('./orchestrator.ts', import.meta.url), 'utf8');
+
+assert(
+  !orchestratorApiSource.includes('buildGetOrchestratorConfigForProjectInvokeArgs'),
+  'orchestrator task API should not export a project config invoke helper',
+);
+assert(
+  !orchestratorApiSource.includes('get_orchestrator_config_for_project'),
+  'orchestrator task API should not call the legacy project config backend command',
 );
 
 const listArgs = buildListOrchestratorTaskViewsInvokeArgs(' project-1 ');
@@ -91,13 +107,6 @@ const evidenceArgs = buildListOrchestratorTaskEvidenceForProjectInvokeArgs(
 assert(
   JSON.stringify(evidenceArgs) === JSON.stringify({ projectId: 'project-1', taskId: 'task-1' }),
   'listEvidence should include projectId and taskId before invoking backend',
-);
-
-const configArgs = buildGetOrchestratorConfigForProjectInvokeArgs(' project-1 ');
-
-assert(
-  JSON.stringify(configArgs) === JSON.stringify({ projectId: 'project-1' }),
-  'getProjectConfig should trim projectId before invoking backend',
 );
 
 console.log('orchestrator.test.ts passed');

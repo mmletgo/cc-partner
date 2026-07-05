@@ -378,7 +378,7 @@ fn build_dispatch_once_response(dispatched: usize) -> serde_json::Value {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Agent 完成后的验证命令已迁移为设备级全局设置，不能再读取 legacy 项目策略表。
+///     Agent 完成后的验证命令已迁移为设备级全局设置，不能再读取 legacy 项目配置表。
 ///
 /// Code Logic（这个函数做什么）:
 ///     从 OrchestratorAutomationConfig 克隆 verification_commands，调用方可在 await 前释放 config 读锁。
@@ -1168,11 +1168,11 @@ pub async fn get_orchestrator_config_for_project(
         .await
 }
 
-/// 查询项目 Orchestrator 策略。
+/// 查询 legacy Orchestrator 项目配置。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     legacy 策略卡仍可展示/调试当前 Workbench 项目的旧自动化策略，缺失时按默认策略初始化。
-///     Phase 3 后 scheduler、验证和 delivery 运行时统一读取 AppConfig.orchestrator。
+///     历史版本写入过项目级自动化配置，后端仍保留兼容/调试读取能力。
+///     用户可见配置入口已经收敛到 Settings 自动化 tab，scheduler、验证和 delivery 统一读取 AppConfig.orchestrator。
 ///
 /// Code Logic（这个函数做什么）:
 ///     委托仓储 get_or_create_project_config，并返回 camelCase DTO。
@@ -1750,7 +1750,7 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     Agent 完成验证命令已迁移到全局 AppConfig，项目策略里的 legacy 命令不能再影响运行时验证。
+    ///     Agent 完成验证命令已迁移到全局 AppConfig，legacy 项目配置里的命令不能再影响运行时验证。
     ///
     /// Code Logic（这个函数做什么）:
     ///     构造全局 Orchestrator 配置并断言命令层 helper 只返回全局 verification_commands。

@@ -372,56 +372,6 @@ export interface OrchestratorEvidence {
   createdAt: string;
 }
 
-/**
- * Orchestrator 项目自动化配置 DTO（对齐 get_orchestrator_config_for_project 返回值）。
- *
- * Business Logic（为什么需要这个类型）:
- *   remote-aware 任务看板读取的是当前项目所在设备的自动化策略，返回值不再包含本机 projectId 和审计时间。
- *
- * Code Logic（字段说明）:
- *   字段直接用于策略卡展示；verificationCommands 为后端解析后的命令数组。
- */
-export interface OrchestratorAutomationConfig {
-  enabled: boolean;
-  maxConcurrentTasks: number;
-  branchPrefix: string;
-  verificationCommands: string[];
-  autoCommit: boolean;
-  autoPushTaskBranch: boolean;
-  autoMergeToMain: boolean;
-  autoPushMain: boolean;
-  retryLimit: number;
-  retainWorktreeOnDone: boolean;
-  retainWorktreeOnBlocked: boolean;
-}
-
-/**
- * Orchestrator 项目策略 DTO（对齐 Rust OrchestratorProjectConfigDto，camelCase）。
- *
- * Business Logic（为什么需要这个类型）:
- *   Orchestrator 页面需要展示当前 Workbench 项目的自动化策略，让用户确认是否启用、并发数、
- *   验证命令以及自动提交/推送/合并等开关。
- *
- * Code Logic（字段说明）:
- *   verificationCommands 为后端 JSON 配置解析后的命令数组；其余 boolean 字段直接驱动策略卡状态展示。
- */
-export interface OrchestratorProjectConfig {
-  projectId: string;
-  enabled: boolean;
-  maxConcurrentTasks: number;
-  branchPrefix: string;
-  verificationCommands: string[];
-  autoCommit: boolean;
-  autoPushTaskBranch: boolean;
-  autoMergeToMain: boolean;
-  autoPushMain: boolean;
-  retryLimit: number;
-  retainWorktreeOnDone: boolean;
-  retainWorktreeOnBlocked: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
 /** 工作台项目来源类型：本机项目或局域网远端项目。 */
 export type WorkbenchProjectKind = 'local' | 'remote' | string;
 

@@ -444,7 +444,7 @@ mod tests {
     ///     Phase 3 runtime 不再读取 legacy project_config；旧表里的 disabled/max=0 不能阻止全局开启后的 dispatch。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     写入 disabled 且 max=0 的项目策略，再用全局 enabled/max=1 领取任务，断言任务仍被领取。
+    ///     写入 disabled 且 max=0 的 legacy 配置，再用全局 enabled/max=1 领取任务，断言任务仍被领取。
     #[tokio::test]
     async fn legacy_project_config_does_not_affect_global_dispatch_claim() {
         let (pool, repo) = setup_repo().await;

@@ -225,14 +225,14 @@ pub struct OrchestratorTaskDto {
     pub finished_at: Option<String>,
 }
 
-/// Orchestrator 项目策略前端 DTO。
+/// Orchestrator legacy 项目配置 DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     每个 Workbench 项目都需要独立的自动编排策略，用户必须能看到当前项目是否启用自动执行、
-///     并发数、分支前缀、验证命令和自动提交/推送/合并等关键开关。
+///     历史版本曾把自动化配置写入项目级表；后端需要保留 DTO 以便兼容旧数据和调试读取。
+///     用户可见配置入口已经迁移到 Settings 自动化 tab，运行时不再消费该 DTO。
 ///
 /// Code Logic（这个结构体做什么）:
-///     字段与 orchestrator_project_config 表一一对应，使用 camelCase 序列化给前端展示。
+///     字段与 orchestrator_project_config 表一一对应，使用 camelCase 序列化给兼容/诊断接口。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]

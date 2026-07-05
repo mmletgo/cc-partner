@@ -87,7 +87,8 @@ pub struct RemoteOrchestratorEvidenceResp {
 /// 远端 Orchestrator 全局配置响应。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     remote UI 需要显示项目所在设备当前的 Orchestrator 自动化策略，而不是本机 shortcut 的策略。
+///     远端诊断/兼容接口需要返回项目所在设备的全局自动化配置，而不是本机 shortcut 的配置。
+///     用户可见配置入口固定在对应设备的 Settings 自动化 tab。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     包装 camelCase `{config}`，内部使用设备级 OrchestratorAutomationConfigDto。

@@ -6,7 +6,7 @@
 
 ## 1. 背景
 
-当前 Orchestrator 已经具备项目任务队列、项目策略读取、Workbench 可见 Runner、验证命令执行、delivery evidence 和 full-auto Git 交付能力。但现状有三个明显缺口：
+当前 Orchestrator 已经具备项目任务队列、legacy 项目配置读取、Workbench 可见 Runner、验证命令执行、delivery evidence 和 full-auto Git 交付能力。但现状有三个明显缺口：
 
 1. 并发上限等自动化策略目前按项目落在后端 `orchestrator_project_config` 表，前端只能展示，不能设置；实际产品使用上这些策略不需要项目级差异，更适合放到 cc-partner 设置页的全局自动化 tab。
 2. Runner 只支持本机 Workbench 项目。远端项目会在 `prepare_visible_runner` 阶段直接失败。
@@ -54,7 +54,7 @@ Settings 新增“自动化”tab，作为本设备 Orchestrator 的唯一配置
 
 保存后立即生效。scheduler 每个 tick 重新读取全局自动化配置，因此无需重启应用。
 
-Workbench 自动化工作区不再承担配置编辑职责，只展示当前设备或远端设备返回的自动化配置摘要与状态。远端项目由远端设备执行时，本机不能用自己的 Settings 覆盖远端执行策略；远端执行策略以远端设备 Settings 为准。
+Workbench 自动化工作区不承担配置编辑或配置展示职责，只展示任务队列、详情、创建表单和 Evidence。远端项目由远端设备执行时，本机不能用自己的 Settings 覆盖远端执行策略；远端执行策略以远端设备 Settings 为准。配置查看和编辑固定回到对应设备的 Settings 自动化 tab。
 
 ### 5.2 远端项目任务创建
 
@@ -246,11 +246,10 @@ Settings 新增自动化 tab：
 
 ### 8.2 OrchestratorPanel
 
-OrchestratorPanel 保持只拥有任务看板、任务详情、创建表单、Evidence 和策略卡。
+OrchestratorPanel 保持只拥有任务看板、任务详情、创建表单和 Evidence。
 
 新增：
 
-- 自动化配置摘要展示，提示配置入口在 Settings。
 - pending remote task 样式。
 - attempt 轮次展示。
 - 验证闭环状态展示，例如“第 4 轮开发中”“验证 Claude 未通过，正在重新修复”。

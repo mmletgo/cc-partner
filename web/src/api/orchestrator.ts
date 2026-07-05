@@ -10,7 +10,6 @@
 
 import { invoke } from './client';
 import type {
-  OrchestratorAutomationConfig,
   OrchestratorEvidence,
   OrchestratorTask,
   OrchestratorTaskView,
@@ -21,7 +20,7 @@ import type {
  *   Orchestrator Workbench UI 必须使用 remote-aware 命令，避免远端项目误走旧的本机-only command。
  *
  * Code Logic（这个常量做什么）:
- *   集中声明任务视图、项目配置和 evidence 的 Tauri command 名，供 API 方法和契约测试共享。
+ *   集中声明任务视图和 evidence 的 Tauri command 名，供 API 方法和契约测试共享。
  */
 export const ORCHESTRATOR_REMOTE_COMMANDS = {
   listTaskViews: 'list_orchestrator_task_views',
@@ -30,7 +29,6 @@ export const ORCHESTRATOR_REMOTE_COMMANDS = {
   retryTaskView: 'retry_orchestrator_task_view',
   abortTaskView: 'abort_orchestrator_task_view',
   listEvidenceForProject: 'list_orchestrator_task_evidence_for_project',
-  getProjectConfig: 'get_orchestrator_config_for_project',
 } as const;
 
 /**
@@ -119,19 +117,6 @@ export function buildOrchestratorTaskIdInvokeArgs(taskId: string): Record<string
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   项目策略读取必须绑定明确项目，参数名需要稳定匹配 Rust get_orchestrator_config_for_project。
- *
- * Code Logic（这个函数做什么）:
- *   projectId 首尾空白会被 trim，再包装成 `{ projectId }` 供 invoke 使用。
- */
-export function buildGetOrchestratorConfigForProjectInvokeArgs(
-  projectId: string,
-): Record<string, unknown> {
-  return { projectId: projectId.trim() };
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
  *   旧 API 方法仍返回裸任务 DTO，但 remote offline create 只会返回 pending outbox，不能伪造任务。
  *
  * Code Logic（这个函数做什么）:
@@ -182,19 +167,6 @@ export const orchestratorApi = {
     invoke<OrchestratorTaskView>(
       ORCHESTRATOR_REMOTE_COMMANDS.queueTaskView,
       buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId),
-    ),
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   策略卡需要显示当前项目所在设备的 Orchestrator 配置，缺失配置由后端按默认值创建。
-   *
-   * Code Logic（这个函数做什么）:
-   *   调用 get_orchestrator_config_for_project，并通过 helper 归一化 projectId 参数。
-   */
-  getProjectConfig: (projectId: string) =>
-    invoke<OrchestratorAutomationConfig>(
-      ORCHESTRATOR_REMOTE_COMMANDS.getProjectConfig,
-      buildGetOrchestratorConfigForProjectInvokeArgs(projectId),
     ),
 
   /**
@@ -309,5 +281,3 @@ export const orchestratorApi = {
 export const buildListOrchestratorTasksInvokeArgs = buildListOrchestratorTaskViewsInvokeArgs;
 export const buildCreateOrchestratorTaskInvokeArgs = buildCreateOrchestratorTaskViewInvokeArgs;
 export const buildQueueOrchestratorTaskInvokeArgs = buildOrchestratorTaskViewActionInvokeArgs;
-export const buildGetOrchestratorProjectConfigInvokeArgs =
-  buildGetOrchestratorConfigForProjectInvokeArgs;

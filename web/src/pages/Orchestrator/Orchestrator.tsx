@@ -3,12 +3,12 @@
  *
  * Business Logic（为什么需要这个页面）:
  *   用户需要在当前 Workbench 项目下管理项目级自动化任务队列，包括本机任务、远端任务和离线远端待发送项。
- *   页面同时只读展示当前项目策略，帮助用户确认并发、验证命令以及提交/推送/合并等执行边界。
+ *   自动化配置统一由 Settings 自动化 tab 管理，本面板只展示任务执行与证据。
  *   当前前端只提供任务、验证证据与 blocked 控制入口，并可把任务定位回对应 Workbench 上下文。
  *
  * Code Logic（这个组件做什么）:
  *   - 按 activeProject 拉取 Orchestrator task view 列表，真实任务按状态分组，pending remote 单独展示
- *   - 按 activeProject 拉取项目策略，并按 selected task 拉取 evidence
+ *   - 按 activeProject 与 selected task 拉取 evidence
  *   - 提供 title/goal/acceptanceCriteria 三个单行输入创建任务
  *   - 允许选中的 draft 任务切换为 queued；action 响应只替换列表，同项目任务切换后不抢回 selection
  *   - 创建成功后把真实任务插入列表并选中；pending remote 只插入待发送区并清空表单
@@ -47,7 +47,6 @@ import {
   upsertOrchestratorTaskView,
 } from '@/lib/orchestratorRemote';
 import type {
-  OrchestratorAutomationConfig,
   OrchestratorEvidence,
   OrchestratorRemoteOutboxStatus,
   OrchestratorTask,
@@ -126,19 +125,6 @@ interface OrchestratorCreateForm {
 interface OrchestratorTaskListResult {
   projectId: string;
   views: OrchestratorTaskView[];
-  error: string | null;
-}
-
-/**
- * Business Logic（为什么需要这个类型）:
- *   项目策略卡必须展示当前项目的策略，旧项目响应不能覆盖或闪现到新项目界面。
- *
- * Code Logic（这个类型做什么）:
- *   把项目策略请求结果与 projectId 绑定，渲染时通过 projectId 匹配决定是否可见以及是否仍处于加载态。
- */
-interface OrchestratorProjectConfigResult {
-  projectId: string;
-  config: OrchestratorAutomationConfig | null;
   error: string | null;
 }
 
@@ -356,7 +342,7 @@ function buildWorkbenchTaskUrl(task: OrchestratorTask | null): string {
  *   Workbench 需要把自动化看板作为终端、文件预览同级的工作区视图，同时保留页面壳复用能力。
  *
  * Code Logic（这个函数做什么）:
- *   维持 activeProject、task view 列表、项目策略与 evidence stale guard；embedded=true 时省略页面级 header。
+ *   维持 activeProject、task view 列表与 evidence stale guard；embedded=true 时省略页面级 header。
  */
 export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const { embedded = false, onOpenWorkbench } = props;
@@ -371,8 +357,6 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
   const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
   const [abortingTaskId, setAbortingTaskId] = useState<string | null>(null);
-  const [projectConfigResult, setProjectConfigResult] =
-    useState<OrchestratorProjectConfigResult | null>(null);
   const [evidenceResult, setEvidenceResult] = useState<OrchestratorEvidenceResult | null>(null);
   const [actionError, setActionError] = useState<OrchestratorActionError | null>(null);
   const activeProjectId = activeProject?.id ?? null;
@@ -398,16 +382,6 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     taskLoadDecision.kind === 'waiting' ||
     (taskLoadDecision.kind === 'load' && !activeTaskListResult);
   const taskLoadError = activeTaskListResult?.error ?? null;
-  const activeProjectConfigResult =
-    taskLoadDecision.kind === 'load' &&
-    projectConfigResult?.projectId === taskLoadDecision.projectId
-      ? projectConfigResult
-      : null;
-  const projectConfig = activeProjectConfigResult?.config ?? null;
-  const projectConfigLoading =
-    taskLoadDecision.kind === 'waiting' ||
-    (taskLoadDecision.kind === 'load' && !activeProjectConfigResult);
-  const projectConfigError = activeProjectConfigResult?.error ?? null;
   const visibleActionError =
     actionError?.projectId === activeProjectId ? actionError.message : null;
   const error = visibleActionError ?? taskLoadError;
@@ -488,30 +462,6 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
           views: current?.projectId === projectId ? current.views : [],
           error: displayOrchestratorErrorMessage(err, t('orchestrator:errors.load')),
         }));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [taskLoadDecision, t]);
-
-  useEffect(() => {
-    if (taskLoadDecision.kind !== 'load') return undefined;
-
-    let cancelled = false;
-    const projectId = taskLoadDecision.projectId;
-    void orchestratorApi
-      .getProjectConfig(projectId)
-      .then((config) => {
-        if (cancelled || activeProjectIdRef.current !== projectId) return;
-        setProjectConfigResult({ projectId, config, error: null });
-      })
-      .catch((err: unknown) => {
-        if (cancelled || activeProjectIdRef.current !== projectId) return;
-        setProjectConfigResult({
-          projectId,
-          config: null,
-          error: displayOrchestratorErrorMessage(err, t('orchestrator:errors.policy')),
-        });
       });
     return () => {
       cancelled = true;
@@ -1172,7 +1122,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                 <p className={styles.muted}>{t('orchestrator:evidence.loading')}</p>
               ) : null}
               {selectedTask && !evidenceLoading && evidenceError ? (
-                <div className={styles.policyError} role="alert">
+                <div className={styles.errorBox} role="alert">
                   {evidenceError}
                 </div>
               ) : null}
@@ -1206,120 +1156,6 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                     </li>
                   ))}
                 </ul>
-              ) : null}
-            </Card.Body>
-          </Card>
-
-          <Card variant="outlined" padding="md" className={styles.policy}>
-            <Card.Header className={styles.cardHeader}>
-              <div>
-                <h2 className={styles.sectionTitle}>{t('orchestrator:policy.title')}</h2>
-                <p className={styles.sectionLead}>{t('orchestrator:policy.subtitle')}</p>
-              </div>
-              {projectConfig ? (
-                <Pill tone={projectConfig.enabled ? 'success' : 'warn'} dot>
-                  {projectConfig.enabled
-                    ? t('orchestrator:policy.enabled')
-                    : t('orchestrator:policy.disabled')}
-                </Pill>
-              ) : null}
-            </Card.Header>
-            <Card.Body className={styles.policyBody}>
-              {projectConfigLoading ? <p className={styles.muted}>{t('common:loading')}</p> : null}
-              {!projectConfigLoading && projectConfigError ? (
-                <div className={styles.policyError} role="alert">
-                  {projectConfigError}
-                </div>
-              ) : null}
-              {!projectConfigLoading && !projectConfig && !projectConfigError ? (
-                <div className={styles.empty}>
-                  <h3 className={styles.emptyTitle}>{t('orchestrator:policy.emptyTitle')}</h3>
-                  <p className={styles.emptyBody}>{t('orchestrator:policy.emptyBody')}</p>
-                </div>
-              ) : null}
-              {projectConfig ? (
-                <>
-                  <dl className={styles.policyGrid}>
-                    <div>
-                      <dt>{t('orchestrator:policy.maxConcurrentTasks')}</dt>
-                      <dd>{projectConfig.maxConcurrentTasks}</dd>
-                    </div>
-                    <div>
-                      <dt>{t('orchestrator:policy.branchPrefix')}</dt>
-                      <dd>{projectConfig.branchPrefix}</dd>
-                    </div>
-                    <div>
-                      <dt>{t('orchestrator:policy.retryLimit')}</dt>
-                      <dd>{projectConfig.retryLimit}</dd>
-                    </div>
-                    <div>
-                      <dt>{t('orchestrator:policy.autoCommit')}</dt>
-                      <dd>
-                        {projectConfig.autoCommit
-                          ? t('orchestrator:policy.on')
-                          : t('orchestrator:policy.off')}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>{t('orchestrator:policy.autoPushTaskBranch')}</dt>
-                      <dd>
-                        {projectConfig.autoPushTaskBranch
-                          ? t('orchestrator:policy.on')
-                          : t('orchestrator:policy.off')}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>{t('orchestrator:policy.autoMergeToMain')}</dt>
-                      <dd>
-                        {projectConfig.autoMergeToMain
-                          ? t('orchestrator:policy.on')
-                          : t('orchestrator:policy.off')}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>{t('orchestrator:policy.autoPushMain')}</dt>
-                      <dd>
-                        {projectConfig.autoPushMain
-                          ? t('orchestrator:policy.on')
-                          : t('orchestrator:policy.off')}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>{t('orchestrator:policy.retainWorktreeOnDone')}</dt>
-                      <dd>
-                        {projectConfig.retainWorktreeOnDone
-                          ? t('orchestrator:policy.on')
-                          : t('orchestrator:policy.off')}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>{t('orchestrator:policy.retainWorktreeOnBlocked')}</dt>
-                      <dd>
-                        {projectConfig.retainWorktreeOnBlocked
-                          ? t('orchestrator:policy.on')
-                          : t('orchestrator:policy.off')}
-                      </dd>
-                    </div>
-                  </dl>
-                  <div className={styles.policyCommands}>
-                    <span className={styles.label}>
-                      {t('orchestrator:policy.verificationCommands')}
-                    </span>
-                    {projectConfig.verificationCommands.length > 0 ? (
-                      <ul className={styles.commandList}>
-                        {projectConfig.verificationCommands.map((command, index) => (
-                          <li className={styles.commandItem} key={`${command}-${index}`}>
-                            {command}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className={styles.emptyBody}>
-                        {t('orchestrator:policy.noVerificationCommands')}
-                      </p>
-                    )}
-                  </div>
-                </>
               ) : null}
             </Card.Body>
           </Card>

@@ -194,7 +194,8 @@ impl RemoteOrchestratorClient {
     /// 读取远端设备 Orchestrator 全局自动化配置。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     remote UI 需要展示 owning device 的 scheduler/verification/delivery 策略。
+    ///     诊断/兼容路径需要读取 owning device 的 scheduler/verification/delivery 全局配置。
+    ///     OrchestratorPanel 不展示该配置，用户查看和编辑固定在对应设备的 Settings 自动化 tab。
     ///
     /// Code Logic（这个函数做什么）:
     ///     GET `{base_url}/api/orchestrator/config`，解析 `{config}` 后返回内部 DTO。

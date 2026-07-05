@@ -1,7 +1,7 @@
 # cc-partner Orchestrator 自动编排器设计
 
 - 日期：2026-07-05
-- 状态：方案已确认，待转入实现计划
+- 状态：基础方案已确认；配置模型已由后续远端自治/验证闭环设计修订为 Settings 全局自动化配置
 - 参考：OpenAI Symphony [README](https://github.com/openai/symphony/blob/main/README.md)、[SPEC](https://github.com/openai/symphony/blob/main/SPEC.md)、[Elixir README](https://github.com/openai/symphony/blob/main/elixir/README.md)
 
 ## 1. 背景
@@ -12,21 +12,21 @@ OpenAI Symphony 的核心思想是把项目工作转成长期自动化服务：�
 
 ## 2. 已确认决策
 
-- 采用独立 **Orchestrator 页面**，不把自动编排塞进现有 Workbench tab。
+- Orchestrator 自动化工作区迁入 Workbench 中心区域，作为终端和文件工作区同级的 workspace view；旧独立路由仅作为 deep link 兼容入口。
 - 第一版任务源使用 **cc-partner 内置任务队列**，暂不接 Linear/GitHub Issues。
 - Runner 使用 **可见 tmux 终端 Runner**：复用现有 Workbench terminal window/pane。
 - 自动化交付策略为全自动：自动 commit、push 任务分支、merge 回主 worktree/主分支、push 主分支。
-- 作用范围采用折中形态：全局看板展示所有项目任务，调度、并发、验证命令和交付策略按项目隔离。
+- 配置入口采用设备级全局形态：scheduler 启用、并发、验证命令和交付开关统一放到 Settings 自动化 tab；任务队列仍按项目隔离。
 
 ## 3. 目标
 
-1. 提供全局任务看板，让用户看到所有项目的 Draft、Queued、Running、Blocked、Done 任务。
+1. 在 Workbench 自动化工作区提供当前项目任务看板，让用户看到该项目的 Draft、Queued、Running、Blocked、Done 任务。
 2. 支持在 cc-partner 内创建任务，并绑定到某个 Workbench 项目。
-3. 调度器按项目级并发限制自动领取 Queued 任务。
+3. 调度器按 Settings 自动化 tab 中的设备级并发限制自动领取本机 Queued 任务。
 4. 每个任务创建独立 Git worktree，避免污染主工作区。
 5. 每个任务创建可见 tmux terminal window，自动启动 Claude Code 并写入任务 Prompt。
 6. 用户可以随时从 Orchestrator 跳转 Workbench，进入该任务绑定的 project/worktree/session 接管。
-7. 任务完成后执行项目配置的验证命令。
+7. 任务完成后执行 Settings 自动化 tab 配置的验证命令。
 8. 验证通过后自动完成 commit、任务分支 push、merge 主分支、push 主分支。
 9. 任一阶段失败时进入 Blocked，保留 worktree、终端、错误原因和重试入口。
 10. 提供完整交付证据链：diff 摘要、验证结果、commit hash、push/merge/push main 结果。
@@ -42,11 +42,11 @@ OpenAI Symphony 的核心思想是把项目工作转成长期自动化服务：�
 
 ## 5. 信息架构
 
-新增一级页面「自动化」或「Orchestrator」，与 Workbench 并列。
+Workbench 中心工作区新增「自动化」视图，与终端层、文件工作区同级；旧「Orchestrator」路由重定向到 Workbench。
 
 ```text
-Orchestrator
-├─ 左栏：全局任务看板
+Workbench 自动化视图 / OrchestratorPanel
+├─ 左栏：当前项目任务看板
 │  ├─ 状态分组：Draft / Queued / Running / Blocked / Done
 │  ├─ 项目筛选
 │  ├─ 状态筛选
@@ -60,7 +60,7 @@ Orchestrator
 │  ├─ 运行日志摘要
 │  └─ 跳转 Workbench 接管
 │
-└─ 右栏：交付证据与项目策略
+└─ 右栏：交付证据
    ├─ Diff summary
    ├─ 验证命令结果
    ├─ commit hash
@@ -89,7 +89,7 @@ Running
   Claude Code 已在可见 tmux 终端中运行。
 
 Verifying
-  Claude Code 任务结束后，系统执行项目配置的验证命令。
+  Claude Code 任务结束后，系统执行 Settings 自动化 tab 中配置的验证命令。
 
 Delivering
   系统正在 commit、push 任务分支、merge 主分支、push 主分支。
@@ -117,25 +117,22 @@ Blocked 状态必须记录阻塞阶段、错误摘要、完整日志入口、是
 - 任务目标。
 - 验收标准。
 - 可选关联文件/目录。
-- 可选验证命令覆盖值。
-- 自动交付策略确认。
-
 创建后默认进入 Draft。用户点击「加入队列」后变为 Queued。
 
 ### 7.2 自动调度
 
-调度器按项目级配置工作：
+调度器按设备级全局配置工作：
 
-- 项目自动调度开关关闭时，不领取该项目任务。
-- 每个项目有独立最大并发数。
-- 同一项目内 Running/Preparing/Verifying/Delivering 任务数达到并发上限时，后续任务留在 Queued。
-- 全局看板只展示状态，不跨项目共享交付策略。
+- Settings 自动化 tab 的自动调度开关关闭时，不领取本机任务。
+- 本设备共享一个最大并发任务数。
+- 本机 local Workbench 项目的 Running/Preparing/Verifying/Delivering 任务总数达到并发上限时，后续任务留在 Queued。
+- 远端项目由远端设备自己的全局自动化配置自治执行。
 
 ### 7.3 Runner 准备
 
 任务进入 Preparing 后：
 
-1. 基于项目主 worktree 创建 `agent/<task-id>` 或项目配置的分支名前缀。
+1. 基于项目主 worktree 创建 `agent/<task-id>` 风格的任务分支。
 2. 创建或记录任务 worktree 元数据。
 3. 创建 Workbench terminal window，绑定该 worktree cwd。
 4. 在终端中启动 Claude Code。
@@ -146,7 +143,7 @@ Prompt 必须包含：
 - 任务标题和目标。
 - 验收标准。
 - 当前项目路径和 worktree 分支。
-- 自动交付策略。
+- Settings 自动化 tab 中的自动交付开关语义。
 - 项目 AGENTS.md/CLAUDE.md 遵守要求。
 - 完成后必须停止在可验证状态，不让 Claude Code 自行执行系统外不可追踪动作。
 
@@ -167,12 +164,7 @@ Running 状态下，Orchestrator 展示：
 
 Claude Code 终端运行结束或系统检测到任务声明完成后，任务进入 Verifying。
 
-验证命令来源优先级：
-
-1. 任务级覆盖命令。
-2. 项目 Orchestrator 配置命令。
-3. 相关目录 AGENTS.md/CLAUDE.md 中记录的测试/lint 命令。
-4. 无命令时进入 Blocked，提示缺少验证配置。
+验证命令来自 Settings 自动化 tab 的设备级配置。无命令时记录 skipped verification evidence，并继续交给验证 Claude 结合任务目标、验收标准和 diff 做最终裁决；命令启动/读取/超时等基础设施错误才进入 Blocked。
 
 验证输出需要归档到任务证据链。失败时不进入 Delivering。
 
@@ -190,23 +182,20 @@ Claude Code 终端运行结束或系统检测到任务声明完成后，任务�
 
 自动交付失败时必须保留现场，不得静默清理 worktree。merge 冲突、主分支 dirty、push 被拒绝、验证命令失败都进入 Blocked。
 
-## 8. 项目级配置
+## 8. Settings 全局自动化配置
 
-每个 Workbench 项目新增 Orchestrator 配置：
+每台 cc-partner 设备在 Settings 的「自动化」tab 中维护一份 Orchestrator 运行配置：
 
 - `enabled`：是否允许自动调度。
 - `maxConcurrentTasks`：最大并发任务数。
-- `branchPrefix`：默认任务分支前缀，建议默认 `agent`。
 - `verificationCommands`：验证命令列表。
 - `autoCommit`：是否自动 commit。
 - `autoPushTaskBranch`：是否自动 push 任务分支。
 - `autoMergeToMain`：是否自动 merge 主分支。
 - `autoPushMain`：是否自动 push 主分支。
-- `retryLimit`：自动重试次数。
-- `retainWorktreeOnDone`：完成后是否保留任务 worktree。
-- `retainWorktreeOnBlocked`：阻塞后是否保留任务 worktree，第一版应固定 true。
+- `retryLimit`：预留字段；当前验证修复循环不设置固定轮数，由用户 Abort 终止。
 
-由于用户已选择全自动交付，默认设计允许上述自动交付开关开启，但 UI 必须显式展示当前项目处于高自动化风险模式。
+后端 legacy `orchestrator_project_config` 表仅保留存储兼容和调试读取能力，不作为用户可见配置路径，也不影响 scheduler、验证或 delivery runtime。
 
 ## 9. 数据模型草案
 
@@ -252,17 +241,17 @@ Claude Code 终端运行结束或系统检测到任务声明完成后，任务�
 
 证据类型包括 `diffSummary`、`verificationOutput`、`commit`、`pushBranch`、`mergeMain`、`pushMain`。
 
-### 9.4 OrchestratorProjectConfig
+### 9.4 OrchestratorAutomationConfig
 
-可以独立表存储，也可以挂在现有 Workbench project config 结构中。字段见第 8 节。
+设备级全局配置存储在 `AppConfig.orchestrator`，字段见第 8 节。legacy `OrchestratorProjectConfig` 仅用于历史数据兼容。
 
 ## 10. 后端架构
 
 建议新增 `src-tauri/src/orchestrator/` 领域模块：
 
-- `models.rs`：任务、事件、证据、配置 DTO。
+- `models.rs`：任务、事件、证据和 legacy 项目配置 DTO。
 - `repo.rs`：SQLite 持久化。
-- `scheduler.rs`：项目级调度循环、并发控制、重试。
+- `scheduler.rs`：设备级全局调度循环、并发控制、重试。
 - `runner.rs`：调用 Workbench worktree/session 能力创建可见 Runner。
 - `delivery.rs`：验证、commit、push、merge、push main。
 - `prompt.rs`：任务 Prompt 生成。
@@ -288,7 +277,7 @@ Claude Code 终端运行结束或系统检测到任务声明完成后，任务�
   - 全局任务队列。
   - 任务详情。
   - 证据链。
-  - 项目策略面板。
+  - Evidence 面板。
 - `web/src/api/orchestrator.ts`
   - Tauri invoke 封装。
 - `web/src/lib/orchestrator.ts`
@@ -346,12 +335,12 @@ Blocked 任务必须提供：
 
 ## 14. 分阶段实现建议
 
-### Phase 1：任务与配置
+### Phase 1：任务与全局配置
 
 - 数据表。
 - API。
 - Orchestrator 页面静态与 CRUD。
-- 项目级策略面板。
+- Settings 自动化 tab。
 
 ### Phase 2：可见 Runner
 
@@ -383,12 +372,12 @@ Blocked 任务必须提供：
 - 多设备 worker pool。
 - PR 创建与 review 证据。
 - 移动端 Orchestrator 状态查看。
-- 项目级 WORKFLOW.md 契约，类似 Symphony 的 repo-owned workflow policy。
+- 项目级 WORKFLOW.md 契约可以作为任务说明/验证建议来源，但不应重新引入用户可见的项目级自动化配置。
 
 ## 16. 自检
 
 - 本设计聚焦单一第一版目标：内置任务队列 + 可见 Runner + 全自动交付。
 - 没有把 Linear/GitHub、app-server、多 worker pool 塞入第一版。
-- 自动交付风险有项目级显式配置和 Blocked 兜底。
+- 自动交付风险由 Settings 全局配置显式控制，并由 Blocked 兜底。
 - 与现有 Workbench 的职责边界明确：Orchestrator 管任务，Workbench 管现场。
 - 测试面覆盖调度、状态机、交付失败和深链接。

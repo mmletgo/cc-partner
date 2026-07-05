@@ -94,6 +94,16 @@ async function main(): Promise<void> {
   );
   assertNotContains(
     orchestratorSource,
+    'getProjectConfig',
+    'Workbench automation view should not load project-scoped Orchestrator policy',
+  );
+  assertNotContains(
+    orchestratorSource,
+    "t('orchestrator:policy.",
+    'Workbench automation view should not render the legacy project policy card',
+  );
+  assertNotContains(
+    orchestratorSource,
     'setSelectedTaskId(null);',
     'Remote offline task refresh should not clear the selected task',
   );

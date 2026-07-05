@@ -242,7 +242,8 @@ async fn abort_task_for_state(
 /// 读取远端设备 Orchestrator 全局配置。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     remote UI 需要展示项目所在设备的自动化策略，而不是本机 shortcut 设备的策略。
+///     远端诊断/兼容入口需要读取项目所在设备的全局自动化配置，而不是本机 shortcut 设备的配置。
+///     OrchestratorPanel 不展示该配置；用户配置入口固定在 Settings 自动化 tab。
 ///
 /// Code Logic（这个函数做什么）:
 ///     从 context.config 读锁克隆 AppConfig.orchestrator，并包装为 `{config}` 响应。
@@ -351,7 +352,8 @@ pub async fn abort_task(
 /// 读取 Orchestrator 全局配置 HTTP handler。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     remote UI 需要知道 owning device 当前自动化开关、并发上限、验证命令和 delivery flags。
+///     诊断/兼容路径需要知道 owning device 当前自动化开关、并发上限、验证命令和 delivery flags。
+///     用户可见配置仍固定在 owning device 的 Settings 自动化 tab。
 ///
 /// Code Logic（这个函数做什么）:
 ///     构造 route context 后同步读取 config，返回 `{config}`。
@@ -859,7 +861,7 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     远端 config 接口需要返回 owning device 的全局 Orchestrator 自动化策略，供 remote UI 展示。
+    ///     远端 config 接口需要返回 owning device 的全局 Orchestrator 自动化配置，供诊断/兼容路径读取。
     ///
     /// Code Logic（这个测试做什么）:
     ///     修改测试状态中的 config.orchestrator，调用 route helper 并断言 DTO 反映当前设备配置。

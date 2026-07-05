@@ -186,7 +186,7 @@ pub struct ValidationCommandReport {
 #[allow(async_fn_in_trait)]
 pub(crate) trait DeliveryContext: Sync {
     /// Business Logic（为什么需要这个函数）:
-    ///     delivery 运行时策略已迁移为设备级全局配置，自动交付开关不能再读取 legacy 项目策略表。
+    ///     delivery 运行时策略已迁移为设备级全局配置，自动交付开关不能再读取 legacy 项目配置表。
     ///
     /// Code Logic（这个函数做什么）:
     ///     返回当前 OrchestratorAutomationConfig；生产从 AppState.config 克隆，测试从可变 harness 配置克隆。
@@ -660,7 +660,7 @@ where
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Agent 声称完成后，系统需要在对应 worktree 中执行项目配置的验证命令，并把输出保存为 evidence。
+///     Agent 声称完成后，系统需要在对应 worktree 中执行 Settings 全局验证命令，并把输出保存为 evidence。
 ///
 /// Code Logic（这个函数做什么）:
 ///     逐条用平台 shell 在 cwd 中执行命令，成功时返回包含命令、stdout、stderr 的合并文本；
@@ -2057,7 +2057,7 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     Phase 3 后 legacy 项目策略只用于展示/调试，损坏的旧策略 JSON 不能影响全局 delivery 运行时。
+    ///     Phase 3 后 legacy 项目配置只用于兼容/调试，损坏的旧配置 JSON 不能影响全局 delivery 运行时。
     ///
     /// Code Logic（这个函数做什么）:
     ///     写入损坏的 verification_commands_json 后执行 delivery，断言任务仍按全局默认配置完成且没有 failed delivery evidence。
@@ -2148,10 +2148,10 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     legacy 项目策略里的 delivery flags 不再控制运行时，旧表关闭 auto_push_main 不能阻塞全局 delivery。
+    ///     legacy 项目配置里的 delivery flags 不再控制运行时，旧表关闭 auto_push_main 不能阻塞全局 delivery。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     把项目策略 auto_push_main 置为 0 后执行 delivery，断言任务仍按全局默认配置完成。
+    ///     把 legacy 配置 auto_push_main 置为 0 后执行 delivery，断言任务仍按全局默认配置完成。
     #[tokio::test]
     async fn delivery_ignores_disabled_legacy_project_delivery_flags() {
         let harness = setup_delivery_harness().await;
