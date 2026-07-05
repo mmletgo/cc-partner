@@ -47,7 +47,11 @@ pub struct CreateOrchestratorTaskRequest {
 /// Code Logic（这个枚举做什么）:
 ///     使用 serde tag=`origin` 输出 discriminated union；旧命令仍返回 OrchestratorTaskDto 保持兼容。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "origin", rename_all = "camelCase")]
+#[serde(
+    tag = "origin",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum OrchestratorTaskViewDto {
     Local {
         task: OrchestratorTaskDto,
@@ -1373,6 +1377,29 @@ mod tests {
             mapped.session_id.as_deref(),
             Some("remote:device-a:remote-session-1")
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     前端 remote-aware API 直接消费 OrchestratorTaskViewDto，设备字段必须保持 camelCase。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     序列化 Remote 视图并断言 origin、deviceId、deviceName 字段符合 Tauri invoke 契约。
+    #[test]
+    fn remote_task_view_serializes_fields_as_camel_case() {
+        let shortcut = remote_shortcut_row();
+        let task = OrchestratorTaskDto::from(command_task_row(
+            "remote-task-1",
+            OrchestratorTaskStatus::Running,
+        ));
+        let view = remote_task_view(task, &shortcut);
+
+        let value = serde_json::to_value(view).expect("serialize task view");
+
+        assert_eq!(value["origin"], "remote");
+        assert_eq!(value["deviceId"], "device-a");
+        assert_eq!(value["deviceName"], "Mac mini");
+        assert!(value.get("device_id").is_none());
+        assert!(value.get("device_name").is_none());
     }
 
     /// Business Logic（为什么需要这个测试）:
