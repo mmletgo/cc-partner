@@ -13,6 +13,7 @@ use crate::orchestrator::outbox::{
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
+use std::time::Duration;
 use uuid::Uuid;
 
 const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_criteria, status, priority, \
@@ -163,6 +164,14 @@ const ORCHESTRATOR_REMOTE_TASK_MIRROR_PROJECT_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_orchestrator_remote_task_mirrors_project \
      ON orchestrator_remote_task_mirrors(device_id, remote_project_id, last_synced_at)";
 
+pub const ORCHESTRATOR_REMOTE_TASK_CREATE_REQUEST_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS orchestrator_remote_task_create_requests (
+  request_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)";
+
 /// Orchestrator 仓储，封装任务、事件和证据表访问。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -207,6 +216,7 @@ impl OrchestratorRepo {
             ORCHESTRATOR_REMOTE_OUTBOX_PROJECT_INDEX,
             ORCHESTRATOR_REMOTE_TASK_MIRROR_SCHEMA,
             ORCHESTRATOR_REMOTE_TASK_MIRROR_PROJECT_INDEX,
+            ORCHESTRATOR_REMOTE_TASK_CREATE_REQUEST_SCHEMA,
         ] {
             sqlx::query(statement).execute(pool).await?;
         }
@@ -245,6 +255,137 @@ impl OrchestratorRepo {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     远端 P2P create 请求可能在 owning device 已创建任务后响应超时，客户端会用同一 clientRequestId 重试。
+    ///     仓储必须把 requestId->taskId 与任务创建放在同一事务中，避免重复任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在事务内先尝试登记非空 client_request_id；已存在则返回既有 task。首次登记后插入任务，
+    ///     queue=true 时在同一事务内执行 Draft->Queued 更新，最后读取并返回完整 Row。
+    pub async fn create_remote_task_idempotent(
+        &self,
+        client_request_id: Option<&str>,
+        row: &OrchestratorTaskRow,
+        queue: bool,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        let client_request_id = client_request_id.and_then(non_empty_trimmed);
+        let mut tx = self.pool.begin().await?;
+
+        if let Some(request_id) = client_request_id {
+            if let Some(existing) = sqlx::query(
+                "SELECT task_id FROM orchestrator_remote_task_create_requests WHERE request_id = ?",
+            )
+            .bind(request_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            {
+                let task_id: String = existing.try_get("task_id")?;
+                let task_row = sqlx::query(&format!(
+                    "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
+                ))
+                .bind(&task_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                return row_to_task(&task_row);
+            }
+
+            let now = Utc::now().to_rfc3339();
+            let inserted = sqlx::query(
+                "INSERT OR IGNORE INTO orchestrator_remote_task_create_requests \
+                 (request_id, task_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            )
+            .bind(request_id)
+            .bind(&row.id)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+            if inserted.rows_affected() != 1 {
+                let existing = sqlx::query(
+                    "SELECT task_id FROM orchestrator_remote_task_create_requests WHERE request_id = ?",
+                )
+                .bind(request_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                let task_id: String = existing.try_get("task_id")?;
+                let task_row = sqlx::query(&format!(
+                    "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
+                ))
+                .bind(&task_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                return row_to_task(&task_row);
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO orchestrator_tasks \
+             (id, project_id, title, goal, acceptance_criteria, status, priority, branch_name, \
+              worktree_id, session_id, blocked_reason, attempt, created_at, updated_at, \
+              started_at, finished_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&row.id)
+        .bind(&row.project_id)
+        .bind(&row.title)
+        .bind(&row.goal)
+        .bind(&row.acceptance_criteria)
+        .bind(row.status.as_str())
+        .bind(row.priority)
+        .bind(&row.branch_name)
+        .bind(&row.worktree_id)
+        .bind(&row.session_id)
+        .bind(&row.blocked_reason)
+        .bind(row.attempt)
+        .bind(&row.created_at)
+        .bind(&row.updated_at)
+        .bind(&row.started_at)
+        .bind(&row.finished_at)
+        .execute(&mut *tx)
+        .await?;
+
+        if queue {
+            let now = Utc::now().to_rfc3339();
+            sqlx::query(
+                "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+                 WHERE id = ? AND status = ?",
+            )
+            .bind(OrchestratorTaskStatus::Queued.as_str())
+            .bind(Option::<&str>::None)
+            .bind(now)
+            .bind(&row.id)
+            .bind(OrchestratorTaskStatus::Draft.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let task_row = sqlx::query(&format!(
+            "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
+        ))
+        .bind(&row.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        row_to_task(&task_row)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     远端 route 使用非空 clientRequestId 时，需要一个语义明确的仓储入口表达“按客户端请求幂等创建”。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     作为 create_remote_task_idempotent 的非空 request id 包装，复用同一个事务实现。
+    pub async fn create_remote_task_for_client_request(
+        &self,
+        client_request_id: &str,
+        row: &OrchestratorTaskRow,
+        queue: bool,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        self.create_remote_task_idempotent(Some(client_request_id), row, queue)
+            .await
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1092,6 +1233,34 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     应用在 outbox item 进入 sending 后崩溃时，后台 dispatcher 重启后必须释放旧 lease，避免任务永久卡在发送中。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 updated_at 早于 lease 截止时间的 sending 行恢复为 pending，写入 last_error 和 updated_at，返回恢复数量。
+    pub async fn recover_stale_remote_outbox_sending_items(
+        &self,
+        lease: Duration,
+    ) -> Result<u64, AppError> {
+        let lease = chrono::Duration::from_std(lease)
+            .map_err(|err| AppError::generic(format!("远端 outbox lease 无效: {err}")))?;
+        let cutoff = (Utc::now() - lease).to_rfc3339();
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_remote_outbox \
+             SET status = ?, last_error = ?, updated_at = ? \
+             WHERE status = ? AND updated_at < ?",
+        )
+        .bind(RemoteOutboxStatus::Pending.as_str())
+        .bind("sending lease expired; recovered for retry")
+        .bind(now)
+        .bind(RemoteOutboxStatus::Sending.as_str())
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     远端项目任务列表需要合并本机尚未投递或投递失败的 outbox 项，避免用户看不到离线提交。
     ///
     /// Code Logic（这个函数做什么）:
@@ -1226,6 +1395,36 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     旧 outbox 行可能缺少 clientRequestId；dispatcher 补齐幂等键后需要持久化，确保后续重试复用同一请求体。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当 item 仍为 sending 时更新 request_json 和 updated_at；并发状态变化时返回 None。
+    pub async fn update_remote_outbox_request_json_if_sending(
+        &self,
+        item_id: &str,
+        request_json: &str,
+    ) -> Result<Option<OrchestratorRemoteOutboxRow>, AppError> {
+        if request_json.trim().is_empty() {
+            return Err(AppError::generic("远端 outbox 请求不能为空"));
+        }
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_remote_outbox SET request_json = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(request_json)
+        .bind(now)
+        .bind(item_id)
+        .bind(RemoteOutboxStatus::Sending.as_str())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Ok(None);
+        }
+        self.get_remote_outbox_item(item_id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     远端任务创建成功后，本机 pending item 应转为 mirrored 并保存远端 task id，避免后续重复投递。
     ///
     /// Code Logic（这个函数做什么）:
@@ -1252,6 +1451,109 @@ impl OrchestratorRepo {
         self.get_remote_outbox_item(item_id)
             .await?
             .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     成功投递后，outbox mirrored 状态、remote_project_id 和 mirror payload 必须同生共死；
+    ///     否则 UI 可能看不到已创建的远端任务，或 outbox 显示已完成但 mirror 丢失。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在单个 SQLite 事务里仅对 status=sending 的 item 写 mirrored/sent_at/remote_task_id/remote_project_id，
+    ///     并按 `(device_id, remote_task_id)` upsert mirror；状态不再是 sending 时返回 None 且不覆盖。
+    pub async fn mark_remote_outbox_mirrored_and_upsert_mirror_if_sending(
+        &self,
+        item_id: &str,
+        device_id: &str,
+        device_name: &str,
+        remote_project_id: &str,
+        remote_project_path: &str,
+        remote_task_id: &str,
+        payload_json: &str,
+    ) -> Result<Option<OrchestratorRemoteOutboxRow>, AppError> {
+        let item_id = item_id.trim();
+        let device_id = device_id.trim();
+        let device_name = device_name.trim();
+        let remote_project_id = remote_project_id.trim();
+        let remote_project_path = remote_project_path.trim();
+        let remote_task_id = remote_task_id.trim();
+        if item_id.is_empty() {
+            return Err(AppError::generic("远端 outbox 缺少 ID"));
+        }
+        if device_id.is_empty() {
+            return Err(AppError::generic("远端任务镜像缺少设备 ID"));
+        }
+        if device_name.is_empty() {
+            return Err(AppError::generic("远端任务镜像缺少设备名称"));
+        }
+        if remote_project_id.is_empty() {
+            return Err(AppError::generic("远端任务镜像缺少项目 ID"));
+        }
+        if remote_project_path.is_empty() {
+            return Err(AppError::generic("远端任务镜像缺少项目路径"));
+        }
+        if remote_task_id.is_empty() {
+            return Err(AppError::generic("远端任务镜像缺少任务 ID"));
+        }
+        if payload_json.trim().is_empty() {
+            return Err(AppError::generic("远端任务镜像 payload 不能为空"));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().to_rfc3339();
+        let updated = sqlx::query(
+            "UPDATE orchestrator_remote_outbox \
+             SET remote_project_id = ?, status = ?, remote_task_id = ?, last_error = ?, \
+                 updated_at = ?, sent_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(remote_project_id)
+        .bind(RemoteOutboxStatus::Mirrored.as_str())
+        .bind(remote_task_id)
+        .bind(Option::<&str>::None)
+        .bind(&now)
+        .bind(&now)
+        .bind(item_id)
+        .bind(RemoteOutboxStatus::Sending.as_str())
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            tx.commit().await?;
+            return Ok(None);
+        }
+
+        let mirror_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO orchestrator_remote_task_mirrors \
+             (id, device_id, device_name, remote_project_id, remote_project_path, remote_task_id, \
+              payload_json, last_synced_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(device_id, remote_task_id) DO UPDATE SET \
+               device_name = excluded.device_name, \
+               remote_project_id = excluded.remote_project_id, \
+               remote_project_path = excluded.remote_project_path, \
+               payload_json = excluded.payload_json, \
+               last_synced_at = excluded.last_synced_at",
+        )
+        .bind(&mirror_id)
+        .bind(device_id)
+        .bind(device_name)
+        .bind(remote_project_id)
+        .bind(remote_project_path)
+        .bind(remote_task_id)
+        .bind(payload_json)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+
+        let row = sqlx::query(&format!(
+            "SELECT {REMOTE_OUTBOX_COLUMNS} FROM orchestrator_remote_outbox WHERE id = ?"
+        ))
+        .bind(item_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let item = row_to_remote_outbox(&row)?;
+        tx.commit().await?;
+        Ok(Some(item))
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1674,6 +1976,34 @@ mod tests {
         assert_eq!(listed[0].id, task.id);
         assert_eq!(config.try_get::<i64, _>("enabled").unwrap(), 0);
         assert_eq!(config.try_get::<i64, _>("retry_limit").unwrap(), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端 create 请求超时重试时，同一个 clientRequestId 必须返回第一次创建的任务，避免 owning device 产生重复任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用同一 clientRequestId 传入两条不同 task row，断言第二次返回第一条任务且数据库只保留一条。
+    #[tokio::test]
+    async fn remote_create_client_request_is_idempotent() {
+        let (_pool, repo) = setup_repo().await;
+        let first = task_row("task-1", "project-1", OrchestratorTaskStatus::Draft);
+        let second = task_row("task-2", "project-1", OrchestratorTaskStatus::Draft);
+
+        let created = repo
+            .create_remote_task_for_client_request("client-request-1", &first, true)
+            .await
+            .unwrap();
+        let replayed = repo
+            .create_remote_task_for_client_request("client-request-1", &second, false)
+            .await
+            .unwrap();
+        let listed = repo.list_tasks(Some("project-1")).await.unwrap();
+
+        assert_eq!(created.id, "task-1");
+        assert_eq!(created.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(replayed.id, "task-1");
+        assert_eq!(replayed.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(listed.len(), 1);
     }
 
     /// Business Logic（为什么需要这个函数）:

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 ///     本机 remote shortcut 创建任务时，实际任务必须创建在项目所属设备的本机 Orchestrator 队列中。
 ///
 /// Code Logic（这个结构体做什么）:
-///     保存远端 local projectId、标题、目标、验收标准、优先级和是否立即入队，字段使用 camelCase。
+///     保存远端 local projectId、标题、目标、验收标准、优先级、是否立即入队和可选幂等键，字段使用 camelCase。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteCreateOrchestratorTaskReq {
@@ -27,6 +27,8 @@ pub struct RemoteCreateOrchestratorTaskReq {
     pub acceptance_criteria: String,
     pub priority: i64,
     pub queue: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<String>,
 }
 
 /// 远端任务 ID 请求体。
@@ -116,6 +118,7 @@ mod tests {
             acceptance_criteria: "验收".to_string(),
             priority: 7,
             queue: true,
+            client_request_id: Some("request-1".to_string()),
         };
 
         let value = serde_json::to_value(req).expect("serialize request");
@@ -124,7 +127,28 @@ mod tests {
         assert_eq!(value["acceptanceCriteria"], "验收");
         assert_eq!(value["priority"], 7);
         assert_eq!(value["queue"], true);
+        assert_eq!(value["clientRequestId"], "request-1");
         assert!(value.get("project_id").is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧客户端不会发送 clientRequestId，远端协议必须把缺失字段兼容解析为 None。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化不含 clientRequestId 的 JSON，断言 Option 字段为 None。
+    #[test]
+    fn create_request_accepts_missing_client_request_id() {
+        let req: RemoteCreateOrchestratorTaskReq = serde_json::from_value(serde_json::json!({
+            "projectId": "project-1",
+            "title": "任务",
+            "goal": "目标",
+            "acceptanceCriteria": "验收",
+            "priority": 1,
+            "queue": false
+        }))
+        .expect("deserialize request");
+
+        assert!(req.client_request_id.is_none());
     }
 
     /// Business Logic（为什么需要这个测试）:

@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 const REMOTE_OUTBOX_DISPATCH_INTERVAL_SECS: u64 = 10;
 const REMOTE_OUTBOX_DISPATCH_BATCH_SIZE: i64 = 20;
+const REMOTE_OUTBOX_SENDING_LEASE_SECS: u64 = 300;
 
 /// 远端任务投递 outbox 状态。
 ///
@@ -234,6 +235,27 @@ pub fn is_remote_network_error(error: &AppError) -> bool {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     远端创建任务需要幂等键防止“远端已创建但响应超时”后重试产生重复任务；旧 outbox payload 可能缺少该字段。
+///
+/// Code Logic（这个函数做什么）:
+///     若请求已有非空 client_request_id 则保持不变；缺失或空白时写入 fallback_id，并返回是否修改过。
+fn ensure_remote_create_client_request_id(
+    request: &mut RemoteCreateOrchestratorTaskReq,
+    fallback_id: &str,
+) -> bool {
+    let existing = request
+        .client_request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if existing.is_some() {
+        return false;
+    }
+    request.client_request_id = Some(fallback_id.to_string());
+    true
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     用户在远端项目离线时创建任务，需要先写入本机 pending outbox，等待设备恢复在线后自动投递。
 ///
 /// Code Logic（这个函数做什么）:
@@ -241,9 +263,11 @@ pub fn is_remote_network_error(error: &AppError) -> bool {
 pub async fn create_pending_remote_task(
     state: &AppState,
     remote_shortcut: &WorkbenchProjectRow,
-    create_req: RemoteCreateOrchestratorTaskReq,
+    mut create_req: RemoteCreateOrchestratorTaskReq,
 ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
     ensure_remote_shortcut(remote_shortcut)?;
+    let fallback_request_id = uuid::Uuid::new_v4().to_string();
+    ensure_remote_create_client_request_id(&mut create_req, &fallback_request_id);
     let request_json = serde_json::to_string(&create_req)?;
     state
         .orchestrator_repo
@@ -259,11 +283,19 @@ pub async fn create_pending_remote_task(
 
 /// Business Logic（为什么需要这个函数）:
 ///     后台 dispatcher 每次 tick 需要尝试投递一批 pending 远端任务，不依赖前端页面是否打开。
+///     旧 sending lease 也必须在 tick 开始时恢复，避免崩溃后永久卡住。
 ///
 /// Code Logic（这个函数做什么）:
-///     查询 pending items，逐条用条件 claim 变为 sending，成功投递后标 mirrored 并 upsert mirror；
-///     网络错误写 last_error 并回 pending，协议/校验错误标 failed，返回成功投递数量。
+///     先恢复超过 lease 的 sending 行，再查询 pending items，逐条用条件 claim 变为 sending；
+///     成功投递后通过 repo 事务标 mirrored 并 upsert mirror，网络错误写 last_error 并回 pending，
+///     协议/校验错误标 failed，返回成功投递数量。
 pub async fn dispatch_remote_outbox_once(state: &AppState) -> Result<usize, AppError> {
+    state
+        .orchestrator_repo
+        .recover_stale_remote_outbox_sending_items(Duration::from_secs(
+            REMOTE_OUTBOX_SENDING_LEASE_SECS,
+        ))
+        .await?;
     let pending = state
         .orchestrator_repo
         .list_pending_remote_outbox_items(REMOTE_OUTBOX_DISPATCH_BATCH_SIZE)
@@ -413,7 +445,8 @@ pub async fn open_remote_project_for_shortcut(
 ///     dispatcher 领取 outbox item 后需要完成一次完整远端投递，并在成功后缓存远端任务镜像。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析 request_json、打开远端项目、替换 request.project_id、创建远端任务、标 mirrored 并 upsert mirror。
+///     解析 request_json、补齐/持久化 clientRequestId、打开远端项目、替换 request.project_id、创建远端任务，
+///     最后用 repo 事务同时标 mirrored 并 upsert mirror。
 async fn dispatch_claimed_remote_outbox_item(
     state: &AppState,
     item: &OrchestratorRemoteOutboxRow,
@@ -422,6 +455,18 @@ async fn dispatch_claimed_remote_outbox_item(
         .map_err(|err| {
             RemoteOutboxDispatchError::Protocol(format!("远端 outbox 请求解析失败: {err}"))
         })?;
+    if ensure_remote_create_client_request_id(&mut request, &item.id) {
+        let request_json = serde_json::to_string(&request)
+            .map_err(|err| RemoteOutboxDispatchError::Protocol(err.to_string()))?;
+        let updated = state
+            .orchestrator_repo
+            .update_remote_outbox_request_json_if_sending(&item.id, &request_json)
+            .await
+            .map_err(|err| RemoteOutboxDispatchError::Protocol(err.to_string()))?;
+        if updated.is_none() {
+            return Ok(());
+        }
+    }
 
     let shortcut = WorkbenchProjectRow {
         id: String::new(),
@@ -437,11 +482,6 @@ async fn dispatch_claimed_remote_outbox_item(
     let context = open_remote_project_for_shortcut(state, &shortcut)
         .await
         .map_err(classify_remote_error)?;
-    state
-        .orchestrator_repo
-        .update_remote_outbox_remote_project_id(item.id.as_str(), &context.remote_project_id)
-        .await
-        .map_err(|err| RemoteOutboxDispatchError::Protocol(err.to_string()))?;
 
     request.project_id = context.remote_project_id.clone();
     let task = RemoteOrchestratorClient::new()
@@ -450,14 +490,10 @@ async fn dispatch_claimed_remote_outbox_item(
         .map_err(classify_remote_error)?;
     let payload = mirror_payload_from_task(&task)
         .map_err(|err| RemoteOutboxDispatchError::Protocol(err.to_string()))?;
-    state
+    let _ = state
         .orchestrator_repo
-        .mark_remote_outbox_mirrored(&item.id, &task.id)
-        .await
-        .map_err(|err| RemoteOutboxDispatchError::Protocol(err.to_string()))?;
-    state
-        .orchestrator_repo
-        .upsert_remote_task_mirror(
+        .mark_remote_outbox_mirrored_and_upsert_mirror_if_sending(
+            &item.id,
             &context.device_id,
             &context.device_name,
             &context.remote_project_id,
@@ -490,7 +526,8 @@ mod tests {
     use crate::orchestrator::models::{OrchestratorTaskDto, OrchestratorTaskStatus};
     use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
     use crate::orchestrator::repo::OrchestratorRepo;
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use chrono::{Duration as ChronoDuration, Utc};
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
     use std::str::FromStr;
 
     /// Business Logic（为什么需要这个函数）:
@@ -498,7 +535,7 @@ mod tests {
     ///
     /// Code Logic（这个函数做什么）:
     ///     创建单连接 SQLite 内存库，初始化 Orchestrator schema，并返回 repo。
-    async fn setup_repo() -> OrchestratorRepo {
+    async fn setup_repo_with_pool() -> (SqlitePool, OrchestratorRepo) {
         let options = SqliteConnectOptions::from_str("sqlite::memory:")
             .expect("sqlite options")
             .create_if_missing(true);
@@ -510,7 +547,18 @@ mod tests {
         OrchestratorRepo::init_schema(&pool)
             .await
             .expect("orchestrator schema");
-        OrchestratorRepo::new(pool)
+        let repo = OrchestratorRepo::new(pool.clone());
+        (pool, repo)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     大多数 outbox 测试只需要仓储对象，隐藏 SQLite pool 可以减少重复样板。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     复用 setup_repo_with_pool 并只返回 OrchestratorRepo。
+    async fn setup_repo() -> OrchestratorRepo {
+        let (_pool, repo) = setup_repo_with_pool().await;
+        repo
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -526,6 +574,7 @@ mod tests {
             acceptance_criteria: "远端测试通过".to_string(),
             priority: 3,
             queue: false,
+            client_request_id: None,
         }
     }
 
@@ -619,6 +668,85 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     应用在 outbox item 被 claim 为 sending 后崩溃时，旧 lease 必须恢复为 pending，避免任务永久卡住。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     人工把 sending 行 updated_at 调整到 5 分钟前，再调用 recovery，断言可重新 claim。
+    #[tokio::test]
+    async fn stale_sending_item_recovers_to_pending_and_can_be_claimed_again() {
+        let (pool, repo) = setup_repo_with_pool().await;
+        let item = repo
+            .insert_remote_outbox_pending("device-1", "Mac mini", "/project", None, "{}")
+            .await
+            .expect("insert pending");
+        repo.claim_remote_outbox_item_as_sending(&item.id)
+            .await
+            .expect("claim")
+            .expect("claimed");
+        let stale_at = (Utc::now() - ChronoDuration::seconds(301)).to_rfc3339();
+        sqlx::query("UPDATE orchestrator_remote_outbox SET updated_at = ? WHERE id = ?")
+            .bind(stale_at)
+            .bind(&item.id)
+            .execute(&pool)
+            .await
+            .expect("mark stale");
+
+        let recovered = repo
+            .recover_stale_remote_outbox_sending_items(Duration::from_secs(300))
+            .await
+            .expect("recover stale");
+        let recovered_item = repo
+            .get_remote_outbox_item(&item.id)
+            .await
+            .expect("get recovered")
+            .expect("recovered exists");
+        let claimed = repo
+            .claim_remote_outbox_item_as_sending(&item.id)
+            .await
+            .expect("claim recovered")
+            .expect("reclaimed");
+
+        assert_eq!(recovered, 1);
+        assert_eq!(recovered_item.status, RemoteOutboxStatus::Pending);
+        assert!(recovered_item
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("sending lease"));
+        assert_eq!(claimed.status, RemoteOutboxStatus::Sending);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     正在投递中的新鲜 sending item 不能被下一轮 dispatcher 误恢复，否则会造成并发重复投递。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim 后立即执行 recovery，断言没有行被恢复且再次 claim 返回 None。
+    #[tokio::test]
+    async fn fresh_sending_item_is_not_recovered() {
+        let repo = setup_repo().await;
+        let item = repo
+            .insert_remote_outbox_pending("device-1", "Mac mini", "/project", None, "{}")
+            .await
+            .expect("insert pending");
+        repo.claim_remote_outbox_item_as_sending(&item.id)
+            .await
+            .expect("claim")
+            .expect("claimed");
+
+        let recovered = repo
+            .recover_stale_remote_outbox_sending_items(Duration::from_secs(300))
+            .await
+            .expect("recover fresh");
+        let second = repo
+            .claim_remote_outbox_item_as_sending(&item.id)
+            .await
+            .expect("claim fresh");
+
+        assert_eq!(recovered, 0);
+        assert!(second.is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     网络离线或设备不在线只是暂时失败，outbox 必须回到 pending 并保留 last_error 供 UI 提示。
     ///
     /// Code Logic（这个测试做什么）:
@@ -691,19 +819,18 @@ mod tests {
         let task = task_dto("remote-task-1", "远端任务");
 
         let mirrored = repo
-            .mark_remote_outbox_mirrored(&item.id, &task.id)
+            .mark_remote_outbox_mirrored_and_upsert_mirror_if_sending(
+                &item.id,
+                "device-1",
+                "Mac mini",
+                "remote-project-1",
+                "/project",
+                &task.id,
+                &mirror_payload_from_task(&task).expect("payload"),
+            )
             .await
-            .expect("mark mirrored");
-        repo.upsert_remote_task_mirror(
-            "device-1",
-            "Mac mini",
-            "remote-project-1",
-            "/project",
-            &task.id,
-            &mirror_payload_from_task(&task).expect("payload"),
-        )
-        .await
-        .expect("upsert mirror");
+            .expect("mark mirrored")
+            .expect("sending item should be mirrored");
         let mirrors = repo
             .list_remote_task_mirrors_for_project("device-1", "remote-project-1")
             .await
@@ -714,6 +841,84 @@ mod tests {
         assert!(mirrored.sent_at.is_some());
         assert_eq!(mirrors.len(), 1);
         assert_eq!(mirrors[0].remote_task_id, "remote-task-1");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     成功投递写 outbox mirrored 与写 mirror 必须在一个事务里完成，且只允许仍处于 sending 的 item 被覆盖。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对 pending item 直接调用事务完成方法，断言返回 None、outbox 仍是 pending 且没有 mirror 行。
+    #[tokio::test]
+    async fn mirrored_transaction_does_not_overwrite_non_sending_item() {
+        let repo = setup_repo().await;
+        let item = repo
+            .insert_remote_outbox_pending("device-1", "Mac mini", "/project", None, "{}")
+            .await
+            .expect("insert pending");
+        let task = task_dto("remote-task-1", "远端任务");
+
+        let result = repo
+            .mark_remote_outbox_mirrored_and_upsert_mirror_if_sending(
+                &item.id,
+                "device-1",
+                "Mac mini",
+                "remote-project-1",
+                "/project",
+                &task.id,
+                &mirror_payload_from_task(&task).expect("payload"),
+            )
+            .await
+            .expect("transaction");
+        let persisted = repo
+            .get_remote_outbox_item(&item.id)
+            .await
+            .expect("get item")
+            .expect("item exists");
+        let mirrors = repo
+            .list_remote_task_mirrors_for_project("device-1", "remote-project-1")
+            .await
+            .expect("list mirrors");
+
+        assert!(result.is_none());
+        assert_eq!(persisted.status, RemoteOutboxStatus::Pending);
+        assert!(persisted.remote_task_id.is_none());
+        assert!(mirrors.is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧 outbox 行可能缺少 clientRequestId，dispatcher 必须用 item id 填入稳定幂等键并持久化回 request_json。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对缺少 client_request_id 的请求调用 helper，断言字段被设为 outbox id 且序列化 payload 包含 clientRequestId。
+    #[test]
+    fn create_request_uses_outbox_id_as_missing_client_request_id() {
+        let mut request = create_req();
+
+        let changed = ensure_remote_create_client_request_id(&mut request, "outbox-1");
+        let value = serde_json::to_value(&request).expect("serialize request");
+
+        assert!(changed);
+        assert_eq!(request.client_request_id.as_deref(), Some("outbox-1"));
+        assert_eq!(value["clientRequestId"], "outbox-1");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     在线创建失败后落入 pending outbox 时已经有稳定 clientRequestId，dispatcher 不能用 outbox id 覆盖它。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对已有 client_request_id 的请求调用 helper，断言返回 false 且原 key 保持不变。
+    #[test]
+    fn create_request_keeps_existing_client_request_id() {
+        let mut request = create_req();
+        request.client_request_id = Some("stable-request-1".to_string());
+
+        let changed = ensure_remote_create_client_request_id(&mut request, "outbox-1");
+
+        assert!(!changed);
+        assert_eq!(
+            request.client_request_id.as_deref(),
+            Some("stable-request-1")
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

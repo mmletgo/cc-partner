@@ -113,12 +113,14 @@ async fn get_local_project_task(
 ///     本机 remote shortcut 创建任务时，owning device 需要生成权威任务行，并可按 queue=true 立即入队。
 ///
 /// Code Logic（这个函数做什么）:
-///     确认 projectId 为 local 后复用命令层 row builder 创建 Draft；queue=true 时再调用 repo.queue_task 安全入队。
+///     确认 projectId 为 local 后复用命令层 row builder 创建 Draft；若提供 clientRequestId 则由 repo 事务保证重复请求返回同一任务。
 async fn create_task_for_state(
     state: &OrchestratorRouteContext,
     req: RemoteCreateOrchestratorTaskReq,
 ) -> Result<OrchestratorTaskDto, AppError> {
     ensure_remote_orchestrator_local_project_id(state, &req.project_id).await?;
+    let queue = req.queue;
+    let client_request_id = req.client_request_id.clone();
     let row = build_orchestrator_task_row(CreateOrchestratorTaskRequest {
         project_id: req.project_id,
         title: req.title,
@@ -126,13 +128,11 @@ async fn create_task_for_state(
         acceptance_criteria: req.acceptance_criteria,
         priority: Some(req.priority),
     })?;
-    state.orchestrator_repo.create_task(&row).await?;
-    if req.queue {
-        let queued = state.orchestrator_repo.queue_task(&row.id).await?;
-        Ok(OrchestratorTaskDto::from(queued))
-    } else {
-        Ok(OrchestratorTaskDto::from(row))
-    }
+    let created = state
+        .orchestrator_repo
+        .create_remote_task_idempotent(client_request_id.as_deref(), &row, queue)
+        .await?;
+    Ok(OrchestratorTaskDto::from(created))
 }
 
 /// 按项目列出远端 Orchestrator 任务。
@@ -530,6 +530,7 @@ mod tests {
                 acceptance_criteria: "验收标准".to_string(),
                 priority: 5,
                 queue: true,
+                client_request_id: None,
             },
         )
         .await
@@ -538,6 +539,44 @@ mod tests {
         assert_eq!(created.project_id, "project-1");
         assert_eq!(created.status, OrchestratorTaskStatus::Queued);
         assert_eq!(created.priority, 5);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端创建响应超时后客户端会用同一个 clientRequestId 重试，owning device 必须返回第一次创建的任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对同一个 local 项目用同一 clientRequestId 调用两次 create helper，断言返回同一 task id 且数据库只有一条任务。
+    #[tokio::test]
+    async fn create_local_project_task_is_idempotent_by_client_request_id() {
+        let state = test_state().await;
+        insert_project(&state, "project-1", "local").await;
+
+        let req = RemoteCreateOrchestratorTaskReq {
+            project_id: "project-1".to_string(),
+            title: "远端任务".to_string(),
+            goal: "完成目标".to_string(),
+            acceptance_criteria: "验收标准".to_string(),
+            priority: 5,
+            queue: true,
+            client_request_id: Some("create-request-1".to_string()),
+        };
+
+        let first = create_task_for_state(&state, req.clone())
+            .await
+            .expect("first create");
+        let second = create_task_for_state(&state, req)
+            .await
+            .expect("second create");
+        let tasks = state
+            .orchestrator_repo
+            .list_tasks(Some("project-1"))
+            .await
+            .expect("list tasks");
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, first.id);
     }
 
     /// Business Logic（为什么需要这个测试）:

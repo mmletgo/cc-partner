@@ -90,3 +90,139 @@ CREATE TABLE IF NOT EXISTS workbench_sessions (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- orchestrator_tasks 表：Orchestrator 权威任务队列
+CREATE TABLE IF NOT EXISTS orchestrator_tasks (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    acceptance_criteria TEXT NOT NULL,
+    status TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    branch_name TEXT,
+    worktree_id TEXT,
+    session_id TEXT,
+    blocked_reason TEXT,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_orchestrator_tasks_project_status
+    ON orchestrator_tasks(project_id, status, priority, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_orchestrator_tasks_status
+    ON orchestrator_tasks(status, priority, created_at);
+
+-- orchestrator_project_config 表：历史项目级策略，仅保留展示/调试，运行时读取 AppConfig.orchestrator
+CREATE TABLE IF NOT EXISTS orchestrator_project_config (
+    project_id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    max_concurrent_tasks INTEGER NOT NULL DEFAULT 1,
+    branch_prefix TEXT NOT NULL DEFAULT 'agent',
+    verification_commands_json TEXT NOT NULL DEFAULT '[]',
+    auto_commit INTEGER NOT NULL DEFAULT 1,
+    auto_push_task_branch INTEGER NOT NULL DEFAULT 1,
+    auto_merge_to_main INTEGER NOT NULL DEFAULT 1,
+    auto_push_main INTEGER NOT NULL DEFAULT 1,
+    retry_limit INTEGER NOT NULL DEFAULT 0,
+    retain_worktree_on_done INTEGER NOT NULL DEFAULT 0,
+    retain_worktree_on_blocked INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- orchestrator_task_events 表：任务生命周期事件
+CREATE TABLE IF NOT EXISTS orchestrator_task_events (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    message TEXT NOT NULL,
+    payload_json TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_orchestrator_task_events_task
+    ON orchestrator_task_events(task_id, created_at);
+
+-- orchestrator_task_evidence 表：验证/交付 evidence
+CREATE TABLE IF NOT EXISTS orchestrator_task_evidence (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_orchestrator_task_evidence_task
+    ON orchestrator_task_evidence(task_id, created_at);
+
+-- orchestrator_task_attempts 表：Runner attempt 与 worktree/session 映射
+CREATE TABLE IF NOT EXISTS orchestrator_task_attempts (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    worktree_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(task_id, attempt)
+);
+
+CREATE INDEX IF NOT EXISTS idx_orchestrator_task_attempts_session
+    ON orchestrator_task_attempts(session_id, status);
+
+-- orchestrator_remote_outbox 表：远端项目离线创建任务的本机待投递队列
+-- status: pending/sending/mirrored/failed；sending 由 dispatcher lease 过期后恢复 pending
+CREATE TABLE IF NOT EXISTS orchestrator_remote_outbox (
+    id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    remote_project_path TEXT NOT NULL,
+    remote_project_id TEXT,
+    request_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    remote_task_id TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    sent_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_orchestrator_remote_outbox_status
+    ON orchestrator_remote_outbox(status, updated_at, device_id);
+
+CREATE INDEX IF NOT EXISTS idx_orchestrator_remote_outbox_project
+    ON orchestrator_remote_outbox(device_id, remote_project_path, status);
+
+-- orchestrator_remote_task_mirrors 表：远端权威任务的本机展示快照，不能被本机 scheduler/验证/交付消费
+CREATE TABLE IF NOT EXISTS orchestrator_remote_task_mirrors (
+    id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    remote_project_id TEXT NOT NULL,
+    remote_project_path TEXT NOT NULL,
+    remote_task_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    last_synced_at TEXT NOT NULL,
+    UNIQUE(device_id, remote_task_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_orchestrator_remote_task_mirrors_project
+    ON orchestrator_remote_task_mirrors(device_id, remote_project_id, last_synced_at);
+
+-- orchestrator_remote_task_create_requests 表：owning device 上的远端 create 幂等键
+-- clientRequestId 重复到达时直接返回第一次写入的 task_id，避免响应超时后的重复任务。
+CREATE TABLE IF NOT EXISTS orchestrator_remote_task_create_requests (
+    request_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);

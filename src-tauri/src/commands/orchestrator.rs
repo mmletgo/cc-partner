@@ -15,6 +15,7 @@ use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
 use crate::workbench::models::WorkbenchProjectRow;
+use crate::workbench::remote_ids::{parse_remote_entity_id, remote_entity_id};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -127,7 +128,8 @@ async fn get_orchestrator_workbench_project(
 ///     远端 create 请求需要沿用用户输入的标题、目标、验收标准和优先级，但 projectId 会在远端 open-project 后替换。
 ///
 /// Code Logic（这个函数做什么）:
-///     从本地 Tauri create request 投影为 RemoteCreateOrchestratorTaskReq，queue 固定 false 保持草稿语义。
+///     从本地 Tauri create request 投影为 RemoteCreateOrchestratorTaskReq，queue 固定 false 保持草稿语义；
+///     同时生成一次性稳定 clientRequestId，若在线响应超时后落入 pending outbox，后续投递仍复用该幂等键。
 fn remote_create_request_from_local(
     request: &CreateOrchestratorTaskRequest,
 ) -> RemoteCreateOrchestratorTaskReq {
@@ -138,6 +140,7 @@ fn remote_create_request_from_local(
         acceptance_criteria: request.acceptance_criteria.clone(),
         priority: request.priority.unwrap_or(0),
         queue: false,
+        client_request_id: Some(Uuid::new_v4().to_string()),
     }
 }
 
@@ -153,19 +156,78 @@ fn local_task_view(row: OrchestratorTaskRow) -> OrchestratorTaskViewDto {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     远端任务返回给本机前端时必须使用 Workbench remote id 通道，后续 queue/retry/abort/evidence 才能安全回到正确设备。
+///
+/// Code Logic（这个函数做什么）:
+///     将远端裸 task/project/worktree/session id 映射为本机可识别的 remote:<deviceId>:<inner> id；
+///     task.project_id 则替换成本机 remote shortcut project.id。
+fn map_remote_task_for_shortcut(
+    mut task: OrchestratorTaskDto,
+    remote_shortcut: &WorkbenchProjectRow,
+) -> OrchestratorTaskDto {
+    task.id = remote_entity_id(&remote_shortcut.device_id, &task.id);
+    task.project_id = remote_shortcut.id.clone();
+    task.worktree_id = task
+        .worktree_id
+        .as_deref()
+        .map(|id| remote_entity_id(&remote_shortcut.device_id, id));
+    task.session_id = task
+        .session_id
+        .as_deref()
+        .map(|id| remote_entity_id(&remote_shortcut.device_id, id));
+    task
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端 evidence DTO 的 taskId 也会回传给前端，必须与任务详情页使用的 remote task id 保持一致。
+///
+/// Code Logic（这个函数做什么）:
+///     克隆 evidence 列表并把每条 task_id 包装为 remote:<deviceId>:<inner>。
+fn map_remote_evidence_for_shortcut(
+    evidence: Vec<OrchestratorEvidenceDto>,
+    remote_shortcut: &WorkbenchProjectRow,
+) -> Vec<OrchestratorEvidenceDto> {
+    evidence
+        .into_iter()
+        .map(|mut item| {
+            item.task_id = remote_entity_id(&remote_shortcut.device_id, &item.task_id);
+            item
+        })
+        .collect()
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     远端任务视图必须带上设备 ID 与设备名，UI 才能标明任务由哪台设备自治执行。
 ///
 /// Code Logic（这个函数做什么）:
-///     将远端任务 DTO 与 remote shortcut 的设备信息包装为 Remote 变体。
+///     先把远端裸任务 DTO 映射成本机 remote id，再与 remote shortcut 的设备信息包装为 Remote 变体。
 fn remote_task_view(
     task: OrchestratorTaskDto,
     remote_shortcut: &WorkbenchProjectRow,
 ) -> OrchestratorTaskViewDto {
     OrchestratorTaskViewDto::Remote {
-        task,
+        task: map_remote_task_for_shortcut(task, remote_shortcut),
         device_id: remote_shortcut.device_id.clone(),
         device_name: remote_shortcut.device_name.clone(),
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     本机前端会把 remote:<deviceId>:<inner> task id 传回命令层，远端 HTTP API 只能接收 owning device 的裸 task id。
+///
+/// Code Logic（这个函数做什么）:
+///     若 task_id 是 remote id，则校验 deviceId 与当前 shortcut 一致后返回 inner_id；裸 id 作为旧协议兼容直接返回。
+fn remote_inner_task_id_for_shortcut(
+    remote_shortcut: &WorkbenchProjectRow,
+    task_id: &str,
+) -> Result<String, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(task_id) {
+        if parsed.device_id != remote_shortcut.device_id {
+            return Err(AppError::generic("远端任务不属于当前设备"));
+        }
+        return Ok(parsed.inner_id);
+    }
+    Ok(task_id.to_string())
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -175,17 +237,14 @@ fn remote_task_view(
 ///     逐条解析 RemoteMirrorTask.payload_json，转换为 Remote 视图；解析失败返回业务错误。
 fn remote_mirror_views(
     mirrors: Vec<RemoteMirrorTask>,
+    remote_shortcut: &WorkbenchProjectRow,
 ) -> Result<Vec<OrchestratorTaskViewDto>, AppError> {
     mirrors
         .into_iter()
         .map(|mirror| {
             let task = serde_json::from_str::<OrchestratorTaskDto>(&mirror.payload_json)
                 .map_err(|err| AppError::generic(format!("远端任务镜像解析失败: {err}")))?;
-            Ok(OrchestratorTaskViewDto::Remote {
-                task,
-                device_id: mirror.device_id,
-                device_name: mirror.device_name,
-            })
+            Ok(remote_task_view(task, remote_shortcut))
         })
         .collect()
 }
@@ -283,10 +342,11 @@ where
     Fut: std::future::Future<Output = Result<OrchestratorTaskDto, AppError>>,
 {
     let context = open_remote_project_for_shortcut(state, remote_shortcut).await?;
+    let remote_task_id = remote_inner_task_id_for_shortcut(remote_shortcut, task_id)?;
     let task = operation(
         RemoteOrchestratorClient::new(),
         context.base_url.clone(),
-        task_id.to_string(),
+        remote_task_id,
     )
     .await?;
     upsert_remote_task_view(
@@ -675,7 +735,7 @@ pub async fn list_orchestrator_task_views(
         }
         Err(err) => return Err(err),
     };
-    let mut views = remote_mirror_views(mirrors)?;
+    let mut views = remote_mirror_views(mirrors, &project)?;
     views.extend(pending_remote_task_views_for_project(state.inner(), &project).await?);
     Ok(views)
 }
@@ -836,9 +896,11 @@ pub async fn list_orchestrator_task_evidence_for_project(
         return state.orchestrator_repo.list_evidence(&task_id).await;
     }
     let context = open_remote_project_for_shortcut(state.inner(), &project).await?;
-    RemoteOrchestratorClient::new()
-        .get_evidence(&context.base_url, &task_id)
-        .await
+    let remote_task_id = remote_inner_task_id_for_shortcut(&project, &task_id)?;
+    let evidence = RemoteOrchestratorClient::new()
+        .get_evidence(&context.base_url, &remote_task_id)
+        .await?;
+    Ok(map_remote_evidence_for_shortcut(evidence, &project))
 }
 
 /// 按项目读取 remote-aware Orchestrator 自动化配置。
@@ -1144,6 +1206,25 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     remote-aware helper 测试需要一个本机 remote shortcut，模拟前端当前打开的远端项目。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造完整 WorkbenchProjectRow，id 是本机 shortcut projectId，device_id 是远端设备。
+    fn remote_shortcut_row() -> WorkbenchProjectRow {
+        WorkbenchProjectRow {
+            id: "shortcut-project-1".to_string(),
+            name: "Remote Project".to_string(),
+            kind: "remote".to_string(),
+            device_id: "device-a".to_string(),
+            device_name: "Mac mini".to_string(),
+            path: "/Users/hans/remote-project".to_string(),
+            last_opened_at: "2026-07-05T00:00:00Z".to_string(),
+            created_at: "2026-07-05T00:00:00Z".to_string(),
+            updated_at: "2026-07-05T00:00:00Z".to_string(),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     Orchestrator 任务创建命令必须拒绝没有项目归属的任务，避免调度器后续无法定位工作台项目。
     ///
     /// Code Logic（这个函数做什么）:
@@ -1234,6 +1315,84 @@ mod tests {
         let value = build_dispatch_once_response(2);
 
         assert_eq!(value["dispatched"], serde_json::json!(2));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     在线远端创建如果响应超时后落入 pending outbox，必须复用同一次请求生成的 clientRequestId 作为幂等键。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     从本机 create request 投影远端请求，断言生成了非空 client_request_id，且 clone 后保持同一个 key。
+    #[test]
+    fn remote_create_request_from_local_generates_stable_client_request_id() {
+        let request = CreateOrchestratorTaskRequest {
+            project_id: "shortcut-project-1".to_string(),
+            title: "远端任务".to_string(),
+            goal: "完成目标".to_string(),
+            acceptance_criteria: "验收".to_string(),
+            priority: Some(3),
+        };
+
+        let remote_request = remote_create_request_from_local(&request);
+        let cloned_for_outbox = remote_request.clone();
+
+        assert!(remote_request
+            .client_request_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()));
+        assert_eq!(
+            remote_request.client_request_id,
+            cloned_for_outbox.client_request_id
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端任务返回给本机前端时必须使用 Workbench remote id 通道，否则后续按钮会把裸远端 id 当成本机 id。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造含 worktree/session 的远端任务 DTO，映射后断言 task/project/worktree/session id 均符合本机 remote 规则。
+    #[test]
+    fn remote_task_mapping_wraps_ids_for_local_shortcut() {
+        let shortcut = remote_shortcut_row();
+        let mut task = OrchestratorTaskDto::from(command_task_row(
+            "remote-task-1",
+            OrchestratorTaskStatus::Running,
+        ));
+        task.project_id = "remote-project-1".to_string();
+        task.worktree_id = Some("remote-worktree-1".to_string());
+        task.session_id = Some("remote-session-1".to_string());
+
+        let mapped = map_remote_task_for_shortcut(task, &shortcut);
+
+        assert_eq!(mapped.id, "remote:device-a:remote-task-1");
+        assert_eq!(mapped.project_id, "shortcut-project-1");
+        assert_eq!(
+            mapped.worktree_id.as_deref(),
+            Some("remote:device-a:remote-worktree-1")
+        );
+        assert_eq!(
+            mapped.session_id.as_deref(),
+            Some("remote:device-a:remote-session-1")
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端 queue/retry/abort/evidence 入参可能是本机 UI 的 remote id，发送前必须剥离为 owning device 裸 id。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     分别传入匹配设备 remote id、裸 id 和错误设备 remote id，断言只接受前两类。
+    #[test]
+    fn remote_task_id_helper_strips_matching_remote_id_and_rejects_wrong_device() {
+        let shortcut = remote_shortcut_row();
+
+        let stripped =
+            remote_inner_task_id_for_shortcut(&shortcut, "remote:device-a:task-1").unwrap();
+        let raw = remote_inner_task_id_for_shortcut(&shortcut, "task-2").unwrap();
+        let error = remote_inner_task_id_for_shortcut(&shortcut, "remote:device-b:task-3")
+            .expect_err("wrong device must fail");
+
+        assert_eq!(stripped, "task-1");
+        assert_eq!(raw, "task-2");
+        assert!(error.to_string().contains("远端任务不属于当前设备"));
     }
 
     /// Business Logic（为什么需要这个函数）:
