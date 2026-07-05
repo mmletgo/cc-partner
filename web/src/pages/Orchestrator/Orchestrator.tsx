@@ -2,16 +2,16 @@
  * Orchestrator 页面 - 自动化任务编排入口
  *
  * Business Logic（为什么需要这个页面）:
- *   用户需要在当前 Workbench 项目下管理项目级自动化任务队列，创建任务、查看任务详情，并把 draft 任务手动入队。
+ *   用户需要在当前 Workbench 项目下管理项目级自动化任务队列，包括本机任务、远端任务和离线远端待发送项。
  *   页面同时只读展示当前项目策略，帮助用户确认并发、验证命令以及提交/推送/合并等执行边界。
  *   当前前端只提供任务、验证证据与 blocked 控制入口，并可把任务定位回对应 Workbench 上下文。
  *
  * Code Logic（这个组件做什么）:
- *   - 按 activeProject 拉取 Orchestrator 任务列表并按状态分组展示
+ *   - 按 activeProject 拉取 Orchestrator task view 列表，真实任务按状态分组，pending remote 单独展示
  *   - 按 activeProject 拉取项目策略，并按 selected task 拉取 evidence
  *   - 提供 title/goal/acceptanceCriteria 三个单行输入创建任务
  *   - 允许选中的 draft 任务切换为 queued；action 响应只替换列表，同项目任务切换后不抢回 selection
- *   - 创建成功后把新任务插入列表顶部、选中新任务并清空表单
+ *   - 创建成功后把真实任务插入列表并选中；pending remote 只插入待发送区并清空表单
  *   - Running 任务可触发后端验证与交付，Blocked 任务可打开 Workbench deep link、重试或终止
  *   - full-auto 交付由后端 complete 命令执行，前端只负责触发命令和展示状态/evidence
  *   - hooks 全部位于渲染分支之前，避免 early return 破坏调用顺序
@@ -28,18 +28,27 @@ import {
   canCompleteAgentRunForProject,
   canControlBlockedTaskForProject,
   canQueueOrchestratorTaskForProject,
-  groupOrchestratorTasks,
   ORCHESTRATOR_STATUSES,
   orchestratorCreateResultMatchesProject,
   orchestratorStatusTone,
   resolveOrchestratorActionSelection,
   resolveOrchestratorTaskLoad,
 } from '@/lib/orchestrator';
+import {
+  getOrchestratorTaskViewTaskId,
+  groupOrchestratorRenderableTasks,
+  isLocalOrchestratorTaskView,
+  isOrchestratorTaskViewActionable,
+  splitOrchestratorTaskViews,
+  upsertOrchestratorTaskView,
+} from '@/lib/orchestratorRemote';
 import type {
+  OrchestratorAutomationConfig,
   OrchestratorEvidence,
-  OrchestratorProjectConfig,
+  OrchestratorRemoteOutboxStatus,
   OrchestratorTask,
   OrchestratorTaskStatus,
+  OrchestratorTaskView,
 } from '@/lib/types';
 import styles from './Orchestrator.module.css';
 
@@ -77,6 +86,19 @@ type OrchestratorEvidenceSummaryLabelKey =
 
 /**
  * Business Logic（为什么需要这个类型）:
+ *   远端任务待发送状态来自后端短值，前端必须映射成本地化文案展示。
+ *
+ * Code Logic（这个类型做什么）:
+ *   枚举 pending remote outbox status 对应的完整 i18n key。
+ */
+type OrchestratorRemoteOutboxStatusLabelKey =
+  | 'orchestrator:pending.status.pending'
+  | 'orchestrator:pending.status.sending'
+  | 'orchestrator:pending.status.mirrored'
+  | 'orchestrator:pending.status.failed';
+
+/**
+ * Business Logic（为什么需要这个类型）:
  *   创建任务表单需要同时管理标题、目标和验收标准，集中成对象便于清空和提交校验。
  *
  * Code Logic（这个类型做什么）:
@@ -90,14 +112,14 @@ interface OrchestratorCreateForm {
 
 /**
  * Business Logic（为什么需要这个类型）:
- *   Orchestrator 任务列表必须严格归属于当前 Workbench 项目，项目切换时不能短暂展示旧项目任务。
+ *   Orchestrator task view 列表必须严格归属于当前 Workbench 项目，项目切换时不能短暂展示旧项目任务或 pending outbox。
  *
  * Code Logic（这个类型做什么）:
- *   把一次任务列表请求的 projectId、任务结果和错误一起保存，渲染阶段只使用 projectId 匹配当前项目的结果。
+ *   把一次 task view 请求的 projectId、view 结果和错误一起保存，渲染阶段只使用 projectId 匹配当前项目的结果。
  */
 interface OrchestratorTaskListResult {
   projectId: string;
-  tasks: OrchestratorTask[];
+  views: OrchestratorTaskView[];
   error: string | null;
 }
 
@@ -110,7 +132,7 @@ interface OrchestratorTaskListResult {
  */
 interface OrchestratorProjectConfigResult {
   projectId: string;
-  config: OrchestratorProjectConfig | null;
+  config: OrchestratorAutomationConfig | null;
   error: string | null;
 }
 
@@ -177,6 +199,16 @@ const EVIDENCE_SUMMARY_LABEL_KEYS: Record<string, OrchestratorEvidenceSummaryLab
   skipped: 'orchestrator:evidence.summary.skipped',
 };
 
+const PENDING_REMOTE_STATUS_LABEL_KEYS: Record<
+  OrchestratorRemoteOutboxStatus,
+  OrchestratorRemoteOutboxStatusLabelKey
+> = {
+  pending: 'orchestrator:pending.status.pending',
+  sending: 'orchestrator:pending.status.sending',
+  mirrored: 'orchestrator:pending.status.mirrored',
+  failed: 'orchestrator:pending.status.failed',
+};
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   API 调用失败时页面需要优先显示后端返回的可读错误，并在缺少 message 时回退到本地化通用提示。
@@ -231,6 +263,28 @@ function evidenceSummaryTone(summary: string): 'neutral' | 'success' | 'warn' | 
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   远端待发送任务需要用一致颜色表达待发送、发送中、已镜像和失败状态。
+ *
+ * Code Logic（这个函数做什么）:
+ *   将 outbox status 映射到 Pill 支持的 tone；失败为 danger，发送中为 accent，其余为 neutral/success。
+ */
+function pendingRemoteStatusTone(
+  status: OrchestratorRemoteOutboxStatus,
+): 'neutral' | 'success' | 'accent' | 'danger' {
+  switch (status) {
+    case 'failed':
+      return 'danger';
+    case 'sending':
+      return 'accent';
+    case 'mirrored':
+      return 'success';
+    case 'pending':
+      return 'neutral';
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   Evidence summary 不能直接把后端短值当用户文案展示，需要走 i18n。
  *
  * Code Logic（这个函数做什么）:
@@ -264,7 +318,7 @@ function buildWorkbenchTaskUrl(task: OrchestratorTask | null): string {
  *   Workbench 需要把自动化看板作为终端、文件预览同级的工作区视图，同时保留页面壳复用能力。
  *
  * Code Logic（这个函数做什么）:
- *   维持原有 activeProject、任务列表、项目策略与 evidence stale guard；embedded=true 时省略页面级 header。
+ *   维持 activeProject、task view 列表、项目策略与 evidence stale guard；embedded=true 时省略页面级 header。
  */
 export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const { embedded = false, onOpenWorkbench } = props;
@@ -298,7 +352,10 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     taskLoadDecision.kind === 'load' && taskListResult?.projectId === taskLoadDecision.projectId
       ? taskListResult
       : null;
-  const tasks = useMemo(() => activeTaskListResult?.tasks ?? [], [activeTaskListResult]);
+  const taskViews = useMemo(() => activeTaskListResult?.views ?? [], [activeTaskListResult]);
+  const taskViewSplit = useMemo(() => splitOrchestratorTaskViews(taskViews), [taskViews]);
+  const tasks = taskViewSplit.tasks;
+  const pendingRemoteItems = taskViewSplit.pendingRemoteItems;
   const loading =
     taskLoadDecision.kind === 'waiting' ||
     (taskLoadDecision.kind === 'load' && !activeTaskListResult);
@@ -317,12 +374,16 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     actionError?.projectId === activeProjectId ? actionError.message : null;
   const error = visibleActionError ?? taskLoadError;
 
-  const groups = useMemo(() => groupOrchestratorTasks(tasks), [tasks]);
-  const selectedTask = useMemo(() => {
-    return tasks.find((task) => task.id === selectedTaskId) ?? tasks[0] ?? null;
+  const groups = useMemo(() => groupOrchestratorRenderableTasks(tasks), [tasks]);
+  const selectedRenderableTask = useMemo(() => {
+    return tasks.find((item) => item.task.id === selectedTaskId) ?? tasks[0] ?? null;
   }, [selectedTaskId, tasks]);
+  const selectedTaskView = selectedRenderableTask?.view ?? null;
+  const selectedTask = selectedRenderableTask?.task ?? null;
   const selectedTaskCanQueue = canQueueOrchestratorTaskForProject(selectedTask, activeProjectId);
-  const selectedTaskCanComplete = canCompleteAgentRunForProject(selectedTask, activeProjectId);
+  const selectedTaskCanComplete =
+    isLocalOrchestratorTaskView(selectedTaskView) &&
+    canCompleteAgentRunForProject(selectedTask, activeProjectId);
   const selectedTaskCanControlBlocked = canControlBlockedTaskForProject(
     selectedTask,
     activeProjectId,
@@ -355,20 +416,21 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     let cancelled = false;
     const projectId = taskLoadDecision.projectId;
     void orchestratorApi
-      .listTasks(projectId)
-      .then((nextTasks) => {
+      .listTaskViews(projectId)
+      .then((nextViews) => {
         if (cancelled || activeProjectIdRef.current !== projectId) return;
-        setTaskListResult({ projectId, tasks: nextTasks, error: null });
+        const nextSplit = splitOrchestratorTaskViews(nextViews);
+        setTaskListResult({ projectId, views: nextViews, error: null });
         setSelectedTaskId((current) => {
-          if (current && nextTasks.some((task) => task.id === current)) return current;
-          return nextTasks[0]?.id ?? null;
+          if (current && nextSplit.tasks.some((item) => item.task.id === current)) return current;
+          return nextSplit.tasks[0]?.task.id ?? null;
         });
       })
       .catch((err: unknown) => {
         if (cancelled || activeProjectIdRef.current !== projectId) return;
         setTaskListResult({
           projectId,
-          tasks: [],
+          views: [],
           error: displayOrchestratorErrorMessage(err, t('orchestrator:errors.load')),
         });
         setSelectedTaskId(null);
@@ -410,7 +472,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     const projectId = taskLoadDecision.projectId;
     const taskId = selectedTask.id;
     void orchestratorApi
-      .listEvidence(taskId)
+      .listEvidence(projectId, taskId)
       .then((items) => {
         if (cancelled || activeProjectIdRef.current !== projectId) return;
         setEvidenceResult({ projectId, taskId, items, error: null });
@@ -457,21 +519,20 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
       setCreating(true);
       setActionError(null);
       try {
-        const created = await orchestratorApi.createTask(payload);
+        const created = await orchestratorApi.createTaskView(payload);
         if (!orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
           return;
         }
-        setTaskListResult((current) => ({
-          projectId,
-          tasks: [
-            created,
-            ...(current?.projectId === projectId ? current.tasks : []).filter(
-              (task) => task.id !== created.id,
-            ),
-          ],
-          error: null,
-        }));
-        setSelectedTaskId(created.id);
+        setTaskListResult((current) => {
+          const currentViews = current?.projectId === projectId ? current.views : [];
+          return {
+            projectId,
+            views: upsertOrchestratorTaskView(currentViews, created),
+            error: null,
+          };
+        });
+        const createdTaskId = getOrchestratorTaskViewTaskId(created);
+        if (createdTaskId) setSelectedTaskId(createdTaskId);
         setForm(EMPTY_FORM);
       } catch (err) {
         setActionError({
@@ -485,21 +546,28 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     [activeProject, activeProjectId, form, t],
   );
 
-  const replaceTaskInCurrentProject = useCallback((projectId: string, nextTask: OrchestratorTask) => {
-    setTaskListResult((current) => {
-      if (!current || current.projectId !== projectId) return current;
-      return {
-        ...current,
-        tasks: current.tasks.map((task) => (task.id === nextTask.id ? nextTask : task)),
-        error: null,
-      };
-    });
-    setSelectedTaskId((current) => resolveOrchestratorActionSelection(current, nextTask.id));
-  }, []);
+  const replaceTaskViewInCurrentProject = useCallback(
+    (projectId: string, nextView: OrchestratorTaskView) => {
+      setTaskListResult((current) => {
+        if (!current || current.projectId !== projectId) return current;
+        return {
+          ...current,
+          views: upsertOrchestratorTaskView(current.views, nextView),
+          error: null,
+        };
+      });
+      const nextTaskId = getOrchestratorTaskViewTaskId(nextView);
+      if (nextTaskId) {
+        setSelectedTaskId((current) => resolveOrchestratorActionSelection(current, nextTaskId));
+      }
+    },
+    [],
+  );
 
   const handleQueueSelectedTask = useCallback(async () => {
     if (
       !selectedTask ||
+      !isOrchestratorTaskViewActionable(selectedTaskView) ||
       !canQueueOrchestratorTaskForProject(selectedTask, activeProjectIdRef.current)
     ) {
       return;
@@ -509,14 +577,15 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     setQueueingTaskId(taskId);
     setActionError(null);
     try {
-      const queued = await orchestratorApi.queueTask(taskId);
+      const queued = await orchestratorApi.queueTaskView(projectId, taskId);
+      const queuedProjectId = queued.origin === 'pendingRemote' ? null : queued.task.projectId;
       if (
         !orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId) ||
-        queued.projectId !== projectId
+        queuedProjectId !== projectId
       ) {
         return;
       }
-      replaceTaskInCurrentProject(projectId, queued);
+      replaceTaskViewInCurrentProject(projectId, queued);
     } catch (err) {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
         setActionError({
@@ -527,11 +596,12 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     } finally {
       setQueueingTaskId((current) => (current === taskId ? null : current));
     }
-  }, [replaceTaskInCurrentProject, selectedTask, t]);
+  }, [replaceTaskViewInCurrentProject, selectedTask, selectedTaskView, t]);
 
   const handleCompleteAgentRun = useCallback(async () => {
     if (
       !selectedTask ||
+      !isLocalOrchestratorTaskView(selectedTaskView) ||
       !canCompleteAgentRunForProject(selectedTask, activeProjectIdRef.current) ||
       completingTaskId === selectedTask.id
     ) {
@@ -549,9 +619,9 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
       ) {
         return;
       }
-      replaceTaskInCurrentProject(projectId, updated);
+      replaceTaskViewInCurrentProject(projectId, { origin: 'local', task: updated });
       try {
-        const items = await orchestratorApi.listEvidence(taskId);
+        const items = await orchestratorApi.listEvidence(projectId, taskId);
         if (activeProjectIdRef.current === projectId) {
           setEvidenceResult({ projectId, taskId, items, error: null });
         }
@@ -575,7 +645,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     } finally {
       setCompletingTaskId((current) => (current === taskId ? null : current));
     }
-  }, [completingTaskId, replaceTaskInCurrentProject, selectedTask, t]);
+  }, [completingTaskId, replaceTaskViewInCurrentProject, selectedTask, selectedTaskView, t]);
 
   const handleOpenWorkbench = useCallback(() => {
     const url = buildWorkbenchTaskUrl(selectedTask);
@@ -589,6 +659,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const handleRetryTask = useCallback(async () => {
     if (
       !selectedTask ||
+      !isOrchestratorTaskViewActionable(selectedTaskView) ||
       !canControlBlockedTaskForProject(selectedTask, activeProjectIdRef.current) ||
       retryingTaskId === selectedTask.id
     ) {
@@ -599,14 +670,15 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     setRetryingTaskId(taskId);
     setActionError(null);
     try {
-      const updated = await orchestratorApi.retryTask(taskId);
+      const updated = await orchestratorApi.retryTaskView(projectId, taskId);
+      const updatedProjectId = updated.origin === 'pendingRemote' ? null : updated.task.projectId;
       if (
         !orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId) ||
-        updated.projectId !== projectId
+        updatedProjectId !== projectId
       ) {
         return;
       }
-      replaceTaskInCurrentProject(projectId, updated);
+      replaceTaskViewInCurrentProject(projectId, updated);
     } catch (err) {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
         setActionError({
@@ -617,11 +689,12 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     } finally {
       setRetryingTaskId((current) => (current === taskId ? null : current));
     }
-  }, [replaceTaskInCurrentProject, retryingTaskId, selectedTask, t]);
+  }, [replaceTaskViewInCurrentProject, retryingTaskId, selectedTask, selectedTaskView, t]);
 
   const handleAbortTask = useCallback(async () => {
     if (
       !selectedTask ||
+      !isOrchestratorTaskViewActionable(selectedTaskView) ||
       !canControlBlockedTaskForProject(selectedTask, activeProjectIdRef.current) ||
       abortingTaskId === selectedTask.id
     ) {
@@ -632,14 +705,15 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     setAbortingTaskId(taskId);
     setActionError(null);
     try {
-      const updated = await orchestratorApi.abortTask(taskId);
+      const updated = await orchestratorApi.abortTaskView(projectId, taskId);
+      const updatedProjectId = updated.origin === 'pendingRemote' ? null : updated.task.projectId;
       if (
         !orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId) ||
-        updated.projectId !== projectId
+        updatedProjectId !== projectId
       ) {
         return;
       }
-      replaceTaskInCurrentProject(projectId, updated);
+      replaceTaskViewInCurrentProject(projectId, updated);
     } catch (err) {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
         setActionError({
@@ -650,7 +724,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     } finally {
       setAbortingTaskId((current) => (current === taskId ? null : current));
     }
-  }, [abortingTaskId, replaceTaskInCurrentProject, selectedTask, t]);
+  }, [abortingTaskId, replaceTaskViewInCurrentProject, selectedTask, selectedTaskView, t]);
 
   return (
     <div className={embedded ? styles.embedded : styles.page}>
@@ -682,11 +756,11 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
               <h2 className={styles.sectionTitle}>{t('orchestrator:queue.title')}</h2>
               <p className={styles.sectionLead}>{t('orchestrator:queue.subtitle')}</p>
             </div>
-            <Pill tone="neutral">{tasks.length}</Pill>
+            <Pill tone="neutral">{tasks.length + pendingRemoteItems.length}</Pill>
           </Card.Header>
           <Card.Body className={styles.queueBody}>
             {loading ? <p className={styles.muted}>{t('common:loading')}</p> : null}
-            {!loading && tasks.length === 0 ? (
+            {!loading && tasks.length === 0 && pendingRemoteItems.length === 0 ? (
               <div className={styles.empty}>
                 <h3 className={styles.emptyTitle}>{t('orchestrator:emptyTitle')}</h3>
                 <p className={styles.emptyBody}>{t('orchestrator:emptyBody')}</p>
@@ -700,7 +774,8 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                       <Pill tone={orchestratorStatusTone(status)}>{groups[status].length}</Pill>
                     </div>
                     <div className={styles.taskList}>
-                      {groups[status].map((task) => {
+                      {groups[status].map((item) => {
+                        const { task } = item;
                         const active = selectedTask?.id === task.id;
                         return (
                           <button
@@ -714,6 +789,13 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                             <span className={styles.taskTitle}>{task.title}</span>
                             <span className={styles.taskMeta}>
                               {t('orchestrator:queue.priority', { priority: task.priority })}
+                              {' · '}
+                              {item.origin === 'remote'
+                                ? t('orchestrator:queue.remoteTask', {
+                                    deviceName:
+                                      item.deviceName ?? t('orchestrator:queue.unknownDevice'),
+                                  })
+                                : t('orchestrator:queue.localTask')}
                             </span>
                           </button>
                         );
@@ -722,6 +804,36 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                   </section>
                 ))
               : null}
+            {!loading && pendingRemoteItems.length > 0 ? (
+              <section className={styles.group}>
+                <div className={styles.groupHeader}>
+                  <span>{t('orchestrator:pending.title')}</span>
+                  <Pill tone="warn">{pendingRemoteItems.length}</Pill>
+                </div>
+                <div className={styles.taskList}>
+                  {pendingRemoteItems.map((item) => (
+                    <div className={styles.pendingTask} key={item.id}>
+                      <div className={styles.pendingTaskHeader}>
+                        <span className={styles.taskTitle}>{item.deviceName}</span>
+                        <Pill tone={pendingRemoteStatusTone(item.status)}>
+                          {t(PENDING_REMOTE_STATUS_LABEL_KEYS[item.status])}
+                        </Pill>
+                      </div>
+                      <span className={styles.taskMeta}>
+                        {t('orchestrator:pending.remoteProjectPath', {
+                          path: item.remoteProjectPath,
+                        })}
+                      </span>
+                      {item.lastError ? (
+                        <p className={styles.pendingError}>
+                          {t('orchestrator:pending.lastError', { error: item.lastError })}
+                        </p>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ) : null}
           </Card.Body>
         </Card>
 
@@ -754,6 +866,20 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                   >
                     {t('orchestrator:detail.completeAgentRun')}
                   </Button>
+                ) : null}
+                {selectedRenderableTask ? (
+                  <Pill
+                    tone={selectedRenderableTask.origin === 'remote' ? 'accent' : 'neutral'}
+                    dot
+                  >
+                    {selectedRenderableTask.origin === 'remote'
+                      ? t('orchestrator:detail.remoteTask', {
+                          deviceName:
+                            selectedRenderableTask.deviceName ??
+                            t('orchestrator:queue.unknownDevice'),
+                        })
+                      : t('orchestrator:detail.localTask')}
+                  </Pill>
                 ) : null}
                 {selectedTask ? (
                   <Pill tone={orchestratorStatusTone(selectedTask.status)} dot>

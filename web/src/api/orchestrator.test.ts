@@ -1,9 +1,10 @@
 import {
-  buildCreateOrchestratorTaskInvokeArgs,
-  buildOrchestratorTaskIdInvokeArgs,
-  buildGetOrchestratorProjectConfigInvokeArgs,
-  buildListOrchestratorTasksInvokeArgs,
-  buildQueueOrchestratorTaskInvokeArgs,
+  ORCHESTRATOR_REMOTE_COMMANDS,
+  buildCreateOrchestratorTaskViewInvokeArgs,
+  buildGetOrchestratorConfigForProjectInvokeArgs,
+  buildListOrchestratorTaskViewsInvokeArgs,
+  buildListOrchestratorTaskEvidenceForProjectInvokeArgs,
+  buildOrchestratorTaskViewActionInvokeArgs,
 } from './orchestrator';
 
 /**
@@ -17,14 +18,44 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
-const listArgs = buildListOrchestratorTasksInvokeArgs(' project-1 ');
+assert(
+  ORCHESTRATOR_REMOTE_COMMANDS.listTaskViews === 'list_orchestrator_task_views',
+  'listTaskViews should use the remote-aware backend command',
+);
+assert(
+  ORCHESTRATOR_REMOTE_COMMANDS.createTaskView === 'create_orchestrator_task_view',
+  'createTaskView should use the remote-aware backend command',
+);
+assert(
+  ORCHESTRATOR_REMOTE_COMMANDS.queueTaskView === 'queue_orchestrator_task_view',
+  'queueTaskView should use the remote-aware backend command',
+);
+assert(
+  ORCHESTRATOR_REMOTE_COMMANDS.retryTaskView === 'retry_orchestrator_task_view',
+  'retryTaskView should use the remote-aware backend command',
+);
+assert(
+  ORCHESTRATOR_REMOTE_COMMANDS.abortTaskView === 'abort_orchestrator_task_view',
+  'abortTaskView should use the remote-aware backend command',
+);
+assert(
+  ORCHESTRATOR_REMOTE_COMMANDS.listEvidenceForProject ===
+    'list_orchestrator_task_evidence_for_project',
+  'listEvidence should use the project-scoped evidence backend command',
+);
+assert(
+  ORCHESTRATOR_REMOTE_COMMANDS.getProjectConfig === 'get_orchestrator_config_for_project',
+  'getProjectConfig should use the project-scoped automation config backend command',
+);
+
+const listArgs = buildListOrchestratorTaskViewsInvokeArgs(' project-1 ');
 
 assert(
   JSON.stringify(listArgs) === JSON.stringify({ projectId: 'project-1' }),
   'listTasks should trim projectId before invoking backend',
 );
 
-const listAllArgs = buildListOrchestratorTasksInvokeArgs('   ');
+const listAllArgs = buildListOrchestratorTaskViewsInvokeArgs('   ');
 
 assert(
   JSON.stringify(listAllArgs) === JSON.stringify({ projectId: null }),
@@ -38,32 +69,35 @@ const request = {
   acceptanceCriteria: '测试通过',
   priority: 3,
 };
-const createArgs = buildCreateOrchestratorTaskInvokeArgs(request);
+const createArgs = buildCreateOrchestratorTaskViewInvokeArgs(request);
 
 assert(
   JSON.stringify(createArgs) === JSON.stringify({ request }),
   'createTask should wrap request without renaming fields',
 );
 
-const queueArgs = buildQueueOrchestratorTaskInvokeArgs(' task-1 ');
+const queueArgs = buildOrchestratorTaskViewActionInvokeArgs(' project-1 ', ' task-1 ');
 
 assert(
-  JSON.stringify(queueArgs) === JSON.stringify({ taskId: 'task-1' }),
-  'queueTask should trim taskId before invoking backend',
+  JSON.stringify(queueArgs) === JSON.stringify({ projectId: 'project-1', taskId: 'task-1' }),
+  'task view actions should trim projectId and taskId before invoking backend',
 );
 
-const configArgs = buildGetOrchestratorProjectConfigInvokeArgs(' project-1 ');
+const evidenceArgs = buildListOrchestratorTaskEvidenceForProjectInvokeArgs(
+  ' project-1 ',
+  ' task-1 ',
+);
+
+assert(
+  JSON.stringify(evidenceArgs) === JSON.stringify({ projectId: 'project-1', taskId: 'task-1' }),
+  'listEvidence should include projectId and taskId before invoking backend',
+);
+
+const configArgs = buildGetOrchestratorConfigForProjectInvokeArgs(' project-1 ');
 
 assert(
   JSON.stringify(configArgs) === JSON.stringify({ projectId: 'project-1' }),
   'getProjectConfig should trim projectId before invoking backend',
-);
-
-const taskIdArgs = buildOrchestratorTaskIdInvokeArgs(' task-1 ');
-
-assert(
-  JSON.stringify(taskIdArgs) === JSON.stringify({ taskId: 'task-1' }),
-  'task id commands should trim taskId before invoking backend',
 );
 
 console.log('orchestrator.test.ts passed');

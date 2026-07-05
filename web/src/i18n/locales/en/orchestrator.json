@@ -19,7 +19,21 @@
     "title": "Task Queue",
     "subtitle": "Review current project tasks by lifecycle status.",
     "taskAria": "Select task {{title}}",
-    "priority": "Priority {{priority}}"
+    "priority": "Priority {{priority}}",
+    "localTask": "Local",
+    "remoteTask": "Remote {{deviceName}}",
+    "unknownDevice": "Unknown device"
+  },
+  "pending": {
+    "title": "Pending Remote",
+    "remoteProjectPath": "Remote path {{path}}",
+    "lastError": "Error: {{error}}",
+    "status": {
+      "pending": "Pending",
+      "sending": "Sending",
+      "mirrored": "Mirrored",
+      "failed": "Failed"
+    }
   },
   "detail": {
     "title": "Task Detail",
@@ -37,7 +51,9 @@
     "completeAgentRun": "Claude Code finished, start verification",
     "openWorkbench": "Open Workbench",
     "retry": "Retry",
-    "abort": "Abort"
+    "abort": "Abort",
+    "localTask": "Local task",
+    "remoteTask": "Remote {{deviceName}}"
   },
   "create": {
     "title": "Create Task",

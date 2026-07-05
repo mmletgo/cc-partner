@@ -227,6 +227,38 @@
   color: var(--muted);
 }
 
+.pendingTask {
+  width: 100%;
+  min-height: 64px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-warm);
+  color: var(--fg);
+}
+
+.pendingTaskHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.pendingError {
+  margin: 0;
+  padding: var(--space-2);
+  border: 1px solid color-mix(in oklab, var(--danger) 32%, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  overflow-wrap: anywhere;
+}
+
 .detailTitleRow {
   display: flex;
   align-items: flex-start;

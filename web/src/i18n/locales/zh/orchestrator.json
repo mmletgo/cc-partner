@@ -19,7 +19,21 @@
     "title": "任务队列",
     "subtitle": "按生命周期状态查看当前项目任务。",
     "taskAria": "选择任务 {{title}}",
-    "priority": "优先级 {{priority}}"
+    "priority": "优先级 {{priority}}",
+    "localTask": "本机",
+    "remoteTask": "远端 {{deviceName}}",
+    "unknownDevice": "未知设备"
+  },
+  "pending": {
+    "title": "远端待发送",
+    "remoteProjectPath": "远端路径 {{path}}",
+    "lastError": "失败原因：{{error}}",
+    "status": {
+      "pending": "待发送",
+      "sending": "发送中",
+      "mirrored": "已镜像",
+      "failed": "发送失败"
+    }
   },
   "detail": {
     "title": "任务详情",
@@ -37,7 +51,9 @@
     "completeAgentRun": "Claude Code 已完成，开始验证",
     "openWorkbench": "打开 Workbench",
     "retry": "重试",
-    "abort": "终止"
+    "abort": "终止",
+    "localTask": "本机任务",
+    "remoteTask": "远端 {{deviceName}}"
   },
   "create": {
     "title": "创建任务",

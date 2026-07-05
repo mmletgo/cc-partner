@@ -300,6 +300,60 @@ export interface OrchestratorTask {
 }
 
 /**
+ * Orchestrator 远端 outbox 状态。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   远端设备离线时，用户创建的任务会先进入本机待发送队列，前端需要展示发送状态但不能当作真实任务操作。
+ *
+ * Code Logic（这个类型做什么）:
+ *   以字符串字面量枚举锁定 Rust OrchestratorRemoteOutboxStatus 序列化后的状态值。
+ */
+export type OrchestratorRemoteOutboxStatus = 'pending' | 'sending' | 'mirrored' | 'failed';
+
+/**
+ * Orchestrator 远端 outbox DTO（对齐 Rust OrchestratorRemoteOutboxDto，camelCase）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   远端项目创建任务可能还没有远端 taskId，前端必须展示待发送/失败状态并避免入队、重试、终止或读取证据。
+ *
+ * Code Logic（字段说明）:
+ *   requestJson 保存原始创建请求；remoteTaskId 只有镜像成功后才可能出现；lastError 用于展示发送失败原因。
+ */
+export interface OrchestratorRemoteOutboxItem {
+  id: string;
+  deviceId: string;
+  deviceName: string;
+  remoteProjectPath: string;
+  remoteProjectId: string;
+  requestJson: string;
+  status: OrchestratorRemoteOutboxStatus;
+  remoteTaskId: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  sentAt: string | null;
+}
+
+/**
+ * Orchestrator remote-aware 任务视图 DTO（serde tag = origin）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   Workbench 既要展示本机任务，也要展示已镜像的远端任务和仍在 outbox 中的远端待发送项。
+ *
+ * Code Logic（这个类型做什么）:
+ *   使用 discriminated union 精确区分 local、remote 和 pendingRemote 三类视图。
+ */
+export type OrchestratorTaskView =
+  | { origin: 'local'; task: OrchestratorTask }
+  | {
+      origin: 'remote';
+      task: OrchestratorTask;
+      deviceId: string;
+      deviceName: string;
+    }
+  | { origin: 'pendingRemote'; item: OrchestratorRemoteOutboxItem };
+
+/**
  * Orchestrator 任务证据 DTO（对齐 Rust OrchestratorEvidenceDto，camelCase）。
  *
  * Business Logic（为什么需要这个类型）:
@@ -316,6 +370,29 @@ export interface OrchestratorEvidence {
   summary: string;
   content: string;
   createdAt: string;
+}
+
+/**
+ * Orchestrator 项目自动化配置 DTO（对齐 get_orchestrator_config_for_project 返回值）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   remote-aware 任务看板读取的是当前项目所在设备的自动化策略，返回值不再包含本机 projectId 和审计时间。
+ *
+ * Code Logic（字段说明）:
+ *   字段直接用于策略卡展示；verificationCommands 为后端解析后的命令数组。
+ */
+export interface OrchestratorAutomationConfig {
+  enabled: boolean;
+  maxConcurrentTasks: number;
+  branchPrefix: string;
+  verificationCommands: string[];
+  autoCommit: boolean;
+  autoPushTaskBranch: boolean;
+  autoMergeToMain: boolean;
+  autoPushMain: boolean;
+  retryLimit: number;
+  retainWorktreeOnDone: boolean;
+  retainWorktreeOnBlocked: boolean;
 }
 
 /**
