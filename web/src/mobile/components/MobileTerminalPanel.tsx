@@ -9,7 +9,7 @@ import {
   useWorkbenchTerminalBuffer,
   useWorkbenchTerminalBuffers,
 } from '@/hooks/workbenchTerminalBuffersContext';
-import { ArrowRightIcon, PlusIcon, XIcon } from '@/lib/icons';
+import { ArrowRightIcon, MaximizeIcon, MinimizeIcon, PlusIcon, XIcon } from '@/lib/icons';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import {
   planTerminalBufferWrite,
@@ -25,6 +25,7 @@ import {
   canRunMobilePaneMutation,
   canSwitchMobilePane,
   getMobileCreatePaneDirection,
+  getMobileTerminalChromeVisibility,
   selectPreferredMobileSession,
 } from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
@@ -138,6 +139,7 @@ export function MobileTerminalPanel({
   const { resetBuffer, removeBuffer } = useWorkbenchTerminalBuffers();
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
+  const [terminalFullscreen, setTerminalFullscreen] = useState<boolean>(false);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -174,6 +176,12 @@ export function MobileTerminalPanel({
   const isActionDisabled = busy || actionBusy !== null;
   const canUsePaneActions = canRunMobilePaneMutation(visibleSession, isActionDisabled);
   const canSwitchPane = canSwitchMobilePane(visibleSession, isActionDisabled);
+  const isTerminalFullscreen = terminalFullscreen && visibleSession !== null;
+  const terminalChrome = getMobileTerminalChromeVisibility(isTerminalFullscreen);
+  const TerminalFullscreenIcon = terminalChrome.exitFullscreen ? MinimizeIcon : MaximizeIcon;
+  const terminalFullscreenLabel = terminalChrome.exitFullscreen
+    ? t('workbench:mobile.terminalPanel.exitFullscreen')
+    : t('workbench:mobile.terminalPanel.enterFullscreen');
 
   useEffect(() => {
     bufferRef.current = buffer;
@@ -272,11 +280,17 @@ export function MobileTerminalPanel({
       return;
     }
     if (lastFocusedSessionIdRef.current === sessionId) {
-      if (visibleSession) void ensurePaneZoomedById(visibleSession);
+      if (visibleSession) {
+        queueMicrotask(() => {
+          void ensurePaneZoomedById(visibleSession);
+        });
+      }
       return;
     }
     if (!visibleSession) return;
-    void focusSessionAndZoomById(visibleSession);
+    queueMicrotask(() => {
+      void focusSessionAndZoomById(visibleSession);
+    });
   }, [ensurePaneZoomedById, focusSessionAndZoomById, sessionId, visibleSession]);
 
   useEffect(() => {
@@ -656,6 +670,29 @@ export function MobileTerminalPanel({
     ],
   );
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机屏幕空间有限，用户需要把当前终端临时铺满屏幕，并隐藏移动端 shell 与 window tabs。
+   *
+   * Code Logic（这个函数做什么）:
+   *   有可见 session 时打开全屏状态；没有终端 window 时忽略，避免空态占满屏幕。
+   */
+  const handleEnterTerminalFullscreen = useCallback((): void => {
+    if (!visibleSession) return;
+    setTerminalFullscreen(true);
+  }, [visibleSession]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   进入全屏后必须保留明确退出入口，让用户回到完整移动端 Workbench shell。
+   *
+   * Code Logic（这个函数做什么）:
+   *   关闭本地全屏状态，触发 CSS 从 fixed overlay 回到普通面板布局。
+   */
+  const handleExitTerminalFullscreen = useCallback((): void => {
+    setTerminalFullscreen(false);
+  }, []);
+
   const terminalBody = !project ? (
     <div className={styles.mobileTerminalEmpty}>
       {t('workbench:mobile.terminalPanel.noProject')}
@@ -678,130 +715,159 @@ export function MobileTerminalPanel({
   return (
     <section
       className={`${styles.panel} ${styles.mobileTerminalPanel}`}
+      data-fullscreen={isTerminalFullscreen || undefined}
       aria-labelledby="mobile-terminal-panel-title"
     >
-      <div className={styles.panelHeader}>
-        <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
-        <h1 id="mobile-terminal-panel-title">{t('workbench:mobile.terminalPanel.title')}</h1>
+      {terminalChrome.panelHeader ? (
+        <div className={styles.panelHeader}>
+          <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
+          <h1 id="mobile-terminal-panel-title">{t('workbench:mobile.terminalPanel.title')}</h1>
+        </div>
+      ) : null}
+
+      <div
+        className={styles.mobileTerminalToolbar}
+        data-fullscreen={isTerminalFullscreen || undefined}
+      >
+        {terminalChrome.windowTabs ? (
+          <div
+            className={styles.mobileTerminalTabs}
+            role="tablist"
+            aria-label={t('workbench:mobile.terminalPanel.tabsAriaLabel')}
+          >
+            {scopedSessions.map((session) => {
+              const isActive = session.id === visibleSession?.id;
+              return (
+                <div
+                  key={session.id}
+                  className={styles.mobileSessionTab}
+                  data-active={isActive || undefined}
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    className={styles.mobileSessionSelectButton}
+                    onClick={() => handleSelectSession(session)}
+                  >
+                    <span className={styles.mobileSessionDot} data-status={session.status} />
+                    <span className={styles.mobileSessionName}>{session.name}</span>
+                    <span className={styles.mobileSessionPaneCount}>
+                      {t('workbench:mobile.terminalPanel.paneCount', {
+                        count: session.paneCount,
+                      })}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.mobileTerminalTabClose}
+                    aria-label={t('workbench:mobile.terminalPanel.closeWindow')}
+                    disabled={isActionDisabled}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void handleCloseSession(session);
+                    }}
+                  >
+                    <XIcon size={14} aria-hidden="true" />
+                  </button>
+                </div>
+              );
+            })}
+            <button
+              type="button"
+              className={styles.mobileTerminalPrimaryButton}
+              disabled={!project || isActionDisabled}
+              onClick={() => void handleCreateSession()}
+            >
+              <PlusIcon size={16} aria-hidden="true" />
+              <span>{t('workbench:mobile.terminalPanel.newWindow')}</span>
+            </button>
+          </div>
+        ) : null}
+
+        {terminalChrome.paneActions ? (
+          <div
+            className={styles.mobileTerminalActions}
+            aria-label={t('workbench:mobile.terminalPanel.actionsAriaLabel')}
+          >
+            <button
+              type="button"
+              className={styles.mobileTerminalActionButton}
+              disabled={!canUsePaneActions}
+              aria-label={t('workbench:mobile.terminalPanel.addPane')}
+              title={t('workbench:mobile.terminalPanel.addPane')}
+              onClick={() => void handleCreatePane()}
+            >
+              <PlusIcon size={16} aria-hidden="true" />
+              <span>{t('workbench:mobile.terminalPanel.addPane')}</span>
+            </button>
+            <button
+              type="button"
+              className={styles.mobileTerminalActionButton}
+              disabled={!canSwitchPane}
+              aria-label={t('workbench:mobile.terminalPanel.switchPane')}
+              title={t('workbench:mobile.terminalPanel.switchPane')}
+              onClick={() => void handleSwitchPane()}
+            >
+              <ArrowRightIcon size={16} aria-hidden="true" />
+              <span>{t('workbench:mobile.terminalPanel.switchPane')}</span>
+            </button>
+            <button
+              type="button"
+              className={styles.mobileTerminalActionButton}
+              disabled={!canUsePaneActions}
+              aria-label={t('workbench:mobile.terminalPanel.closePane')}
+              title={t('workbench:mobile.terminalPanel.closePane')}
+              onClick={() => void handleClosePane()}
+            >
+              <XIcon size={16} aria-hidden="true" />
+              <span>{t('workbench:mobile.terminalPanel.closePane')}</span>
+            </button>
+            <button
+              type="button"
+              className={styles.mobileTerminalActionButton}
+              disabled={!terminalChrome.exitFullscreen && !visibleSession}
+              aria-label={terminalFullscreenLabel}
+              title={terminalFullscreenLabel}
+              onClick={
+                terminalChrome.exitFullscreen
+                  ? handleExitTerminalFullscreen
+                  : handleEnterTerminalFullscreen
+              }
+            >
+              <TerminalFullscreenIcon size={16} aria-hidden="true" />
+              <span>{terminalFullscreenLabel}</span>
+            </button>
+          </div>
+        ) : null}
       </div>
 
-      <div className={styles.mobileTerminalToolbar}>
-        <div
-          className={styles.mobileTerminalTabs}
-          role="tablist"
-          aria-label={t('workbench:mobile.terminalPanel.tabsAriaLabel')}
-        >
-          {scopedSessions.map((session) => {
-            const isActive = session.id === visibleSession?.id;
-            return (
-              <div
-                key={session.id}
-                className={styles.mobileSessionTab}
-                data-active={isActive || undefined}
-              >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={isActive}
-                  className={styles.mobileSessionSelectButton}
-                  onClick={() => handleSelectSession(session)}
-                >
-                  <span className={styles.mobileSessionDot} data-status={session.status} />
-                  <span className={styles.mobileSessionName}>{session.name}</span>
-                  <span className={styles.mobileSessionPaneCount}>
-                    {t('workbench:mobile.terminalPanel.paneCount', {
-                      count: session.paneCount,
-                    })}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className={styles.mobileTerminalTabClose}
-                  aria-label={t('workbench:mobile.terminalPanel.closeWindow')}
-                  disabled={isActionDisabled}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void handleCloseSession(session);
-                  }}
-                >
-                  <XIcon size={14} aria-hidden="true" />
-                </button>
-              </div>
-            );
-          })}
-          <button
-            type="button"
-            className={styles.mobileTerminalPrimaryButton}
-            disabled={!project || isActionDisabled}
-            onClick={() => void handleCreateSession()}
-          >
-            <PlusIcon size={16} aria-hidden="true" />
-            <span>{t('workbench:mobile.terminalPanel.newWindow')}</span>
-          </button>
-        </div>
-
-        <div
-          className={styles.mobileTerminalActions}
-          aria-label={t('workbench:mobile.terminalPanel.actionsAriaLabel')}
-        >
-          <button
-            type="button"
-            className={styles.mobileTerminalActionButton}
-            disabled={!canUsePaneActions}
-            aria-label={t('workbench:mobile.terminalPanel.addPane')}
-            title={t('workbench:mobile.terminalPanel.addPane')}
-            onClick={() => void handleCreatePane()}
-          >
-            <PlusIcon size={16} aria-hidden="true" />
-            <span>{t('workbench:mobile.terminalPanel.addPane')}</span>
-          </button>
-          <button
-            type="button"
-            className={styles.mobileTerminalActionButton}
-            disabled={!canSwitchPane}
-            aria-label={t('workbench:mobile.terminalPanel.switchPane')}
-            title={t('workbench:mobile.terminalPanel.switchPane')}
-            onClick={() => void handleSwitchPane()}
-          >
-            <ArrowRightIcon size={16} aria-hidden="true" />
-            <span>{t('workbench:mobile.terminalPanel.switchPane')}</span>
-          </button>
-          <button
-            type="button"
-            className={styles.mobileTerminalActionButton}
-            disabled={!canUsePaneActions}
-            aria-label={t('workbench:mobile.terminalPanel.closePane')}
-            title={t('workbench:mobile.terminalPanel.closePane')}
-            onClick={() => void handleClosePane()}
-          >
-            <XIcon size={16} aria-hidden="true" />
-            <span>{t('workbench:mobile.terminalPanel.closePane')}</span>
-          </button>
-        </div>
-      </div>
-
-      {busy ? <p className={styles.panelState}>{t('workbench:loading')}</p> : null}
-      {panelError ? (
+      {!isTerminalFullscreen && busy ? (
+        <p className={styles.panelState}>{t('workbench:loading')}</p>
+      ) : null}
+      {!isTerminalFullscreen && panelError ? (
         <p className={styles.panelError}>
           <span>{t('workbench:mobile.projectPanel.error')}</span>
           <span>{panelError}</span>
         </p>
       ) : null}
 
-      <div
-        className={styles.mobileTerminalSurface}
-        ref={surfaceRef}
-        aria-label={t('workbench:mobile.terminalPanel.terminalAriaLabel')}
-      >
-        {terminalBody}
+      {terminalChrome.terminalSurface ? (
         <div
-          className={styles.mobileTerminalHost}
-          data-hidden={!visibleSession || undefined}
-          aria-hidden={!visibleSession}
+          className={styles.mobileTerminalSurface}
+          ref={surfaceRef}
+          aria-label={t('workbench:mobile.terminalPanel.terminalAriaLabel')}
         >
-          <div className={styles.mobileTerminalViewport} ref={viewportRef} />
+          {terminalBody}
+          <div
+            className={styles.mobileTerminalHost}
+            data-hidden={!visibleSession || undefined}
+            aria-hidden={!visibleSession}
+          >
+            <div className={styles.mobileTerminalViewport} ref={viewportRef} />
+          </div>
         </div>
-      </div>
+      ) : null}
     </section>
   );
 }

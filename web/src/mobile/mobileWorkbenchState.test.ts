@@ -5,6 +5,7 @@ import {
   canRunMobileWorktreeDestructiveAction,
   canSwitchMobilePane,
   closeMobileNav,
+  getMobileTerminalChromeVisibility,
   getMobileCreatePaneDirection,
   getInitialMobileNavOpen,
   getMobileWorktreeStatusKind,
@@ -432,6 +433,30 @@ function testMobilePaneSwitchRequiresMultiplePanes(): void {
   assertEqual(canSwitchMobilePane(multiPane, true), false);
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端终端全屏后应隐藏项目标题、window tabs 等外围内容，只保留 pane 功能行、终端输出和退出全屏入口。
+ *
+ * Code Logic（这个函数做什么）:
+ *   分别断言普通模式与全屏模式的 chrome 可见性，确保组件渲染不会误保留无关区域。
+ */
+function testMobileTerminalFullscreenChromeOnlyKeepsPaneActionsAndExit(): void {
+  const normalChrome = getMobileTerminalChromeVisibility(false);
+  const fullscreenChrome = getMobileTerminalChromeVisibility(true);
+
+  assertEqual(normalChrome.panelHeader, true);
+  assertEqual(normalChrome.windowTabs, true);
+  assertEqual(normalChrome.paneActions, true);
+  assertEqual(normalChrome.terminalSurface, true);
+  assertEqual(normalChrome.exitFullscreen, false);
+
+  assertEqual(fullscreenChrome.panelHeader, false);
+  assertEqual(fullscreenChrome.windowTabs, false);
+  assertEqual(fullscreenChrome.paneActions, true);
+  assertEqual(fullscreenChrome.terminalSurface, true);
+  assertEqual(fullscreenChrome.exitFullscreen, true);
+}
+
 testSelectMobilePanelReturnsNextPanel();
 testOpenMobileNavReturnsTrue();
 testInitialMobileNavOpenDefaultsToTrue();
@@ -449,3 +474,4 @@ testPreferredSessionFallsBackToRunningFirstOrNull();
 testMobileCreatePaneDirectionUsesDown();
 testMobilePaneMutationRequiresSupportedIdleSession();
 testMobilePaneSwitchRequiresMultiplePanes();
+testMobileTerminalFullscreenChromeOnlyKeepsPaneActionsAndExit();

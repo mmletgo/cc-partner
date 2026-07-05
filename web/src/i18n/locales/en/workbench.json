@@ -114,6 +114,8 @@
       "splitDown": "Split down",
       "closePane": "Close pane",
       "closeWindow": "Close window",
+      "enterFullscreen": "Fullscreen",
+      "exitFullscreen": "Exit fullscreen",
       "paneCount": "{{count}} pane",
       "paneCount_other": "{{count}} panes",
       "errors": {
@@ -346,6 +348,8 @@
   "splitPaneRight": "Split right",
   "splitPaneDown": "Split down",
   "closePane": "Close current pane",
+  "terminalEnterFullscreen": "Fullscreen",
+  "terminalExitFullscreen": "Exit fullscreen",
   "terminalTabs": "Terminal sessions",
   "terminalPlaceholder": "Create or select a terminal",
   "terminalNoProject": "Select a project folder first",

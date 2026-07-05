@@ -47,6 +47,8 @@ import {
   EditIcon,
   FileIcon,
   FolderIcon,
+  MaximizeIcon,
+  MinimizeIcon,
   PlusIcon,
   SplitDownIcon,
   SplitRightIcon,
@@ -781,6 +783,7 @@ export function Workbench() {
   const [sessionNameDraft, setSessionNameDraft] = useState<string>('');
   const [sessionBusy, setSessionBusy] = useState<boolean>(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
+  const [terminalFullscreen, setTerminalFullscreen] = useState<boolean>(false);
   const [remoteOfflineProjectId, setRemoteOfflineProjectId] = useState<string | null>(null);
   const [worktrees, setWorktrees] = useState<WorkbenchWorktree[]>([]);
   const [activeWorktreeId, setActiveWorktreeId] = useState<string | null>(null);
@@ -900,6 +903,10 @@ export function Workbench() {
   const canUsePanes = Boolean(
     activeSession?.supportsPanes && activeSession.status === 'running',
   );
+  const TerminalFullscreenIcon = terminalFullscreen ? MinimizeIcon : MaximizeIcon;
+  const terminalFullscreenLabel = terminalFullscreen
+    ? t('workbench:terminalExitFullscreen')
+    : t('workbench:terminalEnterFullscreen');
   const remoteProjectOffline = isRemoteWorkbenchProjectOffline(
     activeProject,
     remoteOfflineProjectId,
@@ -1286,7 +1293,9 @@ export function Workbench() {
   }, [activeProjectId]);
 
   useEffect(() => {
-    setRemoteOfflineProjectId(null);
+    queueMicrotask(() => {
+      setRemoteOfflineProjectId(null);
+    });
   }, [activeProjectId]);
 
   useEffect(() => {
@@ -1323,9 +1332,11 @@ export function Workbench() {
     if (applied.search !== locationSearch || applied.worktreeId === deepLinkWorktreeId) return;
     if (!worktrees.some((worktree) => worktree.id === deepLinkWorktreeId)) return;
     applied.worktreeId = deepLinkWorktreeId;
-    setActiveWorktreeId((current) =>
-      current === deepLinkWorktreeId ? current : deepLinkWorktreeId,
-    );
+    queueMicrotask(() => {
+      setActiveWorktreeId((current) =>
+        current === deepLinkWorktreeId ? current : deepLinkWorktreeId,
+      );
+    });
   }, [
     activeProjectId,
     deepLinkProjectId,
@@ -1342,7 +1353,11 @@ export function Workbench() {
     if (applied.search !== locationSearch || applied.sessionId === deepLinkSessionId) return;
     if (!scopedSessions.some((session) => session.id === deepLinkSessionId)) return;
     applied.sessionId = deepLinkSessionId;
-    if (activeSessionId !== deepLinkSessionId) focusSession(deepLinkSessionId);
+    if (activeSessionId !== deepLinkSessionId) {
+      queueMicrotask(() => {
+        focusSession(deepLinkSessionId);
+      });
+    }
   }, [
     activeProjectId,
     activeSessionId,
@@ -1714,6 +1729,30 @@ export function Workbench() {
     updateActiveSession,
   ]);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   桌面端用户需要把当前终端临时铺满屏幕，隐藏项目标题、worktree 管理层、文件层和右侧检查器以专注操作。
+   *
+   * Code Logic（这个函数做什么）:
+   *   关闭可能遮挡终端的 Prompt 优化浮层，切回 terminal 工作区，并打开 terminalLayer 的 fixed overlay 状态。
+   */
+  const handleEnterTerminalFullscreen = useCallback((): void => {
+    setPromptPanelOpen(false);
+    setWorkspaceView('terminal');
+    setTerminalFullscreen(true);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   进入终端全屏后必须有明确出口，恢复完整 Workbench 布局和其他面板内容。
+   *
+   * Code Logic（这个函数做什么）:
+   *   关闭 terminalLayer 的 fixed overlay 状态；不改变当前 session/worktree 或文件 tab 状态。
+   */
+  const handleExitTerminalFullscreen = useCallback((): void => {
+    setTerminalFullscreen(false);
+  }, []);
+
   const handleInput = useCallback(async (sessionId: string, data: string) => {
     if (remoteWriteDisabled) return;
     try {
@@ -1759,7 +1798,7 @@ export function Workbench() {
       }
       if (remoteWriteDisabled) {
         setSessionError(t('workbench:remoteOfflineNotice', {
-          device: activeProject?.deviceName ?? emptyValue,
+          device: activeProject?.deviceName ?? t('workbench:emptyValue'),
         }));
         return;
       }
@@ -1790,7 +1829,6 @@ export function Workbench() {
       activeSession,
       activeProject?.deviceName,
       desktopUnavailableMessage,
-      emptyValue,
       markRemoteOfflineFromError,
       promptInput,
       promptOptimizing,
@@ -3133,7 +3171,8 @@ export function Workbench() {
         <div className={styles.mainWorkspace}>
           <div
             className={styles.terminalLayer}
-            data-hidden={workspaceView === 'files' || undefined}
+            data-hidden={!terminalFullscreen && workspaceView === 'files' || undefined}
+            data-fullscreen={terminalFullscreen || undefined}
           >
             <WorkbenchWorkspaceNav
               ariaLabel={t('workbench:terminalTabs')}
@@ -3177,25 +3216,27 @@ export function Workbench() {
               }
               actions={
                 <>
-                  <Button
-                    className={styles.terminalActionButton}
-                    variant="secondary"
-                    size="sm"
-                    icon={<EditIcon />}
-                    title={t('workbench:promptOptimizer.open')}
-                    aria-label={t('workbench:promptOptimizer.open')}
-                    data-active={promptPanelOpen || undefined}
-                    disabled={!activeSession || (remoteWriteDisabled && !promptPanelOpen)}
-                    onClick={() => {
-                      if (promptPanelOpen) {
-                        setPromptPanelOpen(false);
-                      } else {
-                        openPromptOptimizerPanel();
-                      }
-                    }}
-                  >
-                    {t('workbench:promptOptimizer.open')}
-                  </Button>
+                  {!terminalFullscreen ? (
+                    <Button
+                      className={styles.terminalActionButton}
+                      variant="secondary"
+                      size="sm"
+                      icon={<EditIcon />}
+                      title={t('workbench:promptOptimizer.open')}
+                      aria-label={t('workbench:promptOptimizer.open')}
+                      data-active={promptPanelOpen || undefined}
+                      disabled={!activeSession || (remoteWriteDisabled && !promptPanelOpen)}
+                      onClick={() => {
+                        if (promptPanelOpen) {
+                          setPromptPanelOpen(false);
+                        } else {
+                          openPromptOptimizerPanel();
+                        }
+                      }}
+                    >
+                      {t('workbench:promptOptimizer.open')}
+                    </Button>
+                  ) : null}
                   <Button
                     className={styles.terminalActionButton}
                     variant="secondary"
@@ -3236,20 +3277,38 @@ export function Workbench() {
                     className={styles.terminalActionButton}
                     variant="secondary"
                     size="sm"
-                    icon={<FileIcon />}
-                    title={t('workbench:fileWorkspace.openFiles')}
-                    aria-label={t('workbench:fileWorkspace.openFiles')}
-                    disabled={fileTabs.length === 0}
-                    onClick={handleReturnToFiles}
+                    icon={<TerminalFullscreenIcon />}
+                    title={terminalFullscreenLabel}
+                    aria-label={terminalFullscreenLabel}
+                    disabled={!terminalFullscreen && !activeSession}
+                    onClick={
+                      terminalFullscreen
+                        ? handleExitTerminalFullscreen
+                        : handleEnterTerminalFullscreen
+                    }
                   >
-                    {t('workbench:fileWorkspace.openFiles')}
+                    {terminalFullscreenLabel}
                   </Button>
+                  {!terminalFullscreen ? (
+                    <Button
+                      className={styles.terminalActionButton}
+                      variant="secondary"
+                      size="sm"
+                      icon={<FileIcon />}
+                      title={t('workbench:fileWorkspace.openFiles')}
+                      aria-label={t('workbench:fileWorkspace.openFiles')}
+                      disabled={fileTabs.length === 0}
+                      onClick={handleReturnToFiles}
+                    >
+                      {t('workbench:fileWorkspace.openFiles')}
+                    </Button>
+                  ) : null}
                 </>
               }
             />
 
             <div className={styles.terminalArea} ref={terminalAreaRef}>
-              {promptPanelOpen ? (
+              {promptPanelOpen && !terminalFullscreen ? (
                 <aside
                   className={styles.promptOptimizerPanel}
                   style={promptPanelStyle}

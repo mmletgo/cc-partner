@@ -651,10 +651,30 @@
   min-height: calc(100dvh - var(--space-24) - var(--space-12));
 }
 
+.mobileTerminalPanel[data-fullscreen='true'] {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  min-width: 0;
+  min-height: 100dvh;
+  height: 100dvh;
+  padding: calc(env(safe-area-inset-top) + var(--space-2)) var(--space-2)
+    calc(env(safe-area-inset-bottom) + var(--space-2));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: stretch;
+  gap: var(--space-2);
+  background: var(--bg);
+}
+
 .mobileTerminalToolbar {
   min-width: 0;
   display: grid;
   gap: var(--space-2);
+}
+
+.mobileTerminalToolbar[data-fullscreen='true'] {
+  gap: 0;
 }
 
 .mobileTerminalTabs,
@@ -665,6 +685,10 @@
   gap: var(--space-2);
   overflow-x: auto;
   padding-bottom: var(--space-1);
+}
+
+.mobileTerminalToolbar[data-fullscreen='true'] .mobileTerminalActions {
+  padding-bottom: 0;
 }
 
 .mobileSessionTab {
@@ -803,6 +827,11 @@
   border: 1px solid var(--terminal-border);
   border-radius: var(--radius-md);
   overflow: hidden;
+}
+
+.mobileTerminalPanel[data-fullscreen='true'] .mobileTerminalSurface {
+  min-height: 0;
+  height: 100%;
 }
 
 .mobileTerminalHost {

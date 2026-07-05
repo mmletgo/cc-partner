@@ -248,7 +248,7 @@ export function useWorkbenchHttpEvents({
             consumeWorkbenchHttpEvent(store, event);
           });
         }
-      } catch (error) {
+      } catch {
         if (abortController.signal.aborted) return;
       } finally {
         scheduleReconnect();

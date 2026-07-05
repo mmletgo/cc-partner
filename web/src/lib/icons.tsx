@@ -244,6 +244,34 @@ export const SplitDownIcon = ({ size, ...rest }: IconProps) => (
   </svg>
 );
 
+/**
+ * Business Logic（为什么需要）:
+ *   移动端终端需要进入全屏的工具栏图标，帮助用户快速识别扩大终端视图的操作。
+ *
+ * Code Logic（做什么）:
+ *   渲染四角外扩的 16x16 stroke SVG，并复用 baseProps 保持尺寸、描边和 viewBox 一致。
+ */
+export const MaximizeIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="M6 3H3v3M10 3h3v3M6 13H3v-3M10 13h3v-3" />
+    <path d="M3 3l3 3M13 3l-3 3M3 13l3-3M13 13l-3-3" />
+  </svg>
+);
+
+/**
+ * Business Logic（为什么需要）:
+ *   移动端终端全屏后需要明确的退出全屏图标，避免用户被固定覆盖层困住。
+ *
+ * Code Logic（做什么）:
+ *   渲染四角内收的 16x16 stroke SVG，并复用 baseProps 保持尺寸、描边和 viewBox 一致。
+ */
+export const MinimizeIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="M6 3v3H3M10 3v3h3M6 13v-3H3M10 13v-3h3" />
+    <path d="M6 6 3 3M10 6l3-3M6 10l-3 3M10 10l3 3" />
+  </svg>
+);
+
 export const ScratchpadIcon = ({ size, ...rest }: IconProps) => (
   <svg {...baseProps(size)} {...rest}>
     <path d="M4.5 1.5h6l3 3v9a1.5 1.5 0 0 1-1.5 1.5h-7.5A1.5 1.5 0 0 1 3.5 14V3a1.5 1.5 0 0 1 1-1.5Z" />

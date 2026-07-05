@@ -12,6 +12,14 @@ export type MobileWorkbenchPanel =
 
 export type MobileWorktreeStatusKind = 'clean' | 'dirty' | 'conflict';
 
+export interface MobileTerminalChromeVisibility {
+  panelHeader: boolean;
+  windowTabs: boolean;
+  paneActions: boolean;
+  terminalSurface: boolean;
+  exitFullscreen: boolean;
+}
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   移动端 Workbench shell 的导航点击需要以纯函数方式选择下一个面板，便于组件和测试共享契约。
@@ -47,6 +55,25 @@ export function openMobileNav(): boolean {
  */
 export function closeMobileNav(): boolean {
   return false;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   手机端终端全屏时，用户希望隐藏项目标题、window tabs 和导航等外围内容，专注当前 pane 操作与终端输出。
+ *
+ * Code Logic（这个函数做什么）:
+ *   根据 fullscreen 状态返回终端面板各 chrome 区域的可见性，组件据此决定渲染 header、window tabs、pane 功能行和退出入口。
+ */
+export function getMobileTerminalChromeVisibility(
+  fullscreen: boolean,
+): MobileTerminalChromeVisibility {
+  return {
+    panelHeader: !fullscreen,
+    windowTabs: !fullscreen,
+    paneActions: true,
+    terminalSurface: true,
+    exitFullscreen: fullscreen,
+  };
 }
 
 /**

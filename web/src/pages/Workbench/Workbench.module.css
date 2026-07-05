@@ -411,6 +411,16 @@
   z-index: var(--z-base);
 }
 
+.terminalLayer[data-fullscreen='true'] {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  min-width: 0;
+  min-height: 100dvh;
+  height: 100dvh;
+  background: var(--bg);
+}
+
 .terminalLayer[data-hidden='true'],
 .fileLayer[data-hidden='true'] {
   opacity: 0;
@@ -479,6 +489,10 @@
   display: grid;
 }
 
+.terminalLayer[data-fullscreen='true'] .terminalArea {
+  min-height: 0;
+}
+
 .promptOptimizerPanel {
   position: absolute;
   z-index: var(--z-overlay);
@@ -531,6 +545,14 @@
   border-radius: var(--radius-md);
   background: var(--terminal-bg);
   overflow: hidden;
+}
+
+.terminalLayer[data-fullscreen='true'] .terminalPanel {
+  margin: 0;
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-radius: 0;
 }
 
 .terminalPanel[data-layout='single'] {

@@ -103,6 +103,22 @@ async function main(): Promise<void> {
     "title={t('workbench:fileWorkspace.openFiles')}",
     'file preview action stays at the far right of terminal actions',
   );
+  assertContains(
+    workbenchSource,
+    "title={terminalFullscreenLabel}",
+    'terminal fullscreen action renders in pane navigation actions',
+  );
+  assertNotContains(
+    workbenchSource,
+    'terminalFullscreen ? null :',
+    'terminal fullscreen must keep terminal window tabs available for switching',
+  );
+  assertSubstringOrder(
+    workbenchSource,
+    "title={terminalFullscreenLabel}",
+    "title={t('workbench:fileWorkspace.openFiles')}",
+    'terminal fullscreen action stays in pane action group before file preview',
+  );
   assertContains(workbenchSource, "actionsAriaLabel={t('workbench:paneActions')}", 'terminal action group keeps aria label');
   assertOccurrenceCount(workbenchSource, '<WorkbenchWorkspaceNav', 1, 'terminal workspace uses shared nav once');
   assertOccurrenceCount(fileWorkspaceSource, '<WorkbenchWorkspaceNav', 1, 'file workspace uses shared nav once');
