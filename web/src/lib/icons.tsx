@@ -137,6 +137,20 @@ export const DevicesIcon = ({ size, ...rest }: IconProps) => (
   </svg>
 );
 
+/**
+ * Business Logic（为什么需要）:
+ *   AppShell 侧栏 footer 需要一个单独的手机入口图标，用来打开移动端 Workbench 访问弹层。
+ *
+ * Code Logic（做什么）:
+ *   渲染手机外框、听筒和底部指示点的 16x16 stroke SVG，并复用 baseProps 保持尺寸、描边和 viewBox 一致。
+ */
+export const SmartphoneIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <rect x="4.5" y="1.8" width="7" height="12.4" rx="1.4" />
+    <path d="M6.7 4h2.6M8 11.8h.01" />
+  </svg>
+);
+
 export const SettingsIcon = ({ size, ...rest }: IconProps) => (
   <svg {...baseProps(size)} {...rest}>
     <circle cx="8" cy="8" r="2" />

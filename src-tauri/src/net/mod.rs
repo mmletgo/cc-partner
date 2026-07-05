@@ -2,7 +2,7 @@
 //!
 //! Business Logic: 实现 P2P 局域网协作的三块能力，对照 Python `network/` 包：
 //!     1) `discovery`：mdns-sd 注册/发现（`_cc-partner._tcp.local.`）；
-//!     2) `http_server`：axum HTTP server（port=0 动态），供对端 reqwest 调用 `/api/health` 等；
+//!     2) `http_server`：axum HTTP server（固定首选端口，冲突时递增），供对端 reqwest 调用 `/api/health` 等；
 //!     3) `peer_client`：reqwest 客户端，调对端 API（health 实测，sync/transfer 留 M4/M5）。
 //!
 //! Code Logic: 三个子模块各自独立，通过 AppState 共享 devices 表与端口。

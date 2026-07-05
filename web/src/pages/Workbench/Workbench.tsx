@@ -24,7 +24,6 @@ import { configApi } from '@/api/config';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
 import { workbenchApi } from '@/api/workbench';
 import {
-  MobileAccessCard,
   WorkbenchDependencyCard,
   WorkbenchFileWorkspace,
 } from '@/components/domain';
@@ -3551,8 +3550,6 @@ export function Workbench() {
             </div>
           </div>
         </Card>
-
-        <MobileAccessCard compact />
 
         <div className={styles.inspectorTabs} role="tablist" aria-label={t('workbench:inspectorTabs')}>
           <button

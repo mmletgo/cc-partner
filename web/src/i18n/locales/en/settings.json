@@ -95,6 +95,10 @@
   },
   "mobileAccess": {
     "title": "Mobile Workbench",
+    "buttonLabel": "Open Mobile Workbench access",
+    "buttonTitle": "Mobile Workbench",
+    "dialogLabel": "Mobile Workbench access",
+    "close": "Close Mobile Workbench access",
     "description": "Open this Workbench from a phone browser on the same local network.",
     "warning": "Use only on a trusted personal LAN. Mobile can operate terminal input, file edits, and Git.",
     "loading": "Getting local network access URLs…",

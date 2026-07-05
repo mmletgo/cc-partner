@@ -23,7 +23,7 @@
 - **前端**: React 19 · TypeScript · Vite · React Router v6 · CSS Modules
 - **打包/更新**: Tauri CLI · tauri-plugin-updater · tauri-plugin-global-shortcut · tauri-plugin-process · tauri-plugin-dialog
 
-桌面端架构：Tauri 2 主进程用 Rust 实现全部后端能力，前端复用 `web/` 的 React。本地前端通过 `@tauri-apps/api` 的 `invoke()` 调用 Rust `#[tauri::command]`（无本地端口暴露）；跨设备 P2P 走 axum HTTP server（动态端口）+ reqwest 客户端 + mdns-sd 发现。两条通道共享同一份 `AppState`。
+桌面端架构：Tauri 2 主进程用 Rust 实现全部后端能力，前端复用 `web/` 的 React。本地前端通过 `@tauri-apps/api` 的 `invoke()` 调用 Rust `#[tauri::command]`（无本地端口暴露）；跨设备 P2P 走 axum HTTP server（固定首选端口，端口被占则自动 +1）+ reqwest 客户端 + mdns-sd 发现。两条通道共享同一份 `AppState`。
 
 ## 2. 目录结构
 
@@ -415,7 +415,7 @@ node scripts/bump-version.mjs <新版本号>
 ### 8.1 通信通道
 
 - **本地前端 ↔ Rust**：Tauri `invoke('<command>')` IPC（`#[tauri::command]`）。前端 `web/src/api/` 底层走 `@tauri-apps/api/core` 的 `invoke`，组件层无感知。
-- **跨设备 P2P**：axum HTTP server（动态端口），供对端 reqwest 调用。仅用于设备间通信，前端不直接访问。
+- **跨设备 P2P**：axum HTTP server（固定首选端口，端口被占则自动 +1），供对端 reqwest 调用。仅用于设备间通信，前端不直接访问。
 
 ### 8.2 前端 invoke 命令（由 `src-tauri/src/commands/` 注册）
 

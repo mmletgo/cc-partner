@@ -349,7 +349,7 @@ pub struct AppConfig {
     pub device_id: String,
     /// 设备显示名（默认为主机名）
     pub device_name: String,
-    /// HTTP 服务端口，0 表示系统自动分配
+    /// HTTP 服务首选端口；0 表示使用后端固定默认端口，端口被占时由 HTTP server 自动递增
     pub http_port: i64,
     /// 文件接收保存目录
     pub receive_dir: String,

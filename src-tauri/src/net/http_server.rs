@@ -7,7 +7,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `start_http_server`：构造 axum Router（with_state(AppState)，挂载全部 /api 路由），
-//!       TcpListener::bind(("0.0.0.0", 0)) 绑定动态端口，取 local_addr 实际端口回填
+//!       优先绑定固定 HTTP 端口，冲突时向上递增，取 local_addr 实际端口回填
 //!       AppState.actual_http_port（AtomicU16），tokio::spawn(axum::serve)。
 //!     - `/mobile` fallback：通过 Tauri asset resolver 读取 frontendDist 嵌入资源，并精确服务 `/assets/*` 构建资源。
 //!     - body limit 覆盖文件传输 chunk 和 Workbench 远端文本保存。
@@ -23,6 +23,7 @@ use axum::http::{header, HeaderValue, Request, Response, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
 use std::convert::Infallible;
+use std::io::{Error as IoError, ErrorKind};
 use std::net::SocketAddr;
 use std::path::{Component, Path};
 use std::sync::atomic::Ordering;
@@ -30,6 +31,8 @@ use tower::service_fn;
 
 /// axum body 大小上限（字节）。32MB，容纳 M5 chunk（960KB）+ Workbench 远端文本保存（5MB 高转义 JSON）+ 开销。
 const BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+/// HTTP server 默认首选端口。配置端口为 0 或非法值时使用该端口，冲突则自动向上递增。
+const DEFAULT_HTTP_PORT: u16 = 62116;
 
 /// 判断请求路径是否属于移动端静态入口命名空间。
 ///
@@ -293,13 +296,13 @@ fn mobile_content_type(path: &str) -> &'static str {
 
 /// 启动 axum HTTP server，返回实际监听端口。
 ///
-/// Business Logic: 应用启动时调用，绑定动态端口避免冲突；返回端口供 mDNS 注册使用
-///     （mDNS 宣告的端口必须是 axum 实际监听端口，对端才能连）。
+/// Business Logic: 应用启动时调用，尽量绑定稳定端口，便于移动端 Workbench 链接可收藏和复用；
+///     若端口已被占用则自动向上递增，返回端口供 mDNS 注册使用（mDNS 宣告的端口必须是 axum 实际监听端口）。
 ///
 /// Code Logic:
 ///     1. 构造 Router：全部 /api 路由 → 对应 handler，最后挂 `/mobile` SPA fallback，
 ///        with_state(AppState)，套 DefaultBodyLimit 限制请求体大小。
-///     2. TcpListener::bind(("0.0.0.0", 0)) 绑定动态端口。
+///     2. 从配置读取首选端口；配置为 0/非法值时用 DEFAULT_HTTP_PORT；端口占用时递增重试。
 ///     3. local_addr().port() 取实际端口，回填 AppState.actual_http_port。
 ///     4. tokio::spawn(axum::serve(listener, app)) 在后台运行（不阻塞 setup）。
 pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
@@ -503,8 +506,11 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
         .with_state(state.clone());
 
-    // 绑定动态端口（0 = 系统分配）
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 0))).await?;
+    let preferred_port = {
+        let config = state.config.read().expect("config 读锁中毒");
+        preferred_http_port_from_config(config.http_port)
+    };
+    let listener = bind_preferred_http_listener(preferred_port).await?;
 
     // 取实际监听端口并回填 AppState（供 mDNS 注册 + health handler 返回）
     let actual_port = listener.local_addr()?.port();
@@ -520,6 +526,60 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
 
     tracing::info!("axum HTTP server 已启动，监听端口: {actual_port}");
     Ok(actual_port)
+}
+
+/// 解析配置中的 HTTP 首选端口。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧配置里 http_port 可能是 0，表示历史动态端口；现在移动端链接要求尽量稳定，因此 0/非法值需要
+///     统一回落到固定默认端口。
+///
+/// Code Logic（这个函数做什么）:
+///     接收配置中的 i64 端口值；合法的 1..=65535 直接转 u16，否则返回 DEFAULT_HTTP_PORT。
+fn preferred_http_port_from_config(config_port: i64) -> u16 {
+    if (1..=u16::MAX as i64).contains(&config_port) {
+        config_port as u16
+    } else {
+        DEFAULT_HTTP_PORT
+    }
+}
+
+/// 绑定首选 HTTP 端口，冲突时自动向上递增。
+///
+/// Business Logic（为什么需要这个函数）:
+///     移动端 Workbench URL 需要尽量固定；当同机已有进程占用首选端口时，用户仍应能启动应用并获得相邻端口。
+///
+/// Code Logic（这个函数做什么）:
+///     从 preferred_port 开始依次尝试绑定 0.0.0.0:<port>；AddrInUse 时继续下一个端口，
+///     其它 IO 错误直接返回；全部端口耗尽时返回最后一次 AddrInUse 错误。
+async fn bind_preferred_http_listener(
+    preferred_port: u16,
+) -> Result<tokio::net::TcpListener, std::io::Error> {
+    let start_port = if preferred_port == 0 {
+        DEFAULT_HTTP_PORT
+    } else {
+        preferred_port
+    };
+    let mut last_addr_in_use: Option<IoError> = None;
+
+    for port in start_port..=u16::MAX {
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                if port != start_port {
+                    tracing::warn!("HTTP 首选端口 {start_port} 被占用，改用 {port}");
+                }
+                return Ok(listener);
+            }
+            Err(error) if error.kind() == ErrorKind::AddrInUse => {
+                last_addr_in_use = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_addr_in_use
+        .unwrap_or_else(|| IoError::new(ErrorKind::AddrInUse, "没有可用的 HTTP 监听端口")))
 }
 
 #[cfg(test)]
@@ -572,6 +632,33 @@ mod tests {
             mobile_content_type("assets/file.unknown"),
             "application/octet-stream"
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     移动端 Workbench 访问链接应尽量稳定，用户收藏或记忆固定端口后不应每次启动随机变化；
+    ///     若首选端口被占用，应用应自动尝试下一个端口而不是启动失败或退回随机端口。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先用标准库 listener 占用一个本机端口，再调用 HTTP listener 绑定 helper，断言最终端口不是
+    ///     被占端口，且按递增策略落在更高端口上。
+    #[tokio::test]
+    async fn preferred_http_listener_increments_when_port_is_busy() {
+        let occupied = std::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 0)))
+            .expect("测试应能占用一个临时端口");
+        let occupied_port = occupied
+            .local_addr()
+            .expect("测试 listener 应能读取端口")
+            .port();
+        if occupied_port == u16::MAX {
+            drop(occupied);
+            return;
+        }
+
+        let listener = bind_preferred_http_listener(occupied_port).await.unwrap();
+        let actual_port = listener.local_addr().unwrap().port();
+
+        assert_ne!(actual_port, occupied_port);
+        assert!(actual_port > occupied_port);
     }
 
     /// Business Logic（为什么需要这个测试）:

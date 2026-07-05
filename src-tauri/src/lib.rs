@@ -420,7 +420,7 @@ pub fn run() {
                     orchestrator_cancel: Arc::new(Mutex::new(None)),
                 };
 
-                // 4) 启动 axum HTTP server（绑定动态端口，回填 actual_http_port）
+                // 4) 启动 axum HTTP server（优先固定端口，冲突时递增，回填 actual_http_port）
                 //    失败不阻断应用启动（P2P 不可用但本地功能仍可用），仅记录日志。
                 match http_server::start_http_server(state.clone()).await {
                     Ok(port) => {

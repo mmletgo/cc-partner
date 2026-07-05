@@ -50,6 +50,7 @@
 }
 
 .footer {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -63,4 +64,96 @@
 
 .footerToggle {
   margin-top: var(--space-2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.footerIconGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.mobileAccessButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+  padding: 0;
+  -webkit-app-region: no-drag;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.mobileAccessButton:hover,
+.mobileAccessButton[aria-expanded='true'] {
+  background: var(--surface-warm);
+  color: var(--fg);
+}
+
+.mobileAccessButton:focus-visible,
+.mobileAccessClose:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mobileAccessPopover {
+  position: fixed;
+  left: calc(var(--sidebar-width) + var(--space-3));
+  bottom: var(--space-5);
+  z-index: var(--z-modal);
+  width: min(360px, calc(100vw - var(--sidebar-width) - var(--space-8)));
+  max-height: calc(100vh - var(--space-10));
+  overflow: auto;
+  box-sizing: border-box;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.mobileAccessClose {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  z-index: var(--z-base);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg-2);
+  cursor: pointer;
+  padding: 0;
+  -webkit-app-region: no-drag;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.mobileAccessClose:hover {
+  background: var(--surface-warm);
+  color: var(--fg);
+}
+
+.mobileAccessCard {
+  padding-top: var(--space-3);
+}
+
+@media (max-width: 760px) {
+  .mobileAccessPopover {
+    left: var(--space-3);
+    right: var(--space-3);
+    bottom: var(--space-3);
+    width: auto;
+  }
 }

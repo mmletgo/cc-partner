@@ -7,7 +7,7 @@ cc-partner 的桌面宿主与全部后端逻辑，从 PyQt6 + Python 迁移而�
 ## 通信架构（核心，务必遵守）
 
 - **本地前端 ↔ Rust**：Tauri `invoke()` IPC（`#[tauri::command]`）。无本地端口暴露、无 CORS、无启动端口竞态。前端 `web/src/api/` 底层走 `@tauri-apps/api/core` 的 `invoke`，组件层无感知。
-- **跨设备 P2P**：axum HTTP server（`port=0` 动态分配），供对端 `reqwest` 调用 `/api/health`、`/api/sync/{pull,push}`、`/api/scratchpad/sync/{pull,push}`、`/api/transfer/{init,chunk,status}`。
+- **跨设备 P2P**：axum HTTP server（固定首选端口，端口被占则自动 +1），供对端 `reqwest` 调用 `/api/health`、`/api/sync/{pull,push}`、`/api/scratchpad/sync/{pull,push}`、`/api/transfer/{init,chunk,status}`。
 - 两条通道共享同一份 `AppState`（`Arc<RwLock<...>>`），由 `app.manage()` 注入命令层、`with_state()` 注入 axum。
 
 ## 目录结构（随 M1–M9 里程碑逐步落地）
@@ -96,9 +96,9 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 - **本机过滤**：`ServiceResolved` 时比对 TXT `device_id` 与本机 device_id，一致则忽略（与 Python `_on_service_state_change` 过滤逻辑一致）。本机设备不入 devices 表。
 - **本机 IP 探测**：`local_lan_ip` 用 UDP socket "连接" 8.8.8.8 探测出站接口 IP（对照 Python `_get_local_ip` 回退方案）；探测失败回退 `enable_addr_auto` 让 mdns-sd 自动更新接口地址。
 - **事件循环**：用 mdns-sd re-export 的 `Receiver<ServiceEvent>`，`recv()` 阻塞等待（daemon shutdown 后 channel 断开自然退出）；Resolved → 写 devices 表，Removed(`fullname` 去 type 后缀得 device_id) → 剔除。
-- **动态端口**：axum `TcpListener::bind(("0.0.0.0", 0))`，`local_addr().port()` 取实际端口回填 `AppState.actual_http_port: AtomicU16`；mDNS 注册用该端口（启动顺序：先 axum 拿端口 → 再 mDNS 注册）。
+- **HTTP 端口策略**：axum 优先绑定固定默认端口 `62116`；若配置中的 `http_port` 是合法非 0 值则作为首选端口；首选端口被占用时自动向上递增尝试，`local_addr().port()` 取实际端口回填 `AppState.actual_http_port: AtomicU16`；mDNS 注册用该实际端口（启动顺序：先 axum 拿端口 → 再 mDNS 注册）。验证命令：`cargo test preferred_http_listener_increments_when_port_is_busy --lib`。
 - **/api/health**：`GET` 返回 `{ok, device_id, device_name, http_port, ts}`（字段名 snake_case，对照 Python `handle_health`，供对端 peer_client 解析；对端仅判 status==200）。
-- **移动端访问信息**：`get_mobile_access_info` invoke 与 `GET /api/mobile/access-info` 返回同一份 camelCase `{deviceName, port, urls}`，供桌面端生成手机访问 `/mobile` 的链接/二维码；Tauri 桌面页走 invoke，普通手机浏览器走 HTTP。移动端 Workbench 面向个人可信局域网，不加 auth token 或 permission gate；URL 使用 `actual_http_port` 与 `local_lan_ip()` 候选地址生成，必须过滤空值、`localhost`、`127.0.0.1`、`::1` 与其它 loopback 地址；验证命令：`cargo test mobile::tests::access_info_filters_loopback_urls --lib`。
+- **移动端访问信息**：`get_mobile_access_info` invoke 与 `GET /api/mobile/access-info` 返回同一份 camelCase `{deviceName, port, urls}`，供桌面端 AppShell 左下角手机按钮弹层生成手机访问 `/mobile` 的链接/二维码；Tauri 桌面页走 invoke，普通手机浏览器走 HTTP。移动端 Workbench 面向个人可信局域网，不加 auth token 或 permission gate；URL 使用 `actual_http_port` 与 `local_lan_ip()` 候选地址生成，必须过滤空值、`localhost`、`127.0.0.1`、`::1` 与其它 loopback 地址；验证命令：`cargo test mobile::tests::access_info_filters_loopback_urls --lib`。
 - **/mobile 静态 SPA**：`http_server.rs` 在所有 `/api/*` 路由之后、body limit layer 之前挂 axum fallback service，只接管 `/mobile` shell、`/mobile/...` 子路由和 Vite 多入口产物引用的 `/assets/*` 构建资源；fallback service 捕获 `AppState`，把 `/mobile`/`/mobile/` 规范化为 asset key `mobile.html`，把 `/assets/<file>` 精确规范化为 frontendDist 相对 key `assets/<file>`，把 `/mobile/<asset>` 兼容规范化为不含 `/mobile` 前缀的 key。优先用 `state.app_handle.asset_resolver()` 读取 Tauri 嵌入资源，生产打包后不依赖源码 `../web/dist`；生产态有嵌入资源时必须先检查 exact asset key，避免 Tauri resolver 缺省回退到桌面 `index.html`。`/assets/*` 只服务 exact asset，资源不存在直接 404，不 fallback 到 `mobile.html`；`/mobile` shell 缺失则 404。filesystem 读取 `../web/dist/<key>` 仅作为 dev/test 兜底，不能作为唯一生产路径。静态资源路径必须用 `Component` 校验拒绝空路径、绝对路径、`..` 和其它非 normal component；响应优先使用 Tauri asset MIME，缺失时用本地 `mobile_content_type` 映射。未知非 `/mobile`、非 `/assets` 路径保持 404，不能捕获 `/api/workbench/events` 或 `/api/mobile/access-info`。验证命令：`cargo test net::http_server::tests --lib`。
 - **body limit**：axum `DefaultBodyLimit::max(32MB)`，同时覆盖 M5 chunk（960KB）和 Workbench 远端文本保存（5MB 高转义 JSON + 开销）；不要降回 2MB/8MB，否则 2MB~5MB 的远端可编辑文本会打开成功但保存失败。
 - **AppState 共享**：axum `with_state(state.clone())` 与 invoke `State<'_, AppState>` 共享同一份 `Arc`；devices = `Arc<RwLock<HashMap<String, Device>>>`，actual_http_port = `Arc<AtomicU16>`，discovery = `Arc<Mutex<Option<ServiceDaemon>>>`。
