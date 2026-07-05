@@ -172,16 +172,16 @@ export function getMobileWorktreeMergeAppliedState(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   merge 成功会删除源 worktree 并可能切到 fallback worktree，Git 面板仍必须清空已删除源的提交列表。
+ *   merge 请求返回时用户可能已切到同项目其它 worktree，旧响应不能清空当前 worktree 的提交列表。
  *
  * Code Logic（这个函数做什么）:
- *   比较 merge 请求发起项目和当前项目；同项目即允许应用清空提交，不再要求 worktree id 仍一致。
+ *   比较 merge 请求发起 context 与当前 context 的稳定 key；只有仍停留在请求源 worktree 时才允许回写。
  */
 export function isMobileGitMergeResponseCurrent(
   requestContext: MobileGitActionContext,
   currentContext: MobileGitActionContext | null,
 ): boolean {
-  return Boolean(currentContext && requestContext.projectId === currentContext.projectId);
+  return getMobileFileContextKey(requestContext) === getMobileFileContextKey(currentContext);
 }
 
 /**

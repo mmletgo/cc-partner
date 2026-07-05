@@ -179,7 +179,7 @@ function testCanSelectMobileProjectOnlyAllowsLocalProjects(): void {
  *   移动端 worktree 列表和 Git 面板需要一致区分 clean、dirty、conflict，且冲突必须盖过普通 dirty 状态。
  *
  * Code Logic（这个函数做什么）:
- *   构造 clean/dirty/conflict 样本，断言真实 DTO 的 conflicts 计数大于 0 时优先进入 conflict。
+ *   构造 clean/dirty/conflict 样本，断言真实 DTO 的 conflicts 计数大于 0 时优先进入 conflict，clean=false 即使 changed=0 也算 dirty。
  */
 function testMobileWorktreeStatusKindPrioritizesConflictThenDirty(): void {
   const clean = createWorktree({ id: 'clean', name: 'main', isMain: true });
@@ -222,10 +222,24 @@ function testMobileWorktreeStatusKindPrioritizesConflictThenDirty(): void {
       canPush: false,
     },
   });
+  const dirtyWithoutChangedCount = createWorktree({
+    id: 'dirty-without-changed-count',
+    name: 'feature/dirty-without-changed-count',
+    status: {
+      branch: 'feature/dirty-without-changed-count',
+      changed: 0,
+      ahead: 0,
+      behind: 0,
+      conflicts: 0,
+      clean: false,
+      canPush: false,
+    },
+  });
 
   assertEqual(getMobileWorktreeStatusKind(conflict), 'conflict');
   assertEqual(getMobileWorktreeStatusKind(conflictClean), 'conflict');
   assertEqual(getMobileWorktreeStatusKind(dirty), 'dirty');
+  assertEqual(getMobileWorktreeStatusKind(dirtyWithoutChangedCount), 'dirty');
   assertEqual(getMobileWorktreeStatusKind(clean), 'clean');
 }
 

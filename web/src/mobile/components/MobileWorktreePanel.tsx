@@ -30,6 +30,8 @@ export interface MobileWorktreePanelProps {
     expectedProjectId?: string;
   }) => Promise<void> | void;
   onMergeWorktree?: (worktree: WorkbenchWorktree) => Promise<boolean> | boolean;
+  onBeginWorktreeOperation?: () => () => void;
+  onIsWorktreeActive?: (worktree: WorkbenchWorktree) => boolean;
 }
 
 /**
@@ -64,6 +66,8 @@ export function MobileWorktreePanel({
   onActiveWorktreeChange,
   onRefreshWorktrees,
   onMergeWorktree,
+  onBeginWorktreeOperation,
+  onIsWorktreeActive,
 }: MobileWorktreePanelProps): ReactElement {
   const { t } = useTranslation(['workbench']);
   const [branchPrefix, setBranchPrefix] = useState<WorktreeBranchPrefix>(
@@ -106,6 +110,7 @@ export function MobileWorktreePanel({
     if (!project || !composedBranchName) return;
     setActionBusy('create');
     setError(null);
+    const endWorktreeOperation = onBeginWorktreeOperation?.();
     try {
       const created = await httpWorkbenchTransport.worktrees.create(
         project.id,
@@ -113,6 +118,7 @@ export function MobileWorktreePanel({
         null,
       );
       const nextWorktrees = [...worktrees.filter((item) => item.id !== created.id), created];
+      endWorktreeOperation?.();
       const didApplyActive = applyWorktrees(nextWorktrees, created);
       setBranchSuffix('');
       if (didApplyActive) {
@@ -121,9 +127,18 @@ export function MobileWorktreePanel({
     } catch (reason) {
       setError(`${t('workbench:errors.createWorktree')}: ${getErrorMessage(reason)}`);
     } finally {
+      endWorktreeOperation?.();
       setActionBusy(null);
     }
-  }, [applyWorktrees, composedBranchName, onRefreshWorktrees, project, t, worktrees]);
+  }, [
+    applyWorktrees,
+    composedBranchName,
+    onBeginWorktreeOperation,
+    onRefreshWorktrees,
+    project,
+    t,
+    worktrees,
+  ]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -173,11 +188,18 @@ export function MobileWorktreePanel({
           confirmActiveWorktreeChange: (nextActive) =>
             onConfirmActiveWorktreeChange?.(nextActive) ?? true,
           removeWorktree: async () => {
-            await httpWorkbenchTransport.worktrees.remove(worktree.id, false);
+            const endWorktreeOperation = onBeginWorktreeOperation?.();
+            try {
+              await httpWorkbenchTransport.worktrees.remove(worktree.id, false);
+            } finally {
+              endWorktreeOperation?.();
+            }
           },
           applyRemoval: (plan) => {
+            const sourceBecameActive =
+              onIsWorktreeActive?.(worktree) ?? activeWorktreeId === worktree.id;
             onWorktreesChange?.(plan.nextWorktrees);
-            if (plan.requiresActivePreflight) {
+            if (plan.requiresActivePreflight || sourceBecameActive) {
               onActiveWorktreeChange?.(plan.nextActive);
             }
           },
@@ -197,8 +219,10 @@ export function MobileWorktreePanel({
     [
       activeWorktreeId,
       onActiveWorktreeChange,
+      onBeginWorktreeOperation,
       onConfirmActiveWorktreeChange,
       onRefreshWorktrees,
+      onIsWorktreeActive,
       onWorktreesChange,
       t,
       worktrees,

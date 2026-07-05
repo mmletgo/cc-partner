@@ -586,19 +586,24 @@ function testGitActionResponseRequiresSameContext(): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   active worktree merge 成功后会切到 fallback worktree，但 Git 面板仍需要清空已删除 source 的提交列表。
+ *   active worktree merge 成功返回时，如果用户已经切到其它 worktree，旧响应不能清空当前 worktree 的提交列表。
  *
  * Code Logic（这个函数做什么）:
- *   构造 merge 请求上下文与当前上下文，断言同项目不同 worktree 仍视为当前，不同项目或空当前上下文视为 stale。
+ *   构造 merge 请求上下文与当前上下文，断言必须保持同项目同 worktree 才视为当前。
  */
-function testGitMergeResponseAllowsSameProjectFallbackWorktree(): void {
+function testGitMergeResponseRequiresSourceWorktreeContext(): void {
   const sourceContext = createContext('project-1', 'feature');
   const fallbackContext = createContext('project-1', 'main');
 
   assertEqual(
-    isMobileGitMergeResponseCurrent(sourceContext, fallbackContext),
+    isMobileGitMergeResponseCurrent(sourceContext, sourceContext),
     true,
-    'merge response should remain current after same-project fallback worktree switch',
+    'merge response should be current for same project/worktree',
+  );
+  assertEqual(
+    isMobileGitMergeResponseCurrent(sourceContext, fallbackContext),
+    false,
+    'merge response should be stale after same-project different worktree switch',
   );
   assertEqual(
     isMobileGitMergeResponseCurrent(sourceContext, createContext('project-2', 'main')),
@@ -679,7 +684,7 @@ async function runTests(): Promise<void> {
   await testInactiveMergeSkipsDirtyGuardAndKeepsActive();
   testMergeSuccessAppliedStateUsesRemovalPlan();
   testGitActionResponseRequiresSameContext();
-  testGitMergeResponseAllowsSameProjectFallbackWorktree();
+  testGitMergeResponseRequiresSourceWorktreeContext();
   testRefreshWorktreesCancelDoesNotApplyListOrActive();
   testContextKeyIsStable();
 
