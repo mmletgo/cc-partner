@@ -139,6 +139,18 @@ interface OrchestratorActionError {
   message: string;
 }
 
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   自动化看板既要保留独立页面壳，也要嵌入 Workbench 中作为项目 workspace view 使用。
+ *
+ * Code Logic（这个类型做什么）:
+ *   embedded 控制是否隐藏页面级标题栏；onOpenWorkbench 允许嵌入方接管 blocked 任务的现场跳转。
+ */
+interface OrchestratorPanelProps {
+  embedded?: boolean;
+  onOpenWorkbench?: (url: string) => void;
+}
+
 const EMPTY_FORM: OrchestratorCreateForm = {
   title: '',
   goal: '',
@@ -243,11 +255,16 @@ function buildWorkbenchTaskUrl(task: OrchestratorTask | null): string {
 }
 
 /**
- * Orchestrator 页面组件
+ * Orchestrator 可嵌入面板组件
  *
- * @returns Orchestrator 路由的自动化任务 shell
+ * Business Logic（为什么需要这个函数）:
+ *   Workbench 需要把自动化看板作为终端、文件预览同级的工作区视图，同时保留页面壳复用能力。
+ *
+ * Code Logic（这个函数做什么）:
+ *   维持原有 activeProject、任务列表、项目策略与 evidence stale guard；embedded=true 时省略页面级 header。
  */
-export function Orchestrator(): JSX.Element {
+export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
+  const { embedded = false, onOpenWorkbench } = props;
   const { t } = useTranslation(['orchestrator', 'nav', 'common']);
   const navigate = useNavigate();
   const { activeProject, projectsLoading } = useWorkbenchProjects();
@@ -558,8 +575,13 @@ export function Orchestrator(): JSX.Element {
   }, [completingTaskId, replaceTaskInCurrentProject, selectedTask, t]);
 
   const handleOpenWorkbench = useCallback(() => {
-    navigate(buildWorkbenchTaskUrl(selectedTask));
-  }, [navigate, selectedTask]);
+    const url = buildWorkbenchTaskUrl(selectedTask);
+    if (onOpenWorkbench) {
+      onOpenWorkbench(url);
+      return;
+    }
+    navigate(url);
+  }, [navigate, onOpenWorkbench, selectedTask]);
 
   const handleRetryTask = useCallback(async () => {
     if (
@@ -628,19 +650,21 @@ export function Orchestrator(): JSX.Element {
   }, [abortingTaskId, replaceTaskInCurrentProject, selectedTask, t]);
 
   return (
-    <div className={styles.page}>
-      <header className={styles.header}>
-        <div className={styles.headerText}>
-          <span className={styles.eyebrow}>{t('nav:orchestrator')}</span>
-          <h1 className={styles.title}>{t('orchestrator:title')}</h1>
-          <p className={styles.subtitle}>{t('orchestrator:subtitle')}</p>
-        </div>
-        <div className={styles.projectStatus}>
-          <Pill tone={activeProject ? 'success' : 'warn'} dot>
-            {activeProject ? activeProject.name : t('orchestrator:noProject')}
-          </Pill>
-        </div>
-      </header>
+    <div className={embedded ? styles.embedded : styles.page}>
+      {!embedded ? (
+        <header className={styles.header}>
+          <div className={styles.headerText}>
+            <span className={styles.eyebrow}>{t('nav:orchestrator')}</span>
+            <h1 className={styles.title}>{t('orchestrator:title')}</h1>
+            <p className={styles.subtitle}>{t('orchestrator:subtitle')}</p>
+          </div>
+          <div className={styles.projectStatus}>
+            <Pill tone={activeProject ? 'success' : 'warn'} dot>
+              {activeProject ? activeProject.name : t('orchestrator:noProject')}
+            </Pill>
+          </div>
+        </header>
+      ) : null}
 
       {error ? (
         <div className={styles.error} role="alert">
@@ -1040,4 +1064,17 @@ export function Orchestrator(): JSX.Element {
       </div>
     </div>
   );
+}
+
+/**
+ * Orchestrator 页面组件
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   旧页面入口仍可作为独立渲染边界保留，便于内部复用和未来路由调整。
+ *
+ * Code Logic（这个函数做什么）:
+ *   渲染非嵌入模式 OrchestratorPanel，保留完整页面级 header shell。
+ */
+export function Orchestrator(): JSX.Element {
+  return <OrchestratorPanel />;
 }

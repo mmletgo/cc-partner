@@ -28,7 +28,7 @@ function assertNotContains(source: string, unexpected: string, message: string):
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   终端和文件预览导航栏必须复用同一个布局组件，测试需要明确锁住复用次数，避免后续又分叉成两套 UI。
+ *   终端、自动化和文件预览导航栏必须复用同一个布局组件，测试需要明确锁住复用次数，避免后续又分叉成多套 UI。
  *
  * Code Logic（这个函数做什么）:
  *   统计源码里指定片段出现次数；次数不符合预期时抛出带上下文的错误。
@@ -60,8 +60,8 @@ function assertSubstringOrder(source: string, before: string, after: string, mes
 /**
  * Business Logic（为什么需要这个函数）:
  *   终端工具栏的文件预览按钮需要锁住可回归检查的最小契约：有打开文件才可点、点击切到文件层、
- *   且中英文 tooltip 与文件预览返回终端入口对称；终端和文件预览导航栏需要复用同一个布局组件，
- *   文件预览入口固定在终端 action 组最右侧。
+ *   且中英文 tooltip 与文件预览返回终端入口对称；终端、自动化和文件预览导航栏需要复用同一个布局组件，
+ *   文件预览入口固定在终端 action 组最右侧，自动化入口位于同一工具栏中。
  *
  * Code Logic（这个函数做什么）:
  *   静态读取 Workbench 页面、文件工作区、共享导航组件和 workbench i18n 资源，检查切换回调、按钮绑定、
@@ -120,7 +120,12 @@ async function main(): Promise<void> {
     'terminal fullscreen action stays in pane action group before file preview',
   );
   assertContains(workbenchSource, "actionsAriaLabel={t('workbench:paneActions')}", 'terminal action group keeps aria label');
-  assertOccurrenceCount(workbenchSource, '<WorkbenchWorkspaceNav', 1, 'terminal workspace uses shared nav once');
+  assertOccurrenceCount(workbenchSource, '<WorkbenchWorkspaceNav', 2, 'Workbench terminal and automation workspaces use shared nav');
+  assertContains(
+    workbenchSource,
+    "t('workbench:automationWorkspace.open')",
+    'terminal toolbar includes localized automation workspace entry',
+  );
   assertOccurrenceCount(fileWorkspaceSource, '<WorkbenchWorkspaceNav', 1, 'file workspace uses shared nav once');
   assertContains(
     fileWorkspaceSource,

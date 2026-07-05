@@ -345,6 +345,13 @@
     "saved": "File saved",
     "formatted": "Content formatted"
   },
+  "automationWorkspace": {
+    "title": "Automation",
+    "tabs": "Automation workspace",
+    "actions": "Automation actions",
+    "open": "Automation",
+    "returnTerminal": "Return to terminal"
+  },
   "splitPaneRight": "Split right",
   "splitPaneDown": "Split down",
   "closePane": "Close current pane",

@@ -9,6 +9,19 @@
   color: var(--fg);
 }
 
+.embedded {
+  width: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.embedded .grid {
+  max-width: none;
+  margin: 0;
+}
+
 .header {
   max-width: 1440px;
   margin: 0 auto var(--space-6);

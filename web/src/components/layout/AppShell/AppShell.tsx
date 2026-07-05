@@ -27,7 +27,6 @@ import {
   ScratchpadIcon,
   ClaudeMdIcon,
   TerminalIcon,
-  OrchestratorIcon,
   DevicesIcon,
   SettingsIcon,
   HealthIcon,
@@ -187,7 +186,6 @@ export function AppShell({ children }: AppShellProps) {
           <NavItem to="/transfer" label={t('nav:transfer')} icon={<TransferIcon />} />
           <NavItem to="/claude-md" label={t('nav:claudeMd')} icon={<ClaudeMdIcon />} />
           <NavItem to="/claude-code" label={t('nav:claudeCode')} icon={<TerminalIcon />} />
-          <NavItem to="/orchestrator" label={t('nav:orchestrator')} icon={<OrchestratorIcon />} />
           <NavItem to="/devices" label={t('nav:devices')} icon={<DevicesIcon />} />
           <NavItem to="/health" label={t('nav:health')} icon={<HealthIcon />} />
           <NavItem to="/settings" label={t('nav:settings')} icon={<SettingsIcon />} />

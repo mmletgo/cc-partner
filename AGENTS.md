@@ -11,9 +11,9 @@
 - **Prompt 管理** — 记录 / 复制 / 打标签 / 跨设备同步
 - **Prompt 优化** — 调用本机 Claude Code CLI pure/headless 模式生成中英文优化版 Prompt
 - **速记本** — 多页面自动保存文本，支持页面标题、局域网与 GitHub 同步
-- **工作台** — 指定本机或局域网远端项目文件夹，管理 Git worktree、多个项目终端、可交互工作区文件树、文件浏览/编辑工作区和 Git 提交树
+- **工作台** — 指定本机或局域网远端项目文件夹，管理 Git worktree、多个项目终端、文件工作区、Git 提交树和项目自动化看板
 - **移动端 Workbench** — 可信局域网内通过 `/mobile` 手机浏览器远程操作本机 Workbench，桌面端展示访问链接与二维码
-- **Orchestrator 自动编排器** — 项目级任务队列、可见 Runner、验证 evidence 与 full-auto 交付
+- **Orchestrator 自动编排器** — 项目级任务队列、可见 Runner、验证 evidence 与 full-auto 交付，桌面端作为 Workbench 自动化工作区展示
 - **P2P 自动互联** — 局域网内 mDNS 自动发现
 - **自动更新** — GitHub Releases 检测 / 下载 / 安装
 
@@ -66,8 +66,8 @@ cc-partner/
 │   │   │   ├── Transfer/         # 02-transfer.html
 │   │   │   ├── Prompts/          # 03-prompts.html
 │   │   │   ├── PromptOptimizer/  # Prompt 优化（本机 Claude CLI pure/headless）
-│   │   │   ├── Workbench/        # 本机/远端项目文件夹 + 多项目终端 + 文件树/文件工作区 + Git 提交树
-│   │   │   ├── Orchestrator/     # 自动编排器全局任务看板
+│   │   │   ├── Workbench/        # 本机/远端项目文件夹 + 多项目终端 + 文件树/文件工作区 + Git 提交树 + 自动化工作区
+│   │   │   ├── Orchestrator/     # 自动编排器可嵌入面板；旧路由重定向 Workbench
 │   │   │   ├── Devices/          # 04-devices.html
 │   │   │   ├── Settings/         # 05-settings.html
 │   │   │   ├── Welcome/          # 06-welcome.html
@@ -245,7 +245,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | Sidebar | children, footer | 侧边栏 |
 | NavItem | icon, label, to, badge | 路由导航项 |
 | ThemeToggle | - | 主题切换按钮 |
-| WorkbenchWorkspaceNav | ariaLabel, actionsAriaLabel, tabs, actions | Workbench 终端/文件预览共享导航栏 |
+| WorkbenchWorkspaceNav | ariaLabel, actionsAriaLabel, tabs, actions | Workbench 终端/文件预览/自动化共享导航栏 |
 
 **domain（业务）**：
 
@@ -500,7 +500,7 @@ useEffect(() => {
 | `web/src/components/layout/*` | 布局组件 | 低 |
 | `web/src/components/domain/*` | 业务组件 | 中（业务迭代） |
 | `web/src/pages/*` | 页面 | 高 |
-| `web/src/pages/Workbench/*` | 工作台页面（三栏、本机/远端项目、worktree 管理、多终端、工作区文件树/文件工作区、Git 提交树） | 高 |
+| `web/src/pages/Workbench/*` | 工作台页面（三栏、本机/远端项目、worktree 管理、多终端、工作区文件树/文件工作区、Git 提交树、自动化工作区） | 高 |
 | `src-tauri/src/lib.rs` | Tauri 入口 + 命令注册 + setup 装配 | 中（新增命令时改） |
 | `src-tauri/src/commands/*` | Rust invoke 命令层 | 中（后端迭代） |
 | `src-tauri/src/workbench/*` | 工作台领域逻辑（本机/远端项目、Git worktree、PTY/tmux 会话、文件系统） | 高 |

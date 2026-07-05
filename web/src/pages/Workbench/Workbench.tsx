@@ -15,7 +15,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { listen } from '@tauri-apps/api/event';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -23,6 +23,7 @@ import '@xterm/xterm/css/xterm.css';
 import { configApi } from '@/api/config';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
 import { workbenchApi } from '@/api/workbench';
+import { OrchestratorPanel } from '@/pages/Orchestrator';
 import {
   WorkbenchDependencyCard,
   WorkbenchFileWorkspace,
@@ -48,11 +49,13 @@ import {
   FolderIcon,
   MaximizeIcon,
   MinimizeIcon,
+  OrchestratorIcon,
   PlusIcon,
   RefreshIcon,
   SplitDownIcon,
   SplitRightIcon,
   SyncIcon,
+  TerminalIcon,
   TrashIcon,
   UploadIcon,
   XIcon,
@@ -771,6 +774,7 @@ function FileTree(props: NestedFileTreeProps) {
 export function Workbench() {
   const { t } = useTranslation(['workbench', 'common', 'promptOptimizer']);
   const location = useLocation();
+  const navigate = useNavigate();
   const { status: dependencyStatus } = useWorkbenchDependency();
   const {
     projects,
@@ -2469,6 +2473,32 @@ export function Workbench() {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   用户在终端现场需要直接查看当前项目的自动化任务队列，而不离开 Workbench 上下文。
+   *
+   * Code Logic（这个函数做什么）:
+   *   将中心工作区切换到 automation 叠层；终端 DOM 保持挂载但不可见且不接收输入。
+   */
+  const handleOpenAutomationWorkspace = useCallback(() => {
+    setWorkspaceView('automation');
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户在自动化看板中点击 blocked 任务的现场入口时，需要回到对应 Workbench 项目、worktree 和终端。
+   *
+   * Code Logic（这个函数做什么）:
+   *   应用 Orchestrator 构造出的 deep link，并把中心工作区切回 terminal，让 deep link 聚焦结果可见。
+   */
+  const handleOpenAutomationTaskWorkbench = useCallback(
+    (url: string): void => {
+      navigate(url);
+      setWorkspaceView('terminal');
+    },
+    [navigate],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   用户编辑文件内容时需要标记未保存状态，避免保存按钮和 tab 脏标记失真。
    *
    * Code Logic（这个函数做什么）:
@@ -3227,7 +3257,7 @@ export function Workbench() {
         <div className={styles.mainWorkspace}>
           <div
             className={styles.terminalLayer}
-            data-hidden={!terminalFullscreen && workspaceView === 'files' || undefined}
+            data-hidden={(!terminalFullscreen && workspaceView !== 'terminal') || undefined}
             data-fullscreen={terminalFullscreen || undefined}
           >
             <WorkbenchWorkspaceNav
@@ -3272,6 +3302,20 @@ export function Workbench() {
               }
               actions={
                 <>
+                  {!terminalFullscreen ? (
+                    <Button
+                      className={styles.terminalActionButton}
+                      variant="secondary"
+                      size="sm"
+                      icon={<OrchestratorIcon />}
+                      title={t('workbench:automationWorkspace.open')}
+                      aria-label={t('workbench:automationWorkspace.open')}
+                      data-active={workspaceView === 'automation' || undefined}
+                      onClick={handleOpenAutomationWorkspace}
+                    >
+                      {t('workbench:automationWorkspace.open')}
+                    </Button>
+                  ) : null}
                   {!terminalFullscreen ? (
                     <Button
                       className={styles.terminalActionButton}
@@ -3494,6 +3538,38 @@ export function Workbench() {
               onFormat={handleFormatFileTab}
               onSelectSqliteTable={handleSelectSqliteTable}
             />
+          </div>
+
+          <div
+            className={styles.automationLayer}
+            data-hidden={workspaceView !== 'automation' || undefined}
+          >
+            <WorkbenchWorkspaceNav
+              ariaLabel={t('workbench:automationWorkspace.tabs')}
+              actionsAriaLabel={t('workbench:automationWorkspace.actions')}
+              tabs={
+                <div className={styles.automationTabs}>
+                  <OrchestratorIcon />
+                  <span>{t('workbench:automationWorkspace.title')}</span>
+                </div>
+              }
+              actions={
+                <Button
+                  className={styles.terminalActionButton}
+                  variant="secondary"
+                  size="sm"
+                  icon={<TerminalIcon />}
+                  title={t('workbench:automationWorkspace.returnTerminal')}
+                  aria-label={t('workbench:automationWorkspace.returnTerminal')}
+                  onClick={handleReturnToTerminal}
+                >
+                  {t('workbench:automationWorkspace.returnTerminal')}
+                </Button>
+              }
+            />
+            <div className={styles.automationBody}>
+              <OrchestratorPanel embedded onOpenWorkbench={handleOpenAutomationTaskWorkbench} />
+            </div>
           </div>
         </div>
       </main>

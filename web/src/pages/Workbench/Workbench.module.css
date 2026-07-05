@@ -398,7 +398,8 @@
 }
 
 .terminalLayer,
-.fileLayer {
+.fileLayer,
+.automationLayer {
   position: absolute;
   inset: 0;
   min-width: 0;
@@ -422,7 +423,8 @@
 }
 
 .terminalLayer[data-hidden='true'],
-.fileLayer[data-hidden='true'] {
+.fileLayer[data-hidden='true'],
+.automationLayer[data-hidden='true'] {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -430,6 +432,31 @@
 
 .fileLayer {
   z-index: var(--z-sticky);
+  background: var(--bg);
+}
+
+.automationLayer {
+  z-index: var(--z-sticky);
+  grid-template-rows: auto minmax(0, 1fr);
+  background: var(--bg);
+}
+
+.automationTabs {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-normal);
+}
+
+.automationBody {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-5);
   background: var(--bg);
 }
 

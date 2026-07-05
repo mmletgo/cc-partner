@@ -13,7 +13,6 @@ import { Scratchpad } from './pages/Scratchpad';
 import { PromptOptimizer } from './pages/PromptOptimizer';
 import { ClaudeMd } from './pages/ClaudeMd';
 import { ClaudeCodeAssets } from './pages/ClaudeCodeAssets';
-import { Orchestrator } from './pages/Orchestrator';
 import { Devices } from './pages/Devices';
 import { Settings } from './pages/Settings';
 import { Health } from './pages/Health';
@@ -199,7 +198,7 @@ export default function App() {
             <Route path="/prompt-optimizer" element={<PromptOptimizer />} />
             <Route path="/claude-md" element={<ClaudeMd />} />
             <Route path="/claude-code" element={<ClaudeCodeAssets />} />
-            <Route path="/orchestrator" element={<Orchestrator />} />
+            <Route path="/orchestrator" element={<Navigate to="/workbench" replace />} />
             <Route path="/devices" element={<Devices />} />
             <Route path="/ssh" element={<Navigate to="/devices" replace />} />
             <Route path="/settings" element={<Settings />} />

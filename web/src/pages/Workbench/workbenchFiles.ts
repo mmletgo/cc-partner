@@ -36,7 +36,7 @@ export interface WorkbenchFileTab {
   savedVersion: string | null;
 }
 
-export type WorkbenchFileWorkspaceView = 'terminal' | 'files';
+export type WorkbenchFileWorkspaceView = 'terminal' | 'files' | 'automation';
 
 export interface WorkbenchFileTabsState {
   tabs: WorkbenchFileTab[];
