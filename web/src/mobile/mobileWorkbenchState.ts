@@ -10,6 +10,8 @@ export type MobileWorkbenchPanel =
   | 'prompt'
   | 'settings';
 
+export type MobileWorktreeStatusKind = 'clean' | 'dirty' | 'conflict';
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   移动端 Workbench shell 的导航点击需要以纯函数方式选择下一个面板，便于组件和测试共享契约。
@@ -67,6 +69,49 @@ export function getInitialMobileNavOpen(): boolean {
  */
 export function canSelectMobileProject(project: WorkbenchProject): boolean {
   return project.kind === 'local';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端 worktree 列表和 Git 面板需要共享同一套状态分类，让 clean、dirty、conflict 展示保持一致。
+ *
+ * Code Logic（这个函数做什么）:
+ *   先判断真实 DTO 的 conflicts 计数，其次判断 clean 布尔值；返回 conflict、dirty 或 clean 三态。
+ */
+export function getMobileWorktreeStatusKind(
+  worktree: WorkbenchWorktree,
+): MobileWorktreeStatusKind {
+  if (worktree.status.conflicts > 0) return 'conflict';
+  if (!worktree.status.clean) return 'dirty';
+  return 'clean';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端 worktree switcher 当前只适用于本机项目，远端项目和加载态都不应开放入口。
+ *
+ * Code Logic（这个函数做什么）:
+ *   project 存在、kind 为 local 且 busy 为 false 时返回 true。
+ */
+export function canOpenMobileWorktreeSwitcher(
+  project: WorkbenchProject | null,
+  busy: boolean,
+): boolean {
+  return project?.kind === 'local' && !busy;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   删除、合并等移动端 worktree 破坏性动作不能作用于主工作区，也不能在已有操作占用时重复触发。
+ *
+ * Code Logic（这个函数做什么）:
+ *   worktree 非主工作区且 busy 为 false 时返回 true。
+ */
+export function canRunMobileWorktreeDestructiveAction(
+  worktree: WorkbenchWorktree,
+  busy: boolean,
+): boolean {
+  return !worktree.isMain && !busy;
 }
 
 /**

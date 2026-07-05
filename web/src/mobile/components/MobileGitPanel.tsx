@@ -6,14 +6,17 @@ import type { WorkbenchGitCommit, WorkbenchProject, WorkbenchWorktree } from '@/
 import {
   shouldReloadMobileGitCommitsAfterAction,
   isMobileGitActionResponseCurrent,
+  isMobileGitMergeResponseCurrent,
   type MobileGitPanelAction,
   type MobileGitActionContext,
 } from '../mobilePanelState';
+import { getMobileWorktreeStatusKind } from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
 
 export interface MobileGitPanelProps {
   project: WorkbenchProject | null;
   worktree: WorkbenchWorktree | null;
+  busy?: boolean;
   onWorktreeChange?: (worktree: WorkbenchWorktree) => void;
   onMergeWorktree: (worktree: WorkbenchWorktree) => Promise<boolean>;
   onRefreshWorktrees?: (options?: {
@@ -59,6 +62,7 @@ function getErrorMessage(reason: unknown): string {
 export function MobileGitPanel({
   project,
   worktree,
+  busy = false,
   onWorktreeChange,
   onMergeWorktree,
   onRefreshWorktrees,
@@ -72,10 +76,11 @@ export function MobileGitPanel({
   const currentContextRef = useRef<MobileGitActionContext | null>(null);
   const statusLabel = useMemo(() => {
     if (!worktree) return t('workbench:mobile.gitPanel.noWorktree');
-    if (worktree.status.conflicts > 0) {
+    const statusKind = getMobileWorktreeStatusKind(worktree);
+    if (statusKind === 'conflict') {
       return t('workbench:worktrees.status.conflict', { count: worktree.status.conflicts });
     }
-    if (worktree.status.changed > 0) {
+    if (statusKind === 'dirty') {
       return t('workbench:worktrees.status.dirty', { count: worktree.status.changed });
     }
     return t('workbench:worktrees.status.clean');
@@ -164,7 +169,7 @@ export function MobileGitPanel({
    *   调用 worktrees.commit(worktreeId, null)，成功后通知父组件更新 active worktree 并刷新列表/提交历史。
    */
   const handleCommit = useCallback(async (): Promise<void> => {
-    if (!project || !worktree) return;
+    if (busy || !project || !worktree) return;
     const actionContext = { projectId: project.id, worktreeId: worktree.id };
     setActionBusy('commit');
     setError(null);
@@ -178,7 +183,7 @@ export function MobileGitPanel({
     } finally {
       setActionBusy(null);
     }
-  }, [onWorktreeChange, project, refreshAfterAction, t, worktree]);
+  }, [busy, onWorktreeChange, project, refreshAfterAction, t, worktree]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -188,7 +193,7 @@ export function MobileGitPanel({
    *   调用 worktrees.push，成功后同步 active worktree 状态并刷新 worktree/commit 数据。
    */
   const handlePush = useCallback(async (): Promise<void> => {
-    if (!project || !worktree) return;
+    if (busy || !project || !worktree) return;
     const actionContext = { projectId: project.id, worktreeId: worktree.id };
     setActionBusy('push');
     setError(null);
@@ -202,7 +207,7 @@ export function MobileGitPanel({
     } finally {
       setActionBusy(null);
     }
-  }, [onWorktreeChange, project, refreshAfterAction, t, worktree]);
+  }, [busy, onWorktreeChange, project, refreshAfterAction, t, worktree]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -212,14 +217,14 @@ export function MobileGitPanel({
    *   委托父级执行 dirty guard 与后端 merge；取消时不改本地提交，成功后清空源 worktree commits。
    */
   const handleMerge = useCallback(async (): Promise<void> => {
-    if (!project || !worktree || worktree.isMain) return;
+    if (busy || !project || !worktree || worktree.isMain) return;
     const actionContext = { projectId: project.id, worktreeId: worktree.id };
     setActionBusy('merge');
     setError(null);
     try {
       const didMerge = await onMergeWorktree(worktree);
       if (!didMerge) return;
-      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+      if (!isMobileGitMergeResponseCurrent(actionContext, currentContextRef.current)) return;
       requestIdRef.current += 1;
       setCommits([]);
       setError(null);
@@ -229,9 +234,9 @@ export function MobileGitPanel({
     } finally {
       setActionBusy(null);
     }
-  }, [onMergeWorktree, project, t, worktree]);
+  }, [busy, onMergeWorktree, project, t, worktree]);
 
-  const actionDisabled = actionBusy !== null || !worktree;
+  const actionDisabled = busy || actionBusy !== null || !worktree;
 
   return (
     <section className={styles.panel} aria-labelledby="mobile-git-panel-title">

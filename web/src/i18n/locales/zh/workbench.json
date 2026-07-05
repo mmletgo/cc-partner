@@ -87,6 +87,12 @@
     "statusAriaLabel": "当前工作台状态",
     "noProject": "未选择项目",
     "projectFallback": "项目",
+    "worktreeQuickSwitch": {
+      "title": "切换 Worktree",
+      "refresh": "刷新",
+      "manage": "完整管理",
+      "close": "关闭"
+    },
     "projectPanel": {
       "title": "项目",
       "error": "加载失败",
@@ -170,7 +176,9 @@
       "branchLabel": "新分支名",
       "branchPlaceholder": "feature/mobile-task",
       "creating": "创建中",
+      "merging": "合并中",
       "removing": "移除中",
+      "sync": "同步",
       "removeConfirm": "确定移除 worktree“{{name}}”？请先确认不再需要该工作区。"
     },
     "promptPanel": {

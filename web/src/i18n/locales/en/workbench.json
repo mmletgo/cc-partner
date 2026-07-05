@@ -89,6 +89,12 @@
     "statusAriaLabel": "Current workbench status",
     "noProject": "No project selected",
     "projectFallback": "Project",
+    "worktreeQuickSwitch": {
+      "title": "Switch worktree",
+      "refresh": "Refresh",
+      "manage": "Manage",
+      "close": "Close"
+    },
     "projectPanel": {
       "title": "Projects",
       "error": "Load failed",
@@ -173,7 +179,9 @@
       "branchLabel": "New branch name",
       "branchPlaceholder": "feature/mobile-task",
       "creating": "Creating",
+      "merging": "Merging",
       "removing": "Removing",
+      "sync": "Sync",
       "removeConfirm": "Remove worktree “{{name}}”? Make sure this workspace is no longer needed."
     },
     "promptPanel": {

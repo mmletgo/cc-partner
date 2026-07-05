@@ -9,8 +9,10 @@ import { MobilePromptPanel } from './components/MobilePromptPanel';
 import { MobileTerminalPanel } from './components/MobileTerminalPanel';
 import { MobileProjectPanel } from './components/MobileProjectPanel';
 import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
+import { MobileWorktreeQuickSwitch } from './components/MobileWorktreeQuickSwitch';
 import { MobileWorktreePanel } from './components/MobileWorktreePanel';
 import {
+  canOpenMobileWorktreeSwitcher,
   canSelectMobileProject,
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
@@ -78,6 +80,8 @@ export function MobileWorkbench(): ReactElement {
   const [activeSession, setActiveSession] = useState<WorkbenchSession | null>(null);
   const [projectsLoading, setProjectsLoading] = useState<boolean>(false);
   const [projectDetailsLoading, setProjectDetailsLoading] = useState<boolean>(false);
+  const [worktreeOperationBusy, setWorktreeOperationBusy] = useState<boolean>(false);
+  const [worktreeSwitcherOpen, setWorktreeSwitcherOpen] = useState<boolean>(false);
   const [filesDirtySnapshot, setFilesDirtySnapshot] = useState<MobileFileDirtySnapshot>({
     dirty: false,
     context: null,
@@ -90,6 +94,8 @@ export function MobileWorkbench(): ReactElement {
   const sessionsRequestIdRef = useRef<number>(0);
   const activeProjectRef = useRef<WorkbenchProject | null>(null);
   const activeWorktreeRef = useRef<WorkbenchWorktree | null>(null);
+  const worktreeOperationBusyRef = useRef<boolean>(false);
+  const worktreeOperationCountRef = useRef<number>(0);
   const sessionsRef = useRef<WorkbenchSession[]>([]);
   const { t } = useTranslation(['workbench']);
 
@@ -124,10 +130,20 @@ export function MobileWorkbench(): ReactElement {
     },
   };
   const placeholder = panelPlaceholders[panel];
+  const worktreeControlsBusy = projectDetailsLoading || worktreeOperationBusy;
 
+  /* eslint-disable react-hooks/set-state-in-effect -- 项目或可用性变化时需要关闭 transient quick switch sheet */
   useEffect(() => {
     activeProjectRef.current = activeProject;
+    setWorktreeSwitcherOpen(false);
   }, [activeProject]);
+
+  useEffect(() => {
+    if (!canOpenMobileWorktreeSwitcher(activeProject, worktreeControlsBusy)) {
+      setWorktreeSwitcherOpen(false);
+    }
+  }, [activeProject, worktreeControlsBusy]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
     activeWorktreeRef.current = activeWorktree;
@@ -215,6 +231,38 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   worktree 创建、删除、合并和刷新会影响所有移动端面板上下文，期间必须全局禁用 worktree 切换入口防止竞态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   递增全局 worktree 操作计数并同步 ref/state；返回幂等 end 回调，嵌套操作全部结束后才释放 busy。
+   */
+  const beginWorktreeOperation = useCallback((): (() => void) => {
+    worktreeOperationCountRef.current += 1;
+    worktreeOperationBusyRef.current = true;
+    setWorktreeOperationBusy(true);
+
+    let ended = false;
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   每个异步 worktree 操作结束时都要释放自己的占用，但不能影响仍在进行的嵌套刷新或 merge。
+     *
+     * Code Logic（这个函数做什么）:
+     *   幂等递减计数；计数归零时同步 ref/state 为非 busy。
+     */
+    return (): void => {
+      if (ended) return;
+      ended = true;
+      worktreeOperationCountRef.current = Math.max(0, worktreeOperationCountRef.current - 1);
+      if (worktreeOperationCountRef.current === 0) {
+        worktreeOperationBusyRef.current = false;
+        setWorktreeOperationBusy(false);
+      }
+    };
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   手机端进入 `/mobile` 后需要立即看到最近项目列表，也需要支持用户手动刷新。
    *
    * Code Logic（这个函数做什么）:
@@ -288,6 +336,7 @@ export function MobileWorkbench(): ReactElement {
     if (!activeProject) return;
     const projectId = activeProject.id;
     if (options.expectedProjectId && options.expectedProjectId !== projectId) return;
+    const endWorktreeOperation = beginWorktreeOperation();
     const requestId = worktreesRequestIdRef.current + 1;
     worktreesRequestIdRef.current = requestId;
 
@@ -313,8 +362,10 @@ export function MobileWorkbench(): ReactElement {
     } catch (reason) {
       if (worktreesRequestIdRef.current !== requestId) return;
       setError(getErrorMessage(reason));
+    } finally {
+      endWorktreeOperation();
     }
-  }, [activeProject, confirmFileContextSwitch, setActiveWorktreeWithSession]);
+  }, [activeProject, beginWorktreeOperation, confirmFileContextSwitch, setActiveWorktreeWithSession]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -393,6 +444,56 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   用户点击顶部 worktree pill 时，需要从任意面板打开轻量 quick switch，快速查看和切换本机 worktree。
+   *
+   * Code Logic（这个函数做什么）:
+   *   复用 canOpenMobileWorktreeSwitcher 判断当前项目和加载态；不可打开时忽略点击，可打开时置 open state。
+   */
+  const handleOpenWorktreeSwitcher = useCallback((): void => {
+    if (worktreeOperationBusyRef.current) return;
+    if (!canOpenMobileWorktreeSwitcher(activeProject, projectDetailsLoading)) return;
+    setWorktreeSwitcherOpen(true);
+  }, [activeProject, projectDetailsLoading]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   quick switch sheet 的关闭按钮、遮罩和 Escape 都需要统一关闭入口。
+   *
+   * Code Logic（这个函数做什么）:
+   *   将 worktreeSwitcherOpen 写为 false，不改变当前 panel/worktree/session。
+   */
+  const handleCloseWorktreeSwitcher = useCallback((): void => {
+    setWorktreeSwitcherOpen(false);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   quick switch 的“管理”入口要跳转到完整 Worktrees 面板，但面板状态由父级持有。
+   *
+   * Code Logic（这个函数做什么）:
+   *   接收 MobileWorkbenchPanel 并写入当前 panel state。
+   */
+  const handleQuickSwitchPanelChange = useCallback((nextPanel: MobileWorkbenchPanel): void => {
+    setPanel(nextPanel);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   quick switch 内的刷新按钮需要按当前项目刷新 worktree 列表，并避免旧项目响应污染新项目。
+   *
+   * Code Logic（这个函数做什么）:
+   *   从 activeProjectRef 构造 expectedProjectId options；没有当前项目时调用默认刷新让 refreshWorktrees 自行忽略。
+   */
+  const handleRefreshQuickSwitchWorktrees = useCallback((): Promise<void> | void => {
+    const expectedProjectId = activeProjectRef.current?.id;
+    if (expectedProjectId) {
+      return refreshWorktrees({ expectedProjectId });
+    }
+    return refreshWorktrees();
+  }, [refreshWorktrees]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   用户切换 worktree 后，移动端状态栏和终端面板应同步到同一 worktree 的优先 session。
    *
    * Code Logic（这个函数做什么）:
@@ -400,13 +501,14 @@ export function MobileWorkbench(): ReactElement {
    */
   const handleSelectWorktree = useCallback(
     (worktree: WorkbenchWorktree): boolean => {
+      if (worktreeOperationBusyRef.current || projectDetailsLoading) return false;
       if (!confirmFileContextSwitch(createMobileFilePanelContext(activeProject, worktree))) {
         return false;
       }
       setActiveWorktreeWithSession(worktree);
       return true;
     },
-    [activeProject, confirmFileContextSwitch, setActiveWorktreeWithSession],
+    [activeProject, confirmFileContextSwitch, projectDetailsLoading, setActiveWorktreeWithSession],
   );
 
   /**
@@ -480,41 +582,70 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   mobile Git merge 会删除源 worktree，必须先确认 Files 草稿，再让后端执行 merge；后端失败时不能丢草稿。
+   *   destructive 操作成功应用时需要用最新 active ref 判断源 worktree 是否在操作期间变成 active。
    *
    * Code Logic（这个函数做什么）:
-   *   用 destructive merge helper 串联 confirm-only、HTTP merge、成功后丢弃草稿和跳过重复确认的 worktree 刷新。
+   *   比较传入 worktree id 与当前 activeWorktreeRef；不依赖渲染时闭包里的旧 activeWorktreeId。
+   */
+  const isCurrentActiveWorktree = useCallback((worktree: WorkbenchWorktree): boolean => {
+    return activeWorktreeRef.current?.id === worktree.id;
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   mobile Git merge 会删除源 worktree，必须先确认用户合并意图；只有合并 active worktree 时才需要处理 Files dirty 草稿切换。
+   *
+   * Code Logic（这个函数做什么）:
+   *   先执行 merge confirm，再用 destructive merge helper 串联可选 dirty guard、HTTP merge、成功后移除源列表并按计划刷新 worktree。
    */
   const handleMergeWorktree = useCallback(
     async (sourceWorktree: WorkbenchWorktree): Promise<boolean> => {
+      if (worktreeOperationBusyRef.current || projectDetailsLoading) return false;
+      const shouldMerge = window.confirm(
+        t('workbench:worktrees.mergeConfirm', { name: sourceWorktree.name }),
+      );
+      if (!shouldMerge) return false;
+
       const operationProjectId = activeProjectRef.current?.id ?? null;
-      const result = await runMobileWorktreeMergeFlow({
-        worktrees,
-        sourceWorktree,
-        confirmActiveWorktreeChange: (nextActive) =>
-          handleConfirmActiveWorktreeChange(nextActive),
-        mergeWorktree: async () => {
-          await httpWorkbenchTransport.worktrees.merge(sourceWorktree.id);
-        },
-        applyMergeSuccess: async (plan) => {
-          if (activeProjectRef.current?.id !== operationProjectId) return;
-          const appliedState = getMobileWorktreeMergeAppliedState(plan);
-          discardConfirmedFileContextSwitch();
-          setWorktrees(appliedState.nextWorktrees);
-          setActiveWorktreeWithSession(appliedState.nextActive);
-          await refreshWorktrees({
-            skipFileContextConfirm: true,
-            expectedProjectId: operationProjectId ?? undefined,
-          });
-        },
-      });
-      return result === 'applied';
+      const endWorktreeOperation = beginWorktreeOperation();
+      try {
+        const result = await runMobileWorktreeMergeFlow({
+          worktrees,
+          activeWorktreeId: activeWorktreeRef.current?.id ?? null,
+          sourceWorktree,
+          confirmActiveWorktreeChange: (nextActive) =>
+            handleConfirmActiveWorktreeChange(nextActive),
+          mergeWorktree: async () => {
+            await httpWorkbenchTransport.worktrees.merge(sourceWorktree.id);
+          },
+          applyMergeSuccess: async (plan) => {
+            if (activeProjectRef.current?.id !== operationProjectId) return;
+            const appliedState = getMobileWorktreeMergeAppliedState(plan);
+            const sourceBecameActive = activeWorktreeRef.current?.id === sourceWorktree.id;
+            setWorktrees(appliedState.nextWorktrees);
+            if (plan.requiresActivePreflight || sourceBecameActive) {
+              discardConfirmedFileContextSwitch();
+              setActiveWorktreeWithSession(appliedState.nextActive);
+            }
+            await refreshWorktrees({
+              skipFileContextConfirm: plan.requiresActivePreflight || sourceBecameActive,
+              expectedProjectId: operationProjectId ?? undefined,
+            });
+          },
+        });
+        return result === 'applied';
+      } finally {
+        endWorktreeOperation();
+      }
     },
     [
+      beginWorktreeOperation,
       discardConfirmedFileContextSwitch,
       handleConfirmActiveWorktreeChange,
+      projectDetailsLoading,
       refreshWorktrees,
       setActiveWorktreeWithSession,
+      t,
       worktrees,
     ],
   );
@@ -547,17 +678,21 @@ export function MobileWorkbench(): ReactElement {
         project={activeProject}
         worktrees={worktrees}
         activeWorktreeId={activeWorktree?.id ?? null}
-        busy={projectDetailsLoading}
+        busy={worktreeControlsBusy}
         onSelect={handleSelectWorktree}
         onWorktreesChange={handleWorktreesChange}
         onConfirmActiveWorktreeChange={handleConfirmActiveWorktreeChange}
         onActiveWorktreeChange={handleApplyActiveWorktreeChange}
         onRefreshWorktrees={refreshWorktrees}
+        onMergeWorktree={handleMergeWorktree}
+        onBeginWorktreeOperation={beginWorktreeOperation}
+        onIsWorktreeActive={isCurrentActiveWorktree}
       />
     ) : panel === 'files' ? null : panel === 'git' ? (
       <MobileGitPanel
         project={activeProject}
         worktree={activeWorktree}
+        busy={worktreeControlsBusy}
         onWorktreeChange={handleWorktreeChange}
         onMergeWorktree={handleMergeWorktree}
         onRefreshWorktrees={refreshWorktrees}
@@ -601,9 +736,24 @@ export function MobileWorkbench(): ReactElement {
       project={activeProject?.name ?? null}
       worktree={activeWorktree?.name ?? null}
       session={activeSession?.name ?? null}
+      worktreeStatusDisabled={!canOpenMobileWorktreeSwitcher(activeProject, worktreeControlsBusy)}
+      worktreeStatusExpanded={worktreeSwitcherOpen}
+      onWorktreeStatusClick={handleOpenWorktreeSwitcher}
       onPanelChange={setPanel}
     >
       {panelContent}
+      <MobileWorktreeQuickSwitch
+        open={worktreeSwitcherOpen}
+        project={activeProject}
+        worktrees={worktrees}
+        activeWorktreeId={activeWorktree?.id ?? null}
+        busy={worktreeControlsBusy}
+        t={t}
+        onClose={handleCloseWorktreeSwitcher}
+        onSelect={handleSelectWorktree}
+        onPanelChange={handleQuickSwitchPanelChange}
+        onRefresh={handleRefreshQuickSwitchWorktrees}
+      />
       <div hidden={panel !== 'files'}>
         <MobileFilesPanel
           project={activeProject}

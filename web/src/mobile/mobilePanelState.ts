@@ -32,6 +32,7 @@ export interface MobileWorktreeRemovalFlowOptions {
 
 export interface MobileWorktreeMergeFlowOptions {
   worktrees: WorkbenchWorktree[];
+  activeWorktreeId: string | null;
   sourceWorktree: WorkbenchWorktree;
   confirmActiveWorktreeChange: (nextActive: WorkbenchWorktree | null) => boolean;
   mergeWorktree: () => Promise<void>;
@@ -99,21 +100,24 @@ export async function runMobileWorktreeRemovalFlow(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   merge 成功会删除源 worktree，移动端必须在后端 merge 前先保护 active Files 草稿。
+ *   merge 成功会删除源 worktree；只有源 worktree 正是当前 active 时，移动端才需要在后端 merge 前保护 active Files 草稿。
  *
  * Code Logic（这个函数做什么）:
- *   复用删除计划算出 merge 后目标 active；确认取消时不触碰后端，后端成功后才执行成功应用回调。
+ *   用真实 active worktree id 复用删除计划；仅 active 源合并执行确认，后端成功后才执行成功应用回调。
  */
 export async function runMobileWorktreeMergeFlow(
   options: MobileWorktreeMergeFlowOptions,
 ): Promise<MobileWorktreeDestructiveFlowResult> {
   const plan = getMobileWorktreeRemovalPlan(
     options.worktrees,
-    options.sourceWorktree.id,
+    options.activeWorktreeId,
     options.sourceWorktree,
   );
 
-  if (!options.confirmActiveWorktreeChange(plan.nextActive)) {
+  if (
+    plan.requiresActivePreflight &&
+    !options.confirmActiveWorktreeChange(plan.nextActive)
+  ) {
     return 'cancelled';
   }
 
@@ -164,6 +168,20 @@ export function getMobileWorktreeMergeAppliedState(
   plan: MobileWorktreeRemovalPlan,
 ): Pick<MobileWorktreeRemovalPlan, 'nextWorktrees' | 'nextActive'> {
   return { nextWorktrees: plan.nextWorktrees, nextActive: plan.nextActive };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   merge 请求返回时用户可能已切到同项目其它 worktree，旧响应不能清空当前 worktree 的提交列表。
+ *
+ * Code Logic（这个函数做什么）:
+ *   比较 merge 请求发起 context 与当前 context 的稳定 key；只有仍停留在请求源 worktree 时才允许回写。
+ */
+export function isMobileGitMergeResponseCurrent(
+  requestContext: MobileGitActionContext,
+  currentContext: MobileGitActionContext | null,
+): boolean {
+  return getMobileFileContextKey(requestContext) === getMobileFileContextKey(currentContext);
 }
 
 /**
