@@ -113,14 +113,21 @@ async fn get_local_project_task(
 ///     本机 remote shortcut 创建任务时，owning device 需要生成权威任务行，并可按 queue=true 立即入队。
 ///
 /// Code Logic（这个函数做什么）:
-///     确认 projectId 为 local 后复用命令层 row builder 创建 Draft；若提供 clientRequestId 则由 repo 事务保证重复请求返回同一任务。
+///     确认 projectId 为 local 后要求非空 clientRequestId，再复用命令层 row builder 创建 Draft；
+///     repo 事务按 clientRequestId 保证重复请求返回同一任务。
 async fn create_task_for_state(
     state: &OrchestratorRouteContext,
     req: RemoteCreateOrchestratorTaskReq,
 ) -> Result<OrchestratorTaskDto, AppError> {
     ensure_remote_orchestrator_local_project_id(state, &req.project_id).await?;
     let queue = req.queue;
-    let client_request_id = req.client_request_id.clone();
+    let client_request_id = req
+        .client_request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| AppError::generic("远端创建任务缺少 clientRequestId"))?;
     let row = build_orchestrator_task_row(CreateOrchestratorTaskRequest {
         project_id: req.project_id,
         title: req.title,
@@ -130,7 +137,7 @@ async fn create_task_for_state(
     })?;
     let created = state
         .orchestrator_repo
-        .create_remote_task_idempotent(client_request_id.as_deref(), &row, queue)
+        .create_remote_task_for_client_request(&client_request_id, &row, queue)
         .await?;
     Ok(OrchestratorTaskDto::from(created))
 }
@@ -530,7 +537,7 @@ mod tests {
                 acceptance_criteria: "验收标准".to_string(),
                 priority: 5,
                 queue: true,
-                client_request_id: None,
+                client_request_id: Some("create-request-queued".to_string()),
             },
         )
         .await
@@ -577,6 +584,39 @@ mod tests {
         assert_eq!(first.status, OrchestratorTaskStatus::Queued);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, first.id);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     缺少 clientRequestId 的远端 create 无法在响应超时后安全重试，必须拒绝而不是创建可能重复的任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     传入空 client_request_id 调用 create helper，断言返回业务错误且数据库未插入任务。
+    #[tokio::test]
+    async fn create_local_project_task_requires_client_request_id() {
+        let state = test_state().await;
+        insert_project(&state, "project-1", "local").await;
+
+        let req = RemoteCreateOrchestratorTaskReq {
+            project_id: "project-1".to_string(),
+            title: "远端任务".to_string(),
+            goal: "完成目标".to_string(),
+            acceptance_criteria: "验收标准".to_string(),
+            priority: 5,
+            queue: false,
+            client_request_id: Some("   ".to_string()),
+        };
+
+        let error = create_task_for_state(&state, req)
+            .await
+            .expect_err("missing clientRequestId should fail");
+        let tasks = state
+            .orchestrator_repo
+            .list_tasks(Some("project-1"))
+            .await
+            .expect("list tasks");
+
+        assert!(error.to_string().contains("缺少 clientRequestId"));
+        assert!(tasks.is_empty());
     }
 
     /// Business Logic（为什么需要这个测试）:

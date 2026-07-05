@@ -886,6 +886,48 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     旧发送路径晚到的协议失败不能覆盖已经成功镜像的 outbox，否则 UI 会把已创建远端任务误显示为失败。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先把 sending item 事务性标为 mirrored，再调用 mark_failed，断言状态和 last_error 没被覆盖。
+    #[tokio::test]
+    async fn mark_failed_does_not_overwrite_mirrored_item() {
+        let repo = setup_repo().await;
+        let item = repo
+            .insert_remote_outbox_pending("device-1", "Mac mini", "/project", None, "{}")
+            .await
+            .expect("insert pending");
+        repo.claim_remote_outbox_item_as_sending(&item.id)
+            .await
+            .expect("claim sending");
+        let task = task_dto("remote-task-1", "远端任务");
+        repo.mark_remote_outbox_mirrored_and_upsert_mirror_if_sending(
+            &item.id,
+            "device-1",
+            "Mac mini",
+            "remote-project-1",
+            "/project",
+            &task.id,
+            &mirror_payload_from_task(&task).expect("payload"),
+        )
+        .await
+        .expect("mark mirrored")
+        .expect("sending item should be mirrored");
+
+        let after_failed = repo
+            .mark_remote_outbox_failed(&item.id, "late protocol error")
+            .await
+            .expect("late failed no-op");
+
+        assert_eq!(after_failed.status, RemoteOutboxStatus::Mirrored);
+        assert!(after_failed.last_error.is_none());
+        assert_eq!(
+            after_failed.remote_task_id.as_deref(),
+            Some("remote-task-1")
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     旧 outbox 行可能缺少 clientRequestId，dispatcher 必须用 item id 填入稳定幂等键并持久化回 request_json。
     ///
     /// Code Logic（这个测试做什么）:

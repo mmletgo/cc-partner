@@ -1345,9 +1345,10 @@ impl OrchestratorRepo {
 
     /// Business Logic（为什么需要这个函数）:
     ///     远端协议错误或业务校验错误不可自动重试，应停止 dispatcher 对该 item 的反复投递。
+    ///     但旧投递路径晚到时不能覆盖已经恢复、成功镜像或人工处理过的 outbox 状态。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     将 item 标记为 failed，保存 last_error 并返回当前 Row。
+    ///     仅当 item 仍为 sending 时标记 failed 并保存 last_error；非 sending 时不覆盖，返回当前 Row。
     pub async fn mark_remote_outbox_failed(
         &self,
         item_id: &str,
@@ -1356,12 +1357,13 @@ impl OrchestratorRepo {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ?, updated_at = ? \
-             WHERE id = ?",
+             WHERE id = ? AND status = ?",
         )
         .bind(RemoteOutboxStatus::Failed.as_str())
         .bind(last_error)
         .bind(now)
         .bind(item_id)
+        .bind(RemoteOutboxStatus::Sending.as_str())
         .execute(&self.pool)
         .await?;
         self.get_remote_outbox_item(item_id)

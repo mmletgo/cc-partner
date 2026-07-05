@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 ///     本机 remote shortcut 创建任务时，实际任务必须创建在项目所属设备的本机 Orchestrator 队列中。
 ///
 /// Code Logic（这个结构体做什么）:
-///     保存远端 local projectId、标题、目标、验收标准、优先级、是否立即入队和可选幂等键，字段使用 camelCase。
+///     保存远端 local projectId、标题、目标、验收标准、优先级、是否立即入队和幂等键，字段使用 camelCase。
+///     字段以 Option 解析，便于 route 返回统一业务错误；create route 会拒绝缺失或空白 key。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteCreateOrchestratorTaskReq {
@@ -132,12 +133,12 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     旧客户端不会发送 clientRequestId，远端协议必须把缺失字段兼容解析为 None。
+    ///     route 需要把缺失 clientRequestId 转成统一业务错误，协议层必须先能解析为 None。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     反序列化不含 clientRequestId 的 JSON，断言 Option 字段为 None。
+    ///     反序列化不含 clientRequestId 的 JSON，断言 Option 字段为 None，后续由 route 做必填校验。
     #[test]
-    fn create_request_accepts_missing_client_request_id() {
+    fn create_request_deserializes_missing_client_request_id_for_route_validation() {
         let req: RemoteCreateOrchestratorTaskReq = serde_json::from_value(serde_json::json!({
             "projectId": "project-1",
             "title": "任务",
