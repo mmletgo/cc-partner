@@ -45,6 +45,7 @@ export interface MobileWorkbenchShellProps {
   worktree: string | null;
   session: string | null;
   worktreeStatusDisabled?: boolean;
+  worktreeStatusExpanded?: boolean;
   onWorktreeStatusClick?: () => void;
   onPanelChange: (panel: MobileWorkbenchPanel) => void;
   children: ReactNode;
@@ -108,7 +109,7 @@ function MobilePanelNav({ activePanel, onSelect }: MobilePanelNavProps): ReactEl
  *
  * Code Logic（这个组件做什么）:
  *   管理移动抽屉 open state，使用 mobileWorkbenchState helper 切换面板/开关抽屉，并渲染 topbar、drawer、rail 与内容区。
- *   当父组件提供 onWorktreeStatusClick 时，将 worktree pill 渲染为 dialog 触发按钮，否则保持静态状态文本。
+ *   当父组件提供 onWorktreeStatusClick 时，将 worktree pill 渲染为带展开状态的 dialog 触发按钮，否则保持静态状态文本。
  */
 export function MobileWorkbenchShell({
   panel,
@@ -116,6 +117,7 @@ export function MobileWorkbenchShell({
   worktree,
   session,
   worktreeStatusDisabled = false,
+  worktreeStatusExpanded = false,
   onWorktreeStatusClick,
   onPanelChange,
   children,
@@ -224,6 +226,7 @@ export function MobileWorkbenchShell({
               className={`${styles.statusPill} ${styles.statusPillButton}`}
               disabled={worktreeStatusDisabled}
               aria-haspopup="dialog"
+              aria-expanded={worktreeStatusExpanded}
               onClick={onWorktreeStatusClick}
             >
               <span className={styles.statusPillText}>{worktreeStatusLabel}</span>

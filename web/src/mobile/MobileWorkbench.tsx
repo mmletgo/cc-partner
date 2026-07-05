@@ -673,6 +673,7 @@ export function MobileWorkbench(): ReactElement {
       worktree={activeWorktree?.name ?? null}
       session={activeSession?.name ?? null}
       worktreeStatusDisabled={!canOpenMobileWorktreeSwitcher(activeProject, projectDetailsLoading)}
+      worktreeStatusExpanded={worktreeSwitcherOpen}
       onWorktreeStatusClick={handleOpenWorktreeSwitcher}
       onPanelChange={setPanel}
     >
