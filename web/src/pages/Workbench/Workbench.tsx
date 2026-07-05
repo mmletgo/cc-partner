@@ -98,6 +98,7 @@ import {
   canPushWorktree,
   canRemoveWorktree,
   composeWorktreeBranchName,
+  createWorktreeWithTerminalWindow,
   DEFAULT_WORKTREE_BRANCH_PREFIX,
   formatWorkbenchMergeStages,
   formatCommitRelativeTime,
@@ -2016,10 +2017,38 @@ export function Workbench() {
     try {
       setWorktreeBusy('create');
       setWorktreeError(null);
-      const created = await workbenchApi.worktrees.create(projectId, branchName);
+      setSessionError(null);
+      const initialSize = measureInitialTerminalSize(terminalPanelRef.current, 'single');
+      const { worktree: created, session, sessionError: createSessionError } =
+        await createWorktreeWithTerminalWindow({
+          projectId,
+          branchName,
+          initialSize,
+          createWorktree: (targetProjectId, targetBranchName, targetBaseBranch) =>
+            workbenchApi.worktrees.create(targetProjectId, targetBranchName, targetBaseBranch),
+          createSession: (targetProjectId, targetInitialSize, targetWorktreeId) =>
+            workbenchApi.sessions.create(targetProjectId, targetInitialSize, targetWorktreeId),
+        });
       if (activeProjectIdRef.current !== projectId) return;
       await loadWorktrees(projectId);
+      if (activeProjectIdRef.current !== projectId) return;
       setActiveWorktreeId(created.id);
+      if (session) {
+        setSessions((current) => [...current, session]);
+        knownSessionIdsRef.current.add(session.id);
+        focusSession(session.id);
+        resetTerminalBuffer(session.id);
+        void refreshProjectSessionStats(projectId);
+      } else if (createSessionError) {
+        markRemoteOfflineFromError(projectId, createSessionError);
+        setSessionError(
+          displayErrorMessage(
+            createSessionError,
+            t('workbench:errors.createSession'),
+            desktopUnavailableMessage,
+          ),
+        );
+      }
       setCreateWorktreeOpen(false);
       setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
       setCreateWorktreeBranchSuffixDraft('');
@@ -2040,8 +2069,11 @@ export function Workbench() {
     createWorktreeBranchPrefix,
     createWorktreeBranchSuffixDraft,
     desktopUnavailableMessage,
+    focusSession,
     loadWorktrees,
     markRemoteOfflineFromError,
+    refreshProjectSessionStats,
+    resetTerminalBuffer,
     remoteWriteDisabled,
     t,
   ]);

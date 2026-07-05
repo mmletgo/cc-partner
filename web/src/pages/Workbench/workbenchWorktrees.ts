@@ -29,6 +29,34 @@ export interface WorkbenchGitGraphRow {
   colorIndex: number;
 }
 
+interface WorkbenchInitialTerminalSize {
+  cols: number;
+  rows: number;
+}
+
+interface CreateWorktreeWithTerminalWindowOptions {
+  projectId: string;
+  branchName: string;
+  baseBranch?: string | null;
+  initialSize?: WorkbenchInitialTerminalSize;
+  createWorktree: (
+    projectId: string,
+    branchName: string,
+    baseBranch?: string | null,
+  ) => Promise<WorkbenchWorktree>;
+  createSession: (
+    projectId: string,
+    initialSize: WorkbenchInitialTerminalSize | undefined,
+    worktreeId: string,
+  ) => Promise<WorkbenchSession>;
+}
+
+interface CreateWorktreeWithTerminalWindowResult {
+  worktree: WorkbenchWorktree;
+  session: WorkbenchSession | null;
+  sessionError: unknown | null;
+}
+
 const GIT_GRAPH_COLOR_COUNT = 6;
 export const WORKBENCH_MERGE_STAGE_IDS: WorkbenchMergeStageId[] = [
   'checkSource',
@@ -56,6 +84,33 @@ export function sessionsForWorktree(
     return sessions.filter((session) => session.worktreeId === worktreeId || session.worktreeId === null);
   }
   return sessions.filter((session) => session.worktreeId === worktreeId);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   用户新建 worktree 后通常下一步就是进入该工作区终端，因此 Workbench 需要自动创建一个 terminal window 和默认 pane。
+ *
+ * Code Logic（这个函数做什么）:
+ *   先调用 worktree 创建 API，随后用返回的 worktree.id 创建 terminal session；session 创建失败时保留 worktree 结果并返回错误。
+ */
+export async function createWorktreeWithTerminalWindow(
+  options: CreateWorktreeWithTerminalWindowOptions,
+): Promise<CreateWorktreeWithTerminalWindowResult> {
+  const worktree = await options.createWorktree(
+    options.projectId,
+    options.branchName,
+    options.baseBranch ?? null,
+  );
+  try {
+    const session = await options.createSession(
+      options.projectId,
+      options.initialSize,
+      worktree.id,
+    );
+    return { worktree, session, sessionError: null };
+  } catch (error) {
+    return { worktree, session: null, sessionError: error };
+  }
 }
 
 /**

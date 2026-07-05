@@ -10,6 +10,7 @@ import {
   canMergeWorktree,
   canPushWorktree,
   canRemoveWorktree,
+  createWorktreeWithTerminalWindow,
   formatWorkbenchMergeStages,
   shouldAutoDismissMergeStages,
   formatCommitRelativeTime,
@@ -209,6 +210,56 @@ function testComposeWorktreeBranchName(): void {
 
 /**
  * Business Logic（为什么需要这个测试）:
+ *   用户在 Workbench 新建 worktree 后，应立即获得绑定该 worktree 的 terminal window 和默认 pane。
+ *
+ * Code Logic（这个测试做什么）:
+ *   用 fake API 记录调用顺序，断言 session 创建使用刚返回的 worktree id，并返回 created worktree/session。
+ */
+async function testCreateWorktreeWithTerminalWindowCreatesSessionForNewWorktree(): Promise<void> {
+  const calls: string[] = [];
+  const createdWorktree = {
+    ...mainWorktree,
+    id: 'feature-1',
+    name: 'feature/auto-window',
+    branch: 'feature/auto-window',
+    path: '/repo-feature',
+    isMain: false,
+  };
+  const createdSession: WorkbenchSession = {
+    ...baseSession,
+    id: 'session-feature-1',
+    worktreeId: 'feature-1',
+    cwd: '/repo-feature',
+    paneCount: 1,
+  };
+
+  const result = await createWorktreeWithTerminalWindow({
+    projectId: 'p1',
+    branchName: 'feature/auto-window',
+    initialSize: { cols: 120, rows: 36 },
+    createWorktree: async (projectId, branchName, baseBranch) => {
+      calls.push(`worktree:${projectId}:${branchName}:${baseBranch ?? 'null'}`);
+      return createdWorktree;
+    },
+    createSession: async (projectId, initialSize, worktreeId) => {
+      calls.push(`session:${projectId}:${worktreeId}:${initialSize?.cols}x${initialSize?.rows}`);
+      return createdSession;
+    },
+  });
+
+  if (result.worktree !== createdWorktree || result.session !== createdSession) {
+    throw new Error('expected helper to return created worktree and session');
+  }
+  if (
+    calls.join('|') !==
+    'worktree:p1:feature/auto-window:null|session:p1:feature-1:120x36'
+  ) {
+    throw new Error(`unexpected call order: ${calls.join('|')}`);
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个测试）:
  *   Workbench 桌面与移动端需要共享同一套 worktree 分支前缀，避免两端创建规则漂移。
  *
  * Code Logic（这个测试做什么）:
@@ -403,6 +454,7 @@ testCanCommitWorktreeIgnoresStaleCleanStatus();
 testGitHistoryActionAvailability();
 testNormalizeWorktreeBranchName();
 testComposeWorktreeBranchName();
+await testCreateWorktreeWithTerminalWindowCreatesSessionForNewWorktree();
 testSharedWorktreeBranchPrefixExports();
 testWorktreeChangeCount();
 testFormatCommitRelativeTime();
