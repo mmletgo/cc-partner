@@ -1,12 +1,22 @@
 use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
+use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
     OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskDto,
     OrchestratorTaskRow, OrchestratorTaskStatus,
 };
+use crate::orchestrator::outbox::{
+    create_pending_remote_task, is_remote_network_error, mirror_payload_from_task,
+    open_remote_project_for_shortcut, sync_remote_task_mirror_for_project,
+    OrchestratorRemoteOutboxDto, RemoteMirrorTask,
+};
+use crate::orchestrator::remote_client::RemoteOrchestratorClient;
+use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
+use crate::workbench::models::WorkbenchProjectRow;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, State};
 use uuid::Uuid;
@@ -18,7 +28,7 @@ use uuid::Uuid;
 ///
 /// Code Logic（这个结构体做什么）:
 ///     以 camelCase 接收 Tauri invoke 参数，并保留 priority 可选值用于默认优先级归一。
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateOrchestratorTaskRequest {
     pub project_id: String,
@@ -26,6 +36,29 @@ pub struct CreateOrchestratorTaskRequest {
     pub goal: String,
     pub acceptance_criteria: String,
     pub priority: Option<i64>,
+}
+
+/// Orchestrator 任务视图 DTO。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     Phase 6 前端需要在同一个任务列表中展示本机任务、远端真实任务和本机 pending remote outbox。
+///
+/// Code Logic（这个枚举做什么）:
+///     使用 serde tag=`origin` 输出 discriminated union；旧命令仍返回 OrchestratorTaskDto 保持兼容。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "origin", rename_all = "camelCase")]
+pub enum OrchestratorTaskViewDto {
+    Local {
+        task: OrchestratorTaskDto,
+    },
+    Remote {
+        task: OrchestratorTaskDto,
+        device_id: String,
+        device_name: String,
+    },
+    PendingRemote {
+        item: OrchestratorRemoteOutboxDto,
+    },
 }
 
 /// 构造待持久化的 Orchestrator 任务 Row。
@@ -72,6 +105,198 @@ pub(crate) fn build_orchestrator_task_row(
         started_at: None,
         finished_at: None,
     })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     remote-aware 命令需要先确认 projectId 对应的 Workbench 项目，才能分流 local 与 remote shortcut。
+///
+/// Code Logic（这个函数做什么）:
+///     从 workbench_project_repo 读取项目；缺失时返回 not_found。
+async fn get_orchestrator_workbench_project(
+    state: &AppState,
+    project_id: &str,
+) -> Result<WorkbenchProjectRow, AppError> {
+    state
+        .workbench_project_repo
+        .get(project_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("工作台项目不存在"))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端 create 请求需要沿用用户输入的标题、目标、验收标准和优先级，但 projectId 会在远端 open-project 后替换。
+///
+/// Code Logic（这个函数做什么）:
+///     从本地 Tauri create request 投影为 RemoteCreateOrchestratorTaskReq，queue 固定 false 保持草稿语义。
+fn remote_create_request_from_local(
+    request: &CreateOrchestratorTaskRequest,
+) -> RemoteCreateOrchestratorTaskReq {
+    RemoteCreateOrchestratorTaskReq {
+        project_id: request.project_id.clone(),
+        title: request.title.clone(),
+        goal: request.goal.clone(),
+        acceptance_criteria: request.acceptance_criteria.clone(),
+        priority: request.priority.unwrap_or(0),
+        queue: false,
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     本机任务视图需要统一包装成 discriminated union，供 Phase 6 UI 与远端视图合并展示。
+///
+/// Code Logic（这个函数做什么）:
+///     把 OrchestratorTaskRow 转为 OrchestratorTaskDto 后包装为 Local 变体。
+fn local_task_view(row: OrchestratorTaskRow) -> OrchestratorTaskViewDto {
+    OrchestratorTaskViewDto::Local {
+        task: OrchestratorTaskDto::from(row),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端任务视图必须带上设备 ID 与设备名，UI 才能标明任务由哪台设备自治执行。
+///
+/// Code Logic（这个函数做什么）:
+///     将远端任务 DTO 与 remote shortcut 的设备信息包装为 Remote 变体。
+fn remote_task_view(
+    task: OrchestratorTaskDto,
+    remote_shortcut: &WorkbenchProjectRow,
+) -> OrchestratorTaskViewDto {
+    OrchestratorTaskViewDto::Remote {
+        task,
+        device_id: remote_shortcut.device_id.clone(),
+        device_name: remote_shortcut.device_name.clone(),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     mirror cache 保存的是 JSON payload，命令返回前需要还原为任务 DTO 并附带远端设备信息。
+///
+/// Code Logic（这个函数做什么）:
+///     逐条解析 RemoteMirrorTask.payload_json，转换为 Remote 视图；解析失败返回业务错误。
+fn remote_mirror_views(
+    mirrors: Vec<RemoteMirrorTask>,
+) -> Result<Vec<OrchestratorTaskViewDto>, AppError> {
+    mirrors
+        .into_iter()
+        .map(|mirror| {
+            let task = serde_json::from_str::<OrchestratorTaskDto>(&mirror.payload_json)
+                .map_err(|err| AppError::generic(format!("远端任务镜像解析失败: {err}")))?;
+            Ok(OrchestratorTaskViewDto::Remote {
+                task,
+                device_id: mirror.device_id,
+                device_name: mirror.device_name,
+            })
+        })
+        .collect()
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端项目列表需要同时显示未发送、发送中或已失败的 outbox item，避免用户误以为离线创建丢失。
+///
+/// Code Logic（这个函数做什么）:
+///     从 repo 按 remote shortcut 的 device/path 读取 outbox 行，并包装为 PendingRemote 变体。
+async fn pending_remote_task_views_for_project(
+    state: &AppState,
+    remote_shortcut: &WorkbenchProjectRow,
+) -> Result<Vec<OrchestratorTaskViewDto>, AppError> {
+    let items = state
+        .orchestrator_repo
+        .list_remote_outbox_items_for_project_path(
+            &remote_shortcut.device_id,
+            &remote_shortcut.path,
+        )
+        .await?;
+    Ok(items
+        .into_iter()
+        .map(|item| OrchestratorTaskViewDto::PendingRemote {
+            item: item.to_dto(),
+        })
+        .collect())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     在线远端创建任务时，本机必须先确保远端项目打开，再把任务写到 owning device 的 Orchestrator 队列。
+///
+/// Code Logic（这个函数做什么）:
+///     复用 Workbench remote open-project 规则取得远端 local projectId，调用 RemoteOrchestratorClient::create_task，
+///     成功后 upsert mirror 并返回 Remote 视图。
+async fn create_remote_orchestrator_task_online(
+    state: &AppState,
+    remote_shortcut: &WorkbenchProjectRow,
+    mut request: RemoteCreateOrchestratorTaskReq,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    let context = open_remote_project_for_shortcut(state, remote_shortcut).await?;
+    request.project_id = context.remote_project_id.clone();
+    let task = RemoteOrchestratorClient::new()
+        .create_task(&context.base_url, request)
+        .await?;
+    upsert_remote_task_view(
+        state,
+        remote_shortcut,
+        &context.remote_project_id,
+        &context.remote_project_path,
+        task,
+    )
+    .await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端 queue/retry/abort 操作返回的最新任务状态也要刷新本机 mirror cache，保证离线前快照尽量新。
+///
+/// Code Logic（这个函数做什么）:
+///     序列化任务 DTO 并按 `(device_id, remote_task_id)` upsert mirror，再返回 Remote 视图。
+async fn upsert_remote_task_view(
+    state: &AppState,
+    remote_shortcut: &WorkbenchProjectRow,
+    remote_project_id: &str,
+    remote_project_path: &str,
+    task: OrchestratorTaskDto,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    let payload = mirror_payload_from_task(&task)?;
+    state
+        .orchestrator_repo
+        .upsert_remote_task_mirror(
+            &remote_shortcut.device_id,
+            &remote_shortcut.device_name,
+            remote_project_id,
+            remote_project_path,
+            &task.id,
+            &payload,
+        )
+        .await?;
+    Ok(remote_task_view(task, remote_shortcut))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端任务状态命令共享同一套 open-project、远端 API 调用和 mirror upsert 逻辑，避免 queue/retry/abort 分叉。
+///
+/// Code Logic（这个函数做什么）:
+///     打开远端项目后执行传入的 RemoteOrchestratorClient 方法，随后写 mirror 并返回 Remote 视图。
+async fn update_remote_orchestrator_task_status<F, Fut>(
+    state: &AppState,
+    remote_shortcut: &WorkbenchProjectRow,
+    task_id: &str,
+    operation: F,
+) -> Result<OrchestratorTaskViewDto, AppError>
+where
+    F: FnOnce(RemoteOrchestratorClient, String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<OrchestratorTaskDto, AppError>>,
+{
+    let context = open_remote_project_for_shortcut(state, remote_shortcut).await?;
+    let task = operation(
+        RemoteOrchestratorClient::new(),
+        context.base_url.clone(),
+        task_id.to_string(),
+    )
+    .await?;
+    upsert_remote_task_view(
+        state,
+        remote_shortcut,
+        &context.remote_project_id,
+        &context.remote_project_path,
+        task,
+    )
+    .await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -411,6 +636,237 @@ pub async fn create_orchestrator_task(
     let row = build_orchestrator_task_row(request)?;
     state.orchestrator_repo.create_task(&row).await?;
     Ok(OrchestratorTaskDto::from(row))
+}
+
+/// 查询 remote-aware Orchestrator 任务视图列表。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Phase 6 前端需要在远端项目中展示远端真实任务、本机 pending outbox 和离线 mirror 快照。
+///
+/// Code Logic（这个函数做什么）:
+///     local 项目读取本机任务并包装 Local；remote 项目在线时同步 mirror，离线时读最近 mirror；
+///     最后追加 pending/sending/failed outbox 项。
+#[tauri::command]
+pub async fn list_orchestrator_task_views(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<OrchestratorTaskViewDto>, AppError> {
+    let Some(project_id) = project_id else {
+        let rows = state.orchestrator_repo.list_tasks(None).await?;
+        return Ok(rows.into_iter().map(local_task_view).collect());
+    };
+
+    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    if project.kind != "remote" {
+        let rows = state
+            .orchestrator_repo
+            .list_tasks(Some(&project_id))
+            .await?;
+        return Ok(rows.into_iter().map(local_task_view).collect());
+    }
+
+    let mirrors = match sync_remote_task_mirror_for_project(state.inner(), &project).await {
+        Ok(mirrors) => mirrors,
+        Err(err) if is_remote_network_error(&err) => {
+            state
+                .orchestrator_repo
+                .list_remote_task_mirrors_for_project_path(&project.device_id, &project.path)
+                .await?
+        }
+        Err(err) => return Err(err),
+    };
+    let mut views = remote_mirror_views(mirrors)?;
+    views.extend(pending_remote_task_views_for_project(state.inner(), &project).await?);
+    Ok(views)
+}
+
+/// 创建 remote-aware Orchestrator 任务视图。
+///
+/// Business Logic（为什么需要这个函数）:
+///     local 项目应继续创建本机任务；remote 项目在线时创建远端权威任务，离线时写 pending outbox。
+///
+/// Code Logic（这个函数做什么）:
+///     先按 projectId 读取 Workbench 项目；local 走旧 row builder + repo，remote 先尝试在线创建，
+///     遇到网络/离线错误时创建 pending outbox 并返回 PendingRemote。
+#[tauri::command]
+pub async fn create_orchestrator_task_view(
+    state: State<'_, AppState>,
+    request: CreateOrchestratorTaskRequest,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &request.project_id).await?;
+    if project.kind != "remote" {
+        let row = build_orchestrator_task_row(request)?;
+        state.orchestrator_repo.create_task(&row).await?;
+        return Ok(local_task_view(row));
+    }
+
+    let remote_request = remote_create_request_from_local(&request);
+    match create_remote_orchestrator_task_online(state.inner(), &project, remote_request.clone())
+        .await
+    {
+        Ok(view) => Ok(view),
+        Err(err) if is_remote_network_error(&err) => {
+            let item = create_pending_remote_task(state.inner(), &project, remote_request).await?;
+            Ok(OrchestratorTaskViewDto::PendingRemote {
+                item: item.to_dto(),
+            })
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// 将 remote-aware Orchestrator 任务加入队列。
+///
+/// Business Logic（为什么需要这个函数）:
+///     local 任务入队发生在本机；remote 任务入队必须转发给 owning device，pending item 不能被本机入队。
+///
+/// Code Logic（这个函数做什么）:
+///     project 为 local 时复用 repo.queue_task；remote 时先识别 pending outbox id，否则调用远端 queue 并 upsert mirror。
+#[tauri::command]
+pub async fn queue_orchestrator_task_view(
+    state: State<'_, AppState>,
+    project_id: String,
+    task_id: String,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    if project.kind != "remote" {
+        let task = state.orchestrator_repo.queue_task(&task_id).await?;
+        return Ok(local_task_view(task));
+    }
+    if let Some(item) = state
+        .orchestrator_repo
+        .get_remote_outbox_item(&task_id)
+        .await?
+    {
+        return Ok(OrchestratorTaskViewDto::PendingRemote {
+            item: item.to_dto(),
+        });
+    }
+    update_remote_orchestrator_task_status(
+        state.inner(),
+        &project,
+        &task_id,
+        |client, base_url, id| async move { client.queue_task(&base_url, &id).await },
+    )
+    .await
+}
+
+/// 重试 remote-aware Orchestrator 任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 上的重试必须作用于远端权威任务，不能把本机 mirror 当作任务状态机处理。
+///
+/// Code Logic（这个函数做什么）:
+///     local 项目复用 Blocked->Queued 原子转换；remote 项目调用 RemoteOrchestratorClient::retry_task 并刷新 mirror。
+#[tauri::command]
+pub async fn retry_orchestrator_task_view(
+    state: State<'_, AppState>,
+    project_id: String,
+    task_id: String,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    if project.kind != "remote" {
+        let updated = state
+            .orchestrator_repo
+            .transition_task_status(
+                &task_id,
+                OrchestratorTaskStatus::Blocked,
+                OrchestratorTaskStatus::Queued,
+                None,
+            )
+            .await?;
+        return Ok(local_task_view(updated));
+    }
+    update_remote_orchestrator_task_status(
+        state.inner(),
+        &project,
+        &task_id,
+        |client, base_url, id| async move { client.retry_task(&base_url, &id).await },
+    )
+    .await
+}
+
+/// 终止 remote-aware Orchestrator 任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 上的 Abort 必须终止 owning device 上的真实任务，并保留远端现场。
+///
+/// Code Logic（这个函数做什么）:
+///     local 项目复用 set_task_status；remote 项目调用 RemoteOrchestratorClient::abort_task 并刷新 mirror。
+#[tauri::command]
+pub async fn abort_orchestrator_task_view(
+    state: State<'_, AppState>,
+    project_id: String,
+    task_id: String,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    if project.kind != "remote" {
+        let task = state.orchestrator_repo.get_task(&task_id).await?;
+        let target = abort_orchestrator_task_target_status(task.status);
+        let updated = state
+            .orchestrator_repo
+            .set_task_status(&task.id, target, None)
+            .await?;
+        return Ok(local_task_view(updated));
+    }
+    update_remote_orchestrator_task_status(
+        state.inner(),
+        &project,
+        &task_id,
+        |client, base_url, id| async move { client.abort_task(&base_url, &id).await },
+    )
+    .await
+}
+
+/// 按项目读取 remote-aware Orchestrator evidence。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote task 详情需要展示 owning device 上真实写入的 evidence；local 任务继续读本机 SQLite。
+///
+/// Code Logic（这个函数做什么）:
+///     local 项目走 repo.list_evidence；remote 项目打开远端项目后调用 RemoteOrchestratorClient::get_evidence。
+#[tauri::command]
+pub async fn list_orchestrator_task_evidence_for_project(
+    state: State<'_, AppState>,
+    project_id: String,
+    task_id: String,
+) -> Result<Vec<OrchestratorEvidenceDto>, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    if project.kind != "remote" {
+        return state.orchestrator_repo.list_evidence(&task_id).await;
+    }
+    let context = open_remote_project_for_shortcut(state.inner(), &project).await?;
+    RemoteOrchestratorClient::new()
+        .get_evidence(&context.base_url, &task_id)
+        .await
+}
+
+/// 按项目读取 remote-aware Orchestrator 自动化配置。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote 项目展示的自动化策略应来自远端设备 Settings，而不是本机 shortcut 的配置。
+///
+/// Code Logic（这个函数做什么）:
+///     local 项目返回本机 AppConfig.orchestrator DTO；remote 项目打开远端后调用远端 config endpoint。
+#[tauri::command]
+pub async fn get_orchestrator_config_for_project(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<OrchestratorAutomationConfigDto, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    if project.kind != "remote" {
+        let config = state
+            .config
+            .read()
+            .expect("config 读锁中毒")
+            .orchestrator
+            .clone();
+        return Ok(config.into());
+    }
+    let context = open_remote_project_for_shortcut(state.inner(), &project).await?;
+    RemoteOrchestratorClient::new()
+        .get_config(&context.base_url)
+        .await
 }
 
 /// 查询项目 Orchestrator 策略。

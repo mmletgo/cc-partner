@@ -7,6 +7,9 @@ use crate::orchestrator::models::{
     OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskAttemptRow,
     OrchestratorTaskRow, OrchestratorTaskStatus,
 };
+use crate::orchestrator::outbox::{
+    OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
+};
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
@@ -22,6 +25,11 @@ const PROJECT_CONFIG_COLUMNS: &str = "project_id, enabled, max_concurrent_tasks,
 const EVIDENCE_COLUMNS: &str = "id, task_id, kind, title, summary, content, created_at";
 const ATTEMPT_COLUMNS: &str = "id, task_id, attempt, worktree_id, session_id, prompt, status, \
     created_at, completed_at";
+const REMOTE_OUTBOX_COLUMNS: &str = "id, device_id, device_name, remote_project_path, \
+    remote_project_id, request_json, status, remote_task_id, last_error, created_at, updated_at, \
+    sent_at";
+const REMOTE_MIRROR_COLUMNS: &str = "id, device_id, device_name, remote_project_id, \
+    remote_project_path, remote_task_id, payload_json, last_synced_at";
 
 pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestrator_tasks (
   id TEXT PRIMARY KEY,
@@ -114,6 +122,47 @@ const ORCHESTRATOR_TASK_ATTEMPTS_SESSION_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_orchestrator_task_attempts_session \
      ON orchestrator_task_attempts(session_id, status)";
 
+pub const ORCHESTRATOR_REMOTE_OUTBOX_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS orchestrator_remote_outbox (
+  id TEXT PRIMARY KEY,
+  device_id TEXT NOT NULL,
+  device_name TEXT NOT NULL,
+  remote_project_path TEXT NOT NULL,
+  remote_project_id TEXT,
+  request_json TEXT NOT NULL,
+  status TEXT NOT NULL,
+  remote_task_id TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  sent_at TEXT
+)";
+
+const ORCHESTRATOR_REMOTE_OUTBOX_STATUS_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_orchestrator_remote_outbox_status \
+     ON orchestrator_remote_outbox(status, updated_at, device_id)";
+
+const ORCHESTRATOR_REMOTE_OUTBOX_PROJECT_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_orchestrator_remote_outbox_project \
+     ON orchestrator_remote_outbox(device_id, remote_project_path, status)";
+
+pub const ORCHESTRATOR_REMOTE_TASK_MIRROR_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS orchestrator_remote_task_mirrors (
+  id TEXT PRIMARY KEY,
+  device_id TEXT NOT NULL,
+  device_name TEXT NOT NULL,
+  remote_project_id TEXT NOT NULL,
+  remote_project_path TEXT NOT NULL,
+  remote_task_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  last_synced_at TEXT NOT NULL,
+  UNIQUE(device_id, remote_task_id)
+)";
+
+const ORCHESTRATOR_REMOTE_TASK_MIRROR_PROJECT_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_orchestrator_remote_task_mirrors_project \
+     ON orchestrator_remote_task_mirrors(device_id, remote_project_id, last_synced_at)";
+
 /// Orchestrator 仓储，封装任务、事件和证据表访问。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -153,6 +202,11 @@ impl OrchestratorRepo {
             ORCHESTRATOR_TASK_EVIDENCE_INDEX,
             ORCHESTRATOR_TASK_ATTEMPT_SCHEMA,
             ORCHESTRATOR_TASK_ATTEMPTS_SESSION_INDEX,
+            ORCHESTRATOR_REMOTE_OUTBOX_SCHEMA,
+            ORCHESTRATOR_REMOTE_OUTBOX_STATUS_INDEX,
+            ORCHESTRATOR_REMOTE_OUTBOX_PROJECT_INDEX,
+            ORCHESTRATOR_REMOTE_TASK_MIRROR_SCHEMA,
+            ORCHESTRATOR_REMOTE_TASK_MIRROR_PROJECT_INDEX,
         ] {
             sqlx::query(statement).execute(pool).await?;
         }
@@ -926,6 +980,409 @@ impl OrchestratorRepo {
         .await?;
         rows.iter().map(row_to_evidence).collect()
     }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     远端设备离线时，本机仍允许用户创建远端任务；创建请求必须先持久化为 pending outbox。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     校验目标设备、路径和请求 JSON 非空，生成 outbox id/时间戳，并插入 status=pending 行。
+    pub async fn insert_remote_outbox_pending(
+        &self,
+        device_id: &str,
+        device_name: &str,
+        remote_project_path: &str,
+        remote_project_id: Option<&str>,
+        request_json: &str,
+    ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
+        let device_id = device_id.trim();
+        let device_name = device_name.trim();
+        let remote_project_path = remote_project_path.trim();
+        let remote_project_id = remote_project_id.and_then(non_empty_trimmed);
+        if device_id.is_empty() {
+            return Err(AppError::generic("远端 outbox 缺少设备 ID"));
+        }
+        if device_name.is_empty() {
+            return Err(AppError::generic("远端 outbox 缺少设备名称"));
+        }
+        if remote_project_path.is_empty() {
+            return Err(AppError::generic("远端 outbox 缺少项目路径"));
+        }
+        if request_json.trim().is_empty() {
+            return Err(AppError::generic("远端 outbox 请求不能为空"));
+        }
+
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO orchestrator_remote_outbox \
+             (id, device_id, device_name, remote_project_path, remote_project_id, request_json, \
+              status, remote_task_id, last_error, created_at, updated_at, sent_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(device_id)
+        .bind(device_name)
+        .bind(remote_project_path)
+        .bind(remote_project_id)
+        .bind(request_json)
+        .bind(RemoteOutboxStatus::Pending.as_str())
+        .bind(Option::<&str>::None)
+        .bind(Option::<&str>::None)
+        .bind(&now)
+        .bind(&now)
+        .bind(Option::<&str>::None)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(OrchestratorRemoteOutboxRow {
+            id,
+            device_id: device_id.to_string(),
+            device_name: device_name.to_string(),
+            remote_project_path: remote_project_path.to_string(),
+            remote_project_id: remote_project_id.map(str::to_string),
+            request_json: request_json.to_string(),
+            status: RemoteOutboxStatus::Pending,
+            remote_task_id: None,
+            last_error: None,
+            created_at: now.clone(),
+            updated_at: now,
+            sent_at: None,
+        })
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     命令层和 dispatcher 需要按 id 读取 outbox 当前状态，便于返回 UI 或处理并发 claim 失败。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查询单条 outbox 行；缺失返回 None，存在时转换为强类型 Row。
+    pub async fn get_remote_outbox_item(
+        &self,
+        item_id: &str,
+    ) -> Result<Option<OrchestratorRemoteOutboxRow>, AppError> {
+        let row = sqlx::query(&format!(
+            "SELECT {REMOTE_OUTBOX_COLUMNS} FROM orchestrator_remote_outbox WHERE id = ?"
+        ))
+        .bind(item_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| row_to_remote_outbox(&row)).transpose()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     后台 dispatcher 每个 tick 需要按创建顺序扫描尚未投递的 pending 远端任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查询 status=pending 的 outbox 行，按 created_at/id 稳定排序并限制批量大小。
+    pub async fn list_pending_remote_outbox_items(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<OrchestratorRemoteOutboxRow>, AppError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(&format!(
+            "SELECT {REMOTE_OUTBOX_COLUMNS} FROM orchestrator_remote_outbox \
+             WHERE status = ? ORDER BY created_at ASC, id ASC LIMIT ?"
+        ))
+        .bind(RemoteOutboxStatus::Pending.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_remote_outbox).collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     远端项目任务列表需要合并本机尚未投递或投递失败的 outbox 项，避免用户看不到离线提交。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 device_id 和 remote_project_path 查询 pending/sending/failed 行；mirrored 行不再作为 pending 展示。
+    pub async fn list_remote_outbox_items_for_project_path(
+        &self,
+        device_id: &str,
+        remote_project_path: &str,
+    ) -> Result<Vec<OrchestratorRemoteOutboxRow>, AppError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {REMOTE_OUTBOX_COLUMNS} FROM orchestrator_remote_outbox \
+             WHERE device_id = ? AND remote_project_path = ? AND status IN (?, ?, ?) \
+             ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(device_id)
+        .bind(remote_project_path)
+        .bind(RemoteOutboxStatus::Pending.as_str())
+        .bind(RemoteOutboxStatus::Sending.as_str())
+        .bind(RemoteOutboxStatus::Failed.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_remote_outbox).collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     dispatcher 必须先独占 claim 一条 pending item，避免多个 tick 或多个任务重复创建远端 task。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用 `UPDATE ... WHERE status=pending` 原子切换到 sending；命中返回更新后 Row，未命中返回 None。
+    pub async fn claim_remote_outbox_item_as_sending(
+        &self,
+        item_id: &str,
+    ) -> Result<Option<OrchestratorRemoteOutboxRow>, AppError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(RemoteOutboxStatus::Sending.as_str())
+        .bind(Option::<&str>::None)
+        .bind(&now)
+        .bind(item_id)
+        .bind(RemoteOutboxStatus::Pending.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() != 1 {
+            return Ok(None);
+        }
+        self.get_remote_outbox_item(item_id)
+            .await?
+            .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))
+            .map(Some)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     网络离线、设备不在线或连接超时不代表请求无效，必须回到 pending 等待下次自动投递。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 sending item 改回 pending，写 last_error/updated_at，并返回当前 Row。
+    pub async fn mark_remote_outbox_pending_after_network_failure(
+        &self,
+        item_id: &str,
+        last_error: &str,
+    ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(RemoteOutboxStatus::Pending.as_str())
+        .bind(last_error)
+        .bind(now)
+        .bind(item_id)
+        .bind(RemoteOutboxStatus::Sending.as_str())
+        .execute(&self.pool)
+        .await?;
+        self.get_remote_outbox_item(item_id)
+            .await?
+            .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     远端协议错误或业务校验错误不可自动重试，应停止 dispatcher 对该 item 的反复投递。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 item 标记为 failed，保存 last_error 并返回当前 Row。
+    pub async fn mark_remote_outbox_failed(
+        &self,
+        item_id: &str,
+        last_error: &str,
+    ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ?, updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(RemoteOutboxStatus::Failed.as_str())
+        .bind(last_error)
+        .bind(now)
+        .bind(item_id)
+        .execute(&self.pool)
+        .await?;
+        self.get_remote_outbox_item(item_id)
+            .await?
+            .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     dispatcher 打开远端项目后会拿到远端 local projectId，outbox 行应记录该映射便于后续排查和 UI 展示。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     更新 remote_project_id 与 updated_at；不改变投递状态。
+    pub async fn update_remote_outbox_remote_project_id(
+        &self,
+        item_id: &str,
+        remote_project_id: &str,
+    ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE orchestrator_remote_outbox SET remote_project_id = ?, updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(remote_project_id)
+        .bind(now)
+        .bind(item_id)
+        .execute(&self.pool)
+        .await?;
+        self.get_remote_outbox_item(item_id)
+            .await?
+            .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     远端任务创建成功后，本机 pending item 应转为 mirrored 并保存远端 task id，避免后续重复投递。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写 status=mirrored、remote_task_id、sent_at 和 updated_at，清空 last_error 后返回当前 Row。
+    pub async fn mark_remote_outbox_mirrored(
+        &self,
+        item_id: &str,
+        remote_task_id: &str,
+    ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE orchestrator_remote_outbox \
+             SET status = ?, remote_task_id = ?, last_error = ?, updated_at = ?, sent_at = ? \
+             WHERE id = ?",
+        )
+        .bind(RemoteOutboxStatus::Mirrored.as_str())
+        .bind(remote_task_id)
+        .bind(Option::<&str>::None)
+        .bind(&now)
+        .bind(&now)
+        .bind(item_id)
+        .execute(&self.pool)
+        .await?;
+        self.get_remote_outbox_item(item_id)
+            .await?
+            .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     本机需要保存远端任务的最新展示快照；同一远端 task 重复同步时应覆盖旧 payload。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     使用 `(device_id, remote_task_id)` 唯一键 upsert mirror，更新 payload_json 和 last_synced_at 后返回 Row。
+    pub async fn upsert_remote_task_mirror(
+        &self,
+        device_id: &str,
+        device_name: &str,
+        remote_project_id: &str,
+        remote_project_path: &str,
+        remote_task_id: &str,
+        payload_json: &str,
+    ) -> Result<RemoteMirrorTask, AppError> {
+        let device_id = device_id.trim();
+        let device_name = device_name.trim();
+        let remote_project_id = remote_project_id.trim();
+        let remote_project_path = remote_project_path.trim();
+        let remote_task_id = remote_task_id.trim();
+        if device_id.is_empty() {
+            return Err(AppError::generic("远端任务镜像缺少设备 ID"));
+        }
+        if device_name.is_empty() {
+            return Err(AppError::generic("远端任务镜像缺少设备名称"));
+        }
+        if remote_project_id.is_empty() {
+            return Err(AppError::generic("远端任务镜像缺少项目 ID"));
+        }
+        if remote_project_path.is_empty() {
+            return Err(AppError::generic("远端任务镜像缺少项目路径"));
+        }
+        if remote_task_id.is_empty() {
+            return Err(AppError::generic("远端任务镜像缺少任务 ID"));
+        }
+        if payload_json.trim().is_empty() {
+            return Err(AppError::generic("远端任务镜像 payload 不能为空"));
+        }
+
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO orchestrator_remote_task_mirrors \
+             (id, device_id, device_name, remote_project_id, remote_project_path, remote_task_id, \
+              payload_json, last_synced_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(device_id, remote_task_id) DO UPDATE SET \
+               device_name = excluded.device_name, \
+               remote_project_id = excluded.remote_project_id, \
+               remote_project_path = excluded.remote_project_path, \
+               payload_json = excluded.payload_json, \
+               last_synced_at = excluded.last_synced_at",
+        )
+        .bind(&id)
+        .bind(device_id)
+        .bind(device_name)
+        .bind(remote_project_id)
+        .bind(remote_project_path)
+        .bind(remote_task_id)
+        .bind(payload_json)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        self.get_remote_task_mirror(device_id, remote_task_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("远端任务镜像不存在"))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     mirror upsert 和远端任务详情需要按设备与远端 task id 读取唯一镜像。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查询 `(device_id, remote_task_id)` 唯一行，缺失返回 None。
+    pub async fn get_remote_task_mirror(
+        &self,
+        device_id: &str,
+        remote_task_id: &str,
+    ) -> Result<Option<RemoteMirrorTask>, AppError> {
+        let row = sqlx::query(&format!(
+            "SELECT {REMOTE_MIRROR_COLUMNS} FROM orchestrator_remote_task_mirrors \
+             WHERE device_id = ? AND remote_task_id = ?"
+        ))
+        .bind(device_id)
+        .bind(remote_task_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| row_to_remote_mirror(&row)).transpose()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     远端项目在线刷新后，UI 需要读取该项目所有已缓存的远端任务镜像。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 device_id + remote_project_id 查询 mirror，按 last_synced_at/id 稳定排序。
+    pub async fn list_remote_task_mirrors_for_project(
+        &self,
+        device_id: &str,
+        remote_project_id: &str,
+    ) -> Result<Vec<RemoteMirrorTask>, AppError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {REMOTE_MIRROR_COLUMNS} FROM orchestrator_remote_task_mirrors \
+             WHERE device_id = ? AND remote_project_id = ? ORDER BY last_synced_at DESC, id ASC"
+        ))
+        .bind(device_id)
+        .bind(remote_project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_remote_mirror).collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     远端离线时可能无法拿到最新 remote_project_id，本机仍应按保存的远端路径展示最近镜像快照。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 device_id + remote_project_path 查询 mirror，按 last_synced_at/id 稳定排序。
+    pub async fn list_remote_task_mirrors_for_project_path(
+        &self,
+        device_id: &str,
+        remote_project_path: &str,
+    ) -> Result<Vec<RemoteMirrorTask>, AppError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {REMOTE_MIRROR_COLUMNS} FROM orchestrator_remote_task_mirrors \
+             WHERE device_id = ? AND remote_project_path = ? ORDER BY last_synced_at DESC, id ASC"
+        ))
+        .bind(device_id)
+        .bind(remote_project_path)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_remote_mirror).collect()
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1032,6 +1489,61 @@ fn row_to_attempt(row: &SqliteRow) -> Result<OrchestratorTaskAttemptRow, AppErro
         status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
         completed_at: row.try_get("completed_at")?,
+    })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     optional 文本字段写库前需要把空白归一为 None，避免远端 projectId 空字符串被误当作有效 ID。
+///
+/// Code Logic（这个函数做什么）:
+///     trim 输入字符串，非空返回原 trim 后 &str，空白返回 None。
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     outbox 表读取后必须还原强类型状态和所有时间字段，供 dispatcher 与 UI 共用。
+///
+/// Code Logic（这个函数做什么）:
+///     从 SqliteRow 提取 orchestrator_remote_outbox 全字段并解析 status。
+fn row_to_remote_outbox(row: &SqliteRow) -> Result<OrchestratorRemoteOutboxRow, AppError> {
+    let status_text: String = row.try_get("status")?;
+    Ok(OrchestratorRemoteOutboxRow {
+        id: row.try_get("id")?,
+        device_id: row.try_get("device_id")?,
+        device_name: row.try_get("device_name")?,
+        remote_project_path: row.try_get("remote_project_path")?,
+        remote_project_id: row.try_get("remote_project_id")?,
+        request_json: row.try_get("request_json")?,
+        status: RemoteOutboxStatus::from_str(&status_text)?,
+        remote_task_id: row.try_get("remote_task_id")?,
+        last_error: row.try_get("last_error")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        sent_at: row.try_get("sent_at")?,
+    })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     mirror 表读取后需要形成统一 Row，命令层再负责把 payload_json 解析为远端任务 DTO。
+///
+/// Code Logic（这个函数做什么）:
+///     从 SqliteRow 提取 orchestrator_remote_task_mirrors 全字段。
+fn row_to_remote_mirror(row: &SqliteRow) -> Result<RemoteMirrorTask, AppError> {
+    Ok(RemoteMirrorTask {
+        id: row.try_get("id")?,
+        device_id: row.try_get("device_id")?,
+        device_name: row.try_get("device_name")?,
+        remote_project_id: row.try_get("remote_project_id")?,
+        remote_project_path: row.try_get("remote_project_path")?,
+        remote_task_id: row.try_get("remote_task_id")?,
+        payload_json: row.try_get("payload_json")?,
+        last_synced_at: row.try_get("last_synced_at")?,
     })
 }
 

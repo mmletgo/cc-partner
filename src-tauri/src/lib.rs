@@ -419,6 +419,7 @@ pub fn run() {
                     health_cancel,
                     orchestrator_repo,
                     orchestrator_cancel: Arc::new(Mutex::new(None)),
+                    orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
                 };
 
                 // 4) 启动 axum HTTP server（优先固定端口，冲突时递增，回填 actual_http_port）
@@ -466,6 +467,18 @@ pub fn run() {
                     state.inner().clone(),
                 );
                 *state.orchestrator_cancel.lock().unwrap() = Some(cancel);
+            }
+
+            // 启动 Orchestrator 远端 outbox dispatcher（每 10 秒尝试投递 pending 远端任务）。
+            // 取消令牌存入 AppState，应用退出时优雅停止。
+            {
+                let state: tauri::State<'_, AppState> = app.state();
+                let cancel =
+                    crate::orchestrator::outbox::start_orchestrator_remote_outbox_dispatcher(
+                        app.handle().clone(),
+                        state.inner().clone(),
+                    );
+                *state.orchestrator_outbox_cancel.lock().unwrap() = Some(cancel);
             }
 
             // 启动健康监测 daemon（采样线程 + 处理 task），取消令牌存入 AppState 供应用退出时优雅停止。
@@ -605,6 +618,13 @@ pub fn run() {
             orchestrator_cmd::list_orchestrator_tasks,
             orchestrator_cmd::create_orchestrator_task,
             orchestrator_cmd::queue_orchestrator_task,
+            orchestrator_cmd::list_orchestrator_task_views,
+            orchestrator_cmd::create_orchestrator_task_view,
+            orchestrator_cmd::queue_orchestrator_task_view,
+            orchestrator_cmd::retry_orchestrator_task_view,
+            orchestrator_cmd::abort_orchestrator_task_view,
+            orchestrator_cmd::list_orchestrator_task_evidence_for_project,
+            orchestrator_cmd::get_orchestrator_config_for_project,
             orchestrator_cmd::get_orchestrator_project_config,
             orchestrator_cmd::list_orchestrator_task_evidence,
             orchestrator_cmd::complete_orchestrator_agent_run,
@@ -702,6 +722,11 @@ pub fn run() {
                 if let Some(t) = state.orchestrator_cancel.lock().unwrap().take() {
                     t.cancel();
                     tracing::info!("Orchestrator scheduler 已停止");
+                }
+                // 停止 Orchestrator 远端 outbox dispatcher
+                if let Some(t) = state.orchestrator_outbox_cancel.lock().unwrap().take() {
+                    t.cancel();
+                    tracing::info!("Orchestrator remote outbox dispatcher 已停止");
                 }
                 // 停止健康监测 daemon（采样线程 + 处理 task）
                 if let Some(t) = state.health_cancel.lock().unwrap().take() {

@@ -116,6 +116,8 @@ pub struct AppState {
     pub orchestrator_repo: Arc<OrchestratorRepo>,
     /// Orchestrator 后台 scheduler 的取消令牌（应用退出时 cancel，停止自动领取任务）
     pub orchestrator_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// Orchestrator 远端 outbox dispatcher 的取消令牌（应用退出时 cancel，停止 pending 远端任务投递）
+    pub orchestrator_outbox_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
 }
 
 impl AppState {
