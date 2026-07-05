@@ -1,10 +1,13 @@
 import {
+  canOpenMobileWorktreeSwitcher,
   canSelectMobileProject,
   canRunMobilePaneMutation,
+  canRunMobileWorktreeDestructiveAction,
   canSwitchMobilePane,
   closeMobileNav,
   getMobileCreatePaneDirection,
   getInitialMobileNavOpen,
+  getMobileWorktreeStatusKind,
   openMobileNav,
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
@@ -173,6 +176,109 @@ function testCanSelectMobileProjectOnlyAllowsLocalProjects(): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   移动端 worktree 列表和 Git 面板需要一致区分 clean、dirty、conflict，且冲突必须盖过普通 dirty 状态。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造 clean/dirty/conflict 和只有 conflicts 计数的样本，断言只有 hasConflicts=true 进入 conflict。
+ */
+function testMobileWorktreeStatusKindPrioritizesConflictThenDirty(): void {
+  const clean = createWorktree({ id: 'clean', name: 'main', isMain: true });
+  const dirty = createWorktree({
+    id: 'dirty',
+    name: 'feature/dirty',
+    status: {
+      branch: 'feature/dirty',
+      changed: 2,
+      ahead: 0,
+      behind: 0,
+      conflicts: 0,
+      clean: false,
+      canPush: false,
+    },
+  });
+  const conflict = createWorktree({
+    id: 'conflict',
+    name: 'feature/conflict',
+    status: {
+      branch: 'feature/conflict',
+      changed: 2,
+      ahead: 0,
+      behind: 0,
+      conflicts: 0,
+      clean: false,
+      canPush: false,
+      hasConflicts: true,
+    } as WorkbenchWorktree['status'] & { hasConflicts: true },
+  });
+  const countedDirty = createWorktree({
+    id: 'counted-dirty',
+    name: 'feature/counted-dirty',
+    status: {
+      branch: 'feature/counted-dirty',
+      changed: 2,
+      ahead: 0,
+      behind: 0,
+      conflicts: 1,
+      clean: false,
+      canPush: false,
+    },
+  });
+  const countedClean = createWorktree({
+    id: 'counted-clean',
+    name: 'feature/counted-clean',
+    status: {
+      branch: 'feature/counted-clean',
+      changed: 0,
+      ahead: 0,
+      behind: 0,
+      conflicts: 1,
+      clean: true,
+      canPush: false,
+    },
+  });
+
+  assertEqual(getMobileWorktreeStatusKind(conflict), 'conflict');
+  assertEqual(getMobileWorktreeStatusKind(countedDirty), 'dirty');
+  assertEqual(getMobileWorktreeStatusKind(countedClean), 'clean');
+  assertEqual(getMobileWorktreeStatusKind(dirty), 'dirty');
+  assertEqual(getMobileWorktreeStatusKind(clean), 'clean');
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端 worktree switcher 只能在本机项目且非加载态时打开，避免用户进入远端未支持路径。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造 null、remote、busy local 和 idle local 场景，断言 switcher 打开条件。
+ */
+function testMobileWorktreeSwitcherRequiresIdleLocalProject(): void {
+  const localProject = createProject({ id: 'local', name: 'local-app', kind: 'local' });
+  const remoteProject = createProject({ id: 'remote', name: 'remote-app', kind: 'remote' });
+
+  assertEqual(canOpenMobileWorktreeSwitcher(null, false), false);
+  assertEqual(canOpenMobileWorktreeSwitcher(remoteProject, false), false);
+  assertEqual(canOpenMobileWorktreeSwitcher(localProject, true), false);
+  assertEqual(canOpenMobileWorktreeSwitcher(localProject, false), true);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端删除、合并等破坏性 worktree 操作不能作用于主工作区，也不能在异步操作占用时重复触发。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造主 worktree、busy feature 和 idle feature，断言破坏性操作可用性。
+ */
+function testMobileWorktreeDestructiveActionRequiresIdleNonMainWorktree(): void {
+  const main = createWorktree({ id: 'main', name: 'main', isMain: true });
+  const feature = createWorktree({ id: 'feature', name: 'feature/mobile', isMain: false });
+
+  assertEqual(canRunMobileWorktreeDestructiveAction(main, false), false);
+  assertEqual(canRunMobileWorktreeDestructiveAction(feature, true), false);
+  assertEqual(canRunMobileWorktreeDestructiveAction(feature, false), true);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   移动端选择项目后应优先进入主工作区，避免默认落到随机 feature worktree。
  *
  * Code Logic（这个函数做什么）:
@@ -319,6 +425,9 @@ testOpenMobileNavReturnsTrue();
 testInitialMobileNavOpenDefaultsToTrue();
 testCloseMobileNavReturnsFalse();
 testCanSelectMobileProjectOnlyAllowsLocalProjects();
+testMobileWorktreeStatusKindPrioritizesConflictThenDirty();
+testMobileWorktreeSwitcherRequiresIdleLocalProject();
+testMobileWorktreeDestructiveActionRequiresIdleNonMainWorktree();
 testPreferredWorktreeUsesMainBeforeFirst();
 testPreferredWorktreeFallsBackToFirstOrNull();
 testPreferredSessionUsesMatchingWorktreeBeforeRunning();

@@ -1,5 +1,9 @@
 import type { WorkbenchGitCommit, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import {
+  DEFAULT_WORKTREE_BRANCH_PREFIX,
+  WORKTREE_BRANCH_PREFIXES,
+} from '@/lib/workbenchWorktreeBranches';
+import {
   activeWorktreeRootPath,
   buildGitGraphRows,
   canCommitWorktree,
@@ -205,6 +209,24 @@ function testComposeWorktreeBranchName(): void {
 
 /**
  * Business Logic（为什么需要这个测试）:
+ *   Workbench 桌面与移动端需要共享同一套 worktree 分支前缀，避免两端创建规则漂移。
+ *
+ * Code Logic（这个测试做什么）:
+ *   直接读取共享库导出的前缀列表和默认前缀，断言它们保持固定顺序与默认值。
+ */
+function testSharedWorktreeBranchPrefixExports(): void {
+  const prefixes = WORKTREE_BRANCH_PREFIXES.join(',');
+
+  if (prefixes !== 'feature,fix,chore,docs,refactor,test,hotfix') {
+    throw new Error(`expected canonical branch prefixes, got ${prefixes}`);
+  }
+  if (DEFAULT_WORKTREE_BRANCH_PREFIX !== 'feature') {
+    throw new Error(`expected feature default prefix, got ${DEFAULT_WORKTREE_BRANCH_PREFIX}`);
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个测试）:
  *   Git 历史 tab 顶部需要显示当前 worktree 的改动数，代替 worktree 顶部主工具区的状态提示。
  *
  * Code Logic（这个测试做什么）:
@@ -381,6 +403,7 @@ testCanCommitWorktreeIgnoresStaleCleanStatus();
 testGitHistoryActionAvailability();
 testNormalizeWorktreeBranchName();
 testComposeWorktreeBranchName();
+testSharedWorktreeBranchPrefixExports();
 testWorktreeChangeCount();
 testFormatCommitRelativeTime();
 testHasGitHistory();
