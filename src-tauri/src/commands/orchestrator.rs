@@ -1005,22 +1005,35 @@ pub async fn dispatch_orchestrator_once(
 /// 标记 Agent 已完成并执行验证命令。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户在 Workbench 中看到 Claude Code 完成后，需要从 Orchestrator 触发项目验证，并把输出归档为 evidence。
+///     用户在 Workbench 中看到 Claude Code 完成后，需要从 Orchestrator 触发项目验证；Phase 7 的终端哨兵也复用同一流程。
 ///
 /// Code Logic（这个函数做什么）:
-///     用 expected-status 原子转移执行 Running->Verifying；之后读取项目验证命令和 worktree cwd，执行验证；
-///     Verifying 后的可预期错误统一写 failed evidence 并置 Blocked，成功写 passed/skipped evidence 并推进 Delivering；
-///     随后立即调用 delivery pipeline，返回最终 Done 或 Blocked 任务 DTO。
+///     Tauri command 只解包 State 和 String，再委托 complete_orchestrator_agent_run_for_state 执行内部 pipeline。
 #[tauri::command]
 pub async fn complete_orchestrator_agent_run(
     state: State<'_, AppState>,
     app_handle: AppHandle,
     task_id: String,
 ) -> Result<OrchestratorTaskDto, AppError> {
+    complete_orchestrator_agent_run_for_state(state.inner(), app_handle, &task_id).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     手动完成按钮和 terminal completion sentinel 必须共用同一验证/交付 pipeline，避免状态机和 evidence 语义分叉。
+///
+/// Code Logic（这个函数做什么）:
+///     用 expected-status 原子转移执行 Running->Verifying；之后读取全局验证命令和 worktree cwd，执行验证；
+///     Verifying 后的可预期错误统一写 failed evidence 并置 Blocked，成功写 passed/skipped evidence 并推进 Delivering；
+///     随后立即调用 delivery pipeline，返回最终 Done 或 Blocked 任务 DTO。
+pub(crate) async fn complete_orchestrator_agent_run_for_state(
+    state: &AppState,
+    app_handle: AppHandle,
+    task_id: &str,
+) -> Result<OrchestratorTaskDto, AppError> {
     let task = state
         .orchestrator_repo
         .transition_task_status(
-            &task_id,
+            task_id,
             OrchestratorTaskStatus::Running,
             OrchestratorTaskStatus::Verifying,
             None,
@@ -1029,7 +1042,7 @@ pub async fn complete_orchestrator_agent_run(
 
     let Some(worktree_id) = task.worktree_id.as_deref() else {
         return block_task_with_verification_failure(
-            state.inner(),
+            state,
             &task.id,
             "任务缺少 worktree，无法运行验证命令。",
         )
@@ -1040,7 +1053,7 @@ pub async fn complete_orchestrator_agent_run(
         Ok(Some(worktree)) => worktree,
         Ok(None) => {
             return block_task_with_verification_failure(
-                state.inner(),
+                state,
                 &task.id,
                 &format!("找不到任务 worktree: {worktree_id}"),
             )
@@ -1048,7 +1061,7 @@ pub async fn complete_orchestrator_agent_run(
         }
         Err(err) => {
             return block_task_with_verification_error(
-                state.inner(),
+                state,
                 &task.id,
                 "读取任务 worktree 失败",
                 err,
@@ -1079,8 +1092,7 @@ pub async fn complete_orchestrator_agent_run(
         if !delivery_transition.transitioned {
             return Ok(OrchestratorTaskDto::from(delivery_transition.task));
         }
-        return run_delivery_for_task(state.inner(), app_handle, &delivery_transition.task.id)
-            .await;
+        return run_delivery_for_task(state, app_handle, &delivery_transition.task.id).await;
     }
 
     match crate::orchestrator::delivery::run_verification_commands(&cwd, &verification_commands)
@@ -1103,11 +1115,9 @@ pub async fn complete_orchestrator_agent_run(
             if !delivery_transition.transitioned {
                 return Ok(OrchestratorTaskDto::from(delivery_transition.task));
             }
-            run_delivery_for_task(state.inner(), app_handle, &delivery_transition.task.id).await
+            run_delivery_for_task(state, app_handle, &delivery_transition.task.id).await
         }
-        Err(err) => {
-            block_task_with_verification_error(state.inner(), &task.id, "验证失败", err).await
-        }
+        Err(err) => block_task_with_verification_error(state, &task.id, "验证失败", err).await,
     }
 }
 

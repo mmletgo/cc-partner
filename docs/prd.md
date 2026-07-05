@@ -242,7 +242,8 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 任务队列按项目隔离，支持创建 Draft、入队、自动验证闭环、Blocked 重试和终止
 - 自动化配置统一放在 Settings 的独立 tab 中，控制 scheduler 启用、最大并发、验证命令、full-auto 交付开关和重试相关行为；运行偏好按设备持久化在全局 AppConfig，不做项目级策略。scheduler、验证和 delivery 运行时均读取全局自动化配置；旧项目策略仅保留为历史展示/调试入口。验证命令以多行文本维护，保存时 trim/filter 空行并限制数量与长度
 - 远端项目的 Orchestrator 任务以远端 cc-partner 为权威来源；本机 remote shortcut 只通过 P2P Orchestrator route 创建、列出、入队、重试、终止和读取 evidence，不把远端任务复制成本机可调度任务。远端设备离线时，本机允许创建 pending remote task，写入本机 outbox 并展示“待发送到远端”；设备恢复在线后后台 dispatcher 自动投递，投递使用稳定 clientRequestId 防止超时重试重复创建，sending 超过 5 分钟会恢复 pending 重试，投递成功后必须在同一事务内保存远端 task id 并更新远端任务 mirror。远端 mirror 只用于离线展示最近快照，本机 scheduler、验证和交付不得消费 mirror 行
-- Runner 必须使用 Workbench 可见的 tmux terminal 和任务 worktree，方便用户随时 takeover 或观察 Claude Code 执行现场
+- Runner 必须使用 Workbench 可见的 tmux terminal 和任务 worktree，方便用户随时 takeover 或观察 Claude Code 执行现场；每轮 Runner attempt 记录 prompt、worktree、session 和状态，首轮创建任务 worktree，后续修复轮复用同一 worktree 并新建终端 session
+- Claude Code 开发 Prompt 必须要求完成代码、测试/验证和必要证据说明后，最后单独输出 `ORCHESTRATOR_DEV_DONE`；后端监听可见开发终端输出，检测到该哨兵后自动进入既有验证/交付流程，手动“完成 Agent 运行”命令仍作为用户 fallback
 - 后端自动执行验证命令并调用验证 Claude 做最终裁决；验证未通过时在同一 worktree 新建 terminal/Claude 继续修复，直到通过或用户终止
 - 目标态验证通过后按全局自动化配置完成 commit、推送任务分支、合并主工作区和推送主分支
 - 任务进入 Blocked 或循环修复时保留原因、worktree/session 入口和 evidence 链；Evidence 记录验证输出、验证 Claude 裁决、修复 Prompt、交付阶段结果和失败摘要，供前端任务看板展示与追溯

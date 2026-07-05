@@ -763,7 +763,7 @@ impl OrchestratorRepo {
     ///     开发 terminal 输出 completion sentinel 后，系统需要标记对应尝试已完成，避免同一轮重复触发验证。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     按 task_id+attempt 更新 status=completed 和 completed_at；找不到记录时返回 not_found。
+    ///     按 task_id+attempt 且当前 status=running 更新 status=completed 和 completed_at；找不到运行中记录时返回 not_found。
     pub async fn mark_attempt_completed(
         &self,
         task_id: &str,
@@ -772,17 +772,18 @@ impl OrchestratorRepo {
         let now = Utc::now().to_rfc3339();
         let result = sqlx::query(
             "UPDATE orchestrator_task_attempts SET status = ?, completed_at = ? \
-             WHERE task_id = ? AND attempt = ?",
+             WHERE task_id = ? AND attempt = ? AND status = ?",
         )
         .bind("completed")
         .bind(&now)
         .bind(task_id)
         .bind(attempt)
+        .bind("running")
         .execute(&self.pool)
         .await?;
         if result.rows_affected() != 1 {
             return Err(AppError::not_found(format!(
-                "Orchestrator 任务尝试不存在: {task_id}#{attempt}"
+                "Orchestrator 运行中任务尝试不存在: {task_id}#{attempt}"
             )));
         }
 
@@ -798,6 +799,65 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     terminal completion hook 只能拿到 Workbench session_id，必须反查当前 running attempt 才能定位 task_id。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 session_id 和 status='running' 查询最新 attempt；缺失返回 None，存在时转换为 OrchestratorTaskAttemptRow。
+    pub async fn get_running_attempt_by_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<OrchestratorTaskAttemptRow>, AppError> {
+        let row = sqlx::query(&format!(
+            "SELECT {ATTEMPT_COLUMNS} FROM orchestrator_task_attempts \
+             WHERE session_id = ? AND status = ? \
+             ORDER BY attempt DESC, created_at DESC LIMIT 1"
+        ))
+        .bind(session_id.trim())
+        .bind("running")
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| row_to_attempt(&row)).transpose()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Runner 创建出某一轮尝试的 worktree 和 terminal 后，需要把 active session 与 attempt 写回任务行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当任务仍为 Preparing 时写入 branch/worktree/session/attempt，把状态切到 Running；未命中时返回当前任务。
+    pub async fn mark_task_running_attempt(
+        &self,
+        task_id: &str,
+        branch_name: &str,
+        worktree_id: &str,
+        session_id: &str,
+        attempt: i64,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        if attempt <= 0 {
+            return Err(AppError::generic("任务尝试轮次必须大于 0"));
+        }
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, branch_name = ?, worktree_id = ?, session_id = ?, attempt = ?, \
+                 blocked_reason = ?, started_at = COALESCE(started_at, ?), updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(OrchestratorTaskStatus::Running.as_str())
+        .bind(branch_name)
+        .bind(worktree_id)
+        .bind(session_id)
+        .bind(attempt)
+        .bind(Option::<&str>::None)
+        .bind(&now)
+        .bind(now.clone())
+        .bind(task_id)
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .execute(&self.pool)
+        .await?;
+        self.get_task(task_id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     Runner 创建出任务 worktree 和 terminal 后，需要把可接管现场持久化到任务行。
     ///
     /// Code Logic（这个函数做什么）:
@@ -810,25 +870,8 @@ impl OrchestratorRepo {
         worktree_id: &str,
         session_id: &str,
     ) -> Result<OrchestratorTaskRow, AppError> {
-        let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE orchestrator_tasks \
-             SET status = ?, branch_name = ?, worktree_id = ?, session_id = ?, \
-                 blocked_reason = ?, started_at = COALESCE(started_at, ?), updated_at = ? \
-             WHERE id = ? AND status = ?",
-        )
-        .bind(OrchestratorTaskStatus::Running.as_str())
-        .bind(branch_name)
-        .bind(worktree_id)
-        .bind(session_id)
-        .bind(Option::<&str>::None)
-        .bind(&now)
-        .bind(now.clone())
-        .bind(task_id)
-        .bind(OrchestratorTaskStatus::Preparing.as_str())
-        .execute(&self.pool)
-        .await?;
-        self.get_task(task_id).await
+        self.mark_task_running_attempt(task_id, branch_name, worktree_id, session_id, 1)
+            .await
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2559,6 +2602,55 @@ mod tests {
         assert_eq!(completed.session_id, "session-1");
         assert_eq!(completed.prompt, "implement task\nORCHESTRATOR_DEV_DONE");
         assert!(completed.completed_at.is_some());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     completion hook 只拿得到 Workbench session_id，必须能反查仍在 running 的 attempt 才能定位 task。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入 running 和 completed 两条 attempt，断言只返回 session 匹配且 status=running 的记录。
+    #[tokio::test]
+    async fn get_running_attempt_by_session_returns_only_running_attempt() {
+        let (_pool, repo) = setup_repo().await;
+        let running = repo
+            .add_attempt(
+                "task-running",
+                1,
+                "worktree-1",
+                "session-running",
+                "prompt",
+                "running",
+            )
+            .await
+            .unwrap();
+        repo.add_attempt(
+            "task-completed",
+            1,
+            "worktree-2",
+            "session-completed",
+            "prompt",
+            "running",
+        )
+        .await
+        .unwrap();
+        repo.mark_attempt_completed("task-completed", 1)
+            .await
+            .unwrap();
+
+        let found = repo
+            .get_running_attempt_by_session("session-running")
+            .await
+            .unwrap()
+            .expect("running attempt");
+        let completed = repo
+            .get_running_attempt_by_session("session-completed")
+            .await
+            .unwrap();
+
+        assert_eq!(found.id, running.id);
+        assert_eq!(found.task_id, "task-running");
+        assert_eq!(found.status, "running");
+        assert!(completed.is_none());
     }
 
     /// Business Logic（为什么需要这个函数）:

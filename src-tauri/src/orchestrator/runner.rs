@@ -14,7 +14,9 @@ use crate::commands::workbench::{
 };
 use crate::error::AppError;
 use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
-use crate::orchestrator::prompt::build_task_prompt;
+use crate::orchestrator::prompt::{
+    build_initial_task_prompt, build_repair_task_prompt, RepairPromptContext,
+};
 use crate::state::AppState;
 use tauri::AppHandle;
 
@@ -23,16 +25,80 @@ const TASK_BRANCH_MAX_LEN: usize = 80;
 const DEFAULT_TERMINAL_COLS: u16 = 120;
 const DEFAULT_TERMINAL_ROWS: u16 = 32;
 
+/// Runner 使用的 worktree 现场。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     初始轮次会创建新 worktree，修复轮次会复用旧 worktree；后续创建 session 和生成 prompt 都只需要 id/path。
+///
+/// Code Logic（这个结构体做什么）:
+///     将 Workbench DTO/Row 的 id 与 path 投影为 Runner 内部最小结构，避免公开依赖具体 Workbench 类型。
+struct RunnerWorktree {
+    id: String,
+    path: String,
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     调度器领取任务后，需要创建隔离 worktree 和可见终端，并把 Claude Code 任务 Prompt 写入现场。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验任务绑定本机 Workbench 项目，生成安全分支名，复用 Workbench 本机 helper 创建 worktree/session，
-///     先用 Preparing 条件更新把任务状态和现场 id 持久化为 Running；只有挂账成功后才写入 `claude` 与任务 Prompt。
+///     兼容旧 scheduler 调用点，转发到首轮 Runner 准备逻辑。
 pub async fn prepare_visible_runner(
     state: &AppState,
     app_handle: AppHandle,
     task: &OrchestratorTaskRow,
+) -> Result<OrchestratorTaskRow, AppError> {
+    prepare_initial_runner(state, app_handle, task).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     首轮 Runner 需要创建新的隔离 worktree 和可见终端，并注入初始任务 Prompt。
+///
+/// Code Logic（这个函数做什么）:
+///     以 attempt=1 调用统一 attempt 准备流程；prompt 由 prepare_runner_attempt 在 worktree 路径确定后生成。
+pub async fn prepare_initial_runner(
+    state: &AppState,
+    app_handle: AppHandle,
+    task: &OrchestratorTaskRow,
+) -> Result<OrchestratorTaskRow, AppError> {
+    prepare_runner_attempt(state, app_handle, task, String::new(), 1).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     后续 verifier/repair loop 需要在同一 worktree 中开启新终端执行修复 Prompt，Phase 7 先预留该入口。
+///
+/// Code Logic（这个函数做什么）:
+///     读取任务当前 worktree 路径生成 repair Prompt，并以 task.attempt+1 的修复轮次调用统一 attempt 准备流程。
+#[allow(dead_code)]
+pub async fn prepare_repair_runner(
+    state: &AppState,
+    app_handle: AppHandle,
+    task: &OrchestratorTaskRow,
+    context: RepairPromptContext<'_>,
+) -> Result<OrchestratorTaskRow, AppError> {
+    let attempt = (task.attempt + 1).max(2);
+    let worktree_id = worktree_seed_for_attempt(task, attempt)?
+        .ok_or_else(|| AppError::generic("修复轮次缺少可复用 worktree"))?;
+    let worktree = state
+        .workbench_worktree_repo
+        .get(&worktree_id)
+        .await?
+        .ok_or_else(|| AppError::not_found(format!("任务 worktree 不存在: {worktree_id}")))?;
+    let prompt = build_repair_task_prompt(task, &worktree.path, &context);
+    prepare_runner_attempt(state, app_handle, task, prompt, attempt).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     每一轮 Runner attempt 都要创建新的 terminal session，并记录 prompt/worktree/session 到 attempt history。
+///
+/// Code Logic（这个函数做什么）:
+///     校验本机项目；attempt=1 创建新 worktree，attempt>1 复用 task.worktree_id；随后创建 session，
+///     用 Preparing 条件更新任务 active runner 字段，写入 running attempt 记录，最后按 `claude\n`、prompt 顺序写终端。
+pub async fn prepare_runner_attempt(
+    state: &AppState,
+    app_handle: AppHandle,
+    task: &OrchestratorTaskRow,
+    prompt: String,
+    attempt: i64,
 ) -> Result<OrchestratorTaskRow, AppError> {
     let project = state
         .workbench_project_repo
@@ -45,10 +111,11 @@ pub async fn prepare_visible_runner(
         ));
     }
 
-    let branch_name = task_branch_name(&task.id, &task.title);
-    let worktree =
-        local_create_workbench_worktree(state, task.project_id.clone(), branch_name.clone(), None)
-            .await?;
+    let branch_name = task
+        .branch_name
+        .clone()
+        .unwrap_or_else(|| task_branch_name(&task.id, &task.title));
+    let worktree = prepare_worktree_for_attempt(state, task, &branch_name, attempt).await?;
     let session = local_create_workbench_session(
         state,
         app_handle,
@@ -61,17 +128,96 @@ pub async fn prepare_visible_runner(
 
     let running_task = state
         .orchestrator_repo
-        .mark_task_running(&task.id, &branch_name, &worktree.id, &session.id)
+        .mark_task_running_attempt(&task.id, &branch_name, &worktree.id, &session.id, attempt)
         .await?;
     if running_task.status != OrchestratorTaskStatus::Running {
         return Ok(running_task);
     }
 
+    let prompt = if prompt.trim().is_empty() {
+        build_initial_task_prompt(task, &worktree.path)
+    } else {
+        prompt
+    };
+    state
+        .orchestrator_repo
+        .add_attempt(
+            &task.id,
+            attempt,
+            &worktree.id,
+            &session.id,
+            &prompt,
+            "running",
+        )
+        .await?;
     local_write_workbench_session_input(state, session.id.clone(), "claude\n".to_string()).await?;
-    let prompt = build_task_prompt(task, &worktree.path);
     local_write_workbench_session_input(state, session.id.clone(), format!("{prompt}\n")).await?;
 
     Ok(running_task)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Runner attempt 的 worktree 策略必须稳定：首轮新建，修复轮复用，避免修复丢失上一轮文件改动。
+///
+/// Code Logic（这个函数做什么）:
+///     attempt=1 返回 None 表示需要新建 worktree；attempt>1 返回 task.worktree_id，缺失时给业务错误。
+fn worktree_seed_for_attempt(
+    task: &OrchestratorTaskRow,
+    attempt: i64,
+) -> Result<Option<String>, AppError> {
+    if attempt <= 0 {
+        return Err(AppError::generic("任务尝试轮次必须大于 0"));
+    }
+    if attempt == 1 {
+        return Ok(None);
+    }
+    task.worktree_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| Some(value.to_string()))
+        .ok_or_else(|| AppError::generic("修复轮次缺少已有 worktree，无法继续执行"))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     prepare_runner_attempt 需要把 attempt worktree 选择转换为可创建 session 和生成 prompt 的 id/path。
+///
+/// Code Logic（这个函数做什么）:
+///     首轮调用 Workbench helper 创建新 worktree；修复轮按 task.worktree_id 读取已有 worktree row 并投影为 RunnerWorktree。
+async fn prepare_worktree_for_attempt(
+    state: &AppState,
+    task: &OrchestratorTaskRow,
+    branch_name: &str,
+    attempt: i64,
+) -> Result<RunnerWorktree, AppError> {
+    match worktree_seed_for_attempt(task, attempt)? {
+        None => {
+            let worktree = local_create_workbench_worktree(
+                state,
+                task.project_id.clone(),
+                branch_name.to_string(),
+                None,
+            )
+            .await?;
+            Ok(RunnerWorktree {
+                id: worktree.id,
+                path: worktree.path,
+            })
+        }
+        Some(worktree_id) => {
+            let worktree = state
+                .workbench_worktree_repo
+                .get(&worktree_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::not_found(format!("任务 worktree 不存在: {worktree_id}"))
+                })?;
+            Ok(RunnerWorktree {
+                id: worktree.id,
+                path: worktree.path,
+            })
+        }
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -147,6 +293,34 @@ fn truncate_slug(slug: &str, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Runner attempt 规则测试需要完整任务 Row，避免只测试零散字段。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造带可选 worktree_id 和 attempt 的 Preparing 任务。
+    fn runner_task_row(worktree_id: Option<&str>, attempt: i64) -> OrchestratorTaskRow {
+        OrchestratorTaskRow {
+            id: "task-1".to_string(),
+            project_id: "project-1".to_string(),
+            title: "Fix runner attempts".to_string(),
+            goal: "goal".to_string(),
+            acceptance_criteria: "criteria".to_string(),
+            status: OrchestratorTaskStatus::Preparing,
+            priority: 0,
+            branch_name: Some("agent/task-1".to_string()),
+            worktree_id: worktree_id.map(str::to_string),
+            session_id: None,
+            blocked_reason: None,
+            attempt,
+            created_at: "2026-07-05T00:00:00Z".to_string(),
+            updated_at: "2026-07-05T00:00:00Z".to_string(),
+            started_at: None,
+            finished_at: None,
+        }
+    }
+
     /// Business Logic（为什么需要这个函数）:
     ///     Orchestrator 自动创建的任务分支必须是 Git branch 安全字符串，避免标题中的空格和标点
     ///     破坏 `git worktree add -b`。
@@ -178,5 +352,36 @@ mod tests {
         assert!(branch.len() <= 80);
         assert!(!branch.ends_with('-'));
         assert!(branch.starts_with("agent/taskabcd-"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     首轮 Runner 必须创建新 worktree，而修复轮必须复用任务已有 worktree，避免修复在新目录里丢失上一轮改动。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用 attempt worktree 选择 helper，断言 attempt=1 返回 None，attempt>1 返回已有 worktree。
+    #[test]
+    fn runner_attempt_worktree_seed_reuses_existing_worktree_after_first_attempt() {
+        let first = runner_task_row(None, 0);
+        let repair = runner_task_row(Some("worktree-1"), 1);
+
+        assert_eq!(super::worktree_seed_for_attempt(&first, 1).unwrap(), None);
+        assert_eq!(
+            super::worktree_seed_for_attempt(&repair, 2).unwrap(),
+            Some("worktree-1".to_string())
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     修复轮缺少 task.worktree_id 时不能悄悄创建新 worktree，否则验证/交付会脱离上一轮现场。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     对 attempt>1 且没有 worktree_id 的任务调用 helper，断言返回中文业务错误。
+    #[test]
+    fn runner_attempt_worktree_seed_requires_worktree_after_first_attempt() {
+        let task = runner_task_row(None, 1);
+
+        let error = super::worktree_seed_for_attempt(&task, 2).expect_err("missing worktree");
+
+        assert!(error.to_string().contains("worktree"));
     }
 }

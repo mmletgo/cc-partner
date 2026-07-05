@@ -1986,9 +1986,14 @@ fn emit_terminal_output(
         ts: now_millis(),
     };
     publish_workbench_remote_event(app, WorkbenchRemoteEvent::TerminalOutput(event.clone()));
-    if let Err(error) = app.emit("workbench:terminal-output", event) {
+    if let Err(error) = app.emit("workbench:terminal-output", event.clone()) {
         tracing::warn!("发送工作台终端输出事件失败: {error}");
     }
+    crate::orchestrator::completion::spawn_maybe_handle_session_output(
+        app.clone(),
+        session_id.to_string(),
+        event.chunk.clone(),
+    );
 }
 
 /// Business Logic（为什么需要这个函数）:
