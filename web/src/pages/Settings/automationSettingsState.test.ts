@@ -2,6 +2,7 @@ import type { OrchestratorAutomationConfig } from '@/api/orchestratorConfig';
 import {
   automationConfigToForm,
   automationFormToPatch,
+  clampAutomationMaxConcurrentTasks,
   commandsToTextarea,
   isAutomationFormDirty,
   PENDING_AUTOMATION_SETTINGS_FORM,
@@ -61,6 +62,10 @@ function configFixture(
 
 assertDeepEqual(commandsToTextarea(['cargo test', 'npm run lint']), 'cargo test\nnpm run lint');
 assertDeepEqual(textareaToCommandsText('cargo test\r\n\nnpm run lint'), 'cargo test\n\nnpm run lint');
+assertDeepEqual(clampAutomationMaxConcurrentTasks(Number.NaN), 1);
+assertDeepEqual(clampAutomationMaxConcurrentTasks(0), 1);
+assertDeepEqual(clampAutomationMaxConcurrentTasks(2.8), 2);
+assertDeepEqual(clampAutomationMaxConcurrentTasks(9), 8);
 
 const pending = automationConfigToForm(null);
 assertDeepEqual(pending, PENDING_AUTOMATION_SETTINGS_FORM);
@@ -77,6 +82,8 @@ assertDeepEqual(loaded, {
   autoPushMain: false,
 });
 
+assertDeepEqual(automationConfigToForm(configFixture({ maxConcurrentTasks: 99 })).maxConcurrentTasks, 8);
+
 assertDeepEqual(automationFormToPatch(loaded), {
   enabled: true,
   maxConcurrentTasks: 2,
@@ -86,6 +93,14 @@ assertDeepEqual(automationFormToPatch(loaded), {
   autoMergeToMain: true,
   autoPushMain: false,
 });
+
+assertDeepEqual(
+  automationFormToPatch({
+    ...loaded,
+    maxConcurrentTasks: -4,
+  }).maxConcurrentTasks,
+  1,
+);
 
 assertDeepEqual(isAutomationFormDirty(loaded, loaded), false);
 assertDeepEqual(

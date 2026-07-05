@@ -25,6 +25,9 @@ export const PENDING_AUTOMATION_SETTINGS_FORM: AutomationSettingsForm = {
   autoPushMain: false,
 };
 
+const AUTOMATION_MAX_CONCURRENT_TASKS_MIN = 1;
+const AUTOMATION_MAX_CONCURRENT_TASKS_MAX = 8;
+
 /**
  * 将验证命令数组转换为 textarea 文本
  *
@@ -53,6 +56,26 @@ export function textareaToCommandsText(value: string): string {
 }
 
 /**
+ * 约束自动化并发任务上限
+ *
+ * Business Logic（为什么需要）:
+ *   Settings 自动化 tab 允许用户手动输入项目并发上限，前端需要即时收敛到后端允许的 1..8 范围，
+ *   避免用户保存时才收到可预期的范围错误。
+ *
+ * Code Logic（做什么）:
+ *   将非有限数字回退为下限；对有限数字取整数后夹在 1..8 之间，返回可直接写回受控 input 的值。
+ */
+export function clampAutomationMaxConcurrentTasks(value: number): number {
+  const normalized = Number.isFinite(value)
+    ? Math.trunc(value)
+    : AUTOMATION_MAX_CONCURRENT_TASKS_MIN;
+  return Math.min(
+    AUTOMATION_MAX_CONCURRENT_TASKS_MAX,
+    Math.max(AUTOMATION_MAX_CONCURRENT_TASKS_MIN, normalized),
+  );
+}
+
+/**
  * 将后端 Orchestrator 自动化配置映射为 Settings 表单
  *
  * Business Logic（为什么需要）:
@@ -67,7 +90,7 @@ export function automationConfigToForm(
   if (!config) return { ...PENDING_AUTOMATION_SETTINGS_FORM };
   return {
     enabled: config.enabled,
-    maxConcurrentTasks: config.maxConcurrentTasks,
+    maxConcurrentTasks: clampAutomationMaxConcurrentTasks(config.maxConcurrentTasks),
     verificationCommandsText: commandsToTextarea(config.verificationCommands),
     autoCommit: config.autoCommit,
     autoPushTaskBranch: config.autoPushTaskBranch,
@@ -90,7 +113,7 @@ export function automationFormToPatch(
 ): OrchestratorAutomationConfigPatch {
   return {
     enabled: form.enabled,
-    maxConcurrentTasks: form.maxConcurrentTasks,
+    maxConcurrentTasks: clampAutomationMaxConcurrentTasks(form.maxConcurrentTasks),
     verificationCommands: textareaToCommandsText(form.verificationCommandsText),
     autoCommit: form.autoCommit,
     autoPushTaskBranch: form.autoPushTaskBranch,

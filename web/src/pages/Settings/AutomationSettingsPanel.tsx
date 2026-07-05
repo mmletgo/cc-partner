@@ -9,12 +9,15 @@
  *   复用 Settings 通用 Card/field/toggle/footer 样式渲染受控表单；所有字段变更通过 onChange
  *   回传完整 nextForm，不直接调用后端，不持有副作用状态。
  */
-import type { ChangeEvent } from 'react';
+import type { ChangeEvent, ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Button, Input, Pill } from '@/components/primitives';
 import { CheckIcon, XIcon } from '@/lib/icons';
 import type { AutomationSettingsForm } from './automationSettingsState';
-import { isAutomationFormDirty } from './automationSettingsState';
+import {
+  clampAutomationMaxConcurrentTasks,
+  isAutomationFormDirty,
+} from './automationSettingsState';
 import styles from './Settings.module.css';
 
 interface AutomationSettingsPanelProps {
@@ -54,7 +57,7 @@ interface ToggleRowProps {
  * Code Logic（这个组件做什么）:
  *   使用 button(role=switch) 承载点击交互；checked 决定 Pill tone 与图标，onToggle 回传取反值。
  */
-function ToggleRow({ label, helper, checked, onToggle }: ToggleRowProps) {
+function ToggleRow({ label, helper, checked, onToggle }: ToggleRowProps): ReactElement {
   return (
     <button
       type="button"
@@ -104,7 +107,7 @@ export function AutomationSettingsPanel({
   onChange,
   onResetDefaults,
   onSave,
-}: AutomationSettingsPanelProps) {
+}: AutomationSettingsPanelProps): ReactElement {
   const { t } = useTranslation(['settings', 'common']);
   const resetDisabled = saving || !isAutomationFormDirty(form, defaults);
 
@@ -135,9 +138,13 @@ export function AutomationSettingsPanel({
               type="number"
               min={1}
               max={8}
+              step={1}
               value={form.maxConcurrentTasks}
               onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                onChange({ ...form, maxConcurrentTasks: Number(e.target.value) || 1 })
+                onChange({
+                  ...form,
+                  maxConcurrentTasks: clampAutomationMaxConcurrentTasks(Number(e.target.value)),
+                })
               }
               mono
             />
