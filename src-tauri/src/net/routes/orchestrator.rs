@@ -598,6 +598,153 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     taskId-only 远端路由也必须拒绝 remote shortcut 项目，避免递归代理到第三台设备。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建 remote kind 项目与关联任务，调用 evidence helper 并断言 route guard 返回协议错误。
+    #[tokio::test]
+    async fn task_id_only_routes_reject_remote_shortcut_project() {
+        let state = test_state().await;
+        insert_project(&state, "remote-project", "remote").await;
+        create_test_task(
+            &state,
+            "remote-task",
+            "remote-project",
+            OrchestratorTaskStatus::Draft,
+        )
+        .await;
+
+        let error = get_evidence_for_state(
+            &state,
+            RemoteTaskReq {
+                task_id: "remote-task".to_string(),
+            },
+        )
+        .await
+        .expect_err("remote shortcut task must be rejected");
+
+        assert_eq!(error.to_string(), "远端 Orchestrator 只接受对端本机项目");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     queue/abort 这类写操作同样只携带 taskId，必须在写状态前拒绝 remote shortcut 任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建 remote kind 项目与两个任务，分别调用 queue/abort helper 并断言都被 project guard 拦截。
+    #[tokio::test]
+    async fn task_id_write_routes_reject_remote_shortcut_project() {
+        let state = test_state().await;
+        insert_project(&state, "remote-project", "remote").await;
+        create_test_task(
+            &state,
+            "remote-draft",
+            "remote-project",
+            OrchestratorTaskStatus::Draft,
+        )
+        .await;
+        create_test_task(
+            &state,
+            "remote-queued",
+            "remote-project",
+            OrchestratorTaskStatus::Queued,
+        )
+        .await;
+
+        let queue_error = queue_task_for_state(
+            &state,
+            RemoteTaskReq {
+                task_id: "remote-draft".to_string(),
+            },
+        )
+        .await
+        .expect_err("remote shortcut task must be rejected before queue");
+        let abort_error = abort_task_for_state(
+            &state,
+            RemoteTaskReq {
+                task_id: "remote-queued".to_string(),
+            },
+        )
+        .await
+        .expect_err("remote shortcut task must be rejected before abort");
+
+        assert_eq!(
+            queue_error.to_string(),
+            "远端 Orchestrator 只接受对端本机项目"
+        );
+        assert_eq!(
+            abort_error.to_string(),
+            "远端 Orchestrator 只接受对端本机项目"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     remote shortcut 的 retry 操作只能把 owning device 上的 Blocked 任务重新排队。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 blocked 任务后调用 retry helper，断言返回和持久化状态均为 Queued。
+    #[tokio::test]
+    async fn retry_task_moves_blocked_task_to_queued() {
+        let state = test_state().await;
+        insert_project(&state, "project-1", "local").await;
+        create_test_task(
+            &state,
+            "task-1",
+            "project-1",
+            OrchestratorTaskStatus::Blocked,
+        )
+        .await;
+
+        let task = retry_task_for_state(
+            &state,
+            RemoteTaskReq {
+                task_id: "task-1".to_string(),
+            },
+        )
+        .await
+        .expect("retry task");
+
+        assert_eq!(task.status, OrchestratorTaskStatus::Queued);
+        let stored = state
+            .orchestrator_repo
+            .get_task("task-1")
+            .await
+            .expect("stored task");
+        assert_eq!(stored.status, OrchestratorTaskStatus::Queued);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     retry 不能把 Draft/Queued/Running/Done 等非 Blocked 任务回退到队列。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 Draft 任务后调用 retry helper，断言返回状态错误且数据库状态未被修改。
+    #[tokio::test]
+    async fn retry_task_rejects_non_blocked_task_without_mutating_status() {
+        let state = test_state().await;
+        insert_project(&state, "project-1", "local").await;
+        create_test_task(&state, "task-1", "project-1", OrchestratorTaskStatus::Draft).await;
+
+        let error = retry_task_for_state(
+            &state,
+            RemoteTaskReq {
+                task_id: "task-1".to_string(),
+            },
+        )
+        .await
+        .expect_err("draft task must not retry");
+
+        assert_eq!(
+            error.to_string(),
+            "任务状态已变化，无法从 blocked 切换到 queued，当前状态为 draft"
+        );
+        let stored = state
+            .orchestrator_repo
+            .get_task("task-1")
+            .await
+            .expect("stored task");
+        assert_eq!(stored.status, OrchestratorTaskStatus::Draft);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     用户在远端 shortcut 上终止任务时，实际 owning device 必须把权威任务置为 Aborted。
     ///
     /// Code Logic（这个测试做什么）:

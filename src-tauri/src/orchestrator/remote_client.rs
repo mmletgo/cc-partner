@@ -414,4 +414,48 @@ mod tests {
             "http://127.0.0.1:62116/api/orchestrator/tasks/create"
         );
     }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端 Orchestrator 业务错误由对端序列化为 `{error}`，本机 UI 应展示对端原始中文文案。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     直接调用错误解析 helper，断言 JSON error 字段优先于 HTTP 状态包装。
+    #[test]
+    fn remote_error_message_prefers_json_error_field() {
+        let message = remote_error_message(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":"远端 Orchestrator 项目不存在"}"#,
+        );
+
+        assert_eq!(message, "远端 Orchestrator 项目不存在");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     对端代理或崩溃时可能返回非 JSON 正文，客户端仍要给出可读且有限长度的错误。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     传入非 JSON 正文，断言错误包含 HTTP 状态和正文摘要。
+    #[test]
+    fn remote_error_message_falls_back_to_status_and_body() {
+        let message = remote_error_message(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom");
+
+        assert_eq!(
+            message,
+            "远端 Orchestrator 请求失败: HTTP 500 Internal Server Error: boom"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端 HTML/堆栈正文可能很长，错误展示必须避免把超长正文整段塞进 UI。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     传入超过限制的正文，断言截断结果追加省略号且长度可控。
+    #[test]
+    fn truncate_error_body_adds_ellipsis_when_body_is_too_long() {
+        let body = "x".repeat(REMOTE_ERROR_BODY_MAX_CHARS + 1);
+        let truncated = truncate_error_body(&body);
+
+        assert!(truncated.ends_with("..."));
+        assert_eq!(truncated.chars().count(), REMOTE_ERROR_BODY_MAX_CHARS + 3);
+    }
 }
