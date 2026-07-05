@@ -22,6 +22,12 @@ import {
   shouldForwardMobileTerminalInput,
 } from '../mobileTerminalReplay';
 import {
+  beginMobileTerminalTouchScroll,
+  mobileTerminalTouchLineHeight,
+  updateMobileTerminalTouchScroll,
+  type MobileTerminalTouchScrollState,
+} from '../mobileTerminalTouchScroll';
+import {
   canRunMobilePaneMutation,
   canSwitchMobilePane,
   getMobileCreatePaneDirection,
@@ -152,6 +158,7 @@ export function MobileTerminalPanel({
   const replayRequestIdRef = useRef<number>(0);
   const lastResizeRef = useRef<{ sessionId: string; cols: number; rows: number } | null>(null);
   const lastFocusedSessionIdRef = useRef<string | null>(null);
+  const touchScrollStateRef = useRef<MobileTerminalTouchScrollState | null>(null);
 
   const scopedSessions = useMemo(
     () =>
@@ -381,6 +388,51 @@ export function MobileTerminalPanel({
       });
     });
 
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   终端区域的移动端滑动必须留在 xterm 内部，否则浏览器会把它当页面滚动并显示/隐藏地址栏。
+     *
+     * Code Logic（这个函数做什么）:
+     *   读取当前 viewport 与 xterm rows 得到行高，交给 touch helper 累计像素并调用 terminal.scrollLines。
+     */
+    const handleTouchMove = (event: TouchEvent): void => {
+      if (event.touches.length !== 1) {
+        touchScrollStateRef.current = null;
+        return;
+      }
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+      event.stopPropagation();
+      const touch = event.touches[0];
+      const baseState =
+        touchScrollStateRef.current ?? beginMobileTerminalTouchScroll(touch.clientY);
+      const fallbackLineHeight =
+        Number(terminal.options.fontSize ?? 13) * Number(terminal.options.lineHeight ?? 1);
+      const result = updateMobileTerminalTouchScroll(
+        baseState,
+        touch.clientY,
+        mobileTerminalTouchLineHeight(viewport.clientHeight, terminal.rows, fallbackLineHeight),
+      );
+      touchScrollStateRef.current = result.state;
+      if (result.lines !== 0) {
+        terminal.scrollLines(result.lines);
+      }
+    };
+    const handleTouchStart = (event: TouchEvent): void => {
+      touchScrollStateRef.current =
+        event.touches.length === 1
+          ? beginMobileTerminalTouchScroll(event.touches[0].clientY)
+          : null;
+    };
+    const resetTouchScroll = (): void => {
+      touchScrollStateRef.current = null;
+    };
+    viewport.addEventListener('touchstart', handleTouchStart, { passive: true });
+    viewport.addEventListener('touchmove', handleTouchMove, { passive: false });
+    viewport.addEventListener('touchend', resetTouchScroll, { passive: true });
+    viewport.addEventListener('touchcancel', resetTouchScroll, { passive: true });
+
     const observer = new ResizeObserver(() => {
       if (resizeTimerRef.current !== null) {
         window.clearTimeout(resizeTimerRef.current);
@@ -421,6 +473,11 @@ export function MobileTerminalPanel({
       disposed = true;
       observer.disconnect();
       dataDisposable.dispose();
+      viewport.removeEventListener('touchstart', handleTouchStart);
+      viewport.removeEventListener('touchmove', handleTouchMove);
+      viewport.removeEventListener('touchend', resetTouchScroll);
+      viewport.removeEventListener('touchcancel', resetTouchScroll);
+      touchScrollStateRef.current = null;
       if (resizeTimerRef.current !== null) {
         window.clearTimeout(resizeTimerRef.current);
         resizeTimerRef.current = null;
