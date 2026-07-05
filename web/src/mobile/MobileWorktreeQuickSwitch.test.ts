@@ -1,14 +1,28 @@
 import { register } from 'node:module';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import type { ComponentType, ReactNode } from 'react';
 import type { TFunction } from 'i18next';
 import type { WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
+import type { MobileWorkbenchPanel } from './mobileWorkbenchState';
 
 register('../pages/Settings/css-stub.mjs', import.meta.url);
 
 const { default: i18n } = await import('../i18n');
 await i18n.changeLanguage('zh');
 const { MobileWorktreeQuickSwitch } = await import('./components/MobileWorktreeQuickSwitch');
+const { MobileWorkbenchShell } = await import('./components/MobileWorkbenchShell');
+
+type TestableMobileWorkbenchShellProps = {
+  panel: MobileWorkbenchPanel;
+  project: string | null;
+  worktree: string | null;
+  session: string | null;
+  worktreeStatusDisabled?: boolean;
+  onWorktreeStatusClick?: () => void;
+  onPanelChange: (panel: MobileWorkbenchPanel) => void;
+  children?: ReactNode;
+};
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -142,5 +156,27 @@ const emptyMarkup = renderToStaticMarkup(
   createElement(MobileWorktreeQuickSwitch, { ...baseProps, worktrees: [] }),
 );
 assertIncludes(emptyMarkup, '暂无 worktree', 'quick switch should render empty state');
+
+const TestableMobileWorkbenchShell = MobileWorkbenchShell as ComponentType<
+  TestableMobileWorkbenchShellProps
+>;
+const shellMarkup = renderToStaticMarkup(
+  createElement(
+    TestableMobileWorkbenchShell,
+    {
+      panel: 'terminal',
+      project: 'cc-partner',
+      worktree: 'feature/mobile',
+      session: 'shell',
+      worktreeStatusDisabled: true,
+      onWorktreeStatusClick: () => undefined,
+      onPanelChange: () => undefined,
+    },
+    createElement('section', null, 'panel'),
+  ),
+);
+assertIncludes(shellMarkup, 'aria-haspopup="dialog"', 'worktree status pill should open a dialog');
+assertIncludes(shellMarkup, 'disabled=""', 'disabled worktree status button should be disabled');
+assertIncludes(shellMarkup, 'feature/mobile', 'worktree status button should render worktree name');
 
 console.log('MobileWorktreeQuickSwitch.test.ts passed');

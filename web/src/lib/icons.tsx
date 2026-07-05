@@ -170,6 +170,19 @@ export const ChevronRightIcon = ({ size, ...rest }: IconProps) => (
   </svg>
 );
 
+/**
+ * Business Logic（为什么需要）:
+ *   移动端 Workbench 顶部 worktree pill 需要下拉提示图标，表明可打开快速切换 sheet。
+ *
+ * Code Logic（做什么）:
+ *   渲染向下 chevron 的 16x16 stroke SVG，并复用 baseProps 保持尺寸、描边和 viewBox 一致。
+ */
+export const ChevronDownIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="m4 6 4 4 4-4" />
+  </svg>
+);
+
 export const StopIcon = ({ size, ...rest }: IconProps) => (
   <svg {...baseProps(size)} {...rest}>
     <rect x="4" y="4" width="8" height="8" rx="1.2" />

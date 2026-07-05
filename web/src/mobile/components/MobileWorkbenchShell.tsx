@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import type { ComponentType, ReactElement, ReactNode, SVGProps } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  ChevronDownIcon,
   FileIcon,
   FolderIcon,
   ForkIcon,
@@ -43,6 +44,8 @@ export interface MobileWorkbenchShellProps {
   project: string | null;
   worktree: string | null;
   session: string | null;
+  worktreeStatusDisabled?: boolean;
+  onWorktreeStatusClick?: () => void;
   onPanelChange: (panel: MobileWorkbenchPanel) => void;
   children: ReactNode;
 }
@@ -101,20 +104,25 @@ function MobilePanelNav({ activePanel, onSelect }: MobilePanelNavProps): ReactEl
  *
  * Business Logic（为什么需要这个组件）:
  *   `/mobile` 需要在手机竖屏提供覆盖式抽屉导航，在平板/桌面宽屏提供固定 rail，给后续业务面板统一承载容器。
+ *   顶部状态行还需要把当前 worktree 暴露为可选的 quick switch 入口。
  *
  * Code Logic（这个组件做什么）:
  *   管理移动抽屉 open state，使用 mobileWorkbenchState helper 切换面板/开关抽屉，并渲染 topbar、drawer、rail 与内容区。
+ *   当父组件提供 onWorktreeStatusClick 时，将 worktree pill 渲染为 dialog 触发按钮，否则保持静态状态文本。
  */
 export function MobileWorkbenchShell({
   panel,
   project,
   worktree,
   session,
+  worktreeStatusDisabled = false,
+  onWorktreeStatusClick,
   onPanelChange,
   children,
 }: MobileWorkbenchShellProps): ReactElement {
   const [isNavOpen, setIsNavOpen] = useState<boolean>(() => getInitialMobileNavOpen());
   const { t } = useTranslation(['workbench']);
+  const worktreeStatusLabel = worktree ?? t('workbench:mobile.status.worktree');
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -210,9 +218,24 @@ export function MobileWorkbenchShell({
       <main className={styles.content}>
         <div className={styles.statusRow} aria-label={t('workbench:mobile.statusAriaLabel')}>
           <span className={styles.statusPill}>{project ?? t('workbench:mobile.status.project')}</span>
-          <span className={styles.statusPill}>
-            {worktree ?? t('workbench:mobile.status.worktree')}
-          </span>
+          {onWorktreeStatusClick ? (
+            <button
+              type="button"
+              className={`${styles.statusPill} ${styles.statusPillButton}`}
+              disabled={worktreeStatusDisabled}
+              aria-haspopup="dialog"
+              onClick={onWorktreeStatusClick}
+            >
+              <span className={styles.statusPillText}>{worktreeStatusLabel}</span>
+              <ChevronDownIcon
+                size={14}
+                className={styles.statusPillIcon}
+                aria-hidden="true"
+              />
+            </button>
+          ) : (
+            <span className={styles.statusPill}>{worktreeStatusLabel}</span>
+          )}
           <span className={styles.statusPill}>{session ?? t('workbench:mobile.status.session')}</span>
         </div>
         {children}
