@@ -8,7 +8,7 @@
  *
  * Code Logic（这个页面做什么）:
  *   - 子 tab：常规 / 依赖环境 / 健康提醒 / 同步 / AI / 自动化 / 关于，把既有 Card 按查看任务分组
- *   - Card 区块：基本设置 / 权限管理 / 截图快捷键 / 云端同步 / GitHub Trending / 自动化 / 关于
+ *   - Card 区块：基本设置 / 截图快捷键 / 依赖环境（权限管理、Workbench、局域网）/ 云端同步 / GitHub Trending / 自动化 / 关于
  *   - 组件挂载时从后端加载配置和版本信息
  *   - Toggle 控件内联实现，避免引入额外 Switch 组件；状态切换走
  *     受控的 onClick + role="switch" + aria-checked
@@ -1062,31 +1062,6 @@ export function Settings() {
           </Card.Body>
         </Card>
 
-        {/* Card: 权限管理（macOS 手动授权入口） */}
-        <Card variant="flat" padding="md">
-          <Card.Header>
-            <h2 className={styles.sectionTitle}>{t('settings:permission.title')}</h2>
-          </Card.Header>
-          <Card.Body padding="md">
-            {permLoading || !permStatus ? (
-              <p className={styles.helper}>{t('settings:permission.checking')}</p>
-            ) : (
-              <div className={styles.permissionList}>
-                {mapPermissions(permStatus, tWelcome).map((p) => (
-                  <PermissionCard
-                    key={p.id}
-                    icon={p.icon}
-                    title={p.title}
-                    description={p.description}
-                    granted={p.granted}
-                    onRequestAccess={() => void handleRequestAccess(p.id as PermissionType)}
-                  />
-                ))}
-              </div>
-            )}
-          </Card.Body>
-        </Card>
-
         {/* Card 2: 快捷键 */}
         <Card variant="flat" padding="md">
           <Card.Header>
@@ -1181,6 +1156,31 @@ export function Settings() {
             role="tabpanel"
             aria-labelledby="settings-tab-dependencies"
           >
+            {/* Card: 权限管理（macOS 手动授权入口） */}
+            <Card variant="flat" padding="md">
+              <Card.Header>
+                <h2 className={styles.sectionTitle}>{t('settings:permission.title')}</h2>
+              </Card.Header>
+              <Card.Body padding="md">
+                {permLoading || !permStatus ? (
+                  <p className={styles.helper}>{t('settings:permission.checking')}</p>
+                ) : (
+                  <div className={styles.permissionList}>
+                    {mapPermissions(permStatus, tWelcome).map((p) => (
+                      <PermissionCard
+                        key={p.id}
+                        icon={p.icon}
+                        title={p.title}
+                        description={p.description}
+                        granted={p.granted}
+                        onRequestAccess={() => void handleRequestAccess(p.id as PermissionType)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </Card.Body>
+            </Card>
+
             <WorkbenchDependencyCard />
             <LanFirewallDependencyCard />
           </div>
