@@ -257,7 +257,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | PermissionCard | icon, title, description, granted | 权限卡片 |
 | GithubRepoCard | repo, language, onOpen | GitHub 周热门项目卡片 |
 | MobileAccessCard | compact, className | 局域网移动端 Workbench 访问链接与二维码卡片 |
-| LanFirewallDependencyCard | className | Settings 依赖环境页展示局域网互联防火墙端口/IP 检测与系统放行方法 |
+| LanFirewallDependencyCard | className | Settings 依赖环境页展示局域网互联防火墙端口/IP、开放状态与系统打开方法 |
 | ClaudeAssetRow | asset, onToggle, onRemove, onSelect | Claude Code 资产行 |
 | RemoteAssetPicker | assets, selectedKeys, kind, search, onSelectMany | 局域网远端资产选择器 |
 | WorkbenchProjectRail | - | 侧栏设置项下方的项目文件夹入口 |

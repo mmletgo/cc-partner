@@ -695,7 +695,7 @@ pub fn run() {
             workbench_dependency_cmd::install_workbench_dependency,
             workbench_dependency_cmd::get_workbench_dependency_install_status,
             workbench_dependency_cmd::cancel_workbench_dependency_install,
-            // 局域网互联防火墙依赖（只检测监听/IP，返回平台化放行方法，不自动改防火墙）
+            // 局域网互联防火墙依赖（只读检测监听/IP/端口开放状态，返回平台化放行方法，不自动改防火墙）
             lan_firewall_dependency_cmd::check_lan_firewall_dependency,
         ])
         .build(tauri::generate_context!())

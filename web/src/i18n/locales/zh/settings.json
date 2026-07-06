@@ -137,15 +137,16 @@
     "title": "局域网互联防火墙",
     "subtitle": "项目远程访问端口",
     "description": "局域网设备访问本机 Workbench 项目时，需要允许当前 P2P HTTP TCP 端口入站，并保留 mDNS UDP 5353 用于自动发现。",
-    "manualNotice": "系统防火墙的真实放行状态无法在无管理员权限下可靠判定；这里仅检测 HTTP 服务监听和局域网 IP，并给出手动放行方法。",
+    "manualNotice": "系统会读取当前设备可用的防火墙状态并直接显示已开放或未开放；如果系统规则不可读取，则按未开放处理并保留下方打开方法。",
     "loadFailed": "检测局域网防火墙依赖失败",
     "recheck": "重新检测",
     "copyCommand": "复制命令",
     "copyFailed": "复制命令失败，请手动选中命令复制。",
     "unavailable": "不可用",
     "status": {
-      "manual": "需手动确认",
-      "blocked": "需处理"
+      "ready": "已开放",
+      "checking": "检测中",
+      "blocked": "未开放"
     },
     "platform": {
       "macos": "macOS",
@@ -168,9 +169,10 @@
       "unknown": "未知检查项"
     },
     "checkStatus": {
-      "ready": "已检测",
+      "ready": "已就绪",
       "failed": "未就绪",
-      "manual": "手动确认"
+      "open": "已开放",
+      "closed": "未开放"
     },
     "guidanceTitle": "打开方法",
     "guidance": {

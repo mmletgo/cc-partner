@@ -25,8 +25,8 @@ function dependency(
     checks: [
       { id: 'httpListener', ok: true, detail: 'TCP 62116' },
       { id: 'lanIp', ok: true, detail: '192.168.1.12' },
-      { id: 'mdns', ok: true, detail: 'UDP 5353' },
-      { id: 'manualFirewall', ok: null, detail: 'manual' },
+      { id: 'tcpFirewall', ok: true, detail: 'TCP 62116' },
+      { id: 'mdnsFirewall', ok: true, detail: 'UDP 5353' },
     ],
     guidance: {
       summaryKey: 'settings:lanFirewall.guidance.macos.summary',
@@ -43,8 +43,23 @@ function dependency(
   };
 }
 
-if (lanFirewallStatusTone(dependency({ httpPort: 62116, lanIp: '192.168.1.12' })) !== 'warn') {
-  throw new Error('manual firewall status should use warn tone when listener and LAN IP are present');
+if (lanFirewallStatusTone(dependency({ httpPort: 62116, lanIp: '192.168.1.12' })) !== 'success') {
+  throw new Error('all LAN firewall checks passing should use success tone');
+}
+
+if (
+  lanFirewallStatusTone(
+    dependency({
+      checks: [
+        { id: 'httpListener', ok: true, detail: 'TCP 62116' },
+        { id: 'lanIp', ok: true, detail: '192.168.1.12' },
+        { id: 'tcpFirewall', ok: false, detail: 'TCP 62116' },
+        { id: 'mdnsFirewall', ok: true, detail: 'UDP 5353' },
+      ],
+    }),
+  ) !== 'danger'
+) {
+  throw new Error('blocked TCP firewall check should use danger tone');
 }
 
 if (lanFirewallStatusTone(dependency({ httpPort: 0 })) !== 'danger') {

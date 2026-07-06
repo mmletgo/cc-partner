@@ -137,15 +137,16 @@
     "title": "LAN firewall",
     "subtitle": "Project remote access ports",
     "description": "When another LAN device opens local Workbench projects on this machine, the current P2P HTTP TCP port must allow inbound traffic, and mDNS UDP 5353 must remain available for discovery.",
-    "manualNotice": "The real firewall allow state cannot be reliably determined without elevated system access. This check only verifies the HTTP listener and LAN IP, then gives manual allow instructions.",
+    "manualNotice": "The app reads firewall state available on this device and shows Open or Closed directly. If the system rules cannot be read, the port is treated as closed and the steps below remain available.",
     "loadFailed": "Failed to check LAN firewall dependency",
     "recheck": "Recheck",
     "copyCommand": "Copy command",
     "copyFailed": "Failed to copy command. Select and copy it manually.",
     "unavailable": "Unavailable",
     "status": {
-      "manual": "Manual check needed",
-      "blocked": "Action needed"
+      "ready": "Open",
+      "checking": "Checking",
+      "blocked": "Closed"
     },
     "platform": {
       "macos": "macOS",
@@ -168,9 +169,10 @@
       "unknown": "Unknown check"
     },
     "checkStatus": {
-      "ready": "Detected",
+      "ready": "Ready",
       "failed": "Not ready",
-      "manual": "Manual check"
+      "open": "Open",
+      "closed": "Closed"
     },
     "guidanceTitle": "How to open it",
     "guidance": {

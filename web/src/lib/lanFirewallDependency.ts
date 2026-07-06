@@ -6,10 +6,12 @@ import type { LanFirewallDependencyStatus, LanFirewallPlatform } from './types';
  *   Settings 依赖环境页需要把局域网防火墙状态映射为统一的 Pill 语义色。
  *
  * Code Logic（这个函数做什么）:
- *   HTTP 未监听或无局域网 IP 视为 danger；其余情况仍用 warn，提醒用户防火墙真实放行需手动确认。
+ *   无监听端口、无 LAN IP 或任一检查失败视为 danger；全部检查通过视为 success；缺少检查数据时保守显示 warn。
  */
 export function lanFirewallStatusTone(status: LanFirewallDependencyStatus): PillTone {
   if (status.httpPort <= 0 || !status.lanIp) return 'danger';
+  if (status.checks.some((check) => !check.ok)) return 'danger';
+  if (status.checks.length > 0 && status.checks.every((check) => check.ok)) return 'success';
   return 'warn';
 }
 

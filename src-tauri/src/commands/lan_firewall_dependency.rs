@@ -5,12 +5,13 @@
 //!     Settings 依赖环境页需要向用户展示当前端口、局域网 IP 和对应系统的放行方法。
 //!
 //! Code Logic（这个模块做什么）:
-//!     只检测 HTTP 服务是否已监听、是否能探测到局域网 IP，并按平台生成可复制防火墙指引；
-//!     不申请管理员权限、不修改防火墙，真实放行状态保留为人工确认项。
+//!     检测 HTTP 服务监听、局域网 IP，并按平台只读探测 TCP/mDNS 防火墙放行状态；
+//!     不申请管理员权限、不修改防火墙，读取不到放行规则时按未开放返回并保留可复制指引。
 
 use crate::net::discovery::local_lan_ip;
 use crate::state::AppState;
 use serde::Serialize;
+use std::process::Command;
 use std::sync::atomic::Ordering;
 use tauri::State;
 
@@ -30,8 +31,15 @@ pub(crate) enum LanFirewallPlatform {
 #[serde(rename_all = "camelCase")]
 pub struct LanFirewallCheckDto {
     pub id: String,
-    pub ok: Option<bool>,
+    pub ok: bool,
     pub detail: String,
+}
+
+/// 系统防火墙只读探测结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LanFirewallProbe {
+    pub tcp_allowed: bool,
+    pub mdns_allowed: bool,
 }
 
 /// 单条系统方法步骤 DTO。
@@ -134,6 +142,224 @@ fn current_app_path() -> Option<String> {
     std::env::current_exe()
         .ok()
         .and_then(|path| path.into_os_string().into_string().ok())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     防火墙开放状态需要通过当前系统工具读取，但应用不能申请管理员权限或修改系统设置。
+///
+/// Code Logic（这个函数做什么）:
+///     执行只读系统命令并合并 stdout/stderr；命令不存在或无法启动时返回 None。
+fn read_command_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.stderr.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    Some(text)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     macOS 应用防火墙关闭时，TCP 端口与 mDNS 入站不再被该防火墙拦截，应直接显示已开放。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 socketfilterfw --getglobalstate 输出；返回 true 表示全局防火墙关闭，false 表示开启。
+fn parse_macos_global_firewall_open(output: &str) -> Option<bool> {
+    let lower = output.to_ascii_lowercase();
+    let compact = lower.replace(' ', "");
+    if lower.contains("disabled") || compact.contains("state=0") {
+        return Some(true);
+    }
+    if lower.contains("enabled") || compact.contains("state=1") {
+        return Some(false);
+    }
+    None
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     macOS “阻止所有入站连接”会覆盖单个应用放行状态，必须优先判定为未开放。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 socketfilterfw --getblockall 输出；返回 true 表示 block all 已开启。
+fn parse_macos_block_all_enabled(output: &str) -> Option<bool> {
+    let lower = output.to_ascii_lowercase();
+    let compact = lower.replace(' ', "");
+    if lower.contains("disabled")
+        || lower.contains("off")
+        || lower.contains(": no")
+        || lower.contains("= no")
+        || compact.contains("state=0")
+    {
+        return Some(false);
+    }
+    if lower.contains("enabled")
+        || lower.contains(" on")
+        || lower.contains(": yes")
+        || lower.contains("= yes")
+        || compact.contains("state=1")
+    {
+        return Some(true);
+    }
+    None
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     macOS 应用防火墙按 App 放行，用户需要看到当前 cc-partner App 是否允许接收入站连接。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 socketfilterfw --getappblocked 输出；true 表示 App 未被阻止，false 表示被阻止或未加入规则。
+fn parse_macos_app_allowed(output: &str) -> Option<bool> {
+    let lower = output.to_ascii_lowercase();
+    let compact = lower.replace(' ', "");
+    if lower.contains("not blocked") || compact.contains("state=0") {
+        return Some(true);
+    }
+    if lower.contains("is blocked") || compact.contains("state=1") {
+        return Some(false);
+    }
+    if lower.contains("not part") || lower.contains("not found") {
+        return Some(false);
+    }
+    None
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     macOS 用户通常通过应用防火墙允许 cc-partner，而不是分别添加端口规则。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 socketfilterfw 全局、block all 和当前 App 状态；无法读取到明确允许时返回 false。
+fn macos_application_firewall_allows_app(app_path: Option<&str>) -> bool {
+    let socketfilterfw = "/usr/libexec/ApplicationFirewall/socketfilterfw";
+    if read_command_output(socketfilterfw, &["--getglobalstate"])
+        .and_then(|output| parse_macos_global_firewall_open(&output))
+        == Some(true)
+    {
+        return true;
+    }
+    if read_command_output(socketfilterfw, &["--getblockall"])
+        .and_then(|output| parse_macos_block_all_enabled(&output))
+        == Some(true)
+    {
+        return false;
+    }
+    app_path
+        .and_then(|path| read_command_output(socketfilterfw, &["--getappblocked", path]))
+        .and_then(|output| parse_macos_app_allowed(&output))
+        .unwrap_or(false)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Windows 需要读取当前 profile 和入站允许规则，直接判断目标端口是否已开放。
+///
+/// Code Logic（这个函数做什么）:
+///     通过 PowerShell 读取 Get-NetFirewallProfile/Get-NetFirewallRule；匹配 ALLOW 输出即认为开放。
+fn windows_firewall_allows_port(protocol: &str, port: u16) -> bool {
+    let script = format!(
+        "$ErrorActionPreference='SilentlyContinue';\
+         $enabledProfiles=Get-NetFirewallProfile | Where-Object {{$_.Enabled -eq $true}};\
+         if ($enabledProfiles.Count -eq 0) {{ 'ALLOW'; exit 0 }};\
+         $port='{port}'; $proto='{protocol}';\
+         $rules=Get-NetFirewallRule -Enabled True -Direction Inbound -Action Allow | ForEach-Object {{ $_ | Get-NetFirewallPortFilter }} | Where-Object {{ $_.Protocol -eq $proto -and ($_.LocalPort -eq $port -or $_.LocalPort -eq 'Any' -or ($_.LocalPort -is [array] -and ($_.LocalPort -contains $port -or $_.LocalPort -contains 'Any'))) }};\
+         if ($rules) {{ 'ALLOW' }} else {{ 'DENY' }}"
+    );
+    ["powershell", "powershell.exe", "pwsh", "pwsh.exe"]
+        .iter()
+        .filter_map(|program| {
+            read_command_output(
+                program,
+                &[
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    script.as_str(),
+                ],
+            )
+        })
+        .any(|output| output.to_ascii_uppercase().contains("ALLOW"))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Linux/Ubuntu 常见防火墙是 ufw 或 firewalld，需要按实际启用工具读取端口放行状态。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 ufw status 和 firewalld 端口/服务列表；防火墙明确 inactive/not running 时视为未阻止。
+fn linux_firewall_allows_port(protocol: &str, port: u16) -> bool {
+    let needle = format!("{port}/{protocol}");
+    if let Some(output) = read_command_output("ufw", &["status"]) {
+        let lower = output.to_ascii_lowercase();
+        if lower.contains("status: inactive") {
+            return true;
+        }
+        if lower
+            .lines()
+            .any(|line| line.contains(&needle) && line.contains("allow"))
+        {
+            return true;
+        }
+    }
+
+    if let Some(output) = read_command_output("firewall-cmd", &["--state"]) {
+        let lower = output.to_ascii_lowercase();
+        if lower.contains("not running") {
+            return true;
+        }
+        if lower.contains("running") {
+            let ports = read_command_output("firewall-cmd", &["--list-ports"])
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if ports
+                .split_whitespace()
+                .any(|port_rule| port_rule == needle)
+            {
+                return true;
+            }
+            if protocol == "udp" && port == MDNS_PORT {
+                let services = read_command_output("firewall-cmd", &["--list-services"])
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                return services.split_whitespace().any(|service| service == "mdns");
+            }
+        }
+    }
+
+    false
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Settings 依赖环境页需要直接显示 TCP 当前端口与 mDNS UDP 5353 是否已开放。
+///
+/// Code Logic（这个函数做什么）:
+///     按平台调用只读系统探测函数，返回明确 boolean；无法证明开放时返回 false。
+fn probe_lan_firewall(
+    platform: LanFirewallPlatform,
+    http_port: u16,
+    mdns_port: u16,
+    app_path: Option<&str>,
+) -> LanFirewallProbe {
+    match platform {
+        LanFirewallPlatform::MacOs => {
+            let app_allowed = macos_application_firewall_allows_app(app_path);
+            LanFirewallProbe {
+                tcp_allowed: http_port > 0 && app_allowed,
+                mdns_allowed: app_allowed,
+            }
+        }
+        LanFirewallPlatform::Windows => LanFirewallProbe {
+            tcp_allowed: http_port > 0 && windows_firewall_allows_port("TCP", http_port),
+            mdns_allowed: windows_firewall_allows_port("UDP", mdns_port),
+        },
+        LanFirewallPlatform::Linux => LanFirewallProbe {
+            tcp_allowed: http_port > 0 && linux_firewall_allows_port("tcp", http_port),
+            mdns_allowed: linux_firewall_allows_port("udp", mdns_port),
+        },
+        LanFirewallPlatform::Unsupported => LanFirewallProbe {
+            tcp_allowed: false,
+            mdns_allowed: false,
+        },
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -272,19 +498,20 @@ pub(crate) fn build_lan_firewall_guidance(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Settings 依赖环境页需要清楚区分“已能检测的运行状态”和“必须由用户/系统确认的防火墙放行状态”。
+///     Settings 依赖环境页需要清楚显示 HTTP/LAN 基础状态，以及 TCP/mDNS 防火墙是否已开放。
 ///
 /// Code Logic（这个函数做什么）:
-///     生成 HTTP 监听、局域网 IP、TCP 防火墙和 mDNS 防火墙四项检查；前两项可判定，后两项为人工确认。
+///     生成 HTTP 监听、局域网 IP、TCP 防火墙和 mDNS 防火墙四项检查；所有检查都返回明确 boolean。
 fn build_lan_firewall_checks(
     http_port: u16,
     lan_ip: Option<&str>,
     mdns_port: u16,
+    probe: LanFirewallProbe,
 ) -> Vec<LanFirewallCheckDto> {
     vec![
         LanFirewallCheckDto {
             id: "httpListener".to_string(),
-            ok: Some(http_port > 0),
+            ok: http_port > 0,
             detail: if http_port > 0 {
                 format!("TCP {http_port}")
             } else {
@@ -293,12 +520,12 @@ fn build_lan_firewall_checks(
         },
         LanFirewallCheckDto {
             id: "lanIp".to_string(),
-            ok: Some(lan_ip.is_some()),
+            ok: lan_ip.is_some(),
             detail: lan_ip.unwrap_or("unavailable").to_string(),
         },
         LanFirewallCheckDto {
             id: "tcpFirewall".to_string(),
-            ok: None,
+            ok: probe.tcp_allowed,
             detail: if http_port > 0 {
                 format!("TCP {http_port}")
             } else {
@@ -307,7 +534,7 @@ fn build_lan_firewall_checks(
         },
         LanFirewallCheckDto {
             id: "mdnsFirewall".to_string(),
-            ok: None,
+            ok: probe.mdns_allowed,
             detail: format!("UDP {mdns_port}"),
         },
     ]
@@ -319,13 +546,14 @@ fn build_lan_firewall_checks(
 ///     用户通过局域网访问本机项目时，需要明确当前设备应开放哪些端口以及如何在当前系统放行。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 AppState 读取实际 HTTP 监听端口，复用 local_lan_ip 探测局域网 IP，生成平台化指引 DTO。
+///     从 AppState 读取实际 HTTP 监听端口，探测局域网 IP 和防火墙开放状态，生成平台化指引 DTO。
 #[tauri::command]
 pub fn check_lan_firewall_dependency(state: State<'_, AppState>) -> LanFirewallDependencyStatusDto {
     let platform = current_lan_firewall_platform();
     let http_port = state.actual_http_port.load(Ordering::SeqCst);
     let lan_ip = local_lan_ip().map(|ip| ip.to_string());
     let app_path = current_app_path();
+    let probe = probe_lan_firewall(platform, http_port, MDNS_PORT, app_path.as_deref());
     let guidance = build_lan_firewall_guidance(platform, http_port, MDNS_PORT, app_path.as_deref());
 
     LanFirewallDependencyStatusDto {
@@ -335,14 +563,17 @@ pub fn check_lan_firewall_dependency(state: State<'_, AppState>) -> LanFirewallD
         http_port,
         mdns_port: MDNS_PORT,
         app_path,
-        checks: build_lan_firewall_checks(http_port, lan_ip.as_deref(), MDNS_PORT),
+        checks: build_lan_firewall_checks(http_port, lan_ip.as_deref(), MDNS_PORT, probe),
         guidance,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_lan_firewall_guidance, LanFirewallPlatform};
+    use super::{
+        build_lan_firewall_checks, build_lan_firewall_guidance, LanFirewallPlatform,
+        LanFirewallProbe,
+    };
 
     /// Business Logic（为什么需要这个函数）:
     ///     防火墙指引测试需要断言不同系统会给出对应 TCP/UDP 端口开放命令。
@@ -442,5 +673,35 @@ mod tests {
                 .iter()
                 .any(|command| command.contains("add-port=0/tcp")));
         }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Settings 依赖环境页必须直接显示 TCP/mDNS 防火墙是否已开放，不能再显示“手动确认”。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     将探测结果注入 checks 构造函数，断言 tcpFirewall/mdnsFirewall 都返回明确 boolean。
+    #[test]
+    fn checks_report_tcp_and_mdns_firewall_boolean_probe_results() {
+        let checks = build_lan_firewall_checks(
+            62116,
+            Some("192.168.1.12"),
+            5353,
+            LanFirewallProbe {
+                tcp_allowed: true,
+                mdns_allowed: false,
+            },
+        );
+
+        let tcp = checks
+            .iter()
+            .find(|check| check.id == "tcpFirewall")
+            .expect("tcp firewall check");
+        let mdns = checks
+            .iter()
+            .find(|check| check.id == "mdnsFirewall")
+            .expect("mdns firewall check");
+
+        assert_eq!(tcp.ok, true);
+        assert_eq!(mdns.ok, false);
     }
 }

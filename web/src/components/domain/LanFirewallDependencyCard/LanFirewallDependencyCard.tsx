@@ -7,7 +7,7 @@
  *
  * Code Logic（这个组件做什么）:
  *   调用 check_lan_firewall_dependency 读取后端 DTO，组合 Card/Pill/Button 渲染状态、
- *   检测项、系统步骤和可复制命令；仅展示指引，不自动修改系统防火墙。
+ *   检测项、系统步骤和可复制命令；读取开放状态但不自动修改系统防火墙。
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -43,15 +43,14 @@ function checkLabelKey(id: string): string {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   检测项可能是通过、失败或人工确认三态，状态标签需要稳定映射到视觉语义。
+ *   检测项必须直接展示通过或失败，状态标签需要稳定映射到视觉语义。
  *
  * Code Logic（这个函数做什么）:
- *   ok=true 映射 success，ok=false 映射 danger，ok=null 映射 warn。
+ *   ok=true 映射 success，ok=false 映射 danger。
  */
 function checkTone(check: LanFirewallCheck): 'success' | 'danger' | 'warn' {
   if (check.ok === true) return 'success';
-  if (check.ok === false) return 'danger';
-  return 'warn';
+  return 'danger';
 }
 
 /**
@@ -59,12 +58,18 @@ function checkTone(check: LanFirewallCheck): 'success' | 'danger' | 'warn' {
  *   检测项状态文本必须走 i18n，不能在 JSX 中硬编码三态文案。
  *
  * Code Logic（这个函数做什么）:
- *   ok=true/false/null 分别返回 ready/failed/manual 状态 key。
+ *   防火墙项返回 open/closed；基础运行项返回 ready/failed。
  */
 function checkStatusKey(check: LanFirewallCheck): string {
-  if (check.ok === true) return 'settings:lanFirewall.checkStatus.ready';
-  if (check.ok === false) return 'settings:lanFirewall.checkStatus.failed';
-  return 'settings:lanFirewall.checkStatus.manual';
+  const isFirewallCheck = check.id === 'tcpFirewall' || check.id === 'mdnsFirewall';
+  if (isFirewallCheck) {
+    return check.ok
+      ? 'settings:lanFirewall.checkStatus.open'
+      : 'settings:lanFirewall.checkStatus.closed';
+  }
+  return check.ok
+    ? 'settings:lanFirewall.checkStatus.ready'
+    : 'settings:lanFirewall.checkStatus.failed';
 }
 
 /**
@@ -169,7 +174,9 @@ export function LanFirewallDependencyCard(props: LanFirewallDependencyCardProps)
   const statusKey =
     tone === 'danger'
       ? 'settings:lanFirewall.status.blocked'
-      : 'settings:lanFirewall.status.manual';
+      : tone === 'success'
+        ? 'settings:lanFirewall.status.ready'
+        : 'settings:lanFirewall.status.checking';
   const commandPreview = status ? buildLanFirewallCommandPreview(status) : '';
 
   return (

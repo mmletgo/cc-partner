@@ -148,14 +148,14 @@ export type LanFirewallPlatform = 'macos' | 'windows' | 'linux' | 'unsupported' 
  * 局域网防火墙依赖检测项。
  *
  * Business Logic（为什么需要这个类型）:
- *   Settings 依赖环境页需要把可自动判断的运行状态和需要用户手动确认的防火墙项分开展示。
+ *   Settings 依赖环境页需要直接展示 HTTP/LAN 基础状态和 TCP/mDNS 防火墙是否已开放。
  *
  * Code Logic（字段说明）:
- *   ok=true/false 表示后端可判定，ok=null 表示系统防火墙放行状态无法无权限可靠判定。
+ *   ok=true/false 表示后端按当前系统可读取信息给出的明确检测结果。
  */
 export interface LanFirewallCheck {
   id: 'httpListener' | 'lanIp' | 'tcpFirewall' | 'mdnsFirewall' | string;
-  ok: boolean | null;
+  ok: boolean;
   detail: string;
 }
 
@@ -208,7 +208,7 @@ export interface LanFirewallGuidance {
  *   局域网互联访问项目需要本机 HTTP/P2P TCP 端口与 mDNS UDP 5353 被允许入站。
  *
  * Code Logic（字段说明）:
- *   对齐后端 check_lan_firewall_dependency camelCase DTO；真实防火墙放行状态不做权限外推断。
+ *   对齐后端 check_lan_firewall_dependency camelCase DTO；checks 中含端口开放状态和系统放行指引。
  */
 export interface LanFirewallDependencyStatus {
   platform: LanFirewallPlatform;
