@@ -32,6 +32,12 @@ export interface HttpCreateOrchestratorTaskRequest {
   goal: string;
   acceptanceCriteria: string;
   priority?: number;
+  source?: string;
+  externalId?: string;
+  externalIdentifier?: string;
+  externalUrl?: string;
+  externalState?: string;
+  externalLabels?: string[];
 }
 
 export interface HttpCompleteOrchestratorTaskPromptRequest {
@@ -177,6 +183,12 @@ export const httpOrchestratorTransport = {
         goal: request.goal,
         acceptanceCriteria: request.acceptanceCriteria,
         priority: request.priority ?? 0,
+        source: request.source,
+        externalId: request.externalId,
+        externalIdentifier: request.externalIdentifier,
+        externalUrl: request.externalUrl,
+        externalState: request.externalState,
+        externalLabels: request.externalLabels,
         queue: true,
         clientRequestId: createHttpOrchestratorClientRequestId(),
       }),
@@ -187,6 +199,12 @@ export const httpOrchestratorTransport = {
         goal: request.goal,
         acceptanceCriteria: request.acceptanceCriteria,
         priority: request.priority ?? 0,
+        source: request.source,
+        externalId: request.externalId,
+        externalIdentifier: request.externalIdentifier,
+        externalUrl: request.externalUrl,
+        externalState: request.externalState,
+        externalLabels: request.externalLabels,
         queue: true,
         clientRequestId: createHttpOrchestratorClientRequestId(),
       }),

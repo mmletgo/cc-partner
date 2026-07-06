@@ -157,6 +157,12 @@ async fn create_task_for_state(
         goal: req.goal,
         acceptance_criteria: req.acceptance_criteria,
         priority: Some(req.priority),
+        source: req.source,
+        external_id: req.external_id,
+        external_identifier: req.external_identifier,
+        external_url: req.external_url,
+        external_state: req.external_state,
+        external_labels: req.external_labels,
     })?;
     let created = state
         .orchestrator_repo
@@ -649,6 +655,12 @@ mod tests {
                 priority: 5,
                 queue: true,
                 client_request_id: Some("create-request-queued".to_string()),
+                source: None,
+                external_id: None,
+                external_identifier: None,
+                external_url: None,
+                external_state: None,
+                external_labels: None,
             },
         )
         .await
@@ -679,6 +691,12 @@ mod tests {
             priority: 5,
             queue: true,
             client_request_id: Some("create-request-1".to_string()),
+            source: None,
+            external_id: None,
+            external_identifier: None,
+            external_url: None,
+            external_state: None,
+            external_labels: None,
         };
 
         let first = create_task_for_state(&state, req.clone())
@@ -717,6 +735,12 @@ mod tests {
             priority: 5,
             queue: false,
             client_request_id: Some("   ".to_string()),
+            source: None,
+            external_id: None,
+            external_identifier: None,
+            external_url: None,
+            external_state: None,
+            external_labels: None,
         };
 
         let error = create_task_for_state(&state, req)

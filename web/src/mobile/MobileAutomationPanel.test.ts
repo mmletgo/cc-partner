@@ -40,6 +40,7 @@ const panelSource = readFileSync(
 const stylesSource = readFileSync(new URL('./MobileWorkbench.module.css', import.meta.url), 'utf8');
 const zhWorkbench = readFileSync(new URL('../i18n/locales/zh/workbench.json', import.meta.url), 'utf8');
 const enWorkbench = readFileSync(new URL('../i18n/locales/en/workbench.json', import.meta.url), 'utf8');
+const typesSource = readFileSync(new URL('../lib/types.ts', import.meta.url), 'utf8');
 
 assertContains(
   panelSource,
@@ -96,6 +97,16 @@ assertContains(
   enWorkbench,
   '"completeWithAi": "Fill with AI"',
   'en workbench locale should include mobile AI completion copy',
+);
+assertContains(
+  typesSource,
+  'externalState: string | null;',
+  'mobile automation task DTO should expose tracker externalState',
+);
+assertContains(
+  typesSource,
+  'externalLabels: string[] | null;',
+  'mobile automation task DTO should expose tracker externalLabels',
 );
 
 console.log('MobileAutomationPanel.test.ts passed');

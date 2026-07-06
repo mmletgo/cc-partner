@@ -35,8 +35,8 @@ use uuid::Uuid;
 ///     前端创建编排任务时只提交用户可编辑字段，后端统一补齐 id、状态、关联执行信息和时间戳。
 ///
 /// Code Logic（这个结构体做什么）:
-///     以 camelCase 接收 Tauri invoke 参数，并保留 priority 可选值用于默认优先级归一。
-#[derive(Debug, Clone, Deserialize)]
+///     以 camelCase 接收 Tauri invoke 参数，并保留 priority 与 tracker 预留字段的可选值用于默认归一。
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateOrchestratorTaskRequest {
     pub project_id: String,
@@ -44,6 +44,18 @@ pub struct CreateOrchestratorTaskRequest {
     pub goal: String,
     pub acceptance_criteria: String,
     pub priority: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_identifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_labels: Option<Vec<String>>,
 }
 
 /// Orchestrator 看板泳道移动入参。
@@ -116,7 +128,7 @@ pub enum OrchestratorTaskViewDto {
 ///     创建任务时需要在命令层统一做必填校验、清理用户输入，并初始化任务为 Draft 状态。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验 project/title/goal 非空，生成 UUID 和 UTC 时间戳，返回完整 OrchestratorTaskRow。
+///     校验 project/title/goal 非空，生成 UUID 和 UTC 时间戳，归一化 tracker 字段，返回完整 OrchestratorTaskRow。
 pub(crate) fn build_orchestrator_task_row(
     request: CreateOrchestratorTaskRequest,
 ) -> Result<OrchestratorTaskRow, AppError> {
@@ -136,6 +148,11 @@ pub(crate) fn build_orchestrator_task_row(
     }
 
     let now = Utc::now().to_rfc3339();
+    let source = request
+        .source
+        .as_deref()
+        .and_then(non_empty_trimmed_string)
+        .unwrap_or_else(|| "internal".to_string());
     Ok(OrchestratorTaskRow {
         id: Uuid::new_v4().to_string(),
         project_id: project_id.to_string(),
@@ -143,6 +160,24 @@ pub(crate) fn build_orchestrator_task_row(
         goal: goal.to_string(),
         acceptance_criteria: acceptance_criteria.to_string(),
         status: OrchestratorTaskStatus::Draft,
+        source,
+        external_id: request
+            .external_id
+            .as_deref()
+            .and_then(non_empty_trimmed_string),
+        external_identifier: request
+            .external_identifier
+            .as_deref()
+            .and_then(non_empty_trimmed_string),
+        external_url: request
+            .external_url
+            .as_deref()
+            .and_then(non_empty_trimmed_string),
+        external_state: request
+            .external_state
+            .as_deref()
+            .and_then(non_empty_trimmed_string),
+        external_labels: request.external_labels,
         priority: request.priority.unwrap_or(0),
         branch_name: None,
         worktree_id: None,
@@ -155,6 +190,20 @@ pub(crate) fn build_orchestrator_task_row(
         finished_at: None,
         ..OrchestratorTaskRow::default_for_status(OrchestratorTaskStatus::Draft)
     })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     创建任务时 tracker 预留字符串字段允许缺失或空白，但不能把空白当成有效外部标识写入数据库。
+///
+/// Code Logic（这个函数做什么）:
+///     trim 输入字符串；空白返回 None，非空返回新的 String。
+fn non_empty_trimmed_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -190,6 +239,12 @@ fn remote_create_request_from_local(
         priority: request.priority.unwrap_or(0),
         queue: false,
         client_request_id: Some(Uuid::new_v4().to_string()),
+        source: request.source.clone(),
+        external_id: request.external_id.clone(),
+        external_identifier: request.external_identifier.clone(),
+        external_url: request.external_url.clone(),
+        external_state: request.external_state.clone(),
+        external_labels: request.external_labels.clone(),
     }
 }
 
@@ -1295,6 +1350,12 @@ pub(crate) async fn create_orchestrator_task_view_for_http(
             goal: req.goal,
             acceptance_criteria: req.acceptance_criteria,
             priority: Some(req.priority),
+            source: req.source,
+            external_id: req.external_id,
+            external_identifier: req.external_identifier,
+            external_url: req.external_url,
+            external_state: req.external_state,
+            external_labels: req.external_labels,
         })?;
         let created = state
             .orchestrator_repo
@@ -1955,6 +2016,12 @@ mod tests {
             goal: "完成目标".to_string(),
             acceptance_criteria: "测试通过".to_string(),
             priority: None,
+            source: None,
+            external_id: None,
+            external_identifier: None,
+            external_url: None,
+            external_state: None,
+            external_labels: None,
         };
 
         let result = build_orchestrator_task_row(request);
@@ -1975,6 +2042,12 @@ mod tests {
             goal: "完成目标".to_string(),
             acceptance_criteria: "测试通过".to_string(),
             priority: None,
+            source: None,
+            external_id: None,
+            external_identifier: None,
+            external_url: None,
+            external_state: None,
+            external_labels: None,
         };
         let blank_goal = CreateOrchestratorTaskRequest {
             project_id: "project-1".to_string(),
@@ -1982,6 +2055,12 @@ mod tests {
             goal: " ".to_string(),
             acceptance_criteria: "测试通过".to_string(),
             priority: None,
+            source: None,
+            external_id: None,
+            external_identifier: None,
+            external_url: None,
+            external_state: None,
+            external_labels: None,
         };
 
         assert!(build_orchestrator_task_row(blank_title).is_err());
@@ -2001,6 +2080,12 @@ mod tests {
             goal: "  暴露任务命令  ".to_string(),
             acceptance_criteria: "  测试通过  ".to_string(),
             priority: None,
+            source: None,
+            external_id: None,
+            external_identifier: None,
+            external_url: None,
+            external_state: None,
+            external_labels: None,
         };
 
         let row = build_orchestrator_task_row(request).expect("row");
@@ -2246,6 +2331,12 @@ mod tests {
             goal: "完成目标".to_string(),
             acceptance_criteria: "验收".to_string(),
             priority: Some(3),
+            source: None,
+            external_id: None,
+            external_identifier: None,
+            external_url: None,
+            external_state: None,
+            external_labels: None,
         };
 
         let remote_request = remote_create_request_from_local(&request);

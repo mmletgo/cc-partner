@@ -50,6 +50,8 @@ function createTask(
     externalId: null,
     externalIdentifier: null,
     externalUrl: null,
+    externalState: null,
+    externalLabels: null,
     runnerProvider: null,
     claudeSessionId: null,
     transcriptPath: null,
