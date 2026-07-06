@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Workbench · Session 搜索 · v1 浮层</title>
+<style>
+  /* ===== 完全复用 cc-partner 设计 token（从 tokens.css 同步） ===== */
+  :root {
+    --bg: #f5f4ed;
+    --surface: #faf9f5;
+    --surface-warm: #e8e6dc;
+    --fg: #141413;
+    --fg-2: #3d3d3a;
+    --muted: #5e5d59;
+    --meta: #87867f;
+    --border: #f0eee6;
+    --border-soft: #e8e6dc;
+    --accent: #c96442;
+    --accent-on: #faf9f5;
+    --accent-soft: color-mix(in oklab, var(--accent) 14%, transparent);
+    --accent-hover: color-mix(in oklab, var(--accent) 90%, #141413);
+    --success: #17a34a;
+    --warn: #eab308;
+    --danger: #b53333;
+    --terminal-bg: #faf9f5;
+    --terminal-chrome: #f0eee6;
+    --terminal-fg: #141413;
+    --terminal-muted: #6f6d67;
+    --terminal-border: #d9d5c9;
+    --font-display: "Anthropic Serif", Georgia, "Times New Roman", serif;
+    --font-body: "Anthropic Sans", "Arial", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+    --font-mono: "Anthropic Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+    --text-xs: 11px; --text-sm: 12px; --text-base: 13px; --text-md: 14px;
+    --text-lg: 16px; --text-xl: 20px; --text-2xl: 24px;
+    --weight-regular: 400; --weight-medium: 500; --weight-semibold: 600; --weight-bold: 700;
+    --tracking-tight: -0.015em; --tracking-wide: 0.02em; --tracking-widest: 0.14em;
+    --leading-tight: 1.2; --leading-normal: 1.5;
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+    --space-5: 20px; --space-6: 24px; --space-8: 32px;
+    --radius-sm: 6px; --radius-md: 8px; --radius-lg: 12px; --radius-xl: 16px;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.06);
+    --shadow-lg: 0 12px 32px rgba(0,0,0,0.12);
+    --shadow-window: 0 18px 56px rgba(0,0,0,0.18);
+    --motion-fast: 150ms; --motion-base: 200ms;
+    --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+    --ease-emphasized: cubic-bezier(0.32, 0.72, 0, 1);
+    --z-overlay: 100; --z-modal: 1000;
+  }
+  [data-theme="dark"] {
+    --bg: #1f1d1b; --surface: #272522; --surface-warm: #322f2c;
+    --fg: #faf9f5; --fg-2: #d8d6cf; --muted: #a8a59e; --meta: #787671;
+    --border: #2e2b29; --border-soft: #262422;
+    --accent: #d97757; --accent-on: #141413;
+    --accent-soft: color-mix(in oklab, var(--accent) 22%, transparent);
+    --accent-hover: color-mix(in oklab, var(--accent) 80%, #faf9f5);
+    --terminal-bg: #141210; --terminal-chrome: #211f1c;
+    --terminal-fg: #f5f1e8; --terminal-muted: #9b968b; --terminal-border: #302d29;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.2), 0 2px 8px rgba(0,0,0,0.3);
+    --shadow-lg: 0 12px 32px rgba(0,0,0,0.4);
+    --shadow-window: 0 18px 56px rgba(0,0,0,0.5);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    font-family: var(--font-body);
+    font-size: var(--text-base);
+    color: var(--fg);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ===== 舞台：把 Workbench 终端区铺满，模拟真实使用环境 ===== */
+  .stage {
+    position: relative;
+    width: 100%;
+    height: 100vh;
+    background: var(--bg);
+    overflow: hidden;
+  }
+
+  /* 模拟终端导航条（与 WorkbenchWorkspaceNav 一致） */
+  .workbenchNav {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border-soft);
+    background: color-mix(in oklab, var(--surface) 60%, var(--bg));
+  }
+  .navTabs { display: flex; align-items: center; gap: var(--space-2); min-width: 0; padding-left: var(--space-2); }
+  .sessionTab {
+    height: 36px; max-width: 220px;
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    flex: 0 0 auto;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-md);
+    padding: 0 var(--space-2) 0 var(--space-3);
+    background: var(--surface); color: var(--fg);
+    cursor: pointer;
+    transition: all var(--motion-fast) var(--ease-standard);
+  }
+  .sessionTab:hover { border-color: var(--accent-soft); }
+  .sessionTab[data-active="true"] {
+    border-color: var(--accent);
+    background: color-mix(in oklab, var(--accent) 8%, var(--surface));
+  }
+  .sessionDot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 9999px; background: var(--meta); }
+  .sessionDot[data-status="running"] { background: var(--success); }
+  .sessionName {
+    font-size: var(--text-sm); font-weight: var(--weight-medium);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tabCloseBtn {
+    width: 20px; height: 20px; border: none; background: transparent;
+    color: var(--meta); cursor: pointer; border-radius: var(--radius-sm);
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .tabCloseBtn:hover { background: var(--border-soft); color: var(--fg); }
+  .newSessionBtn {
+    height: 36px; padding: 0 var(--space-3);
+    display: inline-flex; align-items: center; gap: var(--space-1);
+    border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+    background: var(--surface); color: var(--fg); cursor: pointer;
+    font-size: var(--text-sm); font-weight: var(--weight-medium);
+    transition: all var(--motion-fast) var(--ease-standard);
+  }
+  .newSessionBtn:hover { border-color: var(--accent-soft); }
+
+  .navActions { display: flex; align-items: center; gap: var(--space-2); padding-right: var(--space-2); }
+  .actionBtn {
+    height: 32px; padding: 0 var(--space-3);
+    display: inline-flex; align-items: center; gap: var(--space-1);
+    border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+    background: var(--surface); color: var(--fg); cursor: pointer;
+    font-size: var(--text-sm);
+    transition: all var(--motion-fast) var(--ease-standard);
+  }
+  .actionBtn:hover { border-color: var(--accent-soft); }
+  /* ✨ 新增的"搜索 session"按钮——这是本次功能的主入口 */
+  .searchSessionBtn {
+    height: 32px; padding: 0 var(--space-3);
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    border: 1px solid var(--accent-soft);
+    border-radius: var(--radius-md);
+    background: var(--accent-soft);
+    color: var(--accent);
+    cursor: pointer;
+    font-size: var(--text-sm); font-weight: var(--weight-medium);
+    transition: all var(--motion-fast) var(--ease-standard);
+  }
+  .searchSessionBtn:hover {
+    background: color-mix(in oklab, var(--accent) 18%, transparent);
+    border-color: var(--accent);
+  }
+  .kbd {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: 1px 5px;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--meta);
+    line-height: 1.4;
+  }
+  [data-theme="dark"] .kbd { background: var(--bg); border-color: var(--border); }
+
+  /* 模拟终端区 */
+  .terminalArea {
+    position: absolute; inset: 49px 0 0 0;
+    background: var(--terminal-bg);
+    font-family: var(--font-mono);
+    color: var(--terminal-fg);
+    padding: var(--space-4);
+    font-size: 13px;
+    line-height: 1.55;
+    overflow: hidden;
+  }
+  .terminalLine { white-space: pre-wrap; word-break: break-all; }
+  .terminalPrompt { color: var(--accent); }
+  .terminalMuted { color: var(--terminal-muted); }
+  .terminalCursor {
+    display: inline-block; width: 8px; height: 16px; vertical-align: text-bottom;
+    background: var(--terminal-fg); animation: blink 1s steps(2) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ===== ✨ Session 搜索浮层（核心设计） ===== */
+  .searchOverlay {
+    position: absolute;
+    /* 贴合终端区右上角，类似 VS Code Command Palette 但更贴边 */
+    top: 12px;
+    right: 12px;
+    width: 560px;
+    max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 80px);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    z-index: var(--z-overlay);
+    animation: overlay-in var(--motion-base) var(--ease-emphasized);
+  }
+  @keyframes overlay-in {
+    from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  /* 浮层头部：搜索输入框 + 范围标签 */
+  .searchHeader {
+    display: flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .searchIconWrap {
+    width: 18px; height: 18px; flex: 0 0 auto;
+    color: var(--meta);
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .searchInput {
+    flex: 1; min-width: 0;
+    border: none; background: transparent; outline: none;
+    font-family: var(--font-body);
+    font-size: var(--text-md);
+    color: var(--fg);
+    padding: var(--space-1) 0;
+  }
+  .searchInput::placeholder { color: var(--meta); }
+  .scopeBadge {
+    flex: 0 0 auto;
+    display: inline-flex; align-items: center; gap: var(--space-1);
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--surface-warm);
+    color: var(--muted);
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    max-width: 200px;
+  }
+  .scopeBadge span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* 结果列表 */
+  .resultList {
+    flex: 1; min-height: 0; overflow-y: auto;
+    padding: var(--space-2);
+  }
+  .resultEmpty {
+    padding: var(--space-8) var(--space-4);
+    text-align: center;
+    color: var(--meta);
+    font-size: var(--text-sm);
+  }
+  .resultEmptyTitle {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    color: var(--fg-2);
+    margin-bottom: var(--space-1);
+  }
+
+  /* 单条 session 结果 */
+  .resultItem {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all var(--motion-fast) var(--ease-standard);
+  }
+  .resultItem:hover, .resultItem[data-active="true"] {
+    background: color-mix(in oklab, var(--accent) 6%, var(--surface));
+    border-color: var(--accent-soft);
+  }
+  .resultMain { min-width: 0; }
+  .resultTitleRow {
+    display: flex; align-items: center; gap: var(--space-2);
+    margin-bottom: var(--space-1);
+  }
+  .resultTitle {
+    font-size: var(--text-md);
+    font-weight: var(--weight-semibold);
+    color: var(--fg);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1; min-width: 0;
+  }
+  /* 搜索高亮 */
+  mark {
+    background: var(--accent-soft);
+    color: var(--accent);
+    padding: 0 2px;
+    border-radius: 2px;
+    font-weight: var(--weight-semibold);
+  }
+  .resultMeta {
+    display: flex; align-items: center; gap: var(--space-3);
+    color: var(--meta);
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    margin-bottom: var(--space-2);
+  }
+  .resultMetaItem { display: inline-flex; align-items: center; gap: 3px; }
+  .resultPreview {
+    font-size: var(--text-sm);
+    color: var(--muted);
+    line-height: var(--leading-normal);
+    /* 限制 2 行 */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  /* 右侧 resume 动作 */
+  .resultAction {
+    display: flex; flex-direction: column; align-items: flex-end; justify-content: center;
+    gap: var(--space-1);
+    flex: 0 0 auto;
+    padding-left: var(--space-2);
+  }
+  .resumeHint {
+    font-size: var(--text-xs);
+    color: var(--meta);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+  .resumeBtn {
+    height: 28px; padding: 0 var(--space-3);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-md);
+    background: var(--accent);
+    color: var(--accent-on);
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: var(--space-1);
+    transition: all var(--motion-fast) var(--ease-standard);
+    opacity: 0;
+  }
+  .resultItem:hover .resumeBtn, .resultItem[data-active="true"] .resumeBtn { opacity: 1; }
+  .resumeBtn:hover { background: var(--accent-hover); }
+
+  /* 浮层底部：快捷键提示 */
+  .searchFooter {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    border-top: 1px solid var(--border-soft);
+    background: color-mix(in oklab, var(--surface) 50%, var(--bg));
+    font-size: var(--text-xs);
+    color: var(--meta);
+  }
+  .footerHints { display: flex; align-items: center; gap: var(--space-4); }
+  .footerHint { display: inline-flex; align-items: center; gap: var(--space-1); }
+
+  /* 加载态 */
+  .loadingRow {
+    display: flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-3);
+    color: var(--meta); font-size: var(--text-sm);
+  }
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid var(--border-soft);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 主题切换浮动按钮（demo 用） */
+  .demoControls {
+    position: fixed; bottom: 16px; left: 16px; z-index: 9999;
+    display: flex; gap: 8px;
+  }
+  .demoBtn {
+    padding: 6px 12px; border-radius: var(--radius-md);
+    border: 1px solid var(--border-soft); background: var(--surface);
+    color: var(--fg); cursor: pointer; font-size: var(--text-sm);
+  }
+</style>
+</head>
+<body>
+<div class="stage">
+  <!-- 模拟 Workbench 终端导航条 -->
+  <div class="workbenchNav">
+    <div class="navTabs" role="tablist">
+      <div class="sessionTab" data-active="true">
+        <span class="sessionDot" data-status="running"></span>
+        <span class="sessionName">main</span>
+        <button class="tabCloseBtn" title="关闭">×</button>
+      </div>
+      <div class="sessionTab">
+        <span class="sessionDot" data-status="running"></span>
+        <span class="sessionName">claude · refactoring</span>
+        <button class="tabCloseBtn">×</button>
+      </div>
+      <button class="newSessionBtn">＋ 新窗口</button>
+    </div>
+    <div class="navActions">
+      <button class="actionBtn" title="优化 Prompt">优化</button>
+      <button class="actionBtn" title="适配尺寸">适配</button>
+      <button class="actionBtn" title="右分屏">⫦</button>
+      <button class="actionBtn" title="下分屏">⇣</button>
+      <!-- ✨ 新增：搜索 session 按钮 -->
+      <button class="searchSessionBtn" title="搜索 Claude session">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="7" r="5"/><path d="m11 11 3 3"/></svg>
+        搜索 session
+        <span class="kbd">⌘K</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- 模拟终端内容 -->
+  <div class="terminalArea">
+    <div class="terminalLine"><span class="terminalPrompt">hans@mbp</span> <span class="terminalMuted">cc-partner/main</span> $ claude --dangerously-skip-permissions</div>
+    <div class="terminalLine terminalMuted">╭───────────────────────────────────────╮</div>
+    <div class="terminalLine terminalMuted">│  Welcome to Claude Code                │</div>
+    <div class="terminalLine terminalMuted">│  /help for help, /status for status    │</div>
+    <div class="terminalLine terminalMuted">╰───────────────────────────────────────╯</div>
+    <div class="terminalLine"></div>
+    <div class="terminalLine"><span class="terminalPrompt">&gt;</span> 帮我把 Workbench 终端加上 session 搜索功能</div>
+    <div class="terminalLine"></div>
+    <div class="terminalLine terminalMuted">我将先分析现有代码结构，然后规划实现方案...</div>
+    <div class="terminalLine"><span class="terminalCursor"></span></div>
+  </div>
+
+  <!-- ✨ Session 搜索浮层 -->
+  <div class="searchOverlay" role="dialog" aria-label="搜索 Claude session">
+    <div class="searchHeader">
+      <span class="searchIconWrap">
+        <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="7" r="5"/><path d="m11 11 3 3"/></svg>
+      </span>
+      <input class="searchInput" type="text" placeholder="搜索 Claude session 标题或对话内容…" value="session 搜索" autofocus>
+      <span class="scopeBadge" title="搜索范围：当前 worktree">
+        <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 4h12M2 8h12M2 12h8"/></svg>
+        <span>worktree: main</span>
+      </span>
+    </div>
+
+    <div class="resultList">
+      <!-- 加载态示例 -->
+      <div class="loadingRow">
+        <span class="spinner"></span>
+        正在扫描 <code style="font-family:var(--font-mono);color:var(--fg-2)">~/.claude/projects/-Users-hans-web_project-cc-partner/</code>
+      </div>
+
+      <!-- 结果 1（默认高亮） -->
+      <div class="resultItem" data-active="true">
+        <div class="resultMain">
+          <div class="resultTitleRow">
+            <span class="resultTitle">帮我给 Workbench 终端加上 <mark>session 搜索</mark> 功能</span>
+          </div>
+          <div class="resultMeta">
+            <span class="resultMetaItem">
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 2"/></svg>
+              2 小时前
+            </span>
+            <span class="resultMetaItem">
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 3h12v10H2z"/><path d="M2 6h12"/></svg>
+              24 条对话
+            </span>
+            <span class="resultMetaItem" title="session id">
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M5 7h6M5 10h4"/></svg>
+              a4 9cde…
+            </span>
+          </div>
+          <div class="resultPreview">
+            用户：帮我把 Workbench 终端加上 <mark>session 搜索</mark> 功能，找到后能新建 pane 启动 claude resume。<br>
+            Claude：好的，我先调查了三个子系统——Workbench 终端前端结构、Claude 历史数据采集、claude 启动机制…
+          </div>
+        </div>
+        <div class="resultAction">
+          <span class="resumeHint">⏎ resume</span>
+          <button class="resumeBtn">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+            新窗口 resume
+          </button>
+        </div>
+      </div>
+
+      <!-- 结果 2 -->
+      <div class="resultItem">
+        <div class="resultMain">
+          <div class="resultTitleRow">
+            <span class="resultTitle">重构终端 <mark>session</mark> 管理逻辑，支持多 worktree</span>
+          </div>
+          <div class="resultMeta">
+            <span class="resultMetaItem">🕐 昨天</span>
+            <span class="resultMetaItem">📄 47 条对话</span>
+            <span class="resultMetaItem">🆔 7a652482…</span>
+          </div>
+          <div class="resultPreview">
+            用户：当前 <mark>session</mark> 按 worktree 分组的实现有点乱，能不能整理一下？<br>
+            Claude：我看了 <code>workbenchWorktrees.ts</code> 的 <code>sessionsForWorktree</code>，确实主 worktree 兼容旧数据那段…
+          </div>
+        </div>
+        <div class="resultAction">
+          <span class="resumeHint">⏎ resume</span>
+          <button class="resumeBtn">新窗口 resume</button>
+        </div>
+      </div>
+
+      <!-- 结果 3 -->
+      <div class="resultItem">
+        <div class="resultMain">
+          <div class="resultTitleRow">
+            <span class="resultTitle">Orchestrator runner 怎么把 claude 启动到终端里</span>
+          </div>
+          <div class="resultMeta">
+            <span class="resultMetaItem">🕐 3 天前</span>
+            <span class="resultMetaItem">📄 18 条对话</span>
+            <span class="resultMetaItem">🆔 1d169ea0…</span>
+          </div>
+          <div class="resultPreview">
+            用户：runner 是怎么在 terminal 里启动 claude 的？<br>
+            Claude：在 <code>runner.rs:222</code>，先 <code>create_workbench_session</code> 建纯 shell，再 <code>write_input("claude\n…")</code>…
+          </div>
+        </div>
+        <div class="resultAction">
+          <span class="resumeHint">⏎ resume</span>
+          <button class="resumeBtn">新窗口 resume</button>
+        </div>
+      </div>
+
+      <!-- 结果 4：assistant 内容命中 -->
+      <div class="resultItem">
+        <div class="resultMain">
+          <div class="resultTitleRow">
+            <span class="resultTitle">调查 Claude Code jsonl 文件结构</span>
+          </div>
+          <div class="resultMeta">
+            <span class="resultMetaItem">🕐 5 天前</span>
+            <span class="resultMetaItem">📄 12 条对话</span>
+            <span class="resultMetaItem">🆔 3638c428…</span>
+          </div>
+          <div class="resultPreview">
+            Claude：jsonl 每行有 type 字段，user/assistant/last-prompt 等。<code>lastPrompt</code> 字段是 <mark>session</mark> 最近一次输入的摘要，适合做标题…
+          </div>
+        </div>
+        <div class="resultAction">
+          <span class="resumeHint">⏎ resume</span>
+          <button class="resumeBtn">新窗口 resume</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="searchFooter">
+      <div class="footerHints">
+        <span class="footerHint"><span class="kbd">↑↓</span> 选择</span>
+        <span class="footerHint"><span class="kbd">⏎</span> 新窗口 resume</span>
+        <span class="footerHint"><span class="kbd">esc</span> 关闭</span>
+      </div>
+      <span class="footerHint">实时扫描 jsonl · 4 个结果</span>
+    </div>
+  </div>
+</div>
+
+<!-- demo 控件 -->
+<div class="demoControls">
+  <button class="demoBtn" onclick="toggleTheme()">切换主题</button>
+</div>
+
+<script>
+  
+  (function(){
+    try {
+      var m = new URLSearchParams(location.search).get('theme');
+      if (m) document.documentElement.dataset.theme = m;
+    } catch(e){}
+  })();
+
+  function toggleTheme() {
+    const cur = document.documentElement.dataset.theme;
+    document.documentElement.dataset.theme = cur === 'dark' ? 'light' : 'dark';
+  }
+</script>
+</body>
+</html>
