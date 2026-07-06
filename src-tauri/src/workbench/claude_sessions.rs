@@ -823,18 +823,17 @@ fn spawn_session_watcher(
                 }
                 let index_clone = Arc::clone(&index_handle);
                 let dir_clone = watch_dir_for_cb.clone();
-                let worktree_clone = worktree_canonical_owned.clone();
-                let paths_clone = jsonl_paths.clone();
                 let pending_clone = Arc::clone(&pending_trailing);
                 let handle = tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(DEBOUNCE_INTERVAL).await;
                     // sleep 结束：先把自己的句柄从 pending 清掉（表示已执行，不再可 abort），
-                    // 再 spawn_blocking 重扫，await 确保重扫完成。
+                    // 再 spawn_blocking 全量重扫（兜底，保证 debounce 窗口内所有变更最终都被刷新，
+                    // 不依赖事件累积的路径集合），await 确保重扫完成。
                     if let Ok(mut p) = pending_clone.lock() {
                         p.take();
                     }
                     tauri::async_runtime::spawn_blocking(move || {
-                        refresh_sessions_from_paths(&index_clone, &worktree_clone, &dir_clone, &paths_clone);
+                        refresh_all_sessions(&index_clone, &dir_clone);
                     })
                     .await
                     .ok();
@@ -965,6 +964,42 @@ fn refresh_sessions_from_paths(
     // 保持 worktree_path / encoded_cwd 不变（重扫不改根），只刷新 last_scan_at
     guard.last_scan_at = Utc::now().to_rfc3339();
     let _ = worktree_canonical; // 留作未来按 canonical 校验 cwd 用
+}
+
+/// 全量重扫指定目录下所有 jsonl，重建 sessions HashMap（trailing 兜底专用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     debounce 窗口内可能先后有多个不同 jsonl 文件变更，若 trailing 只重扫最后一批事件路径，
+///     较早变更的文件会被漏掉（它们已在 sessions HashMap 里，增量逻辑会跳过）。
+///     trailing 兜底必须全量重扫，保证 debounce 窗口内所有变更最终都被刷新。
+///
+/// Code Logic（这个函数做什么）:
+///     持写锁后枚举 dir 下所有 *.jsonl，逐个 build_session_index，**整体替换** sessions HashMap
+///     （而非增量 upsert），确保被删除的 session 也能被清理；最后更新 last_scan_at。
+fn refresh_all_sessions(shared: &SharedWorktreeSessionIndex, dir: &Path) {
+    let mut guard = match shared.write() {
+        Ok(g) => g,
+        Err(err) => {
+            tracing::warn!("session index 写锁中毒，跳过全量重扫: {err}");
+            return;
+        }
+    };
+
+    let mut new_sessions: HashMap<String, ClaudeSessionIndex> = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if let Some(index) = build_session_index(&p) {
+                new_sessions.insert(index.session_id.clone(), index);
+            }
+        }
+    }
+
+    guard.sessions = new_sessions;
+    guard.last_scan_at = Utc::now().to_rfc3339();
 }
 
 // ---------------------------------------------------------------------------
