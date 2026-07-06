@@ -14,6 +14,7 @@ pub mod config;
 pub mod devices;
 pub mod github_trending;
 pub mod health;
+pub mod lan_firewall_dependency;
 pub mod mobile;
 pub mod orchestrator;
 pub mod orchestrator_config;

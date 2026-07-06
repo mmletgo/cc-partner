@@ -133,6 +133,78 @@
     "refresh": "Refresh",
     "qrLabel": "Mobile Workbench access QR code"
   },
+  "lanFirewall": {
+    "title": "LAN firewall",
+    "subtitle": "Project remote access ports",
+    "description": "When another LAN device opens local Workbench projects on this machine, the current P2P HTTP TCP port must allow inbound traffic, and mDNS UDP 5353 must remain available for discovery.",
+    "manualNotice": "The real firewall allow state cannot be reliably determined without elevated system access. This check only verifies the HTTP listener and LAN IP, then gives manual allow instructions.",
+    "loadFailed": "Failed to check LAN firewall dependency",
+    "recheck": "Recheck",
+    "copyCommand": "Copy command",
+    "copyFailed": "Failed to copy command. Select and copy it manually.",
+    "unavailable": "Unavailable",
+    "status": {
+      "manual": "Manual check needed",
+      "blocked": "Action needed"
+    },
+    "platform": {
+      "macos": "macOS",
+      "windows": "Windows",
+      "linux": "Linux / Ubuntu",
+      "unsupported": "Unsupported platform"
+    },
+    "meta": {
+      "platform": "System",
+      "lanIp": "LAN IP",
+      "httpPort": "P2P TCP port",
+      "mdnsPort": "mDNS UDP port",
+      "appPath": "Current app path"
+    },
+    "checks": {
+      "httpListener": "HTTP/P2P listener",
+      "lanIp": "LAN IP",
+      "tcpFirewall": "Inbound TCP port allowed",
+      "mdnsFirewall": "mDNS UDP 5353 allowed",
+      "unknown": "Unknown check"
+    },
+    "checkStatus": {
+      "ready": "Detected",
+      "failed": "Not ready",
+      "manual": "Manual check"
+    },
+    "guidanceTitle": "How to open it",
+    "guidance": {
+      "macos": {
+        "summary": "On macOS, prefer allowing cc-partner in the application firewall. The relevant network requirements are the current TCP port and UDP 5353.",
+        "stepSystemSettings": "Open System Settings → Network → Firewall → Options.",
+        "stepAllowApp": "Allow cc-partner to receive incoming connections. If it is missing, use the command below to add the current app to the application firewall.",
+        "stepPorts": "Confirm your network policy allows the current TCP port and UDP 5353. The app will not run sudo automatically.",
+        "allowAppCommand": "Add the current app to the application firewall",
+        "unblockAppCommand": "Allow inbound connections for the current app"
+      },
+      "windows": {
+        "summary": "On Windows, use Windows Defender Firewall with Advanced Security or add inbound rules from an elevated terminal.",
+        "stepAdmin": "Open PowerShell or Command Prompt as Administrator.",
+        "stepRules": "Add two inbound allow rules: the current TCP port and UDP 5353.",
+        "tcpCommand": "Allow the current P2P TCP port",
+        "mdnsCommand": "Allow mDNS UDP 5353"
+      },
+      "linux": {
+        "summary": "Linux/Ubuntu commonly uses ufw or firewalld. Choose the command set matching the firewall enabled on your distribution.",
+        "stepChooseFirewall": "Check whether this system uses ufw or firewalld.",
+        "stepReload": "firewalld permanent rules require reload; ufw writes the rule immediately.",
+        "ufwTcp": "ufw allow current P2P TCP port",
+        "ufwMdns": "ufw allow mDNS UDP 5353",
+        "firewalldTcp": "firewalld allow current P2P TCP port",
+        "firewalldMdns": "firewalld allow mDNS UDP 5353",
+        "firewalldReload": "Reload firewalld"
+      },
+      "unsupported": {
+        "summary": "No command template is available for this platform. Manually allow inbound TCP on the current port and UDP 5353 in the system firewall.",
+        "stepManual": "Add inbound rules manually: the current TCP port is used for project access, and UDP 5353 is used for mDNS discovery."
+      }
+    }
+  },
   "about": {
     "title": "About",
     "versionLabel": "Version",

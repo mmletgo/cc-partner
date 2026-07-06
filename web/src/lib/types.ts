@@ -142,6 +142,85 @@ export interface WorkbenchDependencyStatus {
   output: string[];
 }
 
+export type LanFirewallPlatform = 'macos' | 'windows' | 'linux' | 'unsupported' | string;
+
+/**
+ * 局域网防火墙依赖检测项。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   Settings 依赖环境页需要把可自动判断的运行状态和需要用户手动确认的防火墙项分开展示。
+ *
+ * Code Logic（字段说明）:
+ *   ok=true/false 表示后端可判定，ok=null 表示系统防火墙放行状态无法无权限可靠判定。
+ */
+export interface LanFirewallCheck {
+  id: 'httpListener' | 'lanIp' | 'tcpFirewall' | 'mdnsFirewall' | string;
+  ok: boolean | null;
+  detail: string;
+}
+
+/**
+ * 局域网防火墙方法步骤。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   不同系统的放行方法需要前端用 i18n 文案渲染，后端只返回稳定 key。
+ *
+ * Code Logic（字段说明）:
+ *   labelKey 是完整 i18n key，组件通过 t(labelKey) 转成当前语言文案。
+ */
+export interface LanFirewallStep {
+  labelKey: string;
+}
+
+/**
+ * 局域网防火墙可复制命令。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   用户需要按当前系统复制命令手动放行端口，但应用不应自动 sudo 或修改防火墙。
+ *
+ * Code Logic（字段说明）:
+ *   labelKey 为命令说明的 i18n key；command 是后端按当前端口生成的只读命令字符串。
+ */
+export interface LanFirewallCommand {
+  labelKey: string;
+  command: string;
+}
+
+/**
+ * 局域网防火墙平台指引。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   Settings 依赖环境页需要展示系统方法、步骤和命令块。
+ *
+ * Code Logic（字段说明）:
+ *   summaryKey/steps 的可见文案均走 i18n；commands 保留系统命令原文。
+ */
+export interface LanFirewallGuidance {
+  summaryKey: string;
+  steps: LanFirewallStep[];
+  commands: LanFirewallCommand[];
+}
+
+/**
+ * 局域网防火墙依赖状态。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   局域网互联访问项目需要本机 HTTP/P2P TCP 端口与 mDNS UDP 5353 被允许入站。
+ *
+ * Code Logic（字段说明）:
+ *   对齐后端 check_lan_firewall_dependency camelCase DTO；真实防火墙放行状态不做权限外推断。
+ */
+export interface LanFirewallDependencyStatus {
+  platform: LanFirewallPlatform;
+  platformLabel: string;
+  lanIp: string | null;
+  httpPort: number;
+  mdnsPort: number;
+  appPath: string | null;
+  checks: LanFirewallCheck[];
+  guidance: LanFirewallGuidance;
+}
+
 /**
  * GitHub 私有仓库云端同步配置
  * 字段与 Rust 后端 get_cloud_sync_config / update_cloud_sync_config 命令返回对齐（camelCase）。

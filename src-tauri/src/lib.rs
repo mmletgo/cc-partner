@@ -42,11 +42,12 @@ use crate::commands::{
     cc_history as cc_history_cmd, claude_code_assets as claude_code_assets_cmd,
     claude_md as claude_md_cmd, cloud_sync as cloud_sync_cmd, config as config_cmd,
     devices as device_cmd, github_trending as github_trending_cmd, health as health_cmd,
-    mobile as mobile_cmd, orchestrator as orchestrator_cmd,
-    orchestrator_config as orchestrator_config_cmd, permissions as permissions_cmd,
-    prompt_optimizer as prompt_optimizer_cmd, prompts as prompt_cmd, scratchpad as scratchpad_cmd,
-    screenshot as screenshot_cmd, ssh_target as ssh_target_cmd, sync as sync_cmd,
-    transfer as transfer_cmd, updater as updater_cmd, workbench as workbench_cmd,
+    lan_firewall_dependency as lan_firewall_dependency_cmd, mobile as mobile_cmd,
+    orchestrator as orchestrator_cmd, orchestrator_config as orchestrator_config_cmd,
+    permissions as permissions_cmd, prompt_optimizer as prompt_optimizer_cmd,
+    prompts as prompt_cmd, scratchpad as scratchpad_cmd, screenshot as screenshot_cmd,
+    ssh_target as ssh_target_cmd, sync as sync_cmd, transfer as transfer_cmd,
+    updater as updater_cmd, workbench as workbench_cmd,
     workbench_dependencies as workbench_dependency_cmd,
 };
 use crate::net::{discovery, http_server, peer_client::PeerClient};
@@ -694,6 +695,8 @@ pub fn run() {
             workbench_dependency_cmd::install_workbench_dependency,
             workbench_dependency_cmd::get_workbench_dependency_install_status,
             workbench_dependency_cmd::cancel_workbench_dependency_install,
+            // 局域网互联防火墙依赖（只检测监听/IP，返回平台化放行方法，不自动改防火墙）
+            lan_firewall_dependency_cmd::check_lan_firewall_dependency,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {

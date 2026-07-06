@@ -1,0 +1,226 @@
+/* LanFirewallDependencyCard - 局域网防火墙端口检测与系统指引卡。 */
+
+.card {
+  border-color: var(--border-soft);
+}
+
+.header {
+  padding-bottom: var(--space-2);
+}
+
+.titleGroup {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.title {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+}
+
+.subtitle,
+.description,
+.notice {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.subtitle {
+  margin-top: var(--space-1);
+}
+
+.notice {
+  padding: var(--space-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-warm);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.metaGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.metaGrid div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.metaGrid dt {
+  color: var(--meta);
+  font-size: var(--text-xs);
+}
+
+.metaGrid dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metaWide {
+  grid-column: 1 / -1;
+}
+
+.checkList {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.checkRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.checkRow:last-child {
+  border-bottom: none;
+}
+
+.checkText {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.checkLabel {
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.checkDetail {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.guidance {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.sectionTitle {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.stepList {
+  margin: 0;
+  padding-left: var(--space-5);
+  color: var(--fg-2);
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+}
+
+.commandList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.commandBox,
+.errorBox,
+.outputBox {
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.commandBox {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: 1px solid var(--border-soft);
+  background: var(--surface-warm);
+  color: var(--muted);
+}
+
+.commandHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.commandBox code {
+  color: var(--fg);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.errorBox {
+  border: 1px solid var(--danger-soft);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.outputBox {
+  max-height: 120px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+@media (max-width: 860px) {
+  .metaGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .titleGroup,
+  .checkRow,
+  .commandHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .metaGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

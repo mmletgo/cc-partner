@@ -48,6 +48,8 @@ export type { RemoteAssetPickerProps } from './RemoteAssetPicker';
 
 export { WorkbenchProjectRail } from './WorkbenchProjectRail';
 export { WorkbenchDependencyCard } from './WorkbenchDependencyCard';
+export { LanFirewallDependencyCard } from './LanFirewallDependencyCard';
+export type { LanFirewallDependencyCardProps } from './LanFirewallDependencyCard';
 export { WorkbenchImagePreview } from './WorkbenchImagePreview';
 export type { WorkbenchImagePreviewProps } from './WorkbenchImagePreview';
 export { WorkbenchCsvPreview } from './WorkbenchCsvPreview';

@@ -133,6 +133,78 @@
     "refresh": "刷新",
     "qrLabel": "移动端 Workbench 访问二维码"
   },
+  "lanFirewall": {
+    "title": "局域网互联防火墙",
+    "subtitle": "项目远程访问端口",
+    "description": "局域网设备访问本机 Workbench 项目时，需要允许当前 P2P HTTP TCP 端口入站，并保留 mDNS UDP 5353 用于自动发现。",
+    "manualNotice": "系统防火墙的真实放行状态无法在无管理员权限下可靠判定；这里仅检测 HTTP 服务监听和局域网 IP，并给出手动放行方法。",
+    "loadFailed": "检测局域网防火墙依赖失败",
+    "recheck": "重新检测",
+    "copyCommand": "复制命令",
+    "copyFailed": "复制命令失败，请手动选中命令复制。",
+    "unavailable": "不可用",
+    "status": {
+      "manual": "需手动确认",
+      "blocked": "需处理"
+    },
+    "platform": {
+      "macos": "macOS",
+      "windows": "Windows",
+      "linux": "Linux / Ubuntu",
+      "unsupported": "未知平台"
+    },
+    "meta": {
+      "platform": "系统",
+      "lanIp": "局域网 IP",
+      "httpPort": "P2P TCP 端口",
+      "mdnsPort": "mDNS UDP 端口",
+      "appPath": "当前 App 路径"
+    },
+    "checks": {
+      "httpListener": "HTTP/P2P 服务监听",
+      "lanIp": "局域网 IP",
+      "tcpFirewall": "TCP 端口入站放行",
+      "mdnsFirewall": "mDNS UDP 5353 放行",
+      "unknown": "未知检查项"
+    },
+    "checkStatus": {
+      "ready": "已检测",
+      "failed": "未就绪",
+      "manual": "手动确认"
+    },
+    "guidanceTitle": "打开方法",
+    "guidance": {
+      "macos": {
+        "summary": "macOS 应优先在系统设置的应用防火墙中允许 cc-partner 接收入站连接；端口含义是当前 TCP 端口和 UDP 5353。",
+        "stepSystemSettings": "打开 系统设置 → 网络 → 防火墙 → 选项。",
+        "stepAllowApp": "允许 cc-partner 接收入站连接；如果列表中没有应用，可用下方命令把当前 App 加入应用防火墙。",
+        "stepPorts": "确认网络策略允许 TCP 当前端口与 UDP 5353；应用不会自动执行 sudo。",
+        "allowAppCommand": "把当前 App 加入应用防火墙",
+        "unblockAppCommand": "允许当前 App 入站连接"
+      },
+      "windows": {
+        "summary": "Windows 可用“高级安全 Windows Defender 防火墙”或管理员终端添加入站规则。",
+        "stepAdmin": "以管理员身份打开 PowerShell 或命令提示符。",
+        "stepRules": "添加当前 TCP 端口和 UDP 5353 两条入站允许规则。",
+        "tcpCommand": "允许 P2P TCP 当前端口",
+        "mdnsCommand": "允许 mDNS UDP 5353"
+      },
+      "linux": {
+        "summary": "Linux/Ubuntu 通常使用 ufw 或 firewalld；按你的发行版实际启用的防火墙选择一组命令。",
+        "stepChooseFirewall": "确认当前系统使用 ufw 还是 firewalld。",
+        "stepReload": "firewalld 添加永久规则后需要 reload；ufw 命令会即时写入规则。",
+        "ufwTcp": "ufw 允许 P2P TCP 当前端口",
+        "ufwMdns": "ufw 允许 mDNS UDP 5353",
+        "firewalldTcp": "firewalld 允许 P2P TCP 当前端口",
+        "firewalldMdns": "firewalld 允许 mDNS UDP 5353",
+        "firewalldReload": "重载 firewalld"
+      },
+      "unsupported": {
+        "summary": "当前平台没有内置命令模板；请在系统防火墙中手动允许 TCP 当前端口与 UDP 5353 入站。",
+        "stepManual": "手动添加入站规则：TCP 当前端口用于项目访问，UDP 5353 用于 mDNS 自动发现。"
+      }
+    }
+  },
   "about": {
     "title": "关于",
     "versionLabel": "版本号",
