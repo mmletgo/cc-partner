@@ -230,6 +230,7 @@ fn inherit_target_permissions(target_path: &Path, temporary_path: &Path) -> Resu
 ///
 /// Code Logic（这个函数做什么）:
 ///     先读取临时文件权限，若 readonly 则尝试解除 readonly，再执行 remove_file；所有错误都被忽略。
+#[allow(clippy::permissions_set_readonly_false)]
 fn cleanup_temporary_file(path: &Path) {
     if let Ok(metadata) = fs::metadata(path) {
         let mut permissions = metadata.permissions();

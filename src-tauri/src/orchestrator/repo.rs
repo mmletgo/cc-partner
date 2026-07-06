@@ -12,9 +12,11 @@ use crate::orchestrator::models::{
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
 };
+use crate::orchestrator::workflow::resolve_project_workflow;
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
+use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -780,12 +782,12 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     全局 scheduler 一次 tick 需要按设备级剩余容量，在所有本机 local Workbench 项目中领取可执行泳道任务。
-    ///     remote 项目必须跳过，避免本机在远端快捷方式上创建 worktree/terminal。
+    ///     全局 scheduler 一次 tick 需要按设备级剩余容量，在所有本机 local Workbench 项目中领取项目 workflow 允许的活跃泳道任务。
+    ///     remote 项目必须跳过；项目 WORKFLOW.md 无效时不能把该项目任务提前 claim 到 Preparing。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在单个事务内完成 active local run_state 计数、剩余容量计算、Todo/Rework 选择和 Preparing 条件更新。
-    ///     最多领取 limit-active 个任务，排序保持 priority DESC, created_at ASC；limit<=0 或容量已满返回空 Vec。
+    ///     在单个事务内完成 active local run_state 计数、剩余容量计算、idle/blocked 候选读取和 Preparing 条件更新。
+    ///     每个候选按 Workbench 项目 path 动态解析 WORKFLOW.md，使用 ResolvedWorkflow.active_states 判断是否可领取。
     pub async fn claim_next_local_queued_tasks_with_global_capacity(
         &self,
         limit: i64,
@@ -820,29 +822,50 @@ impl OrchestratorRepo {
                SELECT task.id FROM orchestrator_tasks task \
                INNER JOIN workbench_projects project ON project.id = task.project_id \
                WHERE project.kind = 'local' \
-                 AND task.workflow_state IN (?, ?) \
                  AND task.run_state IN (?, ?) \
-               ORDER BY task.priority DESC, task.created_at ASC LIMIT ?\
+               ORDER BY task.priority DESC, task.created_at ASC\
              ) \
              ORDER BY priority DESC, created_at ASC"
         ))
-        .bind(OrchestratorWorkflowState::Todo.as_str())
-        .bind(OrchestratorWorkflowState::Rework.as_str())
         .bind(OrchestratorRunState::Idle.as_str())
         .bind(OrchestratorRunState::Blocked.as_str())
-        .bind(remaining)
         .fetch_all(&mut *tx)
         .await?;
 
         let mut claimed = Vec::new();
         for row in selected {
+            if claimed.len() >= remaining as usize {
+                break;
+            }
             let task_id: String = row.try_get("id")?;
+            let project_id: String = row.try_get("project_id")?;
+            let candidate = row_to_task(&row)?;
+            let project_path =
+                sqlx::query("SELECT path FROM workbench_projects WHERE id = ? AND kind = 'local'")
+                    .bind(&project_id)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .try_get::<String, _>("path")?;
+            let workflow = match resolve_project_workflow(Path::new(&project_path)) {
+                Ok(workflow) => workflow,
+                Err(err) => {
+                    tracing::warn!(
+                        project_id = %project_id,
+                        project_path = %project_path,
+                        "跳过无效 WORKFLOW.md 项目的 Orchestrator dispatch: {err}"
+                    );
+                    continue;
+                }
+            };
+            if !workflow.active_states.contains(&candidate.workflow_state) {
+                continue;
+            }
             let now = Utc::now().to_rfc3339();
             let result = sqlx::query(
                 "UPDATE orchestrator_tasks \
                  SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, updated_at = ? \
                  WHERE id = ? \
-                   AND workflow_state IN (?, ?) \
+                   AND workflow_state = ? \
                    AND run_state IN (?, ?)",
             )
             .bind(OrchestratorTaskStatus::Preparing.as_str())
@@ -852,8 +875,7 @@ impl OrchestratorRepo {
             .bind(Option::<&str>::None)
             .bind(now)
             .bind(&task_id)
-            .bind(OrchestratorWorkflowState::Todo.as_str())
-            .bind(OrchestratorWorkflowState::Rework.as_str())
+            .bind(candidate.workflow_state.as_str())
             .bind(OrchestratorRunState::Idle.as_str())
             .bind(OrchestratorRunState::Blocked.as_str())
             .execute(&mut *tx)
@@ -1334,6 +1356,7 @@ impl OrchestratorRepo {
     /// Code Logic（这个函数做什么）:
     ///     执行 `UPDATE ... WHERE id=? AND status=?`，命中时按调用方传入的 split state 与 attempt phase 更新；
     ///     未命中时确认任务仍存在并返回 None，避免迟到 verifier 覆盖 Abort 或其它并发状态。
+    #[allow(clippy::too_many_arguments)]
     pub async fn try_transition_task_split_state(
         &self,
         task_id: &str,
@@ -1982,6 +2005,7 @@ impl OrchestratorRepo {
     /// Code Logic（这个函数做什么）:
     ///     在单个 SQLite 事务里仅对 status=sending 的 item 写 mirrored/sent_at/remote_task_id/remote_project_id，
     ///     并按 `(device_id, remote_task_id)` upsert mirror；状态不再是 sending 时返回 None 且不覆盖。
+    #[allow(clippy::too_many_arguments)]
     pub async fn mark_remote_outbox_mirrored_and_upsert_mirror_if_sending(
         &self,
         item_id: &str,

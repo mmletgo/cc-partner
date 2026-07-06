@@ -66,6 +66,7 @@ enum PaneClosePlan {
 ///
 /// Code Logic（这个枚举做什么）:
 ///     区分普通 pane 关闭与最后一个 pane 导致的 window 关闭，并在后者携带需要清理的 row。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum PaneCloseOutcome {
     PaneClosed,
@@ -1265,6 +1266,7 @@ impl WorkbenchSessionRegistry {
     ///
     /// Code Logic（这个函数做什么）:
     ///     创建 portable-pty pair，cwd 指向 active worktree 路径，spawn 系统 shell，并启动输出与退出监听线程。
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
         app: AppHandle,

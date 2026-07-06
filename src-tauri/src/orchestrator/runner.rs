@@ -18,10 +18,10 @@ use crate::orchestrator::models::{
     OrchestratorAttemptPhase, OrchestratorTaskRow, OrchestratorTaskStatus,
     EVIDENCE_KIND_DEVELOPMENT_ATTEMPT,
 };
-use crate::orchestrator::prompt::{
-    build_initial_task_prompt, build_repair_task_prompt, RepairPromptContext,
-};
+use crate::orchestrator::prompt::{build_repair_task_prompt, RepairPromptContext};
+use crate::orchestrator::workflow::{resolve_project_workflow, PromptTaskContext};
 use crate::state::AppState;
+use std::path::Path;
 use std::time::Duration;
 use tauri::AppHandle;
 
@@ -177,7 +177,13 @@ pub async fn prepare_runner_attempt(
     }
 
     let prompt = if prompt.trim().is_empty() {
-        build_initial_task_prompt(task, &worktree.path)
+        let workflow = resolve_project_workflow(Path::new(&project.path))?;
+        let prompt_task = PromptTaskContext {
+            title: task.title.clone(),
+            goal: task.goal.clone(),
+            acceptance_criteria: task.acceptance_criteria.clone(),
+        };
+        workflow.render_runner_prompt(&prompt_task, attempt, &worktree.path)?
     } else {
         prompt
     };

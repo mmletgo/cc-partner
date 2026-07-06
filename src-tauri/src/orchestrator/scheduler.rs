@@ -194,6 +194,7 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use sqlx::Row;
     use sqlx::SqlitePool;
+    use std::path::{Path, PathBuf};
     use std::str::FromStr;
 
     /// Business Logic（为什么需要这个函数）:
@@ -237,7 +238,12 @@ mod tests {
     ///
     /// Code Logic（这个函数做什么）:
     ///     插入一条 Workbench 项目记录，除 kind/id 外字段使用稳定测试值。
-    async fn insert_workbench_project(pool: &SqlitePool, id: &str, kind: &str) {
+    async fn insert_workbench_project_with_path(
+        pool: &SqlitePool,
+        id: &str,
+        kind: &str,
+        path: &Path,
+    ) {
         sqlx::query(
             "INSERT INTO workbench_projects \
              (id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at) \
@@ -246,13 +252,23 @@ mod tests {
         .bind(id)
         .bind(format!("Project {id}"))
         .bind(kind)
-        .bind(format!("/tmp/{id}"))
+        .bind(path.to_string_lossy().to_string())
         .bind("2026-07-05T00:00:00Z")
         .bind("2026-07-05T00:00:00Z")
         .bind("2026-07-05T00:00:00Z")
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     大多数 scheduler 测试只关心 local/remote 类型，不需要真实项目目录。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用稳定的 /tmp/<id> 路径调用 insert_workbench_project_with_path。
+    async fn insert_workbench_project(pool: &SqlitePool, id: &str, kind: &str) {
+        insert_workbench_project_with_path(pool, id, kind, &PathBuf::from(format!("/tmp/{id}")))
+            .await;
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -494,6 +510,129 @@ mod tests {
         assert_eq!(backlog.workflow_state, OrchestratorWorkflowState::Backlog);
         assert_eq!(backlog.run_state, OrchestratorRunState::Idle);
         assert_eq!(rework.blocked_reason, None);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     项目 WORKFLOW.md 写错时必须阻止该项目新任务 dispatch，避免错误策略下提前创建 worktree/terminal。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建带非法 WORKFLOW.md 的本机项目和 Todo/Idle 任务，执行领取 helper 后断言任务没有进入 Preparing。
+    #[tokio::test]
+    async fn invalid_project_workflow_blocks_new_dispatch_before_claim() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        let dir = tempfile::tempdir().expect("创建临时项目目录成功");
+        std::fs::write(dir.path().join("WORKFLOW.md"), "---\n[\n---\nBody")
+            .expect("写入非法 WORKFLOW.md 成功");
+        insert_workbench_project_with_path(&pool, "local-a", "local", dir.path()).await;
+        repo.create_task(&task_row_for_project(
+            "todo-invalid-workflow",
+            "local-a",
+            OrchestratorTaskStatus::Queued,
+        ))
+        .await
+        .unwrap();
+        set_task_split_state(
+            &pool,
+            "todo-invalid-workflow",
+            OrchestratorWorkflowState::Todo,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 1))
+            .await
+            .unwrap();
+        let persisted = repo.get_task("todo-invalid-workflow").await.unwrap();
+
+        assert!(claimed.is_empty());
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(persisted.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(persisted.run_state, OrchestratorRunState::Idle);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     项目 workflow 可以调整 active states，scheduler 必须消费解析结果而不是固定 Todo/Rework。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写入 active_states=[backlog] 的 WORKFLOW.md，断言 Backlog/Idle 被领取而 Todo/Idle 留在队列中。
+    #[tokio::test]
+    async fn scheduler_consumes_project_workflow_active_states() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        let dir = tempfile::tempdir().expect("创建临时项目目录成功");
+        std::fs::write(
+            dir.path().join("WORKFLOW.md"),
+            "---\nworkflow:\n  active_states:\n    - backlog\n---\nCustom prompt",
+        )
+        .expect("写入 WORKFLOW.md 成功");
+        insert_workbench_project_with_path(&pool, "local-a", "local", dir.path()).await;
+        for (id, workflow_state) in [
+            ("backlog-active", OrchestratorWorkflowState::Backlog),
+            ("todo-inactive", OrchestratorWorkflowState::Todo),
+        ] {
+            repo.create_task(&task_row_for_project(
+                id,
+                "local-a",
+                OrchestratorTaskStatus::Queued,
+            ))
+            .await
+            .unwrap();
+            set_task_split_state(&pool, id, workflow_state, OrchestratorRunState::Idle, None).await;
+        }
+
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 2))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["backlog-active"]
+        );
+        assert_eq!(
+            repo.get_task("todo-inactive").await.unwrap().status,
+            OrchestratorTaskStatus::Queued
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     没有 WORKFLOW.md 的项目必须继续使用内置默认 workflow，不能因为项目未配置而停止自动化。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建无 WORKFLOW.md 的真实项目目录和 Todo/Idle 任务，断言 scheduler 仍按默认 active states 领取。
+    #[tokio::test]
+    async fn missing_project_workflow_uses_built_in_default_for_dispatch() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        let dir = tempfile::tempdir().expect("创建临时项目目录成功");
+        insert_workbench_project_with_path(&pool, "local-a", "local", dir.path()).await;
+        repo.create_task(&task_row_for_project(
+            "todo-default-workflow",
+            "local-a",
+            OrchestratorTaskStatus::Queued,
+        ))
+        .await
+        .unwrap();
+        set_task_split_state(
+            &pool,
+            "todo-default-workflow",
+            OrchestratorWorkflowState::Todo,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 1))
+            .await
+            .unwrap();
+
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, "todo-default-workflow");
+        assert_eq!(claimed[0].status, OrchestratorTaskStatus::Preparing);
     }
 
     /// Business Logic（为什么需要这个函数）:
