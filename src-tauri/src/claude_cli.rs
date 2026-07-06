@@ -20,6 +20,7 @@ use tokio::process::Command;
 const DEFAULT_CLAUDE_CLI: &str = "claude";
 const DEFAULT_CLAUDE_MODEL: &str = "sonnet";
 const MAX_ERROR_CHARS: usize = 500;
+const CLI_VERSION_TIMEOUT_SECS: u64 = 10;
 
 /// 归一化 Claude CLI 路径。
 ///
@@ -50,6 +51,56 @@ pub(crate) fn normalize_model(model: &str) -> String {
         DEFAULT_CLAUDE_MODEL.to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     多个功能（GitHub Trending 解说、Workbench session resume）都需要先确认本机 Claude CLI 可用，
+///     避免功能启动后才发现 CLI 缺失导致用户体验中断。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 Claude CLI 路径（空则用 "claude"），执行 `<cli> --version`，
+///     成功返回 `Ok(version)`（version 为 stdout trim 后的版本字符串，调用方按需丢弃即可），
+///     失败（命令不存在/非零退出/stderr 非空）返回 `Err(中文错误描述)`。
+///     不读写任何配置，纯检测函数。
+pub(crate) async fn check_claude_cli_available(cli_path: &str) -> Result<String, String> {
+    let cli = normalize_cli_path(cli_path);
+    let mut cmd = Command::new(&cli);
+    cmd.arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let output = match tokio::time::timeout(
+        Duration::from_secs(CLI_VERSION_TIMEOUT_SECS),
+        cmd.output(),
+    )
+    .await
+    {
+        Ok(Ok(out)) => out,
+        Ok(Err(_)) => {
+            return Err("未找到 Claude CLI，请确认已安装并配置 PATH".to_string());
+        }
+        Err(_) => {
+            return Err(format!(
+                "Claude CLI 检测超时（{} 秒）",
+                CLI_VERSION_TIMEOUT_SECS
+            ));
+        }
+    };
+
+    if output.status.success() {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(version)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            "命令返回非零状态".to_string()
+        } else {
+            stderr
+        };
+        Err(format!("Claude CLI 执行失败: {detail}"))
     }
 }
 
