@@ -1607,13 +1607,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
               </div>
             ) : null}
             {loading ? <p className={styles.muted}>{t('common:loading')}</p> : null}
-            {!loading && tasks.length === 0 && pendingRemoteItems.length === 0 ? (
-              <div className={styles.empty}>
-                <h3 className={styles.emptyTitle}>{t('orchestrator:emptyTitle')}</h3>
-                <p className={styles.emptyBody}>{t('orchestrator:emptyBody')}</p>
-              </div>
-            ) : null}
-            {!loading && tasks.length > 0 ? (
+            {!loading ? (
               <div className={styles.board} aria-label={t('orchestrator:workflow.boardAria')}>
                 {ORCHESTRATOR_BOARD_LANES.map((lane) => (
                   <section

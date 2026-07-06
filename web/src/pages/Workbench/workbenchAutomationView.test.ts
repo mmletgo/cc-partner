@@ -236,6 +236,16 @@ async function main(): Promise<void> {
     'ORCHESTRATOR_BOARD_LANES',
     'Orchestrator queue renders the workflow board lane order from orchestratorBoard helpers',
   );
+  assertNotContains(
+    orchestratorSource,
+    '!loading && tasks.length > 0 ? (',
+    'Orchestrator workflow board must stay visible even when the current project has zero tasks',
+  );
+  assertNotContains(
+    orchestratorSource,
+    'tasks.length === 0 && pendingRemoteItems.length === 0',
+    'Empty task projects should render empty workflow lanes instead of replacing the board with an empty prompt',
+  );
   assertContains(
     orchestratorSource,
     'groupRenderableTasksByWorkflowState(tasks)',
