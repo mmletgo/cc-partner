@@ -56,6 +56,7 @@ pub(crate) fn render_user_block(value: &str) -> String {
 ///
 /// Code Logic（这个函数做什么）:
 ///     按行检查去掉 CR 后是否精确等于 DEV_DONE_SENTINEL，命中返回 true。
+#[allow(dead_code)]
 pub(crate) fn contains_standalone_dev_done_sentinel(value: &str) -> bool {
     value
         .lines()

@@ -22,10 +22,47 @@ const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_criteria, st
     external_url, runner_provider, claude_session_id, transcript_path, runtime_started_at, \
     last_activity_at, last_runtime_event, last_runtime_message, branch_name, worktree_id, \
     session_id, blocked_reason, attempt, created_at, updated_at, started_at, finished_at";
+const WORKFLOW_LANE_ORDER: [OrchestratorWorkflowState; 8] = [
+    OrchestratorWorkflowState::Backlog,
+    OrchestratorWorkflowState::Todo,
+    OrchestratorWorkflowState::InProgress,
+    OrchestratorWorkflowState::HumanReview,
+    OrchestratorWorkflowState::Rework,
+    OrchestratorWorkflowState::Merging,
+    OrchestratorWorkflowState::Done,
+    OrchestratorWorkflowState::Canceled,
+];
 const PROJECT_CONFIG_COLUMNS: &str = "project_id, enabled, max_concurrent_tasks, branch_prefix, \
     verification_commands_json, auto_commit, auto_push_task_branch, auto_merge_to_main, \
     auto_push_main, retry_limit, retain_worktree_on_done, retain_worktree_on_blocked, \
     created_at, updated_at";
+
+/// Business Logic（为什么需要这个函数）:
+///     看板拖拽必须使用固定泳道顺序判断相邻关系，避免前端或调用方传入任意状态导致跨阶段跳转。
+///
+/// Code Logic（这个函数做什么）:
+///     在 WORKFLOW_LANE_ORDER 中查找 workflow_state 的索引；枚举完整覆盖，缺失时返回业务错误暴露代码缺陷。
+fn workflow_lane_index(state: OrchestratorWorkflowState) -> Result<usize, AppError> {
+    WORKFLOW_LANE_ORDER
+        .iter()
+        .position(|item| *item == state)
+        .ok_or_else(|| AppError::generic("未知 Orchestrator 工作流泳道"))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     拖拽移动不能作用于已经由 Runner 或交付流程接管的任务，否则看板阶段会与真实运行现场冲突。
+///
+/// Code Logic（这个函数做什么）:
+///     判断 run_state 是否属于 Preparing/Running/Verifying/Delivering 四个执行中状态。
+fn is_active_run_state(state: OrchestratorRunState) -> bool {
+    matches!(
+        state,
+        OrchestratorRunState::Preparing
+            | OrchestratorRunState::Running
+            | OrchestratorRunState::Verifying
+            | OrchestratorRunState::Delivering
+    )
+}
 const EVIDENCE_COLUMNS: &str = "id, task_id, kind, title, summary, content, created_at";
 const ATTEMPT_COLUMNS: &str = "id, task_id, attempt, worktree_id, session_id, prompt, status, \
     created_at, completed_at";
@@ -253,6 +290,7 @@ impl OrchestratorRepo {
         if added_workflow_state || added_run_state {
             backfill_split_state_from_legacy_status(pool).await?;
         }
+        normalize_queued_split_state(pool).await?;
 
         for statement in [
             ORCHESTRATOR_TASKS_PROJECT_STATUS_INDEX,
@@ -588,20 +626,54 @@ impl OrchestratorRepo {
     ///     项目级并发上限只应计算已经被调度器接管或正在后续阶段处理的任务。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     统计 Preparing/Running/Verifying/Delivering 四个 active 状态数量，返回 SQLite COUNT 结果。
+    ///     统计 Preparing/Running/Verifying/Delivering 四个 active run_state 数量，返回 SQLite COUNT 结果。
     pub async fn count_active_tasks(&self, project_id: &str) -> Result<i64, AppError> {
         let row = sqlx::query(
             "SELECT COUNT(*) AS count FROM orchestrator_tasks \
-             WHERE project_id = ? AND status IN (?, ?, ?, ?)",
+             WHERE project_id = ? AND run_state IN (?, ?, ?, ?)",
         )
         .bind(project_id)
-        .bind(OrchestratorTaskStatus::Preparing.as_str())
-        .bind(OrchestratorTaskStatus::Running.as_str())
-        .bind(OrchestratorTaskStatus::Verifying.as_str())
-        .bind(OrchestratorTaskStatus::Delivering.as_str())
+        .bind(OrchestratorRunState::Preparing.as_str())
+        .bind(OrchestratorRunState::Running.as_str())
+        .bind(OrchestratorRunState::Verifying.as_str())
+        .bind(OrchestratorRunState::Delivering.as_str())
         .fetch_one(&self.pool)
         .await?;
         Ok(row.try_get("count")?)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     runtime snapshot 需要展示当前项目已占用的本机自动化槽位，避免 UI 重新拼 SQL 或误用 legacy status。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 project_id 统计 Preparing/Running/Verifying/Delivering 四个 active run_state 数量。
+    pub async fn count_active_run_states_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<i64, AppError> {
+        self.count_active_tasks(project_id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     runtime snapshot 应尽量暴露最近阻塞原因，帮助用户理解自动化为什么没有继续推进。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查询同项目最近一个 run_state=blocked 且 blocked_reason 非空的任务，按 updated_at/id 倒序取一条。
+    pub async fn latest_blocked_reason_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<String>, AppError> {
+        let row = sqlx::query(
+            "SELECT blocked_reason FROM orchestrator_tasks \
+             WHERE project_id = ? AND run_state = ? \
+               AND blocked_reason IS NOT NULL AND TRIM(blocked_reason) <> '' \
+             ORDER BY updated_at DESC, id DESC LIMIT 1",
+        )
+        .bind(project_id)
+        .bind(OrchestratorRunState::Blocked.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|item| item.try_get("blocked_reason")).transpose()?)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -609,17 +681,17 @@ impl OrchestratorRepo {
     ///     远端项目只是快捷方式，不能占用或触发本机 Runner 容量。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     通过 workbench_projects join 过滤 kind='local'，统计 Preparing/Running/Verifying/Delivering 四个 active 状态。
+    ///     通过 workbench_projects join 过滤 kind='local'，统计 Preparing/Running/Verifying/Delivering 四个 active run_state。
     pub async fn count_active_local_tasks(&self) -> Result<i64, AppError> {
         let row = sqlx::query(
             "SELECT COUNT(*) AS count FROM orchestrator_tasks task \
              INNER JOIN workbench_projects project ON project.id = task.project_id \
-             WHERE project.kind = 'local' AND task.status IN (?, ?, ?, ?)",
+             WHERE project.kind = 'local' AND task.run_state IN (?, ?, ?, ?)",
         )
-        .bind(OrchestratorTaskStatus::Preparing.as_str())
-        .bind(OrchestratorTaskStatus::Running.as_str())
-        .bind(OrchestratorTaskStatus::Verifying.as_str())
-        .bind(OrchestratorTaskStatus::Delivering.as_str())
+        .bind(OrchestratorRunState::Preparing.as_str())
+        .bind(OrchestratorRunState::Running.as_str())
+        .bind(OrchestratorRunState::Verifying.as_str())
+        .bind(OrchestratorRunState::Delivering.as_str())
         .fetch_one(&self.pool)
         .await?;
         Ok(row.try_get("count")?)
@@ -707,11 +779,11 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     全局 scheduler 一次 tick 需要按设备级剩余容量，在所有本机 local Workbench 项目中领取 queued 任务。
+    ///     全局 scheduler 一次 tick 需要按设备级剩余容量，在所有本机 local Workbench 项目中领取可执行泳道任务。
     ///     remote 项目必须跳过，避免本机在远端快捷方式上创建 worktree/terminal。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在单个事务内完成 active local 计数、剩余容量计算、local queued 选择和 Queued→Preparing 条件更新。
+    ///     在单个事务内完成 active local run_state 计数、剩余容量计算、Todo/Rework 选择和 Preparing 条件更新。
     ///     最多领取 limit-active 个任务，排序保持 priority DESC, created_at ASC；limit<=0 或容量已满返回空 Vec。
     pub async fn claim_next_local_queued_tasks_with_global_capacity(
         &self,
@@ -726,12 +798,12 @@ impl OrchestratorRepo {
         let active = sqlx::query(
             "SELECT COUNT(*) AS count FROM orchestrator_tasks task \
              INNER JOIN workbench_projects project ON project.id = task.project_id \
-             WHERE project.kind = 'local' AND task.status IN (?, ?, ?, ?)",
+             WHERE project.kind = 'local' AND task.run_state IN (?, ?, ?, ?)",
         )
-        .bind(OrchestratorTaskStatus::Preparing.as_str())
-        .bind(OrchestratorTaskStatus::Running.as_str())
-        .bind(OrchestratorTaskStatus::Verifying.as_str())
-        .bind(OrchestratorTaskStatus::Delivering.as_str())
+        .bind(OrchestratorRunState::Preparing.as_str())
+        .bind(OrchestratorRunState::Running.as_str())
+        .bind(OrchestratorRunState::Verifying.as_str())
+        .bind(OrchestratorRunState::Delivering.as_str())
         .fetch_one(&mut *tx)
         .await?
         .try_get::<i64, _>("count")?;
@@ -746,33 +818,43 @@ impl OrchestratorRepo {
              WHERE id IN (\
                SELECT task.id FROM orchestrator_tasks task \
                INNER JOIN workbench_projects project ON project.id = task.project_id \
-               WHERE project.kind = 'local' AND task.status = ? \
+               WHERE project.kind = 'local' \
+                 AND task.workflow_state IN (?, ?) \
+                 AND task.run_state IN (?, ?) \
                ORDER BY task.priority DESC, task.created_at ASC LIMIT ?\
              ) \
              ORDER BY priority DESC, created_at ASC"
         ))
-        .bind(OrchestratorTaskStatus::Queued.as_str())
+        .bind(OrchestratorWorkflowState::Todo.as_str())
+        .bind(OrchestratorWorkflowState::Rework.as_str())
+        .bind(OrchestratorRunState::Idle.as_str())
+        .bind(OrchestratorRunState::Blocked.as_str())
         .bind(remaining)
         .fetch_all(&mut *tx)
         .await?;
 
         let mut claimed = Vec::new();
-        let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Preparing);
         for row in selected {
             let task_id: String = row.try_get("id")?;
             let now = Utc::now().to_rfc3339();
             let result = sqlx::query(
                 "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
-                 WHERE id = ? AND status = ?",
+                 SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, updated_at = ? \
+                 WHERE id = ? \
+                   AND workflow_state IN (?, ?) \
+                   AND run_state IN (?, ?)",
             )
             .bind(OrchestratorTaskStatus::Preparing.as_str())
-            .bind(split_state.workflow_state.as_str())
-            .bind(split_state.run_state.as_str())
+            .bind(OrchestratorWorkflowState::InProgress.as_str())
+            .bind(OrchestratorRunState::Preparing.as_str())
+            .bind(OrchestratorAttemptPhase::PreparingWorkspace.as_str())
             .bind(Option::<&str>::None)
             .bind(now)
             .bind(&task_id)
-            .bind(OrchestratorTaskStatus::Queued.as_str())
+            .bind(OrchestratorWorkflowState::Todo.as_str())
+            .bind(OrchestratorWorkflowState::Rework.as_str())
+            .bind(OrchestratorRunState::Idle.as_str())
+            .bind(OrchestratorRunState::Blocked.as_str())
             .execute(&mut *tx)
             .await?;
 
@@ -1245,6 +1327,66 @@ impl OrchestratorRepo {
             "只有草稿任务可以入队，当前状态为 {}",
             current.status.as_str()
         )))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     看板拖拽是用户手动调整任务工作流阶段的轻量动作，必须避免隐式启动 Runner 或改变交付设置。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读取当前任务，拒绝 active run_state，只允许移动到固定顺序中的相邻泳道；通过后仅更新 workflow_state 和 updated_at。
+    pub async fn move_task_workflow_state(
+        &self,
+        task_id: &str,
+        target: OrchestratorWorkflowState,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        let current = self.get_task(task_id).await?;
+        self.move_task_workflow_state_from_snapshot(&current, target)
+            .await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     拖拽移动需要基于用户看到的任务快照做条件更新，防止 scheduler 或其它动作在读写之间改变任务后被覆盖。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     校验快照 run_state 和相邻泳道后，用 workflow_state/run_state 作为 CAS 条件更新；未命中时读取最新任务返回中文业务错误。
+    async fn move_task_workflow_state_from_snapshot(
+        &self,
+        current: &OrchestratorTaskRow,
+        target: OrchestratorWorkflowState,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        if is_active_run_state(current.run_state) {
+            return Err(AppError::generic("运行中的任务不能通过拖拽移动"));
+        }
+
+        let current_index = workflow_lane_index(current.workflow_state)?;
+        let target_index = workflow_lane_index(target)?;
+        if current_index.abs_diff(target_index) != 1 {
+            return Err(AppError::generic("只能移动到相邻泳道"));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET workflow_state = ?, updated_at = ? \
+             WHERE id = ? AND workflow_state = ? AND run_state = ?",
+        )
+        .bind(target.as_str())
+        .bind(now)
+        .bind(&current.id)
+        .bind(current.workflow_state.as_str())
+        .bind(current.run_state.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() != 1 {
+            let latest = self.get_task(&current.id).await?;
+            if is_active_run_state(latest.run_state) {
+                return Err(AppError::generic("运行中的任务不能通过拖拽移动"));
+            }
+            return Err(AppError::generic("任务状态已变化，请刷新后重试"));
+        }
+
+        self.get_task(&current.id).await
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1965,6 +2107,26 @@ async fn backfill_split_state_from_legacy_status(pool: &SqlitePool) -> Result<()
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     旧版 split state 曾把 legacy Queued 映射为 Todo/Queued；升级后 scheduler 只领取 Idle/Blocked，必须避免这些旧排队任务卡住。
+///
+/// Code Logic（这个函数做什么）:
+///     精准把 status=queued、workflow_state=todo、run_state=queued 的历史行规范化为 Todo/Idle，不覆盖其它用户调整过的 split state。
+async fn normalize_queued_split_state(pool: &SqlitePool) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE orchestrator_tasks \
+         SET run_state = ? \
+         WHERE status = ? AND workflow_state = ? AND run_state = ?",
+    )
+    .bind(OrchestratorRunState::Idle.as_str())
+    .bind(OrchestratorTaskStatus::Queued.as_str())
+    .bind(OrchestratorWorkflowState::Todo.as_str())
+    .bind(OrchestratorRunState::Queued.as_str())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     多个查询都需要把 SQLite 行转换成任务 Row，统一解析可避免字段遗漏和状态字符串散落。
 ///
 /// Code Logic（这个函数做什么）:
@@ -2250,6 +2412,31 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     split state 调度测试需要构造与 legacy status 解耦的任务，验证新调度条件只看业务泳道和运行态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     直接更新测试任务的 workflow_state、run_state 和 blocked_reason，保持其它字段不变。
+    async fn set_task_split_state(
+        pool: &SqlitePool,
+        task_id: &str,
+        workflow_state: OrchestratorWorkflowState,
+        run_state: OrchestratorRunState,
+        blocked_reason: Option<&str>,
+    ) {
+        sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET workflow_state = ?, run_state = ?, blocked_reason = ? WHERE id = ?",
+        )
+        .bind(workflow_state.as_str())
+        .bind(run_state.as_str())
+        .bind(blocked_reason)
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     基础 schema 初始化必须能支撑任务创建、列表读取和项目配置默认策略。
     ///
     /// Code Logic（这个函数做什么）:
@@ -2420,7 +2607,7 @@ mod tests {
                 (
                     "task-queued".to_string(),
                     "todo".to_string(),
-                    "queued".to_string()
+                    "idle".to_string()
                 ),
             ]
         );
@@ -2501,6 +2688,73 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     曾经落库为 Todo/Queued 的排队任务在升级后仍应被 scheduler 领取，不能因为 run_state 旧值卡住。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建已带 split state 的旧表并插入 queued/todo/queued，执行 init_schema 后断言只把 run_state 规范化为 idle。
+    #[tokio::test]
+    async fn init_schema_normalizes_existing_queued_split_state() {
+        let pool = setup_raw_pool().await;
+        sqlx::query(
+            "CREATE TABLE orchestrator_tasks (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              title TEXT NOT NULL,
+              goal TEXT NOT NULL,
+              acceptance_criteria TEXT NOT NULL,
+              status TEXT NOT NULL,
+              workflow_state TEXT NOT NULL DEFAULT 'backlog',
+              run_state TEXT NOT NULL DEFAULT 'idle',
+              priority INTEGER NOT NULL DEFAULT 0,
+              branch_name TEXT,
+              worktree_id TEXT,
+              session_id TEXT,
+              blocked_reason TEXT,
+              attempt INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              started_at TEXT,
+              finished_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("创建带 split state 的任务表成功");
+        sqlx::query(
+            "INSERT INTO orchestrator_tasks \
+             (id, project_id, title, goal, acceptance_criteria, status, workflow_state, \
+              run_state, priority, created_at, updated_at) \
+             VALUES ('task-queued', 'project-1', 'Queued task', 'goal', 'criteria', \
+              'queued', 'todo', 'queued', 0, '2026-07-05T00:00:00Z', '2026-07-05T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("插入旧 queued split state 任务成功");
+
+        OrchestratorRepo::init_schema(&pool)
+            .await
+            .expect("schema 增量初始化成功");
+
+        let row = sqlx::query(
+            "SELECT workflow_state, run_state FROM orchestrator_tasks WHERE id = 'task-queued'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("读取任务 split state 成功");
+
+        assert_eq!(
+            row.try_get::<String, _>("workflow_state")
+                .expect("读取 workflow_state"),
+            "todo"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("run_state")
+                .expect("读取 run_state"),
+            "idle"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     远端 create 请求超时重试时，同一个 clientRequestId 必须返回第一次创建的任务，避免 owning device 产生重复任务。
     ///
     /// Code Logic（这个测试做什么）:
@@ -2526,6 +2780,40 @@ mod tests {
         assert_eq!(replayed.id, "task-1");
         assert_eq!(replayed.status, OrchestratorTaskStatus::Queued);
         assert_eq!(listed.len(), 1);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     远端 HTTP create queue=true 是移动端和远端代理的直接启动入口，创建后的任务必须被本机 scheduler 领取。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     通过幂等 create helper 创建 queued 任务，再执行全局 claim，断言 split state 从 Todo/Idle 进入 InProgress/Preparing。
+    #[tokio::test]
+    async fn remote_create_queue_true_result_is_claimable_by_split_state_scheduler() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        let row = task_row("remote-created", "project-1", OrchestratorTaskStatus::Draft);
+
+        let created = repo
+            .create_remote_task_for_client_request("client-request-claimable", &row, true)
+            .await
+            .unwrap();
+        let claimed = repo
+            .claim_next_local_queued_tasks_with_global_capacity(1)
+            .await
+            .unwrap();
+
+        assert_eq!(created.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(created.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(created.run_state, OrchestratorRunState::Idle);
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, created.id);
+        assert_eq!(claimed[0].status, OrchestratorTaskStatus::Preparing);
+        assert_eq!(
+            claimed[0].workflow_state,
+            OrchestratorWorkflowState::InProgress
+        );
+        assert_eq!(claimed[0].run_state, OrchestratorRunState::Preparing);
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2608,6 +2896,44 @@ mod tests {
         assert_eq!(queued.project_id, created.project_id);
         assert_eq!(queued.title, created.title);
         assert_eq!(queued.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(queued.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(queued.run_state, OrchestratorRunState::Idle);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     手动入队仍保留 legacy Queued 状态，但 split state 必须进入 scheduler 可领取的 Todo/Idle。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建本机项目和 Draft 任务，queue_task 后执行全局 claim，断言任务能进入 Preparing。
+    #[tokio::test]
+    async fn queue_task_result_is_claimable_by_split_state_scheduler() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        let created = task_row("task-claimable", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&created).await.unwrap();
+
+        let queued = repo.queue_task(&created.id).await.unwrap();
+        let claimed = repo
+            .claim_next_local_queued_tasks_with_global_capacity(1)
+            .await
+            .unwrap();
+
+        assert_eq!(queued.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(queued.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(queued.run_state, OrchestratorRunState::Idle);
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, created.id);
+        assert_eq!(claimed[0].status, OrchestratorTaskStatus::Preparing);
+        assert_eq!(
+            claimed[0].workflow_state,
+            OrchestratorWorkflowState::InProgress
+        );
+        assert_eq!(claimed[0].run_state, OrchestratorRunState::Preparing);
+        assert_eq!(
+            claimed[0].attempt_phase,
+            Some(OrchestratorAttemptPhase::PreparingWorkspace)
+        );
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2640,6 +2966,107 @@ mod tests {
             assert_eq!(persisted.status, status);
             assert_eq!(persisted.blocked_reason, blocked_reason);
         }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户在看板拖拽任务时，只允许把非运行中任务移动到相邻泳道，避免一次跨越多个阶段绕过工作流约束。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Backlog/Idle 任务并移动到 Todo，断言只更新 workflow_state，不改变 legacy status 或 run_state。
+    #[tokio::test]
+    async fn move_task_workflow_state_allows_adjacent_lane() {
+        let (_pool, repo) = setup_repo().await;
+        let created = task_row("drag-adjacent", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&created).await.unwrap();
+
+        let moved = repo
+            .move_task_workflow_state(&created.id, OrchestratorWorkflowState::Todo)
+            .await
+            .unwrap();
+
+        assert_eq!(moved.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(moved.run_state, OrchestratorRunState::Idle);
+        assert_eq!(moved.status, OrchestratorTaskStatus::Draft);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     看板拖拽不应允许从 Backlog 直接跳到 HumanReview 等非相邻泳道，否则会绕过 Todo/InProgress 的任务语义。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Backlog 任务后尝试跨泳道移动，断言返回中文错误且持久化 workflow_state 不变。
+    #[tokio::test]
+    async fn move_task_workflow_state_rejects_non_adjacent_lane() {
+        let (_pool, repo) = setup_repo().await;
+        let created = task_row("drag-cross", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&created).await.unwrap();
+
+        let error = repo
+            .move_task_workflow_state(&created.id, OrchestratorWorkflowState::HumanReview)
+            .await
+            .expect_err("跨泳道移动应失败");
+        let persisted = repo.get_task(&created.id).await.unwrap();
+
+        assert!(error.to_string().contains("只能移动到相邻泳道"));
+        assert_eq!(persisted.workflow_state, OrchestratorWorkflowState::Backlog);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Runner 已经接管的任务不能被拖拽改变工作流阶段，否则 UI 状态会与真实执行现场冲突。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Running 任务后尝试移动到相邻泳道，断言返回运行中中文错误且 workflow_state 不变。
+    #[tokio::test]
+    async fn move_task_workflow_state_rejects_running_task() {
+        let (_pool, repo) = setup_repo().await;
+        let created = task_row("drag-running", "project-1", OrchestratorTaskStatus::Running);
+        repo.create_task(&created).await.unwrap();
+
+        let error = repo
+            .move_task_workflow_state(&created.id, OrchestratorWorkflowState::HumanReview)
+            .await
+            .expect_err("运行中任务拖拽应失败");
+        let persisted = repo.get_task(&created.id).await.unwrap();
+
+        assert!(error.to_string().contains("运行中的任务不能通过拖拽移动"));
+        assert_eq!(
+            persisted.workflow_state,
+            OrchestratorWorkflowState::InProgress
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     拖拽移动和 scheduler claim 可能并发发生，旧拖拽快照不能覆盖已经变化的 workflow/run state。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读取 Backlog/Idle 快照后先把数据库改成 Todo/Idle，再用旧快照执行移动，断言 CAS 未命中且持久化状态不被覆盖。
+    #[tokio::test]
+    async fn move_task_workflow_state_rejects_stale_snapshot_without_overwrite() {
+        let (pool, repo) = setup_repo().await;
+        let created = task_row("drag-stale", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&created).await.unwrap();
+        let stale_snapshot = repo.get_task(&created.id).await.unwrap();
+        set_task_split_state(
+            &pool,
+            &created.id,
+            OrchestratorWorkflowState::Todo,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+
+        let error = repo
+            .move_task_workflow_state_from_snapshot(
+                &stale_snapshot,
+                OrchestratorWorkflowState::Todo,
+            )
+            .await
+            .expect_err("旧快照不应覆盖已变化的任务状态");
+        let persisted = repo.get_task(&created.id).await.unwrap();
+
+        assert!(error.to_string().contains("任务状态已变化"));
+        assert_eq!(persisted.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(persisted.run_state, OrchestratorRunState::Idle);
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Draft);
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -3066,6 +3493,14 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
+            set_task_split_state(
+                &pool,
+                id,
+                OrchestratorWorkflowState::Todo,
+                OrchestratorRunState::Idle,
+                None,
+            )
+            .await;
         }
 
         let claimed = repo
@@ -3085,7 +3520,10 @@ mod tests {
         );
         assert!(claimed
             .iter()
-            .all(|task| task.status == OrchestratorTaskStatus::Preparing));
+            .all(|task| task.status == OrchestratorTaskStatus::Preparing
+                && task.workflow_state == OrchestratorWorkflowState::InProgress
+                && task.run_state == OrchestratorRunState::Preparing
+                && task.attempt_phase == Some(OrchestratorAttemptPhase::PreparingWorkspace)));
         assert_eq!(remote.status, OrchestratorTaskStatus::Queued);
         assert_eq!(waiting.status, OrchestratorTaskStatus::Queued);
         assert_eq!(active, 3);

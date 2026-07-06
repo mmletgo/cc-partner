@@ -83,7 +83,7 @@ pub fn start_orchestrator_scheduler(app_handle: AppHandle, state: AppState) -> C
 ///     scheduler tick 和手动命令都需要执行同一套领取逻辑，避免 UI 手动触发与后台行为不一致。
 ///
 /// Code Logic（这个函数做什么）:
-///     每次从 AppState 读取全局 Orchestrator 配置，在 repo 事务内按全局本机容量批量 claim Queued 任务并交给 runner；
+///     每次从 AppState 读取全局 Orchestrator 配置，在 repo 事务内按全局本机容量批量 claim 可执行泳道任务并交给 runner；
 ///     runner 失败时仅在任务仍为 Preparing 或 bootstrap Running 时把任务置为 Blocked 并追加事件，成功时计入 dispatched。
 pub async fn dispatch_once(state: &AppState, app_handle: AppHandle) -> Result<usize, AppError> {
     let config = state
@@ -112,7 +112,7 @@ pub async fn dispatch_once(state: &AppState, app_handle: AppHandle) -> Result<us
 ///     后台 scheduler 和手动 dispatch 应共享全局开关与容量解释，测试也需要绕开 Tauri AppHandle 只验证领取语义。
 ///
 /// Code Logic（这个函数做什么）:
-///     enabled=false 时返回空；enabled=true 时委托 repo 在事务内按全局本机容量领取 local queued 任务。
+///     enabled=false 时返回空；enabled=true 时委托 repo 在事务内按全局本机容量领取 Todo/Rework 且未运行的 local 任务。
 async fn claim_tasks_for_dispatch(
     repo: &OrchestratorRepo,
     config: &OrchestratorAutomationConfig,
@@ -186,7 +186,10 @@ pub(crate) fn dispatch_capacity(max_concurrent_tasks: i64, active_count: i64) ->
 mod tests {
     use super::*;
     use crate::config::OrchestratorAutomationConfig;
-    use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
+    use crate::orchestrator::models::{
+        OrchestratorAttemptPhase, OrchestratorRunState, OrchestratorTaskRow,
+        OrchestratorTaskStatus, OrchestratorWorkflowState,
+    };
     use crate::orchestrator::repo::OrchestratorRepo;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use sqlx::Row;
@@ -296,6 +299,31 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     split state 调度测试需要构造 legacy status 与新 workflow/run state 不完全一致的任务，覆盖迁移后的真实选择条件。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     直接更新测试任务的 workflow_state、run_state 和 blocked_reason，避免通过 legacy status 间接推导。
+    async fn set_task_split_state(
+        pool: &SqlitePool,
+        task_id: &str,
+        workflow_state: OrchestratorWorkflowState,
+        run_state: OrchestratorRunState,
+        blocked_reason: Option<&str>,
+    ) {
+        sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET workflow_state = ?, run_state = ?, blocked_reason = ? WHERE id = ?",
+        )
+        .bind(workflow_state.as_str())
+        .bind(run_state.as_str())
+        .bind(blocked_reason)
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     调度测试只关心 enabled 和全局并发上限，其它自动交付开关使用默认值即可。
     ///
     /// Code Logic（这个函数做什么）:
@@ -380,6 +408,14 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
+            set_task_split_state(
+                &pool,
+                id,
+                OrchestratorWorkflowState::Todo,
+                OrchestratorRunState::Idle,
+                None,
+            )
+            .await;
         }
 
         let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 3))
@@ -397,6 +433,67 @@ mod tests {
             repo.get_task("queued-low").await.unwrap().status,
             OrchestratorTaskStatus::Queued
         );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     split state 后，scheduler 应只领取 Todo/Idle 与 Rework/Blocked 这类 active workflow 任务，Backlog 不应自动启动。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 Backlog idle、Todo idle 和 Rework blocked 三个本机任务，断言只领取 Todo/Rework 并写入 Preparing split state。
+    #[tokio::test]
+    async fn scheduler_claims_todo_and_rework_only() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "local-a", "local").await;
+        for id in ["backlog-idle", "todo-idle", "rework-blocked"] {
+            repo.create_task(&task_row_for_project(
+                id,
+                "local-a",
+                OrchestratorTaskStatus::Draft,
+            ))
+            .await
+            .unwrap();
+        }
+        set_task_split_state(
+            &pool,
+            "todo-idle",
+            OrchestratorWorkflowState::Todo,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+        set_task_split_state(
+            &pool,
+            "rework-blocked",
+            OrchestratorWorkflowState::Rework,
+            OrchestratorRunState::Blocked,
+            Some("验证失败"),
+        )
+        .await;
+
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 3))
+            .await
+            .unwrap();
+        let backlog = repo.get_task("backlog-idle").await.unwrap();
+        let rework = repo.get_task("rework-blocked").await.unwrap();
+
+        let claimed_ids = claimed
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(claimed_ids.len(), 2);
+        assert!(claimed_ids.contains(&"todo-idle"));
+        assert!(claimed_ids.contains(&"rework-blocked"));
+        assert!(claimed.iter().all(|task| {
+            task.status == OrchestratorTaskStatus::Preparing
+                && task.workflow_state == OrchestratorWorkflowState::InProgress
+                && task.run_state == OrchestratorRunState::Preparing
+                && task.attempt_phase == Some(OrchestratorAttemptPhase::PreparingWorkspace)
+                && task.blocked_reason.is_none()
+        }));
+        assert_eq!(backlog.workflow_state, OrchestratorWorkflowState::Backlog);
+        assert_eq!(backlog.run_state, OrchestratorRunState::Idle);
+        assert_eq!(rework.blocked_reason, None);
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -424,6 +521,22 @@ mod tests {
         ))
         .await
         .unwrap();
+        set_task_split_state(
+            &pool,
+            "remote-high",
+            OrchestratorWorkflowState::Todo,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+        set_task_split_state(
+            &pool,
+            "local-low",
+            OrchestratorWorkflowState::Todo,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
         sqlx::query("UPDATE orchestrator_tasks SET priority = 100 WHERE id = 'remote-high'")
             .execute(&pool)
             .await
@@ -464,6 +577,14 @@ mod tests {
         repo.create_task(&task_row("task-queued", OrchestratorTaskStatus::Queued))
             .await
             .unwrap();
+        set_task_split_state(
+            &pool,
+            "task-queued",
+            OrchestratorWorkflowState::Todo,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
 
         let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 1))
             .await

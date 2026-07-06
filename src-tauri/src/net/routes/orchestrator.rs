@@ -473,7 +473,10 @@ pub async fn get_config(
 mod tests {
     use super::*;
     use crate::config::{GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig};
-    use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
+    use crate::orchestrator::models::{
+        OrchestratorRunState, OrchestratorTaskRow, OrchestratorTaskStatus,
+        OrchestratorWorkflowState,
+    };
     use crate::orchestrator::remote_protocol::{RemoteCreateOrchestratorTaskReq, RemoteTaskReq};
     use crate::workbench::models::WorkbenchProjectRow;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -653,6 +656,8 @@ mod tests {
 
         assert_eq!(created.project_id, "project-1");
         assert_eq!(created.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(created.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(created.run_state, OrchestratorRunState::Idle);
         assert_eq!(created.priority, 5);
     }
 
@@ -891,12 +896,16 @@ mod tests {
         .expect("retry task");
 
         assert_eq!(task.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(task.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(task.run_state, OrchestratorRunState::Idle);
         let stored = state
             .orchestrator_repo
             .get_task("task-1")
             .await
             .expect("stored task");
         assert_eq!(stored.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(stored.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(stored.run_state, OrchestratorRunState::Idle);
     }
 
     /// Business Logic（为什么需要这个测试）:

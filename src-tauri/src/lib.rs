@@ -622,6 +622,8 @@ pub fn run() {
             orchestrator_cmd::queue_orchestrator_task,
             orchestrator_cmd::list_orchestrator_task_views,
             orchestrator_cmd::create_orchestrator_task_view,
+            orchestrator_cmd::move_orchestrator_task_workflow_state,
+            orchestrator_cmd::get_orchestrator_runtime_snapshot,
             orchestrator_cmd::queue_orchestrator_task_view,
             orchestrator_cmd::retry_orchestrator_task_view,
             orchestrator_cmd::abort_orchestrator_task_view,

@@ -101,6 +101,7 @@ pub struct ResolvedWorkflow {
 ///
 /// Code Logic（这个结构体做什么）:
 ///     保存可替换到模板中的任务字段，render_prompt 根据字段名替换占位符。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptTaskContext {
     pub title: String,
@@ -198,6 +199,7 @@ impl ResolvedWorkflow {
     ///
     /// Code Logic（这个函数做什么）:
     ///     调用 render_prompt 替换任务字段和 attempt，占位符未知时返回 AppError。
+    #[allow(dead_code)]
     pub fn render_task_prompt(
         &self,
         task: &PromptTaskContext,
@@ -410,6 +412,7 @@ pub fn workflow_state_from_config(value: &str) -> Result<OrchestratorWorkflowSta
 ///
 /// Code Logic（这个函数做什么）:
 ///     逐段扫描 `{{ ... }}` 占位符，支持带空格和紧凑写法；任务字段逐行引用后替换，未知变量返回 AppError。
+#[allow(dead_code)]
 pub fn render_prompt(
     template: &str,
     task: &PromptTaskContext,

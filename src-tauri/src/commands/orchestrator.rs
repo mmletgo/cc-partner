@@ -3,8 +3,8 @@ use crate::error::AppError;
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
     OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskAttemptRow,
-    OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus, EVIDENCE_KIND_DELIVERY,
-    EVIDENCE_KIND_REPAIR_PROMPT, EVIDENCE_KIND_VERIFICATION_OUTPUT,
+    OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus, OrchestratorWorkflowState,
+    EVIDENCE_KIND_DELIVERY, EVIDENCE_KIND_REPAIR_PROMPT, EVIDENCE_KIND_VERIFICATION_OUTPUT,
     EVIDENCE_KIND_VERIFICATION_REVIEW,
 };
 use crate::orchestrator::outbox::{
@@ -18,12 +18,13 @@ use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::orchestrator::runner::prepare_repair_runner;
 use crate::orchestrator::verifier::{self, VerifierReview};
+use crate::orchestrator::workflow::{resolve_project_workflow, WorkflowSource};
 use crate::state::AppState;
 use crate::workbench::models::WorkbenchProjectRow;
 use crate::workbench::remote_ids::{parse_remote_entity_id, remote_entity_id};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
@@ -42,6 +43,43 @@ pub struct CreateOrchestratorTaskRequest {
     pub goal: String,
     pub acceptance_criteria: String,
     pub priority: Option<i64>,
+}
+
+/// Orchestrator 看板泳道移动入参。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     前端看板拖拽需要显式提交项目、任务和目标泳道，后端负责校验归属和相邻移动规则。
+///
+/// Code Logic（这个结构体做什么）:
+///     以 camelCase 接收 Tauri invoke 参数，targetState 反序列化为强类型 workflow state。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveOrchestratorTaskWorkflowStateRequest {
+    pub project_id: String,
+    pub task_id: String,
+    pub target_state: OrchestratorWorkflowState,
+}
+
+/// Orchestrator 项目运行时快照 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     Workbench 自动化状态条需要展示调度器、workflow 解析和执行槽位信息，帮助用户判断自动化为何运行或停滞。
+///
+/// Code Logic（这个结构体做什么）:
+///     聚合设备级 Settings、项目 workflow resolver、repo 槽位统计和最近错误，使用 camelCase 序列化给前端。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorRuntimeSnapshotDto {
+    pub project_id: String,
+    pub generated_at: String,
+    pub scheduler_enabled: bool,
+    pub workflow_source: String,
+    pub workflow_valid: bool,
+    pub workflow_error: Option<String>,
+    pub max_concurrent_tasks: i64,
+    pub slots_used: i64,
+    pub slots_available: i64,
+    pub latest_error: Option<String>,
 }
 
 /// Orchestrator 任务视图 DTO。
@@ -163,6 +201,107 @@ fn local_task_view(row: OrchestratorTaskRow) -> OrchestratorTaskViewDto {
     OrchestratorTaskViewDto::Local {
         task: OrchestratorTaskDto::from(row),
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     runtime snapshot 需要把强类型 workflow 来源转成稳定前端文案键，而不是让 UI 猜测 Rust enum 形状。
+///
+/// Code Logic（这个函数做什么）:
+///     将 WorkflowSource 映射为 camelCase 字符串；解析失败时由调用方使用 invalidProjectOverride。
+fn workflow_source_label(source: WorkflowSource) -> &'static str {
+    match source {
+        WorkflowSource::BuiltInDefault => "builtInDefault",
+        WorkflowSource::ProjectOverride => "projectOverride",
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     workflow 解析失败时，UI 需要知道失败来自项目覆盖而不是内置默认逻辑。
+///
+/// Code Logic（这个函数做什么）:
+///     根据项目根目录是否存在 WORKFLOW.md 返回失败来源标签。
+fn invalid_workflow_source_label(project_path: &Path) -> &'static str {
+    if project_path.join("WORKFLOW.md").exists() {
+        "invalidProjectOverride"
+    } else {
+        "builtInDefault"
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     看板拖拽必须只作用于当前本机项目的真实任务，不能误改远端 mirror 或其它项目任务。
+///
+/// Code Logic（这个函数做什么）:
+///     校验请求 projectId、项目 kind 和任务归属后委托 repo 相邻泳道移动，返回 Local task view。
+pub(crate) async fn move_orchestrator_task_workflow_state_for_project(
+    repo: &OrchestratorRepo,
+    project: &WorkbenchProjectRow,
+    request: MoveOrchestratorTaskWorkflowStateRequest,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    if request.project_id != project.id {
+        return Err(AppError::generic("请求项目与当前项目不一致"));
+    }
+    if project.kind == "remote" {
+        return Err(AppError::generic("远端项目暂不支持拖拽移动"));
+    }
+
+    let current = repo.get_task(&request.task_id).await?;
+    if current.project_id != project.id {
+        return Err(AppError::generic("任务不属于当前项目"));
+    }
+
+    let moved = repo
+        .move_task_workflow_state(&request.task_id, request.target_state)
+        .await?;
+    Ok(local_task_view(moved))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Workbench 状态条需要项目级 runtime snapshot，但实际数据分散在 Settings、workflow resolver 和 repo 统计中。
+///
+/// Code Logic（这个函数做什么）:
+///     解析项目 WORKFLOW.md，统计当前项目 active run_state 槽位和最近 blocked 原因，生成前端 DTO。
+pub(crate) async fn get_orchestrator_runtime_snapshot_for_project(
+    repo: &OrchestratorRepo,
+    config: &OrchestratorAutomationConfig,
+    project: &WorkbenchProjectRow,
+) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
+    if project.kind == "remote" {
+        return Err(AppError::generic("远端项目暂不支持运行时快照"));
+    }
+    let project_path = Path::new(&project.path);
+    let (workflow_source, workflow_valid, workflow_error) =
+        match resolve_project_workflow(project_path) {
+            Ok(workflow) => (
+                workflow_source_label(workflow.source).to_string(),
+                true,
+                None,
+            ),
+            Err(error) => (
+                invalid_workflow_source_label(project_path).to_string(),
+                false,
+                Some(error.to_string()),
+            ),
+        };
+    let slots_used = repo
+        .count_active_run_states_for_project(&project.id)
+        .await?;
+    let max_slots = config.max_concurrent_tasks.max(0);
+    let slots_available = (max_slots - slots_used).max(0);
+    let latest_error = repo.latest_blocked_reason_for_project(&project.id).await?;
+
+    Ok(OrchestratorRuntimeSnapshotDto {
+        project_id: project.id.clone(),
+        generated_at: Utc::now().to_rfc3339(),
+        scheduler_enabled: config.enabled,
+        workflow_source,
+        workflow_valid,
+        workflow_error,
+        max_concurrent_tasks: max_slots,
+        slots_used,
+        slots_available,
+        latest_error,
+    })
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1025,6 +1164,54 @@ pub async fn create_orchestrator_task_view(
     create_orchestrator_task_view_for_state(&state, request).await
 }
 
+/// 移动 Orchestrator 任务工作流泳道。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Workbench 自动化看板需要通过拖拽调整任务所在业务泳道，但移动规则必须由后端统一校验。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 projectId 对应 Workbench 项目，委托本机项目 helper 校验 remote/归属/相邻移动并返回 task view。
+#[tauri::command]
+pub async fn move_orchestrator_task_workflow_state(
+    state: State<'_, AppState>,
+    request: MoveOrchestratorTaskWorkflowStateRequest,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &request.project_id).await?;
+    move_orchestrator_task_workflow_state_for_project(
+        state.orchestrator_repo.as_ref(),
+        &project,
+        request,
+    )
+    .await
+}
+
+/// 获取 Orchestrator 项目运行时快照。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Workbench 自动化状态条需要一个轻量观测接口展示 scheduler、workflow 和槽位状态。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 Workbench 项目和设备级 Settings 后，构造 runtime snapshot DTO。
+#[tauri::command]
+pub async fn get_orchestrator_runtime_snapshot(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    let config = state
+        .config
+        .read()
+        .expect("config 读锁中毒")
+        .orchestrator
+        .clone();
+    get_orchestrator_runtime_snapshot_for_project(
+        state.orchestrator_repo.as_ref(),
+        &config,
+        &project,
+    )
+    .await
+}
+
 /// 通过 HTTP task-view 协议创建 remote-aware Orchestrator 任务。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -1553,6 +1740,7 @@ mod tests {
     use super::*;
     use crate::config::OrchestratorAutomationConfig;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::fs;
     use std::str::FromStr;
 
     /// Business Logic（为什么需要这个函数）:
@@ -1619,6 +1807,36 @@ mod tests {
             created_at: "2026-07-05T00:00:00Z".to_string(),
             updated_at: "2026-07-05T00:00:00Z".to_string(),
         }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     新增本机-only 拖拽命令和 runtime snapshot 都需要 Workbench 本机项目上下文，测试应复用稳定项目行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 kind=local 的 WorkbenchProjectRow，path 由调用方传入以便 workflow resolver 读取临时目录。
+    fn local_project_row(path: String) -> WorkbenchProjectRow {
+        WorkbenchProjectRow {
+            id: "project-1".to_string(),
+            name: "Local Project".to_string(),
+            kind: "local".to_string(),
+            device_id: "device-local".to_string(),
+            device_name: "MacBook".to_string(),
+            path,
+            last_opened_at: "2026-07-05T00:00:00Z".to_string(),
+            created_at: "2026-07-05T00:00:00Z".to_string(),
+            updated_at: "2026-07-05T00:00:00Z".to_string(),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     workflow snapshot 测试需要一个真实项目目录，避免依赖用户机器上的固定路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在系统临时目录下创建唯一文件夹并返回路径字符串，调用方负责按需写 WORKFLOW.md。
+    fn temp_project_dir(name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("{name}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&path).expect("create temp project dir");
+        path.to_string_lossy().to_string()
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1712,6 +1930,204 @@ mod tests {
         let value = build_dispatch_once_response(2);
 
         assert_eq!(value["dispatched"], serde_json::json!(2));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     本机拖拽命令需要校验项目归属后返回 Local task view，供前端直接刷新看板卡片。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建本机 Backlog 任务，调用命令层 helper 移到 Todo，断言返回 Local DTO 且 workflow_state 更新。
+    #[tokio::test]
+    async fn move_workflow_state_for_local_project_returns_local_view() {
+        let repo = setup_orchestrator_repo().await;
+        let task = command_task_row("task-local-move", OrchestratorTaskStatus::Draft);
+        repo.create_task(&task).await.unwrap();
+        let project = local_project_row(temp_project_dir("orch-local-move"));
+
+        let view = move_orchestrator_task_workflow_state_for_project(
+            &repo,
+            &project,
+            MoveOrchestratorTaskWorkflowStateRequest {
+                project_id: "project-1".to_string(),
+                task_id: task.id.clone(),
+                target_state: OrchestratorWorkflowState::Todo,
+            },
+        )
+        .await
+        .unwrap();
+
+        match view {
+            OrchestratorTaskViewDto::Local { task } => {
+                assert_eq!(task.id, "task-local-move");
+                assert_eq!(task.workflow_state, OrchestratorWorkflowState::Todo);
+            }
+            other => panic!("expected local view, got {other:?}"),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     本轮拖拽动作只支持本机项目，remote shortcut 必须被明确拒绝，避免本机误改 mirror 或远端权威状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用 remote WorkbenchProjectRow 调用命令层 helper，断言返回中文 remote 拒绝错误。
+    #[tokio::test]
+    async fn move_workflow_state_rejects_remote_project() {
+        let repo = setup_orchestrator_repo().await;
+        let project = remote_shortcut_row();
+
+        let error = move_orchestrator_task_workflow_state_for_project(
+            &repo,
+            &project,
+            MoveOrchestratorTaskWorkflowStateRequest {
+                project_id: project.id.clone(),
+                task_id: "remote:device-a:task-1".to_string(),
+                target_state: OrchestratorWorkflowState::Todo,
+            },
+        )
+        .await
+        .expect_err("remote drag must be rejected");
+
+        assert!(error.to_string().contains("远端项目暂不支持拖拽移动"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     拖拽命令必须防止前端请求 projectId 与当前项目上下文不一致时误改任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用本机项目上下文和不匹配 request.projectId 调用 helper，断言返回项目不一致错误。
+    #[tokio::test]
+    async fn move_workflow_state_rejects_project_id_mismatch() {
+        let repo = setup_orchestrator_repo().await;
+        let project = local_project_row(temp_project_dir("orch-project-mismatch"));
+
+        let error = move_orchestrator_task_workflow_state_for_project(
+            &repo,
+            &project,
+            MoveOrchestratorTaskWorkflowStateRequest {
+                project_id: "other-project".to_string(),
+                task_id: "task-1".to_string(),
+                target_state: OrchestratorWorkflowState::Todo,
+            },
+        )
+        .await
+        .expect_err("project mismatch must be rejected");
+
+        assert!(error.to_string().contains("请求项目与当前项目不一致"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     拖拽命令必须确认任务属于当前 Workbench 项目，避免跨项目卡片被误移动。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 project-2 的任务，在 project-1 上下文中请求移动，断言返回任务归属错误且状态不变。
+    #[tokio::test]
+    async fn move_workflow_state_rejects_task_from_another_project() {
+        let repo = setup_orchestrator_repo().await;
+        let task = OrchestratorTaskRow {
+            project_id: "project-2".to_string(),
+            ..command_task_row("task-other-project", OrchestratorTaskStatus::Draft)
+        };
+        repo.create_task(&task).await.unwrap();
+        let project = local_project_row(temp_project_dir("orch-task-project-mismatch"));
+
+        let error = move_orchestrator_task_workflow_state_for_project(
+            &repo,
+            &project,
+            MoveOrchestratorTaskWorkflowStateRequest {
+                project_id: project.id.clone(),
+                task_id: task.id.clone(),
+                target_state: OrchestratorWorkflowState::Todo,
+            },
+        )
+        .await
+        .expect_err("foreign task must be rejected");
+        let persisted = repo.get_task(&task.id).await.unwrap();
+
+        assert!(error.to_string().contains("任务不属于当前项目"));
+        assert_eq!(persisted.workflow_state, OrchestratorWorkflowState::Backlog);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     runtime snapshot 需要向 UI 暴露当前项目使用内置 workflow 还是项目覆盖，方便用户诊断自动化行为。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     使用没有 WORKFLOW.md 的临时项目目录构建 snapshot，断言 source 为 builtInDefault 且 workflow_valid=true。
+    #[tokio::test]
+    async fn runtime_snapshot_reports_built_in_workflow_source() {
+        let repo = setup_orchestrator_repo().await;
+        let project = local_project_row(temp_project_dir("orch-snapshot-valid"));
+        let config = OrchestratorAutomationConfig {
+            enabled: true,
+            max_concurrent_tasks: 2,
+            ..OrchestratorAutomationConfig::default()
+        };
+
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(&repo, &config, &project)
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.project_id, "project-1");
+        assert!(snapshot.scheduler_enabled);
+        assert_eq!(snapshot.workflow_source, "builtInDefault");
+        assert!(snapshot.workflow_valid);
+        assert_eq!(snapshot.max_concurrent_tasks, 2);
+        assert_eq!(snapshot.slots_used, 0);
+        assert_eq!(snapshot.slots_available, 2);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     项目 WORKFLOW.md 解析失败时，状态条必须展示无效 workflow，而不是假装内置默认可用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写入非法 YAML front matter，构建 runtime snapshot 并断言 invalidProjectOverride 与错误信息存在。
+    #[tokio::test]
+    async fn runtime_snapshot_reports_invalid_project_workflow() {
+        let repo = setup_orchestrator_repo().await;
+        let project_dir = temp_project_dir("orch-snapshot-invalid");
+        fs::write(
+            std::path::Path::new(&project_dir).join("WORKFLOW.md"),
+            "---\nrunner: [invalid\n---\n",
+        )
+        .expect("write workflow");
+        let project = local_project_row(project_dir);
+
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &OrchestratorAutomationConfig::default(),
+            &project,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(snapshot.workflow_source, "invalidProjectOverride");
+        assert!(!snapshot.workflow_valid);
+        assert_eq!(snapshot.max_concurrent_tasks, 1);
+        assert!(snapshot
+            .workflow_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("WORKFLOW.md"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端项目的 runtime snapshot 不能展示本机 scheduler/config/workflow，否则用户会误判远端自动化状态。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 remote shortcut 调用 snapshot helper，断言本轮明确拒绝而不是读取本机状态。
+    #[tokio::test]
+    async fn runtime_snapshot_rejects_remote_project() {
+        let repo = setup_orchestrator_repo().await;
+        let project = remote_shortcut_row();
+
+        let error = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &OrchestratorAutomationConfig::default(),
+            &project,
+        )
+        .await
+        .expect_err("remote snapshot must be rejected");
+
+        assert!(error.to_string().contains("远端项目暂不支持运行时快照"));
     }
 
     /// Business Logic（为什么需要这个测试）:

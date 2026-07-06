@@ -343,7 +343,7 @@ impl SplitTaskState {
             },
             OrchestratorTaskStatus::Queued => Self {
                 workflow_state: OrchestratorWorkflowState::Todo,
-                run_state: OrchestratorRunState::Queued,
+                run_state: OrchestratorRunState::Idle,
             },
             OrchestratorTaskStatus::Preparing => Self {
                 workflow_state: OrchestratorWorkflowState::InProgress,
@@ -675,7 +675,7 @@ mod split_state_tests {
             (
                 OrchestratorTaskStatus::Queued,
                 OrchestratorWorkflowState::Todo,
-                OrchestratorRunState::Queued,
+                OrchestratorRunState::Idle,
             ),
             (
                 OrchestratorTaskStatus::Preparing,
