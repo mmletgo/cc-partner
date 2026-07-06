@@ -21,6 +21,8 @@ const en = JSON.parse(
 
 const detailZh = zh.detail as Record<string, string>;
 const detailEn = en.detail as Record<string, string>;
+const createZh = zh.create as Record<string, string>;
+const createEn = en.create as Record<string, string>;
 const errorsZh = zh.errors as Record<string, string>;
 const errorsEn = en.errors as Record<string, string>;
 
@@ -44,5 +46,19 @@ for (const key of ['start', 'retry', 'requestRework', 'deliver', 'cancel', 'refr
   assert(typeof errorsZh[key] === 'string' && errorsZh[key].length > 0, `zh errors.${key} is required`);
   assert(typeof errorsEn[key] === 'string' && errorsEn[key].length > 0, `en errors.${key} is required`);
 }
+
+for (const key of ['createBacklog', 'createTodo', 'createStart']) {
+  assert(typeof createZh[key] === 'string' && createZh[key].length > 0, `zh create.${key} is required`);
+  assert(typeof createEn[key] === 'string' && createEn[key].length > 0, `en create.${key} is required`);
+}
+
+assert(
+  source.includes('createAction: OrchestratorCreateAction'),
+  'Desktop create dialog should submit an explicit createAction argument',
+);
+assert(
+  source.includes('createAction,'),
+  'Desktop create request should pass createAction to orchestratorApi.createTaskView',
+);
 
 console.log('orchestratorActions.test.ts passed');

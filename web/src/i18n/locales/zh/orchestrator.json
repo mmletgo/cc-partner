@@ -162,6 +162,9 @@
     "goalPlaceholder": "描述希望自动化完成的结果",
     "acceptanceCriteria": "验收标准",
     "acceptanceCriteriaPlaceholder": "描述如何判断任务完成",
+    "createBacklog": "创建到 Backlog",
+    "createTodo": "创建到 Todo",
+    "createStart": "创建并启动",
     "submit": "创建任务"
   },
   "evidence": {

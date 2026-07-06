@@ -162,6 +162,9 @@
     "goalPlaceholder": "Describe the result automation should produce",
     "acceptanceCriteria": "Acceptance Criteria",
     "acceptanceCriteriaPlaceholder": "Describe how completion will be judged",
+    "createBacklog": "Create in Backlog",
+    "createTodo": "Create in Todo",
+    "createStart": "Create and Start",
     "submit": "Create Task"
   },
   "evidence": {

@@ -22,6 +22,7 @@ import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { orchestratorApi } from '@/api/orchestrator';
+import type { OrchestratorCreateAction } from '@/api/orchestrator';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
 import { Button, Card, Input, Pill } from '@/components/primitives';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
@@ -160,6 +161,35 @@ type OrchestratorAttemptPhaseLabelKey =
   | 'orchestrator:attempt.timedOut'
   | 'orchestrator:attempt.stalled'
   | 'orchestrator:attempt.canceledByReconciliation';
+
+type OrchestratorCreateActionLabelKey =
+  | 'orchestrator:create.createBacklog'
+  | 'orchestrator:create.createTodo'
+  | 'orchestrator:create.createStart';
+
+interface OrchestratorCreateActionConfig {
+  createAction: OrchestratorCreateAction;
+  labelKey: OrchestratorCreateActionLabelKey;
+  variant: 'primary' | 'secondary';
+}
+
+const ORCHESTRATOR_CREATE_ACTIONS: readonly OrchestratorCreateActionConfig[] = [
+  {
+    createAction: 'backlog',
+    labelKey: 'orchestrator:create.createBacklog',
+    variant: 'secondary',
+  },
+  {
+    createAction: 'todo',
+    labelKey: 'orchestrator:create.createTodo',
+    variant: 'secondary',
+  },
+  {
+    createAction: 'start',
+    labelKey: 'orchestrator:create.createStart',
+    variant: 'primary',
+  },
+];
 
 /**
  * Business Logic（为什么需要这个类型）:
@@ -537,7 +567,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const [taskListResult, setTaskListResult] = useState<OrchestratorTaskListResult | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [form, setForm] = useState<OrchestratorCreateForm>(EMPTY_FORM);
-  const [creating, setCreating] = useState(false);
+  const [creatingAction, setCreatingAction] = useState<OrchestratorCreateAction | null>(null);
   const [startingTaskId, setStartingTaskId] = useState<string | null>(null);
   const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
   const [reworkingTaskId, setReworkingTaskId] = useState<string | null>(null);
@@ -648,7 +678,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     form.title.trim().length > 0 &&
     form.goal.trim().length > 0 &&
     form.acceptanceCriteria.trim().length > 0 &&
-    !creating;
+    !creatingAction;
   const canCompletePrompt =
     Boolean(activeProjectId) && completionPrompt.trim().length > 0 && !completingPrompt;
 
@@ -663,9 +693,9 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   }, []);
 
   const handleCloseCreateDialog = useCallback(() => {
-    if (creating || completingPrompt) return;
+    if (creatingAction || completingPrompt) return;
     setCreateDialogOpen(false);
-  }, [completingPrompt, creating]);
+  }, [completingPrompt, creatingAction]);
 
   const handleCloseTaskDrawer = useCallback(() => {
     setSelectedTaskId(null);
@@ -847,9 +877,8 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     }
   }, [activeProject, activeProjectId, completionPrompt, createPromptWorkingDirectory, t]);
 
-  const handleCreateTask = useCallback(
-    async (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
+  const submitCreateTask = useCallback(
+    async (createAction: OrchestratorCreateAction) => {
       if (!activeProject) {
         setActionError({ projectId: activeProjectId, message: t('orchestrator:errors.noProject') });
         return;
@@ -860,12 +889,13 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         title: form.title.trim(),
         goal: form.goal.trim(),
         acceptanceCriteria: form.acceptanceCriteria.trim(),
+        createAction,
       };
       if (!payload.title || !payload.goal || !payload.acceptanceCriteria) {
         setActionError({ projectId, message: t('orchestrator:errors.required') });
         return;
       }
-      setCreating(true);
+      setCreatingAction(createAction);
       setActionError(null);
       try {
         const created = await orchestratorApi.createTaskView(payload);
@@ -890,10 +920,21 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
           message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.create')),
         });
       } finally {
-        setCreating(false);
+        setCreatingAction(null);
       }
     },
     [activeProject, activeProjectId, form, refreshRuntimeSnapshot, t],
+  );
+
+  const handleCreateFormSubmit = useCallback((event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+  }, []);
+
+  const handleCreateTaskAction = useCallback(
+    async (createAction: OrchestratorCreateAction) => {
+      await submitCreateTask(createAction);
+    },
+    [submitCreateTask],
   );
 
   const replaceTaskViewInCurrentProject = useCallback(
@@ -2119,7 +2160,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                   variant="icon"
                   aria-label={t('orchestrator:create.close')}
                   icon={<XIcon />}
-                  disabled={creating || completingPrompt}
+                  disabled={Boolean(creatingAction) || completingPrompt}
                   onClick={handleCloseCreateDialog}
                 />
               </Card.Header>
@@ -2135,7 +2176,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                       placeholder={t('orchestrator:create.quickPromptPlaceholder')}
                       aria-label={t('orchestrator:create.quickPrompt')}
                       rows={4}
-                      disabled={completingPrompt || creating}
+                      disabled={completingPrompt || Boolean(creatingAction)}
                     />
                   </label>
                   <div className={styles.aiAssistActions}>
@@ -2144,14 +2185,14 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                       size="sm"
                       icon={<SyncIcon />}
                       loading={completingPrompt}
-                      disabled={!canCompletePrompt || creating}
+                      disabled={!canCompletePrompt || Boolean(creatingAction)}
                       onClick={handleCompleteTaskPrompt}
                     >
                       {t('orchestrator:create.completeWithAi')}
                     </Button>
                   </div>
                 </div>
-                <form className={styles.form} onSubmit={handleCreateTask}>
+                <form className={styles.form} onSubmit={handleCreateFormSubmit}>
                   <label className={styles.field}>
                     <span>{t('orchestrator:create.taskTitle')}</span>
                     <Input
@@ -2159,7 +2200,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                       onChange={(event) => updateFormField('title', event.target.value)}
                       placeholder={t('orchestrator:create.taskTitlePlaceholder')}
                       aria-label={t('orchestrator:create.taskTitle')}
-                      disabled={creating}
+                      disabled={Boolean(creatingAction)}
                     />
                   </label>
                   <label className={styles.field}>
@@ -2171,7 +2212,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                       placeholder={t('orchestrator:create.goalPlaceholder')}
                       aria-label={t('orchestrator:create.goal')}
                       rows={5}
-                      disabled={creating}
+                      disabled={Boolean(creatingAction)}
                     />
                   </label>
                   <label className={styles.field}>
@@ -2185,28 +2226,34 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                       placeholder={t('orchestrator:create.acceptanceCriteriaPlaceholder')}
                       aria-label={t('orchestrator:create.acceptanceCriteria')}
                       rows={5}
-                      disabled={creating}
+                      disabled={Boolean(creatingAction)}
                     />
                   </label>
                   <div className={styles.dialogActions}>
                     <Button
                       variant="ghost"
                       size="md"
-                      disabled={creating || completingPrompt}
+                      disabled={Boolean(creatingAction) || completingPrompt}
                       onClick={handleCloseCreateDialog}
                     >
                       {t('common:action.cancel')}
                     </Button>
-                    <Button
-                      variant="primary"
-                      size="md"
-                      type="submit"
-                      icon={<PlusIcon />}
-                      loading={creating}
-                      disabled={!canCreate || completingPrompt}
-                    >
-                      {t('orchestrator:create.submit')}
-                    </Button>
+                    {ORCHESTRATOR_CREATE_ACTIONS.map((action) => (
+                      <Button
+                        variant={action.variant}
+                        size="md"
+                        type="button"
+                        icon={<PlusIcon />}
+                        key={action.createAction}
+                        loading={creatingAction === action.createAction}
+                        disabled={!canCreate || completingPrompt}
+                        onClick={() => {
+                          void handleCreateTaskAction(action.createAction);
+                        }}
+                      >
+                        {t(action.labelKey)}
+                      </Button>
+                    ))}
                   </div>
                 </form>
               </Card.Body>
