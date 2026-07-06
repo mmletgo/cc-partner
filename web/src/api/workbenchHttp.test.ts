@@ -225,11 +225,11 @@ try {
   await httpOrchestratorTransport.tasks.listEvidence('remote-project-1', 'remote:device-a:task-1');
 
   assert(
-    capturedUrls[8] === '/api/orchestrator/tasks/evidence',
+    capturedUrls[10] === '/api/orchestrator/tasks/evidence',
     'orchestrator evidence should call the task evidence route',
   );
   assert(
-    JSON.stringify(capturedBodies[8]) ===
+    JSON.stringify(capturedBodies[10]) ===
       JSON.stringify({ projectId: 'remote-project-1', taskId: 'remote:device-a:task-1' }),
     'orchestrator evidence should include projectId and taskId',
   );
