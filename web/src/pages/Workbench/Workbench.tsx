@@ -30,6 +30,7 @@ import {
   WorkbenchFileWorkspace,
 } from '@/components/domain';
 import type { WorkbenchOpenFileTab } from '@/components/domain';
+import { WorkbenchSessionSearch } from '@/components/domain';
 import { WorkbenchWorkspaceNav } from '@/components/layout';
 import { Button, Card, Input, Pill } from '@/components/primitives';
 import { useWorkbenchDependency } from '@/hooks/workbenchDependencyContext';
@@ -53,6 +54,7 @@ import {
   OrchestratorIcon,
   PlusIcon,
   RefreshIcon,
+  SearchIcon,
   SplitDownIcon,
   SplitRightIcon,
   SyncIcon,
@@ -832,6 +834,7 @@ export function Workbench() {
   const [mergeProgressWorktreeId, setMergeProgressWorktreeId] = useState<string | null>(null);
   const [mergeStages, setMergeStages] = useState<WorkbenchMergeStage[]>([]);
   const [runtimeNow, setRuntimeNow] = useState<number>(() => Date.now());
+  const [sessionSearchOpen, setSessionSearchOpen] = useState<boolean>(false);
   const [promptPanelOpen, setPromptPanelOpen] = useState<boolean>(false);
   const [promptInput, setPromptInput] = useState<string>('');
   const [promptOptimizing, setPromptOptimizing] = useState<boolean>(false);
@@ -1912,6 +1915,20 @@ export function Workbench() {
       window.removeEventListener('keyup', handleShortcutEvent, { capture: true });
     };
   }, [automationConsoleOpen, promptOptimizerHotkey, triggerPromptOptimizerShortcut, workspaceView]);
+
+  // ⌘K / Ctrl+K 打开 Claude session 搜索浮层（仅终端视图）
+  useEffect(() => {
+    if (workspaceView !== 'terminal') return undefined;
+    const handleSessionSearchShortcut = (event: KeyboardEvent) => {
+      if (event.repeat) return;
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key === 'k') {
+        event.preventDefault();
+        setSessionSearchOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handleSessionSearchShortcut);
+    return () => window.removeEventListener('keydown', handleSessionSearchShortcut);
+  }, [workspaceView]);
 
   const handleResize = useCallback(async (sessionId: string, cols: number, rows: number) => {
     try {
@@ -3361,6 +3378,20 @@ export function Workbench() {
                       className={styles.terminalActionButton}
                       variant="secondary"
                       size="sm"
+                      icon={<SearchIcon />}
+                      title={t('workbench:sessionSearch.open')}
+                      aria-label={t('workbench:sessionSearch.open')}
+                      disabled={!activeProjectId || !activeWorktree}
+                      onClick={() => setSessionSearchOpen(true)}
+                    >
+                      {t('workbench:sessionSearch.open')}
+                    </Button>
+                  ) : null}
+                  {!terminalFullscreen ? (
+                    <Button
+                      className={styles.terminalActionButton}
+                      variant="secondary"
+                      size="sm"
                       icon={<EditIcon />}
                       title={t('workbench:promptOptimizer.open')}
                       aria-label={t('workbench:promptOptimizer.open')}
@@ -4028,6 +4059,19 @@ export function Workbench() {
           </Card>
         )}
       </aside>
+      <WorkbenchSessionSearch
+        open={sessionSearchOpen}
+        onClose={() => setSessionSearchOpen(false)}
+        projectId={activeProjectId}
+        worktreeId={activeWorktreeId}
+        offline={remoteProjectOffline}
+        worktreeName={activeWorktree?.name}
+        onResumed={(newSessionId) => {
+          if (activeProjectId) void loadSessions(activeProjectId);
+          focusSession(newSessionId);
+          setSessionSearchOpen(false);
+        }}
+      />
     </div>
   );
 }

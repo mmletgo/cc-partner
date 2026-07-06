@@ -423,6 +423,13 @@ pub fn run() {
                         crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry::new(),
                     orchestrator_cancel: Arc::new(Mutex::new(None)),
                     orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
+                    // Workbench Claude session 搜索：内存索引 + 文件监听句柄（lazy 初始化，首次搜索时建索引）
+                    workbench_claude_session_indexes: Arc::new(RwLock::new(
+                        std::collections::HashMap::new(),
+                    )),
+                    workbench_claude_session_watchers: Arc::new(Mutex::new(
+                        std::collections::HashMap::new(),
+                    )),
                 };
 
                 // 4) 启动 axum HTTP server（优先固定端口，冲突时递增，回填 actual_http_port）
@@ -689,6 +696,9 @@ pub fn run() {
             workbench_cmd::close_workbench_pane,
             workbench_cmd::close_workbench_session,
             workbench_cmd::rename_workbench_session,
+            workbench_cmd::search_claude_sessions,
+            workbench_cmd::get_claude_session_preview,
+            workbench_cmd::resume_claude_session,
             workbench_cmd::list_workbench_dir,
             workbench_cmd::get_workbench_path_info,
             workbench_cmd::open_workbench_file,

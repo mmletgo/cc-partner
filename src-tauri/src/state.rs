@@ -121,6 +121,14 @@ pub struct AppState {
     pub orchestrator_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// Orchestrator 远端 outbox dispatcher 的取消令牌（应用退出时 cancel，停止 pending 远端任务投递）
     pub orchestrator_outbox_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// Workbench Claude session 搜索的内存索引，key = worktree_path canonical string。
+    /// 首次搜索某 worktree 时 lazy 初始化并启动文件监听。
+    pub workbench_claude_session_indexes:
+        Arc<RwLock<HashMap<String, Arc<RwLock<crate::workbench::claude_sessions::WorktreeSessionIndex>>>>>,
+    /// 每个 worktree 的文件监听句柄，key 同 workbench_claude_session_indexes。
+    /// 监听失败时该 key 不存在（降级为每次重扫）。
+    pub workbench_claude_session_watchers:
+        Arc<Mutex<HashMap<String, notify::RecommendedWatcher>>>,
 }
 
 impl AppState {

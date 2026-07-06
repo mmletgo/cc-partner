@@ -9,6 +9,7 @@
 //!     当前任务 worktree，并提取最新 session、transcript 路径和最后运行时事件摘要；扫描失败时保持 best-effort。
 
 use crate::error::AppError;
+use crate::workbench::claude_path::encode_claude_project_path;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
@@ -135,31 +136,6 @@ pub fn associate_claude_runtime(
     }
 
     Ok(best.map(|candidate| candidate.summary))
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     测试和诊断需要按 Claude Code projects 目录规则构造 encoded cwd 子目录名。
-///
-/// Code Logic（这个函数做什么）:
-///     把路径分隔符与非安全字符转成 `-`，保留常见 ASCII 文件名字符；空路径回退为 `-`。
-pub fn encode_claude_project_path(path: &str) -> String {
-    let encoded: String = path
-        .chars()
-        .map(|ch| {
-            if ch == '/' || ch == '\\' {
-                '-'
-            } else if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if encoded.is_empty() {
-        "-".to_string()
-    } else {
-        encoded
-    }
 }
 
 /// Business Logic（为什么需要这个函数）:

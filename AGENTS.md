@@ -270,6 +270,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | WorkbenchCsvPreview | preview | Workbench CSV 只读表格预览 |
 | WorkbenchSqlitePreview | preview, onSelectTable | Workbench SQLite 只读表/数据预览 |
 | WorkbenchFileWorkspace | tabs, activeTabId, callbacks | Workbench 文件 tab 工作区容器 |
+| WorkbenchSessionSearch | open, onClose, projectId, worktreeId, offline, onResumed | Workbench 终端 Claude session 搜索 Command Palette（⌘K） |
 
 ## 5. 开发规范
 
@@ -440,6 +441,9 @@ node scripts/bump-version.mjs <新版本号>
 | get_orchestrator_config / get_default_orchestrator_config / update_orchestrator_config | Orchestrator 设备级自动化配置读写 / 恢复默认（Phase 1 仅配置持久化，运行时消费后续接入） |
 | list_workbench_projects / add_workbench_project / remove_workbench_project / touch_workbench_project / list_workbench_worktrees / create_workbench_worktree / commit_workbench_worktree / push_workbench_worktree / merge_workbench_worktree / remove_workbench_worktree / list_workbench_git_commits / list_workbench_sessions / create_workbench_session / write_workbench_session_input / resize_workbench_session / focus_workbench_session / get_focused_workbench_session / split_workbench_pane / switch_workbench_pane / zoom_workbench_pane / close_workbench_pane / close_workbench_session / rename_workbench_session / list_workbench_dir / get_workbench_path_info / open_workbench_file / save_workbench_text_file / format_workbench_structured_content / preview_workbench_sqlite / create_workbench_file / create_workbench_dir / rename_workbench_path / delete_workbench_path | 工作台本机/远端项目、远端目录选择、Git worktree、带本地/远端 ref 标识的 Git 提交树、tmux-backed terminal window/pane、工作区文件树和文件浏览/编辑 |
 | preview_workbench_html_asset | Workbench HTML/Markdown 预览读取当前 active worktree 根内的相对 CSS/图片等资源并返回 data URL；拒绝外链、绝对路径、根外路径和跨根 symlink |
+| search_claude_sessions | 搜索当前 worktree 下的 Claude Code session（标题/user/assistant 文本），返回命中结果（含高亮片段）；local 直接查内存索引，remote 代理到远端设备 |
+| get_claude_session_preview | 取某个 Claude session 的最近 20 条对话预览 + cwd/gitBranch/首末时间/消息数，用于搜索面板 preview |
+| resume_claude_session | 新建 terminal window 并执行 `claude --dangerously-skip-permissions --resume <session-id>`；执行前检测 Claude CLI 可用性 |
 
 ### 8.3 P2P HTTP 端点（对端调用，由 `src-tauri/src/net/routes/` 注册）
 
@@ -453,6 +457,9 @@ node scripts/bump-version.mjs <新版本号>
 | /api/transfer/init | POST | 初始化文件接收 |
 | /api/transfer/chunk/{id} | POST | 接收文件分块（header `X-Chunk-Offset`） |
 | /api/transfer/status/{id} | GET | 查询接收端传输状态 |
+| /api/workbench/claude-sessions/search | POST | 远端设备扫描自己的 Claude Code session；必须确认 project 是对端 local（拒绝 remote shortcut 递归） |
+| /api/workbench/claude-sessions/preview | POST | 取某 session 的最近 20 条对话预览；同 search 的 local 校验 |
+| /api/workbench/claude-sessions/resume | POST | 在远端设备创建 terminal window 并执行 resume 命令，返回未包装的 inner sessionId |
 
 ### 8.4 添加新能力
 

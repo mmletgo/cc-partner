@@ -21,17 +21,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
-use std::process::Stdio;
 use std::time::Duration;
 use tauri::State;
-use tokio::process::Command;
 
 const TRENDING_URL: &str = "https://github.com/trending?since=weekly";
 const CACHE_PREFIX: &str = "weekly:any:25";
 const TOP_LIMIT: usize = 25;
 const GITHUB_TIMEOUT_SECS: u64 = 20;
 const CLAUDE_TIMEOUT_SECS: u64 = 180;
-const CLAUDE_VERSION_TIMEOUT_SECS: u64 = 10;
 
 /// GitHub Trending 配置 DTO（camelCase，对齐前端类型）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -659,51 +656,26 @@ fn merge_explanations(
 }
 
 /// 运行 `claude --version` 测试 CLI。
+///
+/// Business Logic（为什么需要这个函数）:
+///     设置页“测试 Claude CLI”按钮需要把检测核心结果转成前端契约 DTO（含 version 与中文错误文案），
+///     而 Workbench session resume 等其它功能只需判断是否可用；检测核心已统一到共享 helper。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `claude_cli::check_claude_cli_available` 执行 `<cli> --version`，
+///     把 `Ok(version)` 映射为 ok=true 的 DTO，把 `Err(中文错误)` 映射为 ok=false 的 DTO。
 async fn run_claude_version(config: &GithubTrendingConfig) -> ClaudeCliTestResult {
-    let cli = claude_cli::normalize_cli_path(&config.claude_cli_path);
-    let mut cmd = Command::new(cli);
-    cmd.arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let output = match tokio::time::timeout(
-        Duration::from_secs(CLAUDE_VERSION_TIMEOUT_SECS),
-        cmd.output(),
-    )
-    .await
-    {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
-            return ClaudeCliTestResult {
-                ok: false,
-                version: None,
-                error: Some(format!("启动 Claude CLI 失败: {e}")),
-            };
-        }
-        Err(_) => {
-            return ClaudeCliTestResult {
-                ok: false,
-                version: None,
-                error: Some(format!(
-                    "Claude CLI 测试超时（{} 秒）",
-                    CLAUDE_VERSION_TIMEOUT_SECS
-                )),
-            };
-        }
-    };
-    if output.status.success() {
-        ClaudeCliTestResult {
+    match claude_cli::check_claude_cli_available(&config.claude_cli_path).await {
+        Ok(version) => ClaudeCliTestResult {
             ok: true,
-            version: Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+            version: Some(version),
             error: None,
-        }
-    } else {
-        ClaudeCliTestResult {
+        },
+        Err(error) => ClaudeCliTestResult {
             ok: false,
             version: None,
-            error: Some(String::from_utf8_lossy(&output.stderr).trim().to_string()),
-        }
+            error: Some(error),
+        },
     }
 }
 

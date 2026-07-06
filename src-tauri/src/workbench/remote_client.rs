@@ -16,14 +16,16 @@ use crate::workbench::models::{
     WorkbenchSessionDto, WorkbenchSqlitePreview, WorkbenchWorktreeDto,
 };
 use crate::workbench::remote_protocol::{
-    RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq, RemoteCreateWorktreeReq,
-    RemoteDeletePathReq, RemoteFocusedSessionReq, RemoteFocusedSessionResp, RemoteGitCommitsReq,
-    RemoteListDirReq, RemoteListSessionsReq, RemoteOpenFileReq, RemotePathInfoReq,
-    RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteProjectReq, RemotePromptOptimizerReq,
-    RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq, RemoteReplaySessionReq,
-    RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSessionReq, RemoteSplitPaneReq,
-    RemoteWorktreeReq, RemoteWriteSessionInputReq,
+    RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq,
+    RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq, RemoteFocusedSessionResp,
+    RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq, RemoteOpenFileReq,
+    RemotePathInfoReq, RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteProjectReq,
+    RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq,
+    RemoteReplaySessionReq, RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSearchClaudeSessionsReq,
+    RemoteSessionReq, RemoteSplitPaneReq, RemoteWorktreeReq, RemoteWriteSessionInputReq,
+    ResumeClaudeSessionResult,
 };
+use crate::workbench::claude_sessions::{SessionPreview, SessionSearchHit};
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -862,6 +864,67 @@ impl RemoteWorkbenchClient {
             ),
             &req,
             prompt_optimizer_timeout_kind(),
+        )
+        .await
+    }
+
+    /// 搜索远端设备本机 worktree 内的 Claude Code 历史 session。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     本机在 remote shortcut 上搜索历史 Claude 会话时，transcript 解析必须在项目所在设备完成。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/claude-sessions/search`，用 short timeout 解析搜索命中列表。
+    pub async fn search_claude_sessions(
+        &self,
+        base_url: &str,
+        req: RemoteSearchClaudeSessionsReq,
+    ) -> Result<Vec<SessionSearchHit>, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/claude-sessions/search"),
+            &req,
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 读取远端单个 Claude session 的 preview 详情。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote shortcut 的 preview 面板需要展示远端会话最近消息、cwd 等，只能由项目所在设备解析 transcript。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/claude-sessions/preview`，用 short timeout 解析 SessionPreview。
+    pub async fn get_claude_session_preview(
+        &self,
+        base_url: &str,
+        req: RemoteClaudeSessionReq,
+    ) -> Result<SessionPreview, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/claude-sessions/preview"),
+            &req,
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 在远端设备 resume 一个历史 Claude session。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote shortcut 选中历史会话后，真实 terminal + `claude --resume` 必须在项目所在设备启动；
+    ///     返回的 sessionId 是远端新建 terminal 的 inner id，由发起方命令层包装成统一 remote sessionId。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/claude-sessions/resume`，用 long timeout（120s）覆盖远端 CLI 检测 + 建会话。
+    pub async fn resume_claude_session(
+        &self,
+        base_url: &str,
+        req: RemoteClaudeSessionReq,
+    ) -> Result<ResumeClaudeSessionResult, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/claude-sessions/resume"),
+            &req,
+            RemoteRequestTimeoutKind::Long,
         )
         .await
     }
