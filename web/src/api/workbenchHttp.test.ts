@@ -40,12 +40,16 @@ try {
       }),
     'streamToTerminal should normalize omitted workingDirectory to null',
   );
+  assert(
+    capturedUrls[0] === '/api/mobile/workbench/prompt-optimizer/stream-to-session',
+    'streamToTerminal should call the mobile-facing prompt optimizer route',
+  );
 
   await httpWorkbenchTransport.sessions.switchPane('session-1');
 
   assert(
-    capturedUrls[1] === '/api/workbench/sessions/switch-pane',
-    'switchPane should call the switch-pane HTTP route',
+    capturedUrls[1] === '/api/mobile/workbench/sessions/switch-pane',
+    'switchPane should call the mobile-facing switch-pane HTTP route',
   );
   assert(
     JSON.stringify(capturedBodies[1]) === JSON.stringify({ sessionId: 'session-1' }),
@@ -55,8 +59,8 @@ try {
   await httpWorkbenchTransport.sessions.zoomPane('session-1');
 
   assert(
-    capturedUrls[2] === '/api/workbench/sessions/zoom-pane',
-    'zoomPane should call the zoom-pane HTTP route',
+    capturedUrls[2] === '/api/mobile/workbench/sessions/zoom-pane',
+    'zoomPane should call the mobile-facing zoom-pane HTTP route',
   );
   assert(
     JSON.stringify(capturedBodies[2]) === JSON.stringify({ sessionId: 'session-1' }),

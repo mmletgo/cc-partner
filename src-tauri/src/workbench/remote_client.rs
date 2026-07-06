@@ -20,10 +20,11 @@ use crate::workbench::remote_protocol::{
     RemoteDeletePathReq, RemoteFocusedSessionReq, RemoteFocusedSessionResp, RemoteGitCommitsReq,
     RemoteListDirReq, RemoteListSessionsReq, RemoteOpenFileReq, RemotePathInfoReq,
     RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteProjectReq, RemotePromptOptimizerReq,
-    RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq, RemoteResizeSessionReq,
-    RemoteSaveTextReq, RemoteSessionReq, RemoteSplitPaneReq, RemoteWorktreeReq,
-    RemoteWriteSessionInputReq,
+    RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq, RemoteReplaySessionReq,
+    RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSessionReq, RemoteSplitPaneReq,
+    RemoteWorktreeReq, RemoteWriteSessionInputReq,
 };
+use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::time::Duration;
@@ -583,6 +584,28 @@ impl RemoteWorkbenchClient {
             endpoint_url(base_url, "/api/workbench/sessions/create"),
             &req,
             RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
+    /// 拉取远端终端最近输出。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     手机端首次连接 remote terminal 时，需要先拿到远端 session 的 replay buffer，再接 live 事件。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/replay`，解析对端 WorkbenchSessionReplay DTO。
+    pub async fn replay(
+        &self,
+        base_url: &str,
+        session_id: &str,
+    ) -> Result<WorkbenchSessionReplayDto, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/sessions/replay"),
+            &RemoteReplaySessionReq {
+                session_id: session_id.to_string(),
+            },
+            RemoteRequestTimeoutKind::Short,
         )
         .await
     }
@@ -1519,6 +1542,52 @@ mod tests {
         assert_eq!(body["worktreeId"], "inner-worktree");
         assert_eq!(body["initialCols"], 120);
         assert_eq!(body["initialRows"], 36);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     移动端首次打开 remote terminal 时，需要通过远端 replay route 拉取最近输出。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动临时 HTTP 服务接收 sessions/replay 请求，断言 client 发送 sessionId 并解析 replay DTO。
+    #[tokio::test]
+    async fn replay_posts_session_id_to_replay_route() {
+        let seen_body = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/api/workbench/sessions/replay",
+                post(
+                    |State(seen_body): State<Arc<Mutex<Option<Value>>>>,
+                     Json(body): Json<Value>| async move {
+                        *seen_body.lock().unwrap() = Some(body);
+                        Json(WorkbenchSessionReplayDto {
+                            session_id: "inner-session".to_string(),
+                            buffer: "hello\n".to_string(),
+                            truncated: false,
+                            last_seq: 42,
+                        })
+                    },
+                ),
+            )
+            .with_state(seen_body.clone());
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = RemoteWorkbenchClient::new();
+
+        let replay = client
+            .replay(&format!("http://{addr}"), "inner-session")
+            .await
+            .unwrap();
+
+        assert_eq!(replay.session_id, "inner-session");
+        assert_eq!(replay.buffer, "hello\n");
+        assert_eq!(replay.last_seq, 42);
+        let body = seen_body.lock().unwrap().clone().unwrap();
+        assert_eq!(body["sessionId"], "inner-session");
     }
 
     /// Business Logic（为什么需要这个测试）:

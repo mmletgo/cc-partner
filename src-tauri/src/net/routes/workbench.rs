@@ -1,24 +1,38 @@
-//! net/routes/workbench.rs — Workbench 远端 HTTP 路由
+//! net/routes/workbench.rs — Workbench 远端网关与移动端 HTTP 路由
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     局域网设备需要通过现有 P2P HTTP server 暴露 Workbench 远端目录浏览与项目打开能力。
+//!     局域网设备需要通过现有 P2P HTTP server 暴露 Workbench 远端能力，手机浏览器也需要通过本机 HTTP 入口操作 Workbench。
 //!
 //! Code Logic（这个模块做什么）:
-//!     将远端目录 helper 和本机项目添加逻辑包装为 axum handler，供其他设备调用。
+//!     将 P2P local-only 网关、远端目录 helper 和 mobile remote-aware helper 包装为 axum handler。
 
-use crate::commands::prompt_optimizer::local_stream_optimize_prompt_to_workbench_session;
+use crate::commands::prompt_optimizer::{
+    local_stream_optimize_prompt_to_workbench_session,
+    stream_optimize_prompt_to_workbench_session_for_state,
+};
 use crate::commands::workbench::{
-    add_local_workbench_project_from_path, local_close_workbench_pane,
-    local_close_workbench_session, local_commit_workbench_worktree, local_create_workbench_dir,
-    local_create_workbench_file, local_create_workbench_session, local_create_workbench_worktree,
-    local_delete_workbench_path, local_focus_workbench_session, local_get_workbench_path_info,
-    local_get_workbench_worktree, local_list_workbench_dir, local_list_workbench_git_commits,
-    local_list_workbench_sessions, local_list_workbench_worktrees, local_merge_workbench_worktree,
-    local_open_workbench_file, local_preview_workbench_html_asset, local_preview_workbench_sqlite,
+    add_local_workbench_project_from_path, close_workbench_pane_for_state,
+    close_workbench_session_for_state, commit_workbench_worktree_for_state,
+    create_workbench_session_for_state, create_workbench_worktree_for_state,
+    focus_workbench_session_for_state, get_focused_workbench_session_for_state,
+    get_workbench_path_info_for_state, list_workbench_dir_for_state,
+    list_workbench_git_commits_for_state, list_workbench_sessions_for_state,
+    list_workbench_worktrees_for_state, local_close_workbench_pane, local_close_workbench_session,
+    local_commit_workbench_worktree, local_create_workbench_dir, local_create_workbench_file,
+    local_create_workbench_session, local_create_workbench_worktree, local_delete_workbench_path,
+    local_focus_workbench_session, local_get_workbench_path_info, local_get_workbench_worktree,
+    local_list_workbench_dir, local_list_workbench_git_commits, local_list_workbench_sessions,
+    local_list_workbench_worktrees, local_merge_workbench_worktree, local_open_workbench_file,
+    local_preview_workbench_html_asset, local_preview_workbench_sqlite,
     local_push_workbench_worktree, local_remove_workbench_worktree, local_rename_workbench_path,
     local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_text_file,
     local_split_workbench_pane, local_switch_workbench_pane, local_write_workbench_session_input,
-    local_zoom_workbench_pane, WorkbenchMergeResultDto,
+    local_zoom_workbench_pane, merge_workbench_worktree_for_state, open_workbench_file_for_state,
+    push_workbench_worktree_for_state, remove_workbench_worktree_for_state,
+    replay_workbench_session_for_state, resize_workbench_session_for_state,
+    save_workbench_text_file_for_state, split_workbench_pane_for_state,
+    switch_workbench_pane_for_state, write_workbench_session_input_for_state,
+    zoom_workbench_pane_for_state, WorkbenchMergeResultDto,
 };
 use crate::error::AppError;
 use crate::state::AppState;
@@ -839,6 +853,458 @@ pub async fn stream_prompt_optimizer_to_session(
     ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
     Ok(Json(
         local_stream_optimize_prompt_to_workbench_session(
+            &state,
+            req.prompt,
+            req.working_directory,
+            req.target_language,
+            req.session_id,
+        )
+        .await?,
+    ))
+}
+
+/// 列出手机端可管理的 Workbench 项目。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `/mobile` 需要看到本机项目和远端 project shortcut，作为二级代理链路的入口。
+///
+/// Code Logic（这个函数做什么）:
+///     读取本机 Workbench 项目仓库并直接返回 DTO；远端快捷方式保持 remote kind。
+pub async fn mobile_list_projects(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<WorkbenchProjectDto>>, AppError> {
+    let rows = state.workbench_project_repo.list().await?;
+    Ok(Json(rows.iter().map(WorkbenchProjectRow::to_dto).collect()))
+}
+
+/// 手机端打开本机路径为 Workbench 项目。
+///
+/// Business Logic（为什么需要这个函数）:
+///     移动端 HTTP adapter 需要与桌面项目打开 API 保持同形，便于后续从手机添加本机路径。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 path 非空后复用本机 add-project helper，返回项目 DTO。
+pub async fn mobile_open_project(
+    State(state): State<AppState>,
+    Json(req): Json<RemotePathReq>,
+) -> Result<Json<WorkbenchProjectDto>, AppError> {
+    let path = validate_remote_path(req.path)?;
+    Ok(Json(
+        add_local_workbench_project_from_path(&state, path).await?,
+    ))
+}
+
+/// 手机端列出本机或远端项目的 worktree。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机需要像桌面一级代理一样管理远端项目 worktree，而不只停留在自动化面板。
+///
+/// Code Logic（这个函数做什么）:
+///     接收本机 projectId 或 remote shortcut projectId，委托 commands 层 remote-aware helper。
+pub async fn mobile_list_worktrees(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteProjectReq>,
+) -> Result<Json<Vec<WorkbenchWorktreeDto>>, AppError> {
+    Ok(Json(
+        list_workbench_worktrees_for_state(&state, req.project_id).await?,
+    ))
+}
+
+/// 手机端创建本机或远端项目 worktree。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端远端项目应支持和本机项目一致的新建功能分支工作区。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 projectId/branchName/baseBranch，委托 commands 层 remote-aware helper。
+pub async fn mobile_create_worktree(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteCreateWorktreeReq>,
+) -> Result<Json<WorkbenchWorktreeDto>, AppError> {
+    Ok(Json(
+        create_workbench_worktree_for_state(
+            &state,
+            req.project_id,
+            req.branch_name,
+            req.base_branch,
+        )
+        .await?,
+    ))
+}
+
+/// 手机端提交本机或远端 worktree。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端 Git 面板需要能提交远端设备项目的改动，保持与桌面 Workbench 一致。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 worktreeId 和可选 message，委托 commands 层按 local/remote 目标执行。
+pub async fn mobile_commit_worktree(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteCommitWorktreeReq>,
+) -> Result<Json<WorkbenchWorktreeDto>, AppError> {
+    Ok(Json(
+        commit_workbench_worktree_for_state(&state, req.worktree_id, req.message).await?,
+    ))
+}
+
+/// 手机端推送本机或远端 worktree。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端完成提交后应能把远端设备上的真实分支推送到 Git remote。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 worktreeId，委托 commands 层 remote-aware push helper。
+pub async fn mobile_push_worktree(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteWorktreeReq>,
+) -> Result<Json<WorkbenchWorktreeDto>, AppError> {
+    Ok(Json(
+        push_workbench_worktree_for_state(&state, req.worktree_id).await?,
+    ))
+}
+
+/// 手机端合并本机或远端 worktree。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端应能触发远端设备上的 merge/cleanup 流程，并接收映射后的结果。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 worktreeId，委托 commands 层 remote-aware merge helper。
+pub async fn mobile_merge_worktree(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteWorktreeReq>,
+) -> Result<Json<WorkbenchMergeResultDto>, AppError> {
+    Ok(Json(
+        merge_workbench_worktree_for_state(&state, state.app_handle.clone(), req.worktree_id)
+            .await?,
+    ))
+}
+
+/// 手机端删除本机或远端 worktree。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端 worktree 面板需要清理远端设备上的废弃功能工作区。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 worktreeId/force，委托 commands 层 remote-aware remove helper。
+pub async fn mobile_remove_worktree(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteRemoveWorktreeReq>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        remove_workbench_worktree_for_state(&state, req.worktree_id, req.force).await?,
+    ))
+}
+
+/// 手机端列出本机或远端项目提交历史。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端 Git 面板需要读取远端 active worktree 的真实提交历史。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 projectId/worktreeId/limit，委托 commands 层 remote-aware Git helper。
+pub async fn mobile_list_git_commits(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteGitCommitsReq>,
+) -> Result<Json<Vec<WorkbenchGitCommitDto>>, AppError> {
+    Ok(Json(
+        list_workbench_git_commits_for_state(
+            &state,
+            req.project_id,
+            req.worktree_id,
+            Some(req.limit.clamp(1, 100) as usize),
+        )
+        .await?,
+    ))
+}
+
+/// 手机端列出本机或远端项目目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端文件面板需要浏览远端设备项目目录，而不是只能操作本机项目。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 projectId/worktreeId/path，委托 commands 层 remote-aware 文件树 helper。
+pub async fn mobile_list_workbench_dir(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteListDirReq>,
+) -> Result<Json<Vec<WorkbenchFileNode>>, AppError> {
+    Ok(Json(
+        list_workbench_dir_for_state(&state, req.project_id, req.worktree_id, req.path).await?,
+    ))
+}
+
+/// 手机端读取本机或远端项目路径信息。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端文件面板选中远端路径后需要显示类型、大小和可读性等 metadata。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 projectId/worktreeId/path，委托 commands 层 remote-aware path info helper。
+pub async fn mobile_workbench_path_info(
+    State(state): State<AppState>,
+    Json(req): Json<RemotePathInfoReq>,
+) -> Result<Json<WorkbenchPathInfo>, AppError> {
+    Ok(Json(
+        get_workbench_path_info_for_state(&state, req.project_id, req.worktree_id, req.path)
+            .await?,
+    ))
+}
+
+/// 手机端打开本机或远端项目文件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端文件面板需要打开远端设备上的文本、图片、CSV 和 SQLite 预览。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 projectId/worktreeId/path，委托 commands 层 remote-aware open file helper。
+pub async fn mobile_open_workbench_file(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteOpenFileReq>,
+) -> Result<Json<WorkbenchOpenFileDto>, AppError> {
+    Ok(Json(
+        open_workbench_file_for_state(&state, req.project_id, req.worktree_id, req.path).await?,
+    ))
+}
+
+/// 手机端保存本机或远端项目文本文件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端编辑远端项目文本文件时，保存必须发生在项目所在设备并沿用 baseHash 乐观锁。
+///
+/// Code Logic（这个函数做什么）:
+///     接收保存请求，委托 commands 层 remote-aware save-text helper。
+pub async fn mobile_save_workbench_text_file(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSaveTextReq>,
+) -> Result<Json<WorkbenchSaveTextResultDto>, AppError> {
+    Ok(Json(
+        save_workbench_text_file_for_state(
+            &state,
+            req.project_id,
+            req.worktree_id,
+            req.path,
+            req.content,
+            req.base_hash,
+        )
+        .await?,
+    ))
+}
+
+/// 手机端列出本机或远端项目 terminal window。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端进入远端项目后需要看到项目所在设备上的真实 terminal window 列表。
+///
+/// Code Logic（这个函数做什么）:
+///     接收可选 projectId，委托 commands 层 remote-aware session list helper。
+pub async fn mobile_list_workbench_sessions(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteListSessionsReq>,
+) -> Result<Json<Vec<WorkbenchSessionDto>>, AppError> {
+    Ok(Json(
+        list_workbench_sessions_for_state(&state, state.app_handle.clone(), req.project_id).await?,
+    ))
+}
+
+/// 手机端创建本机或远端 terminal window。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端应能在远端设备项目 worktree 中新建真实 shell/tmux 会话。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 projectId/worktreeId/初始尺寸，委托 commands 层 remote-aware create session helper。
+pub async fn mobile_create_workbench_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteCreateSessionReq>,
+) -> Result<Json<WorkbenchSessionDto>, AppError> {
+    Ok(Json(
+        create_workbench_session_for_state(
+            &state,
+            state.app_handle.clone(),
+            req.project_id,
+            req.worktree_id,
+            req.initial_cols,
+            req.initial_rows,
+        )
+        .await?,
+    ))
+}
+
+/// 手机端 replay 本机或远端 terminal 输出。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端首次打开远端终端时需要恢复最近屏幕内容，再接 live NDJSON 事件。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 sessionId，委托 commands 层 remote-aware replay helper 并返回映射后的 sessionId。
+pub async fn mobile_replay_workbench_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteReplaySessionReq>,
+) -> Result<Json<WorkbenchSessionReplayDto>, AppError> {
+    Ok(Json(
+        replay_workbench_session_for_state(&state, req.session_id).await?,
+    ))
+}
+
+/// 手机端写入本机或远端 terminal 输入。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机键盘输入需要写入当前项目真实所在设备的 PTY/tmux。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 sessionId/data，委托 commands 层 remote-aware write helper。
+pub async fn mobile_write_workbench_session_input(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteWriteSessionInputReq>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        write_workbench_session_input_for_state(&state, req.session_id, req.data).await?,
+    ))
+}
+
+/// 手机端调整本机或远端 terminal 尺寸。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端 terminal viewport 变化要同步到远端设备 tmux，避免交互式 UI 换行错乱。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 sessionId/cols/rows，委托 commands 层 remote-aware resize helper。
+pub async fn mobile_resize_workbench_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteResizeSessionReq>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        resize_workbench_session_for_state(&state, req.session_id, req.cols, req.rows).await?,
+    ))
+}
+
+/// 手机端聚焦本机或远端 terminal window。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端切换 terminal tab 时，远端设备上的 tmux current window 也要同步。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 sessionId，委托 commands 层 remote-aware focus helper。
+pub async fn mobile_focus_workbench_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSessionReq>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        focus_workbench_session_for_state(&state, req.session_id).await?,
+    ))
+}
+
+/// 手机端查询本机或远端当前聚焦 terminal。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端需要跟随远端 tmux status bar 内发生的 window 切换。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 projectId/worktreeId，委托 commands 层 remote-aware focused helper。
+pub async fn mobile_focused_workbench_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteFocusedSessionReq>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        get_focused_workbench_session_for_state(&state, req.project_id, req.worktree_id).await?,
+    ))
+}
+
+/// 手机端新增本机或远端 terminal pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端 pane 工具栏需要在远端设备上的真实 tmux window 中新增 pane。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 sessionId/direction，委托 commands 层 remote-aware split-pane helper。
+pub async fn mobile_split_workbench_pane(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSplitPaneReq>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        split_workbench_pane_for_state(&state, req.session_id, req.direction).await?,
+    ))
+}
+
+/// 手机端切换本机或远端 terminal pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端单 pane 视图需要能循环切换远端 tmux active pane。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 sessionId，委托 commands 层 remote-aware switch-pane helper。
+pub async fn mobile_switch_workbench_pane(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSessionReq>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        switch_workbench_pane_for_state(&state, req.session_id).await?,
+    ))
+}
+
+/// 手机端确保本机或远端 terminal pane zoom。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机屏幕空间有限，远端多 pane window 也必须只显示当前 active pane。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 sessionId，委托 commands 层 remote-aware zoom-pane helper。
+pub async fn mobile_zoom_workbench_pane(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSessionReq>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        zoom_workbench_pane_for_state(&state, req.session_id).await?,
+    ))
+}
+
+/// 手机端关闭本机或远端 terminal pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端关闭 pane 时，最后一个 pane 会关闭远端 window，前端需要知道 closedWindow。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 sessionId，委托 commands 层 remote-aware close-pane helper。
+pub async fn mobile_close_workbench_pane(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSessionReq>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        close_workbench_pane_for_state(&state, req.session_id).await?,
+    ))
+}
+
+/// 手机端关闭本机或远端 terminal window。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端关闭远端 terminal tab 时，真实清理必须发生在项目所在设备。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 sessionId，委托 commands 层 remote-aware close session helper。
+pub async fn mobile_close_workbench_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSessionReq>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        close_workbench_session_for_state(&state, req.session_id).await?,
+    ))
+}
+
+/// 手机端把 Prompt 优化后写入本机或远端 terminal。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端远端项目的 Prompt 面板需要在远端设备执行 Claude CLI，并把结果写入远端 terminal。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 prompt/workingDirectory/targetLanguage/sessionId，委托 commands 层 remote-aware prompt helper。
+pub async fn mobile_stream_prompt_optimizer_to_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemotePromptOptimizerReq>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        stream_optimize_prompt_to_workbench_session_for_state(
             &state,
             req.prompt,
             req.working_directory,

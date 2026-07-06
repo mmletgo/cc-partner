@@ -12,7 +12,7 @@
 - **Prompt 优化** — 调用本机 Claude Code CLI pure/headless 模式生成中英文优化版 Prompt
 - **速记本** — 多页面自动保存文本，支持页面标题、局域网与 GitHub 同步
 - **工作台** — 指定本机或局域网远端项目文件夹，管理 Git worktree、多个项目终端、文件工作区、Git 提交树和项目自动化看板
-- **移动端 Workbench** — 可信局域网内通过 `/mobile` 手机浏览器远程操作 Workbench；本机可作为手机到远端设备的项目自动化代理，桌面端展示访问链接与二维码
+- **移动端 Workbench** — 可信局域网内通过 `/mobile` 手机浏览器远程操作 Workbench；本机可作为手机到远端设备的二级代理，统一管理远端项目的 worktree、终端、文件、Git、Prompt 优化和项目自动化，桌面端展示访问链接与二维码
 - **Orchestrator 自动编排器** — 项目级任务队列、可见 Runner、验证 evidence 与 full-auto 交付，桌面端作为 Workbench 自动化工作区展示
 - **P2P 自动互联** — 局域网内 mDNS 自动发现
 - **自动更新** — GitHub Releases 检测 / 下载 / 安装
@@ -438,7 +438,7 @@ node scripts/bump-version.mjs <新版本号>
 | start_region_capture / get_region_snapshot / save_clipboard_image / cancel_region_capture | 区域截图 |
 | list_github_trending_repos / get_github_trending_config / get_default_github_trending_config / update_github_trending_config / test_claude_cli | GitHub 周热门项目 + Claude CLI 双语解说配置 / 恢复默认 |
 | get_orchestrator_config / get_default_orchestrator_config / update_orchestrator_config | Orchestrator 设备级自动化配置读写 / 恢复默认（Phase 1 仅配置持久化，运行时消费后续接入） |
-| list_workbench_projects / add_workbench_project / remove_workbench_project / touch_workbench_project / list_workbench_worktrees / create_workbench_worktree / commit_workbench_worktree / push_workbench_worktree / merge_workbench_worktree / remove_workbench_worktree / list_workbench_git_commits / list_workbench_sessions / create_workbench_session / write_workbench_session_input / resize_workbench_session / focus_workbench_session / get_focused_workbench_session / split_workbench_pane / close_workbench_pane / close_workbench_session / rename_workbench_session / list_workbench_dir / get_workbench_path_info / open_workbench_file / save_workbench_text_file / format_workbench_structured_content / preview_workbench_sqlite / create_workbench_file / create_workbench_dir / rename_workbench_path / delete_workbench_path | 工作台本机/远端项目、远端目录选择、Git worktree、带本地/远端 ref 标识的 Git 提交树、tmux-backed terminal window/pane、工作区文件树和文件浏览/编辑 |
+| list_workbench_projects / add_workbench_project / remove_workbench_project / touch_workbench_project / list_workbench_worktrees / create_workbench_worktree / commit_workbench_worktree / push_workbench_worktree / merge_workbench_worktree / remove_workbench_worktree / list_workbench_git_commits / list_workbench_sessions / create_workbench_session / write_workbench_session_input / resize_workbench_session / focus_workbench_session / get_focused_workbench_session / split_workbench_pane / switch_workbench_pane / zoom_workbench_pane / close_workbench_pane / close_workbench_session / rename_workbench_session / list_workbench_dir / get_workbench_path_info / open_workbench_file / save_workbench_text_file / format_workbench_structured_content / preview_workbench_sqlite / create_workbench_file / create_workbench_dir / rename_workbench_path / delete_workbench_path | 工作台本机/远端项目、远端目录选择、Git worktree、带本地/远端 ref 标识的 Git 提交树、tmux-backed terminal window/pane、工作区文件树和文件浏览/编辑 |
 | preview_workbench_html_asset | Workbench HTML/Markdown 预览读取当前 active worktree 根内的相对 CSS/图片等资源并返回 data URL；拒绝外链、绝对路径、根外路径和跨根 symlink |
 
 ### 8.3 P2P HTTP 端点（对端调用，由 `src-tauri/src/net/routes/` 注册）

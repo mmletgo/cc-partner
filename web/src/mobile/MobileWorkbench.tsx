@@ -69,10 +69,10 @@ function createMobileFilePanelContext(
  * MobileWorkbench（移动端工作台页面）
  *
  * Business Logic（为什么需要这个组件）:
- *   `/mobile` 需要通过 HTTP 加载最近项目；本机项目进入完整工作台，远端快捷方式进入自动化二级代理链路。
+ *   `/mobile` 需要通过 HTTP 加载最近项目；本机与远端快捷方式都应进入完整移动端 Workbench。
  *
  * Code Logic（这个组件做什么）:
- *   管理 active panel/project/worktree/session 状态；local 项目拉取 worktree/session，remote 项目清空本机上下文并进入 automation。
+ *   管理 active panel/project/worktree/session 状态；local/remote 项目都通过 HTTP transport 拉取 worktree/session，后端按项目类型决定是否代理。
  */
 export function MobileWorkbench(): ReactElement {
   const [panel, setPanel] = useState<MobileWorkbenchPanel>(() => getInitialMobileWorkbenchPanel());
@@ -377,10 +377,10 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户选择本机项目后需要进入完整移动端工作台；选择远端快捷方式后需要进入手机到远端设备的自动化代理链路。
+   *   用户选择本机或远端项目后，都需要进入可管理终端、worktree、文件、Git 和自动化的移动端工作台。
    *
    * Code Logic（这个函数做什么）:
-   *   未支持项目类型直接提示；remote 项目让旧详情请求失效并清空 worktree/session 后切到 automation；local 项目并行请求 worktrees/sessions 后切到 terminal。
+   *   未支持项目类型直接提示；支持的 local/remote 项目并行请求 worktrees/sessions，选择默认 worktree/session 后切到 terminal。
    */
   const selectProject = useCallback(async (project: WorkbenchProject): Promise<void> => {
     if (!canSelectMobileProject(project)) {
@@ -390,7 +390,7 @@ export function MobileWorkbench(): ReactElement {
       return;
     }
     if (activeProject?.id === project.id) {
-      setPanel(project.kind === 'remote' ? 'automation' : 'terminal');
+      setPanel('terminal');
       return;
     }
     if (!confirmFileContextSwitch(createMobileFilePanelContext(project, null))) {
@@ -408,13 +408,6 @@ export function MobileWorkbench(): ReactElement {
     setSessions([]);
     sessionsRef.current = [];
     setActiveSession(null);
-
-    if (project.kind === 'remote') {
-      projectDetailsRequestIdRef.current += 1;
-      setProjectDetailsLoading(false);
-      setPanel('automation');
-      return;
-    }
 
     const requestId = projectDetailsRequestIdRef.current + 1;
     projectDetailsRequestIdRef.current = requestId;

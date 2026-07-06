@@ -48,6 +48,8 @@ interface HttpOrchestratorTaskViewListResponse {
   views: OrchestratorTaskView[];
 }
 
+const MOBILE_WORKBENCH_API_PREFIX = '/api/mobile/workbench';
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   HTTP Workbench route 失败时，移动端页面需要展示后端返回的可读错误，而不是笼统的 fetch status。
@@ -216,118 +218,118 @@ export const httpOrchestratorTransport = {
  */
 export const httpWorkbenchTransport: WorkbenchTransport = {
   projects: {
-    list: () => getJson<WorkbenchProject[]>('/api/workbench/projects/list'),
-    open: (path) => postJson<WorkbenchProject>('/api/workbench/projects/open', { path }),
+    list: () => getJson<WorkbenchProject[]>(`${MOBILE_WORKBENCH_API_PREFIX}/projects/list`),
+    open: (path) => postJson<WorkbenchProject>(`${MOBILE_WORKBENCH_API_PREFIX}/projects/open`, { path }),
   },
   worktrees: {
     list: (projectId) =>
-      postJson<WorkbenchWorktree[]>('/api/workbench/worktrees/list', { projectId }),
+      postJson<WorkbenchWorktree[]>(`${MOBILE_WORKBENCH_API_PREFIX}/worktrees/list`, { projectId }),
     create: (projectId, branchName, baseBranch) =>
-      postJson<WorkbenchWorktree>('/api/workbench/worktrees/create', {
+      postJson<WorkbenchWorktree>(`${MOBILE_WORKBENCH_API_PREFIX}/worktrees/create`, {
         projectId,
         branchName,
         baseBranch: baseBranch ?? null,
       }),
     commit: (worktreeId, message) =>
-      postJson<WorkbenchWorktree>('/api/workbench/worktrees/commit', {
+      postJson<WorkbenchWorktree>(`${MOBILE_WORKBENCH_API_PREFIX}/worktrees/commit`, {
         worktreeId,
         message: message ?? null,
       }),
     push: (worktreeId) =>
-      postJson<WorkbenchWorktree>('/api/workbench/worktrees/push', {
+      postJson<WorkbenchWorktree>(`${MOBILE_WORKBENCH_API_PREFIX}/worktrees/push`, {
         worktreeId,
       }),
     merge: (worktreeId) =>
-      postJson<WorkbenchMergeResult>('/api/workbench/worktrees/merge', {
+      postJson<WorkbenchMergeResult>(`${MOBILE_WORKBENCH_API_PREFIX}/worktrees/merge`, {
         worktreeId,
       }),
     remove: (worktreeId, force = false) =>
-      postJson<{ ok: boolean; worktreeId: string }>('/api/workbench/worktrees/remove', {
+      postJson<{ ok: boolean; worktreeId: string }>(`${MOBILE_WORKBENCH_API_PREFIX}/worktrees/remove`, {
         worktreeId,
         force,
       }),
   },
   sessions: {
     list: (projectId) =>
-      postJson<WorkbenchSession[]>('/api/workbench/sessions/list', {
+      postJson<WorkbenchSession[]>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/list`, {
         projectId: projectId ?? null,
       }),
     create: (projectId, initialSize, worktreeId) =>
-      postJson<WorkbenchSession>('/api/workbench/sessions/create', {
+      postJson<WorkbenchSession>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/create`, {
         projectId,
         worktreeId: worktreeId ?? null,
         initialCols: initialSize?.cols ?? null,
         initialRows: initialSize?.rows ?? null,
       }),
     writeInput: (sessionId, data) =>
-      postJson<{ ok: boolean; sessionId: string }>('/api/workbench/sessions/write', {
+      postJson<{ ok: boolean; sessionId: string }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/write`, {
         sessionId,
         data,
       }),
     resize: (sessionId, cols, rows) =>
-      postJson<{ ok: boolean; sessionId: string }>('/api/workbench/sessions/resize', {
+      postJson<{ ok: boolean; sessionId: string }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/resize`, {
         sessionId,
         cols,
         rows,
       }),
     replay: (sessionId) =>
-      postJson<WorkbenchSessionReplay>('/api/workbench/sessions/replay', { sessionId }),
+      postJson<WorkbenchSessionReplay>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/replay`, { sessionId }),
     focus: (sessionId) =>
-      postJson<{ ok: boolean; sessionId: string }>('/api/workbench/sessions/focus', {
+      postJson<{ ok: boolean; sessionId: string }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/focus`, {
         sessionId,
       }),
     focused: (projectId, worktreeId) =>
-      postJson<{ sessionId: string | null }>('/api/workbench/sessions/focused', {
+      postJson<{ sessionId: string | null }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/focused`, {
         projectId,
         worktreeId: worktreeId ?? null,
       }),
     splitPane: (sessionId, direction) =>
       postJson<{ ok: boolean; sessionId: string; direction: WorkbenchPaneSplitDirection }>(
-        '/api/workbench/sessions/split-pane',
+        `${MOBILE_WORKBENCH_API_PREFIX}/sessions/split-pane`,
         {
           sessionId,
           direction,
         },
       ),
     switchPane: (sessionId) =>
-      postJson<{ ok: boolean; sessionId: string }>('/api/workbench/sessions/switch-pane', {
+      postJson<{ ok: boolean; sessionId: string }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/switch-pane`, {
         sessionId,
       }),
     zoomPane: (sessionId) =>
-      postJson<{ ok: boolean; sessionId: string }>('/api/workbench/sessions/zoom-pane', {
+      postJson<{ ok: boolean; sessionId: string }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/zoom-pane`, {
         sessionId,
       }),
     closePane: (sessionId) =>
       postJson<{ ok: boolean; sessionId: string; closedWindow: boolean }>(
-        '/api/workbench/sessions/close-pane',
+        `${MOBILE_WORKBENCH_API_PREFIX}/sessions/close-pane`,
         { sessionId },
       ),
     close: (sessionId) =>
-      postJson<{ ok: boolean; sessionId: string }>('/api/workbench/sessions/close', {
+      postJson<{ ok: boolean; sessionId: string }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/close`, {
         sessionId,
       }),
   },
   files: {
     listDir: (projectId, path, worktreeId) =>
-      postJson<WorkbenchFileNode[]>('/api/workbench/files/list-dir', {
+      postJson<WorkbenchFileNode[]>(`${MOBILE_WORKBENCH_API_PREFIX}/files/list-dir`, {
         projectId,
         worktreeId: worktreeId ?? null,
         path: path ?? null,
       }),
     info: (projectId, path, worktreeId) =>
-      postJson<WorkbenchPathInfo>('/api/workbench/files/info', {
+      postJson<WorkbenchPathInfo>(`${MOBILE_WORKBENCH_API_PREFIX}/files/info`, {
         projectId,
         worktreeId: worktreeId ?? null,
         path,
       }),
     open: (projectId, path, worktreeId) =>
-      postJson<WorkbenchOpenFile>('/api/workbench/files/open', {
+      postJson<WorkbenchOpenFile>(`${MOBILE_WORKBENCH_API_PREFIX}/files/open`, {
         projectId,
         worktreeId: worktreeId ?? null,
         path,
       }),
     saveText: (projectId, path, content, baseHash, worktreeId) =>
-      postJson<WorkbenchSaveTextResult>('/api/workbench/files/save-text', {
+      postJson<WorkbenchSaveTextResult>(`${MOBILE_WORKBENCH_API_PREFIX}/files/save-text`, {
         projectId,
         worktreeId: worktreeId ?? null,
         path,
@@ -337,7 +339,7 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
   },
   git: {
     listCommits: (projectId, worktreeId, limit = 30) =>
-      postJson<WorkbenchGitCommit[]>('/api/workbench/git/commits', {
+      postJson<WorkbenchGitCommit[]>(`${MOBILE_WORKBENCH_API_PREFIX}/git/commits`, {
         projectId,
         worktreeId: worktreeId ?? null,
         limit,
@@ -346,7 +348,7 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
   prompt: {
     streamToTerminal: (prompt, options) =>
       postJson<{ ok: boolean; sessionId: string }>(
-        '/api/workbench/prompt-optimizer/stream-to-session',
+        `${MOBILE_WORKBENCH_API_PREFIX}/prompt-optimizer/stream-to-session`,
         {
           prompt,
           workingDirectory: options.workingDirectory ?? null,

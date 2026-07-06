@@ -133,21 +133,21 @@ function testSelectMobilePanelReturnsNextPanel(): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   远端项目在移动端只开放自动化代理链路，导航误点本机专属面板时应回到可用的自动化面板。
+ *   远端项目在移动端需要与本机项目一样进入终端、文件、Git、worktree、Prompt 和自动化面板。
  *
  * Code Logic（这个函数做什么）:
- *   构造 local 与 remote 项目，断言 remote 的 terminal/files/git/worktrees/prompt 回落 automation，允许 projects/settings/automation。
+ *   构造 local 与 remote 项目，断言面板选择 helper 不再把 remote 项目的本机专属面板回落到 automation。
  */
-function testRemoteProjectPanelSelectionFallsBackToAutomation(): void {
+function testRemoteProjectPanelSelectionKeepsRequestedPanel(): void {
   const localProject = createProject({ id: 'local', name: 'local-app', kind: 'local' });
   const remoteProject = createProject({ id: 'remote', name: 'remote-app', kind: 'remote' });
 
   assertEqual(selectMobilePanelForProject(localProject, 'terminal'), 'terminal');
-  assertEqual(selectMobilePanelForProject(remoteProject, 'terminal'), 'automation');
-  assertEqual(selectMobilePanelForProject(remoteProject, 'files'), 'automation');
-  assertEqual(selectMobilePanelForProject(remoteProject, 'git'), 'automation');
-  assertEqual(selectMobilePanelForProject(remoteProject, 'worktrees'), 'automation');
-  assertEqual(selectMobilePanelForProject(remoteProject, 'prompt'), 'automation');
+  assertEqual(selectMobilePanelForProject(remoteProject, 'terminal'), 'terminal');
+  assertEqual(selectMobilePanelForProject(remoteProject, 'files'), 'files');
+  assertEqual(selectMobilePanelForProject(remoteProject, 'git'), 'git');
+  assertEqual(selectMobilePanelForProject(remoteProject, 'worktrees'), 'worktrees');
+  assertEqual(selectMobilePanelForProject(remoteProject, 'prompt'), 'prompt');
   assertEqual(selectMobilePanelForProject(remoteProject, 'projects'), 'projects');
   assertEqual(selectMobilePanelForProject(remoteProject, 'settings'), 'settings');
   assertEqual(selectMobilePanelForProject(remoteProject, 'automation'), 'automation');
@@ -304,17 +304,18 @@ function testMobileWorktreeStatusKindPrioritizesConflictThenDirty(): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   移动端 worktree switcher 只能在本机项目且非加载态时打开，避免用户进入远端未支持路径。
+ *   移动端 worktree switcher 需要同时支持本机和远端项目，让手机端能切换远端设备项目 worktree。
  *
  * Code Logic（这个函数做什么）:
- *   构造 null、remote、busy local 和 idle local 场景，断言 switcher 打开条件。
+ *   构造 null、remote、busy local 和 idle local 场景，断言 local/remote 都在非 busy 时可打开。
  */
-function testMobileWorktreeSwitcherRequiresIdleLocalProject(): void {
+function testMobileWorktreeSwitcherAllowsIdleLocalAndRemoteProject(): void {
   const localProject = createProject({ id: 'local', name: 'local-app', kind: 'local' });
   const remoteProject = createProject({ id: 'remote', name: 'remote-app', kind: 'remote' });
 
   assertEqual(canOpenMobileWorktreeSwitcher(null, false), false);
-  assertEqual(canOpenMobileWorktreeSwitcher(remoteProject, false), false);
+  assertEqual(canOpenMobileWorktreeSwitcher(remoteProject, false), true);
+  assertEqual(canOpenMobileWorktreeSwitcher(remoteProject, true), false);
   assertEqual(canOpenMobileWorktreeSwitcher(localProject, true), false);
   assertEqual(canOpenMobileWorktreeSwitcher(localProject, false), true);
 }
@@ -515,7 +516,7 @@ function testMobileTerminalFullscreenChromeOnlyKeepsPaneActionsAndExit(): void {
 }
 
 testSelectMobilePanelReturnsNextPanel();
-testRemoteProjectPanelSelectionFallsBackToAutomation();
+testRemoteProjectPanelSelectionKeepsRequestedPanel();
 testAutomationPanelIsFirstClassMobilePanel();
 testOpenMobileNavReturnsTrue();
 testInitialMobileWorkbenchPanelDefaultsToProjects();
@@ -523,7 +524,7 @@ testInitialMobileNavOpenDefaultsToFalse();
 testCloseMobileNavReturnsFalse();
 testCanSelectMobileProjectAllowsLocalAndRemoteProjects();
 testMobileWorktreeStatusKindPrioritizesConflictThenDirty();
-testMobileWorktreeSwitcherRequiresIdleLocalProject();
+testMobileWorktreeSwitcherAllowsIdleLocalAndRemoteProject();
 testMobileWorktreeDestructiveActionRequiresIdleNonMainWorktree();
 testWorktreeWorkspaceClickNavigatesToTerminalOnlyAfterAcceptedSelection();
 testPreferredWorktreeUsesMainBeforeFirst();

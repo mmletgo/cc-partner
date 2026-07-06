@@ -231,9 +231,8 @@ pub(crate) async fn local_complete_orchestrator_task_prompt(
 /// Code Logic（这个命令做什么）:
 ///     校验 prompt 与目标语种，使用当前项目目录运行 Claude CLI stream-json 输出；每个 assistant 文本增量通过
 ///     WorkbenchSessionRegistry 写入指定 session，不返回优化文本给前端。
-#[tauri::command]
-pub async fn stream_optimize_prompt_to_workbench_session(
-    state: State<'_, AppState>,
+pub(crate) async fn stream_optimize_prompt_to_workbench_session_for_state(
+    state: &AppState,
     prompt: String,
     working_directory: Option<String>,
     target_language: String,
@@ -241,7 +240,7 @@ pub async fn stream_optimize_prompt_to_workbench_session(
 ) -> Result<Value, AppError> {
     if let Some(parsed) = parse_remote_entity_id(&session_id) {
         return remote_stream_optimize_prompt_to_workbench_session(
-            &state,
+            state,
             prompt,
             working_directory,
             target_language,
@@ -253,7 +252,32 @@ pub async fn stream_optimize_prompt_to_workbench_session(
     }
 
     local_stream_optimize_prompt_to_workbench_session(
-        &state,
+        state,
+        prompt,
+        working_directory,
+        target_language,
+        session_id,
+    )
+    .await
+}
+
+/// 流式优化 Prompt 并写入 Workbench 终端。
+///
+/// Business Logic（为什么需要这个命令）:
+///     Workbench 快捷键小组件需要在当前 Claude Code/终端输入位置下方优化 prompt，并把生成内容边生成边填入当前终端。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 只解包 State 和参数，再委托 mobile HTTP route 也能复用的 for_state helper。
+#[tauri::command]
+pub async fn stream_optimize_prompt_to_workbench_session(
+    state: State<'_, AppState>,
+    prompt: String,
+    working_directory: Option<String>,
+    target_language: String,
+    session_id: String,
+) -> Result<Value, AppError> {
+    stream_optimize_prompt_to_workbench_session_for_state(
+        state.inner(),
         prompt,
         working_directory,
         target_language,

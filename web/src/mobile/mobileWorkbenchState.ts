@@ -22,12 +22,6 @@ const MOBILE_WORKBENCH_PANEL_ORDER: readonly MobileWorkbenchPanel[] = [
   'settings',
 ];
 
-const MOBILE_REMOTE_PROJECT_PANEL_ALLOWLIST = new Set<MobileWorkbenchPanel>([
-  'projects',
-  'automation',
-  'settings',
-]);
-
 export type MobileWorktreeStatusKind = 'clean' | 'dirty' | 'conflict';
 
 export interface MobileTerminalChromeVisibility {
@@ -140,18 +134,16 @@ export function canSelectMobileProject(project: WorkbenchProject): boolean {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   远端快捷方式在移动端目前只开放自动化二级代理链路，用户误点本机专属面板时应留在可用功能内。
+ *   远端快捷方式在移动端已复用 Workbench 二级代理链路，导航行为需要与本机项目保持一致。
  *
  * Code Logic（这个函数做什么）:
- *   接收当前项目和目标面板；远端项目只允许 projects、automation、settings，其它面板统一回落到 automation。
+ *   接收当前项目和目标面板；当前 local/remote 都直接返回目标面板，project 参数保留给后续扩展。
  */
 export function selectMobilePanelForProject(
   project: WorkbenchProject | null,
   next: MobileWorkbenchPanel,
 ): MobileWorkbenchPanel {
-  if (project?.kind === 'remote' && !MOBILE_REMOTE_PROJECT_PANEL_ALLOWLIST.has(next)) {
-    return 'automation';
-  }
+  void project;
   return next;
 }
 
@@ -172,16 +164,16 @@ export function getMobileWorktreeStatusKind(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   移动端 worktree switcher 当前只适用于本机项目，远端项目和加载态都不应开放入口。
+ *   移动端 worktree switcher 需要支持本机项目和远端项目，方便手机端切换不同工作区。
  *
  * Code Logic（这个函数做什么）:
- *   project 存在、kind 为 local 且 busy 为 false 时返回 true。
+ *   project 存在、kind 为 local 或 remote 且 busy 为 false 时返回 true。
  */
 export function canOpenMobileWorktreeSwitcher(
   project: WorkbenchProject | null,
   busy: boolean,
 ): boolean {
-  return project?.kind === 'local' && !busy;
+  return (project?.kind === 'local' || project?.kind === 'remote') && !busy;
 }
 
 /**

@@ -22,6 +22,7 @@ use crate::workbench::models::{
 };
 use crate::workbench::sessions::{
     kill_persisted_backend, pane_count_for_row, PaneCloseOutcome, PaneSplitDirection,
+    WorkbenchSessionReplayDto,
 };
 use crate::workbench::{
     file_content, file_preview, fs as workbench_fs, git as workbench_git, html_assets, projects,
@@ -1232,14 +1233,13 @@ pub(crate) async fn local_get_workbench_worktree(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote 项目先恢复远端 local project id 并转发到对端；local 项目走原有本机 helper。
-#[tauri::command]
-pub async fn list_workbench_worktrees(
-    state: State<'_, AppState>,
+pub(crate) async fn list_workbench_worktrees_for_state(
+    state: &AppState,
     project_id: String,
 ) -> Result<Vec<WorkbenchWorktreeDto>, AppError> {
-    let project = get_project(&state, &project_id).await?;
+    let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
-        let context = ensure_remote_project_context(&state, &project).await?;
+        let context = ensure_remote_project_context(state, &project).await?;
         let items = RemoteWorkbenchClient::new()
             .list_worktrees(&context.base_url, &context.inner_project_id)
             .await?;
@@ -1249,7 +1249,22 @@ pub async fn list_workbench_worktrees(
             items,
         ));
     }
-    local_list_workbench_worktrees(&state, project_id).await
+    local_list_workbench_worktrees(state, project_id).await
+}
+
+/// 列出项目下的 Git worktree。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端 Workbench 顶部需要列出本机或远端项目的主工作区和功能 worktree。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 只解包 State，再委托可供 HTTP mobile route 复用的 for_state helper。
+#[tauri::command]
+pub async fn list_workbench_worktrees(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<WorkbenchWorktreeDto>, AppError> {
+    list_workbench_worktrees_for_state(state.inner(), project_id).await
 }
 
 /// 创建一个项目 Git worktree。
@@ -1311,16 +1326,15 @@ pub(crate) async fn local_create_workbench_worktree(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote 项目把创建请求转发到远端设备并映射返回 ID；local 项目走原有本机 helper。
-#[tauri::command]
-pub async fn create_workbench_worktree(
-    state: State<'_, AppState>,
+pub(crate) async fn create_workbench_worktree_for_state(
+    state: &AppState,
     project_id: String,
     branch_name: String,
     base_branch: Option<String>,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
-    let project = get_project(&state, &project_id).await?;
+    let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
-        let context = ensure_remote_project_context(&state, &project).await?;
+        let context = ensure_remote_project_context(state, &project).await?;
         let item = RemoteWorkbenchClient::new()
             .create_worktree(
                 &context.base_url,
@@ -1336,7 +1350,24 @@ pub async fn create_workbench_worktree(
             .next()
             .ok_or_else(|| AppError::generic("远端 worktree 创建结果为空"));
     }
-    local_create_workbench_worktree(&state, project_id, branch_name, base_branch).await
+    local_create_workbench_worktree(state, project_id, branch_name, base_branch).await
+}
+
+/// 创建一个项目 Git worktree。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端需要从 Workbench 新建本机或远端项目的功能 worktree。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 只解包参数，再委托 for_state helper 与手机 HTTP 入口共享业务语义。
+#[tauri::command]
+pub async fn create_workbench_worktree(
+    state: State<'_, AppState>,
+    project_id: String,
+    branch_name: String,
+    base_branch: Option<String>,
+) -> Result<WorkbenchWorktreeDto, AppError> {
+    create_workbench_worktree_for_state(state.inner(), project_id, branch_name, base_branch).await
 }
 
 /// 提交当前 worktree 的全部改动。
@@ -1379,9 +1410,8 @@ pub(crate) async fn local_commit_workbench_worktree(
 ///
 /// Code Logic（这个函数做什么）:
 ///     先按 worktreeId 解析 Local/Remote；Remote 通过 HTTP commit 后把返回 DTO 的 project/worktree id 映射回本机。
-#[tauri::command]
-pub async fn commit_workbench_worktree(
-    state: State<'_, AppState>,
+pub(crate) async fn commit_workbench_worktree_for_state(
+    state: &AppState,
     worktree_id: String,
     message: Option<String>,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
@@ -1391,7 +1421,7 @@ pub async fn commit_workbench_worktree(
             inner_worktree_id,
         } => {
             let context =
-                ensure_remote_worktree_context(&state, device_id, inner_worktree_id).await?;
+                ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
             let item = RemoteWorkbenchClient::new()
                 .commit_worktree(
                     &context.base_url,
@@ -1407,9 +1437,25 @@ pub async fn commit_workbench_worktree(
                 .ok_or_else(|| AppError::generic("远端 worktree commit 结果为空"))
         }
         WorktreeCommandTarget::Local(local_worktree_id) => {
-            local_commit_workbench_worktree(&state, local_worktree_id, message).await
+            local_commit_workbench_worktree(state, local_worktree_id, message).await
         }
     }
+}
+
+/// 提交当前 worktree 的全部改动。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端 Commit 按钮需要提交本机或远端项目 worktree 的全部改动。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 只解包参数，再委托 for_state helper 复用 remote-aware 行为。
+#[tauri::command]
+pub async fn commit_workbench_worktree(
+    state: State<'_, AppState>,
+    worktree_id: String,
+    message: Option<String>,
+) -> Result<WorkbenchWorktreeDto, AppError> {
+    commit_workbench_worktree_for_state(state.inner(), worktree_id, message).await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1531,9 +1577,8 @@ pub(crate) async fn local_push_workbench_worktree(
 ///
 /// Code Logic（这个函数做什么）:
 ///     先解析 worktree 目标；Remote 通过 HTTP push 并映射返回 DTO，Local 复用本地 helper。
-#[tauri::command]
-pub async fn push_workbench_worktree(
-    state: State<'_, AppState>,
+pub(crate) async fn push_workbench_worktree_for_state(
+    state: &AppState,
     worktree_id: String,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
     match worktree_command_target(&worktree_id)? {
@@ -1542,7 +1587,7 @@ pub async fn push_workbench_worktree(
             inner_worktree_id,
         } => {
             let context =
-                ensure_remote_worktree_context(&state, device_id, inner_worktree_id).await?;
+                ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
             let item = RemoteWorkbenchClient::new()
                 .push_worktree(&context.base_url, &context.inner_worktree_id)
                 .await?;
@@ -1552,9 +1597,24 @@ pub async fn push_workbench_worktree(
                 .ok_or_else(|| AppError::generic("远端 worktree push 结果为空"))
         }
         WorktreeCommandTarget::Local(local_worktree_id) => {
-            local_push_workbench_worktree(&state, local_worktree_id).await
+            local_push_workbench_worktree(state, local_worktree_id).await
         }
     }
+}
+
+/// 推送当前 worktree 分支。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端 Push 按钮需要推送本机或远端项目的 active worktree 分支。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包 worktreeId 后委托 for_state helper。
+#[tauri::command]
+pub async fn push_workbench_worktree(
+    state: State<'_, AppState>,
+    worktree_id: String,
+) -> Result<WorkbenchWorktreeDto, AppError> {
+    push_workbench_worktree_for_state(state.inner(), worktree_id).await
 }
 
 /// 合并当前 worktree 到主工作区。
@@ -1820,10 +1880,9 @@ pub(crate) async fn local_merge_workbench_worktree(
 ///
 /// Code Logic（这个函数做什么）:
 ///     先解析 worktree 目标；Remote 先建立事件桥和项目映射，再调用远端 merge 并映射返回 worktreeId。
-#[tauri::command]
-pub async fn merge_workbench_worktree(
+pub(crate) async fn merge_workbench_worktree_for_state(
+    state: &AppState,
     app: AppHandle,
-    state: State<'_, AppState>,
     worktree_id: String,
 ) -> Result<WorkbenchMergeResultDto, AppError> {
     match worktree_command_target(&worktree_id)? {
@@ -1832,16 +1891,32 @@ pub async fn merge_workbench_worktree(
             inner_worktree_id,
         } => {
             let context =
-                ensure_remote_worktree_context(&state, device_id, inner_worktree_id).await?;
+                ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
             let value = RemoteWorkbenchClient::new()
                 .merge_worktree(&context.base_url, &context.inner_worktree_id)
                 .await?;
             map_remote_merge_result_value(&context.device_id, value)
         }
         WorktreeCommandTarget::Local(local_worktree_id) => {
-            local_merge_workbench_worktree(app, &state, local_worktree_id).await
+            local_merge_workbench_worktree(app, state, local_worktree_id).await
         }
     }
+}
+
+/// 合并当前 worktree 到主工作区。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端 Merge 按钮需要合并本机或远端项目 worktree，并接收阶段进度。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 只解包 AppHandle/State，再委托 for_state helper。
+#[tauri::command]
+pub async fn merge_workbench_worktree(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    worktree_id: String,
+) -> Result<WorkbenchMergeResultDto, AppError> {
+    merge_workbench_worktree_for_state(state.inner(), app, worktree_id).await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2354,9 +2429,8 @@ pub(crate) async fn local_remove_workbench_worktree(
 ///
 /// Code Logic（这个函数做什么）:
 ///     先解析 Local/Remote 目标；Remote 通过 HTTP remove，并把返回 JSON 的 worktreeId 映射回 remote id。
-#[tauri::command]
-pub async fn remove_workbench_worktree(
-    state: State<'_, AppState>,
+pub(crate) async fn remove_workbench_worktree_for_state(
+    state: &AppState,
     worktree_id: String,
     force: Option<bool>,
 ) -> Result<serde_json::Value, AppError> {
@@ -2366,16 +2440,32 @@ pub async fn remove_workbench_worktree(
             inner_worktree_id,
         } => {
             let context =
-                ensure_remote_worktree_context(&state, device_id, inner_worktree_id).await?;
+                ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
             let value = RemoteWorkbenchClient::new()
                 .remove_worktree(&context.base_url, &context.inner_worktree_id, force)
                 .await?;
             Ok(map_remote_worktree_json_value(&context.device_id, value))
         }
         WorktreeCommandTarget::Local(local_worktree_id) => {
-            local_remove_workbench_worktree(&state, local_worktree_id, force).await
+            local_remove_workbench_worktree(state, local_worktree_id, force).await
         }
     }
+}
+
+/// 删除一个非主 worktree。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端需要删除本机或远端项目中不再需要的非主 worktree。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
+#[tauri::command]
+pub async fn remove_workbench_worktree(
+    state: State<'_, AppState>,
+    worktree_id: String,
+    force: Option<bool>,
+) -> Result<serde_json::Value, AppError> {
+    remove_workbench_worktree_for_state(state.inner(), worktree_id, force).await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2416,16 +2506,15 @@ pub(crate) async fn local_list_workbench_git_commits(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote 项目把 worktreeId 去掉远端前缀后转发；local 项目走原有本机 Git helper。
-#[tauri::command]
-pub async fn list_workbench_git_commits(
-    state: State<'_, AppState>,
+pub(crate) async fn list_workbench_git_commits_for_state(
+    state: &AppState,
     project_id: String,
     worktree_id: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<WorkbenchGitCommitDto>, AppError> {
-    let project = get_project(&state, &project_id).await?;
+    let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
-        let context = ensure_remote_project_context(&state, &project).await?;
+        let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         let limit = limit.unwrap_or(30).clamp(1, 100) as i64;
         return RemoteWorkbenchClient::new()
@@ -2437,7 +2526,24 @@ pub async fn list_workbench_git_commits(
             )
             .await;
     }
-    local_list_workbench_git_commits(&state, project_id, worktree_id, limit).await
+    local_list_workbench_git_commits(state, project_id, worktree_id, limit).await
+}
+
+/// 列出当前 worktree 的最近 Git 提交。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端 Git 历史面板需要读取本机或远端 active worktree 的提交。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
+#[tauri::command]
+pub async fn list_workbench_git_commits(
+    state: State<'_, AppState>,
+    project_id: String,
+    worktree_id: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<WorkbenchGitCommitDto>, AppError> {
+    list_workbench_git_commits_for_state(state.inner(), project_id, worktree_id, limit).await
 }
 
 /// 打开当前 worktree 内的文件。
@@ -2545,16 +2651,15 @@ pub(crate) async fn local_open_workbench_file(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote 项目把请求转发到远端设备；local 项目走原有本机文件打开 helper。
-#[tauri::command]
-pub async fn open_workbench_file(
-    state: State<'_, AppState>,
+pub(crate) async fn open_workbench_file_for_state(
+    state: &AppState,
     project_id: String,
     worktree_id: Option<String>,
     path: String,
 ) -> Result<WorkbenchOpenFileDto, AppError> {
-    let project = get_project(&state, &project_id).await?;
+    let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
-        let context = ensure_remote_project_context(&state, &project).await?;
+        let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
             .open_file(
@@ -2565,7 +2670,24 @@ pub async fn open_workbench_file(
             )
             .await;
     }
-    local_open_workbench_file(&state, project_id, worktree_id, path).await
+    local_open_workbench_file(state, project_id, worktree_id, path).await
+}
+
+/// 打开当前 worktree 内的文件。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端文件工作区需要打开本机或远端项目内文件。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
+#[tauri::command]
+pub async fn open_workbench_file(
+    state: State<'_, AppState>,
+    project_id: String,
+    worktree_id: Option<String>,
+    path: String,
+) -> Result<WorkbenchOpenFileDto, AppError> {
+    open_workbench_file_for_state(state.inner(), project_id, worktree_id, path).await
 }
 
 /// 保存当前 worktree 内的文本文件。
@@ -2612,18 +2734,17 @@ pub(crate) async fn local_save_workbench_text_file(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote 项目把 content/baseHash 转发到远端设备执行；local 项目走原有本机保存 helper。
-#[tauri::command]
-pub async fn save_workbench_text_file(
-    state: State<'_, AppState>,
+pub(crate) async fn save_workbench_text_file_for_state(
+    state: &AppState,
     project_id: String,
     worktree_id: Option<String>,
     path: String,
     content: String,
     base_hash: String,
 ) -> Result<WorkbenchSaveTextResultDto, AppError> {
-    let project = get_project(&state, &project_id).await?;
+    let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
-        let context = ensure_remote_project_context(&state, &project).await?;
+        let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
             .save_text_file(
@@ -2638,7 +2759,34 @@ pub async fn save_workbench_text_file(
             )
             .await;
     }
-    local_save_workbench_text_file(&state, project_id, worktree_id, path, content, base_hash).await
+    local_save_workbench_text_file(state, project_id, worktree_id, path, content, base_hash).await
+}
+
+/// 保存当前 worktree 内的文本文件。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端文件编辑器需要保存本机或远端项目中的可编辑文本。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
+#[tauri::command]
+pub async fn save_workbench_text_file(
+    state: State<'_, AppState>,
+    project_id: String,
+    worktree_id: Option<String>,
+    path: String,
+    content: String,
+    base_hash: String,
+) -> Result<WorkbenchSaveTextResultDto, AppError> {
+    save_workbench_text_file_for_state(
+        state.inner(),
+        project_id,
+        worktree_id,
+        path,
+        content,
+        base_hash,
+    )
+    .await
 }
 
 /// 格式化 JSON 或 TOML 内容。
@@ -2795,17 +2943,16 @@ pub(crate) async fn local_list_workbench_sessions(
 ///
 /// Code Logic（这个函数做什么）:
 ///     project_id 指向 remote shortcut 时先建立事件桥与项目映射，再转发到远端并映射 session/worktree id；否则调用本地 helper。
-#[tauri::command]
-pub async fn list_workbench_sessions(
-    state: State<'_, AppState>,
+pub(crate) async fn list_workbench_sessions_for_state(
+    state: &AppState,
     app_handle: AppHandle,
     project_id: Option<String>,
 ) -> Result<Vec<WorkbenchSessionDto>, AppError> {
     if let Some(project_id_value) = project_id.as_deref() {
-        let project = get_project(&state, project_id_value).await?;
+        let project = get_project(state, project_id_value).await?;
         if project.kind == "remote" {
-            let context = ensure_remote_project_context(&state, &project).await?;
-            ensure_remote_event_bridge_for_context(&state, &context);
+            let context = ensure_remote_project_context(state, &project).await?;
+            ensure_remote_event_bridge_for_context(state, &context);
             let items = RemoteWorkbenchClient::new()
                 .list_sessions(&context.base_url, Some(&context.inner_project_id))
                 .await?;
@@ -2816,7 +2963,23 @@ pub async fn list_workbench_sessions(
             ));
         }
     }
-    local_list_workbench_sessions(&state, app_handle, project_id).await
+    local_list_workbench_sessions(state, app_handle, project_id).await
+}
+
+/// 列出工作台终端会话。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端需要按项目查看本机或远端 terminal window。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包 State/AppHandle 后委托 for_state helper。
+#[tauri::command]
+pub async fn list_workbench_sessions(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    project_id: Option<String>,
+) -> Result<Vec<WorkbenchSessionDto>, AppError> {
+    list_workbench_sessions_for_state(state.inner(), app_handle, project_id).await
 }
 
 /// 在项目目录中创建一个普通 PTY 终端会话。
@@ -2850,6 +3013,33 @@ pub(crate) async fn local_create_workbench_session(
     Ok(row.to_dto())
 }
 
+/// 拉取工作台终端最近输出。
+///
+/// Business Logic（为什么需要这个函数）:
+///     移动端首次打开本机或远端 terminal 时，需要先 replay 最近输出，再消费 live 事件。
+///
+/// Code Logic（这个函数做什么）:
+///     remote sessionId 转发到项目所在设备并把返回 sessionId 映射回本机；local sessionId 直接读取本机 registry buffer。
+pub(crate) async fn replay_workbench_session_for_state(
+    state: &AppState,
+    session_id: String,
+) -> Result<WorkbenchSessionReplayDto, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        let mut replay = RemoteWorkbenchClient::new()
+            .replay(&base_url, &inner_session_id)
+            .await?;
+        replay.session_id = session_id;
+        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        return Ok(replay);
+    }
+    if !state.workbench_sessions.session_exists(&session_id) {
+        return Err(AppError::not_found("工作台会话不存在"));
+    }
+    Ok(state.workbench_sessions.replay(&session_id))
+}
+
 /// 在项目目录中创建一个普通 PTY 终端会话。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2857,20 +3047,19 @@ pub(crate) async fn local_create_workbench_session(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote 项目恢复远端 local projectId，剥离 remote worktreeId 后调用远端 create-session 并映射 DTO。
-#[tauri::command]
-pub async fn create_workbench_session(
-    state: State<'_, AppState>,
+pub(crate) async fn create_workbench_session_for_state(
+    state: &AppState,
     app_handle: AppHandle,
     project_id: String,
     worktree_id: Option<String>,
     initial_cols: Option<u16>,
     initial_rows: Option<u16>,
 ) -> Result<WorkbenchSessionDto, AppError> {
-    let project = get_project(&state, &project_id).await?;
+    let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
-        let context = ensure_remote_project_context(&state, &project).await?;
+        let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
-        ensure_remote_event_bridge_for_context(&state, &context);
+        ensure_remote_event_bridge_for_context(state, &context);
         let item = RemoteWorkbenchClient::new()
             .create_session(
                 &context.base_url,
@@ -2888,7 +3077,34 @@ pub async fn create_workbench_session(
             .ok_or_else(|| AppError::generic("远端 session 创建结果为空"));
     }
     local_create_workbench_session(
-        &state,
+        state,
+        app_handle,
+        project_id,
+        worktree_id,
+        initial_cols,
+        initial_rows,
+    )
+    .await
+}
+
+/// 在项目目录中创建一个普通 PTY 终端会话。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端需要在本机或远端项目中创建 terminal window。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包 State/AppHandle 后委托 for_state helper。
+#[tauri::command]
+pub async fn create_workbench_session(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    project_id: String,
+    worktree_id: Option<String>,
+    initial_cols: Option<u16>,
+    initial_rows: Option<u16>,
+) -> Result<WorkbenchSessionDto, AppError> {
+    create_workbench_session_for_state(
+        state.inner(),
         app_handle,
         project_id,
         worktree_id,
@@ -2921,22 +3137,37 @@ pub(crate) async fn local_write_workbench_session_input(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote sessionId 解析设备和 inner id 后转发；local sessionId 调用本地 helper。
+pub(crate) async fn write_workbench_session_input_for_state(
+    state: &AppState,
+    session_id: String,
+    data: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .write_input(&base_url, &inner_session_id, &data)
+            .await?;
+        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_write_workbench_session_input(state, session_id, data).await
+}
+
+/// 向工作台终端写入输入。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端 terminal 需要把键盘输入写入本机或远端 PTY/tmux。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
 #[tauri::command]
 pub async fn write_workbench_session_input(
     state: State<'_, AppState>,
     session_id: String,
     data: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(parsed) = parse_remote_entity_id(&session_id) {
-        let base_url = device_base_url(&state, &parsed.device_id)?;
-        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
-        RemoteWorkbenchClient::new()
-            .write_input(&base_url, &inner_session_id, &data)
-            .await?;
-        ensure_remote_event_bridge_for_device(&state, &parsed.device_id, &base_url);
-        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
-    }
-    local_write_workbench_session_input(&state, session_id, data).await
+    write_workbench_session_input_for_state(state.inner(), session_id, data).await
 }
 
 /// 调整工作台终端尺寸。
@@ -2964,6 +3195,31 @@ pub(crate) async fn local_resize_workbench_session(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote sessionId 走远端 resize；local sessionId 调用本地 helper。
+pub(crate) async fn resize_workbench_session_for_state(
+    state: &AppState,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .resize(&base_url, &inner_session_id, cols, rows)
+            .await?;
+        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_resize_workbench_session(state, session_id, cols, rows).await
+}
+
+/// 调整工作台终端尺寸。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端 terminal viewport 变化需要同步到本机或远端 PTY/tmux。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
 #[tauri::command]
 pub async fn resize_workbench_session(
     state: State<'_, AppState>,
@@ -2971,16 +3227,7 @@ pub async fn resize_workbench_session(
     cols: u16,
     rows: u16,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(parsed) = parse_remote_entity_id(&session_id) {
-        let base_url = device_base_url(&state, &parsed.device_id)?;
-        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
-        RemoteWorkbenchClient::new()
-            .resize(&base_url, &inner_session_id, cols, rows)
-            .await?;
-        ensure_remote_event_bridge_for_device(&state, &parsed.device_id, &base_url);
-        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
-    }
-    local_resize_workbench_session(&state, session_id, cols, rows).await
+    resize_workbench_session_for_state(state.inner(), session_id, cols, rows).await
 }
 
 /// 聚焦工作台终端 window。
@@ -3005,21 +3252,35 @@ pub(crate) async fn local_focus_workbench_session(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote sessionId 走远端 focus；local sessionId 调用本地 helper。
+pub(crate) async fn focus_workbench_session_for_state(
+    state: &AppState,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .focus(&base_url, &inner_session_id)
+            .await?;
+        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_focus_workbench_session(state, session_id).await
+}
+
+/// 聚焦工作台终端 window。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端 terminal tab 切换需要同步本机或远端 tmux current window。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
 #[tauri::command]
 pub async fn focus_workbench_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(parsed) = parse_remote_entity_id(&session_id) {
-        let base_url = device_base_url(&state, &parsed.device_id)?;
-        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
-        RemoteWorkbenchClient::new()
-            .focus(&base_url, &inner_session_id)
-            .await?;
-        ensure_remote_event_bridge_for_device(&state, &parsed.device_id, &base_url);
-        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
-    }
-    local_focus_workbench_session(&state, session_id).await
+    focus_workbench_session_for_state(state.inner(), session_id).await
 }
 
 /// 获取当前 worktree 聚焦的工作台终端 window。
@@ -3029,15 +3290,14 @@ pub async fn focus_workbench_session(
 ///
 /// Code Logic（这个函数做什么）:
 ///     校验项目存在，读取当前 worktree tmux session 当前 window id，并映射成 Workbench sessionId 返回。
-#[tauri::command]
-pub async fn get_focused_workbench_session(
-    state: State<'_, AppState>,
+pub(crate) async fn get_focused_workbench_session_for_state(
+    state: &AppState,
     project_id: String,
     worktree_id: Option<String>,
 ) -> Result<serde_json::Value, AppError> {
-    let project = get_project(&state, &project_id).await?;
+    let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
-        let context = ensure_remote_project_context(&state, &project).await?;
+        let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         let session_id = RemoteWorkbenchClient::new()
             .focused(
@@ -3047,13 +3307,29 @@ pub async fn get_focused_workbench_session(
             )
             .await?
             .map(|inner| remote_entity_id(&context.device_id, &inner));
-        ensure_remote_event_bridge_for_context(&state, &context);
+        ensure_remote_event_bridge_for_context(state, &context);
         return Ok(serde_json::json!({ "sessionId": session_id }));
     }
     let session_id = state
         .workbench_sessions
         .focused_session_id(&project_id, worktree_id.as_deref())?;
     Ok(serde_json::json!({ "sessionId": session_id }))
+}
+
+/// 获取当前 worktree 聚焦的工作台终端 window。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端需要跟随本机或远端 tmux 当前 window。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
+#[tauri::command]
+pub async fn get_focused_workbench_session(
+    state: State<'_, AppState>,
+    project_id: String,
+    worktree_id: Option<String>,
+) -> Result<serde_json::Value, AppError> {
+    get_focused_workbench_session_for_state(state.inner(), project_id, worktree_id).await
 }
 
 /// 分割当前 tmux window 的 pane。
@@ -3087,24 +3363,39 @@ pub(crate) async fn local_split_workbench_pane(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote sessionId 走远端 split-pane；local sessionId 调用本地 helper。
+pub(crate) async fn split_workbench_pane_for_state(
+    state: &AppState,
+    session_id: String,
+    direction: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .split_pane(&base_url, &inner_session_id, &direction)
+            .await?;
+        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        return Ok(
+            serde_json::json!({ "ok": true, "sessionId": session_id, "direction": direction }),
+        );
+    }
+    local_split_workbench_pane(state, session_id, direction).await
+}
+
+/// 分割当前 tmux window 的 pane。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端需要在本机或远端 terminal window 内创建 pane。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
 #[tauri::command]
 pub async fn split_workbench_pane(
     state: State<'_, AppState>,
     session_id: String,
     direction: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(parsed) = parse_remote_entity_id(&session_id) {
-        let base_url = device_base_url(&state, &parsed.device_id)?;
-        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
-        RemoteWorkbenchClient::new()
-            .split_pane(&base_url, &inner_session_id, &direction)
-            .await?;
-        ensure_remote_event_bridge_for_device(&state, &parsed.device_id, &base_url);
-        return Ok(
-            serde_json::json!({ "ok": true, "sessionId": session_id, "direction": direction }),
-        );
-    }
-    local_split_workbench_pane(&state, session_id, direction).await
+    split_workbench_pane_for_state(state.inner(), session_id, direction).await
 }
 
 /// 切换当前 tmux window 到下一个 pane。
@@ -3134,21 +3425,35 @@ pub(crate) async fn local_switch_workbench_pane(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote sessionId 走远端 switch-pane；local sessionId 调用本地 helper。
+pub(crate) async fn switch_workbench_pane_for_state(
+    state: &AppState,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .switch_pane(&base_url, &inner_session_id)
+            .await?;
+        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_switch_workbench_pane(state, session_id).await
+}
+
+/// 切换当前 tmux window 到下一个 pane。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端需要在本机或远端 terminal window 内循环切换 active pane。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
 #[tauri::command]
 pub async fn switch_workbench_pane(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(parsed) = parse_remote_entity_id(&session_id) {
-        let base_url = device_base_url(&state, &parsed.device_id)?;
-        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
-        RemoteWorkbenchClient::new()
-            .switch_pane(&base_url, &inner_session_id)
-            .await?;
-        ensure_remote_event_bridge_for_device(&state, &parsed.device_id, &base_url);
-        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
-    }
-    local_switch_workbench_pane(&state, session_id).await
+    switch_workbench_pane_for_state(state.inner(), session_id).await
 }
 
 /// 确保当前 tmux active pane 以单 pane 视图显示。
@@ -3194,21 +3499,35 @@ fn should_attempt_session_zoom(row: &WorkbenchSessionRow) -> bool {
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote sessionId 走远端 zoom-pane；local sessionId 调用本地 helper。
+pub(crate) async fn zoom_workbench_pane_for_state(
+    state: &AppState,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .zoom_pane(&base_url, &inner_session_id)
+            .await?;
+        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_zoom_workbench_pane(state, session_id).await
+}
+
+/// 确保当前 tmux active pane 以单 pane 视图显示。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端和移动端都需要把本机或远端 active pane 切到单 pane 视图。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
 #[tauri::command]
 pub async fn zoom_workbench_pane(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(parsed) = parse_remote_entity_id(&session_id) {
-        let base_url = device_base_url(&state, &parsed.device_id)?;
-        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
-        RemoteWorkbenchClient::new()
-            .zoom_pane(&base_url, &inner_session_id)
-            .await?;
-        ensure_remote_event_bridge_for_device(&state, &parsed.device_id, &base_url);
-        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
-    }
-    local_zoom_workbench_pane(&state, session_id).await
+    zoom_workbench_pane_for_state(state.inner(), session_id).await
 }
 
 /// 关闭当前 tmux pane。
@@ -3241,23 +3560,37 @@ pub(crate) async fn local_close_workbench_pane(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote sessionId 走远端 close-pane 并保留本机 remote sessionId；local sessionId 调用本地 helper。
+pub(crate) async fn close_workbench_pane_for_state(
+    state: &AppState,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        let closed_window = RemoteWorkbenchClient::new()
+            .close_pane(&base_url, &inner_session_id)
+            .await?;
+        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        return Ok(
+            serde_json::json!({ "ok": true, "sessionId": session_id, "closedWindow": closed_window }),
+        );
+    }
+    local_close_workbench_pane(state, session_id).await
+}
+
+/// 关闭当前 tmux pane。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端需要关闭本机或远端 terminal 当前 active pane。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
 #[tauri::command]
 pub async fn close_workbench_pane(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(parsed) = parse_remote_entity_id(&session_id) {
-        let base_url = device_base_url(&state, &parsed.device_id)?;
-        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
-        let closed_window = RemoteWorkbenchClient::new()
-            .close_pane(&base_url, &inner_session_id)
-            .await?;
-        ensure_remote_event_bridge_for_device(&state, &parsed.device_id, &base_url);
-        return Ok(
-            serde_json::json!({ "ok": true, "sessionId": session_id, "closedWindow": closed_window }),
-        );
-    }
-    local_close_workbench_pane(&state, session_id).await
+    close_workbench_pane_for_state(state.inner(), session_id).await
 }
 
 /// 关闭工作台终端 tab。
@@ -3296,21 +3629,35 @@ pub(crate) async fn local_close_workbench_session(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote sessionId 走远端 close；local sessionId 调用本地 helper。
+pub(crate) async fn close_workbench_session_for_state(
+    state: &AppState,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .close_session(&base_url, &inner_session_id)
+            .await?;
+        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_close_workbench_session(state, session_id).await
+}
+
+/// 关闭工作台终端 tab。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端需要关闭本机或远端 terminal window。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
 #[tauri::command]
 pub async fn close_workbench_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(parsed) = parse_remote_entity_id(&session_id) {
-        let base_url = device_base_url(&state, &parsed.device_id)?;
-        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
-        RemoteWorkbenchClient::new()
-            .close_session(&base_url, &inner_session_id)
-            .await?;
-        ensure_remote_event_bridge_for_device(&state, &parsed.device_id, &base_url);
-        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
-    }
-    local_close_workbench_session(&state, session_id).await
+    close_workbench_session_for_state(state.inner(), session_id).await
 }
 
 /// 重命名工作台终端会话。
@@ -3417,16 +3764,15 @@ pub(crate) async fn local_list_workbench_dir(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote 项目把相对路径转发到远端设备；local 项目走原有本机文件树 helper。
-#[tauri::command]
-pub async fn list_workbench_dir(
-    state: State<'_, AppState>,
+pub(crate) async fn list_workbench_dir_for_state(
+    state: &AppState,
     project_id: String,
     worktree_id: Option<String>,
     path: Option<String>,
 ) -> Result<Vec<WorkbenchFileNode>, AppError> {
-    let project = get_project(&state, &project_id).await?;
+    let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
-        let context = ensure_remote_project_context(&state, &project).await?;
+        let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
             .list_workbench_dir(
@@ -3437,7 +3783,24 @@ pub async fn list_workbench_dir(
             )
             .await;
     }
-    local_list_workbench_dir(&state, project_id, worktree_id, path).await
+    local_list_workbench_dir(state, project_id, worktree_id, path).await
+}
+
+/// 列出项目目录下的一级文件节点。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端文件树需要展开本机或远端项目目录。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
+#[tauri::command]
+pub async fn list_workbench_dir(
+    state: State<'_, AppState>,
+    project_id: String,
+    worktree_id: Option<String>,
+    path: Option<String>,
+) -> Result<Vec<WorkbenchFileNode>, AppError> {
+    list_workbench_dir_for_state(state.inner(), project_id, worktree_id, path).await
 }
 
 /// 查询项目内某个路径的信息。
@@ -3466,16 +3829,15 @@ pub(crate) async fn local_get_workbench_path_info(
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote 项目把请求转发到远端设备；local 项目走原有本机 path_info helper。
-#[tauri::command]
-pub async fn get_workbench_path_info(
-    state: State<'_, AppState>,
+pub(crate) async fn get_workbench_path_info_for_state(
+    state: &AppState,
     project_id: String,
     worktree_id: Option<String>,
     path: String,
 ) -> Result<WorkbenchPathInfo, AppError> {
-    let project = get_project(&state, &project_id).await?;
+    let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
-        let context = ensure_remote_project_context(&state, &project).await?;
+        let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
             .workbench_path_info(
@@ -3486,7 +3848,24 @@ pub async fn get_workbench_path_info(
             )
             .await;
     }
-    local_get_workbench_path_info(&state, project_id, worktree_id, path).await
+    local_get_workbench_path_info(state, project_id, worktree_id, path).await
+}
+
+/// 查询项目内某个路径的信息。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端文件详情面板需要读取本机或远端项目内路径 metadata。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
+#[tauri::command]
+pub async fn get_workbench_path_info(
+    state: State<'_, AppState>,
+    project_id: String,
+    worktree_id: Option<String>,
+    path: String,
+) -> Result<WorkbenchPathInfo, AppError> {
+    get_workbench_path_info_for_state(state.inner(), project_id, worktree_id, path).await
 }
 
 /// 在项目内创建文件。
