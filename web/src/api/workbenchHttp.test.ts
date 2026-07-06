@@ -84,6 +84,7 @@ try {
     goal: '从手机端提交项目级自动化任务',
     acceptanceCriteria: '任务进入队列',
     priority: 3,
+    createAction: 'todo',
   });
 
   const createBody = capturedBodies[4] as Record<string, unknown>;
@@ -96,7 +97,8 @@ try {
   assert(createBody.goal === '从手机端提交项目级自动化任务', 'create should include goal');
   assert(createBody.acceptanceCriteria === '任务进入队列', 'create should include acceptanceCriteria');
   assert(createBody.priority === 3, 'create should include priority');
-  assert(createBody.queue === true, 'create should default queue to true');
+  assert(createBody.createAction === 'todo', 'create should forward explicit createAction');
+  assert(!('queue' in createBody), 'create should not send legacy queue flag');
   assert(
     typeof createBody.clientRequestId === 'string' && createBody.clientRequestId.length > 0,
     'create should include a non-empty clientRequestId',
@@ -119,6 +121,7 @@ try {
     goal: '从手机端代理到远端设备创建项目级自动化任务',
     acceptanceCriteria: '远端设备返回 task view',
     priority: 2,
+    createAction: 'start',
   });
 
   const createViewBody = capturedBodies[6] as Record<string, unknown>;
@@ -131,10 +134,36 @@ try {
   assert(createViewBody.goal === '从手机端代理到远端设备创建项目级自动化任务', 'createView should include goal');
   assert(createViewBody.acceptanceCriteria === '远端设备返回 task view', 'createView should include acceptanceCriteria');
   assert(createViewBody.priority === 2, 'createView should include priority');
-  assert(createViewBody.queue === true, 'createView should default queue to true');
+  assert(createViewBody.createAction === 'start', 'createView should forward explicit createAction');
+  assert(!('queue' in createViewBody), 'createView should not send legacy queue flag');
   assert(
     typeof createViewBody.clientRequestId === 'string' && createViewBody.clientRequestId.length > 0,
     'createView should include a non-empty clientRequestId',
+  );
+
+  await httpOrchestratorTransport.tasks.createView({
+    projectId: 'remote-project-1',
+    title: '创建到 Backlog',
+    goal: '只保存任务',
+    acceptanceCriteria: '任务保持 Backlog',
+    createAction: 'backlog',
+  });
+
+  await httpOrchestratorTransport.tasks.createView({
+    projectId: 'remote-project-1',
+    title: '创建到 Todo',
+    goal: '等待调度器领取',
+    acceptanceCriteria: '任务进入 Todo',
+    createAction: 'todo',
+  });
+
+  assert(
+    (capturedBodies[7] as Record<string, unknown>).createAction === 'backlog',
+    'createView should pass backlog createAction',
+  );
+  assert(
+    (capturedBodies[8] as Record<string, unknown>).createAction === 'todo',
+    'createView should pass todo createAction',
   );
 
   await httpOrchestratorTransport.tasks.completePrompt({
@@ -144,11 +173,11 @@ try {
   });
 
   assert(
-    capturedUrls[7] === '/api/orchestrator/tasks/complete-prompt',
+    capturedUrls[9] === '/api/orchestrator/tasks/complete-prompt',
     'orchestrator task prompt completion should call the complete-prompt route',
   );
   assert(
-    JSON.stringify(capturedBodies[7]) ===
+    JSON.stringify(capturedBodies[9]) ===
       JSON.stringify({
         projectId: 'remote-project-1',
         prompt: '移动端自动化任务弹窗',

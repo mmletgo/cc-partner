@@ -133,17 +133,16 @@ async fn get_local_project_task(
 /// 创建远端 Orchestrator 任务。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     本机 remote shortcut 创建任务时，owning device 需要生成权威任务行，并可按 queue=true 立即入队。
+///     本机 remote shortcut 创建任务时，owning device 需要生成权威任务行，并按 createAction 写入初始状态。
 ///
 /// Code Logic（这个函数做什么）:
-///     确认 projectId 为 local 后要求非空 clientRequestId，再复用命令层 row builder 创建 Draft；
-///     repo 事务按 clientRequestId 保证重复请求返回同一任务。
+///     确认 projectId 为 local 后要求非空 clientRequestId，再复用命令层 row builder 创建基础 row；
+///     repo 事务按 createAction 和 clientRequestId 保证重复请求返回同一任务。
 async fn create_task_for_state(
     state: &OrchestratorRouteContext,
     req: RemoteCreateOrchestratorTaskReq,
 ) -> Result<OrchestratorTaskDto, AppError> {
     ensure_remote_orchestrator_local_project_id(state, &req.project_id).await?;
-    let queue = req.queue;
     let client_request_id = req
         .client_request_id
         .as_deref()
@@ -157,10 +156,11 @@ async fn create_task_for_state(
         goal: req.goal,
         acceptance_criteria: req.acceptance_criteria,
         priority: Some(req.priority),
+        create_action: req.create_action,
     })?;
     let created = state
         .orchestrator_repo
-        .create_remote_task_for_client_request(&client_request_id, &row, queue)
+        .create_remote_task_for_client_request(&client_request_id, &row, req.create_action)
         .await?;
     Ok(OrchestratorTaskDto::from(created))
 }
@@ -288,13 +288,39 @@ fn get_config_for_state(state: &OrchestratorRouteContext) -> RemoteOrchestratorC
 ///     其它设备需要通过 P2P HTTP 在本设备 local 项目中创建权威任务。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收 JSON 请求体，构造 route context 后委托 create_task_for_state。
+///     接收 JSON 请求体，构造 route context 后委托 create_task_for_state；Start 动作额外 best-effort dispatch 并刷新返回状态。
 pub async fn create_task(
     State(state): State<AppState>,
     Json(req): Json<RemoteCreateOrchestratorTaskReq>,
 ) -> Result<Json<OrchestratorTaskDto>, AppError> {
+    let create_action = req.create_action;
     let context = OrchestratorRouteContext::from_app_state(&state);
-    Ok(Json(create_task_for_state(&context, req).await?))
+    let created = create_task_for_state(&context, req).await?;
+    if !create_action.should_dispatch_after_create() {
+        return Ok(Json(created));
+    }
+
+    if let Err(err) =
+        crate::orchestrator::scheduler::dispatch_once(&state, state.app_handle.clone()).await
+    {
+        tracing::warn!(
+            task_id = %created.id,
+            error = %err,
+            "orchestrator remote createAction=start dispatch failed after task creation"
+        );
+    }
+    let latest = match state.orchestrator_repo.get_task(&created.id).await {
+        Ok(row) => OrchestratorTaskDto::from(row),
+        Err(err) => {
+            tracing::warn!(
+                task_id = %created.id,
+                error = %err,
+                "orchestrator remote createAction=start failed to refresh task after dispatch"
+            );
+            created
+        }
+    };
+    Ok(Json(latest))
 }
 
 /// 完善 Orchestrator 创建任务 Prompt HTTP handler。
@@ -366,7 +392,7 @@ pub async fn list_task_views(
 /// 创建 mobile-facing Orchestrator task view HTTP handler。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     手机端创建任务需要支持 local 和 remote shortcut，并保留 create+queue 与 clientRequestId 幂等语义。
+///     手机端创建任务需要支持 local 和 remote shortcut，并保留 createAction 与 clientRequestId 幂等语义。
 ///
 /// Code Logic（这个函数做什么）:
 ///     接收 RemoteCreateOrchestratorTaskReq，委托 commands 层 HTTP helper，返回 local/remote/pendingRemote view。
@@ -474,8 +500,8 @@ mod tests {
     use super::*;
     use crate::config::{GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig};
     use crate::orchestrator::models::{
-        OrchestratorRunState, OrchestratorTaskRow, OrchestratorTaskStatus,
-        OrchestratorWorkflowState,
+        OrchestratorCreateAction, OrchestratorRunState, OrchestratorTaskRow,
+        OrchestratorTaskStatus, OrchestratorWorkflowState,
     };
     use crate::orchestrator::remote_protocol::{RemoteCreateOrchestratorTaskReq, RemoteTaskReq};
     use crate::workbench::models::WorkbenchProjectRow;
@@ -630,12 +656,12 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     create route 的 queue=true 语义必须先创建 Draft，再复用安全入队逻辑得到 Queued。
+    ///     create route 的 createAction=todo 语义必须创建 scheduler 可领取的 Todo/Idle 任务。
     ///
     /// Code Logic（这个测试做什么）:
     ///     通过测试 helper 创建任务，断言返回状态为 Queued 且保留请求中的项目和优先级。
     #[tokio::test]
-    async fn create_local_project_task_queues_when_requested() {
+    async fn create_local_project_task_enters_todo_when_requested() {
         let state = test_state().await;
         insert_project(&state, "project-1", "local").await;
 
@@ -647,7 +673,7 @@ mod tests {
                 goal: "完成目标".to_string(),
                 acceptance_criteria: "验收标准".to_string(),
                 priority: 5,
-                queue: true,
+                create_action: OrchestratorCreateAction::Todo,
                 client_request_id: Some("create-request-queued".to_string()),
             },
         )
@@ -677,7 +703,7 @@ mod tests {
             goal: "完成目标".to_string(),
             acceptance_criteria: "验收标准".to_string(),
             priority: 5,
-            queue: true,
+            create_action: OrchestratorCreateAction::Todo,
             client_request_id: Some("create-request-1".to_string()),
         };
 
@@ -715,7 +741,7 @@ mod tests {
             goal: "完成目标".to_string(),
             acceptance_criteria: "验收标准".to_string(),
             priority: 5,
-            queue: false,
+            create_action: OrchestratorCreateAction::Backlog,
             client_request_id: Some("   ".to_string()),
         };
 

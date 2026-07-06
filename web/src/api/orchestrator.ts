@@ -51,7 +51,10 @@ export interface CreateOrchestratorTaskRequest {
   goal: string;
   acceptanceCriteria: string;
   priority?: number;
+  createAction?: OrchestratorCreateAction;
 }
+
+export type OrchestratorCreateAction = 'backlog' | 'todo' | 'start';
 
 /**
  * Business Logic（为什么需要这个函数）:

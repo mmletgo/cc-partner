@@ -24,6 +24,7 @@ import type {
   WorkbenchWorktree,
 } from '@/lib/types';
 import type { WorkbenchPaneSplitDirection } from './workbench';
+import type { OrchestratorCreateAction } from './orchestrator';
 import type { WorkbenchTransport } from './workbenchTransport';
 
 export interface HttpCreateOrchestratorTaskRequest {
@@ -32,6 +33,7 @@ export interface HttpCreateOrchestratorTaskRequest {
   goal: string;
   acceptanceCriteria: string;
   priority?: number;
+  createAction?: OrchestratorCreateAction;
 }
 
 export interface HttpCompleteOrchestratorTaskPromptRequest {
@@ -152,7 +154,7 @@ export function createHttpOrchestratorClientRequestId(): string {
  *   手机端 `/mobile` 需要通过同源 HTTP 操作当前本机项目的 Orchestrator 项目级任务，而不能调用桌面 Tauri invoke。
  *
  * Code Logic（这个常量做什么）:
- *   将任务 list/create/action 映射到 `/api/orchestrator/tasks/...` routes；create 默认携带 queue=true 和非空 clientRequestId。
+ *   将任务 list/create/action 映射到 `/api/orchestrator/tasks/...` routes；create 显式携带 createAction 和非空 clientRequestId。
  */
 export const httpOrchestratorTransport = {
   tasks: {
@@ -177,7 +179,7 @@ export const httpOrchestratorTransport = {
         goal: request.goal,
         acceptanceCriteria: request.acceptanceCriteria,
         priority: request.priority ?? 0,
-        queue: true,
+        createAction: request.createAction ?? 'backlog',
         clientRequestId: createHttpOrchestratorClientRequestId(),
       }),
     createView: (request: HttpCreateOrchestratorTaskRequest): Promise<OrchestratorTaskView> =>
@@ -187,7 +189,7 @@ export const httpOrchestratorTransport = {
         goal: request.goal,
         acceptanceCriteria: request.acceptanceCriteria,
         priority: request.priority ?? 0,
-        queue: true,
+        createAction: request.createAction ?? 'backlog',
         clientRequestId: createHttpOrchestratorClientRequestId(),
       }),
     completePrompt: (

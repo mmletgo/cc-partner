@@ -74,6 +74,10 @@ assert(
   !orchestratorApiSource.includes('get_orchestrator_config_for_project'),
   'orchestrator task API should not call the legacy project config backend command',
 );
+assert(
+  orchestratorApiSource.includes('createAction'),
+  'CreateOrchestratorTaskRequest should expose createAction for the three create buttons',
+);
 
 const listArgs = buildListOrchestratorTaskViewsInvokeArgs(' project-1 ');
 
@@ -95,12 +99,17 @@ const request = {
   goal: '暴露任务命令',
   acceptanceCriteria: '测试通过',
   priority: 3,
+  createAction: 'todo' as const,
 };
 const createArgs = buildCreateOrchestratorTaskViewInvokeArgs(request);
 
 assert(
   JSON.stringify(createArgs) === JSON.stringify({ request }),
-  'createTask should wrap request without renaming fields',
+  'createTask should wrap request with createAction without renaming fields',
+);
+assert(
+  (createArgs.request as typeof request).createAction === 'todo',
+  'createTask should include createAction in the invoke request',
 );
 
 const queueArgs = buildOrchestratorTaskViewActionInvokeArgs(' project-1 ', ' task-1 ');
