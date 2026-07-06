@@ -943,9 +943,8 @@ pub async fn create_orchestrator_task(
 /// Code Logic（这个函数做什么）:
 ///     local 项目读取本机任务并包装 Local；remote 项目在线时同步 mirror，离线时读最近 mirror；
 ///     最后追加 pending/sending/failed outbox 项。
-#[tauri::command]
-pub async fn list_orchestrator_task_views(
-    state: State<'_, AppState>,
+pub(crate) async fn list_orchestrator_task_views_for_state(
+    state: &AppState,
     project_id: Option<String>,
 ) -> Result<Vec<OrchestratorTaskViewDto>, AppError> {
     let Some(project_id) = project_id else {
@@ -953,7 +952,7 @@ pub async fn list_orchestrator_task_views(
         return Ok(rows.into_iter().map(local_task_view).collect());
     };
 
-    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    let project = get_orchestrator_workbench_project(state, &project_id).await?;
     if project.kind != "remote" {
         let rows = state
             .orchestrator_repo
@@ -962,7 +961,7 @@ pub async fn list_orchestrator_task_views(
         return Ok(rows.into_iter().map(local_task_view).collect());
     }
 
-    let mirrors = match sync_remote_task_mirror_for_project(state.inner(), &project).await {
+    let mirrors = match sync_remote_task_mirror_for_project(state, &project).await {
         Ok(mirrors) => mirrors,
         Err(err) if is_remote_network_error(&err) => {
             state
@@ -973,8 +972,16 @@ pub async fn list_orchestrator_task_views(
         Err(err) => return Err(err),
     };
     let mut views = remote_mirror_views(mirrors, &project)?;
-    views.extend(pending_remote_task_views_for_project(state.inner(), &project).await?);
+    views.extend(pending_remote_task_views_for_project(state, &project).await?);
     Ok(views)
+}
+
+#[tauri::command]
+pub async fn list_orchestrator_task_views(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<OrchestratorTaskViewDto>, AppError> {
+    list_orchestrator_task_views_for_state(&state, project_id).await
 }
 
 /// 创建 remote-aware Orchestrator 任务视图。
@@ -985,12 +992,11 @@ pub async fn list_orchestrator_task_views(
 /// Code Logic（这个函数做什么）:
 ///     先按 projectId 读取 Workbench 项目；local 走旧 row builder + repo，remote 先尝试在线创建，
 ///     遇到网络/离线错误时创建 pending outbox 并返回 PendingRemote。
-#[tauri::command]
-pub async fn create_orchestrator_task_view(
-    state: State<'_, AppState>,
+pub(crate) async fn create_orchestrator_task_view_for_state(
+    state: &AppState,
     request: CreateOrchestratorTaskRequest,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
-    let project = get_orchestrator_workbench_project(state.inner(), &request.project_id).await?;
+    let project = get_orchestrator_workbench_project(state, &request.project_id).await?;
     if project.kind != "remote" {
         let row = build_orchestrator_task_row(request)?;
         state.orchestrator_repo.create_task(&row).await?;
@@ -998,12 +1004,70 @@ pub async fn create_orchestrator_task_view(
     }
 
     let remote_request = remote_create_request_from_local(&request);
-    match create_remote_orchestrator_task_online(state.inner(), &project, remote_request.clone())
-        .await
-    {
+    match create_remote_orchestrator_task_online(state, &project, remote_request.clone()).await {
         Ok(view) => Ok(view),
         Err(err) if is_remote_network_error(&err) => {
-            let item = create_pending_remote_task(state.inner(), &project, remote_request).await?;
+            let item = create_pending_remote_task(state, &project, remote_request).await?;
+            Ok(OrchestratorTaskViewDto::PendingRemote {
+                item: item.to_dto(),
+            })
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[tauri::command]
+pub async fn create_orchestrator_task_view(
+    state: State<'_, AppState>,
+    request: CreateOrchestratorTaskRequest,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    create_orchestrator_task_view_for_state(&state, request).await
+}
+
+/// 通过 HTTP task-view 协议创建 remote-aware Orchestrator 任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `/mobile` 创建任务需要保留旧移动端语义：create 请求默认直接入队，同时还要支持 remote shortcut 代理。
+///
+/// Code Logic（这个函数做什么）:
+///     local 项目用 clientRequestId 幂等创建并按 queue 决定是否入队；remote 项目保持同一 requestId 转发到 owning device，
+///     网络失败时写 pending outbox 并返回 PendingRemote。
+pub(crate) async fn create_orchestrator_task_view_for_http(
+    state: &AppState,
+    req: RemoteCreateOrchestratorTaskReq,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    let project = get_orchestrator_workbench_project(state, &req.project_id).await?;
+    let client_request_id = req
+        .client_request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| AppError::generic("移动端创建任务缺少 clientRequestId"))?;
+
+    if project.kind != "remote" {
+        let row = build_orchestrator_task_row(CreateOrchestratorTaskRequest {
+            project_id: req.project_id,
+            title: req.title,
+            goal: req.goal,
+            acceptance_criteria: req.acceptance_criteria,
+            priority: Some(req.priority),
+        })?;
+        let created = state
+            .orchestrator_repo
+            .create_remote_task_for_client_request(&client_request_id, &row, req.queue)
+            .await?;
+        return Ok(local_task_view(created));
+    }
+
+    let remote_request = RemoteCreateOrchestratorTaskReq {
+        client_request_id: Some(client_request_id),
+        ..req
+    };
+    match create_remote_orchestrator_task_online(state, &project, remote_request.clone()).await {
+        Ok(view) => Ok(view),
+        Err(err) if is_remote_network_error(&err) => {
+            let item = create_pending_remote_task(state, &project, remote_request).await?;
             Ok(OrchestratorTaskViewDto::PendingRemote {
                 item: item.to_dto(),
             })

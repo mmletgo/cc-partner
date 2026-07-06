@@ -196,6 +196,31 @@ async function main(): Promise<void> {
   );
   assertContains(
     orchestratorSource,
+    'const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);',
+    'Orchestrator task creation should be opened from a modal dialog state instead of a fixed page card',
+  );
+  assertContains(
+    orchestratorSource,
+    'role="dialog"',
+    'Orchestrator task creation should render as an accessible dialog',
+  );
+  assertContains(
+    orchestratorSource,
+    'promptOptimizerApi.completeOrchestratorTaskPrompt',
+    'Orchestrator task creation should let AI complete title, goal, and acceptance criteria from a short prompt',
+  );
+  assertContains(
+    orchestratorStyles,
+    '.createDialogOverlay',
+    'Orchestrator task creation dialog should have an overlay style boundary',
+  );
+  assertNotContains(
+    orchestratorSource,
+    'className={styles.createCard}',
+    'Orchestrator task creation form must not stay as a fixed card in the page grid',
+  );
+  assertContains(
+    orchestratorSource,
     "orchestratorEvidenceKindLabel(item.kind, t)",
     'Orchestrator evidence renders localized evidence kind labels',
   );

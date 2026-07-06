@@ -1,4 +1,5 @@
 import {
+  buildOrchestratorTaskPromptCompletionInvokeArgs,
   buildPromptOptimizerInvokeArgs,
   buildPromptOptimizerStreamInvokeArgs,
 } from './promptOptimizer';
@@ -44,6 +45,22 @@ assert(
       sessionId: 'session-1',
     }),
   'streamToTerminal should pass sessionId and selected targetLanguage to backend',
+);
+
+const orchestratorCompletionArgs = buildOrchestratorTaskPromptCompletionInvokeArgs(
+  '修复自动化任务创建体验',
+  {
+    workingDirectory: ' /Users/hans/project/Pando ',
+  },
+);
+
+assert(
+  JSON.stringify(orchestratorCompletionArgs) ===
+    JSON.stringify({
+      prompt: '修复自动化任务创建体验',
+      workingDirectory: '/Users/hans/project/Pando',
+    }),
+  'orchestrator task prompt completion should normalize prompt and optional working directory',
 );
 
 console.log('promptOptimizer.test.ts passed');

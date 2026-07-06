@@ -98,7 +98,7 @@
     "projectPanel": {
       "title": "Projects",
       "error": "Load failed",
-      "remoteUnsupported": "Remote project shortcuts are not supported on mobile yet"
+      "unsupportedProjectKind": "This project type is not supported on mobile yet"
     },
     "terminalPanel": {
       "title": "Terminal",
@@ -204,10 +204,15 @@
     },
     "automationPanel": {
       "title": "Automation",
-      "noProject": "Select a local project first",
-      "remoteUnsupported": "Mobile automation currently supports local projects only",
+      "noProject": "Select a project first",
       "empty": "No automation tasks in this project yet",
       "listAriaLabel": "Mobile automation task list",
+      "createOpen": "Create task",
+      "closeCreate": "Close",
+      "shortPrompt": "Simple prompt",
+      "shortPromptPlaceholder": "Describe the task you want AI to complete in one sentence",
+      "completeWithAi": "Fill with AI",
+      "completingPrompt": "Filling",
       "create": "Create and queue",
       "creating": "Creating",
       "created": "Task created and queued",
@@ -234,9 +239,17 @@
         "blocked": "Blocked",
         "aborted": "Aborted"
       },
+      "pendingStatus": {
+        "pending": "Pending send",
+        "sending": "Sending",
+        "mirrored": "Synced",
+        "failed": "Send failed"
+      },
       "errors": {
         "list": "Failed to load automation tasks",
         "create": "Failed to create automation task",
+        "completePrompt": "Failed to fill task with AI",
+        "promptRequired": "Enter a simple prompt first",
         "required": "Fill in the task title, goal, and acceptance criteria"
       }
     },

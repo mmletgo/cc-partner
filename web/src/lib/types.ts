@@ -331,6 +331,21 @@ export interface PromptOptimizeResponse {
 }
 
 /**
+ * Orchestrator 任务创建 Prompt 完善结果。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   项目自动化创建任务时，用户可以只写一个简单 Prompt，再由 AI 生成可编辑的标题、目标和验收标准。
+ *
+ * Code Logic（字段说明）:
+ *   对齐 Rust complete_orchestrator_task_prompt 返回的 camelCase DTO；字段会直接填入创建任务表单。
+ */
+export interface OrchestratorTaskPromptCompletion {
+  title: string;
+  goal: string;
+  acceptanceCriteria: string;
+}
+
+/**
  * Orchestrator 任务生命周期状态。
  *
  * Business Logic（为什么需要这个类型）:

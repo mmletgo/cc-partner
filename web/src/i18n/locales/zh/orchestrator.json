@@ -72,6 +72,11 @@
   "create": {
     "title": "创建任务",
     "subtitle": "创建后会进入当前项目的任务队列。",
+    "open": "创建任务",
+    "close": "关闭创建任务弹窗",
+    "quickPrompt": "简单 Prompt",
+    "quickPromptPlaceholder": "例如：把项目自动化创建任务改成弹窗，并支持 AI 自动完善字段",
+    "completeWithAi": "AI 自动完善",
     "taskTitle": "标题",
     "taskTitlePlaceholder": "例如：实现登录表单校验",
     "goal": "目标",
@@ -114,7 +119,9 @@
     "complete": "验证启动失败。",
     "retry": "任务重试失败。",
     "abort": "任务终止失败。",
+    "completePrompt": "AI 自动完善失败。",
     "noProject": "请先在侧栏选择一个 Workbench 项目。",
+    "promptRequired": "请先填写简单 Prompt。",
     "required": "请填写标题、目标和验收标准。"
   }
 }

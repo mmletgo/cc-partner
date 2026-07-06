@@ -8,16 +8,25 @@
 //!     将 Orchestrator 创建、列表、evidence、queue/retry/abort 和全局配置读取包装为 axum handler；
 //!     所有项目入口都先确认 projectId 指向本设备 local Workbench 项目，拒绝 remote shortcut 递归代理。
 
-use crate::commands::orchestrator::{build_orchestrator_task_row, CreateOrchestratorTaskRequest};
+use crate::commands::orchestrator::{
+    build_orchestrator_task_row, create_orchestrator_task_view_for_http,
+    list_orchestrator_task_views_for_state, CreateOrchestratorTaskRequest, OrchestratorTaskViewDto,
+};
+use crate::commands::prompt_optimizer::{
+    local_complete_orchestrator_task_prompt, OrchestratorTaskPromptCompletionDto,
+};
 use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
     OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus,
 };
+use crate::orchestrator::outbox::open_remote_project_for_shortcut;
+use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::{
-    RemoteCreateOrchestratorTaskReq, RemoteListTasksReq, RemoteOrchestratorConfigResp,
-    RemoteOrchestratorEvidenceResp, RemoteOrchestratorTaskListResp, RemoteTaskReq,
+    RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq, RemoteListTasksReq,
+    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp, RemoteOrchestratorTaskListResp,
+    RemoteTaskReq,
 };
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
@@ -25,6 +34,7 @@ use crate::storage::WorkbenchProjectRepo;
 use crate::workbench::models::WorkbenchProjectRow;
 use axum::extract::State;
 use axum::Json;
+use serde::Serialize;
 use std::sync::{Arc, RwLock};
 
 /// Orchestrator 远端 route 需要的共享状态子集。
@@ -39,6 +49,19 @@ struct OrchestratorRouteContext {
     config: Arc<RwLock<AppConfig>>,
     orchestrator_repo: Arc<OrchestratorRepo>,
     workbench_project_repo: Arc<WorkbenchProjectRepo>,
+}
+
+/// Mobile-facing Orchestrator task view list 响应。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     `/mobile` 需要接收 local/remote/pendingRemote tagged union，而旧 P2P list route 必须继续返回裸 tasks。
+///
+/// Code Logic（这个结构体做什么）:
+///     用 `{views}` 包装 OrchestratorTaskViewDto 列表，避免和 `{tasks}` 旧协议混淆。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorTaskViewListResp {
+    pub views: Vec<OrchestratorTaskViewDto>,
 }
 
 impl OrchestratorRouteContext {
@@ -272,6 +295,88 @@ pub async fn create_task(
 ) -> Result<Json<OrchestratorTaskDto>, AppError> {
     let context = OrchestratorRouteContext::from_app_state(&state);
     Ok(Json(create_task_for_state(&context, req).await?))
+}
+
+/// 完善 Orchestrator 创建任务 Prompt HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端 `/mobile` 不能调用 Tauri invoke，需要通过同源 HTTP 让本设备 Claude CLI 生成任务标题、目标和验收标准。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 `{prompt, workingDirectory?}`，委托 prompt_optimizer 的本机 helper，返回三字段 camelCase DTO。
+pub async fn complete_task_prompt(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteCompleteOrchestratorTaskPromptReq>,
+) -> Result<Json<OrchestratorTaskPromptCompletionDto>, AppError> {
+    let mut working_directory = req.working_directory;
+    if let Some(project_id) = req
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let project = state
+            .workbench_project_repo
+            .get(project_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("自动化 Prompt 完善项目不存在"))?;
+        if project.kind == "remote" {
+            let context = open_remote_project_for_shortcut(&state, &project).await?;
+            let completed = RemoteOrchestratorClient::new()
+                .complete_prompt(
+                    &context.base_url,
+                    RemoteCompleteOrchestratorTaskPromptReq {
+                        project_id: Some(context.remote_project_id),
+                        prompt: req.prompt,
+                        working_directory: Some(context.remote_project_path),
+                    },
+                )
+                .await?;
+            return Ok(Json(completed));
+        }
+        if working_directory
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            working_directory = Some(project.path);
+        }
+    }
+    Ok(Json(
+        local_complete_orchestrator_task_prompt(&state, req.prompt, working_directory).await?,
+    ))
+}
+
+/// 列出 mobile-facing Orchestrator task views HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端可能选择本机项目或本机保存的远端项目 shortcut，需要同一接口返回可展示的 task view 列表。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 `{projectId}`，委托 commands 层 remote-aware helper，并用 `{views}` 包装结果。
+pub async fn list_task_views(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteListTasksReq>,
+) -> Result<Json<OrchestratorTaskViewListResp>, AppError> {
+    let views = list_orchestrator_task_views_for_state(&state, Some(req.project_id)).await?;
+    Ok(Json(OrchestratorTaskViewListResp { views }))
+}
+
+/// 创建 mobile-facing Orchestrator task view HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端创建任务需要支持 local 和 remote shortcut，并保留 create+queue 与 clientRequestId 幂等语义。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 RemoteCreateOrchestratorTaskReq，委托 commands 层 HTTP helper，返回 local/remote/pendingRemote view。
+pub async fn create_task_view(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteCreateOrchestratorTaskReq>,
+) -> Result<Json<OrchestratorTaskViewDto>, AppError> {
+    Ok(Json(
+        create_orchestrator_task_view_for_http(&state, req).await?,
+    ))
 }
 
 /// 列出 Orchestrator 任务 HTTP handler。

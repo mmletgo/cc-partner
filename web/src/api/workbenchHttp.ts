@@ -10,6 +10,8 @@
 
 import type {
   OrchestratorTask,
+  OrchestratorTaskPromptCompletion,
+  OrchestratorTaskView,
   WorkbenchFileNode,
   WorkbenchGitCommit,
   WorkbenchMergeResult,
@@ -32,8 +34,18 @@ export interface HttpCreateOrchestratorTaskRequest {
   priority?: number;
 }
 
+export interface HttpCompleteOrchestratorTaskPromptRequest {
+  projectId?: string | null;
+  prompt: string;
+  workingDirectory?: string | null;
+}
+
 interface HttpOrchestratorTaskListResponse {
   tasks: OrchestratorTask[];
+}
+
+interface HttpOrchestratorTaskViewListResponse {
+  views: OrchestratorTaskView[];
 }
 
 /**
@@ -149,6 +161,13 @@ export const httpOrchestratorTransport = {
       );
       return response.tasks;
     },
+    listViews: async (projectId: string): Promise<OrchestratorTaskView[]> => {
+      const response = await postJson<HttpOrchestratorTaskViewListResponse>(
+        '/api/orchestrator/task-views/list',
+        { projectId },
+      );
+      return response.views;
+    },
     create: (request: HttpCreateOrchestratorTaskRequest): Promise<OrchestratorTask> =>
       postJson<OrchestratorTask>('/api/orchestrator/tasks/create', {
         projectId: request.projectId,
@@ -158,6 +177,24 @@ export const httpOrchestratorTransport = {
         priority: request.priority ?? 0,
         queue: true,
         clientRequestId: createHttpOrchestratorClientRequestId(),
+      }),
+    createView: (request: HttpCreateOrchestratorTaskRequest): Promise<OrchestratorTaskView> =>
+      postJson<OrchestratorTaskView>('/api/orchestrator/task-views/create', {
+        projectId: request.projectId,
+        title: request.title,
+        goal: request.goal,
+        acceptanceCriteria: request.acceptanceCriteria,
+        priority: request.priority ?? 0,
+        queue: true,
+        clientRequestId: createHttpOrchestratorClientRequestId(),
+      }),
+    completePrompt: (
+      request: HttpCompleteOrchestratorTaskPromptRequest,
+    ): Promise<OrchestratorTaskPromptCompletion> =>
+      postJson<OrchestratorTaskPromptCompletion>('/api/orchestrator/tasks/complete-prompt', {
+        projectId: request.projectId?.trim() || null,
+        prompt: request.prompt.trim(),
+        workingDirectory: request.workingDirectory?.trim() || null,
       }),
     queue: (taskId: string): Promise<OrchestratorTask> =>
       postJson<OrchestratorTask>('/api/orchestrator/tasks/queue', { taskId }),

@@ -9,7 +9,7 @@
  * Code Logic（这个组件做什么）:
  *   - 按 activeProject 拉取 Orchestrator task view 列表，真实任务按状态分组，pending remote 单独展示
  *   - 按 activeProject 与 selected task 拉取 evidence
- *   - 提供 title/goal/acceptanceCriteria 三个单行输入创建任务
+ *   - 通过独立弹窗创建任务，支持手动填写三字段或用简单 Prompt 调 AI 自动完善
  *   - 允许选中的 draft 任务切换为 queued；action 响应只替换列表，同项目任务切换后不抢回 selection
  *   - 创建成功后把真实任务插入列表并选中；pending remote 只插入待发送区并清空表单
  *   - Running 任务可触发后端验证与交付，Blocked 任务可打开 Workbench deep link、重试或终止
@@ -21,9 +21,10 @@ import type { FormEvent, JSX } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { orchestratorApi } from '@/api/orchestrator';
+import { promptOptimizerApi } from '@/api/promptOptimizer';
 import { Button, Card, Input, Pill } from '@/components/primitives';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
-import { CheckIcon, FolderIcon, PlayIcon, PlusIcon, StopIcon, SyncIcon } from '@/lib/icons';
+import { CheckIcon, FolderIcon, PlayIcon, PlusIcon, StopIcon, SyncIcon, XIcon } from '@/lib/icons';
 import {
   canCompleteAgentRunForProject,
   canControlBlockedTaskForProject,
@@ -141,6 +142,8 @@ interface OrchestratorEvidenceResult {
   items: OrchestratorEvidence[];
   error: string | null;
 }
+
+const EMPTY_ORCHESTRATOR_EVIDENCE_ITEMS: OrchestratorEvidence[] = [];
 
 /**
  * Business Logic（为什么需要这个类型）:
@@ -359,6 +362,10 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const [abortingTaskId, setAbortingTaskId] = useState<string | null>(null);
   const [evidenceResult, setEvidenceResult] = useState<OrchestratorEvidenceResult | null>(null);
   const [actionError, setActionError] = useState<OrchestratorActionError | null>(null);
+  const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);
+  const [completionPrompt, setCompletionPrompt] = useState('');
+  const [completingPrompt, setCompletingPrompt] = useState(false);
+  const completionPromptRef = useRef<HTMLTextAreaElement | null>(null);
   const activeProjectId = activeProject?.id ?? null;
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
   const taskLoadDecision = useMemo(
@@ -412,7 +419,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     evidenceResult.taskId === selectedTask.id
       ? evidenceResult
       : null;
-  const evidenceItems = activeEvidenceResult?.items ?? [];
+  const evidenceItems = activeEvidenceResult?.items ?? EMPTY_ORCHESTRATOR_EVIDENCE_ITEMS;
   const latestVerifierEvidence = useMemo(
     () => latestEvidenceByKind(evidenceItems, 'verificationReview'),
     [evidenceItems],
@@ -438,6 +445,38 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     form.goal.trim().length > 0 &&
     form.acceptanceCriteria.trim().length > 0 &&
     !creating;
+  const canCompletePrompt =
+    Boolean(activeProjectId) && completionPrompt.trim().length > 0 && !completingPrompt;
+
+  const createPromptWorkingDirectory = useMemo(() => {
+    if (!activeProject || activeProject.kind !== 'local') return null;
+    return activeProject.path;
+  }, [activeProject]);
+
+  const handleOpenCreateDialog = useCallback(() => {
+    setActionError(null);
+    setCreateDialogOpen(true);
+  }, []);
+
+  const handleCloseCreateDialog = useCallback(() => {
+    if (creating || completingPrompt) return;
+    setCreateDialogOpen(false);
+  }, [completingPrompt, creating]);
+
+  useEffect(() => {
+    if (!createDialogOpen) return undefined;
+    const focusTimer = window.setTimeout(() => completionPromptRef.current?.focus(), 0);
+    return () => window.clearTimeout(focusTimer);
+  }, [createDialogOpen]);
+
+  useEffect(() => {
+    if (!createDialogOpen) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') handleCloseCreateDialog();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [createDialogOpen, handleCloseCreateDialog]);
 
   useEffect(() => {
     if (taskLoadDecision.kind !== 'load') return undefined;
@@ -502,6 +541,41 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     [],
   );
 
+  const handleCompleteTaskPrompt = useCallback(async () => {
+    if (!activeProject) {
+      setActionError({ projectId: activeProjectId, message: t('orchestrator:errors.noProject') });
+      return;
+    }
+    const prompt = completionPrompt.trim();
+    if (!prompt) {
+      setActionError({ projectId: activeProject.id, message: t('orchestrator:errors.promptRequired') });
+      return;
+    }
+    const projectId = activeProject.id;
+    setCompletingPrompt(true);
+    setActionError(null);
+    try {
+      const completed = await promptOptimizerApi.completeOrchestratorTaskPrompt(prompt, {
+        workingDirectory: createPromptWorkingDirectory,
+      });
+      if (activeProjectIdRef.current !== projectId) return;
+      setForm({
+        title: completed.title.trim(),
+        goal: completed.goal.trim(),
+        acceptanceCriteria: completed.acceptanceCriteria.trim(),
+      });
+    } catch (err) {
+      if (activeProjectIdRef.current === projectId) {
+        setActionError({
+          projectId,
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.completePrompt')),
+        });
+      }
+    } finally {
+      setCompletingPrompt(false);
+    }
+  }, [activeProject, activeProjectId, completionPrompt, createPromptWorkingDirectory, t]);
+
   const handleCreateTask = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
@@ -538,6 +612,8 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         const createdTaskId = getOrchestratorTaskViewTaskId(created);
         if (createdTaskId) setSelectedTaskId(createdTaskId);
         setForm(EMPTY_FORM);
+        setCompletionPrompt('');
+        setCreateDialogOpen(false);
       } catch (err) {
         setActionError({
           projectId,
@@ -760,7 +836,18 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
               <h2 className={styles.sectionTitle}>{t('orchestrator:queue.title')}</h2>
               <p className={styles.sectionLead}>{t('orchestrator:queue.subtitle')}</p>
             </div>
-            <Pill tone="neutral">{tasks.length + pendingRemoteItems.length}</Pill>
+            <div className={styles.queueActions}>
+              <Pill tone="neutral">{tasks.length + pendingRemoteItems.length}</Pill>
+              <Button
+                variant="primary"
+                size="sm"
+                icon={<PlusIcon />}
+                disabled={!activeProjectId}
+                onClick={handleOpenCreateDialog}
+              >
+                {t('orchestrator:create.open')}
+              </Button>
+            </div>
           </Card.Header>
           <Card.Body className={styles.queueBody}>
             {loading ? <p className={styles.muted}>{t('common:loading')}</p> : null}
@@ -1047,57 +1134,6 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
             </Card.Body>
           </Card>
 
-          <Card variant="outlined" padding="md" className={styles.createCard}>
-            <Card.Header className={styles.cardHeader}>
-              <div>
-                <h2 className={styles.sectionTitle}>{t('orchestrator:create.title')}</h2>
-                <p className={styles.sectionLead}>{t('orchestrator:create.subtitle')}</p>
-              </div>
-            </Card.Header>
-            <Card.Body>
-              <form className={styles.form} onSubmit={handleCreateTask}>
-                <label className={styles.field}>
-                  <span>{t('orchestrator:create.taskTitle')}</span>
-                  <Input
-                    value={form.title}
-                    onChange={(event) => updateFormField('title', event.target.value)}
-                    placeholder={t('orchestrator:create.taskTitlePlaceholder')}
-                    aria-label={t('orchestrator:create.taskTitle')}
-                  />
-                </label>
-                <label className={styles.field}>
-                  <span>{t('orchestrator:create.goal')}</span>
-                  <Input
-                    value={form.goal}
-                    onChange={(event) => updateFormField('goal', event.target.value)}
-                    placeholder={t('orchestrator:create.goalPlaceholder')}
-                    aria-label={t('orchestrator:create.goal')}
-                  />
-                </label>
-                <label className={styles.field}>
-                  <span>{t('orchestrator:create.acceptanceCriteria')}</span>
-                  <Input
-                    value={form.acceptanceCriteria}
-                    onChange={(event) =>
-                      updateFormField('acceptanceCriteria', event.target.value)
-                    }
-                    placeholder={t('orchestrator:create.acceptanceCriteriaPlaceholder')}
-                    aria-label={t('orchestrator:create.acceptanceCriteria')}
-                  />
-                </label>
-                <Button
-                  variant="primary"
-                  size="md"
-                  type="submit"
-                  icon={<PlusIcon />}
-                  loading={creating}
-                  disabled={!canCreate}
-                >
-                  {t('orchestrator:create.submit')}
-                </Button>
-              </form>
-            </Card.Body>
-          </Card>
         </div>
 
         <div className={styles.rightStack}>
@@ -1161,6 +1197,126 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
           </Card>
         </div>
       </div>
+      {createDialogOpen ? (
+        <div
+          className={styles.createDialogOverlay}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) handleCloseCreateDialog();
+          }}
+        >
+          <Card
+            variant="elevated"
+            padding="md"
+            className={styles.createDialog}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="orchestrator-create-dialog-title"
+          >
+            <Card.Header className={styles.dialogHeader}>
+              <div>
+                <h2 id="orchestrator-create-dialog-title" className={styles.sectionTitle}>
+                  {t('orchestrator:create.title')}
+                </h2>
+                <p className={styles.sectionLead}>{t('orchestrator:create.subtitle')}</p>
+              </div>
+              <Button
+                variant="icon"
+                aria-label={t('orchestrator:create.close')}
+                icon={<XIcon />}
+                disabled={creating || completingPrompt}
+                onClick={handleCloseCreateDialog}
+              />
+            </Card.Header>
+            <Card.Body className={styles.dialogBody}>
+              <div className={styles.aiAssistBlock}>
+                <label className={styles.field}>
+                  <span>{t('orchestrator:create.quickPrompt')}</span>
+                  <textarea
+                    ref={completionPromptRef}
+                    className={styles.textarea}
+                    value={completionPrompt}
+                    onChange={(event) => setCompletionPrompt(event.target.value)}
+                    placeholder={t('orchestrator:create.quickPromptPlaceholder')}
+                    aria-label={t('orchestrator:create.quickPrompt')}
+                    rows={4}
+                    disabled={completingPrompt || creating}
+                  />
+                </label>
+                <div className={styles.aiAssistActions}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    icon={<SyncIcon />}
+                    loading={completingPrompt}
+                    disabled={!canCompletePrompt || creating}
+                    onClick={handleCompleteTaskPrompt}
+                  >
+                    {t('orchestrator:create.completeWithAi')}
+                  </Button>
+                </div>
+              </div>
+              <form className={styles.form} onSubmit={handleCreateTask}>
+                <label className={styles.field}>
+                  <span>{t('orchestrator:create.taskTitle')}</span>
+                  <Input
+                    value={form.title}
+                    onChange={(event) => updateFormField('title', event.target.value)}
+                    placeholder={t('orchestrator:create.taskTitlePlaceholder')}
+                    aria-label={t('orchestrator:create.taskTitle')}
+                    disabled={creating}
+                  />
+                </label>
+                <label className={styles.field}>
+                  <span>{t('orchestrator:create.goal')}</span>
+                  <textarea
+                    className={styles.textarea}
+                    value={form.goal}
+                    onChange={(event) => updateFormField('goal', event.target.value)}
+                    placeholder={t('orchestrator:create.goalPlaceholder')}
+                    aria-label={t('orchestrator:create.goal')}
+                    rows={5}
+                    disabled={creating}
+                  />
+                </label>
+                <label className={styles.field}>
+                  <span>{t('orchestrator:create.acceptanceCriteria')}</span>
+                  <textarea
+                    className={styles.textarea}
+                    value={form.acceptanceCriteria}
+                    onChange={(event) =>
+                      updateFormField('acceptanceCriteria', event.target.value)
+                    }
+                    placeholder={t('orchestrator:create.acceptanceCriteriaPlaceholder')}
+                    aria-label={t('orchestrator:create.acceptanceCriteria')}
+                    rows={5}
+                    disabled={creating}
+                  />
+                </label>
+                <div className={styles.dialogActions}>
+                  <Button
+                    variant="ghost"
+                    size="md"
+                    disabled={creating || completingPrompt}
+                    onClick={handleCloseCreateDialog}
+                  >
+                    {t('common:action.cancel')}
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="md"
+                    type="submit"
+                    icon={<PlusIcon />}
+                    loading={creating}
+                    disabled={!canCreate || completingPrompt}
+                  >
+                    {t('orchestrator:create.submit')}
+                  </Button>
+                </div>
+              </form>
+            </Card.Body>
+          </Card>
+        </div>
+      ) : null}
     </div>
   );
 }

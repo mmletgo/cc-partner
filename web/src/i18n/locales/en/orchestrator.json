@@ -72,6 +72,11 @@
   "create": {
     "title": "Create Task",
     "subtitle": "Created tasks appear in the current project's queue.",
+    "open": "Create Task",
+    "close": "Close create task dialog",
+    "quickPrompt": "Short Prompt",
+    "quickPromptPlaceholder": "Example: make Project Automation task creation a dialog and support AI-filled fields",
+    "completeWithAi": "Fill with AI",
     "taskTitle": "Title",
     "taskTitlePlaceholder": "Example: implement login form validation",
     "goal": "Goal",
@@ -114,7 +119,9 @@
     "complete": "Failed to start verification.",
     "retry": "Failed to retry the task.",
     "abort": "Failed to abort the task.",
+    "completePrompt": "Failed to fill the task with AI.",
     "noProject": "Select a Workbench project from the sidebar first.",
+    "promptRequired": "Enter a short prompt first.",
     "required": "Fill in title, goal, and acceptance criteria."
   }
 }

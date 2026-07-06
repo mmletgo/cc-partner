@@ -10,12 +10,14 @@
 
 #![allow(dead_code)]
 
+use crate::commands::prompt_optimizer::OrchestratorTaskPromptCompletionDto;
 use crate::error::AppError;
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{OrchestratorEvidenceDto, OrchestratorTaskDto};
 use crate::orchestrator::remote_protocol::{
-    RemoteCreateOrchestratorTaskReq, RemoteListTasksReq, RemoteOrchestratorConfigResp,
-    RemoteOrchestratorEvidenceResp, RemoteOrchestratorTaskListResp, RemoteTaskReq,
+    RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq, RemoteListTasksReq,
+    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp, RemoteOrchestratorTaskListResp,
+    RemoteTaskReq,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -79,6 +81,26 @@ impl RemoteOrchestratorClient {
     ) -> Result<OrchestratorTaskDto, AppError> {
         self.post_json(
             endpoint_url(base_url, "/api/orchestrator/tasks/create"),
+            &req,
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
+    /// 在远端设备上完善 Orchestrator 创建任务 Prompt。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     手机端选中 remote shortcut 时，AI 完善必须在项目所在设备执行，才能使用远端项目上下文。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/orchestrator/tasks/complete-prompt`，解析 title/goal/acceptanceCriteria DTO。
+    pub async fn complete_prompt(
+        &self,
+        base_url: &str,
+        req: RemoteCompleteOrchestratorTaskPromptReq,
+    ) -> Result<OrchestratorTaskPromptCompletionDto, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/orchestrator/tasks/complete-prompt"),
             &req,
             RemoteRequestTimeoutKind::Long,
         )

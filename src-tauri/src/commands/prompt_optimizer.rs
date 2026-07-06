@@ -51,6 +51,21 @@ struct SinglePromptOptimizeResponseDto {
     optimized_prompt: String,
 }
 
+/// Orchestrator 创建任务 Prompt 完善响应 DTO（camelCase，对齐前端类型）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     项目自动化创建任务时，用户可以只输入一个简短需求，让 Claude Code 生成可编辑的任务标题、目标和验收标准。
+///
+/// Code Logic（这个结构做什么）:
+///     serde 使用 camelCase 暴露 `title` / `goal` / `acceptanceCriteria`，Rust 内部保持 snake_case。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorTaskPromptCompletionDto {
+    pub title: String,
+    pub goal: String,
+    pub acceptance_criteria: String,
+}
+
 /// Workbench 小组件单语优化目标语种。
 ///
 /// Business Logic（为什么需要这个枚举）:
@@ -149,6 +164,60 @@ pub async fn optimize_prompt(
         working_directory.as_deref(),
         PROMPT_OPTIMIZE_TIMEOUT_SECS,
         "优化 Prompt",
+    )
+    .await
+}
+
+/// 调用 Claude Code CLI 把简单 Prompt 完善为 Orchestrator 创建任务字段。
+///
+/// Business Logic（为什么需要这个命令）:
+///     项目自动化创建任务需要兼顾手写表单和自然语言草稿；用户写一句简单 Prompt 后，应能生成标题、目标和验收标准，
+///     并在前端保留可编辑表单，避免直接创建不可审阅任务。
+///
+/// Code Logic（这个命令做什么）:
+///     校验输入长度；解析可选工作目录；读取 Claude CLI 路径/模型；使用 Orchestrator 专用 JSON schema
+///     调用 structured-json helper，返回三字段 DTO。
+#[tauri::command]
+pub async fn complete_orchestrator_task_prompt(
+    state: State<'_, AppState>,
+    prompt: String,
+    working_directory: Option<String>,
+) -> Result<OrchestratorTaskPromptCompletionDto, AppError> {
+    local_complete_orchestrator_task_prompt(&state, prompt, working_directory).await
+}
+
+/// 在本机把简单 Prompt 完善为 Orchestrator 创建任务字段。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Tauri 桌面端和 `/mobile` HTTP route 都需要复用同一套 Orchestrator 任务字段生成逻辑，避免两个入口字段漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 prompt、解析可选工作目录、读取 Claude CLI 配置，并用 Orchestrator 专用 schema 运行 structured JSON。
+pub(crate) async fn local_complete_orchestrator_task_prompt(
+    state: &AppState,
+    prompt: String,
+    working_directory: Option<String>,
+) -> Result<OrchestratorTaskPromptCompletionDto, AppError> {
+    validate_prompt_input(&prompt)?;
+    let working_directory = resolve_working_directory(working_directory)?;
+    let (cli_path, model) = {
+        let cfg = state.config.read().unwrap();
+        (
+            cfg.github_trending.claude_cli_path.clone(),
+            cfg.github_trending.claude_model.clone(),
+        )
+    };
+    let schema = orchestrator_task_prompt_completion_schema();
+    let instruction = build_orchestrator_task_prompt_completion_instruction(&prompt);
+
+    claude_cli::run_structured_json_with_cwd::<OrchestratorTaskPromptCompletionDto>(
+        &cli_path,
+        &model,
+        &schema.to_string(),
+        &instruction,
+        working_directory.as_deref(),
+        PROMPT_OPTIMIZE_TIMEOUT_SECS,
+        "完善自动化任务 Prompt",
     )
     .await
 }
@@ -392,6 +461,26 @@ fn prompt_optimize_schema_for_target(
     }))
 }
 
+/// 构造 Orchestrator 创建任务 Prompt 完善 schema。
+///
+/// Business Logic（为什么需要这个函数）:
+///     创建任务弹窗只需要标题、目标和验收标准，必须强制 Claude CLI 返回稳定字段供前端表单填充。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 JSON Schema，要求 `title`、`goal`、`acceptanceCriteria` 都存在且禁止额外字段。
+fn orchestrator_task_prompt_completion_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "goal", "acceptanceCriteria"],
+        "properties": {
+            "title": { "type": "string" },
+            "goal": { "type": "string" },
+            "acceptanceCriteria": { "type": "string" }
+        }
+    })
+}
+
 /// 把单语优化结果映射回前端既有 DTO。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -508,6 +597,32 @@ fn build_streaming_optimize_instruction(
     )
 }
 
+/// 构造 Orchestrator 创建任务 Prompt 完善指令。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户给出的简单 Prompt 需要变成 Orchestrator 可执行任务字段，且不应被扩写成继续追问用户的对话。
+///
+/// Code Logic（这个函数做什么）:
+///     把原始 prompt 放入 fenced code block，要求 Claude 输出短标题、可执行目标和可验证验收标准三项结构化数据。
+fn build_orchestrator_task_prompt_completion_instruction(prompt: &str) -> String {
+    format!(
+        "You prepare an Orchestrator task for a Claude Code automation queue.\n\
+         Return only data matching the JSON schema.\n\
+         Requirements:\n\
+         - Preserve the user's intent and do not invent external facts.\n\
+         - title must be concise and action-oriented.\n\
+         - goal must describe the concrete outcome the automation runner should produce.\n\
+         - acceptanceCriteria must list observable checks that prove the task is complete.\n\
+         - Write title, goal, and acceptanceCriteria from the requester's perspective.\n\
+         - Do not ask follow-up questions or include confirmation requests.\n\
+         - If important details are missing, express them as bracketed placeholders or execution assumptions inside goal or acceptanceCriteria.\n\
+         - Do not add docs/, file-writing, persistence, or reporting requirements unless the original prompt explicitly asks for them.\n\
+         - Keep the task actionable for a coding agent working inside the current project.\n\n\
+         Original prompt:\n```text\n{}\n```",
+        prompt
+    )
+}
+
 /// 解析 Prompt 优化输出。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -518,6 +633,20 @@ fn build_streaming_optimize_instruction(
 #[cfg(test)]
 fn parse_prompt_optimize_output(stdout: &str) -> Result<PromptOptimizeResponseDto, AppError> {
     claude_cli::parse_structured_output::<PromptOptimizeResponseDto>(stdout)
+}
+
+/// 解析 Orchestrator 创建任务 Prompt 完善输出。
+///
+/// Business Logic（为什么需要这个函数）:
+///     单测锁定 Orchestrator 专用结构化输出契约，避免字段名与前端表单漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     委托共享 `claude_cli::parse_structured_output`，返回三字段 DTO。
+#[cfg(test)]
+fn parse_orchestrator_task_prompt_completion_output(
+    stdout: &str,
+) -> Result<OrchestratorTaskPromptCompletionDto, AppError> {
+    claude_cli::parse_structured_output::<OrchestratorTaskPromptCompletionDto>(stdout)
 }
 
 #[cfg(test)]
@@ -657,5 +786,41 @@ mod tests {
         assert!(instruction.contains("Do not generate a second language version"));
         assert!(instruction.contains("Simplified Chinese"));
         assert!(!instruction.contains("optimizedPrompt"));
+    }
+
+    #[test]
+    fn orchestrator_task_prompt_schema_requires_task_fields() {
+        let schema = orchestrator_task_prompt_completion_schema();
+
+        assert_eq!(schema["required"][0], "title");
+        assert_eq!(schema["required"][1], "goal");
+        assert_eq!(schema["required"][2], "acceptanceCriteria");
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn orchestrator_task_prompt_instruction_targets_task_creation_fields() {
+        let instruction =
+            build_orchestrator_task_prompt_completion_instruction("修复项目自动化创建任务体验");
+
+        assert!(instruction.contains("title"));
+        assert!(instruction.contains("goal"));
+        assert!(instruction.contains("acceptanceCriteria"));
+        assert!(instruction.contains("Do not ask follow-up questions"));
+    }
+
+    #[test]
+    fn parses_orchestrator_task_prompt_completion_output() {
+        let result = parse_orchestrator_task_prompt_completion_output(
+            r#"{"structured_output":{"title":"弹窗创建任务","goal":"把创建任务改成弹窗","acceptanceCriteria":"用户可手动填写，也可让 AI 完善三字段"}}"#,
+        )
+        .expect("structured completion");
+
+        assert_eq!(result.title, "弹窗创建任务");
+        assert_eq!(result.goal, "把创建任务改成弹窗");
+        assert_eq!(
+            result.acceptance_criteria,
+            "用户可手动填写，也可让 AI 完善三字段",
+        );
     }
 }

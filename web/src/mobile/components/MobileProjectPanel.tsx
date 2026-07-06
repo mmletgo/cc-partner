@@ -17,10 +17,10 @@ export interface MobileProjectPanelProps {
  * MobileProjectPanel（移动端项目选择面板）
  *
  * Business Logic（为什么需要这个组件）:
- *   手机进入 `/mobile` 后需要先选择最近 Workbench 本机项目，后续 worktree、terminal session 和状态栏都依赖该项目上下文。
+ *   手机进入 `/mobile` 后需要先选择最近 Workbench 项目；本机项目进入完整工作台，远端快捷方式进入自动化代理链路。
  *
  * Code Logic（这个组件做什么）:
- *   渲染最近项目列表、刷新入口、加载态、错误态和空态；local 项目点击后把 DTO 交给父组件，remote shortcut 保持可聚焦并用 aria-disabled 展示提示。
+ *   渲染最近项目列表、刷新入口、加载态、错误态和空态；local/remote 项目点击后把 DTO 交给父组件，未知类型保持可聚焦并用 aria-disabled 展示提示。
  */
 export function MobileProjectPanel({
   projects,
@@ -111,7 +111,7 @@ export function MobileProjectPanel({
               <span className={styles.mobileListMeta}>{project.deviceName}</span>
               {canSelect ? null : (
                 <span id={unsupportedNoticeId} className={styles.mobileListNotice}>
-                  {t('workbench:mobile.projectPanel.remoteUnsupported')}
+                  {t('workbench:mobile.projectPanel.unsupportedProjectKind')}
                 </span>
               )}
             </button>

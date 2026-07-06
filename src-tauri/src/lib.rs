@@ -614,6 +614,7 @@ pub fn run() {
             github_trending_cmd::test_claude_cli,
             // Prompt 优化（复用 Claude CLI pure/headless helper，不保存历史）
             prompt_optimizer_cmd::optimize_prompt,
+            prompt_optimizer_cmd::complete_orchestrator_task_prompt,
             prompt_optimizer_cmd::stream_optimize_prompt_to_workbench_session,
             // Orchestrator 任务 API（任务列表 / 创建草稿任务 / 入队 / evidence / legacy 配置兼容读取）
             orchestrator_cmd::list_orchestrator_tasks,

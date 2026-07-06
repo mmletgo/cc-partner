@@ -97,6 +97,61 @@ try {
     typeof createBody.clientRequestId === 'string' && createBody.clientRequestId.length > 0,
     'create should include a non-empty clientRequestId',
   );
+
+  await httpOrchestratorTransport.tasks.listViews('remote-project-1');
+
+  assert(
+    capturedUrls[5] === '/api/orchestrator/task-views/list',
+    'orchestrator task view list should call the mobile task-views list route',
+  );
+  assert(
+    JSON.stringify(capturedBodies[5]) === JSON.stringify({ projectId: 'remote-project-1' }),
+    'orchestrator task view list should send projectId only',
+  );
+
+  await httpOrchestratorTransport.tasks.createView({
+    projectId: 'remote-project-1',
+    title: '移动端远端创建任务',
+    goal: '从手机端代理到远端设备创建项目级自动化任务',
+    acceptanceCriteria: '远端设备返回 task view',
+    priority: 2,
+  });
+
+  const createViewBody = capturedBodies[6] as Record<string, unknown>;
+  assert(
+    capturedUrls[6] === '/api/orchestrator/task-views/create',
+    'orchestrator task view create should call the mobile task-views create route',
+  );
+  assert(createViewBody.projectId === 'remote-project-1', 'createView should include projectId');
+  assert(createViewBody.title === '移动端远端创建任务', 'createView should include title');
+  assert(createViewBody.goal === '从手机端代理到远端设备创建项目级自动化任务', 'createView should include goal');
+  assert(createViewBody.acceptanceCriteria === '远端设备返回 task view', 'createView should include acceptanceCriteria');
+  assert(createViewBody.priority === 2, 'createView should include priority');
+  assert(createViewBody.queue === true, 'createView should default queue to true');
+  assert(
+    typeof createViewBody.clientRequestId === 'string' && createViewBody.clientRequestId.length > 0,
+    'createView should include a non-empty clientRequestId',
+  );
+
+  await httpOrchestratorTransport.tasks.completePrompt({
+    projectId: 'remote-project-1',
+    prompt: '移动端自动化任务弹窗',
+    workingDirectory: ' /Users/hans/web_project/cc-partner ',
+  });
+
+  assert(
+    capturedUrls[7] === '/api/orchestrator/tasks/complete-prompt',
+    'orchestrator task prompt completion should call the complete-prompt route',
+  );
+  assert(
+    JSON.stringify(capturedBodies[7]) ===
+      JSON.stringify({
+        projectId: 'remote-project-1',
+        prompt: '移动端自动化任务弹窗',
+        workingDirectory: '/Users/hans/web_project/cc-partner',
+      }),
+    'orchestrator task prompt completion should normalize prompt and workingDirectory',
+  );
 } finally {
   globalThis.fetch = originalFetch;
 }

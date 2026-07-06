@@ -13,6 +13,7 @@ import {
   getMobileWorktreeStatusKind,
   openMobileNav,
   selectMobileWorktreeWorkspacePanel,
+  selectMobilePanelForProject,
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
   selectMobilePanel,
@@ -132,6 +133,28 @@ function testSelectMobilePanelReturnsNextPanel(): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   远端项目在移动端只开放自动化代理链路，导航误点本机专属面板时应回到可用的自动化面板。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造 local 与 remote 项目，断言 remote 的 terminal/files/git/worktrees/prompt 回落 automation，允许 projects/settings/automation。
+ */
+function testRemoteProjectPanelSelectionFallsBackToAutomation(): void {
+  const localProject = createProject({ id: 'local', name: 'local-app', kind: 'local' });
+  const remoteProject = createProject({ id: 'remote', name: 'remote-app', kind: 'remote' });
+
+  assertEqual(selectMobilePanelForProject(localProject, 'terminal'), 'terminal');
+  assertEqual(selectMobilePanelForProject(remoteProject, 'terminal'), 'automation');
+  assertEqual(selectMobilePanelForProject(remoteProject, 'files'), 'automation');
+  assertEqual(selectMobilePanelForProject(remoteProject, 'git'), 'automation');
+  assertEqual(selectMobilePanelForProject(remoteProject, 'worktrees'), 'automation');
+  assertEqual(selectMobilePanelForProject(remoteProject, 'prompt'), 'automation');
+  assertEqual(selectMobilePanelForProject(remoteProject, 'projects'), 'projects');
+  assertEqual(selectMobilePanelForProject(remoteProject, 'settings'), 'settings');
+  assertEqual(selectMobilePanelForProject(remoteProject, 'automation'), 'automation');
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   自动化是移动端 Workbench 的项目级同级面板，不能被塞进 worktree quick switch 这类 worktree 附属入口。
  *
  * Code Logic（这个函数做什么）:
@@ -191,17 +214,23 @@ function testCloseMobileNavReturnsFalse(): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   `/mobile` 当前只支持直连加载本机项目，远端快捷方式应展示但不可选择，避免用户点入必然失败的二级代理路径。
+ *   `/mobile` 自动化面板需要支持手机通过本机代理到远端设备，因此本机项目和远端快捷方式都应可进入项目上下文。
  *
  * Code Logic（这个函数做什么）:
- *   构造 local 与 remote 两类项目，断言 helper 只允许 local 项目进入详情加载。
+ *   构造 local、remote 与未知类型项目，断言 helper 允许已支持项目类型并拒绝未知类型。
  */
-function testCanSelectMobileProjectOnlyAllowsLocalProjects(): void {
+function testCanSelectMobileProjectAllowsLocalAndRemoteProjects(): void {
   const localProject = createProject({ id: 'local', name: 'local-app', kind: 'local' });
   const remoteProject = createProject({ id: 'remote', name: 'remote-app', kind: 'remote' });
+  const unknownProject = createProject({
+    id: 'unknown',
+    name: 'unknown-app',
+    kind: 'other',
+  });
 
   assertEqual(canSelectMobileProject(localProject), true);
-  assertEqual(canSelectMobileProject(remoteProject), false);
+  assertEqual(canSelectMobileProject(remoteProject), true);
+  assertEqual(canSelectMobileProject(unknownProject), false);
 }
 
 /**
@@ -486,12 +515,13 @@ function testMobileTerminalFullscreenChromeOnlyKeepsPaneActionsAndExit(): void {
 }
 
 testSelectMobilePanelReturnsNextPanel();
+testRemoteProjectPanelSelectionFallsBackToAutomation();
 testAutomationPanelIsFirstClassMobilePanel();
 testOpenMobileNavReturnsTrue();
 testInitialMobileWorkbenchPanelDefaultsToProjects();
 testInitialMobileNavOpenDefaultsToFalse();
 testCloseMobileNavReturnsFalse();
-testCanSelectMobileProjectOnlyAllowsLocalProjects();
+testCanSelectMobileProjectAllowsLocalAndRemoteProjects();
 testMobileWorktreeStatusKindPrioritizesConflictThenDirty();
 testMobileWorktreeSwitcherRequiresIdleLocalProject();
 testMobileWorktreeDestructiveActionRequiresIdleNonMainWorktree();

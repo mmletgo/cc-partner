@@ -103,6 +103,14 @@
   gap: var(--space-3);
 }
 
+.queueActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
 .sectionTitle {
   margin: 0;
   font-family: var(--font-display);
@@ -527,8 +535,94 @@
   gap: var(--space-2);
 }
 
-.createCard {
+.textarea {
+  width: 100%;
+  min-height: 96px;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.textarea::placeholder {
+  color: var(--meta);
+}
+
+.textarea:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--accent) 35%, var(--border));
+}
+
+.textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.createDialogOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+  background: color-mix(in oklab, var(--bg) 72%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.createDialog {
+  width: min(720px, 100%);
+  max-height: min(760px, calc(100vh - var(--space-10)));
   overflow: hidden;
+  box-shadow: var(--shadow-window);
+}
+
+.dialogHeader {
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.dialogBody {
+  max-height: calc(100vh - 180px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.aiAssistBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-warm);
+}
+
+.aiAssistActions,
+.dialogActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.dialogActions {
+  padding-top: var(--space-1);
 }
 
 .empty {
@@ -592,5 +686,18 @@
 
   .detailTitleRow {
     flex-direction: column;
+  }
+
+  .createDialogOverlay {
+    align-items: stretch;
+    padding: var(--space-3);
+  }
+
+  .createDialog {
+    max-height: calc(100vh - var(--space-6));
+  }
+
+  .dialogBody {
+    max-height: calc(100vh - 148px);
   }
 }

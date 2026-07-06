@@ -96,7 +96,7 @@
     "projectPanel": {
       "title": "项目",
       "error": "加载失败",
-      "remoteUnsupported": "手机端暂不支持打开远端项目快捷方式"
+      "unsupportedProjectKind": "手机端暂不支持打开该项目类型"
     },
     "terminalPanel": {
       "title": "终端",
@@ -201,10 +201,15 @@
     },
     "automationPanel": {
       "title": "自动化",
-      "noProject": "先选择本机项目",
-      "remoteUnsupported": "手机端自动化暂只支持本机项目",
+      "noProject": "先选择项目",
       "empty": "当前项目暂无自动化任务",
       "listAriaLabel": "移动端自动化任务列表",
+      "createOpen": "创建任务",
+      "closeCreate": "关闭",
+      "shortPrompt": "简单 Prompt",
+      "shortPromptPlaceholder": "一句话描述你想让 AI 完成的任务",
+      "completeWithAi": "AI 自动完善",
+      "completingPrompt": "完善中",
       "create": "创建并入队",
       "creating": "创建中",
       "created": "任务已创建并入队",
@@ -231,9 +236,17 @@
         "blocked": "已阻塞",
         "aborted": "已终止"
       },
+      "pendingStatus": {
+        "pending": "待发送",
+        "sending": "发送中",
+        "mirrored": "已同步",
+        "failed": "发送失败"
+      },
       "errors": {
         "list": "读取自动化任务失败",
         "create": "创建自动化任务失败",
+        "completePrompt": "AI 自动完善失败",
+        "promptRequired": "请先输入简单 Prompt",
         "required": "请填写任务标题、目标和验收标准"
       }
     },

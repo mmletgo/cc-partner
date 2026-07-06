@@ -505,8 +505,20 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(orchestrator::create_task),
         )
         .route(
+            "/api/orchestrator/tasks/complete-prompt",
+            post(orchestrator::complete_task_prompt),
+        )
+        .route(
             "/api/orchestrator/tasks/list",
             post(orchestrator::list_tasks),
+        )
+        .route(
+            "/api/orchestrator/task-views/list",
+            post(orchestrator::list_task_views),
+        )
+        .route(
+            "/api/orchestrator/task-views/create",
+            post(orchestrator::create_task_view),
         )
         .route(
             "/api/orchestrator/tasks/evidence",

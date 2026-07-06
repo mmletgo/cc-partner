@@ -58,6 +58,21 @@ pub struct RemoteListTasksReq {
     pub project_id: String,
 }
 
+/// 远端 Orchestrator 创建任务 Prompt 完善请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     移动端 `/mobile` 和局域网入口需要通过 HTTP 把简单 Prompt 交给 owning device 生成任务表单字段。
+///
+/// Code Logic（这个结构体做什么）:
+///     使用 camelCase 序列化 `{prompt, workingDirectory}`；工作目录可为空，表示 pure/headless 模式。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteCompleteOrchestratorTaskPromptReq {
+    pub project_id: Option<String>,
+    pub prompt: String,
+    pub working_directory: Option<String>,
+}
+
 /// 远端 Orchestrator 任务列表响应。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -151,6 +166,28 @@ mod tests {
         .expect("deserialize request");
 
         assert!(req.client_request_id.is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     移动端 AI 完善任务字段走 HTTP 协议，字段名必须稳定为 camelCase。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     序列化 RemoteCompleteOrchestratorTaskPromptReq，断言 workingDirectory 字段没有退回 snake_case。
+    #[test]
+    fn prompt_completion_request_serializes_as_camel_case() {
+        let req = RemoteCompleteOrchestratorTaskPromptReq {
+            project_id: Some("project-1".to_string()),
+            prompt: "创建弹窗".to_string(),
+            working_directory: Some("/tmp/project".to_string()),
+        };
+
+        let value = serde_json::to_value(req).expect("serialize completion request");
+
+        assert_eq!(value["projectId"], "project-1");
+        assert_eq!(value["prompt"], "创建弹窗");
+        assert_eq!(value["workingDirectory"], "/tmp/project");
+        assert!(value.get("project_id").is_none());
+        assert!(value.get("working_directory").is_none());
     }
 
     /// Business Logic（为什么需要这个测试）:

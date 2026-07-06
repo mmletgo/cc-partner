@@ -22,6 +22,12 @@ const MOBILE_WORKBENCH_PANEL_ORDER: readonly MobileWorkbenchPanel[] = [
   'settings',
 ];
 
+const MOBILE_REMOTE_PROJECT_PANEL_ALLOWLIST = new Set<MobileWorkbenchPanel>([
+  'projects',
+  'automation',
+  'settings',
+]);
+
 export type MobileWorktreeStatusKind = 'clean' | 'dirty' | 'conflict';
 
 export interface MobileTerminalChromeVisibility {
@@ -123,13 +129,30 @@ export function getInitialMobileNavOpen(): boolean {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   移动端 Workbench 当前只支持手机直连本机项目；桌面端 remote shortcut 需要展示但不能进入必然失败的二级远端网关路径。
+ *   移动端 Workbench 自动化面板支持本机项目与远端快捷方式；未知项目类型仍不能点入，避免进入未定义链路。
  *
  * Code Logic（这个函数做什么）:
- *   接收 WorkbenchProject DTO，只有 kind 为 local 时返回 true，其它项目类型返回 false。
+ *   接收 WorkbenchProject DTO，kind 为 local 或 remote 时返回 true，其它项目类型返回 false。
  */
 export function canSelectMobileProject(project: WorkbenchProject): boolean {
-  return project.kind === 'local';
+  return project.kind === 'local' || project.kind === 'remote';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   远端快捷方式在移动端目前只开放自动化二级代理链路，用户误点本机专属面板时应留在可用功能内。
+ *
+ * Code Logic（这个函数做什么）:
+ *   接收当前项目和目标面板；远端项目只允许 projects、automation、settings，其它面板统一回落到 automation。
+ */
+export function selectMobilePanelForProject(
+  project: WorkbenchProject | null,
+  next: MobileWorkbenchPanel,
+): MobileWorkbenchPanel {
+  if (project?.kind === 'remote' && !MOBILE_REMOTE_PROJECT_PANEL_ALLOWLIST.has(next)) {
+    return 'automation';
+  }
+  return next;
 }
 
 /**

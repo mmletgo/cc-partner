@@ -12,7 +12,7 @@
 - **Prompt 优化** — 调用本机 Claude Code CLI pure/headless 模式生成中英文优化版 Prompt
 - **速记本** — 多页面自动保存文本，支持页面标题、局域网与 GitHub 同步
 - **工作台** — 指定本机或局域网远端项目文件夹，管理 Git worktree、多个项目终端、文件工作区、Git 提交树和项目自动化看板
-- **移动端 Workbench** — 可信局域网内通过 `/mobile` 手机浏览器远程操作本机 Workbench，桌面端展示访问链接与二维码
+- **移动端 Workbench** — 可信局域网内通过 `/mobile` 手机浏览器远程操作 Workbench；本机可作为手机到远端设备的项目自动化代理，桌面端展示访问链接与二维码
 - **Orchestrator 自动编排器** — 项目级任务队列、可见 Runner、验证 evidence 与 full-auto 交付，桌面端作为 Workbench 自动化工作区展示
 - **P2P 自动互联** — 局域网内 mDNS 自动发现
 - **自动更新** — GitHub Releases 检测 / 下载 / 安装
@@ -427,7 +427,7 @@ node scripts/bump-version.mjs <新版本号>
 | get_mobile_access_info | 桌面端获取可信局域网 `/mobile` 访问链接与二维码数据；普通手机浏览器对应 HTTP `/api/mobile/access-info` |
 | config.get_version | 应用版本号 |
 | prompts.list / get / create / update / delete / list_tags | Prompt CRUD（delete 为软删除，自增 vector_clock） |
-| optimize_prompt / stream_optimize_prompt_to_workbench_session | 调用 Claude Code CLI 优化用户输入；普通页返回中英文 Prompt，Workbench 可按设置语种用 stream-json 把优化结果流式写入当前终端，远端项目会代理到远端设备执行 |
+| optimize_prompt / complete_orchestrator_task_prompt / stream_optimize_prompt_to_workbench_session | 调用 Claude Code CLI 优化用户输入；普通页返回中英文 Prompt，项目自动化创建任务可把简单 Prompt 完善为标题/目标/验收标准，Workbench 可按设置语种用 stream-json 把优化结果流式写入当前终端，远端项目会代理到远端设备执行 |
 | trigger_sync | 触发全网 Prompt 同步，返回 {accepted, synced, note} |
 | get_claude_md / update_claude_md / push_claude_md | CLAUDE.md 读取 / 保存 / 主动推送本机配置到局域网设备和 GitHub 云端 |
 | list_scratchpad_pages / get_scratchpad_page / create_scratchpad_page / update_scratchpad_page_content / rename_scratchpad_page / delete_scratchpad_page / sync_scratchpad | 速记本多页面 CRUD / 自动保存 / 同步 |

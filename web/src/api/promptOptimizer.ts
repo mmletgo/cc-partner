@@ -9,7 +9,11 @@
  */
 
 import { invoke } from './client';
-import type { PromptOptimizeResponse, PromptOptimizerFillLanguage } from '@/lib/types';
+import type {
+  OrchestratorTaskPromptCompletion,
+  PromptOptimizeResponse,
+  PromptOptimizerFillLanguage,
+} from '@/lib/types';
 
 /**
  * Prompt 优化调用选项。
@@ -38,6 +42,19 @@ export interface PromptOptimizerStreamToTerminalOptions {
   workingDirectory?: string | null;
   targetLanguage: PromptOptimizerFillLanguage;
   sessionId: string;
+}
+
+/**
+ * Orchestrator 任务 Prompt 完善选项。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   本机 Workbench 项目可以把项目根目录传给 Claude Code，让 AI 结合项目上下文生成任务字段。
+ *
+ * Code Logic（这个类型做什么）:
+ *   workingDirectory 为空时后端使用 pure/headless 模式；非空时在该目录下运行 Claude CLI。
+ */
+export interface OrchestratorTaskPromptCompletionOptions {
+  workingDirectory?: string | null;
 }
 
 /**
@@ -77,6 +94,23 @@ export function buildPromptOptimizerStreamInvokeArgs(
   };
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   项目自动化弹窗的 AI 完善按钮需要把简单 Prompt 和可选项目目录传给后端，得到三字段表单草稿。
+ *
+ * Code Logic（这个函数做什么）:
+ *   prompt 和 workingDirectory 都做 trim；空工作目录转 null，避免 Rust 命令层收到空字符串路径。
+ */
+export function buildOrchestratorTaskPromptCompletionInvokeArgs(
+  prompt: string,
+  options: OrchestratorTaskPromptCompletionOptions = {},
+): Record<string, unknown> {
+  return {
+    prompt: prompt.trim(),
+    workingDirectory: options.workingDirectory?.trim() || null,
+  };
+}
+
 export const promptOptimizerApi = {
   /** 优化原始 Prompt；不传 targetLanguage 时返回双语，Workbench 可传当前项目根目录和单语设置。 */
   optimize: (prompt: string, options: PromptOptimizerOptions = {}) =>
@@ -89,5 +123,14 @@ export const promptOptimizerApi = {
     invoke<{ ok: boolean; sessionId: string }>(
       'stream_optimize_prompt_to_workbench_session',
       buildPromptOptimizerStreamInvokeArgs(prompt, options),
+    ),
+  /** Orchestrator 专用：把简单任务 Prompt 完善为创建任务表单的三个字段。 */
+  completeOrchestratorTaskPrompt: (
+    prompt: string,
+    options: OrchestratorTaskPromptCompletionOptions = {},
+  ) =>
+    invoke<OrchestratorTaskPromptCompletion>(
+      'complete_orchestrator_task_prompt',
+      buildOrchestratorTaskPromptCompletionInvokeArgs(prompt, options),
     ),
 };

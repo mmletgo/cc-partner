@@ -16,6 +16,7 @@ import {
   canOpenMobileWorktreeSwitcher,
   canSelectMobileProject,
   getInitialMobileWorkbenchPanel,
+  selectMobilePanelForProject,
   selectMobileWorktreeWorkspacePanel,
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
@@ -68,10 +69,10 @@ function createMobileFilePanelContext(
  * MobileWorkbench（移动端工作台页面）
  *
  * Business Logic（为什么需要这个组件）:
- *   `/mobile` 需要通过 HTTP 加载最近项目，并在用户选择项目后加载对应 worktree 与 terminal session 上下文。
+ *   `/mobile` 需要通过 HTTP 加载最近项目；本机项目进入完整工作台，远端快捷方式进入自动化二级代理链路。
  *
  * Code Logic（这个组件做什么）:
- *   管理 active panel/project/worktree/session 状态，调用 httpWorkbenchTransport 拉取数据，用 request id 避免 stale 请求覆盖新选择。
+ *   管理 active panel/project/worktree/session 状态；local 项目拉取 worktree/session，remote 项目清空本机上下文并进入 automation。
  */
 export function MobileWorkbench(): ReactElement {
   const [panel, setPanel] = useState<MobileWorkbenchPanel>(() => getInitialMobileWorkbenchPanel());
@@ -376,37 +377,48 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户选择本机项目后，移动端需要加载该项目的 worktree 和 terminal window；远端快捷方式当前只能提示不可用。
+   *   用户选择本机项目后需要进入完整移动端工作台；选择远端快捷方式后需要进入手机到远端设备的自动化代理链路。
    *
    * Code Logic（这个函数做什么）:
-   *   非 local 项目直接写入提示并让旧详情请求失效；local 项目并行请求 worktrees/sessions，选择主 worktree 与匹配 session，成功后切到 terminal 面板。
+   *   未支持项目类型直接提示；remote 项目让旧详情请求失效并清空 worktree/session 后切到 automation；local 项目并行请求 worktrees/sessions 后切到 terminal。
    */
   const selectProject = useCallback(async (project: WorkbenchProject): Promise<void> => {
     if (!canSelectMobileProject(project)) {
       projectDetailsRequestIdRef.current += 1;
       setProjectDetailsLoading(false);
-      setError(t('workbench:mobile.projectPanel.remoteUnsupported'));
+      setError(t('workbench:mobile.projectPanel.unsupportedProjectKind'));
       return;
     }
     if (activeProject?.id === project.id) {
-      setPanel('terminal');
+      setPanel(project.kind === 'remote' ? 'automation' : 'terminal');
       return;
     }
     if (!confirmFileContextSwitch(createMobileFilePanelContext(project, null))) {
       return;
     }
 
-    const requestId = projectDetailsRequestIdRef.current + 1;
-    projectDetailsRequestIdRef.current = requestId;
     worktreesRequestIdRef.current += 1;
     sessionsRequestIdRef.current += 1;
-    setProjectDetailsLoading(true);
     setError(null);
+    activeProjectRef.current = project;
     setActiveProject(project);
     setWorktrees([]);
+    activeWorktreeRef.current = null;
     setActiveWorktree(null);
     setSessions([]);
+    sessionsRef.current = [];
     setActiveSession(null);
+
+    if (project.kind === 'remote') {
+      projectDetailsRequestIdRef.current += 1;
+      setProjectDetailsLoading(false);
+      setPanel('automation');
+      return;
+    }
+
+    const requestId = projectDetailsRequestIdRef.current + 1;
+    projectDetailsRequestIdRef.current = requestId;
+    setProjectDetailsLoading(true);
 
     try {
       const [nextWorktrees, nextSessions] = await Promise.all([
@@ -451,6 +463,20 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   远端快捷方式在移动端当前只支持自动化代理链路，导航点击本机专属面板时需要回到可用面板。
+   *
+   * Code Logic（这个函数做什么）:
+   *   复用 selectMobilePanelForProject 按当前 activeProject 规整目标面板，然后写入 panel state。
+   */
+  const handlePanelChange = useCallback(
+    (nextPanel: MobileWorkbenchPanel): void => {
+      setPanel(selectMobilePanelForProject(activeProject, nextPanel));
+    },
+    [activeProject],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   用户点击顶部 worktree pill 时，需要从任意面板打开轻量 quick switch，快速查看和切换本机 worktree。
    *
    * Code Logic（这个函数做什么）:
@@ -481,7 +507,7 @@ export function MobileWorkbench(): ReactElement {
    *   接收 MobileWorkbenchPanel 并写入当前 panel state。
    */
   const handleQuickSwitchPanelChange = useCallback((nextPanel: MobileWorkbenchPanel): void => {
-    setPanel(nextPanel);
+    setPanel(selectMobilePanelForProject(activeProjectRef.current, nextPanel));
   }, []);
 
   /**
@@ -767,7 +793,7 @@ export function MobileWorkbench(): ReactElement {
       worktreeStatusDisabled={!canOpenMobileWorktreeSwitcher(activeProject, worktreeControlsBusy)}
       worktreeStatusExpanded={worktreeSwitcherOpen}
       onWorktreeStatusClick={handleOpenWorktreeSwitcher}
-      onPanelChange={setPanel}
+      onPanelChange={handlePanelChange}
     >
       {panelContent}
       <MobileWorktreeQuickSwitch
