@@ -389,7 +389,6 @@
     "scopeValue": "项目：{{project}}",
     "description": "项目级任务队列；任务运行后才绑定 worktree 和执行现场。",
     "open": "项目自动化",
-    "returnTerminal": "返回终端",
     "noProject": "未选择项目"
   },
   "splitPaneRight": "左右分屏",

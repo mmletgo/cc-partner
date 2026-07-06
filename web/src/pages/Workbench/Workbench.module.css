@@ -280,6 +280,10 @@
   background: color-mix(in oklab, var(--surface) 35%, var(--bg));
 }
 
+.worktreeBar[hidden] {
+  display: none;
+}
+
 .worktreeStrip {
   min-width: 0;
   display: flex;
@@ -433,8 +437,7 @@
 }
 
 .terminalLayer,
-.fileLayer,
-.automationLayer {
+.fileLayer {
   position: absolute;
   inset: 0;
   min-width: 0;
@@ -458,8 +461,7 @@
 }
 
 .terminalLayer[data-hidden='true'],
-.fileLayer[data-hidden='true'],
-.automationLayer[data-hidden='true'] {
+.fileLayer[data-hidden='true'] {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -471,7 +473,11 @@
 }
 
 .automationLayer {
+  position: relative;
   z-index: var(--z-sticky);
+  min-width: 0;
+  min-height: 100%;
+  display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   background: var(--bg);
 }

@@ -15,6 +15,19 @@ function assertContains(source: string, expected: string, message: string): void
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   自动化控制台必须作为可见内容撑开 Workbench 中心区域，不能重新混入终端/文件层的绝对定位隐藏模型。
+ *
+ * Code Logic（这个函数做什么）:
+ *   检查源码不包含指定字符串；存在时抛出错误暴露布局契约回退。
+ */
+function assertNotContains(source: string, unexpected: string, message: string): void {
+  if (source.includes(unexpected)) {
+    throw new Error(message);
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   文件工作区与终端区采用叠层切换，回归测试需要锁住“不卸载终端但不遮挡文件层”的样式契约。
  *
  * Code Logic（这个函数做什么）:
@@ -26,6 +39,21 @@ async function main(): Promise<void> {
   assertContains(css, 'z-index: var(--z-base);', 'terminal layer stays below file layer');
   assertContains(css, '.fileLayer {', 'file layer style exists');
   assertContains(css, '.automationLayer {', 'automation layer style exists');
+  assertContains(
+    css,
+    '.terminalLayer,\n.fileLayer {',
+    'only terminal and file layers should share the absolute overlay base',
+  );
+  assertNotContains(
+    css,
+    '.fileLayer,\n.automationLayer',
+    'automation layer must stay in normal flow so it can keep the project automation page visible',
+  );
+  assertContains(
+    css,
+    'position: relative;',
+    'automation layer should be positioned relative inside mainWorkspace instead of absolute',
+  );
   assertContains(css, '.automationBody {', 'automation body scroll style exists');
   assertContains(css, 'z-index: var(--z-sticky);', 'file layer renders above terminal layer');
   assertContains(css, "data-hidden='true']", 'hidden layer selector exists');

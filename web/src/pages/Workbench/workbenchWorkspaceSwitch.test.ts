@@ -120,6 +120,16 @@ async function main(): Promise<void> {
     'terminal fullscreen action stays in pane action group before file preview',
   );
   assertContains(workbenchSource, "actionsAriaLabel={t('workbench:paneActions')}", 'terminal action group keeps aria label');
+  assertNotContains(
+    workbenchSource,
+    '<button\n                      key={session.id}\n                      type="button"\n                      className={styles.sessionTab}',
+    'terminal session tab must not be a button because it contains a close button',
+  );
+  assertContains(
+    workbenchSource,
+    'role="tab"\n                      tabIndex={0}',
+    'terminal session tab remains keyboard-focusable after removing the outer button element',
+  );
   assertOccurrenceCount(workbenchSource, '<WorkbenchWorkspaceNav', 1, 'Workbench terminal workspace uses shared nav once');
   assertNotContains(
     workbenchSource,

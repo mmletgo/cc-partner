@@ -2482,15 +2482,21 @@ export function Workbench() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户需要从 Workbench 项目层级进入自动化任务队列，避免误以为自动化属于当前 worktree 或终端工具栏。
+   *   用户需要从 Workbench 项目层级进入或退出自动化任务队列，避免再通过自动化层内部的返回按钮理解页面层级。
    *
    * Code Logic（这个函数做什么）:
-   *   打开独立的项目自动化控制台状态；终端 DOM 保持挂载但在控制台打开时不可见且不接收输入。
+   *   当前已打开时关闭项目自动化控制台并切回 terminal；未打开时关闭 Prompt 浮层并打开项目级自动化控制台。
    */
-  const handleOpenProjectAutomation = useCallback(() => {
+  const handleToggleProjectAutomation = useCallback(() => {
     setPromptPanelOpen(false);
+    if (automationConsoleOpen) {
+      setAutomationConsoleOpen(false);
+      setWorkspaceView('terminal');
+      return;
+    }
+    setWorkspaceView('terminal');
     setAutomationConsoleOpen(true);
-  }, []);
+  }, [automationConsoleOpen]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -3154,9 +3160,10 @@ export function Workbench() {
               icon={<OrchestratorIcon />}
               title={t('workbench:projectAutomation.description')}
               aria-label={t('workbench:projectAutomation.open')}
+              aria-pressed={automationConsoleOpen}
               data-active={automationConsoleOpen || undefined}
               disabled={!activeProjectId}
-              onClick={handleOpenProjectAutomation}
+              onClick={handleToggleProjectAutomation}
             >
               {t('workbench:projectAutomation.open')}
             </Button>
@@ -3307,12 +3314,19 @@ export function Workbench() {
               tabs={
                 <div className={styles.sessionTabs} role="tablist">
                   {scopedSessions.map((session) => (
-                    <button
+                    <div
                       key={session.id}
-                      type="button"
                       className={styles.sessionTab}
+                      role="tab"
+                      tabIndex={0}
+                      aria-selected={session.id === activeSessionId}
                       data-active={session.id === activeSessionId || undefined}
                       onClick={() => focusSession(session.id)}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter' && event.key !== ' ') return;
+                        event.preventDefault();
+                        focusSession(session.id);
+                      }}
                     >
                       <span className={styles.sessionDot} data-status={session.status} />
                       <span className={styles.sessionName}>{session.name}</span>
@@ -3326,7 +3340,7 @@ export function Workbench() {
                           void handleCloseSession(session.id);
                         }}
                       />
-                    </button>
+                    </div>
                   ))}
                   <Button
                     className={styles.newSessionButton}
@@ -3572,45 +3586,33 @@ export function Workbench() {
             />
           </div>
 
-          <div
-            className={styles.automationLayer}
-            data-hidden={!automationConsoleOpen || undefined}
-          >
-            <header className={styles.automationHeader}>
-              <div className={styles.automationHeadingGroup}>
-                <span className={styles.automationEyebrow}>
-                  {t('workbench:projectAutomation.scope')}
-                </span>
-                <h2 className={styles.automationTitle}>
-                  {t('workbench:projectAutomation.title')}
-                </h2>
-                <p className={styles.automationDescription}>
-                  {t('workbench:projectAutomation.description')}
-                </p>
+          {automationConsoleOpen ? (
+            <div className={styles.automationLayer}>
+              <header className={styles.automationHeader}>
+                <div className={styles.automationHeadingGroup}>
+                  <span className={styles.automationEyebrow}>
+                    {t('workbench:projectAutomation.scope')}
+                  </span>
+                  <h2 className={styles.automationTitle}>
+                    {t('workbench:projectAutomation.title')}
+                  </h2>
+                  <p className={styles.automationDescription}>
+                    {t('workbench:projectAutomation.description')}
+                  </p>
+                </div>
+                <div className={styles.automationContext}>
+                  <span>
+                    {t('workbench:projectAutomation.scopeValue', {
+                      project: activeProject?.name ?? t('workbench:projectAutomation.noProject'),
+                    })}
+                  </span>
+                </div>
+              </header>
+              <div className={styles.automationBody}>
+                <OrchestratorPanel embedded onOpenWorkbench={handleOpenAutomationTaskWorkbench} />
               </div>
-              <div className={styles.automationContext}>
-                <span>
-                  {t('workbench:projectAutomation.scopeValue', {
-                    project: activeProject?.name ?? t('workbench:projectAutomation.noProject'),
-                  })}
-                </span>
-                <Button
-                  className={styles.terminalActionButton}
-                  variant="secondary"
-                  size="sm"
-                  icon={<TerminalIcon />}
-                  title={t('workbench:projectAutomation.returnTerminal')}
-                  aria-label={t('workbench:projectAutomation.returnTerminal')}
-                  onClick={handleReturnToTerminal}
-                >
-                  {t('workbench:projectAutomation.returnTerminal')}
-                </Button>
-              </div>
-            </header>
-            <div className={styles.automationBody}>
-              <OrchestratorPanel embedded onOpenWorkbench={handleOpenAutomationTaskWorkbench} />
             </div>
-          </div>
+          ) : null}
         </div>
       </main>
 

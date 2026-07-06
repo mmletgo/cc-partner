@@ -46,6 +46,7 @@ async function main(): Promise<void> {
   const workbenchFilesSource = readFileSync(new URL('./workbenchFiles.ts', import.meta.url), 'utf8');
   const workbenchStyles = readFileSync(new URL('./Workbench.module.css', import.meta.url), 'utf8');
   const orchestratorSource = readFileSync(new URL('../Orchestrator/Orchestrator.tsx', import.meta.url), 'utf8');
+  const orchestratorStyles = readFileSync(new URL('../Orchestrator/Orchestrator.module.css', import.meta.url), 'utf8');
   const appShellSource = readFileSync(
     new URL('../../components/layout/AppShell/AppShell.tsx', import.meta.url),
     'utf8',
@@ -77,6 +78,26 @@ async function main(): Promise<void> {
     'setAutomationConsoleOpen(true);',
     'Workbench can open the project automation console',
   );
+  assertContains(
+    workbenchSource,
+    'const handleToggleProjectAutomation = useCallback',
+    'Workbench project automation header action is a toggle, not a one-way open action',
+  );
+  assertContains(
+    workbenchSource,
+    'if (automationConsoleOpen)',
+    'project automation toggle detects the open state before returning to terminal',
+  );
+  assertContains(
+    workbenchSource,
+    "setWorkspaceView('terminal');",
+    'project automation toggle always returns the center workspace to terminal context',
+  );
+  assertContains(
+    workbenchSource,
+    'onClick={handleToggleProjectAutomation}',
+    'clicking the project automation button again toggles back to the terminal page',
+  );
   assertNotContains(
     workbenchSource,
     "setWorkspaceView('automation');",
@@ -92,11 +113,26 @@ async function main(): Promise<void> {
     "workspaceView !== 'automation'",
     'Workbench must not hide automation through workspaceView inequality',
   );
-  assertContains(workbenchSource, 'className={styles.automationLayer}', 'Workbench renders an automation layer');
   assertContains(
     workbenchSource,
+    '{automationConsoleOpen ? (',
+    'Workbench should mount the automation layer only after the project automation console is open',
+  );
+  assertContains(workbenchSource, '<div className={styles.automationLayer}>', 'Workbench renders an automation layer');
+  assertNotContains(
+    workbenchSource,
     'data-hidden={!automationConsoleOpen || undefined}',
-    'automation layer visibility is driven by project-level console state',
+    'automation layer must not stay in the DOM behind a hidden/data-hidden style that can leave a black workspace',
+  );
+  assertContains(
+    workbenchSource,
+    '<OrchestratorPanel embedded onOpenWorkbench={handleOpenAutomationTaskWorkbench} />',
+    'mounted automation layer should contain the embedded Orchestrator UI',
+  );
+  assertNotContains(
+    workbenchSource,
+    'hidden={!automationConsoleOpen}',
+    'automation layer must not rely on the HTML hidden attribute because it can keep the opened console display:none',
   );
   assertContains(
     workbenchSource,
@@ -119,14 +155,24 @@ async function main(): Promise<void> {
     'project automation console hides the worktree switcher to avoid worktree ownership ambiguity',
   );
   assertContains(
-    workbenchSource,
-    'activeProject?.name',
-    'automation context displays the current project name',
+    workbenchStyles,
+    '.worktreeBar[hidden]',
+    'worktree switcher hidden attribute must win over the author display:flex style',
+  );
+  assertNotContains(
+    workbenchStyles,
+    '.automationLayer[hidden]',
+    'automation layer is conditionally mounted, so it should not need a hidden-attribute CSS override',
+  );
+  assertNotContains(
+    workbenchStyles,
+    '.automationLayer[data-hidden',
+    'automation layer is conditionally mounted, so it should not have a data-hidden CSS path',
   );
   assertContains(
     workbenchSource,
-    '<OrchestratorPanel embedded onOpenWorkbench={handleOpenAutomationTaskWorkbench} />',
-    'Workbench embeds OrchestratorPanel without page shell and owns task deep-link return',
+    'activeProject?.name',
+    'automation context displays the current project name',
   );
   assertContains(
     workbenchSource,
@@ -173,13 +219,27 @@ async function main(): Promise<void> {
     "t('workbench:automationWorkspace.open')",
     'terminal toolbar should no longer expose an automation workspace action',
   );
-  assertContains(workbenchSource, "t('workbench:projectAutomation.returnTerminal')", 'automation console has localized return action');
+  assertNotContains(
+    workbenchSource,
+    "t('workbench:projectAutomation.returnTerminal')",
+    'automation console should rely on the header Project Automation toggle instead of a secondary return button',
+  );
   assertContains(workbenchStyles, '.automationLayer {', 'automation layer has a dedicated style block');
   assertContains(workbenchStyles, '.automationHeader {', 'automation console has a project context header');
   assertContains(workbenchStyles, '.automationBody {', 'automation layer scroll body exists');
   assertContains(orchestratorSource, 'export function OrchestratorPanel', 'Orchestrator exports an embeddable panel');
   assertContains(orchestratorSource, 'embedded?: boolean;', 'OrchestratorPanel supports embedded mode');
   assertContains(orchestratorSource, 'onOpenWorkbench?: (url: string) => void;', 'OrchestratorPanel lets Workbench own embedded deep-link handling');
+  assertContains(
+    orchestratorStyles,
+    'height: 100%;',
+    'embedded Orchestrator panel should fill the Workbench automation body instead of collapsing to an empty black area',
+  );
+  assertContains(
+    orchestratorStyles,
+    '.embedded .grid',
+    'embedded Orchestrator grid should have a Workbench-specific layout boundary',
+  );
   assertContains(appSource, '<Navigate to="/workbench" replace />', 'legacy /orchestrator route redirects to Workbench');
   assertNotContains(appShellSource, 'to="/orchestrator"', 'sidebar no longer exposes a standalone automation nav item');
   assertContains(zhWorkbench, '"projectAutomation"', 'zh Workbench locale includes project automation copy');
