@@ -41,6 +41,13 @@ pub const DEFAULT_SEARCH_LIMIT: usize = 50;
 /// recent_messages 保留的最大条数（spec 3.1）。
 pub const RECENT_MESSAGES_MAX: usize = 20;
 
+/// 文件监听应用层 debounce 间隔（spec 5.1：500ms）。
+///
+/// notify::Config::with_poll_interval 只控制 poll backend 轮询频率，不是事件 debounce。
+/// Claude 高频写 jsonl 会触发大量事件，每个都 spawn_blocking 重扫性能很差，故在此再做一层
+/// 应用层 debounce：距上次重扫不足该间隔的事件直接跳过。
+const DEBOUNCE_INTERVAL: Duration = Duration::from_millis(500);
+
 // ---------------------------------------------------------------------------
 // 数据结构（spec 3.1 / 3.2）
 // ---------------------------------------------------------------------------
@@ -431,12 +438,14 @@ pub fn scan_worktree_sessions(worktree_path: &Path) -> WorktreeSessionIndex {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     前端列表项需要展示命中处前后各 30 字符的上下文片段，帮助用户判断是否是目标 session。
+///     片段必须保留原文大小写（用户看到的预览要和真实 transcript 一致），故匹配用小写、截取用原文。
 ///
 /// Code Logic（这个函数做什么）:
-///     在 text 的 UTF-8 字符序列里查找 query_lower 的所有出现位置，取前后各 radius 个字符作为片段，
-///     去重后追加到 out（最多 max_total 段）。
+///     把原始文本转成 char 数组（chars_orig）及其 ASCII 小写镜像（chars_lower，用 to_ascii_lowercase
+///     保证 1:1 映射避免 Unicode lower 展开导致的下标错位），在 chars_lower 上定位 query_lower 的命中位置，
+///     再用同样的下标区间从 chars_orig 截取片段，去重后追加到 out（最多 max_total 段）。
 fn collect_snippets(
-    text_lower: &str,
+    text_original: &str,
     query_lower: &str,
     radius: usize,
     out: &mut Vec<String>,
@@ -445,17 +454,21 @@ fn collect_snippets(
     if query_lower.is_empty() || out.len() >= max_total {
         return;
     }
-    let chars: Vec<char> = text_lower.chars().collect();
+    // 原文 char 数组：片段截取来源，保留原始大小写
+    let chars_orig: Vec<char> = text_original.chars().collect();
+    // ASCII 小写镜像：仅用于命中位置比对，1:1 映射保证下标与原文对齐
+    let chars_lower: Vec<char> = chars_orig.iter().map(|c| c.to_ascii_lowercase()).collect();
     let query_chars: Vec<char> = query_lower.chars().collect();
-    if query_chars.is_empty() || query_chars.len() > chars.len() {
+    if query_chars.is_empty() || query_chars.len() > chars_lower.len() {
         return;
     }
     let mut i = 0;
-    while i + query_chars.len() <= chars.len() && out.len() < max_total {
-        if chars[i..i + query_chars.len()] == query_chars[..] {
+    while i + query_chars.len() <= chars_lower.len() && out.len() < max_total {
+        if chars_lower[i..i + query_chars.len()] == query_chars[..] {
             let start = i.saturating_sub(radius);
-            let end = (i + query_chars.len() + radius).min(chars.len());
-            let snippet: String = chars[start..end].iter().collect();
+            let end = (i + query_chars.len() + radius).min(chars_orig.len());
+            // 从原文数组截取，保留大小写
+            let snippet: String = chars_orig[start..end].iter().collect();
             if !out.contains(&snippet) {
                 out.push(snippet);
             }
@@ -512,10 +525,11 @@ pub fn search_sessions(
         }
 
         // preview_snippets：title 优先，其次 user，其次 assistant，最多 3 段
+        // 传原始文本（保留大小写），collect_snippets 内部用 ASCII 小写镜像定位命中
         let mut snippets: Vec<String> = Vec::new();
         if title_hit {
             collect_snippets(
-                &title_lower,
+                &session.title,
                 &query_lower,
                 PREVIEW_SNIPPET_RADIUS,
                 &mut snippets,
@@ -524,7 +538,7 @@ pub fn search_sessions(
         }
         if user_hit {
             collect_snippets(
-                &user_lower,
+                &session.user_text,
                 &query_lower,
                 PREVIEW_SNIPPET_RADIUS,
                 &mut snippets,
@@ -533,7 +547,7 @@ pub fn search_sessions(
         }
         if assistant_hit {
             collect_snippets(
-                &assistant_lower,
+                &session.assistant_text,
                 &query_lower,
                 PREVIEW_SNIPPET_RADIUS,
                 &mut snippets,
@@ -673,8 +687,11 @@ pub fn ensure_worktree_session_index_scanned(
 ///
 /// Code Logic（这个函数做什么）:
 ///     用 notify::RecommendedWatcher 监听 ~/.claude/projects/<encoded_cwd>/ 目录（RecursiveMode::NonRecursive），
-///     Config poll_interval=500ms 做 debounce；回调内对 Create/Modify 事件的 jsonl 文件 spawn_blocking
-///     重扫并更新对应 HashMap entry；监听初始化失败只 warn 不阻断（降级为下次搜索重扫）。
+///     poll_interval=500ms 控制 poll backend 轮询频率；回调内再做一层应用层 debounce（距上次重扫
+///     不足 DEBOUNCE_INTERVAL 的事件跳过，依赖 jsonl append-only 保证最终一致），对 Create/Modify 的
+///     jsonl 文件 spawn_blocking 重扫并更新对应 HashMap entry。
+///     **降级语义（spec 5.1）**：watcher 创建失败或 watch 失败时，必须从 workbench_claude_session_indexes
+///     移除该 key 的索引，保证下次 ensure_worktree_session_index_scanned 命中不到缓存而重走慢路径重扫。
 fn spawn_session_watcher(
     state: &AppState,
     key: &str,
@@ -690,6 +707,7 @@ fn spawn_session_watcher(
         Some(d) => d.join(&encoded_cwd),
         None => {
             tracing::warn!("无法获取 home 目录，跳过 Claude session 文件监听 key={key}");
+            remove_index_on_failure(state, key);
             return;
         }
     };
@@ -699,6 +717,7 @@ fn spawn_session_watcher(
             "Claude session transcript 目录不存在，暂不监听: {:?}",
             watch_dir
         );
+        remove_index_on_failure(state, key);
         return;
     }
 
@@ -706,6 +725,11 @@ fn spawn_session_watcher(
     let index_handle = Arc::clone(shared);
     let watch_dir_for_cb = watch_dir.clone();
     let worktree_canonical_owned = worktree_canonical.to_path_buf();
+
+    // 应用层 debounce 计时器：记录"上次重扫时刻"。初始化为很久以前，保证首次事件能处理。
+    let last_refresh = Arc::new(std::sync::Mutex::new(
+        Instant::now() - DEBOUNCE_INTERVAL - Duration::from_secs(1),
+    ));
 
     let watcher: Result<RecommendedWatcher, notify::Error> = Watcher::new(
         move |res: Result<notify::Event, notify::Error>| {
@@ -733,6 +757,23 @@ fn spawn_session_watcher(
                 return;
             }
 
+            // 应用层 debounce：距上次重扫不足 DEBOUNCE_INTERVAL 的事件跳过。
+            // 依赖 jsonl append-only 特性：被跳过的高频事件不会丢内容，下一次写入事件会
+            // 重扫到全部累积内容，保证最终一致（spec 5.1 风险表 debounce 近似实现）。
+            {
+                let mut last = match last_refresh.lock() {
+                    Ok(g) => g,
+                    Err(err) => {
+                        tracing::warn!("debounce 计时器锁中毒，跳本次重扫: {err}");
+                        return;
+                    }
+                };
+                if last.elapsed() < DEBOUNCE_INTERVAL {
+                    return; // 距上次重扫不足 500ms，跳过本次（下一次事件会补上）
+                }
+                *last = Instant::now();
+            }
+
             // spawn_blocking 重扫对应 jsonl 文件（同步 IO，不阻塞 async runtime）
             let index_for_task = Arc::clone(&index_handle);
             let dir = watch_dir_for_cb.clone();
@@ -747,16 +788,20 @@ fn spawn_session_watcher(
     let mut watcher = match watcher {
         Ok(w) => w,
         Err(err) => {
+            // 降级：移除已写入的索引，下次搜索会重扫（spec 5.1）
+            remove_index_on_failure(state, key);
             tracing::warn!(
-                "启动 Claude session 文件监听失败（降级为每次重扫）key={key}: {err}"
+                "启动 Claude session 文件监听失败，已移除索引（下次搜索将重扫）key={key}: {err}"
             );
             return;
         }
     };
 
     if let Err(err) = watcher.watch(&watch_dir, RecursiveMode::NonRecursive) {
+        // 降级：移除已写入的索引，下次搜索会重扫（spec 5.1）
+        remove_index_on_failure(state, key);
         tracing::warn!(
-            "监听 Claude session 目录失败（降级为每次重扫）{:?}: {err}",
+            "监听 Claude session 目录失败，已移除索引（下次搜索将重扫）{:?}: {err}",
             watch_dir
         );
         return;
@@ -772,6 +817,30 @@ fn spawn_session_watcher(
         "已启动 Claude session 文件监听 key={key} dir={:?}",
         watch_dir
     );
+}
+
+/// 监听失败降级时从 indexes 缓存移除指定 worktree 的索引（spec 5.1）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     watcher 创建/启动失败时，索引已写入 workbench_claude_session_indexes，若不移除，
+///     下次 ensure_worktree_session_index_scanned 会命中缓存直接返回旧索引，永不重扫。
+///     spec 5.1 要求监听失败降级为每次搜索重扫，故必须删除该 key。
+///
+/// Code Logic（这个函数做什么）:
+///     持写锁删除 indexes 中 key 对应的 entry；失败（如锁中毒）只 warn 不 panic。
+fn remove_index_on_failure(state: &AppState, key: &str) {
+    let mut indexes = match state.workbench_claude_session_indexes.write() {
+        Ok(g) => g,
+        Err(err) => {
+            tracing::warn!("移除 session 索引时写锁中毒（key={key}）: {err}");
+            return;
+        }
+    };
+    if indexes.remove(key).is_some() {
+        tracing::info!(
+            "监听失败已移除 worktree session 索引缓存（下次搜索重扫）key={key}"
+        );
+    }
 }
 
 /// 重扫指定 jsonl 路径并更新内存索引。
@@ -1205,16 +1274,18 @@ mod tests {
 
     /// Business Logic（为什么需要这个测试）:
     ///     preview_snippets 应取命中位置前后各 30 字符的上下文片段，帮助用户预判是否是目标 session。
+    ///     且片段必须保留原文大小写（不能返回全小写文本，否则用户预览失真）。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     构造一个 user 文本含关键词的 session，搜索后断言 preview_snippets 非空且含关键词。
+    ///     构造一段含大小写的 user 文本（"foo Target bar"），用小写关键词 "target" 搜索，
+    ///     断言 preview_snippets 非空、含关键词、且保留原文大写 "Target"。
     #[test]
     fn search_preview_snippets_extract_context_around_hit() {
         let tmp = unique_temp_dir("search_preview_snippets_extract_context_around_hit");
-        // 构造一段足够长的文本，关键词在中间
+        // 构造一段足够长的文本，关键词在中间，且含大小写以验证片段保留原文大小写
         let prefix = "x".repeat(40);
         let suffix = "y".repeat(40);
-        let content = format!("{prefix}target{suffix}");
+        let content = format!("{prefix}foo Target bar{suffix}");
         let line = format!(
             r#"{{"type":"user","message":{{"role":"user","content":{}}},"timestamp":"2026-01-01T00:00:00Z"}}"#,
             serde_json::Value::String(content)
@@ -1232,15 +1303,75 @@ mod tests {
             last_scan_at: Utc::now().to_rfc3339(),
         };
 
+        // 用小写关键词搜索，应命中大写的 "Target"
         let hits = search_sessions(&index, "target", 50);
         assert_eq!(hits.len(), 1);
+        assert!(hits[0].user_hit);
         assert!(!hits[0].preview_snippets.is_empty());
         let snippet = &hits[0].preview_snippets[0];
-        // 片段应包含关键词
-        assert!(snippet.contains("target"));
-        // 片段长度应 <= 关键词长度 + 2*30（前后各 30 字符）
-        assert!(snippet.len() <= "target".len() + 2 * PREVIEW_SNIPPET_RADIUS);
+        // 片段应包含关键词（小写匹配命中大写原文）
+        assert!(snippet.to_lowercase().contains("target"));
+        // 关键：片段保留原文大小写，不是全小写
+        assert!(
+            snippet.contains("Target"),
+            "snippet 应保留原文大小写，实际: {snippet}"
+        );
+        // 片段长度应 <= 关键词长度 + 前后各 30 字符
+        assert!(snippet.chars().count() <= "foo Target bar".chars().count() + 2 * PREVIEW_SNIPPET_RADIUS);
         // 应包含关键词前面的部分上下文
         assert!(snippet.contains('x'));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     recent_messages 上限为 20（spec 3.1），超过时只保留按时间排序的尾部 20 条，
+    ///     保证 preview 面板数据量可控。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造一个含 25 条 user/assistant 交替消息的 jsonl（带递增 timestamp），调用
+    ///     build_session_index，断言 recent_messages.len() == 20，message_count == 25，
+    ///     且 recent_messages 恰好是最后 20 条（首条文本含序号 6，末条含序号 25）。
+    #[test]
+    fn recent_messages_capped_at_twenty() {
+        let tmp = unique_temp_dir("recent_messages_capped_at_twenty");
+        let mut lines: Vec<String> = Vec::new();
+        // 25 条 user/assistant 交替消息，timestamp 递增，文本带序号便于断言尾部
+        for i in 1..=25 {
+            let role = if i % 2 == 1 { "user" } else { "assistant" };
+            let text = format!("msg-{i:02}");
+            let ts = format!("2026-01-01T00:{:02}:00Z", i); // 每分钟一条，严格递增
+            let content = if role == "user" {
+                format!(r#""{}""#, text)
+            } else {
+                format!(r#"[{{"type":"text","text":"{}"}}]"#, text)
+            };
+            lines.push(format!(
+                r#"{{"type":"{role}","message":{{"role":"{role}","content":{content}}},"timestamp":"{ts}"}}"#
+            ));
+        }
+        let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let path = write_jsonl(&tmp, "sess-many", &line_refs);
+
+        let index = build_session_index(&path).expect("应解析成功");
+        // message_count 记录全部有效消息（25 条，user 13 + assistant 12）
+        assert_eq!(index.message_count, 25, "message_count 应为全部消息数");
+        // recent_messages 被截断为 20
+        assert_eq!(
+            index.recent_messages.len(),
+            RECENT_MESSAGES_MAX,
+            "recent_messages 应被截断为 {}",
+            RECENT_MESSAGES_MAX
+        );
+        // 首条应是序号 6（25-20+1=6），末条是序号 25
+        assert_eq!(
+            index.recent_messages[0].text, "msg-06",
+            "recent_messages 首条应是按时间排序的第 6 条"
+        );
+        assert_eq!(
+            index.recent_messages[19].text, "msg-25",
+            "recent_messages 末条应是最后一条"
+        );
+        // 首末时间戳也应是第 6 条和第 25 条的时间
+        assert_eq!(index.recent_messages[0].timestamp, "2026-01-01T00:06:00Z");
+        assert_eq!(index.recent_messages[19].timestamp, "2026-01-01T00:25:00Z");
     }
 }
