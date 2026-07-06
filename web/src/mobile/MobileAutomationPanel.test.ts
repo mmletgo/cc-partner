@@ -37,7 +37,9 @@ const panelSource = readFileSync(
   new URL('./components/MobileAutomationPanel.tsx', import.meta.url),
   'utf8',
 );
+const mobileWorkbenchSource = readFileSync(new URL('./MobileWorkbench.tsx', import.meta.url), 'utf8');
 const stylesSource = readFileSync(new URL('./MobileWorkbench.module.css', import.meta.url), 'utf8');
+const workbenchHttpSource = readFileSync(new URL('../api/workbenchHttp.ts', import.meta.url), 'utf8');
 const zhWorkbench = readFileSync(new URL('../i18n/locales/zh/workbench.json', import.meta.url), 'utf8');
 const enWorkbench = readFileSync(new URL('../i18n/locales/en/workbench.json', import.meta.url), 'utf8');
 const typesSource = readFileSync(new URL('../lib/types.ts', import.meta.url), 'utf8');
@@ -62,6 +64,96 @@ assertContains(
   panelSource,
   'httpOrchestratorTransport.tasks.createView',
   'mobile automation should create local or remote tasks through task view HTTP proxy',
+);
+assertContains(
+  panelSource,
+  'splitOrchestratorTaskViews(taskViews)',
+  'mobile automation should split task-view data into real tasks and pending remote outbox',
+);
+assertContains(
+  panelSource,
+  'MOBILE_AUTOMATION_WORKFLOW_STATES',
+  'mobile automation should render compact groups by task.workflowState',
+);
+assertContains(
+  panelSource,
+  'groupedTasks[task.task.workflowState].push(task)',
+  'mobile automation grouping must use workflowState rather than legacy status',
+);
+assertContains(
+  panelSource,
+  'pendingRemoteItems.map',
+  'mobile automation pending remote outbox should render in a separate list',
+);
+assertContains(
+  panelSource,
+  'setSelectedTaskView(view)',
+  'mobile automation should support click-to-expand task details instead of drag interactions',
+);
+assertNotContains(
+  panelSource,
+  'draggable=',
+  'mobile automation must not implement horizontal drag/drop board behavior',
+);
+assertContains(
+  panelSource,
+  'httpOrchestratorTransport.tasks.listEvidence',
+  'mobile automation details should load task evidence through HTTP transport',
+);
+assertContains(
+  panelSource,
+  'lastRuntimeMessage',
+  'mobile automation rows should show runtime summary with lastRuntimeMessage',
+);
+assertContains(
+  panelSource,
+  'claudeSessionId',
+  'mobile automation rows should show Claude session runtime metadata',
+);
+assertContains(
+  panelSource,
+  'transcriptPath',
+  'mobile automation rows should show transcript runtime metadata',
+);
+assertContains(
+  panelSource,
+  'blockedReason',
+  'mobile automation detail should show blocked reason when available',
+);
+assertContains(
+  panelSource,
+  'workbench:mobile.automationPanel.unknown',
+  'mobile automation runtime metadata should use localized unknown fallback',
+);
+assertContains(
+  panelSource,
+  "createAction: 'backlog'",
+  'mobile automation create dialog should support create-to-backlog action',
+);
+assertContains(
+  panelSource,
+  "createAction: 'todo'",
+  'mobile automation create dialog should support create-to-todo action',
+);
+assertContains(
+  panelSource,
+  "createAction: 'start'",
+  'mobile automation create dialog should support create-and-start action',
+);
+assertContains(
+  workbenchHttpSource,
+  'createAction: request.createAction',
+  'HTTP createView should send explicit createAction to backend',
+);
+assertContains(
+  mobileWorkbenchSource,
+  'onOpenExecutionContext={handleOpenAutomationExecutionContext}',
+  'MobileWorkbench should let automation details switch to the existing terminal panel',
+);
+assertContains(
+  panelSource,
+  'onOpenExecutionContext',
+  'MobileAutomationPanel should expose open-terminal action through a callback prop',
 );
 assertContains(
   panelSource,
@@ -94,6 +186,16 @@ assertContains(
   'zh workbench locale should include mobile AI completion copy',
 );
 assertContains(
+  zhWorkbench,
+  '"createBacklog": "创建到 Backlog"',
+  'zh workbench locale should include create backlog action copy',
+);
+assertContains(
+  zhWorkbench,
+  '"openExecutionContext": "打开执行现场"',
+  'zh workbench locale should include open execution context copy',
+);
+assertContains(
   enWorkbench,
   '"completeWithAi": "Fill with AI"',
   'en workbench locale should include mobile AI completion copy',
@@ -107,6 +209,16 @@ assertContains(
   typesSource,
   'externalLabels: string[] | null;',
   'mobile automation task DTO should expose tracker externalLabels',
+);
+assertContains(
+  enWorkbench,
+  '"createBacklog": "Create in Backlog"',
+  'en workbench locale should include create backlog action copy',
+);
+assertContains(
+  enWorkbench,
+  '"openExecutionContext": "Open execution context"',
+  'en workbench locale should include open execution context copy',
 );
 
 console.log('MobileAutomationPanel.test.ts passed');
