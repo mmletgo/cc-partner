@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 
 const MAX_CONCURRENT_TASKS_MIN: i64 = 1;
 const MAX_CONCURRENT_TASKS_MAX: i64 = 8;
-const MAX_VERIFICATION_COMMANDS: usize = 20;
-const MAX_VERIFICATION_COMMAND_CHARS: usize = 500;
+pub(crate) const MAX_VERIFICATION_COMMANDS: usize = 20;
+pub(crate) const MAX_VERIFICATION_COMMAND_CHARS: usize = 500;
 
 /// Orchestrator 自动化配置前端 DTO。
 ///
@@ -96,26 +96,38 @@ pub fn default_orchestrator_automation_config() -> OrchestratorAutomationConfig 
 /// Code Logic（这个函数做什么）:
 ///     按行 trim、过滤空行、保留顺序；限制最多 20 条，每条最长 500 字符。
 pub fn normalize_verification_commands(input: &str) -> Result<Vec<String>, AppError> {
-    let commands = input
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
+    normalize_verification_command_items(input.lines().map(ToOwned::to_owned).collect(), "验证命令")
+}
+
+/// 归一化验证命令列表。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Settings 和 WORKFLOW.md 都会提供验证命令，二者必须共享数量和长度限制，避免不同入口行为漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     对命令列表逐项 trim、过滤空白；限制最多 20 条、单条 500 字符，并在错误中包含来源标签和索引。
+pub(crate) fn normalize_verification_command_items(
+    items: Vec<String>,
+    source_label: &str,
+) -> Result<Vec<String>, AppError> {
+    let commands = items
+        .into_iter()
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty())
         .collect::<Vec<_>>();
 
     if commands.len() > MAX_VERIFICATION_COMMANDS {
         return Err(AppError::generic(format!(
-            "验证命令最多只能配置 {MAX_VERIFICATION_COMMANDS} 条"
+            "{source_label} 最多只能配置 {MAX_VERIFICATION_COMMANDS} 条"
         )));
     }
 
-    if commands
-        .iter()
-        .any(|command| command.chars().count() > MAX_VERIFICATION_COMMAND_CHARS)
-    {
-        return Err(AppError::generic(format!(
-            "单条验证命令最长不能超过 {MAX_VERIFICATION_COMMAND_CHARS} 字符"
-        )));
+    for (index, command) in commands.iter().enumerate() {
+        if command.chars().count() > MAX_VERIFICATION_COMMAND_CHARS {
+            return Err(AppError::generic(format!(
+                "{source_label}[{index}] 最长不能超过 {MAX_VERIFICATION_COMMAND_CHARS} 字符"
+            )));
+        }
     }
 
     Ok(commands)

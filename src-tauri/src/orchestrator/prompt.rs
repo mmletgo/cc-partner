@@ -36,7 +36,7 @@ pub struct RepairPromptContext<'a> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     对用户可控文本 trim 后逐行加 Markdown 引用前缀 `> `；空文本输出占位行，保持 Prompt 可读且避免裸哨兵行。
-fn render_user_block(value: &str) -> String {
+pub(crate) fn render_user_block(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return "> （未填写）".to_string();
@@ -49,6 +49,17 @@ fn render_user_block(value: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Prompt 生成器和 workflow 模板都必须避免把完成哨兵作为独立行写入终端回显，否则会提前触发验证。
+///
+/// Code Logic（这个函数做什么）:
+///     按行检查去掉 CR 后是否精确等于 DEV_DONE_SENTINEL，命中返回 true。
+pub(crate) fn contains_standalone_dev_done_sentinel(value: &str) -> bool {
+    value
+        .lines()
+        .any(|line| line.strip_suffix('\r').unwrap_or(line) == DEV_DONE_SENTINEL)
 }
 
 /// Business Logic（为什么需要这个函数）:
