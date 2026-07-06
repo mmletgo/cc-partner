@@ -114,6 +114,7 @@ pub(crate) fn build_orchestrator_task_row(
         updated_at: now,
         started_at: None,
         finished_at: None,
+        ..OrchestratorTaskRow::default_for_status(OrchestratorTaskStatus::Draft)
     })
 }
 
@@ -1597,6 +1598,7 @@ mod tests {
             updated_at: "2026-07-05T00:00:00Z".to_string(),
             started_at: None,
             finished_at: None,
+            ..OrchestratorTaskRow::default_for_status(status)
         }
     }
 
@@ -1918,10 +1920,11 @@ mod tests {
             updated_at: "2026-07-05T00:00:00Z".to_string(),
             started_at: None,
             finished_at: None,
+            ..OrchestratorTaskRow::default_for_status(OrchestratorTaskStatus::Running)
         };
         let draft = OrchestratorTaskRow {
             status: OrchestratorTaskStatus::Draft,
-            ..running.clone()
+            ..OrchestratorTaskRow::default_for_status(OrchestratorTaskStatus::Draft)
         };
 
         assert!(ensure_task_can_complete_agent_run(&running).is_ok());

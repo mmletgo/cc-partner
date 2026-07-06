@@ -485,6 +485,7 @@ mod tests {
             updated_at: "2026-07-05T00:00:00Z".to_string(),
             started_at: Some("2026-07-05T00:00:00Z".to_string()),
             finished_at: None,
+            ..OrchestratorTaskRow::default_for_status(OrchestratorTaskStatus::Verifying)
         }
     }
 

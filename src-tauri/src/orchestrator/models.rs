@@ -124,6 +124,259 @@ impl OrchestratorTaskStatus {
     }
 }
 
+/// Orchestrator 任务工作流状态。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     任务的看板流转需要与运行时 runner 状态拆分，避免“正在排队/运行”与“待办/返工/合并”等用户可见阶段互相覆盖。
+///
+/// Code Logic（这个枚举做什么）:
+///     表达用户可见的任务工作流状态，serde 使用 camelCase，SQLite 使用稳定字符串持久化。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrchestratorWorkflowState {
+    Backlog,
+    Todo,
+    InProgress,
+    HumanReview,
+    Rework,
+    Merging,
+    Done,
+    Canceled,
+}
+
+impl OrchestratorWorkflowState {
+    /// Business Logic（为什么需要这个函数）:
+    ///     split state 会进入 SQLite schema，数据库内必须保存稳定且可读的工作流状态字符串。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     把工作流状态枚举转换为 camelCase 存储字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Backlog => "backlog",
+            Self::Todo => "todo",
+            Self::InProgress => "inProgress",
+            Self::HumanReview => "humanReview",
+            Self::Rework => "rework",
+            Self::Merging => "merging",
+            Self::Done => "done",
+            Self::Canceled => "canceled",
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     仓储读取旧库或新库任务时需要把工作流状态还原为强类型，避免后续逻辑处理裸字符串。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     解析稳定存储字符串；未知值转为 AppError，显式暴露数据损坏或迁移遗漏。
+    pub fn from_str(value: &str) -> Result<Self, AppError> {
+        match value {
+            "backlog" => Ok(Self::Backlog),
+            "todo" => Ok(Self::Todo),
+            "inProgress" => Ok(Self::InProgress),
+            "humanReview" => Ok(Self::HumanReview),
+            "rework" => Ok(Self::Rework),
+            "merging" => Ok(Self::Merging),
+            "done" => Ok(Self::Done),
+            "canceled" => Ok(Self::Canceled),
+            other => Err(AppError::generic(format!(
+                "未知 Orchestrator 工作流状态: {other}"
+            ))),
+        }
+    }
+}
+
+/// Orchestrator 任务运行状态。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     Runner 生命周期需要独立表达排队、准备、运行、验证、阻塞和交付，供调度器和前端判断当前执行现场。
+///
+/// Code Logic（这个枚举做什么）:
+///     表达机器可执行的运行态，serde 使用 camelCase，SQLite 使用稳定字符串持久化。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrchestratorRunState {
+    Idle,
+    Queued,
+    Preparing,
+    Running,
+    Verifying,
+    Retrying,
+    Blocked,
+    Delivering,
+}
+
+impl OrchestratorRunState {
+    /// Business Logic（为什么需要这个函数）:
+    ///     split runtime state 需要持久化到 SQLite，便于崩溃恢复和跨设备诊断。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     把运行状态枚举转换为稳定存储字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Queued => "queued",
+            Self::Preparing => "preparing",
+            Self::Running => "running",
+            Self::Verifying => "verifying",
+            Self::Retrying => "retrying",
+            Self::Blocked => "blocked",
+            Self::Delivering => "delivering",
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     仓储读取任务行时必须恢复强类型运行状态，避免调度逻辑误用未知字符串。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     解析稳定存储字符串；未知值返回 AppError。
+    pub fn from_str(value: &str) -> Result<Self, AppError> {
+        match value {
+            "idle" => Ok(Self::Idle),
+            "queued" => Ok(Self::Queued),
+            "preparing" => Ok(Self::Preparing),
+            "running" => Ok(Self::Running),
+            "verifying" => Ok(Self::Verifying),
+            "retrying" => Ok(Self::Retrying),
+            "blocked" => Ok(Self::Blocked),
+            "delivering" => Ok(Self::Delivering),
+            other => Err(AppError::generic(format!(
+                "未知 Orchestrator 运行状态: {other}"
+            ))),
+        }
+    }
+}
+
+/// Orchestrator runner 当前尝试阶段。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     可见 Runner 需要向用户展示当前卡在准备 workspace、构建 prompt、启动 Claude、流式输出或收尾等具体阶段。
+///
+/// Code Logic（这个枚举做什么）:
+///     表达单次执行 attempt 的细粒度 phase，serde 使用 camelCase，SQLite 存储同名稳定字符串。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrchestratorAttemptPhase {
+    PreparingWorkspace,
+    BuildingPrompt,
+    LaunchingRunner,
+    InitializingSession,
+    Streaming,
+    Finishing,
+    Succeeded,
+    Failed,
+    TimedOut,
+    Stalled,
+    CanceledByReconciliation,
+}
+
+impl OrchestratorAttemptPhase {
+    /// Business Logic（为什么需要这个函数）:
+    ///     attempt phase 会记录在任务行中，数据库值必须稳定以支持恢复、排查和未来前端筛选。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     把 attempt phase 枚举转换为 camelCase 存储字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PreparingWorkspace => "preparingWorkspace",
+            Self::BuildingPrompt => "buildingPrompt",
+            Self::LaunchingRunner => "launchingRunner",
+            Self::InitializingSession => "initializingSession",
+            Self::Streaming => "streaming",
+            Self::Finishing => "finishing",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::TimedOut => "timedOut",
+            Self::Stalled => "stalled",
+            Self::CanceledByReconciliation => "canceledByReconciliation",
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     仓储读取 attempt phase 时需要强类型结果，未知值应显式暴露而不是被静默忽略。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     解析 camelCase 存储字符串；未知值返回 AppError。
+    pub fn from_str(value: &str) -> Result<Self, AppError> {
+        match value {
+            "preparingWorkspace" => Ok(Self::PreparingWorkspace),
+            "buildingPrompt" => Ok(Self::BuildingPrompt),
+            "launchingRunner" => Ok(Self::LaunchingRunner),
+            "initializingSession" => Ok(Self::InitializingSession),
+            "streaming" => Ok(Self::Streaming),
+            "finishing" => Ok(Self::Finishing),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            "timedOut" => Ok(Self::TimedOut),
+            "stalled" => Ok(Self::Stalled),
+            "canceledByReconciliation" => Ok(Self::CanceledByReconciliation),
+            other => Err(AppError::generic(format!(
+                "未知 Orchestrator 尝试阶段: {other}"
+            ))),
+        }
+    }
+}
+
+/// Orchestrator split state 聚合结果。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     迁移旧 status 时需要一次性得到工作流状态和运行状态，确保历史任务在新模型下可解释。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 workflow_state/run_state 二元组，并提供 legacy status 到 split state 的确定性映射。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplitTaskState {
+    pub workflow_state: OrchestratorWorkflowState,
+    pub run_state: OrchestratorRunState,
+}
+
+impl SplitTaskState {
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧数据库只保存单一 status；升级到 split state 时必须保持旧任务在看板和运行态上的语义一致。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 legacy OrchestratorTaskStatus 返回对应 workflow_state 与 run_state，供 migration 和新建默认值复用。
+    pub fn from_legacy_status(status: OrchestratorTaskStatus) -> Self {
+        match status {
+            OrchestratorTaskStatus::Draft => Self {
+                workflow_state: OrchestratorWorkflowState::Backlog,
+                run_state: OrchestratorRunState::Idle,
+            },
+            OrchestratorTaskStatus::Queued => Self {
+                workflow_state: OrchestratorWorkflowState::Todo,
+                run_state: OrchestratorRunState::Queued,
+            },
+            OrchestratorTaskStatus::Preparing => Self {
+                workflow_state: OrchestratorWorkflowState::InProgress,
+                run_state: OrchestratorRunState::Preparing,
+            },
+            OrchestratorTaskStatus::Running => Self {
+                workflow_state: OrchestratorWorkflowState::InProgress,
+                run_state: OrchestratorRunState::Running,
+            },
+            OrchestratorTaskStatus::Verifying => Self {
+                workflow_state: OrchestratorWorkflowState::InProgress,
+                run_state: OrchestratorRunState::Verifying,
+            },
+            OrchestratorTaskStatus::Delivering => Self {
+                workflow_state: OrchestratorWorkflowState::Merging,
+                run_state: OrchestratorRunState::Delivering,
+            },
+            OrchestratorTaskStatus::Done => Self {
+                workflow_state: OrchestratorWorkflowState::Done,
+                run_state: OrchestratorRunState::Idle,
+            },
+            OrchestratorTaskStatus::Blocked => Self {
+                workflow_state: OrchestratorWorkflowState::Rework,
+                run_state: OrchestratorRunState::Blocked,
+            },
+            OrchestratorTaskStatus::Aborted => Self {
+                workflow_state: OrchestratorWorkflowState::Canceled,
+                run_state: OrchestratorRunState::Idle,
+            },
+        }
+    }
+}
+
 /// Orchestrator 阶段输出。
 ///
 /// Business Logic（为什么需要这个枚举）:
@@ -162,6 +415,20 @@ pub struct OrchestratorTaskRow {
     pub goal: String,
     pub acceptance_criteria: String,
     pub status: OrchestratorTaskStatus,
+    pub workflow_state: OrchestratorWorkflowState,
+    pub run_state: OrchestratorRunState,
+    pub attempt_phase: Option<OrchestratorAttemptPhase>,
+    pub source: String,
+    pub external_id: Option<String>,
+    pub external_identifier: Option<String>,
+    pub external_url: Option<String>,
+    pub runner_provider: Option<String>,
+    pub claude_session_id: Option<String>,
+    pub transcript_path: Option<String>,
+    pub runtime_started_at: Option<String>,
+    pub last_activity_at: Option<String>,
+    pub last_runtime_event: Option<String>,
+    pub last_runtime_message: Option<String>,
     pub priority: i64,
     pub branch_name: Option<String>,
     pub worktree_id: Option<String>,
@@ -213,6 +480,20 @@ pub struct OrchestratorTaskDto {
     pub goal: String,
     pub acceptance_criteria: String,
     pub status: OrchestratorTaskStatus,
+    pub workflow_state: OrchestratorWorkflowState,
+    pub run_state: OrchestratorRunState,
+    pub attempt_phase: Option<OrchestratorAttemptPhase>,
+    pub source: String,
+    pub external_id: Option<String>,
+    pub external_identifier: Option<String>,
+    pub external_url: Option<String>,
+    pub runner_provider: Option<String>,
+    pub claude_session_id: Option<String>,
+    pub transcript_path: Option<String>,
+    pub runtime_started_at: Option<String>,
+    pub last_activity_at: Option<String>,
+    pub last_runtime_event: Option<String>,
+    pub last_runtime_message: Option<String>,
     pub priority: i64,
     pub branch_name: Option<String>,
     pub worktree_id: Option<String>,
@@ -275,6 +556,47 @@ pub struct OrchestratorEvidenceDto {
 
 impl OrchestratorTaskRow {
     /// Business Logic（为什么需要这个函数）:
+    ///     split state 扩展后，既有命令和测试构造任务时需要统一的内部默认值，避免每个调用点重复填充运行元数据。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     根据 legacy status 生成对应 workflow/run state，并填充 internal 来源、默认 runner provider 和空运行时字段。
+    pub fn default_for_status(status: OrchestratorTaskStatus) -> Self {
+        let split_state = SplitTaskState::from_legacy_status(status);
+        Self {
+            id: String::new(),
+            project_id: String::new(),
+            title: String::new(),
+            goal: String::new(),
+            acceptance_criteria: String::new(),
+            status,
+            workflow_state: split_state.workflow_state,
+            run_state: split_state.run_state,
+            attempt_phase: None,
+            source: "internal".to_string(),
+            external_id: None,
+            external_identifier: None,
+            external_url: None,
+            runner_provider: Some("claudeCodeVisible".to_string()),
+            claude_session_id: None,
+            transcript_path: None,
+            runtime_started_at: None,
+            last_activity_at: None,
+            last_runtime_event: None,
+            last_runtime_message: None,
+            priority: 0,
+            branch_name: None,
+            worktree_id: None,
+            session_id: None,
+            blocked_reason: None,
+            attempt: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+            started_at: None,
+            finished_at: None,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     命令层返回任务时不应暴露内部枚举和 snake_case 语义，需要统一 DTO 转换入口。
     ///
     /// Code Logic（这个函数做什么）:
@@ -282,6 +604,17 @@ impl OrchestratorTaskRow {
     #[allow(dead_code)]
     pub fn to_dto(&self) -> OrchestratorTaskDto {
         OrchestratorTaskDto::from(self.clone())
+    }
+}
+
+impl OrchestratorTaskDto {
+    /// Business Logic（为什么需要这个函数）:
+    ///     协议和 outbox 单测需要构造 DTO 样本，split state 扩展后应与 Row 默认语义保持一致。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     根据 legacy status 生成默认 DTO 字段，调用点可用 struct update 覆盖业务字段。
+    pub fn default_for_status(status: OrchestratorTaskStatus) -> Self {
+        OrchestratorTaskDto::from(OrchestratorTaskRow::default_for_status(status))
     }
 }
 
@@ -299,6 +632,20 @@ impl From<OrchestratorTaskRow> for OrchestratorTaskDto {
             goal: row.goal,
             acceptance_criteria: row.acceptance_criteria,
             status: row.status,
+            workflow_state: row.workflow_state,
+            run_state: row.run_state,
+            attempt_phase: row.attempt_phase,
+            source: row.source,
+            external_id: row.external_id,
+            external_identifier: row.external_identifier,
+            external_url: row.external_url,
+            runner_provider: row.runner_provider,
+            claude_session_id: row.claude_session_id,
+            transcript_path: row.transcript_path,
+            runtime_started_at: row.runtime_started_at,
+            last_activity_at: row.last_activity_at,
+            last_runtime_event: row.last_runtime_event,
+            last_runtime_message: row.last_runtime_message,
             priority: row.priority,
             branch_name: row.branch_name,
             worktree_id: row.worktree_id,
@@ -309,6 +656,68 @@ impl From<OrchestratorTaskRow> for OrchestratorTaskDto {
             updated_at: row.updated_at,
             started_at: row.started_at,
             finished_at: row.finished_at,
+        }
+    }
+}
+
+#[cfg(test)]
+mod split_state_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_status_maps_to_split_states() {
+        let cases = [
+            (
+                OrchestratorTaskStatus::Draft,
+                OrchestratorWorkflowState::Backlog,
+                OrchestratorRunState::Idle,
+            ),
+            (
+                OrchestratorTaskStatus::Queued,
+                OrchestratorWorkflowState::Todo,
+                OrchestratorRunState::Queued,
+            ),
+            (
+                OrchestratorTaskStatus::Preparing,
+                OrchestratorWorkflowState::InProgress,
+                OrchestratorRunState::Preparing,
+            ),
+            (
+                OrchestratorTaskStatus::Running,
+                OrchestratorWorkflowState::InProgress,
+                OrchestratorRunState::Running,
+            ),
+            (
+                OrchestratorTaskStatus::Verifying,
+                OrchestratorWorkflowState::InProgress,
+                OrchestratorRunState::Verifying,
+            ),
+            (
+                OrchestratorTaskStatus::Delivering,
+                OrchestratorWorkflowState::Merging,
+                OrchestratorRunState::Delivering,
+            ),
+            (
+                OrchestratorTaskStatus::Done,
+                OrchestratorWorkflowState::Done,
+                OrchestratorRunState::Idle,
+            ),
+            (
+                OrchestratorTaskStatus::Blocked,
+                OrchestratorWorkflowState::Rework,
+                OrchestratorRunState::Blocked,
+            ),
+            (
+                OrchestratorTaskStatus::Aborted,
+                OrchestratorWorkflowState::Canceled,
+                OrchestratorRunState::Idle,
+            ),
+        ];
+
+        for (legacy, workflow, run) in cases {
+            let mapped = SplitTaskState::from_legacy_status(legacy);
+            assert_eq!(mapped.workflow_state, workflow);
+            assert_eq!(mapped.run_state, run);
         }
     }
 }

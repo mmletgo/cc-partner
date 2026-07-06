@@ -4,8 +4,9 @@
 
 use crate::error::AppError;
 use crate::orchestrator::models::{
-    OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskAttemptRow,
-    OrchestratorTaskRow, OrchestratorTaskStatus,
+    OrchestratorAttemptPhase, OrchestratorEvidenceDto, OrchestratorProjectConfigDto,
+    OrchestratorRunState, OrchestratorTaskAttemptRow, OrchestratorTaskRow, OrchestratorTaskStatus,
+    OrchestratorWorkflowState, SplitTaskState,
 };
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
@@ -17,8 +18,10 @@ use std::time::Duration;
 use uuid::Uuid;
 
 const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_criteria, status, priority, \
-    branch_name, worktree_id, session_id, blocked_reason, attempt, created_at, updated_at, \
-    started_at, finished_at";
+    workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
+    external_url, runner_provider, claude_session_id, transcript_path, runtime_started_at, \
+    last_activity_at, last_runtime_event, last_runtime_message, branch_name, worktree_id, \
+    session_id, blocked_reason, attempt, created_at, updated_at, started_at, finished_at";
 const PROJECT_CONFIG_COLUMNS: &str = "project_id, enabled, max_concurrent_tasks, branch_prefix, \
     verification_commands_json, auto_commit, auto_push_task_branch, auto_merge_to_main, \
     auto_push_main, retry_limit, retain_worktree_on_done, retain_worktree_on_blocked, \
@@ -39,6 +42,20 @@ pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestra
   goal TEXT NOT NULL,
   acceptance_criteria TEXT NOT NULL,
   status TEXT NOT NULL,
+  workflow_state TEXT NOT NULL DEFAULT 'backlog',
+  run_state TEXT NOT NULL DEFAULT 'idle',
+  attempt_phase TEXT,
+  source TEXT NOT NULL DEFAULT 'internal',
+  external_id TEXT,
+  external_identifier TEXT,
+  external_url TEXT,
+  runner_provider TEXT,
+  claude_session_id TEXT,
+  transcript_path TEXT,
+  runtime_started_at TEXT,
+  last_activity_at TEXT,
+  last_runtime_event TEXT,
+  last_runtime_message TEXT,
   priority INTEGER NOT NULL DEFAULT 0,
   branch_name TEXT,
   worktree_id TEXT,
@@ -200,8 +217,44 @@ impl OrchestratorRepo {
     /// Code Logic（这个函数做什么）:
     ///     逐条执行 CREATE TABLE/CREATE INDEX IF NOT EXISTS，兼容旧库且不使用 sqlx 迁移宏。
     pub async fn init_schema(pool: &SqlitePool) -> Result<(), AppError> {
+        sqlx::query(ORCHESTRATOR_TASK_SCHEMA).execute(pool).await?;
+        let added_workflow_state = ensure_column(
+            pool,
+            "orchestrator_tasks",
+            "workflow_state",
+            "TEXT NOT NULL DEFAULT 'backlog'",
+        )
+        .await?;
+        let added_run_state = ensure_column(
+            pool,
+            "orchestrator_tasks",
+            "run_state",
+            "TEXT NOT NULL DEFAULT 'idle'",
+        )
+        .await?;
+        ensure_column(pool, "orchestrator_tasks", "attempt_phase", "TEXT").await?;
+        ensure_column(
+            pool,
+            "orchestrator_tasks",
+            "source",
+            "TEXT NOT NULL DEFAULT 'internal'",
+        )
+        .await?;
+        ensure_column(pool, "orchestrator_tasks", "external_id", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "external_identifier", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "external_url", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "runner_provider", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "claude_session_id", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "transcript_path", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "runtime_started_at", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "last_activity_at", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "last_runtime_event", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "last_runtime_message", "TEXT").await?;
+        if added_workflow_state || added_run_state {
+            backfill_split_state_from_legacy_status(pool).await?;
+        }
+
         for statement in [
-            ORCHESTRATOR_TASK_SCHEMA,
             ORCHESTRATOR_TASKS_PROJECT_STATUS_INDEX,
             ORCHESTRATOR_TASKS_STATUS_INDEX,
             ORCHESTRATOR_PROJECT_CONFIG_SCHEMA,
@@ -232,9 +285,11 @@ impl OrchestratorRepo {
         sqlx::query(
             "INSERT INTO orchestrator_tasks \
              (id, project_id, title, goal, acceptance_criteria, status, priority, branch_name, \
-              worktree_id, session_id, blocked_reason, attempt, created_at, updated_at, \
-              started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
+              external_url, runner_provider, claude_session_id, transcript_path, runtime_started_at, \
+              last_activity_at, last_runtime_event, last_runtime_message, worktree_id, session_id, \
+              blocked_reason, attempt, created_at, updated_at, started_at, finished_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.project_id)
@@ -244,6 +299,20 @@ impl OrchestratorRepo {
         .bind(row.status.as_str())
         .bind(row.priority)
         .bind(&row.branch_name)
+        .bind(row.workflow_state.as_str())
+        .bind(row.run_state.as_str())
+        .bind(row.attempt_phase.map(OrchestratorAttemptPhase::as_str))
+        .bind(&row.source)
+        .bind(&row.external_id)
+        .bind(&row.external_identifier)
+        .bind(&row.external_url)
+        .bind(&row.runner_provider)
+        .bind(&row.claude_session_id)
+        .bind(&row.transcript_path)
+        .bind(&row.runtime_started_at)
+        .bind(&row.last_activity_at)
+        .bind(&row.last_runtime_event)
+        .bind(&row.last_runtime_message)
         .bind(&row.worktree_id)
         .bind(&row.session_id)
         .bind(&row.blocked_reason)
@@ -325,9 +394,11 @@ impl OrchestratorRepo {
         sqlx::query(
             "INSERT INTO orchestrator_tasks \
              (id, project_id, title, goal, acceptance_criteria, status, priority, branch_name, \
-              worktree_id, session_id, blocked_reason, attempt, created_at, updated_at, \
-              started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
+              external_url, runner_provider, claude_session_id, transcript_path, runtime_started_at, \
+              last_activity_at, last_runtime_event, last_runtime_message, worktree_id, session_id, \
+              blocked_reason, attempt, created_at, updated_at, started_at, finished_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.project_id)
@@ -337,6 +408,20 @@ impl OrchestratorRepo {
         .bind(row.status.as_str())
         .bind(row.priority)
         .bind(&row.branch_name)
+        .bind(row.workflow_state.as_str())
+        .bind(row.run_state.as_str())
+        .bind(row.attempt_phase.map(OrchestratorAttemptPhase::as_str))
+        .bind(&row.source)
+        .bind(&row.external_id)
+        .bind(&row.external_identifier)
+        .bind(&row.external_url)
+        .bind(&row.runner_provider)
+        .bind(&row.claude_session_id)
+        .bind(&row.transcript_path)
+        .bind(&row.runtime_started_at)
+        .bind(&row.last_activity_at)
+        .bind(&row.last_runtime_event)
+        .bind(&row.last_runtime_message)
         .bind(&row.worktree_id)
         .bind(&row.session_id)
         .bind(&row.blocked_reason)
@@ -350,11 +435,15 @@ impl OrchestratorRepo {
 
         if queue {
             let now = Utc::now().to_rfc3339();
+            let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Queued);
             sqlx::query(
-                "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+                "UPDATE orchestrator_tasks \
+                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
                  WHERE id = ? AND status = ?",
             )
             .bind(OrchestratorTaskStatus::Queued.as_str())
+            .bind(split_state.workflow_state.as_str())
+            .bind(split_state.run_state.as_str())
             .bind(Option::<&str>::None)
             .bind(now)
             .bind(&row.id)
@@ -586,11 +675,15 @@ impl OrchestratorRepo {
         };
         let task_id: String = row.try_get("id")?;
         let now = Utc::now().to_rfc3339();
+        let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Preparing);
         let result = sqlx::query(
-            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
              WHERE id = ? AND status = ?",
         )
         .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(split_state.workflow_state.as_str())
+        .bind(split_state.run_state.as_str())
         .bind(Option::<&str>::None)
         .bind(now)
         .bind(&task_id)
@@ -664,14 +757,18 @@ impl OrchestratorRepo {
         .await?;
 
         let mut claimed = Vec::new();
+        let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Preparing);
         for row in selected {
             let task_id: String = row.try_get("id")?;
             let now = Utc::now().to_rfc3339();
             let result = sqlx::query(
-                "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+                "UPDATE orchestrator_tasks \
+                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
                  WHERE id = ? AND status = ?",
             )
             .bind(OrchestratorTaskStatus::Preparing.as_str())
+            .bind(split_state.workflow_state.as_str())
+            .bind(split_state.run_state.as_str())
             .bind(Option::<&str>::None)
             .bind(now)
             .bind(&task_id)
@@ -836,13 +933,16 @@ impl OrchestratorRepo {
             return Err(AppError::generic("任务尝试轮次必须大于 0"));
         }
         let now = Utc::now().to_rfc3339();
+        let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Running);
         sqlx::query(
             "UPDATE orchestrator_tasks \
-             SET status = ?, branch_name = ?, worktree_id = ?, session_id = ?, attempt = ?, \
+             SET status = ?, workflow_state = ?, run_state = ?, branch_name = ?, worktree_id = ?, session_id = ?, attempt = ?, \
                  blocked_reason = ?, started_at = COALESCE(started_at, ?), updated_at = ? \
              WHERE id = ? AND status = ?",
         )
         .bind(OrchestratorTaskStatus::Running.as_str())
+        .bind(split_state.workflow_state.as_str())
+        .bind(split_state.run_state.as_str())
         .bind(branch_name)
         .bind(worktree_id)
         .bind(session_id)
@@ -886,11 +986,15 @@ impl OrchestratorRepo {
         blocked_reason: Option<&str>,
     ) -> Result<OrchestratorTaskRow, AppError> {
         let now = Utc::now().to_rfc3339();
+        let split_state = SplitTaskState::from_legacy_status(status);
         sqlx::query(
-            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
              WHERE id = ?",
         )
         .bind(status.as_str())
+        .bind(split_state.workflow_state.as_str())
+        .bind(split_state.run_state.as_str())
         .bind(blocked_reason)
         .bind(now)
         .bind(task_id)
@@ -907,11 +1011,15 @@ impl OrchestratorRepo {
     ///     条件未命中时读取并返回当前任务，不改写终止或其它状态。
     pub async fn finish_task_done(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
         let now = Utc::now().to_rfc3339();
+        let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Done);
         sqlx::query(
-            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ?, finished_at = ? \
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ?, finished_at = ? \
              WHERE id = ? AND status = ?",
         )
         .bind(OrchestratorTaskStatus::Done.as_str())
+        .bind(split_state.workflow_state.as_str())
+        .bind(split_state.run_state.as_str())
         .bind(Option::<&str>::None)
         .bind(&now)
         .bind(&now)
@@ -933,11 +1041,15 @@ impl OrchestratorRepo {
         reason: &str,
     ) -> Result<OrchestratorTaskRow, AppError> {
         let now = Utc::now().to_rfc3339();
+        let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Blocked);
         sqlx::query(
-            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
              WHERE id = ? AND status = ?",
         )
         .bind(OrchestratorTaskStatus::Blocked.as_str())
+        .bind(split_state.workflow_state.as_str())
+        .bind(split_state.run_state.as_str())
         .bind(reason)
         .bind(now)
         .bind(task_id)
@@ -958,11 +1070,15 @@ impl OrchestratorRepo {
         reason: &str,
     ) -> Result<OrchestratorTaskRow, AppError> {
         let now = Utc::now().to_rfc3339();
+        let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Blocked);
         sqlx::query(
-            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
              WHERE id = ? AND status = ?",
         )
         .bind(OrchestratorTaskStatus::Blocked.as_str())
+        .bind(split_state.workflow_state.as_str())
+        .bind(split_state.run_state.as_str())
         .bind(reason)
         .bind(now)
         .bind(task_id)
@@ -986,11 +1102,15 @@ impl OrchestratorRepo {
         blocked_reason: Option<&str>,
     ) -> Result<Option<OrchestratorTaskRow>, AppError> {
         let now = Utc::now().to_rfc3339();
+        let split_state = SplitTaskState::from_legacy_status(next_status);
         let result = sqlx::query(
-            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
              WHERE id = ? AND status = ?",
         )
         .bind(next_status.as_str())
+        .bind(split_state.workflow_state.as_str())
+        .bind(split_state.run_state.as_str())
         .bind(blocked_reason)
         .bind(now)
         .bind(task_id)
@@ -1025,11 +1145,15 @@ impl OrchestratorRepo {
         }
 
         let now = Utc::now().to_rfc3339();
+        let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Verifying);
         let result = sqlx::query(
-            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
              WHERE id = ? AND status = ? AND attempt = ? AND session_id = ?",
         )
         .bind(OrchestratorTaskStatus::Verifying.as_str())
+        .bind(split_state.workflow_state.as_str())
+        .bind(split_state.run_state.as_str())
         .bind(Option::<&str>::None)
         .bind(now)
         .bind(task_id)
@@ -1060,11 +1184,15 @@ impl OrchestratorRepo {
         blocked_reason: Option<&str>,
     ) -> Result<OrchestratorTaskRow, AppError> {
         let now = Utc::now().to_rfc3339();
+        let split_state = SplitTaskState::from_legacy_status(next_status);
         let result = sqlx::query(
-            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
              WHERE id = ? AND status = ?",
         )
         .bind(next_status.as_str())
+        .bind(split_state.workflow_state.as_str())
+        .bind(split_state.run_state.as_str())
         .bind(blocked_reason)
         .bind(now)
         .bind(task_id)
@@ -1092,11 +1220,15 @@ impl OrchestratorRepo {
     ///     用带 status=draft 条件的原子 UPDATE 切换到 queued；未更新时读取当前任务并返回中文业务错误。
     pub async fn queue_task(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
         let now = Utc::now().to_rfc3339();
+        let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Queued);
         let result = sqlx::query(
-            "UPDATE orchestrator_tasks SET status = ?, blocked_reason = ?, updated_at = ? \
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
              WHERE id = ? AND status = ?",
         )
         .bind(OrchestratorTaskStatus::Queued.as_str())
+        .bind(split_state.workflow_state.as_str())
+        .bind(split_state.run_state.as_str())
         .bind(Option::<&str>::None)
         .bind(now)
         .bind(task_id)
@@ -1774,12 +1906,74 @@ impl OrchestratorRepo {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     用户可能从旧版本直接升级，旧 SQLite 表缺少新列时必须原地补齐且保留已有任务数据。
+///
+/// Code Logic（这个函数做什么）:
+///     通过 `pragma_table_info` 检查列是否存在；缺失时执行 `ALTER TABLE ... ADD COLUMN`，并返回是否新增列。
+async fn ensure_column(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<bool, AppError> {
+    let existing: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT name FROM pragma_table_info('{table}') WHERE name = ?"
+    ))
+    .bind(column)
+    .fetch_optional(pool)
+    .await?;
+    if existing.is_some() {
+        return Ok(false);
+    }
+
+    sqlx::query(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+    ))
+    .execute(pool)
+    .await?;
+    Ok(true)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     split state 新列初次加入旧库时会得到默认 backlog/idle；旧任务需要根据 legacy status 恢复正确看板与运行态。
+///
+/// Code Logic（这个函数做什么）:
+///     查找仍处于默认 workflow/run state 的任务，解析 legacy status 后按 SplitTaskState 映射更新两列。
+async fn backfill_split_state_from_legacy_status(pool: &SqlitePool) -> Result<(), AppError> {
+    let rows = sqlx::query(
+        "SELECT id, status FROM orchestrator_tasks WHERE workflow_state = ? AND run_state = ?",
+    )
+    .bind(OrchestratorWorkflowState::Backlog.as_str())
+    .bind(OrchestratorRunState::Idle.as_str())
+    .fetch_all(pool)
+    .await?;
+
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        let status_text: String = row.try_get("status")?;
+        let status = OrchestratorTaskStatus::from_str(&status_text)?;
+        let split_state = SplitTaskState::from_legacy_status(status);
+        sqlx::query("UPDATE orchestrator_tasks SET workflow_state = ?, run_state = ? WHERE id = ?")
+            .bind(split_state.workflow_state.as_str())
+            .bind(split_state.run_state.as_str())
+            .bind(&id)
+            .execute(pool)
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     多个查询都需要把 SQLite 行转换成任务 Row，统一解析可避免字段遗漏和状态字符串散落。
 ///
 /// Code Logic（这个函数做什么）:
 ///     从 SqliteRow 读取 orchestrator_tasks 全字段，并把 status 字符串解析为枚举。
 fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppError> {
     let status_text: String = row.try_get("status")?;
+    let workflow_state_text: String = row.try_get("workflow_state")?;
+    let run_state_text: String = row.try_get("run_state")?;
+    let attempt_phase_text: Option<String> = row.try_get("attempt_phase")?;
     Ok(OrchestratorTaskRow {
         id: row.try_get("id")?,
         project_id: row.try_get("project_id")?,
@@ -1787,6 +1981,23 @@ fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppError> {
         goal: row.try_get("goal")?,
         acceptance_criteria: row.try_get("acceptance_criteria")?,
         status: OrchestratorTaskStatus::from_str(&status_text)?,
+        workflow_state: OrchestratorWorkflowState::from_str(&workflow_state_text)?,
+        run_state: OrchestratorRunState::from_str(&run_state_text)?,
+        attempt_phase: attempt_phase_text
+            .as_deref()
+            .map(OrchestratorAttemptPhase::from_str)
+            .transpose()?,
+        source: row.try_get("source")?,
+        external_id: row.try_get("external_id")?,
+        external_identifier: row.try_get("external_identifier")?,
+        external_url: row.try_get("external_url")?,
+        runner_provider: row.try_get("runner_provider")?,
+        claude_session_id: row.try_get("claude_session_id")?,
+        transcript_path: row.try_get("transcript_path")?,
+        runtime_started_at: row.try_get("runtime_started_at")?,
+        last_activity_at: row.try_get("last_activity_at")?,
+        last_runtime_event: row.try_get("last_runtime_event")?,
+        last_runtime_message: row.try_get("last_runtime_message")?,
         priority: row.try_get("priority")?,
         branch_name: row.try_get("branch_name")?,
         worktree_id: row.try_get("worktree_id")?,
@@ -1949,17 +2160,26 @@ mod tests {
     /// Code Logic（这个函数做什么）:
     ///     创建单连接内存 SQLite pool，执行 Orchestrator schema 初始化并返回 pool 与 repo。
     async fn setup_repo() -> (SqlitePool, OrchestratorRepo) {
-        let options = SqliteConnectOptions::from_str("sqlite::memory:")
-            .unwrap()
-            .create_if_missing(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
+        let pool = setup_raw_pool().await;
         OrchestratorRepo::init_schema(&pool).await.unwrap();
         let repo = OrchestratorRepo::new(pool.clone());
         (pool, repo)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧库迁移测试需要在 init_schema 之前手动创建 legacy 表，不能复用已初始化 schema 的 setup_repo。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建单连接内存 SQLite pool，不执行任何 schema 初始化，交给调用方安排建表顺序。
+    async fn setup_raw_pool() -> SqlitePool {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap()
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2025,6 +2245,7 @@ mod tests {
             updated_at: "2026-07-05T00:00:00Z".to_string(),
             started_at: None,
             finished_at: None,
+            ..OrchestratorTaskRow::default_for_status(status)
         }
     }
 
@@ -2062,6 +2283,221 @@ mod tests {
         assert_eq!(listed[0].id, task.id);
         assert_eq!(config.try_get::<i64, _>("enabled").unwrap(), 0);
         assert_eq!(config.try_get::<i64, _>("retry_limit").unwrap(), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     split state 迁移必须在旧库启动时补齐所有新列，否则任务列表读取会因缺列失败。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     初始化内存 schema 后读取 orchestrator_tasks 列清单，断言 workflow/run/runtime 元数据列全部存在。
+    #[tokio::test]
+    async fn init_schema_adds_split_state_columns() {
+        let (pool, _repo) = setup_repo().await;
+
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('orchestrator_tasks')")
+                .fetch_all(&pool)
+                .await
+                .expect("读取列信息成功");
+
+        for expected in [
+            "workflow_state",
+            "run_state",
+            "attempt_phase",
+            "source",
+            "external_id",
+            "external_identifier",
+            "external_url",
+            "runner_provider",
+            "claude_session_id",
+            "transcript_path",
+            "runtime_started_at",
+            "last_activity_at",
+            "last_runtime_event",
+            "last_runtime_message",
+        ] {
+            assert!(
+                columns.iter().any(|column| column == expected),
+                "missing column {expected}"
+            );
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户从旧版本升级时，已有 orchestrator_tasks 表没有 split state 列，启动迁移必须补列并按旧 status 回填看板状态。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     手动创建旧版任务表并插入多种 legacy status，执行 init_schema 后断言 workflow_state/run_state 已按映射更新。
+    #[tokio::test]
+    async fn init_schema_backfills_split_state_for_legacy_tasks() {
+        let pool = setup_raw_pool().await;
+        sqlx::query(
+            "CREATE TABLE orchestrator_tasks (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              title TEXT NOT NULL,
+              goal TEXT NOT NULL,
+              acceptance_criteria TEXT NOT NULL,
+              status TEXT NOT NULL,
+              priority INTEGER NOT NULL DEFAULT 0,
+              branch_name TEXT,
+              worktree_id TEXT,
+              session_id TEXT,
+              blocked_reason TEXT,
+              attempt INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              started_at TEXT,
+              finished_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("创建旧版任务表成功");
+
+        for (id, status) in [
+            ("task-queued", OrchestratorTaskStatus::Queued),
+            ("task-blocked", OrchestratorTaskStatus::Blocked),
+            ("task-delivering", OrchestratorTaskStatus::Delivering),
+            ("task-done", OrchestratorTaskStatus::Done),
+        ] {
+            sqlx::query(
+                "INSERT INTO orchestrator_tasks \
+                 (id, project_id, title, goal, acceptance_criteria, status, priority, \
+                  created_at, updated_at) \
+                 VALUES (?, 'project-1', ?, 'goal', 'criteria', ?, 0, ?, ?)",
+            )
+            .bind(id)
+            .bind(format!("Task {id}"))
+            .bind(status.as_str())
+            .bind("2026-07-05T00:00:00Z")
+            .bind("2026-07-05T00:00:00Z")
+            .execute(&pool)
+            .await
+            .expect("插入旧任务成功");
+        }
+
+        OrchestratorRepo::init_schema(&pool)
+            .await
+            .expect("旧库 schema 迁移成功");
+
+        let rows = sqlx::query(
+            "SELECT id, workflow_state, run_state FROM orchestrator_tasks ORDER BY id ASC",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("读取迁移后任务成功");
+
+        let migrated: Vec<(String, String, String)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.try_get("id").expect("读取 id"),
+                    row.try_get("workflow_state").expect("读取 workflow_state"),
+                    row.try_get("run_state").expect("读取 run_state"),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            migrated,
+            vec![
+                (
+                    "task-blocked".to_string(),
+                    "rework".to_string(),
+                    "blocked".to_string()
+                ),
+                (
+                    "task-delivering".to_string(),
+                    "merging".to_string(),
+                    "delivering".to_string()
+                ),
+                (
+                    "task-done".to_string(),
+                    "done".to_string(),
+                    "idle".to_string()
+                ),
+                (
+                    "task-queued".to_string(),
+                    "todo".to_string(),
+                    "queued".to_string()
+                ),
+            ]
+        );
+
+        let repo = OrchestratorRepo::new(pool);
+        let listed = repo
+            .list_tasks(Some("project-1"))
+            .await
+            .expect("迁移后任务可用新 row scanner 读取");
+        assert_eq!(listed.len(), 4);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     split state 列一旦存在就可能已经承载用户看板位置，后续启动不能再用 legacy status 覆盖用户调整。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建已带 workflow/run 列的旧表并写入非默认 status 组合，执行 init_schema 后断言 split state 保持原值。
+    #[tokio::test]
+    async fn init_schema_does_not_backfill_existing_split_state_columns() {
+        let pool = setup_raw_pool().await;
+        sqlx::query(
+            "CREATE TABLE orchestrator_tasks (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              title TEXT NOT NULL,
+              goal TEXT NOT NULL,
+              acceptance_criteria TEXT NOT NULL,
+              status TEXT NOT NULL,
+              workflow_state TEXT NOT NULL DEFAULT 'backlog',
+              run_state TEXT NOT NULL DEFAULT 'idle',
+              priority INTEGER NOT NULL DEFAULT 0,
+              branch_name TEXT,
+              worktree_id TEXT,
+              session_id TEXT,
+              blocked_reason TEXT,
+              attempt INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              started_at TEXT,
+              finished_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("创建带 split state 的任务表成功");
+        sqlx::query(
+            "INSERT INTO orchestrator_tasks \
+             (id, project_id, title, goal, acceptance_criteria, status, workflow_state, \
+              run_state, priority, created_at, updated_at) \
+             VALUES ('task-blocked', 'project-1', 'Blocked task', 'goal', 'criteria', \
+              'blocked', 'backlog', 'idle', 0, '2026-07-05T00:00:00Z', '2026-07-05T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("插入已有 split state 任务成功");
+
+        OrchestratorRepo::init_schema(&pool)
+            .await
+            .expect("schema 增量初始化成功");
+
+        let row = sqlx::query(
+            "SELECT workflow_state, run_state FROM orchestrator_tasks WHERE id = 'task-blocked'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("读取任务 split state 成功");
+
+        assert_eq!(
+            row.try_get::<String, _>("workflow_state")
+                .expect("读取 workflow_state"),
+            "backlog"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("run_state")
+                .expect("读取 run_state"),
+            "idle"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

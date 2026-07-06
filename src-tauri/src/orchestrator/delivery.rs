@@ -1880,6 +1880,7 @@ mod tests {
                 updated_at: now,
                 started_at: None,
                 finished_at: None,
+                ..OrchestratorTaskRow::default_for_status(OrchestratorTaskStatus::Delivering)
             })
             .await
             .expect("insert task");
@@ -2124,6 +2125,7 @@ mod tests {
                 updated_at: now,
                 started_at: None,
                 finished_at: None,
+                ..OrchestratorTaskRow::default_for_status(OrchestratorTaskStatus::Delivering)
             })
             .await
             .expect("insert task");
