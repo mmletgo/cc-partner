@@ -470,17 +470,61 @@ export interface OrchestratorTask {
 }
 
 /**
+ * Orchestrator runtime snapshot 任务摘要。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   自动化状态条需要展示运行中和待重试任务的低噪音摘要，用户不用展开任务详情也能看到现场。
+ *
+ * Code Logic（字段说明）:
+ *   对齐 Rust OrchestratorRuntimeTaskSummaryDto；attemptPhase 和 runtime 字段允许为空。
+ */
+export interface OrchestratorRuntimeTaskSummary {
+  taskId: string;
+  title: string;
+  workflowState: OrchestratorWorkflowState;
+  runState: OrchestratorRunState;
+  attemptPhase: OrchestratorAttemptPhase | null;
+  sessionId: string | null;
+  worktreeId: string | null;
+  lastRuntimeMessage: string | null;
+  lastActivityAt: string | null;
+}
+
+/**
+ * Orchestrator runtime snapshot 最近事件。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   状态条需要展示最近 scheduler/runner 事件，帮助用户判断自动化是刚刷新、正在执行还是已阻塞。
+ *
+ * Code Logic（字段说明）:
+ *   对齐 Rust OrchestratorRuntimeEventDto；不暴露 payloadJson，避免 UI 依赖调试结构。
+ */
+export interface OrchestratorRuntimeEvent {
+  id: string;
+  taskId: string;
+  taskTitle: string;
+  kind: string;
+  message: string;
+  createdAt: string;
+}
+
+/**
  * Orchestrator 项目运行时快照 DTO（对齐 Rust OrchestratorRuntimeSnapshotDto，camelCase）。
  *
  * Business Logic（为什么需要这个类型）:
- *   Workbench 自动化看板需要展示当前项目调度器、workflow 配置有效性和并发槽位占用。
+ *   Workbench 自动化看板需要展示当前项目调度器、workflow 配置有效性、并发槽位占用和运行摘要。
  *
  * Code Logic（字段说明）:
- *   workflowError/latestError 为后端可空错误文本；slotsUsed/slotsAvailable 描述当前 runner 并发资源。
+ *   workflowError/latestError 为后端可空错误文本；recentEvents/runningTasks/retryingTasks 为状态条摘要数据。
  */
 export interface OrchestratorRuntimeSnapshot {
   projectId: string;
+  projectKind: 'local' | 'remote' | string;
+  remoteStatus: 'local' | 'unsupported' | 'unavailable' | 'offline';
   generatedAt: string;
+  latestTickAt: string | null;
+  lastDispatchAt: string | null;
+  lastDispatchedCount: number;
   schedulerEnabled: boolean;
   workflowSource: string;
   workflowValid: boolean;
@@ -489,6 +533,9 @@ export interface OrchestratorRuntimeSnapshot {
   slotsUsed: number;
   slotsAvailable: number;
   latestError: string | null;
+  runningTasks: OrchestratorRuntimeTaskSummary[];
+  retryingTasks: OrchestratorRuntimeTaskSummary[];
+  recentEvents: OrchestratorRuntimeEvent[];
 }
 
 /**

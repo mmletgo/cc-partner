@@ -52,15 +52,26 @@
   "snapshot": {
     "title": "运行时状态",
     "loading": "刷新中",
+    "refresh": "刷新状态",
+    "settings": "自动化设置",
     "schedulerEnabled": "调度器已启用",
     "schedulerDisabled": "调度器已停用",
     "workflowValid": "工作流有效",
     "workflowInvalid": "工作流无效",
     "slotsUsed": "槽位 {{used}}/{{max}}",
     "slotsAvailable": "可用 {{available}}",
+    "runningCount": "运行 {{count}}",
+    "retryingCount": "重试 {{count}}",
+    "generatedAt": "生成 {{time}}",
+    "latestTickAt": "调度 {{time}}",
+    "lastDispatchedCount": "最近派发 {{count}}",
+    "latestTickUnknown": "尚无调度",
+    "runningTasks": "运行摘要",
+    "retryingTasks": "重试摘要",
+    "recentEvents": "最近事件",
     "workflowError": "工作流错误：{{error}}",
     "latestError": "最近错误：{{error}}",
-    "remoteUnavailable": "远端项目的运行时状态由所属设备维护。"
+    "remoteUnavailable": "远端运行时快照暂不可用；请在所属设备查看自动化状态。"
   },
   "queue": {
     "title": "任务队列",

@@ -52,15 +52,26 @@
   "snapshot": {
     "title": "Runtime Status",
     "loading": "Refreshing",
+    "refresh": "Refresh status",
+    "settings": "Automation settings",
     "schedulerEnabled": "Scheduler enabled",
     "schedulerDisabled": "Scheduler disabled",
     "workflowValid": "Workflow valid",
     "workflowInvalid": "Workflow invalid",
     "slotsUsed": "Slots {{used}}/{{max}}",
     "slotsAvailable": "{{available}} available",
+    "runningCount": "{{count}} running",
+    "retryingCount": "{{count}} retrying",
+    "generatedAt": "Generated {{time}}",
+    "latestTickAt": "Dispatch {{time}}",
+    "lastDispatchedCount": "{{count}} dispatched",
+    "latestTickUnknown": "No dispatch yet",
+    "runningTasks": "Running summaries",
+    "retryingTasks": "Retry summaries",
+    "recentEvents": "Recent events",
     "workflowError": "Workflow error: {{error}}",
     "latestError": "Latest error: {{error}}",
-    "remoteUnavailable": "Runtime status for remote projects is maintained by the owning device."
+    "remoteUnavailable": "Remote runtime snapshot is unavailable here. Open the owning device to inspect automation state."
   },
   "queue": {
     "title": "Task Queue",

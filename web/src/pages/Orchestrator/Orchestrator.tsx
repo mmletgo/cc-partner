@@ -25,7 +25,17 @@ import { orchestratorApi } from '@/api/orchestrator';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
 import { Button, Card, Input, Pill } from '@/components/primitives';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
-import { CheckIcon, FolderIcon, PlayIcon, PlusIcon, StopIcon, SyncIcon, XIcon } from '@/lib/icons';
+import {
+  CheckIcon,
+  FolderIcon,
+  PlayIcon,
+  PlusIcon,
+  RefreshIcon,
+  SettingsIcon,
+  StopIcon,
+  SyncIcon,
+  XIcon,
+} from '@/lib/icons';
 import {
   canCancelOrchestratorTaskForProject,
   canCompleteAgentRunForProject,
@@ -57,6 +67,8 @@ import type {
   OrchestratorRemoteOutboxStatus,
   OrchestratorRunState,
   OrchestratorRuntimeSnapshot,
+  OrchestratorRuntimeEvent,
+  OrchestratorRuntimeTaskSummary,
   OrchestratorTask,
   OrchestratorTaskStatus,
   OrchestratorTaskView,
@@ -718,6 +730,15 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     [t],
   );
 
+  const handleRefreshRuntimeSnapshot = useCallback(() => {
+    if (!activeProjectId || activeProjectKind !== 'local') return;
+    void refreshRuntimeSnapshot(activeProjectId);
+  }, [activeProjectId, activeProjectKind, refreshRuntimeSnapshot]);
+
+  const handleOpenAutomationSettings = useCallback(() => {
+    navigate('/settings?tab=automation');
+  }, [navigate]);
+
   useEffect(() => {
     if (taskLoadDecision.kind !== 'load' || activeProjectKind !== 'local') {
       setRuntimeSnapshotResult(null);
@@ -1347,50 +1368,173 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
               <div className={styles.snapshotBar}>
                 <div className={styles.snapshotHeader}>
                   <span className={styles.label}>{t('orchestrator:snapshot.title')}</span>
-                  {activeProjectKind === 'local' && activeRuntimeSnapshotResult?.loading ? (
-                    <Pill tone="accent">{t('orchestrator:snapshot.loading')}</Pill>
-                  ) : null}
+                  <div className={styles.snapshotActions}>
+                    {activeProjectKind === 'local' && activeRuntimeSnapshotResult?.loading ? (
+                      <Pill tone="accent">{t('orchestrator:snapshot.loading')}</Pill>
+                    ) : null}
+                    {activeProjectKind === 'local' ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        icon={<RefreshIcon />}
+                        disabled={activeRuntimeSnapshotResult?.loading ?? false}
+                        onClick={handleRefreshRuntimeSnapshot}
+                      >
+                        {t('orchestrator:snapshot.refresh')}
+                      </Button>
+                    ) : null}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={<SettingsIcon />}
+                      onClick={handleOpenAutomationSettings}
+                    >
+                      {t('orchestrator:snapshot.settings')}
+                    </Button>
+                  </div>
                 </div>
                 {activeProjectKind === 'local' ? (
                   <>
                     {activeRuntimeSnapshotResult?.snapshot ? (
-                      <div className={styles.snapshotItems}>
-                        <Pill
-                          tone={
-                            activeRuntimeSnapshotResult.snapshot.schedulerEnabled
-                              ? 'success'
-                              : 'warn'
-                          }
-                          dot
-                        >
-                          {activeRuntimeSnapshotResult.snapshot.schedulerEnabled
-                            ? t('orchestrator:snapshot.schedulerEnabled')
-                            : t('orchestrator:snapshot.schedulerDisabled')}
-                        </Pill>
-                        <Pill
-                          tone={
-                            activeRuntimeSnapshotResult.snapshot.workflowValid
-                              ? 'success'
-                              : 'danger'
-                          }
-                          dot
-                        >
-                          {activeRuntimeSnapshotResult.snapshot.workflowValid
-                            ? t('orchestrator:snapshot.workflowValid')
-                            : t('orchestrator:snapshot.workflowInvalid')}
-                        </Pill>
-                        <span className={styles.snapshotMetric}>
-                          {t('orchestrator:snapshot.slotsUsed', {
-                            used: activeRuntimeSnapshotResult.snapshot.slotsUsed,
-                            max: activeRuntimeSnapshotResult.snapshot.maxConcurrentTasks,
-                          })}
-                        </span>
-                        <span className={styles.snapshotMetric}>
-                          {t('orchestrator:snapshot.slotsAvailable', {
-                            available: activeRuntimeSnapshotResult.snapshot.slotsAvailable,
-                          })}
-                        </span>
-                      </div>
+                      <>
+                        <div className={styles.snapshotItems}>
+                          <Pill
+                            tone={
+                              activeRuntimeSnapshotResult.snapshot.schedulerEnabled
+                                ? 'success'
+                                : 'warn'
+                            }
+                            dot
+                          >
+                            {activeRuntimeSnapshotResult.snapshot.schedulerEnabled
+                              ? t('orchestrator:snapshot.schedulerEnabled')
+                              : t('orchestrator:snapshot.schedulerDisabled')}
+                          </Pill>
+                          <Pill
+                            tone={
+                              activeRuntimeSnapshotResult.snapshot.workflowValid
+                                ? 'success'
+                                : 'danger'
+                            }
+                            dot
+                          >
+                            {activeRuntimeSnapshotResult.snapshot.workflowValid
+                              ? t('orchestrator:snapshot.workflowValid')
+                              : t('orchestrator:snapshot.workflowInvalid')}
+                          </Pill>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.slotsUsed', {
+                              used: activeRuntimeSnapshotResult.snapshot.slotsUsed,
+                              max: activeRuntimeSnapshotResult.snapshot.maxConcurrentTasks,
+                            })}
+                          </span>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.slotsAvailable', {
+                              available: activeRuntimeSnapshotResult.snapshot.slotsAvailable,
+                            })}
+                          </span>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.runningCount', {
+                              count: activeRuntimeSnapshotResult.snapshot.runningTasks.length,
+                            })}
+                          </span>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.retryingCount', {
+                              count: activeRuntimeSnapshotResult.snapshot.retryingTasks.length,
+                            })}
+                          </span>
+                        </div>
+                        <div className={styles.snapshotMetaGrid}>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.generatedAt', {
+                              time: formatTaskTimestamp(
+                                activeRuntimeSnapshotResult.snapshot.generatedAt,
+                              ),
+                            })}
+                          </span>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.latestTickAt', {
+                              time: formatOptionalTaskTimestamp(
+                                activeRuntimeSnapshotResult.snapshot.latestTickAt,
+                                t('orchestrator:snapshot.latestTickUnknown'),
+                              ),
+                            })}
+                          </span>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.lastDispatchedCount', {
+                              count: activeRuntimeSnapshotResult.snapshot.lastDispatchedCount,
+                            })}
+                          </span>
+                        </div>
+                        {activeRuntimeSnapshotResult.snapshot.runningTasks.length > 0 ? (
+                          <section className={styles.snapshotSection}>
+                            <h3 className={styles.snapshotSectionTitle}>
+                              {t('orchestrator:snapshot.runningTasks')}
+                            </h3>
+                            <ul className={styles.snapshotList}>
+                              {activeRuntimeSnapshotResult.snapshot.runningTasks.map(
+                                (task: OrchestratorRuntimeTaskSummary) => (
+                                  <li className={styles.snapshotListItem} key={task.taskId}>
+                                    <span className={styles.snapshotItemTitle}>{task.title}</span>
+                                    <span className={styles.snapshotItemMeta}>
+                                      {t(RUN_STATE_LABEL_KEYS[task.runState])}
+                                      {task.attemptPhase
+                                        ? ` · ${t(ATTEMPT_PHASE_LABEL_KEYS[task.attemptPhase])}`
+                                        : ''}
+                                      {task.lastRuntimeMessage
+                                        ? ` · ${task.lastRuntimeMessage}`
+                                        : ''}
+                                    </span>
+                                  </li>
+                                ),
+                              )}
+                            </ul>
+                          </section>
+                        ) : null}
+                        {activeRuntimeSnapshotResult.snapshot.retryingTasks.length > 0 ? (
+                          <section className={styles.snapshotSection}>
+                            <h3 className={styles.snapshotSectionTitle}>
+                              {t('orchestrator:snapshot.retryingTasks')}
+                            </h3>
+                            <ul className={styles.snapshotList}>
+                              {activeRuntimeSnapshotResult.snapshot.retryingTasks.map(
+                                (task: OrchestratorRuntimeTaskSummary) => (
+                                  <li className={styles.snapshotListItem} key={task.taskId}>
+                                    <span className={styles.snapshotItemTitle}>{task.title}</span>
+                                    <span className={styles.snapshotItemMeta}>
+                                      {t(WORKFLOW_STATE_LABEL_KEYS[task.workflowState])}
+                                      {' · '}
+                                      {t(RUN_STATE_LABEL_KEYS[task.runState])}
+                                    </span>
+                                  </li>
+                                ),
+                              )}
+                            </ul>
+                          </section>
+                        ) : null}
+                        {activeRuntimeSnapshotResult.snapshot.recentEvents.length > 0 ? (
+                          <section className={styles.snapshotSection}>
+                            <h3 className={styles.snapshotSectionTitle}>
+                              {t('orchestrator:snapshot.recentEvents')}
+                            </h3>
+                            <ul className={styles.snapshotList}>
+                              {activeRuntimeSnapshotResult.snapshot.recentEvents.map(
+                                (event: OrchestratorRuntimeEvent) => (
+                                  <li className={styles.snapshotListItem} key={event.id}>
+                                    <span className={styles.snapshotItemTitle}>
+                                      {event.taskTitle}
+                                    </span>
+                                    <span className={styles.snapshotItemMeta}>
+                                      {event.kind} · {event.message} ·{' '}
+                                      {formatTaskTimestamp(event.createdAt)}
+                                    </span>
+                                  </li>
+                                ),
+                              )}
+                            </ul>
+                          </section>
+                        ) : null}
+                      </>
                     ) : null}
                     {activeRuntimeSnapshotResult?.snapshot?.workflowError ? (
                       <p className={styles.snapshotWarning}>

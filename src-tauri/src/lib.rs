@@ -419,6 +419,8 @@ pub fn run() {
                     health_repo,
                     health_cancel,
                     orchestrator_repo,
+                    orchestrator_scheduler_telemetry:
+                        crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry::new(),
                     orchestrator_cancel: Arc::new(Mutex::new(None)),
                     orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
                 };

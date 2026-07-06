@@ -12,6 +12,8 @@ use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::orchestrator::runner::prepare_visible_runner;
 use crate::state::AppState;
+use chrono::Utc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
@@ -28,6 +30,88 @@ const SCHEDULER_TICK_SECS: u64 = 10;
 #[derive(Clone)]
 pub struct OrchestratorRuntime {
     cancel: CancellationToken,
+}
+
+/// Orchestrator scheduler 可观测状态快照。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     Workbench 状态条需要解释最近一次调度 tick 何时发生、是否报错以及调度了多少任务。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存内存 telemetry 的只读克隆结果，供命令层组装 runtime snapshot DTO。
+#[derive(Debug, Clone, Default)]
+pub struct OrchestratorSchedulerTelemetrySnapshot {
+    pub latest_tick_at: Option<String>,
+    pub last_dispatch_at: Option<String>,
+    pub last_dispatched_count: usize,
+    pub latest_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct OrchestratorSchedulerTelemetryState {
+    latest_tick_at: Option<String>,
+    last_dispatch_at: Option<String>,
+    last_dispatched_count: usize,
+    latest_error: Option<String>,
+}
+
+/// Orchestrator scheduler 运行时可观测状态。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     scheduler 在后台运行，不一定有任务事件可写；状态条仍需要知道最近一次 dispatch_once 的时间和结果。
+///
+/// Code Logic（这个结构体做什么）:
+///     用 Arc<RwLock> 保存最近一次调度结果；Clone 只复制 Arc，适合放入 AppState。
+#[derive(Debug, Clone, Default)]
+pub struct OrchestratorSchedulerTelemetry {
+    inner: Arc<RwLock<OrchestratorSchedulerTelemetryState>>,
+}
+
+impl OrchestratorSchedulerTelemetry {
+    /// Business Logic（为什么需要这个函数）:
+    ///     AppState 初始化和单元测试都需要创建空的 scheduler telemetry。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回包含默认状态的 OrchestratorSchedulerTelemetry。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     每次 dispatch_once 完成后都要记录 tick 结果，方便 runtime snapshot 解释最近调度时间。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用传入的 UTC 时间、dispatch 数量和可选错误覆盖内存状态；空白错误会归一为 None。
+    pub fn record_dispatch_result(
+        &self,
+        tick_at: String,
+        dispatched_count: usize,
+        error: Option<String>,
+    ) {
+        let latest_error = error
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let mut state = self.inner.write().expect("orchestrator telemetry 写锁中毒");
+        state.latest_tick_at = Some(tick_at.clone());
+        state.last_dispatch_at = Some(tick_at);
+        state.last_dispatched_count = dispatched_count;
+        state.latest_error = latest_error;
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     runtime snapshot 命令需要读取可观测状态，但不能持有锁跨 await。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     克隆当前 telemetry 字段，返回独立快照。
+    pub fn snapshot(&self) -> OrchestratorSchedulerTelemetrySnapshot {
+        let state = self.inner.read().expect("orchestrator telemetry 读锁中毒");
+        OrchestratorSchedulerTelemetrySnapshot {
+            latest_tick_at: state.latest_tick_at.clone(),
+            last_dispatch_at: state.last_dispatch_at.clone(),
+            last_dispatched_count: state.last_dispatched_count,
+            latest_error: state.latest_error.clone(),
+        }
+    }
 }
 
 impl OrchestratorRuntime {
@@ -86,6 +170,29 @@ pub fn start_orchestrator_scheduler(app_handle: AppHandle, state: AppState) -> C
 ///     每次从 AppState 读取全局 Orchestrator 配置，在 repo 事务内按全局本机容量批量 claim 可执行泳道任务并交给 runner；
 ///     runner 失败时仅在任务仍为 Preparing 或 bootstrap Running 时把任务置为 Blocked 并追加事件，成功时计入 dispatched。
 pub async fn dispatch_once(state: &AppState, app_handle: AppHandle) -> Result<usize, AppError> {
+    let tick_at = Utc::now().to_rfc3339();
+    let result = dispatch_once_inner(state, app_handle).await;
+    match &result {
+        Ok(dispatched) => {
+            state
+                .orchestrator_scheduler_telemetry
+                .record_dispatch_result(tick_at, *dispatched, None);
+        }
+        Err(err) => {
+            state
+                .orchestrator_scheduler_telemetry
+                .record_dispatch_result(tick_at, 0, Some(err.to_string()));
+        }
+    }
+    result
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     dispatch_once 需要在外层统一记录可观测 tick，同时保留原调度流程的错误传播。
+///
+/// Code Logic（这个函数做什么）:
+///     执行原始 claim 和 runner 准备流程，返回本次成功派发数量。
+async fn dispatch_once_inner(state: &AppState, app_handle: AppHandle) -> Result<usize, AppError> {
     let config = state
         .config
         .read()

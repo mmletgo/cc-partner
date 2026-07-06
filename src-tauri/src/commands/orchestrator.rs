@@ -16,8 +16,9 @@ use crate::orchestrator::outbox::{
 use crate::orchestrator::prompt::RepairPromptContext;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
-use crate::orchestrator::repo::OrchestratorRepo;
+use crate::orchestrator::repo::{OrchestratorRecentEventRow, OrchestratorRepo};
 use crate::orchestrator::runner::prepare_repair_runner;
+use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetrySnapshot;
 use crate::orchestrator::verifier::{self, VerifierReview};
 use crate::orchestrator::workflow::{resolve_project_workflow, WorkflowSource};
 use crate::state::AppState;
@@ -28,6 +29,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
+
+const RUNTIME_TASK_SUMMARY_LIMIT: i64 = 6;
+const RUNTIME_EVENT_LIMIT: i64 = 8;
 
 /// 创建 Orchestrator 任务的命令入参。
 ///
@@ -78,15 +82,20 @@ pub struct MoveOrchestratorTaskWorkflowStateRequest {
 /// Orchestrator 项目运行时快照 DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     Workbench 自动化状态条需要展示调度器、workflow 解析和执行槽位信息，帮助用户判断自动化为何运行或停滞。
+///     Workbench 自动化状态条需要展示调度器、workflow、执行槽位和任务运行摘要，帮助用户判断自动化为何运行或停滞。
 ///
 /// Code Logic（这个结构体做什么）:
-///     聚合设备级 Settings、项目 workflow resolver、repo 槽位统计和最近错误，使用 camelCase 序列化给前端。
+///     聚合设备级 Settings、scheduler telemetry、项目 workflow resolver、repo 槽位统计、最近任务事件和远端可用性状态。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestratorRuntimeSnapshotDto {
     pub project_id: String,
+    pub project_kind: String,
+    pub remote_status: String,
     pub generated_at: String,
+    pub latest_tick_at: Option<String>,
+    pub last_dispatch_at: Option<String>,
+    pub last_dispatched_count: usize,
     pub scheduler_enabled: bool,
     pub workflow_source: String,
     pub workflow_valid: bool,
@@ -95,6 +104,48 @@ pub struct OrchestratorRuntimeSnapshotDto {
     pub slots_used: i64,
     pub slots_available: i64,
     pub latest_error: Option<String>,
+    pub running_tasks: Vec<OrchestratorRuntimeTaskSummaryDto>,
+    pub retrying_tasks: Vec<OrchestratorRuntimeTaskSummaryDto>,
+    pub recent_events: Vec<OrchestratorRuntimeEventDto>,
+}
+
+/// Orchestrator runtime snapshot 任务摘要 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     状态条需要以低噪音方式展示正在运行和等待重试的任务，用户不必展开完整任务卡片也能判断现场。
+///
+/// Code Logic（这个结构体做什么）:
+///     从 OrchestratorTaskRow 投影用户可识别字段和 runner runtime 字段，使用 camelCase 序列化给前端。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorRuntimeTaskSummaryDto {
+    pub task_id: String,
+    pub title: String,
+    pub workflow_state: OrchestratorWorkflowState,
+    pub run_state: OrchestratorRunState,
+    pub attempt_phase: Option<OrchestratorAttemptPhase>,
+    pub session_id: Option<String>,
+    pub worktree_id: Option<String>,
+    pub last_runtime_message: Option<String>,
+    pub last_activity_at: Option<String>,
+}
+
+/// Orchestrator runtime snapshot 最近事件 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     状态条需要展示最近 scheduler/runner 事件，帮助用户理解任务为何运行、阻塞或等待。
+///
+/// Code Logic（这个结构体做什么）:
+///     从 orchestrator_task_events join 查询行投影可展示字段，不暴露 payload_json 等内部调试细节。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorRuntimeEventDto {
+    pub id: String,
+    pub task_id: String,
+    pub task_title: String,
+    pub kind: String,
+    pub message: String,
+    pub created_at: String,
 }
 
 /// Orchestrator 项目刷新结果 DTO。
@@ -344,6 +395,71 @@ fn remote_create_request_from_local(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     runtime snapshot 需要展示任务摘要，而不是把完整任务 DTO 全量塞入状态条。
+///
+/// Code Logic（这个函数做什么）:
+///     从 OrchestratorTaskRow 克隆任务 id、标题、split state、执行现场和最近 runtime 文本字段。
+fn runtime_task_summary_from_row(task: OrchestratorTaskRow) -> OrchestratorRuntimeTaskSummaryDto {
+    OrchestratorRuntimeTaskSummaryDto {
+        task_id: task.id,
+        title: task.title,
+        workflow_state: task.workflow_state,
+        run_state: task.run_state,
+        attempt_phase: task.attempt_phase,
+        session_id: task.session_id,
+        worktree_id: task.worktree_id,
+        last_runtime_message: task.last_runtime_message,
+        last_activity_at: task.last_activity_at,
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     runtime snapshot 的 recentEvents 应只暴露前端易展示字段，避免 UI 解析数据库 payload。
+///
+/// Code Logic（这个函数做什么）:
+///     从 OrchestratorRecentEventRow 投影为 camelCase DTO。
+fn runtime_event_from_row(row: OrchestratorRecentEventRow) -> OrchestratorRuntimeEventDto {
+    OrchestratorRuntimeEventDto {
+        id: row.id,
+        task_id: row.task_id,
+        task_title: row.task_title,
+        kind: row.kind,
+        message: row.message,
+        created_at: row.created_at,
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端项目的 runtime snapshot 不能用本机 scheduler/config/workflow 冒充，必须明确标记本轮不可用。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 remoteStatus=unsupported 的空 snapshot；除 project 元信息和错误文案外不读取本机运行状态。
+fn remote_runtime_snapshot_unavailable(
+    project: &WorkbenchProjectRow,
+) -> OrchestratorRuntimeSnapshotDto {
+    OrchestratorRuntimeSnapshotDto {
+        project_id: project.id.clone(),
+        project_kind: project.kind.clone(),
+        remote_status: "unsupported".to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        latest_tick_at: None,
+        last_dispatch_at: None,
+        last_dispatched_count: 0,
+        scheduler_enabled: false,
+        workflow_source: "remoteUnavailable".to_string(),
+        workflow_valid: false,
+        workflow_error: Some("远端运行时快照暂不可用".to_string()),
+        max_concurrent_tasks: 0,
+        slots_used: 0,
+        slots_available: 0,
+        latest_error: Some("远端项目暂不支持运行时快照；请在所属设备查看自动化状态".to_string()),
+        running_tasks: Vec::new(),
+        retrying_tasks: Vec::new(),
+        recent_events: Vec::new(),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     本机任务视图需要统一包装成 discriminated union，供 Phase 6 UI 与远端视图合并展示。
 ///
 /// Code Logic（这个函数做什么）:
@@ -411,14 +527,15 @@ pub(crate) async fn move_orchestrator_task_workflow_state_for_project(
 ///     Workbench 状态条需要项目级 runtime snapshot，但实际数据分散在 Settings、workflow resolver 和 repo 统计中。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析项目 WORKFLOW.md，统计当前项目 active run_state 槽位和最近 blocked 原因，生成前端 DTO。
+///     本机项目解析 WORKFLOW.md、统计槽位、任务摘要和最近事件；远端项目返回明确 unsupported 空快照。
 pub(crate) async fn get_orchestrator_runtime_snapshot_for_project(
     repo: &OrchestratorRepo,
     config: &OrchestratorAutomationConfig,
     project: &WorkbenchProjectRow,
+    scheduler_snapshot: &OrchestratorSchedulerTelemetrySnapshot,
 ) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
     if project.kind == "remote" {
-        return Err(AppError::generic("远端项目暂不支持运行时快照"));
+        return Ok(remote_runtime_snapshot_unavailable(project));
     }
     let project_path = Path::new(&project.path);
     let (workflow_source, workflow_valid, workflow_error) =
@@ -439,11 +556,37 @@ pub(crate) async fn get_orchestrator_runtime_snapshot_for_project(
         .await?;
     let max_slots = config.max_concurrent_tasks.max(0);
     let slots_available = (max_slots - slots_used).max(0);
-    let latest_error = repo.latest_blocked_reason_for_project(&project.id).await?;
+    let latest_error = repo
+        .latest_blocked_reason_for_project(&project.id)
+        .await?
+        .or_else(|| scheduler_snapshot.latest_error.clone());
+    let running_tasks = repo
+        .list_active_runtime_tasks_for_project(&project.id, RUNTIME_TASK_SUMMARY_LIMIT)
+        .await?
+        .into_iter()
+        .map(runtime_task_summary_from_row)
+        .collect();
+    let retrying_tasks = repo
+        .list_retrying_runtime_tasks_for_project(&project.id, RUNTIME_TASK_SUMMARY_LIMIT)
+        .await?
+        .into_iter()
+        .map(runtime_task_summary_from_row)
+        .collect();
+    let recent_events = repo
+        .list_recent_events_for_project(&project.id, RUNTIME_EVENT_LIMIT)
+        .await?
+        .into_iter()
+        .map(runtime_event_from_row)
+        .collect();
 
     Ok(OrchestratorRuntimeSnapshotDto {
         project_id: project.id.clone(),
+        project_kind: project.kind.clone(),
+        remote_status: "local".to_string(),
         generated_at: Utc::now().to_rfc3339(),
+        latest_tick_at: scheduler_snapshot.latest_tick_at.clone(),
+        last_dispatch_at: scheduler_snapshot.last_dispatch_at.clone(),
+        last_dispatched_count: scheduler_snapshot.last_dispatched_count,
         scheduler_enabled: config.enabled,
         workflow_source,
         workflow_valid,
@@ -452,6 +595,9 @@ pub(crate) async fn get_orchestrator_runtime_snapshot_for_project(
         slots_used,
         slots_available,
         latest_error,
+        running_tasks,
+        retrying_tasks,
+        recent_events,
     })
 }
 
@@ -1660,10 +1806,12 @@ pub async fn get_orchestrator_runtime_snapshot(
         .expect("config 读锁中毒")
         .orchestrator
         .clone();
+    let scheduler_snapshot = state.orchestrator_scheduler_telemetry.snapshot();
     get_orchestrator_runtime_snapshot_for_project(
         state.orchestrator_repo.as_ref(),
         &config,
         &project,
+        &scheduler_snapshot,
     )
     .await
 }
@@ -2251,6 +2399,9 @@ pub async fn abort_orchestrator_task(
 mod tests {
     use super::*;
     use crate::config::OrchestratorAutomationConfig;
+    use crate::orchestrator::scheduler::{
+        OrchestratorSchedulerTelemetry, OrchestratorSchedulerTelemetrySnapshot,
+    };
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::fs;
     use std::str::FromStr;
@@ -2349,6 +2500,15 @@ mod tests {
         let path = std::env::temp_dir().join(format!("{name}-{}", Uuid::new_v4()));
         fs::create_dir_all(&path).expect("create temp project dir");
         path.to_string_lossy().to_string()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     多个 snapshot 测试只关心 repo/workflow，不需要调度器真实 tick 时，应提供一致的空观测输入。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造新的 OrchestratorSchedulerTelemetry 并读取其空 snapshot，供 runtime snapshot helper 使用。
+    fn empty_scheduler_snapshot() -> OrchestratorSchedulerTelemetrySnapshot {
+        OrchestratorSchedulerTelemetry::new().snapshot()
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2602,17 +2762,101 @@ mod tests {
             ..OrchestratorAutomationConfig::default()
         };
 
-        let snapshot = get_orchestrator_runtime_snapshot_for_project(&repo, &config, &project)
-            .await
-            .unwrap();
+        let scheduler_snapshot = empty_scheduler_snapshot();
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &config,
+            &project,
+            &scheduler_snapshot,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(snapshot.project_id, "project-1");
+        assert_eq!(snapshot.project_kind, "local");
+        assert_eq!(snapshot.remote_status, "local");
         assert!(snapshot.scheduler_enabled);
         assert_eq!(snapshot.workflow_source, "builtInDefault");
         assert!(snapshot.workflow_valid);
         assert_eq!(snapshot.max_concurrent_tasks, 2);
         assert_eq!(snapshot.slots_used, 0);
         assert_eq!(snapshot.slots_available, 2);
+        assert!(snapshot.latest_tick_at.is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Workbench 状态条需要同时解释当前活跃任务、待重试任务、最近事件和最近调度 tick，用户才能判断自动化是否卡住。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 running 与 blocked/rework 任务并追加事件，写入 scheduler telemetry 后构建 snapshot，
+    ///     断言任务摘要、recentEvents、latestError、projectKind/remoteStatus 和 latestTickAt 都可见。
+    #[tokio::test]
+    async fn runtime_snapshot_reports_running_summaries_events_and_latest_tick() {
+        let repo = setup_orchestrator_repo().await;
+        let project = local_project_row(temp_project_dir("orch-snapshot-runtime"));
+        let mut running = command_task_row("task-running", OrchestratorTaskStatus::Running);
+        running.title = "实现状态条".to_string();
+        running.attempt_phase = Some(OrchestratorAttemptPhase::Streaming);
+        running.session_id = Some("session-running".to_string());
+        running.worktree_id = Some("worktree-running".to_string());
+        running.last_runtime_message = Some("正在运行测试".to_string());
+        running.last_activity_at = Some("2026-07-06T01:02:03Z".to_string());
+        let mut retrying = command_task_row("task-retry", OrchestratorTaskStatus::Blocked);
+        retrying.title = "修复验证失败".to_string();
+        retrying.workflow_state = OrchestratorWorkflowState::Rework;
+        retrying.run_state = OrchestratorRunState::Blocked;
+        retrying.blocked_reason = Some("验证器要求修复".to_string());
+        retrying.updated_at = "2026-07-06T01:03:00Z".to_string();
+        repo.create_task(&running).await.unwrap();
+        repo.create_task(&retrying).await.unwrap();
+        repo.add_event(&running.id, "runner", "Runner 已启动", None)
+            .await
+            .unwrap();
+        repo.add_event(&retrying.id, "blocked", "验证器要求修复", None)
+            .await
+            .unwrap();
+        let telemetry = OrchestratorSchedulerTelemetry::new();
+        telemetry.record_dispatch_result("2026-07-06T01:04:05Z".to_string(), 1, None);
+
+        let telemetry_snapshot = telemetry.snapshot();
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &OrchestratorAutomationConfig::default(),
+            &project,
+            &telemetry_snapshot,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(snapshot.project_kind, "local");
+        assert_eq!(snapshot.remote_status, "local");
+        assert_eq!(
+            snapshot.latest_tick_at.as_deref(),
+            Some("2026-07-06T01:04:05Z")
+        );
+        assert_eq!(snapshot.running_tasks.len(), 1);
+        assert_eq!(snapshot.running_tasks[0].task_id, "task-running");
+        assert_eq!(snapshot.running_tasks[0].title, "实现状态条");
+        assert_eq!(
+            snapshot.running_tasks[0].attempt_phase,
+            Some(OrchestratorAttemptPhase::Streaming)
+        );
+        assert_eq!(
+            snapshot.running_tasks[0].last_runtime_message.as_deref(),
+            Some("正在运行测试")
+        );
+        assert_eq!(snapshot.retrying_tasks.len(), 1);
+        assert_eq!(snapshot.retrying_tasks[0].task_id, "task-retry");
+        assert_eq!(snapshot.latest_error.as_deref(), Some("验证器要求修复"));
+        assert_eq!(snapshot.recent_events.len(), 2);
+        assert!(snapshot
+            .recent_events
+            .iter()
+            .any(|event| event.task_id == "task-retry" && event.kind == "blocked"));
+        assert!(snapshot
+            .recent_events
+            .iter()
+            .any(|event| event.task_id == "task-running" && event.kind == "runner"));
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2631,10 +2875,12 @@ mod tests {
         .expect("write workflow");
         let project = local_project_row(project_dir);
 
+        let scheduler_snapshot = empty_scheduler_snapshot();
         let snapshot = get_orchestrator_runtime_snapshot_for_project(
             &repo,
             &OrchestratorAutomationConfig::default(),
             &project,
+            &scheduler_snapshot,
         )
         .await
         .unwrap();
@@ -2655,19 +2901,31 @@ mod tests {
     /// Code Logic（这个测试做什么）:
     ///     用 remote shortcut 调用 snapshot helper，断言本轮明确拒绝而不是读取本机状态。
     #[tokio::test]
-    async fn runtime_snapshot_rejects_remote_project() {
+    async fn runtime_snapshot_reports_remote_project_unavailable() {
         let repo = setup_orchestrator_repo().await;
         let project = remote_shortcut_row();
+        let scheduler_snapshot = empty_scheduler_snapshot();
 
-        let error = get_orchestrator_runtime_snapshot_for_project(
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
             &repo,
             &OrchestratorAutomationConfig::default(),
             &project,
+            &scheduler_snapshot,
         )
         .await
-        .expect_err("remote snapshot must be rejected");
+        .expect("remote snapshot should return explicit unsupported status");
 
-        assert!(error.to_string().contains("远端项目暂不支持运行时快照"));
+        assert_eq!(snapshot.project_kind, "remote");
+        assert_eq!(snapshot.remote_status, "unsupported");
+        assert!(!snapshot.scheduler_enabled);
+        assert!(snapshot.running_tasks.is_empty());
+        assert!(snapshot.retrying_tasks.is_empty());
+        assert!(snapshot.recent_events.is_empty());
+        assert!(snapshot
+            .latest_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("远端项目暂不支持运行时快照"));
     }
 
     /// Business Logic（为什么需要这个测试）:
