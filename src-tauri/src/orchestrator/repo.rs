@@ -5,9 +5,9 @@
 use crate::error::AppError;
 use crate::orchestrator::claude_runtime::ClaudeRuntimeSummary;
 use crate::orchestrator::models::{
-    OrchestratorAttemptPhase, OrchestratorEvidenceDto, OrchestratorProjectConfigDto,
-    OrchestratorRunState, OrchestratorTaskAttemptRow, OrchestratorTaskRow, OrchestratorTaskStatus,
-    OrchestratorWorkflowState, SplitTaskState,
+    OrchestratorAttemptPhase, OrchestratorCreateAction, OrchestratorEvidenceDto,
+    OrchestratorProjectConfigDto, OrchestratorRunState, OrchestratorTaskAttemptRow,
+    OrchestratorTaskRow, OrchestratorTaskStatus, OrchestratorWorkflowState, SplitTaskState,
 };
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
@@ -381,16 +381,17 @@ impl OrchestratorRepo {
     ///     仓储必须把 requestId->taskId 与任务创建放在同一事务中，避免重复任务。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在事务内先尝试登记非空 client_request_id；已存在则返回既有 task。首次登记后插入任务，
-    ///     queue=true 时在同一事务内执行 Draft->Queued 更新，最后读取并返回完整 Row。
+    ///     在事务内先尝试登记非空 client_request_id；已存在则返回既有 task。首次登记后按 createAction
+    ///     映射 legacy/split state 并插入任务，最后读取并返回完整 Row。
     pub async fn create_remote_task_idempotent(
         &self,
         client_request_id: Option<&str>,
         row: &OrchestratorTaskRow,
-        queue: bool,
+        create_action: OrchestratorCreateAction,
     ) -> Result<OrchestratorTaskRow, AppError> {
         let client_request_id = client_request_id.and_then(non_empty_trimmed);
-        let external_labels_json = serialize_external_labels(&row.external_labels)?;
+        let row_to_insert = task_row_for_create_action(row, create_action);
+        let external_labels_json = serialize_external_labels(&row_to_insert.external_labels)?;
         let mut tx = self.pool.begin().await?;
 
         if let Some(request_id) = client_request_id {
@@ -418,7 +419,7 @@ impl OrchestratorRepo {
                  (request_id, task_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
             )
             .bind(request_id)
-            .bind(&row.id)
+            .bind(&row_to_insert.id)
             .bind(&now)
             .bind(&now)
             .execute(&mut *tx)
@@ -452,64 +453,45 @@ impl OrchestratorRepo {
               updated_at, started_at, finished_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(&row.id)
-        .bind(&row.project_id)
-        .bind(&row.title)
-        .bind(&row.goal)
-        .bind(&row.acceptance_criteria)
-        .bind(row.status.as_str())
-        .bind(row.priority)
-        .bind(&row.branch_name)
-        .bind(row.workflow_state.as_str())
-        .bind(row.run_state.as_str())
-        .bind(row.attempt_phase.map(OrchestratorAttemptPhase::as_str))
-        .bind(&row.source)
-        .bind(&row.external_id)
-        .bind(&row.external_identifier)
-        .bind(&row.external_url)
-        .bind(&row.external_state)
+        .bind(&row_to_insert.id)
+        .bind(&row_to_insert.project_id)
+        .bind(&row_to_insert.title)
+        .bind(&row_to_insert.goal)
+        .bind(&row_to_insert.acceptance_criteria)
+        .bind(row_to_insert.status.as_str())
+        .bind(row_to_insert.priority)
+        .bind(&row_to_insert.branch_name)
+        .bind(row_to_insert.workflow_state.as_str())
+        .bind(row_to_insert.run_state.as_str())
+        .bind(row_to_insert.attempt_phase.map(OrchestratorAttemptPhase::as_str))
+        .bind(&row_to_insert.source)
+        .bind(&row_to_insert.external_id)
+        .bind(&row_to_insert.external_identifier)
+        .bind(&row_to_insert.external_url)
+        .bind(&row_to_insert.external_state)
         .bind(&external_labels_json)
-        .bind(&row.runner_provider)
-        .bind(&row.claude_session_id)
-        .bind(&row.transcript_path)
-        .bind(&row.runtime_started_at)
-        .bind(&row.last_activity_at)
-        .bind(&row.last_runtime_event)
-        .bind(&row.last_runtime_message)
-        .bind(&row.worktree_id)
-        .bind(&row.session_id)
-        .bind(&row.blocked_reason)
-        .bind(row.attempt)
-        .bind(&row.created_at)
-        .bind(&row.updated_at)
-        .bind(&row.started_at)
-        .bind(&row.finished_at)
+        .bind(&row_to_insert.runner_provider)
+        .bind(&row_to_insert.claude_session_id)
+        .bind(&row_to_insert.transcript_path)
+        .bind(&row_to_insert.runtime_started_at)
+        .bind(&row_to_insert.last_activity_at)
+        .bind(&row_to_insert.last_runtime_event)
+        .bind(&row_to_insert.last_runtime_message)
+        .bind(&row_to_insert.worktree_id)
+        .bind(&row_to_insert.session_id)
+        .bind(&row_to_insert.blocked_reason)
+        .bind(row_to_insert.attempt)
+        .bind(&row_to_insert.created_at)
+        .bind(&row_to_insert.updated_at)
+        .bind(&row_to_insert.started_at)
+        .bind(&row_to_insert.finished_at)
         .execute(&mut *tx)
         .await?;
-
-        if queue {
-            let now = Utc::now().to_rfc3339();
-            let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Queued);
-            sqlx::query(
-                "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
-                 WHERE id = ? AND status = ?",
-            )
-            .bind(OrchestratorTaskStatus::Queued.as_str())
-            .bind(split_state.workflow_state.as_str())
-            .bind(split_state.run_state.as_str())
-            .bind(Option::<&str>::None)
-            .bind(now)
-            .bind(&row.id)
-            .bind(OrchestratorTaskStatus::Draft.as_str())
-            .execute(&mut *tx)
-            .await?;
-        }
 
         let task_row = sqlx::query(&format!(
             "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
         ))
-        .bind(&row.id)
+        .bind(&row_to_insert.id)
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -525,9 +507,9 @@ impl OrchestratorRepo {
         &self,
         client_request_id: &str,
         row: &OrchestratorTaskRow,
-        queue: bool,
+        create_action: OrchestratorCreateAction,
     ) -> Result<OrchestratorTaskRow, AppError> {
-        self.create_remote_task_idempotent(Some(client_request_id), row, queue)
+        self.create_remote_task_idempotent(Some(client_request_id), row, create_action)
             .await
     }
 
@@ -2501,6 +2483,25 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     任务创建动作需要在入库前统一映射 legacy status 与 split state，避免 Tauri、HTTP 和 P2P 入口语义漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     克隆调用方构造的完整任务行，按 createAction 覆盖 status/workflow_state/run_state，并清理运行期阻塞字段。
+fn task_row_for_create_action(
+    row: &OrchestratorTaskRow,
+    create_action: OrchestratorCreateAction,
+) -> OrchestratorTaskRow {
+    let mut next = row.clone();
+    let split_state = SplitTaskState::from_create_action(create_action);
+    next.status = create_action.initial_status();
+    next.workflow_state = split_state.workflow_state;
+    next.run_state = split_state.run_state;
+    next.attempt_phase = None;
+    next.blocked_reason = None;
+    next
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     outbox 表读取后必须还原强类型状态和所有时间字段，供 dispatcher 与 UI 共用。
 ///
 /// Code Logic（这个函数做什么）:
@@ -3031,11 +3032,19 @@ mod tests {
         let second = task_row("task-2", "project-1", OrchestratorTaskStatus::Draft);
 
         let created = repo
-            .create_remote_task_for_client_request("client-request-1", &first, true)
+            .create_remote_task_for_client_request(
+                "client-request-1",
+                &first,
+                OrchestratorCreateAction::Todo,
+            )
             .await
             .unwrap();
         let replayed = repo
-            .create_remote_task_for_client_request("client-request-1", &second, false)
+            .create_remote_task_for_client_request(
+                "client-request-1",
+                &second,
+                OrchestratorCreateAction::Backlog,
+            )
             .await
             .unwrap();
         let listed = repo.list_tasks(Some("project-1")).await.unwrap();
@@ -3048,19 +3057,23 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     远端 HTTP create queue=true 是移动端和远端代理的直接启动入口，创建后的任务必须被本机 scheduler 领取。
+    ///     远端 HTTP createAction=todo 是移动端和远端代理的待执行入口，创建后的任务必须被本机 scheduler 领取。
     ///
     /// Code Logic（这个函数做什么）:
     ///     通过幂等 create helper 创建 queued 任务，再执行全局 claim，断言 split state 从 Todo/Idle 进入 InProgress/Preparing。
     #[tokio::test]
-    async fn remote_create_queue_true_result_is_claimable_by_split_state_scheduler() {
+    async fn remote_create_action_todo_result_is_claimable_by_split_state_scheduler() {
         let (pool, repo) = setup_repo().await;
         create_workbench_projects_table(&pool).await;
         insert_workbench_project(&pool, "project-1", "local").await;
         let row = task_row("remote-created", "project-1", OrchestratorTaskStatus::Draft);
 
         let created = repo
-            .create_remote_task_for_client_request("client-request-claimable", &row, true)
+            .create_remote_task_for_client_request(
+                "client-request-claimable",
+                &row,
+                OrchestratorCreateAction::Todo,
+            )
             .await
             .unwrap();
         let claimed = repo
@@ -3079,6 +3092,54 @@ mod tests {
             OrchestratorWorkflowState::InProgress
         );
         assert_eq!(claimed[0].run_state, OrchestratorRunState::Preparing);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     创建弹窗默认动作是 Backlog，不能因为旧 queue 默认值导致任务被 scheduler 自动领取。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     通过幂等 create helper 使用 backlog 动作创建任务，断言 legacy/split state 均保持草稿待办池语义。
+    #[tokio::test]
+    async fn remote_create_action_backlog_keeps_task_in_backlog_idle() {
+        let (_pool, repo) = setup_repo().await;
+        let row = task_row("remote-backlog", "project-1", OrchestratorTaskStatus::Draft);
+
+        let created = repo
+            .create_remote_task_for_client_request(
+                "client-request-backlog",
+                &row,
+                OrchestratorCreateAction::Backlog,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(created.status, OrchestratorTaskStatus::Draft);
+        assert_eq!(created.workflow_state, OrchestratorWorkflowState::Backlog);
+        assert_eq!(created.run_state, OrchestratorRunState::Idle);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Create and Start 在调度前的持久化语义必须与 Todo 一致，后续 dispatch 只能领取 Todo/Idle。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     通过幂等 create helper 使用 start 动作创建任务，断言任务先落库为 legacy Queued + Todo/Idle。
+    #[tokio::test]
+    async fn remote_create_action_start_persists_as_todo_idle_before_dispatch() {
+        let (_pool, repo) = setup_repo().await;
+        let row = task_row("remote-start", "project-1", OrchestratorTaskStatus::Draft);
+
+        let created = repo
+            .create_remote_task_for_client_request(
+                "client-request-start",
+                &row,
+                OrchestratorCreateAction::Start,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(created.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(created.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(created.run_state, OrchestratorRunState::Idle);
     }
 
     /// Business Logic（为什么需要这个函数）:

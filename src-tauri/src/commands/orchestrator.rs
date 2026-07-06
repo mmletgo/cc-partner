@@ -2,11 +2,11 @@ use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
-    OrchestratorAttemptPhase, OrchestratorEvidenceDto, OrchestratorProjectConfigDto,
-    OrchestratorRunState, OrchestratorTaskAttemptRow, OrchestratorTaskDto, OrchestratorTaskRow,
-    OrchestratorTaskStatus, OrchestratorWorkflowState, EVIDENCE_KIND_DELIVERY,
-    EVIDENCE_KIND_REPAIR_PROMPT, EVIDENCE_KIND_VERIFICATION_OUTPUT,
-    EVIDENCE_KIND_VERIFICATION_REVIEW,
+    OrchestratorAttemptPhase, OrchestratorCreateAction, OrchestratorEvidenceDto,
+    OrchestratorProjectConfigDto, OrchestratorRunState, OrchestratorTaskAttemptRow,
+    OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus, OrchestratorWorkflowState,
+    SplitTaskState, EVIDENCE_KIND_DELIVERY, EVIDENCE_KIND_REPAIR_PROMPT,
+    EVIDENCE_KIND_VERIFICATION_OUTPUT, EVIDENCE_KIND_VERIFICATION_REVIEW,
 };
 use crate::orchestrator::outbox::{
     create_pending_remote_task, is_remote_network_error, mirror_payload_from_task,
@@ -35,7 +35,7 @@ use uuid::Uuid;
 ///     前端创建编排任务时只提交用户可编辑字段，后端统一补齐 id、状态、关联执行信息和时间戳。
 ///
 /// Code Logic（这个结构体做什么）:
-///     以 camelCase 接收 Tauri invoke 参数，并保留 priority 与 tracker 预留字段的可选值用于默认归一。
+///     以 camelCase 接收 Tauri invoke 参数，并保留 priority、createAction 与 tracker 预留字段用于归一。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateOrchestratorTaskRequest {
@@ -44,6 +44,8 @@ pub struct CreateOrchestratorTaskRequest {
     pub goal: String,
     pub acceptance_criteria: String,
     pub priority: Option<i64>,
+    #[serde(default)]
+    pub create_action: OrchestratorCreateAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,6 +209,85 @@ fn non_empty_trimmed_string(value: &str) -> Option<String> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     本机 Tauri 创建入口也需要支持 Backlog/Todo/Start 三种动作，不能只让远端 HTTP 协议拥有该语义。
+///
+/// Code Logic（这个函数做什么）:
+///     按 createAction 覆盖新任务 row 的 legacy status 与 split state，Start 与 Todo 入库语义一致。
+fn apply_create_action_to_task_row(
+    row: &mut OrchestratorTaskRow,
+    create_action: OrchestratorCreateAction,
+) {
+    let split_state = SplitTaskState::from_create_action(create_action);
+    row.status = create_action.initial_status();
+    row.workflow_state = split_state.workflow_state;
+    row.run_state = split_state.run_state;
+    row.attempt_phase = None;
+    row.blocked_reason = None;
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Create and Start 应在创建成功后尝试触发 scheduler，但 Settings 关闭、容量不足或 runner 失败都不应让创建失败。
+///
+/// Code Logic（这个函数做什么）:
+///     对 Start 调用 dispatch_once 并吞掉错误写日志，随后重读任务状态；非 Start 直接返回创建行。
+async fn refresh_task_after_create_action(
+    state: &AppState,
+    row: OrchestratorTaskRow,
+    create_action: OrchestratorCreateAction,
+) -> Result<OrchestratorTaskRow, AppError> {
+    if !create_action.should_dispatch_after_create() {
+        return Ok(row);
+    }
+
+    let task_id = row.id.clone();
+    if let Err(err) =
+        crate::orchestrator::scheduler::dispatch_once(state, state.app_handle.clone()).await
+    {
+        tracing::warn!(
+            task_id = %task_id,
+            error = %err,
+            "orchestrator createAction=start dispatch failed after task creation"
+        );
+    }
+    state.orchestrator_repo.get_task(&task_id).await.or(Ok(row))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     多个本机创建入口都需要相同的校验、状态映射、落库和 Start 刷新语义。
+///
+/// Code Logic（这个函数做什么）:
+///     构造任务 row，应用 createAction，插入 repo，并在 Start 时 best-effort dispatch 后返回最新 row。
+async fn create_local_task_with_action(
+    state: &AppState,
+    request: CreateOrchestratorTaskRequest,
+) -> Result<OrchestratorTaskRow, AppError> {
+    let create_action = request.create_action;
+    let mut row = build_orchestrator_task_row(request)?;
+    apply_create_action_to_task_row(&mut row, create_action);
+    state.orchestrator_repo.create_task(&row).await?;
+    refresh_task_after_create_action(state, row, create_action).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     HTTP/mobile 本机创建必须同时支持 clientRequestId 幂等和三种 createAction，避免重试产生重复任务。
+///
+/// Code Logic（这个函数做什么）:
+///     构造本机任务 row，调用 repo 幂等创建入口按 createAction 落库，并在 Start 时 best-effort dispatch 后刷新。
+async fn create_local_task_for_client_request(
+    state: &AppState,
+    client_request_id: &str,
+    request: CreateOrchestratorTaskRequest,
+) -> Result<OrchestratorTaskRow, AppError> {
+    let create_action = request.create_action;
+    let row = build_orchestrator_task_row(request)?;
+    let created = state
+        .orchestrator_repo
+        .create_remote_task_for_client_request(client_request_id, &row, create_action)
+        .await?;
+    refresh_task_after_create_action(state, created, create_action).await
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     remote-aware 命令需要先确认 projectId 对应的 Workbench 项目，才能分流 local 与 remote shortcut。
 ///
 /// Code Logic（这个函数做什么）:
@@ -226,7 +307,7 @@ async fn get_orchestrator_workbench_project(
 ///     远端 create 请求需要沿用用户输入的标题、目标、验收标准和优先级，但 projectId 会在远端 open-project 后替换。
 ///
 /// Code Logic（这个函数做什么）:
-///     从本地 Tauri create request 投影为 RemoteCreateOrchestratorTaskReq，queue 固定 false 保持草稿语义；
+///     从本地 Tauri create request 投影为 RemoteCreateOrchestratorTaskReq，保留 createAction；
 ///     同时生成一次性稳定 clientRequestId，若在线响应超时后落入 pending outbox，后续投递仍复用该幂等键。
 fn remote_create_request_from_local(
     request: &CreateOrchestratorTaskRequest,
@@ -237,7 +318,7 @@ fn remote_create_request_from_local(
         goal: request.goal.clone(),
         acceptance_criteria: request.acceptance_criteria.clone(),
         priority: request.priority.unwrap_or(0),
-        queue: false,
+        create_action: request.create_action,
         client_request_id: Some(Uuid::new_v4().to_string()),
         source: request.source.clone(),
         external_id: request.external_id.clone(),
@@ -1174,14 +1255,13 @@ pub async fn list_orchestrator_tasks(
 ///     用户在前端提交任务后，需要立即生成草稿任务并保存到 SQLite，供后续队列和调度器处理。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用纯 helper 完成校验和 Row 初始化，再委托 OrchestratorRepo 插入并返回 DTO。
+///     调用共享 helper 完成校验、createAction 状态映射、插入和 Start best-effort dispatch，再返回 DTO。
 #[tauri::command]
 pub async fn create_orchestrator_task(
     state: State<'_, AppState>,
     request: CreateOrchestratorTaskRequest,
 ) -> Result<OrchestratorTaskDto, AppError> {
-    let row = build_orchestrator_task_row(request)?;
-    state.orchestrator_repo.create_task(&row).await?;
+    let row = create_local_task_with_action(state.inner(), request).await?;
     Ok(OrchestratorTaskDto::from(row))
 }
 
@@ -1248,8 +1328,7 @@ pub(crate) async fn create_orchestrator_task_view_for_state(
 ) -> Result<OrchestratorTaskViewDto, AppError> {
     let project = get_orchestrator_workbench_project(state, &request.project_id).await?;
     if project.kind != "remote" {
-        let row = build_orchestrator_task_row(request)?;
-        state.orchestrator_repo.create_task(&row).await?;
+        let row = create_local_task_with_action(state, request).await?;
         return Ok(local_task_view(row));
     }
 
@@ -1325,10 +1404,10 @@ pub async fn get_orchestrator_runtime_snapshot(
 /// 通过 HTTP task-view 协议创建 remote-aware Orchestrator 任务。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     `/mobile` 创建任务需要保留旧移动端语义：create 请求默认直接入队，同时还要支持 remote shortcut 代理。
+///     `/mobile` 创建任务需要支持 Backlog/Todo/Start 三种创建动作，同时还要支持 remote shortcut 代理。
 ///
 /// Code Logic（这个函数做什么）:
-///     local 项目用 clientRequestId 幂等创建并按 queue 决定是否入队；remote 项目保持同一 requestId 转发到 owning device，
+///     local 项目用 clientRequestId 幂等创建并按 createAction 决定初始状态；remote 项目保持同一 requestId 转发到 owning device，
 ///     网络失败时写 pending outbox 并返回 PendingRemote。
 pub(crate) async fn create_orchestrator_task_view_for_http(
     state: &AppState,
@@ -1344,24 +1423,26 @@ pub(crate) async fn create_orchestrator_task_view_for_http(
         .ok_or_else(|| AppError::generic("移动端创建任务缺少 clientRequestId"))?;
 
     if project.kind != "remote" {
-        let row = build_orchestrator_task_row(CreateOrchestratorTaskRequest {
-            project_id: req.project_id,
-            title: req.title,
-            goal: req.goal,
-            acceptance_criteria: req.acceptance_criteria,
-            priority: Some(req.priority),
-            source: req.source,
-            external_id: req.external_id,
-            external_identifier: req.external_identifier,
-            external_url: req.external_url,
-            external_state: req.external_state,
-            external_labels: req.external_labels,
-        })?;
-        let created = state
-            .orchestrator_repo
-            .create_remote_task_for_client_request(&client_request_id, &row, req.queue)
-            .await?;
-        return Ok(local_task_view(created));
+        let row = create_local_task_for_client_request(
+            state,
+            &client_request_id,
+            CreateOrchestratorTaskRequest {
+                project_id: req.project_id,
+                title: req.title,
+                goal: req.goal,
+                acceptance_criteria: req.acceptance_criteria,
+                priority: Some(req.priority),
+                create_action: req.create_action,
+                source: req.source,
+                external_id: req.external_id,
+                external_identifier: req.external_identifier,
+                external_url: req.external_url,
+                external_state: req.external_state,
+                external_labels: req.external_labels,
+            },
+        )
+        .await?;
+        return Ok(local_task_view(row));
     }
 
     let remote_request = RemoteCreateOrchestratorTaskReq {
@@ -2016,6 +2097,7 @@ mod tests {
             goal: "完成目标".to_string(),
             acceptance_criteria: "测试通过".to_string(),
             priority: None,
+            create_action: OrchestratorCreateAction::Backlog,
             source: None,
             external_id: None,
             external_identifier: None,
@@ -2042,6 +2124,7 @@ mod tests {
             goal: "完成目标".to_string(),
             acceptance_criteria: "测试通过".to_string(),
             priority: None,
+            create_action: OrchestratorCreateAction::Backlog,
             source: None,
             external_id: None,
             external_identifier: None,
@@ -2055,6 +2138,7 @@ mod tests {
             goal: " ".to_string(),
             acceptance_criteria: "测试通过".to_string(),
             priority: None,
+            create_action: OrchestratorCreateAction::Backlog,
             source: None,
             external_id: None,
             external_identifier: None,
@@ -2080,6 +2164,7 @@ mod tests {
             goal: "  暴露任务命令  ".to_string(),
             acceptance_criteria: "  测试通过  ".to_string(),
             priority: None,
+            create_action: OrchestratorCreateAction::Backlog,
             source: None,
             external_id: None,
             external_identifier: None,
@@ -2331,6 +2416,7 @@ mod tests {
             goal: "完成目标".to_string(),
             acceptance_criteria: "验收".to_string(),
             priority: Some(3),
+            create_action: OrchestratorCreateAction::Start,
             source: None,
             external_id: None,
             external_identifier: None,

@@ -523,7 +523,9 @@ fn classify_remote_error(error: AppError) -> RemoteOutboxDispatchError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::models::{OrchestratorTaskDto, OrchestratorTaskStatus};
+    use crate::orchestrator::models::{
+        OrchestratorCreateAction, OrchestratorTaskDto, OrchestratorTaskStatus,
+    };
     use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
     use crate::orchestrator::repo::OrchestratorRepo;
     use chrono::{Duration as ChronoDuration, Utc};
@@ -573,7 +575,7 @@ mod tests {
             goal: "在远端执行".to_string(),
             acceptance_criteria: "远端测试通过".to_string(),
             priority: 3,
-            queue: false,
+            create_action: OrchestratorCreateAction::Backlog,
             client_request_id: None,
             source: Some("linear".to_string()),
             external_id: Some("lin-123".to_string()),
@@ -615,11 +617,13 @@ mod tests {
     ///     远端离线创建任务必须落到 pending outbox，避免用户提交的工作在重启后丢失。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     插入 pending item 后读取该 item，断言目标设备、路径、请求 JSON 和状态正确。
+    ///     插入 pending item 后读取该 item，断言目标设备、路径、请求 JSON、createAction 和状态正确。
     #[tokio::test]
     async fn insert_pending_item() {
         let repo = setup_repo().await;
-        let request_json = serde_json::to_string(&create_req()).expect("request json");
+        let mut request = create_req();
+        request.create_action = OrchestratorCreateAction::Start;
+        let request_json = serde_json::to_string(&request).expect("request json");
 
         let item = repo
             .insert_remote_outbox_pending(
@@ -648,6 +652,12 @@ mod tests {
         assert!(persisted
             .request_json
             .contains(r#""externalLabels":["frontend","p1"]"#));
+        let persisted_request: RemoteCreateOrchestratorTaskReq =
+            serde_json::from_str(&persisted.request_json).expect("persisted request json");
+        assert_eq!(
+            persisted_request.create_action,
+            OrchestratorCreateAction::Start
+        );
         assert!(persisted.remote_task_id.is_none());
         assert!(persisted.last_error.is_none());
         assert!(persisted.sent_at.is_none());

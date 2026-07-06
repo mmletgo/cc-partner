@@ -8,7 +8,9 @@
 //!     定义 `/api/orchestrator/...` 远端路由请求与响应 DTO，统一使用 camelCase 序列化/反序列化。
 
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
-use crate::orchestrator::models::{OrchestratorEvidenceDto, OrchestratorTaskDto};
+use crate::orchestrator::models::{
+    OrchestratorCreateAction, OrchestratorEvidenceDto, OrchestratorTaskDto,
+};
 use serde::{Deserialize, Serialize};
 
 /// 远端创建 Orchestrator 任务请求体。
@@ -17,8 +19,8 @@ use serde::{Deserialize, Serialize};
 ///     本机 remote shortcut 创建任务时，实际任务必须创建在项目所属设备的本机 Orchestrator 队列中。
 ///
 /// Code Logic（这个结构体做什么）:
-///     保存远端 local projectId、标题、目标、验收标准、优先级、是否立即入队、幂等键和 tracker 预留字段，字段使用 camelCase。
-///     字段以 Option 解析，便于 route 返回统一业务错误；create route 会拒绝缺失或空白 key。
+///     保存远端 local projectId、标题、目标、验收标准、优先级、创建动作、幂等键和 tracker 预留字段，字段使用 camelCase。
+///     clientRequestId 以 Option 解析，便于 route 返回统一业务错误；create route 会拒绝缺失或空白 key。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteCreateOrchestratorTaskReq {
@@ -27,7 +29,8 @@ pub struct RemoteCreateOrchestratorTaskReq {
     pub goal: String,
     pub acceptance_criteria: String,
     pub priority: i64,
-    pub queue: bool,
+    #[serde(default)]
+    pub create_action: OrchestratorCreateAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,7 +149,7 @@ mod tests {
             goal: "目标".to_string(),
             acceptance_criteria: "验收".to_string(),
             priority: 7,
-            queue: true,
+            create_action: OrchestratorCreateAction::Todo,
             client_request_id: Some("request-1".to_string()),
             source: Some("linear".to_string()),
             external_id: Some("lin-123".to_string()),
@@ -161,7 +164,7 @@ mod tests {
         assert_eq!(value["projectId"], "project-1");
         assert_eq!(value["acceptanceCriteria"], "验收");
         assert_eq!(value["priority"], 7);
-        assert_eq!(value["queue"], true);
+        assert_eq!(value["createAction"], "todo");
         assert_eq!(value["clientRequestId"], "request-1");
         assert_eq!(value["externalState"], "In Progress");
         assert_eq!(
@@ -169,6 +172,7 @@ mod tests {
             serde_json::json!(["frontend", "p1"])
         );
         assert!(value.get("project_id").is_none());
+        assert!(value.get("queue").is_none());
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -184,11 +188,32 @@ mod tests {
             "goal": "目标",
             "acceptanceCriteria": "验收",
             "priority": 1,
-            "queue": false
+            "createAction": "backlog"
         }))
         .expect("deserialize request");
 
         assert!(req.client_request_id.is_none());
+        assert_eq!(req.create_action, OrchestratorCreateAction::Backlog);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧移动端协议缺省不应再自动排队，避免创建弹窗未选择动作时直接启动任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化不含 createAction 的 JSON，断言协议默认值为 backlog。
+    #[test]
+    fn create_request_defaults_create_action_to_backlog() {
+        let req: RemoteCreateOrchestratorTaskReq = serde_json::from_value(serde_json::json!({
+            "projectId": "project-1",
+            "title": "任务",
+            "goal": "目标",
+            "acceptanceCriteria": "验收",
+            "priority": 1,
+            "clientRequestId": "request-1"
+        }))
+        .expect("deserialize request");
+
+        assert_eq!(req.create_action, OrchestratorCreateAction::Backlog);
     }
 
     /// Business Logic（为什么需要这个测试）:
