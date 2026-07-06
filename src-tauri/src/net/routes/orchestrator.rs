@@ -10,7 +10,9 @@
 
 use crate::commands::orchestrator::{
     build_orchestrator_task_row, create_orchestrator_task_view_for_http,
-    list_orchestrator_task_views_for_state, CreateOrchestratorTaskRequest, OrchestratorTaskViewDto,
+    dispatch_orchestrator_best_effort, ensure_reviewed_delivery_allowed,
+    list_orchestrator_task_views_for_state, run_delivery_for_task, CreateOrchestratorTaskRequest,
+    OrchestratorTaskViewDto,
 };
 use crate::commands::prompt_optimizer::{
     local_complete_orchestrator_task_prompt, OrchestratorTaskPromptCompletionDto,
@@ -25,8 +27,9 @@ use crate::orchestrator::outbox::open_remote_project_for_shortcut;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::{
     RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq, RemoteListTasksReq,
-    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp, RemoteOrchestratorTaskListResp,
-    RemoteTaskReq,
+    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp,
+    RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp, RemoteTaskReq,
+    RemoteTaskReworkReq,
 };
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
@@ -219,6 +222,25 @@ async fn queue_task_for_state(
     Ok(OrchestratorTaskDto::from(task))
 }
 
+/// 启动远端本机任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的 start 操作必须在 owning device 上把任务放入 scheduler 可领取路径，并尽力立即调度。
+///
+/// Code Logic（这个函数做什么）:
+///     确认任务属于本机 local 项目后调用 repo.start_task，再通过 AppState AppHandle 触发 best-effort dispatch。
+async fn start_task_for_state(
+    state: &AppState,
+    req: RemoteTaskReq,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let context = OrchestratorRouteContext::from_app_state(state);
+    let task = get_local_project_task(&context, &req.task_id).await?;
+    context.orchestrator_repo.start_task(&task.id).await?;
+    dispatch_orchestrator_best_effort(state, state.app_handle.clone()).await;
+    let latest = context.orchestrator_repo.get_task(&task.id).await?;
+    Ok(OrchestratorTaskDto::from(latest))
+}
+
 /// 重试远端阻塞任务。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -243,6 +265,52 @@ async fn retry_task_for_state(
     Ok(OrchestratorTaskDto::from(task))
 }
 
+/// 请求远端本机任务返工。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 上的 requestRework 必须在 owning device 的任务 evidence 中记录人工返工原因。
+///
+/// Code Logic（这个函数做什么）:
+///     确认任务所属 local 项目后调用 repo.request_task_rework，返回更新后的任务 DTO。
+async fn request_rework_task_for_state(
+    state: &OrchestratorRouteContext,
+    req: RemoteTaskReworkReq,
+) -> Result<OrchestratorTaskDto, AppError> {
+    get_local_project_task(state, &req.task_id).await?;
+    let task = state
+        .orchestrator_repo
+        .request_task_rework(&req.task_id, &req.reason)
+        .await?;
+    Ok(OrchestratorTaskDto::from(task))
+}
+
+/// 交付远端本机人工复核任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的 deliverReviewedTask 必须受 owning device Settings 控制，并在 owning device 执行 Git delivery。
+///
+/// Code Logic（这个函数做什么）:
+///     确认任务所属 local 项目，读取全局 Settings gate，通过后切入 Delivering 并调用共享 delivery pipeline。
+async fn deliver_reviewed_task_for_state(
+    state: &AppState,
+    req: RemoteTaskReq,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let context = OrchestratorRouteContext::from_app_state(state);
+    let task = get_local_project_task(&context, &req.task_id).await?;
+    let config = context
+        .config
+        .read()
+        .expect("config 读锁中毒")
+        .orchestrator
+        .clone();
+    ensure_reviewed_delivery_allowed(&config)?;
+    let delivering = context
+        .orchestrator_repo
+        .start_delivery_from_human_review(&task.id)
+        .await?;
+    run_delivery_for_task(state, state.app_handle.clone(), &delivering.id).await
+}
+
 /// 终止远端任务。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -260,6 +328,42 @@ async fn abort_task_for_state(
         .set_task_status(&req.task_id, OrchestratorTaskStatus::Aborted, None)
         .await?;
     Ok(OrchestratorTaskDto::from(task))
+}
+
+/// 取消远端本机任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的 cancelTask 应移动 owning device 上的权威任务到 Canceled/Idle，并保留现场和证据。
+///
+/// Code Logic（这个函数做什么）:
+///     确认任务所属 local 项目后调用 repo.cancel_task。
+async fn cancel_task_for_state(
+    state: &OrchestratorRouteContext,
+    req: RemoteTaskReq,
+) -> Result<OrchestratorTaskDto, AppError> {
+    get_local_project_task(state, &req.task_id).await?;
+    let task = state.orchestrator_repo.cancel_task(&req.task_id).await?;
+    Ok(OrchestratorTaskDto::from(task))
+}
+
+/// 刷新远端本机项目。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 刷新项目时，owning device 需要触发一次 best-effort dispatch/reconcile，并返回领取数量。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 projectId 是本机 local 项目后调用共享 best-effort dispatch wrapper。
+async fn refresh_project_for_state(
+    state: &AppState,
+    project_id: &str,
+) -> Result<RemoteOrchestratorProjectRefreshResp, AppError> {
+    let context = OrchestratorRouteContext::from_app_state(state);
+    ensure_remote_orchestrator_local_project_id(&context, project_id).await?;
+    let dispatched = dispatch_orchestrator_best_effort(state, state.app_handle.clone()).await;
+    Ok(RemoteOrchestratorProjectRefreshResp {
+        project_id: project_id.to_string(),
+        dispatched,
+    })
 }
 
 /// 读取远端设备 Orchestrator 全局配置。
@@ -424,6 +528,20 @@ pub async fn queue_task(
     Ok(Json(queue_task_for_state(&context, req).await?))
 }
 
+/// 启动任务 HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的 start 操作需要在 owning device 上显式进入 scheduler 路径。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 `{taskId}` 请求体，委托 start_task_for_state。
+pub async fn start_task(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteTaskReq>,
+) -> Result<Json<OrchestratorTaskDto>, AppError> {
+    Ok(Json(start_task_for_state(&state, req).await?))
+}
+
 /// 重试任务 HTTP handler。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -439,6 +557,35 @@ pub async fn retry_task(
     Ok(Json(retry_task_for_state(&context, req).await?))
 }
 
+/// 请求返工 HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的 requestRework 操作需要在 owning device 记录返工原因和 evidence。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 `{taskId, reason}` 请求体，构造 route context 后委托 request_rework_task_for_state。
+pub async fn request_rework_task(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteTaskReworkReq>,
+) -> Result<Json<OrchestratorTaskDto>, AppError> {
+    let context = OrchestratorRouteContext::from_app_state(&state);
+    Ok(Json(request_rework_task_for_state(&context, req).await?))
+}
+
+/// 交付人工复核任务 HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的 deliverReviewedTask 操作需要由 owning device 检查 Settings 并运行 delivery pipeline。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 `{taskId}` 请求体，委托 deliver_reviewed_task_for_state。
+pub async fn deliver_reviewed_task(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteTaskReq>,
+) -> Result<Json<OrchestratorTaskDto>, AppError> {
+    Ok(Json(deliver_reviewed_task_for_state(&state, req).await?))
+}
+
 /// 终止任务 HTTP handler。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -452,6 +599,35 @@ pub async fn abort_task(
 ) -> Result<Json<OrchestratorTaskDto>, AppError> {
     let context = OrchestratorRouteContext::from_app_state(&state);
     Ok(Json(abort_task_for_state(&context, req).await?))
+}
+
+/// 取消任务 HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的 cancelTask 操作需要在 owning device 上移动权威任务到 Canceled/Idle。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 `{taskId}` 请求体，构造 route context 后委托 cancel_task_for_state。
+pub async fn cancel_task(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteTaskReq>,
+) -> Result<Json<OrchestratorTaskDto>, AppError> {
+    let context = OrchestratorRouteContext::from_app_state(&state);
+    Ok(Json(cancel_task_for_state(&context, req).await?))
+}
+
+/// 刷新项目 HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的 refreshOrchestratorProject 操作需要在 owning device 上触发一次 best-effort dispatch。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 `{projectId}` 请求体，委托 refresh_project_for_state 并返回 `{projectId, dispatched}`。
+pub async fn refresh_project(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteListTasksReq>,
+) -> Result<Json<RemoteOrchestratorProjectRefreshResp>, AppError> {
+    Ok(Json(refresh_project_for_state(&state, &req.project_id).await?))
 }
 
 /// 读取 Orchestrator 全局配置 HTTP handler。

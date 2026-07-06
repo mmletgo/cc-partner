@@ -7,7 +7,7 @@ use crate::orchestrator::claude_runtime::ClaudeRuntimeSummary;
 use crate::orchestrator::models::{
     OrchestratorAttemptPhase, OrchestratorEvidenceDto, OrchestratorProjectConfigDto,
     OrchestratorRunState, OrchestratorTaskAttemptRow, OrchestratorTaskRow, OrchestratorTaskStatus,
-    OrchestratorWorkflowState, SplitTaskState,
+    OrchestratorWorkflowState, SplitTaskState, EVIDENCE_KIND_REPAIR_PROMPT,
 };
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
@@ -1489,6 +1489,206 @@ impl OrchestratorRepo {
             "只有草稿任务可以入队，当前状态为 {}",
             current.status.as_str()
         )))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 startTask 动作只负责把 Backlog/Draft 或 Todo/Idle 任务放入 scheduler 可领取路径，
+    ///     后续是否立即启动 Runner 交给调度器按全局开关和容量 best-effort 决定。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先读取当前任务并校验允许的 split state；通过后用 status/workflow/run 三字段 CAS 写为 Queued + Todo/Idle，
+    ///     清空 blocked_reason 和 attempt_phase，保留 worktree/session/evidence。
+    pub async fn start_task(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
+        let current = self.get_task(task_id).await?;
+        let can_start_from_backlog =
+            current.status == OrchestratorTaskStatus::Draft
+                && current.workflow_state == OrchestratorWorkflowState::Backlog
+                && current.run_state == OrchestratorRunState::Idle;
+        let can_start_from_todo =
+            current.workflow_state == OrchestratorWorkflowState::Todo
+                && current.run_state == OrchestratorRunState::Idle;
+        if !can_start_from_backlog && !can_start_from_todo {
+            return Err(AppError::generic(format!(
+                "只有待整理草稿或待办空闲任务可以开始，当前 workflow={}, run={}, status={}",
+                current.workflow_state.as_str(),
+                current.run_state.as_str(),
+                current.status.as_str()
+            )));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                 blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ? AND workflow_state = ? AND run_state = ?",
+        )
+        .bind(OrchestratorTaskStatus::Queued.as_str())
+        .bind(OrchestratorWorkflowState::Todo.as_str())
+        .bind(OrchestratorRunState::Idle.as_str())
+        .bind(Option::<&str>::None)
+        .bind(Option::<&str>::None)
+        .bind(now)
+        .bind(&current.id)
+        .bind(current.status.as_str())
+        .bind(current.workflow_state.as_str())
+        .bind(current.run_state.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(&current.id).await;
+        }
+
+        self.get_task(&current.id).await?;
+        Err(AppError::generic("任务状态已变化，请刷新后重试"))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     人工复核未通过时，用户需要显式 requestRework 并留下原因，后续 scheduler 才能在同一现场继续领取任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅允许 legacy Done + workflow HumanReview + run Idle 的任务进入 Queued + Rework/Idle；
+    ///     写入 repairPrompt evidence 和 rework event，保留 worktree/session/runtime 字段。
+    pub async fn request_task_rework(
+        &self,
+        task_id: &str,
+        reason: &str,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(AppError::generic("返工原因不能为空"));
+        }
+        let current = self.get_task(task_id).await?;
+        if current.status != OrchestratorTaskStatus::Done
+            || current.workflow_state != OrchestratorWorkflowState::HumanReview
+            || current.run_state != OrchestratorRunState::Idle
+        {
+            return Err(AppError::generic(format!(
+                "只有人工复核中的任务可以请求返工，当前 workflow={}, run={}, status={}",
+                current.workflow_state.as_str(),
+                current.run_state.as_str(),
+                current.status.as_str()
+            )));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                 blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ? AND workflow_state = ? AND run_state = ?",
+        )
+        .bind(OrchestratorTaskStatus::Queued.as_str())
+        .bind(OrchestratorWorkflowState::Rework.as_str())
+        .bind(OrchestratorRunState::Idle.as_str())
+        .bind(OrchestratorAttemptPhase::Failed.as_str())
+        .bind(Option::<&str>::None)
+        .bind(now)
+        .bind(&current.id)
+        .bind(OrchestratorTaskStatus::Done.as_str())
+        .bind(OrchestratorWorkflowState::HumanReview.as_str())
+        .bind(OrchestratorRunState::Idle.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() != 1 {
+            self.get_task(&current.id).await?;
+            return Err(AppError::generic("任务状态已变化，请刷新后重试"));
+        }
+
+        self.add_evidence(
+            &current.id,
+            EVIDENCE_KIND_REPAIR_PROMPT,
+            "人工返工原因",
+            "failed",
+            reason,
+        )
+        .await?;
+        self.add_event(&current.id, "rework", reason, None).await?;
+        self.get_task(&current.id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 deliverReviewedTask 只能从人工复核泳道取得交付执行权，避免普通完成态被误送入 Git side effect pipeline。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅允许 legacy Done + workflow HumanReview + run Idle 原子切到 Delivering + Merging/Delivering；
+    ///     不清理 worktree/session，后续由 delivery pipeline 在 per-task lock 内处理 Git 阶段。
+    pub async fn start_delivery_from_human_review(
+        &self,
+        task_id: &str,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        let current = self.get_task(task_id).await?;
+        if current.status != OrchestratorTaskStatus::Done
+            || current.workflow_state != OrchestratorWorkflowState::HumanReview
+            || current.run_state != OrchestratorRunState::Idle
+        {
+            return Err(AppError::generic(format!(
+                "只有人工复核中的任务可以交付，当前 workflow={}, run={}, status={}",
+                current.workflow_state.as_str(),
+                current.run_state.as_str(),
+                current.status.as_str()
+            )));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                 blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ? AND workflow_state = ? AND run_state = ?",
+        )
+        .bind(OrchestratorTaskStatus::Delivering.as_str())
+        .bind(OrchestratorWorkflowState::Merging.as_str())
+        .bind(OrchestratorRunState::Delivering.as_str())
+        .bind(Option::<&str>::None)
+        .bind(Option::<&str>::None)
+        .bind(now)
+        .bind(&current.id)
+        .bind(OrchestratorTaskStatus::Done.as_str())
+        .bind(OrchestratorWorkflowState::HumanReview.as_str())
+        .bind(OrchestratorRunState::Idle.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(&current.id).await;
+        }
+
+        self.get_task(&current.id).await?;
+        Err(AppError::generic("任务状态已变化，请刷新后重试"))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 cancelTask 表示用户不再希望任务继续被 scheduler 或 delivery 接管，但仍要保留现场和证据供人工审计。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 legacy status 写为 Aborted、split state 写为 Canceled/Idle，清空 blocked_reason 和 attempt_phase；
+    ///     不修改 branch/worktree/session/runtime/evidence 字段。
+    pub async fn cancel_task(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                 blocked_reason = ?, updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(OrchestratorTaskStatus::Aborted.as_str())
+        .bind(OrchestratorWorkflowState::Canceled.as_str())
+        .bind(OrchestratorRunState::Idle.as_str())
+        .bind(Option::<&str>::None)
+        .bind(Option::<&str>::None)
+        .bind(now)
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(task_id).await;
+        }
+
+        self.get_task(task_id).await
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -3096,6 +3296,147 @@ mod tests {
             claimed[0].attempt_phase,
             Some(OrchestratorAttemptPhase::PreparingWorkspace)
         );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 startTask 动作需要把草稿或待办任务放入 scheduler 可领取路径，而不是直接进入交付或清理现场。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Backlog/Draft 任务后调用 start_task，断言任务进入 Todo/Idle 且可被全局 scheduler claim 到 Preparing。
+    #[tokio::test]
+    async fn start_task_moves_backlog_draft_to_claimable_todo_idle() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        let created = task_row("task-start", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&created).await.unwrap();
+
+        let started = repo.start_task(&created.id).await.unwrap();
+        let claimed = repo
+            .claim_next_local_queued_tasks_with_global_capacity(1)
+            .await
+            .unwrap();
+
+        assert_eq!(started.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(started.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(started.run_state, OrchestratorRunState::Idle);
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, created.id);
+        assert_eq!(claimed[0].status, OrchestratorTaskStatus::Preparing);
+        assert_eq!(
+            claimed[0].workflow_state,
+            OrchestratorWorkflowState::InProgress
+        );
+        assert_eq!(claimed[0].run_state, OrchestratorRunState::Preparing);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     人工复核失败时用户需要显式 requestRework，并保留原因、证据与执行现场供下一轮 scheduler 继续接管。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 HumanReview/Done-compatible 任务并写入现场字段，调用 request_task_rework 后断言进入 Rework/Idle、
+    ///     worktree/session 未清理，且 repairPrompt evidence 保存了人工返工原因。
+    #[tokio::test]
+    async fn request_rework_from_human_review_records_reason_and_keeps_execution_site() {
+        let (pool, repo) = setup_repo().await;
+        let mut created = task_row("task-rework", "project-1", OrchestratorTaskStatus::Done);
+        created.worktree_id = Some("worktree-1".to_string());
+        created.session_id = Some("session-1".to_string());
+        repo.create_task(&created).await.unwrap();
+        set_task_split_state(
+            &pool,
+            &created.id,
+            OrchestratorWorkflowState::HumanReview,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+
+        let rework = repo
+            .request_task_rework(&created.id, "请补充边界条件测试")
+            .await
+            .unwrap();
+        let evidence = repo.list_evidence(&created.id).await.unwrap();
+
+        assert_eq!(rework.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(rework.workflow_state, OrchestratorWorkflowState::Rework);
+        assert_eq!(rework.run_state, OrchestratorRunState::Idle);
+        assert_eq!(rework.worktree_id.as_deref(), Some("worktree-1"));
+        assert_eq!(rework.session_id.as_deref(), Some("session-1"));
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].kind, EVIDENCE_KIND_REPAIR_PROMPT);
+        assert_eq!(evidence[0].content, "请补充边界条件测试");
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 deliverReviewedTask 只能从人工复核泳道进入交付，不能把普通 Done 或其它状态偷偷交付。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 HumanReview/Done-compatible 任务并进入 Merging/Delivering，再验证普通 Done 任务被拒绝且状态不变。
+    #[tokio::test]
+    async fn start_delivery_requires_human_review_task() {
+        let (pool, repo) = setup_repo().await;
+        let reviewed = task_row("task-reviewed", "project-1", OrchestratorTaskStatus::Done);
+        repo.create_task(&reviewed).await.unwrap();
+        set_task_split_state(
+            &pool,
+            &reviewed.id,
+            OrchestratorWorkflowState::HumanReview,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+        let plain_done = task_row("task-done", "project-1", OrchestratorTaskStatus::Done);
+        repo.create_task(&plain_done).await.unwrap();
+
+        let delivering = repo
+            .start_delivery_from_human_review(&reviewed.id)
+            .await
+            .unwrap();
+        let error = repo
+            .start_delivery_from_human_review(&plain_done.id)
+            .await
+            .expect_err("plain done task must not deliver");
+        let persisted_plain_done = repo.get_task(&plain_done.id).await.unwrap();
+
+        assert_eq!(delivering.status, OrchestratorTaskStatus::Delivering);
+        assert_eq!(delivering.workflow_state, OrchestratorWorkflowState::Merging);
+        assert_eq!(delivering.run_state, OrchestratorRunState::Delivering);
+        assert!(error.to_string().contains("人工复核"));
+        assert_eq!(persisted_plain_done.status, OrchestratorTaskStatus::Done);
+        assert_eq!(
+            persisted_plain_done.workflow_state,
+            OrchestratorWorkflowState::Done
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 cancelTask 需要把任务移到 Canceled/Idle，同时保留 worktree、session 和既有 evidence 供用户审计。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Running 任务并写入 evidence，调用 cancel_task 后断言 legacy status 映射为 Aborted、
+    ///     split state 为 Canceled/Idle，现场字段与 evidence 均未丢失。
+    #[tokio::test]
+    async fn cancel_task_moves_to_canceled_idle_and_preserves_execution_site_and_evidence() {
+        let (_pool, repo) = setup_repo().await;
+        let mut created = task_row("task-cancel", "project-1", OrchestratorTaskStatus::Running);
+        created.worktree_id = Some("worktree-1".to_string());
+        created.session_id = Some("session-1".to_string());
+        repo.create_task(&created).await.unwrap();
+        repo.add_evidence(&created.id, "verificationOutput", "验证", "running", "still running")
+            .await
+            .unwrap();
+
+        let canceled = repo.cancel_task(&created.id).await.unwrap();
+        let evidence = repo.list_evidence(&created.id).await.unwrap();
+
+        assert_eq!(canceled.status, OrchestratorTaskStatus::Aborted);
+        assert_eq!(canceled.workflow_state, OrchestratorWorkflowState::Canceled);
+        assert_eq!(canceled.run_state, OrchestratorRunState::Idle);
+        assert_eq!(canceled.worktree_id.as_deref(), Some("worktree-1"));
+        assert_eq!(canceled.session_id.as_deref(), Some("session-1"));
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].content, "still running");
     }
 
     /// Business Logic（为什么需要这个函数）:

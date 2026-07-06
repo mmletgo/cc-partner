@@ -45,6 +45,20 @@ pub struct RemoteTaskReq {
     pub task_id: String,
 }
 
+/// 远端任务返工请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     用户在 remote shortcut 上请求返工时，原因必须记录在 owning device 的权威任务 evidence 中。
+///
+/// Code Logic（这个结构体做什么）:
+///     使用 camelCase 序列化 `{taskId, reason}`，供 client 与 axum route 共用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteTaskReworkReq {
+    pub task_id: String,
+    pub reason: String,
+}
+
 /// 远端任务列表请求体。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -111,6 +125,20 @@ pub struct RemoteOrchestratorEvidenceResp {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteOrchestratorConfigResp {
     pub config: OrchestratorAutomationConfigDto,
+}
+
+/// 远端项目刷新响应。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     用户在 remote shortcut 上刷新项目时，需要知道 owning device 本次 best-effort 调度领取了多少任务。
+///
+/// Code Logic（这个结构体做什么）:
+///     包装 camelCase `{projectId, dispatched}`，projectId 为远端本机项目 id。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteOrchestratorProjectRefreshResp {
+    pub project_id: String,
+    pub dispatched: usize,
 }
 
 #[cfg(test)]
@@ -191,6 +219,25 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     远端 requestRework 需要把返工原因写入 owning device，协议字段不能退回 snake_case 或遗漏 reason。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     序列化 RemoteTaskReworkReq，断言 taskId/reason 字段名稳定为 camelCase。
+    #[test]
+    fn rework_request_serializes_as_camel_case() {
+        let req = RemoteTaskReworkReq {
+            task_id: "task-1".to_string(),
+            reason: "需要补充验证证据".to_string(),
+        };
+
+        let value = serde_json::to_value(req).expect("serialize rework request");
+
+        assert_eq!(value["taskId"], "task-1");
+        assert_eq!(value["reason"], "需要补充验证证据");
+        assert!(value.get("task_id").is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     远端任务列表是 remote shortcut 后续展示的基础 payload，列表外层字段必须与客户端约定一致。
     ///
     /// Code Logic（这个测试做什么）:
@@ -250,6 +297,25 @@ mod tests {
         assert_eq!(value["config"]["maxConcurrentTasks"], 1);
         assert_eq!(value["config"]["autoPushMain"], true);
         assert!(value["config"].get("max_concurrent_tasks").is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     refreshOrchestratorProject 的远端响应需要让本机知道 owning device 本次领取了多少任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     序列化 RemoteOrchestratorProjectRefreshResp，断言 projectId/dispatched 字段为 camelCase。
+    #[test]
+    fn refresh_response_serializes_as_camel_case() {
+        let resp = RemoteOrchestratorProjectRefreshResp {
+            project_id: "project-1".to_string(),
+            dispatched: 2,
+        };
+
+        let value = serde_json::to_value(resp).expect("serialize refresh response");
+
+        assert_eq!(value["projectId"], "project-1");
+        assert_eq!(value["dispatched"], 2);
+        assert!(value.get("project_id").is_none());
     }
 
     /// Business Logic（为什么需要这个函数）:
