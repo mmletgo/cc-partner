@@ -234,6 +234,41 @@
   white-space: nowrap;
 }
 
+.workspaceHeaderActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  margin-left: auto;
+}
+
+.projectAutomationMeta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+  text-align: right;
+}
+
+.projectAutomationMeta strong {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projectAutomationButton[data-active='true'] {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 10%, var(--surface));
+  color: var(--accent);
+}
+
 .worktreeBar {
   min-height: 68px;
   display: flex;
@@ -439,6 +474,67 @@
   z-index: var(--z-sticky);
   grid-template-rows: auto minmax(0, 1fr);
   background: var(--bg);
+}
+
+.automationHeader {
+  min-width: 0;
+  min-height: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  border-bottom: 1px solid var(--border-soft);
+  padding: var(--space-4) var(--space-6);
+  background: color-mix(in oklab, var(--surface) 45%, var(--bg));
+}
+
+.automationHeadingGroup {
+  min-width: 0;
+}
+
+.automationEyebrow {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-normal);
+  line-height: var(--leading-tight);
+}
+
+.automationTitle {
+  margin: var(--space-1) 0 0;
+  color: var(--fg);
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
+
+.automationDescription {
+  margin: var(--space-1) 0 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.automationContext {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.automationContext > span {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .automationTabs {
@@ -1109,7 +1205,31 @@
   }
 
   .workspaceHeader {
+    align-items: flex-start;
+    flex-direction: column;
     padding: var(--space-6) var(--space-5) var(--space-3);
+  }
+
+  .workspaceHeaderActions {
+    width: 100%;
+    justify-content: space-between;
+    margin-left: 0;
+  }
+
+  .projectAutomationMeta {
+    text-align: left;
+  }
+
+  .automationHeader {
+    align-items: flex-start;
+    flex-direction: column;
+    padding-right: var(--space-5);
+    padding-left: var(--space-5);
+  }
+
+  .automationContext {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .contextBar {

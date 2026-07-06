@@ -345,12 +345,14 @@
     "saved": "File saved",
     "formatted": "Content formatted"
   },
-  "automationWorkspace": {
-    "title": "Automation",
-    "tabs": "Automation workspace",
-    "actions": "Automation actions",
-    "open": "Automation",
-    "returnTerminal": "Return to terminal"
+  "projectAutomation": {
+    "title": "Project Automation",
+    "scope": "Scope: Project",
+    "scopeValue": "Project: {{project}}",
+    "description": "Project-level task queue; tasks bind to a worktree and execution context only after they run.",
+    "open": "Project Automation",
+    "returnTerminal": "Return to terminal",
+    "noProject": "No project selected"
   },
   "splitPaneRight": "Split right",
   "splitPaneDown": "Split down",

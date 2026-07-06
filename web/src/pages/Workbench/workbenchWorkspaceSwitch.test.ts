@@ -28,7 +28,7 @@ function assertNotContains(source: string, unexpected: string, message: string):
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   终端、自动化和文件预览导航栏必须复用同一个布局组件，测试需要明确锁住复用次数，避免后续又分叉成多套 UI。
+ *   终端和文件预览导航栏必须复用同一个布局组件，测试需要明确锁住复用次数，避免后续又分叉成多套 UI。
  *
  * Code Logic（这个函数做什么）:
  *   统计源码里指定片段出现次数；次数不符合预期时抛出带上下文的错误。
@@ -59,43 +59,9 @@ function assertSubstringOrder(source: string, before: string, after: string, mes
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   自动化入口必须紧贴文件预览入口，避免工具栏次序漂移影响用户按最右侧工具组扫描。
- *
- * Code Logic（这个函数做什么）:
- *   找到 before 后的下一个终端 action button；如果它在 after 之前已经闭合，说明中间插入了其它按钮。
- */
-function assertNextActionContainsTitle(
-  source: string,
-  before: string,
-  after: string,
-  message: string,
-): void {
-  const beforeIndex = source.indexOf(before);
-  const afterIndex = source.indexOf(after);
-
-  if (beforeIndex < 0 || afterIndex < 0 || beforeIndex >= afterIndex) {
-    throw new Error(message);
-  }
-
-  const nextActionIndex = source.indexOf(
-    'className={styles.terminalActionButton}',
-    beforeIndex + before.length,
-  );
-  if (nextActionIndex < 0 || nextActionIndex > afterIndex) {
-    throw new Error(message);
-  }
-
-  const nextActionBeforeTitle = source.slice(nextActionIndex, afterIndex);
-  if (nextActionBeforeTitle.includes('</Button>')) {
-    throw new Error(message);
-  }
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
  *   终端工具栏的文件预览按钮需要锁住可回归检查的最小契约：有打开文件才可点、点击切到文件层、
- *   且中英文 tooltip 与文件预览返回终端入口对称；终端、自动化和文件预览导航栏需要复用同一个布局组件，
- *   文件预览入口固定在终端 action 组最右侧，自动化入口固定在文件预览入口前一位。
+ *   且中英文 tooltip 与文件预览返回终端入口对称；终端和文件预览导航栏需要复用同一个布局组件，
+ *   文件预览入口固定在终端 action 组最右侧，自动化入口不再混入终端工具栏。
  *
  * Code Logic（这个函数做什么）:
  *   静态读取 Workbench 页面、文件工作区、共享导航组件和 workbench i18n 资源，检查切换回调、按钮绑定、
@@ -154,29 +120,11 @@ async function main(): Promise<void> {
     'terminal fullscreen action stays in pane action group before file preview',
   );
   assertContains(workbenchSource, "actionsAriaLabel={t('workbench:paneActions')}", 'terminal action group keeps aria label');
-  assertOccurrenceCount(workbenchSource, '<WorkbenchWorkspaceNav', 2, 'Workbench terminal and automation workspaces use shared nav');
-  assertContains(
+  assertOccurrenceCount(workbenchSource, '<WorkbenchWorkspaceNav', 1, 'Workbench terminal workspace uses shared nav once');
+  assertNotContains(
     workbenchSource,
     "t('workbench:automationWorkspace.open')",
-    'terminal toolbar includes localized automation workspace entry',
-  );
-  assertSubstringOrder(
-    workbenchSource,
-    "title={terminalFullscreenLabel}",
-    "title={t('workbench:automationWorkspace.open')}",
-    'automation action stays after fullscreen action',
-  );
-  assertSubstringOrder(
-    workbenchSource,
-    "title={t('workbench:automationWorkspace.open')}",
-    "title={t('workbench:fileWorkspace.openFiles')}",
-    'automation action stays immediately before file preview action',
-  );
-  assertNextActionContainsTitle(
-    workbenchSource,
-    "title={t('workbench:automationWorkspace.open')}",
-    "title={t('workbench:fileWorkspace.openFiles')}",
-    'no terminal action may be inserted between automation and file preview',
+    'terminal toolbar no longer includes automation entry',
   );
   assertOccurrenceCount(fileWorkspaceSource, '<WorkbenchWorkspaceNav', 1, 'file workspace uses shared nav once');
   assertContains(

@@ -340,12 +340,14 @@
     "saved": "文件已保存",
     "formatted": "内容已格式化"
   },
-  "automationWorkspace": {
-    "title": "自动化",
-    "tabs": "自动化工作区",
-    "actions": "自动化操作",
-    "open": "自动化",
-    "returnTerminal": "返回终端"
+  "projectAutomation": {
+    "title": "项目自动化",
+    "scope": "范围：项目",
+    "scopeValue": "项目：{{project}}",
+    "description": "项目级任务队列；任务运行后才绑定 worktree 和执行现场。",
+    "open": "项目自动化",
+    "returnTerminal": "返回终端",
+    "noProject": "未选择项目"
   },
   "splitPaneRight": "左右分屏",
   "splitPaneDown": "上下分屏",

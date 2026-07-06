@@ -9,6 +9,7 @@
  *   - 拉取/添加/移除工作台项目，并按当前项目加载会话与根目录文件树
  *   - 用 xterm 渲染当前 session，监听后端 terminal output/status 事件同步 UI
  *   - 提供文件夹展开、选中、创建、重命名、删除和 Git 提交历史查看等检查器交互
+ *   - 在项目层级嵌入 Orchestrator 自动化控制台，任务运行后再 deep link 到具体执行现场
  *   - hooks 全部在 early return 之前，避免 React hooks 调用顺序问题
  */
 
@@ -821,6 +822,7 @@ export function Workbench() {
   const [fileTabs, setFileTabs] = useState<WorkbenchOpenFileTab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [workspaceView, setWorkspaceView] = useState<WorkbenchFileWorkspaceView>('terminal');
+  const [automationConsoleOpen, setAutomationConsoleOpen] = useState<boolean>(false);
   const [fileSaving, setFileSaving] = useState<boolean>(false);
   const [newEntryName, setNewEntryName] = useState<string>('');
   const [renameName, setRenameName] = useState<string>('');
@@ -1857,6 +1859,7 @@ export function Workbench() {
   );
 
   const triggerPromptOptimizerShortcut = useCallback(() => {
+    if (automationConsoleOpen) return;
     if (!activeProjectIdRef.current || workspaceView !== 'terminal') return;
     if (remoteWriteDisabled && !promptPanelOpen) return;
     const action = promptOptimizerShortcutAction(promptPanelOpen, promptInput);
@@ -1875,11 +1878,13 @@ export function Workbench() {
     promptPanelOpen,
     remoteWriteDisabled,
     runPromptOptimization,
+    automationConsoleOpen,
     workspaceView,
   ]);
 
   useEffect(() => {
     const handleShortcutEvent = (event: KeyboardEvent) => {
+      if (automationConsoleOpen) return;
       if (workspaceView !== 'terminal') return;
       const result = reducePromptOptimizerShortcut(
         promptShortcutStateRef.current,
@@ -1907,7 +1912,7 @@ export function Workbench() {
       window.removeEventListener('keydown', handleShortcutEvent, { capture: true });
       window.removeEventListener('keyup', handleShortcutEvent, { capture: true });
     };
-  }, [promptOptimizerHotkey, triggerPromptOptimizerShortcut, workspaceView]);
+  }, [automationConsoleOpen, promptOptimizerHotkey, triggerPromptOptimizerShortcut, workspaceView]);
 
   const handleResize = useCallback(async (sessionId: string, cols: number, rows: number) => {
     try {
@@ -2322,6 +2327,7 @@ export function Workbench() {
         });
         activeFileTabIdRef.current = tabId;
         setActiveFileTabId(tabId);
+        setAutomationConsoleOpen(false);
         setWorkspaceView('files');
       } catch (error) {
         if (
@@ -2405,6 +2411,7 @@ export function Workbench() {
   const handleActivateFileTab = useCallback((id: string) => {
     activeFileTabIdRef.current = id;
     setActiveFileTabId(id);
+    setAutomationConsoleOpen(false);
     setWorkspaceView('files');
   }, []);
 
@@ -2453,6 +2460,7 @@ export function Workbench() {
    *   将中心工作区视图切回 terminal；终端 DOM 一直保持挂载，只是恢复可见和可输入。
    */
   const handleReturnToTerminal = useCallback(() => {
+    setAutomationConsoleOpen(false);
     setWorkspaceView('terminal');
   }, []);
 
@@ -2468,18 +2476,20 @@ export function Workbench() {
     if (!targetTabId) return;
     activeFileTabIdRef.current = targetTabId;
     setActiveFileTabId(targetTabId);
+    setAutomationConsoleOpen(false);
     setWorkspaceView('files');
   }, []);
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户在终端现场需要直接查看当前项目的自动化任务队列，而不离开 Workbench 上下文。
+   *   用户需要从 Workbench 项目层级进入自动化任务队列，避免误以为自动化属于当前 worktree 或终端工具栏。
    *
    * Code Logic（这个函数做什么）:
-   *   将中心工作区切换到 automation 叠层；终端 DOM 保持挂载但不可见且不接收输入。
+   *   打开独立的项目自动化控制台状态；终端 DOM 保持挂载但在控制台打开时不可见且不接收输入。
    */
-  const handleOpenAutomationWorkspace = useCallback(() => {
-    setWorkspaceView('automation');
+  const handleOpenProjectAutomation = useCallback(() => {
+    setPromptPanelOpen(false);
+    setAutomationConsoleOpen(true);
   }, []);
 
   /**
@@ -2492,6 +2502,7 @@ export function Workbench() {
   const handleOpenAutomationTaskWorkbench = useCallback(
     (url: string): void => {
       navigate(url);
+      setAutomationConsoleOpen(false);
       setWorkspaceView('terminal');
     },
     [navigate],
@@ -3127,9 +3138,36 @@ export function Workbench() {
               <p className={styles.workspacePath}>{workspaceLine}</p>
             </div>
           </div>
+          <div className={styles.workspaceHeaderActions}>
+            <div className={styles.projectAutomationMeta}>
+              <span>{t('workbench:projectAutomation.scope')}</span>
+              <strong>
+                {t('workbench:projectAutomation.scopeValue', {
+                  project: activeProject?.name ?? t('workbench:projectAutomation.noProject'),
+                })}
+              </strong>
+            </div>
+            <Button
+              className={styles.projectAutomationButton}
+              variant="secondary"
+              size="sm"
+              icon={<OrchestratorIcon />}
+              title={t('workbench:projectAutomation.description')}
+              aria-label={t('workbench:projectAutomation.open')}
+              data-active={automationConsoleOpen || undefined}
+              disabled={!activeProjectId}
+              onClick={handleOpenProjectAutomation}
+            >
+              {t('workbench:projectAutomation.open')}
+            </Button>
+          </div>
         </section>
 
-        <section className={styles.worktreeBar} aria-label={t('workbench:worktrees.label')}>
+        <section
+          className={styles.worktreeBar}
+          aria-label={t('workbench:worktrees.label')}
+          hidden={automationConsoleOpen}
+        >
           <div className={styles.worktreeStrip}>
             {worktrees.length === 0 ? (
               <span className={styles.worktreeEmpty}>{t('workbench:worktrees.empty')}</span>
@@ -3257,7 +3295,10 @@ export function Workbench() {
         <div className={styles.mainWorkspace}>
           <div
             className={styles.terminalLayer}
-            data-hidden={(!terminalFullscreen && workspaceView !== 'terminal') || undefined}
+            data-hidden={
+              (!terminalFullscreen && (automationConsoleOpen || workspaceView !== 'terminal')) ||
+              undefined
+            }
             data-fullscreen={terminalFullscreen || undefined}
           >
             <WorkbenchWorkspaceNav
@@ -3392,20 +3433,6 @@ export function Workbench() {
                       className={styles.terminalActionButton}
                       variant="secondary"
                       size="sm"
-                      icon={<OrchestratorIcon />}
-                      title={t('workbench:automationWorkspace.open')}
-                      aria-label={t('workbench:automationWorkspace.open')}
-                      data-active={workspaceView === 'automation' || undefined}
-                      onClick={handleOpenAutomationWorkspace}
-                    >
-                      {t('workbench:automationWorkspace.open')}
-                    </Button>
-                  ) : null}
-                  {!terminalFullscreen ? (
-                    <Button
-                      className={styles.terminalActionButton}
-                      variant="secondary"
-                      size="sm"
                       icon={<FileIcon />}
                       title={t('workbench:fileWorkspace.openFiles')}
                       aria-label={t('workbench:fileWorkspace.openFiles')}
@@ -3470,7 +3497,9 @@ export function Workbench() {
                     resizeRequestKey={0}
                     inputEnabled={false}
                     onCursorAnchorChange={
-                      workspaceView === 'terminal' ? handleCursorAnchorChange : undefined
+                      !automationConsoleOpen && workspaceView === 'terminal'
+                        ? handleCursorAnchorChange
+                        : undefined
                     }
                   />
                 ) : null}
@@ -3503,12 +3532,15 @@ export function Workbench() {
                         session.id === renderedActiveSessionId ? terminalResizeRequestKey : 0
                       }
                       inputEnabled={
+                        !automationConsoleOpen &&
                         workspaceView === 'terminal' &&
                         session.id === renderedActiveSessionId &&
                         !remoteWriteDisabled
                       }
                       onCursorAnchorChange={
-                        workspaceView === 'terminal' && session.id === renderedActiveSessionId
+                        !automationConsoleOpen &&
+                        workspaceView === 'terminal' &&
+                        session.id === renderedActiveSessionId
                           ? handleCursorAnchorChange
                           : undefined
                       }
@@ -3521,7 +3553,7 @@ export function Workbench() {
 
           <div
             className={styles.fileLayer}
-            data-hidden={workspaceView !== 'files' || undefined}
+            data-hidden={(automationConsoleOpen || workspaceView !== 'files') || undefined}
           >
             <WorkbenchFileWorkspace
               tabs={fileTabs}
@@ -3542,31 +3574,39 @@ export function Workbench() {
 
           <div
             className={styles.automationLayer}
-            data-hidden={workspaceView !== 'automation' || undefined}
+            data-hidden={!automationConsoleOpen || undefined}
           >
-            <WorkbenchWorkspaceNav
-              ariaLabel={t('workbench:automationWorkspace.tabs')}
-              actionsAriaLabel={t('workbench:automationWorkspace.actions')}
-              tabs={
-                <div className={styles.automationTabs}>
-                  <OrchestratorIcon />
-                  <span>{t('workbench:automationWorkspace.title')}</span>
-                </div>
-              }
-              actions={
+            <header className={styles.automationHeader}>
+              <div className={styles.automationHeadingGroup}>
+                <span className={styles.automationEyebrow}>
+                  {t('workbench:projectAutomation.scope')}
+                </span>
+                <h2 className={styles.automationTitle}>
+                  {t('workbench:projectAutomation.title')}
+                </h2>
+                <p className={styles.automationDescription}>
+                  {t('workbench:projectAutomation.description')}
+                </p>
+              </div>
+              <div className={styles.automationContext}>
+                <span>
+                  {t('workbench:projectAutomation.scopeValue', {
+                    project: activeProject?.name ?? t('workbench:projectAutomation.noProject'),
+                  })}
+                </span>
                 <Button
                   className={styles.terminalActionButton}
                   variant="secondary"
                   size="sm"
                   icon={<TerminalIcon />}
-                  title={t('workbench:automationWorkspace.returnTerminal')}
-                  aria-label={t('workbench:automationWorkspace.returnTerminal')}
+                  title={t('workbench:projectAutomation.returnTerminal')}
+                  aria-label={t('workbench:projectAutomation.returnTerminal')}
                   onClick={handleReturnToTerminal}
                 >
-                  {t('workbench:automationWorkspace.returnTerminal')}
+                  {t('workbench:projectAutomation.returnTerminal')}
                 </Button>
-              }
-            />
+              </div>
+            </header>
             <div className={styles.automationBody}>
               <OrchestratorPanel embedded onOpenWorkbench={handleOpenAutomationTaskWorkbench} />
             </div>
