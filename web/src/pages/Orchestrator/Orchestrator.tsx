@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, JSX } from 'react';
 import { useTranslation } from 'react-i18next';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { orchestratorApi } from '@/api/orchestrator';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
@@ -167,6 +168,24 @@ interface OrchestratorActionError {
 interface OrchestratorPanelProps {
   embedded?: boolean;
   onOpenWorkbench?: (url: string) => void;
+}
+
+interface OrchestratorDialogPortalProps {
+  children: JSX.Element;
+}
+
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   Workbench 嵌入自动化面板时，创建任务弹窗必须脱离滚动容器和终端全屏层，避免 PC 端弹窗被裁剪或遮挡。
+ *
+ * Code Logic（这个组件做什么）:
+ *   在浏览器环境中把弹窗内容 portal 到 document.body；非浏览器渲染时返回 null，避免访问不存在的 document。
+ */
+function OrchestratorDialogPortal(
+  props: OrchestratorDialogPortalProps,
+): ReturnType<typeof createPortal> | null {
+  if (typeof document === 'undefined') return null;
+  return createPortal(props.children, document.body);
 }
 
 const EMPTY_FORM: OrchestratorCreateForm = {
@@ -1198,124 +1217,126 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         </div>
       </div>
       {createDialogOpen ? (
-        <div
-          className={styles.createDialogOverlay}
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) handleCloseCreateDialog();
-          }}
-        >
-          <Card
-            variant="elevated"
-            padding="md"
-            className={styles.createDialog}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="orchestrator-create-dialog-title"
+        <OrchestratorDialogPortal>
+          <div
+            className={styles.createDialogOverlay}
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) handleCloseCreateDialog();
+            }}
           >
-            <Card.Header className={styles.dialogHeader}>
-              <div>
-                <h2 id="orchestrator-create-dialog-title" className={styles.sectionTitle}>
-                  {t('orchestrator:create.title')}
-                </h2>
-                <p className={styles.sectionLead}>{t('orchestrator:create.subtitle')}</p>
-              </div>
-              <Button
-                variant="icon"
-                aria-label={t('orchestrator:create.close')}
-                icon={<XIcon />}
-                disabled={creating || completingPrompt}
-                onClick={handleCloseCreateDialog}
-              />
-            </Card.Header>
-            <Card.Body className={styles.dialogBody}>
-              <div className={styles.aiAssistBlock}>
-                <label className={styles.field}>
-                  <span>{t('orchestrator:create.quickPrompt')}</span>
-                  <textarea
-                    ref={completionPromptRef}
-                    className={styles.textarea}
-                    value={completionPrompt}
-                    onChange={(event) => setCompletionPrompt(event.target.value)}
-                    placeholder={t('orchestrator:create.quickPromptPlaceholder')}
-                    aria-label={t('orchestrator:create.quickPrompt')}
-                    rows={4}
-                    disabled={completingPrompt || creating}
-                  />
-                </label>
-                <div className={styles.aiAssistActions}>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    icon={<SyncIcon />}
-                    loading={completingPrompt}
-                    disabled={!canCompletePrompt || creating}
-                    onClick={handleCompleteTaskPrompt}
-                  >
-                    {t('orchestrator:create.completeWithAi')}
-                  </Button>
+            <Card
+              variant="elevated"
+              padding="md"
+              className={styles.createDialog}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="orchestrator-create-dialog-title"
+            >
+              <Card.Header className={styles.dialogHeader}>
+                <div>
+                  <h2 id="orchestrator-create-dialog-title" className={styles.sectionTitle}>
+                    {t('orchestrator:create.title')}
+                  </h2>
+                  <p className={styles.sectionLead}>{t('orchestrator:create.subtitle')}</p>
                 </div>
-              </div>
-              <form className={styles.form} onSubmit={handleCreateTask}>
-                <label className={styles.field}>
-                  <span>{t('orchestrator:create.taskTitle')}</span>
-                  <Input
-                    value={form.title}
-                    onChange={(event) => updateFormField('title', event.target.value)}
-                    placeholder={t('orchestrator:create.taskTitlePlaceholder')}
-                    aria-label={t('orchestrator:create.taskTitle')}
-                    disabled={creating}
-                  />
-                </label>
-                <label className={styles.field}>
-                  <span>{t('orchestrator:create.goal')}</span>
-                  <textarea
-                    className={styles.textarea}
-                    value={form.goal}
-                    onChange={(event) => updateFormField('goal', event.target.value)}
-                    placeholder={t('orchestrator:create.goalPlaceholder')}
-                    aria-label={t('orchestrator:create.goal')}
-                    rows={5}
-                    disabled={creating}
-                  />
-                </label>
-                <label className={styles.field}>
-                  <span>{t('orchestrator:create.acceptanceCriteria')}</span>
-                  <textarea
-                    className={styles.textarea}
-                    value={form.acceptanceCriteria}
-                    onChange={(event) =>
-                      updateFormField('acceptanceCriteria', event.target.value)
-                    }
-                    placeholder={t('orchestrator:create.acceptanceCriteriaPlaceholder')}
-                    aria-label={t('orchestrator:create.acceptanceCriteria')}
-                    rows={5}
-                    disabled={creating}
-                  />
-                </label>
-                <div className={styles.dialogActions}>
-                  <Button
-                    variant="ghost"
-                    size="md"
-                    disabled={creating || completingPrompt}
-                    onClick={handleCloseCreateDialog}
-                  >
-                    {t('common:action.cancel')}
-                  </Button>
-                  <Button
-                    variant="primary"
-                    size="md"
-                    type="submit"
-                    icon={<PlusIcon />}
-                    loading={creating}
-                    disabled={!canCreate || completingPrompt}
-                  >
-                    {t('orchestrator:create.submit')}
-                  </Button>
+                <Button
+                  variant="icon"
+                  aria-label={t('orchestrator:create.close')}
+                  icon={<XIcon />}
+                  disabled={creating || completingPrompt}
+                  onClick={handleCloseCreateDialog}
+                />
+              </Card.Header>
+              <Card.Body className={styles.dialogBody}>
+                <div className={styles.aiAssistBlock}>
+                  <label className={styles.field}>
+                    <span>{t('orchestrator:create.quickPrompt')}</span>
+                    <textarea
+                      ref={completionPromptRef}
+                      className={styles.textarea}
+                      value={completionPrompt}
+                      onChange={(event) => setCompletionPrompt(event.target.value)}
+                      placeholder={t('orchestrator:create.quickPromptPlaceholder')}
+                      aria-label={t('orchestrator:create.quickPrompt')}
+                      rows={4}
+                      disabled={completingPrompt || creating}
+                    />
+                  </label>
+                  <div className={styles.aiAssistActions}>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      icon={<SyncIcon />}
+                      loading={completingPrompt}
+                      disabled={!canCompletePrompt || creating}
+                      onClick={handleCompleteTaskPrompt}
+                    >
+                      {t('orchestrator:create.completeWithAi')}
+                    </Button>
+                  </div>
                 </div>
-              </form>
-            </Card.Body>
-          </Card>
-        </div>
+                <form className={styles.form} onSubmit={handleCreateTask}>
+                  <label className={styles.field}>
+                    <span>{t('orchestrator:create.taskTitle')}</span>
+                    <Input
+                      value={form.title}
+                      onChange={(event) => updateFormField('title', event.target.value)}
+                      placeholder={t('orchestrator:create.taskTitlePlaceholder')}
+                      aria-label={t('orchestrator:create.taskTitle')}
+                      disabled={creating}
+                    />
+                  </label>
+                  <label className={styles.field}>
+                    <span>{t('orchestrator:create.goal')}</span>
+                    <textarea
+                      className={styles.textarea}
+                      value={form.goal}
+                      onChange={(event) => updateFormField('goal', event.target.value)}
+                      placeholder={t('orchestrator:create.goalPlaceholder')}
+                      aria-label={t('orchestrator:create.goal')}
+                      rows={5}
+                      disabled={creating}
+                    />
+                  </label>
+                  <label className={styles.field}>
+                    <span>{t('orchestrator:create.acceptanceCriteria')}</span>
+                    <textarea
+                      className={styles.textarea}
+                      value={form.acceptanceCriteria}
+                      onChange={(event) =>
+                        updateFormField('acceptanceCriteria', event.target.value)
+                      }
+                      placeholder={t('orchestrator:create.acceptanceCriteriaPlaceholder')}
+                      aria-label={t('orchestrator:create.acceptanceCriteria')}
+                      rows={5}
+                      disabled={creating}
+                    />
+                  </label>
+                  <div className={styles.dialogActions}>
+                    <Button
+                      variant="ghost"
+                      size="md"
+                      disabled={creating || completingPrompt}
+                      onClick={handleCloseCreateDialog}
+                    >
+                      {t('common:action.cancel')}
+                    </Button>
+                    <Button
+                      variant="primary"
+                      size="md"
+                      type="submit"
+                      icon={<PlusIcon />}
+                      loading={creating}
+                      disabled={!canCreate || completingPrompt}
+                    >
+                      {t('orchestrator:create.submit')}
+                    </Button>
+                  </div>
+                </form>
+              </Card.Body>
+            </Card>
+          </div>
+        </OrchestratorDialogPortal>
       ) : null}
     </div>
   );

@@ -206,6 +206,21 @@ async function main(): Promise<void> {
   );
   assertContains(
     orchestratorSource,
+    "import { createPortal } from 'react-dom';",
+    'desktop Orchestrator task creation dialog should use a body portal to escape Workbench scroll and terminal layers',
+  );
+  assertContains(
+    orchestratorSource,
+    'createPortal(',
+    'desktop Orchestrator task creation dialog should render through a React portal',
+  );
+  assertContains(
+    orchestratorSource,
+    'document.body',
+    'desktop Orchestrator task creation dialog should render at document.body level',
+  );
+  assertContains(
+    orchestratorSource,
     'promptOptimizerApi.completeOrchestratorTaskPrompt',
     'Orchestrator task creation should let AI complete title, goal, and acceptance criteria from a short prompt',
   );
@@ -213,6 +228,11 @@ async function main(): Promise<void> {
     orchestratorStyles,
     '.createDialogOverlay',
     'Orchestrator task creation dialog should have an overlay style boundary',
+  );
+  assertContains(
+    orchestratorStyles,
+    'z-index: calc(var(--z-modal) + 1);',
+    'Orchestrator task creation dialog overlay should sit above Workbench terminal fullscreen modal layer',
   );
   assertNotContains(
     orchestratorSource,
