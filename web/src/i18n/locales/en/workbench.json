@@ -202,6 +202,44 @@
       "sent": "Started writing to the current terminal",
       "error": "Prompt optimization failed"
     },
+    "automationPanel": {
+      "title": "Automation",
+      "noProject": "Select a local project first",
+      "remoteUnsupported": "Mobile automation currently supports local projects only",
+      "empty": "No automation tasks in this project yet",
+      "listAriaLabel": "Mobile automation task list",
+      "create": "Create and queue",
+      "creating": "Creating",
+      "created": "Task created and queued",
+      "priority": "Priority {{priority}}",
+      "attempt": "Attempt {{attempt}}",
+      "fields": {
+        "title": "Task title",
+        "goal": "Goal",
+        "acceptanceCriteria": "Acceptance criteria"
+      },
+      "placeholders": {
+        "title": "For example: Fix mobile file save errors",
+        "goal": "Describe the project-level outcome Claude Code should complete",
+        "acceptanceCriteria": "List the checks that must pass when the task is done"
+      },
+      "status": {
+        "draft": "Draft",
+        "queued": "Queued",
+        "preparing": "Preparing",
+        "running": "Running",
+        "verifying": "Verifying",
+        "delivering": "Delivering",
+        "done": "Done",
+        "blocked": "Blocked",
+        "aborted": "Aborted"
+      },
+      "errors": {
+        "list": "Failed to load automation tasks",
+        "create": "Failed to create automation task",
+        "required": "Fill in the task title, goal, and acceptance criteria"
+      }
+    },
     "status": {
       "project": "Project",
       "worktree": "worktree",
@@ -214,6 +252,7 @@
       "git": "Git",
       "worktrees": "Worktrees",
       "prompt": "Prompt",
+      "automation": "Automation",
       "settings": "Settings"
     },
     "placeholders": {
@@ -240,6 +279,10 @@
       "prompt": {
         "title": "Prompt",
         "label": "Waiting for input"
+      },
+      "automation": {
+        "title": "Automation",
+        "label": "Waiting for a local project"
       },
       "settings": {
         "title": "Settings",

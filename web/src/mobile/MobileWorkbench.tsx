@@ -3,6 +3,7 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import { MobileAutomationPanel } from './components/MobileAutomationPanel';
 import { MobileFilesPanel } from './components/MobileFilesPanel';
 import { MobileGitPanel } from './components/MobileGitPanel';
 import { MobilePromptPanel } from './components/MobilePromptPanel';
@@ -125,6 +126,10 @@ export function MobileWorkbench(): ReactElement {
     prompt: {
       title: t('workbench:mobile.placeholders.prompt.title'),
       label: t('workbench:mobile.placeholders.prompt.label'),
+    },
+    automation: {
+      title: t('workbench:mobile.placeholders.automation.title'),
+      label: t('workbench:mobile.placeholders.automation.label'),
     },
     settings: {
       title: t('workbench:mobile.placeholders.settings.title'),
@@ -720,6 +725,8 @@ export function MobileWorkbench(): ReactElement {
       />
     ) : panel === 'prompt' ? (
       <MobilePromptPanel worktree={activeWorktree} session={activeSession} />
+    ) : panel === 'automation' ? (
+      <MobileAutomationPanel project={activeProject} />
     ) : panel === 'terminal' ? (
       <MobileTerminalPanel
         project={activeProject}

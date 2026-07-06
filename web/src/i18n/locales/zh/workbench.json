@@ -199,6 +199,44 @@
       "sent": "已开始写入当前终端",
       "error": "Prompt 优化失败"
     },
+    "automationPanel": {
+      "title": "自动化",
+      "noProject": "先选择本机项目",
+      "remoteUnsupported": "手机端自动化暂只支持本机项目",
+      "empty": "当前项目暂无自动化任务",
+      "listAriaLabel": "移动端自动化任务列表",
+      "create": "创建并入队",
+      "creating": "创建中",
+      "created": "任务已创建并入队",
+      "priority": "优先级 {{priority}}",
+      "attempt": "第 {{attempt}} 轮",
+      "fields": {
+        "title": "任务标题",
+        "goal": "目标",
+        "acceptanceCriteria": "验收标准"
+      },
+      "placeholders": {
+        "title": "例如：修复移动端文件保存错误",
+        "goal": "描述希望 Claude Code 完成的项目级目标",
+        "acceptanceCriteria": "列出完成后必须满足的验证条件"
+      },
+      "status": {
+        "draft": "草稿",
+        "queued": "排队中",
+        "preparing": "准备中",
+        "running": "运行中",
+        "verifying": "验证中",
+        "delivering": "交付中",
+        "done": "已完成",
+        "blocked": "已阻塞",
+        "aborted": "已终止"
+      },
+      "errors": {
+        "list": "读取自动化任务失败",
+        "create": "创建自动化任务失败",
+        "required": "请填写任务标题、目标和验收标准"
+      }
+    },
     "status": {
       "project": "项目",
       "worktree": "worktree",
@@ -211,6 +249,7 @@
       "git": "Git",
       "worktrees": "Worktrees",
       "prompt": "Prompt",
+      "automation": "自动化",
       "settings": "设置"
     },
     "placeholders": {
@@ -237,6 +276,10 @@
       "prompt": {
         "title": "Prompt",
         "label": "等待输入"
+      },
+      "automation": {
+        "title": "自动化",
+        "label": "等待本机项目"
       },
       "settings": {
         "title": "设置",
