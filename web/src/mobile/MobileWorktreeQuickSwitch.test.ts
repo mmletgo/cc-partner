@@ -178,5 +178,11 @@ const shellMarkup = renderToStaticMarkup(
 assertIncludes(shellMarkup, 'aria-haspopup="dialog"', 'worktree status pill should open a dialog');
 assertIncludes(shellMarkup, 'disabled=""', 'disabled worktree status button should be disabled');
 assertIncludes(shellMarkup, 'feature/mobile', 'worktree status button should render worktree name');
+assertIncludes(shellMarkup, '自动化', 'mobile shell navigation should expose automation as a panel');
+assertEqual(
+  openMarkup.includes('自动化') ? 'present' : 'absent',
+  'absent',
+  'quick switch should not contain automation entry',
+);
 
 console.log('MobileWorktreeQuickSwitch.test.ts passed');

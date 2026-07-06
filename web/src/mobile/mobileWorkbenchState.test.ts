@@ -5,6 +5,7 @@ import {
   canRunMobileWorktreeDestructiveAction,
   canSwitchMobilePane,
   closeMobileNav,
+  getMobileWorkbenchPanelOrder,
   getMobileTerminalChromeVisibility,
   getMobileCreatePaneDirection,
   getInitialMobileWorkbenchPanel,
@@ -127,6 +128,21 @@ function testSelectMobilePanelReturnsNextPanel(): void {
   const next: MobileWorkbenchPanel = 'terminal';
 
   assertEqual(selectMobilePanel(current, next), next);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   自动化是移动端 Workbench 的项目级同级面板，不能被塞进 worktree quick switch 这类 worktree 附属入口。
+ *
+ * Code Logic（这个函数做什么）:
+ *   调用移动端面板顺序 helper，断言 automation 出现在主导航顺序中，且位于 projects 之后、terminal 之前。
+ */
+function testAutomationPanelIsFirstClassMobilePanel(): void {
+  const panels = getMobileWorkbenchPanelOrder();
+
+  assertEqual(panels.includes('automation'), true);
+  assertEqual(panels.indexOf('projects') < panels.indexOf('automation'), true);
+  assertEqual(panels.indexOf('automation') < panels.indexOf('terminal'), true);
 }
 
 /**
@@ -470,6 +486,7 @@ function testMobileTerminalFullscreenChromeOnlyKeepsPaneActionsAndExit(): void {
 }
 
 testSelectMobilePanelReturnsNextPanel();
+testAutomationPanelIsFirstClassMobilePanel();
 testOpenMobileNavReturnsTrue();
 testInitialMobileWorkbenchPanelDefaultsToProjects();
 testInitialMobileNavOpenDefaultsToFalse();

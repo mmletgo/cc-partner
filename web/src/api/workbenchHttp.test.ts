@@ -1,4 +1,4 @@
-import { httpWorkbenchTransport } from './workbenchHttp';
+import { httpOrchestratorTransport, httpWorkbenchTransport } from './workbenchHttp';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -61,6 +61,41 @@ try {
   assert(
     JSON.stringify(capturedBodies[2]) === JSON.stringify({ sessionId: 'session-1' }),
     'zoomPane should send sessionId only',
+  );
+
+  await httpOrchestratorTransport.tasks.list('project-1');
+
+  assert(
+    capturedUrls[3] === '/api/orchestrator/tasks/list',
+    'orchestrator task list should call the project task list route',
+  );
+  assert(
+    JSON.stringify(capturedBodies[3]) === JSON.stringify({ projectId: 'project-1' }),
+    'orchestrator task list should send projectId only',
+  );
+
+  await httpOrchestratorTransport.tasks.create({
+    projectId: 'project-1',
+    title: '移动端创建任务',
+    goal: '从手机端提交项目级自动化任务',
+    acceptanceCriteria: '任务进入队列',
+    priority: 3,
+  });
+
+  const createBody = capturedBodies[4] as Record<string, unknown>;
+  assert(
+    capturedUrls[4] === '/api/orchestrator/tasks/create',
+    'orchestrator task create should call the create route',
+  );
+  assert(createBody.projectId === 'project-1', 'create should include projectId');
+  assert(createBody.title === '移动端创建任务', 'create should include title');
+  assert(createBody.goal === '从手机端提交项目级自动化任务', 'create should include goal');
+  assert(createBody.acceptanceCriteria === '任务进入队列', 'create should include acceptanceCriteria');
+  assert(createBody.priority === 3, 'create should include priority');
+  assert(createBody.queue === true, 'create should default queue to true');
+  assert(
+    typeof createBody.clientRequestId === 'string' && createBody.clientRequestId.length > 0,
+    'create should include a non-empty clientRequestId',
   );
 } finally {
   globalThis.fetch = originalFetch;

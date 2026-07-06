@@ -9,6 +9,7 @@
  */
 
 import type {
+  OrchestratorTask,
   WorkbenchFileNode,
   WorkbenchGitCommit,
   WorkbenchMergeResult,
@@ -22,6 +23,18 @@ import type {
 } from '@/lib/types';
 import type { WorkbenchPaneSplitDirection } from './workbench';
 import type { WorkbenchTransport } from './workbenchTransport';
+
+export interface HttpCreateOrchestratorTaskRequest {
+  projectId: string;
+  title: string;
+  goal: string;
+  acceptanceCriteria: string;
+  priority?: number;
+}
+
+interface HttpOrchestratorTaskListResponse {
+  tasks: OrchestratorTask[];
+}
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -100,6 +113,60 @@ export async function getJson<T>(path: string): Promise<T> {
   });
   return parseJsonResponse<T>(response);
 }
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端创建 Orchestrator 任务可能因为网络波动重试，后端需要稳定非空 clientRequestId 来做幂等去重。
+ *
+ * Code Logic（这个函数做什么）:
+ *   优先使用 crypto.randomUUID；不可用时用时间戳和随机数生成 fallback 字符串，保证请求体仍包含非空 id。
+ */
+export function createHttpOrchestratorClientRequestId(): string {
+  const randomUUID = globalThis.crypto?.randomUUID;
+  if (typeof randomUUID === 'function') {
+    return randomUUID.call(globalThis.crypto);
+  }
+  const timePart = Date.now().toString(36);
+  const randomPart = Math.random().toString(36).slice(2);
+  return `${timePart}-${randomPart}`;
+}
+
+/**
+ * HTTP Orchestrator Transport。
+ *
+ * Business Logic（为什么需要这个常量）:
+ *   手机端 `/mobile` 需要通过同源 HTTP 操作当前本机项目的 Orchestrator 项目级任务，而不能调用桌面 Tauri invoke。
+ *
+ * Code Logic（这个常量做什么）:
+ *   将任务 list/create/action 映射到 `/api/orchestrator/tasks/...` routes；create 默认携带 queue=true 和非空 clientRequestId。
+ */
+export const httpOrchestratorTransport = {
+  tasks: {
+    list: async (projectId: string): Promise<OrchestratorTask[]> => {
+      const response = await postJson<HttpOrchestratorTaskListResponse>(
+        '/api/orchestrator/tasks/list',
+        { projectId },
+      );
+      return response.tasks;
+    },
+    create: (request: HttpCreateOrchestratorTaskRequest): Promise<OrchestratorTask> =>
+      postJson<OrchestratorTask>('/api/orchestrator/tasks/create', {
+        projectId: request.projectId,
+        title: request.title,
+        goal: request.goal,
+        acceptanceCriteria: request.acceptanceCriteria,
+        priority: request.priority ?? 0,
+        queue: true,
+        clientRequestId: createHttpOrchestratorClientRequestId(),
+      }),
+    queue: (taskId: string): Promise<OrchestratorTask> =>
+      postJson<OrchestratorTask>('/api/orchestrator/tasks/queue', { taskId }),
+    retry: (taskId: string): Promise<OrchestratorTask> =>
+      postJson<OrchestratorTask>('/api/orchestrator/tasks/retry', { taskId }),
+    abort: (taskId: string): Promise<OrchestratorTask> =>
+      postJson<OrchestratorTask>('/api/orchestrator/tasks/abort', { taskId }),
+  },
+} as const;
 
 /**
  * HTTP Workbench Transport。

@@ -8,7 +8,19 @@ export type MobileWorkbenchPanel =
   | 'git'
   | 'worktrees'
   | 'prompt'
+  | 'automation'
   | 'settings';
+
+const MOBILE_WORKBENCH_PANEL_ORDER: readonly MobileWorkbenchPanel[] = [
+  'projects',
+  'automation',
+  'terminal',
+  'files',
+  'git',
+  'worktrees',
+  'prompt',
+  'settings',
+];
 
 export type MobileWorktreeStatusKind = 'clean' | 'dirty' | 'conflict';
 
@@ -29,6 +41,17 @@ export interface MobileTerminalChromeVisibility {
  */
 export function getInitialMobileWorkbenchPanel(): MobileWorkbenchPanel {
   return 'projects';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端 Workbench 的 shell 导航、测试和后续面板扩展需要共享同一份项目级面板顺序，避免自动化入口被误放到 worktree 快捷切换器。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回只读的移动端主面板顺序；automation 是与 terminal/files/git/worktrees/prompt/settings 同级的项目级面板。
+ */
+export function getMobileWorkbenchPanelOrder(): readonly MobileWorkbenchPanel[] {
+  return MOBILE_WORKBENCH_PANEL_ORDER;
 }
 
 /**

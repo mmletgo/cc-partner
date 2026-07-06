@@ -8,6 +8,7 @@ import {
   ForkIcon,
   HistoryIcon,
   MenuIcon,
+  OrchestratorIcon,
   PromptsIcon,
   SettingsIcon,
   TerminalIcon,
@@ -16,6 +17,7 @@ import {
 import {
   closeMobileNav,
   getInitialMobileNavOpen,
+  getMobileWorkbenchPanelOrder,
   openMobileNav,
   selectMobilePanel,
   type MobileWorkbenchPanel,
@@ -29,15 +31,23 @@ interface MobileNavItem {
   icon: MobileNavIcon;
 }
 
-const MOBILE_NAV_ITEMS: readonly MobileNavItem[] = [
-  { panel: 'projects', icon: FolderIcon },
-  { panel: 'terminal', icon: TerminalIcon },
-  { panel: 'files', icon: FileIcon },
-  { panel: 'git', icon: HistoryIcon },
-  { panel: 'worktrees', icon: ForkIcon },
-  { panel: 'prompt', icon: PromptsIcon },
-  { panel: 'settings', icon: SettingsIcon },
-];
+const MOBILE_NAV_ICONS: Record<MobileWorkbenchPanel, MobileNavIcon> = {
+  projects: FolderIcon,
+  terminal: TerminalIcon,
+  files: FileIcon,
+  git: HistoryIcon,
+  worktrees: ForkIcon,
+  prompt: PromptsIcon,
+  automation: OrchestratorIcon,
+  settings: SettingsIcon,
+};
+
+const MOBILE_NAV_ITEMS: readonly MobileNavItem[] = getMobileWorkbenchPanelOrder().map(
+  (panel) => ({
+    panel,
+    icon: MOBILE_NAV_ICONS[panel],
+  }),
+);
 
 export interface MobileWorkbenchShellProps {
   panel: MobileWorkbenchPanel;
@@ -74,6 +84,7 @@ function MobilePanelNav({ activePanel, onSelect }: MobilePanelNavProps): ReactEl
     git: t('workbench:mobile.nav.git'),
     worktrees: t('workbench:mobile.nav.worktrees'),
     prompt: t('workbench:mobile.nav.prompt'),
+    automation: t('workbench:mobile.nav.automation'),
     settings: t('workbench:mobile.nav.settings'),
   };
 
