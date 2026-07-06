@@ -496,6 +496,18 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::rename_workbench_session),
         )
         .route(
+            "/api/workbench/claude-sessions/search",
+            post(workbench::search_claude_sessions),
+        )
+        .route(
+            "/api/workbench/claude-sessions/preview",
+            post(workbench::get_claude_session_preview),
+        )
+        .route(
+            "/api/workbench/claude-sessions/resume",
+            post(workbench::resume_claude_session),
+        )
+        .route(
             "/api/workbench/prompt-optimizer/stream-to-session",
             post(workbench::stream_prompt_optimizer_to_session),
         )

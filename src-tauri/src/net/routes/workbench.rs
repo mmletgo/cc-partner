@@ -14,23 +14,25 @@ use crate::commands::workbench::{
     add_local_workbench_project_from_path, close_workbench_pane_for_state,
     close_workbench_session_for_state, commit_workbench_worktree_for_state,
     create_workbench_session_for_state, create_workbench_worktree_for_state,
-    focus_workbench_session_for_state, get_focused_workbench_session_for_state,
-    get_workbench_path_info_for_state, list_workbench_dir_for_state,
-    list_workbench_git_commits_for_state, list_workbench_sessions_for_state,
-    list_workbench_worktrees_for_state, local_close_workbench_pane, local_close_workbench_session,
-    local_commit_workbench_worktree, local_create_workbench_dir, local_create_workbench_file,
-    local_create_workbench_session, local_create_workbench_worktree, local_delete_workbench_path,
-    local_focus_workbench_session, local_get_workbench_path_info, local_get_workbench_worktree,
-    local_list_workbench_dir, local_list_workbench_git_commits, local_list_workbench_sessions,
-    local_list_workbench_worktrees, local_merge_workbench_worktree, local_open_workbench_file,
-    local_preview_workbench_html_asset, local_preview_workbench_sqlite,
-    local_push_workbench_worktree, local_remove_workbench_worktree, local_rename_workbench_path,
-    local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_text_file,
-    local_split_workbench_pane, local_switch_workbench_pane, local_write_workbench_session_input,
-    local_zoom_workbench_pane, merge_workbench_worktree_for_state, open_workbench_file_for_state,
+    focus_workbench_session_for_state, get_claude_session_preview_for_state,
+    get_focused_workbench_session_for_state, get_workbench_path_info_for_state,
+    list_workbench_dir_for_state, list_workbench_git_commits_for_state,
+    list_workbench_sessions_for_state, list_workbench_worktrees_for_state,
+    local_close_workbench_pane, local_close_workbench_session, local_commit_workbench_worktree,
+    local_create_workbench_dir, local_create_workbench_file, local_create_workbench_session,
+    local_create_workbench_worktree, local_delete_workbench_path, local_focus_workbench_session,
+    local_get_workbench_path_info, local_get_workbench_worktree, local_list_workbench_dir,
+    local_list_workbench_git_commits, local_list_workbench_sessions, local_list_workbench_worktrees,
+    local_merge_workbench_worktree, local_open_workbench_file, local_preview_workbench_html_asset,
+    local_preview_workbench_sqlite, local_push_workbench_worktree, local_remove_workbench_worktree,
+    local_rename_workbench_path, local_rename_workbench_session, local_resize_workbench_session,
+    local_save_workbench_text_file, local_split_workbench_pane, local_switch_workbench_pane,
+    local_write_workbench_session_input, local_zoom_workbench_pane,
+    merge_workbench_worktree_for_state, open_workbench_file_for_state,
     push_workbench_worktree_for_state, remove_workbench_worktree_for_state,
     replay_workbench_session_for_state, resize_workbench_session_for_state,
-    save_workbench_text_file_for_state, split_workbench_pane_for_state,
+    resume_claude_session_for_state, save_workbench_text_file_for_state,
+    search_claude_sessions_for_state, split_workbench_pane_for_state,
     switch_workbench_pane_for_state, write_workbench_session_input_for_state,
     zoom_workbench_pane_for_state, WorkbenchMergeResultDto,
 };
@@ -44,14 +46,16 @@ use crate::workbench::models::{
 };
 use crate::workbench::remote_directory;
 use crate::workbench::remote_protocol::{
-    RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq, RemoteCreateWorktreeReq,
-    RemoteDeletePathReq, RemoteFocusedSessionReq, RemoteFocusedSessionResp, RemoteGitCommitsReq,
-    RemoteListDirReq, RemoteListSessionsReq, RemoteOpenFileReq, RemotePathInfoReq,
-    RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteProjectReq, RemotePromptOptimizerReq,
-    RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq, RemoteReplaySessionReq,
-    RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSessionReq, RemoteSplitPaneReq,
-    RemoteWorktreeReq, RemoteWriteSessionInputReq,
+    RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq,
+    RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq, RemoteFocusedSessionResp,
+    RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq, RemoteOpenFileReq,
+    RemotePathInfoReq, RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteProjectReq,
+    RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq,
+    RemoteReplaySessionReq, RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSearchClaudeSessionsReq,
+    RemoteSessionReq, RemoteSplitPaneReq, RemoteWorktreeReq, RemoteWriteSessionInputReq,
+    ResumeClaudeSessionResult,
 };
+use crate::workbench::claude_sessions::{SessionPreview, SessionSearchHit};
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use axum::body::Body;
 use axum::extract::State;
@@ -1310,6 +1314,75 @@ pub async fn mobile_stream_prompt_optimizer_to_session(
             req.working_directory,
             req.target_language,
             req.session_id,
+        )
+        .await?,
+    ))
+}
+
+/// 搜索远端设备本机 worktree 内的 Claude Code 历史 session。
+///
+/// Business Logic（为什么需要这个函数）:
+///     对端设备在 remote shortcut 上搜索历史 Claude 会话时，transcript 索引扫描必须在项目所在设备完成。
+///
+/// Code Logic（这个函数做什么）:
+///     接收远端 local projectId/worktreeId/query，确认 projectId 是本机 local 后委托命令层
+///     search_claude_sessions_for_state（local 分支），返回搜索命中列表（sessionId 为 Claude transcript UUID，无需包装）。
+pub async fn search_claude_sessions(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteSearchClaudeSessionsReq>,
+) -> Result<Json<Vec<SessionSearchHit>>, AppError> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
+    Ok(Json(
+        search_claude_sessions_for_state(&state, &req.project_id, req.worktree_id.as_deref(), &req.query)
+            .await?,
+    ))
+}
+
+/// 读取远端单个 Claude session 的 preview 详情。
+///
+/// Business Logic（为什么需要这个函数）:
+///     对端设备的 preview 面板需要展示远端会话最近消息、cwd 等，只能由项目所在设备解析 transcript。
+///
+/// Code Logic（这个函数做什么）:
+///     接收远端 local projectId/worktreeId/sessionId，确认 projectId 是本机 local 后委托命令层
+///     get_claude_session_preview_for_state（local 分支）返回 SessionPreview。
+pub async fn get_claude_session_preview(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteClaudeSessionReq>,
+) -> Result<Json<SessionPreview>, AppError> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
+    Ok(Json(
+        get_claude_session_preview_for_state(
+            &state,
+            &req.project_id,
+            req.worktree_id.as_deref(),
+            &req.session_id,
+        )
+        .await?,
+    ))
+}
+
+/// 在远端设备 resume 一个历史 Claude session。
+///
+/// Business Logic（为什么需要这个函数）:
+///     对端设备选中历史会话后，真实 terminal + `claude --resume` 必须在项目所在设备启动。
+///
+/// Code Logic（这个函数做什么）:
+///     接收远端 local projectId/worktreeId/sessionId，确认 projectId 是本机 local 后委托命令层
+///     resume_claude_session_for_state（local 分支）；返回的 sessionId 是本机新建 terminal 的 inner id，
+///     **不**包装 remote: 前缀（由发起方命令层包装）。
+pub async fn resume_claude_session(
+    State(state): State<AppState>,
+    Json(req): Json<RemoteClaudeSessionReq>,
+) -> Result<Json<ResumeClaudeSessionResult>, AppError> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
+    Ok(Json(
+        resume_claude_session_for_state(
+            &state,
+            state.app_handle.clone(),
+            &req.project_id,
+            req.worktree_id.as_deref(),
+            &req.session_id,
         )
         .await?,
     ))

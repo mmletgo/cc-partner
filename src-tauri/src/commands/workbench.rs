@@ -33,11 +33,16 @@ use crate::workbench::{
     },
     remote_ids::{parse_remote_entity_id, remote_entity_id, remote_project_id},
     remote_protocol::{
-        RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq,
-        RemoteCreateWorktreeReq, RemoteDeletePathReq, RemotePreviewHtmlAssetReq,
-        RemotePreviewSqliteReq, RemoteRenamePathReq, RemoteSaveTextReq,
+        RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq,
+        RemoteCreateSessionReq, RemoteCreateWorktreeReq, RemoteDeletePathReq,
+        RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteRenamePathReq,
+        RemoteSaveTextReq, RemoteSearchClaudeSessionsReq, ResumeClaudeSessionResult,
     },
     sqlite_preview,
+};
+use crate::workbench::claude_sessions::{
+    ensure_worktree_session_index_scanned, search_sessions, to_session_preview,
+    ClaudeSessionIndex, SessionPreview, SessionSearchHit,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -4081,6 +4086,228 @@ pub async fn delete_workbench_path(
             .await;
     }
     local_delete_workbench_path(&state, project_id, worktree_id, path).await
+}
+
+// ---------------------------------------------------------------------------
+// Claude session 搜索 / preview / resume（Phase 2）
+// ---------------------------------------------------------------------------
+
+/// 搜索 worktree 范围内的 Claude Code 历史 session。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在 Workbench 终端想找回之前的 Claude Code 会话继续对话；本机项目在本机扫描 jsonl 索引，
+///     remote shortcut 则把搜索请求转发到项目所在设备解析 transcript，避免本机读取不到远端文件。
+///
+/// Code Logic（这个函数做什么）:
+///     读 project row；local 分支解析 worktree_path 后 lazy 建索引并取读锁调用 search_sessions（limit 50）；
+///     remote 分支解析 inner worktreeId 后委托 remote_client，并映射 inner sessionId 为本机 remote sessionId。
+pub(crate) async fn search_claude_sessions_for_state(
+    state: &AppState,
+    project_id: &str,
+    worktree_id: Option<&str>,
+    query: &str,
+) -> Result<Vec<SessionSearchHit>, AppError> {
+    let project = get_project(state, project_id).await?;
+    if project.kind == "remote" {
+        let context = ensure_remote_project_context(state, &project).await?;
+        let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id.map(str::to_string))?;
+        ensure_remote_event_bridge_for_context(state, &context);
+        let req = RemoteSearchClaudeSessionsReq {
+            project_id: context.inner_project_id.clone(),
+            worktree_id: inner_worktree_id,
+            query: query.to_string(),
+        };
+        return RemoteWorkbenchClient::new()
+            .search_claude_sessions(&context.base_url, req)
+            .await;
+    }
+    // local 分支
+    let worktree = resolve_worktree(state, &project, worktree_id).await?;
+    let shared = ensure_worktree_session_index_scanned(state, std::path::Path::new(&worktree.path));
+    let index = shared.read().expect("session index 读锁中毒");
+    Ok(search_sessions(&index, query, 50))
+}
+
+/// 搜索 worktree 范围内的 Claude Code 历史 session。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端搜索面板需要按关键词返回本机或远端历史 Claude 会话。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包 State 后委托 for_state helper。
+#[tauri::command]
+pub async fn search_claude_sessions(
+    state: State<'_, AppState>,
+    project_id: String,
+    worktree_id: Option<String>,
+    query: String,
+) -> Result<Vec<SessionSearchHit>, AppError> {
+    search_claude_sessions_for_state(state.inner(), &project_id, worktree_id.as_deref(), &query).await
+}
+
+/// 读取单个 Claude session 的 preview 详情。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在搜索结果选中一条 session 后，preview 面板需要展示最近对话、cwd、git 分支等详情；
+///     本机从内存索引取，remote shortcut 转发到项目所在设备解析 transcript。
+///
+/// Code Logic（这个函数做什么）:
+///     读 project row；local 分支取索引读锁后从 sessions.get(session_id) 拿 ClaudeSessionIndex 并 to_session_preview，
+///     不存在返回 not_found；remote 分支解析 inner worktreeId 后委托 remote_client。
+pub(crate) async fn get_claude_session_preview_for_state(
+    state: &AppState,
+    project_id: &str,
+    worktree_id: Option<&str>,
+    session_id: &str,
+) -> Result<SessionPreview, AppError> {
+    let project = get_project(state, project_id).await?;
+    if project.kind == "remote" {
+        let context = ensure_remote_project_context(state, &project).await?;
+        let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id.map(str::to_string))?;
+        ensure_remote_event_bridge_for_context(state, &context);
+        let req = RemoteClaudeSessionReq {
+            project_id: context.inner_project_id.clone(),
+            worktree_id: inner_worktree_id,
+            session_id: session_id.to_string(),
+        };
+        return RemoteWorkbenchClient::new()
+            .get_claude_session_preview(&context.base_url, req)
+            .await;
+    }
+    // local 分支
+    let worktree = resolve_worktree(state, &project, worktree_id).await?;
+    let shared = ensure_worktree_session_index_scanned(state, std::path::Path::new(&worktree.path));
+    let index = shared.read().expect("session index 读锁中毒");
+    let claude_index: &ClaudeSessionIndex = index
+        .sessions
+        .get(session_id)
+        .ok_or_else(|| AppError::not_found("Claude session 不存在"))?;
+    Ok(to_session_preview(claude_index))
+}
+
+/// 读取单个 Claude session 的 preview 详情。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端 preview 面板需要按 sessionId 展示本机或远端会话详情。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包 State 后委托 for_state helper。
+#[tauri::command]
+pub async fn get_claude_session_preview(
+    state: State<'_, AppState>,
+    project_id: String,
+    worktree_id: Option<String>,
+    session_id: String,
+) -> Result<SessionPreview, AppError> {
+    get_claude_session_preview_for_state(
+        state.inner(),
+        &project_id,
+        worktree_id.as_deref(),
+        &session_id,
+    )
+    .await
+}
+
+/// resume 一个历史 Claude Code 会话。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户选中某条历史 session 后，应在当前 worktree 新建一个 workbench terminal 并注入
+///     `claude --dangerously-skip-permissions --resume <sessionId>` 命令，让对话继续。
+///     本机在本机完成 CLI 检测+建会话+写命令；remote shortcut 把 resume 请求转发到项目所在设备，
+///     并把远端新建的 inner sessionId 包装成本机统一 remote sessionId。
+///
+/// Code Logic（这个函数做什么）:
+///     local 分支：读 config.github_trending.claude_cli_path → check_claude_cli_available（失败转中文业务错误）
+///     → resolve_worktree → local_create_workbench_session（默认 120x32）→ local_write_workbench_session_input 注入 resume 命令
+///     → 返回 ResumeClaudeSessionResult（sessionId 为本机新建 terminal id）。
+///     remote 分支：解析 inner worktreeId → 委托 remote_client.resume_claude_session → 把 inner sessionId 包装为
+///     `remote:<device_id>:<inner_session_id>` 返回。
+pub(crate) async fn resume_claude_session_for_state(
+    state: &AppState,
+    app_handle: AppHandle,
+    project_id: &str,
+    worktree_id: Option<&str>,
+    session_id: &str,
+) -> Result<ResumeClaudeSessionResult, AppError> {
+    let project = get_project(state, project_id).await?;
+    if project.kind == "remote" {
+        let context = ensure_remote_project_context(state, &project).await?;
+        let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id.map(str::to_string))?;
+        ensure_remote_event_bridge_for_context(state, &context);
+        let req = RemoteClaudeSessionReq {
+            project_id: context.inner_project_id.clone(),
+            worktree_id: inner_worktree_id,
+            session_id: session_id.to_string(),
+        };
+        let remote_result = RemoteWorkbenchClient::new()
+            .resume_claude_session(&context.base_url, req)
+            .await?;
+        // 把远端新建的 inner terminal sessionId 包装成本机统一 remote sessionId
+        let wrapped = remote_entity_id(&context.device_id, &remote_result.session_id);
+        return Ok(ResumeClaudeSessionResult {
+            ok: remote_result.ok,
+            session_id: wrapped,
+        });
+    }
+    // local 分支：先检测 Claude CLI 可用，失败给清晰中文错误
+    let cli_path = state
+        .config
+        .read()
+        .expect("config 读锁中毒")
+        .github_trending
+        .claude_cli_path
+        .clone();
+    claude_cli::check_claude_cli_available(&cli_path)
+        .await
+        .map_err(|err| AppError::generic(format!("Claude CLI 不可用：{err}")))?;
+    // 解析 worktree（同时校验项目存在性），仅用于确保 worktree_path 有效
+    let _worktree = resolve_worktree(state, &project, worktree_id).await?;
+    // 在该 worktree 新建一个 workbench terminal
+    let new_session = local_create_workbench_session(
+        state,
+        app_handle,
+        project_id.to_string(),
+        worktree_id.map(str::to_string),
+        Some(120),
+        Some(32),
+    )
+    .await?;
+    // 注入 resume 命令并回车
+    let command = format!(
+        "{} --dangerously-skip-permissions --resume {}\n",
+        claude_cli::normalize_cli_path(&cli_path),
+        session_id
+    );
+    local_write_workbench_session_input(state, new_session.id.clone(), command).await?;
+    Ok(ResumeClaudeSessionResult {
+        ok: true,
+        session_id: new_session.id,
+    })
+}
+
+/// resume 一个历史 Claude Code 会话。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端选中搜索结果后需要一键 resume 本机或远端历史会话。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包 State/AppHandle 后委托 for_state helper。
+#[tauri::command]
+pub async fn resume_claude_session(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    project_id: String,
+    worktree_id: Option<String>,
+    session_id: String,
+) -> Result<ResumeClaudeSessionResult, AppError> {
+    resume_claude_session_for_state(
+        state.inner(),
+        app_handle,
+        &project_id,
+        worktree_id.as_deref(),
+        &session_id,
+    )
+    .await
 }
 
 #[cfg(test)]

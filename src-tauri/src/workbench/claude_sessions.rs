@@ -63,7 +63,8 @@ const DEBOUNCE_INTERVAL: Duration = Duration::from_millis(500);
 ///
 /// Code Logic（这个结构体做什么）:
 ///     camelCase 序列化对齐前端 SessionPreviewMessage；text 是已过滤 thinking/tool_use 的纯文本。
-#[derive(Debug, Clone, Serialize)]
+///     同时派生 Deserialize，因为它是 SessionPreview 的字段，需要随 preview 响应一起反序列化。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecentMessage {
     pub role: String,
@@ -118,7 +119,8 @@ pub struct WorktreeSessionIndex {
 ///
 /// Code Logic（这个结构体做什么）:
 ///     camelCase 序列化对齐前端 SessionSearchHit；title_hit/user_hit/assistant_hit 标记命中字段。
-#[derive(Debug, Clone, Serialize)]
+///     同时派生 Deserialize，因为 remote shortcut 命令需要反序列化远端设备的搜索响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSearchHit {
     pub session_id: String,
@@ -130,6 +132,51 @@ pub struct SessionSearchHit {
     pub last_activity_at: String,
     pub message_count: u32,
     pub preview_snippets: Vec<String>,
+}
+
+/// Claude session preview 数据（给前端 preview 面板用）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     用户在搜索结果列表选中某条 session 后，preview 面板需要展示该 session 的标题、
+///     cwd、git 分支、首末活动时间、消息总数以及最近对话消息（role + 纯文本 + 时间戳），
+///     帮助用户在 resume 前确认这是目标会话。该数据由 jsonl transcript 解析得到。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase 序列化对齐前端 SessionPreview；recent_messages 是已过滤 thinking/tool_use 的纯文本消息。
+///     同时派生 Deserialize，因为 remote shortcut 命令需要反序列化远端设备的响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPreview {
+    pub session_id: String,
+    pub title: String,
+    pub cwd: Option<String>,
+    pub git_branch: Option<String>,
+    pub first_activity_at: String,
+    pub last_activity_at: String,
+    pub message_count: u32,
+    pub recent_messages: Vec<RecentMessage>,
+}
+
+/// 把 ClaudeSessionIndex 转成 SessionPreview（给前端 preview 面板）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     内存索引中的 ClaudeSessionIndex 既用于搜索也用于 preview，但 preview 面板不需要
+///     user_text/assistant_text 全文与 transcript_path 等内部字段，需要一个精简投影。
+///
+/// Code Logic（这个函数做什么）:
+///     从 ClaudeSessionIndex 映射出 SessionPreview，丢弃 user_text/assistant_text/transcript_path，
+///     保留 preview 面板需要的元信息与 recent_messages（克隆）。
+pub fn to_session_preview(index: &ClaudeSessionIndex) -> SessionPreview {
+    SessionPreview {
+        session_id: index.session_id.clone(),
+        title: index.title.clone(),
+        cwd: index.cwd.clone(),
+        git_branch: index.git_branch.clone(),
+        first_activity_at: index.first_activity_at.clone(),
+        last_activity_at: index.last_activity_at.clone(),
+        message_count: index.message_count,
+        recent_messages: index.recent_messages.clone(),
+    }
 }
 
 // ---------------------------------------------------------------------------
