@@ -45,7 +45,11 @@ pub const RECENT_MESSAGES_MAX: usize = 20;
 ///
 /// notify::Config::with_poll_interval 只控制 poll backend 轮询频率，不是事件 debounce。
 /// Claude 高频写 jsonl 会触发大量事件，每个都 spawn_blocking 重扫性能很差，故在此再做一层
-/// 应用层 debounce：距上次重扫不足该间隔的事件直接跳过。
+/// 应用层 debounce：采用 **leading + trailing** 策略——
+/// - leading：距上次重扫 ≥ 该间隔的事件立即处理（响应快）；
+/// - trailing：距上次重扫 < 该间隔的事件累积，安排「最后一次事件后该间隔」的兜底重扫任务，
+///   保证写入静默后最后一次内容必定被重扫到（不漏内容）。每次新 trailing 事件 abort 旧的延迟任务，
+///   使 trailing 永远是「最后一次事件后该间隔」。
 const DEBOUNCE_INTERVAL: Duration = Duration::from_millis(500);
 
 // ---------------------------------------------------------------------------
@@ -638,9 +642,14 @@ pub type SharedWorktreeSessionIndex = Arc<RwLock<WorktreeSessionIndex>>;
 /// Code Logic（这个函数做什么）:
 ///     1. 取 worktree_path canonical string 作为 key；
 ///     2. 读 indexes HashMap，已有 → 直接返回 clone；
-///     3. 无 → scan_worktree_sessions 建索引，写入 HashMap；
-///     4. 尝试启动 notify 文件监听（监听 ~/.claude/projects/<encoded_cwd>/ 目录，debounce 500ms），
-///        事件回调内 spawn_blocking 重扫对应 jsonl 并更新索引；监听失败 tracing::warn 后继续，不写 watchers。
+///     3. 无 → scan_worktree_sessions 建索引（**不持锁**，扫描可能耗时）；
+///     4. 短暂持写锁 insert 并 double-check（防并发重复扫描），写锁立即释放；
+///     5. **不持任何锁**调 spawn_session_watcher 启动文件监听（失败降级）。
+///
+/// **为何写锁不活到函数末尾（防死锁）**：
+///     spawn_session_watcher 的失败分支会调 remove_index_on_failure，后者再次获取同一个
+///     `RwLock` 的写锁。标准库 RwLock 不支持写锁重入，若本函数在调用 spawn_session_watcher 时
+///     仍持有写锁，将必然死锁。故写锁只在 insert 时短暂持有，调用 spawn_session_watcher 前已释放。
 pub fn ensure_worktree_session_index_scanned(
     state: &AppState,
     worktree_path: &Path,
@@ -650,7 +659,7 @@ pub fn ensure_worktree_session_index_scanned(
         .unwrap_or_else(|_| worktree_path.to_path_buf());
     let key = canonical.to_string_lossy().to_string();
 
-    // 快速路径：已有索引直接返回
+    // 快速路径：读锁查缓存，已有索引直接返回
     {
         let indexes = state
             .workbench_claude_session_indexes
@@ -661,20 +670,25 @@ pub fn ensure_worktree_session_index_scanned(
         }
     }
 
-    // 慢路径：加写锁，double-check 后建索引
-    let mut indexes = state
-        .workbench_claude_session_indexes
-        .write()
-        .expect("session indexes 写锁中毒");
-    if let Some(existing) = indexes.get(&key) {
-        return Arc::clone(existing);
-    }
-
+    // 慢路径：先建索引（不持锁，扫描可能耗时）
     let index = scan_worktree_sessions(&canonical);
     let shared = Arc::new(RwLock::new(index));
-    indexes.insert(key.clone(), Arc::clone(&shared));
 
-    // 启动文件监听（失败降级）
+    // 短暂持写锁 insert 并 double-check（防止并发重复扫描时两个线程都建索引）
+    {
+        let mut indexes = state
+            .workbench_claude_session_indexes
+            .write()
+            .expect("session indexes 写锁中毒");
+        if let Some(existing) = indexes.get(&key) {
+            // 另一个线程已经建好索引，用它，丢弃我们刚建的（让 Arc 析构）
+            return Arc::clone(existing);
+        }
+        indexes.insert(key.clone(), Arc::clone(&shared));
+    }
+    // 写锁已释放
+
+    // 启动文件监听（不持锁，失败时 remove_index_on_failure 自己获取写锁不会重入死锁）
     spawn_session_watcher(state, &key, &canonical, &shared);
 
     shared
@@ -687,9 +701,8 @@ pub fn ensure_worktree_session_index_scanned(
 ///
 /// Code Logic（这个函数做什么）:
 ///     用 notify::RecommendedWatcher 监听 ~/.claude/projects/<encoded_cwd>/ 目录（RecursiveMode::NonRecursive），
-///     poll_interval=500ms 控制 poll backend 轮询频率；回调内再做一层应用层 debounce（距上次重扫
-///     不足 DEBOUNCE_INTERVAL 的事件跳过，依赖 jsonl append-only 保证最终一致），对 Create/Modify 的
-///     jsonl 文件 spawn_blocking 重扫并更新对应 HashMap entry。
+///     poll_interval=500ms 控制 poll backend 轮询频率；回调内再做一层应用层 **leading + trailing debounce**
+///     （见 DEBOUNCE_INTERVAL 注释），对 Create/Modify 的 jsonl 文件 spawn_blocking 重扫并更新对应 HashMap entry。
 ///     **降级语义（spec 5.1）**：watcher 创建失败或 watch 失败时，必须从 workbench_claude_session_indexes
 ///     移除该 key 的索引，保证下次 ensure_worktree_session_index_scanned 命中不到缓存而重走慢路径重扫。
 fn spawn_session_watcher(
@@ -726,10 +739,15 @@ fn spawn_session_watcher(
     let watch_dir_for_cb = watch_dir.clone();
     let worktree_canonical_owned = worktree_canonical.to_path_buf();
 
-    // 应用层 debounce 计时器：记录"上次重扫时刻"。初始化为很久以前，保证首次事件能处理。
+    // 应用层 debounce 计时器：记录"上次重扫时刻"。初始化为很久以前，保证首次事件走 leading 立即处理。
     let last_refresh = Arc::new(std::sync::Mutex::new(
         Instant::now() - DEBOUNCE_INTERVAL - Duration::from_secs(1),
     ));
+
+    // trailing 兜底任务句柄：累积期内每次新事件都 abort 旧的并 spawn 新的，保证 trailing 永远是
+    // 「最后一次事件后 DEBOUNCE_INTERVAL」。None 表示当前无 pending 的兜底任务。
+    let pending_trailing: Arc<std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> =
+        Arc::new(std::sync::Mutex::new(None));
 
     let watcher: Result<RecommendedWatcher, notify::Error> = Watcher::new(
         move |res: Result<notify::Event, notify::Error>| {
@@ -757,10 +775,12 @@ fn spawn_session_watcher(
                 return;
             }
 
-            // 应用层 debounce：距上次重扫不足 DEBOUNCE_INTERVAL 的事件跳过。
-            // 依赖 jsonl append-only 特性：被跳过的高频事件不会丢内容，下一次写入事件会
-            // 重扫到全部累积内容，保证最终一致（spec 5.1 风险表 debounce 近似实现）。
-            {
+            // 应用层 leading + trailing debounce。
+            // - leading：距上次重扫 ≥ DEBOUNCE_INTERVAL → 立即重扫，更新 last，并取消 pending trailing。
+            // - trailing：< DEBOUNCE_INTERVAL → 不立即重扫，但 abort 旧的 trailing 任务并 spawn 新的
+            //   「DEBOUNCE_INTERVAL 后重扫」任务，保证最后一次事件后 500ms 必定兜底重扫（不漏内容）。
+            // 锁获取顺序固定为「先 last，后 pending」，避免与其它路径交叉死锁。
+            let should_process_now = {
                 let mut last = match last_refresh.lock() {
                     Ok(g) => g,
                     Err(err) => {
@@ -768,19 +788,59 @@ fn spawn_session_watcher(
                         return;
                     }
                 };
-                if last.elapsed() < DEBOUNCE_INTERVAL {
-                    return; // 距上次重扫不足 500ms，跳过本次（下一次事件会补上）
+                if last.elapsed() >= DEBOUNCE_INTERVAL {
+                    *last = Instant::now();
+                    true
+                } else {
+                    false
                 }
-                *last = Instant::now();
-            }
+            };
 
-            // spawn_blocking 重扫对应 jsonl 文件（同步 IO，不阻塞 async runtime）
-            let index_for_task = Arc::clone(&index_handle);
-            let dir = watch_dir_for_cb.clone();
-            let worktree = worktree_canonical_owned.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                refresh_sessions_from_paths(&index_for_task, &worktree, &dir, &jsonl_paths);
-            });
+            if should_process_now {
+                // leading：立即处理。先取消 pending trailing（如果有），避免兜底任务紧随其后重复重扫。
+                if let Ok(mut pending) = pending_trailing.lock() {
+                    if let Some(handle) = pending.take() {
+                        handle.abort();
+                    }
+                }
+                let index_for_task = Arc::clone(&index_handle);
+                let dir = watch_dir_for_cb.clone();
+                let worktree = worktree_canonical_owned.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    refresh_sessions_from_paths(&index_for_task, &worktree, &dir, &jsonl_paths);
+                });
+            } else {
+                // trailing：abort 旧的 trailing 任务（若有），再 spawn 一个 500ms 后执行的兜底重扫。
+                let mut pending = match pending_trailing.lock() {
+                    Ok(g) => g,
+                    Err(err) => {
+                        tracing::warn!("debounce trailing 锁中毒，跳本次兜底安排: {err}");
+                        return;
+                    }
+                };
+                if let Some(old) = pending.take() {
+                    old.abort();
+                }
+                let index_clone = Arc::clone(&index_handle);
+                let dir_clone = watch_dir_for_cb.clone();
+                let worktree_clone = worktree_canonical_owned.clone();
+                let paths_clone = jsonl_paths.clone();
+                let pending_clone = Arc::clone(&pending_trailing);
+                let handle = tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(DEBOUNCE_INTERVAL).await;
+                    // sleep 结束：先把自己的句柄从 pending 清掉（表示已执行，不再可 abort），
+                    // 再 spawn_blocking 重扫，await 确保重扫完成。
+                    if let Ok(mut p) = pending_clone.lock() {
+                        p.take();
+                    }
+                    tauri::async_runtime::spawn_blocking(move || {
+                        refresh_sessions_from_paths(&index_clone, &worktree_clone, &dir_clone, &paths_clone);
+                    })
+                    .await
+                    .ok();
+                });
+                *pending = Some(handle);
+            }
         },
         notify::Config::default().with_poll_interval(Duration::from_millis(500)),
     );
