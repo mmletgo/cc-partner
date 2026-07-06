@@ -519,14 +519,20 @@ fn build_dispatch_once_response(dispatched: usize) -> serde_json::Value {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Agent 完成后的验证命令已迁移为设备级全局设置，不能再读取 legacy 项目配置表。
+///     Agent 完成后的验证命令优先来自项目 WORKFLOW.md；项目未声明时才使用 Settings 全局默认。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 OrchestratorAutomationConfig 克隆 verification_commands，调用方可在 await 前释放 config 读锁。
-fn verification_commands_for_agent_completion(
+///     每次 completion 动态解析项目 workflow；validation.commands 非空则返回项目命令，否则克隆全局 verification_commands。
+fn validation_commands_for_agent_completion(
+    project_path: &Path,
     config: &OrchestratorAutomationConfig,
-) -> Vec<String> {
-    config.verification_commands.clone()
+) -> Result<Vec<String>, AppError> {
+    let workflow = resolve_project_workflow(project_path)?;
+    if workflow.validation_commands.is_empty() {
+        Ok(config.verification_commands.clone())
+    } else {
+        Ok(workflow.validation_commands)
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1649,9 +1655,44 @@ async fn complete_orchestrator_agent_run_after_verifying_transition(
         }
     };
     let cwd = PathBuf::from(&worktree.path);
-    let verification_commands = {
+    let project = match state.workbench_project_repo.get(&task.project_id).await {
+        Ok(Some(project)) => project,
+        Ok(None) => {
+            return block_task_with_verification_failure(
+                state,
+                &task.id,
+                &format!("找不到任务所属 Workbench 项目: {}", task.project_id),
+            )
+            .await;
+        }
+        Err(err) => {
+            return block_task_with_verification_error(
+                state,
+                &task.id,
+                "读取任务所属 Workbench 项目失败",
+                err,
+            )
+            .await;
+        }
+    };
+    let global_orchestrator_config = {
         let config = state.config.read().expect("config 读锁中毒");
-        verification_commands_for_agent_completion(&config.orchestrator)
+        config.orchestrator.clone()
+    };
+    let verification_commands = match validation_commands_for_agent_completion(
+        Path::new(&project.path),
+        &global_orchestrator_config,
+    ) {
+        Ok(commands) => commands,
+        Err(err) => {
+            return block_task_with_verification_error(
+                state,
+                &task.id,
+                "项目 WORKFLOW.md 解析失败",
+                err,
+            )
+            .await;
+        }
     };
 
     let validation_report =
@@ -2294,23 +2335,76 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     Agent 完成验证命令已迁移到全局 AppConfig，legacy 项目配置里的命令不能再影响运行时验证。
+    ///     项目 WORKFLOW.md 声明验证命令时，completion pipeline 必须优先执行项目命令而不是全局默认。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造全局 Orchestrator 配置并断言命令层 helper 只返回全局 verification_commands。
+    ///     写入 validation.commands，构造带全局 fallback 的配置，断言 helper 返回项目命令。
     #[test]
-    fn agent_completion_verification_commands_come_from_global_config() {
+    fn agent_completion_validation_commands_prefer_project_workflow() {
+        let project_dir = temp_project_dir("validation-project");
+        fs::write(
+            Path::new(&project_dir).join("WORKFLOW.md"),
+            "---\nvalidation:\n  commands:\n    - cargo test workflow_runtime --lib\n---\nBody",
+        )
+        .expect("write WORKFLOW.md");
         let config = OrchestratorAutomationConfig {
             verification_commands: vec!["cargo test orchestrator::delivery --lib".to_string()],
             ..OrchestratorAutomationConfig::default()
         };
 
-        let commands = verification_commands_for_agent_completion(&config);
+        let commands = validation_commands_for_agent_completion(Path::new(&project_dir), &config)
+            .expect("workflow validation commands");
+
+        assert_eq!(
+            commands,
+            vec!["cargo test workflow_runtime --lib".to_string()]
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     缺少 WORKFLOW.md 或项目 workflow 未声明验证命令时，Settings 里的 verificationCommands 仍是全局默认。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     使用无 WORKFLOW.md 的临时目录，断言 helper 回落到全局配置命令。
+    #[test]
+    fn agent_completion_validation_commands_fallback_to_global_config_when_workflow_omits_them() {
+        let project_dir = temp_project_dir("validation-default");
+        let config = OrchestratorAutomationConfig {
+            verification_commands: vec!["cargo test orchestrator::delivery --lib".to_string()],
+            ..OrchestratorAutomationConfig::default()
+        };
+
+        let commands = validation_commands_for_agent_completion(Path::new(&project_dir), &config)
+            .expect("fallback validation commands");
 
         assert_eq!(
             commands,
             vec!["cargo test orchestrator::delivery --lib".to_string()]
         );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     WORKFLOW.md 无效时 completion 不应静默落回 Settings，否则用户会误以为项目策略已生效。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写入非法 workflow front matter，断言 helper 返回错误，供 completion pipeline 写 evidence 并 Blocked。
+    #[test]
+    fn agent_completion_validation_commands_error_on_invalid_project_workflow() {
+        let project_dir = temp_project_dir("validation-invalid");
+        fs::write(
+            Path::new(&project_dir).join("WORKFLOW.md"),
+            "---\n[\n---\nBody",
+        )
+        .expect("write invalid WORKFLOW.md");
+        let config = OrchestratorAutomationConfig {
+            verification_commands: vec!["cargo test orchestrator::delivery --lib".to_string()],
+            ..OrchestratorAutomationConfig::default()
+        };
+
+        let error = validation_commands_for_agent_completion(Path::new(&project_dir), &config)
+            .expect_err("invalid workflow must block validation");
+
+        assert!(error.to_string().contains("WORKFLOW.md"));
     }
 
     /// Business Logic（为什么需要这个函数）:

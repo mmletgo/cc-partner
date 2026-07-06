@@ -444,11 +444,10 @@ fn transcript_modified_millis(path: &Path) -> i128 {
 ///     解析 RFC3339 时间戳并转换为 UTC；解析失败记录 debug 并返回 None，让调用方按 best-effort 处理。
 fn parse_runtime_timestamp(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
-        .map(|timestamp| timestamp.with_timezone(&Utc))
-        .map_err(|err| {
+        .inspect_err(|err| {
             tracing::debug!("解析 Claude runtime timestamp 失败 {value:?}: {err}");
-            err
         })
+        .map(|timestamp| timestamp.with_timezone(&Utc))
         .ok()
 }
 
