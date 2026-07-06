@@ -145,6 +145,23 @@ const ORCHESTRATOR_TASK_EVENTS_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_orchestrator_task_events_task \
      ON orchestrator_task_events(task_id, created_at)";
 
+/// Orchestrator 最近事件查询行。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     runtime snapshot 状态条需要展示当前项目最近 scheduler/runner 事件，帮助用户理解任务推进过程。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 event 表字段和 join 得到的任务标题，供命令层投影为前端 DTO。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestratorRecentEventRow {
+    pub id: String,
+    pub task_id: String,
+    pub task_title: String,
+    pub kind: String,
+    pub message: String,
+    pub created_at: String,
+}
+
 pub const ORCHESTRATOR_EVIDENCE_SCHEMA: &str =
     "CREATE TABLE IF NOT EXISTS orchestrator_task_evidence (
   id TEXT PRIMARY KEY,
@@ -675,6 +692,106 @@ impl OrchestratorRepo {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|item| item.try_get("blocked_reason")).transpose()?)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     runtime snapshot 需要展示当前仍占用执行槽位的任务摘要，避免用户只能看到槽位数字。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 project_id 查询 Preparing/Running/Verifying/Delivering run_state 的任务，按更新时间倒序限制数量。
+    pub async fn list_active_runtime_tasks_for_project(
+        &self,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<Vec<OrchestratorTaskRow>, AppError> {
+        let limit = limit.clamp(0, 50);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(&format!(
+            "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
+             WHERE project_id = ? AND run_state IN (?, ?, ?, ?) \
+             ORDER BY updated_at DESC, priority DESC, created_at ASC LIMIT ?"
+        ))
+        .bind(project_id)
+        .bind(OrchestratorRunState::Preparing.as_str())
+        .bind(OrchestratorRunState::Running.as_str())
+        .bind(OrchestratorRunState::Verifying.as_str())
+        .bind(OrchestratorRunState::Delivering.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_task).collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     runtime snapshot 需要突出需要重试或返工的任务，让用户能从状态条直接看到阻塞队列。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查询 workflow_state=Rework 或 run_state=Retrying/Blocked 的任务，按更新时间倒序限制数量。
+    pub async fn list_retrying_runtime_tasks_for_project(
+        &self,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<Vec<OrchestratorTaskRow>, AppError> {
+        let limit = limit.clamp(0, 50);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(&format!(
+            "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
+             WHERE project_id = ? \
+               AND (workflow_state = ? OR run_state IN (?, ?)) \
+             ORDER BY updated_at DESC, priority DESC, created_at ASC LIMIT ?"
+        ))
+        .bind(project_id)
+        .bind(OrchestratorWorkflowState::Rework.as_str())
+        .bind(OrchestratorRunState::Retrying.as_str())
+        .bind(OrchestratorRunState::Blocked.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_task).collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     runtime snapshot 状态条需要展示当前项目最近的 scheduler/runner 事件，而不是让前端遍历全量任务事件。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     join task_events 与 tasks 过滤 project_id，按事件 created_at/id 倒序取最近 limit 条。
+    pub async fn list_recent_events_for_project(
+        &self,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<Vec<OrchestratorRecentEventRow>, AppError> {
+        let limit = limit.clamp(0, 50);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT event.id, event.task_id, task.title AS task_title, \
+                    event.kind, event.message, event.created_at \
+             FROM orchestrator_task_events event \
+             INNER JOIN orchestrator_tasks task ON task.id = event.task_id \
+             WHERE task.project_id = ? \
+             ORDER BY event.created_at DESC, event.id DESC LIMIT ?",
+        )
+        .bind(project_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(OrchestratorRecentEventRow {
+                    id: row.try_get("id")?,
+                    task_id: row.try_get("task_id")?,
+                    task_title: row.try_get("task_title")?,
+                    kind: row.try_get("kind")?,
+                    message: row.try_get("message")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect()
     }
 
     /// Business Logic（为什么需要这个函数）:

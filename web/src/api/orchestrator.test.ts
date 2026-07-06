@@ -65,6 +65,7 @@ assert(
 );
 
 const orchestratorApiSource = readFileSync(new URL('./orchestrator.ts', import.meta.url), 'utf8');
+const typesSource = readFileSync(new URL('../lib/types.ts', import.meta.url), 'utf8');
 
 assert(
   !orchestratorApiSource.includes('buildGetOrchestratorConfigForProjectInvokeArgs'),
@@ -73,6 +74,26 @@ assert(
 assert(
   !orchestratorApiSource.includes('get_orchestrator_config_for_project'),
   'orchestrator task API should not call the legacy project config backend command',
+);
+assert(
+  typesSource.includes('latestTickAt: string | null;'),
+  'runtime snapshot type should include latest scheduler tick',
+);
+assert(
+  typesSource.includes('runningTasks: OrchestratorRuntimeTaskSummary[];'),
+  'runtime snapshot type should include running task summaries',
+);
+assert(
+  typesSource.includes('retryingTasks: OrchestratorRuntimeTaskSummary[];'),
+  'runtime snapshot type should include retrying task summaries',
+);
+assert(
+  typesSource.includes('recentEvents: OrchestratorRuntimeEvent[];'),
+  'runtime snapshot type should include recent scheduler/runner events',
+);
+assert(
+  typesSource.includes("remoteStatus: 'local' | 'unsupported' | 'unavailable' | 'offline';"),
+  'runtime snapshot type should include explicit remote snapshot status',
 );
 
 const listArgs = buildListOrchestratorTaskViewsInvokeArgs(' project-1 ');
