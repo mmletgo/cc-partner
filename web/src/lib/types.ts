@@ -1273,3 +1273,74 @@ export interface ActivityDetail {
   /** 长度恒为 24 的数组，下标为 UTC 小时（0-23），值为该小时活跃分钟数 */
   hourly: number[];
 }
+
+/**
+ * Claude session 搜索命中结果（对齐后端 SessionSearchHitDto，camelCase）。
+ * 由 search_claude_sessions 命令返回，供 WorkbenchSessionSearch Command Palette 渲染结果列表。
+ */
+export interface SessionSearchHit {
+  /** Claude session id（jsonl 文件名 stem，resume 时用） */
+  sessionId: string;
+  /** 标题（lastPrompt，无则回退第一条 user 文本） */
+  title: string;
+  /** 标题字段是否命中搜索关键词 */
+  titleHit: boolean;
+  /** user 文本字段是否命中搜索关键词 */
+  userHit: boolean;
+  /** assistant 文本字段是否命中搜索关键词 */
+  assistantHit: boolean;
+  /** 首次活动时间（ISO） */
+  firstActivityAt: string;
+  /** 最近活动时间（ISO） */
+  lastActivityAt: string;
+  /** 消息总数 */
+  messageCount: number;
+  /** 命中上下文片段（命中位置前后各约 30 字符），最多 3 段 */
+  previewSnippets: string[];
+}
+
+/**
+ * Claude session preview 单条消息（对齐后端 SessionPreviewMessageDto）。
+ */
+export interface SessionPreviewMessage {
+  /** 角色：user 或 assistant */
+  role: 'user' | 'assistant';
+  /** 已过滤 thinking/tool_use 后的纯文本 */
+  text: string;
+  /** 消息时间（ISO） */
+  timestamp: string;
+}
+
+/**
+ * Claude session preview 完整数据（对齐后端 SessionPreviewDto，camelCase）。
+ * 由 get_claude_session_preview 命令返回，供 preview 面板渲染最近对话。
+ */
+export interface SessionPreview {
+  /** Claude session id */
+  sessionId: string;
+  /** 标题 */
+  title: string;
+  /** 记录时的工作目录，可能为 null */
+  cwd: string | null;
+  /** 记录时的 git 分支，可能为 null */
+  gitBranch: string | null;
+  /** 首次活动时间（ISO） */
+  firstActivityAt: string;
+  /** 最近活动时间（ISO） */
+  lastActivityAt: string;
+  /** 消息总数 */
+  messageCount: number;
+  /** 最近 20 条对话（user/assistant 交替） */
+  recentMessages: SessionPreviewMessage[];
+}
+
+/**
+ * resume Claude session 结果（对齐后端 ResumeClaudeSessionResultDto，camelCase）。
+ * 由 resume_claude_session 命令返回，前端据此刷新 sessions 并切到新建的 window。
+ */
+export interface ResumeClaudeSessionResult {
+  /** 是否成功创建并注入命令 */
+  ok: boolean;
+  /** 新建 terminal window 的 session id */
+  sessionId: string;
+}

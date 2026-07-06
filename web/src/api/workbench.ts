@@ -12,6 +12,9 @@
 
 import { invoke } from './client';
 import type {
+  ResumeClaudeSessionResult,
+  SessionPreview,
+  SessionSearchHit,
   WorkbenchFileNode,
   WorkbenchFormatResult,
   WorkbenchGitCommit,
@@ -199,6 +202,32 @@ export const workbenchApi = {
     /** 重命名 terminal window。 */
     rename: (sessionId: string, name: string) =>
       invoke<WorkbenchSession>('rename_workbench_session', { sessionId, name }),
+  },
+
+  claudeSessions: {
+    /** 搜索当前 worktree 范围的 Claude session；query 为空返回全部（倒序，最多 50 条）。 */
+    search: (projectId: string, worktreeId: string | null, query: string) =>
+      invoke<SessionSearchHit[]>('search_claude_sessions', {
+        projectId,
+        worktreeId,
+        query,
+      }),
+
+    /** 取某 Claude session 的最近 20 条对话 + 元信息，用于 preview 面板。 */
+    preview: (projectId: string, worktreeId: string | null, sessionId: string) =>
+      invoke<SessionPreview>('get_claude_session_preview', {
+        projectId,
+        worktreeId,
+        sessionId,
+      }),
+
+    /** 新建 terminal window 并注入 `claude --resume <sessionId>` 命令，返回新建 window 的 sessionId。 */
+    resume: (projectId: string, worktreeId: string | null, sessionId: string) =>
+      invoke<ResumeClaudeSessionResult>('resume_claude_session', {
+        projectId,
+        worktreeId,
+        sessionId,
+      }),
   },
 
   files: {
