@@ -7,7 +7,7 @@
  *   当前前端只提供任务、验证证据与 blocked 控制入口，并可把任务定位回对应 Workbench 上下文。
  *
  * Code Logic（这个组件做什么）:
- *   - 按 activeProject 拉取 Orchestrator task view 列表，真实任务按状态分组，pending remote 单独展示
+ *   - 按 activeProject 拉取 Orchestrator task view 列表，真实任务按 workflow 泳道分组，pending remote 单独展示
  *   - 按 activeProject 与 selected task 拉取 evidence
  *   - 通过独立弹窗创建任务，支持手动填写三字段或用简单 Prompt 调 AI 自动完善
  *   - 允许选中的 draft 任务切换为 queued；action 响应只替换列表，同项目任务切换后不抢回 selection
@@ -17,7 +17,7 @@
  *   - hooks 全部位于渲染分支之前，避免 early return 破坏调用顺序
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { FormEvent, JSX } from 'react';
+import type { DragEvent, FormEvent, JSX } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
@@ -30,32 +30,41 @@ import {
   canCompleteAgentRunForProject,
   canControlBlockedTaskForProject,
   canQueueOrchestratorTaskForProject,
-  ORCHESTRATOR_STATUSES,
   orchestratorAttemptLabel,
   orchestratorCreateResultMatchesProject,
   orchestratorEvidenceKindLabel,
   orchestratorEvidenceKindTone,
   orchestratorStatusTone,
   orchestratorTaskProgressMessage,
+  orchestratorWorkflowStateTone,
   resolveOrchestratorActionSelection,
   resolveOrchestratorTaskLoad,
 } from '@/lib/orchestrator';
 import {
   getOrchestratorTaskViewTaskId,
-  groupOrchestratorRenderableTasks,
+  type OrchestratorRenderableTask,
   isLocalOrchestratorTaskView,
   isOrchestratorTaskViewActionable,
   splitOrchestratorTaskViews,
   upsertOrchestratorTaskView,
 } from '@/lib/orchestratorRemote';
 import type {
+  OrchestratorAttemptPhase,
   OrchestratorEvidence,
   OrchestratorRemoteOutboxStatus,
+  OrchestratorRunState,
+  OrchestratorRuntimeSnapshot,
   OrchestratorTask,
   OrchestratorTaskStatus,
   OrchestratorTaskView,
+  OrchestratorWorkflowState,
 } from '@/lib/types';
 import { buildWorkbenchDeepLink } from '@/pages/Workbench/workbenchDeepLink';
+import {
+  canMoveRenderableTaskToWorkflowState,
+  groupRenderableTasksByWorkflowState,
+  ORCHESTRATOR_BOARD_LANES,
+} from './orchestratorBoard';
 import styles from './Orchestrator.module.css';
 
 /**
@@ -104,6 +113,39 @@ type OrchestratorRemoteOutboxStatusLabelKey =
   | 'orchestrator:pending.status.mirrored'
   | 'orchestrator:pending.status.failed';
 
+type OrchestratorWorkflowStateLabelKey =
+  | 'orchestrator:workflow.backlog'
+  | 'orchestrator:workflow.todo'
+  | 'orchestrator:workflow.inProgress'
+  | 'orchestrator:workflow.humanReview'
+  | 'orchestrator:workflow.rework'
+  | 'orchestrator:workflow.merging'
+  | 'orchestrator:workflow.done'
+  | 'orchestrator:workflow.canceled';
+
+type OrchestratorRunStateLabelKey =
+  | 'orchestrator:run.idle'
+  | 'orchestrator:run.queued'
+  | 'orchestrator:run.preparing'
+  | 'orchestrator:run.running'
+  | 'orchestrator:run.verifying'
+  | 'orchestrator:run.retrying'
+  | 'orchestrator:run.blocked'
+  | 'orchestrator:run.delivering';
+
+type OrchestratorAttemptPhaseLabelKey =
+  | 'orchestrator:attempt.preparingWorkspace'
+  | 'orchestrator:attempt.buildingPrompt'
+  | 'orchestrator:attempt.launchingRunner'
+  | 'orchestrator:attempt.initializingSession'
+  | 'orchestrator:attempt.streaming'
+  | 'orchestrator:attempt.finishing'
+  | 'orchestrator:attempt.succeeded'
+  | 'orchestrator:attempt.failed'
+  | 'orchestrator:attempt.timedOut'
+  | 'orchestrator:attempt.stalled'
+  | 'orchestrator:attempt.canceledByReconciliation';
+
 /**
  * Business Logic（为什么需要这个类型）:
  *   创建任务表单需要同时管理标题、目标和验收标准，集中成对象便于清空和提交校验。
@@ -145,6 +187,20 @@ interface OrchestratorEvidenceResult {
 }
 
 const EMPTY_ORCHESTRATOR_EVIDENCE_ITEMS: OrchestratorEvidence[] = [];
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   运行时快照只对本机 Workbench 项目可用，加载失败不能覆盖任务列表错误，也不能在项目切换后残留。
+ *
+ * Code Logic（这个类型做什么）:
+ *   保存 snapshot 所属 projectId、当前 loading 状态、成功返回的 snapshot 和非阻塞错误文案。
+ */
+interface OrchestratorRuntimeSnapshotResult {
+  projectId: string;
+  snapshot: OrchestratorRuntimeSnapshot | null;
+  loading: boolean;
+  error: string | null;
+}
 
 /**
  * Business Logic（为什么需要这个类型）:
@@ -224,6 +280,48 @@ const PENDING_REMOTE_STATUS_LABEL_KEYS: Record<
   failed: 'orchestrator:pending.status.failed',
 };
 
+const WORKFLOW_STATE_LABEL_KEYS: Record<
+  OrchestratorWorkflowState,
+  OrchestratorWorkflowStateLabelKey
+> = {
+  backlog: 'orchestrator:workflow.backlog',
+  todo: 'orchestrator:workflow.todo',
+  inProgress: 'orchestrator:workflow.inProgress',
+  humanReview: 'orchestrator:workflow.humanReview',
+  rework: 'orchestrator:workflow.rework',
+  merging: 'orchestrator:workflow.merging',
+  done: 'orchestrator:workflow.done',
+  canceled: 'orchestrator:workflow.canceled',
+};
+
+const RUN_STATE_LABEL_KEYS: Record<OrchestratorRunState, OrchestratorRunStateLabelKey> = {
+  idle: 'orchestrator:run.idle',
+  queued: 'orchestrator:run.queued',
+  preparing: 'orchestrator:run.preparing',
+  running: 'orchestrator:run.running',
+  verifying: 'orchestrator:run.verifying',
+  retrying: 'orchestrator:run.retrying',
+  blocked: 'orchestrator:run.blocked',
+  delivering: 'orchestrator:run.delivering',
+};
+
+const ATTEMPT_PHASE_LABEL_KEYS: Record<
+  OrchestratorAttemptPhase,
+  OrchestratorAttemptPhaseLabelKey
+> = {
+  preparingWorkspace: 'orchestrator:attempt.preparingWorkspace',
+  buildingPrompt: 'orchestrator:attempt.buildingPrompt',
+  launchingRunner: 'orchestrator:attempt.launchingRunner',
+  initializingSession: 'orchestrator:attempt.initializingSession',
+  streaming: 'orchestrator:attempt.streaming',
+  finishing: 'orchestrator:attempt.finishing',
+  succeeded: 'orchestrator:attempt.succeeded',
+  failed: 'orchestrator:attempt.failed',
+  timedOut: 'orchestrator:attempt.timedOut',
+  stalled: 'orchestrator:attempt.stalled',
+  canceledByReconciliation: 'orchestrator:attempt.canceledByReconciliation',
+};
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   API 调用失败时页面需要优先显示后端返回的可读错误，并在缺少 message 时回退到本地化通用提示。
@@ -253,6 +351,30 @@ function formatTaskTimestamp(value: string): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   任务运行时字段经常为空，详情页需要用本地化兜底值展示缺失状态，而不是露出空白。
+ *
+ * Code Logic（这个函数做什么）:
+ *   value 为空时返回 fallback；否则复用 formatTaskTimestamp 转换为浏览器本地短日期时间。
+ */
+function formatOptionalTaskTimestamp(value: string | null, fallback: string): string {
+  if (!value) return fallback;
+  return formatTaskTimestamp(value);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Runner provider、Claude session 和 transcript 等字段可能未绑定，详情页需要统一的缺省显示。
+ *
+ * Code Logic（这个函数做什么）:
+ *   去除字符串首尾空白；非空返回原值，空值或空白字符串返回调用方传入的 fallback。
+ */
+function taskRuntimeValue(value: string | null | undefined, fallback: string): string {
+  const normalized = value?.trim();
+  return normalized || fallback;
 }
 
 /**
@@ -296,6 +418,32 @@ function pendingRemoteStatusTone(
     case 'mirrored':
       return 'success';
     case 'pending':
+      return 'neutral';
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   任务卡片需要区分 runner 空闲、运行、阻塞和交付，帮助用户快速判断任务是否可拖拽。
+ *
+ * Code Logic（这个函数做什么）:
+ *   将 runState 映射到 Pill 支持的 tone；运行中为 accent，阻塞为 danger，交付为 success。
+ */
+function runStateTone(
+  state: OrchestratorRunState,
+): 'neutral' | 'success' | 'accent' | 'danger' {
+  switch (state) {
+    case 'blocked':
+      return 'danger';
+    case 'delivering':
+      return 'success';
+    case 'queued':
+    case 'preparing':
+    case 'running':
+    case 'verifying':
+    case 'retrying':
+      return 'accent';
+    case 'idle':
       return 'neutral';
   }
 }
@@ -379,14 +527,20 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
   const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
   const [abortingTaskId, setAbortingTaskId] = useState<string | null>(null);
+  const [movingTaskId, setMovingTaskId] = useState<string | null>(null);
+  const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [evidenceResult, setEvidenceResult] = useState<OrchestratorEvidenceResult | null>(null);
+  const [runtimeSnapshotResult, setRuntimeSnapshotResult] =
+    useState<OrchestratorRuntimeSnapshotResult | null>(null);
   const [actionError, setActionError] = useState<OrchestratorActionError | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);
   const [completionPrompt, setCompletionPrompt] = useState('');
   const [completingPrompt, setCompletingPrompt] = useState(false);
   const completionPromptRef = useRef<HTMLTextAreaElement | null>(null);
   const activeProjectId = activeProject?.id ?? null;
+  const activeProjectKind = activeProject?.kind ?? null;
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
+  const activeProjectKindRef = useRef<string | null>(activeProjectKind);
   const taskLoadDecision = useMemo(
     () => resolveOrchestratorTaskLoad(projectsLoading, activeProjectId),
     [activeProjectId, projectsLoading],
@@ -395,6 +549,10 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   useEffect(() => {
     activeProjectIdRef.current = activeProjectId;
   }, [activeProjectId]);
+
+  useEffect(() => {
+    activeProjectKindRef.current = activeProjectKind;
+  }, [activeProjectKind]);
 
   const activeTaskListResult =
     taskLoadDecision.kind === 'load' && taskListResult?.projectId === taskLoadDecision.projectId
@@ -412,7 +570,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     actionError?.projectId === activeProjectId ? actionError.message : null;
   const error = visibleActionError ?? taskLoadError;
 
-  const groups = useMemo(() => groupOrchestratorRenderableTasks(tasks), [tasks]);
+  const groups = useMemo(() => groupRenderableTasksByWorkflowState(tasks), [tasks]);
   const selectedRenderableTask = useMemo(() => {
     return tasks.find((item) => item.task.id === selectedTaskId) ?? tasks[0] ?? null;
   }, [selectedTaskId, tasks]);
@@ -431,6 +589,12 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   );
   const selectedTaskProgressMessage = orchestratorTaskProgressMessage(selectedTaskView, t);
   const selectedTaskTerminalLabel = selectedTask?.sessionId ?? selectedTask?.worktreeId ?? null;
+  const activeRuntimeSnapshotResult =
+    activeProjectKind === 'local' &&
+    taskLoadDecision.kind === 'load' &&
+    runtimeSnapshotResult?.projectId === taskLoadDecision.projectId
+      ? runtimeSnapshotResult
+      : null;
   const activeEvidenceResult =
     selectedTask &&
     taskLoadDecision.kind === 'load' &&
@@ -496,6 +660,49 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [createDialogOpen, handleCloseCreateDialog]);
+
+  const refreshRuntimeSnapshot = useCallback(
+    async (projectId: string) => {
+      if (activeProjectIdRef.current !== projectId || activeProjectKindRef.current !== 'local') {
+        return;
+      }
+      setRuntimeSnapshotResult((current) => ({
+        projectId,
+        snapshot: current?.projectId === projectId ? current.snapshot : null,
+        loading: true,
+        error: null,
+      }));
+      try {
+        const snapshot = await orchestratorApi.getRuntimeSnapshot(projectId);
+        if (
+          activeProjectIdRef.current !== projectId ||
+          activeProjectKindRef.current !== 'local' ||
+          snapshot.projectId !== projectId
+        ) {
+          return;
+        }
+        setRuntimeSnapshotResult({ projectId, snapshot, loading: false, error: null });
+      } catch (err) {
+        if (activeProjectIdRef.current === projectId && activeProjectKindRef.current === 'local') {
+          setRuntimeSnapshotResult({
+            projectId,
+            snapshot: null,
+            loading: false,
+            error: displayOrchestratorErrorMessage(err, t('orchestrator:errors.snapshot')),
+          });
+        }
+      }
+    },
+    [t],
+  );
+
+  useEffect(() => {
+    if (taskLoadDecision.kind !== 'load' || activeProjectKind !== 'local') {
+      setRuntimeSnapshotResult(null);
+      return;
+    }
+    void refreshRuntimeSnapshot(taskLoadDecision.projectId);
+  }, [activeProjectKind, refreshRuntimeSnapshot, taskLoadDecision]);
 
   useEffect(() => {
     if (taskLoadDecision.kind !== 'load') return undefined;
@@ -633,6 +840,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         setForm(EMPTY_FORM);
         setCompletionPrompt('');
         setCreateDialogOpen(false);
+        void refreshRuntimeSnapshot(projectId);
       } catch (err) {
         setActionError({
           projectId,
@@ -642,7 +850,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         setCreating(false);
       }
     },
-    [activeProject, activeProjectId, form, t],
+    [activeProject, activeProjectId, form, refreshRuntimeSnapshot, t],
   );
 
   const replaceTaskViewInCurrentProject = useCallback(
@@ -661,6 +869,87 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
       }
     },
     [],
+  );
+
+  const getRenderableTaskById = useCallback(
+    (taskId: string | null): OrchestratorRenderableTask | null => {
+      if (!taskId) return null;
+      return tasks.find((item) => item.task.id === taskId) ?? null;
+    },
+    [tasks],
+  );
+
+  const handleTaskDragStart = useCallback(
+    (event: DragEvent<HTMLButtonElement>, item: OrchestratorRenderableTask) => {
+      const canMoveToAdjacentLane = ORCHESTRATOR_BOARD_LANES.some((lane) =>
+        canMoveRenderableTaskToWorkflowState(item, lane),
+      );
+      if (!canMoveToAdjacentLane || movingTaskId === item.task.id) {
+        event.preventDefault();
+        return;
+      }
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', item.task.id);
+      setDraggedTaskId(item.task.id);
+    },
+    [movingTaskId],
+  );
+
+  const handleTaskDragEnd = useCallback(() => {
+    setDraggedTaskId(null);
+  }, []);
+
+  const handleLaneDragOver = useCallback(
+    (event: DragEvent<HTMLElement>, targetState: OrchestratorWorkflowState) => {
+      if (movingTaskId) return;
+      const draggedItem = getRenderableTaskById(draggedTaskId);
+      if (!canMoveRenderableTaskToWorkflowState(draggedItem, targetState)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+    },
+    [draggedTaskId, getRenderableTaskById, movingTaskId],
+  );
+
+  const handleLaneDrop = useCallback(
+    async (event: DragEvent<HTMLElement>, targetState: OrchestratorWorkflowState) => {
+      const droppedTaskId = event.dataTransfer.getData('text/plain') || draggedTaskId;
+      const droppedItem = getRenderableTaskById(droppedTaskId);
+      if (!droppedItem || movingTaskId || !canMoveRenderableTaskToWorkflowState(droppedItem, targetState)) {
+        return;
+      }
+      event.preventDefault();
+      const taskId = droppedItem.task.id;
+      const projectId = droppedItem.task.projectId;
+      setMovingTaskId(taskId);
+      setActionError(null);
+      try {
+        const moved = await orchestratorApi.moveTaskWorkflowState(projectId, taskId, targetState);
+        const movedProjectId = moved.origin === 'pendingRemote' ? null : moved.task.projectId;
+        if (activeProjectIdRef.current !== projectId || movedProjectId !== projectId) {
+          return;
+        }
+        replaceTaskViewInCurrentProject(projectId, moved);
+        void refreshRuntimeSnapshot(projectId);
+      } catch (err) {
+        if (activeProjectIdRef.current === projectId) {
+          setActionError({
+            projectId,
+            message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.move')),
+          });
+        }
+      } finally {
+        setMovingTaskId((current) => (current === taskId ? null : current));
+        setDraggedTaskId((current) => (current === taskId ? null : current));
+      }
+    },
+    [
+      draggedTaskId,
+      getRenderableTaskById,
+      movingTaskId,
+      refreshRuntimeSnapshot,
+      replaceTaskViewInCurrentProject,
+      t,
+    ],
   );
 
   const handleQueueSelectedTask = useCallback(async () => {
@@ -685,6 +974,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         return;
       }
       replaceTaskViewInCurrentProject(projectId, queued);
+      void refreshRuntimeSnapshot(projectId);
     } catch (err) {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
         setActionError({
@@ -695,7 +985,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     } finally {
       setQueueingTaskId((current) => (current === taskId ? null : current));
     }
-  }, [replaceTaskViewInCurrentProject, selectedTask, selectedTaskView, t]);
+  }, [refreshRuntimeSnapshot, replaceTaskViewInCurrentProject, selectedTask, selectedTaskView, t]);
 
   const handleCompleteAgentRun = useCallback(async () => {
     if (
@@ -719,6 +1009,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         return;
       }
       replaceTaskViewInCurrentProject(projectId, { origin: 'local', task: updated });
+      void refreshRuntimeSnapshot(projectId);
       try {
         const items = await orchestratorApi.listEvidence(projectId, taskId);
         if (activeProjectIdRef.current === projectId) {
@@ -744,7 +1035,14 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     } finally {
       setCompletingTaskId((current) => (current === taskId ? null : current));
     }
-  }, [completingTaskId, replaceTaskViewInCurrentProject, selectedTask, selectedTaskView, t]);
+  }, [
+    completingTaskId,
+    refreshRuntimeSnapshot,
+    replaceTaskViewInCurrentProject,
+    selectedTask,
+    selectedTaskView,
+    t,
+  ]);
 
   const handleOpenWorkbench = useCallback(() => {
     const url = buildWorkbenchTaskUrl(selectedTask);
@@ -778,6 +1076,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         return;
       }
       replaceTaskViewInCurrentProject(projectId, updated);
+      void refreshRuntimeSnapshot(projectId);
     } catch (err) {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
         setActionError({
@@ -788,7 +1087,14 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     } finally {
       setRetryingTaskId((current) => (current === taskId ? null : current));
     }
-  }, [replaceTaskViewInCurrentProject, retryingTaskId, selectedTask, selectedTaskView, t]);
+  }, [
+    refreshRuntimeSnapshot,
+    replaceTaskViewInCurrentProject,
+    retryingTaskId,
+    selectedTask,
+    selectedTaskView,
+    t,
+  ]);
 
   const handleAbortTask = useCallback(async () => {
     if (
@@ -813,6 +1119,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         return;
       }
       replaceTaskViewInCurrentProject(projectId, updated);
+      void refreshRuntimeSnapshot(projectId);
     } catch (err) {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
         setActionError({
@@ -823,7 +1130,14 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     } finally {
       setAbortingTaskId((current) => (current === taskId ? null : current));
     }
-  }, [abortingTaskId, replaceTaskViewInCurrentProject, selectedTask, selectedTaskView, t]);
+  }, [
+    abortingTaskId,
+    refreshRuntimeSnapshot,
+    replaceTaskViewInCurrentProject,
+    selectedTask,
+    selectedTaskView,
+    t,
+  ]);
 
   return (
     <div className={embedded ? styles.embedded : styles.page}>
@@ -869,6 +1183,82 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
             </div>
           </Card.Header>
           <Card.Body className={styles.queueBody}>
+            {activeProject ? (
+              <div className={styles.snapshotBar}>
+                <div className={styles.snapshotHeader}>
+                  <span className={styles.label}>{t('orchestrator:snapshot.title')}</span>
+                  {activeProjectKind === 'local' && activeRuntimeSnapshotResult?.loading ? (
+                    <Pill tone="accent">{t('orchestrator:snapshot.loading')}</Pill>
+                  ) : null}
+                </div>
+                {activeProjectKind === 'local' ? (
+                  <>
+                    {activeRuntimeSnapshotResult?.snapshot ? (
+                      <div className={styles.snapshotItems}>
+                        <Pill
+                          tone={
+                            activeRuntimeSnapshotResult.snapshot.schedulerEnabled
+                              ? 'success'
+                              : 'warn'
+                          }
+                          dot
+                        >
+                          {activeRuntimeSnapshotResult.snapshot.schedulerEnabled
+                            ? t('orchestrator:snapshot.schedulerEnabled')
+                            : t('orchestrator:snapshot.schedulerDisabled')}
+                        </Pill>
+                        <Pill
+                          tone={
+                            activeRuntimeSnapshotResult.snapshot.workflowValid
+                              ? 'success'
+                              : 'danger'
+                          }
+                          dot
+                        >
+                          {activeRuntimeSnapshotResult.snapshot.workflowValid
+                            ? t('orchestrator:snapshot.workflowValid')
+                            : t('orchestrator:snapshot.workflowInvalid')}
+                        </Pill>
+                        <span className={styles.snapshotMetric}>
+                          {t('orchestrator:snapshot.slotsUsed', {
+                            used: activeRuntimeSnapshotResult.snapshot.slotsUsed,
+                            max: activeRuntimeSnapshotResult.snapshot.maxConcurrentTasks,
+                          })}
+                        </span>
+                        <span className={styles.snapshotMetric}>
+                          {t('orchestrator:snapshot.slotsAvailable', {
+                            available: activeRuntimeSnapshotResult.snapshot.slotsAvailable,
+                          })}
+                        </span>
+                      </div>
+                    ) : null}
+                    {activeRuntimeSnapshotResult?.snapshot?.workflowError ? (
+                      <p className={styles.snapshotWarning}>
+                        {t('orchestrator:snapshot.workflowError', {
+                          error: activeRuntimeSnapshotResult.snapshot.workflowError,
+                        })}
+                      </p>
+                    ) : null}
+                    {activeRuntimeSnapshotResult?.snapshot?.latestError ? (
+                      <p className={styles.snapshotWarning}>
+                        {t('orchestrator:snapshot.latestError', {
+                          error: activeRuntimeSnapshotResult.snapshot.latestError,
+                        })}
+                      </p>
+                    ) : null}
+                    {activeRuntimeSnapshotResult?.error ? (
+                      <p className={styles.snapshotWarning} role="status">
+                        {activeRuntimeSnapshotResult.error}
+                      </p>
+                    ) : null}
+                  </>
+                ) : (
+                  <p className={styles.snapshotMuted}>
+                    {t('orchestrator:snapshot.remoteUnavailable')}
+                  </p>
+                )}
+              </div>
+            ) : null}
             {loading ? <p className={styles.muted}>{t('common:loading')}</p> : null}
             {!loading && tasks.length === 0 && pendingRemoteItems.length === 0 ? (
               <div className={styles.empty}>
@@ -876,24 +1266,42 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                 <p className={styles.emptyBody}>{t('orchestrator:emptyBody')}</p>
               </div>
             ) : null}
-            {!loading && tasks.length > 0
-              ? ORCHESTRATOR_STATUSES.map((status) => (
-                  <section className={styles.group} key={status}>
-                    <div className={styles.groupHeader}>
-                      <span>{t(STATUS_LABEL_KEYS[status])}</span>
-                      <Pill tone={orchestratorStatusTone(status)}>{groups[status].length}</Pill>
+            {!loading && tasks.length > 0 ? (
+              <div className={styles.board} aria-label={t('orchestrator:workflow.boardAria')}>
+                {ORCHESTRATOR_BOARD_LANES.map((lane) => (
+                  <section
+                    className={styles.lane}
+                    key={lane}
+                    onDragOver={(event) => handleLaneDragOver(event, lane)}
+                    onDrop={(event) => handleLaneDrop(event, lane)}
+                  >
+                    <div className={styles.laneHeader}>
+                      <span>{t(WORKFLOW_STATE_LABEL_KEYS[lane])}</span>
+                      <Pill tone={orchestratorWorkflowStateTone(lane)}>{groups[lane].length}</Pill>
                     </div>
-                    <div className={styles.taskList}>
-                      {groups[status].map((item) => {
+                    <div className={styles.laneTaskList}>
+                      {groups[lane].map((item) => {
                         const { task } = item;
                         const active = selectedTask?.id === task.id;
+                        const moving = movingTaskId === task.id;
+                        const draggable =
+                          !moving &&
+                          ORCHESTRATOR_BOARD_LANES.some((targetLane) =>
+                            canMoveRenderableTaskToWorkflowState(item, targetLane),
+                          );
                         return (
                           <button
-                            className={`${styles.task} ${active ? styles.taskActive : ''}`}
+                            className={`${styles.task} ${active ? styles.taskActive : ''} ${
+                              moving ? styles.taskMoving : ''
+                            }`}
                             type="button"
                             aria-pressed={active}
                             aria-label={t('orchestrator:queue.taskAria', { title: task.title })}
+                            draggable={draggable}
                             key={task.id}
+                            disabled={moving}
+                            onDragStart={(event) => handleTaskDragStart(event, item)}
+                            onDragEnd={handleTaskDragEnd}
                             onClick={() => setSelectedTaskId(task.id)}
                           >
                             <span className={styles.taskTitle}>{task.title}</span>
@@ -907,13 +1315,30 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                                   })
                                 : t('orchestrator:queue.localTask')}
                             </span>
+                            <span className={styles.taskPills}>
+                              <Pill tone={orchestratorWorkflowStateTone(task.workflowState)}>
+                                {t(WORKFLOW_STATE_LABEL_KEYS[task.workflowState])}
+                              </Pill>
+                              <Pill tone={orchestratorStatusTone(task.status)}>
+                                {t(STATUS_LABEL_KEYS[task.status])}
+                              </Pill>
+                              <Pill tone={runStateTone(task.runState)}>
+                                {t(RUN_STATE_LABEL_KEYS[task.runState])}
+                              </Pill>
+                              {task.attemptPhase ? (
+                                <Pill tone="neutral">
+                                  {t(ATTEMPT_PHASE_LABEL_KEYS[task.attemptPhase])}
+                                </Pill>
+                              ) : null}
+                            </span>
                           </button>
                         );
                       })}
                     </div>
                   </section>
-                ))
-              : null}
+                ))}
+              </div>
+            ) : null}
             {!loading && pendingRemoteItems.length > 0 ? (
               <section className={styles.group}>
                 <div className={styles.groupHeader}>
@@ -992,6 +1417,16 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                   </Pill>
                 ) : null}
                 {selectedTask ? (
+                  <Pill tone={orchestratorWorkflowStateTone(selectedTask.workflowState)} dot>
+                    {t(WORKFLOW_STATE_LABEL_KEYS[selectedTask.workflowState])}
+                  </Pill>
+                ) : null}
+                {selectedTask ? (
+                  <Pill tone={runStateTone(selectedTask.runState)} dot>
+                    {t(RUN_STATE_LABEL_KEYS[selectedTask.runState])}
+                  </Pill>
+                ) : null}
+                {selectedTask ? (
                   <Pill tone={orchestratorStatusTone(selectedTask.status)} dot>
                     {t(STATUS_LABEL_KEYS[selectedTask.status])}
                   </Pill>
@@ -1019,6 +1454,26 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                   </div>
                   <dl className={styles.metaGrid}>
                     <div>
+                      <dt>{t('orchestrator:detail.workflowState')}</dt>
+                      <dd>{t(WORKFLOW_STATE_LABEL_KEYS[selectedTask.workflowState])}</dd>
+                    </div>
+                    <div>
+                      <dt>{t('orchestrator:detail.legacyStatus')}</dt>
+                      <dd>{t(STATUS_LABEL_KEYS[selectedTask.status])}</dd>
+                    </div>
+                    <div>
+                      <dt>{t('orchestrator:detail.runState')}</dt>
+                      <dd>{t(RUN_STATE_LABEL_KEYS[selectedTask.runState])}</dd>
+                    </div>
+                    <div>
+                      <dt>{t('orchestrator:detail.attemptPhase')}</dt>
+                      <dd>
+                        {selectedTask.attemptPhase
+                          ? t(ATTEMPT_PHASE_LABEL_KEYS[selectedTask.attemptPhase])
+                          : t('orchestrator:detail.unknown')}
+                      </dd>
+                    </div>
+                    <div>
                       <dt>{t('orchestrator:detail.branch')}</dt>
                       <dd>{selectedTask.branchName ?? t('orchestrator:detail.unassigned')}</dd>
                     </div>
@@ -1042,6 +1497,33 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                         )}
                       </dd>
                     </div>
+                    <div>
+                      <dt>{t('orchestrator:detail.runnerProvider')}</dt>
+                      <dd>
+                        {taskRuntimeValue(
+                          selectedTask.runnerProvider,
+                          t('orchestrator:detail.unassigned'),
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t('orchestrator:detail.claudeSession')}</dt>
+                      <dd>
+                        {taskRuntimeValue(
+                          selectedTask.claudeSessionId,
+                          t('orchestrator:detail.unassigned'),
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t('orchestrator:detail.transcript')}</dt>
+                      <dd>
+                        {taskRuntimeValue(
+                          selectedTask.transcriptPath,
+                          t('orchestrator:detail.unassigned'),
+                        )}
+                      </dd>
+                    </div>
                     {selectedRenderableTask?.origin === 'remote' ? (
                       <div>
                         <dt>{t('orchestrator:detail.executionDevice')}</dt>
@@ -1058,6 +1540,33 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                     <div>
                       <dt>{t('orchestrator:detail.updatedAt')}</dt>
                       <dd>{formatTaskTimestamp(selectedTask.updatedAt)}</dd>
+                    </div>
+                    <div>
+                      <dt>{t('orchestrator:detail.lastActivity')}</dt>
+                      <dd>
+                        {formatOptionalTaskTimestamp(
+                          selectedTask.lastActivityAt,
+                          t('orchestrator:detail.unknown'),
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t('orchestrator:detail.lastEvent')}</dt>
+                      <dd>
+                        {taskRuntimeValue(
+                          selectedTask.lastRuntimeEvent,
+                          t('orchestrator:detail.unknown'),
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t('orchestrator:detail.lastMessage')}</dt>
+                      <dd>
+                        {taskRuntimeValue(
+                          selectedTask.lastRuntimeMessage,
+                          t('orchestrator:detail.unknown'),
+                        )}
+                      </dd>
                     </div>
                   </dl>
                   {selectedTask.status === 'blocked' ? (

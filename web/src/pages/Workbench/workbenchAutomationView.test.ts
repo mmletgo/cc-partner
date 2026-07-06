@@ -196,6 +196,41 @@ async function main(): Promise<void> {
   );
   assertContains(
     orchestratorSource,
+    'ORCHESTRATOR_BOARD_LANES',
+    'Orchestrator queue renders the workflow board lane order from orchestratorBoard helpers',
+  );
+  assertContains(
+    orchestratorSource,
+    'groupRenderableTasksByWorkflowState(tasks)',
+    'Orchestrator queue groups renderable tasks by workflow state',
+  );
+  assertContains(
+    orchestratorSource,
+    'canMoveRenderableTaskToWorkflowState',
+    'Orchestrator queue uses the workflow move guard before enabling drag/drop',
+  );
+  assertContains(
+    orchestratorSource,
+    'orchestratorApi.moveTaskWorkflowState(',
+    'Orchestrator drag/drop calls the workflow state move API',
+  );
+  assertContains(
+    orchestratorSource,
+    'orchestratorApi.getRuntimeSnapshot(',
+    'Orchestrator panel loads the local project runtime snapshot',
+  );
+  assertNotContains(
+    orchestratorSource,
+    'ORCHESTRATOR_STATUSES.map((status)',
+    'Orchestrator main board must not render lanes from legacy task statuses',
+  );
+  assertNotContains(
+    orchestratorSource,
+    'groupOrchestratorRenderableTasks(tasks)',
+    'Orchestrator main board must not group queue cards by legacy task status',
+  );
+  assertContains(
+    orchestratorSource,
     'const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);',
     'Orchestrator task creation should be opened from a modal dialog state instead of a fixed page card',
   );

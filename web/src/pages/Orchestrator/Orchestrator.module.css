@@ -79,7 +79,7 @@
   max-width: 1440px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: minmax(260px, 0.9fr) minmax(380px, 1.2fr) minmax(260px, 0.8fr);
+  grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.75fr);
   gap: var(--space-5);
   align-items: start;
 }
@@ -89,6 +89,10 @@
 .evidence,
 .rightStack {
   min-width: 0;
+}
+
+.queue {
+  grid-column: 1 / -1;
 }
 
 .detail,
@@ -185,6 +189,103 @@
   gap: var(--space-2);
 }
 
+.snapshotBar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-warm);
+}
+
+.snapshotHeader,
+.snapshotItems {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.snapshotHeader {
+  justify-content: space-between;
+}
+
+.snapshotMetric {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.snapshotWarning,
+.snapshotMuted {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.snapshotWarning {
+  color: var(--danger);
+}
+
+.board {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(220px, 240px);
+  gap: var(--space-3);
+  overflow-x: auto;
+  padding: 0 0 var(--space-2);
+  overscroll-behavior-x: contain;
+}
+
+.lane {
+  min-width: 0;
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--surface-warm) 56%, var(--surface));
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.lane:focus-within {
+  border-color: color-mix(in oklab, var(--accent) 40%, var(--border));
+}
+
+.laneHeader {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-normal);
+  letter-spacing: var(--tracking-normal);
+  color: var(--meta);
+  text-transform: uppercase;
+}
+
+.laneTaskList {
+  min-height: 152px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
 .task,
 .taskActive {
   width: 100%;
@@ -204,6 +305,11 @@
   transition: all var(--motion-fast) var(--ease-standard);
 }
 
+.task:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
 .task:hover {
   border-color: color-mix(in oklab, var(--accent) 42%, var(--border));
   background: color-mix(in oklab, var(--accent) 7%, var(--surface));
@@ -220,6 +326,11 @@
   background: var(--accent-soft);
 }
 
+.taskMoving {
+  border-style: dashed;
+  background: color-mix(in oklab, var(--accent) 12%, var(--surface));
+}
+
 .taskTitle {
   width: 100%;
   font-size: var(--text-sm);
@@ -233,6 +344,14 @@
   font-size: var(--text-xs);
   line-height: var(--leading-normal);
   color: var(--muted);
+}
+
+.taskPills {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
 }
 
 .pendingTask {
