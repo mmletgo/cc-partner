@@ -3,7 +3,10 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
-import { MobileAutomationPanel } from './components/MobileAutomationPanel';
+import {
+  MobileAutomationPanel,
+  type MobileAutomationExecutionContext,
+} from './components/MobileAutomationPanel';
 import { MobileFilesPanel } from './components/MobileFilesPanel';
 import { MobileGitPanel } from './components/MobileGitPanel';
 import { MobilePromptPanel } from './components/MobilePromptPanel';
@@ -695,6 +698,37 @@ export function MobileWorkbench(): ReactElement {
     ],
   );
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   自动化任务详情里的“打开执行现场”需要切换到现有 Mobile terminal 面板，并聚焦任务绑定的 worktree/session。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验任务仍属于当前项目；按 task worktreeId/sessionId 从父级权威列表中选择 active worktree/session，然后进入 terminal。
+   */
+  const handleOpenAutomationExecutionContext = useCallback(
+    (context: MobileAutomationExecutionContext): void => {
+      if (activeProjectRef.current?.id !== context.projectId) return;
+      const nextSession = context.sessionId
+        ? sessionsRef.current.find((session) => session.id === context.sessionId) ?? null
+        : null;
+      const nextWorktree = context.worktreeId
+        ? worktrees.find((worktree) => worktree.id === context.worktreeId) ??
+          activeWorktreeRef.current
+        : nextSession?.worktreeId
+          ? worktrees.find((worktree) => worktree.id === nextSession.worktreeId) ??
+            activeWorktreeRef.current
+          : activeWorktreeRef.current;
+
+      activeWorktreeRef.current = nextWorktree;
+      setActiveWorktree(nextWorktree);
+      setActiveSession(
+        nextSession ?? selectPreferredMobileSession(sessionsRef.current, nextWorktree?.id ?? null),
+      );
+      setPanel('terminal');
+    },
+    [worktrees],
+  );
+
   /* eslint-disable react-hooks/set-state-in-effect -- 移动端入口挂载时需要加载最近项目列表 */
   useEffect(() => {
     void loadProjects();
@@ -745,7 +779,10 @@ export function MobileWorkbench(): ReactElement {
     ) : panel === 'prompt' ? (
       <MobilePromptPanel worktree={activeWorktree} session={activeSession} />
     ) : panel === 'automation' ? (
-      <MobileAutomationPanel project={activeProject} />
+      <MobileAutomationPanel
+        project={activeProject}
+        onOpenExecutionContext={handleOpenAutomationExecutionContext}
+      />
     ) : panel === 'terminal' ? (
       <MobileTerminalPanel
         project={activeProject}

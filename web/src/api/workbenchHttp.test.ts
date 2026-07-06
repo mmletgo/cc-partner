@@ -119,6 +119,7 @@ try {
     goal: '从手机端代理到远端设备创建项目级自动化任务',
     acceptanceCriteria: '远端设备返回 task view',
     priority: 2,
+    createAction: 'start',
   });
 
   const createViewBody = capturedBodies[6] as Record<string, unknown>;
@@ -132,6 +133,7 @@ try {
   assert(createViewBody.acceptanceCriteria === '远端设备返回 task view', 'createView should include acceptanceCriteria');
   assert(createViewBody.priority === 2, 'createView should include priority');
   assert(createViewBody.queue === true, 'createView should default queue to true');
+  assert(createViewBody.createAction === 'start', 'createView should include explicit createAction');
   assert(
     typeof createViewBody.clientRequestId === 'string' && createViewBody.clientRequestId.length > 0,
     'createView should include a non-empty clientRequestId',
@@ -155,6 +157,18 @@ try {
         workingDirectory: '/Users/hans/web_project/cc-partner',
       }),
     'orchestrator task prompt completion should normalize prompt and workingDirectory',
+  );
+
+  await httpOrchestratorTransport.tasks.listEvidence('remote-project-1', 'remote:device-a:task-1');
+
+  assert(
+    capturedUrls[8] === '/api/orchestrator/tasks/evidence',
+    'orchestrator evidence should call the task evidence route',
+  );
+  assert(
+    JSON.stringify(capturedBodies[8]) ===
+      JSON.stringify({ projectId: 'remote-project-1', taskId: 'remote:device-a:task-1' }),
+    'orchestrator evidence should include projectId and taskId',
   );
 } finally {
   globalThis.fetch = originalFetch;

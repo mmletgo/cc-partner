@@ -710,11 +710,13 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   );
 
   useEffect(() => {
-    if (taskLoadDecision.kind !== 'load' || activeProjectKind !== 'local') {
-      setRuntimeSnapshotResult(null);
-      return;
-    }
-    void refreshRuntimeSnapshot(taskLoadDecision.projectId);
+    if (taskLoadDecision.kind !== 'load' || activeProjectKind !== 'local') return undefined;
+    const refreshTimer = window.setTimeout(() => {
+      void refreshRuntimeSnapshot(taskLoadDecision.projectId);
+    }, 0);
+    return () => {
+      window.clearTimeout(refreshTimer);
+    };
   }, [activeProjectKind, refreshRuntimeSnapshot, taskLoadDecision]);
 
   useEffect(() => {
