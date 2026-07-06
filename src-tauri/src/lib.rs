@@ -419,6 +419,8 @@ pub fn run() {
                     health_repo,
                     health_cancel,
                     orchestrator_repo,
+                    orchestrator_scheduler_telemetry:
+                        crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry::new(),
                     orchestrator_cancel: Arc::new(Mutex::new(None)),
                     orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
                 };
@@ -624,6 +626,11 @@ pub fn run() {
             orchestrator_cmd::create_orchestrator_task_view,
             orchestrator_cmd::move_orchestrator_task_workflow_state,
             orchestrator_cmd::get_orchestrator_runtime_snapshot,
+            orchestrator_cmd::start_orchestrator_task_view,
+            orchestrator_cmd::request_orchestrator_task_rework_view,
+            orchestrator_cmd::deliver_reviewed_orchestrator_task_view,
+            orchestrator_cmd::cancel_orchestrator_task_view,
+            orchestrator_cmd::refresh_orchestrator_project,
             orchestrator_cmd::queue_orchestrator_task_view,
             orchestrator_cmd::retry_orchestrator_task_view,
             orchestrator_cmd::abort_orchestrator_task_view,

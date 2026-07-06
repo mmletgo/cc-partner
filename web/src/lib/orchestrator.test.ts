@@ -10,6 +10,10 @@ import type { PillTone } from '@/components/primitives';
 import {
   canQueueOrchestratorTask,
   canQueueOrchestratorTaskForProject,
+  canStartOrchestratorTaskForProject,
+  canRequestReworkForProject,
+  canDeliverReviewedTaskForProject,
+  canCancelOrchestratorTaskForProject,
   canCompleteAgentRunForProject,
   canControlBlockedTaskForProject,
   groupOrchestratorTasks,
@@ -63,6 +67,8 @@ function createTask(
     externalId: null,
     externalIdentifier: null,
     externalUrl: null,
+    externalState: null,
+    externalLabels: null,
     runnerProvider: null,
     claudeSessionId: null,
     transcriptPath: null,
@@ -321,6 +327,78 @@ assert(
 assert(
   !canQueueOrchestratorTaskForProject(null, 'project-1'),
   'canQueueOrchestratorTaskForProject should reject null tasks',
+);
+
+const backlogDraftTask = createTask('backlog-start', 'draft');
+backlogDraftTask.workflowState = 'backlog';
+backlogDraftTask.runState = 'idle';
+const todoIdleTask = createTask('todo-start', 'queued');
+todoIdleTask.workflowState = 'todo';
+todoIdleTask.runState = 'idle';
+const todoRunningTask = createTask('todo-running-start', 'running');
+todoRunningTask.workflowState = 'todo';
+todoRunningTask.runState = 'running';
+
+assert(
+  canStartOrchestratorTaskForProject(backlogDraftTask, 'project-1'),
+  'canStartOrchestratorTaskForProject should allow Backlog/Draft tasks',
+);
+assert(
+  canStartOrchestratorTaskForProject(todoIdleTask, 'project-1'),
+  'canStartOrchestratorTaskForProject should allow Todo/Idle tasks',
+);
+assert(
+  !canStartOrchestratorTaskForProject(todoRunningTask, 'project-1'),
+  'canStartOrchestratorTaskForProject should reject tasks with active run state',
+);
+assert(
+  !canStartOrchestratorTaskForProject(backlogDraftTask, 'project-2'),
+  'canStartOrchestratorTaskForProject should reject tasks from another project',
+);
+
+const humanReviewTask = createTask('reviewed', 'done');
+humanReviewTask.workflowState = 'humanReview';
+humanReviewTask.runState = 'idle';
+const deliveredDoneTask = createTask('delivered', 'done');
+deliveredDoneTask.workflowState = 'done';
+deliveredDoneTask.runState = 'idle';
+
+assert(
+  canRequestReworkForProject(humanReviewTask, 'project-1'),
+  'canRequestReworkForProject should allow HumanReview tasks',
+);
+assert(
+  !canRequestReworkForProject(deliveredDoneTask, 'project-1'),
+  'canRequestReworkForProject should reject already delivered Done tasks',
+);
+assert(
+  canDeliverReviewedTaskForProject(humanReviewTask, 'project-1'),
+  'canDeliverReviewedTaskForProject should allow HumanReview tasks',
+);
+assert(
+  !canDeliverReviewedTaskForProject(deliveredDoneTask, 'project-1'),
+  'canDeliverReviewedTaskForProject should reject Done tasks outside HumanReview',
+);
+
+assert(
+  canCancelOrchestratorTaskForProject(createTask('running-cancel', 'running'), 'project-1'),
+  'canCancelOrchestratorTaskForProject should allow active project running tasks',
+);
+assert(
+  canCancelOrchestratorTaskForProject(createTask('blocked-cancel', 'blocked'), 'project-1'),
+  'canCancelOrchestratorTaskForProject should allow blocked tasks',
+);
+assert(
+  canCancelOrchestratorTaskForProject(humanReviewTask, 'project-1'),
+  'canCancelOrchestratorTaskForProject should allow HumanReview tasks despite legacy done status',
+);
+assert(
+  !canCancelOrchestratorTaskForProject(deliveredDoneTask, 'project-1'),
+  'canCancelOrchestratorTaskForProject should reject completed tasks',
+);
+assert(
+  !canCancelOrchestratorTaskForProject(createTask('aborted-cancel', 'aborted'), 'project-1'),
+  'canCancelOrchestratorTaskForProject should reject already canceled tasks',
 );
 
 assert(

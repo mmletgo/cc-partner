@@ -17,6 +17,7 @@ use crate::config::AppConfig;
 use crate::models::device::Device;
 use crate::net::peer_client::PeerClient;
 use crate::orchestrator::repo::OrchestratorRepo;
+use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
 use crate::storage::{
     ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, TransferRepo,
     WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
@@ -114,6 +115,8 @@ pub struct AppState {
     /// Orchestrator 任务编排仓储（任务队列、事件和证据持久化）
     #[allow(dead_code)]
     pub orchestrator_repo: Arc<OrchestratorRepo>,
+    /// Orchestrator scheduler 最近 tick / dispatch 结果（内存可观测状态，供 runtime snapshot 状态条展示）
+    pub orchestrator_scheduler_telemetry: OrchestratorSchedulerTelemetry,
     /// Orchestrator 后台 scheduler 的取消令牌（应用退出时 cancel，停止自动领取任务）
     pub orchestrator_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// Orchestrator 远端 outbox dispatcher 的取消令牌（应用退出时 cancel，停止 pending 远端任务投递）

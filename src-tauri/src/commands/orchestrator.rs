@@ -2,11 +2,11 @@ use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
-    OrchestratorAttemptPhase, OrchestratorEvidenceDto, OrchestratorProjectConfigDto,
-    OrchestratorRunState, OrchestratorTaskAttemptRow, OrchestratorTaskDto, OrchestratorTaskRow,
-    OrchestratorTaskStatus, OrchestratorWorkflowState, EVIDENCE_KIND_DELIVERY,
-    EVIDENCE_KIND_REPAIR_PROMPT, EVIDENCE_KIND_VERIFICATION_OUTPUT,
-    EVIDENCE_KIND_VERIFICATION_REVIEW,
+    OrchestratorAttemptPhase, OrchestratorCreateAction, OrchestratorEvidenceDto,
+    OrchestratorProjectConfigDto, OrchestratorRunState, OrchestratorTaskAttemptRow,
+    OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus, OrchestratorWorkflowState,
+    SplitTaskState, EVIDENCE_KIND_DELIVERY, EVIDENCE_KIND_REPAIR_PROMPT,
+    EVIDENCE_KIND_VERIFICATION_OUTPUT, EVIDENCE_KIND_VERIFICATION_REVIEW,
 };
 use crate::orchestrator::outbox::{
     create_pending_remote_task, is_remote_network_error, mirror_payload_from_task,
@@ -16,8 +16,9 @@ use crate::orchestrator::outbox::{
 use crate::orchestrator::prompt::RepairPromptContext;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
-use crate::orchestrator::repo::OrchestratorRepo;
+use crate::orchestrator::repo::{OrchestratorRecentEventRow, OrchestratorRepo};
 use crate::orchestrator::runner::prepare_repair_runner;
+use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetrySnapshot;
 use crate::orchestrator::verifier::{self, VerifierReview};
 use crate::orchestrator::workflow::{resolve_project_workflow, WorkflowSource};
 use crate::state::AppState;
@@ -29,14 +30,17 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
+const RUNTIME_TASK_SUMMARY_LIMIT: i64 = 6;
+const RUNTIME_EVENT_LIMIT: i64 = 8;
+
 /// 创建 Orchestrator 任务的命令入参。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     前端创建编排任务时只提交用户可编辑字段，后端统一补齐 id、状态、关联执行信息和时间戳。
 ///
 /// Code Logic（这个结构体做什么）:
-///     以 camelCase 接收 Tauri invoke 参数，并保留 priority 可选值用于默认优先级归一。
-#[derive(Debug, Clone, Deserialize)]
+///     以 camelCase 接收 Tauri invoke 参数，并保留 priority、createAction 与 tracker 预留字段用于归一。
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateOrchestratorTaskRequest {
     pub project_id: String,
@@ -44,6 +48,20 @@ pub struct CreateOrchestratorTaskRequest {
     pub goal: String,
     pub acceptance_criteria: String,
     pub priority: Option<i64>,
+    #[serde(default)]
+    pub create_action: OrchestratorCreateAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_identifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_labels: Option<Vec<String>>,
 }
 
 /// Orchestrator 看板泳道移动入参。
@@ -64,15 +82,20 @@ pub struct MoveOrchestratorTaskWorkflowStateRequest {
 /// Orchestrator 项目运行时快照 DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     Workbench 自动化状态条需要展示调度器、workflow 解析和执行槽位信息，帮助用户判断自动化为何运行或停滞。
+///     Workbench 自动化状态条需要展示调度器、workflow、执行槽位和任务运行摘要，帮助用户判断自动化为何运行或停滞。
 ///
 /// Code Logic（这个结构体做什么）:
-///     聚合设备级 Settings、项目 workflow resolver、repo 槽位统计和最近错误，使用 camelCase 序列化给前端。
+///     聚合设备级 Settings、scheduler telemetry、项目 workflow resolver、repo 槽位统计、最近任务事件和远端可用性状态。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestratorRuntimeSnapshotDto {
     pub project_id: String,
+    pub project_kind: String,
+    pub remote_status: String,
     pub generated_at: String,
+    pub latest_tick_at: Option<String>,
+    pub last_dispatch_at: Option<String>,
+    pub last_dispatched_count: usize,
     pub scheduler_enabled: bool,
     pub workflow_source: String,
     pub workflow_valid: bool,
@@ -81,6 +104,62 @@ pub struct OrchestratorRuntimeSnapshotDto {
     pub slots_used: i64,
     pub slots_available: i64,
     pub latest_error: Option<String>,
+    pub running_tasks: Vec<OrchestratorRuntimeTaskSummaryDto>,
+    pub retrying_tasks: Vec<OrchestratorRuntimeTaskSummaryDto>,
+    pub recent_events: Vec<OrchestratorRuntimeEventDto>,
+}
+
+/// Orchestrator runtime snapshot 任务摘要 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     状态条需要以低噪音方式展示正在运行和等待重试的任务，用户不必展开完整任务卡片也能判断现场。
+///
+/// Code Logic（这个结构体做什么）:
+///     从 OrchestratorTaskRow 投影用户可识别字段和 runner runtime 字段，使用 camelCase 序列化给前端。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorRuntimeTaskSummaryDto {
+    pub task_id: String,
+    pub title: String,
+    pub workflow_state: OrchestratorWorkflowState,
+    pub run_state: OrchestratorRunState,
+    pub attempt_phase: Option<OrchestratorAttemptPhase>,
+    pub session_id: Option<String>,
+    pub worktree_id: Option<String>,
+    pub last_runtime_message: Option<String>,
+    pub last_activity_at: Option<String>,
+}
+
+/// Orchestrator runtime snapshot 最近事件 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     状态条需要展示最近 scheduler/runner 事件，帮助用户理解任务为何运行、阻塞或等待。
+///
+/// Code Logic（这个结构体做什么）:
+///     从 orchestrator_task_events join 查询行投影可展示字段，不暴露 payload_json 等内部调试细节。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorRuntimeEventDto {
+    pub id: String,
+    pub task_id: String,
+    pub task_title: String,
+    pub kind: String,
+    pub message: String,
+    pub created_at: String,
+}
+
+/// Orchestrator 项目刷新结果 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     显式 refreshOrchestratorProject 动作需要告诉前端本次 best-effort 调度实际领取了多少任务。
+///
+/// Code Logic（这个结构体做什么）:
+///     使用 camelCase 返回 projectId 与 dispatched 数量；remote 项目返回本机 shortcut projectId。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorProjectRefreshDto {
+    pub project_id: String,
+    pub dispatched: usize,
 }
 
 /// Orchestrator 任务视图 DTO。
@@ -116,7 +195,7 @@ pub enum OrchestratorTaskViewDto {
 ///     创建任务时需要在命令层统一做必填校验、清理用户输入，并初始化任务为 Draft 状态。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验 project/title/goal 非空，生成 UUID 和 UTC 时间戳，返回完整 OrchestratorTaskRow。
+///     校验 project/title/goal 非空，生成 UUID 和 UTC 时间戳，归一化 tracker 字段，返回完整 OrchestratorTaskRow。
 pub(crate) fn build_orchestrator_task_row(
     request: CreateOrchestratorTaskRequest,
 ) -> Result<OrchestratorTaskRow, AppError> {
@@ -136,6 +215,11 @@ pub(crate) fn build_orchestrator_task_row(
     }
 
     let now = Utc::now().to_rfc3339();
+    let source = request
+        .source
+        .as_deref()
+        .and_then(non_empty_trimmed_string)
+        .unwrap_or_else(|| "internal".to_string());
     Ok(OrchestratorTaskRow {
         id: Uuid::new_v4().to_string(),
         project_id: project_id.to_string(),
@@ -143,6 +227,24 @@ pub(crate) fn build_orchestrator_task_row(
         goal: goal.to_string(),
         acceptance_criteria: acceptance_criteria.to_string(),
         status: OrchestratorTaskStatus::Draft,
+        source,
+        external_id: request
+            .external_id
+            .as_deref()
+            .and_then(non_empty_trimmed_string),
+        external_identifier: request
+            .external_identifier
+            .as_deref()
+            .and_then(non_empty_trimmed_string),
+        external_url: request
+            .external_url
+            .as_deref()
+            .and_then(non_empty_trimmed_string),
+        external_state: request
+            .external_state
+            .as_deref()
+            .and_then(non_empty_trimmed_string),
+        external_labels: request.external_labels,
         priority: request.priority.unwrap_or(0),
         branch_name: None,
         worktree_id: None,
@@ -155,6 +257,99 @@ pub(crate) fn build_orchestrator_task_row(
         finished_at: None,
         ..OrchestratorTaskRow::default_for_status(OrchestratorTaskStatus::Draft)
     })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     创建任务时 tracker 预留字符串字段允许缺失或空白，但不能把空白当成有效外部标识写入数据库。
+///
+/// Code Logic（这个函数做什么）:
+///     trim 输入字符串；空白返回 None，非空返回新的 String。
+fn non_empty_trimmed_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     本机 Tauri 创建入口也需要支持 Backlog/Todo/Start 三种动作，不能只让远端 HTTP 协议拥有该语义。
+///
+/// Code Logic（这个函数做什么）:
+///     按 createAction 覆盖新任务 row 的 legacy status 与 split state，Start 与 Todo 入库语义一致。
+fn apply_create_action_to_task_row(
+    row: &mut OrchestratorTaskRow,
+    create_action: OrchestratorCreateAction,
+) {
+    let split_state = SplitTaskState::from_create_action(create_action);
+    row.status = create_action.initial_status();
+    row.workflow_state = split_state.workflow_state;
+    row.run_state = split_state.run_state;
+    row.attempt_phase = None;
+    row.blocked_reason = None;
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Create and Start 应在创建成功后尝试触发 scheduler，但 Settings 关闭、容量不足或 runner 失败都不应让创建失败。
+///
+/// Code Logic（这个函数做什么）:
+///     对 Start 调用 dispatch_once 并吞掉错误写日志，随后重读任务状态；非 Start 直接返回创建行。
+async fn refresh_task_after_create_action(
+    state: &AppState,
+    row: OrchestratorTaskRow,
+    create_action: OrchestratorCreateAction,
+) -> Result<OrchestratorTaskRow, AppError> {
+    if !create_action.should_dispatch_after_create() {
+        return Ok(row);
+    }
+
+    let task_id = row.id.clone();
+    if let Err(err) =
+        crate::orchestrator::scheduler::dispatch_once(state, state.app_handle.clone()).await
+    {
+        tracing::warn!(
+            task_id = %task_id,
+            error = %err,
+            "orchestrator createAction=start dispatch failed after task creation"
+        );
+    }
+    state.orchestrator_repo.get_task(&task_id).await.or(Ok(row))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     多个本机创建入口都需要相同的校验、状态映射、落库和 Start 刷新语义。
+///
+/// Code Logic（这个函数做什么）:
+///     构造任务 row，应用 createAction，插入 repo，并在 Start 时 best-effort dispatch 后返回最新 row。
+async fn create_local_task_with_action(
+    state: &AppState,
+    request: CreateOrchestratorTaskRequest,
+) -> Result<OrchestratorTaskRow, AppError> {
+    let create_action = request.create_action;
+    let mut row = build_orchestrator_task_row(request)?;
+    apply_create_action_to_task_row(&mut row, create_action);
+    state.orchestrator_repo.create_task(&row).await?;
+    refresh_task_after_create_action(state, row, create_action).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     HTTP/mobile 本机创建必须同时支持 clientRequestId 幂等和三种 createAction，避免重试产生重复任务。
+///
+/// Code Logic（这个函数做什么）:
+///     构造本机任务 row，调用 repo 幂等创建入口按 createAction 落库，并在 Start 时 best-effort dispatch 后刷新。
+async fn create_local_task_for_client_request(
+    state: &AppState,
+    client_request_id: &str,
+    request: CreateOrchestratorTaskRequest,
+) -> Result<OrchestratorTaskRow, AppError> {
+    let create_action = request.create_action;
+    let row = build_orchestrator_task_row(request)?;
+    let created = state
+        .orchestrator_repo
+        .create_remote_task_for_client_request(client_request_id, &row, create_action)
+        .await?;
+    refresh_task_after_create_action(state, created, create_action).await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -177,7 +372,7 @@ async fn get_orchestrator_workbench_project(
 ///     远端 create 请求需要沿用用户输入的标题、目标、验收标准和优先级，但 projectId 会在远端 open-project 后替换。
 ///
 /// Code Logic（这个函数做什么）:
-///     从本地 Tauri create request 投影为 RemoteCreateOrchestratorTaskReq，queue 固定 false 保持草稿语义；
+///     从本地 Tauri create request 投影为 RemoteCreateOrchestratorTaskReq，保留 createAction；
 ///     同时生成一次性稳定 clientRequestId，若在线响应超时后落入 pending outbox，后续投递仍复用该幂等键。
 fn remote_create_request_from_local(
     request: &CreateOrchestratorTaskRequest,
@@ -188,8 +383,79 @@ fn remote_create_request_from_local(
         goal: request.goal.clone(),
         acceptance_criteria: request.acceptance_criteria.clone(),
         priority: request.priority.unwrap_or(0),
-        queue: false,
+        create_action: request.create_action,
         client_request_id: Some(Uuid::new_v4().to_string()),
+        source: request.source.clone(),
+        external_id: request.external_id.clone(),
+        external_identifier: request.external_identifier.clone(),
+        external_url: request.external_url.clone(),
+        external_state: request.external_state.clone(),
+        external_labels: request.external_labels.clone(),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     runtime snapshot 需要展示任务摘要，而不是把完整任务 DTO 全量塞入状态条。
+///
+/// Code Logic（这个函数做什么）:
+///     从 OrchestratorTaskRow 克隆任务 id、标题、split state、执行现场和最近 runtime 文本字段。
+fn runtime_task_summary_from_row(task: OrchestratorTaskRow) -> OrchestratorRuntimeTaskSummaryDto {
+    OrchestratorRuntimeTaskSummaryDto {
+        task_id: task.id,
+        title: task.title,
+        workflow_state: task.workflow_state,
+        run_state: task.run_state,
+        attempt_phase: task.attempt_phase,
+        session_id: task.session_id,
+        worktree_id: task.worktree_id,
+        last_runtime_message: task.last_runtime_message,
+        last_activity_at: task.last_activity_at,
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     runtime snapshot 的 recentEvents 应只暴露前端易展示字段，避免 UI 解析数据库 payload。
+///
+/// Code Logic（这个函数做什么）:
+///     从 OrchestratorRecentEventRow 投影为 camelCase DTO。
+fn runtime_event_from_row(row: OrchestratorRecentEventRow) -> OrchestratorRuntimeEventDto {
+    OrchestratorRuntimeEventDto {
+        id: row.id,
+        task_id: row.task_id,
+        task_title: row.task_title,
+        kind: row.kind,
+        message: row.message,
+        created_at: row.created_at,
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端项目的 runtime snapshot 不能用本机 scheduler/config/workflow 冒充，必须明确标记本轮不可用。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 remoteStatus=unsupported 的空 snapshot；除 project 元信息和错误文案外不读取本机运行状态。
+fn remote_runtime_snapshot_unavailable(
+    project: &WorkbenchProjectRow,
+) -> OrchestratorRuntimeSnapshotDto {
+    OrchestratorRuntimeSnapshotDto {
+        project_id: project.id.clone(),
+        project_kind: project.kind.clone(),
+        remote_status: "unsupported".to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        latest_tick_at: None,
+        last_dispatch_at: None,
+        last_dispatched_count: 0,
+        scheduler_enabled: false,
+        workflow_source: "remoteUnavailable".to_string(),
+        workflow_valid: false,
+        workflow_error: Some("远端运行时快照暂不可用".to_string()),
+        max_concurrent_tasks: 0,
+        slots_used: 0,
+        slots_available: 0,
+        latest_error: Some("远端项目暂不支持运行时快照；请在所属设备查看自动化状态".to_string()),
+        running_tasks: Vec::new(),
+        retrying_tasks: Vec::new(),
+        recent_events: Vec::new(),
     }
 }
 
@@ -261,14 +527,15 @@ pub(crate) async fn move_orchestrator_task_workflow_state_for_project(
 ///     Workbench 状态条需要项目级 runtime snapshot，但实际数据分散在 Settings、workflow resolver 和 repo 统计中。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析项目 WORKFLOW.md，统计当前项目 active run_state 槽位和最近 blocked 原因，生成前端 DTO。
+///     本机项目解析 WORKFLOW.md、统计槽位、任务摘要和最近事件；远端项目返回明确 unsupported 空快照。
 pub(crate) async fn get_orchestrator_runtime_snapshot_for_project(
     repo: &OrchestratorRepo,
     config: &OrchestratorAutomationConfig,
     project: &WorkbenchProjectRow,
+    scheduler_snapshot: &OrchestratorSchedulerTelemetrySnapshot,
 ) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
     if project.kind == "remote" {
-        return Err(AppError::generic("远端项目暂不支持运行时快照"));
+        return Ok(remote_runtime_snapshot_unavailable(project));
     }
     let project_path = Path::new(&project.path);
     let (workflow_source, workflow_valid, workflow_error) =
@@ -289,11 +556,37 @@ pub(crate) async fn get_orchestrator_runtime_snapshot_for_project(
         .await?;
     let max_slots = config.max_concurrent_tasks.max(0);
     let slots_available = (max_slots - slots_used).max(0);
-    let latest_error = repo.latest_blocked_reason_for_project(&project.id).await?;
+    let latest_error = repo
+        .latest_blocked_reason_for_project(&project.id)
+        .await?
+        .or_else(|| scheduler_snapshot.latest_error.clone());
+    let running_tasks = repo
+        .list_active_runtime_tasks_for_project(&project.id, RUNTIME_TASK_SUMMARY_LIMIT)
+        .await?
+        .into_iter()
+        .map(runtime_task_summary_from_row)
+        .collect();
+    let retrying_tasks = repo
+        .list_retrying_runtime_tasks_for_project(&project.id, RUNTIME_TASK_SUMMARY_LIMIT)
+        .await?
+        .into_iter()
+        .map(runtime_task_summary_from_row)
+        .collect();
+    let recent_events = repo
+        .list_recent_events_for_project(&project.id, RUNTIME_EVENT_LIMIT)
+        .await?
+        .into_iter()
+        .map(runtime_event_from_row)
+        .collect();
 
     Ok(OrchestratorRuntimeSnapshotDto {
         project_id: project.id.clone(),
+        project_kind: project.kind.clone(),
+        remote_status: "local".to_string(),
         generated_at: Utc::now().to_rfc3339(),
+        latest_tick_at: scheduler_snapshot.latest_tick_at.clone(),
+        last_dispatch_at: scheduler_snapshot.last_dispatch_at.clone(),
+        last_dispatched_count: scheduler_snapshot.last_dispatched_count,
         scheduler_enabled: config.enabled,
         workflow_source,
         workflow_valid,
@@ -302,6 +595,9 @@ pub(crate) async fn get_orchestrator_runtime_snapshot_for_project(
         slots_used,
         slots_available,
         latest_error,
+        running_tasks,
+        retrying_tasks,
+        recent_events,
     })
 }
 
@@ -519,14 +815,20 @@ fn build_dispatch_once_response(dispatched: usize) -> serde_json::Value {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Agent 完成后的验证命令已迁移为设备级全局设置，不能再读取 legacy 项目配置表。
+///     Agent 完成后的验证命令优先来自项目 WORKFLOW.md；项目未声明时才使用 Settings 全局默认。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 OrchestratorAutomationConfig 克隆 verification_commands，调用方可在 await 前释放 config 读锁。
-fn verification_commands_for_agent_completion(
+///     每次 completion 动态解析项目 workflow；validation.commands 非空则返回项目命令，否则克隆全局 verification_commands。
+fn validation_commands_for_agent_completion(
+    project_path: &Path,
     config: &OrchestratorAutomationConfig,
-) -> Vec<String> {
-    config.verification_commands.clone()
+) -> Result<Vec<String>, AppError> {
+    let workflow = resolve_project_workflow(project_path)?;
+    if workflow.validation_commands.is_empty() {
+        Ok(config.verification_commands.clone())
+    } else {
+        Ok(workflow.validation_commands)
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -540,6 +842,75 @@ fn auto_delivery_enabled(config: &OrchestratorAutomationConfig) -> bool {
         && config.auto_push_task_branch
         && config.auto_merge_to_main
         && config.auto_push_main
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     显式 deliverReviewedTask 入口必须和自动 completion pipeline 使用同一 Settings 总闸，避免 UI 按钮绕过交付策略。
+///
+/// Code Logic（这个函数做什么）:
+///     复用 auto_delivery_enabled 判断 enabled 与四个 delivery flag；未全部开启时返回可读业务错误。
+pub(crate) fn ensure_reviewed_delivery_allowed(
+    config: &OrchestratorAutomationConfig,
+) -> Result<(), AppError> {
+    if auto_delivery_enabled(config) {
+        Ok(())
+    } else {
+        Err(AppError::generic(
+            "Settings 未允许 full-auto delivery，无法交付人工复核任务",
+        ))
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     start/refresh 是显式用户动作，但调度 Runner 仍应尽量沿用后台 scheduler 的统一逻辑，且不能因为一次调度失败破坏任务入队。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 scheduler::dispatch_once；成功返回 dispatched 数量，失败仅记录 warn 并返回 0。
+pub(crate) async fn dispatch_orchestrator_best_effort(
+    state: &AppState,
+    app_handle: AppHandle,
+) -> usize {
+    match crate::orchestrator::scheduler::dispatch_once(state, app_handle).await {
+        Ok(dispatched) => dispatched,
+        Err(err) => {
+            tracing::warn!(error = %err, "Orchestrator 显式刷新调度失败");
+            0
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     显式 task action 不能作用在 pending remote outbox 上，因为它还没有 owning device 上的真实 taskId。
+///
+/// Code Logic（这个函数做什么）:
+///     按 taskId 查询 remote outbox；存在则返回业务错误，不存在时允许后续 remote id 解析继续。
+async fn reject_pending_remote_task_action(
+    repo: &OrchestratorRepo,
+    task_id: &str,
+) -> Result<(), AppError> {
+    if repo.get_remote_outbox_item(task_id).await?.is_some() {
+        return Err(AppError::generic(
+            "远端待发送任务尚未创建，不能执行该动作",
+        ));
+    }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     本机显式 action 必须确认任务属于当前 Workbench 项目，避免 stale drawer 操作误改其它项目任务。
+///
+/// Code Logic（这个函数做什么）:
+///     读取任务并比较 project_id；匹配时返回任务行，缺失或不匹配时返回统一业务错误。
+async fn get_local_project_task_for_action(
+    repo: &OrchestratorRepo,
+    project_id: &str,
+    task_id: &str,
+) -> Result<OrchestratorTaskRow, AppError> {
+    let task = repo.get_task(task_id).await?;
+    if task.project_id != project_id {
+        return Err(AppError::generic("任务不属于当前项目"));
+    }
+    Ok(task)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -940,7 +1311,7 @@ async fn mark_active_running_attempt_completed(
 ///
 /// Code Logic（这个函数做什么）:
 ///     构造 AppDeliveryContext 调用 delivery::deliver_task；成功返回 summary.task，失败时条件 Block 当前 Delivering 任务。
-async fn run_delivery_for_task(
+pub(crate) async fn run_delivery_for_task(
     state: &AppState,
     app_handle: AppHandle,
     task_id: &str,
@@ -1113,14 +1484,13 @@ pub async fn list_orchestrator_tasks(
 ///     用户在前端提交任务后，需要立即生成草稿任务并保存到 SQLite，供后续队列和调度器处理。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用纯 helper 完成校验和 Row 初始化，再委托 OrchestratorRepo 插入并返回 DTO。
+///     调用共享 helper 完成校验、createAction 状态映射、插入和 Start best-effort dispatch，再返回 DTO。
 #[tauri::command]
 pub async fn create_orchestrator_task(
     state: State<'_, AppState>,
     request: CreateOrchestratorTaskRequest,
 ) -> Result<OrchestratorTaskDto, AppError> {
-    let row = build_orchestrator_task_row(request)?;
-    state.orchestrator_repo.create_task(&row).await?;
+    let row = create_local_task_with_action(state.inner(), request).await?;
     Ok(OrchestratorTaskDto::from(row))
 }
 
@@ -1187,8 +1557,7 @@ pub(crate) async fn create_orchestrator_task_view_for_state(
 ) -> Result<OrchestratorTaskViewDto, AppError> {
     let project = get_orchestrator_workbench_project(state, &request.project_id).await?;
     if project.kind != "remote" {
-        let row = build_orchestrator_task_row(request)?;
-        state.orchestrator_repo.create_task(&row).await?;
+        let row = create_local_task_with_action(state, request).await?;
         return Ok(local_task_view(row));
     }
 
@@ -1211,6 +1580,190 @@ pub async fn create_orchestrator_task_view(
     request: CreateOrchestratorTaskRequest,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
     create_orchestrator_task_view_for_state(&state, request).await
+}
+
+/// 启动 remote-aware Orchestrator 任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户需要一个显式 startTask 动作，把 Backlog/Draft 或 Todo/Idle 任务放入 scheduler 路径；
+///     remote shortcut 上必须转发到 owning device，pendingRemote outbox 不可启动。
+///
+/// Code Logic（这个函数做什么）:
+///     local 项目校验任务归属后调用 repo.start_task，再 best-effort dispatch 并返回最新任务；
+///     remote 项目剥离 remote task id 后调用远端 start endpoint，并刷新 mirror。
+#[tauri::command]
+pub async fn start_orchestrator_task_view(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    project_id: String,
+    task_id: String,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    if project.kind != "remote" {
+        get_local_project_task_for_action(state.orchestrator_repo.as_ref(), &project_id, &task_id)
+            .await?;
+        let started = state.orchestrator_repo.start_task(&task_id).await?;
+        dispatch_orchestrator_best_effort(state.inner(), app_handle).await;
+        let latest = state.orchestrator_repo.get_task(&started.id).await?;
+        return Ok(local_task_view(latest));
+    }
+    reject_pending_remote_task_action(state.orchestrator_repo.as_ref(), &task_id).await?;
+    update_remote_orchestrator_task_status(
+        state.inner(),
+        &project,
+        &task_id,
+        |client, base_url, id| async move { client.start_task(&base_url, &id).await },
+    )
+    .await
+}
+
+/// 请求 remote-aware Orchestrator 任务返工。
+///
+/// Business Logic（为什么需要这个函数）:
+///     人工复核未通过时，用户需要显式记录返工原因并把任务移回 Rework 可领取路径；
+///     remote shortcut 上原因必须写入 owning device 的 evidence。
+///
+/// Code Logic（这个函数做什么）:
+///     local 项目校验任务归属后调用 repo.request_task_rework；remote 项目调用远端 request-rework endpoint。
+#[tauri::command]
+pub async fn request_orchestrator_task_rework_view(
+    state: State<'_, AppState>,
+    project_id: String,
+    task_id: String,
+    reason: String,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    if project.kind != "remote" {
+        get_local_project_task_for_action(state.orchestrator_repo.as_ref(), &project_id, &task_id)
+            .await?;
+        let task = state
+            .orchestrator_repo
+            .request_task_rework(&task_id, &reason)
+            .await?;
+        return Ok(local_task_view(task));
+    }
+    reject_pending_remote_task_action(state.orchestrator_repo.as_ref(), &task_id).await?;
+    let reason = reason.trim().to_string();
+    update_remote_orchestrator_task_status(
+        state.inner(),
+        &project,
+        &task_id,
+        |client, base_url, id| async move {
+            client.request_rework_task(&base_url, &id, &reason).await
+        },
+    )
+    .await
+}
+
+/// 交付 remote-aware 人工复核任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户复核通过后可以显式 deliver，但必须只有 Settings 允许 full-auto delivery 时才进入 Git delivery pipeline。
+///     remote shortcut 上交付必须由 owning device 检查其 Settings 并执行。
+///
+/// Code Logic（这个函数做什么）:
+///     local 项目先做 Settings gate，再用 repo.start_delivery_from_human_review 取得 Delivering 执行权并调用 delivery pipeline；
+///     remote 项目调用远端 deliver-reviewed endpoint 并刷新 mirror。
+#[tauri::command]
+pub async fn deliver_reviewed_orchestrator_task_view(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    project_id: String,
+    task_id: String,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    if project.kind != "remote" {
+        get_local_project_task_for_action(state.orchestrator_repo.as_ref(), &project_id, &task_id)
+            .await?;
+        let config = state
+            .config
+            .read()
+            .expect("config 读锁中毒")
+            .orchestrator
+            .clone();
+        ensure_reviewed_delivery_allowed(&config)?;
+        let delivering = state
+            .orchestrator_repo
+            .start_delivery_from_human_review(&task_id)
+            .await?;
+        let delivered = run_delivery_for_task(state.inner(), app_handle, &delivering.id).await?;
+        return Ok(OrchestratorTaskViewDto::Local { task: delivered });
+    }
+    reject_pending_remote_task_action(state.orchestrator_repo.as_ref(), &task_id).await?;
+    update_remote_orchestrator_task_status(
+        state.inner(),
+        &project,
+        &task_id,
+        |client, base_url, id| async move {
+            client.deliver_reviewed_task(&base_url, &id).await
+        },
+    )
+    .await
+}
+
+/// 取消 remote-aware Orchestrator 任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     cancelTask 是显式业务动作，用于停止任务继续被 scheduler/delivery 接管，但保留现场和 evidence。
+///     remote shortcut 上必须取消 owning device 的权威任务，pendingRemote outbox 不可取消为任务。
+///
+/// Code Logic（这个函数做什么）:
+///     local 项目校验归属后调用 repo.cancel_task；remote 项目调用远端 cancel endpoint 并刷新 mirror。
+#[tauri::command]
+pub async fn cancel_orchestrator_task_view(
+    state: State<'_, AppState>,
+    project_id: String,
+    task_id: String,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    if project.kind != "remote" {
+        get_local_project_task_for_action(state.orchestrator_repo.as_ref(), &project_id, &task_id)
+            .await?;
+        let task = state.orchestrator_repo.cancel_task(&task_id).await?;
+        return Ok(local_task_view(task));
+    }
+    reject_pending_remote_task_action(state.orchestrator_repo.as_ref(), &task_id).await?;
+    update_remote_orchestrator_task_status(
+        state.inner(),
+        &project,
+        &task_id,
+        |client, base_url, id| async move { client.cancel_task(&base_url, &id).await },
+    )
+    .await
+}
+
+/// 刷新 remote-aware Orchestrator 项目。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户需要显式 refreshOrchestratorProject 触发一次 best-effort dispatch/reconcile，并得到 dispatched 数量。
+///     remote shortcut 上刷新必须转发到 owning device。
+///
+/// Code Logic（这个函数做什么）:
+///     local 项目调用 scheduler dispatch_once 的 best-effort wrapper；remote 项目打开远端项目后调用 refresh endpoint，
+///     返回值 projectId 始终使用本机当前 Workbench project id。
+#[tauri::command]
+pub async fn refresh_orchestrator_project(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    project_id: String,
+) -> Result<OrchestratorProjectRefreshDto, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    if project.kind != "remote" {
+        let dispatched = dispatch_orchestrator_best_effort(state.inner(), app_handle).await;
+        return Ok(OrchestratorProjectRefreshDto {
+            project_id,
+            dispatched,
+        });
+    }
+
+    let context = open_remote_project_for_shortcut(state.inner(), &project).await?;
+    let refreshed = RemoteOrchestratorClient::new()
+        .refresh_project(&context.base_url, &context.remote_project_id)
+        .await?;
+    Ok(OrchestratorProjectRefreshDto {
+        project_id,
+        dispatched: refreshed.dispatched,
+    })
 }
 
 /// 移动 Orchestrator 任务工作流泳道。
@@ -1253,10 +1806,12 @@ pub async fn get_orchestrator_runtime_snapshot(
         .expect("config 读锁中毒")
         .orchestrator
         .clone();
+    let scheduler_snapshot = state.orchestrator_scheduler_telemetry.snapshot();
     get_orchestrator_runtime_snapshot_for_project(
         state.orchestrator_repo.as_ref(),
         &config,
         &project,
+        &scheduler_snapshot,
     )
     .await
 }
@@ -1264,10 +1819,10 @@ pub async fn get_orchestrator_runtime_snapshot(
 /// 通过 HTTP task-view 协议创建 remote-aware Orchestrator 任务。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     `/mobile` 创建任务需要保留旧移动端语义：create 请求默认直接入队，同时还要支持 remote shortcut 代理。
+///     `/mobile` 创建任务需要支持 Backlog/Todo/Start 三种创建动作，同时还要支持 remote shortcut 代理。
 ///
 /// Code Logic（这个函数做什么）:
-///     local 项目用 clientRequestId 幂等创建并按 queue 决定是否入队；remote 项目保持同一 requestId 转发到 owning device，
+///     local 项目用 clientRequestId 幂等创建并按 createAction 决定初始状态；remote 项目保持同一 requestId 转发到 owning device，
 ///     网络失败时写 pending outbox 并返回 PendingRemote。
 pub(crate) async fn create_orchestrator_task_view_for_http(
     state: &AppState,
@@ -1283,18 +1838,26 @@ pub(crate) async fn create_orchestrator_task_view_for_http(
         .ok_or_else(|| AppError::generic("移动端创建任务缺少 clientRequestId"))?;
 
     if project.kind != "remote" {
-        let row = build_orchestrator_task_row(CreateOrchestratorTaskRequest {
-            project_id: req.project_id,
-            title: req.title,
-            goal: req.goal,
-            acceptance_criteria: req.acceptance_criteria,
-            priority: Some(req.priority),
-        })?;
-        let created = state
-            .orchestrator_repo
-            .create_remote_task_for_client_request(&client_request_id, &row, req.queue)
-            .await?;
-        return Ok(local_task_view(created));
+        let row = create_local_task_for_client_request(
+            state,
+            &client_request_id,
+            CreateOrchestratorTaskRequest {
+                project_id: req.project_id,
+                title: req.title,
+                goal: req.goal,
+                acceptance_criteria: req.acceptance_criteria,
+                priority: Some(req.priority),
+                create_action: req.create_action,
+                source: req.source,
+                external_id: req.external_id,
+                external_identifier: req.external_identifier,
+                external_url: req.external_url,
+                external_state: req.external_state,
+                external_labels: req.external_labels,
+            },
+        )
+        .await?;
+        return Ok(local_task_view(row));
     }
 
     let remote_request = RemoteCreateOrchestratorTaskReq {
@@ -1649,9 +2212,44 @@ async fn complete_orchestrator_agent_run_after_verifying_transition(
         }
     };
     let cwd = PathBuf::from(&worktree.path);
-    let verification_commands = {
+    let project = match state.workbench_project_repo.get(&task.project_id).await {
+        Ok(Some(project)) => project,
+        Ok(None) => {
+            return block_task_with_verification_failure(
+                state,
+                &task.id,
+                &format!("找不到任务所属 Workbench 项目: {}", task.project_id),
+            )
+            .await;
+        }
+        Err(err) => {
+            return block_task_with_verification_error(
+                state,
+                &task.id,
+                "读取任务所属 Workbench 项目失败",
+                err,
+            )
+            .await;
+        }
+    };
+    let global_orchestrator_config = {
         let config = state.config.read().expect("config 读锁中毒");
-        verification_commands_for_agent_completion(&config.orchestrator)
+        config.orchestrator.clone()
+    };
+    let verification_commands = match validation_commands_for_agent_completion(
+        Path::new(&project.path),
+        &global_orchestrator_config,
+    ) {
+        Ok(commands) => commands,
+        Err(err) => {
+            return block_task_with_verification_error(
+                state,
+                &task.id,
+                "项目 WORKFLOW.md 解析失败",
+                err,
+            )
+            .await;
+        }
     };
 
     let validation_report =
@@ -1801,6 +2399,9 @@ pub async fn abort_orchestrator_task(
 mod tests {
     use super::*;
     use crate::config::OrchestratorAutomationConfig;
+    use crate::orchestrator::scheduler::{
+        OrchestratorSchedulerTelemetry, OrchestratorSchedulerTelemetrySnapshot,
+    };
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::fs;
     use std::str::FromStr;
@@ -1902,6 +2503,15 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     多个 snapshot 测试只关心 repo/workflow，不需要调度器真实 tick 时，应提供一致的空观测输入。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造新的 OrchestratorSchedulerTelemetry 并读取其空 snapshot，供 runtime snapshot helper 使用。
+    fn empty_scheduler_snapshot() -> OrchestratorSchedulerTelemetrySnapshot {
+        OrchestratorSchedulerTelemetry::new().snapshot()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     Orchestrator 任务创建命令必须拒绝没有项目归属的任务，避免调度器后续无法定位工作台项目。
     ///
     /// Code Logic（这个函数做什么）:
@@ -1914,6 +2524,13 @@ mod tests {
             goal: "完成目标".to_string(),
             acceptance_criteria: "测试通过".to_string(),
             priority: None,
+            create_action: OrchestratorCreateAction::Backlog,
+            source: None,
+            external_id: None,
+            external_identifier: None,
+            external_url: None,
+            external_state: None,
+            external_labels: None,
         };
 
         let result = build_orchestrator_task_row(request);
@@ -1934,6 +2551,13 @@ mod tests {
             goal: "完成目标".to_string(),
             acceptance_criteria: "测试通过".to_string(),
             priority: None,
+            create_action: OrchestratorCreateAction::Backlog,
+            source: None,
+            external_id: None,
+            external_identifier: None,
+            external_url: None,
+            external_state: None,
+            external_labels: None,
         };
         let blank_goal = CreateOrchestratorTaskRequest {
             project_id: "project-1".to_string(),
@@ -1941,6 +2565,13 @@ mod tests {
             goal: " ".to_string(),
             acceptance_criteria: "测试通过".to_string(),
             priority: None,
+            create_action: OrchestratorCreateAction::Backlog,
+            source: None,
+            external_id: None,
+            external_identifier: None,
+            external_url: None,
+            external_state: None,
+            external_labels: None,
         };
 
         assert!(build_orchestrator_task_row(blank_title).is_err());
@@ -1960,6 +2591,13 @@ mod tests {
             goal: "  暴露任务命令  ".to_string(),
             acceptance_criteria: "  测试通过  ".to_string(),
             priority: None,
+            create_action: OrchestratorCreateAction::Backlog,
+            source: None,
+            external_id: None,
+            external_identifier: None,
+            external_url: None,
+            external_state: None,
+            external_labels: None,
         };
 
         let row = build_orchestrator_task_row(request).expect("row");
@@ -2124,17 +2762,101 @@ mod tests {
             ..OrchestratorAutomationConfig::default()
         };
 
-        let snapshot = get_orchestrator_runtime_snapshot_for_project(&repo, &config, &project)
-            .await
-            .unwrap();
+        let scheduler_snapshot = empty_scheduler_snapshot();
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &config,
+            &project,
+            &scheduler_snapshot,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(snapshot.project_id, "project-1");
+        assert_eq!(snapshot.project_kind, "local");
+        assert_eq!(snapshot.remote_status, "local");
         assert!(snapshot.scheduler_enabled);
         assert_eq!(snapshot.workflow_source, "builtInDefault");
         assert!(snapshot.workflow_valid);
         assert_eq!(snapshot.max_concurrent_tasks, 2);
         assert_eq!(snapshot.slots_used, 0);
         assert_eq!(snapshot.slots_available, 2);
+        assert!(snapshot.latest_tick_at.is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Workbench 状态条需要同时解释当前活跃任务、待重试任务、最近事件和最近调度 tick，用户才能判断自动化是否卡住。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 running 与 blocked/rework 任务并追加事件，写入 scheduler telemetry 后构建 snapshot，
+    ///     断言任务摘要、recentEvents、latestError、projectKind/remoteStatus 和 latestTickAt 都可见。
+    #[tokio::test]
+    async fn runtime_snapshot_reports_running_summaries_events_and_latest_tick() {
+        let repo = setup_orchestrator_repo().await;
+        let project = local_project_row(temp_project_dir("orch-snapshot-runtime"));
+        let mut running = command_task_row("task-running", OrchestratorTaskStatus::Running);
+        running.title = "实现状态条".to_string();
+        running.attempt_phase = Some(OrchestratorAttemptPhase::Streaming);
+        running.session_id = Some("session-running".to_string());
+        running.worktree_id = Some("worktree-running".to_string());
+        running.last_runtime_message = Some("正在运行测试".to_string());
+        running.last_activity_at = Some("2026-07-06T01:02:03Z".to_string());
+        let mut retrying = command_task_row("task-retry", OrchestratorTaskStatus::Blocked);
+        retrying.title = "修复验证失败".to_string();
+        retrying.workflow_state = OrchestratorWorkflowState::Rework;
+        retrying.run_state = OrchestratorRunState::Blocked;
+        retrying.blocked_reason = Some("验证器要求修复".to_string());
+        retrying.updated_at = "2026-07-06T01:03:00Z".to_string();
+        repo.create_task(&running).await.unwrap();
+        repo.create_task(&retrying).await.unwrap();
+        repo.add_event(&running.id, "runner", "Runner 已启动", None)
+            .await
+            .unwrap();
+        repo.add_event(&retrying.id, "blocked", "验证器要求修复", None)
+            .await
+            .unwrap();
+        let telemetry = OrchestratorSchedulerTelemetry::new();
+        telemetry.record_dispatch_result("2026-07-06T01:04:05Z".to_string(), 1, None);
+
+        let telemetry_snapshot = telemetry.snapshot();
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &OrchestratorAutomationConfig::default(),
+            &project,
+            &telemetry_snapshot,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(snapshot.project_kind, "local");
+        assert_eq!(snapshot.remote_status, "local");
+        assert_eq!(
+            snapshot.latest_tick_at.as_deref(),
+            Some("2026-07-06T01:04:05Z")
+        );
+        assert_eq!(snapshot.running_tasks.len(), 1);
+        assert_eq!(snapshot.running_tasks[0].task_id, "task-running");
+        assert_eq!(snapshot.running_tasks[0].title, "实现状态条");
+        assert_eq!(
+            snapshot.running_tasks[0].attempt_phase,
+            Some(OrchestratorAttemptPhase::Streaming)
+        );
+        assert_eq!(
+            snapshot.running_tasks[0].last_runtime_message.as_deref(),
+            Some("正在运行测试")
+        );
+        assert_eq!(snapshot.retrying_tasks.len(), 1);
+        assert_eq!(snapshot.retrying_tasks[0].task_id, "task-retry");
+        assert_eq!(snapshot.latest_error.as_deref(), Some("验证器要求修复"));
+        assert_eq!(snapshot.recent_events.len(), 2);
+        assert!(snapshot
+            .recent_events
+            .iter()
+            .any(|event| event.task_id == "task-retry" && event.kind == "blocked"));
+        assert!(snapshot
+            .recent_events
+            .iter()
+            .any(|event| event.task_id == "task-running" && event.kind == "runner"));
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2153,10 +2875,12 @@ mod tests {
         .expect("write workflow");
         let project = local_project_row(project_dir);
 
+        let scheduler_snapshot = empty_scheduler_snapshot();
         let snapshot = get_orchestrator_runtime_snapshot_for_project(
             &repo,
             &OrchestratorAutomationConfig::default(),
             &project,
+            &scheduler_snapshot,
         )
         .await
         .unwrap();
@@ -2177,19 +2901,31 @@ mod tests {
     /// Code Logic（这个测试做什么）:
     ///     用 remote shortcut 调用 snapshot helper，断言本轮明确拒绝而不是读取本机状态。
     #[tokio::test]
-    async fn runtime_snapshot_rejects_remote_project() {
+    async fn runtime_snapshot_reports_remote_project_unavailable() {
         let repo = setup_orchestrator_repo().await;
         let project = remote_shortcut_row();
+        let scheduler_snapshot = empty_scheduler_snapshot();
 
-        let error = get_orchestrator_runtime_snapshot_for_project(
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
             &repo,
             &OrchestratorAutomationConfig::default(),
             &project,
+            &scheduler_snapshot,
         )
         .await
-        .expect_err("remote snapshot must be rejected");
+        .expect("remote snapshot should return explicit unsupported status");
 
-        assert!(error.to_string().contains("远端项目暂不支持运行时快照"));
+        assert_eq!(snapshot.project_kind, "remote");
+        assert_eq!(snapshot.remote_status, "unsupported");
+        assert!(!snapshot.scheduler_enabled);
+        assert!(snapshot.running_tasks.is_empty());
+        assert!(snapshot.retrying_tasks.is_empty());
+        assert!(snapshot.recent_events.is_empty());
+        assert!(snapshot
+            .latest_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("远端项目暂不支持运行时快照"));
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -2205,6 +2941,13 @@ mod tests {
             goal: "完成目标".to_string(),
             acceptance_criteria: "验收".to_string(),
             priority: Some(3),
+            create_action: OrchestratorCreateAction::Start,
+            source: None,
+            external_id: None,
+            external_identifier: None,
+            external_url: None,
+            external_state: None,
+            external_labels: None,
         };
 
         let remote_request = remote_create_request_from_local(&request);
@@ -2294,23 +3037,76 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     Agent 完成验证命令已迁移到全局 AppConfig，legacy 项目配置里的命令不能再影响运行时验证。
+    ///     项目 WORKFLOW.md 声明验证命令时，completion pipeline 必须优先执行项目命令而不是全局默认。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造全局 Orchestrator 配置并断言命令层 helper 只返回全局 verification_commands。
+    ///     写入 validation.commands，构造带全局 fallback 的配置，断言 helper 返回项目命令。
     #[test]
-    fn agent_completion_verification_commands_come_from_global_config() {
+    fn agent_completion_validation_commands_prefer_project_workflow() {
+        let project_dir = temp_project_dir("validation-project");
+        fs::write(
+            Path::new(&project_dir).join("WORKFLOW.md"),
+            "---\nvalidation:\n  commands:\n    - cargo test workflow_runtime --lib\n---\nBody",
+        )
+        .expect("write WORKFLOW.md");
         let config = OrchestratorAutomationConfig {
             verification_commands: vec!["cargo test orchestrator::delivery --lib".to_string()],
             ..OrchestratorAutomationConfig::default()
         };
 
-        let commands = verification_commands_for_agent_completion(&config);
+        let commands = validation_commands_for_agent_completion(Path::new(&project_dir), &config)
+            .expect("workflow validation commands");
+
+        assert_eq!(
+            commands,
+            vec!["cargo test workflow_runtime --lib".to_string()]
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     缺少 WORKFLOW.md 或项目 workflow 未声明验证命令时，Settings 里的 verificationCommands 仍是全局默认。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     使用无 WORKFLOW.md 的临时目录，断言 helper 回落到全局配置命令。
+    #[test]
+    fn agent_completion_validation_commands_fallback_to_global_config_when_workflow_omits_them() {
+        let project_dir = temp_project_dir("validation-default");
+        let config = OrchestratorAutomationConfig {
+            verification_commands: vec!["cargo test orchestrator::delivery --lib".to_string()],
+            ..OrchestratorAutomationConfig::default()
+        };
+
+        let commands = validation_commands_for_agent_completion(Path::new(&project_dir), &config)
+            .expect("fallback validation commands");
 
         assert_eq!(
             commands,
             vec!["cargo test orchestrator::delivery --lib".to_string()]
         );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     WORKFLOW.md 无效时 completion 不应静默落回 Settings，否则用户会误以为项目策略已生效。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写入非法 workflow front matter，断言 helper 返回错误，供 completion pipeline 写 evidence 并 Blocked。
+    #[test]
+    fn agent_completion_validation_commands_error_on_invalid_project_workflow() {
+        let project_dir = temp_project_dir("validation-invalid");
+        fs::write(
+            Path::new(&project_dir).join("WORKFLOW.md"),
+            "---\n[\n---\nBody",
+        )
+        .expect("write invalid WORKFLOW.md");
+        let config = OrchestratorAutomationConfig {
+            verification_commands: vec!["cargo test orchestrator::delivery --lib".to_string()],
+            ..OrchestratorAutomationConfig::default()
+        };
+
+        let error = validation_commands_for_agent_completion(Path::new(&project_dir), &config)
+            .expect_err("invalid workflow must block validation");
+
+        assert!(error.to_string().contains("WORKFLOW.md"));
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2412,6 +3208,34 @@ mod tests {
             ..OrchestratorAutomationConfig::default()
         };
         assert!(!auto_delivery_enabled(&disabled));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 deliverReviewedTask 也必须受 Settings full-auto delivery 总闸控制，避免用户复核页按钮绕过交付策略。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     使用默认关闭、全部开启和单项关闭三组配置调用 gate helper，断言关闭时返回可读 Settings 错误。
+    #[test]
+    fn reviewed_delivery_gate_requires_full_auto_settings() {
+        let default_config = OrchestratorAutomationConfig::default();
+        let default_error = ensure_reviewed_delivery_allowed(&default_config)
+            .expect_err("default settings should block explicit delivery");
+        assert!(default_error.to_string().contains("Settings"));
+
+        let enabled = OrchestratorAutomationConfig {
+            enabled: true,
+            ..OrchestratorAutomationConfig::default()
+        };
+        assert!(ensure_reviewed_delivery_allowed(&enabled).is_ok());
+
+        let partial = OrchestratorAutomationConfig {
+            enabled: true,
+            auto_merge_to_main: false,
+            ..OrchestratorAutomationConfig::default()
+        };
+        let partial_error = ensure_reviewed_delivery_allowed(&partial)
+            .expect_err("partial delivery settings should block explicit delivery");
+        assert!(partial_error.to_string().contains("Settings"));
     }
 
     /// Business Logic（为什么需要这个函数）:

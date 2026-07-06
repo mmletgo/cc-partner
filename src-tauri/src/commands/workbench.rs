@@ -1286,7 +1286,7 @@ pub(crate) async fn local_create_workbench_worktree(
         return Err(AppError::generic("分支名不能为空"));
     }
     let repo_root = workbench_git::repo_root(Path::new(&project.path))?;
-    let worktree_path = worktree_storage_path(&state, &project_id, branch);
+    let worktree_path = worktree_storage_path(state, &project_id, branch);
     if worktree_path.exists() {
         return Err(AppError::generic("目标 worktree 目录已存在"));
     }
@@ -1395,7 +1395,7 @@ pub(crate) async fn local_commit_workbench_worktree(
         .filter(|value| !value.is_empty())
     {
         Some(manual_message) => workbench_git::commit_all(path, manual_message)?,
-        None => commit_worktree_with_generated_message(&state, path).await?,
+        None => commit_worktree_with_generated_message(state, path).await?,
     };
     if !committed {
         return Ok(worktree_to_dto(&row));
@@ -2411,7 +2411,7 @@ pub(crate) async fn local_remove_workbench_worktree(
     {
         return Err(AppError::generic("请先关闭该 worktree 下的终端窗口"));
     }
-    let project = get_project(&state, &row.project_id).await?;
+    let project = get_project(state, &row.project_id).await?;
     let repo_root = workbench_git::repo_root(Path::new(&project.path))?;
     workbench_git::remove_worktree(
         Path::new(&repo_root),

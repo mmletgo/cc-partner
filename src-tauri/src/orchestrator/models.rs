@@ -124,6 +124,56 @@ impl OrchestratorTaskStatus {
     }
 }
 
+/// Orchestrator 创建任务动作。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     创建任务弹窗提供“放入 Backlog / 放入 Todo / 创建并启动”三种动作，后端需要稳定契约区分默认保存、
+///     等待调度和立即尝试调度，避免旧默认行为把新任务直接入队。
+///
+/// Code Logic（这个枚举做什么）:
+///     使用 camelCase/lowercase JSON 值接收 `createAction`，默认 Backlog；提供持久化初始状态和是否触发调度的判断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrchestratorCreateAction {
+    Backlog,
+    Todo,
+    Start,
+}
+
+impl Default for OrchestratorCreateAction {
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧请求或未显式选择动作的创建弹窗必须安全落入 Backlog，不能自动启动任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 createAction 缺省值 Backlog，供 serde(default) 和内部默认值复用。
+    fn default() -> Self {
+        Self::Backlog
+    }
+}
+
+impl OrchestratorCreateAction {
+    /// Business Logic（为什么需要这个函数）:
+    ///     新建任务写入 legacy status 时仍要兼容旧状态机与旧 DTO。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Backlog 映射 Draft；Todo/Start 先映射 Queued，后续 scheduler 只读取 split state 领取。
+    pub fn initial_status(self) -> OrchestratorTaskStatus {
+        match self {
+            Self::Backlog => OrchestratorTaskStatus::Draft,
+            Self::Todo | Self::Start => OrchestratorTaskStatus::Queued,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Create and Start 只是创建后尝试调度，不应影响 Backlog/Todo 的创建结果。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅 Start 返回 true，调用方据此触发 best-effort dispatch。
+    pub fn should_dispatch_after_create(self) -> bool {
+        matches!(self, Self::Start)
+    }
+}
+
 /// Orchestrator 任务工作流状态。
 ///
 /// Business Logic（为什么需要这个枚举）:
@@ -331,6 +381,24 @@ pub struct SplitTaskState {
 
 impl SplitTaskState {
     /// Business Logic（为什么需要这个函数）:
+    ///     创建任务动作需要直接得到 split state，避免各入口重复拼接 Backlog/Todo 与 Idle。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Backlog 映射 Backlog/Idle；Todo/Start 映射 scheduler 可领取的 Todo/Idle。
+    pub fn from_create_action(action: OrchestratorCreateAction) -> Self {
+        match action {
+            OrchestratorCreateAction::Backlog => Self {
+                workflow_state: OrchestratorWorkflowState::Backlog,
+                run_state: OrchestratorRunState::Idle,
+            },
+            OrchestratorCreateAction::Todo | OrchestratorCreateAction::Start => Self {
+                workflow_state: OrchestratorWorkflowState::Todo,
+                run_state: OrchestratorRunState::Idle,
+            },
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     旧数据库只保存单一 status；升级到 split state 时必须保持旧任务在看板和运行态上的语义一致。
     ///
     /// Code Logic（这个函数做什么）:
@@ -422,6 +490,8 @@ pub struct OrchestratorTaskRow {
     pub external_id: Option<String>,
     pub external_identifier: Option<String>,
     pub external_url: Option<String>,
+    pub external_state: Option<String>,
+    pub external_labels: Option<Vec<String>>,
     pub runner_provider: Option<String>,
     pub claude_session_id: Option<String>,
     pub transcript_path: Option<String>,
@@ -487,6 +557,8 @@ pub struct OrchestratorTaskDto {
     pub external_id: Option<String>,
     pub external_identifier: Option<String>,
     pub external_url: Option<String>,
+    pub external_state: Option<String>,
+    pub external_labels: Option<Vec<String>>,
     pub runner_provider: Option<String>,
     pub claude_session_id: Option<String>,
     pub transcript_path: Option<String>,
@@ -576,6 +648,8 @@ impl OrchestratorTaskRow {
             external_id: None,
             external_identifier: None,
             external_url: None,
+            external_state: None,
+            external_labels: None,
             runner_provider: Some("claudeCodeVisible".to_string()),
             claude_session_id: None,
             transcript_path: None,
@@ -639,6 +713,8 @@ impl From<OrchestratorTaskRow> for OrchestratorTaskDto {
             external_id: row.external_id,
             external_identifier: row.external_identifier,
             external_url: row.external_url,
+            external_state: row.external_state,
+            external_labels: row.external_labels,
             runner_provider: row.runner_provider,
             claude_session_id: row.claude_session_id,
             transcript_path: row.transcript_path,

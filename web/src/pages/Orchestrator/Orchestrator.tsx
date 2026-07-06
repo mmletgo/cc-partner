@@ -25,11 +25,24 @@ import { orchestratorApi } from '@/api/orchestrator';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
 import { Button, Card, Input, Pill } from '@/components/primitives';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
-import { CheckIcon, FolderIcon, PlayIcon, PlusIcon, StopIcon, SyncIcon, XIcon } from '@/lib/icons';
 import {
+  CheckIcon,
+  FolderIcon,
+  PlayIcon,
+  PlusIcon,
+  RefreshIcon,
+  SettingsIcon,
+  StopIcon,
+  SyncIcon,
+  XIcon,
+} from '@/lib/icons';
+import {
+  canCancelOrchestratorTaskForProject,
   canCompleteAgentRunForProject,
   canControlBlockedTaskForProject,
-  canQueueOrchestratorTaskForProject,
+  canDeliverReviewedTaskForProject,
+  canRequestReworkForProject,
+  canStartOrchestratorTaskForProject,
   orchestratorAttemptLabel,
   orchestratorCreateResultMatchesProject,
   orchestratorEvidenceKindLabel,
@@ -54,6 +67,8 @@ import type {
   OrchestratorRemoteOutboxStatus,
   OrchestratorRunState,
   OrchestratorRuntimeSnapshot,
+  OrchestratorRuntimeEvent,
+  OrchestratorRuntimeTaskSummary,
   OrchestratorTask,
   OrchestratorTaskStatus,
   OrchestratorTaskView,
@@ -523,10 +538,13 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [form, setForm] = useState<OrchestratorCreateForm>(EMPTY_FORM);
   const [creating, setCreating] = useState(false);
-  const [queueingTaskId, setQueueingTaskId] = useState<string | null>(null);
+  const [startingTaskId, setStartingTaskId] = useState<string | null>(null);
   const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
+  const [reworkingTaskId, setReworkingTaskId] = useState<string | null>(null);
+  const [deliveringTaskId, setDeliveringTaskId] = useState<string | null>(null);
   const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
-  const [abortingTaskId, setAbortingTaskId] = useState<string | null>(null);
+  const [cancelingTaskId, setCancelingTaskId] = useState<string | null>(null);
+  const [refreshingProjectId, setRefreshingProjectId] = useState<string | null>(null);
   const [movingTaskId, setMovingTaskId] = useState<string | null>(null);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [evidenceResult, setEvidenceResult] = useState<OrchestratorEvidenceResult | null>(null);
@@ -576,10 +594,13 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   }, [selectedTaskId, tasks]);
   const selectedTaskView = selectedRenderableTask?.view ?? null;
   const selectedTask = selectedRenderableTask?.task ?? null;
-  const selectedTaskCanQueue = canQueueOrchestratorTaskForProject(selectedTask, activeProjectId);
+  const selectedTaskCanStart = canStartOrchestratorTaskForProject(selectedTask, activeProjectId);
   const selectedTaskCanComplete =
     isLocalOrchestratorTaskView(selectedTaskView) &&
     canCompleteAgentRunForProject(selectedTask, activeProjectId);
+  const selectedTaskCanRequestRework = canRequestReworkForProject(selectedTask, activeProjectId);
+  const selectedTaskCanDeliver = canDeliverReviewedTaskForProject(selectedTask, activeProjectId);
+  const selectedTaskCanCancel = canCancelOrchestratorTaskForProject(selectedTask, activeProjectId);
   const selectedTaskCanControlBlocked = canControlBlockedTaskForProject(
     selectedTask,
     activeProjectId,
@@ -709,12 +730,23 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     [t],
   );
 
+  const handleRefreshRuntimeSnapshot = useCallback(() => {
+    if (!activeProjectId || activeProjectKind !== 'local') return;
+    void refreshRuntimeSnapshot(activeProjectId);
+  }, [activeProjectId, activeProjectKind, refreshRuntimeSnapshot]);
+
+  const handleOpenAutomationSettings = useCallback(() => {
+    navigate('/settings?tab=automation');
+  }, [navigate]);
+
   useEffect(() => {
-    if (taskLoadDecision.kind !== 'load' || activeProjectKind !== 'local') {
-      setRuntimeSnapshotResult(null);
-      return;
-    }
-    void refreshRuntimeSnapshot(taskLoadDecision.projectId);
+    if (taskLoadDecision.kind !== 'load' || activeProjectKind !== 'local') return undefined;
+    const refreshTimer = window.setTimeout(() => {
+      void refreshRuntimeSnapshot(taskLoadDecision.projectId);
+    }, 0);
+    return () => {
+      window.clearTimeout(refreshTimer);
+    };
   }, [activeProjectKind, refreshRuntimeSnapshot, taskLoadDecision]);
 
   useEffect(() => {
@@ -963,38 +995,38 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     ],
   );
 
-  const handleQueueSelectedTask = useCallback(async () => {
+  const handleStartSelectedTask = useCallback(async () => {
     if (
       !selectedTask ||
       !isOrchestratorTaskViewActionable(selectedTaskView) ||
-      !canQueueOrchestratorTaskForProject(selectedTask, activeProjectIdRef.current)
+      !canStartOrchestratorTaskForProject(selectedTask, activeProjectIdRef.current)
     ) {
       return;
     }
     const taskId = selectedTask.id;
     const projectId = selectedTask.projectId;
-    setQueueingTaskId(taskId);
+    setStartingTaskId(taskId);
     setActionError(null);
     try {
-      const queued = await orchestratorApi.queueTaskView(projectId, taskId);
-      const queuedProjectId = queued.origin === 'pendingRemote' ? null : queued.task.projectId;
+      const started = await orchestratorApi.startTaskView(projectId, taskId);
+      const startedProjectId = started.origin === 'pendingRemote' ? null : started.task.projectId;
       if (
         !orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId) ||
-        queuedProjectId !== projectId
+        startedProjectId !== projectId
       ) {
         return;
       }
-      replaceTaskViewInCurrentProject(projectId, queued);
+      replaceTaskViewInCurrentProject(projectId, started);
       void refreshRuntimeSnapshot(projectId);
     } catch (err) {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
         setActionError({
           projectId,
-          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.queue')),
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.start')),
         });
       }
     } finally {
-      setQueueingTaskId((current) => (current === taskId ? null : current));
+      setStartingTaskId((current) => (current === taskId ? null : current));
     }
   }, [refreshRuntimeSnapshot, replaceTaskViewInCurrentProject, selectedTask, selectedTaskView, t]);
 
@@ -1055,6 +1087,108 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     t,
   ]);
 
+  const handleRequestReworkTask = useCallback(async () => {
+    if (
+      !selectedTask ||
+      !isOrchestratorTaskViewActionable(selectedTaskView) ||
+      !canRequestReworkForProject(selectedTask, activeProjectIdRef.current) ||
+      reworkingTaskId === selectedTask.id
+    ) {
+      return;
+    }
+    const reason = window
+      .prompt(
+        t('orchestrator:detail.requestReworkPrompt'),
+        latestVerifierEvidence?.content || t('orchestrator:detail.requestReworkDefaultReason'),
+      )
+      ?.trim();
+    if (!reason) return;
+    const taskId = selectedTask.id;
+    const projectId = selectedTask.projectId;
+    setReworkingTaskId(taskId);
+    setActionError(null);
+    try {
+      const updated = await orchestratorApi.requestReworkTaskView(projectId, taskId, reason);
+      const updatedProjectId = updated.origin === 'pendingRemote' ? null : updated.task.projectId;
+      if (
+        !orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId) ||
+        updatedProjectId !== projectId
+      ) {
+        return;
+      }
+      replaceTaskViewInCurrentProject(projectId, updated);
+      void refreshRuntimeSnapshot(projectId);
+      const items = await orchestratorApi.listEvidence(projectId, taskId);
+      if (activeProjectIdRef.current === projectId) {
+        setEvidenceResult({ projectId, taskId, items, error: null });
+      }
+    } catch (err) {
+      if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
+        setActionError({
+          projectId,
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.requestRework')),
+        });
+      }
+    } finally {
+      setReworkingTaskId((current) => (current === taskId ? null : current));
+    }
+  }, [
+    latestVerifierEvidence,
+    refreshRuntimeSnapshot,
+    replaceTaskViewInCurrentProject,
+    reworkingTaskId,
+    selectedTask,
+    selectedTaskView,
+    t,
+  ]);
+
+  const handleDeliverReviewedTask = useCallback(async () => {
+    if (
+      !selectedTask ||
+      !isOrchestratorTaskViewActionable(selectedTaskView) ||
+      !canDeliverReviewedTaskForProject(selectedTask, activeProjectIdRef.current) ||
+      deliveringTaskId === selectedTask.id
+    ) {
+      return;
+    }
+    const taskId = selectedTask.id;
+    const projectId = selectedTask.projectId;
+    setDeliveringTaskId(taskId);
+    setActionError(null);
+    try {
+      const updated = await orchestratorApi.deliverReviewedTaskView(projectId, taskId);
+      const updatedProjectId = updated.origin === 'pendingRemote' ? null : updated.task.projectId;
+      if (
+        !orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId) ||
+        updatedProjectId !== projectId
+      ) {
+        return;
+      }
+      replaceTaskViewInCurrentProject(projectId, updated);
+      void refreshRuntimeSnapshot(projectId);
+      const items = await orchestratorApi.listEvidence(projectId, taskId);
+      if (activeProjectIdRef.current === projectId) {
+        setEvidenceResult({ projectId, taskId, items, error: null });
+      }
+    } catch (err) {
+      if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
+        setActionError({
+          projectId,
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.deliver')),
+        });
+      }
+    } finally {
+      setDeliveringTaskId((current) => (current === taskId ? null : current));
+    }
+  }, [
+    deliveringTaskId,
+    refreshRuntimeSnapshot,
+    replaceTaskViewInCurrentProject,
+    selectedTask,
+    selectedTaskView,
+    t,
+  ]);
+
   const handleOpenWorkbench = useCallback(() => {
     const url = buildWorkbenchTaskUrl(selectedTask);
     if (onOpenWorkbench) {
@@ -1107,21 +1241,21 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     t,
   ]);
 
-  const handleAbortTask = useCallback(async () => {
+  const handleCancelTask = useCallback(async () => {
     if (
       !selectedTask ||
       !isOrchestratorTaskViewActionable(selectedTaskView) ||
-      !canControlBlockedTaskForProject(selectedTask, activeProjectIdRef.current) ||
-      abortingTaskId === selectedTask.id
+      !canCancelOrchestratorTaskForProject(selectedTask, activeProjectIdRef.current) ||
+      cancelingTaskId === selectedTask.id
     ) {
       return;
     }
     const taskId = selectedTask.id;
     const projectId = selectedTask.projectId;
-    setAbortingTaskId(taskId);
+    setCancelingTaskId(taskId);
     setActionError(null);
     try {
-      const updated = await orchestratorApi.abortTaskView(projectId, taskId);
+      const updated = await orchestratorApi.cancelTaskView(projectId, taskId);
       const updatedProjectId = updated.origin === 'pendingRemote' ? null : updated.task.projectId;
       if (
         !orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId) ||
@@ -1135,20 +1269,48 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
         setActionError({
           projectId,
-          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.abort')),
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.cancel')),
         });
       }
     } finally {
-      setAbortingTaskId((current) => (current === taskId ? null : current));
+      setCancelingTaskId((current) => (current === taskId ? null : current));
     }
   }, [
-    abortingTaskId,
+    cancelingTaskId,
     refreshRuntimeSnapshot,
     replaceTaskViewInCurrentProject,
     selectedTask,
     selectedTaskView,
     t,
   ]);
+
+  const handleRefreshProject = useCallback(async () => {
+    if (!activeProjectId || refreshingProjectId === activeProjectId) return;
+    const projectId = activeProjectId;
+    setRefreshingProjectId(projectId);
+    setActionError(null);
+    try {
+      await orchestratorApi.refreshProject(projectId);
+      const nextViews = await orchestratorApi.listTaskViews(projectId);
+      if (activeProjectIdRef.current !== projectId) return;
+      const nextSplit = splitOrchestratorTaskViews(nextViews);
+      setTaskListResult({ projectId, views: nextViews, error: null });
+      setSelectedTaskId((current) => {
+        if (current && nextSplit.tasks.some((item) => item.task.id === current)) return current;
+        return null;
+      });
+      void refreshRuntimeSnapshot(projectId);
+    } catch (err) {
+      if (activeProjectIdRef.current === projectId) {
+        setActionError({
+          projectId,
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.refresh')),
+        });
+      }
+    } finally {
+      setRefreshingProjectId((current) => (current === projectId ? null : current));
+    }
+  }, [activeProjectId, refreshRuntimeSnapshot, refreshingProjectId, t]);
 
   return (
     <div className={embedded ? styles.embedded : styles.page}>
@@ -1183,6 +1345,16 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
             <div className={styles.queueActions}>
               <Pill tone="neutral">{tasks.length + pendingRemoteItems.length}</Pill>
               <Button
+                variant="secondary"
+                size="sm"
+                icon={<SyncIcon />}
+                disabled={!activeProjectId}
+                loading={refreshingProjectId === activeProjectId}
+                onClick={handleRefreshProject}
+              >
+                {t('orchestrator:detail.refresh')}
+              </Button>
+              <Button
                 variant="primary"
                 size="sm"
                 icon={<PlusIcon />}
@@ -1198,50 +1370,173 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
               <div className={styles.snapshotBar}>
                 <div className={styles.snapshotHeader}>
                   <span className={styles.label}>{t('orchestrator:snapshot.title')}</span>
-                  {activeProjectKind === 'local' && activeRuntimeSnapshotResult?.loading ? (
-                    <Pill tone="accent">{t('orchestrator:snapshot.loading')}</Pill>
-                  ) : null}
+                  <div className={styles.snapshotActions}>
+                    {activeProjectKind === 'local' && activeRuntimeSnapshotResult?.loading ? (
+                      <Pill tone="accent">{t('orchestrator:snapshot.loading')}</Pill>
+                    ) : null}
+                    {activeProjectKind === 'local' ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        icon={<RefreshIcon />}
+                        disabled={activeRuntimeSnapshotResult?.loading ?? false}
+                        onClick={handleRefreshRuntimeSnapshot}
+                      >
+                        {t('orchestrator:snapshot.refresh')}
+                      </Button>
+                    ) : null}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={<SettingsIcon />}
+                      onClick={handleOpenAutomationSettings}
+                    >
+                      {t('orchestrator:snapshot.settings')}
+                    </Button>
+                  </div>
                 </div>
                 {activeProjectKind === 'local' ? (
                   <>
                     {activeRuntimeSnapshotResult?.snapshot ? (
-                      <div className={styles.snapshotItems}>
-                        <Pill
-                          tone={
-                            activeRuntimeSnapshotResult.snapshot.schedulerEnabled
-                              ? 'success'
-                              : 'warn'
-                          }
-                          dot
-                        >
-                          {activeRuntimeSnapshotResult.snapshot.schedulerEnabled
-                            ? t('orchestrator:snapshot.schedulerEnabled')
-                            : t('orchestrator:snapshot.schedulerDisabled')}
-                        </Pill>
-                        <Pill
-                          tone={
-                            activeRuntimeSnapshotResult.snapshot.workflowValid
-                              ? 'success'
-                              : 'danger'
-                          }
-                          dot
-                        >
-                          {activeRuntimeSnapshotResult.snapshot.workflowValid
-                            ? t('orchestrator:snapshot.workflowValid')
-                            : t('orchestrator:snapshot.workflowInvalid')}
-                        </Pill>
-                        <span className={styles.snapshotMetric}>
-                          {t('orchestrator:snapshot.slotsUsed', {
-                            used: activeRuntimeSnapshotResult.snapshot.slotsUsed,
-                            max: activeRuntimeSnapshotResult.snapshot.maxConcurrentTasks,
-                          })}
-                        </span>
-                        <span className={styles.snapshotMetric}>
-                          {t('orchestrator:snapshot.slotsAvailable', {
-                            available: activeRuntimeSnapshotResult.snapshot.slotsAvailable,
-                          })}
-                        </span>
-                      </div>
+                      <>
+                        <div className={styles.snapshotItems}>
+                          <Pill
+                            tone={
+                              activeRuntimeSnapshotResult.snapshot.schedulerEnabled
+                                ? 'success'
+                                : 'warn'
+                            }
+                            dot
+                          >
+                            {activeRuntimeSnapshotResult.snapshot.schedulerEnabled
+                              ? t('orchestrator:snapshot.schedulerEnabled')
+                              : t('orchestrator:snapshot.schedulerDisabled')}
+                          </Pill>
+                          <Pill
+                            tone={
+                              activeRuntimeSnapshotResult.snapshot.workflowValid
+                                ? 'success'
+                                : 'danger'
+                            }
+                            dot
+                          >
+                            {activeRuntimeSnapshotResult.snapshot.workflowValid
+                              ? t('orchestrator:snapshot.workflowValid')
+                              : t('orchestrator:snapshot.workflowInvalid')}
+                          </Pill>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.slotsUsed', {
+                              used: activeRuntimeSnapshotResult.snapshot.slotsUsed,
+                              max: activeRuntimeSnapshotResult.snapshot.maxConcurrentTasks,
+                            })}
+                          </span>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.slotsAvailable', {
+                              available: activeRuntimeSnapshotResult.snapshot.slotsAvailable,
+                            })}
+                          </span>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.runningCount', {
+                              count: activeRuntimeSnapshotResult.snapshot.runningTasks.length,
+                            })}
+                          </span>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.retryingCount', {
+                              count: activeRuntimeSnapshotResult.snapshot.retryingTasks.length,
+                            })}
+                          </span>
+                        </div>
+                        <div className={styles.snapshotMetaGrid}>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.generatedAt', {
+                              time: formatTaskTimestamp(
+                                activeRuntimeSnapshotResult.snapshot.generatedAt,
+                              ),
+                            })}
+                          </span>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.latestTickAt', {
+                              time: formatOptionalTaskTimestamp(
+                                activeRuntimeSnapshotResult.snapshot.latestTickAt,
+                                t('orchestrator:snapshot.latestTickUnknown'),
+                              ),
+                            })}
+                          </span>
+                          <span className={styles.snapshotMetric}>
+                            {t('orchestrator:snapshot.lastDispatchedCount', {
+                              count: activeRuntimeSnapshotResult.snapshot.lastDispatchedCount,
+                            })}
+                          </span>
+                        </div>
+                        {activeRuntimeSnapshotResult.snapshot.runningTasks.length > 0 ? (
+                          <section className={styles.snapshotSection}>
+                            <h3 className={styles.snapshotSectionTitle}>
+                              {t('orchestrator:snapshot.runningTasks')}
+                            </h3>
+                            <ul className={styles.snapshotList}>
+                              {activeRuntimeSnapshotResult.snapshot.runningTasks.map(
+                                (task: OrchestratorRuntimeTaskSummary) => (
+                                  <li className={styles.snapshotListItem} key={task.taskId}>
+                                    <span className={styles.snapshotItemTitle}>{task.title}</span>
+                                    <span className={styles.snapshotItemMeta}>
+                                      {t(RUN_STATE_LABEL_KEYS[task.runState])}
+                                      {task.attemptPhase
+                                        ? ` · ${t(ATTEMPT_PHASE_LABEL_KEYS[task.attemptPhase])}`
+                                        : ''}
+                                      {task.lastRuntimeMessage
+                                        ? ` · ${task.lastRuntimeMessage}`
+                                        : ''}
+                                    </span>
+                                  </li>
+                                ),
+                              )}
+                            </ul>
+                          </section>
+                        ) : null}
+                        {activeRuntimeSnapshotResult.snapshot.retryingTasks.length > 0 ? (
+                          <section className={styles.snapshotSection}>
+                            <h3 className={styles.snapshotSectionTitle}>
+                              {t('orchestrator:snapshot.retryingTasks')}
+                            </h3>
+                            <ul className={styles.snapshotList}>
+                              {activeRuntimeSnapshotResult.snapshot.retryingTasks.map(
+                                (task: OrchestratorRuntimeTaskSummary) => (
+                                  <li className={styles.snapshotListItem} key={task.taskId}>
+                                    <span className={styles.snapshotItemTitle}>{task.title}</span>
+                                    <span className={styles.snapshotItemMeta}>
+                                      {t(WORKFLOW_STATE_LABEL_KEYS[task.workflowState])}
+                                      {' · '}
+                                      {t(RUN_STATE_LABEL_KEYS[task.runState])}
+                                    </span>
+                                  </li>
+                                ),
+                              )}
+                            </ul>
+                          </section>
+                        ) : null}
+                        {activeRuntimeSnapshotResult.snapshot.recentEvents.length > 0 ? (
+                          <section className={styles.snapshotSection}>
+                            <h3 className={styles.snapshotSectionTitle}>
+                              {t('orchestrator:snapshot.recentEvents')}
+                            </h3>
+                            <ul className={styles.snapshotList}>
+                              {activeRuntimeSnapshotResult.snapshot.recentEvents.map(
+                                (event: OrchestratorRuntimeEvent) => (
+                                  <li className={styles.snapshotListItem} key={event.id}>
+                                    <span className={styles.snapshotItemTitle}>
+                                      {event.taskTitle}
+                                    </span>
+                                    <span className={styles.snapshotItemMeta}>
+                                      {event.kind} · {event.message} ·{' '}
+                                      {formatTaskTimestamp(event.createdAt)}
+                                    </span>
+                                  </li>
+                                ),
+                              )}
+                            </ul>
+                          </section>
+                        ) : null}
+                      </>
                     ) : null}
                     {activeRuntimeSnapshotResult?.snapshot?.workflowError ? (
                       <p className={styles.snapshotWarning}>
@@ -1410,66 +1705,66 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                 <div className={styles.taskDrawerContent}>
                   <div className={styles.detail}>
                     <Card variant="outlined" padding="md">
-            <Card.Header className={styles.cardHeader}>
-              <div>
-                <h2 className={styles.sectionTitle}>{t('orchestrator:detail.title')}</h2>
-                <p className={styles.sectionLead}>{t('orchestrator:detail.subtitle')}</p>
-              </div>
-              <div className={styles.detailActions}>
-                {selectedTaskCanQueue ? (
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    icon={<PlayIcon />}
-                    loading={queueingTaskId === selectedTask?.id}
-                    onClick={handleQueueSelectedTask}
-                  >
-                    {t('orchestrator:detail.queue')}
-                  </Button>
-                ) : null}
-                {selectedTaskCanComplete ? (
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    icon={<CheckIcon />}
-                    loading={completingTaskId === selectedTask?.id}
-                    onClick={handleCompleteAgentRun}
-                  >
-                    {t('orchestrator:detail.completeAgentRun')}
-                  </Button>
-                ) : null}
-                {selectedRenderableTask ? (
-                  <Pill
-                    tone={selectedRenderableTask.origin === 'remote' ? 'accent' : 'neutral'}
-                    dot
-                  >
-                    {selectedRenderableTask.origin === 'remote'
-                      ? t('orchestrator:detail.remoteTask', {
-                          deviceName:
-                            selectedRenderableTask.deviceName ??
-                            t('orchestrator:queue.unknownDevice'),
-                        })
-                      : t('orchestrator:detail.localTask')}
-                  </Pill>
-                ) : null}
-                {selectedTask ? (
-                  <Pill tone={orchestratorWorkflowStateTone(selectedTask.workflowState)} dot>
-                    {t(WORKFLOW_STATE_LABEL_KEYS[selectedTask.workflowState])}
-                  </Pill>
-                ) : null}
-                {selectedTask ? (
-                  <Pill tone={runStateTone(selectedTask.runState)} dot>
-                    {t(RUN_STATE_LABEL_KEYS[selectedTask.runState])}
-                  </Pill>
-                ) : null}
-                {selectedTask ? (
-                  <Pill tone={orchestratorStatusTone(selectedTask.status)} dot>
-                    {t(STATUS_LABEL_KEYS[selectedTask.status])}
-                  </Pill>
-                ) : null}
-              </div>
-            </Card.Header>
-            <Card.Body className={styles.detailBody}>
+                      <Card.Header className={styles.cardHeader}>
+                        <div>
+                          <h2 className={styles.sectionTitle}>{t('orchestrator:detail.title')}</h2>
+                          <p className={styles.sectionLead}>{t('orchestrator:detail.subtitle')}</p>
+                        </div>
+                        <div className={styles.detailActions}>
+                          {selectedTaskCanStart ? (
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              icon={<PlayIcon />}
+                              loading={startingTaskId === selectedTask?.id}
+                              onClick={handleStartSelectedTask}
+                            >
+                              {t('orchestrator:detail.start')}
+                            </Button>
+                          ) : null}
+                          {selectedTaskCanComplete ? (
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              icon={<CheckIcon />}
+                              loading={completingTaskId === selectedTask?.id}
+                              onClick={handleCompleteAgentRun}
+                            >
+                              {t('orchestrator:detail.completeAgentRun')}
+                            </Button>
+                          ) : null}
+                          {selectedRenderableTask ? (
+                            <Pill
+                              tone={selectedRenderableTask.origin === 'remote' ? 'accent' : 'neutral'}
+                              dot
+                            >
+                              {selectedRenderableTask.origin === 'remote'
+                                ? t('orchestrator:detail.remoteTask', {
+                                    deviceName:
+                                      selectedRenderableTask.deviceName ??
+                                      t('orchestrator:queue.unknownDevice'),
+                                  })
+                                : t('orchestrator:detail.localTask')}
+                            </Pill>
+                          ) : null}
+                          {selectedTask ? (
+                            <Pill tone={orchestratorWorkflowStateTone(selectedTask.workflowState)} dot>
+                              {t(WORKFLOW_STATE_LABEL_KEYS[selectedTask.workflowState])}
+                            </Pill>
+                          ) : null}
+                          {selectedTask ? (
+                            <Pill tone={runStateTone(selectedTask.runState)} dot>
+                              {t(RUN_STATE_LABEL_KEYS[selectedTask.runState])}
+                            </Pill>
+                          ) : null}
+                          {selectedTask ? (
+                            <Pill tone={orchestratorStatusTone(selectedTask.status)} dot>
+                              {t(STATUS_LABEL_KEYS[selectedTask.status])}
+                            </Pill>
+                          ) : null}
+                        </div>
+                      </Card.Header>
+                      <Card.Body className={styles.detailBody}>
               {selectedTask ? (
                 <>
                   <div className={styles.detailTitleRow}>
@@ -1658,34 +1953,66 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                       </ul>
                     </div>
                   ) : null}
-                  {selectedTaskCanControlBlocked ? (
+                  {selectedTaskCanOpenWorkbench ||
+                  selectedTaskCanControlBlocked ||
+                  selectedTaskCanRequestRework ||
+                  selectedTaskCanDeliver ||
+                  selectedTaskCanCancel ? (
                     <div className={styles.blockedControls}>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        icon={<FolderIcon />}
-                        onClick={handleOpenWorkbench}
-                      >
-                        {t('orchestrator:detail.openWorkbench')}
-                      </Button>
-                      <Button
-                        variant="primary"
-                        size="sm"
-                        icon={<SyncIcon />}
-                        loading={retryingTaskId === selectedTask.id}
-                        onClick={handleRetryTask}
-                      >
-                        {t('orchestrator:detail.retry')}
-                      </Button>
-                      <Button
-                        variant="danger"
-                        size="sm"
-                        icon={<StopIcon />}
-                        loading={abortingTaskId === selectedTask.id}
-                        onClick={handleAbortTask}
-                      >
-                        {t('orchestrator:detail.abort')}
-                      </Button>
+                      {selectedTaskCanOpenWorkbench ? (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          icon={<FolderIcon />}
+                          onClick={handleOpenWorkbench}
+                        >
+                          {t('orchestrator:detail.openWorkbench')}
+                        </Button>
+                      ) : null}
+                      {selectedTaskCanControlBlocked ? (
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          icon={<SyncIcon />}
+                          loading={retryingTaskId === selectedTask.id}
+                          onClick={handleRetryTask}
+                        >
+                          {t('orchestrator:detail.retry')}
+                        </Button>
+                      ) : null}
+                      {selectedTaskCanRequestRework ? (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          icon={<SyncIcon />}
+                          loading={reworkingTaskId === selectedTask.id}
+                          onClick={handleRequestReworkTask}
+                        >
+                          {t('orchestrator:detail.requestRework')}
+                        </Button>
+                      ) : null}
+                      {selectedTaskCanDeliver ? (
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          icon={<CheckIcon />}
+                          loading={deliveringTaskId === selectedTask.id}
+                          onClick={handleDeliverReviewedTask}
+                        >
+                          {t('orchestrator:detail.deliver')}
+                        </Button>
+                      ) : null}
+                      {selectedTaskCanCancel ? (
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          icon={<StopIcon />}
+                          loading={cancelingTaskId === selectedTask.id}
+                          onClick={handleCancelTask}
+                        >
+                          {t('orchestrator:detail.cancel')}
+                        </Button>
+                      ) : null}
                     </div>
                   ) : null}
                 </>

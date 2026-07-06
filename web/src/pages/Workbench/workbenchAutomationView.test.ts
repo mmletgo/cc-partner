@@ -48,6 +48,7 @@ async function main(): Promise<void> {
   const orchestratorSource = readFileSync(new URL('../Orchestrator/Orchestrator.tsx', import.meta.url), 'utf8');
   const orchestratorStyles = readFileSync(new URL('../Orchestrator/Orchestrator.module.css', import.meta.url), 'utf8');
   const orchestratorLibSource = readFileSync(new URL('../../lib/orchestrator.ts', import.meta.url), 'utf8');
+  const typesSource = readFileSync(new URL('../../lib/types.ts', import.meta.url), 'utf8');
   const appShellSource = readFileSync(
     new URL('../../components/layout/AppShell/AppShell.tsx', import.meta.url),
     'utf8',
@@ -254,6 +255,91 @@ async function main(): Promise<void> {
     orchestratorSource,
     'orchestratorApi.getRuntimeSnapshot(',
     'Orchestrator panel loads the local project runtime snapshot',
+  );
+  assertContains(
+    typesSource,
+    'latestTickAt: string | null;',
+    'runtime snapshot type includes scheduler latest tick time',
+  );
+  assertContains(
+    typesSource,
+    'runningTasks: OrchestratorRuntimeTaskSummary[];',
+    'runtime snapshot type includes running task summaries',
+  );
+  assertContains(
+    typesSource,
+    'retryingTasks: OrchestratorRuntimeTaskSummary[];',
+    'runtime snapshot type includes retrying task summaries',
+  );
+  assertContains(
+    typesSource,
+    'recentEvents: OrchestratorRuntimeEvent[];',
+    'runtime snapshot type includes recent scheduler/runner events',
+  );
+  assertContains(
+    typesSource,
+    "remoteStatus: 'local' | 'unsupported' | 'unavailable' | 'offline';",
+    'runtime snapshot type includes explicit local/remote status',
+  );
+  assertContains(
+    orchestratorSource,
+    "icon={<RefreshIcon />}",
+    'runtime snapshot status strip exposes a manual refresh button',
+  );
+  assertContains(
+    orchestratorSource,
+    "navigate('/settings?tab=automation');",
+    'runtime snapshot status strip links to Settings automation tab',
+  );
+  assertContains(
+    orchestratorSource,
+    'activeRuntimeSnapshotResult.snapshot.latestTickAt',
+    'runtime snapshot status strip renders latest scheduler tick time',
+  );
+  assertContains(
+    orchestratorSource,
+    'activeRuntimeSnapshotResult.snapshot.generatedAt',
+    'runtime snapshot status strip renders snapshot generated time',
+  );
+  assertContains(
+    orchestratorSource,
+    'activeRuntimeSnapshotResult.snapshot.runningTasks.length',
+    'runtime snapshot status strip renders running task count',
+  );
+  assertContains(
+    orchestratorSource,
+    'activeRuntimeSnapshotResult.snapshot.recentEvents.map',
+    'runtime snapshot status strip renders recent event summaries',
+  );
+  assertContains(
+    zhOrchestrator,
+    '"refresh": "刷新状态"',
+    'zh Orchestrator locale includes snapshot refresh copy',
+  );
+  assertContains(
+    enOrchestrator,
+    '"refresh": "Refresh status"',
+    'en Orchestrator locale includes snapshot refresh copy',
+  );
+  assertContains(
+    zhOrchestrator,
+    '"settings": "自动化设置"',
+    'zh Orchestrator locale includes Settings automation link copy',
+  );
+  assertContains(
+    enOrchestrator,
+    '"settings": "Automation settings"',
+    'en Orchestrator locale includes Settings automation link copy',
+  );
+  assertContains(
+    zhOrchestrator,
+    '"remoteUnavailable": "远端运行时快照暂不可用；请在所属设备查看自动化状态。"',
+    'zh Orchestrator locale uses explicit remote snapshot unavailable copy',
+  );
+  assertContains(
+    enOrchestrator,
+    '"remoteUnavailable": "Remote runtime snapshot is unavailable here. Open the owning device to inspect automation state."',
+    'en Orchestrator locale uses explicit remote snapshot unavailable copy',
   );
   assertNotContains(
     orchestratorSource,

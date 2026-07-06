@@ -8,7 +8,9 @@
 //!     定义 `/api/orchestrator/...` 远端路由请求与响应 DTO，统一使用 camelCase 序列化/反序列化。
 
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
-use crate::orchestrator::models::{OrchestratorEvidenceDto, OrchestratorTaskDto};
+use crate::orchestrator::models::{
+    OrchestratorCreateAction, OrchestratorEvidenceDto, OrchestratorTaskDto,
+};
 use serde::{Deserialize, Serialize};
 
 /// 远端创建 Orchestrator 任务请求体。
@@ -17,8 +19,8 @@ use serde::{Deserialize, Serialize};
 ///     本机 remote shortcut 创建任务时，实际任务必须创建在项目所属设备的本机 Orchestrator 队列中。
 ///
 /// Code Logic（这个结构体做什么）:
-///     保存远端 local projectId、标题、目标、验收标准、优先级、是否立即入队和幂等键，字段使用 camelCase。
-///     字段以 Option 解析，便于 route 返回统一业务错误；create route 会拒绝缺失或空白 key。
+///     保存远端 local projectId、标题、目标、验收标准、优先级、创建动作、幂等键和 tracker 预留字段，字段使用 camelCase。
+///     clientRequestId 以 Option 解析，便于 route 返回统一业务错误；create route 会拒绝缺失或空白 key。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteCreateOrchestratorTaskReq {
@@ -27,9 +29,22 @@ pub struct RemoteCreateOrchestratorTaskReq {
     pub goal: String,
     pub acceptance_criteria: String,
     pub priority: i64,
-    pub queue: bool,
+    #[serde(default)]
+    pub create_action: OrchestratorCreateAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_identifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_labels: Option<Vec<String>>,
 }
 
 /// 远端任务 ID 请求体。
@@ -43,6 +58,20 @@ pub struct RemoteCreateOrchestratorTaskReq {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteTaskReq {
     pub task_id: String,
+}
+
+/// 远端任务返工请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     用户在 remote shortcut 上请求返工时，原因必须记录在 owning device 的权威任务 evidence 中。
+///
+/// Code Logic（这个结构体做什么）:
+///     使用 camelCase 序列化 `{taskId, reason}`，供 client 与 axum route 共用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteTaskReworkReq {
+    pub task_id: String,
+    pub reason: String,
 }
 
 /// 远端任务列表请求体。
@@ -113,6 +142,20 @@ pub struct RemoteOrchestratorConfigResp {
     pub config: OrchestratorAutomationConfigDto,
 }
 
+/// 远端项目刷新响应。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     用户在 remote shortcut 上刷新项目时，需要知道 owning device 本次 best-effort 调度领取了多少任务。
+///
+/// Code Logic（这个结构体做什么）:
+///     包装 camelCase `{projectId, dispatched}`，projectId 为远端本机项目 id。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteOrchestratorProjectRefreshResp {
+    pub project_id: String,
+    pub dispatched: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,8 +177,14 @@ mod tests {
             goal: "目标".to_string(),
             acceptance_criteria: "验收".to_string(),
             priority: 7,
-            queue: true,
+            create_action: OrchestratorCreateAction::Todo,
             client_request_id: Some("request-1".to_string()),
+            source: Some("linear".to_string()),
+            external_id: Some("lin-123".to_string()),
+            external_identifier: Some("APP-123".to_string()),
+            external_url: Some("https://linear.app/team/issue/APP-123".to_string()),
+            external_state: Some("In Progress".to_string()),
+            external_labels: Some(vec!["frontend".to_string(), "p1".to_string()]),
         };
 
         let value = serde_json::to_value(req).expect("serialize request");
@@ -143,9 +192,15 @@ mod tests {
         assert_eq!(value["projectId"], "project-1");
         assert_eq!(value["acceptanceCriteria"], "验收");
         assert_eq!(value["priority"], 7);
-        assert_eq!(value["queue"], true);
+        assert_eq!(value["createAction"], "todo");
         assert_eq!(value["clientRequestId"], "request-1");
+        assert_eq!(value["externalState"], "In Progress");
+        assert_eq!(
+            value["externalLabels"],
+            serde_json::json!(["frontend", "p1"])
+        );
         assert!(value.get("project_id").is_none());
+        assert!(value.get("queue").is_none());
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -161,11 +216,32 @@ mod tests {
             "goal": "目标",
             "acceptanceCriteria": "验收",
             "priority": 1,
-            "queue": false
+            "createAction": "backlog"
         }))
         .expect("deserialize request");
 
         assert!(req.client_request_id.is_none());
+        assert_eq!(req.create_action, OrchestratorCreateAction::Backlog);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧移动端协议缺省不应再自动排队，避免创建弹窗未选择动作时直接启动任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化不含 createAction 的 JSON，断言协议默认值为 backlog。
+    #[test]
+    fn create_request_defaults_create_action_to_backlog() {
+        let req: RemoteCreateOrchestratorTaskReq = serde_json::from_value(serde_json::json!({
+            "projectId": "project-1",
+            "title": "任务",
+            "goal": "目标",
+            "acceptanceCriteria": "验收",
+            "priority": 1,
+            "clientRequestId": "request-1"
+        }))
+        .expect("deserialize request");
+
+        assert_eq!(req.create_action, OrchestratorCreateAction::Backlog);
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -191,6 +267,25 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     远端 requestRework 需要把返工原因写入 owning device，协议字段不能退回 snake_case 或遗漏 reason。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     序列化 RemoteTaskReworkReq，断言 taskId/reason 字段名稳定为 camelCase。
+    #[test]
+    fn rework_request_serializes_as_camel_case() {
+        let req = RemoteTaskReworkReq {
+            task_id: "task-1".to_string(),
+            reason: "需要补充验证证据".to_string(),
+        };
+
+        let value = serde_json::to_value(req).expect("serialize rework request");
+
+        assert_eq!(value["taskId"], "task-1");
+        assert_eq!(value["reason"], "需要补充验证证据");
+        assert!(value.get("task_id").is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     远端任务列表是 remote shortcut 后续展示的基础 payload，列表外层字段必须与客户端约定一致。
     ///
     /// Code Logic（这个测试做什么）:
@@ -206,6 +301,14 @@ mod tests {
         assert_eq!(value["tasks"][0]["projectId"], "project-1");
         assert_eq!(value["tasks"][0]["acceptanceCriteria"], "验收");
         assert_eq!(value["tasks"][0]["status"], "queued");
+        assert!(
+            value["tasks"][0].get("externalState").is_some(),
+            "externalState should stay in remote task payload"
+        );
+        assert!(
+            value["tasks"][0].get("externalLabels").is_some(),
+            "externalLabels should stay in remote task payload"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -250,6 +353,25 @@ mod tests {
         assert_eq!(value["config"]["maxConcurrentTasks"], 1);
         assert_eq!(value["config"]["autoPushMain"], true);
         assert!(value["config"].get("max_concurrent_tasks").is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     refreshOrchestratorProject 的远端响应需要让本机知道 owning device 本次领取了多少任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     序列化 RemoteOrchestratorProjectRefreshResp，断言 projectId/dispatched 字段为 camelCase。
+    #[test]
+    fn refresh_response_serializes_as_camel_case() {
+        let resp = RemoteOrchestratorProjectRefreshResp {
+            project_id: "project-1".to_string(),
+            dispatched: 2,
+        };
+
+        let value = serde_json::to_value(resp).expect("serialize refresh response");
+
+        assert_eq!(value["projectId"], "project-1");
+        assert_eq!(value["dispatched"], 2);
+        assert!(value.get("project_id").is_none());
     }
 
     /// Business Logic（为什么需要这个函数）:

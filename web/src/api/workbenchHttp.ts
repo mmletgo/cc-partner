@@ -9,6 +9,7 @@
  */
 
 import type {
+  OrchestratorEvidence,
   OrchestratorTask,
   OrchestratorTaskPromptCompletion,
   OrchestratorTaskView,
@@ -24,7 +25,10 @@ import type {
   WorkbenchWorktree,
 } from '@/lib/types';
 import type { WorkbenchPaneSplitDirection } from './workbench';
+import type { OrchestratorCreateAction } from './orchestrator';
 import type { WorkbenchTransport } from './workbenchTransport';
+
+export type HttpCreateOrchestratorTaskAction = OrchestratorCreateAction;
 
 export interface HttpCreateOrchestratorTaskRequest {
   projectId: string;
@@ -32,6 +36,13 @@ export interface HttpCreateOrchestratorTaskRequest {
   goal: string;
   acceptanceCriteria: string;
   priority?: number;
+  createAction?: HttpCreateOrchestratorTaskAction;
+  source?: string;
+  externalId?: string;
+  externalIdentifier?: string;
+  externalUrl?: string;
+  externalState?: string;
+  externalLabels?: string[];
 }
 
 export interface HttpCompleteOrchestratorTaskPromptRequest {
@@ -46,6 +57,10 @@ interface HttpOrchestratorTaskListResponse {
 
 interface HttpOrchestratorTaskViewListResponse {
   views: OrchestratorTaskView[];
+}
+
+interface HttpOrchestratorEvidenceListResponse {
+  evidence: OrchestratorEvidence[];
 }
 
 const MOBILE_WORKBENCH_API_PREFIX = '/api/mobile/workbench';
@@ -152,7 +167,8 @@ export function createHttpOrchestratorClientRequestId(): string {
  *   手机端 `/mobile` 需要通过同源 HTTP 操作当前本机项目的 Orchestrator 项目级任务，而不能调用桌面 Tauri invoke。
  *
  * Code Logic（这个常量做什么）:
- *   将任务 list/create/action 映射到 `/api/orchestrator/tasks/...` routes；create 默认携带 queue=true 和非空 clientRequestId。
+ *   将任务 list/create/action/evidence 映射到 `/api/orchestrator/tasks/...` routes；create/createView 显式携带
+ *   createAction、tracker 预留字段和非空 clientRequestId。
  */
 export const httpOrchestratorTransport = {
   tasks: {
@@ -177,7 +193,13 @@ export const httpOrchestratorTransport = {
         goal: request.goal,
         acceptanceCriteria: request.acceptanceCriteria,
         priority: request.priority ?? 0,
-        queue: true,
+        createAction: request.createAction ?? 'backlog',
+        source: request.source,
+        externalId: request.externalId,
+        externalIdentifier: request.externalIdentifier,
+        externalUrl: request.externalUrl,
+        externalState: request.externalState,
+        externalLabels: request.externalLabels,
         clientRequestId: createHttpOrchestratorClientRequestId(),
       }),
     createView: (request: HttpCreateOrchestratorTaskRequest): Promise<OrchestratorTaskView> =>
@@ -187,7 +209,13 @@ export const httpOrchestratorTransport = {
         goal: request.goal,
         acceptanceCriteria: request.acceptanceCriteria,
         priority: request.priority ?? 0,
-        queue: true,
+        createAction: request.createAction ?? 'backlog',
+        source: request.source,
+        externalId: request.externalId,
+        externalIdentifier: request.externalIdentifier,
+        externalUrl: request.externalUrl,
+        externalState: request.externalState,
+        externalLabels: request.externalLabels,
         clientRequestId: createHttpOrchestratorClientRequestId(),
       }),
     completePrompt: (
@@ -204,6 +232,13 @@ export const httpOrchestratorTransport = {
       postJson<OrchestratorTask>('/api/orchestrator/tasks/retry', { taskId }),
     abort: (taskId: string): Promise<OrchestratorTask> =>
       postJson<OrchestratorTask>('/api/orchestrator/tasks/abort', { taskId }),
+    listEvidence: async (projectId: string, taskId: string): Promise<OrchestratorEvidence[]> => {
+      const response = await postJson<HttpOrchestratorEvidenceListResponse>(
+        '/api/orchestrator/tasks/evidence',
+        { projectId, taskId },
+      );
+      return response.evidence;
+    },
   },
 } as const;
 

@@ -5,24 +5,28 @@
 use crate::error::AppError;
 use crate::orchestrator::claude_runtime::ClaudeRuntimeSummary;
 use crate::orchestrator::models::{
-    OrchestratorAttemptPhase, OrchestratorEvidenceDto, OrchestratorProjectConfigDto,
-    OrchestratorRunState, OrchestratorTaskAttemptRow, OrchestratorTaskRow, OrchestratorTaskStatus,
-    OrchestratorWorkflowState, SplitTaskState,
+    OrchestratorAttemptPhase, OrchestratorCreateAction, OrchestratorEvidenceDto,
+    OrchestratorProjectConfigDto, OrchestratorRunState, OrchestratorTaskAttemptRow,
+    OrchestratorTaskRow, OrchestratorTaskStatus, OrchestratorWorkflowState, SplitTaskState,
+    EVIDENCE_KIND_REPAIR_PROMPT,
 };
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
 };
+use crate::orchestrator::workflow::resolve_project_workflow;
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
+use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 
 const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_criteria, status, priority, \
     workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
-    external_url, runner_provider, claude_session_id, transcript_path, runtime_started_at, \
-    last_activity_at, last_runtime_event, last_runtime_message, branch_name, worktree_id, \
-    session_id, blocked_reason, attempt, created_at, updated_at, started_at, finished_at";
+    external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
+    transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
+    last_runtime_message, branch_name, worktree_id, session_id, blocked_reason, attempt, \
+    created_at, updated_at, started_at, finished_at";
 const WORKFLOW_LANE_ORDER: [OrchestratorWorkflowState; 8] = [
     OrchestratorWorkflowState::Backlog,
     OrchestratorWorkflowState::Todo,
@@ -87,6 +91,8 @@ pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestra
   external_id TEXT,
   external_identifier TEXT,
   external_url TEXT,
+  external_state TEXT,
+  external_labels_json TEXT,
   runner_provider TEXT,
   claude_session_id TEXT,
   transcript_path TEXT,
@@ -144,6 +150,23 @@ pub const ORCHESTRATOR_EVENT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestr
 const ORCHESTRATOR_TASK_EVENTS_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_orchestrator_task_events_task \
      ON orchestrator_task_events(task_id, created_at)";
+
+/// Orchestrator 最近事件查询行。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     runtime snapshot 状态条需要展示当前项目最近 scheduler/runner 事件，帮助用户理解任务推进过程。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 event 表字段和 join 得到的任务标题，供命令层投影为前端 DTO。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestratorRecentEventRow {
+    pub id: String,
+    pub task_id: String,
+    pub task_title: String,
+    pub kind: String,
+    pub message: String,
+    pub created_at: String,
+}
 
 pub const ORCHESTRATOR_EVIDENCE_SCHEMA: &str =
     "CREATE TABLE IF NOT EXISTS orchestrator_task_evidence (
@@ -281,6 +304,8 @@ impl OrchestratorRepo {
         ensure_column(pool, "orchestrator_tasks", "external_id", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "external_identifier", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "external_url", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "external_state", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "external_labels_json", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "runner_provider", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "claude_session_id", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "transcript_path", "TEXT").await?;
@@ -321,14 +346,16 @@ impl OrchestratorRepo {
     /// Code Logic（这个函数做什么）:
     ///     将调用方传入的 OrchestratorTaskRow 全字段插入 orchestrator_tasks，不改写业务字段。
     pub async fn create_task(&self, row: &OrchestratorTaskRow) -> Result<(), AppError> {
+        let external_labels_json = serialize_external_labels(&row.external_labels)?;
         sqlx::query(
             "INSERT INTO orchestrator_tasks \
              (id, project_id, title, goal, acceptance_criteria, status, priority, branch_name, \
               workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
-              external_url, runner_provider, claude_session_id, transcript_path, runtime_started_at, \
-              last_activity_at, last_runtime_event, last_runtime_message, worktree_id, session_id, \
-              blocked_reason, attempt, created_at, updated_at, started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
+              transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
+              last_runtime_message, worktree_id, session_id, blocked_reason, attempt, created_at, \
+              updated_at, started_at, finished_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.project_id)
@@ -345,6 +372,8 @@ impl OrchestratorRepo {
         .bind(&row.external_id)
         .bind(&row.external_identifier)
         .bind(&row.external_url)
+        .bind(&row.external_state)
+        .bind(&external_labels_json)
         .bind(&row.runner_provider)
         .bind(&row.claude_session_id)
         .bind(&row.transcript_path)
@@ -370,15 +399,17 @@ impl OrchestratorRepo {
     ///     仓储必须把 requestId->taskId 与任务创建放在同一事务中，避免重复任务。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在事务内先尝试登记非空 client_request_id；已存在则返回既有 task。首次登记后插入任务，
-    ///     queue=true 时在同一事务内执行 Draft->Queued 更新，最后读取并返回完整 Row。
+    ///     在事务内先尝试登记非空 client_request_id；已存在则返回既有 task。首次登记后按 createAction
+    ///     映射 legacy/split state 并插入任务，最后读取并返回完整 Row。
     pub async fn create_remote_task_idempotent(
         &self,
         client_request_id: Option<&str>,
         row: &OrchestratorTaskRow,
-        queue: bool,
+        create_action: OrchestratorCreateAction,
     ) -> Result<OrchestratorTaskRow, AppError> {
         let client_request_id = client_request_id.and_then(non_empty_trimmed);
+        let row_to_insert = task_row_for_create_action(row, create_action);
+        let external_labels_json = serialize_external_labels(&row_to_insert.external_labels)?;
         let mut tx = self.pool.begin().await?;
 
         if let Some(request_id) = client_request_id {
@@ -406,7 +437,7 @@ impl OrchestratorRepo {
                  (request_id, task_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
             )
             .bind(request_id)
-            .bind(&row.id)
+            .bind(&row_to_insert.id)
             .bind(&now)
             .bind(&now)
             .execute(&mut *tx)
@@ -434,67 +465,51 @@ impl OrchestratorRepo {
             "INSERT INTO orchestrator_tasks \
              (id, project_id, title, goal, acceptance_criteria, status, priority, branch_name, \
               workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
-              external_url, runner_provider, claude_session_id, transcript_path, runtime_started_at, \
-              last_activity_at, last_runtime_event, last_runtime_message, worktree_id, session_id, \
-              blocked_reason, attempt, created_at, updated_at, started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
+              transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
+              last_runtime_message, worktree_id, session_id, blocked_reason, attempt, created_at, \
+              updated_at, started_at, finished_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(&row.id)
-        .bind(&row.project_id)
-        .bind(&row.title)
-        .bind(&row.goal)
-        .bind(&row.acceptance_criteria)
-        .bind(row.status.as_str())
-        .bind(row.priority)
-        .bind(&row.branch_name)
-        .bind(row.workflow_state.as_str())
-        .bind(row.run_state.as_str())
-        .bind(row.attempt_phase.map(OrchestratorAttemptPhase::as_str))
-        .bind(&row.source)
-        .bind(&row.external_id)
-        .bind(&row.external_identifier)
-        .bind(&row.external_url)
-        .bind(&row.runner_provider)
-        .bind(&row.claude_session_id)
-        .bind(&row.transcript_path)
-        .bind(&row.runtime_started_at)
-        .bind(&row.last_activity_at)
-        .bind(&row.last_runtime_event)
-        .bind(&row.last_runtime_message)
-        .bind(&row.worktree_id)
-        .bind(&row.session_id)
-        .bind(&row.blocked_reason)
-        .bind(row.attempt)
-        .bind(&row.created_at)
-        .bind(&row.updated_at)
-        .bind(&row.started_at)
-        .bind(&row.finished_at)
+        .bind(&row_to_insert.id)
+        .bind(&row_to_insert.project_id)
+        .bind(&row_to_insert.title)
+        .bind(&row_to_insert.goal)
+        .bind(&row_to_insert.acceptance_criteria)
+        .bind(row_to_insert.status.as_str())
+        .bind(row_to_insert.priority)
+        .bind(&row_to_insert.branch_name)
+        .bind(row_to_insert.workflow_state.as_str())
+        .bind(row_to_insert.run_state.as_str())
+        .bind(row_to_insert.attempt_phase.map(OrchestratorAttemptPhase::as_str))
+        .bind(&row_to_insert.source)
+        .bind(&row_to_insert.external_id)
+        .bind(&row_to_insert.external_identifier)
+        .bind(&row_to_insert.external_url)
+        .bind(&row_to_insert.external_state)
+        .bind(&external_labels_json)
+        .bind(&row_to_insert.runner_provider)
+        .bind(&row_to_insert.claude_session_id)
+        .bind(&row_to_insert.transcript_path)
+        .bind(&row_to_insert.runtime_started_at)
+        .bind(&row_to_insert.last_activity_at)
+        .bind(&row_to_insert.last_runtime_event)
+        .bind(&row_to_insert.last_runtime_message)
+        .bind(&row_to_insert.worktree_id)
+        .bind(&row_to_insert.session_id)
+        .bind(&row_to_insert.blocked_reason)
+        .bind(row_to_insert.attempt)
+        .bind(&row_to_insert.created_at)
+        .bind(&row_to_insert.updated_at)
+        .bind(&row_to_insert.started_at)
+        .bind(&row_to_insert.finished_at)
         .execute(&mut *tx)
         .await?;
-
-        if queue {
-            let now = Utc::now().to_rfc3339();
-            let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Queued);
-            sqlx::query(
-                "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
-                 WHERE id = ? AND status = ?",
-            )
-            .bind(OrchestratorTaskStatus::Queued.as_str())
-            .bind(split_state.workflow_state.as_str())
-            .bind(split_state.run_state.as_str())
-            .bind(Option::<&str>::None)
-            .bind(now)
-            .bind(&row.id)
-            .bind(OrchestratorTaskStatus::Draft.as_str())
-            .execute(&mut *tx)
-            .await?;
-        }
 
         let task_row = sqlx::query(&format!(
             "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
         ))
-        .bind(&row.id)
+        .bind(&row_to_insert.id)
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -510,9 +525,9 @@ impl OrchestratorRepo {
         &self,
         client_request_id: &str,
         row: &OrchestratorTaskRow,
-        queue: bool,
+        create_action: OrchestratorCreateAction,
     ) -> Result<OrchestratorTaskRow, AppError> {
-        self.create_remote_task_idempotent(Some(client_request_id), row, queue)
+        self.create_remote_task_idempotent(Some(client_request_id), row, create_action)
             .await
     }
 
@@ -678,6 +693,106 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     runtime snapshot 需要展示当前仍占用执行槽位的任务摘要，避免用户只能看到槽位数字。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 project_id 查询 Preparing/Running/Verifying/Delivering run_state 的任务，按更新时间倒序限制数量。
+    pub async fn list_active_runtime_tasks_for_project(
+        &self,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<Vec<OrchestratorTaskRow>, AppError> {
+        let limit = limit.clamp(0, 50);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(&format!(
+            "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
+             WHERE project_id = ? AND run_state IN (?, ?, ?, ?) \
+             ORDER BY updated_at DESC, priority DESC, created_at ASC LIMIT ?"
+        ))
+        .bind(project_id)
+        .bind(OrchestratorRunState::Preparing.as_str())
+        .bind(OrchestratorRunState::Running.as_str())
+        .bind(OrchestratorRunState::Verifying.as_str())
+        .bind(OrchestratorRunState::Delivering.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_task).collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     runtime snapshot 需要突出需要重试或返工的任务，让用户能从状态条直接看到阻塞队列。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查询 workflow_state=Rework 或 run_state=Retrying/Blocked 的任务，按更新时间倒序限制数量。
+    pub async fn list_retrying_runtime_tasks_for_project(
+        &self,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<Vec<OrchestratorTaskRow>, AppError> {
+        let limit = limit.clamp(0, 50);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(&format!(
+            "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
+             WHERE project_id = ? \
+               AND (workflow_state = ? OR run_state IN (?, ?)) \
+             ORDER BY updated_at DESC, priority DESC, created_at ASC LIMIT ?"
+        ))
+        .bind(project_id)
+        .bind(OrchestratorWorkflowState::Rework.as_str())
+        .bind(OrchestratorRunState::Retrying.as_str())
+        .bind(OrchestratorRunState::Blocked.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_task).collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     runtime snapshot 状态条需要展示当前项目最近的 scheduler/runner 事件，而不是让前端遍历全量任务事件。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     join task_events 与 tasks 过滤 project_id，按事件 created_at/id 倒序取最近 limit 条。
+    pub async fn list_recent_events_for_project(
+        &self,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<Vec<OrchestratorRecentEventRow>, AppError> {
+        let limit = limit.clamp(0, 50);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT event.id, event.task_id, task.title AS task_title, \
+                    event.kind, event.message, event.created_at \
+             FROM orchestrator_task_events event \
+             INNER JOIN orchestrator_tasks task ON task.id = event.task_id \
+             WHERE task.project_id = ? \
+             ORDER BY event.created_at DESC, event.id DESC LIMIT ?",
+        )
+        .bind(project_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(OrchestratorRecentEventRow {
+                    id: row.try_get("id")?,
+                    task_id: row.try_get("task_id")?,
+                    task_title: row.try_get("task_title")?,
+                    kind: row.try_get("kind")?,
+                    message: row.try_get("message")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     Phase 3 的调度容量属于本设备全局配置，必须统计所有本机 local Workbench 项目的执行中任务。
     ///     远端项目只是快捷方式，不能占用或触发本机 Runner 容量。
     ///
@@ -780,12 +895,12 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     全局 scheduler 一次 tick 需要按设备级剩余容量，在所有本机 local Workbench 项目中领取可执行泳道任务。
-    ///     remote 项目必须跳过，避免本机在远端快捷方式上创建 worktree/terminal。
+    ///     全局 scheduler 一次 tick 需要按设备级剩余容量，在所有本机 local Workbench 项目中领取项目 workflow 允许的活跃泳道任务。
+    ///     remote 项目必须跳过；项目 WORKFLOW.md 无效时不能把该项目任务提前 claim 到 Preparing。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在单个事务内完成 active local run_state 计数、剩余容量计算、Todo/Rework 选择和 Preparing 条件更新。
-    ///     最多领取 limit-active 个任务，排序保持 priority DESC, created_at ASC；limit<=0 或容量已满返回空 Vec。
+    ///     在单个事务内完成 active local run_state 计数、剩余容量计算、idle/blocked 候选读取和 Preparing 条件更新。
+    ///     每个候选按 Workbench 项目 path 动态解析 WORKFLOW.md，使用 ResolvedWorkflow.active_states 判断是否可领取。
     pub async fn claim_next_local_queued_tasks_with_global_capacity(
         &self,
         limit: i64,
@@ -820,29 +935,50 @@ impl OrchestratorRepo {
                SELECT task.id FROM orchestrator_tasks task \
                INNER JOIN workbench_projects project ON project.id = task.project_id \
                WHERE project.kind = 'local' \
-                 AND task.workflow_state IN (?, ?) \
                  AND task.run_state IN (?, ?) \
-               ORDER BY task.priority DESC, task.created_at ASC LIMIT ?\
+               ORDER BY task.priority DESC, task.created_at ASC\
              ) \
              ORDER BY priority DESC, created_at ASC"
         ))
-        .bind(OrchestratorWorkflowState::Todo.as_str())
-        .bind(OrchestratorWorkflowState::Rework.as_str())
         .bind(OrchestratorRunState::Idle.as_str())
         .bind(OrchestratorRunState::Blocked.as_str())
-        .bind(remaining)
         .fetch_all(&mut *tx)
         .await?;
 
         let mut claimed = Vec::new();
         for row in selected {
+            if claimed.len() >= remaining as usize {
+                break;
+            }
             let task_id: String = row.try_get("id")?;
+            let project_id: String = row.try_get("project_id")?;
+            let candidate = row_to_task(&row)?;
+            let project_path =
+                sqlx::query("SELECT path FROM workbench_projects WHERE id = ? AND kind = 'local'")
+                    .bind(&project_id)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .try_get::<String, _>("path")?;
+            let workflow = match resolve_project_workflow(Path::new(&project_path)) {
+                Ok(workflow) => workflow,
+                Err(err) => {
+                    tracing::warn!(
+                        project_id = %project_id,
+                        project_path = %project_path,
+                        "跳过无效 WORKFLOW.md 项目的 Orchestrator dispatch: {err}"
+                    );
+                    continue;
+                }
+            };
+            if !workflow.active_states.contains(&candidate.workflow_state) {
+                continue;
+            }
             let now = Utc::now().to_rfc3339();
             let result = sqlx::query(
                 "UPDATE orchestrator_tasks \
                  SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, updated_at = ? \
                  WHERE id = ? \
-                   AND workflow_state IN (?, ?) \
+                   AND workflow_state = ? \
                    AND run_state IN (?, ?)",
             )
             .bind(OrchestratorTaskStatus::Preparing.as_str())
@@ -852,8 +988,7 @@ impl OrchestratorRepo {
             .bind(Option::<&str>::None)
             .bind(now)
             .bind(&task_id)
-            .bind(OrchestratorWorkflowState::Todo.as_str())
-            .bind(OrchestratorWorkflowState::Rework.as_str())
+            .bind(candidate.workflow_state.as_str())
             .bind(OrchestratorRunState::Idle.as_str())
             .bind(OrchestratorRunState::Blocked.as_str())
             .execute(&mut *tx)
@@ -1334,6 +1469,7 @@ impl OrchestratorRepo {
     /// Code Logic（这个函数做什么）:
     ///     执行 `UPDATE ... WHERE id=? AND status=?`，命中时按调用方传入的 split state 与 attempt phase 更新；
     ///     未命中时确认任务仍存在并返回 None，避免迟到 verifier 覆盖 Abort 或其它并发状态。
+    #[allow(clippy::too_many_arguments)]
     pub async fn try_transition_task_split_state(
         &self,
         task_id: &str,
@@ -1489,6 +1625,206 @@ impl OrchestratorRepo {
             "只有草稿任务可以入队，当前状态为 {}",
             current.status.as_str()
         )))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 startTask 动作只负责把 Backlog/Draft 或 Todo/Idle 任务放入 scheduler 可领取路径，
+    ///     后续是否立即启动 Runner 交给调度器按全局开关和容量 best-effort 决定。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先读取当前任务并校验允许的 split state；通过后用 status/workflow/run 三字段 CAS 写为 Queued + Todo/Idle，
+    ///     清空 blocked_reason 和 attempt_phase，保留 worktree/session/evidence。
+    pub async fn start_task(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
+        let current = self.get_task(task_id).await?;
+        let can_start_from_backlog =
+            current.status == OrchestratorTaskStatus::Draft
+                && current.workflow_state == OrchestratorWorkflowState::Backlog
+                && current.run_state == OrchestratorRunState::Idle;
+        let can_start_from_todo =
+            current.workflow_state == OrchestratorWorkflowState::Todo
+                && current.run_state == OrchestratorRunState::Idle;
+        if !can_start_from_backlog && !can_start_from_todo {
+            return Err(AppError::generic(format!(
+                "只有待整理草稿或待办空闲任务可以开始，当前 workflow={}, run={}, status={}",
+                current.workflow_state.as_str(),
+                current.run_state.as_str(),
+                current.status.as_str()
+            )));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                 blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ? AND workflow_state = ? AND run_state = ?",
+        )
+        .bind(OrchestratorTaskStatus::Queued.as_str())
+        .bind(OrchestratorWorkflowState::Todo.as_str())
+        .bind(OrchestratorRunState::Idle.as_str())
+        .bind(Option::<&str>::None)
+        .bind(Option::<&str>::None)
+        .bind(now)
+        .bind(&current.id)
+        .bind(current.status.as_str())
+        .bind(current.workflow_state.as_str())
+        .bind(current.run_state.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(&current.id).await;
+        }
+
+        self.get_task(&current.id).await?;
+        Err(AppError::generic("任务状态已变化，请刷新后重试"))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     人工复核未通过时，用户需要显式 requestRework 并留下原因，后续 scheduler 才能在同一现场继续领取任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅允许 legacy Done + workflow HumanReview + run Idle 的任务进入 Queued + Rework/Idle；
+    ///     写入 repairPrompt evidence 和 rework event，保留 worktree/session/runtime 字段。
+    pub async fn request_task_rework(
+        &self,
+        task_id: &str,
+        reason: &str,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(AppError::generic("返工原因不能为空"));
+        }
+        let current = self.get_task(task_id).await?;
+        if current.status != OrchestratorTaskStatus::Done
+            || current.workflow_state != OrchestratorWorkflowState::HumanReview
+            || current.run_state != OrchestratorRunState::Idle
+        {
+            return Err(AppError::generic(format!(
+                "只有人工复核中的任务可以请求返工，当前 workflow={}, run={}, status={}",
+                current.workflow_state.as_str(),
+                current.run_state.as_str(),
+                current.status.as_str()
+            )));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                 blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ? AND workflow_state = ? AND run_state = ?",
+        )
+        .bind(OrchestratorTaskStatus::Queued.as_str())
+        .bind(OrchestratorWorkflowState::Rework.as_str())
+        .bind(OrchestratorRunState::Idle.as_str())
+        .bind(OrchestratorAttemptPhase::Failed.as_str())
+        .bind(Option::<&str>::None)
+        .bind(now)
+        .bind(&current.id)
+        .bind(OrchestratorTaskStatus::Done.as_str())
+        .bind(OrchestratorWorkflowState::HumanReview.as_str())
+        .bind(OrchestratorRunState::Idle.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() != 1 {
+            self.get_task(&current.id).await?;
+            return Err(AppError::generic("任务状态已变化，请刷新后重试"));
+        }
+
+        self.add_evidence(
+            &current.id,
+            EVIDENCE_KIND_REPAIR_PROMPT,
+            "人工返工原因",
+            "failed",
+            reason,
+        )
+        .await?;
+        self.add_event(&current.id, "rework", reason, None).await?;
+        self.get_task(&current.id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 deliverReviewedTask 只能从人工复核泳道取得交付执行权，避免普通完成态被误送入 Git side effect pipeline。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅允许 legacy Done + workflow HumanReview + run Idle 原子切到 Delivering + Merging/Delivering；
+    ///     不清理 worktree/session，后续由 delivery pipeline 在 per-task lock 内处理 Git 阶段。
+    pub async fn start_delivery_from_human_review(
+        &self,
+        task_id: &str,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        let current = self.get_task(task_id).await?;
+        if current.status != OrchestratorTaskStatus::Done
+            || current.workflow_state != OrchestratorWorkflowState::HumanReview
+            || current.run_state != OrchestratorRunState::Idle
+        {
+            return Err(AppError::generic(format!(
+                "只有人工复核中的任务可以交付，当前 workflow={}, run={}, status={}",
+                current.workflow_state.as_str(),
+                current.run_state.as_str(),
+                current.status.as_str()
+            )));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                 blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ? AND workflow_state = ? AND run_state = ?",
+        )
+        .bind(OrchestratorTaskStatus::Delivering.as_str())
+        .bind(OrchestratorWorkflowState::Merging.as_str())
+        .bind(OrchestratorRunState::Delivering.as_str())
+        .bind(Option::<&str>::None)
+        .bind(Option::<&str>::None)
+        .bind(now)
+        .bind(&current.id)
+        .bind(OrchestratorTaskStatus::Done.as_str())
+        .bind(OrchestratorWorkflowState::HumanReview.as_str())
+        .bind(OrchestratorRunState::Idle.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(&current.id).await;
+        }
+
+        self.get_task(&current.id).await?;
+        Err(AppError::generic("任务状态已变化，请刷新后重试"))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 cancelTask 表示用户不再希望任务继续被 scheduler 或 delivery 接管，但仍要保留现场和证据供人工审计。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 legacy status 写为 Aborted、split state 写为 Canceled/Idle，清空 blocked_reason 和 attempt_phase；
+    ///     不修改 branch/worktree/session/runtime/evidence 字段。
+    pub async fn cancel_task(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                 blocked_reason = ?, updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(OrchestratorTaskStatus::Aborted.as_str())
+        .bind(OrchestratorWorkflowState::Canceled.as_str())
+        .bind(OrchestratorRunState::Idle.as_str())
+        .bind(Option::<&str>::None)
+        .bind(Option::<&str>::None)
+        .bind(now)
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(task_id).await;
+        }
+
+        self.get_task(task_id).await
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1982,6 +2318,7 @@ impl OrchestratorRepo {
     /// Code Logic（这个函数做什么）:
     ///     在单个 SQLite 事务里仅对 status=sending 的 item 写 mirrored/sent_at/remote_task_id/remote_project_id，
     ///     并按 `(device_id, remote_task_id)` upsert mirror；状态不再是 sending 时返回 None 且不覆盖。
+    #[allow(clippy::too_many_arguments)]
     pub async fn mark_remote_outbox_mirrored_and_upsert_mirror_if_sending(
         &self,
         item_id: &str,
@@ -2289,6 +2626,37 @@ async fn normalize_queued_split_state(pool: &SqlitePool) -> Result<(), AppError>
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     tracker 标签是预留给外部系统的结构化数组，写库时必须保持稳定 JSON array，避免后续 mirror/outbox 解析歧义。
+///
+/// Code Logic（这个函数做什么）:
+///     将 Option<Vec<String>> 序列化为 Option<String>；None 存 NULL，Some 始终存紧凑 JSON array。
+fn serialize_external_labels(labels: &Option<Vec<String>>) -> Result<Option<String>, AppError> {
+    labels
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(AppError::from)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     旧库和 mixed-version remote 可能没有 tracker 标签；读取时需要安全回退为 None，同时拒绝损坏的非数组值。
+///
+/// Code Logic（这个函数做什么）:
+///     将 external_labels_json 的 TEXT/NULL 转为 Option<Vec<String>>；NULL 或空白字符串返回 None。
+fn deserialize_external_labels(
+    labels_json: Option<String>,
+) -> Result<Option<Vec<String>>, AppError> {
+    let Some(raw) = labels_json else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_str::<Vec<String>>(trimmed)?))
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     多个查询都需要把 SQLite 行转换成任务 Row，统一解析可避免字段遗漏和状态字符串散落。
 ///
 /// Code Logic（这个函数做什么）:
@@ -2298,6 +2666,7 @@ fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppError> {
     let workflow_state_text: String = row.try_get("workflow_state")?;
     let run_state_text: String = row.try_get("run_state")?;
     let attempt_phase_text: Option<String> = row.try_get("attempt_phase")?;
+    let external_labels_json: Option<String> = row.try_get("external_labels_json")?;
     Ok(OrchestratorTaskRow {
         id: row.try_get("id")?,
         project_id: row.try_get("project_id")?,
@@ -2315,6 +2684,8 @@ fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppError> {
         external_id: row.try_get("external_id")?,
         external_identifier: row.try_get("external_identifier")?,
         external_url: row.try_get("external_url")?,
+        external_state: row.try_get("external_state")?,
+        external_labels: deserialize_external_labels(external_labels_json)?,
         runner_provider: row.try_get("runner_provider")?,
         claude_session_id: row.try_get("claude_session_id")?,
         transcript_path: row.try_get("transcript_path")?,
@@ -2427,6 +2798,25 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
     } else {
         Some(trimmed)
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     任务创建动作需要在入库前统一映射 legacy status 与 split state，避免 Tauri、HTTP 和 P2P 入口语义漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     克隆调用方构造的完整任务行，按 createAction 覆盖 status/workflow_state/run_state，并清理运行期阻塞字段。
+fn task_row_for_create_action(
+    row: &OrchestratorTaskRow,
+    create_action: OrchestratorCreateAction,
+) -> OrchestratorTaskRow {
+    let mut next = row.clone();
+    let split_state = SplitTaskState::from_create_action(create_action);
+    next.status = create_action.initial_status();
+    next.workflow_state = split_state.workflow_state;
+    next.run_state = split_state.run_state;
+    next.attempt_phase = None;
+    next.blocked_reason = None;
+    next
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2657,6 +3047,8 @@ mod tests {
             "external_id",
             "external_identifier",
             "external_url",
+            "external_state",
+            "external_labels_json",
             "runner_provider",
             "claude_session_id",
             "transcript_path",
@@ -2670,6 +3062,36 @@ mod tests {
                 "missing column {expected}"
             );
         }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     tracker 预留字段必须随任务从数据库行投影到前端 DTO，后续 Linear/GitHub 等外部系统同步才不会丢状态和标签。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建任务后直接写入 external_state/external_labels_json，读取 DTO JSON 并断言 camelCase 字段和值完整保留。
+    #[tokio::test]
+    async fn tracker_reserved_fields_roundtrip_from_row_to_dto() {
+        let (pool, repo) = setup_repo().await;
+        let task = task_row("tracker-task", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&task).await.unwrap();
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET external_state = ?, external_labels_json = ? WHERE id = ?",
+        )
+        .bind("in_progress")
+        .bind(r#"["frontend","p1"]"#)
+        .bind(&task.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let persisted = repo.get_task(&task.id).await.unwrap();
+        let value = serde_json::to_value(OrchestratorTaskDto::from(persisted)).unwrap();
+
+        assert_eq!(value.get("externalState").unwrap(), "in_progress");
+        assert_eq!(
+            value.get("externalLabels").unwrap(),
+            &serde_json::json!(["frontend", "p1"])
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -2928,11 +3350,19 @@ mod tests {
         let second = task_row("task-2", "project-1", OrchestratorTaskStatus::Draft);
 
         let created = repo
-            .create_remote_task_for_client_request("client-request-1", &first, true)
+            .create_remote_task_for_client_request(
+                "client-request-1",
+                &first,
+                OrchestratorCreateAction::Todo,
+            )
             .await
             .unwrap();
         let replayed = repo
-            .create_remote_task_for_client_request("client-request-1", &second, false)
+            .create_remote_task_for_client_request(
+                "client-request-1",
+                &second,
+                OrchestratorCreateAction::Backlog,
+            )
             .await
             .unwrap();
         let listed = repo.list_tasks(Some("project-1")).await.unwrap();
@@ -2945,19 +3375,23 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     远端 HTTP create queue=true 是移动端和远端代理的直接启动入口，创建后的任务必须被本机 scheduler 领取。
+    ///     远端 HTTP createAction=todo 是移动端和远端代理的待执行入口，创建后的任务必须被本机 scheduler 领取。
     ///
     /// Code Logic（这个函数做什么）:
     ///     通过幂等 create helper 创建 queued 任务，再执行全局 claim，断言 split state 从 Todo/Idle 进入 InProgress/Preparing。
     #[tokio::test]
-    async fn remote_create_queue_true_result_is_claimable_by_split_state_scheduler() {
+    async fn remote_create_action_todo_result_is_claimable_by_split_state_scheduler() {
         let (pool, repo) = setup_repo().await;
         create_workbench_projects_table(&pool).await;
         insert_workbench_project(&pool, "project-1", "local").await;
         let row = task_row("remote-created", "project-1", OrchestratorTaskStatus::Draft);
 
         let created = repo
-            .create_remote_task_for_client_request("client-request-claimable", &row, true)
+            .create_remote_task_for_client_request(
+                "client-request-claimable",
+                &row,
+                OrchestratorCreateAction::Todo,
+            )
             .await
             .unwrap();
         let claimed = repo
@@ -2976,6 +3410,54 @@ mod tests {
             OrchestratorWorkflowState::InProgress
         );
         assert_eq!(claimed[0].run_state, OrchestratorRunState::Preparing);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     创建弹窗默认动作是 Backlog，不能因为旧 queue 默认值导致任务被 scheduler 自动领取。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     通过幂等 create helper 使用 backlog 动作创建任务，断言 legacy/split state 均保持草稿待办池语义。
+    #[tokio::test]
+    async fn remote_create_action_backlog_keeps_task_in_backlog_idle() {
+        let (_pool, repo) = setup_repo().await;
+        let row = task_row("remote-backlog", "project-1", OrchestratorTaskStatus::Draft);
+
+        let created = repo
+            .create_remote_task_for_client_request(
+                "client-request-backlog",
+                &row,
+                OrchestratorCreateAction::Backlog,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(created.status, OrchestratorTaskStatus::Draft);
+        assert_eq!(created.workflow_state, OrchestratorWorkflowState::Backlog);
+        assert_eq!(created.run_state, OrchestratorRunState::Idle);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Create and Start 在调度前的持久化语义必须与 Todo 一致，后续 dispatch 只能领取 Todo/Idle。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     通过幂等 create helper 使用 start 动作创建任务，断言任务先落库为 legacy Queued + Todo/Idle。
+    #[tokio::test]
+    async fn remote_create_action_start_persists_as_todo_idle_before_dispatch() {
+        let (_pool, repo) = setup_repo().await;
+        let row = task_row("remote-start", "project-1", OrchestratorTaskStatus::Draft);
+
+        let created = repo
+            .create_remote_task_for_client_request(
+                "client-request-start",
+                &row,
+                OrchestratorCreateAction::Start,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(created.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(created.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(created.run_state, OrchestratorRunState::Idle);
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -3096,6 +3578,147 @@ mod tests {
             claimed[0].attempt_phase,
             Some(OrchestratorAttemptPhase::PreparingWorkspace)
         );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 startTask 动作需要把草稿或待办任务放入 scheduler 可领取路径，而不是直接进入交付或清理现场。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Backlog/Draft 任务后调用 start_task，断言任务进入 Todo/Idle 且可被全局 scheduler claim 到 Preparing。
+    #[tokio::test]
+    async fn start_task_moves_backlog_draft_to_claimable_todo_idle() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        let created = task_row("task-start", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&created).await.unwrap();
+
+        let started = repo.start_task(&created.id).await.unwrap();
+        let claimed = repo
+            .claim_next_local_queued_tasks_with_global_capacity(1)
+            .await
+            .unwrap();
+
+        assert_eq!(started.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(started.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(started.run_state, OrchestratorRunState::Idle);
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, created.id);
+        assert_eq!(claimed[0].status, OrchestratorTaskStatus::Preparing);
+        assert_eq!(
+            claimed[0].workflow_state,
+            OrchestratorWorkflowState::InProgress
+        );
+        assert_eq!(claimed[0].run_state, OrchestratorRunState::Preparing);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     人工复核失败时用户需要显式 requestRework，并保留原因、证据与执行现场供下一轮 scheduler 继续接管。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 HumanReview/Done-compatible 任务并写入现场字段，调用 request_task_rework 后断言进入 Rework/Idle、
+    ///     worktree/session 未清理，且 repairPrompt evidence 保存了人工返工原因。
+    #[tokio::test]
+    async fn request_rework_from_human_review_records_reason_and_keeps_execution_site() {
+        let (pool, repo) = setup_repo().await;
+        let mut created = task_row("task-rework", "project-1", OrchestratorTaskStatus::Done);
+        created.worktree_id = Some("worktree-1".to_string());
+        created.session_id = Some("session-1".to_string());
+        repo.create_task(&created).await.unwrap();
+        set_task_split_state(
+            &pool,
+            &created.id,
+            OrchestratorWorkflowState::HumanReview,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+
+        let rework = repo
+            .request_task_rework(&created.id, "请补充边界条件测试")
+            .await
+            .unwrap();
+        let evidence = repo.list_evidence(&created.id).await.unwrap();
+
+        assert_eq!(rework.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(rework.workflow_state, OrchestratorWorkflowState::Rework);
+        assert_eq!(rework.run_state, OrchestratorRunState::Idle);
+        assert_eq!(rework.worktree_id.as_deref(), Some("worktree-1"));
+        assert_eq!(rework.session_id.as_deref(), Some("session-1"));
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].kind, EVIDENCE_KIND_REPAIR_PROMPT);
+        assert_eq!(evidence[0].content, "请补充边界条件测试");
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 deliverReviewedTask 只能从人工复核泳道进入交付，不能把普通 Done 或其它状态偷偷交付。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 HumanReview/Done-compatible 任务并进入 Merging/Delivering，再验证普通 Done 任务被拒绝且状态不变。
+    #[tokio::test]
+    async fn start_delivery_requires_human_review_task() {
+        let (pool, repo) = setup_repo().await;
+        let reviewed = task_row("task-reviewed", "project-1", OrchestratorTaskStatus::Done);
+        repo.create_task(&reviewed).await.unwrap();
+        set_task_split_state(
+            &pool,
+            &reviewed.id,
+            OrchestratorWorkflowState::HumanReview,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+        let plain_done = task_row("task-done", "project-1", OrchestratorTaskStatus::Done);
+        repo.create_task(&plain_done).await.unwrap();
+
+        let delivering = repo
+            .start_delivery_from_human_review(&reviewed.id)
+            .await
+            .unwrap();
+        let error = repo
+            .start_delivery_from_human_review(&plain_done.id)
+            .await
+            .expect_err("plain done task must not deliver");
+        let persisted_plain_done = repo.get_task(&plain_done.id).await.unwrap();
+
+        assert_eq!(delivering.status, OrchestratorTaskStatus::Delivering);
+        assert_eq!(delivering.workflow_state, OrchestratorWorkflowState::Merging);
+        assert_eq!(delivering.run_state, OrchestratorRunState::Delivering);
+        assert!(error.to_string().contains("人工复核"));
+        assert_eq!(persisted_plain_done.status, OrchestratorTaskStatus::Done);
+        assert_eq!(
+            persisted_plain_done.workflow_state,
+            OrchestratorWorkflowState::Done
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 cancelTask 需要把任务移到 Canceled/Idle，同时保留 worktree、session 和既有 evidence 供用户审计。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Running 任务并写入 evidence，调用 cancel_task 后断言 legacy status 映射为 Aborted、
+    ///     split state 为 Canceled/Idle，现场字段与 evidence 均未丢失。
+    #[tokio::test]
+    async fn cancel_task_moves_to_canceled_idle_and_preserves_execution_site_and_evidence() {
+        let (_pool, repo) = setup_repo().await;
+        let mut created = task_row("task-cancel", "project-1", OrchestratorTaskStatus::Running);
+        created.worktree_id = Some("worktree-1".to_string());
+        created.session_id = Some("session-1".to_string());
+        repo.create_task(&created).await.unwrap();
+        repo.add_evidence(&created.id, "verificationOutput", "验证", "running", "still running")
+            .await
+            .unwrap();
+
+        let canceled = repo.cancel_task(&created.id).await.unwrap();
+        let evidence = repo.list_evidence(&created.id).await.unwrap();
+
+        assert_eq!(canceled.status, OrchestratorTaskStatus::Aborted);
+        assert_eq!(canceled.workflow_state, OrchestratorWorkflowState::Canceled);
+        assert_eq!(canceled.run_state, OrchestratorRunState::Idle);
+        assert_eq!(canceled.worktree_id.as_deref(), Some("worktree-1"));
+        assert_eq!(canceled.session_id.as_deref(), Some("session-1"));
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].content, "still running");
     }
 
     /// Business Logic（为什么需要这个函数）:

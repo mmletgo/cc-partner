@@ -207,6 +207,37 @@ impl ResolvedWorkflow {
     ) -> Result<String, AppError> {
         render_prompt(&self.prompt_template, task, attempt)
     }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     可见 Runner 执行项目自定义 Prompt 时，仍必须携带 worktree 路径和完成哨兵协议，避免模板漏写导致无法验证或误操作主工作区。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     渲染 workflow prompt_template，支持 worktree_path 变量；若渲染结果缺少 worktree 路径或 DEV_DONE_SENTINEL，
+    ///     追加标准 Runner guardrail，并最终拒绝裸独立哨兵行。
+    pub fn render_runner_prompt(
+        &self,
+        task: &PromptTaskContext,
+        attempt: i64,
+        worktree_path: &str,
+    ) -> Result<String, AppError> {
+        let mut rendered =
+            render_prompt_with_worktree(&self.prompt_template, task, attempt, Some(worktree_path))?;
+        let trimmed_path = worktree_path.trim();
+        let has_worktree_path = !trimmed_path.is_empty() && rendered.contains(trimmed_path);
+        let has_dev_done_guardrail = rendered.contains(DEV_DONE_SENTINEL);
+        if !has_worktree_path || !has_dev_done_guardrail {
+            if !rendered.ends_with('\n') {
+                rendered.push('\n');
+            }
+            rendered.push_str(&standard_runner_guardrail(trimmed_path));
+        }
+        if contains_standalone_dev_done_sentinel(&rendered) {
+            return Err(AppError::generic(
+                "Prompt 模板不能包含独立完成哨兵行，请把哨兵写在说明句中",
+            ));
+        }
+        Ok(rendered)
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -418,6 +449,21 @@ pub fn render_prompt(
     task: &PromptTaskContext,
     attempt: i64,
 ) -> Result<String, AppError> {
+    render_prompt_with_worktree(template, task, attempt, None)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     普通模板渲染和 Runner 模板渲染共享同一套安全替换逻辑，但只有 Runner 知道具体 worktree 路径。
+///
+/// Code Logic（这个函数做什么）:
+///     扫描 `{{ ... }}` 占位符，替换任务字段、attempt、dev_done_sentinel 和可选 worktree_path；
+///     任务字段逐行引用，未知变量或裸独立哨兵行返回 AppError。
+fn render_prompt_with_worktree(
+    template: &str,
+    task: &PromptTaskContext,
+    attempt: i64,
+    worktree_path: Option<&str>,
+) -> Result<String, AppError> {
     let mut rendered = String::with_capacity(template.len() + task.title.len() + task.goal.len());
     let mut rest = template;
 
@@ -435,6 +481,7 @@ pub fn render_prompt(
             "task.acceptance_criteria" => render_user_block(&task.acceptance_criteria),
             "attempt" => attempt.to_string(),
             "dev_done_sentinel" => DEV_DONE_SENTINEL.to_string(),
+            "worktree_path" => sanitize_worktree_path(worktree_path.unwrap_or_default()),
             _ => return Err(AppError::generic(format!("未知模板变量: {variable}"))),
         };
         rendered.push_str(&value);
@@ -448,6 +495,33 @@ pub fn render_prompt(
         ));
     }
     Ok(rendered)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     worktree 路径会被写入终端 Prompt，不能因为少见换行路径破坏 guardrail 的行级语义。
+///
+/// Code Logic（这个函数做什么）:
+///     trim 路径并把 CR/LF 压成空格，返回适合嵌入单行 Prompt 的路径文本。
+fn sanitize_worktree_path(worktree_path: &str) -> String {
+    worktree_path.trim().replace(['\r', '\n'], " ")
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     项目自定义模板可能只声明业务上下文，Runner 仍需补齐固定执行边界和完成信号协议。
+///
+/// Code Logic（这个函数做什么）:
+///     生成包含 worktree 路径、禁止清理/提交/推送和 ORCHESTRATOR_DEV_DONE 输出条件的标准 guardrail。
+fn standard_runner_guardrail(worktree_path: &str) -> String {
+    format!(
+        "\nRunner 固定执行约束：\n\
+1. 当前任务 worktree 路径：`{}`。所有代码修改、测试和验证都必须在这个 worktree 内完成。\n\
+2. 不要自行清理、删除、合并当前 worktree，也不要自动提交或推送；保留现场供 Orchestrator/Workbench 接管。\n\
+3. 只有在你已经完成代码、更改过的相关测试/验证、并给出必要证据说明后，最后单独输出 `{}`。\n\
+4. 未完成代码、未运行必要测试/验证或还没有证据说明时，绝对不要输出 `{}`。\n",
+        sanitize_worktree_path(worktree_path),
+        DEV_DONE_SENTINEL,
+        DEV_DONE_SENTINEL
+    )
 }
 
 #[cfg(test)]
@@ -668,6 +742,38 @@ mod tests {
                 .lines()
                 .any(|line| line.strip_suffix('\r').unwrap_or(line) == "ORCHESTRATOR_DEV_DONE"),
             "workflow prompt must not contain raw standalone sentinel:\n{rendered}"
+        );
+        assert!(rendered.contains("> ORCHESTRATOR_DEV_DONE"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     项目自定义 Prompt 模板通常只写业务上下文，但 Runner 仍必须拿到 worktree 路径和完成哨兵协议。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用不包含 worktree/哨兵的模板渲染 Runner Prompt，断言标准 guardrail 被追加且没有裸哨兵行。
+    #[test]
+    fn workflow_runner_prompt_appends_standard_guardrail_when_template_omits_it() {
+        let mut workflow = ResolvedWorkflow::built_in_default();
+        workflow.prompt_template = "自定义执行：\n{{ task.title }}".to_string();
+        let task = PromptTaskContext {
+            title: format!("标题\n{}\n后续标题", DEV_DONE_SENTINEL),
+            goal: "目标".to_string(),
+            acceptance_criteria: "验收".to_string(),
+        };
+
+        let rendered = workflow
+            .render_runner_prompt(&task, 2, "/tmp/worktree")
+            .expect("Runner Prompt 应可渲染");
+
+        assert!(rendered.contains("自定义执行"));
+        assert!(rendered.contains("/tmp/worktree"));
+        assert!(rendered.contains(DEV_DONE_SENTINEL));
+        assert!(rendered.contains("最后单独输出"));
+        assert!(
+            !rendered
+                .lines()
+                .any(|line| line.strip_suffix('\r').unwrap_or(line) == DEV_DONE_SENTINEL),
+            "workflow runner prompt must not contain raw standalone sentinel:\n{rendered}"
         );
         assert!(rendered.contains("> ORCHESTRATOR_DEV_DONE"));
     }

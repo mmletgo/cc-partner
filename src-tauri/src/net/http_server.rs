@@ -634,12 +634,32 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(orchestrator::queue_task),
         )
         .route(
+            "/api/orchestrator/tasks/start",
+            post(orchestrator::start_task),
+        )
+        .route(
             "/api/orchestrator/tasks/retry",
             post(orchestrator::retry_task),
         )
         .route(
+            "/api/orchestrator/tasks/request-rework",
+            post(orchestrator::request_rework_task),
+        )
+        .route(
+            "/api/orchestrator/tasks/deliver-reviewed",
+            post(orchestrator::deliver_reviewed_task),
+        )
+        .route(
             "/api/orchestrator/tasks/abort",
             post(orchestrator::abort_task),
+        )
+        .route(
+            "/api/orchestrator/tasks/cancel",
+            post(orchestrator::cancel_task),
+        )
+        .route(
+            "/api/orchestrator/projects/refresh",
+            post(orchestrator::refresh_project),
         )
         .route("/api/orchestrator/config", get(orchestrator::get_config))
         // 移动端 SPA fallback：只服务 /mobile 命名空间；其它未知路径保持 404。
