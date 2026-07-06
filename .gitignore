@@ -17,5 +17,8 @@ release/
 # Claude Code worktree 临时工作目录（不应 track）
 .claude/worktrees/
 
+# Codex / git worktree 临时工作目录（不应 track）
+.worktrees/
+
 # Superpowers visual brainstorming 临时画布（不应 track）
 .superpowers/
