@@ -89,9 +89,11 @@ mod tests {
     ///     回退为 `-` 保证后续路径拼接仍合法。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     断言空字符串和纯空白字符路径都编码为 `-`。
+    ///     断言空字符串路径编码为 `-`；同时验证纯空白字符会被逐个转成 `-`
+    ///     （与 Claude Code 磁盘布局一致，不做 trim）。
     #[test]
     fn empty_path_falls_back_to_single_dash() {
         assert_eq!(encode_claude_project_path(""), "-");
+        assert_eq!(encode_claude_project_path("   "), "---");
     }
 }

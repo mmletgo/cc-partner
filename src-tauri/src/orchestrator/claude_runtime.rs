@@ -138,9 +138,6 @@ pub fn associate_claude_runtime(
     Ok(best.map(|candidate| candidate.summary))
 }
 
-// encode_claude_project_path 已迁移到 crate::workbench::claude_path，
-// 让 Workbench Claude session 搜索等模块可直接复用，避免 workbench 反向依赖 orchestrator。
-
 /// Business Logic（为什么需要这个函数）:
 ///     runtime association 需要同时支持 encoded 目录优先扫描与旧全量 fallback，单目录扫描逻辑必须复用。
 ///
