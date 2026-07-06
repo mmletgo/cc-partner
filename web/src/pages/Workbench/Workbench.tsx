@@ -4064,7 +4064,7 @@ export function Workbench() {
         onClose={() => setSessionSearchOpen(false)}
         projectId={activeProjectId}
         worktreeId={activeWorktreeId}
-        isRemote={activeProject?.kind === 'remote'}
+        offline={remoteProjectOffline}
         worktreeName={activeWorktree?.name}
         onResumed={(newSessionId) => {
           if (activeProjectId) void loadSessions(activeProjectId);

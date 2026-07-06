@@ -33,8 +33,11 @@ export interface WorkbenchSessionSearchProps {
   projectId: string | null;
   /** 当前 worktree id（决定搜索范围，可能为 null 表示主工作区） */
   worktreeId: string | null;
-  /** 是否远端项目（影响离线态/错误态提示） */
-  isRemote: boolean;
+  /**
+   * 远端设备是否离线（明确语义，替代用 isRemote 推断离线）。
+   * 远端项目在线时仍可正常搜索；仅 offline=true 时显示离线提示并禁用输入。
+   */
+  offline: boolean;
   /** 当前 worktree 显示名（用于分组标签），无则回退 */
   worktreeName?: string | null;
   /** resume 成功后回调，父组件刷新 sessions + focusSession 到新 window */
@@ -141,7 +144,7 @@ function renderHighlighted(text: string, query: string): ReactNode {
 export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): ReactNode {
   const { t, i18n } = useTranslation(['workbench', 'common']);
   const locale = i18n.language?.startsWith('zh') ? 'zh' : 'en';
-  const { open, onClose, projectId, worktreeId, isRemote, worktreeName, onResumed } = props;
+  const { open, onClose, projectId, worktreeId, offline, worktreeName, onResumed } = props;
 
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<SessionSearchHit[]>([]);
@@ -155,6 +158,8 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
   const [resuming, setResuming] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
+  /** preview 视图根容器 ref：进入 preview 时自动聚焦，确保 Esc 等键盘事件可达 */
+  const previewContainerRef = useRef<HTMLDivElement>(null);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** 标记本次 debounce 触发的搜索请求是否已过期（避免竞态覆盖最新结果） */
   const searchSeqRef = useRef(0);
@@ -225,6 +230,9 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
 
   /**
    * 进入 preview：拉取该 session 的最近 20 条对话。
+   * Business Logic：用户选中某条结果后需要预览历史对话内容确认是否 resume。
+   * Code Logic：切换到 preview 视图并调用 preview 接口，用序号防竞态，
+   *   只接受最后一次请求的结果，避免快速切换不同 session 时旧结果覆盖新结果。
    */
   const openPreview = useCallback(
     (hit: SessionSearchHit) => {
@@ -255,6 +263,10 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
 
   /**
    * 执行 resume：新建 window 并注入 claude --resume 命令，成功后通知父组件。
+   * Business Logic：resume 成功后会切到新 window 继续会话；浮层由父组件关闭，
+   *   但组件自身持有的 query/preview 等状态若不清理，下次打开会残留旧内容。
+   * Code Logic：成功分支先把 query/hits/preview 全部重置，再回调 onResumed
+   *   （父组件会触发 onClose）；即便关闭再打开状态也是干净的。
    */
   const handleResume = useCallback(() => {
     if (!projectId || !previewHit || resuming) return;
@@ -263,6 +275,14 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
       .resume(projectId, worktreeId, previewHit.sessionId)
       .then((result) => {
         if (result?.ok && result.sessionId) {
+          // 清理自身状态，避免下次打开残留
+          setQuery('');
+          setHits([]);
+          setActiveIndex(0);
+          setError(null);
+          setPreviewHit(null);
+          setPreviewData(null);
+          setPreviewError(null);
           onResumed(result.sessionId);
         } else {
           setPreviewError(t('workbench:sessionSearch.resumeFailed'));
@@ -276,7 +296,9 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
   }, [projectId, worktreeId, previewHit, resuming, onResumed, t]);
 
   /**
-   * 列表视图键盘导航：↑↓ 移动高亮、⏎ 进入 preview、esc 返回/关闭。
+   * 列表视图键盘导航。
+   * Business Logic：纯键盘操作结果列表，符合 Command Palette 惯例。
+   * Code Logic：↑↓ 循环移动高亮索引、⏎ 打开当前选中项的 preview、esc 关闭浮层。
    */
   const handleListKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -302,7 +324,12 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     [hits, activeIndex, openPreview, onClose],
   );
 
-  /** preview 视图键盘：esc 返回列表 */
+  /**
+   * preview 视图键盘：esc 返回列表（preview 容器自处理，不依赖外层 palette 容器）。
+   * Business Logic：进入 preview 后焦点会移到 preview 容器，Esc 由容器自身捕获，
+   *   保证即便焦点不在 input 也能回到列表视图。
+   * Code Logic：仅处理 Escape，返回列表前清空 preview 相关 state 并重新聚焦输入框。
+   */
   const handlePreviewKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       if (e.key === 'Escape') {
@@ -317,17 +344,44 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     [],
   );
 
-  /** 点击 scrim 关闭浮层 */
+  /**
+   * 进入 preview 视图时自动聚焦 preview 容器。
+   * Business Logic：preview 视图依赖容器自身的 Esc 处理，必须确保容器持有焦点，
+   *   否则焦点可能停留在已隐藏的 input 或 body 上导致 Esc 失效。
+   * Code Logic：previewHit 由 null 变为非 null 时（即切换进 preview），
+   *   延迟一帧聚焦 preview 容器，让 DOM 完成渲染。
+   */
+  useEffect(() => {
+    if (!previewHit) return;
+    const timer = setTimeout(() => previewContainerRef.current?.focus(), 0);
+    return () => clearTimeout(timer);
+  }, [previewHit]);
+
+  /**
+   * 点击遮罩关闭浮层。
+   * Business Logic：点 palette 外的半透明区域应视为取消搜索，关闭浮层。
+   * Code Logic：直接调 onClose。
+   */
   const handleScrimClick = useCallback(() => {
     onClose();
   }, [onClose]);
 
-  /** 点击 palette 内部阻止冒泡到 scrim */
+  /**
+   * 阻止 palette 内部点击冒泡到 scrim。
+   * Business Logic：palette 内的任何点击都不应触发 scrim 的关闭逻辑。
+   * Code Logic：stopPropagation 中断事件冒泡。
+   */
   const stopPropagation = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
   }, []);
 
+  /** 去除首尾空格后的 query，用于命中高亮匹配（避免空格导致无意义拆分） */
   const trimmedQuery = query.trim();
+  /**
+   * 结果计数文案（受控于 hits.length，传入 i18next count 复数规则）。
+   * Business Logic：footer 右侧展示当前命中条数，给用户搜索进度反馈。
+   * Code Logic：用 useMemo 缓存，仅 hits.length 变化时重算。
+   */
   const resultCountText = useMemo(
     () =>
       t('workbench:sessionSearch.resultCount', {
@@ -340,9 +394,14 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
   // early return 必须在所有 hooks 之后（AGENTS.md 第 20 条）
   if (!open) return null;
 
+  /**
+   * 渲染搜索视图主体（loading / error / empty / results 四态分支）。
+   * Business Logic：按 spec 4.5 三态处理，让用户在任何状态下都有明确反馈与下一步。
+   * Code Logic：依次判断 loading（首屏扫描中）、error（带重试按钮）、empty、
+   *   以及命中列表（分组标签 + resultItem）。
+   */
   const renderBody = (): ReactNode => {
-    // 远端离线态（isRemote 且无 projectId 不可能，这里仅做兜底文案层）
-    // ── 三态：loading / error / empty / results ──
+    // ── 四态：loading / error / empty / results ──
     if (loading && hits.length === 0) {
       return (
         <div className={styles.stateBox}>
@@ -382,7 +441,8 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
             const fresh = Date.now() - Date.parse(hit.lastActivityAt) < FRESH_THRESHOLD_MS;
             const time = formatRelativeTime(hit.lastActivityAt, locale);
             const shortId = hit.sessionId.slice(0, 8);
-            const preview = hit.previewSnippets[0] ?? '';
+            // 后端已限制最多 3 段命中片段；这里全部渲染，每段独立一行
+            const snippets = hit.previewSnippets;
             return (
               <div
                 key={hit.sessionId}
@@ -397,9 +457,13 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
                 <span className={styles.timelineDot} data-fresh={fresh || undefined} />
                 <div className={styles.resultMain}>
                   <div className={styles.resultTitle}>{renderHighlighted(hit.title, trimmedQuery)}</div>
-                  {preview ? (
-                    <div className={styles.resultPreview}>{renderHighlighted(preview, trimmedQuery)}</div>
-                  ) : null}
+                  {snippets.map((snippet, sIdx) =>
+                    snippet ? (
+                      <div key={sIdx} className={styles.resultPreview}>
+                        {renderHighlighted(snippet, trimmedQuery)}
+                      </div>
+                    ) : null,
+                  )}
                 </div>
                 <div className={styles.resultAside}>
                   <span>{time}</span>
@@ -415,6 +479,13 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     );
   };
 
+  /**
+   * 渲染 preview 视图主体（loading / error / 数据三种状态）。
+   * Business Logic：展示选中 session 的元信息（cwd/git 分支/消息数/最近活动时间）
+   *   及最近 20 条对话，供用户判断是否 resume。
+   * Code Logic：previewLoading 显示加载态、previewError 显示错误、否则渲染
+   *   previewMeta + messageList。
+   */
   const renderPreviewBody = (): ReactNode => {
     if (previewLoading) {
       return (
@@ -480,6 +551,11 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     );
   };
 
+  /**
+   * footer 左侧快捷键提示，按当前视图（preview / 搜索）动态切换。
+   * Business Logic：提示用户当前可用的键盘操作，降低学习成本。
+   * Code Logic：previewHit 存在时只提示 esc 返回，否则提示 ↑↓ 导航 / ⏎ 打开 / esc 关闭。
+   */
   const footerHrefs: { label: string; kbd: string }[] = previewHit
     ? [
         { label: t('workbench:sessionSearch.footerResume'), kbd: 'esc' },
@@ -499,29 +575,36 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
         aria-modal="true"
         aria-label={t('workbench:sessionSearch.panelAriaLabel')}
         onClick={stopPropagation}
-        onKeyDown={previewHit ? handlePreviewKeyDown : undefined}
       >
         {previewHit ? (
-          <div className={styles.previewHeader}>
-            <Button
-              className={styles.backButton}
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setPreviewHit(null);
-                setPreviewData(null);
-                setPreviewError(null);
-                setTimeout(() => inputRef.current?.focus(), 30);
-              }}
-            >
-              {t('workbench:sessionSearch.backToList')}
-            </Button>
-            <div className={styles.previewTitleWrap}>
-              <div className={styles.previewTitle}>{previewHit.title}</div>
-              <div className={styles.previewSubtitle}>
-                {previewHit.messageCount} · {previewHit.sessionId.slice(0, 8)}
+          <div
+            ref={previewContainerRef}
+            className={styles.previewContainer}
+            tabIndex={-1}
+            onKeyDown={handlePreviewKeyDown}
+          >
+            <div className={styles.previewHeader}>
+              <Button
+                className={styles.backButton}
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setPreviewHit(null);
+                  setPreviewData(null);
+                  setPreviewError(null);
+                  setTimeout(() => inputRef.current?.focus(), 30);
+                }}
+              >
+                {t('workbench:sessionSearch.backToList')}
+              </Button>
+              <div className={styles.previewTitleWrap}>
+                <div className={styles.previewTitle}>{previewHit.title}</div>
+                <div className={styles.previewSubtitle}>
+                  {previewHit.messageCount} · {previewHit.sessionId.slice(0, 8)}
+                </div>
               </div>
             </div>
+            {renderPreviewBody()}
           </div>
         ) : (
           <div className={styles.header}>
@@ -536,13 +619,13 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
               placeholder={t('workbench:sessionSearch.placeholder')}
               spellCheck={false}
               autoComplete="off"
-              disabled={isRemote && !projectId}
+              disabled={offline}
             />
             <span className={styles.scopeBadge}>{t('workbench:sessionSearch.scopeWorktree')}</span>
           </div>
         )}
 
-        {previewHit ? renderPreviewBody() : renderBody()}
+        {!previewHit && renderBody()}
 
         <div className={styles.footer}>
           <div className={styles.footerHints}>
@@ -564,7 +647,7 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
             </div>
           ) : (
             <span className={styles.footerHint}>
-              {isRemote ? t('workbench:sessionSearch.offline') : resultCountText}
+              {offline ? t('workbench:sessionSearch.offline') : resultCountText}
             </span>
           )}
         </div>
