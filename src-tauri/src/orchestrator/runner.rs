@@ -13,19 +13,24 @@ use crate::commands::workbench::{
     local_write_workbench_session_input,
 };
 use crate::error::AppError;
+use crate::orchestrator::claude_runtime::associate_claude_runtime;
 use crate::orchestrator::models::{
-    OrchestratorTaskRow, OrchestratorTaskStatus, EVIDENCE_KIND_DEVELOPMENT_ATTEMPT,
+    OrchestratorAttemptPhase, OrchestratorTaskRow, OrchestratorTaskStatus,
+    EVIDENCE_KIND_DEVELOPMENT_ATTEMPT,
 };
 use crate::orchestrator::prompt::{
     build_initial_task_prompt, build_repair_task_prompt, RepairPromptContext,
 };
 use crate::state::AppState;
+use std::time::Duration;
 use tauri::AppHandle;
 
 const TASK_BRANCH_PREFIX: &str = "agent";
 const TASK_BRANCH_MAX_LEN: usize = 80;
 const DEFAULT_TERMINAL_COLS: u16 = 120;
 const DEFAULT_TERMINAL_ROWS: u16 = 32;
+const RUNTIME_ASSOCIATION_ATTEMPTS: usize = 5;
+const RUNTIME_ASSOCIATION_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// Runner 使用的 worktree 现场。
 ///
@@ -116,6 +121,14 @@ pub async fn prepare_runner_attempt(
     prompt: String,
     attempt: i64,
 ) -> Result<OrchestratorTaskRow, AppError> {
+    let preparing_task = state
+        .orchestrator_repo
+        .update_task_attempt_phase(&task.id, OrchestratorAttemptPhase::PreparingWorkspace)
+        .await?;
+    if preparing_task.status != OrchestratorTaskStatus::Preparing {
+        return Ok(preparing_task);
+    }
+
     let project = state
         .workbench_project_repo
         .get(&task.project_id)
@@ -147,6 +160,19 @@ pub async fn prepare_runner_attempt(
         .mark_task_running_attempt(&task.id, &branch_name, &worktree.id, &session.id, attempt)
         .await?;
     if running_task.status != OrchestratorTaskStatus::Running {
+        return Ok(running_task);
+    }
+
+    let mut running_task = state
+        .orchestrator_repo
+        .update_active_runner_attempt_phase(
+            &task.id,
+            attempt,
+            &session.id,
+            OrchestratorAttemptPhase::BuildingPrompt,
+        )
+        .await?;
+    if !active_runner_matches(&running_task, attempt, &session.id) {
         return Ok(running_task);
     }
 
@@ -196,7 +222,108 @@ pub async fn prepare_runner_attempt(
     local_write_workbench_session_input(state, session.id.clone(), format!("claude\n{prompt}\n"))
         .await?;
 
+    running_task = state
+        .orchestrator_repo
+        .update_active_runner_attempt_phase(
+            &task.id,
+            attempt,
+            &session.id,
+            OrchestratorAttemptPhase::Streaming,
+        )
+        .await?;
+    if let Some(current) =
+        stop_runner_input_if_task_changed(state, &task.id, attempt, &session.id).await?
+    {
+        return Ok(current);
+    }
+    let runtime_started_at = running_task.runtime_started_at.clone();
+    if let Some(runtime_task) = associate_runner_runtime(
+        state,
+        &task.id,
+        attempt,
+        &session.id,
+        &worktree.path,
+        runtime_started_at.as_deref(),
+    )
+    .await?
+    {
+        running_task = runtime_task;
+    }
+
     Ok(running_task)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Claude Code visible Runner 启动后，任务详情应尽量展示 Claude 自身 session/transcript 信息；但关联失败不能影响执行。
+///
+/// Code Logic（这个函数做什么）:
+///     在 blocking pool 中用 home 目录扫描 Claude JSONL transcript，匹配 worktree cwd 后按 active runner guard 写 runtime summary；
+///     只接受本轮 runtime_started_at 之后的 transcript；transcript 可能晚于 terminal input 创建，因此做短时间 bounded retry。
+async fn associate_runner_runtime(
+    state: &AppState,
+    task_id: &str,
+    attempt: i64,
+    session_id: &str,
+    worktree_path: &str,
+    runtime_started_at: Option<&str>,
+) -> Result<Option<OrchestratorTaskRow>, AppError> {
+    let home_dir = dirs::home_dir();
+    let worktree_path = worktree_path.to_string();
+    let runtime_started_at = runtime_started_at.map(str::to_string);
+    for scan_attempt in 1..=RUNTIME_ASSOCIATION_ATTEMPTS {
+        let home_dir = home_dir.clone();
+        let scan_worktree_path = worktree_path.clone();
+        let scan_runtime_started_at = runtime_started_at.clone();
+        let scan_result = tauri::async_runtime::spawn_blocking(move || {
+            associate_claude_runtime(
+                home_dir.as_deref(),
+                &scan_worktree_path,
+                scan_runtime_started_at.as_deref(),
+            )
+        })
+        .await;
+
+        match scan_result {
+            Ok(Ok(Some(summary))) => {
+                return state
+                    .orchestrator_repo
+                    .update_active_runner_runtime_summary(task_id, attempt, session_id, &summary)
+                    .await;
+            }
+            Ok(Ok(None)) if scan_attempt < RUNTIME_ASSOCIATION_ATTEMPTS => {
+                tokio::time::sleep(RUNTIME_ASSOCIATION_RETRY_DELAY).await;
+            }
+            Ok(Ok(None)) => {
+                tracing::debug!(
+                    task_id = task_id,
+                    worktree_path = worktree_path,
+                    attempts = scan_attempt,
+                    "未找到可关联的 Claude Code runtime transcript"
+                );
+                return Ok(None);
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    task_id = task_id,
+                    worktree_path = worktree_path,
+                    error = %error,
+                    "关联 Claude Code runtime 失败，继续保留 Runner 执行"
+                );
+                return Ok(None);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    task_id = task_id,
+                    worktree_path = worktree_path,
+                    error = %error,
+                    "关联 Claude Code runtime blocking task 失败，继续保留 Runner 执行"
+                );
+                return Ok(None);
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 /// Business Logic（为什么需要这个函数）:

@@ -2,9 +2,10 @@ use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
-    OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorTaskAttemptRow,
-    OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus, OrchestratorWorkflowState,
-    EVIDENCE_KIND_DELIVERY, EVIDENCE_KIND_REPAIR_PROMPT, EVIDENCE_KIND_VERIFICATION_OUTPUT,
+    OrchestratorAttemptPhase, OrchestratorEvidenceDto, OrchestratorProjectConfigDto,
+    OrchestratorRunState, OrchestratorTaskAttemptRow, OrchestratorTaskDto, OrchestratorTaskRow,
+    OrchestratorTaskStatus, OrchestratorWorkflowState, EVIDENCE_KIND_DELIVERY,
+    EVIDENCE_KIND_REPAIR_PROMPT, EVIDENCE_KIND_VERIFICATION_OUTPUT,
     EVIDENCE_KIND_VERIFICATION_REVIEW,
 };
 use crate::orchestrator::outbox::{
@@ -529,6 +530,19 @@ fn verification_commands_for_agent_completion(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     验证通过后是否自动交付由全局自动化开关和四个交付开关共同决定；默认关闭自动化时必须停在人工复核。
+///
+/// Code Logic（这个函数做什么）:
+///     对 enabled、auto_commit、auto_push_task_branch、auto_merge_to_main、auto_push_main 执行 AND 判断。
+fn auto_delivery_enabled(config: &OrchestratorAutomationConfig) -> bool {
+    config.enabled
+        && config.auto_commit
+        && config.auto_push_task_branch
+        && config.auto_merge_to_main
+        && config.auto_push_main
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     Agent 完成按钮只能用于 Running 任务，避免草稿、排队、交付或终态任务被误推进验证阶段。
 ///
 /// Code Logic（这个函数做什么）:
@@ -793,19 +807,54 @@ async fn transition_verified_task_to_delivering(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     verifier 通过但自动交付未完全开启时，任务需要交给用户人工复核，避免继续进入 delivery pipeline。
+///
+/// Code Logic（这个函数做什么）:
+///     用 Verifying expected-status 原子守卫写入 legacy Done，同时指定 HumanReview/Idle/Succeeded split state。
+async fn transition_verified_task_to_human_review(
+    repo: &OrchestratorRepo,
+    task_id: &str,
+) -> Result<ConditionalDeliveryTransition, AppError> {
+    match repo
+        .try_transition_task_split_state(
+            task_id,
+            OrchestratorTaskStatus::Verifying,
+            OrchestratorTaskStatus::Done,
+            OrchestratorWorkflowState::HumanReview,
+            OrchestratorRunState::Idle,
+            Some(OrchestratorAttemptPhase::Succeeded),
+            None,
+        )
+        .await?
+    {
+        Some(task) => Ok(ConditionalDeliveryTransition {
+            transitioned: true,
+            task,
+        }),
+        None => Ok(ConditionalDeliveryTransition {
+            transitioned: false,
+            task: repo.get_task(task_id).await?,
+        }),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     verifier 判定失败后只有仍处于 Verifying 的任务可以回到 Preparing，避免用户 Abort 被旧流程覆盖。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用仓储 try_transition_task_status 做 Verifying->Preparing 条件写；未命中时读取当前任务并标记未转换。
+///     调用仓储 split-state 条件 helper 做 Verifying->Preparing/Rework/Preparing/Failed；未命中时读取当前任务并标记未转换。
 async fn transition_failed_verification_task_to_preparing(
     repo: &OrchestratorRepo,
     task_id: &str,
 ) -> Result<ConditionalRepairTransition, AppError> {
     match repo
-        .try_transition_task_status(
+        .try_transition_task_split_state(
             task_id,
             OrchestratorTaskStatus::Verifying,
             OrchestratorTaskStatus::Preparing,
+            OrchestratorWorkflowState::Rework,
+            OrchestratorRunState::Preparing,
+            Some(OrchestratorAttemptPhase::Failed),
             None,
         )
         .await?
@@ -1678,6 +1727,19 @@ async fn complete_orchestrator_agent_run_after_verifying_transition(
     }
     add_verification_evidence(state, &task.id, &verification_review_evidence(&review)).await?;
     if review.passed {
+        let should_auto_deliver = {
+            let config = state.config.read().expect("config 读锁中毒");
+            auto_delivery_enabled(&config.orchestrator)
+        };
+        if !should_auto_deliver {
+            let review_transition = transition_verified_task_to_human_review(
+                state.orchestrator_repo.as_ref(),
+                &task.id,
+            )
+            .await?;
+            return Ok(OrchestratorTaskDto::from(review_transition.task));
+        }
+
         let delivery_transition =
             transition_verified_task_to_delivering(state.orchestrator_repo.as_ref(), &task.id)
                 .await?;
@@ -2270,6 +2332,86 @@ mod tests {
         assert!(!transition.transitioned);
         assert_eq!(transition.task.status, OrchestratorTaskStatus::Aborted);
         assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     verifier 通过但 full-auto delivery 关闭时，任务应进入人工复核泳道，而不是继续自动交付或阻塞。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Verifying 任务并调用 HumanReview 条件转换 helper，断言 legacy status 与 split state 精确落库。
+    #[tokio::test]
+    async fn human_review_transition_sets_split_state_when_delivery_disabled() {
+        let repo = setup_orchestrator_repo().await;
+        let task = command_task_row("task-human-review", OrchestratorTaskStatus::Verifying);
+        repo.create_task(&task).await.expect("insert task");
+
+        let transition = transition_verified_task_to_human_review(&repo, &task.id)
+            .await
+            .expect("transition result");
+        let persisted = repo.get_task(&task.id).await.expect("persisted task");
+
+        assert!(transition.transitioned);
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Done);
+        assert_eq!(
+            persisted.workflow_state,
+            OrchestratorWorkflowState::HumanReview
+        );
+        assert_eq!(persisted.run_state, OrchestratorRunState::Idle);
+        assert_eq!(
+            persisted.attempt_phase,
+            Some(OrchestratorAttemptPhase::Succeeded)
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     verifier 未通过时，任务必须明确进入 Rework 并标记本轮 failed，同时保持 Preparing 以便立即启动修复 Runner。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Verifying 任务并调用 repair 条件转换 helper，断言 workflow/run/attempt phase 与修复准备语义一致。
+    #[tokio::test]
+    async fn repair_transition_sets_rework_preparing_failed_phase() {
+        let repo = setup_orchestrator_repo().await;
+        let task = command_task_row("task-rework", OrchestratorTaskStatus::Verifying);
+        repo.create_task(&task).await.expect("insert task");
+
+        let transition = transition_failed_verification_task_to_preparing(&repo, &task.id)
+            .await
+            .expect("transition result");
+        let persisted = repo.get_task(&task.id).await.expect("persisted task");
+
+        assert!(transition.transitioned);
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Preparing);
+        assert_eq!(persisted.workflow_state, OrchestratorWorkflowState::Rework);
+        assert_eq!(persisted.run_state, OrchestratorRunState::Preparing);
+        assert_eq!(
+            persisted.attempt_phase,
+            Some(OrchestratorAttemptPhase::Failed)
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     只有全局自动化和四个自动交付开关全部打开时才应进入 Delivering，默认配置应转人工复核。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造默认关闭、全部开启和单项关闭配置，断言 helper 对所有开关执行 AND 语义。
+    #[test]
+    fn auto_delivery_enabled_requires_all_flags() {
+        assert!(!auto_delivery_enabled(
+            &OrchestratorAutomationConfig::default()
+        ));
+
+        let enabled = OrchestratorAutomationConfig {
+            enabled: true,
+            ..OrchestratorAutomationConfig::default()
+        };
+        assert!(auto_delivery_enabled(&enabled));
+
+        let disabled = OrchestratorAutomationConfig {
+            enabled: true,
+            auto_push_main: false,
+            ..OrchestratorAutomationConfig::default()
+        };
+        assert!(!auto_delivery_enabled(&disabled));
     }
 
     /// Business Logic（为什么需要这个函数）:

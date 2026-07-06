@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use crate::error::AppError;
+use crate::orchestrator::claude_runtime::ClaudeRuntimeSummary;
 use crate::orchestrator::models::{
     OrchestratorAttemptPhase, OrchestratorEvidenceDto, OrchestratorProjectConfigDto,
     OrchestratorRunState, OrchestratorTaskAttemptRow, OrchestratorTaskRow, OrchestratorTaskStatus,
@@ -999,10 +1000,11 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     Runner 创建出某一轮尝试的 worktree 和 terminal 后，需要把 active session 与 attempt 写回任务行。
+    ///     Runner 创建出某一轮尝试的 worktree 和 terminal 后，需要把 active session、attempt 与可见运行器类型写回任务行。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     仅当任务仍为 Preparing 时写入 branch/worktree/session/attempt，把状态切到 Running；未命中时返回当前任务。
+    ///     仅当任务仍为 Preparing 时写入 branch/worktree/session/attempt/runner_provider，把状态切到 Running；
+    ///     同时清空上一轮 Claude runtime 字段并设置 runtime_started_at；未命中时返回当前任务。
     pub async fn mark_task_running_attempt(
         &self,
         task_id: &str,
@@ -1018,17 +1020,25 @@ impl OrchestratorRepo {
         let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Running);
         sqlx::query(
             "UPDATE orchestrator_tasks \
-             SET status = ?, workflow_state = ?, run_state = ?, branch_name = ?, worktree_id = ?, session_id = ?, attempt = ?, \
+             SET status = ?, workflow_state = ?, run_state = ?, runner_provider = ?, branch_name = ?, worktree_id = ?, session_id = ?, attempt = ?, \
+                 claude_session_id = ?, transcript_path = ?, runtime_started_at = ?, last_activity_at = ?, last_runtime_event = ?, last_runtime_message = ?, \
                  blocked_reason = ?, started_at = COALESCE(started_at, ?), updated_at = ? \
              WHERE id = ? AND status = ?",
         )
         .bind(OrchestratorTaskStatus::Running.as_str())
         .bind(split_state.workflow_state.as_str())
         .bind(split_state.run_state.as_str())
+        .bind("claudeCodeVisible")
         .bind(branch_name)
         .bind(worktree_id)
         .bind(session_id)
         .bind(attempt)
+        .bind(Option::<&str>::None)
+        .bind(Option::<&str>::None)
+        .bind(&now)
+        .bind(Option::<&str>::None)
+        .bind(Option::<&str>::None)
+        .bind(Option::<&str>::None)
         .bind(Option::<&str>::None)
         .bind(&now)
         .bind(now.clone())
@@ -1037,6 +1047,116 @@ impl OrchestratorRepo {
         .execute(&self.pool)
         .await?;
         self.get_task(task_id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Runner 准备阶段需要持续反馈 PreparingWorkspace/BuildingPrompt/Streaming 等细分进度，方便用户判断当前卡点。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅在任务仍处于 Preparing 时更新 attempt_phase 和 updated_at；Running 后必须改用 active runner guard helper。
+    pub async fn update_task_attempt_phase(
+        &self,
+        task_id: &str,
+        phase: OrchestratorAttemptPhase,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET attempt_phase = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(phase.as_str())
+        .bind(now)
+        .bind(task_id)
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .execute(&self.pool)
+        .await?;
+        self.get_task(task_id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Runner 挂账 Running 后的阶段更新可能与用户 Abort 或新 attempt 并发，旧 runner 迟到更新不能覆盖当前任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当 task_id、status=Running、attempt 和 session_id 全部匹配时写入 attempt_phase；未命中返回当前任务。
+    pub async fn update_active_runner_attempt_phase(
+        &self,
+        task_id: &str,
+        attempt: i64,
+        session_id: &str,
+        phase: OrchestratorAttemptPhase,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        if attempt <= 0 {
+            return Err(AppError::generic("任务尝试轮次必须大于 0"));
+        }
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return Err(AppError::generic("任务尝试缺少 session"));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET attempt_phase = ?, updated_at = ? \
+             WHERE id = ? AND status = ? AND attempt = ? AND session_id = ?",
+        )
+        .bind(phase.as_str())
+        .bind(now)
+        .bind(task_id)
+        .bind(OrchestratorTaskStatus::Running.as_str())
+        .bind(attempt)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+        self.get_task(task_id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Claude Code visible runtime 关联是可选增强；旧 runner 迟到关联不能覆盖新 attempt 的 session/transcript。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当 task_id、status=Running、attempt 和 session_id 全部匹配时写入 ClaudeRuntimeSummary；
+    ///     guard 未命中时返回 None，命中时返回更新后的任务行。
+    pub async fn update_active_runner_runtime_summary(
+        &self,
+        task_id: &str,
+        attempt: i64,
+        session_id: &str,
+        summary: &ClaudeRuntimeSummary,
+    ) -> Result<Option<OrchestratorTaskRow>, AppError> {
+        if attempt <= 0 {
+            return Err(AppError::generic("任务尝试轮次必须大于 0"));
+        }
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return Err(AppError::generic("任务尝试缺少 session"));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET claude_session_id = ?, transcript_path = ?, last_activity_at = ?, \
+                 last_runtime_event = ?, last_runtime_message = ?, updated_at = ? \
+             WHERE id = ? AND status = ? AND attempt = ? AND session_id = ?",
+        )
+        .bind(summary.claude_session_id.as_deref())
+        .bind(summary.transcript_path.as_deref())
+        .bind(summary.last_activity_at.as_deref())
+        .bind(summary.last_runtime_event.as_deref())
+        .bind(summary.last_runtime_message.as_deref())
+        .bind(now)
+        .bind(task_id)
+        .bind(OrchestratorTaskStatus::Running.as_str())
+        .bind(attempt)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 1 {
+            return self.get_task(task_id).await.map(Some);
+        }
+
+        self.get_task(task_id).await?;
+        Ok(None)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1193,6 +1313,48 @@ impl OrchestratorRepo {
         .bind(next_status.as_str())
         .bind(split_state.workflow_state.as_str())
         .bind(split_state.run_state.as_str())
+        .bind(blocked_reason)
+        .bind(now)
+        .bind(task_id)
+        .bind(expected_status.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(task_id).await.map(Some);
+        }
+
+        self.get_task(task_id).await?;
+        Ok(None)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     verifier pass/fail 需要在保留 legacy status 原子守卫的同时写入新的 workflow/run/attempt split state。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     执行 `UPDATE ... WHERE id=? AND status=?`，命中时按调用方传入的 split state 与 attempt phase 更新；
+    ///     未命中时确认任务仍存在并返回 None，避免迟到 verifier 覆盖 Abort 或其它并发状态。
+    pub async fn try_transition_task_split_state(
+        &self,
+        task_id: &str,
+        expected_status: OrchestratorTaskStatus,
+        next_status: OrchestratorTaskStatus,
+        workflow_state: OrchestratorWorkflowState,
+        run_state: OrchestratorRunState,
+        attempt_phase: Option<OrchestratorAttemptPhase>,
+        blocked_reason: Option<&str>,
+    ) -> Result<Option<OrchestratorTaskRow>, AppError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                 blocked_reason = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(next_status.as_str())
+        .bind(workflow_state.as_str())
+        .bind(run_state.as_str())
+        .bind(attempt_phase.map(|phase| phase.as_str()))
         .bind(blocked_reason)
         .bind(now)
         .bind(task_id)
@@ -3743,6 +3905,266 @@ mod tests {
         assert_eq!(running.worktree_id.as_deref(), Some("worktree-1"));
         assert_eq!(running.session_id.as_deref(), Some("session-1"));
         assert!(running.started_at.is_some());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     任务重试新 attempt 时不能继续展示上一轮 Claude transcript/session，否则用户会误以为新轮次已关联旧运行时。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先写入旧 runtime 字段，再把任务挂账为新 Running attempt，断言 runtime 字段被清空且 runtime_started_at 更新。
+    #[tokio::test]
+    async fn mark_task_running_attempt_clears_previous_runtime_and_sets_started_at() {
+        let (_pool, repo) = setup_repo().await;
+        let task = task_row(
+            "task-runtime-reset",
+            "project-1",
+            OrchestratorTaskStatus::Preparing,
+        );
+        repo.create_task(&task).await.unwrap();
+        sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET claude_session_id = 'old-claude-session', transcript_path = '/tmp/old.jsonl', \
+                 runtime_started_at = '2026-07-05T00:00:00Z', last_activity_at = '2026-07-05T00:01:00Z', \
+                 last_runtime_event = 'assistant', last_runtime_message = 'old message' \
+             WHERE id = ?",
+        )
+        .bind(&task.id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let running = repo
+            .mark_task_running_attempt(
+                &task.id,
+                "agent/task-runtime-reset",
+                "worktree-2",
+                "session-2",
+                2,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(running.status, OrchestratorTaskStatus::Running);
+        assert_eq!(running.attempt, 2);
+        assert_eq!(running.session_id.as_deref(), Some("session-2"));
+        assert_eq!(
+            running.runner_provider.as_deref(),
+            Some("claudeCodeVisible")
+        );
+        assert!(running.runtime_started_at.is_some());
+        assert_ne!(
+            running.runtime_started_at.as_deref(),
+            Some("2026-07-05T00:00:00Z")
+        );
+        assert!(running.claude_session_id.is_none());
+        assert!(running.transcript_path.is_none());
+        assert!(running.last_activity_at.is_none());
+        assert!(running.last_runtime_event.is_none());
+        assert!(running.last_runtime_message.is_none());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Runner 准备过程中需要把 PreparingWorkspace/BuildingPrompt/Streaming 等阶段写入任务行，供 UI 展示进度。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Preparing 任务后调用 phase helper，断言 attempt_phase 和 updated_at 已持久化。
+    #[tokio::test]
+    async fn update_task_attempt_phase_persists_phase() {
+        let (_pool, repo) = setup_repo().await;
+        let task = task_row("task-phase", "project-1", OrchestratorTaskStatus::Preparing);
+        repo.create_task(&task).await.unwrap();
+
+        let updated = repo
+            .update_task_attempt_phase(&task.id, OrchestratorAttemptPhase::BuildingPrompt)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            updated.attempt_phase,
+            Some(OrchestratorAttemptPhase::BuildingPrompt)
+        );
+        assert_ne!(updated.updated_at, task.updated_at);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Runner 迟到异步流程可能来自旧 attempt/session；这些迟到 phase 或 runtime 更新不能覆盖当前 active runner。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     挂账当前 Running attempt/session 后先用正确 guard 写入，再用旧 attempt/session 尝试覆盖，断言最终字段保持当前值。
+    #[tokio::test]
+    async fn active_runner_guard_prevents_old_phase_and_runtime_updates() {
+        let (_pool, repo) = setup_repo().await;
+        let task = task_row(
+            "task-active-guard",
+            "project-1",
+            OrchestratorTaskStatus::Preparing,
+        );
+        repo.create_task(&task).await.unwrap();
+        repo.mark_task_running_attempt(
+            &task.id,
+            "agent/task-active-guard",
+            "worktree-2",
+            "session-new",
+            2,
+        )
+        .await
+        .unwrap();
+
+        repo.update_active_runner_attempt_phase(
+            &task.id,
+            2,
+            "session-new",
+            OrchestratorAttemptPhase::BuildingPrompt,
+        )
+        .await
+        .unwrap();
+        repo.update_active_runner_attempt_phase(
+            &task.id,
+            1,
+            "session-old",
+            OrchestratorAttemptPhase::Streaming,
+        )
+        .await
+        .unwrap();
+
+        let current_summary = crate::orchestrator::claude_runtime::ClaudeRuntimeSummary {
+            claude_session_id: Some("claude-session-new".to_string()),
+            transcript_path: Some("/tmp/new.jsonl".to_string()),
+            last_activity_at: Some("2026-07-06T00:01:00Z".to_string()),
+            last_runtime_event: Some("assistant".to_string()),
+            last_runtime_message: Some("new message".to_string()),
+        };
+        let stale_summary = crate::orchestrator::claude_runtime::ClaudeRuntimeSummary {
+            claude_session_id: Some("claude-session-old".to_string()),
+            transcript_path: Some("/tmp/old.jsonl".to_string()),
+            last_activity_at: Some("2026-07-06T00:02:00Z".to_string()),
+            last_runtime_event: Some("assistant".to_string()),
+            last_runtime_message: Some("old message".to_string()),
+        };
+        let updated = repo
+            .update_active_runner_runtime_summary(&task.id, 2, "session-new", &current_summary)
+            .await
+            .unwrap()
+            .expect("current runner runtime should update");
+        assert_eq!(
+            updated.claude_session_id.as_deref(),
+            Some("claude-session-new")
+        );
+
+        let stale_update = repo
+            .update_active_runner_runtime_summary(&task.id, 1, "session-old", &stale_summary)
+            .await
+            .unwrap();
+        assert!(stale_update.is_none());
+
+        let persisted = repo.get_task(&task.id).await.unwrap();
+        assert_eq!(
+            persisted.attempt_phase,
+            Some(OrchestratorAttemptPhase::BuildingPrompt)
+        );
+        assert_eq!(
+            persisted.claude_session_id.as_deref(),
+            Some("claude-session-new")
+        );
+        assert_eq!(persisted.transcript_path.as_deref(), Some("/tmp/new.jsonl"));
+        assert_eq!(
+            persisted.last_runtime_message.as_deref(),
+            Some("new message")
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Claude Code visible runtime 关联成功后，只有当前 active attempt/session 能写入任务详情字段。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     挂账 Running 任务后用匹配的 attempt/session 写入 ClaudeRuntimeSummary，断言所有 runtime 字段落库。
+    #[tokio::test]
+    async fn update_active_runner_runtime_summary_persists_claude_fields() {
+        let (_pool, repo) = setup_repo().await;
+        let task = task_row(
+            "task-runtime",
+            "project-1",
+            OrchestratorTaskStatus::Preparing,
+        );
+        repo.create_task(&task).await.unwrap();
+        repo.mark_task_running_attempt(
+            &task.id,
+            "agent/task-runtime",
+            "worktree-1",
+            "session-1",
+            1,
+        )
+        .await
+        .unwrap();
+        let summary = crate::orchestrator::claude_runtime::ClaudeRuntimeSummary {
+            claude_session_id: Some("claude-session-1".to_string()),
+            transcript_path: Some("/tmp/transcript.jsonl".to_string()),
+            last_activity_at: Some("2026-07-06T00:01:00Z".to_string()),
+            last_runtime_event: Some("assistant".to_string()),
+            last_runtime_message: Some("done".to_string()),
+        };
+
+        let updated = repo
+            .update_active_runner_runtime_summary(&task.id, 1, "session-1", &summary)
+            .await
+            .unwrap()
+            .expect("matching runner should update runtime");
+
+        assert_eq!(
+            updated.claude_session_id.as_deref(),
+            Some("claude-session-1")
+        );
+        assert_eq!(
+            updated.transcript_path.as_deref(),
+            Some("/tmp/transcript.jsonl")
+        );
+        assert_eq!(
+            updated.last_activity_at.as_deref(),
+            Some("2026-07-06T00:01:00Z")
+        );
+        assert_eq!(updated.last_runtime_event.as_deref(), Some("assistant"));
+        assert_eq!(updated.last_runtime_message.as_deref(), Some("done"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     verifier pass 且 delivery 关闭时需要进入 HumanReview/Idle/Succeeded，不能被 legacy Done 映射覆盖。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用 expected-status helper 从 Verifying 转为 legacy Done，同时指定自定义 split state 和 attempt phase。
+    #[tokio::test]
+    async fn try_transition_task_split_state_sets_custom_lane_and_phase() {
+        let (_pool, repo) = setup_repo().await;
+        let task = task_row(
+            "task-human-review",
+            "project-1",
+            OrchestratorTaskStatus::Verifying,
+        );
+        repo.create_task(&task).await.unwrap();
+
+        let updated = repo
+            .try_transition_task_split_state(
+                &task.id,
+                OrchestratorTaskStatus::Verifying,
+                OrchestratorTaskStatus::Done,
+                OrchestratorWorkflowState::HumanReview,
+                OrchestratorRunState::Idle,
+                Some(OrchestratorAttemptPhase::Succeeded),
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("transition should match");
+
+        assert_eq!(updated.status, OrchestratorTaskStatus::Done);
+        assert_eq!(
+            updated.workflow_state,
+            OrchestratorWorkflowState::HumanReview
+        );
+        assert_eq!(updated.run_state, OrchestratorRunState::Idle);
+        assert_eq!(
+            updated.attempt_phase,
+            Some(OrchestratorAttemptPhase::Succeeded)
+        );
     }
 
     /// Business Logic（为什么需要这个函数）:

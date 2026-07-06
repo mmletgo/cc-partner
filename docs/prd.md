@@ -243,10 +243,10 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 兼容旧任务的创建 Draft、入队、自动验证闭环、Blocked 重试和终止语义；移动端 `/mobile` 自动化面板可在本机项目下创建并默认入队项目级任务，也可通过本机 HTTP task-view 入口代理到远端设备列出、创建并默认入队远端项目任务
 - 自动化配置统一放在 Settings 的独立 tab 中，控制 scheduler 启用、最大并发、验证命令、full-auto 交付开关和重试相关行为；运行偏好按设备持久化在全局 AppConfig，不做项目级策略。scheduler、验证和 delivery 运行时均读取全局自动化配置；后端 legacy `orchestrator_project_config` 仅保留存储、兼容和调试接口，不作为用户可见配置路径或运行时语义。验证命令以多行文本维护，保存时 trim/filter 空行并限制数量与长度
 - 远端项目的 Orchestrator 任务以远端 cc-partner 为权威来源；本机 remote shortcut 只通过 P2P Orchestrator route 创建、列出、入队、重试、终止和读取 evidence，不把远端任务复制成本机可调度任务。远端设备离线时，本机允许创建 pending remote task，写入本机 outbox 并展示“待发送到远端”；设备恢复在线后后台 dispatcher 自动投递，投递使用稳定 clientRequestId 防止超时重试重复创建，sending 超过 5 分钟会恢复 pending 重试，投递成功后必须在同一事务内保存远端 task id 并更新远端任务 mirror。远端 mirror 只用于离线展示最近快照，本机 scheduler、验证和交付不得消费 mirror 行
-- Runner 必须使用 Workbench 可见的 tmux terminal 和任务 worktree，方便用户随时 takeover 或观察 Claude Code 执行现场；每轮 Runner attempt 记录 prompt、worktree、session 和状态，首轮创建任务 worktree，Blocked retry 或后续修复轮复用同一 worktree、新建终端 session，并使用新的 attempt 序号
+- Runner 必须使用 Workbench 可见的 tmux terminal 和任务 worktree，方便用户随时 takeover 或观察 Claude Code 执行现场；每轮 Runner attempt 记录 prompt、worktree、session、阶段和状态，首轮创建任务 worktree，Blocked retry 或后续修复轮复用同一 worktree、新建终端 session，并使用新的 attempt 序号；后端会 best-effort 关联 Claude Code 自身 session/transcript/runtime 字段，关联不到或 JSONL 损坏时显示 unknown fallback，不阻断 Runner
 - Claude Code 开发 Prompt 必须要求完成代码、测试/验证和必要证据说明后，最后单独输出 `ORCHESTRATOR_DEV_DONE`；后端监听可见开发终端输出，只在检测到换行终结的独立哨兵行且该 session/attempt 仍是任务 active runner 后自动进入既有验证/交付流程，手动“完成 Agent 运行”命令仍作为用户 fallback
-- 后端自动执行验证命令并调用验证 Claude 做最终裁决；验证命令非零退出作为 verifier 输入，不直接阻塞任务，只有命令启动/读取/超时、verifier CLI/JSON/schema、diff 读取等基础设施失败才进入 Blocked；验证未通过时在同一 worktree 新建 terminal/Claude 继续修复，直到通过或用户终止
-- 目标态验证通过后按全局自动化配置完成 commit、推送任务分支、合并主工作区和推送主分支
+- 后端自动执行验证命令并调用验证 Claude 做最终裁决；验证命令非零退出作为 verifier 输入，不直接阻塞任务，只有命令启动/读取/超时、verifier CLI/JSON/schema、diff 读取等基础设施失败才进入 Blocked；验证未通过时任务进入 Rework，并在同一 worktree 新建 terminal/Claude 继续修复，直到通过或用户终止
+- 目标态验证通过后，只有 Settings 中全局自动化启用且 full-auto 交付开关全部开启才自动完成 commit、推送任务分支、合并主工作区和推送主分支；默认自动化关闭或任一交付开关关闭时任务进入 Human Review 等待用户复核
 - 任务进入 Blocked 或循环修复时保留原因、worktree/session 入口和 evidence 链；Evidence 记录验证输出、验证 Claude 裁决、修复 Prompt、交付阶段结果和失败摘要，供前端任务看板展示与追溯
 - OrchestratorPanel 只拥有项目级任务看板、任务详情、创建任务弹窗、Evidence 和编排状态，不展示项目级策略或配置；Workbench 拥有项目级自动化控制台挂载、项目上下文、执行现场 deep link takeover、文件和 Git 操作
 - Workbench 自动化状态条通过后端 runtime snapshot 展示 scheduler 开关、workflow 来源与校验结果、全局最大并发、当前项目槽位占用和最近阻塞原因；snapshot 只作为观察/诊断面，不作为任务正确性的唯一来源；本轮 remote shortcut 暂不返回 snapshot，后续如需展示远端状态必须由 owning device 提供 P2P snapshot，不能用本机状态代替
