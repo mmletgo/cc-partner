@@ -4,6 +4,8 @@ import {
   buildCreateOrchestratorTaskViewInvokeArgs,
   buildListOrchestratorTaskViewsInvokeArgs,
   buildListOrchestratorTaskEvidenceForProjectInvokeArgs,
+  buildMoveOrchestratorTaskWorkflowStateInvokeArgs,
+  buildOrchestratorRuntimeSnapshotInvokeArgs,
   buildOrchestratorTaskViewActionInvokeArgs,
   orchestratorApi,
 } from './orchestrator';
@@ -43,6 +45,15 @@ assert(
   ORCHESTRATOR_REMOTE_COMMANDS.listEvidenceForProject ===
     'list_orchestrator_task_evidence_for_project',
   'listEvidence should use the project-scoped evidence backend command',
+);
+assert(
+  ORCHESTRATOR_REMOTE_COMMANDS.moveTaskWorkflowState ===
+    'move_orchestrator_task_workflow_state',
+  'moveTaskWorkflowState should use the split-state backend command',
+);
+assert(
+  ORCHESTRATOR_REMOTE_COMMANDS.getRuntimeSnapshot === 'get_orchestrator_runtime_snapshot',
+  'getRuntimeSnapshot should use the runtime snapshot backend command',
 );
 assert(
   !('getProjectConfig' in ORCHESTRATOR_REMOTE_COMMANDS),
@@ -107,6 +118,40 @@ const evidenceArgs = buildListOrchestratorTaskEvidenceForProjectInvokeArgs(
 assert(
   JSON.stringify(evidenceArgs) === JSON.stringify({ projectId: 'project-1', taskId: 'task-1' }),
   'listEvidence should include projectId and taskId before invoking backend',
+);
+
+const moveArgs = buildMoveOrchestratorTaskWorkflowStateInvokeArgs(
+  ' project-1 ',
+  ' task-1 ',
+  'humanReview',
+);
+
+assert(
+  JSON.stringify(moveArgs) ===
+    JSON.stringify({
+      request: {
+        projectId: 'project-1',
+        taskId: 'task-1',
+        targetState: 'humanReview',
+      },
+    }),
+  'moveTaskWorkflowState should wrap trimmed ids and target state in request',
+);
+
+const runtimeSnapshotArgs = buildOrchestratorRuntimeSnapshotInvokeArgs(' project-1 ');
+
+assert(
+  JSON.stringify(runtimeSnapshotArgs) === JSON.stringify({ projectId: 'project-1' }),
+  'getRuntimeSnapshot should trim projectId before invoking backend',
+);
+
+assert(
+  'moveTaskWorkflowState' in orchestratorApi,
+  'orchestrator task API should expose moveTaskWorkflowState',
+);
+assert(
+  'getRuntimeSnapshot' in orchestratorApi,
+  'orchestrator task API should expose getRuntimeSnapshot',
 );
 
 console.log('orchestrator.test.ts passed');

@@ -1,6 +1,11 @@
 import type { PillTone } from '@/components/primitives';
 import type { TFunction } from 'i18next';
-import type { OrchestratorTask, OrchestratorTaskStatus, OrchestratorTaskView } from './types';
+import type {
+  OrchestratorTask,
+  OrchestratorTaskStatus,
+  OrchestratorTaskView,
+  OrchestratorWorkflowState,
+} from './types';
 
 /**
  * Business Logic（为什么需要这个类型）:
@@ -303,6 +308,33 @@ export function orchestratorStatusTone(status: OrchestratorTaskStatus): Orchestr
       return 'accent';
     case 'draft':
     case 'queued':
+      return 'neutral';
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   自动化看板需要用一致颜色表达 workflow 泳道状态，并且只能使用现有 Pill 支持的 tone。
+ *
+ * Code Logic（这个函数做什么）:
+ *   将完成态映射为 success，取消态映射为 danger，返工映射为 warn，执行/合并映射为 accent，其余泳道为 neutral。
+ */
+export function orchestratorWorkflowStateTone(
+  state: OrchestratorWorkflowState,
+): OrchestratorStatusTone {
+  switch (state) {
+    case 'done':
+      return 'success';
+    case 'canceled':
+      return 'danger';
+    case 'rework':
+      return 'warn';
+    case 'inProgress':
+    case 'merging':
+      return 'accent';
+    case 'backlog':
+    case 'todo':
+    case 'humanReview':
       return 'neutral';
   }
 }

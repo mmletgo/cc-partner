@@ -366,13 +366,73 @@ export type OrchestratorTaskStatus =
   | 'aborted';
 
 /**
+ * Orchestrator 工作流看板状态。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   自动化看板需要按后端工作流泳道展示任务，并允许用户拖拽调整本机任务所在泳道。
+ *
+ * Code Logic（这个类型做什么）:
+ *   以字符串字面量枚举锁定 Rust OrchestratorWorkflowState 序列化后的 camelCase 状态值。
+ */
+export type OrchestratorWorkflowState =
+  | 'backlog'
+  | 'todo'
+  | 'inProgress'
+  | 'humanReview'
+  | 'rework'
+  | 'merging'
+  | 'done'
+  | 'canceled';
+
+/**
+ * Orchestrator 运行态状态。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   前端需要区分任务的工作流泳道和当前 runner 是否正在占用执行资源。
+ *
+ * Code Logic（这个类型做什么）:
+ *   以字符串字面量枚举锁定 Rust OrchestratorRunState 序列化后的 camelCase 状态值。
+ */
+export type OrchestratorRunState =
+  | 'idle'
+  | 'queued'
+  | 'preparing'
+  | 'running'
+  | 'verifying'
+  | 'retrying'
+  | 'blocked'
+  | 'delivering';
+
+/**
+ * Orchestrator 当前 attempt 阶段。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   任务详情和运行时提示需要展示 runner 当前卡在准备、启动、流式输出或收尾等哪个阶段。
+ *
+ * Code Logic（这个类型做什么）:
+ *   以字符串字面量枚举锁定 Rust OrchestratorAttemptPhase 序列化后的 camelCase 阶段值。
+ */
+export type OrchestratorAttemptPhase =
+  | 'preparingWorkspace'
+  | 'buildingPrompt'
+  | 'launchingRunner'
+  | 'initializingSession'
+  | 'streaming'
+  | 'finishing'
+  | 'succeeded'
+  | 'failed'
+  | 'timedOut'
+  | 'stalled'
+  | 'canceledByReconciliation';
+
+/**
  * Orchestrator 任务 DTO（对齐 Rust OrchestratorTaskDto，camelCase）。
  *
  * Business Logic（为什么需要这个类型）:
- *   前端后续任务队列页面需要展示任务目标、验收标准、执行关联和阻塞状态。
+ *   前端后续任务队列和自动化看板需要同时展示 legacy 生命周期、工作流泳道和 runner 运行现场。
  *
  * Code Logic（字段说明）:
- *   status 表示任务生命周期；worktree/session/branch 为后续 runner 绑定信息，当前创建时可为空。
+ *   status 保留旧 UI 兼容；workflow/run/attempt 字段对齐 split-state 后端 DTO；nullable 后端字段使用 string | null。
  */
 export interface OrchestratorTask {
   id: string;
@@ -381,6 +441,20 @@ export interface OrchestratorTask {
   goal: string;
   acceptanceCriteria: string;
   status: OrchestratorTaskStatus;
+  workflowState: OrchestratorWorkflowState;
+  runState: OrchestratorRunState;
+  attemptPhase: OrchestratorAttemptPhase | null;
+  source: string;
+  externalId: string | null;
+  externalIdentifier: string | null;
+  externalUrl: string | null;
+  runnerProvider: string | null;
+  claudeSessionId: string | null;
+  transcriptPath: string | null;
+  runtimeStartedAt: string | null;
+  lastActivityAt: string | null;
+  lastRuntimeEvent: string | null;
+  lastRuntimeMessage: string | null;
   priority: number;
   branchName: string | null;
   worktreeId: string | null;
@@ -391,6 +465,28 @@ export interface OrchestratorTask {
   updatedAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+}
+
+/**
+ * Orchestrator 项目运行时快照 DTO（对齐 Rust OrchestratorRuntimeSnapshotDto，camelCase）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   Workbench 自动化看板需要展示当前项目调度器、workflow 配置有效性和并发槽位占用。
+ *
+ * Code Logic（字段说明）:
+ *   workflowError/latestError 为后端可空错误文本；slotsUsed/slotsAvailable 描述当前 runner 并发资源。
+ */
+export interface OrchestratorRuntimeSnapshot {
+  projectId: string;
+  generatedAt: string;
+  schedulerEnabled: boolean;
+  workflowSource: string;
+  workflowValid: boolean;
+  workflowError: string | null;
+  maxConcurrentTasks: number;
+  slotsUsed: number;
+  slotsAvailable: number;
+  latestError: string | null;
 }
 
 /**

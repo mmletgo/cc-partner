@@ -4,6 +4,7 @@ import type {
   OrchestratorTask,
   OrchestratorTaskStatus,
   OrchestratorTaskView,
+  OrchestratorWorkflowState,
 } from './types';
 import type { PillTone } from '@/components/primitives';
 import {
@@ -18,6 +19,7 @@ import {
   orchestratorEvidenceKindLabel,
   orchestratorEvidenceKindTone,
   resolveOrchestratorActionSelection,
+  orchestratorWorkflowStateTone,
   orchestratorStatusTone,
   orchestratorTaskProgressMessage,
   resolveOrchestratorTaskLoad,
@@ -54,6 +56,20 @@ function createTask(
     goal: 'goal',
     acceptanceCriteria: 'acceptance',
     status,
+    workflowState: 'todo',
+    runState: 'idle',
+    attemptPhase: null,
+    source: 'local',
+    externalId: null,
+    externalIdentifier: null,
+    externalUrl: null,
+    runnerProvider: null,
+    claudeSessionId: null,
+    transcriptPath: null,
+    runtimeStartedAt: null,
+    lastActivityAt: null,
+    lastRuntimeEvent: null,
+    lastRuntimeMessage: null,
     priority: 0,
     branchName: null,
     worktreeId: null,
@@ -124,6 +140,35 @@ assert(orchestratorStatusTone('blocked') === 'danger', 'blocked status should us
 assert(orchestratorStatusTone('running') === 'accent', 'running status should use accent tone');
 assert(orchestratorStatusTone('queued') === 'neutral', 'queued status should use neutral tone');
 assert(orchestratorStatusTone('aborted') === 'danger', 'aborted status should use danger tone');
+
+const workflowStates: readonly OrchestratorWorkflowState[] = [
+  'backlog',
+  'todo',
+  'inProgress',
+  'humanReview',
+  'rework',
+  'merging',
+  'done',
+  'canceled',
+];
+
+for (const state of workflowStates) {
+  assert(
+    supportedTones.has(orchestratorWorkflowStateTone(state)),
+    `orchestratorWorkflowStateTone should return a supported PillTone for ${state}`,
+  );
+}
+
+assert(orchestratorWorkflowStateTone('done') === 'success', 'done workflow state should use success tone');
+assert(orchestratorWorkflowStateTone('rework') === 'warn', 'rework workflow state should use warn tone');
+assert(
+  orchestratorWorkflowStateTone('inProgress') === 'accent',
+  'inProgress workflow state should use accent tone',
+);
+assert(
+  orchestratorWorkflowStateTone('canceled') === 'danger',
+  'canceled workflow state should use danger tone',
+);
 
 assert(
   orchestratorEvidenceKindLabel('developmentAttempt', t) === 'Development attempt',

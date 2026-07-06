@@ -11,8 +11,10 @@
 import { invoke } from './client';
 import type {
   OrchestratorEvidence,
+  OrchestratorRuntimeSnapshot,
   OrchestratorTask,
   OrchestratorTaskView,
+  OrchestratorWorkflowState,
 } from '@/lib/types';
 
 /**
@@ -20,7 +22,7 @@ import type {
  *   Orchestrator Workbench UI 必须使用 remote-aware 命令，避免远端项目误走旧的本机-only command。
  *
  * Code Logic（这个常量做什么）:
- *   集中声明任务视图和 evidence 的 Tauri command 名，供 API 方法和契约测试共享。
+ *   集中声明任务视图、evidence 和 Workbench 本机项目看板命令名，供 API 方法和契约测试共享。
  */
 export const ORCHESTRATOR_REMOTE_COMMANDS = {
   listTaskViews: 'list_orchestrator_task_views',
@@ -29,6 +31,9 @@ export const ORCHESTRATOR_REMOTE_COMMANDS = {
   retryTaskView: 'retry_orchestrator_task_view',
   abortTaskView: 'abort_orchestrator_task_view',
   listEvidenceForProject: 'list_orchestrator_task_evidence_for_project',
+  // 常量名保留 remote 以减少本轮迁移面；下面两个命令服务 Workbench 本机项目看板。
+  moveTaskWorkflowState: 'move_orchestrator_task_workflow_state',
+  getRuntimeSnapshot: 'get_orchestrator_runtime_snapshot',
 } as const;
 
 /**
@@ -102,6 +107,40 @@ export function buildListOrchestratorTaskEvidenceForProjectInvokeArgs(
   taskId: string,
 ): Record<string, unknown> {
   return buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   看板拖拽需要把本机任务移动到目标 workflow 泳道，后端要求 request 包裹业务参数。
+ *
+ * Code Logic（这个函数做什么）:
+ *   projectId/taskId 首尾空白会被 trim，targetState 原样保留，再包装成 `{ request }`。
+ */
+export function buildMoveOrchestratorTaskWorkflowStateInvokeArgs(
+  projectId: string,
+  taskId: string,
+  targetState: OrchestratorWorkflowState,
+): Record<string, unknown> {
+  return {
+    request: {
+      projectId: projectId.trim(),
+      taskId: taskId.trim(),
+      targetState,
+    },
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Workbench 自动化看板需要读取当前项目调度器运行时快照，参数必须绑定明确项目。
+ *
+ * Code Logic（这个函数做什么）:
+ *   projectId 首尾空白会被 trim，再包装成 `{ projectId }` 供 invoke 使用。
+ */
+export function buildOrchestratorRuntimeSnapshotInvokeArgs(
+  projectId: string,
+): Record<string, unknown> {
+  return { projectId: projectId.trim() };
 }
 
 /**
@@ -180,6 +219,36 @@ export const orchestratorApi = {
     invoke<OrchestratorEvidence[]>(
       ORCHESTRATOR_REMOTE_COMMANDS.listEvidenceForProject,
       buildListOrchestratorTaskEvidenceForProjectInvokeArgs(projectId, taskId),
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户在 Workbench 自动化看板拖拽本机任务时，需要把任务切换到相邻 workflow 泳道。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 move_orchestrator_task_workflow_state，并按后端要求用 `{ request }` 包裹参数。
+   */
+  moveTaskWorkflowState: (
+    projectId: string,
+    taskId: string,
+    targetState: OrchestratorWorkflowState,
+  ) =>
+    invoke<OrchestratorTaskView>(
+      ORCHESTRATOR_REMOTE_COMMANDS.moveTaskWorkflowState,
+      buildMoveOrchestratorTaskWorkflowStateInvokeArgs(projectId, taskId, targetState),
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Workbench 自动化看板需要展示调度器是否启用、workflow 是否有效和当前并发槽位。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 get_orchestrator_runtime_snapshot，并返回后端 camelCase runtime snapshot DTO。
+   */
+  getRuntimeSnapshot: (projectId: string) =>
+    invoke<OrchestratorRuntimeSnapshot>(
+      ORCHESTRATOR_REMOTE_COMMANDS.getRuntimeSnapshot,
+      buildOrchestratorRuntimeSnapshotInvokeArgs(projectId),
     ),
 
   /**
