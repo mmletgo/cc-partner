@@ -259,6 +259,69 @@ export function canQueueOrchestratorTaskForProject(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   显式 Start 只应出现在 Backlog/Draft 或 Todo/Idle 任务上，避免用户把运行中或终态任务重复送入 scheduler。
+ *
+ * Code Logic（这个函数做什么）:
+ *   校验任务归属当前项目后，允许 draft/backlog/idle 或 todo/idle 两类后端可 start 状态。
+ */
+export function canStartOrchestratorTaskForProject(
+  task: OrchestratorTask | null,
+  currentProjectId: string | null | undefined,
+): boolean {
+  if (!task || task.projectId !== currentProjectId) return false;
+  const backlogDraft =
+    task.status === 'draft' && task.workflowState === 'backlog' && task.runState === 'idle';
+  const todoIdle = task.workflowState === 'todo' && task.runState === 'idle';
+  return backlogDraft || todoIdle;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   人工复核未通过时才允许 requestRework，避免已交付 Done 或运行中任务被误回退。
+ *
+ * Code Logic（这个函数做什么）:
+ *   校验任务属于当前项目，且 legacy status 为 done、workflowState 为 humanReview、runState 为 idle。
+ */
+export function canRequestReworkForProject(
+  task: OrchestratorTask | null,
+  currentProjectId: string | null | undefined,
+): boolean {
+  if (!task || task.projectId !== currentProjectId) return false;
+  return task.status === 'done' && task.workflowState === 'humanReview' && task.runState === 'idle';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   用户只能交付已经通过验证并停在人工复核的任务，Settings gate 由后端再做权威校验。
+ *
+ * Code Logic（这个函数做什么）:
+ *   当前前端交付可见性与 requestRework 使用同一 HumanReview/Done-compatible 条件。
+ */
+export function canDeliverReviewedTaskForProject(
+  task: OrchestratorTask | null,
+  currentProjectId: string | null | undefined,
+): boolean {
+  return canRequestReworkForProject(task, currentProjectId);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   cancelTask 用于停止任务继续被调度或交付；HumanReview 虽然 legacy status 为 done，但仍是可审计待处理状态。
+ *
+ * Code Logic（这个函数做什么）:
+ *   校验任务属于当前项目，并拒绝最终 Done/Canceled 泳道与 legacy aborted。
+ */
+export function canCancelOrchestratorTaskForProject(
+  task: OrchestratorTask | null,
+  currentProjectId: string | null | undefined,
+): boolean {
+  if (!task || task.projectId !== currentProjectId) return false;
+  if (task.status === 'aborted') return false;
+  return task.workflowState !== 'done' && task.workflowState !== 'canceled';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   Running 任务详情才应显示“Claude Code 已完成，开始验证”，且项目切换后不能操作旧项目任务。
  *
  * Code Logic（这个函数做什么）:

@@ -16,8 +16,9 @@ use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{OrchestratorEvidenceDto, OrchestratorTaskDto};
 use crate::orchestrator::remote_protocol::{
     RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq, RemoteListTasksReq,
-    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp, RemoteOrchestratorTaskListResp,
-    RemoteTaskReq,
+    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp,
+    RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp, RemoteTaskReq,
+    RemoteTaskReworkReq,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -46,7 +47,7 @@ enum RemoteRequestTimeoutKind {
 ///     remote shortcut 的 Orchestrator 命令需要复用同一套 HTTP 调用与错误映射规则。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有 cloneable 的 `reqwest::Client`，对外提供 create/list/evidence/queue/retry/abort/config 方法。
+///     持有 cloneable 的 `reqwest::Client`，对外提供 create/list/evidence/start/rework/deliver/cancel/refresh/config 方法。
 #[derive(Clone)]
 pub struct RemoteOrchestratorClient {
     client: reqwest::Client,
@@ -173,6 +174,26 @@ impl RemoteOrchestratorClient {
         .await
     }
 
+    /// 启动远端任务。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户在 remote shortcut 上点击 Start 时，任务必须在 owning device 上进入 scheduler 可领取路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/orchestrator/tasks/start`，解析更新后的任务 DTO。
+    pub async fn start_task(
+        &self,
+        base_url: &str,
+        task_id: &str,
+    ) -> Result<OrchestratorTaskDto, AppError> {
+        self.post_task_req(
+            endpoint_url(base_url, "/api/orchestrator/tasks/start"),
+            task_id,
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
     /// 重试远端阻塞任务。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -187,6 +208,50 @@ impl RemoteOrchestratorClient {
     ) -> Result<OrchestratorTaskDto, AppError> {
         self.post_task_req(
             endpoint_url(base_url, "/api/orchestrator/tasks/retry"),
+            task_id,
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
+    /// 请求远端任务返工。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     人工复核未通过时，返工原因必须写到项目所在设备的任务 evidence，而不是本机 mirror。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/orchestrator/tasks/request-rework`，携带 taskId/reason 并解析更新后的任务 DTO。
+    pub async fn request_rework_task(
+        &self,
+        base_url: &str,
+        task_id: &str,
+        reason: &str,
+    ) -> Result<OrchestratorTaskDto, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/orchestrator/tasks/request-rework"),
+            &RemoteTaskReworkReq {
+                task_id: task_id.to_string(),
+                reason: reason.to_string(),
+            },
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
+    /// 交付远端人工复核任务。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote shortcut 上的显式交付必须由 owning device 检查 Settings 并运行 Git delivery pipeline。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/orchestrator/tasks/deliver-reviewed`，解析 delivery pipeline 返回的任务 DTO。
+    pub async fn deliver_reviewed_task(
+        &self,
+        base_url: &str,
+        task_id: &str,
+    ) -> Result<OrchestratorTaskDto, AppError> {
+        self.post_task_req(
+            endpoint_url(base_url, "/api/orchestrator/tasks/deliver-reviewed"),
             task_id,
             RemoteRequestTimeoutKind::Long,
         )
@@ -208,6 +273,48 @@ impl RemoteOrchestratorClient {
         self.post_task_req(
             endpoint_url(base_url, "/api/orchestrator/tasks/abort"),
             task_id,
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
+    /// 取消远端任务。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 cancelTask 需要把 owning device 上的权威任务移到 Canceled/Idle，并保留执行现场。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/orchestrator/tasks/cancel`，解析更新后的任务 DTO。
+    pub async fn cancel_task(
+        &self,
+        base_url: &str,
+        task_id: &str,
+    ) -> Result<OrchestratorTaskDto, AppError> {
+        self.post_task_req(
+            endpoint_url(base_url, "/api/orchestrator/tasks/cancel"),
+            task_id,
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
+    /// 刷新远端 Orchestrator 项目。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote shortcut 刷新项目时，调度/reconcile 必须在项目所在设备执行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/orchestrator/projects/refresh`，解析 `{projectId, dispatched}`。
+    pub async fn refresh_project(
+        &self,
+        base_url: &str,
+        project_id: &str,
+    ) -> Result<RemoteOrchestratorProjectRefreshResp, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/orchestrator/projects/refresh"),
+            &RemoteListTasksReq {
+                project_id: project_id.to_string(),
+            },
             RemoteRequestTimeoutKind::Long,
         )
         .await

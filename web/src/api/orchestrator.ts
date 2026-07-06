@@ -28,8 +28,13 @@ export const ORCHESTRATOR_REMOTE_COMMANDS = {
   listTaskViews: 'list_orchestrator_task_views',
   createTaskView: 'create_orchestrator_task_view',
   queueTaskView: 'queue_orchestrator_task_view',
+  startTaskView: 'start_orchestrator_task_view',
   retryTaskView: 'retry_orchestrator_task_view',
+  requestReworkTaskView: 'request_orchestrator_task_rework_view',
+  deliverReviewedTaskView: 'deliver_reviewed_orchestrator_task_view',
   abortTaskView: 'abort_orchestrator_task_view',
+  cancelTaskView: 'cancel_orchestrator_task_view',
+  refreshProject: 'refresh_orchestrator_project',
   listEvidenceForProject: 'list_orchestrator_task_evidence_for_project',
   // 常量名保留 remote 以减少本轮迁移面；下面两个命令服务 Workbench 本机项目看板。
   moveTaskWorkflowState: 'move_orchestrator_task_workflow_state',
@@ -61,6 +66,20 @@ export interface CreateOrchestratorTaskRequest {
 }
 
 export type OrchestratorCreateAction = 'backlog' | 'todo' | 'start';
+
+/**
+ * Orchestrator 项目刷新结果。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   用户点击刷新项目后需要看到后端是否实际领取了任务，remote 项目也返回本机 shortcut projectId。
+ *
+ * Code Logic（这个类型做什么）:
+ *   对齐 Rust OrchestratorProjectRefreshDto 的 camelCase 序列化字段。
+ */
+export interface OrchestratorProjectRefreshResult {
+  projectId: string;
+  dispatched: number;
+}
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -102,6 +121,25 @@ export function buildOrchestratorTaskViewActionInvokeArgs(
   taskId: string,
 ): Record<string, unknown> {
   return { projectId: projectId.trim(), taskId: taskId.trim() };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   requestRework 是显式业务动作，除 projectId/taskId 外还必须传递用户填写的返工原因供后端写 evidence。
+ *
+ * Code Logic（这个函数做什么）:
+ *   projectId/taskId/reason 首尾空白会被 trim，再包装成 `{ projectId, taskId, reason }`。
+ */
+export function buildOrchestratorTaskReworkInvokeArgs(
+  projectId: string,
+  taskId: string,
+  reason: string,
+): Record<string, unknown> {
+  return {
+    projectId: projectId.trim(),
+    taskId: taskId.trim(),
+    reason: reason.trim(),
+  };
 }
 
 /**
@@ -219,6 +257,19 @@ export const orchestratorApi = {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   用户点击 Start 时，需要把本机或远端真实任务放入 scheduler 可领取路径。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 start_orchestrator_task_view，并通过 helper 归一化 projectId/taskId 参数。
+   */
+  startTaskView: (projectId: string, taskId: string) =>
+    invoke<OrchestratorTaskView>(
+      ORCHESTRATOR_REMOTE_COMMANDS.startTaskView,
+      buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId),
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   任务详情需要读取当前项目下当前任务的验证输出与交付证据。
    *
    * Code Logic（这个函数做什么）:
@@ -288,6 +339,32 @@ export const orchestratorApi = {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   人工复核未通过时，用户需要把本机或远端真实任务送回 Rework，并记录返工原因。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 request_orchestrator_task_rework_view，并传递 trim 后的 reason。
+   */
+  requestReworkTaskView: (projectId: string, taskId: string, reason: string) =>
+    invoke<OrchestratorTaskView>(
+      ORCHESTRATOR_REMOTE_COMMANDS.requestReworkTaskView,
+      buildOrchestratorTaskReworkInvokeArgs(projectId, taskId, reason),
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   人工复核通过且 Settings 允许 full-auto delivery 时，用户可以显式触发交付。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 deliver_reviewed_orchestrator_task_view，后端负责 Settings gate 与 delivery pipeline。
+   */
+  deliverReviewedTaskView: (projectId: string, taskId: string) =>
+    invoke<OrchestratorTaskView>(
+      ORCHESTRATOR_REMOTE_COMMANDS.deliverReviewedTaskView,
+      buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId),
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   用户决定停止任务时，需要把任务置为 Aborted 但保留 worktree/session。
    *
    * Code Logic（这个函数做什么）:
@@ -297,6 +374,32 @@ export const orchestratorApi = {
     invoke<OrchestratorTaskView>(
       ORCHESTRATOR_REMOTE_COMMANDS.abortTaskView,
       buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId),
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户取消任务时，需要进入 Canceled/Idle 并保留现场与 evidence。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 cancel_orchestrator_task_view，并返回更新后的任务视图。
+   */
+  cancelTaskView: (projectId: string, taskId: string) =>
+    invoke<OrchestratorTaskView>(
+      ORCHESTRATOR_REMOTE_COMMANDS.cancelTaskView,
+      buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId),
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户需要显式刷新当前项目，触发一次后端 best-effort dispatch/reconcile。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 refresh_orchestrator_project，并返回 projectId/dispatched。
+   */
+  refreshProject: (projectId: string) =>
+    invoke<OrchestratorProjectRefreshResult>(
+      ORCHESTRATOR_REMOTE_COMMANDS.refreshProject,
+      buildOrchestratorRuntimeSnapshotInvokeArgs(projectId),
     ),
 
   /**
@@ -335,6 +438,17 @@ export const orchestratorApi = {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   兼容旧 task API 时 start 也必须支持远端项目代理。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 startTaskView 并解包返回的真实任务 DTO。
+   */
+  startTask: async (projectId: string, taskId: string): Promise<OrchestratorTask> => {
+    return unwrapTaskView(await orchestratorApi.startTaskView(projectId, taskId));
+  },
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   兼容旧 task API 时 blocked 重试也必须支持远端项目代理。
    *
    * Code Logic（这个函数做什么）:
@@ -346,6 +460,32 @@ export const orchestratorApi = {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   兼容旧 task API 时 requestRework 也必须支持远端项目代理。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 requestReworkTaskView 并解包返回的真实任务 DTO。
+   */
+  requestReworkTask: async (
+    projectId: string,
+    taskId: string,
+    reason: string,
+  ): Promise<OrchestratorTask> => {
+    return unwrapTaskView(await orchestratorApi.requestReworkTaskView(projectId, taskId, reason));
+  },
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   兼容旧 task API 时 deliverReviewed 也必须支持远端项目代理。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 deliverReviewedTaskView 并解包返回的真实任务 DTO。
+   */
+  deliverReviewedTask: async (projectId: string, taskId: string): Promise<OrchestratorTask> => {
+    return unwrapTaskView(await orchestratorApi.deliverReviewedTaskView(projectId, taskId));
+  },
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   兼容旧 task API 时终止操作也必须支持远端项目代理。
    *
    * Code Logic（这个函数做什么）:
@@ -353,6 +493,17 @@ export const orchestratorApi = {
    */
   abortTask: async (projectId: string, taskId: string): Promise<OrchestratorTask> => {
     return unwrapTaskView(await orchestratorApi.abortTaskView(projectId, taskId));
+  },
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   兼容旧 task API 时 cancel 也必须支持远端项目代理。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 cancelTaskView 并解包返回的真实任务 DTO。
+   */
+  cancelTask: async (projectId: string, taskId: string): Promise<OrchestratorTask> => {
+    return unwrapTaskView(await orchestratorApi.cancelTaskView(projectId, taskId));
   },
 };
 
