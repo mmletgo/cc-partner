@@ -95,6 +95,12 @@ const request = {
   goal: '暴露任务命令',
   acceptanceCriteria: '测试通过',
   priority: 3,
+  source: 'linear',
+  externalId: 'lin-123',
+  externalIdentifier: 'APP-123',
+  externalUrl: 'https://linear.app/team/issue/APP-123',
+  externalState: 'In Progress',
+  externalLabels: ['frontend', 'p1'],
 };
 const createArgs = buildCreateOrchestratorTaskViewInvokeArgs(request);
 

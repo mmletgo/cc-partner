@@ -106,6 +106,8 @@ CREATE TABLE IF NOT EXISTS orchestrator_tasks (
     external_id TEXT,
     external_identifier TEXT,
     external_url TEXT,
+    external_state TEXT,
+    external_labels_json TEXT,
     runner_provider TEXT,
     claude_session_id TEXT,
     transcript_path TEXT,

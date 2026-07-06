@@ -448,6 +448,8 @@ export interface OrchestratorTask {
   externalId: string | null;
   externalIdentifier: string | null;
   externalUrl: string | null;
+  externalState: string | null;
+  externalLabels: string[] | null;
   runnerProvider: string | null;
   claudeSessionId: string | null;
   transcriptPath: string | null;

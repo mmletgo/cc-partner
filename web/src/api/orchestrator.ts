@@ -40,7 +40,7 @@ export const ORCHESTRATOR_REMOTE_COMMANDS = {
  * 创建 Orchestrator 任务的前端请求。
  *
  * Business Logic（为什么需要这个类型）:
- *   用户创建任务时只填写项目、标题、目标、验收标准和可选优先级。
+ *   用户创建任务时只填写项目、标题、目标、验收标准、可选优先级和外部 tracker 预留字段。
  *
  * Code Logic（这个类型做什么）:
  *   字段保持 camelCase，直接对应 Rust CreateOrchestratorTaskRequest 的 serde 入参。
@@ -51,6 +51,12 @@ export interface CreateOrchestratorTaskRequest {
   goal: string;
   acceptanceCriteria: string;
   priority?: number;
+  source?: string;
+  externalId?: string;
+  externalIdentifier?: string;
+  externalUrl?: string;
+  externalState?: string;
+  externalLabels?: string[];
 }
 
 /**

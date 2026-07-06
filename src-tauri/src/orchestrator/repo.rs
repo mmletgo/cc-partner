@@ -20,9 +20,10 @@ use uuid::Uuid;
 
 const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_criteria, status, priority, \
     workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
-    external_url, runner_provider, claude_session_id, transcript_path, runtime_started_at, \
-    last_activity_at, last_runtime_event, last_runtime_message, branch_name, worktree_id, \
-    session_id, blocked_reason, attempt, created_at, updated_at, started_at, finished_at";
+    external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
+    transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
+    last_runtime_message, branch_name, worktree_id, session_id, blocked_reason, attempt, \
+    created_at, updated_at, started_at, finished_at";
 const WORKFLOW_LANE_ORDER: [OrchestratorWorkflowState; 8] = [
     OrchestratorWorkflowState::Backlog,
     OrchestratorWorkflowState::Todo,
@@ -87,6 +88,8 @@ pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestra
   external_id TEXT,
   external_identifier TEXT,
   external_url TEXT,
+  external_state TEXT,
+  external_labels_json TEXT,
   runner_provider TEXT,
   claude_session_id TEXT,
   transcript_path TEXT,
@@ -281,6 +284,8 @@ impl OrchestratorRepo {
         ensure_column(pool, "orchestrator_tasks", "external_id", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "external_identifier", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "external_url", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "external_state", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "external_labels_json", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "runner_provider", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "claude_session_id", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "transcript_path", "TEXT").await?;
@@ -321,14 +326,16 @@ impl OrchestratorRepo {
     /// Code Logic（这个函数做什么）:
     ///     将调用方传入的 OrchestratorTaskRow 全字段插入 orchestrator_tasks，不改写业务字段。
     pub async fn create_task(&self, row: &OrchestratorTaskRow) -> Result<(), AppError> {
+        let external_labels_json = serialize_external_labels(&row.external_labels)?;
         sqlx::query(
             "INSERT INTO orchestrator_tasks \
              (id, project_id, title, goal, acceptance_criteria, status, priority, branch_name, \
               workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
-              external_url, runner_provider, claude_session_id, transcript_path, runtime_started_at, \
-              last_activity_at, last_runtime_event, last_runtime_message, worktree_id, session_id, \
-              blocked_reason, attempt, created_at, updated_at, started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
+              transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
+              last_runtime_message, worktree_id, session_id, blocked_reason, attempt, created_at, \
+              updated_at, started_at, finished_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.project_id)
@@ -345,6 +352,8 @@ impl OrchestratorRepo {
         .bind(&row.external_id)
         .bind(&row.external_identifier)
         .bind(&row.external_url)
+        .bind(&row.external_state)
+        .bind(&external_labels_json)
         .bind(&row.runner_provider)
         .bind(&row.claude_session_id)
         .bind(&row.transcript_path)
@@ -379,6 +388,7 @@ impl OrchestratorRepo {
         queue: bool,
     ) -> Result<OrchestratorTaskRow, AppError> {
         let client_request_id = client_request_id.and_then(non_empty_trimmed);
+        let external_labels_json = serialize_external_labels(&row.external_labels)?;
         let mut tx = self.pool.begin().await?;
 
         if let Some(request_id) = client_request_id {
@@ -434,10 +444,11 @@ impl OrchestratorRepo {
             "INSERT INTO orchestrator_tasks \
              (id, project_id, title, goal, acceptance_criteria, status, priority, branch_name, \
               workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
-              external_url, runner_provider, claude_session_id, transcript_path, runtime_started_at, \
-              last_activity_at, last_runtime_event, last_runtime_message, worktree_id, session_id, \
-              blocked_reason, attempt, created_at, updated_at, started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
+              transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
+              last_runtime_message, worktree_id, session_id, blocked_reason, attempt, created_at, \
+              updated_at, started_at, finished_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.project_id)
@@ -454,6 +465,8 @@ impl OrchestratorRepo {
         .bind(&row.external_id)
         .bind(&row.external_identifier)
         .bind(&row.external_url)
+        .bind(&row.external_state)
+        .bind(&external_labels_json)
         .bind(&row.runner_provider)
         .bind(&row.claude_session_id)
         .bind(&row.transcript_path)
@@ -2289,6 +2302,37 @@ async fn normalize_queued_split_state(pool: &SqlitePool) -> Result<(), AppError>
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     tracker 标签是预留给外部系统的结构化数组，写库时必须保持稳定 JSON array，避免后续 mirror/outbox 解析歧义。
+///
+/// Code Logic（这个函数做什么）:
+///     将 Option<Vec<String>> 序列化为 Option<String>；None 存 NULL，Some 始终存紧凑 JSON array。
+fn serialize_external_labels(labels: &Option<Vec<String>>) -> Result<Option<String>, AppError> {
+    labels
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(AppError::from)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     旧库和 mixed-version remote 可能没有 tracker 标签；读取时需要安全回退为 None，同时拒绝损坏的非数组值。
+///
+/// Code Logic（这个函数做什么）:
+///     将 external_labels_json 的 TEXT/NULL 转为 Option<Vec<String>>；NULL 或空白字符串返回 None。
+fn deserialize_external_labels(
+    labels_json: Option<String>,
+) -> Result<Option<Vec<String>>, AppError> {
+    let Some(raw) = labels_json else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_str::<Vec<String>>(trimmed)?))
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     多个查询都需要把 SQLite 行转换成任务 Row，统一解析可避免字段遗漏和状态字符串散落。
 ///
 /// Code Logic（这个函数做什么）:
@@ -2298,6 +2342,7 @@ fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppError> {
     let workflow_state_text: String = row.try_get("workflow_state")?;
     let run_state_text: String = row.try_get("run_state")?;
     let attempt_phase_text: Option<String> = row.try_get("attempt_phase")?;
+    let external_labels_json: Option<String> = row.try_get("external_labels_json")?;
     Ok(OrchestratorTaskRow {
         id: row.try_get("id")?,
         project_id: row.try_get("project_id")?,
@@ -2315,6 +2360,8 @@ fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppError> {
         external_id: row.try_get("external_id")?,
         external_identifier: row.try_get("external_identifier")?,
         external_url: row.try_get("external_url")?,
+        external_state: row.try_get("external_state")?,
+        external_labels: deserialize_external_labels(external_labels_json)?,
         runner_provider: row.try_get("runner_provider")?,
         claude_session_id: row.try_get("claude_session_id")?,
         transcript_path: row.try_get("transcript_path")?,
@@ -2657,6 +2704,8 @@ mod tests {
             "external_id",
             "external_identifier",
             "external_url",
+            "external_state",
+            "external_labels_json",
             "runner_provider",
             "claude_session_id",
             "transcript_path",
@@ -2670,6 +2719,36 @@ mod tests {
                 "missing column {expected}"
             );
         }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     tracker 预留字段必须随任务从数据库行投影到前端 DTO，后续 Linear/GitHub 等外部系统同步才不会丢状态和标签。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建任务后直接写入 external_state/external_labels_json，读取 DTO JSON 并断言 camelCase 字段和值完整保留。
+    #[tokio::test]
+    async fn tracker_reserved_fields_roundtrip_from_row_to_dto() {
+        let (pool, repo) = setup_repo().await;
+        let task = task_row("tracker-task", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&task).await.unwrap();
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET external_state = ?, external_labels_json = ? WHERE id = ?",
+        )
+        .bind("in_progress")
+        .bind(r#"["frontend","p1"]"#)
+        .bind(&task.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let persisted = repo.get_task(&task.id).await.unwrap();
+        let value = serde_json::to_value(OrchestratorTaskDto::from(persisted)).unwrap();
+
+        assert_eq!(value.get("externalState").unwrap(), "in_progress");
+        assert_eq!(
+            value.get("externalLabels").unwrap(),
+            &serde_json::json!(["frontend", "p1"])
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

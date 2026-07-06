@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 ///     本机 remote shortcut 创建任务时，实际任务必须创建在项目所属设备的本机 Orchestrator 队列中。
 ///
 /// Code Logic（这个结构体做什么）:
-///     保存远端 local projectId、标题、目标、验收标准、优先级、是否立即入队和幂等键，字段使用 camelCase。
+///     保存远端 local projectId、标题、目标、验收标准、优先级、是否立即入队、幂等键和 tracker 预留字段，字段使用 camelCase。
 ///     字段以 Option 解析，便于 route 返回统一业务错误；create route 会拒绝缺失或空白 key。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +30,18 @@ pub struct RemoteCreateOrchestratorTaskReq {
     pub queue: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_identifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_labels: Option<Vec<String>>,
 }
 
 /// 远端任务 ID 请求体。
@@ -136,6 +148,12 @@ mod tests {
             priority: 7,
             queue: true,
             client_request_id: Some("request-1".to_string()),
+            source: Some("linear".to_string()),
+            external_id: Some("lin-123".to_string()),
+            external_identifier: Some("APP-123".to_string()),
+            external_url: Some("https://linear.app/team/issue/APP-123".to_string()),
+            external_state: Some("In Progress".to_string()),
+            external_labels: Some(vec!["frontend".to_string(), "p1".to_string()]),
         };
 
         let value = serde_json::to_value(req).expect("serialize request");
@@ -145,6 +163,11 @@ mod tests {
         assert_eq!(value["priority"], 7);
         assert_eq!(value["queue"], true);
         assert_eq!(value["clientRequestId"], "request-1");
+        assert_eq!(value["externalState"], "In Progress");
+        assert_eq!(
+            value["externalLabels"],
+            serde_json::json!(["frontend", "p1"])
+        );
         assert!(value.get("project_id").is_none());
     }
 
@@ -206,6 +229,14 @@ mod tests {
         assert_eq!(value["tasks"][0]["projectId"], "project-1");
         assert_eq!(value["tasks"][0]["acceptanceCriteria"], "验收");
         assert_eq!(value["tasks"][0]["status"], "queued");
+        assert!(
+            value["tasks"][0].get("externalState").is_some(),
+            "externalState should stay in remote task payload"
+        );
+        assert!(
+            value["tasks"][0].get("externalLabels").is_some(),
+            "externalLabels should stay in remote task payload"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
