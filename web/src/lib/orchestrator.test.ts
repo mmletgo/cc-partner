@@ -289,8 +289,8 @@ assert(
   'resolveOrchestratorActionSelection should not steal selection back to an old action response',
 );
 assert(
-  resolveOrchestratorActionSelection(null, 'task-a') === 'task-a',
-  'resolveOrchestratorActionSelection should select the returned task when selection is empty',
+  resolveOrchestratorActionSelection(null, 'task-a') === null,
+  'resolveOrchestratorActionSelection should keep the detail drawer closed when selection is empty',
 );
 
 assert(

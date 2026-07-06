@@ -47,6 +47,7 @@ async function main(): Promise<void> {
   const workbenchStyles = readFileSync(new URL('./Workbench.module.css', import.meta.url), 'utf8');
   const orchestratorSource = readFileSync(new URL('../Orchestrator/Orchestrator.tsx', import.meta.url), 'utf8');
   const orchestratorStyles = readFileSync(new URL('../Orchestrator/Orchestrator.module.css', import.meta.url), 'utf8');
+  const orchestratorLibSource = readFileSync(new URL('../../lib/orchestrator.ts', import.meta.url), 'utf8');
   const appShellSource = readFileSync(
     new URL('../../components/layout/AppShell/AppShell.tsx', import.meta.url),
     'utf8',
@@ -196,6 +197,41 @@ async function main(): Promise<void> {
   );
   assertContains(
     orchestratorSource,
+    'return tasks.find((item) => item.task.id === selectedTaskId) ?? null;',
+    'Orchestrator must not auto-select the first task before the user clicks a card',
+  );
+  assertContains(
+    orchestratorSource,
+    '<OrchestratorDialogPortal>',
+    'Orchestrator task detail and evidence should render in a body-level side panel',
+  );
+  assertContains(
+    orchestratorSource,
+    'className={styles.taskDrawerOverlay}',
+    'Orchestrator task detail opens from the board as a side drawer overlay',
+  );
+  assertContains(
+    orchestratorSource,
+    'const handleCloseTaskDrawer = useCallback',
+    'Orchestrator task detail drawer has an explicit close path',
+  );
+  assertNotContains(
+    orchestratorSource,
+    '?? tasks[0] ?? null',
+    'Orchestrator must not fall back to the first task as the selected detail task',
+  );
+  assertNotContains(
+    orchestratorSource,
+    'if (createdTaskId) setSelectedTaskId(createdTaskId);',
+    'Creating a task must update the board without opening the detail drawer automatically',
+  );
+  assertContains(
+    orchestratorLibSource,
+    'if (!currentSelectedTaskId) return null;',
+    'Async task actions must not reopen the detail drawer after the user closed it',
+  );
+  assertContains(
+    orchestratorSource,
     'ORCHESTRATOR_BOARD_LANES',
     'Orchestrator queue renders the workflow board lane order from orchestratorBoard helpers',
   );
@@ -289,10 +325,18 @@ async function main(): Promise<void> {
     "t('orchestrator:policy.",
     'Workbench automation view should not render the legacy project policy card',
   );
-  assertNotContains(
+  assertContains(
     orchestratorSource,
-    'setSelectedTaskId(null);',
-    'Remote offline task refresh should not clear the selected task',
+    'if (current && nextSplit.tasks.some((item) => item.task.id === current)) return current;',
+    'Remote offline task refresh preserves an existing selected task when that task is still present',
+  );
+  assertContains(
+    orchestratorSource,
+    `setSelectedTaskId((current) => {
+          if (current && nextSplit.tasks.some((item) => item.task.id === current)) return current;
+          return null;
+        });`,
+    'Task refresh without an existing selected task leaves the detail drawer closed',
   );
   assertNotContains(
     workbenchSource,
@@ -328,6 +372,8 @@ async function main(): Promise<void> {
   assertContains(enWorkbench, '"open": "Project Automation"', 'en Workbench locale uses project-level automation label');
   assertContains(zhOrchestrator, '"activeSession": "执行现场"', 'zh Orchestrator detail avoids terminal-only wording');
   assertContains(enOrchestrator, '"activeSession": "Execution Context"', 'en Orchestrator detail avoids terminal-only wording');
+  assertContains(zhOrchestrator, '"drawerAria": "任务详情侧边栏"', 'zh Orchestrator detail drawer has accessible copy');
+  assertContains(enOrchestrator, '"drawerAria": "Task detail side panel"', 'en Orchestrator detail drawer has accessible copy');
   assertContains(zhOrchestrator, '"openWorkbench": "打开执行现场"', 'zh Orchestrator action opens execution context');
   assertContains(enOrchestrator, '"openWorkbench": "Open execution context"', 'en Orchestrator action opens execution context');
   assertNotContains(zhOrchestrator, '"终端现场"', 'zh Orchestrator copy must not imply task belongs to the current worktree terminal');

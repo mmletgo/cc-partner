@@ -83,6 +83,9 @@
     }
   },
   "detail": {
+    "drawerAria": "任务详情侧边栏",
+    "drawerLabel": "当前任务",
+    "close": "关闭任务详情",
     "title": "任务详情",
     "subtitle": "查看目标、验收标准和执行绑定信息。",
     "goal": "目标",

@@ -8,10 +8,10 @@
  *
  * Code Logic（这个组件做什么）:
  *   - 按 activeProject 拉取 Orchestrator task view 列表，真实任务按 workflow 泳道分组，pending remote 单独展示
- *   - 按 activeProject 与 selected task 拉取 evidence
+ *   - 点击任务后打开右侧抽屉，并按 activeProject 与 selected task 拉取 evidence
  *   - 通过独立弹窗创建任务，支持手动填写三字段或用简单 Prompt 调 AI 自动完善
  *   - 允许选中的 draft 任务切换为 queued；action 响应只替换列表，同项目任务切换后不抢回 selection
- *   - 创建成功后把真实任务插入列表并选中；pending remote 只插入待发送区并清空表单
+ *   - 创建成功后把真实任务插入列表并保持看板视图；pending remote 只插入待发送区并清空表单
  *   - Running 任务可触发后端验证与交付，Blocked 任务可打开 Workbench deep link、重试或终止
  *   - full-auto 交付由后端 complete 命令执行，前端只负责触发命令和展示状态/evidence
  *   - hooks 全部位于渲染分支之前，避免 early return 破坏调用顺序
@@ -512,7 +512,7 @@ function buildWorkbenchTaskUrl(task: OrchestratorTask | null): string {
  *   Workbench 需要把自动化看板作为终端、文件预览同级的工作区视图，同时保留页面壳复用能力。
  *
  * Code Logic（这个函数做什么）:
- *   维持 activeProject、task view 列表与 evidence stale guard；embedded=true 时省略页面级 header。
+ *   维持 activeProject、task view 列表、点击任务后的详情抽屉与 evidence stale guard；embedded=true 时省略页面级 header。
  */
 export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const { embedded = false, onOpenWorkbench } = props;
@@ -572,7 +572,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
 
   const groups = useMemo(() => groupRenderableTasksByWorkflowState(tasks), [tasks]);
   const selectedRenderableTask = useMemo(() => {
-    return tasks.find((item) => item.task.id === selectedTaskId) ?? tasks[0] ?? null;
+    return tasks.find((item) => item.task.id === selectedTaskId) ?? null;
   }, [selectedTaskId, tasks]);
   const selectedTaskView = selectedRenderableTask?.view ?? null;
   const selectedTask = selectedRenderableTask?.task ?? null;
@@ -646,6 +646,10 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     setCreateDialogOpen(false);
   }, [completingPrompt, creating]);
 
+  const handleCloseTaskDrawer = useCallback(() => {
+    setSelectedTaskId(null);
+  }, []);
+
   useEffect(() => {
     if (!createDialogOpen) return undefined;
     const focusTimer = window.setTimeout(() => completionPromptRef.current?.focus(), 0);
@@ -660,6 +664,15 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [createDialogOpen, handleCloseCreateDialog]);
+
+  useEffect(() => {
+    if (!selectedTask || createDialogOpen) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') handleCloseTaskDrawer();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [createDialogOpen, handleCloseTaskDrawer, selectedTask]);
 
   const refreshRuntimeSnapshot = useCallback(
     async (projectId: string) => {
@@ -717,7 +730,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         setTaskListResult({ projectId, views: nextViews, error: null });
         setSelectedTaskId((current) => {
           if (current && nextSplit.tasks.some((item) => item.task.id === current)) return current;
-          return nextSplit.tasks[0]?.task.id ?? null;
+          return null;
         });
       })
       .catch((err: unknown) => {
@@ -835,8 +848,6 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
             error: null,
           };
         });
-        const createdTaskId = getOrchestratorTaskViewTaskId(created);
-        if (createdTaskId) setSelectedTaskId(createdTaskId);
         setForm(EMPTY_FORM);
         setCompletionPrompt('');
         setCreateDialogOpen(false);
@@ -1372,8 +1383,33 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
           </Card.Body>
         </Card>
 
-        <div className={styles.detail}>
-          <Card variant="outlined" padding="md">
+        {selectedTask ? (
+          <OrchestratorDialogPortal>
+            <div
+              className={styles.taskDrawerOverlay}
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget) handleCloseTaskDrawer();
+              }}
+            >
+              <aside
+                className={styles.taskDrawer}
+                aria-label={t('orchestrator:detail.drawerAria')}
+              >
+                <div className={styles.taskDrawerHeader}>
+                  <div className={styles.taskDrawerTitleGroup}>
+                    <span className={styles.label}>{t('orchestrator:detail.drawerLabel')}</span>
+                    <h2 className={styles.taskDrawerTitle}>{selectedTask.title}</h2>
+                  </div>
+                  <Button
+                    variant="icon"
+                    aria-label={t('orchestrator:detail.close')}
+                    icon={<XIcon />}
+                    onClick={handleCloseTaskDrawer}
+                  />
+                </div>
+                <div className={styles.taskDrawerContent}>
+                  <div className={styles.detail}>
+                    <Card variant="outlined" padding="md">
             <Card.Header className={styles.cardHeader}>
               <div>
                 <h2 className={styles.sectionTitle}>{t('orchestrator:detail.title')}</h2>
@@ -1660,12 +1696,11 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                 </div>
               )}
             </Card.Body>
-          </Card>
+                    </Card>
+                  </div>
 
-        </div>
-
-        <div className={styles.rightStack}>
-          <Card variant="outlined" padding="md" className={styles.evidence}>
+                  <div className={styles.rightStack}>
+                    <Card variant="outlined" padding="md" className={styles.evidence}>
             <Card.Header className={styles.cardHeader}>
               <div>
                 <h2 className={styles.sectionTitle}>{t('orchestrator:evidence.title')}</h2>
@@ -1722,8 +1757,13 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                 </ul>
               ) : null}
             </Card.Body>
-          </Card>
-        </div>
+                    </Card>
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </OrchestratorDialogPortal>
+        ) : null}
       </div>
       {createDialogOpen ? (
         <OrchestratorDialogPortal>

@@ -215,7 +215,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 
 **功能点**：
 - 工作台布局：项目文件夹列表紧跟全局左侧栏“设置”菜单项下方，作为进入工作台的入口，不再设置独立“工作台”主导航项；主区域依次展示工作台标题、terminal sessions 标识、worktree 管理层、依赖提示槽和中心工作区；中心工作区在当前 worktree 的终端层与文件 tab 工作区之间切换，预览文件时终端可以隐藏但 xterm DOM 必须保持挂载并停止接收输入；终端工具栏按钮与文件工作区工具栏保持一致，均显示图标和文字；桌面端终端全屏按钮位于 pane 操作导航栏，全屏时隐藏 Workbench 外围内容和文件预览入口，但保留 terminal window tabs、pane 操作、退出全屏按钮和当前终端输出，确保全屏中仍可切换 window；文件预览按钮仅在已有打开文件 tab 时启用，点击后回到当前或首个文件 tab，与文件工作区的返回终端按钮对称；右侧检查器承载当前 window 状态，并提供当前 worktree 文件夹 / Git 提交树 tab，窄宽下排到首屏终端之后
-- 项目自动化控制台：Orchestrator 自动化保持项目级语义，入口位于 Workbench 顶层标题区，文案为“项目自动化 / Project Automation”，不再混入终端工具栏或文件预览工具组；控制台顶部必须明确“范围：项目”并显示当前项目名，主体嵌入项目级任务队列、详情、创建任务弹窗和 Evidence。“项目自动化”按钮是开关：关闭态点击打开控制台，打开态再次点击直接切回终端视图，控制台内部不再提供“返回终端”按钮。创建任务入口必须是独立弹窗，不固定占用控制台页面；桌面端弹窗必须脱离控制台滚动区域和终端全屏层，避免被工作台底层内容遮挡；弹窗支持用户手动填写标题、目标和验收标准，也支持用户输入简单 Prompt 后由 AI 自动完善这三项，AI 只填充表单，用户确认后才创建任务。打开控制台时 worktree 管理条必须完全隐藏，终端/文件层可隐藏但 xterm DOM 必须保持挂载并停止接收输入；自动化控制台自身只在打开态挂载可见面板，且作为中心工作区的正常文档流内容撑开高度，避免隐藏或绝对定位空层留下黑屏；任务运行后才绑定 worktree/session。嵌入模式下 blocked 任务的“打开执行现场”入口应应用任务 deep link 并切回终端视图，让对应项目 / worktree / session 聚焦结果可见。旧 `/orchestrator` 深链应重定向到 `/workbench`，侧栏不再提供独立自动化主导航项
+- 项目自动化控制台：Orchestrator 自动化保持项目级语义，入口位于 Workbench 顶层标题区，文案为“项目自动化 / Project Automation”，不再混入终端工具栏或文件预览工具组；控制台顶部必须明确“范围：项目”并显示当前项目名，主体默认只嵌入项目级任务泳道看板、运行时状态条、pending remote outbox 和创建任务入口，不自动选中第一条任务，也不常驻展示任务详情或 Evidence；用户点击具体任务后，任务详情与 Evidence 才在右侧抽屉中显示，关闭抽屉后回到纯看板。“项目自动化”按钮是开关：关闭态点击打开控制台，打开态再次点击直接切回终端视图，控制台内部不再提供“返回终端”按钮。创建任务入口必须是独立弹窗，不固定占用控制台页面；桌面端弹窗必须脱离控制台滚动区域和终端全屏层，避免被工作台底层内容遮挡；弹窗支持用户手动填写标题、目标和验收标准，也支持用户输入简单 Prompt 后由 AI 自动完善这三项，AI 只填充表单，用户确认后才创建任务。打开控制台时 worktree 管理条必须完全隐藏，终端/文件层可隐藏但 xterm DOM 必须保持挂载并停止接收输入；自动化控制台自身只在打开态挂载可见面板，且作为中心工作区的正常文档流内容撑开高度，避免隐藏或绝对定位空层留下黑屏；任务运行后才绑定 worktree/session。嵌入模式下 blocked 任务的“打开执行现场”入口应应用任务 deep link 并切回终端视图，让对应项目 / worktree / session 聚焦结果可见。旧 `/orchestrator` 深链应重定向到 `/workbench`，侧栏不再提供独立自动化主导航项
 - 添加项目文件夹：用户点击项目文件夹区右上角 `+` 后可选择本机项目或局域网设备项目；本机项目继续使用系统目录选择器；局域网设备项目展示已发现设备并打开应用内远端目录选择器，用户可直接浏览远端设备目录、选中项目文件夹并进入 Workbench，不要求该项目已在远端 Workbench 中预先添加或授权；选中远端路径后本机保存 remote project shortcut，远端设备自动创建或复用对应项目记录
 - 远端项目离线处理：远端项目卡片应标识 Remote/远端与设备名；当远端设备不在线时，当前远端项目展示离线提示，并暂停终端输入、分屏/关闭 pane、session 重命名/关闭、worktree 创建/commit/push/merge/remove、文件新建/保存/格式化/重命名/删除和 Prompt 优化等写操作；侧栏移除 remote shortcut 仍可执行；后续任一 sessions/worktrees/files/git/pathInfo 读取成功后恢复可写状态
 - 项目切换：左侧栏项目文件夹列表切换当前项目，中央 worktree/window 列表和右侧文件夹按当前项目刷新；每个项目卡片右下角显示已打开 terminal window 数与 pane 总数，而不是固定“进入工作台”文案；旧项目的异步请求结果不得覆盖新项目 UI
@@ -248,7 +248,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 后端自动执行验证命令并调用验证 Claude 做最终裁决；验证命令非零退出作为 verifier 输入，不直接阻塞任务，只有命令启动/读取/超时、verifier CLI/JSON/schema、diff 读取等基础设施失败才进入 Blocked；验证未通过时任务进入 Rework，并在同一 worktree 新建 terminal/Claude 继续修复，直到通过或用户终止
 - 目标态验证通过后，只有 Settings 中全局自动化启用且 full-auto 交付开关全部开启才自动完成 commit、推送任务分支、合并主工作区和推送主分支；默认自动化关闭或任一交付开关关闭时任务进入 Human Review 等待用户复核
 - 任务进入 Blocked 或循环修复时保留原因、worktree/session 入口和 evidence 链；Evidence 记录验证输出、验证 Claude 裁决、修复 Prompt、交付阶段结果和失败摘要，供前端任务看板展示与追溯
-- OrchestratorPanel 只拥有项目级任务看板、任务详情、创建任务弹窗、Evidence 和编排状态，不展示项目级策略或配置；Workbench 拥有项目级自动化控制台挂载、项目上下文、执行现场 deep link takeover、文件和 Git 操作
+- OrchestratorPanel 只拥有项目级任务看板、点击任务后出现的右侧详情/Evidence 抽屉、创建任务弹窗和编排状态，不展示项目级策略或配置；Workbench 拥有项目级自动化控制台挂载、项目上下文、执行现场 deep link takeover、文件和 Git 操作
 - Workbench 自动化状态条通过后端 runtime snapshot 展示 scheduler 开关、workflow 来源与校验结果、全局最大并发、当前项目槽位占用和最近阻塞原因；snapshot 只作为观察/诊断面，不作为任务正确性的唯一来源；本轮 remote shortcut 暂不返回 snapshot，后续如需展示远端状态必须由 owning device 提供 P2P snapshot，不能用本机状态代替
 
 ## 3. 非功能需求

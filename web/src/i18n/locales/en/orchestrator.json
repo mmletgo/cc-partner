@@ -83,6 +83,9 @@
     }
   },
   "detail": {
+    "drawerAria": "Task detail side panel",
+    "drawerLabel": "Selected task",
+    "close": "Close task detail",
     "title": "Task Detail",
     "subtitle": "Review the goal, acceptance criteria, and execution bindings.",
     "goal": "Goal",
