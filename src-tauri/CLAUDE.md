@@ -27,7 +27,7 @@ src/
 ├── storage/prompt_repo.rs — sqlx 运行期 query（非宏），list/get/create/update/soft_delete/list_tags [已实现]
 ├── storage/scratchpad_repo.rs — scratchpad 多页面 CRUD、旧表 title 迁移、同步 upsert [已实现]
 ├── storage/cc_history_repo.rs — claude_history 表 CRUD + bulk_ingest(IGNORE)/bulk_upsert(REPLACE) + scan_state [已实现]
-├── storage/health_repo.rs — activity_records/water_records 读写 + aggregate_minutes 统计 [已实现]
+├── storage/health_repo.rs — activity_records/water_records(自增 id)/rest_records 读写 + aggregate_minutes/daily 聚合统计 [已实现]
 ├── sync/              — 向量时钟 + LWW 合并 + engine              [M4]
 ├── net/               — mdns-sd 发现 + axum server + reqwest client [已实现 M3]
 ├── mobile/            — 移动端局域网 `/mobile` 访问 URL 生成（过滤 localhost/loopback）[已实现]
