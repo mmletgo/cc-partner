@@ -176,6 +176,14 @@ const WATER_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS water_records (
     ts INTEGER PRIMARY KEY
 )";
 
+/// rest_records 表 schema:记录久坐提醒触发与完成的休息事件,用于习惯统计。
+const REST_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS rest_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    duration_seconds INTEGER NOT NULL DEFAULT 0
+)";
+
 /// GitHub Trending 首页缓存表（榜单 + Claude CLI 中英文解说）。
 ///
 /// Business Logic: 首页每天只抓取一次 GitHub Trending Weekly，并把 Claude CLI 生成结果持久化，
@@ -290,6 +298,7 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, error::AppError> {
     // 健康提醒：活动采样表 + 喝水记录表（在 CLAUDE_MD_SCHEMA 之后执行）
     sqlx::query(HEALTH_SCHEMA).execute(&pool).await?;
     sqlx::query(WATER_SCHEMA).execute(&pool).await?;
+    sqlx::query(REST_SCHEMA).execute(&pool).await?;
     // GitHub Trending 首页缓存（榜单 + Claude CLI 解说），独立于同步数据。
     sqlx::query(GITHUB_TRENDING_CACHE_SCHEMA)
         .execute(&pool)
