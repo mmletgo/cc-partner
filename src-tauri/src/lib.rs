@@ -662,7 +662,7 @@ pub fn run() {
             orchestrator_config_cmd::get_orchestrator_config,
             orchestrator_config_cmd::get_default_orchestrator_config,
             orchestrator_config_cmd::update_orchestrator_config,
-            // M10 健康提醒（14 命令：配置/状态/开关/暂停/贪睡/跳过/配置回写/统计/活动明细/喝水/跳过喝水/延迟喝水/全屏遮罩/恢复默认）
+            // M10 健康提醒（18 命令：配置/状态/开关/暂停/贪睡/跳过/配置回写/统计/活动明细/喝水/跳过喝水/延迟喝水/全屏遮罩/恢复默认 + 习惯统计4）
             health_cmd::get_health_config,
             health_cmd::get_default_health_config,
             health_cmd::get_health_status,
@@ -677,6 +677,10 @@ pub fn run() {
             health_cmd::skip_water_reminder,
             health_cmd::snooze_water_reminder,
             health_cmd::close_health_overlay,
+            health_cmd::add_water_manual,
+            health_cmd::delete_water_record,
+            health_cmd::record_rest_completed,
+            health_cmd::get_habit_stats,
             // 工作台（本机项目 + Claude Code PTY 终端 + 项目文件树）
             workbench_cmd::list_workbench_projects,
             workbench_cmd::add_workbench_project,

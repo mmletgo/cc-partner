@@ -121,6 +121,26 @@ pub struct ActivityDetailDto {
     pub hourly: Vec<i64>,
 }
 
+/// 习惯统计返回:饮水 + 休息聚合,前端 HabitStatsCard 一次拉取所需数据。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HabitStatsDto {
+    /// 今日饮水次数(本地当日 0 点起)。
+    pub today_water_count: i64,
+    /// 近 N 天(默认 7)每日饮水次数,索引 0 = N-1 天前,末位 = 今日。
+    pub water_daily_counts: Vec<i64>,
+    /// 距今最近一次饮水时间戳(Unix 秒),用于"距下次提醒"计算。无记录则 None。
+    pub last_water_ts: Option<i64>,
+    /// 今日完成休息次数。
+    pub today_rest_count: i64,
+    /// 今日完成休息总时长秒数。
+    pub today_rest_total_seconds: i64,
+    /// 今日久坐提醒触发次数。
+    pub today_reminder_count: i64,
+    /// 近 N 天每日完成休息次数。
+    pub rest_daily_counts: Vec<i64>,
+}
+
 /// 读取完整健康提醒配置（全部字段，供前端配置表单初始化）。
 ///
 /// Business Logic: 前端设置页的完整配置表单需要一个命令一次性拉到当前所有配置项
@@ -360,6 +380,81 @@ pub async fn snooze_water_reminder(
 pub async fn close_health_overlay(app: tauri::AppHandle) -> Result<(), AppError> {
     crate::health::close_health_overlay(&app);
     Ok(())
+}
+
+/// Business Logic: 用户在习惯统计卡片点「+1 杯」手动加计饮水,无需等提醒。
+/// Code Logic: 写入 water_records + 重置喝水状态机 last_drink_ts/pending,返回新 ts。
+#[tauri::command]
+pub async fn add_water_manual(state: State<'_, AppState>) -> Result<i64, AppError> {
+    let now = chrono::Utc::now().timestamp();
+    state.health_repo.insert_water(now).await?;
+    {
+        let mut w = state.health.water.lock().unwrap();
+        w.last_drink_ts = now;
+        w.pending_remind = false;
+    }
+    Ok(now)
+}
+
+/// Business Logic: 用户误点"+1 杯"后撤销,删除指定时间戳的饮水记录。
+/// Code Logic: 转发 health_repo.delete_water,返回是否实际删除。
+#[tauri::command]
+pub async fn delete_water_record(state: State<'_, AppState>, ts: i64) -> Result<bool, AppError> {
+    state.health_repo.delete_water(ts).await
+}
+
+/// Business Logic: 用户完成休息倒计时后记录一次完整休息,用于习惯统计。
+/// Code Logic: duration 取配置 break_seconds(与前端倒计时口径一致),写入 rest_records。
+#[tauri::command]
+pub async fn record_rest_completed(state: State<'_, AppState>) -> Result<(), AppError> {
+    let now = chrono::Utc::now().timestamp();
+    let duration = state.config.read().unwrap().health.break_seconds;
+    state.health_repo.insert_rest_record(now, "rest", duration).await?;
+    Ok(())
+}
+
+/// Business Logic: 习惯统计卡片一次拉取饮水+休息聚合数据,减少前端多次 invoke。
+/// Code Logic: 并行查询 water/rest 各聚合方法,组装 HabitStatsDto。days 默认 7。
+#[tauri::command]
+pub async fn get_habit_stats(
+    state: State<'_, AppState>,
+    days: Option<i64>,
+) -> Result<HabitStatsDto, AppError> {
+    let days = days.unwrap_or(7).max(1) as usize;
+    let now = chrono::Utc::now().timestamp();
+    // 今日起点:UTC 当日 0 点(前端展示时按本地时区口径,后端只算近似 UTC 0 点)
+    let today_start = now - now.rem_euclid(86400);
+    let trend_start = today_start - ((days as i64) - 1) * 86400;
+
+    let today_water_count = state.health_repo.count_water_since(today_start).await?;
+    let water_daily_counts = state
+        .health_repo
+        .get_daily_water_counts(trend_start, days)
+        .await?;
+    let last_water_ts = state.health_repo.get_last_water_ts().await?;
+    let today_rest_count = state.health_repo.count_rest_since(today_start, "rest").await?;
+    let today_rest_total_seconds = state
+        .health_repo
+        .sum_rest_duration_since(today_start)
+        .await?;
+    let today_reminder_count = state
+        .health_repo
+        .count_rest_since(today_start, "reminder")
+        .await?;
+    let rest_daily_counts = state
+        .health_repo
+        .get_daily_rest_counts(trend_start, days, "rest")
+        .await?;
+
+    Ok(HabitStatsDto {
+        today_water_count,
+        water_daily_counts,
+        last_water_ts,
+        today_rest_count,
+        today_rest_total_seconds,
+        today_reminder_count,
+        rest_daily_counts,
+    })
 }
 
 #[cfg(test)]

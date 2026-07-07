@@ -200,7 +200,6 @@ impl HealthRepo {
 
     /// Business Logic: 用户想看"今日喝了多少杯水",需要按时间范围统计饮水次数。
     /// Code Logic: SELECT COUNT(*) FROM water_records WHERE ts >= since_ts,返回单值。
-    #[allow(dead_code)]
     pub async fn count_water_since(&self, since_ts: i64) -> Result<i64, AppError> {
         let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM water_records WHERE ts >= ?")
             .bind(since_ts)
@@ -212,7 +211,6 @@ impl HealthRepo {
     /// Business Logic: sparkline 展示近 7 天每日饮水次数,需要按本地日分桶聚合。
     /// Code Logic: 取出 since_ts 之后所有 ts,Rust 端按 (ts-since_ts)/86400 算桶号落入 Vec<i64>。
     /// 超出 [since_ts, since_ts + days*86400) 的记录丢弃。
-    #[allow(dead_code)]
     pub async fn get_daily_water_counts(
         &self,
         since_ts: i64,
@@ -239,7 +237,6 @@ impl HealthRepo {
 
     /// Business Logic: 用户误点"+1 杯"后需要撤销,删除指定时间戳的饮水记录。
     /// Code Logic: DELETE FROM water_records WHERE ts=?,返回 rows_affected > 0。
-    #[allow(dead_code)]
     pub async fn delete_water(&self, ts: i64) -> Result<bool, AppError> {
         let result = sqlx::query("DELETE FROM water_records WHERE ts = ?")
             .bind(ts)
@@ -250,7 +247,6 @@ impl HealthRepo {
 
     /// Business Logic: 保留 N 天数据避免数据库无限增长,定期清理过期饮水记录。
     /// Code Logic: DELETE FROM water_records WHERE ts < cutoff_ts,返回删除行数。
-    #[allow(dead_code)]
     pub async fn cleanup_water_older_than(&self, cutoff_ts: i64) -> Result<u64, AppError> {
         let result = sqlx::query("DELETE FROM water_records WHERE ts < ?")
             .bind(cutoff_ts)
@@ -259,11 +255,20 @@ impl HealthRepo {
         Ok(result.rows_affected())
     }
 
+    /// Business Logic: 前端"距下次提醒"需要知道上次喝水时间,推算剩余等待时长。
+    /// Code Logic: SELECT MAX(ts) FROM water_records,表空返回 None。
+    pub async fn get_last_water_ts(&self) -> Result<Option<i64>, AppError> {
+        let row: Option<(Option<i64>,)> =
+            sqlx::query_as("SELECT MAX(ts) FROM water_records")
+                .fetch_optional(&self.db)
+                .await?;
+        Ok(row.and_then(|(opt,)| opt))
+    }
+
     /// Business Logic: 久坐提醒触发或用户完成休息时,记录事件用于习惯统计。
     ///     kind 区分事件类型,reminder=提醒触发(用户可能跳过),rest=实际完成休息。
     /// Code Logic: INSERT INTO rest_records (ts,kind,duration_seconds) VALUES(?,?,?)
     ///     RETURNING id,返回自增主键。
-    #[allow(dead_code)]
     pub async fn insert_rest_record(
         &self,
         ts: i64,
@@ -283,7 +288,6 @@ impl HealthRepo {
 
     /// Business Logic: 统计今日提醒触发次数 / 完成休息次数,按 kind 过滤。
     /// Code Logic: SELECT COUNT(*) FROM rest_records WHERE ts >= ? AND kind = ?。
-    #[allow(dead_code)]
     pub async fn count_rest_since(&self, since_ts: i64, kind: &str) -> Result<i64, AppError> {
         let row: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM rest_records WHERE ts >= ? AND kind = ?")
@@ -297,7 +301,6 @@ impl HealthRepo {
     /// Business Logic: 展示"今日总休息时长",只累加实际完成的休息(kind='rest')。
     /// Code Logic: SELECT COALESCE(SUM(duration_seconds),0) FROM rest_records
     ///     WHERE ts >= ? AND kind='rest'。COALESCE 保证空表返回 0 不返回 NULL。
-    #[allow(dead_code)]
     pub async fn sum_rest_duration_since(&self, since_ts: i64) -> Result<i64, AppError> {
         let row: (i64,) = sqlx::query_as(
             "SELECT COALESCE(SUM(duration_seconds), 0) FROM rest_records WHERE ts >= ? AND kind = 'rest'",
@@ -310,7 +313,6 @@ impl HealthRepo {
 
     /// Business Logic: sparkline 展示近 7 天每日完成休息次数,按本地日分桶。
     /// Code Logic: 取出指定 kind 的所有 ts,Rust 端按 (ts-since_ts)/86400 分桶。
-    #[allow(dead_code)]
     pub async fn get_daily_rest_counts(
         &self,
         since_ts: i64,
@@ -340,6 +342,7 @@ impl HealthRepo {
 
     /// Business Logic: 用户撤销误记的休息事件,按自增 id 精准删除。
     /// Code Logic: DELETE FROM rest_records WHERE id=?,返回 rows_affected > 0。
+    /// NOTE: 暂无命令消费方(预留撤销误记的休息记录用),保留 dead_code 标注避免编译警告。
     #[allow(dead_code)]
     pub async fn delete_rest(&self, id: i64) -> Result<bool, AppError> {
         let result = sqlx::query("DELETE FROM rest_records WHERE id = ?")
@@ -351,7 +354,6 @@ impl HealthRepo {
 
     /// Business Logic: 保留 N 天数据,定期清理过期休息记录。
     /// Code Logic: DELETE FROM rest_records WHERE ts < cutoff_ts,返回删除行数。
-    #[allow(dead_code)]
     pub async fn cleanup_rest_older_than(&self, cutoff_ts: i64) -> Result<u64, AppError> {
         let result = sqlx::query("DELETE FROM rest_records WHERE ts < ?")
             .bind(cutoff_ts)
@@ -629,5 +631,16 @@ mod tests {
         let cleaned = repo.cleanup_rest_older_than(250).await.unwrap();
         assert_eq!(cleaned, 1);
         assert_eq!(repo.count_rest_since(0, "rest").await.unwrap(), 1);
+    }
+
+    /// 验证 get_last_water_ts 在空表/有记录时的返回。
+    #[tokio::test]
+    async fn test_get_last_water_ts() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        assert_eq!(repo.get_last_water_ts().await.unwrap(), None);
+        repo.insert_water(100).await.unwrap();
+        repo.insert_water(200).await.unwrap();
+        assert_eq!(repo.get_last_water_ts().await.unwrap(), Some(200));
     }
 }
