@@ -117,9 +117,13 @@ jobs:
         run: cd web && npm ci
 
       - name: Prepare Tauri signing key
-        # 把 TAURI_SIGNING_PRIVATE_KEY secret 解析为 tauri CLI 可识别的 base64 私钥环境变量。
-        # 容错三种 secret 存储格式：原始两行文本 / 整体 base64 包裹 / 纯一行 base64。
+        # 把 TAURI_SIGNING_PRIVATE_KEY secret 注入 GITHUB_ENV 供后续 tauri build 签名用。
+        # 容错三种 secret 存储格式：原始两行文本 / 整体 base64 包裹 / 纯一行 base64（minisign 私钥文件原样）。
         # secret 为空或缺失直接 fail（没有签名就没法生成 latest.json 的 signature）。
+        # 注：TAURI_SIGNING_PRIVATE_KEY env 需要私钥的原始内容（不是再 base64 编码），
+        # minisign 私钥文件本身已是单行 base64，直接写入即可。
+        # 同时始终注入 TAURI_SIGNING_PRIVATE_KEY_PASSWORD（无密码时为空字符串）——
+        # tauri signer 即使私钥无密码也需要这个 env 存在才不报 "incorrect password"。
         shell: bash
         run: |
           if [ -z "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
@@ -129,7 +133,7 @@ jobs:
 
           RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
           KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
-          # 情况 1：原始两行文本（首行是 untrusted comment）
+          # 情况 1：原始两行文本（首行是 untrusted comment）—— 直接写入
           if echo "$RAW" | head -n1 | grep -q '^untrusted comment:'; then
             printf '%s\n' "$RAW" > "$KEY_PATH"
             echo "✅ 使用原始两行密钥文件格式"
@@ -140,29 +144,23 @@ jobs:
               printf '%s\n' "$DECODED" > "$KEY_PATH"
               echo "✅ 成功解码 base64 包裹密钥"
             else
-              # 情况 3：纯 Base64 一行（手动补 untrusted comment 头）
+              # 情况 3：纯 Base64 一行（minisign 私钥文件原样，本身已是 base64）—— 直接写入
               if echo "$RAW" | grep -Eq '^[A-Za-z0-9+/=]+$'; then
-                ONE=$(printf '%s' "$RAW" | tr -d '\r\n')
-                printf '%s\n%s\n' "untrusted comment: tauri signing key" "$ONE" > "$KEY_PATH"
-                echo "✅ 使用一行 Base64 私钥"
+                printf '%s\n' "$RAW" > "$KEY_PATH"
+                echo "✅ 使用一行 Base64 私钥（minisign 原生格式）"
               else
                 echo "❌ 密钥格式无法识别" >&2
                 exit 1
               fi
             fi
           fi
-          # 统一再 base64 一次，写入 GITHUB_ENV 供后续 build 步骤读取
-          if command -v base64 >/dev/null 2>&1; then
-            KEY_B64=$(base64 < "$KEY_PATH" | tr -d '\r\n')
-          elif command -v openssl >/dev/null 2>&1; then
-            KEY_B64=$(openssl base64 -A -in "$KEY_PATH")
-          else
-            KEY_B64=$(KEY_PATH="$KEY_PATH" node -e "process.stdout.write(require('fs').readFileSync(process.env.KEY_PATH).toString('base64'))")
-          fi
-          echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
-          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
-          fi
+          # TAURI_SIGNING_PRIVATE_KEY env：写入私钥文件的原始内容（minisign 单行 base64）
+          # tauri signer 会自动识别这个格式，不需要再二次 base64 编码
+          KEY_CONTENT=$(tr -d '\r\n' < "$KEY_PATH")
+          echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_CONTENT" >> "$GITHUB_ENV"
+          # 始终注入 PASSWORD（无密码私钥也需要这个 env 存在，值为空字符串）
+          # secret 没配时用空字符串，配了用 secret 值
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
 
       # ── 各平台构建 ────────────────────────────────────────────────────────
       # 用项目锁定的 tauri CLI（web/node_modules/.bin/tauri，与本地 ./start.sh 一致）。

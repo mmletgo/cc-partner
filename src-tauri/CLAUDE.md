@@ -252,7 +252,7 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
     3. `assemble-latest-json`（needs: publish-release）—— `gh release download` 拉所有 `.sig`，bash + jq 按文件名匹配平台生成 `latest.json`（`*_aarch64.app.tar.gz`→darwin-aarch64 等），单平台缺签名只跳过该平台不连坐，`gh release upload --clobber` 上传。
   - `bundle.createUpdaterArtifacts: true` —— tauri.conf.json 必须开启，否则 tauri build 不产出 `.sig`。
   - Windows updater 用 nsis 安装包（`_x64-setup.exe`，非 msi）作下载源，对齐 `tauri.conf.json` 的 `windows.installMode: "passive"`。
-- **签名 secret（用户必配）**：CI 引用 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}`（+ 可选 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}`）。用户需把 `~/.tauri/claude-partner.updater.key` 的**内容**配到 repo 的 `TAURI_SIGNING_PRIVATE_KEY` secret（Settings → Secrets and variables → Actions），支持三种格式：原始两行文本 / 整体 base64 包裹 / 纯一行 base64，CI 会自动归一化。当前公钥用 `31678ACB` 这对（`~/.tauri/claude-partner.updater.key.pub`）。**未配 secret 时 CI 的「Prepare Tauri signing key」步骤直接 exit 1，CI 红。**
+- **签名 secret（用户必配）**：CI 引用 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}`（+ 可选 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}`）。用户需把 `~/.tauri/claude-partner.updater.key` 的**内容**配到 repo 的 `TAURI_SIGNING_PRIVATE_KEY` secret（Settings → Secrets and variables → Actions），支持三种格式：原始两行文本 / 整体 base64 包裹 / 纯一行 base64（minisign 私钥文件原样），CI 会自动归一化。当前公钥用 `1ED3DE93` 这对（`~/.tauri/claude-partner.updater.key.pub`，**无密码**——CI 始终注入 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` env，无密码时为空字符串，tauri signer 需要这个 env 存在才不报 "incorrect password"）。**未配 secret 时 CI 的「Prepare Tauri signing key」步骤直接 exit 1，CI 红。**
 - **发版流程**：1) `node scripts/bump-version.mjs <新版本号>`（同步源码清单与锁文件版本）；2) 提交；3) `git tag v<版本号> && git push origin v<版本号>` 触发 CI。
 
 ## Claude Code 历史采集与同步已落地行为约定（src/cc/ + storage/cc_history_repo.rs + commands/cc_history.rs + net/routes/cc_history.rs）

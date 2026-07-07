@@ -418,7 +418,7 @@ node scripts/bump-version.mjs <新版本号>
 
 - GitHub repo secret **`TAURI_SIGNING_PRIVATE_KEY`** 必须配置：值为 `~/.tauri/claude-partner.updater.key` 文件内容（minisign 私钥，支持三种格式：原始两行文本 / 整体 base64 包裹 / 纯一行 base64，CI 的「Prepare Tauri signing key」步骤会自动归一化）
 - 可选 secret **`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`**：私钥有密码时配
-- `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey` 必须与私钥配对（当前用 `~/.tauri/claude-partner.updater.key.pub` 的 `31678ACB` 这对）
+- `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey` 必须与私钥配对（当前用 `~/.tauri/claude-partner.updater.key.pub` 的 `1ED3DE93` 这对，无密码）
 - `bundle.createUpdaterArtifacts: true` 必须开启（让 Tauri build 产出 `.sig`）
 
 > **密钥不匹配/缺失的后果**：CI 不产出 `.sig` → `latest.json` 不生成或不完整 → 应用内检查更新报 `error sending request for url`（latest.json 返回 404）或签名校验失败。
