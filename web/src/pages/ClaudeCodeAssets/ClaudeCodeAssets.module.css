@@ -165,6 +165,14 @@
   align-items: center;
 }
 
+.filterGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  justify-self: start;
+}
+
 .segmented {
   display: inline-flex;
   align-items: center;
