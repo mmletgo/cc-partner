@@ -24,10 +24,7 @@ import type { GithubTrendingResponse } from '@/lib/types';
 import styles from './Home.module.css';
 
 type LoadState = 'loading' | 'ready' | 'error';
-const SKELETON_COLUMNS = [
-  [0, 2, 4],
-  [1, 3, 5],
-] as const;
+const SKELETON_COUNT = 6;
 
 /**
  * 将 i18next 的语言字符串归一化为应用支持语言。
@@ -147,13 +144,6 @@ export function Home() {
       },
     ];
   }, [language, response, t]);
-  const repoColumns = useMemo(() => {
-    const repos = response?.repos ?? [];
-    return [
-      repos.filter((_, index) => index % 2 === 0),
-      repos.filter((_, index) => index % 2 === 1),
-    ] as const;
-  }, [response?.repos]);
 
   const aiTone = response?.aiStatus === 'failed' ? 'warn' : response?.aiStatus === 'ready' ? 'success' : 'neutral';
   const aiStatusText = response?.aiStatus === 'ready'
@@ -224,22 +214,11 @@ export function Home() {
 
         <main className={styles.list} aria-label={t('home:listAria')}>
           {state === 'loading' ? (
-            <>
-              <div className={styles.masonryList}>
-                {SKELETON_COLUMNS.map((column, columnIndex) => (
-                  <div key={columnIndex} className={styles.masonryColumn}>
-                    {column.map((index) => (
-                      <div key={index} className={styles.skeleton} aria-hidden="true" />
-                    ))}
-                  </div>
-                ))}
-              </div>
-              <div className={styles.singleList}>
-                {Array.from({ length: 6 }).map((_, index) => (
-                  <div key={index} className={styles.skeleton} aria-hidden="true" />
-                ))}
-              </div>
-            </>
+            <div className={styles.masonryList}>
+              {Array.from({ length: SKELETON_COUNT }).map((_, index) => (
+                <div key={index} className={styles.skeleton} aria-hidden="true" />
+              ))}
+            </div>
           ) : state === 'error' ? (
             <div className={styles.empty} role="alert">
               <p className={styles.emptyTitle}>{t('home:loadFailed')}</p>
@@ -254,32 +233,16 @@ export function Home() {
               <p className={styles.emptyDesc}>{t('home:emptyDesc')}</p>
             </div>
           ) : (
-            <>
-              <div className={styles.masonryList}>
-                {repoColumns.map((column, columnIndex) => (
-                  <div key={columnIndex} className={styles.masonryColumn}>
-                    {column.map((repo) => (
-                      <GithubRepoCard
-                        key={repo.fullName}
-                        repo={repo}
-                        language={language}
-                        onOpen={handleOpen}
-                      />
-                    ))}
-                  </div>
-                ))}
-              </div>
-              <div className={styles.singleList}>
-                {response.repos.map((repo) => (
-                  <GithubRepoCard
-                    key={repo.fullName}
-                    repo={repo}
-                    language={language}
-                    onOpen={handleOpen}
-                  />
-                ))}
-              </div>
-            </>
+            <div className={styles.masonryList}>
+              {response.repos.map((repo) => (
+                <GithubRepoCard
+                  key={repo.fullName}
+                  repo={repo}
+                  language={language}
+                  onOpen={handleOpen}
+                />
+              ))}
+            </div>
           )}
         </main>
       </div>
