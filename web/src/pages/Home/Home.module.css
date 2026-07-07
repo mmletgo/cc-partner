@@ -10,8 +10,7 @@
 }
 
 .container {
-  width: min(1280px, 100%);
-  margin: 0 auto;
+  width: 100%;
   padding: 0 var(--space-10);
   box-sizing: border-box;
   display: flex;
