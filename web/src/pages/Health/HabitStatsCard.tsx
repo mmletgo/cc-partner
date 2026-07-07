@@ -12,19 +12,22 @@ import styles from './HabitStatsCard.module.css';
  * Code Logic(做什么):
  *   展示 HabitStats 数据:两栏(饮水/休息),每栏大数字 + 小字 + 7 柱 sparkline。
  *   饮水栏含"+1 杯"按钮(带 500ms 节流防误连点,后端已用自增 id 不再丢计数)。
- *   底部"查看历史记录"链接(暂为占位,P1 增量做删除 UI)。
+ *   nowTs 由父组件传入,不在 render 期调用 Date.now()。
+ *   底部仅展示保留天数说明(历史记录抽屉留待 P1)。
  */
 interface HabitStatsCardProps {
   stats: HabitStats | null;
   waterEnabled: boolean;
   waterIntervalSeconds: number;
   retainDays: number;
+  /** 当前 Unix 秒,由父组件传入,避免 render 期调用 Date.now()。 */
+  nowTs: number;
   onWaterAdded: () => void;
 }
 
 /** 计算"距下次提醒"剩余分钟数。返回 null 表示无需展示(饮水禁用)。 */
 function computeNextWaterMinutes(
-  lastWaterTs: number | undefined,
+  lastWaterTs: number | null | undefined,
   interval: number,
   nowSec: number,
 ): number | null {
@@ -38,6 +41,7 @@ export function HabitStatsCard({
   waterEnabled,
   waterIntervalSeconds,
   retainDays,
+  nowTs,
   onWaterAdded,
 }: HabitStatsCardProps) {
   const { t } = useTranslation('health');
@@ -66,7 +70,7 @@ export function HabitStatsCard({
     );
   }
 
-  const nowSec = Math.floor(Date.now() / 1000);
+  const nowSec = nowTs; // 父组件传入,避免 render 期调用 Date.now()
   const nextWaterMin = waterEnabled
     ? computeNextWaterMinutes(stats.lastWaterTs, waterIntervalSeconds, nowSec)
     : null;
@@ -105,6 +109,7 @@ export function HabitStatsCard({
           <WeekBars
             counts={stats.waterDailyCounts}
             todayIndex={todayWaterIdx}
+            nowTs={nowTs}
             variant="water"
           />
         </div>
@@ -129,13 +134,13 @@ export function HabitStatsCard({
           <WeekBars
             counts={stats.restDailyCounts}
             todayIndex={todayRestIdx}
+            nowTs={nowTs}
             variant="rest"
           />
         </div>
       </div>
       <div className={styles.footer}>
         <span>{t('habitFooter', { n: retainDays })}</span>
-        <span className={styles.footerLink}>{t('viewHistory')}</span>
       </div>
     </section>
   );
@@ -145,13 +150,25 @@ export function HabitStatsCard({
 interface WeekBarsProps {
   counts: number[];
   todayIndex: number;
+  /** 当前 Unix 秒,用于按今日倒推 weekday label。 */
+  nowTs: number;
   variant: 'water' | 'rest';
 }
 
-function WeekBars({ counts, todayIndex, variant }: WeekBarsProps) {
+function WeekBars({ counts, todayIndex, nowTs, variant }: WeekBarsProps) {
   const { t } = useTranslation('health');
   const max = Math.max(1, ...counts);
-  const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
+  // 按今日倒推 weekday label:counts 末位对应今日,往前推是昨天、前天...
+  // 后端固定返回索引 0=最早一天,末位=今日,故 label 必须随实际星期几动态生成,
+  // 否则今天非周日时末位柱标会错位。
+  const weekdayKeys = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+  type WeekdayKey = (typeof weekdayKeys)[number];
+  const labels: WeekdayKey[] = [];
+  for (let i = counts.length - 1; i >= 0; i--) {
+    const d = new Date(nowTs * 1000);
+    d.setDate(d.getDate() - (counts.length - 1 - i));
+    labels.unshift(weekdayKeys[d.getDay()]);
+  }
   return (
     <div className={styles.week}>
       <div className={styles.weekBars}>

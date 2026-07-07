@@ -26,6 +26,7 @@ const rendered = renderToStaticMarkup(
     waterEnabled: true,
     waterIntervalSeconds: 3600,
     retainDays: 90,
+    nowTs: Math.floor(Date.now() / 1000),
     onWaterAdded: () => undefined,
   }),
 );

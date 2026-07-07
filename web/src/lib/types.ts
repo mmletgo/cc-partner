@@ -1329,8 +1329,8 @@ export interface HabitStats {
   todayWaterCount: number;
   /** 近 N 天每日饮水次数,索引 0 = N-1 天前,末位 = 今日。 */
   waterDailyCounts: number[];
-  /** 距今最近一次饮水时间戳(Unix 秒),无则 undefined。 */
-  lastWaterTs?: number;
+  /** 距今最近一次饮水时间戳(Unix 秒),无记录为 null/undefined。 */
+  lastWaterTs?: number | null;
   /** 今日完成休息次数。 */
   todayRestCount: number;
   /** 今日完成休息总时长秒数。 */
