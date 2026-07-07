@@ -171,9 +171,15 @@ const HEALTH_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS activity_records (
     window_title TEXT
 )";
 
-/// 健康提醒 - 喝水打卡表（以时间戳为主键，INSERT OR REPLACE 幂等）。
+/// 健康提醒 - 喝水打卡表（自增 id 主键，ts 仅为普通列，支持同秒多次 +1 杯）。
+///
+/// Business Logic（为什么改自增 id）:
+///     早期 schema 以 ts 为主键 + INSERT OR REPLACE，导致用户同秒连点「+1 杯」只计 1 杯（主键冲突被替换）。
+///     改为自增 id 后每条记录都独立保留，count/WEEK 柱状图统计准确。
+/// Code Logic: id 自增主键，ts 为普通 NOT NULL 列；insert_water 用 RETURNING id 回填。
 const WATER_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS water_records (
-    ts INTEGER PRIMARY KEY
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL
 )";
 
 /// rest_records 表 schema:记录久坐提醒触发与完成的休息事件,用于习惯统计。
@@ -297,6 +303,23 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, error::AppError> {
     ScratchpadRepo::new(pool.clone()).ensure_schema().await?;
     // 健康提醒：活动采样表 + 喝水记录表（在 CLAUDE_MD_SCHEMA 之后执行）
     sqlx::query(HEALTH_SCHEMA).execute(&pool).await?;
+    // water_records 迁移：检测老表（ts INTEGER PRIMARY KEY）若无 id 列则 DROP 重建为自增 id。
+    // 本功能未发版前 water_records 无任何读取消费方，老数据是历史垃圾，可直接丢弃无需保留。
+    // 用 pragma_table_info 查列名，COUNT(*)==0 表示是老表结构。
+    let needs_recreate: bool = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pragma_table_info('water_records') WHERE name = 'id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0)
+        == 0;
+    if needs_recreate {
+        // 老表无 id 列，数据全是无消费方的历史垃圾，直接 DROP 重建。
+        sqlx::query("DROP TABLE IF EXISTS water_records")
+            .execute(&pool)
+            .await
+            .ok();
+    }
     sqlx::query(WATER_SCHEMA).execute(&pool).await?;
     sqlx::query(REST_SCHEMA).execute(&pool).await?;
     // GitHub Trending 首页缓存（榜单 + Claude CLI 解说），独立于同步数据。

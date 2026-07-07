@@ -71,8 +71,8 @@ export const healthApi = {
   /** 手动加计一次饮水(HabitStatsCard「+1 杯」按钮) */
   addWaterManual: () => invoke<number>('add_water_manual'),
 
-  /** 删除指定时间戳的饮水记录(历史记录删除 UI,P1 增量) */
-  deleteWaterRecord: (ts: number) => invoke<boolean>('delete_water_record', { ts }),
+  /** 删除指定 id 的饮水记录(历史记录删除 UI,P1 增量) */
+  deleteWaterRecord: (id: number) => invoke<boolean>('delete_water_record', { id }),
 
   /** 记录一次休息完成(全屏休息遮罩「已完成」按钮) */
   recordRestCompleted: () => invoke<void>('record_rest_completed'),

@@ -19,6 +19,24 @@ use crate::error::AppError;
 use crate::health::state::MachineState;
 use crate::state::AppState;
 
+/// 计算本地当日 0 点对应的 Unix 秒时间戳。
+///
+/// Business Logic: 「今日饮水/休息」统计必须按用户体感中的本地日切分（"今天"指本地时区的今天），
+///     若用 UTC 0 点，非 UTC 时区用户看到的"今日"边界会错位（如东八区 UTC 0 点 = 本地 08:00，
+///     00:00-08:00 的饮水会被算到昨天）。
+/// Code Logic: 用 `chrono::Local` 取当前本地时间，构造当日 00:00:00，经本地时区转回 DateTime 后取 timestamp。
+fn local_start_of_day_ts() -> i64 {
+    use chrono::{Local, TimeZone};
+    let now_local = Local::now();
+    let today = now_local.date_naive();
+    now_local
+        .timezone()
+        .from_local_datetime(&today.and_hms_opt(0, 0, 0).unwrap())
+        .single()
+        .unwrap()
+        .timestamp()
+}
+
 /// 健康提醒配置 DTO（camelCase，对齐前端）。
 ///
 /// Business Logic: 前端设置页用一份扁平结构展示/编辑全部健康配置。
@@ -315,7 +333,7 @@ pub async fn get_activity_detail(
 /// Business Logic: 前端「我喝了水」按钮(或收到 `health:water` 提醒后响应);重置下次喝水
 ///                  计时起点,并清除 pending_remind,使 daemon 在下一间隔后才能再次提醒。
 /// Code Logic: 拿当前 UTC 时间戳,更新 `HealthRuntime.water` 的 last_drink_ts 并置
-///             pending_remind=false,再 `insert_water(now)` 落库(INSERT OR REPLACE 幂等)。
+///             pending_remind=false,再 `insert_water(now)` 落库(自增 id 主键,返回值忽略)。
 #[tauri::command]
 pub async fn record_water(state: State<'_, AppState>) -> Result<(), AppError> {
     let now = chrono::Utc::now().timestamp();
@@ -383,24 +401,28 @@ pub async fn close_health_overlay(app: tauri::AppHandle) -> Result<(), AppError>
 }
 
 /// Business Logic: 用户在习惯统计卡片点「+1 杯」手动加计饮水,无需等提醒。
-/// Code Logic: 写入 water_records + 重置喝水状态机 last_drink_ts/pending,返回新 ts。
+/// Code Logic: 写入 water_records(自增 id 主键)+ 重置喝水状态机 last_drink_ts/pending,
+///             返回新插入记录的自增 id(前端撤销 deleteWaterRecord(id) 需要它)。
 #[tauri::command]
 pub async fn add_water_manual(state: State<'_, AppState>) -> Result<i64, AppError> {
     let now = chrono::Utc::now().timestamp();
-    state.health_repo.insert_water(now).await?;
+    let id = state.health_repo.insert_water(now).await?;
     {
         let mut w = state.health.water.lock().unwrap();
         w.last_drink_ts = now;
         w.pending_remind = false;
     }
-    Ok(now)
+    Ok(id)
 }
 
-/// Business Logic: 用户误点"+1 杯"后撤销,删除指定时间戳的饮水记录。
-/// Code Logic: 转发 health_repo.delete_water,返回是否实际删除。
+/// Business Logic: 用户误点"+1 杯"后撤销,按自增 id 删除指定饮水记录。
+/// Code Logic: 转发 health_repo.delete_water(id),返回是否实际删除。
 #[tauri::command]
-pub async fn delete_water_record(state: State<'_, AppState>, ts: i64) -> Result<bool, AppError> {
-    state.health_repo.delete_water(ts).await
+pub async fn delete_water_record(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<bool, AppError> {
+    state.health_repo.delete_water(id).await
 }
 
 /// Business Logic: 用户完成休息倒计时后记录一次完整休息,用于习惯统计。
@@ -414,16 +436,16 @@ pub async fn record_rest_completed(state: State<'_, AppState>) -> Result<(), App
 }
 
 /// Business Logic: 习惯统计卡片一次拉取饮水+休息聚合数据,减少前端多次 invoke。
-/// Code Logic: 并行查询 water/rest 各聚合方法,组装 HabitStatsDto。days 默认 7。
+/// Code Logic: 串行查询 water/rest 各聚合方法(单连接池语义下并行无收益),组装 HabitStatsDto。
+///             days 默认 7,clamp 到 1..=31(产品最多展示月视图级别,避免过大 days 累加溢出)。
 #[tauri::command]
 pub async fn get_habit_stats(
     state: State<'_, AppState>,
     days: Option<i64>,
 ) -> Result<HabitStatsDto, AppError> {
-    let days = days.unwrap_or(7).max(1) as usize;
-    let now = chrono::Utc::now().timestamp();
-    // 今日起点:UTC 当日 0 点(前端展示时按本地时区口径,后端只算近似 UTC 0 点)
-    let today_start = now - now.rem_euclid(86400);
+    let days = days.unwrap_or(7).clamp(1, 31) as usize;
+    // 今日起点:本地当日 0 点(非 UTC 0 点),保证非 UTC 时区用户看到的"今日"边界正确。
+    let today_start = local_start_of_day_ts();
     let trend_start = today_start - ((days as i64) - 1) * 86400;
 
     let today_water_count = state.health_repo.count_water_since(today_start).await?;
@@ -475,5 +497,36 @@ mod default_config_tests {
         assert!(dto.water_enabled);
         assert_eq!(dto.water_interval_seconds, 60 * 60);
         assert!(dto.reminder_fullscreen);
+    }
+}
+
+#[cfg(test)]
+mod habit_stats_tests {
+    use super::*;
+
+    /// 验证 local_start_of_day_ts 返回本地当日 0 点:必须 <= now,且在一天之内,
+    /// 且与"现在"相差的秒数恰好是该日内已过的整秒数(即对齐到本地 00:00:00)。
+    #[test]
+    fn local_start_of_day_is_local_midnight() {
+        use chrono::{Local, Timelike};
+        let now_local = Local::now();
+        let today_start = local_start_of_day_ts();
+        let now_ts = now_local.timestamp();
+        // 起点 <= 当前,且不超过 24 小时之内
+        assert!(today_start <= now_ts, "本地 0 点不应晚于现在");
+        assert!(now_ts - today_start < 86400, "起点应在今天之内");
+        // 已过秒数 == 当前本地时间的 H*3600 + M*60 + S
+        let elapsed = now_ts - today_start;
+        let expected = now_local.num_seconds_from_midnight() as i64;
+        assert_eq!(elapsed, expected, "起点应对齐到本地 00:00:00");
+    }
+
+    /// days 参数边界:None→7, 0→1, 100→31, 负数→1。
+    #[test]
+    fn days_unwrap_or_default_is_seven() {
+        assert_eq!(None::<i64>.unwrap_or(7), 7);
+        assert_eq!((Some(0i64)).unwrap_or(7).clamp(1, 31), 1);
+        assert_eq!((Some(100i64)).unwrap_or(7).clamp(1, 31), 31);
+        assert_eq!((Some(-5i64)).unwrap_or(7).clamp(1, 31), 1);
     }
 }

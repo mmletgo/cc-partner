@@ -11,7 +11,7 @@ import styles from './HabitStatsCard.module.css';
  *
  * Code Logic(做什么):
  *   展示 HabitStats 数据:两栏(饮水/休息),每栏大数字 + 小字 + 7 柱 sparkline。
- *   饮水栏含"+1 杯"按钮(带 500ms 节流防同秒主键冲突)。
+ *   饮水栏含"+1 杯"按钮(带 500ms 节流防误连点,后端已用自增 id 不再丢计数)。
  *   底部"查看历史记录"链接(暂为占位,P1 增量做删除 UI)。
  */
 interface HabitStatsCardProps {
@@ -52,7 +52,7 @@ export function HabitStatsCard({
     } catch (e) {
       console.error('手动加计饮水失败', e);
     } finally {
-      // 500ms 节流,防止同秒 ts 主键冲突
+      // 500ms 节流,防误连点(后端自增 id 已不再丢计数)
       setTimeout(() => setAdding(false), 500);
     }
   }, [adding, onWaterAdded]);

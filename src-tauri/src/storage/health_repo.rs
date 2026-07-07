@@ -187,15 +187,16 @@ impl HealthRepo {
 
     /// 记录一次喝水打卡。
     ///
-    /// Business Logic: 用户点击「喝水」按钮时记录该时刻，water_records 用于后续
-    ///     喝水频率统计 / 提醒。以 ts 为主键，INSERT OR REPLACE 保证同一时间戳幂等。
-    /// Code Logic: INSERT OR REPLACE INTO water_records (ts) VALUES (?)。
-    pub async fn insert_water(&self, ts: i64) -> Result<(), AppError> {
-        sqlx::query("INSERT OR REPLACE INTO water_records (ts) VALUES (?)")
-            .bind(ts)
-            .execute(&self.db)
-            .await?;
-        Ok(())
+    /// Business Logic: 用户点击「+1 杯」按钮时记录该时刻，water_records 用于后续喝水频率统计。
+    ///     自增 id 主键（不再是 ts 主键），同秒连点也能各自成行，避免主键冲突丢计数。
+    /// Code Logic: INSERT INTO water_records (ts) VALUES (?) RETURNING id，返回自增主键。
+    pub async fn insert_water(&self, ts: i64) -> Result<i64, AppError> {
+        let row: (i64,) =
+            sqlx::query_as("INSERT INTO water_records (ts) VALUES (?) RETURNING id")
+                .bind(ts)
+                .fetch_one(&self.db)
+                .await?;
+        Ok(row.0)
     }
 
     /// Business Logic: 用户想看"今日喝了多少杯水",需要按时间范围统计饮水次数。
@@ -235,11 +236,11 @@ impl HealthRepo {
         Ok(buckets)
     }
 
-    /// Business Logic: 用户误点"+1 杯"后需要撤销,删除指定时间戳的饮水记录。
-    /// Code Logic: DELETE FROM water_records WHERE ts=?,返回 rows_affected > 0。
-    pub async fn delete_water(&self, ts: i64) -> Result<bool, AppError> {
-        let result = sqlx::query("DELETE FROM water_records WHERE ts = ?")
-            .bind(ts)
+    /// Business Logic: 用户误点"+1 杯"后需要撤销,按自增 id 精准删除单条饮水记录。
+    /// Code Logic: DELETE FROM water_records WHERE id=?,返回 rows_affected > 0。
+    pub async fn delete_water(&self, id: i64) -> Result<bool, AppError> {
+        let result = sqlx::query("DELETE FROM water_records WHERE id = ?")
+            .bind(id)
             .execute(&self.db)
             .await?;
         Ok(result.rows_affected() > 0)
@@ -379,7 +380,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("CREATE TABLE IF NOT EXISTS activity_records (ts INTEGER PRIMARY KEY, is_active INTEGER NOT NULL, process_name TEXT, window_title TEXT)").execute(&pool).await.unwrap();
-        sqlx::query("CREATE TABLE IF NOT EXISTS water_records (ts INTEGER PRIMARY KEY)")
+        sqlx::query("CREATE TABLE IF NOT EXISTS water_records (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL)")
             .execute(&pool)
             .await
             .unwrap();
@@ -454,9 +455,23 @@ mod tests {
     async fn test_water_record() {
         let pool = setup_db().await;
         let repo = HealthRepo::new(pool);
-        repo.insert_water(9999).await.unwrap();
-        // 不 panic 即通过（INSERT OR REPLACE 幂等）
-        repo.insert_water(9999).await.unwrap();
+        let id1 = repo.insert_water(9999).await.unwrap();
+        let id2 = repo.insert_water(9999).await.unwrap();
+        // 自增 id:同秒 ts 各自成行,两条记录都保留
+        assert!(id2 > id1, "同秒连点应各自生成不同自增 id");
+        assert_eq!(repo.count_water_since(0).await.unwrap(), 2);
+    }
+
+    /// 验证同秒连点「+1 杯」每条都被记录(回归 ts 主键冲突丢计数 bug)。
+    #[tokio::test]
+    async fn test_insert_water_same_second_keeps_all() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        let same_ts = 1234567890;
+        repo.insert_water(same_ts).await.unwrap();
+        repo.insert_water(same_ts).await.unwrap();
+        repo.insert_water(same_ts).await.unwrap();
+        assert_eq!(repo.count_water_since(0).await.unwrap(), 3);
     }
 
     /// 按本地小时桶聚合:插入「本地今天指定小时」的若干分钟活跃记录,
@@ -547,15 +562,15 @@ mod tests {
         assert_eq!(counts[6], 1);
     }
 
-    /// 验证 delete_water 删除存在/不存在的记录的返回值。
+    /// 验证 delete_water 按自增 id 删除存在/不存在的记录的返回值。
     #[tokio::test]
     async fn test_delete_water() {
         let pool = setup_db().await;
         let repo = HealthRepo::new(pool);
-        repo.insert_water(100).await.unwrap();
-        let deleted = repo.delete_water(100).await.unwrap();
+        let id = repo.insert_water(100).await.unwrap();
+        let deleted = repo.delete_water(id).await.unwrap();
         assert!(deleted);
-        let deleted_again = repo.delete_water(100).await.unwrap();
+        let deleted_again = repo.delete_water(id).await.unwrap();
         assert!(!deleted_again);
         assert_eq!(repo.count_water_since(0).await.unwrap(), 0);
     }
