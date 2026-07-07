@@ -23,8 +23,18 @@ export interface GithubTrendingConfigUpdate {
 }
 
 export const githubTrendingApi = {
-  /** 获取 GitHub Weekly Top 25（后端按天缓存） */
-  list: () => invoke<GithubTrendingResponse>('list_github_trending_repos'),
+  /**
+   * 获取 GitHub Weekly Top 25（后端按天缓存）。
+   *
+   * Code Logic:
+   *   - 普通刷新：forceRefreshAi 省略，命中缓存直接返回。
+   *   - 解说失败后用户主动重试：forceRefreshAi=true，后端会忽略未过期的 failed 缓存，
+   *     用缓存的 GitHub 榜单重新调用 Claude 生成解说，不重新抓取 GitHub。
+   */
+  list: (options?: { forceRefreshAi?: boolean }) =>
+    invoke<GithubTrendingResponse>('list_github_trending_repos', {
+      forceRefreshAi: options?.forceRefreshAi ?? false,
+    }),
 
   /** 获取 Claude CLI 解说配置 */
   getConfig: () => invoke<GithubTrendingConfig>('get_github_trending_config'),

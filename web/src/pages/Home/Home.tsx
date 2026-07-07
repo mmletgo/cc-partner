@@ -54,13 +54,17 @@ function formatDateTime(iso: string, language: AppLanguage): string {
  * 拉取 GitHub Trending 首页数据。
  *
  * Business Logic（为什么需要）:
- *   首页初始加载和用户手动刷新都需要读取同一份后端缓存/实时榜单。
+ *   首页初始加载和用户手动刷新都需要读取同一份后端缓存/实时榜单；当 Claude 解说失败后，
+ *   用户手动刷新应视为"重新解说"信号，让后端跳过未过期的 failed 缓存重新调用 Claude。
  *
  * Code Logic（做什么）:
- *   调用 githubTrendingApi.list() 并返回类型化响应，让 effect 与刷新按钮复用同一数据入口。
+ *   调用 githubTrendingApi.list() 并返回类型化响应；forceRefreshAi 仅在用户主动刷新且当前
+ *   解说状态为 failed 时为 true，避免初次加载或正常刷新浪费 Claude 调用。
  */
-async function fetchGithubTrending(): Promise<GithubTrendingResponse> {
-  return githubTrendingApi.list();
+async function fetchGithubTrending(options?: {
+  forceRefreshAi?: boolean;
+}): Promise<GithubTrendingResponse> {
+  return githubTrendingApi.list(options);
 }
 
 /**
@@ -84,13 +88,16 @@ export function Home() {
     setError(null);
     setOpenError(null);
     try {
-      const data = await fetchGithubTrending();
+      // 用户在 Claude 解说失败后点刷新视为"重新解说"信号：强制后端跳过 failed 缓存重跑 Claude。
+      // 正常情况下不传该参数，命中未过期缓存直接返回，避免浪费 Claude 调用。
+      const forceRefreshAi = response?.aiStatus === 'failed';
+      const data = await fetchGithubTrending({ forceRefreshAi });
       applyTrendingResponse(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : t('home:unknownError'));
       setState('error');
     }
-  }, [applyTrendingResponse, t]);
+  }, [applyTrendingResponse, response?.aiStatus, t]);
 
   useEffect(() => {
     let cancelled = false;

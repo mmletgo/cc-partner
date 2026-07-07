@@ -202,9 +202,13 @@ pub async fn test_claude_cli(
 ///
 /// Business Logic: 首页打开时先读当天缓存；缓存未命中才抓取 GitHub 并生成 AI 解说。
 ///     若 GitHub 刷新失败但存在旧缓存，则回退旧缓存并标记 stale，保证首页尽量可用。
+///     当用户在 Claude 解说失败后主动点击刷新，前端会传 `force_refresh_ai=true`，此时即便当天
+///     失败缓存未过期也会用缓存的 repos 重新调用 Claude 解说（不重新抓取 GitHub），让用户能
+///     主动触发解说重试。
 #[tauri::command]
 pub async fn list_github_trending_repos(
     state: State<'_, AppState>,
+    force_refresh_ai: Option<bool>,
 ) -> Result<GithubTrendingResponseDto, AppError> {
     let config = state.config.read().unwrap().github_trending.clone();
     let now = Utc::now();
@@ -212,6 +216,14 @@ pub async fn list_github_trending_repos(
 
     if let Some(payload) = load_cache(&state.db, &key).await? {
         if !is_expired(&payload.expires_at, now) {
+            // 用户主动请求重试解说：仅当 AI 启用且缓存里的解说状态为 failed 时，
+            // 用缓存中的 GitHub 榜单重跑 Claude，避免重新抓取 GitHub。
+            if force_refresh_ai.unwrap_or(false)
+                && config.ai_enabled
+                && payload.ai_status == "failed"
+            {
+                return refresh_cached_ai_cache(&state.db, &key, &config, payload).await;
+            }
             if should_retry_failed_ai_cache(&payload, &config) {
                 return refresh_cached_ai_cache(&state.db, &key, &config, payload).await;
             }
