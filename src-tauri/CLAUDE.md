@@ -189,7 +189,7 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 - **插件**：`tauri-plugin-updater = "2"`（check/download/install + 签名校验 + 三平台自带替换脚本，**不再写 DMG/CMD/sh 脚本**）+ `tauri-plugin-process = "2"`（rust 侧用 `app.request_restart()`，前端 restart 命令同源）。lib.rs 注册 `.plugin(tauri_plugin_updater::Builder::new().build())` + `.plugin(tauri_plugin_process::init())`。**禁止引入 tauri-plugin-log**（与 tracing_subscriber 冲突 panic，见 M4 踩坑）。
 - **capabilities**：`capabilities/default.json` 加 `updater:default` + `process:default`。
 - **tauri.conf.json**：加 `plugins.updater`：`pubkey`（minisign 公钥 base64）、`endpoints: ["https://github.com/mmletgo/cc-partner/releases/latest/download/latest.json"]`（M9 CI 产出）、`windows.installMode: "passive"`。端到端更新需 M9 latest.json + 签名产物，M8 只实现命令层。
-- **签名密钥**：`npx tauri signer generate -w ~/.tauri/cc-partner.updater.key --password ""`（空密码，免 CI 配置）。私钥路径 `~/.tauri/cc-partner.updater.key`（**不进 git**），公钥已入 tauri.conf.json。**M9 CI 需配 secret `TAURI_SIGNING_PRIVATE_KEY_PATH`（或 `TAURI_SIGNING_PRIVATE_KEY`）**；空密码则 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 可省。
+- **签名密钥**：`npx tauri signer generate -w ~/.tauri/claude-partner.updater.key --password ""`（空密码，免 CI 配置）。私钥路径 `~/.tauri/claude-partner.updater.key`（**不进 git**），公钥 `~/.tauri/claude-partner.updater.key.pub` 的内容已入 tauri.conf.json 的 `plugins.updater.pubkey`（base64）。**M9 CI 需配 secret `TAURI_SIGNING_PRIVATE_KEY`**（值为私钥文件内容）；空密码则 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 可省。
 - **返回类型严格对齐前端 `web/src/lib/types.ts`（camelCase）**：
   - `UpdateCheckResult`（`commands/updater.rs::UpdateCheckResult`，`#[serde(rename_all="camelCase")]`）：`{hasUpdate, version?, body?, downloadUrl?, filename?, size?, error?}`。有更新：`{hasUpdate:true, version, body, downloadUrl(=update.download_url), filename(从 url 路径末段解析), size:Some(0)(check 阶段无 content_length)}`；无更新：全 None；检查异常：`{hasUpdate:false, error}`。
   - `UpdateDownloadStatus`（`UpdateDownloadStatus`）：字段**全非可选**（前端 types.ts 定义 error/filePath/url/filename 为 string、size 为 number），故用 String/u64。`status` 枚举 serde lowercase 对齐 `'idle'|'downloading'|'completed'|'failed'|'cancelled'`；progress 0.0~1.0。filePath 恒空串（updater 下载到内存非文件）。
@@ -246,11 +246,13 @@ migrations/0001_init.sql — schema 文档（lib.rs 内联执行，全 CREATE TA
 - **CI workflow（`.github/workflows/release-tauri.yml`）**：
   - 触发：`push tags: ['v*']`。
   - 旧的 Python/PyInstaller `release.yml` 已于 M10 删除，现在仓库为纯 Tauri 结构，推 `v*` tag 只跑这一套 Tauri 构建。
-  - 用 `tauri-apps/tauri-action@v0` 官方 action，矩阵 `macos-latest`(`--target aarch64-apple-darwin`) + `windows-latest` + `ubuntu-22.04`，`fail-fast: false`。
-  - 步骤：checkout → setup-node 20 → Rust stable（macOS 装 aarch64 target）→ Linux 装 webkit2gtk-4.1-dev 等依赖 → `cd web && npm ci` → tauri-action 构建+签名+上传 Release。
-  - **latest.json 当前缺失（tauri-action 上游 bug，v0.6.0 起发现）**：`@v0`(=v0.6.2) 与 dev commit `61337b43` 的 artifacts 收集均不收集 updater `.sig`（与 tauri v2 updater bundle 兼容缺陷），导致 `upload-version-json` 报 "Signature not found for the updater JSON" 跳过 latest.json 生成。release 仅含三平台安装包（无 latest.json/.sig），M8 updater 端到端校验暂不可用（手动下载安装不受影响）。待 tauri-action 上游修复 artifacts 收集后，`@v0` 浮动 tag 自动跟进即可恢复，无需改本仓库代码。注：`assetNamePattern`（旧 input 名 + 不存在的 `[filename]` 占位符）曾导致同平台资产撞名 already_exists，已移除，改用 tauri-action 默认命名（普通产物保留原文件名，macOS updater tarball 自动加 `_版本_架构`，全局唯一）。
-  - `updaterJsonPreferNsis: true` —— Windows updater 用 nsis 安装包（非 msi）作下载源。
-- **签名 secret（用户待配）**：tauri-action 引用 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}`。用户需把 `~/.tauri/cc-partner.updater.key` 的**内容**配到 repo 的同名 secret（Settings → Secrets and variables → Actions）。**M8 用空密码，故无需配 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`**。未配 secret 时 CI 构建不签名、latest.json 无 signature，updater 校验会失败。
+  - **三段式 workflow（v0.6.6 起弃用 tauri-apps/tauri-action）**：曾用 `tauri-apps/tauri-action@v0`，但其 latest.json 自动生成有 bug —— 任一平台缺 `.sig` 就打印 "Signature not found, skipping upload" 并整体跳过 latest.json，导致应用内检查更新报 `error sending request for url`（latest.json 返回 404）。改用三段式：
+    1. `build`（matrix 5 平台：macOS aarch64/x86_64、Windows x64、Linux x64/arm64）—— 原生 `web/node_modules/.bin/tauri build` 构建（项目锁定 tauri CLI 版本），「Prepare Tauri signing key」步骤把 secret 归一化为 base64 注入环境变量，build 时自动签名产出 `.sig`。每个平台收集 updater 产物（`.app.tar.gz`/`_x64-setup.exe`/`.AppImage` + `.sig`）到 `release-assets/`，缺失 `.sig` 直接 fail。
+    2. `publish-release`（needs: build）—— `actions/download-artifact` 合并所有平台产物，`softprops/action-gh-release@v2` 上传到 GitHub Release。
+    3. `assemble-latest-json`（needs: publish-release）—— `gh release download` 拉所有 `.sig`，bash + jq 按文件名匹配平台生成 `latest.json`（`*_aarch64.app.tar.gz`→darwin-aarch64 等），单平台缺签名只跳过该平台不连坐，`gh release upload --clobber` 上传。
+  - `bundle.createUpdaterArtifacts: true` —— tauri.conf.json 必须开启，否则 tauri build 不产出 `.sig`。
+  - Windows updater 用 nsis 安装包（`_x64-setup.exe`，非 msi）作下载源，对齐 `tauri.conf.json` 的 `windows.installMode: "passive"`。
+- **签名 secret（用户必配）**：CI 引用 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}`（+ 可选 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}`）。用户需把 `~/.tauri/claude-partner.updater.key` 的**内容**配到 repo 的 `TAURI_SIGNING_PRIVATE_KEY` secret（Settings → Secrets and variables → Actions），支持三种格式：原始两行文本 / 整体 base64 包裹 / 纯一行 base64，CI 会自动归一化。当前公钥用 `31678ACB` 这对（`~/.tauri/claude-partner.updater.key.pub`）。**未配 secret 时 CI 的「Prepare Tauri signing key」步骤直接 exit 1，CI 红。**
 - **发版流程**：1) `node scripts/bump-version.mjs <新版本号>`（同步源码清单与锁文件版本）；2) 提交；3) `git tag v<版本号> && git push origin v<版本号>` 触发 CI。
 
 ## Claude Code 历史采集与同步已落地行为约定（src/cc/ + storage/cc_history_repo.rs + commands/cc_history.rs + net/routes/cc_history.rs）

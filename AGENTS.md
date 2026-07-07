@@ -412,6 +412,27 @@ node scripts/bump-version.mjs <新版本号>
 
 发版必须通过该脚本统一同步 `src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`web/package.json`、`web/package-lock.json`；提交后推送 `v<新版本号>` tag 触发 `.github/workflows/release-tauri.yml`。
 
+#### 发版前置条件（签名密钥）
+
+应用内自动更新依赖 Tauri updater 签名链，CI 必须能读到签名私钥才能产出 `.sig` 和 `latest.json`：
+
+- GitHub repo secret **`TAURI_SIGNING_PRIVATE_KEY`** 必须配置：值为 `~/.tauri/claude-partner.updater.key` 文件内容（minisign 私钥，支持三种格式：原始两行文本 / 整体 base64 包裹 / 纯一行 base64，CI 的「Prepare Tauri signing key」步骤会自动归一化）
+- 可选 secret **`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`**：私钥有密码时配
+- `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey` 必须与私钥配对（当前用 `~/.tauri/claude-partner.updater.key.pub` 的 `31678ACB` 这对）
+- `bundle.createUpdaterArtifacts: true` 必须开启（让 Tauri build 产出 `.sig`）
+
+> **密钥不匹配/缺失的后果**：CI 不产出 `.sig` → `latest.json` 不生成或不完整 → 应用内检查更新报 `error sending request for url`（latest.json 返回 404）或签名校验失败。
+
+#### CI workflow 机制（三段式，弃用 tauri-action）
+
+`.github/workflows/release-tauri.yml` 用三个 job：
+
+1. **`build`**（matrix 5 平台）— 原生 `tauri build` 构建各平台安装包 + updater 产物（`.app.tar.gz`/`-setup.exe`/`.AppImage` 及对应 `.sig`），收集到 `release-assets/` 上传 workflow artifact
+2. **`publish-release`**（needs: build）— 合并所有平台 artifact，用 `softprops/action-gh-release` 上传到 GitHub Release
+3. **`assemble-latest-json`**（needs: publish-release）— 下载 Release 全部 `.sig`，用 bash + jq 按文件名匹配平台生成 `latest.json`（单平台缺签名不连坐，只跳过该平台），上传到 Release
+
+> 历史教训：曾用 `tauri-apps/tauri-action@v0`，其内部 latest.json 自动生成有 bug —— 任一平台缺 `.sig` 就打印 "Signature not found, skipping upload" 并整体跳过 latest.json，导致应用内更新完全失效。故弃用，改为自写脚本兜底。
+
 ## 8. 与 Rust 后端协作
 
 ### 8.1 通信通道
