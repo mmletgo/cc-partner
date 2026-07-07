@@ -12,7 +12,9 @@ import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/primitives';
 import { CheckIcon, XIcon } from '@/lib/icons';
-import type { ClaudeCodeAsset, ClaudeCodeAssetKind } from '@/lib/types';
+import type { ClaudeCodeAsset } from '@/lib/types';
+import { matchesClaudeCodeAsset } from '@/lib/claudeCodeAssets';
+import type { EnabledFilter, KindFilter } from '@/lib/claudeCodeAssets';
 import { ClaudeAssetRow } from '../ClaudeAssetRow';
 import { remoteAssetKey } from './remoteAssetKey';
 import styles from './RemoteAssetPicker.module.css';
@@ -20,8 +22,9 @@ import styles from './RemoteAssetPicker.module.css';
 export interface RemoteAssetPickerProps {
   assets: ClaudeCodeAsset[];
   selectedKeys: Set<string>;
-  kind: ClaudeCodeAssetKind | 'all';
+  kind: KindFilter;
   search: string;
+  enabledFilter: EnabledFilter;
   onSelect: (asset: ClaudeCodeAsset, checked: boolean) => void;
   onSelectMany: (assets: ClaudeCodeAsset[], checked: boolean) => void;
 }
@@ -34,18 +37,15 @@ export function RemoteAssetPicker({
   selectedKeys,
   kind,
   search,
+  enabledFilter,
   onSelect,
   onSelectMany,
 }: RemoteAssetPickerProps) {
   const { t } = useTranslation(['claudeCodeAssets']);
-  const visible = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return assets.filter((asset) => {
-      const matchesKind = kind === 'all' || asset.kind === kind;
-      const haystack = `${asset.name} ${asset.id} ${asset.source} ${asset.description ?? ''}`.toLowerCase();
-      return matchesKind && (!q || haystack.includes(q));
-    });
-  }, [assets, kind, search]);
+  const visible = useMemo(
+    () => assets.filter((asset) => matchesClaudeCodeAsset(asset, kind, search, enabledFilter)),
+    [assets, kind, search, enabledFilter],
+  );
   const selectableVisible = visible.filter((asset) => asset.canExport);
 
   return (
