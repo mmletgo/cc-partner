@@ -13,7 +13,7 @@
  */
 
 import { invoke } from './client';
-import type { HealthConfig, HealthStatus, ActivityStats, ActivityDetail } from '@/lib/types';
+import type { HealthConfig, HealthStatus, ActivityStats, ActivityDetail, HabitStats } from '@/lib/types';
 
 export const healthApi = {
   /** 读取当前健康提醒状态（相位 / 暂停 / 贪睡到期 / 配置阈值） */
@@ -64,4 +64,16 @@ export const healthApi = {
 
   /** 关闭全部健康提醒全屏遮罩窗口(每屏一个透明置顶窗口) */
   closeOverlay: () => invoke<void>('close_health_overlay'),
+
+  /** 读取近 N 天习惯统计(饮水 + 休息),供 HabitStatsCard 渲染 */
+  getHabitStats: (days?: number) => invoke<HabitStats>('get_habit_stats', { days }),
+
+  /** 手动加计一次饮水(HabitStatsCard「+1 杯」按钮) */
+  addWaterManual: () => invoke<number>('add_water_manual'),
+
+  /** 删除指定时间戳的饮水记录(历史记录删除 UI,P1 增量) */
+  deleteWaterRecord: (ts: number) => invoke<boolean>('delete_water_record', { ts }),
+
+  /** 记录一次休息完成(全屏休息遮罩「已完成」按钮) */
+  recordRestCompleted: () => invoke<void>('record_rest_completed'),
 };
