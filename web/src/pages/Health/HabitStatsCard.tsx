@@ -151,7 +151,7 @@ interface WeekBarsProps {
 function WeekBars({ counts, todayIndex, variant }: WeekBarsProps) {
   const { t } = useTranslation('health');
   const max = Math.max(1, ...counts);
-  const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
   return (
     <div className={styles.week}>
       <div className={styles.weekBars}>
