@@ -115,6 +115,7 @@
 
   /* ── 布局尺寸 ── */
   --sidebar-width: 240px;
+  --card-min-width: 360px;
 
   /* ── z-index 层级 ── */
   --z-base: 0;
