@@ -19,10 +19,11 @@ import { useNavigate } from 'react-router-dom';
 import { Button, Card, Pill, ProgressBar } from '@/components/primitives';
 import type { PillTone } from '@/components/primitives';
 import { healthApi } from '@/api/health';
-import type { ActivityStats, ActivityDetail, HealthStatus, HealthPhase } from '@/lib/types';
+import type { ActivityStats, ActivityDetail, HealthStatus, HealthPhase, HabitStats, HealthConfig } from '@/lib/types';
 import { HealthIcon, PauseIcon, PlayIcon } from '@/lib/icons';
 import styles from './Health.module.css';
 import { StatsChart } from './StatsChart';
+import { HabitStatsCard } from './HabitStatsCard';
 
 /** 页面刷新间隔(ms) */
 const REFRESH_INTERVAL_MS = 30000;
@@ -118,24 +119,31 @@ export function Health() {
   const [status, setStatus] = useState<HealthStatus | null>(null);
   const [stats, setStats] = useState<ActivityStats | null>(null);
   const [detail, setDetail] = useState<ActivityDetail | null>(null);
+  const [config, setConfig] = useState<HealthConfig | null>(null);
+  const [habitStats, setHabitStats] = useState<HabitStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [nowTs, setNowTs] = useState(() => Math.floor(Date.now() / 1000));
 
   /**
-   * 刷新状态 + 今日统计 + 今日活动明细图表。
+   * 刷新状态 + 今日统计 + 今日活动明细图表 + 配置 + 习惯统计。
    * startOfDay 取「本地当日 0 点」的秒级时间戳(先把 Date 的时/分/秒/毫秒清零,再取整秒),
    * 作为 get_activity_stats / get_activity_detail 的 sinceTs。
+   * config 用于 HabitStatsCard 的 waterEnabled / waterIntervalSeconds / retainDays 派生展示。
    */
   const refresh = useCallback(async () => {
     const startOfDay = getLocalStartOfDayTs();
-    const [nextStatus, nextStats, nextDetail] = await Promise.all([
+    const [nextStatus, nextStats, nextDetail, nextConfig, nextHabit] = await Promise.all([
       healthApi.getStatus(),
       healthApi.getStats(startOfDay),
       healthApi.getDetail(startOfDay),
+      healthApi.getConfig(),
+      healthApi.getHabitStats(7),
     ]);
     setStatus(nextStatus);
     setStats(nextStats);
     setDetail(nextDetail);
+    setConfig(nextConfig);
+    setHabitStats(nextHabit);
     setNowTs(Math.floor(Date.now() / 1000));
     setLoading(false);
   }, []);
@@ -284,6 +292,14 @@ export function Health() {
             </div>
           </Card.Body>
         </Card>
+
+        <HabitStatsCard
+          stats={habitStats}
+          waterEnabled={config?.waterEnabled ?? true}
+          waterIntervalSeconds={config?.waterIntervalSeconds ?? 3600}
+          retainDays={config?.retainDays ?? 90}
+          onWaterAdded={refresh}
+        />
 
         {detail && (
           <Card variant="outlined" padding="md" className={styles.chartCard}>
