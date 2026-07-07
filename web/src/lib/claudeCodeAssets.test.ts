@@ -74,6 +74,22 @@ assert(
   'search 找不到时应拒绝',
 );
 
+// description 为 null/undefined 时不应把 'null'/'undefined' 字面量纳入 haystack
+const nullDescAsset = makeAsset({ kind: 'skill', id: 'x1', name: 'Zeta', description: null });
+const undefinedDescAsset = makeAsset({ kind: 'skill', id: 'x2', name: 'Eta', description: undefined });
+assert(
+  !matchesClaudeCodeAsset(nullDescAsset, 'all', 'null', 'all'),
+  'description 为 null 时搜索 "null" 不应命中',
+);
+assert(
+  !matchesClaudeCodeAsset(undefinedDescAsset, 'all', 'undefined', 'all'),
+  'description 为 undefined 时搜索 "undefined" 不应命中',
+);
+assert(
+  matchesClaudeCodeAsset(nullDescAsset, 'all', 'zeta', 'all'),
+  'description 为 null 时仍可按 name 命中',
+);
+
 // enabled 维度
 assert(
   matchesClaudeCodeAsset(enabledSkill, 'all', '', 'enabled'),
