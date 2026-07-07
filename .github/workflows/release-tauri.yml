@@ -172,9 +172,25 @@ jobs:
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
           echo "macOS bundle 目录: $BUNDLE_DIR"
           ls -la "$BUNDLE_DIR"
-          cp "$BUNDLE_DIR"/*.app.tar.gz "$BUNDLE_DIR"/*.app.tar.gz.sig release-assets/
-          # 顺带收集 dmg 安装包（不参与 updater，仅供手动下载）
-          cp src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg release-assets/ 2>/dev/null || true
+          # Tauri 2 原生 build 产出的 macOS tarball 文件名是 cc-partner.app.tar.gz（无架构后缀），
+          # 双架构 matrix（aarch64 + x86_64）会产出同名文件互相覆盖。
+          # 故按 matrix.target 重命名加架构后缀，让 latest.json 脚本能区分平台、避免覆盖。
+          # 约定：aarch64-apple-darwin → aarch64；x86_64-apple-darwin → x64（对齐 latest.json key）
+          ARCH="${{ matrix.target }}"
+          case "$ARCH" in
+            aarch64-*) ARCH_SHORT="aarch64";;
+            x86_64-*)  ARCH_SHORT="x64";;
+            *)         ARCH_SHORT="${ARCH%%-*}";;
+          esac
+          cp "$BUNDLE_DIR"/*.app.tar.gz "release-assets/cc-partner_${ARCH_SHORT}.app.tar.gz"
+          cp "$BUNDLE_DIR"/*.app.tar.gz.sig "release-assets/cc-partner_${ARCH_SHORT}.app.tar.gz.sig"
+          # 顺带收集 dmg 安装包（不参与 updater，仅供手动下载；同样加架构后缀避免覆盖）
+          for dmg in src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg; do
+            [ -f "$dmg" ] || continue
+            base=$(basename "$dmg")
+            # 原文件名形如 cc-partner_0.6.6_aarch64.dmg 已含架构，保留原名
+            cp "$dmg" "release-assets/$base"
+          done
           echo "=== release-assets ==="
           ls -la release-assets/
 
