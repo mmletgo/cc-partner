@@ -4,16 +4,17 @@
  * Business Logic（为什么需要这个模块）:
  *   久坐监测 / 工作休息状态机 / 系统通知 + toast + 全屏提醒 / 喝水提醒 /
  *   活动统计图表需要前端读写：开关监测、手动暂停/贪睡/跳过、读取当前状态与
- *   今日活跃统计 + app 排行/小时分布明细、记录喝水、整体配置回写。
- *   本模块封装这 11 个 invoke 调用，供 Health 页 / toast / 全屏遮罩消费。
+ *   今日活跃统计 + app 排行/小时分布明细、记录喝水、整体配置回写、
+ *   近 N 天习惯统计(饮水 + 休息)、手动加计饮水 / 删除饮水记录 / 记录休息完成。
+ *   本模块封装这 18 个 invoke 调用，供 Health 页 / toast / 全屏遮罩消费。
  *
  * Code Logic（这个模块做什么）:
- *   基于 invoke 封装 11 个命令，返回类型化的 Promise，参数字段 camelCase
+ *   基于 invoke 封装 18 个命令，返回类型化的 Promise，参数字段 camelCase
  *   对齐 Rust #[tauri::command] 签名。
  */
 
 import { invoke } from './client';
-import type { HealthConfig, HealthStatus, ActivityStats, ActivityDetail } from '@/lib/types';
+import type { HealthConfig, HealthStatus, ActivityStats, ActivityDetail, HabitStats } from '@/lib/types';
 
 export const healthApi = {
   /** 读取当前健康提醒状态（相位 / 暂停 / 贪睡到期 / 配置阈值） */
@@ -64,4 +65,16 @@ export const healthApi = {
 
   /** 关闭全部健康提醒全屏遮罩窗口(每屏一个透明置顶窗口) */
   closeOverlay: () => invoke<void>('close_health_overlay'),
+
+  /** 读取近 N 天习惯统计(饮水 + 休息),供 HabitStatsCard 渲染 */
+  getHabitStats: (days?: number) => invoke<HabitStats>('get_habit_stats', { days }),
+
+  /** 手动加计一次饮水(HabitStatsCard「+1 杯」按钮) */
+  addWaterManual: () => invoke<number>('add_water_manual'),
+
+  /** 删除指定 id 的饮水记录(历史记录删除 UI,P1 增量) */
+  deleteWaterRecord: (id: number) => invoke<boolean>('delete_water_record', { id }),
+
+  /** 记录一次休息完成(全屏休息遮罩「已完成」按钮) */
+  recordRestCompleted: () => invoke<void>('record_rest_completed'),
 };

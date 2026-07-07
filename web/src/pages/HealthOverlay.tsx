@@ -92,8 +92,9 @@ export default function HealthOverlay() {
           (async () => {
             try {
               await healthApi.skip();
+              await healthApi.recordRestCompleted();
             } catch (e) {
-              console.error('休息结束跳过提醒失败', e);
+              console.error('休息结束记录失败', e);
             }
             await healthApi.closeOverlay();
           })();

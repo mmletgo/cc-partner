@@ -1323,6 +1323,24 @@ export interface ActivityDetail {
   hourly: number[];
 }
 
+/** 习惯统计(饮水 + 休息)后端返回,对应 HabitStatsDto。 */
+export interface HabitStats {
+  /** 今日饮水次数。 */
+  todayWaterCount: number;
+  /** 近 N 天每日饮水次数,索引 0 = N-1 天前,末位 = 今日。 */
+  waterDailyCounts: number[];
+  /** 距今最近一次饮水时间戳(Unix 秒),无记录为 null/undefined。 */
+  lastWaterTs?: number | null;
+  /** 今日完成休息次数。 */
+  todayRestCount: number;
+  /** 今日完成休息总时长秒数。 */
+  todayRestTotalSeconds: number;
+  /** 今日久坐提醒触发次数。 */
+  todayReminderCount: number;
+  /** 近 N 天每日完成休息次数。 */
+  restDailyCounts: number[];
+}
+
 /**
  * Claude session 搜索命中结果（对齐后端 SessionSearchHitDto，camelCase）。
  * 由 search_claude_sessions 命令返回，供 WorkbenchSessionSearch Command Palette 渲染结果列表。

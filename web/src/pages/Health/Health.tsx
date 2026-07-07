@@ -19,10 +19,11 @@ import { useNavigate } from 'react-router-dom';
 import { Button, Card, Pill, ProgressBar } from '@/components/primitives';
 import type { PillTone } from '@/components/primitives';
 import { healthApi } from '@/api/health';
-import type { ActivityStats, ActivityDetail, HealthStatus, HealthPhase } from '@/lib/types';
+import type { ActivityStats, ActivityDetail, HealthStatus, HealthPhase, HabitStats, HealthConfig } from '@/lib/types';
 import { HealthIcon, PauseIcon, PlayIcon } from '@/lib/icons';
 import styles from './Health.module.css';
 import { StatsChart } from './StatsChart';
+import { HabitStatsCard } from './HabitStatsCard';
 
 /** 页面刷新间隔(ms) */
 const REFRESH_INTERVAL_MS = 30000;
@@ -118,24 +119,58 @@ export function Health() {
   const [status, setStatus] = useState<HealthStatus | null>(null);
   const [stats, setStats] = useState<ActivityStats | null>(null);
   const [detail, setDetail] = useState<ActivityDetail | null>(null);
+  const [config, setConfig] = useState<HealthConfig | null>(null);
+  const [habitStats, setHabitStats] = useState<HabitStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [nowTs, setNowTs] = useState(() => Math.floor(Date.now() / 1000));
 
   /**
-   * 刷新状态 + 今日统计 + 今日活动明细图表。
+   * 刷新状态 + 今日统计 + 今日活动明细图表 + 配置 + 习惯统计。
    * startOfDay 取「本地当日 0 点」的秒级时间戳(先把 Date 的时/分/秒/毫秒清零,再取整秒),
    * 作为 get_activity_stats / get_activity_detail 的 sinceTs。
+   * config 用于 HabitStatsCard 的 waterEnabled / waterIntervalSeconds / retainDays 派生展示。
+   *
+   * 分两组容错,均用 Promise.allSettled 逐项容错:主数据(status/stats/detail)任一失败
+   * 不影响其他项;习惯统计 + 配置独立 try/catch,失败只记日志,不影响主页面(习惯统计是
+   * 辅助展示)。任一组失败都保证 setNowTs + setLoading(false) 执行,避免页面卡 loading。
    */
   const refresh = useCallback(async () => {
     const startOfDay = getLocalStartOfDayTs();
-    const [nextStatus, nextStats, nextDetail] = await Promise.all([
+    // 主数据用 allSettled 逐项容错:getStats/getDetail 失败不影响 status 展示,
+    // 避免"任一 reject 就 loading 卡死"。
+    const [statusRes, statsRes, detailRes] = await Promise.allSettled([
       healthApi.getStatus(),
       healthApi.getStats(startOfDay),
       healthApi.getDetail(startOfDay),
     ]);
-    setStatus(nextStatus);
-    setStats(nextStats);
-    setDetail(nextDetail);
+    if (statusRes.status === 'fulfilled') {
+      setStatus(statusRes.value);
+    } else {
+      console.error('加载健康状态失败', statusRes.reason);
+    }
+    if (statsRes.status === 'fulfilled') {
+      setStats(statsRes.value);
+    } else {
+      console.error('加载今日统计失败', statsRes.reason);
+    }
+    if (detailRes.status === 'fulfilled') {
+      setDetail(detailRes.value);
+    } else {
+      console.error('加载活动明细失败', detailRes.reason);
+    }
+
+    // 习惯统计 + 配置独立容错,失败不阻塞主页面
+    try {
+      const [nextConfig, nextHabit] = await Promise.all([
+        healthApi.getConfig(),
+        healthApi.getHabitStats(7),
+      ]);
+      setConfig(nextConfig);
+      setHabitStats(nextHabit);
+    } catch (e) {
+      console.error('加载习惯统计失败', e);
+    }
+
     setNowTs(Math.floor(Date.now() / 1000));
     setLoading(false);
   }, []);
@@ -284,6 +319,15 @@ export function Health() {
             </div>
           </Card.Body>
         </Card>
+
+        <HabitStatsCard
+          stats={habitStats}
+          waterEnabled={config?.waterEnabled ?? true}
+          waterIntervalSeconds={config?.waterIntervalSeconds ?? 3600}
+          retainDays={config?.retainDays ?? 90}
+          nowTs={nowTs}
+          onWaterAdded={refresh}
+        />
 
         {detail && (
           <Card variant="outlined" padding="md" className={styles.chartCard}>

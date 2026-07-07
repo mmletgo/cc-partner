@@ -187,16 +187,180 @@ impl HealthRepo {
 
     /// 记录一次喝水打卡。
     ///
-    /// Business Logic: 用户点击「喝水」按钮时记录该时刻，water_records 用于后续
-    ///     喝水频率统计 / 提醒。以 ts 为主键，INSERT OR REPLACE 保证同一时间戳幂等。
-    /// Code Logic: INSERT OR REPLACE INTO water_records (ts) VALUES (?)。
-    #[allow(dead_code)]
-    pub async fn insert_water(&self, ts: i64) -> Result<(), AppError> {
-        sqlx::query("INSERT OR REPLACE INTO water_records (ts) VALUES (?)")
-            .bind(ts)
+    /// Business Logic: 用户点击「+1 杯」按钮时记录该时刻，water_records 用于后续喝水频率统计。
+    ///     自增 id 主键（不再是 ts 主键），同秒连点也能各自成行，避免主键冲突丢计数。
+    /// Code Logic: INSERT INTO water_records (ts) VALUES (?) RETURNING id，返回自增主键。
+    pub async fn insert_water(&self, ts: i64) -> Result<i64, AppError> {
+        let row: (i64,) =
+            sqlx::query_as("INSERT INTO water_records (ts) VALUES (?) RETURNING id")
+                .bind(ts)
+                .fetch_one(&self.db)
+                .await?;
+        Ok(row.0)
+    }
+
+    /// Business Logic: 用户想看"今日喝了多少杯水",需要按时间范围统计饮水次数。
+    /// Code Logic: SELECT COUNT(*) FROM water_records WHERE ts >= since_ts,返回单值。
+    pub async fn count_water_since(&self, since_ts: i64) -> Result<i64, AppError> {
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM water_records WHERE ts >= ?")
+            .bind(since_ts)
+            .fetch_one(&self.db)
+            .await?;
+        Ok(row.0)
+    }
+
+    /// Business Logic: sparkline 展示近 7 天每日饮水次数,需要按本地日分桶聚合。
+    /// Code Logic: 取出 since_ts 之后所有 ts,Rust 端按 (ts-since_ts)/86400 算桶号落入 Vec<i64>。
+    /// 超出 [since_ts, since_ts + days*86400) 的记录丢弃。
+    pub async fn get_daily_water_counts(
+        &self,
+        since_ts: i64,
+        days: usize,
+    ) -> Result<Vec<i64>, AppError> {
+        let rows: Vec<(i64,)> =
+            sqlx::query_as("SELECT ts FROM water_records WHERE ts >= ? ORDER BY ts ASC")
+                .bind(since_ts)
+                .fetch_all(&self.db)
+                .await?;
+        let mut buckets = vec![0i64; days];
+        let span = (days as i64) * 86400;
+        for (ts,) in rows {
+            if ts < since_ts || ts >= since_ts + span {
+                continue;
+            }
+            let idx = ((ts - since_ts) / 86400) as usize;
+            if idx < days {
+                buckets[idx] += 1;
+            }
+        }
+        Ok(buckets)
+    }
+
+    /// Business Logic: 用户误点"+1 杯"后需要撤销,按自增 id 精准删除单条饮水记录。
+    /// Code Logic: DELETE FROM water_records WHERE id=?,返回 rows_affected > 0。
+    pub async fn delete_water(&self, id: i64) -> Result<bool, AppError> {
+        let result = sqlx::query("DELETE FROM water_records WHERE id = ?")
+            .bind(id)
             .execute(&self.db)
             .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Business Logic: 保留 N 天数据避免数据库无限增长,定期清理过期饮水记录。
+    /// Code Logic: DELETE FROM water_records WHERE ts < cutoff_ts,返回删除行数。
+    pub async fn cleanup_water_older_than(&self, cutoff_ts: i64) -> Result<u64, AppError> {
+        let result = sqlx::query("DELETE FROM water_records WHERE ts < ?")
+            .bind(cutoff_ts)
+            .execute(&self.db)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Business Logic: 前端"距下次提醒"需要知道上次喝水时间,推算剩余等待时长。
+    /// Code Logic: SELECT MAX(ts) FROM water_records,表空返回 None。
+    pub async fn get_last_water_ts(&self) -> Result<Option<i64>, AppError> {
+        let row: Option<(Option<i64>,)> =
+            sqlx::query_as("SELECT MAX(ts) FROM water_records")
+                .fetch_optional(&self.db)
+                .await?;
+        Ok(row.and_then(|(opt,)| opt))
+    }
+
+    /// Business Logic: 久坐提醒触发或用户完成休息时,记录事件用于习惯统计。
+    ///     kind 区分事件类型,reminder=提醒触发(用户可能跳过),rest=实际完成休息。
+    /// Code Logic: INSERT INTO rest_records (ts,kind,duration_seconds) VALUES(?,?,?)
+    ///     RETURNING id,返回自增主键。
+    pub async fn insert_rest_record(
+        &self,
+        ts: i64,
+        kind: &str,
+        duration_seconds: i64,
+    ) -> Result<i64, AppError> {
+        let row: (i64,) = sqlx::query_as(
+            "INSERT INTO rest_records (ts, kind, duration_seconds) VALUES (?, ?, ?) RETURNING id",
+        )
+        .bind(ts)
+        .bind(kind)
+        .bind(duration_seconds)
+        .fetch_one(&self.db)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Business Logic: 统计今日提醒触发次数 / 完成休息次数,按 kind 过滤。
+    /// Code Logic: SELECT COUNT(*) FROM rest_records WHERE ts >= ? AND kind = ?。
+    pub async fn count_rest_since(&self, since_ts: i64, kind: &str) -> Result<i64, AppError> {
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM rest_records WHERE ts >= ? AND kind = ?")
+                .bind(since_ts)
+                .bind(kind)
+                .fetch_one(&self.db)
+                .await?;
+        Ok(row.0)
+    }
+
+    /// Business Logic: 展示"今日总休息时长",只累加实际完成的休息(kind='rest')。
+    /// Code Logic: SELECT COALESCE(SUM(duration_seconds),0) FROM rest_records
+    ///     WHERE ts >= ? AND kind='rest'。COALESCE 保证空表返回 0 不返回 NULL。
+    pub async fn sum_rest_duration_since(&self, since_ts: i64) -> Result<i64, AppError> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(duration_seconds), 0) FROM rest_records WHERE ts >= ? AND kind = 'rest'",
+        )
+        .bind(since_ts)
+        .fetch_one(&self.db)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Business Logic: sparkline 展示近 7 天每日完成休息次数,按本地日分桶。
+    /// Code Logic: 取出指定 kind 的所有 ts,Rust 端按 (ts-since_ts)/86400 分桶。
+    pub async fn get_daily_rest_counts(
+        &self,
+        since_ts: i64,
+        days: usize,
+        kind: &str,
+    ) -> Result<Vec<i64>, AppError> {
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT ts FROM rest_records WHERE ts >= ? AND kind = ? ORDER BY ts ASC",
+        )
+        .bind(since_ts)
+        .bind(kind)
+        .fetch_all(&self.db)
+        .await?;
+        let mut buckets = vec![0i64; days];
+        let span = (days as i64) * 86400;
+        for (ts,) in rows {
+            if ts < since_ts || ts >= since_ts + span {
+                continue;
+            }
+            let idx = ((ts - since_ts) / 86400) as usize;
+            if idx < days {
+                buckets[idx] += 1;
+            }
+        }
+        Ok(buckets)
+    }
+
+    /// Business Logic: 用户撤销误记的休息事件,按自增 id 精准删除。
+    /// Code Logic: DELETE FROM rest_records WHERE id=?,返回 rows_affected > 0。
+    /// NOTE: 暂无命令消费方(预留撤销误记的休息记录用),保留 dead_code 标注避免编译警告。
+    #[allow(dead_code)]
+    pub async fn delete_rest(&self, id: i64) -> Result<bool, AppError> {
+        let result = sqlx::query("DELETE FROM rest_records WHERE id = ?")
+            .bind(id)
+            .execute(&self.db)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Business Logic: 保留 N 天数据,定期清理过期休息记录。
+    /// Code Logic: DELETE FROM rest_records WHERE ts < cutoff_ts,返回删除行数。
+    pub async fn cleanup_rest_older_than(&self, cutoff_ts: i64) -> Result<u64, AppError> {
+        let result = sqlx::query("DELETE FROM rest_records WHERE ts < ?")
+            .bind(cutoff_ts)
+            .execute(&self.db)
+            .await?;
+        Ok(result.rows_affected())
     }
 }
 
@@ -216,7 +380,11 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("CREATE TABLE IF NOT EXISTS activity_records (ts INTEGER PRIMARY KEY, is_active INTEGER NOT NULL, process_name TEXT, window_title TEXT)").execute(&pool).await.unwrap();
-        sqlx::query("CREATE TABLE IF NOT EXISTS water_records (ts INTEGER PRIMARY KEY)")
+        sqlx::query("CREATE TABLE IF NOT EXISTS water_records (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS rest_records (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, duration_seconds INTEGER NOT NULL DEFAULT 0)")
             .execute(&pool)
             .await
             .unwrap();
@@ -287,9 +455,23 @@ mod tests {
     async fn test_water_record() {
         let pool = setup_db().await;
         let repo = HealthRepo::new(pool);
-        repo.insert_water(9999).await.unwrap();
-        // 不 panic 即通过（INSERT OR REPLACE 幂等）
-        repo.insert_water(9999).await.unwrap();
+        let id1 = repo.insert_water(9999).await.unwrap();
+        let id2 = repo.insert_water(9999).await.unwrap();
+        // 自增 id:同秒 ts 各自成行,两条记录都保留
+        assert!(id2 > id1, "同秒连点应各自生成不同自增 id");
+        assert_eq!(repo.count_water_since(0).await.unwrap(), 2);
+    }
+
+    /// 验证同秒连点「+1 杯」每条都被记录(回归 ts 主键冲突丢计数 bug)。
+    #[tokio::test]
+    async fn test_insert_water_same_second_keeps_all() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        let same_ts = 1234567890;
+        repo.insert_water(same_ts).await.unwrap();
+        repo.insert_water(same_ts).await.unwrap();
+        repo.insert_water(same_ts).await.unwrap();
+        assert_eq!(repo.count_water_since(0).await.unwrap(), 3);
     }
 
     /// 按本地小时桶聚合:插入「本地今天指定小时」的若干分钟活跃记录,
@@ -344,5 +526,136 @@ mod tests {
         assert_eq!(hours[9], 2);
         let sum: i64 = hours.iter().sum();
         assert_eq!(sum, 2);
+    }
+
+    /// 验证 count_water_since 在空表/单条/多条情况下的计数。
+    #[tokio::test]
+    async fn test_count_water_since() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        // 空表
+        assert_eq!(repo.count_water_since(0).await.unwrap(), 0);
+        // 插入 3 条
+        repo.insert_water(100).await.unwrap();
+        repo.insert_water(200).await.unwrap();
+        repo.insert_water(300).await.unwrap();
+        // since=150 只计 200/300
+        assert_eq!(repo.count_water_since(150).await.unwrap(), 2);
+        // since=0 计全部
+        assert_eq!(repo.count_water_since(0).await.unwrap(), 3);
+    }
+
+    /// 验证 get_daily_water_counts 返回长度恒为 days 的桶,且按本地日正确分桶。
+    #[tokio::test]
+    async fn test_get_daily_water_counts() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        repo.insert_water(0).await.unwrap(); // 桶 0
+        repo.insert_water(86399).await.unwrap(); // 桶 0
+        repo.insert_water(86400).await.unwrap(); // 桶 1
+        repo.insert_water(6 * 86400).await.unwrap(); // 桶 6(今日)
+        repo.insert_water(7 * 86400).await.unwrap(); // 超出范围,不计
+        let counts = repo.get_daily_water_counts(0, 7).await.unwrap();
+        assert_eq!(counts.len(), 7);
+        assert_eq!(counts[0], 2);
+        assert_eq!(counts[1], 1);
+        assert_eq!(counts[6], 1);
+    }
+
+    /// 验证 delete_water 按自增 id 删除存在/不存在的记录的返回值。
+    #[tokio::test]
+    async fn test_delete_water() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        let id = repo.insert_water(100).await.unwrap();
+        let deleted = repo.delete_water(id).await.unwrap();
+        assert!(deleted);
+        let deleted_again = repo.delete_water(id).await.unwrap();
+        assert!(!deleted_again);
+        assert_eq!(repo.count_water_since(0).await.unwrap(), 0);
+    }
+
+    /// 验证 cleanup_water_older_than 只清理截止时间之前的记录。
+    #[tokio::test]
+    async fn test_cleanup_water_older_than() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        repo.insert_water(100).await.unwrap();
+        repo.insert_water(200).await.unwrap();
+        repo.insert_water(300).await.unwrap();
+        let deleted = repo.cleanup_water_older_than(200).await.unwrap();
+        assert_eq!(deleted, 1);
+        assert_eq!(repo.count_water_since(0).await.unwrap(), 2);
+    }
+
+    /// 验证 insert_rest_record 写入不同 kind 的记录,count_rest_since 按 kind 过滤。
+    #[tokio::test]
+    async fn test_insert_and_count_rest() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        let id1 = repo.insert_rest_record(100, "reminder", 0).await.unwrap();
+        let id2 = repo.insert_rest_record(200, "reminder", 0).await.unwrap();
+        let id3 = repo.insert_rest_record(300, "rest", 300).await.unwrap();
+        assert!(id1 < id2 && id2 < id3); // 自增 id
+        assert_eq!(repo.count_rest_since(0, "reminder").await.unwrap(), 2);
+        assert_eq!(repo.count_rest_since(0, "rest").await.unwrap(), 1);
+        assert_eq!(repo.count_rest_since(150, "reminder").await.unwrap(), 1);
+    }
+
+    /// 验证 sum_rest_duration_since 只累加 rest(kind='rest')的 duration,不累加 reminder。
+    #[tokio::test]
+    async fn test_sum_rest_duration_since() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        repo.insert_rest_record(100, "reminder", 0).await.unwrap();
+        repo.insert_rest_record(200, "rest", 300).await.unwrap();
+        repo.insert_rest_record(300, "rest", 120).await.unwrap();
+        assert_eq!(repo.sum_rest_duration_since(0).await.unwrap(), 420);
+        assert_eq!(repo.sum_rest_duration_since(250).await.unwrap(), 120);
+    }
+
+    /// 验证 get_daily_rest_counts 按 kind 过滤并按本地日分桶。
+    #[tokio::test]
+    async fn test_get_daily_rest_counts() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        repo.insert_rest_record(0, "rest", 100).await.unwrap();
+        repo.insert_rest_record(86400, "rest", 100).await.unwrap();
+        repo.insert_rest_record(86400, "reminder", 0).await.unwrap();
+        repo.insert_rest_record(6 * 86400, "rest", 100).await.unwrap();
+        let counts = repo.get_daily_rest_counts(0, 7, "rest").await.unwrap();
+        assert_eq!(counts.len(), 7);
+        assert_eq!(counts[0], 1);
+        assert_eq!(counts[1], 1);
+        assert_eq!(counts[6], 1);
+    }
+
+    /// 验证 delete_rest 按 id 删除,cleanup_rest_older_than 按时间清理。
+    #[tokio::test]
+    async fn test_delete_and_cleanup_rest() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        let id1 = repo.insert_rest_record(100, "rest", 100).await.unwrap();
+        let _id2 = repo.insert_rest_record(200, "rest", 100).await.unwrap();
+        let _id3 = repo.insert_rest_record(300, "rest", 100).await.unwrap();
+        let deleted = repo.delete_rest(id1).await.unwrap();
+        assert!(deleted);
+        assert_eq!(repo.count_rest_since(0, "rest").await.unwrap(), 2);
+        let deleted_missing = repo.delete_rest(99999).await.unwrap();
+        assert!(!deleted_missing);
+        let cleaned = repo.cleanup_rest_older_than(250).await.unwrap();
+        assert_eq!(cleaned, 1);
+        assert_eq!(repo.count_rest_since(0, "rest").await.unwrap(), 1);
+    }
+
+    /// 验证 get_last_water_ts 在空表/有记录时的返回。
+    #[tokio::test]
+    async fn test_get_last_water_ts() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        assert_eq!(repo.get_last_water_ts().await.unwrap(), None);
+        repo.insert_water(100).await.unwrap();
+        repo.insert_water(200).await.unwrap();
+        assert_eq!(repo.get_last_water_ts().await.unwrap(), Some(200));
     }
 }
