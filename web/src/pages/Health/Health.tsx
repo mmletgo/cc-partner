@@ -130,23 +130,33 @@ export function Health() {
    * 作为 get_activity_stats / get_activity_detail 的 sinceTs。
    * config 用于 HabitStatsCard 的 waterEnabled / waterIntervalSeconds / retainDays 派生展示。
    *
-   * 分两组容错:主数据(status/stats/detail)失败记日志但不阻塞;习惯统计 + 配置独立
-   * try/catch,失败只记日志,不影响主页面(习惯统计是辅助展示)。任一组失败都保证
-   * setNowTs + setLoading(false) 执行,避免页面卡 loading。
+   * 分两组容错,均用 Promise.allSettled 逐项容错:主数据(status/stats/detail)任一失败
+   * 不影响其他项;习惯统计 + 配置独立 try/catch,失败只记日志,不影响主页面(习惯统计是
+   * 辅助展示)。任一组失败都保证 setNowTs + setLoading(false) 执行,避免页面卡 loading。
    */
   const refresh = useCallback(async () => {
     const startOfDay = getLocalStartOfDayTs();
-    try {
-      const [nextStatus, nextStats, nextDetail] = await Promise.all([
-        healthApi.getStatus(),
-        healthApi.getStats(startOfDay),
-        healthApi.getDetail(startOfDay),
-      ]);
-      setStatus(nextStatus);
-      setStats(nextStats);
-      setDetail(nextDetail);
-    } catch (e) {
-      console.error('加载健康主数据失败', e);
+    // 主数据用 allSettled 逐项容错:getStats/getDetail 失败不影响 status 展示,
+    // 避免"任一 reject 就 loading 卡死"。
+    const [statusRes, statsRes, detailRes] = await Promise.allSettled([
+      healthApi.getStatus(),
+      healthApi.getStats(startOfDay),
+      healthApi.getDetail(startOfDay),
+    ]);
+    if (statusRes.status === 'fulfilled') {
+      setStatus(statusRes.value);
+    } else {
+      console.error('加载健康状态失败', statusRes.reason);
+    }
+    if (statsRes.status === 'fulfilled') {
+      setStats(statsRes.value);
+    } else {
+      console.error('加载今日统计失败', statsRes.reason);
+    }
+    if (detailRes.status === 'fulfilled') {
+      setDetail(detailRes.value);
+    } else {
+      console.error('加载活动明细失败', detailRes.reason);
     }
 
     // 习惯统计 + 配置独立容错,失败不阻塞主页面
