@@ -106,6 +106,8 @@ pub struct ClaudeSessionIndex {
 ///     不 Serialize（仅供内存索引使用）；sessions 以 session_id 为 key 便于单文件增量更新。
 #[derive(Debug, Clone)]
 pub struct WorktreeSessionIndex {
+    // 保留 worktree_path 便于调试与未来扩展（当前索引内部未直接读取）。
+    #[allow(dead_code)]
     pub worktree_path: PathBuf,
     pub encoded_cwd: String,
     pub sessions: HashMap<String, ClaudeSessionIndex>,
