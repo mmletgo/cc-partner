@@ -24,12 +24,16 @@ import type {
   ClaudeCodeAssetSelector,
   Device,
 } from '@/lib/types';
+import {
+  ENABLED_OPTIONS,
+  KIND_OPTIONS,
+  matchesClaudeCodeAsset,
+} from '@/lib/claudeCodeAssets';
+import type { EnabledFilter, KindFilter } from '@/lib/claudeCodeAssets';
 import styles from './ClaudeCodeAssets.module.css';
 
-type KindFilter = ClaudeCodeAssetKind | 'all';
 type AssetTab = 'remote' | 'local';
 
-const KIND_OPTIONS: KindFilter[] = ['all', 'skill', 'command', 'plugin', 'mcp'];
 const ASSET_TABS: AssetTab[] = ['local', 'remote'];
 
 /**
@@ -37,16 +41,6 @@ const ASSET_TABS: AssetTab[] = ['local', 'remote'];
  */
 function assetKey(asset: ClaudeCodeAsset): string {
   return `${asset.kind}:${asset.id}`;
-}
-
-/**
- * 判断资产是否匹配筛选条件。
- */
-function matchesAsset(asset: ClaudeCodeAsset, kind: KindFilter, search: string): boolean {
-  const q = search.trim().toLowerCase();
-  const matchesKind = kind === 'all' || asset.kind === kind;
-  const haystack = `${asset.name} ${asset.id} ${asset.source} ${asset.description ?? ''}`.toLowerCase();
-  return matchesKind && (!q || haystack.includes(q));
 }
 
 /**
@@ -67,6 +61,7 @@ export function ClaudeCodeAssets() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [remoteAssets, setRemoteAssets] = useState<ClaudeCodeAsset[]>([]);
   const [kind, setKind] = useState<KindFilter>('all');
+  const [enabledFilter, setEnabledFilter] = useState<EnabledFilter>('all');
   const [search, setSearch] = useState<string>('');
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [selectedRemoteKeys, setSelectedRemoteKeys] = useState<Set<string>>(new Set());
@@ -137,8 +132,8 @@ export function ClaudeCodeAssets() {
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const filteredAssets = useMemo(
-    () => assets.filter((asset) => matchesAsset(asset, kind, search)),
-    [assets, kind, search],
+    () => assets.filter((asset) => matchesClaudeCodeAsset(asset, kind, search, enabledFilter)),
+    [assets, kind, search, enabledFilter],
   );
 
   const counts = useMemo(() => {
@@ -318,17 +313,37 @@ export function ClaudeCodeAssets() {
                 placeholder={t('claudeCodeAssets:searchPlaceholder')}
                 aria-label={t('claudeCodeAssets:searchPlaceholder')}
               />
-              <div className={styles.segmented}>
-                {KIND_OPTIONS.map((option) => (
-                  <button
-                    key={option}
-                    type="button"
-                    className={option === kind ? styles.segmentActive : styles.segment}
-                    onClick={() => setKind(option)}
-                  >
-                    {option === 'all' ? t('claudeCodeAssets:allKinds') : t(`claudeCodeAssets:kinds.${option}`)}
-                  </button>
-                ))}
+              <div className={styles.filterGroup}>
+                <div className={styles.segmented} role="group" aria-label={t('claudeCodeAssets:kindFilterLabel')}>
+                  {KIND_OPTIONS.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className={option === kind ? styles.segmentActive : styles.segment}
+                      aria-pressed={option === kind}
+                      onClick={() => setKind(option)}
+                    >
+                      {option === 'all' ? t('claudeCodeAssets:allKinds') : t(`claudeCodeAssets:kinds.${option}`)}
+                    </button>
+                  ))}
+                </div>
+                <div className={styles.segmented} role="group" aria-label={t('claudeCodeAssets:stateFilterLabel')}>
+                  {ENABLED_OPTIONS.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className={option === enabledFilter ? styles.segmentActive : styles.segment}
+                      aria-pressed={option === enabledFilter}
+                      onClick={() => setEnabledFilter(option)}
+                    >
+                      {option === 'all'
+                        ? t('claudeCodeAssets:allStates')
+                        : option === 'enabled'
+                          ? t('claudeCodeAssets:enabled')
+                          : t('claudeCodeAssets:disabled')}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           </Card.Body>
@@ -393,6 +408,7 @@ export function ClaudeCodeAssets() {
                 selectedKeys={selectedRemoteKeys}
                 kind={kind}
                 search={search}
+                enabledFilter={enabledFilter}
                 onSelect={handleRemoteSelect}
                 onSelectMany={handleRemoteSelectMany}
               />
