@@ -1,10 +1,30 @@
-# Build & Release (Tauri) — 三平台（macOS 双架构 / Windows / Linux）安装包打包发版 CI
+# Build & Release (Tauri) — 三段式打包发版 CI（弃用 tauri-apps/tauri-action）
 #
-# 触发：push v* tag。
-# tauri-apps/tauri-action 自动构建各平台安装包（macOS→dmg、Windows→nsis+msi、Linux→AppImage+deb），
-# 用 TAURI_SIGNING_PRIVATE_KEY 对安装包签名后上传到 GitHub Release，
-# 并生成 latest.json（含各平台签名后的下载 URL + signature）附到 Release，供应用内 updater 校验。
-# 日常代码质量检查（lint/clippy/test）见 ci.yml，由 PR/push master 触发。
+# 为什么弃用 tauri-action？
+#   tauri-apps/tauri-action 有个上游 bug：只要任一平台缺 updater 的 .sig 签名文件，
+#   它就打印 "Signature not found, skipping upload" 并整体跳过 latest.json 的生成上传。
+#   结果 GitHub Release 上没有 latest.json（返回 404），应用内 updater 检查更新时报
+#   `error sending request for url`。固定到上游 dev commit 同样无效，必须等上游修复。
+#
+# 新方案（参考 cc-switch 项目）：
+#   1. 用项目锁定的 tauri CLI 直接跑 `tauri build`（配合 tauri.conf.json 的
+#      bundle.createUpdaterArtifacts: true，让 Tauri 自动产出 .app.tar.gz / .exe 及其
+#      .sig 签名文件），不再依赖 tauri-action 的产物收集逻辑。
+#   2. 每个 matrix 平台把 updater 产物（+.sig）和安装包收集到 release-assets/，通过
+#      workflow artifact 汇总。
+#   3. 用独立的 bash 脚本扫描所有 .sig、按文件名匹配平台，生成 latest.json 再上传到
+#      Release —— 只要某个平台产出了 .sig 就会进 latest.json，互不影响，彻底绕开 bug。
+#
+# 三个 job 的职责：
+#   - build                  : 按 matrix（macOS aarch64 / macOS x86_64 / Windows / Linux x64 /
+#                              Linux arm64）各自 tauri build，收集产物到 release-assets/。
+#   - publish-release        : 合并所有平台的 release-assets/，上传到 GitHub Release。
+#   - assemble-latest-json   : 从 Release 拉取全部 .sig，生成并上传 latest.json 供 updater 用。
+#
+# 注：前端在 web/ 子目录（用 npm 不是 pnpm），tauri 项目在 src-tauri/ 子目录。tauri CLI
+# 经 `cd web && npm ci` 安装到 web/node_modules，从仓库根目录调用 web/node_modules/.bin/tauri
+# （与本地 ./start.sh 一致）。macOS 保持 ad-hoc 签名（signingIdentity: "-"），不做 Apple
+# 公证/notarization；Windows updater 用 nsis（.exe）。
 
 name: Build & Release (Tauri)
 
@@ -16,32 +36,41 @@ on:
 permissions:
   contents: write
 
+# 同一 tag 多次推送时取消旧的运行，避免重复发版 / Release 资产冲突
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
-  publish-tauri:
+  # ─────────────────────────────────────────────────────────────────────────
+  # job 1: 各平台构建 + 收集产物
+  # ─────────────────────────────────────────────────────────────────────────
+  build:
+    name: build (${{ matrix.matrix_id }})
     strategy:
-      # 单个平台构建失败不阻断其他平台
+      # 单个平台失败不阻断其他平台
       fail-fast: false
       matrix:
         include:
           # macOS Apple Silicon（M 系列）
-          - platform: 'macos-latest'
-            args: '--target aarch64-apple-darwin'
+          - matrix_id: macos-aarch64
+            platform: 'macos-latest'
             target: 'aarch64-apple-darwin'
           # macOS Intel
-          - platform: 'macos-latest'
-            args: '--target x86_64-apple-darwin'
+          - matrix_id: macos-x86_64
+            platform: 'macos-latest'
             target: 'x86_64-apple-darwin'
-          # Windows x86_64（nsis + msi）
-          - platform: 'windows-latest'
-            args: ''
+          # Windows x86_64（nsis + msi；updater 用 nsis 的 .exe）
+          - matrix_id: windows-x86_64
+            platform: 'windows-latest'
             target: ''
-          # Linux x86_64（appimage + deb）；ubuntu-22.04 带 webkit2gtk-4.1
-          - platform: 'ubuntu-22.04'
-            args: ''
+          # Linux x86_64（AppImage + deb + rpm）
+          - matrix_id: linux-x86_64
+            platform: 'ubuntu-22.04'
             target: ''
-          # Linux arm64（aarch64）；GitHub 原生 arm64 runner，产出 arm64 AppImage/deb
-          - platform: 'ubuntu-24.04-arm'
-            args: ''
+          # Linux arm64（aarch64；GitHub 原生 arm64 runner）
+          - matrix_id: linux-aarch64
+            platform: 'ubuntu-24.04-arm'
             target: ''
 
     runs-on: ${{ matrix.platform }}
@@ -84,35 +113,305 @@ jobs:
             xdg-utils
 
       - name: Install frontend dependencies (web/)
+        # 安装前端依赖 + 项目锁定的 @tauri-apps/cli（写入 web/node_modules/.bin/tauri）
         run: cd web && npm ci
 
-      - name: Build & publish with tauri-action
-        # 用 @v0（浮动，指向最新 v0.x release，自动跟进上游修复）。
-        # 注：latest.json 缺失是 tauri-action 上游 bug——其 artifacts 收集不收集 updater .sig
-        # （与 tauri v2 updater bundle 兼容缺陷），致 upload-version-json "Signature not found" 跳过。
-        # 已验证：固定 dev commit 61337b43 同样无效（dev 的 artifacts 收集也有此缺陷）。
-        # 该 bug 需 tauri-action 上游修复，@v0 浮动会在新 release 发布后自动跟进。
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # updater 签名私钥（空密码，无需 TAURI_SIGNING_PRIVATE_KEY_PASSWORD）。
-          # 需把 ~/.tauri/cc-partner.updater.key 的内容配到 repo secret
-          # TAURI_SIGNING_PRIVATE_KEY。tauri-action 检测到该 env 即对安装包签名，
-          # 并把签名信息写进 latest.json 供 updater 校验。未配则不签名、latest.json 无 signature。
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      - name: Prepare Tauri signing key
+        # 把 TAURI_SIGNING_PRIVATE_KEY secret 解析为 tauri CLI 可识别的 base64 私钥环境变量。
+        # 容错三种 secret 存储格式：原始两行文本 / 整体 base64 包裹 / 纯一行 base64。
+        # secret 为空或缺失直接 fail（没有签名就没法生成 latest.json 的 signature）。
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
+            echo "❌ TAURI_SIGNING_PRIVATE_KEY Secret 为空或不存在" >&2
+            exit 1
+          fi
+
+          RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
+          KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
+          # 情况 1：原始两行文本（首行是 untrusted comment）
+          if echo "$RAW" | head -n1 | grep -q '^untrusted comment:'; then
+            printf '%s\n' "$RAW" > "$KEY_PATH"
+            echo "✅ 使用原始两行密钥文件格式"
+          else
+            # 情况 2：整体被 base64 包裹（解码后首行是 untrusted comment）
+            if DECODED=$(printf '%s' "$RAW" | (base64 --decode 2>/dev/null || base64 -D 2>/dev/null)) \
+               && echo "$DECODED" | head -n1 | grep -q '^untrusted comment:'; then
+              printf '%s\n' "$DECODED" > "$KEY_PATH"
+              echo "✅ 成功解码 base64 包裹密钥"
+            else
+              # 情况 3：纯 Base64 一行（手动补 untrusted comment 头）
+              if echo "$RAW" | grep -Eq '^[A-Za-z0-9+/=]+$'; then
+                ONE=$(printf '%s' "$RAW" | tr -d '\r\n')
+                printf '%s\n%s\n' "untrusted comment: tauri signing key" "$ONE" > "$KEY_PATH"
+                echo "✅ 使用一行 Base64 私钥"
+              else
+                echo "❌ 密钥格式无法识别" >&2
+                exit 1
+              fi
+            fi
+          fi
+          # 统一再 base64 一次，写入 GITHUB_ENV 供后续 build 步骤读取
+          if command -v base64 >/dev/null 2>&1; then
+            KEY_B64=$(base64 < "$KEY_PATH" | tr -d '\r\n')
+          elif command -v openssl >/dev/null 2>&1; then
+            KEY_B64=$(openssl base64 -A -in "$KEY_PATH")
+          else
+            KEY_B64=$(KEY_PATH="$KEY_PATH" node -e "process.stdout.write(require('fs').readFileSync(process.env.KEY_PATH).toString('base64'))")
+          fi
+          echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
+          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          fi
+
+      # ── 各平台构建 ────────────────────────────────────────────────────────
+      # 用项目锁定的 tauri CLI（web/node_modules/.bin/tauri，与本地 ./start.sh 一致）。
+      # 在仓库根目录运行：tauri CLI 会自动定位 src-tauri/tauri.conf.json，并由其中的
+      # beforeBuildCommand（cd ../web && npm run build）触发前端构建。
+      - name: Build Tauri App (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        run: web/node_modules/.bin/tauri build --target ${{ matrix.target }}
+
+      - name: Build Tauri App (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        shell: bash
+        # 不指定 --bundles：Tauri 2 bundle.targets=all 会同时产出 nsis(.exe) 和 wix(.msi)，
+        # updater 只用 nsis 的 .exe（下方 Prepare Windows Assets 只收集 nsis 产物）。
+        run: web/node_modules/.bin/tauri build
+
+      - name: Build Tauri App (Linux)
+        if: startsWith(matrix.platform, 'ubuntu')
+        shell: bash
+        # 只要 appimage/deb/rpm 三种安装包。createUpdaterArtifacts: true 会让 AppImage
+        # 同时产 .sig（Tauri 2 官方支持 Linux updater，AppImage 是 updater 产物）。
+        # deb/rpm 仅供手动安装，不参与 updater。
+        run: web/node_modules/.bin/tauri build --bundles appimage,deb,rpm
+
+      # ── 收集产物到 release-assets/ ────────────────────────────────────────
+      - name: Prepare macOS Assets
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          # updater 产物（.app.tar.gz + .sig）在 target 专属目录下；
+          # 用 matrix.target 动态拼路径（带 --target 时为 target/<target>/release/...）。
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
+          echo "macOS bundle 目录: $BUNDLE_DIR"
+          ls -la "$BUNDLE_DIR"
+          cp "$BUNDLE_DIR"/*.app.tar.gz "$BUNDLE_DIR"/*.app.tar.gz.sig release-assets/
+          # 顺带收集 dmg 安装包（不参与 updater，仅供手动下载）
+          cp src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg release-assets/ 2>/dev/null || true
+          echo "=== release-assets ==="
+          ls -la release-assets/
+
+      - name: Prepare Windows Assets
+        if: startsWith(matrix.platform, 'windows')
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          NSIS_DIR="src-tauri/target/release/bundle/nsis"
+          echo "Windows nsis bundle 目录: $NSIS_DIR"
+          ls -la "$NSIS_DIR"
+          # updater 首选 nsis 的 *_x64-setup.exe + 对应 .sig（Tauri 2 文件名用下划线分隔）
+          # 强制要求签名（缺失即 fail）
+          cp "$NSIS_DIR"/*_x64-setup.exe release-assets/
+          cp "$NSIS_DIR"/*_x64-setup.exe.sig release-assets/
+          if ! ls release-assets/*_x64-setup.exe.sig >/dev/null 2>&1; then
+            echo "❌ 未找到 nsis setup.exe 的 .sig 签名文件，updater 无法工作" >&2
+            exit 1
+          fi
+          echo "=== release-assets ==="
+          ls -la release-assets/
+
+      - name: Prepare Linux Assets
+        if: startsWith(matrix.platform, 'ubuntu')
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          APPIMAGE_DIR="src-tauri/target/release/bundle/appimage"
+          # updater 产物：AppImage + .sig（Tauri 2 官方支持，与 macOS/Windows 一致）
+          cp "$APPIMAGE_DIR"/*.AppImage release-assets/
+          cp "$APPIMAGE_DIR"/*.AppImage.sig release-assets/
+          if ! ls release-assets/*.AppImage.sig >/dev/null 2>&1; then
+            echo "❌ 未找到 AppImage 的 .sig 签名文件，updater 无法工作" >&2
+            exit 1
+          fi
+          # deb / rpm 仅供手动安装，不参与 updater
+          cp src-tauri/target/release/bundle/deb/*.deb release-assets/ 2>/dev/null || true
+          cp src-tauri/target/release/bundle/rpm/*.rpm release-assets/ 2>/dev/null || true
+          echo "=== release-assets ==="
+          ls -la release-assets/
+
+      - name: Upload release artifacts to workflow
+        # 每个 matrix job 一个独立 artifact（v4 不允许同名），publish-release 阶段合并
+        uses: actions/upload-artifact@v4
         with:
-          # 复用触发 CI 的 tag 名作为 Release tag，release notes 由 GitHub 自动生成
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Release ${{ github.ref_name }}'
-          releaseDraft: false
+          name: release-assets-${{ matrix.matrix_id }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # job 2: 汇总所有平台产物，上传到 GitHub Release
+  # ─────────────────────────────────────────────────────────────────────────
+  publish-release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download all platform artifacts
+        # merge-multiple 把所有匹配 release-assets-* 的 artifact 平铺到同一目录
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: List collected assets
+        run: |
+          echo "=== 合并后的 release-assets ==="
+          ls -la release-assets/
+
+      - name: Create / Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
           prerelease: false
-          # Windows 用 nsis 安装包（非 msi）作为 updater 的下载源
-          updaterJsonPreferNsis: true
-          # 资产命名用 tauri-action 默认（不设 assetNamePattern）：
-          #   普通产物保留 Tauri CLI 原文件名（已含版本+架构，如 cc-partner_0.6.0_x64.dmg）；
-          #   macOS updater tarball（.app.tar.gz/.sig）自动追加 _版本_架构 后缀（如 cc-partner_0.6.0_x64.app.tar.gz），
-          #   全局唯一不冲突；上传前还会先删除同名资产兜底。
-          # 历史教训：曾用不存在的 [filename] 占位符 + 旧 input 名 assetNamePattern，导致同平台所有文件
-          #   映射到同一字面名（darwin_x64_[filename]），第二个起 already_exists，已移除。
-          # 透传各平台的 build target 参数
-          args: ${{ matrix.args }}
+          generate_release_notes: false
+          body: |
+            ## cc-partner ${{ github.ref_name }}
+
+            ### 下载
+
+            | 平台 | 安装包 |
+            | --- | --- |
+            | macOS (Apple Silicon) | `*_aarch64.dmg` |
+            | macOS (Intel) | `*_x64.dmg` |
+            | Windows (x86_64) | `*_x64-setup.exe` |
+            | Linux (x86_64) | `*_amd64.AppImage` / `.deb` |
+            | Linux (ARM64) | `*_aarch64.AppImage` / `.deb` |
+
+            ### 自动更新
+
+            已安装旧版本的用户，应用内会自动检查更新（读取本 Release 的 `latest.json`）。
+            macOS / Windows 支持应用内自动更新；Linux 需手动下载新版本安装包覆盖。
+          files: release-assets/*
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # job 3: 生成 latest.json 并上传到 Release（供应用内 updater 校验）
+  # ─────────────────────────────────────────────────────────────────────────
+  assemble-latest-json:
+    name: Assemble latest.json
+    needs: publish-release
+    runs-on: ubuntu-22.04
+
+    env:
+      TAG: ${{ github.ref_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Ensure gh CLI available
+        # ubuntu runner 自带 gh，这里仅校验
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "❌ gh CLI 未安装" >&2
+            exit 1
+          fi
+          gh --version
+
+      - name: Download all release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p dl
+          gh release download "$TAG" --dir dl --clobber
+          echo "=== dl/ 内容 ==="
+          ls -la dl/
+
+      - name: Generate latest.json
+        # 扫描所有 .sig，按文件名匹配平台。只把实际产出了签名文件的平台写进 latest.json，
+        # 互不影响——这正是弃用 tauri-action 的核心：单平台缺签名不再拖累其他平台。
+        # case 顺序：arch-specific 模式在前（aarch64/x64/amd64），避免被宽泛通配先吃掉。
+        # 用 jq 构造 JSON，避免字符串拼接的引号/换行/缩进问题，顺带做合法性校验。
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          REPO="${GITHUB_REPOSITORY}"
+          base_url="https://github.com/$REPO/releases/download/$TAG"
+
+          mac_aarch64_url=""; mac_aarch64_sig=""
+          mac_x64_url="";     mac_x64_sig=""
+          win_x64_url="";     win_x64_sig=""
+          linux_x64_url="";   linux_x64_sig=""
+          linux_arm64_url=""; linux_arm64_sig=""
+
+          shopt -s nullglob
+          for sig in dl/*.sig; do
+            base=${sig%.sig}
+            fname=$(basename "$base")
+            url="$base_url/$fname"
+            sig_content=$(cat "$sig")
+            case "$fname" in
+              *_aarch64.app.tar.gz)
+                mac_aarch64_url="$url"; mac_aarch64_sig="$sig_content";;
+              *_x64.app.tar.gz)
+                mac_x64_url="$url"; mac_x64_sig="$sig_content";;
+              *_x64-setup.exe)
+                win_x64_url="$url"; win_x64_sig="$sig_content";;
+              *_amd64.AppImage)
+                linux_x64_url="$url"; linux_x64_sig="$sig_content";;
+              *_aarch64.AppImage)
+                linux_arm64_url="$url"; linux_arm64_sig="$sig_content";;
+            esac
+          done
+
+          # 用 jq 构造 platforms 对象：先建全 5 个键，再用 with_entries 过滤掉 url 为空的
+          # （jq 的 empty 在对象字面量里会吞掉整个对象，不能用 if-then-empty 写法）
+          platforms_json=$(jq -n \
+            --arg mac_a_url "$mac_aarch64_url"     --arg mac_a_sig "$mac_aarch64_sig" \
+            --arg mac_x_url "$mac_x64_url"         --arg mac_x_sig "$mac_x64_sig" \
+            --arg win_url  "$win_x64_url"          --arg win_sig  "$win_x64_sig" \
+            --arg lx_url   "$linux_x64_url"        --arg lx_sig   "$linux_x64_sig" \
+            --arg la_url   "$linux_arm64_url"      --arg la_sig   "$linux_arm64_sig" \
+            '{
+              "darwin-aarch64": {signature: $mac_a_sig, url: $mac_a_url},
+              "darwin-x86_64":  {signature: $mac_x_sig, url: $mac_x_url},
+              "windows-x86_64": {signature: $win_sig,  url: $win_url},
+              "linux-x86_64":   {signature: $lx_sig,   url: $lx_url},
+              "linux-aarch64":  {signature: $la_sig,   url: $la_url}
+            } | with_entries(select(.value.url | length > 0))')
+
+          platform_count=$(echo "$platforms_json" | jq '. | length')
+          if [ "$platform_count" -eq 0 ]; then
+            echo "❌ 没有任何平台产出 .sig 签名文件，无法生成 latest.json" >&2
+            exit 1
+          fi
+
+          # 组装完整 latest.json 并用 jq 校验合法性
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "cc-partner $VERSION" \
+            --arg pub_date "$PUB_DATE" \
+            --argjson platforms "$platforms_json" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: $platforms}' \
+            > latest.json
+
+          echo "=== latest.json ($platform_count 个平台) ==="
+          cat latest.json
+
+      - name: Upload latest.json to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" latest.json --clobber
