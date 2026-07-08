@@ -37,6 +37,9 @@ export type WorkbenchBrowserSourceLabelKey =
   | 'workbench:browserPreview.sources.portProbe'
   | 'workbench:browserPreview.sources.manual';
 
+export const WORKBENCH_BROWSER_IFRAME_SANDBOX =
+  'allow-scripts allow-forms allow-popups allow-downloads allow-modals';
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   纯 helper 测试需要在 Node/tsx 中导入本模块，而完整视图会加载 CSS Modules 与 primitives。

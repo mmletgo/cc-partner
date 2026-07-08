@@ -12,6 +12,7 @@ import {
   canApplyWorkbenchBrowserRequest,
   getWorkbenchBrowserFrameSrc,
   getWorkbenchBrowserTargetSourceLabelKey,
+  WORKBENCH_BROWSER_IFRAME_SANDBOX,
   type WorkbenchBrowserRequestSnapshot,
   type WorkbenchBrowserWorkspaceProps,
 } from './WorkbenchBrowserWorkspace';
@@ -216,6 +217,7 @@ export function WorkbenchBrowserWorkspaceView({
         {frameSrc ? (
           <iframe
             className={styles.frame}
+            sandbox={WORKBENCH_BROWSER_IFRAME_SANDBOX}
             src={frameSrc}
             title={t('workbench:browserPreview.frameTitle')}
           />

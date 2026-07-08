@@ -566,7 +566,7 @@ fn should_drop_proxy_header(name: &str) -> bool {
 ///     上游 dev server 的状态码、内容类型、缓存头等需要尽量透明返回给 iframe。
 ///
 /// Code Logic（这个函数做什么）:
-///     复制状态、过滤响应 header、重写 Location 到本机 proxy path，并用原始响应 bytes 构造 Body。
+///     复制状态、过滤响应 header、重写 Location 到本机 proxy path，并把上游 bytes_stream 直接包装为 axum streaming Body。
 async fn response_to_axum_response(
     session: &BrowserPreviewSession,
     response: reqwest::Response,
@@ -599,9 +599,9 @@ async fn response_to_axum_response(
             headers.append(header_name, header_value);
         }
     }
-    let bytes = response.bytes().await?;
+    let body = Body::from_stream(response.bytes_stream());
     builder
-        .body(Body::from(bytes))
+        .body(body)
         .map_err(|_| ApiError::bad_gateway("构造预览响应失败"))
 }
 
@@ -1021,6 +1021,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use axum::routing::any;
     use axum::Router;
+    use std::convert::Infallible;
     use std::net::SocketAddr;
     use std::sync::Mutex;
     use tokio::net::TcpListener;
@@ -1158,6 +1159,86 @@ mod tests {
             seen_path.lock().unwrap().as_deref(),
             Some("/assets/app.js?version=1")
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     上游 dev server 可能返回很大或持续分块的响应，preview proxy 不能等完整 body 聚合到内存后才返回 iframe。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造延迟分块 upstream，断言 proxy 在后续 chunk 到达前先返回 response，并保留 status/header/content。
+    #[tokio::test]
+    async fn http_proxy_streams_upstream_response_without_waiting_for_full_body() {
+        let app = Router::new().route(
+            "/stream",
+            any(|| async move {
+                let stream = futures_util::stream::unfold(0u8, |state| async move {
+                    match state {
+                        0 => Some((Ok::<Bytes, Infallible>(Bytes::from_static(b"chunk-1|")), 1)),
+                        1 => {
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            Some((Ok::<Bytes, Infallible>(Bytes::from_static(b"chunk-2|")), 2))
+                        }
+                        2 => {
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            Some((Ok::<Bytes, Infallible>(Bytes::from_static(b"chunk-3")), 3))
+                        }
+                        _ => None,
+                    }
+                });
+                Response::builder()
+                    .status(StatusCode::ACCEPTED)
+                    .header("x-preview-stream", "chunked")
+                    .body(Body::from_stream(stream))
+                    .unwrap()
+            }),
+        );
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        let preview = registry.create_local(
+            "project-a".to_string(),
+            None,
+            format!("http://{addr}/"),
+            62116,
+        );
+        let session = registry.lookup(&preview.preview_id).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("http://127.0.0.1/proxy")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = tokio::time::timeout(
+            Duration::from_millis(150),
+            proxy_http_request_for_session(
+                session,
+                "stream".to_string(),
+                req,
+                DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
+            ),
+        )
+        .await
+        .expect("proxy should return headers before the upstream body finishes")
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            response.headers().get("x-preview-stream").unwrap(),
+            "chunked"
+        );
+        let body = tokio::time::timeout(
+            Duration::from_secs(2),
+            to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("streamed body should finish")
+        .unwrap();
+        assert_eq!(&body[..], b"chunk-1|chunk-2|chunk-3");
     }
 
     /// Business Logic（为什么需要这个测试）:

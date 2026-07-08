@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   getWorkbenchBrowserFrameSrc,
+  WORKBENCH_BROWSER_IFRAME_SANDBOX,
   canApplyWorkbenchBrowserRequest,
   getWorkbenchBrowserTargetSourceLabelKey,
 } from '@/components/domain/WorkbenchBrowserWorkspace/WorkbenchBrowserWorkspace';
@@ -23,6 +25,33 @@ assert.equal(
 assert.equal(
   getWorkbenchBrowserFrameSrc(preview, 'mobile'),
   '/api/mobile/workbench/browser/proxy/preview-1/',
+);
+
+const iframeSandboxTokens = new Set(WORKBENCH_BROWSER_IFRAME_SANDBOX.split(/\s+/));
+assert.equal(
+  iframeSandboxTokens.has('allow-scripts'),
+  true,
+  'preview iframe should allow project scripts for dev server previews',
+);
+assert.equal(
+  iframeSandboxTokens.has('allow-same-origin'),
+  false,
+  'preview iframe must omit allow-same-origin to block preview content from same-origin cc-partner APIs such as /api/mobile and /api/workbench',
+);
+const workspaceViewSource = readFileSync(
+  new URL(
+    '../../components/domain/WorkbenchBrowserWorkspace/WorkbenchBrowserWorkspaceView.tsx',
+    import.meta.url,
+  ),
+  'utf8',
+);
+assert(
+  workspaceViewSource.includes('sandbox={WORKBENCH_BROWSER_IFRAME_SANDBOX}'),
+  'WorkbenchBrowserWorkspace iframe should apply the shared sandbox policy',
+);
+assert(
+  !workspaceViewSource.includes('allow-same-origin'),
+  'WorkbenchBrowserWorkspace view must not opt preview iframe back into cc-partner same-origin access',
 );
 
 assert.equal(
