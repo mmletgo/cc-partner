@@ -14,7 +14,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager,
 };
 
 /// 截图菜单项 id。
@@ -60,11 +60,28 @@ pub(crate) fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// 请求前端展示后端关闭选择。
+///
+/// Business Logic（为什么需要这个函数）:
+///     托盘退出和窗口关闭都必须让用户选择“仅关闭 GUI”或“前后端都关闭”，不能绕过后台 sidecar 停止决策。
+///
+/// Code Logic（这个函数做什么）:
+///     先显示并聚焦主窗口，再 emit `backend:close-requested` 事件；前端顶层监听后弹出同一个确认弹窗。
+fn request_backend_close_choice(app: &AppHandle) {
+    show_main_window(app);
+    if let Err(error) = app.emit("backend:close-requested", serde_json::json!({})) {
+        tracing::error!("发送 backend close request 事件失败: {error}");
+    }
+}
+
 /// 创建并安装系统托盘（含图标、菜单、事件处理）。
 ///
-/// Business Logic: 应用启动时在 setup 中调用一次。
-/// Code Logic: 用 TrayIconBuilder 装配图标、tooltip、菜单；on_tray_icon_event 处理双击显窗；
-///             on_menu_event 分发显示/截图/退出。退出直接 app.exit(0)。
+/// Business Logic（为什么需要这个函数）:
+///     应用启动时需要在系统托盘提供显示主窗口、截图、暂停健康监测和退出入口。
+///
+/// Code Logic（这个函数做什么）:
+///     用 TrayIconBuilder 装配图标、tooltip、菜单；托盘双击显示主窗口，菜单事件分发显示/截图/健康监测/退出；
+///     退出入口 emit 前端关闭选择事件，由统一弹窗决定是否停止 sidecar。
 pub fn build_tray(app: &AppHandle) -> Result<(), AppError> {
     let show_item = MenuItem::with_id(app, MENU_SHOW, "显示主窗口", true, None::<&str>)?;
     let shot_item = MenuItem::with_id(app, MENU_SCREENSHOT, "截图", true, None::<&str>)?;
@@ -94,7 +111,7 @@ pub fn build_tray(app: &AppHandle) -> Result<(), AppError> {
                 state.health.paused.store(!cur, Ordering::Relaxed);
                 tracing::info!("健康监测 {}", if !cur { "已暂停" } else { "已恢复" });
             }
-            MENU_QUIT => app.exit(0),
+            MENU_QUIT => request_backend_close_choice(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

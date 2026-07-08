@@ -1,0 +1,44 @@
+/* App 顶层关闭确认弹窗样式
+ * Business Logic: GUI 关闭时需要阻止默认退出并让用户选择是否停止后台 sidecar。
+ * Code Logic: 使用固定遮罩 + Card 容器承载三按钮选择，全部视觉值来自 design token。
+ */
+
+.closeDialogBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  background: color-mix(in oklab, var(--fg) 42%, transparent);
+}
+
+.closeDialog {
+  width: min(100%, 440px);
+  box-shadow: var(--shadow-window);
+}
+
+.closeDialogTitle {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--fg);
+}
+
+.closeDialogText {
+  margin: 0;
+  font-size: var(--text-base);
+  line-height: 1.6;
+  color: var(--fg-2);
+}
+
+.closeDialogError {
+  margin: var(--space-3) 0 0;
+  padding: var(--space-3);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}

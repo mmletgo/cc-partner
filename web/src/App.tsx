@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react';
 import { Routes, Route, Navigate, Outlet, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { sendNotification } from '@tauri-apps/plugin-notification';
+import { Button } from './components/primitives/Button';
+import { Card } from './components/primitives/Card';
 import { AppShell } from './components/layout/AppShell';
 import { Home } from './pages/Home';
 import { Transfer } from './pages/Transfer';
@@ -26,6 +29,8 @@ import { WorkbenchProjectsProvider } from './hooks/useWorkbenchProjects';
 import { WorkbenchDependencyProvider } from './hooks/useWorkbenchDependency';
 import { WorkbenchTerminalBuffersProvider } from './hooks/useWorkbenchTerminalBuffers';
 import { checkNotificationGranted } from './lib/notification';
+import { backendApi } from './api/backend';
+import styles from './App.module.css';
 
 const isDev = import.meta.env.DEV;
 
@@ -166,11 +171,126 @@ function HealthReminderListener() {
   return null;
 }
 
+/**
+ * BackendCloseChoiceListener - GUI 关闭时选择是否同时停止后台 sidecar。
+ *
+ * Business Logic（为什么需要这个组件）:
+ *   GUI 关闭不能再直接退出进程；用户可能希望仅关闭桌面窗口并保留后台后端继续为手机/局域网服务，
+ *   也可能希望完整关闭前后端。托盘退出与窗口关闭必须进入同一选择流程。
+ *
+ * Code Logic（这个组件做什么）:
+ *   - 仅在 Tauri 主窗口 label=`main` 时注册关闭监听，避免截图/健康 overlay 辅助窗口被拦截
+ *   - 主窗口监听 Tauri `getCurrentWindow().onCloseRequested` 并 `preventDefault()`
+ *   - 主窗口监听 Rust 托盘 emit 的 `backend:close-requested`
+ *   - modal 中“仅关闭 GUI”只调用 `backendApi.exitGui()`
+ *   - “前后端都关闭”先 `backendApi.stop()` 再 `backendApi.exitGui()`
+ *   - hooks 全部在 early return 之前
+ */
+function BackendCloseChoiceListener() {
+  const { t } = useTranslation(['common']);
+  const [open, setOpen] = useState(false);
+  const [closingMode, setClosingMode] = useState<'gui' | 'full' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!canListenToTauriEvents()) return undefined;
+    const currentWindow = getCurrentWindow();
+    if (currentWindow.label !== 'main') return undefined;
+
+    const closeUnlisten = currentWindow.onCloseRequested((event) => {
+      event.preventDefault();
+      setError(null);
+      setOpen(true);
+    });
+    const trayUnlisten = listen('backend:close-requested', () => {
+      setError(null);
+      setOpen(true);
+    });
+    return () => {
+      void closeUnlisten.then((fn) => fn());
+      void trayUnlisten.then((fn) => fn());
+    };
+  }, []);
+
+  const handleGuiOnlyClose = async () => {
+    setClosingMode('gui');
+    setError(null);
+    try {
+      await backendApi.exitGui();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setClosingMode(null);
+    }
+  };
+
+  const handleFullClose = async () => {
+    setClosingMode('full');
+    setError(null);
+    try {
+      await backendApi.stop();
+      await backendApi.exitGui();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setClosingMode(null);
+    }
+  };
+
+  const handleCancelClose = () => {
+    if (closingMode !== null) return;
+    setOpen(false);
+    setError(null);
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className={styles.closeDialogBackdrop} role="dialog" aria-modal="true" aria-labelledby="backend-close-title">
+      <Card variant="elevated" className={styles.closeDialog}>
+        <Card.Header>
+          <h2 id="backend-close-title" className={styles.closeDialogTitle}>
+            {t('common:backendClose.title')}
+          </h2>
+        </Card.Header>
+        <Card.Body>
+          <p className={styles.closeDialogText}>{t('common:backendClose.description')}</p>
+          {error ? (
+            <p className={styles.closeDialogError}>
+              {t('common:backendClose.error', { error })}
+            </p>
+          ) : null}
+        </Card.Body>
+        <Card.Footer>
+          <Button variant="ghost" onClick={handleCancelClose} disabled={closingMode !== null}>
+            {t('common:backendClose.cancel')}
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={handleGuiOnlyClose}
+            loading={closingMode === 'gui'}
+            disabled={closingMode === 'full'}
+          >
+            {t('common:backendClose.guiOnly')}
+          </Button>
+          <Button
+            variant="danger"
+            onClick={handleFullClose}
+            loading={closingMode === 'full'}
+            disabled={closingMode === 'gui'}
+          >
+            {t('common:backendClose.stopBackend')}
+          </Button>
+        </Card.Footer>
+      </Card>
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <>
       <PermissionNeededListener />
       <HealthReminderListener />
+      <BackendCloseChoiceListener />
       <Routes>
         {/* 区域截图选区页：独立于 AppShell/OnboardingGuard，由 Tauri 选区窗口直接加载 */}
         <Route path="/screenshot-overlay" element={<Overlay />} />

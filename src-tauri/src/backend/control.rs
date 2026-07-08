@@ -3,12 +3,43 @@ use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 const CONTROL_FILE_NAME: &str = "backend-control.json";
 const PID_FILE_NAME: &str = "backend.pid";
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 static SHUTDOWN_NOTIFIER: OnceLock<Mutex<Option<watch::Sender<bool>>>> = OnceLock::new();
+
+/// `/api/health` 响应中后端状态检查需要的字段。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GUI 与 CLI 判断 sidecar 是否可用时不能只看 pid，必须确认控制文件端口返回的是当前设备的后端。
+///
+/// Code Logic（这个结构做什么）:
+///     反序列化 health JSON 的 ok、device_id、http_port 字段，其它字段由 serde 忽略。
+#[derive(Debug, Deserialize)]
+struct BackendHealthResponse {
+    ok: bool,
+    device_id: String,
+    http_port: u16,
+}
+
+/// stop control route 响应中必须校验的字段。
+///
+/// Business Logic（为什么需要这个结构）:
+///     HTTP 2xx 只代表本地 route 响应成功；调用方还需要确认后端确实触发了 shutdown notifier。
+///
+/// Code Logic（这个结构做什么）:
+///     反序列化 `{ok:boolean}`，其它字段忽略；`ok=false` 表示 stop 请求未真正生效。
+#[derive(Debug, Deserialize)]
+struct StopRouteResponse {
+    ok: bool,
+}
 
 /// 独立后端进程写入磁盘的控制文件内容。
 ///
@@ -236,6 +267,213 @@ pub fn classify_status(
         control,
         error,
     }
+}
+
+/// 计算当前独立后端状态。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI Tauri command、GUI setup 和 CLI 都需要同一套状态判断，避免对 stale/running 的认知分叉。
+///
+/// Code Logic（这个函数做什么）:
+///     读取控制文件；存在控制文件时检查 pid 存活与 HTTP health，再委托 `classify_status` 生成统一 DTO。
+pub async fn current_status() -> BackendStatus {
+    let control = match read_control_file() {
+        Ok(control) => control,
+        Err(error) => return classify_status(None, false, false, Some(error.to_string())),
+    };
+
+    let (process_alive, health_ok) = match control.as_ref() {
+        Some(control) => {
+            let process_alive = process_is_alive(control.pid);
+            let health_ok = health_ok(control).await;
+            (process_alive, health_ok)
+        }
+        None => (false, false),
+    };
+
+    classify_status(control, process_alive, health_ok, None)
+}
+
+/// 请求运行中的独立后端停止。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI 的“前后端都关闭”和 CLI stop 都需要通过 control token 请求 serve 进程优雅退出，而不是直接 kill。
+///
+/// Code Logic（这个函数做什么）:
+///     POST `controlToken` 到本机 `/api/backend/control/stop`；非 2xx、JSON 解析失败或 `ok=false` 都返回业务错误。
+pub async fn request_stop_route(control: &BackendControlFile) -> Result<(), AppError> {
+    let client = reqwest::Client::builder()
+        .timeout(HEALTH_TIMEOUT)
+        .build()
+        .map_err(|error| AppError::generic(format!("构造 stop client 失败: {error}")))?;
+    let url = format!("http://127.0.0.1:{}/api/backend/control/stop", control.port);
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({ "controlToken": control.control_token }))
+        .send()
+        .await
+        .map_err(|error| AppError::generic(format!("请求 stop route 失败: {error}")))?;
+
+    if !response.status().is_success() {
+        return Err(AppError::generic(format!(
+            "stop route 返回 HTTP {}",
+            response.status()
+        )));
+    }
+
+    let stop_response = response
+        .json::<StopRouteResponse>()
+        .await
+        .map_err(|error| AppError::generic(format!("解析 stop route 响应失败: {error}")))?;
+    if !stop_response.ok {
+        return Err(AppError::generic(
+            "stop route 返回 ok=false，后端未触发 shutdown",
+        ));
+    }
+
+    Ok(())
+}
+
+/// 等待独立后端停止。
+///
+/// Business Logic（为什么需要这个函数）:
+///     stop route 返回只表示关闭请求已送达；GUI/CLI 应等待 health 失败或 pid 退出后再清理控制文件。
+///
+/// Code Logic（这个函数做什么）:
+///     在固定超时时间内轮询 pid 和 health；任一证明服务不可用即返回，超时返回错误避免误删仍运行的控制文件。
+pub async fn wait_until_stopped(control: &BackendControlFile) -> Result<(), AppError> {
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    while Instant::now() < deadline {
+        if !process_is_alive(control.pid) || !health_ok(control).await {
+            return Ok(());
+        }
+        tokio::time::sleep(STATUS_POLL_INTERVAL).await;
+    }
+    Err(AppError::generic(format!(
+        "等待后端停止超时: pid={}, port={}",
+        control.pid, control.port
+    )))
+}
+
+/// 通过控制文件停止独立后端并返回最终状态。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI full-close 路径需要在退出前尽力停止后台 sidecar；stale/stopped 状态应幂等处理，不能误报失败。
+///
+/// Code Logic（这个函数做什么）:
+///     读取当前状态；stale 直接清理控制文件；running 走 stop route + wait + 清理；其它状态原样返回。
+pub async fn stop_backend_process() -> Result<BackendStatus, AppError> {
+    let status = current_status().await;
+    let Some(control) = status.control.clone() else {
+        return Ok(status);
+    };
+
+    if status.kind == BackendStatusKind::Stale {
+        remove_control_files()?;
+        return Ok(current_status().await);
+    }
+
+    if status.kind != BackendStatusKind::Running {
+        return Ok(status);
+    }
+
+    request_stop_route(&control).await?;
+    wait_until_stopped(&control).await?;
+    remove_control_files()?;
+    Ok(current_status().await)
+}
+
+/// 检查控制文件对应的 health 是否可用。
+///
+/// Business Logic（为什么需要这个函数）:
+///     pid 存活不代表该端口仍是当前 cc-partner 后端；health 响应要与控制文件设备和端口匹配。
+///
+/// Code Logic（这个函数做什么）:
+///     GET `/api/health`，成功解析后校验 ok、device_id、http_port；任何失败都返回 false。
+async fn health_ok(control: &BackendControlFile) -> bool {
+    if control.port == 0 {
+        return false;
+    }
+    let url = format!("http://127.0.0.1:{}/api/health", control.port);
+    let client = match reqwest::Client::builder().timeout(HEALTH_TIMEOUT).build() {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+    let response = match client.get(url).send().await {
+        Ok(response) if response.status().is_success() => response,
+        _ => return false,
+    };
+    let health = match response.json::<BackendHealthResponse>().await {
+        Ok(health) => health,
+        Err(_) => return false,
+    };
+    health.ok && health.device_id == control.device_id && health.http_port == control.port
+}
+
+/// 检查 pid 是否仍存活。
+///
+/// Business Logic（为什么需要这个函数）:
+///     stale 控制文件的常见形态是 pid 已退出；status/start/stop 都需要先识别这种残留。
+///
+/// Code Logic（这个函数做什么）:
+///     委托平台相关实现查询进程存在性；pid 为 0 直接视为无效。
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    platform_process_is_alive(pid)
+}
+
+/// Unix 平台进程存活检查。
+///
+/// Business Logic（为什么需要这个函数）:
+///     macOS/Linux headless 后端需要用本机工具判断 pid 文件是否仍指向活进程。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 `kill -0 <pid>`，成功表示进程存在且当前用户可探测。
+#[cfg(unix)]
+fn platform_process_is_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Windows 平台进程存活检查。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Windows 用户同样需要 status/start/stop 正确识别 stale pid 文件。
+///
+/// Code Logic（这个函数做什么）:
+///     使用系统 `tasklist` 过滤 PID，并在输出中查找目标 pid。
+#[cfg(windows)]
+fn platform_process_is_alive(pid: u32) -> bool {
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .stdin(Stdio::null())
+        .output()
+        .map(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+        })
+        .unwrap_or(false)
+}
+
+/// 兜底平台进程存活检查。
+///
+/// Business Logic（为什么需要这个函数）:
+///     若未来支持其它平台，状态判断不应因缺少平台 API 而无法编译。
+///
+/// Code Logic（这个函数做什么）:
+///     暂时返回 false，让控制文件被归类为 stale。
+#[cfg(not(any(unix, windows)))]
+fn platform_process_is_alive(_pid: u32) -> bool {
+    false
 }
 
 #[cfg(test)]

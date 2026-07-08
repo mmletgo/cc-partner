@@ -73,6 +73,7 @@ active-win-pos-rs = "0.10"
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
 # Claude Code Assets: portable LAN bundles + safe directory walking
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 walkdir = "2"

@@ -42,9 +42,10 @@ use crate::backend::runtime::{
 };
 use crate::backend::ui::{BackendUi, TauriBackendUi};
 use crate::commands::{
-    cc_history as cc_history_cmd, claude_code_assets as claude_code_assets_cmd,
-    claude_md as claude_md_cmd, cloud_sync as cloud_sync_cmd, config as config_cmd,
-    devices as device_cmd, github_trending as github_trending_cmd, health as health_cmd,
+    backend as backend_cmd, cc_history as cc_history_cmd,
+    claude_code_assets as claude_code_assets_cmd, claude_md as claude_md_cmd,
+    cloud_sync as cloud_sync_cmd, config as config_cmd, devices as device_cmd,
+    github_trending as github_trending_cmd, health as health_cmd,
     lan_firewall_dependency as lan_firewall_dependency_cmd, mobile as mobile_cmd,
     orchestrator as orchestrator_cmd, orchestrator_config as orchestrator_config_cmd,
     permissions as permissions_cmd, prompt_optimizer as prompt_optimizer_cmd,
@@ -99,6 +100,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // 日志统一由 run() 开头的 tracing_subscriber 接管（tracing 宏 + 经 tracing-log 桥接 log）。
@@ -111,7 +113,16 @@ pub fn run() {
             let (state, runtime_mode) = tauri::async_runtime::block_on(async {
                 let ui: Arc<dyn BackendUi> = Arc::new(TauriBackendUi::new(app_handle.clone()));
                 let state = build_app_state(ui).await?;
-                let runtime_mode = start_gui_backend_services(&state).await;
+                let backend_status =
+                    backend_cmd::ensure_backend_process_for_gui(&app_handle).await?;
+                let runtime_mode = start_gui_backend_services(&state).await?;
+                tracing::info!(
+                    "GUI 已连接独立后端 sidecar: kind={:?}, port={}",
+                    backend_status.kind,
+                    state
+                        .actual_http_port
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                );
 
                 Ok::<(AppState, BackendRuntimeMode), error::AppError>((state, runtime_mode))
             })?;
@@ -119,7 +130,7 @@ pub fn run() {
             // 注入共享状态供命令层使用（axum/mDNS 已持有同一份 Arc 的 Clone）
             app.manage(state);
 
-            // 只有已验证 sidecar 正在运行时才跳过 headless 后台任务；否则 GUI 自己承担 in-process 后端任务。
+            // GUI 已连接独立 sidecar，仅 Headless 模式会启动后端后台任务。
             {
                 let state: tauri::State<'_, AppState> = app.state();
                 start_background_tasks(state.inner(), runtime_mode);
@@ -185,6 +196,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ping,
+            backend_cmd::get_backend_status,
+            backend_cmd::start_backend_process,
+            backend_cmd::stop_backend_process,
+            backend_cmd::exit_gui,
             prompt_cmd::list_prompts,
             prompt_cmd::get_prompt,
             prompt_cmd::create_prompt,

@@ -140,6 +140,16 @@ jobs:
       # 用项目锁定的 tauri CLI（web/node_modules/.bin/tauri，与本地 ./start.sh 一致）。
       # 在仓库根目录运行：tauri CLI 会自动定位 src-tauri/tauri.conf.json，并由其中的
       # beforeBuildCommand（cd ../web && npm run build）触发前端构建。
+      - name: Prepare backend sidecar externalBin
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.target }}" ]; then
+            node scripts/prepare-tauri-sidecar.mjs --target "${{ matrix.target }}"
+          else
+            node scripts/prepare-tauri-sidecar.mjs
+          fi
+
       - name: Build Tauri App (macOS)
         if: startsWith(matrix.platform, 'macos')
         shell: bash

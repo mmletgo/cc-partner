@@ -45,5 +45,13 @@
   "permission": {
     "needsGrant": "需要授权",
     "tapToGrant": "点击授权"
+  },
+  "backendClose": {
+    "title": "关闭 cc-partner？",
+    "description": "关闭 GUI 后，后台后端仍可继续服务手机和局域网访问。",
+    "guiOnly": "仅关闭 GUI",
+    "stopBackend": "前后端都关闭",
+    "cancel": "取消",
+    "error": "关闭失败：{{error}}"
   }
 }

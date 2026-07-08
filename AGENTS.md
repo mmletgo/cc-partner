@@ -428,7 +428,7 @@ node scripts/bump-version.mjs <新版本号>
 
 `.github/workflows/release-tauri.yml` 用三个 job：
 
-1. **`build`**（matrix 5 平台）— 原生 `tauri build` 构建各平台安装包 + updater 产物（`.app.tar.gz`/`-setup.exe`/`.AppImage` 及对应 `.sig`），收集到 `release-assets/` 上传 workflow artifact
+1. **`build`**（matrix 5 平台）— 先运行 `node scripts/prepare-tauri-sidecar.mjs [--target <triple>]` 构建并复制真实 `cc-partner-backend` externalBin，再原生 `tauri build` 构建各平台安装包 + updater 产物（`.app.tar.gz`/`-setup.exe`/`.AppImage` 及对应 `.sig`），收集到 `release-assets/` 上传 workflow artifact
 2. **`publish-release`**（needs: build）— 合并所有平台 artifact，用 `softprops/action-gh-release` 上传到 GitHub Release
 3. **`assemble-latest-json`**（needs: publish-release）— 下载 Release 全部 `.sig`，用 bash + jq 按文件名匹配平台生成 `latest.json`（单平台缺签名不连坐，只跳过该平台），上传到 Release
 

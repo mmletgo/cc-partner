@@ -45,5 +45,13 @@
   "permission": {
     "needsGrant": "Permission needed",
     "tapToGrant": "Tap to grant"
+  },
+  "backendClose": {
+    "title": "Close cc-partner?",
+    "description": "The backend can keep running for mobile and LAN access after the GUI closes.",
+    "guiOnly": "Close GUI only",
+    "stopBackend": "Close GUI and backend",
+    "cancel": "Cancel",
+    "error": "Close failed: {{error}}"
   }
 }

@@ -93,6 +93,41 @@ export interface AppConfig {
   httpPort: number;
 }
 
+export type BackendStatusKind = 'running' | 'stopped' | 'stale' | 'error';
+
+/**
+ * 独立后端控制文件信息（对齐 Rust BackendControlFile）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   GUI 需要展示和管理后台 sidecar，状态查询必须携带 pid/port 等控制文件信息。
+ *
+ * Code Logic（字段说明）:
+ *   camelCase 字段来自后端控制 JSON；controlToken 仅供本机 Tauri 命令内部管理，不在 UI 中展示。
+ */
+export interface BackendControlFile {
+  pid: number;
+  port: number;
+  deviceId: string;
+  deviceName: string;
+  startedAt: string;
+  controlToken: string;
+}
+
+/**
+ * 独立后端生命周期状态。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   GUI 启动、关闭选择弹窗和调试入口都需要知道 sidecar 是 running/stopped/stale/error。
+ *
+ * Code Logic（字段说明）:
+ *   kind 是固定状态枚举；control 在有控制文件时存在；error 保存状态读取或健康检查错误。
+ */
+export interface BackendStatus {
+  kind: BackendStatusKind;
+  control: BackendControlFile | null;
+  error: string | null;
+}
+
 /**
  * 移动端局域网访问入口信息。
  *

@@ -471,22 +471,13 @@ pub async fn start_backend_services(
 /// 启动 GUI 入口需要的后端服务并返回后台任务模式。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     桌面 GUI 优先复用已验证的独立 sidecar；没有 sidecar 或控制文件 stale 时，GUI 必须自己承担 in-process 后端职责。
+///     桌面 GUI 必须复用已验证的独立 sidecar，只启动 browse-only mDNS 来发现局域网设备，避免重复 advertise 自己。
 ///
 /// Code Logic（这个函数做什么）:
-///     先调用 `verified_sidecar_port_for_browse_only`；成功则只启动 mDNS browse 并返回 Gui，失败则启动 HTTP+mDNS advertise+browse 并返回 Headless。
-pub async fn start_gui_backend_services(state: &AppState) -> BackendRuntimeMode {
-    if let Some(port) = verified_sidecar_port_for_browse_only(state).await {
-        if let Err(e) = discovery::start_discovery(state, port, false, true).await {
-            tracing::error!("GUI browse-only mDNS 启动失败（sidecar 仍负责后端后台任务）: {e}");
-        }
-        return BackendRuntimeMode::Gui;
-    }
-
-    if let Err(e) = start_backend_services(state, true, true).await {
-        tracing::error!("GUI in-process 后端服务启动失败（P2P/移动端可能不可用）: {e}");
-    }
-    BackendRuntimeMode::Headless
+///     调用 `start_backend_services(advertise=false,browse=true)` 验证控制文件/health，写入 sidecar 端口并启动 browse。
+pub async fn start_gui_backend_services(state: &AppState) -> Result<BackendRuntimeMode, AppError> {
+    start_backend_services(state, false, true).await?;
+    Ok(BackendRuntimeMode::Gui)
 }
 
 /// 启动运行模式对应的后台任务。
@@ -560,11 +551,11 @@ pub async fn verified_sidecar_port_for_browse_only(state: &AppState) -> Option<u
     let control = match control::read_control_file() {
         Ok(Some(control)) => control,
         Ok(None) => {
-            tracing::info!("未发现独立后端控制文件，GUI 将启动 in-process 后端");
+            tracing::info!("未发现独立后端控制文件，GUI 无法进入 browse-only 模式");
             return None;
         }
         Err(e) => {
-            tracing::warn!("读取独立后端控制文件失败，GUI 将启动 in-process 后端: {e}");
+            tracing::warn!("读取独立后端控制文件失败，GUI 无法进入 browse-only 模式: {e}");
             remove_stale_control_files();
             return None;
         }
@@ -573,7 +564,7 @@ pub async fn verified_sidecar_port_for_browse_only(state: &AppState) -> Option<u
     let health = match fetch_sidecar_health(control.port).await {
         Ok(health) => health,
         Err(e) => {
-            tracing::warn!("独立后端健康检查失败，GUI 将启动 in-process 后端: {e}");
+            tracing::warn!("独立后端健康检查失败，GUI 无法进入 browse-only 模式: {e}");
             remove_stale_control_files();
             return None;
         }
@@ -586,7 +577,7 @@ pub async fn verified_sidecar_port_for_browse_only(state: &AppState) -> Option<u
             Some(port)
         }
         Err(e) => {
-            tracing::warn!("独立后端控制文件与健康响应不匹配，GUI 将启动 in-process 后端: {e}");
+            tracing::warn!("独立后端控制文件与健康响应不匹配，GUI 无法进入 browse-only 模式: {e}");
             remove_stale_control_files();
             None
         }
