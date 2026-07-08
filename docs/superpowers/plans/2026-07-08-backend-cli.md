@@ -83,9 +83,6 @@
 //!     聚合控制文件、UI 适配、共享 runtime 和 CLI 命令入口。
 
 pub mod control;
-pub mod ui;
-pub mod runtime;
-pub mod cli;
 ```
 
 In `src-tauri/src/lib.rs`, change the module list to expose the backend module to the bin:
@@ -93,6 +90,8 @@ In `src-tauri/src/lib.rs`, change the module list to expose the backend module t
 ```rust
 pub mod backend;
 ```
+
+Later tasks add `pub mod ui;`, `pub mod runtime;` and `pub mod cli;` when those files are created.
 
 - [ ] **Step 2: Write failing control tests**
 
