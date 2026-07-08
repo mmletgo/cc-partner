@@ -98,6 +98,9 @@
       "error": "加载失败",
       "unsupportedProjectKind": "手机端暂不支持打开该项目类型"
     },
+    "browser": {
+      "title": "移动端项目预览"
+    },
     "terminalPanel": {
       "title": "终端",
       "tabsAriaLabel": "移动端终端窗口",
@@ -314,6 +317,7 @@
     "nav": {
       "projects": "项目",
       "terminal": "终端",
+      "browser": "预览",
       "files": "文件",
       "git": "Git",
       "worktrees": "Worktrees",

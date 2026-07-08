@@ -100,6 +100,9 @@
       "error": "Load failed",
       "unsupportedProjectKind": "This project type is not supported on mobile yet"
     },
+    "browser": {
+      "title": "Mobile project preview"
+    },
     "terminalPanel": {
       "title": "Terminal",
       "tabsAriaLabel": "Mobile terminal windows",
@@ -319,6 +322,7 @@
     "nav": {
       "projects": "Projects",
       "terminal": "Terminal",
+      "browser": "Preview",
       "files": "Files",
       "git": "Git",
       "worktrees": "Worktrees",

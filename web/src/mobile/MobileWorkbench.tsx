@@ -7,6 +7,7 @@ import {
   MobileAutomationPanel,
   type MobileAutomationExecutionContext,
 } from './components/MobileAutomationPanel';
+import { MobileBrowserPanel } from './components/MobileBrowserPanel';
 import { MobileFilesPanel } from './components/MobileFilesPanel';
 import { MobileGitPanel } from './components/MobileGitPanel';
 import { MobilePromptPanel } from './components/MobilePromptPanel';
@@ -114,6 +115,10 @@ export function MobileWorkbench(): ReactElement {
     terminal: {
       title: t('workbench:mobile.placeholders.terminal.title'),
       label: t('workbench:mobile.placeholders.terminal.label'),
+    },
+    browser: {
+      title: t('workbench:mobile.browser.title'),
+      label: t('workbench:mobile.browser.title'),
     },
     files: {
       title: t('workbench:mobile.placeholders.files.title'),
@@ -782,6 +787,12 @@ export function MobileWorkbench(): ReactElement {
       <MobileAutomationPanel
         project={activeProject}
         onOpenExecutionContext={handleOpenAutomationExecutionContext}
+      />
+    ) : panel === 'browser' ? (
+      <MobileBrowserPanel
+        transport={httpWorkbenchTransport}
+        project={activeProject}
+        worktree={activeWorktree}
       />
     ) : panel === 'terminal' ? (
       <MobileTerminalPanel

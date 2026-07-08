@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import type { ComponentType, ReactElement, ReactNode, SVGProps } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  BrowserIcon,
   ChevronDownIcon,
   FileIcon,
   FolderIcon,
@@ -34,6 +35,7 @@ interface MobileNavItem {
 const MOBILE_NAV_ICONS: Record<MobileWorkbenchPanel, MobileNavIcon> = {
   projects: FolderIcon,
   terminal: TerminalIcon,
+  browser: BrowserIcon,
   files: FileIcon,
   git: HistoryIcon,
   worktrees: ForkIcon,
@@ -80,6 +82,7 @@ function MobilePanelNav({ activePanel, onSelect }: MobilePanelNavProps): ReactEl
   const labels: Record<MobileWorkbenchPanel, string> = {
     projects: t('workbench:mobile.nav.projects'),
     terminal: t('workbench:mobile.nav.terminal'),
+    browser: t('workbench:mobile.nav.browser'),
     files: t('workbench:mobile.nav.files'),
     git: t('workbench:mobile.nav.git'),
     worktrees: t('workbench:mobile.nav.worktrees'),

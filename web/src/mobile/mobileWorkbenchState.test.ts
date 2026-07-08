@@ -36,6 +36,21 @@ function assertEqual<T>(actual: T, expected: T): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   移动端主导航顺序是手机端功能发现的核心契约，测试需要断言完整数组而不是只比较相对位置。
+ *
+ * Code Logic（这个函数做什么）:
+ *   比较两个只读字符串数组的长度与逐项值，不一致时抛出包含完整数组的错误。
+ */
+function assertArrayEqual(actual: readonly string[], expected: readonly string[]): void {
+  const matches =
+    actual.length === expected.length && actual.every((value, index) => value === expected[index]);
+  if (!matches) {
+    throw new Error(`Expected ${JSON.stringify(expected)}, received ${JSON.stringify(actual)}`);
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   Task6 需要在移动端加载项目后自动选中一个 worktree，测试要构造最小合法 DTO。
  *
  * Code Logic（这个函数做什么）:
@@ -166,6 +181,27 @@ function testAutomationPanelIsFirstClassMobilePanel(): void {
   assertEqual(panels.includes('automation'), true);
   assertEqual(panels.indexOf('projects') < panels.indexOf('automation'), true);
   assertEqual(panels.indexOf('automation') < panels.indexOf('terminal'), true);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Browser preview 是移动端 Workbench 的一等面板，必须固定在 terminal 后、files 前，避免后续导航调整破坏功能入口。
+ *
+ * Code Logic（这个函数做什么）:
+ *   读取移动端面板顺序 helper，并逐项断言完整顺序包含 browser。
+ */
+function testMobileWorkbenchPanelOrderIncludesBrowserPreview(): void {
+  assertArrayEqual(getMobileWorkbenchPanelOrder(), [
+    'projects',
+    'automation',
+    'terminal',
+    'browser',
+    'files',
+    'git',
+    'worktrees',
+    'prompt',
+    'settings',
+  ]);
 }
 
 /**
@@ -518,6 +554,7 @@ function testMobileTerminalFullscreenChromeOnlyKeepsPaneActionsAndExit(): void {
 testSelectMobilePanelReturnsNextPanel();
 testRemoteProjectPanelSelectionKeepsRequestedPanel();
 testAutomationPanelIsFirstClassMobilePanel();
+testMobileWorkbenchPanelOrderIncludesBrowserPreview();
 testOpenMobileNavReturnsTrue();
 testInitialMobileWorkbenchPanelDefaultsToProjects();
 testInitialMobileNavOpenDefaultsToFalse();
@@ -536,3 +573,5 @@ testMobileCreatePaneDirectionUsesDown();
 testMobilePaneMutationRequiresSupportedIdleSession();
 testMobilePaneSwitchRequiresMultiplePanes();
 testMobileTerminalFullscreenChromeOnlyKeepsPaneActionsAndExit();
+
+console.log('mobileWorkbenchState tests passed');

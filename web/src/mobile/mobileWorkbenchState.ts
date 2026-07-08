@@ -4,6 +4,7 @@ import type { WorkbenchPaneSplitDirection } from '@/api/workbench';
 export type MobileWorkbenchPanel =
   | 'projects'
   | 'terminal'
+  | 'browser'
   | 'files'
   | 'git'
   | 'worktrees'
@@ -15,6 +16,7 @@ const MOBILE_WORKBENCH_PANEL_ORDER: readonly MobileWorkbenchPanel[] = [
   'projects',
   'automation',
   'terminal',
+  'browser',
   'files',
   'git',
   'worktrees',
