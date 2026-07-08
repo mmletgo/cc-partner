@@ -60,9 +60,11 @@ fn host_port_re() -> &'static Regex {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户进入 Browser tab 时，应自动看到上次使用、终端输出、项目配置和可达端口的候选 URL。
+///     Task 1 发现只能在项目所属设备上的 local project 执行；remote shortcut 必须由后续命令/路由 wrapper 转发到 owning device。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析项目/worktree 根目录，合并 remembered/terminal/package/probe 四类候选，去重排序后返回默认可达项。
+///     解析本机 local 项目/worktree 根目录，合并 remembered/terminal/package/probe 四类候选，去重排序后返回默认可达项。
+///     非 local 项目由 resolve 阶段拒绝，避免本机直接扫描远端 shortcut 的终端或端口。
 pub async fn discover_workbench_browser_targets(
     state: &AppState,
     project_id: String,
@@ -176,10 +178,12 @@ pub fn normalize_browser_target_url(raw: &str) -> Result<String, AppError> {
 /// 解析浏览器发现的 worktree 根目录。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     浏览器预览必须运行在项目所在设备的本机项目/worktree 根上，远端 shortcut 需要由后续 route 代理处理。
+///     浏览器预览发现必须运行在项目所在设备的本机项目/worktree 根上。
+///     本机看到的 remote shortcut 只是入口，必须由后续 commands wrapper/P2P route 转发到 owning device 后再调用本函数。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取 project row；无 worktree_id 返回项目路径，有 worktree_id 时校验归属并返回 worktree 路径。
+///     读取 project row 并要求 kind=local；无 worktree_id 返回项目路径，有 worktree_id 时校验归属并返回 worktree 路径。
+///     该函数不要直接暴露给 remote shortcut，否则会错误扫描当前设备的终端 replay 与 loopback 端口。
 async fn resolve_browser_worktree_root(
     state: &AppState,
     project_id: &str,
@@ -211,45 +215,50 @@ async fn resolve_browser_worktree_root(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     dev server 地址通常只出现在终端输出中，自动发现应优先复用当前项目/worktree 的终端历史。
+///     项目级发现只应读取主工作区相关 session，不能把同项目 feature worktree 的 dev server 混入主项目预览。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取持久化会话 id 与运行期会话 replay buffer，提取 URL 后映射为 TerminalOutput 候选。
+///     读取持久化会话 id 与运行期会话 replay buffer，按 worktree scope 过滤后提取 URL 并映射为 TerminalOutput 候选。
 async fn terminal_output_targets(
     state: &AppState,
     project_id: &str,
     worktree_id: Option<&str>,
 ) -> Result<Vec<WorkbenchBrowserTarget>, AppError> {
     let mut session_ids = Vec::new();
-    let target_is_main = if let Some(worktree_id) = worktree_id {
-        state
-            .workbench_worktree_repo
-            .get(worktree_id)
-            .await?
-            .map(|worktree| worktree.is_main)
-            .unwrap_or(false)
+    let (target_is_main, main_worktree_ids) = if let Some(worktree_id) = worktree_id {
+        (
+            state
+                .workbench_worktree_repo
+                .get(worktree_id)
+                .await?
+                .map(|worktree| worktree.is_main)
+                .unwrap_or(false),
+            HashSet::new(),
+        )
     } else {
-        false
+        (
+            false,
+            project_level_browser_main_worktree_ids(state, project_id).await?,
+        )
     };
     let rows = state.workbench_session_repo.list(Some(project_id)).await?;
     for row in rows {
-        if worktree_id
-            .map(|id| {
-                row.worktree_id.as_deref() == Some(id)
-                    || (target_is_main && row.worktree_id.is_none())
-            })
-            .unwrap_or(true)
-        {
+        if session_matches_browser_worktree_scope(
+            row.worktree_id.as_deref(),
+            worktree_id,
+            target_is_main,
+            &main_worktree_ids,
+        ) {
             push_unique(&mut session_ids, row.id);
         }
     }
     for live in state.workbench_sessions.list(Some(project_id)) {
-        if worktree_id
-            .map(|id| {
-                live.worktree_id.as_deref() == Some(id)
-                    || (target_is_main && live.worktree_id.is_none())
-            })
-            .unwrap_or(true)
-        {
+        if session_matches_browser_worktree_scope(
+            live.worktree_id.as_deref(),
+            worktree_id,
+            target_is_main,
+            &main_worktree_ids,
+        ) {
             push_unique(&mut session_ids, live.id);
         }
     }
@@ -266,6 +275,55 @@ async fn terminal_output_targets(
         }
     }
     Ok(targets)
+}
+
+/// 获取 project-level 浏览器发现允许读取的主 worktree id。
+///
+/// Business Logic（为什么需要这个函数）:
+///     主项目预览应兼容当前主 worktree session 和旧版无 worktree session，但不能扫描同项目 feature worktree。
+///
+/// Code Logic（这个函数做什么）:
+///     从 workbench_worktrees 查询 is_main=true 的记录，并加入主 worktree 的确定性 id 兜底。
+async fn project_level_browser_main_worktree_ids(
+    state: &AppState,
+    project_id: &str,
+) -> Result<HashSet<String>, AppError> {
+    let mut ids = HashSet::from([format!("{project_id}:main")]);
+    for worktree in state
+        .workbench_worktree_repo
+        .list_by_project(project_id)
+        .await?
+    {
+        if worktree.is_main {
+            ids.insert(worktree.id);
+        }
+    }
+    Ok(ids)
+}
+
+/// 判断终端会话是否属于当前浏览器发现范围。
+///
+/// Business Logic（为什么需要这个函数）:
+///     浏览器预览应只复用当前项目根或当前 worktree 的终端输出，避免主项目预览误选 feature worktree 的 dev server。
+///
+/// Code Logic（这个函数做什么）:
+///     对显式 worktree_id 做精确匹配；主 worktree 兼容旧的 project-level session；
+///     project-level 请求只接受无 worktree session 和已知主 worktree id。
+fn session_matches_browser_worktree_scope(
+    session_worktree_id: Option<&str>,
+    requested_worktree_id: Option<&str>,
+    requested_worktree_is_main: bool,
+    main_worktree_ids: &HashSet<String>,
+) -> bool {
+    match requested_worktree_id {
+        Some(id) => {
+            session_worktree_id == Some(id)
+                || (requested_worktree_is_main && session_worktree_id.is_none())
+        }
+        None => session_worktree_id
+            .map(|id| main_worktree_ids.contains(id))
+            .unwrap_or(true),
+    }
 }
 
 /// 从 package.json 推断候选端口。
@@ -594,6 +652,11 @@ mod tests {
     use super::*;
     use crate::workbench::browser_models::{WorkbenchBrowserTarget, WorkbenchBrowserTargetSource};
 
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户启动 dev server 后，终端输出中的本机地址应自动出现在浏览器预览候选中。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     输入包含 localhost、局域网地址和 0.0.0.0 片段的输出，断言只保留安全 loopback 候选。
     #[test]
     fn extracts_local_dev_server_urls_from_terminal_output() {
         let output = r#"
@@ -610,6 +673,11 @@ mod tests {
         assert!(!urls.iter().any(|url| url.contains("192.168.1.23")));
     }
 
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户手动输入常见 loopback 地址时，浏览器预览应接受并统一保存成安全目标。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     覆盖无 scheme、0.0.0.0 path 和 https localhost 三类允许输入的归一化结果。
     #[test]
     fn normalizes_allowed_loopback_targets() {
         assert_eq!(
@@ -626,6 +694,11 @@ mod tests {
         );
     }
 
+    /// Business Logic（为什么需要这个测试）:
+    ///     Browser preview 不能成为开放代理或本地文件读取入口。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     输入公网 URL、file URL 和云元数据地址，断言安全校验拒绝。
     #[test]
     fn rejects_open_proxy_targets() {
         assert!(normalize_browser_target_url("https://example.com").is_err());
@@ -633,6 +706,40 @@ mod tests {
         assert!(normalize_browser_target_url("http://169.254.169.254/latest").is_err());
     }
 
+    /// Business Logic（为什么需要这个测试）:
+    ///     主项目浏览器预览不应扫描同一项目下 feature worktree 的终端输出，避免误选别的 dev server。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 project-level 发现范围，断言旧 project-level session 和主 worktree session 命中，feature worktree session 不命中。
+    #[test]
+    fn project_level_browser_scope_excludes_feature_worktree_sessions() {
+        let main_worktree_ids = std::collections::HashSet::from(["project-1:main".to_string()]);
+
+        assert!(session_matches_browser_worktree_scope(
+            None,
+            None,
+            false,
+            &main_worktree_ids,
+        ));
+        assert!(session_matches_browser_worktree_scope(
+            Some("project-1:main"),
+            None,
+            false,
+            &main_worktree_ids,
+        ));
+        assert!(!session_matches_browser_worktree_scope(
+            Some("feature-worktree"),
+            None,
+            false,
+            &main_worktree_ids,
+        ));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     多来源候选同时存在时，用户应先看到可信度最高的地址。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 remembered/terminal/config/probe 四类候选，断言排序按来源优先级稳定输出。
     #[test]
     fn ranks_remembered_then_terminal_then_config_then_probe() {
         let ranked = rank_browser_targets_for_test(vec![

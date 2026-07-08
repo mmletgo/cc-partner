@@ -42,7 +42,7 @@ impl WorkbenchBrowserRepo {
     ///     自动发现需要把用户上次确认的 URL 放在候选第一位。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     RED 阶段暂未实现，后续会按 project_id + coalesced worktree_id 查询。
+    ///     按 project_id + coalesced worktree_id 查询；worktree_id 为空时读取 project-level 目标。
     pub async fn get_target(
         &self,
         project_id: &str,
@@ -66,7 +66,7 @@ impl WorkbenchBrowserRepo {
     ///     用户创建预览后，后续自动发现应把该目标作为可信候选。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     RED 阶段暂未实现，后续会用唯一键 upsert 并刷新 updated_at。
+    ///     使用 project_id + coalesced worktree_id 唯一键 upsert，并刷新 updated_at。
     pub async fn upsert_target(
         &self,
         project_id: &str,
