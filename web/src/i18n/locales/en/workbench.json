@@ -492,6 +492,16 @@
     "saved": "File saved",
     "formatted": "Content formatted"
   },
+  "browserPreview": {
+    "title": "Project Preview",
+    "openWorkspace": "Preview",
+    "connected": "Connected",
+    "refresh": "Rediscover",
+    "open": "Open",
+    "urlPlaceholder": "http://localhost:5173",
+    "frameTitle": "Project browser preview",
+    "empty": "Start the project's dev server and cc-partner will discover the preview URL, or enter a localhost port manually."
+  },
   "projectAutomation": {
     "title": "Project Automation",
     "scope": "Scope: Project",

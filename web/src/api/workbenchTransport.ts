@@ -15,6 +15,8 @@ import type { WorkbenchPaneSplitDirection } from './workbench';
 import { promptOptimizerApi } from './promptOptimizer';
 import type {
   WorkbenchFileNode,
+  WorkbenchBrowserDiscovery,
+  WorkbenchBrowserPreview,
   WorkbenchGitCommit,
   WorkbenchMergeResult,
   WorkbenchOpenFile,
@@ -131,6 +133,17 @@ export interface WorkbenchTransport {
       limit?: number,
     ) => Promise<WorkbenchGitCommit[]>;
   };
+  browser: {
+    discover: (
+      projectId: string,
+      worktreeId?: string | null,
+    ) => Promise<WorkbenchBrowserDiscovery>;
+    createPreview: (
+      projectId: string,
+      worktreeId: string | null | undefined,
+      targetUrl: string,
+    ) => Promise<WorkbenchBrowserPreview>;
+  };
   prompt: {
     streamToTerminal: (
       prompt: string,
@@ -208,6 +221,12 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
   git: {
     listCommits: (projectId, worktreeId, limit) =>
       workbenchApi.git.listCommits(projectId, worktreeId, limit),
+  },
+  browser: {
+    discover: (projectId, worktreeId) =>
+      workbenchApi.browser.discover(projectId, worktreeId ?? null),
+    createPreview: (projectId, worktreeId, targetUrl) =>
+      workbenchApi.browser.createPreview(projectId, worktreeId ?? null, targetUrl),
   },
   prompt: {
     streamToTerminal: (prompt, options) =>

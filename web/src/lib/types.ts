@@ -726,6 +726,67 @@ export interface WorkbenchWorktree {
   updatedAt: string;
 }
 
+/** Workbench 浏览器预览候选来源。 */
+export type WorkbenchBrowserTargetSource =
+  | 'remembered'
+  | 'terminalOutput'
+  | 'projectConfig'
+  | 'portProbe'
+  | 'manual';
+
+/**
+ * Workbench 浏览器预览目标候选。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   用户打开浏览器预览时，需要看到从历史选择、终端输出、项目配置或端口探测得到的 dev server 候选。
+ *
+ * Code Logic（字段说明）:
+ *   url 是后端规范化后的可代理目标；displayUrl/label/source/reachable 用于前端展示与排序提示。
+ */
+export interface WorkbenchBrowserTarget {
+  id: string;
+  url: string;
+  displayUrl: string;
+  source: WorkbenchBrowserTargetSource;
+  label: string;
+  reachable: boolean;
+}
+
+/**
+ * Workbench 浏览器预览发现结果。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   浏览器工作区挂载时需要一次性获取当前项目/worktree 下的候选目标和默认选择。
+ *
+ * Code Logic（字段说明）:
+ *   targets 已由后端排序；selectedTargetId 为空时前端可回退到首个候选。
+ */
+export interface WorkbenchBrowserDiscovery {
+  projectId: string;
+  worktreeId: string | null;
+  targets: WorkbenchBrowserTarget[];
+  selectedTargetId: string | null;
+}
+
+/**
+ * Workbench 浏览器预览代理会话。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   桌面端和手机端访问同一个 dev server 时，需要分别使用 loopback 绝对 URL 和移动端同源 path。
+ *
+ * Code Logic（字段说明）:
+ *   previewId 标识后端 registry session；desktopProxyUrl/mobileProxyPath 分别供 desktop/mobile iframe 使用。
+ */
+export interface WorkbenchBrowserPreview {
+  previewId: string;
+  projectId: string;
+  worktreeId: string | null;
+  targetUrl: string;
+  desktopProxyUrl: string;
+  mobileProxyPath: string;
+  expiresAtMs: number;
+}
+
 /** Workbench 一键合并阶段状态。 */
 export type WorkbenchMergeStageStatus =
   | 'pending'

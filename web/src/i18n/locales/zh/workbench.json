@@ -485,6 +485,16 @@
     "saved": "文件已保存",
     "formatted": "内容已格式化"
   },
+  "browserPreview": {
+    "title": "项目预览",
+    "openWorkspace": "预览",
+    "connected": "已连接",
+    "refresh": "重新发现",
+    "open": "打开",
+    "urlPlaceholder": "http://localhost:5173",
+    "frameTitle": "项目浏览器预览",
+    "empty": "启动项目 dev server 后，系统会自动发现预览地址；也可以手动输入 localhost 端口。"
+  },
   "projectAutomation": {
     "title": "项目自动化",
     "scope": "范围：项目",

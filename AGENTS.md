@@ -271,6 +271,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | WorkbenchSqlitePreview | preview, onSelectTable | Workbench SQLite 只读表/数据预览 |
 | WorkbenchFileWorkspace | tabs, activeTabId, callbacks | Workbench 文件 tab 工作区容器 |
 | WorkbenchSessionSearch | open, onClose, projectId, worktreeId, offline, onResumed | Workbench 终端 Claude session 搜索 Command Palette（⌘K） |
+| WorkbenchBrowserWorkspace | surface, transport, project, worktree, onReturnToTerminal | Workbench 桌面/移动端共享浏览器预览工作区，按 surface 选择 iframe proxy URL |
 
 ## 5. 开发规范
 

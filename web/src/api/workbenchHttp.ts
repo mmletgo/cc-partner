@@ -13,6 +13,8 @@ import type {
   OrchestratorTask,
   OrchestratorTaskPromptCompletion,
   OrchestratorTaskView,
+  WorkbenchBrowserDiscovery,
+  WorkbenchBrowserPreview,
   WorkbenchFileNode,
   WorkbenchGitCommit,
   WorkbenchMergeResult,
@@ -378,6 +380,19 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
         projectId,
         worktreeId: worktreeId ?? null,
         limit,
+      }),
+  },
+  browser: {
+    discover: (projectId, worktreeId) =>
+      postJson<WorkbenchBrowserDiscovery>(`${MOBILE_WORKBENCH_API_PREFIX}/browser/discover`, {
+        projectId,
+        worktreeId: worktreeId ?? null,
+      }),
+    createPreview: (projectId, worktreeId, targetUrl) =>
+      postJson<WorkbenchBrowserPreview>(`${MOBILE_WORKBENCH_API_PREFIX}/browser/preview`, {
+        projectId,
+        worktreeId: worktreeId ?? null,
+        targetUrl,
       }),
   },
   prompt: {

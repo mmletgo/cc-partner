@@ -17,6 +17,8 @@ import type {
   SessionSearchHit,
   WorkbenchFileNode,
   WorkbenchFormatResult,
+  WorkbenchBrowserDiscovery,
+  WorkbenchBrowserPreview,
   WorkbenchGitCommit,
   WorkbenchHtmlAsset,
   WorkbenchMergeResult,
@@ -118,6 +120,30 @@ export const workbenchApi = {
         projectId,
         worktreeId: worktreeId ?? null,
         limit,
+      }),
+  },
+
+  browser: {
+    /** 自动发现当前项目/worktree 可预览的本机 dev server 候选。 */
+    discover: (
+      projectId: string,
+      worktreeId?: string | null,
+    ): Promise<WorkbenchBrowserDiscovery> =>
+      invoke<WorkbenchBrowserDiscovery>('discover_workbench_browser_targets', {
+        projectId,
+        worktreeId: worktreeId ?? null,
+      }),
+
+    /** 为用户选择的 targetUrl 创建浏览器预览代理 session。 */
+    createPreview: (
+      projectId: string,
+      worktreeId: string | null | undefined,
+      targetUrl: string,
+    ): Promise<WorkbenchBrowserPreview> =>
+      invoke<WorkbenchBrowserPreview>('create_workbench_browser_preview', {
+        projectId,
+        worktreeId: worktreeId ?? null,
+        targetUrl,
       }),
   },
 

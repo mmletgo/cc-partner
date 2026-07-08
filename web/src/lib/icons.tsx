@@ -319,6 +319,21 @@ export const TerminalIcon = ({ size, ...rest }: IconProps) => (
 );
 
 /**
+ * Business Logic（为什么需要这个组件）:
+ *   Workbench 浏览器预览需要在桌面 toolbar 和移动端导航中使用统一图标。
+ *
+ * Code Logic（这个组件做什么）:
+ *   渲染 16x16 线性浏览器窗口图标，继承 currentColor 并支持 size 覆盖。
+ */
+export const BrowserIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <rect x="2.4" y="3.2" width="11.2" height="9.6" rx="1.6" />
+    <path d="M2.8 6h10.4" />
+    <path d="M5 4.6h.01M7 4.6h.01" strokeWidth={1.8} />
+  </svg>
+);
+
+/**
  * Business Logic（为什么需要）:
  *   侧栏需要为 Orchestrator 自动化入口提供统一的 16x16 图标，避免导航项只靠文字识别。
  *
