@@ -44,7 +44,10 @@ use crate::workbench::browser_models::{
     WorkbenchBrowserDiscoverReq, WorkbenchBrowserDiscovery, WorkbenchBrowserPreview,
     WorkbenchBrowserPreviewReq,
 };
-use crate::workbench::browser_proxy::proxy_workbench_browser_request;
+use crate::workbench::browser_proxy::{
+    proxy_workbench_browser_request, DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
+    MOBILE_BROWSER_PROXY_ROUTE_PREFIX,
+};
 use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchHtmlAssetDto, WorkbenchOpenFileDto,
     WorkbenchPathInfo, WorkbenchProjectDto, WorkbenchProjectRow, WorkbenchRemoteDirectoryEntryDto,
@@ -291,7 +294,14 @@ pub async fn proxy_browser_preview(
     AxumPath((preview_id, path)): AxumPath<(String, String)>,
     req: Request<Body>,
 ) -> Result<Response, ApiError> {
-    proxy_workbench_browser_request(state, preview_id, path, req).await
+    proxy_workbench_browser_request(
+        state,
+        preview_id,
+        path,
+        req,
+        DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
+    )
+    .await
 }
 
 /// 列出远端设备本机项目的 worktree。
@@ -983,7 +993,14 @@ pub async fn mobile_proxy_browser_preview(
     AxumPath((preview_id, path)): AxumPath<(String, String)>,
     req: Request<Body>,
 ) -> Result<Response, ApiError> {
-    proxy_workbench_browser_request(state, preview_id, path, req).await
+    proxy_workbench_browser_request(
+        state,
+        preview_id,
+        path,
+        req,
+        MOBILE_BROWSER_PROXY_ROUTE_PREFIX,
+    )
+    .await
 }
 
 /// 列出手机端可管理的 Workbench 项目。

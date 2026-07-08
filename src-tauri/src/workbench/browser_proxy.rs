@@ -27,12 +27,18 @@ use reqwest::{
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tokio_tungstenite::connect_async;
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Request as TungsteniteRequest;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
 
 const PREVIEW_TTL: Duration = Duration::from_secs(30 * 60);
 const PROXY_BODY_LIMIT_BYTES: usize = usize::MAX;
+pub const DESKTOP_BROWSER_PROXY_ROUTE_PREFIX: &str = "/api/workbench/browser/proxy";
+pub const MOBILE_BROWSER_PROXY_ROUTE_PREFIX: &str = "/api/mobile/workbench/browser/proxy";
+type UpstreamWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// 浏览器预览会话注册表。
 ///
@@ -339,12 +345,13 @@ pub async fn proxy_workbench_browser_request(
     preview_id: String,
     tail_path: String,
     req: Request<Body>,
+    route_prefix: &'static str,
 ) -> Result<Response, ApiError> {
     let session = lookup_preview_or_not_found(&state.workbench_browser_previews, &preview_id)?;
     if is_websocket_upgrade(req.headers()) {
         return proxy_workbench_browser_websocket(state, session, tail_path, req).await;
     }
-    proxy_http_request_for_session(session, tail_path, req).await
+    proxy_http_request_for_session(session, tail_path, req, route_prefix).await
 }
 
 /// 查找 preview session 或返回 404。
@@ -374,6 +381,7 @@ async fn proxy_http_request_for_session(
     session: BrowserPreviewSession,
     tail_path: String,
     req: Request<Body>,
+    route_prefix: &'static str,
 ) -> Result<Response, ApiError> {
     let upstream_url = build_upstream_proxy_url(&session, &tail_path, req.uri().query())?;
     let method = reqwest_method(req.method())?;
@@ -381,13 +389,27 @@ async fn proxy_http_request_for_session(
     let body = to_bytes(req.into_body(), PROXY_BODY_LIMIT_BYTES)
         .await
         .map_err(|_| ApiError::bad_request("读取预览请求失败"))?;
-    let response = reqwest::Client::new()
+    let response = proxy_http_client()?
         .request(method, upstream_url)
         .headers(headers)
         .body(body)
         .send()
         .await?;
-    response_to_axum_response(&session, response).await
+    response_to_axum_response(&session, response, route_prefix).await
+}
+
+/// 构造预览 HTTP 代理客户端。
+///
+/// Business Logic（为什么需要这个函数）:
+///     preview proxy 只能请求已登记上游；即使上游返回外链 redirect，也不能由后端继续跟随请求。
+///
+/// Code Logic（这个函数做什么）:
+///     创建禁用自动 redirect 的 reqwest client，让 3xx 和 Location 原样进入响应重写流程。
+fn proxy_http_client() -> Result<reqwest::Client, ApiError> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| ApiError::bad_gateway("构造预览 HTTP 客户端失败"))
 }
 
 /// 判断请求是否为 WebSocket upgrade。
@@ -526,6 +548,7 @@ fn should_drop_proxy_header(name: &str) -> bool {
 async fn response_to_axum_response(
     session: &BrowserPreviewSession,
     response: reqwest::Response,
+    route_prefix: &'static str,
 ) -> Result<Response, ApiError> {
     let status = StatusCode::from_u16(response.status().as_u16())
         .map_err(|_| ApiError::bad_gateway("预览上游返回了无效状态码"))?;
@@ -541,7 +564,7 @@ async fn response_to_axum_response(
             match value
                 .to_str()
                 .ok()
-                .and_then(|raw| rewrite_location(session, raw))
+                .and_then(|raw| rewrite_location(session, raw, route_prefix))
             {
                 Some(rewritten) => HeaderValue::from_str(&rewritten)
                     .unwrap_or_else(|_| HeaderValue::from_bytes(value.as_bytes()).unwrap()),
@@ -566,17 +589,31 @@ async fn response_to_axum_response(
 ///     dev server redirect 到自己的绝对 URL 时，iframe 仍应留在本机 preview proxy 下。
 ///
 /// Code Logic（这个函数做什么）:
-///     处理 absolute path、target_url absolute URL 以及 remote owner proxy absolute URL，输出本机 workbench proxy path。
-fn rewrite_location(session: &BrowserPreviewSession, raw: &str) -> Option<String> {
+///     处理 absolute path、target_url absolute URL 以及 remote owner proxy absolute URL，输出当前 route surface 的 proxy path。
+fn rewrite_location(
+    session: &BrowserPreviewSession,
+    raw: &str,
+    route_prefix: &'static str,
+) -> Option<String> {
     if raw.starts_with('/') && !raw.starts_with("//") {
+        if let Some(owner_tail) = owner_proxy_tail_from_path_location(session, raw) {
+            return Some(proxy_path_for_tail(
+                route_prefix,
+                &session.preview_id,
+                &owner_tail,
+            ));
+        }
         return Some(proxy_path_for_tail(
+            route_prefix,
             &session.preview_id,
             raw.trim_start_matches('/'),
         ));
     }
     let location = Url::parse(raw).ok()?;
     let target_base = session_target_url(session);
-    if let Some(rewritten) = rewrite_absolute_location(session, &location, target_base) {
+    if let Some(rewritten) =
+        rewrite_absolute_location(session, &location, target_base, route_prefix)
+    {
         return Some(rewritten);
     }
     if let BrowserPreviewTarget::RemoteRelay {
@@ -585,11 +622,49 @@ fn rewrite_location(session: &BrowserPreviewSession, raw: &str) -> Option<String
         ..
     } = &session.target
     {
-        let owner_proxy_base = format!(
-            "{}/api/workbench/browser/proxy/{remote_preview_id}/",
-            base_url.trim_end_matches('/')
-        );
-        return rewrite_absolute_location(session, &location, &owner_proxy_base);
+        for owner_route_prefix in [
+            DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
+            MOBILE_BROWSER_PROXY_ROUTE_PREFIX,
+        ] {
+            let owner_proxy_base = format!(
+                "{}{owner_route_prefix}/{remote_preview_id}/",
+                base_url.trim_end_matches('/')
+            );
+            if let Some(rewritten) =
+                rewrite_absolute_location(session, &location, &owner_proxy_base, route_prefix)
+            {
+                return Some(rewritten);
+            }
+        }
+    }
+    None
+}
+
+/// 从 remote owner proxy 的 path Location 提取真实 tail。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote relay 上游可能返回 `/api/workbench/browser/proxy/<remote>/...`，本机必须把它映射成当前 local preview 的相同 tail。
+///
+/// Code Logic（这个函数做什么）:
+///     仅 RemoteRelay 生效；识别 desktop/mobile owner proxy prefix，返回 remote previewId 后的 path/query。
+fn owner_proxy_tail_from_path_location(
+    session: &BrowserPreviewSession,
+    raw: &str,
+) -> Option<String> {
+    let BrowserPreviewTarget::RemoteRelay {
+        remote_preview_id, ..
+    } = &session.target
+    else {
+        return None;
+    };
+    let (path, query) = split_path_and_query(raw);
+    for route_prefix in [
+        DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
+        MOBILE_BROWSER_PROXY_ROUTE_PREFIX,
+    ] {
+        if let Some(tail) = extract_proxy_tail_from_path(path, route_prefix, remote_preview_id) {
+            return Some(append_query_to_tail(tail, query));
+        }
     }
     None
 }
@@ -605,34 +680,94 @@ fn rewrite_absolute_location(
     session: &BrowserPreviewSession,
     location: &Url,
     base: &str,
+    route_prefix: &'static str,
 ) -> Option<String> {
     let mut base_url = Url::parse(base).ok()?;
-    if !base_url.path().ends_with('/') {
-        let path = format!("{}/", base_url.path().trim_end_matches('/'));
-        base_url.set_path(&path);
-    }
     if location.scheme() != base_url.scheme()
         || location.host_str() != base_url.host_str()
         || location.port_or_known_default() != base_url.port_or_known_default()
     {
         return None;
     }
-    let base_path = base_url.path();
-    if !location.path().starts_with(base_path) {
-        return None;
+    base_url.set_query(None);
+    base_url.set_fragment(None);
+    let tail = tail_for_base_path(location.path(), base_url.path())?;
+    let tail = append_query_to_tail(tail, location.query());
+    Some(proxy_path_for_tail(
+        route_prefix,
+        &session.preview_id,
+        &tail,
+    ))
+}
+
+/// 拆分 path 与 query。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Location 可以是只有 path 的 header，重写 remote owner proxy path 时仍要保留 query。
+///
+/// Code Logic（这个函数做什么）:
+///     按第一个 `?` 分离 path 和 query，不做 URL 解码。
+fn split_path_and_query(raw: &str) -> (&str, Option<&str>) {
+    raw.split_once('?')
+        .map(|(path, query)| (path, Some(query)))
+        .unwrap_or((raw, None))
+}
+
+/// 从 proxy path 中提取 previewId 后的 tail。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote owner proxy prefix 是协议路径，不是 dev server 资源路径。
+///
+/// Code Logic（这个函数做什么）:
+///     匹配 `route_prefix/previewId` 或其子路径，返回不含前导 `/` 的 tail。
+fn extract_proxy_tail_from_path(
+    path: &str,
+    route_prefix: &str,
+    preview_id: &str,
+) -> Option<String> {
+    let prefix = format!("{}/{preview_id}", route_prefix.trim_end_matches('/'));
+    if path == prefix {
+        return Some(String::new());
     }
-    let mut tail = location.path()[base_path.len()..]
-        .trim_start_matches('/')
-        .to_string();
-    if let Some(query) = location.query() {
-        if tail.is_empty() {
-            tail.push('?');
-        } else {
-            tail.push('?');
-        }
+    let prefix_with_slash = format!("{prefix}/");
+    path.strip_prefix(&prefix_with_slash)
+        .map(|tail| tail.to_string())
+}
+
+/// 根据 base path 提取 absolute URL 的 tail。
+///
+/// Business Logic（为什么需要这个函数）:
+///     上游可能 redirect 到 base 本身或 base 下任意子路径，proxy 需要统一映射为当前 preview tail。
+///
+/// Code Logic（这个函数做什么）:
+///     支持根路径 base、带尾斜杠 base 和无尾斜杠 base，返回不含前导 `/` 的 tail。
+fn tail_for_base_path(location_path: &str, base_path: &str) -> Option<String> {
+    if base_path == "/" {
+        return Some(location_path.trim_start_matches('/').to_string());
+    }
+    let normalized_base = base_path.trim_end_matches('/');
+    if location_path == normalized_base {
+        return Some(String::new());
+    }
+    let base_with_slash = format!("{normalized_base}/");
+    location_path
+        .strip_prefix(&base_with_slash)
+        .map(|tail| tail.to_string())
+}
+
+/// 给 tail 追加 query。
+///
+/// Business Logic（为什么需要这个函数）:
+///     redirect 重写不能丢失登录回跳、Vite cache busting 等 query 参数。
+///
+/// Code Logic（这个函数做什么）:
+///     query 存在时用 `?` 拼回 tail；tail 为空时返回 `?query` 供 proxy_path_for_tail 生成 `/preview/?query`。
+fn append_query_to_tail(mut tail: String, query: Option<&str>) -> String {
+    if let Some(query) = query {
+        tail.push('?');
         tail.push_str(query);
     }
-    Some(proxy_path_for_tail(&session.preview_id, &tail))
+    tail
 }
 
 /// 构造 workbench proxy path。
@@ -641,13 +776,14 @@ fn rewrite_absolute_location(
 ///     redirect 重写需要把任意上游 tail 转回当前本机 previewId 的代理路径。
 ///
 /// Code Logic（这个函数做什么）:
-///     拼出 `/api/workbench/browser/proxy/{previewId}/{tail}`，tail 可包含 query。
-fn proxy_path_for_tail(preview_id: &str, tail: &str) -> String {
+///     拼出 `{route_prefix}/{previewId}/{tail}`，tail 可包含 query。
+fn proxy_path_for_tail(route_prefix: &str, preview_id: &str, tail: &str) -> String {
+    let route_prefix = route_prefix.trim_end_matches('/');
     if tail.is_empty() {
-        format!("/api/workbench/browser/proxy/{preview_id}/")
+        format!("{route_prefix}/{preview_id}/")
     } else {
         format!(
-            "/api/workbench/browser/proxy/{preview_id}/{}",
+            "{route_prefix}/{preview_id}/{}",
             tail.trim_start_matches('/')
         )
     }
@@ -680,12 +816,22 @@ async fn proxy_workbench_browser_websocket(
 ) -> Result<Response, ApiError> {
     let upstream_url = build_upstream_websocket_url(&session, &tail_path, req.uri().query())?;
     let (mut parts, _body) = req.into_parts();
+    let upstream_request = build_upstream_websocket_request(&upstream_url, &parts.headers)?;
+    let (upstream, upstream_response) = connect_async(upstream_request)
+        .await
+        .map_err(|_| ApiError::bad_gateway("连接预览 WebSocket 上游失败"))?;
+    let selected_protocol = selected_websocket_protocol(upstream_response.headers());
     let upgrade = WebSocketUpgrade::from_request_parts(&mut parts, &())
         .await
         .map_err(|_| ApiError::bad_request("预览 WebSocket upgrade 请求无效"))?;
+    let upgrade = if let Some(protocol) = selected_protocol {
+        upgrade.protocols([protocol])
+    } else {
+        upgrade
+    };
     Ok(upgrade
         .on_upgrade(move |socket| async move {
-            if let Err(error) = bridge_websocket(socket, upstream_url).await {
+            if let Err(error) = bridge_websocket(socket, upstream).await {
                 tracing::debug!("浏览器预览 WebSocket 代理结束: {error}");
             }
         })
@@ -717,17 +863,66 @@ fn build_upstream_websocket_url(
     Ok(url.to_string())
 }
 
+/// 构造上游 WebSocket 握手请求。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Vite HMR、受保护 dev server 和登录态预览需要 Cookie/Origin/Authorization/subprotocol 能传到上游。
+///
+/// Code Logic（这个函数做什么）:
+///     先让 tungstenite 生成标准 WS 握手头，再追加安全允许的端到端 header，不转发 Host/Connection/Key 等连接级头。
+fn build_upstream_websocket_request(
+    upstream_url: &str,
+    downstream_headers: &HeaderMap,
+) -> Result<TungsteniteRequest, ApiError> {
+    let mut request = upstream_url
+        .into_client_request()
+        .map_err(|_| ApiError::bad_request("预览 WebSocket 上游地址无效"))?;
+    copy_forwarded_websocket_headers(downstream_headers, request.headers_mut());
+    Ok(request)
+}
+
+/// 复制允许透传的 WebSocket header。
+///
+/// Business Logic（为什么需要这个函数）:
+///     WebSocket preview 需要保留应用认证与 HMR subprotocol，但不能转发 hop-by-hop 握手内部 header。
+///
+/// Code Logic（这个函数做什么）:
+///     仅复制 Cookie、Origin、Authorization、Sec-WebSocket-Protocol，保持其它握手 header 由 tungstenite 生成。
+fn copy_forwarded_websocket_headers(from: &HeaderMap, to: &mut HeaderMap) {
+    for name in [
+        header::COOKIE,
+        header::ORIGIN,
+        header::AUTHORIZATION,
+        HeaderName::from_static("sec-websocket-protocol"),
+    ] {
+        for value in from.get_all(&name) {
+            to.append(name.clone(), value.clone());
+        }
+    }
+}
+
+/// 读取上游选择的 WebSocket subprotocol。
+///
+/// Business Logic（为什么需要这个函数）:
+///     如果上游 HMR server 接受了某个 subprotocol，下游浏览器也必须看到同一个协商结果。
+///
+/// Code Logic（这个函数做什么）:
+///     从上游握手响应读取单个 Sec-WebSocket-Protocol 值，并转换为 axum protocols 接口需要的 String。
+fn selected_websocket_protocol(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(HeaderName::from_static("sec-websocket-protocol"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
 /// 桥接上下游 WebSocket。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     iframe 中的 HMR client 和 dev server 需要持续双向通信，任一侧关闭都应结束桥接。
 ///
 /// Code Logic（这个函数做什么）:
-///     连接上游 WebSocket，split 上下游流，用 tokio::select 在两个方向之间转发消息。
-async fn bridge_websocket(socket: WebSocket, upstream_url: String) -> Result<(), String> {
-    let (upstream, _) = connect_async(&upstream_url)
-        .await
-        .map_err(|error| format!("连接预览 WebSocket 上游失败: {error}"))?;
+///     使用已经完成握手的上游 WebSocket，split 上下游流，用 tokio::select 在两个方向之间转发消息。
+async fn bridge_websocket(socket: WebSocket, upstream: UpstreamWebSocket) -> Result<(), String> {
     let (mut upstream_write, mut upstream_read) = upstream.split();
     let (mut downstream_write, mut downstream_read) = socket.split();
 
@@ -870,11 +1065,8 @@ mod tests {
     #[test]
     fn proxy_url_keeps_absolute_tail_under_registered_target() {
         let registry = WorkbenchBrowserPreviewRegistry::new();
-        let preview = registry.create_local_for_test(
-            "project-a",
-            None,
-            "http://127.0.0.1:5173/app/",
-        );
+        let preview =
+            registry.create_local_for_test("project-a", None, "http://127.0.0.1:5173/app/");
         let session = registry.lookup(&preview.preview_id).unwrap();
 
         let url =
@@ -928,9 +1120,14 @@ mod tests {
             .body(Body::empty())
             .unwrap();
 
-        let response = proxy_http_request_for_session(session, "assets/app.js".to_string(), req)
-            .await
-            .unwrap();
+        let response = proxy_http_request_for_session(
+            session,
+            "assets/app.js".to_string(),
+            req,
+            DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -985,9 +1182,14 @@ mod tests {
             .body(Body::empty())
             .unwrap();
 
-        let response = proxy_http_request_for_session(session, "assets/app.js".to_string(), req)
-            .await
-            .unwrap();
+        let response = proxy_http_request_for_session(
+            session,
+            "assets/app.js".to_string(),
+            req,
+            DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -996,5 +1198,193 @@ mod tests {
             seen_path.lock().unwrap().as_deref(),
             Some("/api/workbench/browser/proxy/remote-preview/assets/app.js?version=2")
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     preview proxy 只允许访问已登记的 loopback dev server，不能跟随该 server 的外链 redirect 继续由后端请求。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     上游返回指向另一个测试服务的 302，断言 proxy 返回 302 且另一个服务没有收到请求。
+    #[tokio::test]
+    async fn http_proxy_does_not_follow_external_redirect_location() {
+        let external_hits = std::sync::Arc::new(Mutex::new(0usize));
+        let external_app = Router::new()
+            .route(
+                "/steal",
+                any(
+                    |State(hits): State<std::sync::Arc<Mutex<usize>>>| async move {
+                        *hits.lock().unwrap() += 1;
+                        "external"
+                    },
+                ),
+            )
+            .with_state(external_hits.clone());
+        let external_listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let external_addr = external_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(external_listener, external_app).await.unwrap();
+        });
+
+        let redirect_target = format!("http://{external_addr}/steal");
+        let upstream_app = Router::new().route(
+            "/jump",
+            any(move || {
+                let redirect_target = redirect_target.clone();
+                async move {
+                    Response::builder()
+                        .status(StatusCode::FOUND)
+                        .header(header::LOCATION, redirect_target)
+                        .body(Body::empty())
+                        .unwrap()
+                }
+            }),
+        );
+        let upstream_listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(upstream_listener, upstream_app).await.unwrap();
+        });
+
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        let preview = registry.create_local(
+            "project-a".to_string(),
+            None,
+            format!("http://{upstream_addr}/"),
+            62116,
+        );
+        let session = registry.lookup(&preview.preview_id).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("http://127.0.0.1/proxy")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = proxy_http_request_for_session(
+            session,
+            "jump".to_string(),
+            req,
+            DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(*external_hits.lock().unwrap(), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     remote relay 收到 owner proxy 的绝对路径 redirect 时，应保持当前本机 previewId，而不是把 owner proxy 前缀当成普通资源路径。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 RemoteRelay session 和 owner proxy Location，断言只保留 owner preview 后面的 tail。
+    #[test]
+    fn remote_relay_rewrites_owner_proxy_absolute_path_location_to_local_tail() {
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        let preview = registry.create_remote_relay(
+            "project-a".to_string(),
+            None,
+            "http://owner.local:62116".to_string(),
+            "remote-preview".to_string(),
+            "http://127.0.0.1:5173/".to_string(),
+            62116,
+        );
+        let session = registry.lookup(&preview.preview_id).unwrap();
+
+        let rewritten = rewrite_location(
+            &session,
+            "/api/workbench/browser/proxy/remote-preview/login?next=%2F",
+            DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rewritten,
+            format!(
+                "/api/workbench/browser/proxy/{}/login?next=%2F",
+                preview.preview_id
+            )
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     mobile iframe 的 redirect 必须留在 mobile 同源 route，不能被改写到桌面 Workbench route。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 local session 重写绝对 path Location，断言输出使用 mobile proxy prefix。
+    #[test]
+    fn mobile_location_rewrite_keeps_mobile_proxy_prefix() {
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        let preview = registry.create_local_for_test("project-a", None, "http://127.0.0.1:5173/");
+        let session = registry.lookup(&preview.preview_id).unwrap();
+
+        let rewritten = rewrite_location(
+            &session,
+            "/login?next=%2Fdashboard",
+            MOBILE_BROWSER_PROXY_ROUTE_PREFIX,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rewritten,
+            format!(
+                "/api/mobile/workbench/browser/proxy/{}/login?next=%2Fdashboard",
+                preview.preview_id
+            )
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     WebSocket preview 需要把认证、Origin 和 HMR subprotocol 传给上游，同时避免成为原始握手 header 的盲转发器。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造下游 header，断言上游请求包含允许 header，且不透传 Proxy-Authorization。
+    #[test]
+    fn websocket_upstream_request_forwards_only_safe_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, HeaderValue::from_static("sid=abc"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:62116"),
+        );
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer token"),
+        );
+        headers.insert(
+            HeaderName::from_static("sec-websocket-protocol"),
+            HeaderValue::from_static("vite-hmr"),
+        );
+        headers.insert(
+            HeaderName::from_static("proxy-authorization"),
+            HeaderValue::from_static("Basic secret"),
+        );
+
+        let request = build_upstream_websocket_request("ws://127.0.0.1:5173/ws", &headers)
+            .expect("websocket request should build");
+
+        assert_eq!(request.headers().get(header::COOKIE).unwrap(), "sid=abc");
+        assert_eq!(
+            request.headers().get(header::ORIGIN).unwrap(),
+            "http://127.0.0.1:62116"
+        );
+        assert_eq!(
+            request.headers().get(header::AUTHORIZATION).unwrap(),
+            "Bearer token"
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get(HeaderName::from_static("sec-websocket-protocol"))
+                .unwrap(),
+            "vite-hmr"
+        );
+        assert!(request
+            .headers()
+            .get(HeaderName::from_static("proxy-authorization"))
+            .is_none());
     }
 }
