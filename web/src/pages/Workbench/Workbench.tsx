@@ -24,8 +24,10 @@ import '@xterm/xterm/css/xterm.css';
 import { configApi } from '@/api/config';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
 import { workbenchApi } from '@/api/workbench';
+import { tauriWorkbenchTransport } from '@/api/workbenchTransport';
 import { OrchestratorPanel } from '@/pages/Orchestrator';
 import {
+  WorkbenchBrowserWorkspace,
   WorkbenchDependencyCard,
   WorkbenchFileWorkspace,
 } from '@/components/domain';
@@ -45,6 +47,7 @@ import {
 } from '@/lib/workbenchRemoteProjects';
 import {
   ChevronRightIcon,
+  BrowserIcon,
   CopyIcon,
   EditIcon,
   FileIcon,
@@ -3378,6 +3381,20 @@ export function Workbench() {
                       className={styles.terminalActionButton}
                       variant="secondary"
                       size="sm"
+                      icon={<BrowserIcon />}
+                      title={t('workbench:browserPreview.openWorkspace')}
+                      aria-label={t('workbench:browserPreview.openWorkspace')}
+                      disabled={!activeProject || !activeWorktree}
+                      onClick={() => setWorkspaceView('browser')}
+                    >
+                      {t('workbench:browserPreview.openWorkspace')}
+                    </Button>
+                  ) : null}
+                  {!terminalFullscreen ? (
+                    <Button
+                      className={styles.terminalActionButton}
+                      variant="secondary"
+                      size="sm"
                       icon={<SearchIcon />}
                       title={t('workbench:sessionSearch.open')}
                       aria-label={t('workbench:sessionSearch.open')}
@@ -3593,6 +3610,19 @@ export function Workbench() {
                 ))}
               </section>
             </div>
+          </div>
+
+          <div
+            className={styles.browserLayer}
+            data-hidden={(automationConsoleOpen || workspaceView !== 'browser') || undefined}
+          >
+            <WorkbenchBrowserWorkspace
+              surface="desktop"
+              transport={tauriWorkbenchTransport}
+              project={activeProject}
+              worktree={activeWorktree}
+              onReturnToTerminal={handleReturnToTerminal}
+            />
           </div>
 
           <div

@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import assertNode from 'node:assert/strict';
+import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -58,11 +60,15 @@ async function main(): Promise<void> {
   const enWorkbench = readFileSync(new URL('../../i18n/locales/en/workbench.json', import.meta.url), 'utf8');
   const zhOrchestrator = readFileSync(new URL('../../i18n/locales/zh/orchestrator.json', import.meta.url), 'utf8');
   const enOrchestrator = readFileSync(new URL('../../i18n/locales/en/orchestrator.json', import.meta.url), 'utf8');
+  const workspaceViews: WorkbenchFileWorkspaceView[] = ['terminal', 'browser', 'files'];
+
+  assertNode.deepEqual(workspaceViews, ['terminal', 'browser', 'files']);
+  assertNode.equal(workspaceViews.includes('automation' as WorkbenchFileWorkspaceView), false);
 
   assertContains(
     workbenchFilesSource,
-    "export type WorkbenchFileWorkspaceView = 'terminal' | 'files';",
-    'Workbench workspace view union stays limited to terminal/files',
+    "export type WorkbenchFileWorkspaceView = 'terminal' | 'browser' | 'files';",
+    'Workbench workspace view union allows terminal/browser/files and still excludes automation',
   );
   assertNotContains(
     workbenchFilesSource,

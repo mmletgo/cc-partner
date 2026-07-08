@@ -2,10 +2,10 @@ import { readFileSync } from 'node:fs';
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   Workbench 文件预览层和自动化层必须盖住常驻终端层，否则终端会遮挡文件预览或自动化看板。
+ *   Workbench 浏览器/文件预览层和自动化层必须盖住常驻终端层，否则终端会遮挡预览或自动化看板。
  *
  * Code Logic（这个函数做什么）:
- *   读取 Workbench CSS Modules 源码并断言终端层、文件层和 hidden 状态保留必要的层级规则。
+ *   读取 Workbench CSS Modules 源码并断言终端层、浏览器层、文件层和 hidden 状态保留必要的层级规则。
  */
 function assertContains(source: string, expected: string, message: string): void {
   if (!source.includes(expected)) {
@@ -28,21 +28,27 @@ function assertNotContains(source: string, unexpected: string, message: string):
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   文件工作区与终端区采用叠层切换，回归测试需要锁住“不卸载终端但不遮挡文件层”的样式契约。
+ *   浏览器/文件工作区与终端区采用叠层切换，回归测试需要锁住“不卸载终端但不遮挡预览层”的样式契约。
  *
  * Code Logic（这个函数做什么）:
- *   检查 `.terminalLayer` 使用基础层级、`.fileLayer` / `.automationLayer` 使用更高层级，hidden 状态同时禁用可见性和指针。
+ *   检查 `.terminalLayer` 使用基础层级、`.browserLayer` / `.fileLayer` / `.automationLayer` 使用更高层级，hidden 状态同时禁用可见性和指针。
  */
 async function main(): Promise<void> {
   const css = readFileSync(new URL('./Workbench.module.css', import.meta.url), 'utf8');
   assertContains(css, '.terminalLayer {', 'terminal layer style exists');
   assertContains(css, 'z-index: var(--z-base);', 'terminal layer stays below file layer');
+  assertContains(css, '.browserLayer', 'browser layer style exists');
   assertContains(css, '.fileLayer {', 'file layer style exists');
   assertContains(css, '.automationLayer {', 'automation layer style exists');
   assertContains(
     css,
-    '.terminalLayer,\n.fileLayer {',
-    'only terminal and file layers should share the absolute overlay base',
+    '.terminalLayer,\n.browserLayer,\n.fileLayer {',
+    'terminal, browser, and file layers should share the absolute overlay base',
+  );
+  assertNotContains(
+    css,
+    '.browserLayer,\n.automationLayer',
+    'automation layer must stay outside the hidden absolute browser layer model',
   );
   assertNotContains(
     css,
