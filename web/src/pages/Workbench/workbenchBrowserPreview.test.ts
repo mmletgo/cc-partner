@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { getWorkbenchBrowserFrameSrc } from '@/components/domain/WorkbenchBrowserWorkspace/WorkbenchBrowserWorkspace';
+import {
+  getWorkbenchBrowserFrameSrc,
+  canApplyWorkbenchBrowserRequest,
+} from '@/components/domain/WorkbenchBrowserWorkspace/WorkbenchBrowserWorkspace';
 import type { WorkbenchBrowserPreview } from '@/lib/types';
 
 const preview: WorkbenchBrowserPreview = {
@@ -19,6 +22,33 @@ assert.equal(
 assert.equal(
   getWorkbenchBrowserFrameSrc(preview, 'mobile'),
   '/api/mobile/workbench/browser/proxy/preview-1/',
+);
+
+assert.equal(
+  canApplyWorkbenchBrowserRequest(
+    { sequence: 2, projectId: 'project-2', worktreeId: 'worktree-2' },
+    { sequence: 1, projectId: 'project-1', worktreeId: 'worktree-1' },
+  ),
+  false,
+  'stale discovery from an old project/worktree must not select a preview',
+);
+
+assert.equal(
+  canApplyWorkbenchBrowserRequest(
+    { sequence: 2, projectId: 'project-1', worktreeId: 'worktree-1' },
+    { sequence: 1, projectId: 'project-1', worktreeId: 'worktree-1' },
+  ),
+  false,
+  'stale openTarget click in the same context must not replace the latest preview',
+);
+
+assert.equal(
+  canApplyWorkbenchBrowserRequest(
+    { sequence: 2, projectId: 'project-1', worktreeId: null },
+    { sequence: 2, projectId: 'project-1', worktreeId: null },
+  ),
+  true,
+  'latest request for the current context may apply its preview',
 );
 
 console.log('workbenchBrowserPreview tests passed');
