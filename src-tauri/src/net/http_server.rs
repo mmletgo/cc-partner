@@ -12,6 +12,7 @@
 //!     - `/mobile` fallback：通过 Tauri asset resolver 读取 frontendDist 嵌入资源，并精确服务 `/assets/*` 构建资源。
 //!     - body limit 覆盖文件传输 chunk 和 Workbench 远端文本保存。
 
+use crate::backend::control::{self, BackendControlFile};
 use crate::net::routes::{
     cc_history, claude_code_assets, claude_md_sync, health, mobile, orchestrator, scratchpad_sync,
     ssh_target_sync, sync, transfer, workbench,
@@ -21,7 +22,9 @@ use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{header, HeaderValue, Request, Response, StatusCode};
 use axum::routing::{any, get, post};
+use axum::Json;
 use axum::Router;
+use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::io::{Error as IoError, ErrorKind};
 use std::net::SocketAddr;
@@ -33,6 +36,72 @@ use tower::service_fn;
 const BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 /// HTTP server 默认首选端口。配置端口为 0 或非法值时使用该端口，冲突则自动向上递增。
 const DEFAULT_HTTP_PORT: u16 = 62116;
+
+/// 后端 stop 控制请求。
+///
+/// Business Logic（为什么需要这个结构）:
+///     `/api/backend/control/stop` 会关闭当前 headless 后端，调用方必须证明自己读到了本机控制文件。
+///
+/// Code Logic（这个结构做什么）:
+///     反序列化 camelCase JSON 中的 `controlToken` 字段，供 handler 与控制文件令牌比较。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopBackendRequest {
+    pub control_token: String,
+}
+
+/// 后端 stop 控制响应。
+///
+/// Business Logic（为什么需要这个结构）:
+///     `cc-partner-backend stop` 需要知道 stop 请求已被 route 接收并触发 shutdown 通知。
+///
+/// Code Logic（这个结构做什么）:
+///     以 `{ok:true}` 形式返回控制请求是否送达进程内 shutdown notifier。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StopBackendResponse {
+    ok: bool,
+}
+
+/// 处理本地后端 stop 控制请求。
+///
+/// Business Logic（为什么需要这个函数）:
+///     stop CLI 必须能通过本机 HTTP route 唤醒 `serve` 主循环优雅关闭，而不是直接 kill 进程。
+///
+/// Code Logic（这个函数做什么）:
+///     读取当前控制文件并校验 controlToken；无效 token 返回 403；有效但无法触发 shutdown notifier 时返回 503；
+///     成功触发后返回 `{ok:true}`。
+async fn stop_backend_control(
+    Json(request): Json<StopBackendRequest>,
+) -> Result<Json<StopBackendResponse>, StatusCode> {
+    let control = control::read_control_file().map_err(|_| StatusCode::FORBIDDEN)?;
+    if !backend_stop_token_matches(&request, control.as_ref()) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    if !control::request_backend_shutdown() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    Ok(Json(StopBackendResponse { ok: true }))
+}
+
+/// 校验 stop 请求 token 是否匹配当前控制文件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     关闭 headless 后端是敏感本机操作，不能让任意局域网请求关闭服务。
+///
+/// Code Logic（这个函数做什么）:
+///     控制文件存在且请求 token 非空并与 `control_token` 完全一致时返回 true。
+fn backend_stop_token_matches(
+    request: &StopBackendRequest,
+    control: Option<&BackendControlFile>,
+) -> bool {
+    let Some(control) = control else {
+        return false;
+    };
+    !request.control_token.is_empty() && request.control_token == control.control_token
+}
 
 /// 判断请求路径是否属于移动端静态入口命名空间。
 ///
@@ -282,6 +351,7 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
     // axum Router：with_state 注入 AppState，与 invoke 命令层共享同一份 Arc
     let app: Router = Router::new()
         .route("/api/health", get(health::health))
+        .route("/api/backend/control/stop", post(stop_backend_control))
         // 移动端访问入口：返回手机可访问的局域网 /mobile URL（过滤 localhost/loopback）
         .route("/api/mobile/access-info", get(mobile::access_info))
         // P2P 同步协议（M4）：对端调 pull/push，字段对照 Python protocol.py
@@ -758,6 +828,194 @@ mod tests {
     use super::*;
     use crate::workbench::file_content::MAX_EDITABLE_TEXT_BYTES;
     use crate::workbench::remote_protocol::RemoteSaveTextReq;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use tempfile::TempDir;
+
+    /// 测试用 HOME 环境隔离守卫。
+    ///
+    /// Business Logic（为什么需要这个结构）:
+    ///     backend stop control route 会读取用户级控制文件；测试必须隔离到临时目录，避免污染真实 `~/.cc-partner`。
+    ///
+    /// Code Logic（这个结构做什么）:
+    ///     持有全局环境变量锁、临时 HOME 目录和原始 HOME/USERPROFILE；Drop 时恢复环境变量并释放临时目录。
+    struct TestHomeGuard {
+        _lock: MutexGuard<'static, ()>,
+        previous_home: Option<OsString>,
+        previous_userprofile: Option<OsString>,
+        _temp_home: TempDir,
+    }
+
+    impl Drop for TestHomeGuard {
+        /// 恢复测试前的 HOME 环境变量。
+        ///
+        /// Business Logic（为什么需要这个函数）:
+        ///     单元测试修改进程级 HOME 后必须恢复，避免影响同一测试进程中的其它模块。
+        ///
+        /// Code Logic（这个函数做什么）:
+        ///     根据保存的原值恢复或移除 HOME/USERPROFILE；临时目录由 TempDir 自动删除。
+        fn drop(&mut self) {
+            match &self.previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.previous_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+    }
+
+    /// 返回测试 HOME 环境变量锁。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     HOME 是进程级全局状态，多个 route 测试并发修改会互相污染控制文件路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用 OnceLock 初始化全局 Mutex，所有需要临时 HOME 的测试串行执行。
+    fn backend_control_home_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// 安装临时 HOME 供 backend control route 测试使用。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     route 读取 `config_dir()` 下的控制文件；测试需要在可控目录写入 token。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     加锁后创建 TempDir，把 HOME/USERPROFILE 指到临时目录，并清理遗留 shutdown notifier。
+    fn install_test_home() -> TestHomeGuard {
+        let lock = backend_control_home_lock()
+            .lock()
+            .expect("backend control HOME 测试锁中毒");
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        let temp_home = tempfile::tempdir().expect("应能创建临时 HOME");
+        std::env::set_var("HOME", temp_home.path());
+        std::env::set_var("USERPROFILE", temp_home.path());
+        control::clear_shutdown_notifier();
+        TestHomeGuard {
+            _lock: lock,
+            previous_home,
+            previous_userprofile,
+            _temp_home: temp_home,
+        }
+    }
+
+    /// 构造 backend stop 控制测试数据。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     多个 stop route 测试需要一致的控制文件内容，避免 token/port 样板分散导致断言难读。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回固定 pid、port、device 和 control token 的 `BackendControlFile`。
+    fn backend_stop_control_file_for_test() -> BackendControlFile {
+        BackendControlFile {
+            pid: 1234,
+            port: 62116,
+            device_id: "device-a".to_string(),
+            device_name: "测试设备".to_string(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            control_token: "expected-token".to_string(),
+        }
+    }
+
+    /// 验证 backend stop 控制接口拒绝错误 token。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     `/api/backend/control/stop` 会关闭本机 headless 后端，必须要求调用方持有控制文件里的令牌。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造控制文件与错误请求，断言 token 校验失败，后续 handler 应据此返回 403。
+    #[test]
+    fn backend_stop_control_rejects_invalid_token() {
+        let _home = install_test_home();
+        let control = backend_stop_control_file_for_test();
+        control::write_control_file(&control).expect("应能写入测试控制文件");
+        let request = StopBackendRequest {
+            control_token: "wrong-token".to_string(),
+        };
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("应能创建测试 runtime")
+            .block_on(stop_backend_control(Json(request)));
+
+        assert!(matches!(result, Err(StatusCode::FORBIDDEN)));
+    }
+
+    /// 验证 backend stop 控制接口接受当前控制文件 token。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     `cc-partner-backend stop` 读取控制文件后必须能通过本地 HTTP route 唤醒 serve 进程关闭。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造控制文件与正确请求，断言 token 校验通过。
+    #[test]
+    fn backend_stop_control_accepts_current_token() {
+        let control = backend_stop_control_file_for_test();
+        let request = StopBackendRequest {
+            control_token: "expected-token".to_string(),
+        };
+
+        assert!(backend_stop_token_matches(&request, Some(&control)));
+    }
+
+    /// 验证 backend stop 控制接口在 shutdown notifier 缺失时返回非 2xx。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     正确 token 只代表请求来源可信；如果进程内关闭通知器缺失，CLI 不能收到 200 并误删控制文件。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入正确控制文件但不安装 shutdown notifier，调用 route 并断言返回 503。
+    #[test]
+    fn backend_stop_control_returns_non_success_when_notifier_missing() {
+        let _home = install_test_home();
+        let control = backend_stop_control_file_for_test();
+        control::write_control_file(&control).expect("应能写入测试控制文件");
+        let request = StopBackendRequest {
+            control_token: control.control_token.clone(),
+        };
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("应能创建测试 runtime")
+            .block_on(stop_backend_control(Json(request)));
+
+        assert!(matches!(result, Err(StatusCode::SERVICE_UNAVAILABLE)));
+    }
+
+    /// 验证 backend stop 控制接口在 shutdown notifier 发送失败时返回非 2xx。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     notifier 已安装但 receiver 已失效时，stop 请求仍无法关闭 serve，CLI 不应把它当作成功。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     安装一个无 receiver 的 watch sender，调用 route 并断言返回 503。
+    #[test]
+    fn backend_stop_control_returns_non_success_when_notifier_send_fails() {
+        let _home = install_test_home();
+        let control = backend_stop_control_file_for_test();
+        control::write_control_file(&control).expect("应能写入测试控制文件");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        drop(shutdown_rx);
+        control::install_shutdown_notifier(shutdown_tx);
+        let request = StopBackendRequest {
+            control_token: control.control_token.clone(),
+        };
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("应能创建测试 runtime")
+            .block_on(stop_backend_control(Json(request)));
+
+        control::clear_shutdown_notifier();
+        assert!(matches!(result, Err(StatusCode::SERVICE_UNAVAILABLE)));
+    }
 
     /// Business Logic（为什么需要这个测试）:
     ///     移动端 SPA 只允许接管 `/mobile` 命名空间，不能抢占 P2P API 与桌面 Workbench 路由。

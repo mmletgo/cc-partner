@@ -3,9 +3,12 @@ use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use tokio::sync::watch;
 
 const CONTROL_FILE_NAME: &str = "backend-control.json";
 const PID_FILE_NAME: &str = "backend.pid";
+static SHUTDOWN_NOTIFIER: OnceLock<Mutex<Option<watch::Sender<bool>>>> = OnceLock::new();
 
 /// 独立后端进程写入磁盘的控制文件内容。
 ///
@@ -151,6 +154,57 @@ pub fn remove_control_files() -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+/// 返回进程内后端关闭通知槽。
+///
+/// Business Logic（为什么需要这个函数）:
+///     headless `serve` 进程需要让 HTTP control route 唤醒自身退出，但 route 层不能依赖 CLI 模块。
+///
+/// Code Logic（这个函数做什么）:
+///     用 `OnceLock` 延迟初始化一个 `Mutex<Option<watch::Sender<bool>>>`，供 serve 安装、route 触发、退出清理。
+fn shutdown_notifier_slot() -> &'static Mutex<Option<watch::Sender<bool>>> {
+    SHUTDOWN_NOTIFIER.get_or_init(|| Mutex::new(None))
+}
+
+/// 安装 headless 后端关闭通知器。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `cc-partner-backend serve` 启动后必须把自己的 shutdown receiver 暴露给本进程 HTTP route，
+///     这样 `stop` 命令才能通过本地 control API 请求它优雅关闭。
+///
+/// Code Logic（这个函数做什么）:
+///     将 watch sender 写入全局通知槽；后续同进程 route 调 `request_backend_shutdown` 会发送 true。
+pub fn install_shutdown_notifier(sender: watch::Sender<bool>) {
+    let mut guard = shutdown_notifier_slot().lock().expect("后端关闭通知锁中毒");
+    *guard = Some(sender);
+}
+
+/// 清理 headless 后端关闭通知器。
+///
+/// Business Logic（为什么需要这个函数）:
+///     serve 退出后不应保留旧 sender，否则测试或后续同进程重启会向已经失效的控制通道发送信号。
+///
+/// Code Logic（这个函数做什么）:
+///     将全局通知槽重置为 None。
+pub fn clear_shutdown_notifier() {
+    let mut guard = shutdown_notifier_slot().lock().expect("后端关闭通知锁中毒");
+    *guard = None;
+}
+
+/// 请求 headless 后端优雅关闭。
+///
+/// Business Logic（为什么需要这个函数）:
+///     本地 stop route 通过 token 校验后需要通知 serve 主循环退出，进而执行 runtime shutdown 和控制文件清理。
+///
+/// Code Logic（这个函数做什么）:
+///     若已安装 watch sender，则发送 true 并返回是否发送成功；未安装 sender 时返回 false。
+pub fn request_backend_shutdown() -> bool {
+    let guard = shutdown_notifier_slot().lock().expect("后端关闭通知锁中毒");
+    guard
+        .as_ref()
+        .map(|sender| sender.send(true).is_ok())
+        .unwrap_or(false)
 }
 
 /// 根据控制文件、进程存活、健康检查和错误信息生成后端状态。

@@ -101,6 +101,7 @@ dependencies = [
  "futures-util",
  "hostname",
  "image 0.25.10",
+ "libc",
  "mdns-sd",
  "notify",
  "portable-pty",
