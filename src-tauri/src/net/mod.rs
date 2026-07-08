@@ -6,7 +6,8 @@
 //!     3) `peer_client`：reqwest 客户端，调对端 API（health 实测，sync/transfer 留 M4/M5）。
 //!
 //! Code Logic: 三个子模块各自独立，通过 AppState 共享 devices 表与端口。
-//!     启动顺序（lib.rs 编排）：先 axum 拿实际端口 → 用该端口启动 mDNS 注册。
+//!     启动顺序（backend/runtime.rs 编排）：advertise 模式先 axum 拿实际端口 → 用该端口启动 mDNS 注册；
+//!     browse-only 模式验证 sidecar 控制文件与 health 后复用端口且不注册本机服务。
 
 pub mod discovery;
 pub mod http_server;

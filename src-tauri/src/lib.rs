@@ -34,11 +34,13 @@ mod transfer;
 mod tray;
 mod workbench;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use std::str::FromStr;
-use std::sync::atomic::AtomicU16;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 
+use crate::backend::runtime::{
+    build_app_state, shutdown_backend_runtime, start_background_tasks, start_gui_backend_services,
+    BackendRuntimeMode,
+};
+use crate::backend::ui::{BackendUi, TauriBackendUi};
 use crate::commands::{
     cc_history as cc_history_cmd, claude_code_assets as claude_code_assets_cmd,
     claude_md as claude_md_cmd, cloud_sync as cloud_sync_cmd, config as config_cmd,
@@ -51,14 +53,7 @@ use crate::commands::{
     updater as updater_cmd, workbench as workbench_cmd,
     workbench_dependencies as workbench_dependency_cmd,
 };
-use crate::net::{discovery, http_server, peer_client::PeerClient};
-use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
-use crate::storage::{
-    ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, SshTargetRepo, TransferRepo,
-    WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
-};
-use crate::transfer::registry::TransferRegistry;
 use tauri::Manager;
 
 /// 健康检查命令：验证前端 invoke 与 Rust 后端的 IPC 通路是否打通（M0 脚手架验证用，保留）。
@@ -67,310 +62,14 @@ fn ping() -> &'static str {
     "pong"
 }
 
-/// 建表 SQL（对照 migrations/0001_init.sql，全 CREATE TABLE IF NOT EXISTS）。
+/// 启动 Tauri 桌面应用。
 ///
-/// Business Logic: 不用 sqlx::migrate!（它对"表已存在但无 _sqlx_migrations 表"的旧库有坑），
-///     手动逐条执行 CREATE TABLE IF NOT EXISTS，对旧库是无操作，保用户数据。
-const PROMPTS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS prompts (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    tags TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    vector_clock TEXT NOT NULL,
-    deleted INTEGER DEFAULT 0
-)";
-
-const TRANSFER_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS transfer_history (
-    id TEXT PRIMARY KEY,
-    filename TEXT NOT NULL,
-    file_path TEXT NOT NULL,
-    size INTEGER NOT NULL,
-    sha256 TEXT NOT NULL,
-    direction TEXT NOT NULL,
-    peer_device_id TEXT NOT NULL,
-    status TEXT NOT NULL,
-    transferred_bytes INTEGER DEFAULT 0,
-    created_at TEXT NOT NULL,
-    completed_at TEXT
-)";
-
-/// Claude Code 历史 prompt 表（采集入库 + 跨设备同步）。
+/// Business Logic（为什么需要这个函数）:
+///     用户打开桌面端时需要初始化 GUI、共享后端状态、P2P/移动端服务、后台任务、健康监测、托盘和快捷键。
 ///
-/// Business Logic: 存储从 ~/.claude/projects jsonl 采集的用户输入 prompt，按 project_path 归类。
-///     vector_clock 采集恒 {device_id:1}，仅 delete_cc_prompt 软删除时递增；deleted 软删除传播。
-const CC_HISTORY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS claude_history (
-    id TEXT PRIMARY KEY,
-    project_path TEXT NOT NULL,
-    project_name TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    content TEXT NOT NULL,
-    git_branch TEXT,
-    cc_version TEXT,
-    occurred_at TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    vector_clock TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    deleted INTEGER DEFAULT 0
-)";
-
-/// CC 历史采集扫描状态表（增量去重：记录每个 jsonl 文件的 mtime/size，未变则跳过）。
-const CC_SCAN_STATE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS claude_history_scan_state (
-    file_path TEXT PRIMARY KEY,
-    mtime_sec INTEGER NOT NULL,
-    size INTEGER NOT NULL,
-    scanned_at TEXT NOT NULL
-)";
-
-/// CC 历史表索引（项目路径+时间倒序查询、设备_id 查询加速）。
-const CC_INDEXES: &str =
-    "CREATE INDEX IF NOT EXISTS idx_ch_proj ON claude_history(project_path, occurred_at DESC);
-CREATE INDEX IF NOT EXISTS idx_ch_dev ON claude_history(device_id)";
-
-/// user 级 CLAUDE.md 单例表（全表仅一行，id 恒为 "claude_md"）。
-const CLAUDE_MD_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS claude_md (
-    id TEXT PRIMARY KEY,
-    content TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    vector_clock TEXT NOT NULL
-)";
-
-/// SSH 连接目标表（每 host 一行：用户名/端口/向量时钟，跨设备同步）。
-const SSH_TARGET_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ssh_targets (
-    host TEXT PRIMARY KEY,
-    port INTEGER NOT NULL DEFAULT 22,
-    username TEXT NOT NULL,
-    label TEXT,
-    device_id TEXT NOT NULL,
-    vector_clock TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    deleted INTEGER DEFAULT 0
-)";
-
-/// 速记本页面表（旧默认页 id 恒为 "scratchpad"，新页用 UUID）。
-const SCRATCHPAD_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS scratchpad (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL DEFAULT '速记本',
-    content TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    vector_clock TEXT NOT NULL,
-    deleted INTEGER DEFAULT 0
-)";
-
-/// 健康提醒 - 每分钟活动采样表（分钟级 unix 时间戳为主键，同分钟重采覆盖）。
-const HEALTH_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS activity_records (
-    ts INTEGER PRIMARY KEY,
-    is_active INTEGER NOT NULL,
-    process_name TEXT,
-    window_title TEXT
-)";
-
-/// 健康提醒 - 喝水打卡表（自增 id 主键，ts 仅为普通列，支持同秒多次 +1 杯）。
-///
-/// Business Logic（为什么改自增 id）:
-///     早期 schema 以 ts 为主键 + INSERT OR REPLACE，导致用户同秒连点「+1 杯」只计 1 杯（主键冲突被替换）。
-///     改为自增 id 后每条记录都独立保留，count/WEEK 柱状图统计准确。
-/// Code Logic: id 自增主键，ts 为普通 NOT NULL 列；insert_water 用 RETURNING id 回填。
-const WATER_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS water_records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts INTEGER NOT NULL
-)";
-
-/// rest_records 表 schema:记录久坐提醒触发与完成的休息事件,用于习惯统计。
-const REST_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS rest_records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts INTEGER NOT NULL,
-    kind TEXT NOT NULL,
-    duration_seconds INTEGER NOT NULL DEFAULT 0
-)";
-
-/// GitHub Trending 首页缓存表（榜单 + Claude CLI 中英文解说）。
-///
-/// Business Logic: 首页每天只抓取一次 GitHub Trending Weekly，并把 Claude CLI 生成结果持久化，
-///     避免重复网络请求和重复 AI 消耗。payload 为完整前端响应主体（不含 fromCache/stale）。
-const GITHUB_TRENDING_CACHE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS github_trending_cache (
-    key TEXT PRIMARY KEY,
-    payload TEXT NOT NULL,
-    fetched_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL,
-    ai_status TEXT NOT NULL,
-    ai_error TEXT
-)";
-
-/// 工作台本机项目表（最近项目列表持久化）。
-///
-/// Business Logic（为什么需要这个常量）:
-///     用户添加到工作台的本机项目需要在应用重启后保留，并按最近打开时间排序。
-///
-/// Code Logic（这个常量做什么）:
-///     定义 workbench_projects 表结构；项目内容仍在磁盘目录中，本表只保存项目元数据。
-const WORKBENCH_PROJECT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_projects (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    device_name TEXT NOT NULL,
-    path TEXT NOT NULL,
-    last_opened_at TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-)";
-
-/// 工作台 Git worktree 表（项目下多个工作区的持久化元数据）。
-///
-/// Business Logic（为什么需要这个常量）:
-///     用户在 Workbench 中创建的 worktree 需要在应用重启后继续展示，并和终端 window 关联。
-///
-/// Code Logic（这个常量做什么）:
-///     定义 workbench_worktrees 表结构；Git 状态不落库，命令层动态读取。
-const WORKBENCH_WORKTREE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_worktrees (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    branch TEXT,
-    base_branch TEXT,
-    path TEXT NOT NULL,
-    is_main INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-)";
-
-/// 工作台终端会话表（终端 tab 元数据持久化，PTY/tmux attach 运行期重建）。
-///
-/// Business Logic（为什么需要这个常量）:
-///     用户希望重启 cc-partner 后之前打开的终端仍出现在工作台，并在可重连后端可用时继续原上下文。
-///
-/// Code Logic（这个常量做什么）:
-///     定义 workbench_sessions 表结构；backend/backend_id 保存 tmux 等重连后端信息，关闭 tab 时删除记录。
-const WORKBENCH_SESSION_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_sessions (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    worktree_id TEXT,
-    name TEXT NOT NULL,
-    command TEXT NOT NULL,
-    cwd TEXT,
-    status TEXT NOT NULL,
-    cols INTEGER NOT NULL,
-    rows INTEGER NOT NULL,
-    started_at TEXT NOT NULL,
-    exited_at TEXT,
-    exit_code INTEGER,
-    backend TEXT NOT NULL,
-    backend_id TEXT,
-    backend_window_id TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-)";
-
-/// Workbench 浏览器预览目标表（项目/worktree 最近一次目标 URL）。
-///
-/// Business Logic（为什么需要这个常量）:
-///     用户选择过的 dev server URL 需要在下次发现时排在候选前面，提高重复预览效率。
-///
-/// Code Logic（这个常量做什么）:
-///     定义 project_id + coalesced worktree_id 唯一键；worktree_id 为空表示项目主目标。
-const WORKBENCH_BROWSER_TARGET_SCHEMA: &str =
-    "CREATE TABLE IF NOT EXISTS workbench_browser_targets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id TEXT NOT NULL,
-    worktree_id TEXT,
-    worktree_key TEXT GENERATED ALWAYS AS (IFNULL(worktree_id, '')) STORED,
-    target_url TEXT NOT NULL,
-    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    UNIQUE(project_id, worktree_key)
-)";
-
-const WORKBENCH_BROWSER_TARGET_INDEX: &str =
-    "CREATE INDEX IF NOT EXISTS idx_workbench_browser_targets_project
-    ON workbench_browser_targets(project_id, updated_at DESC)";
-/// 初始化数据库连接池：开启 WAL，手动建表，返回 SqlitePool。
-///
-/// Business Logic: 单连接语义与 Python aiosqlite 一致（max_connections(1)）。
-/// Code Logic: 用 ConnectOptions 开启 create_if_missing 与 WAL pragma；逐条执行建表 SQL。
-async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, error::AppError> {
-    let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path))?
-        .create_if_missing(true)
-        // 开启 WAL 模式（对照 Python PRAGMA journal_mode=WAL）
-        .pragma("journal_mode", "WAL");
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await?;
-    // 手动建表（不用 migrate! 宏，规避旧库无 _sqlx_migrations 表的坑）
-    sqlx::query(PROMPTS_SCHEMA).execute(&pool).await?;
-    sqlx::query(TRANSFER_SCHEMA).execute(&pool).await?;
-    // Claude Code 历史表 + 扫描状态表（在 TRANSFER_SCHEMA 之后执行）
-    sqlx::query(CC_HISTORY_SCHEMA).execute(&pool).await?;
-    sqlx::query(CC_SCAN_STATE_SCHEMA).execute(&pool).await?;
-    // CC 索引：CC_INDEXES 含多条语句，sqlx 默认不开启多语句，按 ';' 拆分逐条执行
-    for stmt in CC_INDEXES.split(';') {
-        let s = stmt.trim();
-        if s.is_empty() {
-            continue;
-        }
-        sqlx::query(s).execute(&pool).await?;
-    }
-    // user 级 CLAUDE.md 单例表
-    sqlx::query(CLAUDE_MD_SCHEMA).execute(&pool).await?;
-    // SSH 连接目标表（host 主键 + 端口 + 用户名 + 向量时钟，跨设备同步）
-    sqlx::query(SSH_TARGET_SCHEMA).execute(&pool).await?;
-    // 速记本页面表（旧库缺 title 时补列，保证旧单例内容迁移为“速记本”页）
-    sqlx::query(SCRATCHPAD_SCHEMA).execute(&pool).await?;
-    ScratchpadRepo::new(pool.clone()).ensure_schema().await?;
-    // 健康提醒：活动采样表 + 喝水记录表（在 CLAUDE_MD_SCHEMA 之后执行）
-    sqlx::query(HEALTH_SCHEMA).execute(&pool).await?;
-    // water_records 迁移：检测老表（ts INTEGER PRIMARY KEY）若无 id 列则 DROP 重建为自增 id。
-    // 本功能未发版前 water_records 无任何读取消费方，老数据是历史垃圾，可直接丢弃无需保留。
-    // 用 pragma_table_info 查列名，COUNT(*)==0 表示是老表结构。
-    let needs_recreate: bool = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM pragma_table_info('water_records') WHERE name = 'id'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap_or(0)
-        == 0;
-    if needs_recreate {
-        // 老表无 id 列，数据全是无消费方的历史垃圾，直接 DROP 重建。
-        sqlx::query("DROP TABLE IF EXISTS water_records")
-            .execute(&pool)
-            .await
-            .ok();
-    }
-    sqlx::query(WATER_SCHEMA).execute(&pool).await?;
-    sqlx::query(REST_SCHEMA).execute(&pool).await?;
-    // GitHub Trending 首页缓存（榜单 + Claude CLI 解说），独立于同步数据。
-    sqlx::query(GITHUB_TRENDING_CACHE_SCHEMA)
-        .execute(&pool)
-        .await?;
-    // 工作台最近项目列表 + 终端会话元数据（PTY 句柄运行期重建）
-    sqlx::query(WORKBENCH_PROJECT_SCHEMA).execute(&pool).await?;
-    sqlx::query(WORKBENCH_WORKTREE_SCHEMA)
-        .execute(&pool)
-        .await?;
-    sqlx::query(WORKBENCH_SESSION_SCHEMA).execute(&pool).await?;
-    sqlx::query(WORKBENCH_BROWSER_TARGET_SCHEMA)
-        .execute(&pool)
-        .await?;
-    sqlx::query(WORKBENCH_BROWSER_TARGET_INDEX)
-        .execute(&pool)
-        .await?;
-    WorkbenchWorktreeRepo::new(pool.clone())
-        .ensure_schema()
-        .await?;
-    WorkbenchSessionRepo::new(pool.clone())
-        .ensure_schema()
-        .await?;
-    OrchestratorRepo::init_schema(&pool).await?;
-    Ok(pool)
-}
-
+/// Code Logic（这个函数做什么）:
+///     配置 tracing 与 Tauri plugins；setup 中构造 AppState，按 sidecar 验证结果启动 GUI 后端服务并选择后台任务模式；
+///     注册全部 invoke 命令，并在 RunEvent::Exit 时统一关闭共享后端运行时。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 初始化 tracing 日志（输出到 stderr），让 tracing::info!/error! 在 axum/mDNS/sync 等模块生效。
@@ -407,155 +106,23 @@ pub fn run() {
             // 触发 "attempted to set a logger after the logging system was already initialized" panic。
             // （此 bug 从 M4 引入 tracing init 后潜伏，因 M4-M6 仅 cargo build/test 未跑 dev，直到 M7 后首次 dev 才暴露）
 
-            // 在 tauri 异步运行时上完成资源初始化（load config + db + 建表 + axum + mDNS）
+            // 在 tauri 异步运行时上完成共享运行时初始化（load config + db + 建表 + service startup）
             let app_handle = app.handle().clone();
-            let state = tauri::async_runtime::block_on(async {
-                // 1) 加载配置（不存在则生成默认并持久化）
-                let config = config::AppConfig::load()?;
-                // 2) 初始化数据库
-                let pool = init_db(&config.db_path).await?;
-                // 3) 构造仓库与共享状态（先构造完整 AppState，再启动 axum/mDNS 共享同一份 Arc）
-                let device_id = config.device_id.clone();
-                let prompt_repo = Arc::new(PromptRepo::new(pool.clone()));
-                let transfer_repo = Arc::new(TransferRepo::new(pool.clone()));
-                let cc_history_repo = Arc::new(ClaudeHistoryRepo::new(pool.clone()));
-                let claude_md_repo = Arc::new(ClaudeMdRepo::new(pool.clone()));
-                let ssh_target_repo = Arc::new(SshTargetRepo::new(pool.clone()));
-                let scratchpad_repo = Arc::new(ScratchpadRepo::new(pool.clone()));
-                let workbench_project_repo = Arc::new(WorkbenchProjectRepo::new(pool.clone()));
-                let workbench_session_repo = Arc::new(WorkbenchSessionRepo::new(pool.clone()));
-                let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::new(pool.clone()));
-                let workbench_browser_repo = Arc::new(WorkbenchBrowserRepo::new(pool.clone()));
-                let workbench_browser_previews = Arc::new(
-                    crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
-                );
-                let orchestrator_repo = Arc::new(OrchestratorRepo::new(pool.clone()));
-                let workbench_sessions =
-                    Arc::new(crate::workbench::sessions::WorkbenchSessionRegistry::new());
-                let (workbench_remote_events, _) = tokio::sync::broadcast::channel(1024);
-                let workbench_remote_event_bridges =
-                    Arc::new(crate::workbench::remote_events::RemoteEventBridgeRegistry::new());
-                let workbench_dependency = Arc::new(
-                    crate::workbench::dependencies::WorkbenchDependencyInstallRuntime::new(),
-                );
-                // 健康提醒：仓库（共享 pool）+ 运行时（状态机/贪睡/暂停）+ daemon 取消令牌占位
-                let health_repo =
-                    Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone()));
-                let health = Arc::new(crate::health::HealthRuntime::new());
-                let health_cancel =
-                    Arc::new(Mutex::new(None::<tokio_util::sync::CancellationToken>));
-                let ui: Arc<dyn crate::backend::ui::BackendUi> =
-                    Arc::new(crate::backend::ui::TauriBackendUi::new(app_handle.clone()));
-                let state = AppState {
-                    config: Arc::new(RwLock::new(config)),
-                    db: pool,
-                    prompt_repo,
-                    transfer_repo,
-                    claude_md_repo,
-                    scratchpad_repo,
-                    ssh_target_repo,
-                    device_id: Arc::new(device_id),
-                    devices: Arc::new(RwLock::new(std::collections::HashMap::new())),
-                    actual_http_port: Arc::new(AtomicU16::new(0)),
-                    discovery: Arc::new(Mutex::new(None)),
-                    peer_client: Arc::new(PeerClient::new()),
-                    transfers: Arc::new(TransferRegistry::new()),
-                    ui,
-                    // M8 更新器状态：下载状态机 + 缓存的 Update + 下载字节 + 任务句柄 + 取消令牌
-                    update_status: Arc::new(RwLock::new(
-                        crate::commands::updater::UpdateDownloadStatus::default(),
-                    )),
-                    update_pending: Arc::new(Mutex::new(None)),
-                    update_bytes: Arc::new(Mutex::new(None)),
-                    update_download_task: Arc::new(Mutex::new(None)),
-                    update_cancel_token: Arc::new(Mutex::new(None)),
-                    // Claude Code 历史：仓库 + 采集器取消令牌（start 在 manage 之后调用）
-                    cc_history_repo,
-                    workbench_project_repo,
-                    workbench_session_repo,
-                    workbench_worktree_repo,
-                    workbench_browser_repo,
-                    workbench_browser_previews,
-                    workbench_sessions,
-                    workbench_remote_events,
-                    workbench_remote_event_bridges,
-                    workbench_dependency,
-                    cc_collector_cancel: Arc::new(Mutex::new(None)),
-                    // 云端同步：后台 scheduler 取消令牌（start 在 manage 之后调用）
-                    cloud_sync_cancel: Arc::new(Mutex::new(None)),
-                    // 健康提醒：运行时 + 仓库 + daemon 取消令牌（start 在 manage 之后调用）
-                    health,
-                    health_repo,
-                    health_cancel,
-                    orchestrator_repo,
-                    orchestrator_scheduler_telemetry:
-                        crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry::new(),
-                    orchestrator_cancel: Arc::new(Mutex::new(None)),
-                    orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
-                    // Workbench Claude session 搜索：内存索引 + 文件监听句柄（lazy 初始化，首次搜索时建索引）
-                    workbench_claude_session_indexes: Arc::new(RwLock::new(
-                        std::collections::HashMap::new(),
-                    )),
-                    workbench_claude_session_watchers: Arc::new(Mutex::new(
-                        std::collections::HashMap::new(),
-                    )),
-                };
+            let (state, runtime_mode) = tauri::async_runtime::block_on(async {
+                let ui: Arc<dyn BackendUi> = Arc::new(TauriBackendUi::new(app_handle.clone()));
+                let state = build_app_state(ui).await?;
+                let runtime_mode = start_gui_backend_services(&state).await;
 
-                // 4) 启动 axum HTTP server（优先固定端口，冲突时递增，回填 actual_http_port）
-                //    失败不阻断应用启动（P2P 不可用但本地功能仍可用），仅记录日志。
-                match http_server::start_http_server(state.clone()).await {
-                    Ok(port) => {
-                        // 5) 用实际端口启动 mDNS 发现（端口必须与 axum 一致，对端才能连）
-                        if let Err(e) = discovery::start_discovery(&state, port).await {
-                            tracing::error!("mDNS 发现启动失败（P2P 发现不可用）: {e}");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("axum HTTP server 启动失败（P2P 不可用）: {e}");
-                    }
-                }
-
-                Ok::<AppState, error::AppError>(state)
+                Ok::<(AppState, BackendRuntimeMode), error::AppError>((state, runtime_mode))
             })?;
 
             // 注入共享状态供命令层使用（axum/mDNS 已持有同一份 Arc 的 Clone）
             app.manage(state);
 
-            // 启动 Claude Code 历史采集器（立即扫一次 + 每 5 分钟增量扫描），
-            // 取消令牌存入 AppState 供应用退出时优雅停止。
+            // 只有已验证 sidecar 正在运行时才跳过 headless 后台任务；否则 GUI 自己承担 in-process 后端任务。
             {
                 let state: tauri::State<'_, AppState> = app.state();
-                let cancel = crate::cc::collector::start(state.inner().clone());
-                *state.cc_collector_cancel.lock().unwrap() = Some(cancel);
-            }
-
-            // 启动云端同步后台 scheduler（无条件启动；内部每 tick 按 config 的 enabled/auto/
-            // interval 决定是否真同步）。取消令牌存入 AppState 供应用退出时优雅停止。
-            {
-                let state: tauri::State<'_, AppState> = app.state();
-                let cancel = crate::cloud_sync::scheduler::start(state.inner().clone());
-                *state.cloud_sync_cancel.lock().unwrap() = Some(cancel);
-            }
-
-            // 启动 Orchestrator 后台 scheduler（每 10 秒按全局自动化配置领取 Queued 任务）。
-            // 取消令牌存入 AppState，应用退出时优雅停止。
-            {
-                let state: tauri::State<'_, AppState> = app.state();
-                let cancel = crate::orchestrator::scheduler::start_orchestrator_scheduler(
-                    state.inner().clone(),
-                );
-                *state.orchestrator_cancel.lock().unwrap() = Some(cancel);
-            }
-
-            // 启动 Orchestrator 远端 outbox dispatcher（每 10 秒尝试投递 pending 远端任务）。
-            // 取消令牌存入 AppState，应用退出时优雅停止。
-            {
-                let state: tauri::State<'_, AppState> = app.state();
-                let cancel =
-                    crate::orchestrator::outbox::start_orchestrator_remote_outbox_dispatcher(
-                        state.inner().clone(),
-                    );
-                *state.orchestrator_outbox_cancel.lock().unwrap() = Some(cancel);
+                start_background_tasks(state.inner(), runtime_mode);
             }
 
             // 启动健康监测 daemon（采样线程 + 处理 task），取消令牌存入 AppState 供应用退出时优雅停止。
@@ -799,42 +366,11 @@ pub fn run() {
         })
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            // M7：窗口关闭（应用退出）时优雅注销 mDNS，对照 Python app 关闭清理顺序。
-            // 用 RunEvent::Exit 兜底，确保无论退出路径都触发 stop_discovery。
+            // 用 RunEvent::Exit 兜底，确保无论退出路径都走共享后端运行时清理。
             if let tauri::RunEvent::Exit = event {
                 let state: tauri::State<'_, AppState> = app_handle.state();
-                discovery::stop_discovery(&state);
-                // 停止 Claude Code 历史采集器后台任务
-                if let Some(t) = state.cc_collector_cancel.lock().unwrap().take() {
-                    t.cancel();
-                    tracing::info!("CC 历史采集器已停止");
-                }
-                // 停止云端同步后台 scheduler
-                if let Some(t) = state.cloud_sync_cancel.lock().unwrap().take() {
-                    t.cancel();
-                    tracing::info!("云端同步 scheduler 已停止");
-                }
-                // 停止 Orchestrator 后台 scheduler
-                if let Some(t) = state.orchestrator_cancel.lock().unwrap().take() {
-                    t.cancel();
-                    tracing::info!("Orchestrator scheduler 已停止");
-                }
-                // 停止 Orchestrator 远端 outbox dispatcher
-                if let Some(t) = state.orchestrator_outbox_cancel.lock().unwrap().take() {
-                    t.cancel();
-                    tracing::info!("Orchestrator remote outbox dispatcher 已停止");
-                }
-                // 停止健康监测 daemon（采样线程 + 处理 task）
-                if let Some(t) = state.health_cancel.lock().unwrap().take() {
-                    t.cancel();
-                    tracing::info!("健康监测 daemon 已停止");
-                }
-                // 停止工作台中仍运行的 PTY attach；tmux 后端会保留 session 供下次启动重连。
-                let cleaned = state.workbench_sessions.shutdown_all();
-                if cleaned > 0 {
-                    tracing::info!("工作台会话已清理: {cleaned}");
-                }
-                tracing::info!("应用已退出，mDNS 已注销");
+                shutdown_backend_runtime(&state);
+                tracing::info!("应用已退出，共享后端运行时已清理");
             }
         });
 }

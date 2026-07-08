@@ -6,9 +6,9 @@
 //!     浏览对端服务。对照 Python `network/discovery.py`（zeroconf 实现）。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `start_discovery`：创建 ServiceDaemon → 注册本机服务
+//!     - `start_discovery`：创建 ServiceDaemon → 按 advertise 决定是否注册本机服务
 //!       （service type `_cc-partner._tcp.local.`，TXT 含 device_id/device_name，
-//!       SRV record 的 port 为 axum 实际监听端口）→ spawn 后台任务消费 browse 事件流
+//!       SRV record 的 port 为 axum/sidecar 实际监听端口）→ 按 browse 决定是否消费事件流
 //!       更新 AppState 的 devices 表。
 //!     - `stop_discovery`：shutdown daemon，清空 devices 表。
 //!     - 本机过滤：ServiceResolved 时比对 TXT 的 device_id 与本机 device_id，一致则忽略
@@ -30,21 +30,88 @@ const TXT_KEY_DEVICE_ID: &str = "device_id";
 /// TXT 记录 key：设备名。
 const TXT_KEY_DEVICE_NAME: &str = "device_name";
 
-/// 启动 mDNS 发现：注册本机服务 + 后台消费 browse 事件流。
+/// mDNS 启动计划。
 ///
-/// Business Logic: 应用启动、axum 拿到实际端口后调用。注册本机服务让对端能发现自己，
-///     同时浏览局域网内其他实例，把发现的设备写入 AppState.devices。
+/// Business Logic（为什么需要这个结构）:
+///     GUI sidecar 模式只需要浏览设备，不应重复宣告同一个 device_id；headless 则需要同时宣告与浏览。
 ///
-/// Code Logic:
-///     1. 创建 ServiceDaemon（mdns-sd 自带后台线程）。
-///     2. 探测本机 LAN IP（失败则注册时不带地址，让库按 hostname 解析）。
-///     3. 构造 ServiceInfo：ty_domain = SERVICE_TYPE，my_name = device_id（服务实例名），
-///        host_name = `cp-{device_id}.local.`（对照 Python server_name，避免用系统 hostname
-///        解析到多个 IP），port = axum 实际端口，TXT = {device_id, device_name}。
-///     4. register 服务，browse 同一 service type。
-///     5. spawn 任务循环 recv 事件：Resolved 更新 devices（过滤本机），Removed 剔除。
-///     6. 把 daemon 句柄存入 AppState.discovery 供关闭时 shutdown。
-pub async fn start_discovery(state: &AppState, port: u16) -> Result<(), String> {
+/// Code Logic（这个结构做什么）:
+///     保存 register_service 和 browse_services 两个执行开关，供 `start_discovery` 按计划调用 mdns-sd。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiscoveryStartPlan {
+    register_service: bool,
+    browse_services: bool,
+}
+
+impl DiscoveryStartPlan {
+    /// 从调用方传入的 advertise/browse 参数创建 mDNS 启动计划。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     上层 runtime 使用 advertise/browse 描述启动意图，discovery 模块需要把它们映射为具体 mdns-sd 动作。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     原样保存两个布尔值，保持测试可直接验证 browse-only 不触发 register。
+    fn new(advertise: bool, browse: bool) -> Self {
+        Self {
+            register_service: advertise,
+            browse_services: browse,
+        }
+    }
+}
+
+/// 按 mDNS 启动计划构造可注册的本机 ServiceInfo。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI sidecar browse-only 模式必须在“构造服务对象”这一层就停止本机广告路径，避免未来调用方误用计划字段后仍注册重复服务。
+///
+/// Code Logic（这个函数做什么）:
+///     `register_service=false` 时直接返回 None；否则按 device_id/device_name/port/local_ip 构造 mdns-sd ServiceInfo。
+fn build_service_info_for_plan(
+    plan: &DiscoveryStartPlan,
+    device_id: &str,
+    device_name: &str,
+    port: u16,
+    local_ip: Option<IpAddr>,
+) -> Result<Option<ServiceInfo>, String> {
+    if !plan.register_service {
+        return Ok(None);
+    }
+
+    let mut properties = HashMap::new();
+    properties.insert(TXT_KEY_DEVICE_ID.to_string(), device_id.to_string());
+    properties.insert(TXT_KEY_DEVICE_NAME.to_string(), device_name.to_string());
+
+    let host_name = format!("cc-{device_id}.local.");
+    let service_info = match local_ip {
+        Some(ip) => ServiceInfo::new(SERVICE_TYPE, device_id, &host_name, ip, port, properties),
+        None => ServiceInfo::new(SERVICE_TYPE, device_id, &host_name, "", port, properties)
+            .map(|info| info.enable_addr_auto()),
+    }
+    .map_err(|e| format!("构造 ServiceInfo 失败: {e}"))?;
+
+    Ok(Some(service_info))
+}
+
+/// 启动 mDNS 发现：按需注册本机服务 + 按需后台消费 browse 事件流。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Headless 后端需要宣告自己并发现对端；GUI 连接 sidecar 时只浏览局域网实例，避免同 device_id 重复广告。
+///
+/// Code Logic（这个函数做什么）:
+///     创建 ServiceDaemon；advertise=true 时构造 ServiceInfo 并 register；browse=true 时 browse 同一 service type
+///     并 spawn 事件循环；最后把 daemon 句柄存入 AppState.discovery 供关闭时 shutdown。
+pub async fn start_discovery(
+    state: &AppState,
+    port: u16,
+    advertise: bool,
+    browse: bool,
+) -> Result<(), String> {
+    let plan = DiscoveryStartPlan::new(advertise, browse);
+    if !plan.register_service && !plan.browse_services {
+        tracing::info!("mDNS 发现未启动：advertise=false, browse=false");
+        return Ok(());
+    }
+
     // 创建 mDNS 守护进程（mdns-sd 内部起一个后台线程监听 5353）
     let daemon = ServiceDaemon::new().map_err(|e| format!("创建 mDNS daemon 失败: {e}"))?;
 
@@ -52,36 +119,29 @@ pub async fn start_discovery(state: &AppState, port: u16) -> Result<(), String> 
     let device_id = state.device_id.as_ref().clone();
     let device_name = state.device_name();
 
-    // 探测本机局域网 IP（用于 mDNS A record）。探测失败则注册空地址集，
-    // mdns-sd 仍会通过 SRV/TXT 宣告，对端可经 hostname 解析（部分环境仍可达）。
-    let local_ip = local_lan_ip();
-
-    // 构造 TXT 记录：device_id、device_name。
-    let mut properties = HashMap::new();
-    properties.insert(TXT_KEY_DEVICE_ID.to_string(), device_id.clone());
-    properties.insert(TXT_KEY_DEVICE_NAME.to_string(), device_name.clone());
-
-    // host_name 使用 device_id 专用主机名，避免系统 hostname 解析到
-    // 多个 IP（含 VPN/Docker 虚拟接口）。
-    let host_name = format!("cc-{device_id}.local.");
-
-    // 服务实例名用 device_id，my_name 不含 type 后缀。
-    let service_info = match &local_ip {
-        Some(ip) => ServiceInfo::new(SERVICE_TYPE, &device_id, &host_name, *ip, port, properties),
-        None => ServiceInfo::new(SERVICE_TYPE, &device_id, &host_name, "", port, properties)
-            .map(|info| info.enable_addr_auto()), // 无显式 IP 时让库自动更新接口地址
+    let local_ip = if plan.register_service {
+        local_lan_ip()
+    } else {
+        None
+    };
+    if let Some(service_info) =
+        build_service_info_for_plan(&plan, &device_id, &device_name, port, local_ip)?
+    {
+        // 注册本机服务
+        daemon
+            .register(service_info)
+            .map_err(|e| format!("注册 mDNS 服务失败: {e}"))?;
     }
-    .map_err(|e| format!("构造 ServiceInfo 失败: {e}"))?;
 
-    // 注册本机服务
-    daemon
-        .register(service_info)
-        .map_err(|e| format!("注册 mDNS 服务失败: {e}"))?;
-
-    // 开始浏览同类型服务
-    let receiver = daemon
-        .browse(SERVICE_TYPE)
-        .map_err(|e| format!("启动 mDNS browse 失败: {e}"))?;
+    let receiver = if plan.browse_services {
+        Some(
+            daemon
+                .browse(SERVICE_TYPE)
+                .map_err(|e| format!("启动 mDNS browse 失败: {e}"))?,
+        )
+    } else {
+        None
+    };
 
     // 存入 AppState 供关闭使用
     {
@@ -89,18 +149,22 @@ pub async fn start_discovery(state: &AppState, port: u16) -> Result<(), String> 
         *guard = Some(daemon);
     }
 
-    // spawn 后台任务消费事件流（持有 AppState 的 Clone，与 axum/命令层共享同一份 Arc）
-    let state_clone = state.clone();
-    let my_device_id = state.device_id.clone();
-    async_runtime::spawn(async move {
-        event_loop(receiver, state_clone, my_device_id).await;
-    });
+    if let Some(receiver) = receiver {
+        // spawn 后台任务消费事件流（持有 AppState 的 Clone，与 axum/命令层共享同一份 Arc）
+        let state_clone = state.clone();
+        let my_device_id = state.device_id.clone();
+        async_runtime::spawn(async move {
+            event_loop(receiver, state_clone, my_device_id).await;
+        });
+    }
 
     tracing::info!(
-        "mDNS 发现已启动：service={}, device={}, port={}",
+        "mDNS 发现已启动：service={}, device={}, port={}, advertise={}, browse={}",
         SERVICE_TYPE,
         device_name,
-        port
+        port,
+        advertise,
+        browse
     );
     Ok(())
 }
@@ -256,6 +320,48 @@ pub fn local_lan_ip() -> Option<IpAddr> {
         IpAddr::V4(v4) if !v4.is_loopback() => Some(IpAddr::V4(v4)),
         IpAddr::V6(v6) if !v6.is_loopback() => Some(IpAddr::V6(v6)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 验证 browse-only 模式不会注册本机 mDNS 服务。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI 连接独立 sidecar 后端时只能浏览局域网设备，不能用相同 device_id 重复宣告本机服务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 advertise=false、browse=true 构造启动计划，断言 register_service 为 false 且 browse_services 为 true。
+    #[test]
+    fn browse_only_mode_does_not_register_service() {
+        let plan = DiscoveryStartPlan::new(false, true);
+
+        assert!(!plan.register_service);
+        assert!(plan.browse_services);
+    }
+
+    /// 验证 browse-only 模式不会构造本机 ServiceInfo。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI 连接独立 sidecar 时不能产生可注册的本机服务对象，否则后续代码仍可能误注册重复 mDNS 广播。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 browse-only 计划调用 service 构造 helper，断言结果为 None，而不仅是检查计划字段。
+    #[test]
+    fn browse_only_mode_does_not_build_service_info() {
+        let plan = DiscoveryStartPlan::new(false, true);
+        let service_info = build_service_info_for_plan(
+            &plan,
+            "device-a",
+            "测试设备",
+            62116,
+            Some("127.0.0.1".parse().unwrap()),
+        )
+        .expect("browse-only service info planning should not fail");
+
+        assert!(service_info.is_none());
     }
 }
 
