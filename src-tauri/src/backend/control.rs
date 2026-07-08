@@ -159,18 +159,18 @@ pub fn remove_control_files() -> Result<(), AppError> {
 ///     CLI/GUI 需要统一的状态判定口径：没有控制文件是停止，有错误优先报错，只有进程和健康检查都通过才是运行中。
 ///
 /// Code Logic（这个函数做什么）:
-///     按 `None -> Stopped`、`error -> Error`、`process_alive && health_ok -> Running`，
-///     其它控制文件存在的组合归为 `Stale`，并保留原控制文件与错误详情。
+///     按 `error -> Error`、`None -> Stopped`、`process_alive && health_ok -> Running`，
+///     其它组合归为 `Stale`，并保留原控制文件与错误详情。
 pub fn classify_status(
     control: Option<BackendControlFile>,
     process_alive: bool,
     health_ok: bool,
     error: Option<String>,
 ) -> BackendStatus {
-    let kind = if control.is_none() {
-        BackendStatusKind::Stopped
-    } else if error.is_some() {
+    let kind = if error.is_some() {
         BackendStatusKind::Error
+    } else if control.is_none() {
+        BackendStatusKind::Stopped
     } else if process_alive && health_ok {
         BackendStatusKind::Running
     } else {
@@ -188,6 +188,13 @@ pub fn classify_status(
 mod tests {
     use super::*;
 
+    /// 验证缺少控制文件时状态为停止。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户查询后端状态时，未启动过独立后端应看到 Stopped，而不是错误或残留状态。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     传入空控制文件、进程未存活、健康检查失败且无错误，断言分类结果为 Stopped 且不携带控制文件。
     #[test]
     fn classify_status_reports_stopped_without_control_file() {
         let status = classify_status(None, false, false, None);
@@ -195,6 +202,27 @@ mod tests {
         assert!(status.control.is_none());
     }
 
+    /// 验证错误信息优先于缺失控制文件。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     status 查询过程中如果读取控制文件或健康检查发生错误，用户需要先看到 Error，避免真实故障被误报为未启动。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     传入空控制文件和错误字符串，断言 `classify_status` 返回 Error，并保留错误详情。
+    #[test]
+    fn classify_status_reports_error_when_error_exists_without_control_file() {
+        let status = classify_status(None, false, false, Some("read failed".to_string()));
+        assert_eq!(status.kind, BackendStatusKind::Error);
+        assert_eq!(status.error.as_deref(), Some("read failed"));
+    }
+
+    /// 验证控制文件存在但 pid 不存活时状态为 stale。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     后端异常退出后可能留下控制文件，用户查询状态时应看到 Stale 以便后续清理残留。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造测试控制文件并传入进程未存活、健康检查失败且无错误，断言分类结果为 Stale。
     #[test]
     fn classify_status_reports_stale_when_pid_dead() {
         let control = BackendControlFile::for_test(1234, 62116, "device-a");
@@ -202,6 +230,13 @@ mod tests {
         assert_eq!(status.kind, BackendStatusKind::Stale);
     }
 
+    /// 验证只有 pid 和健康检查都正常时才是 running。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI/CLI 只有在后端进程存在且 HTTP 健康检查通过时才能把后端展示为可用。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造控制文件并传入进程存活、健康检查成功且无错误，断言分类结果为 Running 并保留控制文件内容。
     #[test]
     fn classify_status_reports_running_only_when_pid_and_health_are_ok() {
         let control = BackendControlFile::for_test(1234, 62116, "device-a");
