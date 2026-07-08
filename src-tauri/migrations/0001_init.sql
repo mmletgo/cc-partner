@@ -91,6 +91,20 @@ CREATE TABLE IF NOT EXISTS workbench_sessions (
     updated_at TEXT NOT NULL
 );
 
+-- workbench_browser_targets 表：项目/worktree 最近一次浏览器预览目标 URL
+CREATE TABLE IF NOT EXISTS workbench_browser_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    worktree_id TEXT,
+    worktree_key TEXT GENERATED ALWAYS AS (IFNULL(worktree_id, '')) STORED,
+    target_url TEXT NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    UNIQUE(project_id, worktree_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workbench_browser_targets_project
+    ON workbench_browser_targets(project_id, updated_at DESC);
+
 -- orchestrator_tasks 表：Orchestrator 权威任务队列
 CREATE TABLE IF NOT EXISTS orchestrator_tasks (
     id TEXT PRIMARY KEY,

@@ -20,7 +20,7 @@ use crate::orchestrator::repo::OrchestratorRepo;
 use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
 use crate::storage::{
     ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, TransferRepo,
-    WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
+    WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
 };
 use crate::transfer::registry::TransferRegistry;
 use mdns_sd::ServiceDaemon;
@@ -90,6 +90,8 @@ pub struct AppState {
     /// 工作台 Git worktree 元数据仓库（workbench_worktrees 表访问，重启恢复工作区列表）
     #[allow(dead_code)]
     pub workbench_worktree_repo: Arc<WorkbenchWorktreeRepo>,
+    /// Workbench 浏览器预览目标仓库（workbench_browser_targets 表访问，保存项目/worktree 最近目标）
+    pub workbench_browser_repo: Arc<WorkbenchBrowserRepo>,
     /// 工作台 PTY 会话注册表（运行期 PTY/tmux attach 句柄，元数据由 workbench_session_repo 持久化）
     #[allow(dead_code)]
     pub workbench_sessions: Arc<crate::workbench::sessions::WorkbenchSessionRegistry>,

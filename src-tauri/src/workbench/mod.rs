@@ -7,6 +7,8 @@
 //! Code Logic（这个模块做什么）:
 //!     导出本机项目、文件系统、PTY sessions、远端目录浏览、远端 ID 映射与 DTO 模块。
 
+pub mod browser;
+pub mod browser_models;
 pub mod claude_path;
 pub mod claude_sessions;
 pub mod dependencies;

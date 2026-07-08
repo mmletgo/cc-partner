@@ -36,10 +36,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hostname = "0.4"
 toml_edit = "0.25"
 # M3 P2P 网络层：axum HTTP server（供对端调用）+ reqwest peer client + mdns-sd 发现 + tower（axum 服务依赖）
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "ws"] }
 tower = "0.5"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 mdns-sd = "0.11"
+regex = "1"
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 # GitHub Trending 首页：解析 github.com/trending HTML（GitHub 无官方 Trending JSON API）
 scraper = "0.27"
 # M5 文件传输：tokio-util 提供 CancellationToken（每块发送前检查取消标志）

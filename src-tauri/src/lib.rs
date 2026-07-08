@@ -55,7 +55,7 @@ use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
 use crate::storage::{
     ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, SshTargetRepo, TransferRepo,
-    WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
+    WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
 };
 use crate::transfer::registry::TransferRegistry;
 use tauri::Manager;
@@ -267,6 +267,28 @@ const WORKBENCH_SESSION_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_ses
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 )";
+
+/// Workbench 浏览器预览目标表（项目/worktree 最近一次目标 URL）。
+///
+/// Business Logic（为什么需要这个常量）:
+///     用户选择过的 dev server URL 需要在下次发现时排在候选前面，提高重复预览效率。
+///
+/// Code Logic（这个常量做什么）:
+///     定义 project_id + coalesced worktree_id 唯一键；worktree_id 为空表示项目主目标。
+const WORKBENCH_BROWSER_TARGET_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS workbench_browser_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    worktree_id TEXT,
+    worktree_key TEXT GENERATED ALWAYS AS (IFNULL(worktree_id, '')) STORED,
+    target_url TEXT NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    UNIQUE(project_id, worktree_key)
+)";
+
+const WORKBENCH_BROWSER_TARGET_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_workbench_browser_targets_project
+    ON workbench_browser_targets(project_id, updated_at DESC)";
 /// 初始化数据库连接池：开启 WAL，手动建表，返回 SqlitePool。
 ///
 /// Business Logic: 单连接语义与 Python aiosqlite 一致（max_connections(1)）。
@@ -332,6 +354,12 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, error::AppError> {
         .execute(&pool)
         .await?;
     sqlx::query(WORKBENCH_SESSION_SCHEMA).execute(&pool).await?;
+    sqlx::query(WORKBENCH_BROWSER_TARGET_SCHEMA)
+        .execute(&pool)
+        .await?;
+    sqlx::query(WORKBENCH_BROWSER_TARGET_INDEX)
+        .execute(&pool)
+        .await?;
     WorkbenchWorktreeRepo::new(pool.clone())
         .ensure_schema()
         .await?;
@@ -396,6 +424,7 @@ pub fn run() {
                 let workbench_project_repo = Arc::new(WorkbenchProjectRepo::new(pool.clone()));
                 let workbench_session_repo = Arc::new(WorkbenchSessionRepo::new(pool.clone()));
                 let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::new(pool.clone()));
+                let workbench_browser_repo = Arc::new(WorkbenchBrowserRepo::new(pool.clone()));
                 let orchestrator_repo = Arc::new(OrchestratorRepo::new(pool.clone()));
                 let workbench_sessions =
                     Arc::new(crate::workbench::sessions::WorkbenchSessionRegistry::new());
@@ -439,6 +468,7 @@ pub fn run() {
                     workbench_project_repo,
                     workbench_session_repo,
                     workbench_worktree_repo,
+                    workbench_browser_repo,
                     workbench_sessions,
                     workbench_remote_events,
                     workbench_remote_event_bridges,
