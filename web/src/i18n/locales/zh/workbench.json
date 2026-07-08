@@ -497,7 +497,14 @@
     "open": "打开",
     "urlPlaceholder": "http://localhost:5173",
     "frameTitle": "项目浏览器预览",
-    "empty": "启动项目 dev server 后，系统会自动发现预览地址；也可以手动输入 localhost 端口。"
+    "empty": "启动项目 dev server 后，系统会自动发现预览地址；也可以手动输入 localhost 端口。",
+    "sources": {
+      "remembered": "上次使用",
+      "terminalOutput": "终端输出",
+      "projectConfig": "项目配置",
+      "portProbe": "端口探测",
+      "manual": "手动输入"
+    }
   },
   "projectAutomation": {
     "title": "项目自动化",

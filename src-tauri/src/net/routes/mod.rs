@@ -65,6 +65,20 @@ impl ApiError {
         }
     }
 
+    /// 构造 413 API 错误。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     preview proxy 等 HTTP route 需要在请求体超过安全上限时明确拒绝，避免继续读取或转发大 body。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用传入消息创建 status=413 的 ApiError。
+    pub fn payload_too_large(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: message.into(),
+        }
+    }
+
     /// 构造 502 API 错误。
     ///
     /// Business Logic（为什么需要这个函数）:

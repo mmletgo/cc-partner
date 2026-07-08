@@ -741,7 +741,7 @@ export type WorkbenchBrowserTargetSource =
  *   用户打开浏览器预览时，需要看到从历史选择、终端输出、项目配置或端口探测得到的 dev server 候选。
  *
  * Code Logic（字段说明）:
- *   url 是后端规范化后的可代理目标；displayUrl/label/source/reachable 用于前端展示与排序提示。
+ *   url 是后端规范化后的可代理目标；displayUrl/source/reachable 用于前端展示与排序提示；label 仅是兼容字段里的稳定 key，不作为用户可见文案来源。
  */
 export interface WorkbenchBrowserTarget {
   id: string;

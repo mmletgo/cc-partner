@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   getWorkbenchBrowserFrameSrc,
   canApplyWorkbenchBrowserRequest,
+  getWorkbenchBrowserTargetSourceLabelKey,
 } from '@/components/domain/WorkbenchBrowserWorkspace/WorkbenchBrowserWorkspace';
 import type { WorkbenchBrowserPreview } from '@/lib/types';
 
@@ -49,6 +50,17 @@ assert.equal(
   ),
   true,
   'latest request for the current context may apply its preview',
+);
+
+assert.equal(
+  getWorkbenchBrowserTargetSourceLabelKey('remembered'),
+  'workbench:browserPreview.sources.remembered',
+  'remembered source should render through workbench i18n instead of backend label text',
+);
+assert.equal(
+  getWorkbenchBrowserTargetSourceLabelKey('terminalOutput'),
+  'workbench:browserPreview.sources.terminalOutput',
+  'terminal source should render through workbench i18n instead of backend label text',
 );
 
 console.log('workbenchBrowserPreview tests passed');

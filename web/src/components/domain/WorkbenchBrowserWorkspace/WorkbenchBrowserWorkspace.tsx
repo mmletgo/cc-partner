@@ -2,6 +2,7 @@ import { lazy, Suspense } from 'react';
 import type { ReactElement } from 'react';
 import type {
   WorkbenchBrowserPreview,
+  WorkbenchBrowserTargetSource,
   WorkbenchProject,
   WorkbenchWorktree,
 } from '@/lib/types';
@@ -28,6 +29,13 @@ export interface WorkbenchBrowserRequestSnapshot {
   projectId: string;
   worktreeId: string | null;
 }
+
+export type WorkbenchBrowserSourceLabelKey =
+  | 'workbench:browserPreview.sources.remembered'
+  | 'workbench:browserPreview.sources.terminalOutput'
+  | 'workbench:browserPreview.sources.projectConfig'
+  | 'workbench:browserPreview.sources.portProbe'
+  | 'workbench:browserPreview.sources.manual';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -56,6 +64,30 @@ export function getWorkbenchBrowserFrameSrc(
 ): string | null {
   if (!preview) return null;
   return surface === 'desktop' ? preview.desktopProxyUrl : preview.mobileProxyPath;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   浏览器候选来源文案必须跟随当前前端语言，不能直接展示后端 DTO 的 label 字段。
+ *
+ * Code Logic（这个函数做什么）:
+ *   将稳定 source 枚举映射到 workbench namespace 下的 i18n key，供视图组件交给 t() 渲染。
+ */
+export function getWorkbenchBrowserTargetSourceLabelKey(
+  source: WorkbenchBrowserTargetSource,
+): WorkbenchBrowserSourceLabelKey {
+  switch (source) {
+    case 'remembered':
+      return 'workbench:browserPreview.sources.remembered';
+    case 'terminalOutput':
+      return 'workbench:browserPreview.sources.terminalOutput';
+    case 'projectConfig':
+      return 'workbench:browserPreview.sources.projectConfig';
+    case 'portProbe':
+      return 'workbench:browserPreview.sources.portProbe';
+    case 'manual':
+      return 'workbench:browserPreview.sources.manual';
+  }
 }
 
 /**

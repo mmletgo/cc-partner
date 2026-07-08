@@ -1393,7 +1393,7 @@ mod tests {
                                     url: "http://127.0.0.1:5173/".to_string(),
                                     display_url: "http://127.0.0.1:5173/".to_string(),
                                     source: WorkbenchBrowserTargetSource::Remembered,
-                                    label: "上次使用".to_string(),
+                                    label: "remembered".to_string(),
                                     reachable: true,
                                 }],
                                 selected_target_id: Some("target-1".to_string()),

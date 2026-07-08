@@ -409,7 +409,7 @@ async fn probe_default_port_targets(
 ///     不同发现来源应生成一致的目标结构，便于去重、排序和前端展示。
 ///
 /// Code Logic（这个函数做什么）:
-///     规范化 URL，生成 `{source}:{normalized_url}` id，展示 URL 使用 localhost，label 来自来源。
+///     规范化 URL，生成 `{source}:{normalized_url}` id，展示 URL 使用 localhost，label 只保存稳定来源 key。
 fn browser_target_from_url(
     raw: &str,
     source: WorkbenchBrowserTargetSource,
@@ -420,7 +420,7 @@ fn browser_target_from_url(
         id: format!("{source:?}:{normalized_url}"),
         display_url: display_url_for_normalized(&normalized_url),
         url: normalized_url,
-        label: source_label(&source).to_string(),
+        label: source_label_key(&source).to_string(),
         source,
         reachable,
     })
@@ -534,20 +534,20 @@ fn display_url_for_normalized(normalized_url: &str) -> String {
     url.to_string()
 }
 
-/// 获取目标来源展示标签。
+/// 获取目标来源稳定 key。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     前端候选列表需要解释每个 URL 为什么出现，降低误选成本。
+///     前端候选列表需要解释每个 URL 为什么出现，但用户可见文案必须由前端 i18n 负责，不能由后端返回中文。
 ///
 /// Code Logic（这个函数做什么）:
-///     将枚举来源映射为稳定中文标签。
-fn source_label(source: &WorkbenchBrowserTargetSource) -> &'static str {
+///     将枚举来源映射为稳定 key，供 DTO label 字段兼容旧结构；前端实际展示应优先使用 target.source。
+fn source_label_key(source: &WorkbenchBrowserTargetSource) -> &'static str {
     match source {
-        WorkbenchBrowserTargetSource::Remembered => "上次使用",
-        WorkbenchBrowserTargetSource::TerminalOutput => "终端输出",
-        WorkbenchBrowserTargetSource::ProjectConfig => "项目配置",
-        WorkbenchBrowserTargetSource::PortProbe => "端口探测",
-        WorkbenchBrowserTargetSource::Manual => "手动输入",
+        WorkbenchBrowserTargetSource::Remembered => "remembered",
+        WorkbenchBrowserTargetSource::TerminalOutput => "terminalOutput",
+        WorkbenchBrowserTargetSource::ProjectConfig => "projectConfig",
+        WorkbenchBrowserTargetSource::PortProbe => "portProbe",
+        WorkbenchBrowserTargetSource::Manual => "manual",
     }
 }
 
@@ -704,6 +704,23 @@ mod tests {
         assert!(normalize_browser_target_url("https://example.com").is_err());
         assert!(normalize_browser_target_url("file:///etc/passwd").is_err());
         assert!(normalize_browser_target_url("http://169.254.169.254/latest").is_err());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     后端 DTO 不应携带中文来源标签，否则英文界面会直接混入中文。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 terminalOutput 候选，断言 label 字段是稳定 key 而不是用户可见文案。
+    #[test]
+    fn browser_target_label_is_stable_key_not_localized_text() {
+        let target = browser_target_from_url(
+            "http://127.0.0.1:5173/",
+            WorkbenchBrowserTargetSource::TerminalOutput,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(target.label, "terminalOutput");
     }
 
     /// Business Logic（为什么需要这个测试）:

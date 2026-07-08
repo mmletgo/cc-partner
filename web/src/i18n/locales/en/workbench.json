@@ -504,7 +504,14 @@
     "open": "Open",
     "urlPlaceholder": "http://localhost:5173",
     "frameTitle": "Project browser preview",
-    "empty": "Start the project's dev server and cc-partner will discover the preview URL, or enter a localhost port manually."
+    "empty": "Start the project's dev server and cc-partner will discover the preview URL, or enter a localhost port manually.",
+    "sources": {
+      "remembered": "Last used",
+      "terminalOutput": "Terminal output",
+      "projectConfig": "Project config",
+      "portProbe": "Port probe",
+      "manual": "Manual"
+    }
   },
   "projectAutomation": {
     "title": "Project Automation",

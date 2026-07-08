@@ -34,7 +34,7 @@ pub enum WorkbenchBrowserTargetSource {
 ///     Workbench 需要展示可预览的本机 dev server 候选，并让用户选择其中一个创建预览。
 ///
 /// Code Logic（这个结构体做什么）:
-///     保存候选的稳定 id、规范化 URL、展示 URL、来源、标签和当前可达性。
+///     保存候选的稳定 id、规范化 URL、展示 URL、来源、兼容 label key 和当前可达性。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchBrowserTarget {

@@ -9,7 +9,7 @@
 use crate::net::routes::ApiError;
 use crate::state::AppState;
 use crate::workbench::browser_models::WorkbenchBrowserPreview;
-use axum::body::{to_bytes, Body};
+use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::FromRequestParts;
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Request, StatusCode};
@@ -35,7 +35,9 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
 
 const PREVIEW_TTL: Duration = Duration::from_secs(30 * 60);
-const PROXY_BODY_LIMIT_BYTES: usize = usize::MAX;
+/// preview proxy 单次请求体上限，需与 HTTP server DefaultBodyLimit 保持一致（32MB）。
+const PROXY_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+const AXUM_LENGTH_LIMIT_ERROR: &str = "length limit exceeded";
 pub const DESKTOP_BROWSER_PROXY_ROUTE_PREFIX: &str = "/api/workbench/browser/proxy";
 pub const MOBILE_BROWSER_PROXY_ROUTE_PREFIX: &str = "/api/mobile/workbench/browser/proxy";
 type UpstreamWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -386,9 +388,7 @@ async fn proxy_http_request_for_session(
     let upstream_url = build_upstream_proxy_url(&session, &tail_path, req.uri().query())?;
     let method = reqwest_method(req.method())?;
     let headers = filtered_proxy_headers(req.headers());
-    let body = to_bytes(req.into_body(), PROXY_BODY_LIMIT_BYTES)
-        .await
-        .map_err(|_| ApiError::bad_request("读取预览请求失败"))?;
+    let body = read_proxy_request_body(req.into_body()).await?;
     let response = proxy_http_client()?
         .request(method, upstream_url)
         .headers(headers)
@@ -396,6 +396,28 @@ async fn proxy_http_request_for_session(
         .send()
         .await?;
     response_to_axum_response(&session, response, route_prefix).await
+}
+
+/// 读取代理请求体。
+///
+/// Business Logic（为什么需要这个函数）:
+///     preview proxy 需要支持 POST/PUT 等开发接口请求，但必须拒绝超过 HTTP server 上限的 body，避免内存耗尽。
+///
+/// Code Logic（这个函数做什么）:
+///     用 32MB 上限聚合 axum Body；超限错误映射为 413，其它读取错误保留 400。
+async fn read_proxy_request_body(body: Body) -> Result<Bytes, ApiError> {
+    to_bytes(body, PROXY_BODY_LIMIT_BYTES)
+        .await
+        .map_err(|error| {
+            if std::error::Error::source(&error)
+                .map(|source| source.to_string() == AXUM_LENGTH_LIMIT_ERROR)
+                .unwrap_or(false)
+            {
+                ApiError::payload_too_large("预览请求体超过 32MB 限制")
+            } else {
+                ApiError::bad_request("读取预览请求失败")
+            }
+        })
 }
 
 /// 构造预览 HTTP 代理客户端。
@@ -1198,6 +1220,60 @@ mod tests {
             seen_path.lock().unwrap().as_deref(),
             Some("/api/workbench/browser/proxy/remote-preview/assets/app.js?version=2")
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     preview proxy 必须拒绝超过 HTTP server body limit 的大请求，避免一次性读取无限请求体导致内存耗尽。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 32MB+1 的 POST body，断言 proxy 返回 413，并确认测试 upstream 没有收到任何请求。
+    #[tokio::test]
+    async fn http_proxy_rejects_oversized_request_body_without_forwarding() {
+        let upstream_hits = std::sync::Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/upload",
+                any(
+                    |State(hits): State<std::sync::Arc<Mutex<usize>>>| async move {
+                        *hits.lock().unwrap() += 1;
+                        "unexpected"
+                    },
+                ),
+            )
+            .with_state(upstream_hits.clone());
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        let preview = registry.create_local(
+            "project-a".to_string(),
+            None,
+            format!("http://{addr}/"),
+            62116,
+        );
+        let session = registry.lookup(&preview.preview_id).unwrap();
+        let req = Request::builder()
+            .method("POST")
+            .uri("http://127.0.0.1/proxy")
+            .body(Body::from(vec![b'x'; 32 * 1024 * 1024 + 1]))
+            .unwrap();
+
+        let error = proxy_http_request_for_session(
+            session,
+            "upload".to_string(),
+            req,
+            DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
+        )
+        .await
+        .expect_err("oversized proxy body should be rejected before upstream forwarding");
+
+        assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(*upstream_hits.lock().unwrap(), 0);
     }
 
     /// Business Logic（为什么需要这个测试）:

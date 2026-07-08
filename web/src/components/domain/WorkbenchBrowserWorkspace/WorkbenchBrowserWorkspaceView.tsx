@@ -11,6 +11,7 @@ import type {
 import {
   canApplyWorkbenchBrowserRequest,
   getWorkbenchBrowserFrameSrc,
+  getWorkbenchBrowserTargetSourceLabelKey,
   type WorkbenchBrowserRequestSnapshot,
   type WorkbenchBrowserWorkspaceProps,
 } from './WorkbenchBrowserWorkspace';
@@ -205,7 +206,7 @@ export function WorkbenchBrowserWorkspaceView({
               data-active={preview?.targetUrl === target.url || undefined}
               onClick={() => void openTarget(target)}
             >
-              <span>{target.label}</span>
+              <span>{t(getWorkbenchBrowserTargetSourceLabelKey(target.source) as never)}</span>
               <span>{target.displayUrl}</span>
             </button>
           ))}
