@@ -17,7 +17,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Manager};
 
 const REMOTE_EVENT_RECONNECT_DELAY_SECS: u64 = 2;
 
@@ -153,7 +152,7 @@ impl RemoteEventBridgeRegistry {
         device_id: String,
         base_url: String,
         project_mapping: Option<RemoteEventBridgeProjectMapping>,
-        app: AppHandle,
+        state: AppState,
     ) {
         let mut tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
         if let Some(existing) = tasks.get_mut(&device_id) {
@@ -163,13 +162,13 @@ impl RemoteEventBridgeRegistry {
             }
             existing.handle.abort();
             let project_ids = Arc::clone(&existing.project_ids);
-            *existing = spawn_bridge_task(device_id, base_url, project_ids, app);
+            *existing = spawn_bridge_task(device_id, base_url, project_ids, state);
             return;
         }
 
         let project_ids = Arc::new(RwLock::new(HashMap::new()));
         update_project_mapping(&project_ids, project_mapping);
-        let task = spawn_bridge_task(device_id.clone(), base_url, project_ids, app);
+        let task = spawn_bridge_task(device_id.clone(), base_url, project_ids, state);
         tasks.insert(device_id, task);
     }
 
@@ -200,7 +199,7 @@ fn spawn_bridge_task(
     device_id: String,
     base_url: String,
     project_ids: Arc<RwLock<HashMap<String, String>>>,
-    app: AppHandle,
+    state: AppState,
 ) -> RemoteEventBridgeTask {
     let finished = Arc::new(AtomicBool::new(false));
     let task_finished = Arc::clone(&finished);
@@ -208,7 +207,7 @@ fn spawn_bridge_task(
     let task_base_url = base_url.clone();
     let task_project_ids = Arc::clone(&project_ids);
     let handle = tauri::async_runtime::spawn(async move {
-        remote_event_loop(task_device_id, task_base_url, app, task_project_ids).await;
+        remote_event_loop(task_device_id, task_base_url, state, task_project_ids).await;
         task_finished.store(true, Ordering::SeqCst);
     });
     RemoteEventBridgeTask {
@@ -250,12 +249,11 @@ fn bridge_should_restart(existing_base_url: &str, finished: bool, next_base_url:
 ///     本机 session/merge 事件 emit 时，也要同步发布到 HTTP broadcast channel 供远端设备订阅。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 AppHandle 读取 AppState，向 `workbench_remote_events` broadcast sender 发送事件；无订阅者时忽略错误。
-pub fn publish_workbench_remote_event(app: &AppHandle, event: WorkbenchRemoteEvent) {
-    let Some(state) = app.try_state::<AppState>() else {
-        return;
-    };
-    let _ = state.workbench_remote_events.send(event);
+///     从 AppState 向 `workbench_remote_events` broadcast sender 发送事件；无订阅者时记录 debug 后忽略。
+pub fn publish_workbench_remote_event_from_state(state: &AppState, event: WorkbenchRemoteEvent) {
+    if let Err(error) = state.workbench_remote_events.send(event) {
+        tracing::debug!("无 Workbench 远端事件订阅者: {error}");
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -266,13 +264,13 @@ pub fn publish_workbench_remote_event(app: &AppHandle, event: WorkbenchRemoteEve
 async fn remote_event_loop(
     device_id: String,
     base_url: String,
-    app: AppHandle,
+    state: AppState,
     project_ids: Arc<RwLock<HashMap<String, String>>>,
 ) {
     let client = reqwest::Client::new();
     loop {
         if let Err(error) =
-            read_remote_event_stream(&client, &device_id, &base_url, &app, &project_ids).await
+            read_remote_event_stream(&client, &device_id, &base_url, &state, &project_ids).await
         {
             tracing::debug!("Workbench 远端事件流断开，将重连: {error}");
         }
@@ -284,12 +282,12 @@ async fn remote_event_loop(
 ///     一次远端事件连接负责持续读取 NDJSON 并把远端内部 ID 映射成本机 remote ID。
 ///
 /// Code Logic（这个函数做什么）:
-///     GET 远端 events endpoint，按 chunk 累积行，逐行反序列化 WorkbenchRemoteEvent 后 emit 到本机 Tauri。
+///     GET 远端 events endpoint，按 chunk 累积行，逐行反序列化 WorkbenchRemoteEvent 后 emit 到本机后端 UI adapter。
 async fn read_remote_event_stream(
     client: &reqwest::Client,
     device_id: &str,
     base_url: &str,
-    app: &AppHandle,
+    state: &AppState,
     project_ids: &Arc<RwLock<HashMap<String, String>>>,
 ) -> Result<(), AppError> {
     let mut response = client
@@ -312,7 +310,7 @@ async fn read_remote_event_stream(
         .await
         .map_err(|error| AppError::generic(format!("读取远端 Workbench 事件流失败: {error}")))?
     {
-        process_event_chunk(device_id, app, project_ids, &mut buffer, &chunk);
+        process_event_chunk(device_id, state, project_ids, &mut buffer, &chunk);
     }
     Ok(())
 }
@@ -321,10 +319,10 @@ async fn read_remote_event_stream(
 ///     NDJSON 事件可能被 TCP chunk 拆开，必须跨 chunk 保留未完成的一行，并避免破坏 UTF-8 字符。
 ///
 /// Code Logic（这个函数做什么）:
-///     复用纯解析 helper 得到已映射事件，再逐个 emit 到本机 Tauri event bus。
+///     复用纯解析 helper 得到已映射事件，再逐个 emit 到本机后端 UI adapter。
 fn process_event_chunk(
     device_id: &str,
-    app: &AppHandle,
+    state: &AppState,
     project_ids: &Arc<RwLock<HashMap<String, String>>>,
     buffer: &mut Vec<u8>,
     chunk: &[u8],
@@ -334,7 +332,7 @@ fn process_event_chunk(
         .expect("remote event bridge project 映射读锁中毒")
         .clone();
     for event in process_event_chunk_to_events(device_id, &project_ids, buffer, chunk) {
-        emit_mapped_remote_event(app, event);
+        emit_mapped_remote_event(state, event);
     }
 }
 
@@ -392,22 +390,19 @@ fn trim_ascii_whitespace_bytes(mut bytes: &[u8]) -> &[u8] {
 ///     本机前端只监听 Tauri event，不关心事件来自本机 PTY 还是远端 HTTP stream。
 ///
 /// Code Logic（这个函数做什么）:
-///     按事件类型 emit 到现有 `workbench:*` 事件名；失败只记录 warn，不中断桥接循环。
-fn emit_mapped_remote_event(app: &AppHandle, event: WorkbenchRemoteEvent) {
-    let result = match event {
+///     按事件类型 emit 到现有 `workbench:*` 事件名；headless adapter 可安全 no-op。
+fn emit_mapped_remote_event(state: &AppState, event: WorkbenchRemoteEvent) {
+    match event {
         WorkbenchRemoteEvent::TerminalOutput(payload) => {
-            app.emit("workbench:terminal-output", payload)
+            state.emit_event("workbench:terminal-output", payload);
         }
         WorkbenchRemoteEvent::TerminalStatus(payload) => {
-            app.emit("workbench:terminal-status", payload)
+            state.emit_event("workbench:terminal-status", payload);
         }
         WorkbenchRemoteEvent::MergeProgress(payload) => {
-            app.emit("workbench:merge-progress", payload)
+            state.emit_event("workbench:merge-progress", payload);
         }
     };
-    if let Err(error) = result {
-        tracing::warn!("桥接 Workbench 远端事件失败: {error}");
-    }
 }
 
 /// Business Logic（为什么需要这个函数）:

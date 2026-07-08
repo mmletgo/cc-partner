@@ -15,7 +15,6 @@ use crate::state::AppState;
 use chrono::Utc;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
 
 const SCHEDULER_TICK_SECS: u64 = 10;
@@ -141,7 +140,7 @@ impl OrchestratorRuntime {
 ///
 /// Code Logic（这个函数做什么）:
 ///     使用 tauri async runtime 启动后台循环，每 10 秒调用 dispatch_once，收到 cancel 后退出。
-pub fn start_orchestrator_scheduler(app_handle: AppHandle, state: AppState) -> CancellationToken {
+pub fn start_orchestrator_scheduler(state: AppState) -> CancellationToken {
     let runtime = OrchestratorRuntime::new();
     let cancel = runtime.cancel_token();
     let task_cancel = runtime.cancel_token();
@@ -153,7 +152,7 @@ pub fn start_orchestrator_scheduler(app_handle: AppHandle, state: AppState) -> C
                     break;
                 }
                 _ = tokio::time::sleep(Duration::from_secs(SCHEDULER_TICK_SECS)) => {
-                    if let Err(err) = dispatch_once(&state, app_handle.clone()).await {
+                    if let Err(err) = dispatch_once(&state).await {
                         tracing::error!("Orchestrator scheduler dispatch 失败: {err}");
                     }
                 }
@@ -169,9 +168,9 @@ pub fn start_orchestrator_scheduler(app_handle: AppHandle, state: AppState) -> C
 /// Code Logic（这个函数做什么）:
 ///     每次从 AppState 读取全局 Orchestrator 配置，在 repo 事务内按全局本机容量批量 claim 可执行泳道任务并交给 runner；
 ///     runner 失败时仅在任务仍为 Preparing 或 bootstrap Running 时把任务置为 Blocked 并追加事件，成功时计入 dispatched。
-pub async fn dispatch_once(state: &AppState, app_handle: AppHandle) -> Result<usize, AppError> {
+pub async fn dispatch_once(state: &AppState) -> Result<usize, AppError> {
     let tick_at = Utc::now().to_rfc3339();
-    let result = dispatch_once_inner(state, app_handle).await;
+    let result = dispatch_once_inner(state).await;
     match &result {
         Ok(dispatched) => {
             state
@@ -192,7 +191,7 @@ pub async fn dispatch_once(state: &AppState, app_handle: AppHandle) -> Result<us
 ///
 /// Code Logic（这个函数做什么）:
 ///     执行原始 claim 和 runner 准备流程，返回本次成功派发数量。
-async fn dispatch_once_inner(state: &AppState, app_handle: AppHandle) -> Result<usize, AppError> {
+async fn dispatch_once_inner(state: &AppState) -> Result<usize, AppError> {
     let config = state
         .config
         .read()
@@ -202,7 +201,7 @@ async fn dispatch_once_inner(state: &AppState, app_handle: AppHandle) -> Result<
     let tasks = claim_tasks_for_dispatch(state.orchestrator_repo.as_ref(), &config).await?;
     let mut dispatched = 0usize;
     for task in tasks {
-        match prepare_visible_runner(state, app_handle.clone(), &task).await {
+        match prepare_visible_runner(state, &task).await {
             Ok(_) => {
                 dispatched += 1;
             }
@@ -216,7 +215,7 @@ async fn dispatch_once_inner(state: &AppState, app_handle: AppHandle) -> Result<
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     后台 scheduler 和手动 dispatch 应共享全局开关与容量解释，测试也需要绕开 Tauri AppHandle 只验证领取语义。
+///     后台 scheduler 和手动 dispatch 应共享全局开关与容量解释，测试也需要在不构造 GUI 句柄的情况下验证领取语义。
 ///
 /// Code Logic（这个函数做什么）:
 ///     enabled=false 时返回空；enabled=true 时委托 repo 在事务内按全局本机容量领取 Todo/Rework 且未运行的 local 任务。

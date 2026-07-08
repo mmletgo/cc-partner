@@ -18,6 +18,10 @@ use crate::workbench::browser::{
     normalize_browser_target_url,
 };
 use crate::workbench::browser_models::{WorkbenchBrowserDiscovery, WorkbenchBrowserPreview};
+use crate::workbench::claude_sessions::{
+    ensure_worktree_session_index_scanned, search_sessions, to_session_preview, ClaudeSessionIndex,
+    SessionPreview, SessionSearchHit,
+};
 use crate::workbench::models::{
     WorkbenchDetectedFileType, WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchGitStatusDto,
     WorkbenchHtmlAssetDto, WorkbenchOpenFileDto, WorkbenchPathInfo, WorkbenchProjectDto,
@@ -33,22 +37,18 @@ use crate::workbench::{
     file_content, file_preview, fs as workbench_fs, git as workbench_git, html_assets, projects,
     remote_client::RemoteWorkbenchClient,
     remote_events::{
-        publish_workbench_remote_event, RemoteEventBridgeProjectMapping,
+        publish_workbench_remote_event_from_state, RemoteEventBridgeProjectMapping,
         WorkbenchMergeProgressPayload, WorkbenchRemoteEvent,
     },
     remote_ids::{parse_remote_entity_id, remote_entity_id, remote_project_id},
     remote_protocol::{
         RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq,
         RemoteCreateSessionReq, RemoteCreateWorktreeReq, RemoteDeletePathReq,
-        RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteRenamePathReq,
-        RemoteSaveTextReq, RemoteSearchClaudeSessionsReq, RemoteWorkbenchBrowserDiscoverReq,
+        RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteRenamePathReq, RemoteSaveTextReq,
+        RemoteSearchClaudeSessionsReq, RemoteWorkbenchBrowserDiscoverReq,
         RemoteWorkbenchBrowserPreviewReq, ResumeClaudeSessionResult,
     },
     sqlite_preview,
-};
-use crate::workbench::claude_sessions::{
-    ensure_worktree_session_index_scanned, search_sessions, to_session_preview,
-    ClaudeSessionIndex, SessionPreview, SessionSearchHit,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -58,7 +58,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use tauri::{AppHandle, Emitter, State};
+use tauri::State;
 
 const COMMIT_MESSAGE_TIMEOUT_SECS: u64 = 180;
 const MERGE_CONFLICT_RESOLUTION_TIMEOUT_SECS: u64 = 300;
@@ -461,7 +461,6 @@ async fn merged_session_dtos(
 ///     成功后写回最新 row，项目缺失则删除孤儿会话。
 async fn restore_persisted_sessions(
     state: &AppState,
-    app_handle: AppHandle,
     project_id: Option<&str>,
 ) -> Result<(), AppError> {
     let rows = state.workbench_session_repo.list(project_id).await?;
@@ -483,12 +482,10 @@ async fn restore_persisted_sessions(
                     None
                 }
             };
-        match state.workbench_sessions.restore(
-            app_handle.clone(),
-            project,
-            row.clone(),
-            worktree_name,
-        ) {
+        match state
+            .workbench_sessions
+            .restore(state.clone(), project, row.clone(), worktree_name)
+        {
             Ok(restored) => {
                 state.workbench_session_repo.upsert(&restored).await?;
             }
@@ -1092,7 +1089,7 @@ fn ensure_remote_event_bridge_for_project_mapping(
             inner_project_id: inner_project_id.to_string(),
             local_project_id: local_project_id.to_string(),
         }),
-        state.app_handle.clone(),
+        state.clone(),
     );
 }
 
@@ -1106,7 +1103,7 @@ fn ensure_remote_event_bridge_for_device(state: &AppState, device_id: &str, base
         device_id.to_string(),
         base_url.to_string(),
         None,
-        state.app_handle.clone(),
+        state.clone(),
     );
 }
 
@@ -1767,7 +1764,6 @@ pub async fn push_workbench_worktree(
 ///     按 checkSource/closeSessions/mergeMain/resolveConflicts/cleanup 五阶段推进；每阶段开始/完成/失败
 ///     emit `workbench:merge-progress`，成功返回 `{ok, worktreeId, stages}`，失败先 emit failed 再返回 AppError。
 pub(crate) async fn local_merge_workbench_worktree(
-    app: AppHandle,
     state: &AppState,
     worktree_id: String,
 ) -> Result<WorkbenchMergeResultDto, AppError> {
@@ -1780,7 +1776,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     };
     let project_id = row.project_id.clone();
     set_merge_stage(
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
@@ -1790,7 +1786,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     );
     if row.is_main {
         return Err(fail_merge_stage(
-            &app,
+            state,
             &project_id,
             &worktree_id,
             &mut stages,
@@ -1800,7 +1796,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     }
     let project = stage_result(
         get_project(state, &row.project_id).await,
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
@@ -1808,7 +1804,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     )?;
     let main = stage_result(
         ensure_main_worktree(state, &project).await,
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
@@ -1816,7 +1812,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     )?;
     let source_status = stage_result(
         workbench_git::status(Path::new(&row.path)),
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
@@ -1824,7 +1820,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     )?;
     if !source_status.clean {
         return Err(fail_merge_stage(
-            &app,
+            state,
             &project_id,
             &worktree_id,
             &mut stages,
@@ -1837,14 +1833,14 @@ pub(crate) async fn local_merge_workbench_worktree(
             .clone()
             .or(source_status.branch)
             .ok_or_else(|| AppError::generic("当前 worktree 没有可合并的分支")),
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
         MERGE_STAGE_CHECK_SOURCE,
     )?;
     set_merge_stage(
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
@@ -1854,7 +1850,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     );
 
     set_merge_stage(
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
@@ -1864,14 +1860,14 @@ pub(crate) async fn local_merge_workbench_worktree(
     );
     let closed_sessions = stage_result(
         close_sessions_for_worktree(state, &row.project_id, &row.id).await,
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
         MERGE_STAGE_CLOSE_SESSIONS,
     )?;
     set_merge_stage(
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
@@ -1881,7 +1877,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     );
 
     set_merge_stage(
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
@@ -1892,7 +1888,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     let main_path = Path::new(&main.path);
     let main_status = stage_result(
         workbench_git::status(main_path),
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
@@ -1900,7 +1896,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     )?;
     if !main_status.clean {
         return Err(fail_merge_stage(
-            &app,
+            state,
             &project_id,
             &worktree_id,
             &mut stages,
@@ -1910,7 +1906,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     }
     let merge_outcome = stage_result(
         workbench_git::merge_branch(main_path, &branch),
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
@@ -1919,7 +1915,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     match merge_outcome {
         workbench_git::MergeBranchOutcome::Merged => {
             set_merge_stage(
-                &app,
+                state,
                 &project_id,
                 &worktree_id,
                 &mut stages,
@@ -1928,7 +1924,7 @@ pub(crate) async fn local_merge_workbench_worktree(
                 "主工作区 merge 已完成",
             );
             set_merge_stage(
-                &app,
+                state,
                 &project_id,
                 &worktree_id,
                 &mut stages,
@@ -1939,7 +1935,7 @@ pub(crate) async fn local_merge_workbench_worktree(
         }
         workbench_git::MergeBranchOutcome::Conflicted => {
             set_merge_stage(
-                &app,
+                state,
                 &project_id,
                 &worktree_id,
                 &mut stages,
@@ -1948,7 +1944,7 @@ pub(crate) async fn local_merge_workbench_worktree(
                 "merge 出现冲突，进入自动解决阶段",
             );
             set_merge_stage(
-                &app,
+                state,
                 &project_id,
                 &worktree_id,
                 &mut stages,
@@ -1959,7 +1955,7 @@ pub(crate) async fn local_merge_workbench_worktree(
             if let Err(error) = resolve_merge_conflicts_with_claude(state, main_path).await {
                 let message = abort_merge_after_failed_resolution(main_path, &error);
                 return Err(fail_merge_stage(
-                    &app,
+                    state,
                     &project_id,
                     &worktree_id,
                     &mut stages,
@@ -1968,7 +1964,7 @@ pub(crate) async fn local_merge_workbench_worktree(
                 ));
             }
             set_merge_stage(
-                &app,
+                state,
                 &project_id,
                 &worktree_id,
                 &mut stages,
@@ -1980,7 +1976,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     }
 
     set_merge_stage(
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
@@ -1990,14 +1986,14 @@ pub(crate) async fn local_merge_workbench_worktree(
     );
     stage_result(
         cleanup_merged_worktree(state, &project, &row).await,
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
         MERGE_STAGE_CLEANUP,
     )?;
     set_merge_stage(
-        &app,
+        state,
         &project_id,
         &worktree_id,
         &mut stages,
@@ -2022,7 +2018,6 @@ pub(crate) async fn local_merge_workbench_worktree(
 ///     先解析 worktree 目标；Remote 先建立事件桥和项目映射，再调用远端 merge 并映射返回 worktreeId。
 pub(crate) async fn merge_workbench_worktree_for_state(
     state: &AppState,
-    app: AppHandle,
     worktree_id: String,
 ) -> Result<WorkbenchMergeResultDto, AppError> {
     match worktree_command_target(&worktree_id)? {
@@ -2038,7 +2033,7 @@ pub(crate) async fn merge_workbench_worktree_for_state(
             map_remote_merge_result_value(&context.device_id, value)
         }
         WorktreeCommandTarget::Local(local_worktree_id) => {
-            local_merge_workbench_worktree(app, state, local_worktree_id).await
+            local_merge_workbench_worktree(state, local_worktree_id).await
         }
     }
 }
@@ -2049,14 +2044,13 @@ pub(crate) async fn merge_workbench_worktree_for_state(
 ///     桌面端 Merge 按钮需要合并本机或远端项目 worktree，并接收阶段进度。
 ///
 /// Code Logic（这个命令做什么）:
-///     Tauri command 只解包 AppHandle/State，再委托 for_state helper。
+///     Tauri command 只解包 State，再委托 for_state helper。
 #[tauri::command]
 pub async fn merge_workbench_worktree(
-    app: AppHandle,
     state: State<'_, AppState>,
     worktree_id: String,
 ) -> Result<WorkbenchMergeResultDto, AppError> {
-    merge_workbench_worktree_for_state(state.inner(), app, worktree_id).await
+    merge_workbench_worktree_for_state(state.inner(), worktree_id).await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2097,7 +2091,7 @@ fn initial_merge_stages() -> Vec<WorkbenchMergeStageDto> {
 /// Code Logic（这个函数做什么）:
 ///     更新本地 stages 中对应项，并 emit `workbench:merge-progress` 事件；emit 失败只记录日志，不中断 merge。
 fn set_merge_stage(
-    app: &AppHandle,
+    state: &AppState,
     project_id: &str,
     worktree_id: &str,
     stages: &mut [WorkbenchMergeStageDto],
@@ -2117,17 +2111,15 @@ fn set_merge_stage(
         worktree_id: worktree_id.to_string(),
         stage: stage.clone(),
     };
-    publish_workbench_remote_event(
-        app,
+    publish_workbench_remote_event_from_state(
+        state,
         WorkbenchRemoteEvent::MergeProgress(WorkbenchMergeProgressPayload {
             project_id: project_id.to_string(),
             worktree_id: worktree_id.to_string(),
             stage: serde_json::to_value(stage.clone()).unwrap_or(Value::Null),
         }),
     );
-    if let Err(error) = app.emit("workbench:merge-progress", event) {
-        tracing::warn!("发送 Workbench merge 进度事件失败: {error}");
-    }
+    state.emit_event("workbench:merge-progress", event);
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2137,13 +2129,14 @@ fn set_merge_stage(
 ///     将 Result::Err 映射为 fail_merge_stage，Result::Ok 原样返回。
 fn stage_result<T>(
     result: Result<T, AppError>,
-    app: &AppHandle,
+    state: &AppState,
     project_id: &str,
     worktree_id: &str,
     stages: &mut [WorkbenchMergeStageDto],
     stage_id: &str,
 ) -> Result<T, AppError> {
-    result.map_err(|error| fail_merge_stage(app, project_id, worktree_id, stages, stage_id, error))
+    result
+        .map_err(|error| fail_merge_stage(state, project_id, worktree_id, stages, stage_id, error))
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2152,7 +2145,7 @@ fn stage_result<T>(
 /// Code Logic（这个函数做什么）:
 ///     把 stage 标记为 failed 并返回原 AppError，保持命令错误语义不变。
 fn fail_merge_stage(
-    app: &AppHandle,
+    state: &AppState,
     project_id: &str,
     worktree_id: &str,
     stages: &mut [WorkbenchMergeStageDto],
@@ -2161,7 +2154,7 @@ fn fail_merge_stage(
 ) -> AppError {
     let message = error.to_string();
     set_merge_stage(
-        app,
+        state,
         project_id,
         worktree_id,
         stages,
@@ -3069,10 +3062,9 @@ pub async fn preview_workbench_html_asset(
 ///     先从 SQLite 按需恢复缺失会话，再合并持久化列表和 registry 实时状态返回。
 pub(crate) async fn local_list_workbench_sessions(
     state: &AppState,
-    app_handle: AppHandle,
     project_id: Option<String>,
 ) -> Result<Vec<WorkbenchSessionDto>, AppError> {
-    restore_persisted_sessions(state, app_handle, project_id.as_deref()).await?;
+    restore_persisted_sessions(state, project_id.as_deref()).await?;
     merged_session_dtos(state, project_id.as_deref()).await
 }
 
@@ -3085,7 +3077,6 @@ pub(crate) async fn local_list_workbench_sessions(
 ///     project_id 指向 remote shortcut 时先建立事件桥与项目映射，再转发到远端并映射 session/worktree id；否则调用本地 helper。
 pub(crate) async fn list_workbench_sessions_for_state(
     state: &AppState,
-    app_handle: AppHandle,
     project_id: Option<String>,
 ) -> Result<Vec<WorkbenchSessionDto>, AppError> {
     if let Some(project_id_value) = project_id.as_deref() {
@@ -3103,7 +3094,7 @@ pub(crate) async fn list_workbench_sessions_for_state(
             ));
         }
     }
-    local_list_workbench_sessions(state, app_handle, project_id).await
+    local_list_workbench_sessions(state, project_id).await
 }
 
 /// 列出工作台终端会话。
@@ -3112,14 +3103,13 @@ pub(crate) async fn list_workbench_sessions_for_state(
 ///     桌面端需要按项目查看本机或远端 terminal window。
 ///
 /// Code Logic（这个命令做什么）:
-///     Tauri command 解包 State/AppHandle 后委托 for_state helper。
+///     Tauri command 解包 State 后委托 for_state helper。
 #[tauri::command]
 pub async fn list_workbench_sessions(
     state: State<'_, AppState>,
-    app_handle: AppHandle,
     project_id: Option<String>,
 ) -> Result<Vec<WorkbenchSessionDto>, AppError> {
-    list_workbench_sessions_for_state(state.inner(), app_handle, project_id).await
+    list_workbench_sessions_for_state(state.inner(), project_id).await
 }
 
 /// 在项目目录中创建一个普通 PTY 终端会话。
@@ -3132,7 +3122,6 @@ pub async fn list_workbench_sessions(
 ///     并通过 Tauri event 推送输出与状态。
 pub(crate) async fn local_create_workbench_session(
     state: &AppState,
-    app_handle: AppHandle,
     project_id: String,
     worktree_id: Option<String>,
     initial_cols: Option<u16>,
@@ -3141,7 +3130,7 @@ pub(crate) async fn local_create_workbench_session(
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let row = state.workbench_sessions.create(
-        app_handle,
+        state.clone(),
         project,
         worktree.path.clone(),
         Some(worktree.id.clone()),
@@ -3189,7 +3178,6 @@ pub(crate) async fn replay_workbench_session_for_state(
 ///     remote 项目恢复远端 local projectId，剥离 remote worktreeId 后调用远端 create-session 并映射 DTO。
 pub(crate) async fn create_workbench_session_for_state(
     state: &AppState,
-    app_handle: AppHandle,
     project_id: String,
     worktree_id: Option<String>,
     initial_cols: Option<u16>,
@@ -3216,15 +3204,7 @@ pub(crate) async fn create_workbench_session_for_state(
             .next()
             .ok_or_else(|| AppError::generic("远端 session 创建结果为空"));
     }
-    local_create_workbench_session(
-        state,
-        app_handle,
-        project_id,
-        worktree_id,
-        initial_cols,
-        initial_rows,
-    )
-    .await
+    local_create_workbench_session(state, project_id, worktree_id, initial_cols, initial_rows).await
 }
 
 /// 在项目目录中创建一个普通 PTY 终端会话。
@@ -3233,11 +3213,10 @@ pub(crate) async fn create_workbench_session_for_state(
 ///     桌面端需要在本机或远端项目中创建 terminal window。
 ///
 /// Code Logic（这个命令做什么）:
-///     Tauri command 解包 State/AppHandle 后委托 for_state helper。
+///     Tauri command 解包 State 后委托 for_state helper。
 #[tauri::command]
 pub async fn create_workbench_session(
     state: State<'_, AppState>,
-    app_handle: AppHandle,
     project_id: String,
     worktree_id: Option<String>,
     initial_cols: Option<u16>,
@@ -3245,7 +3224,6 @@ pub async fn create_workbench_session(
 ) -> Result<WorkbenchSessionDto, AppError> {
     create_workbench_session_for_state(
         state.inner(),
-        app_handle,
         project_id,
         worktree_id,
         initial_cols,
@@ -4245,7 +4223,8 @@ pub(crate) async fn search_claude_sessions_for_state(
     let project = get_project(state, project_id).await?;
     if project.kind == "remote" {
         let context = ensure_remote_project_context(state, &project).await?;
-        let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id.map(str::to_string))?;
+        let inner_worktree_id =
+            remote_inner_worktree_id(&context.device_id, worktree_id.map(str::to_string))?;
         ensure_remote_event_bridge_for_context(state, &context);
         let req = RemoteSearchClaudeSessionsReq {
             project_id: context.inner_project_id.clone(),
@@ -4277,7 +4256,8 @@ pub async fn search_claude_sessions(
     worktree_id: Option<String>,
     query: String,
 ) -> Result<Vec<SessionSearchHit>, AppError> {
-    search_claude_sessions_for_state(state.inner(), &project_id, worktree_id.as_deref(), &query).await
+    search_claude_sessions_for_state(state.inner(), &project_id, worktree_id.as_deref(), &query)
+        .await
 }
 
 /// 读取单个 Claude session 的 preview 详情。
@@ -4298,7 +4278,8 @@ pub(crate) async fn get_claude_session_preview_for_state(
     let project = get_project(state, project_id).await?;
     if project.kind == "remote" {
         let context = ensure_remote_project_context(state, &project).await?;
-        let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id.map(str::to_string))?;
+        let inner_worktree_id =
+            remote_inner_worktree_id(&context.device_id, worktree_id.map(str::to_string))?;
         ensure_remote_event_bridge_for_context(state, &context);
         let req = RemoteClaudeSessionReq {
             project_id: context.inner_project_id.clone(),
@@ -4359,7 +4340,6 @@ pub async fn get_claude_session_preview(
 ///     `remote:<device_id>:<inner_session_id>` 返回。
 pub(crate) async fn resume_claude_session_for_state(
     state: &AppState,
-    app_handle: AppHandle,
     project_id: &str,
     worktree_id: Option<&str>,
     session_id: &str,
@@ -4367,7 +4347,8 @@ pub(crate) async fn resume_claude_session_for_state(
     let project = get_project(state, project_id).await?;
     if project.kind == "remote" {
         let context = ensure_remote_project_context(state, &project).await?;
-        let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id.map(str::to_string))?;
+        let inner_worktree_id =
+            remote_inner_worktree_id(&context.device_id, worktree_id.map(str::to_string))?;
         ensure_remote_event_bridge_for_context(state, &context);
         let req = RemoteClaudeSessionReq {
             project_id: context.inner_project_id.clone(),
@@ -4400,7 +4381,6 @@ pub(crate) async fn resume_claude_session_for_state(
     // 在该 worktree 新建一个 workbench terminal
     let new_session = local_create_workbench_session(
         state,
-        app_handle,
         project_id.to_string(),
         worktree_id.map(str::to_string),
         Some(120),
@@ -4426,18 +4406,16 @@ pub(crate) async fn resume_claude_session_for_state(
 ///     桌面端选中搜索结果后需要一键 resume 本机或远端历史会话。
 ///
 /// Code Logic（这个命令做什么）:
-///     Tauri command 解包 State/AppHandle 后委托 for_state helper。
+///     Tauri command 解包 State 后委托 for_state helper。
 #[tauri::command]
 pub async fn resume_claude_session(
     state: State<'_, AppState>,
-    app_handle: AppHandle,
     project_id: String,
     worktree_id: Option<String>,
     session_id: String,
 ) -> Result<ResumeClaudeSessionResult, AppError> {
     resume_claude_session_for_state(
         state.inner(),
-        app_handle,
         &project_id,
         worktree_id.as_deref(),
         &session_id,

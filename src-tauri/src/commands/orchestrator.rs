@@ -27,7 +27,7 @@ use crate::workbench::remote_ids::{parse_remote_entity_id, remote_entity_id};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, State};
+use tauri::State;
 use uuid::Uuid;
 
 const RUNTIME_TASK_SUMMARY_LIMIT: i64 = 6;
@@ -305,9 +305,7 @@ async fn refresh_task_after_create_action(
     }
 
     let task_id = row.id.clone();
-    if let Err(err) =
-        crate::orchestrator::scheduler::dispatch_once(state, state.app_handle.clone()).await
-    {
+    if let Err(err) = crate::orchestrator::scheduler::dispatch_once(state).await {
         tracing::warn!(
             task_id = %task_id,
             error = %err,
@@ -866,11 +864,8 @@ pub(crate) fn ensure_reviewed_delivery_allowed(
 ///
 /// Code Logic（这个函数做什么）:
 ///     调用 scheduler::dispatch_once；成功返回 dispatched 数量，失败仅记录 warn 并返回 0。
-pub(crate) async fn dispatch_orchestrator_best_effort(
-    state: &AppState,
-    app_handle: AppHandle,
-) -> usize {
-    match crate::orchestrator::scheduler::dispatch_once(state, app_handle).await {
+pub(crate) async fn dispatch_orchestrator_best_effort(state: &AppState) -> usize {
+    match crate::orchestrator::scheduler::dispatch_once(state).await {
         Ok(dispatched) => dispatched,
         Err(err) => {
             tracing::warn!(error = %err, "Orchestrator 显式刷新调度失败");
@@ -889,9 +884,7 @@ async fn reject_pending_remote_task_action(
     task_id: &str,
 ) -> Result<(), AppError> {
     if repo.get_remote_outbox_item(task_id).await?.is_some() {
-        return Err(AppError::generic(
-            "远端待发送任务尚未创建，不能执行该动作",
-        ));
+        return Err(AppError::generic("远端待发送任务尚未创建，不能执行该动作"));
     }
     Ok(())
 }
@@ -1313,11 +1306,9 @@ async fn mark_active_running_attempt_completed(
 ///     构造 AppDeliveryContext 调用 delivery::deliver_task；成功返回 summary.task，失败时条件 Block 当前 Delivering 任务。
 pub(crate) async fn run_delivery_for_task(
     state: &AppState,
-    app_handle: AppHandle,
     task_id: &str,
 ) -> Result<OrchestratorTaskDto, AppError> {
-    let delivery_context =
-        crate::orchestrator::delivery::AppDeliveryContext::new(state, app_handle);
+    let delivery_context = crate::orchestrator::delivery::AppDeliveryContext::new(state);
     match crate::orchestrator::delivery::deliver_task(&delivery_context, task_id).await {
         Ok(summary) => {
             tracing::debug!(task_id = %task_id, stages = ?summary.stages, "Orchestrator 自动交付完成");
@@ -1433,7 +1424,6 @@ async fn block_task_with_repair_runner_error(
 ///     准备失败时按 runner failure 语义条件阻塞。
 async fn start_repair_runner_for_failed_review(
     state: &AppState,
-    app_handle: AppHandle,
     task_id: &str,
     review: &VerifierReview,
 ) -> Result<OrchestratorTaskDto, AppError> {
@@ -1453,7 +1443,7 @@ async fn start_repair_runner_for_failed_review(
         verifier_reason: &review.reason,
         repair_prompt,
     };
-    match prepare_repair_runner(state, app_handle, &repair_transition.task, repair_context).await {
+    match prepare_repair_runner(state, &repair_transition.task, repair_context).await {
         Ok(task) => Ok(OrchestratorTaskDto::from(task)),
         Err(err) => block_task_with_repair_runner_error(state, task_id, err).await,
     }
@@ -1594,7 +1584,6 @@ pub async fn create_orchestrator_task_view(
 #[tauri::command]
 pub async fn start_orchestrator_task_view(
     state: State<'_, AppState>,
-    app_handle: AppHandle,
     project_id: String,
     task_id: String,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
@@ -1603,7 +1592,7 @@ pub async fn start_orchestrator_task_view(
         get_local_project_task_for_action(state.orchestrator_repo.as_ref(), &project_id, &task_id)
             .await?;
         let started = state.orchestrator_repo.start_task(&task_id).await?;
-        dispatch_orchestrator_best_effort(state.inner(), app_handle).await;
+        dispatch_orchestrator_best_effort(state.inner()).await;
         let latest = state.orchestrator_repo.get_task(&started.id).await?;
         return Ok(local_task_view(latest));
     }
@@ -1667,7 +1656,6 @@ pub async fn request_orchestrator_task_rework_view(
 #[tauri::command]
 pub async fn deliver_reviewed_orchestrator_task_view(
     state: State<'_, AppState>,
-    app_handle: AppHandle,
     project_id: String,
     task_id: String,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
@@ -1686,7 +1674,7 @@ pub async fn deliver_reviewed_orchestrator_task_view(
             .orchestrator_repo
             .start_delivery_from_human_review(&task_id)
             .await?;
-        let delivered = run_delivery_for_task(state.inner(), app_handle, &delivering.id).await?;
+        let delivered = run_delivery_for_task(state.inner(), &delivering.id).await?;
         return Ok(OrchestratorTaskViewDto::Local { task: delivered });
     }
     reject_pending_remote_task_action(state.orchestrator_repo.as_ref(), &task_id).await?;
@@ -1694,9 +1682,7 @@ pub async fn deliver_reviewed_orchestrator_task_view(
         state.inner(),
         &project,
         &task_id,
-        |client, base_url, id| async move {
-            client.deliver_reviewed_task(&base_url, &id).await
-        },
+        |client, base_url, id| async move { client.deliver_reviewed_task(&base_url, &id).await },
     )
     .await
 }
@@ -1744,12 +1730,11 @@ pub async fn cancel_orchestrator_task_view(
 #[tauri::command]
 pub async fn refresh_orchestrator_project(
     state: State<'_, AppState>,
-    app_handle: AppHandle,
     project_id: String,
 ) -> Result<OrchestratorProjectRefreshDto, AppError> {
     let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
     if project.kind != "remote" {
-        let dispatched = dispatch_orchestrator_best_effort(state.inner(), app_handle).await;
+        let dispatched = dispatch_orchestrator_best_effort(state.inner()).await;
         return Ok(OrchestratorProjectRefreshDto {
             project_id,
             dispatched,
@@ -2092,10 +2077,8 @@ pub async fn queue_orchestrator_task(
 #[tauri::command]
 pub async fn dispatch_orchestrator_once(
     state: State<'_, AppState>,
-    app_handle: AppHandle,
 ) -> Result<serde_json::Value, AppError> {
-    let dispatched =
-        crate::orchestrator::scheduler::dispatch_once(state.inner(), app_handle).await?;
+    let dispatched = crate::orchestrator::scheduler::dispatch_once(state.inner()).await?;
     Ok(build_dispatch_once_response(dispatched))
 }
 
@@ -2109,10 +2092,9 @@ pub async fn dispatch_orchestrator_once(
 #[tauri::command]
 pub async fn complete_orchestrator_agent_run(
     state: State<'_, AppState>,
-    app_handle: AppHandle,
     task_id: String,
 ) -> Result<OrchestratorTaskDto, AppError> {
-    complete_orchestrator_agent_run_for_state(state.inner(), app_handle, &task_id).await
+    complete_orchestrator_agent_run_for_state(state.inner(), &task_id).await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2124,7 +2106,6 @@ pub async fn complete_orchestrator_agent_run(
 ///     随后立即调用 delivery pipeline，返回最终 Done 或 Blocked 任务 DTO。
 pub(crate) async fn complete_orchestrator_agent_run_for_state(
     state: &AppState,
-    app_handle: AppHandle,
     task_id: &str,
 ) -> Result<OrchestratorTaskDto, AppError> {
     let task = state
@@ -2137,7 +2118,7 @@ pub(crate) async fn complete_orchestrator_agent_run_for_state(
         )
         .await?;
 
-    complete_orchestrator_agent_run_after_verifying_transition(state, app_handle, task).await
+    complete_orchestrator_agent_run_after_verifying_transition(state, task).await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2147,7 +2128,6 @@ pub(crate) async fn complete_orchestrator_agent_run_for_state(
 ///     用 task_id + expected attempt + expected session 原子校验 Running runner 后切到 Verifying；未命中时返回当前任务 no-op。
 pub(crate) async fn complete_orchestrator_agent_run_for_attempt(
     state: &AppState,
-    app_handle: AppHandle,
     task_id: &str,
     attempt: i64,
     session_id: &str,
@@ -2161,7 +2141,7 @@ pub(crate) async fn complete_orchestrator_agent_run_for_attempt(
         return Ok(OrchestratorTaskDto::from(current));
     };
 
-    complete_orchestrator_agent_run_after_verifying_transition(state, app_handle, task).await
+    complete_orchestrator_agent_run_after_verifying_transition(state, task).await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2172,7 +2152,6 @@ pub(crate) async fn complete_orchestrator_agent_run_for_attempt(
 ///     非零验证输出交给 verifier Claude 裁决，passed=true 进入 delivery，passed=false 回 Preparing 启动修复 runner。
 async fn complete_orchestrator_agent_run_after_verifying_transition(
     state: &AppState,
-    app_handle: AppHandle,
     task: OrchestratorTaskRow,
 ) -> Result<OrchestratorTaskDto, AppError> {
     if let Err(err) =
@@ -2344,10 +2323,10 @@ async fn complete_orchestrator_agent_run_after_verifying_transition(
         if !delivery_transition.transitioned {
             return Ok(OrchestratorTaskDto::from(delivery_transition.task));
         }
-        return run_delivery_for_task(state, app_handle, &delivery_transition.task.id).await;
+        return run_delivery_for_task(state, &delivery_transition.task.id).await;
     }
 
-    start_repair_runner_for_failed_review(state, app_handle, &task.id, &review).await
+    start_repair_runner_for_failed_review(state, &task.id, &review).await
 }
 
 /// 重试阻塞的 Orchestrator 任务。

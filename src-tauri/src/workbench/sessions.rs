@@ -5,16 +5,17 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     使用 portable-pty 创建 PTY；macOS/Linux 原生 tmux、Windows WSL tmux 可承载真实 shell 上下文，应用重启后重新 attach。
-//!     内存保存运行期句柄，通过 Tauri event 推送终端输出和状态变化。
+//!     内存保存运行期句柄，通过后端 UI adapter 推送终端输出和状态变化。
 
 #![allow(dead_code)]
 
 use crate::error::AppError;
+use crate::state::AppState;
 use crate::workbench::dependencies::{available_tmux_command, TmuxCommand};
 use crate::workbench::models::{WorkbenchProjectRow, WorkbenchSessionDto, WorkbenchSessionRow};
 use crate::workbench::remote_events::{
-    publish_workbench_remote_event, WorkbenchRemoteEvent, WorkbenchTerminalOutputPayload,
-    WorkbenchTerminalStatusPayload,
+    publish_workbench_remote_event_from_state, WorkbenchRemoteEvent,
+    WorkbenchTerminalOutputPayload, WorkbenchTerminalStatusPayload,
 };
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
@@ -25,7 +26,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
 
 const DEFAULT_COLS: u16 = 98;
 const DEFAULT_ROWS: u16 = 32;
@@ -180,7 +180,7 @@ impl TerminalUtf8Decoder {
 /// 工作台终端会话 replay 快照。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     移动端首次打开终端时无法收到历史 Tauri event，需要通过 HTTP 拉取最近输出后再接增量事件。
+///     移动端首次打开终端时无法收到历史 live event，需要通过 HTTP 拉取最近输出后再接增量事件。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     以 camelCase 序列化 sessionId、最近输出 buffer、是否截断和最后 seq，供 Rust route 与前端类型对齐。
@@ -1269,7 +1269,7 @@ impl WorkbenchSessionRegistry {
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
-        app: AppHandle,
+        state: AppState,
         project: WorkbenchProjectRow,
         cwd: String,
         worktree_id: Option<String>,
@@ -1348,7 +1348,7 @@ impl WorkbenchSessionRegistry {
             updated_at: chrono::Utc::now().to_rfc3339(),
         };
 
-        self.spawn_row(app, row)
+        self.spawn_row(state, row)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1358,7 +1358,7 @@ impl WorkbenchSessionRegistry {
     ///     根据持久化 row.backend 恢复 tmux session，必要时把旧 session 改名为可读名称；失败则回退普通 PTY，然后用 row.cwd 启动 reader/exit watcher。
     pub fn restore(
         &self,
-        app: AppHandle,
+        state: AppState,
         project: WorkbenchProjectRow,
         mut row: WorkbenchSessionRow,
         worktree_name: Option<String>,
@@ -1444,7 +1444,7 @@ impl WorkbenchSessionRegistry {
         row.exited_at = None;
         row.exit_code = None;
         row.updated_at = chrono::Utc::now().to_rfc3339();
-        self.spawn_row(app, row)
+        self.spawn_row(state, row)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1454,7 +1454,7 @@ impl WorkbenchSessionRegistry {
     ///     用 row 中的命令/后端信息构造 CommandBuilder，spawn 子进程并写入内存 registry。
     fn spawn_row(
         &self,
-        app: AppHandle,
+        state: AppState,
         row: WorkbenchSessionRow,
     ) -> Result<WorkbenchSessionRow, AppError> {
         let session_id = row.id.clone();
@@ -1499,14 +1499,14 @@ impl WorkbenchSessionRegistry {
             .insert(session_id.clone(), handle.clone());
         self.ensure_replay_buffer(&session_id);
 
-        emit_status(&app, &session_id, "running", None);
+        emit_status(&state, &session_id, "running", None);
         spawn_reader_thread(
-            app.clone(),
+            state.clone(),
             session_id.clone(),
             reader,
             self.replay_buffers.clone(),
         );
-        spawn_exit_watcher(app, self.sessions.clone(), session_id.clone(), handle);
+        spawn_exit_watcher(state, self.sessions.clone(), session_id.clone(), handle);
 
         Ok(row)
     }
@@ -1924,7 +1924,7 @@ impl Default for WorkbenchSessionRegistry {
 /// Code Logic（这个函数做什么）:
 ///     在后台线程循环读取 reader，把每个字节块转换为 UTF-8 lossless chunk 后写入 replay buffer 并 emit。
 fn spawn_reader_thread(
-    app: AppHandle,
+    state: AppState,
     session_id: String,
     mut reader: Box<dyn Read + Send>,
     replay_buffers: Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
@@ -1938,7 +1938,7 @@ fn spawn_reader_thread(
                 Ok(0) => break,
                 Ok(n) => {
                     emit_terminal_output(
-                        &app,
+                        &state,
                         &session_id,
                         &mut seq,
                         decoder.decode(&buf[..n]),
@@ -1952,7 +1952,7 @@ fn spawn_reader_thread(
             }
         }
         if let Some(chunk) = decoder.finish() {
-            emit_terminal_output(&app, &session_id, &mut seq, chunk, &replay_buffers);
+            emit_terminal_output(&state, &session_id, &mut seq, chunk, &replay_buffers);
         }
     });
 }
@@ -1961,9 +1961,9 @@ fn spawn_reader_thread(
 ///     终端输出事件需要统一递增 seq，且纯 pending chunk 未完成时不应发送空事件。
 ///
 /// Code Logic（这个函数做什么）:
-///     非空 chunk 才递增 seq、写入 replay buffer，并构造 `TerminalOutputEvent` 通过 `workbench:terminal-output` emit。
+///     非空 chunk 才递增 seq、写入 replay buffer，并构造 `TerminalOutputEvent` 通过后端 UI adapter emit。
 fn emit_terminal_output(
-    app: &AppHandle,
+    state: &AppState,
     session_id: &str,
     seq: &mut u64,
     chunk: String,
@@ -1987,12 +1987,13 @@ fn emit_terminal_output(
         seq: *seq,
         ts: now_millis(),
     };
-    publish_workbench_remote_event(app, WorkbenchRemoteEvent::TerminalOutput(event.clone()));
-    if let Err(error) = app.emit("workbench:terminal-output", event.clone()) {
-        tracing::warn!("发送工作台终端输出事件失败: {error}");
-    }
-    crate::orchestrator::completion::spawn_maybe_handle_session_output(
-        app.clone(),
+    publish_workbench_remote_event_from_state(
+        state,
+        WorkbenchRemoteEvent::TerminalOutput(event.clone()),
+    );
+    state.emit_event("workbench:terminal-output", event.clone());
+    crate::orchestrator::completion::spawn_maybe_handle_session_output_for_state(
+        state.clone(),
         session_id.to_string(),
         event.chunk.clone(),
     );
@@ -2004,7 +2005,7 @@ fn emit_terminal_output(
 /// Code Logic（这个函数做什么）:
 ///     后台线程短轮询 child.try_wait，退出时更新 DTO 并 emit exited 状态事件。
 fn spawn_exit_watcher(
-    app: AppHandle,
+    state: AppState,
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>>,
     session_id: String,
     handle: Arc<Mutex<WorkbenchSessionHandle>>,
@@ -2034,13 +2035,13 @@ fn spawn_exit_watcher(
                     handle.row.exited_at = Some(chrono::Utc::now().to_rfc3339());
                     handle.row.exit_code = Some(exit_code);
                     handle.row.updated_at = chrono::Utc::now().to_rfc3339();
-                    emit_status(&app, &session_id, "exited", Some(exit_code));
+                    emit_status(&state, &session_id, "exited", Some(exit_code));
                 }
                 break;
             }
             Some(Err(error)) => {
                 tracing::warn!("查询工作台终端退出状态失败: {error}");
-                emit_status(&app, &session_id, "disconnected", None);
+                emit_status(&state, &session_id, "disconnected", None);
                 break;
             }
             None => thread::sleep(Duration::from_millis(200)),
@@ -2052,18 +2053,19 @@ fn spawn_exit_watcher(
 ///     会话创建、退出和断开都需要以统一事件格式通知前端。
 ///
 /// Code Logic（这个函数做什么）:
-///     构造 `TerminalStatusEvent` 并通过 `workbench:terminal-status` 发送。
-fn emit_status(app: &AppHandle, session_id: &str, status: &str, exit_code: Option<i32>) {
+///     构造 `TerminalStatusEvent` 并通过后端 UI adapter 发送。
+fn emit_status(state: &AppState, session_id: &str, status: &str, exit_code: Option<i32>) {
     let event = WorkbenchTerminalStatusPayload {
         session_id: session_id.to_string(),
         status: status.to_string(),
         exit_code,
         ts: now_millis(),
     };
-    publish_workbench_remote_event(app, WorkbenchRemoteEvent::TerminalStatus(event.clone()));
-    if let Err(error) = app.emit("workbench:terminal-status", event) {
-        tracing::warn!("发送工作台终端状态事件失败: {error}");
-    }
+    publish_workbench_remote_event_from_state(
+        state,
+        WorkbenchRemoteEvent::TerminalStatus(event.clone()),
+    );
+    state.emit_event("workbench:terminal-status", event);
 }
 
 /// Business Logic（为什么需要这个函数）:

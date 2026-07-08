@@ -15,7 +15,7 @@ use crate::error::AppError;
 use crate::models::transfer::TransferTaskDto;
 use crate::state::AppState;
 use crate::transfer::sender;
-use tauri::{AppHandle, State};
+use tauri::State;
 
 /// 列出全部传输任务（活跃 + 历史），按创建时间倒序。
 ///
@@ -49,16 +49,11 @@ pub async fn list_transfers(state: State<'_, AppState>) -> Result<Vec<TransferTa
 #[tauri::command]
 pub async fn send_transfer(
     state: State<'_, AppState>,
-    app_handle: AppHandle,
     device_id: String,
     file_path: String,
 ) -> Result<serde_json::Value, AppError> {
-    let transfer_id = sender::start_sending(
-        state.inner().clone(),
-        app_handle,
-        device_id.clone(),
-        file_path.clone(),
-    )?;
+    let transfer_id =
+        sender::start_sending(state.inner().clone(), device_id.clone(), file_path.clone())?;
     tracing::info!("已发起传输任务 {transfer_id} → {device_id}");
     Ok(serde_json::json!({
         "accepted": true,

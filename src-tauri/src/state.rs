@@ -31,7 +31,6 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, RwLock};
 use tauri::async_runtime::JoinHandle;
-use tauri::AppHandle;
 use tauri_plugin_updater::Update;
 
 /// 应用全局共享状态。Clone 仅增加 Arc 引用计数。
@@ -65,9 +64,6 @@ pub struct AppState {
     pub transfers: Arc<TransferRegistry>,
     /// 后端 UI adapter（GUI 使用 Tauri，headless 使用 filesystem/no-op）
     pub ui: Arc<dyn BackendUi>,
-    /// Tauri AppHandle 兼容字段：Task 3/4 会继续替换 Workbench/Orchestrator/transfer 中的 raw AppHandle 调用
-    #[allow(dead_code)]
-    pub app_handle: AppHandle,
     /// M8 更新下载状态机（status/progress/error/filePath/url/filename/size），对齐前端 UpdateDownloadStatus，
     /// 前端 get_download_status 轮询读取
     pub update_status: Arc<RwLock<crate::commands::updater::UpdateDownloadStatus>>,

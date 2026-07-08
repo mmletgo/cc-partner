@@ -17,7 +17,6 @@ use crate::workbench::models::WorkbenchProjectRow;
 use crate::workbench::remote_client::RemoteWorkbenchClient;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
 
 const REMOTE_OUTBOX_DISPATCH_INTERVAL_SECS: u64 = 10;
@@ -336,10 +335,7 @@ pub async fn dispatch_remote_outbox_once(state: &AppState) -> Result<usize, AppE
 ///
 /// Code Logic（这个函数做什么）:
 ///     创建 CancellationToken 并启动 tauri async task，按固定 interval 调用 dispatch_remote_outbox_once。
-pub fn start_orchestrator_remote_outbox_dispatcher(
-    _app_handle: AppHandle,
-    state: AppState,
-) -> CancellationToken {
+pub fn start_orchestrator_remote_outbox_dispatcher(state: AppState) -> CancellationToken {
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
     tauri::async_runtime::spawn(async move {

@@ -6,7 +6,7 @@
 //!     emit 进度/完成/失败/取消事件 → 写 transfer_history。对照 Python `transfer/sender.py`。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `start_sending(state, app_handle, device_id, file_path)`：在调用方线程内 spawn 异步任务，
+//!     - `start_sending(state, device_id, file_path)`：在调用方线程内 spawn 异步任务，
 //!       立即返回 transfer_id（命令层 send_transfer 用）。
 //!     - spawn 内：查 devices 拿对端 host:port → 算 SHA256 → registry.add(task) → emit pending →
 //!       transfer_init 拿 resume_offset → 循环分块读 + transfer_chunk（body=bytes，header X-Chunk-Offset）→
@@ -25,7 +25,6 @@ use crate::transfer::CHUNK_SIZE;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -81,11 +80,10 @@ struct StatusPayload {
 /// Code Logic:
 ///     1. 校验文件存在并取 size/filename；
 ///     2. 生成 transfer_id（UUID），构造 TransferTask（status=Pending）；
-///     3. registry.add(task)；spawn 异步任务（持有 app_handle clone 与 cancel_token clone）；
+///     3. registry.add(task)；spawn 异步任务（持有 AppState clone 与 cancel_token clone）；
 ///     4. 任务内：init → 分块发送循环（检查 cancel）→ emit completed + 写历史 / emit failed。
 pub fn start_sending(
     state: AppState,
-    app_handle: AppHandle,
     device_id: String,
     file_path: String,
 ) -> Result<String, AppError> {
@@ -136,7 +134,6 @@ pub fn start_sending(
     tokio::spawn(async move {
         run_send_loop(
             state,
-            app_handle,
             registry,
             transfer_id.clone(),
             device_id,
@@ -157,7 +154,6 @@ pub fn start_sending(
 #[allow(clippy::too_many_arguments)]
 async fn run_send_loop(
     state: AppState,
-    app_handle: AppHandle,
     registry: TransferRegistry,
     transfer_id: String,
     device_id: String,
@@ -178,7 +174,6 @@ async fn run_send_loop(
             fail_transfer(
                 &state,
                 &registry,
-                &app_handle,
                 &transfer_id,
                 format!("对端设备不存在或离线: {device_id}"),
             )
@@ -210,7 +205,7 @@ async fn run_send_loop(
                     .and_then(|v| v.as_str())
                     .unwrap_or("对端拒绝接收文件")
                     .to_string();
-                fail_transfer(&state, &registry, &app_handle, &transfer_id, err).await;
+                fail_transfer(&state, &registry, &transfer_id, err).await;
                 return;
             }
             resp.get("resume_offset")
@@ -221,7 +216,6 @@ async fn run_send_loop(
             fail_transfer(
                 &state,
                 &registry,
-                &app_handle,
                 &transfer_id,
                 format!("连接对端失败: {e}"),
             )
@@ -232,12 +226,11 @@ async fn run_send_loop(
 
     // 标记 transferring，emit 首个进度（含 resume_offset）
     registry.update_progress(&transfer_id, resume_offset, TransferStatus::Transferring);
-    emit_progress(&app_handle, &transfer_id, resume_offset, file_size);
+    emit_progress(&state, &transfer_id, resume_offset, file_size);
 
     // 3) 分块发送循环
     let file_result = send_file_chunks(
         &state,
-        &app_handle,
         &registry,
         &base_url,
         &transfer_id,
@@ -259,7 +252,7 @@ async fn run_send_loop(
                 let _ = state.transfer_repo.record(&t).await;
             }
             registry.remove(&transfer_id);
-            let _ = app_handle.emit(
+            state.emit_event(
                 "transfer:completed",
                 StatusPayload {
                     id: transfer_id,
@@ -275,7 +268,7 @@ async fn run_send_loop(
                 let _ = state.transfer_repo.record(&t).await;
             }
             registry.remove(&transfer_id);
-            let _ = app_handle.emit(
+            state.emit_event(
                 "transfer:cancelled",
                 StatusPayload {
                     id: transfer_id,
@@ -285,7 +278,7 @@ async fn run_send_loop(
             );
         }
         Err(SendError::Failed(msg)) => {
-            fail_transfer(&state, &registry, &app_handle, &transfer_id, msg).await;
+            fail_transfer(&state, &registry, &transfer_id, msg).await;
         }
     }
 }
@@ -307,7 +300,6 @@ enum SendError {
 #[allow(clippy::too_many_arguments)]
 async fn send_file_chunks(
     state: &AppState,
-    app_handle: &AppHandle,
     registry: &TransferRegistry,
     base_url: &str,
     transfer_id: &str,
@@ -365,7 +357,7 @@ async fn send_file_chunks(
 
         offset += n as u64;
         registry.update_progress(transfer_id, offset, TransferStatus::Transferring);
-        emit_progress(app_handle, transfer_id, offset, file_size);
+        emit_progress(state, transfer_id, offset, file_size);
 
         // 让出调度，避免阻塞（对照 Python `await asyncio.sleep(0)`）
         tokio::task::yield_now().await;
@@ -375,13 +367,19 @@ async fn send_file_chunks(
 }
 
 /// emit 一次进度事件。
-fn emit_progress(app_handle: &AppHandle, id: &str, transferred: u64, size: u64) {
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI 和独立后端都需要共享同一套传输进度事件出口，避免 HTTP 接收路径依赖 GUI 句柄。
+///
+/// Code Logic（这个函数做什么）:
+///     计算进度比例并通过 AppState 后端 UI adapter 发布 `transfer:progress`。
+fn emit_progress(state: &AppState, id: &str, transferred: u64, size: u64) {
     let progress = if size == 0 {
         0.0
     } else {
         transferred as f64 / size as f64
     };
-    let _ = app_handle.emit(
+    state.emit_event(
         "transfer:progress",
         ProgressPayload {
             id: id.to_string(),
@@ -396,7 +394,6 @@ fn emit_progress(app_handle: &AppHandle, id: &str, transferred: u64, size: u64) 
 async fn fail_transfer(
     state: &AppState,
     registry: &TransferRegistry,
-    app_handle: &AppHandle,
     transfer_id: &str,
     error_msg: String,
 ) {
@@ -406,7 +403,7 @@ async fn fail_transfer(
         let _ = state.transfer_repo.record(&t).await;
     }
     registry.remove(transfer_id);
-    let _ = app_handle.emit(
+    state.emit_event(
         "transfer:failed",
         StatusPayload {
             id: transfer_id.to_string(),

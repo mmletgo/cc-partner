@@ -23,7 +23,6 @@ use crate::orchestrator::workflow::{resolve_project_workflow, PromptTaskContext}
 use crate::state::AppState;
 use std::path::Path;
 use std::time::Duration;
-use tauri::AppHandle;
 
 const TASK_BRANCH_PREFIX: &str = "agent";
 const TASK_BRANCH_MAX_LEN: usize = 80;
@@ -64,10 +63,9 @@ struct DevelopmentAttemptEvidence {
 ///     兼容旧 scheduler 调用点，转发到首轮 Runner 准备逻辑。
 pub async fn prepare_visible_runner(
     state: &AppState,
-    app_handle: AppHandle,
     task: &OrchestratorTaskRow,
 ) -> Result<OrchestratorTaskRow, AppError> {
-    prepare_initial_runner(state, app_handle, task).await
+    prepare_initial_runner(state, task).await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -77,11 +75,10 @@ pub async fn prepare_visible_runner(
 ///     根据任务当前 attempt/worktree 选择本次 runner attempt；prompt 由 prepare_runner_attempt 在 worktree 路径确定后生成。
 pub async fn prepare_initial_runner(
     state: &AppState,
-    app_handle: AppHandle,
     task: &OrchestratorTaskRow,
 ) -> Result<OrchestratorTaskRow, AppError> {
     let attempt = initial_runner_attempt(task)?;
-    prepare_runner_attempt(state, app_handle, task, String::new(), attempt).await
+    prepare_runner_attempt(state, task, String::new(), attempt).await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -92,7 +89,6 @@ pub async fn prepare_initial_runner(
 #[allow(dead_code)]
 pub async fn prepare_repair_runner(
     state: &AppState,
-    app_handle: AppHandle,
     task: &OrchestratorTaskRow,
     context: RepairPromptContext<'_>,
 ) -> Result<OrchestratorTaskRow, AppError> {
@@ -105,7 +101,7 @@ pub async fn prepare_repair_runner(
         .await?
         .ok_or_else(|| AppError::not_found(format!("任务 worktree 不存在: {worktree_id}")))?;
     let prompt = build_repair_task_prompt(task, &worktree.path, &context);
-    prepare_runner_attempt(state, app_handle, task, prompt, attempt).await
+    prepare_runner_attempt(state, task, prompt, attempt).await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -116,7 +112,6 @@ pub async fn prepare_repair_runner(
 ///     用 Preparing 条件更新任务 active runner 字段；写 attempt/terminal 前重读 active runner，避免 Abort 后仍启动旧 Claude。
 pub async fn prepare_runner_attempt(
     state: &AppState,
-    app_handle: AppHandle,
     task: &OrchestratorTaskRow,
     prompt: String,
     attempt: i64,
@@ -147,7 +142,6 @@ pub async fn prepare_runner_attempt(
     let worktree = prepare_worktree_for_attempt(state, task, &branch_name, attempt).await?;
     let session = local_create_workbench_session(
         state,
-        app_handle,
         task.project_id.clone(),
         Some(worktree.id.clone()),
         Some(DEFAULT_TERMINAL_COLS),

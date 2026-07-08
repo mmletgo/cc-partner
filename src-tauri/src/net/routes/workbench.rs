@@ -23,13 +23,13 @@ use crate::commands::workbench::{
     local_create_workbench_dir, local_create_workbench_file, local_create_workbench_session,
     local_create_workbench_worktree, local_delete_workbench_path, local_focus_workbench_session,
     local_get_workbench_path_info, local_get_workbench_worktree, local_list_workbench_dir,
-    local_list_workbench_git_commits, local_list_workbench_sessions, local_list_workbench_worktrees,
-    local_merge_workbench_worktree, local_open_workbench_file, local_preview_workbench_html_asset,
-    local_preview_workbench_sqlite, local_push_workbench_worktree, local_remove_workbench_worktree,
-    local_rename_workbench_path, local_rename_workbench_session, local_resize_workbench_session,
-    local_save_workbench_text_file, local_split_workbench_pane, local_switch_workbench_pane,
-    local_write_workbench_session_input, local_zoom_workbench_pane,
-    merge_workbench_worktree_for_state, open_workbench_file_for_state,
+    local_list_workbench_git_commits, local_list_workbench_sessions,
+    local_list_workbench_worktrees, local_merge_workbench_worktree, local_open_workbench_file,
+    local_preview_workbench_html_asset, local_preview_workbench_sqlite,
+    local_push_workbench_worktree, local_remove_workbench_worktree, local_rename_workbench_path,
+    local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_text_file,
+    local_split_workbench_pane, local_switch_workbench_pane, local_write_workbench_session_input,
+    local_zoom_workbench_pane, merge_workbench_worktree_for_state, open_workbench_file_for_state,
     push_workbench_worktree_for_state, remove_workbench_worktree_for_state,
     replay_workbench_session_for_state, resize_workbench_session_for_state,
     resume_claude_session_for_state, save_workbench_text_file_for_state,
@@ -48,6 +48,7 @@ use crate::workbench::browser_proxy::{
     proxy_workbench_browser_request, DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
     MOBILE_BROWSER_PROXY_ROUTE_PREFIX,
 };
+use crate::workbench::claude_sessions::{SessionPreview, SessionSearchHit};
 use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchHtmlAssetDto, WorkbenchOpenFileDto,
     WorkbenchPathInfo, WorkbenchProjectDto, WorkbenchProjectRow, WorkbenchRemoteDirectoryEntryDto,
@@ -57,15 +58,14 @@ use crate::workbench::models::{
 use crate::workbench::remote_directory;
 use crate::workbench::remote_protocol::{
     RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq,
-    RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq, RemoteFocusedSessionResp,
-    RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq, RemoteOpenFileReq,
-    RemotePathInfoReq, RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteProjectReq,
-    RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq,
-    RemoteReplaySessionReq, RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSearchClaudeSessionsReq,
-    RemoteSessionReq, RemoteSplitPaneReq, RemoteWorktreeReq, RemoteWriteSessionInputReq,
-    ResumeClaudeSessionResult,
+    RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq,
+    RemoteFocusedSessionResp, RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq,
+    RemoteOpenFileReq, RemotePathInfoReq, RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq,
+    RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq,
+    RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq, RemoteSaveTextReq,
+    RemoteSearchClaudeSessionsReq, RemoteSessionReq, RemoteSplitPaneReq, RemoteWorktreeReq,
+    RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
 };
-use crate::workbench::claude_sessions::{SessionPreview, SessionSearchHit};
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
@@ -403,7 +403,7 @@ pub async fn merge_worktree(
 ) -> Result<Json<WorkbenchMergeResultDto>, AppError> {
     ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id).await?;
     Ok(Json(
-        local_merge_workbench_worktree(state.app_handle.clone(), &state, req.worktree_id).await?,
+        local_merge_workbench_worktree(&state, req.worktree_id).await?,
     ))
 }
 
@@ -719,7 +719,7 @@ pub async fn list_workbench_sessions(
         ensure_remote_gateway_local_project_id(&state, project_id).await?;
     }
     Ok(Json(
-        local_list_workbench_sessions(&state, state.app_handle.clone(), req.project_id).await?,
+        local_list_workbench_sessions(&state, req.project_id).await?,
     ))
 }
 
@@ -738,7 +738,6 @@ pub async fn create_workbench_session(
     Ok(Json(
         local_create_workbench_session(
             &state,
-            state.app_handle.clone(),
             req.project_id,
             req.worktree_id,
             req.initial_cols,
@@ -1116,8 +1115,7 @@ pub async fn mobile_merge_worktree(
     Json(req): Json<RemoteWorktreeReq>,
 ) -> Result<Json<WorkbenchMergeResultDto>, AppError> {
     Ok(Json(
-        merge_workbench_worktree_for_state(&state, state.app_handle.clone(), req.worktree_id)
-            .await?,
+        merge_workbench_worktree_for_state(&state, req.worktree_id).await?,
     ))
 }
 
@@ -1244,7 +1242,7 @@ pub async fn mobile_list_workbench_sessions(
     Json(req): Json<RemoteListSessionsReq>,
 ) -> Result<Json<Vec<WorkbenchSessionDto>>, AppError> {
     Ok(Json(
-        list_workbench_sessions_for_state(&state, state.app_handle.clone(), req.project_id).await?,
+        list_workbench_sessions_for_state(&state, req.project_id).await?,
     ))
 }
 
@@ -1262,7 +1260,6 @@ pub async fn mobile_create_workbench_session(
     Ok(Json(
         create_workbench_session_for_state(
             &state,
-            state.app_handle.clone(),
             req.project_id,
             req.worktree_id,
             req.initial_cols,
@@ -1469,8 +1466,13 @@ pub async fn search_claude_sessions(
 ) -> Result<Json<Vec<SessionSearchHit>>, AppError> {
     ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
     Ok(Json(
-        search_claude_sessions_for_state(&state, &req.project_id, req.worktree_id.as_deref(), &req.query)
-            .await?,
+        search_claude_sessions_for_state(
+            &state,
+            &req.project_id,
+            req.worktree_id.as_deref(),
+            &req.query,
+        )
+        .await?,
     ))
 }
 
@@ -1515,7 +1517,6 @@ pub async fn resume_claude_session(
     Ok(Json(
         resume_claude_session_for_state(
             &state,
-            state.app_handle.clone(),
             &req.project_id,
             req.worktree_id.as_deref(),
             &req.session_id,

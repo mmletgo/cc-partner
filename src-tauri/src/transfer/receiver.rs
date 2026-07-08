@@ -22,7 +22,6 @@ use crate::transfer::CHUNK_SIZE;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 /// 当前时间 RFC3339 ISO 字符串。
@@ -142,7 +141,6 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
 ///     5. 返回 `{success:true, received_bytes}`。
 pub async fn handle_chunk(
     state: &AppState,
-    app_handle: &AppHandle,
     transfer_id: &str,
     offset: u64,
     data: Vec<u8>,
@@ -183,7 +181,7 @@ pub async fn handle_chunk(
 
     // 收齐则 finalize
     if new_transferred >= task.size {
-        if let Err(e) = finalize_transfer(state, app_handle, transfer_id).await {
+        if let Err(e) = finalize_transfer(state, transfer_id).await {
             tracing::error!("finalize 失败: {transfer_id}, {e}");
         }
     }
@@ -202,11 +200,7 @@ pub async fn handle_chunk(
 ///     2. 校验失败：标记 failed + 删除 .tmp + emit failed；
 ///     3. 校验通过：resolve_filename 解析冲突，重命名 .tmp → 最终路径；
 ///        标记 completed + 写历史 + emit completed。
-pub async fn finalize_transfer(
-    state: &AppState,
-    app_handle: &AppHandle,
-    transfer_id: &str,
-) -> Result<(), AppError> {
+pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<(), AppError> {
     let task = match state.transfers.get(transfer_id) {
         Some(t) => t,
         None => return Ok(()),
@@ -218,13 +212,7 @@ pub async fn finalize_transfer(
     let actual = match compute_sha256(&tmp_path).await {
         Ok(h) => h,
         Err(e) => {
-            on_receive_failed(
-                state,
-                app_handle,
-                transfer_id,
-                &format!("读取临时文件失败: {e}"),
-            )
-            .await;
+            on_receive_failed(state, transfer_id, &format!("读取临时文件失败: {e}")).await;
             return Ok(());
         }
     };
@@ -234,7 +222,6 @@ pub async fn finalize_transfer(
         let _ = tokio::fs::remove_file(&tmp_path).await;
         on_receive_failed(
             state,
-            app_handle,
             transfer_id,
             &format!("SHA256 校验失败: 期望={}, 实际={actual}", task.sha256),
         )
@@ -247,7 +234,7 @@ pub async fn finalize_transfer(
     let final_filename = resolve_filename(&receive_dir, &task.filename);
     let final_path = receive_dir.join(&final_filename);
     if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
-        on_receive_failed(state, app_handle, transfer_id, &format!("重命名失败: {e}")).await;
+        on_receive_failed(state, transfer_id, &format!("重命名失败: {e}")).await;
         return Ok(());
     }
 
@@ -263,7 +250,7 @@ pub async fn finalize_transfer(
     }
     state.transfers.remove(transfer_id);
 
-    let _ = app_handle.emit(
+    state.emit_event(
         "transfer:completed",
         serde_json::json!({
             "id": transfer_id,
@@ -277,19 +264,20 @@ pub async fn finalize_transfer(
 }
 
 /// 接收失败统一处理：标记 failed + 写历史 + remove + emit failed。
-async fn on_receive_failed(
-    state: &AppState,
-    app_handle: &AppHandle,
-    transfer_id: &str,
-    error: &str,
-) {
+///
+/// Business Logic（为什么需要这个函数）:
+///     接收端运行在 HTTP 路由中，独立后端没有 GUI 句柄；失败事件仍需统一通知 GUI 或 headless adapter。
+///
+/// Code Logic（这个函数做什么）:
+///     更新 registry/history 后通过 `AppState::emit_event` 发布 `transfer:failed`。
+async fn on_receive_failed(state: &AppState, transfer_id: &str, error: &str) {
     let completed_at = now_iso();
     state.transfers.mark_failed(transfer_id, completed_at);
     if let Some(t) = state.transfers.get(transfer_id) {
         let _ = state.transfer_repo.record(&t).await;
     }
     state.transfers.remove(transfer_id);
-    let _ = app_handle.emit(
+    state.emit_event(
         "transfer:failed",
         serde_json::json!({
             "id": transfer_id,

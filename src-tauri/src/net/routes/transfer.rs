@@ -33,8 +33,7 @@ pub async fn transfer_init(
 /// POST /api/transfer/chunk/:id：接收一个数据块，写入临时文件指定 offset。
 ///
 /// Code Logic: 从 `X-Chunk-Offset` header 取 offset（缺省 0），body 为原始 bytes；
-///     调 receiver::handle_chunk 写入并在收齐时自动 finalize。需取 AppHandle 以 emit 事件
-///     （通过 `state.app_handle` 字段；lib.rs manage 时存入）。
+///     调 receiver::handle_chunk 写入并在收齐时自动 finalize；事件通过 AppState 后端 UI adapter 发布。
 pub async fn transfer_chunk(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -48,10 +47,8 @@ pub async fn transfer_chunk(
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    // 取 AppHandle 用于 emit 接收进度/完成事件（在 axum 中通过 AppState 的 app_handle 字段）
-    let app_handle = state.app_handle.clone();
     let data = body.to_vec();
-    let resp = receiver::handle_chunk(&state, &app_handle, &id, offset, data).await?;
+    let resp = receiver::handle_chunk(&state, &id, offset, data).await?;
     Ok(Json(resp))
 }
 

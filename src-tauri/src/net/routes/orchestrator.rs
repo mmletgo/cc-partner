@@ -43,7 +43,7 @@ use std::sync::{Arc, RwLock};
 /// Orchestrator 远端 route 需要的共享状态子集。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     HTTP handler 生产态从 AppState 取依赖，单测只需要最小仓储和配置，不应强行构造完整 Tauri AppHandle。
+///     HTTP handler 生产态从 AppState 取依赖，单测只需要最小仓储和配置，不应强行构造完整 GUI 句柄。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     保存 config、OrchestratorRepo 和 WorkbenchProjectRepo 三个依赖；handler 从 AppState clone，测试直接构造。
@@ -234,7 +234,7 @@ async fn queue_task_for_state(
 ///     remote shortcut 的 start 操作必须在 owning device 上把任务放入 scheduler 可领取路径，并尽力立即调度。
 ///
 /// Code Logic（这个函数做什么）:
-///     确认任务属于本机 local 项目后调用 repo.start_task，再通过 AppState AppHandle 触发 best-effort dispatch。
+///     确认任务属于本机 local 项目后调用 repo.start_task，再通过 AppState 触发 best-effort dispatch。
 async fn start_task_for_state(
     state: &AppState,
     req: RemoteTaskReq,
@@ -242,7 +242,7 @@ async fn start_task_for_state(
     let context = OrchestratorRouteContext::from_app_state(state);
     let task = get_local_project_task(&context, &req.task_id).await?;
     context.orchestrator_repo.start_task(&task.id).await?;
-    dispatch_orchestrator_best_effort(state, state.app_handle.clone()).await;
+    dispatch_orchestrator_best_effort(state).await;
     let latest = context.orchestrator_repo.get_task(&task.id).await?;
     Ok(OrchestratorTaskDto::from(latest))
 }
@@ -314,7 +314,7 @@ async fn deliver_reviewed_task_for_state(
         .orchestrator_repo
         .start_delivery_from_human_review(&task.id)
         .await?;
-    run_delivery_for_task(state, state.app_handle.clone(), &delivering.id).await
+    run_delivery_for_task(state, &delivering.id).await
 }
 
 /// 终止远端任务。
@@ -365,7 +365,7 @@ async fn refresh_project_for_state(
 ) -> Result<RemoteOrchestratorProjectRefreshResp, AppError> {
     let context = OrchestratorRouteContext::from_app_state(state);
     ensure_remote_orchestrator_local_project_id(&context, project_id).await?;
-    let dispatched = dispatch_orchestrator_best_effort(state, state.app_handle.clone()).await;
+    let dispatched = dispatch_orchestrator_best_effort(state).await;
     Ok(RemoteOrchestratorProjectRefreshResp {
         project_id: project_id.to_string(),
         dispatched,
@@ -410,9 +410,7 @@ pub async fn create_task(
         return Ok(Json(created));
     }
 
-    if let Err(err) =
-        crate::orchestrator::scheduler::dispatch_once(&state, state.app_handle.clone()).await
-    {
+    if let Err(err) = crate::orchestrator::scheduler::dispatch_once(&state).await {
         tracing::warn!(
             task_id = %created.id,
             error = %err,
@@ -659,7 +657,9 @@ pub async fn refresh_project(
     State(state): State<AppState>,
     Json(req): Json<RemoteListTasksReq>,
 ) -> Result<Json<RemoteOrchestratorProjectRefreshResp>, AppError> {
-    Ok(Json(refresh_project_for_state(&state, &req.project_id).await?))
+    Ok(Json(
+        refresh_project_for_state(&state, &req.project_id).await?,
+    ))
 }
 
 /// 读取 Orchestrator 全局配置 HTTP handler。

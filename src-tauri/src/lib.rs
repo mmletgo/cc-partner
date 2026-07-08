@@ -461,7 +461,6 @@ pub fn run() {
                     peer_client: Arc::new(PeerClient::new()),
                     transfers: Arc::new(TransferRegistry::new()),
                     ui,
-                    app_handle: app_handle.clone(),
                     // M8 更新器状态：下载状态机 + 缓存的 Update + 下载字节 + 任务句柄 + 取消令牌
                     update_status: Arc::new(RwLock::new(
                         crate::commands::updater::UpdateDownloadStatus::default(),
@@ -543,7 +542,6 @@ pub fn run() {
             {
                 let state: tauri::State<'_, AppState> = app.state();
                 let cancel = crate::orchestrator::scheduler::start_orchestrator_scheduler(
-                    app.handle().clone(),
                     state.inner().clone(),
                 );
                 *state.orchestrator_cancel.lock().unwrap() = Some(cancel);
@@ -555,7 +553,6 @@ pub fn run() {
                 let state: tauri::State<'_, AppState> = app.state();
                 let cancel =
                     crate::orchestrator::outbox::start_orchestrator_remote_outbox_dispatcher(
-                        app.handle().clone(),
                         state.inner().clone(),
                     );
                 *state.orchestrator_outbox_cancel.lock().unwrap() = Some(cancel);

@@ -25,7 +25,6 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
-use tauri::AppHandle;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -179,7 +178,7 @@ pub struct ValidationCommandReport {
 /// Orchestrator delivery 运行时依赖。
 ///
 /// Business Logic（为什么需要这个 trait）:
-///     生产环境需要复用 AppState 和 Tauri AppHandle，测试环境需要在不启动桌面事件循环的情况下验证真实 Git/SQLite 交付语义。
+///     生产环境需要复用 AppState，测试环境需要在不启动桌面事件循环的情况下验证真实 Git/SQLite 交付语义。
 ///
 /// Code Logic（这个 trait 做什么）:
 ///     抽象 delivery pipeline 需要的全局配置、仓储与三个 Workbench 阶段动作；生产实现委托 Workbench helper，测试实现委托临时 Git repo。
@@ -242,14 +241,13 @@ pub(crate) trait DeliveryContext: Sync {
 /// 生产环境 delivery context。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     Orchestrator 命令层需要把 AppState 和 AppHandle 组合后交给通用 delivery pipeline，
+///     Orchestrator 命令层需要把 AppState 交给通用 delivery pipeline，
 ///     同时保留 Workbench merge progress 事件。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有只读 AppState 引用和可 clone 的 AppHandle，trait 方法直接委托现有 Workbench 本机 helper。
+///     持有只读 AppState 引用，trait 方法直接委托现有 Workbench 本机 helper。
 pub(crate) struct AppDeliveryContext<'a> {
     state: &'a AppState,
-    app: AppHandle,
 }
 
 impl<'a> AppDeliveryContext<'a> {
@@ -257,9 +255,9 @@ impl<'a> AppDeliveryContext<'a> {
     ///     命令层每次完成验证后需要创建一次短生命周期 delivery context。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     保存 AppState 引用和 AppHandle，供 trait 方法复用。
-    pub(crate) fn new(state: &'a AppState, app: AppHandle) -> Self {
-        Self { state, app }
+    ///     保存 AppState 引用，供 trait 方法复用。
+    pub(crate) fn new(state: &'a AppState) -> Self {
+        Self { state }
     }
 }
 
@@ -337,8 +335,7 @@ impl DeliveryContext for AppDeliveryContext<'_> {
     /// Code Logic（这个函数做什么）:
     ///     委托 local_merge_workbench_worktree，并把返回 DTO 格式化为 evidence 文本。
     async fn merge_task_worktree_to_main(&self, worktree_id: String) -> Result<String, AppError> {
-        let result =
-            local_merge_workbench_worktree(self.app.clone(), self.state, worktree_id).await?;
+        let result = local_merge_workbench_worktree(self.state, worktree_id).await?;
         Ok(format!("{result:?}"))
     }
 }

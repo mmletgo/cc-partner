@@ -13,7 +13,6 @@ use crate::orchestrator::prompt::DEV_DONE_SENTINEL;
 use crate::state::AppState;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use tauri::{AppHandle, Manager};
 
 const DETECTOR_TAIL_CHARS: usize = DEV_DONE_SENTINEL.len() + 1;
 
@@ -126,12 +125,16 @@ fn should_spawn_completion_for_output(session_id: &str, chunk: &str) -> bool {
 ///
 /// Code Logic（这个函数做什么）:
 ///     同步 detector 命中后用 tauri async runtime spawn；后台错误只写 warn，不向 reader thread 返回。
-pub fn spawn_maybe_handle_session_output(app_handle: AppHandle, session_id: String, chunk: String) {
+pub fn spawn_maybe_handle_session_output_for_state(
+    state: AppState,
+    session_id: String,
+    chunk: String,
+) {
     if !should_spawn_completion_for_output(&session_id, &chunk) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = handle_session_completion(app_handle, &session_id).await {
+        if let Err(error) = handle_session_completion(state, &session_id).await {
             tracing::warn!(
                 session_id = %session_id,
                 "Orchestrator terminal completion sentinel 处理失败: {error}"
@@ -144,13 +147,9 @@ pub fn spawn_maybe_handle_session_output(app_handle: AppHandle, session_id: Stri
 ///     完成哨兵只能通过 session_id 定位到当前 running attempt，然后复用手动完成命令的验证/交付 pipeline。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 AppHandle 读取 AppState，按 session_id 查询 running attempt；找到后把 task_id、attempt 和 session_id
+///     按 session_id 查询 running attempt；找到后把 task_id、attempt 和 session_id
 ///     交给内部 completion helper 做 active runner 原子校验，attempt 完成标记由 helper 统一执行。
-async fn handle_session_completion(
-    app_handle: AppHandle,
-    session_id: &str,
-) -> Result<(), AppError> {
-    let state: AppState = app_handle.state::<AppState>().inner().clone();
+async fn handle_session_completion(state: AppState, session_id: &str) -> Result<(), AppError> {
     let Some(attempt) = state
         .orchestrator_repo
         .get_running_attempt_by_session(session_id)
@@ -164,7 +163,6 @@ async fn handle_session_completion(
     };
     complete_orchestrator_agent_run_for_attempt(
         &state,
-        app_handle,
         &attempt.task_id,
         attempt.attempt,
         &attempt.session_id,
