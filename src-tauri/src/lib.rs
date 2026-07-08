@@ -425,6 +425,9 @@ pub fn run() {
                 let workbench_session_repo = Arc::new(WorkbenchSessionRepo::new(pool.clone()));
                 let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::new(pool.clone()));
                 let workbench_browser_repo = Arc::new(WorkbenchBrowserRepo::new(pool.clone()));
+                let workbench_browser_previews = Arc::new(
+                    crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
+                );
                 let orchestrator_repo = Arc::new(OrchestratorRepo::new(pool.clone()));
                 let workbench_sessions =
                     Arc::new(crate::workbench::sessions::WorkbenchSessionRegistry::new());
@@ -469,6 +472,7 @@ pub fn run() {
                     workbench_session_repo,
                     workbench_worktree_repo,
                     workbench_browser_repo,
+                    workbench_browser_previews,
                     workbench_sessions,
                     workbench_remote_events,
                     workbench_remote_event_bridges,
@@ -743,6 +747,8 @@ pub fn run() {
             workbench_cmd::open_workbench_remote_project,
             workbench_cmd::remove_workbench_project,
             workbench_cmd::touch_workbench_project,
+            workbench_cmd::discover_workbench_browser_targets,
+            workbench_cmd::create_workbench_browser_preview,
             workbench_cmd::list_workbench_worktrees,
             workbench_cmd::create_workbench_worktree,
             workbench_cmd::commit_workbench_worktree,

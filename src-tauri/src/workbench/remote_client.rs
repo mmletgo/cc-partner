@@ -9,6 +9,7 @@
 //!     解析错误统一转换为简洁中文 AppError。
 
 use crate::error::AppError;
+use crate::workbench::browser_models::{WorkbenchBrowserDiscovery, WorkbenchBrowserPreview};
 use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchHtmlAssetDto, WorkbenchOpenFileDto,
     WorkbenchPathInfo, WorkbenchProjectDto, WorkbenchRemoteDirectoryEntryDto,
@@ -22,7 +23,8 @@ use crate::workbench::remote_protocol::{
     RemotePathInfoReq, RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteProjectReq,
     RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq,
     RemoteReplaySessionReq, RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSearchClaudeSessionsReq,
-    RemoteSessionReq, RemoteSplitPaneReq, RemoteWorktreeReq, RemoteWriteSessionInputReq,
+    RemoteSessionReq, RemoteSplitPaneReq, RemoteWorkbenchBrowserDiscoverReq,
+    RemoteWorkbenchBrowserPreviewReq, RemoteWorktreeReq, RemoteWriteSessionInputReq,
     ResumeClaudeSessionResult,
 };
 use crate::workbench::claude_sessions::{SessionPreview, SessionSearchHit};
@@ -147,6 +149,46 @@ impl RemoteWorkbenchClient {
         self.post_path_json(
             endpoint_url(base_url, "/api/workbench/projects/open"),
             path,
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 发现远端项目的浏览器预览候选。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote shortcut 的 browser tab 必须让 owning device 扫描自己的终端输出、项目配置和 loopback 端口。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/browser/discover`，请求体为远端 local project/worktree，解析 discovery DTO。
+    pub async fn discover_browser_targets(
+        &self,
+        base_url: &str,
+        req: &RemoteWorkbenchBrowserDiscoverReq,
+    ) -> Result<WorkbenchBrowserDiscovery, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/browser/discover"),
+            req,
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 创建远端项目的浏览器预览。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote shortcut 创建 preview 时，真实 previewId 必须先在 owning device 登记，本机随后只创建 relay。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/browser/preview`，发送 targetUrl 并解析远端 preview DTO。
+    pub async fn create_browser_preview(
+        &self,
+        base_url: &str,
+        req: &RemoteWorkbenchBrowserPreviewReq,
+    ) -> Result<WorkbenchBrowserPreview, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/browser/preview"),
+            req,
             RemoteRequestTimeoutKind::Short,
         )
         .await
@@ -1316,6 +1358,136 @@ mod tests {
         let url = endpoint_url("http://127.0.0.1:1420/", "/api/workbench/fs/roots");
 
         assert_eq!(url, "http://127.0.0.1:1420/api/workbench/fs/roots");
+    }
+
+    mod browser {
+        use super::*;
+        use crate::workbench::browser_models::{
+            WorkbenchBrowserDiscovery, WorkbenchBrowserPreview, WorkbenchBrowserTarget,
+            WorkbenchBrowserTargetSource,
+        };
+        use crate::workbench::remote_protocol::{
+            RemoteWorkbenchBrowserDiscoverReq, RemoteWorkbenchBrowserPreviewReq,
+        };
+
+        /// Business Logic（为什么需要这个测试）:
+        ///     本机 remote shortcut 发现浏览器候选时，必须把远端 local projectId/worktreeId 原样发到 owning device。
+        ///
+        /// Code Logic（这个测试做什么）:
+        ///     启动一条 discover route，记录 JSON body，调用 remote client 后断言 projectId/worktreeId 和响应解析。
+        #[tokio::test]
+        async fn browser_discover_posts_project_and_worktree() {
+            let seen_body = Arc::new(Mutex::new(None));
+            let app = Router::new()
+                .route(
+                    "/api/workbench/browser/discover",
+                    post(
+                        |State(seen_body): State<Arc<Mutex<Option<Value>>>>,
+                         Json(body): Json<Value>| async move {
+                            *seen_body.lock().unwrap() = Some(body);
+                            Json(WorkbenchBrowserDiscovery {
+                                project_id: "inner-project".to_string(),
+                                worktree_id: Some("inner-worktree".to_string()),
+                                targets: vec![WorkbenchBrowserTarget {
+                                    id: "target-1".to_string(),
+                                    url: "http://127.0.0.1:5173/".to_string(),
+                                    display_url: "http://127.0.0.1:5173/".to_string(),
+                                    source: WorkbenchBrowserTargetSource::Remembered,
+                                    label: "上次使用".to_string(),
+                                    reachable: true,
+                                }],
+                                selected_target_id: Some("target-1".to_string()),
+                            })
+                        },
+                    ),
+                )
+                .with_state(seen_body.clone());
+            let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let client = RemoteWorkbenchClient::new();
+
+            let discovery = client
+                .discover_browser_targets(
+                    &format!("http://{addr}"),
+                    &RemoteWorkbenchBrowserDiscoverReq {
+                        project_id: "inner-project".to_string(),
+                        worktree_id: Some("inner-worktree".to_string()),
+                    },
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(discovery.project_id, "inner-project");
+            assert_eq!(discovery.targets.len(), 1);
+            let body = seen_body.lock().unwrap().clone().unwrap();
+            assert_eq!(body["projectId"], "inner-project");
+            assert_eq!(body["worktreeId"], "inner-worktree");
+        }
+
+        /// Business Logic（为什么需要这个测试）:
+        ///     远端 preview 必须先在 owning device 创建，remote client 需要把用户选中的 targetUrl 发给 owner。
+        ///
+        /// Code Logic（这个测试做什么）:
+        ///     启动一条 preview route，记录 JSON body，调用 remote client 后断言 targetUrl 和 preview DTO 解析。
+        #[tokio::test]
+        async fn browser_preview_posts_target_url() {
+            let seen_body = Arc::new(Mutex::new(None));
+            let app = Router::new()
+                .route(
+                    "/api/workbench/browser/preview",
+                    post(
+                        |State(seen_body): State<Arc<Mutex<Option<Value>>>>,
+                         Json(body): Json<Value>| async move {
+                            *seen_body.lock().unwrap() = Some(body);
+                            Json(WorkbenchBrowserPreview {
+                                preview_id: "remote-preview".to_string(),
+                                project_id: "inner-project".to_string(),
+                                worktree_id: Some("inner-worktree".to_string()),
+                                target_url: "http://127.0.0.1:5173/".to_string(),
+                                desktop_proxy_url:
+                                    "http://127.0.0.1:62116/api/workbench/browser/proxy/remote-preview/"
+                                        .to_string(),
+                                mobile_proxy_path:
+                                    "/api/mobile/workbench/browser/proxy/remote-preview/"
+                                        .to_string(),
+                                expires_at_ms: 1_800_000,
+                            })
+                        },
+                    ),
+                )
+                .with_state(seen_body.clone());
+            let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let client = RemoteWorkbenchClient::new();
+
+            let preview = client
+                .create_browser_preview(
+                    &format!("http://{addr}"),
+                    &RemoteWorkbenchBrowserPreviewReq {
+                        project_id: "inner-project".to_string(),
+                        worktree_id: Some("inner-worktree".to_string()),
+                        target_url: "http://127.0.0.1:5173/".to_string(),
+                    },
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(preview.preview_id, "remote-preview");
+            let body = seen_body.lock().unwrap().clone().unwrap();
+            assert_eq!(body["projectId"], "inner-project");
+            assert_eq!(body["worktreeId"], "inner-worktree");
+            assert_eq!(body["targetUrl"], "http://127.0.0.1:5173/");
+        }
     }
 
     /// Business Logic（为什么需要这个测试）:

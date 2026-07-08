@@ -20,7 +20,7 @@ use crate::state::AppState;
 use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{header, HeaderValue, Request, Response, StatusCode};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::Router;
 use std::convert::Infallible;
 use std::io::{Error as IoError, ErrorKind};
@@ -511,6 +511,18 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/workbench/prompt-optimizer/stream-to-session",
             post(workbench::stream_prompt_optimizer_to_session),
         )
+        .route(
+            "/api/workbench/browser/discover",
+            post(workbench::discover_browser_targets),
+        )
+        .route(
+            "/api/workbench/browser/preview",
+            post(workbench::create_browser_preview),
+        )
+        .route(
+            "/api/workbench/browser/proxy/:previewId/*path",
+            any(workbench::proxy_browser_preview),
+        )
         // Mobile Workbench 本机入口：手机 → 本机，可继续由本机代理到远端设备 remote shortcut
         .route(
             "/api/mobile/workbench/projects/list",
@@ -615,6 +627,18 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/mobile/workbench/prompt-optimizer/stream-to-session",
             post(workbench::mobile_stream_prompt_optimizer_to_session),
+        )
+        .route(
+            "/api/mobile/workbench/browser/discover",
+            post(workbench::mobile_discover_browser_targets),
+        )
+        .route(
+            "/api/mobile/workbench/browser/preview",
+            post(workbench::mobile_create_browser_preview),
+        )
+        .route(
+            "/api/mobile/workbench/browser/proxy/:previewId/*path",
+            any(workbench::mobile_proxy_browser_preview),
         )
         // Orchestrator 远端协议：remote shortcut 操作转发到项目所在设备的本机任务队列
         .route(

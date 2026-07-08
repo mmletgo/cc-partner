@@ -92,6 +92,9 @@ pub struct AppState {
     pub workbench_worktree_repo: Arc<WorkbenchWorktreeRepo>,
     /// Workbench 浏览器预览目标仓库（workbench_browser_targets 表访问，保存项目/worktree 最近目标）
     pub workbench_browser_repo: Arc<WorkbenchBrowserRepo>,
+    /// Workbench 浏览器预览会话注册表（previewId 到本机 target 或远端 relay 的短期映射）
+    pub workbench_browser_previews:
+        Arc<crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry>,
     /// 工作台 PTY 会话注册表（运行期 PTY/tmux attach 句柄，元数据由 workbench_session_repo 持久化）
     #[allow(dead_code)]
     pub workbench_sessions: Arc<crate::workbench::sessions::WorkbenchSessionRegistry>,

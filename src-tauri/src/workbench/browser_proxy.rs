@@ -1,0 +1,1000 @@
+//! workbench/browser_proxy.rs — Workbench 浏览器预览代理
+//!
+//! Business Logic（为什么需要这个模块）:
+//!     Workbench Browser tab 需要把项目设备上的本机 dev server 包装为桌面端和手机端都能访问的同源预览地址。
+//!
+//! Code Logic（这个模块做什么）:
+//!     管理短期 preview session，并在后续实现中按 previewId 把 HTTP/WebSocket 请求转发到安全的上游目标。
+
+use crate::net::routes::ApiError;
+use crate::state::AppState;
+use crate::workbench::browser_models::WorkbenchBrowserPreview;
+use axum::body::{to_bytes, Body};
+use axum::extract::ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::FromRequestParts;
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Request, StatusCode};
+use axum::response::{IntoResponse, Response};
+use chrono::Utc;
+use futures_util::{SinkExt, StreamExt};
+use reqwest::Url;
+use reqwest::{
+    header::{
+        HeaderMap as ReqwestHeaderMap, HeaderName as ReqwestHeaderName,
+        HeaderValue as ReqwestHeaderValue,
+    },
+    Method as ReqwestMethod,
+};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+use uuid::Uuid;
+
+const PREVIEW_TTL: Duration = Duration::from_secs(30 * 60);
+const PROXY_BODY_LIMIT_BYTES: usize = usize::MAX;
+
+/// 浏览器预览会话注册表。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     预览 URL 必须使用不可预测 previewId，而不是直接暴露用户选择的 dev server URL。
+///
+/// Code Logic（这个结构体做什么）:
+///     用线程安全 HashMap 保存 previewId 到上游目标的短期映射，支持 clone 后在命令和 HTTP route 间共享。
+#[derive(Clone)]
+pub struct WorkbenchBrowserPreviewRegistry {
+    inner: Arc<RwLock<HashMap<String, BrowserPreviewSession>>>,
+}
+
+/// 浏览器预览上游目标。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     本机项目直接代理到本设备 loopback dev server；远端项目只能代理到 owning device 已创建的 preview。
+///
+/// Code Logic（这个枚举做什么）:
+///     区分本地目标 URL 与远端 relay 所需的 owner base URL、远端 previewId 和展示 targetUrl。
+#[derive(Debug, Clone)]
+pub enum BrowserPreviewTarget {
+    Local {
+        target_url: String,
+    },
+    RemoteRelay {
+        base_url: String,
+        remote_preview_id: String,
+        target_url: String,
+    },
+}
+
+/// 浏览器预览会话。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     每个预览 iframe 需要绑定项目、worktree、上游目标与过期时间，避免旧链接永久可用。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 previewId、业务归属、上游目标、Instant 过期点以及前端可展示的毫秒时间戳。
+#[derive(Debug, Clone)]
+pub struct BrowserPreviewSession {
+    pub preview_id: String,
+    pub project_id: String,
+    pub worktree_id: Option<String>,
+    pub target: BrowserPreviewTarget,
+    pub expires_at: Instant,
+    pub expires_at_ms: i64,
+}
+
+impl WorkbenchBrowserPreviewRegistry {
+    /// 创建空的浏览器预览注册表。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     应用启动时需要初始化一份共享 registry，供所有 Workbench Browser preview 会话复用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造 Arc<RwLock<HashMap>>，初始不包含任何 preview session。
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// 创建本机浏览器预览会话。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     本机项目的 dev server 只能通过应用同源 proxy URL 暴露给桌面端和手机端。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     生成 UUID previewId，保存 Local target，并返回桌面绝对代理 URL 与 mobile 同源 path。
+    pub fn create_local(
+        &self,
+        project_id: String,
+        worktree_id: Option<String>,
+        target_url: String,
+        actual_http_port: u16,
+    ) -> WorkbenchBrowserPreview {
+        self.create_session(
+            project_id,
+            worktree_id,
+            BrowserPreviewTarget::Local { target_url },
+            actual_http_port,
+        )
+    }
+
+    /// 创建远端 relay 浏览器预览会话。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     远端项目必须先在 owning device 创建 preview，本机只登记到 owner proxy 的 relay，不能直接访问 owner loopback。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     保存 RemoteRelay target，并返回本机桌面/手机 proxy 地址，后续 HTTP proxy 再转发到 owner proxy path。
+    pub fn create_remote_relay(
+        &self,
+        project_id: String,
+        worktree_id: Option<String>,
+        base_url: String,
+        remote_preview_id: String,
+        target_url: String,
+        actual_http_port: u16,
+    ) -> WorkbenchBrowserPreview {
+        self.create_session(
+            project_id,
+            worktree_id,
+            BrowserPreviewTarget::RemoteRelay {
+                base_url,
+                remote_preview_id,
+                target_url,
+            },
+            actual_http_port,
+        )
+    }
+
+    /// 查找预览会话。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     每次 iframe 请求都必须确认 previewId 仍存在且未过期，同时活跃预览应续期避免使用中失效。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写锁内先清理过期 session，命中后续期 30 分钟并返回 clone；未命中返回 None。
+    pub fn lookup(&self, preview_id: &str) -> Option<BrowserPreviewSession> {
+        let now = Instant::now();
+        let mut guard = self
+            .inner
+            .write()
+            .expect("browser preview registry 写锁中毒");
+        guard.retain(|_, session| session.expires_at > now);
+        let session = guard.get_mut(preview_id)?;
+        let (expires_at, expires_at_ms) = next_expiry();
+        session.expires_at = expires_at;
+        session.expires_at_ms = expires_at_ms;
+        Some(session.clone())
+    }
+
+    /// 创建 preview session 并写入注册表。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     本机 preview 和远端 relay 共享相同的 previewId、TTL 与返回 DTO 生成逻辑。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     生成 session，按 previewId 写入 HashMap，再根据 session 构造 WorkbenchBrowserPreview。
+    fn create_session(
+        &self,
+        project_id: String,
+        worktree_id: Option<String>,
+        target: BrowserPreviewTarget,
+        actual_http_port: u16,
+    ) -> WorkbenchBrowserPreview {
+        let preview_id = Uuid::new_v4().simple().to_string();
+        let (expires_at, expires_at_ms) = next_expiry();
+        let session = BrowserPreviewSession {
+            preview_id: preview_id.clone(),
+            project_id,
+            worktree_id,
+            target,
+            expires_at,
+            expires_at_ms,
+        };
+        let preview = session_to_preview(&session, actual_http_port);
+        self.inner
+            .write()
+            .expect("browser preview registry 写锁中毒")
+            .insert(preview_id, session);
+        preview
+    }
+
+    /// 创建测试用本机 preview。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     registry 单元测试只关心 previewId 与 TTL，不应依赖真实 HTTP server 端口。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     以固定端口调用 create_local，保持测试调用简洁稳定。
+    #[cfg(test)]
+    fn create_local_for_test(
+        &self,
+        project_id: &str,
+        worktree_id: Option<&str>,
+        target_url: &str,
+    ) -> WorkbenchBrowserPreview {
+        self.create_local(
+            project_id.to_string(),
+            worktree_id.map(str::to_string),
+            target_url.to_string(),
+            62116,
+        )
+    }
+
+    /// 强制测试会话过期。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     过期清理不能让测试等待 30 分钟，必须能直接制造过期 session。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在写锁内把目标 session 的 expires_at 调整到过去，并同步设置过期毫秒时间戳。
+    #[cfg(test)]
+    fn force_expire_for_test(&self, preview_id: &str) {
+        if let Some(session) = self
+            .inner
+            .write()
+            .expect("browser preview registry 写锁中毒")
+            .get_mut(preview_id)
+        {
+            session.expires_at = Instant::now() - Duration::from_secs(1);
+            session.expires_at_ms = Utc::now().timestamp_millis() - 1_000;
+        }
+    }
+}
+
+impl Default for WorkbenchBrowserPreviewRegistry {
+    /// 创建默认浏览器预览注册表。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     AppState 初始化和测试可用 Default 语义获取空 registry。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `WorkbenchBrowserPreviewRegistry::new`。
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 计算下一次过期时间。
+///
+/// Business Logic（为什么需要这个函数）:
+///     预览 session 需要同时有运行时 Instant 和前端可展示的 epoch 毫秒过期时间。
+///
+/// Code Logic（这个函数做什么）:
+///     基于固定 30 分钟 TTL 返回 Instant 过期点与 UTC epoch 毫秒。
+fn next_expiry() -> (Instant, i64) {
+    (
+        Instant::now() + PREVIEW_TTL,
+        Utc::now().timestamp_millis() + PREVIEW_TTL.as_millis() as i64,
+    )
+}
+
+/// 从会话生成前端 DTO。
+///
+/// Business Logic（为什么需要这个函数）:
+///     创建 preview 后，前端需要拿到项目归属、目标 URL 和两个入口 URL。
+///
+/// Code Logic（这个函数做什么）:
+///     从 session target 提取展示 targetUrl，并拼接 desktop proxy URL 与 mobile proxy path。
+fn session_to_preview(
+    session: &BrowserPreviewSession,
+    actual_http_port: u16,
+) -> WorkbenchBrowserPreview {
+    WorkbenchBrowserPreview {
+        preview_id: session.preview_id.clone(),
+        project_id: session.project_id.clone(),
+        worktree_id: session.worktree_id.clone(),
+        target_url: session_target_url(session).to_string(),
+        desktop_proxy_url: desktop_proxy_url(actual_http_port, &session.preview_id),
+        mobile_proxy_path: mobile_proxy_path(&session.preview_id),
+        expires_at_ms: session.expires_at_ms,
+    }
+}
+
+/// 读取 session 展示目标 URL。
+///
+/// Business Logic（为什么需要这个函数）:
+///     relay preview 对用户展示的是远端 dev server target，而不是 owner proxy URL。
+///
+/// Code Logic（这个函数做什么）:
+///     Local 和 RemoteRelay 都返回其保存的 target_url 字段引用。
+fn session_target_url(session: &BrowserPreviewSession) -> &str {
+    match &session.target {
+        BrowserPreviewTarget::Local { target_url } => target_url,
+        BrowserPreviewTarget::RemoteRelay { target_url, .. } => target_url,
+    }
+}
+
+/// 构造桌面端代理 URL。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面端 iframe 需要可直接打开的本机 HTTP 绝对 URL。
+///
+/// Code Logic（这个函数做什么）:
+///     使用实际 axum 监听端口拼出 `/api/workbench/browser/proxy/{previewId}/`。
+fn desktop_proxy_url(actual_http_port: u16, preview_id: &str) -> String {
+    format!("http://127.0.0.1:{actual_http_port}/api/workbench/browser/proxy/{preview_id}/")
+}
+
+/// 构造移动端同源代理 path。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机浏览器只能使用本机 HTTP server 同源 path，避免 iframe 跨源访问远端设备。
+///
+/// Code Logic（这个函数做什么）:
+///     拼出 `/api/mobile/workbench/browser/proxy/{previewId}/`，由当前设备 HTTP server 处理。
+fn mobile_proxy_path(preview_id: &str) -> String {
+    format!("/api/mobile/workbench/browser/proxy/{preview_id}/")
+}
+
+/// 代理 Workbench Browser preview 请求。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面端和移动端 iframe 都只能访问本机同源 preview path，由后端按 previewId 安全转发到已登记目标。
+///
+/// Code Logic（这个函数做什么）:
+///     从 registry 查找并续期 session；WebSocket upgrade 走 WS 桥接，其余 HTTP 请求读取 body 后转发到上游。
+pub async fn proxy_workbench_browser_request(
+    state: AppState,
+    preview_id: String,
+    tail_path: String,
+    req: Request<Body>,
+) -> Result<Response, ApiError> {
+    let session = lookup_preview_or_not_found(&state.workbench_browser_previews, &preview_id)?;
+    if is_websocket_upgrade(req.headers()) {
+        return proxy_workbench_browser_websocket(state, session, tail_path, req).await;
+    }
+    proxy_http_request_for_session(session, tail_path, req).await
+}
+
+/// 查找 preview session 或返回 404。
+///
+/// Business Logic（为什么需要这个函数）:
+///     proxy route 在任何上游访问前都必须确认 previewId 有效，未知/过期 preview 不应触发网络请求。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 registry.lookup；None 映射为 ApiError::not_found，Some 返回已续期 session。
+fn lookup_preview_or_not_found(
+    registry: &WorkbenchBrowserPreviewRegistry,
+    preview_id: &str,
+) -> Result<BrowserPreviewSession, ApiError> {
+    registry
+        .lookup(preview_id)
+        .ok_or_else(|| ApiError::not_found("预览会话不存在或已过期"))
+}
+
+/// 转发普通 HTTP preview 请求。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Browser iframe 里的 HTML/CSS/JS/API 请求需要透明转发到 dev server 或 owner proxy。
+///
+/// Code Logic（这个函数做什么）:
+///     根据 session 构造上游 URL，过滤 hop-by-hop header，读取请求 body，使用 reqwest 发起请求并转换响应。
+async fn proxy_http_request_for_session(
+    session: BrowserPreviewSession,
+    tail_path: String,
+    req: Request<Body>,
+) -> Result<Response, ApiError> {
+    let upstream_url = build_upstream_proxy_url(&session, &tail_path, req.uri().query())?;
+    let method = reqwest_method(req.method())?;
+    let headers = filtered_proxy_headers(req.headers());
+    let body = to_bytes(req.into_body(), PROXY_BODY_LIMIT_BYTES)
+        .await
+        .map_err(|_| ApiError::bad_request("读取预览请求失败"))?;
+    let response = reqwest::Client::new()
+        .request(method, upstream_url)
+        .headers(headers)
+        .body(body)
+        .send()
+        .await?;
+    response_to_axum_response(&session, response).await
+}
+
+/// 判断请求是否为 WebSocket upgrade。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Vite/Next 等 dev server 的 HMR 依赖 WebSocket，preview proxy 需要识别并走双向桥接。
+///
+/// Code Logic（这个函数做什么）:
+///     case-insensitive 检查 Connection 是否包含 upgrade，且 Upgrade 是否为 websocket。
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    let has_connection_upgrade = headers.get_all(header::CONNECTION).iter().any(|value| {
+        value
+            .to_str()
+            .map(|raw| {
+                raw.split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case("upgrade"))
+            })
+            .unwrap_or(false)
+    });
+    let has_websocket_upgrade = headers
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false);
+    has_connection_upgrade && has_websocket_upgrade
+}
+
+/// 构造上游代理 URL。
+///
+/// Business Logic（为什么需要这个函数）:
+///     本机 preview 只能访问登记过的 targetUrl；远端 relay 只能访问 owner 已登记的 proxy path。
+///
+/// Code Logic（这个函数做什么）:
+///     Local 用 target_url 作为 base；RemoteRelay 用 `{baseUrl}/api/workbench/browser/proxy/{remotePreviewId}/` 作为 base，再拼 tail path/query。
+fn build_upstream_proxy_url(
+    session: &BrowserPreviewSession,
+    tail_path: &str,
+    query: Option<&str>,
+) -> Result<Url, ApiError> {
+    let base = match &session.target {
+        BrowserPreviewTarget::Local { target_url } => target_url.clone(),
+        BrowserPreviewTarget::RemoteRelay {
+            base_url,
+            remote_preview_id,
+            ..
+        } => format!(
+            "{}/api/workbench/browser/proxy/{remote_preview_id}/",
+            base_url.trim_end_matches('/')
+        ),
+    };
+    join_proxy_url(&base, tail_path, query)
+}
+
+/// 拼接 base URL、尾部 path 和 query。
+///
+/// Business Logic（为什么需要这个函数）:
+///     iframe 内资源使用相对路径访问，proxy 必须把这些路径稳定落到登记的 base 下。
+///
+/// Code Logic（这个函数做什么）:
+///     确保 base path 以 `/` 结尾后逐段追加 tail，避免 `Url::join` 把绝对 tail 当成新上游。
+fn join_proxy_url(base: &str, tail_path: &str, query: Option<&str>) -> Result<Url, ApiError> {
+    let mut url = Url::parse(base).map_err(|_| ApiError::bad_request("预览上游地址格式无效"))?;
+    if !url.path().ends_with('/') {
+        let path = format!("{}/", url.path().trim_end_matches('/'));
+        url.set_path(&path);
+    }
+    let tail = tail_path.trim_start_matches('/');
+    if !tail.is_empty() {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| ApiError::bad_request("预览上游地址不能追加路径"))?;
+        segments.pop_if_empty();
+        for segment in tail.split('/') {
+            segments.push(segment);
+        }
+        drop(segments);
+    }
+    url.set_query(query);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+/// 过滤转发请求头。
+///
+/// Business Logic（为什么需要这个函数）:
+///     代理不能把连接级 header 原样传给上游，否则会破坏 reqwest 与上游之间的新连接语义。
+///
+/// Code Logic（这个函数做什么）:
+///     跳过 hop-by-hop header 与 Host，其余 header 尽力转换为 reqwest HeaderMap。
+fn filtered_proxy_headers(headers: &HeaderMap) -> ReqwestHeaderMap {
+    let mut out = ReqwestHeaderMap::new();
+    for (name, value) in headers {
+        if should_drop_proxy_header(name.as_str()) {
+            continue;
+        }
+        let Ok(name) = ReqwestHeaderName::from_bytes(name.as_str().as_bytes()) else {
+            continue;
+        };
+        let Ok(value) = ReqwestHeaderValue::from_bytes(value.as_bytes()) else {
+            continue;
+        };
+        out.append(name, value);
+    }
+    out
+}
+
+/// 判断代理时应丢弃的 header。
+///
+/// Business Logic（为什么需要这个函数）:
+///     hop-by-hop header 只对当前连接有效，不属于端到端 HTTP 语义。
+///
+/// Code Logic（这个函数做什么）:
+///     case-insensitive 匹配 RFC 常见连接级 header、upgrade 相关 header 和 host。
+fn should_drop_proxy_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "host"
+    )
+}
+
+/// 转换 reqwest 响应为 axum 响应。
+///
+/// Business Logic（为什么需要这个函数）:
+///     上游 dev server 的状态码、内容类型、缓存头等需要尽量透明返回给 iframe。
+///
+/// Code Logic（这个函数做什么）:
+///     复制状态、过滤响应 header、重写 Location 到本机 proxy path，并用原始响应 bytes 构造 Body。
+async fn response_to_axum_response(
+    session: &BrowserPreviewSession,
+    response: reqwest::Response,
+) -> Result<Response, ApiError> {
+    let status = StatusCode::from_u16(response.status().as_u16())
+        .map_err(|_| ApiError::bad_gateway("预览上游返回了无效状态码"))?;
+    let mut builder = Response::builder().status(status);
+    for (name, value) in response.headers() {
+        if should_drop_proxy_header(name.as_str()) {
+            continue;
+        }
+        let Ok(header_name) = HeaderName::from_bytes(name.as_str().as_bytes()) else {
+            continue;
+        };
+        let header_value = if name == reqwest::header::LOCATION {
+            match value
+                .to_str()
+                .ok()
+                .and_then(|raw| rewrite_location(session, raw))
+            {
+                Some(rewritten) => HeaderValue::from_str(&rewritten)
+                    .unwrap_or_else(|_| HeaderValue::from_bytes(value.as_bytes()).unwrap()),
+                None => HeaderValue::from_bytes(value.as_bytes()).unwrap(),
+            }
+        } else {
+            HeaderValue::from_bytes(value.as_bytes()).unwrap()
+        };
+        if let Some(headers) = builder.headers_mut() {
+            headers.append(header_name, header_value);
+        }
+    }
+    let bytes = response.bytes().await?;
+    builder
+        .body(Body::from(bytes))
+        .map_err(|_| ApiError::bad_gateway("构造预览响应失败"))
+}
+
+/// 重写 Location header。
+///
+/// Business Logic（为什么需要这个函数）:
+///     dev server redirect 到自己的绝对 URL 时，iframe 仍应留在本机 preview proxy 下。
+///
+/// Code Logic（这个函数做什么）:
+///     处理 absolute path、target_url absolute URL 以及 remote owner proxy absolute URL，输出本机 workbench proxy path。
+fn rewrite_location(session: &BrowserPreviewSession, raw: &str) -> Option<String> {
+    if raw.starts_with('/') && !raw.starts_with("//") {
+        return Some(proxy_path_for_tail(
+            &session.preview_id,
+            raw.trim_start_matches('/'),
+        ));
+    }
+    let location = Url::parse(raw).ok()?;
+    let target_base = session_target_url(session);
+    if let Some(rewritten) = rewrite_absolute_location(session, &location, target_base) {
+        return Some(rewritten);
+    }
+    if let BrowserPreviewTarget::RemoteRelay {
+        base_url,
+        remote_preview_id,
+        ..
+    } = &session.target
+    {
+        let owner_proxy_base = format!(
+            "{}/api/workbench/browser/proxy/{remote_preview_id}/",
+            base_url.trim_end_matches('/')
+        );
+        return rewrite_absolute_location(session, &location, &owner_proxy_base);
+    }
+    None
+}
+
+/// 重写某个 base URL 下的绝对 Location。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Local target 和 Remote owner proxy 都可能返回绝对跳转地址，需要共用匹配与 tail 计算。
+///
+/// Code Logic（这个函数做什么）:
+///     比较 scheme/host/port 与 path 前缀，命中后把剩余 tail 拼成本机 proxy path 并保留 query。
+fn rewrite_absolute_location(
+    session: &BrowserPreviewSession,
+    location: &Url,
+    base: &str,
+) -> Option<String> {
+    let mut base_url = Url::parse(base).ok()?;
+    if !base_url.path().ends_with('/') {
+        let path = format!("{}/", base_url.path().trim_end_matches('/'));
+        base_url.set_path(&path);
+    }
+    if location.scheme() != base_url.scheme()
+        || location.host_str() != base_url.host_str()
+        || location.port_or_known_default() != base_url.port_or_known_default()
+    {
+        return None;
+    }
+    let base_path = base_url.path();
+    if !location.path().starts_with(base_path) {
+        return None;
+    }
+    let mut tail = location.path()[base_path.len()..]
+        .trim_start_matches('/')
+        .to_string();
+    if let Some(query) = location.query() {
+        if tail.is_empty() {
+            tail.push('?');
+        } else {
+            tail.push('?');
+        }
+        tail.push_str(query);
+    }
+    Some(proxy_path_for_tail(&session.preview_id, &tail))
+}
+
+/// 构造 workbench proxy path。
+///
+/// Business Logic（为什么需要这个函数）:
+///     redirect 重写需要把任意上游 tail 转回当前本机 previewId 的代理路径。
+///
+/// Code Logic（这个函数做什么）:
+///     拼出 `/api/workbench/browser/proxy/{previewId}/{tail}`，tail 可包含 query。
+fn proxy_path_for_tail(preview_id: &str, tail: &str) -> String {
+    if tail.is_empty() {
+        format!("/api/workbench/browser/proxy/{preview_id}/")
+    } else {
+        format!(
+            "/api/workbench/browser/proxy/{preview_id}/{}",
+            tail.trim_start_matches('/')
+        )
+    }
+}
+
+/// 转换 HTTP method。
+///
+/// Business Logic（为什么需要这个函数）:
+///     axum 与 reqwest 都基于 HTTP method，但显式转换能避免版本差异导致类型不兼容。
+///
+/// Code Logic（这个函数做什么）:
+///     通过 method 字符串 bytes 构造 reqwest::Method。
+fn reqwest_method(method: &axum::http::Method) -> Result<ReqwestMethod, ApiError> {
+    ReqwestMethod::from_bytes(method.as_str().as_bytes())
+        .map_err(|_| ApiError::bad_request("预览请求方法无效"))
+}
+
+/// 代理 WebSocket preview 请求。
+///
+/// Business Logic（为什么需要这个函数）:
+///     dev server HMR 需要 WebSocket 双向消息转发，否则 iframe 中的开发预览无法热更新。
+///
+/// Code Logic（这个函数做什么）:
+///     从原始请求提取 WebSocketUpgrade，构造 ws/wss 上游 URL，并在 upgrade 后桥接上下游消息。
+async fn proxy_workbench_browser_websocket(
+    _state: AppState,
+    session: BrowserPreviewSession,
+    tail_path: String,
+    req: Request<Body>,
+) -> Result<Response, ApiError> {
+    let upstream_url = build_upstream_websocket_url(&session, &tail_path, req.uri().query())?;
+    let (mut parts, _body) = req.into_parts();
+    let upgrade = WebSocketUpgrade::from_request_parts(&mut parts, &())
+        .await
+        .map_err(|_| ApiError::bad_request("预览 WebSocket upgrade 请求无效"))?;
+    Ok(upgrade
+        .on_upgrade(move |socket| async move {
+            if let Err(error) = bridge_websocket(socket, upstream_url).await {
+                tracing::debug!("浏览器预览 WebSocket 代理结束: {error}");
+            }
+        })
+        .into_response())
+}
+
+/// 构造 WebSocket 上游 URL。
+///
+/// Business Logic（为什么需要这个函数）:
+///     HMR 请求仍需沿用 HTTP proxy 的安全目标选择，只是协议从 http/https 切换为 ws/wss。
+///
+/// Code Logic（这个函数做什么）:
+///     复用 build_upstream_proxy_url 拼接 path/query，再把 scheme 映射为 ws/wss。
+fn build_upstream_websocket_url(
+    session: &BrowserPreviewSession,
+    tail_path: &str,
+    query: Option<&str>,
+) -> Result<String, ApiError> {
+    let mut url = build_upstream_proxy_url(session, tail_path, query)?;
+    let scheme = match url.scheme() {
+        "http" => "ws",
+        "https" => "wss",
+        "ws" => "ws",
+        "wss" => "wss",
+        _ => return Err(ApiError::bad_request("预览 WebSocket 上游协议无效")),
+    };
+    url.set_scheme(scheme)
+        .map_err(|_| ApiError::bad_request("预览 WebSocket 上游协议无法转换"))?;
+    Ok(url.to_string())
+}
+
+/// 桥接上下游 WebSocket。
+///
+/// Business Logic（为什么需要这个函数）:
+///     iframe 中的 HMR client 和 dev server 需要持续双向通信，任一侧关闭都应结束桥接。
+///
+/// Code Logic（这个函数做什么）:
+///     连接上游 WebSocket，split 上下游流，用 tokio::select 在两个方向之间转发消息。
+async fn bridge_websocket(socket: WebSocket, upstream_url: String) -> Result<(), String> {
+    let (upstream, _) = connect_async(&upstream_url)
+        .await
+        .map_err(|error| format!("连接预览 WebSocket 上游失败: {error}"))?;
+    let (mut upstream_write, mut upstream_read) = upstream.split();
+    let (mut downstream_write, mut downstream_read) = socket.split();
+
+    let client_to_upstream = async {
+        while let Some(message) = downstream_read.next().await {
+            let message = message.map_err(|error| format!("读取下游 WebSocket 失败: {error}"))?;
+            upstream_write
+                .send(axum_to_tungstenite_message(message))
+                .await
+                .map_err(|error| format!("写入上游 WebSocket 失败: {error}"))?;
+        }
+        Ok::<(), String>(())
+    };
+
+    let upstream_to_client = async {
+        while let Some(message) = upstream_read.next().await {
+            let message = message.map_err(|error| format!("读取上游 WebSocket 失败: {error}"))?;
+            if let Some(message) = tungstenite_to_axum_message(message) {
+                downstream_write
+                    .send(message)
+                    .await
+                    .map_err(|error| format!("写入下游 WebSocket 失败: {error}"))?;
+            }
+        }
+        Ok::<(), String>(())
+    };
+
+    tokio::select! {
+        result = client_to_upstream => result,
+        result = upstream_to_client => result,
+    }
+}
+
+/// 转换 axum WebSocket 消息到 tungstenite 消息。
+///
+/// Business Logic（为什么需要这个函数）:
+///     WebSocket 桥接两端使用不同消息类型，但业务上需要保留文本、二进制和心跳消息。
+///
+/// Code Logic（这个函数做什么）:
+///     按同名 variant 转换；Close frame 只保留关闭语义，不保留 code/reason 细节。
+fn axum_to_tungstenite_message(message: AxumWsMessage) -> TungsteniteMessage {
+    match message {
+        AxumWsMessage::Text(text) => TungsteniteMessage::Text(text),
+        AxumWsMessage::Binary(binary) => TungsteniteMessage::Binary(binary),
+        AxumWsMessage::Ping(ping) => TungsteniteMessage::Ping(ping),
+        AxumWsMessage::Pong(pong) => TungsteniteMessage::Pong(pong),
+        AxumWsMessage::Close(_) => TungsteniteMessage::Close(None),
+    }
+}
+
+/// 转换 tungstenite WebSocket 消息到 axum 消息。
+///
+/// Business Logic（为什么需要这个函数）:
+///     上游 HMR server 的消息需要转成 axum 类型后写回浏览器。
+///
+/// Code Logic（这个函数做什么）:
+///     按同名 variant 转换；忽略 tungstenite 的 raw Frame，Close frame 只保留关闭语义。
+fn tungstenite_to_axum_message(message: TungsteniteMessage) -> Option<AxumWsMessage> {
+    match message {
+        TungsteniteMessage::Text(text) => Some(AxumWsMessage::Text(text)),
+        TungsteniteMessage::Binary(binary) => Some(AxumWsMessage::Binary(binary)),
+        TungsteniteMessage::Ping(ping) => Some(AxumWsMessage::Ping(ping)),
+        TungsteniteMessage::Pong(pong) => Some(AxumWsMessage::Pong(pong)),
+        TungsteniteMessage::Close(_) => Some(AxumWsMessage::Close(None)),
+        TungsteniteMessage::Frame(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::extract::State;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::any;
+    use axum::Router;
+    use std::net::SocketAddr;
+    use std::sync::Mutex;
+    use tokio::net::TcpListener;
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     未登记或已过期的 previewId 不能访问任何上游目标。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     新建空 registry 后查找不存在的 previewId，断言返回 None。
+    #[test]
+    fn registry_rejects_unknown_preview_id() {
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        assert!(registry.lookup("missing").is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     预览链接会暴露给 iframe 和手机浏览器，previewId 必须不可预测且每次创建不同。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     连续创建两个相同 target 的 preview，断言 UUID simple 字符串不同且长度不小于 32。
+    #[test]
+    fn registry_creates_unpredictable_preview_ids() {
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        let first = registry.create_local_for_test("project-a", None, "http://127.0.0.1:5173/");
+        let second = registry.create_local_for_test("project-a", None, "http://127.0.0.1:5173/");
+
+        assert_ne!(first.preview_id, second.preview_id);
+        assert!(first.preview_id.len() >= 32);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     preview session 过期后应立即失效，避免旧手机链接长期保留访问能力。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建 preview 后强制过期，再通过 lookup 触发清理并断言无法找到。
+    #[test]
+    fn registry_expires_old_sessions() {
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        let preview = registry.create_local_for_test("project-a", None, "http://127.0.0.1:5173/");
+        registry.force_expire_for_test(&preview.preview_id);
+
+        assert!(registry.lookup(&preview.preview_id).is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     未知 previewId 不能触发任何上游请求，应在本机 proxy 层直接返回 404 语义。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对空 registry 执行 lookup helper，断言错误状态是 NOT_FOUND。
+    #[test]
+    fn proxy_unknown_preview_id_returns_not_found() {
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        let error = lookup_preview_or_not_found(&registry, "missing")
+            .expect_err("missing preview should return not found");
+
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     preview proxy 不能因为请求 tail 看起来像绝对 URL 就变成开放代理。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 `http://evil.test` tail，断言上游 host 仍是登记 target，tail 只作为 path segment 追加。
+    #[test]
+    fn proxy_url_keeps_absolute_tail_under_registered_target() {
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        let preview = registry.create_local_for_test(
+            "project-a",
+            None,
+            "http://127.0.0.1:5173/app/",
+        );
+        let session = registry.lookup(&preview.preview_id).unwrap();
+
+        let url =
+            build_upstream_proxy_url(&session, "http://evil.test/pwn", Some("version=1")).unwrap();
+
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+        assert_eq!(url.port(), Some(5173));
+        assert_eq!(url.path(), "/app/http://evil.test/pwn");
+        assert_eq!(url.query(), Some("version=1"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     本机 preview proxy 必须把 iframe 的 path/query 转发到用户选择的 loopback dev server。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动测试 upstream，创建 local session，发起 GET 代理请求并断言 upstream 收到完整 path/query。
+    #[tokio::test]
+    async fn local_preview_proxy_forwards_get_path_and_query() {
+        let seen_path = std::sync::Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/assets/app.js",
+                any(
+                    |State(seen_path): State<std::sync::Arc<Mutex<Option<String>>>>,
+                     req: Request<Body>| async move {
+                        *seen_path.lock().unwrap() =
+                            Some(req.uri().path_and_query().unwrap().to_string());
+                        "local ok"
+                    },
+                ),
+            )
+            .with_state(seen_path.clone());
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        let preview = registry.create_local(
+            "project-a".to_string(),
+            None,
+            format!("http://{addr}/"),
+            62116,
+        );
+        let session = registry.lookup(&preview.preview_id).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("http://127.0.0.1/proxy?version=1")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = proxy_http_request_for_session(session, "assets/app.js".to_string(), req)
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], b"local ok");
+        assert_eq!(
+            seen_path.lock().unwrap().as_deref(),
+            Some("/assets/app.js?version=1")
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端项目 relay preview 只能转发到 owning device 的 preview proxy，不能直接访问远端设备的 loopback targetUrl。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建 remote relay session，owner 测试服务只监听 owner proxy path，断言请求命中该 path。
+    #[tokio::test]
+    async fn remote_relay_proxy_forwards_to_owner_proxy_path() {
+        let seen_path = std::sync::Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/api/workbench/browser/proxy/remote-preview/assets/app.js",
+                any(
+                    |State(seen_path): State<std::sync::Arc<Mutex<Option<String>>>>,
+                     req: Request<Body>| async move {
+                        *seen_path.lock().unwrap() =
+                            Some(req.uri().path_and_query().unwrap().to_string());
+                        "remote ok"
+                    },
+                ),
+            )
+            .with_state(seen_path.clone());
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        let preview = registry.create_remote_relay(
+            "project-a".to_string(),
+            Some("remote:device-a:inner-worktree".to_string()),
+            format!("http://{addr}"),
+            "remote-preview".to_string(),
+            "http://127.0.0.1:9/".to_string(),
+            62116,
+        );
+        let session = registry.lookup(&preview.preview_id).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("http://127.0.0.1/proxy?version=2")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = proxy_http_request_for_session(session, "assets/app.js".to_string(), req)
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], b"remote ok");
+        assert_eq!(
+            seen_path.lock().unwrap().as_deref(),
+            Some("/api/workbench/browser/proxy/remote-preview/assets/app.js?version=2")
+        );
+    }
+}

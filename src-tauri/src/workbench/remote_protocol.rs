@@ -8,6 +8,26 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 远端浏览器候选发现请求体。
+///
+/// Business Logic（为什么需要这个类型）:
+///     本机 remote shortcut 需要把浏览器候选发现请求转发到项目 owning device 执行。
+///
+/// Code Logic（这个类型做什么）:
+///     复用 Workbench browser 模型中的 camelCase discover 请求，避免远端协议字段漂移。
+pub type RemoteWorkbenchBrowserDiscoverReq =
+    crate::workbench::browser_models::WorkbenchBrowserDiscoverReq;
+
+/// 远端浏览器 preview 创建请求体。
+///
+/// Business Logic（为什么需要这个类型）:
+///     远端项目必须在 owning device 创建真实 preview，本机只创建 relay session。
+///
+/// Code Logic（这个类型做什么）:
+///     复用 Workbench browser 模型中的 camelCase preview 请求，包含 projectId/worktreeId/targetUrl。
+pub type RemoteWorkbenchBrowserPreviewReq =
+    crate::workbench::browser_models::WorkbenchBrowserPreviewReq;
+
 /// 远端项目 ID 请求体。
 ///
 /// Business Logic（为什么需要这个结构体）:

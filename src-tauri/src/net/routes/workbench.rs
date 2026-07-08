@@ -13,7 +13,8 @@ use crate::commands::prompt_optimizer::{
 use crate::commands::workbench::{
     add_local_workbench_project_from_path, close_workbench_pane_for_state,
     close_workbench_session_for_state, commit_workbench_worktree_for_state,
-    create_workbench_session_for_state, create_workbench_worktree_for_state,
+    create_workbench_browser_preview_for_state, create_workbench_session_for_state,
+    create_workbench_worktree_for_state, discover_workbench_browser_targets_for_state,
     focus_workbench_session_for_state, get_claude_session_preview_for_state,
     get_focused_workbench_session_for_state, get_workbench_path_info_for_state,
     list_workbench_dir_for_state, list_workbench_git_commits_for_state,
@@ -37,7 +38,13 @@ use crate::commands::workbench::{
     zoom_workbench_pane_for_state, WorkbenchMergeResultDto,
 };
 use crate::error::AppError;
+use crate::net::routes::ApiError;
 use crate::state::AppState;
+use crate::workbench::browser_models::{
+    WorkbenchBrowserDiscoverReq, WorkbenchBrowserDiscovery, WorkbenchBrowserPreview,
+    WorkbenchBrowserPreviewReq,
+};
+use crate::workbench::browser_proxy::proxy_workbench_browser_request;
 use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchHtmlAssetDto, WorkbenchOpenFileDto,
     WorkbenchPathInfo, WorkbenchProjectDto, WorkbenchProjectRow, WorkbenchRemoteDirectoryEntryDto,
@@ -58,8 +65,9 @@ use crate::workbench::remote_protocol::{
 use crate::workbench::claude_sessions::{SessionPreview, SessionSearchHit};
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::header;
+use axum::http::Request;
 use axum::response::Response;
 use axum::Json;
 use serde_json::Value;
@@ -226,6 +234,64 @@ pub async fn list_projects(
 ) -> Result<Json<Vec<WorkbenchProjectDto>>, AppError> {
     let rows = state.workbench_project_repo.list().await?;
     Ok(Json(rows.iter().map(WorkbenchProjectRow::to_dto).collect()))
+}
+
+/// 发现远端设备本机项目的浏览器预览候选。
+///
+/// Business Logic（为什么需要这个函数）:
+///     其他设备操作 remote shortcut 时，候选发现必须在项目 owning device 上执行。
+///
+/// Code Logic（这个函数做什么）:
+///     先确认 projectId 属于本设备 local 项目，再调用 Task 1 browser discovery 并返回 discovery DTO。
+pub async fn discover_browser_targets(
+    State(state): State<AppState>,
+    Json(req): Json<WorkbenchBrowserDiscoverReq>,
+) -> Result<Json<WorkbenchBrowserDiscovery>, ApiError> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
+    let discovery = crate::workbench::browser::discover_workbench_browser_targets(
+        &state,
+        req.project_id,
+        req.worktree_id,
+    )
+    .await?;
+    Ok(Json(discovery))
+}
+
+/// 创建远端设备本机项目的浏览器 preview。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 创建 preview 时，owner 设备必须先创建真实 preview session。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 projectId 是本设备 local 项目后，复用 commands helper 创建 local preview 并返回 DTO。
+pub async fn create_browser_preview(
+    State(state): State<AppState>,
+    Json(req): Json<WorkbenchBrowserPreviewReq>,
+) -> Result<Json<WorkbenchBrowserPreview>, ApiError> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
+    let preview = create_workbench_browser_preview_for_state(
+        &state,
+        req.project_id,
+        req.worktree_id,
+        req.target_url,
+    )
+    .await?;
+    Ok(Json(preview))
+}
+
+/// 代理桌面端浏览器 preview 请求。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面端 iframe 必须通过本机 HTTP server 的同源 preview URL 访问 dev server。
+///
+/// Code Logic（这个函数做什么）:
+///     从 path 提取 previewId 和 wildcard path，委托 browser_proxy 按 session 转发 HTTP/WebSocket。
+pub async fn proxy_browser_preview(
+    State(state): State<AppState>,
+    AxumPath((preview_id, path)): AxumPath<(String, String)>,
+    req: Request<Body>,
+) -> Result<Response, ApiError> {
+    proxy_workbench_browser_request(state, preview_id, path, req).await
 }
 
 /// 列出远端设备本机项目的 worktree。
@@ -865,6 +931,59 @@ pub async fn stream_prompt_optimizer_to_session(
         )
         .await?,
     ))
+}
+
+/// 手机端发现本机或远端项目的浏览器预览候选。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机浏览器进入 Workbench Browser tab 时，也需要支持 remote shortcut 的二级代理候选发现。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 projectId/worktreeId，委托 commands 层 remote-aware discover helper。
+pub async fn mobile_discover_browser_targets(
+    State(state): State<AppState>,
+    Json(req): Json<WorkbenchBrowserDiscoverReq>,
+) -> Result<Json<WorkbenchBrowserDiscovery>, ApiError> {
+    let discovery =
+        discover_workbench_browser_targets_for_state(&state, req.project_id, req.worktree_id)
+            .await?;
+    Ok(Json(discovery))
+}
+
+/// 手机端创建本机或远端项目的浏览器 preview。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端 iframe 只能使用本机 HTTP server 同源 proxy path；远端项目由本机创建 relay preview。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 project/worktree/targetUrl，委托 commands 层 remote-aware preview helper。
+pub async fn mobile_create_browser_preview(
+    State(state): State<AppState>,
+    Json(req): Json<WorkbenchBrowserPreviewReq>,
+) -> Result<Json<WorkbenchBrowserPreview>, ApiError> {
+    let preview = create_workbench_browser_preview_for_state(
+        &state,
+        req.project_id,
+        req.worktree_id,
+        req.target_url,
+    )
+    .await?;
+    Ok(Json(preview))
+}
+
+/// 代理手机端浏览器 preview 请求。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `/mobile` iframe 不能直接访问远端设备或 loopback target，必须通过当前设备同源 proxy path。
+///
+/// Code Logic（这个函数做什么）:
+///     从 mobile proxy path 提取 previewId 和 wildcard path，复用 browser_proxy 转发逻辑。
+pub async fn mobile_proxy_browser_preview(
+    State(state): State<AppState>,
+    AxumPath((preview_id, path)): AxumPath<(String, String)>,
+    req: Request<Body>,
+) -> Result<Response, ApiError> {
+    proxy_workbench_browser_request(state, preview_id, path, req).await
 }
 
 /// 列出手机端可管理的 Workbench 项目。
