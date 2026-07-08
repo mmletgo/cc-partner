@@ -7,6 +7,11 @@ license = ""
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
+# 存在多个 [[bin]] target（GUI app + cc-partner-backend CLI）时，
+# 显式声明默认运行 GUI 主进程，避免 `cargo run` / `tauri dev` / `tauri build`
+# 报 "could not determine which binary to run"。CLI 仍可经
+# `cargo run --bin cc-partner-backend` 或打包后的 `cc-partner-backend start` 启动。
+default-run = "app"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
