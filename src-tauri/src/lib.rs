@@ -444,6 +444,8 @@ pub fn run() {
                 let health = Arc::new(crate::health::HealthRuntime::new());
                 let health_cancel =
                     Arc::new(Mutex::new(None::<tokio_util::sync::CancellationToken>));
+                let ui: Arc<dyn crate::backend::ui::BackendUi> =
+                    Arc::new(crate::backend::ui::TauriBackendUi::new(app_handle.clone()));
                 let state = AppState {
                     config: Arc::new(RwLock::new(config)),
                     db: pool,
@@ -458,6 +460,7 @@ pub fn run() {
                     discovery: Arc::new(Mutex::new(None)),
                     peer_client: Arc::new(PeerClient::new()),
                     transfers: Arc::new(TransferRegistry::new()),
+                    ui,
                     app_handle: app_handle.clone(),
                     // M8 更新器状态：下载状态机 + 缓存的 Update + 下载字节 + 任务句柄 + 取消令牌
                     update_status: Arc::new(RwLock::new(

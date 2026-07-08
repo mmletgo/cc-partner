@@ -172,15 +172,16 @@ fn mobile_asset_key(path: &str) -> Option<String> {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     手机端页面由前端构建写入 Tauri `frontendDist`，生产打包后源码相对目录不存在，必须从 Tauri
-///     asset resolver 读取嵌入资源；开发/测试环境可在 resolver 缺失时读 dist 兜底。
+///     UI adapter 读取嵌入资源；开发/测试环境可在 adapter 缺失时读 dist 兜底。
 ///
 /// Code Logic（这个函数做什么）:
-///     将请求路径归一化为 asset key；优先调用精确 Tauri asset 查询；命中时用 asset bytes/mime/CSP 生成响应；
+///     将请求路径归一化为 asset key；优先调用 `AppState::mobile_asset` 查询当前 UI adapter；
+///     命中时用 asset bytes/mime/CSP 生成响应；
 ///     未命中时再尝试 dev/test filesystem fallback。
 async fn mobile_asset_response(state: &AppState, path: &str) -> Option<Response<Body>> {
     let asset_key = mobile_asset_key(path)?;
 
-    if let Some(asset) = mobile_tauri_asset(state, &asset_key) {
+    if let Some(asset) = state.mobile_asset(&asset_key) {
         let content_type = mobile_content_type_header(asset.mime_type(), &asset_key);
         let csp_header = asset
             .csp_header()
@@ -198,35 +199,6 @@ async fn mobile_asset_response(state: &AppState, path: &str) -> Option<Response<
     }
 
     mobile_dev_dist_asset_response(&asset_key).await
-}
-
-/// 从 Tauri asset resolver 精确读取移动端资源。
-///
-/// Business Logic（为什么需要这个函数）:
-///     Tauri asset resolver 在生产态找不到某个 key 时会自动回退到 `index.html`；`/mobile` 必须由本模块
-///     自己回退到 `mobile.html`，否则手机端深层路径可能误拿桌面 shell。
-///
-/// Code Logic（这个函数做什么）:
-///     若当前包内有嵌入资源，则先遍历 resolver asset key，只有 exact match 才调用 `get`；若没有嵌入资源
-///     （典型 devUrl 开发态），直接调用 `get` 让 Tauri 按 frontendDist 目录读取。
-fn mobile_tauri_asset(state: &AppState, asset_key: &str) -> Option<tauri::Asset> {
-    let resolver = state.app_handle.asset_resolver();
-    let mut has_embedded_assets = false;
-    let mut has_exact_asset = false;
-
-    for (key, _) in resolver.iter() {
-        has_embedded_assets = true;
-        if key.as_ref().trim_start_matches('/') == asset_key {
-            has_exact_asset = true;
-            break;
-        }
-    }
-
-    if has_embedded_assets && !has_exact_asset {
-        return None;
-    }
-
-    resolver.get(asset_key.to_string())
 }
 
 /// 从源码树 dist 目录读取移动端资源作为开发/测试兜底。

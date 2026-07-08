@@ -13,6 +13,7 @@
 //!     actual_http_port 用 AtomicU16（启动后高频只读，无锁更高效）；
 //!     discovery 句柄用 Mutex<Option<...>>（仅启动/关闭时写）。
 
+use crate::backend::ui::{serialize_event_payload, BackendAsset, BackendUi};
 use crate::config::AppConfig;
 use crate::models::device::Device;
 use crate::net::peer_client::PeerClient;
@@ -24,6 +25,7 @@ use crate::storage::{
 };
 use crate::transfer::registry::TransferRegistry;
 use mdns_sd::ServiceDaemon;
+use serde::Serialize;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU16;
@@ -61,7 +63,9 @@ pub struct AppState {
     pub peer_client: Arc<PeerClient>,
     /// 活跃传输任务登记表（M5）：含每任务 CancellationToken，供发送/接收两端与 cancel 命令共享
     pub transfers: Arc<TransferRegistry>,
-    /// Tauri AppHandle（M5）：axum transfer handler 需 emit 接收进度/完成事件给前端
+    /// 后端 UI adapter（GUI 使用 Tauri，headless 使用 filesystem/no-op）
+    pub ui: Arc<dyn BackendUi>,
+    /// Tauri AppHandle 兼容字段：Task 3/4 会继续替换 Workbench/Orchestrator/transfer 中的 raw AppHandle 调用
     #[allow(dead_code)]
     pub app_handle: AppHandle,
     /// M8 更新下载状态机（status/progress/error/filePath/url/filename/size），对齐前端 UpdateDownloadStatus，
@@ -128,21 +132,58 @@ pub struct AppState {
     pub orchestrator_outbox_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// Workbench Claude session 搜索的内存索引，key = worktree_path canonical string。
     /// 首次搜索某 worktree 时 lazy 初始化并启动文件监听。
-    pub workbench_claude_session_indexes:
-        Arc<RwLock<HashMap<String, Arc<RwLock<crate::workbench::claude_sessions::WorktreeSessionIndex>>>>>,
+    pub workbench_claude_session_indexes: Arc<
+        RwLock<
+            HashMap<String, Arc<RwLock<crate::workbench::claude_sessions::WorktreeSessionIndex>>>,
+        >,
+    >,
     /// 每个 worktree 的文件监听句柄，key 同 workbench_claude_session_indexes。
     /// 监听失败时该 key 不存在（降级为每次重扫）。
-    pub workbench_claude_session_watchers:
-        Arc<Mutex<HashMap<String, notify::RecommendedWatcher>>>,
+    pub workbench_claude_session_watchers: Arc<Mutex<HashMap<String, notify::RecommendedWatcher>>>,
 }
 
 impl AppState {
-    /// 读取本机设备名（从 config RwLock 取，供 mDNS 注册与命令层复用）。
+    /// 读取本机设备名。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     mDNS 注册、健康检查和控制文件都需要展示当前配置中的设备名。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 config RwLock 读取 device_name 并 clone 返回。
     pub fn device_name(&self) -> String {
         self.config
             .read()
             .expect("config 读锁中毒")
             .device_name
             .clone()
+    }
+
+    /// 发送后端 UI 事件。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     运行时业务层需要广播终端输出、传输状态等事件，但 GUI/headless 两种模式的处理方式不同。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先把任意可序列化 payload 转为 JSON Value；成功则委托 `BackendUi::emit`，失败则记录 warn。
+    #[allow(dead_code)]
+    pub fn emit_event<T>(&self, event: &str, payload: T)
+    where
+        T: Serialize,
+    {
+        match serialize_event_payload(payload) {
+            Ok(value) => self.ui.emit(event, value),
+            Err(error) => tracing::warn!("序列化事件 {event} 失败: {error}"),
+        }
+    }
+
+    /// 读取移动端静态资源。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     HTTP `/mobile` fallback 需要按运行模式从 GUI 嵌入资源或 headless dist 目录读取移动端页面资源。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将已规范化的 asset key 委托给当前 `BackendUi` adapter，并返回统一 `BackendAsset`。
+    pub fn mobile_asset(&self, asset_key: &str) -> Option<BackendAsset> {
+        self.ui.asset(asset_key)
     }
 }

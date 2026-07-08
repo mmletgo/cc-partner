@@ -7,3 +7,4 @@
 //!     聚合控制文件、UI 适配、共享 runtime 和 CLI 命令入口。
 
 pub mod control;
+pub mod ui;
