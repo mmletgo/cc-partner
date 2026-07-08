@@ -14,6 +14,7 @@
 - **工作台** — 指定本机或局域网远端项目文件夹，管理 Git worktree、多个项目终端、文件工作区、Git 提交树和项目自动化看板
 - **移动端 Workbench** — 可信局域网内通过 `/mobile` 手机浏览器远程操作 Workbench；本机可作为手机到远端设备的二级代理，统一管理远端项目的 worktree、终端、文件、Git、Prompt 优化和项目自动化，桌面端展示访问链接与二维码
 - **Orchestrator 自动编排器** — 项目级任务队列、可见 Runner、验证 evidence 与 full-auto 交付，桌面端作为 Workbench 自动化工作区展示
+- **独立后端 CLI** — 远端设备可执行 `cc-partner-backend start` 启动 P2P/Workbench/Orchestrator 远端支持，无需打开 GUI
 - **P2P 自动互联** — 局域网内 mDNS 自动发现
 - **自动更新** — GitHub Releases 检测 / 下载 / 安装
 
@@ -23,7 +24,7 @@
 - **前端**: React 19 · TypeScript · Vite · React Router v6 · CSS Modules
 - **打包/更新**: Tauri CLI · tauri-plugin-updater · tauri-plugin-global-shortcut · tauri-plugin-process · tauri-plugin-dialog
 
-桌面端架构：Tauri 2 主进程用 Rust 实现全部后端能力，前端复用 `web/` 的 React。本地前端通过 `@tauri-apps/api` 的 `invoke()` 调用 Rust `#[tauri::command]`（无本地端口暴露）；跨设备 P2P 走 axum HTTP server（固定首选端口，端口被占则自动 +1）+ reqwest 客户端 + mdns-sd 发现。局域网能力依赖防火墙放行 UDP 5353(mDNS) 与实际 P2P HTTP TCP 端口（默认 62116，详见 README）。两条通道共享同一份 `AppState`。
+桌面端架构：Tauri 2 主进程用 Rust 实现 GUI 和共享后端能力，前端复用 `web/` 的 React。本地前端通过 `@tauri-apps/api` 的 `invoke()` 调用 Rust `#[tauri::command]`（无本地端口暴露）；跨设备 P2P 由独立后端 sidecar/CLI 负责 axum HTTP server（固定首选端口，端口被占则自动 +1）+ reqwest 客户端 + mdns-sd 发现。局域网能力依赖防火墙放行 UDP 5353(mDNS) 与实际 P2P HTTP TCP 端口（默认 62116，详见 README）。两条通道共享同一份 `AppState`。
 
 ## 2. 目录结构
 
@@ -83,6 +84,7 @@ cc-partner/
 │   └── package.json
 ├── src-tauri/                    # Tauri 2 Rust 后端（见 src-tauri/CLAUDE.md）
 │   ├── src/                      # lib.rs(入口) config/state/error/commands/models/storage/sync/net/transfer/screenshot/workbench/orchestrator/permissions/hotkey/tray
+│   │   ├── backend/              # GUI/headless 共享运行时、独立后端 CLI lifecycle/control 和 UI adapter
 │   │   └── orchestrator/         # 自动编排器任务、调度、Runner 和交付逻辑
 │   ├── migrations/               # SQL schema 文档
 │   ├── capabilities/             # Tauri 权限清单（default.json）
