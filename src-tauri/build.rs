@@ -53,7 +53,10 @@ fn ensure_debug_sidecar_launcher() {
         }
     }
 
-    let content = debug_sidecar_launcher_content(&target);
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| {
+        panic!("构建 backend sidecar launcher 时缺少 CARGO_MANIFEST_DIR 环境变量")
+    });
+    let content = debug_sidecar_launcher_content(&target, &manifest_dir);
     if let Err(error) = fs::write(&launcher_path, content) {
         panic!("写入 debug sidecar launcher 失败: {error}");
     }
@@ -80,25 +83,27 @@ fn sidecar_launcher_path(target: &str) -> PathBuf {
 /// 返回 debug sidecar launcher 文件内容。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     开发期 sidecar 应尽量复用已编译的 `target/debug/cc-partner-backend`，没有时再走 cargo fallback。
+///     开发期 Tauri externalBin 构建期校验需要 `binaries/cc-partner-backend-<target>` 存在；
+///     该 launcher 在 GUI 通过 Tauri sidecar 机制调用时真正拉起 backend。
 ///
 /// Code Logic（这个函数做什么）:
-///     Unix target 返回可执行 shell launcher；其它 target 写入说明性占位，运行失败后 GUI 命令会进入 cargo fallback。
-fn debug_sidecar_launcher_content(target: &str) -> &'static str {
+///     Unix target 返回可执行 shell launcher；Windows target 写入说明性占位（Windows dev 走 dev binary fallback）。
+///     launcher 必须只通过 `cargo run --bin cc-partner-backend` 启动，**不能 exec 任何 target/debug 真二进制**。
+///     原因：Tauri externalBin 在 dev 模式会把 `binaries/cc-partner-backend-<target>` 复制到
+///     `target/debug/cc-partner-backend` 覆盖 cargo 原始产物。如果 launcher 里 `exec target/debug/cc-partner-backend`，
+///     而 launcher 自身已被复制到那个路径，就会无限自递归。直接 `cargo run` 不经过任何会被覆盖的路径，
+///     且 cargo 检测到已编译会直接运行产物，首次外的开销极低。manifest_dir 在构建期烧入，运行位置无关。
+fn debug_sidecar_launcher_content(target: &str, manifest_dir: &str) -> String {
     if target.contains("windows") {
-        "debug placeholder for cc-partner-backend sidecar\n"
-    } else {
+        return "debug placeholder for cc-partner-backend sidecar\n".to_string();
+    }
+    format!(
         r#"#!/usr/bin/env sh
 set -eu
-DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-MANIFEST_DIR=$(CDPATH= cd -- "$DIR/.." && pwd)
-BIN="$MANIFEST_DIR/target/debug/cc-partner-backend"
-if [ -x "$BIN" ]; then
-  exec "$BIN" "$@"
-fi
+MANIFEST_DIR={manifest_dir:?}
 exec cargo run --manifest-path "$MANIFEST_DIR/Cargo.toml" --bin cc-partner-backend -- "$@"
 "#
-    }
+    )
 }
 
 /// 在 Unix 平台给 launcher 增加执行权限。

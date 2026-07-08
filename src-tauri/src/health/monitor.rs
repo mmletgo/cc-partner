@@ -63,23 +63,35 @@ impl ActivitySampler for MockSampler {
 ///
 /// 维护上次鼠标坐标与按键数,每次采样比较得出是否活跃;活跃时同步查询活动窗口信息。
 /// 真实采样器不参与单测(依赖系统键鼠与窗口管理器),仅保证编译通过。
+///
+/// `state` 为 `Option` 以支持权限降级:macOS 缺辅助功能权限或 Linux 缺 X display 时,
+/// `DeviceState` 构建会失败,此时 sampler 降级为恒 inactive,避免采样线程 panic。
 pub struct DeviceQuerySampler {
     /// 上次采样的鼠标坐标(首次采样视为「无基线」→ 默认活跃)。
     last_mouse: Option<(i64, i64)>,
     /// 上次采样的按键数,用于检测按键数变化(按下/释放)。
     last_key_count: usize,
-    /// device_query 设备状态句柄(非 Send,仅采样线程内持有)。
-    state: DeviceState,
+    /// device_query 设备状态句柄(非 Send,仅采样线程内持有)。None 表示权限/环境不可用,降级采样。
+    state: Option<DeviceState>,
 }
 
 impl DeviceQuerySampler {
-    /// Business Logic:Task 6 daemon 需要一个能查询真实键鼠状态的采样器实例。
-    /// Code Logic:初始化无基线坐标、零按键数,并创建 DeviceState(首次采样必判为活跃)。
+    /// Business Logic:Task 6 daemon 需要一个能查询真实键鼠状态的采样器实例;
+    /// 但 macOS 缺辅助功能权限、Linux 缺 X display 时构建会 panic,必须降级而非崩溃。
+    ///
+    /// Code Logic:初始化无基线坐标、零按键数,并通过 `try_build_device_state()` 安全构建
+    /// DeviceState;成功存入 `state`,失败(权限/环境不可用)存 None 进入降级模式。
     pub fn new() -> Self {
+        let state = try_build_device_state();
+        if state.is_none() {
+            tracing::warn!(
+                "健康监测采样器降级:无法构建 DeviceState(macOS 缺辅助功能权限或 Linux 缺 X display),采样将恒为 inactive"
+            );
+        }
         Self {
             last_mouse: None,
             last_key_count: 0,
-            state: DeviceState::new(),
+            state,
         }
     }
 }
@@ -92,8 +104,12 @@ impl Default for DeviceQuerySampler {
 
 impl ActivitySampler for DeviceQuerySampler {
     fn sample(&mut self) -> ActivitySample {
-        let mouse = self.state.get_mouse();
-        let keys = self.state.get_keys();
+        // 降级模式:无 DeviceState 时恒返回 inactive,不查询键鼠/窗口。
+        let Some(state) = self.state.as_ref() else {
+            return ActivitySample::default();
+        };
+        let mouse = state.get_mouse();
+        let keys = state.get_keys();
         // device_query MouseState.coords 为 (i32, i32),用 as i64 兼容 i32/i64 两种坐标类型。
         let coords = (mouse.coords.0 as i64, mouse.coords.1 as i64);
         // 首次采样无基线,默认视为活跃(捕捉到设备即认为用户在场)。
@@ -117,6 +133,32 @@ impl ActivitySampler for DeviceQuerySampler {
             process_name,
             window_title,
         }
+    }
+}
+
+/// 安全构建 DeviceState,权限/环境不可用时返回 None 而非 panic。
+///
+/// Business Logic(为什么需要这个函数):
+///     `device_query::DeviceState::new()` 在 macOS 缺辅助功能权限时会 `assert!` panic,
+///     在 Linux 缺 X display 时也会 panic;health daemon 的采样线程若直接调用会导致子线程崩溃。
+///     需要一个跨平台的安全构建入口,失败时优雅降级。
+///
+/// Code Logic(这个函数做什么):
+///     macOS 优先用库提供的 `checked_new()`(返回 Option,不 panic);其它平台无 checked_new,
+///     用 `catch_unwind` 包裹 `new()`,panic 时返回 None。
+fn try_build_device_state() -> Option<DeviceState> {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS 库直接提供不 panic 的 checked_new,内部检测辅助功能权限。
+        DeviceState::checked_new()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Linux/Windows 无 checked_new;用 catch_unwind 兜底,DeviceState 用 AssertUnwindSafe 标记。
+        use std::panic::{self, AssertUnwindSafe};
+        let result = panic::catch_unwind(AssertUnwindSafe(DeviceState::new));
+        result.ok()
     }
 }
 
@@ -152,5 +194,36 @@ mod tests {
         assert!(!s.is_active);
         assert!(s.process_name.is_none());
         assert!(s.window_title.is_none());
+    }
+
+    /// 验证降级模式(DeviceState 构建失败)时采样恒为 inactive,不 panic。
+    ///
+    /// Business Logic(为什么需要这个测试):
+    ///     macOS 缺辅助功能权限或 Linux 缺 X display 时,采样器必须优雅降级而非崩溃;
+    ///     降级后每分钟采样应恒为 inactive,让状态机正确判定用户不在场。
+    ///
+    /// Code Logic(这个测试做什么):
+    ///     用 test-only 构造器创建 state=None 的降级 sampler,连续采样多次,断言全部 inactive 且无窗口信息。
+    #[test]
+    fn device_query_sampler_degrades_to_inactive_when_unavailable() {
+        let mut sampler = DeviceQuerySampler::degraded_for_test();
+        for _ in 0..3 {
+            let sample = sampler.sample();
+            assert!(!sample.is_active, "降级采样必须恒为 inactive");
+            assert!(sample.process_name.is_none());
+            assert!(sample.window_title.is_none());
+        }
+    }
+
+    impl DeviceQuerySampler {
+        /// 测试专用:构造无 DeviceState 的降级采样器,模拟权限/环境不可用。
+        #[cfg(test)]
+        fn degraded_for_test() -> Self {
+            Self {
+                last_mouse: None,
+                last_key_count: 0,
+                state: None,
+            }
+        }
     }
 }

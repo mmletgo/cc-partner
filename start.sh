@@ -47,9 +47,28 @@ ensure_deps() {
   fi
 }
 
+# 确保 cc-partner-backend 独立后端 CLI 的 debug binary 已构建。
+# tauri dev 只构建默认 binary(app),不会构建 cc-partner-backend;而 GUI setup 启动时
+# 必须能拉起该 sidecar。缺真 binary 时 build.rs 生成的占位 launcher 会被误当真 binary
+# 执行,导致 cargo 找不到 manifest、GUI panic。这里提前 cargo build 兜底。
+ensure_backend_debug_binary() {
+  local backend_bin="src-tauri/target/debug/cc-partner-backend"
+  if [[ "$OSTYPE" == msys* ]] || [[ "$OSTYPE" == cygwin* ]] || [[ "${OS:-}" == "Windows_NT" ]]; then
+    backend_bin="src-tauri/target/debug/cc-partner-backend.exe"
+  fi
+  if [[ ! -x "$backend_bin" ]]; then
+    info "首次构建独立后端 binary (cargo build --bin cc-partner-backend)..."
+    (cd src-tauri && cargo build --bin cc-partner-backend)
+  fi
+}
+
 run_dev() {
   info "启动开发模式 (Tauri dev:Rust 后端 + Vite 前端 + 热重载)..."
   info "首次启动 Rust 编译较慢(数分钟),之后增量编译很快。"
+  # tauri dev 内部只 `cargo run` 默认 binary(app),不会自动构建独立后端 CLI。
+  # 但 GUI setup 启动时必须拉起 cc-partner-backend sidecar,缺真 binary 会 panic。
+  # 故在此预先构建 cc-partner-backend debug binary(cargo 增量编译,之后很快)。
+  ensure_backend_debug_binary
   exec "$TAURI_BIN" dev
 }
 

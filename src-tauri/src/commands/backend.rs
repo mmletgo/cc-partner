@@ -179,43 +179,75 @@ async fn run_packaged_sidecar_command(app: &AppHandle, subcommand: &str) -> Resu
 ///     `tauri dev` 时 externalBin 可能尚未准备，开发者仍需要 GUI 自动拉起本地 debug backend。
 ///
 /// Code Logic（这个函数做什么）:
-///     优先查找 target/debug/cc-partner-backend；找不到时回退 `cargo run --bin cc-partner-backend -- <subcommand>`。
+///     优先查找 target/debug/cc-partner-backend；找到但执行失败（例如 build.rs 生成的占位 launcher 被误当成真 binary、
+///     或 binary 过期损坏）时不能就此终止，必须继续尝试其它候选并最终回退 `cargo run --bin cc-partner-backend`。
+///     只有全部路径都失败才聚合错误返回，避免单个坏 candidate 让 dev 模式直接 panic。
 async fn run_dev_backend_command(subcommand: &str) -> Result<(), AppError> {
+    let mut candidate_errors = Vec::new();
     for candidate in dev_backend_binary_candidates() {
         if !candidate.exists() {
             continue;
         }
-        let output = Command::new(&candidate)
+        // 防护：跳过明显不是真二进制的 candidate。build.rs 会在 debug profile 生成约 300 字节的
+        // shell launcher 占位（`binaries/cc-partner-backend-<target>`），Tauri externalBin 在 dev 模式
+        // 会把它复制到 target/debug/cc-partner-backend 覆盖真 binary。真正的 debug backend binary
+        // 至少几十 MB，这里用 1MB 作为最低阈值过滤掉 launcher 脚本，确保 dev fallback 走 cargo run。
+        if !looks_like_real_backend_binary(&candidate) {
+            tracing::warn!(
+                "跳过可疑的 backend binary（体积过小，疑似 build.rs 占位 launcher）: {}",
+                candidate.display()
+            );
+            continue;
+        }
+        let output = match Command::new(&candidate)
             .arg(subcommand)
             .stdin(Stdio::null())
             .output()
-            .await?;
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                candidate_errors.push(format!(
+                    "执行 {} 失败: {error}",
+                    candidate.display()
+                ));
+                continue;
+            }
+        };
         if output.status.success() {
             return Ok(());
         }
-        return Err(AppError::generic(format!(
+        candidate_errors.push(format!(
             "{} {subcommand} 退出失败: status={:?}, {}",
             candidate.display(),
             output.status,
             command_output_detail(&output.stdout, &output.stderr)
-        )));
+        ));
     }
 
-    let output = Command::new("cargo")
+    // 所有 candidate 都不存在或执行失败，回退到 cargo run 现场构建。
+    let cargo_output = Command::new("cargo")
         .args(["run", "--bin", BACKEND_SIDECAR_NAME, "--", subcommand])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(Stdio::null())
         .output()
         .await?;
-    if output.status.success() {
+    if cargo_output.status.success() {
         return Ok(());
     }
 
-    Err(AppError::generic(format!(
+    let mut detail = format!(
         "cargo run backend {subcommand} 退出失败: status={:?}, {}",
-        output.status,
-        command_output_detail(&output.stdout, &output.stderr)
-    )))
+        cargo_output.status,
+        command_output_detail(&cargo_output.stdout, &cargo_output.stderr)
+    );
+    if !candidate_errors.is_empty() {
+        detail.push_str(&format!(
+            "\n候选 backend binary 也全部失败:\n- {}",
+            candidate_errors.join("\n- ")
+        ));
+    }
+    Err(AppError::generic(detail))
 }
 
 /// 返回开发环境 backend debug binary 候选路径。
@@ -257,6 +289,24 @@ fn backend_binary_name() -> &'static str {
         "cc-partner-backend.exe"
     } else {
         BACKEND_SIDECAR_NAME
+    }
+}
+
+/// 判断 candidate 是否像一个真正的 backend 二进制而不是占位脚本。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `build.rs` 在 debug profile 会生成约 300 字节的 shell launcher 占位（用于通过 Tauri externalBin 构建期校验）。
+///     Tauri externalBin 在 dev 模式会把该 launcher 复制到 `target/debug/cc-partner-backend` 覆盖真 binary。
+///     dev fallback 若把它当真 binary 执行，会触发 launcher 自身的 cargo run（间接但冗余），甚至在旧版 launcher
+///     里无限自递归导致 GUI 启动 panic。真正的 debug backend binary 至少几十 MB，用体积阈值即可可靠区分。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 candidate 文件元数据；文件不存在返回 false；体积小于 1MB 视为占位脚本返回 false，否则返回 true。
+fn looks_like_real_backend_binary(path: &std::path::Path) -> bool {
+    const MIN_REAL_BINARY_BYTES: u64 = 1_000_000;
+    match std::fs::metadata(path) {
+        Ok(metadata) => metadata.len() >= MIN_REAL_BINARY_BYTES,
+        Err(_) => false,
     }
 }
 
