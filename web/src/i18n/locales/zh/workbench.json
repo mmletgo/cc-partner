@@ -590,6 +590,8 @@
     "createSession": "创建终端失败",
     "focusSession": "切换终端 window 失败",
     "splitPane": "分割 pane 失败",
+    "switchPane": "切换 pane 失败",
+    "zoomPane": "切换单 pane 视图失败",
     "closePane": "关闭 pane 失败",
     "closeSession": "关闭终端失败",
     "renameSession": "重命名会话失败",

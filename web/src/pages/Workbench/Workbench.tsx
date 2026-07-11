@@ -13,7 +13,7 @@
  *   - hooks 全部在 early return 之前，避免 React hooks 调用顺序问题
  */
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -37,10 +37,7 @@ import { WorkbenchWorkspaceNav } from '@/components/layout';
 import { Button, Card, Input, Pill } from '@/components/primitives';
 import { useWorkbenchDependency } from '@/hooks/workbenchDependencyContext';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
-import {
-  useWorkbenchTerminalBuffer,
-  useWorkbenchTerminalBuffers,
-} from '@/hooks/workbenchTerminalBuffersContext';
+import { useWorkbenchTerminalBuffers } from '@/hooks/workbenchTerminalBuffersContext';
 import {
   ChevronRightIcon,
   BrowserIcon,
@@ -70,8 +67,6 @@ import type {
   WorkbenchMergeStage,
   WorkbenchMergeStageId,
   WorkbenchPathInfo,
-  WorkbenchSession,
-  WorkbenchTerminalStatusEvent,
   WorkbenchWorktree,
 } from '@/lib/types';
 import styles from './Workbench.module.css';
@@ -85,16 +80,16 @@ import {
   resetPromptOptimizerTextState,
   shouldCommitPromptOptimizerPanelPosition,
 } from './promptOptimizerWidget';
-import { mountedTerminalSessions, visibleTerminalSessions } from './terminalSessionOrder';
-import { workbenchTerminalOptions, workbenchTerminalTheme } from './terminalOptions';
-import {
-  planTerminalBufferWrite,
-  shouldForwardTerminalInput,
-  writeTerminalReplay,
-} from './terminalReplay';
-import { canRefreshTerminalSize, terminalPanePixelSize } from './terminalSizing';
+import { workbenchTerminalOptions } from './terminalOptions';
+import { terminalPanePixelSize } from './terminalSizing';
 import type { TerminalLayoutMode } from './terminalSizing';
 import { useWorkbenchProjectController } from './controllers/useWorkbenchProjectController';
+import {
+  useWorkbenchTerminalController,
+} from './controllers/useWorkbenchTerminalController';
+import type { WorkbenchTerminalErrorKey } from './controllers/useWorkbenchTerminalController';
+import { WorkbenchTerminalPane } from './WorkbenchTerminalPane';
+import type { TerminalCursorAnchor } from './WorkbenchTerminalPane';
 import {
   activeWorktreeRootPath,
   buildGitGraphRows,
@@ -157,25 +152,9 @@ interface FileTreeNodeProps extends FileTreeProps {
   depth: number;
 }
 
-interface TerminalPaneProps {
-  session: WorkbenchSession | null;
-  placeholder: string;
-  inputEnabled: boolean;
-  onInput: (sessionId: string, data: string) => void;
-  onResize: (sessionId: string, cols: number, rows: number) => void;
-  resizeRequestKey?: number;
-  onCursorAnchorChange?: (anchor: TerminalCursorAnchor | null) => void;
-}
-
 interface TerminalSize {
   cols: number;
   rows: number;
-}
-
-interface TerminalCursorAnchor {
-  left: number;
-  top: number;
-  bottom: number;
 }
 
 interface PromptOptimizerPanelPosition {
@@ -186,8 +165,6 @@ interface PromptOptimizerPanelPosition {
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 6;
 const TERMINAL_PANE_HEADER_PX = 36;
-const TMUX_FOCUS_SYNC_INTERVAL_MS = 700;
-const LOCAL_FOCUS_GRACE_MS = 500;
 const MERGE_STAGE_AUTO_DISMISS_MS = 2500;
 
 const INITIAL_MERGE_STAGE_ID: WorkbenchMergeStageId = 'checkSource';
@@ -533,166 +510,6 @@ function statusTone(status: string): 'neutral' | 'success' | 'warn' | 'danger' {
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   xterm 生命周期较重，应隔离在独立组件内，避免页面其他状态刷新时重复初始化终端实例。
- *
- * Code Logic（这个组件做什么）:
- *   session 变化时创建/销毁 Terminal；buffer revision 变化时只写入新增输出；
- *   仅 inputEnabled=true 的 active 终端转发 onData；ResizeObserver 触发 FitAddon.fit 后把 cols/rows clamp 后回传后端。
- */
-const TerminalPane = memo(function TerminalPane(props: TerminalPaneProps) {
-  const {
-    session,
-    placeholder,
-    inputEnabled,
-    onInput,
-    onResize,
-    resizeRequestKey = 0,
-    onCursorAnchorChange,
-  } = props;
-  const viewportRef = useRef<HTMLDivElement | null>(null);
-  const terminalRef = useRef<Terminal | null>(null);
-  const bufferRef = useRef<string>('');
-  const writtenBufferRef = useRef<string>('');
-  const replayGateRef = useRef<boolean>(false);
-  const inputEnabledRef = useRef<boolean>(inputEnabled);
-  const resizeTimerRef = useRef<number | null>(null);
-  const forceResizeRef = useRef<(() => void) | null>(null);
-  const cursorAnchorCallbackRef = useRef<TerminalPaneProps['onCursorAnchorChange']>(
-    onCursorAnchorChange,
-  );
-  const sessionId = session?.id ?? null;
-  const { buffer, revision } = useWorkbenchTerminalBuffer(sessionId);
-
-  useEffect(() => {
-    bufferRef.current = buffer;
-  }, [buffer]);
-
-  useEffect(() => {
-    inputEnabledRef.current = inputEnabled;
-  }, [inputEnabled]);
-
-  useEffect(() => {
-    cursorAnchorCallbackRef.current = onCursorAnchorChange;
-  }, [onCursorAnchorChange]);
-
-  useEffect(() => {
-    const viewport = viewportRef.current;
-    if (!viewport || !sessionId) return undefined;
-
-    const terminal = new Terminal(workbenchTerminalOptions());
-    const fit = new FitAddon();
-    terminal.loadAddon(fit);
-    terminal.open(viewport);
-    fit.fit();
-    const emitCursorAnchor = () => {
-      try {
-        const rect = viewport.getBoundingClientRect();
-        const cellWidth = rect.width / Math.max(terminal.cols, 1);
-        const cellHeight = rect.height / Math.max(terminal.rows, 1);
-        const cursorX = terminal.buffer.active.cursorX;
-        const cursorY = terminal.buffer.active.cursorY;
-        const left = rect.left + cursorX * cellWidth;
-        const top = rect.top + cursorY * cellHeight;
-        cursorAnchorCallbackRef.current?.({ left, top, bottom: top + cellHeight });
-      } catch {
-        // 光标定位仅用于浮层摆放，失败不影响终端显示与输入。
-      }
-    };
-    const dataDisposable = terminal.onData((data: string) => {
-      if (!shouldForwardTerminalInput(replayGateRef, inputEnabledRef.current)) return;
-      onInput(sessionId, data);
-    });
-    const cursorDisposable = terminal.onCursorMove(emitCursorAnchor);
-    writeTerminalReplay(terminal, bufferRef.current, replayGateRef);
-    writtenBufferRef.current = bufferRef.current;
-    emitCursorAnchor();
-    const resize = () => {
-      try {
-        fit.fit();
-        onResize(
-          sessionId,
-          clampU16(terminal.cols, MIN_TERMINAL_COLS),
-          clampU16(terminal.rows, MIN_TERMINAL_ROWS),
-        );
-        emitCursorAnchor();
-      } catch {
-        // xterm 在容器不可见时 fit 可能失败，下一次 ResizeObserver 会重试。
-      }
-    };
-    const observer = new ResizeObserver(() => {
-      if (resizeTimerRef.current !== null) {
-        window.clearTimeout(resizeTimerRef.current);
-      }
-      resizeTimerRef.current = window.setTimeout(resize, 80);
-    });
-    observer.observe(viewport);
-    forceResizeRef.current = resize;
-    resize();
-    terminalRef.current = terminal;
-
-    return () => {
-      observer.disconnect();
-      dataDisposable.dispose();
-      cursorDisposable.dispose();
-      if (resizeTimerRef.current !== null) {
-        window.clearTimeout(resizeTimerRef.current);
-        resizeTimerRef.current = null;
-      }
-      cursorAnchorCallbackRef.current?.(null);
-      terminal.dispose();
-      terminalRef.current = null;
-      forceResizeRef.current = null;
-      writtenBufferRef.current = '';
-      replayGateRef.current = false;
-    };
-  }, [onInput, onResize, sessionId]);
-
-  useEffect(() => {
-    if (resizeRequestKey <= 0) return;
-    forceResizeRef.current?.();
-  }, [resizeRequestKey]);
-
-  useEffect(() => {
-    const applyTheme = () => {
-      const terminal = terminalRef.current;
-      if (terminal) {
-        terminal.options.theme = workbenchTerminalTheme();
-      }
-    };
-    window.addEventListener('cp-theme-change', applyTheme);
-    window.addEventListener('storage', applyTheme);
-    return () => {
-      window.removeEventListener('cp-theme-change', applyTheme);
-      window.removeEventListener('storage', applyTheme);
-    };
-  }, []);
-
-  useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal || !sessionId) return;
-    const plan = planTerminalBufferWrite(writtenBufferRef.current, buffer);
-    if (plan.mode === 'replay') {
-      terminal.clear();
-      writeTerminalReplay(terminal, plan.data, replayGateRef);
-      writtenBufferRef.current = buffer;
-      return;
-    }
-    if (plan.mode === 'append') {
-      terminal.write(plan.data);
-      writtenBufferRef.current = buffer;
-    }
-  }, [buffer, revision, sessionId]);
-
-  return (
-    <div className={styles.terminalHost}>
-      <div className={styles.terminalViewport} ref={viewportRef} />
-      {!session ? <div className={styles.terminalPlaceholder}>{placeholder}</div> : null}
-    </div>
-  );
-});
-
-/**
- * Business Logic（为什么需要这个组件）:
  *   文件树需要懒加载多级目录，同时保持目录展开、选中态和 loading 态一致。
  *
  * Code Logic（这个组件做什么）:
@@ -795,13 +612,6 @@ export function Workbench() {
   const deepLinkProjectId = workbenchDeepLink.projectId;
   const deepLinkWorktreeId = workbenchDeepLink.worktreeId;
   const deepLinkSessionId = workbenchDeepLink.sessionId;
-  const [sessions, setSessions] = useState<WorkbenchSession[]>([]);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [sessionNameDraft, setSessionNameDraft] = useState<string>('');
-  const [sessionBusy, setSessionBusy] = useState<boolean>(false);
-  const [sessionError, setSessionError] = useState<string | null>(null);
-  const [terminalFullscreen, setTerminalFullscreen] = useState<boolean>(false);
-  const [terminalResizeRequestKey, setTerminalResizeRequestKey] = useState<number>(0);
   // Business Logic: 项目域（远端离线状态机 + 跨项目请求守卫 + 项目级 deep link）由独立 controller 持有，
   // 避免在 Workbench.tsx 里散落多处 state/effect；controller 接收窄 API/回调，不复制邻接域 state。
   const {
@@ -861,7 +671,6 @@ export function Workbench() {
   });
   const activeProjectIdRef = useRef<string | null>(null);
   const activeWorktreeIdRef = useRef<string | null>(null);
-  const knownSessionIdsRef = useRef<Set<string>>(new Set());
   const terminalPanelRef = useRef<HTMLElement | null>(null);
   const terminalAreaRef = useRef<HTMLDivElement | null>(null);
   const worktreeBranchInputRef = useRef<HTMLInputElement | null>(null);
@@ -869,7 +678,6 @@ export function Workbench() {
   const promptShortcutStateRef = useRef(createPromptOptimizerShortcutState());
   const promptPanelOpenRef = useRef<boolean>(false);
   const cursorAnchorRef = useRef<TerminalCursorAnchor | null>(null);
-  const lastLocalFocusAtRef = useRef<number>(0);
   const mergeProgressWorktreeIdRef = useRef<string | null>(null);
   const mergeStageDismissTimerRef = useRef<number | null>(null);
   const fileTabsRef = useRef<WorkbenchOpenFileTab[]>([]);
@@ -896,35 +704,74 @@ export function Workbench() {
     [activeWorktreeId, worktrees],
   );
   const activeWorktreeSessionId = activeWorktree?.id ?? null;
-  const scopedSessions = useMemo(
-    () => sessionsForWorktree(sessions, activeWorktreeSessionId),
-    [activeWorktreeSessionId, sessions],
+  // Business Logic: 终端域（session 生命周期 + focus 同步 + pane 操作 + terminal-status 事件）由独立 controller
+  // 持有，避免在 Workbench.tsx 里散落多处 state/effect/handler；controller 接收窄 API/回调，不复制邻接域 state，
+  // 也绝不持有终端字节内容（字节内容仍归 WorkbenchTerminalBuffersProvider 所有）。
+  const desktopUnavailableMessage = t('workbench:errors.desktopUnavailable');
+  // Business Logic: translateError 必须稳定（useCallback），否则 controller 内 loadSessions 等 useCallback 的依赖
+  // 每次渲染都变，导致 project-switch effect 反复重跑 loadSessions，把 terminal-status 事件更新覆盖回 running。
+  const translateTerminalError = useCallback(
+    (key: WorkbenchTerminalErrorKey): string => t(`workbench:errors.${key}`),
+    [t],
   );
-  const activeSession = useMemo(
-    () => scopedSessions.find((session) => session.id === activeSessionId) ?? null,
-    [activeSessionId, scopedSessions],
-  );
-  const visibleSessions = useMemo(
-    () => visibleTerminalSessions({ sessions: scopedSessions, activeSessionId }),
-    [activeSessionId, scopedSessions],
-  );
-  const mountedSessions = useMemo(
-    () => mountedTerminalSessions({ sessions }),
-    [sessions],
-  );
+  const terminalController = useWorkbenchTerminalController({
+    activeProjectId,
+    activeWorktreeId: activeWorktreeSessionId,
+    remoteWriteDisabled,
+    terminalPanelRef,
+    resetBuffer: resetTerminalBuffer,
+    removeBuffer: removeTerminalBuffer,
+    refreshProjectSessionStats,
+    markRequestFailure,
+    markRequestSuccess,
+    isCurrentProject,
+    measureInitialTerminalSize,
+    displayErrorMessage,
+    translateError: translateTerminalError,
+    desktopUnavailableMessage,
+    canListenToTauriEvents,
+  });
+  const {
+    sessions,
+    scopedSessions,
+    activeSession,
+    activeSessionId,
+    visibleSessions,
+    mountedSessions,
+    renderedActiveSessionId,
+    sessionNameDraft,
+    sessionBusy,
+    sessionError,
+    terminalFullscreen,
+    terminalResizeRequestKey,
+    canUsePanes,
+    canRefreshCurrentTerminalSize,
+    setSessionNameDraft,
+    setSessionError,
+    setActiveSessionId,
+    setSessions,
+    loadSessions,
+    focusSession,
+    handleCreateSession,
+    handleSplitPane,
+    handleClosePane,
+    handleCloseSession,
+    handleRenameSession,
+    handleInput,
+    handleResize,
+    handleRefreshTerminalSize,
+  } = terminalController;
   const gitGraphRows = useMemo(() => buildGitGraphRows(gitCommits), [gitCommits]);
   const renderedMergeStages = useMemo(
     () => (mergeStages.length > 0 ? formatWorkbenchMergeStages(mergeStages) : []),
     [mergeStages],
   );
-  const renderedActiveSessionId = activeSession?.id ?? visibleSessions[0]?.id ?? null;
   const selectedParentPath = selectedInfo
     ? selectedInfo.kind === 'dir'
       ? selectedInfo.path
       : parentPathOf(selectedInfo.path)
     : '';
   const selectedDisplayPath = selectedInfo?.path ?? '';
-  const desktopUnavailableMessage = t('workbench:errors.desktopUnavailable');
   const emptyValue = t('workbench:emptyValue');
   const rootPath = t('workbench:rootPath');
   const activeRootPath = activeWorktreeRootPath(activeProject?.path ?? '', activeWorktree);
@@ -934,14 +781,10 @@ export function Workbench() {
     runtimeNow,
     emptyValue,
   );
-  const canUsePanes = Boolean(
-    activeSession?.supportsPanes && activeSession.status === 'running',
-  );
   const TerminalFullscreenIcon = terminalFullscreen ? MinimizeIcon : MaximizeIcon;
   const terminalFullscreenLabel = terminalFullscreen
     ? t('workbench:terminalExitFullscreen')
     : t('workbench:terminalEnterFullscreen');
-  const canRefreshCurrentTerminalSize = canRefreshTerminalSize(activeSession, remoteWriteDisabled);
   const promptWorkingDirectory = activeRootPath || undefined;
   const composedWorktreeBranchName = composeWorktreeBranchName(
     createWorktreeBranchPrefix,
@@ -1028,97 +871,6 @@ export function Workbench() {
       }, MERGE_STAGE_AUTO_DISMISS_MS);
     },
     [clearMergeStageDismissTimer],
-  );
-
-  const updateActiveSession = useCallback((nextSessions: WorkbenchSession[]) => {
-    const candidates = sessionsForWorktree(nextSessions, activeWorktreeIdRef.current);
-    setActiveSessionId((current) => {
-      if (current && candidates.some((session) => session.id === current)) return current;
-      return candidates[0]?.id ?? null;
-    });
-  }, []);
-
-  const focusSession = useCallback((sessionId: string) => {
-    lastLocalFocusAtRef.current = Date.now();
-    setActiveSessionId(sessionId);
-  }, []);
-
-  useEffect(() => {
-    if (!activeSessionId) return undefined;
-    let cancelled = false;
-    void workbenchApi.sessions.focus(activeSessionId).catch((error) => {
-      if (cancelled) return;
-      const projectId = activeProjectIdRef.current;
-      if (projectId) markRequestFailure(projectId, error);
-      setSessionError(
-        displayErrorMessage(
-          error,
-          t('workbench:errors.focusSession'),
-          desktopUnavailableMessage,
-        ),
-      );
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeSessionId, desktopUnavailableMessage, markRequestFailure, t]);
-
-  useEffect(() => {
-    if (!activeProjectId || !activeWorktreeSessionId || scopedSessions.length === 0) {
-      return undefined;
-    }
-    let cancelled = false;
-
-    const syncFocusedSession = () => {
-      if (Date.now() - lastLocalFocusAtRef.current < LOCAL_FOCUS_GRACE_MS) return;
-      void workbenchApi.sessions
-        .focused(activeProjectId, activeWorktreeSessionId)
-        .then(({ sessionId }) => {
-          if (cancelled || !sessionId) return;
-          if (!scopedSessions.some((session) => session.id === sessionId)) return;
-          setActiveSessionId((current) => (current === sessionId ? current : sessionId));
-        })
-        .catch(() => {
-          // tmux focus sync 是辅助状态同步；失败不应打断终端输入和显示。
-        });
-    };
-
-    syncFocusedSession();
-    const timer = window.setInterval(syncFocusedSession, TMUX_FOCUS_SYNC_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [activeProjectId, activeWorktreeSessionId, scopedSessions]);
-
-  const loadSessions = useCallback(
-    async (projectId: string) => {
-      try {
-        setSessionError(null);
-        const list = await workbenchApi.sessions.list(projectId);
-        if (!isCurrentProject(projectId)) return;
-        markRequestSuccess(projectId);
-        knownSessionIdsRef.current = new Set(list.map((session) => session.id));
-        setSessions(list);
-        updateActiveSession(list);
-        void refreshProjectSessionStats(projectId);
-      } catch (error) {
-        if (!isCurrentProject(projectId)) return;
-        markRequestFailure(projectId, error);
-        setSessionError(
-          displayErrorMessage(error, t('workbench:errors.sessions'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [
-      isCurrentProject,
-      markRequestSuccess,
-      desktopUnavailableMessage,
-      markRequestFailure,
-      refreshProjectSessionStats,
-      t,
-      updateActiveSession,
-    ],
   );
 
   const loadWorktrees = useCallback(
@@ -1379,10 +1131,6 @@ export function Workbench() {
   }, [mergeProgressWorktreeId]);
 
   useEffect(() => {
-    knownSessionIdsRef.current = new Set(sessions.map((session) => session.id));
-  }, [sessions]);
-
-  useEffect(() => {
     activeFileTabIdRef.current = activeFileTabId;
   }, [activeFileTabId]);
 
@@ -1409,21 +1157,6 @@ export function Workbench() {
     },
     [],
   );
-
-  useEffect(() => {
-    return deferEffect(() => {
-      setActiveSessionId((current) => {
-        if (current && scopedSessions.some((session) => session.id === current)) return current;
-        return scopedSessions[0]?.id ?? null;
-      });
-    });
-  }, [scopedSessions]);
-
-  useEffect(() => {
-    return deferEffect(() => {
-      setSessionNameDraft(activeSession?.name ?? '');
-    });
-  }, [activeSession?.name]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setRuntimeNow(Date.now()), 1000);
@@ -1477,7 +1210,6 @@ export function Workbench() {
         sqlitePreviewRequestSeqRef.current = {};
         dirRequestSeqRef.current = {};
         activeFileTabIdRef.current = null;
-        knownSessionIdsRef.current = new Set();
         setSessions([]);
         setActiveSessionId(null);
         setWorktrees([]);
@@ -1507,7 +1239,6 @@ export function Workbench() {
       dirRequestSeqRef.current = {};
       activeFileTabIdRef.current = null;
       setRootNodes([]);
-      knownSessionIdsRef.current = new Set();
       setWorktrees([]);
       setActiveWorktreeId(null);
       setCreateWorktreeOpen(false);
@@ -1528,7 +1259,7 @@ export function Workbench() {
       void loadWorktrees(activeProjectId);
       void loadSessions(activeProjectId);
     });
-  }, [activeProjectId, clearMergeStagePanel, loadSessions, loadWorktrees, setFileTabsState]);
+  }, [activeProjectId, clearMergeStagePanel, loadSessions, loadWorktrees, setActiveSessionId, setFileTabsState, setSessions]);
 
   useEffect(() => {
     return deferEffect(() => {
@@ -1566,34 +1297,6 @@ export function Workbench() {
 
   useEffect(() => {
     if (!canListenToTauriEvents()) return undefined;
-    const statusUnlisten = listen<WorkbenchTerminalStatusEvent>(
-      'workbench:terminal-status',
-      (event) => {
-        const payload = event.payload;
-        setSessions((current) =>
-          current.map((session) =>
-            session.id === payload.sessionId
-              ? {
-                  ...session,
-                  status: payload.status,
-                  exitCode: payload.exitCode,
-                  exitedAt:
-                    payload.status === 'exited' || payload.status === 'disconnected'
-                      ? new Date(payload.ts).toISOString()
-                      : session.exitedAt,
-                }
-              : session,
-          ),
-        );
-      },
-    );
-    return () => {
-      void statusUnlisten.then((fn) => fn());
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!canListenToTauriEvents()) return undefined;
     const mergeUnlisten = listen<WorkbenchMergeProgressEvent>(
       'workbench:merge-progress',
       (event) => {
@@ -1619,148 +1322,29 @@ export function Workbench() {
     };
   }, []);
 
-  const handleCreateSession = useCallback(async () => {
-    const projectId = activeProjectIdRef.current;
-    if (!projectId) return;
-    const worktreeId = activeWorktreeIdRef.current;
-    try {
-      setSessionBusy(true);
-      setSessionError(null);
-      const initialSize = measureInitialTerminalSize(terminalPanelRef.current, 'single');
-      const session = await workbenchApi.sessions.create(projectId, initialSize, worktreeId);
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      setSessions((current) => [...current, session]);
-      knownSessionIdsRef.current.add(session.id);
-      focusSession(session.id);
-      resetTerminalBuffer(session.id);
-      void refreshProjectSessionStats(projectId);
-    } catch (error) {
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      markRequestFailure(projectId, error);
-      setSessionError(
-        displayErrorMessage(
-          error,
-          t('workbench:errors.createSession'),
-          desktopUnavailableMessage,
-        ),
-      );
-    } finally {
-      setSessionBusy(false);
-    }
-  }, [
-    desktopUnavailableMessage,
-    focusSession,
-    markRequestFailure,
-    refreshProjectSessionStats,
-    resetTerminalBuffer,
-    t,
-  ]);
-
-  const handleSplitPane = useCallback(
-    async (direction: 'right' | 'down') => {
-      if (!activeSession) return;
-      if (remoteWriteDisabled) return;
-      try {
-        setSessionError(null);
-        await workbenchApi.sessions.splitPane(activeSession.id, direction);
-        await loadSessions(activeSession.projectId);
-      } catch (error) {
-        markRequestFailure(activeSession.projectId, error);
-        setSessionError(
-          displayErrorMessage(
-            error,
-            t('workbench:errors.splitPane'),
-            desktopUnavailableMessage,
-          ),
-        );
-      }
-    },
-    [
-      activeSession,
-      desktopUnavailableMessage,
-      loadSessions,
-      markRequestFailure,
-      remoteWriteDisabled,
-      t,
-    ],
-  );
-
-  const handleClosePane = useCallback(async () => {
-    if (!activeSession) return;
-    if (remoteWriteDisabled) return;
-    try {
-      setSessionError(null);
-      const result = await workbenchApi.sessions.closePane(activeSession.id);
-      const projectId = activeSession.projectId;
-      if (result.closedWindow) {
-        setSessions((current) => {
-          const next = current.filter((session) => session.id !== result.sessionId);
-          updateActiveSession(next);
-          return next;
-        });
-        knownSessionIdsRef.current.delete(result.sessionId);
-        removeTerminalBuffer(result.sessionId);
-      }
-      await loadSessions(projectId);
-    } catch (error) {
-      markRequestFailure(activeSession.projectId, error);
-      setSessionError(
-        displayErrorMessage(error, t('workbench:errors.closePane'), desktopUnavailableMessage),
-      );
-    }
-  }, [
-    activeSession,
-    desktopUnavailableMessage,
-    loadSessions,
-    markRequestFailure,
-    removeTerminalBuffer,
-    remoteWriteDisabled,
-    t,
-    updateActiveSession,
-  ]);
-
   /**
    * Business Logic（为什么需要这个函数）:
    *   桌面端用户需要把当前终端临时铺满屏幕，隐藏项目标题、worktree 管理层、文件层和右侧检查器以专注操作。
    *
    * Code Logic（这个函数做什么）:
-   *   关闭可能遮挡终端的 Prompt 优化浮层，切回 terminal 工作区，并打开 terminalLayer 的 fixed overlay 状态。
+   *   关闭可能遮挡终端的 Prompt 优化浮层，切回 terminal 工作区，并通过 controller 打开 terminalLayer 的 fixed overlay 状态。
    */
   const handleEnterTerminalFullscreen = useCallback((): void => {
     setPromptPanelOpen(false);
     setWorkspaceView('terminal');
-    setTerminalFullscreen(true);
-  }, []);
+    terminalController.handleEnterTerminalFullscreen();
+  }, [terminalController]);
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   进入终端全屏后必须有明确出口，恢复完整 Workbench 布局和其他面板内容。
    *
    * Code Logic（这个函数做什么）:
-   *   关闭 terminalLayer 的 fixed overlay 状态；不改变当前 session/worktree 或文件 tab 状态。
+   *   通过 controller 关闭 terminalLayer 的 fixed overlay 状态；不改变当前 session/worktree 或文件 tab 状态。
    */
   const handleExitTerminalFullscreen = useCallback((): void => {
-    setTerminalFullscreen(false);
-  }, []);
-
-  const handleInput = useCallback(async (sessionId: string, data: string) => {
-    if (remoteWriteDisabled) return;
-    try {
-      await workbenchApi.sessions.writeInput(sessionId, data);
-    } catch {
-      // 输入写入失败时通常是会话刚退出；状态事件或下一次操作会反映错误。
-    }
-  }, [remoteWriteDisabled]);
+    terminalController.handleExitTerminalFullscreen();
+  }, [terminalController]);
 
   const openPromptOptimizerPanel = useCallback(() => {
     const reset = resetPromptOptimizerTextState();
@@ -1835,6 +1419,7 @@ export function Workbench() {
       promptOptimizerFillLanguage,
       promptWorkingDirectory,
       remoteWriteDisabled,
+      setSessionError,
       t,
     ],
   );
@@ -1909,91 +1494,6 @@ export function Workbench() {
     return () => window.removeEventListener('keydown', handleSessionSearchShortcut);
   }, [workspaceView]);
 
-  const handleResize = useCallback(async (sessionId: string, cols: number, rows: number) => {
-    try {
-      await workbenchApi.sessions.resize(
-        sessionId,
-        clampU16(cols, MIN_TERMINAL_COLS),
-        clampU16(rows, MIN_TERMINAL_ROWS),
-      );
-    } catch {
-      // 容器 resize 高频触发，失败不阻断终端显示。
-    }
-  }, []);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   移动端使用同一终端后可能把共享 tmux/PTY 尺寸改成手机视口，桌面用户需要一键恢复为当前 PC 终端尺寸。
-   *
-   * Code Logic（这个函数做什么）:
-   *   在可用时递增 resize request key，由当前可见 TerminalPane 使用自身 xterm 实例重新 fit 并复用现有后端 resize。
-   */
-  const handleRefreshTerminalSize = useCallback(() => {
-    if (!canRefreshCurrentTerminalSize) return;
-    setTerminalResizeRequestKey((current) => current + 1);
-  }, [canRefreshCurrentTerminalSize]);
-
-  const handleCloseSession = useCallback(
-    async (sessionId: string) => {
-      if (remoteWriteDisabled) return;
-      try {
-        await workbenchApi.sessions.close(sessionId);
-        setSessions((current) => {
-          const next = current.filter((session) => session.id !== sessionId);
-          updateActiveSession(next);
-          return next;
-        });
-        knownSessionIdsRef.current.delete(sessionId);
-        removeTerminalBuffer(sessionId);
-        const projectId = activeProjectIdRef.current;
-        if (projectId) void refreshProjectSessionStats(projectId);
-      } catch (error) {
-        const projectId = activeProjectIdRef.current;
-        if (projectId) markRequestFailure(projectId, error);
-        setSessionError(
-          displayErrorMessage(
-            error,
-            t('workbench:errors.closeSession'),
-            desktopUnavailableMessage,
-          ),
-        );
-      }
-    },
-    [
-      desktopUnavailableMessage,
-      markRequestFailure,
-      refreshProjectSessionStats,
-      removeTerminalBuffer,
-      remoteWriteDisabled,
-      t,
-      updateActiveSession,
-    ],
-  );
-
-  const handleRenameSession = useCallback(async () => {
-    if (!activeSession || !sessionNameDraft.trim()) return;
-    if (remoteWriteDisabled) return;
-    try {
-      setSessionError(null);
-      const renamed = await workbenchApi.sessions.rename(activeSession.id, sessionNameDraft.trim());
-      setSessions((current) =>
-        current.map((session) => (session.id === renamed.id ? renamed : session)),
-      );
-    } catch (error) {
-      markRequestFailure(activeSession.projectId, error);
-      setSessionError(
-        displayErrorMessage(error, t('workbench:errors.renameSession'), desktopUnavailableMessage),
-      );
-    }
-  }, [
-    activeSession,
-    desktopUnavailableMessage,
-    markRequestFailure,
-    remoteWriteDisabled,
-    sessionNameDraft,
-    t,
-  ]);
-
   const handleOpenCreateWorktree = useCallback(() => {
     if (!activeProjectIdRef.current || worktreeBusy !== null || remoteWriteDisabled) return;
     setWorktreeError(null);
@@ -2039,7 +1539,6 @@ export function Workbench() {
       setActiveWorktreeId(created.id);
       if (session) {
         setSessions((current) => [...current, session]);
-        knownSessionIdsRef.current.add(session.id);
         focusSession(session.id);
         resetTerminalBuffer(session.id);
         void refreshProjectSessionStats(projectId);
@@ -2079,6 +1578,8 @@ export function Workbench() {
     refreshProjectSessionStats,
     resetTerminalBuffer,
     remoteWriteDisabled,
+    setSessionError,
+    setSessions,
     t,
   ]);
 
@@ -3550,7 +3051,7 @@ export function Workbench() {
                 ref={terminalPanelRef}
               >
                 {visibleSessions.length === 0 ? (
-                  <TerminalPane
+                  <WorkbenchTerminalPane
                     session={null}
                     placeholder={
                       activeProject
@@ -3588,7 +3089,7 @@ export function Workbench() {
                               : session.status}
                       </span>
                     </div>
-                    <TerminalPane
+                    <WorkbenchTerminalPane
                       session={session}
                       placeholder={t('workbench:terminalPlaceholder')}
                       onInput={handleInput}
