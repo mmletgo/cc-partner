@@ -22,7 +22,7 @@
 
 每个 Task 执行：主控给出单个 brief/Global Constraints → implementer 先建立失败证据，再最小实现和聚焦测试 → 自审、提交并写 report（修改、测试文件、精确命令/结果）→ 生成 BASE..HEAD package → Codex review → 修复 Critical/Important → 同一 BASE 复审，直至 `Spec compliance: ✅` 且 `Code quality: Approved`。Minor 写入 ledger。主控仅合入 clean Task，并按依赖拓扑逐个合入 Plan branch；冲突 Task须基于最新 Plan HEAD 重放/修复、重跑验证并重新接受 Codex review，不得直接手工消冲突后跳审。一个 wave 全部合入且集成验证通过后，才启动依赖它的下一 wave。
 
-主控与 implementer 可使用任意支持本 Goal 所需 subagent、worktree 和验证能力的 Agent，不绑定具体厂商或模型。所有 task、Plan-level 和 whole-program reviewer 必须通过已安装的 [**codex-plugin-cc**](https://github.com/openai/codex-plugin-cc) 调用 Codex：主控若不能直接使用插件 slash command，必须把纯 review 步骤委派给可使用该插件的独立 review worker。只能使用插件暴露的 `/codex:*`；**禁止直接执行 `codex` CLI、直接调用插件内部 script/companion runtime，或用 Bash 绕过插件**。主控、implementer 及其同源 subagent 不得自行充当 reviewer。review worker 预检运行 `/codex:setup`；插件报告 Codex CLI/认证不可用时即报告 blocker，禁止自行改用 CLI、降级或跳审。自定义审查统一使用：
+所有 task、Plan-level 和 whole-program reviewer 必须通过已安装的 codex-plugin-cc 调用 Codex：只能使用插件暴露的 `/codex:*`；**禁止直接执行 `codex` CLI、直接调用插件内部 script/companion runtime，或用 Bash 绕过插件**。主控、implementer 及其同源 subagent 不得自行充当 reviewer。review worker 预检运行 `/codex:setup`；插件报告 Codex CLI/认证不可用时即报告 blocker，禁止自行改用 CLI、降级或跳审。自定义审查统一使用：
 
 `/codex:adversarial-review --wait --base <BASE> --scope branch <FOCUS>`
 
