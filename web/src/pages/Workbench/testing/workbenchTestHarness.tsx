@@ -755,7 +755,9 @@ export function renderWorkbench(
   act(() => {
     renderUtils = render(<HarnessRoot />);
   });
-  if (!renderUtils) throw new Error('renderWorkbench: render did not return');
+  // Business Logic: TS 无法跨 act 闭包收窄 renderUtils 的非空类型，这里显式断言以便下方 return 取字段。
+  const utils = renderUtils as ReturnType<typeof render> | null;
+  if (!utils) throw new Error('renderWorkbench: render did not return');
 
   const setProjectsContext = (next: WorkbenchProjectsContextValue): void => {
     act(() => {
@@ -769,9 +771,9 @@ export function renderWorkbench(
   };
 
   return {
-    container: renderUtils.container,
-    rerender: renderUtils.rerender,
-    unmount: renderUtils.unmount,
+    container: utils.container,
+    rerender: utils.rerender,
+    unmount: utils.unmount,
     user: userEvent.setup(),
     setProjectsContext,
     setDependencyContext,
