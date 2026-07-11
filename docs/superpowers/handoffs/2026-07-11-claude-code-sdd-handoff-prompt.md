@@ -44,9 +44,57 @@ git status --short
 6. 工作区干净；所有未验证的 hosted/platform 行为被如实标记，不能用“应该通过”代替证据。
 7. 未经用户额外授权，不 push、不创建 PR、不合并到 master。
 
+## 最高优先级：唯一允许执行的 Plan 白名单
+
+本次开发**只允许执行下面 8 份 plan**，并且只能按数组顺序执行：
+
+```bash
+bash <<'BASH'
+PLAN_FILES=(
+  /Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-vitest-frontend-ci.md
+  /Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-workbench-controller-extraction.md
+  /Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-p2p-protocol-metadata-errors.md
+  /Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-remote-orchestrator-runtime-snapshot.md
+  /Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-global-inbox.md
+  /Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-cross-platform-smoke-ci.md
+  /Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-backend-logs-doctor.md
+  /Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-documentation-calibration.md
+)
+
+PLAN_TASK_COUNTS=(8 9 9 8 10 6 8 7)
+
+test "${#PLAN_FILES[@]}" -eq 8
+for i in "${!PLAN_FILES[@]}"; do
+  test -f "${PLAN_FILES[$i]}"
+  actual_tasks=$(rg -c '^### Task ' "${PLAN_FILES[$i]}")
+  test "$actual_tasks" -eq "${PLAN_TASK_COUNTS[$i]}"
+done
+BASH
+```
+
+这是一个自包含 Bash 校验块；即使当前交互 shell 是 zsh，也必须按上面方式交给 Bash 执行，避免数组下标语义差异。
+
+严格禁止：
+
+1. 禁止通过 `rg --files docs/superpowers/plans`、`find docs/superpowers/plans` 或目录遍历自动发现“还要执行哪些 plan”。
+2. 禁止执行、续跑、补做或重新解释 `docs/superpowers/plans/` 中不在 `PLAN_FILES` 数组里的任何历史 plan。
+3. 禁止因为旧 plan 仍有未勾选 checkbox，就把它加入 todo、ledger、branch 或验收范围。
+4. 禁止让 implementer/reviewer 自行选择 plan 文件；主控只能把当前白名单 plan 的单个 task brief 交给它。
+5. 白名单文件缺失、Task 数量不匹配或内容损坏时，立即报告 blocker；不得选择文件名相似、日期更早或主题相近的旧 plan 替代。
+6. 历史 plan 只能在当前白名单 plan 明确引用、且为理解已存在代码所必需时作为只读背景；它永远不能成为本次执行任务来源或验收清单。
+7. 当前阶段的 `PLAN_FILE` 必须逐字等于白名单中同阶段的绝对路径，不得由搜索结果、最近修改时间或 Agent 自主判断产生。
+
+本次总任务数固定为：
+
+```text
+8 + 9 + 9 + 8 + 10 + 6 + 8 + 7 = 65 tasks
+```
+
+ledger 只能登记这 65 个 task。出现第 66 个 task、未列出的 plan 名或历史 plan 路径时，视为流程错误并停止派发。
+
 ## 二、权威资料与指令层级
 
-主控 Agent 必须亲自完整读取这些文件；不要让 subagent 替你解释流程或方案：
+主控 Agent 必须亲自完整读取这些文件；不要让 subagent 替你解释流程或方案。除下列两份 spec 和上面的 8-plan 白名单外，不得把其他历史 spec/plan 当成本次执行范围：
 
 ```text
 /Users/hans/web_project/cc-partner/AGENTS.md
@@ -218,7 +266,7 @@ TASK_NUMBER=1
 "$SDD_SKILL_DIR/scripts/task-brief" "$PLAN_FILE" "$TASK_NUMBER"
 ```
 
-进入后续阶段时把“第八节”列出的 plan 路径解析到仓库根，写入绝对 `PLAN_FILE`；`TASK_NUMBER` 从 1 顺序递增。
+进入后续阶段时只使用白名单中下一行的绝对路径；禁止手工搜索或猜测路径。每个阶段的 `TASK_NUMBER` 从 1 顺序递增到白名单校验块中对应的 task count。
 
 记录脚本输出的 brief 路径。report 路径与 brief 同名：
 
@@ -371,7 +419,7 @@ Cannot verify from diff:
 Plan：
 
 ```text
-docs/superpowers/plans/2026-07-11-vitest-frontend-ci.md
+/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-vitest-frontend-ci.md
 ```
 
 共 8 个 Task，严格执行 Task 1→8。
@@ -395,7 +443,7 @@ docs/superpowers/plans/2026-07-11-vitest-frontend-ci.md
 Plan：
 
 ```text
-docs/superpowers/plans/2026-07-11-workbench-controller-extraction.md
+/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-workbench-controller-extraction.md
 ```
 
 共 9 个 Task，严格执行 Task 1→9。
@@ -418,7 +466,7 @@ docs/superpowers/plans/2026-07-11-workbench-controller-extraction.md
 Plan：
 
 ```text
-docs/superpowers/plans/2026-07-11-p2p-protocol-metadata-errors.md
+/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-p2p-protocol-metadata-errors.md
 ```
 
 共 9 个 Task，严格执行 Task 1→9。
@@ -443,7 +491,7 @@ docs/superpowers/plans/2026-07-11-p2p-protocol-metadata-errors.md
 Plan：
 
 ```text
-docs/superpowers/plans/2026-07-11-remote-orchestrator-runtime-snapshot.md
+/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-remote-orchestrator-runtime-snapshot.md
 ```
 
 共 8 个 Task，严格执行 Task 1→8。
@@ -468,7 +516,7 @@ docs/superpowers/plans/2026-07-11-remote-orchestrator-runtime-snapshot.md
 Plan：
 
 ```text
-docs/superpowers/plans/2026-07-11-global-inbox.md
+/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-global-inbox.md
 ```
 
 共 10 个 Task，严格执行 Task 1→10。
@@ -495,7 +543,7 @@ docs/superpowers/plans/2026-07-11-global-inbox.md
 Plan：
 
 ```text
-docs/superpowers/plans/2026-07-11-cross-platform-smoke-ci.md
+/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-cross-platform-smoke-ci.md
 ```
 
 共 6 个 Task，严格执行 Task 1→6。
@@ -519,7 +567,7 @@ docs/superpowers/plans/2026-07-11-cross-platform-smoke-ci.md
 Plan：
 
 ```text
-docs/superpowers/plans/2026-07-11-backend-logs-doctor.md
+/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-backend-logs-doctor.md
 ```
 
 共 8 个 Task，严格执行 Task 1→8。
@@ -544,7 +592,7 @@ docs/superpowers/plans/2026-07-11-backend-logs-doctor.md
 Plan：
 
 ```text
-docs/superpowers/plans/2026-07-11-documentation-calibration.md
+/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-documentation-calibration.md
 ```
 
 共 7 个 Task，严格执行 Task 1→7。
@@ -661,7 +709,7 @@ Phase 08 完成并合并 integration branch 后：
 
 现在执行以下动作，不要先复述整份 Prompt：
 
-1. 读取根指令、两份 spec 和 Phase 01 plan。
+1. 读取根指令、两份 spec，并精确读取白名单第一项 Phase 01 plan；不要扫描 plans 目录。
 2. 确认 Superpowers skills/scripts 可用。
 3. 做一次 program/Phase 01 pre-flight conflict scan。
 4. 创建 integration worktree、Phase 01 worktree 和 durable ledger。
