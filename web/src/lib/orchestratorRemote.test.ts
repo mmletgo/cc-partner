@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import type {
   OrchestratorRemoteOutboxItem,
   OrchestratorTask,
@@ -18,7 +19,7 @@ import {
  *   Orchestrator remote helper 测试需要在契约不一致时立即失败，避免 pending outbox 被当作真实任务操作。
  *
  * Code Logic（这个函数做什么）:
- *   condition 为 false 时抛出 Error，让 tsx 测试进程以非零状态退出。
+ *   condition 为 false 时抛出 Error，让测试用例失败。
  */
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -99,97 +100,99 @@ function createPendingItem(
   };
 }
 
-const localView: OrchestratorTaskView = {
-  origin: 'local',
-  task: createTask('local-1', 'draft'),
-};
-const remoteView: OrchestratorTaskView = {
-  origin: 'remote',
-  task: createTask('remote-1', 'blocked'),
-  deviceId: 'device-1',
-  deviceName: 'MacBook Pro',
-};
-const pendingView: OrchestratorTaskView = {
-  origin: 'pendingRemote',
-  item: createPendingItem({ status: 'failed', lastError: 'device offline' }),
-};
+describe('orchestratorRemote', () => {
+  test('splits, groups, gates actions, and upserts task views vs pending remote outbox', () => {
+    const localView: OrchestratorTaskView = {
+      origin: 'local',
+      task: createTask('local-1', 'draft'),
+    };
+    const remoteView: OrchestratorTaskView = {
+      origin: 'remote',
+      task: createTask('remote-1', 'blocked'),
+      deviceId: 'device-1',
+      deviceName: 'MacBook Pro',
+    };
+    const pendingView: OrchestratorTaskView = {
+      origin: 'pendingRemote',
+      item: createPendingItem({ status: 'failed', lastError: 'device offline' }),
+    };
 
-const split = splitOrchestratorTaskViews([localView, pendingView, remoteView]);
+    const split = splitOrchestratorTaskViews([localView, pendingView, remoteView]);
 
-assert(
-  split.tasks.length === 2,
-  'splitOrchestratorTaskViews should return real local/remote tasks',
-);
-assert(
-  split.tasks[0]?.task.id === 'local-1',
-  'splitOrchestratorTaskViews should keep local task order',
-);
-assert(
-  split.tasks[1]?.origin === 'remote' && split.tasks[1]?.deviceName === 'MacBook Pro',
-  'splitOrchestratorTaskViews should preserve remote device metadata',
-);
-assert(
-  split.pendingRemoteItems.length === 1 && split.pendingRemoteItems[0]?.status === 'failed',
-  'splitOrchestratorTaskViews should keep pending remote outbox items separately',
-);
+    assert(
+      split.tasks.length === 2,
+      'splitOrchestratorTaskViews should return real local/remote tasks',
+    );
+    assert(
+      split.tasks[0]?.task.id === 'local-1',
+      'splitOrchestratorTaskViews should keep local task order',
+    );
+    assert(
+      split.tasks[1]?.origin === 'remote' && split.tasks[1]?.deviceName === 'MacBook Pro',
+      'splitOrchestratorTaskViews should preserve remote device metadata',
+    );
+    assert(
+      split.pendingRemoteItems.length === 1 && split.pendingRemoteItems[0]?.status === 'failed',
+      'splitOrchestratorTaskViews should keep pending remote outbox items separately',
+    );
 
-const groups = groupOrchestratorRenderableTasks(split.tasks);
+    const groups = groupOrchestratorRenderableTasks(split.tasks);
 
-assert(
-  groups.draft[0]?.task.id === 'local-1',
-  'groupOrchestratorRenderableTasks should group local tasks by status',
-);
-assert(
-  groups.blocked[0]?.task.id === 'remote-1',
-  'groupOrchestratorRenderableTasks should group remote tasks by status',
-);
-assert(groups.queued.length === 0, 'groupOrchestratorRenderableTasks should keep empty status buckets');
+    assert(
+      groups.draft[0]?.task.id === 'local-1',
+      'groupOrchestratorRenderableTasks should group local tasks by status',
+    );
+    assert(
+      groups.blocked[0]?.task.id === 'remote-1',
+      'groupOrchestratorRenderableTasks should group remote tasks by status',
+    );
+    assert(groups.queued.length === 0, 'groupOrchestratorRenderableTasks should keep empty status buckets');
 
-assert(isOrchestratorTaskViewActionable(localView), 'local task views should be actionable');
-assert(isOrchestratorTaskViewActionable(remoteView), 'remote task views should be actionable');
-assert(!isOrchestratorTaskViewActionable(pendingView), 'pending remote views should not be actionable');
+    assert(isOrchestratorTaskViewActionable(localView), 'local task views should be actionable');
+    assert(isOrchestratorTaskViewActionable(remoteView), 'remote task views should be actionable');
+    assert(!isOrchestratorTaskViewActionable(pendingView), 'pending remote views should not be actionable');
 
-assert(
-  getOrchestratorTaskViewTaskId(remoteView) === 'remote-1',
-  'getOrchestratorTaskViewTaskId should read task id from remote views',
-);
-assert(
-  getOrchestratorTaskViewProjectId(remoteView) === 'project-1',
-  'getOrchestratorTaskViewProjectId should read project id from remote views',
-);
-assert(
-  getOrchestratorTaskViewTaskId(pendingView) === null &&
-    getOrchestratorTaskViewProjectId(pendingView) === null,
-  'pending remote views should not expose task id or project id',
-);
+    assert(
+      getOrchestratorTaskViewTaskId(remoteView) === 'remote-1',
+      'getOrchestratorTaskViewTaskId should read task id from remote views',
+    );
+    assert(
+      getOrchestratorTaskViewProjectId(remoteView) === 'project-1',
+      'getOrchestratorTaskViewProjectId should read project id from remote views',
+    );
+    assert(
+      getOrchestratorTaskViewTaskId(pendingView) === null &&
+        getOrchestratorTaskViewProjectId(pendingView) === null,
+      'pending remote views should not expose task id or project id',
+    );
 
-const replacedRemote = upsertOrchestratorTaskView([localView, remoteView], {
-  ...remoteView,
-  task: createTask('remote-1', 'queued'),
+    const replacedRemote = upsertOrchestratorTaskView([localView, remoteView], {
+      ...remoteView,
+      task: createTask('remote-1', 'queued'),
+    });
+
+    assert(
+      replacedRemote.length === 2 &&
+        replacedRemote[1]?.origin === 'remote' &&
+        replacedRemote[1].task.status === 'queued',
+      'upsertOrchestratorTaskView should replace a real task view by task id',
+    );
+
+    const insertedPending = upsertOrchestratorTaskView([localView], pendingView);
+
+    assert(
+      insertedPending.length === 2 && insertedPending[0]?.origin === 'pendingRemote',
+      'upsertOrchestratorTaskView should insert a new pending remote view at the front',
+    );
+
+    const replacedPending = upsertOrchestratorTaskView([pendingView, localView], {
+      origin: 'pendingRemote',
+      item: createPendingItem({ status: 'sending' }),
+    });
+
+    assert(
+      replacedPending[0]?.origin === 'pendingRemote' && replacedPending[0].item.status === 'sending',
+      'upsertOrchestratorTaskView should replace pending remote views by outbox id',
+    );
+  });
 });
-
-assert(
-  replacedRemote.length === 2 &&
-    replacedRemote[1]?.origin === 'remote' &&
-    replacedRemote[1].task.status === 'queued',
-  'upsertOrchestratorTaskView should replace a real task view by task id',
-);
-
-const insertedPending = upsertOrchestratorTaskView([localView], pendingView);
-
-assert(
-  insertedPending.length === 2 && insertedPending[0]?.origin === 'pendingRemote',
-  'upsertOrchestratorTaskView should insert a new pending remote view at the front',
-);
-
-const replacedPending = upsertOrchestratorTaskView([pendingView, localView], {
-  origin: 'pendingRemote',
-  item: createPendingItem({ status: 'sending' }),
-});
-
-assert(
-  replacedPending[0]?.origin === 'pendingRemote' && replacedPending[0].item.status === 'sending',
-  'upsertOrchestratorTaskView should replace pending remote views by outbox id',
-);
-
-console.log('orchestratorRemote.test.ts passed');
