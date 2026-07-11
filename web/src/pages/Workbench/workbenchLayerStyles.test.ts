@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import { readFileSync } from 'node:fs';
 
 /**
@@ -33,7 +34,8 @@ function assertNotContains(source: string, unexpected: string, message: string):
  * Code Logic（这个函数做什么）:
  *   检查 `.terminalLayer` 使用基础层级、`.browserLayer` / `.fileLayer` / `.automationLayer` 使用更高层级，hidden 状态同时禁用可见性和指针。
  */
-async function main(): Promise<void> {
+describe('workbenchLayerStyles', () => {
+  test('layered workbench layout keeps automation in flow and hidden layers non-interactive', async () => {
   const css = readFileSync(new URL('./Workbench.module.css', import.meta.url), 'utf8');
   assertContains(css, '.terminalLayer {', 'terminal layer style exists');
   assertContains(css, 'z-index: var(--z-base);', 'terminal layer stays below file layer');
@@ -66,6 +68,5 @@ async function main(): Promise<void> {
   assertContains(css, 'opacity: 0;', 'hidden layer is visually transparent');
   assertContains(css, 'visibility: hidden;', 'hidden layer is not visible');
   assertContains(css, 'pointer-events: none;', 'hidden layer does not intercept input');
-}
-
-void main();
+  });
+});

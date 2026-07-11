@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { workbenchTerminalOptions } from './terminalOptions';
 
@@ -64,7 +65,9 @@ function assertTerminalTokensFollowTheme(): void {
   }
 }
 
-assertConvertEolDisabled();
-assertTerminalTokensFollowTheme();
-
-console.log('terminalOptions.test.ts passed');
+describe('terminalOptions', () => {
+  test('keeps convertEol disabled and binds terminal tokens to light/dark theme', () => {
+    assertConvertEolDisabled();
+    assertTerminalTokensFollowTheme();
+  });
+});

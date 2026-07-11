@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import { readFileSync } from 'node:fs';
 
 /**
@@ -67,7 +68,8 @@ function assertSubstringOrder(source: string, before: string, after: string, mes
  *   静态读取 Workbench 页面、文件工作区、共享导航组件和 workbench i18n 资源，检查切换回调、按钮绑定、
  *   禁用条件、文案 key、全路径 tab 标签、共享导航样式以及无第二行 toolbar 的布局契约。
  */
-async function main(): Promise<void> {
+describe('workbenchWorkspaceSwitch', () => {
+  test('locks terminal/files nav reuse, ordering, file path tab labels and shared nav styles', async () => {
   const workbenchSource = readFileSync(new URL('./Workbench.tsx', import.meta.url), 'utf8');
   const fileWorkspaceSource = readFileSync(
     new URL('../../components/domain/WorkbenchFileWorkspace/WorkbenchFileWorkspace.tsx', import.meta.url),
@@ -291,6 +293,5 @@ async function main(): Promise<void> {
   assertContains(enLocale, '"actions": "File actions"', 'en file actions label exists');
   assertContains(enLocale, '"openFiles": "File preview"', 'en file preview label exists');
   assertContains(enLocale, '"htmlPreview"', 'en HTML preview copy exists');
-}
-
-void main();
+  });
+});

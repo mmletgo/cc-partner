@@ -1,6 +1,5 @@
 import { defineConfig, mergeConfig } from 'vitest/config';
 import viteConfig from './vite.config';
-import { legacyTestPaths } from './scripts/test-migration-manifest.mjs';
 
 export default mergeConfig(
   viteConfig,
@@ -9,7 +8,7 @@ export default mergeConfig(
       environment: 'node',
       globals: false,
       include: ['src/**/*.test.{ts,tsx}'],
-      exclude: ['tests/**', 'node_modules/**', 'dist/**', ...legacyTestPaths],
+      exclude: ['tests/**', 'node_modules/**', 'dist/**'],
       passWithNoTests: false,
     },
   }),

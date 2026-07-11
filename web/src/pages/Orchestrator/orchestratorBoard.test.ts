@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import type {
   OrchestratorRunState,
   OrchestratorTask,
@@ -106,92 +107,94 @@ function createRenderableTask(
   };
 }
 
-const expectedLaneOrder: readonly OrchestratorWorkflowState[] = [
-  'backlog',
-  'todo',
-  'inProgress',
-  'humanReview',
-  'rework',
-  'merging',
-  'done',
-  'canceled',
-];
+describe('orchestratorBoard', () => {
+  test('board lanes, grouping and drag rules follow backend workflow contract', () => {
+    const expectedLaneOrder: readonly OrchestratorWorkflowState[] = [
+      'backlog',
+      'todo',
+      'inProgress',
+      'humanReview',
+      'rework',
+      'merging',
+      'done',
+      'canceled',
+    ];
 
-assert(
-  JSON.stringify(ORCHESTRATOR_BOARD_LANES) === JSON.stringify(expectedLaneOrder),
-  'ORCHESTRATOR_BOARD_LANES should match backend WORKFLOW_LANE_ORDER',
-);
+    assert(
+      JSON.stringify(ORCHESTRATOR_BOARD_LANES) === JSON.stringify(expectedLaneOrder),
+      'ORCHESTRATOR_BOARD_LANES should match backend WORKFLOW_LANE_ORDER',
+    );
 
-const grouped = groupRenderableTasksByWorkflowState([
-  createRenderableTask('todo-1', 'todo'),
-  createRenderableTask('review-1', 'humanReview'),
-]);
+    const grouped = groupRenderableTasksByWorkflowState([
+      createRenderableTask('todo-1', 'todo'),
+      createRenderableTask('review-1', 'humanReview'),
+    ]);
 
-assert(grouped.todo[0]?.task.id === 'todo-1', 'group helper should place todo task in todo lane');
-assert(
-  grouped.humanReview[0]?.task.id === 'review-1',
-  'group helper should place human review task in humanReview lane',
-);
-assert(grouped.backlog.length === 0, 'group helper should preserve empty backlog lane');
-assert(grouped.done.length === 0, 'group helper should preserve empty done lane');
+    assert(grouped.todo[0]?.task.id === 'todo-1', 'group helper should place todo task in todo lane');
+    assert(
+      grouped.humanReview[0]?.task.id === 'review-1',
+      'group helper should place human review task in humanReview lane',
+    );
+    assert(grouped.backlog.length === 0, 'group helper should preserve empty backlog lane');
+    assert(grouped.done.length === 0, 'group helper should preserve empty done lane');
 
-assert(
-  canMoveRenderableTaskToWorkflowState(createRenderableTask('local-next', 'todo'), 'inProgress'),
-  'local idle task should move to the next lane',
-);
-assert(
-  canMoveRenderableTaskToWorkflowState(createRenderableTask('local-prev', 'todo'), 'backlog'),
-  'local idle task should move to the previous lane',
-);
-assert(
-  !canMoveRenderableTaskToWorkflowState(createRenderableTask('local-skip', 'todo'), 'humanReview'),
-  'local task should not move across two lanes',
-);
-assert(
-  !canMoveRenderableTaskToWorkflowState(createRenderableTask('remote-next', 'todo', 'idle', 'remote'), 'inProgress'),
-  'remote task should not be draggable by the local board',
-);
-assert(
-  !canMoveRenderableTaskToWorkflowState(createRenderableTask('active-next', 'todo', 'running'), 'inProgress'),
-  'active runtime task should not be draggable',
-);
-assert(
-  !canMoveRenderableTaskToWorkflowState(createRenderableTask('same-lane', 'todo'), 'todo'),
-  'task should not move to its current lane',
-);
-assert(
-  canMoveRenderableTaskToWorkflowState(createRenderableTask('blocked-next', 'todo', 'blocked'), 'inProgress'),
-  'blocked run state should follow adjacent lane movement rules',
-);
-assert(
-  canMoveRenderableTaskToWorkflowState(createRenderableTask('idle-next', 'todo', 'idle'), 'inProgress'),
-  'idle run state should follow adjacent lane movement rules',
-);
+    assert(
+      canMoveRenderableTaskToWorkflowState(createRenderableTask('local-next', 'todo'), 'inProgress'),
+      'local idle task should move to the next lane',
+    );
+    assert(
+      canMoveRenderableTaskToWorkflowState(createRenderableTask('local-prev', 'todo'), 'backlog'),
+      'local idle task should move to the previous lane',
+    );
+    assert(
+      !canMoveRenderableTaskToWorkflowState(createRenderableTask('local-skip', 'todo'), 'humanReview'),
+      'local task should not move across two lanes',
+    );
+    assert(
+      !canMoveRenderableTaskToWorkflowState(createRenderableTask('remote-next', 'todo', 'idle', 'remote'), 'inProgress'),
+      'remote task should not be draggable by the local board',
+    );
+    assert(
+      !canMoveRenderableTaskToWorkflowState(createRenderableTask('active-next', 'todo', 'running'), 'inProgress'),
+      'active runtime task should not be draggable',
+    );
+    assert(
+      !canMoveRenderableTaskToWorkflowState(createRenderableTask('same-lane', 'todo'), 'todo'),
+      'task should not move to its current lane',
+    );
+    assert(
+      canMoveRenderableTaskToWorkflowState(createRenderableTask('blocked-next', 'todo', 'blocked'), 'inProgress'),
+      'blocked run state should follow adjacent lane movement rules',
+    );
+    assert(
+      canMoveRenderableTaskToWorkflowState(createRenderableTask('idle-next', 'todo', 'idle'), 'inProgress'),
+      'idle run state should follow adjacent lane movement rules',
+    );
 
-const activeStates: readonly OrchestratorRunState[] = [
-  'preparing',
-  'running',
-  'verifying',
-  'delivering',
-];
-const inactiveStates: readonly OrchestratorRunState[] = [
-  'idle',
-  'queued',
-  'retrying',
-  'blocked',
-];
+    const activeStates: readonly OrchestratorRunState[] = [
+      'preparing',
+      'running',
+      'verifying',
+      'delivering',
+    ];
+    const inactiveStates: readonly OrchestratorRunState[] = [
+      'idle',
+      'queued',
+      'retrying',
+      'blocked',
+    ];
 
-for (const state of activeStates) {
-  assert(isActiveOrchestratorRunState(state), `${state} should be treated as an active run state`);
-}
+    for (const state of activeStates) {
+      assert(isActiveOrchestratorRunState(state), `${state} should be treated as an active run state`);
+    }
 
-for (const state of inactiveStates) {
-  assert(!isActiveOrchestratorRunState(state), `${state} should not be treated as an active run state`);
-}
+    for (const state of inactiveStates) {
+      assert(!isActiveOrchestratorRunState(state), `${state} should not be treated as an active run state`);
+    }
 
-assert(
-  !canMoveRenderableTaskToWorkflowState(null, 'todo'),
-  'null renderable task should not be draggable',
-);
-
-console.log('orchestratorBoard.test.ts passed');
+    assert(
+      !canMoveRenderableTaskToWorkflowState(null, 'todo'),
+      'null renderable task should not be draggable',
+    );
+  });
+});

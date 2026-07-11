@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import { readFileSync } from 'node:fs';
 import assertNode from 'node:assert/strict';
 import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
@@ -43,7 +44,8 @@ function assertNotContains(source: string, unexpected: string, message: string):
  *   读取 Workbench、Orchestrator、AppShell、路由和 i18n 资源，检查自动化控制台入口、嵌入组件、
  *   deep link 回终端、层级样式、侧栏导航收敛和执行现场文案契约。
  */
-async function main(): Promise<void> {
+describe('workbenchAutomationView', () => {
+  test('keeps automation console inside Workbench and the embedded Orchestrator contract intact', async () => {
   const workbenchSource = readFileSync(new URL('./Workbench.tsx', import.meta.url), 'utf8');
   const workbenchFilesSource = readFileSync(new URL('./workbenchFiles.ts', import.meta.url), 'utf8');
   const workbenchStyles = readFileSync(new URL('./Workbench.module.css', import.meta.url), 'utf8');
@@ -480,6 +482,5 @@ async function main(): Promise<void> {
   assertContains(enOrchestrator, '"openWorkbench": "Open execution context"', 'en Orchestrator action opens execution context');
   assertNotContains(zhOrchestrator, '"终端现场"', 'zh Orchestrator copy must not imply task belongs to the current worktree terminal');
   assertNotContains(enOrchestrator, '"Open Workbench"', 'en Orchestrator copy must not imply a generic Workbench jump');
-}
-
-void main();
+  });
+});
