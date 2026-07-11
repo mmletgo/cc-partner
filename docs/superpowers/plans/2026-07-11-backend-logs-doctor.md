@@ -24,6 +24,10 @@
 
 ---
 
+## Task Dependency Graph
+
+最大并行 waves：`T1 → (T2 | T4) → (T3 | T5) → T6 → T7 → T8`。T2 sanitizer 是文件日志持久化门禁；Doctor schema 可同步定义，随后 logging 初始化与 bounded probes 可并行；CLI 汇合二者后才能进入跨平台回归。
+
 ## File Structure
 
 - Create `src-tauri/src/backend/logging.rs`: log config/path、rotating writer、strict formatter/sanitizer、guard、recent errors reader。

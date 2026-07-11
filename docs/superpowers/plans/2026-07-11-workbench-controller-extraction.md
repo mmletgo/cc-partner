@@ -22,6 +22,10 @@
 
 ---
 
+## Task Dependency Graph
+
+最大并行 waves：`T1 → T2 → T3 → T4 → T5 → T6 → T7 → T8 → T9`。T2–T8 都修改 `Workbench.tsx`，且后一 controller extraction 依赖前一阶段稳定页面，因此不得并行；Task 内测试与实现仍由同一 implementer 完成。
+
 ## File Structure
 
 ### Test Infrastructure

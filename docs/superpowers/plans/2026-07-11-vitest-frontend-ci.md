@@ -21,6 +21,10 @@
 
 ---
 
+## Task Dependency Graph
+
+最大并行 waves：`T1 → (T2 | T6) → T3 → T4 → T5 → T7 → T8`。T3/T4 共享迁移清单而串行；T7 同时依赖 T5 的完整 Vitest 迁移和 T6 的 Playwright 诊断。此图是并行上界；发现新增写集或测试资源冲突时只能进一步串行。
+
 ## File Structure
 
 - Modify `web/package.json`: 增加 Vitest/Playwright 固定脚本和 Vitest dev dependency。

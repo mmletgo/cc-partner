@@ -22,6 +22,10 @@
 
 ---
 
+## Task Dependency Graph
+
+最大并行 waves：`T1 → (T2 | T3 | T4) → T5 → (T6 | T7) → T8 → T9`。T5 与 T4 共享 `net/mod.rs`；T7 还依赖 T2 的 authoritative health metadata，T8 必须基于已完成的 route/client 边界。并行 Task 各用独立 worktree；新增共享写集时拆 wave。
+
 ## File Structure
 
 - Create `src-tauri/src/net/protocol.rs`: protocol v1 常量、capability 列表、legacy 解析和 mDNS 编码。

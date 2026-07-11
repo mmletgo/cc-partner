@@ -18,7 +18,7 @@
 
 先校验 8 个文件存在、Task 数依次为 `8 9 9 8 10 6 8 7`，总计 65；不匹配即阻塞。读取并使用 `superpowers:using-git-worktrees`、`subagent-driven-development`、`dispatching-parallel-agents`、`test-driven-development`、`systematic-debugging`、`verification-before-completion`、`finishing-a-development-branch`。创建长期 integration branch/worktree `sdd/cc-partner-improvement-program`；8 个 Plan 保持上述阶段顺序，后一 Plan 只能从前一 Plan clean 并合入 integration 后开始。
 
-为 65 个 Task 建 durable ledger。每份 Plan 开始时，主控根据显式前置依赖、共享接口/迁移、预计修改文件和测试资源生成 DAG 与执行 waves，记录依据；同一 wave 只包含无依赖且写集不重叠的 Task，最多并行 4 个 fresh implementer。每个 Task 使用从该 wave 基线创建的独立 branch/worktree，严禁共享工作区。公共类型/API、数据库迁移、同文件高重叠或依赖前序行为的 Task 必须串行；不确定是否独立时也串行。
+为 65 个 Task 建 durable ledger。每份 Plan 的 `Task Dependency Graph` 是最大并行上界：主控按图生成 waves，同一 wave 最多并行 4 个 fresh implementer，每个 Task 使用从 wave 基线创建的独立 branch/worktree。开工前复核当前代码；发现新增依赖、共享接口/迁移、文件或测试资源冲突时只可拆 wave/串行并记录依据，不得扩大 Plan 图中的并行范围；不确定时串行。
 
 每个 Task 执行：主控给出单个 brief/Global Constraints → implementer 先建立失败证据，再最小实现和聚焦测试 → 自审、提交并写 report（修改、测试文件、精确命令/结果）→ 生成 BASE..HEAD package → Codex review → 修复 Critical/Important → 同一 BASE 复审，直至 `Spec compliance: ✅` 且 `Code quality: Approved`。Minor 写入 ledger。主控仅合入 clean Task，并按依赖拓扑逐个合入 Plan branch；冲突 Task须基于最新 Plan HEAD 重放/修复、重跑验证并重新接受 Codex review，不得直接手工消冲突后跳审。一个 wave 全部合入且集成验证通过后，才启动依赖它的下一 wave。
 

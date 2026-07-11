@@ -22,6 +22,10 @@
 
 ---
 
+## Task Dependency Graph
+
+最大并行 waves：`T1 → T2 → T3 → T4 → (T5 | T6) → T7 → T8`。T1–T4 依次建立 builder、route、client 与 command；桌面缓存和移动 store 在契约稳定后可并行，T7 汇合两端回归。
+
 ## File Structure
 
 - Modify `src-tauri/src/commands/orchestrator.rs`: DTO Deserialize、纯 local snapshot helper、remote shortcut调用与状态映射。

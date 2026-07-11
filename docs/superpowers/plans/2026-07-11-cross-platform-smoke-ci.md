@@ -21,6 +21,10 @@
 
 ---
 
+## Task Dependency Graph
+
+最大并行 waves：`(T1 | T3) → T2 → T4 → T5 → T6`。PTY smoke 不依赖 data-dir 隔离，可与 T1 并行；backend lifecycle smoke 依赖 T1，workflow 依赖两个 smoke test，随后验证证据和文档必须串行收口。
+
 ## File Structure
 
 - Modify `src-tauri/src/config.rs`: 支持 CLI/test 的显式 `CC_PARTNER_DATA_DIR` override，并测试默认路径不变。

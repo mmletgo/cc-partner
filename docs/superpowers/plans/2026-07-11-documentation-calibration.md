@@ -22,6 +22,10 @@
 
 ---
 
+## Task Dependency Graph
+
+最大并行 waves：`T1 → (T2 | T3 | T4 | T6) → T5 → T7`。事实清单是所有写作与 guard 的共同基线；README、PRD、分层指令和 guard 写集独立，开发指南待 README/分层职责稳定后编写，最终统一校验。
+
 ## File Structure
 
 - Modify `README.md`: local-first Workbench-first positioning, current commands, architecture, release and limits。

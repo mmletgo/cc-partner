@@ -24,6 +24,10 @@
 
 ---
 
+## Task Dependency Graph
+
+最大并行 waves：`(T1 | T3 | T4) → (T2 | T5) → T6 → T7 → (T8 | T9) → T10`。首 wave 分别稳定 outbox、tmux 时间与 Attention 核心；T5 依赖 T1/T4，T6 汇合 T3/T4/T5，T8/T9 仅在共享 Provider 完成后并行，T10 汇合桌面、移动端及原界面 invalidation。
+
 ## File Structure
 
 ### Backend
