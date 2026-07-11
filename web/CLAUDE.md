@@ -10,7 +10,9 @@
 - `npm run build` — 打包到 dist/（tsc 类型检查 + vite 构建）
 - `npm run lint` — ESLint 检查
 - `npx --yes tsx src/mobile/mobilePanelState.test.ts && npx --yes tsx src/mobile/mobileWorkbenchState.test.ts && npx --yes tsx src/mobile/mobileTerminalReplay.test.ts && npx --yes tsx src/mobile/MobileWorktreeQuickSwitch.test.ts && npx --yes tsx src/mobile/MobileAutomationPanel.test.ts` — Mobile Workbench shell 导航、文件/Git 面板状态 helper、默认 worktree/session 选择、terminal replay helper、worktree quick switch 与自动化创建弹窗回归测试
-- `npx playwright test tests/screenshot-overlay.spec.ts --project=chromium` — 截图 Overlay 工具条时序回归测试（会自动拉起 Vite）
+- `npm run test:e2e`（`playwright test`）— 前端 E2E；配置在 `playwright.config.ts`（`outputDir: test-results`，失败保留 screenshot/trace/video，CI `retries: 1`）
+- E2E 用例从 `tests/fixtures.ts` 导入 `test`/`expect`：auto fixture 监听 `console.error` 与 `pageerror`，意外浏览器错误即失败，失败时 attach `browser-logs`
+- `npx playwright test tests/screenshot-overlay.spec.ts --project=chromium` — 截图 Overlay 工具条时序回归测试（会自动拉起 Vite；mock 须补全 `__TAURI_INTERNALS__.metadata.currentWindow`，label 非 `main`）
 - `npx --yes tsx src/pages/Settings/HealthPanel.test.ts && npx --yes tsx src/pages/Settings/shortcutRecorder.test.ts && npx --yes tsx src/pages/Settings/settingsState.test.ts && npx --yes tsx src/pages/Settings/automationSettingsState.test.ts && npx --yes tsx src/lib/lanFirewallDependency.test.ts` — Settings 健康提醒布局/时间选择、快捷键录制、基础状态/payload、自动化配置表单与局域网防火墙依赖 helper 回归测试
 - `npx --yes tsx src/hooks/workbenchHttpEvents.test.ts` — Mobile Workbench HTTP NDJSON parser chunk/pending 回归测试
 - `npx --yes tsx src/pages/Workbench/workbenchAutomationView.test.ts && npx --yes tsx src/lib/orchestrator.test.ts && npx --yes tsx src/pages/Workbench/workbenchDeepLink.test.ts && npx tsc --noEmit` — Orchestrator 迁入 Workbench、Workbench deep link 与类型检查聚焦验证

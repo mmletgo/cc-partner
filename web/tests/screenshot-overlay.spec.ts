@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test';
+import { type Page } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 declare global {
   interface Window {
@@ -6,6 +7,10 @@ declare global {
       invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
       transformCallback: (callback: unknown) => number;
       unregisterCallback: (id: number) => void;
+      metadata?: {
+        currentWindow: { label: string };
+        currentWebview?: { windowLabel: string; label: string };
+      };
     };
     __TAURI_EVENT_PLUGIN_INTERNALS__?: {
       unregisterListener: (event: string, eventId: number) => void;
@@ -49,6 +54,12 @@ async function installDelayedSnapshotMock(page: Page): Promise<void> {
     };
     let callbackId = 0;
     window.__TAURI_INTERNALS__ = {
+      // metadata 必须存在：canListenToTauriEvents 见 transformCallback 后会调用 getCurrentWindow()，
+      // 缺 currentWindow 会 pageerror；label 非 main 让 BackendCloseChoiceListener 直接跳过。
+      metadata: {
+        currentWindow: { label: 'screenshot-overlay' },
+        currentWebview: { windowLabel: 'screenshot-overlay', label: 'screenshot-overlay' },
+      },
       invoke: async (cmd: string) => {
         if (cmd === 'plugin:event|listen') return 1;
         if (cmd === 'plugin:event|unlisten') return undefined;
@@ -78,13 +89,9 @@ async function installDelayedSnapshotMock(page: Page): Promise<void> {
 
 test.describe('截图选区 Overlay', () => {
   test('普通 Vite 浏览器没有 Tauri event internals 时仍可渲染遮罩', async ({ page }) => {
-    const pageErrors: string[] = [];
-    page.on('pageerror', (error) => pageErrors.push(error.message));
-
     await page.goto('/screenshot-overlay?display=0');
 
     await expect(page.locator('[class*="overlay"]')).toBeVisible();
-    expect(pageErrors.filter((message) => message.includes('transformCallback'))).toEqual([]);
   });
 
   test('框选完成后工具条不等待快照返回即可显示', async ({ page }) => {
