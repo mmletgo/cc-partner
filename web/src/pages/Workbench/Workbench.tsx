@@ -88,6 +88,11 @@ import {
   useWorkbenchWorktreeGitController,
 } from './controllers/useWorkbenchWorktreeGitController';
 import type { WorkbenchWorktreeGitErrorKey } from './controllers/useWorkbenchWorktreeGitController';
+import { useWorkbenchFileController } from './controllers/useWorkbenchFileController';
+import type {
+  WorkbenchFileErrorKey,
+  WorkbenchFileMessageKey,
+} from './controllers/useWorkbenchFileController';
 import { WorkbenchTerminalPane } from './WorkbenchTerminalPane';
 import type { TerminalCursorAnchor } from './WorkbenchTerminalPane';
 import {
@@ -198,78 +203,6 @@ function basename(path: string, rootLabel: string): string {
   if (!path) return rootLabel;
   const parts = path.split('/').filter(Boolean);
   return parts[parts.length - 1] ?? rootLabel;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   文件工作区 tab id 需要同时区分 main worktree 与功能 worktree，避免同一路径跨 worktree 冲突。
- *
- * Code Logic（这个函数做什么）:
- *   按当前 worktreeId 和文件相对路径生成稳定 tab id；主工作区使用 main 前缀。
- */
-function workbenchFileTabId(worktreeId: string | null, path: string): string {
-  return `${worktreeId ?? 'main'}:${path}`;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   用户重命名文件或目录后，已打开 tab 需要继续指向新的相对路径并保留未保存编辑。
- *
- * Code Logic（这个函数做什么）:
- *   命中原路径时返回新路径；命中原目录后代时拼接新目录路径和原后缀；不相关路径返回 null。
- */
-function renamedPathForTab(path: string, originalPath: string, renamedPath: string): string | null {
-  if (path === originalPath) return renamedPath;
-  if (!originalPath || !path.startsWith(`${originalPath}/`)) return null;
-  return `${renamedPath}${path.slice(originalPath.length)}`;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   dirty tab 重新打开时可以刷新 preview/metadata，但不能刷新保存基线，否则会绕过后端 optimistic lock。
- *
- * Code Logic（这个函数做什么）:
- *   基于后端最新 opened payload 更新 metadata/preview；当 tab 已 dirty 时保留原 opened.text 作为 baseHash、
- *   baseModifiedAt 和打开时 content 的来源。
- */
-function mergeOpenedForReopenedTab(
-  existingTab: WorkbenchOpenFileTab,
-  freshTab: WorkbenchOpenFileTab,
-): WorkbenchOpenFileTab {
-  if (!existingTab.dirty) return freshTab;
-
-  return {
-    ...existingTab,
-    path: freshTab.path,
-    name: freshTab.name,
-    opened: {
-      ...freshTab.opened,
-      text: existingTab.opened.text,
-    },
-  };
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   关闭或删除 tab 后需要选择合理的相邻 tab，避免 activeFileTabId 指向不存在的文件。
- *
- * Code Logic（这个函数做什么）:
- *   如果当前 active tab 未被移除则保持不变；否则优先选择原 active 前一个邻居，再退到最后一个剩余 tab。
- */
-function nextActiveFileTabIdAfterRemoval(
-  currentTabs: WorkbenchOpenFileTab[],
-  removedTabIds: Set<string>,
-  activeTabId: string | null,
-): string | null {
-  const remainingTabs = currentTabs.filter((tab) => !removedTabIds.has(tab.id));
-  if (remainingTabs.length === 0) return null;
-  if (activeTabId && !removedTabIds.has(activeTabId)) return activeTabId;
-
-  const activeIndex = activeTabId
-    ? currentTabs.findIndex((tab) => tab.id === activeTabId)
-    : -1;
-  const fallbackIndex = activeIndex >= 0 ? Math.max(0, activeIndex - 1) : 0;
-  return remainingTabs[Math.min(fallbackIndex, remainingTabs.length - 1)]?.id ?? null;
 }
 
 /**
@@ -622,21 +555,10 @@ export function Workbench() {
     selectProject,
   });
   const [activeWorktreeId, setActiveWorktreeId] = useState<string | null>(null);
-  const [rootNodes, setRootNodes] = useState<WorkbenchFileNode[]>([]);
-  const [childrenByPath, setChildrenByPath] = useState<Record<string, WorkbenchFileNode[]>>({});
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [selectedInfo, setSelectedInfo] = useState<WorkbenchPathInfo | null>(null);
-  const [fileLoadingPath, setFileLoadingPath] = useState<string | null>(null);
-  const [fileError, setFileError] = useState<string | null>(null);
-  const [fileNotice, setFileNotice] = useState<string | null>(null);
-  const [fileTabs, setFileTabs] = useState<WorkbenchOpenFileTab[]>([]);
-  const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
+  // Business Logic: workspaceView / automationConsoleOpen 是跨域共享状态（终端全屏、自动化控制台、文件 tab 都会改写），
+  // 仍由 Workbench.tsx 持有；文件域 controller 通过 requestWorkspaceView / requestHideAutomationConsole 回调表达意图。
   const [workspaceView, setWorkspaceView] = useState<WorkbenchFileWorkspaceView>('terminal');
   const [automationConsoleOpen, setAutomationConsoleOpen] = useState<boolean>(false);
-  const [fileSaving, setFileSaving] = useState<boolean>(false);
-  const [newEntryName, setNewEntryName] = useState<string>('');
-  const [renameName, setRenameName] = useState<string>('');
   const [inspectorTab, setInspectorTab] = useState<WorkbenchInspectorTab>('files');
   const [runtimeNow, setRuntimeNow] = useState<number>(() => Date.now());
   const [sessionSearchOpen, setSessionSearchOpen] = useState<boolean>(false);
@@ -659,13 +581,6 @@ export function Workbench() {
   const promptShortcutStateRef = useRef(createPromptOptimizerShortcutState());
   const promptPanelOpenRef = useRef<boolean>(false);
   const cursorAnchorRef = useRef<TerminalCursorAnchor | null>(null);
-  const fileTabsRef = useRef<WorkbenchOpenFileTab[]>([]);
-  const activeFileTabIdRef = useRef<string | null>(null);
-  const openFileRequestSeqRef = useRef<number>(0);
-  const saveRequestSeqRef = useRef<Record<string, number>>({});
-  const formatRequestSeqRef = useRef<Record<string, number>>({});
-  const sqlitePreviewRequestSeqRef = useRef<Record<string, number>>({});
-  const dirRequestSeqRef = useRef<Record<string, number>>({});
   const deepLinkApplicationRef = useRef<{
     search: string;
     projectId: string | null;
@@ -804,6 +719,84 @@ export function Workbench() {
     handleRemoveWorktree,
     clearMergeStagePanel,
   } = worktreeGitController;
+  // Business Logic: 文件工作区域（目录树 + tab + dirty/save/format + create/rename/delete/copy）由独立 controller
+  // 持有，避免在 Workbench.tsx 里散落多处 state/handler/effect；controller 接收窄 API/回调，不复制邻接域 state。
+  // workspaceView / automationConsoleOpen 仍由页面持有（跨域共享），controller 通过 request* 回调表达切换意图。
+  // Code Logic: translateFileError / translateFileMessage 必须稳定（useCallback），否则 controller 内 useCallback
+  // 依赖每次渲染都变，导致项目/worktree 切换 effect 反复重跑 loadDir。
+  const translateFileError = useCallback(
+    (key: WorkbenchFileErrorKey): string => t(`workbench:errors.${key}`),
+    [t],
+  );
+  const translateFileMessage = useCallback(
+    (key: WorkbenchFileMessageKey, vars?: Record<string, unknown>): string => {
+      if (key === 'saved') return t('workbench:fileWorkspace.saved');
+      if (key === 'formatted') return t('workbench:fileWorkspace.formatted');
+      if (key === 'pathCopied') return t('workbench:pathCopied');
+      if (key === 'confirmCloseDirtyFile') return t('workbench:confirmCloseDirtyFile', vars);
+      if (key === 'confirmDeleteDirtyFiles') return t('workbench:confirmDeleteDirtyFiles', vars);
+      return t('workbench:confirmDeletePath', vars);
+    },
+    [t],
+  );
+  const requestWorkspaceView = useCallback(
+    (view: WorkbenchFileWorkspaceView) => {
+      setWorkspaceView(view);
+    },
+    [],
+  );
+  const requestHideAutomationConsole = useCallback(() => {
+    setAutomationConsoleOpen(false);
+  }, []);
+  const fileController = useWorkbenchFileController({
+    activeProjectId,
+    activeWorktreeId,
+    remoteWriteDisabled,
+    isCurrentProject,
+    markRequestFailure,
+    markRequestSuccess,
+    requestWorkspaceView,
+    requestHideAutomationConsole,
+    displayErrorMessage,
+    desktopUnavailableMessage,
+    translateFileError,
+    translateFileMessage,
+  });
+  const {
+    rootNodes,
+    childrenByPath,
+    expandedPaths,
+    selectedPath,
+    selectedInfo,
+    fileLoadingPath,
+    fileError,
+    fileNotice,
+    fileTabs,
+    activeFileTabId,
+    fileSaving,
+    newEntryName,
+    renameName,
+    setNewEntryName,
+    setRenameName,
+    loadDir,
+    loadPathInfo,
+    handleToggleNode,
+    handleSelectNode,
+    handleOpenFile,
+    handleActivateFileTab,
+    handleCloseFileTab,
+    handleFileContentChange,
+    handleFileModeChange,
+    handleSaveFileTab,
+    handleFormatFileTab,
+    handleSelectSqliteTable,
+    handleLoadHtmlAsset,
+    handleCreateEntry,
+    handleRenamePath,
+    handleDeletePath,
+    handleCopySelectedPath,
+    resetForContext: resetFileForContext,
+  } = fileController;
   const activeWorktree = useMemo(
     () => worktrees.find((worktree) => worktree.id === activeWorktreeId) ?? worktrees[0] ?? null,
     [activeWorktreeId, worktrees],
@@ -870,113 +863,6 @@ export function Workbench() {
       }
     },
     [t],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   文件树展开和刷新会对同一路径发起多次异步请求，旧响应不能覆盖最新目录内容或错误状态。
-   *
-   * Code Logic（这个函数做什么）:
-   *   按 project/worktree/path 生成请求 key 并递增序号；响应、错误和 loading 清理只在当前序号仍最新时回写。
-   */
-  const loadDir = useCallback(
-    async (path: string) => {
-      const projectId = activeProjectIdRef.current;
-      if (!projectId) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      const requestKey = workbenchDirRequestKey(projectId, worktreeId, path);
-      const requestSeq = (dirRequestSeqRef.current[requestKey] ?? 0) + 1;
-      dirRequestSeqRef.current[requestKey] = requestSeq;
-      try {
-        setFileError(null);
-        setFileLoadingPath(path);
-        const nodes = await workbenchApi.files.listDir(projectId, path, worktreeId);
-        if (
-          !isCurrentProject(projectId) ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          !isLatestRequest(dirRequestSeqRef.current[requestKey], requestSeq)
-        ) {
-          return;
-        }
-        if (path === '') {
-          setRootNodes(nodes);
-        } else {
-          setChildrenByPath((current) => ({ ...current, [path]: nodes }));
-        }
-        markRequestSuccess(projectId);
-      } catch (error) {
-        if (
-          !isCurrentProject(projectId) ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          !isLatestRequest(dirRequestSeqRef.current[requestKey], requestSeq)
-        ) {
-          return;
-        }
-        markRequestFailure(projectId, error);
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.files'), desktopUnavailableMessage),
-        );
-      } finally {
-        if (
-          isCurrentProject(projectId) &&
-          activeWorktreeIdRef.current === worktreeId &&
-          isLatestRequest(dirRequestSeqRef.current[requestKey], requestSeq)
-        ) {
-          setFileLoadingPath((current) => (current === path ? null : current));
-        }
-      }
-    },
-    [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, t],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   删除或重命名目录后，旧目录子树的异步加载响应不能再写回文件树。
-   *
-   * Code Logic（这个函数做什么）:
-   *   遍历当前目录请求序号表，命中同 project/worktree/path 子树的 key 就递增序号，使旧响应 stale。
-   */
-  const invalidateDirRequestsForPath = useCallback((path: string) => {
-    const projectId = activeProjectIdRef.current;
-    if (!projectId) return;
-    const worktreeId = activeWorktreeIdRef.current;
-    for (const [requestKey, requestSeq] of Object.entries(dirRequestSeqRef.current)) {
-      if (workbenchDirRequestKeyMatchesPath(requestKey, projectId, worktreeId, path)) {
-        dirRequestSeqRef.current[requestKey] = requestSeq + 1;
-      }
-    }
-  }, []);
-
-  const loadPathInfo = useCallback(
-    async (path: string) => {
-      const projectId = activeProjectIdRef.current;
-      if (!projectId) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      try {
-        const info = await workbenchApi.files.info(projectId, path, worktreeId);
-        if (
-          !isCurrentProject(projectId) ||
-          activeWorktreeIdRef.current !== worktreeId
-        ) {
-          return;
-        }
-        setSelectedInfo(info);
-        setRenameName(info.name);
-        markRequestSuccess(projectId);
-      } catch (error) {
-        if (
-          !isCurrentProject(projectId) ||
-          activeWorktreeIdRef.current !== worktreeId
-        ) {
-          return;
-        }
-        markRequestFailure(projectId, error);
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.pathInfo'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, t],
   );
 
   useEffect(() => {
@@ -1063,34 +949,6 @@ export function Workbench() {
   }, [promptPanelOpen]);
 
   useEffect(() => {
-    activeFileTabIdRef.current = activeFileTabId;
-  }, [activeFileTabId]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   文件 tab 的异步 stale guard 依赖 fileTabsRef 读取最新内容；如果只等 React effect 同步 ref，
-   *   编辑、保存或预览请求返回的窄窗口内可能读到旧 tab 状态。
-   *
-   * Code Logic（这个函数做什么）:
-   *   基于 fileTabsRef.current 计算下一份 tabs，立即写入 ref，再调用 React setState；不把副作用放进
-   *   React functional updater，避免 Strict Mode 下 updater 重放带来不一致。
-   */
-  const setFileTabsState = useCallback(
-    (
-      updater:
-        | WorkbenchOpenFileTab[]
-        | ((currentTabs: WorkbenchOpenFileTab[]) => WorkbenchOpenFileTab[]),
-    ) => {
-      const currentTabs = fileTabsRef.current;
-      const nextTabs = typeof updater === 'function' ? updater(currentTabs) : updater;
-      fileTabsRef.current = nextTabs;
-      setFileTabs(nextTabs);
-      return nextTabs;
-    },
-    [],
-  );
-
-  useEffect(() => {
     const timer = window.setInterval(() => setRuntimeNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
@@ -1133,13 +991,11 @@ export function Workbench() {
   useEffect(() => {
     return deferEffect(() => {
       clearMergeStagePanel();
+      // Business Logic: 文件域（含 open/save/format/sqlite/dir stale 守卫）由 fileController.resetForContext 统一重置。
+      // Code Logic: resetForContext 忽略入参（仅作语义占位），不依赖当前 activeWorktreeId，因此本 effect 不订阅
+      // activeWorktreeId 变化——避免 worktree 切换时重跑 loadSessions 把 terminal-status 事件更新覆盖回 running。
+      resetFileForContext(activeProjectId, null);
       if (!activeProjectId) {
-        openFileRequestSeqRef.current += 1;
-        saveRequestSeqRef.current = {};
-        formatRequestSeqRef.current = {};
-        sqlitePreviewRequestSeqRef.current = {};
-        dirRequestSeqRef.current = {};
-        activeFileTabIdRef.current = null;
         setSessions([]);
         setActiveSessionId(null);
         setWorktrees([]);
@@ -1147,76 +1003,36 @@ export function Workbench() {
         setCreateWorktreeOpen(false);
         setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
         setCreateWorktreeBranchSuffixDraft('');
-        setRootNodes([]);
-        setChildrenByPath({});
-        setExpandedPaths(new Set());
-        setSelectedPath(null);
-        setSelectedInfo(null);
-        setFileTabsState([]);
-        setActiveFileTabId(null);
         setWorkspaceView('terminal');
-        setFileSaving(false);
-        setFileError(null);
-        setFileNotice(null);
         setGitCommits([]);
         setGitHistoryError(null);
         return;
       }
-      openFileRequestSeqRef.current += 1;
-      saveRequestSeqRef.current = {};
-      formatRequestSeqRef.current = {};
-      sqlitePreviewRequestSeqRef.current = {};
-      dirRequestSeqRef.current = {};
-      activeFileTabIdRef.current = null;
-      setRootNodes([]);
       setWorktrees([]);
       setActiveWorktreeId(null);
       setCreateWorktreeOpen(false);
       setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
       setCreateWorktreeBranchSuffixDraft('');
-      setChildrenByPath({});
-      setExpandedPaths(new Set());
-      setSelectedPath(null);
-      setSelectedInfo(null);
-      setFileTabsState([]);
-      setActiveFileTabId(null);
       setWorkspaceView('terminal');
-      setFileSaving(false);
-      setFileError(null);
-      setFileNotice(null);
       setGitCommits([]);
       setGitHistoryError(null);
       void loadWorktrees(activeProjectId);
       void loadSessions(activeProjectId);
     });
-  }, [activeProjectId, clearMergeStagePanel, loadSessions, loadWorktrees, setActiveSessionId, setFileTabsState, setSessions, setWorktrees, setCreateWorktreeOpen, setCreateWorktreeBranchPrefix, setCreateWorktreeBranchSuffixDraft, setGitCommits, setGitHistoryError]);
+  }, [activeProjectId, clearMergeStagePanel, loadSessions, loadWorktrees, resetFileForContext, setActiveSessionId, setSessions, setWorktrees, setCreateWorktreeOpen, setCreateWorktreeBranchPrefix, setCreateWorktreeBranchSuffixDraft, setGitCommits, setGitHistoryError]);
 
   useEffect(() => {
     return deferEffect(() => {
-      openFileRequestSeqRef.current += 1;
-      saveRequestSeqRef.current = {};
-      formatRequestSeqRef.current = {};
-      sqlitePreviewRequestSeqRef.current = {};
-      dirRequestSeqRef.current = {};
-      activeFileTabIdRef.current = null;
-      setRootNodes([]);
-      setChildrenByPath({});
-      setExpandedPaths(new Set());
-      setSelectedPath(null);
-      setSelectedInfo(null);
-      setFileTabsState([]);
-      setActiveFileTabId(null);
+      // Business Logic: worktree 切换时文件域需要彻底重置（含 stale 守卫），随后按新 worktree 重新加载根目录。
+      resetFileForContext(activeProjectId, activeWorktreeId);
       setWorkspaceView('terminal');
-      setFileSaving(false);
-      setFileError(null);
-      setFileNotice(null);
       setGitCommits([]);
       setGitHistoryError(null);
       if (activeProjectId && activeWorktreeId) {
         void loadDir('');
       }
     });
-  }, [activeProjectId, activeWorktreeId, loadDir, setFileTabsState, setGitCommits, setGitHistoryError]);
+  }, [activeProjectId, activeWorktreeId, loadDir, resetFileForContext, setGitCommits, setGitHistoryError]);
 
   useEffect(() => {
     if (inspectorTab !== 'history') return undefined;
@@ -1397,230 +1213,26 @@ export function Workbench() {
     return () => window.removeEventListener('keydown', handleSessionSearchShortcut);
   }, [workspaceView]);
 
-  const handleToggleNode = useCallback(
-    (node: WorkbenchFileNode) => {
-      if (node.kind !== 'dir') return;
-      setExpandedPaths((current) => {
-        const next = new Set(current);
-        if (next.has(node.path)) {
-          next.delete(node.path);
-        } else {
-          next.add(node.path);
-          if (!childrenByPath[node.path]) {
-            void loadDir(node.path);
-          }
-        }
-        return next;
-      });
-    },
-    [childrenByPath, loadDir],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户从右侧文件树点选文件时，需要在 Workbench 中打开文件工作区，同时保留终端会话上下文。
-   *
-   * Code Logic（这个函数做什么）:
-   *   对当前 project/worktree 发起带序号的 open 文件请求；只有最后一次点击的响应允许激活 tab。
-   *   已有 dirty tab 保留用户编辑内容、模式和原 opened.text 保存基线，只更新后端 metadata/preview。
-   */
-  const handleOpenFile = useCallback(
-    async (node: WorkbenchFileNode) => {
-      if (node.kind !== 'file') return;
-      const projectId = activeProjectIdRef.current;
-      if (!projectId) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      const requestSeq = openFileRequestSeqRef.current + 1;
-      openFileRequestSeqRef.current = requestSeq;
-
-      try {
-        setFileError(null);
-        setFileNotice(null);
-        const opened = await workbenchApi.files.open(projectId, node.path, worktreeId);
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          openFileRequestSeqRef.current !== requestSeq
-        ) {
-          return;
-        }
-
-        const tabId = workbenchFileTabId(worktreeId, opened.metadata.path);
-        const freshTab: WorkbenchOpenFileTab = {
-          id: tabId,
-          path: opened.metadata.path,
-          name: opened.metadata.name,
-          opened,
-          content: opened.text?.content ?? '',
-          dirty: false,
-          mode: opened.capabilities.defaultMode,
-        };
-
-        setFileTabsState((currentTabs) => {
-          const existingTab = currentTabs.find((tab) => tab.id === tabId);
-          if (!existingTab) {
-            return [...currentTabs, freshTab];
-          }
-
-          return currentTabs.map((tab) => {
-            if (tab.id !== tabId) return tab;
-            return mergeOpenedForReopenedTab(tab, freshTab);
-          });
-        });
-        activeFileTabIdRef.current = tabId;
-        setActiveFileTabId(tabId);
-        setAutomationConsoleOpen(false);
-        setWorkspaceView('files');
-      } catch (error) {
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          openFileRequestSeqRef.current !== requestSeq
-        ) {
-          return;
-        }
-        markRequestFailure(projectId, error);
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.openFile'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [desktopUnavailableMessage, markRequestFailure, setFileTabsState, t],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   HTML 预览组件只知道当前文件路径，项目/worktree 上下文由页面层持有，因此资源读取必须经页面层转接。
-   *
-   * Code Logic（这个函数做什么）:
-   *   捕获当前 projectId/worktreeId，调用 workbench files API 获取 data URL；失败返回 null 让预览移除该资源引用。
-   */
-  const handleLoadHtmlAsset = useCallback(
-    async (documentPath: string, assetPath: string): Promise<WorkbenchHtmlAsset | null> => {
-      const projectId = activeProjectId;
-      if (!projectId) return null;
-      const worktreeId = activeWorktreeId;
-
-      try {
-        return await workbenchApi.files.previewHtmlAsset(
-          projectId,
-          documentPath,
-          assetPath,
-          worktreeId,
-        );
-      } catch {
-        return null;
-      }
-    },
-    [activeProjectId, activeWorktreeId],
-  );
-
-  const handleSelectNode = useCallback(
-    (node: WorkbenchFileNode) => {
-      setSelectedPath(node.path);
-      setSelectedInfo({
-        name: node.name,
-        path: node.path,
-        kind: node.kind,
-        size: node.size,
-        modifiedAt: node.modifiedAt,
-      });
-      setRenameName(node.name);
-      void loadPathInfo(node.path);
-      if (node.kind === 'file') {
-        void handleOpenFile(node);
-      }
-    },
-    [handleOpenFile, loadPathInfo],
-  );
-
-  const refreshParentDir = useCallback(
-    async (path: string) => {
-      const parent = parentPathOf(path);
-      await loadDir(parent);
-      if (parent === '') await loadDir('');
-    },
-    [loadDir],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户在文件工作区点击 tab 时，需要切回文件视图并激活对应文件，而不是影响右侧检查器 tab。
-   *
-   * Code Logic（这个函数做什么）:
-   *   只更新 activeFileTabId 和 workspaceView，具体 tab 内容由 WorkbenchFileWorkspace 根据 id 渲染。
-   */
-  const handleActivateFileTab = useCallback((id: string) => {
-    activeFileTabIdRef.current = id;
-    setActiveFileTabId(id);
-    setAutomationConsoleOpen(false);
-    setWorkspaceView('files');
-  }, []);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户关闭文件 tab 后，工作区需要选择相邻文件继续显示；dirty tab 不能在未确认时丢弃修改。
-   *
-   * Code Logic（这个函数做什么）:
-   *   关闭前检查目标 tab 是否 dirty；用户确认后移除目标 tab，并在关闭 active tab 时选择相邻或剩余 tab。
-   */
-  const handleCloseFileTab = useCallback(
-    (id: string) => {
-      const currentTabs = fileTabsRef.current;
-      const targetTab = currentTabs.find((tab) => tab.id === id);
-      if (!targetTab) return;
-      if (
-        targetTab.dirty &&
-        !window.confirm(
-          t('workbench:confirmCloseDirtyFile', {
-            names: dirtyTabNames([targetTab]).join(', '),
-          }),
-        )
-      ) {
-        return;
-      }
-      const removedTabIds = new Set([id]);
-      const nextTabs = currentTabs.filter((tab) => tab.id !== id);
-      const nextActiveTabId = nextActiveFileTabIdAfterRemoval(
-        currentTabs,
-        removedTabIds,
-        activeFileTabIdRef.current,
-      );
-      activeFileTabIdRef.current = nextActiveTabId;
-      setFileTabsState(nextTabs);
-      setActiveFileTabId(nextActiveTabId);
-      setWorkspaceView(nextActiveTabId ? 'files' : 'terminal');
-    },
-    [setFileTabsState, t],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   文件浏览/编辑完成后，用户需要回到原本常驻的终端工作区继续操作。
-   *
-   * Code Logic（这个函数做什么）:
-   *   将中心工作区视图切回 terminal；终端 DOM 一直保持挂载，只是恢复可见和可输入。
-   */
+  // Business Logic: 文件域操作函数（toggle/select/open/activate/close/content-change/mode-change/
+  // save/format/sqlite/html-asset/create/rename/delete/copy）已迁移到 useWorkbenchFileController；
+  // 页面只保留 handleReturnToTerminal / handleReturnToFiles 两个跨域导航回调（它们同时影响 workspaceView
+  // 与 automationConsoleOpen 共享状态，且 workbenchWorkspaceSwitch 静态测试需要这两个名字留在页面源码里）。
   const handleReturnToTerminal = useCallback(() => {
-    setAutomationConsoleOpen(false);
-    setWorkspaceView('terminal');
-  }, []);
+    fileController.handleReturnToTerminal();
+  }, [fileController]);
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户从文件预览返回终端后，仍需要从终端工具栏一键回到已打开的文件工作区，形成对称导航。
    *
    * Code Logic（这个函数做什么）:
-   *   优先恢复当前 active 文件 tab；如果 ref 丢失但仍有打开文件，则选择第一个 tab 并切换到 files 视图。
+   *   委托给文件域 controller 的 handleReturnToFiles（恢复 active tab、隐藏自动化控制台并切回 files 视图）。
+   *   保留页面层 useCallback 包装以稳定引用并满足 workbenchWorkspaceSwitch 静态契约。
    */
   const handleReturnToFiles = useCallback(() => {
-    const targetTabId = activeFileTabIdRef.current ?? fileTabsRef.current[0]?.id ?? null;
-    if (!targetTabId) return;
-    activeFileTabIdRef.current = targetTabId;
-    setActiveFileTabId(targetTabId);
-    setAutomationConsoleOpen(false);
     setWorkspaceView('files');
-  }, []);
+    fileController.handleReturnToFiles();
+  }, [fileController]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1655,589 +1267,6 @@ export function Workbench() {
     },
     [navigate],
   );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户编辑文件内容时需要标记未保存状态，避免保存按钮和 tab 脏标记失真。
-   *
-   * Code Logic（这个函数做什么）:
-   *   按 tab id 更新 content 并设置 dirty=true，其他 tab 保持不变。
-   */
-  const handleFileContentChange = useCallback((id: string, value: string) => {
-    if (remoteWriteDisabled) return;
-    setFileTabsState((currentTabs) =>
-      currentTabs.map((tab) => (tab.id === id ? { ...tab, content: value, dirty: true } : tab)),
-    );
-  }, [remoteWriteDisabled, setFileTabsState]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   Markdown 等文件支持多种查看/编辑模式，用户切换模式后应随 tab 保持。
-   *
-   * Code Logic（这个函数做什么）:
-   *   按 tab id 写入新的 mode，不改变文件内容和保存状态。
-   */
-  const handleFileModeChange = useCallback((id: string, mode: WorkbenchOpenFileTab['mode']) => {
-    setFileTabsState((currentTabs) =>
-      currentTabs.map((tab) => (tab.id === id ? { ...tab, mode } : tab)),
-    );
-  }, [setFileTabsState]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   JSON/TOML/YAML 保存前必须先做前端语法校验，避免明显错误内容覆盖项目文件。
-   *
-   * Code Logic（这个函数做什么）:
-   *   根据后端 detectedType 选择对应校验器；非结构化文本不做额外校验。
-   */
-  const validateStructuredFileTab = useCallback(
-    (tab: WorkbenchOpenFileTab): string | null => {
-      if (tab.opened.detectedType === 'json') {
-        const result = validateJsonText(tab.content);
-        return result.ok ? null : result.message;
-      }
-
-      if (tab.opened.detectedType === 'toml') {
-        const result = validateTomlText(tab.content);
-        return result.ok ? null : result.message;
-      }
-
-      if (tab.opened.detectedType === 'yaml') {
-        const result = validateYamlText(tab.content);
-        return result.ok ? null : result.message;
-      }
-
-      return null;
-    },
-    [],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户保存文件 tab 时，需要使用后端 baseHash 乐观锁写回当前 worktree，并刷新文件树元信息。
-   *
-   * Code Logic（这个函数做什么）:
-   *   找到目标 tab、校验 JSON/TOML/YAML、捕获提交内容和请求序号后调用 saveText；响应仍最新时更新保存基线，
-   *   若保存期间又有内存编辑则保留当前 content 和 dirty=true，否则清除 dirty，并刷新路径信息。
-   */
-  const handleSaveFileTab = useCallback(
-    async (id: string) => {
-      const tab = fileTabsRef.current.find((candidate) => candidate.id === id);
-      if (!tab) return;
-      if (remoteWriteDisabled) return;
-
-      const baseHash = tab.opened.text?.baseHash;
-      if (!baseHash) {
-        setFileError(t('workbench:errors.saveFile'));
-        return;
-      }
-
-      const validationMessage = validateStructuredFileTab(tab);
-      if (validationMessage) {
-        setFileError(`${t('workbench:errors.saveFile')}: ${validationMessage}`);
-        return;
-      }
-
-      const projectId = activeProjectIdRef.current;
-      if (!projectId) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      const submittedContent = tab.content;
-      const requestSeq = (saveRequestSeqRef.current[id] ?? 0) + 1;
-      saveRequestSeqRef.current[id] = requestSeq;
-
-      try {
-        setFileSaving(true);
-        setFileError(null);
-        setFileNotice(null);
-        const saved = await workbenchApi.files.saveText(
-          projectId,
-          tab.path,
-          submittedContent,
-          baseHash,
-          worktreeId,
-        );
-        const latestTab = fileTabsRef.current.find((candidate) => candidate.id === id);
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          !isLatestRequest(saveRequestSeqRef.current[id], requestSeq) ||
-          !latestTab
-        ) {
-          return;
-        }
-
-        setFileTabsState((currentTabs) =>
-          currentTabs.map((currentTab) => {
-            if (currentTab.id !== id) return currentTab;
-            const contentChangedAfterSubmit = currentTab.content !== submittedContent;
-            return {
-              ...currentTab,
-              path: saved.metadata.path,
-              name: saved.metadata.name,
-              dirty: contentChangedAfterSubmit,
-              opened: {
-                ...currentTab.opened,
-                metadata: saved.metadata,
-                text: currentTab.opened.text
-                  ? {
-                      ...currentTab.opened.text,
-                      content: submittedContent,
-                      baseHash: saved.baseHash,
-                      baseModifiedAt: saved.baseModifiedAt,
-                    }
-                  : currentTab.opened.text,
-              },
-              content: contentChangedAfterSubmit ? currentTab.content : submittedContent,
-            };
-          }),
-        );
-        await refreshParentDir(tab.path);
-        if (selectedPath === tab.path) {
-          await loadPathInfo(tab.path);
-        }
-        setFileNotice(t('workbench:fileWorkspace.saved'));
-        setFileError(null);
-      } catch (error) {
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          !isLatestRequest(saveRequestSeqRef.current[id], requestSeq)
-        ) {
-          return;
-        }
-        markRequestFailure(projectId, error);
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.saveFile'), desktopUnavailableMessage),
-        );
-      } finally {
-        if (
-          activeProjectIdRef.current === projectId &&
-          activeWorktreeIdRef.current === worktreeId &&
-          isLatestRequest(saveRequestSeqRef.current[id], requestSeq)
-        ) {
-          setFileSaving(false);
-        }
-      }
-    },
-    [
-      desktopUnavailableMessage,
-      loadPathInfo,
-      refreshParentDir,
-      setFileTabsState,
-      selectedPath,
-      markRequestFailure,
-      remoteWriteDisabled,
-      t,
-      validateStructuredFileTab,
-    ],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户需要在保存前格式化 JSON/TOML/YAML，但格式化不应自动写盘。
-   *
-   * Code Logic（这个函数做什么）:
-   *   捕获提交时的内容、project/worktree 和 tab 请求序号；响应回来后仍是最新请求且内容未变化时，
-   *   才用后端格式化输出更新 tab 并标记 dirty。
-   */
-  const handleFormatFileTab = useCallback(
-    async (id: string) => {
-      const tab = fileTabsRef.current.find((candidate) => candidate.id === id);
-      if (!tab) return;
-      if (remoteWriteDisabled) return;
-      const kind =
-        tab.opened.detectedType === 'json' ||
-        tab.opened.detectedType === 'toml' ||
-        tab.opened.detectedType === 'yaml'
-          ? tab.opened.detectedType
-          : null;
-      if (!kind) return;
-
-      const validationMessage = validateStructuredFileTab(tab);
-      if (validationMessage) {
-        setFileError(`${t('workbench:errors.formatFile')}: ${validationMessage}`);
-        return;
-      }
-      const projectId = activeProjectIdRef.current;
-      if (!projectId) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      const submittedContent = tab.content;
-      const requestSeq = (formatRequestSeqRef.current[id] ?? 0) + 1;
-      formatRequestSeqRef.current[id] = requestSeq;
-
-      try {
-        setFileError(null);
-        setFileNotice(null);
-        const result = await workbenchApi.files.formatStructured(kind, submittedContent);
-        const latestTab = fileTabsRef.current.find((candidate) => candidate.id === id);
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          formatRequestSeqRef.current[id] !== requestSeq ||
-          !latestTab ||
-          latestTab.content !== submittedContent
-        ) {
-          return;
-        }
-        setFileTabsState((currentTabs) =>
-          currentTabs.map((currentTab) =>
-            currentTab.id === id && currentTab.content === submittedContent
-              ? {
-                  ...currentTab,
-                  content: result.formatted,
-                  dirty: true,
-                }
-              : currentTab,
-          ),
-        );
-        setFileNotice(t('workbench:fileWorkspace.formatted'));
-      } catch (error) {
-        const latestTab = fileTabsRef.current.find((candidate) => candidate.id === id);
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          formatRequestSeqRef.current[id] !== requestSeq ||
-          !latestTab ||
-          latestTab.content !== submittedContent
-        ) {
-          return;
-        }
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.formatFile'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [
-      desktopUnavailableMessage,
-      remoteWriteDisabled,
-      setFileTabsState,
-      t,
-      validateStructuredFileTab,
-    ],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   SQLite 文件预览需要按用户选择的表重新加载行数据，而不是重新打开整个文件 tab。
-   *
-   * Code Logic（这个函数做什么）:
-   *   为每个 tab 的表预览请求递增序号；响应仍属于当前 project/worktree 且是该 tab 最新请求时，
-   *   才替换 tab.opened.sqlite。
-   */
-  const handleSelectSqliteTable = useCallback(
-    async (id: string, table: string) => {
-      const tab = fileTabsRef.current.find((candidate) => candidate.id === id);
-      const projectId = activeProjectIdRef.current;
-      if (!tab || !projectId) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      const requestSeq = (sqlitePreviewRequestSeqRef.current[id] ?? 0) + 1;
-      sqlitePreviewRequestSeqRef.current[id] = requestSeq;
-
-      try {
-        setFileError(null);
-        const sqlite = await workbenchApi.files.previewSqlite(
-          projectId,
-          tab.path,
-          table,
-          100,
-          worktreeId,
-        );
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          sqlitePreviewRequestSeqRef.current[id] !== requestSeq ||
-          !fileTabsRef.current.some((candidate) => candidate.id === id)
-        ) {
-          return;
-        }
-        setFileTabsState((currentTabs) =>
-          currentTabs.map((currentTab) =>
-            currentTab.id === id
-              ? {
-                  ...currentTab,
-                  opened: {
-                    ...currentTab.opened,
-                    sqlite,
-                  },
-                }
-              : currentTab,
-          ),
-        );
-      } catch (error) {
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          sqlitePreviewRequestSeqRef.current[id] !== requestSeq ||
-          !fileTabsRef.current.some((candidate) => candidate.id === id)
-        ) {
-          return;
-        }
-        markRequestFailure(projectId, error);
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.previewSqlite'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [desktopUnavailableMessage, markRequestFailure, setFileTabsState, t],
-  );
-
-  const handleCreateEntry = useCallback(
-    async (kind: 'file' | 'dir') => {
-      const projectId = activeProjectIdRef.current;
-      if (!projectId || !newEntryName.trim()) return;
-      if (remoteWriteDisabled) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      try {
-        setFileError(null);
-        setFileNotice(null);
-        const parentPath = selectedParentPath;
-        const created =
-          kind === 'file'
-            ? await workbenchApi.files.createFile(
-                projectId,
-                parentPath,
-                newEntryName.trim(),
-                worktreeId,
-              )
-            : await workbenchApi.files.createDir(
-                projectId,
-                parentPath,
-                newEntryName.trim(),
-                worktreeId,
-              );
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId
-        ) {
-          return;
-        }
-        setNewEntryName('');
-        setSelectedPath(created.path);
-        setSelectedInfo(created);
-        setRenameName(created.name);
-        if (parentPath) {
-          setExpandedPaths((current) => new Set(current).add(parentPath));
-        }
-        await loadDir(parentPath);
-      } catch (error) {
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId
-        ) {
-          return;
-        }
-        markRequestFailure(projectId, error);
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.createPath'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [
-      desktopUnavailableMessage,
-      loadDir,
-      markRequestFailure,
-      newEntryName,
-      remoteWriteDisabled,
-      selectedParentPath,
-      t,
-    ],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   文件树重命名成功后，用户已经打开的文件 tab 应继续指向新路径，且不能丢失未保存编辑。
-   *
-   * Code Logic（这个函数做什么）:
-   *   调用后端 rename 后按原路径映射所有受影响 tab 的 path/id/metadata；activeFileTabId 同步改名后的 id，
-   *   content、dirty、mode 和保存基线保持不变，并让此前发出的旧路径 open 响应失效。
-   */
-  const handleRenamePath = useCallback(async () => {
-    const projectId = activeProjectIdRef.current;
-    if (!projectId || !selectedInfo || !renameName.trim()) return;
-    if (remoteWriteDisabled) return;
-    const worktreeId = activeWorktreeIdRef.current;
-    try {
-      setFileError(null);
-      setFileNotice(null);
-      const originalPath = selectedInfo.path;
-      const renamed = await workbenchApi.files.renamePath(
-        projectId,
-        originalPath,
-        renameName.trim(),
-        worktreeId,
-      );
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      openFileRequestSeqRef.current += 1;
-      if (selectedInfo.kind === 'dir') {
-        invalidateDirRequestsForPath(originalPath);
-        invalidateDirRequestsForPath(renamed.path);
-        setChildrenByPath((current) =>
-          dropPathTreeEntries(dropPathTreeEntries(current, originalPath), renamed.path),
-        );
-        setExpandedPaths((current) =>
-          dropExpandedPathTree(dropExpandedPathTree(current, originalPath), renamed.path),
-        );
-      }
-      const renamedTabIds = new Map<string, string>();
-      const nextTabs = fileTabsRef.current.map((tab) => {
-        const nextPath = renamedPathForTab(tab.path, originalPath, renamed.path);
-        if (!nextPath) return tab;
-
-        const nextId = workbenchFileTabId(worktreeId, nextPath);
-        const nextName = tab.path === originalPath ? renamed.name : basename(nextPath, tab.name);
-        renamedTabIds.set(tab.id, nextId);
-        return {
-          ...tab,
-          id: nextId,
-          path: nextPath,
-          name: nextName,
-          opened: {
-            ...tab.opened,
-            metadata: {
-              ...tab.opened.metadata,
-              ...(tab.path === originalPath ? renamed : {}),
-              path: nextPath,
-              name: nextName,
-            },
-          },
-        };
-      });
-      setFileTabsState(nextTabs);
-      const nextActiveFileTabId = activeFileTabIdRef.current
-        ? renamedTabIds.get(activeFileTabIdRef.current) ?? activeFileTabIdRef.current
-        : null;
-      activeFileTabIdRef.current = nextActiveFileTabId;
-      setActiveFileTabId(nextActiveFileTabId);
-      setSelectedPath(renamed.path);
-      setSelectedInfo(renamed);
-      setRenameName(renamed.name);
-      await refreshParentDir(originalPath);
-    } catch (error) {
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      markRequestFailure(projectId, error);
-      setFileError(
-        displayErrorMessage(error, t('workbench:errors.renamePath'), desktopUnavailableMessage),
-      );
-    }
-  }, [
-    desktopUnavailableMessage,
-    invalidateDirRequestsForPath,
-    markRequestFailure,
-    refreshParentDir,
-    renameName,
-    remoteWriteDisabled,
-    selectedInfo,
-    setFileTabsState,
-    t,
-  ]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   文件树删除路径成功后，被删除文件或目录下的已打开 tab 不能继续指向不存在的路径；
-   *   如果这些 tab 有未保存编辑，必须先让用户确认放弃。
-   *
-   * Code Logic（这个函数做什么）:
-   *   删除前用当前 tabs 收集受影响路径并提示 dirty 文件；确认后调用后端 delete，成功后关闭命中 tab，
-   *   active tab 被删除时按相邻/剩余 tab 重新选择，并让此前发出的旧路径 open 响应失效。
-   */
-  const handleDeletePath = useCallback(async () => {
-    const projectId = activeProjectIdRef.current;
-    if (!projectId || !selectedInfo) return;
-    if (remoteWriteDisabled) return;
-    const affectedTabs = collectTabsForPath(fileTabsRef.current, selectedInfo.path, selectedInfo.kind);
-    const affectedDirtyNames = dirtyTabNames(affectedTabs);
-    if (
-      affectedDirtyNames.length > 0 &&
-      !window.confirm(
-        t('workbench:confirmDeleteDirtyFiles', {
-          names: affectedDirtyNames.join(', '),
-        }),
-      )
-    ) {
-      return;
-    }
-    if (!window.confirm(t('workbench:confirmDeletePath', { name: selectedInfo.name }))) return;
-    const worktreeId = activeWorktreeIdRef.current;
-    const path = selectedInfo.path;
-    try {
-      setFileError(null);
-      setFileNotice(null);
-      await workbenchApi.files.deletePath(projectId, path, worktreeId);
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      openFileRequestSeqRef.current += 1;
-      if (selectedInfo.kind === 'dir') {
-        invalidateDirRequestsForPath(path);
-        setChildrenByPath((current) => dropPathTreeEntries(current, path));
-        setExpandedPaths((current) => dropExpandedPathTree(current, path));
-      }
-      const removedTabIds = new Set(
-        collectTabsForPath(fileTabsRef.current, path, selectedInfo.kind).map((tab) => tab.id),
-      );
-      const nextActiveTabId = nextActiveFileTabIdAfterRemoval(
-        fileTabsRef.current,
-        removedTabIds,
-        activeFileTabIdRef.current,
-      );
-      const nextTabs = fileTabsRef.current.filter((tab) => !removedTabIds.has(tab.id));
-      activeFileTabIdRef.current = nextActiveTabId;
-      setFileTabsState(nextTabs);
-      setActiveFileTabId(nextActiveTabId);
-      setWorkspaceView(nextActiveTabId ? 'files' : 'terminal');
-      setSelectedPath(null);
-      setSelectedInfo(null);
-      setRenameName('');
-      await refreshParentDir(path);
-    } catch (error) {
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      markRequestFailure(projectId, error);
-      setFileError(
-        displayErrorMessage(error, t('workbench:errors.deletePath'), desktopUnavailableMessage),
-      );
-    }
-  }, [
-    desktopUnavailableMessage,
-    invalidateDirRequestsForPath,
-    markRequestFailure,
-    refreshParentDir,
-    remoteWriteDisabled,
-    selectedInfo,
-    setFileTabsState,
-    t,
-  ]);
-
-  const handleCopySelectedPath = useCallback(async () => {
-    if (!selectedInfo) return;
-    try {
-      const value = selectedInfo.path || '.';
-      await navigator.clipboard.writeText(value);
-      setFileError(null);
-      setFileNotice(t('workbench:pathCopied'));
-    } catch (error) {
-      setFileError(
-        displayErrorMessage(error, t('workbench:errors.copyPath'), desktopUnavailableMessage),
-      );
-    }
-  }, [desktopUnavailableMessage, selectedInfo, t]);
 
   const sessionStatusLabel = activeSession
     ? activeSession.status === 'running'
