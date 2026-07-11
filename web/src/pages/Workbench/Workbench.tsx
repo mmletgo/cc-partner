@@ -67,15 +67,6 @@ import type {
 } from '@/lib/types';
 import styles from './Workbench.module.css';
 import { parseWorkbenchDeepLink } from './workbenchDeepLink';
-import {
-  canFillPromptIntoTerminal,
-  createPromptOptimizerShortcutState,
-  promptOptimizerInputKeyAction,
-  promptOptimizerShortcutAction,
-  reducePromptOptimizerShortcut,
-  resetPromptOptimizerTextState,
-  shouldCommitPromptOptimizerPanelPosition,
-} from './promptOptimizerWidget';
 import { workbenchTerminalOptions } from './terminalOptions';
 import { terminalPanePixelSize } from './terminalSizing';
 import type { TerminalLayoutMode } from './terminalSizing';
@@ -94,8 +85,10 @@ import type {
   WorkbenchFileMessageKey,
 } from './controllers/useWorkbenchFileController';
 import { useWorkbenchAutomationController } from './controllers/useWorkbenchAutomationController';
+import { useWorkbenchPromptOptimizerController } from './controllers/useWorkbenchPromptOptimizerController';
+import type { PromptOptimizerConfigLoadResult } from './controllers/useWorkbenchPromptOptimizerController';
+import { useWorkbenchSessionSearchController } from './controllers/useWorkbenchSessionSearchController';
 import { WorkbenchTerminalPane } from './WorkbenchTerminalPane';
-import type { TerminalCursorAnchor } from './WorkbenchTerminalPane';
 import {
   activeWorktreeRootPath,
   buildGitGraphRows,
@@ -158,11 +151,6 @@ interface FileTreeNodeProps extends FileTreeProps {
 interface TerminalSize {
   cols: number;
   rows: number;
-}
-
-interface PromptOptimizerPanelPosition {
-  left: number;
-  top: number;
 }
 
 const MIN_TERMINAL_COLS = 20;
@@ -278,26 +266,6 @@ function formatRuntime(
 function clampU16(value: number, min: number): number {
   const rounded = Math.max(min, Math.round(value));
   return Math.min(65535, rounded);
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   Prompt 优化浮层应出现在当前终端输入光标下方，但不能超出终端工作区。
- *
- * Code Logic（这个函数做什么）:
- *   把 viewport 绝对坐标系的光标锚点转换为 terminalArea 内相对坐标，并按面板宽高做 clamp。
- */
-function promptOptimizerPanelPosition(
-  areaRect: DOMRect,
-  anchor: TerminalCursorAnchor,
-): PromptOptimizerPanelPosition {
-  const panelWidth = Math.min(560, Math.max(280, areaRect.width - 32));
-  const estimatedPanelHeight = Math.min(520, Math.max(280, areaRect.height - 32));
-  const maxLeft = Math.max(16, areaRect.width - panelWidth - 16);
-  const maxTop = Math.max(16, areaRect.height - estimatedPanelHeight - 16);
-  const left = Math.min(maxLeft, Math.max(16, anchor.left - areaRect.left));
-  const top = Math.min(maxTop, Math.max(16, anchor.bottom - areaRect.top + 8));
-  return { left, top };
 }
 
 /**
@@ -559,26 +527,12 @@ export function Workbench() {
   const [automationConsoleOpen, setAutomationConsoleOpen] = useState<boolean>(false);
   const [inspectorTab, setInspectorTab] = useState<WorkbenchInspectorTab>('files');
   const [runtimeNow, setRuntimeNow] = useState<number>(() => Date.now());
-  const [sessionSearchOpen, setSessionSearchOpen] = useState<boolean>(false);
-  const [promptPanelOpen, setPromptPanelOpen] = useState<boolean>(false);
-  const [promptInput, setPromptInput] = useState<string>('');
-  const [promptOptimizing, setPromptOptimizing] = useState<boolean>(false);
-  const [promptOptimizerHotkey, setPromptOptimizerHotkey] = useState<string>('<ctrl>');
-  const [promptOptimizerFillLanguage, setPromptOptimizerFillLanguage] =
-    useState<PromptOptimizerFillLanguage>('zh');
-  const [promptPanelPosition, setPromptPanelPosition] = useState<PromptOptimizerPanelPosition>({
-    left: 24,
-    top: 24,
-  });
   const activeProjectIdRef = useRef<string | null>(null);
   const activeWorktreeIdRef = useRef<string | null>(null);
   const terminalPanelRef = useRef<HTMLElement | null>(null);
   const terminalAreaRef = useRef<HTMLDivElement | null>(null);
   const worktreeBranchInputRef = useRef<HTMLInputElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
-  const promptShortcutStateRef = useRef(createPromptOptimizerShortcutState());
-  const promptPanelOpenRef = useRef<boolean>(false);
-  const cursorAnchorRef = useRef<TerminalCursorAnchor | null>(null);
 
   // Business Logic: 终端域（session 生命周期 + focus 同步 + pane 操作 + terminal-status 事件）由独立 controller
   // 持有，避免在 Workbench.tsx 里散落多处 state/effect/handler；controller 接收窄 API/回调，不复制邻接域 state，
@@ -841,6 +795,88 @@ export function Workbench() {
     ? t('workbench:terminalExitFullscreen')
     : t('workbench:terminalEnterFullscreen');
   const promptWorkingDirectory = activeRootPath || undefined;
+  // Business Logic: Prompt 优化浮层域（配置加载 + 打开/输入/定位 + Control 单键快捷键 + IME 安全 +
+  // 流式写入终端 + 焦点回归 + 重新打开清空）由独立 controller 持有，避免在 Workbench.tsx 里散落
+  // 多处 state/effect/handler；controller 接收窄 API/回调 + 共享 refs，不复制邻接域 state。
+  // Code Logic: translateFillFailed / translateOptimizeFailed / loadConfig / streamToTerminal 必须稳定
+  // （useCallback / useCallback 包装），否则 controller 内 runPromptOptimization 的 useCallback 依赖每次渲染都变。
+  const translatePromptFillFailed = useCallback(
+    (): string => t('workbench:promptOptimizer.fillFailed'),
+    [t],
+  );
+  const translatePromptOptimizeFailed = useCallback(
+    (): string => t('workbench:promptOptimizer.optimizeFailed'),
+    [t],
+  );
+  const translatePromptRemoteOffline = useCallback(
+    (): string =>
+      t('workbench:remoteOfflineNotice', {
+        device: activeProject?.deviceName ?? t('workbench:emptyValue'),
+      }),
+    [activeProject?.deviceName, t],
+  );
+  const loadPromptOptimizerConfig = useCallback(async (): Promise<PromptOptimizerConfigLoadResult> => {
+    const config = await configApi.get();
+    return {
+      promptOptimizerHotkey: config.promptOptimizerHotkey,
+      promptOptimizerFillLanguage: config.promptOptimizerFillLanguage,
+    };
+  }, []);
+  const streamPromptToTerminal = useCallback(
+    (
+      prompt: string,
+      options: {
+        workingDirectory?: string | null;
+        targetLanguage: PromptOptimizerFillLanguage;
+        sessionId: string;
+      },
+    ) => promptOptimizerApi.streamToTerminal(prompt, options),
+    [],
+  );
+  const promptOptimizerController = useWorkbenchPromptOptimizerController({
+    activeSession,
+    activeProjectId,
+    promptWorkingDirectory,
+    remoteWriteDisabled,
+    automationConsoleOpen,
+    workspaceView,
+    terminalAreaRef,
+    promptInputRef,
+    loadConfig: loadPromptOptimizerConfig,
+    streamToTerminal: streamPromptToTerminal,
+    markRequestFailure,
+    setSessionError,
+    displayErrorMessage,
+    desktopUnavailableMessage,
+    translateFillFailed: translatePromptFillFailed,
+    translateOptimizeFailed: translatePromptOptimizeFailed,
+    translateRemoteOffline: translatePromptRemoteOffline,
+  });
+  const {
+    promptPanelOpen,
+    promptInput,
+    promptOptimizing,
+    promptPanelPosition,
+    setPromptInput,
+    closePromptPanel,
+    togglePromptOptimizerPanel,
+    handleCursorAnchorChange,
+    handlePromptInputKeyDown,
+  } = promptOptimizerController;
+  // Business Logic: Session 搜索浮层域（⌘K/Ctrl+K 开/关 + resume 成功刷新 sessions/focus 新 session/关闭浮层）
+  // 由独立 controller 持有，避免在 Workbench.tsx 里散落 open state 与 keydown 监听；controller 只持有 open 状态
+  // 与 resume 编排，搜索结果数据（query/hits/preview）仍归 WorkbenchSessionSearch 组件所有。
+  const {
+    sessionSearchOpen,
+    openSessionSearch,
+    closeSessionSearch,
+    handleResumed: handleSessionSearchResumed,
+  } = useWorkbenchSessionSearchController({
+    workspaceView,
+    activeProjectId,
+    loadSessions,
+    focusSession,
+  });
   const composedWorktreeBranchName = composeWorktreeBranchName(
     createWorktreeBranchPrefix,
     createWorktreeBranchSuffixDraft,
@@ -889,40 +925,9 @@ export function Workbench() {
   }, [activeWorktreeId]);
 
   useEffect(() => {
-    promptPanelOpenRef.current = promptPanelOpen;
-  }, [promptPanelOpen]);
-
-  useEffect(() => {
     const timer = window.setInterval(() => setRuntimeNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    void configApi
-      .get()
-      .then((config) => {
-        if (cancelled) return;
-        setPromptOptimizerHotkey(config.promptOptimizerHotkey || '<ctrl>');
-        setPromptOptimizerFillLanguage(
-          config.promptOptimizerFillLanguage === 'en' ? 'en' : 'zh',
-        );
-      })
-      .catch(() => {
-        // 普通浏览器调试环境没有 Tauri invoke；保留默认快捷键与语言即可。
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!promptPanelOpen) return undefined;
-    const frame = window.requestAnimationFrame(() => {
-      promptInputRef.current?.focus();
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [promptPanelOpen]);
 
   useEffect(() => {
     if (!createWorktreeOpen) return undefined;
@@ -993,10 +998,10 @@ export function Workbench() {
    *   关闭可能遮挡终端的 Prompt 优化浮层，切回 terminal 工作区，并通过 controller 打开 terminalLayer 的 fixed overlay 状态。
    */
   const handleEnterTerminalFullscreen = useCallback((): void => {
-    setPromptPanelOpen(false);
+    closePromptPanel();
     setWorkspaceView('terminal');
     terminalController.handleEnterTerminalFullscreen();
-  }, [terminalController]);
+  }, [closePromptPanel, terminalController]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1008,154 +1013,6 @@ export function Workbench() {
   const handleExitTerminalFullscreen = useCallback((): void => {
     terminalController.handleExitTerminalFullscreen();
   }, [terminalController]);
-
-  const openPromptOptimizerPanel = useCallback(() => {
-    const reset = resetPromptOptimizerTextState();
-    setPromptInput(reset.input);
-    const area = terminalAreaRef.current;
-    const anchor = cursorAnchorRef.current;
-    if (area && anchor) {
-      setPromptPanelPosition(promptOptimizerPanelPosition(area.getBoundingClientRect(), anchor));
-    }
-    setPromptPanelOpen(true);
-  }, []);
-
-  const handleCursorAnchorChange = useCallback((anchor: TerminalCursorAnchor | null) => {
-    cursorAnchorRef.current = anchor;
-    const area = terminalAreaRef.current;
-    if (!area || !anchor) return;
-    const nextPosition = promptOptimizerPanelPosition(area.getBoundingClientRect(), anchor);
-    if (!promptPanelOpenRef.current) return;
-    setPromptPanelPosition((current) =>
-      shouldCommitPromptOptimizerPanelPosition(true, current, nextPosition)
-        ? nextPosition
-        : current,
-    );
-  }, []);
-
-  const runPromptOptimization = useCallback(
-    async () => {
-      if (!promptInput.trim() || promptOptimizing) {
-        promptInputRef.current?.focus();
-        return;
-      }
-      if (!activeSession || !canFillPromptIntoTerminal(activeSession)) {
-        setSessionError(t('workbench:promptOptimizer.fillFailed'));
-        return;
-      }
-      if (remoteWriteDisabled) {
-        setSessionError(t('workbench:remoteOfflineNotice', {
-          device: activeProject?.deviceName ?? t('workbench:emptyValue'),
-        }));
-        return;
-      }
-      try {
-        setPromptOptimizing(true);
-        await promptOptimizerApi.streamToTerminal(promptInput, {
-          workingDirectory: promptWorkingDirectory,
-          targetLanguage: promptOptimizerFillLanguage,
-          sessionId: activeSession.id,
-        });
-        setPromptPanelOpen(false);
-      } catch (error) {
-        if (activeProjectIdRef.current) {
-          markRequestFailure(activeProjectIdRef.current, error);
-        }
-        setSessionError(
-          displayErrorMessage(
-            error,
-            t('workbench:promptOptimizer.optimizeFailed'),
-            desktopUnavailableMessage,
-          ),
-        );
-      } finally {
-        setPromptOptimizing(false);
-      }
-    },
-    [
-      activeSession,
-      activeProject?.deviceName,
-      desktopUnavailableMessage,
-      markRequestFailure,
-      promptInput,
-      promptOptimizing,
-      promptOptimizerFillLanguage,
-      promptWorkingDirectory,
-      remoteWriteDisabled,
-      setSessionError,
-      t,
-    ],
-  );
-
-  const triggerPromptOptimizerShortcut = useCallback(() => {
-    if (automationConsoleOpen) return;
-    if (!activeProjectIdRef.current || workspaceView !== 'terminal') return;
-    if (remoteWriteDisabled && !promptPanelOpen) return;
-    const action = promptOptimizerShortcutAction(promptPanelOpen, promptInput);
-    if (action === 'open') {
-      openPromptOptimizerPanel();
-      return;
-    }
-    if (action === 'close') {
-      setPromptPanelOpen(false);
-      return;
-    }
-    void runPromptOptimization();
-  }, [
-    openPromptOptimizerPanel,
-    promptInput,
-    promptPanelOpen,
-    remoteWriteDisabled,
-    runPromptOptimization,
-    automationConsoleOpen,
-    workspaceView,
-  ]);
-
-  useEffect(() => {
-    const handleShortcutEvent = (event: KeyboardEvent) => {
-      if (automationConsoleOpen) return;
-      if (workspaceView !== 'terminal') return;
-      const result = reducePromptOptimizerShortcut(
-        promptShortcutStateRef.current,
-        {
-          type: event.type === 'keyup' ? 'keyup' : 'keydown',
-          key: event.key,
-          ctrlKey: event.ctrlKey,
-          metaKey: event.metaKey,
-          altKey: event.altKey,
-          shiftKey: event.shiftKey,
-          repeat: event.repeat,
-        },
-        promptOptimizerHotkey,
-      );
-      promptShortcutStateRef.current = result.state;
-      if (!result.triggered) return;
-      event.preventDefault();
-      event.stopPropagation();
-      triggerPromptOptimizerShortcut();
-    };
-
-    window.addEventListener('keydown', handleShortcutEvent, { capture: true });
-    window.addEventListener('keyup', handleShortcutEvent, { capture: true });
-    return () => {
-      window.removeEventListener('keydown', handleShortcutEvent, { capture: true });
-      window.removeEventListener('keyup', handleShortcutEvent, { capture: true });
-    };
-  }, [automationConsoleOpen, promptOptimizerHotkey, triggerPromptOptimizerShortcut, workspaceView]);
-
-  // ⌘K / Ctrl+K 打开 Claude session 搜索浮层（仅终端视图）
-  useEffect(() => {
-    if (workspaceView !== 'terminal') return undefined;
-    const handleSessionSearchShortcut = (event: KeyboardEvent) => {
-      if (event.repeat) return;
-      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key === 'k') {
-        event.preventDefault();
-        setSessionSearchOpen(true);
-      }
-    };
-    window.addEventListener('keydown', handleSessionSearchShortcut);
-    return () => window.removeEventListener('keydown', handleSessionSearchShortcut);
-  }, [workspaceView]);
 
   // Business Logic: 文件域操作函数（toggle/select/open/activate/close/content-change/mode-change/
   // save/format/sqlite/html-asset/create/rename/delete/copy）已迁移到 useWorkbenchFileController；
@@ -1189,14 +1046,14 @@ export function Workbench() {
    *   并满足 workbenchAutomationView 静态契约。
    */
   const handleToggleProjectAutomation = useCallback(() => {
-    setPromptPanelOpen(false);
+    closePromptPanel();
     if (automationConsoleOpen) {
       closeAutomationConsole();
       return;
     }
     setWorkspaceView('terminal');
     setAutomationConsoleOpen(true);
-  }, [automationConsoleOpen, closeAutomationConsole]);
+  }, [automationConsoleOpen, closeAutomationConsole, closePromptPanel]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1503,7 +1360,7 @@ export function Workbench() {
                       aria-label={t('workbench:sessionSearch.open')}
                       data-workbench-responsive-action="true"
                       disabled={!activeProjectId || !activeWorktree}
-                      onClick={() => setSessionSearchOpen(true)}
+                      onClick={openSessionSearch}
                     >
                       <span data-workbench-responsive-label="true">
                         {t('workbench:sessionSearch.open')}
@@ -1521,13 +1378,7 @@ export function Workbench() {
                       data-workbench-responsive-action="true"
                       data-active={promptPanelOpen || undefined}
                       disabled={!activeSession || (remoteWriteDisabled && !promptPanelOpen)}
-                      onClick={() => {
-                        if (promptPanelOpen) {
-                          setPromptPanelOpen(false);
-                        } else {
-                          openPromptOptimizerPanel();
-                        }
-                      }}
+                      onClick={togglePromptOptimizerPanel}
                     >
                       <span data-workbench-responsive-label="true">
                         {t('workbench:promptOptimizer.open')}
@@ -1644,20 +1495,7 @@ export function Workbench() {
                     className={styles.promptOptimizerInput}
                     value={promptInput}
                     onChange={(event) => setPromptInput(event.target.value)}
-                    onKeyDown={(event) => {
-                      const action = promptOptimizerInputKeyAction(
-                        {
-                          key: event.key,
-                          shiftKey: event.shiftKey,
-                          isComposing: event.nativeEvent.isComposing,
-                        },
-                        promptInput,
-                      );
-                      if (action !== 'optimize') return;
-                      event.preventDefault();
-                      event.stopPropagation();
-                      void runPromptOptimization();
-                    }}
+                    onKeyDown={handlePromptInputKeyDown}
                     placeholder={t('promptOptimizer:inputPlaceholder')}
                     aria-label={t('promptOptimizer:inputAriaLabel')}
                     disabled={promptOptimizing || remoteWriteDisabled}
@@ -2216,16 +2054,12 @@ export function Workbench() {
       </aside>
       <WorkbenchSessionSearch
         open={sessionSearchOpen}
-        onClose={() => setSessionSearchOpen(false)}
+        onClose={closeSessionSearch}
         projectId={activeProjectId}
         worktreeId={activeWorktreeId}
         offline={remoteProjectOffline}
         worktreeName={activeWorktree?.name}
-        onResumed={(newSessionId) => {
-          if (activeProjectId) void loadSessions(activeProjectId);
-          focusSession(newSessionId);
-          setSessionSearchOpen(false);
-        }}
+        onResumed={handleSessionSearchResumed}
       />
     </div>
   );
