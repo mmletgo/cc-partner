@@ -90,21 +90,53 @@ async function collectTestFiles(dir = SRC_ROOT, relBase = 'src') {
   return files;
 }
 
+const ALLOWED_RUNNERS = new Set(['legacy', 'vitest']);
+
 /**
  * Compare filesystem inventory with the versioned manifest.
- * Exit 1 on any missing/extra path; print N test files accounted for on success.
+ * Exit 1 on invalid runner, duplicate path, or missing/extra path;
+ * print N test files accounted for on success.
  */
 async function checkManifest() {
-  const onDisk = (await collectTestFiles()).sort();
-  const inManifest = TEST_MIGRATION_MANIFEST.map((e) => e.path).sort();
+  const invalidRunners = [];
+  for (const entry of TEST_MIGRATION_MANIFEST) {
+    if (!ALLOWED_RUNNERS.has(entry.runner)) {
+      invalidRunners.push(`${entry.path} (runner=${JSON.stringify(entry.runner)})`);
+    }
+  }
+  if (invalidRunners.length > 0) {
+    console.error('Invalid runner (must be legacy|vitest):');
+    for (const line of invalidRunners) console.error(`  ! ${line}`);
+    process.exit(1);
+  }
 
+  const rawPaths = TEST_MIGRATION_MANIFEST.map((e) => e.path);
+  const seen = new Set();
+  const duplicates = [];
+  for (const p of rawPaths) {
+    if (seen.has(p)) {
+      if (!duplicates.includes(p)) duplicates.push(p);
+    } else {
+      seen.add(p);
+    }
+  }
+  if (duplicates.length > 0) {
+    console.error('Duplicate paths in manifest (each test must appear exactly once):');
+    for (const p of duplicates) console.error(`  * ${p}`);
+    process.exit(1);
+  }
+
+  const onDisk = (await collectTestFiles()).sort();
+  const inManifest = [...rawPaths].sort();
+
+  // Prefer sorted-array equality so length/order mismatches cannot be hidden by Set.
   const diskSet = new Set(onDisk);
   const manifestSet = new Set(inManifest);
 
   const missing = onDisk.filter((p) => !manifestSet.has(p));
   const extra = inManifest.filter((p) => !diskSet.has(p));
 
-  if (missing.length > 0 || extra.length > 0) {
+  if (missing.length > 0 || extra.length > 0 || onDisk.length !== inManifest.length) {
     if (missing.length > 0) {
       console.error('Missing from manifest (present on disk):');
       for (const p of missing) console.error(`  + ${p}`);
@@ -112,6 +144,11 @@ async function checkManifest() {
     if (extra.length > 0) {
       console.error('Extra in manifest (not on disk):');
       for (const p of extra) console.error(`  - ${p}`);
+    }
+    if (missing.length === 0 && extra.length === 0 && onDisk.length !== inManifest.length) {
+      console.error(
+        `Path count mismatch: disk=${onDisk.length} manifest=${inManifest.length}`,
+      );
     }
     process.exit(1);
   }
