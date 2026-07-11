@@ -1,24 +1,26 @@
 /goal 在独立 integration/plan worktree 中，严格按下列唯一白名单和顺序，用 Superpowers Subagent-Driven Development 完成 cc-partner 工程改进与全局 Inbox 共 65 个 Task；每个 Task 均采用 fresh implementer、TDD、独立提交、Codex 审查、必要修复与复审，最终形成可审查、证据完整且未合并到 master 的集成分支。
 
-唯一执行范围（禁止扫描 plans 目录、自动发现或执行任何历史/近似 Plan）：
+唯一执行范围（`PLAN_ROOT=/Users/hans/web_project/cc-partner/docs/superpowers/plans`；禁止扫描目录、自动发现或执行历史/近似 Plan）：
 
-1. `/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-vitest-frontend-ci.md`（8）
-2. `/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-workbench-controller-extraction.md`（9）
-3. `/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-p2p-protocol-metadata-errors.md`（9）
-4. `/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-remote-orchestrator-runtime-snapshot.md`（8）
-5. `/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-global-inbox.md`（10）
-6. `/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-cross-platform-smoke-ci.md`（6）
-7. `/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-backend-logs-doctor.md`（8）
-8. `/Users/hans/web_project/cc-partner/docs/superpowers/plans/2026-07-11-documentation-calibration.md`（7）
+1. `$PLAN_ROOT/2026-07-11-vitest-frontend-ci.md`（8）
+2. `$PLAN_ROOT/2026-07-11-workbench-controller-extraction.md`（9）
+3. `$PLAN_ROOT/2026-07-11-p2p-protocol-metadata-errors.md`（9）
+4. `$PLAN_ROOT/2026-07-11-remote-orchestrator-runtime-snapshot.md`（8）
+5. `$PLAN_ROOT/2026-07-11-global-inbox.md`（10）
+6. `$PLAN_ROOT/2026-07-11-cross-platform-smoke-ci.md`（6）
+7. `$PLAN_ROOT/2026-07-11-backend-logs-doctor.md`（8）
+8. `$PLAN_ROOT/2026-07-11-documentation-calibration.md`（7）
 
 执行前完整读取根 `AGENTS.md`、目标目录分层指令，以及：
 
 - `docs/superpowers/specs/2026-07-11-engineering-improvement-program-design.md`
 - `docs/superpowers/specs/2026-07-11-global-inbox-design.md`
 
-先校验 8 个文件存在、Task 数依次为 `8 9 9 8 10 6 8 7`，总数为 65；不匹配即阻塞，不得用旧 Plan 替代。读取并使用 `superpowers:using-git-worktrees`、`subagent-driven-development`、`test-driven-development`、`systematic-debugging`、`verification-before-completion`、`finishing-a-development-branch`。创建长期 integration worktree/branch `sdd/cc-partner-improvement-program`，每份 Plan 建独立 branch/worktree，从当时 integration HEAD 开始；Plan 必须串行，写入型 Agent 不并行。
+先校验 8 个文件存在、Task 数依次为 `8 9 9 8 10 6 8 7`，总计 65；不匹配即阻塞。读取并使用 `superpowers:using-git-worktrees`、`subagent-driven-development`、`dispatching-parallel-agents`、`test-driven-development`、`systematic-debugging`、`verification-before-completion`、`finishing-a-development-branch`。创建长期 integration branch/worktree `sdd/cc-partner-improvement-program`；8 个 Plan 保持上述阶段顺序，后一 Plan 只能从前一 Plan clean 并合入 integration 后开始。
 
-为 65 个 Task 建 durable ledger。每个 Task 严格执行：主控提取单个 task brief 和 Global Constraints → 派 fresh implementer subagent → 先建立失败证据，再最小实现和聚焦测试 → implementer 自审、提交并写 report（修改、测试文件、精确命令/结果）→ 生成 BASE..HEAD review package → 调用 Codex reviewer → 修复 Critical/Important → 用同一 BASE 再次调用 Codex，直至 `Spec compliance: ✅` 且 `Code quality: Approved`。Minor 必须进入 ledger，不能静默丢弃。一个 Task clean 后才进入下一个；一份 Plan clean 后才本地合并 integration。
+为 65 个 Task 建 durable ledger。每份 Plan 开始时，主控根据显式前置依赖、共享接口/迁移、预计修改文件和测试资源生成 DAG 与执行 waves，记录依据；同一 wave 只包含无依赖且写集不重叠的 Task，最多并行 4 个 fresh implementer。每个 Task 使用从该 wave 基线创建的独立 branch/worktree，严禁共享工作区。公共类型/API、数据库迁移、同文件高重叠或依赖前序行为的 Task 必须串行；不确定是否独立时也串行。
+
+每个 Task 执行：主控给出单个 brief/Global Constraints → implementer 先建立失败证据，再最小实现和聚焦测试 → 自审、提交并写 report（修改、测试文件、精确命令/结果）→ 生成 BASE..HEAD package → Codex review → 修复 Critical/Important → 同一 BASE 复审，直至 `Spec compliance: ✅` 且 `Code quality: Approved`。Minor 写入 ledger。主控仅合入 clean Task，并按依赖拓扑逐个合入 Plan branch；冲突 Task须基于最新 Plan HEAD 重放/修复、重跑验证并重新接受 Codex review，不得直接手工消冲突后跳审。一个 wave 全部合入且集成验证通过后，才启动依赖它的下一 wave。
 
 所有 task、Plan-level 和 whole-program reviewer 必须由 Claude Code 已安装的 `codex-plugin-cc` 调用 Codex；Claude 主控、implementer 或其他 Claude subagent 不得充当 reviewer。预检运行 `/codex:setup`；插件、Codex CLI 或认证不可用即报告 blocker，禁止降级或跳审。自定义审查统一使用：
 
