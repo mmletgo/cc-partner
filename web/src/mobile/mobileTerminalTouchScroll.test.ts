@@ -36,7 +36,7 @@ describe('mobileTerminalTouchScroll', () => {
   });
 
   test('sub-line touch movement accumulates into full lines keeping remaining pixels', () => {
-    let state = beginMobileTerminalTouchScroll(100);
+    const state = beginMobileTerminalTouchScroll(100);
     let result = updateMobileTerminalTouchScroll(state, 91, 20);
     assertEqual(result.lines, 0, 'sub-line touch movement should wait for accumulated pixels');
     result = updateMobileTerminalTouchScroll(result.state, 79, 20);
