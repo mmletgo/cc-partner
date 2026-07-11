@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import type { WorkbenchSession } from '../../lib/types';
 import { mountedTerminalSessions, visibleTerminalSessions } from './terminalSessionOrder';
 
@@ -48,57 +49,59 @@ function assertIds(actual: WorkbenchSession[], expected: string[]): void {
   }
 }
 
-const sessions = [
-  session('second', 'Terminal 2', '2026-06-24T09:05:00.000Z'),
-  session('third', 'Terminal 3', '2026-06-24T09:10:00.000Z'),
-  session('first', 'Terminal 1', '2026-06-24T09:00:00.000Z'),
-  session('fourth', 'Terminal 4', '2026-06-24T09:15:00.000Z'),
-  session('fifth', 'Terminal 5', '2026-06-24T09:20:00.000Z'),
-];
+describe('terminalSessionOrder', () => {
+  test('keeps stable startedAt order across active selection and groups mounted cross-worktree sessions', () => {
+    const sessions = [
+      session('second', 'Terminal 2', '2026-06-24T09:05:00.000Z'),
+      session('third', 'Terminal 3', '2026-06-24T09:10:00.000Z'),
+      session('first', 'Terminal 1', '2026-06-24T09:00:00.000Z'),
+      session('fourth', 'Terminal 4', '2026-06-24T09:15:00.000Z'),
+      session('fifth', 'Terminal 5', '2026-06-24T09:20:00.000Z'),
+    ];
 
-assertIds(
-  visibleTerminalSessions({
-    sessions,
-    activeSessionId: 'third',
-  }),
-  ['first', 'second', 'third', 'fourth', 'fifth'],
-);
+    assertIds(
+      visibleTerminalSessions({
+        sessions,
+        activeSessionId: 'third',
+      }),
+      ['first', 'second', 'third', 'fourth', 'fifth'],
+    );
 
-assertIds(
-  visibleTerminalSessions({
-    sessions,
-    activeSessionId: 'fifth',
-  }),
-  ['first', 'second', 'third', 'fourth', 'fifth'],
-);
+    assertIds(
+      visibleTerminalSessions({
+        sessions,
+        activeSessionId: 'fifth',
+      }),
+      ['first', 'second', 'third', 'fourth', 'fifth'],
+    );
 
-assertIds(
-  visibleTerminalSessions({
-    sessions,
-    activeSessionId: 'third',
-  }),
-  ['first', 'second', 'third', 'fourth', 'fifth'],
-);
+    assertIds(
+      visibleTerminalSessions({
+        sessions,
+        activeSessionId: 'third',
+      }),
+      ['first', 'second', 'third', 'fourth', 'fifth'],
+    );
 
-assertIds(
-  visibleTerminalSessions({
-    sessions,
-    activeSessionId: null,
-  }),
-  ['first', 'second', 'third', 'fourth', 'fifth'],
-);
+    assertIds(
+      visibleTerminalSessions({
+        sessions,
+        activeSessionId: null,
+      }),
+      ['first', 'second', 'third', 'fourth', 'fifth'],
+    );
 
-const crossWorktreeSessions = [
-  session('feature-a', 'Feature A', '2026-06-24T09:05:00.000Z', 'project-1:feature'),
-  session('main-a', 'Main A', '2026-06-24T09:00:00.000Z', 'project-1:main'),
-  session('feature-b', 'Feature B', '2026-06-24T09:10:00.000Z', 'project-1:feature'),
-];
+    const crossWorktreeSessions = [
+      session('feature-a', 'Feature A', '2026-06-24T09:05:00.000Z', 'project-1:feature'),
+      session('main-a', 'Main A', '2026-06-24T09:00:00.000Z', 'project-1:main'),
+      session('feature-b', 'Feature B', '2026-06-24T09:10:00.000Z', 'project-1:feature'),
+    ];
 
-assertIds(
-  mountedTerminalSessions({
-    sessions: crossWorktreeSessions,
-  }),
-  ['main-a', 'feature-a', 'feature-b'],
-);
-
-console.log('terminalSessionOrder.test.ts passed');
+    assertIds(
+      mountedTerminalSessions({
+        sessions: crossWorktreeSessions,
+      }),
+      ['main-a', 'feature-a', 'feature-b'],
+    );
+  });
+});

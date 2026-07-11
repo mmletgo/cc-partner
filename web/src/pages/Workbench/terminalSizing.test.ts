@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import {
   canRefreshTerminalSize,
   terminalPanePixelSize,
@@ -22,64 +23,66 @@ function assertSize(
   }
 }
 
-assertSize(
-  terminalPanePixelSize({
-    panelWidth: 1000,
-    panelHeight: 500,
-    layout: 'single',
-    headerHeight: 36,
-  }),
-  { width: 1000, height: 464 },
-);
+describe('terminalSizing', () => {
+  test('computes pane/viewport pixel sizes and gates refresh on session status', () => {
+    assertSize(
+      terminalPanePixelSize({
+        panelWidth: 1000,
+        panelHeight: 500,
+        layout: 'single',
+        headerHeight: 36,
+      }),
+      { width: 1000, height: 464 },
+    );
 
-assertSize(
-  terminalViewportPixelSize({
-    panelWidth: 1000,
-    panelHeight: 500,
-    layout: 'single',
-    headerHeight: 36,
-    viewportInsetX: 12,
-    viewportInsetY: 12,
-  }),
-  { width: 976, height: 440 },
-);
+    assertSize(
+      terminalViewportPixelSize({
+        panelWidth: 1000,
+        panelHeight: 500,
+        layout: 'single',
+        headerHeight: 36,
+        viewportInsetX: 12,
+        viewportInsetY: 12,
+      }),
+      { width: 976, height: 440 },
+    );
 
-assertSize(
-  terminalViewportPixelSize({
-    panelWidth: 1001,
-    panelHeight: 500,
-    layout: 'double',
-    headerHeight: 36,
-    viewportInsetX: 12,
-    viewportInsetY: 12,
-  }),
-  { width: 476, height: 440 },
-);
+    assertSize(
+      terminalViewportPixelSize({
+        panelWidth: 1001,
+        panelHeight: 500,
+        layout: 'double',
+        headerHeight: 36,
+        viewportInsetX: 12,
+        viewportInsetY: 12,
+      }),
+      { width: 476, height: 440 },
+    );
 
-assertSize(
-  terminalViewportPixelSize({
-    panelWidth: 1001,
-    panelHeight: 701,
-    layout: 'quad',
-    headerHeight: 36,
-    viewportInsetX: 12,
-    viewportInsetY: 12,
-  }),
-  { width: 476, height: 290 },
-);
+    assertSize(
+      terminalViewportPixelSize({
+        panelWidth: 1001,
+        panelHeight: 701,
+        layout: 'quad',
+        headerHeight: 36,
+        viewportInsetX: 12,
+        viewportInsetY: 12,
+      }),
+      { width: 476, height: 290 },
+    );
 
-const runningSession = { status: 'running' };
-if (!canRefreshTerminalSize(runningSession, false)) {
-  throw new Error('running session should allow manual terminal size refresh');
-}
-if (canRefreshTerminalSize(runningSession, true)) {
-  throw new Error('remote offline session should block manual terminal size refresh');
-}
-if (canRefreshTerminalSize({ status: 'exited' }, false)) {
-  throw new Error('exited session should block manual terminal size refresh');
-}
-if (canRefreshTerminalSize(null, false)) {
-  throw new Error('missing session should block manual terminal size refresh');
-}
-
-console.log('terminalSizing.test.ts passed');
+    const runningSession = { status: 'running' };
+    if (!canRefreshTerminalSize(runningSession, false)) {
+      throw new Error('running session should allow manual terminal size refresh');
+    }
+    if (canRefreshTerminalSize(runningSession, true)) {
+      throw new Error('remote offline session should block manual terminal size refresh');
+    }
+    if (canRefreshTerminalSize({ status: 'exited' }, false)) {
+      throw new Error('exited session should block manual terminal size refresh');
+    }
+    if (canRefreshTerminalSize(null, false)) {
+      throw new Error('missing session should block manual terminal size refresh');
+    }
+  });
+});

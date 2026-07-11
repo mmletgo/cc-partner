@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import type {
   WorkbenchProject,
   WorkbenchRemoteDirectoryEntry,
@@ -11,7 +12,6 @@ import {
   remoteParentPath,
   sortRemoteDirectoryEntries,
 } from '../../lib/workbenchRemoteProjects';
-import { exit } from 'node:process';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -207,19 +207,12 @@ function testRemoteOfflineStateOnlyMatchesCurrentRemoteProject(): void {
  * Code Logic（这个函数做什么）:
  *   逐个执行纯 helper 测试，任一失败会抛出并让进程返回非零状态。
  */
-async function main(): Promise<void> {
-  testInsertRemoteProjectMovesToTopWithoutDuplicates();
-  testRemoteParentPathHandlesUnixAndWindowsPaths();
-  testSortRemoteDirectoryEntriesPutsDirsBeforeFiles();
-  testCanOpenRemoteProjectSelectionRequiresCurrentReadableDirectory();
-  testRemoteOfflineStateOnlyMatchesCurrentRemoteProject();
-}
-
-void main()
-  .then(() => {
-    exit(0);
-  })
-  .catch((error: unknown) => {
-    console.error(error);
-    exit(1);
+describe('workbenchRemoteProjects', () => {
+  test('insert, parent path, sort, open gate and offline detection helpers', async () => {
+    testInsertRemoteProjectMovesToTopWithoutDuplicates();
+    testRemoteParentPathHandlesUnixAndWindowsPaths();
+    testSortRemoteDirectoryEntriesPutsDirsBeforeFiles();
+    testCanOpenRemoteProjectSelectionRequiresCurrentReadableDirectory();
+    testRemoteOfflineStateOnlyMatchesCurrentRemoteProject();
   });
+});

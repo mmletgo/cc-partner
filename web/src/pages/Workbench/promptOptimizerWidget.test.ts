@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import type { WorkbenchProject, WorkbenchSession } from '../../lib/types';
 import {
   canFillPromptIntoTerminal,
@@ -99,209 +100,211 @@ function keyEvent(init: {
   };
 }
 
-assertEqual(
-  selectPromptOptimizerInsertText({
-    optimizedZh: '中文结果',
-    optimizedEn: 'English result',
-  }),
-  '中文结果',
-  'selects Chinese optimized result first',
-);
+describe('promptOptimizerWidget', () => {
+  test('selects insert text, gates fill, resets state, and resolves shortcuts', () => {
+    assertEqual(
+      selectPromptOptimizerInsertText({
+        optimizedZh: '中文结果',
+        optimizedEn: 'English result',
+      }),
+      '中文结果',
+      'selects Chinese optimized result first',
+    );
 
-assertEqual(
-  selectPromptOptimizerInsertText(
-    {
-      optimizedZh: '中文结果',
-      optimizedEn: 'English result',
-    },
-    'en',
-  ),
-  'English result',
-  'selects English optimized result when preferred',
-);
+    assertEqual(
+      selectPromptOptimizerInsertText(
+        {
+          optimizedZh: '中文结果',
+          optimizedEn: 'English result',
+        },
+        'en',
+      ),
+      'English result',
+      'selects English optimized result when preferred',
+    );
 
-assertEqual(
-  selectPromptOptimizerInsertText(
-    {
-      optimizedZh: '中文结果',
-      optimizedEn: '  ',
-    },
-    'en',
-  ),
-  '中文结果',
-  'falls back to Chinese when preferred English is empty',
-);
+    assertEqual(
+      selectPromptOptimizerInsertText(
+        {
+          optimizedZh: '中文结果',
+          optimizedEn: '  ',
+        },
+        'en',
+      ),
+      '中文结果',
+      'falls back to Chinese when preferred English is empty',
+    );
 
-assertEqual(
-  selectPromptOptimizerInsertText({
-    optimizedZh: '   ',
-    optimizedEn: 'English result',
-  }),
-  'English result',
-  'falls back to English optimized result',
-);
+    assertEqual(
+      selectPromptOptimizerInsertText({
+        optimizedZh: '   ',
+        optimizedEn: 'English result',
+      }),
+      'English result',
+      'falls back to English optimized result',
+    );
 
-assertEqual(canFillPromptIntoTerminal(session('running')), true, 'running session can fill');
-assertEqual(canFillPromptIntoTerminal(null), false, 'missing session cannot fill');
-assertEqual(canFillPromptIntoTerminal(session('exited')), false, 'non-running session cannot fill');
+    assertEqual(canFillPromptIntoTerminal(session('running')), true, 'running session can fill');
+    assertEqual(canFillPromptIntoTerminal(null), false, 'missing session cannot fill');
+    assertEqual(canFillPromptIntoTerminal(session('exited')), false, 'non-running session cannot fill');
 
-assertEqual(
-  resetPromptOptimizerTextState({
-    input: '上一次输入',
-    result: {
-      optimizedZh: '上一次中文结果',
-      optimizedEn: 'previous English result',
-    },
-    message: '上一次状态',
-  }),
-  {
-    input: '',
-    result: {
-      optimizedZh: '',
-      optimizedEn: '',
-    },
-    message: null,
-  },
-  'opening prompt optimizer resets all visible text',
-);
+    assertEqual(
+      resetPromptOptimizerTextState({
+        input: '上一次输入',
+        result: {
+          optimizedZh: '上一次中文结果',
+          optimizedEn: 'previous English result',
+        },
+        message: '上一次状态',
+      }),
+      {
+        input: '',
+        result: {
+          optimizedZh: '',
+          optimizedEn: '',
+        },
+        message: null,
+      },
+      'opening prompt optimizer resets all visible text',
+    );
 
-assertEqual(
-  promptOptimizerWorkingDirectory(project('/Users/hans/project/Pando')),
-  '/Users/hans/project/Pando',
-  'uses active project path as Claude working directory',
-);
+    assertEqual(
+      promptOptimizerWorkingDirectory(project('/Users/hans/project/Pando')),
+      '/Users/hans/project/Pando',
+      'uses active project path as Claude working directory',
+    );
 
-assertEqual(
-  promptOptimizerWorkingDirectory(null),
-  undefined,
-  'missing active project has no working directory',
-);
+    assertEqual(
+      promptOptimizerWorkingDirectory(null),
+      undefined,
+      'missing active project has no working directory',
+    );
 
-assertEqual(
-  promptOptimizerInsertPayload({
-    optimizedZh: '中文结果',
-    optimizedEn: 'English result',
-  }),
-  '中文结果',
-  'insert payload does not append Enter',
-);
+    assertEqual(
+      promptOptimizerInsertPayload({
+        optimizedZh: '中文结果',
+        optimizedEn: 'English result',
+      }),
+      '中文结果',
+      'insert payload does not append Enter',
+    );
 
-assertEqual(
-  promptOptimizerInsertPayload(
-    {
-      optimizedZh: '中文结果',
-      optimizedEn: 'English result',
-    },
-    'en',
-  ),
-  'English result',
-  'insert payload follows preferred language',
-);
+    assertEqual(
+      promptOptimizerInsertPayload(
+        {
+          optimizedZh: '中文结果',
+          optimizedEn: 'English result',
+        },
+        'en',
+      ),
+      'English result',
+      'insert payload follows preferred language',
+    );
 
-assertEqual(
-  promptOptimizerInsertPayload({
-    optimizedZh: '中文结果\n',
-    optimizedEn: '',
-  }),
-  '中文结果\n',
-  'insert payload preserves existing trailing newline',
-);
+    assertEqual(
+      promptOptimizerInsertPayload({
+        optimizedZh: '中文结果\n',
+        optimizedEn: '',
+      }),
+      '中文结果\n',
+      'insert payload preserves existing trailing newline',
+    );
 
-assertEqual(
-  shouldCommitPromptOptimizerPanelPosition(false, { left: 16, top: 24 }, { left: 40, top: 48 }),
-  false,
-  'closed panel should not commit cursor position changes',
-);
+    assertEqual(
+      shouldCommitPromptOptimizerPanelPosition(false, { left: 16, top: 24 }, { left: 40, top: 48 }),
+      false,
+      'closed panel should not commit cursor position changes',
+    );
 
-assertEqual(
-  shouldCommitPromptOptimizerPanelPosition(true, { left: 16, top: 24 }, { left: 16, top: 24 }),
-  false,
-  'open panel should skip identical cursor position changes',
-);
+    assertEqual(
+      shouldCommitPromptOptimizerPanelPosition(true, { left: 16, top: 24 }, { left: 16, top: 24 }),
+      false,
+      'open panel should skip identical cursor position changes',
+    );
 
-assertEqual(
-  shouldCommitPromptOptimizerPanelPosition(true, { left: 16, top: 24 }, { left: 40, top: 48 }),
-  true,
-  'open panel should commit changed cursor position',
-);
+    assertEqual(
+      shouldCommitPromptOptimizerPanelPosition(true, { left: 16, top: 24 }, { left: 40, top: 48 }),
+      true,
+      'open panel should commit changed cursor position',
+    );
 
-assertEqual(
-  promptOptimizerShortcutAction(false, ''),
-  'open',
-  'shortcut opens panel when it is closed',
-);
+    assertEqual(
+      promptOptimizerShortcutAction(false, ''),
+      'open',
+      'shortcut opens panel when it is closed',
+    );
 
-assertEqual(
-  promptOptimizerShortcutAction(true, '   '),
-  'close',
-  'shortcut closes opened panel when input is empty',
-);
+    assertEqual(
+      promptOptimizerShortcutAction(true, '   '),
+      'close',
+      'shortcut closes opened panel when input is empty',
+    );
 
-assertEqual(
-  promptOptimizerShortcutAction(true, '修复工作台'),
-  'optimize',
-  'shortcut optimizes only when opened panel has input',
-);
+    assertEqual(
+      promptOptimizerShortcutAction(true, '修复工作台'),
+      'optimize',
+      'shortcut optimizes only when opened panel has input',
+    );
 
-assertEqual(
-  promptOptimizerInputKeyAction({ key: 'Enter', shiftKey: false }, '修复工作台'),
-  'optimize',
-  'enter optimizes when input has text',
-);
+    assertEqual(
+      promptOptimizerInputKeyAction({ key: 'Enter', shiftKey: false }, '修复工作台'),
+      'optimize',
+      'enter optimizes when input has text',
+    );
 
-assertEqual(
-  promptOptimizerInputKeyAction({ key: 'Enter', shiftKey: false }, '   '),
-  'ignore',
-  'enter ignores empty input',
-);
+    assertEqual(
+      promptOptimizerInputKeyAction({ key: 'Enter', shiftKey: false }, '   '),
+      'ignore',
+      'enter ignores empty input',
+    );
 
-assertEqual(
-  promptOptimizerInputKeyAction({ key: 'Enter', shiftKey: true }, '修复工作台'),
-  'newline',
-  'shift enter keeps multiline editing',
-);
+    assertEqual(
+      promptOptimizerInputKeyAction({ key: 'Enter', shiftKey: true }, '修复工作台'),
+      'newline',
+      'shift enter keeps multiline editing',
+    );
 
-assertEqual(
-  promptOptimizerInputKeyAction({ key: 'Enter', shiftKey: false, isComposing: true }, '修复工作台'),
-  'ignore',
-  'enter during IME composition does not optimize',
-);
+    assertEqual(
+      promptOptimizerInputKeyAction({ key: 'Enter', shiftKey: false, isComposing: true }, '修复工作台'),
+      'ignore',
+      'enter during IME composition does not optimize',
+    );
 
-let shortcut = reducePromptOptimizerShortcut(
-  createPromptOptimizerShortcutState(),
-  keyEvent({ type: 'keydown', key: 'Control', ctrlKey: true }),
-  '<ctrl>',
-);
-assertEqual(shortcut.triggered, false, 'control keydown starts modifier-only tap');
-shortcut = reducePromptOptimizerShortcut(
-  shortcut.state,
-  keyEvent({ type: 'keyup', key: 'Control' }),
-  '<ctrl>',
-);
-assertEqual(shortcut.triggered, true, 'control keyup triggers modifier-only tap');
+    let shortcut = reducePromptOptimizerShortcut(
+      createPromptOptimizerShortcutState(),
+      keyEvent({ type: 'keydown', key: 'Control', ctrlKey: true }),
+      '<ctrl>',
+    );
+    assertEqual(shortcut.triggered, false, 'control keydown starts modifier-only tap');
+    shortcut = reducePromptOptimizerShortcut(
+      shortcut.state,
+      keyEvent({ type: 'keyup', key: 'Control' }),
+      '<ctrl>',
+    );
+    assertEqual(shortcut.triggered, true, 'control keyup triggers modifier-only tap');
 
-shortcut = reducePromptOptimizerShortcut(
-  createPromptOptimizerShortcutState(),
-  keyEvent({ type: 'keydown', key: 'Control', ctrlKey: true }),
-  '<ctrl>',
-);
-shortcut = reducePromptOptimizerShortcut(
-  shortcut.state,
-  keyEvent({ type: 'keydown', key: 'c', ctrlKey: true }),
-  '<ctrl>',
-);
-shortcut = reducePromptOptimizerShortcut(
-  shortcut.state,
-  keyEvent({ type: 'keyup', key: 'Control' }),
-  '<ctrl>',
-);
-assertEqual(shortcut.triggered, false, 'control plus another key does not trigger modifier-only tap');
+    shortcut = reducePromptOptimizerShortcut(
+      createPromptOptimizerShortcutState(),
+      keyEvent({ type: 'keydown', key: 'Control', ctrlKey: true }),
+      '<ctrl>',
+    );
+    shortcut = reducePromptOptimizerShortcut(
+      shortcut.state,
+      keyEvent({ type: 'keydown', key: 'c', ctrlKey: true }),
+      '<ctrl>',
+    );
+    shortcut = reducePromptOptimizerShortcut(
+      shortcut.state,
+      keyEvent({ type: 'keyup', key: 'Control' }),
+      '<ctrl>',
+    );
+    assertEqual(shortcut.triggered, false, 'control plus another key does not trigger modifier-only tap');
 
-shortcut = reducePromptOptimizerShortcut(
-  createPromptOptimizerShortcutState(),
-  keyEvent({ type: 'keydown', key: 'p', ctrlKey: true }),
-  '<ctrl>+p',
-);
-assertEqual(shortcut.triggered, true, 'configured combo triggers on keydown');
-
-console.log('promptOptimizerWidget.test.ts passed');
+    shortcut = reducePromptOptimizerShortcut(
+      createPromptOptimizerShortcutState(),
+      keyEvent({ type: 'keydown', key: 'p', ctrlKey: true }),
+      '<ctrl>+p',
+    );
+    assertEqual(shortcut.triggered, true, 'configured combo triggers on keydown');
+  });
+});

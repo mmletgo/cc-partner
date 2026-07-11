@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import type { AppConfig, HealthConfig } from '../../lib/types';
 import {
   buildConfigUpdate,
@@ -47,104 +48,113 @@ function configFixture(partial: Partial<AppConfig> = {}): AppConfig {
   };
 }
 
-const loaded = settingsStateFromConfig(configFixture());
-assertDeepEqual(loaded, {
-  deviceName: 'Hans-Mac',
-  receiveDir: '/Users/hans/cc-partner-files',
-  shortcuts: [
-    {
-      id: 'screenshot',
-      labelKey: 'screenshot',
-      value: '<cmd>+<shift>+s',
-    },
-  ],
+describe('settingsState', () => {
+  test('maps config <-> form <-> update across shortcuts, cloud, trending, prompt optimizer', () => {
+    const loaded = settingsStateFromConfig(configFixture());
+    assertDeepEqual(loaded, {
+      deviceName: 'Hans-Mac',
+      receiveDir: '/Users/hans/cc-partner-files',
+      shortcuts: [
+        {
+          id: 'screenshot',
+          labelKey: 'screenshot',
+          value: '<cmd>+<shift>+s',
+        },
+      ],
+    });
+
+    const changedShortcut = {
+      ...loaded,
+      shortcuts: loaded.shortcuts.map((s) =>
+        s.id === 'screenshot' ? { ...s, value: '<cmd>+<shift>+4' } : s,
+      ),
+    };
+    assertDeepEqual(buildConfigUpdate(changedShortcut, loaded), {
+      screenshotHotkey: '<cmd>+<shift>+4',
+    });
+
+    const defaults = settingsStateFromConfig(
+      configFixture({
+        deviceName: 'cc-partner',
+        receiveDir: '/Users/hans/cc-partner-files',
+        screenshotHotkey: '<cmd>+<shift>+s',
+      }),
+    );
+    assertDeepEqual(defaults.deviceName, 'cc-partner');
+    assertDeepEqual(defaults.receiveDir, '/Users/hans/cc-partner-files');
+    assertDeepEqual(isSettingsStateDirty(defaults, changedShortcut), true);
+
+    assertDeepEqual(
+      cloudSyncConfigToForm({
+        repoUrl: null,
+        branch: null,
+        enabled: false,
+        auto: false,
+        intervalSecs: 600,
+      }),
+      {
+        repoUrl: '',
+        branch: '',
+        enabled: false,
+        auto: false,
+        intervalSecs: 600,
+      },
+    );
+
+    assertDeepEqual(
+      githubTrendingConfigToForm({
+        aiEnabled: true,
+        claudeCliPath: 'claude',
+        claudeModel: 'sonnet',
+        cacheTtlHours: 24,
+      }),
+      {
+        aiEnabled: true,
+        claudeCliPath: 'claude',
+        claudeModel: 'sonnet',
+        cacheTtlHours: 24,
+      },
+    );
+
+    assertDeepEqual(promptOptimizerSettingsConfigToForm(configFixture()), {
+      hotkey: '<ctrl>',
+      fillLanguage: 'zh',
+    });
+
+    assertDeepEqual(
+      promptOptimizerSettingsFormToUpdate({
+        hotkey: '<ctrl>',
+        fillLanguage: 'en',
+      }),
+      {
+        promptOptimizerHotkey: '<ctrl>',
+        promptOptimizerFillLanguage: 'en',
+      },
+    );
+
+    assertDeepEqual(
+      cloudSyncFormToUpdate({
+        repoUrl: '  ',
+        branch: ' ',
+        enabled: false,
+        auto: false,
+        intervalSecs: 600,
+      }),
+      {
+        repoUrl: '',
+        enabled: false,
+        auto: false,
+        intervalSecs: 600,
+        branch: '',
+      },
+    );
+  });
+
+  test('healthConfigToForm normalizes water/fullscreen when health monitoring is enabled and returns fresh refs', () => {
+    testHealthConfigToFormNull();
+    testHealthConfigToFormConfig();
+  });
 });
-
-const changedShortcut = {
-  ...loaded,
-  shortcuts: loaded.shortcuts.map((s) =>
-    s.id === 'screenshot' ? { ...s, value: '<cmd>+<shift>+4' } : s,
-  ),
-};
-assertDeepEqual(buildConfigUpdate(changedShortcut, loaded), {
-  screenshotHotkey: '<cmd>+<shift>+4',
-});
-
-const defaults = settingsStateFromConfig(
-  configFixture({
-    deviceName: 'cc-partner',
-    receiveDir: '/Users/hans/cc-partner-files',
-    screenshotHotkey: '<cmd>+<shift>+s',
-  }),
-);
-assertDeepEqual(defaults.deviceName, 'cc-partner');
-assertDeepEqual(defaults.receiveDir, '/Users/hans/cc-partner-files');
-assertDeepEqual(isSettingsStateDirty(defaults, changedShortcut), true);
-
-assertDeepEqual(
-  cloudSyncConfigToForm({
-    repoUrl: null,
-    branch: null,
-    enabled: false,
-    auto: false,
-    intervalSecs: 600,
-  }),
-  {
-    repoUrl: '',
-    branch: '',
-    enabled: false,
-    auto: false,
-    intervalSecs: 600,
-  },
-);
-
-assertDeepEqual(
-  githubTrendingConfigToForm({
-    aiEnabled: true,
-    claudeCliPath: 'claude',
-    claudeModel: 'sonnet',
-    cacheTtlHours: 24,
-  }),
-  {
-    aiEnabled: true,
-    claudeCliPath: 'claude',
-    claudeModel: 'sonnet',
-    cacheTtlHours: 24,
-  },
-);
-
-assertDeepEqual(promptOptimizerSettingsConfigToForm(configFixture()), {
-  hotkey: '<ctrl>',
-  fillLanguage: 'zh',
-});
-
-assertDeepEqual(
-  promptOptimizerSettingsFormToUpdate({
-    hotkey: '<ctrl>',
-    fillLanguage: 'en',
-  }),
-  {
-    promptOptimizerHotkey: '<ctrl>',
-    promptOptimizerFillLanguage: 'en',
-  },
-);
-
-assertDeepEqual(
-  cloudSyncFormToUpdate({
-    repoUrl: '  ',
-    branch: ' ',
-    enabled: false,
-    auto: false,
-    intervalSecs: 600,
-  }),
-  {
-    repoUrl: '',
-    enabled: false,
-    auto: false,
-    intervalSecs: 600,
-    branch: '',
-  },
-);
 
 // ===== healthConfigToForm: 健康表单映射 =====
 
@@ -207,6 +217,3 @@ function testHealthConfigToFormConfig(): void {
   });
   assertNotSameRef(form, cfg);
 }
-
-testHealthConfigToFormNull();
-testHealthConfigToFormConfig();

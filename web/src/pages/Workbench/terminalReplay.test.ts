@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import {
   planTerminalBufferWrite,
   shouldForwardTerminalInput,
@@ -40,41 +41,43 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
-const gate: TerminalReplayGate = { current: false };
-const terminal = new FakeTerminalWriter();
-const scheduledReleases: Array<() => void> = [];
+describe('terminalReplay', () => {
+  test('gates input around replay writes and plans capped buffer appends', () => {
+    const gate: TerminalReplayGate = { current: false };
+    const terminal = new FakeTerminalWriter();
+    const scheduledReleases: Array<() => void> = [];
 
-writeTerminalReplay(terminal, '\x1b[c', gate, (release) => {
-  scheduledReleases.push(release);
+    writeTerminalReplay(terminal, '\x1b[c', gate, (release) => {
+      scheduledReleases.push(release);
+    });
+
+    assert(gate.current, 'replay should suppress terminal-generated input while pending');
+    assert(!shouldForwardTerminalInput(gate), 'input must not be forwarded during replay');
+    assert(JSON.stringify(terminal.writes) === JSON.stringify(['\x1b[c']), 'replay should write buffer');
+
+    terminal.callback?.();
+
+    assert(
+      gate.current,
+      'replay should keep suppressing terminal-generated input until delayed release runs',
+    );
+    assert(
+      !shouldForwardTerminalInput(gate),
+      'input must not be forwarded between xterm callback and delayed release',
+    );
+    assert(scheduledReleases.length === 1, 'replay should schedule one delayed gate release');
+
+    scheduledReleases[0]?.();
+
+    assert(!gate.current, 'replay should release suppression after delayed gate release');
+    assert(shouldForwardTerminalInput(gate), 'live input should be forwarded after replay');
+    assert(
+      !shouldForwardTerminalInput(gate, false),
+      'inactive mounted terminals must not forward xterm-generated input',
+    );
+
+    const cappedAppendPlan = planTerminalBufferWrite('bcdefghijk', 'defghijklm');
+    assert(cappedAppendPlan.mode === 'append', 'capped buffer shift should append live tail');
+    assert(cappedAppendPlan.data === 'lm', 'capped buffer shift should append only new output');
+  });
 });
-
-assert(gate.current, 'replay should suppress terminal-generated input while pending');
-assert(!shouldForwardTerminalInput(gate), 'input must not be forwarded during replay');
-assert(JSON.stringify(terminal.writes) === JSON.stringify(['\x1b[c']), 'replay should write buffer');
-
-terminal.callback?.();
-
-assert(
-  gate.current,
-  'replay should keep suppressing terminal-generated input until delayed release runs',
-);
-assert(
-  !shouldForwardTerminalInput(gate),
-  'input must not be forwarded between xterm callback and delayed release',
-);
-assert(scheduledReleases.length === 1, 'replay should schedule one delayed gate release');
-
-scheduledReleases[0]?.();
-
-assert(!gate.current, 'replay should release suppression after delayed gate release');
-assert(shouldForwardTerminalInput(gate), 'live input should be forwarded after replay');
-assert(
-  !shouldForwardTerminalInput(gate, false),
-  'inactive mounted terminals must not forward xterm-generated input',
-);
-
-const cappedAppendPlan = planTerminalBufferWrite('bcdefghijk', 'defghijklm');
-assert(cappedAppendPlan.mode === 'append', 'capped buffer shift should append live tail');
-assert(cappedAppendPlan.data === 'lm', 'capped buffer shift should append only new output');
-
-console.log('terminalReplay.test.ts passed');

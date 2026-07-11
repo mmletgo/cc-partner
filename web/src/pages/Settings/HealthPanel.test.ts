@@ -12,6 +12,7 @@
  *   健康监测开启后久坐/喝水/全屏遮罩始终启用,因此不应再渲染喝水启用或全屏遮罩开关。
  */
 
+import { describe, test } from 'vitest';
 import { register } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { createElement } from 'react';
@@ -19,112 +20,106 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { PENDING_HEALTH_FORM } from './settingsState';
 register('./css-stub.mjs', import.meta.url);
 
-const { default: i18n } = await import('../../i18n');
-await i18n.changeLanguage('zh');
+describe('HealthPanel', () => {
+  test('maps time helpers, renders 3 sections, 4 24-hour selects, and CSS override order', async () => {
+    const { default: i18n } = await import('../../i18n');
+    await i18n.changeLanguage('zh');
 
-const { HealthPanel, splitTimeValue, timePartsToConfig } = await import('./HealthPanel');
+    const { HealthPanel, splitTimeValue, timePartsToConfig } = await import('./HealthPanel');
 
-const cases: Array<[string, string, string | null]> = [
-  ['', '', null],
-  ['09', '', '09:00'],
-  ['09', '30', '09:30'],
-  ['23', '59', '23:59'],
-];
+    const cases: Array<[string, string, string | null]> = [
+      ['', '', null],
+      ['09', '', '09:00'],
+      ['09', '30', '09:30'],
+      ['23', '59', '23:59'],
+    ];
 
-for (const [hour, minute, expected] of cases) {
-  const actual = timePartsToConfig(hour, minute);
-  if (actual !== expected) {
-    throw new Error(`timePartsToConfig('${hour}', '${minute}') expected ${String(expected)}, got ${String(actual)}`);
-  }
-}
+    for (const [hour, minute, expected] of cases) {
+      const actual = timePartsToConfig(hour, minute);
+      if (actual !== expected) {
+        throw new Error(`timePartsToConfig('${hour}', '${minute}') expected ${String(expected)}, got ${String(actual)}`);
+      }
+    }
 
-console.log(`timePartsToConfig: ${cases.length} cases passed`);
+    const splitCases: Array<[string | null, string, string]> = [
+      [null, '', ''],
+      ['09:30', '09', '30'],
+      ['23:59', '23', '59'],
+    ];
 
-const splitCases: Array<[string | null, string, string]> = [
-  [null, '', ''],
-  ['09:30', '09', '30'],
-  ['23:59', '23', '59'],
-];
+    for (const [input, expectedHour, expectedMinute] of splitCases) {
+      const actual = splitTimeValue(input);
+      if (actual.hour !== expectedHour || actual.minute !== expectedMinute) {
+        throw new Error(
+          `splitTimeValue('${String(input)}') expected ${expectedHour}:${expectedMinute}, got ${actual.hour}:${actual.minute}`,
+        );
+      }
+    }
 
-for (const [input, expectedHour, expectedMinute] of splitCases) {
-  const actual = splitTimeValue(input);
-  if (actual.hour !== expectedHour || actual.minute !== expectedMinute) {
-    throw new Error(
-      `splitTimeValue('${String(input)}') expected ${expectedHour}:${expectedMinute}, got ${actual.hour}:${actual.minute}`,
+    const rendered = renderToStaticMarkup(
+      createElement(HealthPanel, {
+        form: PENDING_HEALTH_FORM,
+        applied: null,
+        onPatch: () => undefined,
+        onResetDefaults: () => undefined,
+        onApply: () => undefined,
+        applying: false,
+        error: null,
+      }),
     );
-  }
-}
 
-console.log(`splitTimeValue: ${splitCases.length} cases passed`);
+    const sectionCount = rendered.match(/<section/g)?.length ?? 0;
+    if (sectionCount !== 3) {
+      throw new Error(`HealthPanel expected 3 settings sections, got ${sectionCount}`);
+    }
 
-const rendered = renderToStaticMarkup(
-  createElement(HealthPanel, {
-    form: PENDING_HEALTH_FORM,
-    applied: null,
-    onPatch: () => undefined,
-    onResetDefaults: () => undefined,
-    onApply: () => undefined,
-    applying: false,
-    error: null,
-  }),
-);
+    for (const title of ['健康提醒', '免打扰', '通知与隐私']) {
+      if (!rendered.includes(title)) {
+        throw new Error(`HealthPanel missing section title: ${title}`);
+      }
+    }
 
-const sectionCount = rendered.match(/<section/g)?.length ?? 0;
-if (sectionCount !== 3) {
-  throw new Error(`HealthPanel expected 3 settings sections, got ${sectionCount}`);
-}
+    if (rendered.includes('提醒方向')) {
+      throw new Error('HealthPanel must not render a separate reminder style section');
+    }
 
-for (const title of ['健康提醒', '免打扰', '通知与隐私']) {
-  if (!rendered.includes(title)) {
-    throw new Error(`HealthPanel missing section title: ${title}`);
-  }
-}
+    const waterIntervalIndex = rendered.indexOf('喝水提醒间隔(分钟)');
+    const quietHoursIndex = rendered.indexOf('settings-health-quiet-hours-title');
+    if (waterIntervalIndex === -1 || quietHoursIndex === -1 || waterIntervalIndex > quietHoursIndex) {
+      throw new Error('HealthPanel should render water interval inside the first health reminder section');
+    }
 
-if (rendered.includes('提醒方向')) {
-  throw new Error('HealthPanel must not render a separate reminder style section');
-}
+    if (rendered.includes('全屏遮罩提醒') || rendered.includes('按间隔显示应用内喝水提醒。')) {
+      throw new Error('HealthPanel must not render fullscreen or water reminder enablement toggles');
+    }
 
-const waterIntervalIndex = rendered.indexOf('喝水提醒间隔(分钟)');
-const quietHoursIndex = rendered.indexOf('settings-health-quiet-hours-title');
-if (waterIntervalIndex === -1 || quietHoursIndex === -1 || waterIntervalIndex > quietHoursIndex) {
-  throw new Error('HealthPanel should render water interval inside the first health reminder section');
-}
+    const selectCount = rendered.match(/<select/g)?.length ?? 0;
+    if (selectCount !== 4) {
+      throw new Error(`HealthPanel expected 4 time picker selects, got ${selectCount}`);
+    }
 
-if (rendered.includes('全屏遮罩提醒') || rendered.includes('按间隔显示应用内喝水提醒。')) {
-  throw new Error('HealthPanel must not render fullscreen or water reminder enablement toggles');
-}
+    const hourSelectCount = rendered.match(/data-part="hour"/g)?.length ?? 0;
+    const minuteSelectCount = rendered.match(/data-part="minute"/g)?.length ?? 0;
+    if (hourSelectCount !== 2 || minuteSelectCount !== 2) {
+      throw new Error(`HealthPanel expected 2 hour selects and 2 minute selects, got ${hourSelectCount}/${minuteSelectCount}`);
+    }
 
-console.log('HealthPanel layout: 3 section cards rendered and water interval stays in health reminder section');
+    if (!rendered.includes('<option value="23">23</option>')) {
+      throw new Error('HealthPanel expected 24-hour option 23');
+    }
 
-const selectCount = rendered.match(/<select/g)?.length ?? 0;
-if (selectCount !== 4) {
-  throw new Error(`HealthPanel expected 4 time picker selects, got ${selectCount}`);
-}
+    if (rendered.includes('AM') || rendered.includes('PM')) {
+      throw new Error('HealthPanel 24-hour picker must not render AM/PM labels');
+    }
 
-const hourSelectCount = rendered.match(/data-part="hour"/g)?.length ?? 0;
-const minuteSelectCount = rendered.match(/data-part="minute"/g)?.length ?? 0;
-if (hourSelectCount !== 2 || minuteSelectCount !== 2) {
-  throw new Error(`HealthPanel expected 2 hour selects and 2 minute selects, got ${hourSelectCount}/${minuteSelectCount}`);
-}
-
-if (!rendered.includes('<option value="23">23</option>')) {
-  throw new Error('HealthPanel expected 24-hour option 23');
-}
-
-if (rendered.includes('AM') || rendered.includes('PM')) {
-  throw new Error('HealthPanel 24-hour picker must not render AM/PM labels');
-}
-
-console.log('HealthPanel layout: quiet hours use 24-hour picker selects');
-
-const cssSource = await readFile(new URL('./Settings.module.css', import.meta.url), 'utf8');
-const fieldSeparatorIndex = cssSource.indexOf('.field + .field');
-const healthGridOverrideIndex = cssSource.indexOf('.healthFieldGrid > .field + .field');
-if (fieldSeparatorIndex === -1 || healthGridOverrideIndex === -1) {
-  throw new Error('HealthPanel CSS expected both generic field separator and health grid override rules');
-}
-if (healthGridOverrideIndex <= fieldSeparatorIndex) {
-  throw new Error('HealthPanel CSS health grid override must appear after .field + .field');
-}
-
-console.log('HealthPanel CSS: health grid field separator override follows generic field rule');
+    const cssSource = await readFile(new URL('./Settings.module.css', import.meta.url), 'utf8');
+    const fieldSeparatorIndex = cssSource.indexOf('.field + .field');
+    const healthGridOverrideIndex = cssSource.indexOf('.healthFieldGrid > .field + .field');
+    if (fieldSeparatorIndex === -1 || healthGridOverrideIndex === -1) {
+      throw new Error('HealthPanel CSS expected both generic field separator and health grid override rules');
+    }
+    if (healthGridOverrideIndex <= fieldSeparatorIndex) {
+      throw new Error('HealthPanel CSS health grid override must appear after .field + .field');
+    }
+  });
+});
