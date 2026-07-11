@@ -17,7 +17,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { listen } from '@tauri-apps/api/event';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -61,13 +60,10 @@ import {
 import type {
   PromptOptimizerFillLanguage,
   WorkbenchFileNode,
-  WorkbenchGitCommit,
   WorkbenchHtmlAsset,
-  WorkbenchMergeProgressEvent,
   WorkbenchMergeStage,
   WorkbenchMergeStageId,
   WorkbenchPathInfo,
-  WorkbenchWorktree,
 } from '@/lib/types';
 import styles from './Workbench.module.css';
 import { parseWorkbenchDeepLink } from './workbenchDeepLink';
@@ -88,6 +84,10 @@ import {
   useWorkbenchTerminalController,
 } from './controllers/useWorkbenchTerminalController';
 import type { WorkbenchTerminalErrorKey } from './controllers/useWorkbenchTerminalController';
+import {
+  useWorkbenchWorktreeGitController,
+} from './controllers/useWorkbenchWorktreeGitController';
+import type { WorkbenchWorktreeGitErrorKey } from './controllers/useWorkbenchWorktreeGitController';
 import { WorkbenchTerminalPane } from './WorkbenchTerminalPane';
 import type { TerminalCursorAnchor } from './WorkbenchTerminalPane';
 import {
@@ -98,13 +98,10 @@ import {
   canPushWorktree,
   canRemoveWorktree,
   composeWorktreeBranchName,
-  createWorktreeWithTerminalWindow,
   DEFAULT_WORKTREE_BRANCH_PREFIX,
   formatWorkbenchMergeStages,
   formatCommitRelativeTime,
   hasGitHistory,
-  sessionsForWorktree,
-  shouldAutoDismissMergeStages,
   WORKTREE_BRANCH_PREFIXES,
   worktreeChangeCount,
   worktreeStatusTone,
@@ -165,9 +162,6 @@ interface PromptOptimizerPanelPosition {
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 6;
 const TERMINAL_PANE_HEADER_PX = 36;
-const MERGE_STAGE_AUTO_DISMISS_MS = 2500;
-
-const INITIAL_MERGE_STAGE_ID: WorkbenchMergeStageId = 'checkSource';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -627,15 +621,7 @@ export function Workbench() {
     projects,
     selectProject,
   });
-  const [worktrees, setWorktrees] = useState<WorkbenchWorktree[]>([]);
   const [activeWorktreeId, setActiveWorktreeId] = useState<string | null>(null);
-  const [worktreeBusy, setWorktreeBusy] = useState<string | null>(null);
-  const [worktreeError, setWorktreeError] = useState<string | null>(null);
-  const [createWorktreeOpen, setCreateWorktreeOpen] = useState<boolean>(false);
-  const [createWorktreeBranchPrefix, setCreateWorktreeBranchPrefix] =
-    useState<WorktreeBranchPrefix>(DEFAULT_WORKTREE_BRANCH_PREFIX);
-  const [createWorktreeBranchSuffixDraft, setCreateWorktreeBranchSuffixDraft] =
-    useState<string>('');
   const [rootNodes, setRootNodes] = useState<WorkbenchFileNode[]>([]);
   const [childrenByPath, setChildrenByPath] = useState<Record<string, WorkbenchFileNode[]>>({});
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
@@ -652,11 +638,6 @@ export function Workbench() {
   const [newEntryName, setNewEntryName] = useState<string>('');
   const [renameName, setRenameName] = useState<string>('');
   const [inspectorTab, setInspectorTab] = useState<WorkbenchInspectorTab>('files');
-  const [gitCommits, setGitCommits] = useState<WorkbenchGitCommit[]>([]);
-  const [gitHistoryLoading, setGitHistoryLoading] = useState<boolean>(false);
-  const [gitHistoryError, setGitHistoryError] = useState<string | null>(null);
-  const [mergeProgressWorktreeId, setMergeProgressWorktreeId] = useState<string | null>(null);
-  const [mergeStages, setMergeStages] = useState<WorkbenchMergeStage[]>([]);
   const [runtimeNow, setRuntimeNow] = useState<number>(() => Date.now());
   const [sessionSearchOpen, setSessionSearchOpen] = useState<boolean>(false);
   const [promptPanelOpen, setPromptPanelOpen] = useState<boolean>(false);
@@ -678,8 +659,6 @@ export function Workbench() {
   const promptShortcutStateRef = useRef(createPromptOptimizerShortcutState());
   const promptPanelOpenRef = useRef<boolean>(false);
   const cursorAnchorRef = useRef<TerminalCursorAnchor | null>(null);
-  const mergeProgressWorktreeIdRef = useRef<string | null>(null);
-  const mergeStageDismissTimerRef = useRef<number | null>(null);
   const fileTabsRef = useRef<WorkbenchOpenFileTab[]>([]);
   const activeFileTabIdRef = useRef<string | null>(null);
   const openFileRequestSeqRef = useRef<number>(0);
@@ -699,11 +678,6 @@ export function Workbench() {
     sessionId: null,
   });
 
-  const activeWorktree = useMemo(
-    () => worktrees.find((worktree) => worktree.id === activeWorktreeId) ?? worktrees[0] ?? null,
-    [activeWorktreeId, worktrees],
-  );
-  const activeWorktreeSessionId = activeWorktree?.id ?? null;
   // Business Logic: 终端域（session 生命周期 + focus 同步 + pane 操作 + terminal-status 事件）由独立 controller
   // 持有，避免在 Workbench.tsx 里散落多处 state/effect/handler；controller 接收窄 API/回调，不复制邻接域 state，
   // 也绝不持有终端字节内容（字节内容仍归 WorkbenchTerminalBuffersProvider 所有）。
@@ -716,7 +690,7 @@ export function Workbench() {
   );
   const terminalController = useWorkbenchTerminalController({
     activeProjectId,
-    activeWorktreeId: activeWorktreeSessionId,
+    activeWorktreeId,
     remoteWriteDisabled,
     terminalPanelRef,
     resetBuffer: resetTerminalBuffer,
@@ -732,7 +706,6 @@ export function Workbench() {
     canListenToTauriEvents,
   });
   const {
-    sessions,
     scopedSessions,
     activeSession,
     activeSessionId,
@@ -761,6 +734,80 @@ export function Workbench() {
     handleResize,
     handleRefreshTerminalSize,
   } = terminalController;
+  // Business Logic: worktree/Git 域（worktree 生命周期 + 创建表单/busy/error + Git 提交刷新 + merge 阶段）
+  // 由独立 controller 持有，避免在 Workbench.tsx 里散落多处 state/effect/handler；controller 接收窄 API/回调 +
+  // terminalBridge，不复制邻接域 state。activeWorktreeId 仍由页面持有（终端域 controller / 文件 effect /
+  // deep link effect 都读取同一值），controller 通过 setActiveWorktreeId 回写。
+  // Code Logic: translateWorktreeError 必须稳定（useCallback），否则 controller 内 useCallback 依赖每次渲染都变。
+  const translateWorktreeError = useCallback(
+    (key: WorkbenchWorktreeGitErrorKey): string => t(`workbench:errors.${key}`),
+    [t],
+  );
+  const translateWorktreeMessage = useCallback(
+    (
+      key: 'mergeConfirm' | 'removeConfirm' | 'checkSourceMessage',
+      vars?: Record<string, unknown>,
+    ): string => {
+      if (key === 'mergeConfirm') return t('workbench:worktrees.mergeConfirm', vars);
+      if (key === 'removeConfirm') return t('workbench:worktrees.removeConfirm', vars);
+      return t('workbench:mergeStages.messages.checkSource');
+    },
+    [t],
+  );
+  const confirmWorktreeAction = useCallback(
+    (message: string): boolean => window.confirm(message),
+    [],
+  );
+  const worktreeGitController = useWorkbenchWorktreeGitController({
+    activeProjectId,
+    activeWorktreeId,
+    setActiveWorktreeId,
+    remoteWriteDisabled,
+    inspectorTab,
+    isCurrentProject,
+    markRequestFailure,
+    markRequestSuccess,
+    refreshProjectSessionStats,
+    terminalBridge: terminalController,
+    displayErrorMessage,
+    desktopUnavailableMessage,
+    translateError: translateWorktreeError,
+    translateWorktreeMessage,
+    confirmAction: confirmWorktreeAction,
+    canListenToTauriEvents,
+  });
+  const {
+    worktrees,
+    setWorktrees,
+    worktreeBusy,
+    worktreeError,
+    createWorktreeOpen,
+    setCreateWorktreeOpen,
+    createWorktreeBranchPrefix,
+    createWorktreeBranchSuffixDraft,
+    setCreateWorktreeBranchPrefix,
+    setCreateWorktreeBranchSuffixDraft,
+    gitCommits,
+    setGitCommits,
+    gitHistoryLoading,
+    gitHistoryError,
+    setGitHistoryError,
+    mergeStages,
+    loadWorktrees,
+    loadGitHistory,
+    handleOpenCreateWorktree,
+    handleCancelCreateWorktree,
+    handleCreateWorktree,
+    handleCommitWorktree,
+    handlePushWorktree,
+    handleMergeWorktree,
+    handleRemoveWorktree,
+    clearMergeStagePanel,
+  } = worktreeGitController;
+  const activeWorktree = useMemo(
+    () => worktrees.find((worktree) => worktree.id === activeWorktreeId) ?? worktrees[0] ?? null,
+    [activeWorktreeId, worktrees],
+  );
   const gitGraphRows = useMemo(() => buildGitGraphRows(gitCommits), [gitCommits]);
   const renderedMergeStages = useMemo(
     () => (mergeStages.length > 0 ? formatWorkbenchMergeStages(mergeStages) : []),
@@ -823,77 +870,6 @@ export function Workbench() {
       }
     },
     [t],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户可能连续发起 merge 或切换项目，旧的自动隐藏计时器不能误清新一轮进度。
-   *
-   * Code Logic（这个函数做什么）:
-   *   如果存在 merge 阶段条隐藏计时器，则取消并清空 ref。
-   */
-  const clearMergeStageDismissTimer = useCallback(() => {
-    if (mergeStageDismissTimerRef.current === null) return;
-    window.clearTimeout(mergeStageDismissTimerRef.current);
-    mergeStageDismissTimerRef.current = null;
-  }, []);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   项目切换或成功完成后的阶段条应释放 Git 历史区域空间。
-   *
-   * Code Logic（这个函数做什么）:
-   *   取消隐藏计时器，清空当前追踪 worktree 与阶段列表。
-   */
-  const clearMergeStagePanel = useCallback(() => {
-    clearMergeStageDismissTimer();
-    mergeProgressWorktreeIdRef.current = null;
-    setMergeProgressWorktreeId(null);
-    setMergeStages([]);
-  }, [clearMergeStageDismissTimer]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   成功 merge 后用户只需要短暂看到完成反馈，不应长期保留状态条占位。
-   *
-   * Code Logic（这个函数做什么）:
-   *   为指定 worktree 安排延迟隐藏；触发时若已经开始追踪别的 worktree，则不清理新状态。
-   */
-  const scheduleMergeStagePanelDismiss = useCallback(
-    (worktreeId: string) => {
-      clearMergeStageDismissTimer();
-      mergeStageDismissTimerRef.current = window.setTimeout(() => {
-        mergeStageDismissTimerRef.current = null;
-        if (mergeProgressWorktreeIdRef.current !== worktreeId) return;
-        mergeProgressWorktreeIdRef.current = null;
-        setMergeProgressWorktreeId(null);
-        setMergeStages([]);
-      }, MERGE_STAGE_AUTO_DISMISS_MS);
-    },
-    [clearMergeStageDismissTimer],
-  );
-
-  const loadWorktrees = useCallback(
-    async (projectId: string) => {
-      try {
-        setWorktreeError(null);
-        const list = await workbenchApi.worktrees.list(projectId);
-        if (!isCurrentProject(projectId)) return;
-        markRequestSuccess(projectId);
-        setWorktrees(list);
-        setActiveWorktreeId((current) => {
-          if (current && list.some((worktree) => worktree.id === current)) return current;
-          return list[0]?.id ?? null;
-        });
-      } catch (error) {
-        if (!isCurrentProject(projectId)) return;
-        markRequestFailure(projectId, error);
-        setWorktreeError(
-          displayErrorMessage(error, t('workbench:errors.worktrees'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, t],
   );
 
   /**
@@ -970,46 +946,6 @@ export function Workbench() {
       }
     }
   }, []);
-
-  const loadGitHistory = useCallback(async () => {
-    const projectId = activeProjectIdRef.current;
-    if (!projectId) {
-      setGitCommits([]);
-      setGitHistoryError(null);
-      setGitHistoryLoading(false);
-      return;
-    }
-    const worktreeId = activeWorktreeIdRef.current;
-    try {
-      setGitHistoryLoading(true);
-      setGitHistoryError(null);
-      const commits = await workbenchApi.git.listCommits(projectId, worktreeId, 30);
-      if (
-        !isCurrentProject(projectId) ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      setGitCommits(commits);
-      markRequestSuccess(projectId);
-    } catch (error) {
-      if (
-        !isCurrentProject(projectId) ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      markRequestFailure(projectId, error);
-      setGitCommits([]);
-      setGitHistoryError(
-        displayErrorMessage(error, t('workbench:errors.gitHistory'), desktopUnavailableMessage),
-      );
-    } finally {
-      if (isCurrentProject(projectId) && activeWorktreeIdRef.current === worktreeId) {
-        setGitHistoryLoading(false);
-      }
-    }
-  }, [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, t]);
 
   const loadPathInfo = useCallback(
     async (path: string) => {
@@ -1127,10 +1063,6 @@ export function Workbench() {
   }, [promptPanelOpen]);
 
   useEffect(() => {
-    mergeProgressWorktreeIdRef.current = mergeProgressWorktreeId;
-  }, [mergeProgressWorktreeId]);
-
-  useEffect(() => {
     activeFileTabIdRef.current = activeFileTabId;
   }, [activeFileTabId]);
 
@@ -1162,8 +1094,6 @@ export function Workbench() {
     const timer = window.setInterval(() => setRuntimeNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
-
-  useEffect(() => clearMergeStageDismissTimer, [clearMergeStageDismissTimer]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1259,7 +1189,7 @@ export function Workbench() {
       void loadWorktrees(activeProjectId);
       void loadSessions(activeProjectId);
     });
-  }, [activeProjectId, clearMergeStagePanel, loadSessions, loadWorktrees, setActiveSessionId, setFileTabsState, setSessions]);
+  }, [activeProjectId, clearMergeStagePanel, loadSessions, loadWorktrees, setActiveSessionId, setFileTabsState, setSessions, setWorktrees, setCreateWorktreeOpen, setCreateWorktreeBranchPrefix, setCreateWorktreeBranchSuffixDraft, setGitCommits, setGitHistoryError]);
 
   useEffect(() => {
     return deferEffect(() => {
@@ -1286,7 +1216,7 @@ export function Workbench() {
         void loadDir('');
       }
     });
-  }, [activeProjectId, activeWorktreeId, loadDir, setFileTabsState]);
+  }, [activeProjectId, activeWorktreeId, loadDir, setFileTabsState, setGitCommits, setGitHistoryError]);
 
   useEffect(() => {
     if (inspectorTab !== 'history') return undefined;
@@ -1294,33 +1224,6 @@ export function Workbench() {
       void loadGitHistory();
     });
   }, [activeProjectId, activeWorktreeId, inspectorTab, loadGitHistory]);
-
-  useEffect(() => {
-    if (!canListenToTauriEvents()) return undefined;
-    const mergeUnlisten = listen<WorkbenchMergeProgressEvent>(
-      'workbench:merge-progress',
-      (event) => {
-        const payload = event.payload;
-        const activeProjectId = activeProjectIdRef.current;
-        if (!activeProjectId || payload.projectId !== activeProjectId) return;
-        const trackedWorktreeId = mergeProgressWorktreeIdRef.current;
-        if (trackedWorktreeId && trackedWorktreeId !== payload.worktreeId) return;
-        if (!trackedWorktreeId) {
-          mergeProgressWorktreeIdRef.current = payload.worktreeId;
-          setMergeProgressWorktreeId(payload.worktreeId);
-        }
-        setMergeStages((current) =>
-          formatWorkbenchMergeStages([
-            ...current.filter((stage) => stage.id !== payload.stage.id),
-            payload.stage,
-          ]),
-        );
-      },
-    );
-    return () => {
-      void mergeUnlisten.then((fn) => fn());
-    };
-  }, []);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1493,263 +1396,6 @@ export function Workbench() {
     window.addEventListener('keydown', handleSessionSearchShortcut);
     return () => window.removeEventListener('keydown', handleSessionSearchShortcut);
   }, [workspaceView]);
-
-  const handleOpenCreateWorktree = useCallback(() => {
-    if (!activeProjectIdRef.current || worktreeBusy !== null || remoteWriteDisabled) return;
-    setWorktreeError(null);
-    setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
-    setCreateWorktreeBranchSuffixDraft('');
-    setCreateWorktreeOpen(true);
-  }, [remoteWriteDisabled, worktreeBusy]);
-
-  const handleCancelCreateWorktree = useCallback(() => {
-    if (worktreeBusy === 'create') return;
-    setCreateWorktreeOpen(false);
-    setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
-    setCreateWorktreeBranchSuffixDraft('');
-  }, [worktreeBusy]);
-
-  const handleCreateWorktree = useCallback(async () => {
-    const projectId = activeProjectIdRef.current;
-    if (!projectId) return;
-    if (remoteWriteDisabled) return;
-    const branchName = composeWorktreeBranchName(
-      createWorktreeBranchPrefix,
-      createWorktreeBranchSuffixDraft,
-    );
-    if (!branchName) return;
-    try {
-      setWorktreeBusy('create');
-      setWorktreeError(null);
-      setSessionError(null);
-      const initialSize = measureInitialTerminalSize(terminalPanelRef.current, 'single');
-      const { worktree: created, session, sessionError: createSessionError } =
-        await createWorktreeWithTerminalWindow({
-          projectId,
-          branchName,
-          initialSize,
-          createWorktree: (targetProjectId, targetBranchName, targetBaseBranch) =>
-            workbenchApi.worktrees.create(targetProjectId, targetBranchName, targetBaseBranch),
-          createSession: (targetProjectId, targetInitialSize, targetWorktreeId) =>
-            workbenchApi.sessions.create(targetProjectId, targetInitialSize, targetWorktreeId),
-        });
-      if (activeProjectIdRef.current !== projectId) return;
-      await loadWorktrees(projectId);
-      if (activeProjectIdRef.current !== projectId) return;
-      setActiveWorktreeId(created.id);
-      if (session) {
-        setSessions((current) => [...current, session]);
-        focusSession(session.id);
-        resetTerminalBuffer(session.id);
-        void refreshProjectSessionStats(projectId);
-      } else if (createSessionError) {
-        markRequestFailure(projectId, createSessionError);
-        setSessionError(
-          displayErrorMessage(
-            createSessionError,
-            t('workbench:errors.createSession'),
-            desktopUnavailableMessage,
-          ),
-        );
-      }
-      setCreateWorktreeOpen(false);
-      setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
-      setCreateWorktreeBranchSuffixDraft('');
-    } catch (error) {
-      if (activeProjectIdRef.current !== projectId) return;
-      markRequestFailure(projectId, error);
-      setWorktreeError(
-        displayErrorMessage(
-          error,
-          t('workbench:errors.createWorktree'),
-          desktopUnavailableMessage,
-        ),
-      );
-    } finally {
-      setWorktreeBusy(null);
-    }
-  }, [
-    createWorktreeBranchPrefix,
-    createWorktreeBranchSuffixDraft,
-    desktopUnavailableMessage,
-    focusSession,
-    loadWorktrees,
-    markRequestFailure,
-    refreshProjectSessionStats,
-    resetTerminalBuffer,
-    remoteWriteDisabled,
-    setSessionError,
-    setSessions,
-    t,
-  ]);
-
-  const handleCommitWorktree = useCallback(async () => {
-    if (!activeWorktree) return;
-    if (remoteWriteDisabled) return;
-    try {
-      setWorktreeBusy('commit');
-      setWorktreeError(null);
-      await workbenchApi.worktrees.commit(activeWorktree.id, null);
-      await loadWorktrees(activeWorktree.projectId);
-      if (inspectorTab === 'history') await loadGitHistory();
-    } catch (error) {
-      markRequestFailure(activeWorktree.projectId, error);
-      await loadWorktrees(activeWorktree.projectId);
-      if (inspectorTab === 'history') await loadGitHistory();
-      setWorktreeError(
-        displayErrorMessage(error, t('workbench:errors.commitWorktree'), desktopUnavailableMessage),
-      );
-    } finally {
-      setWorktreeBusy(null);
-    }
-  }, [
-    activeWorktree,
-    desktopUnavailableMessage,
-    inspectorTab,
-    loadGitHistory,
-    loadWorktrees,
-    markRequestFailure,
-    remoteWriteDisabled,
-    t,
-  ]);
-
-  const handlePushWorktree = useCallback(async () => {
-    if (!activeWorktree) return;
-    if (remoteWriteDisabled) return;
-    try {
-      setWorktreeBusy('push');
-      setWorktreeError(null);
-      await workbenchApi.worktrees.push(activeWorktree.id);
-      await loadWorktrees(activeWorktree.projectId);
-      if (inspectorTab === 'history') await loadGitHistory();
-    } catch (error) {
-      markRequestFailure(activeWorktree.projectId, error);
-      setWorktreeError(
-        displayErrorMessage(error, t('workbench:errors.pushWorktree'), desktopUnavailableMessage),
-      );
-    } finally {
-      setWorktreeBusy(null);
-    }
-  }, [
-    activeWorktree,
-    desktopUnavailableMessage,
-    inspectorTab,
-    loadGitHistory,
-    loadWorktrees,
-    markRequestFailure,
-    remoteWriteDisabled,
-    t,
-  ]);
-
-  const handleMergeWorktree = useCallback(async () => {
-    if (!activeWorktree || activeWorktree.isMain) return;
-    if (remoteWriteDisabled) return;
-    if (!window.confirm(t('workbench:worktrees.mergeConfirm', { name: activeWorktree.name }))) {
-      return;
-    }
-    const projectId = activeWorktree.projectId;
-    const worktreeId = activeWorktree.id;
-    try {
-      clearMergeStageDismissTimer();
-      setWorktreeBusy('merge');
-      setWorktreeError(null);
-      setMergeProgressWorktreeId(worktreeId);
-      mergeProgressWorktreeIdRef.current = worktreeId;
-      setMergeStages(
-        formatWorkbenchMergeStages([
-          {
-            id: INITIAL_MERGE_STAGE_ID,
-            status: 'running',
-            message: t('workbench:mergeStages.messages.checkSource'),
-          },
-        ]),
-      );
-      const result = await workbenchApi.worktrees.merge(worktreeId);
-      const finalStages = formatWorkbenchMergeStages(result.stages);
-      setMergeStages(finalStages);
-      if (shouldAutoDismissMergeStages(finalStages)) {
-        scheduleMergeStagePanelDismiss(worktreeId);
-      }
-      await loadWorktrees(projectId);
-      await loadSessions(projectId);
-      sessionsForWorktree(sessions, worktreeId).forEach((session) => {
-        removeTerminalBuffer(session.id);
-      });
-      void refreshProjectSessionStats(projectId);
-      if (inspectorTab === 'history') await loadGitHistory();
-    } catch (error) {
-      markRequestFailure(projectId, error);
-      const message = displayErrorMessage(
-        error,
-        t('workbench:errors.mergeWorktree'),
-        desktopUnavailableMessage,
-      );
-      clearMergeStageDismissTimer();
-      setMergeStages((current) => {
-        const formatted = formatWorkbenchMergeStages(current);
-        if (formatted.some((stage) => stage.status === 'failed')) return formatted;
-        const failedStage = formatted.find((stage) => stage.status === 'running') ?? formatted[0];
-        return formatted.map((stage) =>
-          stage.id === failedStage.id ? { ...stage, status: 'failed', message } : stage,
-        );
-      });
-      await loadWorktrees(projectId);
-      await loadSessions(projectId);
-      setWorktreeError(
-        message,
-      );
-    } finally {
-      setWorktreeBusy(null);
-    }
-  }, [
-    activeWorktree,
-    clearMergeStageDismissTimer,
-    desktopUnavailableMessage,
-    inspectorTab,
-    loadGitHistory,
-    loadSessions,
-    loadWorktrees,
-    markRequestFailure,
-    remoteWriteDisabled,
-    refreshProjectSessionStats,
-    removeTerminalBuffer,
-    scheduleMergeStagePanelDismiss,
-    sessions,
-    t,
-  ]);
-
-  const handleRemoveWorktree = useCallback(async () => {
-    if (!activeWorktree || activeWorktree.isMain) return;
-    if (remoteWriteDisabled) return;
-    if (!window.confirm(t('workbench:worktrees.removeConfirm', { name: activeWorktree.name }))) {
-      return;
-    }
-    try {
-      setWorktreeBusy('remove');
-      setWorktreeError(null);
-      await workbenchApi.worktrees.remove(activeWorktree.id);
-      if (activeWorktreeIdRef.current === activeWorktree.id) {
-        const next = worktrees.find((worktree) => worktree.id !== activeWorktree.id);
-        setActiveWorktreeId(next?.id ?? null);
-      }
-      await loadWorktrees(activeWorktree.projectId);
-    } catch (error) {
-      markRequestFailure(activeWorktree.projectId, error);
-      setWorktreeError(
-        displayErrorMessage(error, t('workbench:errors.removeWorktree'), desktopUnavailableMessage),
-      );
-    } finally {
-      setWorktreeBusy(null);
-    }
-  }, [
-    activeWorktree,
-    desktopUnavailableMessage,
-    loadWorktrees,
-    markRequestFailure,
-    remoteWriteDisabled,
-    t,
-    worktrees,
-  ]);
 
   const handleToggleNode = useCallback(
     (node: WorkbenchFileNode) => {
