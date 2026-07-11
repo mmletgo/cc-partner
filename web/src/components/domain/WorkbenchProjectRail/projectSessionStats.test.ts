@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import type { WorkbenchSession } from '@/lib/types';
 import { projectSessionStats, sessionStatsByProject } from '@/lib/workbenchProjectStats';
 
@@ -42,21 +43,23 @@ function assertJson(actual: unknown, expected: unknown): void {
   }
 }
 
-const sessions = [
-  session('window-1', 'project-1', 1),
-  session('window-2', 'project-1', 3),
-  session('window-3', 'project-2', 2),
-];
+describe('projectSessionStats', () => {
+  test('aggregates window and pane counts by project, handling missing and NaN panes', () => {
+    const sessions = [
+      session('window-1', 'project-1', 1),
+      session('window-2', 'project-1', 3),
+      session('window-3', 'project-2', 2),
+    ];
 
-assertJson(sessionStatsByProject(sessions), {
-  'project-1': { windowCount: 2, paneCount: 4 },
-  'project-2': { windowCount: 1, paneCount: 2 },
+    assertJson(sessionStatsByProject(sessions), {
+      'project-1': { windowCount: 2, paneCount: 4 },
+      'project-2': { windowCount: 1, paneCount: 2 },
+    });
+
+    assertJson(projectSessionStats(sessions, 'project-3'), { windowCount: 0, paneCount: 0 });
+
+    assertJson(sessionStatsByProject([session('window-4', 'project-4', Number.NaN)]), {
+      'project-4': { windowCount: 1, paneCount: 1 },
+    });
+  });
 });
-
-assertJson(projectSessionStats(sessions, 'project-3'), { windowCount: 0, paneCount: 0 });
-
-assertJson(sessionStatsByProject([session('window-4', 'project-4', Number.NaN)]), {
-  'project-4': { windowCount: 1, paneCount: 1 },
-});
-
-console.log('projectSessionStats.test.ts passed');

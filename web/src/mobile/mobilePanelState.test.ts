@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import {
   getMobileFileContextKey,
   getMobileWorktreeMergeAppliedState,
@@ -25,7 +26,7 @@ import type { WorkbenchWorktree } from '@/lib/types';
  *   当前 web tsconfig 会编译 src 下测试文件，但未启用 Node 类型；测试断言需要避免依赖 node:assert。
  *
  * Code Logic（这个函数做什么）:
- *   比较 actual 与 expected，不一致时抛出 Error 让 tsx 进程以失败状态退出。
+ *   比较 actual 与 expected，不一致时抛出 Error 让用例失败。
  */
 function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected) {
@@ -99,596 +100,563 @@ function createWorktree(id: string, isMain: boolean): WorkbenchWorktree {
   };
 }
 
-/**
- * Business Logic（为什么需要这个函数）:
- *   用户取消切换后再回到原 project/worktree 时，未保存草稿必须保留，不能重新加载根目录覆盖当前文件状态。
- *
- * Code Logic（这个函数做什么）:
- *   构造 loaded/next/opened 都相同的上下文，断言上下文同步应跳过 reset 与 reload。
- */
-function testReturningToLoadedContextSkipsReload(): void {
-  const context = createContext('project-1', 'worktree-1');
+describe('mobilePanelState', () => {
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   用户取消切换后再回到原 project/worktree 时，未保存草稿必须保留，不能重新加载根目录覆盖当前文件状态。
+   *
+   * Code Logic（这个测试做什么）:
+   *   构造 loaded/next/opened 都相同的上下文，断言上下文同步应跳过 reset 与 reload。
+   */
+  test('shouldSkipMobileFileContextReload returns to loaded dirty context', () => {
+    const context = createContext('project-1', 'worktree-1');
 
-  assertEqual(
-    shouldSkipMobileFileContextReload(context, context, context),
-    true,
-    'returning to loaded dirty context should skip reload',
-  );
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   dirty 草稿只应阻止真正切换到另一个 project/worktree，同上下文重渲染不应进入阻塞态。
- *
- * Code Logic（这个函数做什么）:
- *   分别断言 dirty+不同上下文会阻塞，dirty+同上下文或 clean+不同上下文不会阻塞。
- */
-function testDirtyContextSwitchBlockBoundary(): void {
-  const current = createContext('project-1', 'worktree-1');
-  const next = createContext('project-1', 'worktree-2');
-
-  assertEqual(
-    shouldBlockMobileFileContextSwitch(current, next, true),
-    true,
-    'dirty changed context should block until user confirms',
-  );
-  assertEqual(
-    shouldBlockMobileFileContextSwitch(current, current, true),
-    false,
-    'dirty same context should not block',
-  );
-  assertEqual(
-    shouldBlockMobileFileContextSwitch(current, next, false),
-    false,
-    'clean changed context should not block',
-  );
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   Files 面板被隐藏但仍挂载时，父级在切换项目或 worktree 前必须能用 dirty snapshot 判断是否需要确认。
- *
- * Code Logic（这个函数做什么）:
- *   构造 dirty snapshot 与不同目标上下文，断言父级切换守卫需要弹出确认。
- */
-function testDirtySnapshotDifferentTargetRequiresParentConfirm(): void {
-  const snapshot: MobileFileDirtySnapshot = {
-    dirty: true,
-    context: createContext('project-1', 'worktree-1'),
-  };
-  const next = createContext('project-1', 'worktree-2');
-
-  assertEqual(
-    shouldConfirmMobileFileDirtyContextSwitch(snapshot, next),
-    true,
-    'dirty snapshot should require parent confirm when target context differs',
-  );
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   用户重新选择当前 project/worktree 时不能误弹确认或清空草稿，否则会破坏 Task8 的“切回原上下文保留草稿”要求。
- *
- * Code Logic（这个函数做什么）:
- *   构造 dirty snapshot 与相同目标上下文，断言父级切换守卫不需要确认。
- */
-function testDirtySnapshotSameTargetSkipsParentConfirm(): void {
-  const context = createContext('project-1', 'worktree-1');
-  const snapshot: MobileFileDirtySnapshot = {
-    dirty: true,
-    context,
-  };
-
-  assertEqual(
-    shouldConfirmMobileFileDirtyContextSwitch(snapshot, context),
-    false,
-    'dirty snapshot should not require parent confirm when target context is unchanged',
-  );
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   父级已经确认丢弃 dirty 草稿后，Files 面板响应 props context 变化时不能再次弹出同一条确认。
- *
- * Code Logic（这个函数做什么）:
- *   比较上一次与当前 discard token，断言 token 变化时内部 context confirm 应被跳过，token 不变时不跳过。
- */
-function testDiscardTokenChangeSkipsInternalContextConfirm(): void {
-  assertEqual(
-    shouldSkipMobileFileContextConfirmForDiscardToken(1, 2),
-    true,
-    'changed discard token should skip internal context confirm',
-  );
-  assertEqual(
-    shouldSkipMobileFileContextConfirmForDiscardToken(2, 2),
-    false,
-    'unchanged discard token should keep normal internal confirm behavior',
-  );
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   旧 files.open 响应不能在 project/worktree 切换或根目录重载后写入旧文件预览。
- *
- * Code Logic（这个函数做什么）:
- *   同时校验 request id 和发起请求时的 context；任一不匹配都应判定为 stale。
- */
-function testOpenResponseRequiresLatestRequestAndCurrentContext(): void {
-  const context = createContext('project-1', 'worktree-1');
-  const otherContext = createContext('project-1', 'worktree-2');
-
-  assertEqual(
-    isMobileFileOpenResponseCurrent(2, 2, context, context),
-    true,
-    'latest open response in loaded context should be current',
-  );
-  assertEqual(
-    isMobileFileOpenResponseCurrent(1, 2, context, context),
-    false,
-    'older open response should be stale',
-  );
-  assertEqual(
-    isMobileFileOpenResponseCurrent(2, 2, context, otherContext),
-    false,
-    'open response from previous context should be stale',
-  );
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   保存文本文件期间用户可能切换文件或 worktree，旧 save 响应不能清掉新草稿的 dirty 状态。
- *
- * Code Logic（这个函数做什么）:
- *   同时校验 request id、context key 和文件 path，任一变化都应判定为 stale。
- */
-function testSaveResponseRequiresLatestContextAndPath(): void {
-  const context = createContext('project-1', 'worktree-1');
-  const otherContext = createContext('project-1', 'worktree-2');
-
-  assertEqual(
-    isMobileFileSaveResponseCurrent(3, 3, context, context, 'src/a.ts', 'src/a.ts'),
-    true,
-    'latest save response for same context/path should be current',
-  );
-  assertEqual(
-    isMobileFileSaveResponseCurrent(2, 3, context, context, 'src/a.ts', 'src/a.ts'),
-    false,
-    'older save response should be stale',
-  );
-  assertEqual(
-    isMobileFileSaveResponseCurrent(3, 3, context, otherContext, 'src/a.ts', 'src/a.ts'),
-    false,
-    'save response from previous context should be stale',
-  );
-  assertEqual(
-    isMobileFileSaveResponseCurrent(3, 3, context, context, 'src/a.ts', 'src/b.ts'),
-    false,
-    'save response for previous opened file should be stale',
-  );
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   重新加载根目录代表文件面板回到新的上下文基线，未完成的 open 请求必须失效。
- *
- * Code Logic（这个函数做什么）:
- *   断言空路径根目录需要失效 open 请求，子目录加载不触发该边界规则。
- */
-function testRootDirectoryLoadInvalidatesOpenRequests(): void {
-  assertEqual(
-    shouldInvalidateMobileFileOpenOnDirectoryLoad(''),
-    true,
-    'root directory load should invalidate pending open requests',
-  );
-  assertEqual(
-    shouldInvalidateMobileFileOpenOnDirectoryLoad('src'),
-    false,
-    'child directory load should not be treated as root context reload',
-  );
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   merge 成功后源 worktree 可能已被后端删除，移动端不能再用旧源 worktree id 拉 commits 并误报失败。
- *
- * Code Logic（这个函数做什么）:
- *   断言 commit/push 成功后仍刷新 commits，但 merge 成功后只刷新 worktrees。
- */
-function testMergeRefreshSkipsCommitReload(): void {
-  assertEqual(
-    shouldReloadMobileGitCommitsAfterAction('commit'),
-    true,
-    'commit should reload commits',
-  );
-  assertEqual(
-    shouldReloadMobileGitCommitsAfterAction('push'),
-    true,
-    'push should reload commits',
-  );
-  assertEqual(
-    shouldReloadMobileGitCommitsAfterAction('merge'),
-    false,
-    'merge should not reload commits from deleted source worktree',
-  );
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   删除 active worktree 前必须先让父级 Files dirty guard 决定是否允许离开当前草稿上下文。
- *
- * Code Logic（这个函数做什么）:
- *   构造删除 active 功能 worktree 的计划，断言它需要 active preflight，并预先算出回落到主工作区。
- */
-function testActiveWorktreeRemovalRequiresPreflight(): void {
-  const main = createWorktree('main', true);
-  const feature = createWorktree('feature/remove-me', false);
-
-  const plan = getMobileWorktreeRemovalPlan([main, feature], feature.id, feature);
-
-  assertEqual(plan.requiresActivePreflight, true, 'active removal should preflight guard');
-  assertEqual(plan.nextActive?.id ?? null, main.id, 'active removal should fall back to main');
-  assertEqual(
-    plan.nextWorktrees.some((worktree) => worktree.id === feature.id),
-    false,
-    'removed worktree should be absent from next list',
-  );
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   删除非 active worktree 不会离开当前 Files 草稿上下文，不能多弹一次 dirty guard。
- *
- * Code Logic（这个函数做什么）:
- *   构造删除非 active 功能 worktree 的计划，断言它不需要 preflight，且 active worktree 保持不变。
- */
-function testInactiveWorktreeRemovalSkipsPreflight(): void {
-  const main = createWorktree('main', true);
-  const feature = createWorktree('feature/remove-me', false);
-
-  const plan = getMobileWorktreeRemovalPlan([main, feature], main.id, feature);
-
-  assertEqual(plan.requiresActivePreflight, false, 'inactive removal should skip preflight');
-  assertEqual(plan.nextActive?.id ?? null, main.id, 'inactive removal should keep active');
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   删除 active worktree 的确认只是 destructive preflight，不能在后端真正删除前切 active、写列表或丢弃 Files 草稿。
- *
- * Code Logic（这个函数做什么）:
- *   用未完成的 remove promise 卡住后端阶段，断言确认与后端已开始但 apply 回调尚未执行。
- */
-async function testActiveRemoveConfirmStageDoesNotApplyState(): Promise<void> {
-  const main = createWorktree('main', true);
-  const feature = createWorktree('feature/remove-me', false);
-  const events: string[] = [];
-  let resolveRemove!: () => void;
-
-  const flow = runMobileWorktreeRemovalFlow({
-    worktrees: [main, feature],
-    activeWorktreeId: feature.id,
-    removingWorktree: feature,
-    confirmActiveWorktreeChange: () => {
-      events.push('confirm');
-      return true;
-    },
-    removeWorktree: async () => {
-      events.push('backend');
-      await new Promise<void>((resolve) => {
-        resolveRemove = resolve;
-      });
-    },
-    applyRemoval: () => {
-      events.push('apply');
-    },
+    assertEqual(
+      shouldSkipMobileFileContextReload(context, context, context),
+      true,
+      'returning to loaded dirty context should skip reload',
+    );
   });
 
-  assertEqual(
-    events.join('>'),
-    'confirm>backend',
-    'remove preflight should not apply before backend resolves',
-  );
-  resolveRemove();
-  await flow;
-  assertEqual(
-    events.join('>'),
-    'confirm>backend>apply',
-    'remove success should apply after backend resolves',
-  );
-}
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   dirty 草稿只应阻止真正切换到另一个 project/worktree，同上下文重渲染不应进入阻塞态。
+   *
+   * Code Logic（这个测试做什么）:
+   *   分别断言 dirty+不同上下文会阻塞，dirty+同上下文或 clean+不同上下文不会阻塞。
+   */
+  test('shouldBlockMobileFileContextSwitch boundary cases', () => {
+    const current = createContext('project-1', 'worktree-1');
+    const next = createContext('project-1', 'worktree-2');
 
-/**
- * Business Logic（为什么需要这个函数）:
- *   后端删除 active worktree 失败时，磁盘 worktree 仍存在，移动端不能切走 active 或清空 dirty draft。
- *
- * Code Logic（这个函数做什么）:
- *   模拟 removeWorktree reject，断言流程向外抛错且 applyRemoval 从未执行。
- */
-async function testActiveRemoveBackendFailureDoesNotApplyState(): Promise<void> {
-  const main = createWorktree('main', true);
-  const feature = createWorktree('feature/remove-me', false);
-  let didApply = false;
-
-  await assertRejects(
-    () =>
-      runMobileWorktreeRemovalFlow({
-        worktrees: [main, feature],
-        activeWorktreeId: feature.id,
-        removingWorktree: feature,
-        confirmActiveWorktreeChange: () => true,
-        removeWorktree: async () => {
-          throw new Error('remove failed');
-        },
-        applyRemoval: () => {
-          didApply = true;
-        },
-      }),
-    'remove failed',
-    'remove backend failure should bubble to component error handling',
-  );
-  assertEqual(didApply, false, 'remove backend failure should not apply active/list/discard');
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   删除 active worktree 成功后，移动端才可以切到回落 worktree、刷新列表并丢弃旧 Files 草稿。
- *
- * Code Logic（这个函数做什么）:
- *   模拟成功删除，断言 applyRemoval 收到已移除源 worktree 的列表和主工作区 nextActive。
- */
-async function testActiveRemoveBackendSuccessAppliesNextState(): Promise<void> {
-  const main = createWorktree('main', true);
-  const feature = createWorktree('feature/remove-me', false);
-  let appliedActiveId: string | null = null;
-  let appliedWorktreeIds = '';
-
-  const result = await runMobileWorktreeRemovalFlow({
-    worktrees: [main, feature],
-    activeWorktreeId: feature.id,
-    removingWorktree: feature,
-    confirmActiveWorktreeChange: () => true,
-    removeWorktree: async () => undefined,
-    applyRemoval: (plan) => {
-      appliedActiveId = plan.nextActive?.id ?? null;
-      appliedWorktreeIds = plan.nextWorktrees.map((worktree) => worktree.id).join(',');
-    },
+    assertEqual(
+      shouldBlockMobileFileContextSwitch(current, next, true),
+      true,
+      'dirty changed context should block until user confirms',
+    );
+    assertEqual(
+      shouldBlockMobileFileContextSwitch(current, current, true),
+      false,
+      'dirty same context should not block',
+    );
+    assertEqual(
+      shouldBlockMobileFileContextSwitch(current, next, false),
+      false,
+      'clean changed context should not block',
+    );
   });
 
-  assertEqual(result, 'applied', 'remove success should report applied transition');
-  assertEqual(appliedActiveId, main.id, 'remove success should apply fallback active worktree');
-  assertEqual(appliedWorktreeIds, main.id, 'remove success should apply list without removed worktree');
-}
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   Files 面板被隐藏但仍挂载时，父级在切换项目或 worktree 前必须能用 dirty snapshot 判断是否需要确认。
+   *
+   * Code Logic（这个测试做什么）:
+   *   构造 dirty snapshot 与不同目标上下文，断言父级切换守卫需要弹出确认。
+   */
+  test('shouldConfirmMobileFileDirtyContextSwitch requires parent confirm on different target', () => {
+    const snapshot: MobileFileDirtySnapshot = {
+      dirty: true,
+      context: createContext('project-1', 'worktree-1'),
+    };
+    const next = createContext('project-1', 'worktree-2');
 
-/**
- * Business Logic（为什么需要这个函数）:
- *   merge 会删除源 active worktree，必须在调用后端 merge 前先询问 Files dirty guard；用户取消时不能触碰后端。
- *
- * Code Logic（这个函数做什么）:
- *   模拟 confirm 返回 false，断言 mergeWorktree 与 applyMergeSuccess 均不执行。
- */
-async function testMergeCancelledByDirtyGuardDoesNotCallBackend(): Promise<void> {
-  const main = createWorktree('main', true);
-  const feature = createWorktree('feature/merge-me', false);
-  let didCallBackend = false;
-  let didApply = false;
-
-  const result = await runMobileWorktreeMergeFlow({
-    worktrees: [main, feature],
-    activeWorktreeId: feature.id,
-    sourceWorktree: feature,
-    confirmActiveWorktreeChange: () => false,
-    mergeWorktree: async () => {
-      didCallBackend = true;
-    },
-    applyMergeSuccess: async () => {
-      didApply = true;
-    },
+    assertEqual(
+      shouldConfirmMobileFileDirtyContextSwitch(snapshot, next),
+      true,
+      'dirty snapshot should require parent confirm when target context differs',
+    );
   });
 
-  assertEqual(result, 'cancelled', 'merge cancelled by dirty guard should report cancelled');
-  assertEqual(didCallBackend, false, 'merge cancelled by dirty guard should not call backend');
-  assertEqual(didApply, false, 'merge cancelled by dirty guard should not apply state');
-}
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   用户重新选择当前 project/worktree 时不能误弹确认或清空草稿，否则会破坏 Task8 的“切回原上下文保留草稿”要求。
+   *
+   * Code Logic（这个测试做什么）:
+   *   构造 dirty snapshot 与相同目标上下文，断言父级切换守卫不需要确认。
+   */
+  test('shouldConfirmMobileFileDirtyContextSwitch skips parent confirm on same target', () => {
+    const context = createContext('project-1', 'worktree-1');
+    const snapshot: MobileFileDirtySnapshot = {
+      dirty: true,
+      context,
+    };
 
-/**
- * Business Logic（为什么需要这个函数）:
- *   合并非 active worktree 不会离开当前 Files 草稿上下文，不能误触发 dirty guard 或切走当前 active。
- *
- * Code Logic（这个函数做什么）:
- *   构造 main 为 active、feature 为 merge source 的流程，断言不调用 confirm，后端 merge 被调用，成功计划保持 main active。
- */
-async function testInactiveMergeSkipsDirtyGuardAndKeepsActive(): Promise<void> {
-  const main = createWorktree('main', true);
-  const feature = createWorktree('feature/merge-me', false);
-  let confirmCalls = 0;
-  let didCallBackend = false;
-  let appliedRequiresActivePreflight: boolean | null = null;
-  let appliedNextActiveId: string | null = null;
-
-  const result = await runMobileWorktreeMergeFlow({
-    worktrees: [main, feature],
-    activeWorktreeId: main.id,
-    sourceWorktree: feature,
-    confirmActiveWorktreeChange: () => {
-      confirmCalls += 1;
-      return true;
-    },
-    mergeWorktree: async () => {
-      didCallBackend = true;
-    },
-    applyMergeSuccess: async (plan) => {
-      appliedRequiresActivePreflight = plan.requiresActivePreflight;
-      appliedNextActiveId = plan.nextActive?.id ?? null;
-    },
+    assertEqual(
+      shouldConfirmMobileFileDirtyContextSwitch(snapshot, context),
+      false,
+      'dirty snapshot should not require parent confirm when target context is unchanged',
+    );
   });
 
-  assertEqual(result, 'applied', 'inactive merge should report applied transition');
-  assertEqual(confirmCalls, 0, 'inactive merge should skip dirty guard confirm');
-  assertEqual(didCallBackend, true, 'inactive merge should call backend merge');
-  assertEqual(
-    appliedRequiresActivePreflight,
-    false,
-    'inactive merge plan should not require active preflight',
-  );
-  assertEqual(appliedNextActiveId, main.id, 'inactive merge should keep main active');
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   merge 成功会删除源 active worktree，即使后续权威刷新失败，移动端也不能继续指向已删除源 worktree。
- *
- * Code Logic（这个函数做什么）:
- *   构造 merge 删除源 worktree 的计划，断言应用态先移除源列表并切回主工作区。
- */
-function testMergeSuccessAppliedStateUsesRemovalPlan(): void {
-  const main = createWorktree('main', true);
-  const feature = createWorktree('feature/merge-me', false);
-  const state = getMobileWorktreeMergeAppliedState({
-    nextWorktrees: [main],
-    nextActive: main,
-    requiresActivePreflight: true,
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   父级已经确认丢弃 dirty 草稿后，Files 面板响应 props context 变化时不能再次弹出同一条确认。
+   *
+   * Code Logic（这个测试做什么）:
+   *   比较上一次与当前 discard token，断言 token 变化时内部 context confirm 应被跳过，token 不变时不跳过。
+   */
+  test('shouldSkipMobileFileContextConfirmForDiscardToken tracks token changes', () => {
+    assertEqual(
+      shouldSkipMobileFileContextConfirmForDiscardToken(1, 2),
+      true,
+      'changed discard token should skip internal context confirm',
+    );
+    assertEqual(
+      shouldSkipMobileFileContextConfirmForDiscardToken(2, 2),
+      false,
+      'unchanged discard token should keep normal internal confirm behavior',
+    );
   });
 
-  assertEqual(
-    state.nextWorktrees.some((worktree) => worktree.id === feature.id),
-    false,
-    'merge applied state should not keep removed source worktree',
-  );
-  assertEqual(state.nextActive?.id ?? null, main.id, 'merge applied state should switch to main');
-}
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   旧 files.open 响应不能在 project/worktree 切换或根目录重载后写入旧文件预览。
+   *
+   * Code Logic（这个测试做什么）:
+   *   同时校验 request id 和发起请求时的 context；任一不匹配都应判定为 stale。
+   */
+  test('isMobileFileOpenResponseCurrent requires latest request and current context', () => {
+    const context = createContext('project-1', 'worktree-1');
+    const otherContext = createContext('project-1', 'worktree-2');
 
-/**
- * Business Logic（为什么需要这个函数）:
- *   Git commit/push/merge 等长操作完成时，用户可能已经切到其它项目或 worktree，旧响应不能污染当前 UI。
- *
- * Code Logic（这个函数做什么）:
- *   比较操作发起时和响应时的 project/worktree context，断言任一变化都视为 stale。
- */
-function testGitActionResponseRequiresSameContext(): void {
-  const context = createContext('project-1', 'worktree-1');
-
-  assertEqual(
-    isMobileGitActionResponseCurrent(context, context),
-    true,
-    'same project/worktree action response should be current',
-  );
-  assertEqual(
-    isMobileGitActionResponseCurrent(context, createContext('project-2', 'worktree-1')),
-    false,
-    'git action response from previous project should be stale',
-  );
-  assertEqual(
-    isMobileGitActionResponseCurrent(context, createContext('project-1', 'worktree-2')),
-    false,
-    'git action response from previous worktree should be stale',
-  );
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   active worktree merge 成功返回时，如果用户已经切到其它 worktree，旧响应不能清空当前 worktree 的提交列表。
- *
- * Code Logic（这个函数做什么）:
- *   构造 merge 请求上下文与当前上下文，断言必须保持同项目同 worktree 才视为当前。
- */
-function testGitMergeResponseRequiresSourceWorktreeContext(): void {
-  const sourceContext = createContext('project-1', 'feature');
-  const fallbackContext = createContext('project-1', 'main');
-
-  assertEqual(
-    isMobileGitMergeResponseCurrent(sourceContext, sourceContext),
-    true,
-    'merge response should be current for same project/worktree',
-  );
-  assertEqual(
-    isMobileGitMergeResponseCurrent(sourceContext, fallbackContext),
-    false,
-    'merge response should be stale after same-project different worktree switch',
-  );
-  assertEqual(
-    isMobileGitMergeResponseCurrent(sourceContext, createContext('project-2', 'main')),
-    false,
-    'merge response from previous project should be stale',
-  );
-  assertEqual(
-    isMobileGitMergeResponseCurrent(sourceContext, null),
-    false,
-    'merge response should be stale without current context',
-  );
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   refreshWorktrees 发现 active 已不存在时，需要先确认能否离开 dirty context；取消时不能先写入后端返回的新列表。
- *
- * Code Logic（这个函数做什么）:
- *   传入不含当前 active 的 nextWorktrees，模拟确认取消，断言 applyRefresh 不执行。
- */
-function testRefreshWorktreesCancelDoesNotApplyListOrActive(): void {
-  const main = createWorktree('main', true);
-  const feature = createWorktree('feature/deleted-elsewhere', false);
-  let didApply = false;
-
-  const result = runMobileWorktreeRefreshFlow({
-    nextWorktrees: [main],
-    currentActiveWorktreeId: feature.id,
-    confirmActiveWorktreeChange: () => false,
-    applyRefresh: () => {
-      didApply = true;
-    },
+    assertEqual(
+      isMobileFileOpenResponseCurrent(2, 2, context, context),
+      true,
+      'latest open response in loaded context should be current',
+    );
+    assertEqual(
+      isMobileFileOpenResponseCurrent(1, 2, context, context),
+      false,
+      'older open response should be stale',
+    );
+    assertEqual(
+      isMobileFileOpenResponseCurrent(2, 2, context, otherContext),
+      false,
+      'open response from previous context should be stale',
+    );
   });
 
-  assertEqual(result, 'cancelled', 'refresh cancelled by dirty guard should report cancelled');
-  assertEqual(didApply, false, 'refresh cancelled by dirty guard should not apply list or active');
-}
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   保存文本文件期间用户可能切换文件或 worktree，旧 save 响应不能清掉新草稿的 dirty 状态。
+   *
+   * Code Logic（这个测试做什么）:
+   *   同时校验 request id、context key 和文件 path，任一变化都应判定为 stale。
+   */
+  test('isMobileFileSaveResponseCurrent requires latest context and path', () => {
+    const context = createContext('project-1', 'worktree-1');
+    const otherContext = createContext('project-1', 'worktree-2');
 
-/**
- * Business Logic（为什么需要这个函数）:
- *   context key 是文件面板 stale guard 的基础，null worktree 必须有稳定表示。
- *
- * Code Logic（这个函数做什么）:
- *   断言同一 project + null worktree 生成稳定 key，null context 返回空 key。
- */
-function testContextKeyIsStable(): void {
-  assertEqual(
-    getMobileFileContextKey(createContext('project-1', null)),
-    'project-1:',
-    'null worktree should produce stable key',
-  );
-  assertEqual(getMobileFileContextKey(null), '', 'null context should produce empty key');
-}
+    assertEqual(
+      isMobileFileSaveResponseCurrent(3, 3, context, context, 'src/a.ts', 'src/a.ts'),
+      true,
+      'latest save response for same context/path should be current',
+    );
+    assertEqual(
+      isMobileFileSaveResponseCurrent(2, 3, context, context, 'src/a.ts', 'src/a.ts'),
+      false,
+      'older save response should be stale',
+    );
+    assertEqual(
+      isMobileFileSaveResponseCurrent(3, 3, context, otherContext, 'src/a.ts', 'src/a.ts'),
+      false,
+      'save response from previous context should be stale',
+    );
+    assertEqual(
+      isMobileFileSaveResponseCurrent(3, 3, context, context, 'src/a.ts', 'src/b.ts'),
+      false,
+      'save response for previous opened file should be stale',
+    );
+  });
 
-/**
- * Business Logic（为什么需要这个函数）:
- *   本文件同时包含同步状态 helper 测试和 destructive worktree 异步时序测试，需要顺序执行并让失败使进程退出。
- *
- * Code Logic（这个函数做什么）:
- *   依次调用所有测试函数；异步 destructive 流程用 await 串行执行，最后输出通过标记。
- */
-async function runTests(): Promise<void> {
-  testReturningToLoadedContextSkipsReload();
-  testDirtyContextSwitchBlockBoundary();
-  testDirtySnapshotDifferentTargetRequiresParentConfirm();
-  testDirtySnapshotSameTargetSkipsParentConfirm();
-  testDiscardTokenChangeSkipsInternalContextConfirm();
-  testOpenResponseRequiresLatestRequestAndCurrentContext();
-  testSaveResponseRequiresLatestContextAndPath();
-  testRootDirectoryLoadInvalidatesOpenRequests();
-  testMergeRefreshSkipsCommitReload();
-  testActiveWorktreeRemovalRequiresPreflight();
-  testInactiveWorktreeRemovalSkipsPreflight();
-  await testActiveRemoveConfirmStageDoesNotApplyState();
-  await testActiveRemoveBackendFailureDoesNotApplyState();
-  await testActiveRemoveBackendSuccessAppliesNextState();
-  await testMergeCancelledByDirtyGuardDoesNotCallBackend();
-  await testInactiveMergeSkipsDirtyGuardAndKeepsActive();
-  testMergeSuccessAppliedStateUsesRemovalPlan();
-  testGitActionResponseRequiresSameContext();
-  testGitMergeResponseRequiresSourceWorktreeContext();
-  testRefreshWorktreesCancelDoesNotApplyListOrActive();
-  testContextKeyIsStable();
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   重新加载根目录代表文件面板回到新的上下文基线，未完成的 open 请求必须失效。
+   *
+   * Code Logic（这个测试做什么）:
+   *   断言空路径根目录需要失效 open 请求，子目录加载不触发该边界规则。
+   */
+  test('shouldInvalidateMobileFileOpenOnDirectoryLoad only for root directory', () => {
+    assertEqual(
+      shouldInvalidateMobileFileOpenOnDirectoryLoad(''),
+      true,
+      'root directory load should invalidate pending open requests',
+    );
+    assertEqual(
+      shouldInvalidateMobileFileOpenOnDirectoryLoad('src'),
+      false,
+      'child directory load should not be treated as root context reload',
+    );
+  });
 
-  console.log('mobilePanelState.test.ts passed');
-}
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   merge 成功后源 worktree 可能已被后端删除，移动端不能再用旧源 worktree id 拉 commits 并误报失败。
+   *
+   * Code Logic（这个测试做什么）:
+   *   断言 commit/push 成功后仍刷新 commits，但 merge 成功后只刷新 worktrees。
+   */
+  test('shouldReloadMobileGitCommitsAfterAction skips merge only', () => {
+    assertEqual(
+      shouldReloadMobileGitCommitsAfterAction('commit'),
+      true,
+      'commit should reload commits',
+    );
+    assertEqual(
+      shouldReloadMobileGitCommitsAfterAction('push'),
+      true,
+      'push should reload commits',
+    );
+    assertEqual(
+      shouldReloadMobileGitCommitsAfterAction('merge'),
+      false,
+      'merge should not reload commits from deleted source worktree',
+    );
+  });
 
-void runTests();
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   删除 active worktree 前必须先让父级 Files dirty guard 决定是否允许离开当前草稿上下文。
+   *
+   * Code Logic（这个测试做什么）:
+   *   构造删除 active 功能 worktree 的计划，断言它需要 active preflight，并预先算出回落到主工作区。
+   */
+  test('getMobileWorktreeRemovalPlan active removal requires preflight', () => {
+    const main = createWorktree('main', true);
+    const feature = createWorktree('feature/remove-me', false);
+
+    const plan = getMobileWorktreeRemovalPlan([main, feature], feature.id, feature);
+
+    assertEqual(plan.requiresActivePreflight, true, 'active removal should preflight guard');
+    assertEqual(plan.nextActive?.id ?? null, main.id, 'active removal should fall back to main');
+    assertEqual(
+      plan.nextWorktrees.some((worktree) => worktree.id === feature.id),
+      false,
+      'removed worktree should be absent from next list',
+    );
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   删除非 active worktree 不会离开当前 Files 草稿上下文，不能多弹一次 dirty guard。
+   *
+   * Code Logic（这个测试做什么）:
+   *   构造删除非 active 功能 worktree 的计划，断言它不需要 preflight，且 active worktree 保持不变。
+   */
+  test('getMobileWorktreeRemovalPlan inactive removal skips preflight', () => {
+    const main = createWorktree('main', true);
+    const feature = createWorktree('feature/remove-me', false);
+
+    const plan = getMobileWorktreeRemovalPlan([main, feature], main.id, feature);
+
+    assertEqual(plan.requiresActivePreflight, false, 'inactive removal should skip preflight');
+    assertEqual(plan.nextActive?.id ?? null, main.id, 'inactive removal should keep active');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   删除 active worktree 的确认只是 destructive preflight，不能在后端真正删除前切 active、写列表或丢弃 Files 草稿。
+   *
+   * Code Logic（这个测试做什么）:
+   *   用未完成的 remove promise 卡住后端阶段，断言确认与后端已开始但 apply 回调尚未执行。
+   */
+  test('runMobileWorktreeRemovalFlow confirm stage does not apply state before backend resolves', async () => {
+    const main = createWorktree('main', true);
+    const feature = createWorktree('feature/remove-me', false);
+    const events: string[] = [];
+    let resolveRemove!: () => void;
+
+    const flow = runMobileWorktreeRemovalFlow({
+      worktrees: [main, feature],
+      activeWorktreeId: feature.id,
+      removingWorktree: feature,
+      confirmActiveWorktreeChange: () => {
+        events.push('confirm');
+        return true;
+      },
+      removeWorktree: async () => {
+        events.push('backend');
+        await new Promise<void>((resolve) => {
+          resolveRemove = resolve;
+        });
+      },
+      applyRemoval: () => {
+        events.push('apply');
+      },
+    });
+
+    assertEqual(
+      events.join('>'),
+      'confirm>backend',
+      'remove preflight should not apply before backend resolves',
+    );
+    resolveRemove();
+    await flow;
+    assertEqual(
+      events.join('>'),
+      'confirm>backend>apply',
+      'remove success should apply after backend resolves',
+    );
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   后端删除 active worktree 失败时，磁盘 worktree 仍存在，移动端不能切走 active 或清空 dirty draft。
+   *
+   * Code Logic（这个测试做什么）:
+   *   模拟 removeWorktree reject，断言流程向外抛错且 applyRemoval 从未执行。
+   */
+  test('runMobileWorktreeRemovalFlow backend failure does not apply state', async () => {
+    const main = createWorktree('main', true);
+    const feature = createWorktree('feature/remove-me', false);
+    let didApply = false;
+
+    await assertRejects(
+      () =>
+        runMobileWorktreeRemovalFlow({
+          worktrees: [main, feature],
+          activeWorktreeId: feature.id,
+          removingWorktree: feature,
+          confirmActiveWorktreeChange: () => true,
+          removeWorktree: async () => {
+            throw new Error('remove failed');
+          },
+          applyRemoval: () => {
+            didApply = true;
+          },
+        }),
+      'remove failed',
+      'remove backend failure should bubble to component error handling',
+    );
+    assertEqual(didApply, false, 'remove backend failure should not apply active/list/discard');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   删除 active worktree 成功后，移动端才可以切到回落 worktree、刷新列表并丢弃旧 Files 草稿。
+   *
+   * Code Logic（这个测试做什么）:
+   *   模拟成功删除，断言 applyRemoval 收到已移除源 worktree 的列表和主工作区 nextActive。
+   */
+  test('runMobileWorktreeRemovalFlow backend success applies next state', async () => {
+    const main = createWorktree('main', true);
+    const feature = createWorktree('feature/remove-me', false);
+    let appliedActiveId: string | null = null;
+    let appliedWorktreeIds = '';
+
+    const result = await runMobileWorktreeRemovalFlow({
+      worktrees: [main, feature],
+      activeWorktreeId: feature.id,
+      removingWorktree: feature,
+      confirmActiveWorktreeChange: () => true,
+      removeWorktree: async () => undefined,
+      applyRemoval: (plan) => {
+        appliedActiveId = plan.nextActive?.id ?? null;
+        appliedWorktreeIds = plan.nextWorktrees.map((worktree) => worktree.id).join(',');
+      },
+    });
+
+    assertEqual(result, 'applied', 'remove success should report applied transition');
+    assertEqual(appliedActiveId, main.id, 'remove success should apply fallback active worktree');
+    assertEqual(appliedWorktreeIds, main.id, 'remove success should apply list without removed worktree');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   merge 会删除源 active worktree，必须在调用后端 merge 前先询问 Files dirty guard；用户取消时不能触碰后端。
+   *
+   * Code Logic（这个测试做什么）:
+   *   模拟 confirm 返回 false，断言 mergeWorktree 与 applyMergeSuccess 均不执行。
+   */
+  test('runMobileWorktreeMergeFlow cancelled by dirty guard does not call backend', async () => {
+    const main = createWorktree('main', true);
+    const feature = createWorktree('feature/merge-me', false);
+    let didCallBackend = false;
+    let didApply = false;
+
+    const result = await runMobileWorktreeMergeFlow({
+      worktrees: [main, feature],
+      activeWorktreeId: feature.id,
+      sourceWorktree: feature,
+      confirmActiveWorktreeChange: () => false,
+      mergeWorktree: async () => {
+        didCallBackend = true;
+      },
+      applyMergeSuccess: async () => {
+        didApply = true;
+      },
+    });
+
+    assertEqual(result, 'cancelled', 'merge cancelled by dirty guard should report cancelled');
+    assertEqual(didCallBackend, false, 'merge cancelled by dirty guard should not call backend');
+    assertEqual(didApply, false, 'merge cancelled by dirty guard should not apply state');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   合并非 active worktree 不会离开当前 Files 草稿上下文，不能误触发 dirty guard 或切走当前 active。
+   *
+   * Code Logic（这个测试做什么）:
+   *   构造 main 为 active、feature 为 merge source 的流程，断言不调用 confirm，后端 merge 被调用，成功计划保持 main active。
+   */
+  test('runMobileWorktreeMergeFlow inactive merge skips dirty guard and keeps active', async () => {
+    const main = createWorktree('main', true);
+    const feature = createWorktree('feature/merge-me', false);
+    let confirmCalls = 0;
+    let didCallBackend = false;
+    let appliedRequiresActivePreflight: boolean | null = null;
+    let appliedNextActiveId: string | null = null;
+
+    const result = await runMobileWorktreeMergeFlow({
+      worktrees: [main, feature],
+      activeWorktreeId: main.id,
+      sourceWorktree: feature,
+      confirmActiveWorktreeChange: () => {
+        confirmCalls += 1;
+        return true;
+      },
+      mergeWorktree: async () => {
+        didCallBackend = true;
+      },
+      applyMergeSuccess: async (plan) => {
+        appliedRequiresActivePreflight = plan.requiresActivePreflight;
+        appliedNextActiveId = plan.nextActive?.id ?? null;
+      },
+    });
+
+    assertEqual(result, 'applied', 'inactive merge should report applied transition');
+    assertEqual(confirmCalls, 0, 'inactive merge should skip dirty guard confirm');
+    assertEqual(didCallBackend, true, 'inactive merge should call backend merge');
+    assertEqual(
+      appliedRequiresActivePreflight,
+      false,
+      'inactive merge plan should not require active preflight',
+    );
+    assertEqual(appliedNextActiveId, main.id, 'inactive merge should keep main active');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   merge 成功会删除源 active worktree，即使后续权威刷新失败，移动端也不能继续指向已删除源 worktree。
+   *
+   * Code Logic（这个测试做什么）:
+   *   构造 merge 删除源 worktree 的计划，断言应用态先移除源列表并切回主工作区。
+   */
+  test('getMobileWorktreeMergeAppliedState uses removal plan', () => {
+    const main = createWorktree('main', true);
+    const feature = createWorktree('feature/merge-me', false);
+    const state = getMobileWorktreeMergeAppliedState({
+      nextWorktrees: [main],
+      nextActive: main,
+      requiresActivePreflight: true,
+    });
+
+    assertEqual(
+      state.nextWorktrees.some((worktree) => worktree.id === feature.id),
+      false,
+      'merge applied state should not keep removed source worktree',
+    );
+    assertEqual(state.nextActive?.id ?? null, main.id, 'merge applied state should switch to main');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   Git commit/push/merge 等长操作完成时，用户可能已经切到其它项目或 worktree，旧响应不能污染当前 UI。
+   *
+   * Code Logic（这个测试做什么）:
+   *   比较操作发起时和响应时的 project/worktree context，断言任一变化都视为 stale。
+   */
+  test('isMobileGitActionResponseCurrent requires same context', () => {
+    const context = createContext('project-1', 'worktree-1');
+
+    assertEqual(
+      isMobileGitActionResponseCurrent(context, context),
+      true,
+      'same project/worktree action response should be current',
+    );
+    assertEqual(
+      isMobileGitActionResponseCurrent(context, createContext('project-2', 'worktree-1')),
+      false,
+      'git action response from previous project should be stale',
+    );
+    assertEqual(
+      isMobileGitActionResponseCurrent(context, createContext('project-1', 'worktree-2')),
+      false,
+      'git action response from previous worktree should be stale',
+    );
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   active worktree merge 成功返回时，如果用户已经切到其它 worktree，旧响应不能清空当前 worktree 的提交列表。
+   *
+   * Code Logic（这个测试做什么）:
+   *   构造 merge 请求上下文与当前上下文，断言必须保持同项目同 worktree 才视为当前。
+   */
+  test('isMobileGitMergeResponseCurrent requires source worktree context', () => {
+    const sourceContext = createContext('project-1', 'feature');
+    const fallbackContext = createContext('project-1', 'main');
+
+    assertEqual(
+      isMobileGitMergeResponseCurrent(sourceContext, sourceContext),
+      true,
+      'merge response should be current for same project/worktree',
+    );
+    assertEqual(
+      isMobileGitMergeResponseCurrent(sourceContext, fallbackContext),
+      false,
+      'merge response should be stale after same-project different worktree switch',
+    );
+    assertEqual(
+      isMobileGitMergeResponseCurrent(sourceContext, createContext('project-2', 'main')),
+      false,
+      'merge response from previous project should be stale',
+    );
+    assertEqual(
+      isMobileGitMergeResponseCurrent(sourceContext, null),
+      false,
+      'merge response should be stale without current context',
+    );
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   refreshWorktrees 发现 active 已不存在时，需要先确认能否离开 dirty context；取消时不能先写入后端返回的新列表。
+   *
+   * Code Logic（这个测试做什么）:
+   *   传入不含当前 active 的 nextWorktrees，模拟确认取消，断言 applyRefresh 不执行。
+   */
+  test('runMobileWorktreeRefreshFlow cancel does not apply list or active', () => {
+    const main = createWorktree('main', true);
+    const feature = createWorktree('feature/deleted-elsewhere', false);
+    let didApply = false;
+
+    const result = runMobileWorktreeRefreshFlow({
+      nextWorktrees: [main],
+      currentActiveWorktreeId: feature.id,
+      confirmActiveWorktreeChange: () => false,
+      applyRefresh: () => {
+        didApply = true;
+      },
+    });
+
+    assertEqual(result, 'cancelled', 'refresh cancelled by dirty guard should report cancelled');
+    assertEqual(didApply, false, 'refresh cancelled by dirty guard should not apply list or active');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   context key 是文件面板 stale guard 的基础，null worktree 必须有稳定表示。
+   *
+   * Code Logic（这个测试做什么）:
+   *   断言同一 project + null worktree 生成稳定 key，null context 返回空 key。
+   */
+  test('getMobileFileContextKey is stable for null worktree', () => {
+    assertEqual(
+      getMobileFileContextKey(createContext('project-1', null)),
+      'project-1:',
+      'null worktree should produce stable key',
+    );
+    assertEqual(getMobileFileContextKey(null), '', 'null context should produce empty key');
+  });
+});
