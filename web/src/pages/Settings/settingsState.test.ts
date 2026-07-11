@@ -217,6 +217,3 @@ function testHealthConfigToFormConfig(): void {
   });
   assertNotSameRef(form, cfg);
 }
-
-testHealthConfigToFormNull();
-testHealthConfigToFormConfig();

@@ -5,7 +5,6 @@ import {
   KIND_OPTIONS,
   matchesClaudeCodeAsset,
 } from './claudeCodeAssets';
-import type { EnabledFilter, KindFilter } from './claudeCodeAssets';
 
 /**
  * Business Logic（为什么需要这个函数）:

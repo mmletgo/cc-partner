@@ -1,6 +1,9 @@
 # CI — 日常质量门禁
 #
-# 触发：PR / 推送 master（纯文档/设计稿改动除外）。
+# 触发：所有 PR 与推送 master。
+# pull_request 不使用 paths-ignore：如果这些 job 是 branch protection 的 required checks，
+# paths-ignore 会导致 docs-only PR 永久 pending（被跳过的 required workflow 保持 Pending）。
+# push 到 master 时跳过纯文档/设计稿改动以节省 CI 额度。
 # 单平台（ubuntu-22.04）三个独立 job 并行：
 #   - quality：前端 lint + 构建、Rust fmt + clippy + 单测
 #   - frontend-unit：Vitest 前端单测
@@ -13,10 +16,6 @@ name: CI
 on:
   pull_request:
     branches: [master]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - 'uiux/**'
   push:
     branches: [master]
     paths-ignore:
