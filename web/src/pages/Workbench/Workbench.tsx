@@ -42,10 +42,6 @@ import {
   useWorkbenchTerminalBuffers,
 } from '@/hooks/workbenchTerminalBuffersContext';
 import {
-  isRemoteWorkbenchOfflineError,
-  isRemoteWorkbenchProjectOffline,
-} from '@/lib/workbenchRemoteProjects';
-import {
   ChevronRightIcon,
   BrowserIcon,
   CopyIcon,
@@ -98,6 +94,7 @@ import {
 } from './terminalReplay';
 import { canRefreshTerminalSize, terminalPanePixelSize } from './terminalSizing';
 import type { TerminalLayoutMode } from './terminalSizing';
+import { useWorkbenchProjectController } from './controllers/useWorkbenchProjectController';
 import {
   activeWorktreeRootPath,
   buildGitGraphRows,
@@ -805,7 +802,21 @@ export function Workbench() {
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [terminalFullscreen, setTerminalFullscreen] = useState<boolean>(false);
   const [terminalResizeRequestKey, setTerminalResizeRequestKey] = useState<number>(0);
-  const [remoteOfflineProjectId, setRemoteOfflineProjectId] = useState<string | null>(null);
+  // Business Logic: 项目域（远端离线状态机 + 跨项目请求守卫 + 项目级 deep link）由独立 controller 持有，
+  // 避免在 Workbench.tsx 里散落多处 state/effect；controller 接收窄 API/回调，不复制邻接域 state。
+  const {
+    remoteProjectOffline,
+    remoteWriteDisabled,
+    isCurrentProject,
+    markRequestFailure,
+    markRequestSuccess,
+    selectProjectFromDeepLink,
+  } = useWorkbenchProjectController({
+    activeProject,
+    activeProjectId,
+    projects,
+    selectProject,
+  });
   const [worktrees, setWorktrees] = useState<WorkbenchWorktree[]>([]);
   const [activeWorktreeId, setActiveWorktreeId] = useState<string | null>(null);
   const [worktreeBusy, setWorktreeBusy] = useState<string | null>(null);
@@ -930,11 +941,6 @@ export function Workbench() {
   const terminalFullscreenLabel = terminalFullscreen
     ? t('workbench:terminalExitFullscreen')
     : t('workbench:terminalEnterFullscreen');
-  const remoteProjectOffline = isRemoteWorkbenchProjectOffline(
-    activeProject,
-    remoteOfflineProjectId,
-  );
-  const remoteWriteDisabled = remoteProjectOffline;
   const canRefreshCurrentTerminalSize = canRefreshTerminalSize(activeSession, remoteWriteDisabled);
   const promptWorkingDirectory = activeRootPath || undefined;
   const composedWorktreeBranchName = composeWorktreeBranchName(
@@ -1005,34 +1011,6 @@ export function Workbench() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   远端项目一旦发现设备离线，页面需要进入只读/不可写状态，避免用户继续点击必然失败的远端写操作。
-   *
-   * Code Logic（这个函数做什么）:
-   *   只在当前 active project 仍是同一个 remote project 且错误包含后端离线文案时，记录离线 projectId。
-   */
-  const markRemoteOfflineFromError = useCallback(
-    (projectId: string, error: unknown) => {
-      if (activeProjectIdRef.current !== projectId) return;
-      if (activeProject?.id !== projectId || activeProject.kind !== 'remote') return;
-      if (!isRemoteWorkbenchOfflineError(error)) return;
-      setRemoteOfflineProjectId(projectId);
-    },
-    [activeProject],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   远端设备恢复在线并有请求成功后，应恢复当前项目的可写操作。
-   *
-   * Code Logic（这个函数做什么）:
-   *   仅当成功请求对应当前记录的离线 projectId 时清空状态，避免误清其他项目的离线提示。
-   */
-  const clearRemoteOfflineForProject = useCallback((projectId: string) => {
-    setRemoteOfflineProjectId((current) => (current === projectId ? null : current));
-  }, []);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
    *   成功 merge 后用户只需要短暂看到完成反馈，不应长期保留状态条占位。
    *
    * Code Logic（这个函数做什么）:
@@ -1071,7 +1049,7 @@ export function Workbench() {
     void workbenchApi.sessions.focus(activeSessionId).catch((error) => {
       if (cancelled) return;
       const projectId = activeProjectIdRef.current;
-      if (projectId) markRemoteOfflineFromError(projectId, error);
+      if (projectId) markRequestFailure(projectId, error);
       setSessionError(
         displayErrorMessage(
           error,
@@ -1083,7 +1061,7 @@ export function Workbench() {
     return () => {
       cancelled = true;
     };
-  }, [activeSessionId, desktopUnavailableMessage, markRemoteOfflineFromError, t]);
+  }, [activeSessionId, desktopUnavailableMessage, markRequestFailure, t]);
 
   useEffect(() => {
     if (!activeProjectId || !activeWorktreeSessionId || scopedSessions.length === 0) {
@@ -1118,24 +1096,25 @@ export function Workbench() {
       try {
         setSessionError(null);
         const list = await workbenchApi.sessions.list(projectId);
-        if (activeProjectIdRef.current !== projectId) return;
-        clearRemoteOfflineForProject(projectId);
+        if (!isCurrentProject(projectId)) return;
+        markRequestSuccess(projectId);
         knownSessionIdsRef.current = new Set(list.map((session) => session.id));
         setSessions(list);
         updateActiveSession(list);
         void refreshProjectSessionStats(projectId);
       } catch (error) {
-        if (activeProjectIdRef.current !== projectId) return;
-        markRemoteOfflineFromError(projectId, error);
+        if (!isCurrentProject(projectId)) return;
+        markRequestFailure(projectId, error);
         setSessionError(
           displayErrorMessage(error, t('workbench:errors.sessions'), desktopUnavailableMessage),
         );
       }
     },
     [
-      clearRemoteOfflineForProject,
+      isCurrentProject,
+      markRequestSuccess,
       desktopUnavailableMessage,
-      markRemoteOfflineFromError,
+      markRequestFailure,
       refreshProjectSessionStats,
       t,
       updateActiveSession,
@@ -1147,22 +1126,22 @@ export function Workbench() {
       try {
         setWorktreeError(null);
         const list = await workbenchApi.worktrees.list(projectId);
-        if (activeProjectIdRef.current !== projectId) return;
-        clearRemoteOfflineForProject(projectId);
+        if (!isCurrentProject(projectId)) return;
+        markRequestSuccess(projectId);
         setWorktrees(list);
         setActiveWorktreeId((current) => {
           if (current && list.some((worktree) => worktree.id === current)) return current;
           return list[0]?.id ?? null;
         });
       } catch (error) {
-        if (activeProjectIdRef.current !== projectId) return;
-        markRemoteOfflineFromError(projectId, error);
+        if (!isCurrentProject(projectId)) return;
+        markRequestFailure(projectId, error);
         setWorktreeError(
           displayErrorMessage(error, t('workbench:errors.worktrees'), desktopUnavailableMessage),
         );
       }
     },
-    [clearRemoteOfflineForProject, desktopUnavailableMessage, markRemoteOfflineFromError, t],
+    [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, t],
   );
 
   /**
@@ -1185,7 +1164,7 @@ export function Workbench() {
         setFileLoadingPath(path);
         const nodes = await workbenchApi.files.listDir(projectId, path, worktreeId);
         if (
-          activeProjectIdRef.current !== projectId ||
+          !isCurrentProject(projectId) ||
           activeWorktreeIdRef.current !== worktreeId ||
           !isLatestRequest(dirRequestSeqRef.current[requestKey], requestSeq)
         ) {
@@ -1196,22 +1175,22 @@ export function Workbench() {
         } else {
           setChildrenByPath((current) => ({ ...current, [path]: nodes }));
         }
-        clearRemoteOfflineForProject(projectId);
+        markRequestSuccess(projectId);
       } catch (error) {
         if (
-          activeProjectIdRef.current !== projectId ||
+          !isCurrentProject(projectId) ||
           activeWorktreeIdRef.current !== worktreeId ||
           !isLatestRequest(dirRequestSeqRef.current[requestKey], requestSeq)
         ) {
           return;
         }
-        markRemoteOfflineFromError(projectId, error);
+        markRequestFailure(projectId, error);
         setFileError(
           displayErrorMessage(error, t('workbench:errors.files'), desktopUnavailableMessage),
         );
       } finally {
         if (
-          activeProjectIdRef.current === projectId &&
+          isCurrentProject(projectId) &&
           activeWorktreeIdRef.current === worktreeId &&
           isLatestRequest(dirRequestSeqRef.current[requestKey], requestSeq)
         ) {
@@ -1219,7 +1198,7 @@ export function Workbench() {
         }
       }
     },
-    [clearRemoteOfflineForProject, desktopUnavailableMessage, markRemoteOfflineFromError, t],
+    [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, t],
   );
 
   /**
@@ -1254,31 +1233,31 @@ export function Workbench() {
       setGitHistoryError(null);
       const commits = await workbenchApi.git.listCommits(projectId, worktreeId, 30);
       if (
-        activeProjectIdRef.current !== projectId ||
+        !isCurrentProject(projectId) ||
         activeWorktreeIdRef.current !== worktreeId
       ) {
         return;
       }
       setGitCommits(commits);
-      clearRemoteOfflineForProject(projectId);
+      markRequestSuccess(projectId);
     } catch (error) {
       if (
-        activeProjectIdRef.current !== projectId ||
+        !isCurrentProject(projectId) ||
         activeWorktreeIdRef.current !== worktreeId
       ) {
         return;
       }
-      markRemoteOfflineFromError(projectId, error);
+      markRequestFailure(projectId, error);
       setGitCommits([]);
       setGitHistoryError(
         displayErrorMessage(error, t('workbench:errors.gitHistory'), desktopUnavailableMessage),
       );
     } finally {
-      if (activeProjectIdRef.current === projectId && activeWorktreeIdRef.current === worktreeId) {
+      if (isCurrentProject(projectId) && activeWorktreeIdRef.current === worktreeId) {
         setGitHistoryLoading(false);
       }
     }
-  }, [clearRemoteOfflineForProject, desktopUnavailableMessage, markRemoteOfflineFromError, t]);
+  }, [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, t]);
 
   const loadPathInfo = useCallback(
     async (path: string) => {
@@ -1288,38 +1267,32 @@ export function Workbench() {
       try {
         const info = await workbenchApi.files.info(projectId, path, worktreeId);
         if (
-          activeProjectIdRef.current !== projectId ||
+          !isCurrentProject(projectId) ||
           activeWorktreeIdRef.current !== worktreeId
         ) {
           return;
         }
         setSelectedInfo(info);
         setRenameName(info.name);
-        clearRemoteOfflineForProject(projectId);
+        markRequestSuccess(projectId);
       } catch (error) {
         if (
-          activeProjectIdRef.current !== projectId ||
+          !isCurrentProject(projectId) ||
           activeWorktreeIdRef.current !== worktreeId
         ) {
           return;
         }
-        markRemoteOfflineFromError(projectId, error);
+        markRequestFailure(projectId, error);
         setFileError(
           displayErrorMessage(error, t('workbench:errors.pathInfo'), desktopUnavailableMessage),
         );
       }
     },
-    [clearRemoteOfflineForProject, desktopUnavailableMessage, markRemoteOfflineFromError, t],
+    [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, t],
   );
 
   useEffect(() => {
     activeProjectIdRef.current = activeProjectId;
-  }, [activeProjectId]);
-
-  useEffect(() => {
-    queueMicrotask(() => {
-      setRemoteOfflineProjectId(null);
-    });
   }, [activeProjectId]);
 
   useEffect(() => {
@@ -1339,15 +1312,18 @@ export function Workbench() {
     if (!deepLinkProjectId) return;
     const applied = deepLinkApplicationRef.current;
     if (applied.search !== locationSearch || applied.projectId === deepLinkProjectId) return;
+    // Business Logic: 项目级 deep link 选择由 controller 提供；命中后 fire-and-forget 触发 selectProject，
+    // 与原 Workbench.tsx 行为一致（不等待切换完成，让后续 worktree/session deep-link effect 自行守卫）。
+    // Code Logic: 先在 effect 主体里同步确认目标项目存在并标记 applied.projectId 防止重入，再交给 controller
+    // 执行实际切换（controller 内部会再判断当前 activeProjectId 是否已等于目标，避免重复 selectProject）。
     if (activeProjectId === deepLinkProjectId) {
       applied.projectId = deepLinkProjectId;
       return;
     }
-    const targetProject = projects.find((project) => project.id === deepLinkProjectId);
-    if (!targetProject) return;
+    if (!projects.some((project) => project.id === deepLinkProjectId)) return;
     applied.projectId = deepLinkProjectId;
-    void selectProject(targetProject);
-  }, [activeProjectId, deepLinkProjectId, locationSearch, projects, selectProject]);
+    void selectProjectFromDeepLink(deepLinkProjectId);
+  }, [activeProjectId, deepLinkProjectId, locationSearch, projects, selectProjectFromDeepLink]);
 
   useEffect(() => {
     if (!deepLinkWorktreeId) return;
@@ -1670,7 +1646,7 @@ export function Workbench() {
       ) {
         return;
       }
-      markRemoteOfflineFromError(projectId, error);
+      markRequestFailure(projectId, error);
       setSessionError(
         displayErrorMessage(
           error,
@@ -1684,7 +1660,7 @@ export function Workbench() {
   }, [
     desktopUnavailableMessage,
     focusSession,
-    markRemoteOfflineFromError,
+    markRequestFailure,
     refreshProjectSessionStats,
     resetTerminalBuffer,
     t,
@@ -1699,7 +1675,7 @@ export function Workbench() {
         await workbenchApi.sessions.splitPane(activeSession.id, direction);
         await loadSessions(activeSession.projectId);
       } catch (error) {
-        markRemoteOfflineFromError(activeSession.projectId, error);
+        markRequestFailure(activeSession.projectId, error);
         setSessionError(
           displayErrorMessage(
             error,
@@ -1713,7 +1689,7 @@ export function Workbench() {
       activeSession,
       desktopUnavailableMessage,
       loadSessions,
-      markRemoteOfflineFromError,
+      markRequestFailure,
       remoteWriteDisabled,
       t,
     ],
@@ -1737,7 +1713,7 @@ export function Workbench() {
       }
       await loadSessions(projectId);
     } catch (error) {
-      markRemoteOfflineFromError(activeSession.projectId, error);
+      markRequestFailure(activeSession.projectId, error);
       setSessionError(
         displayErrorMessage(error, t('workbench:errors.closePane'), desktopUnavailableMessage),
       );
@@ -1746,7 +1722,7 @@ export function Workbench() {
     activeSession,
     desktopUnavailableMessage,
     loadSessions,
-    markRemoteOfflineFromError,
+    markRequestFailure,
     removeTerminalBuffer,
     remoteWriteDisabled,
     t,
@@ -1836,7 +1812,7 @@ export function Workbench() {
         setPromptPanelOpen(false);
       } catch (error) {
         if (activeProjectIdRef.current) {
-          markRemoteOfflineFromError(activeProjectIdRef.current, error);
+          markRequestFailure(activeProjectIdRef.current, error);
         }
         setSessionError(
           displayErrorMessage(
@@ -1853,7 +1829,7 @@ export function Workbench() {
       activeSession,
       activeProject?.deviceName,
       desktopUnavailableMessage,
-      markRemoteOfflineFromError,
+      markRequestFailure,
       promptInput,
       promptOptimizing,
       promptOptimizerFillLanguage,
@@ -1973,7 +1949,7 @@ export function Workbench() {
         if (projectId) void refreshProjectSessionStats(projectId);
       } catch (error) {
         const projectId = activeProjectIdRef.current;
-        if (projectId) markRemoteOfflineFromError(projectId, error);
+        if (projectId) markRequestFailure(projectId, error);
         setSessionError(
           displayErrorMessage(
             error,
@@ -1985,7 +1961,7 @@ export function Workbench() {
     },
     [
       desktopUnavailableMessage,
-      markRemoteOfflineFromError,
+      markRequestFailure,
       refreshProjectSessionStats,
       removeTerminalBuffer,
       remoteWriteDisabled,
@@ -2004,7 +1980,7 @@ export function Workbench() {
         current.map((session) => (session.id === renamed.id ? renamed : session)),
       );
     } catch (error) {
-      markRemoteOfflineFromError(activeSession.projectId, error);
+      markRequestFailure(activeSession.projectId, error);
       setSessionError(
         displayErrorMessage(error, t('workbench:errors.renameSession'), desktopUnavailableMessage),
       );
@@ -2012,7 +1988,7 @@ export function Workbench() {
   }, [
     activeSession,
     desktopUnavailableMessage,
-    markRemoteOfflineFromError,
+    markRequestFailure,
     remoteWriteDisabled,
     sessionNameDraft,
     t,
@@ -2068,7 +2044,7 @@ export function Workbench() {
         resetTerminalBuffer(session.id);
         void refreshProjectSessionStats(projectId);
       } else if (createSessionError) {
-        markRemoteOfflineFromError(projectId, createSessionError);
+        markRequestFailure(projectId, createSessionError);
         setSessionError(
           displayErrorMessage(
             createSessionError,
@@ -2082,7 +2058,7 @@ export function Workbench() {
       setCreateWorktreeBranchSuffixDraft('');
     } catch (error) {
       if (activeProjectIdRef.current !== projectId) return;
-      markRemoteOfflineFromError(projectId, error);
+      markRequestFailure(projectId, error);
       setWorktreeError(
         displayErrorMessage(
           error,
@@ -2099,7 +2075,7 @@ export function Workbench() {
     desktopUnavailableMessage,
     focusSession,
     loadWorktrees,
-    markRemoteOfflineFromError,
+    markRequestFailure,
     refreshProjectSessionStats,
     resetTerminalBuffer,
     remoteWriteDisabled,
@@ -2116,7 +2092,7 @@ export function Workbench() {
       await loadWorktrees(activeWorktree.projectId);
       if (inspectorTab === 'history') await loadGitHistory();
     } catch (error) {
-      markRemoteOfflineFromError(activeWorktree.projectId, error);
+      markRequestFailure(activeWorktree.projectId, error);
       await loadWorktrees(activeWorktree.projectId);
       if (inspectorTab === 'history') await loadGitHistory();
       setWorktreeError(
@@ -2131,7 +2107,7 @@ export function Workbench() {
     inspectorTab,
     loadGitHistory,
     loadWorktrees,
-    markRemoteOfflineFromError,
+    markRequestFailure,
     remoteWriteDisabled,
     t,
   ]);
@@ -2146,7 +2122,7 @@ export function Workbench() {
       await loadWorktrees(activeWorktree.projectId);
       if (inspectorTab === 'history') await loadGitHistory();
     } catch (error) {
-      markRemoteOfflineFromError(activeWorktree.projectId, error);
+      markRequestFailure(activeWorktree.projectId, error);
       setWorktreeError(
         displayErrorMessage(error, t('workbench:errors.pushWorktree'), desktopUnavailableMessage),
       );
@@ -2159,7 +2135,7 @@ export function Workbench() {
     inspectorTab,
     loadGitHistory,
     loadWorktrees,
-    markRemoteOfflineFromError,
+    markRequestFailure,
     remoteWriteDisabled,
     t,
   ]);
@@ -2201,7 +2177,7 @@ export function Workbench() {
       void refreshProjectSessionStats(projectId);
       if (inspectorTab === 'history') await loadGitHistory();
     } catch (error) {
-      markRemoteOfflineFromError(projectId, error);
+      markRequestFailure(projectId, error);
       const message = displayErrorMessage(
         error,
         t('workbench:errors.mergeWorktree'),
@@ -2232,7 +2208,7 @@ export function Workbench() {
     loadGitHistory,
     loadSessions,
     loadWorktrees,
-    markRemoteOfflineFromError,
+    markRequestFailure,
     remoteWriteDisabled,
     refreshProjectSessionStats,
     removeTerminalBuffer,
@@ -2257,7 +2233,7 @@ export function Workbench() {
       }
       await loadWorktrees(activeWorktree.projectId);
     } catch (error) {
-      markRemoteOfflineFromError(activeWorktree.projectId, error);
+      markRequestFailure(activeWorktree.projectId, error);
       setWorktreeError(
         displayErrorMessage(error, t('workbench:errors.removeWorktree'), desktopUnavailableMessage),
       );
@@ -2268,7 +2244,7 @@ export function Workbench() {
     activeWorktree,
     desktopUnavailableMessage,
     loadWorktrees,
-    markRemoteOfflineFromError,
+    markRequestFailure,
     remoteWriteDisabled,
     t,
     worktrees,
@@ -2356,13 +2332,13 @@ export function Workbench() {
         ) {
           return;
         }
-        markRemoteOfflineFromError(projectId, error);
+        markRequestFailure(projectId, error);
         setFileError(
           displayErrorMessage(error, t('workbench:errors.openFile'), desktopUnavailableMessage),
         );
       }
     },
-    [desktopUnavailableMessage, markRemoteOfflineFromError, setFileTabsState, t],
+    [desktopUnavailableMessage, markRequestFailure, setFileTabsState, t],
   );
 
   /**
@@ -2682,7 +2658,7 @@ export function Workbench() {
         ) {
           return;
         }
-        markRemoteOfflineFromError(projectId, error);
+        markRequestFailure(projectId, error);
         setFileError(
           displayErrorMessage(error, t('workbench:errors.saveFile'), desktopUnavailableMessage),
         );
@@ -2702,7 +2678,7 @@ export function Workbench() {
       refreshParentDir,
       setFileTabsState,
       selectedPath,
-      markRemoteOfflineFromError,
+      markRequestFailure,
       remoteWriteDisabled,
       t,
       validateStructuredFileTab,
@@ -2849,13 +2825,13 @@ export function Workbench() {
         ) {
           return;
         }
-        markRemoteOfflineFromError(projectId, error);
+        markRequestFailure(projectId, error);
         setFileError(
           displayErrorMessage(error, t('workbench:errors.previewSqlite'), desktopUnavailableMessage),
         );
       }
     },
-    [desktopUnavailableMessage, markRemoteOfflineFromError, setFileTabsState, t],
+    [desktopUnavailableMessage, markRequestFailure, setFileTabsState, t],
   );
 
   const handleCreateEntry = useCallback(
@@ -2903,7 +2879,7 @@ export function Workbench() {
         ) {
           return;
         }
-        markRemoteOfflineFromError(projectId, error);
+        markRequestFailure(projectId, error);
         setFileError(
           displayErrorMessage(error, t('workbench:errors.createPath'), desktopUnavailableMessage),
         );
@@ -2912,7 +2888,7 @@ export function Workbench() {
     [
       desktopUnavailableMessage,
       loadDir,
-      markRemoteOfflineFromError,
+      markRequestFailure,
       newEntryName,
       remoteWriteDisabled,
       selectedParentPath,
@@ -3001,7 +2977,7 @@ export function Workbench() {
       ) {
         return;
       }
-      markRemoteOfflineFromError(projectId, error);
+      markRequestFailure(projectId, error);
       setFileError(
         displayErrorMessage(error, t('workbench:errors.renamePath'), desktopUnavailableMessage),
       );
@@ -3009,7 +2985,7 @@ export function Workbench() {
   }, [
     desktopUnavailableMessage,
     invalidateDirRequestsForPath,
-    markRemoteOfflineFromError,
+    markRequestFailure,
     refreshParentDir,
     renameName,
     remoteWriteDisabled,
@@ -3086,7 +3062,7 @@ export function Workbench() {
       ) {
         return;
       }
-      markRemoteOfflineFromError(projectId, error);
+      markRequestFailure(projectId, error);
       setFileError(
         displayErrorMessage(error, t('workbench:errors.deletePath'), desktopUnavailableMessage),
       );
@@ -3094,7 +3070,7 @@ export function Workbench() {
   }, [
     desktopUnavailableMessage,
     invalidateDirRequestsForPath,
-    markRemoteOfflineFromError,
+    markRequestFailure,
     refreshParentDir,
     remoteWriteDisabled,
     selectedInfo,
