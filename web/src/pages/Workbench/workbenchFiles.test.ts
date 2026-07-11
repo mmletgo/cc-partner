@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import {
   collectTabsForPath,
   detectWorkbenchFileType,
@@ -18,7 +19,6 @@ import {
   workbenchDirRequestKey,
   workbenchDirRequestKeyMatchesPath,
 } from './workbenchFiles';
-import { exit } from 'node:process';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -38,7 +38,8 @@ function assert(condition: boolean, message: string): void {
  * Code Logic（这个函数做什么）:
  *   顺序调用 Workbench 文件 helper，断言关键行为符合设计规格。
  */
-async function main(): Promise<void> {
+describe('workbenchFiles', () => {
+  test('detects file types, maps capabilities, manages tabs and validates/formats text', async () => {
   assert(detectWorkbenchFileType('README.md', null) === 'markdown', 'markdown extension detected');
   assert(detectWorkbenchFileType('README.mdx', null) === 'markdown', 'mdx extension detected as markdown');
   assert(detectWorkbenchFileType('Makefile', null) === 'code', 'Makefile detected as code');
@@ -240,13 +241,5 @@ async function main(): Promise<void> {
   assert(expanded.has('docs'), 'dropping expanded path tree keeps unrelated expanded path');
   assert(!isLatestRequest(2, 1), 'older request seq is not latest');
   assert(isLatestRequest(2, 2), 'matching request seq is latest');
-}
-
-void main()
-  .then(() => {
-    exit(0);
-  })
-  .catch((error: unknown) => {
-    console.error(error);
-    exit(1);
   });
+});

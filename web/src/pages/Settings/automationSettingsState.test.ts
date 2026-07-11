@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import type { OrchestratorAutomationConfig } from '@/api/orchestratorConfig';
 import {
   automationConfigToForm,
@@ -60,58 +61,60 @@ function configFixture(
   };
 }
 
-assertDeepEqual(commandsToTextarea(['cargo test', 'npm run lint']), 'cargo test\nnpm run lint');
-assertDeepEqual(textareaToCommandsText('cargo test\r\n\nnpm run lint'), 'cargo test\n\nnpm run lint');
-assertDeepEqual(clampAutomationMaxConcurrentTasks(Number.NaN), 1);
-assertDeepEqual(clampAutomationMaxConcurrentTasks(0), 1);
-assertDeepEqual(clampAutomationMaxConcurrentTasks(2.8), 2);
-assertDeepEqual(clampAutomationMaxConcurrentTasks(9), 8);
+describe('automationSettingsState', () => {
+  test('converts config <-> form <-> patch and clamps concurrency', () => {
+    assertDeepEqual(commandsToTextarea(['cargo test', 'npm run lint']), 'cargo test\nnpm run lint');
+    assertDeepEqual(textareaToCommandsText('cargo test\r\n\nnpm run lint'), 'cargo test\n\nnpm run lint');
+    assertDeepEqual(clampAutomationMaxConcurrentTasks(Number.NaN), 1);
+    assertDeepEqual(clampAutomationMaxConcurrentTasks(0), 1);
+    assertDeepEqual(clampAutomationMaxConcurrentTasks(2.8), 2);
+    assertDeepEqual(clampAutomationMaxConcurrentTasks(9), 8);
 
-const pending = automationConfigToForm(null);
-assertDeepEqual(pending, PENDING_AUTOMATION_SETTINGS_FORM);
-assertNotSameRef(pending, PENDING_AUTOMATION_SETTINGS_FORM);
+    const pending = automationConfigToForm(null);
+    assertDeepEqual(pending, PENDING_AUTOMATION_SETTINGS_FORM);
+    assertNotSameRef(pending, PENDING_AUTOMATION_SETTINGS_FORM);
 
-const loaded = automationConfigToForm(configFixture());
-assertDeepEqual(loaded, {
-  enabled: true,
-  maxConcurrentTasks: 2,
-  verificationCommandsText: 'cargo test\nnpm run lint',
-  autoCommit: true,
-  autoPushTaskBranch: false,
-  autoMergeToMain: true,
-  autoPushMain: false,
+    const loaded = automationConfigToForm(configFixture());
+    assertDeepEqual(loaded, {
+      enabled: true,
+      maxConcurrentTasks: 2,
+      verificationCommandsText: 'cargo test\nnpm run lint',
+      autoCommit: true,
+      autoPushTaskBranch: false,
+      autoMergeToMain: true,
+      autoPushMain: false,
+    });
+
+    assertDeepEqual(automationConfigToForm(configFixture({ maxConcurrentTasks: 99 })).maxConcurrentTasks, 8);
+
+    assertDeepEqual(automationFormToPatch(loaded), {
+      enabled: true,
+      maxConcurrentTasks: 2,
+      verificationCommands: 'cargo test\nnpm run lint',
+      autoCommit: true,
+      autoPushTaskBranch: false,
+      autoMergeToMain: true,
+      autoPushMain: false,
+    });
+
+    assertDeepEqual(
+      automationFormToPatch({
+        ...loaded,
+        maxConcurrentTasks: -4,
+      }).maxConcurrentTasks,
+      1,
+    );
+
+    assertDeepEqual(isAutomationFormDirty(loaded, loaded), false);
+    assertDeepEqual(
+      isAutomationFormDirty(
+        {
+          ...loaded,
+          autoPushMain: true,
+        },
+        loaded,
+      ),
+      true,
+    );
+  });
 });
-
-assertDeepEqual(automationConfigToForm(configFixture({ maxConcurrentTasks: 99 })).maxConcurrentTasks, 8);
-
-assertDeepEqual(automationFormToPatch(loaded), {
-  enabled: true,
-  maxConcurrentTasks: 2,
-  verificationCommands: 'cargo test\nnpm run lint',
-  autoCommit: true,
-  autoPushTaskBranch: false,
-  autoMergeToMain: true,
-  autoPushMain: false,
-});
-
-assertDeepEqual(
-  automationFormToPatch({
-    ...loaded,
-    maxConcurrentTasks: -4,
-  }).maxConcurrentTasks,
-  1,
-);
-
-assertDeepEqual(isAutomationFormDirty(loaded, loaded), false);
-assertDeepEqual(
-  isAutomationFormDirty(
-    {
-      ...loaded,
-      autoPushMain: true,
-    },
-    loaded,
-  ),
-  true,
-);
-
-console.log('automationSettingsState.test.ts passed');
