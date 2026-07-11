@@ -3366,11 +3366,14 @@ export function Workbench() {
                     variant="secondary"
                     size="sm"
                     icon={<PlusIcon />}
+                    title={t('workbench:newSession')}
+                    aria-label={t('workbench:newSession')}
+                    data-workbench-responsive-action="true"
                     loading={sessionBusy}
                     disabled={!activeProjectId || !activeWorktree || remoteWriteDisabled}
                     onClick={() => void handleCreateSession()}
                   >
-                    {t('workbench:newSession')}
+                    <span data-workbench-responsive-label="true">{t('workbench:newSession')}</span>
                   </Button>
                 </div>
               }
@@ -3384,10 +3387,13 @@ export function Workbench() {
                       icon={<BrowserIcon />}
                       title={t('workbench:browserPreview.openWorkspace')}
                       aria-label={t('workbench:browserPreview.openWorkspace')}
+                      data-workbench-responsive-action="true"
                       disabled={!activeProject || !activeWorktree}
                       onClick={() => setWorkspaceView('browser')}
                     >
-                      {t('workbench:browserPreview.openWorkspace')}
+                      <span data-workbench-responsive-label="true">
+                        {t('workbench:browserPreview.openWorkspace')}
+                      </span>
                     </Button>
                   ) : null}
                   {!terminalFullscreen ? (
@@ -3398,10 +3404,13 @@ export function Workbench() {
                       icon={<SearchIcon />}
                       title={t('workbench:sessionSearch.open')}
                       aria-label={t('workbench:sessionSearch.open')}
+                      data-workbench-responsive-action="true"
                       disabled={!activeProjectId || !activeWorktree}
                       onClick={() => setSessionSearchOpen(true)}
                     >
-                      {t('workbench:sessionSearch.open')}
+                      <span data-workbench-responsive-label="true">
+                        {t('workbench:sessionSearch.open')}
+                      </span>
                     </Button>
                   ) : null}
                   {!terminalFullscreen ? (
@@ -3412,6 +3421,7 @@ export function Workbench() {
                       icon={<EditIcon />}
                       title={t('workbench:promptOptimizer.open')}
                       aria-label={t('workbench:promptOptimizer.open')}
+                      data-workbench-responsive-action="true"
                       data-active={promptPanelOpen || undefined}
                       disabled={!activeSession || (remoteWriteDisabled && !promptPanelOpen)}
                       onClick={() => {
@@ -3422,7 +3432,9 @@ export function Workbench() {
                         }
                       }}
                     >
-                      {t('workbench:promptOptimizer.open')}
+                      <span data-workbench-responsive-label="true">
+                        {t('workbench:promptOptimizer.open')}
+                      </span>
                     </Button>
                   ) : null}
                   <Button
@@ -3432,10 +3444,13 @@ export function Workbench() {
                     icon={<RefreshIcon />}
                     title={t('workbench:fitTerminalSize')}
                     aria-label={t('workbench:fitTerminalSize')}
+                    data-workbench-responsive-action="true"
                     disabled={!canRefreshCurrentTerminalSize}
                     onClick={handleRefreshTerminalSize}
                   >
-                    {t('workbench:fitTerminalSize')}
+                    <span data-workbench-responsive-label="true">
+                      {t('workbench:fitTerminalSize')}
+                    </span>
                   </Button>
                   <Button
                     className={styles.terminalActionButton}
@@ -3444,10 +3459,13 @@ export function Workbench() {
                     icon={<SplitRightIcon />}
                     title={t('workbench:splitPaneRight')}
                     aria-label={t('workbench:splitPaneRight')}
+                    data-workbench-responsive-action="true"
                     disabled={!canUsePanes || remoteWriteDisabled}
                     onClick={() => void handleSplitPane('right')}
                   >
-                    {t('workbench:splitPaneRight')}
+                    <span data-workbench-responsive-label="true">
+                      {t('workbench:splitPaneRight')}
+                    </span>
                   </Button>
                   <Button
                     className={styles.terminalActionButton}
@@ -3456,10 +3474,13 @@ export function Workbench() {
                     icon={<SplitDownIcon />}
                     title={t('workbench:splitPaneDown')}
                     aria-label={t('workbench:splitPaneDown')}
+                    data-workbench-responsive-action="true"
                     disabled={!canUsePanes || remoteWriteDisabled}
                     onClick={() => void handleSplitPane('down')}
                   >
-                    {t('workbench:splitPaneDown')}
+                    <span data-workbench-responsive-label="true">
+                      {t('workbench:splitPaneDown')}
+                    </span>
                   </Button>
                   <Button
                     className={styles.terminalActionButton}
@@ -3468,10 +3489,13 @@ export function Workbench() {
                     icon={<XIcon />}
                     title={t('workbench:closePane')}
                     aria-label={t('workbench:closePane')}
+                    data-workbench-responsive-action="true"
                     disabled={!canUsePanes || remoteWriteDisabled}
                     onClick={() => void handleClosePane()}
                   >
-                    {t('workbench:closePane')}
+                    <span data-workbench-responsive-label="true">
+                      {t('workbench:closePane')}
+                    </span>
                   </Button>
                   <Button
                     className={styles.terminalActionButton}
@@ -3480,6 +3504,7 @@ export function Workbench() {
                     icon={<TerminalFullscreenIcon />}
                     title={terminalFullscreenLabel}
                     aria-label={terminalFullscreenLabel}
+                    data-workbench-responsive-action="true"
                     disabled={!terminalFullscreen && !activeSession}
                     onClick={
                       terminalFullscreen
@@ -3487,7 +3512,7 @@ export function Workbench() {
                         : handleEnterTerminalFullscreen
                     }
                   >
-                    {terminalFullscreenLabel}
+                    <span data-workbench-responsive-label="true">{terminalFullscreenLabel}</span>
                   </Button>
                   {!terminalFullscreen ? (
                     <Button
@@ -3497,10 +3522,13 @@ export function Workbench() {
                       icon={<FileIcon />}
                       title={t('workbench:fileWorkspace.openFiles')}
                       aria-label={t('workbench:fileWorkspace.openFiles')}
+                      data-workbench-responsive-action="true"
                       disabled={fileTabs.length === 0}
                       onClick={handleReturnToFiles}
                     >
-                      {t('workbench:fileWorkspace.openFiles')}
+                      <span data-workbench-responsive-label="true">
+                        {t('workbench:fileWorkspace.openFiles')}
+                      </span>
                     </Button>
                   ) : null}
                 </>

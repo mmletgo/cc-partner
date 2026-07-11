@@ -475,10 +475,15 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
                   variant="secondary"
                   size="sm"
                   icon={<RefreshIcon aria-hidden="true" />}
+                  title={t('workbench:fileWorkspace.format')}
+                  aria-label={t('workbench:fileWorkspace.format')}
+                  data-workbench-responsive-action="true"
                   disabled={writeLocked}
                   onClick={handleFormat}
                 >
-                  {t('workbench:fileWorkspace.format')}
+                  <span data-workbench-responsive-label="true">
+                    {t('workbench:fileWorkspace.format')}
+                  </span>
                 </Button>
               ) : null}
               {activeTab.opened.capabilities.canEdit ? (
@@ -486,20 +491,30 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
                   variant="primary"
                   size="sm"
                   icon={<CheckIcon aria-hidden="true" />}
+                  title={t('workbench:fileWorkspace.save')}
+                  aria-label={t('workbench:fileWorkspace.save')}
+                  data-workbench-responsive-action="true"
                   loading={saving}
                   disabled={!activeTab.dirty || writeLocked}
                   onClick={handleSave}
                 >
-                  {t('workbench:fileWorkspace.save')}
+                  <span data-workbench-responsive-label="true">
+                    {t('workbench:fileWorkspace.save')}
+                  </span>
                 </Button>
               ) : null}
               <Button
                 variant="secondary"
                 size="sm"
                 icon={<TerminalIcon aria-hidden="true" />}
+                title={t('workbench:fileWorkspace.returnTerminal')}
+                aria-label={t('workbench:fileWorkspace.returnTerminal')}
+                data-workbench-responsive-action="true"
                 onClick={onReturnToTerminal}
               >
-                {t('workbench:fileWorkspace.returnTerminal')}
+                <span data-workbench-responsive-label="true">
+                  {t('workbench:fileWorkspace.returnTerminal')}
+                </span>
               </Button>
             </div>
           ) : null

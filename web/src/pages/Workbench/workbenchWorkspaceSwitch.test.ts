@@ -164,6 +164,33 @@ async function main(): Promise<void> {
     'shared nav matches terminal nav padding',
   );
   assertContains(
+    workspaceNavStyles,
+    'container: workbench-workspace-nav / inline-size;',
+    'shared nav measures its own available width for responsive actions',
+  );
+  assertContains(
+    workspaceNavStyles,
+    '@container workbench-workspace-nav (max-width: 1280px)',
+    'shared nav collapses action labels when its own width is constrained',
+  );
+  assertContains(
+    workspaceNavStyles,
+    "[data-workbench-responsive-label='true']",
+    'shared nav hides only responsive labels while preserving button icons',
+  );
+  assertOccurrenceCount(
+    workbenchSource,
+    'data-workbench-responsive-action="true"',
+    10,
+    'terminal nav marks new session and every toolbar action as responsive',
+  );
+  assertOccurrenceCount(
+    fileWorkspaceSource,
+    'data-workbench-responsive-action="true"',
+    3,
+    'file workspace marks every toolbar action as responsive',
+  );
+  assertContains(
     fileWorkspaceSource,
     '<span className={styles.tabName}>{tab.path}</span>',
     'file tab label renders full relative path',
