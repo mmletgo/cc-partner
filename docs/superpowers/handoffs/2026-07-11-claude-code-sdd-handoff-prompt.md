@@ -139,11 +139,12 @@ superpowers:subagent-driven-development
 superpowers:test-driven-development
 superpowers:systematic-debugging
 superpowers:verification-before-completion
-superpowers:requesting-code-review
 superpowers:finishing-a-development-branch
 ```
 
 如果 `superpowers:subagent-driven-development` 或其脚本不存在，停止并报告 blocker；不要静默模拟一个缩水流程。
+
+所有 reviewer 必须由已安装的 `codex-plugin-cc` 调用 Codex 执行，Claude Code 自身或 Claude subagent 不得充当 reviewer。开始实现前先运行 `/codex:setup`，确认插件、Codex CLI 和认证状态可用；若不可用，停止并报告 blocker，不得降级为 Claude 自审或跳过 review。
 
 Subagent-Driven 的不可变规则：
 
@@ -152,14 +153,14 @@ Subagent-Driven 的不可变规则：
 3. implementer 只读取自己的 task brief、相关分层指令和必要接口，不把完整会话历史或整份 plan 塞给它。
 4. implementer 必须使用 TDD：先建立失败证据，再实现，再跑聚焦测试。
 5. implementer 完成后必须提交、自审并写 report 文件。
-6. 每个 task 必须有独立 reviewer；reviewer同时给出：
+6. 每个 task 必须有独立 Codex reviewer，由 `codex-plugin-cc` 的 `/codex:adversarial-review` 调用；reviewer 同时给出：
    - Spec compliance：✅ / ❌
    - Code quality：Approved / Findings
 7. reviewer 有 Critical / Important finding 时，不得进入下一 task。
 8. 修复 Agent 必须运行覆盖修复的测试，把命令、结果和输出摘要追加到同一个 report，再交原 reviewer re-review。
 9. reviewer 的 “⚠️ Cannot verify from diff” 由主控亲自查证；未查证不得标 task complete。
-10. implementer 自审不能替代 reviewer。
-11. 全部 task 完成后，还要进行一次 plan-level broad review；8 个阶段都完成后再做一次 whole-program final review。
+10. implementer 自审、Claude 主控审查或另一个 Claude subagent 都不能替代 Codex reviewer。
+11. 全部 task 完成后，还要通过 `codex-plugin-cc` 进行一次 plan-level broad review；8 个阶段都完成后再通过该插件做一次 whole-program final review。
 12. 不要在任务间询问“是否继续”。只有真实 blocker、必须由用户选择的矛盾、或全部完成时才停。
 
 ## 四、Worktree 与 branch 拓扑
@@ -345,7 +346,13 @@ implementer 完成后：
 
 ### 6. 派发 task reviewer
 
-reviewer 必须读取三个文件：
+禁止使用 Claude Code 的 Agent/Task 工具创建 reviewer。必须在当前仓库通过 `codex-plugin-cc` 调用 Codex：
+
+```text
+/codex:adversarial-review --wait --base <TASK_BASE> --scope branch <FOCUS>
+```
+
+其中 `<TASK_BASE>` 是该 task 开始前的 commit；`<FOCUS>` 必须明确要求 Codex reviewer 读取三个文件：
 
 ```text
 task brief
@@ -353,9 +360,11 @@ implementer report
 review package
 ```
 
-同时把对应 plan 的 Global Constraints 原文交给 reviewer。
+同时在 `<FOCUS>` 中给出对应 plan 路径，并要求读取该 plan 的 Global Constraints 原文。不要使用 `/codex:review` 代替：它不支持附加本流程所需的 task/spec 审查说明。
 
-reviewer Prompt 不得出现“不要报告某问题”“最多算 Minor”“plan 已经决定所以忽略”等预判语言。
+`--wait` 是强制项，确保 Codex 返回结论前主控不会进入下一 task。如果因运行环境限制必须使用 `--background`，则必须记录 job ID，并用 `/codex:status <job-id> --wait` 等待完成、再用 `/codex:result <job-id>` 取得完整结果；结果未取回前 task 保持 in-progress。
+
+传给 Codex reviewer 的 `<FOCUS>` 不得出现“不要报告某问题”“最多算 Minor”“plan 已经决定所以忽略”等预判语言。
 
 reviewer 必须输出：
 
@@ -372,11 +381,13 @@ Cannot verify from diff:
 - ...
 ```
 
+保留并记录插件返回的完整 Codex 输出，不得由 Claude 改写、压缩或冒充 Codex 结论。如果输出缺少上述两个 verdict，review 尚未完成：补全 review context 后重新调用 Codex，不得由 Claude 自行补判。
+
 ### 7. 修复与 re-review
 
 - Critical / Important：派发一个 fix subagent 处理本轮完整 findings。
 - fix subagent 在同一 report 追加：修改、测试文件、命令、输出。
-- 主控确认 report 里三项齐全后，把更新后的 diff package 交回原 reviewer。
+- 主控确认 report 里三项齐全后，使用相同 `<TASK_BASE>`、更新后的 review package 和相同审查焦点，再次通过 `/codex:adversarial-review` 调用 Codex re-review。
 - 重复直到 spec ✅ 且 quality approved。
 - Minor 写入 ledger，交 plan-level/final reviewer；不能静默丢弃。
 
@@ -386,15 +397,14 @@ Cannot verify from diff:
 
 ## 七、模型路由
 
-如果 Claude Code 的 Agent/Task 工具支持显式 `model`，每次派发都必须填写，不要继承主会话默认模型。
+如果 Claude Code 的 Agent/Task 工具支持显式 `model`，每次派发 implementer/fix subagent 时都必须填写，不要继承主会话默认模型。
 
 按运行环境实际可用模型映射：
 
 - 机械、单文件、完整规格：快速模型。
 - 常规多文件实现：标准工程模型。
 - 并发、协议、Worktree 拆分、日志隐私、复杂 Debug：最强可用模型。
-- task reviewer：至少标准工程模型。
-- plan-level 与 whole-program final reviewer：最强可用模型。
+- task、plan-level 与 whole-program reviewer：不通过 Claude Agent/Task 派发，统一由 `codex-plugin-cc` 调用 Codex；不得套用 Claude 模型路由或用 Claude 模型替代。
 
 如果运行环境不支持项目 AGENTS.md 中的 GPT 型号名称，使用 Claude Code 工具实际支持的等价档位，例如 Haiku/Sonnet/Opus，并在 ledger 记录一次映射。不得伪造模型参数。
 
@@ -408,7 +418,7 @@ Cannot verify from diff:
 - CI/YAML：标准。
 - Logs/sanitizer/doctor：最强。
 - Documentation calibration：标准。
-- 所有阶段 final review：最强。
+- 所有阶段 final review：通过 `codex-plugin-cc` 调用 Codex。
 
 ## 八、严格执行顺序
 
@@ -635,7 +645,9 @@ Plan：
 1. 计算该 plan branch 的起始 BASE。
 2. 运行：
    `"$SDD_SKILL_DIR/scripts/review-package" "$PLAN_BASE" HEAD`
-3. 使用 `superpowers:requesting-code-review` 派发最强 reviewer。
+3. 禁止派发 Claude reviewer；通过 `codex-plugin-cc` 执行：
+   `/codex:adversarial-review --wait --base <PLAN_BASE> --scope branch <FOCUS>`。
+   `<FOCUS>` 必须列出 Completion Contract、对应 spec、plan、ledger 和 review package 的路径，并要求 Codex 做 plan-level broad review。
 4. reviewer 检查：
    - plan Completion Contract
    - 对应 spec
@@ -651,7 +663,9 @@ Plan：
 Phase 08 完成并合并 integration branch 后：
 
 1. 使用 program 起始 commit 到 integration HEAD 生成 review package。
-2. 派发最强 final reviewer，覆盖两份 spec、8 份 plan、所有 Minor ledger。
+2. 禁止派发 Claude final reviewer；通过 `codex-plugin-cc` 执行：
+   `/codex:adversarial-review --wait --base <PROGRAM_BASE> --scope branch <FOCUS>`。
+   `<FOCUS>` 必须列出两份 spec、8 份白名单 plan、所有 Minor ledger 和 program review package，并要求 Codex 做 whole-program final review。
 3. 重点检查跨阶段接口：
    - health capability 与 route 是否原子发布
    - runtime/attention 对 v0/v1 的处理
@@ -687,9 +701,9 @@ Phase 08 完成并合并 integration branch 后：
 - hosted workflow URLs and job conclusions（如已获授权执行）
 
 ## Reviews
-- task review status
-- plan-level final review status
-- whole-program final review status
+- task review status（含 codex-plugin-cc/Codex job ID 或前台结果引用）
+- plan-level final review status（Codex）
+- whole-program final review status（Codex）
 - remaining Minor findings
 
 ## Explicitly not verified
@@ -710,7 +724,7 @@ Phase 08 完成并合并 integration branch 后：
 现在执行以下动作，不要先复述整份 Prompt：
 
 1. 读取根指令、两份 spec，并精确读取白名单第一项 Phase 01 plan；不要扫描 plans 目录。
-2. 确认 Superpowers skills/scripts 可用。
+2. 确认 Superpowers skills/scripts 可用；运行 `/codex:setup`，确认 `codex-plugin-cc`、Codex CLI 与认证可用。
 3. 做一次 program/Phase 01 pre-flight conflict scan。
 4. 创建 integration worktree、Phase 01 worktree 和 durable ledger。
 5. 从 Phase 01 Task 1 开始 Subagent-Driven 循环。
