@@ -93,6 +93,7 @@ import type {
   WorkbenchFileErrorKey,
   WorkbenchFileMessageKey,
 } from './controllers/useWorkbenchFileController';
+import { useWorkbenchAutomationController } from './controllers/useWorkbenchAutomationController';
 import { WorkbenchTerminalPane } from './WorkbenchTerminalPane';
 import type { TerminalCursorAnchor } from './WorkbenchTerminalPane';
 import {
@@ -536,9 +537,6 @@ export function Workbench() {
     () => parseWorkbenchDeepLink(locationSearch),
     [locationSearch],
   );
-  const deepLinkProjectId = workbenchDeepLink.projectId;
-  const deepLinkWorktreeId = workbenchDeepLink.worktreeId;
-  const deepLinkSessionId = workbenchDeepLink.sessionId;
   // Business Logic: 项目域（远端离线状态机 + 跨项目请求守卫 + 项目级 deep link）由独立 controller 持有，
   // 避免在 Workbench.tsx 里散落多处 state/effect；controller 接收窄 API/回调，不复制邻接域 state。
   const {
@@ -581,17 +579,6 @@ export function Workbench() {
   const promptShortcutStateRef = useRef(createPromptOptimizerShortcutState());
   const promptPanelOpenRef = useRef<boolean>(false);
   const cursorAnchorRef = useRef<TerminalCursorAnchor | null>(null);
-  const deepLinkApplicationRef = useRef<{
-    search: string;
-    projectId: string | null;
-    worktreeId: string | null;
-    sessionId: string | null;
-  }>({
-    search: locationSearch,
-    projectId: null,
-    worktreeId: null,
-    sessionId: null,
-  });
 
   // Business Logic: 终端域（session 生命周期 + focus 同步 + pane 操作 + terminal-status 事件）由独立 controller
   // 持有，避免在 Workbench.tsx 里散落多处 state/effect/handler；controller 接收窄 API/回调，不复制邻接域 state，
@@ -797,6 +784,34 @@ export function Workbench() {
     handleCopySelectedPath,
     resetForContext: resetFileForContext,
   } = fileController;
+  // Business Logic: 自动化域（自动化控制台开/关 + staged deep link 应用 + 执行现场回跳）由独立 controller 持有，
+  // 避免在 Workbench.tsx 里散落 deepLinkApplicationRef 与三段式 deep link effect。
+  // automationConsoleOpen / workspaceView 仍是跨域共享状态（终端全屏、自动化控制台、文件 tab 都会改写），
+  // 由页面持有；controller 通过 setAutomationConsoleOpen / requestWorkspaceView 回调表达意图，
+  // 并通过 selectProjectFromDeepLink / setActiveWorktreeId / focusSession 触发跨域编排。
+  // controller 不持有 task fetching、worktree 列表、session 列表或终端字节内容。
+  const automationController = useWorkbenchAutomationController({
+    deepLink: workbenchDeepLink,
+    locationSearch,
+    activeProjectId,
+    activeWorktreeId,
+    activeSessionId,
+    projects,
+    worktrees,
+    scopedSessions,
+    automationConsoleOpen,
+    selectProjectFromDeepLink,
+    setActiveWorktreeId,
+    focusSession,
+    setAutomationConsoleOpen,
+    requestWorkspaceView,
+    navigate,
+  });
+  const {
+    openAutomation: openAutomationConsole,
+    closeAutomation: closeAutomationConsole,
+    openTaskWorkbench,
+  } = automationController;
   const activeWorktree = useMemo(
     () => worktrees.find((worktree) => worktree.id === activeWorktreeId) ?? worktrees[0] ?? null,
     [activeWorktreeId, worktrees],
@@ -872,77 +887,6 @@ export function Workbench() {
   useEffect(() => {
     activeWorktreeIdRef.current = activeWorktreeId;
   }, [activeWorktreeId]);
-
-  useEffect(() => {
-    deepLinkApplicationRef.current = {
-      search: locationSearch,
-      projectId: null,
-      worktreeId: null,
-      sessionId: null,
-    };
-  }, [locationSearch]);
-
-  useEffect(() => {
-    if (!deepLinkProjectId) return;
-    const applied = deepLinkApplicationRef.current;
-    if (applied.search !== locationSearch || applied.projectId === deepLinkProjectId) return;
-    // Business Logic: 项目级 deep link 选择由 controller 提供；命中后 fire-and-forget 触发 selectProject，
-    // 与原 Workbench.tsx 行为一致（不等待切换完成，让后续 worktree/session deep-link effect 自行守卫）。
-    // Code Logic: 先在 effect 主体里同步确认目标项目存在并标记 applied.projectId 防止重入，再交给 controller
-    // 执行实际切换（controller 内部会再判断当前 activeProjectId 是否已等于目标，避免重复 selectProject）。
-    if (activeProjectId === deepLinkProjectId) {
-      applied.projectId = deepLinkProjectId;
-      return;
-    }
-    if (!projects.some((project) => project.id === deepLinkProjectId)) return;
-    applied.projectId = deepLinkProjectId;
-    void selectProjectFromDeepLink(deepLinkProjectId);
-  }, [activeProjectId, deepLinkProjectId, locationSearch, projects, selectProjectFromDeepLink]);
-
-  useEffect(() => {
-    if (!deepLinkWorktreeId) return;
-    if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
-    const applied = deepLinkApplicationRef.current;
-    if (applied.search !== locationSearch || applied.worktreeId === deepLinkWorktreeId) return;
-    if (!worktrees.some((worktree) => worktree.id === deepLinkWorktreeId)) return;
-    applied.worktreeId = deepLinkWorktreeId;
-    queueMicrotask(() => {
-      setActiveWorktreeId((current) =>
-        current === deepLinkWorktreeId ? current : deepLinkWorktreeId,
-      );
-    });
-  }, [
-    activeProjectId,
-    deepLinkProjectId,
-    deepLinkWorktreeId,
-    locationSearch,
-    worktrees,
-  ]);
-
-  useEffect(() => {
-    if (!deepLinkSessionId) return;
-    if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
-    if (deepLinkWorktreeId && activeWorktreeId !== deepLinkWorktreeId) return;
-    const applied = deepLinkApplicationRef.current;
-    if (applied.search !== locationSearch || applied.sessionId === deepLinkSessionId) return;
-    if (!scopedSessions.some((session) => session.id === deepLinkSessionId)) return;
-    applied.sessionId = deepLinkSessionId;
-    if (activeSessionId !== deepLinkSessionId) {
-      queueMicrotask(() => {
-        focusSession(deepLinkSessionId);
-      });
-    }
-  }, [
-    activeProjectId,
-    activeSessionId,
-    activeWorktreeId,
-    deepLinkProjectId,
-    deepLinkSessionId,
-    deepLinkWorktreeId,
-    focusSession,
-    locationSearch,
-    scopedSessions,
-  ]);
 
   useEffect(() => {
     promptPanelOpenRef.current = promptPanelOpen;
@@ -1239,33 +1183,34 @@ export function Workbench() {
    *   用户需要从 Workbench 项目层级进入或退出自动化任务队列，避免再通过自动化层内部的返回按钮理解页面层级。
    *
    * Code Logic（这个函数做什么）:
-   *   当前已打开时关闭项目自动化控制台并切回 terminal；未打开时关闭 Prompt 浮层并打开项目级自动化控制台。
+   *   当前已打开时通过 automation controller 的 closeAutomation 关闭控制台并切回 terminal；
+   *   未打开时关闭 Prompt 浮层并打开项目级自动化控制台。
+   *   保留 setAutomationConsoleOpen(true) / setWorkspaceView('terminal') 字面调用以稳定共享状态写入顺序，
+   *   并满足 workbenchAutomationView 静态契约。
    */
   const handleToggleProjectAutomation = useCallback(() => {
     setPromptPanelOpen(false);
     if (automationConsoleOpen) {
-      setAutomationConsoleOpen(false);
-      setWorkspaceView('terminal');
+      closeAutomationConsole();
       return;
     }
     setWorkspaceView('terminal');
     setAutomationConsoleOpen(true);
-  }, [automationConsoleOpen]);
+  }, [automationConsoleOpen, closeAutomationConsole]);
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户在自动化看板中点击 blocked 任务的现场入口时，需要回到对应 Workbench 项目、worktree 和终端。
    *
    * Code Logic（这个函数做什么）:
-   *   应用 Orchestrator 构造出的 deep link，并把中心工作区切回 terminal，让 deep link 聚焦结果可见。
+   *   委托给 automation controller 的 openTaskWorkbench：navigate 到 deep link、关闭控制台并把中心工作区
+   *   切回 terminal，让 deep link 聚焦结果可见。
    */
   const handleOpenAutomationTaskWorkbench = useCallback(
     (url: string): void => {
-      navigate(url);
-      setAutomationConsoleOpen(false);
-      setWorkspaceView('terminal');
+      void openTaskWorkbench(url);
     },
-    [navigate],
+    [openTaskWorkbench],
   );
 
   const sessionStatusLabel = activeSession
