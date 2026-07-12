@@ -299,25 +299,33 @@ static TEST_WINDOWS_TASKKILL_SPAWN: std::sync::Mutex<
 /// Business Logic（为什么需要这个结构）:
 ///     wrapper（如 wsl/cmd）常先启动持管道的后代再自行退出；此时仅对死根 PID
 ///     `taskkill /T` 不可靠。Job Object + KILL_ON_JOB_CLOSE 把整棵树绑在句柄生命周期上。
+///     绑定必须在用户代码运行前完成：CREATE_SUSPENDED → AssignProcessToJobObject → ResumeThread，
+///     否则短命 wrapper 可在 Assign 前派生后代并逃逸。
 ///
 /// Code Logic（这个结构做什么）:
 ///     持有 CREATE 的 job HANDLE（OwnedHandle）；Drop/Close 触发 KILL_ON_JOB_CLOSE；
-///     `terminate` 显式 TerminateJobObject 供超时路径使用。
+///     `terminate` 显式 TerminateJobObject 供超时路径使用；
+///     `create` + `assign_child` 与 `resume_suspended_process` 组成原子进 job 路径。
 #[cfg(windows)]
 #[derive(Debug)]
 pub struct WindowsProbeJob {
     handle: std::os::windows::io::OwnedHandle,
 }
 
+/// Windows CreateProcess 的 CREATE_SUSPENDED 标志。
+/// Business Logic: 用户代码不得在进入 Job 前运行，否则后代可逃逸。
+/// Code Logic: 0x4，与 CommandExt::creation_flags 组合使用。
+#[cfg(windows)]
+const CREATE_SUSPENDED: u32 = 0x0000_0004;
+
 #[cfg(windows)]
 impl WindowsProbeJob {
     /// Business Logic（为什么需要这个函数）:
-    ///     探测 spawn 后必须立刻把子进程放入 job，否则根退出后无法回收后代。
+    ///     必须先建好带 KILL_ON_JOB_CLOSE 的 Job，再挂起 spawn 的根进程，才能在 Resume 前完成绑定。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     CreateJobObjectW → 设置 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE →
-    ///     AssignProcessToJobObject(child process handle)；任一步失败返回 Err。
-    pub fn create_for_child(child: &Child) -> Result<Self, std::io::Error> {
+    ///     CreateJobObjectW → 设置 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE；不绑定进程。
+    pub fn create() -> Result<Self, std::io::Error> {
         use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 
         type BOOL = i32;
@@ -372,7 +380,6 @@ impl WindowsProbeJob {
                 lp_job_object_information: *mut core::ffi::c_void,
                 cb_job_object_information_length: DWORD,
             ) -> BOOL;
-            fn AssignProcessToJobObject(h_job: HANDLE, h_process: HANDLE) -> BOOL;
         }
 
         let raw = unsafe { CreateJobObjectW(core::ptr::null_mut(), core::ptr::null()) };
@@ -419,13 +426,33 @@ impl WindowsProbeJob {
             return Err(std::io::Error::last_os_error());
         }
 
-        let process = child.as_raw_handle() as HANDLE;
-        let ok = unsafe { AssignProcessToJobObject(handle.as_raw_handle() as HANDLE, process) };
-        if ok == 0 {
-            return Err(std::io::Error::last_os_error());
+        Ok(Self { handle })
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     挂起进程必须在 Resume 前进入 Job，后续派生的后代才会继承 Job 成员身份。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     AssignProcessToJobObject(self, child process handle)；失败返回 last_os_error。
+    pub fn assign_child(&self, child: &Child) -> Result<(), std::io::Error> {
+        use std::os::windows::io::AsRawHandle;
+
+        type BOOL = i32;
+        type HANDLE = *mut core::ffi::c_void;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn AssignProcessToJobObject(h_job: HANDLE, h_process: HANDLE) -> BOOL;
         }
 
-        Ok(Self { handle })
+        let process = child.as_raw_handle() as HANDLE;
+        let ok =
+            unsafe { AssignProcessToJobObject(self.handle.as_raw_handle() as HANDLE, process) };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -450,6 +477,126 @@ impl WindowsProbeJob {
             Err(std::io::Error::last_os_error())
         } else {
             Ok(())
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     CREATE_SUSPENDED 后 std::process::Command 会关闭主线程句柄；必须再找到主线程并 Resume，
+///     否则探测命令永远挂起。
+///
+/// Code Logic（这个函数做什么）:
+///     CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD) 枚举线程，找到 owner==pid 的首个线程，
+///     OpenThread(THREAD_SUSPEND_RESUME) → ResumeThread → CloseHandle；找不到线程返回 NotFound。
+#[cfg(windows)]
+fn resume_suspended_process(pid: u32) -> Result<(), std::io::Error> {
+    type BOOL = i32;
+    type DWORD = u32;
+    type HANDLE = *mut core::ffi::c_void;
+
+    const TH32CS_SNAPTHREAD: DWORD = 0x0000_0004;
+    const THREAD_SUSPEND_RESUME: DWORD = 0x0002;
+    const INVALID_HANDLE_VALUE: HANDLE = !0usize as HANDLE;
+
+    #[repr(C)]
+    struct ThreadEntry32 {
+        dw_size: DWORD,
+        cnt_usage: DWORD,
+        th32_thread_id: DWORD,
+        th32_owner_process_id: DWORD,
+        tp_base_pri: i32,
+        tp_delta_pri: i32,
+        dw_flags: DWORD,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dw_flags: DWORD, th32_process_id: DWORD) -> HANDLE;
+        fn Thread32First(h_snapshot: HANDLE, lpte: *mut ThreadEntry32) -> BOOL;
+        fn Thread32Next(h_snapshot: HANDLE, lpte: *mut ThreadEntry32) -> BOOL;
+        fn OpenThread(
+            dw_desired_access: DWORD,
+            b_inherit_handle: BOOL,
+            dw_thread_id: DWORD,
+        ) -> HANDLE;
+        fn ResumeThread(h_thread: HANDLE) -> DWORD;
+        fn CloseHandle(h_object: HANDLE) -> BOOL;
+    }
+
+    // 线程枚举可能短暂滞后于 CreateProcess；短重试避免误报 NotFound。
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut last_err = std::io::Error::new(
+        ErrorKind::NotFound,
+        format!("suspended process {pid} has no thread to resume"),
+    );
+    loop {
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+            last_err = std::io::Error::last_os_error();
+        } else {
+            let mut entry = ThreadEntry32 {
+                dw_size: std::mem::size_of::<ThreadEntry32>() as DWORD,
+                cnt_usage: 0,
+                th32_thread_id: 0,
+                th32_owner_process_id: 0,
+                tp_base_pri: 0,
+                tp_delta_pri: 0,
+                dw_flags: 0,
+            };
+            let mut thread_id: Option<DWORD> = None;
+            let mut has = unsafe { Thread32First(snapshot, &mut entry) };
+            while has != 0 {
+                if entry.th32_owner_process_id == pid {
+                    thread_id = Some(entry.th32_thread_id);
+                    break;
+                }
+                has = unsafe { Thread32Next(snapshot, &mut entry) };
+            }
+            unsafe {
+                let _ = CloseHandle(snapshot);
+            }
+
+            if let Some(tid) = thread_id {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, tid) };
+                if thread.is_null() {
+                    last_err = std::io::Error::last_os_error();
+                } else {
+                    let prev = unsafe { ResumeThread(thread) };
+                    unsafe {
+                        let _ = CloseHandle(thread);
+                    }
+                    // ResumeThread 失败返回 u32::MAX。
+                    if prev == DWORD::MAX {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err(last_err);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     挂起 spawn 后若 Assign/Resume 失败，必须立刻杀掉根进程，避免留下永不 resume 的僵尸。
+///
+/// Code Logic（这个函数做什么）:
+///     child.kill() + 有界 try_wait 轮询；忽略已退出错误。
+#[cfg(windows)]
+fn kill_suspended_probe_child(child: &mut Child) {
+    let _ = child.kill();
+    let deadline = Instant::now() + PROBE_TERMINATE_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => break,
         }
     }
 }
@@ -1131,26 +1278,61 @@ fn run_std_command_with_timeout_guarded(
             });
         }
     }
+    // Windows：CREATE_SUSPENDED → AssignProcessToJobObject → ResumeThread，
+    // 保证用户代码运行前根进程已在 Job 内，短命 wrapper 的后代不会逃逸。
+    #[cfg(windows)]
+    let prepared_job = WindowsProbeJob::create().ok();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // 仅当 Job 创建成功时才挂起；否则走普通 spawn + taskkill fallback。
+        if prepared_job.is_some() {
+            command.creation_flags(CREATE_SUSPENDED);
+        }
+    }
     let mut child = command.spawn().map_err(|_| ProbeCommandError::SpawnOrIo)?;
     let deadline = Instant::now() + effective;
     let process_group_id = child.id();
-    // Windows：spawn 后立刻放入 Job Object；根退出后仍可 TerminateJobObject 杀后代。
     #[cfg(windows)]
-    let probe_job: Option<Arc<WindowsProbeJob>> = match WindowsProbeJob::create_for_child(&child) {
-        Ok(job) => {
-            let job = Arc::new(job);
-            if let Some(guard) = guard {
-                guard.register_job(process_group_id, Arc::clone(&job));
+    let probe_job: Option<Arc<WindowsProbeJob>> = {
+        match prepared_job {
+            Some(job) => {
+                // 挂起态绑定 Job；Assign/Resume 失败必须杀挂起根并返回错误，
+                // 不能带着永不 resume 的僵尸继续探测。
+                if let Err(err) = job.assign_child(&child) {
+                    tracing::warn!(
+                        pid = process_group_id,
+                        error = %err,
+                        "probe 未能 AssignProcessToJobObject"
+                    );
+                    kill_suspended_probe_child(&mut child);
+                    return Err(ProbeCommandError::SpawnOrIo);
+                }
+                if let Err(err) = resume_suspended_process(process_group_id) {
+                    tracing::warn!(
+                        pid = process_group_id,
+                        error = %err,
+                        "probe ResumeThread 失败，终止挂起根进程"
+                    );
+                    // Assign 已成功：用 job.terminate 清树，再 reap 根。
+                    let _ = job.terminate();
+                    kill_suspended_probe_child(&mut child);
+                    return Err(ProbeCommandError::SpawnOrIo);
+                }
+                let job = Arc::new(job);
+                if let Some(guard) = guard {
+                    guard.register_job(process_group_id, Arc::clone(&job));
+                }
+                Some(job)
             }
-            Some(job)
-        }
-        Err(err) => {
-            tracing::warn!(
-                pid = process_group_id,
-                error = %err,
-                "probe 未能创建/绑定 Job Object，超时将回退 taskkill /T"
-            );
-            None
+            None => {
+                // Job 创建失败：上面未设 CREATE_SUSPENDED，子进程已在跑；回退 taskkill。
+                tracing::warn!(
+                    pid = process_group_id,
+                    "probe 未能创建 Job Object，超时将回退 taskkill /T"
+                );
+                None
+            }
         }
     };
     if let Some(guard) = guard {
@@ -2980,11 +3162,12 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     根进程先退出后 taskkill /T 不可靠；生产路径必须在 Windows spawn 时绑定 Job Object。
+    ///     根进程先退出后 taskkill /T 不可靠；生产路径必须在用户代码运行前绑定 Job Object。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     审查生产源码含 CreateJobObjectW / KILL_ON_JOB_CLOSE / AssignProcessToJobObject /
-    ///     TerminateJobObject，且 terminate_probe_child / cancel_and_reap 优先使用 job。
+    ///     审查生产源码含 CREATE_SUSPENDED / CreateJobObjectW / KILL_ON_JOB_CLOSE /
+    ///     AssignProcessToJobObject / ResumeThread / TerminateJobObject，且
+    ///     terminate_probe_child / cancel_and_reap 优先使用 job。
     ///     真实“父退子存”杀树验证需 windows-latest runner；非 Windows 以本源码契约测试代替。
     #[test]
     fn windows_probe_job_object_source_contract() {
@@ -3004,8 +3187,21 @@ mod tests {
             "Job 必须启用 KILL_ON_JOB_CLOSE"
         );
         assert!(
+            production.contains("CREATE_SUSPENDED") && production.contains("creation_flags"),
+            "必须 CREATE_SUSPENDED 挂起 spawn，用户代码运行前再 Assign"
+        );
+        assert!(
             production.contains("AssignProcessToJobObject"),
-            "spawn 后必须 AssignProcessToJobObject"
+            "必须 AssignProcessToJobObject"
+        );
+        assert!(
+            production.contains("ResumeThread") || production.contains("resume_suspended_process"),
+            "Assign 后必须 ResumeThread 再跑用户代码"
+        );
+        // 禁止旧的“先 spawn 再 create_for_child”竞态路径出现在生产代码。
+        assert!(
+            !production.contains("create_for_child"),
+            "禁止 spawn 后 create_for_child（Assign 竞态）"
         );
         assert!(
             production.contains("TerminateJobObject"),
@@ -3045,41 +3241,128 @@ mod tests {
     ///     Windows 上父进程派生持管道后代后立即退出时，deadline 后必须能通过 Job 终止后代。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     仅 Windows：cmd 启动后台 ping 后 exit；create_for_child + drain 超时；
-    ///     断言有界返回且 TerminateJobObject 成功。非 Windows 编译期跳过
-    ///     （理由：Job Object API 仅 Windows；契约由 source_contract 在全平台锁住）。
+    ///     仅 Windows：CREATE_SUSPENDED 起 powershell wrapper → Assign → Resume；
+    ///     wrapper 写 ready 信号文件（含真实后代 PID）后立刻退出，后代继续 sleep；
+    ///     断言 ready 时后代存活，TerminateJobObject 后后代退出。使用 NUL 而非 /dev/null。
     #[cfg(windows)]
     #[test]
     fn windows_job_kills_descendants_after_root_exits() {
-        let mut child = StdCommand::new("cmd")
-            .args(["/C", "start /B ping -n 30 127.0.0.1 >/dev/null & exit 0"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn cmd wrapper");
-        let job = WindowsProbeJob::create_for_child(&child).expect("create job for wrapper");
+        use std::os::windows::process::CommandExt;
+        use std::path::PathBuf;
 
-        let wait_deadline = Instant::now() + Duration::from_secs(3);
+        let ready_path: PathBuf =
+            std::env::temp_dir().join(format!("cc-partner-job-ready-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&ready_path);
+        let ready_str = ready_path.to_string_lossy().replace('\'', "''");
+
+        // wrapper：启动长 sleep 后代，把后代 PID 写入 ready 文件，然后立刻 exit。
+        // 必须在 Assign 之后 Resume 才运行，否则后代可能逃逸 Job。
+        let script = format!(
+            "$p = Start-Process -FilePath 'ping.exe' -ArgumentList '-n','60','127.0.0.1' -WindowStyle Hidden -PassThru; Set-Content -LiteralPath '{ready}' -Value $p.Id -Encoding ascii; exit 0",
+            ready = ready_str
+        );
+
+        let job = WindowsProbeJob::create().expect("create empty job");
+        let mut command = StdCommand::new("powershell");
+        command
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_SUSPENDED);
+        let mut child = command.spawn().expect("spawn suspended powershell wrapper");
+        job.assign_child(&child)
+            .expect("assign suspended root to job");
+        resume_suspended_process(child.id()).expect("resume after assign");
+
+        // 等待 ready 信号并解析真实后代 PID。
+        let wait_ready = Instant::now() + Duration::from_secs(5);
+        let descendant_pid: u32 = loop {
+            if let Ok(content) = std::fs::read_to_string(&ready_path) {
+                let trimmed = content.trim();
+                if let Ok(pid) = trimmed.parse::<u32>() {
+                    break pid;
+                }
+            }
+            assert!(
+                Instant::now() < wait_ready,
+                "wrapper 未在时限内写出 ready 信号/后代 PID"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        // 根应很快退出；后代此时仍应存活。
+        let wait_root = Instant::now() + Duration::from_secs(5);
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => break,
                 Ok(None) => {
-                    assert!(Instant::now() < wait_deadline, "cmd 根进程未及时退出");
+                    assert!(Instant::now() < wait_root, "powershell 根进程未及时退出");
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(err) => panic!("try_wait cmd failed: {err}"),
+                Err(err) => panic!("try_wait wrapper failed: {err}"),
             }
         }
+        assert!(
+            windows_pid_is_alive(descendant_pid),
+            "ready 后、Terminate 前后代 PID {descendant_pid} 应仍存活"
+        );
 
         let started = Instant::now();
-        let past = Instant::now() - Duration::from_millis(1);
-        let (_stdout, _stderr) = drain_probe_pipes(&mut child, past, Some(&job));
+        job.terminate().expect("TerminateJobObject after root exit");
+        // 轮询确认后代被 Job 杀掉。
+        let kill_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if !windows_pid_is_alive(descendant_pid) {
+                break;
+            }
+            assert!(
+                Instant::now() < kill_deadline,
+                "TerminateJobObject 后后代 PID {descendant_pid} 仍存活"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_secs(2),
-            "job 杀树 drain 超时路径过长: {elapsed:?}"
+            "job 杀树过长: {elapsed:?}"
         );
-        job.terminate().expect("TerminateJobObject after root exit");
+        let _ = std::fs::remove_file(&ready_path);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Windows 杀树回归测试需要观察真实后代 PID 是否仍存活。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) 成功即视为存活；失败视为已退出。
+    #[cfg(windows)]
+    fn windows_pid_is_alive(pid: u32) -> bool {
+        type BOOL = i32;
+        type DWORD = u32;
+        type HANDLE = *mut core::ffi::c_void;
+        const PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn OpenProcess(
+                dw_desired_access: DWORD,
+                b_inherit_handle: BOOL,
+                dw_process_id: DWORD,
+            ) -> HANDLE;
+            fn CloseHandle(h_object: HANDLE) -> BOOL;
+            fn GetExitCodeProcess(h_process: HANDLE, lp_exit_code: *mut DWORD) -> BOOL;
+        }
+
+        const STILL_ACTIVE: DWORD = 259;
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let mut code: DWORD = 0;
+        let ok = unsafe { GetExitCodeProcess(handle, &mut code) };
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        ok != 0 && code == STILL_ACTIVE
     }
 
     /// Business Logic（为什么需要这个测试）:
