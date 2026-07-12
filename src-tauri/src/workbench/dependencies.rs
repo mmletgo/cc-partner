@@ -10,8 +10,8 @@ use crate::error::AppError;
 use chrono::Utc;
 use portable_pty::CommandBuilder;
 use serde::Serialize;
-use std::io::Read;
-use std::process::{Child, Command as StdCommand, Output, Stdio};
+use std::io::{ErrorKind, Read};
+use std::process::{Child, ChildStderr, ChildStdout, Command as StdCommand, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::async_runtime::JoinHandle;
@@ -27,7 +27,7 @@ const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// kill/wait 与管道排空的额外宽限（在共享截止时间之后仍允许的小额回收窗口）。
 /// Business Logic: 截止后仍需 best-effort 回收僵尸，但不得无限阻塞 AppState 初始化。
 const PROBE_TERMINATE_GRACE: Duration = Duration::from_millis(250);
-/// 管道 drain 线程 join 的单管道宽限。
+/// 管道非阻塞 drain 的截止宽限（在共享 deadline 之后仍允许的小额读取窗口）。
 const PROBE_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(150);
 
 /// Business Logic（为什么需要这个函数）:
@@ -554,9 +554,10 @@ pub fn probe_workbench_dependency() -> WorkbenchDependencyStatusDto {
             output: vec!["依赖探测超时，已终止外部进程".to_string()],
             status_changed_at: String::new(),
         },
-        TmuxProbeOutcome::Missing => {
-            missing_or_unsupported_status(actual_install_command_preview().unwrap_or_default(), None)
-        }
+        TmuxProbeOutcome::Missing => missing_or_unsupported_status(
+            actual_install_command_preview().unwrap_or_default(),
+            None,
+        ),
     }
 }
 
@@ -664,8 +665,8 @@ enum ProbeCommandError {
 ///
 /// Code Logic（这个函数做什么）:
 ///     以共享 deadline 覆盖整个探测生命周期：Unix 上用独立进程组 spawn，
-///     超时后 kill/killpg + 有界 wait/reap，stdout/stderr 在后台线程 drain 且带 join 超时；
-///     截止后绝不阻塞超过 deadline + PROBE_TERMINATE_GRACE。
+///     超时后 kill/killpg + 有界 wait/reap；stdout/stderr 在当前线程非阻塞 poll/read，
+///     超时后关闭读端，绝不 spawn 可 forget 的 reader 线程。
 fn run_std_command_with_timeout(
     mut command: StdCommand,
     timeout: Duration,
@@ -708,7 +709,7 @@ fn run_std_command_with_timeout(
         }
     };
 
-    // 正常退出：在共享截止时间（+ 小额 grace）内有界 drain 管道，避免后代持有 pipe 时无界 read_to_end。
+    // 正常退出：在共享截止时间（+ 小额 grace）内有界非阻塞 drain，避免后代持 pipe 时无界阻塞。
     let (stdout, stderr) = drain_probe_pipes(&mut child, deadline);
     Ok(Output {
         status,
@@ -721,14 +722,27 @@ fn run_std_command_with_timeout(
 ///     超时或 IO 失败后必须 best-effort 终止进程树并回收，但 kill 失败时不能无条件 child.wait() 永久挂起。
 ///
 /// Code Logic（这个函数做什么）:
-///     Unix 先 killpg(SIGKILL) 再 child.kill()；Windows 仅 child.kill()；
-///     随后在 deadline+PROBE_TERMINATE_GRACE 内轮询 try_wait，超时则丢弃 wait（接受潜在僵尸而非阻塞启动）。
+///     Unix 先 killpg(SIGKILL) 再 child.kill()，killpg 失败时记 warning（含 ESRCH 外的真实错误）；
+///     Windows 仅 child.kill()；随后在 deadline+PROBE_TERMINATE_GRACE 内轮询 try_wait，
+///     超时则丢弃 wait（接受潜在僵尸而非阻塞启动），并 drop 管道读端。
 fn terminate_probe_child(child: &mut Child, process_group_id: u32, deadline: Instant) {
     #[cfg(unix)]
     {
-        let _ = kill_probe_process_group(process_group_id);
+        if let Err(err) = kill_probe_process_group(process_group_id) {
+            // ESRCH = 进程组已无成员，属预期；其它错误必须可见，便于排查 setsid 逃逸等场景。
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                tracing::warn!(
+                    process_group_id,
+                    error = %err,
+                    "probe killpg 失败，后续仅依赖 child.kill 与关闭管道读端"
+                );
+            }
+        }
     }
-    let _ = child.kill();
+    if let Err(err) = child.kill() {
+        // 子进程已退出时 kill 失败属常见路径，不必抬高日志级别。
+        tracing::debug!(error = %err, "probe child.kill 未生效（可能已退出）");
+    }
 
     let reap_deadline = deadline + PROBE_TERMINATE_GRACE;
     loop {
@@ -746,7 +760,7 @@ fn terminate_probe_child(child: &mut Child, process_group_id: u32, deadline: Ins
         }
     }
 
-    // 丢弃管道，避免后续任何无界读。
+    // 显式关闭读端：即使写端仍被逃逸后代持有，也不再保留 reader 资源。
     let _ = child.stdout.take();
     let _ = child.stderr.take();
 }
@@ -774,81 +788,300 @@ fn kill_probe_process_group(process_group_id: u32) -> Result<(), std::io::Error>
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     正常退出后仍可能因孙进程持有 pipe 导致 read_to_end 永不返回，必须有界 drain。
+///     正常退出后仍可能因孙进程持有 pipe 导致阻塞读永不返回；旧实现用后台线程 + mem::forget
+///     会在 setsid/killpg 失败时永久累积 reader 线程。
 ///
 /// Code Logic（这个函数做什么）:
-///     把 stdout/stderr take 到独立线程 read_to_end；主线程在 deadline+grace 内 join；
-///     任一 reader 超时则用已保存 pgid kill 进程组（Unix）/ 子进程并有界 reap，
-///     再给 reader 短宽限 rejoin；仍未结束才 detach，避免永久阻塞与后代泄漏。
+///     在当前线程把 stdout/stderr 设为 nonblocking，poll/select 到 deadline 为止增量读取；
+///     超时则 killpg+kill child 并 drop 读端，绝不 spawn/detach 线程。
 fn drain_probe_pipes(child: &mut Child, deadline: Instant) -> (Vec<u8>, Vec<u8>) {
-    // 在 take 管道前保存 pgid：超时后仍可 killpg 终止持 pipe 的后代。
     let process_group_id = child.id();
-    let stdout_handle = child.stdout.take().map(|mut out| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = out.read_to_end(&mut buf);
-            buf
-        })
-    });
-    let stderr_handle = child.stderr.take().map(|mut err| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = err.read_to_end(&mut buf);
-            buf
-        })
-    });
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let drain_deadline = deadline + PROBE_PIPE_DRAIN_GRACE;
 
-    let join_deadline = deadline + PROBE_PIPE_DRAIN_GRACE;
-    let (mut stdout, pending_stdout) = join_pipe_thread(stdout_handle, join_deadline);
-    let (mut stderr, pending_stderr) = join_pipe_thread(stderr_handle, join_deadline);
+    let (stdout_buf, stderr_buf, timed_out) =
+        drain_child_pipes_nonblocking(stdout, stderr, drain_deadline);
 
-    if pending_stdout.is_some() || pending_stderr.is_some() {
-        // 后代仍持管道：终止进程组以关闭写端，让 reader 的 read_to_end 返回。
+    if timed_out {
+        // 写端可能仍被后代持有：终止进程组/子进程，读端已在本函数作用域 drop。
         terminate_probe_child(child, process_group_id, Instant::now());
-        let rejoin_deadline = Instant::now() + PROBE_PIPE_DRAIN_GRACE;
-        if let Some(handle) = pending_stdout {
-            let (buf, still_pending) = join_pipe_thread(Some(handle), rejoin_deadline);
-            stdout = buf;
-            // 仍挂起则 detach（kill 后极少见；接受线程泄漏优于阻塞启动）。
-            if let Some(stuck) = still_pending {
-                std::mem::forget(stuck);
-            }
-        }
-        if let Some(handle) = pending_stderr {
-            let (buf, still_pending) = join_pipe_thread(Some(handle), rejoin_deadline);
-            stderr = buf;
-            if let Some(stuck) = still_pending {
-                std::mem::forget(stuck);
-            }
-        }
     }
 
-    (stdout, stderr)
+    (stdout_buf, stderr_buf)
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     drain 线程 join 必须可超时，否则与无界 read_to_end 等价。
+///     把 stdout/stderr 有界排空抽成纯 IO 逻辑，便于单测「deadline 内读完 / 超时关闭读端」。
 ///
 /// Code Logic（这个函数做什么）:
-///     在 join_deadline 前轮询 is_finished + join；完成返回 (buf, None)；
-///     超时返回 (空, Some(handle)) 供调用方 killpg 后再 rejoin/detach。
-fn join_pipe_thread(
-    handle: Option<std::thread::JoinHandle<Vec<u8>>>,
-    join_deadline: Instant,
-) -> (Vec<u8>, Option<std::thread::JoinHandle<Vec<u8>>>) {
-    let Some(handle) = handle else {
-        return (Vec::new(), None);
-    };
-    loop {
-        if handle.is_finished() {
-            return (handle.join().unwrap_or_default(), None);
-        }
-        if Instant::now() >= join_deadline {
-            return (Vec::new(), Some(handle));
-        }
-        let remaining = join_deadline.saturating_duration_since(Instant::now());
-        std::thread::sleep(remaining.min(PROBE_POLL_INTERVAL));
+///     Unix 走 nonblocking + poll；其它平台 best-effort 非阻塞轮询读；返回 (stdout, stderr, timed_out)。
+fn drain_child_pipes_nonblocking(
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    deadline: Instant,
+) -> (Vec<u8>, Vec<u8>, bool) {
+    #[cfg(unix)]
+    {
+        drain_child_pipes_nonblocking_unix(stdout, stderr, deadline)
     }
+    #[cfg(not(unix))]
+    {
+        drain_child_pipes_nonblocking_fallback(stdout, stderr, deadline)
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Unix 探测路径必须在 setsid 逃逸/killpg 失败时仍能有界返回并关闭读端，
+///     不能依赖可遗忘的阻塞 reader 线程。
+///
+/// Code Logic（这个函数做什么）:
+///     fcntl O_NONBLOCK + poll(2) 等待可读；EAGAIN 继续等到 deadline；EOF/错误结束该 fd；
+///     超时返回已读缓冲并 drop 管道（关闭读端）。
+#[cfg(unix)]
+fn drain_child_pipes_nonblocking_unix(
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    deadline: Instant,
+) -> (Vec<u8>, Vec<u8>, bool) {
+    use std::os::fd::{AsRawFd, RawFd};
+
+    enum PipeKind {
+        Stdout,
+        Stderr,
+    }
+
+    struct PipeSide {
+        kind: PipeKind,
+        reader: Box<dyn Read>,
+        fd: RawFd,
+        buf: Vec<u8>,
+        done: bool,
+    }
+
+    /// Business Logic: 探测管道必须非阻塞，否则 poll 返回后仍可能在 read 上挂死。
+    /// Code Logic: fcntl GETFL/SETFL 叠加 O_NONBLOCK；失败时仍尝试读，最坏靠 deadline 退出。
+    fn set_nonblocking(fd: RawFd) {
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags == -1 {
+                return;
+            }
+            let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+
+    /// Business Logic: 从单条管道尽量排空当前可读字节，不跨越 deadline。
+    /// Code Logic: 循环 nonblocking read；0=EOF；WouldBlock/Interrupted 停止本轮；其它错误标记 done。
+    fn pump_side(side: &mut PipeSide) {
+        if side.done {
+            return;
+        }
+        let mut chunk = [0u8; 4096];
+        loop {
+            match side.reader.read(&mut chunk) {
+                Ok(0) => {
+                    side.done = true;
+                    break;
+                }
+                Ok(n) => side.buf.extend_from_slice(&chunk[..n]),
+                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    side.done = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut sides: Vec<PipeSide> = Vec::with_capacity(2);
+    if let Some(out) = stdout {
+        let fd = out.as_raw_fd();
+        set_nonblocking(fd);
+        sides.push(PipeSide {
+            kind: PipeKind::Stdout,
+            reader: Box::new(out),
+            fd,
+            buf: Vec::new(),
+            done: false,
+        });
+    }
+    if let Some(err) = stderr {
+        let fd = err.as_raw_fd();
+        set_nonblocking(fd);
+        sides.push(PipeSide {
+            kind: PipeKind::Stderr,
+            reader: Box::new(err),
+            fd,
+            buf: Vec::new(),
+            done: false,
+        });
+    }
+
+    // 先排空已有缓冲，避免 poll 前丢数据。
+    for side in &mut sides {
+        pump_side(side);
+    }
+
+    let mut timed_out = false;
+    while sides.iter().any(|s| !s.done) {
+        let now = Instant::now();
+        if now >= deadline {
+            timed_out = true;
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+
+        let mut pollfds: Vec<libc::pollfd> = sides
+            .iter()
+            .filter(|s| !s.done)
+            .map(|s| libc::pollfd {
+                fd: s.fd,
+                events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                revents: 0,
+            })
+            .collect();
+
+        if pollfds.is_empty() {
+            break;
+        }
+
+        let rc = unsafe {
+            libc::poll(
+                pollfds.as_mut_ptr(),
+                pollfds.len() as libc::nfds_t,
+                timeout_ms,
+            )
+        };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            // poll 失败时不再阻塞；关闭读端并返回已读内容。
+            timed_out = true;
+            break;
+        }
+        if rc == 0 {
+            timed_out = true;
+            break;
+        }
+
+        // 按仍活跃 side 顺序对齐 revents。
+        let mut poll_idx = 0usize;
+        for side in &mut sides {
+            if side.done {
+                continue;
+            }
+            let revents = pollfds[poll_idx].revents;
+            poll_idx += 1;
+            if revents == 0 {
+                continue;
+            }
+            pump_side(side);
+        }
+    }
+
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    for side in sides {
+        match side.kind {
+            PipeKind::Stdout => stdout_buf = side.buf,
+            PipeKind::Stderr => stderr_buf = side.buf,
+        }
+    }
+
+    // drop sides → 关闭读端；即使写端仍开着也不会留下 reader 线程。
+    (stdout_buf, stderr_buf, timed_out)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     非 Unix 平台同样不能用可 forget 的阻塞 reader 线程排空探测管道。
+///
+/// Code Logic（这个函数做什么）:
+///     best-effort 短读轮询到 deadline；超时 drop 读端返回已读缓冲。Windows 管道无统一
+///     非阻塞 API，这里用小缓冲 read + 时间盒；极端阻塞场景仍受 probe 总超时约束。
+#[cfg(not(unix))]
+fn drain_child_pipes_nonblocking_fallback(
+    mut stdout: Option<ChildStdout>,
+    mut stderr: Option<ChildStderr>,
+    deadline: Instant,
+) -> (Vec<u8>, Vec<u8>, bool) {
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    let mut stdout_done = stdout.is_none();
+    let mut stderr_done = stderr.is_none();
+    let mut timed_out = false;
+    let mut chunk = [0u8; 4096];
+
+    while !(stdout_done && stderr_done) {
+        if Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
+
+        let mut progress = false;
+        if !stdout_done {
+            if let Some(out) = stdout.as_mut() {
+                match out.read(&mut chunk) {
+                    Ok(0) => {
+                        stdout_done = true;
+                        progress = true;
+                    }
+                    Ok(n) => {
+                        stdout_buf.extend_from_slice(&chunk[..n]);
+                        progress = true;
+                    }
+                    Err(err) if err.kind() == ErrorKind::Interrupted => progress = true,
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+                    Err(_) => {
+                        stdout_done = true;
+                        progress = true;
+                    }
+                }
+            } else {
+                stdout_done = true;
+            }
+        }
+        if !stderr_done {
+            if let Some(err_pipe) = stderr.as_mut() {
+                match err_pipe.read(&mut chunk) {
+                    Ok(0) => {
+                        stderr_done = true;
+                        progress = true;
+                    }
+                    Ok(n) => {
+                        stderr_buf.extend_from_slice(&chunk[..n]);
+                        progress = true;
+                    }
+                    Err(err) if err.kind() == ErrorKind::Interrupted => progress = true,
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+                    Err(_) => {
+                        stderr_done = true;
+                        progress = true;
+                    }
+                }
+            } else {
+                stderr_done = true;
+            }
+        }
+
+        if !progress {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                timed_out = true;
+                break;
+            }
+            std::thread::sleep(remaining.min(PROBE_POLL_INTERVAL));
+        }
+    }
+
+    // 显式 drop 读端：超时后不再保留任何 reader。
+    drop(stdout);
+    drop(stderr);
+    (stdout_buf, stderr_buf, timed_out)
 }
 
 struct TmuxCandidate {
@@ -1323,7 +1556,7 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     正常退出后的管道 drain 必须有界；即便 deadline 已过，也不能无界 read_to_end。
+    ///     正常退出后的管道 drain 必须有界；即便 deadline 已过，也不能无界阻塞读。
     ///
     /// Code Logic（这个测试做什么）:
     ///     跑 `printf hi`，以已过去的 deadline 调用 drain_probe_pipes，断言快速返回（缓冲可空）。
@@ -1345,12 +1578,12 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "过期 deadline 的 drain 耗时过长: {elapsed:?}"
         );
-        // 结果可空（超时 detach）或含 "hi"；关键是不阻塞。
+        // 结果可空（超时关闭读端）或含 "hi"；关键是不阻塞。
         let _ = (stdout, stderr);
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     成功路径在截止时间内应读到完整 stdout，验证 drain 不只是「永远返回空」。
+    ///     成功路径在截止时间内应读到完整 stdout，验证非阻塞 drain 不只是「永远返回空」。
     ///
     /// Code Logic（这个测试做什么）:
     ///     跑 `printf hello` 并在充足 deadline 下 drain，断言 stdout 含 hello。
@@ -1370,7 +1603,7 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     父进程先退出但孙进程仍持 stdout 时，旧实现只 detach reader，后代与线程永久泄漏。
+    ///     父进程先退出但同进程组孙进程仍持 stdout 时，必须有界返回并 killpg 清理后代。
     ///
     /// Code Logic（这个测试做什么）:
     ///     Unix：独立进程组 spawn `sh -c 'sleep 60 &'`，等 shell 退出后以过期 deadline drain；
@@ -1403,10 +1636,7 @@ mod tests {
             match child.try_wait() {
                 Ok(Some(_)) => break,
                 Ok(None) => {
-                    assert!(
-                        Instant::now() < wait_deadline,
-                        "shell 未在预期时间内退出"
-                    );
+                    assert!(Instant::now() < wait_deadline, "shell 未在预期时间内退出");
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(err) => panic!("try_wait shell failed: {err}"),
@@ -1426,9 +1656,126 @@ mod tests {
         // 进程组应已被 SIGKILL；kill(-pgid, 0) 失败表示无存活成员。
         let pgid_i: libc::pid_t = pgid.try_into().expect("pgid fits pid_t");
         let still_alive = unsafe { libc::kill(-pgid_i, 0) } == 0;
+        assert!(!still_alive, "drain 超时后进程组仍有存活后代 (pgid={pgid})");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     后代 setsid 逃离原进程组后 killpg 无效；旧实现会 mem::forget 阻塞 reader，
+    ///     每次依赖重检都累积线程。新实现必须有界返回并关闭读端，无 reader 线程爆炸。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 python 子进程 setsid 后 sleep 并继承 stdout；父 shell 退出后反复 drain；
+    ///     断言每次 probe 在 deadline 内返回，且过程不依赖 mem::forget/detach 线程。
+    ///     最后单独 kill 逃逸后代，避免污染测试环境。
+    #[cfg(unix)]
+    #[test]
+    fn drain_timeout_with_setsid_escape_stays_bounded_across_repeated_probes() {
+        use std::os::unix::process::CommandExt;
+
+        // 逃逸后代把 pid 写到临时文件，便于测试结束清理；stdout 继承 shell 管道保持打开。
+        let pid_file = std::env::temp_dir().join(format!(
+            "cc-partner-probe-setsid-{}.pid",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&pid_file);
+        let pid_path = pid_file.to_string_lossy().replace('\'', "");
+
+        let script = format!(
+            "python3 -c 'import os,time; os.setsid(); open(\"{pid_path}\",\"w\").write(str(os.getpid())); time.sleep(120)' &"
+        );
+
+        let mut escaped_pids: Vec<i32> = Vec::new();
+        // 多次探测：证明不会因 forget reader 而线程/耗时爆炸。
+        for round in 0..3 {
+            let mut command = StdCommand::new("sh");
+            command
+                .arg("-c")
+                .arg(&script)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setpgid(0, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let mut child = command
+                .spawn()
+                .expect("spawn sh with setsid-escaped python");
+
+            let wait_deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {
+                        assert!(
+                            Instant::now() < wait_deadline,
+                            "round {round}: shell 未在预期时间内退出"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("round {round}: try_wait shell failed: {err}"),
+                }
+            }
+
+            // 读取逃逸 pid（best-effort，用于最终清理）。
+            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = text.trim().parse::<i32>() {
+                    escaped_pids.push(pid);
+                }
+            }
+            let _ = std::fs::remove_file(&pid_file);
+
+            let started = Instant::now();
+            // 给极短 grace：非阻塞 poll 应在 deadline 后立刻因超时关闭读端返回。
+            let past_deadline = Instant::now() - Duration::from_millis(1);
+            let (_stdout, _stderr) = drain_probe_pipes(&mut child, past_deadline);
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "round {round}: setsid-escape drain 超时路径耗时过长: {elapsed:?}"
+            );
+            // 读端已关闭：Child 上不应再持有 stdout/stderr handle。
+            assert!(child.stdout.is_none());
+            assert!(child.stderr.is_none());
+        }
+
+        // 清理 setsid 逃逸后代（它们不在原 pgid，drain 的 killpg 管不到）。
+        for pid in escaped_pids {
+            unsafe {
+                let _ = libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        let _ = std::fs::remove_file(&pid_file);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     生产代码必须消除 forget-reader 与后台 join reader 回退，避免回归到永久线程泄漏。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     只检查 `#[cfg(test)]` 之前的生产源码，断言不存在 forget 调用 / join_pipe_thread 定义。
+    #[test]
+    fn probe_drain_source_has_no_forgotten_reader_fallback() {
+        let source = include_str!("dependencies.rs");
+        // 测试模块自身会提到这些符号；只审查生产实现段。
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("dependencies.rs 应包含 #[cfg(test)] 测试模块");
+        let forget_token = format!("{}::forget(", "mem");
         assert!(
-            !still_alive,
-            "drain 超时后进程组仍有存活后代 (pgid={pgid})"
+            !production.contains(&forget_token),
+            "生产代码仍包含 mem::forget 调用，禁止作为 pipe drain 回退"
+        );
+        assert!(
+            !production.contains("fn join_pipe_thread"),
+            "生产代码仍包含 fn join_pipe_thread 后台 reader 路径"
+        );
+        assert!(
+            production.contains("fn drain_child_pipes_nonblocking"),
+            "生产代码应定义非阻塞 drain_child_pipes_nonblocking"
         );
     }
 

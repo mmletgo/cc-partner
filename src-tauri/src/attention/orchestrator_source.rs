@@ -441,15 +441,18 @@ fn project_ref_for_local_task(
     task: &OrchestratorTaskRow,
     projects: &[WorkbenchProjectRow],
 ) -> Option<AttentionProjectRef> {
-    projects.iter().find(|p| p.id == task.project_id).map(|project| AttentionProjectRef {
-        id: project.id.clone(),
-        name: project.name.clone(),
-        kind: if project.kind == "remote" {
-            AttentionProjectKind::Remote
-        } else {
-            AttentionProjectKind::Local
-        },
-    })
+    projects
+        .iter()
+        .find(|p| p.id == task.project_id)
+        .map(|project| AttentionProjectRef {
+            id: project.id.clone(),
+            name: project.name.clone(),
+            kind: if project.kind == "remote" {
+                AttentionProjectKind::Remote
+            } else {
+                AttentionProjectKind::Local
+            },
+        })
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -900,10 +903,8 @@ mod tests {
             "2026-07-11T14:01:00Z",
         );
         let local_projects: Vec<&WorkbenchProjectRow> = Vec::new();
-        let items = project_local_tasks_for_active_projects(
-            &local_projects,
-            &[blocked, human_review],
-        );
+        let items =
+            project_local_tasks_for_active_projects(&local_projects, &[blocked, human_review]);
         assert!(
             items.is_empty(),
             "删除最后一个本机项目后不得投影历史任务: {items:?}"
@@ -961,10 +962,8 @@ mod tests {
             "2026-07-11T16:01:00Z",
         );
         let local_projects = vec![&active];
-        let items = project_local_tasks_for_active_projects(
-            &local_projects,
-            &[active_task, orphan_task],
-        );
+        let items =
+            project_local_tasks_for_active_projects(&local_projects, &[active_task, orphan_task]);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "orchestrator:blocked:active-blocked");
         assert_eq!(
