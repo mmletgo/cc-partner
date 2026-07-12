@@ -4,10 +4,12 @@
  * Business Logic（为什么需要这个模块）:
  *   手机端自动化面板需要展示 remote-aware runtime 四态，并在 live→offline 时保留最后一次 remote live 快照供显示；
  *   缓存不得写入 localStorage/磁盘，也不得驱动任务动作可用性。
+ *   display state 必须记录 owning projectId，A→B 切换首帧不得展示旧项目 snapshot/status/cachedAt。
  *
  * Code Logic（这个模块做什么）:
  *   提供按 projectId 键控的模块级 Map 缓存、请求序号 stale guard，以及 load 状态归并逻辑。
  *   仅 remote live 写入 success cache；错误状态不依据“是否有缓存”推断 offline。
+ *   所有 display state 带 projectId；selectMobileRuntimeDisplayForProject 在 render 阶段做隔离。
  */
 
 import type {
@@ -30,8 +32,69 @@ interface MobileRuntimeSnapshotCacheEntry {
   cachedAt: string;
 }
 
+/**
+ * 带归属 projectId 的移动端 runtime 显示态。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   组件 state 在 effect 跑完前仍可能持有旧项目数据；归属 id 让 render 能立即丢弃串台。
+ *
+ * Code Logic（字段说明）:
+ *   projectId 为当前 display 所属 shortcut id；null 表示空态/无项目。
+ */
+export interface OwnedMobileRuntimeDisplayState extends OrchestratorRuntimeDisplayState {
+  projectId: string | null;
+}
+
 const successCache = new Map<string, MobileRuntimeSnapshotCacheEntry>();
 const requestSeqByProject = new Map<string, number>();
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   统一构造空显示态，项目切换首帧与失败归并都需要可归属的 loading/空态。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回带 projectId 的空 snapshot 显示态；loading/error/projectId 可配置。
+ */
+export function emptyMobileRuntimeDisplayState(
+  loading: boolean,
+  error: Error | null = null,
+  projectId: string | null = null,
+): OwnedMobileRuntimeDisplayState {
+  return {
+    projectId,
+    snapshot: null,
+    remoteStatus: null,
+    cachedAt: null,
+    loading,
+    error,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   A→B 项目切换时 React 首帧仍可能持有 A 的 state；render 必须在 effect 之前隔离。
+ *
+ * Code Logic（这个函数做什么）:
+ *   projectId 为空 → 空态；display.projectId 与目标不一致 → loading 空态；一致则剥离归属字段返回展示字段。
+ */
+export function selectMobileRuntimeDisplayForProject(
+  display: OwnedMobileRuntimeDisplayState,
+  projectId: string | null,
+): OrchestratorRuntimeDisplayState {
+  if (!projectId) {
+    return emptyMobileRuntimeDisplayState(false);
+  }
+  if (display.projectId !== projectId) {
+    return emptyMobileRuntimeDisplayState(true, null, projectId);
+  }
+  return {
+    snapshot: display.snapshot,
+    remoteStatus: display.remoteStatus,
+    cachedAt: display.cachedAt,
+    loading: display.loading,
+    error: display.error,
+  };
+}
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -50,13 +113,14 @@ export function resetMobileRuntimeSnapshotStore(): void {
  *   面板在发起请求前需要一个可渲染的 loading 状态，并可能带上旧 remote live 缓存做骨架显示。
  *
  * Code Logic（这个函数做什么）:
- *   读取该 project 的 remote live 缓存（若有），返回 loading=true 的 display state。
+ *   读取该 project 的 remote live 缓存（若有），返回 loading=true 且 projectId 归属正确的 display state。
  */
 export function beginMobileRuntimeSnapshotLoad(
   projectId: string,
-): OrchestratorRuntimeDisplayState {
+): OwnedMobileRuntimeDisplayState {
   const cached = successCache.get(projectId) ?? null;
   return {
+    projectId,
     snapshot: cached?.snapshot ?? null,
     remoteStatus: cached ? 'live' : null,
     cachedAt: cached?.cachedAt ?? null,
@@ -98,32 +162,27 @@ export function isCurrentMobileRuntimeSnapshotRequest(
  *   unsupported/unavailable 不得复用旧缓存。
  *
  * Code Logic（这个函数做什么）:
- *   按 remoteStatus 归并 Map 缓存并返回 display state；stale 请求或错误 projectId 返回 null/空态。
+ *   按 remoteStatus 归并 Map 缓存并返回带 projectId 的 display state；stale 请求返回 null。
  */
 export function applyMobileRuntimeSnapshotSuccess(
   projectId: string,
   requestSeq: number,
   snapshot: OrchestratorRuntimeSnapshot,
   receivedAt: string = new Date().toISOString(),
-): OrchestratorRuntimeDisplayState | null {
+): OwnedMobileRuntimeDisplayState | null {
   if (!isCurrentMobileRuntimeSnapshotRequest(projectId, requestSeq)) {
     return null;
   }
 
   if (snapshot.projectId !== projectId) {
-    return {
-      snapshot: null,
-      remoteStatus: null,
-      cachedAt: null,
-      loading: false,
-      error: null,
-    };
+    return emptyMobileRuntimeDisplayState(false, null, projectId);
   }
 
   const status = snapshot.remoteStatus;
   if (status === 'live') {
     successCache.set(projectId, { snapshot, cachedAt: receivedAt });
     return {
+      projectId,
       snapshot,
       remoteStatus: 'live',
       cachedAt: receivedAt,
@@ -135,6 +194,7 @@ export function applyMobileRuntimeSnapshotSuccess(
   if (status === 'local') {
     // 本机成功不写入 remote live cache，展示层 remoteStatus 归一为 null。
     return {
+      projectId,
       snapshot,
       remoteStatus: null,
       cachedAt: null,
@@ -146,6 +206,7 @@ export function applyMobileRuntimeSnapshotSuccess(
   if (status === 'offline') {
     const cached = successCache.get(projectId) ?? null;
     return {
+      projectId,
       snapshot: cached?.snapshot ?? null,
       remoteStatus: 'offline',
       cachedAt: cached?.cachedAt ?? null,
@@ -157,6 +218,7 @@ export function applyMobileRuntimeSnapshotSuccess(
   // unsupported / unavailable：清空本项目显示缓存，避免跨状态误用。
   successCache.delete(projectId);
   return {
+    projectId,
     snapshot: null,
     remoteStatus: status,
     cachedAt: null,
@@ -176,7 +238,7 @@ export function applyMobileRuntimeSnapshotFailure(
   projectId: string,
   requestSeq: number,
   error: Error,
-): OrchestratorRuntimeDisplayState | null {
+): OwnedMobileRuntimeDisplayState | null {
   if (!isCurrentMobileRuntimeSnapshotRequest(projectId, requestSeq)) {
     return null;
   }
@@ -196,6 +258,7 @@ export function applyMobileRuntimeSnapshotFailure(
 
   if (cached && networkish) {
     return {
+      projectId,
       snapshot: cached.snapshot,
       remoteStatus: 'offline',
       cachedAt: cached.cachedAt,
@@ -205,6 +268,7 @@ export function applyMobileRuntimeSnapshotFailure(
   }
 
   return {
+    projectId,
     snapshot: null,
     remoteStatus: cached ? 'unavailable' : null,
     cachedAt: null,

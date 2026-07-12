@@ -4,10 +4,13 @@ import {
   applyMobileRuntimeSnapshotFailure,
   applyMobileRuntimeSnapshotSuccess,
   beginMobileRuntimeSnapshotLoad,
+  emptyMobileRuntimeDisplayState,
   getMobileRuntimeSnapshotCacheSize,
   isCurrentMobileRuntimeSnapshotRequest,
   nextMobileRuntimeSnapshotRequestSeq,
   resetMobileRuntimeSnapshotStore,
+  selectMobileRuntimeDisplayForProject,
+  type OwnedMobileRuntimeDisplayState,
 } from './mobileRuntimeSnapshotStore';
 
 /**
@@ -273,6 +276,7 @@ describe('mobileRuntimeSnapshotStore', () => {
     assert(beginCold.snapshot === null, 'cold begin has no snapshot');
     assert(beginCold.cachedAt === null, 'cold begin has no cachedAt');
     assert(beginCold.remoteStatus === null, 'cold begin has no remoteStatus');
+    assert(beginCold.projectId === 'cold-owner', 'begin stamps owning projectId');
 
     const ownerGeneratedAt = '2026-07-12T15:16:17.018Z';
     const ownerEvent = 'owner-only-event-fingerprint-p4t7';
@@ -310,5 +314,58 @@ describe('mobileRuntimeSnapshotStore', () => {
     );
     assert(applied?.remoteStatus === 'live', 'live status');
     assert(applied?.cachedAt === '2026-07-12T15:16:20.000Z', 'client receipt cachedAt');
+    assert(applied?.projectId === 'owner-mobile', 'success stamps owning projectId');
+  });
+
+  test('selectMobileRuntimeDisplayForProject isolates A→B first-frame stale state', () => {
+    const ownedA: OwnedMobileRuntimeDisplayState = {
+      projectId: 'project-a',
+      snapshot: makeSnapshot({
+        projectId: 'project-a',
+        remoteStatus: 'live',
+        generatedAt: 'A-generated',
+        slotsUsed: 9,
+        latestError: 'only-project-a',
+      }),
+      remoteStatus: 'live',
+      cachedAt: '2026-07-12T10:00:00.000Z',
+      loading: false,
+      error: null,
+    };
+
+    // 模拟 A→B 首帧：组件 props 已是 B，但 useState 仍持有 A 的 display。
+    const firstFrameB = selectMobileRuntimeDisplayForProject(ownedA, 'project-b');
+    assert(firstFrameB.snapshot === null, 'first frame for B must not show A snapshot');
+    assert(firstFrameB.remoteStatus === null, 'first frame for B must not show A remoteStatus');
+    assert(firstFrameB.cachedAt === null, 'first frame for B must not show A cachedAt');
+    assert(firstFrameB.loading === true, 'mismatched ownership yields loading empty state');
+    assert(firstFrameB.error === null, 'mismatched ownership clears error');
+
+    const matchedA = selectMobileRuntimeDisplayForProject(ownedA, 'project-a');
+    assert(matchedA.snapshot?.generatedAt === 'A-generated', 'matching project keeps snapshot');
+    assert(matchedA.remoteStatus === 'live', 'matching project keeps remoteStatus');
+    assert(matchedA.cachedAt === '2026-07-12T10:00:00.000Z', 'matching project keeps cachedAt');
+    assert(matchedA.loading === false, 'matching project keeps loading flag');
+
+    const noProject = selectMobileRuntimeDisplayForProject(ownedA, null);
+    assert(noProject.snapshot === null, 'null project clears snapshot');
+    assert(noProject.loading === false, 'null project is idle empty, not loading');
+
+    const syncReset = emptyMobileRuntimeDisplayState(true, null, 'project-b');
+    assert(syncReset.projectId === 'project-b', 'empty helper stamps target projectId');
+    assert(syncReset.snapshot === null, 'sync reset empties snapshot');
+    const afterReset = selectMobileRuntimeDisplayForProject(syncReset, 'project-b');
+    assert(afterReset.loading === true, 'owned empty loading passes through for B');
+    assert(afterReset.snapshot === null, 'owned empty has no snapshot');
+
+    const beginB = beginMobileRuntimeSnapshotLoad('project-b');
+    assert(beginB.projectId === 'project-b', 'begin stamps B');
+    assert(beginB.snapshot === null, 'B has no shared cache from A');
+    const failB = applyMobileRuntimeSnapshotFailure(
+      'project-b',
+      nextMobileRuntimeSnapshotRequestSeq('project-b'),
+      new Error('network'),
+    );
+    assert(failB?.projectId === 'project-b', 'failure stamps owning projectId');
   });
 });
