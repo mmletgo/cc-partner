@@ -148,7 +148,7 @@ describe('getAttentionActionI18nKey', () => {
     expect(getAttentionActionI18nKey('orchestratorHumanReview')).toBe('attention:action.review');
     expect(getAttentionActionI18nKey('orchestratorBlocked')).toBe('attention:action.viewBlocked');
     expect(getAttentionActionI18nKey('remoteOutboxFailed')).toBe(
-      'attention:action.viewFailedOutbox',
+      'attention:action.viewFailed',
     );
     expect(getAttentionActionI18nKey('workbenchDependency')).toBe('attention:action.openSettings');
   });

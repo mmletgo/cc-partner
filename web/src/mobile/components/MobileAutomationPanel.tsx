@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { toRuntimeLoadError } from '@/api/orchestratorRuntimeTransportError';
 import { httpOrchestratorTransport } from '@/api/workbenchHttp';
 import type { HttpCreateOrchestratorTaskAction } from '@/api/workbenchHttp';
+import { requestAttentionInvalidation } from '@/hooks/attentionInvalidation';
 import { orchestratorEvidenceKindTone } from '@/lib/orchestrator';
 import {
   splitOrchestratorTaskViews,
@@ -661,10 +662,12 @@ export function MobileAutomationPanel({
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   手机 Automation 面板对 failed outbox 点 Retry 时，应在本机把条目回到 pending 并刷新列表。
+   *   手机 Automation 面板对 failed outbox 点 Retry 时，应在本机把条目回到 pending、刷新列表，
+   *   并立即失效全局 Inbox 投影。
    *
    * Code Logic（这个函数做什么）:
-   *   校验 project 与 busy 状态，调用 httpOrchestratorTransport.outbox.retry，成功后 loadTasks。
+   *   校验 project 与 busy 状态，调用 httpOrchestratorTransport.outbox.retry，
+   *   成功后 loadTasks 并 requestAttentionInvalidation。
    */
   const handleRetryRemoteOutbox = useCallback(
     async (outboxId: string): Promise<void> => {
@@ -676,6 +679,7 @@ export function MobileAutomationPanel({
         await httpOrchestratorTransport.outbox.retry(projectId, outboxId);
         if (activeProjectIdRef.current !== projectId) return;
         await loadTasks(projectId);
+        requestAttentionInvalidation();
       } catch (reason) {
         if (activeProjectIdRef.current !== projectId) return;
         setError(
@@ -692,10 +696,11 @@ export function MobileAutomationPanel({
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   手机 Automation 面板对 failed outbox 点 Discard 时，需要确认后进入 discarded 审计终态。
+   *   手机 Automation 面板对 failed outbox 点 Discard 时，需要确认后进入 discarded 审计终态，
+   *   并从 Inbox 移除对应 failed outbox 投影。
    *
    * Code Logic（这个函数做什么）:
-   *   window.confirm 后调用 outbox.discard，成功后 loadTasks 刷新 pending 列表。
+   *   window.confirm 后调用 outbox.discard，成功后 loadTasks 并 requestAttentionInvalidation。
    */
   const handleDiscardRemoteOutbox = useCallback(
     async (outboxId: string): Promise<void> => {
@@ -709,6 +714,7 @@ export function MobileAutomationPanel({
         await httpOrchestratorTransport.outbox.discard(projectId, outboxId);
         if (activeProjectIdRef.current !== projectId) return;
         await loadTasks(projectId);
+        requestAttentionInvalidation();
       } catch (reason) {
         if (activeProjectIdRef.current !== projectId) return;
         setError(

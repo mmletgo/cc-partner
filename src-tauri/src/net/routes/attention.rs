@@ -36,8 +36,8 @@ pub async fn list_attention(
 mod tests {
     use super::*;
     use crate::net::protocol::{
-        server_protocol_info, CAPABILITY_ATTENTION_V1, CAPABILITY_ERRORS_ENVELOPE_V1,
-        PeerProtocolInfo, PROTOCOL_VERSION_V1,
+        server_protocol_info, PeerProtocolInfo, CAPABILITY_ATTENTION_V1,
+        CAPABILITY_ERRORS_ENVELOPE_V1, PROTOCOL_VERSION_V1,
     };
     use crate::net::request_context::P2pRequestContext;
 

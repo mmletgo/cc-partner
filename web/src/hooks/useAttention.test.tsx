@@ -238,6 +238,31 @@ describe('AttentionProvider', () => {
     expect(screen.getByTestId('error').textContent).toBe('');
   });
 
+  test('invalidation event triggers refresh without waiting for poll', async () => {
+    const { requestAttentionInvalidation } = await import('./attentionInvalidation');
+    const loadSnapshot = vi
+      .fn()
+      .mockResolvedValueOnce(buildSnapshot({ total: 2, generatedAt: 'first' }))
+      .mockResolvedValueOnce(buildSnapshot({ total: 0, generatedAt: 'after-action' }));
+
+    renderProvider(loadSnapshot);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('total').textContent).toBe('2');
+    });
+    const callsAfterMount = loadSnapshot.mock.calls.length;
+
+    await act(async () => {
+      requestAttentionInvalidation();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('total').textContent).toBe('0');
+    });
+    expect(loadSnapshot.mock.calls.length).toBeGreaterThan(callsAfterMount);
+  });
+
   test('hidden document pauses 10s interval; visible and focus trigger loads', async () => {
     let visibility: DocumentVisibilityState = 'visible';
     Object.defineProperty(document, 'visibilityState', {

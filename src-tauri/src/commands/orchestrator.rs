@@ -2562,7 +2562,6 @@ pub async fn abort_orchestrator_task(
     Ok(OrchestratorTaskDto::from(updated))
 }
 
-
 /// Business Logic（为什么需要这个函数）:
 ///     失败 outbox 的 Retry/Discard 必须在本机 remote shortcut 上下文中执行，outbox 行只存在于当前设备，
 ///     不能递归代理到 owning device，也不能操作不属于当前 shortcut 的条目。
@@ -2656,9 +2655,7 @@ async fn mutate_failed_remote_outbox_for_repos(
         .await?
         .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {outbox_id}")))?;
     if item.device_id != project.device_id || item.remote_project_path != project.path {
-        return Err(AppError::validation(
-            "远端 outbox 不属于当前项目快捷方式",
-        ));
+        return Err(AppError::validation("远端 outbox 不属于当前项目快捷方式"));
     }
 
     let updated = match mutation {
@@ -4620,7 +4617,8 @@ mod tests {
     ///
     /// Code Logic（这个函数做什么）:
     ///     创建单连接内存库、初始化 Orchestrator schema 与最小 workbench_projects 表，返回两个仓储。
-    async fn setup_outbox_action_repos() -> (OrchestratorRepo, crate::storage::WorkbenchProjectRepo) {
+    async fn setup_outbox_action_repos() -> (OrchestratorRepo, crate::storage::WorkbenchProjectRepo)
+    {
         let options = SqliteConnectOptions::from_str("sqlite::memory:")
             .expect("sqlite options")
             .create_if_missing(true);
@@ -4661,7 +4659,10 @@ mod tests {
         let project = remote_shortcut_row();
         let mut row = project.clone();
         row.id = project_id.to_string();
-        workbench_project_repo.upsert(&row).await.expect("upsert project");
+        workbench_project_repo
+            .upsert(&row)
+            .await
+            .expect("upsert project");
         let item = orchestrator_repo
             .insert_remote_outbox_pending(
                 &project.device_id,
@@ -4738,7 +4739,10 @@ mod tests {
         let mut other = wrong_project;
         other.id = "other-shortcut".to_string();
         other.path = "/other/path".to_string();
-        workbench_project_repo.upsert(&other).await.expect("other project");
+        workbench_project_repo
+            .upsert(&other)
+            .await
+            .expect("other project");
         let wrong = retry_orchestrator_remote_outbox_for_repos(
             &orchestrator_repo,
             &workbench_project_repo,
@@ -4779,7 +4783,10 @@ mod tests {
         .await;
 
         let local = local_project_row("/tmp/local-project".to_string());
-        workbench_project_repo.upsert(&local).await.expect("local project");
+        workbench_project_repo
+            .upsert(&local)
+            .await
+            .expect("local project");
         let local_err = discard_orchestrator_remote_outbox_for_repos(
             &orchestrator_repo,
             &workbench_project_repo,
@@ -4812,5 +4819,4 @@ mod tests {
         .expect_err("discarded cannot discard again");
         assert!(again.to_string().contains("失败"));
     }
-
 }

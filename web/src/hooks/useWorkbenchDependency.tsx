@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { workbenchDependencyApi } from '@/api/workbenchDependency';
 import type { WorkbenchDependencyStatus } from '@/lib/types';
+import { requestAttentionInvalidation } from './attentionInvalidation';
 import {
   WorkbenchDependencyContext,
   type WorkbenchDependencyContextValue,
@@ -66,12 +67,23 @@ export function WorkbenchDependencyProvider({ children }: WorkbenchDependencyPro
   const [installing, setInstalling] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  const check = useCallback(async () => {
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   依赖检测既用于挂载后静默探测，也用于用户手动 recheck；
+   *   只有用户主动 recheck/install 成功才应立即失效 Inbox，避免首屏重复刷新抖动。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 check API 更新状态；invalidateAttention=true 时在成功路径 requestAttentionInvalidation。
+   */
+  const runCheck = useCallback(async (invalidateAttention: boolean): Promise<void> => {
     try {
       setChecking(true);
       setError(null);
       const next = await workbenchDependencyApi.check();
       setStatus(next);
+      if (invalidateAttention) {
+        requestAttentionInvalidation();
+      }
     } catch (err) {
       const failed = statusFromError(err);
       setError(failed.error);
@@ -81,12 +93,19 @@ export function WorkbenchDependencyProvider({ children }: WorkbenchDependencyPro
     }
   }, []);
 
+  const check = useCallback(async () => {
+    // 用户从依赖卡点「重新检测」：成功后立刻失效 Inbox。
+    await runCheck(true);
+  }, [runCheck]);
+
   const install = useCallback(async () => {
     try {
       setInstalling(true);
       setError(null);
       const next = await workbenchDependencyApi.install();
       setStatus(next);
+      // 安装命令启动/完成快照写入成功后失效 Inbox（失败路径不触发）。
+      requestAttentionInvalidation();
     } catch (err) {
       const failed = statusFromError(err);
       setError(failed.error);
@@ -110,10 +129,11 @@ export function WorkbenchDependencyProvider({ children }: WorkbenchDependencyPro
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void check();
+      // 挂载静默探测：只更新依赖卡状态，不触发 Attention invalidation。
+      void runCheck(false);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [check]);
+  }, [runCheck]);
 
   useEffect(() => {
     const syncTimer = window.setTimeout(() => {
@@ -127,7 +147,11 @@ export function WorkbenchDependencyProvider({ children }: WorkbenchDependencyPro
         .status()
         .then((next) => {
           setStatus(next);
-          if (next.status !== 'installing') setInstalling(false);
+          if (next.status !== 'installing') {
+            setInstalling(false);
+            // 安装轮询离开 installing 表示状态已收敛，立即刷新 Inbox 环境条目。
+            requestAttentionInvalidation();
+          }
         })
         .catch((err) => {
           const failed = statusFromError(err);

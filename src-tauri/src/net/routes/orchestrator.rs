@@ -13,10 +13,9 @@ use crate::commands::orchestrator::{
     discard_orchestrator_remote_outbox_for_repos, dispatch_orchestrator_best_effort,
     ensure_reviewed_delivery_allowed, get_orchestrator_runtime_snapshot_for_project,
     get_orchestrator_runtime_snapshot_for_state, list_orchestrator_task_views_for_state,
-    retry_orchestrator_remote_outbox_for_repos, run_delivery_for_task, CreateOrchestratorTaskRequest,
-    OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
+    retry_orchestrator_remote_outbox_for_repos, run_delivery_for_task,
+    CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
 };
-use crate::orchestrator::outbox::OrchestratorRemoteOutboxDto;
 use crate::commands::prompt_optimizer::{
     local_complete_orchestrator_task_prompt, OrchestratorTaskPromptCompletionDto,
 };
@@ -29,6 +28,7 @@ use crate::orchestrator::models::{
     OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus,
 };
 use crate::orchestrator::outbox::open_remote_project_for_shortcut;
+use crate::orchestrator::outbox::OrchestratorRemoteOutboxDto;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::{
     MobileRuntimeSnapshotReq, RemoteCompleteOrchestratorTaskPromptReq,
@@ -838,7 +838,6 @@ pub async fn get_config(
     Ok(Json(get_config_for_state(&context)))
 }
 
-
 /// Mobile HTTP 本机 failed outbox 动作请求体。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -895,10 +894,11 @@ pub async fn discard_remote_outbox(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     route 测试与 handler 需要共用 for_repos helper 的语义，验证 HTTP 层不会递归代理。
+///     route 测试需要与 retry handler 相同的仓储路径，验证 HTTP 层不会递归代理。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 route context 的仓储直接调用共享 helper。
+///     从 route context 的仓储直接调用共享 helper；仅测试使用。
+#[cfg(test)]
 async fn retry_remote_outbox_for_context(
     context: &OrchestratorRouteContext,
     req: MobileRemoteOutboxActionReq,
@@ -916,7 +916,8 @@ async fn retry_remote_outbox_for_context(
 ///     route 测试需要与 discard handler 相同的仓储路径。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 route context 的仓储直接调用共享 helper。
+///     从 route context 的仓储直接调用共享 helper；仅测试使用。
+#[cfg(test)]
 async fn discard_remote_outbox_for_context(
     context: &OrchestratorRouteContext,
     req: MobileRemoteOutboxActionReq,
@@ -1970,5 +1971,4 @@ mod tests {
         assert_eq!(dto.status.as_str(), "discarded");
         assert_eq!(dto.last_error.as_deref(), Some("协议错误"));
     }
-
 }

@@ -56,6 +56,10 @@ migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，�
 - **Workbench dependency source（`workbench_dependency_source.rs`）**：零 Workbench 项目时任何依赖状态都不投影；有项目时仅 `missing`/`failed`/`unsupported` 产出固定 ID `workbench:dependency:tmux`（category=environment，target=settings/dependencies）；`ready`/`installing` 排除；`updatedAt` 取 dependency 缓存的 `statusChangedAt`，只读 `get_workbench_dependency_status_for_state`，不触发探测/安装。
 - **API 出口**：`commands/attention.rs::list_attention_items`（Tauri）与 `net/routes/attention.rs::list_attention`（`GET /api/mobile/attention`）共用 `list_attention_items_for_state`（注册 Orchestrator + Workbench dependency 两 source 后聚合）；HTTP 使用 P2P request-id/error 信封；本路由只聚合当前 backend，不递归要求对端再聚合 attention。
 - **能力宣告**：`attention.v1` 与 Mobile attention 路由同提交写入 `server_protocol_info()`；旧后端缺失该 token 时 Mobile 客户端必须显示 unsupported，不得猜测旧接口。
+- **无 Inbox 表**：Attention 不持久化条目、已读、snooze 或历史；SQLite 只读 Orchestrator/Workbench 权威数据，投影失败不得落库“部分快照”。
+- **错误策略**：任一非网络 source 失败（损坏 mirror、SQLite/项目仓储、非法 DTO）→ 整次 `list_attention_items_for_state` 失败；远端网络失败只允许该 remote 回退最近 mirror 并标 `cached` + 真实 `last_synced_at`，不得伪装 live 或部分成功。
+- **四请求并发上限**：remote mirror 刷新使用 `buffer_unordered(4)`，禁止无界并发扫设备。
+- **验证**：`cd src-tauri && cargo test --locked attention:: && cargo test --locked orchestrator::repo && cargo test --locked net::routes::attention`。
 
 ## Orchestrator 基础约定（src/orchestrator/）
 

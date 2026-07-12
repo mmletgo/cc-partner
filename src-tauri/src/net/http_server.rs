@@ -17,8 +17,7 @@ use crate::net::error_response::{envelope_fallback_middleware, P2pError, P2pErro
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
     attention, cc_history, claude_code_assets, claude_md_sync, health, mobile, orchestrator,
-    scratchpad_sync,
-    ssh_target_sync, sync, transfer, workbench,
+    scratchpad_sync, ssh_target_sync, sync, transfer, workbench,
 };
 use crate::state::AppState;
 use axum::body::Body;

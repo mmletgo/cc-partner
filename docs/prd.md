@@ -262,6 +262,20 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - OrchestratorPanel 只拥有项目级任务看板、点击任务后出现的右侧详情/Evidence 抽屉、创建任务弹窗和编排状态，不展示项目级策略或配置；Workbench 拥有项目级自动化控制台挂载、项目上下文、执行现场 deep link takeover、文件和 Git 操作
 - Workbench 自动化状态条通过后端 runtime snapshot 展示生成时间、最近调度 tick/dispatch 时间、scheduler 开关、workflow 来源与校验结果、全局最大并发、当前项目槽位占用、运行中任务摘要、重试/返工任务摘要、最近 scheduler/runner 事件和最近错误；状态条提供手动刷新入口与 Settings 自动化 tab 链接。snapshot 只作为观察/诊断面，不作为任务正确性的唯一来源，也不能驱动 scheduler、验证、交付或任务 action。本机项目直接读取本机权威快照；remote shortcut 必须向 owning device 拉取 live 数据（P2P `POST /api/orchestrator/runtime-snapshot`，capability `orchestrator.runtime-snapshot.v1`），只映射 shortcut 身份/表面 ID，保留 owner 的 generatedAt/tick/slots/running/retrying/events 等运行时字段，禁止用本机 telemetry 补空。远端展示四态为 `live`（在线权威数据）、`unsupported`（对端无能力）、`offline`（传输不可达）、`unavailable`（协议/业务失败），状态分支只看类型化错误，不看本地化文案或 404 猜测。桌面与移动端各自维护进程内、按 projectId 隔离的 display-only 最后一次成功缓存：live→offline 可展示缓存并标最后更新时间；cold offline 无缓存则为空态，不得伪造数据；缓存不写 SQLite/localStorage/磁盘，且绝不能进入执行决策。
 
+### 2.17 全局 Inbox（Attention）
+
+**描述**：回答“现在有哪些事情需要我处理，工作才能继续”。桌面与移动端共享同一套实时投影、数量与分类语义，并只导航到既有权威业务界面。
+
+**功能点**：
+- 全局 Inbox 是实时投影，不新增 Inbox 表，不做已读/忽略/稍后/关闭，不保留已解决历史；列表只反映当前权威阻塞
+- v1 四类 source：本机/远端 Human Review（decision）、Blocked 任务（blocked）、failed remote outbox（blocked）、Workbench tmux 依赖缺失/失败/不支持（environment）；设备离线本身不是 source，只有它造成的 cached 任务/outbox 业务后果可以显示
+- 桌面入口为侧栏第二项「待处理」`/attention`，移动端在 Projects 后增加第二导航项「待处理」；两端对同一 snapshot 使用相同 badge（0 隐藏、1..99 数字、100+→99+）、相同分组顺序（需要你的决定 → 运行受阻 → 环境受阻）与空组省略规则
+- 条目只导航：任务/Evidence 进 Orchestrator 自动化控制台，failed outbox 进原 pending 区，tmux 依赖进 Settings `dependencies`；列表内不执行 Deliver、Request Rework、Retry、Discard 或依赖安装
+- 解决动作仍在 Orchestrator/Settings 原界面；Deliver、Request Rework、task Retry/Refresh、outbox Retry/Discard、依赖 install/recheck 成功后立即失效并刷新 Inbox；失败动作不失效；页面可见时 10 秒轮询仅作远端/外部变化兜底
+- 远端在线条目标 live；网络失败回退最近 mirror 时保留真实 `last_synced_at` 并标 cached，不得伪装 live；任一非网络 source 失败则整次快照失败，不得返回误导性部分快照
+- 有快照时刷新失败只标 stale 并保留列表/badge；初次失败不显示虚假数字；旧请求不得覆盖新请求
+- 目标已解决或状态变化时回退 Inbox 并提示“事项已解决或状态已变化”；remote shortcut 被移除后其 orphan failed outbox 不再投影
+
 ## 3. 非功能需求
 
 ### 3.1 跨平台

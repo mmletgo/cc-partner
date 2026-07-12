@@ -98,12 +98,12 @@ function attentionActionLabelKey(
 ):
   | 'attention:action.review'
   | 'attention:action.viewBlocked'
-  | 'attention:action.viewFailedOutbox'
+  | 'attention:action.viewFailed'
   | 'attention:action.openSettings' {
   return getAttentionActionI18nKey(sourceKind) as
     | 'attention:action.review'
     | 'attention:action.viewBlocked'
-    | 'attention:action.viewFailedOutbox'
+    | 'attention:action.viewFailed'
     | 'attention:action.openSettings';
 }
 

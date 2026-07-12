@@ -12,6 +12,7 @@
 7. **CLAUDE.md 编辑与推送** - 应用内编辑 user 级 `~/.claude/CLAUDE.md`，可将本机配置主动推送到局域网设备和 GitHub 云端（文件为权威源，DB 存同步元数据，对账纳入应用外编辑；不参与自动同步）
 8. **SSH 配置管理** - 列出局域网设备 IP + 手填 IP，为每个目标配置用户名/端口并一键复制 ssh 命令；配置基于向量时钟跨设备同步；附 mac/ubuntu/windows 三端配置指南
 9. **GitHub 周热门首页** - 每天抓取 GitHub Trending Weekly Top 25，缓存到 SQLite，并通过本地 Claude Code CLI 生成中英文项目解说
+10. **全局 Inbox（Attention）** - 实时投影当前阻塞工作的事项（Human Review / Blocked / failed outbox / tmux 依赖）；桌面 `/attention` 与移动导航第二项共享 badge/分组；只导航到权威界面，成功动作立即失效刷新
 
 ## 技术栈
 

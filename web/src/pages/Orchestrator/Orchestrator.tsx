@@ -25,6 +25,7 @@ import { orchestratorApi } from '@/api/orchestrator';
 import type { OrchestratorCreateAction } from '@/api/orchestrator';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
 import { Button, Card, Input, Pill } from '@/components/primitives';
+import { requestAttentionInvalidation } from '@/hooks/attentionInvalidation';
 import { useOrchestratorRuntimeSnapshot } from '@/hooks/useOrchestratorRuntimeSnapshot';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import {
@@ -804,10 +805,11 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   /**
    * Business Logic（为什么需要这个函数）:
    *   failed outbox 的 Retry/Discard 成功后需要刷新当前项目的 task-view 列表，
-   *   让 pending 区反映 pending/discarded 变化；Attention invalidation 由后续任务接入。
+   *   让 pending 区反映 pending/discarded 变化，并立即失效全局 Inbox 投影。
    *
    * Code Logic（这个函数做什么）:
-   *   用 active projectId 调 listTaskViews，并用 activeProjectIdRef 做 stale guard。
+   *   用 active projectId 调 listTaskViews，并用 activeProjectIdRef 做 stale guard；
+   *   列表刷新成功后调用 requestAttentionInvalidation。
    */
   const reloadTaskViewsForActiveProject = useCallback(async (): Promise<void> => {
     const projectId = activeProjectIdRef.current;
@@ -821,6 +823,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         if (current && nextSplit.tasks.some((item) => item.task.id === current)) return current;
         return null;
       });
+      requestAttentionInvalidation();
     } catch (err) {
       if (activeProjectIdRef.current !== projectId) return;
       setActionError({
@@ -1281,6 +1284,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
       }
       replaceTaskViewInCurrentProject(projectId, updated);
       void refreshRuntimeSnapshot();
+      requestAttentionInvalidation();
       const items = await orchestratorApi.listEvidence(projectId, taskId);
       if (activeProjectIdRef.current === projectId) {
         setEvidenceResult({ projectId, taskId, items, error: null });
@@ -1329,6 +1333,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
       }
       replaceTaskViewInCurrentProject(projectId, updated);
       void refreshRuntimeSnapshot();
+      requestAttentionInvalidation();
       const items = await orchestratorApi.listEvidence(projectId, taskId);
       if (activeProjectIdRef.current === projectId) {
         setEvidenceResult({ projectId, taskId, items, error: null });
@@ -1385,6 +1390,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
       }
       replaceTaskViewInCurrentProject(projectId, updated);
       void refreshRuntimeSnapshot();
+      requestAttentionInvalidation();
     } catch (err) {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
         setActionError({
@@ -1463,6 +1469,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         return null;
       });
       void refreshRuntimeSnapshot();
+      requestAttentionInvalidation();
     } catch (err) {
       if (activeProjectIdRef.current === projectId) {
         setActionError({
