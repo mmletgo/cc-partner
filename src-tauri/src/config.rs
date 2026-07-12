@@ -68,7 +68,7 @@ pub(crate) fn migrate_legacy_db_path_with_home(cfg: &mut AppConfig, home: &Path)
 pub fn data_dir() -> Result<PathBuf, AppError> {
     match std::env::var_os(DATA_DIR_ENV) {
         Some(raw) => resolve_data_dir_override(raw),
-        None => Ok(default_home_data_dir()),
+        None => default_home_data_dir(),
     }
 }
 
@@ -123,13 +123,18 @@ fn resolve_data_dir_override(raw: std::ffi::OsString) -> Result<PathBuf, AppErro
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     未设置 `CC_PARTNER_DATA_DIR` 时生产路径必须与历史行为一致，并继续迁移旧 `.claude-partner`。
+///     无可解析 home 的服务账户/异常环境不得 panic，应映射为 AppError 供 doctor/CLI 稳定 exit 2。
 ///
 /// Code Logic（这个函数做什么）:
-///     取 home 下 `.cc-partner`；若新目录不存在且旧目录存在则 rename 迁移，失败则回落旧路径。
-fn default_home_data_dir() -> PathBuf {
+///     取 home 下 `.cc-partner`；home 缺失返回 Validation 错误；若新目录不存在且旧目录存在则 rename 迁移，失败则回落旧路径。
+fn default_home_data_dir() -> Result<PathBuf, AppError> {
     // dirs::config_dir 在各平台指向用户配置目录；历史 Python 版用的是 home 下的隐藏目录。
     // 更名后优先使用 ~/.cc-partner；若新目录不存在但旧 ~/.claude-partner 存在，首次启动时重命名迁移。
-    let home = dirs::home_dir().expect("无法定位用户 home 目录，环境异常");
+    let home = dirs::home_dir().ok_or_else(|| {
+        AppError::validation(
+            "无法定位用户 home 目录，环境异常；请设置 CC_PARTNER_DATA_DIR 绝对路径",
+        )
+    })?;
     let dir = home.join(CONFIG_DIR_NAME);
     let legacy = home.join(LEGACY_CONFIG_DIR_NAME);
 
@@ -138,26 +143,27 @@ fn default_home_data_dir() -> PathBuf {
             Ok(()) => tracing::info!("已迁移配置目录: {:?} -> {:?}", legacy, dir),
             Err(e) => {
                 tracing::warn!("迁移配置目录失败，将继续使用旧目录 {:?}: {e}", legacy);
-                return legacy;
+                return Ok(legacy);
             }
         }
     }
 
-    dir
+    Ok(dir)
 }
 
 /// 配置文件和数据文件的根目录：`~/.cc-partner`（可被 `CC_PARTNER_DATA_DIR` 覆盖）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     既有模块（cloud_sync、control、load/save）统一通过此入口派生路径；测试/CLI 隔离时
-///     必须与 `data_dir()` 指向同一根。
+///     必须与 `data_dir()` 指向同一根。非法 `CC_PARTNER_DATA_DIR` 不得 panic 或回落相对路径，
+///     否则 doctor/CLI 会把核心失败误报为 healthy 或得到非 0/1/2 退出码。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 `data_dir()`；解析失败时 panic（非法 override 属于环境配置错误，应尽早暴露）。
+///     委托 `data_dir()` 并原样向上返回 `Result`（空白/相对/NUL override → Validation 错误）。
 ///
 /// pub 供 cloud_sync 等模块复用同一根目录派生子路径（如 `~/.cc-partner/cloud-sync/`）。
-pub fn config_dir() -> PathBuf {
-    data_dir().expect("无法解析应用数据目录（检查 CC_PARTNER_DATA_DIR）")
+pub fn config_dir() -> Result<PathBuf, AppError> {
+    data_dir()
 }
 
 /// 后端文件日志目录：`<data_dir>/logs`。
@@ -187,13 +193,13 @@ pub fn backend_log_path() -> Result<PathBuf, AppError> {
 }
 
 /// 配置文件完整路径：`~/.cc-partner/config.json`
-fn config_file_path() -> PathBuf {
-    config_dir().join("config.json")
+fn config_file_path() -> Result<PathBuf, AppError> {
+    Ok(config_dir()?.join("config.json"))
 }
 
 /// 默认数据库路径：`~/.cc-partner/data.db`
-pub fn default_db_path() -> PathBuf {
-    config_dir().join("data.db")
+pub fn default_db_path() -> Result<PathBuf, AppError> {
+    Ok(config_dir()?.join("data.db"))
 }
 
 /// 判断候选路径是否位于指定数据根目录之下（含根本身）。
@@ -297,7 +303,7 @@ fn enforce_data_dir_isolation(cfg: &mut AppConfig) -> Result<bool, AppError> {
     if is_path_within_data_dir(&db, &root) {
         return Ok(false);
     }
-    let forced = default_db_path();
+    let forced = default_db_path()?;
     tracing::warn!(
         "CC_PARTNER_DATA_DIR 生效时拒绝 db_path 逃逸: {} -> {}",
         cfg.db_path,
@@ -307,11 +313,42 @@ fn enforce_data_dir_isolation(cfg: &mut AppConfig) -> Result<bool, AppError> {
     Ok(true)
 }
 
-/// 默认文件接收目录：`~/cc-partner-files`
-fn default_receive_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("无法定位用户 home 目录，环境异常")
-        .join("cc-partner-files")
+/// 默认文件接收目录：优先 `~/cc-partner-files`，无 home 时回落隔离根内。
+///
+/// Business Logic（为什么需要这个函数）:
+///     首次 `AppConfig::load` 需要安全默认接收目录；无 home 的服务账户只要设置了
+///     `CC_PARTNER_DATA_DIR` 就应能启动，不得 panic。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `default_receive_dir_with_home(dirs::home_dir().as_deref())`。
+fn default_receive_dir() -> Result<PathBuf, AppError> {
+    default_receive_dir_with_home(dirs::home_dir().as_deref())
+}
+
+/// 按注入 home 计算默认接收目录（生产与 no-home 单测共用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     无 home 时不得 `expect` panic；有 `CC_PARTNER_DATA_DIR` 时落到隔离根下安全路径。
+///
+/// Code Logic（这个函数做什么）:
+///     `Some(home)` → `home/cc-partner-files`；`None` 且设置了 `CC_PARTNER_DATA_DIR` →
+///     解析 override 后 `<data_dir>/received-files`；否则 Validation 错误（不回落真实 home 的 data_dir）。
+fn default_receive_dir_with_home(home: Option<&Path>) -> Result<PathBuf, AppError> {
+    if let Some(home) = home {
+        return Ok(home.join("cc-partner-files"));
+    }
+    // no-home：仅当显式设置了合法 override 时才回落隔离根；否则明确错误，避免误用真实 home。
+    if std::env::var_os(DATA_DIR_ENV).is_none() {
+        return Err(AppError::validation(
+            "无法定位用户 home 目录，环境异常；请设置 CC_PARTNER_DATA_DIR 绝对路径",
+        ));
+    }
+    let root = data_dir().map_err(|_| {
+        AppError::validation(
+            "无法定位用户 home 目录，环境异常；请设置 CC_PARTNER_DATA_DIR 绝对路径",
+        )
+    })?;
+    Ok(root.join("received-files"))
 }
 
 /// 云端同步（GitHub 私有仓库）的默认轮询间隔（秒）= 10 分钟。
@@ -396,9 +433,12 @@ fn default_device_name() -> String {
 ///     prompt_optimizer_hotkey, prompt_optimizer_fill_language)`；
 ///     receive_dir 转成字符串以便命令层直接组装 DTO。
 pub(crate) fn default_preference_values() -> (String, String, String, String, String) {
+    let receive = default_receive_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "cc-partner-files".to_string());
     (
         default_device_name(),
-        default_receive_dir().to_string_lossy().to_string(),
+        receive,
         default_screenshot_hotkey(),
         default_prompt_optimizer_hotkey(),
         default_prompt_optimizer_fill_language(),
@@ -686,7 +726,7 @@ impl AppConfig {
     ///                确保 config/control/db/log 全部落在 override 根内。
     ///             文件缺失则用默认值构造并 save()。
     pub fn load() -> Result<Self, AppError> {
-        let path = config_file_path();
+        let path = config_file_path()?;
         if path.exists() {
             let text = fs::read_to_string(&path)?;
             let mut cfg: AppConfig = serde_json::from_str(&text)?;
@@ -717,8 +757,8 @@ impl AppConfig {
                 device_id: Uuid::new_v4().to_string(),
                 device_name: default_device_name(),
                 http_port: 0,
-                receive_dir: default_receive_dir().to_string_lossy().to_string(),
-                db_path: default_db_path().to_string_lossy().to_string(),
+                receive_dir: default_receive_dir()?.to_string_lossy().to_string(),
+                db_path: default_db_path()?.to_string_lossy().to_string(),
                 screenshot_hotkey: default_screenshot_hotkey(),
                 prompt_optimizer_hotkey: default_prompt_optimizer_hotkey(),
                 prompt_optimizer_fill_language: default_prompt_optimizer_fill_language(),
@@ -741,9 +781,9 @@ impl AppConfig {
     /// Business Logic: 用户修改配置后需持久化，下次启动生效。
     /// Code Logic: 确保目录存在；序列化为 UTF-8 JSON（紧凑，中文不转义）写入。
     pub fn save(&self) -> Result<(), AppError> {
-        let dir = config_dir();
+        let dir = config_dir()?;
         ensure_dir(&dir)?;
-        let path = config_file_path();
+        let path = config_file_path()?;
         // serde_json::to_string 生成紧凑标准 JSON，与 Python json.dumps(ensure_ascii=False) 互通
         let text = serde_json::to_string(self)?;
         fs::write(&path, text)?;
@@ -851,8 +891,11 @@ mod tests {
             "data_dir 应确保 override 目录存在: {:?}",
             resolved
         );
-        assert_eq!(config_dir(), override_dir);
-        assert_eq!(default_db_path(), override_dir.join("data.db"));
+        assert_eq!(config_dir().expect("config_dir 应可解析"), override_dir);
+        assert_eq!(
+            default_db_path().expect("default_db_path 应可解析"),
+            override_dir.join("data.db")
+        );
         assert_eq!(
             backend_log_dir().expect("log 目录应可解析"),
             override_dir.join("logs")
@@ -862,11 +905,11 @@ mod tests {
             override_dir.join("logs").join("backend.log")
         );
         assert_eq!(
-            crate::backend::control::control_file_path(),
+            crate::backend::control::control_file_path().expect("control 路径应可解析"),
             override_dir.join("backend-control.json")
         );
         assert_eq!(
-            crate::backend::control::pid_file_path(),
+            crate::backend::control::pid_file_path().expect("pid 路径应可解析"),
             override_dir.join("backend.pid")
         );
     }
@@ -890,8 +933,11 @@ mod tests {
             "默认 data_dir 应位于 home 应用目录，实际: {:?}",
             resolved
         );
-        assert_eq!(config_dir(), resolved);
-        assert_eq!(default_db_path(), resolved.join("data.db"));
+        assert_eq!(config_dir().expect("config_dir 应可解析"), resolved);
+        assert_eq!(
+            default_db_path().expect("default_db_path 应可解析"),
+            resolved.join("data.db")
+        );
     }
 
     /// 验证空白 override 被拒绝。
@@ -983,6 +1029,33 @@ mod tests {
         assert!(
             is_path_within_data_dir(Path::new(&on_disk.db_path), &override_dir),
             "最终 db_path 必须位于 override 根内"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     无 home 的服务账户只要设置了合法 `CC_PARTNER_DATA_DIR`，首次配置默认
+    ///     receive_dir 不得 panic，应回落到隔离根内。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     注入 home=None + 绝对 override，断言 receive_dir=`<override>/received-files`；
+    ///     清除 override 后断言返回 Validation 错误而非 panic。
+    #[test]
+    fn default_receive_dir_no_home_uses_data_dir_override_or_errors() {
+        let temp = tempfile::tempdir().expect("临时目录");
+        let override_dir = temp.path().join("isolated-no-home");
+        let _guard = install_data_dir_env(Some(override_dir.to_str().expect("UTF-8 path")));
+        let path =
+            super::default_receive_dir_with_home(None).expect("有 override 时 no-home 应成功");
+        assert_eq!(path, override_dir.join("received-files"));
+
+        drop(_guard);
+        let _guard = install_data_dir_env(None);
+        // 无 home 且无 override：必须是 Result 错误，不能 panic。
+        let err = super::default_receive_dir_with_home(None)
+            .expect_err("无 home 且无 override 应 Validation 错误");
+        assert!(
+            err.to_string().contains("CC_PARTNER_DATA_DIR") || err.to_string().contains("home"),
+            "错误应提示 home/override，实际: {err}"
         );
     }
 

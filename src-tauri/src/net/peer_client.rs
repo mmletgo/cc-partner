@@ -325,14 +325,29 @@ impl PeerClient {
         let body = serde_json::json!({ "summaries": local_summary });
         match self.request_post::<SyncPullResp, _>(&url, &body).await {
             Ok(data) => {
-                tracing::info!(
-                    "sync_pull 从 {base_url} 获取 {} 条 prompt",
+                // 只记条数与结果，不记录 prompt 正文或请求 body
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "sync_pull",
+                    crate::backend::logging::OperationResult::Ok,
+                )
+                .message(format!(
+                    "sync_pull 从对端获取 {} 条 prompt",
                     data.prompts.len()
-                );
+                ))
+                .emit();
                 data.prompts
             }
             Err(e) => {
-                tracing::warn!("sync_pull 失败 ({base_url}): {e}");
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "sync_pull",
+                    crate::backend::logging::OperationResult::Error,
+                )
+                .level(tracing::Level::WARN)
+                .error_code("unavailable")
+                .message(format!("sync_pull 失败: {e}"))
+                .emit();
                 Vec::new()
             }
         }
@@ -354,14 +369,25 @@ impl PeerClient {
         let body = serde_json::json!({ "prompts": prompts });
         match self.request_post::<SyncPushResp, _>(&url, &body).await {
             Ok(data) => {
-                tracing::info!(
-                    "sync_push 到 {base_url} 成功，对端接收 {} 条",
-                    data.accepted
-                );
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "sync_push",
+                    crate::backend::logging::OperationResult::Ok,
+                )
+                .message(format!("sync_push 成功，对端接收 {} 条", data.accepted))
+                .emit();
                 true
             }
             Err(e) => {
-                tracing::warn!("sync_push 失败 ({base_url}): {e}");
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "sync_push",
+                    crate::backend::logging::OperationResult::Error,
+                )
+                .level(tracing::Level::WARN)
+                .error_code("unavailable")
+                .message(format!("sync_push 失败: {e}"))
+                .emit();
                 false
             }
         }
@@ -433,10 +459,13 @@ impl PeerClient {
             .await
         {
             Ok(data) => {
-                tracing::info!(
-                    "scratchpad_push 到 {base_url} 完成，accepted={}",
-                    data.accepted
-                );
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "scratchpad_push",
+                    crate::backend::logging::OperationResult::Ok,
+                )
+                .message(format!("scratchpad_push 完成，accepted={}", data.accepted))
+                .emit();
                 true
             }
             Err(e) => {
@@ -581,14 +610,25 @@ impl PeerClient {
         let body = serde_json::json!({ "summaries": local_summary });
         match self.request_post::<CcSyncPullResp, _>(&url, &body).await {
             Ok(data) => {
-                tracing::info!(
-                    "cc_sync_pull 从 {base_url} 获取 {} 条 CC 历史",
-                    data.items.len()
-                );
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "cc_sync_pull",
+                    crate::backend::logging::OperationResult::Ok,
+                )
+                .message(format!("cc_sync_pull 获取 {} 条 CC 历史", data.items.len()))
+                .emit();
                 data.items
             }
             Err(e) => {
-                tracing::warn!("cc_sync_pull 失败 ({base_url}): {e}");
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "cc_sync_pull",
+                    crate::backend::logging::OperationResult::Error,
+                )
+                .level(tracing::Level::WARN)
+                .error_code("unavailable")
+                .message(format!("cc_sync_pull 失败: {e}"))
+                .emit();
                 Vec::new()
             }
         }
@@ -609,14 +649,25 @@ impl PeerClient {
         let body = serde_json::json!({ "items": items });
         match self.request_post::<CcSyncPushResp, _>(&url, &body).await {
             Ok(data) => {
-                tracing::info!(
-                    "cc_sync_push 到 {base_url} 成功，对端接收 {} 条",
-                    data.accepted
-                );
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "cc_sync_push",
+                    crate::backend::logging::OperationResult::Ok,
+                )
+                .message(format!("cc_sync_push 成功，对端接收 {} 条", data.accepted))
+                .emit();
                 true
             }
             Err(e) => {
-                tracing::warn!("cc_sync_push 失败 ({base_url}): {e}");
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "cc_sync_push",
+                    crate::backend::logging::OperationResult::Error,
+                )
+                .level(tracing::Level::WARN)
+                .error_code("unavailable")
+                .message(format!("cc_sync_push 失败: {e}"))
+                .emit();
                 false
             }
         }
@@ -638,14 +689,28 @@ impl PeerClient {
         let body = serde_json::json!({ "summaries": local_summary });
         match self.request_post::<SshTargetPullResp, _>(&url, &body).await {
             Ok(data) => {
-                tracing::info!(
-                    "ssh_target_pull 从 {base_url} 获取 {} 条 SSH 目标",
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "ssh_target_pull",
+                    crate::backend::logging::OperationResult::Ok,
+                )
+                .message(format!(
+                    "ssh_target_pull 获取 {} 条 SSH 目标",
                     data.targets.len()
-                );
+                ))
+                .emit();
                 data.targets
             }
             Err(e) => {
-                tracing::warn!("ssh_target_pull 失败 ({base_url}): {e}");
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "ssh_target_pull",
+                    crate::backend::logging::OperationResult::Error,
+                )
+                .level(tracing::Level::WARN)
+                .error_code("unavailable")
+                .message(format!("ssh_target_pull 失败: {e}"))
+                .emit();
                 Vec::new()
             }
         }
@@ -666,14 +731,28 @@ impl PeerClient {
         let body = serde_json::json!({ "targets": targets });
         match self.request_post::<SshTargetPushResp, _>(&url, &body).await {
             Ok(data) => {
-                tracing::info!(
-                    "ssh_target_push 到 {base_url} 成功，对端接收 {} 条",
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "ssh_target_push",
+                    crate::backend::logging::OperationResult::Ok,
+                )
+                .message(format!(
+                    "ssh_target_push 成功，对端接收 {} 条",
                     data.accepted
-                );
+                ))
+                .emit();
                 true
             }
             Err(e) => {
-                tracing::warn!("ssh_target_push 失败 ({base_url}): {e}");
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "ssh_target_push",
+                    crate::backend::logging::OperationResult::Error,
+                )
+                .level(tracing::Level::WARN)
+                .error_code("unavailable")
+                .message(format!("ssh_target_push 失败: {e}"))
+                .emit();
                 false
             }
         }

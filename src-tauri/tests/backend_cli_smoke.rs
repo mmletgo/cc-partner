@@ -673,3 +673,242 @@ fn stale_control_status_and_start_recovery() {
         );
     }
 }
+
+/// 并发直接执行 serve 时，同一 data_dir 只能有一个实例持锁并写出 control。
+///
+/// Business Logic（为什么需要这个测试）:
+///     start 锁只覆盖父进程；serve 自身必须持生命周期单实例锁，否则双 writer/双 control。
+///
+/// Code Logic（这个测试做什么）:
+///     同 data_dir 并发 spawn 两个 `serve`，等待其中一个成为 Running 后，再等短时间，
+///     断言最多一个 serve pid 存活；最后 stop 清理。
+#[test]
+fn concurrent_direct_serve_is_single_instance() {
+    if let Err(reason) = ensure_platform_supported() {
+        eprintln!("{reason}");
+        return;
+    }
+    let mut case = SmokeCase::new("concurrent-serve").expect("create case");
+    let bin = case.backend_bin.clone();
+    let data_dir = case.data_dir.clone();
+
+    let spawn_serve = || {
+        std::process::Command::new(&bin)
+            .arg("serve")
+            .env("CC_PARTNER_DATA_DIR", &data_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    };
+
+    let mut c1 = match spawn_serve() {
+        Ok(c) => c,
+        Err(err) => fail_case(&mut case, format!("spawn serve1: {err}")),
+    };
+    let mut c2 = match spawn_serve() {
+        Ok(c) => c,
+        Err(err) => {
+            let _ = c1.kill();
+            let _ = c1.wait();
+            fail_case(&mut case, format!("spawn serve2: {err}"))
+        }
+    };
+    case.record_pid(c1.id());
+    case.record_pid(c2.id());
+
+    // 等待出现唯一 running 实例。
+    let deadline = Instant::now() + case.op_timeout;
+    let mut winner_pid = None;
+    let mut winner_port = None;
+    while Instant::now() < deadline {
+        if let Ok(status) = case.run_cli(&["status"]) {
+            if let Ok(value) = status.parse_status_json() {
+                if value.kind == "running" {
+                    if let Some(control) = value.control {
+                        case.record_pid(control.pid);
+                        winner_pid = Some(control.pid);
+                        winner_port = Some(control.port);
+                        break;
+                    }
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    let Some(winner_pid) = winner_pid else {
+        let _ = c1.kill();
+        let _ = c2.kill();
+        let _ = c1.wait();
+        let _ = c2.wait();
+        fail_case(&mut case, "并发 serve 未在超时内出现 running");
+    };
+    let winner_port = winner_port.expect("winner port");
+
+    // 稳定窗口：control 不得抖动到另一个 pid/port。
+    thread::sleep(Duration::from_secs(2));
+    for _ in 0..5 {
+        let status = match case.run_cli(&["status"]) {
+            Ok(s) => s,
+            Err(err) => fail_case(&mut case, format!("status 失败: {err}")),
+        };
+        let value = match status.parse_status_json() {
+            Ok(v) => v,
+            Err(err) => fail_case(&mut case, err),
+        };
+        if value.kind != "running" {
+            fail_case(&mut case, format!("期望保持 running，实际 {:?}", value));
+        }
+        let control = value
+            .control
+            .clone()
+            .unwrap_or_else(|| fail_case(&mut case, "running 无 control"));
+        if control.pid != winner_pid || control.port != winner_port {
+            fail_case(
+                &mut case,
+                format!(
+                    "control 在并发 serve 下发生切换: winner=({winner_pid},{winner_port}) now=({}, {})",
+                    control.pid, control.port
+                ),
+            );
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    if let Err(err) = case.wait_for_health(winner_port) {
+        fail_case(&mut case, err);
+    }
+
+    // 用 try_wait 判断 child 是否退出（kill -0 会对僵尸进程误报存活）。
+    let loser_deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let exited1 = matches!(c1.try_wait(), Ok(Some(_)));
+        let exited2 = matches!(c2.try_wait(), Ok(Some(_)));
+        let running_children = usize::from(!exited1) + usize::from(!exited2);
+        if running_children <= 1 {
+            break;
+        }
+        if Instant::now() >= loser_deadline {
+            let _ = case.run_cli(&["stop"]);
+            let _ = c1.kill();
+            let _ = c2.kill();
+            let _ = c1.wait();
+            let _ = c2.wait();
+            fail_case(
+                &mut case,
+                format!(
+                    "serve 锁超时后仍有两个未退出 child pid={} / {} (winner={winner_pid})",
+                    c1.id(),
+                    c2.id()
+                ),
+            );
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    let _ = case.run_cli(&["stop"]);
+    let _ = c1.kill();
+    let _ = c2.kill();
+    let _ = c1.wait();
+    let _ = c2.wait();
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     start 与 direct serve 并发时，若只看全局 Running 不校验 PID，会放弃自己的 child
+///     导致稍后意外重启；必须 kill+reap owned child 并采纳已有实例。
+///
+/// Code Logic（这个测试做什么）:
+///     先 spawn direct serve，再 start；断言 start 成功、仅一个 running pid，
+///     且 start 退出后不会再出现第二个 backend。
+#[test]
+fn start_concurrent_with_direct_serve_adopts_existing_and_reaps_owned_child() {
+    if let Err(reason) = ensure_platform_supported() {
+        eprintln!("{reason}");
+        return;
+    }
+    let mut case = SmokeCase::new("start-vs-direct-serve").expect("create case");
+    let bin = case.backend_bin.clone();
+    let data_dir = case.data_dir.clone();
+
+    let mut serve_child = match std::process::Command::new(&bin)
+        .arg("serve")
+        .env("CC_PARTNER_DATA_DIR", &data_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(err) => fail_case(&mut case, format!("spawn serve: {err}")),
+    };
+    case.record_pid(serve_child.id());
+
+    // 并发 start
+    let start = match case.run_cli(&["start"]) {
+        Ok(s) => s,
+        Err(err) => {
+            let _ = serve_child.kill();
+            let _ = serve_child.wait();
+            fail_case(&mut case, format!("start 失败: {err}"))
+        }
+    };
+    if start.code != Some(0) {
+        let _ = serve_child.kill();
+        let _ = serve_child.wait();
+        fail_case(
+            &mut case,
+            format!("start 应成功采纳已有 serve\n{}", start.diagnostic()),
+        );
+    }
+    let start_status = match start.parse_status_json() {
+        Ok(v) => v,
+        Err(err) => {
+            let _ = serve_child.kill();
+            let _ = serve_child.wait();
+            fail_case(&mut case, err)
+        }
+    };
+    if start_status.kind != "running" {
+        let _ = serve_child.kill();
+        let _ = serve_child.wait();
+        fail_case(&mut case, format!("期望 running，实际 {:?}", start_status));
+    }
+    let control = start_status
+        .control
+        .clone()
+        .unwrap_or_else(|| fail_case(&mut case, "running 无 control"));
+    case.record_pid(control.pid);
+
+    // 稳定窗口：不得出现第二实例 pid 切换
+    thread::sleep(Duration::from_secs(2));
+    for _ in 0..5 {
+        let status = match case.run_cli(&["status"]) {
+            Ok(s) => s,
+            Err(err) => fail_case(&mut case, format!("status 失败: {err}")),
+        };
+        let value = match status.parse_status_json() {
+            Ok(v) => v,
+            Err(err) => fail_case(&mut case, err),
+        };
+        if value.kind != "running" {
+            fail_case(&mut case, format!("期望保持 running，实际 {:?}", value));
+        }
+        let now = value
+            .control
+            .clone()
+            .unwrap_or_else(|| fail_case(&mut case, "running 无 control"));
+        if now.pid != control.pid || now.port != control.port {
+            fail_case(
+                &mut case,
+                format!(
+                    "start 后 control 切换，疑似遗留 child 抢锁: first=({},{}) now=({},{})",
+                    control.pid, control.port, now.pid, now.port
+                ),
+            );
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    let _ = case.run_cli(&["stop"]);
+    let _ = serve_child.kill();
+    let _ = serve_child.wait();
+}
