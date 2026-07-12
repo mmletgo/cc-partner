@@ -200,7 +200,8 @@ function buildBridgeFakes(): TerminalBridgeFakes {
   return {
     loadSessions: vi.fn(async () => undefined),
     focusSession: vi.fn(async () => true),
-    createSessionForWorktree: vi.fn(async () => undefined),
+    // Returns a session id so the create-worktree orchestrator exercises the post-activation focus.
+    createSessionForWorktree: vi.fn(async () => 'session-new'),
     clearBuffersForWorktree: vi.fn(),
   };
 }
@@ -270,7 +271,7 @@ function renderController(
           focusSession: bridge.focusSession as (sessionId: string) => Promise<boolean>,
           createSessionForWorktree: bridge.createSessionForWorktree as (
             worktreeId: string,
-          ) => Promise<void>,
+          ) => Promise<string | null>,
           clearBuffersForWorktree: bridge.clearBuffersForWorktree as (
             worktreeId: string,
           ) => void,
@@ -556,6 +557,13 @@ describe('useWorkbenchWorktreeGitController — create form / create action', ()
     expect(result.current.worktrees.map((w) => w.id)).toEqual(['wt-main', 'wt-new']);
     // busy cleared.
     expect(result.current.worktreeBusy).toBeNull();
+
+    // Codex re-review Finding 4: focus on the new session happens AFTER setActiveWorktreeId (so the
+    // focus lands in the correct, now-active worktree context), not inside the bridge call.
+    expect(bridge.focusSession).toHaveBeenCalledWith('session-new');
+    const setActiveCall = setActive.mock.invocationCallOrder[0];
+    const focusCall = bridge.focusSession.mock.invocationCallOrder[0];
+    expect(focusCall).toBeGreaterThan(setActiveCall);
   });
 
   test('handleCreateWorktree surfaces error and marks failure when worktree create throws', async () => {

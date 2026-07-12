@@ -22,7 +22,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
-import type { ReactElement, ReactNode } from 'react';
+import type { ReactElement } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 
 import { Workbench } from '../Workbench';
@@ -169,7 +169,7 @@ vi.mock('@tauri-apps/api/event', () => ({
     event: string,
     handler: EventListener,
   ): Promise<() => void> => {
-    const id = workbenchTestState.nextEventId++;
+    workbenchTestState.nextEventId++;
     const set = workbenchTestState.eventListeners.get(event) ?? new Set<EventListener>();
     set.add(handler);
     workbenchTestState.eventListeners.set(event, set);
@@ -181,7 +181,7 @@ vi.mock('@tauri-apps/api/event', () => ({
     event: string,
     handler: EventListener,
   ): Promise<() => void> => {
-    const id = workbenchTestState.nextEventId++;
+    workbenchTestState.nextEventId++;
     const wrapped: EventListener = (payload) => {
       handler(payload);
       workbenchTestState.eventListeners.get(event)?.delete(wrapped);
@@ -784,7 +784,6 @@ export function renderWorkbench(
 export async function flushMicrotasks(): Promise<void> {
   await act(async () => {
     for (let i = 0; i < 8; i += 1) {
-      // eslint-disable-next-line no-await-in-loop
       await Promise.resolve();
     }
   });
@@ -794,9 +793,7 @@ export async function flushMicrotasks(): Promise<void> {
 export async function flushMacrotasks(rounds = 6): Promise<void> {
   await act(async () => {
     for (let i = 0; i < rounds; i += 1) {
-      // eslint-disable-next-line no-await-in-loop
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      // eslint-disable-next-line no-await-in-loop
       await Promise.resolve();
     }
   });
@@ -825,7 +822,6 @@ export async function waitFor<T>(
     } catch (error) {
       lastError = error;
     }
-    // eslint-disable-next-line no-await-in-loop
     await act(async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
     });

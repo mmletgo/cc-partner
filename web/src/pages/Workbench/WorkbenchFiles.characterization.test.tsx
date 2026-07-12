@@ -19,7 +19,6 @@ import {
   buildWorktree,
   createDeferred,
   flushMacrotasks,
-  invokeCallsFor,
   renderWorkbench,
   setInvokeHandler,
   waitFor,

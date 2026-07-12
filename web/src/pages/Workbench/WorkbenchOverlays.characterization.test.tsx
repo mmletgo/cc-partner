@@ -83,7 +83,7 @@ describe('Workbench overlay domain (characterization)', () => {
     const session = buildSession({ id: 's-r', projectId: remote.id, worktreeId: 'wt-r' });
 
     // 第一轮所有读命令离线，让 remoteWriteDisabled=true 稳定。
-    let offline = true;
+    const offline = true;
     setInvokeHandler((call) => {
       switch (call.cmd) {
         case 'list_workbench_projects':

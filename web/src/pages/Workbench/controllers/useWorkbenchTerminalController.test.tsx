@@ -493,6 +493,94 @@ describe('useWorkbenchTerminalController — create / rename / close session', (
     // becomes the scoped active session. Verified end-to-end in the worktree controller test.
   });
 
+  test('createSessionForWorktree does NOT focus session when user switched worktree mid-flight (race guard)', async () => {
+    // Codex re-review Finding 4: after removing the worktreeId stale guard, a session created on
+    // worktree A could steal focus in B's context if the user switched A→B while A's creation was
+    // in-flight. The bridge must register the session but only focus it when the target worktree
+    // is still the active one.
+    const project = buildLocalProject();
+    const wtA = buildWorktree({ id: 'wt-a' });
+    const wtB = buildWorktree({ id: 'wt-b', isMain: false });
+    const existingOnB = buildSession({ id: 'sb', worktreeId: wtB.id });
+    const createdOnA = buildSession({ id: 'sa', worktreeId: wtA.id });
+
+    fakeSessionsApi.list.mockResolvedValue([existingOnB]);
+
+    // Hold A's session creation open until we explicitly resolve it.
+    let resolveCreateA: (session: WorkbenchSession) => void = () => undefined;
+    fakeSessionsApi.create.mockImplementationOnce(
+      () =>
+        new Promise<WorkbenchSession>((resolve) => {
+          resolveCreateA = resolve;
+        }),
+    );
+
+    const { result, rerender } = renderController({
+      activeProjectId: project.id,
+      // User starts on worktree A and triggers "new terminal".
+      activeWorktreeId: wtA.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    // Start session creation on A (promise is still pending).
+    let createPromise: Promise<unknown> | undefined;
+    await act(async () => {
+      createPromise = result.current.createSessionForWorktree(wtA.id);
+      await flushMicrotasks();
+    });
+
+    // While A's creation is in-flight, the user switches to worktree B.
+    rerender(
+      baseControllerProps({
+        activeProjectId: project.id,
+        activeWorktreeId: wtB.id,
+        remoteWriteDisabled: false,
+        terminalPanelRef: { current: null },
+        resetBuffer: vi.fn(),
+        removeBuffer: vi.fn(),
+        refreshProjectSessionStats: vi.fn(),
+        markRequestFailure: vi.fn(),
+        markRequestSuccess: vi.fn(),
+        isCurrentProject: () => true,
+        canListenToTauriEvents: () => true,
+      }),
+    );
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    // Establish B as the focused context before A resolves.
+    await act(async () => {
+      await result.current.focusSession(existingOnB.id);
+      await flushMicrotasks();
+    });
+    expect(result.current.activeSessionId).toBe(existingOnB.id);
+
+    // Now A's session creation resolves.
+    await act(async () => {
+      resolveCreateA(createdOnA);
+      await createPromise;
+      await flushMicrotasks();
+    });
+
+    // A's session is registered (not silently dropped — backend already created it)...
+    expect(result.current.sessions.map((s) => s.id)).toContain('sa');
+    // ...but it must NOT have stolen focus from B's context.
+    expect(result.current.activeSessionId).toBe(existingOnB.id);
+  });
+
   test('handleRenameSession updates the renamed session in state via API', async () => {
     const project = buildLocalProject();
     const worktree = buildWorktree();

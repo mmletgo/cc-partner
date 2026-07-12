@@ -131,7 +131,14 @@ export type WorkbenchTerminalErrorKey =
 export interface WorkbenchTerminalBridge {
   loadSessions: (projectId?: string) => Promise<void>;
   focusSession: (sessionId: string) => Promise<boolean>;
-  createSessionForWorktree: (worktreeId: string) => Promise<void>;
+  /**
+   * 为指定 worktree 创建并注册 session。
+   *
+   * Business Logic: 仅当目标 worktree 仍是当前 active worktree 时才 focus；这避免「在 A 上发起创建、
+   * 中途切到 B」时 A 的 session 抢占 B 的焦点（Codex 二次评审 Finding 4）。返回创建出的 session id
+   * （或 null），让编排方（handleCreateWorktree）在显式 setActiveWorktreeId 之后再 focus。
+   */
+  createSessionForWorktree: (worktreeId: string) => Promise<string | null>;
   clearBuffersForWorktree: (worktreeId: string) => void;
 }
 
@@ -424,43 +431,52 @@ export function useWorkbenchTerminalController(
    *   新建 worktree / 用户主动 new session 时，需要按当前布局估算初始 cols/rows 并创建 session。
    *
    * Code Logic（这个函数做什么）:
-   *   1. 读取当前 project/worktree ref，估算初始尺寸；
+   *   1. 读取当前 project ref，估算初始尺寸；
    *   2. 调用 sessions.create；如果 create 后 project 已切换，则丢弃响应；
-   *   3. 成功时 append session、记录 known id、focus、reset buffer、refresh stats；
-   *   4. 失败时 markRequestFailure + 展示 sessionError。
+   *   3. 成功时 append session、记录 known id、reset buffer、refresh stats；
+   *   4. 仅当目标 worktreeId 仍是当前 active worktree 时才 focus（防止 session 竞态抢占焦点）；
+   *   5. 失败时 markRequestFailure + 展示 sessionError；
+   *   6. 返回新创建的 session id（或 null），让编排方在显式 setActiveWorktreeId 后再 focus。
    *
-   *   重要边界：worktreeId 是显式入参；不再用 activeWorktreeIdRef 做 stale guard。
-   *   原因：useWorkbenchWorktreeGitController.handleCreateWorktree 的编排顺序是先 create worktree、
-   *   再 createSessionForWorktree、最后 setActiveWorktreeId。在 bridge 被调用的时刻，新 worktree 还没
-   *   成为 activeWorktreeId；若用 activeWorktreeIdRef !== worktreeId 守卫，会把 session 从 UI 静默丢弃
-   *   （后端已创建）。这里只用 projectId 守卫跨项目 stale；同一项目内的 worktreeId 是显式 target，
-   *   无论当前 active 是哪个都应接受 session append。loadWorktrees / setActiveWorktreeId 随后会把
-   *   新 worktree 设为 active，scopedSessions 计算会自然包含新 session。
+   * 重要边界（Codex 二次评审 Finding 4 修复）：
+   *   worktreeId 是显式入参，session 创建/注册不能因 activeWorktreeIdRef 不等于 worktreeId 而丢弃
+   *   （后端已创建，丢弃会让 session 永久消失）。但 focus 必须区分两种调用场景：
+   *     - 普通「新建终端」(handleCreateSession)：目标就是当前 active worktree，创建期间用户若切到别的
+   *       worktree，则不应把刚创建的 session 抢成焦点。故用 activeWorktreeIdRef.current === worktreeId
+   *       守卫 focus。
+   *     - 新建 worktree 流程 (handleCreateWorktree)：调用时新 worktree 还不是 active，此守卫会跳过 focus；
+   *       编排方在 setActiveWorktreeId(created.id) 之后再显式 focusSession(sessionId)，此时 active 已正确。
    */
   const createSessionForWorktree = useCallback(
-    async (worktreeId: string): Promise<void> => {
+    async (worktreeId: string): Promise<string | null> => {
       const projectId = activeProjectIdRef.current;
-      if (!projectId) return;
+      if (!projectId) return null;
       try {
         setSessionBusy(true);
         setSessionError(null);
         const initialSize = measureInitialTerminalSize?.(terminalPanelRef.current, 'single');
         const session = await workbenchApi.sessions.create(projectId, initialSize, worktreeId);
-        // Business Logic: 仅跨项目切换时丢弃；worktreeId 是显式 target，不与 activeWorktreeIdRef 比较。
+        // Business Logic: 跨项目切换则丢弃响应（后端已创建，但 UI 不再属于当前 project）。
         if (activeProjectIdRef.current !== projectId) {
-          return;
+          return null;
         }
         setSessions((current) => [...current, session]);
         knownSessionIdsRef.current.add(session.id);
-        await focusSession(session.id);
         resetTerminalBuffer(session.id);
         void refreshProjectSessionStats(projectId);
+        // Business Logic: 仅当目标 worktree 仍是当前 active worktree 时才 focus。新建 worktree 流程下，
+        // 此时 active 仍是旧 worktree（=== worktreeId 为 false），focus 交由编排方在激活后显式调用。
+        if (activeWorktreeIdRef.current === worktreeId) {
+          await focusSession(session.id);
+        }
+        return session.id;
       } catch (error) {
         if (activeProjectIdRef.current !== projectId) {
-          return;
+          return null;
         }
         markRequestFailure(projectId, error);
         setSessionError(displayErrorMessage(error, t('createSession')));
+        return null;
       } finally {
         setSessionBusy(false);
       }
