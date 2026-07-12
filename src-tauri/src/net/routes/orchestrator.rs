@@ -1282,4 +1282,80 @@ mod tests {
         assert!(resp.config.enabled);
         assert_eq!(resp.config.max_concurrent_tasks, 3);
     }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Orchestrator 路由（create/list/evidence/queue/start/retry/rework/deliver/abort/
+    ///     cancel/refresh/config）的错误必须经 P2pError::from_app_error 映射到信封。本测试覆盖
+    ///     三类典型错误：400（remote shortcut 项目被网关 guard 拒绝，属校验类）、404（任务不存在）、
+    ///     409（状态机非法转换，如对非 Blocked 任务 retry），断言 status/code/request_id 与契约一致。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对 validation/not_found/conflict 三类 AppError 构造 P2pError，断言 envelope 字段。
+    #[test]
+    fn orchestrator_routes_map_app_error_classes_to_envelope() {
+        use crate::error::{AppError, AppErrorCategory};
+        use crate::net::error_response::P2pError;
+        let ctx = P2pRequestContext {
+            request_id: "req-orch".to_string(),
+        };
+        let cases: Vec<(AppError, AppErrorCategory, &str, axum::http::StatusCode)> = vec![
+            (
+                AppError::validation("远端 Orchestrator 只接受对端本机项目"),
+                AppErrorCategory::Validation,
+                "validation_error",
+                axum::http::StatusCode::BAD_REQUEST,
+            ),
+            (
+                AppError::not_found("任务不存在"),
+                AppErrorCategory::NotFound,
+                "not_found",
+                axum::http::StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::conflict("任务当前状态不支持 retry"),
+                AppErrorCategory::Conflict,
+                "conflict",
+                axum::http::StatusCode::CONFLICT,
+            ),
+        ];
+        for (app, category, code, status) in cases {
+            assert_eq!(app.classify(), category, "AppError 分类应匹配");
+            let p2p = P2pError::from_app_error(app, &ctx, "orchestrator.tasks");
+            assert_eq!(p2p.status(), status, "状态码应匹配 code 约定");
+            assert_eq!(p2p.envelope().code, code, "code token 应匹配");
+            assert_eq!(p2p.envelope().request_id, "req-orch");
+            // Orchestrator 写/状态机操作保守默认：retryable 必须为 false。
+            assert!(
+                !p2p.envelope().retryable,
+                "orchestrator 操作 retryable 默认必须为 false"
+            );
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     orchestrator create route 的 project guard 把 remote shortcut 项目转成 AppError::validation，
+    ///     经 route handler 的 map_err 后必须变成 400 validation_error 信封，而不是 500 internal_error。
+    ///     这是 Task 6 把 AppError::generic → AppError::validation 的语义校正在边界上的回归保护。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     直接调用 ensure_remote_orchestrator_local_project 对 remote kind 项目取 AppError，
+    ///     经 P2pError::from_app_error 映射后断言 status=400 且 code=validation_error。
+    #[test]
+    fn remote_shortcut_project_guard_maps_to_400_validation_envelope() {
+        use crate::net::error_response::P2pError;
+        let ctx = P2pRequestContext {
+            request_id: "req-guard".to_string(),
+        };
+        let app_error = ensure_remote_orchestrator_local_project(&project_row_with_kind("remote"))
+            .expect_err("remote shortcut 必须被 guard 拒绝");
+
+        let p2p = P2pError::from_app_error(app_error, &ctx, "orchestrator.tasks.create");
+        assert_eq!(
+            p2p.status(),
+            axum::http::StatusCode::BAD_REQUEST,
+            "remote shortcut 拒绝应映射为 400 而非 500"
+        );
+        assert_eq!(p2p.envelope().code, "validation_error");
+        assert_eq!(p2p.envelope().request_id, "req-guard");
+    }
 }
