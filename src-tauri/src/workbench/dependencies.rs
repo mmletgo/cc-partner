@@ -41,7 +41,9 @@ const PROBE_PIPE_DRAIN_BYTE_BUDGET: usize = 256 * 1024;
 ///     必须把剩余 deadline 与取消信号传入 probe，并在返回前有界 reap 已登记进程树。
 ///
 /// Code Logic（这个结构做什么）:
-///     持有 AtomicBool 取消标志，以及已 spawn 的 Unix pgid / 子进程 pid 列表；overall deadline 由调用方传入 probe。
+///     持有 AtomicBool 取消标志，以及已 spawn 的 Unix pgid / 子进程 pid 列表；
+///     Windows 额外登记 Job Object（KILL_ON_JOB_CLOSE），覆盖根进程已退出后的后代树；
+///     overall deadline 由调用方传入 probe。
 #[derive(Debug, Default)]
 pub struct ProbeRuntimeGuard {
     cancel: std::sync::atomic::AtomicBool,
@@ -49,6 +51,9 @@ pub struct ProbeRuntimeGuard {
     process_groups: Mutex<Vec<u32>>,
     /// 直接子进程 pid 列表（全平台）。
     child_pids: Mutex<Vec<u32>>,
+    /// Windows：pid → Job Object；超时 cancel_and_reap 可终止整棵进程树。
+    #[cfg(windows)]
+    jobs: Mutex<Vec<(u32, Arc<WindowsProbeJob>)>>,
 }
 
 impl ProbeRuntimeGuard {
@@ -96,10 +101,27 @@ impl ProbeRuntimeGuard {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     Windows 上根进程可能先退出，仅登记 pid 后 taskkill /T 无法可靠枚举树；
+    ///     必须把 Job Object 句柄交给 guard，硬超时路径才能 TerminateJobObject。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 pid 登记 Arc<WindowsProbeJob>；同一 pid 重复登记时覆盖。
+    #[cfg(windows)]
+    pub fn register_job(&self, pid: u32, job: Arc<WindowsProbeJob>) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            if let Some(existing) = jobs.iter_mut().find(|(p, _)| *p == pid) {
+                existing.1 = job;
+            } else {
+                jobs.push((pid, job));
+            }
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     子进程正常退出后不再需要超时路径 kill，避免误伤 pid 复用。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     从 pid / pgid 列表移除该 id（保留其它仍在跑的探测）。
+    ///     从 pid / pgid / job 列表移除该 id（保留其它仍在跑的探测）。
     pub fn unregister_child(&self, pid: u32) {
         if let Ok(mut pids) = self.child_pids.lock() {
             pids.retain(|value| *value != pid);
@@ -108,15 +130,31 @@ impl ProbeRuntimeGuard {
         if let Ok(mut groups) = self.process_groups.lock() {
             groups.retain(|value| *value != pid);
         }
+        #[cfg(windows)]
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.retain(|(value, _)| *value != pid);
+        }
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     doctor 硬超时返回前必须 best-effort 终止仍在跑的依赖探测进程树。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     先 cancel，再 Unix killpg + 全平台对登记 pid 发 kill，短 sleep 作为有界 reap 窗口。
+    ///     先 cancel；Windows 优先 TerminateJobObject（覆盖已退出根下的后代）；
+    ///     再 Unix killpg + 全平台对登记 pid 发 kill（taskkill 作无 job 时的 fallback）；
+    ///     短 sleep 作为有界 reap 窗口。
     pub fn cancel_and_reap(&self) {
         self.cancel();
+        #[cfg(windows)]
+        {
+            if let Ok(mut jobs) = self.jobs.lock() {
+                for (_pid, job) in jobs.drain(..) {
+                    if let Err(err) = job.terminate() {
+                        tracing::debug!(error = %err, "probe job TerminateJobObject 未完全成功");
+                    }
+                }
+            }
+        }
         #[cfg(unix)]
         {
             if let Ok(groups) = self.process_groups.lock() {
@@ -256,6 +294,166 @@ static TEST_WINDOWS_TASKKILL_SPAWN: std::sync::Mutex<
 ///
 /// Code Logic（这个函数做什么）:
 ///     返回当前 UTC 时刻的 RFC3339 字符串，用作进程内 `status_changed_at`。
+/// Windows 探测 Job Object：根进程退出后仍可终止整棵后代树。
+///
+/// Business Logic（为什么需要这个结构）:
+///     wrapper（如 wsl/cmd）常先启动持管道的后代再自行退出；此时仅对死根 PID
+///     `taskkill /T` 不可靠。Job Object + KILL_ON_JOB_CLOSE 把整棵树绑在句柄生命周期上。
+///
+/// Code Logic（这个结构做什么）:
+///     持有 CREATE 的 job HANDLE（OwnedHandle）；Drop/Close 触发 KILL_ON_JOB_CLOSE；
+///     `terminate` 显式 TerminateJobObject 供超时路径使用。
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct WindowsProbeJob {
+    handle: std::os::windows::io::OwnedHandle,
+}
+
+#[cfg(windows)]
+impl WindowsProbeJob {
+    /// Business Logic（为什么需要这个函数）:
+    ///     探测 spawn 后必须立刻把子进程放入 job，否则根退出后无法回收后代。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     CreateJobObjectW → 设置 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE →
+    ///     AssignProcessToJobObject(child process handle)；任一步失败返回 Err。
+    pub fn create_for_child(child: &Child) -> Result<Self, std::io::Error> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+        type BOOL = i32;
+        type DWORD = u32;
+        type HANDLE = *mut core::ffi::c_void;
+
+        const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x0000_2000;
+        const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
+
+        #[repr(C)]
+        struct JobObjectBasicLimitInformation {
+            per_process_user_time_limit: i64,
+            per_job_user_time_limit: i64,
+            limit_flags: DWORD,
+            minimum_working_set_size: usize,
+            maximum_working_set_size: usize,
+            active_process_limit: DWORD,
+            affinity: usize,
+            priority_class: DWORD,
+            scheduling_class: DWORD,
+        }
+
+        #[repr(C)]
+        struct IoCounters {
+            read_operation_count: u64,
+            write_operation_count: u64,
+            other_operation_count: u64,
+            read_transfer_count: u64,
+            write_transfer_count: u64,
+            other_transfer_count: u64,
+        }
+
+        #[repr(C)]
+        struct JobObjectExtendedLimitInformation {
+            basic_limit_information: JobObjectBasicLimitInformation,
+            io_info: IoCounters,
+            process_memory_limit: usize,
+            job_memory_limit: usize,
+            peak_process_memory_used: usize,
+            peak_job_memory_used: usize,
+        }
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CreateJobObjectW(
+                lp_job_attributes: *mut core::ffi::c_void,
+                lp_name: *const u16,
+            ) -> HANDLE;
+            fn SetInformationJobObject(
+                h_job: HANDLE,
+                job_object_information_class: i32,
+                lp_job_object_information: *mut core::ffi::c_void,
+                cb_job_object_information_length: DWORD,
+            ) -> BOOL;
+            fn AssignProcessToJobObject(h_job: HANDLE, h_process: HANDLE) -> BOOL;
+        }
+
+        let raw = unsafe { CreateJobObjectW(core::ptr::null_mut(), core::ptr::null()) };
+        if raw.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw as _) };
+
+        let mut info = JobObjectExtendedLimitInformation {
+            basic_limit_information: JobObjectBasicLimitInformation {
+                per_process_user_time_limit: 0,
+                per_job_user_time_limit: 0,
+                limit_flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                minimum_working_set_size: 0,
+                maximum_working_set_size: 0,
+                active_process_limit: 0,
+                affinity: 0,
+                priority_class: 0,
+                scheduling_class: 0,
+            },
+            io_info: IoCounters {
+                read_operation_count: 0,
+                write_operation_count: 0,
+                other_operation_count: 0,
+                read_transfer_count: 0,
+                write_transfer_count: 0,
+                other_transfer_count: 0,
+            },
+            process_memory_limit: 0,
+            job_memory_limit: 0,
+            peak_process_memory_used: 0,
+            peak_job_memory_used: 0,
+        };
+
+        let ok = unsafe {
+            SetInformationJobObject(
+                handle.as_raw_handle() as HANDLE,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                (&mut info as *mut JobObjectExtendedLimitInformation).cast(),
+                std::mem::size_of::<JobObjectExtendedLimitInformation>() as DWORD,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let process = child.as_raw_handle() as HANDLE;
+        let ok = unsafe { AssignProcessToJobObject(handle.as_raw_handle() as HANDLE, process) };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Ok(Self { handle })
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     超时/管道排空失败时必须立刻终止 job 内全部进程，不能等 Drop。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用 TerminateJobObject(handle, 1)；失败返回 last_os_error。
+    pub fn terminate(&self) -> Result<(), std::io::Error> {
+        use std::os::windows::io::AsRawHandle;
+
+        type BOOL = i32;
+        type DWORD = u32;
+        type HANDLE = *mut core::ffi::c_void;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn TerminateJobObject(h_job: HANDLE, u_exit_code: DWORD) -> BOOL;
+        }
+
+        let ok = unsafe { TerminateJobObject(self.handle.as_raw_handle() as HANDLE, 1) };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 fn now_status_changed_at() -> String {
     Utc::now().to_rfc3339()
 }
@@ -936,13 +1134,38 @@ fn run_std_command_with_timeout_guarded(
     let mut child = command.spawn().map_err(|_| ProbeCommandError::SpawnOrIo)?;
     let deadline = Instant::now() + effective;
     let process_group_id = child.id();
+    // Windows：spawn 后立刻放入 Job Object；根退出后仍可 TerminateJobObject 杀后代。
+    #[cfg(windows)]
+    let probe_job: Option<Arc<WindowsProbeJob>> = match WindowsProbeJob::create_for_child(&child) {
+        Ok(job) => {
+            let job = Arc::new(job);
+            if let Some(guard) = guard {
+                guard.register_job(process_group_id, Arc::clone(&job));
+            }
+            Some(job)
+        }
+        Err(err) => {
+            tracing::warn!(
+                pid = process_group_id,
+                error = %err,
+                "probe 未能创建/绑定 Job Object，超时将回退 taskkill /T"
+            );
+            None
+        }
+    };
     if let Some(guard) = guard {
         guard.register_child(process_group_id);
     }
 
     let status = loop {
         if guard.is_some_and(ProbeRuntimeGuard::is_cancelled) {
-            terminate_probe_child(&mut child, process_group_id, deadline);
+            terminate_probe_child(
+                &mut child,
+                process_group_id,
+                deadline,
+                #[cfg(windows)]
+                probe_job.as_deref(),
+            );
             if let Some(guard) = guard {
                 guard.unregister_child(process_group_id);
             }
@@ -952,7 +1175,13 @@ fn run_std_command_with_timeout_guarded(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    terminate_probe_child(&mut child, process_group_id, deadline);
+                    terminate_probe_child(
+                        &mut child,
+                        process_group_id,
+                        deadline,
+                        #[cfg(windows)]
+                        probe_job.as_deref(),
+                    );
                     if let Some(guard) = guard {
                         guard.unregister_child(process_group_id);
                     }
@@ -963,7 +1192,13 @@ fn run_std_command_with_timeout_guarded(
             }
             Err(_) => {
                 // try_wait 失败也走终止路径，避免留下僵尸。
-                terminate_probe_child(&mut child, process_group_id, deadline);
+                terminate_probe_child(
+                    &mut child,
+                    process_group_id,
+                    deadline,
+                    #[cfg(windows)]
+                    probe_job.as_deref(),
+                );
                 if let Some(guard) = guard {
                     guard.unregister_child(process_group_id);
                 }
@@ -973,7 +1208,12 @@ fn run_std_command_with_timeout_guarded(
     };
 
     // 正常退出：在共享截止时间（+ 小额 grace）内有界非阻塞 drain，避免后代持 pipe 时无界阻塞。
-    let (stdout, stderr) = drain_probe_pipes(&mut child, deadline);
+    let (stdout, stderr) = drain_probe_pipes(
+        &mut child,
+        deadline,
+        #[cfg(windows)]
+        probe_job.as_deref(),
+    );
     if let Some(guard) = guard {
         guard.unregister_child(process_group_id);
     }
@@ -986,14 +1226,19 @@ fn run_std_command_with_timeout_guarded(
 
 /// Business Logic（为什么需要这个函数）:
 ///     超时或 IO 失败后必须 best-effort 终止进程树并回收，但 kill 失败时不能无条件 child.wait() 永久挂起。
-///     Windows 上 WSL/wrapper 会派生子孙进程：仅 Child::kill 会留下后代，且过早 unregister 后
-///     cancel_and_reap 无法再 taskkill /T。
+///     Windows 上 WSL/wrapper 会派生子孙进程：仅 Child::kill 会留下后代；根进程已退出时
+///     taskkill /T 也不可靠，必须优先 TerminateJobObject。
 ///
 /// Code Logic（这个函数做什么）:
 ///     Unix 先 killpg(SIGKILL) 再 child.kill()，killpg 失败时记 warning（含 ESRCH 外的真实错误）；
-///     Windows 在共享截止时间内对直接子 PID 执行有界 taskkill /T /F，再 child.kill() 兜底；
+///     Windows 优先 TerminateJobObject；无 job 或失败时再有界 taskkill /T /F，最后 child.kill()；
 ///     随后在 deadline+PROBE_TERMINATE_GRACE 内轮询 try_wait，超时则丢弃 wait，并 drop 管道读端。
-fn terminate_probe_child(child: &mut Child, process_group_id: u32, deadline: Instant) {
+fn terminate_probe_child(
+    child: &mut Child,
+    process_group_id: u32,
+    deadline: Instant,
+    #[cfg(windows)] job: Option<&WindowsProbeJob>,
+) {
     #[cfg(unix)]
     {
         if let Err(err) = kill_probe_process_group(process_group_id) {
@@ -1009,19 +1254,34 @@ fn terminate_probe_child(child: &mut Child, process_group_id: u32, deadline: Ins
     }
     #[cfg(windows)]
     {
-        // Business Logic: 必须在 unregister 前杀进程树，否则后代存活且 cancel_and_reap 已丢 PID。
+        // Business Logic: 根已退出时 taskkill /T 不可靠；job 才能覆盖持管道后代。
         let remaining = deadline
             .saturating_duration_since(Instant::now())
             .max(Duration::from_millis(1));
         let grace = remaining
             .min(PROBE_TERMINATE_GRACE)
             .max(Duration::from_millis(50));
-        if let Err(err) = kill_probe_pid_windows(process_group_id, grace) {
-            tracing::debug!(
-                pid = process_group_id,
-                error = %err,
-                "probe taskkill /T 未完全成功，继续 child.kill 兜底"
-            );
+        let mut job_ok = false;
+        if let Some(job) = job {
+            match job.terminate() {
+                Ok(()) => job_ok = true,
+                Err(err) => {
+                    tracing::debug!(
+                        pid = process_group_id,
+                        error = %err,
+                        "probe TerminateJobObject 失败，回退 taskkill /T"
+                    );
+                }
+            }
+        }
+        if !job_ok {
+            if let Err(err) = kill_probe_pid_windows(process_group_id, grace) {
+                tracing::debug!(
+                    pid = process_group_id,
+                    error = %err,
+                    "probe taskkill /T 未完全成功，继续 child.kill 兜底"
+                );
+            }
         }
     }
     if let Err(err) = child.kill() {
@@ -1078,8 +1338,12 @@ fn kill_probe_process_group(process_group_id: u32) -> Result<(), std::io::Error>
 ///
 /// Code Logic（这个函数做什么）:
 ///     在当前线程把 stdout/stderr 设为 nonblocking，poll/select 到 deadline 为止增量读取；
-///     超时则 killpg+kill child 并 drop 读端，绝不 spawn/detach 线程。
-fn drain_probe_pipes(child: &mut Child, deadline: Instant) -> (Vec<u8>, Vec<u8>) {
+///     超时则 killpg/job+kill child 并 drop 读端，绝不 spawn/detach 线程。
+fn drain_probe_pipes(
+    child: &mut Child,
+    deadline: Instant,
+    #[cfg(windows)] job: Option<&WindowsProbeJob>,
+) -> (Vec<u8>, Vec<u8>) {
     let process_group_id = child.id();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -1089,8 +1353,14 @@ fn drain_probe_pipes(child: &mut Child, deadline: Instant) -> (Vec<u8>, Vec<u8>)
         drain_child_pipes_nonblocking(stdout, stderr, drain_deadline);
 
     if timed_out {
-        // 写端可能仍被后代持有：终止进程组/子进程，读端已在本函数作用域 drop。
-        terminate_probe_child(child, process_group_id, Instant::now());
+        // 写端可能仍被后代持有：终止进程组/job/子进程，读端已在本函数作用域 drop。
+        terminate_probe_child(
+            child,
+            process_group_id,
+            Instant::now(),
+            #[cfg(windows)]
+            job,
+        );
     }
 
     (stdout_buf, stderr_buf)
@@ -2197,7 +2467,13 @@ mod tests {
         let _ = child.wait();
         let deadline = Instant::now();
         let started = Instant::now();
-        terminate_probe_child(&mut child, pgid, deadline);
+        terminate_probe_child(
+            &mut child,
+            pgid,
+            deadline,
+            #[cfg(windows)]
+            None,
+        );
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_millis(500),
@@ -2249,7 +2525,13 @@ mod tests {
         }
 
         let deadline = Instant::now() + Duration::from_millis(200);
-        terminate_probe_child(&mut child, pid, deadline);
+        terminate_probe_child(
+            &mut child,
+            pid,
+            deadline,
+            #[cfg(windows)]
+            None,
+        );
 
         {
             let mut hook = TEST_WINDOWS_TASKKILL_SPAWN.lock().expect("hook lock");
@@ -2280,7 +2562,12 @@ mod tests {
         let _ = child.wait();
         let started = Instant::now();
         let past_deadline = Instant::now() - Duration::from_millis(1);
-        let (stdout, stderr) = drain_probe_pipes(&mut child, past_deadline);
+        let (stdout, stderr) = drain_probe_pipes(
+            &mut child,
+            past_deadline,
+            #[cfg(windows)]
+            None,
+        );
         let elapsed = started.elapsed();
         // 允许小额 grace；必须远小于无界阻塞。
         assert!(
@@ -2307,7 +2594,12 @@ mod tests {
         let status = child.wait().expect("wait printf");
         assert!(status.success());
         let deadline = Instant::now() + Duration::from_secs(2);
-        let (stdout, _stderr) = drain_probe_pipes(&mut child, deadline);
+        let (stdout, _stderr) = drain_probe_pipes(
+            &mut child,
+            deadline,
+            #[cfg(windows)]
+            None,
+        );
         assert_eq!(String::from_utf8_lossy(&stdout), "hello");
     }
 
@@ -2355,7 +2647,12 @@ mod tests {
         // 过期 deadline 强制走 drain 超时 → killpg 路径。
         let started = Instant::now();
         let past_deadline = Instant::now() - Duration::from_millis(1);
-        let (_stdout, _stderr) = drain_probe_pipes(&mut child, past_deadline);
+        let (_stdout, _stderr) = drain_probe_pipes(
+            &mut child,
+            past_deadline,
+            #[cfg(windows)]
+            None,
+        );
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_secs(2),
@@ -2450,7 +2747,12 @@ mod tests {
             let started = Instant::now();
             // 给极短 grace：非阻塞 poll 应在 deadline 后立刻因超时关闭读端返回。
             let past_deadline = Instant::now() - Duration::from_millis(1);
-            let (_stdout, _stderr) = drain_probe_pipes(&mut child, past_deadline);
+            let (_stdout, _stderr) = drain_probe_pipes(
+                &mut child,
+                past_deadline,
+                #[cfg(windows)]
+                None,
+            );
             let elapsed = started.elapsed();
             assert!(
                 elapsed < Duration::from_secs(2),
@@ -2520,7 +2822,12 @@ mod tests {
         // 给真实 grace 窗口：管道始终可读时，旧实现会无限 pump；新实现靠 deadline/预算退出。
         let started = Instant::now();
         let drain_deadline = Instant::now() + Duration::from_millis(200);
-        let (stdout, _stderr) = drain_probe_pipes(&mut child, drain_deadline);
+        let (stdout, _stderr) = drain_probe_pipes(
+            &mut child,
+            drain_deadline,
+            #[cfg(windows)]
+            None,
+        );
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_secs(2),
@@ -2670,6 +2977,109 @@ mod tests {
             fallback.contains("plan_windows_pipe_read"),
             "fallback 函数体必须经 plan_windows_pipe_read 决策后再 read"
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     根进程先退出后 taskkill /T 不可靠；生产路径必须在 Windows spawn 时绑定 Job Object。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     审查生产源码含 CreateJobObjectW / KILL_ON_JOB_CLOSE / AssignProcessToJobObject /
+    ///     TerminateJobObject，且 terminate_probe_child / cancel_and_reap 优先使用 job。
+    ///     真实“父退子存”杀树验证需 windows-latest runner；非 Windows 以本源码契约测试代替。
+    #[test]
+    fn windows_probe_job_object_source_contract() {
+        let source = include_str!("dependencies.rs");
+        let production = source
+            .split("mod tests {")
+            .next()
+            .expect("dependencies.rs 应包含 mod tests");
+        assert!(
+            production.contains("CreateJobObjectW"),
+            "Windows probe 必须 CreateJobObjectW"
+        );
+        assert!(
+            production.contains("JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE")
+                || production.contains("0x0000_2000")
+                || production.contains("0x00002000"),
+            "Job 必须启用 KILL_ON_JOB_CLOSE"
+        );
+        assert!(
+            production.contains("AssignProcessToJobObject"),
+            "spawn 后必须 AssignProcessToJobObject"
+        );
+        assert!(
+            production.contains("TerminateJobObject"),
+            "超时路径必须 TerminateJobObject"
+        );
+        assert!(
+            production.contains("register_job") || production.contains("jobs:"),
+            "ProbeRuntimeGuard 必须登记 job 句柄"
+        );
+        let terminate = production
+            .split("fn terminate_probe_child")
+            .nth(1)
+            .and_then(|rest| rest.split("fn kill_probe_process_group").next())
+            .expect("应能切出 terminate_probe_child");
+        assert!(
+            terminate.contains("job.terminate") || terminate.contains("TerminateJobObject"),
+            "terminate_probe_child 必须优先 job.terminate"
+        );
+        assert!(
+            terminate.contains("kill_probe_pid_windows") || terminate.contains("taskkill"),
+            "无 job 时仍保留 taskkill fallback"
+        );
+        let cancel = production
+            .split("fn cancel_and_reap")
+            .nth(1)
+            .and_then(|rest| rest.split("fn kill_probe_pid").next())
+            .expect("应能切出 cancel_and_reap");
+        assert!(
+            cancel.contains("TerminateJobObject")
+                || cancel.contains("job.terminate")
+                || cancel.contains("jobs.drain"),
+            "cancel_and_reap 必须终止已登记 job"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Windows 上父进程派生持管道后代后立即退出时，deadline 后必须能通过 Job 终止后代。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     仅 Windows：cmd 启动后台 ping 后 exit；create_for_child + drain 超时；
+    ///     断言有界返回且 TerminateJobObject 成功。非 Windows 编译期跳过
+    ///     （理由：Job Object API 仅 Windows；契约由 source_contract 在全平台锁住）。
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_kills_descendants_after_root_exits() {
+        let mut child = StdCommand::new("cmd")
+            .args(["/C", "start /B ping -n 30 127.0.0.1 >/dev/null & exit 0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn cmd wrapper");
+        let job = WindowsProbeJob::create_for_child(&child).expect("create job for wrapper");
+
+        let wait_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    assert!(Instant::now() < wait_deadline, "cmd 根进程未及时退出");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(err) => panic!("try_wait cmd failed: {err}"),
+            }
+        }
+
+        let started = Instant::now();
+        let past = Instant::now() - Duration::from_millis(1);
+        let (_stdout, _stderr) = drain_probe_pipes(&mut child, past, Some(&job));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "job 杀树 drain 超时路径过长: {elapsed:?}"
+        );
+        job.terminate().expect("TerminateJobObject after root exit");
     }
 
     /// Business Logic（为什么需要这个测试）:
