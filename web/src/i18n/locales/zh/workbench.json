@@ -338,6 +338,7 @@
     },
     "nav": {
       "projects": "项目",
+      "attention": "待处理",
       "terminal": "终端",
       "browser": "预览",
       "files": "文件",
@@ -351,6 +352,10 @@
       "projects": {
         "title": "项目",
         "label": "选择项目"
+      },
+      "attention": {
+        "title": "待处理",
+        "label": "查看阻塞工作的事项"
       },
       "terminal": {
         "title": "终端",

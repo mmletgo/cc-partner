@@ -2,28 +2,48 @@
   "title": "Needs attention",
   "subtitle": "Only items that block work from continuing",
   "empty": "Nothing is blocking work right now",
+  "loading": "Loading attention items…",
   "reload": "Reload",
   "refresh": "Refresh",
   "loadError": "Could not load attention items",
+  "error": "Could not load attention items",
   "staleBanner": "Status may be out of date",
   "staleUpdatedAt": "Last successful update: {{time}}",
+  "lastUpdated": "Last successful update: {{time}}",
   "cachedLabel": "Remote cache · last synced {{time}}",
   "liveLabel": "Live",
   "projectLabel": "Project {{name}}",
   "deviceLabel": "Device {{name}}",
   "targetResolved": "Item resolved or status changed",
+  "resolvedOrChanged": "Item was resolved or changed",
+  "unsupported": "This backend does not support the global inbox (missing attention.v1)",
   "groups": {
     "decision": "Needs your decision",
     "blocked": "Blocked runs",
     "environment": "Environment blockers"
   },
+  "category": {
+    "decision": "Needs your decision",
+    "blocked": "Blocked runs",
+    "environment": "Environment blocked"
+  },
+  "freshness": {
+    "live": "Live",
+    "cached": "Cached remote"
+  },
+  "cachedAt": "Last synced {{time}}",
+  "projectDevice": "{{project}} · {{device}}",
+  "projectOnly": "{{project}}",
+  "deviceOnly": "{{device}}",
   "action": {
     "review": "Review",
-    "viewBlocked": "View blocker",
-    "viewFailedOutbox": "View failed item",
+    "viewBlocked": "View blocked reason",
+    "viewFailed": "View failed item",
     "openSettings": "Open settings"
   },
   "nav": {
     "label": "Inbox"
-  }
+  },
+  "listAriaLabel": "Attention items",
+  "badgeAriaLabel": "{{count}} attention items"
 }
