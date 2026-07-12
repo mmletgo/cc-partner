@@ -13,17 +13,20 @@ use std::thread;
 use std::time::Duration;
 
 /// Business Logic（为什么需要这个函数）:
-///     测试失败时要把 CLI 输出与 case 路径挂到 panic，便于 CI 诊断。
+///     测试失败时要把 CLI 输出与 case 路径挂到 panic，便于 CI 诊断；
+///     同时在 teardown 前落盘 diagnostics，避免 control/port 证据被清理。
 ///
 /// Code Logic（这个函数做什么）:
-///     标记 case failed 后 panic 带上下文的消息。
+///     标记 failed、写 diagnostics，再 panic 带上下文的消息。
 fn fail_case(case: &mut SmokeCase, message: impl AsRef<str>) -> ! {
+    let message = message.as_ref();
     case.mark_failed();
+    case.write_failure_diagnostics(message);
     panic!(
-        "{}\ncase_dir={}\ndata_dir={}",
-        message.as_ref(),
+        "{message}\ncase_dir={}\ndata_dir={}\ndiagnostics={}",
         case.case_dir.display(),
-        case.data_dir.display()
+        case.data_dir.display(),
+        case.case_dir.join("diagnostics").display()
     );
 }
 

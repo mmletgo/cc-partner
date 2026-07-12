@@ -387,6 +387,128 @@ impl SmokeCase {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     失败/超时后必须在 teardown 清掉 control 文件前落盘诊断，
+    ///     否则 CI artifact 只剩空目录，无法复现 port/pid/control 状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在 case_dir/diagnostics 写入 control 快照、pid 存活、环境与路径摘要。
+    pub fn write_failure_diagnostics(&self, reason: &str) {
+        let diag_dir = self.case_dir.join("diagnostics");
+        if let Err(err) = fs::create_dir_all(&diag_dir) {
+            eprintln!(
+                "[smoke] 创建 diagnostics 目录失败 path={} err={err}",
+                diag_dir.display()
+            );
+            return;
+        }
+
+        let control_path = self.control_file_path();
+        let pid_path = self.pid_file_path();
+        let control_raw = fs::read_to_string(&control_path).unwrap_or_default();
+        let pid_raw = fs::read_to_string(&pid_path).unwrap_or_default();
+        if !control_raw.is_empty() {
+            let _ = fs::write(diag_dir.join("backend-control.json"), &control_raw);
+        }
+        if !pid_raw.is_empty() {
+            let _ = fs::write(diag_dir.join("backend.pid"), &pid_raw);
+        }
+
+        let mut pid = self.recorded_pid.unwrap_or(0);
+        let mut port = 0u16;
+        if let Ok(Some(control)) = read_control_file(&control_path) {
+            pid = control.pid;
+            port = control.port;
+        }
+        let alive = if pid == 0 {
+            false
+        } else {
+            process_is_alive(pid)
+        };
+
+        let summary = format!(
+            "reason={reason}\n\
+name={}\n\
+case_dir={}\n\
+data_dir={}\n\
+backend_bin={}\n\
+op_timeout_secs={}\n\
+recorded_pid={:?}\n\
+control_pid={pid}\n\
+control_port={port}\n\
+process_alive={alive}\n\
+control_path={}\n\
+pid_path={}\n\
+CC_PARTNER_SMOKE_ROOT={}\n\
+CC_PARTNER_SMOKE_KEEP={}\n\
+RUST_BACKTRACE={}\n\
+timestamp_unix_ns={}\n",
+            self.name,
+            self.case_dir.display(),
+            self.data_dir.display(),
+            self.backend_bin.display(),
+            self.op_timeout.as_secs(),
+            self.recorded_pid,
+            control_path.display(),
+            pid_path.display(),
+            std::env::var("CC_PARTNER_SMOKE_ROOT").unwrap_or_default(),
+            std::env::var("CC_PARTNER_SMOKE_KEEP").unwrap_or_default(),
+            std::env::var("RUST_BACKTRACE").unwrap_or_default(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        if let Err(err) = fs::write(diag_dir.join("summary.txt"), summary) {
+            eprintln!(
+                "[smoke] 写 diagnostics/summary.txt 失败 path={} err={err}",
+                diag_dir.display()
+            );
+        }
+
+        // 进程/端口快照（best-effort，仅诊断，不用于扫杀）。
+        let mut snapshot = String::from("--- process ---\n");
+        #[cfg(unix)]
+        {
+            if pid != 0 {
+                if let Ok(output) = Command::new("ps")
+                    .args(["-p", &pid.to_string(), "-o", "pid,ppid,stat,command"])
+                    .output()
+                {
+                    snapshot.push_str(&String::from_utf8_lossy(&output.stdout));
+                    snapshot.push('\n');
+                }
+            }
+            if port != 0 {
+                if let Ok(output) = Command::new("lsof")
+                    .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+                    .output()
+                {
+                    snapshot.push_str("--- lsof port ---\n");
+                    snapshot.push_str(&String::from_utf8_lossy(&output.stdout));
+                    snapshot.push('\n');
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            if pid != 0 {
+                if let Ok(output) = Command::new("tasklist")
+                    .args(["/FI", &format!("PID eq {pid}")])
+                    .output()
+                {
+                    snapshot.push_str(&String::from_utf8_lossy(&output.stdout));
+                    snapshot.push('\n');
+                }
+            }
+        }
+        let _ = fs::write(diag_dir.join("process-port.txt"), snapshot);
+        eprintln!(
+            "[smoke] 已写入 failure diagnostics path={}",
+            diag_dir.display()
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     Drop 与显式 teardown 共用同一清理序列。
     ///
     /// Code Logic（这个函数做什么）:
@@ -411,20 +533,33 @@ impl SmokeCase {
 
 impl Drop for SmokeCase {
     /// Business Logic（为什么需要这个函数）:
-    ///     panic 或测试结束时也必须清理本 case 的 backend，避免残留进程/端口。
+    ///     panic 或测试结束时也必须清理本 case 的 backend，避免残留进程/端口；
+    ///     失败/panic 时还要先落盘诊断再 teardown，保证 CI artifact 有证据。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     执行 teardown_processes；仅当 keep 或 failed 时保留 case 目录。
+    ///     若 keep/failed/panicking 则写 diagnostics；再 teardown；仅保留时留下 case 目录。
     fn drop(&mut self) {
+        let panicking = std::thread::panicking();
+        let retain = self.keep || self.failed || panicking;
+        if retain {
+            let reason = if self.failed {
+                "marked_failed"
+            } else if panicking {
+                "panic_unwinding"
+            } else {
+                "keep_requested"
+            };
+            self.write_failure_diagnostics(reason);
+        }
         self.teardown_processes();
-        let retain = self.keep || self.failed;
         if retain {
             eprintln!(
-                "[smoke] 保留 case 目录 name={} path={} keep={} failed={}",
+                "[smoke] 保留 case 目录 name={} path={} keep={} failed={} panicking={}",
                 self.name,
                 self.case_dir.display(),
                 self.keep,
-                self.failed
+                self.failed,
+                panicking
             );
             // 防止 TempDir Drop 删除保留目录：泄漏 TempDir 所有权。
             if let Some(temp) = self._temp_root.take() {

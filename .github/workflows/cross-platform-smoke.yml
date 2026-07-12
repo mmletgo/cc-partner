@@ -130,6 +130,8 @@ jobs:
         working-directory: src-tauri
         shell: bash
         env:
+          # 与 CLI smoke 共用隔离根，失败时 pty 也会把 raw/escaped 输出落盘到此
+          CC_PARTNER_SMOKE_ROOT: ${{ env.CC_PARTNER_SMOKE_ROOT }}
           RUST_BACKTRACE: '1'
         run: |
           set -euo pipefail
@@ -137,6 +139,8 @@ jobs:
             2>&1 | tee "${{ runner.temp }}/cargo-logs/pty-smoke.log"
 
       # 无条件清理：只读 smoke 目录下 control 文件，停止记录的 PID，写出诊断
+      # 注意：case 失败时 Rust harness 已在 case_dir/diagnostics 留下 control/summary 快照；
+      # 本步骤只清理残留 PID，绝不删除 case_dir/diagnostics 或 cargo-logs。
       - name: Cleanup smoke processes and write diagnostics
         id: cleanup
         if: always()
@@ -151,29 +155,37 @@ jobs:
           mkdir -p "${DIAG}"
           echo "=== smoke cleanup @ $(date -u +%Y-%m-%dT%H:%M:%SZ) ===" | tee "${DIAG}/cleanup.log"
           echo "ROOT=${ROOT}" | tee -a "${DIAG}/cleanup.log"
+          echo "event=${{ github.event_name }} os=${{ matrix.os }} run=${{ github.run_id }}" | tee -a "${DIAG}/cleanup.log"
 
           if [ ! -d "${ROOT}" ]; then
             echo "smoke root missing; nothing to clean" | tee -a "${DIAG}/cleanup.log"
             exit 0
           fi
 
-          # 列出 smoke 目录树（有界）
+          # 列出 smoke 目录树（有界）；保留 case diagnostics 供 artifact
           {
-            echo "--- tree (depth 4) ---"
+            echo "--- tree (depth 5) ---"
             if command -v find >/dev/null 2>&1; then
-              find "${ROOT}" -maxdepth 4 \( -type f -o -type d \) 2>/dev/null | head -n 400
+              find "${ROOT}" -maxdepth 5 \( -type f -o -type d \) 2>/dev/null | head -n 600
             else
-              ls -laR "${ROOT}" 2>/dev/null | head -n 400
+              ls -laR "${ROOT}" 2>/dev/null | head -n 600
             fi
+            echo "--- retained case diagnostics (if any) ---"
+            find "${ROOT}" -type d -name diagnostics 2>/dev/null | head -n 50
+            find "${ROOT}" -type f \( -name 'summary.txt' -o -name 'backend-control.json' -o -name 'output.escaped.txt' -o -name 'process-port.txt' \) 2>/dev/null | head -n 100
           } > "${DIAG}/tree.txt" 2>&1
 
-          # 仅处理 smoke 拥有的 backend-control.json
+          # 仅处理 smoke 拥有的 backend-control.json（live control，不含 diagnostics 快照副本）
           CONTROL_FILES=()
           while IFS= read -r -d '' f; do
+            # 跳过 diagnostics 目录内的快照，避免误删证据
+            case "$f" in
+              */diagnostics/*) continue ;;
+            esac
             CONTROL_FILES+=("$f")
           done < <(find "${ROOT}" -name 'backend-control.json' -type f -print0 2>/dev/null)
 
-          echo "found ${#CONTROL_FILES[@]} control file(s)" | tee -a "${DIAG}/cleanup.log"
+          echo "found ${#CONTROL_FILES[@]} live control file(s)" | tee -a "${DIAG}/cleanup.log"
 
           for cf in "${CONTROL_FILES[@]:-}"; do
             [ -n "${cf:-}" ] || continue
@@ -195,7 +207,7 @@ jobs:
                 fi
               fi
             fi
-            # 删除本 case 的 control / pid 文件（不扫全局）
+            # 删除本 case 的 live control / pid 文件（不扫全局；不碰 diagnostics 快照）
             dir="$(dirname "${cf}")"
             rm -f "${cf}" "${dir}/backend.pid" 2>/dev/null
           done
@@ -222,6 +234,14 @@ jobs:
             cp -R "${{ runner.temp }}/cargo-logs/." "${ROOT}/cargo-logs/" 2>/dev/null || true
           fi
 
+          # 证据清单：失败时 artifact 至少应能看到 cargo-logs 与任一 case diagnostics
+          {
+            echo "smoke_root=${ROOT}"
+            echo "cargo_logs=${ROOT}/cargo-logs"
+            echo "case_diagnostics:"
+            find "${ROOT}" -type d -name diagnostics 2>/dev/null | head -n 50
+          } > "${DIAG}/evidence-index.txt" 2>&1
+
           echo "cleanup finished" | tee -a "${DIAG}/cleanup.log"
           # 清理步骤本身不阻断 job（诊断优先）；真正失败由前置 step 决定
           exit 0
@@ -230,10 +250,11 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
+          # 每个 matrix OS 独立 artifact，避免互相覆盖
           name: cross-platform-smoke-${{ matrix.os }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/cc-partner-smoke/**
-            ${{ runner.temp }}/cargo-logs/**
+            ${{ runner.temp }}/cc-partner-smoke
+            ${{ runner.temp }}/cargo-logs
           if-no-files-found: warn
           retention-days: 7
 
