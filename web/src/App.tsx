@@ -28,6 +28,9 @@ import { PERMISSION_ONBOARDED_KEY } from './hooks/usePermissions';
 import { WorkbenchProjectsProvider } from './hooks/useWorkbenchProjects';
 import { WorkbenchDependencyProvider } from './hooks/useWorkbenchDependency';
 import { WorkbenchTerminalBuffersProvider } from './hooks/useWorkbenchTerminalBuffers';
+import { AttentionProvider } from './hooks/useAttention';
+import { attentionApi } from './api/attention';
+import { Attention } from './pages/Attention';
 import { checkNotificationGranted } from './lib/notification';
 import { backendApi } from './api/backend';
 import styles from './App.module.css';
@@ -303,13 +306,16 @@ export default function App() {
               <WorkbenchDependencyProvider>
                 <WorkbenchProjectsProvider>
                   <WorkbenchTerminalBuffersProvider>
-                    <AppShell />
+                    <AttentionProvider loadSnapshot={attentionApi.listSnapshot}>
+                      <AppShell />
+                    </AttentionProvider>
                   </WorkbenchTerminalBuffersProvider>
                 </WorkbenchProjectsProvider>
               </WorkbenchDependencyProvider>
             }
           >
             <Route path="/" element={<Home />} />
+            <Route path="/attention" element={<Attention />} />
             <Route path="/transfer" element={<Transfer />} />
             <Route path="/prompts" element={<Prompts />} />
             <Route path="/cc-history" element={<CcHistory />} />

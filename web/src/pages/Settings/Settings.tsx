@@ -59,6 +59,7 @@ import {
   promptOptimizerSettingsConfigToForm,
   promptOptimizerSettingsFormToUpdate,
   settingsStateFromConfig,
+  parseSettingsTabFromSearch,
 } from './settingsState';
 import type {
   CloudSyncForm,
@@ -158,18 +159,34 @@ export function Settings() {
   const [installing, setInstalling] = useState(false);
   const [saving, setSaving] = useState(false);
   const [choosingDir, setChoosingDir] = useState(false);
-  // 深链激活：从 ?tab= 取初值，仅接受已知 tab id，其余回退到「常规」
-  const [searchParams] = useSearchParams();
-  const initialTab = searchParams.get('tab');
-  const [activeTab, setActiveTab] = useState<SettingsTabId>(
-    initialTab === 'dependencies' ||
-      initialTab === 'health' ||
-      initialTab === 'sync' ||
-      initialTab === 'ai' ||
-      initialTab === 'automation' ||
-      initialTab === 'about'
-      ? (initialTab as SettingsTabId)
-      : 'general',
+  // 深链激活：activeTab 完全由 ?tab= 派生，挂载后 search 变化自动生效；用户点 tab 时写回 URL。
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = parseSettingsTabFromSearch(
+    searchParams.toString() ? `?${searchParams.toString()}` : '',
+  );
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户点 Settings tab 与 Attention 深链共用同一 URL 真源，才能在已挂载时响应 search 变化。
+   *
+   * Code Logic（这个函数做什么）:
+   *   将 tab 写入 searchParams（general 省略 tab）；replace 避免历史堆叠。
+   */
+  const setActiveTab = useCallback(
+    (tab: SettingsTabId) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (tab === 'general') {
+            next.delete('tab');
+          } else {
+            next.set('tab', tab);
+          }
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
   );
   const [recordingShortcutId, setRecordingShortcutId] = useState<string | null>(null);
 
@@ -264,7 +281,7 @@ export function Settings() {
     window.requestAnimationFrame(() => {
       document.getElementById(`settings-tab-${nextTab.id}`)?.focus();
     });
-  }, []);
+  }, [setActiveTab]);
 
   /**
    * 单项权限「去设置」：请求该项权限（默认弹框 + 开面板）后刷新状态

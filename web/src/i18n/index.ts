@@ -31,6 +31,7 @@ import enCcHistory from './locales/en/ccHistory.json';
 import enSsh from './locales/en/ssh.json';
 import enHealth from './locales/en/health.json';
 import enOrchestrator from './locales/en/orchestrator.json';
+import enAttention from './locales/en/attention.json';
 
 import zhCommon from './locales/zh/common.json';
 import zhNav from './locales/zh/nav.json';
@@ -49,6 +50,7 @@ import zhCcHistory from './locales/zh/ccHistory.json';
 import zhSsh from './locales/zh/ssh.json';
 import zhHealth from './locales/zh/health.json';
 import zhOrchestrator from './locales/zh/orchestrator.json';
+import zhAttention from './locales/zh/attention.json';
 
 export type AppLanguage = 'en' | 'zh';
 export const LANGUAGE_STORAGE_KEY = 'cp-lang';
@@ -91,6 +93,7 @@ export const resources = {
     ssh: enSsh,
     health: enHealth,
     orchestrator: enOrchestrator,
+    attention: enAttention,
   },
   zh: {
     common: zhCommon,
@@ -110,6 +113,7 @@ export const resources = {
     ssh: zhSsh,
     health: zhHealth,
     orchestrator: zhOrchestrator,
+    attention: zhAttention,
   },
 } as const;
 

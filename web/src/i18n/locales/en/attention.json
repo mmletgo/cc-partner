@@ -1,0 +1,29 @@
+{
+  "title": "Needs attention",
+  "subtitle": "Only items that block work from continuing",
+  "empty": "Nothing is blocking work right now",
+  "reload": "Reload",
+  "refresh": "Refresh",
+  "loadError": "Could not load attention items",
+  "staleBanner": "Status may be out of date",
+  "staleUpdatedAt": "Last successful update: {{time}}",
+  "cachedLabel": "Remote cache · last synced {{time}}",
+  "liveLabel": "Live",
+  "projectLabel": "Project {{name}}",
+  "deviceLabel": "Device {{name}}",
+  "targetResolved": "Item resolved or status changed",
+  "groups": {
+    "decision": "Needs your decision",
+    "blocked": "Blocked runs",
+    "environment": "Environment blockers"
+  },
+  "action": {
+    "review": "Review",
+    "viewBlocked": "View blocker",
+    "viewFailedOutbox": "View failed item",
+    "openSettings": "Open settings"
+  },
+  "nav": {
+    "label": "Inbox"
+  }
+}

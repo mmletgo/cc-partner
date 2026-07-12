@@ -1,0 +1,234 @@
+/* Attention 桌面 Inbox：只用 tokens，不引入专属配色体系。 */
+
+.page {
+  width: 100%;
+  min-height: 100%;
+  background: var(--bg);
+  padding: var(--space-8) 0 var(--space-12);
+}
+
+.container {
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 var(--space-10);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.titleRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.titleBlock {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-3xl);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  color: var(--fg);
+}
+
+.subtitle {
+  margin: 0;
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
+  color: var(--fg-2);
+}
+
+.banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-2);
+  color: var(--fg-2);
+  font-size: var(--text-sm);
+}
+
+.bannerError {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, var(--bg-2));
+  color: var(--fg);
+}
+
+.bannerText {
+  margin: 0;
+}
+
+.groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.groupTitle {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+  color: var(--fg-2);
+  text-transform: none;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-4);
+  align-items: center;
+  min-height: 44px;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-1, var(--bg-2));
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.item:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: var(--bg-2);
+}
+
+.item:focus-visible,
+.action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.itemBody {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.itemTitle {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+}
+
+.itemSummary {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  color: var(--fg-2);
+}
+
+.metaRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--fg-3, var(--fg-2));
+}
+
+.metaChip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.action:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+.empty {
+  padding: var(--space-8) var(--space-4);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  text-align: center;
+  color: var(--fg-2);
+  font-size: var(--text-md);
+}
+
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.skeletonBlock {
+  height: 88px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(
+    90deg,
+    var(--bg-2) 0%,
+    color-mix(in srgb, var(--bg-2) 60%, var(--fg-3, var(--border)) 40%) 50%,
+    var(--bg-2) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.2s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+.statusText {
+  font-size: var(--text-xs);
+  color: var(--fg-3, var(--fg-2));
+}

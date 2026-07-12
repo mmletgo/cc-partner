@@ -112,7 +112,13 @@ export function groupAttentionItems(items: AttentionItem[]): AttentionGroup[] {
  * Code Logic（这个函数做什么）:
  *   映射 sourceKind 到 attention namespace 下的 action.* key。
  */
-export function getAttentionActionI18nKey(sourceKind: AttentionSourceKind): string {
+export type AttentionActionI18nKey =
+  | 'attention:action.review'
+  | 'attention:action.viewBlocked'
+  | 'attention:action.viewFailedOutbox'
+  | 'attention:action.openSettings';
+
+export function getAttentionActionI18nKey(sourceKind: AttentionSourceKind): AttentionActionI18nKey {
   switch (sourceKind) {
     case 'orchestratorHumanReview':
       return 'attention:action.review';

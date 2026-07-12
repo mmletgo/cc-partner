@@ -30,10 +30,13 @@ import {
   DevicesIcon,
   SettingsIcon,
   HealthIcon,
+  AlertIcon,
   SmartphoneIcon,
   XIcon,
 } from '../../../lib/icons';
 import { useAppVersion } from '../../../hooks/useAppVersion';
+import { useAttention } from '../../../hooks/useAttention';
+import { formatAttentionBadgeCount } from '../../../lib/attention';
 import { Sidebar } from '../Sidebar';
 import { NavItem } from '../NavItem';
 import { ThemeToggle } from '../ThemeToggle';
@@ -57,6 +60,8 @@ export function AppShell({ children }: AppShellProps) {
   // 版本号以后端 __init__.py 的 __version__ 为唯一权威来源，通过 useAppVersion
   // 从 /api/version 动态获取，前端不再硬编码，避免发版漏改导致版本不一致。
   const version = useAppVersion();
+  const { snapshot: attentionSnapshot } = useAttention();
+  const attentionBadge = formatAttentionBadgeCount(attentionSnapshot?.counts.total ?? 0);
   // 传入命名空间数组,让 react-i18next v17 的 t() 类型校验 ns:key 形式
   // (无参时 t() 只接受 defaultNS 即 common 的扁平 key,'nav:*' 会类型报错)
   const { t } = useTranslation(['common', 'nav', 'settings']);
@@ -179,6 +184,12 @@ export function AppShell({ children }: AppShellProps) {
         </div>
         <nav className={styles.navList} aria-label="primary">
           <NavItem to="/" label={t('nav:home')} icon={<HomeIcon />} />
+          <NavItem
+            to="/attention"
+            label={t('nav:attention')}
+            icon={<AlertIcon />}
+            badge={attentionBadge ?? undefined}
+          />
           <NavItem to="/prompts" label={t('nav:prompts')} icon={<PromptsIcon />} />
           <NavItem to="/cc-history" label={t('nav:ccHistory')} icon={<HistoryIcon />} />
           <NavItem to="/scratchpad" label={t('nav:scratchpad')} icon={<ScratchpadIcon />} />

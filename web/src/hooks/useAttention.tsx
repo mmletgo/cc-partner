@@ -123,7 +123,9 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
 
   // 首次挂载加载；卸载时使 in-flight 请求失效。
   useEffect(() => {
-    void runLoad();
+    queueMicrotask(() => {
+      void runLoad();
+    });
     return () => {
       requestIdRef.current = nextAttentionRequestId(requestIdRef.current);
     };
@@ -210,4 +212,5 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
 }
 
 // 再导出读取 hook，便于页面 `import { useAttention, AttentionProvider } from '@/hooks/useAttention'`。
+// eslint-disable-next-line react-refresh/only-export-components -- Provider 与 hook 同入口是既定公共 API
 export { useAttention } from './attentionContext';

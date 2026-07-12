@@ -30,6 +30,7 @@ import { Button } from '@/components/primitives';
 import { useWorkbenchDependency } from '@/hooks/workbenchDependencyContext';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import { useWorkbenchTerminalBuffers } from '@/hooks/workbenchTerminalBuffersContext';
+import { useAttention } from '@/hooks/useAttention';
 import {
   BrowserIcon, EditIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon,
   PlusIcon, RefreshIcon, SearchIcon, SplitDownIcon, SplitRightIcon, XIcon,
@@ -219,7 +220,7 @@ function deferEffect(work: () => void): () => void {
  *   聚合项目、会话、终端输出 buffer、文件树与文件操作状态，并组合三栏布局。
  */
 export function Workbench() {
-  const { t } = useTranslation(['workbench', 'common', 'promptOptimizer']);
+  const { t } = useTranslation(['workbench', 'common', 'promptOptimizer', 'attention']);
   const location = useLocation();
   const navigate = useNavigate();
   const { status: dependencyStatus } = useWorkbenchDependency();
@@ -494,7 +495,23 @@ export function Workbench() {
   const {
     closeAutomation: closeAutomationConsole,
     openTaskWorkbench,
+    focusTaskId: automationFocusTaskId,
+    focusOutboxId: automationFocusOutboxId,
   } = automationController;
+  const { refresh: refreshAttention } = useAttention();
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Attention deep link 目标已解决时不能打开空白详情/终端，应提示并回到 Inbox。
+   *
+   * Code Logic（这个函数做什么）:
+   *   显示提示文案、refresh Attention、navigate `/attention`。
+   */
+  const handleAttentionTargetNotFound = useCallback(() => {
+    window.alert(t('attention:targetResolved'));
+    void refreshAttention();
+    navigate('/attention');
+  }, [navigate, refreshAttention, t]);
+
   const activeWorktree = useMemo(
     () => worktrees.find((worktree) => worktree.id === activeWorktreeId) ?? worktrees[0] ?? null,
     [activeWorktreeId, worktrees],
@@ -1122,7 +1139,13 @@ export function Workbench() {
                 </div>
               </header>
               <div className={styles.automationBody}>
-                <OrchestratorPanel embedded onOpenWorkbench={handleOpenAutomationTaskWorkbench} />
+                <OrchestratorPanel
+                  embedded
+                  onOpenWorkbench={handleOpenAutomationTaskWorkbench}
+                  focusTaskId={automationFocusTaskId}
+                  focusOutboxId={automationFocusOutboxId}
+                  onFocusTargetNotFound={handleAttentionTargetNotFound}
+                />
               </div>
             </div>
           ) : null}

@@ -1,0 +1,29 @@
+{
+  "title": "待处理",
+  "subtitle": "只保留会阻塞工作继续的事项",
+  "empty": "当前没有阻塞工作的事项",
+  "reload": "重新加载",
+  "refresh": "刷新",
+  "loadError": "无法加载待处理事项",
+  "staleBanner": "状态可能已过期",
+  "staleUpdatedAt": "上次成功更新：{{time}}",
+  "cachedLabel": "远端缓存 · 最后同步于 {{time}}",
+  "liveLabel": "实时",
+  "projectLabel": "项目 {{name}}",
+  "deviceLabel": "设备 {{name}}",
+  "targetResolved": "事项已解决或状态已变化",
+  "groups": {
+    "decision": "需要你的决定",
+    "blocked": "运行受阻",
+    "environment": "环境受阻"
+  },
+  "action": {
+    "review": "前往复核",
+    "viewBlocked": "查看阻塞原因",
+    "viewFailedOutbox": "查看失败项",
+    "openSettings": "打开设置"
+  },
+  "nav": {
+    "label": "待处理"
+  }
+}
