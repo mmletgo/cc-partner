@@ -1,6 +1,6 @@
 # web/ - React 前端
 
-> 根层概览、组件清单、token/复用规范见仓库根 `AGENTS.md`。后端协议/端口/CLI 见 `src-tauri/CLAUDE.md`。
+> 根层概览、组件清单、token/复用规范见仓库根 `AGENTS.md`。后端协议/端口/CLI 见 `src-tauri/CLAUDE.md`。跨平台 CI / smoke 矩阵见 [`docs/development/testing.md`](../docs/development/testing.md)。
 
 ## 概述
 
