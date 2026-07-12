@@ -38,7 +38,7 @@ use crate::commands::workbench::{
     zoom_workbench_pane_for_state, WorkbenchMergeResultDto,
 };
 use crate::error::AppError;
-use crate::net::error_response::{P2pError, P2pResult};
+use crate::net::error_response::{mark_response_as_passthrough, P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::net::routes::api_error_to_p2p;
 use crate::state::AppState;
@@ -316,6 +316,8 @@ pub async fn create_browser_preview(
 ///
 /// Code Logic（这个函数做什么）:
 ///     从 path 提取 previewId 和 wildcard path，委托 browser_proxy 按 session 转发 HTTP/WebSocket。
+///     透传响应（含上游 4xx/5xx 与流式 body）打上 `BrowserProxyPassthroughMarker`（Finding 1），
+///     让 `envelope_fallback_middleware` 跳过信封包装，iframe 能看到 dev server 真实响应。
 pub async fn proxy_browser_preview(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
@@ -331,7 +333,7 @@ pub async fn proxy_browser_preview(
     )
     .await
     .map_err(|e| api_error_to_p2p(e, &ctx))?;
-    Ok(response)
+    Ok(mark_response_as_passthrough(response))
 }
 
 /// 列出远端设备本机项目的 worktree。
@@ -1146,7 +1148,7 @@ pub async fn mobile_proxy_browser_preview(
     AxumPath((preview_id, path)): AxumPath<(String, String)>,
     req: Request<Body>,
 ) -> Result<Response, P2pError> {
-    proxy_workbench_browser_request(
+    let response = proxy_workbench_browser_request(
         state,
         preview_id,
         path,
@@ -1154,7 +1156,8 @@ pub async fn mobile_proxy_browser_preview(
         MOBILE_BROWSER_PROXY_ROUTE_PREFIX,
     )
     .await
-    .map_err(|e| api_error_to_p2p(e, &ctx))
+    .map_err(|e| api_error_to_p2p(e, &ctx))?;
+    Ok(mark_response_as_passthrough(response))
 }
 
 /// 列出手机端可管理的 Workbench 项目。

@@ -69,7 +69,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/sync/claude_md/pull` | `routes/claude_md_sync.rs` | none; returns the singleton row | read-only | — |
 | POST | `/api/sync/claude_md/push` | `routes/claude_md_sync.rs` | overwrites singleton + `~/.claude/CLAUDE.md` | naturally-idempotent | sender only pushes its own already-merged version; re-applying the same row + `write_file_if_changed` is a no-op |
 | POST | `/api/transfer/init` | `routes/transfer.rs` | creates `.{transfer_id}.tmp` + receive registry entry | requires-idempotency-key | `transfer_id` is client-supplied and the tmp file is keyed by it, but the server does not enforce that a transport replay reuses the same `transfer_id`; a retry that mints a new id leaks a tmp file + registry entry. Clients MUST reuse the same `transfer_id` (the de-facto idempotency key) or MUST NOT auto-retry |
-| POST | `/api/transfer/chunk/:id` | `routes/transfer.rs` | writes bytes at offset, finalizes when complete | naturally-idempotent | `X-Chunk-Offset` header + seek-write; replaying the same offset writes the same bytes; SHA256 finalize rejects mismatches |
+| POST | `/api/transfer/chunk/:id` | `routes/transfer.rs` | writes bytes at offset, finalizes when complete | no-transport-retry | the final chunk triggers `finalize_transfer` which renames the tmp file into its final path and removes the registry entry; a transport-layer replay of the same final-chunk request previously hit a missing registry entry and returned `success:false`. The receiver now guards finalize with a per-`transfer_id` singleflight lock + a short-lived terminal tombstone, so a duplicate final chunk returns the first finalize's result — but middle chunks still mutate the tmp file at arbitrary offsets and there is no per-offset dedupe, so transport-layer retries must be disabled; callers surface the failure and let the user re-initiate |
 | GET | `/api/transfer/status/:id` | `routes/transfer.rs` | none | read-only | — |
 | POST | `/api/cc-history/sync/pull` | `routes/cc_history.rs` | none | read-only | — |
 | POST | `/api/cc-history/sync/push` | `routes/cc_history.rs` | upserts CC history rows after merge | naturally-idempotent | per-row `merge_cc_history` + `bulk_upsert`; replay converges |
@@ -103,7 +103,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/workbench/files/rename` | `routes/workbench.rs` | irreversible `fs::rename` inside worktree root | no-transport-retry | source path disappears; replay after timeout can fail or rename the wrong target |
 | POST | `/api/workbench/files/delete` | `routes/workbench.rs` | irreversible delete inside worktree root | no-transport-retry | destructive |
 | GET | `/api/workbench/events` | `routes/workbench.rs` | none; NDJSON event stream | read-only | — |
-| POST | `/api/workbench/sessions/list` | `routes/workbench.rs` | `restore_persisted_sessions` may recreate missing tmux windows for persisted session rows | naturally-idempotent | `local_list_workbench_sessions` → `restore_persisted_sessions` → `sessions.restore` only creates a tmux window when `target_exists` is false and reuses the persisted `backend_window_id`; replay converges to the same window for the same session row |
+| POST | `/api/workbench/sessions/list` | `routes/workbench.rs` | `restore_persisted_sessions` may recreate missing tmux windows for persisted session rows | no-transport-retry | `local_list_workbench_sessions` → `restore_persisted_sessions` may spawn a PTY/tmux window for each persisted row. The registry now guards restore with an atomic `try_claim_restore` placeholder (Finding 5) so concurrent list requests no longer double-restore the same row, but a transport-layer replay still triggers real subprocess spawns and tmux window creation with no per-request dedupe key; callers surface the failure and let the user re-list explicitly |
 | POST | `/api/workbench/sessions/create` | `routes/workbench.rs` | new tmux window / PTY + SQLite window row | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry until a session-create idempotency key lands |
 | POST | `/api/workbench/sessions/replay` | `routes/workbench.rs` | none; reads ring buffer | read-only | — |
 | POST | `/api/workbench/sessions/write` | `routes/workbench.rs` | writes bytes to PTY/tmux pane stdin | no-transport-retry | appended input has no offset guard; replay duplicates keystrokes/commands |
@@ -136,7 +136,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/mobile/workbench/files/info` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/files/open` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/files/save-text` | `routes/workbench.rs` | writes worktree-relative text file | naturally-idempotent | `baseHash` optimistic-lock guard |
-| POST | `/api/mobile/workbench/sessions/list` | `routes/workbench.rs` | `restore_persisted_sessions` may recreate missing tmux windows | naturally-idempotent | same convergence guarantee as the desktop route; replay recreates the same window for the same session row |
+| POST | `/api/mobile/workbench/sessions/list` | `routes/workbench.rs` | `restore_persisted_sessions` may recreate missing tmux windows | no-transport-retry | same subprocess/tmux spawn caveat as the desktop route; the registry guards against concurrent double-restore (Finding 5) but a transport replay still spawns real windows, so callers must not auto-retry |
 | POST | `/api/mobile/workbench/sessions/create` | `routes/workbench.rs` | new tmux window / PTY + SQLite window row | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry |
 | POST | `/api/mobile/workbench/sessions/replay` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/sessions/write` | `routes/workbench.rs` | writes bytes to PTY/tmux pane stdin | no-transport-retry | appended input; replay duplicates |
@@ -191,12 +191,8 @@ the router so the inventory check matches exactly.
   - sync/cc-history/ssh-target/scratchpad push — per-row vector-clock merge +
     conditional `bulk_upsert`;
   - claude_md push — sender pushes its own merged version; re-apply is a no-op;
-  - transfer chunk — offset-aware seek-write + SHA256 finalize;
   - save-text — `baseHash` optimistic-lock guard;
   - projects/open — same canonical path reuses the same project id;
-  - sessions/list — `restore_persisted_sessions` only recreates a tmux window
-    when `target_exists` is false and reuses the persisted `backend_window_id`,
-    so replay converges to the same window for the same session row;
   - resize/focus/zoom-pane/rename — fixed-target tmux operations guarded by
     current state where relevant.
 - **`no-transport-retry` rows.** terminal write, git commit/push/merge/remove,

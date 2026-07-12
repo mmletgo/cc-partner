@@ -58,9 +58,12 @@ enum RemoteRequestTimeoutKind {
 ///
 /// Code Logic（这个结构体做什么）:
 ///     持有 cloneable 的 `reqwest::Client`，对外提供目录根、目录列表、路径信息和打开项目方法。
+///     `forwarded_request_id`（Finding 3）若被设置，所有出站请求会复用该 ID，把多跳代理
+///     （手机 → 本机 → 远端设备）串成同一调用链；否则每次出站生成新 UUID。
 #[derive(Clone)]
 pub struct RemoteWorkbenchClient {
     client: reqwest::Client,
+    forwarded_request_id: Option<String>,
 }
 
 impl RemoteWorkbenchClient {
@@ -71,11 +74,42 @@ impl RemoteWorkbenchClient {
     ///
     /// Code Logic（这个函数做什么）:
     ///     构造不带全局超时的 reqwest client；每个请求按短/长操作单独设置 timeout。
+    ///     `forwarded_request_id` 默认 None（每次出站生成新 ID）。
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .build()
             .expect("构造 Workbench 远端 reqwest Client 失败");
-        Self { client }
+        Self {
+            client,
+            forwarded_request_id: None,
+        }
+    }
+
+    /// 设置转发用 request_id（Finding 3），返回 self 便于链式构造。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     多跳代理（手机 → 本机 → 项目所在设备）必须把入站 `X-CC-Request-Id` 转发到下一跳，
+    ///     让整条调用链共用同一 ID，便于跨设备日志关联。调用方在 route handler 拿到
+    ///     `P2pRequestContext` 后用本方法注入，再发起远端调用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     存储 request_id；`get_json`/`post_json` 出站时优先用它，缺失则生成新 UUID。
+    ///
+    /// 注：当前生产路径中 `RemoteWorkbenchClient` 仅在 Tauri 命令（无 inbound request_id）使用，
+    /// 该 builder 暂无生产 caller，留给未来 P2P workbench relay 路由接入。测试已锁定其行为。
+    #[allow(dead_code)]
+    pub fn with_forwarded_request_id(mut self, request_id: impl Into<String>) -> Self {
+        let id = request_id.into();
+        self.forwarded_request_id = if id.is_empty() { None } else { Some(id) };
+        self
+    }
+
+    /// 返回出站 request_id：转发 ID 优先，否则生成新 UUID（Finding 3）。
+    fn outbound_request_id(&self) -> String {
+        self.forwarded_request_id
+            .clone()
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(crate::net::request_context::new_request_id)
     }
 
     /// 获取远端设备可浏览的根目录。
@@ -975,7 +1009,8 @@ impl RemoteWorkbenchClient {
     ///
     /// Code Logic（这个函数做什么）:
     ///     发送 GET 请求（附出站 request_id header，Finding 3：多跳调用链关联），
-    ///     非成功状态转中文业务错误，成功后解析 JSON 为目标类型。
+    ///     非成功状态转中文业务错误，成功后解析 JSON 为目标类型。request_id 优先转发
+    ///     `forwarded_request_id`（多跳代理），缺失时生成新 UUID。
     async fn get_json<T>(
         &self,
         url: String,
@@ -989,7 +1024,7 @@ impl RemoteWorkbenchClient {
             .get(&url)
             .header(
                 crate::net::request_context::REQUEST_ID_HEADER,
-                crate::net::request_context::new_request_id(),
+                self.outbound_request_id(),
             )
             .timeout(remote_request_timeout(timeout_kind))
             .send()
@@ -1021,7 +1056,8 @@ impl RemoteWorkbenchClient {
     ///
     /// Code Logic（这个函数做什么）:
     ///     发送 JSON body（附出站 request_id header，Finding 3：多跳调用链关联），
-    ///     非成功状态转中文业务错误，成功后按泛型解析 JSON。
+    ///     非成功状态转中文业务错误，成功后按泛型解析 JSON。request_id 优先转发
+    ///     `forwarded_request_id`（多跳代理），缺失时生成新 UUID。
     async fn post_json<T, B>(
         &self,
         url: String,
@@ -1038,7 +1074,7 @@ impl RemoteWorkbenchClient {
             .json(body)
             .header(
                 crate::net::request_context::REQUEST_ID_HEADER,
-                crate::net::request_context::new_request_id(),
+                self.outbound_request_id(),
             )
             .timeout(remote_request_timeout(timeout_kind))
             .send()
@@ -1947,5 +1983,62 @@ mod tests {
         assert_eq!(body["workingDirectory"], "/remote/repo");
         assert_eq!(body["targetLanguage"], "zh");
         assert_eq!(body["sessionId"], "inner-session");
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 3）:
+    ///     Workbench 远端客户端同样要支持 `with_forwarded_request_id`，把多跳代理的入站
+    ///     `X-CC-Request-Id` 转发到下一跳，让整条调用链共用同一 ID。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动 echo server 捕获 observed `X-CC-Request-Id`；用转发 ID 调用 list_worktrees，
+    ///     断言对端观测到的就是该固定 ID；再用 new()（不转发）调用，断言对端观测到 36 字符 UUID。
+    #[tokio::test]
+    async fn with_forwarded_request_id_propagates_inbound_id_for_workbench() {
+        use std::sync::{Arc, Mutex};
+        let observed: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let observed_clone = observed.clone();
+        let app = Router::new().route(
+            "/api/workbench/worktrees/list",
+            post(
+                move |headers: axum::http::HeaderMap, _req: Json<RemoteProjectReq>| {
+                    let observed = observed_clone.clone();
+                    async move {
+                        let id = headers
+                            .get("x-cc-request-id")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        *observed.lock().unwrap() = id;
+                        Json(Vec::<WorkbenchWorktreeDto>::new())
+                    }
+                },
+            ),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        RemoteWorkbenchClient::new()
+            .with_forwarded_request_id("wb-trace-001")
+            .list_worktrees(&format!("http://{addr}"), "project-1")
+            .await
+            .expect("转发场景应成功");
+        assert_eq!(
+            observed.lock().unwrap().as_str(),
+            "wb-trace-001",
+            "转发 ID 必须原样到达下一跳"
+        );
+
+        RemoteWorkbenchClient::new()
+            .list_worktrees(&format!("http://{addr}"), "project-1")
+            .await
+            .expect("非转发场景应成功");
+        assert_eq!(
+            observed.lock().unwrap().len(),
+            36,
+            "未设置转发 ID 时应生成 36 字符 UUID"
+        );
     }
 }

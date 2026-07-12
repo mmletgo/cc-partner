@@ -133,21 +133,41 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
 /// 处理 chunk：将数据写入临时文件指定 offset，收齐时自动 finalize。
 ///
 /// Business Logic: 对端逐块发来数据，本端按 offset 写入临时文件；全部收齐后校验并保存。
+///     Finding 4: 最后一块可能在传输层被重试，重放时 registry 已移除会误返回 success:false。
+///     通过 finalize 单飞锁 + 终态墓碑保证重放安全：第一个请求完成 finalize 写墓碑，
+///     重放命中墓碑返回第一次的成功结果。
 /// Code Logic:
-///     1. 查 registry 任务，不存在返回 success:false（对照 Python）；
-///     2. 打开/创建 .tmp（写模式，允许读写以 seek），seek 到 offset 写入；
-///     3. 更新 transferred_bytes；
-///     4. 若 transferred >= size 则 finalize（SHA256 校验 + 重命名）；
-///     5. 返回 `{success:true, received_bytes}`。
+///     1. 查 registry 任务：不存在先查墓碑，命中成功墓碑返回成功响应（重放兜底），
+///        否则返回 success:false（对照 Python）；
+///     2. 持 finalize 单飞锁（仅最后一块触发 finalize 时锁有意义）；
+///     3. 打开/创建 .tmp（写模式，允许读写以 seek），seek 到 offset 写入；
+///     4. 更新 transferred_bytes；
+///     5. 若 transferred >= size 则 finalize（SHA256 校验 + 重命名）；
+///     6. 返回 `{success:true, received_bytes}`。
 pub async fn handle_chunk(
     state: &AppState,
     transfer_id: &str,
     offset: u64,
     data: Vec<u8>,
 ) -> Result<ChunkResp, AppError> {
+    // 任务不存在：先查墓碑（重放兜底）。
     let task = match state.transfers.get(transfer_id) {
         Some(t) => t,
         None => {
+            if let Some(tomb) = state.transfers.tombstone(transfer_id) {
+                tracing::info!(
+                    "重放最后一块命中终态墓碑: {transfer_id}, outcome={:?}",
+                    tomb.outcome
+                );
+                let success = matches!(
+                    tomb.outcome,
+                    crate::transfer::registry::TransferOutcome::Completed { .. }
+                );
+                return Ok(ChunkResp {
+                    success,
+                    received_bytes: tomb.received_bytes,
+                });
+            }
             tracing::error!("未找到传输任务: {transfer_id}");
             return Ok(ChunkResp {
                 success: false,
@@ -155,6 +175,9 @@ pub async fn handle_chunk(
             });
         }
     };
+
+    // 拿 finalize 单飞锁（保留 task.size 用于判断是否最后一块）。锁在 transfer_id 生命周期内常驻。
+    let finalize_guard = state.transfers.finalize_lock(transfer_id);
 
     state
         .transfers
@@ -179,8 +202,32 @@ pub async fn handle_chunk(
         .transfers
         .update_progress(transfer_id, new_transferred, TransferStatus::Transferring);
 
-    // 收齐则 finalize
+    // 收齐则 finalize：持单飞锁串行化，确保重放的最后一块等第一次 finalize 完成。
     if new_transferred >= task.size {
+        let _guard = finalize_guard.lock().await;
+        // 拿锁后再查 registry：若已被前一次 finalize 移除，说明本请求是重放，走墓碑兜底。
+        if state.transfers.get(transfer_id).is_none() {
+            if let Some(tomb) = state.transfers.tombstone(transfer_id) {
+                tracing::info!(
+                    "持锁后发现任务已被前一次 finalize 移除，命中墓碑兜底: {transfer_id}, outcome={:?}",
+                    tomb.outcome
+                );
+                let success = matches!(
+                    tomb.outcome,
+                    crate::transfer::registry::TransferOutcome::Completed { .. }
+                );
+                return Ok(ChunkResp {
+                    success,
+                    received_bytes: tomb.received_bytes,
+                });
+            }
+            // 罕见：任务被移除但无墓碑（例如外部 cancel），返回 success:false 兜底。
+            tracing::warn!("持锁后任务已移除且无墓碑: {transfer_id}，返回 success:false");
+            return Ok(ChunkResp {
+                success: false,
+                received_bytes: new_transferred,
+            });
+        }
         if let Err(e) = finalize_transfer(state, transfer_id).await {
             tracing::error!("finalize 失败: {transfer_id}, {e}");
         }
@@ -250,6 +297,22 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
     }
     state.transfers.remove(transfer_id);
 
+    // Finding 4: 写入成功墓碑，重放的最后一块与 status 查询可还原成功结果。
+    state.transfers.record_tombstone(
+        transfer_id,
+        crate::transfer::registry::TransferTombstone {
+            outcome: crate::transfer::registry::TransferOutcome::Completed {
+                final_filename: final_filename.clone(),
+                file_path: final_path.to_string_lossy().to_string(),
+            },
+            received_bytes: task.size,
+            size: task.size,
+            filename: task.filename.clone(),
+            completed_at: completed_at.clone(),
+            created_at: std::time::Instant::now(),
+        },
+    );
+
     state.emit_event(
         "transfer:completed",
         serde_json::json!({
@@ -272,11 +335,34 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
 ///     更新 registry/history 后通过 `AppState::emit_event` 发布 `transfer:failed`。
 async fn on_receive_failed(state: &AppState, transfer_id: &str, error: &str) {
     let completed_at = now_iso();
-    state.transfers.mark_failed(transfer_id, completed_at);
+    // 在移除前抓任务快照，用于写 Failed 墓碑（Finding 4）。
+    let snapshot = state.transfers.get(transfer_id);
+    state
+        .transfers
+        .mark_failed(transfer_id, completed_at.clone());
     if let Some(t) = state.transfers.get(transfer_id) {
         let _ = state.transfer_repo.record(&t).await;
     }
     state.transfers.remove(transfer_id);
+
+    // Finding 4: 写失败墓碑，重放的最后一块返回 success:false，但与第一次 finalize 失败的结果一致，
+    // 避免"第一次失败、重放变成功"的诡异步态。
+    if let Some(t) = &snapshot {
+        state.transfers.record_tombstone(
+            transfer_id,
+            crate::transfer::registry::TransferTombstone {
+                outcome: crate::transfer::registry::TransferOutcome::Failed {
+                    error: error.to_string(),
+                },
+                received_bytes: t.transferred_bytes,
+                size: t.size,
+                filename: t.filename.clone(),
+                completed_at: completed_at.clone(),
+                created_at: std::time::Instant::now(),
+            },
+        );
+    }
+
     state.emit_event(
         "transfer:failed",
         serde_json::json!({
@@ -290,25 +376,51 @@ async fn on_receive_failed(state: &AppState, transfer_id: &str, error: &str) {
 /// 处理 status 查询（对端 GET /api/transfer/status/:id 调用）。
 ///
 /// Business Logic: 对端或本端可查询接收任务进度。
-/// Code Logic: 对照 Python `get_transfer_status`，任务不存在返回 error 字段。
+///     Finding 4: 任务终态后从 registry 移除，status 查询命中终态墓碑还原 completed/failed
+///     与最终字节数，避免返回 "unknown" 让对端误判为丢失。
+/// Code Logic: 对照 Python `get_transfer_status`，先查 registry，miss 时查墓碑，仍 miss 返回 unknown。
 pub async fn handle_status(state: &AppState, transfer_id: &str) -> StatusResp {
-    match state.transfers.get(transfer_id) {
-        Some(t) => StatusResp {
+    if let Some(t) = state.transfers.get(transfer_id) {
+        return StatusResp {
             transfer_id: transfer_id.to_string(),
             status: status_str(t.status),
             progress: t.progress(),
             transferred_bytes: t.transferred_bytes,
             size: t.size,
             filename: t.filename,
-        },
-        None => StatusResp {
+        };
+    }
+    // 终态墓碑兜底（Finding 4）。
+    if let Some(tomb) = state.transfers.tombstone(transfer_id) {
+        let (status_str_val, received) = match &tomb.outcome {
+            crate::transfer::registry::TransferOutcome::Completed { .. } => {
+                ("completed".to_string(), tomb.size)
+            }
+            crate::transfer::registry::TransferOutcome::Failed { .. } => {
+                ("failed".to_string(), tomb.received_bytes)
+            }
+        };
+        let size = tomb.size;
+        return StatusResp {
             transfer_id: transfer_id.to_string(),
-            status: "unknown".to_string(),
-            progress: 0.0,
-            transferred_bytes: 0,
-            size: 0,
-            filename: String::new(),
-        },
+            status: status_str_val,
+            progress: if size == 0 {
+                0.0
+            } else {
+                (received as f64) / (size as f64)
+            },
+            transferred_bytes: received,
+            size,
+            filename: tomb.filename,
+        };
+    }
+    StatusResp {
+        transfer_id: transfer_id.to_string(),
+        status: "unknown".to_string(),
+        progress: 0.0,
+        transferred_bytes: 0,
+        size: 0,
+        filename: String::new(),
     }
 }
 
