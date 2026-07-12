@@ -86,6 +86,10 @@ export interface WorkbenchAutomationControllerParams {
  */
 export interface WorkbenchAutomationControllerResult {
   automationOpen: boolean;
+  /** Attention/automation deep link 的 task 焦点（加载后交给 OrchestratorPanel）。 */
+  focusTaskId: string | null;
+  /** Attention/automation deep link 的 outbox 焦点。 */
+  focusOutboxId: string | null;
   openAutomation: () => void;
   closeAutomation: () => void;
   applyAutomationDeepLink: (target: WorkbenchDeepLink) => Promise<boolean>;
@@ -151,6 +155,11 @@ export function useWorkbenchAutomationController(
     };
   }, [locationSearch]);
 
+  const deepLinkView = deepLink.view ?? null;
+  const deepLinkTaskId = deepLink.taskId ?? null;
+  const deepLinkOutboxId = deepLink.outboxId ?? null;
+  const isAutomationDeepLink = deepLinkView === 'automation';
+
   // Business Logic: staged deep link —— project 段。命中后 fire-and-forget 触发 selectProjectFromDeepLink，
   // 与原 Workbench.tsx 行为一致（不等待切换完成，让后续 worktree/session 段 effect 自行守卫）。
   // Code Logic: 先在 effect 主体里同步确认目标项目存在并标记 applied.projectId 防止重入，再交给
@@ -168,8 +177,33 @@ export function useWorkbenchAutomationController(
     void selectProjectFromDeepLink(deepLinkProjectId);
   }, [activeProjectId, deepLinkProjectId, locationSearch, projects, selectProjectFromDeepLink]);
 
-  // Business Logic: staged deep link —— worktree 段。等 project 段对齐后，命中目标 worktree 则选中。
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   Attention task/outbox deep link 必须先打开 automation 控制台，不能直接进终端。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   view=automation 且 project 已对齐时 openAutomation；无 project 约束时也打开。
+   */
   useEffect(() => {
+    if (!isAutomationDeepLink) return;
+    if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
+    if (!automationConsoleOpen) {
+      setAutomationConsoleOpen(true);
+      requestWorkspaceView('terminal');
+    }
+  }, [
+    activeProjectId,
+    automationConsoleOpen,
+    deepLinkProjectId,
+    isAutomationDeepLink,
+    requestWorkspaceView,
+    setAutomationConsoleOpen,
+  ]);
+
+  // Business Logic: staged deep link —— worktree 段。等 project 段对齐后，命中目标 worktree 则选中。
+  // Attention automation 链接不消费 worktree/session，避免误开终端。
+  useEffect(() => {
+    if (isAutomationDeepLink) return;
     if (!deepLinkWorktreeId) return;
     if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
     const applied = deepLinkApplicationRef.current;
@@ -185,6 +219,7 @@ export function useWorkbenchAutomationController(
     activeProjectId,
     deepLinkProjectId,
     deepLinkWorktreeId,
+    isAutomationDeepLink,
     locationSearch,
     worktrees,
     setActiveWorktreeId,
@@ -192,6 +227,7 @@ export function useWorkbenchAutomationController(
 
   // Business Logic: staged deep link —— session 段。等 project+worktree 段对齐后，命中目标 session 则 focus。
   useEffect(() => {
+    if (isAutomationDeepLink) return;
     if (!deepLinkSessionId) return;
     if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
     if (deepLinkWorktreeId && activeWorktreeId !== deepLinkWorktreeId) return;
@@ -212,6 +248,7 @@ export function useWorkbenchAutomationController(
     deepLinkSessionId,
     deepLinkWorktreeId,
     focusSession,
+    isAutomationDeepLink,
     locationSearch,
     scopedSessions,
   ]);
@@ -277,6 +314,8 @@ export function useWorkbenchAutomationController(
 
   return {
     automationOpen: automationConsoleOpen,
+    focusTaskId: isAutomationDeepLink ? deepLinkTaskId : null,
+    focusOutboxId: isAutomationDeepLink ? deepLinkOutboxId : null,
     openAutomation,
     closeAutomation,
     applyAutomationDeepLink,

@@ -81,6 +81,7 @@ import {
   groupRenderableTasksByWorkflowState,
   ORCHESTRATOR_BOARD_LANES,
 } from './orchestratorBoard';
+import { resolveOrchestratorFocusTarget } from './orchestratorFocus';
 import styles from './Orchestrator.module.css';
 
 /**
@@ -256,6 +257,17 @@ interface OrchestratorActionError {
 interface OrchestratorPanelProps {
   embedded?: boolean;
   onOpenWorkbench?: (url: string) => void;
+  /** Attention deep link：加载完成后打开任务详情/Evidence。 */
+  focusTaskId?: string | null;
+  /** Attention deep link：加载完成后聚焦 failed outbox 行。 */
+  focusOutboxId?: string | null;
+  /** 焦点目标已成功应用后的回调（供 Workbench 清 staged 标记）。 */
+  onFocusTargetResolved?: (result: { kind: 'task' | 'outbox'; id: string }) => void;
+  /**
+   * 焦点目标不存在/已解决时的类型化回调。
+   * Workbench 协调器应 refresh Attention 并回退 `/attention`，不得打开空白详情或终端。
+   */
+  onFocusTargetNotFound?: (result: { kind: 'task' | 'outbox'; id: string }) => void;
 }
 
 interface OrchestratorDialogPortalProps {
@@ -549,12 +561,21 @@ function buildWorkbenchTaskUrl(task: OrchestratorTask | null): string {
  *   维持 activeProject、task view 列表、点击任务后的详情抽屉与 evidence stale guard；embedded=true 时省略页面级 header。
  */
 export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
-  const { embedded = false, onOpenWorkbench } = props;
+  const {
+    embedded = false,
+    onOpenWorkbench,
+    focusTaskId = null,
+    focusOutboxId = null,
+    onFocusTargetResolved,
+    onFocusTargetNotFound,
+  } = props;
   const { t } = useTranslation(['orchestrator', 'nav', 'common']);
   const navigate = useNavigate();
   const { activeProject, projectsLoading } = useWorkbenchProjects();
   const [taskListResult, setTaskListResult] = useState<OrchestratorTaskListResult | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [focusedOutboxId, setFocusedOutboxId] = useState<string | null>(null);
+  const focusHandledRef = useRef<string | null>(null);
   const [form, setForm] = useState<OrchestratorCreateForm>(EMPTY_FORM);
   const [creatingAction, setCreatingAction] = useState<OrchestratorCreateAction | null>(null);
   const [startingTaskId, setStartingTaskId] = useState<string | null>(null);
@@ -612,6 +633,62 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const visibleActionError =
     actionError?.projectId === activeProjectId ? actionError.message : null;
   const error = visibleActionError ?? taskLoadError;
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   Attention deep link 必须在 task/outbox 列表加载后聚焦详情或失败项；
+   *   目标已解决时要类型化回报协调器，不能渲染空白详情或打开终端。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   用 resolveOrchestratorFocusTarget 判定；found 时选中任务/高亮 outbox；
+   *   not_found 时调用 onFocusTargetNotFound 一次（按 focus key 去重）。
+   */
+  useEffect(() => {
+    const focusKey = `${focusTaskId ?? ''}|${focusOutboxId ?? ''}|${activeProjectId ?? ''}`;
+    const result = resolveOrchestratorFocusTarget({
+      loading,
+      focusTaskId,
+      focusOutboxId,
+      taskIds: tasks.map((item) => item.task.id),
+      outboxIds: pendingRemoteItems.map((item) => item.id),
+    });
+
+    if (result.status === 'none' || result.status === 'pending') {
+      if (result.status === 'none') {
+        focusHandledRef.current = null;
+      }
+      return;
+    }
+
+    if (focusHandledRef.current === focusKey) return;
+    focusHandledRef.current = focusKey;
+
+    if (result.status === 'found') {
+      queueMicrotask(() => {
+        if (result.kind === 'task') {
+          setSelectedTaskId(result.id);
+          setFocusedOutboxId(null);
+        } else {
+          setFocusedOutboxId(result.id);
+        }
+        onFocusTargetResolved?.(result);
+      });
+      return;
+    }
+
+    queueMicrotask(() => {
+      onFocusTargetNotFound?.(result);
+    });
+  }, [
+    activeProjectId,
+    focusOutboxId,
+    focusTaskId,
+    loading,
+    onFocusTargetNotFound,
+    onFocusTargetResolved,
+    pendingRemoteItems,
+    tasks,
+  ]);
 
   const groups = useMemo(() => groupRenderableTasksByWorkflowState(tasks), [tasks]);
   const selectedRenderableTask = useMemo(() => {
@@ -1733,7 +1810,14 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                 </div>
                 <div className={styles.taskList}>
                   {pendingRemoteItems.map((item) => (
-                    <div className={styles.pendingTask} key={item.id}>
+                    <div
+                      className={styles.pendingTask}
+                      key={item.id}
+                      data-focused={focusedOutboxId === item.id || undefined}
+                      data-testid={
+                        focusedOutboxId === item.id ? `orchestrator-outbox-focused-${item.id}` : undefined
+                      }
+                    >
                       <div className={styles.pendingTaskHeader}>
                         <span className={styles.taskTitle}>{item.deviceName}</span>
                         <Pill tone={pendingRemoteStatusTone(item.status)}>

@@ -78,6 +78,14 @@ describe('orchestratorActions', () => {
       source.includes("window.confirm(t('orchestrator:pending.discardConfirm'))"),
       'discard should require confirmation in original Automation UI',
     );
+    assert(
+      source.includes('focusTaskId') && source.includes('focusOutboxId'),
+      'OrchestratorPanel should accept Attention focus task/outbox props',
+    );
+    assert(
+      source.includes('onFocusTargetNotFound') || source.includes('resolveOrchestratorFocusTarget'),
+      'Orchestrator should report typed target-not-found for missing Attention deep links',
+    );
 
     const pendingZh = zh.pending as Record<string, unknown>;
     const pendingEn = en.pending as Record<string, unknown>;

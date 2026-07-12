@@ -74,4 +74,58 @@ describe('workbench deep links', () => {
       throw new Error(`expected remote shortcut ids to round trip, got ${JSON.stringify(parsed)}`);
     }
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   Attention Inbox 必须通过 view=automation + taskId 打开详情/Evidence，而不是终端。
+   *
+   * Code Logic（这个测试做什么）:
+   *   构造/解析 automation+taskId deep link，断言字段 round-trip。
+   */
+  test('parses and builds automation task deep links', () => {
+    const url = buildWorkbenchDeepLink({
+      projectId: 'proj-1',
+      worktreeId: null,
+      sessionId: null,
+      view: 'automation',
+      taskId: 'task-9',
+      outboxId: null,
+    });
+    const parsed = parseWorkbenchDeepLink(url.replace('/workbench', ''));
+
+    if (
+      url !== '/workbench?projectId=proj-1&view=automation&taskId=task-9' ||
+      parsed.view !== 'automation' ||
+      parsed.taskId !== 'task-9' ||
+      parsed.outboxId !== null
+    ) {
+      throw new Error(`unexpected automation task deep link: ${url} / ${JSON.stringify(parsed)}`);
+    }
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   failed outbox 导航必须定位到 automation 面板中的 outbox 条目。
+   *
+   * Code Logic（这个测试做什么）:
+   *   构造/解析 automation+outboxId deep link。
+   */
+  test('parses and builds automation outbox deep links', () => {
+    const url = buildWorkbenchDeepLink({
+      projectId: 'remote:device-a:p',
+      worktreeId: null,
+      sessionId: null,
+      view: 'automation',
+      taskId: null,
+      outboxId: 'outbox-3',
+    });
+    const parsed = parseWorkbenchDeepLink(url.replace('/workbench', ''));
+
+    if (parsed.view !== 'automation' || parsed.outboxId !== 'outbox-3' || parsed.taskId !== null) {
+      throw new Error(`unexpected automation outbox deep link: ${url} / ${JSON.stringify(parsed)}`);
+    }
+    if (!url.includes('outboxId=outbox-3') || !url.includes('view=automation')) {
+      throw new Error(`expected outbox automation query, got ${url}`);
+    }
+  });
 });
