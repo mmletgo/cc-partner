@@ -10,6 +10,7 @@
 
 import type {
   OrchestratorEvidence,
+  OrchestratorRuntimeSnapshot,
   OrchestratorTask,
   OrchestratorTaskPromptCompletion,
   OrchestratorTaskView,
@@ -242,6 +243,17 @@ export const httpOrchestratorTransport = {
       return response.evidence;
     },
   },
+  /**
+   * Business Logic（为什么需要这个方法）:
+   *   手机自动化面板需要拉取本机/远端 shortcut 的 runtime snapshot，且不能直连 owning device P2P base URL。
+   *
+   * Code Logic（这个函数做什么）:
+   *   POST `/api/mobile/orchestrator/runtime-snapshot`，body `{projectId}`，返回 camelCase snapshot DTO。
+   */
+  getRuntimeSnapshot: (projectId: string): Promise<OrchestratorRuntimeSnapshot> =>
+    postJson<OrchestratorRuntimeSnapshot>('/api/mobile/orchestrator/runtime-snapshot', {
+      projectId,
+    }),
 } as const;
 
 /**

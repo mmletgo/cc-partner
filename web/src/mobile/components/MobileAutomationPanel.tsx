@@ -14,12 +14,21 @@ import type {
   OrchestratorEvidence,
   OrchestratorRemoteOutboxItem,
   OrchestratorRemoteOutboxStatus,
+  OrchestratorRemoteRuntimeStatus,
   OrchestratorRunState,
+  OrchestratorRuntimeDisplayState,
   OrchestratorTask,
   OrchestratorTaskView,
   OrchestratorWorkflowState,
   WorkbenchProject,
 } from '@/lib/types';
+import {
+  applyMobileRuntimeSnapshotFailure,
+  applyMobileRuntimeSnapshotSuccess,
+  beginMobileRuntimeSnapshotLoad,
+  nextMobileRuntimeSnapshotRequestSeq,
+  resetMobileRuntimeSnapshotStore,
+} from '../mobileRuntimeSnapshotStore';
 import styles from '../MobileWorkbench.module.css';
 
 export interface MobileAutomationExecutionContext {
@@ -259,6 +268,46 @@ function formatAutomationTimestamp(value: string): string {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   runtime 状态条需要把后端 remoteStatus 映射成移动端可本地化的文案 key。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按四态 + local 返回 workbench mobile automation i18n key。
+ */
+function mobileRuntimeStatusLabelKey(
+  status: OrchestratorRemoteRuntimeStatus,
+):
+  | 'workbench:mobile.automationPanel.runtimeStatusLocal'
+  | 'workbench:mobile.automationPanel.runtimeStatusLive'
+  | 'workbench:mobile.automationPanel.runtimeStatusOffline'
+  | 'workbench:mobile.automationPanel.runtimeStatusUnsupported'
+  | 'workbench:mobile.automationPanel.runtimeStatusUnavailable' {
+  switch (status) {
+    case 'local':
+      return 'workbench:mobile.automationPanel.runtimeStatusLocal';
+    case 'live':
+      return 'workbench:mobile.automationPanel.runtimeStatusLive';
+    case 'offline':
+      return 'workbench:mobile.automationPanel.runtimeStatusOffline';
+    case 'unsupported':
+      return 'workbench:mobile.automationPanel.runtimeStatusUnsupported';
+    case 'unavailable':
+      return 'workbench:mobile.automationPanel.runtimeStatusUnavailable';
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   缓存时间需要可读展示，帮助用户判断 offline 快照新旧。
+ *
+ * Code Logic（这个函数做什么）:
+ *   复用 evidence 时间格式化 helper。
+ */
+function formatRuntimeTimestamp(value: string): string {
+  return formatAutomationTimestamp(value);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   详情面板只支持真实 local/remote 任务，pendingRemote outbox 不应触发 evidence 或 action。
  *
  * Code Logic（这个函数做什么）:
@@ -317,6 +366,13 @@ export function MobileAutomationPanel({
   const [completingPrompt, setCompletingPrompt] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [runtimeDisplay, setRuntimeDisplay] = useState<OrchestratorRuntimeDisplayState>({
+    snapshot: null,
+    remoteStatus: null,
+    cachedAt: null,
+    loading: false,
+    error: null,
+  });
   const requestIdRef = useRef<number>(0);
   const evidenceRequestIdRef = useRef<number>(0);
   const activeProjectIdRef = useRef<string | null>(null);
@@ -324,6 +380,7 @@ export function MobileAutomationPanel({
   const titleId = useId();
   const dialogTitleId = useId();
   const detailTitleId = useId();
+  const runtimeTitleId = useId();
   const hasProject = Boolean(project);
   const creating = creatingAction !== null;
   const trimmedPromptDraft = promptDraft.trim();
@@ -365,6 +422,15 @@ export function MobileAutomationPanel({
       onOpenExecutionContext &&
       (selectedTask.worktreeId || selectedTask.sessionId),
   );
+  const runtimeStatusLabel = useMemo(() => {
+    const statusValue = runtimeDisplay.remoteStatus;
+    if (!statusValue) {
+      return t('workbench:mobile.automationPanel.runtimeStatusUnknown');
+    }
+    return t(mobileRuntimeStatusLabelKey(statusValue));
+  }, [runtimeDisplay.remoteStatus, t]);
+  const showRuntimeCachedHint =
+    runtimeDisplay.remoteStatus === 'offline' && runtimeDisplay.snapshot !== null;
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -396,6 +462,32 @@ export function MobileAutomationPanel({
     }
   }, [t]);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   项目切换或手动刷新时需要拉取 remote-aware runtime snapshot，并与任务列表解耦。
+   *
+   * Code Logic（这个函数做什么）:
+   *   通过模块 store 生成 request seq、调用 mobile HTTP route，成功/失败归并显示缓存；缓存不驱动动作。
+   */
+  const loadRuntimeSnapshot = useCallback(async (projectId: string): Promise<void> => {
+    const requestSeq = nextMobileRuntimeSnapshotRequestSeq(projectId);
+    setRuntimeDisplay(beginMobileRuntimeSnapshotLoad(projectId));
+    try {
+      const snapshot = await httpOrchestratorTransport.getRuntimeSnapshot(projectId);
+      if (activeProjectIdRef.current !== projectId) return;
+      const next = applyMobileRuntimeSnapshotSuccess(projectId, requestSeq, snapshot);
+      if (next) setRuntimeDisplay(next);
+    } catch (reason) {
+      if (activeProjectIdRef.current !== projectId) return;
+      const next = applyMobileRuntimeSnapshotFailure(
+        projectId,
+        requestSeq,
+        new Error(getErrorMessage(reason)),
+      );
+      if (next) setRuntimeDisplay(next);
+    }
+  }, []);
+
   /* eslint-disable react-hooks/set-state-in-effect -- 项目切换时必须同步自动化任务上下文 */
   useEffect(() => {
     const projectId = project?.id ?? null;
@@ -417,11 +509,21 @@ export function MobileAutomationPanel({
     setTitle('');
     setGoal('');
     setAcceptanceCriteria('');
+    setRuntimeDisplay({
+      snapshot: null,
+      remoteStatus: null,
+      cachedAt: null,
+      loading: false,
+      error: null,
+    });
 
     if (projectId) {
       void loadTasks(projectId);
+      void loadRuntimeSnapshot(projectId);
+    } else {
+      resetMobileRuntimeSnapshotStore();
     }
-  }, [loadTasks, project?.id]);
+  }, [loadRuntimeSnapshot, loadTasks, project?.id]);
 
   useEffect(() => {
     const projectId = activeProjectIdRef.current;
@@ -464,16 +566,17 @@ export function MobileAutomationPanel({
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户点击刷新时需要重新读取当前项目的任务列表，未选项目不应发起请求。
+   *   用户点击刷新时需要重新读取当前项目的任务列表与 runtime 状态，未选项目不应发起请求。
    *
    * Code Logic（这个函数做什么）:
-   *   校验当前 project id，存在时调用 loadTasks；错误由 loadTasks 写入面板状态。
+   *   校验当前 project id，存在时并行调用 loadTasks 与 loadRuntimeSnapshot。
    */
   const handleRefresh = useCallback((): void => {
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
     void loadTasks(projectId);
-  }, [loadTasks]);
+    void loadRuntimeSnapshot(projectId);
+  }, [loadRuntimeSnapshot, loadTasks]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -680,6 +783,67 @@ export function MobileAutomationPanel({
 
       {hasProject ? (
         <>
+          <section className={styles.mobileAutomationGroup} aria-labelledby={runtimeTitleId}>
+            <div className={styles.mobileAutomationGroupHeader}>
+              <span id={runtimeTitleId}>
+                {t('workbench:mobile.automationPanel.runtimeSnapshotTitle')}
+              </span>
+              <span className={`${styles.mobileBadge} ${styles.mobileBadgeAccent}`}>
+                {runtimeDisplay.loading
+                  ? t('workbench:mobile.automationPanel.runtimeSnapshotLoading')
+                  : runtimeStatusLabel}
+              </span>
+            </div>
+            <div className={styles.automationTaskBody}>
+              {runtimeDisplay.loading && !runtimeDisplay.snapshot ? (
+                <p className={styles.panelState}>
+                  {t('workbench:mobile.automationPanel.runtimeSnapshotLoading')}
+                </p>
+              ) : null}
+              {runtimeDisplay.error ? (
+                <p className={styles.panelState}>{runtimeDisplay.error.message}</p>
+              ) : null}
+              {!runtimeDisplay.loading &&
+              !runtimeDisplay.snapshot &&
+              runtimeDisplay.remoteStatus &&
+              runtimeDisplay.remoteStatus !== 'local' &&
+              runtimeDisplay.remoteStatus !== 'live' ? (
+                <p className={styles.panelState}>{runtimeStatusLabel}</p>
+              ) : null}
+              {runtimeDisplay.snapshot ? (
+                <>
+                  <p>
+                    {t('workbench:mobile.automationPanel.runtimeSlots', {
+                      used: runtimeDisplay.snapshot.slotsUsed,
+                      max: runtimeDisplay.snapshot.maxConcurrentTasks,
+                      running: runtimeDisplay.snapshot.runningTasks.length,
+                      retrying: runtimeDisplay.snapshot.retryingTasks.length,
+                    })}
+                  </p>
+                  {runtimeDisplay.snapshot.latestError ? (
+                    <p>
+                      {t('workbench:mobile.automationPanel.runtimeLatestError', {
+                        error: runtimeDisplay.snapshot.latestError,
+                      })}
+                    </p>
+                  ) : null}
+                </>
+              ) : null}
+              {runtimeDisplay.cachedAt ? (
+                <p className={styles.mobileListMeta}>
+                  {t('workbench:mobile.automationPanel.runtimeLastUpdated', {
+                    time: formatRuntimeTimestamp(runtimeDisplay.cachedAt),
+                  })}
+                </p>
+              ) : null}
+              {showRuntimeCachedHint ? (
+                <p className={styles.mobileListMeta}>
+                  {t('workbench:mobile.automationPanel.runtimeCachedHint')}
+                </p>
+              ) : null}
+            </div>
+          </section>
+
           {loading ? <p className={styles.panelState}>{t('workbench:loading')}</p> : null}
           {isListEmpty ? (
             <p className={styles.panelState}>{t('workbench:mobile.automationPanel.empty')}</p>

@@ -11,9 +11,9 @@
 use crate::commands::orchestrator::{
     build_orchestrator_task_row, create_orchestrator_task_view_for_http,
     dispatch_orchestrator_best_effort, ensure_reviewed_delivery_allowed,
-    get_orchestrator_runtime_snapshot_for_project, list_orchestrator_task_views_for_state,
-    run_delivery_for_task, CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto,
-    OrchestratorTaskViewDto,
+    get_orchestrator_runtime_snapshot_for_project, get_orchestrator_runtime_snapshot_for_state,
+    list_orchestrator_task_views_for_state, run_delivery_for_task, CreateOrchestratorTaskRequest,
+    OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
 };
 use crate::commands::prompt_optimizer::{
     local_complete_orchestrator_task_prompt, OrchestratorTaskPromptCompletionDto,
@@ -788,6 +788,34 @@ pub async fn runtime_snapshot(
     let snapshot = runtime_snapshot_for_state(&context, &project_id, &scheduler_snapshot)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.runtime_snapshot"))?;
+    Ok(Json(snapshot))
+}
+
+/// 读取 mobile-facing 项目运行时快照 HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机浏览器 `/mobile` 需要通过同源 HTTP 拉取本机或远端 shortcut 的 runtime snapshot，
+///     且必须复用与 Tauri 命令相同的四态 helper，不能把 owning device 的 P2P base URL 暴露给浏览器。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 camelCase `{projectId}`，trim 后委托 `get_orchestrator_runtime_snapshot_for_state`；
+///     该 helper 对 local/remote 分流，远端成功返回 live 映射快照，失败返回 unsupported/offline/unavailable 空快照。
+pub async fn mobile_runtime_snapshot(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteRuntimeSnapshotReq>,
+) -> P2pResult<Json<OrchestratorRuntimeSnapshotDto>> {
+    let project_id = req.project_id.trim().to_string();
+    if project_id.is_empty() {
+        return Err(P2pError::from_app_error(
+            AppError::validation("移动端 Orchestrator runtime snapshot 缺少 projectId"),
+            &ctx,
+            "orchestrator.mobile.runtime_snapshot",
+        ));
+    }
+    let snapshot = get_orchestrator_runtime_snapshot_for_state(&state, &project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.mobile.runtime_snapshot"))?;
     Ok(Json(snapshot))
 }
 
@@ -1572,5 +1600,38 @@ mod tests {
         // 用指针非空断言 handler 存在，避免被 dead_code 优化掉。
         let addr = handler_ptr as usize;
         assert_ne!(addr, 0, "runtime_snapshot handler 必须存在");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     手机浏览器入口必须注册 remote-aware runtime-snapshot 路由，且不能与 owning-device
+    ///     本地路由混用；handler 在空白 projectId 时返回 validation_error。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     引用 mobile_runtime_snapshot 函数指针保证编译期共存，并复刻空白 projectId 校验映射。
+    #[test]
+    fn mobile_runtime_snapshot_handler_ships_and_rejects_blank_project_id() {
+        let handler_ptr = mobile_runtime_snapshot as fn(
+            State<AppState>,
+            Extension<P2pRequestContext>,
+            Json<RemoteRuntimeSnapshotReq>,
+        ) -> _;
+        let addr = handler_ptr as usize;
+        assert_ne!(addr, 0, "mobile_runtime_snapshot handler 必须存在");
+
+        for blank in ["", "   ", "\t\n"] {
+            let req = RemoteRuntimeSnapshotReq {
+                project_id: blank.to_string(),
+            };
+            assert!(req.project_id.trim().is_empty());
+        }
+
+        let ctx = P2pRequestContext {
+            request_id: "req-mobile-blank".to_string(),
+        };
+        let app_error = AppError::validation("移动端 Orchestrator runtime snapshot 缺少 projectId");
+        let p2p = P2pError::from_app_error(app_error, &ctx, "orchestrator.mobile.runtime_snapshot");
+        assert_eq!(p2p.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(p2p.envelope().code, "validation_error");
+        assert_eq!(p2p.envelope().request_id, "req-mobile-blank");
     }
 }

@@ -544,6 +544,22 @@ export interface OrchestratorRuntimeEvent {
 }
 
 /**
+ * Orchestrator 远端运行时状态（remote-aware 四态 + 本机 local）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   桌面/移动端状态条必须区分 live、offline、unsupported、unavailable，且本机快照用 local。
+ *
+ * Code Logic（这个类型做什么）:
+ *   对齐 Rust OrchestratorRuntimeSnapshotDto.remote_status 序列化后的稳定字面量。
+ */
+export type OrchestratorRemoteRuntimeStatus =
+  | 'local'
+  | 'live'
+  | 'unsupported'
+  | 'offline'
+  | 'unavailable';
+
+/**
  * Orchestrator 项目运行时快照 DTO（对齐 Rust OrchestratorRuntimeSnapshotDto，camelCase）。
  *
  * Business Logic（为什么需要这个类型）:
@@ -551,11 +567,12 @@ export interface OrchestratorRuntimeEvent {
  *
  * Code Logic（字段说明）:
  *   workflowError/latestError 为后端可空错误文本；recentEvents/runningTasks/retryingTasks 为状态条摘要数据。
+ *   remoteStatus 对远端 shortcut 使用 live/offline/unsupported/unavailable，本机项目固定 local。
  */
 export interface OrchestratorRuntimeSnapshot {
   projectId: string;
   projectKind: 'local' | 'remote' | string;
-  remoteStatus: 'local' | 'unsupported' | 'unavailable' | 'offline';
+  remoteStatus: OrchestratorRemoteRuntimeStatus;
   generatedAt: string;
   latestTickAt: string | null;
   lastDispatchAt: string | null;
@@ -571,6 +588,23 @@ export interface OrchestratorRuntimeSnapshot {
   runningTasks: OrchestratorRuntimeTaskSummary[];
   retryingTasks: OrchestratorRuntimeTaskSummary[];
   recentEvents: OrchestratorRuntimeEvent[];
+}
+
+/**
+ * Orchestrator runtime 前端显示状态（桌面 hook / 移动 store 共用形状）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   两端都需要把 snapshot、远端状态、缓存时间与 loading/error 合成可渲染状态，且缓存只用于显示。
+ *
+ * Code Logic（字段说明）:
+ *   snapshot 仅在 live/local 成功或 offline 命中显示缓存时非空；cachedAt 是客户端收到成功响应的时间。
+ */
+export interface OrchestratorRuntimeDisplayState {
+  snapshot: OrchestratorRuntimeSnapshot | null;
+  remoteStatus: OrchestratorRemoteRuntimeStatus | null;
+  cachedAt: string | null;
+  loading: boolean;
+  error: Error | null;
 }
 
 /**

@@ -1902,26 +1902,26 @@ pub async fn move_orchestrator_task_workflow_state(
     .await
 }
 
-/// 获取 Orchestrator 项目运行时快照。
+/// 获取 Orchestrator 项目运行时快照（remote-aware 共享入口）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     Workbench 自动化状态条需要一个轻量观测接口展示 scheduler、workflow 和槽位状态；
-///     远端 shortcut 必须向 owning device 拉取权威快照，并映射为 live/offline/unsupported/unavailable。
+///     桌面 Tauri 命令与 `/mobile` HTTP 路由都需要同一套 local/remote 四态分发，
+///     避免手机浏览器绕过 owning-device 拉取或读到本机冒充远端的快照。
 ///
 /// Code Logic（这个函数做什么）:
 ///     读取 Workbench 项目；local 走共享 builder + 本机 config/telemetry；
 ///     remote 走 open_remote_project_for_shortcut + RemoteOrchestratorClient::runtime_snapshot，
 ///     成功映射 identity 字段，失败按 PeerCallError 变体回落空快照。
-#[tauri::command]
-pub async fn get_orchestrator_runtime_snapshot(
-    state: State<'_, AppState>,
-    project_id: String,
+///     本函数从不向调用方暴露 owning device 的 P2P base URL。
+pub(crate) async fn get_orchestrator_runtime_snapshot_for_state(
+    state: &AppState,
+    project_id: &str,
 ) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
-    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    let project = get_orchestrator_workbench_project(state, project_id).await?;
     // 远端 shortcut 不得读本机 scheduler/config/workflow 冒充 owner 状态。
     // 共享 builder 只负责本地项目；远端守卫与四态分发留在命令层。
     if project.kind == "remote" {
-        return get_remote_orchestrator_runtime_snapshot(state.inner(), &project).await;
+        return get_remote_orchestrator_runtime_snapshot(state, &project).await;
     }
     let config = state
         .config
@@ -1937,6 +1937,22 @@ pub async fn get_orchestrator_runtime_snapshot(
         &scheduler_snapshot,
     )
     .await
+}
+
+/// 获取 Orchestrator 项目运行时快照。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Workbench 自动化状态条需要一个轻量观测接口展示 scheduler、workflow 和槽位状态；
+///     远端 shortcut 必须向 owning device 拉取权威快照，并映射为 live/offline/unsupported/unavailable。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `get_orchestrator_runtime_snapshot_for_state`，供桌面 Tauri invoke 使用。
+#[tauri::command]
+pub async fn get_orchestrator_runtime_snapshot(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
+    get_orchestrator_runtime_snapshot_for_state(state.inner(), &project_id).await
 }
 
 /// 通过 HTTP task-view 协议创建 remote-aware Orchestrator 任务。

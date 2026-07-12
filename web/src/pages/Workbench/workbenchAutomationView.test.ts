@@ -296,8 +296,13 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     typesSource,
-    "remoteStatus: 'local' | 'unsupported' | 'unavailable' | 'offline';",
-    'runtime snapshot type includes explicit local/remote status',
+    'export type OrchestratorRemoteRuntimeStatus =',
+    'runtime snapshot type includes explicit local/remote status union',
+  );
+  assertContains(
+    typesSource,
+    "| 'live'",
+    'runtime snapshot remote status includes live for owning-device data',
   );
   assertContains(
     orchestratorSource,

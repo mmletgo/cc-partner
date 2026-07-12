@@ -65,6 +65,31 @@ describe('MobileAutomationPanel', () => {
     );
     assertContains(
       panelSource,
+      'httpOrchestratorTransport.getRuntimeSnapshot',
+      'mobile automation should load remote-aware runtime snapshot through mobile HTTP route',
+    );
+    assertContains(
+      panelSource,
+      'applyMobileRuntimeSnapshotSuccess',
+      'mobile automation should apply in-memory runtime snapshot cache store',
+    );
+    assertContains(
+      panelSource,
+      'runtimeCachedHint',
+      'mobile automation should mark offline cached runtime as display-only',
+    );
+    assertContains(
+      panelSource,
+      'loadRuntimeSnapshot(projectId)',
+      'mobile automation should refresh runtime snapshot with tasks',
+    );
+    assertContains(
+      workbenchHttpSource,
+      "/api/mobile/orchestrator/runtime-snapshot",
+      'HTTP transport should call mobile runtime-snapshot route rather than owner P2P base URL',
+    );
+    assertContains(
+      panelSource,
       'httpOrchestratorTransport.tasks.createView',
       'mobile automation should create local or remote tasks through task view HTTP proxy',
     );
