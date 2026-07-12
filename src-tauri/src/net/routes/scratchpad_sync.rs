@@ -10,10 +10,12 @@
 
 use crate::error::AppError;
 use crate::models::scratchpad::ScratchpadRow;
+use crate::net::error_response::{P2pError, P2pResult};
+use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
 use crate::sync::scratchpad::{merge_scratchpad, scratchpad_changed};
 use crate::sync::vector_clock::{compare, ClockOrder};
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -58,8 +60,20 @@ pub struct ScratchpadPushResp {
 /// Code Logic: get_all_for_sync 含 deleted；compare(local, remote_clock) 判断 After/Concurrent。
 pub async fn scratchpad_pull(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<ScratchpadPullReq>,
-) -> Result<Json<ScratchpadPullResp>, AppError> {
+) -> P2pResult<Json<ScratchpadPullResp>> {
+    let pages = scratchpad_pull_impl(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "scratchpad.pull"))?;
+    Ok(Json(ScratchpadPullResp { pages }))
+}
+
+/// scratchpad_pull 业务实现：返回需要下发的页面列表。
+async fn scratchpad_pull_impl(
+    state: &AppState,
+    req: ScratchpadPullReq,
+) -> Result<Vec<ScratchpadRow>, AppError> {
     let remote_map: HashMap<&str, &HashMap<String, u64>> = req
         .summaries
         .iter()
@@ -88,7 +102,7 @@ pub async fn scratchpad_pull(
         local_all.len(),
         pages.len()
     );
-    Ok(Json(ScratchpadPullResp { pages }))
+    Ok(pages)
 }
 
 /// POST /api/scratchpad/sync/push：接收对端页面，逐条合并后按需落库。
@@ -97,8 +111,20 @@ pub async fn scratchpad_pull(
 /// Code Logic: 本地没有则直接接收；本地已有则 merge_scratchpad，再用 scratchpad_changed 判断是否写库。
 pub async fn scratchpad_push(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<ScratchpadPushReq>,
-) -> Result<Json<ScratchpadPushResp>, AppError> {
+) -> P2pResult<Json<ScratchpadPushResp>> {
+    let accepted = scratchpad_push_impl(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "scratchpad.push"))?;
+    Ok(Json(ScratchpadPushResp { accepted }))
+}
+
+/// scratchpad_push 业务实现：逐条合并后按需落库，返回实际落库条数。
+async fn scratchpad_push_impl(
+    state: &AppState,
+    req: ScratchpadPushReq,
+) -> Result<usize, AppError> {
     let mut to_upsert: Vec<ScratchpadRow> = Vec::new();
 
     for remote in req.pages {
@@ -119,5 +145,5 @@ pub async fn scratchpad_push(
     }
 
     tracing::info!("scratchpad/sync/push: 接收并落库 {} 个页面", accepted);
-    Ok(Json(ScratchpadPushResp { accepted }))
+    Ok(accepted)
 }
