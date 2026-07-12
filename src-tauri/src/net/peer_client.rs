@@ -593,6 +593,29 @@ impl PeerClient {
             .map_err(|e| peer_call_error_to_transfer_message("status", &url, e))
     }
 
+    /// 显式 complete/finalize 握手：要求对端校验并落地后返回 success。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     size=0 与 resume_offset==size 时不会发送任何 chunk；发送端必须确认对端已 finalize
+    ///     才能标记本地 completed，否则会假报成功而远端只剩隐藏 .tmp。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/transfer/complete/{id}`，空 JSON body；期望 `{success, received_bytes}`。
+    ///     success==true → Ok(true)；success==false → Ok(false)；网络/协议失败 → Err。
+    pub async fn transfer_complete(
+        &self,
+        base_url: &str,
+        transfer_id: &str,
+    ) -> Result<bool, String> {
+        let url = format!("{base_url}/api/transfer/complete/{transfer_id}");
+        let body = serde_json::json!({});
+        let resp: ChunkResp = self
+            .request_post(&url, &body)
+            .await
+            .map_err(|e| peer_call_error_to_transfer_message("complete", &url, e))?;
+        Ok(resp.success)
+    }
+
     /// Claude Code 历史同步 pull：向对端发送本端 cc 历史摘要，获取对端认为本端需要的 cc 历史。
     ///
     /// Business Logic: CC 历史同步第一步——把本端摘要发给对端，对端比对后返回本端需要更新的

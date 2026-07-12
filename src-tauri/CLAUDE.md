@@ -281,18 +281,19 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 
 ## M5 已落地行为约定（移植自 Python transfer/，逐方法对照）
 
-- **传输协议等价（Rust↔Python 互通）**：三条 P2P 端点字段与 Python `protocol.py` 逐字一致——
+- **传输协议（P2P）**：四条端点——
   - `POST /api/transfer/init`：body `{transfer_id, filename, size, sha256, chunk_size}` → `{transfer_id, accepted, resume_offset}`
   - `POST /api/transfer/chunk/:id`：body=原始 bytes，**header `X-Chunk-Offset`**（缺省 0）→ `{success, received_bytes}`
+  - `POST /api/transfer/complete/:id`：空 JSON body → `{success, received_bytes}`（显式 finalize 握手；size=0 / full-tmp 续传必需；墓碑幂等）
   - `GET /api/transfer/status/:id` → `{transfer_id, status, progress, transferred_bytes, size, filename}`
-  **`X-Chunk-Offset` header 是关键契约**，peer_client `transfer_chunk` 发送端设置、route handler 接收端解析。
+  **`X-Chunk-Offset` header 是关键契约**，peer_client `transfer_chunk` 发送端设置、route handler 接收端解析。发送端分块循环结束后**必须** `transfer_complete`，远端 `success=true` 才 mark 本地 completed。
 - **分块大小**：`transfer::CHUNK_SIZE = 960KB`（960*1024），与 Python 完全一致，低于 aiohttp 默认 1MB 限制兼容未自定义对端。axum `DefaultBodyLimit::max(32MB)` 仍可容纳 chunk+开销，并额外支持 Workbench 远端 5MB 高转义文本保存。
-- **SHA256 校验**：发送端发送前用 `sha2` crate 以 8KB 块流式计算（对照 Python `_calculate_sha256`），随 init 元数据下发；接收端收齐（`transferred >= size`）后流式校验 `.tmp`，不符标记 failed + 删 `.tmp`，通过则重命名落地。
-- **断点续传**：接收端临时文件 `.{transfer_id}.tmp`（命名与 Python 一致）；init 返回该文件已存在大小作 `resume_offset`，发送端从该 offset seek 续传。接收端 OpenOptions 用 `create+write+read+truncate(false)` 保留旧内容（r+b 语义）。
+- **SHA256 校验**：发送端发送前用 `sha2` crate 以 8KB 块流式计算（对照 Python `_calculate_sha256`），随 init 元数据下发；接收端收齐（`transferred >= size` 或 complete 握手）后流式校验 `.tmp`，不符标记 failed + 删 `.tmp`，通过则原子落盘。
+- **断点续传**：接收端临时文件 `.{transfer_id}.tmp`（命名与 Python 一致）；init 返回该文件已存在大小作 `resume_offset`（tmp > size 时删除损坏 tmp 并 Validation 拒绝），发送端从该 offset seek 续传；`resume_offset > file_size` 发送端直接 fail。接收端 OpenOptions 用 `create+write+read+truncate(false)` 保留旧内容（r+b 语义）。
 - **取消机制**：`tokio_util::sync::CancellationToken`（Cargo.toml 加 `tokio-util = {version="0.7", features=["rt"]}`）。每任务在 `TransferRegistry` 内关联一个 token；`cancel_transfer` 命令触发 `cancel()`，发送循环每块前 `is_cancelled()` 检查；取消标记 cancelled + 写历史 + emit `transfer:cancelled`。
-- **TransferRegistry**（`transfer/registry.rs`）：`Arc<RwLock<HashMap<String, Entry>>>`，Entry = `{task, cancel_token}`。提供 add/get/cancel_token/update_progress/set_status/mark_completed/failed/cancelled/cancel/remove/list + per-`transfer_id` finalize 单飞锁（`Weak` 存储，无强引用时 prune，未知随机 ID 不得永久扩张 map）与终态墓碑。`handle_init` 与 `handle_chunk` 必须共享同一 per-ID 锁：init 持锁后重查 active/墓碑——**仅 direction=Receive** 且同元数据幂等返回；**Send entry 一律 conflict**；不同元数据 conflict；终态墓碑 conflict 禁止 reopen；chunk 在 open/write 前持锁并重读任务/墓碑，**direction≠Receive 直接 success:false 且不得 open 源文件**，覆盖写块→进度→finalize 全临界区，迟到请求不得在 rename 后改写已校验文件。finalize 同样拒绝非 Receive。
+- **TransferRegistry**（`transfer/registry.rs`）：`Arc<RwLock<HashMap<String, Entry>>>`，Entry = `{task, cancel_token}`。提供 add/get/cancel_token/update_progress/set_status/mark_completed/failed/cancelled/cancel/remove/list + per-`transfer_id` finalize 单飞锁（`Weak` 存储，无强引用时 prune，未知随机 ID 不得永久扩张 map）+ **receive_dir 级落盘锁**（覆盖 resolve_filename → exclusive place，防并发同名不同 transfer_id 覆盖）与终态墓碑。`handle_init`/`handle_chunk`/`handle_complete` 共享 per-ID 锁：init 持锁后重查 active/墓碑——**仅 direction=Receive** 且同元数据幂等返回；**Send entry 一律 conflict**；不同元数据 conflict；终态墓碑 conflict 禁止 reopen；chunk/complete 在 open/write 前持锁并重读任务/墓碑，**direction≠Receive 直接 success:false 且不得 open 源文件**。finalize 在 receive_dir 锁内 `create_new` 占位 + rename，AlreadyExists 则重新 resolve 后缀。
 - **事件 emit 机制**：发送端和接收端都通过 `AppState::emit_event` 发布事件；GUI 模式由 `TauriBackendUi` 转发给前端 `listen(...)`，headless 模式不依赖 Tauri。发送循环 emit `transfer:progress`（`{id, transferredBytes, size, progress}`）；终态 emit `transfer:completed`/`transfer:failed`/`transfer:cancelled`（含 errorMessage）。接收端 axum handler 不得读取 GUI 句柄，收齐或失败时同样通过 state adapter 发布事件。
-- **文件名安全与冲突**：init 边界 `sanitize_receive_basename` 将 `filename`/`transfer_id` 限制为单个普通路径组件，拒绝绝对路径、`..`/`Prefix`/`RootDir`、`/` `\` 与空串；临时路径 `.{transfer_id}.tmp` 与 finalize 最终路径在落盘前 `ensure_path_within_dir` 断言仍位于 `receive_dir` 内。`resolve_filename` 仅处理已校验 basename，重名时加 `(1)`/`(2)` 后缀（`file.txt → file (1).txt`；无扩展名 → `README → README (1)`）。
+- **文件名安全与冲突**：init 边界 `sanitize_receive_basename` 将 `filename`/`transfer_id` 限制为单个普通路径组件，拒绝绝对路径、`..`/`Prefix`/`RootDir`、`/` `\` 与空串；临时路径 `.{transfer_id}.tmp` 与 finalize 最终路径在落盘前 `ensure_path_within_dir` 断言仍位于 `receive_dir` 内。`resolve_filename` 仅处理已校验 basename，重名时加 `(1)`/`(2)` 后缀（`file.txt → file (1).txt`；无扩展名 → `README → README (1)`）；并发同名靠 exclusive place，不静默覆盖。
 - **TransferTask 模型**：`models/transfer.rs` 内部 snake_case（registry + transfer_history 表对齐），`TransferTaskDto` camelCase + 派生 progress 对齐前端 `web/src/lib/types.ts`。状态枚举 `TransferStatus` serde lowercase，方向枚举 `TransferDirection` serde lowercase（与 Python Enum.value 一致）。
 - **transfer_history 持久化**：`storage/transfer_repo.rs`（INSERT OR REPLACE record / list 倒序 / update_status）。表 schema 由 backend/runtime.rs `TRANSFER_SCHEMA` 内联建表。任务进入终态（completed/failed/cancelled）后写历史并从 registry remove。
 - **命令层**（`commands/transfer.rs`，lib.rs invoke_handler 注册）：

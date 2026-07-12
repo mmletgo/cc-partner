@@ -2,20 +2,21 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     用户在传输面板选择文件与目标设备后，需将文件分块发送到对端。发送端封装：
-//!     计算 SHA256 → init 握手拿 resume_offset → 从 offset 逐块读取发送 → 完成校验 →
+//!     计算 SHA256 → init 握手拿 resume_offset → 从 offset 逐块读取发送 → 显式 complete 握手 →
 //!     emit 进度/完成/失败/取消事件 → 写 transfer_history。对照 Python `transfer/sender.py`。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `start_sending(state, device_id, file_path)`：在调用方线程内 spawn 异步任务，
 //!       立即返回 transfer_id（命令层 send_transfer 用）。
 //!     - spawn 内：查 devices 拿对端 host:port → 算 SHA256 → registry.add(task) → emit pending →
-//!       transfer_init 拿 resume_offset → 循环分块读 + transfer_chunk（body=bytes，header X-Chunk-Offset）→
-//!       每块前检查 cancel_token → 更新 progress + 节流 emit → 全部发完 emit completed + 写历史。
+//!       transfer_init 拿 resume_offset（>size 拒绝）→ 循环分块读 + transfer_chunk →
+//!       每块前检查 cancel_token → 更新 progress + 节流 emit →
+//!       分块循环结束后 **必须** `transfer_complete` 确认对端终态，成功才 mark completed。
 //!     - 任何异常：mark_failed + emit failed。
 //!     - 取消：mark_cancelled + emit cancelled。
 //!
-//! 协议等价：init/chunk JSON 字段、X-Chunk-Offset header、960KB chunk_size、resume_offset 语义
-//!     全部与 Python 一致（迁移期 Rust↔Python 互通）。
+//! 协议：init/chunk/complete JSON 字段、X-Chunk-Offset header、960KB chunk_size、resume_offset 语义
+//!     与既有对端互通；complete 是 round9 新增的显式终态握手（兼容 size=0 与 full-tmp 续传）。
 
 use crate::error::AppError;
 use crate::models::transfer::{TransferDirection, TransferStatus, TransferTask};
@@ -224,11 +225,23 @@ async fn run_send_loop(
         }
     };
 
+    // resume_offset 大于文件 size 属于协议/对端异常，不得空转后假报完成。
+    if resume_offset > file_size {
+        fail_transfer(
+            &state,
+            &registry,
+            &transfer_id,
+            format!("对端 resume_offset={resume_offset} 超过本机文件大小 {file_size}"),
+        )
+        .await;
+        return;
+    }
+
     // 标记 transferring，emit 首个进度（含 resume_offset）
     registry.update_progress(&transfer_id, resume_offset, TransferStatus::Transferring);
     emit_progress(&state, &transfer_id, resume_offset, file_size);
 
-    // 3) 分块发送循环
+    // 3) 分块发送循环（resume_offset==size 或 size==0 时循环不发送任何块）
     let file_result = send_file_chunks(
         &state,
         &registry,
@@ -243,23 +256,69 @@ async fn run_send_loop(
 
     match file_result {
         Ok(()) => {
-            // 4) 全部发完：对端在收齐最后一块时会自动 finalize（校验 SHA256）。
-            //    发送端标记本地任务 completed 并写历史。
-            let completed_at = now_iso();
-            registry.mark_completed(&transfer_id, completed_at.clone(), None);
-            let task = registry.get(&transfer_id);
-            if let Some(t) = task {
-                let _ = state.transfer_repo.record(&t).await;
+            // 4) 分块循环结束 ≠ 对端已落地。必须显式 complete 握手：
+            //    - size=0 / full-tmp 续传不会触发 chunk 侧 finalize；
+            //    - 即便最后一块已 finalize，complete 命中墓碑也幂等返回成功。
+            //    只有远端 success=true 才标记本地 completed。
+            if cancel_token.is_cancelled() {
+                let completed_at = now_iso();
+                registry.mark_cancelled(&transfer_id, completed_at.clone());
+                if let Some(t) = registry.get(&transfer_id) {
+                    let _ = state.transfer_repo.record(&t).await;
+                }
+                registry.remove(&transfer_id);
+                state.emit_event(
+                    "transfer:cancelled",
+                    StatusPayload {
+                        id: transfer_id,
+                        status: "cancelled".to_string(),
+                        error_message: None,
+                    },
+                );
+                return;
             }
-            registry.remove(&transfer_id);
-            state.emit_event(
-                "transfer:completed",
-                StatusPayload {
-                    id: transfer_id,
-                    status: "completed".to_string(),
-                    error_message: None,
-                },
-            );
+
+            match state
+                .peer_client
+                .transfer_complete(&base_url, &transfer_id)
+                .await
+            {
+                Ok(true) => {
+                    let completed_at = now_iso();
+                    registry.mark_completed(&transfer_id, completed_at.clone(), None);
+                    let task = registry.get(&transfer_id);
+                    if let Some(t) = task {
+                        let _ = state.transfer_repo.record(&t).await;
+                    }
+                    registry.remove(&transfer_id);
+                    state.emit_event(
+                        "transfer:completed",
+                        StatusPayload {
+                            id: transfer_id,
+                            status: "completed".to_string(),
+                            error_message: None,
+                        },
+                    );
+                }
+                Ok(false) => {
+                    fail_transfer(
+                        &state,
+                        &registry,
+                        &transfer_id,
+                        "对端 finalize 未成功（complete 握手返回 success=false）".to_string(),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    fail_transfer(
+                        &state,
+                        &registry,
+                        &transfer_id,
+                        format!("对端 complete 握手失败: {e}"),
+                    )
+                    .await;
+                }
+            }
         }
         Err(SendError::Cancelled) => {
             let completed_at = now_iso();

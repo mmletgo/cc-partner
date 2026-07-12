@@ -1,15 +1,15 @@
-//! net/routes/transfer.rs — /api/transfer/{init,chunk,status} handler（供对端 P2P 调用）
+//! net/routes/transfer.rs — /api/transfer/{init,chunk,complete,status} handler（供对端 P2P 调用）
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     对端发送文件时调用这三个端点：init 协商元数据与续传 offset；chunk 逐块写入；
-//!     status 查询接收进度。对照 Python `protocol.py` 的三个 handler。
-//!     字段命名与 Python 逐字一致（transfer_id/accepted/resume_offset/success/received_bytes 等），
-//!     保证迁移期 Rust↔Python 互通。
+//!     对端发送文件时调用这些端点：init 协商元数据与续传 offset；chunk 逐块写入；
+//!     complete 显式触发/确认 finalize；status 查询接收进度。
+//!     字段命名与既有协议一致（transfer_id/accepted/resume_offset/success/received_bytes 等）。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - POST /api/transfer/init：body `{transfer_id, filename, size, sha256, chunk_size}` →
 //!       `{transfer_id, accepted, resume_offset}`
 //!     - POST /api/transfer/chunk/:id：body=Bytes，header `X-Chunk-Offset` → `{success, received_bytes}`
+//!     - POST /api/transfer/complete/:id：空 JSON body → `{success, received_bytes}`（终态握手）
 //!     - GET /api/transfer/status/:id → `{transfer_id, status, progress, transferred_bytes, size, filename}`
 //!
 //! header X-Chunk-Offset 是关键契约（对照 Python handle_transfer_chunk）。
@@ -56,6 +56,21 @@ pub async fn transfer_chunk(
     let resp = receiver::handle_chunk(&state, &id, offset, data)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "transfer.chunk"))?;
+    Ok(Json(resp))
+}
+
+/// POST /api/transfer/complete/:id：显式 finalize 握手（size=0 / full-tmp 续传必需）。
+///
+/// Code Logic: 调 `receiver::handle_complete`；成功/失败均以 `{success, received_bytes}` 表达，
+///     业务错误（校验失败等）已收敛为 success=false + 墓碑，仅基础设施错误上抛。
+pub async fn transfer_complete(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Path(id): Path<String>,
+) -> P2pResult<Json<receiver::ChunkResp>> {
+    let resp = receiver::handle_complete(&state, &id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "transfer.complete"))?;
     Ok(Json(resp))
 }
 

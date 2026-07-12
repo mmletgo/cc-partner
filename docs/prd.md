@@ -451,6 +451,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 | POST | /api/sync/claude_md/push | 主动推送 user 级 CLAUDE.md |
 | POST | /api/transfer/init | 发起文件传输 |
 | POST | /api/transfer/chunk/{id} | 发送文件块 |
+| POST | /api/transfer/complete/{id} | 显式 finalize 握手（空文件/满 tmp 续传） |
 | GET | /api/transfer/status/{id} | 查询传输状态 |
 | GET | /api/claude-code/assets/inventory | 获取本机 Claude Code assets inventory，供对端选择性拉取 |
 | POST | /api/claude-code/assets/bundle | 按 selectors 打包 Claude Code assets 供对端拉取 |
