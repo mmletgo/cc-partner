@@ -777,9 +777,12 @@ fn kill_probe_process_group(process_group_id: u32) -> Result<(), std::io::Error>
 ///     正常退出后仍可能因孙进程持有 pipe 导致 read_to_end 永不返回，必须有界 drain。
 ///
 /// Code Logic（这个函数做什么）:
-///     把 stdout/stderr take 到独立线程 read_to_end；主线程在 deadline+grace 内 join，
-///     超时则 detach（线程随 pipe 关闭结束）并返回已读（可能空）缓冲。
+///     把 stdout/stderr take 到独立线程 read_to_end；主线程在 deadline+grace 内 join；
+///     任一 reader 超时则用已保存 pgid kill 进程组（Unix）/ 子进程并有界 reap，
+///     再给 reader 短宽限 rejoin；仍未结束才 detach，避免永久阻塞与后代泄漏。
 fn drain_probe_pipes(child: &mut Child, deadline: Instant) -> (Vec<u8>, Vec<u8>) {
+    // 在 take 管道前保存 pgid：超时后仍可 killpg 终止持 pipe 的后代。
+    let process_group_id = child.id();
     let stdout_handle = child.stdout.take().map(|mut out| {
         std::thread::spawn(move || {
             let mut buf = Vec::new();
@@ -796,8 +799,30 @@ fn drain_probe_pipes(child: &mut Child, deadline: Instant) -> (Vec<u8>, Vec<u8>)
     });
 
     let join_deadline = deadline + PROBE_PIPE_DRAIN_GRACE;
-    let stdout = join_pipe_thread(stdout_handle, join_deadline);
-    let stderr = join_pipe_thread(stderr_handle, join_deadline);
+    let (mut stdout, pending_stdout) = join_pipe_thread(stdout_handle, join_deadline);
+    let (mut stderr, pending_stderr) = join_pipe_thread(stderr_handle, join_deadline);
+
+    if pending_stdout.is_some() || pending_stderr.is_some() {
+        // 后代仍持管道：终止进程组以关闭写端，让 reader 的 read_to_end 返回。
+        terminate_probe_child(child, process_group_id, Instant::now());
+        let rejoin_deadline = Instant::now() + PROBE_PIPE_DRAIN_GRACE;
+        if let Some(handle) = pending_stdout {
+            let (buf, still_pending) = join_pipe_thread(Some(handle), rejoin_deadline);
+            stdout = buf;
+            // 仍挂起则 detach（kill 后极少见；接受线程泄漏优于阻塞启动）。
+            if let Some(stuck) = still_pending {
+                std::mem::forget(stuck);
+            }
+        }
+        if let Some(handle) = pending_stderr {
+            let (buf, still_pending) = join_pipe_thread(Some(handle), rejoin_deadline);
+            stderr = buf;
+            if let Some(stuck) = still_pending {
+                std::mem::forget(stuck);
+            }
+        }
+    }
+
     (stdout, stderr)
 }
 
@@ -805,22 +830,21 @@ fn drain_probe_pipes(child: &mut Child, deadline: Instant) -> (Vec<u8>, Vec<u8>)
 ///     drain 线程 join 必须可超时，否则与无界 read_to_end 等价。
 ///
 /// Code Logic（这个函数做什么）:
-///     在 join_deadline 前轮询 is_finished + join；超时返回空缓冲并让线程继续（pipe 关闭后自然退出）。
+///     在 join_deadline 前轮询 is_finished + join；完成返回 (buf, None)；
+///     超时返回 (空, Some(handle)) 供调用方 killpg 后再 rejoin/detach。
 fn join_pipe_thread(
     handle: Option<std::thread::JoinHandle<Vec<u8>>>,
     join_deadline: Instant,
-) -> Vec<u8> {
+) -> (Vec<u8>, Option<std::thread::JoinHandle<Vec<u8>>>) {
     let Some(handle) = handle else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     loop {
         if handle.is_finished() {
-            return handle.join().unwrap_or_default();
+            return (handle.join().unwrap_or_default(), None);
         }
         if Instant::now() >= join_deadline {
-            // 超时：丢弃 JoinHandle（detach），不阻塞主路径。
-            drop(handle);
-            return Vec::new();
+            return (Vec::new(), Some(handle));
         }
         let remaining = join_deadline.saturating_duration_since(Instant::now());
         std::thread::sleep(remaining.min(PROBE_POLL_INTERVAL));
@@ -1343,6 +1367,69 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         let (stdout, _stderr) = drain_probe_pipes(&mut child, deadline);
         assert_eq!(String::from_utf8_lossy(&stdout), "hello");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     父进程先退出但孙进程仍持 stdout 时，旧实现只 detach reader，后代与线程永久泄漏。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Unix：独立进程组 spawn `sh -c 'sleep 60 &'`，等 shell 退出后以过期 deadline drain；
+    ///     断言 drain 有界返回，且 kill(pgid,0) 失败（进程组已无存活成员）。
+    #[cfg(unix)]
+    #[test]
+    fn drain_timeout_kills_descendant_holding_pipe() {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = StdCommand::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 60 &")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("spawn sh with background sleep");
+        let pgid = child.id();
+
+        // 等待 shell 自身退出，留下持有 stdout 的 sleep 后代。
+        let wait_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    assert!(
+                        Instant::now() < wait_deadline,
+                        "shell 未在预期时间内退出"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("try_wait shell failed: {err}"),
+            }
+        }
+
+        // 过期 deadline 强制走 drain 超时 → killpg 路径。
+        let started = Instant::now();
+        let past_deadline = Instant::now() - Duration::from_millis(1);
+        let (_stdout, _stderr) = drain_probe_pipes(&mut child, past_deadline);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "descendant-hold-pipe 的 drain 超时路径耗时过长: {elapsed:?}"
+        );
+
+        // 进程组应已被 SIGKILL；kill(-pgid, 0) 失败表示无存活成员。
+        let pgid_i: libc::pid_t = pgid.try_into().expect("pgid fits pid_t");
+        let still_alive = unsafe { libc::kill(-pgid_i, 0) } == 0;
+        assert!(
+            !still_alive,
+            "drain 超时后进程组仍有存活后代 (pgid={pgid})"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

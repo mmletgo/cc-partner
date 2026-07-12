@@ -444,6 +444,80 @@ describe('AttentionProvider', () => {
     expect(loadSnapshot.mock.calls.length).toBe(2);
   });
 
+  test('visible poll-pending ordinary reject does not chain; manual refresh recovers', async () => {
+    // 覆盖移动端 30s HTTP 超时：loader 以普通 Error reject（非 Provider 35s 硬超时）。
+    // 可见页 in-flight 期间 10s 轮询会 mark poll-pending；失败后不得立刻 force 链式。
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible' as DocumentVisibilityState,
+    });
+
+    let callCount = 0;
+    const first = deferred<AttentionSnapshot>();
+    const loadSnapshot = vi.fn(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        return first.promise;
+      }
+      return Promise.resolve(buildSnapshot({ total: 21, generatedAt: 'manual-ok' }));
+    });
+
+    renderProvider(loadSnapshot);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('loading').textContent).toBe('true');
+
+    // in-flight 期间可见轮询只 mark poll-pending。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ATTENTION_POLL_INTERVAL_MS);
+      await Promise.resolve();
+    });
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+
+    // 普通业务/HTTP 失败（timedOut=false）：错误应保留，且不得因 poll-pending 立即再起请求。
+    await act(async () => {
+      first.reject(new Error('Attention HTTP timeout 30000ms'));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+    expect(screen.getByTestId('error').textContent).toMatch(/HTTP timeout/);
+    expect(screen.getByTestId('total').textContent).toBe('null');
+    // 失败后不得立刻链式第二请求。
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+
+    // 短时间内推进时间（远小于 10s 下一轮 interval）：调用次数仍应有界。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('error').textContent).toMatch(/HTTP timeout/);
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+
+    // 手动 refresh 可恢复（single-flight 已释放；force 不依赖 poll-pending）。
+    await act(async () => {
+      screen.getByRole('button', { name: 'refresh' }).click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('total').textContent).toBe('21');
+    });
+    expect(screen.getByTestId('generatedAt').textContent).toBe('manual-ok');
+    expect(screen.getByTestId('error').textContent).toBe('');
+    expect(loadSnapshot.mock.calls.length).toBe(2);
+  });
+
   test('useAttention outside provider throws', () => {
     function Broken() {
       useAttention();
