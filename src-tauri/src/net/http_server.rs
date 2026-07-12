@@ -1205,10 +1205,7 @@ mod tests {
             .uri("/probe")
             .body(Body::empty())
             .unwrap();
-        let response = router
-            .oneshot(request)
-            .await
-            .expect("router 不可失败");
+        let response = router.oneshot(request).await.expect("router 不可失败");
 
         assert_eq!(response.status(), StatusCode::OK);
         let header = response
@@ -1235,10 +1232,7 @@ mod tests {
             .header("x-cc-request-id", "trace-abc-001")
             .body(Body::empty())
             .unwrap();
-        let response = router
-            .oneshot(request)
-            .await
-            .expect("router 不可失败");
+        let response = router.oneshot(request).await.expect("router 不可失败");
 
         assert_eq!(
             response

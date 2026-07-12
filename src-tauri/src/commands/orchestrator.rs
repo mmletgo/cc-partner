@@ -3253,7 +3253,7 @@ mod tests {
             .expect("query running attempt");
 
         assert_eq!(completed.status, "completed");
-        assert_eq!(completed.completed_at.is_some(), true);
+        assert!(completed.completed_at.is_some());
         assert!(running.is_none());
     }
 

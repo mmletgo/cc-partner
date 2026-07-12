@@ -498,12 +498,12 @@ fn remote_error_to_app_error(error: PeerCallError) -> AppError {
         PeerCallError::Network { url, source } => {
             AppError::generic(format!("远端 Orchestrator 请求失败 ({url}): {source}"))
         }
-        PeerCallError::InvalidResponse { url, reason } => AppError::generic(format!(
-            "远端 Orchestrator 响应无法解析 ({url}): {reason}"
-        )),
-        PeerCallError::Unsupported { url, capability } => AppError::unavailable(format!(
-            "远端 Orchestrator ({url}) 不支持能力 {capability}"
-        )),
+        PeerCallError::InvalidResponse { url, reason } => {
+            AppError::generic(format!("远端 Orchestrator 响应无法解析 ({url}): {reason}"))
+        }
+        PeerCallError::Unsupported { url, capability } => {
+            AppError::unavailable(format!("远端 Orchestrator ({url}) 不支持能力 {capability}"))
+        }
         PeerCallError::Remote {
             message,
             status,

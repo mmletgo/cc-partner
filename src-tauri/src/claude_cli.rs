@@ -72,27 +72,25 @@ pub(crate) async fn check_claude_cli_available(cli_path: &str) -> Result<String,
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let output = match tokio::time::timeout(
-        Duration::from_secs(CLI_VERSION_TIMEOUT_SECS),
-        cmd.output(),
-    )
-    .await
-    {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
-            return Err(if e.kind() == std::io::ErrorKind::NotFound {
-                "未找到 Claude CLI，请确认已安装并配置 PATH".to_string()
-            } else {
-                format!("启动 Claude CLI 失败: {e}")
-            });
-        }
-        Err(_) => {
-            return Err(format!(
-                "Claude CLI 检测超时（{} 秒）",
-                CLI_VERSION_TIMEOUT_SECS
-            ));
-        }
-    };
+    let output =
+        match tokio::time::timeout(Duration::from_secs(CLI_VERSION_TIMEOUT_SECS), cmd.output())
+            .await
+        {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                return Err(if e.kind() == std::io::ErrorKind::NotFound {
+                    "未找到 Claude CLI，请确认已安装并配置 PATH".to_string()
+                } else {
+                    format!("启动 Claude CLI 失败: {e}")
+                });
+            }
+            Err(_) => {
+                return Err(format!(
+                    "Claude CLI 检测超时（{} 秒）",
+                    CLI_VERSION_TIMEOUT_SECS
+                ));
+            }
+        };
 
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();

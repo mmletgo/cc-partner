@@ -194,9 +194,7 @@ pub fn parse_peer_response_parts<T: DeserializeOwned>(
         if !body_id.is_empty() && header_id != body_id {
             return Err(PeerCallError::InvalidResponse {
                 url: url.to_string(),
-                reason: format!(
-                    "request_id 不一致: header={header_id} body={body_id}"
-                ),
+                reason: format!("request_id 不一致: header={header_id} body={body_id}"),
             });
         }
     }
@@ -234,13 +232,10 @@ pub async fn parse_peer_response<T: DeserializeOwned>(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     let url_owned = url.to_string();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| PeerCallError::Network {
-            url: url_owned,
-            source: e,
-        })?;
+    let bytes = response.bytes().await.map_err(|e| PeerCallError::Network {
+        url: url_owned,
+        source: e,
+    })?;
     parse_peer_response_parts::<T>(status, header_request_id.as_deref(), &bytes, url)
 }
 
@@ -284,8 +279,9 @@ mod tests {
             "retryable": true,
             "details": {"queue": "sync"}
         }"#;
-        let err = parse_peer_response_parts::<SampleDto>(503, Some("req-abc"), body.as_bytes(), URL)
-            .expect_err("503 应为错误");
+        let err =
+            parse_peer_response_parts::<SampleDto>(503, Some("req-abc"), body.as_bytes(), URL)
+                .expect_err("503 应为错误");
 
         match &err {
             PeerCallError::Remote {
@@ -358,8 +354,8 @@ mod tests {
     #[test]
     fn legacy_body_does_not_derive_business_code_from_text() {
         let body = br#"{"error":"state conflict happened"}"#;
-        let err = parse_peer_response_parts::<SampleDto>(409, None, body, URL)
-            .expect_err("409 应为错误");
+        let err =
+            parse_peer_response_parts::<SampleDto>(409, None, body, URL).expect_err("409 应为错误");
         // 关键断言：code 不是 "conflict"，而是合成的 legacy token。
         assert_eq!(err.code(), Some(LEGACY_REMOTE_ERROR_CODE));
     }
@@ -375,8 +371,8 @@ mod tests {
     #[test]
     fn invalid_json_body_becomes_invalid_response() {
         let body = b"<html>502 Bad Gateway</html>";
-        let err = parse_peer_response_parts::<SampleDto>(502, None, body, URL)
-            .expect_err("502 应为错误");
+        let err =
+            parse_peer_response_parts::<SampleDto>(502, None, body, URL).expect_err("502 应为错误");
         match &err {
             PeerCallError::InvalidResponse { reason, .. } => {
                 assert!(reason.contains("无法解析"), "原因应说明无法解析: {reason}");
@@ -441,7 +437,9 @@ mod tests {
         let err = parse_peer_response_parts::<SampleDto>(404, Some("hdr-9"), body, URL)
             .expect_err("404 应为错误");
         match err {
-            PeerCallError::Remote { request_id, code, .. } => {
+            PeerCallError::Remote {
+                request_id, code, ..
+            } => {
                 assert_eq!(request_id, "hdr-9");
                 assert_eq!(code, "not_found");
             }

@@ -57,7 +57,8 @@ impl PeerProtocolInfo {
     /// Code Logic（这个函数做什么）:
     ///     要求 `protocol_version >= 1` 且 capabilities 中存在与入参完全相等（`==`）的字符串。
     pub fn supports(&self, capability: &str) -> bool {
-        self.protocol_version >= PROTOCOL_VERSION_V1 && self.capabilities.iter().any(|c| c == capability)
+        self.protocol_version >= PROTOCOL_VERSION_V1
+            && self.capabilities.iter().any(|c| c == capability)
     }
 }
 

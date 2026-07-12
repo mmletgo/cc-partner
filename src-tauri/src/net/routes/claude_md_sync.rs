@@ -112,10 +112,7 @@ pub async fn claude_md_push(
 }
 
 /// claude_md_push 业务实现：覆盖落库 + 写文件，返回是否实际发生变化。
-async fn claude_md_push_impl(
-    state: &AppState,
-    req: ClaudeMdPushReq,
-) -> Result<bool, AppError> {
+async fn claude_md_push_impl(state: &AppState, req: ClaudeMdPushReq) -> Result<bool, AppError> {
     let local = state.claude_md_repo.get().await?;
     // 用 `Option::map_or` 而非 `Option::is_none_or`（后者 1.82 才 stable），
     // 项目 MSRV 是 1.77.2，clippy 的 `-D warnings` 会阻断。

@@ -136,10 +136,12 @@ impl PeerClient {
                 source: e,
             }
         })?;
-        parse_peer_response::<HealthResponse>(resp, &url).await.map_err(|e| {
-            tracing::debug!("health_info 解析失败 ({url}): {e}");
-            e
-        })
+        parse_peer_response::<HealthResponse>(resp, &url)
+            .await
+            .map_err(|e| {
+                tracing::debug!("health_info 解析失败 ({url}): {e}");
+                e
+            })
     }
 
     /// 能力门：调用新路由前检查对端是否支持某能力，不支持则直接返回 `Unsupported` 而不发起路由请求。
@@ -179,7 +181,10 @@ impl PeerClient {
     ///     均视为不可达返回 false（与 Python `health_check` 一致，不向上抛错）。
     pub async fn health(&self, addr: &str, port: u16) -> bool {
         let base_url = format!("http://{addr}:{port}");
-        self.health_info(&base_url).await.map(|r| r.ok).unwrap_or(false)
+        self.health_info(&base_url)
+            .await
+            .map(|r| r.ok)
+            .unwrap_or(false)
     }
 
     /// 同步 pull：向对端发送本端 prompt 摘要，获取对端认为本端需要的 prompt。
@@ -795,10 +800,7 @@ mod tests {
     ///
     /// Code Logic: 用 axum 挂一个 `/api/health` handler，按入参 protocol_version/capabilities
     ///     返回 HealthResponse；端口绑定 0 由 OS 分配，避免与真实服务冲突。
-    async fn spawn_health_server(
-        protocol_version: u32,
-        capabilities: Vec<String>,
-    ) -> String {
+    async fn spawn_health_server(protocol_version: u32, capabilities: Vec<String>) -> String {
         use axum::routing::get;
         let state = HealthState {
             protocol_version,
@@ -847,8 +849,7 @@ mod tests {
     ///     断言 Ok 且 protocol_version == 1。
     #[tokio::test]
     async fn require_capability_passes_when_peer_supports_token() {
-        let base_url =
-            spawn_health_server(1, vec!["errors.envelope.v1".to_string()]).await;
+        let base_url = spawn_health_server(1, vec!["errors.envelope.v1".to_string()]).await;
         let client = PeerClient::new();
         let health = client
             .require_capability(&base_url, "errors.envelope.v1")

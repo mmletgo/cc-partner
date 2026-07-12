@@ -1636,13 +1636,11 @@ impl OrchestratorRepo {
     ///     清空 blocked_reason 和 attempt_phase，保留 worktree/session/evidence。
     pub async fn start_task(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
         let current = self.get_task(task_id).await?;
-        let can_start_from_backlog =
-            current.status == OrchestratorTaskStatus::Draft
-                && current.workflow_state == OrchestratorWorkflowState::Backlog
-                && current.run_state == OrchestratorRunState::Idle;
-        let can_start_from_todo =
-            current.workflow_state == OrchestratorWorkflowState::Todo
-                && current.run_state == OrchestratorRunState::Idle;
+        let can_start_from_backlog = current.status == OrchestratorTaskStatus::Draft
+            && current.workflow_state == OrchestratorWorkflowState::Backlog
+            && current.run_state == OrchestratorRunState::Idle;
+        let can_start_from_todo = current.workflow_state == OrchestratorWorkflowState::Todo
+            && current.run_state == OrchestratorRunState::Idle;
         if !can_start_from_backlog && !can_start_from_todo {
             return Err(AppError::generic(format!(
                 "只有待整理草稿或待办空闲任务可以开始，当前 workflow={}, run={}, status={}",
@@ -3682,7 +3680,10 @@ mod tests {
         let persisted_plain_done = repo.get_task(&plain_done.id).await.unwrap();
 
         assert_eq!(delivering.status, OrchestratorTaskStatus::Delivering);
-        assert_eq!(delivering.workflow_state, OrchestratorWorkflowState::Merging);
+        assert_eq!(
+            delivering.workflow_state,
+            OrchestratorWorkflowState::Merging
+        );
         assert_eq!(delivering.run_state, OrchestratorRunState::Delivering);
         assert!(error.to_string().contains("人工复核"));
         assert_eq!(persisted_plain_done.status, OrchestratorTaskStatus::Done);
@@ -3705,9 +3706,15 @@ mod tests {
         created.worktree_id = Some("worktree-1".to_string());
         created.session_id = Some("session-1".to_string());
         repo.create_task(&created).await.unwrap();
-        repo.add_evidence(&created.id, "verificationOutput", "验证", "running", "still running")
-            .await
-            .unwrap();
+        repo.add_evidence(
+            &created.id,
+            "verificationOutput",
+            "验证",
+            "running",
+            "still running",
+        )
+        .await
+        .unwrap();
 
         let canceled = repo.cancel_task(&created.id).await.unwrap();
         let evidence = repo.list_evidence(&created.id).await.unwrap();

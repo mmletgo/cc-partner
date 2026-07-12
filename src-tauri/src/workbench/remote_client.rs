@@ -10,6 +10,7 @@
 
 use crate::error::AppError;
 use crate::workbench::browser_models::{WorkbenchBrowserDiscovery, WorkbenchBrowserPreview};
+use crate::workbench::claude_sessions::{SessionPreview, SessionSearchHit};
 use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchHtmlAssetDto, WorkbenchOpenFileDto,
     WorkbenchPathInfo, WorkbenchProjectDto, WorkbenchRemoteDirectoryEntryDto,
@@ -18,16 +19,15 @@ use crate::workbench::models::{
 };
 use crate::workbench::remote_protocol::{
     RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq,
-    RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq, RemoteFocusedSessionResp,
-    RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq, RemoteOpenFileReq,
-    RemotePathInfoReq, RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteProjectReq,
-    RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq,
-    RemoteReplaySessionReq, RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSearchClaudeSessionsReq,
-    RemoteSessionReq, RemoteSplitPaneReq, RemoteWorkbenchBrowserDiscoverReq,
-    RemoteWorkbenchBrowserPreviewReq, RemoteWorktreeReq, RemoteWriteSessionInputReq,
-    ResumeClaudeSessionResult,
+    RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq,
+    RemoteFocusedSessionResp, RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq,
+    RemoteOpenFileReq, RemotePathInfoReq, RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq,
+    RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq,
+    RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq, RemoteSaveTextReq,
+    RemoteSearchClaudeSessionsReq, RemoteSessionReq, RemoteSplitPaneReq,
+    RemoteWorkbenchBrowserDiscoverReq, RemoteWorkbenchBrowserPreviewReq, RemoteWorktreeReq,
+    RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
 };
-use crate::workbench::claude_sessions::{SessionPreview, SessionSearchHit};
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;

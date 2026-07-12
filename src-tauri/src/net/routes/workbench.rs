@@ -114,7 +114,9 @@ fn validate_remote_path(path: String) -> Result<String, AppError> {
 ///     检查项目 row 的 kind 是否为 local；非 local 返回校验错误（HTTP 边界映射 400 validation_error）。
 fn ensure_remote_gateway_local_project(project: &WorkbenchProjectRow) -> Result<(), AppError> {
     if project.kind != "local" {
-        return Err(AppError::validation("远端 Workbench 网关只接受对端本机项目"));
+        return Err(AppError::validation(
+            "远端 Workbench 网关只接受对端本机项目",
+        ));
     }
     Ok(())
 }
@@ -474,10 +476,9 @@ pub async fn remove_worktree(
     ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.remove"))?;
-    let result =
-        local_remove_workbench_worktree(&state, req.worktree_id, req.force)
-            .await
-            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.remove"))?;
+    let result = local_remove_workbench_worktree(&state, req.worktree_id, req.force)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.remove"))?;
     Ok(Json(result))
 }
 
@@ -497,10 +498,9 @@ pub async fn list_git_commits(
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.git.commits"))?;
     let limit = Some(req.limit.clamp(1, 100) as usize);
-    let commits =
-        local_list_workbench_git_commits(&state, req.project_id, req.worktree_id, limit)
-            .await
-            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.git.commits"))?;
+    let commits = local_list_workbench_git_commits(&state, req.project_id, req.worktree_id, limit)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.git.commits"))?;
     Ok(Json(commits))
 }
 
@@ -519,10 +519,9 @@ pub async fn list_workbench_dir(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.list_dir"))?;
-    let nodes =
-        local_list_workbench_dir(&state, req.project_id, req.worktree_id, req.path)
-            .await
-            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.list_dir"))?;
+    let nodes = local_list_workbench_dir(&state, req.project_id, req.worktree_id, req.path)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.list_dir"))?;
     Ok(Json(nodes))
 }
 
@@ -541,10 +540,9 @@ pub async fn workbench_path_info(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.info"))?;
-    let info =
-        local_get_workbench_path_info(&state, req.project_id, req.worktree_id, req.path)
-            .await
-            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.info"))?;
+    let info = local_get_workbench_path_info(&state, req.project_id, req.worktree_id, req.path)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.info"))?;
     Ok(Json(info))
 }
 
@@ -563,10 +561,9 @@ pub async fn open_workbench_file(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.open"))?;
-    let file =
-        local_open_workbench_file(&state, req.project_id, req.worktree_id, req.path)
-            .await
-            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.open"))?;
+    let file = local_open_workbench_file(&state, req.project_id, req.worktree_id, req.path)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.open"))?;
     Ok(Json(file))
 }
 
@@ -585,17 +582,16 @@ pub async fn save_workbench_text_file(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.save_text"))?;
-    let result =
-        local_save_workbench_text_file(
-            &state,
-            req.project_id,
-            req.worktree_id,
-            req.path,
-            req.content,
-            req.base_hash,
-        )
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.save_text"))?;
+    let result = local_save_workbench_text_file(
+        &state,
+        req.project_id,
+        req.worktree_id,
+        req.path,
+        req.content,
+        req.base_hash,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.save_text"))?;
     Ok(Json(result))
 }
 
@@ -614,17 +610,16 @@ pub async fn preview_workbench_sqlite(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.preview_sqlite"))?;
-    let preview =
-        local_preview_workbench_sqlite(
-            &state,
-            req.project_id,
-            req.worktree_id,
-            req.path,
-            req.table,
-            req.limit_rows,
-        )
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.preview_sqlite"))?;
+    let preview = local_preview_workbench_sqlite(
+        &state,
+        req.project_id,
+        req.worktree_id,
+        req.path,
+        req.table,
+        req.limit_rows,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.preview_sqlite"))?;
     Ok(Json(preview))
 }
 
@@ -643,16 +638,15 @@ pub async fn preview_workbench_html_asset(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.preview_html_asset"))?;
-    let asset =
-        local_preview_workbench_html_asset(
-            &state,
-            req.project_id,
-            req.worktree_id,
-            req.document_path,
-            req.asset_path,
-        )
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.preview_html_asset"))?;
+    let asset = local_preview_workbench_html_asset(
+        &state,
+        req.project_id,
+        req.worktree_id,
+        req.document_path,
+        req.asset_path,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.preview_html_asset"))?;
     Ok(Json(asset))
 }
 
@@ -671,16 +665,15 @@ pub async fn create_workbench_file(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.create_file"))?;
-    let info =
-        local_create_workbench_file(
-            &state,
-            req.project_id,
-            req.worktree_id,
-            req.parent_path,
-            req.name,
-        )
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.create_file"))?;
+    let info = local_create_workbench_file(
+        &state,
+        req.project_id,
+        req.worktree_id,
+        req.parent_path,
+        req.name,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.create_file"))?;
     Ok(Json(info))
 }
 
@@ -699,16 +692,15 @@ pub async fn create_workbench_dir(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.create_dir"))?;
-    let info =
-        local_create_workbench_dir(
-            &state,
-            req.project_id,
-            req.worktree_id,
-            req.parent_path,
-            req.name,
-        )
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.create_dir"))?;
+    let info = local_create_workbench_dir(
+        &state,
+        req.project_id,
+        req.worktree_id,
+        req.parent_path,
+        req.name,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.create_dir"))?;
     Ok(Json(info))
 }
 
@@ -727,16 +719,15 @@ pub async fn rename_workbench_path(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.rename"))?;
-    let info =
-        local_rename_workbench_path(
-            &state,
-            req.project_id,
-            req.worktree_id,
-            req.path,
-            req.new_name,
-        )
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.rename"))?;
+    let info = local_rename_workbench_path(
+        &state,
+        req.project_id,
+        req.worktree_id,
+        req.path,
+        req.new_name,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.rename"))?;
     Ok(Json(info))
 }
 
@@ -755,10 +746,9 @@ pub async fn delete_workbench_path(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.delete"))?;
-    let result =
-        local_delete_workbench_path(&state, req.project_id, req.worktree_id, req.path)
-            .await
-            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.delete"))?;
+    let result = local_delete_workbench_path(&state, req.project_id, req.worktree_id, req.path)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.delete"))?;
     Ok(Json(result))
 }
 
@@ -851,16 +841,15 @@ pub async fn create_workbench_session(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.create"))?;
-    let session =
-        local_create_workbench_session(
-            &state,
-            req.project_id,
-            req.worktree_id,
-            req.initial_cols,
-            req.initial_rows,
-        )
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.create"))?;
+    let session = local_create_workbench_session(
+        &state,
+        req.project_id,
+        req.worktree_id,
+        req.initial_cols,
+        req.initial_rows,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.create"))?;
     Ok(Json(session))
 }
 
@@ -900,10 +889,9 @@ pub async fn resize_workbench_session(
     ensure_remote_gateway_local_session_id(&state, &req.session_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.resize"))?;
-    let result =
-        local_resize_workbench_session(&state, req.session_id, req.cols, req.rows)
-            .await
-            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.resize"))?;
+    let result = local_resize_workbench_session(&state, req.session_id, req.cols, req.rows)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.resize"))?;
     Ok(Json(result))
 }
 
@@ -1091,16 +1079,15 @@ pub async fn stream_prompt_optimizer_to_session(
     ensure_remote_gateway_local_session_id(&state, &req.session_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.prompt_optimizer.stream"))?;
-    let result =
-        local_stream_optimize_prompt_to_workbench_session(
-            &state,
-            req.prompt,
-            req.working_directory,
-            req.target_language,
-            req.session_id,
-        )
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.prompt_optimizer.stream"))?;
+    let result = local_stream_optimize_prompt_to_workbench_session(
+        &state,
+        req.prompt,
+        req.working_directory,
+        req.target_language,
+        req.session_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.prompt_optimizer.stream"))?;
     Ok(Json(result))
 }
 
@@ -1514,10 +1501,9 @@ pub async fn mobile_resize_workbench_session(
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteResizeSessionReq>,
 ) -> P2pResult<Json<Value>> {
-    let value =
-        resize_workbench_session_for_state(&state, req.session_id, req.cols, req.rows)
-            .await
-            .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.resize"))?;
+    let value = resize_workbench_session_for_state(&state, req.session_id, req.cols, req.rows)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.resize"))?;
     Ok(Json(value))
 }
 
@@ -1551,10 +1537,9 @@ pub async fn mobile_focused_workbench_session(
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteFocusedSessionReq>,
 ) -> P2pResult<Json<Value>> {
-    let value =
-        get_focused_workbench_session_for_state(&state, req.project_id, req.worktree_id)
-            .await
-            .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.focused"))?;
+    let value = get_focused_workbench_session_for_state(&state, req.project_id, req.worktree_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.focused"))?;
     Ok(Json(value))
 }
 
@@ -1660,16 +1645,15 @@ pub async fn mobile_stream_prompt_optimizer_to_session(
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemotePromptOptimizerReq>,
 ) -> P2pResult<Json<Value>> {
-    let value =
-        stream_optimize_prompt_to_workbench_session_for_state(
-            &state,
-            req.prompt,
-            req.working_directory,
-            req.target_language,
-            req.session_id,
-        )
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.prompt_optimizer.stream"))?;
+    let value = stream_optimize_prompt_to_workbench_session_for_state(
+        &state,
+        req.prompt,
+        req.working_directory,
+        req.target_language,
+        req.session_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.prompt_optimizer.stream"))?;
     Ok(Json(value))
 }
 
@@ -1689,15 +1673,14 @@ pub async fn search_claude_sessions(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.search"))?;
-    let hits =
-        search_claude_sessions_for_state(
-            &state,
-            &req.project_id,
-            req.worktree_id.as_deref(),
-            &req.query,
-        )
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.search"))?;
+    let hits = search_claude_sessions_for_state(
+        &state,
+        &req.project_id,
+        req.worktree_id.as_deref(),
+        &req.query,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.search"))?;
     Ok(Json(hits))
 }
 
@@ -1717,15 +1700,14 @@ pub async fn get_claude_session_preview(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.preview"))?;
-    let preview =
-        get_claude_session_preview_for_state(
-            &state,
-            &req.project_id,
-            req.worktree_id.as_deref(),
-            &req.session_id,
-        )
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.preview"))?;
+    let preview = get_claude_session_preview_for_state(
+        &state,
+        &req.project_id,
+        req.worktree_id.as_deref(),
+        &req.session_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.preview"))?;
     Ok(Json(preview))
 }
 
@@ -1746,15 +1728,14 @@ pub async fn resume_claude_session(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.resume"))?;
-    let result =
-        resume_claude_session_for_state(
-            &state,
-            &req.project_id,
-            req.worktree_id.as_deref(),
-            &req.session_id,
-        )
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.resume"))?;
+    let result = resume_claude_session_for_state(
+        &state,
+        &req.project_id,
+        req.worktree_id.as_deref(),
+        &req.session_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.resume"))?;
     Ok(Json(result))
 }
 

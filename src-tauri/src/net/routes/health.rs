@@ -108,7 +108,9 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["protocol_version"], 1);
-        let caps = json["capabilities"].as_array().expect("capabilities 为数组");
+        let caps = json["capabilities"]
+            .as_array()
+            .expect("capabilities 为数组");
         let cap_strs: Vec<&str> = caps.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(
             cap_strs.contains(&"errors.envelope.v1"),

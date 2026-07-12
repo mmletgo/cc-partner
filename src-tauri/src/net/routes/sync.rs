@@ -81,10 +81,7 @@ pub async fn sync_pull(
 }
 
 /// sync_pull 业务实现：返回需要下发的 prompt 列表（命令层错误保持 AppError 形态）。
-async fn sync_pull_impl(
-    state: &AppState,
-    req: SyncPullReq,
-) -> Result<Vec<PromptRow>, AppError> {
+async fn sync_pull_impl(state: &AppState, req: SyncPullReq) -> Result<Vec<PromptRow>, AppError> {
     // 对端摘要查找表
     let remote_map: HashMap<&str, &HashMap<String, u64>> = req
         .summaries

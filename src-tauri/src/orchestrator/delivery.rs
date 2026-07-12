@@ -1325,7 +1325,7 @@ mod tests {
             std::time::Duration::from_millis(800),
             run_verification_commands_with_limits(
                 dir.path(),
-                &[command.clone()],
+                std::slice::from_ref(&command),
                 std::time::Duration::from_millis(50),
                 1024,
             ),

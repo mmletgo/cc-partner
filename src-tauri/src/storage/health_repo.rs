@@ -191,11 +191,10 @@ impl HealthRepo {
     ///     自增 id 主键（不再是 ts 主键），同秒连点也能各自成行，避免主键冲突丢计数。
     /// Code Logic: INSERT INTO water_records (ts) VALUES (?) RETURNING id，返回自增主键。
     pub async fn insert_water(&self, ts: i64) -> Result<i64, AppError> {
-        let row: (i64,) =
-            sqlx::query_as("INSERT INTO water_records (ts) VALUES (?) RETURNING id")
-                .bind(ts)
-                .fetch_one(&self.db)
-                .await?;
+        let row: (i64,) = sqlx::query_as("INSERT INTO water_records (ts) VALUES (?) RETURNING id")
+            .bind(ts)
+            .fetch_one(&self.db)
+            .await?;
         Ok(row.0)
     }
 
@@ -259,10 +258,9 @@ impl HealthRepo {
     /// Business Logic: 前端"距下次提醒"需要知道上次喝水时间,推算剩余等待时长。
     /// Code Logic: SELECT MAX(ts) FROM water_records,表空返回 None。
     pub async fn get_last_water_ts(&self) -> Result<Option<i64>, AppError> {
-        let row: Option<(Option<i64>,)> =
-            sqlx::query_as("SELECT MAX(ts) FROM water_records")
-                .fetch_optional(&self.db)
-                .await?;
+        let row: Option<(Option<i64>,)> = sqlx::query_as("SELECT MAX(ts) FROM water_records")
+            .fetch_optional(&self.db)
+            .await?;
         Ok(row.and_then(|(opt,)| opt))
     }
 
@@ -622,7 +620,9 @@ mod tests {
         repo.insert_rest_record(0, "rest", 100).await.unwrap();
         repo.insert_rest_record(86400, "rest", 100).await.unwrap();
         repo.insert_rest_record(86400, "reminder", 0).await.unwrap();
-        repo.insert_rest_record(6 * 86400, "rest", 100).await.unwrap();
+        repo.insert_rest_record(6 * 86400, "rest", 100)
+            .await
+            .unwrap();
         let counts = repo.get_daily_rest_counts(0, 7, "rest").await.unwrap();
         assert_eq!(counts.len(), 7);
         assert_eq!(counts[0], 1);

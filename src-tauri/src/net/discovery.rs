@@ -277,8 +277,7 @@ fn handle_resolved(state: &AppState, info: ServiceInfo, my_device_id: &str) {
 
     // 解析协议元数据提示（非权威，缺失/非法回落为 v0 / 空）。
     let proto_version = parse_proto_hint(info.get_property_val_str(TXT_KEY_PROTO));
-    let capabilities =
-        parse_caps_hint(info.get_property_val_str(TXT_KEY_CAPS));
+    let capabilities = parse_caps_hint(info.get_property_val_str(TXT_KEY_CAPS));
 
     let device = Device {
         id: device_id.clone(),
@@ -399,8 +398,7 @@ pub fn encode_mdns_capabilities(capabilities: &[String], max_txt_bytes: usize) -
 /// Business Logic: mDNS 提示不是权威来源，对端可能用旧版本不带 proto，也可能写了非数字字符串，
 ///     绝不能因解析失败把对端踢出 devices 表；统一安全回落 v0（`supports()` 对 v0 永远返回 false）。
 fn parse_proto_hint(raw: Option<&str>) -> u32 {
-    raw.and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(0)
+    raw.and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(0)
 }
 
 /// 解析 `caps` TXT 提示为能力 Vec<String>；空 token / 缺失 一律丢弃。
@@ -583,10 +581,7 @@ mod tests {
         .expect("advertise plan should build ServiceInfo")
         .expect("register_service=true should yield Some(ServiceInfo)");
 
-        assert_eq!(
-            service_info.get_property_val_str(TXT_KEY_PROTO),
-            Some("1")
-        );
+        assert_eq!(service_info.get_property_val_str(TXT_KEY_PROTO), Some("1"));
         assert_eq!("1", PROTOCOL_VERSION_V1.to_string());
         let caps = service_info
             .get_property_val_str(TXT_KEY_CAPS)
@@ -655,7 +650,9 @@ mod tests {
         .expect("register_service=true should yield Some(ServiceInfo)");
 
         let proto_version = parse_proto_hint(service_info.get_property_val_str(TXT_KEY_PROTO));
-        let caps_raw = service_info.get_property_val_str(TXT_KEY_CAPS).unwrap_or("");
+        let caps_raw = service_info
+            .get_property_val_str(TXT_KEY_CAPS)
+            .unwrap_or("");
         // 解析路径期望 raw 是 `caps=...` 形式；publish 端写入的就是带前缀的整串。
         // parse_caps_hint 按逗号切分，因此先剥离 `caps=` 前缀。
         let stripped = caps_raw.strip_prefix("caps=").unwrap_or(caps_raw);

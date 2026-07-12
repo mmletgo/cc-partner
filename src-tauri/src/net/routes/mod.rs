@@ -216,7 +216,9 @@ pub(crate) fn api_error_to_p2p(
 mod envelope_contract_tests {
     use super::*;
     use crate::net::error_response::{P2pError, P2pErrorEnvelope};
-    use crate::net::request_context::{request_id_middleware, P2pRequestContext, REQUEST_ID_HEADER};
+    use crate::net::request_context::{
+        request_id_middleware, P2pRequestContext, REQUEST_ID_HEADER,
+    };
     use axum::body::{to_bytes, Body};
     use axum::extract::Extension;
     use axum::http::{Method, Request, StatusCode};
@@ -299,7 +301,10 @@ mod envelope_contract_tests {
         assert_eq!(body["code"], "validation_error");
         assert_eq!(body["error"], "参数非法");
         assert_eq!(body["request_id"], TEST_REQUEST_ID);
-        assert_eq!(body["request_id"], header_id, "header/body request_id 必须一致");
+        assert_eq!(
+            body["request_id"], header_id,
+            "header/body request_id 必须一致"
+        );
         assert_eq!(body["retryable"], false);
         assert!(body["details"].is_object(), "details 默认应为对象");
     }
@@ -376,11 +381,7 @@ mod envelope_contract_tests {
                 StatusCode::NOT_FOUND,
                 "not_found",
             ),
-            (
-                AppError::conflict("冲突"),
-                StatusCode::CONFLICT,
-                "conflict",
-            ),
+            (AppError::conflict("冲突"), StatusCode::CONFLICT, "conflict"),
             (
                 AppError::unavailable("不可用"),
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -402,7 +403,8 @@ mod envelope_contract_tests {
             assert_eq!(p2p.status(), expected_status, "状态码应匹配 code 约定");
             assert_eq!(p2p.envelope().code, expected_code, "code token 应匹配");
             assert_eq!(
-                p2p.envelope().request_id, TEST_REQUEST_ID,
+                p2p.envelope().request_id,
+                TEST_REQUEST_ID,
                 "request_id 必须取自 context"
             );
             assert!(

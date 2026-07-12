@@ -207,10 +207,7 @@ async fn run_dev_backend_command(subcommand: &str) -> Result<(), AppError> {
         {
             Ok(output) => output,
             Err(error) => {
-                candidate_errors.push(format!(
-                    "执行 {} 失败: {error}",
-                    candidate.display()
-                ));
+                candidate_errors.push(format!("执行 {} 失败: {error}", candidate.display()));
                 continue;
             }
         };

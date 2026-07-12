@@ -121,10 +121,7 @@ pub async fn scratchpad_push(
 }
 
 /// scratchpad_push 业务实现：逐条合并后按需落库，返回实际落库条数。
-async fn scratchpad_push_impl(
-    state: &AppState,
-    req: ScratchpadPushReq,
-) -> Result<usize, AppError> {
+async fn scratchpad_push_impl(state: &AppState, req: ScratchpadPushReq) -> Result<usize, AppError> {
     let mut to_upsert: Vec<ScratchpadRow> = Vec::new();
 
     for remote in req.pages {
