@@ -52,7 +52,8 @@ migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，�
 - **Source trait**：`source.rs::AttentionSource::collect(&AppState) -> BoxFuture<Result<Vec<AttentionItemDto>, AppError>>`；任一 source 错误使整次聚合失败，不得返回部分快照。
 - **Aggregator**：`aggregator.rs::aggregate_attention_sources` 顺序收集 source → 稳定 ID 去重（相等保留首次，内容冲突返回完整性错误）→ 分类序 decision→blocked→environment → 同分类 `updatedAt` 降序 → 同时间 ID 升序 → counts.total 与分类计数一致；`generatedAt` 仅在全部 source 成功后生成。
 - **稳定 ID**：`orchestrator:human-review:<taskId>` / `orchestrator:blocked:<taskId>` / `orchestrator:outbox-failed:<outboxId>` / `workbench:dependency:tmux`；远端 taskId 使用既有 `remote:<deviceId>:<inner>` 包装。
-- **未接入**：orchestrator_source / workbench_dependency_source / Tauri command / Mobile route 由后续 task 落地。
+- **Orchestrator source（`orchestrator_source.rs`）**：本机任务 HumanReview→decision、Blocked→blocked（投影前对 `status=blocked` 应用 `SplitTaskState::from_legacy_status`）；排除 resolved/running/queued/retrying 等；稳定 ID `orchestrator:human-review:<taskId>` / `orchestrator:blocked:<taskId>` / `orchestrator:outbox-failed:<outboxId>`，远端 taskId 用 `remote:<deviceId>:<inner>`；failed outbox 仅 active remote shortcut，target.projectId 为本机 shortcut id；remote 在线刷新 mirror 为 live，网络失败回退 path mirror 并以 `last_synced_at` 为 cachedAt；损坏 mirror/仓库错误使整 source 失败；remote 刷新 `buffer_unordered(4)`。不消费 `list_orchestrator_task_views_for_state` 最终 DTO（会丢 freshness）。
+- **未接入**：workbench_dependency_source / Tauri command / Mobile route 由后续 task 落地。
 
 ## Orchestrator 基础约定（src/orchestrator/）
 
