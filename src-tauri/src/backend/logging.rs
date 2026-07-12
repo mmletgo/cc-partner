@@ -876,6 +876,34 @@ pub fn init_backend_tracing(config: BackendLogConfig) -> Result<BackendLoggingGu
     Ok(guard)
 }
 
+/// 初始化 doctor 短生命周期进程的仅 stderr 脱敏 tracing。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `doctor` / `doctor --json` 需要在 probe 过程中把诊断 tracing 打到 stderr，
+///     同时 stdout 必须保持纯净（尤其 JSON 模式只能有一份合法 JSON）。
+///     doctor 不是 serve 子进程，不得打开/写入 `backend.log`，避免与 serve 双写竞态。
+///
+/// Code Logic（这个函数做什么）:
+///     组装 EnvFilter + 脱敏文本 stderr layer，`try_init` 设为全局默认 subscriber；
+///     已初始化时静默忽略（测试/重复调用友好），不打开文件 layer，不返回 guard。
+pub fn init_doctor_tracing() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::EnvFilter;
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,mdns_sd=off"));
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .event_format(SanitizedTextFormatter)
+        .with_ansi(false)
+        .with_writer(std::io::stderr);
+
+    let _ = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stderr_layer)
+        .try_init();
+}
+
 // ---------------------------------------------------------------------------
 // Production structured logging helpers
 // ---------------------------------------------------------------------------
