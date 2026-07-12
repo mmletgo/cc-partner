@@ -367,14 +367,19 @@ fn normalize_path(path: &Path) -> PathBuf {
 ///     通过 per-transfer 单飞锁 + 终态墓碑保证重放安全：第一个请求完成 finalize 写墓碑，
 ///     迟到请求必须在任何文件 open/write 前命中墓碑，返回第一次的成功结果。
 ///     安全边界：仅接受 direction=Receive 的任务；禁止用 outbound Send 任务 id 写入源文件。
+///     durable 窗口：最后一块 place 成功但 history 瞬时失败时，active 已是 Completed、
+///     status 仍 transferring；必须返回 retryable 5xx（与 handle_complete 一致），
+///     禁止 HTTP 200 success=false——否则 chunk 客户端只接受 completed，发送端永久失败，
+///     后续 complete 重试路径永不执行。
 /// Code Logic:
 ///     1. 先取 per-transfer 单飞锁（覆盖 re-read 任务/墓碑、写块、进度、finalize 全临界区）；
 ///     2. 持锁后重读 registry：不存在则查墓碑，命中则直接返回第一次结果（禁止 open 文件）；
 ///     3. 存在但 direction≠Receive → 拒绝写入并返回 success:false；
-///     4. 打开/创建 .tmp（写模式，允许读写以 seek），seek 到 offset 写入；
-///     5. 更新 transferred_bytes；
-///     6. 若 transferred >= size 则 finalize（SHA256 校验 + 重命名）；
-///     7. 返回 `{success:true, received_bytes}`。
+///     4. active 已 Completed → 只重试 durable 晋升；失败上抛 Unavailable；
+///     5. 打开/创建 .tmp（写模式，允许读写以 seek），seek 到 offset 写入；
+///     6. 更新 transferred_bytes；
+///     7. 若 transferred >= size 则 finalize；place 成功但 history 未 durable → Unavailable；
+///     8. 返回 `{success:true, received_bytes}` 或墓碑结果。
 pub async fn handle_chunk(
     state: &AppState,
     transfer_id: &str,
@@ -391,10 +396,6 @@ pub async fn handle_chunk(
         Some(t) => t,
         None => {
             if let Some(tomb) = state.transfers.tombstone(transfer_id) {
-                tracing::info!(
-                    "重放最后一块命中终态墓碑: {transfer_id}, outcome={:?}",
-                    tomb.outcome
-                );
                 let success = matches!(
                     tomb.outcome,
                     crate::transfer::registry::TransferOutcome::Completed { .. }
@@ -432,14 +433,13 @@ pub async fn handle_chunk(
         });
     }
 
-    // 落盘已成功但 history 未 durable：禁止再写文件，只重试晋升；失败不得 success=true。
+    // 落盘已成功但 history 未 durable：禁止再写文件，只重试晋升；失败上抛 5xx（与 complete 一致）。
     if task.status == TransferStatus::Completed {
         if let Err(e) = finalize_transfer(state, transfer_id).await {
             tracing::error!("chunk 路径 durable 晋升失败: {transfer_id}, {e}");
-            return Ok(ChunkResp {
-                success: false,
-                received_bytes: task.size,
-            });
+            return Err(AppError::unavailable(format!(
+                "transfer_history 尚未 durable，请重试 complete: {transfer_id}: {e}"
+            )));
         }
         if let Some(tomb) = state.transfers.tombstone(transfer_id) {
             let success = matches!(
@@ -451,10 +451,9 @@ pub async fn handle_chunk(
                 received_bytes: tomb.received_bytes,
             });
         }
-        return Ok(ChunkResp {
-            success: false,
-            received_bytes: task.size,
-        });
+        return Err(AppError::unavailable(format!(
+            "transfer durable 晋升后无墓碑，请重试 complete: {transfer_id}"
+        )));
     }
 
     state
@@ -486,8 +485,7 @@ pub async fn handle_chunk(
     if new_transferred >= task.size {
         if let Err(e) = finalize_transfer(state, transfer_id).await {
             tracing::error!("finalize 失败: {transfer_id}, {e}");
-            // durable 未就绪：active 可能已是 Completed（文件在、history 无），
-            // 或已 failed 墓碑。禁止 success=true 误导发送端。
+            // 已 failed 墓碑：返回 success=false（校验失败等业务终态）。
             if let Some(tomb) = state.transfers.tombstone(transfer_id) {
                 let success = matches!(
                     tomb.outcome,
@@ -498,20 +496,23 @@ pub async fn handle_chunk(
                     received_bytes: tomb.received_bytes,
                 });
             }
-            let received = state
-                .transfers
-                .get(transfer_id)
-                .map(|t| {
-                    if t.status == TransferStatus::Completed {
-                        t.size
-                    } else {
-                        t.transferred_bytes
-                    }
-                })
-                .unwrap_or(new_transferred);
+            // durable 未就绪：active 已是 Completed（文件在、history 无）→ 5xx 驱动重试。
+            // 禁止 HTTP 200 success=false：chunk 客户端只在 status=completed 时收敛，
+            // 而此处 status 故意仍为 transferring，会让发送端永久失败且跳过 complete。
+            if let Some(t) = state.transfers.get(transfer_id) {
+                if t.status == TransferStatus::Completed {
+                    return Err(AppError::unavailable(format!(
+                        "transfer_history 尚未 durable，请重试 complete: {transfer_id}: {e}"
+                    )));
+                }
+                return Ok(ChunkResp {
+                    success: false,
+                    received_bytes: t.transferred_bytes,
+                });
+            }
             return Ok(ChunkResp {
                 success: false,
-                received_bytes: received,
+                received_bytes: new_transferred,
             });
         }
     }
@@ -530,14 +531,13 @@ pub async fn handle_chunk(
         }
     }
 
-    // 收齐后若仍停留在 Completed active（异常：finalize Ok 却无墓碑），不得假报 success。
+    // 收齐后若仍停留在 Completed active（finalize Ok 却无墓碑）→ durable 窗口，上抛 5xx。
     if let Some(t) = state.transfers.get(transfer_id) {
         if t.status == TransferStatus::Completed && state.transfers.tombstone(transfer_id).is_none()
         {
-            return Ok(ChunkResp {
-                success: false,
-                received_bytes: t.size,
-            });
+            return Err(AppError::unavailable(format!(
+                "transfer_history 尚未 durable，请重试 complete: {transfer_id}"
+            )));
         }
     }
 
@@ -948,12 +948,16 @@ fn finalize_intent_path(receive_dir: &Path, transfer_id: &str) -> Result<PathBuf
 ///     但 intent 写在 no-replace place 之前：若 place 因 AlreadyExists 失败且崩溃发生在下一轮
 ///     覆盖 intent 前，磁盘上 intent 仍指向竞争文件。仅靠 size 会把同尺寸碰撞文件误晋升为
 ///     Completed，导致发送端确认成功而原始 tmp 从未交付。
+///     同样，`metadata()` 会跟随符号链接：若 final 是指向同尺寸同哈希目标的 symlink，
+///     is_file + 跟随哈希都会通过，却从未把本次 .tmp place 到 final；链接被删/改指后静默丢数据。
+///     恢复晋升只接受**普通文件**（no-follow）。
 ///
 /// Code Logic（这个函数做什么）:
-///     读 intent；若 history 已有终态则清 intent；若 final 是普通文件且 size 匹配，
-///     **再重算 SHA256 与 intent.sha256 严格比对**，通过才构造 Completed task →
+///     读 intent；若 history 已有终态则清 intent；对 final 使用 no-follow 元数据：
+///     拒绝 symlink/非普通文件；长度匹配后再对同一路径 no-follow 打开并流式 SHA256，
+///     与 intent.sha256 严格比对，通过才构造 Completed task →
 ///     promote_completed_to_durable → 返回 success ChunkResp；
-///     非普通文件 / size 不匹配 / sha 不匹配 / 读失败：清 intent 并返回 None
+///     symlink / 非普通文件 / size 不匹配 / sha 不匹配 / 读失败：清 intent 并返回 None
 ///     （不删 .tmp、不宣称 success，允许干净重传或下一后缀重试）。
 async fn try_recover_finalize_intent(
     state: &AppState,
@@ -1007,70 +1011,90 @@ async fn try_recover_finalize_intent(
         return Ok(None);
     }
 
-    match tokio::fs::metadata(&final_path).await {
-        Ok(meta) if meta.is_file() && meta.len() == intent.size => {
-            // 内容所有权：size 匹配不够。intent 写后 place 前被同尺寸竞争文件占用时，
-            // AlreadyExists 后崩溃会使 intent 指向竞争者；必须重算 SHA256。
-            let actual = match compute_sha256(&final_path).await {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::warn!(
-                        "finalize intent 目标无法校验 sha256，清除 intent 允许重传: {transfer_id}, {e}"
-                    );
-                    let _ = clear_finalize_intent(receive_dir, transfer_id).await;
-                    return Ok(None);
-                }
-            };
-            if actual != intent.sha256 {
-                tracing::warn!(
-                    "finalize intent 目标 sha256 不匹配（可能是同尺寸碰撞文件），\
-                     清除 intent 且不宣称 success，允许重试下一后缀: {transfer_id}"
-                );
-                let _ = clear_finalize_intent(receive_dir, transfer_id).await;
-                // 不删除 .tmp，不写 history Completed，不返回 success。
-                return Ok(None);
-            }
-
-            // 最终文件在且内容匹配：晋升 durable，禁止 re-receive。
-            let task = TransferTask {
-                id: transfer_id.to_string(),
-                filename: intent.filename.clone(),
-                file_path: intent.final_path.clone(),
-                size: intent.size,
-                sha256: intent.sha256.clone(),
-                chunk_size: intent.chunk_size,
-                direction: TransferDirection::Receive,
-                peer_device_id: String::new(),
-                status: TransferStatus::Completed,
-                transferred_bytes: intent.size,
-                created_at: intent.created_at.clone(),
-                completed_at: Some(now_iso()),
-            };
-            // 若 registry 无 entry，临时 add 以便 promote 后 remove/tombstone。
-            if state.transfers.get(transfer_id).is_none() {
-                state.transfers.add(task.clone());
-            } else {
-                state.transfers.mark_completed(
-                    transfer_id,
-                    task.completed_at.clone().unwrap_or_else(now_iso),
-                    Some(intent.final_path.clone()),
-                );
-            }
-            promote_completed_to_durable(state, transfer_id, &task).await?;
-            Ok(Some(ChunkResp {
-                success: true,
-                received_bytes: intent.size,
-            }))
-        }
-        Ok(_) | Err(_) => {
-            // final 不在、非普通文件、或 size 不匹配：intent 过期/place 未完成，清 intent 允许干净重传。
+    // no-follow：禁止 symlink 绕过“仅普通文件可恢复 Completed”。
+    // tokio::fs::metadata 会跟随链接，必须用 symlink_metadata + 同路径 no-follow 读哈希。
+    let meta = match tokio::fs::symlink_metadata(&final_path).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
             tracing::warn!(
-                "finalize intent 存在但最终文件缺失/不匹配，清除 intent 允许重传: {transfer_id}"
+                "finalize intent 存在但最终文件缺失，清除 intent 允许重传: {transfer_id}"
             );
             let _ = clear_finalize_intent(receive_dir, transfer_id).await;
-            Ok(None)
+            return Ok(None);
         }
+        Err(e) => {
+            tracing::warn!(
+                "finalize intent 目标 metadata 失败，清除 intent 允许重传: {transfer_id}, {e}"
+            );
+            let _ = clear_finalize_intent(receive_dir, transfer_id).await;
+            return Ok(None);
+        }
+    };
+    let ft = meta.file_type();
+    if ft.is_symlink() || !ft.is_file() || meta.len() != intent.size {
+        tracing::warn!(
+            "finalize intent 目标非普通文件/尺寸不匹配（symlink={}/is_file={}/len={}），\
+             清除 intent 且不宣称 success: {transfer_id}",
+            ft.is_symlink(),
+            ft.is_file(),
+            meta.len()
+        );
+        let _ = clear_finalize_intent(receive_dir, transfer_id).await;
+        return Ok(None);
     }
+
+    // 内容所有权：size 匹配不够。intent 写后 place 前被同尺寸竞争文件占用时，
+    // AlreadyExists 后崩溃会使 intent 指向竞争者；必须 no-follow 重算 SHA256。
+    let actual = match compute_sha256_nofollow(&final_path).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(
+                "finalize intent 目标无法校验 sha256，清除 intent 允许重传: {transfer_id}, {e}"
+            );
+            let _ = clear_finalize_intent(receive_dir, transfer_id).await;
+            return Ok(None);
+        }
+    };
+    if actual != intent.sha256 {
+        tracing::warn!(
+            "finalize intent 目标 sha256 不匹配（可能是同尺寸碰撞文件），\
+             清除 intent 且不宣称 success，允许重试下一后缀: {transfer_id}"
+        );
+        let _ = clear_finalize_intent(receive_dir, transfer_id).await;
+        // 不删除 .tmp，不写 history Completed，不返回 success。
+        return Ok(None);
+    }
+
+    // 最终文件在且内容匹配：晋升 durable，禁止 re-receive。
+    let task = TransferTask {
+        id: transfer_id.to_string(),
+        filename: intent.filename.clone(),
+        file_path: intent.final_path.clone(),
+        size: intent.size,
+        sha256: intent.sha256.clone(),
+        chunk_size: intent.chunk_size,
+        direction: TransferDirection::Receive,
+        peer_device_id: String::new(),
+        status: TransferStatus::Completed,
+        transferred_bytes: intent.size,
+        created_at: intent.created_at.clone(),
+        completed_at: Some(now_iso()),
+    };
+    // 若 registry 无 entry，临时 add 以便 promote 后 remove/tombstone。
+    if state.transfers.get(transfer_id).is_none() {
+        state.transfers.add(task.clone());
+    } else {
+        state.transfers.mark_completed(
+            transfer_id,
+            task.completed_at.clone().unwrap_or_else(now_iso),
+            Some(intent.final_path.clone()),
+        );
+    }
+    promote_completed_to_durable(state, transfer_id, &task).await?;
+    Ok(Some(ChunkResp {
+        success: true,
+        received_bytes: intent.size,
+    }))
 }
 
 /// 原子落盘结果。
@@ -1604,8 +1628,102 @@ fn status_str(s: TransferStatus) -> String {
 }
 
 /// 异步流式计算文件 SHA256（8KB 块，对照 Python）。
+///
+/// Business Logic: finalize 校验 .tmp 内容；路径由本机生成，走普通 open 即可。
+/// Code Logic: 跟随 open 后 8KB 分块读入 Sha256。
 async fn compute_sha256(path: &Path) -> Result<String, AppError> {
     let mut file = tokio::fs::File::open(path).await?;
+    hash_reader(&mut file).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     intent 恢复晋升 Completed 时必须证明候选 final **本身**是匹配内容的普通文件。
+///     普通 `File::open` / `metadata` 会跟随 symlink，链接到同尺寸同哈希目标时会误晋升，
+///     而本次传输的 .tmp 从未 place 到 final。
+///
+/// Code Logic（这个函数做什么）:
+///     用 `OpenOptions` + 平台 no-follow 标志打开路径（symlink 打开失败）；
+///     再确认打开后句柄对应普通文件且可读，流式 SHA256。
+async fn compute_sha256_nofollow(path: &Path) -> Result<String, AppError> {
+    let mut file = open_regular_file_nofollow(path).await?;
+    hash_reader(&mut file).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     recovery 与 no-follow 哈希共用同一“拒绝 symlink、只读普通文件”打开语义，
+///     避免 metadata 跟随与 open 跟随两套路径不一致。
+///
+/// Code Logic（这个函数做什么）:
+///     Unix: `OpenOptionsExt::custom_flags(O_NOFOLLOW)`；Windows: `OpenOptionsExt::custom_flags`
+///     使用 `FILE_FLAG_OPEN_REPARSE_POINT` 打开 reparse point 自身，再检查不是 directory
+///     且非 reparse（symlink/junction）。打开失败或类型不符返回 IO 错误。
+async fn open_regular_file_nofollow(path: &Path) -> Result<tokio::fs::File, AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let std_file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|e| {
+                if e.kind() == ErrorKind::Other
+                    || e.raw_os_error() == Some(libc::ELOOP)
+                    || e.raw_os_error() == Some(libc::EPERM)
+                {
+                    std::io::Error::new(
+                        ErrorKind::InvalidInput,
+                        format!("拒绝跟随符号链接打开: {}: {e}", path.display()),
+                    )
+                } else {
+                    e
+                }
+            })?;
+        let meta = std_file.metadata()?;
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            return Err(AppError::from(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("目标不是普通文件: {}", path.display()),
+            )));
+        }
+        Ok(tokio::fs::File::from_std(std_file))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        // FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000：打开 reparse point 自身而不跟随。
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        let std_file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let meta = std_file.metadata()?;
+        let ft = meta.file_type();
+        // Windows 上 is_symlink 覆盖 symlink/junction；再拒绝目录与 reparse point。
+        if ft.is_symlink()
+            || !ft.is_file()
+            || (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+        {
+            return Err(AppError::from(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("目标不是普通文件: {}", path.display()),
+            )));
+        }
+        Ok(tokio::fs::File::from_std(std_file))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        // 无 no-follow 原语的平台：fail-closed，禁止 recovery 晋升。
+        let _ = path;
+        Err(AppError::from(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "当前平台无法 no-follow 打开文件，拒绝 recovery 晋升",
+        )))
+    }
+}
+
+/// 从已打开的异步文件句柄流式计算 SHA256。
+async fn hash_reader(file: &mut tokio::fs::File) -> Result<String, AppError> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 8192];
     loop {
@@ -3119,6 +3237,224 @@ mod tests {
             hist.file_path.ends_with("doc (1).bin"),
             "history 应记录真实落盘路径: {}",
             hist.file_path
+        );
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     `metadata()` 跟随符号链接：若 intent 指向 symlink（目标同尺寸同哈希），
+    ///     is_file + 跟随哈希会通过并误晋升 Completed，尽管本次 .tmp 从未 place 到 final。
+    ///     链接被删/改指后静默丢数据，直接违反 regular-file 恢复不变量。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写真实 payload 的 target 与 .tmp；创建指向 target 的 symlink 作为 final；
+    ///     intent.sha256=payload 哈希；清空 registry 模拟崩溃；recover 必须 None、
+    ///     不写 history、保留 tmp 与 intent 清除后允许干净重试。
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn symlink_matching_content_must_not_promote_on_recovery() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::symlink;
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let payload = b"symlink-target-payload!!";
+        let sha = format!("{:x}", Sha256::digest(payload));
+        let transfer_id = "symlink-bypass".to_string();
+
+        handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "via-link.bin".to_string(),
+                size: payload.len() as u64,
+                sha256: sha.clone(),
+                chunk_size: 8,
+            },
+        )
+        .await
+        .expect("init");
+
+        let tmp = receive_dir.join(format!(".{transfer_id}.tmp"));
+        fs::write(&tmp, payload).unwrap();
+
+        // 同尺寸同内容的真实目标 + 指向它的 symlink 作为 intent final。
+        let real_target = receive_dir.join("real-target.bin");
+        fs::write(&real_target, payload).unwrap();
+        let link_path = receive_dir.join("via-link.bin");
+        symlink(&real_target, &link_path).expect("create symlink final");
+        assert!(
+            fs::symlink_metadata(&link_path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "fixture 必须是 symlink"
+        );
+        // 跟随 metadata 会把 symlink 当普通文件：这正是要堵住的绕过。
+        let followed = fs::metadata(&link_path).unwrap();
+        assert!(followed.is_file());
+        assert_eq!(followed.len(), payload.len() as u64);
+
+        let intent = FinalizeIntent {
+            transfer_id: transfer_id.clone(),
+            filename: "via-link.bin".to_string(),
+            size: payload.len() as u64,
+            sha256: sha.clone(),
+            chunk_size: 8,
+            final_filename: "via-link.bin".to_string(),
+            final_path: link_path.to_string_lossy().to_string(),
+            created_at: now_iso(),
+        };
+        write_finalize_intent(&receive_dir, &intent)
+            .await
+            .expect("write intent pointing at symlink");
+
+        state.transfers.remove(&transfer_id);
+        state.transfers.clear_tombstones_for_test();
+
+        let recovered = try_recover_finalize_intent(&state, &transfer_id, &receive_dir)
+            .await
+            .expect("recover ok");
+        assert!(
+            recovered.is_none(),
+            "symlink 即使指向匹配内容也不得晋升 Completed"
+        );
+        assert!(
+            state
+                .transfer_repo
+                .get_by_id(&transfer_id)
+                .await
+                .expect("repo ok")
+                .is_none(),
+            "不得写入 Completed history"
+        );
+        assert!(tmp.exists(), "不得清除原始 tmp");
+        assert!(
+            link_path
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "不得把 symlink 替换/删除"
+        );
+        assert_eq!(fs::read(&real_target).unwrap(), payload);
+        assert!(
+            !receive_dir
+                .join(FINALIZE_INTENT_DIR)
+                .join(format!("{transfer_id}.json"))
+                .exists(),
+            "拒绝后应清除过期 intent"
+        );
+        assert!(state.transfers.tombstone(&transfer_id).is_none());
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     最后一块触发 finalize 后，若文件已落盘、active 已 Completed，但 history 瞬时失败，
+    ///     旧实现返回 HTTP 200 success=false；chunk 客户端只接受 status=completed，
+    ///     而 status 故意仍为 transferring → 发送端永久失败，complete 重试永不执行。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     init + 最后一块 handle_chunk；DROP transfer_history 注入 durable 失败 →
+    ///     必须返回 AppError::Unavailable（非 Ok success=false）；重建表后
+    ///     再 chunk 重放（或 complete）应 durable 成功。
+    #[tokio::test]
+    async fn last_chunk_history_failure_returns_unavailable_then_recovers() {
+        use sha2::{Digest, Sha256};
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let payload = b"last-chunk-durable!";
+        let sha = format!("{:x}", Sha256::digest(payload));
+        let transfer_id = "last-chunk-hist-fail".to_string();
+
+        handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "last.bin".to_string(),
+                size: payload.len() as u64,
+                sha256: sha.clone(),
+                chunk_size: payload.len() as u64,
+            },
+        )
+        .await
+        .expect("init");
+
+        // 注入 history 失败：place 成功但 durable 失败。
+        sqlx::query("DROP TABLE transfer_history")
+            .execute(&state.db)
+            .await
+            .expect("drop history");
+
+        let err = handle_chunk(&state, &transfer_id, 0, payload.to_vec())
+            .await
+            .expect_err("最后一块 history 失败必须 5xx 而非 success=false");
+        assert!(
+            matches!(err, AppError::Unavailable(_)),
+            "应返回 Unavailable 驱动 chunk/complete 重试: {err:?}"
+        );
+        assert!(receive_dir.join("last.bin").exists(), "最终文件应已落盘");
+        assert_eq!(fs::read(receive_dir.join("last.bin")).unwrap(), payload);
+        let active = state
+            .transfers
+            .get(&transfer_id)
+            .expect("history 失败必须保留 active Completed");
+        assert_eq!(active.status, TransferStatus::Completed);
+        assert!(
+            state.transfers.tombstone(&transfer_id).is_none(),
+            "未 durable 前不得写成功墓碑"
+        );
+        let status = handle_status(&state, &transfer_id).await;
+        assert_eq!(
+            status.status, "transferring",
+            "未 durable 时 status 不得宣称 completed: {status:?}"
+        );
+
+        // 恢复 schema 后重放最后一块 → 只晋升 durable，不再写文件。
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS transfer_history (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                peer_device_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                transferred_bytes INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            )",
+        )
+        .execute(&state.db)
+        .await
+        .expect("recreate history");
+
+        let retry = handle_chunk(&state, &transfer_id, 0, payload.to_vec())
+            .await
+            .expect("history 恢复后 chunk 重放应 durable 成功");
+        assert!(retry.success, "durable 后 chunk 重放应 success=true");
+        assert_eq!(retry.received_bytes, payload.len() as u64);
+        let hist = state
+            .transfer_repo
+            .get_by_id(&transfer_id)
+            .await
+            .unwrap()
+            .expect("history row");
+        assert_eq!(hist.status, TransferStatus::Completed);
+        assert!(
+            state.transfers.tombstone(&transfer_id).is_some(),
+            "durable 成功后应写墓碑"
+        );
+        assert!(
+            !receive_dir
+                .join(FINALIZE_INTENT_DIR)
+                .join(format!("{transfer_id}.json"))
+                .exists(),
+            "durable 成功后应清除 intent"
         );
 
         let _ = fs::remove_dir_all(&receive_dir);
