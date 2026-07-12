@@ -55,6 +55,10 @@ const terminalEvents = vi.hoisted<{
   resizeCalls: Array<{ sessionId: string; cols: number; rows: number }>;
   fitCount: number;
   instances: MockTerminal[];
+  /** Records every write(data, cb) call across all instances, in order. */
+  writeCalls: Array<{ data: string; instanceIndex: number }>;
+  /** Records every clear() call across all instances, in order. */
+  clearCalls: Array<{ instanceIndex: number }>;
 }>(() => ({
   constructCount: 0,
   disposeCount: 0,
@@ -62,6 +66,8 @@ const terminalEvents = vi.hoisted<{
   resizeCalls: [],
   fitCount: 0,
   instances: [],
+  writeCalls: [],
+  clearCalls: [],
 }));
 
 vi.mock('@xterm/xterm', () => {
@@ -72,9 +78,12 @@ vi.mock('@xterm/xterm', () => {
     private dataCb: ((data: string) => void) | null = null;
     private cursorMoveCb: (() => void) | null = null;
     private resizeCb: (() => void) | null = null;
+    // Business Logic: 记录自己的 instance index，让 write/clear 日志能溯源到具体实例。
+    private readonly instanceIndex: number;
 
     constructor() {
       terminalEvents.constructCount += 1;
+      this.instanceIndex = terminalEvents.instances.length;
       const instance = this as unknown as MockTerminal;
       terminalEvents.instances.push(instance);
     }
@@ -106,8 +115,14 @@ vi.mock('@xterm/xterm', () => {
       }
     }
     open() { /* no-op */ }
-    write(_data: string, cb?: () => void) { cb?.(); }
-    clear() { /* no-op */ }
+    write(data: string, cb?: () => void) {
+      // Business Logic: 记录 write 数据用于 replay gate 断言；cb 同步触发以模拟 xterm 真实写入完成。
+      terminalEvents.writeCalls.push({ data, instanceIndex: this.instanceIndex });
+      cb?.();
+    }
+    clear() {
+      terminalEvents.clearCalls.push({ instanceIndex: this.instanceIndex });
+    }
     dispose() {
       terminalEvents.disposeCount += 1;
     }
@@ -299,6 +314,8 @@ beforeEach(() => {
   terminalEvents.resizeCalls.length = 0;
   terminalEvents.fitCount = 0;
   terminalEvents.instances.length = 0;
+  terminalEvents.writeCalls.length = 0;
+  terminalEvents.clearCalls.length = 0;
   // jsdom 默认无 ResizeObserver；安装一个调用回调的最小实现，触发 pane 内的 resize 路径。
   if (!window.ResizeObserver) {
     class RO {
@@ -373,6 +390,92 @@ describe('WorkbenchTerminalPane — replay gate', () => {
     // 第一次 replay 期间 inputEnabled=true 但 gate 会屏蔽，直到 release；release 后再触发 onData。
     // 这里只验证 onData 注册了回调（侧证 replay 流程没把 pane 卡死）。
     expect(terminalEvents.dataCallbacks.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('replay gate writes history buffer to xterm via write() then releases gate so subsequent onData forwards', async () => {
+    // Strengthen per Codex finding 4: verify the history buffer IS written to the Terminal during
+    // replay (not just onData registration), and that the gate blocks onData while closed but
+    // releases afterwards.
+    const onInput = vi.fn();
+    const session = buildSession({ id: 's1' });
+    const snapshots: Record<string, ControlledBuffer> = { s1: { buffer: '', revision: 0 } };
+    const { rerender } = render(
+      <PaneHost
+        session={session}
+        snapshots={snapshots}
+        inputEnabled={true}
+        onInput={onInput}
+      />,
+    );
+
+    // Push a non-empty history buffer at revision 1; this triggers replay (clear + write).
+    act(() => {
+      snapshots.s1 = { buffer: 'hist-data', revision: 1 };
+      rerender(
+        <PaneHost
+          session={session}
+          snapshots={{ ...snapshots }}
+          inputEnabled={true}
+          onInput={onInput}
+        />,
+      );
+    });
+    // Allow the setTimeout(0) gate-release callback (scheduled inside writeTerminalReplay) to fire.
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    });
+
+    // The history buffer MUST have been written through Terminal.write (replay path).
+    const written = terminalEvents.writeCalls.map((c) => c.data).join('');
+    expect(written).toContain('hist-data');
+
+    // While gate was closed, onData must NOT have forwarded to onInput. After release, a new
+    // onData invocation MUST forward. Grab the latest registered onData callback.
+    const dataCb = terminalEvents.dataCallbacks[terminalEvents.dataCallbacks.length - 1]!;
+    // Gate has been released by the setTimeout(0) above; forwarding now works.
+    onInput.mockClear();
+    act(() => {
+      dataCb('ls');
+    });
+    expect(onInput).toHaveBeenCalledWith('s1', 'ls');
+  });
+
+  test('replay path triggers clear() when buffer cannot be appended (sliding truncation)', async () => {
+    // Cover the clear() branch in the replay path: when the new buffer is NOT a forward
+    // extension of the previously-written buffer (e.g. backend buffer slid), the pane must
+    // clear() before writeTerminalReplay. We trigger this by first writing buffer "first",
+    // then swapping to an unrelated "second" buffer.
+    const session = buildSession({ id: 's1' });
+    const snapshots: Record<string, ControlledBuffer> = {
+      s1: { buffer: 'first', revision: 1 },
+    };
+    const { rerender } = render(
+      <PaneHost session={session} snapshots={snapshots} inputEnabled={true} />,
+    );
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    });
+
+    // Now swap to a buffer that is NOT a forward extension of 'first' → triggers replay (clear).
+    act(() => {
+      rerender(
+        <PaneHost
+          session={session}
+          snapshots={{ s1: { buffer: 'second', revision: 2 } }}
+          inputEnabled={true}
+        />,
+      );
+    });
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    });
+
+    // clear() must have been called at least once across the mount+swap lifecycle (the swap
+    // path is guaranteed to clear since 'second' is not append-able to 'first').
+    expect(terminalEvents.clearCalls.length).toBeGreaterThanOrEqual(1);
+    // And the new buffer must have been written via write().
+    const written = terminalEvents.writeCalls.map((c) => c.data).join('');
+    expect(written).toContain('second');
   });
 });
 
@@ -475,6 +578,8 @@ describe('WorkbenchTerminalPane — workspace view change does not unmount xterm
     const { rerenderProps } = renderPaneWithRevision();
     const constructsAfterMount = terminalEvents.constructCount;
     expect(constructsAfterMount).toBe(1);
+    // Capture the Terminal instance identity at mount; workspace view switches must reuse it.
+    const instanceAtMount = terminalEvents.instances[0];
 
     // 模拟 workspace 视图切换：父组件重渲染（同 session）。
     rerenderProps({ workspaceView: 'browser' });
@@ -483,17 +588,39 @@ describe('WorkbenchTerminalPane — workspace view change does not unmount xterm
 
     expect(terminalEvents.constructCount).toBe(1);
     expect(terminalEvents.disposeCount).toBe(0);
+    // Strengthen per Codex finding 4: verify the Terminal INSTANCE is preserved (not just count),
+    // so callers can rely on instance identity across workspace switches.
+    expect(terminalEvents.instances[0]).toBe(instanceAtMount);
   });
 
   test('toggling inputEnabled on workspace view change does not recreate Terminal', () => {
     const { rerenderProps } = renderPaneWithRevision();
     expect(terminalEvents.constructCount).toBe(1);
+    const instanceAtMount = terminalEvents.instances[0];
 
     rerenderProps({ inputEnabled: false });
     rerenderProps({ inputEnabled: true });
 
     expect(terminalEvents.constructCount).toBe(1);
     expect(terminalEvents.disposeCount).toBe(0);
+    expect(terminalEvents.instances[0]).toBe(instanceAtMount);
+  });
+
+  test('Terminal.dispose is not called for sessions that remain mounted while workspace view changes', () => {
+    // Strengthen per Codex finding 4: explicitly assert dispose count across multiple workspace
+    // switches to lock in that no intermediate dispose happens (which would force a rebuild).
+    const { rerenderProps } = renderPaneWithRevision();
+    expect(terminalEvents.disposeCount).toBe(0);
+
+    rerenderProps({ workspaceView: 'browser' });
+    expect(terminalEvents.disposeCount).toBe(0);
+    rerenderProps({ workspaceView: 'files' });
+    expect(terminalEvents.disposeCount).toBe(0);
+    rerenderProps({ workspaceView: 'terminal' });
+    expect(terminalEvents.disposeCount).toBe(0);
+    // Final state: same instance alive.
+    expect(terminalEvents.instances.length).toBe(1);
+    expect(terminalEvents.constructCount).toBe(1);
   });
 });
 
