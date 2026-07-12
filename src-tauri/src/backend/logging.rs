@@ -245,11 +245,13 @@ impl RotatingLogWriter {
     /// 执行 size 轮转：关文件 → 删最旧 → 依次 rename → 重开 current。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     必须在写入前完成轮转，保证任何文件都不会超过配置上限。
+    ///     必须在写入前完成轮转，保证任何文件都不会超过配置上限；瞬时 I/O 失败后仍要恢复文件日志，
+    ///     不能让一次 Windows 占用/杀毒竞争永久关闭诊断输出。
     ///
     /// Code Logic（这个函数做什么）:
     ///     close → 删除 `.N` → `.N-1→.N` … `.1→.2` → current→`.1` → 新建 current（0600）。
-    ///     任一步失败上抛，不丢弃调用方记录（由上层决定是否重试）。
+    ///     任一步失败时 best-effort 重新打开 current 并根据 metadata 恢复 `current_len`，再把原始错误上抛；
+    ///     成功路径把 `current_len` 置 0。
     fn rotate_locked(&self, state: &mut WriterState) -> io::Result<()> {
         // 先关闭 current，避免 rename 打开文件。
         if let Some(file) = state.file.take() {
@@ -257,6 +259,55 @@ impl RotatingLogWriter {
             drop(file);
         }
 
+        match self.rotate_files_unlocked() {
+            Ok(()) => {
+                let current = self.config.current_path();
+                let file = create_current_file(&current).inspect_err(|_err| {
+                    // 创建失败时仍尝试 reopen 已有 current，避免 file=None 永久失联。
+                    self.recover_current_file_locked(state);
+                })?;
+                state.file = Some(file);
+                state.current_len = 0;
+                Ok(())
+            }
+            Err(err) => {
+                self.recover_current_file_locked(state);
+                Err(err)
+            }
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     轮转中的 rename/remove/chmod 失败不能留下 `file=None`，否则后续所有写入都会永久报句柄丢失。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     best-effort `open_current_file`，并从 metadata 恢复 `current_len`；打开失败则保持 None 并记 0。
+    fn recover_current_file_locked(&self, state: &mut WriterState) {
+        let current = self.config.current_path();
+        match open_current_file(&current) {
+            Ok(file) => {
+                let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+                state.file = Some(file);
+                state.current_len = len;
+            }
+            Err(recover_err) => {
+                tracing::warn!(
+                    error = %recover_err,
+                    path = %current.display(),
+                    "日志轮转失败后 reopen current 也失败，文件日志暂时不可用"
+                );
+                state.file = None;
+                state.current_len = 0;
+            }
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     轮转的文件系统步骤需要可单独失败并交由 `rotate_locked` 做恢复，便于 fault-injection 测试。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     删除最旧 history，反向 rename 历史，再把 current rename 为 `.1`；不打开新 current。
+    fn rotate_files_unlocked(&self) -> io::Result<()> {
         let history = self.config.history_files.max(1);
         let oldest = self.config.history_path(history);
         if oldest.exists() {
@@ -281,10 +332,6 @@ impl RotatingLogWriter {
             #[cfg(unix)]
             apply_file_mode_0600(&first_history)?;
         }
-
-        let file = create_current_file(&current)?;
-        state.file = Some(file);
-        state.current_len = 0;
         Ok(())
     }
 }
@@ -1523,6 +1570,72 @@ mod tests {
         writer.flush().expect("flush");
         assert_eq!(read_string(&config.current_path()), "Z");
         assert_eq!(read_string(&config.history_path(1)), "1234567890");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     轮转中途 rename 失败后，writer 必须恢复 current 句柄，后续诊断仍可写入。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     人为占用 history 路径使 rename 失败（Unix 用目录占位），断言 rotate_locked 返回错误但
+    ///     后续小写入仍成功且 current 文件可读。
+    #[cfg(unix)]
+    #[test]
+    fn rotate_failure_reopens_current_and_keeps_logging() {
+        let (_dir, config) = test_config(10, 3);
+        let mut writer = RotatingLogWriter::open(config.clone()).expect("open writer");
+        writer.write_all(b"1234567890").expect("fill current");
+        writer.flush().expect("flush");
+
+        // 用目录占住最旧 history 路径，使 remove_file(.N) 失败；
+        // 注意：不能只占 `.1`，因为目录会被反向 rename 挪走，导致 current→.1 仍成功。
+        let blocker = config.history_path(config.history_files.max(1));
+        fs::create_dir_all(&blocker).expect("create blocker dir");
+
+        let err = writer
+            .write_all(b"X")
+            .expect_err("remove_file 被目录阻挡时应失败");
+        assert_ne!(err.kind(), io::ErrorKind::InvalidInput);
+
+        // 清理阻挡后，recover 的句柄应仍能继续写（或 reopen 后写）。
+        fs::remove_dir_all(&blocker).ok();
+        writer
+            .write_all(b"Y")
+            .expect("轮转失败恢复后应能继续写日志");
+        writer.flush().expect("flush after recover");
+        let content = read_string(&config.current_path());
+        assert!(
+            content.contains('Y') || content.ends_with('Y') || content.contains("1234567890"),
+            "恢复后 current 应包含续写或原内容: {content:?}"
+        );
+        assert!(
+            writer.write_all(b"Z").is_ok(),
+            "后续写入不得因 file=None 永久失败"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     即使 create_current_file 失败，recover 也必须 reopen 已有 current，避免 file=None。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     在 rotate_files 成功后通过把 current 父路径换成只读/不可写场景较难跨平台；
+    ///     这里直接调用 recover_current_file_locked 验证 metadata 长度恢复契约。
+    #[test]
+    fn recover_current_file_restores_len_from_metadata() {
+        let (_dir, config) = test_config(32, 3);
+        let writer = RotatingLogWriter::open(config.clone()).expect("open");
+        {
+            let mut guard = writer.state.lock().expect("lock");
+            // 写入已知内容后关闭句柄，模拟 rotate 中途 take。
+            if let Some(mut file) = guard.file.take() {
+                use std::io::Write as _;
+                file.write_all(b"abcdef").expect("seed");
+                file.flush().ok();
+            }
+            guard.current_len = 0;
+            writer.recover_current_file_locked(&mut guard);
+            assert!(guard.file.is_some(), "recover 必须重新打开 current");
+            assert_eq!(guard.current_len, 6, "current_len 必须来自 metadata");
+        }
     }
 
     #[test]

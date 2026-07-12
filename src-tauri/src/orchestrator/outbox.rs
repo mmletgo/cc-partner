@@ -376,9 +376,18 @@ pub fn start_orchestrator_remote_outbox_dispatcher(state: AppState) -> Cancellat
 pub async fn sync_remote_task_mirror_for_project(
     state: &AppState,
     remote_shortcut: &WorkbenchProjectRow,
+    forwarded_request_id: Option<&str>,
 ) -> Result<Vec<RemoteMirrorTask>, AppError> {
-    let context = open_remote_project_for_shortcut(state, remote_shortcut).await?;
-    let tasks = RemoteOrchestratorClient::new()
+    let context =
+        open_remote_project_for_shortcut(state, remote_shortcut, forwarded_request_id).await?;
+    let mut client = RemoteOrchestratorClient::new();
+    if let Some(request_id) = forwarded_request_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        client = client.with_forwarded_request_id(request_id);
+    }
+    let tasks = client
         .list_tasks(&context.base_url, &context.remote_project_id)
         .await?;
 
@@ -427,10 +436,18 @@ pub struct RemoteOrchestratorProjectContext {
 pub async fn open_remote_project_for_shortcut(
     state: &AppState,
     remote_shortcut: &WorkbenchProjectRow,
+    forwarded_request_id: Option<&str>,
 ) -> Result<RemoteOrchestratorProjectContext, AppError> {
     ensure_remote_shortcut(remote_shortcut)?;
     let base_url = remote_device_base_url(state, &remote_shortcut.device_id)?;
-    let remote = RemoteWorkbenchClient::new()
+    let mut client = RemoteWorkbenchClient::new();
+    if let Some(request_id) = forwarded_request_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        client = client.with_forwarded_request_id(request_id);
+    }
+    let remote = client
         .open_project(&base_url, &remote_shortcut.path)
         .await?;
     Ok(RemoteOrchestratorProjectContext {
@@ -480,7 +497,7 @@ async fn dispatch_claimed_remote_outbox_item(
         created_at: item.created_at.clone(),
         updated_at: item.updated_at.clone(),
     };
-    let context = open_remote_project_for_shortcut(state, &shortcut)
+    let context = open_remote_project_for_shortcut(state, &shortcut, None)
         .await
         .map_err(classify_remote_error)?;
 

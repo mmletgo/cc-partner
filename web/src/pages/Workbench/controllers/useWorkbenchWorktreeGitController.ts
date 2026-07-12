@@ -32,6 +32,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { workbenchApi } from '@/api/workbench';
+import { isLatestRequest } from '../workbenchFiles';
 import type {
   WorkbenchGitCommit,
   WorkbenchMergeProgressEvent,
@@ -203,6 +204,10 @@ export function useWorkbenchWorktreeGitController(
   const mergeProgressWorktreeIdRef = useRef<string | null>(null);
   // Business Logic: 成功 merge 后阶段条延迟隐藏；用 ref 持有 timer 以便取消。
   const mergeStageDismissTimerRef = useRef<number | null>(null);
+  // Business Logic: 同一 project 的 worktree list 与同一 project/worktree 的 git history 可能并发；
+  // 用单调 request seq 丢弃过期响应，避免 create/remove/merge 后被慢速 list 回写旧状态。
+  const worktreeListRequestSeqRef = useRef<Record<string, number>>({});
+  const gitHistoryRequestSeqRef = useRef<Record<string, number>>({});
 
   useEffect(() => {
     activeProjectIdRef.current = activeProjectId;
@@ -276,12 +281,47 @@ export function useWorkbenchWorktreeGitController(
    *   2. 成功时更新 worktrees、保留仍存在的 active worktree（否则回退到第一个），markRequestSuccess；
    *   3. 失败时 markRequestFailure + 展示 worktreeError。
    */
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   create/remove/merge/commit 等 mutation 成功后，旧 worktree list 响应不能覆盖新列表。
+   *
+   * Code Logic（这个函数做什么）:
+   *   递增指定 project 的 worktree list request seq。
+   */
+  const invalidateWorktreeListRequests = useCallback((projectId: string): void => {
+    const current = worktreeListRequestSeqRef.current[projectId] ?? 0;
+    worktreeListRequestSeqRef.current[projectId] = current + 1;
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   commit/push/merge 或切换 worktree 后，旧 git history 响应不能覆盖新历史。
+   *
+   * Code Logic（这个函数做什么）:
+   *   递增指定 project+worktree 键的 git history request seq；worktreeId 为空时用 `__none__`。
+   */
+  const invalidateGitHistoryRequests = useCallback(
+    (projectId: string, worktreeId: string | null): void => {
+      const key = `${projectId}::${worktreeId ?? '__none__'}`;
+      const current = gitHistoryRequestSeqRef.current[key] ?? 0;
+      gitHistoryRequestSeqRef.current[key] = current + 1;
+    },
+    [],
+  );
+
   const loadWorktrees = useCallback(
     async (projectId: string): Promise<void> => {
+      const requestSeq = (worktreeListRequestSeqRef.current[projectId] ?? 0) + 1;
+      worktreeListRequestSeqRef.current[projectId] = requestSeq;
       try {
         setWorktreeError(null);
         const list = await workbenchApi.worktrees.list(projectId);
-        if (!isCurrentProject(projectId)) return;
+        if (
+          !isCurrentProject(projectId) ||
+          !isLatestRequest(worktreeListRequestSeqRef.current[projectId], requestSeq)
+        ) {
+          return;
+        }
         markRequestSuccess(projectId);
         setWorktrees(list);
         // Business Logic: 保留仍存在的 active worktree；否则回退到第一个。读取 ref 拿到最新 active id，
@@ -292,7 +332,12 @@ export function useWorkbenchWorktreeGitController(
         }
         setActiveWorktreeId(list[0]?.id ?? null);
       } catch (error) {
-        if (!isCurrentProject(projectId)) return;
+        if (
+          !isCurrentProject(projectId) ||
+          !isLatestRequest(worktreeListRequestSeqRef.current[projectId], requestSeq)
+        ) {
+          return;
+        }
         markRequestFailure(projectId, error);
         setWorktreeError(
           displayErrorMessage(error, translateError('worktrees'), desktopUnavailableMessage),
@@ -320,17 +365,28 @@ export function useWorkbenchWorktreeGitController(
       return;
     }
     const worktreeId = activeWorktreeIdRef.current;
+    const requestKey = `${projectId}::${worktreeId ?? '__none__'}`;
+    const requestSeq = (gitHistoryRequestSeqRef.current[requestKey] ?? 0) + 1;
+    gitHistoryRequestSeqRef.current[requestKey] = requestSeq;
     try {
       setGitHistoryLoading(true);
       setGitHistoryError(null);
       const commits = await workbenchApi.git.listCommits(projectId, worktreeId, 30);
-      if (!isCurrentProject(projectId) || activeWorktreeIdRef.current !== worktreeId) {
+      if (
+        !isCurrentProject(projectId) ||
+        activeWorktreeIdRef.current !== worktreeId ||
+        !isLatestRequest(gitHistoryRequestSeqRef.current[requestKey], requestSeq)
+      ) {
         return;
       }
       setGitCommits(commits);
       markRequestSuccess(projectId);
     } catch (error) {
-      if (!isCurrentProject(projectId) || activeWorktreeIdRef.current !== worktreeId) {
+      if (
+        !isCurrentProject(projectId) ||
+        activeWorktreeIdRef.current !== worktreeId ||
+        !isLatestRequest(gitHistoryRequestSeqRef.current[requestKey], requestSeq)
+      ) {
         return;
       }
       markRequestFailure(projectId, error);
@@ -339,7 +395,11 @@ export function useWorkbenchWorktreeGitController(
         displayErrorMessage(error, translateError('gitHistory'), desktopUnavailableMessage),
       );
     } finally {
-      if (isCurrentProject(projectId) && activeWorktreeIdRef.current === worktreeId) {
+      if (
+        isCurrentProject(projectId) &&
+        activeWorktreeIdRef.current === worktreeId &&
+        isLatestRequest(gitHistoryRequestSeqRef.current[requestKey], requestSeq)
+      ) {
         setGitHistoryLoading(false);
       }
     }
@@ -417,6 +477,8 @@ export function useWorkbenchWorktreeGitController(
         // bridge 内部已处理错误；这里吞掉以避免中断 worktree 列表刷新。
       }
       if (activeProjectIdRef.current !== projectId) return;
+      // Business Logic: create 成功后作废旧 list，防止慢速 worktree list 覆盖新建结果。
+      invalidateWorktreeListRequests(projectId);
       await loadWorktrees(projectId);
       if (activeProjectIdRef.current !== projectId) return;
       setActiveWorktreeId(created.id);
@@ -442,6 +504,7 @@ export function useWorkbenchWorktreeGitController(
     createWorktreeBranchSuffixDraft,
     desktopUnavailableMessage,
     displayErrorMessage,
+    invalidateWorktreeListRequests,
     loadWorktrees,
     markRequestFailure,
     remoteWriteDisabled,
@@ -471,6 +534,8 @@ export function useWorkbenchWorktreeGitController(
       setWorktreeBusy('commit');
       setWorktreeError(null);
       await workbenchApi.worktrees.commit(worktreeId, null);
+      invalidateWorktreeListRequests(projectId);
+      invalidateGitHistoryRequests(projectId, worktreeId);
       await loadWorktrees(projectId);
       if (inspectorTab === 'history') await loadGitHistory();
     } catch (error) {
@@ -487,6 +552,8 @@ export function useWorkbenchWorktreeGitController(
     desktopUnavailableMessage,
     displayErrorMessage,
     inspectorTab,
+    invalidateGitHistoryRequests,
+    invalidateWorktreeListRequests,
     loadGitHistory,
     loadWorktrees,
     markRequestFailure,
@@ -511,6 +578,8 @@ export function useWorkbenchWorktreeGitController(
       setWorktreeBusy('push');
       setWorktreeError(null);
       await workbenchApi.worktrees.push(worktreeId);
+      invalidateWorktreeListRequests(projectId);
+      invalidateGitHistoryRequests(projectId, worktreeId);
       await loadWorktrees(projectId);
       if (inspectorTab === 'history') await loadGitHistory();
     } catch (error) {
@@ -525,6 +594,8 @@ export function useWorkbenchWorktreeGitController(
     desktopUnavailableMessage,
     displayErrorMessage,
     inspectorTab,
+    invalidateGitHistoryRequests,
+    invalidateWorktreeListRequests,
     loadGitHistory,
     loadWorktrees,
     markRequestFailure,
@@ -579,6 +650,8 @@ export function useWorkbenchWorktreeGitController(
       if (shouldAutoDismissMergeStages(finalStages)) {
         scheduleMergeStagePanelDismiss(worktreeId);
       }
+      invalidateWorktreeListRequests(projectId);
+      invalidateGitHistoryRequests(projectId, worktreeId);
       await loadWorktrees(projectId);
       await terminalBridge.loadSessions(projectId);
       terminalBridge.clearBuffersForWorktree(worktreeId);
@@ -611,6 +684,8 @@ export function useWorkbenchWorktreeGitController(
     desktopUnavailableMessage,
     displayErrorMessage,
     inspectorTab,
+    invalidateGitHistoryRequests,
+    invalidateWorktreeListRequests,
     loadGitHistory,
     loadWorktrees,
     markRequestFailure,
@@ -659,6 +734,8 @@ export function useWorkbenchWorktreeGitController(
         const next = worktrees.find((worktree) => worktree.id !== worktreeId);
         setActiveWorktreeId(next?.id ?? null);
       }
+      invalidateWorktreeListRequests(projectId);
+      invalidateGitHistoryRequests(projectId, worktreeId);
       await loadWorktrees(projectId);
     } catch (error) {
       markRequestFailure(projectId, error);
@@ -671,6 +748,8 @@ export function useWorkbenchWorktreeGitController(
   }, [
     desktopUnavailableMessage,
     displayErrorMessage,
+    invalidateGitHistoryRequests,
+    invalidateWorktreeListRequests,
     loadWorktrees,
     markRequestFailure,
     confirmAction,

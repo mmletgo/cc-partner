@@ -34,6 +34,148 @@ const PROBE_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(150);
 /// Code Logic: pump 在累计字节达此上限后立刻标记该侧 done 并视为超时。
 const PROBE_PIPE_DRAIN_BYTE_BUDGET: usize = 256 * 1024;
 
+/// Doctor/依赖探测的共享取消与进程树登记。
+///
+/// Business Logic（为什么需要这个结构）:
+///     doctor 硬超时后若只 forget 采集线程，git/tmux/wsl/claude 子进程可能继续跑；
+///     必须把剩余 deadline 与取消信号传入 probe，并在返回前有界 reap 已登记进程树。
+///
+/// Code Logic（这个结构做什么）:
+///     持有 AtomicBool 取消标志，以及已 spawn 的 Unix pgid / 子进程 pid 列表；overall deadline 由调用方传入 probe。
+#[derive(Debug, Default)]
+pub struct ProbeRuntimeGuard {
+    cancel: std::sync::atomic::AtomicBool,
+    /// Unix 进程组 id 列表（探测 spawn 时登记）。
+    process_groups: Mutex<Vec<u32>>,
+    /// 直接子进程 pid 列表（全平台）。
+    child_pids: Mutex<Vec<u32>>,
+}
+
+impl ProbeRuntimeGuard {
+    /// Business Logic（为什么需要这个函数）:
+    ///     采集线程与主线程共享同一 guard，超时侧可取消并 reap，探测侧可读剩余预算。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回默认未取消、空登记的 guard。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     硬超时或上层取消时必须立刻让后续 probe 快速失败并停止 spawn。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     置 cancel=true（Release）。
+    pub fn cancel(&self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     probe 在 spawn 前/轮询中需要知道是否应提前放弃。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读取 cancel 标志（Acquire）。
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     探测子进程启动后必须可被 doctor 超时路径定位并 kill。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     登记 pid；Unix 同时登记 process group id（与 setpgid 后的 pgid 相同）。
+    pub fn register_child(&self, pid: u32) {
+        if let Ok(mut pids) = self.child_pids.lock() {
+            pids.push(pid);
+        }
+        #[cfg(unix)]
+        if let Ok(mut groups) = self.process_groups.lock() {
+            groups.push(pid);
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     子进程正常退出后不再需要超时路径 kill，避免误伤 pid 复用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 pid / pgid 列表移除该 id（保留其它仍在跑的探测）。
+    pub fn unregister_child(&self, pid: u32) {
+        if let Ok(mut pids) = self.child_pids.lock() {
+            pids.retain(|value| *value != pid);
+        }
+        #[cfg(unix)]
+        if let Ok(mut groups) = self.process_groups.lock() {
+            groups.retain(|value| *value != pid);
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     doctor 硬超时返回前必须 best-effort 终止仍在跑的依赖探测进程树。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先 cancel，再 Unix killpg + 全平台对登记 pid 发 kill，短 sleep 作为有界 reap 窗口。
+    pub fn cancel_and_reap(&self) {
+        self.cancel();
+        #[cfg(unix)]
+        {
+            if let Ok(groups) = self.process_groups.lock() {
+                for pgid in groups.iter().copied() {
+                    let _ = kill_probe_process_group(pgid);
+                }
+            }
+        }
+        if let Ok(pids) = self.child_pids.lock() {
+            for pid in pids.iter().copied() {
+                let _ = kill_probe_pid(pid);
+            }
+        }
+        // 有界 reap 窗口：给内核回收僵尸的时间，但不 join 采集线程。
+        std::thread::sleep(PROBE_TERMINATE_GRACE);
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     非 Unix 或需要按 pid 兜底 kill 时，不能只依赖 process group。
+///
+/// Code Logic（这个函数做什么）:
+///     Unix 使用 libc::kill(SIGKILL)；Windows 使用 taskkill /F /PID；其它平台 no-op。
+fn kill_probe_pid(pid: u32) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        let raw: libc::pid_t = pid.try_into().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "pid out of range")
+        })?;
+        let result = unsafe { libc::kill(raw, libc::SIGKILL) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        let status = StdCommand::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match status {
+            Ok(code) if code.success() => Ok(()),
+            Ok(code) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("taskkill exit {code}"),
+            )),
+            Err(err) => Err(err),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        Ok(())
+    }
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     Attention 与前端轮询需要稳定的依赖状态变更时间，不能在每次读取时漂移。
 ///
@@ -672,9 +814,35 @@ enum ProbeCommandError {
 ///     超时后 kill/killpg + 有界 wait/reap；stdout/stderr 在当前线程非阻塞 poll/read，
 ///     超时后关闭读端，绝不 spawn 可 forget 的 reader 线程。
 fn run_std_command_with_timeout(
-    mut command: StdCommand,
+    command: StdCommand,
     timeout: Duration,
 ) -> Result<Output, ProbeCommandError> {
+    run_std_command_with_timeout_guarded(command, timeout, None, None)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     doctor 硬 deadline 必须压缩每个依赖 probe 的剩余预算，并在全局取消时立刻停止。
+///
+/// Code Logic（这个函数做什么）:
+///     取 `min(timeout, remaining_overall)`；若已取消或剩余为 0 直接 TimedOut；
+///     spawn 后登记到 guard，退出/超时时注销；轮询中检查 cancel。
+fn run_std_command_with_timeout_guarded(
+    mut command: StdCommand,
+    timeout: Duration,
+    overall_deadline: Option<Instant>,
+    guard: Option<&ProbeRuntimeGuard>,
+) -> Result<Output, ProbeCommandError> {
+    if guard.is_some_and(ProbeRuntimeGuard::is_cancelled) {
+        return Err(ProbeCommandError::TimedOut);
+    }
+    let mut effective = timeout;
+    if let Some(overall) = overall_deadline {
+        let remaining = overall.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(ProbeCommandError::TimedOut);
+        }
+        effective = effective.min(remaining);
+    }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     // Unix：独立进程组，便于超时 killpg 覆盖 wrapper 后代。
     #[cfg(unix)]
@@ -691,15 +859,28 @@ fn run_std_command_with_timeout(
         }
     }
     let mut child = command.spawn().map_err(|_| ProbeCommandError::SpawnOrIo)?;
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now() + effective;
     let process_group_id = child.id();
+    if let Some(guard) = guard {
+        guard.register_child(process_group_id);
+    }
 
     let status = loop {
+        if guard.is_some_and(ProbeRuntimeGuard::is_cancelled) {
+            terminate_probe_child(&mut child, process_group_id, deadline);
+            if let Some(guard) = guard {
+                guard.unregister_child(process_group_id);
+            }
+            return Err(ProbeCommandError::TimedOut);
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
                     terminate_probe_child(&mut child, process_group_id, deadline);
+                    if let Some(guard) = guard {
+                        guard.unregister_child(process_group_id);
+                    }
                     return Err(ProbeCommandError::TimedOut);
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
@@ -708,6 +889,9 @@ fn run_std_command_with_timeout(
             Err(_) => {
                 // try_wait 失败也走终止路径，避免留下僵尸。
                 terminate_probe_child(&mut child, process_group_id, deadline);
+                if let Some(guard) = guard {
+                    guard.unregister_child(process_group_id);
+                }
                 return Err(ProbeCommandError::SpawnOrIo);
             }
         }
@@ -715,6 +899,9 @@ fn run_std_command_with_timeout(
 
     // 正常退出：在共享截止时间（+ 小额 grace）内有界非阻塞 drain，避免后代持 pipe 时无界阻塞。
     let (stdout, stderr) = drain_probe_pipes(&mut child, deadline);
+    if let Some(guard) = guard {
+        guard.unregister_child(process_group_id);
+    }
     Ok(Output {
         status,
         stdout,
@@ -1381,17 +1568,23 @@ pub struct OptionalDependencyProbe {
     pub detail: String,
 }
 
-/// 非 mutating 探测系统 git（仅 location/version，不改配置）。
-///
 /// Business Logic（为什么需要这个函数）:
-///     doctor 可选依赖块需要 Git 可用性；探测不得 clone/commit/改 identity。
+///     doctor 采集必须把剩余全局 deadline 传给 git 探测，避免硬超时后仍留下 git 子进程。
 ///
 /// Code Logic（这个函数做什么）:
-///     带 3s 超时执行 `git --version`；成功解析版本字符串，失败标记 unavailable。
-pub fn probe_git_non_mutating() -> OptionalDependencyProbe {
+///     带 3s 超时执行 `git --version`；成功解析版本字符串，失败标记 unavailable；使用 guarded runner 与可选 overall deadline/guard。
+pub fn probe_git_non_mutating_with_budget(
+    overall_deadline: Option<Instant>,
+    guard: Option<&ProbeRuntimeGuard>,
+) -> OptionalDependencyProbe {
     let mut command = StdCommand::new("git");
     command.arg("--version");
-    match run_std_command_with_timeout(command, PROBE_COMMAND_TIMEOUT) {
+    match run_std_command_with_timeout_guarded(
+        command,
+        PROBE_COMMAND_TIMEOUT,
+        overall_deadline,
+        guard,
+    ) {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             OptionalDependencyProbe {
@@ -1414,15 +1607,19 @@ pub fn probe_git_non_mutating() -> OptionalDependencyProbe {
     }
 }
 
-/// 非 mutating 探测 tmux（复用 workbench 探测，不安装）。
-///
 /// Business Logic（为什么需要这个函数）:
-///     doctor 与 Workbench dependency 必须共享同一 tmux 探测口径，避免分叉。
+///     doctor 需要把剩余 deadline/取消信号传入 tmux 探测，防止 hard timeout 后遗留 tmux wrapper。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用 `probe_tmux_command`：Ready→available；TimedOut/Missing→unavailable。
-pub fn probe_tmux_non_mutating() -> OptionalDependencyProbe {
-    match probe_tmux_command() {
+///     使用 guarded runner 调用 `probe_tmux_command_with`（Ready→available；TimedOut/Missing→unavailable）。
+pub fn probe_tmux_non_mutating_with_budget(
+    overall_deadline: Option<Instant>,
+    guard: Option<&ProbeRuntimeGuard>,
+) -> OptionalDependencyProbe {
+    let outcome = probe_tmux_command_with(current_platform(), |command, timeout| {
+        run_std_command_with_timeout_guarded(command, timeout, overall_deadline, guard)
+    });
+    match outcome {
         TmuxProbeOutcome::Ready(probe) => OptionalDependencyProbe {
             available: true,
             applicable: true,
@@ -1444,14 +1641,15 @@ pub fn probe_tmux_non_mutating() -> OptionalDependencyProbe {
     }
 }
 
-/// 非 mutating 探测 WSL（仅 Windows 相关；其它平台 not applicable）。
-///
 /// Business Logic（为什么需要这个函数）:
-///     Windows 上 WSL 是 tmux 宿主；非 Windows 平台报告 info 而非 warning。
+///     doctor 在 Windows 上探测 WSL 时必须尊重全局 deadline，避免 hard timeout 后留下 wsl.exe。
 ///
 /// Code Logic（这个函数做什么）:
-///     非 Windows → applicable=false；Windows 上 `wsl.exe --status` 或 `--version` 有界探测。
-pub fn probe_wsl_non_mutating() -> OptionalDependencyProbe {
+///     非 Windows 直接 not-applicable；Windows 用 guarded runner 跑 `--status` / `--version`。
+pub fn probe_wsl_non_mutating_with_budget(
+    overall_deadline: Option<Instant>,
+    guard: Option<&ProbeRuntimeGuard>,
+) -> OptionalDependencyProbe {
     if current_platform() != DependencyPlatform::Windows {
         return OptionalDependencyProbe {
             available: false,
@@ -1463,7 +1661,12 @@ pub fn probe_wsl_non_mutating() -> OptionalDependencyProbe {
     // 仅探测 wsl.exe 是否存在且能返回版本/状态，绝不 start 发行版或改配置。
     let mut command = StdCommand::new("wsl.exe");
     command.arg("--status");
-    match run_std_command_with_timeout(command, PROBE_COMMAND_TIMEOUT) {
+    match run_std_command_with_timeout_guarded(
+        command,
+        PROBE_COMMAND_TIMEOUT,
+        overall_deadline,
+        guard,
+    ) {
         Ok(output) if output.status.success() || output.status.code().is_some() => {
             OptionalDependencyProbe {
                 available: true,
@@ -1476,7 +1679,12 @@ pub fn probe_wsl_non_mutating() -> OptionalDependencyProbe {
             // --status 在部分发行版不可用时回退 --version
             let mut fallback = StdCommand::new("wsl.exe");
             fallback.arg("--version");
-            match run_std_command_with_timeout(fallback, PROBE_COMMAND_TIMEOUT) {
+            match run_std_command_with_timeout_guarded(
+                fallback,
+                PROBE_COMMAND_TIMEOUT,
+                overall_deadline,
+                guard,
+            ) {
                 Ok(output) if output.status.success() || output.status.code().is_some() => {
                     OptionalDependencyProbe {
                         available: true,
@@ -1496,14 +1704,16 @@ pub fn probe_wsl_non_mutating() -> OptionalDependencyProbe {
     }
 }
 
-/// 非 mutating 探测 Claude CLI（仅 --version，不跑用户配置/会话）。
-///
 /// Business Logic（为什么需要这个函数）:
-///     doctor 需要知道 Claude Code CLI 是否可调用；不得触发 headless 任务或读凭据。
+///     doctor 探测自定义 Claude wrapper 时必须共享全局 deadline，防止 hard timeout 后遗留 wrapper 进程。
 ///
 /// Code Logic（这个函数做什么）:
-///     对 cli_path（空则 `claude`）带 3s 超时执行 `--version`。
-pub fn probe_claude_cli_non_mutating(cli_path: &str) -> OptionalDependencyProbe {
+///     对 cli_path（空则 `claude`）用 guarded runner 执行 `--version`。
+pub fn probe_claude_cli_non_mutating_with_budget(
+    cli_path: &str,
+    overall_deadline: Option<Instant>,
+    guard: Option<&ProbeRuntimeGuard>,
+) -> OptionalDependencyProbe {
     let program = if cli_path.trim().is_empty() {
         "claude"
     } else {
@@ -1511,7 +1721,12 @@ pub fn probe_claude_cli_non_mutating(cli_path: &str) -> OptionalDependencyProbe 
     };
     let mut command = StdCommand::new(program);
     command.arg("--version");
-    match run_std_command_with_timeout(command, PROBE_COMMAND_TIMEOUT) {
+    match run_std_command_with_timeout_guarded(
+        command,
+        PROBE_COMMAND_TIMEOUT,
+        overall_deadline,
+        guard,
+    ) {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             OptionalDependencyProbe {

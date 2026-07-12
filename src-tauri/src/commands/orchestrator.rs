@@ -592,8 +592,15 @@ fn remote_runtime_snapshot_from_open_error(
 async fn get_remote_orchestrator_runtime_snapshot(
     state: &AppState,
     remote_shortcut: &WorkbenchProjectRow,
+    forwarded_request_id: Option<&str>,
 ) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
-    let context = match open_remote_project_for_shortcut(state, remote_shortcut).await {
+    let context = match open_remote_project_for_shortcut(
+        state,
+        remote_shortcut,
+        forwarded_request_id,
+    )
+    .await
+    {
         Ok(context) => context,
         Err(error) => {
             return Ok(remote_runtime_snapshot_from_open_error(
@@ -602,8 +609,20 @@ async fn get_remote_orchestrator_runtime_snapshot(
             ));
         }
     };
-    let request_id = crate::net::request_context::new_request_id();
-    match RemoteOrchestratorClient::new()
+    // Business Logic: 多跳代理（mobile→本机→owner）必须复用入站 request_id；Tauri IPC 无入站 ID 时由客户端生成。
+    let request_id = forwarded_request_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(crate::net::request_context::new_request_id);
+    let mut client = RemoteOrchestratorClient::new();
+    if let Some(request_id) = forwarded_request_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        client = client.with_forwarded_request_id(request_id);
+    }
+    match client
         .runtime_snapshot(&context.base_url, &context.remote_project_id, &request_id)
         .await
     {
@@ -892,7 +911,7 @@ async fn create_remote_orchestrator_task_online(
     remote_shortcut: &WorkbenchProjectRow,
     mut request: RemoteCreateOrchestratorTaskReq,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
-    let context = open_remote_project_for_shortcut(state, remote_shortcut).await?;
+    let context = open_remote_project_for_shortcut(state, remote_shortcut, None).await?;
     request.project_id = context.remote_project_id.clone();
     let task = RemoteOrchestratorClient::new()
         .create_task(&context.base_url, request)
@@ -949,7 +968,7 @@ where
     F: FnOnce(RemoteOrchestratorClient, String, String) -> Fut,
     Fut: std::future::Future<Output = Result<OrchestratorTaskDto, AppError>>,
 {
-    let context = open_remote_project_for_shortcut(state, remote_shortcut).await?;
+    let context = open_remote_project_for_shortcut(state, remote_shortcut, None).await?;
     let remote_task_id = remote_inner_task_id_for_shortcut(remote_shortcut, task_id)?;
     let task = operation(
         RemoteOrchestratorClient::new(),
@@ -1674,7 +1693,7 @@ pub(crate) async fn list_orchestrator_task_views_for_state(
         return Ok(rows.into_iter().map(local_task_view).collect());
     }
 
-    let mirrors = match sync_remote_task_mirror_for_project(state, &project).await {
+    let mirrors = match sync_remote_task_mirror_for_project(state, &project, None).await {
         Ok(mirrors) => mirrors,
         Err(err) if is_remote_network_error(&err) => {
             state
@@ -1905,7 +1924,7 @@ pub async fn refresh_orchestrator_project(
         });
     }
 
-    let context = open_remote_project_for_shortcut(state.inner(), &project).await?;
+    let context = open_remote_project_for_shortcut(state.inner(), &project, None).await?;
     let refreshed = RemoteOrchestratorClient::new()
         .refresh_project(&context.base_url, &context.remote_project_id)
         .await?;
@@ -1951,11 +1970,27 @@ pub(crate) async fn get_orchestrator_runtime_snapshot_for_state(
     state: &AppState,
     project_id: &str,
 ) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
+    get_orchestrator_runtime_snapshot_for_state_with_request_id(state, project_id, None).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Mobile HTTP 入口携带入站 request_id，需要沿两跳链路转发到 owning device；
+///     Tauri IPC 入口没有入站 ID，传 None 由下游生成。
+///
+/// Code Logic（这个函数做什么）:
+///     与 `get_orchestrator_runtime_snapshot_for_state` 相同的 local/remote 四态分发，
+///     但把可选 `forwarded_request_id` 传给 remote open-project / runtime_snapshot。
+pub(crate) async fn get_orchestrator_runtime_snapshot_for_state_with_request_id(
+    state: &AppState,
+    project_id: &str,
+    forwarded_request_id: Option<&str>,
+) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
     let project = get_orchestrator_workbench_project(state, project_id).await?;
     // 远端 shortcut 不得读本机 scheduler/config/workflow 冒充 owner 状态。
     // 共享 builder 只负责本地项目；远端守卫与四态分发留在命令层。
     if project.kind == "remote" {
-        return get_remote_orchestrator_runtime_snapshot(state, &project).await;
+        return get_remote_orchestrator_runtime_snapshot(state, &project, forwarded_request_id)
+            .await;
     }
     let config = state
         .config
@@ -2169,7 +2204,7 @@ pub async fn list_orchestrator_task_evidence_for_project(
     if project.kind != "remote" {
         return state.orchestrator_repo.list_evidence(&task_id).await;
     }
-    let context = open_remote_project_for_shortcut(state.inner(), &project).await?;
+    let context = open_remote_project_for_shortcut(state.inner(), &project, None).await?;
     let remote_task_id = remote_inner_task_id_for_shortcut(&project, &task_id)?;
     let evidence = RemoteOrchestratorClient::new()
         .get_evidence(&context.base_url, &remote_task_id)
@@ -2199,7 +2234,7 @@ pub async fn get_orchestrator_config_for_project(
             .clone();
         return Ok(config.into());
     }
-    let context = open_remote_project_for_shortcut(state.inner(), &project).await?;
+    let context = open_remote_project_for_shortcut(state.inner(), &project, None).await?;
     RemoteOrchestratorClient::new()
         .get_config(&context.base_url)
         .await
