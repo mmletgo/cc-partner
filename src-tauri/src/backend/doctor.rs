@@ -15,8 +15,9 @@ use crate::backend::control::{
 use crate::config::{backend_log_path, data_dir};
 use crate::error::AppError;
 use crate::workbench::dependencies::{
-    probe_claude_cli_non_mutating, probe_git_non_mutating, probe_tmux_non_mutating,
-    probe_wsl_non_mutating, OptionalDependencyProbe,
+    probe_claude_cli_non_mutating_with_budget, probe_git_non_mutating_with_budget,
+    probe_tmux_non_mutating_with_budget, probe_wsl_non_mutating_with_budget,
+    OptionalDependencyProbe, ProbeRuntimeGuard,
 };
 use chrono::Utc;
 use mdns_sd::ServiceDaemon;
@@ -25,7 +26,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Doctor 快照 schema 版本（当前固定为 1）。
 pub const DOCTOR_SCHEMA_VERSION: u32 = 1;
@@ -618,7 +619,15 @@ pub async fn collect_doctor_snapshot() -> Result<DoctorSnapshot, AppError> {
 ///     成功则 join；超时则 `mem::forget` JoinHandle（文档化泄漏卡住线程作为 last resort）
 ///     并返回 `AppError::Timeout`。
 pub fn collect_doctor_snapshot_bounded(deadline: Duration) -> Result<DoctorSnapshot, AppError> {
-    run_on_thread_with_deadline(deadline, collect_doctor_snapshot_on_thread).map_err(|err| {
+    let guard = std::sync::Arc::new(ProbeRuntimeGuard::new());
+    let overall_deadline = Instant::now() + deadline;
+    let guard_for_thread = std::sync::Arc::clone(&guard);
+    run_on_thread_with_deadline(deadline, move || {
+        collect_doctor_snapshot_on_thread(overall_deadline, guard_for_thread)
+    })
+    .map_err(|err| {
+        // 超时/断开前先 cancel + 有界 reap 依赖探测进程树，避免 forget 采集线程后遗留 git/tmux/wsl。
+        guard.cancel_and_reap();
         if matches!(err, DeadlineRunError::Timeout) {
             AppError::timeout(format!("doctor 采集超时（{deadline:?}）"))
         } else {
@@ -686,14 +695,23 @@ where
 /// Code Logic（这个函数做什么）:
 ///     自建 current_thread Tokio runtime `block_on(current_status)`，再跑同步
 ///     `collect_doctor_snapshot_blocking` 组装快照。
-fn collect_doctor_snapshot_on_thread() -> Result<DoctorSnapshot, AppError> {
+fn collect_doctor_snapshot_on_thread(
+    overall_deadline: Instant,
+    guard: std::sync::Arc<ProbeRuntimeGuard>,
+) -> Result<DoctorSnapshot, AppError> {
+    if guard.is_cancelled() || Instant::now() >= overall_deadline {
+        return Err(AppError::timeout("doctor 采集在启动前已超时/取消"));
+    }
     let backend_status = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|err| AppError::generic(format!("doctor 采集 runtime 创建失败: {err}")))?
         .block_on(crate::backend::control::current_status());
+    if guard.is_cancelled() || Instant::now() >= overall_deadline {
+        return Err(AppError::timeout("doctor 采集在 health 后已超时/取消"));
+    }
     let home = current_home_dir();
-    collect_doctor_snapshot_blocking(backend_status, home.as_deref())
+    collect_doctor_snapshot_blocking(backend_status, home.as_deref(), overall_deadline, guard)
 }
 
 /// 在 blocking 线程中完成同步探测并组装快照。
@@ -708,8 +726,10 @@ fn collect_doctor_snapshot_on_thread() -> Result<DoctorSnapshot, AppError> {
 fn collect_doctor_snapshot_blocking(
     backend_status: BackendStatus,
     home: Option<&Path>,
+    overall_deadline: Instant,
+    guard: std::sync::Arc<ProbeRuntimeGuard>,
 ) -> Result<DoctorSnapshot, AppError> {
-    let inputs = gather_live_probe_inputs_sync(backend_status)?;
+    let inputs = gather_live_probe_inputs_sync(backend_status, overall_deadline, guard)?;
     Ok(assemble_snapshot_from_inputs(inputs, home))
 }
 
@@ -722,6 +742,8 @@ fn collect_doctor_snapshot_blocking(
 ///     解析 data/db/log 路径，跑非 mutating 依赖探测；路径解析失败上抛 Validation。
 fn gather_live_probe_inputs_sync(
     backend_status: BackendStatus,
+    overall_deadline: Instant,
+    guard: std::sync::Arc<ProbeRuntimeGuard>,
 ) -> Result<DoctorProbeInputs, AppError> {
     let control_path = control_file_path()?;
     let data = data_dir()?;
@@ -741,6 +763,10 @@ fn gather_live_probe_inputs_sync(
     };
     let claude_path = cfg.github_trending.claude_cli_path.clone();
 
+    if guard.is_cancelled() || Instant::now() >= overall_deadline {
+        return Err(AppError::timeout("doctor 依赖探测前已超时/取消"));
+    }
+
     Ok(DoctorProbeInputs {
         backend_status,
         control_path,
@@ -748,10 +774,14 @@ fn gather_live_probe_inputs_sync(
         database_path: db,
         log_dir,
         log_path,
-        git: probe_git_non_mutating(),
-        tmux: probe_tmux_non_mutating(),
-        wsl: probe_wsl_non_mutating(),
-        claude_cli: probe_claude_cli_non_mutating(&claude_path),
+        git: probe_git_non_mutating_with_budget(Some(overall_deadline), Some(guard.as_ref())),
+        tmux: probe_tmux_non_mutating_with_budget(Some(overall_deadline), Some(guard.as_ref())),
+        wsl: probe_wsl_non_mutating_with_budget(Some(overall_deadline), Some(guard.as_ref())),
+        claude_cli: probe_claude_cli_non_mutating_with_budget(
+            &claude_path,
+            Some(overall_deadline),
+            Some(guard.as_ref()),
+        ),
         mdns_override: None,
         recent_errors_override: None,
         // None 表示走真实读取并报告 malformed warning。
@@ -1521,8 +1551,8 @@ mod tests {
     use super::*;
     use crate::backend::control::classify_status;
     use crate::workbench::dependencies::{
-        probe_claude_cli_non_mutating, probe_git_non_mutating, probe_tmux_non_mutating,
-        probe_wsl_non_mutating,
+        probe_claude_cli_non_mutating_with_budget, probe_git_non_mutating_with_budget,
+        probe_tmux_non_mutating_with_budget, probe_wsl_non_mutating_with_budget,
     };
     use serde_json::{json, Value};
     use std::net::TcpListener;
@@ -2199,15 +2229,15 @@ mod tests {
     #[test]
     fn dependency_probe_helpers_are_non_mutating() {
         // 仅确保 helper 可调用且返回 applicable 字段；不安装、不改 PATH
-        let git = probe_git_non_mutating();
+        let git = probe_git_non_mutating_with_budget(None, None);
         assert!(git.applicable);
-        let tmux = probe_tmux_non_mutating();
+        let tmux = probe_tmux_non_mutating_with_budget(None, None);
         assert!(tmux.applicable);
-        let wsl = probe_wsl_non_mutating();
+        let wsl = probe_wsl_non_mutating_with_budget(None, None);
         // 在 macOS/Linux 上 WSL 应 not applicable
         #[cfg(not(target_os = "windows"))]
         assert!(!wsl.applicable);
-        let claude = probe_claude_cli_non_mutating("claude");
+        let claude = probe_claude_cli_non_mutating_with_budget("claude", None, None);
         assert!(claude.applicable);
     }
 

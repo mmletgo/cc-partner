@@ -148,7 +148,7 @@ async fn collect_one_remote_project_attention_items(
     project: &WorkbenchProjectRow,
 ) -> Result<Vec<AttentionItemDto>, AppError> {
     let (mirrors, freshness, cached_at) =
-        match sync_remote_task_mirror_for_project(state, project).await {
+        match sync_remote_task_mirror_for_project(state, project, None).await {
             Ok(mirrors) => (mirrors, AttentionFreshness::Live, None),
             Err(err) if is_remote_network_error(&err) => {
                 let mirrors = state

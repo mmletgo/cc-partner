@@ -12,9 +12,10 @@ use crate::commands::orchestrator::{
     build_orchestrator_task_row, create_orchestrator_task_view_for_http,
     discard_orchestrator_remote_outbox_for_repos, dispatch_orchestrator_best_effort,
     ensure_reviewed_delivery_allowed, get_orchestrator_runtime_snapshot_for_project,
-    get_orchestrator_runtime_snapshot_for_state, list_orchestrator_task_views_for_state,
-    retry_orchestrator_remote_outbox_for_repos, run_delivery_for_task,
-    CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
+    get_orchestrator_runtime_snapshot_for_state_with_request_id,
+    list_orchestrator_task_views_for_state, retry_orchestrator_remote_outbox_for_repos,
+    run_delivery_for_task, CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto,
+    OrchestratorTaskViewDto,
 };
 use crate::commands::prompt_optimizer::{
     local_complete_orchestrator_task_prompt, OrchestratorTaskPromptCompletionDto,
@@ -503,11 +504,12 @@ pub async fn complete_task_prompt(
             .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.complete_prompt"))?
             .ok_or_else(|| P2pError::not_found("自动化 Prompt 完善项目不存在", &ctx))?;
         if project.kind == "remote" {
-            let context = open_remote_project_for_shortcut(&state, &project)
-                .await
-                .map_err(|e| {
-                    P2pError::from_app_error(e, &ctx, "orchestrator.tasks.complete_prompt")
-                })?;
+            let context =
+                open_remote_project_for_shortcut(&state, &project, Some(ctx.request_id.as_str()))
+                    .await
+                    .map_err(|e| {
+                        P2pError::from_app_error(e, &ctx, "orchestrator.tasks.complete_prompt")
+                    })?;
             let completed = RemoteOrchestratorClient::new()
                 .with_forwarded_request_id(&ctx.request_id)
                 .complete_prompt(
@@ -816,9 +818,13 @@ pub async fn mobile_runtime_snapshot(
             "orchestrator.mobile.runtime_snapshot",
         ));
     }
-    let snapshot = get_orchestrator_runtime_snapshot_for_state(&state, &project_id)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.mobile.runtime_snapshot"))?;
+    let snapshot = get_orchestrator_runtime_snapshot_for_state_with_request_id(
+        &state,
+        &project_id,
+        Some(ctx.request_id.as_str()),
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.mobile.runtime_snapshot"))?;
     Ok(Json(snapshot))
 }
 

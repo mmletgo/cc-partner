@@ -414,6 +414,52 @@ describe('useWorkbenchWorktreeGitController — load / select', () => {
     expect(result.current.worktrees).toEqual([]);
   });
 
+  test('slow initial loadWorktrees does not overwrite later refresh after mutation-triggered reload', async () => {
+    const project = buildLocalProject();
+    const initialList = [buildWorktree({ id: 'wt-old', projectId: project.id })];
+    const refreshedList = [
+      buildWorktree({ id: 'wt-old', projectId: project.id }),
+      buildWorktree({ id: 'wt-new', projectId: project.id, isMain: false }),
+    ];
+
+    let resolveInitial: (value: typeof initialList) => void = () => undefined;
+    fakeWorktreesApi.list
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveInitial = resolve as (value: typeof initialList) => void;
+          }),
+      )
+      .mockResolvedValueOnce(refreshedList);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: null,
+    });
+
+    let firstLoad: Promise<void> | undefined;
+    act(() => {
+      firstLoad = result.current.loadWorktrees(project.id);
+    });
+    await act(async () => {
+      await flushMicrotasks(2);
+    });
+
+    await act(async () => {
+      await result.current.loadWorktrees(project.id);
+      await flushMicrotasks();
+    });
+    expect(result.current.worktrees.map((worktree) => worktree.id)).toEqual(['wt-old', 'wt-new']);
+
+    await act(async () => {
+      resolveInitial(initialList);
+      await firstLoad;
+      await flushMicrotasks();
+    });
+
+    expect(result.current.worktrees.map((worktree) => worktree.id)).toEqual(['wt-old', 'wt-new']);
+  });
+
   test('loadWorktrees surfaces error and marks failure on throw', async () => {
     const project = buildLocalProject();
     fakeWorktreesApi.list.mockRejectedValueOnce(new Error('boom'));
@@ -1155,6 +1201,51 @@ describe('useWorkbenchWorktreeGitController — git history refresh', () => {
     });
 
     expect(result.current.gitCommits).toEqual([]);
+  });
+
+  test('slow initial loadGitHistory does not overwrite later refresh for same worktree', async () => {
+    const project = buildLocalProject();
+    const oldCommits = [buildCommit({ hash: 'old' })];
+    const newCommits = [buildCommit({ hash: 'new1' }), buildCommit({ hash: 'new2' })];
+
+    let resolveInitial: (value: typeof oldCommits) => void = () => undefined;
+    fakeGitApi.listCommits
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveInitial = resolve as (value: typeof oldCommits) => void;
+          }),
+      )
+      .mockResolvedValueOnce(newCommits);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-main',
+    });
+
+    let firstLoad: Promise<void> | undefined;
+    act(() => {
+      firstLoad = result.current.loadGitHistory();
+    });
+    await act(async () => {
+      await flushMicrotasks(2);
+    });
+
+    await act(async () => {
+      await result.current.loadGitHistory();
+      await flushMicrotasks();
+    });
+    expect(result.current.gitCommits).toEqual(newCommits);
+    expect(result.current.gitHistoryLoading).toBe(false);
+
+    await act(async () => {
+      resolveInitial(oldCommits);
+      await firstLoad;
+      await flushMicrotasks();
+    });
+
+    expect(result.current.gitCommits).toEqual(newCommits);
+    expect(result.current.gitHistoryLoading).toBe(false);
   });
 
   test('loadGitHistory surfaces error and clears commits on throw', async () => {

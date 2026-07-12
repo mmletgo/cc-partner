@@ -28,6 +28,7 @@ import { mountedTerminalSessions, visibleTerminalSessions } from '../terminalSes
 import { canRefreshTerminalSize } from '../terminalSizing';
 import type { TerminalLayoutMode } from '../terminalSizing';
 import { sessionsForWorktree } from '../workbenchWorktrees';
+import { isLatestRequest } from '../workbenchFiles';
 
 /**
  * 终端 resize 命令后端接受 u16，前端需要提前 clamp；与原 Workbench 内部常量保持一致。
@@ -229,6 +230,8 @@ export function useWorkbenchTerminalController(
   const knownSessionIdsRef = useRef<Set<string>>(new Set());
   // Business Logic: 用 lastLocalFocusAtRef 抑制本地 focus 操作后 500ms 内的 tmux focus 轮询，避免把焦点抢回。
   const lastLocalFocusAtRef = useRef<number>(0);
+  // Business Logic: 同一 project 的 session list 可能并发；用单调 request seq 丢弃过期 list，避免 create/close/split 后被慢响应回写旧列表。
+  const sessionListRequestSeqRef = useRef<Record<string, number>>({});
   // Business Logic: terminal-status listen 只想在 mount 时注册一次；用 ref 读取最新的 canListenToTauriEvents，
   // 避免把它放进 effect 依赖导致 listener 反复重注册（与原 Workbench.tsx 的 [] 依赖行为一致）。
   const canListenToTauriEventsRef = useRef(canListenToTauriEventsParam);
@@ -387,30 +390,53 @@ export function useWorkbenchTerminalController(
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   create/close/split/rename 等 mutation 成功后，任何仍在飞行中的旧 list 响应都不能再写回 UI。
+   *
+   * Code Logic（这个函数做什么）:
+   *   递增指定 project 的 session list request seq，使先前 loadSessions 的 isLatest 判断失败。
+   */
+  const invalidateSessionListRequests = useCallback((projectId: string): void => {
+    const current = sessionListRequestSeqRef.current[projectId] ?? 0;
+    sessionListRequestSeqRef.current[projectId] = current + 1;
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   切换项目或刷新时需要重新拉取当前项目的所有 terminal window。
    *
    * Code Logic（这个函数做什么）:
-   *   1. 调用 sessions.list(projectId)，并通过 isCurrentProject 做 stale guard；
-   *   2. 成功时更新 sessions / knownSessionIds，并 refreshProjectSessionStats / markRequestSuccess；
-   *   3. 失败时 markRequestFailure + 展示 sessionError。
-   *
+   *   1. 为 project 递增单调 request seq 后调用 sessions.list；
+   *   2. 仅当 project 仍 active 且 request 仍是最新时写入 sessions / knownSessionIds / success；
+   *   3. 失败时同样校验 seq，再 markRequestFailure + 展示 sessionError。
    *   projectId 缺省时使用 activeProjectIdRef.current，便于 bridge.loadSessions() 无参调用。
    */
   const loadSessions = useCallback(
     async (projectId?: string): Promise<void> => {
       const resolvedProjectId = projectId ?? activeProjectIdRef.current;
       if (!resolvedProjectId) return;
+      const requestSeq = (sessionListRequestSeqRef.current[resolvedProjectId] ?? 0) + 1;
+      sessionListRequestSeqRef.current[resolvedProjectId] = requestSeq;
       try {
         setSessionError(null);
         const list = await workbenchApi.sessions.list(resolvedProjectId);
-        if (!isCurrentProject(resolvedProjectId)) return;
+        if (
+          !isCurrentProject(resolvedProjectId) ||
+          !isLatestRequest(sessionListRequestSeqRef.current[resolvedProjectId], requestSeq)
+        ) {
+          return;
+        }
         markRequestSuccess(resolvedProjectId);
         knownSessionIdsRef.current = new Set(list.map((session) => session.id));
         setSessions(list);
         updateActiveSession(list);
         void refreshProjectSessionStats(resolvedProjectId);
       } catch (error) {
-        if (!isCurrentProject(resolvedProjectId)) return;
+        if (
+          !isCurrentProject(resolvedProjectId) ||
+          !isLatestRequest(sessionListRequestSeqRef.current[resolvedProjectId], requestSeq)
+        ) {
+          return;
+        }
         markRequestFailure(resolvedProjectId, error);
         setSessionError(displayErrorMessage(error, t('sessions')));
       }
@@ -460,6 +486,8 @@ export function useWorkbenchTerminalController(
         if (activeProjectIdRef.current !== projectId) {
           return null;
         }
+        // Business Logic: mutation 成功后立刻作废旧 list，防止慢速 list 覆盖刚创建的 session。
+        invalidateSessionListRequests(projectId);
         setSessions((current) => [...current, session]);
         knownSessionIdsRef.current.add(session.id);
         resetTerminalBuffer(session.id);
@@ -484,6 +512,7 @@ export function useWorkbenchTerminalController(
     [
       displayErrorMessage,
       focusSession,
+      invalidateSessionListRequests,
       markRequestFailure,
       measureInitialTerminalSize,
       refreshProjectSessionStats,
@@ -519,13 +548,22 @@ export function useWorkbenchTerminalController(
       try {
         setSessionError(null);
         await workbenchApi.sessions.splitPane(activeSession.id, direction);
+        invalidateSessionListRequests(activeSession.projectId);
         await loadSessions(activeSession.projectId);
       } catch (error) {
         markRequestFailure(activeSession.projectId, error);
         setSessionError(displayErrorMessage(error, t('splitPane')));
       }
     },
-    [activeSession, displayErrorMessage, loadSessions, markRequestFailure, remoteWriteDisabled, t],
+    [
+      activeSession,
+      displayErrorMessage,
+      invalidateSessionListRequests,
+      loadSessions,
+      markRequestFailure,
+      remoteWriteDisabled,
+      t,
+    ],
   );
 
   /**
@@ -612,6 +650,11 @@ export function useWorkbenchTerminalController(
       if (remoteWriteDisabled) return;
       try {
         await workbenchApi.sessions.close(sessionId);
+        const projectIdForInvalidate = activeProjectIdRef.current;
+        if (projectIdForInvalidate) {
+          // Business Logic: close 成功后作废旧 list，防止慢速 list 把已关闭 session 复活。
+          invalidateSessionListRequests(projectIdForInvalidate);
+        }
         setSessions((current) => {
           const next = current.filter((session) => session.id !== sessionId);
           updateActiveSession(next);
@@ -629,6 +672,7 @@ export function useWorkbenchTerminalController(
     },
     [
       displayErrorMessage,
+      invalidateSessionListRequests,
       markRequestFailure,
       refreshProjectSessionStats,
       removeTerminalBuffer,
@@ -655,6 +699,7 @@ export function useWorkbenchTerminalController(
         activeSession.id,
         sessionNameDraft.trim(),
       );
+      invalidateSessionListRequests(activeSession.projectId);
       setSessions((current) =>
         current.map((session) => (session.id === renamed.id ? renamed : session)),
       );
@@ -665,6 +710,7 @@ export function useWorkbenchTerminalController(
   }, [
     activeSession,
     displayErrorMessage,
+    invalidateSessionListRequests,
     markRequestFailure,
     remoteWriteDisabled,
     sessionNameDraft,

@@ -296,6 +296,60 @@ describe('useWorkbenchTerminalController — load / focus', () => {
     expect(result.current.sessionError).toBeNull();
   });
 
+  test('slow initial loadSessions does not overwrite createSession mutation result', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const initialSession = buildSession({ id: 's-initial', projectId: project.id, worktreeId: worktree.id });
+    const createdSession = buildSession({ id: 's-created', projectId: project.id, worktreeId: worktree.id });
+
+    let resolveInitialList: (value: typeof initialSession[]) => void = () => undefined;
+    fakeSessionsApi.list.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveInitialList = resolve as (value: typeof initialSession[]) => void;
+        }),
+    );
+    fakeSessionsApi.create.mockResolvedValueOnce(createdSession);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    let initialLoad: Promise<void> | undefined;
+    act(() => {
+      initialLoad = result.current.loadSessions(project.id);
+    });
+    await act(async () => {
+      await flushMicrotasks(2);
+    });
+
+    await act(async () => {
+      const createdId = await result.current.createSessionForWorktree(worktree.id);
+      expect(createdId).toBe(createdSession.id);
+      await flushMicrotasks();
+    });
+    expect(result.current.sessions.map((session) => session.id)).toEqual([createdSession.id]);
+
+    await act(async () => {
+      resolveInitialList([initialSession]);
+      await initialLoad;
+      await flushMicrotasks();
+    });
+
+    // 旧 list 不得覆盖 mutation 后的会话列表。
+    expect(result.current.sessions.map((session) => session.id)).toEqual([createdSession.id]);
+  });
+
   test('loadSessions surfaces error message and marks request failure on throw', async () => {
     const project = buildLocalProject();
     const worktree = buildWorktree();
