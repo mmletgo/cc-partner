@@ -910,12 +910,20 @@ async fn create_remote_orchestrator_task_online(
     state: &AppState,
     remote_shortcut: &WorkbenchProjectRow,
     mut request: RemoteCreateOrchestratorTaskReq,
+    forwarded_request_id: Option<&str>,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
-    let context = open_remote_project_for_shortcut(state, remote_shortcut, None).await?;
+    // Business Logic: mobile→本机→owner 创建任务必须复用同一 request_id，便于多跳排障。
+    let context =
+        open_remote_project_for_shortcut(state, remote_shortcut, forwarded_request_id).await?;
     request.project_id = context.remote_project_id.clone();
-    let task = RemoteOrchestratorClient::new()
-        .create_task(&context.base_url, request)
-        .await?;
+    let mut client = RemoteOrchestratorClient::new();
+    if let Some(request_id) = forwarded_request_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        client = client.with_forwarded_request_id(request_id);
+    }
+    let task = client.create_task(&context.base_url, request).await?;
     upsert_remote_task_view(
         state,
         remote_shortcut,
@@ -1673,11 +1681,24 @@ pub async fn create_orchestrator_task(
 ///     Phase 6 前端需要在远端项目中展示远端真实任务、本机 pending outbox 和离线 mirror 快照。
 ///
 /// Code Logic（这个函数做什么）:
-///     local 项目读取本机任务并包装 Local；remote 项目在线时同步 mirror，离线时读最近 mirror；
-///     最后追加 pending/sending/failed outbox 项。
+///     local 项目读取本机任务并包装 Local；remote 项目在线时同步 mirror（可转发 request_id），
+///     离线时读最近 mirror；最后追加 pending/sending/failed outbox 项。
 pub(crate) async fn list_orchestrator_task_views_for_state(
     state: &AppState,
     project_id: Option<String>,
+) -> Result<Vec<OrchestratorTaskViewDto>, AppError> {
+    list_orchestrator_task_views_for_state_with_request_id(state, project_id, None).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     mobile HTTP list 需要把入站 request_id 贯穿 open-project 与 owner list，避免多跳 ID 断链。
+///
+/// Code Logic（这个函数做什么）:
+///     与 `list_orchestrator_task_views_for_state` 相同，但把 `forwarded_request_id` 传给 mirror 同步。
+pub(crate) async fn list_orchestrator_task_views_for_state_with_request_id(
+    state: &AppState,
+    project_id: Option<String>,
+    forwarded_request_id: Option<&str>,
 ) -> Result<Vec<OrchestratorTaskViewDto>, AppError> {
     let Some(project_id) = project_id else {
         let rows = state.orchestrator_repo.list_tasks(None).await?;
@@ -1693,16 +1714,17 @@ pub(crate) async fn list_orchestrator_task_views_for_state(
         return Ok(rows.into_iter().map(local_task_view).collect());
     }
 
-    let mirrors = match sync_remote_task_mirror_for_project(state, &project, None).await {
-        Ok(mirrors) => mirrors,
-        Err(err) if is_remote_network_error(&err) => {
-            state
-                .orchestrator_repo
-                .list_remote_task_mirrors_for_project_path(&project.device_id, &project.path)
-                .await?
-        }
-        Err(err) => return Err(err),
-    };
+    let mirrors =
+        match sync_remote_task_mirror_for_project(state, &project, forwarded_request_id).await {
+            Ok(mirrors) => mirrors,
+            Err(err) if is_remote_network_error(&err) => {
+                state
+                    .orchestrator_repo
+                    .list_remote_task_mirrors_for_project_path(&project.device_id, &project.path)
+                    .await?
+            }
+            Err(err) => return Err(err),
+        };
     let mut views = remote_mirror_views(mirrors, &project)?;
     views.extend(pending_remote_task_views_for_project(state, &project).await?);
     Ok(views)
@@ -1735,7 +1757,10 @@ pub(crate) async fn create_orchestrator_task_view_for_state(
     }
 
     let remote_request = remote_create_request_from_local(&request);
-    match create_remote_orchestrator_task_online(state, &project, remote_request.clone()).await {
+    // Tauri IPC 无入站 request_id，第二跳由 client 生成新 ID。
+    match create_remote_orchestrator_task_online(state, &project, remote_request.clone(), None)
+        .await
+    {
         Ok(view) => Ok(view),
         Err(err) if is_remote_network_error(&err) => {
             let item = create_pending_remote_task(state, &project, remote_request).await?;
@@ -2032,9 +2057,15 @@ pub async fn get_orchestrator_runtime_snapshot(
 /// Code Logic（这个函数做什么）:
 ///     local 项目用 clientRequestId 幂等创建并按 createAction 决定初始状态；remote 项目保持同一 requestId 转发到 owning device，
 ///     网络失败时写 pending outbox 并返回 PendingRemote。
-pub(crate) async fn create_orchestrator_task_view_for_http(
+/// Business Logic（为什么需要这个函数）:
+///     mobile create 入站 request_id 必须贯穿 open-project 与 owner create，否则 owner 侧看到重生 ID。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 clientRequestId；local 幂等创建；remote 把 `forwarded_request_id` 传给 open-project 与 owner create。
+pub(crate) async fn create_orchestrator_task_view_for_http_with_request_id(
     state: &AppState,
     req: RemoteCreateOrchestratorTaskReq,
+    forwarded_request_id: Option<&str>,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
     let project = get_orchestrator_workbench_project(state, &req.project_id).await?;
     let client_request_id = req
@@ -2072,7 +2103,14 @@ pub(crate) async fn create_orchestrator_task_view_for_http(
         client_request_id: Some(client_request_id),
         ..req
     };
-    match create_remote_orchestrator_task_online(state, &project, remote_request.clone()).await {
+    match create_remote_orchestrator_task_online(
+        state,
+        &project,
+        remote_request.clone(),
+        forwarded_request_id,
+    )
+    .await
+    {
         Ok(view) => Ok(view),
         Err(err) if is_remote_network_error(&err) => {
             let item = create_pending_remote_task(state, &project, remote_request).await?;

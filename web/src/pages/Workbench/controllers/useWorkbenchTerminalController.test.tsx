@@ -748,6 +748,118 @@ describe('useWorkbenchTerminalController — create / rename / close session', (
 
     expect(fakeSessionsApi.close).not.toHaveBeenCalled();
   });
+
+  test('delayed close on project A does not invalidate or mutate project B sessions', async () => {
+    // Residual H1: close completes after user switches A→B; must only bump A's list seq
+    // and must not clear B's sessions/buffer/stats/error.
+    const projectA = buildLocalProject({ id: 'project-a', name: 'A' });
+    const projectB = buildLocalProject({ id: 'project-b', name: 'B' });
+    const worktreeA = buildWorktree({ id: 'wt-a', projectId: projectA.id });
+    const worktreeB = buildWorktree({ id: 'wt-b', projectId: projectB.id });
+    const sessionA = buildSession({
+      id: 'sa',
+      projectId: projectA.id,
+      worktreeId: worktreeA.id,
+    });
+    const sessionB = buildSession({
+      id: 'sb',
+      projectId: projectB.id,
+      worktreeId: worktreeB.id,
+    });
+
+    let resolveCloseA: (value: { ok: true; sessionId: string }) => void = () => undefined;
+    fakeSessionsApi.close.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCloseA = resolve;
+        }),
+    );
+
+    const removeBuffer = vi.fn();
+    const refreshStats = vi.fn();
+    const markFailure = vi.fn();
+
+    const { result, rerender } = renderController({
+      activeProjectId: projectA.id,
+      activeWorktreeId: worktreeA.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer,
+      refreshProjectSessionStats: refreshStats,
+      markRequestFailure: markFailure,
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: (id) => id === projectA.id,
+      canListenToTauriEvents: () => true,
+    });
+
+    fakeSessionsApi.list.mockResolvedValueOnce([sessionA]);
+    await act(async () => {
+      await result.current.loadSessions(projectA.id);
+      await flushMicrotasks();
+    });
+    expect(result.current.sessions.map((s) => s.id)).toEqual(['sa']);
+
+    // Start close on A (still pending).
+    let closePromise: Promise<void> | undefined;
+    await act(async () => {
+      closePromise = result.current.handleCloseSession('sa');
+      await flushMicrotasks();
+    });
+
+    // Switch to B and load B's sessions while A's close is in-flight.
+    rerender(
+      baseControllerProps({
+        activeProjectId: projectB.id,
+        activeWorktreeId: worktreeB.id,
+        remoteWriteDisabled: false,
+        terminalPanelRef: { current: null },
+        resetBuffer: vi.fn(),
+        removeBuffer,
+        refreshProjectSessionStats: refreshStats,
+        markRequestFailure: markFailure,
+        markRequestSuccess: vi.fn(),
+        isCurrentProject: (id) => id === projectB.id,
+        canListenToTauriEvents: () => true,
+      }),
+    );
+    fakeSessionsApi.list.mockResolvedValueOnce([sessionB]);
+    await act(async () => {
+      await result.current.loadSessions(projectB.id);
+      await flushMicrotasks();
+    });
+    expect(result.current.sessions.map((s) => s.id)).toEqual(['sb']);
+    const listCallsBeforeCloseResolve = fakeSessionsApi.list.mock.calls.length;
+    refreshStats.mockClear();
+    removeBuffer.mockClear();
+
+    // Resolve A's delayed close — must not wipe B or invalidate B's list seq.
+    await act(async () => {
+      resolveCloseA({ ok: true, sessionId: 'sa' });
+      await closePromise;
+      await flushMicrotasks();
+    });
+
+    expect(result.current.sessions.map((s) => s.id)).toEqual(['sb']);
+    expect(result.current.sessionError).toBeNull();
+    expect(removeBuffer).not.toHaveBeenCalled();
+    expect(refreshStats).not.toHaveBeenCalled();
+    expect(markFailure).not.toHaveBeenCalled();
+
+    // B's subsequent list must still be accepted (A must not have bumped B's request seq).
+    const sessionB2 = buildSession({
+      id: 'sb2',
+      projectId: projectB.id,
+      worktreeId: worktreeB.id,
+    });
+    fakeSessionsApi.list.mockResolvedValueOnce([sessionB, sessionB2]);
+    await act(async () => {
+      await result.current.loadSessions(projectB.id);
+      await flushMicrotasks();
+    });
+    expect(fakeSessionsApi.list.mock.calls.length).toBe(listCallsBeforeCloseResolve + 1);
+    expect(result.current.sessions.map((s) => s.id).sort()).toEqual(['sb', 'sb2']);
+  });
 });
 
 describe('useWorkbenchTerminalController — split / switch / zoom / close pane', () => {

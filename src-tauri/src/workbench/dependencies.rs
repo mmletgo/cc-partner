@@ -139,7 +139,8 @@ impl ProbeRuntimeGuard {
 ///     非 Unix 或需要按 pid 兜底 kill 时，不能只依赖 process group。
 ///
 /// Code Logic（这个函数做什么）:
-///     Unix 使用 libc::kill(SIGKILL)；Windows 使用 taskkill /F /PID；其它平台 no-op。
+///     Unix 使用 libc::kill(SIGKILL)；Windows 使用有界 spawn/try_wait/kill/reap 的 taskkill；
+///     其它平台 no-op。Windows 绝不能无界 `.status()`，否则 doctor hard deadline 后仍可挂死。
 fn kill_probe_pid(pid: u32) -> Result<(), std::io::Error> {
     #[cfg(unix)]
     {
@@ -155,19 +156,7 @@ fn kill_probe_pid(pid: u32) -> Result<(), std::io::Error> {
     }
     #[cfg(windows)]
     {
-        let status = StdCommand::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        match status {
-            Ok(code) if code.success() => Ok(()),
-            Ok(code) => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("taskkill exit {code}"),
-            )),
-            Err(err) => Err(err),
-        }
+        kill_probe_pid_windows(pid, PROBE_TERMINATE_GRACE)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -175,6 +164,92 @@ fn kill_probe_pid(pid: u32) -> Result<(), std::io::Error> {
         Ok(())
     }
 }
+
+/// Business Logic（为什么需要这个函数）:
+///     doctor 超时后 cancel_and_reap 仍必须在 grace 内返回；Windows taskkill 被安全软件挂起时
+///     不能用无界 `Command::status()` 突破 hard deadline。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn `taskkill /PID /T /F`，再委托有界 wait；超时 kill taskkill 自身。
+///     `cfg(test)` 可通过 hook 注入假挂起命令。
+#[cfg(windows)]
+fn kill_probe_pid_windows(pid: u32, grace: Duration) -> Result<(), std::io::Error> {
+    let mut child = spawn_windows_taskkill(pid)?;
+    match wait_child_bounded(&mut child, grace) {
+        Ok(code) if code.success() => Ok(()),
+        Ok(code) => Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("taskkill exit {code}"),
+        )),
+        Err(err) if err.kind() == std::io::ErrorKind::TimedOut => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("taskkill /PID {pid} 超过 grace {grace:?}"),
+        )),
+        Err(err) => Err(err),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     doctor hard deadline 之后的回收命令本身也必须有界；否则 Windows taskkill hang
+///     会把整次 doctor 卡死在“已超时”之后。
+///
+/// Code Logic（这个函数做什么）:
+///     在 `grace` 内轮询 `try_wait`；到期 kill 子进程并 best-effort try_wait，返回 TimedOut。
+///     生产路径仅 Windows taskkill 使用；单元测试在所有平台注入挂起 helper 校验有界性。
+#[cfg(any(windows, test))]
+fn wait_child_bounded(
+    child: &mut Child,
+    grace: Duration,
+) -> Result<std::process::ExitStatus, std::io::Error> {
+    let deadline = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.try_wait();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("子进程回收超过 grace {grace:?}"),
+                    ));
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(remaining.min(PROBE_POLL_INTERVAL));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Windows 回收命令需要可测试的 spawn 入口，才能注入“taskkill 挂起”故障而不依赖真实系统工具。
+///
+/// Code Logic（这个函数做什么）:
+///     默认 spawn `taskkill /PID <pid> /T /F` 并丢弃 stdout/stderr；测试 hook 可替换实现。
+#[cfg(windows)]
+fn spawn_windows_taskkill(pid: u32) -> Result<std::process::Child, std::io::Error> {
+    #[cfg(test)]
+    {
+        if let Some(hook) = TEST_WINDOWS_TASKKILL_SPAWN
+            .lock()
+            .expect("taskkill spawn hook 锁中毒")
+            .as_ref()
+        {
+            return hook(pid);
+        }
+    }
+    StdCommand::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+#[cfg(all(windows, test))]
+static TEST_WINDOWS_TASKKILL_SPAWN: std::sync::Mutex<
+    Option<Box<dyn Fn(u32) -> Result<std::process::Child, std::io::Error> + Send>>,
+> = std::sync::Mutex::new(None);
 
 /// Business Logic（为什么需要这个函数）:
 ///     Attention 与前端轮询需要稳定的依赖状态变更时间，不能在每次读取时漂移。
@@ -2057,6 +2132,31 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "超时路径耗时过长: {elapsed:?}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     doctor 超时后的回收命令本身也必须有界；挂起的 kill 辅助进程不得突破 hard deadline。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     spawn 长 sleep 模拟挂起的 taskkill/kill helper，用极短 grace 调用 wait_child_bounded，
+    ///     断言 TimedOut 且耗时远小于无界 wait。
+    #[test]
+    fn wait_child_bounded_times_out_and_kills_hanging_helper() {
+        let mut child = StdCommand::new("sleep")
+            .arg("10")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn hanging helper");
+        let started = Instant::now();
+        let err = wait_child_bounded(&mut child, Duration::from_millis(80))
+            .expect_err("挂起 helper 必须在 grace 内超时");
+        let elapsed = started.elapsed();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "有界回收耗时过长: {elapsed:?}"
         );
     }
 
