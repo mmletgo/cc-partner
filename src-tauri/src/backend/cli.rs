@@ -1023,11 +1023,8 @@ mod tests {
         assert!(err.contains("未知选项"));
         let err = super::parse_doctor_args(&["extra".to_string()]).expect_err("多余参数应失败");
         assert!(err.contains("多余参数"));
-        assert_eq!(super::parse_doctor_args(&[]).expect("无参应成功"), false);
-        assert_eq!(
-            super::parse_doctor_args(&["--json".to_string()]).expect("--json 应成功"),
-            true
-        );
+        assert!(!super::parse_doctor_args(&[]).expect("无参应成功"));
+        assert!(super::parse_doctor_args(&["--json".to_string()]).expect("--json 应成功"));
         let exit_code = super::dispatch_for_test(["cc-partner-backend", "doctor", "--bogus"]);
         assert_eq!(exit_code, 2);
         let exit_code = super::dispatch_for_test(["cc-partner-backend", "doctor", "extra"]);

@@ -731,6 +731,8 @@ pub fn read_control_file(path: &Path) -> Result<Option<ControlFileJson>, String>
 ///
 /// Code Logic（这个函数做什么）:
 ///     确保父目录存在，pretty JSON 写入 control，并同步写 pid 文件。
+///     共享 support 被多个 integration test crate 编译；未引用的 crate 会报 dead_code。
+#[allow(dead_code)]
 pub fn write_control_file(data_dir: &Path, control: &ControlFileJson) -> Result<(), String> {
     fs::create_dir_all(data_dir).map_err(|e| format!("创建 data_dir 失败: {e}"))?;
     let control_path = data_dir.join("backend-control.json");
@@ -749,6 +751,8 @@ pub fn write_control_file(data_dir: &Path, control: &ControlFileJson) -> Result<
 ///
 /// Code Logic（这个函数做什么）:
 ///     bind `127.0.0.1:0` 取系统分配端口后立即释放。
+///     共享 support 被多个 integration test crate 编译；未引用的 crate 会报 dead_code。
+#[allow(dead_code)]
 pub fn unused_local_port() -> Result<u16, String> {
     let listener =
         TcpListener::bind("127.0.0.1:0").map_err(|e| format!("绑定临时端口失败: {e}"))?;
@@ -765,6 +769,8 @@ pub fn unused_local_port() -> Result<u16, String> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     spawn 立即退出的子进程并 wait，返回其 pid。
+///     共享 support 被多个 integration test crate 编译；未引用的 crate 会报 dead_code。
+#[allow(dead_code)]
 pub fn dead_pid() -> Result<u32, String> {
     #[cfg(unix)]
     {

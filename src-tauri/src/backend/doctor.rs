@@ -257,7 +257,7 @@ pub fn compute_overall_status(
     }
 
     let optional_and_aux = [
-        &mdns,
+        mdns,
         &dependencies.git,
         &dependencies.tmux,
         &dependencies.wsl,
@@ -921,8 +921,9 @@ fn probe_database_readable(database_path: &Path) -> DoctorCheck {
         match File::open(database_path) {
             Ok(mut f) => {
                 let mut buf = [0u8; 1];
+                // 空库或至少可读 1 字节都算可读；只关心 open/read 是否成功。
                 match f.read(&mut buf) {
-                    Ok(_) => DoctorCheck::new(
+                    Ok(0) | Ok(1..) => DoctorCheck::new(
                         DoctorCheckStatus::Ok,
                         "paths.database.ok",
                         "database file is readable",
