@@ -13,6 +13,7 @@
 //!     - body limit 覆盖文件传输 chunk 和 Workbench 远端文本保存。
 
 use crate::backend::control::{self, BackendControlFile};
+use crate::net::request_context::request_id_middleware;
 use crate::net::routes::{
     cc_history, claude_code_assets, claude_md_sync, health, mobile, orchestrator, scratchpad_sync,
     ssh_target_sync, sync, transfer, workbench,
@@ -745,6 +746,11 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             serve_mobile_spa(fallback_state.clone(), req)
         }))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
+        // P2P/mobile API 请求 ID 边界：所有请求自动获得 X-CC-Request-Id（客户端带入或服务端生成 UUID），
+        // 注入 P2pRequestContext 供 handler 使用，并打开带 `request_id` 字段的 tracing span。
+        // 放在最外层，使其覆盖全部 /api 路由 + /mobile SPA fallback，便于把移动端静态资源请求
+        // 也纳入统一追踪（响应 header 同样回写，方便前端调试）。
+        .layer(axum::middleware::from_fn(request_id_middleware))
         .with_state(state.clone());
 
     let preferred_port = {
@@ -1163,5 +1169,85 @@ mod tests {
         .expect("remote save-text request should serialize");
 
         assert!(body.len() < BODY_LIMIT_BYTES);
+    }
+
+    /// 构造一个与生产 Router 同样的 middleware 栈（DefaultBodyLimit + request_id_middleware）的最小测试 Router。
+    ///
+    /// Business Logic（为什么需要这个辅助）:
+    ///     `start_http_server` 内联了 Router 构造并需要 AppState，无法直接拿来跑 oneshot。
+    ///     用一个简单 `ok` handler 替代真实 health/workbench handler，聚焦验证 middleware 栈在 router 层确实生效。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造路由 `/probe` + `/mobile` 占位 handler，依次套 `DefaultBodyLimit` 和 `request_id_middleware`，
+    ///     模拟 `start_http_server` 中 `.layer(DefaultBodyLimit).layer(from_fn(request_id_middleware))` 顺序。
+    fn middleware_test_router() -> Router {
+        async fn ok() -> (StatusCode, &'static str) {
+            (StatusCode::OK, "ok")
+        }
+        Router::new()
+            .route("/probe", get(ok))
+            .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
+            .layer(axum::middleware::from_fn(request_id_middleware))
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     request_id middleware 必须对真实 `/api/health` 等路由生效；测试通过模拟生产 middleware 栈
+    ///     （DefaultBodyLimit + request_id_middleware）确认 `/probe` 代表的 `/api/*` 路由会自动回写 header。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造与生产一致的 middleware 栈并 oneshot 一个 `/probe` 请求（未带 header），
+    ///     断言响应带 `X-CC-Request-Id`（新生成的 UUID，长度 36）。
+    #[tokio::test]
+    async fn health_like_route_returns_request_id_header() {
+        use tower::ServiceExt;
+        let router = middleware_test_router();
+        let request = Request::builder()
+            .uri("/probe")
+            .body(Body::empty())
+            .unwrap();
+        let response = router
+            .oneshot(request)
+            .await
+            .expect("router 不可失败");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let header = response
+            .headers()
+            .get("x-cc-request-id")
+            .expect("probe-like route should carry request id header");
+        let value = header.to_str().unwrap();
+        assert_eq!(value.len(), 36);
+        assert_eq!(value.matches('-').count(), 4);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     客户端带入的请求 ID 必须穿透整个 middleware 栈（不被 DefaultBodyLimit 或 handler 层覆盖），
+    ///     保证 A→B 的调用链 ID 与对端日志可对齐。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     发送带 `X-CC-Request-Id: trace-abc-001` 的 `/probe` 请求，断言响应 header 回写同一值。
+    #[tokio::test]
+    async fn health_like_route_echoes_client_request_id() {
+        use tower::ServiceExt;
+        let router = middleware_test_router();
+        let request = Request::builder()
+            .uri("/probe")
+            .header("x-cc-request-id", "trace-abc-001")
+            .body(Body::empty())
+            .unwrap();
+        let response = router
+            .oneshot(request)
+            .await
+            .expect("router 不可失败");
+
+        assert_eq!(
+            response
+                .headers()
+                .get("x-cc-request-id")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "trace-abc-001"
+        );
     }
 }
