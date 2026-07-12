@@ -213,8 +213,10 @@ impl RotatingLogWriter {
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     单条写入是轮转决策的原子单位：要么整条进 current，要么先轮转再写。
+    ///     若上次轮转恢复失败留下 `file=None`，后续写入必须有界 reopen，否则诊断永久失联。
     ///
     /// Code Logic（这个函数做什么）:
+    ///     file=None 时 best-effort reopen + metadata 恢复 current_len；
     ///     单条 > max → InvalidInput；将越界 → rotate；再 append 并更新 current_len。
     fn write_record_locked(&self, state: &mut WriterState, buf: &[u8]) -> io::Result<usize> {
         let record_len = buf.len() as u64;
@@ -226,6 +228,11 @@ impl RotatingLogWriter {
                     record_len, self.config.max_bytes
                 ),
             ));
+        }
+
+        // Business Logic: 轮转恢复失败后环境可能已恢复（权限/杀毒/句柄耗尽），每次写前再尝试 reopen。
+        if state.file.is_none() {
+            self.recover_current_file_locked(state);
         }
 
         if state.current_len.saturating_add(record_len) > self.config.max_bytes {
@@ -355,19 +362,22 @@ impl Write for RotatingLogWriter {
     /// 刷新当前文件缓冲。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     non_blocking drop / 显式 flush 时需要把诊断记录落盘。
+    ///     non_blocking drop / 显式 flush 时需要把诊断记录落盘；日志已 down 时不得假装成功。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     对已打开的 current 文件调用 `flush`。
+    ///     file=None 时先有界 reopen；仍不可用则返回错误；否则 flush 已打开句柄。
     fn flush(&mut self) -> io::Result<()> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| io::Error::other("日志 writer 锁中毒"))?;
-        if let Some(file) = state.file.as_mut() {
-            file.flush()?;
+        if state.file.is_none() {
+            self.recover_current_file_locked(&mut state);
         }
-        Ok(())
+        match state.file.as_mut() {
+            Some(file) => file.flush(),
+            None => Err(io::Error::other("日志文件句柄不可用，无法 flush")),
+        }
     }
 }
 
@@ -1610,6 +1620,50 @@ mod tests {
         assert!(
             writer.write_all(b"Z").is_ok(),
             "后续写入不得因 file=None 永久失败"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     轮转恢复连续失败留下 file=None 后，环境恢复时后续写入必须能 reopen，不能永久静默。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用目录占住 current 路径使 open 失败 → file=None；flush 不得假装成功；
+    ///     移除目录并重建文件后 write 应 reopen 成功。
+    #[cfg(unix)]
+    #[test]
+    fn write_reopens_after_recover_failed_when_environment_recovers() {
+        let (_dir, config) = test_config(64, 3);
+        let mut writer = RotatingLogWriter::open(config.clone()).expect("open");
+        {
+            let mut guard = writer.state.lock().expect("lock");
+            if let Some(file) = guard.file.take() {
+                drop(file);
+            }
+            guard.current_len = 0;
+        }
+        // 用目录占住 current 路径，使 open_current_file 失败（create 文件会 EISDIR）。
+        let current = config.current_path();
+        let _ = fs::remove_file(&current);
+        fs::create_dir_all(&current).expect("block current with directory");
+        {
+            let mut guard = writer.state.lock().expect("lock");
+            writer.recover_current_file_locked(&mut guard);
+            assert!(guard.file.is_none(), "open 失败时 recover 应保持 file=None");
+        }
+        let flush_err = writer.flush().expect_err("file=None 时 flush 不得假装成功");
+        assert_ne!(flush_err.kind(), io::ErrorKind::InvalidInput);
+
+        // 环境恢复：去掉目录阻挡，重建文件后 write 路径应 reopen 并成功。
+        fs::remove_dir_all(&current).expect("remove blocker");
+        fs::write(&current, b"").expect("recreate current file");
+        writer
+            .write_all(b"recovered")
+            .expect("环境恢复后 write 应 reopen 成功");
+        writer.flush().expect("reopen 后 flush 应成功");
+        let content = read_string(&config.current_path());
+        assert!(
+            content.contains("recovered"),
+            "恢复后 current 应包含后续写入: {content:?}"
         );
     }
 

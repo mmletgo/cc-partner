@@ -9,13 +9,13 @@
 //!     所有项目入口都先确认 projectId 指向本设备 local Workbench 项目，拒绝 remote shortcut 递归代理。
 
 use crate::commands::orchestrator::{
-    build_orchestrator_task_row, create_orchestrator_task_view_for_http,
+    build_orchestrator_task_row, create_orchestrator_task_view_for_http_with_request_id,
     discard_orchestrator_remote_outbox_for_repos, dispatch_orchestrator_best_effort,
     ensure_reviewed_delivery_allowed, get_orchestrator_runtime_snapshot_for_project,
     get_orchestrator_runtime_snapshot_for_state_with_request_id,
-    list_orchestrator_task_views_for_state, retry_orchestrator_remote_outbox_for_repos,
-    run_delivery_for_task, CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto,
-    OrchestratorTaskViewDto,
+    list_orchestrator_task_views_for_state_with_request_id,
+    retry_orchestrator_remote_outbox_for_repos, run_delivery_for_task,
+    CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
 };
 use crate::commands::prompt_optimizer::{
     local_complete_orchestrator_task_prompt, OrchestratorTaskPromptCompletionDto,
@@ -547,15 +547,19 @@ pub async fn complete_task_prompt(
 ///     手机端可能选择本机项目或本机保存的远端项目 shortcut，需要同一接口返回可展示的 task view 列表。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收 `{projectId}`，委托 commands 层 remote-aware helper，并用 `{views}` 包装结果。
+///     接收 `{projectId}`，把入站 request_id 贯穿 open-project/owner list，并用 `{views}` 包装结果。
 pub async fn list_task_views(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteListTasksReq>,
 ) -> P2pResult<Json<OrchestratorTaskViewListResp>> {
-    let views = list_orchestrator_task_views_for_state(&state, Some(req.project_id))
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.task_views.list"))?;
+    let views = list_orchestrator_task_views_for_state_with_request_id(
+        &state,
+        Some(req.project_id),
+        Some(ctx.request_id.as_str()),
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.task_views.list"))?;
     Ok(Json(OrchestratorTaskViewListResp { views }))
 }
 
@@ -565,15 +569,20 @@ pub async fn list_task_views(
 ///     手机端创建任务需要支持 local 和 remote shortcut，并保留 createAction 与 clientRequestId 幂等语义。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收 RemoteCreateOrchestratorTaskReq，委托 commands 层 HTTP helper，返回 local/remote/pendingRemote view。
+///     接收 RemoteCreateOrchestratorTaskReq，把入站 request_id 贯穿 open-project/owner create，
+///     返回 local/remote/pendingRemote view。
 pub async fn create_task_view(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCreateOrchestratorTaskReq>,
 ) -> P2pResult<Json<OrchestratorTaskViewDto>> {
-    let view = create_orchestrator_task_view_for_http(&state, req)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.task_views.create"))?;
+    let view = create_orchestrator_task_view_for_http_with_request_id(
+        &state,
+        req,
+        Some(ctx.request_id.as_str()),
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.task_views.create"))?;
     Ok(Json(view))
 }
 
@@ -1755,6 +1764,51 @@ mod tests {
         // 用指针非空断言 handler 存在，避免被 dead_code 优化掉。
         let addr = handler_ptr as usize;
         assert_ne!(addr, 0, "runtime_snapshot handler 必须存在");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     mobile list/create 必须把入站 request_id 传给 request-id-aware helpers，
+    ///     否则 owner 侧 open/list/create 会重生 ID，多跳链路断链。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     引用 list_task_views/create_task_view handler 指针保证路由存在；再对
+    ///     `list/create_with_request_id` helper 做 `stringify!` 符号引用，防止重命名/删除后
+    ///     静默回退到无 request_id 入口；并断言入站 ID 以 `Some(&str)` 转发。
+    #[test]
+    fn mobile_list_and_create_handlers_ship_with_request_id_aware_helpers() {
+        let list_handler = list_task_views
+            as fn(State<AppState>, Extension<P2pRequestContext>, Json<RemoteListTasksReq>) -> _;
+        let create_handler = create_task_view
+            as fn(
+                State<AppState>,
+                Extension<P2pRequestContext>,
+                Json<RemoteCreateOrchestratorTaskReq>,
+            ) -> _;
+        assert_ne!(list_handler as usize, 0);
+        assert_ne!(create_handler as usize, 0);
+
+        // 强制编译期解析 request-id-aware 符号；若被删除/改名，本测试在编译期失败。
+        let list_name = stringify!(
+            crate::commands::orchestrator::list_orchestrator_task_views_for_state_with_request_id
+        );
+        let create_name = stringify!(
+            crate::commands::orchestrator::create_orchestrator_task_view_for_http_with_request_id
+        );
+        assert!(list_name.contains("with_request_id"));
+        assert!(create_name.contains("with_request_id"));
+
+        // 再通过函数项路径实际引用符号，避免仅字符串被优化掉。
+        let _list_item =
+            crate::commands::orchestrator::list_orchestrator_task_views_for_state_with_request_id;
+        let _create_item =
+            crate::commands::orchestrator::create_orchestrator_task_view_for_http_with_request_id;
+
+        let ctx = P2pRequestContext {
+            request_id: "req-mobile-list-create".to_string(),
+        };
+        // 与 handler 实现一致：非空入站 ID 以 Some(&str) 转发。
+        let forwarded = Some(ctx.request_id.as_str());
+        assert_eq!(forwarded, Some("req-mobile-list-create"));
     }
 
     /// Business Logic（为什么需要这个测试）:

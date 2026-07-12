@@ -642,18 +642,24 @@ export function useWorkbenchTerminalController(
    *
    * Code Logic（这个函数做什么）:
    *   1. remoteWriteDisabled 时静默拒绝；
-   *   2. 调用 sessions.close，从 state 移除 session，updateActiveSession 重算焦点；
-   *   3. 同步 knownSessionIdsRef，removeTerminalBuffer 清理 buffer，refreshProjectSessionStats。
+   *   2. 在 await 前捕获 sourceProjectId（发起关闭时的 active 项目）；
+   *   3. 调用 sessions.close；成功后只作废 source 项目的 list seq；
+   *   4. 若用户已切到其它项目，不改当前 sessions/buffer/stats/error（避免 A 关闭污染 B）；
+   *   5. 仍在 source 项目时：从 state 移除 session、updateActiveSession、清 buffer、refresh stats。
    */
   const handleCloseSession = useCallback(
     async (sessionId: string): Promise<void> => {
       if (remoteWriteDisabled) return;
+      // Business Logic: 关闭请求可能慢于用户切项目；必须绑定发起时的 project，不能读返回后的 active。
+      const sourceProjectId = activeProjectIdRef.current;
       try {
         await workbenchApi.sessions.close(sessionId);
-        const projectIdForInvalidate = activeProjectIdRef.current;
-        if (projectIdForInvalidate) {
-          // Business Logic: close 成功后作废旧 list，防止慢速 list 把已关闭 session 复活。
-          invalidateSessionListRequests(projectIdForInvalidate);
+        if (sourceProjectId) {
+          // Business Logic: 只作废源项目 list，禁止递增新项目 seq 导致 B 的有效 list 被当 stale 丢弃。
+          invalidateSessionListRequests(sourceProjectId);
+        }
+        if (activeProjectIdRef.current !== sourceProjectId) {
+          return;
         }
         setSessions((current) => {
           const next = current.filter((session) => session.id !== sessionId);
@@ -662,11 +668,12 @@ export function useWorkbenchTerminalController(
         });
         knownSessionIdsRef.current.delete(sessionId);
         removeTerminalBuffer(sessionId);
-        const projectId = activeProjectIdRef.current;
-        if (projectId) void refreshProjectSessionStats(projectId);
+        if (sourceProjectId) void refreshProjectSessionStats(sourceProjectId);
       } catch (error) {
-        const projectId = activeProjectIdRef.current;
-        if (projectId) markRequestFailure(projectId, error);
+        if (activeProjectIdRef.current !== sourceProjectId) {
+          return;
+        }
+        if (sourceProjectId) markRequestFailure(sourceProjectId, error);
         setSessionError(displayErrorMessage(error, t('closeSession')));
       }
     },
