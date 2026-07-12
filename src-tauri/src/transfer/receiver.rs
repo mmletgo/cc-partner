@@ -381,6 +381,31 @@ pub async fn handle_chunk(
         });
     }
 
+    // 落盘已成功但 history 未 durable：禁止再写文件，只重试晋升；失败不得 success=true。
+    if task.status == TransferStatus::Completed {
+        if let Err(e) = finalize_transfer(state, transfer_id).await {
+            tracing::error!("chunk 路径 durable 晋升失败: {transfer_id}, {e}");
+            return Ok(ChunkResp {
+                success: false,
+                received_bytes: task.size,
+            });
+        }
+        if let Some(tomb) = state.transfers.tombstone(transfer_id) {
+            let success = matches!(
+                tomb.outcome,
+                crate::transfer::registry::TransferOutcome::Completed { .. }
+            );
+            return Ok(ChunkResp {
+                success,
+                received_bytes: tomb.received_bytes,
+            });
+        }
+        return Ok(ChunkResp {
+            success: false,
+            received_bytes: task.size,
+        });
+    }
+
     state
         .transfers
         .set_status(transfer_id, TransferStatus::Transferring);
@@ -410,6 +435,33 @@ pub async fn handle_chunk(
     if new_transferred >= task.size {
         if let Err(e) = finalize_transfer(state, transfer_id).await {
             tracing::error!("finalize 失败: {transfer_id}, {e}");
+            // durable 未就绪：active 可能已是 Completed（文件在、history 无），
+            // 或已 failed 墓碑。禁止 success=true 误导发送端。
+            if let Some(tomb) = state.transfers.tombstone(transfer_id) {
+                let success = matches!(
+                    tomb.outcome,
+                    crate::transfer::registry::TransferOutcome::Completed { .. }
+                );
+                return Ok(ChunkResp {
+                    success,
+                    received_bytes: tomb.received_bytes,
+                });
+            }
+            let received = state
+                .transfers
+                .get(transfer_id)
+                .map(|t| {
+                    if t.status == TransferStatus::Completed {
+                        t.size
+                    } else {
+                        t.transferred_bytes
+                    }
+                })
+                .unwrap_or(new_transferred);
+            return Ok(ChunkResp {
+                success: false,
+                received_bytes: received,
+            });
         }
     }
 
@@ -423,6 +475,17 @@ pub async fn handle_chunk(
             return Ok(ChunkResp {
                 success,
                 received_bytes: tomb.received_bytes,
+            });
+        }
+    }
+
+    // 收齐后若仍停留在 Completed active（异常：finalize Ok 却无墓碑），不得假报 success。
+    if let Some(t) = state.transfers.get(transfer_id) {
+        if t.status == TransferStatus::Completed && state.transfers.tombstone(transfer_id).is_none()
+        {
+            return Ok(ChunkResp {
+                success: false,
+                received_bytes: t.size,
             });
         }
     }
@@ -484,6 +547,31 @@ pub async fn handle_complete(state: &AppState, transfer_id: &str) -> Result<Chun
         return Ok(ChunkResp {
             success: false,
             received_bytes: 0,
+        });
+    }
+
+    // 已落盘待 durable：file_path 已是最终路径，禁止按 tmp 再写；只重试 history 晋升。
+    if task.status == TransferStatus::Completed {
+        if let Err(e) = finalize_transfer(state, transfer_id).await {
+            tracing::error!("complete durable 晋升失败: {transfer_id}, {e}");
+            return Ok(ChunkResp {
+                success: false,
+                received_bytes: task.size,
+            });
+        }
+        if let Some(tomb) = state.transfers.tombstone(transfer_id) {
+            let success = matches!(
+                tomb.outcome,
+                crate::transfer::registry::TransferOutcome::Completed { .. }
+            );
+            return Ok(ChunkResp {
+                success,
+                received_bytes: tomb.received_bytes,
+            });
+        }
+        return Ok(ChunkResp {
+            success: false,
+            received_bytes: task.size,
         });
     }
 
@@ -557,12 +645,15 @@ pub async fn handle_complete(state: &AppState, transfer_id: &str) -> Result<Chun
 /// Business Logic: 文件全部接收后需校验完整性，确保无误后落地为最终文件名。
 ///     并发同名不同 transfer_id 不得互相覆盖：resolve_filename 到 place 必须在 receive_dir 锁内，
 ///     并用 exclusive create + 失败重试后缀，禁止静默 replace。
+///     落盘成功与 transfer_history 持久化之间不得出现“已 completed 但无 durable 终态”窗口：
+///     否则崩溃/DB 失败会导致重启后 complete=false、status=unknown、发送端假失败并后缀重试。
 /// Code Logic:
 ///     1. 仅处理 direction=Receive 的任务；
-///     2. 计算 .tmp 的 SHA256，与任务记录的 sha256 比较；
-///     3. 校验失败：标记 failed + 删除 .tmp + emit failed；
-///     4. 校验通过：持 receive_dir 锁，循环 resolve 候选名并 atomic no-replace 落盘；
-///        标记 completed + 写历史 + emit completed。
+///     2. 若 active 已是 Completed（落盘成功但 history 未写入），只重试 durable 晋升；
+///     3. 计算 .tmp 的 SHA256，与任务记录的 sha256 比较；
+///     4. 校验失败：标记 failed + 删除 .tmp + emit failed；
+///     5. 校验通过：持 receive_dir 锁，循环 resolve 候选名并 atomic no-replace 落盘；
+///     6. 先 mark_completed 保留 active（可恢复），再 durable record；成功后才 remove + 墓碑 + emit。
 pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<(), AppError> {
     let task = match state.transfers.get(transfer_id) {
         Some(t) => t,
@@ -576,6 +667,11 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
             task.direction
         );
         return Ok(());
+    }
+
+    // 落盘已成功但 history 未 durable：只重试晋升，禁止二次 place 或假报 completed。
+    if task.status == TransferStatus::Completed {
+        return promote_completed_to_durable(state, transfer_id, &task).await;
     }
 
     let tmp_path = PathBuf::from(&task.file_path);
@@ -622,33 +718,79 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
             return Ok(());
         }
     };
-    let final_filename = placed.final_filename;
-    let final_path = placed.final_path;
+    let PlacedFile {
+        final_filename,
+        final_path,
+    } = placed;
+    tracing::debug!(
+        "receive exclusive place ok: {transfer_id} -> {final_filename} ({})",
+        final_path.display()
+    );
 
-    // 标记 completed + 写历史
+    // 先把 active 标为 Completed 并写入最终路径，但**不** remove / 不写墓碑 / 不 emit completed。
+    // history 成功前对发送端仍表现为 transferring，complete/chunk 可重试 durable 晋升。
     let completed_at = now_iso();
     state.transfers.mark_completed(
         transfer_id,
-        completed_at.clone(),
+        completed_at,
         Some(final_path.to_string_lossy().to_string()),
     );
-    if let Some(t) = state.transfers.get(transfer_id) {
-        let _ = state.transfer_repo.record(&t).await;
-    }
-    state.transfers.remove(transfer_id);
+    let completed_task = state.transfers.get(transfer_id).ok_or_else(|| {
+        AppError::generic(format!(
+            "落盘后丢失 active 任务，无法写入 transfer_history: {transfer_id}"
+        ))
+    })?;
+    promote_completed_to_durable(state, transfer_id, &completed_task).await
+}
 
-    // Finding 4: 写入成功墓碑，重放的最后一块与 status 查询可还原成功结果。
+/// Business Logic（为什么需要这个函数）:
+///     最终文件已落地后，只有 transfer_history 成功才可向发送端/UI 宣告 completed。
+///     record 失败或崩溃窗口内必须保留可恢复 active，禁止“文件在、终态丢”。
+///
+/// Code Logic（这个函数做什么）:
+///     要求 active 已是 Receive+Completed；`transfer_repo.record` 成功后才 remove、
+///     写成功墓碑并 emit `transfer:completed`；record 失败保留 active 并返回 Err。
+async fn promote_completed_to_durable(
+    state: &AppState,
+    transfer_id: &str,
+    task: &TransferTask,
+) -> Result<(), AppError> {
+    if task.direction != TransferDirection::Receive {
+        return Err(AppError::validation(format!(
+            "仅 Receive 任务可晋升 durable 终态: {transfer_id}"
+        )));
+    }
+    if task.status != TransferStatus::Completed {
+        return Err(AppError::generic(format!(
+            "任务尚未 Completed，不能晋升 durable: {transfer_id}"
+        )));
+    }
+
+    state.transfer_repo.record(task).await.map_err(|e| {
+        tracing::error!("transfer_history 写入失败，保留 active 等待重试: {transfer_id}, {e}");
+        e
+    })?;
+
+    let final_path = task.file_path.clone();
+    let final_filename = Path::new(&final_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(task.filename.as_str())
+        .to_string();
+    let completed_at = task.completed_at.clone().unwrap_or_else(now_iso);
+
+    state.transfers.remove(transfer_id);
     state.transfers.record_tombstone(
         transfer_id,
         crate::transfer::registry::TransferTombstone {
             outcome: crate::transfer::registry::TransferOutcome::Completed {
-                final_filename: final_filename.clone(),
-                file_path: final_path.to_string_lossy().to_string(),
+                final_filename,
+                file_path: final_path.clone(),
             },
             received_bytes: task.size,
             size: task.size,
             filename: task.filename.clone(),
-            completed_at: completed_at.clone(),
+            completed_at,
             created_at: std::time::Instant::now(),
         },
     );
@@ -658,11 +800,11 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
         serde_json::json!({
             "id": transfer_id,
             "status": "completed",
-            "filePath": final_path.to_string_lossy().to_string(),
+            "filePath": final_path,
         }),
     );
 
-    tracing::info!("文件接收完成: {transfer_id} -> {}", final_path.display());
+    tracing::info!("文件接收完成: {transfer_id} -> {final_path}");
     Ok(())
 }
 
@@ -855,20 +997,47 @@ fn rename_no_replace_blocking(tmp_path: &Path, final_path: &Path) -> std::io::Re
 
     #[cfg(windows)]
     {
-        // Windows `std::fs::rename` 底层 MoveFileEx **不带** MOVEFILE_REPLACE_EXISTING：
-        // 目标存在时失败（原子 no-replace），与 Linux/macOS 排他 rename 语义一致。
-        match std::fs::rename(tmp_path, final_path) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                // ERROR_ALREADY_EXISTS (183) / ERROR_FILE_EXISTS (80) → AlreadyExists
-                if err.raw_os_error() == Some(183) || err.raw_os_error() == Some(80) {
-                    Err(std::io::Error::new(ErrorKind::AlreadyExists, err))
-                } else if err.kind() == ErrorKind::AlreadyExists {
-                    Err(err)
-                } else {
-                    Err(err)
-                }
+        // 关键：Rust std 的 `fs::rename` 在 Windows 调用 MoveFileExW **带**
+        // MOVEFILE_REPLACE_EXISTING，会覆盖竞争者。必须直接调原生 API 且 flags=0。
+        use std::os::windows::ffi::OsStrExt;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn MoveFileExW(
+                lp_existing_file_name: *const u16,
+                lp_new_file_name: *const u16,
+                dw_flags: u32,
+            ) -> i32;
+        }
+
+        /// Business Logic: 把 OsStr 编成 Windows 宽字符串（NUL 结尾），供 MoveFileExW 使用。
+        /// Code Logic: encode_wide 追加 0；路径含内部 NUL 时返回 InvalidInput。
+        fn to_wide(path: &Path) -> std::io::Result<Vec<u16>> {
+            let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+            if wide.iter().any(|&u| u == 0) {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "路径含内部 NUL",
+                ));
             }
+            wide.push(0);
+            Ok(wide)
+        }
+
+        let from = to_wide(tmp_path)?;
+        let to = to_wide(final_path)?;
+        // flags=0：不带 MOVEFILE_REPLACE_EXISTING(0x1)；目标存在则失败，绝不覆盖。
+        // SAFETY: 宽字符串以 NUL 结尾；flags 明确为 0。
+        let ok = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) };
+        if ok != 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        // ERROR_ALREADY_EXISTS=183 / ERROR_FILE_EXISTS=80 → AlreadyExists（调用方换后缀）。
+        match err.raw_os_error() {
+            Some(183) | Some(80) => Err(std::io::Error::new(ErrorKind::AlreadyExists, err)),
+            _ if err.kind() == ErrorKind::AlreadyExists => Err(err),
+            _ => Err(err),
         }
     }
 
@@ -938,11 +1107,19 @@ async fn on_receive_failed(state: &AppState, transfer_id: &str, error: &str) {
 /// Code Logic: 先查 registry → 墓碑 → transfer_history Receive 终态；仍 miss 返回 unknown。
 pub async fn handle_status(state: &AppState, transfer_id: &str) -> StatusResp {
     if let Some(t) = state.transfers.get(transfer_id) {
+        // active 上的 Completed 表示“文件已落盘、history 尚未 durable”，
+        // 对发送端仍应表现为 transferring，避免 status 收敛成假成功后不再重试 record。
+        let (status, transferred_bytes) =
+            if t.direction == TransferDirection::Receive && t.status == TransferStatus::Completed {
+                ("transferring".to_string(), t.size)
+            } else {
+                (status_str(t.status), t.transferred_bytes)
+            };
         return StatusResp {
             transfer_id: transfer_id.to_string(),
-            status: status_str(t.status),
+            status,
             progress: t.progress(),
-            transferred_bytes: t.transferred_bytes,
+            transferred_bytes,
             size: t.size,
             filename: t.filename,
         };
@@ -2071,5 +2248,180 @@ mod tests {
         assert!(state.transfers.list().is_empty());
 
         let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     最终文件落盘后若 transfer_history 写入失败，不得向发送端报告 completed，
+    ///     也不得 remove active/写成功墓碑；必须保留可恢复状态以便重试 record。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     init 后 DROP transfer_history 注入 record 失败 → complete 返回 success=false；
+    ///     最终文件已落地、active 仍在、无成功墓碑、status≠completed；
+    ///     重建表后重试 complete 应 durable 成功。
+    #[tokio::test]
+    async fn history_record_failure_keeps_recoverable_state_without_claiming_completed() {
+        use sha2::{Digest, Sha256};
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let empty_sha = format!("{:x}", Sha256::digest(b""));
+        let transfer_id = "history-record-fail".to_string();
+
+        handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "durable.txt".to_string(),
+                size: 0,
+                sha256: empty_sha,
+                chunk_size: 1,
+            },
+        )
+        .await
+        .expect("init");
+
+        // 注入 record 失败：落盘后 INSERT 无表。
+        sqlx::query("DROP TABLE transfer_history")
+            .execute(&state.db)
+            .await
+            .expect("drop history table");
+
+        let first = handle_complete(&state, &transfer_id)
+            .await
+            .expect("complete should not transport-error");
+        assert!(
+            !first.success,
+            "history 失败时 complete 不得 success=true: {first:?}"
+        );
+        assert!(receive_dir.join("durable.txt").exists(), "最终文件应已落盘");
+        let active = state
+            .transfers
+            .get(&transfer_id)
+            .expect("history 失败必须保留 active");
+        assert_eq!(active.status, TransferStatus::Completed);
+        assert!(
+            state.transfers.tombstone(&transfer_id).is_none(),
+            "未 durable 前不得写成功墓碑"
+        );
+        let status = handle_status(&state, &transfer_id).await;
+        assert_ne!(
+            status.status, "completed",
+            "未 durable 时 status 不得宣称 completed: {status:?}"
+        );
+        assert!(
+            status.status == "transferring" || status.status == "pending",
+            "应表现为可重试中: {status:?}"
+        );
+        assert!(
+            state
+                .transfer_repo
+                .get_by_id(&transfer_id)
+                .await
+                .ok()
+                .flatten()
+                .is_none(),
+            "history 表已丢，不得存在 durable 行"
+        );
+
+        // 恢复 schema 后重试 complete → 应晋升 durable 并宣告完成。
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS transfer_history (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                peer_device_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                transferred_bytes INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            )",
+        )
+        .execute(&state.db)
+        .await
+        .expect("recreate history");
+
+        let retry = handle_complete(&state, &transfer_id)
+            .await
+            .expect("retry complete");
+        assert!(retry.success, "history 恢复后应 durable 成功");
+        assert!(state.transfers.get(&transfer_id).is_none());
+        assert!(matches!(
+            state.transfers.tombstone(&transfer_id).map(|t| t.outcome),
+            Some(crate::transfer::registry::TransferOutcome::Completed { .. })
+        ));
+        let hist = state
+            .transfer_repo
+            .get_by_id(&transfer_id)
+            .await
+            .expect("repo ok")
+            .expect("history row");
+        assert_eq!(hist.status, TransferStatus::Completed);
+        let status_after = handle_status(&state, &transfer_id).await;
+        assert_eq!(status_after.status, "completed");
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Windows 回退路径必须调用 MoveFileExW 且 flags=0；不得使用会带
+    ///     MOVEFILE_REPLACE_EXISTING 的 `std::fs::rename`，否则 hard_link 失败时覆盖竞争者。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     源码契约：Windows cfg 块含 MoveFileExW(..., 0)，且不含 std::fs::rename。
+    #[test]
+    fn windows_rename_no_replace_source_contract_omits_replace_existing() {
+        let src = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/transfer/receiver.rs"
+        ));
+        let after_windows = src
+            .split("#[cfg(windows)]")
+            .nth(1)
+            .expect("应存在 #[cfg(windows)] 分支");
+        let windows_block = after_windows
+            .split("#[cfg(not(any(target_os = \"linux\"")
+            .next()
+            .expect("windows 分支应在 other-os cfg 前结束");
+        assert!(
+            windows_block.contains("MoveFileExW"),
+            "Windows 必须直接调用 MoveFileExW"
+        );
+        assert!(
+            windows_block.contains("MoveFileExW(from.as_ptr(), to.as_ptr(), 0)"),
+            "MoveFileExW flags 必须为 0（无 MOVEFILE_REPLACE_EXISTING）"
+        );
+        assert!(
+            !windows_block.contains("std::fs::rename"),
+            "禁止 Windows 回退使用 std::fs::rename（std 会 REPLACE_EXISTING）"
+        );
+        assert!(
+            !windows_block.contains("MOVEFILE_REPLACE_EXISTING)"),
+            "不得在 flags 中传入 MOVEFILE_REPLACE_EXISTING"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     hard_link 不可用时 rename_no_replace 仍须 no-replace；在可 hard_link 的宿主上
+    ///     直接测 rename_no_replace_blocking，确保目标存在 → AlreadyExists 且不覆盖。
+    #[test]
+    fn rename_no_replace_blocking_preserves_existing_target() {
+        let dir = unique_temp_dir();
+        let final_path = dir.join("existing.dat");
+        let existing = b"competitor-bytes";
+        fs::write(&final_path, existing).unwrap();
+        let tmp = dir.join("incoming.tmp");
+        fs::write(&tmp, b"incoming-bytes").unwrap();
+
+        let err = rename_no_replace_blocking(&tmp, &final_path)
+            .expect_err("existing target must fail no-replace");
+        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&final_path).unwrap(), existing);
+        assert!(tmp.exists(), "失败不得删除/移动 tmp 源");
+        assert_eq!(fs::read(&tmp).unwrap(), b"incoming-bytes");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
