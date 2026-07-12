@@ -117,9 +117,11 @@ pub struct BackendStatus {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     GUI、CLI 与独立后端必须在同一用户配置目录下定位同一份控制文件，避免多处硬编码路径。
+///     CLI/smoke 通过 `CC_PARTNER_DATA_DIR` 隔离时，控制文件也必须落在同一数据根。
 ///
 /// Code Logic（这个函数做什么）:
-///     基于 `config_dir()` 派生 `backend-control.json` 的绝对路径。
+///     基于 `config_dir()`（内部委托 `data_dir()`，支持 `CC_PARTNER_DATA_DIR` override）
+///     派生 `backend-control.json` 的绝对路径。
 pub fn control_file_path() -> PathBuf {
     config_dir().join(CONTROL_FILE_NAME)
 }
@@ -130,7 +132,7 @@ pub fn control_file_path() -> PathBuf {
 ///     stop/status 等命令需要一个轻量 pid 文件与控制 JSON 并存，兼容只需读取进程号的后续逻辑。
 ///
 /// Code Logic（这个函数做什么）:
-///     基于 `config_dir()` 派生 `backend.pid` 的绝对路径。
+///     基于 `config_dir()`（内部委托 `data_dir()`）派生 `backend.pid` 的绝对路径。
 pub fn pid_file_path() -> PathBuf {
     config_dir().join(PID_FILE_NAME)
 }
