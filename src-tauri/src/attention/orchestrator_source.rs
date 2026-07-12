@@ -85,7 +85,8 @@ pub async fn collect_orchestrator_attention_items(
             if remote_ids.contains(row.project_id.as_str()) {
                 continue;
             }
-            if let Some(item) = project_local_task_row(&row, project_ref_for_local_task(&row, &projects))
+            if let Some(item) =
+                project_local_task_row(&row, project_ref_for_local_task(&row, &projects))
             {
                 items.push(item);
             }
@@ -219,11 +220,8 @@ pub(crate) fn project_local_task_row(
     task: &OrchestratorTaskRow,
     project: Option<AttentionProjectRef>,
 ) -> Option<AttentionItemDto> {
-    let (category, source_kind, id_prefix) = attention_kind_for_task(
-        task.status,
-        task.workflow_state,
-        task.run_state,
-    )?;
+    let (category, source_kind, id_prefix) =
+        attention_kind_for_task(task.status, task.workflow_state, task.run_state)?;
     let task_id = task.id.clone();
     Some(AttentionItemDto {
         id: format!("{id_prefix}:{task_id}"),
@@ -256,9 +254,8 @@ pub(crate) fn project_remote_mirrors(
 ) -> Result<Vec<AttentionItemDto>, AppError> {
     let mut items = Vec::new();
     for mirror in mirrors {
-        let task = serde_json::from_str::<OrchestratorTaskDto>(&mirror.payload_json).map_err(
-            |err| AppError::generic(format!("远端任务镜像解析失败: {err}")),
-        )?;
+        let task = serde_json::from_str::<OrchestratorTaskDto>(&mirror.payload_json)
+            .map_err(|err| AppError::generic(format!("远端任务镜像解析失败: {err}")))?;
         if let Some(item) =
             project_remote_task_dto(&task, remote_shortcut, freshness, cached_at.clone())
         {
@@ -279,11 +276,8 @@ pub(crate) fn project_remote_task_dto(
     freshness: AttentionFreshness,
     cached_at: Option<String>,
 ) -> Option<AttentionItemDto> {
-    let (category, source_kind, id_prefix) = attention_kind_for_task(
-        task.status,
-        task.workflow_state,
-        task.run_state,
-    )?;
+    let (category, source_kind, id_prefix) =
+        attention_kind_for_task(task.status, task.workflow_state, task.run_state)?;
     let wrapped_task_id = remote_entity_id(&remote_shortcut.device_id, &task.id);
     let item_cached_at = match freshness {
         AttentionFreshness::Live => None,
@@ -327,8 +321,7 @@ pub(crate) fn project_failed_outbox_row(
         return None;
     }
     // orphan 防御：device/path 必须与 shortcut 对齐。
-    if row.device_id != remote_shortcut.device_id
-        || row.remote_project_path != remote_shortcut.path
+    if row.device_id != remote_shortcut.device_id || row.remote_project_path != remote_shortcut.path
     {
         return None;
     }
@@ -381,7 +374,7 @@ where
 {
     let limit = concurrency.max(1);
     stream::iter(projects)
-        .map(|project_id| refresh_one(project_id))
+        .map(refresh_one)
         .buffer_unordered(limit)
         .collect()
         .await
@@ -439,12 +432,11 @@ fn effective_split_state(
 ///
 /// Code Logic（这个函数做什么）:
 ///     blocked_reason 非空则用它；否则用 goal；再空则给分类默认文案。
-fn task_summary(
-    blocked_reason: Option<&str>,
-    goal: &str,
-    category: AttentionCategory,
-) -> String {
-    if let Some(reason) = blocked_reason.map(str::trim).filter(|text| !text.is_empty()) {
+fn task_summary(blocked_reason: Option<&str>, goal: &str, category: AttentionCategory) -> String {
+    if let Some(reason) = blocked_reason
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
         return reason.to_string();
     }
     let goal = goal.trim();
@@ -552,7 +544,9 @@ mod tests {
             device_name: "Mac Mini".to_string(),
             remote_project_path: path.to_string(),
             remote_project_id: Some("remote-local-proj".to_string()),
-            request_json: r#"{"projectId":"x","title":"t","goal":"g","acceptanceCriteria":"a","priority":0}"#.to_string(),
+            request_json:
+                r#"{"projectId":"x","title":"t","goal":"g","acceptanceCriteria":"a","priority":0}"#
+                    .to_string(),
             status,
             remote_task_id: None,
             last_error: last_error.map(str::to_string),

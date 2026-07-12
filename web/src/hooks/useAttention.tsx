@@ -15,6 +15,7 @@ import type { ReactNode } from 'react';
 
 import type { AttentionSnapshot } from '@/lib/types';
 import { AttentionContext, type AttentionContextValue } from './attentionContext';
+import { subscribeAttentionInvalidation } from './attentionInvalidation';
 import {
   attentionReducer,
   createInitialAttentionState,
@@ -122,7 +123,6 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
   }, [runLoad]);
 
   // 首次挂载加载；卸载时使 in-flight 请求失效。
-  /* eslint-disable react-hooks/set-state-in-effect -- Provider 挂载必须主动拉取首份 Inbox 快照 */
   useEffect(() => {
     queueMicrotask(() => {
       void runLoad();
@@ -131,7 +131,13 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
       requestIdRef.current = nextAttentionRequestId(requestIdRef.current);
     };
   }, [runLoad]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // 业务动作成功后的立即失效桥：Deliver/Rework/Retry/Discard/依赖 recheck 等。
+  useEffect(() => {
+    return subscribeAttentionInvalidation(() => {
+      void runLoad();
+    });
+  }, [runLoad]);
 
   // focus / visibility / 可见轮询。
   useEffect(() => {

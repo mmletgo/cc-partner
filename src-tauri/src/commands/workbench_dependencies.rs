@@ -22,9 +22,7 @@ use tauri::State;
 ///
 /// Code Logic（这个函数做什么）:
 ///     直接返回 `AppState.workbench_dependency` 的当前 DTO 快照（含 status_changed_at）。
-pub fn get_workbench_dependency_status_for_state(
-    state: &AppState,
-) -> WorkbenchDependencyStatusDto {
+pub fn get_workbench_dependency_status_for_state(state: &AppState) -> WorkbenchDependencyStatusDto {
     state.workbench_dependency.status()
 }
 

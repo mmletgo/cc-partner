@@ -158,11 +158,7 @@ mod tests {
     #[test]
     fn missing_failed_unsupported_project_to_stable_environment_item() {
         let cases = [
-            (
-                WorkbenchDependencyState::Missing,
-                None,
-                "tmux 依赖缺失",
-            ),
+            (WorkbenchDependencyState::Missing, None, "tmux 依赖缺失"),
             (
                 WorkbenchDependencyState::Failed,
                 Some("exit 1"),

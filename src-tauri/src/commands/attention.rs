@@ -28,8 +28,7 @@ pub async fn list_attention_items_for_state(
 ) -> Result<AttentionSnapshotDto, AppError> {
     let orchestrator = OrchestratorAttentionSource;
     let dependency = WorkbenchDependencyAttentionSource;
-    let sources: [&dyn crate::attention::source::AttentionSource; 2] =
-        [&orchestrator, &dependency];
+    let sources: [&dyn crate::attention::source::AttentionSource; 2] = [&orchestrator, &dependency];
     aggregate_attention_sources(state, &sources).await
 }
 

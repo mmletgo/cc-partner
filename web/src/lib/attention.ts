@@ -115,7 +115,7 @@ export function groupAttentionItems(items: AttentionItem[]): AttentionGroup[] {
 export type AttentionActionI18nKey =
   | 'attention:action.review'
   | 'attention:action.viewBlocked'
-  | 'attention:action.viewFailedOutbox'
+  | 'attention:action.viewFailed'
   | 'attention:action.openSettings';
 
 export function getAttentionActionI18nKey(sourceKind: AttentionSourceKind): AttentionActionI18nKey {
@@ -125,7 +125,7 @@ export function getAttentionActionI18nKey(sourceKind: AttentionSourceKind): Atte
     case 'orchestratorBlocked':
       return 'attention:action.viewBlocked';
     case 'remoteOutboxFailed':
-      return 'attention:action.viewFailedOutbox';
+      return 'attention:action.viewFailed';
     case 'workbenchDependency':
       return 'attention:action.openSettings';
     default: {
