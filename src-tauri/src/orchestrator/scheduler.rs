@@ -558,16 +558,18 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     split state 后，scheduler 应只领取 Todo/Idle 与 Rework/Blocked 这类 active workflow 任务，Backlog 不应自动启动。
+    ///     split state 后，scheduler 只领取 active workflow 上的 **Idle** 任务（Todo/Rework）；
+    ///     Backlog 不自动启动，Blocked 必须经用户 retry 回到 Idle 后才能再 claim。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造 Backlog idle、Todo idle 和 Rework blocked 三个本机任务，断言只领取 Todo/Rework 并写入 Preparing split state。
+    ///     构造 Backlog idle、Todo idle、Rework idle 与 Rework blocked 四个本机任务，
+    ///     断言只领取 Todo/Rework 的 Idle 项，Blocked 保持阻塞。
     #[tokio::test]
     async fn scheduler_claims_todo_and_rework_only() {
         let (pool, repo) = setup_repo().await;
         create_workbench_projects_table(&pool).await;
         insert_workbench_project(&pool, "local-a", "local").await;
-        for id in ["backlog-idle", "todo-idle", "rework-blocked"] {
+        for id in ["backlog-idle", "todo-idle", "rework-idle", "rework-blocked"] {
             repo.create_task(&task_row_for_project(
                 id,
                 "local-a",
@@ -586,6 +588,14 @@ mod tests {
         .await;
         set_task_split_state(
             &pool,
+            "rework-idle",
+            OrchestratorWorkflowState::Rework,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+        set_task_split_state(
+            &pool,
             "rework-blocked",
             OrchestratorWorkflowState::Rework,
             OrchestratorRunState::Blocked,
@@ -597,7 +607,7 @@ mod tests {
             .await
             .unwrap();
         let backlog = repo.get_task("backlog-idle").await.unwrap();
-        let rework = repo.get_task("rework-blocked").await.unwrap();
+        let rework_blocked = repo.get_task("rework-blocked").await.unwrap();
 
         let claimed_ids = claimed
             .iter()
@@ -605,7 +615,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(claimed_ids.len(), 2);
         assert!(claimed_ids.contains(&"todo-idle"));
-        assert!(claimed_ids.contains(&"rework-blocked"));
+        assert!(claimed_ids.contains(&"rework-idle"));
+        assert!(!claimed_ids.contains(&"rework-blocked"));
         assert!(claimed.iter().all(|task| {
             task.status == OrchestratorTaskStatus::Preparing
                 && task.workflow_state == OrchestratorWorkflowState::InProgress
@@ -615,7 +626,8 @@ mod tests {
         }));
         assert_eq!(backlog.workflow_state, OrchestratorWorkflowState::Backlog);
         assert_eq!(backlog.run_state, OrchestratorRunState::Idle);
-        assert_eq!(rework.blocked_reason, None);
+        assert_eq!(rework_blocked.run_state, OrchestratorRunState::Blocked);
+        assert_eq!(rework_blocked.blocked_reason.as_deref(), Some("验证失败"));
     }
 
     /// Business Logic（为什么需要这个函数）:
