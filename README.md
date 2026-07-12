@@ -216,7 +216,7 @@ git tag v0.6.0
 git push origin master
 git push origin v0.6.0
 ```
-3. GitHub Actions 用 tauri-action 自动构建三平台（macOS 双架构 / Windows / Linux）、签发 Release 并产出 `latest.json`（供自动更新校验）。
+3. GitHub Actions 用原生 `tauri` CLI 三段式 workflow（矩阵 build → 上传 Release → 组装 `latest.json`）构建三平台（macOS 双架构 / Windows / Linux）、签发 Release 并产出 `latest.json`（供自动更新校验）。
 
 ### 独立后端 CLI（无 GUI 远端支持）
 
@@ -254,7 +254,7 @@ cc-partner 使用 **P2P 架构**，每个实例既是服务端也是客户端：
 2. **文件传输**：基于 HTTP 分块传输，支持断点续传和 SHA256 完整性校验
 3. **Prompt 同步**：使用向量时钟追踪版本，自动合并，冲突时以最后修改者为准（Last-Writer-Wins）
 
-本地前端与 Rust 后端通过 Tauri `invoke()` IPC 通信（无本地端口暴露）；跨设备 P2P 走 axum HTTP server（动态端口）+ reqwest 客户端。所有数据存储在本地 SQLite 数据库，配置文件在 `~/.cc-partner/` 目录下。
+本地前端与 Rust 后端通过 Tauri `invoke()` IPC 通信（无本地端口暴露）；跨设备 P2P 走 axum HTTP server（首选 TCP 62116，占用时递增，以 `/api/health` 的 `http_port` 为准）+ reqwest 客户端。所有数据存储在本地 SQLite 数据库，配置文件在 `~/.cc-partner/` 目录下。
 
 ## 常见问题
 
