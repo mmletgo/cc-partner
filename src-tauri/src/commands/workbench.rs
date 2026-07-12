@@ -4447,6 +4447,8 @@ mod tests {
                 port: 14210,
                 last_seen: Utc::now(),
                 online: true,
+                proto_version: 0,
+                capabilities: Vec::new(),
             },
         );
 
