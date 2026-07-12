@@ -68,44 +68,25 @@ pub async fn collect_orchestrator_attention_items(
     let projects = state.workbench_project_repo.list().await?;
     let mut items = Vec::new();
 
-    // 本机项目任务：按项目过滤后投影，避免 remote shortcut 的本地空列表误伤。
+    // 本机任务必须与当前有效 Workbench 本机项目 ID 求交；
+    // 零本机项目时绝不回退全局历史任务，避免投影不可导航的孤儿条目。
     let local_projects: Vec<&WorkbenchProjectRow> = projects
         .iter()
         .filter(|project| project.kind != "remote")
         .collect();
-    if local_projects.is_empty() {
-        // 无 workbench 本机项目时，仍可能存在历史任务；用全局 list 再按非 remote project_id 过滤。
-        let remote_ids: std::collections::HashSet<&str> = projects
-            .iter()
-            .filter(|p| p.kind == "remote")
-            .map(|p| p.id.as_str())
-            .collect();
-        let rows = state.orchestrator_repo.list_tasks(None).await?;
+    for project in local_projects {
+        let rows = state
+            .orchestrator_repo
+            .list_tasks(Some(&project.id))
+            .await?;
+        let project_ref = AttentionProjectRef {
+            id: project.id.clone(),
+            name: project.name.clone(),
+            kind: AttentionProjectKind::Local,
+        };
         for row in rows {
-            if remote_ids.contains(row.project_id.as_str()) {
-                continue;
-            }
-            if let Some(item) =
-                project_local_task_row(&row, project_ref_for_local_task(&row, &projects))
-            {
+            if let Some(item) = project_local_task_row(&row, Some(project_ref.clone())) {
                 items.push(item);
-            }
-        }
-    } else {
-        for project in local_projects {
-            let rows = state
-                .orchestrator_repo
-                .list_tasks(Some(&project.id))
-                .await?;
-            let project_ref = AttentionProjectRef {
-                id: project.id.clone(),
-                name: project.name.clone(),
-                kind: AttentionProjectKind::Local,
-            };
-            for row in rows {
-                if let Some(item) = project_local_task_row(&row, Some(project_ref.clone())) {
-                    items.push(item);
-                }
             }
         }
     }
@@ -451,30 +432,50 @@ fn task_summary(blocked_reason: Option<&str>, goal: &str, category: AttentionCat
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     全局任务列表投影时需要尽量补齐 project 名称，而不是只剩 id。
+///     投影本机任务时只能引用当前仍存在的 Workbench 项目，删除后不得合成假引用。
 ///
 /// Code Logic（这个函数做什么）:
-///     在 workbench 项目列表中查找 task.project_id；找不到则用 id 兜底 local 项目。
+///     在 workbench 项目列表中查找 task.project_id；找不到返回 None（不合成）。
+#[cfg(test)]
 fn project_ref_for_local_task(
     task: &OrchestratorTaskRow,
     projects: &[WorkbenchProjectRow],
 ) -> Option<AttentionProjectRef> {
-    if let Some(project) = projects.iter().find(|p| p.id == task.project_id) {
-        return Some(AttentionProjectRef {
+    projects.iter().find(|p| p.id == task.project_id).map(|project| AttentionProjectRef {
+        id: project.id.clone(),
+        name: project.name.clone(),
+        kind: if project.kind == "remote" {
+            AttentionProjectKind::Remote
+        } else {
+            AttentionProjectKind::Local
+        },
+    })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     删除最后一个本机项目后，历史 blocked/human-review 任务不得继续进入 Inbox。
+///
+/// Code Logic（这个函数做什么）:
+///     仅按当前有效本机项目 ID 与任务 project_id 求交后投影；零本机项目恒返回空。
+#[cfg(test)]
+fn project_local_tasks_for_active_projects(
+    local_projects: &[&WorkbenchProjectRow],
+    tasks: &[OrchestratorTaskRow],
+) -> Vec<AttentionItemDto> {
+    let mut items = Vec::new();
+    for project in local_projects {
+        let project_ref = AttentionProjectRef {
             id: project.id.clone(),
             name: project.name.clone(),
-            kind: if project.kind == "remote" {
-                AttentionProjectKind::Remote
-            } else {
-                AttentionProjectKind::Local
-            },
-        });
+            kind: AttentionProjectKind::Local,
+        };
+        for row in tasks.iter().filter(|row| row.project_id == project.id) {
+            if let Some(item) = project_local_task_row(row, Some(project_ref.clone())) {
+                items.push(item);
+            }
+        }
     }
-    Some(AttentionProjectRef {
-        id: task.project_id.clone(),
-        name: task.project_id.clone(),
-        kind: AttentionProjectKind::Local,
-    })
+    items
 }
 
 #[cfg(test)]
@@ -875,6 +876,100 @@ mod tests {
         assert!(
             peak >= 2,
             "测试应观察到真实并发，峰值={peak}（若恒为 1 说明未并行）"
+        );
+    }
+
+    /// Business Logic: 删除最后一个含阻塞任务的本机项目后，Inbox 不得投影孤儿任务。
+    /// Code Logic: 零本机项目 + 历史 blocked 任务 → 投影结果为空。
+    #[test]
+    fn zero_local_projects_never_projects_orphan_local_tasks() {
+        let blocked = local_task(
+            "orphan-blocked",
+            "deleted-proj",
+            OrchestratorTaskStatus::Blocked,
+            OrchestratorWorkflowState::Rework,
+            OrchestratorRunState::Blocked,
+            "2026-07-11T14:00:00Z",
+        );
+        let human_review = local_task(
+            "orphan-hr",
+            "deleted-proj",
+            OrchestratorTaskStatus::Done,
+            OrchestratorWorkflowState::HumanReview,
+            OrchestratorRunState::Idle,
+            "2026-07-11T14:01:00Z",
+        );
+        let local_projects: Vec<&WorkbenchProjectRow> = Vec::new();
+        let items = project_local_tasks_for_active_projects(
+            &local_projects,
+            &[blocked, human_review],
+        );
+        assert!(
+            items.is_empty(),
+            "删除最后一个本机项目后不得投影历史任务: {items:?}"
+        );
+    }
+
+    /// Business Logic: 已删除项目的任务不能合成假 project 引用进入 Inbox。
+    /// Code Logic: project_ref_for_local_task 在项目列表无匹配时返回 None。
+    #[test]
+    fn removed_project_does_not_synthesize_project_ref() {
+        let task = local_task(
+            "orphan-task",
+            "gone-proj",
+            OrchestratorTaskStatus::Blocked,
+            OrchestratorWorkflowState::Rework,
+            OrchestratorRunState::Blocked,
+            "2026-07-11T15:00:00Z",
+        );
+        let projects: Vec<WorkbenchProjectRow> = Vec::new();
+        assert!(
+            project_ref_for_local_task(&task, &projects).is_none(),
+            "已删除项目不得合成 project ref"
+        );
+    }
+
+    /// Business Logic: 仅当前有效本机项目上的阻塞任务才进入 Inbox。
+    /// Code Logic: 有匹配项目时投影 blocked；无关项目任务被过滤。
+    #[test]
+    fn only_tasks_for_active_local_projects_are_projected() {
+        let active = WorkbenchProjectRow {
+            id: "proj-active".to_string(),
+            name: "Active".to_string(),
+            kind: "local".to_string(),
+            device_id: String::new(),
+            device_name: String::new(),
+            path: "/tmp/active".to_string(),
+            last_opened_at: "2026-07-11T08:00:00Z".to_string(),
+            created_at: "2026-07-11T08:00:00Z".to_string(),
+            updated_at: "2026-07-11T08:00:00Z".to_string(),
+        };
+        let active_task = local_task(
+            "active-blocked",
+            "proj-active",
+            OrchestratorTaskStatus::Blocked,
+            OrchestratorWorkflowState::Rework,
+            OrchestratorRunState::Blocked,
+            "2026-07-11T16:00:00Z",
+        );
+        let orphan_task = local_task(
+            "orphan-blocked",
+            "proj-gone",
+            OrchestratorTaskStatus::Blocked,
+            OrchestratorWorkflowState::Rework,
+            OrchestratorRunState::Blocked,
+            "2026-07-11T16:01:00Z",
+        );
+        let local_projects = vec![&active];
+        let items = project_local_tasks_for_active_projects(
+            &local_projects,
+            &[active_task, orphan_task],
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "orchestrator:blocked:active-blocked");
+        assert_eq!(
+            items[0].project.as_ref().map(|p| p.id.as_str()),
+            Some("proj-active")
         );
     }
 }
