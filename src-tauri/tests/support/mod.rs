@@ -103,11 +103,14 @@ impl CapturedCli {
             .stdout
             .lines()
             .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .last()
+            .rfind(|line| !line.is_empty())
             .ok_or_else(|| format!("CLI stdout 无 JSON 行\n{}", self.diagnostic()))?;
-        serde_json::from_str(line)
-            .map_err(|err| format!("解析 status JSON 失败: {err}\nline={line}\n{}", self.diagnostic()))
+        serde_json::from_str(line).map_err(|err| {
+            format!(
+                "解析 status JSON 失败: {err}\nline={line}\n{}",
+                self.diagnostic()
+            )
+        })
     }
 }
 
@@ -583,8 +586,8 @@ fn http_get_json(host_port: &str, path: &str) -> Result<serde_json::Value, Strin
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
-    let mut stream = TcpStream::connect(host_port)
-        .map_err(|e| format!("连接 {host_port} 失败: {e}"))?;
+    let mut stream =
+        TcpStream::connect(host_port).map_err(|e| format!("连接 {host_port} 失败: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|e| format!("设置读超时失败: {e}"))?;
@@ -639,8 +642,8 @@ pub fn read_control_file(path: &Path) -> Result<Option<ControlFileJson>, String>
     if !path.exists() {
         return Ok(None);
     }
-    let content =
-        fs::read_to_string(path).map_err(|e| format!("读取 control 失败 {}: {e}", path.display()))?;
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("读取 control 失败 {}: {e}", path.display()))?;
     let control = serde_json::from_str(&content)
         .map_err(|e| format!("解析 control 失败 {}: {e}\n{content}", path.display()))?;
     Ok(Some(control))
@@ -655,8 +658,8 @@ pub fn write_control_file(data_dir: &Path, control: &ControlFileJson) -> Result<
     fs::create_dir_all(data_dir).map_err(|e| format!("创建 data_dir 失败: {e}"))?;
     let control_path = data_dir.join("backend-control.json");
     let pid_path = data_dir.join("backend.pid");
-    let body = serde_json::to_string_pretty(control)
-        .map_err(|e| format!("序列化 control 失败: {e}"))?;
+    let body =
+        serde_json::to_string_pretty(control).map_err(|e| format!("序列化 control 失败: {e}"))?;
     fs::write(&control_path, body)
         .map_err(|e| format!("写 control 失败 {}: {e}", control_path.display()))?;
     fs::write(&pid_path, control.pid.to_string())
@@ -670,8 +673,8 @@ pub fn write_control_file(data_dir: &Path, control: &ControlFileJson) -> Result<
 /// Code Logic（这个函数做什么）:
 ///     bind `127.0.0.1:0` 取系统分配端口后立即释放。
 pub fn unused_local_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("绑定临时端口失败: {e}"))?;
+    let listener =
+        TcpListener::bind("127.0.0.1:0").map_err(|e| format!("绑定临时端口失败: {e}"))?;
     let port = listener
         .local_addr()
         .map_err(|e| format!("读取临时端口失败: {e}"))?
@@ -840,7 +843,9 @@ fn kill_pid_hard(pid: u32) -> io::Result<()> {
         if status.success() {
             Ok(())
         } else {
-            Err(io::Error::other(format!("taskkill /F {pid} 失败: {status}")))
+            Err(io::Error::other(format!(
+                "taskkill /F {pid} 失败: {status}"
+            )))
         }
     }
     #[cfg(not(any(unix, windows)))]
