@@ -152,6 +152,49 @@ fn escape_bytes_for_diagnostic(bytes: &[u8]) -> String {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     PTY smoke 失败时若只 panic 到日志，CI 上传的 smoke root 可能没有文件证据；
+///     需要在 `CC_PARTNER_SMOKE_ROOT` 下落盘 raw/escaped 输出。
+///
+/// Code Logic（这个函数做什么）:
+///     若设置了 SMOKE_ROOT，创建唯一 case 目录并写 summary/raw/escaped；否则 no-op。
+fn persist_pty_failure_diagnostics(reason: &str, marker: &str, output: &[u8]) {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let Some(root) = std::env::var_os("CC_PARTNER_SMOKE_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let case_dir = root.join(format!("pty-failure-{nanos}-{}", std::process::id()));
+    let diag_dir = case_dir.join("diagnostics");
+    if let Err(err) = fs::create_dir_all(&diag_dir) {
+        eprintln!(
+            "[pty-smoke] 创建 diagnostics 失败 path={} err={err}",
+            diag_dir.display()
+        );
+        return;
+    }
+    let escaped = escape_bytes_for_diagnostic(output);
+    let summary = format!(
+        "reason={reason}\nmarker={marker}\noutput_len={}\ncase_dir={}\n",
+        output.len(),
+        case_dir.display()
+    );
+    let _ = fs::write(diag_dir.join("summary.txt"), summary);
+    let _ = fs::write(diag_dir.join("output.raw"), output);
+    let _ = fs::write(diag_dir.join("output.escaped.txt"), escaped);
+    eprintln!(
+        "[pty-smoke] 已写入 failure diagnostics path={}",
+        diag_dir.display()
+    );
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     失败清理时 `Child::wait` 可能因仍持有 slave 端而永久阻塞，冒烟必须有界。
 ///
 /// Code Logic（这个函数做什么）:
@@ -497,6 +540,11 @@ fn native_pty_echo_token_and_exit_zero() {
     if let Err((buf, msg)) = wait_for_standalone_marker(&drain, &marker, PTY_SMOKE_TIMEOUT) {
         drop(writer);
         force_reap_child(&mut child, Duration::from_secs(2));
+        persist_pty_failure_diagnostics(
+            &format!("marker_timeout: {msg}"),
+            &marker,
+            &buf,
+        );
         panic!(
             "未读到独立成行 marker `{marker}`: {msg}; partial={}",
             escape_bytes_for_diagnostic(&buf)
@@ -511,6 +559,8 @@ fn native_pty_echo_token_and_exit_zero() {
         }
         Err(err) => {
             drop(writer);
+            let snap = drain.snapshot();
+            persist_pty_failure_diagnostics(&format!("exit_timeout_or_nonzero: {err}"), &marker, &snap);
             panic!("{err}");
         }
     };
