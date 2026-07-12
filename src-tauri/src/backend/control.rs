@@ -16,7 +16,6 @@ const START_LOCK_FILE_NAME: &str = "backend-start.lock";
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
-const START_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 static SHUTDOWN_NOTIFIER: OnceLock<Mutex<Option<watch::Sender<bool>>>> = OnceLock::new();
 
 /// `/api/health` 响应中后端状态检查需要的字段。
@@ -210,10 +209,12 @@ pub fn start_lock_path() -> PathBuf {
 ///     `start` 的 check-then-spawn 不是原子的；必须用磁盘锁串行化同一 data_dir 上的启动声明。
 ///
 /// Code Logic（这个结构做什么）:
-///     持有通过 `create_new` 创建的锁文件句柄；Drop 时删除锁文件释放互斥。
+///     持有已 `try_lock`/`lock` 成功的 OS 文件锁句柄；进程退出或 Drop 时内核自动释放，
+///     不依赖删除路径，避免 create_new+pid 文件的 ABA / 空文件误回收竞态。
 pub struct StartLockGuard {
     path: PathBuf,
-    _file: fs::File,
+    file: fs::File,
+    ownership_token: String,
 }
 
 impl Drop for StartLockGuard {
@@ -223,14 +224,16 @@ impl Drop for StartLockGuard {
     ///     无论 start 成功、超时还是 panic，都必须释放 data_dir 级启动互斥，避免永久卡死后续 start。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     best-effort 删除锁文件；文件已不存在时忽略。
+    ///     仅当锁文件仍包含本守卫写入的 ownership token 时才 best-effort 清理诊断内容并 unlock；
+    ///     文件删除不是互斥前提——OS 文件锁在 fd 关闭时自动释放。
     fn drop(&mut self) {
-        match fs::remove_file(&self.path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => {
-                tracing::warn!("释放 backend start 锁失败 path={:?}: {err}", self.path);
-            }
+        if lock_file_owned_by(&self.path, &self.ownership_token) {
+            // 诊断字段可清，但不要 unlink：其它进程可能已 open 同一路径等待 lock。
+            let _ = self.file.set_len(0);
+        }
+        // 全限定调用 fs4，避免解析到 std::fs::File::unlock（MSRV 1.89+）。
+        if let Err(err) = fs4::FileExt::unlock(&self.file) {
+            tracing::warn!("释放 backend start 锁失败 path={:?}: {err}", self.path);
         }
     }
 }
@@ -242,8 +245,10 @@ impl Drop for StartLockGuard {
 ///     需要按隔离根原子声明“我正在启动”。
 ///
 /// Code Logic（这个函数做什么）:
-///     对 `backend-start.lock` 使用 `create_new` 互斥创建；成功写入持有者 pid + 时间戳。
-///     已存在时若持有者 pid 已死或锁超过 stale 阈值则回收后重试；否则轮询直到 deadline。
+///     打开（或创建）`backend-start.lock` 后用 OS 级 exclusive lock（`fs4::FileExt::try_lock`，
+///     全限定调用以避开 std 1.89+ 同名方法与 crate MSRV 1.77 冲突）抢占；
+///     成功后写入 ownership token + pid 作诊断。进程崩溃时内核自动释放锁，无需 pid 回收，
+///     也消除了“空/半写锁文件被误删”导致双持有的 ABA。轮询 try_lock 直到 deadline。
 pub async fn acquire_start_lock(timeout: Duration) -> Result<StartLockGuard, AppError> {
     let path = start_lock_path();
     let dir = config_dir();
@@ -251,21 +256,26 @@ pub async fn acquire_start_lock(timeout: Duration) -> Result<StartLockGuard, App
     let deadline = Instant::now() + timeout;
 
     loop {
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                let payload = format!(
-                    "pid={}\nacquired_at_ms={}\n",
-                    std::process::id(),
-                    unix_millis_now()
-                );
-                file.write_all(payload.as_bytes())?;
-                let _ = file.flush();
-                return Ok(StartLockGuard { path, _file: file });
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+
+        // 全限定调用 fs4，避免 rustc 优先解析到 std::fs::File::try_lock（MSRV 1.89+）。
+        match fs4::FileExt::try_lock(&file) {
+            Ok(()) => {
+                let ownership_token = uuid::Uuid::new_v4().to_string();
+                write_start_lock_payload(&mut file, &ownership_token)?;
+                return Ok(StartLockGuard {
+                    path,
+                    file,
+                    ownership_token,
+                });
             }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                if reclaim_stale_start_lock(&path)? {
-                    continue;
-                }
+            Err(fs4::TryLockError::WouldBlock) => {
+                drop(file);
                 if Instant::now() >= deadline {
                     return Err(AppError::conflict(format!(
                         "获取 backend start 锁超时（{timeout:?}）: start 锁被占用: {}",
@@ -274,74 +284,42 @@ pub async fn acquire_start_lock(timeout: Duration) -> Result<StartLockGuard, App
                 }
                 tokio::time::sleep(STATUS_POLL_INTERVAL).await;
             }
-            Err(err) => return Err(err.into()),
+            Err(fs4::TryLockError::Error(err)) => return Err(err.into()),
         }
     }
 }
 
-/// 判断并在需要时回收 stale start 锁。
+/// 把 ownership token 与持有者 pid 写入 start 锁文件（仅诊断，不参与互斥）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     持锁进程若在 spawn 前崩溃，锁文件会永久挡住后续 start；必须可安全回收。
+///     OS 文件锁保证互斥；锁文件内容仅用于排障时识别谁持有锁，避免再走 pid 回收路径。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取锁内 pid；pid 不存在/不可解析/进程已死，或 mtime/acquired_at 超过阈值时删除锁并返回 true。
-fn reclaim_stale_start_lock(path: &std::path::Path) -> Result<bool, AppError> {
-    let meta = match fs::metadata(path) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(err.into()),
-    };
-
-    let content = fs::read_to_string(path).unwrap_or_default();
-    let holder_pid = content.lines().find_map(|line| {
-        line.strip_prefix("pid=")
-            .and_then(|raw| raw.trim().parse::<u32>().ok())
-    });
-    let acquired_ms = content.lines().find_map(|line| {
-        line.strip_prefix("acquired_at_ms=")
-            .and_then(|raw| raw.trim().parse::<u128>().ok())
-    });
-
-    let age_stale = if let Some(acquired_ms) = acquired_ms {
-        unix_millis_now().saturating_sub(acquired_ms) >= START_LOCK_STALE_AFTER.as_millis()
-    } else if let Ok(modified) = meta.modified() {
-        modified
-            .elapsed()
-            .map(|elapsed| elapsed >= START_LOCK_STALE_AFTER)
-            .unwrap_or(true)
-    } else {
-        true
-    };
-
-    let holder_dead = match holder_pid {
-        Some(pid) => !process_is_alive(pid),
-        None => true,
-    };
-
-    if holder_dead || age_stale {
-        match fs::remove_file(path) {
-            Ok(()) => Ok(true),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(err) => Err(err.into()),
-        }
-    } else {
-        Ok(false)
-    }
+///     truncate 后写入 `token=`/`pid=` 两行并 flush。
+fn write_start_lock_payload(file: &mut fs::File, ownership_token: &str) -> Result<(), AppError> {
+    file.set_len(0)?;
+    let payload = format!("token={ownership_token}\npid={}\n", std::process::id());
+    file.write_all(payload.as_bytes())?;
+    file.flush()?;
+    Ok(())
 }
 
-/// 当前 unix 纪元毫秒（用于 start 锁时间戳）。
+/// 判断 start 锁文件是否仍由给定 ownership token 持有。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     stale 锁回收需要稳定的时间锚点，避免永久占用 data_dir 启动互斥。
+///     Drop 时不应误清他人写入的诊断内容；仅 token 匹配才允许 truncate。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取 SystemTime::now 相对 UNIX_EPOCH 的毫秒数；异常时返回 0。
-fn unix_millis_now() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
+///     读锁文件，解析 `token=` 行并与期望 token 比较；读失败视为不匹配。
+fn lock_file_owned_by(path: &std::path::Path, ownership_token: &str) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    content.lines().any(|line| {
+        line.strip_prefix("token=")
+            .map(|raw| raw.trim() == ownership_token)
+            .unwrap_or(false)
+    })
 }
 
 /// 返回进程内后端关闭通知槽。
