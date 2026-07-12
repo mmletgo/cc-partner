@@ -37,6 +37,8 @@ pub async fn list_devices(state: State<'_, AppState>) -> Result<Vec<DeviceDto>, 
 pub async fn get_local_device(state: State<'_, AppState>) -> Result<DeviceDto, AppError> {
     let device_name = state.device_name();
     let port = state.actual_http_port.load(Ordering::SeqCst);
+    // 本机设备直接宣告权威协议元数据（与对端 health 一致），前端可据此判断本机能力。
+    let info = crate::net::protocol::server_protocol_info();
     Ok(DeviceDto {
         id: state.device_id.as_ref().clone(),
         name: device_name,
@@ -45,5 +47,7 @@ pub async fn get_local_device(state: State<'_, AppState>) -> Result<DeviceDto, A
         last_seen: chrono::Utc::now().to_rfc3339(),
         online: true,
         is_self: true,
+        proto_version: info.protocol_version,
+        capabilities: info.capabilities,
     })
 }
