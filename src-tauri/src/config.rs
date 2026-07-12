@@ -68,7 +68,7 @@ pub(crate) fn migrate_legacy_db_path_with_home(cfg: &mut AppConfig, home: &Path)
 pub fn data_dir() -> Result<PathBuf, AppError> {
     match std::env::var_os(DATA_DIR_ENV) {
         Some(raw) => resolve_data_dir_override(raw),
-        None => Ok(default_home_data_dir()),
+        None => default_home_data_dir(),
     }
 }
 
@@ -123,13 +123,18 @@ fn resolve_data_dir_override(raw: std::ffi::OsString) -> Result<PathBuf, AppErro
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     未设置 `CC_PARTNER_DATA_DIR` 时生产路径必须与历史行为一致，并继续迁移旧 `.claude-partner`。
+///     无可解析 home 的服务账户/异常环境不得 panic，应映射为 AppError 供 doctor/CLI 稳定 exit 2。
 ///
 /// Code Logic（这个函数做什么）:
-///     取 home 下 `.cc-partner`；若新目录不存在且旧目录存在则 rename 迁移，失败则回落旧路径。
-fn default_home_data_dir() -> PathBuf {
+///     取 home 下 `.cc-partner`；home 缺失返回 Validation 错误；若新目录不存在且旧目录存在则 rename 迁移，失败则回落旧路径。
+fn default_home_data_dir() -> Result<PathBuf, AppError> {
     // dirs::config_dir 在各平台指向用户配置目录；历史 Python 版用的是 home 下的隐藏目录。
     // 更名后优先使用 ~/.cc-partner；若新目录不存在但旧 ~/.claude-partner 存在，首次启动时重命名迁移。
-    let home = dirs::home_dir().expect("无法定位用户 home 目录，环境异常");
+    let home = dirs::home_dir().ok_or_else(|| {
+        AppError::validation(
+            "无法定位用户 home 目录，环境异常；请设置 CC_PARTNER_DATA_DIR 绝对路径",
+        )
+    })?;
     let dir = home.join(CONFIG_DIR_NAME);
     let legacy = home.join(LEGACY_CONFIG_DIR_NAME);
 
@@ -138,12 +143,12 @@ fn default_home_data_dir() -> PathBuf {
             Ok(()) => tracing::info!("已迁移配置目录: {:?} -> {:?}", legacy, dir),
             Err(e) => {
                 tracing::warn!("迁移配置目录失败，将继续使用旧目录 {:?}: {e}", legacy);
-                return legacy;
+                return Ok(legacy);
             }
         }
     }
 
-    dir
+    Ok(dir)
 }
 
 /// 配置文件和数据文件的根目录：`~/.cc-partner`（可被 `CC_PARTNER_DATA_DIR` 覆盖）。

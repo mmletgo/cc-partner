@@ -811,3 +811,104 @@ fn concurrent_direct_serve_is_single_instance() {
     let _ = c1.wait();
     let _ = c2.wait();
 }
+
+/// Business Logic（为什么需要这个测试）:
+///     start 与 direct serve 并发时，若只看全局 Running 不校验 PID，会放弃自己的 child
+///     导致稍后意外重启；必须 kill+reap owned child 并采纳已有实例。
+///
+/// Code Logic（这个测试做什么）:
+///     先 spawn direct serve，再 start；断言 start 成功、仅一个 running pid，
+///     且 start 退出后不会再出现第二个 backend。
+#[test]
+fn start_concurrent_with_direct_serve_adopts_existing_and_reaps_owned_child() {
+    if let Err(reason) = ensure_platform_supported() {
+        eprintln!("{reason}");
+        return;
+    }
+    let mut case = SmokeCase::new("start-vs-direct-serve").expect("create case");
+    let bin = case.backend_bin.clone();
+    let data_dir = case.data_dir.clone();
+
+    let mut serve_child = match std::process::Command::new(&bin)
+        .arg("serve")
+        .env("CC_PARTNER_DATA_DIR", &data_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(err) => fail_case(&mut case, format!("spawn serve: {err}")),
+    };
+    case.record_pid(serve_child.id());
+
+    // 并发 start
+    let start = match case.run_cli(&["start"]) {
+        Ok(s) => s,
+        Err(err) => {
+            let _ = serve_child.kill();
+            let _ = serve_child.wait();
+            fail_case(&mut case, format!("start 失败: {err}"))
+        }
+    };
+    if start.code != Some(0) {
+        let _ = serve_child.kill();
+        let _ = serve_child.wait();
+        fail_case(
+            &mut case,
+            format!("start 应成功采纳已有 serve\n{}", start.diagnostic()),
+        );
+    }
+    let start_status = match start.parse_status_json() {
+        Ok(v) => v,
+        Err(err) => {
+            let _ = serve_child.kill();
+            let _ = serve_child.wait();
+            fail_case(&mut case, err)
+        }
+    };
+    if start_status.kind != "running" {
+        let _ = serve_child.kill();
+        let _ = serve_child.wait();
+        fail_case(&mut case, format!("期望 running，实际 {:?}", start_status));
+    }
+    let control = start_status
+        .control
+        .clone()
+        .unwrap_or_else(|| fail_case(&mut case, "running 无 control"));
+    case.record_pid(control.pid);
+
+    // 稳定窗口：不得出现第二实例 pid 切换
+    thread::sleep(Duration::from_secs(2));
+    for _ in 0..5 {
+        let status = match case.run_cli(&["status"]) {
+            Ok(s) => s,
+            Err(err) => fail_case(&mut case, format!("status 失败: {err}")),
+        };
+        let value = match status.parse_status_json() {
+            Ok(v) => v,
+            Err(err) => fail_case(&mut case, err),
+        };
+        if value.kind != "running" {
+            fail_case(&mut case, format!("期望保持 running，实际 {:?}", value));
+        }
+        let now = value
+            .control
+            .clone()
+            .unwrap_or_else(|| fail_case(&mut case, "running 无 control"));
+        if now.pid != control.pid || now.port != control.port {
+            fail_case(
+                &mut case,
+                format!(
+                    "start 后 control 切换，疑似遗留 child 抢锁: first=({},{}) now=({},{})",
+                    control.pid, control.port, now.pid, now.port
+                ),
+            );
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    let _ = case.run_cli(&["stop"]);
+    let _ = serve_child.kill();
+    let _ = serve_child.wait();
+}

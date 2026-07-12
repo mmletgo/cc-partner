@@ -560,3 +560,77 @@ fn doctor_json_stdout_remains_pure_across_calls() {
 fn logs_dir(case: &SmokeCase) -> PathBuf {
     case.data_dir.join("logs")
 }
+
+/// Business Logic（为什么需要这个测试）:
+///     畸形受控 JSON 日志行必须 warning + degraded(exit 1)，不能静默 healthy。
+///
+/// Code Logic（这个测试做什么）:
+///     在隔离 data_dir 写入 malformed backend.log，跑 doctor --json，断言 exit=1 且
+///     status=degraded、logParseWarning 存在。
+#[test]
+fn malformed_recent_errors_degrade_exit_1() {
+    if let Err(reason) = ensure_platform_supported() {
+        eprintln!("{reason}");
+        return;
+    }
+    let mut case = SmokeCase::new("doctor-malformed-log").expect("create case");
+    let logs = case.data_dir.join("logs");
+    fs::create_dir_all(&logs).expect("mkdir logs");
+    let log_path = logs.join("backend.log");
+    let body = concat!(
+        r#"{"timestamp":"2026-07-11T11:00:00Z","level":"info","message":"boot"}"#,
+        "\n",
+        r#"{"timestamp":"bad","level":"error","broken"#,
+        "\n",
+        r#"{"not":"schema"}"#,
+        "\n",
+    );
+    fs::write(&log_path, body).expect("write malformed log");
+
+    let captured = match case.run_cli(&["doctor", "--json"]) {
+        Ok(c) => c,
+        Err(err) => fail_case(&mut case, format!("doctor 执行失败: {err}")),
+    };
+    preserve_doctor_artifacts(&case, "malformed", &captured);
+    let value = match parse_doctor_json(&captured) {
+        Ok(v) => v,
+        Err(err) => fail_case(&mut case, err),
+    };
+    let code = captured.code.unwrap_or(-1);
+    if code != 1 {
+        fail_case(
+            &mut case,
+            format!(
+                "malformed 日志期望 exit 1 (degraded)，实际 {code}\n{}",
+                captured.diagnostic()
+            ),
+        );
+    }
+    if value.get("status").and_then(|s| s.as_str()) != Some("degraded") {
+        fail_case(
+            &mut case,
+            format!(
+                "期望 status=degraded，实际 {}\n{}",
+                value,
+                captured.diagnostic()
+            ),
+        );
+    }
+    let warning = value.get("logParseWarning");
+    if warning.is_none() || warning == Some(&Value::Null) {
+        fail_case(
+            &mut case,
+            format!("期望 logParseWarning 存在\n{}", captured.diagnostic()),
+        );
+    }
+    let wcode = warning
+        .and_then(|w| w.get("code"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+    if wcode != "logs.recent_errors.malformed" {
+        fail_case(
+            &mut case,
+            format!("warning code 应为 logs.recent_errors.malformed，实际 {wcode}"),
+        );
+    }
+}
