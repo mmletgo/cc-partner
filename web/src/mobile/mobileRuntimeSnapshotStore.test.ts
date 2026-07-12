@@ -1,5 +1,8 @@
 import { describe, test, beforeEach } from 'vitest';
-import { OrchestratorRuntimeTransportError } from '@/api/orchestratorRuntimeTransportError';
+import {
+  OrchestratorRuntimeTransportError,
+  toRuntimeLoadError,
+} from '@/api/orchestratorRuntimeTransportError';
 import type { OrchestratorRuntimeSnapshot } from '@/lib/types';
 import {
   applyMobileRuntimeSnapshotFailure,
@@ -384,6 +387,59 @@ describe('mobileRuntimeSnapshotStore', () => {
     );
     assert(fail?.remoteStatus === 'unavailable', 'plain Error with network keywords is not offline');
     assert(fail?.snapshot === null, 'must not surface warm cache without transport kind');
+  });
+
+  test('panel catch path via toRuntimeLoadError keeps network kind and warm offline cache', () => {
+    applyMobileRuntimeSnapshotSuccess(
+      'panel-net',
+      nextMobileRuntimeSnapshotRequestSeq('panel-net'),
+      makeSnapshot({
+        projectId: 'panel-net',
+        remoteStatus: 'live',
+        generatedAt: 'panel-live',
+        latestTickAt: '2026-07-12T10:00:00.000Z',
+        recentEvents: [
+          {
+            id: 'ev-1',
+            taskId: 't-1',
+            taskTitle: 'Task A',
+            kind: 'dispatch',
+            message: 'owner event',
+            createdAt: '2026-07-12T10:00:01.000Z',
+          },
+        ],
+      }),
+      '2026-07-12T10:05:00.000Z',
+    );
+
+    // 模拟 adapter fetch 失败 → postJson 抛 network transport → 面板 catch 用 toRuntimeLoadError。
+    const adapterReject = new OrchestratorRuntimeTransportError('Failed to fetch', 'network');
+    const loadError = toRuntimeLoadError(adapterReject);
+    const fail = applyMobileRuntimeSnapshotFailure(
+      'panel-net',
+      nextMobileRuntimeSnapshotRequestSeq('panel-net'),
+      loadError,
+    );
+    assert(fail?.remoteStatus === 'offline', 'network transport must map to offline');
+    assert(fail?.snapshot?.generatedAt === 'panel-live', 'warm offline cache must surface');
+    assert(fail?.snapshot?.latestTickAt === '2026-07-12T10:00:00.000Z', 'owner tick preserved');
+    assert(
+      fail?.snapshot?.recentEvents[0]?.message === 'owner event',
+      'owner recentEvents preserved in offline cache',
+    );
+    assert(fail?.cachedAt === '2026-07-12T10:05:00.000Z', 'cachedAt retained for warm offline');
+
+    // 回归：若错误地 new Error(message) 会丢失 kind，不得进 offline。
+    const stripped = toRuntimeLoadError(new Error(adapterReject.message));
+    const strippedFail = applyMobileRuntimeSnapshotFailure(
+      'panel-net',
+      nextMobileRuntimeSnapshotRequestSeq('panel-net'),
+      stripped,
+    );
+    assert(
+      strippedFail?.remoteStatus === 'unavailable',
+      'plain Error rewrap loses network kind and must not offline',
+    );
   });
 
 });
