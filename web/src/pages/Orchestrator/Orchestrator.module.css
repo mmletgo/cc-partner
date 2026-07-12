@@ -956,3 +956,10 @@
     max-height: calc(100vh - 148px);
   }
 }
+
+.pendingTaskActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}

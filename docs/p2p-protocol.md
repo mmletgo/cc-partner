@@ -157,6 +157,8 @@ the router so the inventory check matches exactly.
 | POST | `/api/orchestrator/tasks/list` | `routes/orchestrator.rs` | none | read-only | — |
 | POST | `/api/orchestrator/task-views/list` | `routes/orchestrator.rs` | none | read-only | — |
 | POST | `/api/orchestrator/task-views/create` | `routes/orchestrator.rs` | creates mobile task view (local project row, pending outbox, or remote mirror) | requires-idempotency-key | preserves `clientRequestId` via `create_orchestrator_task_view_for_http`; pending outbox keeps the same key |
+| POST | `/api/orchestrator/outbox/retry` | `routes/orchestrator.rs` | failed outbox → pending on current device only | naturally-idempotent | failed-only SQL guard via `retry_failed_remote_outbox_item`; ownership checked against local remote shortcut |
+| POST | `/api/orchestrator/outbox/discard` | `routes/orchestrator.rs` | failed outbox → discarded audit on current device only | naturally-idempotent | failed-only SQL guard via `discard_failed_remote_outbox_item`; ownership checked against local remote shortcut |
 | POST | `/api/orchestrator/tasks/evidence` | `routes/orchestrator.rs` | none; reads evidence list | read-only | — |
 | POST | `/api/orchestrator/tasks/queue` | `routes/orchestrator.rs` | atomic Draft→Queued transition | no-transport-retry | Orchestrator lifecycle action; replay after timeout races the scheduler claim |
 | POST | `/api/orchestrator/tasks/start` | `routes/orchestrator.rs` | moves task into scheduler path + best-effort dispatch | no-transport-retry | Orchestrator lifecycle action |

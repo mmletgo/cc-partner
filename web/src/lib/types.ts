@@ -620,7 +620,7 @@ export interface OrchestratorRuntimeDisplayState {
  * Code Logic（这个类型做什么）:
  *   以字符串字面量枚举锁定 Rust OrchestratorRemoteOutboxStatus 序列化后的状态值。
  */
-export type OrchestratorRemoteOutboxStatus = 'pending' | 'sending' | 'mirrored' | 'failed';
+export type OrchestratorRemoteOutboxStatus = 'pending' | 'sending' | 'mirrored' | 'failed' | 'discarded';
 
 /**
  * Orchestrator 远端 outbox DTO（对齐 Rust OrchestratorRemoteOutboxDto，camelCase）。

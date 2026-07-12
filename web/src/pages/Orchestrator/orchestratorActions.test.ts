@@ -63,5 +63,31 @@ describe('orchestratorActions', () => {
       source.includes('createAction,'),
       'Desktop create request should pass createAction to orchestratorApi.createTaskView',
     );
+
+    for (const expectedCall of [
+      'orchestratorApi.retryRemoteOutbox',
+      'orchestratorApi.discardRemoteOutbox',
+    ]) {
+      assert(source.includes(expectedCall), `Orchestrator pending outbox should call ${expectedCall}`);
+    }
+    assert(
+      source.includes("item.status === 'failed'"),
+      'outbox Retry/Discard actions should render only for failed status',
+    );
+    assert(
+      source.includes("window.confirm(t('orchestrator:pending.discardConfirm'))"),
+      'discard should require confirmation in original Automation UI',
+    );
+
+    const pendingZh = zh.pending as Record<string, unknown>;
+    const pendingEn = en.pending as Record<string, unknown>;
+    for (const key of ['retry', 'discard', 'discardConfirm']) {
+      assert(typeof pendingZh[key] === 'string' && String(pendingZh[key]).length > 0, `zh pending.${key}`);
+      assert(typeof pendingEn[key] === 'string' && String(pendingEn[key]).length > 0, `en pending.${key}`);
+    }
+    const pendingStatusZh = pendingZh.status as Record<string, string>;
+    const pendingStatusEn = pendingEn.status as Record<string, string>;
+    assert(typeof pendingStatusZh.discarded === 'string', 'zh pending.status.discarded');
+    assert(typeof pendingStatusEn.discarded === 'string', 'en pending.status.discarded');
   });
 });

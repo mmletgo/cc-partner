@@ -136,6 +136,31 @@ describe('workbenchHttp', () => {
         'orchestrator task view list should send projectId only',
       );
 
+      await httpOrchestratorTransport.outbox.retry('remote-project-1', 'outbox-1');
+      const retryIdx = capturedUrls.length - 1;
+      assert(
+        capturedUrls[retryIdx] === '/api/orchestrator/outbox/retry',
+        'outbox retry should call mobile local outbox retry route',
+      );
+      assert(
+        JSON.stringify(capturedBodies[retryIdx]) ===
+          JSON.stringify({ projectId: 'remote-project-1', outboxId: 'outbox-1' }),
+        'outbox retry body should be camelCase projectId/outboxId',
+      );
+
+      await httpOrchestratorTransport.outbox.discard('remote-project-1', 'outbox-2');
+      const discardIdx = capturedUrls.length - 1;
+      assert(
+        capturedUrls[discardIdx] === '/api/orchestrator/outbox/discard',
+        'outbox discard should call mobile local outbox discard route',
+      );
+      assert(
+        JSON.stringify(capturedBodies[discardIdx]) ===
+          JSON.stringify({ projectId: 'remote-project-1', outboxId: 'outbox-2' }),
+        'outbox discard body should be camelCase projectId/outboxId',
+      );
+
+
       await httpOrchestratorTransport.tasks.createView({
         projectId: 'remote-project-1',
         title: '移动端远端创建任务',
@@ -151,9 +176,10 @@ describe('workbenchHttp', () => {
         externalLabels: ['remote', 'bug'],
       });
 
-      const createViewBody = capturedBodies[6] as Record<string, unknown>;
+      const createViewIdx = capturedUrls.length - 1;
+      const createViewBody = capturedBodies[createViewIdx] as Record<string, unknown>;
       assert(
-        capturedUrls[6] === '/api/orchestrator/task-views/create',
+        capturedUrls[createViewIdx] === '/api/orchestrator/task-views/create',
         'orchestrator task view create should call the mobile task-views create route',
       );
       assert(createViewBody.projectId === 'remote-project-1', 'createView should include projectId');
@@ -187,6 +213,7 @@ describe('workbenchHttp', () => {
         acceptanceCriteria: '任务保持 Backlog',
         createAction: 'backlog',
       });
+      const backlogIdx = capturedUrls.length - 1;
 
       await httpOrchestratorTransport.tasks.createView({
         projectId: 'remote-project-1',
@@ -195,13 +222,14 @@ describe('workbenchHttp', () => {
         acceptanceCriteria: '任务进入 Todo',
         createAction: 'todo',
       });
+      const todoIdx = capturedUrls.length - 1;
 
       assert(
-        (capturedBodies[7] as Record<string, unknown>).createAction === 'backlog',
+        (capturedBodies[backlogIdx] as Record<string, unknown>).createAction === 'backlog',
         'createView should pass backlog createAction',
       );
       assert(
-        (capturedBodies[8] as Record<string, unknown>).createAction === 'todo',
+        (capturedBodies[todoIdx] as Record<string, unknown>).createAction === 'todo',
         'createView should pass todo createAction',
       );
 
@@ -210,13 +238,14 @@ describe('workbenchHttp', () => {
         prompt: '移动端自动化任务弹窗',
         workingDirectory: ' /Users/hans/web_project/cc-partner ',
       });
+      const completePromptIdx = capturedUrls.length - 1;
 
       assert(
-        capturedUrls[9] === '/api/orchestrator/tasks/complete-prompt',
+        capturedUrls[completePromptIdx] === '/api/orchestrator/tasks/complete-prompt',
         'orchestrator task prompt completion should call the complete-prompt route',
       );
       assert(
-        JSON.stringify(capturedBodies[9]) ===
+        JSON.stringify(capturedBodies[completePromptIdx]) ===
           JSON.stringify({
             projectId: 'remote-project-1',
             prompt: '移动端自动化任务弹窗',
@@ -226,25 +255,27 @@ describe('workbenchHttp', () => {
       );
 
       await httpOrchestratorTransport.tasks.listEvidence('remote-project-1', 'remote:device-a:task-1');
+      const evidenceIdx = capturedUrls.length - 1;
 
       assert(
-        capturedUrls[10] === '/api/orchestrator/tasks/evidence',
+        capturedUrls[evidenceIdx] === '/api/orchestrator/tasks/evidence',
         'orchestrator evidence should call the task evidence route',
       );
       assert(
-        JSON.stringify(capturedBodies[10]) ===
+        JSON.stringify(capturedBodies[evidenceIdx]) ===
           JSON.stringify({ projectId: 'remote-project-1', taskId: 'remote:device-a:task-1' }),
         'orchestrator evidence should include projectId and taskId',
       );
 
       await httpOrchestratorTransport.getRuntimeSnapshot('remote-project-1');
+      const runtimeIdx = capturedUrls.length - 1;
 
       assert(
-        capturedUrls[11] === '/api/mobile/orchestrator/runtime-snapshot',
+        capturedUrls[runtimeIdx] === '/api/mobile/orchestrator/runtime-snapshot',
         'runtime snapshot should call the mobile remote-aware route',
       );
       assert(
-        JSON.stringify(capturedBodies[11]) === JSON.stringify({ projectId: 'remote-project-1' }),
+        JSON.stringify(capturedBodies[runtimeIdx]) === JSON.stringify({ projectId: 'remote-project-1' }),
         'runtime snapshot should send projectId only',
       );
     } finally {

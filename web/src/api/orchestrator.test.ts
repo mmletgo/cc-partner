@@ -9,6 +9,7 @@ import {
   buildOrchestratorRuntimeSnapshotInvokeArgs,
   buildOrchestratorTaskReworkInvokeArgs,
   buildOrchestratorTaskViewActionInvokeArgs,
+  buildOrchestratorRemoteOutboxActionInvokeArgs,
   orchestratorApi,
 } from './orchestrator';
 
@@ -117,6 +118,33 @@ describe('orchestrator', () => {
       typesSource.includes('retryingTasks: OrchestratorRuntimeTaskSummary[];'),
       'runtime snapshot type should include retrying task summaries',
     );
+
+    assert(
+      ORCHESTRATOR_REMOTE_COMMANDS.retryRemoteOutbox === 'retry_orchestrator_remote_outbox',
+      'retryRemoteOutbox should use the local failed outbox retry command',
+    );
+    assert(
+      ORCHESTRATOR_REMOTE_COMMANDS.discardRemoteOutbox === 'discard_orchestrator_remote_outbox',
+      'discardRemoteOutbox should use the local failed outbox discard command',
+    );
+    assert(
+      typeof orchestratorApi.retryRemoteOutbox === 'function',
+      'orchestratorApi should expose retryRemoteOutbox',
+    );
+    assert(
+      typeof orchestratorApi.discardRemoteOutbox === 'function',
+      'orchestratorApi should expose discardRemoteOutbox',
+    );
+    assert(
+      JSON.stringify(buildOrchestratorRemoteOutboxActionInvokeArgs('proj-1', 'outbox-1')) ===
+        JSON.stringify({ projectId: 'proj-1', outboxId: 'outbox-1' }),
+      'remote outbox action invoke args should be camelCase projectId/outboxId',
+    );
+    assert(
+      typesSource.includes("| 'discarded'"),
+      'outbox status type should include discarded',
+    );
+
     assert(
       typesSource.includes('recentEvents: OrchestratorRuntimeEvent[];'),
       'runtime snapshot type should include recent scheduler/runner events',

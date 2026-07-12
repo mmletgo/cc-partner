@@ -290,6 +290,8 @@ pub fn run() {
             orchestrator_cmd::refresh_orchestrator_project,
             orchestrator_cmd::queue_orchestrator_task_view,
             orchestrator_cmd::retry_orchestrator_task_view,
+            orchestrator_cmd::retry_orchestrator_remote_outbox,
+            orchestrator_cmd::discard_orchestrator_remote_outbox,
             orchestrator_cmd::abort_orchestrator_task_view,
             orchestrator_cmd::list_orchestrator_task_evidence_for_project,
             orchestrator_cmd::get_orchestrator_config_for_project,

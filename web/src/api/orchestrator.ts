@@ -12,6 +12,7 @@ import { invoke } from './client';
 import { toOrchestratorRuntimeTransportError } from './orchestratorRuntimeTransportError';
 import type {
   OrchestratorEvidence,
+  OrchestratorRemoteOutboxItem,
   OrchestratorRuntimeSnapshot,
   OrchestratorTask,
   OrchestratorTaskView,
@@ -25,6 +26,21 @@ import type {
  * Code Logic（这个常量做什么）:
  *   集中声明任务视图、evidence 和 Workbench 本机项目看板命令名，供 API 方法和契约测试共享。
  */
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Retry/Discard outbox 动作需要稳定的 projectId/outboxId 参数形状，供契约测试锁定。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 camelCase invoke 参数对象。
+ */
+export function buildOrchestratorRemoteOutboxActionInvokeArgs(
+  projectId: string,
+  outboxId: string,
+): { projectId: string; outboxId: string } {
+  return { projectId, outboxId };
+}
+
 export const ORCHESTRATOR_REMOTE_COMMANDS = {
   listTaskViews: 'list_orchestrator_task_views',
   createTaskView: 'create_orchestrator_task_view',
@@ -40,6 +56,8 @@ export const ORCHESTRATOR_REMOTE_COMMANDS = {
   // 常量名保留 remote 以减少本轮迁移面；下面两个命令服务 Workbench 本机项目看板。
   moveTaskWorkflowState: 'move_orchestrator_task_workflow_state',
   getRuntimeSnapshot: 'get_orchestrator_runtime_snapshot',
+  retryRemoteOutbox: 'retry_orchestrator_remote_outbox',
+  discardRemoteOutbox: 'discard_orchestrator_remote_outbox',
 } as const;
 
 /**
@@ -417,6 +435,33 @@ export const orchestratorApi = {
       ORCHESTRATOR_REMOTE_COMMANDS.refreshProject,
       buildOrchestratorRuntimeSnapshotInvokeArgs(projectId),
     ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   桌面 Automation UI 对 failed outbox 点 Retry 时，应在本机把状态回到 pending，不代理远端。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invoke retry_orchestrator_remote_outbox，返回更新后的 outbox DTO。
+   */
+  retryRemoteOutbox: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
+    invoke<OrchestratorRemoteOutboxItem>(ORCHESTRATOR_REMOTE_COMMANDS.retryRemoteOutbox, {
+      projectId,
+      outboxId,
+    }),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   桌面 Automation UI 对 failed outbox 点 Discard 时，应在本机进入 discarded 审计终态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invoke discard_orchestrator_remote_outbox，返回更新后的 outbox DTO。
+   */
+  discardRemoteOutbox: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
+    invoke<OrchestratorRemoteOutboxItem>(ORCHESTRATOR_REMOTE_COMMANDS.discardRemoteOutbox, {
+      projectId,
+      outboxId,
+    }),
+
 
   /**
    * Business Logic（为什么需要这个函数）:
