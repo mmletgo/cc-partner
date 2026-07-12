@@ -77,6 +77,21 @@ const REMOTE_OUTBOX_COLUMNS: &str = "id, device_id, device_name, remote_project_
 const REMOTE_MIRROR_COLUMNS: &str = "id, device_id, device_name, remote_project_id, \
     remote_project_path, remote_task_id, payload_json, last_synced_at";
 
+/// 幂等 create 结果：任务行 + 是否首次插入。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     客户端用同一 clientRequestId 重试 create 时，仓储必须返回既有任务，但调用方还需要知道
+///     本次是否真的新建了任务。Start 动作只能在首次插入后触发全局 dispatch，否则会在 A 完成后
+///     误启动队列中的任务 B。
+///
+/// Code Logic（这个结构体做什么）:
+///     `task` 是权威任务行；`newly_created=true` 表示本请求完成了 insert，`false` 表示幂等命中。
+#[derive(Debug, Clone)]
+pub struct IdempotentCreateTaskOutcome {
+    pub task: OrchestratorTaskRow,
+    pub newly_created: bool,
+}
+
 pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestrator_tasks (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
@@ -402,20 +417,22 @@ impl OrchestratorRepo {
     ///     远端 P2P create 请求可能在 owning device 已创建任务后响应超时，客户端会用同一 clientRequestId 重试。
     ///     仓储必须把 requestId->taskId 与任务创建放在同一事务中，避免重复任务；
     ///     同时必须按 project 隔离幂等键，防止跨项目返回另一项目的任务内容。
+    ///     调用方还需要区分“首次插入”与“幂等命中”，避免 Start 重放再次触发全局调度副作用。
     ///
     /// Code Logic（这个函数做什么）:
     ///     在事务内对非空 client_request_id：
     ///     1) 按 request_id 查找既有映射；
     ///     2) 映射的 project_id 与本次请求不一致 → conflict（跨项目不得复用）；
-    ///     3) 同项目且 fingerprint 匹配（或旧行空指纹）→ 返回既有 task；
-    ///     4) 同项目但 fingerprint 不同 → conflict；
-    ///     5) 首次登记写入 (request_id, project_id, fingerprint, task_id) 后插入任务。
+    ///     3) 同项目且 fingerprint 匹配 → 返回既有 task，`newly_created=false`；
+    ///     4) 同项目但 fingerprint 为空或不同 → conflict（旧行空指纹 fail-closed）；
+    ///     5) 首次登记写入 (request_id, project_id, fingerprint, task_id) 后插入任务，
+    ///        返回 `newly_created=true`。
     pub async fn create_remote_task_idempotent(
         &self,
         client_request_id: Option<&str>,
         row: &OrchestratorTaskRow,
         create_action: OrchestratorCreateAction,
-    ) -> Result<OrchestratorTaskRow, AppError> {
+    ) -> Result<IdempotentCreateTaskOutcome, AppError> {
         let client_request_id = client_request_id.and_then(non_empty_trimmed);
         let row_to_insert = task_row_for_create_action(row, create_action);
         let external_labels_json = serialize_external_labels(&row_to_insert.external_labels)?;
@@ -441,7 +458,10 @@ impl OrchestratorRepo {
                 )
                 .await?;
                 tx.commit().await?;
-                return Ok(task);
+                return Ok(IdempotentCreateTaskOutcome {
+                    task,
+                    newly_created: false,
+                });
             }
 
             let now = Utc::now().to_rfc3339();
@@ -475,7 +495,10 @@ impl OrchestratorRepo {
                 )
                 .await?;
                 tx.commit().await?;
-                return Ok(task);
+                return Ok(IdempotentCreateTaskOutcome {
+                    task,
+                    newly_created: false,
+                });
             }
         }
 
@@ -531,7 +554,10 @@ impl OrchestratorRepo {
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
-        row_to_task(&task_row)
+        Ok(IdempotentCreateTaskOutcome {
+            task: row_to_task(&task_row)?,
+            newly_created: true,
+        })
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -544,7 +570,7 @@ impl OrchestratorRepo {
         client_request_id: &str,
         row: &OrchestratorTaskRow,
         create_action: OrchestratorCreateAction,
-    ) -> Result<OrchestratorTaskRow, AppError> {
+    ) -> Result<IdempotentCreateTaskOutcome, AppError> {
         self.create_remote_task_idempotent(Some(client_request_id), row, create_action)
             .await
     }
@@ -2728,8 +2754,14 @@ async fn resolve_existing_create_request(
             "clientRequestId `{request_id}` 已绑定项目 `{effective_project_id}`，不能用于项目 `{project_id}`"
         )));
     }
-    // 新写入的映射始终带非空指纹；旧库空指纹仅允许同项目复用，避免升级后所有重试直接 conflict。
-    if !mapped_fingerprint.is_empty() && mapped_fingerprint != request_fingerprint {
+    // 旧库迁移后 request_fingerprint 可能仍为空：无法可靠比对 payload，必须 fail-closed，
+    // 要求客户端换新 request id，禁止把空指纹当通配符静默匹配任意 payload。
+    if mapped_fingerprint.trim().is_empty() {
+        return Err(AppError::conflict(format!(
+            "clientRequestId `{request_id}` 缺少可靠请求指纹，请使用新的 clientRequestId 重新创建"
+        )));
+    }
+    if mapped_fingerprint != request_fingerprint {
         return Err(AppError::conflict(format!(
             "clientRequestId `{request_id}` 已用于不同创建内容，拒绝冲突重放"
         )));
@@ -3614,10 +3646,12 @@ mod tests {
             .unwrap();
         let listed = repo.list_tasks(Some("project-1")).await.unwrap();
 
-        assert_eq!(created.id, "task-1");
-        assert_eq!(created.status, OrchestratorTaskStatus::Queued);
-        assert_eq!(replayed.id, "task-1");
-        assert_eq!(replayed.status, OrchestratorTaskStatus::Queued);
+        assert!(created.newly_created);
+        assert!(!replayed.newly_created);
+        assert_eq!(created.task.id, "task-1");
+        assert_eq!(created.task.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(replayed.task.id, "task-1");
+        assert_eq!(replayed.task.status, OrchestratorTaskStatus::Queued);
         assert_eq!(listed.len(), 1);
     }
 
@@ -3720,11 +3754,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(created.status, OrchestratorTaskStatus::Queued);
-        assert_eq!(created.workflow_state, OrchestratorWorkflowState::Todo);
-        assert_eq!(created.run_state, OrchestratorRunState::Idle);
+        assert!(created.newly_created);
+        assert_eq!(created.task.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(created.task.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(created.task.run_state, OrchestratorRunState::Idle);
         assert_eq!(claimed.len(), 1);
-        assert_eq!(claimed[0].id, created.id);
+        assert_eq!(claimed[0].id, created.task.id);
         assert_eq!(claimed[0].status, OrchestratorTaskStatus::Preparing);
         assert_eq!(
             claimed[0].workflow_state,
@@ -3752,9 +3787,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(created.status, OrchestratorTaskStatus::Draft);
-        assert_eq!(created.workflow_state, OrchestratorWorkflowState::Backlog);
-        assert_eq!(created.run_state, OrchestratorRunState::Idle);
+        assert!(created.newly_created);
+        assert_eq!(created.task.status, OrchestratorTaskStatus::Draft);
+        assert_eq!(
+            created.task.workflow_state,
+            OrchestratorWorkflowState::Backlog
+        );
+        assert_eq!(created.task.run_state, OrchestratorRunState::Idle);
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -3776,9 +3815,120 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(created.status, OrchestratorTaskStatus::Queued);
-        assert_eq!(created.workflow_state, OrchestratorWorkflowState::Todo);
-        assert_eq!(created.run_state, OrchestratorRunState::Idle);
+        assert!(created.newly_created);
+        assert_eq!(created.task.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(created.task.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(created.task.run_state, OrchestratorRunState::Idle);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧库映射行 request_fingerprint 为空时不能当通配符；同键不同 payload 必须 conflict，
+    ///     强制客户端换新 request id，避免静默返回错误内容的旧任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     直接插入空 fingerprint 映射与任务，再用不同 payload 调用幂等 create，断言 Conflict。
+    #[tokio::test]
+    async fn remote_create_legacy_empty_fingerprint_conflicts_on_payload_mismatch() {
+        let (pool, repo) = setup_repo().await;
+        let first = task_row("task-legacy", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&first).await.unwrap();
+        sqlx::query(
+            "INSERT INTO orchestrator_remote_task_create_requests \
+             (request_id, project_id, task_id, request_fingerprint, created_at, updated_at) \
+             VALUES (?, ?, ?, '', ?, ?)",
+        )
+        .bind("legacy-empty-fp")
+        .bind("project-1")
+        .bind("task-legacy")
+        .bind("2026-07-05T00:00:00Z")
+        .bind("2026-07-05T00:00:00Z")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut second = task_row("task-new", "project-1", OrchestratorTaskStatus::Draft);
+        second.goal = "different-payload-goal".to_string();
+        let err = repo
+            .create_remote_task_for_client_request(
+                "legacy-empty-fp",
+                &second,
+                OrchestratorCreateAction::Todo,
+            )
+            .await
+            .expect_err("legacy empty fingerprint must fail closed");
+        assert!(
+            matches!(err, AppError::Conflict(_)),
+            "应返回 Conflict: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("缺少可靠请求指纹")
+                || err.to_string().contains("clientRequestId"),
+            "错误应提示指纹不可靠: {err}"
+        );
+        let listed = repo.list_tasks(Some("project-1")).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "task-legacy");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Start 幂等命中必须返回 newly_created=false，调用方据此跳过 dispatch，
+    ///     防止任务 A 完成后同键重放启动队列中的任务 B。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     首次 Start 创建 A，再创建排队任务 B 并标记 A 为 Done；同键重放 Start 断言
+    ///     newly_created=false 且 B 仍保持 Todo/Idle（未被 claim）。
+    #[tokio::test]
+    async fn remote_create_start_replay_reports_not_newly_created_when_other_tasks_queued() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+
+        let first = task_row("task-a", "project-1", OrchestratorTaskStatus::Draft);
+        let created = repo
+            .create_remote_task_for_client_request(
+                "start-replay-key",
+                &first,
+                OrchestratorCreateAction::Start,
+            )
+            .await
+            .unwrap();
+        assert!(created.newly_created);
+        assert_eq!(created.task.id, "task-a");
+
+        // 模拟 A 已完成，队列中另有可调度任务 B。
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET status='done', workflow_state='done', \
+             run_state='idle', updated_at=? WHERE id=?",
+        )
+        .bind("2026-07-05T00:01:00Z")
+        .bind("task-a")
+        .execute(&pool)
+        .await
+        .unwrap();
+        let queued_b = task_row("task-b", "project-1", OrchestratorTaskStatus::Queued);
+        repo.create_task(&queued_b).await.unwrap();
+
+        let mut replay_row = task_row("task-a-replay", "project-1", OrchestratorTaskStatus::Draft);
+        replay_row.title = first.title.clone();
+        replay_row.goal = first.goal.clone();
+        replay_row.acceptance_criteria = first.acceptance_criteria.clone();
+        let replayed = repo
+            .create_remote_task_for_client_request(
+                "start-replay-key",
+                &replay_row,
+                OrchestratorCreateAction::Start,
+            )
+            .await
+            .unwrap();
+        assert!(!replayed.newly_created);
+        assert_eq!(replayed.task.id, "task-a");
+
+        let b = repo.get_task("task-b").await.unwrap();
+        assert_eq!(b.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(b.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(b.run_state, OrchestratorRunState::Idle);
+        let listed = repo.list_tasks(Some("project-1")).await.unwrap();
+        assert_eq!(listed.len(), 2);
     }
 
     /// Business Logic（为什么需要这个函数）:

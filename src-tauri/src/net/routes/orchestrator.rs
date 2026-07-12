@@ -144,14 +144,15 @@ async fn get_local_project_task(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     本机 remote shortcut 创建任务时，owning device 需要生成权威任务行，并按 createAction 写入初始状态。
+///     调用方（create route）还需要知道是否首次插入，以便仅在新建时触发 Start dispatch。
 ///
 /// Code Logic（这个函数做什么）:
 ///     确认 projectId 为 local 后要求非空 clientRequestId，再复用命令层 row builder 创建基础 row；
-///     repo 事务按 createAction 和 clientRequestId 保证重复请求返回同一任务。
+///     repo 事务按 createAction 和 clientRequestId 保证重复请求返回同一任务，并透出 newly_created。
 async fn create_task_for_state(
     state: &OrchestratorRouteContext,
     req: RemoteCreateOrchestratorTaskReq,
-) -> Result<OrchestratorTaskDto, AppError> {
+) -> Result<crate::orchestrator::repo::IdempotentCreateTaskOutcome, AppError> {
     ensure_remote_orchestrator_local_project_id(state, &req.project_id).await?;
     let client_request_id = req
         .client_request_id
@@ -174,11 +175,10 @@ async fn create_task_for_state(
         external_state: req.external_state,
         external_labels: req.external_labels,
     })?;
-    let created = state
+    state
         .orchestrator_repo
         .create_remote_task_for_client_request(&client_request_id, &row, req.create_action)
-        .await?;
-    Ok(OrchestratorTaskDto::from(created))
+        .await
 }
 
 /// 按项目列出远端 Orchestrator 任务。
@@ -440,9 +440,11 @@ fn get_config_for_state(state: &OrchestratorRouteContext) -> RemoteOrchestratorC
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     其它设备需要通过 P2P HTTP 在本设备 local 项目中创建权威任务。
+///     createAction=Start 只能在首次创建后 best-effort 调度；幂等重放不得再次 dispatch。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收 JSON 请求体，构造 route context 后委托 create_task_for_state；Start 动作额外 best-effort dispatch 并刷新返回状态。
+///     接收 JSON 请求体，构造 route context 后委托 create_task_for_state；
+///     仅 `newly_created && Start` 时 dispatch_once 并刷新返回状态，重放直接返回既有任务 DTO。
 pub async fn create_task(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
@@ -450,10 +452,11 @@ pub async fn create_task(
 ) -> P2pResult<Json<OrchestratorTaskDto>> {
     let create_action = req.create_action;
     let context = OrchestratorRouteContext::from_app_state(&state);
-    let created = create_task_for_state(&context, req)
+    let outcome = create_task_for_state(&context, req)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.create"))?;
-    if !create_action.should_dispatch_after_create() {
+    let created = OrchestratorTaskDto::from(outcome.task);
+    if !outcome.newly_created || !create_action.should_dispatch_after_create() {
         return Ok(Json(created));
     }
 
@@ -1116,7 +1119,7 @@ mod tests {
         let state = test_state().await;
         insert_project(&state, "project-1", "local").await;
 
-        let created = create_task_for_state(
+        let outcome = create_task_for_state(
             &state,
             RemoteCreateOrchestratorTaskReq {
                 project_id: "project-1".to_string(),
@@ -1136,7 +1139,9 @@ mod tests {
         )
         .await
         .expect("create task");
+        let created = outcome.task;
 
+        assert!(outcome.newly_created);
         assert_eq!(created.project_id, "project-1");
         assert_eq!(created.status, OrchestratorTaskStatus::Queued);
         assert_eq!(created.workflow_state, OrchestratorWorkflowState::Todo);
@@ -1182,10 +1187,12 @@ mod tests {
             .await
             .expect("list tasks");
 
-        assert_eq!(first.id, second.id);
-        assert_eq!(first.status, OrchestratorTaskStatus::Queued);
+        assert!(first.newly_created);
+        assert!(!second.newly_created);
+        assert_eq!(first.task.id, second.task.id);
+        assert_eq!(first.task.status, OrchestratorTaskStatus::Queued);
         assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].id, first.id);
+        assert_eq!(tasks[0].id, first.task.id);
     }
 
     /// Business Logic（为什么需要这个测试）:

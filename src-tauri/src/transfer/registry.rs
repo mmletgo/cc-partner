@@ -17,7 +17,7 @@
 
 use crate::models::transfer::{TransferStatus, TransferTask};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Instant;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -89,8 +89,9 @@ fn prune_expired_tombstones(map: &mut HashMap<String, TransferTombstone>) {
 pub struct TransferRegistry {
     inner: Arc<RwLock<HashMap<String, Entry>>>,
     /// finalize 单飞锁：每个 transfer_id 一把 tokio Mutex，确保并发重复最后一块串行 finalize
-    /// （Finding 4）。锁在 transfer_id 生命周期内常驻，TTL 由 tombstones 间接覆盖。
-    finalize_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    /// （Finding 4 + fix7）。用 Weak 存储，调用方持有的 Arc 全部 drop 后条目可被回收，
+    /// 避免未知/随机 ID 永久扩张锁表。
+    finalize_locks: Arc<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
     /// 终态墓碑表：finalize 完成后短期保留，重放的最后一块请求与 status 查询命中后返回同一结果。
     tombstones: Arc<Mutex<HashMap<String, TransferTombstone>>>,
 }
@@ -105,20 +106,41 @@ impl TransferRegistry {
         }
     }
 
-    /// 获取某 transfer_id 的 chunk/finalize 单飞锁（Finding 4 + fix6）。
+    /// 获取某 transfer_id 的 chunk/finalize 单飞锁（Finding 4 + fix6 + fix7）。
     ///
     /// Business Logic（为什么需要这个方法）:
     ///     最后一块请求可能在传输层被重试。锁必须覆盖 re-read 任务/墓碑、open/write、
     ///     进度更新与 finalize：若只在 finalize 前加锁，迟到请求可在 rename 后仍持旧 fd
     ///     改写已校验文件。第一个请求持锁完成 finalize（任务移除 + 写墓碑），
     ///     第二个请求拿锁后先命中墓碑，不得再 open 文件。
+    ///     未知 transfer_id 的探测请求不得永久登记锁表条目。
     ///
-    /// Code Logic: 锁 map 用 std Mutex（无 await），按 id 取/建 Arc<AsyncMutex>（持锁跨越 await）。
+    /// Code Logic:
+    ///     锁 map 用 std Mutex（无 await）；值存 `Weak<AsyncMutex>`。
+    ///     命中且 upgrade 成功 → 复用；失效或 miss → 新建 Arc 并登记 Weak；顺手 prune dead Weak。
     pub fn finalize_lock(&self, id: &str) -> Arc<AsyncMutex<()>> {
         let mut map = self.finalize_locks.lock().expect("finalize_locks 写锁中毒");
-        map.entry(id.to_string())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone()
+        // 惰性淘汰已无强引用的锁项，防止随机 ID 探测导致 map 无界增长。
+        map.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(existing) = map.get(id).and_then(|weak| weak.upgrade()) {
+            return existing;
+        }
+        let lock = Arc::new(AsyncMutex::new(()));
+        map.insert(id.to_string(), Arc::downgrade(&lock));
+        lock
+    }
+
+    /// 当前 finalize 锁表条目数（仅测试/诊断用）。
+    ///
+    /// Business Logic（为什么需要这个方法）:
+    ///     随机 ID 探测回归需要断言锁表不会无限增长。
+    ///
+    /// Code Logic（这个方法做什么）:
+    ///     先 prune 失效 Weak，再返回 map 长度。
+    pub fn finalize_lock_map_len(&self) -> usize {
+        let mut map = self.finalize_locks.lock().expect("finalize_locks 写锁中毒");
+        map.retain(|_, weak| weak.strong_count() > 0);
+        map.len()
     }
 
     /// 写入终态墓碑（Finding 4）。finalize 完成后调用。
@@ -451,5 +473,24 @@ mod tests {
         }
         // 访问应触发惰性清理并返回 None。
         assert!(reg.tombstone("expired").is_none(), "过期墓碑应被淘汰");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     持续请求未知 transfer_id 不得让 finalize 锁表无界增长；Weak 条目在强引用释放后必须可回收。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对大量随机 ID 取锁后立即 drop Arc，再查 map 长度，断言不会保留全部条目。
+    #[test]
+    fn finalize_lock_map_does_not_grow_unbounded_for_unknown_ids() {
+        let reg = TransferRegistry::new();
+        for i in 0..200 {
+            let lock = reg.finalize_lock(&format!("random-{i}"));
+            drop(lock);
+        }
+        // 再触发一次 prune（内部 retain）。
+        let _ = reg.finalize_lock("probe-once");
+        // probe-once 自身仍有本作用域引用；随机 ID 的 Weak 应已被 prune。
+        let len = reg.finalize_lock_map_len();
+        assert!(len <= 2, "未知 ID 锁表应回收，实际长度 {len}");
     }
 }

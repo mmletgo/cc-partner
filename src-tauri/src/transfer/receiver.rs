@@ -74,11 +74,16 @@ pub struct StatusResp {
 /// 处理 init：创建接收任务并返回断点续传 offset。
 ///
 /// Business Logic: 对端发起传输前先发元数据，本端确认接收并告知从何处续传。
+///     同一 transfer_id 的重复 init 必须与 chunk/finalize 串行，且不得覆盖活跃任务或绕过终态墓碑。
 /// Code Logic:
 ///     1. 取 receive_dir，确保存在；
-///     2. 临时文件 `.{transfer_id}.tmp`，已存在则其大小为 resume_offset；
-///     3. 构造 TransferTask（Receive）入 registry；
-///     4. 返回 `{transfer_id, accepted:true, resume_offset}`。
+///     2. 解析 transfer_id 后获取与 chunk 相同的 per-ID 锁；
+///     3. 持锁后重查 active task / 墓碑：
+///        - 活跃且元数据相同 → 幂等返回当前 resume_offset；
+///        - 活跃但元数据不同 → conflict；
+///        - 命中墓碑 → conflict（终态后禁止 reopen 写路径）；
+///     4. 否则读/建 `.{transfer_id}.tmp`，构造 TransferTask（Receive）入 registry；
+///     5. 返回 `{transfer_id, accepted:true, resume_offset}`。
 pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, AppError> {
     // 标准 RwLockReadGuard 非 Send，必须在 await 前释放：先 clone 出 receive_dir 字符串。
     let receive_dir = state
@@ -92,7 +97,37 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
 
     let transfer_id = meta
         .transfer_id
+        .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    // init 与 chunk/finalize 共享 per-ID 锁，防止并发 init 覆盖活跃 entry 或 finalize 后重开写路径。
+    let init_lock = state.transfers.finalize_lock(&transfer_id);
+    let _guard = init_lock.lock().await;
+
+    if let Some(existing) = state.transfers.get(&transfer_id) {
+        if init_metadata_matches(&existing, &meta) {
+            let resume_offset = match tokio::fs::metadata(&existing.file_path).await {
+                Ok(m) => m.len().max(existing.transferred_bytes),
+                Err(_) => existing.transferred_bytes,
+            };
+            tracing::info!("幂等 init 命中活跃传输: {transfer_id}, resume_offset={resume_offset}");
+            return Ok(InitResp {
+                transfer_id,
+                accepted: true,
+                resume_offset,
+            });
+        }
+        return Err(AppError::conflict(format!(
+            "transfer_id `{transfer_id}` 已存在且元数据不一致，拒绝覆盖活跃传输"
+        )));
+    }
+
+    if state.transfers.tombstone(&transfer_id).is_some() {
+        return Err(AppError::conflict(format!(
+            "transfer_id `{transfer_id}` 已终态完成，拒绝重新 init"
+        )));
+    }
+
     let tmp_path = dir.join(format!(".{transfer_id}.tmp"));
 
     // 断点续传：检查临时文件已存在大小
@@ -128,6 +163,18 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
         accepted: true,
         resume_offset,
     })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     同一 transfer_id 重放 init 时，只有元数据完全一致才允许幂等返回，否则必须 conflict。
+///
+/// Code Logic（这个函数做什么）:
+///     比较 filename/size/sha256/chunk_size 是否与活跃任务一致。
+fn init_metadata_matches(task: &TransferTask, meta: &InitMeta) -> bool {
+    task.filename == meta.filename
+        && task.size == meta.size
+        && task.sha256 == meta.sha256
+        && task.chunk_size == meta.chunk_size
 }
 
 /// 处理 chunk：将数据写入临时文件指定 offset，收齐时自动 finalize。
@@ -744,6 +791,174 @@ mod tests {
         assert!(
             !tmp_path.exists(),
             "成功 finalize 后临时文件应已被 rename 移除"
+        );
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同一 transfer_id 重复 init 必须幂等，不能覆盖活跃 entry 的元数据或进度。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     首次 init 后写一部分进度，再以相同元数据 init，断言 resume_offset 反映现有进度且任务仍唯一。
+    #[tokio::test]
+    async fn handle_init_is_idempotent_for_same_metadata() {
+        use sha2::{Digest, Sha256};
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let payload = b"hello-world";
+        let sha = format!("{:x}", Sha256::digest(payload));
+        let transfer_id = "init-idempotent".to_string();
+
+        let first = handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "hello.txt".to_string(),
+                size: payload.len() as u64,
+                sha256: sha.clone(),
+                chunk_size: 4,
+            },
+        )
+        .await
+        .expect("first init");
+        assert!(first.accepted);
+        assert_eq!(first.resume_offset, 0);
+
+        // 写入部分数据模拟进行中传输。
+        let partial = handle_chunk(&state, &transfer_id, 0, payload[..5].to_vec())
+            .await
+            .expect("partial chunk");
+        assert!(partial.success);
+        assert_eq!(partial.received_bytes, 5);
+
+        let second = handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "hello.txt".to_string(),
+                size: payload.len() as u64,
+                sha256: sha,
+                chunk_size: 4,
+            },
+        )
+        .await
+        .expect("second init");
+        assert!(second.accepted);
+        assert!(
+            second.resume_offset >= 5,
+            "幂等 init 应返回至少已写入字节数，实际 {}",
+            second.resume_offset
+        );
+        assert_eq!(state.transfers.list().len(), 1);
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同 id 不同元数据的 init 必须 conflict，禁止覆盖活跃传输。
+    #[tokio::test]
+    async fn handle_init_rejects_metadata_conflict_on_active_task() {
+        use sha2::{Digest, Sha256};
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let sha = format!("{:x}", Sha256::digest(b"A"));
+        let transfer_id = "init-conflict".to_string();
+
+        handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "a.bin".to_string(),
+                size: 1,
+                sha256: sha.clone(),
+                chunk_size: 1,
+            },
+        )
+        .await
+        .expect("first init");
+
+        let err = handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id),
+                filename: "b.bin".to_string(),
+                size: 1,
+                sha256: sha,
+                chunk_size: 1,
+            },
+        )
+        .await
+        .expect_err("different metadata must conflict");
+        assert!(
+            matches!(err, AppError::Conflict(_)),
+            "应返回 Conflict: {err:?}"
+        );
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     finalize 完成后重放 init 不得重建 active task 重新打开写路径。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     完整传输完成后再次 init 同 id，断言 Conflict 且 registry 无 active 任务。
+    #[tokio::test]
+    async fn handle_init_rejects_reopen_after_finalize_tombstone() {
+        use sha2::{Digest, Sha256};
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let payload = b"Z";
+        let sha = format!("{:x}", Sha256::digest(payload));
+        let transfer_id = "init-after-finalize".to_string();
+
+        handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "z.bin".to_string(),
+                size: 1,
+                sha256: sha.clone(),
+                chunk_size: 1,
+            },
+        )
+        .await
+        .expect("init");
+        let chunk = handle_chunk(&state, &transfer_id, 0, payload.to_vec())
+            .await
+            .expect("chunk");
+        assert!(chunk.success);
+        assert!(
+            state.transfers.get(&transfer_id).is_none(),
+            "finalize 后应移除 active"
+        );
+        assert!(
+            state.transfers.tombstone(&transfer_id).is_some(),
+            "应有终态墓碑"
+        );
+
+        let err = handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "z.bin".to_string(),
+                size: 1,
+                sha256: sha,
+                chunk_size: 1,
+            },
+        )
+        .await
+        .expect_err("post-finalize init must conflict");
+        assert!(
+            matches!(err, AppError::Conflict(_)),
+            "应返回 Conflict: {err:?}"
+        );
+        assert!(
+            state.transfers.get(&transfer_id).is_none(),
+            "重放 init 不得重建 active 任务"
         );
 
         let _ = fs::remove_dir_all(&receive_dir);
