@@ -2226,6 +2226,99 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     用户在原 Automation UI 对协议/校验失败的 outbox 选择「重新发送」时，必须原子恢复为 pending，
+    ///     并保留原 request payload 与 clientRequestId，避免创建重复远端任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅用 `WHERE id=? AND status='failed'` 更新 status=pending、清空 last_error、刷新 updated_at，
+    ///     绝不改写 request_json；0 行更新时读取当前状态，缺失返回 not_found，其它状态返回 conflict。
+    pub async fn retry_failed_remote_outbox_item(
+        &self,
+        item_id: &str,
+    ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
+        let item_id = item_id.trim();
+        if item_id.is_empty() {
+            return Err(AppError::validation("远端 outbox ID 不能为空"));
+        }
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_remote_outbox \
+             SET status = ?, last_error = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(RemoteOutboxStatus::Pending.as_str())
+        .bind(Option::<&str>::None)
+        .bind(&now)
+        .bind(item_id)
+        .bind(RemoteOutboxStatus::Failed.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self
+                .get_remote_outbox_item(item_id)
+                .await?
+                .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")));
+        }
+
+        match self.get_remote_outbox_item(item_id).await? {
+            None => Err(AppError::not_found(format!(
+                "远端 outbox 不存在: {item_id}"
+            ))),
+            Some(current) => Err(AppError::conflict(format!(
+                "只有失败的远端 outbox 可以重新发送，当前状态为 {}",
+                current.status.as_str()
+            ))),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户确认放弃某条失败 outbox 后，条目应进入 discarded 终态：保留审计与 last_error，
+    ///     但不再参与 dispatcher、active 列表或 Attention 投影。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅用 `WHERE id=? AND status='failed'` 更新 status=discarded 与 updated_at，保留 last_error/request_json；
+    ///     0 行更新时读取当前状态，缺失返回 not_found，其它状态返回 conflict。
+    pub async fn discard_failed_remote_outbox_item(
+        &self,
+        item_id: &str,
+    ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
+        let item_id = item_id.trim();
+        if item_id.is_empty() {
+            return Err(AppError::validation("远端 outbox ID 不能为空"));
+        }
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_remote_outbox \
+             SET status = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(RemoteOutboxStatus::Discarded.as_str())
+        .bind(&now)
+        .bind(item_id)
+        .bind(RemoteOutboxStatus::Failed.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self
+                .get_remote_outbox_item(item_id)
+                .await?
+                .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")));
+        }
+
+        match self.get_remote_outbox_item(item_id).await? {
+            None => Err(AppError::not_found(format!(
+                "远端 outbox 不存在: {item_id}"
+            ))),
+            Some(current) => Err(AppError::conflict(format!(
+                "只有失败的远端 outbox 可以放弃发送，当前状态为 {}",
+                current.status.as_str()
+            ))),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     dispatcher 打开远端项目后会拿到远端 local projectId，outbox 行应记录该映射便于后续排查和 UI 展示。
     ///
     /// Code Logic（这个函数做什么）:
@@ -4850,5 +4943,246 @@ mod tests {
         assert_eq!(items[0].title, "npm test");
         assert_eq!(items[0].summary, "passed");
         assert_eq!(items[0].content, "output");
+    }
+
+    /// Business Logic（为什么需要这个辅助函数）:
+    ///     Retry/Discard 单测需要快速把 outbox 推到 failed，才能验证 failed-only 状态机。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入 pending → claim sending → mark failed，返回最终 failed 行。
+    async fn seed_failed_remote_outbox(
+        repo: &OrchestratorRepo,
+        request_json: &str,
+        last_error: &str,
+    ) -> OrchestratorRemoteOutboxRow {
+        let item = repo
+            .insert_remote_outbox_pending(
+                "device-1",
+                "Mac mini",
+                "/Users/hans/project",
+                None,
+                request_json,
+            )
+            .await
+            .expect("insert pending");
+        repo.claim_remote_outbox_item_as_sending(&item.id)
+            .await
+            .expect("claim")
+            .expect("claimed");
+        repo.mark_remote_outbox_failed(&item.id, last_error)
+            .await
+            .expect("mark failed")
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户对协议/校验失败的 outbox 选择重新发送时，必须原子回到 pending，清空 last_error，
+    ///     并完整保留原 request_json/clientRequestId，避免重复创建远端任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造带 clientRequestId 的 failed item，调用 retry_failed_remote_outbox_item，
+    ///     断言 status=pending、last_error 清空、request_json 原样保留；重复 retry 与非 failed 状态返回 conflict，
+    ///     缺失 id 返回 not_found；discarded 不出现在 active/dispatcher 查询中。
+    #[tokio::test]
+    async fn retry_failed_remote_outbox() {
+        let (_pool, repo) = setup_repo().await;
+        let request_json = r#"{"projectId":"p1","title":"t","goal":"g","acceptanceCriteria":"a","clientRequestId":"client-req-42","createAction":"todo"}"#;
+        let failed = seed_failed_remote_outbox(&repo, request_json, "项目不能为空").await;
+        assert_eq!(failed.status, RemoteOutboxStatus::Failed);
+        assert_eq!(failed.last_error.as_deref(), Some("项目不能为空"));
+        assert_eq!(failed.request_json, request_json);
+
+        let retried = repo
+            .retry_failed_remote_outbox_item(&failed.id)
+            .await
+            .expect("retry failed");
+        assert_eq!(retried.status, RemoteOutboxStatus::Pending);
+        assert!(retried.last_error.is_none());
+        assert_eq!(retried.request_json, request_json);
+        assert!(retried.request_json.contains("client-req-42"));
+        assert!(retried.remote_task_id.is_none());
+        assert!(retried.sent_at.is_none());
+
+        let pending = repo
+            .list_pending_remote_outbox_items(20)
+            .await
+            .expect("list pending");
+        assert!(pending.iter().any(|item| item.id == failed.id));
+
+        let active = repo
+            .list_remote_outbox_items_for_project_path("device-1", "/Users/hans/project")
+            .await
+            .expect("list active");
+        assert!(active.iter().any(|item| item.id == failed.id));
+
+        let duplicate = repo.retry_failed_remote_outbox_item(&failed.id).await;
+        assert!(duplicate.is_err());
+        let duplicate_err = duplicate.unwrap_err().to_string();
+        assert!(
+            duplicate_err.contains("只有失败的远端 outbox 可以重新发送"),
+            "duplicate retry should be invalid-transition: {duplicate_err}"
+        );
+
+        let missing = repo
+            .retry_failed_remote_outbox_item("missing-outbox-id")
+            .await;
+        assert!(missing.is_err());
+        let missing_err = missing.unwrap_err().to_string();
+        assert!(
+            missing_err.contains("不存在"),
+            "missing retry should be not-found: {missing_err}"
+        );
+
+        for status in [
+            RemoteOutboxStatus::Pending,
+            RemoteOutboxStatus::Sending,
+            RemoteOutboxStatus::Mirrored,
+            RemoteOutboxStatus::Discarded,
+        ] {
+            let item = repo
+                .insert_remote_outbox_pending(
+                    "device-1",
+                    "Mac mini",
+                    "/Users/hans/project",
+                    None,
+                    request_json,
+                )
+                .await
+                .expect("insert for rejection");
+            sqlx::query(
+                "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ? WHERE id = ?",
+            )
+            .bind(status.as_str())
+            .bind("prior error")
+            .bind(&item.id)
+            .execute(&_pool)
+            .await
+            .expect("force status");
+            let rejected = repo.retry_failed_remote_outbox_item(&item.id).await;
+            assert!(
+                rejected.is_err(),
+                "retry should reject status {}",
+                status.as_str()
+            );
+            let err = rejected.unwrap_err().to_string();
+            assert!(
+                err.contains("只有失败的远端 outbox 可以重新发送"),
+                "status {} should be invalid-transition: {err}",
+                status.as_str()
+            );
+            let persisted = repo
+                .get_remote_outbox_item(&item.id)
+                .await
+                .expect("get")
+                .expect("exists");
+            assert_eq!(persisted.status, status);
+            assert_eq!(persisted.request_json, request_json);
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户放弃失败 outbox 后，条目必须进入 discarded 终态：保留 last_error 与 request 审计，
+    ///     但不再出现在 active 列表或 dispatcher pending 队列中。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 failed item 后调用 discard_failed_remote_outbox_item，断言 status=discarded、
+    ///     last_error/request_json 保留；重复 discard 与非 failed 状态返回 conflict，缺失返回 not_found；
+    ///     discarded 被 active/pending 查询排除。
+    #[tokio::test]
+    async fn discard_failed_remote_outbox() {
+        let (_pool, repo) = setup_repo().await;
+        let request_json = r#"{"projectId":"p1","title":"t","goal":"g","acceptanceCriteria":"a","clientRequestId":"client-req-99","createAction":"backlog"}"#;
+        let failed = seed_failed_remote_outbox(&repo, request_json, "远端拒绝: 校验失败").await;
+
+        let discarded = repo
+            .discard_failed_remote_outbox_item(&failed.id)
+            .await
+            .expect("discard failed");
+        assert_eq!(discarded.status, RemoteOutboxStatus::Discarded);
+        assert_eq!(discarded.last_error.as_deref(), Some("远端拒绝: 校验失败"));
+        assert_eq!(discarded.request_json, request_json);
+        assert!(discarded.request_json.contains("client-req-99"));
+
+        let pending = repo
+            .list_pending_remote_outbox_items(20)
+            .await
+            .expect("list pending");
+        assert!(!pending.iter().any(|item| item.id == failed.id));
+
+        let active = repo
+            .list_remote_outbox_items_for_project_path("device-1", "/Users/hans/project")
+            .await
+            .expect("list active");
+        assert!(!active.iter().any(|item| item.id == failed.id));
+
+        let still_there = repo
+            .get_remote_outbox_item(&failed.id)
+            .await
+            .expect("get discarded")
+            .expect("audit retained");
+        assert_eq!(still_there.status, RemoteOutboxStatus::Discarded);
+
+        let duplicate = repo.discard_failed_remote_outbox_item(&failed.id).await;
+        assert!(duplicate.is_err());
+        let duplicate_err = duplicate.unwrap_err().to_string();
+        assert!(
+            duplicate_err.contains("只有失败的远端 outbox 可以放弃发送"),
+            "duplicate discard should be invalid-transition: {duplicate_err}"
+        );
+
+        let missing = repo
+            .discard_failed_remote_outbox_item("missing-outbox-id")
+            .await;
+        assert!(missing.is_err());
+        let missing_err = missing.unwrap_err().to_string();
+        assert!(
+            missing_err.contains("不存在"),
+            "missing discard should be not-found: {missing_err}"
+        );
+
+        for status in [
+            RemoteOutboxStatus::Pending,
+            RemoteOutboxStatus::Sending,
+            RemoteOutboxStatus::Mirrored,
+            RemoteOutboxStatus::Discarded,
+        ] {
+            let item = repo
+                .insert_remote_outbox_pending(
+                    "device-1",
+                    "Mac mini",
+                    "/Users/hans/project",
+                    None,
+                    request_json,
+                )
+                .await
+                .expect("insert for rejection");
+            sqlx::query(
+                "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ? WHERE id = ?",
+            )
+            .bind(status.as_str())
+            .bind("prior error")
+            .bind(&item.id)
+            .execute(&_pool)
+            .await
+            .expect("force status");
+            let rejected = repo.discard_failed_remote_outbox_item(&item.id).await;
+            assert!(
+                rejected.is_err(),
+                "discard should reject status {}",
+                status.as_str()
+            );
+            let err = rejected.unwrap_err().to_string();
+            assert!(
+                err.contains("只有失败的远端 outbox 可以放弃发送"),
+                "status {} should be invalid-transition: {err}",
+                status.as_str()
+            );
+            let persisted = repo
+                .get_remote_outbox_item(&item.id)
+                .await
+                .expect("get")
+                .expect("exists");
+            assert_eq!(persisted.status, status);
+            assert_eq!(persisted.last_error.as_deref(), Some("prior error"));
+        }
     }
 }
