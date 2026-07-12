@@ -11,6 +11,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
+pub mod attention;
 pub mod cc_history;
 pub mod claude_code_assets;
 pub mod claude_md_sync;

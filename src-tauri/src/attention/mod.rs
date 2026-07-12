@@ -5,12 +5,14 @@
 //!     只从 Orchestrator/Workbench 权威状态投影，失败时整次快照失败。
 //!
 //! Code Logic（这个模块做什么）:
-//!     导出 models/source/aggregator；具体 source 与 command/route 在后续 task 接入。
+//!     导出 models/source/aggregator 与 orchestrator/workbench dependency source；
+//!     Tauri command 与 Mobile HTTP 经 commands/attention 与 net/routes/attention 接入。
 
-// source/command/route 仍在逐步接入；保留 dead_code 以免未接线的 helper 阻断编译。
+// source 纯投影 helper 可能仅被测试/后续扩展引用；保留 dead_code 以免阻断编译。
 #![allow(dead_code)]
 
 pub mod aggregator;
 pub mod models;
 pub(crate) mod orchestrator_source;
 pub(crate) mod source;
+pub(crate) mod workbench_dependency_source;

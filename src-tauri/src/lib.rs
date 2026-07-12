@@ -43,7 +43,7 @@ use crate::backend::runtime::{
 };
 use crate::backend::ui::{BackendUi, TauriBackendUi};
 use crate::commands::{
-    backend as backend_cmd, cc_history as cc_history_cmd,
+    attention as attention_cmd, backend as backend_cmd, cc_history as cc_history_cmd,
     claude_code_assets as claude_code_assets_cmd, claude_md as claude_md_cmd,
     cloud_sync as cloud_sync_cmd, config as config_cmd, devices as device_cmd,
     github_trending as github_trending_cmd, health as health_cmd,
@@ -213,6 +213,7 @@ pub fn run() {
             config_cmd::get_version,
             config_cmd::choose_dir,
             mobile_cmd::get_mobile_access_info,
+            attention_cmd::list_attention_items,
             device_cmd::list_devices,
             device_cmd::get_local_device,
             sync_cmd::trigger_sync,

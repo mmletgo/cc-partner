@@ -33,7 +33,7 @@ src/
 ├── net/               — mdns-sd 发现 + axum server + reqwest client [已实现 M3]
 ├── mobile/            — 移动端局域网 `/mobile` 访问 URL 生成（过滤 localhost/loopback）[已实现]
 ├── orchestrator/      — 自动编排器后端：任务模型、状态机、SQLite repo、scheduler、Workbench 可见 Runner、Prompt 生成、验证与交付 [已实现]
-├── attention/         — 全局 Inbox 聚合领域：DTO/source trait/确定性 aggregator（无 Inbox 表；source/command/route 后续接入）[部分实现]
+├── attention/         — 全局 Inbox 聚合领域：DTO/source trait/确定性 aggregator + orchestrator/workbench dependency source；Tauri `list_attention_items` 与 Mobile `GET /api/mobile/attention` 共享 helper；能力 token `attention.v1` [已实现]
 ├── transfer/          — 分块传输 + SHA256 + 断点续传              [M5]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
 ├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥 [已实现]
@@ -53,7 +53,9 @@ migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，�
 - **Aggregator**：`aggregator.rs::aggregate_attention_sources` 顺序收集 source → 稳定 ID 去重（相等保留首次，内容冲突返回完整性错误）→ 分类序 decision→blocked→environment → 同分类 `updatedAt` 降序 → 同时间 ID 升序 → counts.total 与分类计数一致；`generatedAt` 仅在全部 source 成功后生成。
 - **稳定 ID**：`orchestrator:human-review:<taskId>` / `orchestrator:blocked:<taskId>` / `orchestrator:outbox-failed:<outboxId>` / `workbench:dependency:tmux`；远端 taskId 使用既有 `remote:<deviceId>:<inner>` 包装。
 - **Orchestrator source（`orchestrator_source.rs`）**：本机任务 HumanReview→decision、Blocked→blocked（投影前对 `status=blocked` 应用 `SplitTaskState::from_legacy_status`）；排除 resolved/running/queued/retrying 等；稳定 ID `orchestrator:human-review:<taskId>` / `orchestrator:blocked:<taskId>` / `orchestrator:outbox-failed:<outboxId>`，远端 taskId 用 `remote:<deviceId>:<inner>`；failed outbox 仅 active remote shortcut，target.projectId 为本机 shortcut id；remote 在线刷新 mirror 为 live，网络失败回退 path mirror 并以 `last_synced_at` 为 cachedAt；损坏 mirror/仓库错误使整 source 失败；remote 刷新 `buffer_unordered(4)`。不消费 `list_orchestrator_task_views_for_state` 最终 DTO（会丢 freshness）。
-- **未接入**：workbench_dependency_source / Tauri command / Mobile route 由后续 task 落地。
+- **Workbench dependency source（`workbench_dependency_source.rs`）**：零 Workbench 项目时任何依赖状态都不投影；有项目时仅 `missing`/`failed`/`unsupported` 产出固定 ID `workbench:dependency:tmux`（category=environment，target=settings/dependencies）；`ready`/`installing` 排除；`updatedAt` 取 dependency 缓存的 `statusChangedAt`，只读 `get_workbench_dependency_status_for_state`，不触发探测/安装。
+- **API 出口**：`commands/attention.rs::list_attention_items`（Tauri）与 `net/routes/attention.rs::list_attention`（`GET /api/mobile/attention`）共用 `list_attention_items_for_state`（注册 Orchestrator + Workbench dependency 两 source 后聚合）；HTTP 使用 P2P request-id/error 信封；本路由只聚合当前 backend，不递归要求对端再聚合 attention。
+- **能力宣告**：`attention.v1` 与 Mobile attention 路由同提交写入 `server_protocol_info()`；旧后端缺失该 token 时 Mobile 客户端必须显示 unsupported，不得猜测旧接口。
 
 ## Orchestrator 基础约定（src/orchestrator/）
 
