@@ -1,10 +1,12 @@
-# Cross-Platform Smoke — macOS / Windows 后端 CLI + 原生 PTY 冒烟
+# Cross-Platform Smoke — macOS / Windows 后端 CLI + 原生 PTY + doctor/日志 冒烟
 #
 # 目的：
 #   在真实 macos-latest / windows-latest hosted runner 上验证：
 #   - backend CLI 生命周期（start→health→status→stop、duplicate start、stale control）
 #   - 平台路径 / 进程语义相关单测
 #   - 原生 PTY echo/exit
+#   - backend doctor --json（stopped/running、纯 JSON、exit 0/1/2 契约、隐私扫描）
+#   - 日志轮转 / 脱敏单测（3-history 上限、Unix mode、Windows close-before-rename）
 #   - 最小 `cargo check --locked --bins`
 #
 # 明确不验证（见 job summary）：
@@ -104,7 +106,7 @@ jobs:
           set -euo pipefail
           cargo check --locked --bins 2>&1 | tee "${{ runner.temp }}/cargo-logs/check-bins.log"
 
-      - name: Focused unit tests (control / cli / sessions)
+      - name: Focused unit tests (control / cli / sessions / logging / doctor)
         id: unit
         working-directory: src-tauri
         shell: bash
@@ -115,6 +117,9 @@ jobs:
             cargo test --locked backend::control::tests -- --nocapture
             cargo test --locked backend::cli::tests -- --nocapture
             cargo test --locked workbench::sessions::tests -- --nocapture
+            # 日志轮转/脱敏/平台 mode 与 Windows close-before-rename（Task 7）
+            cargo test --locked backend::logging::tests -- --nocapture
+            cargo test --locked backend::doctor::tests -- --nocapture
           } 2>&1 | tee "${{ runner.temp }}/cargo-logs/unit.log"
 
       - name: Backend CLI lifecycle smoke
@@ -129,6 +134,21 @@ jobs:
           set -euo pipefail
           cargo test --locked --test backend_cli_smoke -- --nocapture --test-threads=1 \
             2>&1 | tee "${{ runner.temp }}/cargo-logs/backend-cli-smoke.log"
+
+      - name: Backend doctor + privacy smoke
+        id: doctor_smoke
+        working-directory: src-tauri
+        shell: bash
+        timeout-minutes: 12
+        env:
+          CC_PARTNER_SMOKE_ROOT: ${{ env.CC_PARTNER_SMOKE_ROOT }}
+          RUST_BACKTRACE: '1'
+        run: |
+          set -euo pipefail
+          # doctor --json 纯 JSON / exit 0|1|2 / privacy sentinel 扫描 / core-path unhealthy
+          # 串行：共享隔离根下避免并行 case 抢端口/进程诊断
+          cargo test --locked --test backend_doctor_smoke -- --nocapture --test-threads=1 \
+            2>&1 | tee "${{ runner.temp }}/cargo-logs/backend-doctor-smoke.log"
 
       - name: Native PTY echo/exit smoke
         id: pty_smoke
@@ -178,7 +198,7 @@ jobs:
             fi
             echo "--- retained case diagnostics (if any) ---"
             find "${ROOT}" -type d -name diagnostics 2>/dev/null | head -n 50
-            find "${ROOT}" -type f \( -name 'summary.txt' -o -name 'backend-control.json' -o -name 'output.escaped.txt' -o -name 'process-port.txt' \) 2>/dev/null | head -n 100
+            find "${ROOT}" -type f \( -name 'summary.txt' -o -name 'backend-control.json' -o -name 'output.escaped.txt' -o -name 'process-port.txt' -o -name 'doctor-*-stdout.json' -o -name 'doctor-*-stderr.txt' -o -name 'doctor-*-exit.txt' \) 2>/dev/null | head -n 120
           } > "${DIAG}/tree.txt" 2>&1
 
           # 仅处理 smoke 拥有的 backend-control.json（live control，不含 diagnostics 快照副本）
@@ -286,6 +306,7 @@ jobs:
           CHECK="$(mark '${{ steps.check_bins.outcome }}')"
           UNIT="$(mark '${{ steps.unit.outcome }}')"
           CLI="$(mark '${{ steps.cli_smoke.outcome }}')"
+          DOCTOR="$(mark '${{ steps.doctor_smoke.outcome }}')"
           PTY="$(mark '${{ steps.pty_smoke.outcome }}')"
           CLEAN="$(mark '${{ steps.cleanup.outcome }}')"
 
@@ -300,8 +321,9 @@ jobs:
             echo "| --- | --- |"
             echo "| cargo fmt --check | ${FMT} |"
             echo "| cargo check --locked --bins | ${CHECK} |"
-            echo "| focused unit (control/cli/sessions) | ${UNIT} |"
+            echo "| focused unit (control/cli/sessions/logging/doctor) | ${UNIT} |"
             echo "| backend CLI lifecycle smoke | ${CLI} |"
+            echo "| backend doctor + privacy smoke | ${DOCTOR} |"
             echo "| native PTY echo/exit smoke | ${PTY} |"
             echo "| cleanup / diagnostics | ${CLEAN} |"
             echo ""
@@ -315,5 +337,6 @@ jobs:
             echo "| multi-host mDNS | NOT VERIFIED — hosted runner scope |"
             echo ""
             echo "Isolation: \`CC_PARTNER_SMOKE_ROOT=${CC_PARTNER_SMOKE_ROOT}\` · \`RUST_BACKTRACE=1\`."
+            echo "Doctor: pure JSON stdout; exit 0/1 expected on normal paths; core-path fixture must be unhealthy/2; privacy sentinels must not leak."
             echo "No \`continue-on-error\`; required checks above block on failure."
           } >> "${GITHUB_STEP_SUMMARY}"

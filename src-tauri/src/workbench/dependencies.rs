@@ -1393,9 +1393,7 @@ pub fn probe_git_non_mutating() -> OptionalDependencyProbe {
     command.arg("--version");
     match run_std_command_with_timeout(command, PROBE_COMMAND_TIMEOUT) {
         Ok(output) if output.status.success() => {
-            let version = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .to_string();
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             OptionalDependencyProbe {
                 available: true,
                 applicable: true,
@@ -1515,9 +1513,7 @@ pub fn probe_claude_cli_non_mutating(cli_path: &str) -> OptionalDependencyProbe 
     command.arg("--version");
     match run_std_command_with_timeout(command, PROBE_COMMAND_TIMEOUT) {
         Ok(output) if output.status.success() => {
-            let version = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .to_string();
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             OptionalDependencyProbe {
                 available: true,
                 applicable: true,

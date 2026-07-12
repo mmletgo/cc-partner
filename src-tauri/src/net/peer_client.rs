@@ -331,11 +331,11 @@ impl PeerClient {
                     "sync_pull",
                     crate::backend::logging::OperationResult::Ok,
                 )
-                    .message(format!(
-                        "sync_pull 从对端获取 {} 条 prompt",
-                        data.prompts.len()
-                    ))
-                    .emit();
+                .message(format!(
+                    "sync_pull 从对端获取 {} 条 prompt",
+                    data.prompts.len()
+                ))
+                .emit();
                 data.prompts
             }
             Err(e) => {
@@ -344,10 +344,10 @@ impl PeerClient {
                     "sync_pull",
                     crate::backend::logging::OperationResult::Error,
                 )
-                    .level(tracing::Level::WARN)
-                    .error_code("unavailable")
-                    .message(format!("sync_pull 失败: {e}"))
-                    .emit();
+                .level(tracing::Level::WARN)
+                .error_code("unavailable")
+                .message(format!("sync_pull 失败: {e}"))
+                .emit();
                 Vec::new()
             }
         }
@@ -374,8 +374,8 @@ impl PeerClient {
                     "sync_push",
                     crate::backend::logging::OperationResult::Ok,
                 )
-                    .message(format!("sync_push 成功，对端接收 {} 条", data.accepted))
-                    .emit();
+                .message(format!("sync_push 成功，对端接收 {} 条", data.accepted))
+                .emit();
                 true
             }
             Err(e) => {
@@ -384,10 +384,10 @@ impl PeerClient {
                     "sync_push",
                     crate::backend::logging::OperationResult::Error,
                 )
-                    .level(tracing::Level::WARN)
-                    .error_code("unavailable")
-                    .message(format!("sync_push 失败: {e}"))
-                    .emit();
+                .level(tracing::Level::WARN)
+                .error_code("unavailable")
+                .message(format!("sync_push 失败: {e}"))
+                .emit();
                 false
             }
         }
@@ -464,8 +464,8 @@ impl PeerClient {
                     "scratchpad_push",
                     crate::backend::logging::OperationResult::Ok,
                 )
-                    .message(format!("scratchpad_push 完成，accepted={}", data.accepted))
-                    .emit();
+                .message(format!("scratchpad_push 完成，accepted={}", data.accepted))
+                .emit();
                 true
             }
             Err(e) => {
@@ -615,8 +615,8 @@ impl PeerClient {
                     "cc_sync_pull",
                     crate::backend::logging::OperationResult::Ok,
                 )
-                    .message(format!("cc_sync_pull 获取 {} 条 CC 历史", data.items.len()))
-                    .emit();
+                .message(format!("cc_sync_pull 获取 {} 条 CC 历史", data.items.len()))
+                .emit();
                 data.items
             }
             Err(e) => {
@@ -625,10 +625,10 @@ impl PeerClient {
                     "cc_sync_pull",
                     crate::backend::logging::OperationResult::Error,
                 )
-                    .level(tracing::Level::WARN)
-                    .error_code("unavailable")
-                    .message(format!("cc_sync_pull 失败: {e}"))
-                    .emit();
+                .level(tracing::Level::WARN)
+                .error_code("unavailable")
+                .message(format!("cc_sync_pull 失败: {e}"))
+                .emit();
                 Vec::new()
             }
         }
@@ -654,8 +654,8 @@ impl PeerClient {
                     "cc_sync_push",
                     crate::backend::logging::OperationResult::Ok,
                 )
-                    .message(format!("cc_sync_push 成功，对端接收 {} 条", data.accepted))
-                    .emit();
+                .message(format!("cc_sync_push 成功，对端接收 {} 条", data.accepted))
+                .emit();
                 true
             }
             Err(e) => {
@@ -664,10 +664,10 @@ impl PeerClient {
                     "cc_sync_push",
                     crate::backend::logging::OperationResult::Error,
                 )
-                    .level(tracing::Level::WARN)
-                    .error_code("unavailable")
-                    .message(format!("cc_sync_push 失败: {e}"))
-                    .emit();
+                .level(tracing::Level::WARN)
+                .error_code("unavailable")
+                .message(format!("cc_sync_push 失败: {e}"))
+                .emit();
                 false
             }
         }
@@ -694,8 +694,11 @@ impl PeerClient {
                     "ssh_target_pull",
                     crate::backend::logging::OperationResult::Ok,
                 )
-                    .message(format!("ssh_target_pull 获取 {} 条 SSH 目标", data.targets.len()))
-                    .emit();
+                .message(format!(
+                    "ssh_target_pull 获取 {} 条 SSH 目标",
+                    data.targets.len()
+                ))
+                .emit();
                 data.targets
             }
             Err(e) => {
@@ -704,10 +707,10 @@ impl PeerClient {
                     "ssh_target_pull",
                     crate::backend::logging::OperationResult::Error,
                 )
-                    .level(tracing::Level::WARN)
-                    .error_code("unavailable")
-                    .message(format!("ssh_target_pull 失败: {e}"))
-                    .emit();
+                .level(tracing::Level::WARN)
+                .error_code("unavailable")
+                .message(format!("ssh_target_pull 失败: {e}"))
+                .emit();
                 Vec::new()
             }
         }
@@ -733,8 +736,11 @@ impl PeerClient {
                     "ssh_target_push",
                     crate::backend::logging::OperationResult::Ok,
                 )
-                    .message(format!("ssh_target_push 成功，对端接收 {} 条", data.accepted))
-                    .emit();
+                .message(format!(
+                    "ssh_target_push 成功，对端接收 {} 条",
+                    data.accepted
+                ))
+                .emit();
                 true
             }
             Err(e) => {
@@ -743,10 +749,10 @@ impl PeerClient {
                     "ssh_target_push",
                     crate::backend::logging::OperationResult::Error,
                 )
-                    .level(tracing::Level::WARN)
-                    .error_code("unavailable")
-                    .message(format!("ssh_target_push 失败: {e}"))
-                    .emit();
+                .level(tracing::Level::WARN)
+                .error_code("unavailable")
+                .message(format!("ssh_target_push 失败: {e}"))
+                .emit();
                 false
             }
         }
