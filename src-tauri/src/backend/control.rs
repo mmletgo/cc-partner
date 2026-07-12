@@ -2,6 +2,8 @@ use crate::config::config_dir;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -10,9 +12,11 @@ use tokio::sync::watch;
 
 const CONTROL_FILE_NAME: &str = "backend-control.json";
 const PID_FILE_NAME: &str = "backend.pid";
+const START_LOCK_FILE_NAME: &str = "backend-start.lock";
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
+const START_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 static SHUTDOWN_NOTIFIER: OnceLock<Mutex<Option<watch::Sender<bool>>>> = OnceLock::new();
 
 /// `/api/health` 响应中后端状态检查需要的字段。
@@ -187,6 +191,157 @@ pub fn remove_control_files() -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+/// 返回 data_dir 作用域下的 start 互斥锁文件路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     并发 `start` 必须按隔离数据根互斥，避免两个进程同时观察到 stopped 后双开 serve。
+///
+/// Code Logic（这个函数做什么）:
+///     基于 `config_dir()` 派生 `backend-start.lock` 绝对路径。
+pub fn start_lock_path() -> PathBuf {
+    config_dir().join(START_LOCK_FILE_NAME)
+}
+
+/// data_dir 作用域的跨进程 start 锁守卫。
+///
+/// Business Logic（为什么需要这个结构）:
+///     `start` 的 check-then-spawn 不是原子的；必须用磁盘锁串行化同一 data_dir 上的启动声明。
+///
+/// Code Logic（这个结构做什么）:
+///     持有通过 `create_new` 创建的锁文件句柄；Drop 时删除锁文件释放互斥。
+pub struct StartLockGuard {
+    path: PathBuf,
+    _file: fs::File,
+}
+
+impl Drop for StartLockGuard {
+    /// 释放 start 锁。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     无论 start 成功、超时还是 panic，都必须释放 data_dir 级启动互斥，避免永久卡死后续 start。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     best-effort 删除锁文件；文件已不存在时忽略。
+    fn drop(&mut self) {
+        match fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                tracing::warn!("释放 backend start 锁失败 path={:?}: {err}", self.path);
+            }
+        }
+    }
+}
+
+/// 在有界时间内获取 data_dir 作用域的跨进程 start 锁。
+///
+/// Business Logic（为什么需要这个函数）:
+///     两个并发 `start` 都可能读到 stopped 并各自 spawn serve，随后竞争 control 文件留下孤儿进程。
+///     需要按隔离根原子声明“我正在启动”。
+///
+/// Code Logic（这个函数做什么）:
+///     对 `backend-start.lock` 使用 `create_new` 互斥创建；成功写入持有者 pid + 时间戳。
+///     已存在时若持有者 pid 已死或锁超过 stale 阈值则回收后重试；否则轮询直到 deadline。
+pub async fn acquire_start_lock(timeout: Duration) -> Result<StartLockGuard, AppError> {
+    let path = start_lock_path();
+    let dir = config_dir();
+    fs::create_dir_all(&dir)?;
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                let payload = format!(
+                    "pid={}\nacquired_at_ms={}\n",
+                    std::process::id(),
+                    unix_millis_now()
+                );
+                file.write_all(payload.as_bytes())?;
+                let _ = file.flush();
+                return Ok(StartLockGuard { path, _file: file });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if reclaim_stale_start_lock(&path)? {
+                    continue;
+                }
+                if Instant::now() >= deadline {
+                    return Err(AppError::conflict(format!(
+                        "获取 backend start 锁超时（{timeout:?}）: start 锁被占用: {}",
+                        path.display()
+                    )));
+                }
+                tokio::time::sleep(STATUS_POLL_INTERVAL).await;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+}
+
+/// 判断并在需要时回收 stale start 锁。
+///
+/// Business Logic（为什么需要这个函数）:
+///     持锁进程若在 spawn 前崩溃，锁文件会永久挡住后续 start；必须可安全回收。
+///
+/// Code Logic（这个函数做什么）:
+///     读取锁内 pid；pid 不存在/不可解析/进程已死，或 mtime/acquired_at 超过阈值时删除锁并返回 true。
+fn reclaim_stale_start_lock(path: &std::path::Path) -> Result<bool, AppError> {
+    let meta = match fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+
+    let content = fs::read_to_string(path).unwrap_or_default();
+    let holder_pid = content.lines().find_map(|line| {
+        line.strip_prefix("pid=")
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+    });
+    let acquired_ms = content.lines().find_map(|line| {
+        line.strip_prefix("acquired_at_ms=")
+            .and_then(|raw| raw.trim().parse::<u128>().ok())
+    });
+
+    let age_stale = if let Some(acquired_ms) = acquired_ms {
+        unix_millis_now().saturating_sub(acquired_ms) >= START_LOCK_STALE_AFTER.as_millis()
+    } else if let Ok(modified) = meta.modified() {
+        modified
+            .elapsed()
+            .map(|elapsed| elapsed >= START_LOCK_STALE_AFTER)
+            .unwrap_or(true)
+    } else {
+        true
+    };
+
+    let holder_dead = match holder_pid {
+        Some(pid) => !process_is_alive(pid),
+        None => true,
+    };
+
+    if holder_dead || age_stale {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err.into()),
+        }
+    } else {
+        Ok(false)
+    }
+}
+
+/// 当前 unix 纪元毫秒（用于 start 锁时间戳）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     stale 锁回收需要稳定的时间锚点，避免永久占用 data_dir 启动互斥。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 SystemTime::now 相对 UNIX_EPOCH 的毫秒数；异常时返回 0。
+fn unix_millis_now() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 /// 返回进程内后端关闭通知槽。

@@ -201,8 +201,12 @@ async fn serve() -> Result<(), AppError> {
 ///     用户需要用短生命周期命令启动后台后端，并在命令返回后继续使用该服务。
 ///
 /// Code Logic（这个函数做什么）:
-///     若已 running 则直接打印状态；若 stale 则清控制文件；否则 spawn 当前 exe 的 `serve` 子进程并轮询 status 最多 10 秒。
+///     先获取 data_dir 作用域跨进程 start 锁，再读状态：running 直接返回；stale 清控制文件；
+///     否则 spawn 当前 exe 的 `serve` 子进程并轮询 status 最多 10 秒。锁在函数返回时释放。
 async fn start() -> Result<(), AppError> {
+    // 跨进程互斥：防止两个 start 同时看到 stopped 后各自 spawn serve。
+    let _start_lock = control::acquire_start_lock(START_TIMEOUT).await?;
+
     let initial = current_status().await;
     match initial.kind {
         BackendStatusKind::Running => {
@@ -511,6 +515,18 @@ fn inherit_data_dir_env(command: &mut Command) {
 ///     在 child exec 前调用 `setsid()` 创建新 session；失败时让 spawn 返回对应 IO 错误。
 #[cfg(unix)]
 fn configure_detached_child(command: &mut Command) {
+    apply_unix_detached_pre_exec(command);
+}
+
+/// Unix detached lifecycle 的生产 pre_exec seam（setsid 新会话/进程组）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     smoke 必须验证真实生产路径的进程组语义，而不是在测试里复制 setpgid/setsid 实现。
+///
+/// Code Logic（这个函数做什么）:
+///     给 Command 安装 pre_exec：子进程 exec 前 `setsid()`；失败返回 last_os_error。
+#[cfg(unix)]
+pub fn apply_unix_detached_pre_exec(command: &mut Command) {
     use std::os::unix::process::CommandExt;
 
     unsafe {
@@ -523,20 +539,32 @@ fn configure_detached_child(command: &mut Command) {
     }
 }
 
+/// Windows backend lifecycle 使用的 creation flags。
+///
+/// Business Logic（为什么需要这个函数）:
+///     smoke/单元测试必须锁定生产路径真正使用的 DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP，
+///     禁止在测试里复制字面量导致生产改坏仍绿。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 `DETACHED_PROCESS (0x8) | CREATE_NEW_PROCESS_GROUP (0x200)`。
+#[cfg(windows)]
+pub fn windows_detached_creation_flags() -> u32 {
+    const DETACHED_PROCESS: u32 = 0x00000008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+}
+
 /// 配置 Windows serve 子进程脱离父控制台。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     Windows 下 `start` 返回后 headless 后端也应独立存活，供后续 status/stop 管理。
 ///
 /// Code Logic（这个函数做什么）:
-///     设置 DETACHED_PROCESS 与 CREATE_NEW_PROCESS_GROUP creation flags。
+///     设置 DETACHED_PROCESS 与 CREATE_NEW_PROCESS_GROUP creation flags（经可测 seam 计算）。
 #[cfg(windows)]
 fn configure_detached_child(command: &mut Command) {
     use std::os::windows::process::CommandExt;
-
-    const DETACHED_PROCESS: u32 = 0x00000008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    command.creation_flags(windows_detached_creation_flags());
 }
 
 /// 配置其它平台 serve 子进程脱离父进程。

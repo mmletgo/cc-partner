@@ -211,6 +211,69 @@ fn force_reap_child(child: &mut Box<dyn portable_pty::Child + Send + Sync>, time
     }
 }
 
+/// PTY 子进程 RAII 清理守卫：任意 panic/错误路径都 kill+有界 reap。
+///
+/// Business Logic（为什么需要这个结构）:
+///     portable-pty Child Drop 不会自动杀进程；take_writer/try_clone_reader/write_all
+///     等失败若直接 panic，会遗留 shell，workflow cleanup 也扫不到。
+///
+/// Code Logic（这个结构做什么）:
+///     持有 child；`disarm` 表示测试已正常回收；Drop 时若仍 armed 则 force_reap。
+struct PtyChildGuard {
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    armed: bool,
+}
+
+impl PtyChildGuard {
+    /// Business Logic（为什么需要这个函数）:
+    ///     spawn 成功后必须立刻接管 child 生命周期。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     包装 child 并默认 armed=true。
+    fn new(child: Box<dyn portable_pty::Child + Send + Sync>) -> Self {
+        Self {
+            child: Some(child),
+            armed: true,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试主体需要可变借用 child 做 try_wait/kill。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回内部 child 的可变引用；缺失时 panic（守卫构造后不应为空）。
+    fn child_mut(&mut self) -> &mut Box<dyn portable_pty::Child + Send + Sync> {
+        self.child
+            .as_mut()
+            .expect("PtyChildGuard 在 Drop 前应持有 child")
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     正常路径已确认子进程退出后，不应在 Drop 时再次 kill。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 armed 置 false。
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PtyChildGuard {
+    /// Business Logic（为什么需要这个函数）:
+    ///     panic 或早期 return 时仍必须清理 shell 子进程。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     armed 时对 child force_reap（kill + 有界 try_wait）。
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Some(child) = self.child.as_mut() {
+            force_reap_child(child, Duration::from_secs(2));
+        }
+    }
+}
+
 /// 持续 drain PTY 输出的共享缓冲。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -507,33 +570,57 @@ fn native_pty_echo_token_and_exit_zero() {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
 
-    let mut child = pair
+    let child = pair
         .slave
         .spawn_command(cmd)
         .unwrap_or_else(|err| panic!("spawn {:?} 失败: {err}", shell.program));
-    let child_pid = child.process_id();
+    // spawn 成功后立刻安装 RAII 清理守卫：后续 take_writer/reader/write 失败 panic 也会回收 shell。
+    let mut child_guard = PtyChildGuard::new(child);
+    let child_pid = child_guard.child_mut().process_id();
 
     // 父进程必须释放 slave，否则 child 退出后 master 读端可能永远等不到 EOF。
     drop(pair.slave);
 
-    let mut writer = pair.master.take_writer().expect("PTY writer 应可取出");
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .expect("PTY reader 应可 clone");
+    let mut writer = match pair.master.take_writer() {
+        Ok(w) => w,
+        Err(err) => {
+            let snap = Vec::new();
+            persist_pty_failure_diagnostics(&format!("take_writer failed: {err}"), &marker, &snap);
+            panic!("PTY writer 取出失败: {err}");
+        }
+    };
+    let reader = match pair.master.try_clone_reader() {
+        Ok(r) => r,
+        Err(err) => {
+            drop(writer);
+            let snap = Vec::new();
+            persist_pty_failure_diagnostics(
+                &format!("try_clone_reader failed: {err}"),
+                &marker,
+                &snap,
+            );
+            panic!("PTY reader clone 失败: {err}");
+        }
+    };
     // 单 reader 全程 drain，避免停止读后 PTY 缓冲堵死 shell。
     let drain = PtyOutputDrain::start(reader);
 
     // 给 shell 一点启动时间，再写入受控脚本。
     thread::sleep(Duration::from_millis(200));
-    writer
-        .write_all(input.as_bytes())
-        .unwrap_or_else(|err| panic!("写入 PTY 失败: {err}"));
+    if let Err(err) = writer.write_all(input.as_bytes()) {
+        drop(writer);
+        let snap = drain.snapshot();
+        persist_pty_failure_diagnostics(&format!("write_all failed: {err}"), &marker, &snap);
+        panic!(
+            "写入 PTY 失败: {err}; output={}",
+            escape_bytes_for_diagnostic(&snap)
+        );
+    }
     let _ = writer.flush();
 
     if let Err((buf, msg)) = wait_for_standalone_marker(&drain, &marker, PTY_SMOKE_TIMEOUT) {
         drop(writer);
-        force_reap_child(&mut child, Duration::from_secs(2));
+        // Drop 守卫会 force_reap；此处先落盘诊断再 panic。
         persist_pty_failure_diagnostics(&format!("marker_timeout: {msg}"), &marker, &buf);
         panic!(
             "未读到独立成行 marker `{marker}`: {msg}; partial={}",
@@ -542,9 +629,10 @@ fn native_pty_echo_token_and_exit_zero() {
     }
 
     // 保持 writer 直到 exit 完成，避免交互式 shell 在处理 exit 前收到 stdin EOF。
-    let output = match wait_child_exit_zero(&mut child, &drain, PTY_SMOKE_TIMEOUT) {
+    let output = match wait_child_exit_zero(child_guard.child_mut(), &drain, PTY_SMOKE_TIMEOUT) {
         Ok(buf) => {
             drop(writer);
+            child_guard.disarm();
             buf
         }
         Err(err) => {
@@ -555,6 +643,7 @@ fn native_pty_echo_token_and_exit_zero() {
                 &marker,
                 &snap,
             );
+            // 保持 armed，Drop 再做一次有界 reap。
             panic!("{err}");
         }
     };
@@ -586,32 +675,28 @@ fn native_pty_echo_token_and_exit_zero() {
 ///     Unix 生产路径依赖独立进程组 + killpg；smoke 需证明 helper 目标是 spawn 出的组且清理后无子进程。
 ///
 /// Code Logic（这个测试做什么）:
-///     spawn `sleep 60` 并 setpgid(0,0)，确认 pid 存活后 killpg，再断言进程消失。
+///     使用生产 seam `apply_unix_detached_pre_exec`（setsid）spawn `sleep 60`，
+///     确认 pid 存活后 killpg，再断言进程消失。
 #[cfg(unix)]
 #[test]
 fn unix_process_group_cleanup_leaves_no_child() {
-    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let mut child = unsafe {
-        Command::new("sleep")
-            .arg("60")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .pre_exec(|| {
-                if libc::setpgid(0, 0) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            })
-            .spawn()
-            .expect("应能 spawn sleep 作为进程组组长")
-    };
+    let mut command = Command::new("sleep");
+    command
+        .arg("60")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // 必须走生产 detached seam，禁止测试内复制 setpgid/setsid。
+    app_lib::backend::cli::apply_unix_detached_pre_exec(&mut command);
+    let mut child = command
+        .spawn()
+        .expect("应能 spawn sleep 作为 detached session/进程组组长");
     let pid = child.id();
     assert!(process_is_alive(pid), "spawn 后 sleep 应存活");
 
-    // 与 orchestrator/delivery、workbench/dependencies 相同：killpg 目标为子进程组。
+    // setsid 后 child 是新 session/pg 组长，killpg(pid) 目标即该组。
     kill_unix_process_group(pid).expect("killpg 应能向 spawn 的进程组发 SIGKILL");
 
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -635,15 +720,17 @@ fn unix_process_group_cleanup_leaves_no_child() {
 ///     Windows 冒烟矩阵要求验证 backend lifecycle 的 detached creation flags，而不是 WSL/tmux。
 ///
 /// Code Logic（这个测试做什么）:
-///     锁定 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` 与 backend/cli.rs 相同的字面常量。
+///     直接调用生产 seam `app_lib::backend::cli::windows_detached_creation_flags`，
+///     断言仍为 DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP；生产改坏会让本测试失败。
 #[cfg(windows)]
 #[test]
 fn windows_detached_creation_flags_match_backend_lifecycle() {
-    // 与 src-tauri/src/backend/cli.rs::configure_detached_child 保持一致。
-    const DETACHED_PROCESS: u32 = 0x00000008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-    const EXPECTED: u32 = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
-    assert_eq!(EXPECTED, 0x00000208);
+    // 必须绑定生产 helper，禁止在测试内复制字面量。
+    let flags = app_lib::backend::cli::windows_detached_creation_flags();
+    assert_eq!(
+        flags, 0x00000208,
+        "生产 windows_detached_creation_flags 必须是 DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP"
+    );
     // 路径契约：Windows shell 解析必须能找到 cmd.exe（ComSpec 或系统路径）。
     let shell = resolve_platform_shell().expect("Windows smoke 需要可用的 cmd.exe");
     assert!(
