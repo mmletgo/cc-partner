@@ -1,0 +1,757 @@
+//! 跨平台 smoke 集成测试 harness。
+//!
+//! 提供隔离数据目录、超时轮询、CLI 输出捕获、按 PID 清理等共享能力，
+//! 供 `backend_cli_smoke` 等 integration test 复用。
+
+use serde::Deserialize;
+use std::fs;
+use std::io;
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// smoke 单次操作默认超时。
+pub const DEFAULT_OP_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// 轮询间隔。
+pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// CLI status JSON（与 `backend::cli` 输出契约对齐，不含 token）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     smoke 需要解析 `start|status|stop` 的机器可读 JSON，断言 kind/pid/port。
+///
+/// Code Logic（这个结构做什么）:
+///     反序列化 camelCase `{kind, control?, error?}`；control 仅含 pid/port。
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CliStatusJson {
+    pub kind: String,
+    pub control: Option<CliControlJson>,
+    pub error: Option<String>,
+}
+
+/// CLI status 中的控制摘要。
+///
+/// Business Logic（为什么需要这个结构）:
+///     断言 start/status 返回的 pid/port 与 control 文件、health 一致。
+///
+/// Code Logic（这个结构做什么）:
+///     反序列化 `{pid, port}`。
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CliControlJson {
+    pub pid: u32,
+    pub port: u16,
+}
+
+/// 磁盘上的 backend-control.json（完整字段）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     smoke 轮询 control 文件、构造 stale control、校验 token 路径隔离时需要完整字段。
+///
+/// Code Logic（这个结构做什么）:
+///     反序列化 camelCase 控制文件；序列化时同样使用 camelCase。
+#[derive(Debug, Clone, serde::Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlFileJson {
+    pub pid: u32,
+    pub port: u16,
+    pub device_id: String,
+    pub device_name: String,
+    pub started_at: String,
+    pub control_token: String,
+}
+
+/// CLI 一次调用的捕获结果。
+///
+/// Business Logic（为什么需要这个结构）:
+///     失败时要把 stdout/stderr/exit 挂到诊断，避免 silent failure。
+///
+/// Code Logic（这个结构做什么）:
+///     保存 exit status、stdout、stderr 原始文本。
+#[derive(Debug, Clone)]
+pub struct CapturedCli {
+    pub success: bool,
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl CapturedCli {
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试断言失败时需要可读的 CLI 输出摘要。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     拼装 exit/stdout/stderr 的多行诊断字符串。
+    pub fn diagnostic(&self) -> String {
+        format!(
+            "exit={:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.code, self.stdout, self.stderr
+        )
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     start/status 成功后需要解析 JSON 状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 stdout 取最后一行非空文本并反序列化为 `CliStatusJson`。
+    pub fn parse_status_json(&self) -> Result<CliStatusJson, String> {
+        let line = self
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .last()
+            .ok_or_else(|| format!("CLI stdout 无 JSON 行\n{}", self.diagnostic()))?;
+        serde_json::from_str(line)
+            .map_err(|err| format!("解析 status JSON 失败: {err}\nline={line}\n{}", self.diagnostic()))
+    }
+}
+
+/// 单个 smoke case 的隔离环境与清理守卫。
+///
+/// Business Logic（为什么需要这个结构）:
+///     每个 lifecycle case 必须使用独立 data dir/control 文件，失败时保留诊断，
+///     成功且未要求 keep 时清理；teardown 只能 kill 本 case 记录的 PID。
+///
+/// Code Logic（这个结构做什么）:
+///     创建唯一 case 根目录，设置 `CC_PARTNER_DATA_DIR`，记录 observed PID，
+///     Drop 时先 CLI stop，再按 PID 有界 kill，最后按策略删除目录。
+pub struct SmokeCase {
+    pub name: String,
+    pub case_dir: PathBuf,
+    pub data_dir: PathBuf,
+    pub backend_bin: PathBuf,
+    pub op_timeout: Duration,
+    keep: bool,
+    failed: bool,
+    recorded_pid: Option<u32>,
+    _temp_root: Option<tempfile::TempDir>,
+}
+
+impl SmokeCase {
+    /// Business Logic（为什么需要这个函数）:
+    ///     smoke 必须在隔离目录写数据，不接触用户真实 `~/.cc-partner`。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在 `CC_PARTNER_SMOKE_ROOT` 或 tempfile 下创建唯一 case 目录与 data 子目录，
+    ///     返回持有清理策略的守卫。
+    pub fn new(name: &str) -> Result<Self, String> {
+        Self::new_with_timeout(name, DEFAULT_OP_TIMEOUT)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     不同 case 可能需要不同操作超时，但共享同一隔离根规则。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     生成唯一 case 根，创建 data 子目录，记录 keep 策略与 backend 二进制路径。
+    pub fn new_with_timeout(name: &str, op_timeout: Duration) -> Result<Self, String> {
+        let keep = env_truthy("CC_PARTNER_SMOKE_KEEP");
+        let backend_bin = PathBuf::from(env!("CARGO_BIN_EXE_cc-partner-backend"));
+        if !backend_bin.exists() {
+            return Err(format!(
+                "backend 二进制不存在: {}（请先 cargo test --test backend_cli_smoke）",
+                backend_bin.display()
+            ));
+        }
+
+        let unique = unique_suffix();
+        let (case_dir, temp_root) = match std::env::var_os("CC_PARTNER_SMOKE_ROOT") {
+            Some(root) => {
+                let root = PathBuf::from(root);
+                fs::create_dir_all(&root).map_err(|e| format!("创建 SMOKE_ROOT 失败: {e}"))?;
+                let case_dir = root.join(format!("{name}-{unique}"));
+                fs::create_dir_all(&case_dir)
+                    .map_err(|e| format!("创建 case 目录失败 {}: {e}", case_dir.display()))?;
+                (case_dir, None)
+            }
+            None => {
+                let temp = tempfile::Builder::new()
+                    .prefix(&format!("cc-partner-smoke-{name}-"))
+                    .tempdir()
+                    .map_err(|e| format!("创建 tempfile 失败: {e}"))?;
+                let case_dir = temp.path().to_path_buf();
+                (case_dir, Some(temp))
+            }
+        };
+
+        let data_dir = case_dir.join("data");
+        fs::create_dir_all(&data_dir)
+            .map_err(|e| format!("创建 data_dir 失败 {}: {e}", data_dir.display()))?;
+
+        Ok(Self {
+            name: name.to_string(),
+            case_dir,
+            data_dir,
+            backend_bin,
+            op_timeout,
+            keep,
+            failed: false,
+            recorded_pid: None,
+            _temp_root: temp_root,
+        })
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     失败时需保留 case 目录供 CI 上传诊断。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     标记 failed=true，Drop 时不删除目录。
+    pub fn mark_failed(&mut self) {
+        self.failed = true;
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     teardown 只能 kill 本 case 启动过的 backend PID，禁止按进程名扫杀。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     记录最近一次观察到的 backend pid。
+    pub fn record_pid(&mut self, pid: u32) {
+        if pid != 0 {
+            self.recorded_pid = Some(pid);
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     control 文件路径必须落在隔离 data_dir 下。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 `<data_dir>/backend-control.json`。
+    pub fn control_file_path(&self) -> PathBuf {
+        self.data_dir.join("backend-control.json")
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     pid 文件与 control 文件并存，清理断言需要同时检查。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 `<data_dir>/backend.pid`。
+    pub fn pid_file_path(&self) -> PathBuf {
+        self.data_dir.join("backend.pid")
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     所有 CLI 调用必须继承隔离 data dir，避免污染用户 home。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造指向 backend 二进制的 Command，注入 `CC_PARTNER_DATA_DIR`，
+    ///     清空继承污染并捕获 stdout/stderr。
+    pub fn backend_command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(&self.backend_bin);
+        cmd.args(args)
+            .env("CC_PARTNER_DATA_DIR", &self.data_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        cmd
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     smoke 需要同步拿到 CLI 输出并解析 JSON。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     同步执行子命令，收集 Output 并转成 `CapturedCli`。
+    pub fn run_cli(&self, args: &[&str]) -> Result<CapturedCli, String> {
+        let output = self
+            .backend_command(args)
+            .output()
+            .map_err(|e| format!("执行 {:?} 失败: {e}", args))?;
+        Ok(captured_from_output(output))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     有些场景需要异步启动 CLI 并稍后 wait，但当前 smoke 以同步为主。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     spawn 后返回 Child，调用方负责 wait/kill。
+    #[allow(dead_code)]
+    pub fn spawn_cli(&self, args: &[&str]) -> Result<Child, String> {
+        self.backend_command(args)
+            .spawn()
+            .map_err(|e| format!("spawn {:?} 失败: {e}", args))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     start 后 control 文件由 serve 异步写出，必须有界轮询。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在 deadline 内轮询读取并解析 control 文件，超时返回诊断。
+    pub fn wait_for_control_file(&self) -> Result<ControlFileJson, String> {
+        let path = self.control_file_path();
+        let deadline = Instant::now() + self.op_timeout;
+        let mut last_err = String::from("control 文件尚未出现");
+        while Instant::now() < deadline {
+            match read_control_file(&path) {
+                Ok(Some(control)) => return Ok(control),
+                Ok(None) => last_err = format!("control 文件不存在: {}", path.display()),
+                Err(err) => last_err = err,
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+        Err(format!(
+            "等待 control 文件超时 ({}): {last_err}\ncase={}",
+            self.op_timeout.as_secs(),
+            self.case_dir.display()
+        ))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     health 必须证明 control 端口上是真实 cc-partner 后端。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     有界轮询本机 GET `/api/health`（std TCP，避免额外 blocking HTTP 依赖），
+    ///     成功且 JSON ok=true 即返回 body。
+    pub fn wait_for_health(&self, port: u16) -> Result<serde_json::Value, String> {
+        let deadline = Instant::now() + self.op_timeout;
+        let mut last = String::from("尚未请求");
+        while Instant::now() < deadline {
+            match http_get_json(&format!("127.0.0.1:{port}"), "/api/health") {
+                Ok(body) if body.get("ok").and_then(|v| v.as_bool()) == Some(true) => {
+                    return Ok(body);
+                }
+                Ok(body) => last = format!("health body 非 ok: {body}"),
+                Err(err) => last = err,
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+        Err(format!(
+            "等待 /api/health 超时 port={port}: {last}\ncase={}",
+            self.case_dir.display()
+        ))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试结束必须尽量优雅停止本 case 的 backend。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用 CLI stop；忽略已 stopped 的结果，失败时保留诊断字符串。
+    pub fn cli_stop(&self) -> CapturedCli {
+        match self.run_cli(&["stop"]) {
+            Ok(captured) => captured,
+            Err(err) => CapturedCli {
+                success: false,
+                code: None,
+                stdout: String::new(),
+                stderr: err,
+            },
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     CLI stop 失败时只能按本 case 记录的 PID 有界 kill，绝不能按进程名扫杀。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     对 recorded_pid 发 SIGTERM/taskkill，轮询直到进程退出或超时，再 SIGKILL。
+    pub fn force_kill_recorded_pid(&self) {
+        let Some(pid) = self.recorded_pid else {
+            return;
+        };
+        if !process_is_alive(pid) {
+            return;
+        }
+        let _ = terminate_pid(pid);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if !process_is_alive(pid) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let _ = kill_pid_hard(pid);
+        let hard_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < hard_deadline {
+            if !process_is_alive(pid) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     stop 后必须确认 control/pid 文件消失，避免污染下一 case。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     删除 control 与 pid 文件；不存在视为成功。
+    pub fn remove_control_files(&self) -> Result<(), String> {
+        for path in [self.control_file_path(), self.pid_file_path()] {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(format!("删除 {} 失败: {err}", path.display())),
+            }
+        }
+        Ok(())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Drop 与显式 teardown 共用同一清理序列。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     CLI stop → 按 recorded PID kill → 删除 control 文件；目录保留策略见 Drop。
+    pub fn teardown_processes(&mut self) {
+        // 若 control 仍在，先尝试把 pid 记入 recorded，便于后续有界 kill。
+        if self.recorded_pid.is_none() {
+            if let Ok(Some(control)) = read_control_file(&self.control_file_path()) {
+                self.record_pid(control.pid);
+            }
+        }
+        let _ = self.cli_stop();
+        // stop 后若仍存活，仅 kill 记录的 PID。
+        if let Some(pid) = self.recorded_pid {
+            if process_is_alive(pid) {
+                self.force_kill_recorded_pid();
+            }
+        }
+        let _ = self.remove_control_files();
+    }
+}
+
+impl Drop for SmokeCase {
+    /// Business Logic（为什么需要这个函数）:
+    ///     panic 或测试结束时也必须清理本 case 的 backend，避免残留进程/端口。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     执行 teardown_processes；仅当 keep 或 failed 时保留 case 目录。
+    fn drop(&mut self) {
+        self.teardown_processes();
+        let retain = self.keep || self.failed;
+        if retain {
+            eprintln!(
+                "[smoke] 保留 case 目录 name={} path={} keep={} failed={}",
+                self.name,
+                self.case_dir.display(),
+                self.keep,
+                self.failed
+            );
+            // 防止 TempDir Drop 删除保留目录：泄漏 TempDir 所有权。
+            if let Some(temp) = self._temp_root.take() {
+                let _ = temp.keep();
+            }
+            return;
+        }
+        // tempfile::TempDir 会自动删；若使用 SMOKE_ROOT 则手动删。
+        if self._temp_root.is_none() {
+            let _ = fs::remove_dir_all(&self.case_dir);
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     smoke 需探测本机 `/api/health`，但 integration test 不引入 blocking HTTP 依赖。
+///
+/// Code Logic（这个函数做什么）:
+///     用 std TcpStream 发最小 HTTP/1.1 GET，解析状态行与 body JSON。
+fn http_get_json(host_port: &str, path: &str) -> Result<serde_json::Value, String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let mut stream = TcpStream::connect(host_port)
+        .map_err(|e| format!("连接 {host_port} 失败: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| format!("设置读超时失败: {e}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| format!("设置写超时失败: {e}"))?;
+
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\nAccept: application/json\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("写 HTTP 请求失败: {e}"))?;
+
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("读 HTTP 响应失败: {e}"))?;
+    let text = String::from_utf8_lossy(&raw);
+    let (header, body) = text
+        .split_once("\r\n\r\n")
+        .or_else(|| text.split_once("\n\n"))
+        .ok_or_else(|| format!("HTTP 响应无 header/body 分隔: {text}"))?;
+    let status_line = header.lines().next().unwrap_or("");
+    if !(status_line.contains(" 200 ") || status_line.ends_with(" 200")) {
+        return Err(format!("HTTP 非 200: {status_line}"));
+    }
+    serde_json::from_str(body.trim())
+        .map_err(|e| format!("解析 health JSON 失败: {e}\nbody={body}"))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     将 `std::process::Output` 统一转成诊断友好结构。
+///
+/// Code Logic（这个函数做什么）:
+///     解码 stdout/stderr 为有损 UTF-8 字符串。
+pub fn captured_from_output(output: Output) -> CapturedCli {
+    CapturedCli {
+        success: output.status.success(),
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     smoke 读写磁盘 control 文件时需要统一解析。
+///
+/// Code Logic（这个函数做什么）:
+///     文件不存在返回 Ok(None)；存在则反序列化为 `ControlFileJson`。
+pub fn read_control_file(path: &Path) -> Result<Option<ControlFileJson>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(path).map_err(|e| format!("读取 control 失败 {}: {e}", path.display()))?;
+    let control = serde_json::from_str(&content)
+        .map_err(|e| format!("解析 control 失败 {}: {e}\n{content}", path.display()))?;
+    Ok(Some(control))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     stale-control case 需要写入死 PID + 未使用端口的控制文件。
+///
+/// Code Logic（这个函数做什么）:
+///     确保父目录存在，pretty JSON 写入 control，并同步写 pid 文件。
+pub fn write_control_file(data_dir: &Path, control: &ControlFileJson) -> Result<(), String> {
+    fs::create_dir_all(data_dir).map_err(|e| format!("创建 data_dir 失败: {e}"))?;
+    let control_path = data_dir.join("backend-control.json");
+    let pid_path = data_dir.join("backend.pid");
+    let body = serde_json::to_string_pretty(control)
+        .map_err(|e| format!("序列化 control 失败: {e}"))?;
+    fs::write(&control_path, body)
+        .map_err(|e| format!("写 control 失败 {}: {e}", control_path.display()))?;
+    fs::write(&pid_path, control.pid.to_string())
+        .map_err(|e| format!("写 pid 失败 {}: {e}", pid_path.display()))?;
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     stale case 需要一个确定未使用的本地端口，避免误判为 running。
+///
+/// Code Logic（这个函数做什么）:
+///     bind `127.0.0.1:0` 取系统分配端口后立即释放。
+pub fn unused_local_port() -> Result<u16, String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("绑定临时端口失败: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("读取临时端口失败: {e}"))?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     stale case 需要一个确定已死亡的 PID。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn 立即退出的子进程并 wait，返回其 pid。
+pub fn dead_pid() -> Result<u32, String> {
+    #[cfg(unix)]
+    {
+        let mut child = Command::new("true")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("spawn true 失败: {e}"))?;
+        let pid = child.id();
+        let _ = child.wait();
+        // 确保内核已回收。
+        thread::sleep(Duration::from_millis(20));
+        if process_is_alive(pid) {
+            return Err(format!("期望死 PID 仍存活: {pid}"));
+        }
+        Ok(pid)
+    }
+    #[cfg(windows)]
+    {
+        let mut child = Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("spawn cmd exit 失败: {e}"))?;
+        let pid = child.id();
+        let _ = child.wait();
+        thread::sleep(Duration::from_millis(20));
+        if process_is_alive(pid) {
+            return Err(format!("期望死 PID 仍存活: {pid}"));
+        }
+        Ok(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err("skip: 当前平台无法生成 dead PID 用于 stale-control smoke".to_string())
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     teardown 与断言都需要判断 PID 是否仍存活。
+///
+/// Code Logic（这个函数做什么）:
+///     Unix 用 `kill -0`；Windows 用 `tasklist` 过滤 PID。
+pub fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .stdin(Stdio::null())
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     优雅停止失败后需要先发可恢复的终止信号。
+///
+/// Code Logic（这个函数做什么）:
+///     Unix SIGTERM；Windows taskkill 不带 /F。
+fn terminate_pid(pid: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("kill -TERM {pid} 失败: {status}")))
+        }
+    }
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("taskkill {pid} 失败: {status}")))
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        Ok(())
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     有界等待后仍存活的测试 PID 必须强杀，避免污染后续 case。
+///
+/// Code Logic（这个函数做什么）:
+///     Unix SIGKILL；Windows `taskkill /F`。
+fn kill_pid_hard(pid: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("kill -KILL {pid} 失败: {status}")))
+        }
+    }
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("taskkill /F {pid} 失败: {status}")))
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        Ok(())
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     并行/重复运行时 case 目录名必须唯一。
+///
+/// Code Logic（这个函数做什么）:
+///     用时间纳秒 + pid 生成后缀。
+fn unique_suffix() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos}-{}", std::process::id())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     keep 开关用真值语义，避免只认 `"1"`。
+///
+/// Code Logic（这个函数做什么）:
+///     环境变量为 1/true/yes/on（忽略大小写）时返回 true。
+fn env_truthy(key: &str) -> bool {
+    match std::env::var(key) {
+        Ok(value) => {
+            let v = value.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     平台若完全无法运行 CLI smoke，必须显式说明原因而不是静默 skip。
+///
+/// Code Logic（这个函数做什么）:
+///     当前 unix/windows 返回 Ok；其它平台返回 skip reason。
+pub fn ensure_platform_supported() -> Result<(), String> {
+    if cfg!(any(unix, windows)) {
+        Ok(())
+    } else {
+        Err("skip: 当前平台非 unix/windows，无法运行 backend CLI lifecycle smoke".to_string())
+    }
+}
