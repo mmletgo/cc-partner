@@ -271,8 +271,8 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     orchestratorSource,
-    'orchestratorApi.getRuntimeSnapshot(',
-    'Orchestrator panel loads the local project runtime snapshot',
+    'useOrchestratorRuntimeSnapshot',
+    'Orchestrator panel loads runtime snapshots through the desktop cache/stale-guard hook',
   );
   assertContains(
     typesSource,
@@ -296,8 +296,13 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     typesSource,
-    "remoteStatus: 'local' | 'unsupported' | 'unavailable' | 'offline';",
-    'runtime snapshot type includes explicit local/remote status',
+    "remoteStatus: 'local' | OrchestratorRemoteRuntimeStatus",
+    'runtime snapshot type includes explicit local/remote status with live',
+  );
+  assertContains(
+    typesSource,
+    "export type OrchestratorRemoteRuntimeStatus =",
+    'runtime display types include OrchestratorRemoteRuntimeStatus',
   );
   assertContains(
     orchestratorSource,
@@ -311,22 +316,22 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     orchestratorSource,
-    'activeRuntimeSnapshotResult.snapshot.latestTickAt',
+    'runtimeSnapshot.latestTickAt',
     'runtime snapshot status strip renders latest scheduler tick time',
   );
   assertContains(
     orchestratorSource,
-    'activeRuntimeSnapshotResult.snapshot.generatedAt',
+    'runtimeSnapshot.generatedAt',
     'runtime snapshot status strip renders snapshot generated time',
   );
   assertContains(
     orchestratorSource,
-    'activeRuntimeSnapshotResult.snapshot.runningTasks.length',
+    'runtimeSnapshot.runningTasks.length',
     'runtime snapshot status strip renders running task count',
   );
   assertContains(
     orchestratorSource,
-    'activeRuntimeSnapshotResult.snapshot.recentEvents.map',
+    'runtimeSnapshot.recentEvents.map',
     'runtime snapshot status strip renders recent event summaries',
   );
   assertContains(
