@@ -548,10 +548,10 @@ export interface OrchestratorRuntimeEvent {
  *
  * Business Logic（为什么需要这个类型）:
  *   桌面/移动端状态条需要把 owning device 的可达性与能力情况区分开，
- *   不能把 offline 与 unsupported 混成同一种空态。
+ *   不能把 offline 与 unsupported 混成同一种空态；本机项目 snapshot 使用 'local' 字面量，不进入该联合。
  *
  * Code Logic（这个类型做什么）:
- *   以字面量联合锁定远端四态；本机项目不使用该联合（display state 用 null 表示 local）。
+ *   以字面量联合锁定远端四态；对齐 owning-device 成功/失败映射。snapshot.remoteStatus 为 'local' | 本联合。
  */
 export type OrchestratorRemoteRuntimeStatus =
   | 'live'
@@ -594,10 +594,10 @@ export interface OrchestratorRuntimeSnapshot {
  * Orchestrator runtime 桌面/移动端显示态（进程内缓存 + 远端状态）。
  *
  * Business Logic（为什么需要这个类型）:
- *   远端离线后仍需展示最后一次成功快照与收到时间，但不能把缓存交给 scheduler/动作逻辑。
+ *   远端离线后仍需展示最后一次成功快照与收到时间，但不能把缓存交给 scheduler/动作逻辑；桌面 hook 与移动 store 共用形状、缓存彼此独立。
  *
  * Code Logic（字段说明）:
- *   snapshot 为当前应渲染的快照（live 或 offline 缓存）；remoteStatus 为远端四态或 null（本机）；
+ *   snapshot 为当前应渲染的快照（live/local 成功或 offline 缓存）；remoteStatus 为远端四态或 null（本机）；
  *   cachedAt 仅在展示缓存时有值；loading/error 描述请求过程。
  */
 export interface OrchestratorRuntimeDisplayState {

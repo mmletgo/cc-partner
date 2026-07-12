@@ -759,6 +759,11 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/orchestrator/runtime-snapshot",
             post(orchestrator::runtime_snapshot),
         )
+        // Mobile-facing runtime snapshot：手机浏览器同源调用，remote-aware 四态分发，不暴露 owner base URL。
+        .route(
+            "/api/mobile/orchestrator/runtime-snapshot",
+            post(orchestrator::mobile_runtime_snapshot),
+        )
         .route("/api/orchestrator/config", get(orchestrator::get_config))
         // 移动端 SPA fallback：只服务 /mobile 命名空间；其它未知路径保持 404。
         .fallback_service(service_fn(move |req| {

@@ -122,7 +122,8 @@ describe('orchestrator', () => {
       'runtime snapshot type should include recent scheduler/runner events',
     );
     assert(
-      typesSource.includes('OrchestratorRemoteRuntimeStatus') &&
+      typesSource.includes('export type OrchestratorRemoteRuntimeStatus =') &&
+        typesSource.includes("| 'live'") &&
         typesSource.includes("remoteStatus: 'local' | OrchestratorRemoteRuntimeStatus"),
       'runtime snapshot type should include explicit remote snapshot status with live',
     );

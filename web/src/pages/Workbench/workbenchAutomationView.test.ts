@@ -305,6 +305,11 @@ describe('workbenchAutomationView', () => {
     'runtime display types include OrchestratorRemoteRuntimeStatus',
   );
   assertContains(
+    typesSource,
+    "| 'live'",
+    'runtime snapshot remote status includes live for owning-device data',
+  );
+  assertContains(
     orchestratorSource,
     "icon={<RefreshIcon />}",
     'runtime snapshot status strip exposes a manual refresh button',
