@@ -8,5 +8,6 @@
 
 pub mod cli;
 pub mod control;
+pub mod logging;
 pub mod runtime;
 pub mod ui;
