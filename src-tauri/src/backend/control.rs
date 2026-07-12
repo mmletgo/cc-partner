@@ -233,7 +233,16 @@ impl Drop for StartLockGuard {
         }
         // 全限定调用 fs4，避免解析到 std::fs::File::unlock（MSRV 1.89+）。
         if let Err(err) = fs4::FileExt::unlock(&self.file) {
-            tracing::warn!("释放 backend start 锁失败 path={:?}: {err}", self.path);
+            // 路径可能含 home/用户名，走脱敏 helper；不记录锁文件内容
+            crate::backend::logging::OperationLog::new(
+                "control",
+                "start_lock_release",
+                crate::backend::logging::OperationResult::Error,
+            )
+            .level(tracing::Level::WARN)
+            .error_code("internal")
+            .message(format!("释放 backend start 锁失败 path={:?}: {err}", self.path))
+            .emit();
         }
     }
 }

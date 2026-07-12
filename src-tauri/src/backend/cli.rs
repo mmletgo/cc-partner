@@ -185,13 +185,25 @@ async fn serve() -> Result<(), AppError> {
         return Err(error);
     }
     start_background_tasks(&state, BackendRuntimeMode::Headless);
-    tracing::info!("cc-partner headless backend 已启动，监听端口 {port}");
+    crate::backend::logging::OperationLog::new(
+        "control",
+        "serve_start",
+        crate::backend::logging::OperationResult::Ok,
+    )
+    .message(format!("cc-partner headless backend 已启动，监听端口 {port}"))
+    .emit();
 
     wait_for_shutdown(shutdown_rx).await;
     control::clear_shutdown_notifier();
     shutdown_backend_runtime(&state);
     control::remove_control_files()?;
-    tracing::info!("cc-partner headless backend 已停止");
+    crate::backend::logging::OperationLog::new(
+        "control",
+        "serve_stop",
+        crate::backend::logging::OperationResult::Ok,
+    )
+    .message("cc-partner headless backend 已停止")
+    .emit();
     Ok(())
 }
 
