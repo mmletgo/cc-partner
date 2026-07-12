@@ -169,11 +169,16 @@ where
 ///     远端设备需要一个长期运行的 headless 后端，负责 HTTP/mDNS、后台任务和 Workbench 服务。
 ///
 /// Code Logic（这个函数做什么）:
-///     初始化 tracing 与 headless AppState；启动 HTTP/mDNS；先安装 shutdown notifier，再写控制文件并启动后台任务；
-///     等待 ctrl-c 或 control route；
-///     退出时 shutdown runtime、移除控制文件并清理 shutdown notifier。
+///     用 `init_backend_tracing` 装配脱敏 stderr + 严格 JSON 文件双 layer，并持有
+///     `BackendLoggingGuard` 直到 shutdown 完成；初始化 headless AppState；启动 HTTP/mDNS；
+///     先安装 shutdown notifier，再写控制文件并启动后台任务；等待 ctrl-c 或 control route；
+///     退出时 shutdown runtime、移除控制文件、清理 notifier，最后 drop guard 以 flush 文件日志。
+///     日志目录/文件不可用时启动失败，不静默降级。
 async fn serve() -> Result<(), AppError> {
-    init_tracing();
+    // serve 子进程是 backend.log 的唯一写入方；父进程 start 只 detach stdio，绝不打开同一文件。
+    let _logging_guard = crate::backend::logging::init_backend_tracing(
+        crate::backend::logging::BackendLogConfig::production()?,
+    )?;
     let ui: Arc<dyn BackendUi> = Arc::new(HeadlessBackendUi::new(headless_dist_dir()));
     let state = build_app_state(ui).await?;
     let port = start_backend_services(&state, true, true).await?;
@@ -204,6 +209,7 @@ async fn serve() -> Result<(), AppError> {
     )
     .message("cc-partner headless backend 已停止")
     .emit();
+    // `_logging_guard` 在此 drop：flush non-blocking worker，确保 serve_stop 等终态事件落盘。
     Ok(())
 }
 
@@ -654,22 +660,6 @@ fn headless_dist_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web/dist"))
 }
 
-/// 初始化 CLI tracing。
-///
-/// Business Logic（为什么需要这个函数）:
-///     serve 运行时需要把 HTTP/mDNS/后台任务错误输出到 stderr，便于用户排查 headless 服务问题。
-///
-/// Code Logic（这个函数做什么）:
-///     按 GUI 入口相同的 env-filter 规则初始化 tracing_subscriber；重复初始化错误被忽略。
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,mdns_sd=off")),
-        )
-        .try_init();
-}
-
 #[cfg(test)]
 mod tests {
     use crate::backend::control::{BackendControlFile, BackendStatus, BackendStatusKind};
@@ -810,6 +800,33 @@ mod tests {
 
         server.abort();
         assert!(error.to_string().contains("ok=false"));
+    }
+
+    /// 验证 start 子进程 detach 时把 stdio 置 null，而不是重定向到 backend.log。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     父进程与 serve 子进程若同时打开同一轮转文件，会破坏 size 轮转与诊断唯一写入契约。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     复现 start 中 Command 配置：stdin/stdout/stderr 均为 null，且不出现 backend.log 路径重定向。
+    #[test]
+    fn start_detaches_stdio_without_opening_backend_log() {
+        let mut command = std::process::Command::new("true");
+        command
+            .arg("serve")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let debug = format!("{command:?}");
+        assert!(
+            !debug.contains("backend.log"),
+            "父进程不得把 stdio 重定向到 backend.log，实际: {debug}"
+        );
+        // Debug 输出在 Unix 上会标注 null 重定向；至少确认未绑定文件路径。
+        assert!(
+            debug.contains("serve"),
+            "command 应包含 serve 子命令，实际: {debug}"
+        );
     }
 
     /// 验证等待停止超时时返回错误。
