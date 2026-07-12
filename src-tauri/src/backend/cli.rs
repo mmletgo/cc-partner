@@ -208,7 +208,7 @@ fn parse_doctor_args(rest: &[String]) -> Result<bool, String> {
 /// Code Logic（这个函数做什么）:
 ///     `collect_doctor_snapshot` → 渲染 JSON 或人类文本到 stdout → 返回 `DoctorStatus::exit_code()`。
 async fn run_doctor(json_mode: bool) -> Result<i32, AppError> {
-    let snapshot = collect_doctor_snapshot().await;
+    let snapshot = collect_doctor_snapshot().await?;
     if json_mode {
         println!("{}", render_doctor_json(&snapshot)?);
     } else {
@@ -422,6 +422,9 @@ where
 ///     退出时 shutdown runtime、移除控制文件、清理 notifier，最后 drop guard 以 flush 文件日志。
 ///     日志目录/文件不可用时启动失败，不静默降级。
 async fn serve() -> Result<(), AppError> {
+    // serve 生命周期单实例锁：必须在打开 backend.log 之前抢到，覆盖整个 serve 生命周期。
+    // start 父进程持有的是短生命周期 start 锁，不能替代本锁。
+    let _serve_lock = control::acquire_serve_lock(START_TIMEOUT).await?;
     // serve 子进程是 backend.log 的唯一写入方；父进程 start 只 detach stdio，绝不打开同一文件。
     let _logging_guard = crate::backend::logging::init_backend_tracing(
         crate::backend::logging::BackendLogConfig::production()?,
@@ -458,7 +461,7 @@ async fn serve() -> Result<(), AppError> {
     )
     .message("cc-partner headless backend 已停止")
     .emit();
-    // `_logging_guard` 在此 drop：flush non-blocking worker，确保 serve_stop 等终态事件落盘。
+    // `_logging_guard` / `_serve_lock` 在此 drop：flush 日志并释放 serve 单实例锁。
     Ok(())
 }
 
@@ -469,7 +472,9 @@ async fn serve() -> Result<(), AppError> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     先获取 data_dir 作用域跨进程 start 锁，再读状态：running 直接返回；stale 清控制文件；
-///     否则 spawn 当前 exe 的 `serve` 子进程并轮询 status 最多 10 秒。锁在函数返回时释放。
+///     否则 spawn 当前 exe 的 `serve` 子进程并轮询 status 最多 10 秒。
+///     仅在确认 Running 后释放 child 所有权；超时/过早退出/探测错误路径必须 kill+reap owned child。
+///     锁在函数返回时释放。
 async fn start() -> Result<(), AppError> {
     // 跨进程互斥：防止两个 start 同时看到 stopped 后各自 spawn serve。
     let _start_lock = control::acquire_start_lock(START_TIMEOUT).await?;
@@ -508,21 +513,64 @@ async fn start() -> Result<(), AppError> {
 
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
-        if let Some(status) = child.try_wait()? {
-            return Err(AppError::generic(format!(
-                "serve 子进程过早退出，状态: {status}"
-            )));
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(AppError::generic(format!(
+                    "serve 子进程过早退出，状态: {status}"
+                )));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                let _ = kill_and_reap_owned_child(&mut child);
+                return Err(err.into());
+            }
         }
 
         let status = current_status().await;
         if status.kind == BackendStatusKind::Running {
+            // Running 已确认：所有权交给 detached serve，不再 reap。
             println!("{}", render_status_json(&status)?);
             return Ok(());
         }
         tokio::time::sleep(STATUS_POLL_INTERVAL).await;
     }
 
-    Err(AppError::generic("等待后端启动超时"))
+    // 超时或任何未确认 Running 的路径都必须有界 kill+reap 自己 spawn 的 child，避免孤儿 writer。
+    let reap_note = kill_and_reap_owned_child(&mut child);
+    Err(AppError::generic(format!("等待后端启动超时{reap_note}")))
+}
+
+/// 有界 kill 并 reap 自己 spawn 的 serve 子进程。
+///
+/// Business Logic（为什么需要这个函数）:
+///     start 超时或探测失败后若放任 detached child 存活，稍后仍会打开 backend.log 并写出 control，
+///     与下一次 start 形成双 writer / 孤儿实例。
+///
+/// Code Logic（这个函数做什么）:
+///     `child.kill()` 后在 2 秒内 `try_wait` 回收；返回简短诊断后缀（不含路径/敏感内容）。
+fn kill_and_reap_owned_child(child: &mut std::process::Child) -> String {
+    let pid = child.id();
+    if let Err(err) = child.kill() {
+        // 进程可能已自行退出；继续尝试 reap。
+        let _ = err;
+    }
+    let reap_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return format!("；已终止子进程 pid={pid} status={status}");
+            }
+            Ok(None) => {
+                if Instant::now() >= reap_deadline {
+                    return format!("；已发送终止信号但子进程 pid={pid} 在 2s 内未退出");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => {
+                return format!("；终止子进程 pid={pid} 时 reap 失败: {err}");
+            }
+        }
+    }
 }
 
 /// 运行 `status` 子命令。
@@ -921,6 +969,7 @@ mod tests {
     use axum::routing::get;
     use axum::{Json, Router};
     use serde_json::json;
+    use std::process::Stdio;
     use tokio::net::TcpListener;
 
     /// 验证 status 输出符合 CLI JSON 契约。
@@ -1305,5 +1354,35 @@ mod tests {
 
         server.abort();
         assert!(error.to_string().contains("等待后端停止超时"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     start 超时路径必须有界 kill+reap 自己 spawn 的 child，避免孤儿 detached serve。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     spawn 一个 sleep 子进程，调用 `kill_and_reap_owned_child`，断言进程不再存活。
+    #[test]
+    fn kill_and_reap_owned_child_terminates_stuck_child() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let note = super::kill_and_reap_owned_child(&mut child);
+        assert!(note.contains("pid="), "reap note 应含 pid: {note}");
+        let status = child.try_wait().expect("try_wait");
+        assert!(status.is_some(), "child 应已被 reap");
+        #[cfg(unix)]
+        {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            assert!(!alive, "pid={pid} 不应仍存活");
+        }
     }
 }

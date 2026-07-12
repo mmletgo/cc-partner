@@ -150,14 +150,15 @@ fn default_home_data_dir() -> PathBuf {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     既有模块（cloud_sync、control、load/save）统一通过此入口派生路径；测试/CLI 隔离时
-///     必须与 `data_dir()` 指向同一根。
+///     必须与 `data_dir()` 指向同一根。非法 `CC_PARTNER_DATA_DIR` 不得 panic 或回落相对路径，
+///     否则 doctor/CLI 会把核心失败误报为 healthy 或得到非 0/1/2 退出码。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 `data_dir()`；解析失败时 panic（非法 override 属于环境配置错误，应尽早暴露）。
+///     委托 `data_dir()` 并原样向上返回 `Result`（空白/相对/NUL override → Validation 错误）。
 ///
 /// pub 供 cloud_sync 等模块复用同一根目录派生子路径（如 `~/.cc-partner/cloud-sync/`）。
-pub fn config_dir() -> PathBuf {
-    data_dir().expect("无法解析应用数据目录（检查 CC_PARTNER_DATA_DIR）")
+pub fn config_dir() -> Result<PathBuf, AppError> {
+    data_dir()
 }
 
 /// 后端文件日志目录：`<data_dir>/logs`。
@@ -187,13 +188,13 @@ pub fn backend_log_path() -> Result<PathBuf, AppError> {
 }
 
 /// 配置文件完整路径：`~/.cc-partner/config.json`
-fn config_file_path() -> PathBuf {
-    config_dir().join("config.json")
+fn config_file_path() -> Result<PathBuf, AppError> {
+    Ok(config_dir()?.join("config.json"))
 }
 
 /// 默认数据库路径：`~/.cc-partner/data.db`
-pub fn default_db_path() -> PathBuf {
-    config_dir().join("data.db")
+pub fn default_db_path() -> Result<PathBuf, AppError> {
+    Ok(config_dir()?.join("data.db"))
 }
 
 /// 判断候选路径是否位于指定数据根目录之下（含根本身）。
@@ -297,7 +298,7 @@ fn enforce_data_dir_isolation(cfg: &mut AppConfig) -> Result<bool, AppError> {
     if is_path_within_data_dir(&db, &root) {
         return Ok(false);
     }
-    let forced = default_db_path();
+    let forced = default_db_path()?;
     tracing::warn!(
         "CC_PARTNER_DATA_DIR 生效时拒绝 db_path 逃逸: {} -> {}",
         cfg.db_path,
@@ -686,7 +687,7 @@ impl AppConfig {
     ///                确保 config/control/db/log 全部落在 override 根内。
     ///             文件缺失则用默认值构造并 save()。
     pub fn load() -> Result<Self, AppError> {
-        let path = config_file_path();
+        let path = config_file_path()?;
         if path.exists() {
             let text = fs::read_to_string(&path)?;
             let mut cfg: AppConfig = serde_json::from_str(&text)?;
@@ -718,7 +719,7 @@ impl AppConfig {
                 device_name: default_device_name(),
                 http_port: 0,
                 receive_dir: default_receive_dir().to_string_lossy().to_string(),
-                db_path: default_db_path().to_string_lossy().to_string(),
+                db_path: default_db_path()?.to_string_lossy().to_string(),
                 screenshot_hotkey: default_screenshot_hotkey(),
                 prompt_optimizer_hotkey: default_prompt_optimizer_hotkey(),
                 prompt_optimizer_fill_language: default_prompt_optimizer_fill_language(),
@@ -741,9 +742,9 @@ impl AppConfig {
     /// Business Logic: 用户修改配置后需持久化，下次启动生效。
     /// Code Logic: 确保目录存在；序列化为 UTF-8 JSON（紧凑，中文不转义）写入。
     pub fn save(&self) -> Result<(), AppError> {
-        let dir = config_dir();
+        let dir = config_dir()?;
         ensure_dir(&dir)?;
-        let path = config_file_path();
+        let path = config_file_path()?;
         // serde_json::to_string 生成紧凑标准 JSON，与 Python json.dumps(ensure_ascii=False) 互通
         let text = serde_json::to_string(self)?;
         fs::write(&path, text)?;
@@ -851,8 +852,11 @@ mod tests {
             "data_dir 应确保 override 目录存在: {:?}",
             resolved
         );
-        assert_eq!(config_dir(), override_dir);
-        assert_eq!(default_db_path(), override_dir.join("data.db"));
+        assert_eq!(config_dir().expect("config_dir 应可解析"), override_dir);
+        assert_eq!(
+            default_db_path().expect("default_db_path 应可解析"),
+            override_dir.join("data.db")
+        );
         assert_eq!(
             backend_log_dir().expect("log 目录应可解析"),
             override_dir.join("logs")
@@ -862,11 +866,11 @@ mod tests {
             override_dir.join("logs").join("backend.log")
         );
         assert_eq!(
-            crate::backend::control::control_file_path(),
+            crate::backend::control::control_file_path().expect("control 路径应可解析"),
             override_dir.join("backend-control.json")
         );
         assert_eq!(
-            crate::backend::control::pid_file_path(),
+            crate::backend::control::pid_file_path().expect("pid 路径应可解析"),
             override_dir.join("backend.pid")
         );
     }
@@ -890,8 +894,11 @@ mod tests {
             "默认 data_dir 应位于 home 应用目录，实际: {:?}",
             resolved
         );
-        assert_eq!(config_dir(), resolved);
-        assert_eq!(default_db_path(), resolved.join("data.db"));
+        assert_eq!(config_dir().expect("config_dir 应可解析"), resolved);
+        assert_eq!(
+            default_db_path().expect("default_db_path 应可解析"),
+            resolved.join("data.db")
+        );
     }
 
     /// 验证空白 override 被拒绝。

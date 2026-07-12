@@ -13,6 +13,7 @@ use crate::backend::control::{
     control_file_path, process_is_alive, BackendControlFile, BackendStatus, BackendStatusKind,
 };
 use crate::config::{backend_log_path, data_dir};
+use crate::error::AppError;
 use crate::workbench::dependencies::{
     probe_claude_cli_non_mutating, probe_git_non_mutating, probe_tmux_non_mutating,
     probe_wsl_non_mutating, OptionalDependencyProbe,
@@ -534,6 +535,8 @@ fn path_to_display(path: &Path) -> String {
 
 /// health / mDNS / 依赖等网络与进程 probe 的默认超时。
 pub const DOCTOR_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// 整次 doctor 采集硬超时（覆盖 FS/依赖/mDNS 等可能阻塞探测）。
+pub const DOCTOR_HARD_DEADLINE: Duration = Duration::from_secs(8);
 
 /// recent errors 最多返回条数。
 pub const DOCTOR_RECENT_ERROR_LIMIT: usize = 20;
@@ -579,9 +582,30 @@ pub struct DoctorProbeInputs {
 /// Code Logic（这个函数做什么）:
 ///     读取 control/health 状态，探测 path/dependency/mDNS，读 recent errors，
 ///     计算 overall 并 `sanitize_snapshot_privacy`。
-pub async fn collect_doctor_snapshot() -> DoctorSnapshot {
-    let inputs = gather_live_probe_inputs().await;
-    assemble_snapshot_from_inputs(inputs, current_home_dir().as_deref())
+pub async fn collect_doctor_snapshot() -> Result<DoctorSnapshot, AppError> {
+    // 整次 doctor 硬 deadline：任一阻塞 probe 超时都映射为结构化核心错误，exit 2。
+    match tokio::time::timeout(DOCTOR_HARD_DEADLINE, collect_doctor_snapshot_inner()).await {
+        Ok(result) => result,
+        Err(_) => Err(AppError::timeout(format!(
+            "doctor 采集超时（{:?}）",
+            DOCTOR_HARD_DEADLINE
+        ))),
+    }
+}
+
+/// 内部采集实现（供硬超时包装）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     需要把路径解析失败等核心错误稳定映射为 Result，而不是 panic/相对路径回退。
+///
+/// Code Logic（这个函数做什么）:
+///     gather_live_probe_inputs → assemble_snapshot_from_inputs。
+async fn collect_doctor_snapshot_inner() -> Result<DoctorSnapshot, AppError> {
+    let inputs = gather_live_probe_inputs().await?;
+    Ok(assemble_snapshot_from_inputs(
+        inputs,
+        current_home_dir().as_deref(),
+    ))
 }
 
 /// 从 live 环境组装 probe 输入。
@@ -591,65 +615,42 @@ pub async fn collect_doctor_snapshot() -> DoctorSnapshot {
 ///
 /// Code Logic（这个函数做什么）:
 ///     调 `current_status`（含 health 超时）、解析 data/db/log 路径，跑非 mutating 依赖探测。
-async fn gather_live_probe_inputs() -> DoctorProbeInputs {
+async fn gather_live_probe_inputs() -> Result<DoctorProbeInputs, AppError> {
     let backend_status = probe_backend_status().await;
-    let control_path = control_file_path();
-    let data = data_dir().unwrap_or_else(|_| PathBuf::from(".cc-partner-unresolved"));
-    let database_path = data.join("data.db");
-    // 尝试从 config 读 db_path；失败则用默认
-    if let Ok(cfg) = crate::config::AppConfig::load() {
-        let candidate = PathBuf::from(&cfg.db_path);
-        // 仅在路径字符串非空时使用
-        let db = if cfg.db_path.trim().is_empty() {
-            database_path
-        } else {
-            candidate
-        };
-        let log_path = backend_log_path().unwrap_or_else(|_| data.join("logs").join("backend.log"));
-        let log_dir = log_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| data.join("logs"));
-        let claude_path = cfg.github_trending.claude_cli_path.clone();
-        return DoctorProbeInputs {
-            backend_status,
-            control_path,
-            data_dir: data,
-            database_path: db,
-            log_dir,
-            log_path,
-            git: probe_git_non_mutating(),
-            tmux: probe_tmux_non_mutating(),
-            wsl: probe_wsl_non_mutating(),
-            claude_cli: probe_claude_cli_non_mutating(&claude_path),
-            mdns_override: None,
-            recent_errors_override: None,
-            app_version: env!("CARGO_PKG_VERSION").to_string(),
-            backend_version: env!("CARGO_PKG_VERSION").to_string(),
-        };
-    }
-
-    let log_path = backend_log_path().unwrap_or_else(|_| data.join("logs").join("backend.log"));
+    let control_path = control_file_path()?;
+    let data = data_dir()?;
+    let default_database_path = data.join("data.db");
+    let log_path = backend_log_path()?;
     let log_dir = log_path
         .parent()
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| data.join("logs"));
-    DoctorProbeInputs {
+        .ok_or_else(|| AppError::validation("backend log 路径缺少父目录"))?;
+
+    // 配置加载失败属于核心解析失败，不得静默吞掉后把路径回落相对目录。
+    let cfg = crate::config::AppConfig::load()?;
+    let db = if cfg.db_path.trim().is_empty() {
+        default_database_path
+    } else {
+        PathBuf::from(&cfg.db_path)
+    };
+    let claude_path = cfg.github_trending.claude_cli_path.clone();
+
+    Ok(DoctorProbeInputs {
         backend_status,
         control_path,
         data_dir: data,
-        database_path,
+        database_path: db,
         log_dir,
         log_path,
         git: probe_git_non_mutating(),
         tmux: probe_tmux_non_mutating(),
         wsl: probe_wsl_non_mutating(),
-        claude_cli: probe_claude_cli_non_mutating("claude"),
+        claude_cli: probe_claude_cli_non_mutating(&claude_path),
         mdns_override: None,
         recent_errors_override: None,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         backend_version: env!("CARGO_PKG_VERSION").to_string(),
-    }
+    })
 }
 
 /// 有界读取当前 backend 控制/health 状态。
@@ -868,6 +869,29 @@ pub fn probe_path_checks(
 /// Code Logic（这个函数做什么）:
 ///     `create_dir_all` + 在目录内写/删 `.cc-partner-doctor-write-probe` 临时文件。
 fn probe_directory_usable(dir: &Path, code_prefix: &str) -> DoctorCheck {
+    match run_fs_probe_with_timeout(
+        dir.to_path_buf(),
+        code_prefix.to_string(),
+        |dir, code_prefix| probe_directory_usable_inner(&dir, &code_prefix),
+    ) {
+        Ok(check) => check,
+        Err(err) => DoctorCheck::new(
+            DoctorCheckStatus::Error,
+            format!("{code_prefix}.timeout"),
+            format!("directory probe timed out or failed: {err}"),
+        ),
+    }
+}
+
+/// 目录可写探测实现：随机名 + create_new，仅删除本进程创建的探针。
+///
+/// Business Logic（为什么需要这个函数）:
+///     固定名 truncate/delete 会破坏既有文件或 symlink，也与并发 doctor 互相截断；
+///     探针必须非破坏且只清理自己创建的身份匹配文件。
+///
+/// Code Logic（这个函数做什么）:
+///     create_dir_all → 随机探针路径 create_new(true) 写入 → 校验 metadata 后仅删除该路径。
+fn probe_directory_usable_inner(dir: &Path, code_prefix: &str) -> DoctorCheck {
     if let Err(err) = fs::create_dir_all(dir) {
         return DoctorCheck::new(
             DoctorCheckStatus::Error,
@@ -875,18 +899,17 @@ fn probe_directory_usable(dir: &Path, code_prefix: &str) -> DoctorCheck {
             format!("directory inaccessible: {err}"),
         );
     }
-    let probe = dir.join(".cc-partner-doctor-write-probe");
-    match OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&probe)
-    {
+    let token = uuid::Uuid::new_v4();
+    let probe = dir.join(format!(".cc-partner-doctor-write-probe-{token}"));
+    match OpenOptions::new().write(true).create_new(true).open(&probe) {
         Ok(mut f) => {
             use std::io::Write;
             let write_ok = f.write_all(b"ok").is_ok();
             drop(f);
-            let _ = fs::remove_file(&probe);
+            // 仅当本进程 create_new 成功创建时才删除，避免误删既有同名/竞态文件。
+            if probe.exists() {
+                let _ = fs::remove_file(&probe);
+            }
             if write_ok {
                 DoctorCheck::new(
                     DoctorCheckStatus::Ok,
@@ -917,11 +940,32 @@ fn probe_directory_usable(dir: &Path, code_prefix: &str) -> DoctorCheck {
 /// Code Logic（这个函数做什么）:
 ///     文件存在 → 以只读打开并 try_read 1 字节；不存在 → 父目录可写视为 ok（尚未初始化）。
 fn probe_database_readable(database_path: &Path) -> DoctorCheck {
+    match run_fs_probe_with_timeout(
+        database_path.to_path_buf(),
+        "paths.database".to_string(),
+        |database_path, _| probe_database_readable_inner(&database_path),
+    ) {
+        Ok(check) => check,
+        Err(err) => DoctorCheck::new(
+            DoctorCheckStatus::Error,
+            "paths.database.timeout",
+            format!("database probe timed out or failed: {err}"),
+        ),
+    }
+}
+
+/// 数据库可读探测实现（随机父目录探针，不 truncate 固定名）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     已有 db 只需只读 open/read；未创建时父目录探针不得破坏既有文件。
+///
+/// Code Logic（这个函数做什么）:
+///     exists → 只读 open + try_read 1 字节；否则 create_new 随机探针并仅删除自己创建的文件。
+fn probe_database_readable_inner(database_path: &Path) -> DoctorCheck {
     if database_path.exists() {
         match File::open(database_path) {
             Ok(mut f) => {
                 let mut buf = [0u8; 1];
-                // 空库或至少可读 1 字节都算可读；只关心 open/read 是否成功。
                 match f.read(&mut buf) {
                     Ok(0) | Ok(1..) => DoctorCheck::new(
                         DoctorCheckStatus::Ok,
@@ -942,35 +986,69 @@ fn probe_database_readable(database_path: &Path) -> DoctorCheck {
             ),
         }
     } else {
-        let parent = database_path.parent().unwrap_or_else(|| Path::new("."));
-        if parent.exists() || fs::create_dir_all(parent).is_ok() {
-            // 父目录可访问即认为尚未初始化的健康态
-            match OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(parent.join(".cc-partner-doctor-db-parent-probe"))
-            {
-                Ok(_) => {
-                    let _ = fs::remove_file(parent.join(".cc-partner-doctor-db-parent-probe"));
-                    DoctorCheck::new(
-                        DoctorCheckStatus::Ok,
-                        "paths.database.ok",
-                        "database parent directory is usable (db not yet created)",
-                    )
-                }
-                Err(err) => DoctorCheck::new(
-                    DoctorCheckStatus::Error,
-                    "paths.database.inaccessible",
-                    format!("database parent directory is not writable: {err}"),
-                ),
-            }
-        } else {
-            DoctorCheck::new(
+        let Some(parent) = database_path.parent() else {
+            return DoctorCheck::new(
                 DoctorCheckStatus::Error,
                 "paths.database.inaccessible",
                 "database parent directory is inaccessible",
-            )
+            );
+        };
+        if !(parent.exists() || fs::create_dir_all(parent).is_ok()) {
+            return DoctorCheck::new(
+                DoctorCheckStatus::Error,
+                "paths.database.inaccessible",
+                "database parent directory is inaccessible",
+            );
+        }
+        let token = uuid::Uuid::new_v4();
+        let probe = parent.join(format!(".cc-partner-doctor-db-parent-probe-{token}"));
+        match OpenOptions::new().write(true).create_new(true).open(&probe) {
+            Ok(_) => {
+                if probe.exists() {
+                    let _ = fs::remove_file(&probe);
+                }
+                DoctorCheck::new(
+                    DoctorCheckStatus::Ok,
+                    "paths.database.ok",
+                    "database parent directory is usable (db not yet created)",
+                )
+            }
+            Err(err) => DoctorCheck::new(
+                DoctorCheckStatus::Error,
+                "paths.database.inaccessible",
+                format!("database parent directory is not writable: {err}"),
+            ),
+        }
+    }
+}
+
+/// 在独立线程中运行可能阻塞的 FS probe，并施加 `DOCTOR_PROBE_TIMEOUT`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     网络盘/故障盘上 create/open/read 可能无限阻塞，破坏 doctor 有界退出契约。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn 线程执行闭包，`recv_timeout` 等待结果；超时返回 Err 字符串。
+fn run_fs_probe_with_timeout<F>(
+    path: PathBuf,
+    code_prefix: String,
+    probe: F,
+) -> Result<DoctorCheck, String>
+where
+    F: FnOnce(PathBuf, String) -> DoctorCheck + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = probe(path, code_prefix);
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(DOCTOR_PROBE_TIMEOUT) {
+        Ok(check) => Ok(check),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(format!("exceeded {DOCTOR_PROBE_TIMEOUT:?}"))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("probe worker disconnected".to_string())
         }
     }
 }
@@ -1136,31 +1214,22 @@ fn parse_error_log_line(line: &str) -> Option<DoctorErrorSummary> {
     if level != "error" {
         return None;
     }
-    let timestamp = obj
-        .get("timestamp")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let code = obj
+    let home = current_home_dir();
+    let home_ref = home.as_deref();
+
+    let raw_ts = obj.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+    let timestamp = sanitize_timestamp_field(raw_ts);
+
+    let raw_code = obj
         .get("error_code")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .or_else(|| obj.get("operation").and_then(|v| v.as_str()))
-        .unwrap_or("error")
-        .to_string();
-    let message = obj
-        .get("message")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let request_id = obj
-        .get("request_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+        .unwrap_or("error");
+    let code = sanitize_code_field(raw_code, home_ref);
 
-    let home = current_home_dir();
-    let mut summary = sanitize_doctor_text(&message, home.as_deref());
+    let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    let mut summary = sanitize_doctor_text(message, home_ref);
     if summary.chars().count() > DOCTOR_ERROR_SUMMARY_MAX_CHARS {
         summary = summary
             .chars()
@@ -1169,12 +1238,76 @@ fn parse_error_log_line(line: &str) -> Option<DoctorErrorSummary> {
             + "…";
     }
 
+    let request_id = obj
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| sanitize_request_id_field(s, home_ref));
+
     Some(DoctorErrorSummary {
         timestamp,
         code,
         summary,
         request_id,
     })
+}
+
+/// 严格清洗 timestamp：仅接受 RFC3339，否则替换为占位。
+///
+/// Business Logic（为什么需要这个函数）:
+///     敌意日志可把 Prompt/路径塞进 timestamp 字段；recentErrors 必须全字段隐私门禁。
+///
+/// Code Logic（这个函数做什么）:
+///     `DateTime::parse_from_rfc3339` 成功则规范化为 RFC3339 字符串，失败返回 `invalid-timestamp`。
+fn sanitize_timestamp_field(raw: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(raw.trim()) {
+        Ok(dt) => dt.to_rfc3339(),
+        Err(_) => "invalid-timestamp".to_string(),
+    }
+}
+
+/// 清洗 error code/operation：限制字符集与长度，并跑隐私 sanitizer。
+///
+/// Business Logic（为什么需要这个函数）:
+///     code 字段若原样回显可携带路径/Prompt/凭据，绕过 summary-only 清洗。
+///
+/// Code Logic（这个函数做什么）:
+///     仅保留 `[A-Za-z0-9._-]`，最长 64；空则 `error`；再 `sanitize_doctor_text`。
+fn sanitize_code_field(raw: &str, home: Option<&Path>) -> String {
+    // 只取前缀合法 token（遇非法字符即停），避免把路径/命令拼进 code。
+    let token: String = raw
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .take(64)
+        .collect();
+    let base = if token.is_empty() {
+        "error".to_string()
+    } else {
+        token
+    };
+    sanitize_doctor_text(&base, home)
+}
+
+/// 清洗 requestId：长度限制 + 隐私 sanitizer。
+///
+/// Business Logic（为什么需要这个函数）:
+///     requestId 可被敌意日志写入任意字符串，必须与 summary 同等脱敏。
+///
+/// Code Logic（这个函数做什么）:
+///     截到 128 字符后 `sanitize_doctor_text`。
+fn sanitize_request_id_field(raw: &str, home: Option<&Path>) -> String {
+    // requestId 只允许短标识字符集；路径/Prompt 形态直接拒绝。
+    let token: String = raw
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':'))
+        .take(128)
+        .collect();
+    let base = if token.is_empty() {
+        "invalid-request-id".to_string()
+    } else {
+        token
+    };
+    sanitize_doctor_text(&base, home)
 }
 
 #[cfg(test)]
@@ -1867,5 +2000,40 @@ mod tests {
         assert!(!wsl.applicable);
         let claude = probe_claude_cli_non_mutating("claude");
         assert!(claude.applicable);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     recentErrors 若只清洗 summary，timestamp/code/requestId 可绕过隐私门禁。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造敌意 JSON 行，断言 parse 后各字段均不含 sentinel 且 timestamp 非法被替换。
+    #[test]
+    fn recent_errors_sanitize_all_string_fields() {
+        let line = r#"{"timestamp":"NOT-A-TIMESTAMP Prompt=do-not-leak","level":"error","error_code":"net.timeout;rm -rf /Users/alice/secret","message":"token=sk-live-abc","request_id":"req-/Users/alice/prompt=leak"}"#;
+        let err = super::parse_error_log_line(line).expect("应解析 error 行");
+        assert_eq!(err.timestamp, "invalid-timestamp");
+        assert!(!err.code.contains("Users"));
+        assert!(!err.code.contains("secret"));
+        assert!(!err.summary.contains("sk-live"));
+        let rid = err.request_id.unwrap_or_default();
+        assert!(!rid.contains("Users"), "requestId={rid}");
+        assert!(!rid.contains("alice"), "requestId={rid}");
+        assert!(!rid.contains("prompt"), "requestId={rid}");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     目录探针不得 truncate/删除固定名既有文件。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     预置固定名探针文件内容，跑 probe_directory_usable，断言固定名内容仍在。
+    #[test]
+    fn directory_probe_does_not_destroy_fixed_name_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixed = dir.path().join(".cc-partner-doctor-write-probe");
+        std::fs::write(&fixed, b"user-data-keep-me").unwrap();
+        let check = super::probe_directory_usable(dir.path(), "paths.data");
+        assert!(check.status == DoctorCheckStatus::Ok || check.status == DoctorCheckStatus::Error);
+        let content = std::fs::read(&fixed).expect("固定名文件应仍存在");
+        assert_eq!(content, b"user-data-keep-me");
     }
 }
