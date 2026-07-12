@@ -10,6 +10,7 @@
 
 use crate::error::AppError;
 use crate::workbench::browser_models::{WorkbenchBrowserDiscovery, WorkbenchBrowserPreview};
+use crate::workbench::claude_sessions::{SessionPreview, SessionSearchHit};
 use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchHtmlAssetDto, WorkbenchOpenFileDto,
     WorkbenchPathInfo, WorkbenchProjectDto, WorkbenchRemoteDirectoryEntryDto,
@@ -18,16 +19,15 @@ use crate::workbench::models::{
 };
 use crate::workbench::remote_protocol::{
     RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq,
-    RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq, RemoteFocusedSessionResp,
-    RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq, RemoteOpenFileReq,
-    RemotePathInfoReq, RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteProjectReq,
-    RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq,
-    RemoteReplaySessionReq, RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSearchClaudeSessionsReq,
-    RemoteSessionReq, RemoteSplitPaneReq, RemoteWorkbenchBrowserDiscoverReq,
-    RemoteWorkbenchBrowserPreviewReq, RemoteWorktreeReq, RemoteWriteSessionInputReq,
-    ResumeClaudeSessionResult,
+    RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq,
+    RemoteFocusedSessionResp, RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq,
+    RemoteOpenFileReq, RemotePathInfoReq, RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq,
+    RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq,
+    RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq, RemoteSaveTextReq,
+    RemoteSearchClaudeSessionsReq, RemoteSessionReq, RemoteSplitPaneReq,
+    RemoteWorkbenchBrowserDiscoverReq, RemoteWorkbenchBrowserPreviewReq, RemoteWorktreeReq,
+    RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
 };
-use crate::workbench::claude_sessions::{SessionPreview, SessionSearchHit};
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -36,7 +36,6 @@ use std::time::Duration;
 const SHORT_REMOTE_WORKBENCH_TIMEOUT_SECS: u64 = 15;
 const LONG_REMOTE_WORKBENCH_TIMEOUT_SECS: u64 = 120;
 const VERY_LONG_REMOTE_WORKBENCH_TIMEOUT_SECS: u64 = 420;
-const REMOTE_ERROR_BODY_MAX_CHARS: usize = 240;
 
 /// 远端请求超时类别。
 ///
@@ -59,9 +58,12 @@ enum RemoteRequestTimeoutKind {
 ///
 /// Code Logic（这个结构体做什么）:
 ///     持有 cloneable 的 `reqwest::Client`，对外提供目录根、目录列表、路径信息和打开项目方法。
+///     `forwarded_request_id`（Finding 3）若被设置，所有出站请求会复用该 ID，把多跳代理
+///     （手机 → 本机 → 远端设备）串成同一调用链；否则每次出站生成新 UUID。
 #[derive(Clone)]
 pub struct RemoteWorkbenchClient {
     client: reqwest::Client,
+    forwarded_request_id: Option<String>,
 }
 
 impl RemoteWorkbenchClient {
@@ -72,11 +74,42 @@ impl RemoteWorkbenchClient {
     ///
     /// Code Logic（这个函数做什么）:
     ///     构造不带全局超时的 reqwest client；每个请求按短/长操作单独设置 timeout。
+    ///     `forwarded_request_id` 默认 None（每次出站生成新 ID）。
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .build()
             .expect("构造 Workbench 远端 reqwest Client 失败");
-        Self { client }
+        Self {
+            client,
+            forwarded_request_id: None,
+        }
+    }
+
+    /// 设置转发用 request_id（Finding 3），返回 self 便于链式构造。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     多跳代理（手机 → 本机 → 项目所在设备）必须把入站 `X-CC-Request-Id` 转发到下一跳，
+    ///     让整条调用链共用同一 ID，便于跨设备日志关联。调用方在 route handler 拿到
+    ///     `P2pRequestContext` 后用本方法注入，再发起远端调用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     存储 request_id；`get_json`/`post_json` 出站时优先用它，缺失则生成新 UUID。
+    ///
+    /// 注：当前生产路径中 `RemoteWorkbenchClient` 仅在 Tauri 命令（无 inbound request_id）使用，
+    /// 该 builder 暂无生产 caller，留给未来 P2P workbench relay 路由接入。测试已锁定其行为。
+    #[allow(dead_code)]
+    pub fn with_forwarded_request_id(mut self, request_id: impl Into<String>) -> Self {
+        let id = request_id.into();
+        self.forwarded_request_id = if id.is_empty() { None } else { Some(id) };
+        self
+    }
+
+    /// 返回出站 request_id：转发 ID 优先，否则生成新 UUID（Finding 3）。
+    fn outbound_request_id(&self) -> String {
+        self.forwarded_request_id
+            .clone()
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(crate::net::request_context::new_request_id)
     }
 
     /// 获取远端设备可浏览的根目录。
@@ -975,7 +1008,9 @@ impl RemoteWorkbenchClient {
     ///     远端 Workbench GET 调用都需要统一处理网络错误、HTTP 状态码和 JSON 解析错误。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     发送 GET 请求，非成功状态转中文业务错误，成功后解析 JSON 为目标类型。
+    ///     发送 GET 请求（附出站 request_id header，Finding 3：多跳调用链关联），
+    ///     非成功状态转中文业务错误，成功后解析 JSON 为目标类型。request_id 优先转发
+    ///     `forwarded_request_id`（多跳代理），缺失时生成新 UUID。
     async fn get_json<T>(
         &self,
         url: String,
@@ -987,6 +1022,10 @@ impl RemoteWorkbenchClient {
         let response = self
             .client
             .get(&url)
+            .header(
+                crate::net::request_context::REQUEST_ID_HEADER,
+                self.outbound_request_id(),
+            )
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
@@ -1016,7 +1055,9 @@ impl RemoteWorkbenchClient {
     ///     远端 Workbench POST 调用大多使用不同 DTO 请求体，但错误处理与 JSON 解析规则一致。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     发送 JSON body，非成功状态转中文业务错误，成功后按泛型解析 JSON。
+    ///     发送 JSON body（附出站 request_id header，Finding 3：多跳调用链关联），
+    ///     非成功状态转中文业务错误，成功后按泛型解析 JSON。request_id 优先转发
+    ///     `forwarded_request_id`（多跳代理），缺失时生成新 UUID。
     async fn post_json<T, B>(
         &self,
         url: String,
@@ -1031,6 +1072,10 @@ impl RemoteWorkbenchClient {
             .client
             .post(&url)
             .json(body)
+            .header(
+                crate::net::request_context::REQUEST_ID_HEADER,
+                self.outbound_request_id(),
+            )
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
@@ -1103,63 +1148,24 @@ fn endpoint_url(base_url: &str, path: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), path)
 }
 
-/// Business Logic（为什么需要这个函数）:
+/// Business Logic（为什么需要这个函数 / Finding 3）:
 ///     所有远端 Workbench 响应都需要统一错误语义，避免各方法返回不同格式的错误文案。
+///     旧实现用 `response.text()` + 字符串解析 `{error}`，丢弃了对端信封的
+///     code/status/retryable/request_id，导致上层重试只能靠文案匹配。现改用共享
+///     `net::peer_error::parse_peer_response` 统一解析 v1 信封/v0 老形态，并经
+///     `peer_call_error_to_app_error` 把 `Remote` 转为 `AppError::remote`，保留结构化元数据。
 ///
 /// Code Logic（这个函数做什么）:
-///     检查 HTTP 2xx 状态；非 2xx 返回 `AppError::generic`；成功时按泛型解析 JSON。
+///     委托 `parse_peer_response` 一次性消费 status/header request_id/body bytes，
+///     成功时按泛型解析 JSON；失败时按 `PeerCallError` 变体经共享 helper 映射为 `AppError`。
 async fn parse_json_response<T>(response: reqwest::Response) -> Result<T, AppError>
 where
     T: DeserializeOwned,
 {
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(AppError::generic(remote_error_message(status, &body)));
-    }
-    response
-        .json::<T>()
+    let url = response.url().as_str().to_string();
+    crate::net::peer_error::parse_peer_response::<T>(response, &url)
         .await
-        .map_err(|error| AppError::generic(format!("远端 Workbench 响应解析失败: {error}")))
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     远端业务错误通常由对端 AppError 序列化为 `{error}`，本机应保留原始业务文案。
-///
-/// Code Logic（这个函数做什么）:
-///     优先从 JSON body 读取非空 error 字段；否则返回 HTTP 状态与截断后的正文摘要。
-fn remote_error_message(status: reqwest::StatusCode, body: &str) -> String {
-    let trimmed = body.trim();
-    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        if let Some(error) = value.get("error").and_then(Value::as_str) {
-            let error = error.trim();
-            if !error.is_empty() {
-                return error.to_string();
-            }
-        }
-    }
-    if trimmed.is_empty() {
-        return format!("远端 Workbench 请求失败: HTTP {status}");
-    }
-    format!(
-        "远端 Workbench 请求失败: HTTP {status}: {}",
-        truncate_error_body(trimmed)
-    )
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     远端非 JSON 错误可能包含代理 HTML 或长堆栈，完整回传会降低前端错误可读性。
-///
-/// Code Logic（这个函数做什么）:
-///     按 Unicode char 截断错误正文，超长时追加省略号。
-fn truncate_error_body(body: &str) -> String {
-    let mut chars = body.chars();
-    let truncated: String = chars.by_ref().take(REMOTE_ERROR_BODY_MAX_CHARS).collect();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
-    }
+        .map_err(|err| crate::net::peer_error::peer_call_error_to_app_error(err, "远端 Workbench"))
 }
 
 #[cfg(test)]
@@ -1273,11 +1279,13 @@ mod tests {
         );
     }
 
-    /// Business Logic（为什么需要这个测试）:
-    ///     远端路由会返回本地业务错误，客户端必须保留这些错误文案给前端展示。
+    /// Business Logic（为什么需要这个测试 / Finding 3）:
+    ///     远端路由会返回本地业务错误（v0 老形态 `{error}` 或 v1 信封）；客户端必须保留这些
+    ///     错误文案给前端展示，且**保留** code/status/retryable/request_id 供上层决策。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     临时服务返回非 2xx JSON `{error}`，断言远端客户端提取 error 字段而不是只报 HTTP 状态。
+    ///     临时服务返回 400 + 老形态 `{error}`，断言远端客户端提取 error 字段（而非只报 HTTP 状态），
+    ///     且 `remote_meta()` 暴露 legacy 合成 code 与 HTTP 状态。
     #[tokio::test]
     async fn parse_json_response_uses_remote_error_field() {
         let app = Router::new().route(
@@ -1301,13 +1309,20 @@ mod tests {
             .expect_err("non-success JSON error should fail");
 
         assert_eq!(error.to_string(), "远端项目必须是本机项目");
+        // Finding 3: legacy 老形态被合成 code=legacy.remote_error，状态码保留。
+        let meta = error.remote_meta().expect("远端业务错误应携带结构化 meta");
+        assert_eq!(meta.status, 400);
+        assert_eq!(meta.code, "legacy.remote_error");
     }
 
-    /// Business Logic（为什么需要这个测试）:
-    ///     非 JSON 错误响应仍应带上短正文，方便定位对端代理或反序列化问题。
+    /// Business Logic（为什么需要这个测试 / Finding 3）:
+    ///     非 JSON 错误响应（代理 HTML/纯文本）必须归为协议违例（InvalidResponse），
+    ///     不能误判为对端业务错误。旧实现把它当 `generic` 并塞进正文摘要；现经统一解析
+    ///     归为 InvalidResponse → generic，文案含 url 上下文与"无法解析"说明。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     临时服务返回非 2xx 文本 body，断言错误包含 HTTP 状态和正文摘要。
+    ///     临时服务返回 502 + 纯文本 body，断言错误为 generic（非 Remote）、含 url 上下文、
+    ///     不携带 remote_meta（防止把代理错误当业务失败重试）。
     #[tokio::test]
     async fn parse_json_response_uses_plain_body_fallback() {
         let app = Router::new().route(
@@ -1326,8 +1341,17 @@ mod tests {
             .expect_err("non-success plain body should fail");
         let message = error.to_string();
 
-        assert!(message.contains("HTTP 502 Bad Gateway"));
-        assert!(message.contains("plain upstream failure"));
+        // 文案含 url 上下文与"无法解析"说明（InvalidResponse 语义）。
+        assert!(
+            message.contains("无法解析"),
+            "非 JSON body 应归为 InvalidResponse: {message}"
+        );
+        assert!(message.contains("127.0.0.1"), "应含 url 上下文: {message}");
+        // 关键：非 JSON 不应被当 Remote（不能携带 meta，避免上层误重试）。
+        assert!(
+            error.remote_meta().is_none(),
+            "InvalidResponse 不应携带 remote meta"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -1959,5 +1983,62 @@ mod tests {
         assert_eq!(body["workingDirectory"], "/remote/repo");
         assert_eq!(body["targetLanguage"], "zh");
         assert_eq!(body["sessionId"], "inner-session");
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 3）:
+    ///     Workbench 远端客户端同样要支持 `with_forwarded_request_id`，把多跳代理的入站
+    ///     `X-CC-Request-Id` 转发到下一跳，让整条调用链共用同一 ID。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动 echo server 捕获 observed `X-CC-Request-Id`；用转发 ID 调用 list_worktrees，
+    ///     断言对端观测到的就是该固定 ID；再用 new()（不转发）调用，断言对端观测到 36 字符 UUID。
+    #[tokio::test]
+    async fn with_forwarded_request_id_propagates_inbound_id_for_workbench() {
+        use std::sync::{Arc, Mutex};
+        let observed: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let observed_clone = observed.clone();
+        let app = Router::new().route(
+            "/api/workbench/worktrees/list",
+            post(
+                move |headers: axum::http::HeaderMap, _req: Json<RemoteProjectReq>| {
+                    let observed = observed_clone.clone();
+                    async move {
+                        let id = headers
+                            .get("x-cc-request-id")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        *observed.lock().unwrap() = id;
+                        Json(Vec::<WorkbenchWorktreeDto>::new())
+                    }
+                },
+            ),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        RemoteWorkbenchClient::new()
+            .with_forwarded_request_id("wb-trace-001")
+            .list_worktrees(&format!("http://{addr}"), "project-1")
+            .await
+            .expect("转发场景应成功");
+        assert_eq!(
+            observed.lock().unwrap().as_str(),
+            "wb-trace-001",
+            "转发 ID 必须原样到达下一跳"
+        );
+
+        RemoteWorkbenchClient::new()
+            .list_worktrees(&format!("http://{addr}"), "project-1")
+            .await
+            .expect("非转发场景应成功");
+        assert_eq!(
+            observed.lock().unwrap().len(),
+            36,
+            "未设置转发 ID 时应生成 36 字符 UUID"
+        );
     }
 }

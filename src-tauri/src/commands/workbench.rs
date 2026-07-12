@@ -457,19 +457,24 @@ async fn merged_session_dtos(
 ///     应用重启后，进入工作台项目时应自动恢复之前打开的终端 tab 和可重连上下文。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取持久化会话；registry 已有则跳过；项目存在时补齐可读 worktree 名再调用 registry.restore，
-///     成功后写回最新 row，项目缺失则删除孤儿会话。
+///     读取持久化会话；用 `try_claim_restore` 原子占位避免并发重复恢复（Finding 5）；
+///     项目存在时补齐可读 worktree 名再调用 registry.restore，成功后写回最新 row；
+///     无论成功/失败都释放占位；项目缺失则删除孤儿会话。
 async fn restore_persisted_sessions(
     state: &AppState,
     project_id: Option<&str>,
 ) -> Result<(), AppError> {
     let rows = state.workbench_session_repo.list(project_id).await?;
     for row in rows {
-        if state.workbench_sessions.contains(&row.id) {
+        // Finding 5: 原子占位 — 把"已运行期 + 是否有其他 caller 在 restore"的检查合为单步，
+        // 消除 contains() 与 restore() 之间的 TOCTOU 窗口。
+        if !state.workbench_sessions.try_claim_restore(&row.id) {
             continue;
         }
+        // 后续所有路径都必须释放占位，否则该 session 会被永久跳过。
         let Some(project) = state.workbench_project_repo.get(&row.project_id).await? else {
             state.workbench_session_repo.delete(&row.id).await?;
+            state.workbench_sessions.release_restore_claim(&row.id);
             continue;
         };
         let worktree_name =
@@ -491,13 +496,16 @@ async fn restore_persisted_sessions(
             }
             Err(error) => {
                 tracing::warn!("恢复工作台终端会话失败: {error}");
-                let mut disconnected = row;
+                let mut disconnected = row.clone();
                 disconnected.status = "disconnected".to_string();
                 disconnected.exited_at = Some(now_iso());
                 disconnected.updated_at = now_iso();
                 state.workbench_session_repo.upsert(&disconnected).await?;
             }
         }
+        // 成功路径：spawn_row 已写入 sessions map，contains 自然命中；
+        // 失败路径：释放占位允许后续请求重试 restore。
+        state.workbench_sessions.release_restore_claim(&row.id);
     }
     Ok(())
 }
@@ -4447,6 +4455,8 @@ mod tests {
                 port: 14210,
                 last_seen: Utc::now(),
                 online: true,
+                proto_version: 0,
+                capabilities: Vec::new(),
             },
         );
 

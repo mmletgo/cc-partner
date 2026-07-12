@@ -19,6 +19,8 @@ use crate::commands::prompt_optimizer::{
 };
 use crate::config::AppConfig;
 use crate::error::AppError;
+use crate::net::error_response::{P2pError, P2pResult};
+use crate::net::request_context::P2pRequestContext;
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
     OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus,
@@ -35,7 +37,7 @@ use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
 use crate::storage::WorkbenchProjectRepo;
 use crate::workbench::models::WorkbenchProjectRow;
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::Json;
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
@@ -90,10 +92,10 @@ impl OrchestratorRouteContext {
 ///     P2P Orchestrator 网关只接受 owning device 上的 local projectId，remote shortcut 不能递归代理到第三台设备。
 ///
 /// Code Logic（这个函数做什么）:
-///     检查项目 row 的 kind 是否为 local；非 local 返回清晰协议错误。
+///     检查项目 row 的 kind 是否为 local；非 local 返回校验错误（HTTP 边界映射 400 validation_error）。
 fn ensure_remote_orchestrator_local_project(project: &WorkbenchProjectRow) -> Result<(), AppError> {
     if project.kind != "local" {
-        return Err(AppError::generic("远端 Orchestrator 只接受对端本机项目"));
+        return Err(AppError::validation("远端 Orchestrator 只接受对端本机项目"));
     }
     Ok(())
 }
@@ -401,11 +403,14 @@ fn get_config_for_state(state: &OrchestratorRouteContext) -> RemoteOrchestratorC
 ///     接收 JSON 请求体，构造 route context 后委托 create_task_for_state；Start 动作额外 best-effort dispatch 并刷新返回状态。
 pub async fn create_task(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCreateOrchestratorTaskReq>,
-) -> Result<Json<OrchestratorTaskDto>, AppError> {
+) -> P2pResult<Json<OrchestratorTaskDto>> {
     let create_action = req.create_action;
     let context = OrchestratorRouteContext::from_app_state(&state);
-    let created = create_task_for_state(&context, req).await?;
+    let created = create_task_for_state(&context, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.create"))?;
     if !create_action.should_dispatch_after_create() {
         return Ok(Json(created));
     }
@@ -440,8 +445,9 @@ pub async fn create_task(
 ///     接收 `{prompt, workingDirectory?}`，委托 prompt_optimizer 的本机 helper，返回三字段 camelCase DTO。
 pub async fn complete_task_prompt(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCompleteOrchestratorTaskPromptReq>,
-) -> Result<Json<OrchestratorTaskPromptCompletionDto>, AppError> {
+) -> P2pResult<Json<OrchestratorTaskPromptCompletionDto>> {
     let mut working_directory = req.working_directory;
     if let Some(project_id) = req
         .project_id
@@ -452,11 +458,17 @@ pub async fn complete_task_prompt(
         let project = state
             .workbench_project_repo
             .get(project_id)
-            .await?
-            .ok_or_else(|| AppError::not_found("自动化 Prompt 完善项目不存在"))?;
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.complete_prompt"))?
+            .ok_or_else(|| P2pError::not_found("自动化 Prompt 完善项目不存在", &ctx))?;
         if project.kind == "remote" {
-            let context = open_remote_project_for_shortcut(&state, &project).await?;
+            let context = open_remote_project_for_shortcut(&state, &project)
+                .await
+                .map_err(|e| {
+                    P2pError::from_app_error(e, &ctx, "orchestrator.tasks.complete_prompt")
+                })?;
             let completed = RemoteOrchestratorClient::new()
+                .with_forwarded_request_id(&ctx.request_id)
                 .complete_prompt(
                     &context.base_url,
                     RemoteCompleteOrchestratorTaskPromptReq {
@@ -465,7 +477,10 @@ pub async fn complete_task_prompt(
                         working_directory: Some(context.remote_project_path),
                     },
                 )
-                .await?;
+                .await
+                .map_err(|e| {
+                    P2pError::from_app_error(e, &ctx, "orchestrator.tasks.complete_prompt")
+                })?;
             return Ok(Json(completed));
         }
         if working_directory
@@ -477,9 +492,10 @@ pub async fn complete_task_prompt(
             working_directory = Some(project.path);
         }
     }
-    Ok(Json(
-        local_complete_orchestrator_task_prompt(&state, req.prompt, working_directory).await?,
-    ))
+    let completed = local_complete_orchestrator_task_prompt(&state, req.prompt, working_directory)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.complete_prompt"))?;
+    Ok(Json(completed))
 }
 
 /// 列出 mobile-facing Orchestrator task views HTTP handler。
@@ -491,9 +507,12 @@ pub async fn complete_task_prompt(
 ///     接收 `{projectId}`，委托 commands 层 remote-aware helper，并用 `{views}` 包装结果。
 pub async fn list_task_views(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteListTasksReq>,
-) -> Result<Json<OrchestratorTaskViewListResp>, AppError> {
-    let views = list_orchestrator_task_views_for_state(&state, Some(req.project_id)).await?;
+) -> P2pResult<Json<OrchestratorTaskViewListResp>> {
+    let views = list_orchestrator_task_views_for_state(&state, Some(req.project_id))
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.task_views.list"))?;
     Ok(Json(OrchestratorTaskViewListResp { views }))
 }
 
@@ -506,11 +525,13 @@ pub async fn list_task_views(
 ///     接收 RemoteCreateOrchestratorTaskReq，委托 commands 层 HTTP helper，返回 local/remote/pendingRemote view。
 pub async fn create_task_view(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCreateOrchestratorTaskReq>,
-) -> Result<Json<OrchestratorTaskViewDto>, AppError> {
-    Ok(Json(
-        create_orchestrator_task_view_for_http(&state, req).await?,
-    ))
+) -> P2pResult<Json<OrchestratorTaskViewDto>> {
+    let view = create_orchestrator_task_view_for_http(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.task_views.create"))?;
+    Ok(Json(view))
 }
 
 /// 列出 Orchestrator 任务 HTTP handler。
@@ -522,10 +543,14 @@ pub async fn create_task_view(
 ///     接收 `{projectId}` 请求体，构造 route context 后委托 list_tasks_for_state。
 pub async fn list_tasks(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteListTasksReq>,
-) -> Result<Json<RemoteOrchestratorTaskListResp>, AppError> {
+) -> P2pResult<Json<RemoteOrchestratorTaskListResp>> {
     let context = OrchestratorRouteContext::from_app_state(&state);
-    Ok(Json(list_tasks_for_state(&context, &req.project_id).await?))
+    let resp = list_tasks_for_state(&context, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.list"))?;
+    Ok(Json(resp))
 }
 
 /// 读取任务 evidence HTTP handler。
@@ -537,10 +562,14 @@ pub async fn list_tasks(
 ///     接收 `{taskId}` 请求体，构造 route context 后委托 get_evidence_for_state。
 pub async fn get_evidence(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteTaskReq>,
-) -> Result<Json<RemoteOrchestratorEvidenceResp>, AppError> {
+) -> P2pResult<Json<RemoteOrchestratorEvidenceResp>> {
     let context = OrchestratorRouteContext::from_app_state(&state);
-    Ok(Json(get_evidence_for_state(&context, req).await?))
+    let resp = get_evidence_for_state(&context, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.evidence"))?;
+    Ok(Json(resp))
 }
 
 /// 将任务入队 HTTP handler。
@@ -552,10 +581,14 @@ pub async fn get_evidence(
 ///     接收 `{taskId}` 请求体，构造 route context 后委托 queue_task_for_state。
 pub async fn queue_task(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteTaskReq>,
-) -> Result<Json<OrchestratorTaskDto>, AppError> {
+) -> P2pResult<Json<OrchestratorTaskDto>> {
     let context = OrchestratorRouteContext::from_app_state(&state);
-    Ok(Json(queue_task_for_state(&context, req).await?))
+    let task = queue_task_for_state(&context, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.queue"))?;
+    Ok(Json(task))
 }
 
 /// 启动任务 HTTP handler。
@@ -567,9 +600,13 @@ pub async fn queue_task(
 ///     接收 `{taskId}` 请求体，委托 start_task_for_state。
 pub async fn start_task(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteTaskReq>,
-) -> Result<Json<OrchestratorTaskDto>, AppError> {
-    Ok(Json(start_task_for_state(&state, req).await?))
+) -> P2pResult<Json<OrchestratorTaskDto>> {
+    let task = start_task_for_state(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.start"))?;
+    Ok(Json(task))
 }
 
 /// 重试任务 HTTP handler。
@@ -581,10 +618,14 @@ pub async fn start_task(
 ///     接收 `{taskId}` 请求体，构造 route context 后委托 retry_task_for_state。
 pub async fn retry_task(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteTaskReq>,
-) -> Result<Json<OrchestratorTaskDto>, AppError> {
+) -> P2pResult<Json<OrchestratorTaskDto>> {
     let context = OrchestratorRouteContext::from_app_state(&state);
-    Ok(Json(retry_task_for_state(&context, req).await?))
+    let task = retry_task_for_state(&context, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.retry"))?;
+    Ok(Json(task))
 }
 
 /// 请求返工 HTTP handler。
@@ -596,10 +637,14 @@ pub async fn retry_task(
 ///     接收 `{taskId, reason}` 请求体，构造 route context 后委托 request_rework_task_for_state。
 pub async fn request_rework_task(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteTaskReworkReq>,
-) -> Result<Json<OrchestratorTaskDto>, AppError> {
+) -> P2pResult<Json<OrchestratorTaskDto>> {
     let context = OrchestratorRouteContext::from_app_state(&state);
-    Ok(Json(request_rework_task_for_state(&context, req).await?))
+    let task = request_rework_task_for_state(&context, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.request_rework"))?;
+    Ok(Json(task))
 }
 
 /// 交付人工复核任务 HTTP handler。
@@ -611,9 +656,13 @@ pub async fn request_rework_task(
 ///     接收 `{taskId}` 请求体，委托 deliver_reviewed_task_for_state。
 pub async fn deliver_reviewed_task(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteTaskReq>,
-) -> Result<Json<OrchestratorTaskDto>, AppError> {
-    Ok(Json(deliver_reviewed_task_for_state(&state, req).await?))
+) -> P2pResult<Json<OrchestratorTaskDto>> {
+    let task = deliver_reviewed_task_for_state(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.deliver_reviewed"))?;
+    Ok(Json(task))
 }
 
 /// 终止任务 HTTP handler。
@@ -625,10 +674,14 @@ pub async fn deliver_reviewed_task(
 ///     接收 `{taskId}` 请求体，构造 route context 后委托 abort_task_for_state。
 pub async fn abort_task(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteTaskReq>,
-) -> Result<Json<OrchestratorTaskDto>, AppError> {
+) -> P2pResult<Json<OrchestratorTaskDto>> {
     let context = OrchestratorRouteContext::from_app_state(&state);
-    Ok(Json(abort_task_for_state(&context, req).await?))
+    let task = abort_task_for_state(&context, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.abort"))?;
+    Ok(Json(task))
 }
 
 /// 取消任务 HTTP handler。
@@ -640,10 +693,14 @@ pub async fn abort_task(
 ///     接收 `{taskId}` 请求体，构造 route context 后委托 cancel_task_for_state。
 pub async fn cancel_task(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteTaskReq>,
-) -> Result<Json<OrchestratorTaskDto>, AppError> {
+) -> P2pResult<Json<OrchestratorTaskDto>> {
     let context = OrchestratorRouteContext::from_app_state(&state);
-    Ok(Json(cancel_task_for_state(&context, req).await?))
+    let task = cancel_task_for_state(&context, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.cancel"))?;
+    Ok(Json(task))
 }
 
 /// 刷新项目 HTTP handler。
@@ -655,11 +712,13 @@ pub async fn cancel_task(
 ///     接收 `{projectId}` 请求体，委托 refresh_project_for_state 并返回 `{projectId, dispatched}`。
 pub async fn refresh_project(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteListTasksReq>,
-) -> Result<Json<RemoteOrchestratorProjectRefreshResp>, AppError> {
-    Ok(Json(
-        refresh_project_for_state(&state, &req.project_id).await?,
-    ))
+) -> P2pResult<Json<RemoteOrchestratorProjectRefreshResp>> {
+    let resp = refresh_project_for_state(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.projects.refresh"))?;
+    Ok(Json(resp))
 }
 
 /// 读取 Orchestrator 全局配置 HTTP handler。
@@ -672,7 +731,8 @@ pub async fn refresh_project(
 ///     构造 route context 后同步读取 config，返回 `{config}`。
 pub async fn get_config(
     State(state): State<AppState>,
-) -> Result<Json<RemoteOrchestratorConfigResp>, AppError> {
+    Extension(_ctx): Extension<P2pRequestContext>,
+) -> P2pResult<Json<RemoteOrchestratorConfigResp>> {
     let context = OrchestratorRouteContext::from_app_state(&state);
     Ok(Json(get_config_for_state(&context)))
 }
@@ -1219,5 +1279,81 @@ mod tests {
 
         assert!(resp.config.enabled);
         assert_eq!(resp.config.max_concurrent_tasks, 3);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Orchestrator 路由（create/list/evidence/queue/start/retry/rework/deliver/abort/
+    ///     cancel/refresh/config）的错误必须经 P2pError::from_app_error 映射到信封。本测试覆盖
+    ///     三类典型错误：400（remote shortcut 项目被网关 guard 拒绝，属校验类）、404（任务不存在）、
+    ///     409（状态机非法转换，如对非 Blocked 任务 retry），断言 status/code/request_id 与契约一致。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对 validation/not_found/conflict 三类 AppError 构造 P2pError，断言 envelope 字段。
+    #[test]
+    fn orchestrator_routes_map_app_error_classes_to_envelope() {
+        use crate::error::{AppError, AppErrorCategory};
+        use crate::net::error_response::P2pError;
+        let ctx = P2pRequestContext {
+            request_id: "req-orch".to_string(),
+        };
+        let cases: Vec<(AppError, AppErrorCategory, &str, axum::http::StatusCode)> = vec![
+            (
+                AppError::validation("远端 Orchestrator 只接受对端本机项目"),
+                AppErrorCategory::Validation,
+                "validation_error",
+                axum::http::StatusCode::BAD_REQUEST,
+            ),
+            (
+                AppError::not_found("任务不存在"),
+                AppErrorCategory::NotFound,
+                "not_found",
+                axum::http::StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::conflict("任务当前状态不支持 retry"),
+                AppErrorCategory::Conflict,
+                "conflict",
+                axum::http::StatusCode::CONFLICT,
+            ),
+        ];
+        for (app, category, code, status) in cases {
+            assert_eq!(app.classify(), category, "AppError 分类应匹配");
+            let p2p = P2pError::from_app_error(app, &ctx, "orchestrator.tasks");
+            assert_eq!(p2p.status(), status, "状态码应匹配 code 约定");
+            assert_eq!(p2p.envelope().code, code, "code token 应匹配");
+            assert_eq!(p2p.envelope().request_id, "req-orch");
+            // Orchestrator 写/状态机操作保守默认：retryable 必须为 false。
+            assert!(
+                !p2p.envelope().retryable,
+                "orchestrator 操作 retryable 默认必须为 false"
+            );
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     orchestrator create route 的 project guard 把 remote shortcut 项目转成 AppError::validation，
+    ///     经 route handler 的 map_err 后必须变成 400 validation_error 信封，而不是 500 internal_error。
+    ///     这是 Task 6 把 AppError::generic → AppError::validation 的语义校正在边界上的回归保护。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     直接调用 ensure_remote_orchestrator_local_project 对 remote kind 项目取 AppError，
+    ///     经 P2pError::from_app_error 映射后断言 status=400 且 code=validation_error。
+    #[test]
+    fn remote_shortcut_project_guard_maps_to_400_validation_envelope() {
+        use crate::net::error_response::P2pError;
+        let ctx = P2pRequestContext {
+            request_id: "req-guard".to_string(),
+        };
+        let app_error = ensure_remote_orchestrator_local_project(&project_row_with_kind("remote"))
+            .expect_err("remote shortcut 必须被 guard 拒绝");
+
+        let p2p = P2pError::from_app_error(app_error, &ctx, "orchestrator.tasks.create");
+        assert_eq!(
+            p2p.status(),
+            axum::http::StatusCode::BAD_REQUEST,
+            "remote shortcut 拒绝应映射为 400 而非 500"
+        );
+        assert_eq!(p2p.envelope().code, "validation_error");
+        assert_eq!(p2p.envelope().request_id, "req-guard");
     }
 }

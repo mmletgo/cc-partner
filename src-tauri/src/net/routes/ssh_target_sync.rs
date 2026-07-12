@@ -12,10 +12,12 @@
 
 use crate::error::AppError;
 use crate::models::ssh_target::SshTargetRow;
+use crate::net::error_response::{P2pError, P2pResult};
+use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
 use crate::sync::ssh_target::merge_ssh_target;
 use crate::sync::vector_clock::{compare, ClockOrder};
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -57,8 +59,20 @@ pub struct SshSyncPushResp {
 /// POST /api/ssh-target/sync/pull：接收对端摘要，返回本端需下发的 SSH 目标。
 pub async fn ssh_target_sync_pull(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<SshSyncPullReq>,
-) -> Result<Json<SshSyncPullResp>, AppError> {
+) -> P2pResult<Json<SshSyncPullResp>> {
+    let targets = ssh_target_sync_pull_impl(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "ssh_target.pull"))?;
+    Ok(Json(SshSyncPullResp { targets }))
+}
+
+/// ssh_target_sync_pull 业务实现：返回需要下发的 SSH 目标列表。
+async fn ssh_target_sync_pull_impl(
+    state: &AppState,
+    req: SshSyncPullReq,
+) -> Result<Vec<SshTargetRow>, AppError> {
     let remote_map: HashMap<&str, &HashMap<String, u64>> = req
         .summaries
         .iter()
@@ -90,14 +104,26 @@ pub async fn ssh_target_sync_pull(
         local_all.len(),
         targets.len()
     );
-    Ok(Json(SshSyncPullResp { targets }))
+    Ok(targets)
 }
 
 /// POST /api/ssh-target/sync/push：接收对端推送的 SSH 目标，逐条合并后落库。
 pub async fn ssh_target_sync_push(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<SshSyncPushReq>,
-) -> Result<Json<SshSyncPushResp>, AppError> {
+) -> P2pResult<Json<SshSyncPushResp>> {
+    let accepted = ssh_target_sync_push_impl(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "ssh_target.push"))?;
+    Ok(Json(SshSyncPushResp { accepted }))
+}
+
+/// ssh_target_sync_push 业务实现：逐条合并后落库，返回实际落库条数。
+async fn ssh_target_sync_push_impl(
+    state: &AppState,
+    req: SshSyncPushReq,
+) -> Result<usize, AppError> {
     let mut to_upsert: Vec<SshTargetRow> = Vec::new();
 
     for remote in req.targets {
@@ -127,5 +153,5 @@ pub async fn ssh_target_sync_push(
     }
 
     tracing::info!("ssh-target/sync/push: 接收并落库 {} 条 SSH 目标", accepted);
-    Ok(Json(SshSyncPushResp { accepted }))
+    Ok(accepted)
 }

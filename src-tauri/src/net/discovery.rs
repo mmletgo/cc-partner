@@ -16,6 +16,9 @@
 //!     - 本机 IP 探测：`local_lan_ip` 优先选真实局域网接口 IP，对照 Python `_get_local_ip`。
 
 use crate::models::device::Device;
+use crate::net::protocol::server_protocol_info;
+#[cfg(test)]
+use crate::net::protocol::PROTOCOL_VERSION_V1;
 use crate::net::SERVICE_TYPE;
 use crate::state::AppState;
 use chrono::Utc;
@@ -29,6 +32,17 @@ use tauri::async_runtime;
 const TXT_KEY_DEVICE_ID: &str = "device_id";
 /// TXT 记录 key：设备名。
 const TXT_KEY_DEVICE_NAME: &str = "device_name";
+/// TXT 记录 key：协议版本提示（值为十进制 u32 字符串；缺失/非法视为 v0）。
+const TXT_KEY_PROTO: &str = "proto";
+/// TXT 记录 key：能力清单提示（值为按字典序排序、逗号分隔的 token 字符串）。
+const TXT_KEY_CAPS: &str = "caps";
+
+/// `caps` TXT value（逗号分隔的 token 列表，不含 `caps=` key 前缀）的 UTF-8 字节上限。
+///
+/// Business Logic: mDNS TXT 记录整体须保持精简（单条 RR 推荐上限 ~255B，整组 RR 推荐上限 ~1300B），
+///     为 device_id/device_name/proto 等其它键留出空间，且不得让单个能力 token 被截断成无意义片段。
+/// Code Logic: 与计划一致固定为 220；`encode_mdns_capabilities` 在累加过程中遇到超限的完整 token 时整段丢弃。
+const MAX_CAPS_TXT_BYTES: usize = 220;
 
 /// mDNS 启动计划。
 ///
@@ -80,6 +94,13 @@ fn build_service_info_for_plan(
     let mut properties = HashMap::new();
     properties.insert(TXT_KEY_DEVICE_ID.to_string(), device_id.to_string());
     properties.insert(TXT_KEY_DEVICE_NAME.to_string(), device_name.to_string());
+    // 协议元数据提示：proto=<u32>，caps=<bounded-list>。仅作发现层快速预筛，权威值仍来自对端 health。
+    let info = server_protocol_info();
+    properties.insert(TXT_KEY_PROTO.to_string(), info.protocol_version.to_string());
+    properties.insert(
+        TXT_KEY_CAPS.to_string(),
+        encode_mdns_capabilities(&info.capabilities, MAX_CAPS_TXT_BYTES),
+    );
 
     let host_name = format!("cc-{device_id}.local.");
     let service_info = match local_ip {
@@ -253,6 +274,11 @@ fn handle_resolved(state: &AppState, info: ServiceInfo, my_device_id: &str) {
 
     let port = info.get_port();
     let host_for_log = host.clone();
+
+    // 解析协议元数据提示（非权威，缺失/非法回落为 v0 / 空）。
+    let proto_version = parse_proto_hint(info.get_property_val_str(TXT_KEY_PROTO));
+    let capabilities = parse_caps_hint(info.get_property_val_str(TXT_KEY_CAPS));
+
     let device = Device {
         id: device_id.clone(),
         name: device_name.clone(),
@@ -260,6 +286,8 @@ fn handle_resolved(state: &AppState, info: ServiceInfo, my_device_id: &str) {
         port,
         last_seen: Utc::now(),
         online: true,
+        proto_version,
+        capabilities,
     };
 
     let mut devices = state.devices.write().expect("devices 写锁中毒");
@@ -323,6 +351,72 @@ pub fn local_lan_ip() -> Option<IpAddr> {
     }
 }
 
+/// 把能力 token 列表编码为 mDNS TXT `caps` 值（逗号分隔，不含 `caps=` 前缀）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     mDNS TXT 记录空间受限，能力清单可能很长或包含多字节 token，直接拼接会撑爆 TXT 上限，
+///     还可能把某个 token 切成无意义的半截。本函数按字典序排序、去重，再逐个累加完整 token，
+///     一旦加入下一个完整 token 会让整段值超过 `max_txt_bytes` 字节就停止，
+///     保证每个出现的 token 都是完整的。返回值仅是逗号分隔的 token 列表——`caps=` 前缀由
+///     TXT key（`TXT_KEY_CAPS`）在 wire 侧自动提供，函数内部若再补一次前缀会导致
+///     对端读到 `caps=caps=...` 双前缀（Finding 6）。
+///
+/// Code Logic（这个函数做什么）:
+///     1. 排序 + 去重输入；
+///     2. 逐个累加完整 token，每次先按"当前长度 + 分隔符 + token"计算字节数，超限就停止累加；
+///     3. 即使第一个 token 也放不下也返回空串，不会截断 token；
+///     4. 输出不含 `caps=` 前缀（前缀由 TXT key 提供），空输入返回空串。
+pub fn encode_mdns_capabilities(capabilities: &[String], max_txt_bytes: usize) -> String {
+    let mut sorted: Vec<&String> = capabilities.iter().collect();
+    sorted.sort();
+    sorted.dedup();
+
+    let mut out = String::new();
+    let mut current_len: usize = 0;
+
+    for token in sorted {
+        let token_bytes = token.len();
+        // 第一个 token 无分隔符；后续 token 前补逗号。
+        let separator_len = if current_len == 0 { 0 } else { 1 };
+        let projected = current_len + separator_len + token_bytes;
+        if projected > max_txt_bytes {
+            // 已按字典序排序，后续 token 至少等长或更长，无法再塞下，停止累加。
+            break;
+        }
+        if separator_len == 1 {
+            out.push(',');
+        }
+        out.push_str(token);
+        current_len = projected;
+    }
+
+    out
+}
+
+/// 解析 `proto` TXT 提示为 u32 协议版本；缺失或非法（含负数/溢出/空串）一律回落为 v0。
+///
+/// Business Logic: mDNS 提示不是权威来源，对端可能用旧版本不带 proto，也可能写了非数字字符串，
+///     绝不能因解析失败把对端踢出 devices 表；统一安全回落 v0（`supports()` 对 v0 永远返回 false）。
+fn parse_proto_hint(raw: Option<&str>) -> u32 {
+    raw.and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(0)
+}
+
+/// 解析 `caps` TXT 提示为能力 Vec<String>；空 token / 缺失 一律丢弃。
+///
+/// Business Logic: 与 `proto` 一样属于非权威提示，仅用于发现层预筛。空 token（连续逗号、首尾逗号）
+///     没有任何语义，必须丢弃避免与精确 token 匹配冲突。这里不去重/排序——`PeerProtocolInfo`
+///     反序列化路径会负责规范化；直接构造 `Device` 时也已是排序去重后的来源。
+fn parse_caps_hint(raw: Option<&str>) -> Vec<String> {
+    match raw {
+        Some(s) => s
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +456,213 @@ mod tests {
         .expect("browse-only service info planning should not fail");
 
         assert!(service_info.is_none());
+    }
+
+    /// 验证 `encode_mdns_capabilities` 不带 `caps=` 前缀（前缀由 TXT key 提供）。
+    ///
+    /// Business Logic: 对端解析器按 `caps` key 直接读取 value，若 value 自带 `caps=` 前缀会形成
+    ///     `caps=caps=...` 双前缀。空输入应返回空串（无前缀、无 token），由对端解释为“无能力提示”。
+    /// Code Logic: 空输入断言返回空串，避免与 wire 侧 key 拼出 `caps=`。
+    #[test]
+    fn encode_capabilities_empty_yields_no_prefix() {
+        assert_eq!(encode_mdns_capabilities(&[], MAX_CAPS_TXT_BYTES), "");
+    }
+
+    /// 验证能力 token 按字典序排序输出（不含 `caps=` 前缀）。
+    ///
+    /// Business Logic: 确定性的排序输出便于 diff、日志、与对端断言比对。
+    /// Code Logic: 输入乱序，断言输出按字典序排列且不带前缀。
+    #[test]
+    fn encode_capabilities_sorts_tokens_lexicographically() {
+        let caps = vec![
+            "zzz.last".to_string(),
+            "errors.envelope.v1".to_string(),
+            "inbox.messages.v1".to_string(),
+            "aaa.first".to_string(),
+        ];
+        let encoded = encode_mdns_capabilities(&caps, MAX_CAPS_TXT_BYTES);
+        assert_eq!(
+            encoded,
+            "aaa.first,errors.envelope.v1,inbox.messages.v1,zzz.last"
+        );
+    }
+
+    /// 验证重复 token 被去重。
+    ///
+    /// Business Logic: 重复 token 会让对端解析集合不稳定，也可能无谓消耗 TXT 空间。
+    /// Code Logic: 输入含重复，断言输出每个 token 仅出现一次。
+    #[test]
+    fn encode_capabilities_deduplicates_tokens() {
+        let caps = vec![
+            "errors.envelope.v1".to_string(),
+            "errors.envelope.v1".to_string(),
+            "inbox.messages.v1".to_string(),
+        ];
+        let encoded = encode_mdns_capabilities(&caps, MAX_CAPS_TXT_BYTES);
+        assert_eq!(encoded, "errors.envelope.v1,inbox.messages.v1");
+    }
+
+    /// 验证超过 `max_txt_bytes` 字节上限的完整 token 会被整段丢弃，不会出现截断。
+    ///
+    /// Business Logic: 被截断的半截 token 没有语义且可能误命中其它能力，必须避免；
+    ///     一旦某个完整 token 放不下就停止累加（后续 token 在排序后只会更长或等长）。
+    ///
+    /// Code Logic:
+    ///     1. 构造两个短 token（能放下）+ 一个长 token（超 30 字节上限）。
+    ///     2. 断言输出只含两个短 token，长 token 既不出现也不以截断形式出现。
+    ///     3. 断言输出总字节数 <= 上限。
+    #[test]
+    fn encode_capabilities_drops_oversize_token_without_truncation() {
+        let caps = vec![
+            "aa".to_string(),
+            "bb".to_string(),
+            "this-is-a-very-long-token-that-cannot-fit".to_string(),
+        ];
+        let encoded = encode_mdns_capabilities(&caps, 30);
+        assert_eq!(encoded, "aa,bb");
+        assert!(encoded.len() <= 30);
+        // 显式断言：超长 token 的任何前缀都不应出现在输出中（无截断）。
+        assert!(!encoded.contains("this-is"));
+    }
+
+    /// 验证当连第一个 token 都放不下时返回空串。
+    ///
+    /// Business Logic: 极端紧凑的 TXT 上限下，宁可宣告“无能力提示”也不能塞半截 token。
+    /// Code Logic: 单个长 token + 极小上限，断言输出为空串。
+    #[test]
+    fn encode_capabilities_first_token_too_large_yields_empty() {
+        let caps = vec!["toolongtoken".to_string()];
+        let encoded = encode_mdns_capabilities(&caps, 10);
+        assert_eq!(encoded, "");
+    }
+
+    /// 验证多字节（UTF-8）token 按字节而非字符计数。
+    ///
+    /// Business Logic: 能力 token 可能含中文/emoji 等多字节字符，UTF-8 字节数才是 TXT 真实占用；
+    ///     若按字符数计数会低估实际占用、撑爆 TXT 上限还自以为合规。
+    ///
+    /// Code Logic:
+    ///     "🛰️" 由 U+1F6F0(4B) + U+FE0F(3B) 组成，共 7 字节 / 2 个码点 / 1 个字素。
+    ///     - max=7：token 7B = 7B ≤ 7 → 完整放入（无前缀占用字节）。
+    ///     - max=6：token 7B > 6 → 整段丢弃（空串），绝不截断多字节字符。
+    ///     若实现误用 chars().count()(=2) 或 grapheme 计数(=1)，max=6 时也会被放入，从而失败。
+    #[test]
+    fn encode_capabilities_counts_multibyte_tokens_by_utf8_bytes() {
+        let emoji_token = "🛰️";
+        assert_eq!(emoji_token.chars().count(), 2, "precondition: 2 codepoints");
+        assert_eq!(emoji_token.len(), 7, "precondition: 7 UTF-8 bytes");
+
+        // 边界右侧：按字节刚好放下。
+        let fits = encode_mdns_capabilities(std::slice::from_ref(&emoji_token.to_string()), 7);
+        assert_eq!(fits, "🛰️");
+        assert_eq!("🛰️".len(), 7);
+
+        // 边界左侧：按字节差 1，整段丢弃（空串），绝不截断多字节字符。
+        let dropped = encode_mdns_capabilities(std::slice::from_ref(&emoji_token.to_string()), 6);
+        assert_eq!(dropped, "");
+    }
+
+    /// 验证 service 注册时构造的 TXT properties 含 `proto=1` 与 `caps=<bounded-list>`，
+    /// 且 caps value 不含 `caps=` 前缀（前缀由 TXT key 提供，避免双前缀 bug，Finding 6）。
+    ///
+    /// Business Logic: 本机对 mDNS 局域网广播的协议元数据提示必须与 `server_protocol_info()` 一致，
+    ///     让对端在 health 实测前就能预筛能力。`proto` 必须等于当前 PROTOCOL_VERSION_V1。
+    ///     `caps` 的 value 必须是裸 token 列表，对端 wire 侧按 key `caps` 读取。
+    ///
+    /// Code Logic: 用 advertise 计划构造 ServiceInfo，从 ServiceInfo 读回 TXT 属性，
+    ///             断言 proto=1、caps value 恰为 `errors.envelope.v1`（无 `caps=` 前缀）。
+    #[test]
+    fn service_info_advertises_proto_and_caps_hints() {
+        let plan = DiscoveryStartPlan::new(true, false);
+        let service_info = build_service_info_for_plan(
+            &plan,
+            "device-a",
+            "测试设备",
+            62116,
+            Some("127.0.0.1".parse().unwrap()),
+        )
+        .expect("advertise plan should build ServiceInfo")
+        .expect("register_service=true should yield Some(ServiceInfo)");
+
+        assert_eq!(service_info.get_property_val_str(TXT_KEY_PROTO), Some("1"));
+        assert_eq!("1", PROTOCOL_VERSION_V1.to_string());
+        let caps = service_info
+            .get_property_val_str(TXT_KEY_CAPS)
+            .expect("caps TXT must be present");
+        // value 必须是裸 token 列表，不能自带 `caps=` 前缀（否则对端读到 `caps=caps=...`）。
+        assert_eq!(caps, "errors.envelope.v1");
+        assert!(
+            !caps.starts_with("caps="),
+            "caps value must NOT carry the `caps=` prefix (it is provided by the TXT key); got: {caps}"
+        );
+    }
+
+    /// 验证 `proto` TXT 提示解析：合法数字 → 对应版本；缺失/非法/空串 → 0。
+    ///
+    /// Business Logic: mDNS 提示非权威，对端可能是旧版（无 proto）或写了非法值，必须安全回落 v0。
+    /// Code Logic: 直接调用 parse_proto_hint，覆盖 4 个分支。
+    #[test]
+    fn parse_proto_hint_handles_valid_missing_and_malformed() {
+        assert_eq!(parse_proto_hint(Some("1")), 1);
+        assert_eq!(parse_proto_hint(Some("  2 ")), 2);
+        assert_eq!(parse_proto_hint(Some("0")), 0);
+        assert_eq!(parse_proto_hint(None), 0);
+        assert_eq!(parse_proto_hint(Some("")), 0);
+        assert_eq!(parse_proto_hint(Some("not-a-number")), 0);
+        assert_eq!(parse_proto_hint(Some("-1")), 0);
+        assert_eq!(parse_proto_hint(Some("99999999999999999999")), 0);
+    }
+
+    /// 验证 `caps` TXT 提示解析：按逗号切分、去空白、丢空 token。
+    ///
+    /// Business Logic: 连续逗号、首尾逗号、空白 token 没有语义，必须丢弃，
+    ///     避免空串与精确 token 匹配冲突。
+    /// Code Logic: 直接调用 parse_caps_hint，覆盖正常/异常输入。
+    #[test]
+    fn parse_caps_hint_drops_empty_tokens() {
+        assert_eq!(
+            parse_caps_hint(Some("errors.envelope.v1,inbox.messages.v1")),
+            vec!["errors.envelope.v1", "inbox.messages.v1"]
+        );
+        // 首尾/连续逗号 → 空 token 被丢弃
+        assert_eq!(
+            parse_caps_hint(Some(",errors.envelope.v1,,,")),
+            vec!["errors.envelope.v1"]
+        );
+        // 缺失 → 空
+        assert!(parse_caps_hint(None).is_empty());
+        // 空串 → 空
+        assert!(parse_caps_hint(Some("")).is_empty());
+    }
+
+    /// 验证 mDNS 注册 → 解析 round-trip：本机 advertise 的 proto/caps 提示能被对端解析路径还原。
+    ///
+    /// Business Logic: 保证 publish 端和 parse 端用同一套约定（key/格式），避免“自己宣告的对端读不懂”。
+    ///     caps value 不带 `caps=` 前缀（前缀由 TXT key 提供），parse 端直接拿 value 走切分即可。
+    /// Code Logic: 构造 ServiceInfo（advertise），手动从其 TXT 取 proto/caps 走解析函数，
+    ///             断言还原出 proto_version=1 且 capabilities 包含 errors.envelope.v1。
+    #[test]
+    fn mdns_proto_caps_round_trip_through_publish_and_parse() {
+        let plan = DiscoveryStartPlan::new(true, false);
+        let service_info = build_service_info_for_plan(
+            &plan,
+            "device-b",
+            "Round-Trip 设备",
+            62117,
+            Some("127.0.0.1".parse().unwrap()),
+        )
+        .expect("advertise plan should build ServiceInfo")
+        .expect("register_service=true should yield Some(ServiceInfo)");
+
+        let proto_version = parse_proto_hint(service_info.get_property_val_str(TXT_KEY_PROTO));
+        let caps_raw = service_info
+            .get_property_val_str(TXT_KEY_CAPS)
+            .unwrap_or("");
+        // publish 端写入的是裸 token 列表（无 `caps=` 前缀），parse 端直接按逗号切分即可。
+        let capabilities = parse_caps_hint(Some(caps_raw));
+
+        assert_eq!(proto_version, PROTOCOL_VERSION_V1);
+        assert!(capabilities.contains(&"errors.envelope.v1".to_string()));
     }
 }
 

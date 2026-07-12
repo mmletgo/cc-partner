@@ -10,8 +10,12 @@
 //!     browse-only 模式验证 sidecar 控制文件与 health 后复用端口且不注册本机服务。
 
 pub mod discovery;
+pub mod error_response;
 pub mod http_server;
 pub mod peer_client;
+pub mod peer_error;
+pub mod protocol;
+pub mod request_context;
 pub mod routes;
 
 /// mDNS 服务类型。跟随应用名 cc-partner，供局域网内同版本实例互相发现。

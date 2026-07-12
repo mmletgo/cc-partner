@@ -15,10 +15,12 @@
 
 use crate::error::AppError;
 use crate::models::prompt::PromptRow;
+use crate::net::error_response::{P2pError, P2pResult};
+use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
 use crate::sync::merger::merge_prompt;
 use crate::sync::vector_clock::compare;
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -69,8 +71,17 @@ pub struct SyncPushResp {
 ///     4. 返回完整 PromptRow 列表（snake_case）。
 pub async fn sync_pull(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<SyncPullReq>,
-) -> Result<Json<SyncPullResp>, AppError> {
+) -> P2pResult<Json<SyncPullResp>> {
+    let prompts = sync_pull_impl(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "sync.pull"))?;
+    Ok(Json(SyncPullResp { prompts }))
+}
+
+/// sync_pull 业务实现：返回需要下发的 prompt 列表（命令层错误保持 AppError 形态）。
+async fn sync_pull_impl(state: &AppState, req: SyncPullReq) -> Result<Vec<PromptRow>, AppError> {
     // 对端摘要查找表
     let remote_map: HashMap<&str, &HashMap<String, u64>> = req
         .summaries
@@ -107,7 +118,7 @@ pub async fn sync_pull(
         local_all.len(),
         prompts.len()
     );
-    Ok(Json(SyncPullResp { prompts }))
+    Ok(prompts)
 }
 
 /// POST /api/sync/push：接收对端推送的 prompt，逐条合并后落库。
@@ -126,8 +137,17 @@ pub async fn sync_pull(
 ///     3. 返回 accepted = 实际落库条数。
 pub async fn sync_push(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<SyncPushReq>,
-) -> Result<Json<SyncPushResp>, AppError> {
+) -> P2pResult<Json<SyncPushResp>> {
+    let accepted = sync_push_impl(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "sync.push"))?;
+    Ok(Json(SyncPushResp { accepted }))
+}
+
+/// sync_push 业务实现：逐条合并后落库，返回实际落库条数（命令层错误保持 AppError 形态）。
+async fn sync_push_impl(state: &AppState, req: SyncPushReq) -> Result<usize, AppError> {
     let mut to_upsert: Vec<PromptRow> = Vec::new();
 
     for remote in req.prompts {
@@ -159,5 +179,5 @@ pub async fn sync_push(
     }
 
     tracing::info!("sync/push: 接收并落库 {} 条 prompt", accepted);
-    Ok(Json(SyncPushResp { accepted }))
+    Ok(accepted)
 }

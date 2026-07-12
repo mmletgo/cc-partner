@@ -14,9 +14,11 @@
 use crate::cc::merger::merge_cc_history;
 use crate::cc::models::ClaudeHistoryRow;
 use crate::error::AppError;
+use crate::net::error_response::{P2pError, P2pResult};
+use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
 use crate::sync::vector_clock::{compare, ClockOrder};
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -67,8 +69,20 @@ pub struct CcSyncPushResp {
 ///     4. 返回完整 ClaudeHistoryRow 列表（snake_case）。
 pub async fn cc_sync_pull(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<CcSyncPullReq>,
-) -> Result<Json<CcSyncPullResp>, AppError> {
+) -> P2pResult<Json<CcSyncPullResp>> {
+    let items = cc_sync_pull_impl(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "cc_history.pull"))?;
+    Ok(Json(CcSyncPullResp { items }))
+}
+
+/// cc_sync_pull 业务实现：返回需要下发的 cc 历史列表。
+async fn cc_sync_pull_impl(
+    state: &AppState,
+    req: CcSyncPullReq,
+) -> Result<Vec<ClaudeHistoryRow>, AppError> {
     let remote_map: HashMap<&str, &HashMap<String, u64>> = req
         .summaries
         .iter()
@@ -101,7 +115,7 @@ pub async fn cc_sync_pull(
         local_all.len(),
         items.len()
     );
-    Ok(Json(CcSyncPullResp { items }))
+    Ok(items)
 }
 
 /// POST /api/cc-history/sync/push：接收对端推送的 cc 历史，逐条合并后落库。
@@ -115,8 +129,17 @@ pub async fn cc_sync_pull(
 ///     3. 返回 accepted = 实际落库条数。
 pub async fn cc_sync_push(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<CcSyncPushReq>,
-) -> Result<Json<CcSyncPushResp>, AppError> {
+) -> P2pResult<Json<CcSyncPushResp>> {
+    let accepted = cc_sync_push_impl(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "cc_history.push"))?;
+    Ok(Json(CcSyncPushResp { accepted }))
+}
+
+/// cc_sync_push 业务实现：逐条合并后落库，返回实际落库条数。
+async fn cc_sync_push_impl(state: &AppState, req: CcSyncPushReq) -> Result<usize, AppError> {
     let mut to_upsert: Vec<ClaudeHistoryRow> = Vec::new();
 
     for remote in req.items {
@@ -144,5 +167,5 @@ pub async fn cc_sync_push(
     }
 
     tracing::info!("cc-history/sync/push: 接收并落库 {} 条 CC 历史", accepted);
-    Ok(Json(CcSyncPushResp { accepted }))
+    Ok(accepted)
 }
