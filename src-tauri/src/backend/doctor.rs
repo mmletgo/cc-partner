@@ -594,41 +594,113 @@ pub struct DoctorProbeInputs {
 /// 采集完整 doctor 快照（生产入口）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     `doctor` / `doctor --json` 需要一份有界、脱敏、可机器解析的健康快照。
+///     `doctor` / `doctor --json` 需要一份有界、脱敏、可机器解析的健康快照；
+///     卡住的 FS/探针绝不能让 CLI 进程长期挂起。
 ///
 /// Code Logic（这个函数做什么）:
-///     异步读 control/health 后，把全部同步阻塞探测（deps/FS/mDNS/log tail）放进
-///     `spawn_blocking`，并对 JoinHandle 施加 8s 硬超时，保证计时器可被 poll。
+///     委托 `collect_doctor_snapshot_bounded`：在独立 OS 线程上跑完整采集
+///     （含 `current_status`），主线程 `recv_timeout`；超时不 join 卡住线程，
+///     保证返回并让 CLI 能 exit（不经 Tokio blocking pool，避免 runtime Drop 等待）。
 pub async fn collect_doctor_snapshot() -> Result<DoctorSnapshot, AppError> {
-    // control/health 自身已有 2s 超时，先 await 拿到 BackendStatus。
-    let backend_status = crate::backend::control::current_status().await;
-    let home = current_home_dir();
+    // 同步有界采集即可：内部自建 OS 线程 + 可选 current_thread runtime，
+    // 不经过 spawn_blocking，避免超时后 Tokio runtime Drop 等待 blocking task。
+    collect_doctor_snapshot_bounded(DOCTOR_HARD_DEADLINE)
+}
 
-    // 整次同步采集硬 deadline：把阻塞工作移出 async future，timeout 才能真正抢占。
-    match tokio::time::timeout(
-        DOCTOR_HARD_DEADLINE,
-        tokio::task::spawn_blocking(move || {
-            collect_doctor_snapshot_blocking(backend_status, home.as_deref())
-        }),
-    )
-    .await
-    {
-        Ok(Ok(result)) => result,
-        Ok(Err(join_err)) => Err(AppError::generic(format!(
-            "doctor 采集任务失败: {join_err}"
-        ))),
-        Err(_) => Err(AppError::timeout(format!(
-            "doctor 采集超时（{:?}）",
-            DOCTOR_HARD_DEADLINE
-        ))),
+/// 在硬 deadline 内采集 doctor 快照（进程退出保证入口）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     仅让 future 提前返回不够：若阻塞工作落在 Tokio blocking pool 且超时后仍 join，
+///     CLI 进程仍会挂住。必须用 OS 线程 + `recv_timeout`，超时后放弃 join。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn 专用线程执行 `collect_doctor_snapshot_on_thread`；主线程 `recv_timeout`；
+///     成功则 join；超时则 `mem::forget` JoinHandle（文档化泄漏卡住线程作为 last resort）
+///     并返回 `AppError::Timeout`。
+pub fn collect_doctor_snapshot_bounded(deadline: Duration) -> Result<DoctorSnapshot, AppError> {
+    run_on_thread_with_deadline(deadline, collect_doctor_snapshot_on_thread).map_err(|err| {
+        if matches!(err, DeadlineRunError::Timeout) {
+            AppError::timeout(format!("doctor 采集超时（{deadline:?}）"))
+        } else {
+            AppError::generic("doctor 采集线程异常退出（未回传结果）")
+        }
+    })?
+}
+
+/// 有界线程执行失败原因。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     测试与生产路径需要区分“超时放弃 join”和“线程断开未回传”。
+///
+/// Code Logic（这个枚举做什么）:
+///     `Timeout` = recv_timeout 到期且已 detach；`Disconnected` = 通道断开且无结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeadlineRunError {
+    Timeout,
+    Disconnected,
+}
+
+/// 在独立 OS 线程上执行闭包，并用 `recv_timeout` 施加硬 deadline。
+///
+/// Business Logic（为什么需要这个函数）:
+///     doctor 必须保证 CLI 在 deadline 后可退出；不能 join 可能永久阻塞的 FS/探针线程。
+///
+/// Code Logic（这个函数做什么）:
+///     `std::thread::spawn` + `mpsc::recv_timeout`；完成则 join；超时 `mem::forget(handle)`
+///     故意泄漏卡住线程（进程退出时 OS 回收），并返回 `DeadlineRunError::Timeout`。
+fn run_on_thread_with_deadline<T, F>(deadline: Duration, work: F) -> Result<T, DeadlineRunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let result = work();
+        // 接收端可能已因超时丢弃；发送失败可忽略。
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(deadline) {
+        Ok(value) => {
+            // 工作已完成，回收线程，避免无意义泄漏。
+            let _ = handle.join();
+            Ok(value)
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            // LAST RESORT: 不 join 卡住的探测线程，否则 CLI 无法在硬截止后退出。
+            // 泄漏的线程会在进程退出时被 OS 回收；禁止改为 join/park 等待。
+            std::mem::forget(handle);
+            Err(DeadlineRunError::Timeout)
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = handle.join();
+            Err(DeadlineRunError::Disconnected)
+        }
     }
+}
+
+/// 在专用线程内完成 current_status + 同步探测。
+///
+/// Business Logic（为什么需要这个函数）:
+///     硬 deadline 必须覆盖 health/control 与全部阻塞 probe，不能把 current_status 放在界外。
+///
+/// Code Logic（这个函数做什么）:
+///     自建 current_thread Tokio runtime `block_on(current_status)`，再跑同步
+///     `collect_doctor_snapshot_blocking` 组装快照。
+fn collect_doctor_snapshot_on_thread() -> Result<DoctorSnapshot, AppError> {
+    let backend_status = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| AppError::generic(format!("doctor 采集 runtime 创建失败: {err}")))?
+        .block_on(crate::backend::control::current_status());
+    let home = current_home_dir();
+    collect_doctor_snapshot_blocking(backend_status, home.as_deref())
 }
 
 /// 在 blocking 线程中完成同步探测并组装快照。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     依赖命令、FS recv_timeout、mDNS 与日志 tail 都是同步阻塞；必须离开 async runtime
-///     才能让外层 `timeout` 在 deadline 到达时真正返回。
+///     依赖命令、FS recv_timeout、mDNS 与日志 tail 都是同步阻塞；与 async health 分离后
+///     便于把整段采集放进有界 OS 线程。
 ///
 /// Code Logic（这个函数做什么）:
 ///     解析 data/db/log 路径 → 同步依赖/mDNS 探测 → 读 recent errors（含 malformed warning）
@@ -1189,13 +1261,13 @@ pub fn read_recent_errors_from_logs(current_log: &Path, log_dir: &Path) -> Vec<D
 /// 读取 recent errors 并报告畸形受控 JSON 行。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     畸形受控 JSON 行必须产生 warning check 并纳入 overall degraded，
-///     同时 tail 首行可能因 seek 截断，不能当 malformed 误报。
+///     畸形受控 JSON 行必须产生 warning check 并纳入 overall degraded；
+///     合法 info/warn/debug/trace 行是正常受控输出，不得误计 malformed 导致常态 degraded。
 ///
 /// Code Logic（这个函数做什么）:
 ///     读 `backend.log` 与 `backend.log.1` 的有界 tail；每个文件若从中间 seek，
-///     丢弃首个可能截断半行；解析 level=error 的受控 JSON；看起来像 JSON 但解析失败
-///     的行累计为 malformed，最终返回 warning check。
+///     丢弃首个可能截断半行；按 `classify_controlled_log_line` 分类：error→收集、
+///     合法非 error→忽略、JSON/schema 非法→malformed warning。
 pub fn read_recent_errors_report(current_log: &Path, log_dir: &Path) -> RecentErrorsReport {
     let mut lines: Vec<String> = Vec::new();
     let history_1 = log_dir.join(format!(
@@ -1215,15 +1287,11 @@ pub fn read_recent_errors_report(current_log: &Path, log_dir: &Path) -> RecentEr
     let mut errors: Vec<DoctorErrorSummary> = Vec::new();
     let mut malformed = 0usize;
     for line in lines {
-        match parse_error_log_line(&line) {
-            Some(err) => errors.push(err),
-            None => {
-                // 非 JSON 或非 error 级别：仅对“看起来像 JSON 但字段不对”计 malformed
-                let trimmed = line.trim();
-                if trimmed.starts_with('{') {
-                    malformed += 1;
-                }
-            }
+        match classify_controlled_log_line(&line) {
+            ControlledLogLine::Error(err) => errors.push(err),
+            ControlledLogLine::ValidNonError => {}
+            ControlledLogLine::Malformed => malformed += 1,
+            ControlledLogLine::Ignore => {}
         }
     }
 
@@ -1246,6 +1314,56 @@ pub fn read_recent_errors_report(current_log: &Path, log_dir: &Path) -> RecentEr
     RecentErrorsReport {
         errors,
         malformed_warning,
+    }
+}
+
+/// 受控日志行分类结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     doctor 必须区分“合法非 error”“error 摘要”“真正畸形”，避免 info/warn 常态 degraded。
+///
+/// Code Logic（这个枚举做什么）:
+///     Error=收集；ValidNonError=忽略；Malformed=计 warning；Ignore=非 JSON 文本忽略。
+#[derive(Debug)]
+enum ControlledLogLine {
+    Error(DoctorErrorSummary),
+    ValidNonError,
+    Malformed,
+    Ignore,
+}
+
+/// 分类单行受控日志。
+///
+/// Business Logic（为什么需要这个函数）:
+///     先独立解析 JSON 与受控 schema，再按 level 分流；只有语法/schema 非法才算 malformed。
+///
+/// Code Logic（这个函数做什么）:
+///     非 `{` 开头 → Ignore；JSON 解析失败或非 object → Malformed；
+///     level 为 info/warn/debug/trace → ValidNonError；level=error → 构造 summary；
+///     缺失/未知 level → Malformed。
+fn classify_controlled_log_line(line: &str) -> ControlledLogLine {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return ControlledLogLine::Ignore;
+    }
+    if !trimmed.starts_with('{') {
+        return ControlledLogLine::Ignore;
+    }
+    let value: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return ControlledLogLine::Malformed,
+    };
+    let Some(obj) = value.as_object() else {
+        return ControlledLogLine::Malformed;
+    };
+    let Some(level) = obj.get("level").and_then(|v| v.as_str()) else {
+        // 受控 schema 要求稳定 level 字段；缺 level 视为 schema-invalid。
+        return ControlledLogLine::Malformed;
+    };
+    match level {
+        "error" => ControlledLogLine::Error(error_summary_from_controlled_object(obj)),
+        "info" | "warn" | "debug" | "trace" => ControlledLogLine::ValidNonError,
+        _ => ControlledLogLine::Malformed,
     }
 }
 
@@ -1280,18 +1398,28 @@ fn read_file_tail_lines(path: &Path, max_bytes: u64) -> Option<Vec<String>> {
 /// 解析单行受控日志 JSON 为 error summary。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     只接受白名单 schema 的 error 级行，防止把 info 或任意文本当错误。
+///     单测需要直接拿到 error 级摘要；非 error/畸形返回 None。
 ///
 /// Code Logic（这个函数做什么）:
-///     serde_json 解析；要求 level==error；取 timestamp/error_code/message/request_id；
-///     summary 再 sanitize + 截断。
+///     委托 `classify_controlled_log_line`，仅 `Error` 变体映射为 Some。
+#[cfg(test)]
 fn parse_error_log_line(line: &str) -> Option<DoctorErrorSummary> {
-    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    let obj = value.as_object()?;
-    let level = obj.get("level")?.as_str()?;
-    if level != "error" {
-        return None;
+    match classify_controlled_log_line(line) {
+        ControlledLogLine::Error(err) => Some(err),
+        _ => None,
     }
+}
+
+/// 从已确认 level=error 的受控 JSON object 构造 error summary。
+///
+/// Business Logic（为什么需要这个函数）:
+///     分类器已校验 schema/level，字段清洗逻辑需与历史 parse 行为一致且可复用。
+///
+/// Code Logic（这个函数做什么）:
+///     取 timestamp/error_code|operation/message/request_id；sanitize + 截断后返回 DTO。
+fn error_summary_from_controlled_object(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> DoctorErrorSummary {
     let home = current_home_dir();
     let home_ref = home.as_deref();
 
@@ -1322,12 +1450,12 @@ fn parse_error_log_line(line: &str) -> Option<DoctorErrorSummary> {
         .filter(|s| !s.is_empty())
         .map(|s| sanitize_request_id_field(s, home_ref));
 
-    Some(DoctorErrorSummary {
+    DoctorErrorSummary {
         timestamp,
         code,
         summary,
         request_id,
-    })
+    }
 }
 
 /// 严格清洗 timestamp：仅接受 RFC3339，否则替换为占位。
@@ -2191,26 +2319,67 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     doctor 硬超时必须能在阻塞同步工作上抢占返回，映射 exit 2。
+    ///     doctor 硬超时必须在阻塞同步工作上抢占返回，且不得 join 卡住线程。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     spawn_blocking + timeout 模拟：对 JoinHandle 超时后得到 timeout 错误类别。
-    #[tokio::test]
-    async fn hard_deadline_timeout_is_preemptive_on_blocking_work() {
+    ///     对 `run_on_thread_with_deadline` 注入长于 deadline 的 sleep，断言 wrapper 在
+    ///     deadline+margin 内返回 Timeout，且不 join 阻塞线程。
+    #[test]
+    fn hard_deadline_wrapper_returns_without_joining_stuck_thread() {
         let started = std::time::Instant::now();
-        let result = tokio::time::timeout(
-            Duration::from_millis(200),
-            tokio::task::spawn_blocking(|| {
-                std::thread::sleep(Duration::from_secs(5));
-                Ok::<(), AppError>(())
-            }),
-        )
-        .await;
-        assert!(result.is_err(), "timeout 应在阻塞 sleep 完成前触发");
+        let result = super::run_on_thread_with_deadline(Duration::from_millis(150), || {
+            std::thread::sleep(Duration::from_secs(5));
+            42_u32
+        });
+        assert_eq!(result, Err(super::DeadlineRunError::Timeout));
         assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "硬超时必须抢占，实际耗时 {:?}",
+            started.elapsed() < Duration::from_millis(800),
+            "硬超时必须在 deadline 后立即返回，实际耗时 {:?}",
             started.elapsed()
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     合法 info/warn 受控 JSON 是正常输出，不得计为 malformed 把 doctor 常态 degraded。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     仅写入合法 info/warn 行，断言 report 无 malformed warning；在其它检查 ok 时 overall healthy。
+    #[test]
+    fn valid_info_and_warn_log_lines_do_not_count_as_malformed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log_dir = tmp.path().to_path_buf();
+        let current = log_dir.join("backend.log");
+        let body = concat!(
+            r#"{"timestamp":"2026-07-11T11:00:00Z","level":"info","domain":"http","operation":"serve","result":"ok","message":"listening"}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-11T11:00:01Z","level":"warn","domain":"sync","operation":"pull","result":"degraded","message":"peer slow"}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-11T11:00:02Z","level":"debug","message":"trace detail"}"#,
+            "\n",
+        );
+        fs::write(&current, body).expect("write log");
+
+        let report = read_recent_errors_report(&current, &log_dir);
+        assert!(report.errors.is_empty(), "非 error 行不得进入 recentErrors");
+        assert!(
+            report.malformed_warning.is_none(),
+            "合法 info/warn/debug 不得计为 malformed"
+        );
+
+        let data = tmp.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        let db = data.join("data.db");
+        fs::write(&db, b"SQLite format 3\0").unwrap();
+        let status = classify_status(None, false, false, None);
+        let mut inputs = base_inputs(status, data, db, log_dir.clone());
+        inputs.recent_errors_override = None;
+        inputs.recent_errors_warning_override = None;
+        let snap = assemble_snapshot_from_inputs(inputs, None);
+        assert_eq!(
+            snap.status,
+            DoctorStatus::Healthy,
+            "仅合法非 error 日志时应 healthy"
+        );
+        assert!(snap.log_parse_warning.is_none());
     }
 }

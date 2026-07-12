@@ -529,7 +529,7 @@ async fn start() -> Result<(), AppError> {
             }
             Ok(None) => {}
             Err(err) => {
-                let _ = kill_and_reap_owned_child(&mut child);
+                let _ = kill_and_reap_owned_child(&mut child, CHILD_REAP_TIMEOUT);
                 return Err(err.into());
             }
         }
@@ -545,47 +545,87 @@ async fn start() -> Result<(), AppError> {
                 // Running 且 PID 匹配：所有权交给 detached serve，不再 reap。
                 return Ok(());
             }
-            // 他人实例已 Running：清理自己的等待中 child，再按“已有实例运行”成功返回。
-            let _ = kill_and_reap_owned_child(&mut child);
-            println!("{}", render_status_json(&status)?);
-            return Ok(());
+            // 他人实例已 Running：仅当确认自己的 child 已死才能成功采纳，否则报告残留 PID。
+            match kill_and_reap_owned_child(&mut child, CHILD_REAP_TIMEOUT) {
+                Ok(note) => {
+                    println!("{}", render_status_json(&status)?);
+                    let _ = note;
+                    return Ok(());
+                }
+                Err(reap_err) => {
+                    return Err(AppError::generic(format!(
+                        "检测到其它后端实例已运行，但无法确认清理本进程 spawn 的 child: {reap_err}"
+                    )));
+                }
+            }
         }
         tokio::time::sleep(STATUS_POLL_INTERVAL).await;
     }
 
     // 超时或任何未确认 Running 的路径都必须有界 kill+reap 自己 spawn 的 child，避免孤儿 writer。
-    let reap_note = kill_and_reap_owned_child(&mut child);
-    Err(AppError::generic(format!("等待后端启动超时{reap_note}")))
+    match kill_and_reap_owned_child(&mut child, CHILD_REAP_TIMEOUT) {
+        Ok(note) => Err(AppError::generic(format!("等待后端启动超时{note}"))),
+        Err(reap_err) => Err(AppError::generic(format!(
+            "等待后端启动超时；且清理子进程失败: {reap_err}"
+        ))),
+    }
 }
+
+/// owned child 有界 kill+reap 的默认等待窗口。
+const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 有界 kill 并 reap 自己 spawn 的 serve 子进程。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     start 超时或探测失败后若放任 detached child 存活，稍后仍会打开 backend.log 并写出 control，
-///     与下一次 start 形成双 writer / 孤儿实例。
+///     start 超时、探测失败或采纳他人实例前，若放任 detached child 存活，稍后仍会打开
+///     backend.log 并写出 control，形成双 writer / 意外重启。只有确认 child 已退出才可继续。
 ///
 /// Code Logic（这个函数做什么）:
-///     `child.kill()` 后在 2 秒内 `try_wait` 回收；返回简短诊断后缀（不含路径/敏感内容）。
-fn kill_and_reap_owned_child(child: &mut std::process::Child) -> String {
+///     委托 `kill_and_reap_owned_child_with`，生产路径用 `Child::try_wait` 轮询。
+fn kill_and_reap_owned_child(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<String, String> {
+    kill_and_reap_owned_child_with(child, timeout, |c| c.try_wait())
+}
+
+/// 可注入 wait 策略的有界 kill+reap（生产与回归测试共用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     采纳他人实例必须在确认自有 child 已死之后；超时路径需可测，不能依赖真实 OS 信号竞态。
+///
+/// Code Logic（这个函数做什么）:
+///     `child.kill()` 后在 `timeout` 内反复调用 `wait_once`；确认退出返回 Ok(诊断后缀)，
+///     超时/reap 失败返回 Err(含残留 PID)。测试可注入恒返回 None 的 wait 模拟卡住 child。
+fn kill_and_reap_owned_child_with<F>(
+    child: &mut std::process::Child,
+    timeout: Duration,
+    mut wait_once: F,
+) -> Result<String, String>
+where
+    F: FnMut(&mut std::process::Child) -> std::io::Result<Option<std::process::ExitStatus>>,
+{
     let pid = child.id();
     if let Err(err) = child.kill() {
         // 进程可能已自行退出；继续尝试 reap。
         let _ = err;
     }
-    let reap_deadline = Instant::now() + Duration::from_secs(2);
+    let reap_deadline = Instant::now() + timeout;
     loop {
-        match child.try_wait() {
+        match wait_once(child) {
             Ok(Some(status)) => {
-                return format!("；已终止子进程 pid={pid} status={status}");
+                return Ok(format!("；已终止子进程 pid={pid} status={status}"));
             }
             Ok(None) => {
                 if Instant::now() >= reap_deadline {
-                    return format!("；已发送终止信号但子进程 pid={pid} 在 2s 内未退出");
+                    return Err(format!(
+                        "已发送终止信号但子进程 pid={pid} 在 {timeout:?} 内未退出（残留 PID）"
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(err) => {
-                return format!("；终止子进程 pid={pid} 时 reap 失败: {err}");
+                return Err(format!("终止子进程 pid={pid} 时 reap 失败: {err}"));
             }
         }
     }
@@ -988,6 +1028,7 @@ mod tests {
     use axum::{Json, Router};
     use serde_json::json;
     use std::process::Stdio;
+    use std::time::Duration;
     use tokio::net::TcpListener;
 
     /// 验证 status 输出符合 CLI JSON 契约。
@@ -1379,7 +1420,7 @@ mod tests {
     ///     start 超时路径必须有界 kill+reap 自己 spawn 的 child，避免孤儿 detached serve。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     spawn 一个 sleep 子进程，调用 `kill_and_reap_owned_child`，断言进程不再存活。
+    ///     spawn 一个 sleep 子进程，调用 `kill_and_reap_owned_child`，断言 Ok 且进程不再存活。
     #[test]
     fn kill_and_reap_owned_child_terminates_stuck_child() {
         let mut child = std::process::Command::new("sleep")
@@ -1390,7 +1431,8 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         let pid = child.id();
-        let note = super::kill_and_reap_owned_child(&mut child);
+        let note = super::kill_and_reap_owned_child(&mut child, super::CHILD_REAP_TIMEOUT)
+            .expect("应成功 kill+reap sleep 子进程");
         assert!(note.contains("pid="), "reap note 应含 pid: {note}");
         let status = child.try_wait().expect("try_wait");
         assert!(status.is_some(), "child 应已被 reap");
@@ -1403,5 +1445,34 @@ mod tests {
                 .unwrap_or(false);
             assert!(!alive, "pid={pid} 不应仍存活");
         }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     采纳他人实例前若 kill/reap 超时，start 必须失败并报告残留 PID，不能假装成功。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     注入恒返回 None 的 wait + 短超时，断言 Err 含残留 PID；最后真实 reap 清理。
+    #[test]
+    fn kill_and_reap_owned_child_reports_residual_pid_on_timeout() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        // 注入卡住 wait：模拟 kill 后进程仍存活超过 deadline。
+        let err =
+            super::kill_and_reap_owned_child_with(&mut child, Duration::from_millis(80), |_c| {
+                Ok(None)
+            })
+            .expect_err("卡住 wait 应超时失败");
+        assert!(
+            err.contains(&pid.to_string()) && err.contains("残留"),
+            "错误应报告残留 PID，实际: {err}"
+        );
+        // 清理：真实 try_wait 路径 reap，避免测试泄漏 sleep。
+        let _ = super::kill_and_reap_owned_child(&mut child, super::CHILD_REAP_TIMEOUT);
     }
 }
