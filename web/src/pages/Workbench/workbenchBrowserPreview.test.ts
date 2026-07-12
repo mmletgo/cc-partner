@@ -6,7 +6,7 @@ import {
   WORKBENCH_BROWSER_IFRAME_SANDBOX,
   canApplyWorkbenchBrowserRequest,
   getWorkbenchBrowserTargetSourceLabelKey,
-} from '@/components/domain/WorkbenchBrowserWorkspace/WorkbenchBrowserWorkspace';
+} from '@/components/domain/WorkbenchBrowserWorkspace/workbenchBrowserHelpers';
 import type { WorkbenchBrowserPreview } from '@/lib/types';
 
 describe('workbenchBrowserPreview', () => {

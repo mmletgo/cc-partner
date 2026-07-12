@@ -1,14 +1,8 @@
 import { lazy, Suspense } from 'react';
 import type { ReactElement } from 'react';
-import type {
-  WorkbenchBrowserPreview,
-  WorkbenchBrowserTargetSource,
-  WorkbenchProject,
-  WorkbenchWorktree,
-} from '@/lib/types';
+import type { WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
 import type { WorkbenchTransport } from '@/api/workbenchTransport';
-
-export type WorkbenchBrowserSurface = 'desktop' | 'mobile';
+import type { WorkbenchBrowserSurface } from './workbenchBrowserHelpers';
 
 export interface WorkbenchBrowserWorkspaceProps {
   surface: WorkbenchBrowserSurface;
@@ -17,28 +11,6 @@ export interface WorkbenchBrowserWorkspaceProps {
   worktree: WorkbenchWorktree | null;
   onReturnToTerminal?: () => void;
 }
-
-export interface WorkbenchBrowserRequestState {
-  sequence: number;
-  projectId: string | null;
-  worktreeId: string | null;
-}
-
-export interface WorkbenchBrowserRequestSnapshot {
-  sequence: number;
-  projectId: string;
-  worktreeId: string | null;
-}
-
-export type WorkbenchBrowserSourceLabelKey =
-  | 'workbench:browserPreview.sources.remembered'
-  | 'workbench:browserPreview.sources.terminalOutput'
-  | 'workbench:browserPreview.sources.projectConfig'
-  | 'workbench:browserPreview.sources.portProbe'
-  | 'workbench:browserPreview.sources.manual';
-
-export const WORKBENCH_BROWSER_IFRAME_SANDBOX =
-  'allow-scripts allow-forms allow-popups allow-downloads allow-modals';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -55,68 +27,11 @@ async function loadWorkbenchBrowserWorkspaceView() {
 const LazyWorkbenchBrowserWorkspaceView = lazy(loadWorkbenchBrowserWorkspaceView);
 
 /**
- * Business Logic（为什么需要这个函数）:
- *   桌面 Tauri 和移动端浏览器访问 preview proxy 的 URL 不同，组件需要稳定选择 iframe src。
- *
- * Code Logic（这个函数做什么）:
- *   desktop 返回后端提供的绝对 loopback URL，mobile 返回同源 path。
- */
-export function getWorkbenchBrowserFrameSrc(
-  preview: WorkbenchBrowserPreview | null,
-  surface: WorkbenchBrowserSurface,
-): string | null {
-  if (!preview) return null;
-  return surface === 'desktop' ? preview.desktopProxyUrl : preview.mobileProxyPath;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   浏览器候选来源文案必须跟随当前前端语言，不能直接展示后端 DTO 的 label 字段。
- *
- * Code Logic（这个函数做什么）:
- *   将稳定 source 枚举映射到 workbench namespace 下的 i18n key，供视图组件交给 t() 渲染。
- */
-export function getWorkbenchBrowserTargetSourceLabelKey(
-  source: WorkbenchBrowserTargetSource,
-): WorkbenchBrowserSourceLabelKey {
-  switch (source) {
-    case 'remembered':
-      return 'workbench:browserPreview.sources.remembered';
-    case 'terminalOutput':
-      return 'workbench:browserPreview.sources.terminalOutput';
-    case 'projectConfig':
-      return 'workbench:browserPreview.sources.projectConfig';
-    case 'portProbe':
-      return 'workbench:browserPreview.sources.portProbe';
-    case 'manual':
-      return 'workbench:browserPreview.sources.manual';
-  }
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   浏览器预览的发现与打开请求可能乱序返回，旧项目/worktree 或旧点击结果不能覆盖当前预览。
- *
- * Code Logic（这个函数做什么）:
- *   同时比较请求序号、projectId 和 worktreeId，三者完全匹配才允许异步结果写入 UI 状态。
- */
-export function canApplyWorkbenchBrowserRequest(
-  current: WorkbenchBrowserRequestState,
-  request: WorkbenchBrowserRequestSnapshot,
-): boolean {
-  return (
-    current.sequence === request.sequence &&
-    current.projectId === request.projectId &&
-    current.worktreeId === request.worktreeId
-  );
-}
-
-/**
  * Business Logic（为什么需要这个组件）:
  *   Workbench 用户需要在终端和文件工作区旁快速查看当前项目 dev server 效果，并能自动发现或手动输入 URL。
  *
  * Code Logic（这个组件做什么）:
- *   延迟加载带样式的浏览器预览视图，让纯 helper 测试可直接导入本模块，同时运行时渲染完整工作区。
+ *   延迟加载带样式的浏览器预览视图；纯 helper 已拆到 workbenchBrowserHelpers.ts 以满足 Fast Refresh。
  */
 export function WorkbenchBrowserWorkspace(
   props: WorkbenchBrowserWorkspaceProps,

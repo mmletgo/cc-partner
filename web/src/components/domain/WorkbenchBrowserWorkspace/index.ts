@@ -1,5 +1,14 @@
-export { WorkbenchBrowserWorkspace, getWorkbenchBrowserFrameSrc } from './WorkbenchBrowserWorkspace';
+export { WorkbenchBrowserWorkspace } from './WorkbenchBrowserWorkspace';
+export type { WorkbenchBrowserWorkspaceProps } from './WorkbenchBrowserWorkspace';
+export {
+  WORKBENCH_BROWSER_IFRAME_SANDBOX,
+  canApplyWorkbenchBrowserRequest,
+  getWorkbenchBrowserFrameSrc,
+  getWorkbenchBrowserTargetSourceLabelKey,
+} from './workbenchBrowserHelpers';
 export type {
+  WorkbenchBrowserRequestSnapshot,
+  WorkbenchBrowserRequestState,
+  WorkbenchBrowserSourceLabelKey,
   WorkbenchBrowserSurface,
-  WorkbenchBrowserWorkspaceProps,
-} from './WorkbenchBrowserWorkspace';
+} from './workbenchBrowserHelpers';

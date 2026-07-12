@@ -283,25 +283,29 @@ pub async fn parse_peer_response<T: DeserializeOwned>(
 ///     `AppError::generic(message)`，导致 `code`/`status`/`retryable`/`request_id` 全部丢失，
 ///     上层重试/退避只能依赖人类可读文案（文案本地化后即失效）。本函数提供单一映射入口，
 ///     让两处 client 行为一致：
-///     - `Network`/`InvalidResponse` → `generic`（网络/协议层，非业务失败）；
-///     - `Unsupported` → `unavailable`（对端能力不足，调用方不应重试同一对端）；
+///     - `Network` → `unavailable`（传输层离线/中断，`classify()`=Unavailable，outbox/preflight 当网络）；
+///     - `InvalidResponse` → `generic`（协议层，`classify()`=Internal）；
+///     - `Unsupported` → `validation`（能力缺失，不是传输离线；与 Network 的 Unavailable 区分）；
 ///     - `Remote` → `AppError::remote(message, meta)`，保留 code/status/retryable/request_id；
 ///       `classify()` 会据此（而非文案）映射分类。message 为空时回落到状态码摘要。
 ///
 /// Code Logic（这个函数做什么）:
-///     `Remote` 分支构造 `RemoteErrorMeta` 并委托 `AppError::remote`；其余分支与原各 client
-///     行为对齐（中文文案 + url 上下文）。`client_label` 用于在 Network/InvalidResponse/Unsupported
-///     文案里区分调用方（"远端 Orchestrator" / "远端 Workbench"），便于日志定位。
+///     `Remote` 分支构造 `RemoteErrorMeta` 并委托 `AppError::remote`；其余分支产出类型化 AppError。
+///     `client_label` 用于在 Network/InvalidResponse/Unsupported 文案里区分调用方
+///     （"远端 Orchestrator" / "远端 Workbench"），便于日志定位。
 pub fn peer_call_error_to_app_error(error: PeerCallError, client_label: &str) -> AppError {
     match error {
+        // 传输层 send/body-read 失败：稳定映射 Unavailable，供 outbox/preflight 按 classify 分支，
+        // 不再依赖“远端 xxx 请求失败:”中文前缀（body-read 形态带括号 URL 时旧文案匹配会漏判）。
         PeerCallError::Network { url, source } => {
-            AppError::generic(format!("{client_label} 请求失败 ({url}): {source}"))
+            AppError::unavailable(format!("{client_label} 请求失败 ({url}): {source}"))
         }
         PeerCallError::InvalidResponse { url, reason } => {
             AppError::generic(format!("{client_label} 响应无法解析 ({url}): {reason}"))
         }
         PeerCallError::Unsupported { url, capability } => {
-            AppError::unavailable(format!("{client_label} ({url}) 不支持能力 {capability}"))
+            // 能力缺失是稳定业务/协议态，不是传输离线；用 Validation 与 Network 的 Unavailable 区分。
+            AppError::validation(format!("{client_label} ({url}) 不支持能力 {capability}"))
         }
         PeerCallError::Remote {
             message,

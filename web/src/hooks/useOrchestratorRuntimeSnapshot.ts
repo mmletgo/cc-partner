@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { orchestratorApi } from '@/api/orchestrator';
+import { isOrchestratorRuntimeNetworkTransportError } from '@/api/orchestratorRuntimeTransportError';
 import type {
   OrchestratorRemoteRuntimeStatus,
   OrchestratorRuntimeDisplayState,
@@ -216,29 +217,6 @@ function resolveDisplayStateFromResponse(
 }
 
 /**
- * Business Logic（为什么需要这个函数）:
- *   invoke 异常不能一律标 offline；只有网络类失败且存在 remote live 缓存时才展示 offline 缓存。
- *
- * Code Logic（这个函数做什么）:
- *   根据 Error.message 的常见网络关键词做启发式判定（前端无法拿到 typed PeerCallError）。
- */
-function isLikelyNetworkFailure(error: Error): boolean {
-  const message = error.message.toLowerCase();
-  return (
-    message.includes('network') ||
-    message.includes('fetch') ||
-    message.includes('timeout') ||
-    message.includes('timed out') ||
-    message.includes('econn') ||
-    message.includes('offline') ||
-    message.includes('离线') ||
-    message.includes('连接') ||
-    message.includes('unreachable') ||
-    message.includes('failed to fetch')
-  );
-}
-
-/**
  * Business Logic（为什么需要这个 hook）:
  *   Orchestrator 面板需要按当前 active project 拉取 runtime snapshot，并在远端 offline 时
  *   展示本进程内最后一次 remote live 成功结果；项目切换必须丢弃旧响应与旧显示。
@@ -304,7 +282,9 @@ export function useOrchestratorRuntimeSnapshot(
       }
       const error = err instanceof Error ? err : new Error(String(err));
       const cached = liveRuntimeSnapshotCache.get(targetProjectId) ?? null;
-      if (cached && isLikelyNetworkFailure(error)) {
+      // 仅当 adapter 显式标记 network transport 且存在 remote live 缓存时才 warm offline。
+      // 禁止 Error.message 关键词匹配；成功 DTO 的 remoteStatus 才是四态权威。
+      if (cached && isOrchestratorRuntimeNetworkTransportError(err)) {
         setState({
           projectId: targetProjectId,
           snapshot: cached.snapshot,
@@ -315,7 +295,7 @@ export function useOrchestratorRuntimeSnapshot(
         });
         return;
       }
-      // 非网络失败：有/无缓存都不推断 offline；本机或协议错误保持 error 语义。
+      // 非 network transport：有/无缓存都不推断 offline；协议/未知错误保持 error 语义。
       setState({
         projectId: targetProjectId,
         snapshot: null,

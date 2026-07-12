@@ -552,14 +552,13 @@ fn map_remote_runtime_snapshot_for_shortcut(
 ///     必须映射回四态空快照，保持 cold offline 与 unavailable 语义。
 ///
 /// Code Logic（这个函数做什么）:
-///     设备缺失/网络类 → offline 空快照；其它 preflight 业务/协议错误 → unavailable 空快照；
-///     文案固定中文提示，不拼接 base_url/IP/端口。
+///     仅按 `AppError::classify()` / `is_remote_network_error` 类型分支：
+///     Unavailable/Timeout → offline；其它 → unavailable。
+///     展示文案固定中文提示，不拼接 base_url/IP/端口，也不用中文 contains 判定四态。
 fn remote_runtime_snapshot_from_open_error(
     project: &WorkbenchProjectRow,
     error: AppError,
 ) -> OrchestratorRuntimeSnapshotDto {
-    // 脱敏：绝不把 owner URL 写入 latest_error。
-    let sanitized = error.to_string();
     if is_remote_network_error(&error) {
         return remote_runtime_snapshot_empty(
             project,
@@ -567,11 +566,12 @@ fn remote_runtime_snapshot_from_open_error(
             "远端设备离线，暂时无法获取运行时快照",
         );
     }
+    // 脱敏：业务/协议失败也绝不把 owner URL 写入 latest_error。
+    let sanitized = error.to_string();
     let looks_like_url = sanitized.contains("http://") || sanitized.contains("https://");
     let message = if looks_like_url || sanitized.trim().is_empty() {
         "远端运行时快照暂时不可用".to_string()
     } else {
-        // 业务错误保留中文提示，但不带 URL。
         sanitized
     };
     remote_runtime_snapshot_empty(project, "unavailable", &message)
@@ -3272,16 +3272,18 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     open-project preflight 设备缺失/离线必须回落 offline 空快照，且不得把 owner URL 写进 DTO。
+    ///     open-project preflight 设备缺失/传输中断必须回落 offline 空快照，且不得把 owner URL 写进 DTO。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     用“远端设备不在线”与带 URL 的网络失败文案调用 remote_runtime_snapshot_from_open_error，
-    ///     断言 remoteStatus=offline、空运行时字段、latest_error 不含 http://。
+    ///     用类型化 Unavailable（设备缺失、send 失败、body-read 中断带 URL）调用
+    ///     remote_runtime_snapshot_from_open_error，断言 remoteStatus=offline 且脱敏。
     #[test]
     fn remote_runtime_snapshot_open_preflight_maps_device_missing_to_offline_without_url() {
         let project = remote_shortcut_row();
-        let offline =
-            remote_runtime_snapshot_from_open_error(&project, AppError::generic("远端设备不在线"));
+        let offline = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::unavailable("远端设备不在线"),
+        );
         assert_eq!(offline.remote_status, "offline");
         assert_eq!(offline.project_id, "shortcut-project-1");
         assert!(offline.running_tasks.is_empty());
@@ -3291,9 +3293,10 @@ mod tests {
         assert!(!offline_err.contains("http://"));
         assert!(!offline_err.contains("https://"));
 
+        // send 失败（旧前缀形态）
         let network = remote_runtime_snapshot_from_open_error(
             &project,
-            AppError::generic(
+            AppError::unavailable(
                 "远端 Workbench 请求失败: error sending request for url (http://192.168.9.9:62116/api/workbench/projects/open)",
             ),
         );
@@ -3302,13 +3305,26 @@ mod tests {
         assert!(!network_err.contains("http://"));
         assert!(!network_err.contains("192.168.9.9"));
         assert!(!network_err.contains("62116"));
+
+        // body-read 中断（peer_call_error_to_app_error 括号 URL 形态）仍按类型判 offline
+        let body_read = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::unavailable(
+                "远端 Workbench 请求失败 (http://192.168.9.9:62116/api/workbench/projects/open): connection reset",
+            ),
+        );
+        assert_eq!(body_read.remote_status, "offline");
+        let body_err = body_read.latest_error.unwrap_or_default();
+        assert!(!body_err.contains("http://"));
+        assert!(!body_err.contains("192.168.9.9"));
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     open-project 业务/协议失败必须回落 unavailable，且响应不得泄漏 owner base URL。
+    ///     open-project 业务/协议失败必须回落 unavailable，且响应不得泄漏 owner base URL；
+    ///     即使文案含“连接/离线”等误导词也不能靠文案误判 offline。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     用含 URL 的业务错误与不含 URL 的业务错误分别映射，断言 unavailable 且脱敏。
+    ///     用 Validation/Internal 类型错误（含 URL 与误导中文）映射，断言 unavailable 且脱敏。
     #[test]
     fn remote_runtime_snapshot_open_preflight_maps_business_failure_to_unavailable_without_url() {
         let project = remote_shortcut_row();
@@ -3330,6 +3346,17 @@ mod tests {
         assert_eq!(plain.latest_error.as_deref(), Some("路径不能为空"));
         assert!(plain.running_tasks.is_empty());
         assert_eq!(plain.max_concurrent_tasks, 0);
+
+        // 误导文案 + Validation 分类：必须 unavailable，不能被“离线/连接”关键词带偏。
+        let misleading = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::validation("路径无效：远端连接配置离线占位"),
+        );
+        assert_eq!(misleading.remote_status, "unavailable");
+        assert_eq!(
+            misleading.latest_error.as_deref(),
+            Some("路径无效：远端连接配置离线占位")
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

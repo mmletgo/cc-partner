@@ -1,4 +1,5 @@
 import { describe, test, beforeEach } from 'vitest';
+import { OrchestratorRuntimeTransportError } from '@/api/orchestratorRuntimeTransportError';
 import type { OrchestratorRuntimeSnapshot } from '@/lib/types';
 import {
   applyMobileRuntimeSnapshotFailure,
@@ -217,7 +218,7 @@ describe('mobileRuntimeSnapshotStore', () => {
       const fail = applyMobileRuntimeSnapshotFailure(
         'b',
         nextMobileRuntimeSnapshotRequestSeq('b'),
-        new Error('network down'),
+        new OrchestratorRuntimeTransportError('network down', 'network'),
       );
       assert(fail?.error?.message === 'network down', 'failure keeps error');
       assert(fail?.snapshot?.generatedAt === 'B', 'failure keeps display cache');
@@ -368,4 +369,21 @@ describe('mobileRuntimeSnapshotStore', () => {
     );
     assert(failB?.projectId === 'project-b', 'failure stamps owning projectId');
   });
+
+  test('keyword-only Error message does not promote to offline without transport kind', () => {
+    applyMobileRuntimeSnapshotSuccess(
+      'kw-p',
+      nextMobileRuntimeSnapshotRequestSeq('kw-p'),
+      makeSnapshot({ projectId: 'kw-p', remoteStatus: 'live', generatedAt: 'kw-live' }),
+      '2026-07-11T17:00:00.000Z',
+    );
+    const fail = applyMobileRuntimeSnapshotFailure(
+      'kw-p',
+      nextMobileRuntimeSnapshotRequestSeq('kw-p'),
+      new Error('连接超时 offline timeout'),
+    );
+    assert(fail?.remoteStatus === 'unavailable', 'plain Error with network keywords is not offline');
+    assert(fail?.snapshot === null, 'must not surface warm cache without transport kind');
+  });
+
 });

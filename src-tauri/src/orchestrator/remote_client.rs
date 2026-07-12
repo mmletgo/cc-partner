@@ -439,7 +439,11 @@ impl RemoteOrchestratorClient {
                 url: url.clone(),
                 source: error,
             })?;
-        parse_peer_response::<OrchestratorRuntimeSnapshotDto>(response, &url).await
+        let snapshot =
+            parse_peer_response::<OrchestratorRuntimeSnapshotDto>(response, &url).await?;
+        // owner 身份语义校验：成功 2xx 也不能把错误项目/远端 shortcut 快照重标为 live。
+        validate_owner_runtime_snapshot(&snapshot, project_id, &url)?;
+        Ok(snapshot)
     }
 
     /// 发送 taskId 请求。
@@ -495,7 +499,10 @@ impl RemoteOrchestratorClient {
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
-            .map_err(|error| AppError::generic(format!("远端 Orchestrator 请求失败: {error}")))?;
+            // send 失败属于传输离线：用 Unavailable 分类，供 outbox/preflight 按类型分支。
+            .map_err(|error| {
+                AppError::unavailable(format!("远端 Orchestrator 请求失败: {error}"))
+            })?;
         parse_json_response(response, &url).await
     }
 
@@ -529,7 +536,10 @@ impl RemoteOrchestratorClient {
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
-            .map_err(|error| AppError::generic(format!("远端 Orchestrator 请求失败: {error}")))?;
+            // send 失败属于传输离线：用 Unavailable 分类，供 outbox/preflight 按类型分支。
+            .map_err(|error| {
+                AppError::unavailable(format!("远端 Orchestrator 请求失败: {error}"))
+            })?;
         parse_json_response(response, &url).await
     }
 }
@@ -609,6 +619,50 @@ where
 ///     保证 UI 文案不回归。
 fn remote_error_to_app_error(error: PeerCallError) -> AppError {
     crate::net::peer_error::peer_call_error_to_app_error(error, "远端 Orchestrator")
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     owning device 的 runtime-snapshot 成功响应若混入错误 projectId、remote shortcut 身份或
+///     非 local remoteStatus，本机会无条件 remap 为 shortcut live，导致串项目/串状态缓存。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 `project_id == requested`、`project_kind == "local"`、`remote_status == "local"`；
+///     任一不满足返回 `PeerCallError::InvalidResponse`，由 command 层映射 unavailable。
+// PeerCallError::Remote 变体较大；本 helper 仅返回 InvalidResponse，允许 Result large_err。
+#[allow(clippy::result_large_err)]
+fn validate_owner_runtime_snapshot(
+    snapshot: &OrchestratorRuntimeSnapshotDto,
+    requested_project_id: &str,
+    url: &str,
+) -> Result<(), PeerCallError> {
+    if snapshot.project_id != requested_project_id {
+        return Err(PeerCallError::InvalidResponse {
+            url: url.to_string(),
+            reason: format!(
+                "owner snapshot project_id mismatch: expected {requested_project_id}, got {}",
+                snapshot.project_id
+            ),
+        });
+    }
+    if snapshot.project_kind != "local" {
+        return Err(PeerCallError::InvalidResponse {
+            url: url.to_string(),
+            reason: format!(
+                "owner snapshot project_kind must be local, got {}",
+                snapshot.project_kind
+            ),
+        });
+    }
+    if snapshot.remote_status != "local" {
+        return Err(PeerCallError::InvalidResponse {
+            url: url.to_string(),
+            reason: format!(
+                "owner snapshot remote_status must be local, got {}",
+                snapshot.remote_status
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// 截断远端错误正文。
@@ -1551,6 +1605,126 @@ mod tests {
             "invalid v1 payload 必须 InvalidResponse（→ unavailable），实际: {err:?}"
         );
         assert_eq!(hits.load(Ordering::SeqCst), 1, "能力门通过后路由应被调用");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     owner 成功响应若 projectId/projectKind/remoteStatus 身份不匹配，必须 InvalidResponse，
+    ///     禁止被 command 层 remap 成目标 shortcut 的 live 缓存。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     分别喂 wrong-project / wrong-kind / wrong-status fixture，断言均为 InvalidResponse。
+    #[tokio::test]
+    async fn runtime_snapshot_rejects_owner_identity_mismatch_as_invalid_response() {
+        // wrong project_id
+        let wrong_project = serde_json::json!({
+            "projectId": "other-project",
+            "projectKind": "local",
+            "remoteStatus": "local",
+            "generatedAt": "2026-07-12T03:00:00Z",
+            "latestTickAt": null,
+            "lastDispatchAt": null,
+            "lastDispatchedCount": 0,
+            "schedulerEnabled": true,
+            "workflowSource": "built-in",
+            "workflowValid": true,
+            "workflowError": null,
+            "maxConcurrentTasks": 1,
+            "slotsUsed": 0,
+            "slotsAvailable": 1,
+            "latestError": null,
+            "runningTasks": [],
+            "retryingTasks": [],
+            "recentEvents": []
+        });
+        let (url, hits, _, _, _) = spawn_runtime_snapshot_server(
+            1,
+            vec![CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string()],
+            wrong_project,
+        )
+        .await;
+        let err = RemoteOrchestratorClient::new()
+            .runtime_snapshot(&url, "project-1", "req-wrong-project")
+            .await
+            .expect_err("wrong project must be invalid");
+        assert!(
+            matches!(err, PeerCallError::InvalidResponse { .. }),
+            "wrong project → InvalidResponse, got {err:?}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // wrong project_kind
+        let wrong_kind = serde_json::json!({
+            "projectId": "project-1",
+            "projectKind": "remote",
+            "remoteStatus": "local",
+            "generatedAt": "2026-07-12T03:00:00Z",
+            "latestTickAt": null,
+            "lastDispatchAt": null,
+            "lastDispatchedCount": 0,
+            "schedulerEnabled": true,
+            "workflowSource": "built-in",
+            "workflowValid": true,
+            "workflowError": null,
+            "maxConcurrentTasks": 1,
+            "slotsUsed": 0,
+            "slotsAvailable": 1,
+            "latestError": null,
+            "runningTasks": [],
+            "retryingTasks": [],
+            "recentEvents": []
+        });
+        let (url, hits, _, _, _) = spawn_runtime_snapshot_server(
+            1,
+            vec![CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string()],
+            wrong_kind,
+        )
+        .await;
+        let err = RemoteOrchestratorClient::new()
+            .runtime_snapshot(&url, "project-1", "req-wrong-kind")
+            .await
+            .expect_err("wrong kind must be invalid");
+        assert!(
+            matches!(err, PeerCallError::InvalidResponse { .. }),
+            "wrong kind → InvalidResponse, got {err:?}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // wrong remote_status
+        let wrong_status = serde_json::json!({
+            "projectId": "project-1",
+            "projectKind": "local",
+            "remoteStatus": "live",
+            "generatedAt": "2026-07-12T03:00:00Z",
+            "latestTickAt": null,
+            "lastDispatchAt": null,
+            "lastDispatchedCount": 0,
+            "schedulerEnabled": true,
+            "workflowSource": "built-in",
+            "workflowValid": true,
+            "workflowError": null,
+            "maxConcurrentTasks": 1,
+            "slotsUsed": 0,
+            "slotsAvailable": 1,
+            "latestError": null,
+            "runningTasks": [],
+            "retryingTasks": [],
+            "recentEvents": []
+        });
+        let (url, hits, _, _, _) = spawn_runtime_snapshot_server(
+            1,
+            vec![CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string()],
+            wrong_status,
+        )
+        .await;
+        let err = RemoteOrchestratorClient::new()
+            .runtime_snapshot(&url, "project-1", "req-wrong-status")
+            .await
+            .expect_err("wrong status must be invalid");
+        assert!(
+            matches!(err, PeerCallError::InvalidResponse { .. }),
+            "wrong status → InvalidResponse, got {err:?}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     /// 启动临时 Orchestrator server（返回 base_url）。
