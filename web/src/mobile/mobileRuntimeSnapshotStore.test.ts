@@ -227,4 +227,49 @@ describe('mobileRuntimeSnapshotStore', () => {
       }
     }
   });
+
+  test('reset leaves cold empty state and preserves unique owner live fields', () => {
+    assert(getMobileRuntimeSnapshotCacheSize() === 0, 'beforeEach reset must cold-start empty');
+    const beginCold = beginMobileRuntimeSnapshotLoad('cold-owner');
+    assert(beginCold.snapshot === null, 'cold begin has no snapshot');
+    assert(beginCold.cachedAt === null, 'cold begin has no cachedAt');
+    assert(beginCold.remoteStatus === null, 'cold begin has no remoteStatus');
+
+    const ownerGeneratedAt = '2026-07-12T15:16:17.018Z';
+    const ownerEvent = 'owner-only-event-fingerprint-p4t7';
+    const live = makeSnapshot({
+      projectId: 'owner-mobile',
+      remoteStatus: 'live',
+      generatedAt: ownerGeneratedAt,
+      latestTickAt: '2026-07-12T15:15:00.001Z',
+      lastDispatchedCount: 7,
+      slotsUsed: 4,
+      slotsAvailable: 2,
+      latestError: 'owner-only-latest-error-p4t7',
+      recentEvents: [
+        {
+          id: 'event-owner-p4t7',
+          taskId: 'task-owner-p4t7',
+          taskTitle: 'owner running',
+          kind: 'runner',
+          message: ownerEvent,
+          createdAt: '2026-07-12T15:12:00.000Z',
+        },
+      ],
+    });
+    const applied = applyMobileRuntimeSnapshotSuccess(
+      'owner-mobile',
+      nextMobileRuntimeSnapshotRequestSeq('owner-mobile'),
+      live,
+      '2026-07-12T15:16:20.000Z',
+    );
+    assert(applied?.snapshot?.generatedAt === ownerGeneratedAt, 'owner generatedAt preserved');
+    assert(applied?.snapshot?.slotsUsed === 4, 'owner slots preserved');
+    assert(
+      applied?.snapshot?.recentEvents[0]?.message === ownerEvent,
+      'owner event message preserved',
+    );
+    assert(applied?.remoteStatus === 'live', 'live status');
+    assert(applied?.cachedAt === '2026-07-12T15:16:20.000Z', 'client receipt cachedAt');
+  });
 });

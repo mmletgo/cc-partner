@@ -503,11 +503,7 @@ fn remote_runtime_snapshot_from_peer_error(
             "远端设备离线，暂时无法获取运行时快照",
         ),
         PeerCallError::InvalidResponse { .. } | PeerCallError::Remote { .. } => {
-            remote_runtime_snapshot_empty(
-                project,
-                "unavailable",
-                "远端运行时快照暂时不可用",
-            )
+            remote_runtime_snapshot_empty(project, "unavailable", "远端运行时快照暂时不可用")
         }
     }
 }
@@ -566,11 +562,7 @@ async fn get_remote_orchestrator_runtime_snapshot(
     let context = open_remote_project_for_shortcut(state, remote_shortcut).await?;
     let request_id = crate::net::request_context::new_request_id();
     match RemoteOrchestratorClient::new()
-        .runtime_snapshot(
-            &context.base_url,
-            &context.remote_project_id,
-            &request_id,
-        )
+        .runtime_snapshot(&context.base_url, &context.remote_project_id, &request_id)
         .await
     {
         Ok(owner_snapshot) => Ok(map_remote_runtime_snapshot_for_shortcut(
@@ -3102,7 +3094,10 @@ mod tests {
         assert_eq!(mapped.project_kind, "remote");
         assert_eq!(mapped.remote_status, "live");
         assert_eq!(mapped.generated_at, "2026-07-12T09:08:07.006Z");
-        assert_eq!(mapped.latest_tick_at.as_deref(), Some("2026-07-12T09:07:00Z"));
+        assert_eq!(
+            mapped.latest_tick_at.as_deref(),
+            Some("2026-07-12T09:07:00Z")
+        );
         assert_eq!(
             mapped.last_dispatch_at.as_deref(),
             Some("2026-07-12T09:06:30Z")
@@ -3159,6 +3154,82 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("local"));
+    }
+
+    /// Business Logic（为什么需要这个测试 / T7 owner 端到端透传）:
+    ///     route→client 解析后的 owner DTO 再经 command 层 shortcut 映射时，
+    ///     generatedAt/tick/slots/events 必须与 owner 种子逐字相等，仅 ID/表面字段被改写。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用唯一 owner 指纹构造 DTO，JSON round-trip 模拟 remote client 反序列化，
+    ///     再 map_remote_runtime_snapshot_for_shortcut，断言 owner 运行时字段精确相等，
+    ///     仅 projectId/kind/status 与 entity id 发生表面映射。
+    #[test]
+    fn remote_runtime_snapshot_preserves_owner_fields_after_client_json_and_shortcut_mapping() {
+        let shortcut = remote_shortcut_row();
+        let owner = owner_runtime_snapshot_fixture();
+        let owner_generated_at = owner.generated_at.clone();
+        let owner_tick = owner.latest_tick_at.clone();
+        let owner_dispatch = owner.last_dispatch_at.clone();
+        let owner_dispatched_count = owner.last_dispatched_count;
+        let owner_slots_used = owner.slots_used;
+        let owner_slots_available = owner.slots_available;
+        let owner_max = owner.max_concurrent_tasks;
+        let owner_latest_error = owner.latest_error.clone();
+        let owner_event_message = owner.recent_events[0].message.clone();
+        let owner_running_message = owner.running_tasks[0].last_runtime_message.clone();
+        let owner_workflow_source = owner.workflow_source.clone();
+
+        // 模拟 remote_client 成功路径：owner JSON → Deserialize → command 映射。
+        let wire = serde_json::to_value(&owner).expect("owner DTO serialize");
+        let decoded: OrchestratorRuntimeSnapshotDto =
+            serde_json::from_value(wire).expect("owner DTO deserialize after client parse");
+        let mapped = map_remote_runtime_snapshot_for_shortcut(decoded, &shortcut);
+
+        // 表面/身份映射。
+        assert_eq!(mapped.project_id, shortcut.id);
+        assert_eq!(mapped.project_kind, "remote");
+        assert_eq!(mapped.remote_status, "live");
+        assert_eq!(
+            mapped.running_tasks[0].task_id,
+            "remote:device-a:task-owner-running"
+        );
+        assert_eq!(
+            mapped.running_tasks[0].session_id.as_deref(),
+            Some("remote:device-a:session-owner-1")
+        );
+        assert_eq!(
+            mapped.running_tasks[0].worktree_id.as_deref(),
+            Some("remote:device-a:worktree-owner-1")
+        );
+        assert_eq!(
+            mapped.retrying_tasks[0].task_id,
+            "remote:device-a:task-owner-retry"
+        );
+        assert_eq!(
+            mapped.recent_events[0].task_id,
+            "remote:device-a:task-owner-running"
+        );
+
+        // owner 运行时字段逐字保留（禁止本机 telemetry 替代）。
+        assert_eq!(mapped.generated_at, owner_generated_at);
+        assert_eq!(mapped.latest_tick_at, owner_tick);
+        assert_eq!(mapped.last_dispatch_at, owner_dispatch);
+        assert_eq!(mapped.last_dispatched_count, owner_dispatched_count);
+        assert_eq!(mapped.slots_used, owner_slots_used);
+        assert_eq!(mapped.slots_available, owner_slots_available);
+        assert_eq!(mapped.max_concurrent_tasks, owner_max);
+        assert_eq!(mapped.latest_error, owner_latest_error);
+        assert_eq!(mapped.workflow_source, owner_workflow_source);
+        assert_eq!(
+            mapped.running_tasks[0].last_runtime_message,
+            owner_running_message
+        );
+        assert_eq!(mapped.recent_events[0].message, owner_event_message);
+        assert_ne!(
+            mapped.generated_at, "local-telemetry-should-not-appear",
+            "不得用本机 telemetry 补 owner generatedAt"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -3333,7 +3404,8 @@ mod tests {
         running.worktree_id = Some("worktree-golden".to_string());
         running.last_runtime_message = Some("正在执行测试".to_string());
         running.last_activity_at = Some("2026-07-12T01:02:03Z".to_string());
-        let mut retrying = command_task_row("task-retrying-golden", OrchestratorTaskStatus::Blocked);
+        let mut retrying =
+            command_task_row("task-retrying-golden", OrchestratorTaskStatus::Blocked);
         retrying.title = "修复验证失败".to_string();
         retrying.workflow_state = OrchestratorWorkflowState::Rework;
         retrying.run_state = OrchestratorRunState::Blocked;
@@ -3377,8 +3449,7 @@ mod tests {
         // 锁定其结构而非具体值：包含日期分隔符 'T' 与 UTC offset（Z 或 +00:00）。
         assert!(snapshot.generated_at.contains('T'));
         assert!(
-            snapshot.generated_at.ends_with('Z')
-                || snapshot.generated_at.ends_with("+00:00"),
+            snapshot.generated_at.ends_with('Z') || snapshot.generated_at.ends_with("+00:00"),
             "generatedAt 应是 UTC RFC3339 时间，实际: {}",
             snapshot.generated_at
         );
@@ -3393,10 +3464,7 @@ mod tests {
         );
         assert_eq!(snapshot.last_dispatched_count, 2);
         // 空 telemetry 错误会被归一为 None，此时 latestError 由 repo 的最近 blocked_reason 回填。
-        assert_eq!(
-            snapshot.latest_error.as_deref(),
-            Some("验证器要求修复")
-        );
+        assert_eq!(snapshot.latest_error.as_deref(), Some("验证器要求修复"));
         assert_eq!(snapshot.workflow_source, "builtInDefault");
         assert!(snapshot.workflow_valid);
         assert!(snapshot.workflow_error.is_none());
@@ -3418,7 +3486,10 @@ mod tests {
             running_summary.attempt_phase,
             Some(OrchestratorAttemptPhase::Streaming)
         );
-        assert_eq!(running_summary.session_id.as_deref(), Some("session-golden"));
+        assert_eq!(
+            running_summary.session_id.as_deref(),
+            Some("session-golden")
+        );
         assert_eq!(
             running_summary.worktree_id.as_deref(),
             Some("worktree-golden")
@@ -3469,10 +3540,7 @@ mod tests {
         assert_eq!(value["slotsUsed"], 1);
         assert_eq!(value["slotsAvailable"], 2);
         assert_eq!(value["runningTasks"][0]["taskId"], "task-running-golden");
-        assert_eq!(
-            value["runningTasks"][0]["attemptPhase"],
-            "streaming"
-        );
+        assert_eq!(value["runningTasks"][0]["attemptPhase"], "streaming");
         // recentEvents 顺序依赖数据库 created_at/id，断言存在性而非位置以避免抖动。
         let recent_events = value["recentEvents"]
             .as_array()
@@ -3520,10 +3588,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            snapshot.latest_error.as_deref(),
-            Some("runner 启动失败")
-        );
+        assert_eq!(snapshot.latest_error.as_deref(), Some("runner 启动失败"));
         assert_eq!(snapshot.last_dispatched_count, 0);
         assert_eq!(snapshot.slots_used, 0);
         assert_eq!(snapshot.max_concurrent_tasks, 1);
@@ -3561,10 +3626,7 @@ mod tests {
         )
         .await;
 
-        assert!(
-            result.is_err(),
-            "repo 查询失败必须透传，不能用空快照掩盖"
-        );
+        assert!(result.is_err(), "repo 查询失败必须透传，不能用空快照掩盖");
         let error = result.expect_err("snapshot must error");
         assert!(
             error.to_string().to_lowercase().contains("no such table")
@@ -3620,10 +3682,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_snapshot_dto_round_trips_through_json_for_remote_client() {
         let repo = setup_orchestrator_repo().await;
-        let mut running = command_task_row(
-            "task-roundtrip",
-            OrchestratorTaskStatus::Running,
-        );
+        let mut running = command_task_row("task-roundtrip", OrchestratorTaskStatus::Running);
         running.attempt_phase = Some(OrchestratorAttemptPhase::Streaming);
         running.session_id = Some("session-roundtrip".to_string());
         repo.create_task(&running).await.unwrap();
@@ -3669,7 +3728,10 @@ mod tests {
             parsed.running_tasks[0].attempt_phase,
             Some(OrchestratorAttemptPhase::Streaming)
         );
-        assert_eq!(parsed.running_tasks[0].session_id.as_deref(), Some("session-roundtrip"));
+        assert_eq!(
+            parsed.running_tasks[0].session_id.as_deref(),
+            Some("session-roundtrip")
+        );
         assert_eq!(parsed.recent_events.len(), 1);
         assert_eq!(parsed.recent_events[0].task_id, "task-roundtrip");
         assert_eq!(parsed.recent_events[0].kind, "runner");

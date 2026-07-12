@@ -34,8 +34,8 @@ use crate::orchestrator::remote_protocol::{
     RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
     RemoteTaskReq, RemoteTaskReworkReq,
 };
-use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetrySnapshot;
 use crate::orchestrator::repo::OrchestratorRepo;
+use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetrySnapshot;
 use crate::state::AppState;
 use crate::storage::WorkbenchProjectRepo;
 use crate::workbench::models::WorkbenchProjectRow;
@@ -1458,11 +1458,11 @@ mod tests {
     /// Business Logic（为什么需要这个测试）:
     ///     owning-device runtime-snapshot 路由的核心契约：对端用本机 local projectId 调用，
     ///     必须返回与本机命令相同的 runtime snapshot DTO（remote_status=local）。
-///     路由必须复用 T1 共享 builder，不能另起一套本地构造逻辑。
+    ///     路由必须复用 T1 共享 builder，不能另起一套本地构造逻辑。
     ///
-/// Code Logic（这个测试做什么）:
-///     插入 local 项目后调用 runtime_snapshot_for_state，断言关键字段（projectId、projectKind、
-///     remoteStatus、schedulerEnabled）与本地 builder 产出一致。
+    /// Code Logic（这个测试做什么）:
+    ///     插入 local 项目后调用 runtime_snapshot_for_state，断言关键字段（projectId、projectKind、
+    ///     remoteStatus、schedulerEnabled）与本地 builder 产出一致。
     #[tokio::test]
     async fn runtime_snapshot_returns_local_dto_for_local_project() {
         let state = test_state().await;
@@ -1582,7 +1582,9 @@ mod tests {
     ///     `orchestrator::runtime_snapshot` 存在（通过 `assert_eq` 引用其指针地址，强制编译期共存）。
     #[test]
     fn runtime_snapshot_capability_and_route_ship_together() {
-        use crate::net::protocol::{server_protocol_info, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1};
+        use crate::net::protocol::{
+            server_protocol_info, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1,
+        };
 
         let info = server_protocol_info();
         assert!(
@@ -1592,11 +1594,12 @@ mod tests {
         );
         // 引用 handler 函数指针，确保路由 handler 与 capability 在同一编译单元共存。
         // 若 handler 被移除或重命名，本测试会在编译期失败。
-        let handler_ptr = runtime_snapshot as fn(
-            State<AppState>,
-            Extension<P2pRequestContext>,
-            Json<RemoteRuntimeSnapshotReq>,
-        ) -> _;
+        let handler_ptr = runtime_snapshot
+            as fn(
+                State<AppState>,
+                Extension<P2pRequestContext>,
+                Json<RemoteRuntimeSnapshotReq>,
+            ) -> _;
         // 用指针非空断言 handler 存在，避免被 dead_code 优化掉。
         let addr = handler_ptr as usize;
         assert_ne!(addr, 0, "runtime_snapshot handler 必须存在");
@@ -1610,11 +1613,12 @@ mod tests {
     ///     引用 mobile_runtime_snapshot 函数指针保证编译期共存，并复刻空白 projectId 校验映射。
     #[test]
     fn mobile_runtime_snapshot_handler_ships_and_rejects_blank_project_id() {
-        let handler_ptr = mobile_runtime_snapshot as fn(
-            State<AppState>,
-            Extension<P2pRequestContext>,
-            Json<RemoteRuntimeSnapshotReq>,
-        ) -> _;
+        let handler_ptr = mobile_runtime_snapshot
+            as fn(
+                State<AppState>,
+                Extension<P2pRequestContext>,
+                Json<RemoteRuntimeSnapshotReq>,
+            ) -> _;
         let addr = handler_ptr as usize;
         assert_ne!(addr, 0, "mobile_runtime_snapshot handler 必须存在");
 
@@ -1633,5 +1637,46 @@ mod tests {
         assert_eq!(p2p.status(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(p2p.envelope().code, "validation_error");
         assert_eq!(p2p.envelope().request_id, "req-mobile-blank");
+    }
+
+    /// Business Logic（为什么需要这个测试 / T7 route 无本地替代）:
+    ///     owning-device route 对 local 项目必须复用共享 builder 产出 remoteStatus=local 的 DTO，
+    ///     且不得接受 remote shortcut（递归代理会把调用端本地 telemetry 冒充 owner）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     同一 state 下先成功取 local snapshot，再对 remote shortcut 断言 validation 拒绝；
+    ///     local 成功结果 projectKind/remoteStatus 固定为 local，不出现 remote 四态。
+    #[tokio::test]
+    async fn runtime_snapshot_local_success_never_substitutes_remote_status_or_accepts_shortcut() {
+        let state = test_state().await;
+        insert_project(&state, "owner-local-p4t7", "local").await;
+        insert_project(&state, "remote:device-z:owner-local-p4t7", "remote").await;
+
+        let local = runtime_snapshot_for_state(
+            &state,
+            "owner-local-p4t7",
+            &OrchestratorSchedulerTelemetrySnapshot::default(),
+        )
+        .await
+        .expect("local project must succeed");
+        assert_eq!(local.project_id, "owner-local-p4t7");
+        assert_eq!(local.project_kind, "local");
+        assert_eq!(local.remote_status, "local");
+        assert!(
+            !matches!(
+                local.remote_status.as_str(),
+                "live" | "offline" | "unsupported" | "unavailable"
+            ),
+            "owning-device local route 不得返回远端四态"
+        );
+
+        let rejected = runtime_snapshot_for_state(
+            &state,
+            "remote:device-z:owner-local-p4t7",
+            &OrchestratorSchedulerTelemetrySnapshot::default(),
+        )
+        .await
+        .expect_err("remote shortcut must be rejected on owning-device route");
+        assert_eq!(rejected.to_string(), "远端 Orchestrator 只接受对端本机项目");
     }
 }

@@ -385,4 +385,157 @@ describe('useOrchestratorRuntimeSnapshot', () => {
     expect(result.current.remoteStatus).toBe('live');
     expect(result.current.cachedAt).toBeNull();
   });
+
+  test('never writes localStorage/sessionStorage and cold init has no fabricated cache', async () => {
+    const originalLocalGet = globalThis.localStorage?.getItem?.bind(globalThis.localStorage);
+    const originalLocalSet = globalThis.localStorage?.setItem?.bind(globalThis.localStorage);
+    const originalSessionGet = globalThis.sessionStorage?.getItem?.bind(globalThis.sessionStorage);
+    const originalSessionSet = globalThis.sessionStorage?.setItem?.bind(globalThis.sessionStorage);
+    let storageTouched = false;
+    if (globalThis.localStorage) {
+      globalThis.localStorage.getItem = ((...args: Parameters<Storage['getItem']>) => {
+        storageTouched = true;
+        return originalLocalGet?.(...args) ?? null;
+      }) as Storage['getItem'];
+      globalThis.localStorage.setItem = ((...args: Parameters<Storage['setItem']>) => {
+        storageTouched = true;
+        originalLocalSet?.(...args);
+      }) as Storage['setItem'];
+    }
+    if (globalThis.sessionStorage) {
+      globalThis.sessionStorage.getItem = ((...args: Parameters<Storage['getItem']>) => {
+        storageTouched = true;
+        return originalSessionGet?.(...args) ?? null;
+      }) as Storage['getItem'];
+      globalThis.sessionStorage.setItem = ((...args: Parameters<Storage['setItem']>) => {
+        storageTouched = true;
+        originalSessionSet?.(...args);
+      }) as Storage['setItem'];
+    }
+
+    try {
+      // 冷启动：模块缓存已 clear，offline 不得伪造 snapshot。
+      getRuntimeSnapshotMock.mockResolvedValueOnce(
+        buildSnapshot({
+          projectId: 'remote:storage:proj',
+          projectKind: 'remote',
+          remoteStatus: 'offline',
+          generatedAt: '2026-07-12T01:00:00.000Z',
+          slotsUsed: 0,
+        }),
+      );
+      const cold = renderHook(() =>
+        useOrchestratorRuntimeSnapshot({ projectId: 'remote:storage:proj', enabled: true }),
+      );
+      await waitFor(() => {
+        expect(cold.result.current.loading).toBe(false);
+      });
+      expect(cold.result.current.snapshot).toBeNull();
+      expect(cold.result.current.cachedAt).toBeNull();
+      expect(cold.result.current.remoteStatus).toBe('offline');
+
+      // live 成功后 offline 仅进程内缓存，仍不得触碰 storage。
+      getRuntimeSnapshotMock
+        .mockResolvedValueOnce(
+          buildSnapshot({
+            projectId: 'remote:storage:proj',
+            projectKind: 'remote',
+            remoteStatus: 'live',
+            generatedAt: '2026-07-12T02:00:00.000Z',
+            slotsUsed: 5,
+          }),
+        )
+        .mockResolvedValueOnce(
+          buildSnapshot({
+            projectId: 'remote:storage:proj',
+            projectKind: 'remote',
+            remoteStatus: 'offline',
+            generatedAt: '2026-07-12T03:00:00.000Z',
+            slotsUsed: 0,
+          }),
+        );
+      const live = renderHook(() =>
+        useOrchestratorRuntimeSnapshot({ projectId: 'remote:storage:proj', enabled: true }),
+      );
+      await waitFor(() => {
+        expect(live.result.current.remoteStatus).toBe('live');
+      });
+      await act(async () => {
+        await live.result.current.refresh();
+      });
+      await waitFor(() => {
+        expect(live.result.current.remoteStatus).toBe('offline');
+      });
+      expect(live.result.current.snapshot?.generatedAt).toBe('2026-07-12T02:00:00.000Z');
+      // receivedAt 来自 new Date().toISOString()；fake timer 可能前进毫秒，只断言存在且为 ISO。
+      expect(live.result.current.cachedAt).toEqual(expect.stringMatching(/^2026-07-11T12:00:00\.\d{3}Z$/));
+      expect(storageTouched).toBe(false);
+    } finally {
+      if (globalThis.localStorage && originalLocalGet && originalLocalSet) {
+        globalThis.localStorage.getItem = originalLocalGet;
+        globalThis.localStorage.setItem = originalLocalSet;
+      }
+      if (globalThis.sessionStorage && originalSessionGet && originalSessionSet) {
+        globalThis.sessionStorage.getItem = originalSessionGet;
+        globalThis.sessionStorage.setItem = originalSessionSet;
+      }
+    }
+  });
+
+  test('preserves unique owner runtime fields exactly on remote live load', async () => {
+    const owner = buildSnapshot({
+      projectId: 'remote:dev-owner:proj',
+      projectKind: 'remote',
+      remoteStatus: 'live',
+      generatedAt: '2026-07-12T15:16:17.018Z',
+      latestTickAt: '2026-07-12T15:15:00.001Z',
+      lastDispatchAt: '2026-07-12T15:14:30.002Z',
+      lastDispatchedCount: 7,
+      maxConcurrentTasks: 6,
+      slotsUsed: 4,
+      slotsAvailable: 2,
+      latestError: 'owner-only-latest-error-p4t7',
+      runningTasks: [
+        {
+          taskId: 'remote:dev-owner:task-owner-p4t7',
+          title: 'owner running',
+          workflowState: 'inProgress',
+          runState: 'running',
+          attemptPhase: 'streaming',
+          sessionId: 'remote:dev-owner:session-owner-p4t7',
+          worktreeId: 'remote:dev-owner:worktree-owner-p4t7',
+          lastRuntimeMessage: 'owner streaming p4t7',
+          lastActivityAt: '2026-07-12T15:13:00.000Z',
+        },
+      ],
+      recentEvents: [
+        {
+          id: 'event-owner-p4t7',
+          taskId: 'remote:dev-owner:task-owner-p4t7',
+          taskTitle: 'owner running',
+          kind: 'runner',
+          message: 'owner-only-event-fingerprint-p4t7',
+          createdAt: '2026-07-12T15:12:00.000Z',
+        },
+      ],
+    });
+    getRuntimeSnapshotMock.mockResolvedValueOnce(owner);
+
+    const { result } = renderHook(() =>
+      useOrchestratorRuntimeSnapshot({ projectId: 'remote:dev-owner:proj', enabled: true }),
+    );
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(result.current.snapshot).toEqual(owner);
+    expect(result.current.snapshot?.generatedAt).toBe('2026-07-12T15:16:17.018Z');
+    expect(result.current.snapshot?.latestTickAt).toBe('2026-07-12T15:15:00.001Z');
+    expect(result.current.snapshot?.slotsUsed).toBe(4);
+    expect(result.current.snapshot?.recentEvents[0]?.message).toBe(
+      'owner-only-event-fingerprint-p4t7',
+    );
+    expect(result.current.remoteStatus).toBe('live');
+    expect(result.current.cachedAt).toBeNull();
+  });
 });
