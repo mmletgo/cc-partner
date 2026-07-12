@@ -945,11 +945,16 @@ fn finalize_intent_path(receive_dir: &Path, transfer_id: &str) -> Result<PathBuf
 /// Business Logic（为什么需要这个函数）:
 ///     进程在 place 后、history 前崩溃时，内存 active/墓碑丢失；必须从 intent + 最终文件恢复
 ///     durable 终态，阻止 handle_init 接受同一 transfer_id 生成后缀副本。
+///     但 intent 写在 no-replace place 之前：若 place 因 AlreadyExists 失败且崩溃发生在下一轮
+///     覆盖 intent 前，磁盘上 intent 仍指向竞争文件。仅靠 size 会把同尺寸碰撞文件误晋升为
+///     Completed，导致发送端确认成功而原始 tmp 从未交付。
 ///
 /// Code Logic（这个函数做什么）:
-///     读 intent；若 history 已有终态则清 intent；若 final 文件存在且 size 匹配则
-///     构造 Completed task → promote_completed_to_durable → 返回 success ChunkResp；
-///     intent 存在但 final 缺失则清 intent 并返回 None（允许干净重传）。
+///     读 intent；若 history 已有终态则清 intent；若 final 是普通文件且 size 匹配，
+///     **再重算 SHA256 与 intent.sha256 严格比对**，通过才构造 Completed task →
+///     promote_completed_to_durable → 返回 success ChunkResp；
+///     非普通文件 / size 不匹配 / sha 不匹配 / 读失败：清 intent 并返回 None
+///     （不删 .tmp、不宣称 success，允许干净重传或下一后缀重试）。
 async fn try_recover_finalize_intent(
     state: &AppState,
     transfer_id: &str,
@@ -1003,8 +1008,30 @@ async fn try_recover_finalize_intent(
     }
 
     match tokio::fs::metadata(&final_path).await {
-        Ok(meta) if meta.len() == intent.size => {
-            // 最终文件在：晋升 durable，禁止 re-receive。
+        Ok(meta) if meta.is_file() && meta.len() == intent.size => {
+            // 内容所有权：size 匹配不够。intent 写后 place 前被同尺寸竞争文件占用时，
+            // AlreadyExists 后崩溃会使 intent 指向竞争者；必须重算 SHA256。
+            let actual = match compute_sha256(&final_path).await {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(
+                        "finalize intent 目标无法校验 sha256，清除 intent 允许重传: {transfer_id}, {e}"
+                    );
+                    let _ = clear_finalize_intent(receive_dir, transfer_id).await;
+                    return Ok(None);
+                }
+            };
+            if actual != intent.sha256 {
+                tracing::warn!(
+                    "finalize intent 目标 sha256 不匹配（可能是同尺寸碰撞文件），\
+                     清除 intent 且不宣称 success，允许重试下一后缀: {transfer_id}"
+                );
+                let _ = clear_finalize_intent(receive_dir, transfer_id).await;
+                // 不删除 .tmp，不写 history Completed，不返回 success。
+                return Ok(None);
+            }
+
+            // 最终文件在且内容匹配：晋升 durable，禁止 re-receive。
             let task = TransferTask {
                 id: transfer_id.to_string(),
                 filename: intent.filename.clone(),
@@ -1036,7 +1063,7 @@ async fn try_recover_finalize_intent(
             }))
         }
         Ok(_) | Err(_) => {
-            // final 不在或 size 不匹配：intent 过期/place 未完成，清 intent 允许干净重传。
+            // final 不在、非普通文件、或 size 不匹配：intent 过期/place 未完成，清 intent 允许干净重传。
             tracing::warn!(
                 "finalize intent 存在但最终文件缺失/不匹配，清除 intent 允许重传: {transfer_id}"
             );
@@ -2944,6 +2971,153 @@ mod tests {
         assert!(
             hist.file_path.ends_with("report (1).bin"),
             "history 应记录后缀最终路径: {}",
+            hist.file_path
+        );
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     intent 写在 no-replace place 之前：若候选被同尺寸不同内容的竞争文件占用，
+    ///     place 返回 AlreadyExists 后、下一轮覆盖 intent 前崩溃，intent 仍指向竞争文件。
+    ///     恢复若只比 size 会把竞争文件晋升为 Completed 并向发送端确认成功，原始 tmp 永久丢失。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入真实 payload 的 .tmp + 同尺寸不同内容的碰撞 final；手工写 intent 指向碰撞文件
+    ///     （含正确 intent.sha256=tmp 哈希）；清空 registry 模拟 AlreadyExists 后崩溃重启；
+    ///     complete/recover 不得晋升 history Completed，tmp 保留；随后 complete 可安全落到下一后缀。
+    #[tokio::test]
+    async fn collision_same_size_different_hash_intent_must_not_promote_on_recovery() {
+        use sha2::{Digest, Sha256};
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        // 同尺寸、不同内容：仅 size 校验无法区分。
+        let payload = b"AAAA-payload-bytes!"; // 19 bytes
+        let collision = b"BBBB-collision-byte"; // 19 bytes
+        assert_eq!(payload.len(), collision.len());
+        let sha = format!("{:x}", Sha256::digest(payload));
+        let collision_sha = format!("{:x}", Sha256::digest(collision));
+        assert_ne!(sha, collision_sha);
+        let transfer_id = "collision-same-size".to_string();
+
+        handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "doc.bin".to_string(),
+                size: payload.len() as u64,
+                sha256: sha.clone(),
+                chunk_size: 8,
+            },
+        )
+        .await
+        .expect("init");
+
+        let tmp = receive_dir.join(format!(".{transfer_id}.tmp"));
+        fs::write(&tmp, payload).unwrap();
+
+        // 模拟：intent 已写指向首选候选，place 因 AlreadyExists 失败后崩溃。
+        // 竞争者同尺寸、不同哈希。
+        let collision_path = receive_dir.join("doc.bin");
+        fs::write(&collision_path, collision).unwrap();
+        let intent = FinalizeIntent {
+            transfer_id: transfer_id.clone(),
+            filename: "doc.bin".to_string(),
+            size: payload.len() as u64,
+            sha256: sha.clone(),
+            chunk_size: 8,
+            final_filename: "doc.bin".to_string(),
+            final_path: collision_path.to_string_lossy().to_string(),
+            created_at: now_iso(),
+        };
+        write_finalize_intent(&receive_dir, &intent)
+            .await
+            .expect("write intent pointing at collision");
+
+        // 模拟进程重启：清空 active + 墓碑（intent + tmp + 碰撞文件仍在）。
+        state.transfers.remove(&transfer_id);
+        state.transfers.clear_tombstones_for_test();
+        assert!(state.transfers.get(&transfer_id).is_none());
+        assert!(tmp.exists(), "tmp 必须保留供安全重试");
+
+        // 恢复不得把同尺寸碰撞文件晋升为 Completed。
+        let recovered = try_recover_finalize_intent(&state, &transfer_id, &receive_dir)
+            .await
+            .expect("recover ok");
+        assert!(
+            recovered.is_none(),
+            "sha 不匹配时不得返回 success ChunkResp"
+        );
+        assert!(
+            state
+                .transfer_repo
+                .get_by_id(&transfer_id)
+                .await
+                .expect("repo ok")
+                .is_none(),
+            "不得写入 Completed history"
+        );
+        assert_eq!(
+            fs::read(&collision_path).unwrap(),
+            collision,
+            "不得改写/删除竞争文件"
+        );
+        assert!(tmp.exists(), "不匹配时不得清除原始 tmp");
+        assert!(
+            !receive_dir
+                .join(FINALIZE_INTENT_DIR)
+                .join(format!("{transfer_id}.json"))
+                .exists(),
+            "不匹配后应清除过期 intent，允许后续干净 place"
+        );
+        assert!(
+            state.transfers.tombstone(&transfer_id).is_none(),
+            "不得写成功墓碑"
+        );
+
+        // 可继续安全 finalize：重新 init 后 complete 应落到下一后缀，不覆盖碰撞文件。
+        handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "doc.bin".to_string(),
+                size: payload.len() as u64,
+                sha256: sha.clone(),
+                chunk_size: 8,
+            },
+        )
+        .await
+        .expect("init after safe reject must reopen");
+        // resume 可能已见 tmp 全量；ensure tmp 内容仍在。
+        assert_eq!(fs::read(&tmp).unwrap(), payload);
+
+        let completed = handle_complete(&state, &transfer_id)
+            .await
+            .expect("complete should place next suffix");
+        assert!(completed.success);
+        assert_eq!(
+            fs::read(&collision_path).unwrap(),
+            collision,
+            "不得覆盖同尺寸碰撞文件"
+        );
+        let suffix = receive_dir.join("doc (1).bin");
+        assert_eq!(
+            fs::read(&suffix).unwrap(),
+            payload,
+            "真实内容应落到下一后缀"
+        );
+        let hist = state
+            .transfer_repo
+            .get_by_id(&transfer_id)
+            .await
+            .unwrap()
+            .expect("history after real place");
+        assert_eq!(hist.status, TransferStatus::Completed);
+        assert_eq!(hist.sha256, sha);
+        assert!(
+            hist.file_path.ends_with("doc (1).bin"),
+            "history 应记录真实落盘路径: {}",
             hist.file_path
         );
 
