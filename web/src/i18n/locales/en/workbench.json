@@ -319,7 +319,8 @@
         "pending": "Pending send",
         "sending": "Sending",
         "mirrored": "Synced",
-        "failed": "Send failed"
+        "failed": "Send failed",
+        "discarded": "Discarded"
       },
       "errors": {
         "list": "Failed to load automation tasks",
@@ -327,8 +328,13 @@
         "evidence": "Failed to load evidence",
         "completePrompt": "Failed to fill task with AI",
         "promptRequired": "Enter a simple prompt first",
-        "required": "Fill in the task title, goal, and acceptance criteria"
-      }
+        "required": "Fill in the task title, goal, and acceptance criteria",
+        "retryOutbox": "Failed to retry outbox",
+        "discardOutbox": "Failed to discard outbox"
+      },
+      "pendingRetry": "Retry send",
+      "pendingDiscard": "Discard",
+      "pendingDiscardConfirm": "Discard this failed remote outbox item?"
     },
     "status": {
       "project": "Project",

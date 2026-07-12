@@ -158,6 +158,7 @@ const MOBILE_AUTOMATION_PENDING_STATUS_LABEL_KEYS: Record<
   sending: 'workbench:mobile.automationPanel.pendingStatus.sending',
   mirrored: 'workbench:mobile.automationPanel.pendingStatus.mirrored',
   failed: 'workbench:mobile.automationPanel.pendingStatus.failed',
+  discarded: 'workbench:mobile.automationPanel.pendingStatus.discarded',
 };
 
 const MOBILE_AUTOMATION_EVIDENCE_KIND_LABEL_KEYS = {
@@ -362,6 +363,7 @@ export function MobileAutomationPanel({
   const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);
   const [promptDraft, setPromptDraft] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
+  const [outboxActionId, setOutboxActionId] = useState<string | null>(null);
   const [creatingAction, setCreatingAction] =
     useState<HttpCreateOrchestratorTaskAction | null>(null);
   const [completingPrompt, setCompletingPrompt] = useState<boolean>(false);
@@ -590,6 +592,72 @@ export function MobileAutomationPanel({
     void loadTasks(projectId);
     void loadRuntimeSnapshot(projectId);
   }, [loadRuntimeSnapshot, loadTasks]);
+
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机 Automation 面板对 failed outbox 点 Retry 时，应在本机把条目回到 pending 并刷新列表。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验 project 与 busy 状态，调用 httpOrchestratorTransport.outbox.retry，成功后 loadTasks。
+   */
+  const handleRetryRemoteOutbox = useCallback(
+    async (outboxId: string): Promise<void> => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || outboxActionId) return;
+      setOutboxActionId(outboxId);
+      setError(null);
+      try {
+        await httpOrchestratorTransport.outbox.retry(projectId, outboxId);
+        if (activeProjectIdRef.current !== projectId) return;
+        await loadTasks(projectId);
+      } catch (reason) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setError(
+          `${t('workbench:mobile.automationPanel.errors.retryOutbox')}: ${getErrorMessage(reason)}`,
+        );
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setOutboxActionId(null);
+        }
+      }
+    },
+    [loadTasks, outboxActionId, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机 Automation 面板对 failed outbox 点 Discard 时，需要确认后进入 discarded 审计终态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   window.confirm 后调用 outbox.discard，成功后 loadTasks 刷新 pending 列表。
+   */
+  const handleDiscardRemoteOutbox = useCallback(
+    async (outboxId: string): Promise<void> => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || outboxActionId) return;
+      const confirmed = window.confirm(t('workbench:mobile.automationPanel.pendingDiscardConfirm'));
+      if (!confirmed) return;
+      setOutboxActionId(outboxId);
+      setError(null);
+      try {
+        await httpOrchestratorTransport.outbox.discard(projectId, outboxId);
+        if (activeProjectIdRef.current !== projectId) return;
+        await loadTasks(projectId);
+      } catch (reason) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setError(
+          `${t('workbench:mobile.automationPanel.errors.discardOutbox')}: ${getErrorMessage(reason)}`,
+        );
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setOutboxActionId(null);
+        }
+      }
+    },
+    [loadTasks, outboxActionId, t],
+  );
+
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1011,6 +1079,30 @@ export function MobileAutomationPanel({
                           {t('workbench:mobile.automationPanel.origin.pending')}
                         </span>
                       </div>
+                      {item.status === 'failed' ? (
+                        <div className={styles.mobileBadgeRow}>
+                          <button
+                            type="button"
+                            className={styles.secondaryButton}
+                            disabled={outboxActionId !== null}
+                            onClick={() => {
+                              void handleRetryRemoteOutbox(item.id);
+                            }}
+                          >
+                            {t('workbench:mobile.automationPanel.pendingRetry')}
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.secondaryButton}
+                            disabled={outboxActionId !== null}
+                            onClick={() => {
+                              void handleDiscardRemoteOutbox(item.id);
+                            }}
+                          >
+                            {t('workbench:mobile.automationPanel.pendingDiscard')}
+                          </button>
+                        </div>
+                      ) : null}
                     </article>
                   ))}
                 </div>

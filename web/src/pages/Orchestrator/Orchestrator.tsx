@@ -127,7 +127,8 @@ type OrchestratorRemoteOutboxStatusLabelKey =
   | 'orchestrator:pending.status.pending'
   | 'orchestrator:pending.status.sending'
   | 'orchestrator:pending.status.mirrored'
-  | 'orchestrator:pending.status.failed';
+  | 'orchestrator:pending.status.failed'
+  | 'orchestrator:pending.status.discarded';
 
 type OrchestratorWorkflowStateLabelKey =
   | 'orchestrator:workflow.backlog'
@@ -309,6 +310,7 @@ const PENDING_REMOTE_STATUS_LABEL_KEYS: Record<
   sending: 'orchestrator:pending.status.sending',
   mirrored: 'orchestrator:pending.status.mirrored',
   failed: 'orchestrator:pending.status.failed',
+  discarded: 'orchestrator:pending.status.discarded',
 };
 
 const WORKFLOW_STATE_LABEL_KEYS: Record<
@@ -449,6 +451,7 @@ function pendingRemoteStatusTone(
     case 'mirrored':
       return 'success';
     case 'pending':
+    case 'discarded':
       return 'neutral';
   }
 }
@@ -565,6 +568,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [evidenceResult, setEvidenceResult] = useState<OrchestratorEvidenceResult | null>(null);
   const [actionError, setActionError] = useState<OrchestratorActionError | null>(null);
+  const [outboxActionId, setOutboxActionId] = useState<string | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);
   const [completionPrompt, setCompletionPrompt] = useState('');
   const [completingPrompt, setCompletingPrompt] = useState(false);
@@ -718,6 +722,103 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     if (!activeProjectId) return;
     void refreshRuntimeSnapshot();
   }, [activeProjectId, refreshRuntimeSnapshot]);
+
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   failed outbox 的 Retry/Discard 成功后需要刷新当前项目的 task-view 列表，
+   *   让 pending 区反映 pending/discarded 变化；Attention invalidation 由后续任务接入。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用 active projectId 调 listTaskViews，并用 activeProjectIdRef 做 stale guard。
+   */
+  const reloadTaskViewsForActiveProject = useCallback(async (): Promise<void> => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return;
+    try {
+      const nextViews = await orchestratorApi.listTaskViews(projectId);
+      if (activeProjectIdRef.current !== projectId) return;
+      setTaskListResult({ projectId, views: nextViews, error: null });
+      setSelectedTaskId((current) => {
+        const nextSplit = splitOrchestratorTaskViews(nextViews);
+        if (current && nextSplit.tasks.some((item) => item.task.id === current)) return current;
+        return null;
+      });
+    } catch (err) {
+      if (activeProjectIdRef.current !== projectId) return;
+      setActionError({
+        projectId,
+        message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.load')),
+      });
+    }
+  }, [t]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户在原 Automation UI 对 failed outbox 点 Retry 时，应保留 payload 回到 pending。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验 active project 与 busy 状态，调用 orchestratorApi.retryRemoteOutbox，成功后 reload 列表。
+   */
+  const handleRetryRemoteOutbox = useCallback(
+    async (outboxId: string): Promise<void> => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || outboxActionId) return;
+      setOutboxActionId(outboxId);
+      setActionError(null);
+      try {
+        await orchestratorApi.retryRemoteOutbox(projectId, outboxId);
+        if (activeProjectIdRef.current !== projectId) return;
+        await reloadTaskViewsForActiveProject();
+      } catch (err) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setActionError({
+          projectId,
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.retryOutbox')),
+        });
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setOutboxActionId(null);
+        }
+      }
+    },
+    [outboxActionId, reloadTaskViewsForActiveProject, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户在原 Automation UI 对 failed outbox 点 Discard 时，需要确认后再进入 discarded 审计终态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   window.confirm 后调用 discardRemoteOutbox，成功后 reload 列表。
+   */
+  const handleDiscardRemoteOutbox = useCallback(
+    async (outboxId: string): Promise<void> => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || outboxActionId) return;
+      const confirmed = window.confirm(t('orchestrator:pending.discardConfirm'));
+      if (!confirmed) return;
+      setOutboxActionId(outboxId);
+      setActionError(null);
+      try {
+        await orchestratorApi.discardRemoteOutbox(projectId, outboxId);
+        if (activeProjectIdRef.current !== projectId) return;
+        await reloadTaskViewsForActiveProject();
+      } catch (err) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setActionError({
+          projectId,
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.discardOutbox')),
+        });
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setOutboxActionId(null);
+        }
+      }
+    },
+    [outboxActionId, reloadTaskViewsForActiveProject, t],
+  );
+
 
   const handleOpenAutomationSettings = useCallback(() => {
     navigate('/settings?tab=automation');
@@ -1648,6 +1749,32 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                         <p className={styles.pendingError}>
                           {t('orchestrator:pending.lastError', { error: item.lastError })}
                         </p>
+                      ) : null}
+                      {item.status === 'failed' ? (
+                        <div className={styles.pendingTaskActions}>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            loading={outboxActionId === item.id}
+                            disabled={outboxActionId !== null && outboxActionId !== item.id}
+                            onClick={() => {
+                              void handleRetryRemoteOutbox(item.id);
+                            }}
+                          >
+                            {t('orchestrator:pending.retry')}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            loading={outboxActionId === item.id}
+                            disabled={outboxActionId !== null && outboxActionId !== item.id}
+                            onClick={() => {
+                              void handleDiscardRemoteOutbox(item.id);
+                            }}
+                          >
+                            {t('orchestrator:pending.discard')}
+                          </Button>
+                        </div>
                       ) : null}
                     </div>
                   ))}

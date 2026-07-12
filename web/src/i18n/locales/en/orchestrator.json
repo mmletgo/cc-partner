@@ -94,8 +94,12 @@
       "pending": "Pending",
       "sending": "Sending",
       "mirrored": "Mirrored",
-      "failed": "Failed"
-    }
+      "failed": "Failed",
+      "discarded": "Discarded"
+    },
+    "retry": "Retry send",
+    "discard": "Discard",
+    "discardConfirm": "Discard this failed remote outbox item? It will remain for audit only and will not be retried."
   },
   "detail": {
     "drawerAria": "Task detail side panel",
@@ -215,6 +219,8 @@
     "completePrompt": "Failed to fill the task with AI.",
     "noProject": "Select a Workbench project from the sidebar first.",
     "promptRequired": "Enter a short prompt first.",
-    "required": "Fill in title, goal, and acceptance criteria."
+    "required": "Fill in title, goal, and acceptance criteria.",
+    "retryOutbox": "Failed to retry the outbox item.",
+    "discardOutbox": "Failed to discard the outbox item."
   }
 }

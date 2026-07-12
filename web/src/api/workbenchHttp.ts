@@ -10,6 +10,7 @@
 
 import type {
   OrchestratorEvidence,
+  OrchestratorRemoteOutboxItem,
   OrchestratorRuntimeSnapshot,
   OrchestratorTask,
   OrchestratorTaskPromptCompletion,
@@ -266,6 +267,26 @@ export const httpOrchestratorTransport = {
    * Code Logic（这个函数做什么）:
    *   POST `/api/mobile/orchestrator/runtime-snapshot`，body `{projectId}`，返回 camelCase snapshot DTO。
    */
+
+  /**
+   * Business Logic（为什么需要这个对象）:
+   *   手机 Automation 面板需要对本机 failed outbox 执行 Retry/Discard，且只打本机同源 HTTP。
+   *
+   * Code Logic（这个对象做什么）:
+   *   POST `/api/orchestrator/outbox/{retry,discard}`，body `{projectId,outboxId}`，返回 outbox DTO。
+   */
+  outbox: {
+    retry: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
+      postJson<OrchestratorRemoteOutboxItem>('/api/orchestrator/outbox/retry', {
+        projectId,
+        outboxId,
+      }),
+    discard: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
+      postJson<OrchestratorRemoteOutboxItem>('/api/orchestrator/outbox/discard', {
+        projectId,
+        outboxId,
+      }),
+  },
   getRuntimeSnapshot: (projectId: string): Promise<OrchestratorRuntimeSnapshot> =>
     postJson<OrchestratorRuntimeSnapshot>('/api/mobile/orchestrator/runtime-snapshot', {
       projectId,

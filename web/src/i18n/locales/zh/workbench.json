@@ -314,7 +314,8 @@
         "pending": "待发送",
         "sending": "发送中",
         "mirrored": "已同步",
-        "failed": "发送失败"
+        "failed": "发送失败",
+        "discarded": "已放弃"
       },
       "errors": {
         "list": "读取自动化任务失败",
@@ -322,8 +323,13 @@
         "evidence": "读取 evidence 失败",
         "completePrompt": "AI 自动完善失败",
         "promptRequired": "请先输入简单 Prompt",
-        "required": "请填写任务标题、目标和验收标准"
-      }
+        "required": "请填写任务标题、目标和验收标准",
+        "retryOutbox": "重新发送失败",
+        "discardOutbox": "放弃发送失败"
+      },
+      "pendingRetry": "重新发送",
+      "pendingDiscard": "放弃",
+      "pendingDiscardConfirm": "确定放弃这条失败的远端发送请求？"
     },
     "status": {
       "project": "项目",

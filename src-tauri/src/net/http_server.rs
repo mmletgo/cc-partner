@@ -718,6 +718,14 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(orchestrator::create_task_view),
         )
         .route(
+            "/api/orchestrator/outbox/retry",
+            post(orchestrator::retry_remote_outbox),
+        )
+        .route(
+            "/api/orchestrator/outbox/discard",
+            post(orchestrator::discard_remote_outbox),
+        )
+        .route(
             "/api/orchestrator/tasks/evidence",
             post(orchestrator::get_evidence),
         )
