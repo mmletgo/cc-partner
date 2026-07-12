@@ -386,6 +386,140 @@ describe('useOrchestratorRuntimeSnapshot', () => {
     expect(result.current.cachedAt).toBeNull();
   });
 
+  test('project switch A to B isolates previous project on first render', async () => {
+    const projectA = buildSnapshot({
+      projectId: 'project-a',
+      remoteStatus: 'local',
+      generatedAt: '2026-07-11T10:00:00.000Z',
+      slotsUsed: 9,
+    });
+    const projectBPending = deferred<OrchestratorRuntimeSnapshot>();
+    getRuntimeSnapshotMock
+      .mockResolvedValueOnce(projectA)
+      .mockImplementationOnce(() => projectBPending.promise);
+
+    const { result, rerender } = renderHook(
+      ({ projectId }: { projectId: string }) =>
+        useOrchestratorRuntimeSnapshot({ projectId, enabled: true }),
+      { initialProps: { projectId: 'project-a' } },
+    );
+
+    await waitFor(() => {
+      expect(result.current.snapshot?.projectId).toBe('project-a');
+    });
+    expect(result.current.snapshot?.slotsUsed).toBe(9);
+
+    rerender({ projectId: 'project-b' });
+    // 首帧不得继续展示 A 的 telemetry。
+    expect(result.current.snapshot?.projectId).not.toBe('project-a');
+    expect(result.current.loading).toBe(true);
+
+    await act(async () => {
+      projectBPending.resolve(
+        buildSnapshot({
+          projectId: 'project-b',
+          remoteStatus: 'local',
+          generatedAt: '2026-07-11T10:10:00.000Z',
+          slotsUsed: 1,
+        }),
+      );
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    expect(result.current.snapshot?.projectId).toBe('project-b');
+  });
+
+  test('discards response when snapshot.projectId mismatches target', async () => {
+    getRuntimeSnapshotMock.mockResolvedValueOnce(
+      buildSnapshot({
+        projectId: 'wrong-project',
+        remoteStatus: 'live',
+        projectKind: 'remote',
+        generatedAt: '2026-07-11T11:00:00.000Z',
+        slotsUsed: 8,
+      }),
+    );
+
+    const { result } = renderHook(() =>
+      useOrchestratorRuntimeSnapshot({ projectId: 'target-project', enabled: true }),
+    );
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    expect(result.current.snapshot).toBeNull();
+    expect(result.current.remoteStatus).toBeNull();
+    expect(result.current.cachedAt).toBeNull();
+  });
+
+  test('local success then reject does not mark offline from local cache', async () => {
+    const local = buildSnapshot({
+      projectId: 'local-only',
+      remoteStatus: 'local',
+      generatedAt: '2026-07-11T09:00:00.000Z',
+      slotsUsed: 2,
+    });
+    getRuntimeSnapshotMock
+      .mockResolvedValueOnce(local)
+      .mockRejectedValueOnce(new Error('repo failed'));
+
+    const { result } = renderHook(() =>
+      useOrchestratorRuntimeSnapshot({ projectId: 'local-only', enabled: true }),
+    );
+
+    await waitFor(() => {
+      expect(result.current.snapshot?.remoteStatus).toBe('local');
+    });
+
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    expect(result.current.remoteStatus).not.toBe('offline');
+    expect(result.current.error?.message).toBe('repo failed');
+    // local 成功不得写入 remote live cache，因此失败后不能展示旧 local 为 offline 缓存。
+    expect(result.current.cachedAt).toBeNull();
+  });
+
+  test('cached remote non-network failure maps to unavailable not offline', async () => {
+    const live = buildSnapshot({
+      projectId: 'remote:dev:cache',
+      projectKind: 'remote',
+      remoteStatus: 'live',
+      generatedAt: '2026-07-11T09:00:00.000Z',
+      slotsUsed: 3,
+    });
+    getRuntimeSnapshotMock
+      .mockResolvedValueOnce(live)
+      .mockRejectedValueOnce(new Error('protocol invalid payload'));
+
+    const { result } = renderHook(() =>
+      useOrchestratorRuntimeSnapshot({ projectId: 'remote:dev:cache', enabled: true }),
+    );
+
+    await waitFor(() => {
+      expect(result.current.remoteStatus).toBe('live');
+    });
+
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    expect(result.current.remoteStatus).toBe('unavailable');
+    expect(result.current.remoteStatus).not.toBe('offline');
+    expect(result.current.snapshot).toBeNull();
+    expect(result.current.cachedAt).toBeNull();
+    expect(result.current.error?.message).toContain('protocol');
+  });
+
   test('never writes localStorage/sessionStorage and cold init has no fabricated cache', async () => {
     const originalLocalGet = globalThis.localStorage?.getItem?.bind(globalThis.localStorage);
     const originalLocalSet = globalThis.localStorage?.setItem?.bind(globalThis.localStorage);

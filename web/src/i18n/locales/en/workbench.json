@@ -238,7 +238,7 @@
       "runtimeSnapshotLoading": "Refreshing",
       "runtimeStatusLocal": "Local",
       "runtimeStatusLive": "Live",
-      "runtimeStatusOffline": "Offline (cached)",
+      "runtimeStatusOffline": "Offline",
       "runtimeStatusUnsupported": "Unsupported on peer",
       "runtimeStatusUnavailable": "Unavailable",
       "runtimeStatusUnknown": "Status unknown",

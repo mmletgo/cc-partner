@@ -102,17 +102,31 @@ pub struct RemoteCompleteOrchestratorTaskPromptReq {
     pub working_directory: Option<String>,
 }
 
-/// 远端 Orchestrator runtime snapshot 请求体。
+/// 远端 Orchestrator runtime snapshot 请求体（P2P owning-device 路由）。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     其它设备需要通过 P2P HTTP 拉取 owning device 上的项目运行时快照（调度器、workflow、槽位和事件），
 ///     供 remote shortcut 的状态条展示。请求只携带 owning device 上的 local projectId。
 ///
 /// Code Logic（这个结构体做什么）:
-///     使用 camelCase 反序列化 `{projectId}`；route 会解析 projectId、确认是本机 local 项目后调用共享 builder。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+///     P2P wire 契约锁定 snake_case `{"project_id":"..."}`（与 Shared Contracts / Spec 9.2 一致）；
+///     route 解析 project_id、确认是本机 local 项目后调用共享 builder。手机浏览器入口使用独立 camelCase DTO。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteRuntimeSnapshotReq {
+    #[serde(rename = "project_id")]
+    pub project_id: String,
+}
+
+/// 手机浏览器 Orchestrator runtime snapshot 请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     `/mobile` SPA 通过同源 HTTP 拉取本机或 remote shortcut 的 runtime snapshot，前端约定 camelCase。
+///
+/// Code Logic（这个结构体做什么）:
+///     使用 camelCase 反序列化 `{projectId}`，与 P2P snake_case 请求体刻意分离，避免协议漂移。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileRuntimeSnapshotReq {
     pub project_id: String,
 }
 
@@ -281,30 +295,58 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     owning-device runtime-snapshot 路由由局域网其它设备调用，字段必须稳定为前端/HTTP 约定的 camelCase。
+    ///     P2P owning-device runtime-snapshot 请求体必须精确使用 snake_case `{project_id}`，
+    ///     与 Shared Contracts 锁定契约一致；camelCase `{projectId}` 不得被 P2P DTO 接受。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     反序列化 `{projectId}` 形态的 JSON，断言字段名没有退回 snake_case；同时验证空字符串仍可被解析，
-    ///     由 route 层而非 serde 拒绝空白 projectId。
+    ///     反序列化/序列化 `{"project_id":"..."}` 成功；`{"projectId":"..."}` 失败；空白值仍可解析并由 route 拒绝。
     #[test]
-    fn runtime_snapshot_request_round_trips_as_camel_case() {
+    fn runtime_snapshot_request_round_trips_as_snake_case_project_id() {
         let req: RemoteRuntimeSnapshotReq = serde_json::from_value(serde_json::json!({
-            "projectId": "project-1"
+            "project_id": "project-1"
         }))
-        .expect("deserialize runtime snapshot request");
+        .expect("deserialize P2P runtime snapshot request");
 
         assert_eq!(req.project_id, "project-1");
 
-        let value = serde_json::to_value(req).expect("serialize runtime snapshot request");
-        assert_eq!(value["projectId"], "project-1");
-        assert!(value.get("project_id").is_none());
+        let value = serde_json::to_value(req).expect("serialize P2P runtime snapshot request");
+        assert_eq!(value["project_id"], "project-1");
+        assert!(value.get("projectId").is_none());
 
-        // 空白 projectId 由 route guard 校验，协议层仍可解析。
+        let camel_rejected =
+            serde_json::from_value::<RemoteRuntimeSnapshotReq>(serde_json::json!({
+                "projectId": "project-1"
+            }));
+        assert!(
+            camel_rejected.is_err(),
+            "P2P DTO must reject camelCase projectId body"
+        );
+
+        // 空白 project_id 由 route guard 校验，协议层仍可解析。
         let blank: RemoteRuntimeSnapshotReq = serde_json::from_value(serde_json::json!({
-            "projectId": "   "
+            "project_id": "   "
         }))
         .expect("deserialize blank project id");
         assert_eq!(blank.project_id, "   ");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     手机浏览器入口继续使用 camelCase `{projectId}`，不得与 P2P snake_case 契约混用。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化/序列化 `{"projectId":"..."}`，断言不退回 snake_case。
+    #[test]
+    fn mobile_runtime_snapshot_request_round_trips_as_camel_case() {
+        let req: MobileRuntimeSnapshotReq = serde_json::from_value(serde_json::json!({
+            "projectId": "project-1"
+        }))
+        .expect("deserialize mobile runtime snapshot request");
+
+        assert_eq!(req.project_id, "project-1");
+
+        let value = serde_json::to_value(req).expect("serialize mobile runtime snapshot request");
+        assert_eq!(value["projectId"], "project-1");
+        assert!(value.get("project_id").is_none());
     }
 
     /// Business Logic（为什么需要这个测试）:

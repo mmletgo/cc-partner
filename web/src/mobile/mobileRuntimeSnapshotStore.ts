@@ -2,11 +2,12 @@
  * Mobile Orchestrator runtime snapshot 进程内缓存。
  *
  * Business Logic（为什么需要这个模块）:
- *   手机端自动化面板需要展示 remote-aware runtime 四态，并在 live→offline 时保留最后一次成功快照供显示；
+ *   手机端自动化面板需要展示 remote-aware runtime 四态，并在 live→offline 时保留最后一次 remote live 快照供显示；
  *   缓存不得写入 localStorage/磁盘，也不得驱动任务动作可用性。
  *
  * Code Logic（这个模块做什么）:
  *   提供按 projectId 键控的模块级 Map 缓存、请求序号 stale guard，以及 load 状态归并逻辑。
+ *   仅 remote live 写入 success cache；错误状态不依据“是否有缓存”推断 offline。
  */
 
 import type {
@@ -19,10 +20,10 @@ import type {
  * 成功缓存条目。
  *
  * Business Logic（为什么需要这个类型）:
- *   offline 时只能展示本项目上一次 live/local 成功快照，不能跨项目复用。
+ *   offline 时只能展示本项目上一次 remote live 成功快照，不能跨项目复用，也不能把 local 当 live cache。
  *
  * Code Logic（字段说明）:
- *   snapshot 为成功响应体；cachedAt 为客户端收到成功响应时的 ISO 时间。
+ *   snapshot 为 remote live 响应体；cachedAt 为客户端收到成功响应时的 ISO 时间。
  */
 interface MobileRuntimeSnapshotCacheEntry {
   snapshot: OrchestratorRuntimeSnapshot;
@@ -46,27 +47,18 @@ export function resetMobileRuntimeSnapshotStore(): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   面板在发起请求前需要一个可渲染的 loading 状态，并可能带上旧缓存做骨架显示。
+ *   面板在发起请求前需要一个可渲染的 loading 状态，并可能带上旧 remote live 缓存做骨架显示。
  *
  * Code Logic（这个函数做什么）:
- *   读取该 project 的成功缓存（若有），返回 loading=true 的 display state。
+ *   读取该 project 的 remote live 缓存（若有），返回 loading=true 的 display state。
  */
 export function beginMobileRuntimeSnapshotLoad(
   projectId: string,
 ): OrchestratorRuntimeDisplayState {
   const cached = successCache.get(projectId) ?? null;
-  // 展示层 remoteStatus 不含 local：本机成功快照的 remoteStatus 归一为 null（与桌面 hook 一致）。
-  const displayRemoteStatus =
-    cached?.snapshot.remoteStatus === 'live'
-      ? 'live'
-      : cached?.snapshot.remoteStatus === 'offline' ||
-          cached?.snapshot.remoteStatus === 'unsupported' ||
-          cached?.snapshot.remoteStatus === 'unavailable'
-        ? cached.snapshot.remoteStatus
-        : null;
   return {
     snapshot: cached?.snapshot ?? null,
-    remoteStatus: displayRemoteStatus,
+    remoteStatus: cached ? 'live' : null,
     cachedAt: cached?.cachedAt ?? null,
     loading: true,
     error: null,
@@ -102,10 +94,11 @@ export function isCurrentMobileRuntimeSnapshotRequest(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   live/local 成功响应需要更新显示缓存；offline 时保留旧成功快照；unsupported/unavailable 不得复用旧缓存。
+ *   remote live 成功响应需要更新显示缓存；local 成功不写 live 缓存；offline 时保留旧 live 快照；
+ *   unsupported/unavailable 不得复用旧缓存。
  *
  * Code Logic（这个函数做什么）:
- *   按 remoteStatus 归并 Map 缓存并返回 display state；stale 请求返回 null。
+ *   按 remoteStatus 归并 Map 缓存并返回 display state；stale 请求或错误 projectId 返回 null/空态。
  */
 export function applyMobileRuntimeSnapshotSuccess(
   projectId: string,
@@ -117,14 +110,34 @@ export function applyMobileRuntimeSnapshotSuccess(
     return null;
   }
 
+  if (snapshot.projectId !== projectId) {
+    return {
+      snapshot: null,
+      remoteStatus: null,
+      cachedAt: null,
+      loading: false,
+      error: null,
+    };
+  }
+
   const status = snapshot.remoteStatus;
-  if (status === 'local' || status === 'live') {
+  if (status === 'live') {
     successCache.set(projectId, { snapshot, cachedAt: receivedAt });
     return {
       snapshot,
-      // 本机 local 在展示层归一为 null；远端 live 保留 live。
-      remoteStatus: status === 'live' ? 'live' : null,
+      remoteStatus: 'live',
       cachedAt: receivedAt,
+      loading: false,
+      error: null,
+    };
+  }
+
+  if (status === 'local') {
+    // 本机成功不写入 remote live cache，展示层 remoteStatus 归一为 null。
+    return {
+      snapshot,
+      remoteStatus: null,
+      cachedAt: null,
       loading: false,
       error: null,
     };
@@ -154,10 +167,10 @@ export function applyMobileRuntimeSnapshotSuccess(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   传输层失败（非后端四态 DTO）时面板仍要结束 loading，并保留 offline 显示缓存（若有）。
+ *   传输层失败（非后端四态 DTO）时面板仍要结束 loading；只有网络类失败 + remote live 缓存才标 offline。
  *
  * Code Logic（这个函数做什么）:
- *   stale 请求返回 null；否则返回 offline 语义 + 可选缓存 + error。
+ *   stale 请求返回 null；网络失败且有缓存 → offline+cache；其它失败 → unavailable/error，不把任意错误当 offline。
  */
 export function applyMobileRuntimeSnapshotFailure(
   projectId: string,
@@ -168,10 +181,33 @@ export function applyMobileRuntimeSnapshotFailure(
     return null;
   }
   const cached = successCache.get(projectId) ?? null;
+  const message = error.message.toLowerCase();
+  const networkish =
+    message.includes('network') ||
+    message.includes('fetch') ||
+    message.includes('timeout') ||
+    message.includes('timed out') ||
+    message.includes('econn') ||
+    message.includes('offline') ||
+    message.includes('离线') ||
+    message.includes('连接') ||
+    message.includes('unreachable') ||
+    message.includes('failed to fetch');
+
+  if (cached && networkish) {
+    return {
+      snapshot: cached.snapshot,
+      remoteStatus: 'offline',
+      cachedAt: cached.cachedAt,
+      loading: false,
+      error,
+    };
+  }
+
   return {
-    snapshot: cached?.snapshot ?? null,
-    remoteStatus: cached ? 'offline' : null,
-    cachedAt: cached?.cachedAt ?? null,
+    snapshot: null,
+    remoteStatus: cached ? 'unavailable' : null,
+    cachedAt: null,
     loading: false,
     error,
   };

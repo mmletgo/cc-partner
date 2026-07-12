@@ -218,7 +218,7 @@ describe('mobileRuntimeSnapshotStore', () => {
       );
       assert(fail?.error?.message === 'network down', 'failure keeps error');
       assert(fail?.snapshot?.generatedAt === 'B', 'failure keeps display cache');
-      assert(fail?.remoteStatus === 'offline', 'transport failure maps to offline display');
+      assert(fail?.remoteStatus === 'offline', 'network failure maps to offline display');
       assert(!storageTouched, 'store must not touch localStorage');
     } finally {
       if (globalThis.localStorage && originalGetItem && originalSetItem) {
@@ -226,6 +226,45 @@ describe('mobileRuntimeSnapshotStore', () => {
         globalThis.localStorage.setItem = originalSetItem;
       }
     }
+  });
+
+  test('local success is not cached as remote live and non-network failure is not offline', () => {
+    const localSeq = nextMobileRuntimeSnapshotRequestSeq('local-p');
+    const local = applyMobileRuntimeSnapshotSuccess(
+      'local-p',
+      localSeq,
+      makeSnapshot({ projectId: 'local-p', projectKind: 'local', remoteStatus: 'local' }),
+      '2026-07-11T16:00:00.000Z',
+    );
+    assert(local?.remoteStatus === null, 'local success normalizes remoteStatus to null');
+    assert(getMobileRuntimeSnapshotCacheSize() === 0, 'local success must not write live cache');
+
+    const localFail = applyMobileRuntimeSnapshotFailure(
+      'local-p',
+      nextMobileRuntimeSnapshotRequestSeq('local-p'),
+      new Error('repo failed'),
+    );
+    assert(localFail?.remoteStatus !== 'offline', 'local reject must not become offline');
+    assert(localFail?.cachedAt === null, 'local reject has no cachedAt');
+
+    const liveSeq = nextMobileRuntimeSnapshotRequestSeq('remote-p');
+    applyMobileRuntimeSnapshotSuccess(
+      'remote-p',
+      liveSeq,
+      makeSnapshot({ projectId: 'remote-p', remoteStatus: 'live', generatedAt: 'live-1' }),
+      '2026-07-11T16:01:00.000Z',
+    );
+    const protocolFail = applyMobileRuntimeSnapshotFailure(
+      'remote-p',
+      nextMobileRuntimeSnapshotRequestSeq('remote-p'),
+      new Error('protocol invalid payload'),
+    );
+    assert(
+      protocolFail?.remoteStatus === 'unavailable',
+      'cached remote non-network failure must be unavailable',
+    );
+    assert(protocolFail?.remoteStatus !== 'offline', 'must not mark offline for protocol errors');
+    assert(protocolFail?.snapshot === null, 'non-network failure does not surface live cache as offline');
   });
 
   test('reset leaves cold empty state and preserves unique owner live fields', () => {

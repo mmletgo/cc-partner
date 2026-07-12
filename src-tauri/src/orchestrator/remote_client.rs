@@ -394,8 +394,8 @@ impl RemoteOrchestratorClient {
     /// Code Logic（这个函数做什么）:
     ///     1. `PeerClient::require_capability(.., CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1)`
     ///        先做能力门；未通过直接返回 `Unsupported`，不打路由；
-    ///     2. 通过后构造 `RemoteRuntimeSnapshotReq { projectId }`（camelCase wire 契约，与
-    ///        `routes/orchestrator.rs::runtime_snapshot` handler 一致）；
+    ///     2. 通过后构造 `RemoteRuntimeSnapshotReq { project_id }`（P2P snake_case wire 契约，与
+    ///        Shared Contracts / `routes/orchestrator.rs::runtime_snapshot` handler 一致）；
     ///     3. POST `{base_url}/api/orchestrator/runtime-snapshot`，注入出站 `X-CC-Request-Id`
     ///        （非空 request_id 入参优先转发，构建多跳调用链；空入参生成新 UUID）；
     ///     4. 用共享 `parse_peer_response` 解析 v0/v1 响应，成功返回
@@ -1087,8 +1087,8 @@ mod tests {
     /// 启动带 health + runtime-snapshot 路由（带 hit 计数 + 请求体捕获）的临时服务。
     ///
     /// Code Logic: 复用测试常用的 v0/v1 health + 新路由骨架；额外捕获
-    /// `RemoteRuntimeSnapshotReq` 请求体 projectId 与入站 `X-CC-Request-Id`，
-    /// 供 capability gate / 出站 request_id 转发断言使用。返回 (base_url, hits, observed_project_id, observed_request_id)。
+    /// `RemoteRuntimeSnapshotReq` 请求体 `project_id` 与入站 `X-CC-Request-Id`，
+    /// 供 capability gate / 出站 request_id 转发断言使用。返回 (base_url, hits, observed_project_id, observed_request_id, observed_raw_body)。
     async fn spawn_runtime_snapshot_server(
         protocol_version: u32,
         capabilities: Vec<String>,
@@ -1098,14 +1098,17 @@ mod tests {
         Arc<AtomicU32>,
         Arc<Mutex<String>>,
         Arc<Mutex<String>>,
+        Arc<Mutex<String>>,
     ) {
         use crate::orchestrator::remote_protocol::RemoteRuntimeSnapshotReq;
         let hits = Arc::new(AtomicU32::new(0));
         let hits_clone = hits.clone();
         let observed_project_id: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
         let observed_request_id: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let observed_raw_body: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
         let observed_pid_clone = observed_project_id.clone();
         let observed_rid_clone = observed_request_id.clone();
+        let observed_raw_clone = observed_raw_body.clone();
         let app = Router::new()
             .route(
                 "/api/health",
@@ -1127,15 +1130,21 @@ mod tests {
             .route(
                 "/api/orchestrator/runtime-snapshot",
                 post(
-                    move |headers: axum::http::HeaderMap,
-                          Json(req): Json<RemoteRuntimeSnapshotReq>| {
+                    move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
                         let hits = hits_clone.clone();
                         let observed_pid = observed_pid_clone.clone();
                         let observed_rid = observed_rid_clone.clone();
+                        let observed_raw = observed_raw_clone.clone();
                         let payload = snapshot_payload.clone();
                         async move {
                             hits.fetch_add(1, Ordering::SeqCst);
-                            *observed_pid.lock().unwrap() = req.project_id.clone();
+                            let raw = String::from_utf8_lossy(&body).to_string();
+                            *observed_raw.lock().unwrap() = raw.clone();
+                            if let Ok(req) =
+                                serde_json::from_slice::<RemoteRuntimeSnapshotReq>(&body)
+                            {
+                                *observed_pid.lock().unwrap() = req.project_id;
+                            }
                             *observed_rid.lock().unwrap() = headers
                                 .get("x-cc-request-id")
                                 .and_then(|v| v.to_str().ok())
@@ -1148,7 +1157,13 @@ mod tests {
                 ),
             );
         let url = spawn_orchestrator_server(app).await;
-        (url, hits, observed_project_id, observed_request_id)
+        (
+            url,
+            hits,
+            observed_project_id,
+            observed_request_id,
+            observed_raw_body,
+        )
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -1203,12 +1218,13 @@ mod tests {
                 "createdAt": "2026-07-12T02:58:00Z"
             }]
         });
-        let (base_url, hits, observed_pid, observed_rid) = spawn_runtime_snapshot_server(
-            1,
-            vec![CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string()],
-            payload,
-        )
-        .await;
+        let (base_url, hits, observed_pid, observed_rid, observed_raw) =
+            spawn_runtime_snapshot_server(
+                1,
+                vec![CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string()],
+                payload,
+            )
+            .await;
 
         let snapshot = RemoteOrchestratorClient::new()
             .runtime_snapshot(&base_url, "project-1", "req-1")
@@ -1221,8 +1237,17 @@ mod tests {
             1,
             "v1 应通过能力门并调用新路由"
         );
-        // 请求体契约：projectId 原样到达对端。
+        // 请求体契约：P2P snake_case project_id 原样到达对端。
         assert_eq!(observed_pid.lock().unwrap().as_str(), "project-1");
+        let raw_body = observed_raw.lock().unwrap().clone();
+        assert!(
+            raw_body.contains("\"project_id\""),
+            "P2P client must send snake_case project_id, raw={raw_body}"
+        );
+        assert!(
+            !raw_body.contains("\"projectId\""),
+            "P2P client must not send camelCase projectId, raw={raw_body}"
+        );
         // Finding 3：出站 request_id 必须原样转发到对端（多跳调用链关联）。
         assert_eq!(observed_rid.lock().unwrap().as_str(), "req-1");
         // Owner 字段必须逐字保留（不漂移、不重新计算）。
@@ -1257,7 +1282,7 @@ mod tests {
     ///     调用 `runtime_snapshot(...)`，断言返回 `Unsupported` 且路由未被调用（hit=0）。
     #[tokio::test]
     async fn runtime_snapshot_returns_unsupported_when_capability_absent() {
-        let (base_url, hits, _observed_pid, _observed_rid) =
+        let (base_url, hits, _observed_pid, _observed_rid, _observed_raw) =
             spawn_runtime_snapshot_server(1, vec![], serde_json::json!({})).await;
 
         let err = RemoteOrchestratorClient::new()
@@ -1359,31 +1384,32 @@ mod tests {
     ///     （而非空串）。
     #[tokio::test]
     async fn runtime_snapshot_generates_request_id_when_caller_passes_empty() {
-        let (base_url, _hits, _observed_pid, observed_rid) = spawn_runtime_snapshot_server(
-            1,
-            vec![CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string()],
-            serde_json::json!({
-                "projectId": "project-1",
-                "projectKind": "local",
-                "remoteStatus": "local",
-                "generatedAt": "2026-07-12T03:00:00Z",
-                "latestTickAt": null,
-                "lastDispatchAt": null,
-                "lastDispatchedCount": 0,
-                "schedulerEnabled": false,
-                "workflowSource": "built-in",
-                "workflowValid": true,
-                "workflowError": null,
-                "maxConcurrentTasks": 1,
-                "slotsUsed": 0,
-                "slotsAvailable": 1,
-                "latestError": null,
-                "runningTasks": [],
-                "retryingTasks": [],
-                "recentEvents": []
-            }),
-        )
-        .await;
+        let (base_url, _hits, _observed_pid, observed_rid, _observed_raw) =
+            spawn_runtime_snapshot_server(
+                1,
+                vec![CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string()],
+                serde_json::json!({
+                    "projectId": "project-1",
+                    "projectKind": "local",
+                    "remoteStatus": "local",
+                    "generatedAt": "2026-07-12T03:00:00Z",
+                    "latestTickAt": null,
+                    "lastDispatchAt": null,
+                    "lastDispatchedCount": 0,
+                    "schedulerEnabled": false,
+                    "workflowSource": "built-in",
+                    "workflowValid": true,
+                    "workflowError": null,
+                    "maxConcurrentTasks": 1,
+                    "slotsUsed": 0,
+                    "slotsAvailable": 1,
+                    "latestError": null,
+                    "runningTasks": [],
+                    "retryingTasks": [],
+                    "recentEvents": []
+                }),
+            )
+            .await;
 
         let _snapshot = RemoteOrchestratorClient::new()
             .runtime_snapshot(&base_url, "project-1", "")
@@ -1411,7 +1437,7 @@ mod tests {
     async fn runtime_snapshot_mixed_v0_v1_contract_unsupported_without_route_and_live_with_owner_fields(
     ) {
         // v0 对端：protocol_version=0，无任何能力，但挂着同名路由（hit 计数器验证门控）。
-        let (v0_url, v0_hits, _v0_pid, _v0_rid) =
+        let (v0_url, v0_hits, _v0_pid, _v0_rid, _v0_raw) =
             spawn_runtime_snapshot_server(0, vec![], serde_json::json!({})).await;
         let v0_err = RemoteOrchestratorClient::new()
             .runtime_snapshot(&v0_url, "owner-local-project", "req-v0")
@@ -1468,18 +1494,24 @@ mod tests {
                 "createdAt": "2026-07-12T15:12:00Z"
             }]
         });
-        let (v1_url, v1_hits, observed_pid, _observed_rid) = spawn_runtime_snapshot_server(
-            1,
-            vec![CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string()],
-            payload,
-        )
-        .await;
+        let (v1_url, v1_hits, observed_pid, _observed_rid, observed_raw) =
+            spawn_runtime_snapshot_server(
+                1,
+                vec![CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string()],
+                payload,
+            )
+            .await;
         let snapshot = RemoteOrchestratorClient::new()
             .runtime_snapshot(&v1_url, "owner-local-project", "req-v1")
             .await
             .expect("new client + v1 server 应返回 live owner snapshot");
         assert_eq!(v1_hits.load(Ordering::SeqCst), 1, "v1 应命中 feature route");
         assert_eq!(observed_pid.lock().unwrap().as_str(), "owner-local-project");
+        let raw_body = observed_raw.lock().unwrap().clone();
+        assert!(
+            raw_body.contains("\"project_id\""),
+            "mixed v1 path must send snake_case project_id, raw={raw_body}"
+        );
         assert_eq!(snapshot.generated_at, owner_generated_at);
         assert_eq!(snapshot.latest_tick_at.as_deref(), Some(owner_tick));
         assert_eq!(snapshot.last_dispatched_count, 7);
@@ -1504,7 +1536,7 @@ mod tests {
     ///     调用 runtime_snapshot 断言 InvalidResponse 且路由已被命中。
     #[tokio::test]
     async fn runtime_snapshot_returns_invalid_response_for_incomplete_v1_payload() {
-        let (base_url, hits, _pid, _rid) = spawn_runtime_snapshot_server(
+        let (base_url, hits, _pid, _rid, _raw) = spawn_runtime_snapshot_server(
             1,
             vec![CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string()],
             serde_json::json!({ "projectId": "only-partial" }),

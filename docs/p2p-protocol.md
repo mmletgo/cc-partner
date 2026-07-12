@@ -166,8 +166,8 @@ the router so the inventory check matches exactly.
 | POST | `/api/orchestrator/tasks/abort` | `routes/orchestrator.rs` | sets authoritative task to Aborted | no-transport-retry | Orchestrator lifecycle action |
 | POST | `/api/orchestrator/tasks/cancel` | `routes/orchestrator.rs` | transitions to Canceled/Idle, retains scene | no-transport-retry | Orchestrator lifecycle action |
 | POST | `/api/orchestrator/projects/refresh` | `routes/orchestrator.rs` | best-effort `dispatch_once` | no-transport-retry | Orchestrator action; replay can race a concurrent scheduler tick |
-| POST | `/api/orchestrator/runtime-snapshot` | `routes/orchestrator.rs` | none; reads owning-device local runtime snapshot | read-only | capability-gated by `orchestrator.runtime-snapshot.v1`; rejects remote shortcuts |
-| POST | `/api/mobile/orchestrator/runtime-snapshot` | `routes/orchestrator.rs` | none; remote-aware runtime snapshot for mobile browser | read-only | reuses Tauri four-state helper; never exposes owner P2P base URL |
+| POST | `/api/orchestrator/runtime-snapshot` | `routes/orchestrator.rs` | none; reads owning-device local runtime snapshot | read-only | capability-gated by `orchestrator.runtime-snapshot.v1`; body snake_case `{project_id}` only; rejects remote shortcuts |
+| POST | `/api/mobile/orchestrator/runtime-snapshot` | `routes/orchestrator.rs` | none; remote-aware runtime snapshot for mobile browser | read-only | body camelCase `{projectId}`; reuses Tauri four-state helper; never exposes owner P2P base URL |
 | GET | `/api/orchestrator/config` | `routes/orchestrator.rs` | none | read-only | — |
 
 ## Notes on the mandatory classifications

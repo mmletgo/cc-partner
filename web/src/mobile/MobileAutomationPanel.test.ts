@@ -80,6 +80,41 @@ describe('MobileAutomationPanel', () => {
     );
     assertContains(
       panelSource,
+      "runtimeDisplay.snapshot?.remoteStatus === 'local'",
+      'mobile automation local success must use local status label',
+    );
+    assertContains(
+      panelSource,
+      'runtimeStatusLocal',
+      'mobile automation must reference runtimeStatusLocal for local snapshots',
+    );
+    assertContains(
+      panelSource,
+      'runtimeDisplay.cachedAt !== null',
+      'mobile automation cached hint requires warm offline snapshot+cachedAt',
+    );
+    assertContains(
+      zhWorkbench,
+      '"runtimeStatusOffline": "离线"',
+      'zh offline label must be neutral offline without claiming cache',
+    );
+    assertContains(
+      enWorkbench,
+      '"runtimeStatusOffline": "Offline"',
+      'en offline label must be neutral offline without claiming cache',
+    );
+    assertContains(
+      zhWorkbench,
+      '"runtimeStatusLocal": "本机"',
+      'zh local runtime label must exist',
+    );
+    assertContains(
+      enWorkbench,
+      '"runtimeStatusLocal": "Local"',
+      'en local runtime label must exist',
+    );
+    assertContains(
+      panelSource,
       'loadRuntimeSnapshot(projectId)',
       'mobile automation should refresh runtime snapshot with tasks',
     );
@@ -333,10 +368,16 @@ describe('MobileAutomationPanel', () => {
       'canStartOrchestratorTaskForProject(runtime',
       'start availability must not be computed from runtime snapshot cache',
     );
+    // 状态条文案可读取 runtimeDisplay.snapshot；任务动作 gate 不得用 snapshot 真值分支。
     assertNotContains(
       panelSource,
-      'if (runtimeDisplay.snapshot',
+      'if (runtimeDisplay.snapshot) {',
       'task action gates must not branch on runtimeDisplay.snapshot truthiness',
+    );
+    assertNotContains(
+      panelSource,
+      'canStartOrchestratorTaskForProject(runtimeDisplay.snapshot',
+      'start action must not consume runtimeDisplay.snapshot',
     );
   });
 });

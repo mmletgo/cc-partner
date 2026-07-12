@@ -548,18 +548,57 @@ fn map_remote_runtime_snapshot_for_shortcut(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     open-project/设备查找失败时不能把含 owner base URL 的 AppError 直接抛给 mobile/Tauri 调用方，
+///     必须映射回四态空快照，保持 cold offline 与 unavailable 语义。
+///
+/// Code Logic（这个函数做什么）:
+///     设备缺失/网络类 → offline 空快照；其它 preflight 业务/协议错误 → unavailable 空快照；
+///     文案固定中文提示，不拼接 base_url/IP/端口。
+fn remote_runtime_snapshot_from_open_error(
+    project: &WorkbenchProjectRow,
+    error: AppError,
+) -> OrchestratorRuntimeSnapshotDto {
+    // 脱敏：绝不把 owner URL 写入 latest_error。
+    let sanitized = error.to_string();
+    if is_remote_network_error(&error) {
+        return remote_runtime_snapshot_empty(
+            project,
+            "offline",
+            "远端设备离线，暂时无法获取运行时快照",
+        );
+    }
+    let looks_like_url = sanitized.contains("http://") || sanitized.contains("https://");
+    let message = if looks_like_url || sanitized.trim().is_empty() {
+        "远端运行时快照暂时不可用".to_string()
+    } else {
+        // 业务错误保留中文提示，但不带 URL。
+        sanitized
+    };
+    remote_runtime_snapshot_empty(project, "unavailable", &message)
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     remote shortcut 的 runtime snapshot 必须向 owning device 拉取权威数据，
 ///     不能用本机 scheduler/config/workflow 冒充远端状态。
 ///
 /// Code Logic（这个函数做什么）:
-///     通过 open_remote_project_for_shortcut 解析 base_url 与远端 local projectId，
-///     调用 RemoteOrchestratorClient::runtime_snapshot；成功则映射 shortcut 身份字段，
-///     失败则按 PeerCallError 变体回落到 unsupported/offline/unavailable 空快照。
+///     通过 open_remote_project_for_shortcut 解析 base_url 与远端 local projectId；
+///     open/device preflight 失败映射 offline/unavailable 空快照（不泄漏 owner URL）；
+///     调用 RemoteOrchestratorClient::runtime_snapshot 成功则映射 shortcut 身份字段，
+///     peer 失败则按 PeerCallError 变体回落到 unsupported/offline/unavailable 空快照。
 async fn get_remote_orchestrator_runtime_snapshot(
     state: &AppState,
     remote_shortcut: &WorkbenchProjectRow,
 ) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
-    let context = open_remote_project_for_shortcut(state, remote_shortcut).await?;
+    let context = match open_remote_project_for_shortcut(state, remote_shortcut).await {
+        Ok(context) => context,
+        Err(error) => {
+            return Ok(remote_runtime_snapshot_from_open_error(
+                remote_shortcut,
+                error,
+            ));
+        }
+    };
     let request_id = crate::net::request_context::new_request_id();
     match RemoteOrchestratorClient::new()
         .runtime_snapshot(&context.base_url, &context.remote_project_id, &request_id)
@@ -3230,6 +3269,67 @@ mod tests {
             mapped.generated_at, "local-telemetry-should-not-appear",
             "不得用本机 telemetry 补 owner generatedAt"
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     open-project preflight 设备缺失/离线必须回落 offline 空快照，且不得把 owner URL 写进 DTO。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用“远端设备不在线”与带 URL 的网络失败文案调用 remote_runtime_snapshot_from_open_error，
+    ///     断言 remoteStatus=offline、空运行时字段、latest_error 不含 http://。
+    #[test]
+    fn remote_runtime_snapshot_open_preflight_maps_device_missing_to_offline_without_url() {
+        let project = remote_shortcut_row();
+        let offline =
+            remote_runtime_snapshot_from_open_error(&project, AppError::generic("远端设备不在线"));
+        assert_eq!(offline.remote_status, "offline");
+        assert_eq!(offline.project_id, "shortcut-project-1");
+        assert!(offline.running_tasks.is_empty());
+        assert!(offline.recent_events.is_empty());
+        let offline_err = offline.latest_error.unwrap_or_default();
+        assert!(offline_err.contains("离线"));
+        assert!(!offline_err.contains("http://"));
+        assert!(!offline_err.contains("https://"));
+
+        let network = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::generic(
+                "远端 Workbench 请求失败: error sending request for url (http://192.168.9.9:62116/api/workbench/projects/open)",
+            ),
+        );
+        assert_eq!(network.remote_status, "offline");
+        let network_err = network.latest_error.unwrap_or_default();
+        assert!(!network_err.contains("http://"));
+        assert!(!network_err.contains("192.168.9.9"));
+        assert!(!network_err.contains("62116"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     open-project 业务/协议失败必须回落 unavailable，且响应不得泄漏 owner base URL。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用含 URL 的业务错误与不含 URL 的业务错误分别映射，断言 unavailable 且脱敏。
+    #[test]
+    fn remote_runtime_snapshot_open_preflight_maps_business_failure_to_unavailable_without_url() {
+        let project = remote_shortcut_row();
+        let with_url = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::generic(
+                "打开远端项目失败: http://10.0.0.8:62116/api/workbench/projects/open",
+            ),
+        );
+        assert_eq!(with_url.remote_status, "unavailable");
+        let msg = with_url.latest_error.unwrap_or_default();
+        assert!(!msg.contains("http://"));
+        assert!(!msg.contains("10.0.0.8"));
+        assert!(!msg.contains("62116"));
+
+        let plain =
+            remote_runtime_snapshot_from_open_error(&project, AppError::generic("路径不能为空"));
+        assert_eq!(plain.remote_status, "unavailable");
+        assert_eq!(plain.latest_error.as_deref(), Some("路径不能为空"));
+        assert!(plain.running_tasks.is_empty());
+        assert_eq!(plain.max_concurrent_tasks, 0);
     }
 
     /// Business Logic（为什么需要这个测试）:
