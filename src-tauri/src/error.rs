@@ -12,6 +12,36 @@
 //!     实现 `axum::response::IntoResponse`（HTTP 500 + 同结构 JSON，对照 Python handler），
 //!     并为 sqlx::Error / serde_json::Error / io::Error 等实现 `From`，
 //!     使命令体与 handler 内都可用 `?` 优雅传播。
+//!
+//! Finding 3 补丁: 新增 `Remote` variant 携带对端 v1 信封的结构化元数据
+//!     （`code`/`status`/`retryable`/`request_id`），让 `classify()` 据此映射稳定分类，
+//!     上层重试/退避决策不再依赖人类可读文案。IPC Serialize 仍只输出 `{"error": "..."}`，
+//!     前端契约不变；元数据仅由命令层/Rust 内部消费。
+
+/// 远端对端错误信封携带的结构化元数据（Finding 3）。
+///
+/// Business Logic（为什么需要这个类型）:
+///     `PeerCallError::Remote` 已解析出对端信封的 `code`/HTTP `status`/`retryable`/`request_id`，
+///     但旧的 `remote_error_to_app_error` 把它们全部丢弃，只保留 `message` 字符串，导致：
+///     1. 上层无法用 `classify()` 区分 `unavailable`/`conflict`/`validation`（一律 Internal），
+///        重试/退避只能靠字符串匹配；
+///     2. `request_id` 丢失，多跳代理链无法关联日志；
+///     3. `retryable` 丢失，客户端无法判断是否安全重试。
+///     本结构把这些字段原样挂在 `AppError::Remote` 上，由 `classify()` 翻译为稳定分类。
+///
+/// Code Logic（这个结构做什么）:
+///     纯数据载体，所有字段 `pub`；由 `AppError::remote()` 构造，由 `AppError::remote_meta()` 读取。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteErrorMeta {
+    /// 对端信封的稳定 code token（v1 如 `unavailable`/`conflict`；v0 合成 `legacy.remote_error`）。
+    pub code: String,
+    /// 对端 HTTP 状态码（非 2xx）。
+    pub status: u16,
+    /// 对端信封声明的 retryable（v0 合成 false）。
+    pub retryable: bool,
+    /// 对端调用链 request_id（v1 取自信封并校验 header 一致；v0 取自响应 header）。
+    pub request_id: String,
+}
 
 /// 应用统一错误类型，覆盖数据库、序列化、IO、业务 not-found 等场景。
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +90,19 @@ pub enum AppError {
     /// Code Logic: Display 直接展示消息，分类时映射到 `AppErrorCategory::Timeout`。
     #[error("{0}")]
     Timeout(String),
+    /// 远端对端返回的业务错误（携带 v1 信封结构化元数据）。
+    ///
+    /// Business Logic（Finding 3）: 远端 client（orchestrator/workbench）经 `parse_peer_response`
+    ///     解析对端错误后，把 `PeerCallError::Remote` 的 code/status/retryable/request_id 原样
+    ///     存入本 variant，让 `classify()` 据稳定 code（而非人类可读文案）映射分类，
+    ///     供上层重试/退避决策使用。Display 只展示 message，IPC Serialize 仍输出 `{"error": "..."}`。
+    #[error("{message}")]
+    Remote {
+        /// 人类可读错误消息（v1 信封 `error` 字段或 v0 老形态原文）。
+        message: String,
+        /// 对端信封结构化元数据（code/status/retryable/request_id）。
+        meta: RemoteErrorMeta,
+    },
 }
 
 /// 稳定的内部错误分类，供 HTTP/P2P 边界映射状态码与重试策略。
@@ -97,6 +140,14 @@ impl AppError {
     ///
     /// Code Logic（这个函数做什么）:
     ///     显式 variant 映射到对应分类；Db/Json/Io/Tauri/Bad 等兜底归入 Internal。
+    ///     `Remote` 变体（Finding 3）依据对端信封的稳定 code token 映射，不再依赖文案：
+    ///       - `validation_error`/`unauthorized`/`forbidden`/`payload_too_large`/
+    ///         `method_not_allowed` → Validation；
+    ///       - `not_found` → NotFound；
+    ///       - `conflict` → Conflict；
+    ///       - `unavailable` → Unavailable；
+    ///       - `timeout` → Timeout；
+    ///       - 其余（含 `legacy.remote_error`/`internal_error`/未知 token）→ Internal。
     pub fn classify(&self) -> AppErrorCategory {
         match self {
             AppError::NotFound(_) => AppErrorCategory::NotFound,
@@ -104,6 +155,7 @@ impl AppError {
             AppError::Conflict(_) => AppErrorCategory::Conflict,
             AppError::Unavailable(_) => AppErrorCategory::Unavailable,
             AppError::Timeout(_) => AppErrorCategory::Timeout,
+            AppError::Remote { meta, .. } => classify_remote_code(&meta.code),
             // Db/Json/Io/Tauri/Bad 均视为内部错误（500）：
             // 这些 variant 既有调用点大多包裹 IO/进程失败，不应误升 4xx。
             AppError::Db(_)
@@ -112,6 +164,39 @@ impl AppError {
             | AppError::Bad(_)
             | AppError::Tauri(_) => AppErrorCategory::Internal,
         }
+    }
+
+    /// 返回 `Remote` variant 携带的对端元数据（Finding 3）；其它 variant 返回 None。
+    ///
+    /// Business Logic: 上层重试/退避逻辑可读 `meta.retryable`/`meta.status`/`meta.code`，
+    ///     无需把文案当决策依据；调用链也可读 `meta.request_id` 关联多跳日志。
+    pub fn remote_meta(&self) -> Option<&RemoteErrorMeta> {
+        match self {
+            AppError::Remote { meta, .. } => Some(meta),
+            _ => None,
+        }
+    }
+}
+
+/// 把对端信封的稳定 code token 映射为内部稳定分类（Finding 3）。
+///
+/// Business Logic（为什么独立成函数）:
+///     `AppError::classify()` 与远端 client 的错误映射都需要同一套 code→category 规则，
+///     集中到一处避免漂移。映射基于稳定 token 字符串，不依赖人类可读文案。
+///
+/// Code Logic（这个函数做什么）:
+///     显式 token → category；未覆盖 token（含 v0 合成的 `legacy.remote_error`、
+///     `unknown` 占位、未来新 token）兜底为 Internal，保证向后兼容。
+pub fn classify_remote_code(code: &str) -> AppErrorCategory {
+    match code {
+        "validation_error" | "unauthorized" | "forbidden" | "payload_too_large"
+        | "method_not_allowed" => AppErrorCategory::Validation,
+        "not_found" => AppErrorCategory::NotFound,
+        "conflict" => AppErrorCategory::Conflict,
+        "unavailable" => AppErrorCategory::Unavailable,
+        "timeout" => AppErrorCategory::Timeout,
+        // legacy.remote_error / internal_error / unknown / 未来新 token 兜底。
+        _ => AppErrorCategory::Internal,
     }
 }
 
@@ -157,6 +242,18 @@ impl AppError {
     /// Business Logic: 上游/对端在限定时间内未响应时使用，区别于网络层不可达(503)。
     pub fn timeout(msg: impl Into<String>) -> Self {
         Self::Timeout(msg.into())
+    }
+
+    /// 远端对端业务错误便捷构造（携带 v1 信封元数据，Finding 3）。
+    ///
+    /// Business Logic: orchestrator/workbench 远端 client 解析 `PeerCallError::Remote` 后
+    ///     用此构造把 code/status/retryable/request_id 原样挂入 AppError，让 `classify()`
+    ///     据稳定 code 映射分类（而非文案），上层重试决策可读 `remote_meta()`。
+    pub fn remote(message: impl Into<String>, meta: RemoteErrorMeta) -> Self {
+        Self::Remote {
+            message: message.into(),
+            meta,
+        }
     }
 }
 

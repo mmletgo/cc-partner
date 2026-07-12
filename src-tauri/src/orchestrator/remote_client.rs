@@ -373,7 +373,8 @@ impl RemoteOrchestratorClient {
     ///     多个远端只读接口需要统一超时、网络错误和响应解析文案。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     对 reqwest GET 设置 timeout，发送后委托 parse_json_response。
+    ///     对 reqwest GET 设置 timeout 与出站 request_id header（Finding 3：多跳调用链关联），
+    ///     发送后委托 parse_json_response。
     async fn get_json<T>(
         &self,
         url: String,
@@ -385,6 +386,10 @@ impl RemoteOrchestratorClient {
         let response = self
             .client
             .get(&url)
+            .header(
+                crate::net::request_context::REQUEST_ID_HEADER,
+                crate::net::request_context::new_request_id(),
+            )
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
@@ -398,7 +403,8 @@ impl RemoteOrchestratorClient {
     ///     Orchestrator 远端接口统一使用 JSON 请求体，错误文案应在所有方法间保持一致。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     对 reqwest POST 设置 JSON body 和 timeout，发送后委托 parse_json_response。
+    ///     对 reqwest POST 设置 JSON body、timeout 与出站 request_id header（Finding 3：多跳调用链关联），
+    ///     发送后委托 parse_json_response。
     async fn post_json<T, B>(
         &self,
         url: String,
@@ -413,6 +419,10 @@ impl RemoteOrchestratorClient {
             .client
             .post(&url)
             .json(body)
+            .header(
+                crate::net::request_context::REQUEST_ID_HEADER,
+                crate::net::request_context::new_request_id(),
+            )
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
@@ -484,40 +494,18 @@ where
 
 /// 把统一的 `PeerCallError` 映射为命令层 `AppError`。
 ///
-/// Business Logic（为什么需要这个函数）:
+/// Business Logic（为什么需要这个函数 / Finding 3）:
 ///     Orchestrator 命令层沿用 `AppError`；远端调用失败需转成可读的中文错误文案供 UI 展示，
-///     同时保留 code/status 语义（如 unavailable 触发上层重试逻辑）。
+///     同时**保留**对端信封的 code/status/retryable/request_id（旧实现把它们全部丢弃，
+///     `classify()` 一律 Internal，重试只能靠文案匹配）。现委托共享
+///     `peer_error::peer_call_error_to_app_error`，把 `Remote` 转为 `AppError::remote`，
+///     `classify()` 据稳定 code 映射分类，`remote_meta()` 暴露 request_id/retryable。
 ///
 /// Code Logic（这个函数做什么）:
-///     - `Network`/`InvalidResponse` → generic（网络/协议层，非业务失败）；
-///     - `Unsupported` → unavailable（对端能力不足，调用方不应重试同一对端）；
-///     - `Remote` → 用对端原始 message（v1 信封或 v0 老形态的 `error` 字段），
-///       避免本地化文案匹配；message 为空时回落到状态码摘要。
+///     委托 `peer_call_error_to_app_error(error, "远端 Orchestrator")`，文案前缀与原实现一致，
+///     保证 UI 文案不回归。
 fn remote_error_to_app_error(error: PeerCallError) -> AppError {
-    match error {
-        PeerCallError::Network { url, source } => {
-            AppError::generic(format!("远端 Orchestrator 请求失败 ({url}): {source}"))
-        }
-        PeerCallError::InvalidResponse { url, reason } => {
-            AppError::generic(format!("远端 Orchestrator 响应无法解析 ({url}): {reason}"))
-        }
-        PeerCallError::Unsupported { url, capability } => {
-            AppError::unavailable(format!("远端 Orchestrator ({url}) 不支持能力 {capability}"))
-        }
-        PeerCallError::Remote {
-            message,
-            status,
-            url,
-            ..
-        } => {
-            let msg = message.trim();
-            if msg.is_empty() {
-                AppError::generic(format!("远端 Orchestrator 请求失败 ({url}): HTTP {status}"))
-            } else {
-                AppError::generic(msg.to_string())
-            }
-        }
-    }
+    crate::net::peer_error::peer_call_error_to_app_error(error, "远端 Orchestrator")
 }
 
 /// 截断远端错误正文。
@@ -587,13 +575,18 @@ mod tests {
         assert_eq!(err.to_string(), "远端 Orchestrator 项目不存在");
     }
 
-    /// Business Logic（为什么需要这个测试）:
-    ///     v1 对端返回完整错误信封时，客户端仍应展示对端 message（与 v0 行为一致），且 code/status
-    ///     可用于程序化分支（不依赖文案）。本测试验证 Task 7 统一解析后 v1 信封的 message 被正确传递。
+    /// Business Logic（为什么需要这个测试 / Finding 3）:
+    ///     v1 对端返回完整错误信封时，客户端应展示对端 message（与 v0 行为一致），
+    ///     且 code/status/retryable/request_id 必须被**保留**（不再被丢弃折叠成 Internal）。
+    ///     旧实现把 503 unavailable 错误归类为 Internal，导致重试只能靠文案匹配——本测试
+    ///     锁定修复后行为：classify() 据 code 映射为 Unavailable，remote_meta() 暴露全部字段。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     临时服务返回 503 + v1 信封（code=unavailable），调用 list_tasks，
-    ///     断言错误文案 == message 且分类为 Internal（generic）。
+    ///     临时服务返回 503 + v1 信封（code=unavailable, retryable=true, request_id=req-1），
+    ///     调用 list_tasks，断言：
+    ///     - 文案 == message（UI 不回归）；
+    ///     - classify() == Unavailable（据 code，不再 Internal）；
+    ///     - remote_meta() 携带 code/status/retryable/request_id 全部字段。
     #[tokio::test]
     async fn remote_error_uses_peer_message_from_v1_envelope() {
         let app = Router::new().route(
@@ -617,7 +610,90 @@ mod tests {
             .await
             .expect_err("503 v1 信封应失败");
         assert_eq!(err.to_string(), "对端调度忙");
-        assert_eq!(err.classify(), AppErrorCategory::Internal);
+        // Finding 3: code=unavailable 必须映射为 Unavailable（不再 Internal）。
+        assert_eq!(err.classify(), AppErrorCategory::Unavailable);
+        // Finding 3: 结构化元数据必须被保留，供重试/调用链关联。
+        let meta = err.remote_meta().expect("Remote 错误应携带 meta");
+        assert_eq!(meta.code, "unavailable");
+        assert_eq!(meta.status, 503);
+        assert!(meta.retryable);
+        assert_eq!(meta.request_id, "req-1");
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 3）:
+    ///     不同 code token（conflict/validation_error/not_found/timeout/legacy.remote_error）
+    ///     必须各自映射到对应分类，让上层用 `classify()` 而非文案做重试/合并决策。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对每类 code 构造 `AppError::remote`，断言 `classify()` 与 `remote_meta()` 一致。
+    #[test]
+    fn remote_variant_classifies_by_code_not_message() {
+        use crate::error::{classify_remote_code, RemoteErrorMeta};
+        let cases: Vec<(&str, AppErrorCategory)> = vec![
+            ("validation_error", AppErrorCategory::Validation),
+            ("unauthorized", AppErrorCategory::Validation),
+            ("forbidden", AppErrorCategory::Validation),
+            ("payload_too_large", AppErrorCategory::Validation),
+            ("method_not_allowed", AppErrorCategory::Validation),
+            ("not_found", AppErrorCategory::NotFound),
+            ("conflict", AppErrorCategory::Conflict),
+            ("unavailable", AppErrorCategory::Unavailable),
+            ("timeout", AppErrorCategory::Timeout),
+            // 兜底：legacy / internal / unknown / 未来 token → Internal。
+            ("legacy.remote_error", AppErrorCategory::Internal),
+            ("internal_error", AppErrorCategory::Internal),
+            ("unknown", AppErrorCategory::Internal),
+            ("future.token", AppErrorCategory::Internal),
+        ];
+        for (code, expected) in cases {
+            // 纯函数入口直接校验。
+            assert_eq!(classify_remote_code(code), expected, "code={code}");
+            // 经 AppError::remote → classify 端到端校验。
+            let app = AppError::remote(
+                format!("msg-{code}"),
+                RemoteErrorMeta {
+                    code: code.to_string(),
+                    status: 500,
+                    retryable: false,
+                    request_id: "r".to_string(),
+                },
+            );
+            assert_eq!(app.classify(), expected, "AppError classify code={code}");
+            assert_eq!(app.remote_meta().unwrap().code, code);
+            // Display 只展示 message，不泄漏元数据。
+            assert_eq!(app.to_string(), format!("msg-{code}"));
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 3）:
+    ///     v0 老形态（`{error}` 无 code）合成 code=`legacy.remote_error`，必须归类为 Internal
+    ///     （不误升 4xx/5xx），且 message 取自对端原始文案，request_id 取自响应 header。
+    ///     本测试锁定修复后行为，防止 legacy 被误映射为业务分类。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用纯函数 `peer_call_error_to_app_error` 直接喂一个合成的 legacy Remote 错误，
+    ///     断言 classify()==Internal 且 meta.code==legacy.remote_error。
+    #[test]
+    fn legacy_remote_error_classifies_as_internal() {
+        use crate::net::peer_error::peer_call_error_to_app_error;
+        use crate::net::peer_error::PeerCallError;
+        let err = PeerCallError::Remote {
+            url: "http://1.2.3.4:8765/x".to_string(),
+            status: 409,
+            code: "legacy.remote_error".to_string(),
+            message: "旧错误".to_string(),
+            request_id: "hdr-1".to_string(),
+            retryable: false,
+            legacy: true,
+        };
+        let app = peer_call_error_to_app_error(err, "远端 Orchestrator");
+        assert_eq!(app.classify(), AppErrorCategory::Internal);
+        assert_eq!(app.to_string(), "旧错误");
+        let meta = app.remote_meta().unwrap();
+        assert_eq!(meta.code, "legacy.remote_error");
+        assert_eq!(meta.status, 409);
+        assert_eq!(meta.request_id, "hdr-1");
+        assert!(!meta.retryable);
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -696,6 +772,104 @@ mod tests {
             hits.load(Ordering::SeqCst),
             0,
             "能力门未通过时不应调用新路由"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 5）:
+    ///     既有能力门测试用的是非生产 fixture 路由（`/api/orchestrator/future-route`），
+    ///     无法证明门真的保护生产 caller。本测试把真实生产 caller
+    ///     `RemoteOrchestratorClient::list_tasks`（经生产 `parse_json_response`→
+    ///     `parse_peer_response` 链）挂在 `require_capability` 之后，验证：
+    ///     1. v0 对端（无 errors.envelope.v1）被门拦截 → list_tasks 不被调用（hit 计数 0）；
+    ///     2. v1 对端（有 errors.envelope.v1）通过门 → list_tasks 被调用且走完生产解析链。
+    ///     这锁定了"能力门 + 生产 caller"的端到端契约。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动 v0/v1 两套 health + 生产 tasks/list 路由（带 hit 计数器），
+    ///     对每套先 `require_capability`，通过后再 `list_tasks`；断言 v0 拦截且 hit=0，
+    ///     v1 通过且 hit=1 且响应正确解析。
+    #[tokio::test]
+    async fn capability_gate_protects_production_orchestrator_list_tasks_caller() {
+        use crate::net::peer_client::{PeerCallError, PeerClient};
+        use crate::net::routes::health::HealthResponse;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        async fn spawn_gated_server(
+            protocol_version: u32,
+            capabilities: Vec<String>,
+        ) -> (String, Arc<AtomicU32>) {
+            let hits = Arc::new(AtomicU32::new(0));
+            let hits_clone = hits.clone();
+            let app = Router::new()
+                .route(
+                    "/api/health",
+                    axum::routing::get(move || {
+                        let caps = capabilities.clone();
+                        async move {
+                            Json(HealthResponse {
+                                ok: true,
+                                device_id: "test".to_string(),
+                                device_name: "test".to_string(),
+                                http_port: 8765,
+                                ts: 1_700_000_000,
+                                protocol_version,
+                                capabilities: caps,
+                            })
+                        }
+                    }),
+                )
+                .route(
+                    "/api/orchestrator/tasks/list",
+                    post(move || {
+                        let hits = hits_clone.clone();
+                        async move {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            // 生产 caller 期望 `{tasks: [...]}` camelCase 包裹（RemoteOrchestratorTaskListResp）。
+                            Json(serde_json::json!({ "tasks": [] }))
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            (format!("http://{addr}"), hits)
+        }
+
+        // v0 对端：能力门拦截，生产 caller 不应被调用。
+        let (v0_url, v0_hits) = spawn_gated_server(0, vec![]).await;
+        let v0_gate = PeerClient::new()
+            .require_capability(&v0_url, "errors.envelope.v1")
+            .await;
+        assert!(
+            matches!(v0_gate, Err(PeerCallError::Unsupported { .. })),
+            "v0 应被能力门拦截，实际: {v0_gate:?}"
+        );
+        // 门未通过，调用方不应继续打 list_tasks。
+        assert_eq!(
+            v0_hits.load(Ordering::SeqCst),
+            0,
+            "v0 能力门未通过时不应调用生产 list_tasks"
+        );
+
+        // v1 对端：能力门通过，生产 caller 应被调用且响应走完生产解析链。
+        let (v1_url, v1_hits) = spawn_gated_server(1, vec!["errors.envelope.v1".to_string()]).await;
+        PeerClient::new()
+            .require_capability(&v1_url, "errors.envelope.v1")
+            .await
+            .expect("v1 应通过能力门");
+        let tasks = RemoteOrchestratorClient::new()
+            .list_tasks(&v1_url, "project-1")
+            .await
+            .expect("v1 生产 list_tasks 应成功");
+        assert!(tasks.is_empty(), "fixture 返回空列表");
+        assert_eq!(
+            v1_hits.load(Ordering::SeqCst),
+            1,
+            "v1 通过能力门后应恰好调用一次生产 list_tasks"
         );
     }
 

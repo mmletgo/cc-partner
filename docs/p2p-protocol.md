@@ -30,6 +30,29 @@ change must add a capability constant, advertise it in `server_protocol_info()`,
 and gate the client call behind `PeerProtocolInfo::supports(...)`. The current
 advertised capability is `errors.envelope.v1`.
 
+### Semantics of `errors.envelope.v1` (important)
+
+`errors.envelope.v1` describes the **error response wire format only**
+(`P2pErrorEnvelope`: `error`/`code`/`request_id`/`retryable`/`details`), **not**
+route access or route existence. Concretely:
+
+- A v0 peer that does **not** advertise this token still has all of its existing
+  `/api/...` routes callable. Only its error responses may arrive in the legacy
+  `{error: "..."}` shape, which the client must tolerate via
+  `parse_peer_response` (it auto-detects legacy vs v1 envelope).
+- The token does **not** mean "this peer implements a particular new route".
+  Confirming route existence is a separate concern (health/version probe or
+  handling 404). Do not use `supports("errors.envelope.v1")` as a proxy for
+  "new routes are available".
+- This is the only v1 capability advertised today. Future capabilities (Runtime
+  notifications, Inbox, …) will ship as **independent** tokens alongside their
+  own routes and must not reuse this token to mean "new routes supported".
+
+The existing capability gate (`peer_client::require_capability`) is therefore a
+**format** gate, not an authorization gate: it lets a caller avoid sending a
+v1-envelope-dependent request to a v0 peer that would only return a legacy
+error. It does not restrict which routes a peer may call.
+
 ## Route inventory
 
 The "Path" column mirrors the literal string passed to axum `.route(...)`.
@@ -45,7 +68,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/sync/push` | `routes/sync.rs` | upserts prompt rows after vector-clock merge | naturally-idempotent | `sync_push_impl` re-merges each row; `bulk_upsert` with merged clock converges on replay |
 | POST | `/api/sync/claude_md/pull` | `routes/claude_md_sync.rs` | none; returns the singleton row | read-only | — |
 | POST | `/api/sync/claude_md/push` | `routes/claude_md_sync.rs` | overwrites singleton + `~/.claude/CLAUDE.md` | naturally-idempotent | sender only pushes its own already-merged version; re-applying the same row + `write_file_if_changed` is a no-op |
-| POST | `/api/transfer/init` | `routes/transfer.rs` | creates `.{transfer_id}.tmp` + receive registry entry | naturally-idempotent | `handle_init` keys the tmp file by `transfer_id`; replay returns existing size as `resume_offset` |
+| POST | `/api/transfer/init` | `routes/transfer.rs` | creates `.{transfer_id}.tmp` + receive registry entry | requires-idempotency-key | `transfer_id` is client-supplied and the tmp file is keyed by it, but the server does not enforce that a transport replay reuses the same `transfer_id`; a retry that mints a new id leaks a tmp file + registry entry. Clients MUST reuse the same `transfer_id` (the de-facto idempotency key) or MUST NOT auto-retry |
 | POST | `/api/transfer/chunk/:id` | `routes/transfer.rs` | writes bytes at offset, finalizes when complete | naturally-idempotent | `X-Chunk-Offset` header + seek-write; replaying the same offset writes the same bytes; SHA256 finalize rejects mismatches |
 | GET | `/api/transfer/status/:id` | `routes/transfer.rs` | none | read-only | — |
 | POST | `/api/cc-history/sync/pull` | `routes/cc_history.rs` | none | read-only | — |
@@ -80,7 +103,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/workbench/files/rename` | `routes/workbench.rs` | irreversible `fs::rename` inside worktree root | no-transport-retry | source path disappears; replay after timeout can fail or rename the wrong target |
 | POST | `/api/workbench/files/delete` | `routes/workbench.rs` | irreversible delete inside worktree root | no-transport-retry | destructive |
 | GET | `/api/workbench/events` | `routes/workbench.rs` | none; NDJSON event stream | read-only | — |
-| POST | `/api/workbench/sessions/list` | `routes/workbench.rs` | none | read-only | — |
+| POST | `/api/workbench/sessions/list` | `routes/workbench.rs` | `restore_persisted_sessions` may recreate missing tmux windows for persisted session rows | naturally-idempotent | `local_list_workbench_sessions` → `restore_persisted_sessions` → `sessions.restore` only creates a tmux window when `target_exists` is false and reuses the persisted `backend_window_id`; replay converges to the same window for the same session row |
 | POST | `/api/workbench/sessions/create` | `routes/workbench.rs` | new tmux window / PTY + SQLite window row | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry until a session-create idempotency key lands |
 | POST | `/api/workbench/sessions/replay` | `routes/workbench.rs` | none; reads ring buffer | read-only | — |
 | POST | `/api/workbench/sessions/write` | `routes/workbench.rs` | writes bytes to PTY/tmux pane stdin | no-transport-retry | appended input has no offset guard; replay duplicates keystrokes/commands |
@@ -88,7 +111,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/workbench/sessions/focus` | `routes/workbench.rs` | `tmux select-window` | naturally-idempotent | selecting the same window target is a no-op |
 | POST | `/api/workbench/sessions/focused` | `routes/workbench.rs` | none; `tmux display-message` query | read-only | — |
 | POST | `/api/workbench/sessions/split-pane` | `routes/workbench.rs` | `tmux split-window` creates a new pane | requires-idempotency-key | no dedupe key yet; replay creates a second pane |
-| POST | `/api/workbench/sessions/switch-pane` | `routes/workbench.rs` | `tmux select-pane -t .+` | naturally-idempotent | cycling to the next pane is a fixed target transition; replay lands on the same pane |
+| POST | `/api/workbench/sessions/switch-pane` | `routes/workbench.rs` | `tmux select-pane -t .+` cycles to the next pane | no-transport-retry | `switch_to_next_pane` runs a relative `select-pane` cycle; a transport replay after a timeout lands on a *different* pane than the caller intended, so the client must not auto-replay |
 | POST | `/api/workbench/sessions/zoom-pane` | `routes/workbench.rs` | `tmux resize-pane -Z` guarded by current zoom flag | naturally-idempotent | `ensure_active_pane_zoomed` checks `#{window_zoomed_flag}` before toggling |
 | POST | `/api/workbench/sessions/close-pane` | `routes/workbench.rs` | `tmux kill-pane`/`kill-window` + row delete | no-transport-retry | destructive |
 | POST | `/api/workbench/sessions/close` | `routes/workbench.rs` | `tmux kill-window`/`kill-session` + row delete | no-transport-retry | destructive |
@@ -99,7 +122,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/workbench/prompt-optimizer/stream-to-session` | `routes/workbench.rs` | spawns Claude CLI and streams text into a terminal | no-transport-retry | paid, nondeterministic LLM call whose output is appended to the pane; replay duplicates tokens |
 | POST | `/api/workbench/browser/discover` | `routes/workbench.rs` | none; scans loopback dev servers | read-only | — |
 | POST | `/api/workbench/browser/preview` | `routes/workbench.rs` | registers a previewId (local relay or remote relay) | requires-idempotency-key | each call mints a new UUID previewId; replay registers a second stale entry |
-| ANY | `/api/workbench/browser/proxy/:previewId/*path` | `routes/workbench.rs` | proxied HTTP/WS pass-through; no own mutation | read-only | — |
+| ANY | `/api/workbench/browser/proxy/:previewId/*path` | `routes/workbench.rs` | proxied HTTP/WS pass-through; forwards arbitrary methods (GET/POST/PUT/DELETE) to the upstream dev server | no-transport-retry | the proxy is method-agnostic (`any(...)`); a retry can replay a non-idempotent upstream POST/PUT/DELETE, so the transport layer must not auto-replay proxied requests |
 | GET | `/api/mobile/workbench/projects/list` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/projects/open` | `routes/workbench.rs` | upserts a `local` project row keyed by canonical path | naturally-idempotent | reuses same project id for same path |
 | POST | `/api/mobile/workbench/worktrees/list` | `routes/workbench.rs` | none | read-only | — |
@@ -113,7 +136,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/mobile/workbench/files/info` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/files/open` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/files/save-text` | `routes/workbench.rs` | writes worktree-relative text file | naturally-idempotent | `baseHash` optimistic-lock guard |
-| POST | `/api/mobile/workbench/sessions/list` | `routes/workbench.rs` | none | read-only | — |
+| POST | `/api/mobile/workbench/sessions/list` | `routes/workbench.rs` | `restore_persisted_sessions` may recreate missing tmux windows | naturally-idempotent | same convergence guarantee as the desktop route; replay recreates the same window for the same session row |
 | POST | `/api/mobile/workbench/sessions/create` | `routes/workbench.rs` | new tmux window / PTY + SQLite window row | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry |
 | POST | `/api/mobile/workbench/sessions/replay` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/sessions/write` | `routes/workbench.rs` | writes bytes to PTY/tmux pane stdin | no-transport-retry | appended input; replay duplicates |
@@ -121,14 +144,14 @@ the router so the inventory check matches exactly.
 | POST | `/api/mobile/workbench/sessions/focus` | `routes/workbench.rs` | `tmux select-window` | naturally-idempotent | same target is a no-op |
 | POST | `/api/mobile/workbench/sessions/focused` | `routes/workbench.rs` | none; `tmux display-message` query | read-only | — |
 | POST | `/api/mobile/workbench/sessions/split-pane` | `routes/workbench.rs` | `tmux split-window` | requires-idempotency-key | no dedupe key yet; replay creates a second pane |
-| POST | `/api/mobile/workbench/sessions/switch-pane` | `routes/workbench.rs` | `tmux select-pane` | naturally-idempotent | — |
+| POST | `/api/mobile/workbench/sessions/switch-pane` | `routes/workbench.rs` | `tmux select-pane` cycles to the next pane | no-transport-retry | relative cycle; replay lands on the wrong pane |
 | POST | `/api/mobile/workbench/sessions/zoom-pane` | `routes/workbench.rs` | `tmux resize-pane -Z` guarded by zoom flag | naturally-idempotent | — |
 | POST | `/api/mobile/workbench/sessions/close-pane` | `routes/workbench.rs` | `tmux kill-pane`/`kill-window` + row delete | no-transport-retry | destructive |
 | POST | `/api/mobile/workbench/sessions/close` | `routes/workbench.rs` | `tmux kill-window`/`kill-session` + row delete | no-transport-retry | destructive |
 | POST | `/api/mobile/workbench/prompt-optimizer/stream-to-session` | `routes/workbench.rs` | spawns Claude CLI, streams into terminal | no-transport-retry | paid, nondeterministic; replay duplicates |
 | POST | `/api/mobile/workbench/browser/discover` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/browser/preview` | `routes/workbench.rs` | registers a previewId | requires-idempotency-key | new UUID per call; replay registers a stale entry |
-| ANY | `/api/mobile/workbench/browser/proxy/:previewId/*path` | `routes/workbench.rs` | proxied pass-through | read-only | — |
+| ANY | `/api/mobile/workbench/browser/proxy/:previewId/*path` | `routes/workbench.rs` | proxied pass-through; forwards arbitrary methods | no-transport-retry | method-agnostic proxy; replay can duplicate a non-idempotent upstream mutation |
 | POST | `/api/orchestrator/tasks/create` | `routes/orchestrator.rs` | inserts authoritative task row + optional best-effort dispatch | requires-idempotency-key | non-empty `clientRequestId` required; `orchestrator_remote_task_create_requests` dedupes in one transaction (`create_remote_task_for_client_request`) |
 | POST | `/api/orchestrator/tasks/complete-prompt` | `routes/orchestrator.rs` | invokes Claude CLI headless to draft title/goal/acceptance | no-transport-retry | paid, nondeterministic Orchestrator action; replay re-runs the LLM and may overwrite the user's edits |
 | POST | `/api/orchestrator/tasks/list` | `routes/orchestrator.rs` | none | read-only | — |
@@ -152,28 +175,38 @@ the router so the inventory check matches exactly.
   `orchestrator_remote_task_create_requests` in the same transaction
   (`create_remote_task_for_client_request`). Mobile `task-views/create` preserves
   the same key end-to-end through the commands layer and pending outbox. Both
-  rows above are the only currently-implemented idempotency keys.
+  rows above are the only currently-implemented *server-enforced* idempotency keys.
 - **`requires-idempotency-key` rows without a key yet.** Worktree create,
-  terminal session create, split-pane, Claude resume, file/dir create, and
-  browser-preview create have no server-side dedupe today. Until each gets its
-  own key, the client transport MUST NOT auto-retry them: surface the timeout
-  and let the user re-trigger explicitly.
+  terminal session create, split-pane, Claude resume, file/dir create,
+  browser-preview create, **and transfer/init** have no server-side dedupe today.
+  `transfer/init` keys its tmp file by the client-supplied `transfer_id`, but the
+  server does not enforce that a transport replay reuses the same id — a retry
+  that mints a fresh `transfer_id` leaks a tmp file. Until each of these gets its
+  own server-enforced key, the client transport MUST NOT auto-retry them: surface
+  the timeout and let the user re-trigger explicitly (for transfer/init the
+  client MAY auto-retry only if it deterministically reuses the original
+  `transfer_id`).
 - **`naturally-idempotent` rows are verified by code.** Each "Key / guard" cell
   cites the function or mechanism that makes replay converge:
   - sync/cc-history/ssh-target/scratchpad push — per-row vector-clock merge +
     conditional `bulk_upsert`;
   - claude_md push — sender pushes its own merged version; re-apply is a no-op;
-  - transfer init — `.{transfer_id}.tmp` keyed by `transfer_id`;
   - transfer chunk — offset-aware seek-write + SHA256 finalize;
   - save-text — `baseHash` optimistic-lock guard;
   - projects/open — same canonical path reuses the same project id;
-  - resize/focus/switch-pane/zoom-pane/rename — fixed-target tmux operations
-    guarded by current state where relevant.
+  - sessions/list — `restore_persisted_sessions` only recreates a tmux window
+    when `target_exists` is false and reuses the persisted `backend_window_id`,
+    so replay converges to the same window for the same session row;
+  - resize/focus/zoom-pane/rename — fixed-target tmux operations guarded by
+    current state where relevant.
 - **`no-transport-retry` rows.** terminal write, git commit/push/merge/remove,
-  file rename/delete, session close/close-pane, prompt-optimizer streaming,
-  Orchestrator lifecycle actions, project refresh and the local backend stop
-  control all mutate irreversible or externally observable state. The transport
-  layer must not auto-replay them.
+  file rename/delete, session close/close-pane, **switch-pane** (relative
+  `select-pane` cycle — replay lands on the wrong pane), prompt-optimizer
+  streaming, the **browser proxy** (`any(...)` method-agnostic pass-through —
+  can replay a non-idempotent upstream POST/PUT/DELETE), Orchestrator lifecycle
+  actions, project refresh and the local backend stop control all mutate
+  irreversible or externally observable state, or forward to something that does.
+  The transport layer must not auto-replay them.
 
 ## Adding a new route (protocol change checklist)
 

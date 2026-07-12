@@ -37,7 +37,7 @@ const TXT_KEY_PROTO: &str = "proto";
 /// TXT 记录 key：能力清单提示（值为按字典序排序、逗号分隔的 token 字符串）。
 const TXT_KEY_CAPS: &str = "caps";
 
-/// `caps=` TXT 字符串（含 `caps=` 前缀）的 UTF-8 字节上限。
+/// `caps` TXT value（逗号分隔的 token 列表，不含 `caps=` key 前缀）的 UTF-8 字节上限。
 ///
 /// Business Logic: mDNS TXT 记录整体须保持精简（单条 RR 推荐上限 ~255B，整组 RR 推荐上限 ~1300B），
 ///     为 device_id/device_name/proto 等其它键留出空间，且不得让单个能力 token 被截断成无意义片段。
@@ -351,33 +351,33 @@ pub fn local_lan_ip() -> Option<IpAddr> {
     }
 }
 
-/// 把能力 token 列表编码为 `caps=<逗号分隔>` TXT 值（含 `caps=` 前缀按字节计）。
+/// 把能力 token 列表编码为 mDNS TXT `caps` 值（逗号分隔，不含 `caps=` 前缀）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     mDNS TXT 记录空间受限，能力清单可能很长或包含多字节 token，直接拼接会撑爆 TXT 上限，
 ///     还可能把某个 token 切成无意义的半截。本函数按字典序排序、去重，再逐个累加完整 token，
-///     一旦加入下一个完整 token 会让整段 `caps=...` 超过 `max_txt_bytes` 字节就停止，
-///     保证每个出现的 token 都是完整的。
+///     一旦加入下一个完整 token 会让整段值超过 `max_txt_bytes` 字节就停止，
+///     保证每个出现的 token 都是完整的。返回值仅是逗号分隔的 token 列表——`caps=` 前缀由
+///     TXT key（`TXT_KEY_CAPS`）在 wire 侧自动提供，函数内部若再补一次前缀会导致
+///     对端读到 `caps=caps=...` 双前缀（Finding 6）。
 ///
 /// Code Logic（这个函数做什么）:
 ///     1. 排序 + 去重输入；
-///     2. 逐个累加完整 token，每次先按"前缀 + 分隔符 + token"计算字节数，超限就丢弃该 token 及其后所有 token；
-///     3. 即使第一个 token 也放不下也返回空（`caps=`），不会截断 token；
-///     4. 输出始终以 `caps=` 开头（即使值为空），便于对端无歧义解析。
+///     2. 逐个累加完整 token，每次先按"当前长度 + 分隔符 + token"计算字节数，超限就停止累加；
+///     3. 即使第一个 token 也放不下也返回空串，不会截断 token；
+///     4. 输出不含 `caps=` 前缀（前缀由 TXT key 提供），空输入返回空串。
 pub fn encode_mdns_capabilities(capabilities: &[String], max_txt_bytes: usize) -> String {
     let mut sorted: Vec<&String> = capabilities.iter().collect();
     sorted.sort();
     sorted.dedup();
 
-    const PREFIX: &str = "caps=";
-    let prefix_len = PREFIX.len();
-    let mut out = String::from(PREFIX);
-    let mut current_len = prefix_len;
+    let mut out = String::new();
+    let mut current_len: usize = 0;
 
     for token in sorted {
         let token_bytes = token.len();
         // 第一个 token 无分隔符；后续 token 前补逗号。
-        let separator_len = if current_len == prefix_len { 0 } else { 1 };
+        let separator_len = if current_len == 0 { 0 } else { 1 };
         let projected = current_len + separator_len + token_bytes;
         if projected > max_txt_bytes {
             // 已按字典序排序，后续 token 至少等长或更长，无法再塞下，停止累加。
@@ -458,19 +458,20 @@ mod tests {
         assert!(service_info.is_none());
     }
 
-    /// 验证 `encode_mdns_capabilities` 输出始终以 `caps=` 前缀开头。
+    /// 验证 `encode_mdns_capabilities` 不带 `caps=` 前缀（前缀由 TXT key 提供）。
     ///
-    /// Business Logic: 对端解析器按 `caps=` key 读取，前缀缺失会导致整段能力提示丢失。
-    /// Code Logic: 空输入也应返回 `caps=`（而非空串），保证对端解析无歧义。
+    /// Business Logic: 对端解析器按 `caps` key 直接读取 value，若 value 自带 `caps=` 前缀会形成
+    ///     `caps=caps=...` 双前缀。空输入应返回空串（无前缀、无 token），由对端解释为“无能力提示”。
+    /// Code Logic: 空输入断言返回空串，避免与 wire 侧 key 拼出 `caps=`。
     #[test]
-    fn encode_capabilities_empty_yields_bare_prefix() {
-        assert_eq!(encode_mdns_capabilities(&[], MAX_CAPS_TXT_BYTES), "caps=");
+    fn encode_capabilities_empty_yields_no_prefix() {
+        assert_eq!(encode_mdns_capabilities(&[], MAX_CAPS_TXT_BYTES), "");
     }
 
-    /// 验证能力 token 按字典序排序输出。
+    /// 验证能力 token 按字典序排序输出（不含 `caps=` 前缀）。
     ///
     /// Business Logic: 确定性的排序输出便于 diff、日志、与对端断言比对。
-    /// Code Logic: 输入乱序，断言输出按字典序排列。
+    /// Code Logic: 输入乱序，断言输出按字典序排列且不带前缀。
     #[test]
     fn encode_capabilities_sorts_tokens_lexicographically() {
         let caps = vec![
@@ -482,7 +483,7 @@ mod tests {
         let encoded = encode_mdns_capabilities(&caps, MAX_CAPS_TXT_BYTES);
         assert_eq!(
             encoded,
-            "caps=aaa.first,errors.envelope.v1,inbox.messages.v1,zzz.last"
+            "aaa.first,errors.envelope.v1,inbox.messages.v1,zzz.last"
         );
     }
 
@@ -498,7 +499,7 @@ mod tests {
             "inbox.messages.v1".to_string(),
         ];
         let encoded = encode_mdns_capabilities(&caps, MAX_CAPS_TXT_BYTES);
-        assert_eq!(encoded, "caps=errors.envelope.v1,inbox.messages.v1");
+        assert_eq!(encoded, "errors.envelope.v1,inbox.messages.v1");
     }
 
     /// 验证超过 `max_txt_bytes` 字节上限的完整 token 会被整段丢弃，不会出现截断。
@@ -507,7 +508,7 @@ mod tests {
     ///     一旦某个完整 token 放不下就停止累加（后续 token 在排序后只会更长或等长）。
     ///
     /// Code Logic:
-    ///     1. 构造两个短 token（能放下）+ 一个长 token（连前缀都超 30 字节上限）。
+    ///     1. 构造两个短 token（能放下）+ 一个长 token（超 30 字节上限）。
     ///     2. 断言输出只含两个短 token，长 token 既不出现也不以截断形式出现。
     ///     3. 断言输出总字节数 <= 上限。
     #[test]
@@ -518,21 +519,21 @@ mod tests {
             "this-is-a-very-long-token-that-cannot-fit".to_string(),
         ];
         let encoded = encode_mdns_capabilities(&caps, 30);
-        assert_eq!(encoded, "caps=aa,bb");
+        assert_eq!(encoded, "aa,bb");
         assert!(encoded.len() <= 30);
         // 显式断言：超长 token 的任何前缀都不应出现在输出中（无截断）。
         assert!(!encoded.contains("this-is"));
     }
 
-    /// 验证当连第一个 token 都放不下时返回空 `caps=`（前缀 only）。
+    /// 验证当连第一个 token 都放不下时返回空串。
     ///
     /// Business Logic: 极端紧凑的 TXT 上限下，宁可宣告“无能力提示”也不能塞半截 token。
-    /// Code Logic: 单个长 token + 极小上限，断言输出仅 `caps=`。
+    /// Code Logic: 单个长 token + 极小上限，断言输出为空串。
     #[test]
     fn encode_capabilities_first_token_too_large_yields_empty() {
         let caps = vec!["toolongtoken".to_string()];
         let encoded = encode_mdns_capabilities(&caps, 10);
-        assert_eq!(encoded, "caps=");
+        assert_eq!(encoded, "");
     }
 
     /// 验证多字节（UTF-8）token 按字节而非字符计数。
@@ -542,9 +543,9 @@ mod tests {
     ///
     /// Code Logic:
     ///     "🛰️" 由 U+1F6F0(4B) + U+FE0F(3B) 组成，共 7 字节 / 2 个码点 / 1 个字素。
-    ///     - max=12：前缀 5B + token 7B = 12B ≤ 12 → 完整放入。
-    ///     - max=11：前缀 5B + token 7B = 12B > 11 → 整段丢弃（仅 `caps=`），绝不截断多字节字符。
-    ///     若实现误用 chars().count()(=2) 或 grapheme 计数(=1)，max=11 时也会被放入，从而失败。
+    ///     - max=7：token 7B = 7B ≤ 7 → 完整放入（无前缀占用字节）。
+    ///     - max=6：token 7B > 6 → 整段丢弃（空串），绝不截断多字节字符。
+    ///     若实现误用 chars().count()(=2) 或 grapheme 计数(=1)，max=6 时也会被放入，从而失败。
     #[test]
     fn encode_capabilities_counts_multibyte_tokens_by_utf8_bytes() {
         let emoji_token = "🛰️";
@@ -552,22 +553,24 @@ mod tests {
         assert_eq!(emoji_token.len(), 7, "precondition: 7 UTF-8 bytes");
 
         // 边界右侧：按字节刚好放下。
-        let fits = encode_mdns_capabilities(std::slice::from_ref(&emoji_token.to_string()), 12);
-        assert_eq!(fits, "caps=🛰️");
-        assert_eq!("caps=🛰️".len(), 12);
+        let fits = encode_mdns_capabilities(std::slice::from_ref(&emoji_token.to_string()), 7);
+        assert_eq!(fits, "🛰️");
+        assert_eq!("🛰️".len(), 7);
 
-        // 边界左侧：按字节差 1，整段丢弃（仅 `caps=` 前缀），绝不截断多字节字符。
-        let dropped = encode_mdns_capabilities(std::slice::from_ref(&emoji_token.to_string()), 11);
-        assert_eq!(dropped, "caps=");
+        // 边界左侧：按字节差 1，整段丢弃（空串），绝不截断多字节字符。
+        let dropped = encode_mdns_capabilities(std::slice::from_ref(&emoji_token.to_string()), 6);
+        assert_eq!(dropped, "");
     }
 
-    /// 验证 service 注册时构造的 TXT properties 含 `proto=1` 与 `caps=<bounded-list>`。
+    /// 验证 service 注册时构造的 TXT properties 含 `proto=1` 与 `caps=<bounded-list>`，
+    /// 且 caps value 不含 `caps=` 前缀（前缀由 TXT key 提供，避免双前缀 bug，Finding 6）。
     ///
     /// Business Logic: 本机对 mDNS 局域网广播的协议元数据提示必须与 `server_protocol_info()` 一致，
     ///     让对端在 health 实测前就能预筛能力。`proto` 必须等于当前 PROTOCOL_VERSION_V1。
+    ///     `caps` 的 value 必须是裸 token 列表，对端 wire 侧按 key `caps` 读取。
     ///
     /// Code Logic: 用 advertise 计划构造 ServiceInfo，从 ServiceInfo 读回 TXT 属性，
-    ///             断言 proto=1、caps 含 errors.envelope.v1。
+    ///             断言 proto=1、caps value 恰为 `errors.envelope.v1`（无 `caps=` 前缀）。
     #[test]
     fn service_info_advertises_proto_and_caps_hints() {
         let plan = DiscoveryStartPlan::new(true, false);
@@ -586,10 +589,11 @@ mod tests {
         let caps = service_info
             .get_property_val_str(TXT_KEY_CAPS)
             .expect("caps TXT must be present");
-        assert!(caps.starts_with("caps="));
+        // value 必须是裸 token 列表，不能自带 `caps=` 前缀（否则对端读到 `caps=caps=...`）。
+        assert_eq!(caps, "errors.envelope.v1");
         assert!(
-            caps.contains("errors.envelope.v1"),
-            "caps hint should include errors.envelope.v1, got: {caps}"
+            !caps.starts_with("caps="),
+            "caps value must NOT carry the `caps=` prefix (it is provided by the TXT key); got: {caps}"
         );
     }
 
@@ -634,6 +638,7 @@ mod tests {
     /// 验证 mDNS 注册 → 解析 round-trip：本机 advertise 的 proto/caps 提示能被对端解析路径还原。
     ///
     /// Business Logic: 保证 publish 端和 parse 端用同一套约定（key/格式），避免“自己宣告的对端读不懂”。
+    ///     caps value 不带 `caps=` 前缀（前缀由 TXT key 提供），parse 端直接拿 value 走切分即可。
     /// Code Logic: 构造 ServiceInfo（advertise），手动从其 TXT 取 proto/caps 走解析函数，
     ///             断言还原出 proto_version=1 且 capabilities 包含 errors.envelope.v1。
     #[test]
@@ -653,10 +658,8 @@ mod tests {
         let caps_raw = service_info
             .get_property_val_str(TXT_KEY_CAPS)
             .unwrap_or("");
-        // 解析路径期望 raw 是 `caps=...` 形式；publish 端写入的就是带前缀的整串。
-        // parse_caps_hint 按逗号切分，因此先剥离 `caps=` 前缀。
-        let stripped = caps_raw.strip_prefix("caps=").unwrap_or(caps_raw);
-        let capabilities = parse_caps_hint(Some(stripped));
+        // publish 端写入的是裸 token 列表（无 `caps=` 前缀），parse 端直接按逗号切分即可。
+        let capabilities = parse_caps_hint(Some(caps_raw));
 
         assert_eq!(proto_version, PROTOCOL_VERSION_V1);
         assert!(capabilities.contains(&"errors.envelope.v1".to_string()));

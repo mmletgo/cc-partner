@@ -23,6 +23,16 @@ pub const PROTOCOL_VERSION_V1: u32 = 1;
 /// 能力 token：v1 标准错误信封（`/api/...` 错误统一返回 `{error}` 信封结构）。
 ///
 /// Business Logic: 对端据此决定能否信任本机错误响应的稳定信封格式。
+///
+/// **语义边界（重要）**：本 token **只**描述错误响应的线材格式（P2pErrorEnvelope），
+/// **不**描述路由访问权限或路由是否存在。具体而言：
+/// - 缺少该能力的 v0 对端**仍可**被调用任意已存在的 `/api/...` 路由；只是它的错误
+///   响应可能仍是老形态 `{error: "..."}`，客户端需用 `parse_peer_response` 兼容两种形态。
+/// - 该能力**不**代表对端实现了某个特定新路由；调用新路由前应另行确认路由存在
+///   （如通过 health/version 或直接尝试并处理 404）。
+/// - 当前唯一已声明的 v1 能力就是本 token；后续 Runtime/Inbox 等能力会随各自路由
+///   原子地加入独立 token，**不应**复用本 token 表达"支持新路由"。
+///
 /// Code Logic: 字符串常量，与 `PeerProtocolInfo::supports()` 做精确匹配。
 pub const CAPABILITY_ERRORS_ENVELOPE_V1: &str = "errors.envelope.v1";
 

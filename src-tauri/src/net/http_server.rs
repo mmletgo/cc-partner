@@ -13,14 +13,15 @@
 //!     - body limit 覆盖文件传输 chunk 和 Workbench 远端文本保存。
 
 use crate::backend::control::{self, BackendControlFile};
-use crate::net::request_context::request_id_middleware;
+use crate::net::error_response::{envelope_fallback_middleware, P2pError, P2pErrorCode, P2pResult};
+use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
     cc_history, claude_code_assets, claude_md_sync, health, mobile, orchestrator, scratchpad_sync,
     ssh_target_sync, sync, transfer, workbench,
 };
 use crate::state::AppState;
 use axum::body::Body;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, Extension};
 use axum::http::{header, HeaderValue, Request, Response, StatusCode};
 use axum::routing::{any, get, post};
 use axum::Json;
@@ -68,20 +69,32 @@ struct StopBackendResponse {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     stop CLI 必须能通过本机 HTTP route 唤醒 `serve` 主循环优雅关闭，而不是直接 kill 进程。
+///     该接口既可能被局域网对端触达，也接受本机 CLI 调用，所有错误路径必须返回统一的 P2P 错误信封，
+///     不能把原始 axum `StatusCode`（无 body、无 code token、无 request_id）漏给客户端。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取当前控制文件并校验 controlToken；无效 token 返回 403；有效但无法触发 shutdown notifier 时返回 503；
-///     成功触发后返回 `{ok:true}`。
+///     读取当前控制文件并校验 controlToken；控制文件不可读或 token 不匹配都视为未授权，返回
+///     `unauthorized`（401）信封；notifier 不可用（无 receiver / 未安装）时返回 `unavailable`（503）信封，
+///     并把 retryable 置 true，提示调用方可以稍后重试；成功触发 shutdown 后返回 `{ok:true}`。
 async fn stop_backend_control(
+    Extension(context): Extension<P2pRequestContext>,
     Json(request): Json<StopBackendRequest>,
-) -> Result<Json<StopBackendResponse>, StatusCode> {
-    let control = control::read_control_file().map_err(|_| StatusCode::FORBIDDEN)?;
+) -> P2pResult<Json<StopBackendResponse>> {
+    let control = control::read_control_file()
+        .map_err(|_| P2pError::from_code("控制文件不可读", P2pErrorCode::Unauthorized, &context))?;
     if !backend_stop_token_matches(&request, control.as_ref()) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(P2pError::from_code(
+            "控制令牌不匹配",
+            P2pErrorCode::Unauthorized,
+            &context,
+        ));
     }
 
     if !control::request_backend_shutdown() {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
+        return Err(P2pError::unavailable(
+            "后端关闭通知器不可用，请稍后重试",
+            &context,
+        ));
     }
 
     Ok(Json(StopBackendResponse { ok: true }))
@@ -746,6 +759,11 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             serve_mobile_spa(fallback_state.clone(), req)
         }))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
+        // P2P 错误信封兜底：把任何"非 2xx 且 body 非信封"的响应（包括 axum 框架产生的 404/405、
+        // DefaultBodyLimit 触发的 413、JSON extractor 失败的 400）包成 P2pErrorEnvelope，确保客户端
+        // 永远拿到稳定的 {error, code, request_id, retryable, details} 结构。放在 request_id_middleware
+        // 之内，使其能从 extensions 读到 P2pRequestContext 并写入信封。
+        .layer(axum::middleware::from_fn(envelope_fallback_middleware))
         // P2P/mobile API 请求 ID 边界：所有请求自动获得 X-CC-Request-Id（客户端带入或服务端生成 UUID），
         // 注入 P2pRequestContext 供 handler 使用，并打开带 `request_id` 字段的 tracing span。
         // 放在最外层，使其覆盖全部 /api 路由 + /mobile SPA fallback，便于把移动端静态资源请求
@@ -927,13 +945,28 @@ mod tests {
         }
     }
 
-    /// 验证 backend stop 控制接口拒绝错误 token。
+    /// 返回测试用 P2pRequestContext，供 stop_backend_control 直接调用。
+    ///
+    /// Business Logic（为什么需要这个辅助）:
+    ///     handler 升级为 `P2pResult` 后需要 `Extension<P2pRequestContext>` 才能构造信封；单元测试
+    ///     直接调用 handler 时需要注入固定 context，方便断言信封里的 request_id 字段。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 `request_id = "req-stop-test"` 的 P2pRequestContext。
+    fn stop_ctx() -> P2pRequestContext {
+        P2pRequestContext {
+            request_id: "req-stop-test".to_string(),
+        }
+    }
+
+    /// 验证 backend stop 控制接口拒绝错误 token 并返回 unauthorized 信封。
     ///
     /// Business Logic（为什么需要这个测试）:
-    ///     `/api/backend/control/stop` 会关闭本机 headless 后端，必须要求调用方持有控制文件里的令牌。
+    ///     `/api/backend/control/stop` 会关闭本机 headless 后端，必须要求调用方持有控制文件里的令牌；
+    ///     失败路径必须返回统一的 P2P 错误信封（携带 code/request_id），而不是原始 axum StatusCode。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     构造控制文件与错误请求，断言 token 校验失败，后续 handler 应据此返回 403。
+    ///     构造控制文件与错误请求，断言 handler 返回 401 unauthorized 信封，request_id 与 ctx 一致。
     #[test]
     fn backend_stop_control_rejects_invalid_token() {
         let _home = install_test_home();
@@ -947,9 +980,13 @@ mod tests {
             .enable_all()
             .build()
             .expect("应能创建测试 runtime")
-            .block_on(stop_backend_control(Json(request)));
+            .block_on(stop_backend_control(Extension(stop_ctx()), Json(request)));
 
-        assert!(matches!(result, Err(StatusCode::FORBIDDEN)));
+        let err = result.expect_err("错误 token 必须返回错误");
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(err.envelope().code, "unauthorized");
+        assert_eq!(err.envelope().request_id, "req-stop-test");
+        assert!(!err.envelope().retryable);
     }
 
     /// 验证 backend stop 控制接口接受当前控制文件 token。
@@ -969,13 +1006,15 @@ mod tests {
         assert!(backend_stop_token_matches(&request, Some(&control)));
     }
 
-    /// 验证 backend stop 控制接口在 shutdown notifier 缺失时返回非 2xx。
+    /// 验证 backend stop 控制接口在 shutdown notifier 缺失时返回 unavailable 信封且可重试。
     ///
     /// Business Logic（为什么需要这个测试）:
     ///     正确 token 只代表请求来源可信；如果进程内关闭通知器缺失，CLI 不能收到 200 并误删控制文件。
+    ///     失败路径必须返回 P2P 错误信封；notifier 缺失属于瞬时状态，应标记 retryable=true。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     写入正确控制文件但不安装 shutdown notifier，调用 route 并断言返回 503。
+    ///     写入正确控制文件但不安装 shutdown notifier，调用 route 并断言返回 503 unavailable 信封，
+    ///     retryable=true，request_id 与 ctx 一致。
     #[test]
     fn backend_stop_control_returns_non_success_when_notifier_missing() {
         let _home = install_test_home();
@@ -989,18 +1028,23 @@ mod tests {
             .enable_all()
             .build()
             .expect("应能创建测试 runtime")
-            .block_on(stop_backend_control(Json(request)));
+            .block_on(stop_backend_control(Extension(stop_ctx()), Json(request)));
 
-        assert!(matches!(result, Err(StatusCode::SERVICE_UNAVAILABLE)));
+        let err = result.expect_err("notifier 缺失必须返回错误");
+        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.envelope().code, "unavailable");
+        assert!(err.envelope().retryable);
+        assert_eq!(err.envelope().request_id, "req-stop-test");
     }
 
-    /// 验证 backend stop 控制接口在 shutdown notifier 发送失败时返回非 2xx。
+    /// 验证 backend stop 控制接口在 shutdown notifier 发送失败时返回 unavailable 信封且可重试。
     ///
     /// Business Logic（为什么需要这个测试）:
-    ///     notifier 已安装但 receiver 已失效时，stop 请求仍无法关闭 serve，CLI 不应把它当作成功。
+    ///     notifier 已安装但 receiver 已失效时，stop 请求仍无法关闭 serve，CLI 不应把它当作成功；
+    ///     该路径同样属于可重试瞬时错误，必须返回 P2P 错误信封并标记 retryable=true。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     安装一个无 receiver 的 watch sender，调用 route 并断言返回 503。
+    ///     安装一个无 receiver 的 watch sender，调用 route 并断言返回 503 unavailable 信封，retryable=true。
     #[test]
     fn backend_stop_control_returns_non_success_when_notifier_send_fails() {
         let _home = install_test_home();
@@ -1017,10 +1061,14 @@ mod tests {
             .enable_all()
             .build()
             .expect("应能创建测试 runtime")
-            .block_on(stop_backend_control(Json(request)));
+            .block_on(stop_backend_control(Extension(stop_ctx()), Json(request)));
 
         control::clear_shutdown_notifier();
-        assert!(matches!(result, Err(StatusCode::SERVICE_UNAVAILABLE)));
+        let err = result.expect_err("notifier 发送失败必须返回错误");
+        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.envelope().code, "unavailable");
+        assert!(err.envelope().retryable);
+        assert_eq!(err.envelope().request_id, "req-stop-test");
     }
 
     /// Business Logic（为什么需要这个测试）:

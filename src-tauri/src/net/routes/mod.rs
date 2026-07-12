@@ -365,40 +365,51 @@ mod envelope_contract_tests {
     ///
     /// Code Logic（这个测试做什么）:
     ///     对 validation/not_found/conflict/unavailable/timeout/generic 六类构造 AppError，
-    ///     断言 from_app_error 的 status/code/request_id 与约定一致。
+    ///     断言 from_app_error 的 status/code/request_id 与约定一致；
+    ///     并断言 retryable 仅对 unavailable/timeout 置 true（Finding 2）。
     #[test]
     fn from_app_error_covers_all_status_classes_with_matching_request_id() {
         use crate::error::AppError;
         let context = ctx();
-        let cases: Vec<(AppError, StatusCode, &str)> = vec![
+        let cases: Vec<(AppError, StatusCode, &str, bool)> = vec![
             (
                 AppError::validation("参数非法"),
                 StatusCode::BAD_REQUEST,
                 "validation_error",
+                false,
             ),
             (
                 AppError::not_found("Prompt 不存在"),
                 StatusCode::NOT_FOUND,
                 "not_found",
+                false,
             ),
-            (AppError::conflict("冲突"), StatusCode::CONFLICT, "conflict"),
+            (
+                AppError::conflict("冲突"),
+                StatusCode::CONFLICT,
+                "conflict",
+                false,
+            ),
             (
                 AppError::unavailable("不可用"),
                 StatusCode::SERVICE_UNAVAILABLE,
                 "unavailable",
+                true,
             ),
             (
                 AppError::timeout("超时"),
                 StatusCode::GATEWAY_TIMEOUT,
                 "timeout",
+                true,
             ),
             (
                 AppError::generic("boom"),
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
+                false,
             ),
         ];
-        for (app, expected_status, expected_code) in cases {
+        for (app, expected_status, expected_code, expected_retryable) in cases {
             let p2p = P2pError::from_app_error(app, &context, "test");
             assert_eq!(p2p.status(), expected_status, "状态码应匹配 code 约定");
             assert_eq!(p2p.envelope().code, expected_code, "code token 应匹配");
@@ -407,9 +418,19 @@ mod envelope_contract_tests {
                 TEST_REQUEST_ID,
                 "request_id 必须取自 context"
             );
-            assert!(
-                !p2p.envelope().retryable,
-                "retryable 默认必须为 false（保守默认）"
+            assert_eq!(
+                p2p.envelope().retryable,
+                expected_retryable,
+                "retryable 应匹配分类策略（unavailable/timeout=true）"
+            );
+            // domain_code="test" 应写入 details.domain_code（Finding 2）。
+            assert_eq!(
+                p2p.envelope()
+                    .details
+                    .get("domain_code")
+                    .and_then(|v| v.as_str()),
+                Some("test"),
+                "domain_code 应写入 details.domain_code"
             );
         }
     }

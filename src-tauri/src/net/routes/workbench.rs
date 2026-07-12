@@ -1974,11 +1974,17 @@ mod tests {
     ///     Workbench 写路由（create/save/rename/delete/session write/commit/push/merge/
     ///     remove/resume）的错误必须经 P2pError::from_app_error 映射到信封；本测试覆盖
     ///     409（冲突，如 baseHash 乐观锁失败、worktree 已存在）与 503（暂不可用，如 tmux/PTY 容量上限）
-    ///     两类在 write 域的映射，并断言 retryable 默认 false（写操作保守不重试）。
+    ///     两类在 write 域的映射。
+    ///
+    ///     关于 retryable（Finding 2）：`unavailable`/`timeout` 分类现在默认 retryable=true，
+    ///     因为它们属“暂态错误”——错误本身是暂时的，客户端**可以**退避后重试。
+    ///     但这是“错误暂态性”信号，不是“该路由应自动重试”的许可：写路由的最终重试决策仍由
+    ///     路由的幂等类（docs/p2p-protocol.md）决定。例如 `sessions/write` 是 no-transport-retry，
+    ///     即使收到 503 也不应自动重放（重放会重复键入）。客户端应同时参考 retryable 与路由幂等类。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     对 conflict/unavailable 两类 AppError 构造 P2pError，断言 status/code/retryable
-    ///     与 write 路由信封契约一致。
+    ///     对 conflict/unavailable 两类 AppError 构造 P2pError，断言 status/code 与信封契约一致；
+    ///     conflict retryable=false（非暂态），unavailable retryable=true（暂态，但写路由不应据此自动重试）。
     #[test]
     fn write_routes_map_conflict_and_unavailable_to_envelope() {
         use crate::error::AppError;
@@ -1986,32 +1992,45 @@ mod tests {
         let ctx = P2pRequestContext {
             request_id: "req-write".to_string(),
         };
-        let cases: Vec<(AppError, &str, axum::http::StatusCode)> = vec![
+        // (app, code, status, expected_retryable)
+        let cases: Vec<(AppError, &str, axum::http::StatusCode, bool)> = vec![
             (
                 AppError::conflict("baseHash 过期，文件已被修改"),
                 "conflict",
                 axum::http::StatusCode::CONFLICT,
+                false,
             ),
             (
                 AppError::conflict("worktree 分支已存在"),
                 "conflict",
                 axum::http::StatusCode::CONFLICT,
+                false,
             ),
             (
                 AppError::unavailable("tmux 会话数已达上限"),
                 "unavailable",
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                true,
             ),
         ];
-        for (app, code, status) in cases {
+        for (app, code, status, expected_retryable) in cases {
             let p2p = P2pError::from_app_error(app, &ctx, "workbench.write");
             assert_eq!(p2p.status(), status, "状态码应匹配 code 约定");
             assert_eq!(p2p.envelope().code, code, "code token 应匹配");
             assert_eq!(p2p.envelope().request_id, "req-write");
-            // 写操作保守默认：retryable 必须为 false，避免误重试非幂等写。
-            assert!(
-                !p2p.envelope().retryable,
-                "写操作 retryable 默认必须为 false"
+            assert_eq!(
+                p2p.envelope().retryable,
+                expected_retryable,
+                "retryable 应匹配分类暂态性策略"
+            );
+            // domain_code 必须写入 details.domain_code（Finding 2）。
+            assert_eq!(
+                p2p.envelope()
+                    .details
+                    .get("domain_code")
+                    .and_then(|v| v.as_str()),
+                Some("workbench.write"),
+                "domain_code 应写入 details.domain_code"
             );
         }
     }

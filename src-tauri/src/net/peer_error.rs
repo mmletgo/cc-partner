@@ -21,6 +21,7 @@
 //!     `PeerCallError::Remote { code: "legacy.remote_error", legacy: true, ... }`，**不再**用作
 //!     字符串业务决策；调用方若需区分新旧对端可读 `legacy` 字段或 `code`。
 
+use crate::error::{AppError, RemoteErrorMeta};
 use crate::net::error_response::RemoteErrorBody;
 use crate::net::request_context::REQUEST_ID_HEADER;
 use serde::de::DeserializeOwned;
@@ -237,6 +238,61 @@ pub async fn parse_peer_response<T: DeserializeOwned>(
         source: e,
     })?;
     parse_peer_response_parts::<T>(status, header_request_id.as_deref(), &bytes, url)
+}
+
+/// 把统一的 `PeerCallError` 映射为命令层 `AppError`，保留对端信封的结构化元数据（Finding 3）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     orchestrator/workbench 远端 client 历史上各自字符串解析对端错误并把所有信息折叠成
+///     `AppError::generic(message)`，导致 `code`/`status`/`retryable`/`request_id` 全部丢失，
+///     上层重试/退避只能依赖人类可读文案（文案本地化后即失效）。本函数提供单一映射入口，
+///     让两处 client 行为一致：
+///     - `Network`/`InvalidResponse` → `generic`（网络/协议层，非业务失败）；
+///     - `Unsupported` → `unavailable`（对端能力不足，调用方不应重试同一对端）；
+///     - `Remote` → `AppError::remote(message, meta)`，保留 code/status/retryable/request_id；
+///       `classify()` 会据此（而非文案）映射分类。message 为空时回落到状态码摘要。
+///
+/// Code Logic（这个函数做什么）:
+///     `Remote` 分支构造 `RemoteErrorMeta` 并委托 `AppError::remote`；其余分支与原各 client
+///     行为对齐（中文文案 + url 上下文）。`client_label` 用于在 Network/InvalidResponse/Unsupported
+///     文案里区分调用方（"远端 Orchestrator" / "远端 Workbench"），便于日志定位。
+pub fn peer_call_error_to_app_error(error: PeerCallError, client_label: &str) -> AppError {
+    match error {
+        PeerCallError::Network { url, source } => {
+            AppError::generic(format!("{client_label} 请求失败 ({url}): {source}"))
+        }
+        PeerCallError::InvalidResponse { url, reason } => {
+            AppError::generic(format!("{client_label} 响应无法解析 ({url}): {reason}"))
+        }
+        PeerCallError::Unsupported { url, capability } => {
+            AppError::unavailable(format!("{client_label} ({url}) 不支持能力 {capability}"))
+        }
+        PeerCallError::Remote {
+            message,
+            status,
+            url,
+            code,
+            request_id,
+            retryable,
+            ..
+        } => {
+            let msg = message.trim();
+            let message = if msg.is_empty() {
+                format!("{client_label} 请求失败 ({url}): HTTP {status}")
+            } else {
+                msg.to_string()
+            };
+            AppError::remote(
+                message,
+                RemoteErrorMeta {
+                    code,
+                    status,
+                    retryable,
+                    request_id,
+                },
+            )
+        }
+    }
 }
 
 /// 判定 HTTP 状态码是否为成功（2xx）。

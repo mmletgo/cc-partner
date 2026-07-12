@@ -36,7 +36,6 @@ use std::time::Duration;
 const SHORT_REMOTE_WORKBENCH_TIMEOUT_SECS: u64 = 15;
 const LONG_REMOTE_WORKBENCH_TIMEOUT_SECS: u64 = 120;
 const VERY_LONG_REMOTE_WORKBENCH_TIMEOUT_SECS: u64 = 420;
-const REMOTE_ERROR_BODY_MAX_CHARS: usize = 240;
 
 /// 远端请求超时类别。
 ///
@@ -975,7 +974,8 @@ impl RemoteWorkbenchClient {
     ///     远端 Workbench GET 调用都需要统一处理网络错误、HTTP 状态码和 JSON 解析错误。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     发送 GET 请求，非成功状态转中文业务错误，成功后解析 JSON 为目标类型。
+    ///     发送 GET 请求（附出站 request_id header，Finding 3：多跳调用链关联），
+    ///     非成功状态转中文业务错误，成功后解析 JSON 为目标类型。
     async fn get_json<T>(
         &self,
         url: String,
@@ -987,6 +987,10 @@ impl RemoteWorkbenchClient {
         let response = self
             .client
             .get(&url)
+            .header(
+                crate::net::request_context::REQUEST_ID_HEADER,
+                crate::net::request_context::new_request_id(),
+            )
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
@@ -1016,7 +1020,8 @@ impl RemoteWorkbenchClient {
     ///     远端 Workbench POST 调用大多使用不同 DTO 请求体，但错误处理与 JSON 解析规则一致。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     发送 JSON body，非成功状态转中文业务错误，成功后按泛型解析 JSON。
+    ///     发送 JSON body（附出站 request_id header，Finding 3：多跳调用链关联），
+    ///     非成功状态转中文业务错误，成功后按泛型解析 JSON。
     async fn post_json<T, B>(
         &self,
         url: String,
@@ -1031,6 +1036,10 @@ impl RemoteWorkbenchClient {
             .client
             .post(&url)
             .json(body)
+            .header(
+                crate::net::request_context::REQUEST_ID_HEADER,
+                crate::net::request_context::new_request_id(),
+            )
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
@@ -1103,63 +1112,24 @@ fn endpoint_url(base_url: &str, path: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), path)
 }
 
-/// Business Logic（为什么需要这个函数）:
+/// Business Logic（为什么需要这个函数 / Finding 3）:
 ///     所有远端 Workbench 响应都需要统一错误语义，避免各方法返回不同格式的错误文案。
+///     旧实现用 `response.text()` + 字符串解析 `{error}`，丢弃了对端信封的
+///     code/status/retryable/request_id，导致上层重试只能靠文案匹配。现改用共享
+///     `net::peer_error::parse_peer_response` 统一解析 v1 信封/v0 老形态，并经
+///     `peer_call_error_to_app_error` 把 `Remote` 转为 `AppError::remote`，保留结构化元数据。
 ///
 /// Code Logic（这个函数做什么）:
-///     检查 HTTP 2xx 状态；非 2xx 返回 `AppError::generic`；成功时按泛型解析 JSON。
+///     委托 `parse_peer_response` 一次性消费 status/header request_id/body bytes，
+///     成功时按泛型解析 JSON；失败时按 `PeerCallError` 变体经共享 helper 映射为 `AppError`。
 async fn parse_json_response<T>(response: reqwest::Response) -> Result<T, AppError>
 where
     T: DeserializeOwned,
 {
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(AppError::generic(remote_error_message(status, &body)));
-    }
-    response
-        .json::<T>()
+    let url = response.url().as_str().to_string();
+    crate::net::peer_error::parse_peer_response::<T>(response, &url)
         .await
-        .map_err(|error| AppError::generic(format!("远端 Workbench 响应解析失败: {error}")))
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     远端业务错误通常由对端 AppError 序列化为 `{error}`，本机应保留原始业务文案。
-///
-/// Code Logic（这个函数做什么）:
-///     优先从 JSON body 读取非空 error 字段；否则返回 HTTP 状态与截断后的正文摘要。
-fn remote_error_message(status: reqwest::StatusCode, body: &str) -> String {
-    let trimmed = body.trim();
-    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        if let Some(error) = value.get("error").and_then(Value::as_str) {
-            let error = error.trim();
-            if !error.is_empty() {
-                return error.to_string();
-            }
-        }
-    }
-    if trimmed.is_empty() {
-        return format!("远端 Workbench 请求失败: HTTP {status}");
-    }
-    format!(
-        "远端 Workbench 请求失败: HTTP {status}: {}",
-        truncate_error_body(trimmed)
-    )
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     远端非 JSON 错误可能包含代理 HTML 或长堆栈，完整回传会降低前端错误可读性。
-///
-/// Code Logic（这个函数做什么）:
-///     按 Unicode char 截断错误正文，超长时追加省略号。
-fn truncate_error_body(body: &str) -> String {
-    let mut chars = body.chars();
-    let truncated: String = chars.by_ref().take(REMOTE_ERROR_BODY_MAX_CHARS).collect();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
-    }
+        .map_err(|err| crate::net::peer_error::peer_call_error_to_app_error(err, "远端 Workbench"))
 }
 
 #[cfg(test)]
@@ -1273,11 +1243,13 @@ mod tests {
         );
     }
 
-    /// Business Logic（为什么需要这个测试）:
-    ///     远端路由会返回本地业务错误，客户端必须保留这些错误文案给前端展示。
+    /// Business Logic（为什么需要这个测试 / Finding 3）:
+    ///     远端路由会返回本地业务错误（v0 老形态 `{error}` 或 v1 信封）；客户端必须保留这些
+    ///     错误文案给前端展示，且**保留** code/status/retryable/request_id 供上层决策。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     临时服务返回非 2xx JSON `{error}`，断言远端客户端提取 error 字段而不是只报 HTTP 状态。
+    ///     临时服务返回 400 + 老形态 `{error}`，断言远端客户端提取 error 字段（而非只报 HTTP 状态），
+    ///     且 `remote_meta()` 暴露 legacy 合成 code 与 HTTP 状态。
     #[tokio::test]
     async fn parse_json_response_uses_remote_error_field() {
         let app = Router::new().route(
@@ -1301,13 +1273,20 @@ mod tests {
             .expect_err("non-success JSON error should fail");
 
         assert_eq!(error.to_string(), "远端项目必须是本机项目");
+        // Finding 3: legacy 老形态被合成 code=legacy.remote_error，状态码保留。
+        let meta = error.remote_meta().expect("远端业务错误应携带结构化 meta");
+        assert_eq!(meta.status, 400);
+        assert_eq!(meta.code, "legacy.remote_error");
     }
 
-    /// Business Logic（为什么需要这个测试）:
-    ///     非 JSON 错误响应仍应带上短正文，方便定位对端代理或反序列化问题。
+    /// Business Logic（为什么需要这个测试 / Finding 3）:
+    ///     非 JSON 错误响应（代理 HTML/纯文本）必须归为协议违例（InvalidResponse），
+    ///     不能误判为对端业务错误。旧实现把它当 `generic` 并塞进正文摘要；现经统一解析
+    ///     归为 InvalidResponse → generic，文案含 url 上下文与"无法解析"说明。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     临时服务返回非 2xx 文本 body，断言错误包含 HTTP 状态和正文摘要。
+    ///     临时服务返回 502 + 纯文本 body，断言错误为 generic（非 Remote）、含 url 上下文、
+    ///     不携带 remote_meta（防止把代理错误当业务失败重试）。
     #[tokio::test]
     async fn parse_json_response_uses_plain_body_fallback() {
         let app = Router::new().route(
@@ -1326,8 +1305,17 @@ mod tests {
             .expect_err("non-success plain body should fail");
         let message = error.to_string();
 
-        assert!(message.contains("HTTP 502 Bad Gateway"));
-        assert!(message.contains("plain upstream failure"));
+        // 文案含 url 上下文与"无法解析"说明（InvalidResponse 语义）。
+        assert!(
+            message.contains("无法解析"),
+            "非 JSON body 应归为 InvalidResponse: {message}"
+        );
+        assert!(message.contains("127.0.0.1"), "应含 url 上下文: {message}");
+        // 关键：非 JSON 不应被当 Remote（不能携带 meta，避免上层误重试）。
+        assert!(
+            error.remote_meta().is_none(),
+            "InvalidResponse 不应携带 remote meta"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
