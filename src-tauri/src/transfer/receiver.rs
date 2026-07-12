@@ -194,12 +194,11 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
 
     let tmp_path = receive_tmp_path(&dir, &transfer_id)?;
 
-    // 断点续传：检查临时文件已存在大小。
+    // 断点续传：检查临时文件已存在大小（no-follow，拒绝 symlink 把 resume 指到 receive_dir 外）。
     // tmp 大于声明 size 说明损坏/脏数据，拒绝静默截断：删除 tmp 并返回 Validation，
     // 让发送端 fail 后由用户重试（新 init 从 0 开始）。
-    let resume_offset = match tokio::fs::metadata(&tmp_path).await {
-        Ok(m) => {
-            let len = m.len();
+    let resume_offset = match receive_tmp_len_nofollow(&tmp_path).await {
+        Ok(Some(len)) => {
             if len > meta.size {
                 let _ = tokio::fs::remove_file(&tmp_path).await;
                 return Err(AppError::validation(format!(
@@ -209,7 +208,8 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
             }
             len
         }
-        Err(_) => 0,
+        Ok(None) => 0,
+        Err(e) => return Err(e),
     };
 
     let task = TransferTask {
@@ -461,15 +461,9 @@ pub async fn handle_chunk(
         .set_status(transfer_id, TransferStatus::Transferring);
 
     let tmp_path = PathBuf::from(&task.file_path);
-    // 以 OpenOptions 打开（create + write + read，不 truncate）：断点续传需保留旧内容，
-    // seek 到 offset 后写入。对照 Python `open(path, "r+b" if exists else "wb")` 的 r+b 语义。
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .read(true)
-        .truncate(false)
-        .open(&tmp_path)
-        .await?;
+    // 首次 create_new；续传 no-follow 只打开普通文件。禁止跟随 symlink 写出 receive_dir。
+    // seek 到 offset 后写入（r+b 语义，不 truncate）。
+    let mut file = open_receive_tmp_rw(&tmp_path).await?;
     file.seek(std::io::SeekFrom::Start(offset)).await?;
     file.write_all(&data).await?;
     file.flush().await?;
@@ -636,16 +630,28 @@ pub async fn handle_complete(state: &AppState, transfer_id: &str) -> Result<Chun
     }
 
     let tmp_path = PathBuf::from(&task.file_path);
-    // size=0：没有 tmp 也视为已收齐；否则以磁盘长度为准。
-    let actual_len = if task.size == 0 {
-        match tokio::fs::metadata(&tmp_path).await {
-            Ok(m) => m.len(),
-            Err(_) => 0,
+    // size=0：没有 tmp 也视为已收齐；否则以 no-follow 普通文件长度为准（拒绝 symlink）。
+    let actual_len = match receive_tmp_len_nofollow(&tmp_path).await {
+        Ok(Some(len)) => len,
+        Ok(None) => {
+            if task.size == 0 {
+                0
+            } else {
+                task.transferred_bytes
+            }
         }
-    } else {
-        match tokio::fs::metadata(&tmp_path).await {
-            Ok(m) => m.len(),
-            Err(_) => task.transferred_bytes,
+        Err(e) => {
+            on_receive_failed(state, transfer_id, &format!("读取临时文件失败: {e}")).await;
+            if let Some(tomb) = state.transfers.tombstone(transfer_id) {
+                return Ok(ChunkResp {
+                    success: false,
+                    received_bytes: tomb.received_bytes,
+                });
+            }
+            return Ok(ChunkResp {
+                success: false,
+                received_bytes: 0,
+            });
         }
     };
 
@@ -656,9 +662,9 @@ pub async fn handle_complete(state: &AppState, transfer_id: &str) -> Result<Chun
         });
     }
 
-    // size=0 且 tmp 不存在时先创建空文件，便于 SHA256 与原子落盘走统一路径。
-    if task.size == 0 && !tmp_path.exists() {
-        if let Err(e) = tokio::fs::File::create(&tmp_path).await {
+    // size=0 且 tmp 不存在时 create_new 空普通文件（拒绝覆盖/跟随 symlink）。
+    if task.size == 0 && actual_len == 0 {
+        if let Err(e) = open_receive_tmp_rw(&tmp_path).await {
             on_receive_failed(state, transfer_id, &format!("创建空临时文件失败: {e}")).await;
             if let Some(tomb) = state.transfers.tombstone(transfer_id) {
                 return Ok(ChunkResp {
@@ -751,8 +757,8 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
 
     let tmp_path = PathBuf::from(&task.file_path);
 
-    // 校验 SHA256
-    let actual = match compute_sha256(&tmp_path).await {
+    // 校验 SHA256（no-follow：禁止 symlink tmp 把哈希指到 receive_dir 外任意文件）。
+    let actual = match compute_sha256_nofollow(&tmp_path).await {
         Ok(h) => h,
         Err(e) => {
             on_receive_failed(state, transfer_id, &format!("读取临时文件失败: {e}")).await;
@@ -1629,55 +1635,113 @@ fn status_str(s: TransferStatus) -> String {
 
 /// 异步流式计算文件 SHA256（8KB 块，对照 Python）。
 ///
-/// Business Logic: finalize 校验 .tmp 内容；路径由本机生成，走普通 open 即可。
+/// Business Logic: 测试/非路径安全场景可用跟随 open；生产 finalize 请用 nofollow。
 /// Code Logic: 跟随 open 后 8KB 分块读入 Sha256。
+#[allow(dead_code)]
 async fn compute_sha256(path: &Path) -> Result<String, AppError> {
     let mut file = tokio::fs::File::open(path).await?;
     hash_reader(&mut file).await
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     intent 恢复晋升 Completed 时必须证明候选 final **本身**是匹配内容的普通文件。
-///     普通 `File::open` / `metadata` 会跟随 symlink，链接到同尺寸同哈希目标时会误晋升，
-///     而本次传输的 .tmp 从未 place 到 final。
+///     intent 恢复与 finalize 校验 .tmp 时必须证明路径 **本身**是匹配内容的普通文件。
+///     普通 `File::open` / `metadata` 会跟随 symlink，链接到同尺寸同哈希目标时会误晋升或
+///     把 chunk 写穿到 receive_dir 外。
 ///
 /// Code Logic（这个函数做什么）:
-///     用 `OpenOptions` + 平台 no-follow 标志打开路径（symlink 打开失败）；
-///     再确认打开后句柄对应普通文件且可读，流式 SHA256。
+///     no-follow 只读打开后流式 SHA256。
 async fn compute_sha256_nofollow(path: &Path) -> Result<String, AppError> {
-    let mut file = open_regular_file_nofollow(path).await?;
+    let mut file = open_regular_file_nofollow(path, false).await?;
     hash_reader(&mut file).await
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     recovery 与 no-follow 哈希共用同一“拒绝 symlink、只读普通文件”打开语义，
+///     init resume / complete 进度必须以 .tmp **自身**长度为准；跟随 symlink 会把
+///     transferred_bytes 指到外部目标长度，掩盖写穿攻击。
+///
+/// Code Logic（这个函数做什么）:
+///     `symlink_metadata`：不存在 → None；symlink/非普通文件 → Validation 并 best-effort 删除 symlink；
+///     普通文件 → Some(len)。
+async fn receive_tmp_len_nofollow(path: &Path) -> Result<Option<u64>, AppError> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(meta) => {
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                let _ = tokio::fs::remove_file(path).await;
+                return Err(AppError::validation(format!(
+                    "临时文件是符号链接，已删除危险路径: {}",
+                    path.display()
+                )));
+            }
+            if !ft.is_file() {
+                return Err(AppError::validation(format!(
+                    "临时路径不是普通文件: {}",
+                    path.display()
+                )));
+            }
+            Ok(Some(meta.len()))
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(AppError::from(e)),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     chunk 写入路径若用普通 OpenOptions，会跟随预置/竞态替换的 `.{id}.tmp` symlink，
+///     以本机权限 seek/write 到 receive_dir 外任意可写文件。
+///
+/// Code Logic（这个函数做什么）:
+///     1) `create_new` 首次创建普通文件（路径已是 symlink 时失败，不会跟随）；
+///     2) 已存在则 no-follow 读写打开，并校验句柄对应普通文件。
+async fn open_receive_tmp_rw(path: &Path) -> Result<tokio::fs::File, AppError> {
+    // 先 create_new：存在（含 symlink 目录项）时不跟随、不覆盖。
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(std_file) => Ok(tokio::fs::File::from_std(std_file)),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            // 续传：no-follow 读写打开既有普通文件。
+            open_regular_file_nofollow(path, true).await
+        }
+        Err(e) => Err(AppError::from(e)),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     recovery、chunk 续传与 no-follow 哈希共用“拒绝 symlink、只开普通文件”语义，
 ///     避免 metadata 跟随与 open 跟随两套路径不一致。
 ///
 /// Code Logic（这个函数做什么）:
-///     Unix: `OpenOptionsExt::custom_flags(O_NOFOLLOW)`；Windows: `OpenOptionsExt::custom_flags`
-///     使用 `FILE_FLAG_OPEN_REPARSE_POINT` 打开 reparse point 自身，再检查不是 directory
-///     且非 reparse（symlink/junction）。打开失败或类型不符返回 IO 错误。
-async fn open_regular_file_nofollow(path: &Path) -> Result<tokio::fs::File, AppError> {
+///     Unix: `OpenOptionsExt::custom_flags(O_NOFOLLOW)`；Windows: `FILE_FLAG_OPEN_REPARSE_POINT`
+///     打开 reparse 自身后拒绝 directory/reparse。`writable=true` 时加 write。
+async fn open_regular_file_nofollow(
+    path: &Path,
+    writable: bool,
+) -> Result<tokio::fs::File, AppError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        let std_file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)
-            .map_err(|e| {
-                if e.kind() == ErrorKind::Other
-                    || e.raw_os_error() == Some(libc::ELOOP)
-                    || e.raw_os_error() == Some(libc::EPERM)
-                {
-                    std::io::Error::new(
-                        ErrorKind::InvalidInput,
-                        format!("拒绝跟随符号链接打开: {}: {e}", path.display()),
-                    )
-                } else {
-                    e
-                }
-            })?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true).custom_flags(libc::O_NOFOLLOW);
+        if writable {
+            opts.write(true);
+        }
+        let std_file = opts.open(path).map_err(|e| {
+            if e.kind() == ErrorKind::Other
+                || e.raw_os_error() == Some(libc::ELOOP)
+                || e.raw_os_error() == Some(libc::EPERM)
+            {
+                std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("拒绝跟随符号链接打开: {}: {e}", path.display()),
+                )
+            } else {
+                e
+            }
+        })?;
         let meta = std_file.metadata()?;
         if meta.file_type().is_symlink() || !meta.file_type().is_file() {
             return Err(AppError::from(std::io::Error::new(
@@ -1693,10 +1757,12 @@ async fn open_regular_file_nofollow(path: &Path) -> Result<tokio::fs::File, AppE
         // FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000：打开 reparse point 自身而不跟随。
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        let std_file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        if writable {
+            opts.write(true);
+        }
+        let std_file = opts.open(path)?;
         let meta = std_file.metadata()?;
         let ft = meta.file_type();
         // Windows 上 is_symlink 覆盖 symlink/junction；再拒绝目录与 reparse point。
@@ -1713,11 +1779,11 @@ async fn open_regular_file_nofollow(path: &Path) -> Result<tokio::fs::File, AppE
     }
     #[cfg(not(any(unix, windows)))]
     {
-        // 无 no-follow 原语的平台：fail-closed，禁止 recovery 晋升。
-        let _ = path;
+        // 无 no-follow 原语的平台：fail-closed。
+        let _ = (path, writable);
         Err(AppError::from(std::io::Error::new(
             ErrorKind::Unsupported,
-            "当前平台无法 no-follow 打开文件，拒绝 recovery 晋升",
+            "当前平台无法 no-follow 打开文件，拒绝打开接收临时文件",
         )))
     }
 }
@@ -3349,6 +3415,91 @@ mod tests {
         assert!(state.transfers.tombstone(&transfer_id).is_none());
 
         let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     若 `.{transfer_id}.tmp` 被预置为指向 receive_dir 外文件的 symlink，普通 OpenOptions
+    ///     会跟随写入；LAN 请求即可越权破坏任意可写文件。chunk 路径必须拒绝跟随。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     在 receive_dir 外放 victim；在 receive_dir 内建指向 victim 的 `.{id}.tmp` symlink；
+    ///     init 后 handle_chunk 必须失败且 victim 内容不变。
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn chunk_refuses_to_follow_tmp_symlink_outside_receive_dir() {
+        use std::os::unix::fs::symlink;
+
+        let receive_dir = unique_temp_dir();
+        let outside_dir = unique_temp_dir();
+        let victim = outside_dir.join("victim.bin");
+        fs::write(&victim, b"ORIGINAL-OUTSIDE").unwrap();
+
+        let state = build_transfer_test_state(&receive_dir).await;
+        let transfer_id = "tmp-symlink-escape".to_string();
+        let tmp = receive_dir.join(format!(".{transfer_id}.tmp"));
+        symlink(&victim, &tmp).expect("pre-plant tmp symlink");
+
+        // init：发现 symlink tmp 时拒绝并 best-effort 删除危险路径。
+        let init_err = handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "escape.bin".to_string(),
+                size: 8,
+                sha256: "deadbeef".to_string(),
+                chunk_size: 8,
+            },
+        )
+        .await
+        .expect_err("init 必须拒绝 symlink tmp 作为 resume 路径");
+        let _ = init_err;
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"ORIGINAL-OUTSIDE",
+            "init 路径不得跟随改写 victim"
+        );
+
+        // 重新种植 symlink，绕过 init 直接测 chunk 写入路径。
+        if tmp.exists() {
+            let _ = fs::remove_file(&tmp);
+        }
+        symlink(&victim, &tmp).expect("re-plant tmp symlink for chunk");
+        let task = crate::models::transfer::TransferTask {
+            id: transfer_id.clone(),
+            filename: "escape.bin".to_string(),
+            file_path: tmp.to_string_lossy().to_string(),
+            size: 8,
+            sha256: "deadbeef".to_string(),
+            chunk_size: 8,
+            direction: crate::models::transfer::TransferDirection::Receive,
+            peer_device_id: String::new(),
+            status: crate::models::transfer::TransferStatus::Pending,
+            transferred_bytes: 0,
+            created_at: now_iso(),
+            completed_at: None,
+        };
+        state.transfers.add(task);
+
+        let chunk_err = handle_chunk(&state, &transfer_id, 0, b"ATTACK!!!".to_vec())
+            .await
+            .expect_err("chunk 不得跟随 tmp symlink 写入");
+        let _ = chunk_err;
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"ORIGINAL-OUTSIDE",
+            "receive_dir 外 victim 不得被改写"
+        );
+        // create_new 对既有 symlink 返回 AlreadyExists，随后 no-follow open 失败；
+        // 不得把 symlink 替换成写出到 victim 的普通文件。
+        if tmp.exists() {
+            assert!(
+                tmp.symlink_metadata().unwrap().file_type().is_symlink(),
+                "危险 tmp 若仍存在必须保持 symlink"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&receive_dir);
+        let _ = fs::remove_dir_all(&outside_dir);
     }
 
     /// Business Logic（为什么需要这个测试）:

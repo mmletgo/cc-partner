@@ -943,7 +943,8 @@ impl OrchestratorRepo {
     ///     remote 项目必须跳过；项目 WORKFLOW.md 无效时不能把该项目任务提前 claim 到 Preparing。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在单个事务内完成 active local run_state 计数、剩余容量计算、idle/blocked 候选读取和 Preparing 条件更新。
+    ///     在单个事务内完成 active local run_state 计数、剩余容量计算、**仅 Idle** 候选读取和 Preparing 条件更新。
+    ///     Blocked 必须先经用户 retry 原子回到 Queued/Idle，后台 scheduler 不得自动重跑。
     ///     每个候选按 Workbench 项目 path 动态解析 WORKFLOW.md，使用 ResolvedWorkflow.active_states 判断是否可领取。
     pub async fn claim_next_local_queued_tasks_with_global_capacity(
         &self,
@@ -973,19 +974,20 @@ impl OrchestratorRepo {
             return Ok(Vec::new());
         }
 
+        // 只领取显式可调度的 Idle（Todo/Rework 等 active_states 过滤在下方）；
+        // 禁止领取 Blocked——Blocked 必须经用户 retry → Idle/Queued 后才能再次 claim。
         let selected = sqlx::query(&format!(
             "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
              WHERE id IN (\
                SELECT task.id FROM orchestrator_tasks task \
                INNER JOIN workbench_projects project ON project.id = task.project_id \
                WHERE project.kind = 'local' \
-                 AND task.run_state IN (?, ?) \
+                 AND task.run_state = ? \
                ORDER BY task.priority DESC, task.created_at ASC\
              ) \
              ORDER BY priority DESC, created_at ASC"
         ))
         .bind(OrchestratorRunState::Idle.as_str())
-        .bind(OrchestratorRunState::Blocked.as_str())
         .fetch_all(&mut *tx)
         .await?;
 
@@ -1023,7 +1025,7 @@ impl OrchestratorRepo {
                  SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, updated_at = ? \
                  WHERE id = ? \
                    AND workflow_state = ? \
-                   AND run_state IN (?, ?)",
+                   AND run_state = ?",
             )
             .bind(OrchestratorTaskStatus::Preparing.as_str())
             .bind(OrchestratorWorkflowState::InProgress.as_str())
@@ -1034,7 +1036,6 @@ impl OrchestratorRepo {
             .bind(&task_id)
             .bind(candidate.workflow_state.as_str())
             .bind(OrchestratorRunState::Idle.as_str())
-            .bind(OrchestratorRunState::Blocked.as_str())
             .execute(&mut *tx)
             .await?;
 
@@ -2877,7 +2878,7 @@ async fn backfill_split_state_from_legacy_status(pool: &SqlitePool) -> Result<()
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     旧版 split state 曾把 legacy Queued 映射为 Todo/Queued；升级后 scheduler 只领取 Idle/Blocked，必须避免这些旧排队任务卡住。
+///     旧版 split state 曾把 legacy Queued 映射为 Todo/Queued；升级后 scheduler 只领取 Idle，必须避免这些旧排队任务卡住。
 ///
 /// Code Logic（这个函数做什么）:
 ///     精准把 status=queued、workflow_state=todo、run_state=queued 的历史行规范化为 Todo/Idle，不覆盖其它用户调整过的 split state。
@@ -4857,6 +4858,46 @@ mod tests {
         assert_eq!(remote.status, OrchestratorTaskStatus::Queued);
         assert_eq!(waiting.status, OrchestratorTaskStatus::Queued);
         assert_eq!(active, 3);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Blocked 表示用户必须显式 retry 才能再跑；后台 scheduler 若把 Blocked 当可领取态，
+    ///     会造成无界自动重跑、Attention 闪烁，并破坏 Blocked→Queued 用户契约。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入一个 legacy Blocked + run_state=Blocked 的本机任务；全局 claim 后断言 0 条领取，
+    ///     且任务仍保持 Blocked（含 blocked_reason）。
+    #[tokio::test]
+    async fn claim_next_local_queued_tasks_does_not_auto_claim_blocked() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "local-a", "local").await;
+        repo.create_task(&task_row(
+            "blocked-task",
+            "local-a",
+            OrchestratorTaskStatus::Blocked,
+        ))
+        .await
+        .unwrap();
+        set_task_split_state(
+            &pool,
+            "blocked-task",
+            OrchestratorWorkflowState::Rework,
+            OrchestratorRunState::Blocked,
+            Some("verification failed"),
+        )
+        .await;
+
+        let claimed = repo
+            .claim_next_local_queued_tasks_with_global_capacity(3)
+            .await
+            .unwrap();
+        let still = repo.get_task("blocked-task").await.unwrap();
+
+        assert!(claimed.is_empty(), "Blocked 不得被后台 scheduler 自动领取");
+        assert_eq!(still.status, OrchestratorTaskStatus::Blocked);
+        assert_eq!(still.run_state, OrchestratorRunState::Blocked);
+        assert_eq!(still.blocked_reason.as_deref(), Some("verification failed"));
     }
 
     /// Business Logic（为什么需要这个函数）:
