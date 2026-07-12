@@ -214,7 +214,8 @@ pub fn remote_device_base_url(state: &AppState, device_id: &str) -> Result<Strin
     let devices = state.devices.read().expect("devices 读锁中毒");
     let device = devices
         .get(device_id)
-        .ok_or_else(|| AppError::generic("远端设备不在线"))?;
+        // 设备缺失属于暂态离线：用 Unavailable 分类，禁止靠中文文案匹配。
+        .ok_or_else(|| AppError::unavailable("远端设备不在线"))?;
     Ok(device.base_url())
 }
 
@@ -222,15 +223,14 @@ pub fn remote_device_base_url(state: &AppState, device_id: &str) -> Result<Strin
 ///     网络离线类错误应保持 pending，协议/校验类错误才应标 failed。
 ///
 /// Code Logic（这个函数做什么）:
-///     基于现有远端客户端错误前缀和设备离线文案做分类；非网络错误默认按协议/校验失败处理。
+///     只读 `AppError::classify()`：`Unavailable`/`Timeout` 视为网络/离线，其它归协议/业务失败。
+///     禁止 `contains/starts_with` 匹配本地化文案。
 pub fn is_remote_network_error(error: &AppError) -> bool {
-    let message = error.to_string();
-    if message.contains("远端设备不在线") {
-        return true;
-    }
-    let request_failed = message.starts_with("远端 Orchestrator 请求失败:")
-        || message.starts_with("远端 Workbench 请求失败:");
-    request_failed && !message.contains("HTTP ")
+    use crate::error::AppErrorCategory;
+    matches!(
+        error.classify(),
+        AppErrorCategory::Unavailable | AppErrorCategory::Timeout
+    )
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1048,20 +1048,37 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     outbox 只能把真实网络/离线错误保持 pending；HTTP 协议响应异常应标 failed 以避免无限重试。
+    ///     outbox 只能把真实网络/离线错误保持 pending；协议/业务错误应标 failed 以避免无限重试。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     构造设备离线、reqwest 发送失败和 HTTP 500 fallback 三类错误文案，断言仅前两类属于网络错误。
+    ///     用类型化 AppError 变体断言：Unavailable/Timeout 为网络，Validation/Internal/Remote 非网络。
     #[test]
     fn network_error_classifier_excludes_http_protocol_failures() {
-        assert!(is_remote_network_error(&AppError::generic(
+        assert!(is_remote_network_error(&AppError::unavailable(
             "远端设备不在线"
         )));
-        assert!(is_remote_network_error(&AppError::generic(
-            "远端 Orchestrator 请求失败: error sending request"
+        assert!(is_remote_network_error(&AppError::unavailable(
+            "远端 Orchestrator 请求失败 (http://peer/api/x): body interrupted"
         )));
+        assert!(is_remote_network_error(&AppError::timeout(
+            "远端 Orchestrator 请求超时"
+        )));
+        // 业务/协议失败即使文案含“连接”也不应判网络。
         assert!(!is_remote_network_error(&AppError::generic(
             "远端 Orchestrator 请求失败: HTTP 500"
+        )));
+        assert!(!is_remote_network_error(&AppError::validation(
+            "路径不能为空，连接配置无效"
+        )));
+        assert!(!is_remote_network_error(&AppError::remote(
+            "连接超时业务码",
+            crate::error::RemoteErrorMeta {
+                code: "validation_error".to_string(),
+                status: 400,
+                retryable: false,
+                request_id: "req".to_string(),
+                details: serde_json::json!({}),
+            }
         )));
     }
 }

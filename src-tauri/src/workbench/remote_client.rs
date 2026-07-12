@@ -1029,7 +1029,8 @@ impl RemoteWorkbenchClient {
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
-            .map_err(|error| AppError::generic(format!("远端 Workbench 请求失败: {error}")))?;
+            // send 失败属于传输离线：用 Unavailable 分类，供 preflight/outbox 按类型分支。
+            .map_err(|error| AppError::unavailable(format!("远端 Workbench 请求失败: {error}")))?;
         parse_json_response(response).await
     }
 
@@ -1079,7 +1080,8 @@ impl RemoteWorkbenchClient {
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
-            .map_err(|error| AppError::generic(format!("远端 Workbench 请求失败: {error}")))?;
+            // send 失败属于传输离线：用 Unavailable 分类，供 preflight/outbox 按类型分支。
+            .map_err(|error| AppError::unavailable(format!("远端 Workbench 请求失败: {error}")))?;
         parse_json_response(response).await
     }
 }

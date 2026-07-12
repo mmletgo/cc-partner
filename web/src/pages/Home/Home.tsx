@@ -87,6 +87,7 @@ export function Home() {
     try {
       // 用户在 Claude 解说失败后点刷新视为"重新解说"信号：强制后端跳过 failed 缓存重跑 Claude。
       // 正常情况下不传该参数，命中未过期缓存直接返回，避免浪费 Claude 调用。
+      // 依赖完整 response，满足 React Compiler preserve-manual-memoization（不可只写 response?.aiStatus）。
       const forceRefreshAi = response?.aiStatus === 'failed';
       const data = await fetchGithubTrending({ forceRefreshAi });
       applyTrendingResponse(data);
@@ -94,7 +95,7 @@ export function Home() {
       setError(err instanceof Error ? err.message : t('home:unknownError'));
       setState('error');
     }
-  }, [applyTrendingResponse, response?.aiStatus, t]);
+  }, [applyTrendingResponse, response, t]);
 
   useEffect(() => {
     let cancelled = false;

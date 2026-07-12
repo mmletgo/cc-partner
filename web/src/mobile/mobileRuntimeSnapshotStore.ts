@@ -12,6 +12,7 @@
  *   所有 display state 带 projectId；selectMobileRuntimeDisplayForProject 在 render 阶段做隔离。
  */
 
+import { isOrchestratorRuntimeNetworkTransportError } from '@/api/orchestratorRuntimeTransportError';
 import type {
   OrchestratorRemoteRuntimeStatus,
   OrchestratorRuntimeDisplayState,
@@ -243,20 +244,9 @@ export function applyMobileRuntimeSnapshotFailure(
     return null;
   }
   const cached = successCache.get(projectId) ?? null;
-  const message = error.message.toLowerCase();
-  const networkish =
-    message.includes('network') ||
-    message.includes('fetch') ||
-    message.includes('timeout') ||
-    message.includes('timed out') ||
-    message.includes('econn') ||
-    message.includes('offline') ||
-    message.includes('离线') ||
-    message.includes('连接') ||
-    message.includes('unreachable') ||
-    message.includes('failed to fetch');
-
-  if (cached && networkish) {
+  // 仅 adapter 显式 network transport + live 缓存 → offline warm cache。
+  // 禁止 message 关键词匹配；成功 DTO remoteStatus 才是四态权威。
+  if (cached && isOrchestratorRuntimeNetworkTransportError(error)) {
     return {
       projectId,
       snapshot: cached.snapshot,
