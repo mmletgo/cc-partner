@@ -2683,9 +2683,11 @@ impl OrchestratorRepo {
 
 /// Business Logic（为什么需要这个函数）:
 ///     幂等键必须绑定项目与请求内容指纹，避免跨项目泄露任务 goal/acceptance，或同键不同 payload 静默复用旧任务。
+///     指纹编码必须无歧义：字段内 NUL/分隔符不得制造跨字段边界碰撞，否则 fail-closed 会被绕过。
 ///
 /// Code Logic（这个函数做什么）:
-///     对 create 语义字段做稳定序列化后 SHA256，输出小写 hex 指纹。
+///     将 create 语义字段打包为固定 key 顺序的 JSON 对象后 SHA256，输出小写 hex 指纹。
+///     JSON 字符串转义保证字段边界无歧义，比 NUL-join 更安全。
 fn create_request_fingerprint(
     row: &OrchestratorTaskRow,
     create_action: OrchestratorCreateAction,
@@ -2698,23 +2700,24 @@ fn create_request_fingerprint(
         OrchestratorCreateAction::Todo => "todo",
         OrchestratorCreateAction::Start => "start",
     };
-    let labels = external_labels_json.as_deref().unwrap_or("");
-    let payload = format!(
-        "project_id={}\0title={}\0goal={}\0acceptance={}\0priority={}\0action={}\0source={}\0external_id={}\0external_identifier={}\0external_url={}\0external_state={}\0external_labels={}",
-        row.project_id,
-        row.title,
-        row.goal,
-        row.acceptance_criteria,
-        row.priority,
-        action,
-        row.source,
-        row.external_id.as_deref().unwrap_or(""),
-        row.external_identifier.as_deref().unwrap_or(""),
-        row.external_url.as_deref().unwrap_or(""),
-        row.external_state.as_deref().unwrap_or(""),
-        labels,
-    );
-    let digest = Sha256::digest(payload.as_bytes());
+    // 固定 key 顺序的结构化对象：serde_json::json! 按插入顺序序列化，字段值经 JSON 转义，
+    // title="a\0goal=b" 与跨字段迁移不会产生相同字节串。
+    let payload = serde_json::json!({
+        "project_id": row.project_id,
+        "title": row.title,
+        "goal": row.goal,
+        "acceptance": row.acceptance_criteria,
+        "priority": row.priority,
+        "action": action,
+        "source": row.source,
+        "external_id": row.external_id.as_deref().unwrap_or(""),
+        "external_identifier": row.external_identifier.as_deref().unwrap_or(""),
+        "external_url": row.external_url.as_deref().unwrap_or(""),
+        "external_state": row.external_state.as_deref().unwrap_or(""),
+        "external_labels": external_labels_json.as_deref().unwrap_or(""),
+    });
+    let encoded = serde_json::to_vec(&payload)?;
+    let digest = Sha256::digest(&encoded);
     Ok(format!("{digest:x}"))
 }
 
@@ -3819,6 +3822,68 @@ mod tests {
         assert_eq!(created.task.status, OrchestratorTaskStatus::Queued);
         assert_eq!(created.task.workflow_state, OrchestratorWorkflowState::Todo);
         assert_eq!(created.task.run_state, OrchestratorRunState::Idle);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     NUL-join 指纹可在字段边界被内部 NUL 碰撞；结构化 JSON 编码必须区分此类不同语义元组。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 title/goal 跨字段 NUL 迁移的两份 payload，断言指纹不同，且同 clientRequestId 重放 conflict。
+    #[tokio::test]
+    async fn create_request_fingerprint_resists_nul_field_boundary_collision() {
+        let mut left = task_row("task-left", "project-1", OrchestratorTaskStatus::Draft);
+        left.title = "a\0goal=b".to_string();
+        left.goal = "c".to_string();
+
+        let mut right = task_row("task-right", "project-1", OrchestratorTaskStatus::Draft);
+        right.title = "a".to_string();
+        right.goal = "b\0goal=c".to_string();
+
+        let fp_left =
+            create_request_fingerprint(&left, OrchestratorCreateAction::Todo, &None).unwrap();
+        let fp_right =
+            create_request_fingerprint(&right, OrchestratorCreateAction::Todo, &None).unwrap();
+        assert_ne!(
+            fp_left, fp_right,
+            "跨字段 NUL 迁移不得生成相同指纹: left={fp_left} right={fp_right}"
+        );
+
+        // 分隔符文本本身也不应碰撞：显式含 key 名的字段值 vs 真实字段赋值。
+        let mut spoof = task_row("task-spoof", "project-1", OrchestratorTaskStatus::Draft);
+        spoof.title = "x".to_string();
+        spoof.goal = "y\0acceptance=z".to_string();
+        spoof.acceptance_criteria = "".to_string();
+        let mut real = task_row("task-real", "project-1", OrchestratorTaskStatus::Draft);
+        real.title = "x".to_string();
+        real.goal = "y".to_string();
+        real.acceptance_criteria = "z".to_string();
+        let fp_spoof =
+            create_request_fingerprint(&spoof, OrchestratorCreateAction::Todo, &None).unwrap();
+        let fp_real =
+            create_request_fingerprint(&real, OrchestratorCreateAction::Todo, &None).unwrap();
+        assert_ne!(fp_spoof, fp_real, "分隔符文本不得伪造字段边界");
+
+        // 端到端：同 request id 的不同语义 payload 必须 conflict，不得误判幂等命中。
+        let (_pool, repo) = setup_repo().await;
+        repo.create_remote_task_for_client_request(
+            "nul-collision-request",
+            &left,
+            OrchestratorCreateAction::Todo,
+        )
+        .await
+        .unwrap();
+        let err = repo
+            .create_remote_task_for_client_request(
+                "nul-collision-request",
+                &right,
+                OrchestratorCreateAction::Todo,
+            )
+            .await
+            .expect_err("NUL 边界不同 payload 必须 conflict");
+        assert!(
+            matches!(err, AppError::Conflict(_)),
+            "应返回 Conflict: {err:?}"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

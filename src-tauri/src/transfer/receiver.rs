@@ -21,7 +21,7 @@ use crate::state::AppState;
 use crate::transfer::CHUNK_SIZE;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 /// 当前时间 RFC3339 ISO 字符串。
@@ -75,15 +75,17 @@ pub struct StatusResp {
 ///
 /// Business Logic: 对端发起传输前先发元数据，本端确认接收并告知从何处续传。
 ///     同一 transfer_id 的重复 init 必须与 chunk/finalize 串行，且不得覆盖活跃任务或绕过终态墓碑。
+///     安全边界：filename/transfer_id 只能是单个普通路径组件；幂等路径只接受 Receive 任务，禁止把 Send 源文件当接收目标。
 /// Code Logic:
 ///     1. 取 receive_dir，确保存在；
-///     2. 解析 transfer_id 后获取与 chunk 相同的 per-ID 锁；
-///     3. 持锁后重查 active task / 墓碑：
-///        - 活跃且元数据相同 → 幂等返回当前 resume_offset；
-///        - 活跃但元数据不同 → conflict；
+///     2. 校验并规范化 filename；解析 transfer_id（缺省 UUID，否则校验为单组件）；
+///     3. 获取与 chunk 相同的 per-ID 锁；
+///     4. 持锁后重查 active task / 墓碑：
+///        - 活跃且 direction=Receive 且元数据相同 → 幂等返回当前 resume_offset；
+///        - 活跃但 direction=Send 或元数据不同 → conflict；
 ///        - 命中墓碑 → conflict（终态后禁止 reopen 写路径）；
-///     4. 否则读/建 `.{transfer_id}.tmp`，构造 TransferTask（Receive）入 registry；
-///     5. 返回 `{transfer_id, accepted:true, resume_offset}`。
+///     5. 否则读/建 `.{transfer_id}.tmp`，构造 TransferTask（Receive）入 registry；
+///     6. 返回 `{transfer_id, accepted:true, resume_offset}`。
 pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, AppError> {
     // 标准 RwLockReadGuard 非 Send，必须在 await 前释放：先 clone 出 receive_dir 字符串。
     let receive_dir = state
@@ -95,17 +97,24 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
     let dir = PathBuf::from(&receive_dir);
     tokio::fs::create_dir_all(&dir).await?;
 
-    let transfer_id = meta
-        .transfer_id
-        .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let safe_filename = sanitize_receive_basename(&meta.filename, "filename")?;
+    let transfer_id = match meta.transfer_id.as_deref() {
+        Some(id) => sanitize_receive_basename(id, "transfer_id")?,
+        None => uuid::Uuid::new_v4().to_string(),
+    };
 
     // init 与 chunk/finalize 共享 per-ID 锁，防止并发 init 覆盖活跃 entry 或 finalize 后重开写路径。
     let init_lock = state.transfers.finalize_lock(&transfer_id);
     let _guard = init_lock.lock().await;
 
     if let Some(existing) = state.transfers.get(&transfer_id) {
-        if init_metadata_matches(&existing, &meta) {
+        // Send 任务与 Receive 共享 registry；init 幂等路径不得把 outbound 源文件当接收目标。
+        if existing.direction != TransferDirection::Receive {
+            return Err(AppError::conflict(format!(
+                "transfer_id `{transfer_id}` 属于发送任务，拒绝作为接收 init 目标"
+            )));
+        }
+        if init_metadata_matches(&existing, &meta, &safe_filename) {
             let resume_offset = match tokio::fs::metadata(&existing.file_path).await {
                 Ok(m) => m.len().max(existing.transferred_bytes),
                 Err(_) => existing.transferred_bytes,
@@ -128,7 +137,7 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
         )));
     }
 
-    let tmp_path = dir.join(format!(".{transfer_id}.tmp"));
+    let tmp_path = receive_tmp_path(&dir, &transfer_id)?;
 
     // 断点续传：检查临时文件已存在大小
     let resume_offset = match tokio::fs::metadata(&tmp_path).await {
@@ -138,7 +147,7 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
 
     let task = TransferTask {
         id: transfer_id.clone(),
-        filename: meta.filename.clone(),
+        filename: safe_filename.clone(),
         file_path: tmp_path.to_string_lossy().to_string(),
         size: meta.size,
         sha256: meta.sha256.clone(),
@@ -153,8 +162,7 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
     state.transfers.add(task);
 
     tracing::info!(
-        "接受传输请求: {transfer_id}, 文件={}, 大小={}, resume_offset={resume_offset}",
-        meta.filename,
+        "接受传输请求: {transfer_id}, 文件={safe_filename}, 大小={}, resume_offset={resume_offset}",
         meta.size
     );
 
@@ -169,12 +177,120 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
 ///     同一 transfer_id 重放 init 时，只有元数据完全一致才允许幂等返回，否则必须 conflict。
 ///
 /// Code Logic（这个函数做什么）:
-///     比较 filename/size/sha256/chunk_size 是否与活跃任务一致。
-fn init_metadata_matches(task: &TransferTask, meta: &InitMeta) -> bool {
-    task.filename == meta.filename
+///     比较已规范化的 filename/size/sha256/chunk_size 是否与活跃 Receive 任务一致。
+fn init_metadata_matches(task: &TransferTask, meta: &InitMeta, safe_filename: &str) -> bool {
+    task.filename == safe_filename
         && task.size == meta.size
         && task.sha256 == meta.sha256
         && task.chunk_size == meta.chunk_size
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端 filename/transfer_id 进入路径拼接前必须限制为单个普通组件，否则绝对路径或 `..`
+///     可逃逸 receive_dir，把校验通过的内容写到任意可写路径。
+///
+/// Code Logic（这个函数做什么）:
+///     trim 后拒绝空串；Path components 必须恰好一个 Normal，且不含 `/` `\` 或 `.`/`..`。
+fn sanitize_receive_basename(raw: &str, field: &str) -> Result<String, AppError> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(AppError::validation(format!("{field} 不能为空")));
+    }
+    if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return Err(AppError::validation(format!(
+            "{field} 只能是单个文件名组件，禁止路径分隔符"
+        )));
+    }
+    let path = Path::new(name);
+    if path.is_absolute() {
+        return Err(AppError::validation(format!("{field} 不能是绝对路径")));
+    }
+    let mut components = path.components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(part)), None) => {
+            let s = part.to_string_lossy();
+            if s.is_empty() || s == "." || s == ".." {
+                return Err(AppError::validation(format!(
+                    "{field} 非法：禁止 `.`/`..` 或空组件"
+                )));
+            }
+            // 防御：Windows 下某些前缀/盘符可能被解析为 Prefix 而非 Normal。
+            Ok(s.into_owned())
+        }
+        _ => Err(AppError::validation(format!(
+            "{field} 只能是单个普通文件名组件，禁止绝对路径、父目录或前缀"
+        ))),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     临时文件 `.{transfer_id}.tmp` 也必须落在 receive_dir 内，避免 transfer_id 逃逸。
+///
+/// Code Logic（这个函数做什么）:
+///     用已校验的 transfer_id 拼临时名，再验证最终路径仍位于 receive_dir 之下。
+fn receive_tmp_path(receive_dir: &Path, transfer_id: &str) -> Result<PathBuf, AppError> {
+    let tmp_name = format!(".{transfer_id}.tmp");
+    // transfer_id 已是单组件，前缀 `.` + 后缀 `.tmp` 仍应是单组件。
+    let _ = sanitize_receive_basename(&tmp_name, "transfer_id_tmp")?;
+    let tmp_path = receive_dir.join(&tmp_name);
+    ensure_path_within_dir(receive_dir, &tmp_path)?;
+    Ok(tmp_path)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     join 后的最终/临时路径必须仍在 receive_dir 内，防止绝对路径替换或 `..` 逃逸。
+///
+/// Code Logic（这个函数做什么）:
+///     对父目录做 canonicalize（不存在时回退规范化），断言目标仍以 receive_dir 为前缀。
+fn ensure_path_within_dir(dir: &Path, candidate: &Path) -> Result<(), AppError> {
+    let canonical_dir = match dir.canonicalize() {
+        Ok(p) => p,
+        Err(_) => normalize_path(dir),
+    };
+    let parent = candidate.parent().unwrap_or(dir);
+    let canonical_parent = match parent.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            // 父目录可能尚未创建；用 dir 的 canonical + 相对剩余部分做逻辑归一化。
+            if parent == dir {
+                canonical_dir.clone()
+            } else {
+                normalize_path(parent)
+            }
+        }
+    };
+    if !canonical_parent.starts_with(&canonical_dir) {
+        return Err(AppError::validation(
+            "目标路径逃逸 receive_dir，拒绝写入".to_string(),
+        ));
+    }
+    let file_name = candidate
+        .file_name()
+        .ok_or_else(|| AppError::validation("目标路径缺少文件名".to_string()))?;
+    let final_path = canonical_parent.join(file_name);
+    if !final_path.starts_with(&canonical_dir) {
+        return Err(AppError::validation(
+            "目标路径逃逸 receive_dir，拒绝写入".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Code Logic: 去掉 `.`、解析 `..` 的逻辑路径规范化（不访问磁盘）。
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let _ = out.pop();
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    out
 }
 
 /// 处理 chunk：将数据写入临时文件指定 offset，收齐时自动 finalize。
@@ -183,13 +299,15 @@ fn init_metadata_matches(task: &TransferTask, meta: &InitMeta) -> bool {
 ///     Finding 4: 最后一块可能在传输层被重试，重放时 registry 已移除会误返回 success:false。
 ///     通过 per-transfer 单飞锁 + 终态墓碑保证重放安全：第一个请求完成 finalize 写墓碑，
 ///     迟到请求必须在任何文件 open/write 前命中墓碑，返回第一次的成功结果。
+///     安全边界：仅接受 direction=Receive 的任务；禁止用 outbound Send 任务 id 写入源文件。
 /// Code Logic:
 ///     1. 先取 per-transfer 单飞锁（覆盖 re-read 任务/墓碑、写块、进度、finalize 全临界区）；
 ///     2. 持锁后重读 registry：不存在则查墓碑，命中则直接返回第一次结果（禁止 open 文件）；
-///     3. 打开/创建 .tmp（写模式，允许读写以 seek），seek 到 offset 写入；
-///     4. 更新 transferred_bytes；
-///     5. 若 transferred >= size 则 finalize（SHA256 校验 + 重命名）；
-///     6. 返回 `{success:true, received_bytes}`。
+///     3. 存在但 direction≠Receive → 拒绝写入并返回 success:false；
+///     4. 打开/创建 .tmp（写模式，允许读写以 seek），seek 到 offset 写入；
+///     5. 更新 transferred_bytes；
+///     6. 若 transferred >= size 则 finalize（SHA256 校验 + 重命名）；
+///     7. 返回 `{success:true, received_bytes}`。
 pub async fn handle_chunk(
     state: &AppState,
     transfer_id: &str,
@@ -226,6 +344,18 @@ pub async fn handle_chunk(
             });
         }
     };
+
+    // 方向隔离：Send 任务的 file_path 指向本机源文件，绝不能被 chunk 路由改写/删除。
+    if task.direction != TransferDirection::Receive {
+        tracing::warn!(
+            "拒绝向非 Receive 任务写入 chunk: {transfer_id}, direction={:?}",
+            task.direction
+        );
+        return Ok(ChunkResp {
+            success: false,
+            received_bytes: 0,
+        });
+    }
 
     state
         .transfers
@@ -283,15 +413,26 @@ pub async fn handle_chunk(
 ///
 /// Business Logic: 文件全部接收后需校验完整性，确保无误后落地为最终文件名。
 /// Code Logic: 对照 Python `finalize_transfer`：
-///     1. 计算 .tmp 的 SHA256，与任务记录的 sha256 比较；
-///     2. 校验失败：标记 failed + 删除 .tmp + emit failed；
-///     3. 校验通过：resolve_filename 解析冲突，重命名 .tmp → 最终路径；
+///     1. 仅处理 direction=Receive 的任务；
+///     2. 计算 .tmp 的 SHA256，与任务记录的 sha256 比较；
+///     3. 校验失败：标记 failed + 删除 .tmp + emit failed；
+///     4. 校验通过：再校验 filename 为单组件，resolve_filename 解析冲突，
+///        ensure 最终路径仍在 receive_dir 内，再重命名 .tmp → 最终路径；
 ///        标记 completed + 写历史 + emit completed。
 pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<(), AppError> {
     let task = match state.transfers.get(transfer_id) {
         Some(t) => t,
         None => return Ok(()),
     };
+
+    // 防御：即便 chunk 漏检，finalize 也不得操作 Send 源文件（哈希失败会删、成功会 move）。
+    if task.direction != TransferDirection::Receive {
+        tracing::warn!(
+            "finalize 拒绝非 Receive 任务: {transfer_id}, direction={:?}",
+            task.direction
+        );
+        return Ok(());
+    }
 
     let tmp_path = PathBuf::from(&task.file_path);
 
@@ -316,10 +457,26 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
         return Ok(());
     }
 
-    // 解析文件名冲突并重命名
+    // 解析文件名冲突并重命名；落盘前再次校验 basename 与 receive_dir 边界。
     let receive_dir = PathBuf::from(&state.config.read().expect("config 读锁中毒").receive_dir);
-    let final_filename = resolve_filename(&receive_dir, &task.filename);
+    let safe_filename = match sanitize_receive_basename(&task.filename, "filename") {
+        Ok(name) => name,
+        Err(e) => {
+            on_receive_failed(state, transfer_id, &format!("非法文件名: {e}")).await;
+            return Ok(());
+        }
+    };
+    let final_filename = resolve_filename(&receive_dir, &safe_filename);
+    // resolve_filename 可能产出 "stem (n).ext"；仍须是单组件。
+    if let Err(e) = sanitize_receive_basename(&final_filename, "final_filename") {
+        on_receive_failed(state, transfer_id, &format!("非法最终文件名: {e}")).await;
+        return Ok(());
+    }
     let final_path = receive_dir.join(&final_filename);
+    if let Err(e) = ensure_path_within_dir(&receive_dir, &final_path) {
+        on_receive_failed(state, transfer_id, &format!("最终路径非法: {e}")).await;
+        return Ok(());
+    }
     if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
         on_receive_failed(state, transfer_id, &format!("重命名失败: {e}")).await;
         return Ok(());
@@ -495,6 +652,7 @@ async fn compute_sha256(path: &Path) -> Result<String, AppError> {
 ///
 /// Business Logic: 避免覆盖已存在文件。对照 Python `_resolve_filename`。
 /// Code Logic: stem + " ({n})" + suffix，逐次递增直到不冲突。
+///     调用方必须先 `sanitize_receive_basename`；本函数假定 filename 已是单组件 basename。
 pub fn resolve_filename(dir: &Path, filename: &str) -> String {
     let target = dir.join(filename);
     if !target.exists() {
@@ -962,5 +1120,186 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     接收 chunk 若只按 id 取任务，攻击者可用 outbound Send 任务 id 改写/删除本机源文件。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     注册真实 Send 任务指向源文件，用该 id 提交 chunk，断言 success=false 且源文件内容不变。
+    #[tokio::test]
+    async fn handle_chunk_rejects_outbound_send_task_without_touching_source() {
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let source_path = receive_dir.join("outbound-source.bin");
+        let original = b"KEEP-SOURCE-BYTES";
+        fs::write(&source_path, original).unwrap();
+
+        let transfer_id = "outbound-send-id".to_string();
+        state.transfers.add(TransferTask {
+            id: transfer_id.clone(),
+            filename: "outbound-source.bin".to_string(),
+            file_path: source_path.to_string_lossy().to_string(),
+            size: original.len() as u64,
+            sha256: "deadbeef".to_string(),
+            chunk_size: 4,
+            direction: TransferDirection::Send,
+            peer_device_id: "peer".to_string(),
+            status: TransferStatus::Transferring,
+            transferred_bytes: 0,
+            created_at: now_iso(),
+            completed_at: None,
+        });
+
+        let resp = handle_chunk(&state, &transfer_id, 0, b"XXXX".to_vec())
+            .await
+            .expect("chunk call should return Ok envelope");
+        assert!(
+            !resp.success,
+            "对 Send 任务的 chunk 必须失败，不得写入源文件"
+        );
+        assert_eq!(resp.received_bytes, 0);
+        let after = fs::read(&source_path).expect("源文件应仍存在");
+        assert_eq!(after, original, "outbound 源文件内容必须完全不变");
+        // 任务应仍在 registry 中且仍是 Send
+        let task = state.transfers.get(&transfer_id).expect("Send 任务应保留");
+        assert_eq!(task.direction, TransferDirection::Send);
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     init 幂等路径若命中 Send entry 并返回 accepted，会把发送源路径暴露给后续 chunk 写入。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先放一个 Send 任务，再用相同 transfer_id 调 init，断言 Conflict 且源文件不变。
+    #[tokio::test]
+    async fn handle_init_rejects_send_entry_on_idempotent_path() {
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let source_path = receive_dir.join("send-source.txt");
+        let original = b"send-source-content";
+        fs::write(&source_path, original).unwrap();
+        let transfer_id = "send-init-id".to_string();
+
+        state.transfers.add(TransferTask {
+            id: transfer_id.clone(),
+            filename: "send-source.txt".to_string(),
+            file_path: source_path.to_string_lossy().to_string(),
+            size: original.len() as u64,
+            sha256: "abc".to_string(),
+            chunk_size: 4,
+            direction: TransferDirection::Send,
+            peer_device_id: "peer".to_string(),
+            status: TransferStatus::Pending,
+            transferred_bytes: 0,
+            created_at: now_iso(),
+            completed_at: None,
+        });
+
+        let err = handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "send-source.txt".to_string(),
+                size: original.len() as u64,
+                sha256: "abc".to_string(),
+                chunk_size: 4,
+            },
+        )
+        .await
+        .expect_err("init 命中 Send entry 必须 conflict");
+        assert!(
+            matches!(err, AppError::Conflict(_)),
+            "应返回 Conflict: {err:?}"
+        );
+        let after = fs::read(&source_path).unwrap();
+        assert_eq!(after, original);
+        assert_eq!(
+            state.transfers.get(&transfer_id).unwrap().direction,
+            TransferDirection::Send
+        );
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     绝对路径 filename 经 PathBuf::join 会替换 receive_dir，导致任意路径写入。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     init 提交绝对路径 filename，断言 Validation 错误，且 receive_dir 外不产生新文件。
+    #[tokio::test]
+    async fn handle_init_rejects_absolute_filename() {
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let outside = std::env::temp_dir()
+            .join("cp_transfer_tests")
+            .join(format!("escape-abs-{}", SEQ.fetch_add(1, Ordering::SeqCst)));
+        let _ = fs::remove_file(&outside);
+
+        let abs_name = outside.to_string_lossy().to_string();
+        let err = handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some("abs-name".to_string()),
+                filename: abs_name,
+                size: 1,
+                sha256: "x".to_string(),
+                chunk_size: 1,
+            },
+        )
+        .await
+        .expect_err("绝对路径 filename 必须拒绝");
+        assert!(
+            matches!(err, AppError::Validation(_)),
+            "应返回 Validation: {err:?}"
+        );
+        assert!(!outside.exists(), "不得在 receive_dir 外创建目标");
+        assert!(state.transfers.list().is_empty());
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     `../` 相对路径可逃逸 receive_dir，必须在 init 边界拒绝。
+    #[tokio::test]
+    async fn handle_init_rejects_parent_dir_filename() {
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+
+        let err = handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some("parent-escape".to_string()),
+                filename: "../evil.bin".to_string(),
+                size: 1,
+                sha256: "x".to_string(),
+                chunk_size: 1,
+            },
+        )
+        .await
+        .expect_err("../ filename 必须拒绝");
+        assert!(
+            matches!(err, AppError::Validation(_)),
+            "应返回 Validation: {err:?}"
+        );
+        assert!(state.transfers.list().is_empty());
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     basename 校验本身必须拒绝绝对路径、父目录与多组件路径。
+    #[test]
+    fn sanitize_receive_basename_rejects_escape_patterns() {
+        assert!(sanitize_receive_basename("ok.txt", "filename").is_ok());
+        assert!(sanitize_receive_basename("/tmp/x", "filename").is_err());
+        assert!(sanitize_receive_basename("../x", "filename").is_err());
+        assert!(sanitize_receive_basename("a/b", "filename").is_err());
+        assert!(sanitize_receive_basename("a\\b", "filename").is_err());
+        assert!(sanitize_receive_basename("..", "filename").is_err());
+        assert!(sanitize_receive_basename(".", "filename").is_err());
+        assert!(sanitize_receive_basename("", "filename").is_err());
+        assert!(sanitize_receive_basename("  ", "filename").is_err());
     }
 }
