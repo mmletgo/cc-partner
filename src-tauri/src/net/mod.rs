@@ -10,6 +10,7 @@
 //!     browse-only 模式验证 sidecar 控制文件与 health 后复用端口且不注册本机服务。
 
 pub mod discovery;
+pub mod error_response;
 pub mod http_server;
 pub mod peer_client;
 pub mod protocol;
