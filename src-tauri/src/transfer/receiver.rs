@@ -14,6 +14,8 @@
 //!     - `handle_complete(state, id)`：显式终态握手；对 size=0 或 resume 已满的任务触发 finalize，
 //!       并返回与 chunk 相同的 `{success, received_bytes}`（命中墓碑则幂等回放）。
 //!     - finalize：SHA256 校验 .tmp，通过后在 receive_dir 锁内原子 no-replace 落盘。
+//!     - finalize intent journal：落盘前持久化候选最终路径，覆盖 place→history 崩溃窗口，
+//!       重启后 init/complete 可晋升 durable，禁止同 transfer_id 后缀重复副本。
 //!
 //! 临时文件命名 `.{transfer_id}.tmp` 与 Python 一致（断点续传识别）。
 //! 文件名冲突处理（file.txt → file (1).txt → file (2).txt）与 Python `_resolve_filename` 一致。
@@ -27,6 +29,30 @@ use sha2::{Digest, Sha256};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+/// finalize 落盘意图 journal 目录名（位于 receive_dir 下）。
+const FINALIZE_INTENT_DIR: &str = ".cc-partner-transfer-intents";
+
+/// 落盘前写入的 durable intent（跨进程恢复 place→history 窗口）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     最终文件可能已 place 成功，但 transfer_history 尚未写入；进程崩溃后内存 active/墓碑丢失，
+///     若不保留 intent，handle_init 会接受同一 transfer_id 并产生后缀重复文件。
+///
+/// Code Logic（这个结构做什么）:
+///     序列化为 receive_dir 下 `.cc-partner-transfer-intents/<transfer_id>.json`；
+///     含 transfer 元数据与候选 final_path；history+墓碑成功后删除。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct FinalizeIntent {
+    transfer_id: String,
+    filename: String,
+    size: u64,
+    sha256: String,
+    chunk_size: u64,
+    final_filename: String,
+    final_path: String,
+    created_at: String,
+}
 
 /// 当前时间 RFC3339 ISO 字符串。
 fn now_iso() -> String {
@@ -138,6 +164,30 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
     if state.transfers.tombstone(&transfer_id).is_some() {
         return Err(AppError::conflict(format!(
             "transfer_id `{transfer_id}` 已终态完成，拒绝重新 init"
+        )));
+    }
+
+    // 跨重启：history 中已 durable 的 Receive 终态禁止 reopen（避免后缀重复）。
+    if let Some(hist) = state.transfer_repo.get_by_id(&transfer_id).await? {
+        if hist.direction == TransferDirection::Receive
+            && matches!(
+                hist.status,
+                TransferStatus::Completed | TransferStatus::Failed | TransferStatus::Cancelled
+            )
+        {
+            return Err(AppError::conflict(format!(
+                "transfer_id `{transfer_id}` 已在 transfer_history 终态，拒绝重新 init"
+            )));
+        }
+    }
+
+    // place→history 崩溃窗口：intent + 最终文件已在 → 晋升 durable 后拒绝 reopen。
+    if try_recover_finalize_intent(state, &transfer_id, &dir)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::conflict(format!(
+            "transfer_id `{transfer_id}` 已从 finalize intent 恢复终态，拒绝重新 init"
         )));
     }
 
@@ -506,10 +556,12 @@ pub async fn handle_chunk(
 /// Code Logic（这个函数做什么）:
 ///     1. 取 per-transfer 单飞锁；
 ///     2. 无 active 任务时查墓碑；仍 miss 时查 transfer_history（Receive 方向）跨重启收敛；
+///        再 miss 时尝试 finalize intent 恢复（place 后 crash 窗口）；
 ///     3. 拒绝 non-Receive；
 ///     4. 读取 tmp 实际长度：不足 size → success=false（尚未收齐）；
 ///        >= size（含 size=0 空文件）→ 调用 finalize_transfer；
-///     5. 返回墓碑结果或当前进度。
+///     5. durable history 写入失败上抛 Unavailable（retryable 5xx），驱动发送端重试 complete；
+///     6. 返回墓碑结果或当前进度。
 pub async fn handle_complete(state: &AppState, transfer_id: &str) -> Result<ChunkResp, AppError> {
     let complete_lock = state.transfers.finalize_lock(transfer_id);
     let _guard = complete_lock.lock().await;
@@ -529,6 +581,14 @@ pub async fn handle_complete(state: &AppState, transfer_id: &str) -> Result<Chun
             }
             // 进程重启后内存墓碑丢失：用持久化 history 收敛已完成的 Receive。
             if let Some(resp) = history_terminal_chunk_resp(state, transfer_id).await? {
+                return Ok(resp);
+            }
+            // place→history 崩溃窗口：intent + 最终文件 → 晋升 durable。
+            let receive_dir =
+                PathBuf::from(&state.config.read().expect("config 读锁中毒").receive_dir);
+            if let Some(resp) =
+                try_recover_finalize_intent(state, transfer_id, &receive_dir).await?
+            {
                 return Ok(resp);
             }
             tracing::error!("complete 未找到传输任务: {transfer_id}");
@@ -553,11 +613,11 @@ pub async fn handle_complete(state: &AppState, transfer_id: &str) -> Result<Chun
     // 已落盘待 durable：file_path 已是最终路径，禁止按 tmp 再写；只重试 history 晋升。
     if task.status == TransferStatus::Completed {
         if let Err(e) = finalize_transfer(state, transfer_id).await {
+            // durable 失败：上抛 retryable Unavailable，让 PeerClient 走 5xx 重试路径。
             tracing::error!("complete durable 晋升失败: {transfer_id}, {e}");
-            return Ok(ChunkResp {
-                success: false,
-                received_bytes: task.size,
-            });
+            return Err(AppError::unavailable(format!(
+                "transfer_history 尚未 durable，请重试 complete: {transfer_id}: {e}"
+            )));
         }
         if let Some(tomb) = state.transfers.tombstone(transfer_id) {
             let success = matches!(
@@ -569,10 +629,9 @@ pub async fn handle_complete(state: &AppState, transfer_id: &str) -> Result<Chun
                 received_bytes: tomb.received_bytes,
             });
         }
-        return Ok(ChunkResp {
-            success: false,
-            received_bytes: task.size,
-        });
+        return Err(AppError::unavailable(format!(
+            "transfer durable 晋升后无墓碑，请重试 complete: {transfer_id}"
+        )));
     }
 
     let tmp_path = PathBuf::from(&task.file_path);
@@ -615,6 +674,15 @@ pub async fn handle_complete(state: &AppState, transfer_id: &str) -> Result<Chun
 
     if let Err(e) = finalize_transfer(state, transfer_id).await {
         tracing::error!("complete finalize 失败: {transfer_id}, {e}");
+        // 若文件已落盘但 history 未 durable（active Completed），上抛 5xx 驱动重试。
+        if let Some(t) = state.transfers.get(transfer_id) {
+            if t.status == TransferStatus::Completed {
+                return Err(AppError::unavailable(format!(
+                    "transfer_history 尚未 durable，请重试 complete: {transfer_id}: {e}"
+                )));
+            }
+        }
+        // 其它 finalize 错误（校验失败等）已写 failed 墓碑，下面按墓碑/active 返回。
     }
 
     if let Some(tomb) = state.transfers.tombstone(transfer_id) {
@@ -628,15 +696,21 @@ pub async fn handle_complete(state: &AppState, transfer_id: &str) -> Result<Chun
         });
     }
 
-    // finalize 未写墓碑（异常路径）：按仍在 registry 的任务返回 false。
-    let received = state
-        .transfers
-        .get(transfer_id)
-        .map(|t| t.transferred_bytes)
-        .unwrap_or(actual_len);
+    // finalize 未写墓碑：若仍是 Completed active → durable 窗口，上抛 5xx。
+    if let Some(t) = state.transfers.get(transfer_id) {
+        if t.status == TransferStatus::Completed {
+            return Err(AppError::unavailable(format!(
+                "transfer_history 尚未 durable，请重试 complete: {transfer_id}"
+            )));
+        }
+        return Ok(ChunkResp {
+            success: false,
+            received_bytes: t.transferred_bytes,
+        });
+    }
     Ok(ChunkResp {
         success: false,
-        received_bytes: received,
+        received_bytes: actual_len,
     })
 }
 
@@ -707,24 +781,86 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
         }
     };
 
-    // receive_dir 锁覆盖 resolve → exclusive place，防止并发同名 TOCTOU 覆盖。
+    // receive_dir 锁覆盖 resolve → write intent → exclusive place，防止并发同名 TOCTOU 覆盖。
     let dir_lock = state.transfers.receive_dir_lock();
     let _dir_guard = dir_lock.lock().await;
 
-    let placed = match place_final_file_exclusive(&receive_dir, &safe_filename, &tmp_path).await {
-        Ok(p) => p,
+    // 先 resolve 候选 final 路径，**在 place 之前**持久化 intent（跨崩溃恢复）。
+    let final_filename = resolve_filename(&receive_dir, &safe_filename);
+    if let Err(e) = sanitize_receive_basename(&final_filename, "final_filename") {
+        on_receive_failed(state, transfer_id, &format!("非法最终文件名: {e}")).await;
+        return Ok(());
+    }
+    let final_path = receive_dir.join(&final_filename);
+    if let Err(e) = ensure_path_within_dir(&receive_dir, &final_path) {
+        on_receive_failed(state, transfer_id, &format!("最终路径非法: {e}")).await;
+        return Ok(());
+    }
+
+    let intent = FinalizeIntent {
+        transfer_id: transfer_id.to_string(),
+        filename: task.filename.clone(),
+        size: task.size,
+        sha256: task.sha256.clone(),
+        chunk_size: task.chunk_size,
+        final_filename: final_filename.clone(),
+        final_path: final_path.to_string_lossy().to_string(),
+        created_at: now_iso(),
+    };
+    if let Err(e) = write_finalize_intent(&receive_dir, &intent).await {
+        on_receive_failed(
+            state,
+            transfer_id,
+            &format!("写入 finalize intent 失败: {e}"),
+        )
+        .await;
+        return Ok(());
+    }
+
+    // place 到 intent 声明的路径；冲突则清 intent 后走完整 exclusive 循环。
+    let placed_path = match commit_tmp_to_final_no_replace(&tmp_path, &final_path).await {
+        Ok(()) => final_path,
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            let _ = clear_finalize_intent(&receive_dir, transfer_id).await;
+            let placed =
+                match place_final_file_exclusive(&receive_dir, &safe_filename, &tmp_path).await {
+                    Ok(p) => p,
+                    Err(pe) => {
+                        on_receive_failed(state, transfer_id, &format!("原子落盘失败: {pe}")).await;
+                        return Ok(());
+                    }
+                };
+            let intent2 = FinalizeIntent {
+                transfer_id: transfer_id.to_string(),
+                filename: task.filename.clone(),
+                size: task.size,
+                sha256: task.sha256.clone(),
+                chunk_size: task.chunk_size,
+                final_filename: placed.final_filename.clone(),
+                final_path: placed.final_path.to_string_lossy().to_string(),
+                created_at: now_iso(),
+            };
+            // place 已成功后 intent 必须立刻落盘；失败仍 mark_completed，靠文件存在恢复。
+            if let Err(ie) = write_finalize_intent(&receive_dir, &intent2).await {
+                tracing::error!(
+                    "place 成功后补写 intent 失败（依赖 active/文件恢复）: {transfer_id}, {ie}"
+                );
+            }
+            placed.final_path
+        }
         Err(e) => {
+            let _ = clear_finalize_intent(&receive_dir, transfer_id).await;
             on_receive_failed(state, transfer_id, &format!("原子落盘失败: {e}")).await;
             return Ok(());
         }
     };
-    let PlacedFile {
-        final_filename,
-        final_path,
-    } = placed;
     tracing::debug!(
-        "receive exclusive place ok: {transfer_id} -> {final_filename} ({})",
-        final_path.display()
+        "receive exclusive place ok: {transfer_id} -> {} ({})",
+        placed_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?"),
+        placed_path.display()
     );
 
     // 先把 active 标为 Completed 并写入最终路径，但**不** remove / 不写墓碑 / 不 emit completed。
@@ -733,7 +869,7 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
     state.transfers.mark_completed(
         transfer_id,
         completed_at,
-        Some(final_path.to_string_lossy().to_string()),
+        Some(placed_path.to_string_lossy().to_string()),
     );
     let completed_task = state.transfers.get(transfer_id).ok_or_else(|| {
         AppError::generic(format!(
@@ -795,6 +931,12 @@ async fn promote_completed_to_durable(
         },
     );
 
+    // history + 墓碑已就绪：清除跨崩溃 intent journal。
+    let receive_dir = PathBuf::from(&state.config.read().expect("config 读锁中毒").receive_dir);
+    if let Err(e) = clear_finalize_intent(&receive_dir, transfer_id).await {
+        tracing::warn!("清除 finalize intent 失败（可忽略）: {transfer_id}, {e}");
+    }
+
     state.emit_event(
         "transfer:completed",
         serde_json::json!({
@@ -806,6 +948,155 @@ async fn promote_completed_to_durable(
 
     tracing::info!("文件接收完成: {transfer_id} -> {final_path}");
     Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     place 前必须把候选 final 路径持久化到 journal，才能在进程崩溃后避免同 transfer_id 重传后缀副本。
+///
+/// Code Logic（这个函数做什么）:
+///     在 receive_dir/.cc-partner-transfer-intents/ 下原子写 `<transfer_id>.json`。
+async fn write_finalize_intent(
+    receive_dir: &Path,
+    intent: &FinalizeIntent,
+) -> Result<(), AppError> {
+    let dir = receive_dir.join(FINALIZE_INTENT_DIR);
+    tokio::fs::create_dir_all(&dir).await?;
+    let path = finalize_intent_path(receive_dir, &intent.transfer_id)?;
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(intent)?;
+    tokio::fs::write(&tmp, &bytes).await?;
+    // 同进程覆盖：先 remove 旧 intent（Windows rename 到已存在路径可能失败）。
+    let _ = tokio::fs::remove_file(&path).await;
+    tokio::fs::rename(&tmp, &path).await?;
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     durable history + 墓碑成功后必须删除 intent，避免后续误恢复。
+///
+/// Code Logic（这个函数做什么）:
+///     删除 intent 文件；不存在视为成功。
+async fn clear_finalize_intent(receive_dir: &Path, transfer_id: &str) -> Result<(), AppError> {
+    let path = finalize_intent_path(receive_dir, transfer_id)?;
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(AppError::from(e)),
+    }
+}
+
+/// Code Logic: 拼 intent 文件路径并校验仍在 receive_dir 内。
+fn finalize_intent_path(receive_dir: &Path, transfer_id: &str) -> Result<PathBuf, AppError> {
+    let safe_id = sanitize_receive_basename(transfer_id, "transfer_id")?;
+    let path = receive_dir
+        .join(FINALIZE_INTENT_DIR)
+        .join(format!("{safe_id}.json"));
+    ensure_path_within_dir(receive_dir, &path)?;
+    Ok(path)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     进程在 place 后、history 前崩溃时，内存 active/墓碑丢失；必须从 intent + 最终文件恢复
+///     durable 终态，阻止 handle_init 接受同一 transfer_id 生成后缀副本。
+///
+/// Code Logic（这个函数做什么）:
+///     读 intent；若 history 已有终态则清 intent；若 final 文件存在且 size 匹配则
+///     构造 Completed task → promote_completed_to_durable → 返回 success ChunkResp；
+///     intent 存在但 final 缺失则清 intent 并返回 None（允许干净重传）。
+async fn try_recover_finalize_intent(
+    state: &AppState,
+    transfer_id: &str,
+    receive_dir: &Path,
+) -> Result<Option<ChunkResp>, AppError> {
+    let path = match finalize_intent_path(receive_dir, transfer_id) {
+        Ok(p) => p,
+        Err(_) => return Ok(None),
+    };
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(AppError::from(e)),
+    };
+    let intent: FinalizeIntent = match serde_json::from_slice(&bytes) {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!("损坏的 finalize intent，删除: {transfer_id}, {e}");
+            let _ = clear_finalize_intent(receive_dir, transfer_id).await;
+            return Ok(None);
+        }
+    };
+    if intent.transfer_id != transfer_id {
+        tracing::warn!(
+            "finalize intent transfer_id 不匹配，删除: expected={transfer_id}, got={}",
+            intent.transfer_id
+        );
+        let _ = clear_finalize_intent(receive_dir, transfer_id).await;
+        return Ok(None);
+    }
+
+    // 已 durable：只清 intent。
+    if let Some(hist) = state.transfer_repo.get_by_id(transfer_id).await? {
+        if hist.direction == TransferDirection::Receive
+            && matches!(
+                hist.status,
+                TransferStatus::Completed | TransferStatus::Failed | TransferStatus::Cancelled
+            )
+        {
+            let _ = clear_finalize_intent(receive_dir, transfer_id).await;
+            return history_terminal_chunk_resp(state, transfer_id).await;
+        }
+    }
+
+    let final_path = PathBuf::from(&intent.final_path);
+    // 边界：final_path 必须仍在 receive_dir 内。
+    if ensure_path_within_dir(receive_dir, &final_path).is_err() {
+        tracing::warn!("intent final_path 逃逸 receive_dir，删除: {transfer_id}");
+        let _ = clear_finalize_intent(receive_dir, transfer_id).await;
+        return Ok(None);
+    }
+
+    match tokio::fs::metadata(&final_path).await {
+        Ok(meta) if meta.len() == intent.size => {
+            // 最终文件在：晋升 durable，禁止 re-receive。
+            let task = TransferTask {
+                id: transfer_id.to_string(),
+                filename: intent.filename.clone(),
+                file_path: intent.final_path.clone(),
+                size: intent.size,
+                sha256: intent.sha256.clone(),
+                chunk_size: intent.chunk_size,
+                direction: TransferDirection::Receive,
+                peer_device_id: String::new(),
+                status: TransferStatus::Completed,
+                transferred_bytes: intent.size,
+                created_at: intent.created_at.clone(),
+                completed_at: Some(now_iso()),
+            };
+            // 若 registry 无 entry，临时 add 以便 promote 后 remove/tombstone。
+            if state.transfers.get(transfer_id).is_none() {
+                state.transfers.add(task.clone());
+            } else {
+                state.transfers.mark_completed(
+                    transfer_id,
+                    task.completed_at.clone().unwrap_or_else(now_iso),
+                    Some(intent.final_path.clone()),
+                );
+            }
+            promote_completed_to_durable(state, transfer_id, &task).await?;
+            Ok(Some(ChunkResp {
+                success: true,
+                received_bytes: intent.size,
+            }))
+        }
+        Ok(_) | Err(_) => {
+            // final 不在或 size 不匹配：intent 过期/place 未完成，清 intent 允许干净重传。
+            tracing::warn!(
+                "finalize intent 存在但最终文件缺失/不匹配，清除 intent 允许重传: {transfer_id}"
+            );
+            let _ = clear_finalize_intent(receive_dir, transfer_id).await;
+            Ok(None)
+        }
+    }
 }
 
 /// 原子落盘结果。
@@ -1151,6 +1442,36 @@ pub async fn handle_status(state: &AppState, transfer_id: &str) -> StatusResp {
     // 跨重启：history 中 Receive 终态可还原 status，避免 unknown 导致发送端假失败。
     if let Ok(Some(resp)) = history_terminal_status_resp(state, transfer_id).await {
         return resp;
+    }
+    // place→history 崩溃窗口：尝试从 intent 晋升后再读 history/墓碑。
+    let receive_dir = PathBuf::from(&state.config.read().expect("config 读锁中毒").receive_dir);
+    if let Ok(Some(_)) = try_recover_finalize_intent(state, transfer_id, &receive_dir).await {
+        if let Some(tomb) = state.transfers.tombstone(transfer_id) {
+            let (status_str_val, received) = match &tomb.outcome {
+                crate::transfer::registry::TransferOutcome::Completed { .. } => {
+                    ("completed".to_string(), tomb.size)
+                }
+                crate::transfer::registry::TransferOutcome::Failed { .. } => {
+                    ("failed".to_string(), tomb.received_bytes)
+                }
+            };
+            let size = tomb.size;
+            return StatusResp {
+                transfer_id: transfer_id.to_string(),
+                status: status_str_val,
+                progress: if size == 0 {
+                    0.0
+                } else {
+                    (received as f64) / (size as f64)
+                },
+                transferred_bytes: received,
+                size,
+                filename: tomb.filename,
+            };
+        }
+        if let Ok(Some(resp)) = history_terminal_status_resp(state, transfer_id).await {
+            return resp;
+        }
     }
     StatusResp {
         transfer_id: transfer_id.to_string(),
@@ -2252,11 +2573,12 @@ mod tests {
 
     /// Business Logic（为什么需要这个测试）:
     ///     最终文件落盘后若 transfer_history 写入失败，不得向发送端报告 completed，
-    ///     也不得 remove active/写成功墓碑；必须保留可恢复状态以便重试 record。
+    ///     也不得 remove active/写成功墓碑；必须保留可恢复状态，并以 retryable 5xx
+    ///     驱动 PeerClient 重试 complete（而非 HTTP 200 success=false 立即终止）。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     init 后 DROP transfer_history 注入 record 失败 → complete 返回 success=false；
-    ///     最终文件已落地、active 仍在、无成功墓碑、status≠completed；
+    ///     init 后 DROP transfer_history 注入 record 失败 → complete 返回 Unavailable；
+    ///     最终文件已落地、active 仍在、无成功墓碑、status≠completed、intent 仍在；
     ///     重建表后重试 complete 应 durable 成功。
     #[tokio::test]
     async fn history_record_failure_keeps_recoverable_state_without_claiming_completed() {
@@ -2286,14 +2608,18 @@ mod tests {
             .await
             .expect("drop history table");
 
-        let first = handle_complete(&state, &transfer_id)
+        let first_err = handle_complete(&state, &transfer_id)
             .await
-            .expect("complete should not transport-error");
+            .expect_err("history 失败应返回 retryable Unavailable 而非 success=false");
         assert!(
-            !first.success,
-            "history 失败时 complete 不得 success=true: {first:?}"
+            matches!(first_err, AppError::Unavailable(_)),
+            "应返回 Unavailable 驱动 5xx 重试: {first_err:?}"
         );
         assert!(receive_dir.join("durable.txt").exists(), "最终文件应已落盘");
+        let intent_path = receive_dir
+            .join(FINALIZE_INTENT_DIR)
+            .join(format!("{transfer_id}.json"));
+        assert!(intent_path.exists(), "history 失败时 intent 必须保留");
         let active = state
             .transfers
             .get(&transfer_id)
@@ -2311,16 +2637,6 @@ mod tests {
         assert!(
             status.status == "transferring" || status.status == "pending",
             "应表现为可重试中: {status:?}"
-        );
-        assert!(
-            state
-                .transfer_repo
-                .get_by_id(&transfer_id)
-                .await
-                .ok()
-                .flatten()
-                .is_none(),
-            "history 表已丢，不得存在 durable 行"
         );
 
         // 恢复 schema 后重试 complete → 应晋升 durable 并宣告完成。
@@ -2352,6 +2668,10 @@ mod tests {
             state.transfers.tombstone(&transfer_id).map(|t| t.outcome),
             Some(crate::transfer::registry::TransferOutcome::Completed { .. })
         ));
+        assert!(
+            !intent_path.exists(),
+            "durable 成功后应清除 finalize intent"
+        );
         let hist = state
             .transfer_repo
             .get_by_id(&transfer_id)
@@ -2361,6 +2681,119 @@ mod tests {
         assert_eq!(hist.status, TransferStatus::Completed);
         let status_after = handle_status(&state, &transfer_id).await;
         assert_eq!(status_after.status, "completed");
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     place 成功后、history 写入前进程崩溃时，不得因无 memory/history 而接受同一
+    ///     transfer_id 重新 init 并生成带后缀的重复副本。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     complete 落盘后 DROP history 并 clear registry/tombstones 模拟崩溃；
+    ///     保留 intent + 最终文件 → init 必须 conflict；complete 应恢复 durable 且无后缀文件。
+    #[tokio::test]
+    async fn place_before_history_crash_recovers_via_intent_without_suffix_duplicate() {
+        use sha2::{Digest, Sha256};
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let payload = b"intent-crash-payload";
+        let sha = format!("{:x}", Sha256::digest(payload));
+        let transfer_id = "intent-crash".to_string();
+
+        handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "crash.bin".to_string(),
+                size: payload.len() as u64,
+                sha256: sha.clone(),
+                chunk_size: 8,
+            },
+        )
+        .await
+        .expect("init");
+
+        // 写入完整 tmp 后 complete（会 place）。
+        let tmp = receive_dir.join(format!(".{transfer_id}.tmp"));
+        fs::write(&tmp, payload).unwrap();
+
+        // 注入 history 失败：place + intent 成功，但 durable 失败。
+        sqlx::query("DROP TABLE transfer_history")
+            .execute(&state.db)
+            .await
+            .expect("drop history");
+        let err = handle_complete(&state, &transfer_id)
+            .await
+            .expect_err("history 失败应 Unavailable");
+        assert!(matches!(err, AppError::Unavailable(_)));
+        assert!(receive_dir.join("crash.bin").exists());
+        let intent_path = receive_dir
+            .join(FINALIZE_INTENT_DIR)
+            .join(format!("{transfer_id}.json"));
+        assert!(intent_path.exists(), "崩溃窗口必须保留 intent");
+
+        // 模拟进程重启：清空内存 active + 墓碑，history 表仍缺失。
+        state.transfers.remove(&transfer_id);
+        state.transfers.clear_tombstones_for_test();
+        assert!(state.transfers.get(&transfer_id).is_none());
+        assert!(state.transfers.tombstone(&transfer_id).is_none());
+
+        // 重建 history 表后：init 不得 reopen；complete 应恢复。
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS transfer_history (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                peer_device_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                transferred_bytes INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            )",
+        )
+        .execute(&state.db)
+        .await
+        .expect("recreate history");
+
+        let init_err = handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "crash.bin".to_string(),
+                size: payload.len() as u64,
+                sha256: sha,
+                chunk_size: 8,
+            },
+        )
+        .await
+        .expect_err("intent+final 存在时 init 必须 conflict");
+        assert!(
+            matches!(init_err, AppError::Conflict(_)),
+            "应 conflict 禁止重传: {init_err:?}"
+        );
+
+        let recovered = handle_complete(&state, &transfer_id)
+            .await
+            .expect("complete 应从 intent 恢复");
+        assert!(recovered.success);
+        assert_eq!(fs::read(receive_dir.join("crash.bin")).unwrap(), payload);
+        assert!(
+            !receive_dir.join("crash (1).bin").exists(),
+            "不得生成后缀重复副本"
+        );
+        assert!(!intent_path.exists(), "恢复后应清除 intent");
+        let hist = state
+            .transfer_repo
+            .get_by_id(&transfer_id)
+            .await
+            .unwrap()
+            .expect("history 应写入");
+        assert_eq!(hist.status, TransferStatus::Completed);
 
         let _ = fs::remove_dir_all(&receive_dir);
     }

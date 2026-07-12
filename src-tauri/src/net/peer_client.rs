@@ -835,8 +835,10 @@ impl PeerClient {
     /// Code Logic（这个函数做什么）:
     ///     POST `{base_url}/api/transfer/complete/{id}`，空 JSON body；期望 `{success, received_bytes}`。
     ///     对 Network / 5xx / 504 / retryable Remote 做有界退避重试（默认 4 次，间隔 200ms*attempt）。
+    ///     HTTP 200 但 success=false 时：status=completed → 成功收敛；status=transferring/pending
+    ///     且仍有剩余 attempt → 退避后重发 complete（覆盖 durable history 写入瞬时失败窗口）。
     ///     仍失败时可选 status 轮询：若对端 status=completed 则视为成功（响应丢失收敛）。
-    ///     success==true → Ok(true)；success==false → Ok(false)；其它 → Err(PeerCallError)。
+    ///     success==true → Ok(true)；不可恢复的 success=false → Ok(false)；其它 → Err(PeerCallError)。
     pub async fn transfer_complete(
         &self,
         base_url: &str,
@@ -862,13 +864,16 @@ impl PeerClient {
         let url = format!("{base_url}/api/transfer/complete/{transfer_id}");
         let body = serde_json::json!({});
         let mut last_err: Option<PeerCallError> = None;
+        // success=false 且 status 仍 transferring 时的最后一次观测，用于重试耗尽诊断。
+        let mut saw_retryable_soft_false = false;
 
         for attempt in 1..=policy.max_attempts {
             match self.request_post::<ChunkResp, _>(&url, &body).await {
                 Ok(resp) if resp.success => return Ok(true),
                 Ok(_resp) => {
-                    // success=false：可能是尚未收齐，也可能是重启后内存 miss。
-                    // 开启 status_fallback 时再查一次终态，避免假失败。
+                    // success=false：可能是尚未收齐、durable 晋升失败、或重启后内存 miss。
+                    // 开启 status_fallback 时再查终态：completed 收敛成功；transferring/pending
+                    // 则在有界策略内退避重发 complete，驱动接收端 promote_completed_to_durable。
                     if policy.status_fallback {
                         if let Ok(status) = self.transfer_status_typed(base_url, transfer_id).await
                         {
@@ -877,6 +882,18 @@ impl PeerClient {
                                     "transfer complete success=false 但 status=completed，按成功收敛: {transfer_id}"
                                 );
                                 return Ok(true);
+                            }
+                            if status_json_is_still_transferring(&status)
+                                && attempt < policy.max_attempts
+                            {
+                                saw_retryable_soft_false = true;
+                                tracing::debug!(
+                                    "transfer complete success=false 且 status 仍 transferring，退避重试 complete: {transfer_id} attempt={attempt}/{}",
+                                    policy.max_attempts
+                                );
+                                let backoff = policy.base_backoff * attempt;
+                                tokio::time::sleep(backoff).await;
+                                continue;
                             }
                         }
                     }
@@ -910,10 +927,17 @@ impl PeerClient {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| PeerCallError::InvalidResponse {
+        if let Some(e) = last_err {
+            return Err(e);
+        }
+        // soft success=false 重试耗尽且 status 从未 completed：返回 false（业务未完成）。
+        if saw_retryable_soft_false {
+            return Ok(false);
+        }
+        Err(PeerCallError::InvalidResponse {
             url,
             reason: "complete 重试耗尽且无错误详情".to_string(),
-        }))
+        })
     }
 
     /// 查询对端接收任务状态（结构化错误，供 complete 收敛使用）。
@@ -1853,5 +1877,79 @@ mod tests {
             .await
             .expect("success=false + status=completed 应收敛");
         assert!(ok);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     接收端文件已落盘但 transfer_history 写入失败时，complete 可能返回 200 success=false，
+    ///     status 仍为 transferring。发送端必须在有界策略内重发 complete，驱动 durable 晋升，
+    ///     而不能立刻 Ok(false) 把任务记为 failed。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     complete 前 2 次 success=false，第 3 次 success=true；status 在成功前恒 transferring；
+    ///     短 backoff 下 transfer_complete_with_policy 应 Ok(true)，且 complete 命中 3 次。
+    #[tokio::test]
+    async fn transfer_complete_retries_success_false_while_transferring() {
+        use axum::response::IntoResponse;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_c = hits.clone();
+        let app = axum::Router::new()
+            .route(
+                "/api/transfer/complete/:id",
+                axum::routing::post(move || {
+                    let hits = hits_c.clone();
+                    async move {
+                        let n = hits.fetch_add(1, Ordering::SeqCst) + 1;
+                        if n < 3 {
+                            axum::Json(serde_json::json!({
+                                "success": false,
+                                "received_bytes": 10
+                            }))
+                            .into_response()
+                        } else {
+                            axum::Json(serde_json::json!({
+                                "success": true,
+                                "received_bytes": 10
+                            }))
+                            .into_response()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/transfer/status/:id",
+                axum::routing::get(|| async move {
+                    axum::Json(serde_json::json!({
+                        "transfer_id": "tid-soft",
+                        "status": "transferring",
+                        "progress": 1.0,
+                        "transferred_bytes": 10,
+                        "size": 10,
+                        "filename": "soft.bin"
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base_url = format!("http://{addr}");
+        let client = PeerClient::new();
+        let policy = TransferCompletePolicy {
+            max_attempts: 4,
+            base_backoff: Duration::from_millis(5),
+            status_fallback: true,
+        };
+        let ok = client
+            .transfer_complete_with_policy(&base_url, "tid-soft", policy)
+            .await
+            .expect("success=false+transferring 应有界重试后成功");
+        assert!(ok);
+        assert_eq!(hits.load(Ordering::SeqCst), 3, "应在第 3 次 complete 成功");
     }
 }
