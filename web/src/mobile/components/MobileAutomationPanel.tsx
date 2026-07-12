@@ -271,7 +271,7 @@ function formatAutomationTimestamp(value: string): string {
  *   runtime 状态条需要把后端 remoteStatus 映射成移动端可本地化的文案 key。
  *
  * Code Logic（这个函数做什么）:
- *   按四态 + local 返回 workbench mobile automation i18n key。
+ *   按四态返回 workbench mobile automation i18n key；offline 主文案为中性“离线”。
  */
 function mobileRuntimeStatusLabelKey(
   status: OrchestratorRemoteRuntimeStatus,
@@ -421,14 +421,22 @@ export function MobileAutomationPanel({
       (selectedTask.worktreeId || selectedTask.sessionId),
   );
   const runtimeStatusLabel = useMemo(() => {
+    // local 成功：display remoteStatus 归一为 null，但 snapshot.remoteStatus 仍是 local。
+    if (runtimeDisplay.snapshot?.remoteStatus === 'local') {
+      return t('workbench:mobile.automationPanel.runtimeStatusLocal');
+    }
     const statusValue = runtimeDisplay.remoteStatus;
     if (!statusValue) {
+      // cold offline / 未知：中性未知，不声称“显示缓存”。
       return t('workbench:mobile.automationPanel.runtimeStatusUnknown');
     }
     return t(mobileRuntimeStatusLabelKey(statusValue));
-  }, [runtimeDisplay.remoteStatus, t]);
+  }, [runtimeDisplay.remoteStatus, runtimeDisplay.snapshot, t]);
+  // 仅 warm offline（有 snapshot + cachedAt）展示缓存提示；cold offline 不声称有缓存。
   const showRuntimeCachedHint =
-    runtimeDisplay.remoteStatus === 'offline' && runtimeDisplay.snapshot !== null;
+    runtimeDisplay.remoteStatus === 'offline' &&
+    runtimeDisplay.snapshot !== null &&
+    runtimeDisplay.cachedAt !== null;
 
   /**
    * Business Logic（为什么需要这个函数）:

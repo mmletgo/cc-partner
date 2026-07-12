@@ -29,10 +29,10 @@ use crate::orchestrator::models::{
 use crate::orchestrator::outbox::open_remote_project_for_shortcut;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::{
-    RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq, RemoteListTasksReq,
-    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp,
-    RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
-    RemoteTaskReq, RemoteTaskReworkReq,
+    MobileRuntimeSnapshotReq, RemoteCompleteOrchestratorTaskPromptReq,
+    RemoteCreateOrchestratorTaskReq, RemoteListTasksReq, RemoteOrchestratorConfigResp,
+    RemoteOrchestratorEvidenceResp, RemoteOrchestratorProjectRefreshResp,
+    RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq, RemoteTaskReq, RemoteTaskReworkReq,
 };
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetrySnapshot;
@@ -768,7 +768,7 @@ pub async fn refresh_project(
 ///     能力 token 门控。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收 `{projectId}` 请求体，构造 route context 并读取 scheduler telemetry 快照，
+///     接收 snake_case `{project_id}` 请求体，构造 route context 并读取 scheduler telemetry 快照，
 ///     委托 runtime_snapshot_for_state。本 handler 从不调用 remote_client，仅服务本机 local 项目。
 pub async fn runtime_snapshot(
     State(state): State<AppState>,
@@ -778,7 +778,7 @@ pub async fn runtime_snapshot(
     let project_id = req.project_id.trim().to_string();
     if project_id.is_empty() {
         return Err(P2pError::from_app_error(
-            AppError::validation("远端 Orchestrator runtime snapshot 缺少 projectId"),
+            AppError::validation("远端 Orchestrator runtime snapshot 缺少 project_id"),
             &ctx,
             "orchestrator.runtime_snapshot",
         ));
@@ -798,12 +798,13 @@ pub async fn runtime_snapshot(
 ///     且必须复用与 Tauri 命令相同的四态 helper，不能把 owning device 的 P2P base URL 暴露给浏览器。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收 camelCase `{projectId}`，trim 后委托 `get_orchestrator_runtime_snapshot_for_state`；
-///     该 helper 对 local/remote 分流，远端成功返回 live 映射快照，失败返回 unsupported/offline/unavailable 空快照。
+///     接收 camelCase `{projectId}`（MobileRuntimeSnapshotReq），trim 后委托
+///     `get_orchestrator_runtime_snapshot_for_state`；该 helper 对 local/remote 分流，
+///     远端成功返回 live 映射快照，preflight/peer 失败返回 offline/unsupported/unavailable 空快照 DTO。
 pub async fn mobile_runtime_snapshot(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
-    Json(req): Json<RemoteRuntimeSnapshotReq>,
+    Json(req): Json<MobileRuntimeSnapshotReq>,
 ) -> P2pResult<Json<OrchestratorRuntimeSnapshotDto>> {
     let project_id = req.project_id.trim().to_string();
     if project_id.is_empty() {
@@ -1564,12 +1565,62 @@ mod tests {
         let ctx = P2pRequestContext {
             request_id: "req-blank".to_string(),
         };
-        let app_error = AppError::validation("远端 Orchestrator runtime snapshot 缺少 projectId");
+        let app_error = AppError::validation("远端 Orchestrator runtime snapshot 缺少 project_id");
         let p2p = P2pError::from_app_error(app_error, &ctx, "orchestrator.runtime_snapshot");
         assert_eq!(p2p.status(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(p2p.envelope().code, "validation_error");
         assert_eq!(p2p.envelope().request_id, "req-blank");
         assert!(!p2p.envelope().retryable);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     P2P route 必须接受字面量 `{"project_id":"..."}` 并拒绝 camelCase `{"projectId":...}`，
+    ///     防止 client/server 共用错误 DTO 掩盖 wire 漂移。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 axum Router + oneshot 直接 POST 两种 body：snake_case 200 且回显 project_id；
+    ///     camelCase 422 且不进入业务 handler。
+    #[tokio::test]
+    async fn runtime_snapshot_router_accepts_snake_case_and_rejects_camel_case_body() {
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        async fn echo_project_id(
+            Json(req): Json<RemoteRuntimeSnapshotReq>,
+        ) -> Json<serde_json::Value> {
+            Json(serde_json::json!({ "project_id": req.project_id }))
+        }
+
+        let app = Router::new().route("/api/orchestrator/runtime-snapshot", post(echo_project_id));
+
+        let snake_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/orchestrator/runtime-snapshot")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"project_id":"owner-local-1"}"#))
+            .expect("snake request");
+        let snake_resp = app.clone().oneshot(snake_req).await.expect("snake oneshot");
+        assert_eq!(snake_resp.status(), axum::http::StatusCode::OK);
+        let snake_bytes = axum::body::to_bytes(snake_resp.into_body(), 1024 * 1024)
+            .await
+            .expect("snake body");
+        let snake_json: serde_json::Value =
+            serde_json::from_slice(&snake_bytes).expect("snake json");
+        assert_eq!(snake_json["project_id"], "owner-local-1");
+
+        let camel_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/orchestrator/runtime-snapshot")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"projectId":"owner-local-1"}"#))
+            .expect("camel request");
+        let camel_resp = app.oneshot(camel_req).await.expect("camel oneshot");
+        assert_eq!(
+            camel_resp.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "P2P route must reject camelCase projectId body"
+        );
     }
 
     /// Business Logic（为什么需要这个测试 / T2 契约核心）:
@@ -1617,13 +1668,13 @@ mod tests {
             as fn(
                 State<AppState>,
                 Extension<P2pRequestContext>,
-                Json<RemoteRuntimeSnapshotReq>,
+                Json<MobileRuntimeSnapshotReq>,
             ) -> _;
         let addr = handler_ptr as usize;
         assert_ne!(addr, 0, "mobile_runtime_snapshot handler 必须存在");
 
         for blank in ["", "   ", "\t\n"] {
-            let req = RemoteRuntimeSnapshotReq {
+            let req = MobileRuntimeSnapshotReq {
                 project_id: blank.to_string(),
             };
             assert!(req.project_id.trim().is_empty());
