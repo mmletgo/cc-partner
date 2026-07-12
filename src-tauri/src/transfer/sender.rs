@@ -421,7 +421,8 @@ enum SendError {
 ///     1. 以 resume_offset seek 文件；
 ///     2. 循环读 min(CHUNK_SIZE, remaining) 字节；
 ///     3. 每块前检查 cancel_token，已取消返回 SendError::Cancelled；
-///     4. peer_client.transfer_chunk 发送（header X-Chunk-Offset，body=bytes）；
+///     4. peer_client.transfer_chunk 发送（内置 Network/retryable 5xx 有界重试 +
+///        最后一块响应丢失时 status=completed 收敛）；
 ///     5. 更新 progress + 节流 emit（每块都 emit，与 Python 一致）。
 #[allow(clippy::too_many_arguments)]
 async fn send_file_chunks(
@@ -466,7 +467,8 @@ async fn send_file_chunks(
         }
         let chunk_data = buf[..n].to_vec();
 
-        // 发送分块（X-Chunk-Offset header 由 peer_client.transfer_chunk 设置）
+        // 发送分块：peer_client 对可重试错误与最后一块响应丢失做有界重试/status 收敛。
+        // 成功后才推进 offset，保证失败时同一 offset 可被外层逻辑安全重放。
         match state
             .peer_client
             .transfer_chunk(base_url, transfer_id, offset, chunk_data)

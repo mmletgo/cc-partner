@@ -138,13 +138,44 @@ impl Default for TransferCompletePolicy {
     }
 }
 
+/// chunk 发送重试策略（与 complete 同形，便于测试注入短退避）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     最后一块在接收端可能已校验落盘，但响应超时丢失；同 transfer_id/offset/body 幂等可重放。
+///     发送端必须有界重试，并在仍失败时用 status 收敛 completed，否则本地 failed、远端 completed。
+///
+/// Code Logic（这个结构做什么）:
+///     max_attempts / base_backoff 控制 Network/retryable 5xx 重试；
+///     status_fallback：耗尽后若 status=completed 则 Ok(true)，transferring 时再安全重放一次。
+#[derive(Debug, Clone)]
+pub struct TransferChunkPolicy {
+    /// 最大尝试次数（含首次）。
+    pub max_attempts: u32,
+    /// 基础退避（第 attempt 次失败后 sleep = base_backoff * attempt）。
+    pub base_backoff: Duration,
+    /// 失败后是否用 status 收敛 completed / transferring 再放一次。
+    pub status_fallback: bool,
+}
+
+impl Default for TransferChunkPolicy {
+    /// Business Logic: 覆盖弱网下最后一块响应丢失窗口。
+    /// Code Logic: 4 次尝试、150ms 递增退避、开启 status 收敛。
+    fn default() -> Self {
+        Self {
+            max_attempts: 4,
+            base_backoff: Duration::from_millis(150),
+            status_fallback: true,
+        }
+    }
+}
+
 /// Business Logic（为什么需要这个函数）:
-///     complete 只对网络抖动与服务端瞬时错误安全重试；4xx 业务错误（如 validation）不得重试。
+///     complete/chunk 只对网络抖动与服务端瞬时错误安全重试；4xx 业务错误（如 validation）不得重试。
 ///
 /// Code Logic（这个函数做什么）:
 ///     Network 可重试；Remote 在 status>=500 或 status==504 或 retryable=true 时可重试；
 ///     Unsupported/InvalidResponse 不可重试。
-fn is_transfer_complete_retryable(error: &PeerCallError) -> bool {
+fn is_transfer_transport_retryable(error: &PeerCallError) -> bool {
     match error {
         PeerCallError::Network { .. } => true,
         PeerCallError::Remote {
@@ -152,6 +183,35 @@ fn is_transfer_complete_retryable(error: &PeerCallError) -> bool {
         } => *retryable || *status >= 500 || *status == 504,
         PeerCallError::Unsupported { .. } | PeerCallError::InvalidResponse { .. } => false,
     }
+}
+
+/// 兼容旧名：complete 路径复用同一判定。
+fn is_transfer_complete_retryable(error: &PeerCallError) -> bool {
+    is_transfer_transport_retryable(error)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     complete 返回 success=false 或传输错误时，若远端 status 已 completed，必须收敛成功。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 status JSON 的 `status` 字段；`"completed"` → true。
+fn status_json_is_completed(status: &serde_json::Value) -> bool {
+    status
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "completed")
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     最后一块失败后若 status 仍 transferring，同 offset 重放是安全的（seek-write + 墓碑）。
+///
+/// Code Logic（这个函数做什么）:
+///     `status == "transferring"` 或 `"pending"` → true。
+fn status_json_is_still_transferring(status: &serde_json::Value) -> bool {
+    status
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "transferring" || s == "pending")
 }
 
 /// 对端 HTTP 客户端，封装 reqwest::Client。
@@ -597,15 +657,15 @@ impl PeerClient {
             .map_err(|e| peer_call_error_to_transfer_message("init", &url, e))
     }
 
-    /// 发送一个数据块到对端。
+    /// 发送一个数据块到对端（生产默认：有界重试 + status 收敛）。
     ///
     /// Business Logic: 分块传输核心调用，body 为原始字节，header X-Chunk-Offset 标明写入 offset。
     ///     对照 Python `transfer_chunk`（POST /api/transfer/chunk/{id}）。
+    ///     最后一块可能已在远端 finalize，但响应丢失；必须同 offset/body 有界重试并在耗尽后
+    ///     查 status：completed → 本地成功；仍 transferring → 再安全重放一次。
     ///
-    /// Code Logic（Finding 2 起）: POST `{base_url}/api/transfer/chunk/{id}`，header
-    ///     `X-Chunk-Offset: <offset>`，body = bytes。经共享 `request_post_raw` helper 注入
-    ///     X-CC-Request-Id 并用 `parse_peer_response` 统一解析。期望响应 `{success, received_bytes}`。
-    ///     成功且 success==true 返回 Ok(true)；success==false 返回 Ok(false)；失败返回 Err。
+    /// Code Logic（Finding 2 起）: 委托 `transfer_chunk_with_policy` 使用生产默认策略；
+    ///     公开签名仍为 `Result<bool, String>` 以兼容 sender。
     pub async fn transfer_chunk(
         &self,
         base_url: &str,
@@ -613,12 +673,136 @@ impl PeerClient {
         offset: u64,
         data: Vec<u8>,
     ) -> Result<bool, String> {
+        self.transfer_chunk_with_policy(
+            base_url,
+            transfer_id,
+            offset,
+            data,
+            TransferChunkPolicy::default(),
+        )
+        .await
+        .map_err(|e| {
+            let url = format!("{base_url}/api/transfer/chunk/{transfer_id}");
+            peer_call_error_to_transfer_message("chunk", &url, e)
+        })
+    }
+
+    /// 带策略的 chunk 发送（结构化错误，测试可注入短退避）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     发送循环对 Network/retryable 5xx 必须重放同一 transfer_id/offset/body；
+    ///     最后一块响应丢失时 status=completed 应收敛成功，避免“远端 completed、本地 failed”。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     1) 对可重试错误有界退避重试（body 每次 clone，幂等 seek-write）；
+    ///     2) success=true → Ok(true)；success=false 且开启 status_fallback 时查 status；
+    ///     3) 传输错误耗尽后 status=completed → Ok(true)；status=transferring → 再放一次；
+    ///     4) 其它 → 原样 Err(PeerCallError) 或 Ok(false)。
+    pub async fn transfer_chunk_with_policy(
+        &self,
+        base_url: &str,
+        transfer_id: &str,
+        offset: u64,
+        data: Vec<u8>,
+        policy: TransferChunkPolicy,
+    ) -> Result<bool, PeerCallError> {
         let url = format!("{base_url}/api/transfer/chunk/{transfer_id}");
-        let resp: ChunkResp = self
-            .request_post_raw(&url, "X-Chunk-Offset", &offset.to_string(), data)
-            .await
-            .map_err(|e| peer_call_error_to_transfer_message("chunk", &url, e))?;
-        Ok(resp.success)
+        let mut last_err: Option<PeerCallError> = None;
+
+        for attempt in 1..=policy.max_attempts {
+            match self
+                .request_post_raw::<ChunkResp>(
+                    &url,
+                    "X-Chunk-Offset",
+                    &offset.to_string(),
+                    data.clone(),
+                )
+                .await
+            {
+                Ok(resp) if resp.success => return Ok(true),
+                Ok(resp) => {
+                    // success=false：可能是业务拒绝；若 status 已 completed 仍收敛成功。
+                    if policy.status_fallback {
+                        if let Ok(status) = self.transfer_status_typed(base_url, transfer_id).await
+                        {
+                            if status_json_is_completed(&status) {
+                                tracing::info!(
+                                    "chunk success=false 但 status=completed，按成功收敛: {transfer_id} offset={offset}"
+                                );
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    let _ = resp;
+                    return Ok(false);
+                }
+                Err(e) if is_transfer_transport_retryable(&e) && attempt < policy.max_attempts => {
+                    tracing::debug!(
+                        "transfer chunk 可重试失败 attempt={attempt}/{} ({url} offset={offset}): {e}",
+                        policy.max_attempts
+                    );
+                    last_err = Some(e);
+                    let backoff = policy.base_backoff * attempt;
+                    tokio::time::sleep(backoff).await;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+
+        // 响应丢失 / 重试耗尽：用 status 收敛。
+        if policy.status_fallback {
+            if let Ok(status) = self.transfer_status_typed(base_url, transfer_id).await {
+                if status_json_is_completed(&status) {
+                    tracing::info!(
+                        "chunk 响应丢失但 status=completed，按成功收敛: {transfer_id} offset={offset}"
+                    );
+                    return Ok(true);
+                }
+                if status_json_is_still_transferring(&status) {
+                    tracing::debug!(
+                        "chunk 失败后 status 仍 transferring，安全重放一次: {transfer_id} offset={offset}"
+                    );
+                    match self
+                        .request_post_raw::<ChunkResp>(
+                            &url,
+                            "X-Chunk-Offset",
+                            &offset.to_string(),
+                            data,
+                        )
+                        .await
+                    {
+                        Ok(resp) if resp.success => return Ok(true),
+                        Ok(_) => {
+                            // 再查一次 completed（finalize 可能刚好完成）。
+                            if let Ok(st2) = self.transfer_status_typed(base_url, transfer_id).await
+                            {
+                                if status_json_is_completed(&st2) {
+                                    return Ok(true);
+                                }
+                            }
+                            return Ok(false);
+                        }
+                        Err(e) => {
+                            if let Ok(st2) = self.transfer_status_typed(base_url, transfer_id).await
+                            {
+                                if status_json_is_completed(&st2) {
+                                    return Ok(true);
+                                }
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| PeerCallError::InvalidResponse {
+            url,
+            reason: "chunk 重试耗尽且无错误详情".to_string(),
+        }))
     }
 
     /// 查询对端某接收任务的状态。
@@ -681,7 +865,23 @@ impl PeerClient {
 
         for attempt in 1..=policy.max_attempts {
             match self.request_post::<ChunkResp, _>(&url, &body).await {
-                Ok(resp) => return Ok(resp.success),
+                Ok(resp) if resp.success => return Ok(true),
+                Ok(_resp) => {
+                    // success=false：可能是尚未收齐，也可能是重启后内存 miss。
+                    // 开启 status_fallback 时再查一次终态，避免假失败。
+                    if policy.status_fallback {
+                        if let Ok(status) = self.transfer_status_typed(base_url, transfer_id).await
+                        {
+                            if status_json_is_completed(&status) {
+                                tracing::info!(
+                                    "transfer complete success=false 但 status=completed，按成功收敛: {transfer_id}"
+                                );
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    return Ok(false);
+                }
                 Err(e) if is_transfer_complete_retryable(&e) && attempt < policy.max_attempts => {
                     tracing::debug!(
                         "transfer complete 可重试失败 attempt={attempt}/{} ({url}): {e}",
@@ -701,11 +901,7 @@ impl PeerClient {
         // 响应丢失收敛：complete 失败后查 status，若已 completed 则本地视为成功。
         if policy.status_fallback {
             if let Ok(status) = self.transfer_status_typed(base_url, transfer_id).await {
-                if status
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| s == "completed")
-                {
+                if status_json_is_completed(&status) {
                     tracing::info!(
                         "transfer complete 响应丢失但 status=completed，按成功收敛: {transfer_id}"
                     );
@@ -1483,6 +1679,179 @@ mod tests {
             .transfer_complete_with_policy(&base_url, "tid-lost", policy)
             .await
             .expect("status=completed 应收敛成功");
+        assert!(ok);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     最后一块已在远端提交但响应丢失时，发送端不得立即标 failed；必须经有界重试
+    ///     与 status=completed 收敛为成功。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     chunk 恒 504；status 返回 completed；transfer_chunk_with_policy 应 Ok(true)。
+    #[tokio::test]
+    async fn transfer_chunk_status_fallback_converges_on_completed() {
+        let app = axum::Router::new()
+            .route(
+                "/api/transfer/chunk/:id",
+                axum::routing::post(|| async move {
+                    (
+                        axum::http::StatusCode::GATEWAY_TIMEOUT,
+                        axum::Json(serde_json::json!({
+                            "error": "timeout",
+                            "code": "timeout",
+                            "request_id": "r-chunk-to",
+                            "retryable": true,
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/api/transfer/status/:id",
+                axum::routing::get(|| async move {
+                    axum::Json(serde_json::json!({
+                        "transfer_id": "tid-chunk-lost",
+                        "status": "completed",
+                        "progress": 1.0,
+                        "transferred_bytes": 4,
+                        "size": 4,
+                        "filename": "last.bin"
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base_url = format!("http://{addr}");
+        let client = PeerClient::new();
+        let policy = TransferChunkPolicy {
+            max_attempts: 2,
+            base_backoff: Duration::from_millis(5),
+            status_fallback: true,
+        };
+        let ok = client
+            .transfer_chunk_with_policy(&base_url, "tid-chunk-lost", 0, b"data".to_vec(), policy)
+            .await
+            .expect("最后一块响应丢失但 status=completed 应收敛成功");
+        assert!(ok);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     chunk 瞬时 5xx 后同 offset 重放必须成功，避免可恢复抖动导致整次传输失败。
+    #[tokio::test]
+    async fn transfer_chunk_retries_retryable_5xx_then_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_c = hits.clone();
+        let app = axum::Router::new().route(
+            "/api/transfer/chunk/:id",
+            axum::routing::post(move || {
+                let hits = hits_c.clone();
+                async move {
+                    let n = hits.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n < 3 {
+                        axum::response::Response::builder()
+                            .status(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                            .header(axum::http::header::CONTENT_TYPE, "application/json")
+                            .body(axum::body::Body::from(
+                                serde_json::json!({
+                                    "error": "busy",
+                                    "code": "unavailable",
+                                    "request_id": "r-chunk",
+                                    "retryable": true,
+                                })
+                                .to_string(),
+                            ))
+                            .unwrap()
+                    } else {
+                        axum::response::Response::builder()
+                            .status(axum::http::StatusCode::OK)
+                            .header(axum::http::header::CONTENT_TYPE, "application/json")
+                            .body(axum::body::Body::from(
+                                serde_json::json!({
+                                    "success": true,
+                                    "received_bytes": 4
+                                })
+                                .to_string(),
+                            ))
+                            .unwrap()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base_url = format!("http://{addr}");
+        let client = PeerClient::new();
+        let policy = TransferChunkPolicy {
+            max_attempts: 4,
+            base_backoff: Duration::from_millis(5),
+            status_fallback: false,
+        };
+        let ok = client
+            .transfer_chunk_with_policy(&base_url, "tid-chunk-retry", 0, b"data".to_vec(), policy)
+            .await
+            .expect("retryable 5xx 后 chunk 应成功");
+        assert!(ok);
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     complete 返回 HTTP 200 但 success=false 时，若 status 已 completed（如重启后
+    ///     history 收敛前的短暂窗口），客户端仍应收敛成功。
+    #[tokio::test]
+    async fn transfer_complete_false_still_status_fallback() {
+        let app = axum::Router::new()
+            .route(
+                "/api/transfer/complete/:id",
+                axum::routing::post(|| async move {
+                    axum::Json(serde_json::json!({
+                        "success": false,
+                        "received_bytes": 0
+                    }))
+                }),
+            )
+            .route(
+                "/api/transfer/status/:id",
+                axum::routing::get(|| async move {
+                    axum::Json(serde_json::json!({
+                        "transfer_id": "tid-false",
+                        "status": "completed",
+                        "progress": 1.0,
+                        "transferred_bytes": 1,
+                        "size": 1,
+                        "filename": "x.bin"
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base_url = format!("http://{addr}");
+        let client = PeerClient::new();
+        let policy = TransferCompletePolicy {
+            max_attempts: 1,
+            base_backoff: Duration::from_millis(1),
+            status_fallback: true,
+        };
+        let ok = client
+            .transfer_complete_with_policy(&base_url, "tid-false", policy)
+            .await
+            .expect("success=false + status=completed 应收敛");
         assert!(ok);
     }
 }
