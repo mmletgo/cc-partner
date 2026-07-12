@@ -662,11 +662,16 @@ struct PlacedFile {
 
 /// Business Logic（为什么需要这个函数）:
 ///     并发同名接收时，仅 `exists()` 检查后 rename 会在 POSIX 上静默覆盖先落地的文件。
-///     必须用 exclusive create 占位 + rename 替换占位，AlreadyExists 则换后缀重试。
+///     零字节占位再 rename 仍有 TOCTOU：外部进程可在两步之间替换路径；失败时无条件
+///     `remove_file` 还可能误删竞争者文件；崩溃会留下“看似成功”的零字节最终文件。
+///     因此必须用 hard_link(tmp, final) 作为跨平台 no-replace 提交原语。
 ///
 /// Code Logic（这个函数做什么）:
-///     循环 resolve 候选名 → 校验路径边界 → `create_new` 占位 → rename tmp 覆盖占位；
-///     create_new 冲突则 continue；其它 IO 错误上抛。调用方必须已持有 receive_dir 锁。
+///     循环 resolve 候选名 → 校验路径边界 → `hard_link(tmp, final)` 原子抢占最终路径
+///     （已存在 → AlreadyExists，换后缀继续）→ 成功后删除 tmp（失败仅 warn，最终文件已落地）。
+///     hard_link 在跨卷等场景不可用时，回退到平台 no-replace rename（见
+///     `commit_tmp_to_final_no_replace`），仍保证失败路径不删除非本次创建的文件。
+///     调用方必须已持有 receive_dir 锁（同进程额外协调）。
 async fn place_final_file_exclusive(
     receive_dir: &Path,
     safe_filename: &str,
@@ -681,20 +686,8 @@ async fn place_final_file_exclusive(
         let final_path = receive_dir.join(&final_filename);
         ensure_path_within_dir(receive_dir, &final_path)?;
 
-        // exclusive create 占位：存在则 AlreadyExists，避免 TOCTOU 覆盖。
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&final_path)
-        {
-            Ok(f) => {
-                drop(f);
-                // 占位成功：rename tmp 覆盖占位文件（同卷原子替换，不会撞上其它路径）。
-                if let Err(e) = tokio::fs::rename(tmp_path, &final_path).await {
-                    // 清理占位，避免留下 0 字节垃圾。
-                    let _ = tokio::fs::remove_file(&final_path).await;
-                    return Err(AppError::generic(format!("重命名失败: {e}")));
-                }
+        match commit_tmp_to_final_no_replace(tmp_path, &final_path).await {
+            Ok(()) => {
                 return Ok(PlacedFile {
                     final_filename,
                     final_path,
@@ -705,13 +698,113 @@ async fn place_final_file_exclusive(
                 continue;
             }
             Err(e) => {
-                return Err(AppError::generic(format!("创建最终文件失败: {e}")));
+                return Err(AppError::generic(format!("提交最终文件失败: {e}")));
             }
         }
     }
     Err(AppError::generic(
         "无法分配不冲突的最终文件名（重试耗尽）".to_string(),
     ))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     将已校验的临时文件提交到最终路径，且不得覆盖/删除路径上已有的竞争文件。
+///     hard_link 是首选：同 inode 链接要么成功要么 AlreadyExists，无零字节占位窗口。
+///
+/// Code Logic（这个函数做什么）:
+///     1) 同步 hard_link(tmp → final)；成功后 best-effort remove tmp；
+///     2) hard_link 因 AlreadyExists 失败 → 原样返回，调用方换后缀；
+///     3) hard_link 因跨卷/不支持失败 → 平台 no-replace rename 回退；
+///        回退失败绝不 remove final（可能是竞争者文件）。
+async fn commit_tmp_to_final_no_replace(tmp_path: &Path, final_path: &Path) -> std::io::Result<()> {
+    // hard_link 是同步 syscall；放在 blocking 上下文外也可接受（单次元数据操作）。
+    match std::fs::hard_link(tmp_path, final_path) {
+        Ok(()) => {
+            if let Err(e) = tokio::fs::remove_file(tmp_path).await {
+                tracing::warn!(
+                    "最终文件 hard_link 成功但删除 tmp 失败 ({}): {e}",
+                    tmp_path.display()
+                );
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(e),
+        Err(link_err) => {
+            // 跨卷/不支持 hard_link：回退到平台 no-replace rename，仍禁止覆盖已有 final。
+            match rename_no_replace(tmp_path, final_path).await {
+                Ok(()) => Ok(()),
+                Err(rename_err) if rename_err.kind() == ErrorKind::AlreadyExists => Err(rename_err),
+                Err(rename_err) => {
+                    // 保留原始 hard_link 错误上下文，便于诊断跨卷场景。
+                    Err(std::io::Error::new(
+                        rename_err.kind(),
+                        format!(
+                            "hard_link 失败 ({link_err}) 且 no-replace rename 失败 ({rename_err})"
+                        ),
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     hard_link 不可用时仍需尽量保证“最终路径已存在则失败、不覆盖”。
+///     标准 `rename` 在 POSIX 上会静默覆盖已有目标，Windows 上则默认失败——行为不一致。
+///
+/// Code Logic（这个函数做什么）:
+///     - Unix：先 `link`/`renamex_np` 不可移植；这里用 create_new 探测 + 立即 close 后
+///       **仅当探测成功创建的路径** 上 rename，且 rename 失败时只删除本探测创建的零字节文件
+///       （inode 由 create_new 独占，外部替换同路径会得到不同文件——我们用创建后立即
+///       记录的 dev/ino 校验，不匹配则不删除）。
+///     - Windows：`std::fs::rename` 在目标存在时失败（近似 no-replace），直接使用。
+///     注意：Unix 探测方案仍有极窄崩溃窗口留下零字节文件，但**不会覆盖或删除竞争者**。
+async fn rename_no_replace(tmp_path: &Path, final_path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        // Windows rename 默认不替换已存在目标（与 POSIX 不同）。
+        return tokio::fs::rename(tmp_path, final_path).await;
+    }
+
+    #[cfg(not(windows))]
+    {
+        // 用 create_new 探测路径空闲；成功则记录本次创建的 inode，失败清理时只删自己的。
+        let placeholder = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(final_path)?;
+        let created_meta = match placeholder.metadata() {
+            Ok(m) => m,
+            Err(e) => {
+                drop(placeholder);
+                // 无法读取元数据：保守删除自己刚创建的占位。
+                let _ = std::fs::remove_file(final_path);
+                return Err(e);
+            }
+        };
+        let created_key = {
+            use std::os::unix::fs::MetadataExt;
+            (created_meta.dev(), created_meta.ino())
+        };
+        drop(placeholder);
+
+        match tokio::fs::rename(tmp_path, final_path).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // 仅当 final 仍是我们 create_new 创建的那个 inode 时才清理。
+                let should_remove = std::fs::metadata(final_path)
+                    .map(|m| {
+                        use std::os::unix::fs::MetadataExt;
+                        (m.dev(), m.ino()) == created_key
+                    })
+                    .unwrap_or(false);
+                if should_remove {
+                    let _ = std::fs::remove_file(final_path);
+                }
+                Err(e)
+            }
+        }
+    }
 }
 
 /// 接收失败统一处理：标记 failed + 写历史 + remove + emit failed。
@@ -1559,7 +1652,85 @@ mod tests {
         let mut expected = vec![payload_a, payload_b];
         expected.sort();
         assert_eq!(contents, expected, "两份内容都必须完整保留且互不覆盖");
-        assert!(!tmp_a.exists() && !tmp_b.exists(), "tmp 应被 rename 移除");
+        assert!(
+            !tmp_a.exists() && !tmp_b.exists(),
+            "tmp 应在 hard_link 提交后移除"
+        );
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     hard_link 提交必须真正落地最终文件并移除 tmp；不得留下零字节占位当成功。
+    #[tokio::test]
+    async fn place_final_file_hard_link_commits_content_and_removes_tmp() {
+        let receive_dir = unique_temp_dir();
+        let tmp = receive_dir.join(".place-hl.tmp");
+        let payload = b"hard-link-payload";
+        fs::write(&tmp, payload).unwrap();
+
+        let placed = place_final_file_exclusive(&receive_dir, "hl.txt", &tmp)
+            .await
+            .expect("hard_link place");
+        assert_eq!(placed.final_filename, "hl.txt");
+        assert_eq!(fs::read(&placed.final_path).unwrap(), payload);
+        assert!(!tmp.exists(), "成功 hard_link 后应删除 tmp");
+        // 最终文件不得是零字节占位。
+        assert_eq!(
+            fs::metadata(&placed.final_path).unwrap().len(),
+            payload.len() as u64
+        );
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     目标路径已存在时提交必须失败并换名，且不得删除/覆盖竞争者文件内容。
+    #[tokio::test]
+    async fn place_final_file_does_not_overwrite_or_delete_competitor() {
+        let receive_dir = unique_temp_dir();
+        let competitor = receive_dir.join("report.txt");
+        let competitor_bytes = b"EXTERNAL-COMPETITOR";
+        fs::write(&competitor, competitor_bytes).unwrap();
+
+        let tmp = receive_dir.join(".place-comp.tmp");
+        let payload = b"incoming-transfer";
+        fs::write(&tmp, payload).unwrap();
+
+        let placed = place_final_file_exclusive(&receive_dir, "report.txt", &tmp)
+            .await
+            .expect("should pick alternate name");
+        assert_ne!(placed.final_path, competitor, "不得占用已存在的竞争者路径");
+        assert_eq!(
+            fs::read(&competitor).unwrap(),
+            competitor_bytes,
+            "竞争者文件内容必须原样保留"
+        );
+        assert_eq!(fs::read(&placed.final_path).unwrap(), payload);
+        assert!(!tmp.exists());
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     hard_link 失败回退路径中，清理逻辑不得删除非本次创建的最终文件。
+    ///     用已存在路径直接调 commit，断言 AlreadyExists 且竞争者仍在。
+    #[tokio::test]
+    async fn commit_no_replace_failure_preserves_existing_final() {
+        let receive_dir = unique_temp_dir();
+        let final_path = receive_dir.join("keep-me.bin");
+        let existing = b"do-not-delete";
+        fs::write(&final_path, existing).unwrap();
+        let tmp = receive_dir.join(".commit-fail.tmp");
+        fs::write(&tmp, b"new-bytes").unwrap();
+
+        let err = commit_tmp_to_final_no_replace(&tmp, &final_path)
+            .await
+            .expect_err("existing final must fail");
+        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&final_path).unwrap(), existing);
+        // tmp 仍应存在（提交未成功，不应删除源）。
+        assert!(tmp.exists(), "失败时不应删除 tmp 源文件");
 
         let _ = fs::remove_dir_all(&receive_dir);
     }

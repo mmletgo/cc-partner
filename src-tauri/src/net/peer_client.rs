@@ -107,6 +107,53 @@ struct ClaudeMdPushResp {
 /// Claude Code assets inventory 响应体：直接是 DTO 数组。
 type ClaudeAssetsInventoryResp = Vec<crate::claude_code_assets::ClaudeCodeAsset>;
 
+/// complete 握手重试策略。
+///
+/// Business Logic（为什么需要这个结构）:
+///     接收端 finalize 后墓碑在 TTL 内幂等；网络抖动/响应丢失时同一 transfer_id 可安全重试。
+///     策略独立结构便于生产默认值与测试注入短退避。
+///
+/// Code Logic（这个结构做什么）:
+///     max_attempts：含首次在内的总尝试次数；base_backoff：第 n 次重试前 sleep = base * n；
+///     status_fallback：complete 仍失败时是否查 status 收敛 completed。
+#[derive(Debug, Clone)]
+pub struct TransferCompletePolicy {
+    /// 最大尝试次数（含首次）。
+    pub max_attempts: u32,
+    /// 基础退避（第 attempt 次失败后 sleep = base_backoff * attempt）。
+    pub base_backoff: Duration,
+    /// complete 失败后是否用 status 查询收敛。
+    pub status_fallback: bool,
+}
+
+impl Default for TransferCompletePolicy {
+    /// Business Logic: 生产默认在墓碑 TTL（约 5 分钟）内做有限次快速重试。
+    /// Code Logic: 4 次尝试、200ms 递增退避、开启 status 收敛。
+    fn default() -> Self {
+        Self {
+            max_attempts: 4,
+            base_backoff: Duration::from_millis(200),
+            status_fallback: true,
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     complete 只对网络抖动与服务端瞬时错误安全重试；4xx 业务错误（如 validation）不得重试。
+///
+/// Code Logic（这个函数做什么）:
+///     Network 可重试；Remote 在 status>=500 或 status==504 或 retryable=true 时可重试；
+///     Unsupported/InvalidResponse 不可重试。
+fn is_transfer_complete_retryable(error: &PeerCallError) -> bool {
+    match error {
+        PeerCallError::Network { .. } => true,
+        PeerCallError::Remote {
+            status, retryable, ..
+        } => *retryable || *status >= 500 || *status == 504,
+        PeerCallError::Unsupported { .. } | PeerCallError::InvalidResponse { .. } => false,
+    }
+}
+
 /// 对端 HTTP 客户端，封装 reqwest::Client。
 ///
 /// Business Logic: 所有对端调用复用同一 Client（内部连接池），提升效率。
@@ -598,22 +645,95 @@ impl PeerClient {
     /// Business Logic（为什么需要这个函数）:
     ///     size=0 与 resume_offset==size 时不会发送任何 chunk；发送端必须确认对端已 finalize
     ///     才能标记本地 completed，否则会假报成功而远端只剩隐藏 .tmp。
+    ///     接收端可能已完成 SHA256/落盘/墓碑，但响应在网络中丢失；同一 transfer_id 在墓碑
+    ///     TTL 内重放 complete 是 naturally-idempotent，必须有界重试以避免分裂终态。
     ///
     /// Code Logic（这个函数做什么）:
     ///     POST `{base_url}/api/transfer/complete/{id}`，空 JSON body；期望 `{success, received_bytes}`。
-    ///     success==true → Ok(true)；success==false → Ok(false)；网络/协议失败 → Err。
+    ///     对 Network / 5xx / 504 / retryable Remote 做有界退避重试（默认 4 次，间隔 200ms*attempt）。
+    ///     仍失败时可选 status 轮询：若对端 status=completed 则视为成功（响应丢失收敛）。
+    ///     success==true → Ok(true)；success==false → Ok(false)；其它 → Err(PeerCallError)。
     pub async fn transfer_complete(
         &self,
         base_url: &str,
         transfer_id: &str,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, PeerCallError> {
+        self.transfer_complete_with_policy(base_url, transfer_id, TransferCompletePolicy::default())
+            .await
+    }
+
+    /// 带策略的 complete 握手（测试可注入更短重试）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     生产路径与单测共享同一重试/status 收敛逻辑；单测可缩小 attempts 与 backoff。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     见 `transfer_complete`；`policy` 控制最大尝试次数与基础退避。
+    pub async fn transfer_complete_with_policy(
+        &self,
+        base_url: &str,
+        transfer_id: &str,
+        policy: TransferCompletePolicy,
+    ) -> Result<bool, PeerCallError> {
         let url = format!("{base_url}/api/transfer/complete/{transfer_id}");
         let body = serde_json::json!({});
-        let resp: ChunkResp = self
-            .request_post(&url, &body)
-            .await
-            .map_err(|e| peer_call_error_to_transfer_message("complete", &url, e))?;
-        Ok(resp.success)
+        let mut last_err: Option<PeerCallError> = None;
+
+        for attempt in 1..=policy.max_attempts {
+            match self.request_post::<ChunkResp, _>(&url, &body).await {
+                Ok(resp) => return Ok(resp.success),
+                Err(e) if is_transfer_complete_retryable(&e) && attempt < policy.max_attempts => {
+                    tracing::debug!(
+                        "transfer complete 可重试失败 attempt={attempt}/{} ({url}): {e}",
+                        policy.max_attempts
+                    );
+                    last_err = Some(e);
+                    let backoff = policy.base_backoff * attempt;
+                    tokio::time::sleep(backoff).await;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+
+        // 响应丢失收敛：complete 失败后查 status，若已 completed 则本地视为成功。
+        if policy.status_fallback {
+            if let Ok(status) = self.transfer_status_typed(base_url, transfer_id).await {
+                if status
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s == "completed")
+                {
+                    tracing::info!(
+                        "transfer complete 响应丢失但 status=completed，按成功收敛: {transfer_id}"
+                    );
+                    return Ok(true);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| PeerCallError::InvalidResponse {
+            url,
+            reason: "complete 重试耗尽且无错误详情".to_string(),
+        }))
+    }
+
+    /// 查询对端接收任务状态（结构化错误，供 complete 收敛使用）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     complete 响应丢失时需要用 status 确认远端是否已终态 completed，避免假失败。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     GET `/api/transfer/status/{id}`，保留 `PeerCallError` 结构。
+    pub async fn transfer_status_typed(
+        &self,
+        base_url: &str,
+        transfer_id: &str,
+    ) -> Result<serde_json::Value, PeerCallError> {
+        let url = format!("{base_url}/api/transfer/status/{transfer_id}");
+        self.request_get::<serde_json::Value>(&url).await
     }
 
     /// Claude Code 历史同步 pull：向对端发送本端 cc 历史摘要，获取对端认为本端需要的 cc 历史。
@@ -1236,5 +1356,133 @@ mod tests {
             err.contains("unavailable"),
             "transfer_init 失败文案应含 code: {err}"
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     complete 首次响应丢失/5xx 时，同一 transfer_id 必须在墓碑 TTL 内有界重试并最终成功，
+    ///     避免远端已落地、本地标 failed 的分裂终态。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     mock complete 前 2 次返回 503 retryable，第 3 次 success=true；短 backoff 策略下
+    ///     transfer_complete_with_policy 应返回 Ok(true)，且命中 3 次。
+    #[tokio::test]
+    async fn transfer_complete_retries_retryable_5xx_then_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_c = hits.clone();
+        let app = axum::Router::new().route(
+            "/api/transfer/complete/:id",
+            axum::routing::post(move || {
+                let hits = hits_c.clone();
+                async move {
+                    let n = hits.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n < 3 {
+                        axum::response::Response::builder()
+                            .status(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                            .header(axum::http::header::CONTENT_TYPE, "application/json")
+                            .body(axum::body::Body::from(
+                                serde_json::json!({
+                                    "error": "busy",
+                                    "code": "unavailable",
+                                    "request_id": "r-complete",
+                                    "retryable": true,
+                                })
+                                .to_string(),
+                            ))
+                            .unwrap()
+                    } else {
+                        axum::response::Response::builder()
+                            .status(axum::http::StatusCode::OK)
+                            .header(axum::http::header::CONTENT_TYPE, "application/json")
+                            .body(axum::body::Body::from(
+                                serde_json::json!({
+                                    "success": true,
+                                    "received_bytes": 1
+                                })
+                                .to_string(),
+                            ))
+                            .unwrap()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base_url = format!("http://{addr}");
+        let client = PeerClient::new();
+        let policy = TransferCompletePolicy {
+            max_attempts: 4,
+            base_backoff: Duration::from_millis(5),
+            status_fallback: false,
+        };
+        let ok = client
+            .transfer_complete_with_policy(&base_url, "tid-retry", policy)
+            .await
+            .expect("retryable 5xx 后应成功");
+        assert!(ok);
+        assert_eq!(hits.load(Ordering::SeqCst), 3, "应在第 3 次成功");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     complete 响应全部丢失后，若 status 已 completed，本地必须收敛为成功，避免重复发送。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     complete 恒 503；status 返回 completed；开启 status_fallback 时 complete 应 Ok(true)。
+    #[tokio::test]
+    async fn transfer_complete_status_fallback_converges_on_completed() {
+        let app = axum::Router::new()
+            .route(
+                "/api/transfer/complete/:id",
+                axum::routing::post(|| async move {
+                    (
+                        axum::http::StatusCode::GATEWAY_TIMEOUT,
+                        axum::Json(serde_json::json!({
+                            "error": "timeout",
+                            "code": "timeout",
+                            "request_id": "r-to",
+                            "retryable": true,
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/api/transfer/status/:id",
+                axum::routing::get(|| async move {
+                    axum::Json(serde_json::json!({
+                        "transfer_id": "tid-lost",
+                        "status": "completed",
+                        "progress": 1.0,
+                        "transferred_bytes": 10,
+                        "size": 10,
+                        "filename": "a.bin"
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base_url = format!("http://{addr}");
+        let client = PeerClient::new();
+        let policy = TransferCompletePolicy {
+            max_attempts: 2,
+            base_backoff: Duration::from_millis(5),
+            status_fallback: true,
+        };
+        let ok = client
+            .transfer_complete_with_policy(&base_url, "tid-lost", policy)
+            .await
+            .expect("status=completed 应收敛成功");
+        assert!(ok);
     }
 }
