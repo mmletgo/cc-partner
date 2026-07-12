@@ -71,7 +71,11 @@ Same crates the smoke workflow runs; **serialize** process/port-sensitive tests:
 cd src-tauri
 cargo fmt --check
 cargo check --locked --bins
-cargo test --locked backend::control backend::cli backend::logging backend::doctor workbench::sessions
+cargo test --locked backend::control::tests -- --nocapture
+cargo test --locked backend::cli::tests -- --nocapture
+cargo test --locked backend::logging::tests -- --nocapture
+cargo test --locked backend::doctor::tests -- --nocapture
+cargo test --locked workbench::sessions::tests -- --nocapture
 cargo test --locked --test backend_cli_smoke -- --nocapture --test-threads=1
 cargo test --locked --test backend_doctor_smoke -- --nocapture --test-threads=1
 cargo test --locked --test pty_smoke -- --nocapture --test-threads=1
