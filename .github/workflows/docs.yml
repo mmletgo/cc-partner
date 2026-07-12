@@ -41,12 +41,5 @@ jobs:
         run: node scripts/check-docs.mjs --self-test
 
       - name: Check current documentation set
-        run: >
-          node scripts/check-docs.mjs
-          README.md
-          docs/prd.md
-          AGENTS.md
-          web/CLAUDE.md
-          src-tauri/CLAUDE.md
-          docs/development/testing.md
-          docs/development/backend-operations.md
+        # No fixed file list: default mode scans all tracked Markdown except docs/superpowers/**
+        run: node scripts/check-docs.mjs

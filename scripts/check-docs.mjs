@@ -12,15 +12,18 @@
  *   - 检查相对文件链接、GitHub 风格标题锚点、三反引号围栏配对。
  *   - 按文件作用域拒绝陈旧表述（README 的 tauri-action/动态端口、web/CLAUDE.md
  *     的 npx --yes tsx、docs 中把 hosted smoke 写成已覆盖 WSL/tmux/GUI/权限/
- *     多机 mDNS 等）。
+ *     多机 mDNS 等、src-tauri/CLAUDE.md 对 encode_mdns_capabilities 的 caps= 前缀误写）。
  *   - README 代码块中的命令名需命中 package scripts / CLI 分发 / 仓库脚本白名单。
+ *   - CLI 子命令白名单只从 `src-tauri/src/backend/cli.rs` 的 `dispatch` match arms
+ *     解析，不预置硬编码命令；源缺失或解析失败使检查失败。
+ *   - 无参数时默认扫描全部 git 跟踪的 Markdown，仅排除 docs/superpowers/**。
  *   - 忽略 http(s)/mailto 外链；不检查 docs/superpowers/** 历史设计记录。
  *   - `--self-test` 用临时 Markdown fixture 覆盖正/反例，失败时打印 file:line。
  *
  * Usage:
  *   node scripts/check-docs.mjs [files...]
  *   node scripts/check-docs.mjs --self-test
- *   node scripts/check-docs.mjs            # 默认检查仓库内当前文档集合
+ *   node scripts/check-docs.mjs            # 默认：全部 tracked Markdown（排除 superpowers）
  */
 
 import { spawnSync } from 'node:child_process';
@@ -41,16 +44,8 @@ import { fileURLToPath } from 'node:url';
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 
-/** 默认当前文档集合（与 docs.yml / plan Task 6 一致）。 */
-const DEFAULT_TARGETS = [
-  'README.md',
-  'docs/prd.md',
-  'AGENTS.md',
-  'web/CLAUDE.md',
-  'src-tauri/CLAUDE.md',
-  'docs/development/testing.md',
-  'docs/development/backend-operations.md',
-];
+/** CLI 源（dispatch match arms 是子命令唯一权威）。 */
+const CLI_SOURCE_REL = 'src-tauri/src/backend/cli.rs';
 
 /** docs/superpowers 下的历史 plan/spec 不参与当前文档守卫。 */
 
@@ -136,6 +131,26 @@ const STALE_RULES = [
       ];
       for (const rule of overclaims) {
         if (rule.re.test(content)) return rule.msg;
+      }
+      return null;
+    },
+  },
+  {
+    id: 'mdns-caps-prefix',
+    test(relPath, content) {
+      // encode_mdns_capabilities 返回裸 token；caps= 由 TXT key 提供，禁止文档写“输出始终带 caps= 前缀”。
+      if (!isPath(relPath, 'src-tauri/CLAUDE.md') && !isPath(relPath, 'CLAUDE.md')) {
+        return null;
+      }
+      if (
+        /encode_mdns_capabilities[^。\n]{0,120}(始终以\s*`?caps=`?\s*前缀|输出始终以\s*`?caps=`?|带\s*`?caps=`?\s*前缀开头)/i.test(
+          content,
+        ) ||
+        /encode_mdns_capabilities[^.\n]{0,120}(always\s+(?:starts\s+with|prefixes?|emits)\s+`?caps=`?)/i.test(
+          content,
+        )
+      ) {
+        return 'encode_mdns_capabilities must be documented as bare comma-separated tokens (TXT key supplies caps=)';
       }
       return null;
     },
@@ -463,15 +478,105 @@ function firstMatchingLine(content, rule) {
         return i + 1;
       }
     }
+    if (
+      rule.id === 'mdns-caps-prefix' &&
+      /encode_mdns_capabilities/.test(lines[i]) &&
+      /caps=/.test(lines[i])
+    ) {
+      return i + 1;
+    }
   }
   return 1;
 }
 
 /**
- * 从 web/package.json / start.sh / backend CLI / scripts 构建命令白名单。
- * @returns {{ npmScripts: Set<string>, cliSubcommands: Set<string>, rootScripts: Set<string>, startModes: Set<string> }}
+ * 从 cli.rs 的 dispatch match arms 解析 CLI 子命令（空集合起步，不预置硬编码）。
+ *
+ * Business Logic: README 推荐的 backend 子命令必须以源码 dispatch 为准；
+ *   预置白名单会在命令删除后继续放行，造成假绿。
+ * Code Logic: 定位 `fn dispatch` 后的第一个 `match command { ... }`，
+ *   抽取 `Some("name")` 字面量；源缺失或解析不到任何 arm 则返回 error。
+ *
+ * @param {string} [cliSourceAbs] 可选：注入 fixture 路径；默认仓库 CLI_SOURCE_REL
+ * @returns {{ ok: true, commands: Set<string> } | { ok: false, error: string }}
  */
-function loadCommandAllowlist() {
+function parseCliSubcommandsFromSource(cliSourceAbs) {
+  const abs = cliSourceAbs ?? join(repoRoot, CLI_SOURCE_REL);
+  if (!existsSync(abs)) {
+    return {
+      ok: false,
+      error: `CLI source missing: ${cliSourceAbs ? abs : CLI_SOURCE_REL}`,
+    };
+  }
+  let src;
+  try {
+    src = readFileSync(abs, 'utf8');
+  } catch (err) {
+    return {
+      ok: false,
+      error: `CLI source unreadable: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  // 锚定 dispatch 函数体，避免误匹配其它 match。
+  const dispatchIdx = src.search(/fn\s+dispatch\b/);
+  if (dispatchIdx < 0) {
+    return { ok: false, error: 'CLI dispatch function not found in cli.rs' };
+  }
+  const afterDispatch = src.slice(dispatchIdx);
+  const matchIdx = afterDispatch.search(/match\s+command\s*\{/);
+  if (matchIdx < 0) {
+    return { ok: false, error: 'CLI dispatch match command block not found' };
+  }
+  const braceStart = afterDispatch.indexOf('{', matchIdx);
+  if (braceStart < 0) {
+    return { ok: false, error: 'CLI dispatch match block missing opening brace' };
+  }
+
+  // 扫描配对花括号，截取 match 体。
+  let depth = 0;
+  let end = -1;
+  for (let i = braceStart; i < afterDispatch.length; i++) {
+    const ch = afterDispatch[i];
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+  if (end < 0) {
+    return { ok: false, error: 'CLI dispatch match block unclosed' };
+  }
+  const body = afterDispatch.slice(braceStart + 1, end);
+  /** @type {Set<string>} */
+  const commands = new Set();
+  for (const m of body.matchAll(/Some\(\s*"([a-zA-Z][a-zA-Z0-9_-]*)"\s*\)/g)) {
+    commands.add(m[1]);
+  }
+  if (commands.size === 0) {
+    return {
+      ok: false,
+      error: 'CLI dispatch match arms yielded zero subcommands',
+    };
+  }
+  return { ok: true, commands };
+}
+
+/**
+ * 从 web/package.json / start.sh / backend CLI / scripts 构建命令白名单。
+ * @param {{ cliSourceAbs?: string }} [opts]
+ * @returns {{
+ *   npmScripts: Set<string>,
+ *   cliSubcommands: Set<string>,
+ *   rootScripts: Set<string>,
+ *   startModes: Set<string>,
+ *   cliError: string | null,
+ * }}
+ */
+function loadCommandAllowlist(opts = {}) {
   /** @type {Set<string>} */
   const npmScripts = new Set();
   const pkgPath = join(repoRoot, 'web/package.json');
@@ -487,14 +592,13 @@ function loadCommandAllowlist() {
   }
 
   /** @type {Set<string>} */
-  const cliSubcommands = new Set(['start', 'serve', 'stop', 'status', 'doctor']);
-  // 尝试从 cli.rs 抽取字面量子命令以保持与源同步
-  const cliPath = join(repoRoot, 'src-tauri/src/backend/cli.rs');
-  if (existsSync(cliPath)) {
-    const src = readFileSync(cliPath, 'utf8');
-    for (const m of src.matchAll(/"((?:start|serve|stop|status|doctor)(?:\s+--json)?)"/g)) {
-      cliSubcommands.add(m[1].split(/\s+/)[0]);
-    }
+  const cliSubcommands = new Set();
+  let cliError = /** @type {string | null} */ (null);
+  const parsed = parseCliSubcommandsFromSource(opts.cliSourceAbs);
+  if (parsed.ok) {
+    for (const c of parsed.commands) cliSubcommands.add(c);
+  } else {
+    cliError = parsed.error;
   }
 
   /** @type {Set<string>} */
@@ -509,7 +613,7 @@ function loadCommandAllowlist() {
   /** @type {Set<string>} */
   const startModes = new Set(['dev', 'build', 'web', 'clean', 'help']);
 
-  return { npmScripts, cliSubcommands, rootScripts, startModes };
+  return { npmScripts, cliSubcommands, rootScripts, startModes, cliError };
 }
 
 /**
@@ -625,7 +729,26 @@ function shouldSkipPath(relPath) {
 }
 
 /**
- * 解析检查目标：显式参数或默认集合；若无参数且默认文件缺失则回退 git ls-files。
+ * 列出 git 跟踪的 Markdown（排除 docs/superpowers/** 与 node_modules 等）。
+ * @returns {string[]}
+ */
+function listTrackedMarkdown() {
+  const ls = spawnSync('git', ['-C', repoRoot, 'ls-files', '*.md', '**/*.md'], {
+    encoding: 'utf8',
+  });
+  if (ls.status !== 0 || !ls.stdout.trim()) {
+    return [];
+  }
+  return ls.stdout
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((p) => !shouldSkipPath(p))
+    .filter((p) => !normalizeRel(p).includes('node_modules/'));
+}
+
+/**
+ * 解析检查目标：显式参数优先；无参数时扫描全部 tracked Markdown（排除 superpowers）。
  * @param {string[]} args
  * @returns {string[]} rel paths
  */
@@ -633,21 +756,7 @@ function resolveTargets(args) {
   if (args.length > 0) {
     return args.map((a) => normalizeRel(a));
   }
-  const existing = DEFAULT_TARGETS.filter((p) => existsSync(join(repoRoot, p)));
-  if (existing.length > 0) return existing;
-
-  // 回退：仓库跟踪的 Markdown（排除 superpowers）
-  const ls = spawnSync('git', ['-C', repoRoot, 'ls-files', '*.md', '**/*.md'], {
-    encoding: 'utf8',
-  });
-  if (ls.status === 0 && ls.stdout.trim()) {
-    return ls.stdout
-      .split(/\r?\n/)
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .filter((p) => !shouldSkipPath(p));
-  }
-  return [];
+  return listTrackedMarkdown();
 }
 
 /**
@@ -685,24 +794,20 @@ function checkFile(relFile, slugIndex, allow, opts = {}) {
 }
 
 /**
- * 默认集合中可在并行任务落地前暂时缺失的路径。
- * @param {string} rel
- */
-function isSoftOptionalTarget(rel) {
-  const n = normalizeRel(rel);
-  return (
-    n === 'docs/development/testing.md' ||
-    n === 'docs/development/backend-operations.md'
-  );
-}
-
-/**
  * 两轮检查：先建 slug 索引，再校验交叉锚点。
+ * CLI 源缺失/解析失败作为全局 finding 直接失败。
  * @param {string[]} targets
  * @returns {Finding[]}
  */
 function checkAll(targets) {
   const allow = loadCommandAllowlist();
+  /** @type {Finding[]} */
+  const all = [];
+
+  if (allow.cliError) {
+    all.push(finding(CLI_SOURCE_REL, 1, allow.cliError));
+  }
+
   /** @type {Map<string, Map<string, number>>} */
   const slugIndex = new Map();
 
@@ -716,14 +821,8 @@ function checkAll(targets) {
     slugIndex.set(normalizeRel(rel), collectHeadingSlugs(stripped, lineMap));
   }
 
-  /** @type {Finding[]} */
-  const all = [];
   for (const rel of targets) {
-    all.push(
-      ...checkFile(rel, slugIndex, allow, {
-        softMissing: isSoftOptionalTarget(rel),
-      }),
-    );
+    all.push(...checkFile(rel, slugIndex, allow, {}));
   }
   return all;
 }
@@ -934,6 +1033,104 @@ function runSelfTest() {
     },
     { expectFail: false },
   );
+
+  // 无效：文档误写 encode_mdns_capabilities 输出始终带 caps= 前缀
+  caseRun(
+    'banned-mdns-caps-prefix',
+    {
+      'src-tauri/CLAUDE.md':
+        '# backend\n\n`encode_mdns_capabilities` 输出始终以 `caps=` 前缀开头，按 UTF-8 字节计数。\n',
+    },
+    {
+      expectFail: true,
+      mustMatch: [/src-tauri\/CLAUDE\.md:\d+:.*encode_mdns_capabilities|bare comma-separated/],
+    },
+  );
+
+  // CLI：README 推荐已从 dispatch 删除的子命令 → 失败
+  {
+    const name = 'cli-deleted-command';
+    const caseDir = join(dir, name);
+    mkdirSync(join(caseDir, 'src-tauri/src/backend'), { recursive: true });
+    writeFileSync(
+      join(caseDir, 'src-tauri/src/backend/cli.rs'),
+      [
+        'fn dispatch(args: Vec<String>) -> i32 {',
+        '    let command = args.get(1).map(String::as_str);',
+        '    match command {',
+        '        Some("start") => 0,',
+        '        Some("status") => 0,',
+        '        _ => 2,',
+        '    }',
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    writeFileSync(
+      join(caseDir, 'README.md'),
+      '# T\n\n```bash\ncc-partner-backend doctor\n```\n',
+      'utf8',
+    );
+    const parsed = parseCliSubcommandsFromSource(
+      join(caseDir, 'src-tauri/src/backend/cli.rs'),
+    );
+    if (!parsed.ok) {
+      failures.push(`${name}: expected parse ok, got ${parsed.error}`);
+    } else {
+      const allow = {
+        npmScripts: new Set(),
+        cliSubcommands: parsed.commands,
+        rootScripts: new Set(),
+        startModes: new Set(),
+        cliError: null,
+      };
+      const findings = checkReadmeCommands(
+        'README.md',
+        readFileSync(join(caseDir, 'README.md'), 'utf8'),
+        allow,
+      );
+      if (findings.length === 0) {
+        failures.push(`${name}: expected failure for deleted doctor subcommand`);
+      } else {
+        const blob = findings.map((f) => f.message).join('\n');
+        if (!/doctor/.test(blob)) {
+          failures.push(`${name}: diagnostics missing doctor:\n  ${blob}`);
+        }
+      }
+    }
+  }
+
+  // CLI：源文件缺失 → parse 失败
+  {
+    const name = 'cli-source-missing';
+    const missing = join(dir, name, 'no-such-cli.rs');
+    const parsed = parseCliSubcommandsFromSource(missing);
+    if (parsed.ok) {
+      failures.push(`${name}: expected parse failure for missing source`);
+    } else if (!/missing/i.test(parsed.error)) {
+      failures.push(`${name}: expected missing error, got ${parsed.error}`);
+    }
+  }
+
+  // CLI：dispatch arms 为空 → parse 失败
+  {
+    const name = 'cli-empty-dispatch';
+    const caseDir = join(dir, name);
+    mkdirSync(caseDir, { recursive: true });
+    const abs = join(caseDir, 'cli.rs');
+    writeFileSync(
+      abs,
+      'fn dispatch() -> i32 {\n    match command {\n        _ => 2,\n    }\n}\n',
+      'utf8',
+    );
+    const parsed = parseCliSubcommandsFromSource(abs);
+    if (parsed.ok) {
+      failures.push(`${name}: expected parse failure for empty arms`);
+    } else if (!/zero subcommands|not found/i.test(parsed.error)) {
+      failures.push(`${name}: unexpected error ${parsed.error}`);
+    }
+  }
 
   rmSync(dir, { recursive: true, force: true });
 
