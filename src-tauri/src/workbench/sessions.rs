@@ -19,7 +19,7 @@ use crate::workbench::remote_events::{
 };
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
@@ -1177,6 +1177,15 @@ fn decode_utf8_chunk(bytes: &[u8], pending: &mut Vec<u8>) -> String {
 pub struct WorkbenchSessionRegistry {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>>,
     replay_buffers: Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
+    /// 正在 restore 的 session_id 占位集合（Finding 5: TOCTOU 修复）。
+    ///
+    /// Business Logic（为什么需要这个字段）:
+    ///     `restore_persisted_sessions` 先 `contains()` 再异步 `resolve_worktree` 后 `restore()`，
+    ///     两个并发的 sessions/list 请求都能通过 contains() 检查并各自 spawn 一次 PTY/tmux 窗口。
+    ///     占位集合让"检查 + 占位"在同一个 Mutex 内原子完成：第一个 caller 拿到 claim，
+    ///     第二个直接跳过。restore 完成后由 caller 释放 claim（成功路径 spawn_row 已写入 sessions，
+    ///     contains 自然命中；失败路径释放后允许后续重试）。
+    restoring: Arc<Mutex<HashSet<String>>>,
 }
 
 impl WorkbenchSessionRegistry {
@@ -1189,6 +1198,7 @@ impl WorkbenchSessionRegistry {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             replay_buffers: Arc::new(Mutex::new(HashMap::new())),
+            restoring: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -1238,6 +1248,46 @@ impl WorkbenchSessionRegistry {
     ///     复用 contains 的只读 HashMap 检查，作为路由层的公开语义化 helper。
     pub fn session_exists(&self, session_id: &str) -> bool {
         self.contains(session_id)
+    }
+
+    /// 原子占位：声明"我即将 restore 这个 session"（Finding 5: TOCTOU 修复）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     `restore_persisted_sessions` 的旧实现 `contains() → await resolve_worktree → restore()`
+    ///     存在 TOCTOU：两个并发的 sessions/list 请求都能通过 contains() 检查，各自 spawn 一个
+    ///     PTY/tmux 窗口，导致同一持久化 session 被恢复两次。本方法把"检查 sessions map + 写入
+    ///     restoring 占位集合"放进同一个 `sessions` 锁内原子完成：第一个 caller 拿到 claim，
+    ///     第二个并发 caller 看到占位直接跳过。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     1. 持 sessions 锁；
+    ///     2. 若 sessions map 已有该 session_id（已在运行期），返回 false（无需 restore）；
+    ///     3. 若 restoring 集合已有该 session_id（另一个 caller 正在 restore），返回 false；
+    ///     4. 否则写入 restoring 集合并返回 true（caller 独占 restore 责任）。
+    ///
+    /// 返回 true 表示 caller 必须 restore 并在完成后调用 `release_restore_claim`。
+    pub fn try_claim_restore(&self, session_id: &str) -> bool {
+        let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+        if sessions.contains_key(session_id) {
+            return false;
+        }
+        let mut restoring = self.restoring.lock().expect("restoring 集合锁中毒");
+        if restoring.contains(session_id) {
+            return false;
+        }
+        restoring.insert(session_id.to_string());
+        true
+    }
+
+    /// 释放 restore 占位（Finding 5）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     restore 完成（成功或失败）后必须释放占位，否则后续 sessions/list 永远跳过该 session。
+    ///     成功路径：spawn_row 已把 session 写入 sessions map，contains 自然命中；
+    ///     失败路径：释放占位允许后续请求重试 restore。
+    pub fn release_restore_claim(&self, session_id: &str) {
+        let mut restoring = self.restoring.lock().expect("restoring 集合锁中毒");
+        restoring.remove(session_id);
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2831,5 +2881,67 @@ mod tests {
         assert_eq!(listed[0].id, "s1");
         assert_eq!(listed[0].status, "disconnected");
         assert!(listed[0].exited_at.is_some());
+    }
+
+    /// Business Logic（Finding 5: 为什么需要这个测试）:
+    ///     空 registry 上首次 claim 一个未运行也未被占位的 session 应成功，再次 claim 应失败
+    ///     （占位生效），从而消除并发 sessions/list 的 TOCTOU。
+    #[test]
+    fn try_claim_restore_serializes_concurrent_restore_for_same_session() {
+        let registry = WorkbenchSessionRegistry::new();
+
+        let first = registry.try_claim_restore("s1");
+        assert!(first, "首次 claim 应成功");
+
+        let second = registry.try_claim_restore("s1");
+        assert!(!second, "占位期间第二次 claim 应失败，避免重复 restore");
+
+        // 释放占位后允许后续重试。
+        registry.release_restore_claim("s1");
+        let third = registry.try_claim_restore("s1");
+        assert!(third, "释放占位后应允许重新 claim");
+        registry.release_restore_claim("s1");
+    }
+
+    /// Business Logic（Finding 5: 为什么需要这个测试）:
+    ///     session 已在运行期 registry 时，claim 应直接失败（contains 命中），不写入占位，
+    ///     避免对活跃 session 做无意义的 restore。
+    #[test]
+    fn try_claim_restore_returns_false_when_session_already_live() {
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_fake_session_for_test("live-1", "p1");
+
+        let claimed = registry.try_claim_restore("live-1");
+        assert!(!claimed, "session 已在运行期 registry 时 claim 应失败");
+        // 释放不存在的占位应是 no-op，不应 panic。
+        registry.release_restore_claim("live-1");
+    }
+
+    /// Business Logic（Finding 5: 为什么需要这个测试）:
+    ///     不同 session_id 的 claim 互不干扰，确保并发恢复多个持久化 tab 不互相阻塞。
+    #[test]
+    fn try_claim_restore_independent_for_different_sessions() {
+        let registry = WorkbenchSessionRegistry::new();
+
+        let a = registry.try_claim_restore("s-a");
+        let b = registry.try_claim_restore("s-b");
+        assert!(a && b, "不同 session 的 claim 应互不干扰");
+
+        registry.release_restore_claim("s-a");
+        registry.release_restore_claim("s-b");
+    }
+
+    /// Business Logic（Finding 5: 为什么需要这个测试）:
+    ///     release_restore_claim 对未占位的 session 必须是幂等 no-op，不应 panic，
+    ///     因为 restore_persisted_sessions 在多个 early-return 路径上调用它。
+    #[test]
+    fn release_restore_claim_is_idempotent() {
+        let registry = WorkbenchSessionRegistry::new();
+        // 未 claim 直接 release — 不应 panic。
+        registry.release_restore_claim("never-claimed");
+        // 双重 release — 不应 panic。
+        registry.try_claim_restore("s1");
+        registry.release_restore_claim("s1");
+        registry.release_restore_claim("s1");
     }
 }

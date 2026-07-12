@@ -31,7 +31,7 @@
 ///
 /// Code Logic（这个结构做什么）:
 ///     纯数据载体，所有字段 `pub`；由 `AppError::remote()` 构造，由 `AppError::remote_meta()` 读取。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RemoteErrorMeta {
     /// 对端信封的稳定 code token（v1 如 `unavailable`/`conflict`；v0 合成 `legacy.remote_error`）。
     pub code: String,
@@ -41,6 +41,12 @@ pub struct RemoteErrorMeta {
     pub retryable: bool,
     /// 对端调用链 request_id（v1 取自信封并校验 header 一致；v0 取自响应 header）。
     pub request_id: String,
+    /// 对端信封的结构化 details（含 `domain_code`；v0 合成为空对象）—— Finding 3。
+    ///
+    /// Business Logic: 多跳代理/客户端据此做细粒度路由（如区分 `transfer.chunk` 与
+    ///     `transfer.init` 失败）。保留为 `serde_json::Value` 而非具体类型，因为 details
+    ///     是开放对象（各路由可写入自定义字段如 `fields`/`queue`）。
+    pub details: serde_json::Value,
 }
 
 /// 应用统一错误类型，覆盖数据库、序列化、IO、业务 not-found 等场景。

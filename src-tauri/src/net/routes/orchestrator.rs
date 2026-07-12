@@ -468,6 +468,7 @@ pub async fn complete_task_prompt(
                     P2pError::from_app_error(e, &ctx, "orchestrator.tasks.complete_prompt")
                 })?;
             let completed = RemoteOrchestratorClient::new()
+                .with_forwarded_request_id(&ctx.request_id)
                 .complete_prompt(
                     &context.base_url,
                     RemoteCompleteOrchestratorTaskPromptReq {

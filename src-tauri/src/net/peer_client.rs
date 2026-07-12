@@ -14,6 +14,7 @@
 
 use crate::net::peer_error::parse_peer_response;
 use crate::net::protocol::PeerProtocolInfo;
+use crate::net::request_context::{new_request_id, REQUEST_ID_HEADER};
 use crate::net::routes::health::HealthResponse;
 use std::time::Duration;
 
@@ -30,6 +31,21 @@ pub use crate::net::peer_error::PeerCallError;
 struct SyncPullResp {
     #[serde(default)]
     prompts: Vec<crate::models::prompt::PromptRow>,
+}
+
+/// transfer/chunk 响应体（字段名对照 Python `receive_chunk` 返回 `{success, received_bytes}`）。
+///
+/// Business Logic（为什么本地定义而不复用 `transfer::receiver::ChunkResp`）:
+///     `transfer::receiver::ChunkResp` 是 route 层响应序列化结构（只 derive Serialize）；
+///     客户端需要的是反序列化视图。本地定义避免给 route 结构补 derive Deserialize 造成语义混淆，
+///     也避免 peer_client 反向依赖 transfer route 模块。
+#[derive(Debug, serde::Deserialize)]
+struct ChunkResp {
+    #[serde(default)]
+    success: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
+    received_bytes: u64,
 }
 
 /// sync/push 响应体（字段名对照 Python `handle_sync_push` 返回 `{accepted: <count>}`）。
@@ -198,13 +214,108 @@ impl PeerClient {
             .unwrap_or(false)
     }
 
+    // ===== Finding 2: 共享出站请求 helper =====
+    //
+    // 历史上 sync_pull/sync_push/transfer_*/cc_sync_*/ssh_target_*/scratchpad_* 每个方法
+    // 自己拼 reqwest 请求并手写 `status.is_success()` 判断，把所有失败折叠成空 Vec/false/
+    // 字符串错误，导致 code/status/retryable/request_id 全部丢失。下面两个 helper 集中：
+    //   1. 自动注入 X-CC-Request-Id（多跳调用链关联）；
+    //   2. 统一委托 `parse_peer_response` 解析成功/错误（v1 信封 + v0 老形态）；
+    //   3. 失败返回结构化 `PeerCallError`（携带 code/status/retryable/request_id）。
+    // 各公开方法据此重写，公开签名保留向后兼容（Vec/bool），但内部走结构化错误路径，
+    // 并在 tracing 里记录 code/status，便于诊断。
+
+    /// 共享 GET helper：注入 request_id 并用 `parse_peer_response` 解析响应（Finding 2）。
+    ///
+    /// Business Logic: 只读远端调用（如 transfer_status）复用同一套 request_id 注入 +
+    ///     统一错误分类，避免每处手写 `status.is_success()`。
+    ///
+    /// Code Logic: 构造 GET 请求（带 X-CC-Request-Id），发送后委托 `parse_peer_response`；
+    ///     send 失败 → `PeerCallError::Network`；2xx 反序列化失败 → `InvalidResponse`；
+    ///     非 2xx → `Remote`（携带 code/status/retryable/request_id）。
+    async fn request_get<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+    ) -> Result<T, PeerCallError> {
+        let resp = self
+            .client
+            .get(url)
+            .header(REQUEST_ID_HEADER, new_request_id())
+            .send()
+            .await
+            .map_err(|e| PeerCallError::Network {
+                url: url.to_string(),
+                source: e,
+            })?;
+        parse_peer_response::<T>(resp, url).await
+    }
+
+    /// 共享 POST helper：注入 request_id、发送 JSON body 并用 `parse_peer_response` 解析响应
+    ///（Finding 2）。
+    ///
+    /// Business Logic: sync/transfer/cc-history/ssh-target/scratchpad 等 POST 调用都需要
+    ///     统一的 request_id 注入与错误分类。
+    ///
+    /// Code Logic: 构造 POST 请求（JSON body + X-CC-Request-Id），发送后委托
+    ///     `parse_peer_response`；错误分类与 `request_get` 一致。
+    async fn request_post<T, B>(&self, url: &str, body: &B) -> Result<T, PeerCallError>
+    where
+        T: serde::de::DeserializeOwned,
+        B: serde::Serialize + ?Sized,
+    {
+        let resp = self
+            .client
+            .post(url)
+            .header(REQUEST_ID_HEADER, new_request_id())
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| PeerCallError::Network {
+                url: url.to_string(),
+                source: e,
+            })?;
+        parse_peer_response::<T>(resp, url).await
+    }
+
+    /// 共享 POST raw-bytes helper：注入 request_id、发送原始字节 body 并用 `parse_peer_response`
+    /// 解析响应（Finding 2）。
+    ///
+    /// Business Logic: transfer/chunk 的 body 是原始字节 + 自定义 header（X-Chunk-Offset），
+    ///     无法走 `request_post` 的 JSON 路径，但同样需要 request_id 注入与统一错误分类。
+    ///
+    /// Code Logic: 构造 POST 请求（自定义 header + raw body + X-CC-Request-Id），发送后委托
+    ///     `parse_peer_response`；错误分类与其它 helper 一致。
+    async fn request_post_raw<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        extra_header_name: &str,
+        extra_header_value: &str,
+        body: Vec<u8>,
+    ) -> Result<T, PeerCallError> {
+        let resp = self
+            .client
+            .post(url)
+            .header(REQUEST_ID_HEADER, new_request_id())
+            .header(extra_header_name, extra_header_value)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| PeerCallError::Network {
+                url: url.to_string(),
+                source: e,
+            })?;
+        parse_peer_response::<T>(resp, url).await
+    }
+
     /// 同步 pull：向对端发送本端 prompt 摘要，获取对端认为本端需要的 prompt。
     ///
     /// Business Logic: Prompt 同步第一步——把本端摘要发给对端，对端比对后返回本端需要更新的
     ///     prompt 完整数据。对照 Python `sync_pull`。
     ///
-    /// Code Logic: POST `{base_url}/api/sync/pull`，请求体 `{summaries: [...]}`，
-    ///     期望响应 `{prompts: [PromptRow snake_case, ...]}`。失败返回空 Vec（不阻断同步）。
+    /// Code Logic（Finding 2 起）: POST `{base_url}/api/sync/pull`，请求体 `{summaries: [...]}`，
+    ///     经共享 `request_post` helper 注入 X-CC-Request-Id 并用 `parse_peer_response` 统一解析：
+    ///     成功返回 `{prompts: [...]}`；任何失败（网络/HTTP/JSON）都记录结构化 code/status 后
+    ///     返回空 Vec（保留公开签名以兼容调用方不阻断整轮同步）。
     pub async fn sync_pull(
         &self,
         base_url: &str,
@@ -212,26 +323,16 @@ impl PeerClient {
     ) -> Vec<crate::models::prompt::PromptRow> {
         let url = format!("{base_url}/api/sync/pull");
         let body = serde_json::json!({ "summaries": local_summary });
-        match self.client.post(&url).json(&body).send().await {
-            Ok(resp) if resp.status().as_u16() == 200 => match resp.json::<SyncPullResp>().await {
-                Ok(data) => {
-                    tracing::info!(
-                        "sync_pull 从 {base_url} 获取 {} 条 prompt",
-                        data.prompts.len()
-                    );
-                    data.prompts
-                }
-                Err(e) => {
-                    tracing::error!("sync_pull 解析响应失败 ({base_url}): {e}");
-                    Vec::new()
-                }
-            },
-            Ok(resp) => {
-                tracing::warn!("sync_pull 失败 ({base_url}): HTTP {}", resp.status());
-                Vec::new()
+        match self.request_post::<SyncPullResp, _>(&url, &body).await {
+            Ok(data) => {
+                tracing::info!(
+                    "sync_pull 从 {base_url} 获取 {} 条 prompt",
+                    data.prompts.len()
+                );
+                data.prompts
             }
             Err(e) => {
-                tracing::error!("sync_pull 异常 ({base_url}): {e}");
+                tracing::warn!("sync_pull 失败 ({base_url}): {e}");
                 Vec::new()
             }
         }
@@ -241,8 +342,9 @@ impl PeerClient {
     ///
     /// Business Logic: Prompt 同步第二步——把本端独有或领先的 prompt 推过去。对照 Python `sync_push`。
     ///
-    /// Code Logic: POST `{base_url}/api/sync/push`，请求体 `{prompts: [...]}`，
-    ///     期望响应 `{accepted: <count>}`。HTTP 200 即视为成功（accepted 仅作日志）。
+    /// Code Logic（Finding 2 起）: POST `{base_url}/api/sync/push`，请求体 `{prompts: [...]}`，
+    ///     经共享 `request_post` helper 注入 X-CC-Request-Id 并用 `parse_peer_response` 统一解析：
+    ///     成功（HTTP 2xx）即视为推送完成；失败记录结构化 code/status 后返回 false。
     pub async fn sync_push(
         &self,
         base_url: &str,
@@ -250,27 +352,16 @@ impl PeerClient {
     ) -> bool {
         let url = format!("{base_url}/api/sync/push");
         let body = serde_json::json!({ "prompts": prompts });
-        match self.client.post(&url).json(&body).send().await {
-            Ok(resp) if resp.status().as_u16() == 200 => match resp.json::<SyncPushResp>().await {
-                Ok(data) => {
-                    tracing::info!(
-                        "sync_push 到 {base_url} 成功，对端接收 {} 条",
-                        data.accepted
-                    );
-                    true
-                }
-                Err(e) => {
-                    // 即使 JSON 解析失败，HTTP 200 已表示对端接收，保守返回 true 并告警
-                    tracing::warn!("sync_push 响应解析失败 ({base_url}): {e}");
-                    true
-                }
-            },
-            Ok(resp) => {
-                tracing::warn!("sync_push 失败 ({base_url}): HTTP {}", resp.status());
-                false
+        match self.request_post::<SyncPushResp, _>(&url, &body).await {
+            Ok(data) => {
+                tracing::info!(
+                    "sync_push 到 {base_url} 成功，对端接收 {} 条",
+                    data.accepted
+                );
+                true
             }
             Err(e) => {
-                tracing::error!("sync_push 异常 ({base_url}): {e}");
+                tracing::warn!("sync_push 失败 ({base_url}): {e}");
                 false
             }
         }
@@ -281,9 +372,10 @@ impl PeerClient {
     /// Business Logic: 用户主动推送 CLAUDE.md 时，对端应被更新为触发设备的版本，
     ///     因此服务端 push handler 会覆盖落库，而不是做双向 merge。
     ///
-    /// Code Logic: POST `{base_url}/api/sync/claude_md/push`，请求体 `{claude_md: row}`，
+    /// Code Logic（Finding 2 起）: POST `{base_url}/api/sync/claude_md/push`，请求体 `{claude_md: row}`，
+    ///     经共享 `request_post` helper 注入 X-CC-Request-Id 并用 `parse_peer_response` 统一解析。
     ///     期望响应 `{accepted: bool}`（对端实际落库为 true）。返回 accepted。
-    ///     HTTP 非 200 或网络/解析异常返回 Err（调用方记日志，不阻断）。
+    ///     失败经 `peer_call_error_to_app_error` 映射为 `AppError::Remote`，保留 code/status/retryable。
     pub async fn claude_md_push(
         &self,
         base_url: &str,
@@ -291,31 +383,19 @@ impl PeerClient {
     ) -> Result<bool, crate::error::AppError> {
         let url = format!("{base_url}/api/sync/claude_md/push");
         let body = serde_json::json!({ "claude_md": row });
-        let resp = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                crate::error::AppError::generic(format!("claude_md_push 请求失败: {e}"))
-            })?;
-        if resp.status().as_u16() != 200 {
-            return Err(crate::error::AppError::generic(format!(
-                "claude_md_push 失败: HTTP {}",
-                resp.status()
-            )));
-        }
-        let data = resp.json::<ClaudeMdPushResp>().await.map_err(|e| {
-            crate::error::AppError::generic(format!("claude_md_push 响应解析失败: {e}"))
+        let resp: ClaudeMdPushResp = self.request_post(&url, &body).await.map_err(|e| {
+            crate::net::peer_error::peer_call_error_to_app_error(e, "远端 CLAUDE.md")
         })?;
-        Ok(data.accepted)
+        Ok(resp.accepted)
     }
 
     /// 速记本同步 pull：向对端发送本端页面 summaries，获取对端认为本端需要的页面版本。
     ///
     /// Business Logic: Scratchpad 是多页面文本，pull 需要逐页比较向量时钟。
-    /// Code Logic: POST `{base_url}/api/scratchpad/sync/pull`，失败返回空 Vec 以兼容旧版本对端。
+    ///
+    /// Code Logic（Finding 2 起）: POST `{base_url}/api/scratchpad/sync/pull`，经共享 `request_post`
+    ///     helper 注入 X-CC-Request-Id 并用 `parse_peer_response` 统一解析；失败记录结构化错误后
+    ///     返回空 Vec 以兼容旧版本对端（不阻断整轮同步）。
     pub async fn scratchpad_pull(
         &self,
         base_url: &str,
@@ -323,22 +403,13 @@ impl PeerClient {
     ) -> Vec<crate::models::scratchpad::ScratchpadRow> {
         let url = format!("{base_url}/api/scratchpad/sync/pull");
         let body = serde_json::json!({ "summaries": summaries });
-        match self.client.post(&url).json(&body).send().await {
-            Ok(resp) if resp.status().as_u16() == 200 => {
-                match resp.json::<ScratchpadPullResp>().await {
-                    Ok(data) => data.pages,
-                    Err(e) => {
-                        tracing::warn!("scratchpad_pull 响应解析失败 ({base_url}): {e}");
-                        Vec::new()
-                    }
-                }
-            }
-            Ok(resp) => {
-                tracing::debug!("scratchpad_pull 跳过 ({base_url}): HTTP {}", resp.status());
-                Vec::new()
-            }
+        match self
+            .request_post::<ScratchpadPullResp, _>(&url, &body)
+            .await
+        {
+            Ok(data) => data.pages,
             Err(e) => {
-                tracing::debug!("scratchpad_pull 异常 ({base_url}): {e}");
+                tracing::debug!("scratchpad_pull 跳过 ({base_url}): {e}");
                 Vec::new()
             }
         }
@@ -347,7 +418,9 @@ impl PeerClient {
     /// 速记本同步 push：向对端推送本端当前页面版本列表。
     ///
     /// Business Logic: 本端缺失/领先/并发页面需要推送给对端；对端会 merge/no-op。
-    /// Code Logic: POST `{base_url}/api/scratchpad/sync/push`，HTTP 200 且 JSON 可解析即视为成功。
+    ///
+    /// Code Logic（Finding 2 起）: POST `{base_url}/api/scratchpad/sync/push`，经共享 `request_post`
+    ///     helper 注入 X-CC-Request-Id 并用 `parse_peer_response` 统一解析；HTTP 2xx 即视为成功。
     pub async fn scratchpad_push(
         &self,
         base_url: &str,
@@ -355,28 +428,19 @@ impl PeerClient {
     ) -> bool {
         let url = format!("{base_url}/api/scratchpad/sync/push");
         let body = serde_json::json!({ "pages": pages });
-        match self.client.post(&url).json(&body).send().await {
-            Ok(resp) if resp.status().as_u16() == 200 => {
-                match resp.json::<ScratchpadPushResp>().await {
-                    Ok(data) => {
-                        tracing::info!(
-                            "scratchpad_push 到 {base_url} 完成，accepted={}",
-                            data.accepted
-                        );
-                        true
-                    }
-                    Err(e) => {
-                        tracing::warn!("scratchpad_push 响应解析失败 ({base_url}): {e}");
-                        true
-                    }
-                }
-            }
-            Ok(resp) => {
-                tracing::debug!("scratchpad_push 跳过 ({base_url}): HTTP {}", resp.status());
-                false
+        match self
+            .request_post::<ScratchpadPushResp, _>(&url, &body)
+            .await
+        {
+            Ok(data) => {
+                tracing::info!(
+                    "scratchpad_push 到 {base_url} 完成，accepted={}",
+                    data.accepted
+                );
+                true
             }
             Err(e) => {
-                tracing::debug!("scratchpad_push 异常 ({base_url}): {e}");
+                tracing::debug!("scratchpad_push 跳过 ({base_url}): {e}");
                 false
             }
         }
@@ -386,31 +450,28 @@ impl PeerClient {
     ///
     /// Business Logic: 前端从某个局域网设备拉取前，先展示远端可选清单，让用户逐项勾选。
     ///
-    /// Code Logic: GET `{base_url}/api/claude-code/assets/inventory`，响应为 ClaudeCodeAsset DTO 数组。
+    /// Code Logic（Finding 2 起）: GET `{base_url}/api/claude-code/assets/inventory`，经共享
+    ///     `request_get` helper 注入 X-CC-Request-Id 并用 `parse_peer_response` 统一解析；
+    ///     失败经 `peer_call_error_to_app_error` 映射为 `AppError`（Remote 保留 code/status）。
     pub async fn claude_assets_inventory(
         &self,
         base_url: &str,
     ) -> Result<Vec<crate::claude_code_assets::ClaudeCodeAsset>, crate::error::AppError> {
         let url = format!("{base_url}/api/claude-code/assets/inventory");
-        let resp = self.client.get(&url).send().await.map_err(|e| {
-            crate::error::AppError::generic(format!("assets inventory 请求失败: {e}"))
-        })?;
-        if resp.status().as_u16() != 200 {
-            return Err(crate::error::AppError::generic(format!(
-                "assets inventory 失败: HTTP {}",
-                resp.status()
-            )));
-        }
-        resp.json::<ClaudeAssetsInventoryResp>().await.map_err(|e| {
-            crate::error::AppError::generic(format!("assets inventory 响应解析失败: {e}"))
-        })
+        let resp: ClaudeAssetsInventoryResp = self
+            .request_get(&url)
+            .await
+            .map_err(|e| crate::net::peer_error::peer_call_error_to_app_error(e, "远端 assets"))?;
+        Ok(resp)
     }
 
     /// 请求对端按 selectors 生成 Claude Code assets bundle。
     ///
     /// Business Logic: 只下载用户勾选的 assets，避免全量拉取覆盖不想要的本机配置。
     ///
-    /// Code Logic: POST selectors 到 `/api/claude-code/assets/bundle`，返回 zip 原始字节。
+    /// Code Logic（Finding 2 起）: POST selectors 到 `/api/claude-code/assets/bundle`，返回 zip 原始字节
+    ///     （非 JSON，无法走 `parse_peer_response` 反序列化路径）；但同样注入 X-CC-Request-Id，
+    ///     并把非 2xx 折叠为携带状态码的 `AppError`，便于调用方区分网络/HTTP/业务失败。
     pub async fn claude_assets_bundle(
         &self,
         base_url: &str,
@@ -421,14 +482,16 @@ impl PeerClient {
         let resp = self
             .client
             .post(&url)
+            .header(REQUEST_ID_HEADER, new_request_id())
             .json(&body)
             .send()
             .await
             .map_err(|e| crate::error::AppError::generic(format!("assets bundle 请求失败: {e}")))?;
-        if resp.status().as_u16() != 200 {
+        let status = resp.status();
+        if !status.is_success() {
             return Err(crate::error::AppError::generic(format!(
                 "assets bundle 失败: HTTP {}",
-                resp.status()
+                status
             )));
         }
         let bytes = resp
@@ -443,28 +506,19 @@ impl PeerClient {
     /// Business Logic: 发送端分块前先握手，告知对端文件名/大小/SHA256，对端确认并返回续传 offset。
     ///     对照 Python `transfer_init`（POST /api/transfer/init）。
     ///
-    /// Code Logic: POST `{base_url}/api/transfer/init`，body `{transfer_id, filename, size, sha256, chunk_size}`，
-    ///     期望响应 `{transfer_id, accepted, resume_offset}`。成功返回完整响应 JSON；
-    ///     HTTP 非 200 或网络异常返回 Err（调用方据此标记任务 failed）。
+    /// Code Logic（Finding 2 起）: POST `{base_url}/api/transfer/init`，body
+    ///     `{transfer_id, filename, size, sha256, chunk_size}`，经共享 `request_post` helper 注入
+    ///     X-CC-Request-Id 并用 `parse_peer_response` 统一解析。成功返回完整响应 JSON；
+    ///     失败返回 Err，文案携带结构化 code/status（调用方据此标记任务 failed）。
     pub async fn transfer_init(
         &self,
         base_url: &str,
         metadata: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         let url = format!("{base_url}/api/transfer/init");
-        let resp = self
-            .client
-            .post(&url)
-            .json(&metadata)
-            .send()
+        self.request_post::<serde_json::Value, _>(&url, &metadata)
             .await
-            .map_err(|e| format!("请求 init 失败: {e}"))?;
-        if resp.status().as_u16() != 200 {
-            return Err(format!("init HTTP {}", resp.status()));
-        }
-        resp.json::<serde_json::Value>()
-            .await
-            .map_err(|e| format!("init 响应解析失败: {e}"))
+            .map_err(|e| peer_call_error_to_transfer_message("init", &url, e))
     }
 
     /// 发送一个数据块到对端。
@@ -472,9 +526,10 @@ impl PeerClient {
     /// Business Logic: 分块传输核心调用，body 为原始字节，header X-Chunk-Offset 标明写入 offset。
     ///     对照 Python `transfer_chunk`（POST /api/transfer/chunk/{id}）。
     ///
-    /// Code Logic: POST `{base_url}/api/transfer/chunk/{id}`，header `X-Chunk-Offset: <offset>`，
-    ///     body = bytes（reqwest Body）。期望响应 `{success, received_bytes}`。
-    ///     成功且 success==true 返回 Ok(true)；success==false 返回 Ok(false)；HTTP 非 200 或异常返回 Err。
+    /// Code Logic（Finding 2 起）: POST `{base_url}/api/transfer/chunk/{id}`，header
+    ///     `X-Chunk-Offset: <offset>`，body = bytes。经共享 `request_post_raw` helper 注入
+    ///     X-CC-Request-Id 并用 `parse_peer_response` 统一解析。期望响应 `{success, received_bytes}`。
+    ///     成功且 success==true 返回 Ok(true)；success==false 返回 Ok(false)；失败返回 Err。
     pub async fn transfer_chunk(
         &self,
         base_url: &str,
@@ -483,32 +538,20 @@ impl PeerClient {
         data: Vec<u8>,
     ) -> Result<bool, String> {
         let url = format!("{base_url}/api/transfer/chunk/{transfer_id}");
-        let resp = self
-            .client
-            .post(&url)
-            .header("X-Chunk-Offset", offset.to_string())
-            .body(data)
-            .send()
+        let resp: ChunkResp = self
+            .request_post_raw(&url, "X-Chunk-Offset", &offset.to_string(), data)
             .await
-            .map_err(|e| format!("请求 chunk 失败: {e}"))?;
-        if resp.status().as_u16() != 200 {
-            return Err(format!("chunk HTTP {}", resp.status()));
-        }
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("chunk 响应解析失败: {e}"))?;
-        let success = body
-            .get("success")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        Ok(success)
+            .map_err(|e| peer_call_error_to_transfer_message("chunk", &url, e))?;
+        Ok(resp.success)
     }
 
     /// 查询对端某接收任务的状态。
     ///
     /// Business Logic: 发送端可轮询对端接收进度（M5 当前未强制使用，保留供扩展）。
     ///     对照 Python `get_transfer_status`（GET /api/transfer/status/{id}）。
+    ///
+    /// Code Logic（Finding 2 起）: GET `{base_url}/api/transfer/status/{id}`，经共享 `request_get`
+    ///     helper 注入 X-CC-Request-Id 并用 `parse_peer_response` 统一解析。
     #[allow(dead_code)]
     pub async fn transfer_status(
         &self,
@@ -516,18 +559,9 @@ impl PeerClient {
         transfer_id: &str,
     ) -> Result<serde_json::Value, String> {
         let url = format!("{base_url}/api/transfer/status/{transfer_id}");
-        let resp = self
-            .client
-            .get(&url)
-            .send()
+        self.request_get::<serde_json::Value>(&url)
             .await
-            .map_err(|e| format!("请求 status 失败: {e}"))?;
-        if resp.status().as_u16() != 200 {
-            return Err(format!("status HTTP {}", resp.status()));
-        }
-        resp.json::<serde_json::Value>()
-            .await
-            .map_err(|e| format!("status 响应解析失败: {e}"))
+            .map_err(|e| peer_call_error_to_transfer_message("status", &url, e))
     }
 
     /// Claude Code 历史同步 pull：向对端发送本端 cc 历史摘要，获取对端认为本端需要的 cc 历史。
@@ -535,8 +569,9 @@ impl PeerClient {
     /// Business Logic: CC 历史同步第一步——把本端摘要发给对端，对端比对后返回本端需要更新的
     ///     cc 历史完整数据。走独立链路 `/api/cc-history/sync/pull`，与 prompts 同步解耦。
     ///
-    /// Code Logic: POST `{base_url}/api/cc-history/sync/pull`，请求体 `{summaries: [...]}`，
-    ///     期望响应 `{items: [ClaudeHistoryRow snake_case, ...]}`。失败返回空 Vec（不阻断同步）。
+    /// Code Logic（Finding 2 起）: POST `{base_url}/api/cc-history/sync/pull`，经共享 `request_post`
+    ///     helper 注入 X-CC-Request-Id 并用 `parse_peer_response` 统一解析；失败记录结构化错误后
+    ///     返回空 Vec（不阻断同步）。
     pub async fn cc_sync_pull(
         &self,
         base_url: &str,
@@ -544,28 +579,16 @@ impl PeerClient {
     ) -> Vec<crate::cc::models::ClaudeHistoryRow> {
         let url = format!("{base_url}/api/cc-history/sync/pull");
         let body = serde_json::json!({ "summaries": local_summary });
-        match self.client.post(&url).json(&body).send().await {
-            Ok(resp) if resp.status().as_u16() == 200 => {
-                match resp.json::<CcSyncPullResp>().await {
-                    Ok(data) => {
-                        tracing::info!(
-                            "cc_sync_pull 从 {base_url} 获取 {} 条 CC 历史",
-                            data.items.len()
-                        );
-                        data.items
-                    }
-                    Err(e) => {
-                        tracing::error!("cc_sync_pull 解析响应失败 ({base_url}): {e}");
-                        Vec::new()
-                    }
-                }
-            }
-            Ok(resp) => {
-                tracing::warn!("cc_sync_pull 失败 ({base_url}): HTTP {}", resp.status());
-                Vec::new()
+        match self.request_post::<CcSyncPullResp, _>(&url, &body).await {
+            Ok(data) => {
+                tracing::info!(
+                    "cc_sync_pull 从 {base_url} 获取 {} 条 CC 历史",
+                    data.items.len()
+                );
+                data.items
             }
             Err(e) => {
-                tracing::error!("cc_sync_pull 异常 ({base_url}): {e}");
+                tracing::warn!("cc_sync_pull 失败 ({base_url}): {e}");
                 Vec::new()
             }
         }
@@ -575,8 +598,8 @@ impl PeerClient {
     ///
     /// Business Logic: CC 历史同步第二步——把本端独有或领先的 cc 历史推过去。
     ///
-    /// Code Logic: POST `{base_url}/api/cc-history/sync/push`，请求体 `{items: [...]}`，
-    ///     期望响应 `{accepted: <count>}`。HTTP 200 即视为成功。
+    /// Code Logic（Finding 2 起）: POST `{base_url}/api/cc-history/sync/push`，经共享 `request_post`
+    ///     helper 注入 X-CC-Request-Id 并用 `parse_peer_response` 统一解析；HTTP 2xx 即视为成功。
     pub async fn cc_sync_push(
         &self,
         base_url: &str,
@@ -584,28 +607,16 @@ impl PeerClient {
     ) -> bool {
         let url = format!("{base_url}/api/cc-history/sync/push");
         let body = serde_json::json!({ "items": items });
-        match self.client.post(&url).json(&body).send().await {
-            Ok(resp) if resp.status().as_u16() == 200 => {
-                match resp.json::<CcSyncPushResp>().await {
-                    Ok(data) => {
-                        tracing::info!(
-                            "cc_sync_push 到 {base_url} 成功，对端接收 {} 条",
-                            data.accepted
-                        );
-                        true
-                    }
-                    Err(e) => {
-                        tracing::warn!("cc_sync_push 响应解析失败 ({base_url}): {e}");
-                        true
-                    }
-                }
-            }
-            Ok(resp) => {
-                tracing::warn!("cc_sync_push 失败 ({base_url}): HTTP {}", resp.status());
-                false
+        match self.request_post::<CcSyncPushResp, _>(&url, &body).await {
+            Ok(data) => {
+                tracing::info!(
+                    "cc_sync_push 到 {base_url} 成功，对端接收 {} 条",
+                    data.accepted
+                );
+                true
             }
             Err(e) => {
-                tracing::error!("cc_sync_push 异常 ({base_url}): {e}");
+                tracing::warn!("cc_sync_push 失败 ({base_url}): {e}");
                 false
             }
         }
@@ -616,8 +627,8 @@ impl PeerClient {
     /// Business Logic: SSH 同步第一步——把本端摘要发给对端，对端比对后返回本端需要更新的
     ///     SSH 目标完整数据。走独立链路 `/api/ssh-target/sync/pull`，与 prompts 同步解耦。
     ///
-    /// Code Logic: POST `{base_url}/api/ssh-target/sync/pull`，请求体 `{summaries: [...]}`，
-    ///     期望响应 `{targets: [SshTargetRow snake_case, ...]}`。失败返回空 Vec（不阻断同步）。
+    /// Code Logic（Finding 2 起）: POST `{base_url}/api/ssh-target/sync/pull`，经共享 `request_post`
+    ///     helper 注入 X-CC-Request-Id 并用 `parse_peer_response` 统一解析；失败返回空 Vec。
     pub async fn ssh_target_pull(
         &self,
         base_url: &str,
@@ -625,28 +636,16 @@ impl PeerClient {
     ) -> Vec<crate::models::ssh_target::SshTargetRow> {
         let url = format!("{base_url}/api/ssh-target/sync/pull");
         let body = serde_json::json!({ "summaries": local_summary });
-        match self.client.post(&url).json(&body).send().await {
-            Ok(resp) if resp.status().as_u16() == 200 => {
-                match resp.json::<SshTargetPullResp>().await {
-                    Ok(data) => {
-                        tracing::info!(
-                            "ssh_target_pull 从 {base_url} 获取 {} 条 SSH 目标",
-                            data.targets.len()
-                        );
-                        data.targets
-                    }
-                    Err(e) => {
-                        tracing::error!("ssh_target_pull 解析响应失败 ({base_url}): {e}");
-                        Vec::new()
-                    }
-                }
-            }
-            Ok(resp) => {
-                tracing::warn!("ssh_target_pull 失败 ({base_url}): HTTP {}", resp.status());
-                Vec::new()
+        match self.request_post::<SshTargetPullResp, _>(&url, &body).await {
+            Ok(data) => {
+                tracing::info!(
+                    "ssh_target_pull 从 {base_url} 获取 {} 条 SSH 目标",
+                    data.targets.len()
+                );
+                data.targets
             }
             Err(e) => {
-                tracing::error!("ssh_target_pull 异常 ({base_url}): {e}");
+                tracing::warn!("ssh_target_pull 失败 ({base_url}): {e}");
                 Vec::new()
             }
         }
@@ -656,8 +655,8 @@ impl PeerClient {
     ///
     /// Business Logic: SSH 同步第二步——把本端独有或领先的 SSH 目标推过去。
     ///
-    /// Code Logic: POST `{base_url}/api/ssh-target/sync/push`，请求体 `{targets: [...]}`，
-    ///     期望响应 `{accepted: <count>}`。HTTP 200 即视为成功。
+    /// Code Logic（Finding 2 起）: POST `{base_url}/api/ssh-target/sync/push`，经共享 `request_post`
+    ///     helper 注入 X-CC-Request-Id 并用 `parse_peer_response` 统一解析；HTTP 2xx 即视为成功。
     pub async fn ssh_target_push(
         &self,
         base_url: &str,
@@ -665,28 +664,16 @@ impl PeerClient {
     ) -> bool {
         let url = format!("{base_url}/api/ssh-target/sync/push");
         let body = serde_json::json!({ "targets": targets });
-        match self.client.post(&url).json(&body).send().await {
-            Ok(resp) if resp.status().as_u16() == 200 => {
-                match resp.json::<SshTargetPushResp>().await {
-                    Ok(data) => {
-                        tracing::info!(
-                            "ssh_target_push 到 {base_url} 成功，对端接收 {} 条",
-                            data.accepted
-                        );
-                        true
-                    }
-                    Err(e) => {
-                        tracing::warn!("ssh_target_push 响应解析失败 ({base_url}): {e}");
-                        true
-                    }
-                }
-            }
-            Ok(resp) => {
-                tracing::warn!("ssh_target_push 失败 ({base_url}): HTTP {}", resp.status());
-                false
+        match self.request_post::<SshTargetPushResp, _>(&url, &body).await {
+            Ok(data) => {
+                tracing::info!(
+                    "ssh_target_push 到 {base_url} 成功，对端接收 {} 条",
+                    data.accepted
+                );
+                true
             }
             Err(e) => {
-                tracing::error!("ssh_target_push 异常 ({base_url}): {e}");
+                tracing::warn!("ssh_target_push 失败 ({base_url}): {e}");
                 false
             }
         }
@@ -696,6 +683,36 @@ impl PeerClient {
 impl Default for PeerClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// 把 `PeerCallError` 折叠为 transfer 调用方的字符串错误文案（Finding 2）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `transfer_init`/`transfer_chunk`/`transfer_status` 的公开签名沿用 `Result<_, String>`（调用方
+///     `transfer/sender.rs` 把它写进失败任务的 errorMessage）。直接返回 `PeerCallError` 会破坏签名；
+///     但旧实现只写 `"init HTTP 503"`，丢失了 code/retryable/request_id。本函数把结构化错误折叠成
+///     含 code/status 的可读字符串，让调用方/日志/用户仍能看到失败语义（如 `[unavailable/503]`）。
+///
+/// Code Logic（这个函数做什么）:
+///     - `Remote` → `"{step} 失败 ({url}): HTTP {status} [{code}]"`（保留 code/status）；
+///     - `Network` → `"{step} 网络失败 ({url}): {source}"`；
+///     - `Unsupported` → `"{step} 对端不支持能力 {capability}"`；
+///     - `InvalidResponse` → `"{step} 响应无法解析 ({url}): {reason}"`。
+fn peer_call_error_to_transfer_message(step: &str, url: &str, error: PeerCallError) -> String {
+    match error {
+        PeerCallError::Remote { status, code, .. } => {
+            format!("{step} 失败 ({url}): HTTP {status} [{code}]")
+        }
+        PeerCallError::Network { source, .. } => {
+            format!("{step} 网络失败 ({url}): {source}")
+        }
+        PeerCallError::Unsupported { capability, .. } => {
+            format!("{step} 对端不支持能力 {capability}")
+        }
+        PeerCallError::InvalidResponse { reason, .. } => {
+            format!("{step} 响应无法解析 ({url}): {reason}")
+        }
     }
 }
 
@@ -771,6 +788,7 @@ mod tests {
                 request_id: "r".to_string(),
                 retryable: true,
                 legacy: false,
+                details: serde_json::Value::Object(serde_json::Map::new()),
             }
         );
         assert!(remote_msg.contains("503"));
@@ -979,6 +997,142 @@ mod tests {
             hits.load(Ordering::SeqCst),
             0,
             "能力门未通过时不应调用新路由"
+        );
+    }
+
+    // ===== Finding 2: 共享出站请求 helper =====
+
+    /// 测试用 DTO：sync_push 响应子集（`{accepted: u64}`）。
+    #[derive(Debug, serde::Deserialize)]
+    struct AcceptedResp {
+        #[serde(default)]
+        accepted: u64,
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 2）:
+    ///     `request_post` 必须在每次出站请求上自动注入 `X-CC-Request-Id`，让对端把请求纳入
+    ///     同一调用链日志；这是多跳代理关联的前提。用 echo handler 回写 observed header 验证。
+    #[tokio::test]
+    async fn request_post_helper_injects_request_id_header() {
+        let app = axum::Router::new().route(
+            "/api/echo-id",
+            axum::routing::post(|headers: axum::http::HeaderMap| async move {
+                let id = headers
+                    .get("x-cc-request-id")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                axum::Json(serde_json::json!({ "accepted": id.len() as u64 }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!("http://{addr}/api/echo-id");
+        let client = PeerClient::new();
+        let body = serde_json::json!({});
+        let resp: AcceptedResp = client
+            .request_post(&url, &body)
+            .await
+            .expect("2xx 应解析成功");
+        // UUID v4 长度 36 → accepted==36 证明 header 已注入并被对端观测到。
+        assert_eq!(resp.accepted, 36, "request_post 应注入 36 字符 UUID header");
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 2）:
+    ///     `request_post` 经 `parse_peer_response` 解析时，对端 503 + v1 信封必须被分类为
+    ///     `PeerCallError::Remote` 且保留 code/status/retryable，调用方据此（而非文案）决策重试。
+    #[tokio::test]
+    async fn request_post_helper_classifies_remote_error_envelope() {
+        let app = axum::Router::new().route(
+            "/api/fail",
+            axum::routing::post(|| async move {
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(serde_json::json!({
+                        "error": "对端忙",
+                        "code": "unavailable",
+                        "request_id": "req-fail",
+                        "retryable": true,
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!("http://{addr}/api/fail");
+        let client = PeerClient::new();
+        let body = serde_json::json!({});
+        let err = client
+            .request_post::<AcceptedResp, _>(&url, &body)
+            .await
+            .expect_err("503 应为错误");
+        match err {
+            PeerCallError::Remote {
+                status,
+                code,
+                request_id,
+                retryable,
+                ..
+            } => {
+                assert_eq!(status, 503);
+                assert_eq!(code, "unavailable");
+                assert_eq!(request_id, "req-fail");
+                assert!(retryable);
+            }
+            other => panic!("应为 Remote，实际: {other:?}"),
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 2）:
+    ///     transfer 失败文案必须携带结构化 code/status（不再只是 "init HTTP 503"），
+    ///     便于调用方/日志诊断。验证 `peer_call_error_to_transfer_message` 折叠 Remote 时含
+    ///     `[unavailable/503]` 形态。
+    #[tokio::test]
+    async fn transfer_init_failure_message_carries_code_and_status() {
+        let app = axum::Router::new().route(
+            "/api/transfer/init",
+            axum::routing::post(|| async move {
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(serde_json::json!({
+                        "error": "对端忙",
+                        "code": "unavailable",
+                        "request_id": "req-t",
+                        "retryable": true,
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base_url = format!("http://{addr}");
+        let client = PeerClient::new();
+        let err = client
+            .transfer_init(&base_url, serde_json::json!({}))
+            .await
+            .expect_err("503 应返回 Err");
+        assert!(
+            err.contains("503"),
+            "transfer_init 失败文案应含状态码: {err}"
+        );
+        assert!(
+            err.contains("unavailable"),
+            "transfer_init 失败文案应含 code: {err}"
         );
     }
 }

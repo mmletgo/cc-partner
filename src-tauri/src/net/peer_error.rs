@@ -81,7 +81,8 @@ pub enum PeerCallError {
     /// 对端返回的业务错误（v1 信封或 v0 老形态合成）。
     ///
     /// Business Logic: 调用方应优先用 `code` + `status` 做分支（如 `unavailable`/503 触发重试），
-    ///     `message` 仅用于日志/展示；`legacy` 标识来自旧版对端，便于遥测区分。
+    ///     `message` 仅用于日志/展示；`legacy` 标识来自旧版对端，便于遥测区分。`details` 携带
+    ///     对端信封的结构化补充信息（含 `domain_code`），供细粒度遥测/路由（Finding 3）。
     #[error("对端业务错误 ({url}): HTTP {status} [{code}] {message}")]
     Remote {
         /// 对端 URL。
@@ -98,6 +99,11 @@ pub enum PeerCallError {
         retryable: bool,
         /// 是否来自旧版 v0 对端（code 为合成值）。
         legacy: bool,
+        /// 对端信封的结构化补充信息（v1 `details` 字段，含 `domain_code`；v0 合成为空对象）。
+        ///
+        /// Business Logic（Finding 3）: `details.domain_code` 让多跳代理/客户端做细粒度路由，
+        ///     例如区分 `transfer.chunk` 与 `transfer.init` 的失败，即使二者都映射到同一 code token。
+        details: serde_json::Value,
     },
 }
 
@@ -133,6 +139,28 @@ impl PeerCallError {
     pub fn is_legacy(&self) -> bool {
         matches!(self, PeerCallError::Remote { legacy: true, .. })
     }
+
+    /// 返回 `Remote` 变体携带的对端 `details`（含 `domain_code`）；其它变体返回 None（Finding 3）。
+    ///
+    /// Business Logic: 多跳代理/客户端可据此做细粒度遥测或路由决策（如区分 `transfer.chunk`
+    ///     与 `transfer.init` 失败），而不依赖人类可读文案。返回 `serde_json::Value` 引用，
+    ///     调用方自行取 `domain_code`/`fields` 等子字段。
+    pub fn remote_details(&self) -> Option<&serde_json::Value> {
+        match self {
+            PeerCallError::Remote { details, .. } => Some(details),
+            _ => None,
+        }
+    }
+
+    /// 返回 `Remote` 变体 `details.domain_code` 字符串（Finding 3）；缺失或非 string 返回 None。
+    ///
+    /// Business Logic: 便捷访问器，集中 `details.domain_code` 提取逻辑，避免调用方重复
+    ///     `details.get("domain_code").and_then(|v| v.as_str())` 样板。
+    pub fn remote_domain_code(&self) -> Option<&str> {
+        self.remote_details()
+            .and_then(|d| d.get("domain_code"))
+            .and_then(|v| v.as_str())
+    }
 }
 
 /// 纯函数解析入口：消费 (status, header request_id, body bytes, url) 一次，产出统一结果。
@@ -149,6 +177,10 @@ impl PeerCallError {
 ///         否则产出 `Remote { code, legacy: false, ... }`。
 ///       - v0（legacy）：合成 code=`legacy.remote_error`、retryable=false、request_id 取自 header。
 ///     - 非 2xx 且 body 无法解析（含空 body）：→ `InvalidResponse`，与业务错误明确区分。
+/// `PeerCallError::Remote` 因携带 `details: serde_json::Value`（保留对端结构化错误元数据用于
+/// 多跳代理细粒度路由，Finding 3）使变体超过 clippy 默认的 128 字节阈值。错误路径非热路径，
+/// 透传结构化 details 的价值大于 Result 体积，故此处允许 `result_large_err`。
+#[allow(clippy::result_large_err)]
 pub fn parse_peer_response_parts<T: DeserializeOwned>(
     status: u16,
     header_request_id: Option<&str>,
@@ -178,6 +210,7 @@ pub fn parse_peer_response_parts<T: DeserializeOwned>(
 
     if parsed.is_legacy() {
         // v0 老形态：合成稳定 code，request_id 取自 header（body 里没有）。
+        // details 合成为空对象（v0 信封没有该字段），保持 Remote 变体形状一致。
         return Err(PeerCallError::Remote {
             url: url.to_string(),
             status,
@@ -186,6 +219,7 @@ pub fn parse_peer_response_parts<T: DeserializeOwned>(
             request_id: header_request_id.unwrap_or("").to_string(),
             retryable: false,
             legacy: true,
+            details: serde_json::Value::Object(serde_json::Map::new()),
         });
     }
 
@@ -213,6 +247,8 @@ pub fn parse_peer_response_parts<T: DeserializeOwned>(
         request_id,
         retryable: parsed.retryable,
         legacy: false,
+        // Finding 3: 原样保留对端 details（含 domain_code），供多跳代理/客户端细粒度路由。
+        details: parsed.details,
     })
 }
 
@@ -274,6 +310,7 @@ pub fn peer_call_error_to_app_error(error: PeerCallError, client_label: &str) ->
             code,
             request_id,
             retryable,
+            details,
             ..
         } => {
             let msg = message.trim();
@@ -289,6 +326,7 @@ pub fn peer_call_error_to_app_error(error: PeerCallError, client_label: &str) ->
                     status,
                     retryable,
                     request_id,
+                    details,
                 },
             )
         }
@@ -361,6 +399,94 @@ mod tests {
         assert_eq!(err.code(), Some("unavailable"));
         assert_eq!(err.status(), Some(503));
         assert!(!err.is_legacy());
+    }
+
+    // ===== Finding 3: details/domain_code 保留 =====
+
+    /// Business Logic（为什么需要这个测试 / Finding 3）:
+    ///     v1 信封的 `details`（含 `domain_code`）必须原样保留进 `PeerCallError::Remote`，
+    ///     让多跳代理/客户端据此做细粒度路由（如区分 `transfer.chunk` 与 `transfer.init`）。
+    ///     旧实现只保留 code/status/message，把 details 丢弃，导致 domain_code 在第一跳就丢失。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 503 + v1 信封（含 `details: {"domain_code": "transfer.chunk", "queue": "sync"}`），
+    ///     断言 `remote_details()` 与 `remote_domain_code()` 返回期望值。
+    #[test]
+    fn preserves_v1_details_with_domain_code_in_remote_variant() {
+        let body = r#"{
+            "error": "对端忙",
+            "code": "unavailable",
+            "request_id": "req-d",
+            "retryable": true,
+            "details": {"domain_code": "transfer.chunk", "queue": "sync"}
+        }"#;
+        let err = parse_peer_response_parts::<SampleDto>(503, Some("req-d"), body.as_bytes(), URL)
+            .expect_err("503 应为错误");
+        let details = err.remote_details().expect("details 应被保留");
+        assert_eq!(
+            details.get("domain_code").and_then(|v| v.as_str()),
+            Some("transfer.chunk"),
+            "details.domain_code 应原样保留"
+        );
+        assert_eq!(
+            details.get("queue").and_then(|v| v.as_str()),
+            Some("sync"),
+            "details 其它字段应原样保留"
+        );
+        assert_eq!(err.remote_domain_code(), Some("transfer.chunk"));
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 3）:
+    ///     v0 老形态没有 details，`remote_details()` 应返回空对象（而非 None），保持 Remote
+    ///     变体形状一致；`remote_domain_code()` 返回 None（空对象里没有 domain_code）。
+    #[test]
+    fn legacy_remote_details_is_empty_object_without_domain_code() {
+        let body = r#"{"error":"旧错误"}"#;
+        let err = parse_peer_response_parts::<SampleDto>(503, Some("hdr"), body.as_bytes(), URL)
+            .expect_err("503 应为错误");
+        let details = err
+            .remote_details()
+            .expect("legacy Remote 也应有 details 占位");
+        assert!(details.is_object(), "legacy details 应为空对象");
+        assert!(details.as_object().unwrap().is_empty());
+        assert_eq!(err.remote_domain_code(), None);
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 3）:
+    ///     `remote_details()`/`remote_domain_code()` 在非 Remote 变体（如 InvalidResponse）上
+    ///     必须返回 None，避免调用方误读。
+    #[test]
+    fn remote_details_accessors_return_none_for_non_remote_variants() {
+        let err = parse_peer_response_parts::<SampleDto>(500, None, b"not json", URL)
+            .expect_err("500 非 json 应为错误");
+        assert!(matches!(err, PeerCallError::InvalidResponse { .. }));
+        assert_eq!(err.remote_details(), None);
+        assert_eq!(err.remote_domain_code(), None);
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 3）:
+    ///     `peer_call_error_to_app_error` 把 `PeerCallError::Remote` 映射为 `AppError::Remote` 时，
+    ///     details（含 domain_code）必须透传进 `RemoteErrorMeta.details`，否则多跳代理第二跳
+    ///     就拿不到对端第一跳的 domain_code。
+    #[test]
+    fn peer_call_error_to_app_error_preserves_details_in_remote_meta() {
+        let body = r#"{
+            "error": "x",
+            "code": "unavailable",
+            "request_id": "req-meta",
+            "retryable": true,
+            "details": {"domain_code": "transfer.init"}
+        }"#;
+        let err =
+            parse_peer_response_parts::<SampleDto>(503, Some("req-meta"), body.as_bytes(), URL)
+                .expect_err("503 应为错误");
+        let app = peer_call_error_to_app_error(err, "远端测试");
+        let meta = app.remote_meta().expect("应有 remote_meta");
+        assert_eq!(
+            meta.details.get("domain_code").and_then(|v| v.as_str()),
+            Some("transfer.init"),
+            "RemoteErrorMeta.details 应保留 domain_code"
+        );
     }
 
     // ===== Step 1 契约: legacy `{ "error": "..." }` =====
@@ -580,6 +706,7 @@ mod tests {
                 request_id: "r".to_string(),
                 retryable: true,
                 legacy: false,
+                details: serde_json::Value::Object(serde_json::Map::new()),
             }
         );
         assert!(remote.contains("503"));

@@ -588,6 +588,35 @@ fn body_is_envelope(body: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+/// 响应扩展标记：Browser Preview 代理透传响应。
+///
+/// Business Logic（为什么需要这个标记 / Finding 1）:
+///     Browser Preview 代理把上游 dev server 的响应（含 4xx/5xx 错误页、HTML body、流式 chunk）
+///     原样透传给 iframe。上游的 404/500 等错误页面对 iframe 是有效内容，不能被
+///     `envelope_fallback_middleware` 改写成 P2P 错误信封。代理 handler 在返回透传响应前
+///     把本标记写入 response extensions，中间件据此跳过信封包装。
+///
+/// Code Logic（这个标记做什么）:
+///     空结构体，仅作为 extensions 中的类型键存在；中间件用 `response.extensions().get::<...>()`
+///     判定是否存在。标记由 `mark_response_as_passthrough` 统一注入，避免散落构造。
+#[derive(Debug, Clone, Copy)]
+pub struct BrowserProxyPassthroughMarker;
+
+/// 把一个 axum `Response` 标记为 Browser Preview 代理透传响应（Finding 1）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     代理 handler 集中调用本函数，确保所有透传响应都带上同一份标记；中间件据此跳过信封包装，
+///     让上游 4xx/5xx 与流式 body 原样到达 iframe。
+///
+/// Code Logic（这个函数做什么）:
+///     写入 `BrowserProxyPassthroughMarker` 到 response extensions 并返回原响应。
+pub fn mark_response_as_passthrough<B>(mut response: Response<B>) -> Response<B> {
+    response
+        .extensions_mut()
+        .insert(BrowserProxyPassthroughMarker);
+    response
+}
+
 /// 边界信封兜底中间件：把任何"非 2xx 且 body 非信封"的响应包成 P2pErrorEnvelope（Finding 1）。
 ///
 /// Business Logic（为什么需要这个函数 / Finding 1）:
@@ -595,7 +624,12 @@ fn body_is_envelope(body: &[u8]) -> bool {
 ///     未匹配路由 → 404、错误方法 → 405）默认返回裸状态码或 axum 自有 body，不经过
 ///     `P2pError::into_response`，因此会破坏 health 宣告的 `errors.envelope.v1` 契约。
 ///     本中间件放在 `request_id_middleware` 内层、业务路由外层，统一把这类响应改写为信封。
-///     成功响应（2xx）与已经是信封的非 2xx 响应原样透传。
+///     透传规则（Finding 1）:
+///     1. 成功响应（2xx）原样透传；
+///     2. 带 `BrowserProxyPassthroughMarker` 的响应（Browser Preview 代理透传，含上游 4xx/5xx
+///        与流式 body）原样透传，不包装为信封——iframe 需看到 dev server 的真实错误页面；
+///     3. 已经是 P2P 信封的非 2xx 响应原样透传；
+///     4. 其余非 2xx 响应包装为信封。
 pub async fn envelope_fallback_middleware(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -609,6 +643,15 @@ pub async fn envelope_fallback_middleware(
         });
     let response = next.run(request).await;
     if response.status().is_success() {
+        return response;
+    }
+    // Browser Preview 代理透传：上游 4xx/5xx 与流式 body 必须原样到达 iframe，
+    // 不能被改写为 P2P 错误信封（Finding 1）。
+    if response
+        .extensions()
+        .get::<BrowserProxyPassthroughMarker>()
+        .is_some()
+    {
         return response;
     }
     let status = response.status();
@@ -978,6 +1021,76 @@ mod tests {
         assert_eq!(body.code, "conflict");
         assert_eq!(body.error, "状态冲突");
         assert_eq!(body.request_id, "req-pass");
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 1）:
+    ///     Browser Preview 代理把上游 dev server 的 4xx/5xx（含 HTML body）原样透传给 iframe；
+    ///     `envelope_fallback_middleware` 必须识别 `BrowserProxyPassthroughMarker` 并跳过信封包装，
+    ///     否则 iframe 会看到 P2P 错误信封而不是 dev server 的真实错误页面。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造一个返回 404 + HTML body 且带 `BrowserProxyPassthroughMarker` 的 handler，
+    ///     断言中间件输出仍是原始 404 + HTML body（未被改写为信封）。
+    #[tokio::test]
+    async fn fallback_middleware_passes_through_browser_proxy_marker_response() {
+        use crate::net::request_context::request_id_middleware;
+        use axum::body::to_bytes;
+        use axum::routing::get;
+        async fn proxy_like_handler() -> axum::response::Response<axum::body::Body> {
+            let mut response = axum::response::Response::new(axum::body::Body::from(
+                "<html>dev server 404 page</html>",
+            ));
+            *response.status_mut() = axum::http::StatusCode::NOT_FOUND;
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                "text/html".parse().unwrap(),
+            );
+            mark_response_as_passthrough(response)
+        }
+        let router = axum::Router::new()
+            .route("/proxy/preview", get(proxy_like_handler))
+            .layer(axum::middleware::from_fn(envelope_fallback_middleware))
+            .layer(axum::middleware::from_fn(request_id_middleware));
+
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .uri("/proxy/preview")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.expect("router 不可失败");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::NOT_FOUND,
+            "代理透传 404 应原样保留"
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_text = std::str::from_utf8(&bytes).expect("HTML body 为 UTF-8");
+        assert!(
+            body_text.contains("dev server 404 page"),
+            "代理透传 body 应原样保留（不被改写为信封）: {body_text}"
+        );
+        assert!(
+            serde_json::from_slice::<P2pErrorEnvelope>(&bytes).is_err(),
+            "代理透传 body 不应被解析为 P2P 信封"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 1）:
+    ///     `mark_response_as_passthrough` 是代理 handler 的统一注入入口，必须真正写入标记。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造一个普通 502 响应，调用 `mark_response_as_passthrough`，断言 extensions 含标记。
+    #[test]
+    fn mark_response_as_passthrough_inserts_marker() {
+        let response = axum::response::Response::new(axum::body::Body::empty());
+        let marked = mark_response_as_passthrough(response);
+        assert!(
+            marked
+                .extensions()
+                .get::<BrowserProxyPassthroughMarker>()
+                .is_some(),
+            "mark_response_as_passthrough 应写入 BrowserProxyPassthroughMarker"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
