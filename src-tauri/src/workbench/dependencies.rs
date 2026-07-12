@@ -230,14 +230,16 @@ struct DependencyInstallInner {
 
 impl WorkbenchDependencyInstallRuntime {
     /// Business Logic（为什么需要这个函数）:
-    ///     AppState 初始化时需要一个空闲的依赖管理运行时，供所有命令共享。
+    ///     AppState 初始化时需要一个空闲的依赖管理运行时，供所有命令共享；
+    ///     启动后 Attention 可能立刻读取缓存，绝不能把“未探测”伪装成真实 missing。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造初始 missing/unsupported 状态占位，并写入首次 `status_changed_at`；真正检测由 check 命令刷新。
+    ///     构造时同步执行一次真实 tmux 探测并写入 `status_changed_at`，
+    ///     使桌面/headless/移动端冷启动都能拿到真实依赖状态，而不是 missing 占位。
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(DependencyInstallInner {
-                status: stamp_initial_status(missing_or_unsupported_status(Vec::new(), None)),
+                status: stamp_initial_status(probe_workbench_dependency()),
                 task: None,
                 cancel_token: None,
             }),
@@ -883,6 +885,29 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     冷启动若把未探测伪装成 missing，有项目时 Inbox 会错误计数环境阻塞；
+    ///     初始化必须与真实探测结果一致。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对比 `new()` 缓存与 `probe_workbench_dependency()` 的 status/available/path，
+    ///     并在探测为 ready 时确认不会被当成 missing。
+    #[test]
+    fn new_runtime_uses_real_probe_not_placeholder_missing() {
+        let probed = probe_workbench_dependency();
+        let runtime = WorkbenchDependencyInstallRuntime::new();
+        let status = runtime.status();
+
+        assert_eq!(status.status, probed.status);
+        assert_eq!(status.available, probed.available);
+        assert_eq!(status.path, probed.path);
+        assert_eq!(status.version, probed.version);
+        if probed.status == WorkbenchDependencyState::Ready {
+            assert_ne!(status.status, WorkbenchDependencyState::Missing);
+            assert!(status.available);
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     相同语义状态的重复探测/轮询不能刷新变更时间，否则 Inbox 会把旧问题伪装成新事件。
     ///
     /// Code Logic（这个测试做什么）:
@@ -914,42 +939,54 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     真实状态迁移（如 missing→ready 或 missing→failed）必须更新变更时间，Attention 才能按最新阻塞排序。
+    ///     真实状态迁移（如 missing→ready 或 ready→failed）必须更新变更时间，Attention 才能按最新阻塞排序。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     从初始状态切到 ready，再切到 failed，断言每次语义变化后 status_changed_at 都前进。
+    ///     先强制写入与当前探测不同的状态，再切到另一状态，断言每次语义变化后 status_changed_at 都前进。
     #[test]
     fn semantic_status_change_updates_status_changed_at() {
         let runtime = WorkbenchDependencyInstallRuntime::new();
         let initial = runtime.status();
         let initial_changed_at = initial.status_changed_at.clone();
 
-        // 确保时间戳至少相差 1ms，避免同一 RFC3339 秒级相等误判。
+        // 确保时间戳至少相差 1ms；先切到与初始不同的状态（冷启动可能已是 ready）。
         std::thread::sleep(std::time::Duration::from_millis(5));
-
-        let ready = runtime.set_checked_status(WorkbenchDependencyStatusDto {
-            status: WorkbenchDependencyState::Ready,
-            available: true,
-            version: Some("3.4".into()),
+        let first_target = if initial.status == WorkbenchDependencyState::Missing {
+            WorkbenchDependencyState::Ready
+        } else {
+            WorkbenchDependencyState::Missing
+        };
+        let first = runtime.set_checked_status(WorkbenchDependencyStatusDto {
+            status: first_target,
+            available: first_target == WorkbenchDependencyState::Ready,
+            version: if first_target == WorkbenchDependencyState::Ready {
+                Some("3.4".into())
+            } else {
+                None
+            },
             backend: "native".into(),
-            path: Some("/opt/homebrew/bin/tmux".into()),
-            installable: false,
+            path: if first_target == WorkbenchDependencyState::Ready {
+                Some("/opt/homebrew/bin/tmux".into())
+            } else {
+                None
+            },
+            installable: first_target == WorkbenchDependencyState::Missing,
             install_command_preview: Vec::new(),
             error: None,
             output: Vec::new(),
             status_changed_at: String::new(),
         });
-        assert_eq!(ready.status, WorkbenchDependencyState::Ready);
-        assert_ne!(ready.status_changed_at, initial_changed_at);
-        assert!(!ready.status_changed_at.is_empty());
+        assert_eq!(first.status, first_target);
+        assert_ne!(first.status_changed_at, initial_changed_at);
+        assert!(!first.status_changed_at.is_empty());
 
-        let ready_changed_at = ready.status_changed_at.clone();
+        let first_changed_at = first.status_changed_at.clone();
         std::thread::sleep(std::time::Duration::from_millis(5));
 
         runtime.mark_failed("probe failed", vec!["stderr".into()]);
         let failed = runtime.status();
         assert_eq!(failed.status, WorkbenchDependencyState::Failed);
-        assert_ne!(failed.status_changed_at, ready_changed_at);
+        assert_ne!(failed.status_changed_at, first_changed_at);
         assert!(!failed.status_changed_at.is_empty());
     }
 }

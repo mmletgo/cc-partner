@@ -91,7 +91,7 @@ pub(crate) fn project_workbench_dependency(
             "当前平台不支持自动管理 tmux".to_string(),
             "Workbench 依赖在当前平台不可自动安装，请手动配置后重新检测".to_string(),
         ),
-        // ready / installing（及未来 checking 类进行中状态）不进入 Inbox。
+        // ready / installing：非阻塞；未探测完成的状态也绝不能投影为环境待办。
         WorkbenchDependencyState::Ready | WorkbenchDependencyState::Installing => return None,
     };
 
@@ -206,6 +206,24 @@ mod tests {
                 "状态 {status:?} 不应进入 attention"
             );
         }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     冷启动有项目且 tmux 实际 ready 时，Inbox 不得出现虚假环境阻塞。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 ready 状态 + project_count>0 投影，断言返回 None。
+    #[test]
+    fn cold_start_ready_with_projects_does_not_project_dependency_item() {
+        let dto = dep_status(
+            WorkbenchDependencyState::Ready,
+            "2026-07-12T12:00:00Z",
+            None,
+        );
+        assert!(
+            project_workbench_dependency(2, &dto).is_none(),
+            "tmux ready 时即使有项目也不得投影依赖条目"
+        );
     }
 
     #[test]

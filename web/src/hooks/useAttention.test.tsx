@@ -315,6 +315,59 @@ describe('AttentionProvider', () => {
     });
   });
 
+  test('slow load longer than poll interval is not starved by 10s timer', async () => {
+    const slow = deferred<AttentionSnapshot>();
+    let callCount = 0;
+    const loadSnapshot = vi.fn(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        return slow.promise;
+      }
+      return Promise.resolve(buildSnapshot({ total: 7, generatedAt: 'after-slow' }));
+    });
+
+    renderProvider(loadSnapshot);
+
+    // 首个慢请求已启动。
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('loading').textContent).toBe('true');
+
+    // 10s 轮询触发：in-flight 时只 coalesce，不启动第二请求。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ATTENTION_POLL_INTERVAL_MS);
+      await Promise.resolve();
+    });
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('total').textContent).toBe('null');
+
+    // 再等一轮仍不得丢弃唯一 in-flight 请求。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ATTENTION_POLL_INTERVAL_MS);
+      await Promise.resolve();
+    });
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+
+    // 慢请求完成后必须写入快照；若轮询有 pending，可再跑一次但不永久 loading。
+    await act(async () => {
+      slow.resolve(buildSnapshot({ total: 3, generatedAt: 'slow-ok' }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+    // 首个慢响应或随后的 coalesced 刷新都应让 total 变为非 null。
+    await waitFor(() => {
+      expect(screen.getByTestId('total').textContent).not.toBe('null');
+    });
+    const total = screen.getByTestId('total').textContent;
+    expect(total === '3' || total === '7').toBe(true);
+  });
+
   test('useAttention outside provider throws', () => {
     function Broken() {
       useAttention();
