@@ -305,7 +305,7 @@ fn render_doctor_text(snapshot: &DoctorSnapshot) -> String {
 ///     人类输出只应突出问题项，避免 ok/info 噪音；stopped backend 的 info 不列入问题表。
 ///
 /// Code Logic（这个函数做什么）:
-///     遍历 backend.health / paths / mdns / dependencies，仅保留 Warning 与 Error。
+///     遍历 backend.health / paths / mdns / dependencies / log_parse_warning，仅保留 Warning 与 Error。
 fn collect_problem_checks(snapshot: &DoctorSnapshot) -> Vec<&DoctorCheck> {
     let mut checks: Vec<&DoctorCheck> = Vec::new();
     let candidates = [
@@ -325,6 +325,14 @@ fn collect_problem_checks(snapshot: &DoctorSnapshot) -> Vec<&DoctorCheck> {
             DoctorCheckStatus::Warning | DoctorCheckStatus::Error
         ) {
             checks.push(check);
+        }
+    }
+    if let Some(warning) = snapshot.log_parse_warning.as_ref() {
+        if matches!(
+            warning.status,
+            DoctorCheckStatus::Warning | DoctorCheckStatus::Error
+        ) {
+            checks.push(warning);
         }
     }
     checks
@@ -528,7 +536,17 @@ async fn start() -> Result<(), AppError> {
 
         let status = current_status().await;
         if status.kind == BackendStatusKind::Running {
-            // Running 已确认：所有权交给 detached serve，不再 reap。
+            // 只有 control PID 等于自己 spawn 的 child 时才移交所有权；
+            // 其他 PID 的 Running 说明 concurrent direct serve 先拿到锁，必须 kill+reap 自己的 child。
+            let owned_pid = child.id();
+            let running_pid = status.control.as_ref().map(|c| c.pid);
+            if running_pid == Some(owned_pid) {
+                println!("{}", render_status_json(&status)?);
+                // Running 且 PID 匹配：所有权交给 detached serve，不再 reap。
+                return Ok(());
+            }
+            // 他人实例已 Running：清理自己的等待中 child，再按“已有实例运行”成功返回。
+            let _ = kill_and_reap_owned_child(&mut child);
             println!("{}", render_status_json(&status)?);
             return Ok(());
         }
@@ -1158,6 +1176,7 @@ mod tests {
                 request_id: Some("req-fixed-001".to_string()),
             }],
             log_path: format!("{HOME_PLACEHOLDER}/.cc-partner/logs/backend.log"),
+            log_parse_warning: None,
         }
     }
 

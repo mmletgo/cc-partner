@@ -216,7 +216,8 @@ pub struct DoctorErrorSummary {
 ///
 /// Code Logic（这个结构做什么）:
 ///     camelCase 聚合 schemaVersion/generatedAt/status/version/platform/backend/paths/
-///     mdns/dependencies/recentErrors/logPath；不含环境变量 map 或项目枚举。
+///     mdns/dependencies/recentErrors/logPath；可选 logParseWarning 表示畸形日志 warning；
+///     不含环境变量 map 或项目枚举。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DoctorSnapshot {
@@ -231,6 +232,9 @@ pub struct DoctorSnapshot {
     pub dependencies: DoctorDependencies,
     pub recent_errors: Vec<DoctorErrorSummary>,
     pub log_path: String,
+    /// 读取 recent-errors 时发现的畸形受控 JSON 行 warning（无则省略）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_parse_warning: Option<DoctorCheck>,
 }
 
 /// 根据各检查结果计算 overall 状态。
@@ -248,6 +252,7 @@ pub fn compute_overall_status(
     paths: &DoctorPathChecks,
     mdns: &DoctorCheck,
     dependencies: &DoctorDependencies,
+    log_parse_warning: Option<&DoctorCheck>,
 ) -> DoctorStatus {
     let core_checks = [&paths.data, &paths.database, &paths.log, &backend.health];
     if core_checks
@@ -264,11 +269,14 @@ pub fn compute_overall_status(
         &dependencies.wsl,
         &dependencies.claude_cli,
     ];
-    // backend.health 的 warning（如 recoverable stale）也算 degraded
+    // backend.health 的 warning（如 recoverable stale）与畸形日志 warning 也算 degraded
     let has_warning = core_checks
         .iter()
         .chain(optional_and_aux.iter())
-        .any(|check| check.status == DoctorCheckStatus::Warning);
+        .any(|check| check.status == DoctorCheckStatus::Warning)
+        || log_parse_warning
+            .map(|c| c.status == DoctorCheckStatus::Warning)
+            .unwrap_or(false);
 
     if has_warning {
         DoctorStatus::Degraded
@@ -458,7 +466,7 @@ fn redact_user_project_paths(text: &str) -> String {
 ///     序列化前统一清洗，避免 probe 漏调 helper 导致泄露。
 ///
 /// Code Logic（这个函数做什么）:
-///     归一化 control_path、log_path、各 check.summary 与 recent_errors.summary。
+///     归一化 control_path、log_path、各 check.summary、log_parse_warning 与 recent_errors.summary。
 pub fn sanitize_snapshot_privacy(snapshot: &mut DoctorSnapshot, home: Option<&Path>) {
     snapshot.backend.control_path =
         normalize_home_in_path(Path::new(&snapshot.backend.control_path), home);
@@ -473,9 +481,16 @@ pub fn sanitize_snapshot_privacy(snapshot: &mut DoctorSnapshot, home: Option<&Pa
     sanitize_check(&mut snapshot.dependencies.tmux, home);
     sanitize_check(&mut snapshot.dependencies.wsl, home);
     sanitize_check(&mut snapshot.dependencies.claude_cli, home);
+    if let Some(warning) = snapshot.log_parse_warning.as_mut() {
+        sanitize_check(warning, home);
+    }
 
     for err in &mut snapshot.recent_errors {
         err.summary = sanitize_doctor_text(&err.summary, home);
+        err.code = sanitize_doctor_text(&err.code, home);
+        if let Some(rid) = err.request_id.as_mut() {
+            *rid = sanitize_doctor_text(rid, home);
+        }
     }
 }
 
@@ -570,6 +585,8 @@ pub struct DoctorProbeInputs {
     pub mdns_override: Option<DoctorCheck>,
     /// None 表示从 log_path/history 读取；Some 则直接注入 recent errors。
     pub recent_errors_override: Option<Vec<DoctorErrorSummary>>,
+    /// 配合 `recent_errors_override` 注入 malformed warning；None 且 override 存在时表示无 warning。
+    pub recent_errors_warning_override: Option<DoctorCheck>,
     pub app_version: String,
     pub backend_version: String,
 }
@@ -580,12 +597,26 @@ pub struct DoctorProbeInputs {
 ///     `doctor` / `doctor --json` 需要一份有界、脱敏、可机器解析的健康快照。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取 control/health 状态，探测 path/dependency/mDNS，读 recent errors，
-///     计算 overall 并 `sanitize_snapshot_privacy`。
+///     异步读 control/health 后，把全部同步阻塞探测（deps/FS/mDNS/log tail）放进
+///     `spawn_blocking`，并对 JoinHandle 施加 8s 硬超时，保证计时器可被 poll。
 pub async fn collect_doctor_snapshot() -> Result<DoctorSnapshot, AppError> {
-    // 整次 doctor 硬 deadline：任一阻塞 probe 超时都映射为结构化核心错误，exit 2。
-    match tokio::time::timeout(DOCTOR_HARD_DEADLINE, collect_doctor_snapshot_inner()).await {
-        Ok(result) => result,
+    // control/health 自身已有 2s 超时，先 await 拿到 BackendStatus。
+    let backend_status = crate::backend::control::current_status().await;
+    let home = current_home_dir();
+
+    // 整次同步采集硬 deadline：把阻塞工作移出 async future，timeout 才能真正抢占。
+    match tokio::time::timeout(
+        DOCTOR_HARD_DEADLINE,
+        tokio::task::spawn_blocking(move || {
+            collect_doctor_snapshot_blocking(backend_status, home.as_deref())
+        }),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(join_err)) => Err(AppError::generic(format!(
+            "doctor 采集任务失败: {join_err}"
+        ))),
         Err(_) => Err(AppError::timeout(format!(
             "doctor 采集超时（{:?}）",
             DOCTOR_HARD_DEADLINE
@@ -593,30 +624,33 @@ pub async fn collect_doctor_snapshot() -> Result<DoctorSnapshot, AppError> {
     }
 }
 
-/// 内部采集实现（供硬超时包装）。
+/// 在 blocking 线程中完成同步探测并组装快照。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     需要把路径解析失败等核心错误稳定映射为 Result，而不是 panic/相对路径回退。
+///     依赖命令、FS recv_timeout、mDNS 与日志 tail 都是同步阻塞；必须离开 async runtime
+///     才能让外层 `timeout` 在 deadline 到达时真正返回。
 ///
 /// Code Logic（这个函数做什么）:
-///     gather_live_probe_inputs → assemble_snapshot_from_inputs。
-async fn collect_doctor_snapshot_inner() -> Result<DoctorSnapshot, AppError> {
-    let inputs = gather_live_probe_inputs().await?;
-    Ok(assemble_snapshot_from_inputs(
-        inputs,
-        current_home_dir().as_deref(),
-    ))
+///     解析 data/db/log 路径 → 同步依赖/mDNS 探测 → 读 recent errors（含 malformed warning）
+///     → assemble_snapshot_from_inputs。
+fn collect_doctor_snapshot_blocking(
+    backend_status: BackendStatus,
+    home: Option<&Path>,
+) -> Result<DoctorSnapshot, AppError> {
+    let inputs = gather_live_probe_inputs_sync(backend_status)?;
+    Ok(assemble_snapshot_from_inputs(inputs, home))
 }
 
-/// 从 live 环境组装 probe 输入。
+/// 从 live 环境同步组装 probe 输入（不含 async health）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     生产路径需要把 control/health、路径、依赖与日志位置一次收集，供组装快照。
+///     生产路径需要把 control 状态、路径、依赖与日志位置一次收集，供组装快照。
 ///
 /// Code Logic（这个函数做什么）:
-///     调 `current_status`（含 health 超时）、解析 data/db/log 路径，跑非 mutating 依赖探测。
-async fn gather_live_probe_inputs() -> Result<DoctorProbeInputs, AppError> {
-    let backend_status = probe_backend_status().await;
+///     解析 data/db/log 路径，跑非 mutating 依赖探测；路径解析失败上抛 Validation。
+fn gather_live_probe_inputs_sync(
+    backend_status: BackendStatus,
+) -> Result<DoctorProbeInputs, AppError> {
     let control_path = control_file_path()?;
     let data = data_dir()?;
     let default_database_path = data.join("data.db");
@@ -648,20 +682,11 @@ async fn gather_live_probe_inputs() -> Result<DoctorProbeInputs, AppError> {
         claude_cli: probe_claude_cli_non_mutating(&claude_path),
         mdns_override: None,
         recent_errors_override: None,
+        // None 表示走真实读取并报告 malformed warning。
+        recent_errors_warning_override: None,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         backend_version: env!("CARGO_PKG_VERSION").to_string(),
     })
-}
-
-/// 有界读取当前 backend 控制/health 状态。
-///
-/// Business Logic（为什么需要这个函数）:
-///     doctor 必须复用 control 的 running/stopped/stale 口径，且 health 调用有超时。
-///
-/// Code Logic（这个函数做什么）:
-///     委托 `crate::backend::control::current_status`（内部 health 2s 超时）。
-async fn probe_backend_status() -> BackendStatus {
-    crate::backend::control::current_status().await
 }
 
 /// 根据 probe 输入组装快照（可测试入口）。
@@ -670,7 +695,8 @@ async fn probe_backend_status() -> BackendStatus {
 ///     fixture 测试需要注入 control/path/dependency 结果验证 overall 与 code 映射。
 ///
 /// Code Logic（这个函数做什么）:
-///     映射 backend/path/mdns/deps/recent_errors → compute_overall_status → 隐私清洗。
+///     映射 backend/path/mdns/deps/recent_errors → 合并 malformed warning →
+///     compute_overall_status → 隐私清洗。
 pub fn assemble_snapshot_from_inputs(
     inputs: DoctorProbeInputs,
     home: Option<&Path>,
@@ -684,14 +710,23 @@ pub fn assemble_snapshot_from_inputs(
         wsl: dependency_to_check("wsl", &inputs.wsl),
         claude_cli: dependency_to_check("claude_cli", &inputs.claude_cli),
     };
-    let mut recent_errors = inputs
-        .recent_errors_override
-        .unwrap_or_else(|| read_recent_errors_from_logs(&inputs.log_path, &inputs.log_dir));
-    // 若 recent errors 读取过程中发现畸形行，read helper 会把 warning 码写入最后一项 code 前缀；
-    // 这里不额外抬升 overall（畸形只产生 warning check 由 caller 可选合并）。
-    let _ = &mut recent_errors;
+    let (recent_errors, log_warning) = match inputs.recent_errors_override {
+        Some(errors) => (errors, inputs.recent_errors_warning_override),
+        None => {
+            let report = read_recent_errors_report(&inputs.log_path, &inputs.log_dir);
+            (report.errors, report.malformed_warning)
+        }
+    };
 
-    let status = compute_overall_status(&backend, &paths, &mdns, &dependencies);
+    // 畸形受控 JSON 行产生 warning check，纳入 overall degraded。
+    let log_parse_warning = log_warning;
+    let status = compute_overall_status(
+        &backend,
+        &paths,
+        &mdns,
+        &dependencies,
+        log_parse_warning.as_ref(),
+    );
     let mut snapshot = DoctorSnapshot {
         schema_version: DOCTOR_SCHEMA_VERSION,
         generated_at: Utc::now().to_rfc3339(),
@@ -710,6 +745,7 @@ pub fn assemble_snapshot_from_inputs(
         dependencies,
         recent_errors,
         log_path: inputs.log_path.to_string_lossy().into_owned(),
+        log_parse_warning,
     };
     sanitize_snapshot_privacy(&mut snapshot, home);
     snapshot
@@ -1125,17 +1161,43 @@ fn dependency_to_check(name: &str, probe: &OptionalDependencyProbe) -> DoctorChe
     }
 }
 
+/// recent-errors 读取结果：错误列表 + 可选畸形 warning。
+///
+/// Business Logic（为什么需要这个结构）:
+///     计划要求“ignore malformed lines with a warning check”；畸形不得静默丢弃，
+///     否则日志损坏/schema 漂移会把 doctor 误报为 healthy。
+///
+/// Code Logic（这个结构做什么）:
+///     持有已解析 error 摘要与可选 `DoctorCheck` warning。
+#[derive(Debug, Clone)]
+pub struct RecentErrorsReport {
+    pub errors: Vec<DoctorErrorSummary>,
+    pub malformed_warning: Option<DoctorCheck>,
+}
+
 /// 安全读取 recent errors（仅 current + 最新 history 的 tail）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     doctor 展示最近错误便于排障，但绝不能读任意用户文件或泄露正文。
 ///
 /// Code Logic（这个函数做什么）:
-///     读 `backend.log` 与 `backend.log.1` 的尾部字节，按行解析受控 JSON，
-///     仅接受 level=error；re-sanitize、cap 条数与 summary 长度；畸形行记 warning 跳过。
+///     委托 `read_recent_errors_report`，只返回 errors 列表（兼容旧调用点）。
 pub fn read_recent_errors_from_logs(current_log: &Path, log_dir: &Path) -> Vec<DoctorErrorSummary> {
+    read_recent_errors_report(current_log, log_dir).errors
+}
+
+/// 读取 recent errors 并报告畸形受控 JSON 行。
+///
+/// Business Logic（为什么需要这个函数）:
+///     畸形受控 JSON 行必须产生 warning check 并纳入 overall degraded，
+///     同时 tail 首行可能因 seek 截断，不能当 malformed 误报。
+///
+/// Code Logic（这个函数做什么）:
+///     读 `backend.log` 与 `backend.log.1` 的有界 tail；每个文件若从中间 seek，
+///     丢弃首个可能截断半行；解析 level=error 的受控 JSON；看起来像 JSON 但解析失败
+///     的行累计为 malformed，最终返回 warning check。
+pub fn read_recent_errors_report(current_log: &Path, log_dir: &Path) -> RecentErrorsReport {
     let mut lines: Vec<String> = Vec::new();
-    // newest history first for recency when merging tails
     let history_1 = log_dir.join(format!(
         "{}.1",
         current_log
@@ -1145,12 +1207,8 @@ pub fn read_recent_errors_from_logs(current_log: &Path, log_dir: &Path) -> Vec<D
     ));
     // 先读历史再读 current，使 current 行在合并后更“新”
     for path in [&history_1, current_log] {
-        if let Some(tail) = read_file_tail(path, DOCTOR_LOG_TAIL_BYTES) {
-            for line in tail.lines() {
-                if !line.trim().is_empty() {
-                    lines.push(line.to_string());
-                }
-            }
+        if let Some(tail) = read_file_tail_lines(path, DOCTOR_LOG_TAIL_BYTES) {
+            lines.extend(tail);
         }
     }
 
@@ -1175,28 +1233,48 @@ pub fn read_recent_errors_from_logs(current_log: &Path, log_dir: &Path) -> Vec<D
         errors = errors.into_iter().skip(skip).collect();
     }
 
-    // 畸形行只产生副作用：若有 malformed 且 errors 为空，不额外塞假错误；
-    // 调用方可忽略。保留计数仅用于调试——此处不写入 snapshot 额外字段。
-    let _ = malformed;
-    errors
+    let malformed_warning = if malformed > 0 {
+        Some(DoctorCheck::new(
+            DoctorCheckStatus::Warning,
+            "logs.recent_errors.malformed",
+            format!("ignored {malformed} malformed controlled JSON log line(s)"),
+        ))
+    } else {
+        None
+    };
+
+    RecentErrorsReport {
+        errors,
+        malformed_warning,
+    }
 }
 
-/// 读取文件末尾最多 max_bytes 字节并转 UTF-8 lossy。
+/// 读取文件末尾最多 max_bytes 字节，按行切分并跳过可能截断的首半行。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     大日志不得整文件读入；doctor 只看 tail。
+///     大日志不得整文件读入；tail seek 后首行可能是半行，不能当 malformed 报警。
 ///
 /// Code Logic（这个函数做什么）:
-///     seek 到 max(0, len-max_bytes) 后 read_to_end。
-fn read_file_tail(path: &Path, max_bytes: u64) -> Option<String> {
+///     seek 到 max(0, len-max_bytes) 后 read_to_end；若从中间 seek 且缓冲不以 `\n` 开头，
+///     丢弃第一行；返回非空行列表。metadata/seek/read 失败返回 None（有界失败，不 panic）。
+fn read_file_tail_lines(path: &Path, max_bytes: u64) -> Option<Vec<String>> {
     let mut file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
+    let mut truncated = false;
     if len > max_bytes {
         file.seek(SeekFrom::Start(len - max_bytes)).ok()?;
+        truncated = true;
     }
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+    // seek 到文件中部时，第一行通常是半行截断，跳过以免误报 malformed。
+    if truncated && !buf.is_empty() && buf[0] != b'\n' && !lines.is_empty() {
+        lines.remove(0);
+    }
+    lines.retain(|l| !l.trim().is_empty());
+    Some(lines)
 }
 
 /// 解析单行受控日志 JSON 为 error summary。
@@ -1395,6 +1473,7 @@ mod tests {
                 request_id: Some("req-fixed-001".to_string()),
             }],
             log_path: format!("{HOME_PLACEHOLDER}/.cc-partner/logs/backend.log"),
+            log_parse_warning: None,
         }
     }
 
@@ -1534,6 +1613,7 @@ mod tests {
                 request_id: Some("req-private".to_string()),
             }],
             log_path: "/Users/alice/.cc-partner/logs/backend.log".to_string(),
+            log_parse_warning: None,
         };
 
         sanitize_snapshot_privacy(&mut snapshot, Some(home.as_path()));
@@ -1603,7 +1683,7 @@ mod tests {
             claude_cli: DoctorCheck::new(DoctorCheckStatus::Ok, "deps.claude_cli.ok", "ok"),
         };
         assert_eq!(
-            compute_overall_status(&backend, &paths, &mdns, &deps),
+            compute_overall_status(&backend, &paths, &mdns, &deps, None),
             DoctorStatus::Healthy
         );
         assert_eq!(DoctorStatus::Healthy.exit_code(), 0);
@@ -1631,7 +1711,7 @@ mod tests {
             claude_cli: DoctorCheck::new(DoctorCheckStatus::Ok, "deps.claude_cli.ok", "ok"),
         };
         assert_eq!(
-            compute_overall_status(&backend, &paths, &mdns, &deps),
+            compute_overall_status(&backend, &paths, &mdns, &deps, None),
             DoctorStatus::Degraded
         );
         assert_eq!(DoctorStatus::Degraded.exit_code(), 1);
@@ -1663,7 +1743,7 @@ mod tests {
             claude_cli: DoctorCheck::new(DoctorCheckStatus::Ok, "deps.claude_cli.ok", "ok"),
         };
         assert_eq!(
-            compute_overall_status(&backend, &paths, &mdns, &deps),
+            compute_overall_status(&backend, &paths, &mdns, &deps, None),
             DoctorStatus::Unhealthy
         );
         assert_eq!(DoctorStatus::Unhealthy.exit_code(), 2);
@@ -1695,7 +1775,7 @@ mod tests {
             claude_cli: DoctorCheck::new(DoctorCheckStatus::Ok, "deps.claude_cli.ok", "ok"),
         };
         assert_eq!(
-            compute_overall_status(&backend, &paths, &mdns, &deps),
+            compute_overall_status(&backend, &paths, &mdns, &deps, None),
             DoctorStatus::Unhealthy
         );
     }
@@ -1783,6 +1863,7 @@ mod tests {
                 "mDNS discovery can initialize",
             )),
             recent_errors_override: Some(vec![]),
+            recent_errors_warning_override: None,
             app_version: "0.6.7".into(),
             backend_version: "0.6.7".into(),
         }
@@ -2035,5 +2116,101 @@ mod tests {
         assert!(check.status == DoctorCheckStatus::Ok || check.status == DoctorCheckStatus::Error);
         let content = std::fs::read(&fixed).expect("固定名文件应仍存在");
         assert_eq!(content, b"user-data-keep-me");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     畸形受控 JSON 行不得静默忽略，必须产生 warning 并把 overall 抬升为 degraded。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入 malformed JSON 行 + 合法 error 行，断言 report 含 warning 且 assemble 后 status=degraded。
+    #[test]
+    fn malformed_recent_error_lines_produce_warning_and_degrade() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log_dir = tmp.path().to_path_buf();
+        let current = log_dir.join("backend.log");
+        let body = concat!(
+            r#"{"timestamp":"2026-07-11T11:00:00Z","level":"error","error_code":"net.timeout","message":"ok error"}"#,
+            "\n",
+            r#"{"timestamp":"bad","level":"error","broken"#,
+            "\n",
+            r#"{"not":"a-valid-error-schema"}"#,
+            "\n",
+        );
+        fs::write(&current, body).expect("write log");
+
+        let report = read_recent_errors_report(&current, &log_dir);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.malformed_warning.is_some());
+        let warning = report.malformed_warning.unwrap();
+        assert_eq!(warning.status, DoctorCheckStatus::Warning);
+        assert_eq!(warning.code, "logs.recent_errors.malformed");
+
+        let data = tmp.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        let db = data.join("data.db");
+        fs::write(&db, b"SQLite format 3\0").unwrap();
+        let status = classify_status(None, false, false, None);
+        let mut inputs = base_inputs(status, data, db, log_dir.clone());
+        inputs.recent_errors_override = None;
+        inputs.recent_errors_warning_override = None;
+        let snap = assemble_snapshot_from_inputs(inputs, None);
+        assert_eq!(snap.status, DoctorStatus::Degraded);
+        assert!(snap.log_parse_warning.is_some());
+        assert_eq!(
+            snap.log_parse_warning.as_ref().unwrap().code,
+            "logs.recent_errors.malformed"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     tail seek 后首个半行不得计为 malformed，避免永远 degraded。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造超 tail 长度的日志，首字节落在半行中部；断言仅完整畸形行计数。
+    #[test]
+    fn truncated_first_tail_line_is_not_counted_as_malformed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log_dir = tmp.path().to_path_buf();
+        let current = log_dir.join("backend.log");
+        // 构造 >64KiB 日志：前缀垃圾 + 半行 + 换行 + 完整合法 error
+        let mut body = "X".repeat((DOCTOR_LOG_TAIL_BYTES as usize) + 10);
+        body.push_str(r#"partial-json-{"broken"#);
+        body.push('\n');
+        body.push_str(
+            r#"{"timestamp":"2026-07-11T11:01:00Z","level":"error","error_code":"net.timeout","message":"peer request timed out"}"#,
+        );
+        body.push('\n');
+        fs::write(&current, body).expect("write");
+        let report = read_recent_errors_report(&current, &log_dir);
+        assert_eq!(report.errors.len(), 1);
+        // 半行应被 skip，不应因 truncated first line 产生 malformed
+        assert!(
+            report.malformed_warning.is_none(),
+            "truncated first line must not count as malformed"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     doctor 硬超时必须能在阻塞同步工作上抢占返回，映射 exit 2。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     spawn_blocking + timeout 模拟：对 JoinHandle 超时后得到 timeout 错误类别。
+    #[tokio::test]
+    async fn hard_deadline_timeout_is_preemptive_on_blocking_work() {
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            tokio::task::spawn_blocking(|| {
+                std::thread::sleep(Duration::from_secs(5));
+                Ok::<(), AppError>(())
+            }),
+        )
+        .await;
+        assert!(result.is_err(), "timeout 应在阻塞 sleep 完成前触发");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "硬超时必须抢占，实际耗时 {:?}",
+            started.elapsed()
+        );
     }
 }

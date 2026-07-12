@@ -1184,19 +1184,27 @@ fn ensure_log_dir(dir: &Path) -> io::Result<()> {
 /// 打开日志集合时协调遗留 history/权限。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     升级遗留的 `.4+`、宽权限 history 与超大 current 会破坏 3-history/5MiB/0600 不变量，
-///     必须在 reopen 时收敛，而不是等到下一次自然轮转。
+///     升级遗留的 `.4+` / `.20+`、宽权限 history 与超大 retained history 会破坏
+///     3-history/5MiB/0600 不变量，必须在 reopen 时全量收敛，而不是等到下一次自然轮转。
 ///
 /// Code Logic（这个函数做什么）:
-///     删除编号 > history_files 的历史；对 current 与 `.1..N` 强制 0600（存在时）。
+///     枚举目录中严格匹配 `backend.log.<正整数>` 的文件：index > history_files 删除；
+///     retained history（1..=history）若超 max_bytes 也删除；对 current 与保留 history 强制 0600。
 fn reconcile_log_set_on_open(config: &BackendLogConfig) -> io::Result<()> {
     let history = config.history_files.max(1);
-    // 扫描到 history+16 足够覆盖常见遗留。
-    for index in (history + 1)..=(history + 16) {
-        let path = config.history_path(index);
-        if path.exists() {
+    for (index, path) in enumerate_history_files(config)? {
+        if index > history {
             fs::remove_file(&path)?;
+            continue;
         }
+        // retained history 也必须满足单文件上限，否则永远原样保留超限遗留。
+        let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if len > config.max_bytes {
+            fs::remove_file(&path)?;
+            continue;
+        }
+        #[cfg(unix)]
+        apply_file_mode_0600(&path)?;
     }
     #[cfg(unix)]
     {
@@ -1204,14 +1212,50 @@ fn reconcile_log_set_on_open(config: &BackendLogConfig) -> io::Result<()> {
         if current.exists() {
             apply_file_mode_0600(&current)?;
         }
-        for index in 1..=history {
-            let path = config.history_path(index);
-            if path.exists() {
-                apply_file_mode_0600(&path)?;
-            }
-        }
     }
     Ok(())
+}
+
+/// 枚举日志目录中严格匹配 `backend.log.<正整数>` 的历史文件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     固定扫描 `.4..19` 会漏掉 `.20+`；reopen 必须枚举全部正整数后缀历史。
+///
+/// Code Logic（这个函数做什么）:
+///     `read_dir` 后解析文件名：前缀等于 `backend.log.` 且剩余部分为无符号正整数（无前导符号），
+///     返回 `(index, path)` 列表；目录不存在时返回空。
+fn enumerate_history_files(config: &BackendLogConfig) -> io::Result<Vec<(usize, PathBuf)>> {
+    let dir = &config.log_dir;
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let prefix = format!("{BACKEND_LOG_FILE_NAME}.");
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = match entry.file_name().into_string() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let Some(suffix) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        // 严格正整数：全数字、非空、不允许前导 `+`/`-`，`0` 也不算有效 history index。
+        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if suffix.starts_with('0') && suffix.len() > 1 {
+            continue;
+        }
+        let Ok(index) = suffix.parse::<usize>() else {
+            continue;
+        };
+        if index == 0 {
+            continue;
+        }
+        out.push((index, entry.path()));
+    }
+    Ok(out)
 }
 
 /// 在尚无打开句柄时对已有日志文件执行一次安全轮转/收敛。
@@ -1772,6 +1816,44 @@ mod tests {
                     let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
                     assert_eq!(mode, 0o600, "{path:?} reopen 后应为 0600");
                 }
+            }
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     reopen 必须删除 index > history_files 的高编号历史，以及超限 retained history。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     预置 oversized `.1` 与 `.20`，reopen 后断言二者均被删除，保留的 history 不超 max。
+    #[test]
+    fn reopen_deletes_oversized_retained_history_and_high_index_files() {
+        let (_dir, config) = test_config(8, 3);
+        // retained history 超限
+        fs::write(config.history_path(1), b"0123456789ABCDEF").unwrap();
+        fs::write(config.history_path(2), b"ok2").unwrap();
+        fs::write(config.history_path(3), b"ok3").unwrap();
+        // 高编号遗留（超出 history+16 旧扫描范围）
+        fs::write(config.history_path(20), b"h20-should-go").unwrap();
+        fs::write(config.current_path(), b"curr").unwrap();
+
+        let _writer = RotatingLogWriter::open(config.clone()).expect("reopen");
+        assert!(
+            !config.history_path(20).exists(),
+            "reopen 必须删除 .20+ 高编号历史"
+        );
+        assert!(
+            !config.history_path(1).exists(),
+            "reopen 必须删除 oversized retained history .1"
+        );
+        for i in 2..=3 {
+            let p = config.history_path(i);
+            if p.exists() {
+                assert!(
+                    file_len(&p) <= config.max_bytes,
+                    "保留 history 不得超限: {:?} len={}",
+                    p,
+                    file_len(&p)
+                );
             }
         }
     }
