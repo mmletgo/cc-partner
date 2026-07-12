@@ -13,6 +13,7 @@ use tokio::sync::watch;
 const CONTROL_FILE_NAME: &str = "backend-control.json";
 const PID_FILE_NAME: &str = "backend.pid";
 const START_LOCK_FILE_NAME: &str = "backend-start.lock";
+const SERVE_LOCK_FILE_NAME: &str = "backend-serve.lock";
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
@@ -124,9 +125,9 @@ pub struct BackendStatus {
 ///
 /// Code Logic（这个函数做什么）:
 ///     基于 `config_dir()`（内部委托 `data_dir()`，支持 `CC_PARTNER_DATA_DIR` override）
-///     派生 `backend-control.json` 的绝对路径。
-pub fn control_file_path() -> PathBuf {
-    config_dir().join(CONTROL_FILE_NAME)
+///     派生 `backend-control.json` 的绝对路径；路径解析失败返回 Validation/IO 错误，不 panic。
+pub fn control_file_path() -> Result<PathBuf, AppError> {
+    Ok(config_dir()?.join(CONTROL_FILE_NAME))
 }
 
 /// 返回后端 pid 文件路径。
@@ -135,9 +136,10 @@ pub fn control_file_path() -> PathBuf {
 ///     stop/status 等命令需要一个轻量 pid 文件与控制 JSON 并存，兼容只需读取进程号的后续逻辑。
 ///
 /// Code Logic（这个函数做什么）:
-///     基于 `config_dir()`（内部委托 `data_dir()`）派生 `backend.pid` 的绝对路径。
-pub fn pid_file_path() -> PathBuf {
-    config_dir().join(PID_FILE_NAME)
+///     基于 `config_dir()`（内部委托 `data_dir()`）派生 `backend.pid` 的绝对路径；
+///     路径解析失败返回错误，不 panic。
+pub fn pid_file_path() -> Result<PathBuf, AppError> {
+    Ok(config_dir()?.join(PID_FILE_NAME))
 }
 
 /// 读取后端控制文件。
@@ -148,7 +150,7 @@ pub fn pid_file_path() -> PathBuf {
 /// Code Logic（这个函数做什么）:
 ///     若控制文件不存在返回 `Ok(None)`；存在则按 UTF-8 读取并反序列化为 `BackendControlFile`。
 pub fn read_control_file() -> Result<Option<BackendControlFile>, AppError> {
-    let path = control_file_path();
+    let path = control_file_path()?;
     if !path.exists() {
         return Ok(None);
     }
@@ -164,7 +166,7 @@ pub fn read_control_file() -> Result<Option<BackendControlFile>, AppError> {
 /// Code Logic（这个函数做什么）:
 ///     确保配置目录存在，将控制结构写成 pretty JSON UTF-8，并把 pid 单独写入 `backend.pid`。
 pub fn write_control_file(control: &BackendControlFile) -> Result<(), AppError> {
-    let dir = config_dir();
+    let dir = config_dir()?;
     fs::create_dir_all(&dir)?;
     fs::write(
         dir.join(CONTROL_FILE_NAME),
@@ -182,7 +184,7 @@ pub fn write_control_file(control: &BackendControlFile) -> Result<(), AppError> 
 /// Code Logic（这个函数做什么）:
 ///     分别尝试删除控制 JSON 与 pid 文件；文件不存在视为清理成功，其它 IO 错误向上返回。
 pub fn remove_control_files() -> Result<(), AppError> {
-    for path in [control_file_path(), pid_file_path()] {
+    for path in [control_file_path()?, pid_file_path()?] {
         match fs::remove_file(path) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -199,8 +201,19 @@ pub fn remove_control_files() -> Result<(), AppError> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     基于 `config_dir()` 派生 `backend-start.lock` 绝对路径。
-pub fn start_lock_path() -> PathBuf {
-    config_dir().join(START_LOCK_FILE_NAME)
+pub fn start_lock_path() -> Result<PathBuf, AppError> {
+    Ok(config_dir()?.join(START_LOCK_FILE_NAME))
+}
+
+/// 返回 data_dir 作用域下的 serve 单实例锁文件路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     直接执行 `serve` 或异常重试时必须跨进程互斥，避免多个 writer 同时轮转 backend.log。
+///
+/// Code Logic（这个函数做什么）:
+///     基于 `config_dir()` 派生 `backend-serve.lock` 绝对路径。
+pub fn serve_lock_path() -> Result<PathBuf, AppError> {
+    Ok(config_dir()?.join(SERVE_LOCK_FILE_NAME))
 }
 
 /// data_dir 作用域的跨进程 start 锁守卫。
@@ -262,8 +275,37 @@ impl Drop for StartLockGuard {
 ///     成功后写入 ownership token + pid 作诊断。进程崩溃时内核自动释放锁，无需 pid 回收，
 ///     也消除了“空/半写锁文件被误删”导致双持有的 ABA。轮询 try_lock 直到 deadline。
 pub async fn acquire_start_lock(timeout: Duration) -> Result<StartLockGuard, AppError> {
-    let path = start_lock_path();
-    let dir = config_dir();
+    let path = start_lock_path()?;
+    acquire_named_lock(path, "start", timeout).await
+}
+
+/// 在有界时间内获取 data_dir 作用域的跨进程 serve 单实例锁。
+///
+/// Business Logic（为什么需要这个函数）:
+///     serve 进程是 backend.log 的唯一写入方，必须在打开日志前抢到覆盖整个生命周期的实例锁，
+///     否则并发 serve 会破坏轮转精确性与 control 文件一致性。
+///
+/// Code Logic（这个函数做什么）:
+///     打开/创建 `backend-serve.lock` 后用 OS exclusive lock 抢占；成功后写入 ownership token + pid；
+///     守卫持有直到 serve 退出（Drop 时内核释放）。
+pub async fn acquire_serve_lock(timeout: Duration) -> Result<StartLockGuard, AppError> {
+    let path = serve_lock_path()?;
+    acquire_named_lock(path, "serve", timeout).await
+}
+
+/// 在有界时间内获取 data_dir 作用域的命名跨进程锁。
+///
+/// Business Logic（为什么需要这个函数）:
+///     start 与 serve 需要同一套 OS 文件锁语义，避免重复实现导致 ABA/空文件误回收。
+///
+/// Code Logic（这个函数做什么）:
+///     确保目录存在后循环 `try_lock`；成功写入 ownership payload 并返回守卫；超时返回 conflict。
+async fn acquire_named_lock(
+    path: PathBuf,
+    kind: &str,
+    timeout: Duration,
+) -> Result<StartLockGuard, AppError> {
+    let dir = config_dir()?;
     fs::create_dir_all(&dir)?;
     let deadline = Instant::now() + timeout;
 
@@ -290,7 +332,7 @@ pub async fn acquire_start_lock(timeout: Duration) -> Result<StartLockGuard, App
                 drop(file);
                 if Instant::now() >= deadline {
                     return Err(AppError::conflict(format!(
-                        "获取 backend start 锁超时（{timeout:?}）: start 锁被占用: {}",
+                        "获取 backend {kind} 锁超时（{timeout:?}）: {kind} 锁被占用: {}",
                         path.display()
                     )));
                 }

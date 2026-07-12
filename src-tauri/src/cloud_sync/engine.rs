@@ -73,7 +73,9 @@ pub struct CloudClaudeMdPushResult {
 /// Business Logic: cloud_sync 的 git 工作区集中放在应用数据根下，便于清理与定位。
 /// Code Logic: 复用 config::config_dir()（与配置/数据库同根），追加 "cloud-sync"。
 pub fn cloud_sync_workdir() -> PathBuf {
-    config_dir().join("cloud-sync")
+    config_dir()
+        .expect("无法解析应用数据目录（检查 CC_PARTNER_DATA_DIR）")
+        .join("cloud-sync")
 }
 
 /// 将本机 CLAUDE.md 版本主动推送到 GitHub 云端。

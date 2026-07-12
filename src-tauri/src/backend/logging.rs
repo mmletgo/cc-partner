@@ -157,10 +157,19 @@ impl RotatingLogWriter {
     ///     serve 启动时必须确保日志目录存在且权限收紧，并读取 current 已有长度以支持重启续写。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     创建 log_dir（Unix 0700）→ 以 append 打开 current（Unix 0600）→ 读取 metadata 长度。
+    ///     创建 log_dir（Unix 0700）→ 协调遗留历史（删 `.N>history`、history/current 强制 0600）→
+    ///     若 current 已超 max 则安全处理超限文件 → 以 append 打开 current 并读取长度。
     pub fn open(config: BackendLogConfig) -> io::Result<Self> {
         ensure_log_dir(&config.log_dir)?;
+        reconcile_log_set_on_open(&config)?;
         let path = config.current_path();
+        // 重启时若 current 已超上限，先安全处理，避免后续再生成 >max 的 history。
+        if path.exists() {
+            let len = fs::metadata(&path)?.len();
+            if len > config.max_bytes {
+                rotate_existing_files(&config)?;
+            }
+        }
         let file = open_current_file(&path)?;
         let current_len = file.metadata()?.len();
         Ok(Self {
@@ -465,20 +474,31 @@ fn redact_secret_patterns(input: &str) -> String {
 ///     去掉 `Header-Name: value` 形态；去掉以 `{`/`[` 开头的大段 JSON body 提示替换为 `<BODY_OMITTED>`。
 fn strip_header_body_shaped(input: &str) -> String {
     static HEADER_RE: OnceLock<Regex> = OnceLock::new();
-    static BODY_RE: OnceLock<Regex> = OnceLock::new();
+    static BODY_MARKER_RE: OnceLock<Regex> = OnceLock::new();
+    static FREEFORM_RE: OnceLock<Regex> = OnceLock::new();
     let header_re = HEADER_RE.get_or_init(|| {
         Regex::new(r"(?i)\b(content-type|content-length|cookie|set-cookie|x-api-key|x-auth-token)\s*:\s*\S+")
             .expect("header regex")
     });
-    let body_re = BODY_RE.get_or_init(|| {
-        // 形如 body={...} / body: [...] / request body: {...}
-        Regex::new(r"(?i)\b(request\s*)?body\s*[:=]\s*[\[{].{0,4096}").expect("body regex")
+    // body marker 之后丢弃全部剩余内容（含超长 tail），避免 4096 上限泄漏正文尾部。
+    let body_marker_re = BODY_MARKER_RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(request\s*)?body\s*[:=]\s*.*$").expect("body marker regex")
+    });
+    // 独立 Prompt/文件正文（无 body/token 标签）也必须拦截，避免敌意自由文本落盘。
+    let freeform_re = FREEFORM_RE.get_or_init(|| {
+        Regex::new(
+            r"(?ix)\bprompt(?:\s*(?:text|body|content))?\s*[:=]\s*\S+|\bfile(?:\s*(?:content|body|text|payload))?\s*[:=]\s*\S+|\bfile-sentinel-\S+|\bTOP_SECRET_[A-Z0-9_]+\b",
+        )
+        .expect("freeform regex")
     });
     let mut text = header_re
         .replace_all(input, "<HEADER_OMITTED>")
         .into_owned();
-    text = body_re
+    text = body_marker_re
         .replace_all(&text, "body=<BODY_OMITTED>")
+        .into_owned();
+    text = freeform_re
+        .replace_all(&text, "<CONTENT_OMITTED>")
         .into_owned();
     text
 }
@@ -1161,6 +1181,83 @@ fn ensure_log_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// 打开日志集合时协调遗留 history/权限。
+///
+/// Business Logic（为什么需要这个函数）:
+///     升级遗留的 `.4+`、宽权限 history 与超大 current 会破坏 3-history/5MiB/0600 不变量，
+///     必须在 reopen 时收敛，而不是等到下一次自然轮转。
+///
+/// Code Logic（这个函数做什么）:
+///     删除编号 > history_files 的历史；对 current 与 `.1..N` 强制 0600（存在时）。
+fn reconcile_log_set_on_open(config: &BackendLogConfig) -> io::Result<()> {
+    let history = config.history_files.max(1);
+    // 扫描到 history+16 足够覆盖常见遗留。
+    for index in (history + 1)..=(history + 16) {
+        let path = config.history_path(index);
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        let current = config.current_path();
+        if current.exists() {
+            apply_file_mode_0600(&current)?;
+        }
+        for index in 1..=history {
+            let path = config.history_path(index);
+            if path.exists() {
+                apply_file_mode_0600(&path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 在尚无打开句柄时对已有日志文件执行一次安全轮转/收敛。
+///
+/// Business Logic（为什么需要这个函数）:
+///     reopen 时 current 可能已 >max（升级遗留/外部写入）；必须先处理再 append，
+///     且不得把超大文件推进 history 永久违反 5 MiB 上限。
+///
+/// Code Logic（这个函数做什么）:
+///     删除最旧与超限 history；未超限 history 反向 rename；超限 current 直接删除，
+///     未超限 current rename 为 `.1`。随后 open 会重建空/可续写 current。
+fn rotate_existing_files(config: &BackendLogConfig) -> io::Result<()> {
+    let history = config.history_files.max(1);
+    let oldest = config.history_path(history);
+    if oldest.exists() {
+        fs::remove_file(&oldest)?;
+    }
+    for index in (1..history).rev() {
+        let from = config.history_path(index);
+        let to = config.history_path(index + 1);
+        if from.exists() {
+            let from_len = fs::metadata(&from).map(|m| m.len()).unwrap_or(0);
+            if from_len > config.max_bytes {
+                fs::remove_file(&from)?;
+                continue;
+            }
+            fs::rename(&from, &to)?;
+            #[cfg(unix)]
+            apply_file_mode_0600(&to)?;
+        }
+    }
+    let current = config.current_path();
+    if current.exists() {
+        let current_len = fs::metadata(&current).map(|m| m.len()).unwrap_or(0);
+        if current_len > config.max_bytes {
+            fs::remove_file(&current)?;
+        } else {
+            let first_history = config.history_path(1);
+            fs::rename(&current, &first_history)?;
+            #[cfg(unix)]
+            apply_file_mode_0600(&first_history)?;
+        }
+    }
+    Ok(())
+}
+
 /// 以 append 打开 current 日志文件，Unix 上强制 0600。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -1593,6 +1690,113 @@ mod tests {
     }
 
     // ----- sanitizer unit tests -----
+
+    #[test]
+    fn sanitize_discards_entire_body_remainder_even_when_oversized() {
+        let tail = "TAIL_SHOULD_NOT_LEAK_".repeat(300);
+        let raw = format!("upstream error body={{ \"prompt\":\"SECRET\" }} {tail}");
+        let cleaned = sanitize_diagnostic_text(&raw);
+        assert!(
+            cleaned.contains("body=<BODY_OMITTED>"),
+            "body marker 应整段丢弃: {cleaned}"
+        );
+        assert!(
+            !cleaned.contains("TAIL_SHOULD_NOT_LEAK_"),
+            "超长 body 尾部不得泄漏: {cleaned}"
+        );
+        assert!(
+            !cleaned.contains("SECRET"),
+            "body 内 secret 不得泄漏: {cleaned}"
+        );
+    }
+
+    #[test]
+    fn sanitize_blocks_standalone_prompt_and_file_content() {
+        let samples = [
+            "user said Prompt=do-not-leak-this-prompt-body",
+            "failed path file content=FILE_SENTINEL_PAYLOAD_123",
+            "remote peer replied: free text containing file-sentinel-XYZ",
+        ];
+        for raw in samples {
+            let cleaned = sanitize_diagnostic_text(raw);
+            assert!(
+                !cleaned.contains("do-not-leak-this-prompt-body"),
+                "独立 Prompt 应拦截: {cleaned}"
+            );
+            assert!(
+                !cleaned.contains("FILE_SENTINEL_PAYLOAD_123"),
+                "独立 file content 应拦截: {cleaned}"
+            );
+            assert!(
+                !cleaned.contains("file-sentinel-XYZ"),
+                "自由文本 file-sentinel 应拦截: {cleaned}"
+            );
+        }
+    }
+
+    #[test]
+    fn reopen_deletes_history_beyond_limit_and_enforces_mode() {
+        let (_dir, config) = test_config(32, 3);
+        fs::write(config.history_path(1), b"h1").unwrap();
+        fs::write(config.history_path(2), b"h2").unwrap();
+        fs::write(config.history_path(3), b"h3").unwrap();
+        fs::write(config.history_path(4), b"h4-should-go").unwrap();
+        fs::write(config.current_path(), b"curr").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [
+                config.current_path(),
+                config.history_path(1),
+                config.history_path(2),
+                config.history_path(3),
+            ] {
+                let mut perms = fs::metadata(&path).unwrap().permissions();
+                perms.set_mode(0o644);
+                fs::set_permissions(&path, perms).unwrap();
+            }
+        }
+
+        let _writer = RotatingLogWriter::open(config.clone()).expect("reopen");
+        assert!(!config.history_path(4).exists(), "reopen 必须删除 .4+");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [
+                config.current_path(),
+                config.history_path(1),
+                config.history_path(2),
+                config.history_path(3),
+            ] {
+                if path.exists() {
+                    let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+                    assert_eq!(mode, 0o600, "{path:?} reopen 后应为 0600");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reopen_discards_oversized_current_instead_of_creating_oversize_history() {
+        let (_dir, config) = test_config(8, 3);
+        fs::write(config.current_path(), b"0123456789ABCDEFGHIJ").unwrap();
+        let mut writer = RotatingLogWriter::open(config.clone()).expect("reopen oversized");
+        writer.write_all(b"Z").expect("append after reopen");
+        writer.flush().ok();
+        assert_eq!(read_string(&config.current_path()), "Z");
+        assert!(file_len(&config.current_path()) <= config.max_bytes);
+        for i in 1..=3 {
+            let p = config.history_path(i);
+            if p.exists() {
+                assert!(
+                    file_len(&p) <= config.max_bytes,
+                    "history 不得保留超限遗留: {:?} len={}",
+                    p,
+                    file_len(&p)
+                );
+            }
+        }
+    }
 
     #[test]
     fn sanitize_replaces_home_and_redacts_secrets() {

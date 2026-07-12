@@ -1576,7 +1576,9 @@ fn claude_commands_dir() -> PathBuf {
 }
 
 fn assets_root() -> PathBuf {
-    config::config_dir().join("claude-assets")
+    config::config_dir()
+        .expect("无法解析应用数据目录（检查 CC_PARTNER_DATA_DIR）")
+        .join("claude-assets")
 }
 
 fn disabled_skills_dir() -> PathBuf {

@@ -57,34 +57,9 @@ fn preserve_doctor_artifacts(case: &SmokeCase, label: &str, captured: &CapturedC
         format!("{:?}", captured.code),
     );
 
-    let logs_src = case.data_dir.join("logs");
-    if logs_src.is_dir() {
-        let logs_dst = diag.join(format!("{prefix}-logs"));
-        let _ = copy_dir_best_effort(&logs_src, &logs_dst);
-    }
+    // 故意不复制 data_dir/logs：敌意 raw log 不得进入 diagnostics/CI artifact。
+    let _ = (case, prefix);
 }
-
-/// Business Logic（为什么需要这个函数）:
-///     失败诊断需要把日志目录原样保留到 diagnostics。
-///
-/// Code Logic（这个函数做什么）:
-///     递归复制目录（best-effort，忽略单文件错误）。
-fn copy_dir_best_effort(src: &Path, dst: &Path) -> Result<(), String> {
-    fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {e}", dst.display()))?;
-    let entries = fs::read_dir(src).map_err(|e| format!("read_dir {}: {e}", src.display()))?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        let target = dst.join(name);
-        if path.is_dir() {
-            let _ = copy_dir_best_effort(&path, &target);
-        } else if let Ok(bytes) = fs::read(&path) {
-            let _ = fs::write(&target, bytes);
-        }
-    }
-    Ok(())
-}
-
 /// Business Logic（为什么需要这个函数）:
 ///     doctor --json 的 stdout 必须是纯 JSON，供脚本/CI 直接解析。
 ///
@@ -176,10 +151,9 @@ fn assert_doctor_exit_and_status(
 fn scan_artifacts_for_sentinels(root: &Path, sentinels: &[&str]) -> Result<(), String> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        // 跳过敌意输入原件目录，以及 preserve 时复制的 raw logs 副本
-        // （raw logs 是输入侧 fixture，不是 doctor 输出；扫描目标是脱敏后的产物）。
+        // 仅跳过故意放置的敌意输入原件目录；不得豁免 *-logs 或其它产物目录。
         let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if dir_name == "hostile-input-only" || dir_name.ends_with("-logs") {
+        if dir_name == "hostile-input-only" {
             continue;
         }
         let entries = match fs::read_dir(&dir) {
@@ -194,16 +168,6 @@ fn scan_artifacts_for_sentinels(root: &Path, sentinels: &[&str]) -> Result<(), S
                 stack.push(path);
                 continue;
             }
-            // 只扫描 doctor 输出与摘要类文本，不扫 raw backend.log 输入 fixture 副本
-            let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            let is_doctor_output = file_name.starts_with("doctor-")
-                && (file_name.ends_with("-stdout.json")
-                    || file_name.ends_with("-stderr.txt")
-                    || file_name.ends_with("-exit.txt"));
-            let is_summary = file_name == "summary.txt";
-            if !is_doctor_output && !is_summary {
-                continue;
-            }
             let Ok(bytes) = fs::read(&path) else {
                 continue;
             };
@@ -214,10 +178,11 @@ fn scan_artifacts_for_sentinels(root: &Path, sentinels: &[&str]) -> Result<(), S
             let text = String::from_utf8_lossy(&bytes);
             for s in sentinels {
                 if text.contains(s) {
+                    // 失败信息只输出 sentinel 标识，不回显命中明文片段。
                     return Err(format!(
-                        "隐私泄漏：sentinel {s:?} 出现在 {}\n片段: {}",
-                        path.display(),
-                        truncate_for_diag(&text, 240)
+                        "隐私泄漏：sentinel_id={} 出现在 {}",
+                        sentinel_id(s),
+                        path.display()
                     ));
                 }
             }
@@ -226,19 +191,25 @@ fn scan_artifacts_for_sentinels(root: &Path, sentinels: &[&str]) -> Result<(), S
     Ok(())
 }
 
+/// 将 sentinel 原文映射为稳定标识（失败日志不回显明文）。
+///
 /// Business Logic（为什么需要这个函数）:
-///     失败诊断片段需要有界，避免 panic 消息爆炸。
+///     smoke 失败消息若回显 sentinel 明文，会把敏感 fixture 写进 cargo/CI 日志。
 ///
 /// Code Logic（这个函数做什么）:
-///     截断到 max_chars 并追加省略号。
-fn truncate_for_diag(text: &str, max_chars: usize) -> String {
-    let count = text.chars().count();
-    if count <= max_chars {
-        return text.to_string();
+///     对已知 sentinel 返回短 id；未知则返回 OTHER。
+fn sentinel_id(sentinel: &str) -> &'static str {
+    if sentinel.contains("SECRET_TOKEN") {
+        "SECRET"
+    } else if sentinel.contains("PROMPT_BODY") {
+        "PROMPT"
+    } else if sentinel.contains("file-sentinel-") {
+        "FILE"
+    } else if sentinel.starts_with('/') || sentinel.contains("Users") || sentinel.contains("home") {
+        "HOME"
+    } else {
+        "OTHER"
     }
-    let mut out: String = text.chars().take(max_chars).collect();
-    out.push('…');
-    out
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -251,20 +222,12 @@ fn assert_no_sentinels_in_text(case: &mut SmokeCase, label: &str, text: &str, se
         if text.contains(s) {
             fail_case(
                 case,
-                format!(
-                    "{label}: 文本泄漏 sentinel {s:?}\n片段: {}",
-                    truncate_for_diag(text, 300)
-                ),
+                format!("{label}: 文本泄漏 sentinel_id={}", sentinel_id(s)),
             );
         }
     }
 }
 
-/// Business Logic（为什么需要这个函数）:
-///     从 status 记录 pid，便于 teardown 精准 kill。
-///
-/// Code Logic（这个函数做什么）:
-///     解析 status JSON control.pid 并 `record_pid`。
 fn record_pid_from_status_cli(case: &mut SmokeCase, captured: &CapturedCli) {
     if let Ok(status) = captured.parse_status_json() {
         if let Some(control) = status.control {
@@ -466,9 +429,8 @@ fn doctor_privacy_scan_rejects_leaked_sentinels() {
     assert_no_sentinels_in_text(&mut case, "doctor-stdout", &doctor.stdout, &sentinel_list);
     assert_no_sentinels_in_text(&mut case, "doctor-stderr", &doctor.stderr, &sentinel_list);
 
-    // 只扫描 smoke 产物（diagnostics 内 doctor 输出），不扫敌意输入原件。
-    // 敌意内容故意写在 hostile-input-only/ 与 logs/backend.log 输入侧；
-    // doctor 读 recent errors 时必须脱敏，产物侧不得出现明文。
+    // 扫描 artifact 根（diagnostics）：不得复制 raw logs，也不允许按 *-logs 豁免。
+    // 不扫 data/（含 config.json 合法 home 路径）与 hostile-input-only 输入侧。
     let diagnostics = case.case_dir.join("diagnostics");
     if diagnostics.exists() {
         if let Err(err) = scan_artifacts_for_sentinels(&diagnostics, &sentinel_list) {
@@ -487,7 +449,7 @@ fn doctor_privacy_scan_rejects_leaked_sentinels() {
             if msg.contains(SECRET_SENTINEL) || msg.contains(PROMPT_SENTINEL) {
                 fail_case(
                     &mut case,
-                    format!("recentErrors.message 泄漏敏感内容: {msg}"),
+                    "recentErrors.message 泄漏敏感内容 (sentinel_id=SECRET/PROMPT)",
                 );
             }
         }
