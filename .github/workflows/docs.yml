@@ -12,12 +12,14 @@ on:
     paths:
       - '**/*.md'
       - 'scripts/check-docs.mjs'
+      - 'src-tauri/src/backend/cli.rs'
       - '.github/workflows/docs.yml'
   push:
     branches: [master]
     paths:
       - '**/*.md'
       - 'scripts/check-docs.mjs'
+      - 'src-tauri/src/backend/cli.rs'
       - '.github/workflows/docs.yml'
 
 concurrency:
