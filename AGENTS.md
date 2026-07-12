@@ -94,7 +94,7 @@ cc-partner/
 │   ├── tauri.conf.json           # Tauri 配置 + bundle + updater（版本号单一来源）
 │   └── Cargo.toml
 ├── scripts/                      # bump-version / prepare-tauri-sidecar / check-p2p-route-inventory + 图标源
-├── .github/workflows/            # ci.yml · cross-platform-smoke.yml · release-tauri.yml
+├── .github/workflows/            # ci.yml · cross-platform-smoke.yml · release-tauri.yml · docs.yml
 ├── uiux/                         # 设计稿（参考资源，不参与构建）
 ├── docs/
 │   ├── prd.md

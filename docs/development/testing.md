@@ -12,12 +12,14 @@ Concise map of **what to run locally**, **which CI job owns it**, and **what is 
 | Ubuntu full quality (Rust) | `cd src-tauri && cargo fmt --check` · `cargo clippy --all-targets --locked -- -D warnings` · `cargo test --locked` | `quality` (`CI`) | Same as above | fmt / clippy (deny warnings) / full `cargo test` on **ubuntu-22.04** | Not macOS/Windows process or path smoke |
 | macOS / Windows smoke | See [local smoke](#local-cross-platform-smoke) | `smoke (macos-latest\|windows-latest)` (`Cross-Platform Smoke`) | Related PR path filter; daily `schedule` UTC `18:23`; `workflow_dispatch` | Backend CLI lifecycle, doctor `--json`, native PTY, logs rotation/sanitize, focused unit + `cargo check --bins` | **NOT VERIFIED on hosted runners:** WSL + tmux; GUI / WebView; macOS permission dialogs; multi-host mDNS |
 | Release installers | Local: `./start.sh build` (dev); formal: tag only | `build` / `publish-release` / `assemble-latest-json` (`Build & Release (Tauri)`) | Push tag `v*` | Platform installers + `.sig` + `latest.json` assembly | **Not** a quality substitute for `CI` or Cross-Platform Smoke |
+| Documentation facts | `node scripts/check-docs.mjs` · `node scripts/check-docs.mjs --self-test` | `docs` (`Docs`) | PR/push `master` path filter on `**/*.md`, `scripts/check-docs.mjs`, workflow | Relative links, fence balance, scoped stale claims, README command allowlist | Not a substitute for product CI/smoke; skips `docs/superpowers/**` |
 
 Workflows:
 
 - [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — name **CI**
 - [`.github/workflows/cross-platform-smoke.yml`](../../.github/workflows/cross-platform-smoke.yml) — name **Cross-Platform Smoke**
 - [`.github/workflows/release-tauri.yml`](../../.github/workflows/release-tauri.yml) — name **Build & Release (Tauri)**
+- [`.github/workflows/docs.yml`](../../.github/workflows/docs.yml) — name **Docs**
 
 ## Local frontend
 
@@ -53,10 +55,12 @@ cd src-tauri && cargo clippy --all-targets --locked -- -D warnings
 cd src-tauri && cargo test --locked
 ```
 
-Optional inventory guard (not a CI quality job by itself):
+Optional inventory / docs guards (docs guard also runs in `Docs` workflow):
 
 ```bash
 node scripts/check-p2p-route-inventory.mjs
+node scripts/check-docs.mjs
+node scripts/check-docs.mjs --self-test
 ```
 
 ## Local cross-platform smoke
@@ -94,8 +98,9 @@ Product support for WSL/tmux and desktop GUI is separate from automation coverag
 
 ## Separation rules
 
-1. **`CI` (Ubuntu)** gates merge for frontend lint/build/unit/e2e and full Rust quality. Three jobs run in parallel; no `continue-on-error`.
+1. **`CI` (Ubuntu)** gates merge for frontend lint/build/unit/e2e and full Rust quality. Three jobs (`quality`, `frontend-unit`, `frontend-e2e`) run in parallel; no `continue-on-error`.
 2. **Cross-Platform Smoke** is a **related-PR + daily** matrix on macOS/Windows for backend lifecycle / PTY / doctor / logs — not a full Ubuntu quality clone, not release packaging.
-3. **Release (`v*` tag)** builds installers with prepared sidecar + native Tauri CLI (three-job flow). It does **not** replace `CI` or smoke.
+3. **Release (`v*` tag)** builds installers with prepared sidecar + native Tauri CLI (three-job flow: `build` → `publish-release` → `assemble-latest-json`). It does **not** replace `CI` or smoke.
+4. **`Docs`** runs Node-only static fact checks on documentation path changes; it does not install frontend/Rust toolchains.
 
 Backend lifecycle, ports, logs, and `doctor` usage for operators: [`backend-operations.md`](backend-operations.md).

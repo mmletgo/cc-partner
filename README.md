@@ -28,7 +28,8 @@ cc-partner 以 **Workbench** 为核心：本机与远端项目、worktree、终�
 
 远端或不想开桌面窗口时，独立二进制 `cc-partner-backend` 提供同一局域网服务与健康检查：
 
-```textcc-partner-backend start
+```text
+cc-partner-backend start
 cc-partner-backend status
 cc-partner-backend doctor
 cc-partner-backend doctor --json

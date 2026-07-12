@@ -26,7 +26,7 @@
 src-tauri/   → Rust 后端，见 src-tauri/CLAUDE.md
 web/         → React 前端，见 web/CLAUDE.md
 scripts/     → bump-version / prepare-tauri-sidecar / check-p2p-route-inventory
-.github/     → ci.yml · cross-platform-smoke.yml · release-tauri.yml
+.github/     → ci.yml · cross-platform-smoke.yml · release-tauri.yml · docs.yml
 docs/        → prd + 设计文档
 AGENTS.md    → 根层开发指南（组件清单与跨目录陷阱）
 ```
@@ -62,6 +62,7 @@ AGENTS.md    → 根层开发指南（组件清单与跨目录陷阱）
 | `ci.yml` | Ubuntu：web lint/build/test/e2e + cargo fmt/clippy/test |
 | `cross-platform-smoke.yml` | macOS/Windows：CLI/PTY/doctor/logs smoke；**不**验证 WSL/tmux/GUI/多机 mDNS |
 | `release-tauri.yml` | tag `v*`：sidecar 准备 + **原生 tauri build** 矩阵 + publish + 独立 `latest.json`（**不是 tauri-action**） |
+| `docs.yml` | 文档路径变更：`node scripts/check-docs.mjs` 静态事实守卫（Node only） |
 
 发版：`node scripts/bump-version.mjs <ver>` → 提交 → `git tag v<ver> && git push origin v<ver>`。
 
