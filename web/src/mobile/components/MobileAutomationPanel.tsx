@@ -43,6 +43,16 @@ export interface MobileAutomationExecutionContext {
 export interface MobileAutomationPanelProps {
   project: WorkbenchProject | null;
   onOpenExecutionContext?: (context: MobileAutomationExecutionContext) => void;
+  /** Attention 跳转：聚焦真实任务详情/Evidence。 */
+  focusTaskId?: string | null;
+  /** Attention 跳转：聚焦 failed outbox 行。 */
+  focusOutboxId?: string | null;
+  /** 聚焦结果回调：missing 时父级刷新 Inbox 并回到 Attention。 */
+  onFocusResult?: (result: {
+    status: 'found' | 'missing';
+    entity: 'task' | 'outbox';
+    id: string;
+  }) => void;
 }
 
 type MobileAutomationTaskGroups = Record<
@@ -350,10 +360,16 @@ function mobileAutomationEvidenceKindLabelKey(
 export function MobileAutomationPanel({
   project,
   onOpenExecutionContext,
+  focusTaskId = null,
+  focusOutboxId = null,
+  onFocusResult,
 }: MobileAutomationPanelProps): ReactElement {
   const { t } = useTranslation(['workbench', 'orchestrator']);
   const [taskViews, setTaskViews] = useState<OrchestratorTaskView[]>([]);
   const [selectedTaskView, setSelectedTaskView] = useState<OrchestratorTaskView | null>(null);
+  const [focusedOutboxId, setFocusedOutboxId] = useState<string | null>(null);
+  const appliedFocusTaskIdRef = useRef<string | null>(null);
+  const appliedFocusOutboxIdRef = useRef<string | null>(null);
   const [evidenceItems, setEvidenceItems] = useState<OrchestratorEvidence[]>([]);
   const [evidenceLoading, setEvidenceLoading] = useState<boolean>(false);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
@@ -510,8 +526,11 @@ export function MobileAutomationPanel({
     activeProjectIdRef.current = projectId;
     requestIdRef.current += 1;
     evidenceRequestIdRef.current += 1;
+    appliedFocusTaskIdRef.current = null;
+    appliedFocusOutboxIdRef.current = null;
     setTaskViews([]);
     setSelectedTaskView(null);
+    setFocusedOutboxId(null);
     setEvidenceItems([]);
     setEvidenceError(null);
     setEvidenceLoading(false);
@@ -539,6 +558,52 @@ export function MobileAutomationPanel({
       resetMobileRuntimeSnapshotStore();
     }
   }, [loadRuntimeSnapshot, loadTasks, project?.id]);
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   Attention 跳转到 automation 后需要在列表加载完成时聚焦 task 或 outbox；找不到则回报 missing。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   在非 loading 时匹配 focusTaskId/focusOutboxId；成功选中详情或高亮 outbox，失败回调 onFocusResult(missing)。
+   */
+  useEffect(() => {
+    if (loading) return;
+    if (!project?.id) return;
+
+    if (focusTaskId && appliedFocusTaskIdRef.current !== focusTaskId) {
+      appliedFocusTaskIdRef.current = focusTaskId;
+      const match = taskViews.find(
+        (view) => view.origin !== 'pendingRemote' && view.task.id === focusTaskId,
+      );
+      if (match) {
+        setSelectedTaskView(match);
+        onFocusResult?.({ status: 'found', entity: 'task', id: focusTaskId });
+      } else {
+        setSelectedTaskView(null);
+        onFocusResult?.({ status: 'missing', entity: 'task', id: focusTaskId });
+      }
+    }
+
+    if (focusOutboxId && appliedFocusOutboxIdRef.current !== focusOutboxId) {
+      appliedFocusOutboxIdRef.current = focusOutboxId;
+      const match = pendingRemoteItems.find((item) => item.id === focusOutboxId);
+      if (match) {
+        setFocusedOutboxId(focusOutboxId);
+        onFocusResult?.({ status: 'found', entity: 'outbox', id: focusOutboxId });
+      } else {
+        setFocusedOutboxId(null);
+        onFocusResult?.({ status: 'missing', entity: 'outbox', id: focusOutboxId });
+      }
+    }
+  }, [
+    focusOutboxId,
+    focusTaskId,
+    loading,
+    onFocusResult,
+    pendingRemoteItems,
+    project?.id,
+    taskViews,
+  ]);
 
   useEffect(() => {
     const projectId = activeProjectIdRef.current;
@@ -1049,7 +1114,13 @@ export function MobileAutomationPanel({
                 </div>
                 <div className={styles.mobileList}>
                   {pendingRemoteItems.map((item) => (
-                    <article key={item.id} className={styles.mobileListItem}>
+                    <article
+                      key={item.id}
+                      className={`${styles.mobileListItem} ${
+                        focusedOutboxId === item.id ? styles.mobileListItemActive : ''
+                      }`}
+                      data-attention-outbox={focusedOutboxId === item.id ? 'true' : undefined}
+                    >
                       <div className={styles.mobileListTitleRow}>
                         <strong className={styles.mobileListTitle}>
                           {pendingRemoteTaskTitle(item)}

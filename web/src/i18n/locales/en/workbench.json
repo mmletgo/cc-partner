@@ -350,12 +350,17 @@
       "worktrees": "Worktrees",
       "prompt": "Prompt",
       "automation": "Automation",
-      "settings": "Settings"
+      "settings": "Settings",
+      "attention": "Attention"
     },
     "placeholders": {
       "projects": {
         "title": "Projects",
         "label": "Select a project"
+      },
+      "attention": {
+        "title": "Attention",
+        "label": "See items that block work"
       },
       "terminal": {
         "title": "Terminal",

@@ -122,12 +122,14 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
   }, [runLoad]);
 
   // 首次挂载加载；卸载时使 in-flight 请求失效。
+  /* eslint-disable react-hooks/set-state-in-effect -- Provider 挂载必须主动拉取首份 Inbox 快照 */
   useEffect(() => {
     void runLoad();
     return () => {
       requestIdRef.current = nextAttentionRequestId(requestIdRef.current);
     };
   }, [runLoad]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // focus / visibility / 可见轮询。
   useEffect(() => {
@@ -210,4 +212,5 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
 }
 
 // 再导出读取 hook，便于页面 `import { useAttention, AttentionProvider } from '@/hooks/useAttention'`。
+// eslint-disable-next-line react-refresh/only-export-components -- 兼容既有 import 路径，Context 定义仍在 attentionContext.ts
 export { useAttention } from './attentionContext';
