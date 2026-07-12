@@ -222,6 +222,10 @@ export function useWorkbenchFileController(
   // 编辑、保存或预览请求返回的窄窗口内可能读到旧 tab 状态。
   const fileTabsRef = useRef<WorkbenchOpenFileTab[]>([]);
   const activeFileTabIdRef = useRef<string | null>(null);
+  // Business Logic: handleSaveFileTab / handleCreateEntry / handleRenamePath / handleDeletePath 的 selectedPath /
+  // selectedInfo 依赖需要在异步回调里读取最新选中态；用 ref + 同步 effect 保持最新值，使操作函数依赖稳定。
+  const selectedPathRef = useRef<string | null>(null);
+  const selectedInfoRef = useRef<WorkbenchPathInfo | null>(null);
   const openFileRequestSeqRef = useRef<number>(0);
   const saveRequestSeqRef = useRef<Record<string, number>>({});
   const formatRequestSeqRef = useRef<Record<string, number>>({});
@@ -239,6 +243,14 @@ export function useWorkbenchFileController(
   useEffect(() => {
     activeFileTabIdRef.current = activeFileTabId;
   }, [activeFileTabId]);
+
+  useEffect(() => {
+    selectedPathRef.current = selectedPath;
+  }, [selectedPath]);
+
+  useEffect(() => {
+    selectedInfoRef.current = selectedInfo;
+  }, [selectedInfo]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1204,19 +1216,11 @@ export function useWorkbenchFileController(
    * Business Logic（为什么需要 selectedPathRef / selectedInfoRef）:
    *   handleSaveFileTab 的 selectedPath 依赖、handleCreateEntry 的 selectedInfo 依赖、handleRenamePath /
    *   handleDeletePath 的 selectedInfo 依赖都需要在异步回调里读取最新选中态。若直接读取 React state，
-   *   useCallback 依赖会每次渲染变化；用 ref + 一个同步副作用保持最新值，使操作函数依赖稳定。
+   *   useCallback 依赖会每次渲染变化；用 ref + 同步副作用保持最新值，使操作函数依赖稳定。
    *
-   * Code Logic（这个函数做什么）:
-   *   每次 selectedPath / selectedInfo 变化时把最新值写入 ref；操作函数读 ref.current。
+   * Code Logic: ref 与 useEffect 在 hook 顶部声明（与 active*IdRef 同位置），避免 react-hooks/immutability
+   *   规则把“在 hook 中段声明 ref + 紧随其后的 effect 写回”判为不可变违规。操作函数读 ref.current。
    */
-  const selectedPathRef = useRef<string | null>(selectedPath);
-  const selectedInfoRef = useRef<WorkbenchPathInfo | null>(selectedInfo);
-  useEffect(() => {
-    selectedPathRef.current = selectedPath;
-  }, [selectedPath]);
-  useEffect(() => {
-    selectedInfoRef.current = selectedInfo;
-  }, [selectedInfo]);
 
   /**
    * Business Logic（为什么需要这个 bridge）:
@@ -1229,6 +1233,7 @@ export function useWorkbenchFileController(
    *   无论回到哪个 context 都被丢弃。
    */
   const resetForContext = useCallback(
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- bridge 契约保留参数语义。
     (_projectId: string | null, _worktreeId: string | null): void => {
       openFileRequestSeqRef.current += 1;
       saveRequestSeqRef.current = {};

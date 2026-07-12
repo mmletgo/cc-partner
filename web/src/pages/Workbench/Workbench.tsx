@@ -669,26 +669,16 @@ export function Workbench() {
     });
   }, [activeProjectId, activeWorktreeId, inspectorTab, loadGitHistory]);
 
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   桌面端用户需要把当前终端临时铺满屏幕，隐藏项目标题、worktree 管理层、文件层和右侧检查器以专注操作。
-   *
-   * Code Logic（这个函数做什么）:
-   *   关闭可能遮挡终端的 Prompt 优化浮层，切回 terminal 工作区，并通过 controller 打开 terminalLayer 的 fixed overlay 状态。
-   */
+  // Business Logic: 桌面端用户需要把当前终端临时铺满屏幕，隐藏项目标题、worktree 管理层、文件层和右侧检查器。
+  // Code Logic: 关闭 Prompt 优化浮层，切回 terminal 工作区，并通过 controller 打开 terminalLayer fixed overlay。
   const handleEnterTerminalFullscreen = useCallback((): void => {
     closePromptPanel();
     setWorkspaceView('terminal');
     terminalController.handleEnterTerminalFullscreen();
   }, [closePromptPanel, terminalController]);
 
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   进入终端全屏后必须有明确出口，恢复完整 Workbench 布局和其他面板内容。
-   *
-   * Code Logic（这个函数做什么）:
-   *   通过 controller 关闭 terminalLayer 的 fixed overlay 状态；不改变当前 session/worktree 或文件 tab 状态。
-   */
+  // Business Logic: 进入终端全屏后必须有明确出口，恢复完整 Workbench 布局。
+  // Code Logic: 通过 controller 关闭 terminalLayer 的 fixed overlay 状态；不改变 session/worktree 或文件 tab。
   const handleExitTerminalFullscreen = useCallback((): void => {
     terminalController.handleExitTerminalFullscreen();
   }, [terminalController]);
@@ -700,6 +690,17 @@ export function Workbench() {
   const handleReturnToTerminal = useCallback(() => {
     fileController.handleReturnToTerminal();
   }, [fileController]);
+
+  // Business Logic: worktree chip 切换前先调用 fileController.guardDirtyContextChange（Codex 评审指出 Plan 2 抽出
+  //   guard 后一度成为 dead code，dirty tab 会被 resetForContext 静默清空）。用户取消则中止；否则 setActiveWorktreeId。
+  const handleSelectWorktree = useCallback(
+    async (nextWorktreeId: string): Promise<void> => {
+      const ok = await fileController.guardDirtyContextChange();
+      if (!ok) return;
+      setActiveWorktreeId(nextWorktreeId);
+    },
+    [fileController, setActiveWorktreeId],
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -811,7 +812,9 @@ export function Workbench() {
             createWorktreeBranchPrefix={createWorktreeBranchPrefix}
             createWorktreeBranchSuffixDraft={createWorktreeBranchSuffixDraft}
             worktreeBranchInputRef={worktreeBranchInputRef}
-            setActiveWorktreeId={setActiveWorktreeId}
+            onSelectWorktree={(id) => {
+              void handleSelectWorktree(id);
+            }}
             setCreateWorktreeBranchPrefix={setCreateWorktreeBranchPrefix}
             setCreateWorktreeBranchSuffixDraft={setCreateWorktreeBranchSuffixDraft}
             handleOpenCreateWorktree={handleOpenCreateWorktree}

@@ -440,6 +440,59 @@ describe('useWorkbenchTerminalController — create / rename / close session', (
     expect(markFailure).toHaveBeenCalledWith(project.id, expect.any(Error));
   });
 
+  test('createSessionForWorktree appends session even when activeWorktreeId differs (new worktree flow)', async () => {
+    // Regression: handleCreateWorktree calls createSessionForWorktree BEFORE setActiveWorktreeId,
+    // so at the moment of the call activeWorktreeId still points at the OLD worktree. The bridge
+    // must NOT silently drop the just-created session from the UI.
+    const project = buildLocalProject();
+    const mainWt = buildWorktree({ id: 'wt-main' });
+    const newWt = buildWorktree({ id: 'wt-new', isMain: false });
+    const existing = buildSession({ id: 's1', worktreeId: mainWt.id });
+    const created = buildSession({ id: 's2', worktreeId: newWt.id });
+
+    fakeSessionsApi.list.mockResolvedValue([existing]);
+    fakeSessionsApi.create.mockResolvedValueOnce(created);
+
+    const resetBuffer = vi.fn();
+    const refreshStats = vi.fn();
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      // activeWorktreeId is still main when bridge is invoked (mirrors production flow).
+      activeWorktreeId: mainWt.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer,
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: refreshStats,
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    await act(async () => {
+      // Pass the NEW worktree id explicitly; activeWorktreeId is still main.
+      await result.current.createSessionForWorktree(newWt.id);
+      await flushMicrotasks();
+    });
+
+    // Session must be appended to the sessions list (not silently dropped by stale guard).
+    // This is the core regression: before the fix, the bridge would call sessions.create on the
+    // backend but never append the session to UI state, leaving the user with no visible tab.
+    expect(result.current.sessions.map((s) => s.id)).toEqual(['s1', 's2']);
+    expect(resetBuffer).toHaveBeenCalledWith('s2');
+    expect(refreshStats).toHaveBeenCalledWith(project.id);
+    // activeSessionId timing depends on the scopedSessions defer effect; the production flow
+    // continues with handleCreateWorktree's setActiveWorktreeId(newWt.id), at which point s2
+    // becomes the scoped active session. Verified end-to-end in the worktree controller test.
+  });
+
   test('handleRenameSession updates the renamed session in state via API', async () => {
     const project = buildLocalProject();
     const worktree = buildWorktree();

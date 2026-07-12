@@ -425,9 +425,17 @@ export function useWorkbenchTerminalController(
    *
    * Code Logic（这个函数做什么）:
    *   1. 读取当前 project/worktree ref，估算初始尺寸；
-   *   2. 调用 sessions.create；如果 create 后 project/worktree 已切换，则丢弃响应；
+   *   2. 调用 sessions.create；如果 create 后 project 已切换，则丢弃响应；
    *   3. 成功时 append session、记录 known id、focus、reset buffer、refresh stats；
    *   4. 失败时 markRequestFailure + 展示 sessionError。
+   *
+   *   重要边界：worktreeId 是显式入参；不再用 activeWorktreeIdRef 做 stale guard。
+   *   原因：useWorkbenchWorktreeGitController.handleCreateWorktree 的编排顺序是先 create worktree、
+   *   再 createSessionForWorktree、最后 setActiveWorktreeId。在 bridge 被调用的时刻，新 worktree 还没
+   *   成为 activeWorktreeId；若用 activeWorktreeIdRef !== worktreeId 守卫，会把 session 从 UI 静默丢弃
+   *   （后端已创建）。这里只用 projectId 守卫跨项目 stale；同一项目内的 worktreeId 是显式 target，
+   *   无论当前 active 是哪个都应接受 session append。loadWorktrees / setActiveWorktreeId 随后会把
+   *   新 worktree 设为 active，scopedSessions 计算会自然包含新 session。
    */
   const createSessionForWorktree = useCallback(
     async (worktreeId: string): Promise<void> => {
@@ -438,10 +446,8 @@ export function useWorkbenchTerminalController(
         setSessionError(null);
         const initialSize = measureInitialTerminalSize?.(terminalPanelRef.current, 'single');
         const session = await workbenchApi.sessions.create(projectId, initialSize, worktreeId);
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId
-        ) {
+        // Business Logic: 仅跨项目切换时丢弃；worktreeId 是显式 target，不与 activeWorktreeIdRef 比较。
+        if (activeProjectIdRef.current !== projectId) {
           return;
         }
         setSessions((current) => [...current, session]);
@@ -450,10 +456,7 @@ export function useWorkbenchTerminalController(
         resetTerminalBuffer(session.id);
         void refreshProjectSessionStats(projectId);
       } catch (error) {
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId
-        ) {
+        if (activeProjectIdRef.current !== projectId) {
           return;
         }
         markRequestFailure(projectId, error);

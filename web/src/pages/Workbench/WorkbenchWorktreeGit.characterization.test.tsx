@@ -26,7 +26,7 @@ import {
   waitForInvoke,
   workbenchTestState,
 } from './testing/workbenchTestHarness';
-import type { WorkbenchWorktree } from '@/lib/types';
+import type { WorkbenchFileNode, WorkbenchWorktree } from '@/lib/types';
 
 async function settle(): Promise<void> {
   await flushMacrotasks();
@@ -304,5 +304,109 @@ describe('Workbench worktree / Git domain (characterization)', () => {
 
     const mergePanel = document.querySelector('[class*="mergeStagePanel"]');
     expect(mergePanel).toBeNull();
+  });
+
+  test('switching worktree with dirty file tab prompts confirm; cancelling keeps active worktree and tabs unchanged', async () => {
+    // Regression for Codex finding 2: guardDirtyContextChange must be wired into worktree switching.
+    // Without the guard, switching worktrees would call resetForContext and silently wipe dirty tabs.
+    const project = buildLocalProject();
+    const mainWt = buildWorktree({ id: 'wt-main', name: 'main', branch: 'main', isMain: true });
+    const featureWt = buildWorktree({
+      id: 'wt-feat',
+      projectId: project.id,
+      name: 'feat',
+      branch: 'feature/feat',
+      isMain: false,
+    });
+    const session = buildSession({ id: 's1', worktreeId: 'wt-main' });
+    const readme: WorkbenchFileNode = {
+      name: 'README.md',
+      path: 'README.md',
+      kind: 'file',
+      size: 1,
+      modifiedAt: null,
+      children: null,
+    };
+    setInvokeHandler((call) => {
+      switch (call.cmd) {
+        case 'list_workbench_projects':
+          return [project];
+        case 'list_workbench_worktrees':
+          return [mainWt, featureWt];
+        case 'list_workbench_sessions':
+          return [session];
+        case 'list_workbench_git_commits':
+          return [];
+        case 'list_workbench_dir':
+          return [readme];
+        case 'get_workbench_path_info':
+          return { name: 'README.md', path: 'README.md', kind: 'file', size: 1, modifiedAt: null };
+        case 'open_workbench_file':
+          return {
+            metadata: { name: 'README.md', path: 'README.md', kind: 'file', size: 7, modifiedAt: '2026-07-01T00:00:00.000Z' },
+            detectedType: 'code',
+            capabilities: { canPreview: false, canEdit: true, canFormat: false, mustValidateBeforeSave: false, defaultMode: 'editor', availableModes: ['editor', 'source'] },
+            text: { content: 'original', baseHash: 'hash-1', baseModifiedAt: '2026-07-01T00:00:00.000Z' },
+            image: null,
+            csv: null,
+            sqlite: null,
+            truncated: false,
+            notice: null,
+          };
+        default:
+          return { ok: true };
+      }
+    });
+
+    renderWorkbench(
+      buildProjectsContextValue({ projects: [project], activeProjectId: project.id }),
+      buildDependencyContextValue(),
+    );
+    await waitForInvoke('list_workbench_dir');
+    await waitFor(() => {
+      if (screen.queryAllByRole('button', { name: 'README.md' }).length === 0) {
+        throw new Error('README.md not rendered');
+      }
+    });
+
+    // Open README.md and mark it dirty via the FileWorkspace stub content-change trigger.
+    fireEvent.click(screen.getByRole('button', { name: 'README.md' }));
+    await waitForInvoke('open_workbench_file');
+    await waitFor(() => {
+      const node = screen.getByTestId('workbench-file-workspace');
+      if (!node.getAttribute('data-active-tab-id')?.endsWith(':README.md')) {
+        throw new Error('active tab not README.md');
+      }
+    });
+    fireEvent.click(screen.getByTestId('workbench-file-workspace-content-change'));
+    await settle();
+
+    // Confirm prompt → cancel. Switching worktree must be aborted: active worktree unchanged,
+    // file tab still present.
+    const original = window.confirm;
+    let confirmCalls = 0;
+    window.confirm = (): boolean => {
+      confirmCalls += 1;
+      return false;
+    };
+    try {
+      fireEvent.click(screen.getByText('feature/feat'));
+      await settle();
+    } finally {
+      window.confirm = original;
+    }
+
+    expect(confirmCalls).toBe(1);
+    // Active worktree unchanged: the feature chip must NOT have data-active set.
+    const featureChip = screen.getByText('feature/feat').closest('button');
+    expect(featureChip?.getAttribute('data-active')).toBeNull();
+    // File tab preserved (dirty tab NOT wiped by resetForContext).
+    expect(screen.getByTestId('workbench-file-workspace').getAttribute('data-tab-count')).toBe('1');
+    // list_workbench_dir should NOT have been re-invoked for a new worktree (we never switched).
+    // The initial load plus the open file means no extra dir loads for worktree-main happened.
+    const dirLoadsForMain = workbenchTestState.invokeCalls.filter(
+      (c) => c.cmd === 'list_workbench_dir',
+    ).length;
+    expect(dirLoadsForMain).toBe(1);
   });
 });

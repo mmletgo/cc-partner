@@ -32,6 +32,10 @@ import type { WorktreeBusyKind } from './controllers/useWorkbenchWorktreeGitCont
  * Business Logic: 所有数据均由 useWorkbenchWorktreeGitController + Workbench.tsx 跨域共享派生；
  * 组件本身不持有状态、不调用 workbenchApi。worktreeBranchInputRef 由页面持有并通过 forwardRef 注入到 suffix Input，
  * 因为 createWorktreeOpen 状态变化时页面需要 focus 该输入。
+ *
+ * Code Logic: onSelectWorktree 是页面注入的 dirty-context-aware 切换入口——切换前会通过
+ * fileController.guardDirtyContextChange 询问用户是否放弃未保存编辑。创建/移除流程的 setActiveWorktreeId
+ * 由 controller 内部走另一条路径（不经过本叶子组件）。
  */
 export interface WorkbenchWorktreeBarProps {
   worktrees: WorkbenchWorktree[];
@@ -43,7 +47,8 @@ export interface WorkbenchWorktreeBarProps {
   createWorktreeBranchPrefix: WorktreeBranchPrefix;
   createWorktreeBranchSuffixDraft: string;
   worktreeBranchInputRef: React.RefObject<HTMLInputElement | null>;
-  setActiveWorktreeId: (id: string) => void;
+  /** dirty-context-aware 切换入口；用户在 chip 上点击时调用。 */
+  onSelectWorktree: (id: string) => void;
   setCreateWorktreeBranchPrefix: (prefix: WorktreeBranchPrefix) => void;
   setCreateWorktreeBranchSuffixDraft: (suffix: string) => void;
   handleOpenCreateWorktree: () => void;
@@ -71,7 +76,7 @@ export function WorkbenchWorktreeBar(props: WorkbenchWorktreeBarProps) {
     createWorktreeBranchPrefix,
     createWorktreeBranchSuffixDraft,
     worktreeBranchInputRef,
-    setActiveWorktreeId,
+    onSelectWorktree,
     setCreateWorktreeBranchPrefix,
     setCreateWorktreeBranchSuffixDraft,
     handleOpenCreateWorktree,
@@ -101,7 +106,7 @@ export function WorkbenchWorktreeBar(props: WorkbenchWorktreeBarProps) {
                 className={styles.worktreeChip}
                 data-active={worktree.id === activeWorktree?.id || undefined}
                 data-tone={tone}
-                onClick={() => setActiveWorktreeId(worktree.id)}
+                onClick={() => onSelectWorktree(worktree.id)}
               >
                 <span className={styles.worktreeDot} data-tone={tone} />
                 <span className={styles.worktreeName}>{label}</span>
