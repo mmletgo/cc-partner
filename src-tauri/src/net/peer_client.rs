@@ -129,13 +129,24 @@ impl PeerClient {
     ///     - 非 2xx 且 body 是错误信封（v1 或 v0 老形态）→ `Remote`（携带 code/status）。
     pub async fn health_info(&self, base_url: &str) -> Result<HealthResponse, PeerCallError> {
         let url = format!("{base_url}/api/health");
-        let resp = self.client.get(&url).send().await.map_err(|e| {
-            tracing::debug!("health_info 网络失败 ({url}): {e}");
-            PeerCallError::Network {
-                url: url.clone(),
-                source: e,
-            }
-        })?;
+        let resp = self
+            .client
+            .get(&url)
+            // Finding 3: 出站 request_id 让对端把 health 请求纳入同一调用链日志，
+            // 多跳代理（orchestrator/workbench）也能据此关联本机发起的请求。
+            .header(
+                crate::net::request_context::REQUEST_ID_HEADER,
+                crate::net::request_context::new_request_id(),
+            )
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::debug!("health_info 网络失败 ({url}): {e}");
+                PeerCallError::Network {
+                    url: url.clone(),
+                    source: e,
+                }
+            })?;
         parse_peer_response::<HealthResponse>(resp, &url)
             .await
             .map_err(|e| {

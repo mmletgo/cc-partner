@@ -61,12 +61,24 @@ pub enum P2pErrorCode {
     /// 客户端输入校验失败（HTTP 400）。
     #[serde(rename = "validation_error")]
     Validation,
+    /// 未认证（HTTP 401）。HTTP-only 路由（如 backend control）区分"未认证"与"已认证但无权"。
+    #[serde(rename = "unauthorized")]
+    Unauthorized,
+    /// 已认证但无权访问该资源（HTTP 403）。例如 backend control token 不匹配、capability 不足。
+    #[serde(rename = "forbidden")]
+    Forbidden,
     /// 资源不存在（HTTP 404）。
     #[serde(rename = "not_found")]
     NotFound,
     /// 资源状态冲突（HTTP 409）。
     #[serde(rename = "conflict")]
     Conflict,
+    /// 请求方法不被支持（HTTP 405）。axum fallback handler 把 405 也包成统一信封。
+    #[serde(rename = "method_not_allowed")]
+    MethodNotAllowed,
+    /// 请求体超过上限（HTTP 413）。`DefaultBodyLimit` 拒绝大 body 时必须包成信封。
+    #[serde(rename = "payload_too_large")]
+    PayloadTooLarge,
     /// 服务暂不可用（HTTP 503）。
     #[serde(rename = "unavailable")]
     Unavailable,
@@ -85,15 +97,43 @@ impl P2pErrorCode {
     ///     `IntoResponse` 需要根据 code 设置状态码，集中映射避免边界多处重复且漂移。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     Validation→400, NotFound→404, Conflict→409, Unavailable→503, Timeout→504, Internal→500。
+    ///     Validation→400, Unauthorized→401, Forbidden→403, NotFound→404,
+    ///     MethodNotAllowed→405, PayloadTooLarge→413, Conflict→409,
+    ///     Unavailable→503, Timeout→504, Internal→500。
     pub fn http_status(self) -> StatusCode {
         match self {
             P2pErrorCode::Validation => StatusCode::BAD_REQUEST,
+            P2pErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
+            P2pErrorCode::Forbidden => StatusCode::FORBIDDEN,
             P2pErrorCode::NotFound => StatusCode::NOT_FOUND,
+            P2pErrorCode::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+            P2pErrorCode::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             P2pErrorCode::Conflict => StatusCode::CONFLICT,
             P2pErrorCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             P2pErrorCode::Timeout => StatusCode::GATEWAY_TIMEOUT,
             P2pErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// 从 HTTP 状态码反查最贴近的边界 code token（fallback handler 使用）。
+    ///
+    /// Business Logic（为什么需要这个函数 / Finding 1）:
+    ///     axum fallback / extractor rejection 只能给出 `StatusCode`，没有结构化分类；
+    ///     集中映射避免 fallback handler 散落 match。未覆盖的状态码兜底为 Internal。
+    pub fn from_status(status: StatusCode) -> Self {
+        match status {
+            StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => P2pErrorCode::Validation,
+            StatusCode::UNAUTHORIZED => P2pErrorCode::Unauthorized,
+            StatusCode::FORBIDDEN => P2pErrorCode::Forbidden,
+            StatusCode::NOT_FOUND => P2pErrorCode::NotFound,
+            StatusCode::METHOD_NOT_ALLOWED => P2pErrorCode::MethodNotAllowed,
+            StatusCode::PAYLOAD_TOO_LARGE | StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE => {
+                P2pErrorCode::PayloadTooLarge
+            }
+            StatusCode::CONFLICT => P2pErrorCode::Conflict,
+            StatusCode::SERVICE_UNAVAILABLE => P2pErrorCode::Unavailable,
+            StatusCode::GATEWAY_TIMEOUT => P2pErrorCode::Timeout,
+            _ => P2pErrorCode::Internal,
         }
     }
 
@@ -122,6 +162,46 @@ impl P2pErrorCode {
 /// Business Logic: 多数错误只需分类级 code（如 `not_found`），少数路由需要更细（如
 ///     `sync.push.conflict`）；提供一个稳定默认值，避免路由层强制传 code。
 pub const DEFAULT_DOMAIN_CODE: &str = "p2p";
+
+/// 判断 AppError 分类对应的边界错误是否默认可安全重试。
+///
+/// Business Logic（为什么需要这个函数 / Finding 2）:
+///     重试决策不能依赖字符串匹配（文案会本地化/调整）。集中一个稳定入口：
+///     Unavailable（503）/Timeout（504）属于明确的暂态错误，客户端退避重试通常是安全的；
+///     其它分类默认不重试。retryable=true 只是"暂态"信号；是否真的重试仍由调用方按路由幂等策略决定。
+pub fn category_is_retryable(category: AppErrorCategory) -> bool {
+    matches!(
+        category,
+        AppErrorCategory::Unavailable | AppErrorCategory::Timeout
+    )
+}
+
+/// fallback handler 在响应 body 为空时使用的默认人类可读消息。
+fn fallback_default_message(status: StatusCode) -> String {
+    match status {
+        StatusCode::NOT_FOUND => "请求的资源或路由不存在".to_string(),
+        StatusCode::METHOD_NOT_ALLOWED => "请求方法不被该路由支持".to_string(),
+        StatusCode::PAYLOAD_TOO_LARGE => "请求体超过大小上限".to_string(),
+        StatusCode::BAD_REQUEST => "请求格式非法".to_string(),
+        StatusCode::UNAUTHORIZED => "未认证".to_string(),
+        StatusCode::FORBIDDEN => "无权访问该资源".to_string(),
+        StatusCode::SERVICE_UNAVAILABLE => "服务暂不可用".to_string(),
+        StatusCode::GATEWAY_TIMEOUT => "上游响应超时".to_string(),
+        _ => format!("HTTP {status} 错误"),
+    }
+}
+
+/// 把可能很长的诊断正文截断到 envelope `error` 字段可接受的长度。
+const FALLBACK_MESSAGE_MAX_CHARS: usize = 240;
+fn truncate_message(message: &str) -> String {
+    let mut chars = message.chars();
+    let truncated: String = chars.by_ref().take(FALLBACK_MESSAGE_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
 
 /// P2P/HTTP 边界标准错误信封（JSON body）。
 ///
@@ -195,6 +275,26 @@ impl P2pErrorEnvelope {
         self
     }
 
+    /// 设置 `details.domain_code`（路由级稳定机器可读 code，Finding 2）。
+    ///
+    /// Business Logic（为什么需要这个函数 / Finding 2）:
+    ///     `from_app_error` 的 `domain_code` 参数历史上被丢弃。现在它被写入
+    ///     `details.domain_code`，客户端可据此做细粒度遥测/路由，而 `code` 仍保持为稳定分类
+    ///     token（如 `conflict`）用于通用分支。两者解耦后，新增路由不会让客户端为每个路由
+    ///     学习独立 code。
+    #[must_use]
+    pub fn with_domain_code(mut self, domain_code: &str) -> Self {
+        let obj = self
+            .details
+            .as_object_mut()
+            .expect("details 默认为对象；构造路径保证非 null");
+        obj.insert(
+            "domain_code".to_string(),
+            serde_json::Value::String(domain_code.to_string()),
+        );
+        self
+    }
+
     /// 设置 details 字段（结构化补充信息）。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -230,19 +330,28 @@ impl P2pError {
     /// Business Logic（为什么需要这个函数）:
     ///     P2P handler 复用命令层 helper（返回 `AppError`），需要一个统一入口把它转成边界错误：
     ///     分类映射 code token、状态码，并把 request context 的 ID 写进信封与响应 header。
-    ///     retryable 默认 false（保守默认），仅幂等路由显式开启。
+    ///     retryable 默认 false（保守默认），仅幂等路由显式开启。Finding 2 起 `domain_code`
+    ///     不再被丢弃，而是作为 `details.domain_code` 暴露给客户端；Unavailable/Timeout 分类
+    ///     的 retryable 自动置 true（暂态错误）。
     ///
     /// Code Logic（这个函数做什么）:
     ///     1. `AppError::classify()` 得到稳定分类；
     ///     2. `P2pErrorCode::from_category` 映射到 code token；
     ///     3. token.http_status() 得到状态码；
-    ///     4. 信封 request_id 取自 context，保证 header/body 一致。
+    ///     4. `category_is_retryable` 决定 retryable（Unavailable/Timeout=true）；
+    ///     5. 信封 request_id 取自 context，保证 header/body 一致；
+    ///     6. 非默认 domain_code 写入 `details.domain_code`。
     pub fn from_app_error(error: AppError, context: &P2pRequestContext, domain_code: &str) -> Self {
-        let _ = domain_code; // 保留参数：后续细粒度 code 可能使用，当前用 code token。
         let category = error.classify();
         let code = P2pErrorCode::from_category(category);
         let status = code.http_status();
-        let envelope = P2pErrorEnvelope::new(error.to_string(), code, &context.request_id);
+        let retryable = category_is_retryable(category);
+        let domain = domain_code.trim();
+        let mut envelope = P2pErrorEnvelope::new(error.to_string(), code, &context.request_id)
+            .with_retryable(retryable);
+        if !domain.is_empty() && domain != DEFAULT_DOMAIN_CODE {
+            envelope = envelope.with_domain_code(domain);
+        }
         Self { envelope, status }
     }
 
@@ -288,20 +397,28 @@ impl P2pError {
         Self::from_code(message, P2pErrorCode::Conflict, context)
     }
 
-    /// 暂不可用（HTTP 503）便捷构造。
+    /// 暂不可用（HTTP 503）便捷构造，retryable 自动置 true（Finding 2）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     依赖未就绪、容量上限等暂态不可用时直接构造边界 503。
+    ///     依赖未就绪、容量上限等暂态不可用时直接构造边界 503。503 属暂态错误，客户端退避
+    ///     重试通常安全（是否真的重试仍由调用方按路由幂等策略决定），故 retryable=true。
     pub fn unavailable(message: impl Into<String>, context: &P2pRequestContext) -> Self {
-        Self::from_code(message, P2pErrorCode::Unavailable, context)
+        let status = P2pErrorCode::Unavailable.http_status();
+        let envelope =
+            P2pErrorEnvelope::new(message, P2pErrorCode::Unavailable, &context.request_id)
+                .with_retryable(true);
+        Self { envelope, status }
     }
 
-    /// 超时（HTTP 504）便捷构造。
+    /// 超时（HTTP 504）便捷构造，retryable 自动置 true（Finding 2）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     上游/对端在限定时间内未响应时直接构造边界 504。
+    ///     上游/对端在限定时间内未响应时直接构造边界 504。504 属暂态错误，retryable=true。
     pub fn timeout(message: impl Into<String>, context: &P2pRequestContext) -> Self {
-        Self::from_code(message, P2pErrorCode::Timeout, context)
+        let status = P2pErrorCode::Timeout.http_status();
+        let envelope = P2pErrorEnvelope::new(message, P2pErrorCode::Timeout, &context.request_id)
+            .with_retryable(true);
+        Self { envelope, status }
     }
 
     /// 内部错误（HTTP 500）便捷构造。
@@ -310,6 +427,35 @@ impl P2pError {
     ///     其他未分类错误兜底为边界 500，避免裸 StatusCode 响应破坏信封契约。
     pub fn internal(message: impl Into<String>, context: &P2pRequestContext) -> Self {
         Self::from_code(message, P2pErrorCode::Internal, context)
+    }
+
+    /// 把任意裸响应（无信封 body）包成信封（Finding 1 fallback handler 使用）。
+    ///
+    /// Business Logic（为什么需要这个函数 / Finding 1）:
+    ///     axum 框架级错误（404/405/413/extractor rejection）只有状态码与可能非 JSON 的 body，
+    ///     本函数把状态码反查为 code token，retryable 仅对 503/504 置 true，并把原 body 文本
+    ///     （截断后）写入 envelope.error，保证 health 宣告的 errors.envelope.v1 在所有错误路径生效。
+    pub fn from_response(
+        status: StatusCode,
+        body_text: Option<String>,
+        context: &P2pRequestContext,
+    ) -> Self {
+        let code = P2pErrorCode::from_status(status);
+        let retryable = matches!(code, P2pErrorCode::Unavailable | P2pErrorCode::Timeout);
+        let message = match body_text {
+            Some(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    fallback_default_message(status)
+                } else {
+                    truncate_message(trimmed)
+                }
+            }
+            None => fallback_default_message(status),
+        };
+        let envelope =
+            P2pErrorEnvelope::new(message, code, &context.request_id).with_retryable(retryable);
+        Self { envelope, status }
     }
 
     /// 返回内部信封引用（测试与日志使用）。
@@ -406,17 +552,81 @@ impl P2pErrorCode {
     ///
     /// Code Logic（这个函数做什么）:
     ///     显式 match 输出字符串，与 `#[serde(rename = ...)]` 输出保持一致。
-    fn to_token_string(self) -> String {
+    pub(crate) fn to_token_string(self) -> String {
         match self {
             P2pErrorCode::Validation => "validation_error",
+            P2pErrorCode::Unauthorized => "unauthorized",
+            P2pErrorCode::Forbidden => "forbidden",
             P2pErrorCode::NotFound => "not_found",
             P2pErrorCode::Conflict => "conflict",
+            P2pErrorCode::MethodNotAllowed => "method_not_allowed",
+            P2pErrorCode::PayloadTooLarge => "payload_too_large",
             P2pErrorCode::Unavailable => "unavailable",
             P2pErrorCode::Timeout => "timeout",
             P2pErrorCode::Internal => "internal_error",
         }
         .to_string()
     }
+}
+
+/// 判断响应 body 是否已经是错误信封（含稳定 code 字段）。
+///
+/// Business Logic（为什么需要这个函数 / Finding 1）:
+///     fallback middleware 需要区分"已经是信封"与"框架级裸响应"：已经是信封则原样透传，
+///     避免双重包装；否则用 `P2pError::from_response` 包成信封。
+fn body_is_envelope(body: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return false;
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // code 非 `unknown`（缺省占位）即视为已有信封。
+    serde_json::from_str::<RemoteErrorBody>(trimmed)
+        .map(|body| !body.is_legacy())
+        .unwrap_or(false)
+}
+
+/// 边界信封兜底中间件：把任何"非 2xx 且 body 非信封"的响应包成 P2pErrorEnvelope（Finding 1）。
+///
+/// Business Logic（为什么需要这个函数 / Finding 1）:
+///     axum 框架层产生的错误（`DefaultBodyLimit` 拒绝 → 413、Json extractor 拒绝 → 400、
+///     未匹配路由 → 404、错误方法 → 405）默认返回裸状态码或 axum 自有 body，不经过
+///     `P2pError::into_response`，因此会破坏 health 宣告的 `errors.envelope.v1` 契约。
+///     本中间件放在 `request_id_middleware` 内层、业务路由外层，统一把这类响应改写为信封。
+///     成功响应（2xx）与已经是信封的非 2xx 响应原样透传。
+pub async fn envelope_fallback_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response<Body> {
+    let ctx = request
+        .extensions()
+        .get::<P2pRequestContext>()
+        .cloned()
+        .unwrap_or_else(|| P2pRequestContext {
+            request_id: String::new(),
+        });
+    let response = next.run(request).await;
+    if response.status().is_success() {
+        return response;
+    }
+    let status = response.status();
+    let (parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            let p2p = P2pError::from_response(status, None, &ctx);
+            return p2p.into_response();
+        }
+    };
+    if body_is_envelope(&bytes) {
+        let response = Response::from_parts(parts, Body::from(bytes));
+        return response;
+    }
+    let body_text = std::str::from_utf8(&bytes).ok().map(|s| s.to_string());
+    let p2p = P2pError::from_response(status, body_text, &ctx);
+    p2p.into_response()
 }
 
 #[cfg(test)]
@@ -463,51 +673,59 @@ mod tests {
 
     /// Business Logic（为什么需要这个测试）:
     ///     从命令层 AppError 到边界 P2pError 的全链路映射必须覆盖每个分类，确保 handler
-    ///     用 `?` 传播 AppError 时边界层返回正确状态码与 code token。
+    ///     用 `?` 传播 AppError 时边界层返回正确状态码与 code token。Finding 2 起
+    ///     Unavailable/Timeout 的 retryable 自动置 true（暂态错误），其余 false。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     对每个 AppError 分类构造 P2pError，断言 status 与 envelope.code 匹配约定。
+    ///     对每个 AppError 分类构造 P2pError，断言 status、envelope.code、retryable 匹配约定。
     #[test]
     fn from_app_error_maps_all_categories() {
-        let cases: Vec<(AppError, StatusCode, &str)> = vec![
+        let cases: Vec<(AppError, StatusCode, &str, bool)> = vec![
             (
                 AppError::validation("参数非法"),
                 StatusCode::BAD_REQUEST,
                 "validation_error",
+                false,
             ),
             (
                 AppError::not_found("Prompt 不存在"),
                 StatusCode::NOT_FOUND,
                 "not_found",
+                false,
             ),
             (
                 AppError::conflict("状态冲突"),
                 StatusCode::CONFLICT,
                 "conflict",
+                false,
             ),
             (
                 AppError::unavailable("暂不可用"),
                 StatusCode::SERVICE_UNAVAILABLE,
                 "unavailable",
+                true,
             ),
             (
                 AppError::timeout("超时"),
                 StatusCode::GATEWAY_TIMEOUT,
                 "timeout",
+                true,
             ),
             (
                 AppError::generic("boom"),
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
+                false,
             ),
             (
                 AppError::Io(std::io::Error::other("disk")),
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
+                false,
             ),
         ];
 
-        for (app, expected_status, expected_code) in cases {
+        for (app, expected_status, expected_code, expected_retryable) in cases {
             let p2p = P2pError::from_app_error(app, &ctx("req-abc"), DEFAULT_DOMAIN_CODE);
             assert_eq!(
                 p2p.status(),
@@ -517,9 +735,249 @@ mod tests {
             assert_eq!(p2p.envelope().code, expected_code, "code token 应匹配");
             // request_id 必须与 context 完全一致。
             assert_eq!(p2p.envelope().request_id, "req-abc");
-            // retryable 默认 false（保守默认）。
-            assert!(!p2p.envelope().retryable, "retryable 默认必须为 false");
+            assert_eq!(
+                p2p.envelope().retryable,
+                expected_retryable,
+                "retryable 应匹配分类约定"
+            );
         }
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 2）:
+    ///     retryable 不能依赖字符串匹配。集中验证 `category_is_retryable` 对每个分类的判定，
+    ///     保证 Unavailable/Timeout=true，其余=false。
+    #[test]
+    fn category_is_retryable_only_for_unavailable_and_timeout() {
+        use crate::error::AppErrorCategory;
+        assert!(!category_is_retryable(AppErrorCategory::Validation));
+        assert!(!category_is_retryable(AppErrorCategory::NotFound));
+        assert!(!category_is_retryable(AppErrorCategory::Conflict));
+        assert!(category_is_retryable(AppErrorCategory::Unavailable));
+        assert!(category_is_retryable(AppErrorCategory::Timeout));
+        assert!(!category_is_retryable(AppErrorCategory::Internal));
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 2）:
+    ///     `P2pError::unavailable()` 与 `timeout()` 便捷构造器必须把 retryable 置 true，
+    ///     因为它们表达暂态错误；其它便捷构造器（validation/not_found/conflict/internal）保持 false。
+    #[test]
+    fn unavailable_and_timeout_constructors_set_retryable_true() {
+        let ctx = P2pRequestContext {
+            request_id: "req-rt".to_string(),
+        };
+        assert!(P2pError::unavailable("x", &ctx).envelope().retryable);
+        assert!(P2pError::timeout("x", &ctx).envelope().retryable);
+        // 其它分类保持 false。
+        assert!(!P2pError::validation("x", &ctx).envelope().retryable);
+        assert!(!P2pError::not_found("x", &ctx).envelope().retryable);
+        assert!(!P2pError::conflict("x", &ctx).envelope().retryable);
+        assert!(!P2pError::internal("x", &ctx).envelope().retryable);
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 2）:
+    ///     非默认 domain_code 必须写入 `details.domain_code`，供客户端做细粒度遥测；
+    ///     默认 domain_code（`p2p`）不写入，避免无意义噪声。
+    #[test]
+    fn from_app_error_surfaces_domain_code_in_details() {
+        let app = AppError::conflict("冲突");
+        // 非默认 domain_code → 写入 details.domain_code。
+        let p2p = P2pError::from_app_error(app, &ctx("req-dc"), "sync.push");
+        let details = p2p
+            .envelope()
+            .details
+            .as_object()
+            .expect("details 应为对象");
+        assert_eq!(
+            details.get("domain_code").and_then(|v| v.as_str()),
+            Some("sync.push"),
+            "非默认 domain_code 应写入 details.domain_code"
+        );
+        // 默认 domain_code → 不写入。
+        let app2 = AppError::conflict("冲突");
+        let p2p2 = P2pError::from_app_error(app2, &ctx("req-dc2"), DEFAULT_DOMAIN_CODE);
+        let details2 = p2p2.envelope().details.as_object().unwrap();
+        assert!(
+            details2.get("domain_code").is_none(),
+            "默认 domain_code 不应写入 details.domain_code"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 2）:
+    ///     `from_status` 是 fallback handler 把裸状态码反查为 code token 的核心入口；
+    ///     必须覆盖框架级错误状态码（400/401/403/404/405/413/409/503/504），其余兜底 Internal。
+    #[test]
+    fn from_status_maps_framework_status_codes_to_envelope_codes() {
+        assert_eq!(
+            P2pErrorCode::from_status(StatusCode::BAD_REQUEST),
+            P2pErrorCode::Validation
+        );
+        assert_eq!(
+            P2pErrorCode::from_status(StatusCode::UNPROCESSABLE_ENTITY),
+            P2pErrorCode::Validation
+        );
+        assert_eq!(
+            P2pErrorCode::from_status(StatusCode::UNAUTHORIZED),
+            P2pErrorCode::Unauthorized
+        );
+        assert_eq!(
+            P2pErrorCode::from_status(StatusCode::FORBIDDEN),
+            P2pErrorCode::Forbidden
+        );
+        assert_eq!(
+            P2pErrorCode::from_status(StatusCode::NOT_FOUND),
+            P2pErrorCode::NotFound
+        );
+        assert_eq!(
+            P2pErrorCode::from_status(StatusCode::METHOD_NOT_ALLOWED),
+            P2pErrorCode::MethodNotAllowed
+        );
+        assert_eq!(
+            P2pErrorCode::from_status(StatusCode::PAYLOAD_TOO_LARGE),
+            P2pErrorCode::PayloadTooLarge
+        );
+        assert_eq!(
+            P2pErrorCode::from_status(StatusCode::CONFLICT),
+            P2pErrorCode::Conflict
+        );
+        assert_eq!(
+            P2pErrorCode::from_status(StatusCode::SERVICE_UNAVAILABLE),
+            P2pErrorCode::Unavailable
+        );
+        assert_eq!(
+            P2pErrorCode::from_status(StatusCode::GATEWAY_TIMEOUT),
+            P2pErrorCode::Timeout
+        );
+        assert_eq!(
+            P2pErrorCode::from_status(StatusCode::INTERNAL_SERVER_ERROR),
+            P2pErrorCode::Internal
+        );
+        assert_eq!(
+            P2pErrorCode::from_status(StatusCode::BAD_GATEWAY),
+            P2pErrorCode::Internal
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 1）:
+    ///     `P2pError::from_response` 是 fallback handler 把任意裸响应（无信封 body）包成信封的核心。
+    ///     必须把状态码反查到 code token，retryable 仅对 503/504 置 true，并把原 body 文本写入
+    ///     envelope.error（截断后）。
+    #[test]
+    fn from_response_wraps_bare_status_into_envelope() {
+        let ctx = P2pRequestContext {
+            request_id: "req-fb".to_string(),
+        };
+        // 413 + 空 body → PayloadTooLarge + 默认消息 + retryable=false。
+        let p2p = P2pError::from_response(StatusCode::PAYLOAD_TOO_LARGE, None, &ctx);
+        assert_eq!(p2p.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(p2p.envelope().code, "payload_too_large");
+        assert!(!p2p.envelope().retryable);
+        assert_eq!(p2p.envelope().request_id, "req-fb");
+
+        // 405 + 有 body → MethodNotAllowed + 原 body（截断）。
+        let p2p = P2pError::from_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            Some("method not allowed".to_string()),
+            &ctx,
+        );
+        assert_eq!(p2p.envelope().code, "method_not_allowed");
+        assert!(p2p.envelope().error.contains("method not allowed"));
+
+        // 503 → Unavailable + retryable=true。
+        let p2p = P2pError::from_response(StatusCode::SERVICE_UNAVAILABLE, None, &ctx);
+        assert_eq!(p2p.envelope().code, "unavailable");
+        assert!(p2p.envelope().retryable, "503 fallback 必须 retryable=true");
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 1）:
+    ///     `from_response` 必须把超长 body 截断，避免把代理 HTML/堆栈整段塞进 envelope.error。
+    #[test]
+    fn from_response_truncates_long_body_text() {
+        let ctx = P2pRequestContext {
+            request_id: "req-tr".to_string(),
+        };
+        let long_body = "x".repeat(FALLBACK_MESSAGE_MAX_CHARS + 100);
+        let p2p = P2pError::from_response(StatusCode::BAD_GATEWAY, Some(long_body), &ctx);
+        assert!(p2p.envelope().error.ends_with("..."));
+        assert_eq!(
+            p2p.envelope().error.chars().count(),
+            FALLBACK_MESSAGE_MAX_CHARS + 3
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 1）:
+    ///     `envelope_fallback_middleware` 必须把 axum 框架级错误（如未匹配路由的 404）包成信封，
+    ///     让 health 宣告的 errors.envelope.v1 在所有错误路径都生效。
+    #[tokio::test]
+    async fn fallback_middleware_wraps_unmatched_route_into_envelope() {
+        use crate::net::request_context::request_id_middleware;
+        use axum::body::to_bytes;
+        use axum::routing::get;
+        async fn ok() -> (axum::http::StatusCode, &'static str) {
+            (axum::http::StatusCode::OK, "ok")
+        }
+        let router = axum::Router::new()
+            .route("/probe", get(ok))
+            .fallback_service(tower::service_fn(
+                |_req: axum::extract::Request| async move {
+                    Ok::<_, std::convert::Infallible>(axum::response::Response::new(
+                        axum::body::Body::empty(),
+                    ))
+                    .map(|mut r| {
+                        *r.status_mut() = axum::http::StatusCode::NOT_FOUND;
+                        r
+                    })
+                },
+            ))
+            .layer(axum::middleware::from_fn(envelope_fallback_middleware))
+            .layer(axum::middleware::from_fn(request_id_middleware));
+
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .uri("/nonexistent")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.expect("router 不可失败");
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        assert!(response.headers().get(REQUEST_ID_HEADER).is_some());
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: P2pErrorEnvelope =
+            serde_json::from_slice(&bytes).expect("fallback 应把 404 包成信封");
+        assert_eq!(body.code, "not_found");
+        assert!(!body.retryable);
+    }
+
+    /// Business Logic（为什么需要这个测试 / Finding 1）:
+    ///     `envelope_fallback_middleware` 不能双重包装已经是信封的非 2xx 响应。
+    ///     路由 handler 通过 `P2pError::into_response` 返回的信封必须原样透传。
+    #[tokio::test]
+    async fn fallback_middleware_passes_through_existing_envelope_without_double_wrap() {
+        use crate::net::request_context::request_id_middleware;
+        use axum::body::to_bytes;
+        use axum::routing::post;
+        async fn conflict_handler(
+            axum::extract::Extension(ctx): axum::extract::Extension<P2pRequestContext>,
+        ) -> Result<String, P2pError> {
+            Err(P2pError::conflict("状态冲突", &ctx))
+        }
+        let router = axum::Router::new()
+            .route("/probe", post(conflict_handler))
+            .layer(axum::middleware::from_fn(envelope_fallback_middleware))
+            .layer(axum::middleware::from_fn(request_id_middleware));
+
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/probe")
+            .header(REQUEST_ID_HEADER, "req-pass")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.expect("router 不可失败");
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: P2pErrorEnvelope = serde_json::from_slice(&bytes).expect("body 应仍为信封");
+        assert_eq!(body.code, "conflict");
+        assert_eq!(body.error, "状态冲突");
+        assert_eq!(body.request_id, "req-pass");
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -788,8 +1246,12 @@ mod tests {
     fn code_token_serialization_matches_to_token_string() {
         let codes = vec![
             P2pErrorCode::Validation,
+            P2pErrorCode::Unauthorized,
+            P2pErrorCode::Forbidden,
             P2pErrorCode::NotFound,
             P2pErrorCode::Conflict,
+            P2pErrorCode::MethodNotAllowed,
+            P2pErrorCode::PayloadTooLarge,
             P2pErrorCode::Unavailable,
             P2pErrorCode::Timeout,
             P2pErrorCode::Internal,
