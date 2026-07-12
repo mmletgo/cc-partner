@@ -597,6 +597,8 @@
     "createSession": "Failed to create terminal",
     "focusSession": "Failed to switch terminal window",
     "splitPane": "Failed to split pane",
+    "switchPane": "Failed to switch pane",
+    "zoomPane": "Failed to switch single-pane view",
     "closePane": "Failed to close pane",
     "closeSession": "Failed to close terminal",
     "renameSession": "Failed to rename session",
