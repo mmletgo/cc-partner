@@ -21,6 +21,11 @@ use uuid::Uuid;
 const CONFIG_DIR_NAME: &str = ".cc-partner";
 const LEGACY_CONFIG_DIR_NAME: &str = ".claude-partner";
 const APP_NAME: &str = "cc-partner";
+/// CLI/测试隔离数据根目录环境变量。
+///
+/// Business Logic: smoke/CI 与并行 CLI 用例需要把 config/control/db/log 写到临时目录，
+///     不能触碰用户真实 `~/.cc-partner`；`start` 子进程 detach 后也要继承同一 override。
+const DATA_DIR_ENV: &str = "CC_PARTNER_DATA_DIR";
 
 /// 把 cfg.db_path 中残留的旧 `~/.claude-partner/` 前缀改写为 `~/.cc-partner/`。
 ///
@@ -50,10 +55,80 @@ pub(crate) fn migrate_legacy_db_path_with_home(cfg: &mut AppConfig, home: &Path)
     true
 }
 
-/// 配置文件和数据文件的根目录：`~/.cc-partner`。
+/// 解析应用运行时数据根目录（配置/控制文件/数据库/日志的共同父目录）。
 ///
-/// pub 供 cloud_sync 等模块复用同一根目录派生子路径（如 `~/.cc-partner/cloud-sync/`）。
-pub fn config_dir() -> PathBuf {
+/// Business Logic（为什么需要这个函数）:
+///     CLI 与集成 smoke 需要通过 `CC_PARTNER_DATA_DIR` 把后端状态隔离到临时目录，
+///     避免污染用户真实 `~/.cc-partner`；未设置时必须保持现有 home 默认路径。
+///
+/// Code Logic（这个函数做什么）:
+///     1) 读取 `CC_PARTNER_DATA_DIR`；空白/NUL/非绝对路径返回 Validation 错误；
+///     2) 合法 override 则 `create_dir_all` 后返回该绝对路径；
+///     3) 无 override 时复用 home 下 `.cc-partner`，并保留旧 `.claude-partner` 目录迁移。
+pub fn data_dir() -> Result<PathBuf, AppError> {
+    match std::env::var_os(DATA_DIR_ENV) {
+        Some(raw) => resolve_data_dir_override(raw),
+        None => Ok(default_home_data_dir()),
+    }
+}
+
+/// 校验并物化 `CC_PARTNER_DATA_DIR` override。
+///
+/// Business Logic（为什么需要这个函数）:
+///     非法 override（空串、相对路径、含 NUL）会让 detach 子进程写到不可预期位置，必须在入口拒绝。
+///
+/// Code Logic（这个函数做什么）:
+///     拒绝含 NUL 字节、trim 后为空、非绝对路径的值；通过后递归创建目录并返回 PathBuf。
+fn resolve_data_dir_override(raw: std::ffi::OsString) -> Result<PathBuf, AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        if raw.as_bytes().contains(&0) {
+            return Err(AppError::validation(
+                "CC_PARTNER_DATA_DIR 不能包含 NUL 字节",
+            ));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        if raw.encode_wide().any(|unit| unit == 0) {
+            return Err(AppError::validation(
+                "CC_PARTNER_DATA_DIR 不能包含 NUL 字节",
+            ));
+        }
+    }
+
+    let as_str = raw.to_string_lossy();
+    let trimmed = as_str.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::validation("CC_PARTNER_DATA_DIR 不能为空"));
+    }
+    if trimmed.contains('\0') {
+        return Err(AppError::validation(
+            "CC_PARTNER_DATA_DIR 不能包含 NUL 字节",
+        ));
+    }
+
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(AppError::validation(
+            "CC_PARTNER_DATA_DIR 必须是绝对路径",
+        ));
+    }
+
+    fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+/// 默认 home 数据目录（含旧目录迁移）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     未设置 `CC_PARTNER_DATA_DIR` 时生产路径必须与历史行为一致，并继续迁移旧 `.claude-partner`。
+///
+/// Code Logic（这个函数做什么）:
+///     取 home 下 `.cc-partner`；若新目录不存在且旧目录存在则 rename 迁移，失败则回落旧路径。
+fn default_home_data_dir() -> PathBuf {
     // dirs::config_dir 在各平台指向用户配置目录；历史 Python 版用的是 home 下的隐藏目录。
     // 更名后优先使用 ~/.cc-partner；若新目录不存在但旧 ~/.claude-partner 存在，首次启动时重命名迁移。
     let home = dirs::home_dir().expect("无法定位用户 home 目录，环境异常");
@@ -71,6 +146,46 @@ pub fn config_dir() -> PathBuf {
     }
 
     dir
+}
+
+/// 配置文件和数据文件的根目录：`~/.cc-partner`（可被 `CC_PARTNER_DATA_DIR` 覆盖）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     既有模块（cloud_sync、control、load/save）统一通过此入口派生路径；测试/CLI 隔离时
+///     必须与 `data_dir()` 指向同一根。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `data_dir()`；解析失败时 panic（非法 override 属于环境配置错误，应尽早暴露）。
+///
+/// pub 供 cloud_sync 等模块复用同一根目录派生子路径（如 `~/.cc-partner/cloud-sync/`）。
+pub fn config_dir() -> PathBuf {
+    data_dir().expect("无法解析应用数据目录（检查 CC_PARTNER_DATA_DIR）")
+}
+
+/// 后端文件日志目录：`<data_dir>/logs`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     doctor/smoke 与后续 rotating logs 需要与 config/control 同一隔离根下的日志路径。
+///
+/// Code Logic（这个函数做什么）:
+///     基于 `data_dir()` 拼接 `logs` 子目录路径（本函数不强制创建子目录）。
+///
+/// 当前生产路径尚未接线日志 writer；API 先落地供 data_dir 隔离契约与后续 logs plan 复用。
+#[allow(dead_code)]
+pub fn backend_log_dir() -> Result<PathBuf, AppError> {
+    Ok(data_dir()?.join("logs"))
+}
+
+/// 后端当前日志文件路径：`<data_dir>/logs/backend.log`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     doctor 与日志读取需要固定文件名定位当前 backend 日志。
+///
+/// Code Logic（这个函数做什么）:
+///     基于 `backend_log_dir()` 拼接 `backend.log`。
+#[allow(dead_code)]
+pub fn backend_log_path() -> Result<PathBuf, AppError> {
+    Ok(backend_log_dir()?.join("backend.log"))
 }
 
 /// 配置文件完整路径：`~/.cc-partner/config.json`
@@ -531,6 +646,174 @@ fn ensure_dir(path: &Path) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// 进程级 `CC_PARTNER_DATA_DIR` 环境变量锁。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     多个 data_dir 测试会改写同一进程环境变量，必须串行避免互相污染。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用 OnceLock 初始化全局 Mutex，所有相关测试共享同一把锁。
+    fn data_dir_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// 测试用 `CC_PARTNER_DATA_DIR` 环境隔离守卫。
+    ///
+    /// Business Logic（为什么需要这个结构）:
+    ///     单元测试需要临时注入/清空 override，并在 panic 后仍恢复真实环境，避免污染其它用例。
+    ///
+    /// Code Logic（这个结构做什么）:
+    ///     持有全局锁与原始 env 值；Drop 时按原值恢复或移除变量。
+    struct DataDirEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        previous: Option<OsString>,
+    }
+
+    impl Drop for DataDirEnvGuard {
+        /// 恢复测试前的 `CC_PARTNER_DATA_DIR`。
+        ///
+        /// Business Logic（为什么需要这个函数）:
+        ///     即使断言失败或 panic，后续测试也不能继续看到错误的数据目录 override。
+        ///
+        /// Code Logic（这个函数做什么）:
+        ///     有原值则 set_var，无原值则 remove_var。
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(DATA_DIR_ENV, value),
+                None => std::env::remove_var(DATA_DIR_ENV),
+            }
+        }
+    }
+
+    /// 安装临时 `CC_PARTNER_DATA_DIR`（或清除）并返回 RAII 守卫。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试需要可控地模拟“有/无 override”和非法值，而不污染开发者真实环境。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     加锁后保存原值；`Some(path)` 时 set_var，`None` 时 remove_var。
+    fn install_data_dir_env(value: Option<&str>) -> DataDirEnvGuard {
+        let lock = data_dir_env_lock()
+            .lock()
+            .expect("CC_PARTNER_DATA_DIR 测试锁中毒");
+        let previous = std::env::var_os(DATA_DIR_ENV);
+        match value {
+            Some(path) => std::env::set_var(DATA_DIR_ENV, path),
+            None => std::env::remove_var(DATA_DIR_ENV),
+        }
+        DataDirEnvGuard {
+            _lock: lock,
+            previous,
+        }
+    }
+
+    /// 验证合法绝对路径 override 会改写 config/control/database/log 派生路径。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     CLI/smoke 测试必须把运行时状态隔离到临时目录，不能碰真实 `~/.cc-partner`。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     设置绝对 `CC_PARTNER_DATA_DIR`，断言 data_dir/config_dir/db/log 都落在该目录下，
+    ///     且目录被创建；退出时守卫恢复环境。
+    #[test]
+    fn data_dir_override_rewrites_config_control_db_and_log_paths() {
+        let temp = tempfile::tempdir().expect("应能创建临时数据目录");
+        let override_dir = temp.path().join("isolated-data");
+        let _guard = install_data_dir_env(Some(override_dir.to_str().expect("临时路径应为 UTF-8")));
+
+        let resolved = data_dir().expect("合法绝对路径 override 应成功");
+        assert_eq!(resolved, override_dir);
+        assert!(
+            resolved.is_dir(),
+            "data_dir 应确保 override 目录存在: {:?}",
+            resolved
+        );
+        assert_eq!(config_dir(), override_dir);
+        assert_eq!(default_db_path(), override_dir.join("data.db"));
+        assert_eq!(
+            backend_log_dir().expect("log 目录应可解析"),
+            override_dir.join("logs")
+        );
+        assert_eq!(
+            backend_log_path().expect("log 路径应可解析"),
+            override_dir.join("logs").join("backend.log")
+        );
+        assert_eq!(
+            crate::backend::control::control_file_path(),
+            override_dir.join("backend-control.json")
+        );
+        assert_eq!(
+            crate::backend::control::pid_file_path(),
+            override_dir.join("backend.pid")
+        );
+    }
+
+    /// 验证未设置 override 时仍使用 home 下默认目录。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     生产 GUI/CLI 默认路径不得因引入测试 override 而改变。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     清除 `CC_PARTNER_DATA_DIR` 后，断言 data_dir/config_dir 指向 `~/.cc-partner`（或已迁移路径）。
+    #[test]
+    fn data_dir_without_override_keeps_home_default() {
+        let _guard = install_data_dir_env(None);
+        let home = dirs::home_dir().expect("测试环境应有 home");
+        let expected = home.join(CONFIG_DIR_NAME);
+        let resolved = data_dir().expect("默认路径应成功");
+        // 若旧目录迁移失败可能回落 legacy；生产路径仍应位于 home 下应用目录。
+        assert!(
+            resolved == expected || resolved == home.join(LEGACY_CONFIG_DIR_NAME),
+            "默认 data_dir 应位于 home 应用目录，实际: {:?}",
+            resolved
+        );
+        assert_eq!(config_dir(), resolved);
+        assert_eq!(default_db_path(), resolved.join("data.db"));
+    }
+
+    /// 验证空白 override 被拒绝。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     空字符串会让路径解析落到相对/当前目录，破坏隔离与用户数据安全。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     设置空字符串与仅空白字符串，断言 data_dir 返回错误。
+    #[test]
+    fn data_dir_rejects_blank_override() {
+        let _guard = install_data_dir_env(Some(""));
+        assert!(
+            data_dir().is_err(),
+            "空字符串 override 应被拒绝"
+        );
+
+        drop(_guard);
+        let _guard = install_data_dir_env(Some("   "));
+        assert!(
+            data_dir().is_err(),
+            "纯空白 override 应被拒绝"
+        );
+    }
+
+    /// 验证相对路径 override 被拒绝。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     相对路径依赖 cwd，CI 与 detach 子进程 cwd 不稳定，不能作为数据根。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     设置相对路径，断言 data_dir 返回错误。
+    #[test]
+    fn data_dir_rejects_relative_override() {
+        let _guard = install_data_dir_env(Some("relative-data-dir"));
+        let err = data_dir().expect_err("相对路径 override 应被拒绝");
+        assert!(
+            err.to_string().contains("绝对") || err.to_string().contains("absolute"),
+            "错误应提示需要绝对路径，实际: {err}"
+        );
+    }
 
     #[test]
     fn test_health_config_defaults() {

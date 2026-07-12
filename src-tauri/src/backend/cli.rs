@@ -222,6 +222,8 @@ async fn start() -> Result<(), AppError> {
         BackendStatusKind::Stopped => {}
     }
 
+    // start detach 后 serve 子进程独立读取环境变量；必须显式继承 CC_PARTNER_DATA_DIR，
+    // 保证 control/config/db/log 与父进程落在同一隔离根，避免写回用户真实 home。
     let current_exe = std::env::current_exe()?;
     let mut command = Command::new(current_exe);
     command
@@ -229,6 +231,7 @@ async fn start() -> Result<(), AppError> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    inherit_data_dir_env(&mut command);
     configure_detached_child(&mut command);
     let mut child = command.spawn()?;
 
@@ -484,6 +487,21 @@ fn process_is_alive(pid: u32) -> bool {
     platform_process_is_alive(pid)
 }
 
+/// 让 start 拉起的 serve 子进程继承数据目录隔离环境变量。
+///
+/// Business Logic（为什么需要这个函数）:
+///     smoke/CI 用 `CC_PARTNER_DATA_DIR` 隔离后端状态；`start` detach 后子进程若丢失该变量，
+///     会把 control/db 写回真实 `~/.cc-partner`，破坏隔离并污染用户数据。
+///
+/// Code Logic（这个函数做什么）:
+///     若当前进程设置了 `CC_PARTNER_DATA_DIR`，显式写入 child Command 的 env；
+///     未设置则不改动（子进程默认继承父环境，保持生产行为）。
+fn inherit_data_dir_env(command: &mut Command) {
+    if let Some(value) = std::env::var_os("CC_PARTNER_DATA_DIR") {
+        command.env("CC_PARTNER_DATA_DIR", value);
+    }
+}
+
 /// 配置 Unix serve 子进程脱离父会话。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -643,6 +661,54 @@ mod tests {
         assert_eq!(parsed["kind"], "stopped");
         assert!(parsed["control"].is_null());
         assert!(parsed["error"].is_null());
+    }
+
+    /// 验证 start 子进程会显式继承 `CC_PARTNER_DATA_DIR`。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     detach 后 serve 必须与父进程共用同一隔离数据根，否则 control 文件会写回用户 home。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     设置环境变量后构造 Command，调用 inherit helper，断言 env 中含有该键值；
+    ///     Drop 守卫保证 panic 后仍恢复环境。
+    #[test]
+    fn start_inherits_data_dir_env_for_detached_serve() {
+        use std::ffi::OsString;
+        use std::sync::{Mutex, MutexGuard, OnceLock};
+
+        struct EnvGuard {
+            _lock: MutexGuard<'static, ()>,
+            previous: Option<OsString>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.previous {
+                    Some(value) => std::env::set_var("CC_PARTNER_DATA_DIR", value),
+                    None => std::env::remove_var("CC_PARTNER_DATA_DIR"),
+                }
+            }
+        }
+
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("data dir inherit 测试锁中毒");
+        let previous = std::env::var_os("CC_PARTNER_DATA_DIR");
+        std::env::set_var("CC_PARTNER_DATA_DIR", "/tmp/cc-partner-isolated");
+        let _guard = EnvGuard {
+            _lock: lock,
+            previous,
+        };
+
+        let mut command = std::process::Command::new("true");
+        super::inherit_data_dir_env(&mut command);
+        // Command 不公开 env 查询 API；通过 debug 字符串粗检 env 注入（平台无关）。
+        let debug = format!("{command:?}");
+        assert!(
+            debug.contains("CC_PARTNER_DATA_DIR") && debug.contains("cc-partner-isolated"),
+            "start 子进程应继承数据目录 override，实际 Command: {debug}"
+        );
     }
 
     /// 验证未知命令返回非零并提示用法。
