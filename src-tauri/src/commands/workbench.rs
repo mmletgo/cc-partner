@@ -1416,9 +1416,14 @@ pub async fn list_workbench_worktrees(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户希望在 Workbench 中直接从当前项目切出独立工作区，后续 terminal window、文件树和 Prompt 优化都绑定该路径。
+///     Orchestrator Runner 在 Preparing 崩溃后 Retry 会再次使用相同确定性路径；若路径/元数据已属于本分支，
+///     必须复用既有现场，否则永久 Blocked 并留下孤儿 worktree。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验 Git 仓库和分支名，生成应用数据目录下的 worktree 路径，执行 `git worktree add -b` 并持久化 row。
+///     校验 Git 仓库和分支名，生成应用数据目录下的 worktree 路径；
+///     若路径已存在且 DB 中有同 project+path 且 branch 匹配的 row，直接复用；
+///     若路径存在但无匹配 row，在路径是目录时为该分支重新登记 row（不覆盖目录、不 git worktree add）；
+///     否则执行 `git worktree add -b` 并持久化 row。
 pub(crate) async fn local_create_workbench_worktree(
     state: &AppState,
     project_id: String,
@@ -1432,16 +1437,47 @@ pub(crate) async fn local_create_workbench_worktree(
     }
     let repo_root = workbench_git::repo_root(Path::new(&project.path))?;
     let worktree_path = worktree_storage_path(state, &project_id, branch);
-    if worktree_path.exists() {
-        return Err(AppError::generic("目标 worktree 目录已存在"));
-    }
-    if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let base = base_branch
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+
+    // Preparing 崩溃恢复 / Retry：确定性路径已存在时，按 project+path+branch 身份复用，禁止硬失败。
+    if worktree_path.exists() {
+        if let Some(existing) =
+            find_reusable_worktree_row(state, &project_id, &worktree_path, branch).await?
+        {
+            return Ok(worktree_to_dto(&existing));
+        }
+        if worktree_path.is_dir() {
+            let now = now_iso();
+            let path = worktree_path
+                .canonicalize()
+                .unwrap_or_else(|_| worktree_path.clone())
+                .to_string_lossy()
+                .to_string();
+            let row = WorkbenchWorktreeRow {
+                id: uuid::Uuid::new_v4().to_string(),
+                project_id: project_id.clone(),
+                name: branch.to_string(),
+                branch: Some(branch.to_string()),
+                base_branch: base.map(str::to_string),
+                path,
+                is_main: false,
+                created_at: now.clone(),
+                updated_at: now,
+            };
+            state.workbench_worktree_repo.upsert(&row).await?;
+            return Ok(worktree_to_dto(&row));
+        }
+        return Err(AppError::generic(
+            "目标 worktree 路径已存在且不是可复用目录",
+        ));
+    }
+
+    if let Some(parent) = worktree_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     workbench_git::create_worktree(Path::new(&repo_root), &worktree_path, branch, base)?;
     let now = now_iso();
     let path = worktree_path
@@ -1462,6 +1498,52 @@ pub(crate) async fn local_create_workbench_worktree(
     };
     state.workbench_worktree_repo.upsert(&row).await?;
     Ok(worktree_to_dto(&row))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Retry/崩溃恢复需要在确定性 worktree 路径已存在时识别“是否就是本任务分支的现场”，避免误复用他人目录。
+///
+/// Code Logic（这个函数做什么）:
+///     列出 project 下 worktree，按规范化 path 匹配；要求 branch 与请求分支一致（或 DB branch 为空时用 name 兜底）。
+async fn find_reusable_worktree_row(
+    state: &AppState,
+    project_id: &str,
+    worktree_path: &Path,
+    branch: &str,
+) -> Result<Option<WorkbenchWorktreeRow>, AppError> {
+    let expected = worktree_path
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_path.to_path_buf());
+    let expected_str = expected.to_string_lossy();
+    let rows = state
+        .workbench_worktree_repo
+        .list_by_project(project_id)
+        .await?;
+    for row in rows {
+        if row.is_main {
+            continue;
+        }
+        let row_path = Path::new(&row.path);
+        let row_canon = row_path
+            .canonicalize()
+            .unwrap_or_else(|_| row_path.to_path_buf());
+        if row_canon != expected
+            && row.path != expected_str
+            && row.path != worktree_path.to_string_lossy()
+        {
+            continue;
+        }
+        let row_branch = row
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(row.name.as_str());
+        if row_branch == branch {
+            return Ok(Some(row));
+        }
+    }
+    Ok(None)
 }
 
 /// 创建一个项目 Git worktree。

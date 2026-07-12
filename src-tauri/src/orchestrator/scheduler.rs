@@ -18,8 +18,10 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 const SCHEDULER_TICK_SECS: u64 = 10;
-/// claim 后进程崩溃留下的 Preparing 超过该 lease 才回收，避免与刚 claim 的任务竞态。
-const PREPARING_STALE_LEASE_SECS: u64 = 60;
+/// claim 后进程崩溃留下的 Preparing 超过该 lease 才回收。
+/// prepare 会在长步骤前后续租 updated_at；lease 需明显大于单次 git worktree/session 创建，
+/// 避免仍在合法 prepare 的任务被并发 dispatch 误杀为 Blocked 并留下孤儿现场。
+const PREPARING_STALE_LEASE_SECS: u64 = 600;
 
 /// Orchestrator scheduler 运行时句柄。
 ///
