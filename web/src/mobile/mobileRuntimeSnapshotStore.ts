@@ -55,9 +55,18 @@ export function beginMobileRuntimeSnapshotLoad(
   projectId: string,
 ): OrchestratorRuntimeDisplayState {
   const cached = successCache.get(projectId) ?? null;
+  // 展示层 remoteStatus 不含 local：本机成功快照的 remoteStatus 归一为 null（与桌面 hook 一致）。
+  const displayRemoteStatus =
+    cached?.snapshot.remoteStatus === 'live'
+      ? 'live'
+      : cached?.snapshot.remoteStatus === 'offline' ||
+          cached?.snapshot.remoteStatus === 'unsupported' ||
+          cached?.snapshot.remoteStatus === 'unavailable'
+        ? cached.snapshot.remoteStatus
+        : null;
   return {
     snapshot: cached?.snapshot ?? null,
-    remoteStatus: cached?.snapshot.remoteStatus ?? null,
+    remoteStatus: displayRemoteStatus,
     cachedAt: cached?.cachedAt ?? null,
     loading: true,
     error: null,
@@ -113,7 +122,8 @@ export function applyMobileRuntimeSnapshotSuccess(
     successCache.set(projectId, { snapshot, cachedAt: receivedAt });
     return {
       snapshot,
-      remoteStatus: status,
+      // 本机 local 在展示层归一为 null；远端 live 保留 live。
+      remoteStatus: status === 'live' ? 'live' : null,
       cachedAt: receivedAt,
       loading: false,
       error: null,

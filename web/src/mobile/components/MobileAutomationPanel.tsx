@@ -276,14 +276,12 @@ function formatAutomationTimestamp(value: string): string {
 function mobileRuntimeStatusLabelKey(
   status: OrchestratorRemoteRuntimeStatus,
 ):
-  | 'workbench:mobile.automationPanel.runtimeStatusLocal'
   | 'workbench:mobile.automationPanel.runtimeStatusLive'
   | 'workbench:mobile.automationPanel.runtimeStatusOffline'
   | 'workbench:mobile.automationPanel.runtimeStatusUnsupported'
   | 'workbench:mobile.automationPanel.runtimeStatusUnavailable' {
+  // display state 的 remoteStatus 已把本机 local 归一为 null，此处只处理远端四态。
   switch (status) {
-    case 'local':
-      return 'workbench:mobile.automationPanel.runtimeStatusLocal';
     case 'live':
       return 'workbench:mobile.automationPanel.runtimeStatusLive';
     case 'offline':
@@ -806,7 +804,6 @@ export function MobileAutomationPanel({
               {!runtimeDisplay.loading &&
               !runtimeDisplay.snapshot &&
               runtimeDisplay.remoteStatus &&
-              runtimeDisplay.remoteStatus !== 'local' &&
               runtimeDisplay.remoteStatus !== 'live' ? (
                 <p className={styles.panelState}>{runtimeStatusLabel}</p>
               ) : null}

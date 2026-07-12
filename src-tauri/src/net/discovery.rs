@@ -592,10 +592,7 @@ mod tests {
             .expect("caps TXT must be present");
         // value 必须是裸 token 列表，不能自带 `caps=` 前缀（否则对端读到 `caps=caps=...`）。
         // encode_mdns_capabilities 按字典序排序去重，因此两个能力按字母序拼接。
-        assert_eq!(
-            caps,
-            "errors.envelope.v1,orchestrator.runtime-snapshot.v1"
-        );
+        assert_eq!(caps, "errors.envelope.v1,orchestrator.runtime-snapshot.v1");
         assert!(
             !caps.starts_with("caps="),
             "caps value must NOT carry the `caps=` prefix (it is provided by the TXT key); got: {caps}"
