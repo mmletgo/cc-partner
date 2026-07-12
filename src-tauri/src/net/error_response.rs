@@ -15,8 +15,9 @@
 //!     - `from_app_error`：从命令层 AppError + request 上下文构造边界错误。
 //!     - `parse_remote_error`：客户端侧解析对端响应，同时兼容老 `{error}` 与新信封。
 
-// 本模块定义的 API 将在后续路由接入任务中被消费；当前路由尚未切到 P2pError，
-// 故模块级允许 dead_code，避免误删稳定 API 表面。
+// 路由层已切到 P2pError：模块内的 pub API（构造器、Envelope 等）被 axum handler 与
+// 客户端 RemoteErrorBody 解析共用；个别仅供路由内部使用的辅助项仍可能未在所有构建中
+// 被引用，保留 allow(dead_code) 避免误删稳定 API 表面。
 #![allow(dead_code)]
 
 use crate::error::{AppError, AppErrorCategory};
@@ -26,6 +27,17 @@ use axum::http::{HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+
+/// P2P/HTTP 边界 handler 的统一返回类型。
+///
+/// Business Logic（为什么需要这个别名）:
+///     axum handler 的错误返回类型必须实现 `IntoResponse`；用统一别名让所有 P2P 路由
+///     在签名上一致（`Result<Json<T>, P2pError>`），便于grep/重构，也避免每个 handler
+///     各自写完整错误类型。
+///
+/// Code Logic（这个别名做什么）:
+///     即 `Result<T, P2pError>`；Ok 携带成功 DTO（通常由 handler 包成 `Json<T>`），Err 携带边界错误。
+pub type P2pResult<T> = Result<T, P2pError>;
 
 /// P2P 错误 header：回写请求 ID（与 `request_context::REQUEST_ID_HEADER` 同名）。
 ///
@@ -232,6 +244,72 @@ impl P2pError {
         let status = code.http_status();
         let envelope = P2pErrorEnvelope::new(error.to_string(), code, &context.request_id);
         Self { envelope, status }
+    }
+
+    /// 从指定 code token + 消息 + 请求上下文构造边界错误。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     部分 HTTP-only 路由需要绕过 `AppError` 直接表达边界语义（如 proxy 的 413/502），
+    ///     用本函数显式指定 code token 与消息，避免再经过 AppError 的分类映射。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     直接用 code token 决定状态码（`code.http_status()`），消息与 request_id 写入信封。
+    pub fn from_code(
+        message: impl Into<String>,
+        code: P2pErrorCode,
+        context: &P2pRequestContext,
+    ) -> Self {
+        let status = code.http_status();
+        let envelope = P2pErrorEnvelope::new(message, code, &context.request_id);
+        Self { envelope, status }
+    }
+
+    /// 校验错误（HTTP 400）便捷构造。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     路由层判定入参非法时直接构造边界 400，调用方不必先包成 AppError::validation。
+    pub fn validation(message: impl Into<String>, context: &P2pRequestContext) -> Self {
+        Self::from_code(message, P2pErrorCode::Validation, context)
+    }
+
+    /// not-found（HTTP 404）便捷构造。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     previewId、session、project 等路由实体缺失时直接构造边界 404。
+    pub fn not_found(message: impl Into<String>, context: &P2pRequestContext) -> Self {
+        Self::from_code(message, P2pErrorCode::NotFound, context)
+    }
+
+    /// 冲突（HTTP 409）便捷构造。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     状态转换/乐观锁失败时直接构造边界 409。
+    pub fn conflict(message: impl Into<String>, context: &P2pRequestContext) -> Self {
+        Self::from_code(message, P2pErrorCode::Conflict, context)
+    }
+
+    /// 暂不可用（HTTP 503）便捷构造。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     依赖未就绪、容量上限等暂态不可用时直接构造边界 503。
+    pub fn unavailable(message: impl Into<String>, context: &P2pRequestContext) -> Self {
+        Self::from_code(message, P2pErrorCode::Unavailable, context)
+    }
+
+    /// 超时（HTTP 504）便捷构造。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     上游/对端在限定时间内未响应时直接构造边界 504。
+    pub fn timeout(message: impl Into<String>, context: &P2pRequestContext) -> Self {
+        Self::from_code(message, P2pErrorCode::Timeout, context)
+    }
+
+    /// 内部错误（HTTP 500）便捷构造。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     其他未分类错误兜底为边界 500，避免裸 StatusCode 响应破坏信封契约。
+    pub fn internal(message: impl Into<String>, context: &P2pRequestContext) -> Self {
+        Self::from_code(message, P2pErrorCode::Internal, context)
     }
 
     /// 返回内部信封引用（测试与日志使用）。
