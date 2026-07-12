@@ -7,9 +7,10 @@
 //! Code Logic（这个模块做什么）:
 //!     导出 models/source/aggregator；具体 source 与 command/route 在后续 task 接入。
 
-// 本 task 只落地 DTO/trait/aggregator；后续 task 的 source/command/route 才会消费这些符号。
+// source/command/route 仍在逐步接入；保留 dead_code 以免未接线的 helper 阻断编译。
 #![allow(dead_code)]
 
 pub mod aggregator;
 pub mod models;
+pub(crate) mod orchestrator_source;
 pub(crate) mod source;
