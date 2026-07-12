@@ -38,7 +38,9 @@ use crate::commands::workbench::{
     zoom_workbench_pane_for_state, WorkbenchMergeResultDto,
 };
 use crate::error::AppError;
-use crate::net::routes::ApiError;
+use crate::net::error_response::{P2pError, P2pResult};
+use crate::net::request_context::P2pRequestContext;
+use crate::net::routes::{api_error_to_p2p, ApiError};
 use crate::state::AppState;
 use crate::workbench::browser_models::{
     WorkbenchBrowserDiscoverReq, WorkbenchBrowserDiscovery, WorkbenchBrowserPreview,
@@ -68,7 +70,7 @@ use crate::workbench::remote_protocol::{
 };
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use axum::body::Body;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Extension, Path as AxumPath, State};
 use axum::http::header;
 use axum::http::Request;
 use axum::response::Response;
@@ -96,10 +98,11 @@ pub struct RemotePathReq {
 ///     所有远端路径类接口都必须拒绝空输入，避免误把空串解释为当前工作目录。
 ///
 /// Code Logic（这个函数做什么）:
-///     检查 path trim 后是否为空；为空返回统一中文业务错误，否则保留原始路径字符串。
+///     检查 path trim 后是否为空；为空返回校验错误（HTTP 边界映射 400 validation_error），
+///     否则保留原始路径字符串。
 fn validate_remote_path(path: String) -> Result<String, AppError> {
     if path.trim().is_empty() {
-        return Err(AppError::generic("路径不能为空"));
+        return Err(AppError::validation("路径不能为空"));
     }
     Ok(path)
 }
@@ -108,10 +111,10 @@ fn validate_remote_path(path: String) -> Result<String, AppError> {
 ///     Workbench P2P 网关协议只接受对端本机 local projectId，不能把 remote shortcut 当成本机项目递归代理。
 ///
 /// Code Logic（这个函数做什么）:
-///     检查项目 row 的 kind 是否为 local；非 local 返回清晰协议错误。
+///     检查项目 row 的 kind 是否为 local；非 local 返回校验错误（HTTP 边界映射 400 validation_error）。
 fn ensure_remote_gateway_local_project(project: &WorkbenchProjectRow) -> Result<(), AppError> {
     if project.kind != "local" {
-        return Err(AppError::generic("远端 Workbench 网关只接受对端本机项目"));
+        return Err(AppError::validation("远端 Workbench 网关只接受对端本机项目"));
     }
     Ok(())
 }
@@ -174,7 +177,7 @@ async fn ensure_remote_gateway_local_worktree_id(
 ///
 /// Code Logic（这个函数做什么）:
 ///     调用 Workbench remote_directory helper 生成根目录 DTO，并包装为 axum Json。
-pub async fn remote_roots() -> Result<Json<Vec<WorkbenchRemoteRootDto>>, AppError> {
+pub async fn remote_roots() -> P2pResult<Json<Vec<WorkbenchRemoteRootDto>>> {
     Ok(Json(remote_directory::remote_roots()))
 }
 
@@ -186,12 +189,14 @@ pub async fn remote_roots() -> Result<Json<Vec<WorkbenchRemoteRootDto>>, AppErro
 /// Code Logic（这个函数做什么）:
 ///     校验 path 非空后调用 `list_remote_directory`，返回目录优先排序的条目列表。
 pub async fn remote_list_dir(
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemotePathReq>,
-) -> Result<Json<Vec<WorkbenchRemoteDirectoryEntryDto>>, AppError> {
-    let path = validate_remote_path(req.path)?;
-    Ok(Json(remote_directory::list_remote_directory(Path::new(
-        &path,
-    ))?))
+) -> P2pResult<Json<Vec<WorkbenchRemoteDirectoryEntryDto>>> {
+    let path = validate_remote_path(req.path)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.fs.list"))?;
+    let entries = remote_directory::list_remote_directory(Path::new(&path))
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.fs.list"))?;
+    Ok(Json(entries))
 }
 
 /// 返回远端设备某个路径的详情。
@@ -202,10 +207,14 @@ pub async fn remote_list_dir(
 /// Code Logic（这个函数做什么）:
 ///     校验 path 非空后调用 `remote_path_info`，返回单个路径的元信息 DTO。
 pub async fn remote_path_info(
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemotePathReq>,
-) -> Result<Json<WorkbenchRemotePathInfoDto>, AppError> {
-    let path = validate_remote_path(req.path)?;
-    Ok(Json(remote_directory::remote_path_info(Path::new(&path))?))
+) -> P2pResult<Json<WorkbenchRemotePathInfoDto>> {
+    let path = validate_remote_path(req.path)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.fs.info"))?;
+    let info = remote_directory::remote_path_info(Path::new(&path))
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.fs.info"))?;
+    Ok(Json(info))
 }
 
 /// 在远端设备上打开一个本地项目记录。
@@ -217,12 +226,15 @@ pub async fn remote_path_info(
 ///     校验 path 非空，随后复用本机 add-project 共享实现，返回远端设备上的 local 项目 DTO。
 pub async fn open_remote_project(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemotePathReq>,
-) -> Result<Json<WorkbenchProjectDto>, AppError> {
-    let path = validate_remote_path(req.path)?;
-    Ok(Json(
-        add_local_workbench_project_from_path(&state, path).await?,
-    ))
+) -> P2pResult<Json<WorkbenchProjectDto>> {
+    let path = validate_remote_path(req.path)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.projects.open"))?;
+    let project = add_local_workbench_project_from_path(&state, path)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.projects.open"))?;
+    Ok(Json(project))
 }
 
 /// 列出当前设备的最近 Workbench 项目。
@@ -234,8 +246,13 @@ pub async fn open_remote_project(
 ///     从 workbench_projects 仓库读取项目 row，并复用 WorkbenchProjectRow::to_dto 转成 camelCase DTO。
 pub async fn list_projects(
     State(state): State<AppState>,
-) -> Result<Json<Vec<WorkbenchProjectDto>>, AppError> {
-    let rows = state.workbench_project_repo.list().await?;
+    Extension(ctx): Extension<P2pRequestContext>,
+) -> P2pResult<Json<Vec<WorkbenchProjectDto>>> {
+    let rows = state
+        .workbench_project_repo
+        .list()
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.projects.list"))?;
     Ok(Json(rows.iter().map(WorkbenchProjectRow::to_dto).collect()))
 }
 
@@ -248,15 +265,19 @@ pub async fn list_projects(
 ///     先确认 projectId 属于本设备 local 项目，再调用 Task 1 browser discovery 并返回 discovery DTO。
 pub async fn discover_browser_targets(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<WorkbenchBrowserDiscoverReq>,
-) -> Result<Json<WorkbenchBrowserDiscovery>, ApiError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
+) -> P2pResult<Json<WorkbenchBrowserDiscovery>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.browser.discover"))?;
     let discovery = crate::workbench::browser::discover_workbench_browser_targets(
         &state,
         req.project_id,
         req.worktree_id,
     )
-    .await?;
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.browser.discover"))?;
     Ok(Json(discovery))
 }
 
@@ -269,16 +290,20 @@ pub async fn discover_browser_targets(
 ///     确认 projectId 是本设备 local 项目后，复用 commands helper 创建 local preview 并返回 DTO。
 pub async fn create_browser_preview(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<WorkbenchBrowserPreviewReq>,
-) -> Result<Json<WorkbenchBrowserPreview>, ApiError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
+) -> P2pResult<Json<WorkbenchBrowserPreview>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.browser.preview"))?;
     let preview = create_workbench_browser_preview_for_state(
         &state,
         req.project_id,
         req.worktree_id,
         req.target_url,
     )
-    .await?;
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.browser.preview"))?;
     Ok(Json(preview))
 }
 
@@ -291,10 +316,11 @@ pub async fn create_browser_preview(
 ///     从 path 提取 previewId 和 wildcard path，委托 browser_proxy 按 session 转发 HTTP/WebSocket。
 pub async fn proxy_browser_preview(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     AxumPath((preview_id, path)): AxumPath<(String, String)>,
     req: Request<Body>,
-) -> Result<Response, ApiError> {
-    proxy_workbench_browser_request(
+) -> P2pResult<Response> {
+    let response = proxy_workbench_browser_request(
         state,
         preview_id,
         path,
@@ -302,6 +328,8 @@ pub async fn proxy_browser_preview(
         DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
     )
     .await
+    .map_err(|e| api_error_to_p2p(e, &ctx))?;
+    Ok(response)
 }
 
 /// 列出远端设备本机项目的 worktree。
@@ -313,12 +341,16 @@ pub async fn proxy_browser_preview(
 ///     接收远端 local projectId，委托命令层本地 helper 返回 worktree DTO。
 pub async fn list_worktrees(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteProjectReq>,
-) -> Result<Json<Vec<WorkbenchWorktreeDto>>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
-        local_list_workbench_worktrees(&state, req.project_id).await?,
-    ))
+) -> P2pResult<Json<Vec<WorkbenchWorktreeDto>>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.list"))?;
+    let worktrees = local_list_workbench_worktrees(&state, req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.list"))?;
+    Ok(Json(worktrees))
 }
 
 /// 在远端设备本机项目中创建 worktree。
@@ -348,12 +380,16 @@ pub async fn create_worktree(
 ///     接收本机 local worktreeId，确认所属项目是 local 后返回 worktree DTO。
 pub async fn get_worktree(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteWorktreeReq>,
-) -> Result<Json<WorkbenchWorktreeDto>, AppError> {
-    ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id).await?;
-    Ok(Json(
-        local_get_workbench_worktree(&state, req.worktree_id).await?,
-    ))
+) -> P2pResult<Json<WorkbenchWorktreeDto>> {
+    ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.get"))?;
+    let worktree = local_get_workbench_worktree(&state, req.worktree_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.get"))?;
+    Ok(Json(worktree))
 }
 
 /// 提交远端设备本机 worktree。
@@ -433,13 +469,18 @@ pub async fn remove_worktree(
 ///     接收 projectId/worktreeId/limit，委托本地 Git commits helper，limit 归一到 1..100。
 pub async fn list_git_commits(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteGitCommitsReq>,
-) -> Result<Json<Vec<WorkbenchGitCommitDto>>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
+) -> P2pResult<Json<Vec<WorkbenchGitCommitDto>>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.git.commits"))?;
     let limit = Some(req.limit.clamp(1, 100) as usize);
-    Ok(Json(
-        local_list_workbench_git_commits(&state, req.project_id, req.worktree_id, limit).await?,
-    ))
+    let commits =
+        local_list_workbench_git_commits(&state, req.project_id, req.worktree_id, limit)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.git.commits"))?;
+    Ok(Json(commits))
 }
 
 /// 列出远端设备本机项目目录。
@@ -451,12 +492,17 @@ pub async fn list_git_commits(
 ///     接收 projectId/worktreeId/path，委托本地 list_dir helper 返回文件节点。
 pub async fn list_workbench_dir(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteListDirReq>,
-) -> Result<Json<Vec<WorkbenchFileNode>>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
-        local_list_workbench_dir(&state, req.project_id, req.worktree_id, req.path).await?,
-    ))
+) -> P2pResult<Json<Vec<WorkbenchFileNode>>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.list_dir"))?;
+    let nodes =
+        local_list_workbench_dir(&state, req.project_id, req.worktree_id, req.path)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.list_dir"))?;
+    Ok(Json(nodes))
 }
 
 /// 查询远端设备本机项目内路径信息。
@@ -468,12 +514,17 @@ pub async fn list_workbench_dir(
 ///     接收 projectId/worktreeId/path，委托本地 path_info helper 返回统一 DTO。
 pub async fn workbench_path_info(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemotePathInfoReq>,
-) -> Result<Json<WorkbenchPathInfo>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
-        local_get_workbench_path_info(&state, req.project_id, req.worktree_id, req.path).await?,
-    ))
+) -> P2pResult<Json<WorkbenchPathInfo>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.info"))?;
+    let info =
+        local_get_workbench_path_info(&state, req.project_id, req.worktree_id, req.path)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.info"))?;
+    Ok(Json(info))
 }
 
 /// 打开远端设备本机项目内文件。
@@ -485,12 +536,17 @@ pub async fn workbench_path_info(
 ///     接收 projectId/worktreeId/path，委托本地 open-file helper 返回完整文件打开 DTO。
 pub async fn open_workbench_file(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteOpenFileReq>,
-) -> Result<Json<WorkbenchOpenFileDto>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
-        local_open_workbench_file(&state, req.project_id, req.worktree_id, req.path).await?,
-    ))
+) -> P2pResult<Json<WorkbenchOpenFileDto>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.open"))?;
+    let file =
+        local_open_workbench_file(&state, req.project_id, req.worktree_id, req.path)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.open"))?;
+    Ok(Json(file))
 }
 
 /// 保存远端设备本机项目内文本文件。
@@ -527,10 +583,13 @@ pub async fn save_workbench_text_file(
 ///     接收 projectId/worktreeId/path/table/limitRows，委托本地 SQLite 预览 helper。
 pub async fn preview_workbench_sqlite(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemotePreviewSqliteReq>,
-) -> Result<Json<WorkbenchSqlitePreview>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
+) -> P2pResult<Json<WorkbenchSqlitePreview>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.preview_sqlite"))?;
+    let preview =
         local_preview_workbench_sqlite(
             &state,
             req.project_id,
@@ -539,8 +598,9 @@ pub async fn preview_workbench_sqlite(
             req.table,
             req.limit_rows,
         )
-        .await?,
-    ))
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.preview_sqlite"))?;
+    Ok(Json(preview))
 }
 
 /// 读取远端设备本机项目内 HTML/Markdown 预览资源。
@@ -552,10 +612,13 @@ pub async fn preview_workbench_sqlite(
 ///     接收 projectId/worktreeId/documentPath/assetPath，委托本地 HTML asset helper。
 pub async fn preview_workbench_html_asset(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemotePreviewHtmlAssetReq>,
-) -> Result<Json<WorkbenchHtmlAssetDto>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
+) -> P2pResult<Json<WorkbenchHtmlAssetDto>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.preview_html_asset"))?;
+    let asset =
         local_preview_workbench_html_asset(
             &state,
             req.project_id,
@@ -563,8 +626,9 @@ pub async fn preview_workbench_html_asset(
             req.document_path,
             req.asset_path,
         )
-        .await?,
-    ))
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.preview_html_asset"))?;
+    Ok(Json(asset))
 }
 
 /// 在远端设备本机项目内创建文件。
@@ -695,11 +759,14 @@ pub async fn workbench_events(State(state): State<AppState>) -> Response<Body> {
 ///     接收 sessionId，先确认它属于对端本机 local 项目且仍在运行期 registry 中，再返回 replay DTO。
 pub async fn replay_workbench_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteReplaySessionReq>,
-) -> Result<Json<WorkbenchSessionReplayDto>, AppError> {
-    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
+) -> P2pResult<Json<WorkbenchSessionReplayDto>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.replay"))?;
     if !state.workbench_sessions.session_exists(&req.session_id) {
-        return Err(AppError::not_found("工作台会话不存在"));
+        return Err(P2pError::not_found("工作台会话不存在", &ctx));
     }
     Ok(Json(state.workbench_sessions.replay(&req.session_id)))
 }
@@ -713,14 +780,18 @@ pub async fn replay_workbench_session(
 ///     接收可选 projectId；有 projectId 时先确认它是本机 local 项目，再委托本地 session helper。
 pub async fn list_workbench_sessions(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteListSessionsReq>,
-) -> Result<Json<Vec<WorkbenchSessionDto>>, AppError> {
+) -> P2pResult<Json<Vec<WorkbenchSessionDto>>> {
     if let Some(project_id) = req.project_id.as_deref() {
-        ensure_remote_gateway_local_project_id(&state, project_id).await?;
+        ensure_remote_gateway_local_project_id(&state, project_id)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.list"))?;
     }
-    Ok(Json(
-        local_list_workbench_sessions(&state, req.project_id).await?,
-    ))
+    let sessions = local_list_workbench_sessions(&state, req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.list"))?;
+    Ok(Json(sessions))
 }
 
 /// 在远端设备本机项目中创建终端会话。
@@ -807,12 +878,16 @@ pub async fn focus_workbench_session(
 ///     确认 projectId 是 local 后调用 registry focused 查询，并包装为 `{sessionId}`。
 pub async fn focused_workbench_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteFocusedSessionReq>,
-) -> Result<Json<RemoteFocusedSessionResp>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
+) -> P2pResult<Json<RemoteFocusedSessionResp>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.focused"))?;
     let session_id = state
         .workbench_sessions
-        .focused_session_id(&req.project_id, req.worktree_id.as_deref())?;
+        .focused_session_id(&req.project_id, req.worktree_id.as_deref())
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.focused"))?;
     Ok(Json(RemoteFocusedSessionResp { session_id }))
 }
 
@@ -1462,18 +1537,22 @@ pub async fn mobile_stream_prompt_optimizer_to_session(
 ///     search_claude_sessions_for_state（local 分支），返回搜索命中列表（sessionId 为 Claude transcript UUID，无需包装）。
 pub async fn search_claude_sessions(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSearchClaudeSessionsReq>,
-) -> Result<Json<Vec<SessionSearchHit>>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
+) -> P2pResult<Json<Vec<SessionSearchHit>>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.search"))?;
+    let hits =
         search_claude_sessions_for_state(
             &state,
             &req.project_id,
             req.worktree_id.as_deref(),
             &req.query,
         )
-        .await?,
-    ))
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.search"))?;
+    Ok(Json(hits))
 }
 
 /// 读取远端单个 Claude session 的 preview 详情。
@@ -1486,18 +1565,22 @@ pub async fn search_claude_sessions(
 ///     get_claude_session_preview_for_state（local 分支）返回 SessionPreview。
 pub async fn get_claude_session_preview(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteClaudeSessionReq>,
-) -> Result<Json<SessionPreview>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
+) -> P2pResult<Json<SessionPreview>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.preview"))?;
+    let preview =
         get_claude_session_preview_for_state(
             &state,
             &req.project_id,
             req.worktree_id.as_deref(),
             &req.session_id,
         )
-        .await?,
-    ))
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.preview"))?;
+    Ok(Json(preview))
 }
 
 /// 在远端设备 resume 一个历史 Claude session。
@@ -1556,32 +1639,48 @@ mod tests {
     ///     远端目录浏览不能接受空路径，否则对端可能误读当前进程目录或返回不可预测结果。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     直接调用 list-dir handler，断言空白 path 在进入文件系统 helper 前被拒绝。
+    ///     直接调用 list-dir handler，断言空白 path 在进入文件系统 helper 前被拒绝，
+    ///     且错误被映射到边界信封 validation_error（400）。
     #[tokio::test]
     async fn remote_list_dir_rejects_blank_path() {
-        let error = remote_list_dir(Json(RemotePathReq {
-            path: "   ".to_string(),
-        }))
+        let ctx = P2pRequestContext {
+            request_id: "req-test".to_string(),
+        };
+        let error = remote_list_dir(
+            Extension(ctx),
+            Json(RemotePathReq {
+                path: "   ".to_string(),
+            }),
+        )
         .await
         .expect_err("blank path should be rejected");
 
-        assert_eq!(error.to_string(), "路径不能为空");
+        assert_eq!(error.envelope().error, "路径不能为空");
+        assert_eq!(error.envelope().code, "validation_error");
+        assert_eq!(error.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     /// Business Logic（为什么需要这个测试）:
     ///     远端路径详情与目录列表使用同一用户输入，空路径也必须一致拒绝。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     直接调用 path-info handler，断言空白 path 返回中文业务错误。
+    ///     直接调用 path-info handler，断言空白 path 返回中文业务错误并落入边界信封 validation_error。
     #[tokio::test]
     async fn remote_path_info_rejects_blank_path() {
-        let error = remote_path_info(Json(RemotePathReq {
-            path: "\n\t".to_string(),
-        }))
+        let ctx = P2pRequestContext {
+            request_id: "req-test".to_string(),
+        };
+        let error = remote_path_info(
+            Extension(ctx),
+            Json(RemotePathReq {
+                path: "\n\t".to_string(),
+            }),
+        )
         .await
         .expect_err("blank path should be rejected");
 
-        assert_eq!(error.to_string(), "路径不能为空");
+        assert_eq!(error.envelope().error, "路径不能为空");
+        assert_eq!(error.envelope().code, "validation_error");
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -1684,7 +1783,8 @@ mod tests {
     ///     Workbench P2P 网关协议只接受对端本机 local projectId，不能把 remote shortcut 再当成本机项目执行文件或 Git 操作。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     直接校验 route-level project kind guard：local 通过，remote 返回清晰协议错误。
+    ///     直接校验 route-level project kind guard：local 通过，remote 返回校验错误
+    ///     （分类 Validation，HTTP 边界映射 400 validation_error）。
     #[test]
     fn remote_gateway_project_guard_rejects_non_local_project() {
         assert!(ensure_remote_gateway_local_project(&project_row_with_kind("local")).is_ok());
@@ -1693,5 +1793,49 @@ mod tests {
             .expect_err("remote shortcut rows must be rejected by P2P route guard");
 
         assert_eq!(error.to_string(), "远端 Workbench 网关只接受对端本机项目");
+        assert_eq!(error.classify(), crate::error::AppErrorCategory::Validation);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Workbench 读路由（list/info/open/preview 等）的错误必须经 P2pError::from_app_error
+    ///     映射到信封；本测试覆盖 400（校验）、404（缺失）、503（暂不可用）三类在 read 域的映射。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对 validation/not_found/unavailable 三类 AppError 构造 P2pError，断言 status 与 code token
+    ///     与 read 路由信封契约一致，且 request_id 取自 context。
+    #[test]
+    fn read_routes_map_app_error_classes_to_envelope() {
+        use crate::error::{AppError, AppErrorCategory};
+        use crate::net::error_response::P2pError;
+        let ctx = P2pRequestContext {
+            request_id: "req-read".to_string(),
+        };
+        let cases: Vec<(AppError, AppErrorCategory, &str, axum::http::StatusCode)> = vec![
+            (
+                AppError::validation("路径不能为空"),
+                AppErrorCategory::Validation,
+                "validation_error",
+                axum::http::StatusCode::BAD_REQUEST,
+            ),
+            (
+                AppError::not_found("工作台会话不存在"),
+                AppErrorCategory::NotFound,
+                "not_found",
+                axum::http::StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::unavailable("项目锁占用"),
+                AppErrorCategory::Unavailable,
+                "unavailable",
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ];
+        for (app, category, code, status) in cases {
+            assert_eq!(app.classify(), category, "AppError 分类应匹配");
+            let p2p = P2pError::from_app_error(app, &ctx, "workbench.read");
+            assert_eq!(p2p.status(), status, "状态码应匹配 code 约定");
+            assert_eq!(p2p.envelope().code, code, "code token 应匹配");
+            assert_eq!(p2p.envelope().request_id, "req-read");
+        }
     }
 }

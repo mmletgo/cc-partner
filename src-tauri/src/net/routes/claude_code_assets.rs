@@ -7,7 +7,6 @@
 //!     GET inventory 返回脱敏摘要 DTO；POST bundle 接收 selectors，返回只包含所选 assets 的 zip。
 
 use crate::claude_code_assets::{self, ClaudeCodeAssetSelector};
-use crate::error::AppError;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use axum::body::Body;

@@ -14,7 +14,6 @@
 //!
 //! header X-Chunk-Offset 是关键契约（对照 Python handle_transfer_chunk）。
 
-use crate::error::AppError;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;

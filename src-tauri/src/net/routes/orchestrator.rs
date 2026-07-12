@@ -90,10 +90,10 @@ impl OrchestratorRouteContext {
 ///     P2P Orchestrator 网关只接受 owning device 上的 local projectId，remote shortcut 不能递归代理到第三台设备。
 ///
 /// Code Logic（这个函数做什么）:
-///     检查项目 row 的 kind 是否为 local；非 local 返回清晰协议错误。
+///     检查项目 row 的 kind 是否为 local；非 local 返回校验错误（HTTP 边界映射 400 validation_error）。
 fn ensure_remote_orchestrator_local_project(project: &WorkbenchProjectRow) -> Result<(), AppError> {
     if project.kind != "local" {
-        return Err(AppError::generic("远端 Orchestrator 只接受对端本机项目"));
+        return Err(AppError::validation("远端 Orchestrator 只接受对端本机项目"));
     }
     Ok(())
 }
