@@ -33,6 +33,7 @@ advertised capabilities are:
 - `attention.v1` — Mobile Attention snapshot (`GET /api/mobile/attention`)
 - `errors.envelope.v1` — standard error envelope wire format
 - `orchestrator.runtime-snapshot.v1` — owning-device runtime snapshot route
+- `transfer.complete.v1` — explicit transfer finalize handshake (`POST /api/transfer/complete/:id`)
 
 ### Semantics of `errors.envelope.v1` (important)
 
@@ -49,8 +50,8 @@ route access or route existence. Concretely:
   handling 404). Do not use `supports("errors.envelope.v1")` as a proxy for
   "new routes are available".
 - Route-specific capabilities (`attention.v1`, `orchestrator.runtime-snapshot.v1`,
-  …) ship as **independent** tokens alongside their own routes and must not reuse
-  `errors.envelope.v1` to mean "new routes supported".
+  `transfer.complete.v1`, …) ship as **independent** tokens alongside their own
+  routes and must not reuse `errors.envelope.v1` to mean "new routes supported".
 
 The existing capability gate (`peer_client::require_capability`) is therefore a
 **format** gate when used with `errors.envelope.v1`, and a **route** gate when
@@ -75,8 +76,8 @@ the router so the inventory check matches exactly.
 | POST | `/api/sync/claude_md/pull` | `routes/claude_md_sync.rs` | none; returns the singleton row | read-only | — |
 | POST | `/api/sync/claude_md/push` | `routes/claude_md_sync.rs` | overwrites singleton + `~/.claude/CLAUDE.md` | naturally-idempotent | sender only pushes its own already-merged version; re-applying the same row + `write_file_if_changed` is a no-op |
 | POST | `/api/transfer/init` | `routes/transfer.rs` | creates `.{transfer_id}.tmp` + receive registry entry | requires-idempotency-key | `transfer_id` is client-supplied and the tmp file is keyed by it, but the server does not enforce that a transport replay reuses the same `transfer_id`; a retry that mints a new id leaks a tmp file + registry entry. Clients MUST reuse the same `transfer_id` (the de-facto idempotency key) or MUST NOT auto-retry. tmp larger than declared size is rejected and deleted |
-| POST | `/api/transfer/chunk/:id` | `routes/transfer.rs` | writes bytes at offset, finalizes when complete | no-transport-retry | the final chunk triggers `finalize_transfer` which atomically places the tmp file into its final path (exclusive create + rename, receive_dir lock) and removes the registry entry; a transport-layer replay of the same final-chunk request previously hit a missing registry entry and returned `success:false`. The receiver now guards finalize with a per-`transfer_id` singleflight lock + a short-lived terminal tombstone, so a duplicate final chunk returns the first finalize's result — but middle chunks still mutate the tmp file at arbitrary offsets and there is no per-offset dedupe, so transport-layer retries must be disabled; callers surface the failure and let the user re-initiate |
-| POST | `/api/transfer/complete/:id` | `routes/transfer.rs` | SHA256 verify + atomic place when bytes are complete (incl. size=0 / full-tmp resume) | naturally-idempotent | explicit finalize handshake required by sender before marking local completed; tombstone makes replay return the first terminal outcome |
+| POST | `/api/transfer/chunk/:id` | `routes/transfer.rs` | writes bytes at offset, finalizes when complete | no-transport-retry | the final chunk triggers `finalize_transfer` which atomically places the tmp file into its final path via hard_link(tmp,final) no-replace commit (receive_dir lock; fallback rename_no_replace) and removes the registry entry; a transport-layer replay of the same final-chunk request previously hit a missing registry entry and returned `success:false`. The receiver now guards finalize with a per-`transfer_id` singleflight lock + a short-lived terminal tombstone, so a duplicate final chunk returns the first finalize's result — but middle chunks still mutate the tmp file at arbitrary offsets and there is no per-offset dedupe, so transport-layer retries must be disabled; callers surface the failure and let the user re-initiate |
+| POST | `/api/transfer/complete/:id` | `routes/transfer.rs` | SHA256 verify + atomic place when bytes are complete (incl. size=0 / full-tmp resume) | naturally-idempotent | capability-gated by `transfer.complete.v1`; sender only calls when peer advertises the token; legacy peers without it use last-chunk finalize for non-empty transfers and fail size=0/full-tmp as unsupported; tombstone makes replay return the first terminal outcome; client does bounded retries on network/5xx then status fallback |
 | GET | `/api/transfer/status/:id` | `routes/transfer.rs` | none | read-only | — |
 | POST | `/api/cc-history/sync/pull` | `routes/cc_history.rs` | none | read-only | — |
 | POST | `/api/cc-history/sync/push` | `routes/cc_history.rs` | upserts CC history rows after merge | naturally-idempotent | per-row `merge_cc_history` + `bulk_upsert`; replay converges |

@@ -67,6 +67,20 @@ pub const CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1: &str = "orchestrator.runt
 /// `server_protocol_info()` 中宣告。
 pub const CAPABILITY_ATTENTION_V1: &str = "attention.v1";
 
+/// 能力 token：v1 文件传输显式 complete/finalize 握手
+/// （`POST /api/transfer/complete/:id`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     新发送端在 size=0 / full-tmp 续传场景必须调用 complete 才能触发对端落盘；
+///     旧接收端没有该路由，无条件调用会导致 404 假失败与重试重复副本。
+///     本 token 与 complete 路由原子上线：宣告即表示路由可用。
+///     对无该能力的 legacy 对端，发送端对普通非空传输回退为“最后一块 chunk 已 finalize”，
+///     对 size=0/full-tmp 则明确 unsupported，不得假报成功。
+///
+/// Code Logic: 字符串常量，与 `PeerProtocolInfo::supports()` 做精确匹配；随路由一起在
+/// `server_protocol_info()` 中宣告。
+pub const CAPABILITY_TRANSFER_COMPLETE_V1: &str = "transfer.complete.v1";
+
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -107,8 +121,9 @@ impl PeerProtocolInfo {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     本机对外（health/对端探测）需要宣告自身支持的能力集合，且必须是当前 build 实际存在路由的子集。
-///     本轮宣告 `errors.envelope.v1`、`orchestrator.runtime-snapshot.v1` 与 `attention.v1`；
-///     后两者分别与 owning-device runtime-snapshot 路由、Mobile attention 路由原子上线。
+///     本轮宣告 `attention.v1`、`errors.envelope.v1`、`orchestrator.runtime-snapshot.v1`
+///     与 `transfer.complete.v1`；后三者分别与 attention 路由、runtime-snapshot 路由、
+///     transfer complete 路由原子上线。
 ///
 /// Code Logic（这个函数做什么）:
 ///     构造 `protocol_version = 1`，capabilities 为已排序、去重的当前支持能力列表。
@@ -119,6 +134,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_ATTENTION_V1.to_string(),
             CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string(),
+            CAPABILITY_TRANSFER_COMPLETE_V1.to_string(),
         ],
     }
 }
@@ -249,12 +265,12 @@ mod tests {
 
     /// Business Logic（为什么需要这个测试）:
     ///     `server_protocol_info()` 是本机对外的能力宣告入口，本轮必须宣告 v1
-    ///     且包含 `attention.v1`、`errors.envelope.v1` 与 `orchestrator.runtime-snapshot.v1`
-    ///     （attention 与 Mobile attention 路由原子上线，runtime-snapshot 与 owning-device 路由原子上线）。
+    ///     且包含 `attention.v1`、`errors.envelope.v1`、`orchestrator.runtime-snapshot.v1`
+    ///     与 `transfer.complete.v1`（分别与对应路由原子上线）。
     ///
     /// Code Logic（这个测试做什么）:
     ///     调用 `server_protocol_info()`，断言 protocol_version == 1 且 capabilities
-    ///     去重排序后正好等于三 token 字典序列表。
+    ///     去重排序后正好等于四 token 字典序列表。
     #[test]
     fn server_protocol_info_advertises_v1_with_current_capabilities() {
         let info = server_protocol_info();
@@ -265,6 +281,7 @@ mod tests {
                 "attention.v1".to_string(),
                 "errors.envelope.v1".to_string(),
                 "orchestrator.runtime-snapshot.v1".to_string(),
+                "transfer.complete.v1".to_string(),
             ]
         );
     }
