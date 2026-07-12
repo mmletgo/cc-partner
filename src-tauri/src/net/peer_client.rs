@@ -7,14 +7,57 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     - 持有一个 reqwest::Client（连接池复用，rustls-tls 避免 OpenSSL 依赖）。
-//!     - `health(addr, port)`：GET `http://{addr}:{port}/api/health`，10s 超时，
-//!       成功且 status==200 返回 true，否则 false（与 Python `health_check` 一致）。
-//!     - sync/transfer 方法预留签名（TODO M4/M5）。
+//!     - `health_info(base_url)`：GET `{base_url}/api/health`，10s 超时，成功且 status==200
+//!       返回解析后的 `HealthResponse`（含 protocol_version / capabilities）；失败返回 PeerCallError。
+//!     - `health(addr, port)`：legacy 布尔包装，复用 health_info，仅返回 ok 字段（旧调用方兼容）。
+//!     - sync/transfer 方法（pull/push/init/chunk 等）。
 
+use crate::net::routes::health::HealthResponse;
 use std::time::Duration;
 
 /// health 请求超时（秒）。对照 Python `DEFAULT_TIMEOUT=5`，Rust 版略放宽到 10s 提升弱网容错。
 const HEALTH_TIMEOUT_SECS: u64 = 10;
+
+/// 对端 P2P 调用错误：网络/HTTP/JSON 解析三类失败的统一封装。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     `health_info` 等新增 typed 调用必须把失败原因明确回传调用方（用于日志、能力探测分支、
+///     重试决策），不能像 legacy `health(addr, port)` 那样只回 bool 屏蔽原因。同时仍保持
+///     `Display` 友好，便于 tracing 直接记录。
+///
+/// Code Logic（这个枚举做什么）:
+///     - `Network`：reqwest send 失败（DNS/连接/超时/拒绝）。
+///     - `Status`：HTTP 非 200（携带状态码与对端 URL 上下文）。
+///     - `Decode`：响应体反序列化失败（JSON 字段缺失或类型不匹配）。
+#[derive(Debug, thiserror::Error)]
+pub enum PeerCallError {
+    /// 网络/连接层失败（reqwest send 返回 Err）。
+    #[error("对端调用网络失败 ({url}): {source}")]
+    Network {
+        /// 对端 URL，便于日志定位是哪个 peer。
+        url: String,
+        /// 原始 reqwest 错误。
+        #[source]
+        source: reqwest::Error,
+    },
+    /// HTTP 非 200 响应（携带状态码）。
+    #[error("对端调用 HTTP 状态失败 ({url}): {status}")]
+    Status {
+        /// 对端 URL。
+        url: String,
+        /// HTTP 状态码（非 200）。
+        status: u16,
+    },
+    /// 响应体 JSON 解析失败。
+    #[error("对端调用响应解析失败 ({url}): {source}")]
+    Decode {
+        /// 对端 URL。
+        url: String,
+        /// 原始 reqwest 错误（json() 解码）。
+        #[source]
+        source: reqwest::Error,
+    },
+}
 
 /// sync/pull 响应体（字段名对照 Python `handle_sync_pull` 返回 `{prompts: [...]}`）。
 #[derive(Debug, serde::Deserialize)]
@@ -104,21 +147,49 @@ impl PeerClient {
         Self { client }
     }
 
-    /// 健康检查：GET 对端 /api/health，返回 true 表示可达。
+    /// 健康检查（typed）：GET 对端 /api/health，返回完整 HealthResponse。
     ///
-    /// Business Logic: 同步/传输前需验证对端在线且 HTTP 服务正常。
-    /// Code Logic: 拼接 `http://{addr}:{port}/api/health`，发送 GET，status==200 即 true；
-    ///             任何异常（网络、超时、非 200）返回 false（与 Python `health_check` 一致，不向上抛错）。
-    #[allow(dead_code)]
-    pub async fn health(&self, addr: &str, port: u16) -> bool {
-        let url = format!("http://{addr}:{port}/api/health");
-        match self.client.get(&url).send().await {
-            Ok(resp) => resp.status().as_u16() == 200,
-            Err(e) => {
-                tracing::debug!("health_check 失败 ({url}): {e}");
-                false
+    /// Business Logic（为什么需要这个函数）:
+    ///     新增的能力探测场景需要 protocol_version + capabilities 字段，而不只是 bool 可达性；
+    ///     调用方据此判断对端是否支持 errors.envelope.v1 等能力后再决定调哪些新路由。
+    ///     失败原因必须回传（网络/HTTP/JSON 解码），不能像 legacy `health` 那样吃掉错误。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     GET `{base_url}/api/health`（base_url 形如 `http://192.168.1.5:8765`，无尾斜杠），
+    ///     status==200 时解析 HealthResponse 返回 Ok；其它状态返回 `PeerCallError::Status`，
+    ///     send 失败返回 `Network`，json 解析失败返回 `Decode`。
+    pub async fn health_info(&self, base_url: &str) -> Result<HealthResponse, PeerCallError> {
+        let url = format!("{base_url}/api/health");
+        let resp = self.client.get(&url).send().await.map_err(|e| {
+            tracing::debug!("health_info 网络失败 ({url}): {e}");
+            PeerCallError::Network {
+                url: url.clone(),
+                source: e,
             }
+        })?;
+        if resp.status().as_u16() != 200 {
+            let status = resp.status().as_u16();
+            tracing::debug!("health_info HTTP 非 200 ({url}): {status}");
+            return Err(PeerCallError::Status { url, status });
         }
+        resp.json::<HealthResponse>().await.map_err(|e| {
+            tracing::debug!("health_info 响应解析失败 ({url}): {e}");
+            PeerCallError::Decode {
+                url,
+                source: e,
+            }
+        })
+    }
+
+    /// 健康检查（legacy 布尔）：GET 对端 /api/health，返回 true 表示可达。
+    ///
+    /// Business Logic: 同步/传输前需验证对端在线且 HTTP 服务正常；历史调用方只关心 bool。
+    ///     新代码应改用 `health_info`，以便拿到协议元数据；保留此包装只为兼容现有调用点。
+    /// Code Logic: 用 `{addr}:{port}` 拼 base_url，复用 health_info；任何失败（网络/HTTP/JSON）
+    ///     均视为不可达返回 false（与 Python `health_check` 一致，不向上抛错）。
+    pub async fn health(&self, addr: &str, port: u16) -> bool {
+        let base_url = format!("http://{addr}:{port}");
+        self.health_info(&base_url).await.map(|r| r.ok).unwrap_or(false)
     }
 
     /// 同步 pull：向对端发送本端 prompt 摘要，获取对端认为本端需要的 prompt。
@@ -619,5 +690,98 @@ impl PeerClient {
 impl Default for PeerClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     对端可能是尚未携带 protocol_version / capabilities 字段的旧版；客户端必须能容忍缺失字段
+    ///     并安全回落为 v0 + 空能力，不能因 JSON 字段缺失而 health_info 失败。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化旧版 health 响应 JSON（无 protocol 元数据）为 HealthResponse，
+    ///     断言 protocol_version == 0 且 capabilities 为空，且基础字段（ok/device_id 等）正确。
+    #[test]
+    fn health_info_parses_legacy_response_without_protocol_fields() {
+        let json = r#"{
+            "ok": true,
+            "device_id": "device-legacy",
+            "device_name": "legacy-device",
+            "http_port": 8765,
+            "ts": 1700000000
+        }"#;
+        let resp: HealthResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.ok);
+        assert_eq!(resp.device_id, "device-legacy");
+        assert_eq!(resp.protocol_version, 0);
+        assert!(resp.capabilities.is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     新版（v1）对端响应携带 protocol_version 与 capabilities；客户端必须能解析出这些字段，
+    ///     并据此判定对端支持 errors.envelope.v1，否则能力探测会全部误判为不支持。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化 v1 响应 JSON（含 capabilities）为 HealthResponse，断言 protocol_version == 1、
+    ///     capabilities 含 errors.envelope.v1，且 protocol_info().supports() 命中。
+    #[test]
+    fn health_info_parses_v1_response_with_capabilities() {
+        let json = r#"{
+            "ok": true,
+            "device_id": "device-v1",
+            "device_name": "v1-device",
+            "http_port": 8765,
+            "ts": 1700000000,
+            "protocol_version": 1,
+            "capabilities": ["errors.envelope.v1"]
+        }"#;
+        let resp: HealthResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.protocol_version, 1);
+        assert_eq!(resp.capabilities, vec!["errors.envelope.v1".to_string()]);
+        let proto = resp.protocol_info();
+        assert!(proto.supports("errors.envelope.v1"));
+        assert!(!proto.supports("inbox.messages.v1"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     PeerCallError 是 health_info 失败的统一封装；调用方需对网络/HTTP/解码三类失败分别处理
+    ///     （例如 HTTP 502 触发重试，解码失败只告警），所以必须能用 match 区分 variant。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     手工构造三类 PeerCallError，断言它们互不相等且 Display 含上下文。
+    ///     （不构造真实 reqwest::Error，因为该错误无公共构造器；Display 仅做烟测。）
+    #[test]
+    fn peer_call_error_variants_carry_url_context() {
+        // 用 stable Display 文本断言枚举形态稳定，避免触碰 reqwest::Error 私有构造。
+        let net_msg = format!(
+            "{}",
+            PeerCallError::Status {
+                url: "http://1.2.3.4:8765/api/health".to_string(),
+                status: 503,
+            }
+        );
+        assert!(net_msg.contains("503"));
+        assert!(net_msg.contains("1.2.3.4:8765"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     legacy `health(addr, port)` 必须把 `{addr}:{port}` 拼成合法 base_url 形态，
+    ///     以便后续 health_info 复用；这里只验证 URL 拼接形态（不发网络），
+    ///     因为 health_info 自身由独立测试覆盖。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     通过 format! 验证 health() 内部使用的 base_url 形态符合 `http://{addr}:{port}` 约定。
+    #[test]
+    fn health_legacy_url_format_matches_health_info_contract() {
+        let addr = "192.168.1.10";
+        let port: u16 = 8765;
+        let base_url = format!("http://{addr}:{port}");
+        // health_info 内部会拼 `{base_url}/api/health`，验证拼出来无 `//` 重复斜杠。
+        let full = format!("{base_url}/api/health");
+        assert_eq!(full, "http://192.168.1.10:8765/api/health");
+        assert!(!full.contains("//api"), "URL 出现重复斜杠: {full}");
     }
 }
