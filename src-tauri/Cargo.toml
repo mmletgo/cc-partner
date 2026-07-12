@@ -91,3 +91,6 @@ tempfile = "3"
 # integration smoke（pty_smoke）需要直接使用 portable-pty / libc，不能只依赖 lib 再导出。
 portable-pty = "0.9.0"
 libc = "0.2"
+# backend_cli_smoke harness：解析 CLI status / control JSON。
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
