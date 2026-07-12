@@ -941,11 +941,13 @@ impl OrchestratorRepo {
     /// Business Logic（为什么需要这个函数）:
     ///     全局 scheduler 一次 tick 需要按设备级剩余容量，在所有本机 local Workbench 项目中领取项目 workflow 允许的活跃泳道任务。
     ///     remote 项目必须跳过；项目 WORKFLOW.md 无效时不能把该项目任务提前 claim 到 Preparing。
+    ///     仅看板拖入 Todo 的 Draft 不得被隐式启动——必须 legacy status=Queued（queue/start/createAction）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在单个事务内完成 active local run_state 计数、剩余容量计算、**仅 Idle** 候选读取和 Preparing 条件更新。
+    ///     在单个事务内完成 active local run_state 计数、剩余容量计算、**仅 Queued+Idle** 候选读取和 Preparing 条件更新。
     ///     Blocked 必须先经用户 retry 原子回到 Queued/Idle，后台 scheduler 不得自动重跑。
     ///     每个候选按 Workbench 项目 path 动态解析 WORKFLOW.md，使用 ResolvedWorkflow.active_states 判断是否可领取。
+    ///     SELECT 与最终 UPDATE CAS 均要求 status=Queued，避免 Draft/Todo/Idle 被拖拽后自动 claim。
     pub async fn claim_next_local_queued_tasks_with_global_capacity(
         &self,
         limit: i64,
@@ -974,19 +976,21 @@ impl OrchestratorRepo {
             return Ok(Vec::new());
         }
 
-        // 只领取显式可调度的 Idle（Todo/Rework 等 active_states 过滤在下方）；
-        // 禁止领取 Blocked——Blocked 必须经用户 retry → Idle/Queued 后才能再次 claim。
+        // 只领取显式入队的 Queued + Idle（Todo/Rework 等 active_states 过滤在下方）；
+        // 禁止领取 Draft（仅拖拽泳道）与 Blocked——Blocked 必须经用户 retry → Idle/Queued。
         let selected = sqlx::query(&format!(
             "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
              WHERE id IN (\
                SELECT task.id FROM orchestrator_tasks task \
                INNER JOIN workbench_projects project ON project.id = task.project_id \
                WHERE project.kind = 'local' \
+                 AND task.status = ? \
                  AND task.run_state = ? \
                ORDER BY task.priority DESC, task.created_at ASC\
              ) \
              ORDER BY priority DESC, created_at ASC"
         ))
+        .bind(OrchestratorTaskStatus::Queued.as_str())
         .bind(OrchestratorRunState::Idle.as_str())
         .fetch_all(&mut *tx)
         .await?;
@@ -1024,6 +1028,7 @@ impl OrchestratorRepo {
                 "UPDATE orchestrator_tasks \
                  SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, updated_at = ? \
                  WHERE id = ? \
+                   AND status = ? \
                    AND workflow_state = ? \
                    AND run_state = ?",
             )
@@ -1034,6 +1039,7 @@ impl OrchestratorRepo {
             .bind(Option::<&str>::None)
             .bind(now)
             .bind(&task_id)
+            .bind(OrchestratorTaskStatus::Queued.as_str())
             .bind(candidate.workflow_state.as_str())
             .bind(OrchestratorRunState::Idle.as_str())
             .execute(&mut *tx)
@@ -1054,6 +1060,45 @@ impl OrchestratorRepo {
 
         tx.commit().await?;
         Ok(claimed)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     claim 把任务批量挂到 Preparing 后若进程崩溃或 runner 启动前失败补偿中断，Preparing 会永久占用全局容量；
+    ///     启动与每次 scheduler tick 必须回收过期 Preparing，否则槽位可被卡死。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 local 项目中 status=Preparing 且 run_state=Preparing、updated_at 早于 lease 截止的任务原子恢复为
+    ///     legacy Blocked + workflow Rework + run Blocked（与 from_legacy_status(Blocked) 一致），
+    ///     写入固定中文 blocked_reason 与 updated_at；返回恢复行数。
+    ///     用户可通过 retry 回到 Queued/Idle 后再被 claim。
+    pub async fn recover_stale_local_preparing_tasks(
+        &self,
+        lease: Duration,
+    ) -> Result<u64, AppError> {
+        let lease = chrono::Duration::from_std(lease)
+            .map_err(|err| AppError::generic(format!("Preparing lease 无效: {err}")))?;
+        let cutoff = (Utc::now() - lease).to_rfc3339();
+        let now = Utc::now().to_rfc3339();
+        let reason = "Preparing 中断（进程崩溃或启动未完成），请重试";
+        let blocked = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Blocked);
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, updated_at = ? \
+             WHERE status = ? AND run_state = ? AND updated_at < ? \
+               AND project_id IN (SELECT id FROM workbench_projects WHERE kind = 'local')",
+        )
+        .bind(OrchestratorTaskStatus::Blocked.as_str())
+        .bind(blocked.workflow_state.as_str())
+        .bind(blocked.run_state.as_str())
+        .bind(OrchestratorAttemptPhase::Failed.as_str())
+        .bind(reason)
+        .bind(now)
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(OrchestratorRunState::Preparing.as_str())
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -4115,6 +4160,97 @@ mod tests {
             claimed[0].attempt_phase,
             Some(OrchestratorAttemptPhase::PreparingWorkspace)
         );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     看板拖拽只改 workflow_state，不得把 Draft 变成可调度的 Queued；否则启用自动化后拖入 Todo 会隐式启动 Claude。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Draft 任务并 move 到 Todo，再 claim，断言 0 领取且 status 仍为 Draft。
+    #[tokio::test]
+    async fn draft_moved_to_todo_is_not_claimable_without_queue() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        let created = task_row(
+            "draft-todo-drag",
+            "project-1",
+            OrchestratorTaskStatus::Draft,
+        );
+        repo.create_task(&created).await.unwrap();
+        let moved = repo
+            .move_task_workflow_state(&created.id, OrchestratorWorkflowState::Todo)
+            .await
+            .unwrap();
+        assert_eq!(moved.status, OrchestratorTaskStatus::Draft);
+        assert_eq!(moved.workflow_state, OrchestratorWorkflowState::Todo);
+
+        let claimed = repo
+            .claim_next_local_queued_tasks_with_global_capacity(4)
+            .await
+            .unwrap();
+        let persisted = repo.get_task(&created.id).await.unwrap();
+
+        assert!(claimed.is_empty());
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Draft);
+        assert_eq!(persisted.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(persisted.run_state, OrchestratorRunState::Idle);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     claim 后崩溃留下的 Preparing 必须可被回收，否则全局槽位永久耗尽。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入过期 Preparing 任务，调用 recover_stale_local_preparing_tasks，断言变为 Blocked 并释放 active 计数。
+    #[tokio::test]
+    async fn recover_stale_local_preparing_tasks_blocks_and_frees_capacity() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        repo.create_task(&task_row(
+            "stale-preparing",
+            "project-1",
+            OrchestratorTaskStatus::Preparing,
+        ))
+        .await
+        .unwrap();
+        set_task_split_state(
+            &pool,
+            "stale-preparing",
+            OrchestratorWorkflowState::InProgress,
+            OrchestratorRunState::Preparing,
+            None,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET updated_at = '2020-01-01T00:00:00Z' WHERE id = ?",
+        )
+        .bind("stale-preparing")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let recovered = repo
+            .recover_stale_local_preparing_tasks(std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        let task = repo.get_task("stale-preparing").await.unwrap();
+        let active_count: i64 = sqlx::query(
+            "SELECT COUNT(*) AS count FROM orchestrator_tasks \
+             WHERE run_state IN ('preparing','running','verifying','delivering')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .try_get("count")
+        .unwrap();
+
+        assert_eq!(recovered, 1);
+        assert_eq!(task.status, OrchestratorTaskStatus::Blocked);
+        assert_eq!(task.run_state, OrchestratorRunState::Blocked);
+        assert!(task.blocked_reason.is_some());
+        // Blocked 不占 active 容量。
+        assert_eq!(active_count, 0);
     }
 
     /// Business Logic（为什么需要这个函数）:
