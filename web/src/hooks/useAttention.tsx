@@ -9,7 +9,8 @@
  *   接受 loadSnapshot prop；用 attentionReducer + requestId 管理状态；
  *   注册 focus/visibility/interval 监听并在卸载时清理；
  *   in-flight load 采用 single-flight/coalescing，避免 10s 轮询饿死慢请求；
- *   超时后清除轮询 pending、展示错误，不因可见轮询自动连环重试挂起请求。
+ *   任何加载失败（硬超时或普通 reject）都丢弃轮询 pending、展示错误，
+ *   不得因 poll-pending 立即连环再起请求；仅成功后才消费合并的轮询意图。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -73,8 +74,8 @@ function isAttentionLoadTimeoutError(error: unknown): boolean {
  *
  * Code Logic（这个组件做什么）:
  *   维护 AttentionViewState；显式刷新可递增 requestId 使旧响应失效；
- *   区分轮询 pending 与显式 force pending：超时后丢弃轮询 pending 并暂停自动轮询，
- *   仅 focus/手动/invalidation/可见恢复等 force 路径可恢复；
+ *   区分轮询 pending 与显式 force pending：任何失败都丢弃轮询 pending，
+ *   硬超时额外暂停自动轮询（仅 force 路径恢复）；普通失败可等下个 interval 或显式 force；
  *   可见时 setInterval 10s；hidden 暂停。
  */
 export function AttentionProvider({ children, loadSnapshot }: AttentionProviderProps) {
@@ -91,11 +92,12 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
    */
   const pendingForceRefreshRef = useRef(false);
   /**
-   * 定时轮询刷新意图。超时后必须丢弃，避免「超时→立刻再挂起」死循环。
+   * 定时轮询刷新意图。任何失败后都必须丢弃，避免「失败→立刻再请求」死循环
+   * （含移动端 30s HTTP 超时这类 timedOut=false 的普通 reject）。
    */
   const pendingPollRefreshRef = useRef(false);
   /**
-   * 超时后暂停自动轮询，直到下一次 force 刷新（focus/手动/invalidation/可见恢复）。
+   * 硬超时后暂停自动轮询，直到下一次 force 刷新（focus/手动/invalidation/可见恢复）。
    * 避免可见页面上 10s 定时器在错误态下立即再起挂起请求。
    */
   const allowAutomaticPollRef = useRef(true);
@@ -119,13 +121,16 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
    * Business Logic（为什么需要这个函数）:
    *   所有触发源（挂载/focus/可见/轮询/手动）必须走同一 load 路径与 stale guard；
    *   慢聚合（远端 open-project/task-list 可达 30s）不能被 10s 轮询反复废弃；
-   *   永久挂起的 loader 必须能超时释放 single-flight 并展示错误，不能靠轮询无限连环重试。
+   *   永久挂起或提前 reject 的 loader 都必须释放 single-flight 并展示错误，
+   *   不能靠 poll-pending 在失败后立即连环再起请求（含移动端 30s HTTP 超时）。
    *
    * Code Logic（这个函数做什么）:
-   *   force=false（轮询）：若已 in-flight 只 mark poll-pending；超时后 poll-pending 丢弃且不自动链式；
+   *   force=false（轮询）：若已 in-flight 只 mark poll-pending；
    *   force=true（挂载/focus/可见/手动/invalidation）：可 bump requestId，in-flight 时 mark force-pending；
-   *   loadSnapshot 包 ATTENTION_LOAD_TIMEOUT_MS；超时后暂停自动轮询，仅 force 路径恢复；
-   *   while 循环只消化 force-pending，或非超时后的 poll-pending。
+   *   loadSnapshot 包 ATTENTION_LOAD_TIMEOUT_MS；
+   *   **任何失败**都丢弃 poll-pending 且不自动链式；仅成功后才消费 poll-pending；
+   *   硬超时额外暂停自动轮询，仅 force 路径恢复；普通失败等待下个 interval 或显式 force；
+   *   while 循环只消化 force-pending，或成功后的 poll-pending。
    */
   const runLoad = useCallback(async (options?: { force?: boolean }) => {
     let force = options?.force === true;
@@ -168,9 +173,10 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
         }),
       );
 
-      let timedOut = false;
+      let loadSucceeded = false;
       try {
         const snapshot = await withAttentionLoadTimeout(loadSnapshotRef.current());
+        loadSucceeded = true;
         if (mountedRef.current && isCurrentAttentionRequest(requestId, requestIdRef.current)) {
           const receivedAt = new Date().toISOString();
           setState((current) =>
@@ -182,10 +188,12 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
           );
         }
       } catch (reason) {
-        timedOut = isAttentionLoadTimeoutError(reason);
-        if (timedOut) {
-          // 超时：丢弃轮询 pending，暂停自动轮询，展示错误态，不连环再起挂起请求。
-          pendingPollRefreshRef.current = false;
+        // 任何失败（硬超时或业务/HTTP reject）都必须丢弃 poll-pending：
+        // 否则 in-flight 期间被 10s 轮询 mark 的 pending 会在失败后立即 force 链式，
+        // 移动端 30s HTTP 超时（timedOut=false）会无限 loading 并清掉错误态。
+        pendingPollRefreshRef.current = false;
+        if (isAttentionLoadTimeoutError(reason)) {
+          // 硬超时额外暂停自动轮询，避免可见页上 interval 立刻再起挂起请求。
           allowAutomaticPollRef.current = false;
         }
         if (mountedRef.current && isCurrentAttentionRequest(requestId, requestIdRef.current)) {
@@ -206,7 +214,7 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
         return;
       }
 
-      // 超时后只允许消化显式 force pending；轮询 pending 已清空。
+      // 显式 force pending 始终优先消化（手动/focus/invalidation 不得被失败吞掉）。
       if (pendingForceRefreshRef.current) {
         pendingForceRefreshRef.current = false;
         pendingPollRefreshRef.current = false;
@@ -214,9 +222,10 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
         continue;
       }
 
-      if (!timedOut && pendingPollRefreshRef.current) {
+      // 仅成功后才消费 in-flight 期间合并的轮询意图；失败路径已清空 poll-pending。
+      if (loadSucceeded && pendingPollRefreshRef.current) {
         pendingPollRefreshRef.current = false;
-        // 非超时的慢请求结束后，用 force 消化一次合并的轮询意图，保证最新快照。
+        // 用 force 消化一次合并的轮询意图，保证拿到最新快照。
         force = true;
         continue;
       }
