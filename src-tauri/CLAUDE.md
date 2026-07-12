@@ -430,6 +430,71 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 - **AppState 扩展**：`health: Arc<HealthRuntime>`、`health_repo: Arc<HealthRepo>`、`health_cancel: Arc<Mutex<Option<CancellationToken>>>`（全 Arc 包裹，AppState 仍 `#[derive(Clone)]`）。
 - **capabilities 待办**：前端真正 invoke health 命令或弹系统通知时，需确认 `capabilities/default.json` 含 notification/autostart 权限集（本模块 Rust 侧闭环，capabilities 留给前端接入 task 补）。
 
+## 跨平台 Smoke（macOS / Windows）覆盖范围
+
+Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runner 上验证 **backend CLI 生命周期、data_dir 隔离、原生 PTY echo/exit、清理/可重复性与失败证据**。不依赖 GUI、tmux 或 WSL；结果不得宣称覆盖下方「明确未验证」项。workflow：`.github/workflows/cross-platform-smoke.yml`（name: **Cross-Platform Smoke**）。三平台 release 安装包仍由 `release-tauri.yml` 负责，**不能替代本 smoke**。
+
+### 已验证（Verified）
+
+- **backend CLI 生命周期**：`start → /api/health → status → stop`（pid/port 一致；stop 后 process/control 清理）
+- **duplicate start**：不创建第二 backend 实例，报告既有实例
+- **stale control recovery**：死 PID + 未占用端口时 `status` 识别 stale；后续 `start` 恢复，且不触碰其它 case 的 control/PID
+- **data_dir 隔离**：`config::data_dir()` 认合法绝对 `CC_PARTNER_DATA_DIR`；smoke harness 为每 case 注入独立 data 子目录，config/control/db/log 全部落在隔离根，**不触碰** runner/用户真实 `~/.cc-partner`
+- **平台路径/进程语义单测**：`backend::control::tests`、`backend::cli::tests`、`workbench::sessions::tests`
+- **原生 PTY**：create → echo 可控 token → exit 0；Unix process-group / Windows detached 生命周期（非本平台 case 必须带显式 skip reason，禁止静默 skip）
+- **最小构建门禁**：`cargo fmt --check`、`cargo check --locked --bins`
+- **清理与可重复性**：每 case 独立 root/control/端口；Drop 与 CI cleanup 只 stop/kill **本 case 记录的 PID** 与 live `backend-control.json`，不扫全局、不删失败 diagnostics
+- **失败证据**：case 失败或 `CC_PARTNER_SMOKE_KEEP=1` 时保留 case_dir/diagnostics（control 快照、summary、PTY raw/escaped 输出等）；CI 失败上传 smoke 根 + cargo-logs（保留 7 天）；job summary 区分 Verified / NOT VERIFIED
+
+### 明确未验证（NOT VERIFIED）
+
+| 能力 | 状态 |
+| --- | --- |
+| Windows WSL + tmux | NOT VERIFIED — hosted runner scope |
+| GUI / WebView | NOT VERIFIED — hosted runner scope |
+| macOS 权限弹窗（屏幕录制/辅助功能等） | NOT VERIFIED — hosted runner scope |
+| 多机 mDNS / 跨主机 P2P | NOT VERIFIED — hosted runner scope |
+| 完整 release 安装包矩阵 | 由 `release-tauri.yml` 独立负责，**不是**本 smoke 的替代 |
+
+### 本地运行
+
+环境变量：
+
+- `CC_PARTNER_DATA_DIR`：合法绝对路径时覆盖 config/control/db/log 根（CLI `start` 会 `inherit_data_dir_env` 传给 `serve` 子进程；harness 为每 case 自动注入）
+- `CC_PARTNER_SMOKE_ROOT`：可选；指定时 case 目录落在此根下（CI 用 `${{ runner.temp }}/cc-partner-smoke`）；未设则用 tempfile
+- `CC_PARTNER_SMOKE_KEEP=1`：成功后也保留 case 目录与 diagnostics，便于本地复盘
+
+```bash
+cd src-tauri
+cargo test --locked backend::control::tests
+cargo test --locked backend::cli::tests
+cargo test --locked workbench::sessions::tests
+# backend lifecycle 必须串行（进程/端口/control 语义）
+cargo test --locked --test backend_cli_smoke -- --nocapture --test-threads=1
+cargo test --locked --test pty_smoke -- --nocapture --test-threads=1
+cargo check --locked --bins
+```
+
+可选隔离根：
+
+```bash
+export CC_PARTNER_SMOKE_ROOT=/tmp/cc-partner-smoke
+export CC_PARTNER_SMOKE_KEEP=1
+mkdir -p "$CC_PARTNER_SMOKE_ROOT"
+```
+
+相关文件：`tests/backend_cli_smoke.rs`（start/health/status/stop、duplicate start、stale control）、`tests/pty_smoke.rs`（原生 shell echo/exit + 平台 lifecycle）、`tests/support/mod.rs`（隔离根、timeout、PID cleanup、diagnostics）。
+
+### CI 触发与矩阵
+
+- **Workflow name**：`Cross-Platform Smoke`（`.github/workflows/cross-platform-smoke.yml`）
+- **触发**：
+  - `pull_request` → `master`，路径过滤：`src-tauri/**`、`web/src/pages/Workbench/**`、`web/src/hooks/workbench*`、`scripts/**`、`.github/workflows/**`、`web/package-lock.json`（只降无关变更成本）
+  - `schedule`：`23 18 * * *`（每日 UTC 18:23，**无**路径过滤，完整矩阵兜底）
+  - `workflow_dispatch` 手动
+- **矩阵**：`macos-latest` + `windows-latest`；`fail-fast: false`（单平台失败不取消另一平台）；**无 `continue-on-error`**，required checks 失败即阻断
+- **约束**：每 job/cargo/子进程有 timeout；隔离目录写数据；job summary 必须显式列出 NOT VERIFIED 能力；缺少可选环境时写明 skip reason 并进 summary，禁止静默 skip
+
 ## 关键约定
 
 - **主窗口启动形态**：`tauri.conf.json` 的主窗口 `fullscreen` 固定为 `true`，应用启动后默认进入系统全屏显示；不要在 `lib.rs` setup 或前端启动流程里再写一套运行时全屏逻辑，避免与 Tauri 静态窗口配置互相覆盖。
