@@ -1,5 +1,7 @@
 # web/ - React 前端
 
+> 根层概览、组件清单、token/复用规范见仓库根 `AGENTS.md`。后端协议/端口/CLI 见 `src-tauri/CLAUDE.md`。
+
 ## 概述
 
 基于 React + TypeScript + Vite 的前端界面，宿主为 **Tauri 2**，桌面主界面通过 `invoke()` IPC 调用 Rust 后端命令（`src-tauri/`）。`/mobile` 普通浏览器 SPA 通过同源 HTTP 调用后端移动端/Workbench routes。
@@ -7,20 +9,28 @@
 ## 开发命令
 
 - `npm run dev` — 启动 Vite 开发服务器（端口 5173）
-- `npm run build` — 打包到 dist/（tsc 类型检查 + vite 构建）
+- `npm run build` — 打包到 dist/（`tsc -b` 类型检查 + vite 构建；类型检查入口，**不要**用浮动 `npx tsc`）
 - `npm run lint` — ESLint 检查
-- `npm test`（`vitest run`）— 单次跑全部 47 个单元测试，Vitest 按 `vitest.config.ts` 的 `include: ['src/**/*.test.{ts,tsx}']` 自动收集，无需手工维护执行清单
-- `npm run test:unit:watch`（`vitest`）— 单元测试 watch 模式，本地开发改代码后增量重跑
-- `npm run test:e2e`（`playwright test`）— 前端 E2E；配置在 `playwright.config.ts`（`outputDir: test-results`，失败保留 screenshot/trace/video，CI `retries: 1`）。E2E 用例从 `tests/fixtures.ts` 导入 `test`/`expect`：auto fixture 监听 `console.error` 与 `pageerror`，意外浏览器错误即失败，失败时 attach `browser-logs`
-- `npm run test:all` — 串行跑 `npm test` + `npm run test:e2e`，等价于一次本地 CI
-- 完整开发（前端 + Rust）：仓库根 `./web/node_modules/.bin/tauri dev`（自动拉起 vite + cargo run + 热重载）
+- `npm test`（`vitest run`）— 单次跑全部单元测试；Vitest 按 `vitest.config.ts` 的 `include: ['src/**/*.test.{ts,tsx}']` 自动收集。按路径过滤：`npm test -- src/pages/Workbench` 或 `npm test -- attention`
+- `npm run test:unit:watch`（`vitest`）— 单元测试 watch 模式
+- `npm run test:e2e`（`playwright test`）— 前端 E2E；配置在 `playwright.config.ts`（`outputDir: test-results`，失败保留 screenshot/trace/video，CI `retries: 1`）。用例从 `tests/fixtures.ts` 导入 `test`/`expect`：auto fixture 监听 `console.error` 与 `pageerror`，意外浏览器错误即失败
+- `npm run test:all` — 串行 `npm test` + `npm run test:e2e`，等价于一次本地前端 CI
+- 完整开发（前端 + Rust）：仓库根 `./start.sh` 或 `./web/node_modules/.bin/tauri dev`
 
 ### 测试环境约定
 
-- Vitest 默认 **Node environment**（`vitest.config.ts` 中 `test.environment: 'node'`），不全局启用 jsdom，避免无 DOM 依赖的纯逻辑测试被拖慢
-- 只有真正访问 DOM 的测试文件，才在文件顶部显式声明 `// @vitest-environment jsdom` 覆盖默认环境
-- CI 只用 `npm ci` 安装锁定依赖；禁止 `npx --yes` 浮动安装任何测试 runner
-- `web/CLAUDE.md` 与 `package.json` scripts 暴露相同的四条稳定命令（`test` / `test:unit:watch` / `test:e2e` / `test:all`），不再有按文件路径手敲的单文件 tsx 执行指令
+- Vitest 默认 **Node environment**（`vitest.config.ts` 中 `test.environment: 'node'`），不全局启用 jsdom
+- 只有真正访问 DOM 的测试文件，才在文件顶部显式声明 `// @vitest-environment jsdom`
+- CI 只用 `npm ci` 安装锁定依赖；**禁止** `npx --yes`、**禁止** 文档/脚本推荐 `npx --yes tsx` 或按文件手敲的 `npx tsx …/*.test.ts` 单文件 runner——一律走 `npm test` / `npm run test:e2e`
+- 稳定命令四条：`test` / `test:unit:watch` / `test:e2e` / `test:all`（与 `package.json` 一致）
+
+### 前端约束摘要（本目录必守）
+
+- **组件 / token / i18n**：颜色间距圆角阴影 100% `tokens.css`；用户可见文案走 `src/i18n`；详见根 `AGENTS.md` §3–§5 与本文 i18n 节
+- **Hooks 顺序**：所有 hooks 与 Workbench controllers 必须在 early return 之前（根规则 + `AGENTS.md` §5.8）
+- **Workbench 页面合同**：`Workbench.tsx` ≤ **1200 行**；域逻辑在 `controllers/` 七个 hook；禁止页面直接 `workbenchApi.(sessions|files|worktrees|git)` 或 `listen('workbench:terminal-status|merge-progress')`
+- **Attention**：Provider 共享 snapshot；成功业务动作立即 invalidation；10s 可见轮询兜底；列表只导航不动作
+- **Runtime 显示缓存**：桌面 `useOrchestratorRuntimeSnapshot` 与移动 `mobileRuntimeSnapshotStore` **进程内 Map 彼此独立**；只缓存 remote **live** 成功；不写 localStorage/SQLite；缓存不驱动 task action / scheduler
 
 ## 架构
 

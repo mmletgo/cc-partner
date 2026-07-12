@@ -74,7 +74,7 @@ cc-partner/
 │   │   │   ├── Settings/         # 05-settings.html
 │   │   │   ├── Welcome/          # 06-welcome.html
 │   │   │   └── DesignSystem/     # 🆕 设计系统预览（仅 dev）
-│   │   ├── api/                  # HTTP 客户端（fetch 封装；含 attention / attentionHttp）
+│   │   ├── api/                  # 桌面 invoke + mobile HTTP 封装（含 attention / workbenchHttp）
 │   │   ├── hooks/                # 自定义 hooks（useTheme、AttentionProvider、attentionInvalidation 等）
 │   │   ├── lib/                  # 通用工具 + icon 库（含 attention pure helpers）
 │   │   └── assets/
@@ -93,14 +93,26 @@ cc-partner/
 │   ├── icons/                    # 应用图标
 │   ├── tauri.conf.json           # Tauri 配置 + bundle + updater（版本号单一来源）
 │   └── Cargo.toml
-├── scripts/                      # 发版脚本 + 应用图标源（app 图标透明外圈；tray 图标为 macOS template）
+├── scripts/                      # bump-version / prepare-tauri-sidecar / check-p2p-route-inventory + 图标源
+├── .github/workflows/            # ci.yml · cross-platform-smoke.yml · release-tauri.yml
 ├── uiux/                         # 设计稿（参考资源，不参与构建）
 ├── docs/
 │   ├── prd.md
 │   └── superpowers/specs/        # 设计文档
-├── AGENTS.md                     # 本文件
+├── AGENTS.md                     # 本文件（根层开发指令）
+├── CLAUDE.md                     # 根层项目概览（与本文件互补）
 └── web/dist/                     # Vite 构建产物（git ignored）
 ```
+
+### 2.1 分层指令地图（一跳可达）
+
+| 场景 | 去哪读 |
+|------|--------|
+| 设计 token / 组件分层 / 复用 / Hooks 顺序 | 本文 §3–§5；前端细则 `web/CLAUDE.md` |
+| 前端命令、Vitest/Playwright、Workbench controllers、Attention、runtime cache | `web/CLAUDE.md` |
+| P2P 协议 v1 / 错误信封 / 幂等 / 端口 / CLI doctor / smoke / 发版 | `src-tauri/CLAUDE.md` |
+| 用户向启动、防火墙、产品定位 | `README.md` |
+| 持久产品行为 | `docs/prd.md` |
 
 ## 3. 设计系统架构
 
@@ -343,7 +355,11 @@ export function ComponentName() { ... }
 
 ### 5.7 API 调用
 
-`src/api/` 下按业务模块拆分（`prompts.ts` / `devices.ts` / `transfer.ts`），统一通过 `client.ts` 包装的 `fetch`。SSE 订阅封装在 `events.ts`。
+`web/src/api/` 按业务模块拆分。**桌面端**统一经 `client.ts` 的 `invoke()`（Tauri IPC），**禁止**组件直接 `fetch` 本机后端；**`/mobile` 浏览器**走 `workbenchHttp.ts` / `attentionHttp.ts` 等同源 HTTP helper。事件用 `@tauri-apps/api/event` 的 `listen`（替代旧 SSE）。命令名与 DTO 细节见 `web/CLAUDE.md` 与 `src-tauri/CLAUDE.md`。
+
+### 5.8 React Hooks 顺序（必读）
+
+所有 hooks（`useState` / `useCallback` / `useMemo` / `useEffect` / 自定义 hooks / Workbench controllers）**必须放在所有 early return（loading/error/空态守卫）之前**。条件分支或 `return` 之后再调 hooks 会破坏调用顺序，运行时 crash（React error #310）。Workbench 页面的 7 个 controller 也必须在 `Workbench.tsx` early return 前无条件调用。
 
 ## 6. 工作流
 
@@ -379,137 +395,87 @@ export function ComponentName() { ... }
 
 ## 7. 验证与调试
 
-### 7.1 启动开发模式
+### 7.1 主验证入口（贡献者常用）
 
 ```bash
-cd web
-npm install                          # 首次
-./node_modules/.bin/tauri dev        # 同时起 Vite dev server + Rust 主进程，热重载
+# 桌面开发
+./start.sh                         # 或 ./start.sh dev；web 仅前端：./start.sh web
+
+# 前端质量（锁定依赖，禁止 npx --yes 浮动 runner）
+cd web && npm ci && npm run lint && npm run build && npm test && npm run test:e2e
+
+# Rust 质量
+cd src-tauri && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+
+# 路由清单 / 后端 CLI 本地 smoke（按需）
+node scripts/check-p2p-route-inventory.mjs
+cd src-tauri && cargo test --locked --test backend_cli_smoke -- --nocapture --test-threads=1
+cd src-tauri && cargo test --locked --test backend_doctor_smoke -- --nocapture --test-threads=1
 ```
 
-本地前端与 Rust 后端通过 Tauri `invoke()` IPC 通信，无 `/api` proxy、无本地端口暴露。
+领域测试、Vitest/jsdom 策略、Attention/Workbench 回归命令见 `web/CLAUDE.md`；P2P/protocol、doctor/logs、macOS/Windows smoke 范围与 NOT VERIFIED 见 `src-tauri/CLAUDE.md`。
 
-### 7.2 访问设计系统预览
-
-开发模式下访问 `http://localhost:1420/design-system` 查看所有组件（Tauri dev 默认占用 1420 端口）。生产构建后该路由不可访问。
-
-### 7.3 类型检查
+### 7.2 启动与设计系统预览
 
 ```bash
-cd web
-npx tsc --noEmit
+./start.sh                         # 推荐：自检工具链 + tauri dev
+# 或：cd web && npm install && ./node_modules/.bin/tauri dev
 ```
 
-### 7.4 生产构建
+本地前端 ↔ Rust 走 `invoke()` IPC（无前端本地 API 端口、无 `/api` proxy）。开发模式设计系统：`http://localhost:1420/design-system`（Tauri dev 默认 1420；生产不可访问）。
+
+### 7.3 类型检查与生产构建
 
 ```bash
-cd web
-./node_modules/.bin/tauri build      # 产物在 src-tauri/target/release/bundle/
+cd web && npm run build            # tsc -b && vite build（类型检查入口，勿用浮动 npx tsc）
+./web/node_modules/.bin/tauri build  # 本平台产物：src-tauri/target/release/bundle/
 ```
 
-Tauri 自动打包三平台本平台产物（macOS→dmg/app、Windows→nsis/msi、Linux→AppImage/deb），前端构建产物嵌入应用。
-
-### 7.5 发版版本同步
+### 7.4 发版与签名（摘要）
 
 ```bash
-node scripts/bump-version.mjs <新版本号>
+node scripts/bump-version.mjs <新版本号>   # 同步 tauri.conf.json + Cargo.toml/lock + web package.json/lock
+git tag v<版本号> && git push origin v<版本号>  # 触发 release-tauri.yml
 ```
 
-发版必须通过该脚本统一同步 `src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`web/package.json`、`web/package-lock.json`；提交后推送 `v<新版本号>` tag 触发 `.github/workflows/release-tauri.yml`。
+- **版本号单一来源**：`src-tauri/tauri.conf.json` 的 `version`
+- **Release 机制**：三段式原生 `tauri build`（`prepare-tauri-sidecar` → matrix build → softprops 上传 → 独立 `latest.json` 组装），**不是** `tauri-apps/tauri-action`
+- **跨目录关键陷阱**：repo secret `TAURI_SIGNING_PRIVATE_KEY` 缺失则无 `.sig` / `latest.json` 不完整，应用内更新失败；`plugins.updater.pubkey` 必须与私钥配对；`bundle.createUpdaterArtifacts: true` 必须开启
+- **实现细节、矩阵平台、sidecar、历史弃用原因**：`src-tauri/CLAUDE.md`「M9」节
 
-#### 发版前置条件（签名密钥）
+### 7.5 端口与防火墙（跨目录摘要）
 
-应用内自动更新依赖 Tauri updater 签名链，CI 必须能读到签名私钥才能产出 `.sig` 和 `latest.json`：
-
-- GitHub repo secret **`TAURI_SIGNING_PRIVATE_KEY`** 必须配置：值为 `~/.tauri/claude-partner.updater.key` 文件内容（minisign 私钥，支持三种格式：原始两行文本 / 整体 base64 包裹 / 纯一行 base64，CI 的「Prepare Tauri signing key」步骤会自动归一化）
-- 可选 secret **`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`**：私钥有密码时配
-- `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey` 必须与私钥配对（当前用 `~/.tauri/claude-partner.updater.key.pub` 的 `1ED3DE93` 这对，无密码）
-- `bundle.createUpdaterArtifacts: true` 必须开启（让 Tauri build 产出 `.sig`）
-
-> **密钥不匹配/缺失的后果**：CI 不产出 `.sig` → `latest.json` 不生成或不完整 → 应用内检查更新报 `error sending request for url`（latest.json 返回 404）或签名校验失败。
-
-#### CI workflow 机制（三段式，弃用 tauri-action）
-
-`.github/workflows/release-tauri.yml` 用三个 job：
-
-1. **`build`**（matrix 5 平台）— 先运行 `node scripts/prepare-tauri-sidecar.mjs [--target <triple>]` 构建并复制真实 `cc-partner-backend` externalBin，再原生 `tauri build` 构建各平台安装包 + updater 产物（`.app.tar.gz`/`-setup.exe`/`.AppImage` 及对应 `.sig`），收集到 `release-assets/` 上传 workflow artifact
-2. **`publish-release`**（needs: build）— 合并所有平台 artifact，用 `softprops/action-gh-release` 上传到 GitHub Release
-3. **`assemble-latest-json`**（needs: publish-release）— 下载 Release 全部 `.sig`，用 bash + jq 按文件名匹配平台生成 `latest.json`（单平台缺签名不连坐，只跳过该平台），上传到 Release
-
-> 历史教训：曾用 `tauri-apps/tauri-action@v0`，其内部 latest.json 自动生成有 bug —— 任一平台缺 `.sig` 就打印 "Signature not found, skipping upload" 并整体跳过 latest.json，导致应用内更新完全失效。故弃用，改为自写脚本兜底。
+- P2P HTTP **首选 TCP 62116**；被占用则 **+1 递增**；`config.http_port=0`/非法表示“用首选默认”，**不是** OS `port=0` 临时端口
+- 实际监听端口以 UI 或 `GET /api/health` 的 `http_port` 为准；mDNS 为 UDP **5353**
+- 防火墙示例与 doctor 探测见 `src-tauri/CLAUDE.md` / README，文档不得宣称自动改防火墙
 
 ## 8. 与 Rust 后端协作
 
 ### 8.1 通信通道
 
-- **本地前端 ↔ Rust**：Tauri `invoke('<command>')` IPC（`#[tauri::command]`）。前端 `web/src/api/` 底层走 `@tauri-apps/api/core` 的 `invoke`，组件层无感知。
-- **跨设备 P2P**：axum HTTP server（固定首选端口，端口被占则自动 +1），供对端 reqwest 调用。仅用于设备间通信，前端不直接访问。
+- **本地前端 ↔ Rust**：Tauri `invoke('<command>')` IPC（`#[tauri::command]`）。前端 `web/src/api/` 底层走 `@tauri-apps/api/core` 的 `invoke`，组件层无感知。**无本地 HTTP API 端口给桌面前端。**
+- **跨设备 / mobile P2P**：axum HTTP（首选 **62116**，占用则 +1）+ reqwest peer client + mDNS。`/mobile` SPA 与 P2P 共享实际 HTTP 端口。前端桌面页不直接打 P2P base URL。
+- 协议 v1 health（`protocol_version` + capabilities）、错误信封、request id、幂等清单、local-only runtime-snapshot：**见 `src-tauri/CLAUDE.md`**。
+- 前端 API 模块、Attention、Workbench controllers：**见 `web/CLAUDE.md`**。
 
-### 8.2 前端 invoke 命令（由 `src-tauri/src/commands/` 注册）
+### 8.2 命令与路由目录（下沉，勿在根复制长表）
 
-| 命令 | 说明 |
-|------|------|
-| ping | 健康检查 |
-| config.get_config / config.get_default_config / config.update_config | 配置读写；恢复默认取后端环境默认值，update_config 支持快捷键热更新 |
-| get_mobile_access_info | 桌面端获取可信局域网 `/mobile` 访问链接与二维码数据；普通手机浏览器对应 HTTP `/api/mobile/access-info` |
-| config.get_version | 应用版本号 |
-| prompts.list / get / create / update / delete / list_tags | Prompt CRUD（delete 为软删除，自增 vector_clock） |
-| optimize_prompt / complete_orchestrator_task_prompt / stream_optimize_prompt_to_workbench_session | 调用 Claude Code CLI 优化用户输入；普通页返回中英文 Prompt，项目自动化创建任务可把简单 Prompt 完善为标题/目标/验收标准，Workbench 可按设置语种用 stream-json 把优化结果流式写入当前终端，远端项目会代理到远端设备执行 |
-| trigger_sync | 触发全网 Prompt 同步，返回 {accepted, synced, note} |
-| get_claude_md / update_claude_md / push_claude_md | CLAUDE.md 读取 / 保存 / 主动推送本机配置到局域网设备和 GitHub 云端 |
-| list_scratchpad_pages / get_scratchpad_page / create_scratchpad_page / update_scratchpad_page_content / rename_scratchpad_page / delete_scratchpad_page / sync_scratchpad | 速记本多页面 CRUD / 自动保存 / 同步 |
-| get_cloud_sync_config / get_default_cloud_sync_config / update_cloud_sync_config / trigger_cloud_sync_cmd / test_cloud_sync | GitHub 私有仓库云端同步配置 / 恢复默认 / 手动同步 / 连通性测试 |
-| list_transfers / send_transfer / cancel_transfer | 文件传输任务管理 |
-| check_permissions / request_permission | macOS 权限检查与申请（屏幕录制 / 输入监控） |
-| check_update / download_update / get_download_status / cancel_download / install_update | 自动更新 5 命令 |
-| start_region_capture / get_region_snapshot / save_clipboard_image / cancel_region_capture | 区域截图 |
-| list_github_trending_repos / get_github_trending_config / get_default_github_trending_config / update_github_trending_config / test_claude_cli | GitHub 周热门项目 + Claude CLI 双语解说配置 / 恢复默认 |
-| get_orchestrator_config / get_default_orchestrator_config / update_orchestrator_config | Orchestrator 设备级自动化配置读写 / 恢复默认（Phase 1 仅配置持久化，运行时消费后续接入） |
-| list_workbench_projects / add_workbench_project / remove_workbench_project / touch_workbench_project / list_workbench_worktrees / create_workbench_worktree / commit_workbench_worktree / push_workbench_worktree / merge_workbench_worktree / remove_workbench_worktree / list_workbench_git_commits / list_workbench_sessions / create_workbench_session / write_workbench_session_input / resize_workbench_session / focus_workbench_session / get_focused_workbench_session / split_workbench_pane / switch_workbench_pane / zoom_workbench_pane / close_workbench_pane / close_workbench_session / rename_workbench_session / list_workbench_dir / get_workbench_path_info / open_workbench_file / save_workbench_text_file / format_workbench_structured_content / preview_workbench_sqlite / create_workbench_file / create_workbench_dir / rename_workbench_path / delete_workbench_path | 工作台本机/远端项目、远端目录选择、Git worktree、带本地/远端 ref 标识的 Git 提交树、tmux-backed terminal window/pane、工作区文件树和文件浏览/编辑 |
-| preview_workbench_html_asset | Workbench HTML/Markdown 预览读取当前 active worktree 根内的相对 CSS/图片等资源并返回 data URL；拒绝外链、绝对路径、根外路径和跨根 symlink |
-| search_claude_sessions | 搜索当前 worktree 下的 Claude Code session（标题/user/assistant 文本），返回命中结果（含高亮片段）；local 直接查内存索引，remote 代理到远端设备 |
-| get_claude_session_preview | 取某个 Claude session 的最近 20 条对话预览 + cwd/gitBranch/首末时间/消息数，用于搜索面板 preview |
-| resume_claude_session | 新建 terminal window 并执行 `claude --dangerously-skip-permissions --resume <session-id>`；执行前检测 Claude CLI 可用性 |
+| 类型 | 权威位置 |
+|------|----------|
+| Tauri `#[tauri::command]` 注册与领域语义 | `src-tauri/src/commands/*` + `src-tauri/CLAUDE.md` 各领域节 |
+| 前端 invoke / HTTP 封装 | `web/src/api/*` + `web/CLAUDE.md` |
+| P2P `/api/*` 路由、retry class、幂等键 | `docs/p2p-protocol.md` + `node scripts/check-p2p-route-inventory.mjs` + `src-tauri/CLAUDE.md`「P2P 协议…」 |
+| Health 能力 token | `attention.v1` · `errors.envelope.v1` · `orchestrator.runtime-snapshot.v1`（`server_protocol_info()`） |
 
-### 8.3 P2P HTTP 端点（对端调用，由 `src-tauri/src/net/routes/` 注册）
+### 8.3 添加新能力
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| /api/health | GET | {ok, device_id, device_name, http_port, ts} |
-| /api/sync/pull | POST | 接收对端摘要，返回对端需要的 prompt |
-| /api/sync/push | POST | 接收对端推送的 prompt |
-| /api/scratchpad/sync/pull | POST | 接收对端速记本页面摘要，返回本端需要推送的页面 |
-| /api/scratchpad/sync/push | POST | 接收对端推送的速记本页面并逐页合并 |
-| /api/transfer/init | POST | 初始化文件接收 |
-| /api/transfer/chunk/{id} | POST | 接收文件分块（header `X-Chunk-Offset`） |
-| /api/transfer/status/{id} | GET | 查询接收端传输状态 |
-| /api/workbench/claude-sessions/search | POST | 远端设备扫描自己的 Claude Code session；必须确认 project 是对端 local（拒绝 remote shortcut 递归） |
-| /api/workbench/claude-sessions/preview | POST | 取某 session 的最近 20 条对话预览；同 search 的 local 校验 |
-| /api/workbench/claude-sessions/resume | POST | 在远端设备创建 terminal window 并执行 resume 命令，返回未包装的 inner sessionId |
+1. **Rust**：`src-tauri/src/commands/<module>.rs` 加 `#[tauri::command]`，`lib.rs` `invoke_handler!` 注册；P2P 则 `net/routes/` 加路由并按 `src-tauri/CLAUDE.md` 的 7 步清单更新 `docs/p2p-protocol.md` + 能力 token
+2. **前端**：`web/src/api/<module>.ts` 加 `invoke` 或 mobile HTTP 封装
+3. **类型**：Rust DTO `#[serde(rename_all="camelCase")]`（P2P 部分路由仍 snake_case，见后端约定）对齐 `web/src/lib/types.ts`
 
-### 8.4 添加新能力
+### 8.4 事件订阅（Tauri emit/listen）
 
-1. **Rust 端**: 在 `src-tauri/src/commands/<module>.rs` 加 `#[tauri::command]`，在 `lib.rs` 的 `invoke_handler!` 注册；需要 P2P 则在 `net/routes/` 加 axum 路由
-2. **前端**: 在 `web/src/api/<module>.ts` 加对应 `invoke` 封装
-3. 类型同步更新（Rust `#[serde(rename_all="camelCase")]` 对齐前端，前端 `lib/types.ts`）
-
-### 8.5 事件订阅（Tauri emit/listen，替代 SSE）
-
-Rust 侧用 `app_handle.emit("<event>", payload)`，前端 `listen("<event>", cb)`：
-
-```tsx
-import { listen } from '@tauri-apps/api/event';
-
-useEffect(() => {
-  const unlisten = listen('transfer:progress', (e) => {
-    const { id, transferredBytes, size, progress } = e.payload;
-    // ...
-  });
-  return () => { unlisten.then(fn => fn()); };
-}, []);
-```
-
-常用事件：`transfer:progress` / `transfer:completed` / `transfer:failed` / `transfer:cancelled` / `region-capture:result` / `update:download-progress`。
+Rust `app_handle.emit("<event>", payload)`，前端 `listen("<event>", cb)`（须先 `canListenToTauriEvents()`，纯浏览器跳过）。常用：`transfer:progress|completed|failed|cancelled`、`workbench:terminal-output|terminal-status|merge-progress`、`update:download-progress`、`health:reminder`、`screenshot:permission-needed`。
 
 ## 9. 后续开发注意事项
 
@@ -519,15 +485,22 @@ useEffect(() => {
 4. **不要修改 uiux/ 目录** — 它是设计稿参考
 5. **新组件必须更新 AGENTS.md 组件清单**
 6. **新增 icon 必须在 `lib/icons.tsx` 集中管理**
-7. **TypeScript 必须 strict 通过** — `npx tsc --noEmit`
+7. **TypeScript 必须 strict 通过** — `cd web && npm run build`（含 `tsc -b`）
 8. **优先扩展已有组件，谨慎新建**
 9. **设计 token 新增必须同时给浅色/深色两套值**
-10. **前端调后端一律走 `web/src/api/` 的 invoke 封装，不要直接 fetch** — Rust 命令在 `src-tauri/src/commands/` 注册，新命令记得在 `lib.rs` 的 invoke_handler 加入
+10. **前端调后端一律走 `web/src/api/` 封装** — 桌面 `invoke`，mobile 同源 HTTP；Rust 命令在 `src-tauri/src/commands/` 注册
+11. **Hooks 必须在 early return 之前** — 见 §5.8
+12. **不要把 P2P 首选端口写成 `port=0` 动态分配** — 首选 62116 + 占用递增
+13. **不要推荐 `npx --yes` / 单文件 `npx tsx` runner** — 用 `package.json` 锁定 scripts
+14. **Release 不要写成 tauri-action** — 三段式原生 tauri CLI，细节在 `src-tauri/CLAUDE.md`
 
 ## 10. 关键文件索引
 
 | 文件 | 作用 | 修改频率 |
 |------|------|---------|
+| `AGENTS.md` | 根层开发指南（本文件） | 中 |
+| `web/CLAUDE.md` | 前端分层指令 | 高 |
+| `src-tauri/CLAUDE.md` | 后端分层指令 | 高 |
 | `web/src/styles/tokens.css` | 设计 token 总入口 | 中（新增 token） |
 | `web/src/lib/icons.tsx` | Icon 库 | 低（新增 icon） |
 | `web/src/App.tsx` | 路由根 | 低（新增页面） |
@@ -535,12 +508,14 @@ useEffect(() => {
 | `web/src/components/layout/*` | 布局组件 | 低 |
 | `web/src/components/domain/*` | 业务组件 | 中（业务迭代） |
 | `web/src/pages/*` | 页面 | 高 |
-| `web/src/pages/Workbench/*` | 工作台页面（三栏、本机/远端项目、worktree 管理、多终端、工作区文件树/文件工作区、Git 提交树、自动化工作区） | 高 |
+| `web/src/pages/Workbench/*` | 工作台页面 + controllers | 高 |
 | `src-tauri/src/lib.rs` | Tauri 入口 + 命令注册 + setup 装配 | 中（新增命令时改） |
 | `src-tauri/src/commands/*` | Rust invoke 命令层 | 中（后端迭代） |
-| `src-tauri/src/workbench/*` | 工作台领域逻辑（本机/远端项目、Git worktree、PTY/tmux 会话、文件系统） | 高 |
+| `src-tauri/src/workbench/*` | 工作台领域逻辑 | 高 |
+| `src-tauri/src/net/*` | P2P HTTP / mDNS / protocol | 高 |
 | `src-tauri/tauri.conf.json` | Tauri 配置 + bundle + updater（版本号单一来源） | 低（发版改） |
+| `docs/p2p-protocol.md` | P2P 路由权威清单 | 中 |
 
 ---
 
-**📌 在你修改任何代码前，请确保已读懂本文档第 4 节「组件分层与复用规范」。**
+**在你修改任何代码前，请确保已读懂本文档第 4 节「组件分层与复用规范」，并按 §2.1 进入对应分层 CLAUDE。**
