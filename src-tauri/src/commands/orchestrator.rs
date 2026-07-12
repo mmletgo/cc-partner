@@ -83,10 +83,13 @@ pub struct MoveOrchestratorTaskWorkflowStateRequest {
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     Workbench 自动化状态条需要展示调度器、workflow、执行槽位和任务运行摘要，帮助用户判断自动化为何运行或停滞。
+///     未来 owning-device P2P 路由（T2）会通过 HTTP 把本 DTO 返回给请求端，
+///     请求端需要把 JSON 反序列化回同一 DTO，因此除了 Serialize 还需要 Deserialize。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     聚合设备级 Settings、scheduler telemetry、项目 workflow resolver、repo 槽位统计、最近任务事件和远端可用性状态。
-#[derive(Debug, Clone, Serialize)]
+///     同时派生 Serialize 与 Deserialize，保证 owning-device 路由的响应可被远端客户端用同一类型解析。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestratorRuntimeSnapshotDto {
     pub project_id: String,
@@ -113,10 +116,12 @@ pub struct OrchestratorRuntimeSnapshotDto {
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     状态条需要以低噪音方式展示正在运行和等待重试的任务，用户不必展开完整任务卡片也能判断现场。
+///     作为 OrchestratorRuntimeSnapshotDto 的嵌套字段，需要随父 DTO 一起被远端客户端反序列化。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     从 OrchestratorTaskRow 投影用户可识别字段和 runner runtime 字段，使用 camelCase 序列化给前端。
-#[derive(Debug, Clone, Serialize)]
+///     派生 Deserialize 以支持 owning-device P2P 路由响应的客户端解析。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestratorRuntimeTaskSummaryDto {
     pub task_id: String,
@@ -134,10 +139,12 @@ pub struct OrchestratorRuntimeTaskSummaryDto {
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     状态条需要展示最近 scheduler/runner 事件，帮助用户理解任务为何运行、阻塞或等待。
+///     作为 OrchestratorRuntimeSnapshotDto 的嵌套字段，需要随父 DTO 一起被远端客户端反序列化。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     从 orchestrator_task_events join 查询行投影可展示字段，不暴露 payload_json 等内部调试细节。
-#[derive(Debug, Clone, Serialize)]
+///     派生 Deserialize 以支持 owning-device P2P 路由响应的客户端解析。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestratorRuntimeEventDto {
     pub id: String,
@@ -523,18 +530,21 @@ pub(crate) async fn move_orchestrator_task_workflow_state_for_project(
 
 /// Business Logic（为什么需要这个函数）:
 ///     Workbench 状态条需要项目级 runtime snapshot，但实际数据分散在 Settings、workflow resolver 和 repo 统计中。
+///     本函数是本机命令与未来 owning-device P2P 路由（T2）共享的唯一构造入口，
+///     两端必须使用同一份本地快照构造逻辑，避免远端设备状态条与本机状态条出现分叉。
 ///
 /// Code Logic（这个函数做什么）:
-///     本机项目解析 WORKFLOW.md、统计槽位、任务摘要和最近事件；远端项目返回明确 unsupported 空快照。
+///     纯本地快照构造：解析 WORKFLOW.md、统计槽位、任务摘要和最近事件，组装 remoteStatus=local 的 DTO。
+///     本函数不再内部分支远端 shortcut——调用方必须先解析并校验 project.kind，
+///     远端 shortcut 应由命令/路由层先调用 remote_runtime_snapshot_unavailable 提前返回，
+///     再把已校验的本地 WorkbenchProject 传入本函数。这样 P2P owning-device 路由可以
+///     直接复用本构造逻辑而无需复制代码或处理与己无关的远端语义。
 pub(crate) async fn get_orchestrator_runtime_snapshot_for_project(
     repo: &OrchestratorRepo,
     config: &OrchestratorAutomationConfig,
     project: &WorkbenchProjectRow,
     scheduler_snapshot: &OrchestratorSchedulerTelemetrySnapshot,
 ) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
-    if project.kind == "remote" {
-        return Ok(remote_runtime_snapshot_unavailable(project));
-    }
     let project_path = Path::new(&project.path);
     let (workflow_source, workflow_valid, workflow_error) =
         match resolve_project_workflow(project_path) {
@@ -1785,6 +1795,13 @@ pub async fn get_orchestrator_runtime_snapshot(
     project_id: String,
 ) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
     let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    // 远端 shortcut 的 runtime snapshot 不能用本机 scheduler/config/workflow 冒充，
+    // 必须在调用共享 builder 之前提前返回明确 unsupported 空快照。共享 builder 只负责
+    // 本地项目构造，因此远端守卫留在命令层；未来 owning-device P2P 路由只处理本地项目，
+    // 不会进入此分支。
+    if project.kind == "remote" {
+        return Ok(remote_runtime_snapshot_unavailable(&project));
+    }
     let config = state
         .config
         .read()
@@ -2876,23 +2893,17 @@ mod tests {
 
     /// Business Logic（为什么需要这个测试）:
     ///     远端项目的 runtime snapshot 不能展示本机 scheduler/config/workflow，否则用户会误判远端自动化状态。
+    ///     重构后远端守卫从共享 builder 移到命令层，builder 只接受已校验的本地项目；
+    ///     命令与未来 P2P 路由都通过 remote_runtime_snapshot_unavailable 构造拒绝快照。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     用 remote shortcut 调用 snapshot helper，断言本轮明确拒绝而不是读取本机状态。
+    ///     直接调用 remote_runtime_snapshot_unavailable helper（即命令层和 P2P 路由复用的入口），
+    ///     断言远端 shortcut 返回明确 unsupported 空快照而不是读取本机状态。
     #[tokio::test]
     async fn runtime_snapshot_reports_remote_project_unavailable() {
-        let repo = setup_orchestrator_repo().await;
         let project = remote_shortcut_row();
-        let scheduler_snapshot = empty_scheduler_snapshot();
 
-        let snapshot = get_orchestrator_runtime_snapshot_for_project(
-            &repo,
-            &OrchestratorAutomationConfig::default(),
-            &project,
-            &scheduler_snapshot,
-        )
-        .await
-        .expect("remote snapshot should return explicit unsupported status");
+        let snapshot = remote_runtime_snapshot_unavailable(&project);
 
         assert_eq!(snapshot.project_kind, "remote");
         assert_eq!(snapshot.remote_status, "unsupported");
@@ -2905,6 +2916,368 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("远端项目暂不支持运行时快照"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     runtime snapshot DTO 是本机命令与未来 owning-device P2P 路由共享的稳定契约，
+    ///     任何字段顺序、camelCase 形状或字段集变化都会破坏两端一致性。golden test 锁住完整本地 DTO。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造一个 running + 一个 rework/blocked 任务并追加事件，写入完整 scheduler telemetry
+    ///     （含 lastDispatchAt、lastDispatchedCount 与 latestError）后调用共享 builder，
+    ///     断言全部 DTO 字段、任务摘要字段、事件字段、generatedAt 形状、lastDispatchAt 与 lastDispatchedCount。
+    #[tokio::test]
+    async fn runtime_snapshot_locks_full_local_dto_for_local_and_remote_callers() {
+        let repo = setup_orchestrator_repo().await;
+        let project_dir = temp_project_dir("orch-snapshot-golden");
+        let project = local_project_row(project_dir);
+        let mut running = command_task_row("task-running-golden", OrchestratorTaskStatus::Running);
+        running.title = "实现运行时快照".to_string();
+        running.attempt_phase = Some(OrchestratorAttemptPhase::Streaming);
+        running.session_id = Some("session-golden".to_string());
+        running.worktree_id = Some("worktree-golden".to_string());
+        running.last_runtime_message = Some("正在执行测试".to_string());
+        running.last_activity_at = Some("2026-07-12T01:02:03Z".to_string());
+        let mut retrying = command_task_row("task-retrying-golden", OrchestratorTaskStatus::Blocked);
+        retrying.title = "修复验证失败".to_string();
+        retrying.workflow_state = OrchestratorWorkflowState::Rework;
+        retrying.run_state = OrchestratorRunState::Blocked;
+        retrying.blocked_reason = Some("验证器要求修复".to_string());
+        retrying.updated_at = "2026-07-12T01:03:00Z".to_string();
+        repo.create_task(&running).await.unwrap();
+        repo.create_task(&retrying).await.unwrap();
+        repo.add_event(&running.id, "runner", "Runner 已启动", None)
+            .await
+            .unwrap();
+        repo.add_event(&retrying.id, "blocked", "验证器要求修复", None)
+            .await
+            .unwrap();
+        let config = OrchestratorAutomationConfig {
+            enabled: true,
+            max_concurrent_tasks: 3,
+            ..OrchestratorAutomationConfig::default()
+        };
+        let telemetry = OrchestratorSchedulerTelemetry::new();
+        telemetry.record_dispatch_result(
+            "2026-07-12T01:04:05Z".to_string(),
+            2,
+            Some("  ".to_string()),
+        );
+
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &config,
+            &project,
+            &telemetry.snapshot(),
+        )
+        .await
+        .unwrap();
+
+        // 顶层 DTO 契约：projectId/kind、remoteStatus=local、generatedAt RFC3339、tick/slot/调度字段。
+        assert_eq!(snapshot.project_id, "project-1");
+        assert_eq!(snapshot.project_kind, "local");
+        assert_eq!(snapshot.remote_status, "local");
+        assert!(snapshot.scheduler_enabled);
+        // generatedAt 由 chrono to_rfc3339() 生成，形如 2026-07-12T01:02:03+00:00，
+        // 锁定其结构而非具体值：包含日期分隔符 'T' 与 UTC offset（Z 或 +00:00）。
+        assert!(snapshot.generated_at.contains('T'));
+        assert!(
+            snapshot.generated_at.ends_with('Z')
+                || snapshot.generated_at.ends_with("+00:00"),
+            "generatedAt 应是 UTC RFC3339 时间，实际: {}",
+            snapshot.generated_at
+        );
+        assert!(snapshot.generated_at.len() > 15);
+        assert_eq!(
+            snapshot.latest_tick_at.as_deref(),
+            Some("2026-07-12T01:04:05Z")
+        );
+        assert_eq!(
+            snapshot.last_dispatch_at.as_deref(),
+            Some("2026-07-12T01:04:05Z")
+        );
+        assert_eq!(snapshot.last_dispatched_count, 2);
+        // 空 telemetry 错误会被归一为 None，此时 latestError 由 repo 的最近 blocked_reason 回填。
+        assert_eq!(
+            snapshot.latest_error.as_deref(),
+            Some("验证器要求修复")
+        );
+        assert_eq!(snapshot.workflow_source, "builtInDefault");
+        assert!(snapshot.workflow_valid);
+        assert!(snapshot.workflow_error.is_none());
+        assert_eq!(snapshot.max_concurrent_tasks, 3);
+        assert_eq!(snapshot.slots_used, 1); // 仅 running 计入 active 槽位
+        assert_eq!(snapshot.slots_available, 2);
+
+        // running 摘要契约：包含 runner runtime 字段，供 P2P 远端 UI 与本机状态条共用。
+        assert_eq!(snapshot.running_tasks.len(), 1);
+        let running_summary = &snapshot.running_tasks[0];
+        assert_eq!(running_summary.task_id, "task-running-golden");
+        assert_eq!(running_summary.title, "实现运行时快照");
+        assert_eq!(
+            running_summary.workflow_state,
+            OrchestratorWorkflowState::InProgress
+        );
+        assert_eq!(running_summary.run_state, OrchestratorRunState::Running);
+        assert_eq!(
+            running_summary.attempt_phase,
+            Some(OrchestratorAttemptPhase::Streaming)
+        );
+        assert_eq!(running_summary.session_id.as_deref(), Some("session-golden"));
+        assert_eq!(
+            running_summary.worktree_id.as_deref(),
+            Some("worktree-golden")
+        );
+        assert_eq!(
+            running_summary.last_runtime_message.as_deref(),
+            Some("正在执行测试")
+        );
+        assert_eq!(
+            running_summary.last_activity_at.as_deref(),
+            Some("2026-07-12T01:02:03Z")
+        );
+
+        // retrying 摘要契约：rework/blocked 任务进入 retrying 列表，本机命令与 P2P 路由共用。
+        assert_eq!(snapshot.retrying_tasks.len(), 1);
+        let retrying_summary = &snapshot.retrying_tasks[0];
+        assert_eq!(retrying_summary.task_id, "task-retrying-golden");
+        assert_eq!(retrying_summary.title, "修复验证失败");
+        assert_eq!(
+            retrying_summary.workflow_state,
+            OrchestratorWorkflowState::Rework
+        );
+        assert_eq!(retrying_summary.run_state, OrchestratorRunState::Blocked);
+
+        // recent_events 契约：camelCase DTO 字段稳定。
+        assert_eq!(snapshot.recent_events.len(), 2);
+        let runner_event = snapshot
+            .recent_events
+            .iter()
+            .find(|event| event.kind == "runner")
+            .expect("runner event present");
+        assert_eq!(runner_event.task_id, "task-running-golden");
+        assert_eq!(runner_event.task_title, "实现运行时快照");
+        assert_eq!(runner_event.message, "Runner 已启动");
+        assert!(runner_event.created_at.contains('T'));
+        assert!(!runner_event.id.is_empty());
+
+        // 序列化形状：camelCase key 锁死，未来 P2P 客户端反序列化与前端契约保持一致。
+        let value = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert_eq!(value["projectId"], "project-1");
+        assert_eq!(value["projectKind"], "local");
+        assert_eq!(value["remoteStatus"], "local");
+        assert_eq!(value["schedulerEnabled"], true);
+        assert_eq!(value["latestTickAt"], "2026-07-12T01:04:05Z");
+        assert_eq!(value["lastDispatchAt"], "2026-07-12T01:04:05Z");
+        assert_eq!(value["lastDispatchedCount"], 2);
+        assert_eq!(value["maxConcurrentTasks"], 3);
+        assert_eq!(value["slotsUsed"], 1);
+        assert_eq!(value["slotsAvailable"], 2);
+        assert_eq!(value["runningTasks"][0]["taskId"], "task-running-golden");
+        assert_eq!(
+            value["runningTasks"][0]["attemptPhase"],
+            "streaming"
+        );
+        // recentEvents 顺序依赖数据库 created_at/id，断言存在性而非位置以避免抖动。
+        let recent_events = value["recentEvents"]
+            .as_array()
+            .expect("recentEvents is array");
+        assert_eq!(recent_events.len(), 2);
+        assert!(recent_events.iter().any(|event| {
+            event["taskId"] == "task-running-golden" && event["kind"] == "runner"
+        }));
+        assert!(recent_events.iter().any(|event| {
+            event["taskId"] == "task-retrying-golden" && event["kind"] == "blocked"
+        }));
+        // 单条事件 camelCase 字段形状稳定（取 runner 事件作为代表）。
+        let runner_event_value = recent_events
+            .iter()
+            .find(|event| event["kind"] == "runner")
+            .expect("runner event in serialized output");
+        assert_eq!(runner_event_value["taskTitle"], "实现运行时快照");
+        assert_eq!(runner_event_value["message"], "Runner 已启动");
+        assert!(!runner_event_value["createdAt"].as_str().unwrap().is_empty());
+        assert!(!runner_event_value["id"].as_str().unwrap().is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     scheduler 最近一次 dispatch 失败时，latestError 必须回填到 snapshot，让用户能在状态条看到调度异常。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用空项目目录调用 builder，scheduler telemetry 写入错误，断言 latestError 来自 telemetry 且槽位为空。
+    #[tokio::test]
+    async fn runtime_snapshot_surfaces_scheduler_latest_error() {
+        let repo = setup_orchestrator_repo().await;
+        let project = local_project_row(temp_project_dir("orch-snapshot-scheduler-error"));
+        let telemetry = OrchestratorSchedulerTelemetry::new();
+        telemetry.record_dispatch_result(
+            "2026-07-12T02:00:00Z".to_string(),
+            0,
+            Some("runner 启动失败".to_string()),
+        );
+
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &OrchestratorAutomationConfig::default(),
+            &project,
+            &telemetry.snapshot(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            snapshot.latest_error.as_deref(),
+            Some("runner 启动失败")
+        );
+        assert_eq!(snapshot.last_dispatched_count, 0);
+        assert_eq!(snapshot.slots_used, 0);
+        assert_eq!(snapshot.max_concurrent_tasks, 1);
+        assert_eq!(snapshot.slots_available, 1);
+        assert!(snapshot.running_tasks.is_empty());
+        assert!(snapshot.retrying_tasks.is_empty());
+        assert!(snapshot.recent_events.is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     repo 查询槽位失败时（例如数据库不可用），builder 必须把错误透传，而不是用 0 槽位掩盖仓储异常。
+    ///     本机命令与未来 P2P 路由调用同一 builder，错误语义必须一致。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用未初始化 schema 的内存 SQLite 构造 repo，调用 builder，断言返回仓储错误而非空快照。
+    #[tokio::test]
+    async fn runtime_snapshot_propagates_repo_failure() {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .expect("sqlite options")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("sqlite pool");
+        // 故意不调用 OrchestratorRepo::init_schema，模拟表缺失导致的仓储错误。
+        let repo = OrchestratorRepo::new(pool);
+        let project = local_project_row(temp_project_dir("orch-snapshot-repo-failure"));
+
+        let result = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &OrchestratorAutomationConfig::default(),
+            &project,
+            &empty_scheduler_snapshot(),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "repo 查询失败必须透传，不能用空快照掩盖"
+        );
+        let error = result.expect_err("snapshot must error");
+        assert!(
+            error.to_string().to_lowercase().contains("no such table")
+                || error.to_string().contains("orchestrator"),
+            "错误信息应指向 orchestrator 表缺失，实际: {error}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     未来 owning-device P2P 路由（T2）会绕过 tauri 命令直接调用共享 builder，
+    ///     因此 builder 必须只接受已校验的本地 WorkbenchProject，不能内部分支远端 shortcut。
+    ///     本测试通过直接调用 builder 确认其行为稳定，T2 接入时无需改动 builder 逻辑。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用本地项目行直接调用 builder（模拟 P2P 路由的调用路径），断言返回 local 快照，
+    ///     证明命令入口与未来 P2P 路由使用的是同一构造逻辑。
+    #[tokio::test]
+    async fn runtime_snapshot_builder_is_reusable_by_p2p_route() {
+        let repo = setup_orchestrator_repo().await;
+        let project = local_project_row(temp_project_dir("orch-snapshot-p2p-route"));
+        let config = OrchestratorAutomationConfig {
+            enabled: true,
+            max_concurrent_tasks: 2,
+            ..OrchestratorAutomationConfig::default()
+        };
+
+        // 模拟 P2P 路由：仅持有 repo + 已校验的本地 project + scheduler snapshot，
+        // 不经过 tauri command 层，确认同一 builder 直接可用。
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &config,
+            &project,
+            &empty_scheduler_snapshot(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(snapshot.project_id, "project-1");
+        assert_eq!(snapshot.project_kind, "local");
+        assert_eq!(snapshot.remote_status, "local");
+        assert!(snapshot.scheduler_enabled);
+        assert_eq!(snapshot.slots_available, 2);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     未来 owning-device P2P 路由会把本机 builder 产出的 OrchestratorRuntimeSnapshotDto
+    ///     序列化为 JSON 返回给请求端，请求端必须能用同一类型反序列化。本测试锁死 DTO 图的
+    ///     round-trip（Serialize -> Deserialize）能力，证明 Deserialize 派生覆盖了所有嵌套类型。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用本地 builder 构造真实 snapshot，序列化为 JSON Value 后再反序列化回
+    ///     OrchestratorRuntimeSnapshotDto，断言关键字段与原 DTO 一致，证明远端客户端可解析。
+    #[tokio::test]
+    async fn runtime_snapshot_dto_round_trips_through_json_for_remote_client() {
+        let repo = setup_orchestrator_repo().await;
+        let mut running = command_task_row(
+            "task-roundtrip",
+            OrchestratorTaskStatus::Running,
+        );
+        running.attempt_phase = Some(OrchestratorAttemptPhase::Streaming);
+        running.session_id = Some("session-roundtrip".to_string());
+        repo.create_task(&running).await.unwrap();
+        repo.add_event(&running.id, "runner", "Runner roundtrip", None)
+            .await
+            .unwrap();
+        let project = local_project_row(temp_project_dir("orch-snapshot-roundtrip"));
+        let config = OrchestratorAutomationConfig {
+            enabled: true,
+            max_concurrent_tasks: 2,
+            ..OrchestratorAutomationConfig::default()
+        };
+        let telemetry = OrchestratorSchedulerTelemetry::new();
+        telemetry.record_dispatch_result("2026-07-12T03:00:00Z".to_string(), 1, None);
+
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &config,
+            &project,
+            &telemetry.snapshot(),
+        )
+        .await
+        .unwrap();
+
+        let json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        let parsed: OrchestratorRuntimeSnapshotDto =
+            serde_json::from_value(json).expect("deserialize snapshot for remote client");
+
+        assert_eq!(parsed.project_id, "project-1");
+        assert_eq!(parsed.project_kind, "local");
+        assert_eq!(parsed.remote_status, "local");
+        assert!(parsed.scheduler_enabled);
+        assert_eq!(
+            parsed.latest_tick_at.as_deref(),
+            Some("2026-07-12T03:00:00Z")
+        );
+        assert_eq!(parsed.last_dispatched_count, 1);
+        assert_eq!(parsed.slots_used, 1);
+        assert_eq!(parsed.slots_available, 1);
+        assert_eq!(parsed.running_tasks.len(), 1);
+        assert_eq!(parsed.running_tasks[0].task_id, "task-roundtrip");
+        assert_eq!(
+            parsed.running_tasks[0].attempt_phase,
+            Some(OrchestratorAttemptPhase::Streaming)
+        );
+        assert_eq!(parsed.running_tasks[0].session_id.as_deref(), Some("session-roundtrip"));
+        assert_eq!(parsed.recent_events.len(), 1);
+        assert_eq!(parsed.recent_events[0].task_id, "task-roundtrip");
+        assert_eq!(parsed.recent_events[0].kind, "runner");
     }
 
     /// Business Logic（为什么需要这个测试）:
