@@ -353,6 +353,14 @@ pub async fn handle_chunk(
                     received_bytes: tomb.received_bytes,
                 });
             }
+            // 重启后墓碑丢失：history 中 Receive 终态仍可幂等响应最后一块重放。
+            if let Some(resp) = history_terminal_chunk_resp(state, transfer_id).await? {
+                tracing::info!(
+                    "重放最后一块命中 transfer_history 终态: {transfer_id}, success={}",
+                    resp.success
+                );
+                return Ok(resp);
+            }
             tracing::error!("未找到传输任务: {transfer_id}");
             return Ok(ChunkResp {
                 success: false,
@@ -434,7 +442,7 @@ pub async fn handle_chunk(
 ///
 /// Code Logic（这个函数做什么）:
 ///     1. 取 per-transfer 单飞锁；
-///     2. 无 active 任务时查墓碑并幂等返回；
+///     2. 无 active 任务时查墓碑；仍 miss 时查 transfer_history（Receive 方向）跨重启收敛；
 ///     3. 拒绝 non-Receive；
 ///     4. 读取 tmp 实际长度：不足 size → success=false（尚未收齐）；
 ///        >= size（含 size=0 空文件）→ 调用 finalize_transfer；
@@ -455,6 +463,10 @@ pub async fn handle_complete(state: &AppState, transfer_id: &str) -> Result<Chun
                     success,
                     received_bytes: tomb.received_bytes,
                 });
+            }
+            // 进程重启后内存墓碑丢失：用持久化 history 收敛已完成的 Receive。
+            if let Some(resp) = history_terminal_chunk_resp(state, transfer_id).await? {
+                return Ok(resp);
             }
             tracing::error!("complete 未找到传输任务: {transfer_id}");
             return Ok(ChunkResp {
@@ -749,61 +761,124 @@ async fn commit_tmp_to_final_no_replace(tmp_path: &Path, final_path: &Path) -> s
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     hard_link 不可用时仍需尽量保证“最终路径已存在则失败、不覆盖”。
-///     标准 `rename` 在 POSIX 上会静默覆盖已有目标，Windows 上则默认失败——行为不一致。
+///     hard_link 不可用（跨卷/网络盘/受限 FS）时仍必须保证 no-replace：已有目标则失败、
+///     绝不覆盖竞争者；也不得用零字节占位 + 普通 rename（崩溃会留下假最终文件，外部
+///     进程可在间隙替换路径）。
 ///
 /// Code Logic（这个函数做什么）:
-///     - Unix：先 `link`/`renamex_np` 不可移植；这里用 create_new 探测 + 立即 close 后
-///       **仅当探测成功创建的路径** 上 rename，且 rename 失败时只删除本探测创建的零字节文件
-///       （inode 由 create_new 独占，外部替换同路径会得到不同文件——我们用创建后立即
-///       记录的 dev/ino 校验，不匹配则不删除）。
-///     - Windows：`std::fs::rename` 在目标存在时失败（近似 no-replace），直接使用。
-///     注意：Unix 探测方案仍有极窄崩溃窗口留下零字节文件，但**不会覆盖或删除竞争者**。
+///     在 blocking 线程调用平台原生**原子排他 rename**：
+///     - Linux：`renameat2(..., RENAME_NOREPLACE)`；
+///     - macOS：`renamex_np(..., RENAME_EXCL)`；
+///     - Windows：`MoveFileExW` **不带** `MOVEFILE_REPLACE_EXISTING`（目标存在 → 失败）；
+///     平台/内核无法提供 no-replace 时 fail-closed 返回 Unsupported，**禁止**占位回退。
 async fn rename_no_replace(tmp_path: &Path, final_path: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
+    let from = tmp_path.to_path_buf();
+    let to = final_path.to_path_buf();
+    tokio::task::spawn_blocking(move || rename_no_replace_blocking(&from, &to))
+        .await
+        .map_err(|e| std::io::Error::other(format!("rename_no_replace join 失败: {e}")))?
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     真正的 no-replace rename 是同步 syscall，必须在 blocking 上下文执行。
+///
+/// Code Logic（这个函数做什么）:
+///     见 `rename_no_replace` 的平台分支；仅同步路径。
+fn rename_no_replace_blocking(tmp_path: &Path, final_path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
     {
-        // Windows rename 默认不替换已存在目标（与 POSIX 不同）。
-        return tokio::fs::rename(tmp_path, final_path).await;
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let from = CString::new(tmp_path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "tmp 路径含内部 NUL"))?;
+        let to = CString::new(final_path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "final 路径含内部 NUL"))?;
+        // RENAME_NOREPLACE = 1：目标存在则失败，不覆盖。
+        const RENAME_NOREPLACE: libc::c_uint = 1;
+        // SAFETY: 路径已转为以 NUL 结尾的 CString；renameat2 对 AT_FDCWD 语义与 rename 一致。
+        let rc = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                RENAME_NOREPLACE,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        // ENOSYS / EINVAL：内核或 FS 不支持 noreplace → fail-closed，禁止回退普通 rename。
+        if err.raw_os_error() == Some(libc::ENOSYS) || err.raw_os_error() == Some(libc::EINVAL) {
+            return Err(std::io::Error::new(
+                ErrorKind::Unsupported,
+                format!("文件系统不支持 RENAME_NOREPLACE: {err}"),
+            ));
+        }
+        // EEXIST → AlreadyExists，供调用方换后缀。
+        if err.raw_os_error() == Some(libc::EEXIST) {
+            return Err(std::io::Error::new(ErrorKind::AlreadyExists, err));
+        }
+        Err(err)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        // 用 create_new 探测路径空闲；成功则记录本次创建的 inode，失败清理时只删自己的。
-        let placeholder = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(final_path)?;
-        let created_meta = match placeholder.metadata() {
-            Ok(m) => m,
-            Err(e) => {
-                drop(placeholder);
-                // 无法读取元数据：保守删除自己刚创建的占位。
-                let _ = std::fs::remove_file(final_path);
-                return Err(e);
-            }
-        };
-        let created_key = {
-            use std::os::unix::fs::MetadataExt;
-            (created_meta.dev(), created_meta.ino())
-        };
-        drop(placeholder);
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
 
-        match tokio::fs::rename(tmp_path, final_path).await {
+        let from = CString::new(tmp_path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "tmp 路径含内部 NUL"))?;
+        let to = CString::new(final_path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "final 路径含内部 NUL"))?;
+        // RENAME_EXCL = 0x00000004：目标存在则失败（与 Linux RENAME_NOREPLACE 同语义）。
+        const RENAME_EXCL: libc::c_uint = 0x0000_0004;
+        // SAFETY: CString 保证 NUL 结尾；renamex_np 在失败时设置 errno。
+        let rc = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), RENAME_EXCL) };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENOTSUP) || err.raw_os_error() == Some(libc::ENOSYS) {
+            return Err(std::io::Error::new(
+                ErrorKind::Unsupported,
+                format!("文件系统不支持 RENAME_EXCL: {err}"),
+            ));
+        }
+        if err.raw_os_error() == Some(libc::EEXIST) {
+            return Err(std::io::Error::new(ErrorKind::AlreadyExists, err));
+        }
+        Err(err)
+    }
+
+    #[cfg(windows)]
+    {
+        // Windows `std::fs::rename` 底层 MoveFileEx **不带** MOVEFILE_REPLACE_EXISTING：
+        // 目标存在时失败（原子 no-replace），与 Linux/macOS 排他 rename 语义一致。
+        match std::fs::rename(tmp_path, final_path) {
             Ok(()) => Ok(()),
-            Err(e) => {
-                // 仅当 final 仍是我们 create_new 创建的那个 inode 时才清理。
-                let should_remove = std::fs::metadata(final_path)
-                    .map(|m| {
-                        use std::os::unix::fs::MetadataExt;
-                        (m.dev(), m.ino()) == created_key
-                    })
-                    .unwrap_or(false);
-                if should_remove {
-                    let _ = std::fs::remove_file(final_path);
+            Err(err) => {
+                // ERROR_ALREADY_EXISTS (183) / ERROR_FILE_EXISTS (80) → AlreadyExists
+                if err.raw_os_error() == Some(183) || err.raw_os_error() == Some(80) {
+                    Err(std::io::Error::new(ErrorKind::AlreadyExists, err))
+                } else if err.kind() == ErrorKind::AlreadyExists {
+                    Err(err)
+                } else {
+                    Err(err)
                 }
-                Err(e)
             }
         }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = (tmp_path, final_path);
+        Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "当前平台无法提供原子 no-replace rename；禁止占位回退",
+        ))
     }
 }
 
@@ -859,7 +934,8 @@ async fn on_receive_failed(state: &AppState, transfer_id: &str, error: &str) {
 /// Business Logic: 对端或本端可查询接收任务进度。
 ///     Finding 4: 任务终态后从 registry 移除，status 查询命中终态墓碑还原 completed/failed
 ///     与最终字节数，避免返回 "unknown" 让对端误判为丢失。
-/// Code Logic: 对照 Python `get_transfer_status`，先查 registry，miss 时查墓碑，仍 miss 返回 unknown。
+///     进程重启后内存墓碑消失时，再查 transfer_history（Receive）收敛。
+/// Code Logic: 先查 registry → 墓碑 → transfer_history Receive 终态；仍 miss 返回 unknown。
 pub async fn handle_status(state: &AppState, transfer_id: &str) -> StatusResp {
     if let Some(t) = state.transfers.get(transfer_id) {
         return StatusResp {
@@ -895,6 +971,10 @@ pub async fn handle_status(state: &AppState, transfer_id: &str) -> StatusResp {
             filename: tomb.filename,
         };
     }
+    // 跨重启：history 中 Receive 终态可还原 status，避免 unknown 导致发送端假失败。
+    if let Ok(Some(resp)) = history_terminal_status_resp(state, transfer_id).await {
+        return resp;
+    }
     StatusResp {
         transfer_id: transfer_id.to_string(),
         status: "unknown".to_string(),
@@ -903,6 +983,76 @@ pub async fn handle_status(state: &AppState, transfer_id: &str) -> StatusResp {
         size: 0,
         filename: String::new(),
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     complete/chunk 在内存 miss 时需要把已落盘的 Receive 历史还原为 success 响应。
+///
+/// Code Logic（这个函数做什么）:
+///     查 transfer_history by id；仅 direction=Receive 且 status 为 completed/failed 时返回
+///     ChunkResp；其它方向/状态返回 None（避免把本机 Send 历史当接收终态）。
+async fn history_terminal_chunk_resp(
+    state: &AppState,
+    transfer_id: &str,
+) -> Result<Option<ChunkResp>, AppError> {
+    let Some(task) = state.transfer_repo.get_by_id(transfer_id).await? else {
+        return Ok(None);
+    };
+    if task.direction != TransferDirection::Receive {
+        return Ok(None);
+    }
+    match task.status {
+        TransferStatus::Completed => Ok(Some(ChunkResp {
+            success: true,
+            received_bytes: task.size,
+        })),
+        TransferStatus::Failed | TransferStatus::Cancelled => Ok(Some(ChunkResp {
+            success: false,
+            received_bytes: task.transferred_bytes,
+        })),
+        TransferStatus::Pending | TransferStatus::Transferring => Ok(None),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     status 在内存 miss 时需要把持久化 Receive 终态还原，供发送端 complete 响应丢失后收敛。
+///
+/// Code Logic（这个函数做什么）:
+///     查 history by id；Receive + completed/failed/cancelled → StatusResp；否则 None。
+async fn history_terminal_status_resp(
+    state: &AppState,
+    transfer_id: &str,
+) -> Result<Option<StatusResp>, AppError> {
+    let Some(task) = state.transfer_repo.get_by_id(transfer_id).await? else {
+        return Ok(None);
+    };
+    if task.direction != TransferDirection::Receive {
+        return Ok(None);
+    }
+    let status = match task.status {
+        TransferStatus::Completed => "completed",
+        TransferStatus::Failed => "failed",
+        TransferStatus::Cancelled => "cancelled",
+        TransferStatus::Pending | TransferStatus::Transferring => return Ok(None),
+    };
+    let transferred = if task.status == TransferStatus::Completed {
+        task.size
+    } else {
+        task.transferred_bytes
+    };
+    let size = task.size;
+    Ok(Some(StatusResp {
+        transfer_id: transfer_id.to_string(),
+        status: status.to_string(),
+        progress: if size == 0 {
+            0.0
+        } else {
+            (transferred as f64) / (size as f64)
+        },
+        transferred_bytes: transferred,
+        size,
+        filename: task.filename,
+    }))
 }
 
 /// 将状态枚举转为字符串（对照 Python status.value）。
@@ -1731,6 +1881,60 @@ mod tests {
         assert_eq!(fs::read(&final_path).unwrap(), existing);
         // tmp 仍应存在（提交未成功，不应删除源）。
         assert!(tmp.exists(), "失败时不应删除 tmp 源文件");
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     落盘并写 history 后若进程重启（内存墓碑清空），complete/status 仍须按 Receive
+    ///     历史收敛为 completed，否则发送端会假失败并可能产生后缀副本。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     complete 空文件 → clear_tombstones_for_test 模拟重启 → complete 与 status 均成功。
+    #[tokio::test]
+    async fn handle_complete_and_status_survive_restart_via_history() {
+        use sha2::{Digest, Sha256};
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let empty_sha = format!("{:x}", Sha256::digest(b""));
+        let transfer_id = "restart-history-complete".to_string();
+
+        handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "restart.txt".to_string(),
+                size: 0,
+                sha256: empty_sha,
+                chunk_size: 1,
+            },
+        )
+        .await
+        .expect("init");
+
+        let first = handle_complete(&state, &transfer_id)
+            .await
+            .expect("first complete");
+        assert!(first.success);
+        assert!(receive_dir.join("restart.txt").exists());
+
+        // 模拟接收端重启：内存墓碑与 active 均消失，仅 history 残留。
+        state.transfers.clear_tombstones_for_test();
+        assert!(state.transfers.tombstone(&transfer_id).is_none());
+        assert!(state.transfers.get(&transfer_id).is_none());
+
+        let after_restart = handle_complete(&state, &transfer_id)
+            .await
+            .expect("complete after restart");
+        assert!(
+            after_restart.success,
+            "history 中 completed Receive 应让 complete 成功"
+        );
+
+        let status = handle_status(&state, &transfer_id).await;
+        assert_eq!(status.status, "completed");
+        assert_eq!(status.filename, "restart.txt");
 
         let _ = fs::remove_dir_all(&receive_dir);
     }

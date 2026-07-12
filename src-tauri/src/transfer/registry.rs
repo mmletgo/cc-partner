@@ -176,6 +176,19 @@ impl TransferRegistry {
         map.get(id).cloned()
     }
 
+    /// 测试用：清空全部内存墓碑，模拟接收端重启后墓碑丢失。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     跨重启 complete/status 回归需要在 finalize 已写 history 后抹掉内存墓碑。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     清空 tombstones map；仅 `cfg(test)` 暴露。
+    #[cfg(test)]
+    pub fn clear_tombstones_for_test(&self) {
+        let mut map = self.tombstones.lock().expect("tombstones 写锁中毒");
+        map.clear();
+    }
+
     /// 插入一个新任务（附带独立的 CancellationToken）。
     pub fn add(&self, task: TransferTask) {
         let id = task.id.clone();

@@ -92,6 +92,25 @@ impl TransferRepo {
         Ok(rows.iter().map(Self::row_to_task).collect())
     }
 
+    /// 按 id 查询单条传输历史（接收端 complete/status 跨重启收敛用）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     接收端 finalize 后 registry/墓碑都只在内存；进程重启后 complete/status 若只查内存，
+    ///     会把已落盘的 Receive 任务误报为 unknown/success=false，发送端假失败。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `SELECT ... WHERE id=?`，命中则映射为 `TransferTask`；无行返回 `Ok(None)`。
+    pub async fn get_by_id(&self, id: &str) -> Result<Option<TransferTask>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, filename, file_path, size, sha256, direction, peer_device_id, status, transferred_bytes, created_at, completed_at \
+             FROM transfer_history WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.db)
+        .await?;
+        Ok(row.map(|r| Self::row_to_task(&r)))
+    }
+
     /// 更新某任务的状态/进度/完成时间。
     #[allow(dead_code)]
     pub async fn update_status(
