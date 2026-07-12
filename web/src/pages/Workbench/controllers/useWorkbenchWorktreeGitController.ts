@@ -376,15 +376,18 @@ export function useWorkbenchWorktreeGitController(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户填入分支后缀并提交；先创建 worktree，再通过 terminalBridge.createSessionForWorktree 创建
-   *   关联终端 session，最后刷新 worktree 列表并切到新 worktree。
+   *   用户填入分支后缀并提交；先创建 worktree，再通过 terminalBridge.createSessionForWorktree 创建并注册
+   *   关联终端 session（不 focus），然后刷新 worktree 列表、切到新 worktree，最后再 focus 该 session。
    *
    * Code Logic（这个函数做什么）:
    *   1. 校验 active project、remoteWriteDisabled、composeWorktreeBranchName 非空；
    *   2. setWorktreeBusy('create')，调用 worktrees.create；
-   *   3. project 切换则丢弃；否则 loadWorktrees、setActiveWorktreeId、terminalBridge.createSessionForWorktree；
-   *   4. 成功时关闭表单、清空 draft；失败时 markRequestFailure + worktreeError；
-   *   5. finally 清空 worktreeBusy。
+   *   3. project 切换则丢弃；否则 terminalBridge.createSessionForWorktree（注册 session，bridge 此时
+   *      因新 worktree 尚未 active 而不 focus）；
+   *   4. loadWorktrees、setActiveWorktreeId(created.id)，随后显式 focusSession(sessionId)（此时 active
+   *      已正确，焦点不会错落在旧 worktree 上下文）；
+   *   5. 成功时关闭表单、清空 draft；失败时 markRequestFailure + worktreeError；
+   *   6. finally 清空 worktreeBusy。
    *
    *   注意：session 创建交给 terminalBridge.createSessionForWorktree，controller 不直接调用 sessions.create，
    *   避免与终端域 session 状态管理重复。
@@ -403,11 +406,13 @@ export function useWorkbenchWorktreeGitController(
       setWorktreeError(null);
       const created = await workbenchApi.worktrees.create(projectId, branchName, null);
       if (activeProjectIdRef.current !== projectId) return;
-      // Business Logic: session 创建通过终端域 bridge 完成；bridge 内部处理 stale guard、append、focus、
-      // resetBuffer、refreshProjectSessionStats 与 sessionError。create 失败时 bridge 会自行 markRequestFailure
-      // 并展示 sessionError；worktree 已成功创建，因此继续 loadWorktrees 与切换 active。
+      // Business Logic: session 创建/注册通过终端域 bridge 完成；bridge 只在目标 worktree 已是 active 时
+      // 才 focus。此时新 worktree 还未成为 active（setActiveWorktreeId 在下方），故 bridge 内不会 focus；
+      // 我们拿到 sessionId 后，在 setActiveWorktreeId(created.id) 之后再显式 focusSession，保证焦点落在
+      // 正确的 worktree 上下文（Codex 二次评审 Finding 4：修复 session 创建竞态）。
+      let createdSessionId: string | null = null;
       try {
-        await terminalBridge.createSessionForWorktree(created.id);
+        createdSessionId = await terminalBridge.createSessionForWorktree(created.id);
       } catch {
         // bridge 内部已处理错误；这里吞掉以避免中断 worktree 列表刷新。
       }
@@ -415,6 +420,11 @@ export function useWorkbenchWorktreeGitController(
       await loadWorktrees(projectId);
       if (activeProjectIdRef.current !== projectId) return;
       setActiveWorktreeId(created.id);
+      // Business Logic: worktree 已激活为 active 后，再把刚创建的 session 设为焦点。若期间 project 已切走
+      // 则跳过（focus 会落到错误上下文）。
+      if (createdSessionId && activeProjectIdRef.current === projectId) {
+        void terminalBridge.focusSession(createdSessionId);
+      }
       setCreateWorktreeOpen(false);
       setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
       setCreateWorktreeBranchSuffixDraft('');
@@ -626,7 +636,9 @@ export function useWorkbenchWorktreeGitController(
    *   5. finally 清空 worktreeBusy。
    *
    *   注意：remove 不直接清理 terminal session/buffer；后端会在 remove_workbench_worktree 时关闭关联
-   *   session，随后页面通过 terminal-status 事件或下一次 loadSessions 同步状态。
+   *   session，随后页面通过 terminal-status 事件或下一次 loadSessions 同步状态。这与抽取前的原 Workbench.tsx
+   *   （eae5bef 行 2244–2275）行为完全一致——原 remove 也只 setActiveWorktreeId + loadWorktrees，不做 buffer/
+   *   session 清理（merge 才做）。Codex 二次评审 Finding 3 已确认这不是回归。
    */
   const handleRemoveWorktree = useCallback(async (): Promise<void> => {
     const worktreeId = activeWorktreeIdRef.current;

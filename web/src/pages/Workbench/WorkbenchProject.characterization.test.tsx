@@ -24,7 +24,7 @@ import {
   renderWorkbench,
   setInvokeHandler,
 } from './testing/workbenchTestHarness';
-import type { WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
+import type { WorkbenchWorktree } from '@/lib/types';
 
 const REMOTE_OFFLINE_ERROR = '远端设备不在线';
 

@@ -19,7 +19,6 @@ import {
   buildWorktree,
   emitWorkbenchEvent,
   flushMacrotasks,
-  invokeCallsFor,
   renderWorkbench,
   setInvokeHandler,
   waitFor,

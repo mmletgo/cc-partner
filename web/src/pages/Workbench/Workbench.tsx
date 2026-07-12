@@ -691,8 +691,8 @@ export function Workbench() {
     fileController.handleReturnToTerminal();
   }, [fileController]);
 
-  // Business Logic: worktree chip 切换前先调用 fileController.guardDirtyContextChange（Codex 评审指出 Plan 2 抽出
-  //   guard 后一度成为 dead code，dirty tab 会被 resetForContext 静默清空）。用户取消则中止；否则 setActiveWorktreeId。
+  // Business Logic: worktree chip 切换前先调用 fileController.guardDirtyContextChange（Plan 2 新增保护：原
+  //   Workbench.tsx eae5bef chip/其余 context 切换均无 dirty guard；当前已更严格，Finding 1 确认非回归）。用户取消则中止。
   const handleSelectWorktree = useCallback(
     async (nextWorktreeId: string): Promise<void> => {
       const ok = await fileController.guardDirtyContextChange();
