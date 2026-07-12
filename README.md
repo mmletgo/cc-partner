@@ -218,6 +218,34 @@ git push origin v0.6.0
 ```
 3. GitHub Actions 用 tauri-action 自动构建三平台（macOS 双架构 / Windows / Linux）、签发 Release 并产出 `latest.json`（供自动更新校验）。
 
+### 独立后端 CLI（无 GUI 远端支持）
+
+远端机器或不想开桌面窗口时，可用独立后端二进制启动局域网服务：
+
+```bash
+# 开发态
+cargo run --locked --bin cc-partner-backend -- start
+cargo run --locked --bin cc-partner-backend -- status
+cargo run --locked --bin cc-partner-backend -- doctor
+cargo run --locked --bin cc-partner-backend -- doctor --json
+cargo run --locked --bin cc-partner-backend -- stop
+
+# 已安装 / 打包后
+cc-partner-backend start
+cc-partner-backend status
+cc-partner-backend doctor
+cc-partner-backend doctor --json
+cc-partner-backend stop
+```
+
+- `start` / `stop` / `status`：生命周期管理。`status` 输出本机运行态 JSON（不含控制 token）。
+- `doctor`：人类可读健康检查（状态、关键检查、日志路径）。
+- `doctor --json`：stdout **仅**一份机器可读 JSON 快照；说明与 tracing 写 stderr。
+- **退出码**：`healthy → 0`，`degraded → 1`，`unhealthy` 或 doctor 无法完成 → `2`。可选依赖缺失（如未装 tmux）通常是 degraded/1，不是崩溃。
+- **正常 stopped** 是信息态（healthy/0），不是错误。
+- 数据与日志默认在 `~/.cc-partner/`；可用绝对路径环境变量 `CC_PARTNER_DATA_DIR` 隔离到其它目录。
+- 诊断日志本地落盘：`~/.cc-partner/logs/backend.log`（及最多 3 个历史文件），**不上传**、不建远程 Issue、不收集 telemetry。
+
 ## 工作原理
 
 cc-partner 使用 **P2P 架构**，每个实例既是服务端也是客户端：
