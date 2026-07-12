@@ -29,6 +29,7 @@ const INITIAL_STATUS: WorkbenchDependencyStatus = {
   installCommandPreview: [],
   error: null,
   output: [],
+  statusChangedAt: new Date(0).toISOString(),
 };
 
 export interface WorkbenchDependencyProviderProps {

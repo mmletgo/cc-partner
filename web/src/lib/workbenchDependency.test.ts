@@ -27,6 +27,7 @@ function dependency(
     installCommandPreview: ['brew', 'install', 'tmux'],
     error: null,
     output: [],
+    statusChangedAt: '2026-07-12T00:00:00.000Z',
     ...patch,
   };
 }
