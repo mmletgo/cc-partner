@@ -29,6 +29,10 @@ const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const PROBE_TERMINATE_GRACE: Duration = Duration::from_millis(250);
 /// 管道非阻塞 drain 的截止宽限（在共享 deadline 之后仍允许的小额读取窗口）。
 const PROBE_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(150);
+/// 探测管道 stdout+stderr 合计读取预算，防止持续写入的逃逸后代无限扩张缓冲。
+/// Business Logic: 依赖探测只需版本行/少量错误输出；无限泵出会拖死 AppState 初始化。
+/// Code Logic: pump 在累计字节达此上限后立刻标记该侧 done 并视为超时。
+const PROBE_PIPE_DRAIN_BYTE_BUDGET: usize = 256 * 1024;
 
 /// Business Logic（为什么需要这个函数）:
 ///     Attention 与前端轮询需要稳定的依赖状态变更时间，不能在每次读取时漂移。
@@ -833,11 +837,11 @@ fn drain_child_pipes_nonblocking(
 
 /// Business Logic（为什么需要这个函数）:
 ///     Unix 探测路径必须在 setsid 逃逸/killpg 失败时仍能有界返回并关闭读端，
-///     不能依赖可遗忘的阻塞 reader 线程。
+///     不能依赖可遗忘的阻塞 reader 线程；持续写入的后代也不能让 pump 越过 deadline。
 ///
 /// Code Logic（这个函数做什么）:
-///     fcntl O_NONBLOCK + poll(2) 等待可读；EAGAIN 继续等到 deadline；EOF/错误结束该 fd；
-///     超时返回已读缓冲并 drop 管道（关闭读端）。
+///     fcntl O_NONBLOCK + poll(2) 等待可读；fcntl 失败立即关闭该侧（绝不阻塞 read）；
+///     pump 在每次 read 前检查 deadline 与字节预算；超时/预算耗尽 drop 读端返回。
 #[cfg(unix)]
 fn drain_child_pipes_nonblocking_unix(
     stdout: Option<ChildStdout>,
@@ -859,75 +863,111 @@ fn drain_child_pipes_nonblocking_unix(
         done: bool,
     }
 
-    /// Business Logic: 探测管道必须非阻塞，否则 poll 返回后仍可能在 read 上挂死。
-    /// Code Logic: fcntl GETFL/SETFL 叠加 O_NONBLOCK；失败时仍尝试读，最坏靠 deadline 退出。
-    fn set_nonblocking(fd: RawFd) {
+    /// Business Logic: 探测管道必须非阻塞；fcntl 失败时绝不能继续阻塞 read。
+    /// Code Logic: F_GETFL/F_SETFL 叠加 O_NONBLOCK；任一失败返回 Err，调用方立刻关该侧。
+    fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
         unsafe {
             let flags = libc::fcntl(fd, libc::F_GETFL);
             if flags == -1 {
-                return;
+                return Err(std::io::Error::last_os_error());
             }
-            let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
         }
+        Ok(())
     }
 
-    /// Business Logic: 从单条管道尽量排空当前可读字节，不跨越 deadline。
-    /// Code Logic: 循环 nonblocking read；0=EOF；WouldBlock/Interrupted 停止本轮；其它错误标记 done。
-    fn pump_side(side: &mut PipeSide) {
+    /// Business Logic: 从单条管道尽量排空当前可读字节，但不得越过 deadline 或字节预算。
+    /// Code Logic: 每次 read 前检查 deadline/预算；0=EOF；WouldBlock 停本轮；预算/超时标记 done。
+    /// 返回 true 表示因 deadline 或字节预算结束（调用方应记 timed_out）。
+    fn pump_side(side: &mut PipeSide, deadline: Instant, total_read: &mut usize) -> bool {
         if side.done {
-            return;
+            return false;
         }
         let mut chunk = [0u8; 4096];
         loop {
-            match side.reader.read(&mut chunk) {
+            if Instant::now() >= deadline {
+                side.done = true;
+                return true;
+            }
+            if *total_read >= PROBE_PIPE_DRAIN_BYTE_BUDGET {
+                side.done = true;
+                return true;
+            }
+            let remaining_budget = PROBE_PIPE_DRAIN_BYTE_BUDGET - *total_read;
+            let to_read = chunk.len().min(remaining_budget);
+            match side.reader.read(&mut chunk[..to_read]) {
                 Ok(0) => {
                     side.done = true;
-                    break;
+                    return false;
                 }
-                Ok(n) => side.buf.extend_from_slice(&chunk[..n]),
-                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                Ok(n) => {
+                    side.buf.extend_from_slice(&chunk[..n]);
+                    *total_read = total_read.saturating_add(n);
+                    if *total_read >= PROBE_PIPE_DRAIN_BYTE_BUDGET {
+                        side.done = true;
+                        return true;
+                    }
+                }
+                Err(err) if err.kind() == ErrorKind::WouldBlock => return false,
                 Err(err) if err.kind() == ErrorKind::Interrupted => continue,
                 Err(_) => {
                     side.done = true;
-                    break;
+                    return false;
                 }
             }
         }
     }
 
     let mut sides: Vec<PipeSide> = Vec::with_capacity(2);
+    let mut timed_out = false;
     if let Some(out) = stdout {
         let fd = out.as_raw_fd();
-        set_nonblocking(fd);
-        sides.push(PipeSide {
-            kind: PipeKind::Stdout,
-            reader: Box::new(out),
-            fd,
-            buf: Vec::new(),
-            done: false,
-        });
+        match set_nonblocking(fd) {
+            Ok(()) => sides.push(PipeSide {
+                kind: PipeKind::Stdout,
+                reader: Box::new(out),
+                fd,
+                buf: Vec::new(),
+                done: false,
+            }),
+            // fcntl 失败：立刻丢弃读端，绝不进入可能阻塞的 read。
+            Err(_) => {
+                drop(out);
+                timed_out = true;
+            }
+        }
     }
     if let Some(err) = stderr {
         let fd = err.as_raw_fd();
-        set_nonblocking(fd);
-        sides.push(PipeSide {
-            kind: PipeKind::Stderr,
-            reader: Box::new(err),
-            fd,
-            buf: Vec::new(),
-            done: false,
-        });
+        match set_nonblocking(fd) {
+            Ok(()) => sides.push(PipeSide {
+                kind: PipeKind::Stderr,
+                reader: Box::new(err),
+                fd,
+                buf: Vec::new(),
+                done: false,
+            }),
+            Err(_) => {
+                drop(err);
+                timed_out = true;
+            }
+        }
     }
 
-    // 先排空已有缓冲，避免 poll 前丢数据。
+    let mut total_read = 0usize;
+
+    // 先排空已有缓冲，避免 poll 前丢数据；每次 pump 都受 deadline/预算约束。
     for side in &mut sides {
-        pump_side(side);
+        if pump_side(side, deadline, &mut total_read) {
+            timed_out = true;
+        }
     }
 
-    let mut timed_out = false;
     while sides.iter().any(|s| !s.done) {
         let now = Instant::now();
-        if now >= deadline {
+        if now >= deadline || total_read >= PROBE_PIPE_DRAIN_BYTE_BUDGET {
             timed_out = true;
             break;
         }
@@ -980,7 +1020,20 @@ fn drain_child_pipes_nonblocking_unix(
             if revents == 0 {
                 continue;
             }
-            pump_side(side);
+            if pump_side(side, deadline, &mut total_read) {
+                timed_out = true;
+            }
+        }
+        if timed_out {
+            // 预算/截止触发后立即停止，drop 剩余读端。
+            break;
+        }
+    }
+
+    // 超时/预算耗尽：标记未完成侧 done，随后 drop 关闭 fd。
+    if timed_out {
+        for side in &mut sides {
+            side.done = true;
         }
     }
 
@@ -1740,9 +1793,19 @@ mod tests {
             "descendant-hold-pipe 的 drain 超时路径耗时过长: {elapsed:?}"
         );
 
-        // 进程组应已被 SIGKILL；kill(-pgid, 0) 失败表示无存活成员。
+        // 进程组应已被 SIGKILL。SIGKILL 后可能短暂残留僵尸，轮询等待 reaper 回收。
         let pgid_i: libc::pid_t = pgid.try_into().expect("pgid fits pid_t");
-        let still_alive = unsafe { libc::kill(-pgid_i, 0) } == 0;
+        let assert_deadline = Instant::now() + Duration::from_secs(1);
+        let mut still_alive = true;
+        while Instant::now() < assert_deadline {
+            still_alive = unsafe { libc::kill(-pgid_i, 0) } == 0;
+            if !still_alive {
+                break;
+            }
+            // 再补一次 killpg，覆盖 terminate 与断言之间的竞态窗口。
+            let _ = kill_probe_process_group(pgid);
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(!still_alive, "drain 超时后进程组仍有存活后代 (pgid={pgid})");
     }
 
@@ -1836,6 +1899,132 @@ mod tests {
             }
         }
         let _ = std::fs::remove_file(&pid_file);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     持续向继承管道写数据的后代会使旧 pump_side 在 WouldBlock 前无限扩张缓冲，
+    ///     阻塞 AppState 初始化；修复后必须在 deadline/字节预算内返回并关闭读端。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Unix：独立进程组 spawn `sh -c 'yes ... &'`，shell 退出后后代持续写 stdout；
+    ///     以短但非零 deadline drain，断言有界返回、读端已 drop、缓冲不超过字节预算。
+    #[cfg(unix)]
+    #[test]
+    fn drain_timeout_with_continuous_writing_descendant_stays_bounded() {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = StdCommand::new("sh");
+        command
+            .arg("-c")
+            // yes 继承 shell stdout（探测管道）并持续写入；父 shell 退出后管道仍可读。
+            .arg("yes probe-continuous-write 2>/dev/null &")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command
+            .spawn()
+            .expect("spawn continuous-writing descendant");
+        let pgid = child.id();
+
+        let wait_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    assert!(
+                        Instant::now() < wait_deadline,
+                        "continuous-write shell 未在预期时间内退出"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("try_wait continuous-write shell failed: {err}"),
+            }
+        }
+
+        // 给真实 grace 窗口：管道始终可读时，旧实现会无限 pump；新实现靠 deadline/预算退出。
+        let started = Instant::now();
+        let drain_deadline = Instant::now() + Duration::from_millis(200);
+        let (stdout, _stderr) = drain_probe_pipes(&mut child, drain_deadline);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "continuous-write drain 超时路径耗时过长: {elapsed:?}"
+        );
+        assert!(
+            stdout.len() <= PROBE_PIPE_DRAIN_BYTE_BUDGET,
+            "stdout 超过字节预算: {}",
+            stdout.len()
+        );
+        assert!(child.stdout.is_none());
+        assert!(child.stderr.is_none());
+
+        // best-effort 清理同组 yes 后代（drain 超时路径通常已 killpg）。
+        let pgid_i: libc::pid_t = pgid.try_into().expect("pgid fits pid_t");
+        unsafe {
+            let _ = libc::kill(-pgid_i, libc::SIGKILL);
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     fcntl 失败后若仍进入阻塞 read，deadline 无法打断；源码必须在失败时立刻关侧。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     审查 Unix drain 生产实现：set_nonblocking 返回 Result，失败分支 drop 读端且
+    ///     不在失败路径上直接 pump/read。
+    #[cfg(unix)]
+    #[test]
+    fn unix_drain_source_closes_side_on_set_nonblocking_failure() {
+        let source = include_str!("dependencies.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("dependencies.rs 应包含 #[cfg(test)] 测试模块");
+        let unix_fn = production
+            .split("fn drain_child_pipes_nonblocking_unix")
+            .nth(1)
+            .and_then(|rest| rest.split("fn plan_windows_pipe_read").next())
+            .or_else(|| {
+                production
+                    .split("fn drain_child_pipes_nonblocking_unix")
+                    .nth(1)
+                    .and_then(|rest| {
+                        rest.split("fn drain_child_pipes_nonblocking_fallback")
+                            .next()
+                    })
+            })
+            .expect("应能切出 Unix drain 函数体");
+        assert!(
+            unix_fn.contains("fn set_nonblocking(fd: RawFd) -> std::io::Result<()>")
+                || unix_fn.contains("fn set_nonblocking(fd: RawFd) -> Result<(),"),
+            "set_nonblocking 必须返回 Result，禁止静默忽略 fcntl 失败"
+        );
+        assert!(
+            unix_fn.contains("match set_nonblocking(fd)"),
+            "调用方必须 match set_nonblocking 结果"
+        );
+        assert!(
+            unix_fn.contains("drop(out)") || unix_fn.contains("drop(err)"),
+            "fcntl 失败路径必须 drop 读端，禁止继续阻塞 read"
+        );
+        assert!(
+            !unix_fn.contains("失败时仍尝试读") && !unix_fn.contains("最坏靠 deadline 退出"),
+            "不得再声称 fcntl 失败后靠 deadline 退出阻塞 read"
+        );
+        assert!(
+            unix_fn.contains("PROBE_PIPE_DRAIN_BYTE_BUDGET") || unix_fn.contains("total_read"),
+            "pump_side 必须受字节预算约束"
+        );
+        assert!(
+            unix_fn.contains("Instant::now() >= deadline"),
+            "pump_side 循环内必须检查 deadline"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
