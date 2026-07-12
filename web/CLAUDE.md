@@ -21,7 +21,7 @@
 
 - Vitest 默认 **Node environment**（`vitest.config.ts` 中 `test.environment: 'node'`），不全局启用 jsdom
 - 只有真正访问 DOM 的测试文件，才在文件顶部显式声明 `// @vitest-environment jsdom`
-- CI 只用 `npm ci` 安装锁定依赖；**禁止** `npx --yes`、**禁止** 文档/脚本推荐 `npx --yes tsx` 或按文件手敲的 `npx tsx …/*.test.ts` 单文件 runner——一律走 `npm test` / `npm run test:e2e`
+- CI 只用 `npm ci` 安装锁定依赖；**禁止** 带 `--yes` 的浮动 `npx` runner，也**禁止**文档/脚本推荐按文件手敲的 `npx` + `tsx` 单文件测试入口——一律走 `npm test` / `npm run test:e2e`
 - 稳定命令四条：`test` / `test:unit:watch` / `test:e2e` / `test:all`（与 `package.json` 一致）
 
 ### 前端约束摘要（本目录必守）
