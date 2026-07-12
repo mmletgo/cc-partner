@@ -71,7 +71,11 @@
     "recentEvents": "Recent events",
     "workflowError": "Workflow error: {{error}}",
     "latestError": "Latest error: {{error}}",
-    "remoteUnavailable": "Remote runtime snapshot is unavailable here. Open the owning device to inspect automation state."
+    "remoteUnavailable": "Remote runtime snapshot is unavailable here. Open the owning device to inspect automation state.",
+    "remoteUnsupported": "This remote device does not support runtime snapshots. Open the owning device or upgrade the peer.",
+    "remoteOffline": "Remote device is offline. Runtime status is unavailable until it reconnects.",
+    "remoteOfflineCached": "Showing last known runtime status. Last updated {{time}}.",
+    "remoteOfflineCachedBadge": "Cached · {{time}}"
   },
   "queue": {
     "title": "Task Queue",
