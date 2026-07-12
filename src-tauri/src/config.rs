@@ -196,6 +196,117 @@ pub fn default_db_path() -> PathBuf {
     config_dir().join("data.db")
 }
 
+/// 判断候选路径是否位于指定数据根目录之下（含根本身）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     设置 `CC_PARTNER_DATA_DIR` 时，config/control/db/log 必须全部落在隔离根内；
+///     残留或拷贝的 config.json 若带外部绝对 `db_path`，会逃逸到用户真实 home 或任意路径。
+///
+/// Code Logic（这个函数做什么）:
+///     对 root 与 candidate 做 `canonicalize`（不存在时回退 `components` 规范化后的绝对路径），
+///     再判断 candidate 是否等于 root 或以 `root + sep` 为前缀。
+pub fn is_path_within_data_dir(candidate: &Path, root: &Path) -> bool {
+    let root_norm = normalize_path_for_containment(root);
+    let cand_norm = normalize_path_for_containment(candidate);
+    if cand_norm == root_norm {
+        return true;
+    }
+    let root_prefix = {
+        let mut p = root_norm.into_os_string();
+        p.push(std::path::MAIN_SEPARATOR_STR);
+        PathBuf::from(p)
+    };
+    cand_norm.starts_with(&root_prefix)
+}
+
+/// 规范化路径用于“是否位于根内”的前缀判断。
+///
+/// Business Logic（为什么需要这个函数）:
+///     隔离校验不能被 `..`、多余分隔符或未 canonicalize 的相对差异绕过；
+///     macOS 上 `/var` 与 `/private/var` 等符号链接也必须归一。
+///
+/// Code Logic（这个函数做什么）:
+///     优先 `canonicalize` 整路径；失败则向上找到已存在祖先做 canonicalize，
+///     再接回剩余相对组件；完全无法 canonicalize 时回退组件级折叠 `.`/`..`。
+fn normalize_path_for_containment(path: &Path) -> PathBuf {
+    if let Ok(canon) = fs::canonicalize(path) {
+        return canon;
+    }
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+
+    // 对尚未创建的子路径：canonicalize 最近存在的祖先，再拼接尾部组件，
+    // 避免 macOS `/var`→`/private/var` 等链接导致 root 与 child 前缀不一致。
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = absolute.as_path();
+    loop {
+        if let Ok(canon_ancestor) = fs::canonicalize(cursor) {
+            let mut out = canon_ancestor;
+            for part in suffix.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match cursor.parent() {
+            Some(parent) if parent != cursor => {
+                if let Some(name) = cursor.file_name() {
+                    suffix.push(name.to_os_string());
+                }
+                cursor = parent;
+            }
+            _ => break,
+        }
+    }
+
+    let mut out = PathBuf::new();
+    for comp in absolute.components() {
+        match comp {
+            std::path::Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            std::path::Component::RootDir => out.push(comp.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                let _ = out.pop();
+            }
+            std::path::Component::Normal(part) => out.push(part),
+        }
+    }
+    out
+}
+
+/// 在 `CC_PARTNER_DATA_DIR` 生效时，强制把应落在数据根内的路径约束回根下。
+///
+/// Business Logic（为什么需要这个函数）:
+///     smoke/CI 与隔离启动依赖 override 根；config.json 里残留的外部绝对 `db_path`
+///     会让 serve 打开隔离根之外甚至真实 `~/.cc-partner` 的数据库，破坏隔离契约。
+///
+/// Code Logic（这个函数做什么）:
+///     仅当 env override 存在时检查 `db_path`：若逃逸出 `data_dir()` 根，则改写为
+///     `default_db_path()` 并返回 `true`（调用方应 save）；无 override 时 no-op。
+fn enforce_data_dir_isolation(cfg: &mut AppConfig) -> Result<bool, AppError> {
+    if std::env::var_os(DATA_DIR_ENV).is_none() {
+        return Ok(false);
+    }
+    let root = data_dir()?;
+    let db = PathBuf::from(&cfg.db_path);
+    if is_path_within_data_dir(&db, &root) {
+        return Ok(false);
+    }
+    let forced = default_db_path();
+    tracing::warn!(
+        "CC_PARTNER_DATA_DIR 生效时拒绝 db_path 逃逸: {} -> {}",
+        cfg.db_path,
+        forced.display()
+    );
+    cfg.db_path = forced.to_string_lossy().to_string();
+    Ok(true)
+}
+
 /// 默认文件接收目录：`~/cc-partner-files`
 fn default_receive_dir() -> PathBuf {
     dirs::home_dir()
@@ -567,26 +678,36 @@ impl AppConfig {
     /// 加载配置；文件不存在则生成默认配置并保存。
     ///
     /// Business Logic: 启动时读取上次配置；首次运行初始化默认值并落盘。
-    /// Code Logic: 读 JSON 反序列化；做两步迁移修复后 save()：
+    /// Code Logic: 读 JSON 反序列化；做多步迁移/隔离修复后按需 save()：
     ///             1) macOS 旧配置中 `<ctrl>` 快捷键替换为 `<cmd>`（对照 config.py）；
     ///             2) `db_path` 字段若仍指向已废弃的 `~/.claude-partner/`（目录迁移只
-    ///                重命名目录、不改 JSON 字段），改写为 `~/.cc-partner/`。
+    ///                重命名目录、不改 JSON 字段），改写为 `~/.cc-partner/`；
+    ///             3) 若设置了 `CC_PARTNER_DATA_DIR`，拒绝/强制纠正逃逸出隔离根的 `db_path`，
+    ///                确保 config/control/db/log 全部落在 override 根内。
     ///             文件缺失则用默认值构造并 save()。
     pub fn load() -> Result<Self, AppError> {
         let path = config_file_path();
         if path.exists() {
             let text = fs::read_to_string(&path)?;
             let mut cfg: AppConfig = serde_json::from_str(&text)?;
+            let mut dirty = false;
             // macOS 迁移：旧配置中 <ctrl> 快捷键自动替换为 <cmd>（对照 config.py）
             if cfg!(target_os = "macos") && cfg.screenshot_hotkey.contains("<ctrl>") {
                 cfg.screenshot_hotkey = cfg.screenshot_hotkey.replace("<ctrl>", "<cmd>");
-                cfg.save()?;
+                dirty = true;
             }
             // 目录迁移补丁：config_dir() 把 ~/.claude-partner 整目录重命名成 ~/.cc-partner，
             // 但 config.json 里的 db_path 是绝对路径，目录迁移不会改 JSON 字段内容。
             // 残留的旧路径会让 init_db 找不到文件而 panic (SQLITE_CANTOPEN)。
             if migrate_legacy_db_path(&mut cfg) {
                 tracing::info!("已迁移 db_path 字段到新配置目录: {}", cfg.db_path);
+                dirty = true;
+            }
+            // 隔离根约束：override 生效时 db_path 不得指向根外（含真实 ~/.cc-partner）。
+            if enforce_data_dir_isolation(&mut cfg)? {
+                dirty = true;
+            }
+            if dirty {
                 cfg.save()?;
             }
             Ok(cfg)
@@ -805,6 +926,87 @@ mod tests {
             err.to_string().contains("绝对") || err.to_string().contains("absolute"),
             "错误应提示需要绝对路径，实际: {err}"
         );
+    }
+
+    /// 验证 override 生效时 load() 会强制把逃逸的 db_path 拉回隔离根。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     预置/拷贝的 config.json 若含外部绝对 db_path，会让 smoke/serve 写到真实 home，
+    ///     破坏 “config/control/db/log 全部落在隔离根” 的契约。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     在临时 override 根内写入 db_path 指向根外的 config.json，调用 load()，
+    ///     断言返回与落盘后的 db_path 都等于根内 data.db。
+    #[test]
+    fn load_rewrites_escaped_db_path_under_data_dir_override() {
+        let temp = tempfile::tempdir().expect("应能创建临时数据目录");
+        let override_dir = temp.path().join("isolated-data");
+        fs::create_dir_all(&override_dir).expect("应能创建 override 目录");
+        let escaped_db = temp
+            .path()
+            .join("outside")
+            .join("escape.db")
+            .to_string_lossy()
+            .to_string();
+        let config_path = override_dir.join("config.json");
+        let seeded = serde_json::json!({
+            "device_id": "smoke-escape-device",
+            "device_name": "smoke-escape",
+            "http_port": 0,
+            "receive_dir": "/tmp",
+            "db_path": escaped_db,
+            "screenshot_hotkey": "<cmd>+<shift>+s"
+        });
+        fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&seeded).expect("应能序列化 seed config"),
+        )
+        .expect("应能写入 seed config");
+
+        let _guard = install_data_dir_env(Some(override_dir.to_str().expect("UTF-8 path")));
+        let loaded = AppConfig::load().expect("load 在 override 下应成功");
+        let expected_db = override_dir.join("data.db");
+        assert_eq!(
+            PathBuf::from(&loaded.db_path),
+            expected_db,
+            "load 应把逃逸 db_path 强制到隔离根内"
+        );
+
+        let on_disk: AppConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).expect("应能重读 config.json"))
+                .expect("落盘 config 应可反序列化");
+        assert_eq!(
+            PathBuf::from(&on_disk.db_path),
+            expected_db,
+            "纠正后的 db_path 应已 save 回 config.json"
+        );
+        assert!(
+            is_path_within_data_dir(Path::new(&on_disk.db_path), &override_dir),
+            "最终 db_path 必须位于 override 根内"
+        );
+    }
+
+    /// 验证路径包含判定：根内/根本身通过，根外与前缀碰撞失败。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     隔离校验本身必须正确，否则 load 纠正逻辑会误伤合法路径或放行逃逸路径。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用临时目录断言 root、root/child 通过，sibling 与 `root-extra` 前缀碰撞失败。
+    #[test]
+    fn is_path_within_data_dir_handles_prefix_and_escape() {
+        let temp = tempfile::tempdir().expect("临时目录");
+        let root = temp.path().join("data-root");
+        fs::create_dir_all(root.join("nested")).expect("建 nested");
+        assert!(is_path_within_data_dir(&root, &root));
+        assert!(is_path_within_data_dir(&root.join("nested/data.db"), &root));
+        assert!(!is_path_within_data_dir(
+            &temp.path().join("other.db"),
+            &root
+        ));
+        // 前缀碰撞：`data-root-extra` 不能被当成 `data-root` 的子路径。
+        let sibling_prefix = temp.path().join("data-root-extra").join("data.db");
+        assert!(!is_path_within_data_dir(&sibling_prefix, &root));
     }
 
     #[test]

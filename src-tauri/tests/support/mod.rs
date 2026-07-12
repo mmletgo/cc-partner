@@ -253,16 +253,58 @@ impl SmokeCase {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     smoke 需要同步拿到 CLI 输出并解析 JSON。
+    ///     smoke 需要同步拿到 CLI 输出并解析 JSON；每个 CLI 调用必须有硬超时，
+    ///     否则异常阻塞会拖到 job 超时，导致 cleanup/artifact 无法可靠执行。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     同步执行子命令，收集 Output 并转成 `CapturedCli`。
+    ///     spawn 后在后台线程 `wait_with_output` 收集 stdout/stderr（避免 pipe 填满死锁），
+    ///     主线程按 `op_timeout` 轮询；超时只 kill 该 child 并返回诊断 Err。
     pub fn run_cli(&self, args: &[&str]) -> Result<CapturedCli, String> {
-        let output = self
+        let child = self
             .backend_command(args)
-            .output()
-            .map_err(|e| format!("执行 {:?} 失败: {e}", args))?;
-        Ok(captured_from_output(output))
+            .spawn()
+            .map_err(|e| format!("spawn {:?} 失败: {e}", args))?;
+        let child_pid = child.id();
+        // 后台 drain+wait，防止 stdout/stderr pipe 缓冲填满导致子进程阻塞。
+        let waiter = thread::spawn(move || child.wait_with_output());
+        let deadline = Instant::now() + self.op_timeout;
+        loop {
+            if waiter.is_finished() {
+                let output = waiter
+                    .join()
+                    .map_err(|_| format!("CLI {:?} waiter 线程 panic", args))?
+                    .map_err(|e| format!("wait {:?} 失败: {e}", args))?;
+                return Ok(captured_from_output(output));
+            }
+            if Instant::now() >= deadline {
+                // 只终止本 CLI 子进程；detached serve 由 control/PID teardown 管理。
+                let _ = kill_pid_hard(child_pid);
+                // 给 waiter 一点时间 reap 并带出已缓冲输出。
+                let reap_deadline = Instant::now() + Duration::from_secs(2);
+                while !waiter.is_finished() && Instant::now() < reap_deadline {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                if waiter.is_finished() {
+                    if let Ok(Ok(output)) = waiter.join() {
+                        let captured = captured_from_output(output);
+                        return Err(format!(
+                            "CLI {:?} 超时 ({}s)\n{}\ncase={}",
+                            args,
+                            self.op_timeout.as_secs(),
+                            captured.diagnostic(),
+                            self.case_dir.display()
+                        ));
+                    }
+                }
+                return Err(format!(
+                    "CLI {:?} 超时 ({}s) 且未能完整回收输出 (pid={child_pid})\ncase={}",
+                    args,
+                    self.op_timeout.as_secs(),
+                    self.case_dir.display()
+                ));
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
     }
 
     /// Business Logic（为什么需要这个函数）:

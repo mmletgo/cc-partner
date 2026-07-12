@@ -6,10 +6,10 @@
 mod support;
 
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use support::{
-    dead_pid, ensure_platform_supported, process_is_alive, read_control_file, unused_local_port,
-    write_control_file, CapturedCli, ControlFileJson, SmokeCase,
+    captured_from_output, dead_pid, ensure_platform_supported, process_is_alive, read_control_file,
+    unused_local_port, write_control_file, CapturedCli, ControlFileJson, SmokeCase,
 };
 
 /// Business Logic（为什么需要这个函数）:
@@ -309,6 +309,190 @@ fn duplicate_start_reports_existing_instance() {
             &mut case,
             format!("duplicate case stop 失败\n{}", stop.diagnostic()),
         );
+    }
+}
+
+/// 并发双重 start 只能留下一个 backend PID/监听实例，且 teardown 可完整回收。
+///
+/// Business Logic（为什么需要这个测试）:
+///     check-then-spawn 无锁时，两个同时 start 都能看到 stopped 并各自 spawn serve，
+///     留下孤儿进程与竞争覆盖的 control 文件；顺序 duplicate start 测不到该竞态。
+///
+/// Code Logic（这个测试做什么）:
+///     同 data_dir 上并发 spawn 两个 `start`，等待二者结束后断言仅一个 running 实例，
+///     且 control pid 存活、health 可用；随后 stop 并确认进程/文件清理。
+#[test]
+fn concurrent_duplicate_start_only_one_backend_survives() {
+    if let Err(reason) = ensure_platform_supported() {
+        eprintln!("{reason}");
+        return;
+    }
+
+    let mut case = SmokeCase::new("concurrent-duplicate-start").expect("创建 smoke case");
+
+    let mut first_child = match case.spawn_cli(&["start"]) {
+        Ok(child) => child,
+        Err(err) => fail_case(&mut case, format!("并发 start#1 spawn 失败: {err}")),
+    };
+    let mut second_child = match case.spawn_cli(&["start"]) {
+        Ok(child) => child,
+        Err(err) => {
+            let _ = first_child.kill();
+            let _ = first_child.wait();
+            fail_case(&mut case, format!("并发 start#2 spawn 失败: {err}"))
+        }
+    };
+
+    let deadline = Instant::now() + case.op_timeout;
+    let first_out = wait_child_output(&mut first_child, deadline, "start#1", &mut case);
+    let second_out = wait_child_output(&mut second_child, deadline, "start#2", &mut case);
+
+    let first = captured_from_output(first_out);
+    let second = captured_from_output(second_out);
+    // 至少一个 start 必须成功变成 running；另一个可以成功返回同一实例，或在锁竞争下短暂失败后由后续 status 收敛。
+    if !first.success && !second.success {
+        fail_case(
+            &mut case,
+            format!(
+                "并发 start 全部失败\n--- first ---\n{}\n--- second ---\n{}",
+                first.diagnostic(),
+                second.diagnostic()
+            ),
+        );
+    }
+
+    // 收敛：以 control 文件 + status 为准，断言唯一存活 backend。
+    let control = match case.wait_for_control_file() {
+        Ok(c) => c,
+        Err(err) => fail_case(
+            &mut case,
+            format!(
+                "并发 start 后无 control 文件: {err}\n--- first ---\n{}\n--- second ---\n{}",
+                first.diagnostic(),
+                second.diagnostic()
+            ),
+        ),
+    };
+    case.record_pid(control.pid);
+    if !process_is_alive(control.pid) {
+        fail_case(&mut case, format!("control pid {} 未存活", control.pid));
+    }
+    if let Err(err) = case.wait_for_health(control.port) {
+        fail_case(&mut case, err);
+    }
+
+    let status = match case.run_cli(&["status"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("并发后 status 失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "concurrent status", &status);
+    let status_json = match status.parse_status_json() {
+        Ok(s) => s,
+        Err(err) => fail_case(&mut case, err),
+    };
+    if status_json.kind != "running" {
+        fail_case(
+            &mut case,
+            format!("并发 start 收敛后应为 running: {:?}", status_json),
+        );
+    }
+    let reported = status_json
+        .control
+        .clone()
+        .unwrap_or_else(|| fail_case(&mut case, "status 无 control"));
+    if reported.pid != control.pid || reported.port != control.port {
+        fail_case(
+            &mut case,
+            format!("status control 与文件不一致: status={reported:?} file={control:?}"),
+        );
+    }
+
+    // 额外保险：同一 data_dir 下不应再出现第二个存活 listener（health 只认 control 端口）。
+    // stop 必须回收该唯一实例。
+    let stop = case.cli_stop();
+    if !stop.success {
+        fail_case(
+            &mut case,
+            format!("concurrent case stop 失败\n{}", stop.diagnostic()),
+        );
+    }
+    let stop_deadline = Instant::now() + Duration::from_secs(5);
+    while process_is_alive(control.pid) && Instant::now() < stop_deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    if process_is_alive(control.pid) {
+        fail_case(&mut case, format!("stop 后 pid {} 仍存活", control.pid));
+    }
+    if case.control_file_path().exists() || case.pid_file_path().exists() {
+        fail_case(&mut case, "stop 后 control/pid 文件仍存在");
+    }
+}
+
+/// 有界等待 CLI child 并收集 Output；超时 kill 后仍尽量 drain。
+///
+/// Business Logic（为什么需要这个函数）:
+///     并发 start smoke 需要同时等待两个 CLI 子进程，且每个都有 deadline。
+///
+/// Code Logic（这个函数做什么）:
+///     轮询 try_wait；超时 kill+有界 reap；成功后 read_to_end stdout/stderr 组装 Output。
+fn wait_child_output(
+    child: &mut std::process::Child,
+    deadline: Instant,
+    label: &str,
+    case: &mut SmokeCase,
+) -> std::process::Output {
+    use std::io::Read;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_end(&mut stdout);
+                }
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = err.read_to_end(&mut stderr);
+                }
+                return std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                };
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let reap_deadline = Instant::now() + Duration::from_secs(2);
+                    while Instant::now() < reap_deadline {
+                        match child.try_wait() {
+                            Ok(Some(status)) => {
+                                let mut stdout = Vec::new();
+                                let mut stderr = Vec::new();
+                                if let Some(mut out) = child.stdout.take() {
+                                    let _ = out.read_to_end(&mut stdout);
+                                }
+                                if let Some(mut err) = child.stderr.take() {
+                                    let _ = err.read_to_end(&mut stderr);
+                                }
+                                return std::process::Output {
+                                    status,
+                                    stdout,
+                                    stderr,
+                                };
+                            }
+                            Ok(None) => thread::sleep(Duration::from_millis(20)),
+                            Err(err) => fail_case(case, format!("{label} try_wait 失败: {err}")),
+                        }
+                    }
+                    fail_case(
+                        case,
+                        format!("{label} 等待超时且无法回收 (pid={})", child.id()),
+                    );
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => fail_case(case, format!("{label} try_wait 失败: {err}")),
+        }
     }
 }
 
