@@ -51,6 +51,11 @@ export interface HttpCreateOrchestratorTaskRequest {
   externalUrl?: string;
   externalState?: string;
   externalLabels?: string[];
+  /**
+   * 逻辑提交幂等键。调用方在一次提交开始时生成并在失败重试间复用；
+   * 未提供时 transport 才会 mint 新 id（兼容旧调用方，但移动端应显式传入）。
+   */
+  clientRequestId?: string;
 }
 
 export interface HttpCompleteOrchestratorTaskPromptRequest {
@@ -213,6 +218,24 @@ export function createHttpOrchestratorClientRequestId(): string {
 }
 
 /**
+ * Business Logic（为什么需要这个函数）:
+ *   create/createView 必须始终携带非空 clientRequestId；若调用方已在逻辑提交开始时生成，
+ *   则必须原样复用，避免“响应丢失 + 用户重试”因换键产生重复任务。
+ *
+ * Code Logic（这个函数做什么）:
+ *   若 request.clientRequestId 去空白后非空则返回该值；否则 mint 新 id。
+ */
+export function resolveHttpOrchestratorClientRequestId(
+  request: Pick<HttpCreateOrchestratorTaskRequest, 'clientRequestId'>,
+): string {
+  const existing = request.clientRequestId?.trim();
+  if (existing) {
+    return existing;
+  }
+  return createHttpOrchestratorClientRequestId();
+}
+
+/**
  * HTTP Orchestrator Transport。
  *
  * Business Logic（为什么需要这个常量）:
@@ -220,7 +243,7 @@ export function createHttpOrchestratorClientRequestId(): string {
  *
  * Code Logic（这个常量做什么）:
  *   将任务 list/create/action/evidence 映射到 `/api/orchestrator/tasks/...` routes；create/createView 显式携带
- *   createAction、tracker 预留字段和非空 clientRequestId。
+ *   createAction、tracker 预留字段和非空 clientRequestId（优先复用调用方传入的逻辑提交 id）。
  */
 export const httpOrchestratorTransport = {
   tasks: {
@@ -252,7 +275,7 @@ export const httpOrchestratorTransport = {
         externalUrl: request.externalUrl,
         externalState: request.externalState,
         externalLabels: request.externalLabels,
-        clientRequestId: createHttpOrchestratorClientRequestId(),
+        clientRequestId: resolveHttpOrchestratorClientRequestId(request),
       }),
     createView: (request: HttpCreateOrchestratorTaskRequest): Promise<OrchestratorTaskView> =>
       postJson<OrchestratorTaskView>('/api/orchestrator/task-views/create', {
@@ -268,7 +291,7 @@ export const httpOrchestratorTransport = {
         externalUrl: request.externalUrl,
         externalState: request.externalState,
         externalLabels: request.externalLabels,
-        clientRequestId: createHttpOrchestratorClientRequestId(),
+        clientRequestId: resolveHttpOrchestratorClientRequestId(request),
       }),
     completePrompt: (
       request: HttpCompleteOrchestratorTaskPromptRequest,

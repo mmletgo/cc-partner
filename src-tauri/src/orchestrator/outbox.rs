@@ -243,6 +243,16 @@ pub fn is_remote_network_error(error: &AppError) -> bool {
 ///
 /// Code Logic（这个函数做什么）:
 ///     若请求已有非空 client_request_id 则保持不变；缺失或空白时写入 fallback_id，并返回是否修改过。
+/// Business Logic（为什么需要这个函数）:
+///     多跳代理必须把入站 request_id 原样转发到下一跳；trim 会让 ` req-1 ` 变成 `req-1`，
+///     与 middleware/响应信封中的原值脱节，破坏跨设备日志关联。
+///
+/// Code Logic（这个函数做什么）:
+///     空串视为缺失返回 None；非空（含首尾空格）原样返回 `Some`。
+pub(crate) fn select_forwarded_request_id(forwarded_request_id: Option<&str>) -> Option<&str> {
+    forwarded_request_id.filter(|value| !value.is_empty())
+}
+
 fn ensure_remote_create_client_request_id(
     request: &mut RemoteCreateOrchestratorTaskReq,
     fallback_id: &str,
@@ -381,10 +391,7 @@ pub async fn sync_remote_task_mirror_for_project(
     let context =
         open_remote_project_for_shortcut(state, remote_shortcut, forwarded_request_id).await?;
     let mut client = RemoteOrchestratorClient::new();
-    if let Some(request_id) = forwarded_request_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(request_id) = select_forwarded_request_id(forwarded_request_id) {
         client = client.with_forwarded_request_id(request_id);
     }
     let tasks = client
@@ -432,7 +439,8 @@ pub struct RemoteOrchestratorProjectContext {
 ///     所有远端 Orchestrator 操作都必须先通过 Workbench open-project 确保对端有本机 local 项目记录。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验 remote shortcut，解析 base_url，调用 RemoteWorkbenchClient::open_project，并返回远端 local projectId。
+///     校验 remote shortcut，解析 base_url；原样转发非空 request_id（不 trim）后调用
+///     RemoteWorkbenchClient::open_project，并返回远端 local projectId。
 pub async fn open_remote_project_for_shortcut(
     state: &AppState,
     remote_shortcut: &WorkbenchProjectRow,
@@ -441,10 +449,7 @@ pub async fn open_remote_project_for_shortcut(
     ensure_remote_shortcut(remote_shortcut)?;
     let base_url = remote_device_base_url(state, &remote_shortcut.device_id)?;
     let mut client = RemoteWorkbenchClient::new();
-    if let Some(request_id) = forwarded_request_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(request_id) = select_forwarded_request_id(forwarded_request_id) {
         client = client.with_forwarded_request_id(request_id);
     }
     let remote = client
@@ -1067,6 +1072,22 @@ mod tests {
 
         assert_eq!(mirrors.len(), 1);
         assert_eq!(payload.title, "新标题");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     合法 request_id 可含首尾空格（可打印 ASCII）；代理层 trim 会破坏 H4 多跳关联。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 select_forwarded_request_id 原样保留 ` req-1 `，空串→None，None→None。
+    #[test]
+    fn select_forwarded_request_id_keeps_leading_trailing_spaces() {
+        assert_eq!(
+            select_forwarded_request_id(Some(" req-1 ")),
+            Some(" req-1 ")
+        );
+        assert_eq!(select_forwarded_request_id(Some("req-1")), Some("req-1"));
+        assert_eq!(select_forwarded_request_id(Some("")), None);
+        assert_eq!(select_forwarded_request_id(None), None);
     }
 
     /// Business Logic（为什么需要这个测试）:

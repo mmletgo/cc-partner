@@ -610,16 +610,14 @@ async fn get_remote_orchestrator_runtime_snapshot(
         }
     };
     // Business Logic: 多跳代理（mobile→本机→owner）必须复用入站 request_id；Tauri IPC 无入站 ID 时由客户端生成。
+    // 原样保留入站 request_id（含首尾空格），仅空串回落生成新 UUID。
     let request_id = forwarded_request_id
-        .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .unwrap_or_else(crate::net::request_context::new_request_id);
     let mut client = RemoteOrchestratorClient::new();
-    if let Some(request_id) = forwarded_request_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    // 原样转发入站 request_id（含首尾空格）；middleware 接受可打印 ASCII，trim 会破坏跨跳关联。
+    if let Some(request_id) = forwarded_request_id.filter(|value| !value.is_empty()) {
         client = client.with_forwarded_request_id(request_id);
     }
     match client
@@ -917,10 +915,8 @@ async fn create_remote_orchestrator_task_online(
         open_remote_project_for_shortcut(state, remote_shortcut, forwarded_request_id).await?;
     request.project_id = context.remote_project_id.clone();
     let mut client = RemoteOrchestratorClient::new();
-    if let Some(request_id) = forwarded_request_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    // 原样转发入站 request_id（含首尾空格）；middleware 接受可打印 ASCII，trim 会破坏跨跳关联。
+    if let Some(request_id) = forwarded_request_id.filter(|value| !value.is_empty()) {
         client = client.with_forwarded_request_id(request_id);
     }
     let task = client.create_task(&context.base_url, request).await?;

@@ -1,5 +1,5 @@
 import { describe, test } from 'vitest';
-import { httpOrchestratorTransport, httpWorkbenchTransport } from './workbenchHttp';
+import { createHttpOrchestratorClientRequestId, httpOrchestratorTransport, httpWorkbenchTransport } from './workbenchHttp';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -283,3 +283,100 @@ describe('workbenchHttp', () => {
     }
   });
 });
+
+
+describe('workbenchHttp createView idempotency', () => {
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   响应丢失后用户重试必须复用同一 clientRequestId，否则 owner 会创建重复任务。
+   *
+   * Code Logic（这个测试做什么）:
+   *   调用方固定一个 id，连续两次 createView；断言两笔 body.clientRequestId 完全相同。
+   */
+  test('createView reuses caller-provided clientRequestId across retries', async () => {
+    const capturedBodies: unknown[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      capturedBodies.push(JSON.parse(String(init?.body ?? '{}')) as unknown);
+      return {
+        ok: true,
+        json: async () => ({ ok: true, id: 'task-1' }),
+      } as Response;
+    };
+
+    try {
+      const clientRequestId = createHttpOrchestratorClientRequestId();
+      const request = {
+        projectId: 'project-retry',
+        title: '重试幂等',
+        goal: '同一逻辑提交',
+        acceptanceCriteria: '仅一条任务',
+        createAction: 'todo' as const,
+        clientRequestId,
+      };
+
+      await httpOrchestratorTransport.tasks.createView(request);
+      await httpOrchestratorTransport.tasks.createView(request);
+
+      assert(capturedBodies.length === 2, 'should capture two createView bodies');
+      const first = capturedBodies[0] as Record<string, unknown>;
+      const second = capturedBodies[1] as Record<string, unknown>;
+      assert(
+        first.clientRequestId === clientRequestId,
+        'first createView should use caller clientRequestId',
+      );
+      assert(
+        second.clientRequestId === clientRequestId,
+        'retry createView should reuse the same clientRequestId',
+      );
+      assert(
+        first.clientRequestId === second.clientRequestId,
+        'clientRequestId must be stable across retries',
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   未传 clientRequestId 时 transport 仍应自动 mint，保证后端契约不破。
+   *
+   * Code Logic（这个测试做什么）:
+   *   两次不带 id 的 createView，断言各自非空且两次不同（新逻辑提交默认新键）。
+   */
+  test('createView mints non-empty clientRequestId when omitted', async () => {
+    const capturedBodies: unknown[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      capturedBodies.push(JSON.parse(String(init?.body ?? '{}')) as unknown);
+      return {
+        ok: true,
+        json: async () => ({ ok: true }),
+      } as Response;
+    };
+
+    try {
+      await httpOrchestratorTransport.tasks.createView({
+        projectId: 'p',
+        title: 'a',
+        goal: 'b',
+        acceptanceCriteria: 'c',
+      });
+      await httpOrchestratorTransport.tasks.createView({
+        projectId: 'p',
+        title: 'a',
+        goal: 'b',
+        acceptanceCriteria: 'c',
+      });
+      const first = (capturedBodies[0] as Record<string, unknown>).clientRequestId;
+      const second = (capturedBodies[1] as Record<string, unknown>).clientRequestId;
+      assert(typeof first === 'string' && first.length > 0, 'first id non-empty');
+      assert(typeof second === 'string' && second.length > 0, 'second id non-empty');
+      assert(first !== second, 'omitted ids should be freshly minted per call');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
