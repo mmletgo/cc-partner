@@ -1,5 +1,5 @@
 import { describe, test } from 'vitest';
-import { getWorkbenchBrowserFrameSrc } from '@/components/domain/WorkbenchBrowserWorkspace/WorkbenchBrowserWorkspace';
+import { getWorkbenchBrowserFrameSrc } from '@/components/domain/WorkbenchBrowserWorkspace/workbenchBrowserHelpers';
 import type { WorkbenchBrowserPreview } from '@/lib/types';
 
 /**

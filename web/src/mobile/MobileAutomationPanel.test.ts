@@ -65,6 +65,141 @@ describe('MobileAutomationPanel', () => {
     );
     assertContains(
       panelSource,
+      'httpOrchestratorTransport.getRuntimeSnapshot',
+      'mobile automation should load remote-aware runtime snapshot through mobile HTTP route',
+    );
+    assertContains(
+      panelSource,
+      'applyMobileRuntimeSnapshotSuccess',
+      'mobile automation should apply in-memory runtime snapshot cache store',
+    );
+    assertContains(
+      panelSource,
+      'toRuntimeLoadError',
+      'mobile automation runtime load catch must preserve transport Error kind via toRuntimeLoadError',
+    );
+    assertNotContains(
+      panelSource,
+      'new Error(getErrorMessage(reason))',
+      'mobile automation must not rewrap runtime load errors and drop transport kind',
+    );
+    assertContains(
+      panelSource,
+      'runtimeDisplay.snapshot.generatedAt',
+      'mobile runtime strip must render owner generatedAt',
+    );
+    assertContains(
+      panelSource,
+      'runtimeDisplay.snapshot.latestTickAt',
+      'mobile runtime strip must render owner latestTickAt',
+    );
+    assertContains(
+      panelSource,
+      'runtimeDisplay.snapshot.recentEvents',
+      'mobile runtime strip must render owner recentEvents',
+    );
+    assertContains(
+      panelSource,
+      'runtimeGeneratedAt',
+      'mobile automation must reference runtimeGeneratedAt i18n key',
+    );
+    assertContains(
+      panelSource,
+      'runtimeLatestTickAt',
+      'mobile automation must reference runtimeLatestTickAt i18n key',
+    );
+    assertContains(
+      panelSource,
+      'runtimeRecentEvents',
+      'mobile automation must reference runtimeRecentEvents i18n key',
+    );
+    assertContains(
+      zhWorkbench,
+      '"runtimeGeneratedAt": "生成时间 {{time}}"',
+      'zh locale must include runtime generatedAt copy',
+    );
+    assertContains(
+      enWorkbench,
+      '"runtimeGeneratedAt": "Generated {{time}}"',
+      'en locale must include runtime generatedAt copy',
+    );
+    assertContains(
+      zhWorkbench,
+      '"runtimeRecentEvents": "最近事件"',
+      'zh locale must include recent events copy',
+    );
+    assertContains(
+      enWorkbench,
+      '"runtimeRecentEvents": "Recent events"',
+      'en locale must include recent events copy',
+    );
+    assertContains(
+      panelSource,
+      'runtimeCachedHint',
+      'mobile automation should mark offline cached runtime as display-only',
+    );
+    assertContains(
+      panelSource,
+      "runtimeDisplay.snapshot?.remoteStatus === 'local'",
+      'mobile automation local success must use local status label',
+    );
+    assertContains(
+      panelSource,
+      'runtimeStatusLocal',
+      'mobile automation must reference runtimeStatusLocal for local snapshots',
+    );
+    assertContains(
+      panelSource,
+      'runtimeDisplay.cachedAt !== null',
+      'mobile automation cached hint requires warm offline snapshot+cachedAt',
+    );
+    assertContains(
+      panelSource,
+      'selectMobileRuntimeDisplayForProject',
+      'mobile automation must isolate runtime display by project on first render',
+    );
+    assertContains(
+      panelSource,
+      'emptyMobileRuntimeDisplayState(true, null, projectId)',
+      'project change must synchronously reset runtime display owned by new projectId',
+    );
+    assertContains(
+      panelSource,
+      'OwnedMobileRuntimeDisplayState',
+      'mobile runtime display state must carry owning projectId',
+    );
+    assertContains(
+      zhWorkbench,
+      '"runtimeStatusOffline": "离线"',
+      'zh offline label must be neutral offline without claiming cache',
+    );
+    assertContains(
+      enWorkbench,
+      '"runtimeStatusOffline": "Offline"',
+      'en offline label must be neutral offline without claiming cache',
+    );
+    assertContains(
+      zhWorkbench,
+      '"runtimeStatusLocal": "本机"',
+      'zh local runtime label must exist',
+    );
+    assertContains(
+      enWorkbench,
+      '"runtimeStatusLocal": "Local"',
+      'en local runtime label must exist',
+    );
+    assertContains(
+      panelSource,
+      'loadRuntimeSnapshot(projectId)',
+      'mobile automation should refresh runtime snapshot with tasks',
+    );
+    assertContains(
+      workbenchHttpSource,
+      "/api/mobile/orchestrator/runtime-snapshot",
+      'HTTP transport should call mobile runtime-snapshot route rather than owner P2P base URL',
+    );
+    assertContains(
+      panelSource,
       'httpOrchestratorTransport.tasks.createView',
       'mobile automation should create local or remote tasks through task view HTTP proxy',
     );
@@ -222,6 +357,102 @@ describe('MobileAutomationPanel', () => {
       enWorkbench,
       '"openExecutionContext": "Open execution context"',
       'en workbench locale should include open execution context copy',
+    );
+  });
+
+  test('runtime cache is display-only and actions derive from task DTO not snapshot', () => {
+    const panelSource = readFileSync(
+      new URL('./components/MobileAutomationPanel.tsx', import.meta.url),
+      'utf8',
+    );
+    const desktopHookSource = readFileSync(
+      new URL('../hooks/useOrchestratorRuntimeSnapshot.ts', import.meta.url),
+      'utf8',
+    );
+    const mobileStoreSource = readFileSync(
+      new URL('./mobileRuntimeSnapshotStore.ts', import.meta.url),
+      'utf8',
+    );
+    const actionHelperSource = readFileSync(new URL('../lib/orchestrator.ts', import.meta.url), 'utf8');
+
+    assertContains(
+      panelSource,
+      'runtimeCachedHint',
+      'mobile offline cache must be labeled display-only',
+    );
+    assertNotContains(
+      panelSource,
+      'localStorage',
+      'MobileAutomationPanel must not touch localStorage for runtime cache',
+    );
+    assertNotContains(
+      panelSource,
+      'sessionStorage',
+      'MobileAutomationPanel must not touch sessionStorage for runtime cache',
+    );
+    assertNotContains(
+      desktopHookSource,
+      'localStorage',
+      'desktop runtime hook must not touch localStorage',
+    );
+    assertNotContains(
+      desktopHookSource,
+      'sessionStorage',
+      'desktop runtime hook must not touch sessionStorage',
+    );
+    // 注释可提及 localStorage 约束；生产路径不得出现实际 storage API 调用。
+    assertNotContains(
+      mobileStoreSource,
+      'localStorage.',
+      'mobile runtime store must not call localStorage APIs',
+    );
+    assertNotContains(
+      mobileStoreSource,
+      'sessionStorage',
+      'mobile runtime store must not reference sessionStorage',
+    );
+    // 动作可用性只读 task DTO 字段，参数签名不得出现 runtime snapshot。
+    assertContains(
+      actionHelperSource,
+      'export function canStartOrchestratorTaskForProject(\n  task: OrchestratorTask | null,\n  currentProjectId: string | null | undefined,\n)',
+      'canStart must only take task + projectId, not runtime snapshot cache',
+    );
+    assertContains(
+      actionHelperSource,
+      'export function canCancelOrchestratorTaskForProject(\n  task: OrchestratorTask | null,\n  currentProjectId: string | null | undefined,\n)',
+      'canCancel must only take task + projectId, not runtime snapshot cache',
+    );
+    assertNotContains(
+      actionHelperSource,
+      'OrchestratorRuntimeSnapshot',
+      'action helpers must not import or consume runtime snapshot types',
+    );
+    // 面板任务动作走 task view transport；runtime snapshot 只出现在状态条文案，不驱动 create/start。
+    assertContains(
+      panelSource,
+      'httpOrchestratorTransport.tasks.listViews',
+      'actions path continues to use task views transport',
+    );
+    assertContains(
+      panelSource,
+      'httpOrchestratorTransport.tasks.createView',
+      'create actions use task createView, not runtime snapshot cache',
+    );
+    assertNotContains(
+      panelSource,
+      'canStartOrchestratorTaskForProject(runtime',
+      'start availability must not be computed from runtime snapshot cache',
+    );
+    // 状态条文案可读取 runtimeDisplay.snapshot；任务动作 gate 不得用 snapshot 真值分支。
+    assertNotContains(
+      panelSource,
+      'if (runtimeDisplay.snapshot) {',
+      'task action gates must not branch on runtimeDisplay.snapshot truthiness',
+    );
+    assertNotContains(
+      panelSource,
+      'canStartOrchestratorTaskForProject(runtimeDisplay.snapshot',
+      'start action must not consume runtimeDisplay.snapshot',
     );
   });
 });

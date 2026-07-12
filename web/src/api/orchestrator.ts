@@ -9,6 +9,7 @@
  */
 
 import { invoke } from './client';
+import { toOrchestratorRuntimeTransportError } from './orchestratorRuntimeTransportError';
 import type {
   OrchestratorEvidence,
   OrchestratorRuntimeSnapshot,
@@ -305,11 +306,26 @@ export const orchestratorApi = {
    * Code Logic（这个函数做什么）:
    *   调用 get_orchestrator_runtime_snapshot，并返回后端 camelCase runtime snapshot DTO。
    */
-  getRuntimeSnapshot: (projectId: string) =>
-    invoke<OrchestratorRuntimeSnapshot>(
-      ORCHESTRATOR_REMOTE_COMMANDS.getRuntimeSnapshot,
-      buildOrchestratorRuntimeSnapshotInvokeArgs(projectId),
-    ),
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Workbench 自动化看板需要展示调度器是否启用、workflow 是否有效和当前并发槽位。
+   *   传输失败必须抛结构化 kind，禁止 hook 再靠 Error.message 关键词猜 offline。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 get_orchestrator_runtime_snapshot；reject 包装为 OrchestratorRuntimeTransportError(kind=unknown)，
+   *   因为后端成功路径已把远端四态收敛为 DTO，真正抛错通常是本机命令/协议层，不能推断 network。
+   */
+  getRuntimeSnapshot: async (projectId: string) => {
+    try {
+      return await invoke<OrchestratorRuntimeSnapshot>(
+        ORCHESTRATOR_REMOTE_COMMANDS.getRuntimeSnapshot,
+        buildOrchestratorRuntimeSnapshotInvokeArgs(projectId),
+      );
+    } catch (reason) {
+      // 后端成功路径已收敛四态 DTO；invoke 抛错多为本机命令/协议层，不能关键词推断 network。
+      throw toOrchestratorRuntimeTransportError(reason, 'unknown');
+    }
+  },
 
   /**
    * Business Logic（为什么需要这个函数）:

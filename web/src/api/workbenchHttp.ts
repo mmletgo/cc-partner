@@ -10,6 +10,7 @@
 
 import type {
   OrchestratorEvidence,
+  OrchestratorRuntimeSnapshot,
   OrchestratorTask,
   OrchestratorTaskPromptCompletion,
   OrchestratorTaskView,
@@ -28,6 +29,10 @@ import type {
 } from '@/lib/types';
 import type { WorkbenchPaneSplitDirection } from './workbench';
 import type { OrchestratorCreateAction } from './orchestrator';
+import {
+  OrchestratorRuntimeTransportError,
+  toOrchestratorRuntimeTransportError,
+} from './orchestratorRuntimeTransportError';
 import type { WorkbenchTransport } from './workbenchTransport';
 
 export type HttpCreateOrchestratorTaskAction = OrchestratorCreateAction;
@@ -104,7 +109,8 @@ async function readHttpErrorMessage(response: Response): Promise<string> {
 async function parseJsonResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const message = await readHttpErrorMessage(response);
-    throw new Error(message);
+    // HTTP 非 2xx 是协议/业务失败：用 protocol，禁止 hook 因 message 含“连接”误判 offline。
+    throw new OrchestratorRuntimeTransportError(message, 'protocol');
   }
   return (await response.json()) as T;
 }
@@ -117,14 +123,20 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
  *   以 application/json 发送 body，解析成功 JSON；非 2xx 时抛出后端 error/message。
  */
 export async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (reason) {
+    // fetch 本身失败（断网/DNS/CORS 等）是传输层 network，不靠文案匹配。
+    throw toOrchestratorRuntimeTransportError(reason, 'network');
+  }
   return parseJsonResponse<T>(response);
 }
 
@@ -136,12 +148,17 @@ export async function postJson<T>(path: string, body: unknown): Promise<T> {
  *   发起同源 GET 请求，成功时解析 JSON，失败时读取 JSON error/message 或文本后抛 Error。
  */
 export async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(path, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+      },
+    });
+  } catch (reason) {
+    throw toOrchestratorRuntimeTransportError(reason, 'network');
+  }
   return parseJsonResponse<T>(response);
 }
 
@@ -242,6 +259,17 @@ export const httpOrchestratorTransport = {
       return response.evidence;
     },
   },
+  /**
+   * Business Logic（为什么需要这个方法）:
+   *   手机自动化面板需要拉取本机/远端 shortcut 的 runtime snapshot，且不能直连 owning device P2P base URL。
+   *
+   * Code Logic（这个函数做什么）:
+   *   POST `/api/mobile/orchestrator/runtime-snapshot`，body `{projectId}`，返回 camelCase snapshot DTO。
+   */
+  getRuntimeSnapshot: (projectId: string): Promise<OrchestratorRuntimeSnapshot> =>
+    postJson<OrchestratorRuntimeSnapshot>('/api/mobile/orchestrator/runtime-snapshot', {
+      projectId,
+    }),
 } as const;
 
 /**

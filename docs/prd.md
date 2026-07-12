@@ -260,7 +260,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 目标态验证通过后，只有 Settings 中全局自动化启用且 full-auto 交付开关全部开启才自动完成 commit、推送任务分支、合并主工作区和推送主分支；默认自动化关闭或任一交付开关关闭时任务进入 Human Review 等待用户复核
 - 任务进入 Blocked 或循环修复时保留原因、worktree/session 入口和 evidence 链；Evidence 记录验证输出、验证 Claude 裁决、修复 Prompt、交付阶段结果和失败摘要，供前端任务看板展示与追溯
 - OrchestratorPanel 只拥有项目级任务看板、点击任务后出现的右侧详情/Evidence 抽屉、创建任务弹窗和编排状态，不展示项目级策略或配置；Workbench 拥有项目级自动化控制台挂载、项目上下文、执行现场 deep link takeover、文件和 Git 操作
-- Workbench 自动化状态条通过后端 runtime snapshot 展示生成时间、最近调度 tick/dispatch 时间、scheduler 开关、workflow 来源与校验结果、全局最大并发、当前项目槽位占用、运行中任务摘要、重试/返工任务摘要、最近 scheduler/runner 事件和最近错误；状态条提供手动刷新入口与 Settings 自动化 tab 链接。snapshot 只作为观察/诊断面，不作为任务正确性的唯一来源；remote shortcut 本轮必须返回明确的 `remoteStatus=unsupported/unavailable` 空快照和用户可见文案，后续如需展示远端状态必须由 owning device 提供 P2P snapshot，不能用本机状态代替
+- Workbench 自动化状态条通过后端 runtime snapshot 展示生成时间、最近调度 tick/dispatch 时间、scheduler 开关、workflow 来源与校验结果、全局最大并发、当前项目槽位占用、运行中任务摘要、重试/返工任务摘要、最近 scheduler/runner 事件和最近错误；状态条提供手动刷新入口与 Settings 自动化 tab 链接。snapshot 只作为观察/诊断面，不作为任务正确性的唯一来源，也不能驱动 scheduler、验证、交付或任务 action。本机项目直接读取本机权威快照；remote shortcut 必须向 owning device 拉取 live 数据（P2P `POST /api/orchestrator/runtime-snapshot`，capability `orchestrator.runtime-snapshot.v1`），只映射 shortcut 身份/表面 ID，保留 owner 的 generatedAt/tick/slots/running/retrying/events 等运行时字段，禁止用本机 telemetry 补空。远端展示四态为 `live`（在线权威数据）、`unsupported`（对端无能力）、`offline`（传输不可达）、`unavailable`（协议/业务失败），状态分支只看类型化错误，不看本地化文案或 404 猜测。桌面与移动端各自维护进程内、按 projectId 隔离的 display-only 最后一次成功缓存：live→offline 可展示缓存并标最后更新时间；cold offline 无缓存则为空态，不得伪造数据；缓存不写 SQLite/localStorage/磁盘，且绝不能进入执行决策。
 
 ## 3. 非功能需求
 

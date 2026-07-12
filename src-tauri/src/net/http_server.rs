@@ -753,6 +753,17 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/orchestrator/projects/refresh",
             post(orchestrator::refresh_project),
         )
+        // Orchestrator owning-device runtime snapshot：供 remote shortcut 状态条拉取权威运行时快照。
+        // 由 orchestrator.runtime-snapshot.v1 能力 token 门控；仅服务本机 local 项目。
+        .route(
+            "/api/orchestrator/runtime-snapshot",
+            post(orchestrator::runtime_snapshot),
+        )
+        // Mobile-facing runtime snapshot：手机浏览器同源调用，remote-aware 四态分发，不暴露 owner base URL。
+        .route(
+            "/api/mobile/orchestrator/runtime-snapshot",
+            post(orchestrator::mobile_runtime_snapshot),
+        )
         .route("/api/orchestrator/config", get(orchestrator::get_config))
         // 移动端 SPA fallback：只服务 /mobile 命名空间；其它未知路径保持 404。
         .fallback_service(service_fn(move |req| {

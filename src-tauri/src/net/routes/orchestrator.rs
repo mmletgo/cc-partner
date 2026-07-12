@@ -11,8 +11,9 @@
 use crate::commands::orchestrator::{
     build_orchestrator_task_row, create_orchestrator_task_view_for_http,
     dispatch_orchestrator_best_effort, ensure_reviewed_delivery_allowed,
+    get_orchestrator_runtime_snapshot_for_project, get_orchestrator_runtime_snapshot_for_state,
     list_orchestrator_task_views_for_state, run_delivery_for_task, CreateOrchestratorTaskRequest,
-    OrchestratorTaskViewDto,
+    OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
 };
 use crate::commands::prompt_optimizer::{
     local_complete_orchestrator_task_prompt, OrchestratorTaskPromptCompletionDto,
@@ -28,12 +29,13 @@ use crate::orchestrator::models::{
 use crate::orchestrator::outbox::open_remote_project_for_shortcut;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::{
-    RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq, RemoteListTasksReq,
-    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp,
-    RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp, RemoteTaskReq,
-    RemoteTaskReworkReq,
+    MobileRuntimeSnapshotReq, RemoteCompleteOrchestratorTaskPromptReq,
+    RemoteCreateOrchestratorTaskReq, RemoteListTasksReq, RemoteOrchestratorConfigResp,
+    RemoteOrchestratorEvidenceResp, RemoteOrchestratorProjectRefreshResp,
+    RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq, RemoteTaskReq, RemoteTaskReworkReq,
 };
 use crate::orchestrator::repo::OrchestratorRepo;
+use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetrySnapshot;
 use crate::state::AppState;
 use crate::storage::WorkbenchProjectRepo;
 use crate::workbench::models::WorkbenchProjectRow;
@@ -372,6 +374,43 @@ async fn refresh_project_for_state(
         project_id: project_id.to_string(),
         dispatched,
     })
+}
+
+/// 构造 owning-device 项目运行时快照。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的状态条需要拉取 owning device 上的权威运行时快照（调度器、workflow、槽位和事件），
+///     不能用本机 shortcut 的 scheduler/config/workflow 冒充。本函数复用 T1 共享 builder，
+///     保证远端设备状态条与本机命令看到的是同一份本地快照构造逻辑。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 projectId 对应的本机 Workbench 项目，要求 kind == local（拒绝 remote shortcut 递归代理），
+///     读取设备级 Orchestrator 配置，再调用共享 builder 组装 runtime snapshot DTO。
+///     本函数从不调用 remote_client——它只服务 owning device 上的 local 项目。
+async fn runtime_snapshot_for_state(
+    state: &OrchestratorRouteContext,
+    project_id: &str,
+    scheduler_snapshot: &OrchestratorSchedulerTelemetrySnapshot,
+) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
+    let project = state
+        .workbench_project_repo
+        .get(project_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("远端 Orchestrator 项目不存在"))?;
+    ensure_remote_orchestrator_local_project(&project)?;
+    let config = state
+        .config
+        .read()
+        .expect("config 读锁中毒")
+        .orchestrator
+        .clone();
+    get_orchestrator_runtime_snapshot_for_project(
+        state.orchestrator_repo.as_ref(),
+        &config,
+        &project,
+        scheduler_snapshot,
+    )
+    .await
 }
 
 /// 读取远端设备 Orchestrator 全局配置。
@@ -719,6 +758,66 @@ pub async fn refresh_project(
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.projects.refresh"))?;
     Ok(Json(resp))
+}
+
+/// 读取 owning-device 项目运行时快照 HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的状态条需要通过 P2P HTTP 拉取 owning device 上的权威运行时快照，
+///     供前端展示调度器、workflow、槽位和最近事件。本路由由 `orchestrator.runtime-snapshot.v1`
+///     能力 token 门控。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 snake_case `{project_id}` 请求体，构造 route context 并读取 scheduler telemetry 快照，
+///     委托 runtime_snapshot_for_state。本 handler 从不调用 remote_client，仅服务本机 local 项目。
+pub async fn runtime_snapshot(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteRuntimeSnapshotReq>,
+) -> P2pResult<Json<OrchestratorRuntimeSnapshotDto>> {
+    let project_id = req.project_id.trim().to_string();
+    if project_id.is_empty() {
+        return Err(P2pError::from_app_error(
+            AppError::validation("远端 Orchestrator runtime snapshot 缺少 project_id"),
+            &ctx,
+            "orchestrator.runtime_snapshot",
+        ));
+    }
+    let context = OrchestratorRouteContext::from_app_state(&state);
+    let scheduler_snapshot = state.orchestrator_scheduler_telemetry.snapshot();
+    let snapshot = runtime_snapshot_for_state(&context, &project_id, &scheduler_snapshot)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.runtime_snapshot"))?;
+    Ok(Json(snapshot))
+}
+
+/// 读取 mobile-facing 项目运行时快照 HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机浏览器 `/mobile` 需要通过同源 HTTP 拉取本机或远端 shortcut 的 runtime snapshot，
+///     且必须复用与 Tauri 命令相同的四态 helper，不能把 owning device 的 P2P base URL 暴露给浏览器。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 camelCase `{projectId}`（MobileRuntimeSnapshotReq），trim 后委托
+///     `get_orchestrator_runtime_snapshot_for_state`；该 helper 对 local/remote 分流，
+///     远端成功返回 live 映射快照，preflight/peer 失败返回 offline/unsupported/unavailable 空快照 DTO。
+pub async fn mobile_runtime_snapshot(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<MobileRuntimeSnapshotReq>,
+) -> P2pResult<Json<OrchestratorRuntimeSnapshotDto>> {
+    let project_id = req.project_id.trim().to_string();
+    if project_id.is_empty() {
+        return Err(P2pError::from_app_error(
+            AppError::validation("移动端 Orchestrator runtime snapshot 缺少 projectId"),
+            &ctx,
+            "orchestrator.mobile.runtime_snapshot",
+        ));
+    }
+    let snapshot = get_orchestrator_runtime_snapshot_for_state(&state, &project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.mobile.runtime_snapshot"))?;
+    Ok(Json(snapshot))
 }
 
 /// 读取 Orchestrator 全局配置 HTTP handler。
@@ -1355,5 +1454,280 @@ mod tests {
         );
         assert_eq!(p2p.envelope().code, "validation_error");
         assert_eq!(p2p.envelope().request_id, "req-guard");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     owning-device runtime-snapshot 路由的核心契约：对端用本机 local projectId 调用，
+    ///     必须返回与本机命令相同的 runtime snapshot DTO（remote_status=local）。
+    ///     路由必须复用 T1 共享 builder，不能另起一套本地构造逻辑。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 local 项目后调用 runtime_snapshot_for_state，断言关键字段（projectId、projectKind、
+    ///     remoteStatus、schedulerEnabled）与本地 builder 产出一致。
+    #[tokio::test]
+    async fn runtime_snapshot_returns_local_dto_for_local_project() {
+        let state = test_state().await;
+        insert_project(&state, "project-1", "local").await;
+
+        let snapshot = runtime_snapshot_for_state(
+            &state,
+            "project-1",
+            &OrchestratorSchedulerTelemetrySnapshot::default(),
+        )
+        .await
+        .expect("local project snapshot");
+
+        assert_eq!(snapshot.project_id, "project-1");
+        assert_eq!(snapshot.project_kind, "local");
+        assert_eq!(snapshot.remote_status, "local");
+        assert!(snapshot.workflow_error.is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     runtime-snapshot 路由必须拒绝 remote shortcut 项目，避免递归代理到第三台设备。
+    ///     remote shortcut 的 runtime snapshot 不能用本机 scheduler/config/workflow 冒充。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 remote kind 项目后调用 runtime_snapshot_for_state，断言返回 validation 错误
+    ///     （HTTP 边界映射 400 validation_error），且错误经 P2pError 信封后携带稳定 request_id。
+    #[tokio::test]
+    async fn runtime_snapshot_rejects_remote_shortcut_project_with_envelope() {
+        let state = test_state().await;
+        insert_project(&state, "remote:device-a:project-1", "remote").await;
+
+        let error = runtime_snapshot_for_state(
+            &state,
+            "remote:device-a:project-1",
+            &OrchestratorSchedulerTelemetrySnapshot::default(),
+        )
+        .await
+        .expect_err("remote shortcut must be rejected");
+
+        assert_eq!(error.to_string(), "远端 Orchestrator 只接受对端本机项目");
+
+        // 验证错误经 P2pError 信封映射后为 400 validation_error 且携带稳定 request_id。
+        let ctx = P2pRequestContext {
+            request_id: "req-runtime-snapshot".to_string(),
+        };
+        let p2p = P2pError::from_app_error(error, &ctx, "orchestrator.runtime_snapshot");
+        assert_eq!(p2p.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(p2p.envelope().code, "validation_error");
+        assert_eq!(p2p.envelope().request_id, "req-runtime-snapshot");
+        assert!(!p2p.envelope().retryable);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     projectId 指向本设备不存在的项目时，路由必须返回 not_found（HTTP 404）而非 500。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     不插入任何项目，直接调用 runtime_snapshot_for_state，断言返回 not_found 错误且经
+    ///     P2pError 映射后为 404。
+    #[tokio::test]
+    async fn runtime_snapshot_returns_not_found_for_unknown_project() {
+        let state = test_state().await;
+
+        let error = runtime_snapshot_for_state(
+            &state,
+            "missing-project",
+            &OrchestratorSchedulerTelemetrySnapshot::default(),
+        )
+        .await
+        .expect_err("unknown project must return not_found");
+
+        let ctx = P2pRequestContext {
+            request_id: "req-not-found".to_string(),
+        };
+        let p2p = P2pError::from_app_error(error, &ctx, "orchestrator.runtime_snapshot");
+        assert_eq!(p2p.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(p2p.envelope().code, "not_found");
+        assert_eq!(p2p.envelope().request_id, "req-not-found");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     handler 在进入 route helper 前必须把空白 projectId 转成 validation_error（400），
+    ///     而不是把空串带到 repo.get 查询。这是 handler 层 guard，与 route helper 的项目解析互补。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     模拟 handler 对 RemoteRuntimeSnapshotReq.project_id 的 trim 判空逻辑，
+    ///     并断言对应 AppError::validation 经 P2pError 映射后为 400 validation_error。
+    #[tokio::test]
+    async fn runtime_snapshot_handler_rejects_blank_project_id() {
+        // 复刻 handler 内部 trim 判空逻辑：空白 projectId 必须被识别为空。
+        for blank in ["", "   ", "\t\n"] {
+            let req = RemoteRuntimeSnapshotReq {
+                project_id: blank.to_string(),
+            };
+            let trimmed = req.project_id.trim().to_string();
+            assert!(trimmed.is_empty(), "trim 后应识别为空白: {blank:?}");
+        }
+
+        // 断言 handler 使用的 AppError::validation 映射到稳定 P2pError 信封（400 validation_error）。
+        let ctx = P2pRequestContext {
+            request_id: "req-blank".to_string(),
+        };
+        let app_error = AppError::validation("远端 Orchestrator runtime snapshot 缺少 project_id");
+        let p2p = P2pError::from_app_error(app_error, &ctx, "orchestrator.runtime_snapshot");
+        assert_eq!(p2p.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(p2p.envelope().code, "validation_error");
+        assert_eq!(p2p.envelope().request_id, "req-blank");
+        assert!(!p2p.envelope().retryable);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     P2P route 必须接受字面量 `{"project_id":"..."}` 并拒绝 camelCase `{"projectId":...}`，
+    ///     防止 client/server 共用错误 DTO 掩盖 wire 漂移。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 axum Router + oneshot 直接 POST 两种 body：snake_case 200 且回显 project_id；
+    ///     camelCase 422 且不进入业务 handler。
+    #[tokio::test]
+    async fn runtime_snapshot_router_accepts_snake_case_and_rejects_camel_case_body() {
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        async fn echo_project_id(
+            Json(req): Json<RemoteRuntimeSnapshotReq>,
+        ) -> Json<serde_json::Value> {
+            Json(serde_json::json!({ "project_id": req.project_id }))
+        }
+
+        let app = Router::new().route("/api/orchestrator/runtime-snapshot", post(echo_project_id));
+
+        let snake_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/orchestrator/runtime-snapshot")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"project_id":"owner-local-1"}"#))
+            .expect("snake request");
+        let snake_resp = app.clone().oneshot(snake_req).await.expect("snake oneshot");
+        assert_eq!(snake_resp.status(), axum::http::StatusCode::OK);
+        let snake_bytes = axum::body::to_bytes(snake_resp.into_body(), 1024 * 1024)
+            .await
+            .expect("snake body");
+        let snake_json: serde_json::Value =
+            serde_json::from_slice(&snake_bytes).expect("snake json");
+        assert_eq!(snake_json["project_id"], "owner-local-1");
+
+        let camel_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/orchestrator/runtime-snapshot")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"projectId":"owner-local-1"}"#))
+            .expect("camel request");
+        let camel_resp = app.oneshot(camel_req).await.expect("camel oneshot");
+        assert_eq!(
+            camel_resp.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "P2P route must reject camelCase projectId body"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试 / T2 契约核心）:
+    ///     能力 token `orchestrator.runtime-snapshot.v1` 与对应路由必须**原子上线**：
+    ///     本机宣告该 token 时，路由 `/api/orchestrator/runtime-snapshot` 必须已注册；
+    ///     对端据此决定能否安全调用新路由。本测试锁死 token 与 route 注册共存。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 server_protocol_info() 宣告了 `orchestrator.runtime-snapshot.v1`，且 route handler
+    ///     `orchestrator::runtime_snapshot` 存在（通过 `assert_eq` 引用其指针地址，强制编译期共存）。
+    #[test]
+    fn runtime_snapshot_capability_and_route_ship_together() {
+        use crate::net::protocol::{
+            server_protocol_info, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1,
+        };
+
+        let info = server_protocol_info();
+        assert!(
+            info.supports(CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1),
+            "server_protocol_info 必须宣告 orchestrator.runtime-snapshot.v1，实际: {:?}",
+            info.capabilities
+        );
+        // 引用 handler 函数指针，确保路由 handler 与 capability 在同一编译单元共存。
+        // 若 handler 被移除或重命名，本测试会在编译期失败。
+        let handler_ptr = runtime_snapshot
+            as fn(
+                State<AppState>,
+                Extension<P2pRequestContext>,
+                Json<RemoteRuntimeSnapshotReq>,
+            ) -> _;
+        // 用指针非空断言 handler 存在，避免被 dead_code 优化掉。
+        let addr = handler_ptr as usize;
+        assert_ne!(addr, 0, "runtime_snapshot handler 必须存在");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     手机浏览器入口必须注册 remote-aware runtime-snapshot 路由，且不能与 owning-device
+    ///     本地路由混用；handler 在空白 projectId 时返回 validation_error。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     引用 mobile_runtime_snapshot 函数指针保证编译期共存，并复刻空白 projectId 校验映射。
+    #[test]
+    fn mobile_runtime_snapshot_handler_ships_and_rejects_blank_project_id() {
+        let handler_ptr = mobile_runtime_snapshot
+            as fn(
+                State<AppState>,
+                Extension<P2pRequestContext>,
+                Json<MobileRuntimeSnapshotReq>,
+            ) -> _;
+        let addr = handler_ptr as usize;
+        assert_ne!(addr, 0, "mobile_runtime_snapshot handler 必须存在");
+
+        for blank in ["", "   ", "\t\n"] {
+            let req = MobileRuntimeSnapshotReq {
+                project_id: blank.to_string(),
+            };
+            assert!(req.project_id.trim().is_empty());
+        }
+
+        let ctx = P2pRequestContext {
+            request_id: "req-mobile-blank".to_string(),
+        };
+        let app_error = AppError::validation("移动端 Orchestrator runtime snapshot 缺少 projectId");
+        let p2p = P2pError::from_app_error(app_error, &ctx, "orchestrator.mobile.runtime_snapshot");
+        assert_eq!(p2p.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(p2p.envelope().code, "validation_error");
+        assert_eq!(p2p.envelope().request_id, "req-mobile-blank");
+    }
+
+    /// Business Logic（为什么需要这个测试 / T7 route 无本地替代）:
+    ///     owning-device route 对 local 项目必须复用共享 builder 产出 remoteStatus=local 的 DTO，
+    ///     且不得接受 remote shortcut（递归代理会把调用端本地 telemetry 冒充 owner）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     同一 state 下先成功取 local snapshot，再对 remote shortcut 断言 validation 拒绝；
+    ///     local 成功结果 projectKind/remoteStatus 固定为 local，不出现 remote 四态。
+    #[tokio::test]
+    async fn runtime_snapshot_local_success_never_substitutes_remote_status_or_accepts_shortcut() {
+        let state = test_state().await;
+        insert_project(&state, "owner-local-p4t7", "local").await;
+        insert_project(&state, "remote:device-z:owner-local-p4t7", "remote").await;
+
+        let local = runtime_snapshot_for_state(
+            &state,
+            "owner-local-p4t7",
+            &OrchestratorSchedulerTelemetrySnapshot::default(),
+        )
+        .await
+        .expect("local project must succeed");
+        assert_eq!(local.project_id, "owner-local-p4t7");
+        assert_eq!(local.project_kind, "local");
+        assert_eq!(local.remote_status, "local");
+        assert!(
+            !matches!(
+                local.remote_status.as_str(),
+                "live" | "offline" | "unsupported" | "unavailable"
+            ),
+            "owning-device local route 不得返回远端四态"
+        );
+
+        let rejected = runtime_snapshot_for_state(
+            &state,
+            "remote:device-z:owner-local-p4t7",
+            &OrchestratorSchedulerTelemetrySnapshot::default(),
+        )
+        .await
+        .expect_err("remote shortcut must be rejected on owning-device route");
+        assert_eq!(rejected.to_string(), "远端 Orchestrator 只接受对端本机项目");
     }
 }

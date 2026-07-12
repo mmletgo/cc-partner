@@ -570,7 +570,8 @@ mod tests {
     ///     `caps` 的 value 必须是裸 token 列表，对端 wire 侧按 key `caps` 读取。
     ///
     /// Code Logic: 用 advertise 计划构造 ServiceInfo，从 ServiceInfo 读回 TXT 属性，
-    ///             断言 proto=1、caps value 恰为 `errors.envelope.v1`（无 `caps=` 前缀）。
+    ///             断言 proto=1、caps value 恰为当前 `server_protocol_info()` 的全部能力（按字典序拼接），
+    ///             且不含 `caps=` 前缀。
     #[test]
     fn service_info_advertises_proto_and_caps_hints() {
         let plan = DiscoveryStartPlan::new(true, false);
@@ -590,7 +591,8 @@ mod tests {
             .get_property_val_str(TXT_KEY_CAPS)
             .expect("caps TXT must be present");
         // value 必须是裸 token 列表，不能自带 `caps=` 前缀（否则对端读到 `caps=caps=...`）。
-        assert_eq!(caps, "errors.envelope.v1");
+        // encode_mdns_capabilities 按字典序排序去重，因此两个能力按字母序拼接。
+        assert_eq!(caps, "errors.envelope.v1,orchestrator.runtime-snapshot.v1");
         assert!(
             !caps.starts_with("caps="),
             "caps value must NOT carry the `caps=` prefix (it is provided by the TXT key); got: {caps}"

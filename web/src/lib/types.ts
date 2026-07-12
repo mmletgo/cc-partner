@@ -544,6 +544,22 @@ export interface OrchestratorRuntimeEvent {
 }
 
 /**
+ * Orchestrator 远端 runtime 展示状态（live / unsupported / offline / unavailable）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   桌面/移动端状态条需要把 owning device 的可达性与能力情况区分开，
+ *   不能把 offline 与 unsupported 混成同一种空态；本机项目 snapshot 使用 'local' 字面量，不进入该联合。
+ *
+ * Code Logic（这个类型做什么）:
+ *   以字面量联合锁定远端四态；对齐 owning-device 成功/失败映射。snapshot.remoteStatus 为 'local' | 本联合。
+ */
+export type OrchestratorRemoteRuntimeStatus =
+  | 'live'
+  | 'unsupported'
+  | 'offline'
+  | 'unavailable';
+
+/**
  * Orchestrator 项目运行时快照 DTO（对齐 Rust OrchestratorRuntimeSnapshotDto，camelCase）。
  *
  * Business Logic（为什么需要这个类型）:
@@ -551,11 +567,12 @@ export interface OrchestratorRuntimeEvent {
  *
  * Code Logic（字段说明）:
  *   workflowError/latestError 为后端可空错误文本；recentEvents/runningTasks/retryingTasks 为状态条摘要数据。
+ *   remoteStatus 在本机为 local，远端在线成功为 live，其余为 unsupported/offline/unavailable。
  */
 export interface OrchestratorRuntimeSnapshot {
   projectId: string;
   projectKind: 'local' | 'remote' | string;
-  remoteStatus: 'local' | 'unsupported' | 'unavailable' | 'offline';
+  remoteStatus: 'local' | OrchestratorRemoteRuntimeStatus;
   generatedAt: string;
   latestTickAt: string | null;
   lastDispatchAt: string | null;
@@ -571,6 +588,24 @@ export interface OrchestratorRuntimeSnapshot {
   runningTasks: OrchestratorRuntimeTaskSummary[];
   retryingTasks: OrchestratorRuntimeTaskSummary[];
   recentEvents: OrchestratorRuntimeEvent[];
+}
+
+/**
+ * Orchestrator runtime 桌面/移动端显示态（进程内缓存 + 远端状态）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   远端离线后仍需展示最后一次成功快照与收到时间，但不能把缓存交给 scheduler/动作逻辑；桌面 hook 与移动 store 共用形状、缓存彼此独立。
+ *
+ * Code Logic（字段说明）:
+ *   snapshot 为当前应渲染的快照（live/local 成功或 offline 缓存）；remoteStatus 为远端四态或 null（本机）；
+ *   cachedAt 仅在展示缓存时有值；loading/error 描述请求过程。
+ */
+export interface OrchestratorRuntimeDisplayState {
+  snapshot: OrchestratorRuntimeSnapshot | null;
+  remoteStatus: OrchestratorRemoteRuntimeStatus | null;
+  cachedAt: string | null;
+  loading: boolean;
+  error: Error | null;
 }
 
 /**

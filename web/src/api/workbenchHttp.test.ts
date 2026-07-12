@@ -236,6 +236,17 @@ describe('workbenchHttp', () => {
           JSON.stringify({ projectId: 'remote-project-1', taskId: 'remote:device-a:task-1' }),
         'orchestrator evidence should include projectId and taskId',
       );
+
+      await httpOrchestratorTransport.getRuntimeSnapshot('remote-project-1');
+
+      assert(
+        capturedUrls[11] === '/api/mobile/orchestrator/runtime-snapshot',
+        'runtime snapshot should call the mobile remote-aware route',
+      );
+      assert(
+        JSON.stringify(capturedBodies[11]) === JSON.stringify({ projectId: 'remote-project-1' }),
+        'runtime snapshot should send projectId only',
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }

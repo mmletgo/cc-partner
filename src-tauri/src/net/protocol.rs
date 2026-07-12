@@ -36,6 +36,22 @@ pub const PROTOCOL_VERSION_V1: u32 = 1;
 /// Code Logic: 字符串常量，与 `PeerProtocolInfo::supports()` 做精确匹配。
 pub const CAPABILITY_ERRORS_ENVELOPE_V1: &str = "errors.envelope.v1";
 
+/// 能力 token：v1 Orchestrator owning-device runtime-snapshot 路由
+/// （`POST /api/orchestrator/runtime-snapshot`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     对端在调用 owning-device runtime-snapshot 路由前，必须确认本设备已实现该路由，
+///     否则旧版本（未挂载该路由）会返回 404 并触发不必要的重试。该 token 与
+///     `errors.envelope.v1` 解耦——后者只描述错误响应的线材格式，不代表路由存在。
+///
+/// **语义边界（重要）**：本 token 与对应路由 / 能力**原子地**上线：本机宣告该 token 等价于
+/// 本机实现了 `POST /api/orchestrator/runtime-snapshot` 路由。调用方应在调用该路由前
+/// 先用 `PeerProtocolInfo::supports(token)` 确认；本机当前 build 总是宣告该 token。
+///
+/// Code Logic: 字符串常量，与 `PeerProtocolInfo::supports()` 做精确匹配；随路由一起在
+/// `server_protocol_info()` 中宣告。
+pub const CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1: &str = "orchestrator.runtime-snapshot.v1";
+
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -76,14 +92,18 @@ impl PeerProtocolInfo {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     本机对外（health/对端探测）需要宣告自身支持的能力集合，且必须是当前 build 实际存在路由的子集。
-///     本轮（计划初始）只宣告 `errors.envelope.v1`；后续 Runtime/Inbox 计划会随其路由原子地加入新常量与宣告。
+///     本轮在 `errors.envelope.v1` 之外新增 `orchestrator.runtime-snapshot.v1`，与对应 owning-device
+///     runtime-snapshot 路由原子上线；后续 Runtime/Inbox 计划会随其路由原子地加入新常量与宣告。
 ///
 /// Code Logic（这个函数做什么）:
 ///     构造 `protocol_version = 1`，capabilities 为已排序、去重的当前支持能力列表。
 pub fn server_protocol_info() -> PeerProtocolInfo {
     PeerProtocolInfo {
         protocol_version: PROTOCOL_VERSION_V1,
-        capabilities: vec![CAPABILITY_ERRORS_ENVELOPE_V1.to_string()],
+        capabilities: vec![
+            CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
+            CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string(),
+        ],
     }
 }
 
@@ -212,16 +232,23 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     `server_protocol_info()` 是本机对外的能力宣告入口，本轮（计划初始）必须宣告 v1
-    ///     且只包含 `errors.envelope.v1`；其它能力由后续 Runtime/Inbox 计划随路由原子加入。
+    ///     `server_protocol_info()` 是本机对外的能力宣告入口，本轮必须宣告 v1
+    ///     且包含 `errors.envelope.v1` 与 `orchestrator.runtime-snapshot.v1`（后者与 owning-device
+    ///     runtime-snapshot 路由原子上线）；其它能力由后续 Runtime/Inbox 计划随路由原子加入。
     ///
     /// Code Logic（这个测试做什么）:
     ///     调用 `server_protocol_info()`，断言 protocol_version == 1 且 capabilities
-    ///     去重排序后正好等于 `["errors.envelope.v1"]`。
+    ///     去重排序后正好等于 `["errors.envelope.v1", "orchestrator.runtime-snapshot.v1"]`。
     #[test]
-    fn server_protocol_info_advertises_v1_with_errors_envelope() {
+    fn server_protocol_info_advertises_v1_with_current_capabilities() {
         let info = server_protocol_info();
         assert_eq!(info.protocol_version, 1);
-        assert_eq!(info.capabilities, vec!["errors.envelope.v1".to_string()]);
+        assert_eq!(
+            info.capabilities,
+            vec![
+                "errors.envelope.v1".to_string(),
+                "orchestrator.runtime-snapshot.v1".to_string(),
+            ]
+        );
     }
 }
