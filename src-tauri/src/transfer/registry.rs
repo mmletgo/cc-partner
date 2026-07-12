@@ -92,6 +92,9 @@ pub struct TransferRegistry {
     /// （Finding 4 + fix7）。用 Weak 存储，调用方持有的 Arc 全部 drop 后条目可被回收，
     /// 避免未知/随机 ID 永久扩张锁表。
     finalize_locks: Arc<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
+    /// receive_dir 级落盘锁：覆盖 resolve_filename → exclusive place 全过程，
+    /// 防止不同 transfer_id 并发同名接收在检查后互相覆盖。
+    receive_dir_lock: Arc<AsyncMutex<()>>,
     /// 终态墓碑表：finalize 完成后短期保留，重放的最后一块请求与 status 查询命中后返回同一结果。
     tombstones: Arc<Mutex<HashMap<String, TransferTombstone>>>,
 }
@@ -102,8 +105,21 @@ impl TransferRegistry {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
             finalize_locks: Arc::new(Mutex::new(HashMap::new())),
+            receive_dir_lock: Arc::new(AsyncMutex::new(())),
             tombstones: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// 获取 receive_dir 级落盘锁（round9: 并发同名接收 TOCTOU）。
+    ///
+    /// Business Logic（为什么需要这个方法）:
+    ///     不同 transfer_id 只有各自的 finalize 锁；两个同名接收可同时看到 final_path 空闲并互相覆盖。
+    ///     需要一把覆盖“解析冲突名 → 原子落盘”全过程的目录级锁。
+    ///
+    /// Code Logic（这个方法做什么）:
+    ///     返回共享 `AsyncMutex` 的 Arc 克隆，供 finalize 在 resolve+place 前持有。
+    pub fn receive_dir_lock(&self) -> Arc<AsyncMutex<()>> {
+        self.receive_dir_lock.clone()
     }
 
     /// 获取某 transfer_id 的 chunk/finalize 单飞锁（Finding 4 + fix6 + fix7）。

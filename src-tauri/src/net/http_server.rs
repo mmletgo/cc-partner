@@ -382,9 +382,13 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/sync/claude_md/push",
             post(claude_md_sync::claude_md_push),
         )
-        // P2P 文件传输协议（M5）：init/chunk/status，字段 + X-Chunk-Offset header 对照 Python
+        // P2P 文件传输协议（M5）：init/chunk/complete/status；X-Chunk-Offset + complete 握手
         .route("/api/transfer/init", post(transfer::transfer_init))
         .route("/api/transfer/chunk/:id", post(transfer::transfer_chunk))
+        .route(
+            "/api/transfer/complete/:id",
+            post(transfer::transfer_complete),
+        )
         .route("/api/transfer/status/:id", get(transfer::transfer_status))
         // Claude Code 历史同步协议（独立链路）：cc-history/sync/{pull,push}，snake_case 互通
         .route("/api/cc-history/sync/pull", post(cc_history::cc_sync_pull))

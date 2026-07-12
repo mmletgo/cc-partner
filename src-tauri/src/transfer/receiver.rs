@@ -2,15 +2,18 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     对端向本机发送文件时，本机作为接收端：处理 init（创建任务 + 断点续传 offset）、
-//!     chunk（写入临时文件）、finalize（SHA256 校验 + 重命名 + 文件名冲突处理）。
+//!     chunk（写入临时文件）、complete/finalize（SHA256 校验 + 原子落盘 + 文件名冲突处理）。
 //!     对照 Python `transfer/receiver.py`。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `handle_init(state, meta) -> resume_offset`：在 receive_dir 建 `.{transfer_id}.tmp`，
-//!       已存在则返回其大小作 resume_offset；新建 TransferTask（direction=Receive）入 registry。
+//!       已存在则返回其大小作 resume_offset（tmp 大于 size 时拒绝续传并删除损坏 tmp）；
+//!       新建 TransferTask（direction=Receive）入 registry。
 //!     - `handle_chunk(state, id, offset, bytes)`：seek 到 offset 写入 .tmp，更新 transferred_bytes；
 //!       收齐（>= size）时自动 finalize。
-//!     - `handle_complete(state, id)`：SHA256 校验 .tmp，通过则解析文件名冲突后重命名 + 写历史。
+//!     - `handle_complete(state, id)`：显式终态握手；对 size=0 或 resume 已满的任务触发 finalize，
+//!       并返回与 chunk 相同的 `{success, received_bytes}`（命中墓碑则幂等回放）。
+//!     - finalize：SHA256 校验 .tmp，通过后在 receive_dir 锁内原子 no-replace 落盘。
 //!
 //! 临时文件命名 `.{transfer_id}.tmp` 与 Python 一致（断点续传识别）。
 //! 文件名冲突处理（file.txt → file (1).txt → file (2).txt）与 Python `_resolve_filename` 一致。
@@ -21,6 +24,7 @@ use crate::state::AppState;
 use crate::transfer::CHUNK_SIZE;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
@@ -139,9 +143,21 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
 
     let tmp_path = receive_tmp_path(&dir, &transfer_id)?;
 
-    // 断点续传：检查临时文件已存在大小
+    // 断点续传：检查临时文件已存在大小。
+    // tmp 大于声明 size 说明损坏/脏数据，拒绝静默截断：删除 tmp 并返回 Validation，
+    // 让发送端 fail 后由用户重试（新 init 从 0 开始）。
     let resume_offset = match tokio::fs::metadata(&tmp_path).await {
-        Ok(m) => m.len(),
+        Ok(m) => {
+            let len = m.len();
+            if len > meta.size {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(AppError::validation(format!(
+                    "临时文件长度 {len} 超过声明 size {}，已删除损坏断点，请重新发起传输",
+                    meta.size
+                )));
+            }
+            len
+        }
         Err(_) => 0,
     };
 
@@ -409,15 +425,131 @@ pub async fn handle_chunk(
     })
 }
 
-/// 完成传输：SHA256 校验临时文件，通过则重命名（处理冲突）+ 写历史；失败标记 failed。
+/// 显式 complete/finalize 握手（round9）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     size=0 与 resume_offset==size 时发送端不会发任何 chunk，接收端若只在 handle_chunk 里
+///     finalize，最终文件不会落地，发送端却可能误报 completed。发送端必须在标记本地 completed
+///     前调用本接口确认远端终态。
+///
+/// Code Logic（这个函数做什么）:
+///     1. 取 per-transfer 单飞锁；
+///     2. 无 active 任务时查墓碑并幂等返回；
+///     3. 拒绝 non-Receive；
+///     4. 读取 tmp 实际长度：不足 size → success=false（尚未收齐）；
+///        >= size（含 size=0 空文件）→ 调用 finalize_transfer；
+///     5. 返回墓碑结果或当前进度。
+pub async fn handle_complete(state: &AppState, transfer_id: &str) -> Result<ChunkResp, AppError> {
+    let complete_lock = state.transfers.finalize_lock(transfer_id);
+    let _guard = complete_lock.lock().await;
+
+    let task = match state.transfers.get(transfer_id) {
+        Some(t) => t,
+        None => {
+            if let Some(tomb) = state.transfers.tombstone(transfer_id) {
+                let success = matches!(
+                    tomb.outcome,
+                    crate::transfer::registry::TransferOutcome::Completed { .. }
+                );
+                return Ok(ChunkResp {
+                    success,
+                    received_bytes: tomb.received_bytes,
+                });
+            }
+            tracing::error!("complete 未找到传输任务: {transfer_id}");
+            return Ok(ChunkResp {
+                success: false,
+                received_bytes: 0,
+            });
+        }
+    };
+
+    if task.direction != TransferDirection::Receive {
+        tracing::warn!(
+            "complete 拒绝非 Receive 任务: {transfer_id}, direction={:?}",
+            task.direction
+        );
+        return Ok(ChunkResp {
+            success: false,
+            received_bytes: 0,
+        });
+    }
+
+    let tmp_path = PathBuf::from(&task.file_path);
+    // size=0：没有 tmp 也视为已收齐；否则以磁盘长度为准。
+    let actual_len = if task.size == 0 {
+        match tokio::fs::metadata(&tmp_path).await {
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        }
+    } else {
+        match tokio::fs::metadata(&tmp_path).await {
+            Ok(m) => m.len(),
+            Err(_) => task.transferred_bytes,
+        }
+    };
+
+    if actual_len < task.size {
+        return Ok(ChunkResp {
+            success: false,
+            received_bytes: actual_len,
+        });
+    }
+
+    // size=0 且 tmp 不存在时先创建空文件，便于 SHA256 与原子落盘走统一路径。
+    if task.size == 0 && !tmp_path.exists() {
+        if let Err(e) = tokio::fs::File::create(&tmp_path).await {
+            on_receive_failed(state, transfer_id, &format!("创建空临时文件失败: {e}")).await;
+            if let Some(tomb) = state.transfers.tombstone(transfer_id) {
+                return Ok(ChunkResp {
+                    success: false,
+                    received_bytes: tomb.received_bytes,
+                });
+            }
+            return Ok(ChunkResp {
+                success: false,
+                received_bytes: 0,
+            });
+        }
+    }
+
+    if let Err(e) = finalize_transfer(state, transfer_id).await {
+        tracing::error!("complete finalize 失败: {transfer_id}, {e}");
+    }
+
+    if let Some(tomb) = state.transfers.tombstone(transfer_id) {
+        let success = matches!(
+            tomb.outcome,
+            crate::transfer::registry::TransferOutcome::Completed { .. }
+        );
+        return Ok(ChunkResp {
+            success,
+            received_bytes: tomb.received_bytes,
+        });
+    }
+
+    // finalize 未写墓碑（异常路径）：按仍在 registry 的任务返回 false。
+    let received = state
+        .transfers
+        .get(transfer_id)
+        .map(|t| t.transferred_bytes)
+        .unwrap_or(actual_len);
+    Ok(ChunkResp {
+        success: false,
+        received_bytes: received,
+    })
+}
+
+/// 完成传输：SHA256 校验临时文件，通过则原子落盘（处理冲突）+ 写历史；失败标记 failed。
 ///
 /// Business Logic: 文件全部接收后需校验完整性，确保无误后落地为最终文件名。
-/// Code Logic: 对照 Python `finalize_transfer`：
+///     并发同名不同 transfer_id 不得互相覆盖：resolve_filename 到 place 必须在 receive_dir 锁内，
+///     并用 exclusive create + 失败重试后缀，禁止静默 replace。
+/// Code Logic:
 ///     1. 仅处理 direction=Receive 的任务；
 ///     2. 计算 .tmp 的 SHA256，与任务记录的 sha256 比较；
 ///     3. 校验失败：标记 failed + 删除 .tmp + emit failed；
-///     4. 校验通过：再校验 filename 为单组件，resolve_filename 解析冲突，
-///        ensure 最终路径仍在 receive_dir 内，再重命名 .tmp → 最终路径；
+///     4. 校验通过：持 receive_dir 锁，循环 resolve 候选名并 atomic no-replace 落盘；
 ///        标记 completed + 写历史 + emit completed。
 pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<(), AppError> {
     let task = match state.transfers.get(transfer_id) {
@@ -457,7 +589,7 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
         return Ok(());
     }
 
-    // 解析文件名冲突并重命名；落盘前再次校验 basename 与 receive_dir 边界。
+    // 解析文件名冲突并原子落盘；落盘前再次校验 basename 与 receive_dir 边界。
     let receive_dir = PathBuf::from(&state.config.read().expect("config 读锁中毒").receive_dir);
     let safe_filename = match sanitize_receive_basename(&task.filename, "filename") {
         Ok(name) => name,
@@ -466,21 +598,20 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
             return Ok(());
         }
     };
-    let final_filename = resolve_filename(&receive_dir, &safe_filename);
-    // resolve_filename 可能产出 "stem (n).ext"；仍须是单组件。
-    if let Err(e) = sanitize_receive_basename(&final_filename, "final_filename") {
-        on_receive_failed(state, transfer_id, &format!("非法最终文件名: {e}")).await;
-        return Ok(());
-    }
-    let final_path = receive_dir.join(&final_filename);
-    if let Err(e) = ensure_path_within_dir(&receive_dir, &final_path) {
-        on_receive_failed(state, transfer_id, &format!("最终路径非法: {e}")).await;
-        return Ok(());
-    }
-    if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
-        on_receive_failed(state, transfer_id, &format!("重命名失败: {e}")).await;
-        return Ok(());
-    }
+
+    // receive_dir 锁覆盖 resolve → exclusive place，防止并发同名 TOCTOU 覆盖。
+    let dir_lock = state.transfers.receive_dir_lock();
+    let _dir_guard = dir_lock.lock().await;
+
+    let placed = match place_final_file_exclusive(&receive_dir, &safe_filename, &tmp_path).await {
+        Ok(p) => p,
+        Err(e) => {
+            on_receive_failed(state, transfer_id, &format!("原子落盘失败: {e}")).await;
+            return Ok(());
+        }
+    };
+    let final_filename = placed.final_filename;
+    let final_path = placed.final_path;
 
     // 标记 completed + 写历史
     let completed_at = now_iso();
@@ -521,6 +652,66 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
 
     tracing::info!("文件接收完成: {transfer_id} -> {}", final_path.display());
     Ok(())
+}
+
+/// 原子落盘结果。
+struct PlacedFile {
+    final_filename: String,
+    final_path: PathBuf,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     并发同名接收时，仅 `exists()` 检查后 rename 会在 POSIX 上静默覆盖先落地的文件。
+///     必须用 exclusive create 占位 + rename 替换占位，AlreadyExists 则换后缀重试。
+///
+/// Code Logic（这个函数做什么）:
+///     循环 resolve 候选名 → 校验路径边界 → `create_new` 占位 → rename tmp 覆盖占位；
+///     create_new 冲突则 continue；其它 IO 错误上抛。调用方必须已持有 receive_dir 锁。
+async fn place_final_file_exclusive(
+    receive_dir: &Path,
+    safe_filename: &str,
+    tmp_path: &Path,
+) -> Result<PlacedFile, AppError> {
+    // 有限重试：极端并发下 resolve 可能反复撞车；上限防止死循环。
+    for _ in 0..10_000 {
+        let final_filename = resolve_filename(receive_dir, safe_filename);
+        if let Err(e) = sanitize_receive_basename(&final_filename, "final_filename") {
+            return Err(AppError::validation(format!("非法最终文件名: {e}")));
+        }
+        let final_path = receive_dir.join(&final_filename);
+        ensure_path_within_dir(receive_dir, &final_path)?;
+
+        // exclusive create 占位：存在则 AlreadyExists，避免 TOCTOU 覆盖。
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&final_path)
+        {
+            Ok(f) => {
+                drop(f);
+                // 占位成功：rename tmp 覆盖占位文件（同卷原子替换，不会撞上其它路径）。
+                if let Err(e) = tokio::fs::rename(tmp_path, &final_path).await {
+                    // 清理占位，避免留下 0 字节垃圾。
+                    let _ = tokio::fs::remove_file(&final_path).await;
+                    return Err(AppError::generic(format!("重命名失败: {e}")));
+                }
+                return Ok(PlacedFile {
+                    final_filename,
+                    final_path,
+                });
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                // 候选名被并发占走，重新 resolve 下一个后缀。
+                continue;
+            }
+            Err(e) => {
+                return Err(AppError::generic(format!("创建最终文件失败: {e}")));
+            }
+        }
+    }
+    Err(AppError::generic(
+        "无法分配不冲突的最终文件名（重试耗尽）".to_string(),
+    ))
 }
 
 /// 接收失败统一处理：标记 failed + 写历史 + remove + emit failed。
@@ -1301,5 +1492,209 @@ mod tests {
         assert!(sanitize_receive_basename(".", "filename").is_err());
         assert!(sanitize_receive_basename("", "filename").is_err());
         assert!(sanitize_receive_basename("  ", "filename").is_err());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     不同 transfer_id 并发接收同名文件时，不得后写覆盖先落地的内容；两份数据都必须保留。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     并发 finalize 两个同名不同内容的 Receive 任务，断言两个最终文件都存在且内容互不覆盖。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_same_name_different_transfer_ids_do_not_overwrite() {
+        use sha2::{Digest, Sha256};
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+
+        let payload_a = b"CONTENT-A".to_vec();
+        let payload_b = b"CONTENT-B-DIFFERENT".to_vec();
+        let sha_a = format!("{:x}", Sha256::digest(&payload_a));
+        let sha_b = format!("{:x}", Sha256::digest(&payload_b));
+        let id_a = "same-name-a".to_string();
+        let id_b = "same-name-b".to_string();
+        let tmp_a = receive_dir.join(format!(".{id_a}.tmp"));
+        let tmp_b = receive_dir.join(format!(".{id_b}.tmp"));
+        fs::write(&tmp_a, &payload_a).unwrap();
+        fs::write(&tmp_b, &payload_b).unwrap();
+
+        for (id, tmp, size, sha) in [
+            (id_a.clone(), tmp_a.clone(), payload_a.len() as u64, sha_a),
+            (id_b.clone(), tmp_b.clone(), payload_b.len() as u64, sha_b),
+        ] {
+            state.transfers.add(TransferTask {
+                id,
+                filename: "report.txt".to_string(),
+                file_path: tmp.to_string_lossy().to_string(),
+                size,
+                sha256: sha,
+                chunk_size: 64,
+                direction: TransferDirection::Receive,
+                peer_device_id: String::new(),
+                status: TransferStatus::Transferring,
+                transferred_bytes: size,
+                created_at: now_iso(),
+                completed_at: None,
+            });
+        }
+
+        let state_a = state.clone();
+        let state_b = state.clone();
+        let (r1, r2) = tokio::join!(
+            async move { finalize_transfer(&state_a, "same-name-a").await },
+            async move { finalize_transfer(&state_b, "same-name-b").await },
+        );
+        r1.expect("finalize A");
+        r2.expect("finalize B");
+
+        let path_plain = receive_dir.join("report.txt");
+        let path_one = receive_dir.join("report (1).txt");
+        assert!(path_plain.exists(), "应保留第一份 report.txt");
+        assert!(path_one.exists(), "第二份应落为 report (1).txt");
+
+        let mut contents = vec![
+            fs::read(&path_plain).expect("read plain"),
+            fs::read(&path_one).expect("read (1)"),
+        ];
+        contents.sort();
+        let mut expected = vec![payload_a, payload_b];
+        expected.sort();
+        assert_eq!(contents, expected, "两份内容都必须完整保留且互不覆盖");
+        assert!(!tmp_a.exists() && !tmp_b.exists(), "tmp 应被 rename 移除");
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     零字节文件不会触发 chunk 路径；complete 握手必须能校验空内容并落地最终文件。
+    #[tokio::test]
+    async fn handle_complete_finalizes_empty_file() {
+        use sha2::{Digest, Sha256};
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let empty_sha = format!("{:x}", Sha256::digest(b""));
+        let transfer_id = "empty-complete".to_string();
+
+        let init = handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "empty.txt".to_string(),
+                size: 0,
+                sha256: empty_sha,
+                chunk_size: 1,
+            },
+        )
+        .await
+        .expect("init empty");
+        assert_eq!(init.resume_offset, 0);
+
+        let resp = handle_complete(&state, &transfer_id)
+            .await
+            .expect("complete empty");
+        assert!(resp.success, "空文件 complete 应成功");
+        assert_eq!(resp.received_bytes, 0);
+        let final_path = receive_dir.join("empty.txt");
+        assert!(final_path.exists(), "空文件最终路径应存在");
+        assert_eq!(fs::read(&final_path).unwrap(), b"");
+        assert!(
+            state.transfers.get(&transfer_id).is_none(),
+            "complete 后应移除 active"
+        );
+        assert!(
+            matches!(
+                state.transfers.tombstone(&transfer_id).map(|t| t.outcome),
+                Some(crate::transfer::registry::TransferOutcome::Completed { .. })
+            ),
+            "应写入成功墓碑"
+        );
+
+        // 重放 complete 必须幂等。
+        let replay = handle_complete(&state, &transfer_id)
+            .await
+            .expect("replay complete");
+        assert!(replay.success);
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     崩溃后遗留已写满的 .tmp 时，重试 init 返回 resume_offset==size；complete 必须
+    ///     校验哈希并原子落地，而不是让发送端空转 chunk 循环后假报完成。
+    #[tokio::test]
+    async fn handle_complete_finalizes_full_tmp_after_restart() {
+        use sha2::{Digest, Sha256};
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let payload = b"full-tmp-payload";
+        let sha = format!("{:x}", Sha256::digest(payload));
+        let transfer_id = "full-tmp-restart".to_string();
+        let tmp_path = receive_dir.join(format!(".{transfer_id}.tmp"));
+        // 模拟崩溃后遗留的写满临时文件。
+        fs::write(&tmp_path, payload).unwrap();
+
+        let init = handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "resume.bin".to_string(),
+                size: payload.len() as u64,
+                sha256: sha,
+                chunk_size: 4,
+            },
+        )
+        .await
+        .expect("init full tmp");
+        assert_eq!(
+            init.resume_offset,
+            payload.len() as u64,
+            "写满 tmp 应返回 size 作为 resume_offset"
+        );
+
+        let resp = handle_complete(&state, &transfer_id)
+            .await
+            .expect("complete full tmp");
+        assert!(resp.success, "写满 tmp 的 complete 应成功落地");
+        let final_path = receive_dir.join("resume.bin");
+        assert_eq!(fs::read(&final_path).unwrap(), payload);
+        assert!(!tmp_path.exists(), "成功后 tmp 应消失");
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     resume_offset > size 的脏临时文件必须拒绝续传，避免发送端假完成。
+    #[tokio::test]
+    async fn handle_init_rejects_tmp_larger_than_declared_size() {
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let transfer_id = "oversized-tmp".to_string();
+        let tmp_path = receive_dir.join(format!(".{transfer_id}.tmp"));
+        fs::write(&tmp_path, b"too-large-for-declared-size").unwrap();
+
+        let err = handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "x.bin".to_string(),
+                size: 4,
+                sha256: "dead".to_string(),
+                chunk_size: 1,
+            },
+        )
+        .await
+        .expect_err("oversized tmp must be rejected");
+        assert!(
+            matches!(err, AppError::Validation(_)),
+            "应返回 Validation: {err:?}"
+        );
+        assert!(
+            !tmp_path.exists(),
+            "损坏 oversized tmp 应被删除以便干净重试"
+        );
+        assert!(state.transfers.list().is_empty());
+
+        let _ = fs::remove_dir_all(&receive_dir);
     }
 }
