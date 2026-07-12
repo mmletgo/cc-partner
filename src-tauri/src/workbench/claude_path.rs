@@ -26,13 +26,7 @@
 pub fn encode_claude_project_path(path: &str) -> String {
     let encoded: String = path
         .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch
-            } else {
-                '-'
-            }
-        })
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
         .collect();
     if encoded.is_empty() {
         "-".to_string()
@@ -53,7 +47,10 @@ mod tests {
     ///     断言常见 Unix 绝对路径编码后以 `-` 连接各目录段，与 Claude Code 磁盘布局一致。
     #[test]
     fn encodes_unix_path_with_dashes_between_segments() {
-        assert_eq!(encode_claude_project_path("/Users/hans/foo"), "-Users-hans-foo");
+        assert_eq!(
+            encode_claude_project_path("/Users/hans/foo"),
+            "-Users-hans-foo"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

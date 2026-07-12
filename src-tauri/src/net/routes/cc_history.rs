@@ -139,10 +139,7 @@ pub async fn cc_sync_push(
 }
 
 /// cc_sync_push 业务实现：逐条合并后落库，返回实际落库条数。
-async fn cc_sync_push_impl(
-    state: &AppState,
-    req: CcSyncPushReq,
-) -> Result<usize, AppError> {
+async fn cc_sync_push_impl(state: &AppState, req: CcSyncPushReq) -> Result<usize, AppError> {
     let mut to_upsert: Vec<ClaudeHistoryRow> = Vec::new();
 
     for remote in req.items {

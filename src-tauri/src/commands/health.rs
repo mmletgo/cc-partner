@@ -418,10 +418,7 @@ pub async fn add_water_manual(state: State<'_, AppState>) -> Result<i64, AppErro
 /// Business Logic: 用户误点"+1 杯"后撤销,按自增 id 删除指定饮水记录。
 /// Code Logic: 转发 health_repo.delete_water(id),返回是否实际删除。
 #[tauri::command]
-pub async fn delete_water_record(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<bool, AppError> {
+pub async fn delete_water_record(state: State<'_, AppState>, id: i64) -> Result<bool, AppError> {
     state.health_repo.delete_water(id).await
 }
 
@@ -431,7 +428,10 @@ pub async fn delete_water_record(
 pub async fn record_rest_completed(state: State<'_, AppState>) -> Result<(), AppError> {
     let now = chrono::Utc::now().timestamp();
     let duration = state.config.read().unwrap().health.break_seconds;
-    state.health_repo.insert_rest_record(now, "rest", duration).await?;
+    state
+        .health_repo
+        .insert_rest_record(now, "rest", duration)
+        .await?;
     Ok(())
 }
 
@@ -454,7 +454,10 @@ pub async fn get_habit_stats(
         .get_daily_water_counts(trend_start, days)
         .await?;
     let last_water_ts = state.health_repo.get_last_water_ts().await?;
-    let today_rest_count = state.health_repo.count_rest_since(today_start, "rest").await?;
+    let today_rest_count = state
+        .health_repo
+        .count_rest_since(today_start, "rest")
+        .await?;
     let today_rest_total_seconds = state
         .health_repo
         .sum_rest_duration_since(today_start)
@@ -522,7 +525,11 @@ mod habit_stats_tests {
     }
 
     /// days 参数边界:None→7, 0→1, 100→31, 负数→1。
+    ///
+    /// 本测试显式演示 `Option::unwrap_or` 与 `clamp` 的边界语义，
+    /// clippy::unnecessary_literal_unwrap 对常量 None/Some 的告警在此处为预期。
     #[test]
+    #[allow(clippy::unnecessary_literal_unwrap)]
     fn days_unwrap_or_default_is_seven() {
         assert_eq!(None::<i64>.unwrap_or(7), 7);
         assert_eq!((Some(0i64)).unwrap_or(7).clamp(1, 31), 1);

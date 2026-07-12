@@ -160,6 +160,39 @@ impl AppError {
     }
 }
 
+/// 让 AppError 可序列化为 `{"error": "<message>"}` 给前端。
+///
+/// Business Logic: Tauri invoke 的 Result Err 分支会把 E 序列化后传给前端 reject，
+/// 前端期望 error 字段为字符串消息，与 Python HTTP 500 的 `{"error": str(e)}` 一致。
+impl serde::Serialize for AppError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("error", 1)?;
+        // Display 实现已由 thiserror 提供，返回友好的中文消息
+        s.serialize_field("error", &self.to_string())?;
+        s.end()
+    }
+}
+
+/// 让 AppError 可作为 axum handler 的返回错误类型（HTTP 500 + `{"error": "..."}`）。
+///
+/// Business Logic: axum 的 `Result<Json<T>, E>` 要求 E: IntoResponse。sync/transfer 等 P2P
+///     handler 复用 AppError，错误响应需与 Python handler 的 `{"error": str(e)}` + 500 一致，
+///     以便对端/前端错误处理逻辑通用。
+impl axum::response::IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        tracing::error!("HTTP handler 返回错误: {self}");
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": self.to_string() })),
+        )
+            .into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,10 +229,7 @@ mod tests {
         assert_legacy(AppError::unavailable("暂不可用"), "暂不可用");
         assert_legacy(AppError::timeout("超时"), "超时");
         // 带前缀的既有 variant 也应保持老形态。
-        assert_legacy(
-            AppError::Io(std::io::Error::other("disk")),
-            "IO 错误: disk",
-        );
+        assert_legacy(AppError::Io(std::io::Error::other("disk")), "IO 错误: disk");
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -227,10 +257,7 @@ mod tests {
             AppError::unavailable("x").classify(),
             AppErrorCategory::Unavailable
         );
-        assert_eq!(
-            AppError::timeout("x").classify(),
-            AppErrorCategory::Timeout
-        );
+        assert_eq!(AppError::timeout("x").classify(), AppErrorCategory::Timeout);
         assert_eq!(
             AppError::generic("x").classify(),
             AppErrorCategory::Internal
@@ -243,38 +270,5 @@ mod tests {
             AppError::Db(sqlx::Error::Configuration("cfg".into())).classify(),
             AppErrorCategory::Internal
         );
-    }
-}
-
-/// 让 AppError 可序列化为 `{"error": "<message>"}` 给前端。
-///
-/// Business Logic: Tauri invoke 的 Result Err 分支会把 E 序列化后传给前端 reject，
-/// 前端期望 error 字段为字符串消息，与 Python HTTP 500 的 `{"error": str(e)}` 一致。
-impl serde::Serialize for AppError {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("error", 1)?;
-        // Display 实现已由 thiserror 提供，返回友好的中文消息
-        s.serialize_field("error", &self.to_string())?;
-        s.end()
-    }
-}
-
-/// 让 AppError 可作为 axum handler 的返回错误类型（HTTP 500 + `{"error": "..."}`）。
-///
-/// Business Logic: axum 的 `Result<Json<T>, E>` 要求 E: IntoResponse。sync/transfer 等 P2P
-///     handler 复用 AppError，错误响应需与 Python handler 的 `{"error": str(e)}` + 500 一致，
-///     以便对端/前端错误处理逻辑通用。
-impl axum::response::IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        tracing::error!("HTTP handler 返回错误: {self}");
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({ "error": self.to_string() })),
-        )
-            .into_response()
     }
 }

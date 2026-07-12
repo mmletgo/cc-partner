@@ -167,7 +167,11 @@ impl P2pErrorEnvelope {
     ///
     /// Code Logic（这个函数做什么）:
     ///     接收消息、code token、request_id，retryable 置 false，details 置空对象。
-    pub fn new(message: impl Into<String>, code: P2pErrorCode, request_id: impl Into<String>) -> Self {
+    pub fn new(
+        message: impl Into<String>,
+        code: P2pErrorCode,
+        request_id: impl Into<String>,
+    ) -> Self {
         Self {
             error: message.into(),
             code: code.to_token_string(),
@@ -233,11 +237,7 @@ impl P2pError {
     ///     2. `P2pErrorCode::from_category` 映射到 code token；
     ///     3. token.http_status() 得到状态码；
     ///     4. 信封 request_id 取自 context，保证 header/body 一致。
-    pub fn from_app_error(
-        error: AppError,
-        context: &P2pRequestContext,
-        domain_code: &str,
-    ) -> Self {
+    pub fn from_app_error(error: AppError, context: &P2pRequestContext, domain_code: &str) -> Self {
         let _ = domain_code; // 保留参数：后续细粒度 code 可能使用，当前用 code token。
         let category = error.classify();
         let code = P2pErrorCode::from_category(category);
@@ -518,10 +518,7 @@ mod tests {
             // request_id 必须与 context 完全一致。
             assert_eq!(p2p.envelope().request_id, "req-abc");
             // retryable 默认 false（保守默认）。
-            assert!(
-                !p2p.envelope().retryable,
-                "retryable 默认必须为 false"
-            );
+            assert!(!p2p.envelope().retryable, "retryable 默认必须为 false");
         }
     }
 
@@ -540,7 +537,7 @@ mod tests {
         // 新字段。
         assert_eq!(obj.get("code").unwrap().as_str().unwrap(), "not_found");
         assert_eq!(obj.get("request_id").unwrap().as_str().unwrap(), "req-1");
-        assert_eq!(obj.get("retryable").unwrap().as_bool().unwrap(), false);
+        assert!(!obj.get("retryable").unwrap().as_bool().unwrap());
         // details 默认 {}。
         assert_eq!(obj.get("details").unwrap().as_object().unwrap().len(), 0);
     }
@@ -670,7 +667,10 @@ mod tests {
         assert_eq!(body.code, "not_found");
         assert_eq!(body.request_id, "req-abc");
         assert!(!body.retryable);
-        assert_eq!(body.details.get("resource").unwrap().as_str().unwrap(), "prompt");
+        assert_eq!(
+            body.details.get("resource").unwrap().as_str().unwrap(),
+            "prompt"
+        );
         assert_eq!(body.details.get("id").unwrap().as_i64().unwrap(), 42);
         assert!(!body.is_legacy());
     }
@@ -710,7 +710,10 @@ mod tests {
         assert_eq!(parsed.code, "timeout");
         assert_eq!(parsed.request_id, "req-rt");
         assert!(parsed.retryable);
-        assert_eq!(parsed.details.get("upstream").unwrap().as_str().unwrap(), "claude-cli");
+        assert_eq!(
+            parsed.details.get("upstream").unwrap().as_str().unwrap(),
+            "claude-cli"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -742,12 +745,8 @@ mod tests {
             "field": "name",
             "reason": "required"
         });
-        let envelope = P2pErrorEnvelope::new(
-            "参数非法",
-            P2pErrorCode::Validation,
-            "req-secret",
-        )
-        .with_details(safe_details);
+        let envelope = P2pErrorEnvelope::new("参数非法", P2pErrorCode::Validation, "req-secret")
+            .with_details(safe_details);
 
         let json = serde_json::to_string(&envelope).unwrap();
         // 断言 details 序列化结果不含敏感关键字（这些只可能因误传泄漏）。

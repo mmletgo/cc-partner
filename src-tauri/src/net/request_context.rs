@@ -94,7 +94,10 @@ fn is_valid_request_id(value: &str) -> bool {
 ///     读取 `X-CC-Request-Id` header，转 `&str` 后过 `is_valid_request_id`；
 ///     通过则 clone 该值，否则调用 `new_request_id()` 生成兜底。
 fn resolve_request_id(headers: &axum::http::HeaderMap) -> String {
-    if let Some(value) = headers.get(&REQUEST_ID_HEADER).and_then(|v| v.to_str().ok()) {
+    if let Some(value) = headers
+        .get(&REQUEST_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+    {
         if is_valid_request_id(value) {
             return value.to_string();
         }
@@ -126,8 +129,8 @@ pub async fn request_id_middleware(mut request: Request<Body>, next: Next) -> Re
     // 把与 context 完全相同的 ID 回写到响应 header。
     // HeaderValue::from_str 在 `is_valid_request_id` 已保证可打印 ASCII 下不会失败；
     // 兜底用静态占位符避免极小概率 panic，但这种情况理论上不可达。
-    let header_value = HeaderValue::from_str(&request_id)
-        .unwrap_or_else(|_| HeaderValue::from_static("invalid"));
+    let header_value =
+        HeaderValue::from_str(&request_id).unwrap_or_else(|_| HeaderValue::from_static("invalid"));
     let mut response = response;
     response
         .headers_mut()
@@ -388,9 +391,7 @@ mod tests {
     ///     断言合法 UUID、含连字符 ID 通过；空字符串、超长、换行、TAB、非 ASCII 均被拒绝。
     #[test]
     fn is_valid_request_id_accepts_printable_ascii_only() {
-        assert!(is_valid_request_id(
-            "550e8400-e29b-41d4-a716-446655440000"
-        ));
+        assert!(is_valid_request_id("550e8400-e29b-41d4-a716-446655440000"));
         assert!(is_valid_request_id("abc-123"));
         assert!(is_valid_request_id("a")); // 单字符也合法
         assert!(is_valid_request_id("request-1"));

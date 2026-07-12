@@ -150,7 +150,11 @@ async fn handle_sample(
 
     if should_remind {
         // 记录 reminder 触发事件(用于习惯统计),无论是否被静默都算一次触发。
-        if let Err(e) = state.health_repo.insert_rest_record(now, "reminder", 0).await {
+        if let Err(e) = state
+            .health_repo
+            .insert_rest_record(now, "reminder", 0)
+            .await
+        {
             tracing::warn!("写入 reminder 统计记录失败: {e}");
         }
         // 贪睡未到期则静默;免打扰时段静默;notify_enabled 仅控制系统通知事件,全屏遮罩固定启用。

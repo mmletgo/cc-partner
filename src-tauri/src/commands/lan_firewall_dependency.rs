@@ -701,7 +701,7 @@ mod tests {
             .find(|check| check.id == "mdnsFirewall")
             .expect("mdns firewall check");
 
-        assert_eq!(tcp.ok, true);
-        assert_eq!(mdns.ok, false);
+        assert!(tcp.ok);
+        assert!(!mdns.ok);
     }
 }

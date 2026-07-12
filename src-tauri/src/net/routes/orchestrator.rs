@@ -460,9 +460,7 @@ pub async fn complete_task_prompt(
             .get(project_id)
             .await
             .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.complete_prompt"))?
-            .ok_or_else(|| {
-                P2pError::not_found("自动化 Prompt 完善项目不存在", &ctx)
-            })?;
+            .ok_or_else(|| P2pError::not_found("自动化 Prompt 完善项目不存在", &ctx))?;
         if project.kind == "remote" {
             let context = open_remote_project_for_shortcut(&state, &project)
                 .await
@@ -493,10 +491,9 @@ pub async fn complete_task_prompt(
             working_directory = Some(project.path);
         }
     }
-    let completed =
-        local_complete_orchestrator_task_prompt(&state, req.prompt, working_directory)
-            .await
-            .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.complete_prompt"))?;
+    let completed = local_complete_orchestrator_task_prompt(&state, req.prompt, working_directory)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.complete_prompt"))?;
     Ok(Json(completed))
 }
 
