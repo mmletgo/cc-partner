@@ -475,6 +475,7 @@ export function buildDefaultInvokeHandler(data: {
           installCommandPreview: [],
           error: null,
           output: [],
+          statusChangedAt: '2026-07-12T00:00:00.000Z',
         };
       case 'get_config':
         return {
@@ -575,6 +576,7 @@ export function buildDependencyContextValue(
       installCommandPreview: [],
       error: null,
       output: [],
+      statusChangedAt: '2026-07-12T00:00:00.000Z',
     },
     checking: false,
     installing: false,

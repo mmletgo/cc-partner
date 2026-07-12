@@ -7,6 +7,7 @@
 //!     提供 tmux 探测、版本解析、平台安装命令选择、DTO 序列化与安装状态机。
 
 use crate::error::AppError;
+use chrono::Utc;
 use portable_pty::CommandBuilder;
 use serde::Serialize;
 use std::process::{Command as StdCommand, Stdio};
@@ -15,6 +16,15 @@ use tauri::async_runtime::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const OUTPUT_LINE_LIMIT: usize = 24;
+
+/// Business Logic（为什么需要这个函数）:
+///     Attention 与前端轮询需要稳定的依赖状态变更时间，不能在每次读取时漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     返回当前 UTC 时刻的 RFC3339 字符串，用作进程内 `status_changed_at`。
+fn now_status_changed_at() -> String {
+    Utc::now().to_rfc3339()
+}
 
 /// tmux 工作目录路径模式。
 ///
@@ -177,10 +187,12 @@ pub enum WorkbenchDependencyState {
 /// Workbench tmux 依赖状态 DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     Workbench 和设置页需要同一份后端状态，既能展示检测结果，也能展示安装进度与错误摘要。
+///     Workbench 和设置页需要同一份后端状态，既能展示检测结果，也能展示安装进度与错误摘要；
+///     Attention 还需要稳定的状态变更时间，避免轮询把环境条目的 updatedAt 不断刷新。
 ///
 /// Code Logic（这个结构体做什么）:
-///     序列化为 camelCase，字段与前端 WorkbenchDependencyStatus 对齐。
+///     序列化为 camelCase，字段与前端 WorkbenchDependencyStatus 对齐；
+///     `status_changed_at` 仅在语义状态枚举变化时由 dependency manager 更新，不落 SQLite。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchDependencyStatusDto {
@@ -193,15 +205,19 @@ pub struct WorkbenchDependencyStatusDto {
     pub install_command_preview: Vec<String>,
     pub error: Option<String>,
     pub output: Vec<String>,
+    /// 进程内最近一次语义状态枚举变化时间（RFC3339），序列化为 statusChangedAt。
+    pub status_changed_at: String,
 }
 
 /// 依赖安装运行时状态。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     安装命令跨 invoke 调用运行，前端需要轮询状态、读取最近输出并能取消进行中的任务。
+///     安装命令跨 invoke 调用运行，前端需要轮询状态、读取最近输出并能取消进行中的任务；
+///     Attention 还需要依赖状态变更时间保持稳定，不能在每次探测/轮询时重置。
 ///
 /// Code Logic（这个结构体做什么）:
-///     用 Mutex 保存当前 DTO、后台任务句柄与取消令牌；所有状态更新都通过小方法集中处理。
+///     用 Mutex 保存当前 DTO、后台任务句柄与取消令牌；状态写入统一走 `apply_status_transition`，
+///     仅在语义 status 枚举变化时刷新 `status_changed_at`（进程内，不落 SQLite）。
 pub struct WorkbenchDependencyInstallRuntime {
     inner: Mutex<DependencyInstallInner>,
 }
@@ -217,11 +233,11 @@ impl WorkbenchDependencyInstallRuntime {
     ///     AppState 初始化时需要一个空闲的依赖管理运行时，供所有命令共享。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造初始 missing/unsupported 状态占位；真正检测由 check 命令刷新。
+    ///     构造初始 missing/unsupported 状态占位，并写入首次 `status_changed_at`；真正检测由 check 命令刷新。
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(DependencyInstallInner {
-                status: missing_or_unsupported_status(Vec::new(), None),
+                status: stamp_initial_status(missing_or_unsupported_status(Vec::new(), None)),
                 task: None,
                 cancel_token: None,
             }),
@@ -229,10 +245,11 @@ impl WorkbenchDependencyInstallRuntime {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     前端轮询状态时不能拿到内部锁或任务句柄，只需要当前 DTO 快照。
+    ///     前端轮询状态时不能拿到内部锁或任务句柄，只需要当前 DTO 快照；
+    ///     Attention source 也必须只读缓存，不能触发探测。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     克隆并返回当前状态。
+    ///     克隆并返回当前状态（含稳定的 status_changed_at）。
     pub fn status(&self) -> WorkbenchDependencyStatusDto {
         self.inner
             .lock()
@@ -245,14 +262,15 @@ impl WorkbenchDependencyInstallRuntime {
     ///     检测命令需要把最新 tmux 状态写入共享运行时，供后续 status 读取。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     非安装中状态直接覆盖 DTO；安装中时保留安装进度，避免 recheck 把 UI 状态打回 missing。
+    ///     非安装中状态经 `apply_status_transition` 覆盖 DTO（同枚举保留时间戳）；
+    ///     安装中时保留安装进度，避免 recheck 把 UI 状态打回 missing。
     pub fn set_checked_status(
         &self,
         status: WorkbenchDependencyStatusDto,
     ) -> WorkbenchDependencyStatusDto {
         let mut inner = self.inner.lock().expect("workbench dependency 锁中毒");
         if inner.status.status != WorkbenchDependencyState::Installing {
-            inner.status = status;
+            inner.status = apply_status_transition(&inner.status, status);
         }
         inner.status.clone()
     }
@@ -273,6 +291,7 @@ impl WorkbenchDependencyInstallRuntime {
             install_command_preview: command,
             error: None,
             output: vec!["开始安装 tmux".to_string()],
+            status_changed_at: String::new(),
         });
     }
 
@@ -297,6 +316,7 @@ impl WorkbenchDependencyInstallRuntime {
             install_command_preview: actual_install_command_preview().unwrap_or_default(),
             error: Some(error),
             output: truncate_output_lines(lines),
+            status_changed_at: String::new(),
         });
         self.clear_task();
     }
@@ -398,10 +418,8 @@ impl WorkbenchDependencyInstallRuntime {
     }
 
     fn replace_status(&self, status: WorkbenchDependencyStatusDto) {
-        self.inner
-            .lock()
-            .expect("workbench dependency 锁中毒")
-            .status = status;
+        let mut inner = self.inner.lock().expect("workbench dependency 锁中毒");
+        inner.status = apply_status_transition(&inner.status, status);
     }
 
     fn clear_task(&self) {
@@ -409,6 +427,33 @@ impl WorkbenchDependencyInstallRuntime {
         inner.task = None;
         inner.cancel_token = None;
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     依赖探测结果本身不携带稳定变更时间；manager 需要在写入缓存时决定是否刷新时间戳。
+///
+/// Code Logic（这个函数做什么）:
+///     若新旧语义 status 枚举相同，则保留旧 `status_changed_at`；否则写入当前 UTC RFC3339。
+fn apply_status_transition(
+    previous: &WorkbenchDependencyStatusDto,
+    mut next: WorkbenchDependencyStatusDto,
+) -> WorkbenchDependencyStatusDto {
+    if previous.status == next.status {
+        next.status_changed_at = previous.status_changed_at.clone();
+    } else {
+        next.status_changed_at = now_status_changed_at();
+    }
+    next
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     运行时首次构造时还没有“旧状态”，也必须给出非空的状态变更时间供 Attention 使用。
+///
+/// Code Logic（这个函数做什么）:
+///     给初始 DTO 写入当前 UTC RFC3339 的 `status_changed_at`。
+fn stamp_initial_status(mut status: WorkbenchDependencyStatusDto) -> WorkbenchDependencyStatusDto {
+    status.status_changed_at = now_status_changed_at();
+    status
 }
 
 impl Default for WorkbenchDependencyInstallRuntime {
@@ -472,6 +517,8 @@ pub fn probe_workbench_dependency() -> WorkbenchDependencyStatusDto {
             install_command_preview: Vec::new(),
             error: None,
             output: Vec::new(),
+            // 真实变更时间由 dependency manager 在写入缓存时按语义状态差决定。
+            status_changed_at: String::new(),
         };
     }
     missing_or_unsupported_status(actual_install_command_preview().unwrap_or_default(), None)
@@ -634,6 +681,8 @@ fn missing_or_unsupported_status(
         install_command_preview,
         error,
         output: Vec::new(),
+        // 真实变更时间由 dependency manager 在写入缓存时按语义状态差决定。
+        status_changed_at: String::new(),
     }
 }
 
@@ -791,12 +840,14 @@ mod tests {
             install_command_preview: Vec::new(),
             error: None,
             output: Vec::new(),
+            status_changed_at: "2026-07-12T00:00:00Z".to_string(),
         };
 
         let json = serde_json::to_value(status).unwrap();
 
         assert_eq!(json["status"], "ready");
         assert_eq!(json["installCommandPreview"], serde_json::json!([]));
+        assert_eq!(json["statusChangedAt"], "2026-07-12T00:00:00Z");
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -815,5 +866,90 @@ mod tests {
         assert_eq!(status.status, WorkbenchDependencyState::Failed);
         assert_eq!(status.error.as_deref(), Some("安装已取消"));
         assert!(status.output.iter().any(|line| line.contains("安装已取消")));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Attention 需要依赖初始状态带有非空变更时间，才能稳定投影 environment 条目。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     新建 runtime 后读取 status，断言 status_changed_at 非空。
+    #[test]
+    fn initial_status_has_status_changed_at_timestamp() {
+        let runtime = WorkbenchDependencyInstallRuntime::new();
+        let status = runtime.status();
+
+        assert!(!status.status_changed_at.is_empty());
+        assert!(chrono::DateTime::parse_from_rfc3339(&status.status_changed_at).is_ok());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     相同语义状态的重复探测/轮询不能刷新变更时间，否则 Inbox 会把旧问题伪装成新事件。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入 missing 后再次 set 同枚举不同 payload，再连续 status() 读取，断言时间戳保持不变。
+    #[test]
+    fn same_semantic_status_preserves_status_changed_at_across_polls() {
+        let runtime = WorkbenchDependencyInstallRuntime::new();
+        let initial = runtime.status();
+        let initial_changed_at = initial.status_changed_at.clone();
+
+        let again = runtime.set_checked_status(WorkbenchDependencyStatusDto {
+            status: initial.status,
+            available: false,
+            version: None,
+            backend: "native".to_string(),
+            path: None,
+            installable: true,
+            install_command_preview: vec!["brew".into(), "install".into(), "tmux".into()],
+            error: Some("still missing".into()),
+            output: vec!["recheck".into()],
+            status_changed_at: "should-be-ignored".into(),
+        });
+        assert_eq!(again.status_changed_at, initial_changed_at);
+
+        let polled_once = runtime.status();
+        let polled_twice = runtime.status();
+        assert_eq!(polled_once.status_changed_at, initial_changed_at);
+        assert_eq!(polled_twice.status_changed_at, initial_changed_at);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     真实状态迁移（如 missing→ready 或 missing→failed）必须更新变更时间，Attention 才能按最新阻塞排序。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     从初始状态切到 ready，再切到 failed，断言每次语义变化后 status_changed_at 都前进。
+    #[test]
+    fn semantic_status_change_updates_status_changed_at() {
+        let runtime = WorkbenchDependencyInstallRuntime::new();
+        let initial = runtime.status();
+        let initial_changed_at = initial.status_changed_at.clone();
+
+        // 确保时间戳至少相差 1ms，避免同一 RFC3339 秒级相等误判。
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let ready = runtime.set_checked_status(WorkbenchDependencyStatusDto {
+            status: WorkbenchDependencyState::Ready,
+            available: true,
+            version: Some("3.4".into()),
+            backend: "native".into(),
+            path: Some("/opt/homebrew/bin/tmux".into()),
+            installable: false,
+            install_command_preview: Vec::new(),
+            error: None,
+            output: Vec::new(),
+            status_changed_at: String::new(),
+        });
+        assert_eq!(ready.status, WorkbenchDependencyState::Ready);
+        assert_ne!(ready.status_changed_at, initial_changed_at);
+        assert!(!ready.status_changed_at.is_empty());
+
+        let ready_changed_at = ready.status_changed_at.clone();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        runtime.mark_failed("probe failed", vec!["stderr".into()]);
+        let failed = runtime.status();
+        assert_eq!(failed.status, WorkbenchDependencyState::Failed);
+        assert_ne!(failed.status_changed_at, ready_changed_at);
+        assert!(!failed.status_changed_at.is_empty());
     }
 }

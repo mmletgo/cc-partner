@@ -160,10 +160,12 @@ export type WorkbenchDependencyBackend = 'native' | 'wsl' | string;
  * 工作台运行时依赖状态（tmux）。
  *
  * Business Logic（为什么需要这个类型）:
- *   Workbench 的真实 window/pane 体验依赖 tmux，前端需要展示检测、安装、失败和重检状态。
+ *   Workbench 的真实 window/pane 体验依赖 tmux，前端需要展示检测、安装、失败和重检状态；
+ *   Attention 还需要稳定的状态变更时间作为 environment 条目 updatedAt。
  *
  * Code Logic（字段说明）:
- *   对齐后端 dependency manager DTO；installCommandPreview 是只读预览，不代表前端可直接执行命令。
+ *   对齐后端 dependency manager DTO；installCommandPreview 是只读预览，不代表前端可直接执行命令；
+ *   statusChangedAt 是进程内语义状态最近变化时间（RFC3339），重复轮询不会重置。
  */
 export interface WorkbenchDependencyStatus {
   status: WorkbenchDependencyState;
@@ -175,6 +177,7 @@ export interface WorkbenchDependencyStatus {
   installCommandPreview: string[];
   error: string | null;
   output: string[];
+  statusChangedAt: string;
 }
 
 export type LanFirewallPlatform = 'macos' | 'windows' | 'linux' | 'unsupported' | string;
