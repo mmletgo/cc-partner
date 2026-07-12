@@ -1,20 +1,34 @@
-//! backend/logging.rs — 后端受限本地文件日志（路径/配置 + 精确 size 轮转 writer）。
+//! backend/logging.rs — 后端受限本地文件日志（路径/配置 + 精确 size 轮转 + 字段脱敏 formatter）。
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     detached `cc-partner-backend` 需要留下可诊断、可轮转、权限收紧的本地日志，
-//!     供 doctor/smoke 与人工排障读取；日志体积必须有界，避免磁盘被打满。
+//!     detached `cc-partner-backend` 需要留下可诊断、可轮转、权限收紧且**无密钥/正文泄露**的本地日志，
+//!     供 doctor/smoke 与人工排障读取；日志体积必须有界，字段必须白名单，避免磁盘打满与隐私事故。
 //!
 //! Code Logic（这个模块做什么）:
 //!     提供 `BackendLogConfig`、固定上限常量、`RotatingLogWriter`（按字节精确轮转，
-//!     历史 `.1` 最新 / `.N` 最旧）以及 `tracing_appender::non_blocking` 包装守卫。
+//!     历史 `.1` 最新 / `.N` 最旧）、`sanitize_diagnostic_text`、白名单 JSON formatter、
+//!     结构化操作完成 helper，以及 `tracing_appender::non_blocking` 包装守卫。
+//!
+//! 文件日志字段 schema（生产路径，仅此白名单）:
+//!     `timestamp` / `level` / `request_id` / `domain` / `operation` / `result` /
+//!     `elapsed_ms` / `error_code` / `message`（已脱敏）。未知字段一律丢弃；
+//!     永不记录 Prompt/会话正文、文件内容、请求 body、完整环境变量、token/password/key/Authorization。
 
 use crate::config;
 use crate::error::AppError;
+use regex::Regex;
+use serde_json::{Map, Value};
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use tracing::field::{Field, Visit};
+use tracing::{Event, Level, Subscriber};
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::registry::LookupSpan;
 
 /// 后端当前日志文件最大字节数（current 另算，不含历史）。
 pub const BACKEND_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
@@ -24,6 +38,26 @@ pub const BACKEND_LOG_HISTORY_FILES: usize = 3;
 
 /// 当前日志文件名（固定）。
 pub const BACKEND_LOG_FILE_NAME: &str = "backend.log";
+
+/// 单字段脱敏后最大字节数（8 KiB，在合法 UTF-8 边界截断）。
+pub const SANITIZED_VALUE_MAX_BYTES: usize = 8 * 1024;
+
+/// 短标识字段（request_id 等）最大字符长度。
+const SHORT_FIELD_MAX_CHARS: usize = 128;
+
+/// 分类字段（domain/operation/result/error_code）最大字符长度。
+const LABEL_FIELD_MAX_CHARS: usize = 64;
+
+/// 文件日志允许的结构化字段白名单（不含自动注入的 timestamp/level）。
+pub const FILE_LOG_ALLOWED_FIELDS: &[&str] = &[
+    "request_id",
+    "domain",
+    "operation",
+    "result",
+    "elapsed_ms",
+    "error_code",
+    "message",
+];
 
 /// 后端文件日志配置（目录、上限、历史份数）。
 ///
@@ -281,6 +315,685 @@ impl Write for RotatingLogWriter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Sanitizer
+// ---------------------------------------------------------------------------
+
+/// 脱敏诊断文本：home 替换、密钥模式 redact、header/body 形态剥离、控制字符归一、8 KiB 截断。
+///
+/// Business Logic（为什么需要这个函数）:
+///     文件日志与 stderr 都可能承载错误摘要；必须保证 Prompt/密钥/家目录用户名/请求正文
+///     不会以明文或简单编码形式落盘，即便调用方误把敏感串写进 message。
+///
+/// Code Logic（这个函数做什么）:
+///     1) 控制字符归一为空格；2) 用已知 home 路径替换为 `<HOME>`；
+///     3) 用正则 redact Authorization/Bearer/token/password/secret/key 等模式；
+///     4) 剥离 header/body 形态片段；5) 在 UTF-8 边界截到 `SANITIZED_VALUE_MAX_BYTES`。
+pub fn sanitize_diagnostic_text(input: &str) -> String {
+    let mut text = normalize_control_chars(input);
+    text = replace_home_paths(&text);
+    text = redact_secret_patterns(&text);
+    text = strip_header_body_shaped(&text);
+    truncate_utf8_bytes(&text, SANITIZED_VALUE_MAX_BYTES)
+}
+
+/// 将不可打印控制字符归一为空格（保留常规空白语义，避免多行 payload 穿透）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     攻击性 fixture 可能夹带 `\0`/`\r` 换行注入多行 body；归一后便于 redact 与单行 JSON 输出。
+///
+/// Code Logic（这个函数做什么）:
+///     遍历 char：ASCII 控制字符（除 tab）替换为空格，压缩连续空白为单空格并 trim。
+fn normalize_control_chars(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut last_space = false;
+    for ch in input.chars() {
+        let is_control = ch.is_control() && ch != '\t';
+        if is_control || ch == '\t' {
+            if !last_space {
+                out.push(' ');
+                last_space = true;
+            }
+            continue;
+        }
+        if ch == ' ' {
+            if !last_space {
+                out.push(' ');
+                last_space = true;
+            }
+            continue;
+        }
+        out.push(ch);
+        last_space = false;
+    }
+    out.trim().to_string()
+}
+
+/// 将本机 home 路径（及用户名片段）替换为 `<HOME>`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     日志常含绝对路径；home 会泄露本机用户名，doctor/recent errors 契约要求替换。
+///
+/// Code Logic（这个函数做什么）:
+///     收集 `dirs::home_dir` 与 `HOME`/`USERPROFILE` 环境变量，按长度降序替换为 `<HOME>`。
+fn replace_home_paths(input: &str) -> String {
+    let mut homes: Vec<String> = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        let s = home.to_string_lossy().to_string();
+        if !s.is_empty() {
+            homes.push(s);
+        }
+    }
+    for key in ["HOME", "USERPROFILE"] {
+        if let Ok(val) = std::env::var(key) {
+            if !val.is_empty() && !homes.iter().any(|h| h == &val) {
+                homes.push(val);
+            }
+        }
+    }
+    homes.sort_by_key(|h| std::cmp::Reverse(h.len()));
+    let mut text = input.to_string();
+    for home in homes {
+        if text.contains(&home) {
+            text = text.replace(&home, "<HOME>");
+        }
+        // Windows 路径可能混用反斜杠
+        let alt = home.replace('\\', "/");
+        if alt != home && text.contains(&alt) {
+            text = text.replace(&alt, "<HOME>");
+        }
+        let alt2 = home.replace('/', "\\");
+        if alt2 != home && text.contains(&alt2) {
+            text = text.replace(&alt2, "<HOME>");
+        }
+    }
+    text
+}
+
+/// 编译敏感模式正则（进程内只编译一次）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     每次写日志都编译正则会拖慢热路径；OnceLock 保证单例。
+///
+/// Code Logic（这个函数做什么）:
+///     返回覆盖 Authorization Bearer、token/password/secret/key 赋值、常见 key 前缀的 Regex 列表。
+fn secret_regexes() -> &'static [Regex] {
+    static REGEXES: OnceLock<Vec<Regex>> = OnceLock::new();
+    REGEXES.get_or_init(|| {
+        // 顺序：先匹配更长/更具体的模式
+        let patterns = [
+            // Authorization: Bearer <token> / Authorization Bearer <token>
+            r"(?i)authorization\s*[:=]\s*bearer\s+\S+",
+            r"(?i)bearer\s+[A-Za-z0-9\-._~+/]+=*",
+            // key=value / key: value 形态（含单独 key=，避免 key=sk_live_... 漏网）
+            r#"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|private[_-]?key|client[_-]?secret|authorization|(?:api[_-]?)?key)\b\s*[:=]\s*["']?[^,\s"'\\}{]+["']?"#,
+            // JSON "password":"..."
+            r#"(?i)"(password|passwd|secret|token|api[_-]?key|access[_-]?token|private[_-]?key|authorization|key)"\s*:\s*"[^"]*""#,
+            // 常见云密钥前缀（sk_ / sk_live_ / sk_test_ / pk_* / ghp_ 等）
+            r"\b(?:sk|pk|rk)_(?:live_|test_)?[A-Za-z0-9]{8,}\b",
+            r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{8,}\b",
+            r"\bAIza[0-9A-Za-z\-_]{20,}\b",
+        ];
+        patterns
+            .iter()
+            .filter_map(|p| Regex::new(p).ok())
+            .collect()
+    })
+}
+
+/// 用 `<REDACTED>` 替换密钥/凭证模式。
+///
+/// Business Logic（为什么需要这个函数）:
+///     即便 message 误入 token/password，也必须在落盘前抹掉。
+///
+/// Code Logic（这个函数做什么）:
+///     对 `secret_regexes` 逐条 `replace_all` 为 `<REDACTED>`。
+fn redact_secret_patterns(input: &str) -> String {
+    let mut text = input.to_string();
+    for re in secret_regexes() {
+        text = re.replace_all(&text, "<REDACTED>").into_owned();
+    }
+    text
+}
+
+/// 剥离 header/body 形态内容（多行 HTTP 头与 JSON body 大段）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     调试路径可能把 `Authorization: ...\r\n\r\n{body}` 整段塞进错误串；需主动剥离。
+///
+/// Code Logic（这个函数做什么）:
+///     去掉 `Header-Name: value` 形态；去掉以 `{`/`[` 开头的大段 JSON body 提示替换为 `<BODY_OMITTED>`。
+fn strip_header_body_shaped(input: &str) -> String {
+    static HEADER_RE: OnceLock<Regex> = OnceLock::new();
+    static BODY_RE: OnceLock<Regex> = OnceLock::new();
+    let header_re = HEADER_RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(content-type|content-length|cookie|set-cookie|x-api-key|x-auth-token)\s*:\s*\S+")
+            .expect("header regex")
+    });
+    let body_re = BODY_RE.get_or_init(|| {
+        // 形如 body={...} / body: [...] / request body: {...}
+        Regex::new(r"(?i)\b(request\s*)?body\s*[:=]\s*[\[{].{0,4096}")
+            .expect("body regex")
+    });
+    let mut text = header_re.replace_all(input, "<HEADER_OMITTED>").into_owned();
+    text = body_re.replace_all(&text, "body=<BODY_OMITTED>").into_owned();
+    text
+}
+
+/// 在合法 UTF-8 边界截断到 max_bytes。
+///
+/// Business Logic（为什么需要这个函数）:
+///     超长错误栈/误入正文必须有界，且不能切断多字节字符产生非法 UTF-8。
+///
+/// Code Logic（这个函数做什么）:
+///     若 `as_bytes().len() <= max` 原样返回；否则从 max 向前找到 char 边界再切片。
+fn truncate_utf8_bytes(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = input[..end].to_string();
+    out.push('…');
+    out
+}
+
+/// 截断短标签字段（字符数上限）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     request_id/domain 等标识字段也需有界，防止恶意超长注入。
+///
+/// Code Logic（这个函数做什么）:
+///     按 char 计数截断到 max_chars，再跑 `sanitize_diagnostic_text`。
+fn bound_label_field(input: &str, max_chars: usize) -> String {
+    let trimmed: String = input.chars().take(max_chars).collect();
+    sanitize_diagnostic_text(&trimmed)
+}
+
+// ---------------------------------------------------------------------------
+// Strict event visitor + JSON formatter
+// ---------------------------------------------------------------------------
+
+/// 白名单字段收集器：只保留 schema 字段，未知字段丢弃。
+///
+/// Business Logic（为什么需要这个结构）:
+///     tracing 事件可携带任意字段；文件层必须强制 schema，避免 body/password 等字段落盘。
+///
+/// Code Logic（这个结构做什么）:
+///     实现 `Visit`：仅处理白名单键；message 走 sanitizer；elapsed_ms 解析为数字。
+#[derive(Debug, Default)]
+struct WhitelistFieldVisitor {
+    request_id: Option<String>,
+    domain: Option<String>,
+    operation: Option<String>,
+    result: Option<String>,
+    elapsed_ms: Option<u64>,
+    error_code: Option<String>,
+    message: Option<String>,
+}
+
+impl WhitelistFieldVisitor {
+    /// 写入一个字符串字段（仅白名单键）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Visit 的 str/debug 路径共用同一白名单判定。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按字段名分发到对应槽位；message 脱敏；其它标签 bound+脱敏；未知忽略。
+    fn record_str_field(&mut self, field: &Field, value: &str) {
+        match field.name() {
+            "request_id" => {
+                self.request_id = Some(bound_label_field(value, SHORT_FIELD_MAX_CHARS));
+            }
+            "domain" => {
+                self.domain = Some(bound_label_field(value, LABEL_FIELD_MAX_CHARS));
+            }
+            "operation" => {
+                self.operation = Some(bound_label_field(value, LABEL_FIELD_MAX_CHARS));
+            }
+            "result" => {
+                self.result = Some(bound_label_field(value, LABEL_FIELD_MAX_CHARS));
+            }
+            "error_code" => {
+                self.error_code = Some(bound_label_field(value, LABEL_FIELD_MAX_CHARS));
+            }
+            // tracing 默认消息字段名
+            "message" => {
+                self.message = Some(sanitize_diagnostic_text(value));
+            }
+            "elapsed_ms" => {
+                if let Ok(v) = value.trim().parse::<u64>() {
+                    self.elapsed_ms = Some(v);
+                }
+            }
+            _ => {
+                // 未知字段（authorization/password/body/prompt/...）一律丢弃
+            }
+        }
+    }
+}
+
+impl Visit for WhitelistFieldVisitor {
+    /// 记录 debug 格式字段。
+    ///
+    /// Business Logic: Visit 必选入口，承接非 Display 值。
+    /// Code Logic: 转字符串后走 `record_str_field`。
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        // tracing 事件消息字段名为 "message"
+        let rendered = format!("{value:?}");
+        // Debug 字符串常带引号：若两端是 "..." 则剥掉，避免 message 双重转义噪音
+        let stripped = rendered
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .map(|s| s.replace("\\\"", "\""))
+            .unwrap_or(rendered);
+        if field.name() == "message" {
+            self.message = Some(sanitize_diagnostic_text(&stripped));
+        } else {
+            self.record_str_field(field, &stripped);
+        }
+    }
+
+    /// 记录字符串字段。
+    ///
+    /// Business Logic: 结构化字段多为 &str。
+    /// Code Logic: 委托 `record_str_field`。
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.message = Some(sanitize_diagnostic_text(value));
+            return;
+        }
+        self.record_str_field(field, value);
+    }
+
+    /// 记录有符号整数（elapsed_ms）。
+    ///
+    /// Business Logic: elapsed_ms 应以数字写入 JSON。
+    /// Code Logic: 仅接受字段名 elapsed_ms 且非负。
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        if field.name() == "elapsed_ms" && value >= 0 {
+            self.elapsed_ms = Some(value as u64);
+        }
+    }
+
+    /// 记录无符号整数（elapsed_ms）。
+    ///
+    /// Business Logic: 同上。
+    /// Code Logic: 仅接受 elapsed_ms。
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        if field.name() == "elapsed_ms" {
+            self.elapsed_ms = Some(value);
+        }
+    }
+
+    /// 记录 u128（降级到 u64 范围时接受 elapsed_ms）。
+    ///
+    /// Business Logic: 兼容可能的更宽整数类型。
+    /// Code Logic: 能装进 u64 则写入 elapsed_ms。
+    fn record_u128(&mut self, field: &Field, value: u128) {
+        if field.name() == "elapsed_ms" {
+            if let Ok(v) = u64::try_from(value) {
+                self.elapsed_ms = Some(v);
+            }
+        }
+    }
+
+    /// 记录 i128。
+    ///
+    /// Business Logic: 兼容更宽整数。
+    /// Code Logic: 非负且可转 u64 时写入 elapsed_ms。
+    fn record_i128(&mut self, field: &Field, value: i128) {
+        if field.name() == "elapsed_ms" && value >= 0 {
+            if let Ok(v) = u64::try_from(value) {
+                self.elapsed_ms = Some(v);
+            }
+        }
+    }
+}
+
+/// 严格白名单 JSON 文件日志 formatter。
+///
+/// Business Logic（为什么需要这个结构）:
+///     文件层必须输出可控 JSON schema，供 doctor 读取 recent errors，且永不泄漏未知字段。
+///
+/// Code Logic（这个结构做什么）:
+///     实现 `FormatEvent`：Visit 白名单字段 → 组装 JSON 对象 → 写一行 + `\n`。
+#[derive(Debug, Default, Clone)]
+pub struct SanitizedJsonFormatter;
+
+impl<S, N> FormatEvent<S, N> for SanitizedJsonFormatter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    /// 将事件格式化为单行白名单 JSON。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     tracing-subscriber 每条事件回调此处；必须保证输出 schema 稳定且已脱敏。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     收集字段 → 注入 timestamp/level → serde_json 紧凑序列化 → writeln。
+    fn format_event(
+        &self,
+        _ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let mut visitor = WhitelistFieldVisitor::default();
+        event.record(&mut visitor);
+
+        let mut map = Map::new();
+        map.insert(
+            "timestamp".to_string(),
+            Value::String(chrono::Utc::now().to_rfc3339()),
+        );
+        map.insert(
+            "level".to_string(),
+            Value::String(level_to_str(event.metadata().level()).to_string()),
+        );
+        if let Some(v) = visitor.request_id {
+            map.insert("request_id".to_string(), Value::String(v));
+        }
+        if let Some(v) = visitor.domain {
+            map.insert("domain".to_string(), Value::String(v));
+        }
+        if let Some(v) = visitor.operation {
+            map.insert("operation".to_string(), Value::String(v));
+        }
+        if let Some(v) = visitor.result {
+            map.insert("result".to_string(), Value::String(v));
+        }
+        if let Some(v) = visitor.elapsed_ms {
+            map.insert("elapsed_ms".to_string(), Value::Number(v.into()));
+        }
+        if let Some(v) = visitor.error_code {
+            map.insert("error_code".to_string(), Value::String(v));
+        }
+        if let Some(v) = visitor.message {
+            map.insert("message".to_string(), Value::String(v));
+        }
+
+        let line = serde_json::to_string(&Value::Object(map)).map_err(|_| fmt::Error)?;
+        writeln!(writer, "{line}")
+    }
+}
+
+/// Level 转小写稳定字符串。
+///
+/// Business Logic（为什么需要这个函数）:
+///     doctor/测试依赖 level 字段稳定字面量。
+///
+/// Code Logic（这个函数做什么）:
+///     ERROR/WARN/INFO/DEBUG/TRACE → 对应小写。
+fn level_to_str(level: &Level) -> &'static str {
+    match *level {
+        Level::ERROR => "error",
+        Level::WARN => "warn",
+        Level::INFO => "info",
+        Level::DEBUG => "debug",
+        Level::TRACE => "trace",
+    }
+}
+
+/// 将 `SanitizedJsonFormatter` 接到任意 `MakeWriter`（文件/缓冲）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     serve（Task 3）与本任务测试都需要同一套严格 JSON layer，避免重复拼装。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 `fmt::Layer`：无 ANSI、使用 `SanitizedJsonFormatter` 作为事件格式。
+pub fn sanitized_json_layer<S, W>(
+    make_writer: W,
+) -> tracing_subscriber::fmt::Layer<
+    S,
+    tracing_subscriber::fmt::format::DefaultFields,
+    SanitizedJsonFormatter,
+    W,
+>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + 'static,
+{
+    tracing_subscriber::fmt::layer()
+        .event_format(SanitizedJsonFormatter)
+        .with_ansi(false)
+        .with_writer(make_writer)
+}
+
+// ---------------------------------------------------------------------------
+// Production structured logging helpers
+// ---------------------------------------------------------------------------
+
+/// 操作完成结果字面量（成功/失败/取消等）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     统一 result 字段取值，避免自由文本漂移。
+///
+/// Code Logic（这个枚举做什么）:
+///     提供 `as_str` 稳定字面量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationResult {
+    /// 成功。
+    Ok,
+    /// 失败。
+    Error,
+    /// 被取消。
+    Cancelled,
+    /// 跳过（如能力不支持）。
+    Skipped,
+}
+
+impl OperationResult {
+    /// 稳定字符串。
+    ///
+    /// Business Logic: schema 的 result 字段字面量。
+    /// Code Logic: 映射到 ok/error/cancelled/skipped。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+/// 一次请求/操作完成的结构化诊断字段（生产路径）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     backend HTTP/control/P2P 高价值事件必须只写白名单字段；用结构体聚合参数，
+///     避免过长位置参数列表，也便于调用方按名字填充。
+///
+/// Code Logic（这个结构做什么）:
+///     持有 level + schema 字段（request_id/domain/operation/result/elapsed_ms/error_code/message）。
+#[derive(Debug, Clone)]
+pub struct OperationLog {
+    /// 日志级别。
+    pub level: Level,
+    /// 可选请求 ID（P2P/middleware 透传）。
+    pub request_id: Option<String>,
+    /// 业务域（http/control/p2p 等）。
+    pub domain: String,
+    /// 操作名（serve/sync_pull/stop 等）。
+    pub operation: String,
+    /// 结果字面量。
+    pub result: OperationResult,
+    /// 可选耗时毫秒。
+    pub elapsed_ms: Option<u64>,
+    /// 可选稳定错误码。
+    pub error_code: Option<String>,
+    /// 可选已脱敏前的错误/摘要文本（写入前会再跑 sanitizer）。
+    pub message: Option<String>,
+}
+
+impl OperationLog {
+    /// 构造最小必填字段的操作日志。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     多数调用只需 domain/operation/result，可选字段按需链式补充。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     以 INFO/空可选字段初始化，调用方再覆盖 level 等。
+    pub fn new(domain: impl Into<String>, operation: impl Into<String>, result: OperationResult) -> Self {
+        Self {
+            level: Level::INFO,
+            request_id: None,
+            domain: domain.into(),
+            operation: operation.into(),
+            result,
+            elapsed_ms: None,
+            error_code: None,
+            message: None,
+        }
+    }
+
+    /// 设置日志级别。
+    ///
+    /// Business Logic: 错误路径用 ERROR/WARN，成功用 INFO。
+    /// Code Logic: 覆盖 `level` 后返回 self 便于链式调用。
+    pub fn level(mut self, level: Level) -> Self {
+        self.level = level;
+        self
+    }
+
+    /// 设置 request_id。
+    ///
+    /// Business Logic: 串联 P2P 调用链。
+    /// Code Logic: 写入 `request_id`。
+    pub fn request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
+        self
+    }
+
+    /// 设置耗时毫秒。
+    ///
+    /// Business Logic: doctor/排障需要耗时信号。
+    /// Code Logic: 写入 `elapsed_ms`。
+    pub fn elapsed_ms(mut self, ms: u64) -> Self {
+        self.elapsed_ms = Some(ms);
+        self
+    }
+
+    /// 设置稳定错误码。
+    ///
+    /// Business Logic: 与 P2P 错误信封 code 对齐。
+    /// Code Logic: 写入 `error_code`。
+    pub fn error_code(mut self, code: impl Into<String>) -> Self {
+        self.error_code = Some(code.into());
+        self
+    }
+
+    /// 设置摘要消息（写入前脱敏）。
+    ///
+    /// Business Logic: 人类可读摘要，禁止塞 payload。
+    /// Code Logic: 写入 `message`。
+    pub fn message(mut self, message: impl Into<String>) -> Self {
+        self.message = Some(message.into());
+        self
+    }
+
+    /// 发出本条结构化诊断事件。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     生产路径统一出口：只写白名单字段，message 强制脱敏，永不记请求 body。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 level 选择 tracing 宏，字段仅含 schema 白名单。
+    pub fn emit(self) {
+        let request_id = self.request_id.as_deref().unwrap_or("");
+        let error_code = self.error_code.as_deref().unwrap_or("");
+        let message = self
+            .message
+            .as_deref()
+            .map(sanitize_diagnostic_text)
+            .unwrap_or_default();
+        let result_str = self.result.as_str();
+        let elapsed = self.elapsed_ms.unwrap_or(0);
+        let domain = self.domain.as_str();
+        let operation = self.operation.as_str();
+
+        match self.level {
+            Level::ERROR => {
+                tracing::error!(
+                    request_id = %request_id,
+                    domain = %domain,
+                    operation = %operation,
+                    result = %result_str,
+                    elapsed_ms = elapsed,
+                    error_code = %error_code,
+                    message = %message,
+                    "{message}"
+                );
+            }
+            Level::WARN => {
+                tracing::warn!(
+                    request_id = %request_id,
+                    domain = %domain,
+                    operation = %operation,
+                    result = %result_str,
+                    elapsed_ms = elapsed,
+                    error_code = %error_code,
+                    message = %message,
+                    "{message}"
+                );
+            }
+            Level::DEBUG => {
+                tracing::debug!(
+                    request_id = %request_id,
+                    domain = %domain,
+                    operation = %operation,
+                    result = %result_str,
+                    elapsed_ms = elapsed,
+                    error_code = %error_code,
+                    message = %message,
+                    "{message}"
+                );
+            }
+            Level::TRACE => {
+                tracing::trace!(
+                    request_id = %request_id,
+                    domain = %domain,
+                    operation = %operation,
+                    result = %result_str,
+                    elapsed_ms = elapsed,
+                    error_code = %error_code,
+                    message = %message,
+                    "{message}"
+                );
+            }
+            _ => {
+                tracing::info!(
+                    request_id = %request_id,
+                    domain = %domain,
+                    operation = %operation,
+                    result = %result_str,
+                    elapsed_ms = elapsed,
+                    error_code = %error_code,
+                    message = %message,
+                    "{message}"
+                );
+            }
+        }
+    }
+}
+
+/// 记录一次请求/操作完成的结构化诊断事件（生产路径，兼容包装）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     保留简短调用入口；内部委托 `OperationLog::emit`。
+///
+/// Code Logic（这个函数做什么）:
+///     组装 `OperationLog` 后 `emit`。
+pub fn log_operation_completion(log: OperationLog) {
+    log.emit();
+}
+
+// ---------------------------------------------------------------------------
+// FS helpers
+// ---------------------------------------------------------------------------
+
 /// 确保日志目录存在并在 Unix 上设为 0700。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -353,10 +1066,17 @@ fn apply_file_mode_0600(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     use std::io::Write;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tracing_subscriber::prelude::*;
 
     /// 构造临时目录下的测试配置。
     ///
@@ -379,6 +1099,67 @@ mod tests {
     fn file_len(path: &Path) -> u64 {
         fs::metadata(path).map(|m| m.len()).unwrap_or(0)
     }
+
+    /// 读取 current + 全部历史文件的拼接文本。
+    ///
+    /// Business Logic: 敏感字段回归必须扫描所有落盘文件。
+    /// Code Logic: current + `.1`..`.history` 拼接。
+    fn read_all_log_files(config: &BackendLogConfig) -> String {
+        let mut out = read_string(&config.current_path());
+        for i in 1..=config.history_files {
+            let p = config.history_path(i);
+            if p.exists() {
+                out.push_str(&read_string(&p));
+            }
+        }
+        out
+    }
+
+    /// 内存 MakeWriter：供 with_default subscriber 测试 formatter。
+    #[derive(Clone, Default)]
+    struct BufferWriter {
+        buf: Arc<StdMutex<Vec<u8>>>,
+    }
+
+    impl BufferWriter {
+        fn new() -> Self {
+            Self {
+                buf: Arc::new(StdMutex::new(Vec::new())),
+            }
+        }
+
+        fn contents(&self) -> String {
+            let guard = self.buf.lock().expect("buf lock");
+            String::from_utf8_lossy(&guard).into_owned()
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufferWriter {
+        type Writer = BufferHandle;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            BufferHandle {
+                buf: Arc::clone(&self.buf),
+            }
+        }
+    }
+
+    struct BufferHandle {
+        buf: Arc<StdMutex<Vec<u8>>>,
+    }
+
+    impl Write for BufferHandle {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            self.buf.lock().expect("buf").extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // ----- rotation tests (Task 1) -----
 
     #[test]
     fn append_below_limit_stays_on_current() {
@@ -496,10 +1277,7 @@ mod tests {
             & 0o777;
         assert_eq!(dir_mode, 0o700, "日志目录应为 0700");
 
-        for path in [
-            config.current_path(),
-            config.history_path(1),
-        ] {
+        for path in [config.current_path(), config.history_path(1)] {
             let mode = fs::metadata(&path)
                 .expect("file meta")
                 .permissions()
@@ -581,5 +1359,310 @@ mod tests {
                 prod.log_dir
             );
         }
+    }
+
+    // ----- sanitizer unit tests -----
+
+    #[test]
+    fn sanitize_replaces_home_and_redacts_secrets() {
+        let home = dirs::home_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/Users/hostile".into());
+        let raw = format!(
+            "fail path={home}/.claude/CLAUDE.md Authorization: Bearer SUPERSECRET_TOKEN_XYZ password=hunter2-secret"
+        );
+        let cleaned = sanitize_diagnostic_text(&raw);
+        assert!(
+            cleaned.contains("<HOME>"),
+            "home 应替换为 <HOME>: {cleaned}"
+        );
+        assert!(
+            !cleaned.contains(&home),
+            "原始 home 不得残留: {cleaned}"
+        );
+        assert!(
+            !cleaned.contains("SUPERSECRET_TOKEN_XYZ"),
+            "Bearer token 必须 redact: {cleaned}"
+        );
+        assert!(
+            !cleaned.contains("hunter2-secret"),
+            "password 必须 redact: {cleaned}"
+        );
+        assert!(
+            cleaned.contains("<REDACTED>"),
+            "应出现 <REDACTED> 占位: {cleaned}"
+        );
+    }
+
+    #[test]
+    fn sanitize_caps_at_8kib_utf8_boundary() {
+        // 使用多字节字符确保截断不破坏 UTF-8
+        let unit = "测";
+        let mut s = String::new();
+        while s.len() < SANITIZED_VALUE_MAX_BYTES + 64 {
+            s.push_str(unit);
+        }
+        let out = sanitize_diagnostic_text(&s);
+        assert!(out.len() <= SANITIZED_VALUE_MAX_BYTES + 3, "截断后应有界");
+        assert!(out.ends_with('…') || out.chars().all(|c| c == '测' || c == '…'));
+        // 必须仍是合法 UTF-8（String 保证）且不以残缺字节结尾
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn sanitize_strips_body_shaped_content() {
+        let raw = r#"upstream error body={"prompt":"TOP_SECRET_PROMPT_TEXT","token":"abc"}"#;
+        let cleaned = sanitize_diagnostic_text(raw);
+        assert!(
+            !cleaned.contains("TOP_SECRET_PROMPT_TEXT"),
+            "body 内 prompt 不得残留: {cleaned}"
+        );
+        assert!(
+            cleaned.contains("BODY_OMITTED") || cleaned.contains("<REDACTED>"),
+            "应剥离 body: {cleaned}"
+        );
+    }
+
+    // ----- hostile fixture + file schema tests -----
+
+    /// 敌意 fixture：敏感字段/正文不得出现在任何 current/history 文件中。
+    ///
+    /// Business Logic: Task 2 核心门禁——脱敏与白名单必须挡住真实攻击性输入。
+    /// Code Logic: with_default 挂 sanitized JSON layer → 写文件 → 扫描全部日志文件。
+    #[test]
+    fn redacts_sensitive_diagnostics() {
+        let (_dir, config) = test_config(BACKEND_LOG_MAX_BYTES, 3);
+        let writer = RotatingLogWriter::open(config.clone()).expect("open rotating");
+        // 同步写盘，避免 non_blocking 竞态
+        let file_writer = Arc::new(StdMutex::new(writer));
+
+        #[derive(Clone)]
+        struct SharedRotating(Arc<StdMutex<RotatingLogWriter>>);
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedRotating {
+            type Writer = SharedRotatingHandle;
+            fn make_writer(&'a self) -> Self::Writer {
+                SharedRotatingHandle(Arc::clone(&self.0))
+            }
+        }
+        struct SharedRotatingHandle(Arc<StdMutex<RotatingLogWriter>>);
+        impl Write for SharedRotatingHandle {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().expect("lock").write(buf)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.0.lock().expect("lock").flush()
+            }
+        }
+
+        let make_writer = SharedRotating(Arc::clone(&file_writer));
+        let subscriber = tracing_subscriber::registry()
+            .with(sanitized_json_layer(make_writer));
+
+        let home = dirs::home_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/Users/hostile-user".into());
+        let home_username = PathBuf::from(&home)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("hostile-user")
+            .to_string();
+
+        const BEARER: &str = "Bearer_HostileToken_9f3c2a1b";
+        const PASSWORD: &str = "P@ssw0rd_Hostile_Fixture";
+        const API_KEY: &str = "sk_live_hostilefixturekeymaterial0001";
+        const PROMPT_TEXT: &str = "PROMPT_TEXT_SENTINEL_do_not_log_me";
+        const FILE_SENTINEL: &str = "FILE_CONTENT_SENTINEL_xyz987";
+        const BODY_JSON: &str =
+            r#"{"prompt":"PROMPT_TEXT_SENTINEL_do_not_log_me","password":"P@ssw0rd_Hostile_Fixture"}"#;
+
+        let bearer_b64 = B64.encode(BEARER.as_bytes());
+        let password_b64 = B64.encode(PASSWORD.as_bytes());
+        let prompt_b64 = B64.encode(PROMPT_TEXT.as_bytes());
+
+        tracing::subscriber::with_default(subscriber, || {
+            // 1) 敌意字段：未知字段必须被丢弃
+            tracing::error!(
+                request_id = "req-hostile-001",
+                domain = "p2p",
+                operation = "health",
+                result = "error",
+                elapsed_ms = 42u64,
+                error_code = "unavailable",
+                authorization = %format!("Bearer {BEARER}"),
+                password = PASSWORD,
+                token = BEARER,
+                secret = API_KEY,
+                api_key = API_KEY,
+                body = BODY_JSON,
+                prompt = PROMPT_TEXT,
+                file_content = FILE_SENTINEL,
+                "health failed Authorization: Bearer {BEARER} password={PASSWORD} key={API_KEY} home={home}/.cc-partner body={BODY_JSON} file={FILE_SENTINEL} prompt={PROMPT_TEXT}"
+            );
+
+            // 2) 生产 helper 路径
+            OperationLog::new("control", "stop", OperationResult::Error)
+                .level(Level::ERROR)
+                .request_id("req-control-002")
+                .elapsed_ms(7)
+                .error_code("internal")
+                .message(format!(
+                    "stop failed token={BEARER} path={home}/data.db body={BODY_JSON}"
+                ))
+                .emit();
+
+            // 3) 代表 health/control/P2P 的结构化成功事件（允许字段必须保留）
+            OperationLog::new("http", "serve", OperationResult::Ok)
+                .request_id("req-http-003")
+                .elapsed_ms(3)
+                .message("axum HTTP server started")
+                .emit();
+        });
+
+        // flush writer
+        file_writer.lock().expect("lock").flush().ok();
+
+        let all = read_all_log_files(&config);
+        assert!(
+            !all.trim().is_empty(),
+            "应写出至少一条日志，实际为空"
+        );
+
+        // --- 禁止出现的敏感原文 / 编码 ---
+        for banned in [
+            BEARER,
+            PASSWORD,
+            API_KEY,
+            PROMPT_TEXT,
+            FILE_SENTINEL,
+            BODY_JSON,
+            &home,
+            &home_username,
+            &bearer_b64,
+            &password_b64,
+            &prompt_b64,
+            "Authorization: Bearer",
+            "Bearer Bearer_Hostile",
+        ] {
+            assert!(
+                !all.contains(banned),
+                "日志不得包含敏感串 `{banned}`\n--- log ---\n{all}\n--- end ---"
+            );
+        }
+
+        // --- 允许字段必须保留 ---
+        assert!(
+            all.contains("req-hostile-001") || all.contains("req-control-002"),
+            "request_id 应保留: {all}"
+        );
+        assert!(
+            all.contains("\"domain\":\"p2p\"")
+                || all.contains("\"domain\":\"control\"")
+                || all.contains("\"domain\":\"http\""),
+            "domain 应保留: {all}"
+        );
+        assert!(
+            all.contains("\"operation\""),
+            "operation 应保留: {all}"
+        );
+        assert!(
+            all.contains("\"result\""),
+            "result 应保留: {all}"
+        );
+        assert!(
+            all.contains("elapsed_ms") || all.contains("\"elapsed_ms\":"),
+            "elapsed_ms 应保留: {all}"
+        );
+        assert!(
+            all.contains("error_code") || all.contains("unavailable") || all.contains("internal"),
+            "error_code 应保留: {all}"
+        );
+
+        // 每行必须是合法 JSON 且仅含白名单键（+ timestamp/level）
+        let allowed: std::collections::HashSet<&str> = [
+            "timestamp",
+            "level",
+            "request_id",
+            "domain",
+            "operation",
+            "result",
+            "elapsed_ms",
+            "error_code",
+            "message",
+        ]
+        .into_iter()
+        .collect();
+        for line in all.lines().filter(|l| !l.trim().is_empty()) {
+            let value: Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("日志行必须是 JSON: {e}; line={line}"));
+            let obj = value
+                .as_object()
+                .unwrap_or_else(|| panic!("日志行必须是对象: {line}"));
+            for key in obj.keys() {
+                assert!(
+                    allowed.contains(key.as_str()),
+                    "未知字段 `{key}` 不得出现在文件日志: {line}"
+                );
+            }
+            // 禁止敌意字段名
+            for banned_key in [
+                "authorization",
+                "password",
+                "token",
+                "secret",
+                "api_key",
+                "body",
+                "prompt",
+                "file_content",
+            ] {
+                assert!(
+                    !obj.contains_key(banned_key),
+                    "禁止字段 `{banned_key}` 出现: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_fields_dropped_allowed_fields_kept() {
+        let buffer = BufferWriter::new();
+        let subscriber = tracing_subscriber::registry().with(sanitized_json_layer(buffer.clone()));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                request_id = "req-keep",
+                domain = "net",
+                operation = "sync_pull",
+                result = "ok",
+                elapsed_ms = 11u64,
+                error_code = "",
+                password = "should-drop",
+                body = "should-drop-body",
+                "sync pull completed"
+            );
+        });
+
+        let out = buffer.contents();
+        assert!(out.contains("req-keep"), "request_id 保留: {out}");
+        assert!(out.contains("\"domain\":\"net\""), "domain 保留: {out}");
+        assert!(
+            out.contains("\"operation\":\"sync_pull\""),
+            "operation 保留: {out}"
+        );
+        assert!(out.contains("\"elapsed_ms\":11"), "elapsed_ms 保留: {out}");
+        assert!(!out.contains("should-drop"), "未知字段值丢弃: {out}");
+        assert!(!out.contains("password"), "未知字段名丢弃: {out}");
+        assert!(!out.contains("should-drop-body"), "body 丢弃: {out}");
+    }
+
+    #[test]
+    fn file_log_allowed_fields_constant_matches_schema() {
+        assert!(FILE_LOG_ALLOWED_FIELDS.contains(&"request_id"));
+        assert!(FILE_LOG_ALLOWED_FIELDS.contains(&"domain"));
+        assert!(FILE_LOG_ALLOWED_FIELDS.contains(&"operation"));
+        assert!(FILE_LOG_ALLOWED_FIELDS.contains(&"result"));
+        assert!(FILE_LOG_ALLOWED_FIELDS.contains(&"elapsed_ms"));
+        assert!(FILE_LOG_ALLOWED_FIELDS.contains(&"error_code"));
+        assert!(FILE_LOG_ALLOWED_FIELDS.contains(&"message"));
+        assert_eq!(FILE_LOG_ALLOWED_FIELDS.len(), 7);
     }
 }

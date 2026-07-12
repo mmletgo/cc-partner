@@ -806,11 +806,26 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
     // axum::serve 返回的 future 为 Send，可直接 spawn 到 tokio runtime。
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
-            tracing::error!("axum HTTP server 异常退出: {e}");
+            // 仅记录脱敏摘要，不写请求 payload
+            crate::backend::logging::OperationLog::new(
+                "http",
+                "serve",
+                crate::backend::logging::OperationResult::Error,
+            )
+            .level(tracing::Level::ERROR)
+            .error_code("internal")
+            .message(format!("axum HTTP server 异常退出: {e}"))
+            .emit();
         }
     });
 
-    tracing::info!("axum HTTP server 已启动，监听端口: {actual_port}");
+    crate::backend::logging::OperationLog::new(
+        "http",
+        "serve",
+        crate::backend::logging::OperationResult::Ok,
+    )
+    .message(format!("axum HTTP server 已启动，监听端口: {actual_port}"))
+    .emit();
     Ok(actual_port)
 }
 
