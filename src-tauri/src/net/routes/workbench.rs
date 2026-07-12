@@ -362,13 +362,17 @@ pub async fn list_worktrees(
 ///     接收 projectId/branchName/baseBranch，委托本地 create worktree helper 并返回 DTO。
 pub async fn create_worktree(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCreateWorktreeReq>,
-) -> Result<Json<WorkbenchWorktreeDto>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
+) -> P2pResult<Json<WorkbenchWorktreeDto>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.create"))?;
+    let worktree =
         local_create_workbench_worktree(&state, req.project_id, req.branch_name, req.base_branch)
-            .await?,
-    ))
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.create"))?;
+    Ok(Json(worktree))
 }
 
 /// 获取远端设备本机 worktree。
@@ -401,12 +405,16 @@ pub async fn get_worktree(
 ///     确认 worktree 属于 local 项目后调用本地 commit helper，返回最新 worktree DTO。
 pub async fn commit_worktree(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCommitWorktreeReq>,
-) -> Result<Json<WorkbenchWorktreeDto>, AppError> {
-    ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id).await?;
-    Ok(Json(
-        local_commit_workbench_worktree(&state, req.worktree_id, req.message).await?,
-    ))
+) -> P2pResult<Json<WorkbenchWorktreeDto>> {
+    ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.commit"))?;
+    let worktree = local_commit_workbench_worktree(&state, req.worktree_id, req.message)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.commit"))?;
+    Ok(Json(worktree))
 }
 
 /// 推送远端设备本机 worktree。
@@ -418,12 +426,16 @@ pub async fn commit_worktree(
 ///     确认 worktree 属于 local 项目后调用本地 push helper，返回最新 worktree DTO。
 pub async fn push_worktree(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteWorktreeReq>,
-) -> Result<Json<WorkbenchWorktreeDto>, AppError> {
-    ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id).await?;
-    Ok(Json(
-        local_push_workbench_worktree(&state, req.worktree_id).await?,
-    ))
+) -> P2pResult<Json<WorkbenchWorktreeDto>> {
+    ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.push"))?;
+    let worktree = local_push_workbench_worktree(&state, req.worktree_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.push"))?;
+    Ok(Json(worktree))
 }
 
 /// 合并远端设备本机 worktree。
@@ -435,12 +447,16 @@ pub async fn push_worktree(
 ///     确认 worktree 属于 local 项目后调用本地 merge helper，返回 merge result DTO。
 pub async fn merge_worktree(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteWorktreeReq>,
-) -> Result<Json<WorkbenchMergeResultDto>, AppError> {
-    ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id).await?;
-    Ok(Json(
-        local_merge_workbench_worktree(&state, req.worktree_id).await?,
-    ))
+) -> P2pResult<Json<WorkbenchMergeResultDto>> {
+    ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.merge"))?;
+    let result = local_merge_workbench_worktree(&state, req.worktree_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.merge"))?;
+    Ok(Json(result))
 }
 
 /// 删除远端设备本机 worktree。
@@ -452,12 +468,17 @@ pub async fn merge_worktree(
 ///     确认 worktree 属于 local 项目后调用本地 remove helper，返回 `{ok, worktreeId}`。
 pub async fn remove_worktree(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteRemoveWorktreeReq>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id).await?;
-    Ok(Json(
-        local_remove_workbench_worktree(&state, req.worktree_id, req.force).await?,
-    ))
+) -> P2pResult<Json<serde_json::Value>> {
+    ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.remove"))?;
+    let result =
+        local_remove_workbench_worktree(&state, req.worktree_id, req.force)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.remove"))?;
+    Ok(Json(result))
 }
 
 /// 列出远端设备本机项目的 Git 提交。
@@ -558,10 +579,13 @@ pub async fn open_workbench_file(
 ///     接收 projectId/worktreeId/path/content/baseHash，委托本地 save-text helper。
 pub async fn save_workbench_text_file(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSaveTextReq>,
-) -> Result<Json<WorkbenchSaveTextResultDto>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
+) -> P2pResult<Json<WorkbenchSaveTextResultDto>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.save_text"))?;
+    let result =
         local_save_workbench_text_file(
             &state,
             req.project_id,
@@ -570,8 +594,9 @@ pub async fn save_workbench_text_file(
             req.content,
             req.base_hash,
         )
-        .await?,
-    ))
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.save_text"))?;
+    Ok(Json(result))
 }
 
 /// 预览远端设备本机项目内 SQLite 文件。
@@ -640,10 +665,13 @@ pub async fn preview_workbench_html_asset(
 ///     接收 projectId/worktreeId/parentPath/name，委托本地 create-file helper。
 pub async fn create_workbench_file(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCreatePathReq>,
-) -> Result<Json<WorkbenchPathInfo>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
+) -> P2pResult<Json<WorkbenchPathInfo>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.create_file"))?;
+    let info =
         local_create_workbench_file(
             &state,
             req.project_id,
@@ -651,8 +679,9 @@ pub async fn create_workbench_file(
             req.parent_path,
             req.name,
         )
-        .await?,
-    ))
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.create_file"))?;
+    Ok(Json(info))
 }
 
 /// 在远端设备本机项目内创建目录。
@@ -664,10 +693,13 @@ pub async fn create_workbench_file(
 ///     接收 projectId/worktreeId/parentPath/name，委托本地 create-dir helper。
 pub async fn create_workbench_dir(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCreatePathReq>,
-) -> Result<Json<WorkbenchPathInfo>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
+) -> P2pResult<Json<WorkbenchPathInfo>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.create_dir"))?;
+    let info =
         local_create_workbench_dir(
             &state,
             req.project_id,
@@ -675,8 +707,9 @@ pub async fn create_workbench_dir(
             req.parent_path,
             req.name,
         )
-        .await?,
-    ))
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.create_dir"))?;
+    Ok(Json(info))
 }
 
 /// 重命名远端设备本机项目内路径。
@@ -688,10 +721,13 @@ pub async fn create_workbench_dir(
 ///     接收 projectId/worktreeId/path/newName，委托本地 rename helper。
 pub async fn rename_workbench_path(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteRenamePathReq>,
-) -> Result<Json<WorkbenchPathInfo>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
+) -> P2pResult<Json<WorkbenchPathInfo>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.rename"))?;
+    let info =
         local_rename_workbench_path(
             &state,
             req.project_id,
@@ -699,8 +735,9 @@ pub async fn rename_workbench_path(
             req.path,
             req.new_name,
         )
-        .await?,
-    ))
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.rename"))?;
+    Ok(Json(info))
 }
 
 /// 删除远端设备本机项目内路径。
@@ -712,12 +749,17 @@ pub async fn rename_workbench_path(
 ///     接收 projectId/worktreeId/path，委托本地 delete helper 并返回 `{ok,path}`。
 pub async fn delete_workbench_path(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteDeletePathReq>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
-        local_delete_workbench_path(&state, req.project_id, req.worktree_id, req.path).await?,
-    ))
+) -> P2pResult<Json<serde_json::Value>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.delete"))?;
+    let result =
+        local_delete_workbench_path(&state, req.project_id, req.worktree_id, req.path)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.files.delete"))?;
+    Ok(Json(result))
 }
 
 /// 订阅本机 Workbench 远端事件流。
@@ -803,10 +845,13 @@ pub async fn list_workbench_sessions(
 ///     接收 projectId/worktreeId/尺寸，确认 projectId 是 local 后委托本地 create session helper。
 pub async fn create_workbench_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCreateSessionReq>,
-) -> Result<Json<WorkbenchSessionDto>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
+) -> P2pResult<Json<WorkbenchSessionDto>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.create"))?;
+    let session =
         local_create_workbench_session(
             &state,
             req.project_id,
@@ -814,8 +859,9 @@ pub async fn create_workbench_session(
             req.initial_cols,
             req.initial_rows,
         )
-        .await?,
-    ))
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.create"))?;
+    Ok(Json(session))
 }
 
 /// 向远端设备本机终端写入输入。
@@ -827,12 +873,16 @@ pub async fn create_workbench_session(
 ///     确认 session 属于本机 local 项目后调用本地 write helper。
 pub async fn write_workbench_session_input(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteWriteSessionInputReq>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
-    Ok(Json(
-        local_write_workbench_session_input(&state, req.session_id, req.data).await?,
-    ))
+) -> P2pResult<Json<serde_json::Value>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.write"))?;
+    let result = local_write_workbench_session_input(&state, req.session_id, req.data)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.write"))?;
+    Ok(Json(result))
 }
 
 /// 调整远端设备本机终端尺寸。
@@ -844,12 +894,17 @@ pub async fn write_workbench_session_input(
 ///     确认 session 属于本机 local 项目后调用本地 resize helper。
 pub async fn resize_workbench_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteResizeSessionReq>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
-    Ok(Json(
-        local_resize_workbench_session(&state, req.session_id, req.cols, req.rows).await?,
-    ))
+) -> P2pResult<Json<serde_json::Value>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.resize"))?;
+    let result =
+        local_resize_workbench_session(&state, req.session_id, req.cols, req.rows)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.resize"))?;
+    Ok(Json(result))
 }
 
 /// 聚焦远端设备本机终端 window。
@@ -861,12 +916,16 @@ pub async fn resize_workbench_session(
 ///     确认 session 属于本机 local 项目后调用本地 focus helper。
 pub async fn focus_workbench_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSessionReq>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
-    Ok(Json(
-        local_focus_workbench_session(&state, req.session_id).await?,
-    ))
+) -> P2pResult<Json<serde_json::Value>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.focus"))?;
+    let result = local_focus_workbench_session(&state, req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.focus"))?;
+    Ok(Json(result))
 }
 
 /// 查询远端设备本机项目当前聚焦终端。
@@ -900,12 +959,16 @@ pub async fn focused_workbench_session(
 ///     确认 session 属于本机 local 项目后调用本地 split-pane helper。
 pub async fn split_workbench_pane(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSplitPaneReq>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
-    Ok(Json(
-        local_split_workbench_pane(&state, req.session_id, req.direction).await?,
-    ))
+) -> P2pResult<Json<serde_json::Value>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.split_pane"))?;
+    let result = local_split_workbench_pane(&state, req.session_id, req.direction)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.split_pane"))?;
+    Ok(Json(result))
 }
 
 /// 切换远端设备本机终端到下一个 pane。
@@ -917,12 +980,16 @@ pub async fn split_workbench_pane(
 ///     确认 session 属于本机 local 项目后调用本地 switch-pane helper。
 pub async fn switch_workbench_pane(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSessionReq>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
-    Ok(Json(
-        local_switch_workbench_pane(&state, req.session_id).await?,
-    ))
+) -> P2pResult<Json<serde_json::Value>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.switch_pane"))?;
+    let result = local_switch_workbench_pane(&state, req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.switch_pane"))?;
+    Ok(Json(result))
 }
 
 /// 确保远端设备本机终端 active pane 以单 pane 视图显示。
@@ -934,12 +1001,16 @@ pub async fn switch_workbench_pane(
 ///     确认 session 属于本机 local 项目后调用本地 zoom-pane helper。
 pub async fn zoom_workbench_pane(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSessionReq>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
-    Ok(Json(
-        local_zoom_workbench_pane(&state, req.session_id).await?,
-    ))
+) -> P2pResult<Json<serde_json::Value>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.zoom_pane"))?;
+    let result = local_zoom_workbench_pane(&state, req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.zoom_pane"))?;
+    Ok(Json(result))
 }
 
 /// 关闭远端设备本机终端当前 pane。
@@ -951,12 +1022,16 @@ pub async fn zoom_workbench_pane(
 ///     确认 session 属于本机 local 项目后调用本地 close-pane helper。
 pub async fn close_workbench_pane(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSessionReq>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
-    Ok(Json(
-        local_close_workbench_pane(&state, req.session_id).await?,
-    ))
+) -> P2pResult<Json<serde_json::Value>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.close_pane"))?;
+    let result = local_close_workbench_pane(&state, req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.close_pane"))?;
+    Ok(Json(result))
 }
 
 /// 关闭远端设备本机终端会话。
@@ -968,12 +1043,16 @@ pub async fn close_workbench_pane(
 ///     确认 session 属于本机 local 项目后调用本地 close session helper。
 pub async fn close_workbench_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSessionReq>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
-    Ok(Json(
-        local_close_workbench_session(&state, req.session_id).await?,
-    ))
+) -> P2pResult<Json<serde_json::Value>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.close"))?;
+    let result = local_close_workbench_session(&state, req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.close"))?;
+    Ok(Json(result))
 }
 
 /// 重命名远端设备本机终端会话。
@@ -985,12 +1064,16 @@ pub async fn close_workbench_session(
 ///     确认 session 属于本机 local 项目后调用本地 rename helper。
 pub async fn rename_workbench_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteRenameSessionReq>,
-) -> Result<Json<WorkbenchSessionDto>, AppError> {
-    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
-    Ok(Json(
-        local_rename_workbench_session(&state, req.session_id, req.name).await?,
-    ))
+) -> P2pResult<Json<WorkbenchSessionDto>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.rename"))?;
+    let session = local_rename_workbench_session(&state, req.session_id, req.name)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.rename"))?;
+    Ok(Json(session))
 }
 
 /// 在远端设备本机项目上下文中流式优化 Prompt 并写入终端。
@@ -1002,10 +1085,13 @@ pub async fn rename_workbench_session(
 ///     接收远端 local sessionId 与可选远端工作目录，确认 session 属于本机 local 项目后复用本地流式优化 helper。
 pub async fn stream_prompt_optimizer_to_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemotePromptOptimizerReq>,
-) -> Result<Json<Value>, AppError> {
-    ensure_remote_gateway_local_session_id(&state, &req.session_id).await?;
-    Ok(Json(
+) -> P2pResult<Json<Value>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.prompt_optimizer.stream"))?;
+    let result =
         local_stream_optimize_prompt_to_workbench_session(
             &state,
             req.prompt,
@@ -1013,8 +1099,9 @@ pub async fn stream_prompt_optimizer_to_session(
             req.target_language,
             req.session_id,
         )
-        .await?,
-    ))
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.prompt_optimizer.stream"))?;
+    Ok(Json(result))
 }
 
 /// 手机端发现本机或远端项目的浏览器预览候选。
@@ -1594,18 +1681,22 @@ pub async fn get_claude_session_preview(
 ///     **不**包装 remote: 前缀（由发起方命令层包装）。
 pub async fn resume_claude_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteClaudeSessionReq>,
-) -> Result<Json<ResumeClaudeSessionResult>, AppError> {
-    ensure_remote_gateway_local_project_id(&state, &req.project_id).await?;
-    Ok(Json(
+) -> P2pResult<Json<ResumeClaudeSessionResult>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.resume"))?;
+    let result =
         resume_claude_session_for_state(
             &state,
             &req.project_id,
             req.worktree_id.as_deref(),
             &req.session_id,
         )
-        .await?,
-    ))
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.resume"))?;
+    Ok(Json(result))
 }
 
 #[cfg(test)]
@@ -1836,6 +1927,52 @@ mod tests {
             assert_eq!(p2p.status(), status, "状态码应匹配 code 约定");
             assert_eq!(p2p.envelope().code, code, "code token 应匹配");
             assert_eq!(p2p.envelope().request_id, "req-read");
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Workbench 写路由（create/save/rename/delete/session write/commit/push/merge/
+    ///     remove/resume）的错误必须经 P2pError::from_app_error 映射到信封；本测试覆盖
+    ///     409（冲突，如 baseHash 乐观锁失败、worktree 已存在）与 503（暂不可用，如 tmux/PTY 容量上限）
+    ///     两类在 write 域的映射，并断言 retryable 默认 false（写操作保守不重试）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对 conflict/unavailable 两类 AppError 构造 P2pError，断言 status/code/retryable
+    ///     与 write 路由信封契约一致。
+    #[test]
+    fn write_routes_map_conflict_and_unavailable_to_envelope() {
+        use crate::error::AppError;
+        use crate::net::error_response::P2pError;
+        let ctx = P2pRequestContext {
+            request_id: "req-write".to_string(),
+        };
+        let cases: Vec<(AppError, &str, axum::http::StatusCode)> = vec![
+            (
+                AppError::conflict("baseHash 过期，文件已被修改"),
+                "conflict",
+                axum::http::StatusCode::CONFLICT,
+            ),
+            (
+                AppError::conflict("worktree 分支已存在"),
+                "conflict",
+                axum::http::StatusCode::CONFLICT,
+            ),
+            (
+                AppError::unavailable("tmux 会话数已达上限"),
+                "unavailable",
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ];
+        for (app, code, status) in cases {
+            let p2p = P2pError::from_app_error(app, &ctx, "workbench.write");
+            assert_eq!(p2p.status(), status, "状态码应匹配 code 约定");
+            assert_eq!(p2p.envelope().code, code, "code token 应匹配");
+            assert_eq!(p2p.envelope().request_id, "req-write");
+            // 写操作保守默认：retryable 必须为 false，避免误重试非幂等写。
+            assert!(
+                !p2p.envelope().retryable,
+                "写操作 retryable 默认必须为 false"
+            );
         }
     }
 }
