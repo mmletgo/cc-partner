@@ -905,22 +905,132 @@ async fn promote_completed_to_durable(
 
 /// Business Logic（为什么需要这个函数）:
 ///     place 前必须把候选 final 路径持久化到 journal，才能在进程崩溃后避免同 transfer_id 重传后缀副本。
+///     intent 目录/文件若是 symlink/reparse，普通 create_dir_all/write 会跟随写出 receive_dir。
 ///
 /// Code Logic（这个函数做什么）:
-///     在 receive_dir/.cc-partner-transfer-intents/ 下原子写 `<transfer_id>.json`。
+///     确保 intent 目录为 receive_dir 内普通目录（拒绝 symlink）；临时文件 create_new + no-follow 写字节；
+///     同目录 rename 覆盖正式 intent；任一步失败清理本次 tmp。
 async fn write_finalize_intent(
     receive_dir: &Path,
     intent: &FinalizeIntent,
 ) -> Result<(), AppError> {
-    let dir = receive_dir.join(FINALIZE_INTENT_DIR);
-    tokio::fs::create_dir_all(&dir).await?;
+    let dir = ensure_regular_intent_dir(receive_dir).await?;
     let path = finalize_intent_path(receive_dir, &intent.transfer_id)?;
+    // 词法路径已校验在 receive_dir 内；仍要求 parent 即 no-follow 确认的 intent 目录。
+    if path.parent() != Some(dir.as_path()) {
+        return Err(AppError::validation(format!(
+            "intent 路径不在已校验目录内: {}",
+            path.display()
+        )));
+    }
     let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(intent)?;
-    tokio::fs::write(&tmp, &bytes).await?;
+    write_bytes_create_new_nofollow(&tmp, &bytes).await?;
     // 同进程覆盖：先 remove 旧 intent（Windows rename 到已存在路径可能失败）。
+    // remove 跟随与否：若 path 是 symlink 指向外部，remove_file 只删目录项本身（Unix），不触达目标。
     let _ = tokio::fs::remove_file(&path).await;
-    tokio::fs::rename(&tmp, &path).await?;
+    if let Err(err) = tokio::fs::rename(&tmp, &path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(AppError::from(err));
+    }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     finalize intent 目录若被替换为指向 receive_dir 外的 symlink，create_dir_all/write 会跟随逃逸。
+///
+/// Code Logic（这个函数做什么）:
+///     对 receive_dir 下 FINALIZE_INTENT_DIR：不存在则 create_dir（目录项本身）；存在则 symlink_metadata
+///     拒绝 symlink/非目录；返回校验后的绝对/相对 path。
+async fn ensure_regular_intent_dir(receive_dir: &Path) -> Result<PathBuf, AppError> {
+    let dir = receive_dir.join(FINALIZE_INTENT_DIR);
+    ensure_path_within_dir(receive_dir, &dir)?;
+    match tokio::fs::symlink_metadata(&dir).await {
+        Ok(meta) => {
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                return Err(AppError::validation(format!(
+                    "intent 目录是符号链接，拒绝写入: {}",
+                    dir.display()
+                )));
+            }
+            if !ft.is_dir() {
+                return Err(AppError::validation(format!(
+                    "intent 路径不是目录: {}",
+                    dir.display()
+                )));
+            }
+            Ok(dir)
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            // 仅创建本层目录；不 create_dir_all 跟随深层 symlink。
+            // receive_dir 本身由配置保证存在；若 receive_dir 缺失，create_dir 会失败。
+            match tokio::fs::create_dir(&dir).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                    // 竞态：他方刚创建或种植了 symlink；重新走校验分支。
+                    return Box::pin(ensure_regular_intent_dir(receive_dir)).await;
+                }
+                Err(err) => return Err(AppError::from(err)),
+            }
+            // 创建后重读，拒绝 TOCTOU 换成 symlink。
+            match tokio::fs::symlink_metadata(&dir).await {
+                Ok(meta) => {
+                    let ft = meta.file_type();
+                    if ft.is_symlink() || !ft.is_dir() {
+                        return Err(AppError::validation(format!(
+                            "intent 目录创建后不是普通目录: {}",
+                            dir.display()
+                        )));
+                    }
+                    Ok(dir)
+                }
+                Err(err) => Err(AppError::from(err)),
+            }
+        }
+        Err(e) => Err(AppError::from(e)),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     写 intent 临时文件时若路径已是指向外部的 symlink，tokio::fs::write 会跟随并截断外部文件。
+///
+/// Code Logic（这个函数做什么）:
+///     create_new 创建普通文件（已存在含 symlink 时失败）；再以 no-follow 可写打开并写满字节后 sync。
+///     失败时 best-effort 删除本次创建的 tmp（若 create_new 成功）。
+async fn write_bytes_create_new_nofollow(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    // 先清可能残留的同名 tmp（仅删除目录项；symlink 也只删链接本身）。
+    let _ = tokio::fs::remove_file(path).await;
+    let created = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(AppError::from(std::io::Error::new(
+                e.kind(),
+                format!("创建 intent 临时文件失败 {}: {e}", path.display()),
+            )));
+        }
+    };
+    drop(created);
+    // 再用 no-follow 可写打开，拒绝竞态换成的 symlink/reparse。
+    let mut file = match open_regular_file_nofollow(path, true).await {
+        Ok(f) => f,
+        Err(err) => {
+            let _ = tokio::fs::remove_file(path).await;
+            return Err(err);
+        }
+    };
+    if let Err(err) = file.write_all(bytes).await {
+        let _ = tokio::fs::remove_file(path).await;
+        return Err(AppError::from(err));
+    }
+    if let Err(err) = file.flush().await {
+        let _ = tokio::fs::remove_file(path).await;
+        return Err(AppError::from(err));
+    }
     Ok(())
 }
 
@@ -3497,6 +3607,102 @@ mod tests {
                 "危险 tmp 若仍存在必须保持 symlink"
             );
         }
+
+        let _ = fs::remove_dir_all(&receive_dir);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     intent 目录若被替换为指向 receive_dir 外的 symlink，旧 write 路径会跟随 create/write 逃逸。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     在 receive_dir 外建 victim 目录，在 receive_dir 内把 intent 目录名种为指向 victim 的 symlink；
+    ///     调用 write_finalize_intent 必须失败，且 victim 目录保持空。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_finalize_intent_refuses_symlink_intent_dir() {
+        use std::os::unix::fs::symlink;
+
+        let receive_dir = unique_temp_dir();
+        let outside_dir = unique_temp_dir();
+        fs::create_dir_all(&receive_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        let intent_link = receive_dir.join(FINALIZE_INTENT_DIR);
+        symlink(&outside_dir, &intent_link).expect("plant intent dir symlink");
+        assert!(intent_link
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        let intent = FinalizeIntent {
+            transfer_id: "escape-intent-dir".to_string(),
+            filename: "a.bin".to_string(),
+            size: 1,
+            sha256: "aa".to_string(),
+            chunk_size: 1,
+            final_filename: "a.bin".to_string(),
+            final_path: receive_dir.join("a.bin").to_string_lossy().to_string(),
+            created_at: now_iso(),
+        };
+        let err = write_finalize_intent(&receive_dir, &intent)
+            .await
+            .expect_err("intent 目录 symlink 必须拒绝");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("符号链接") || msg.contains("symlink") || msg.contains("intent"),
+            "错误应说明 intent 目录不安全: {msg}"
+        );
+        assert!(
+            fs::read_dir(&outside_dir).unwrap().next().is_none(),
+            "不得在 receive_dir 外创建 intent 文件"
+        );
+
+        let _ = fs::remove_dir_all(&receive_dir);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     intent 临时文件若预置为指向外部文件的 symlink，tokio::fs::write 会跟随截断外部文件。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先建合法 intent 目录；在目录内预置 `<id>.json.tmp` symlink 指向外部 victim；
+    ///     write_finalize_intent 必须失败或安全覆盖目录项本身，且 victim 内容不变。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_finalize_intent_refuses_to_follow_tmp_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let receive_dir = unique_temp_dir();
+        let outside_dir = unique_temp_dir();
+        fs::create_dir_all(&receive_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        let intent_dir = receive_dir.join(FINALIZE_INTENT_DIR);
+        fs::create_dir_all(&intent_dir).unwrap();
+        let victim = outside_dir.join("victim.json");
+        fs::write(&victim, b"KEEP-ME").unwrap();
+        let transfer_id = "escape-intent-tmp";
+        let tmp = intent_dir.join(format!("{transfer_id}.json.tmp"));
+        symlink(&victim, &tmp).expect("plant intent tmp symlink");
+
+        let intent = FinalizeIntent {
+            transfer_id: transfer_id.to_string(),
+            filename: "b.bin".to_string(),
+            size: 1,
+            sha256: "bb".to_string(),
+            chunk_size: 1,
+            final_filename: "b.bin".to_string(),
+            final_path: receive_dir.join("b.bin").to_string_lossy().to_string(),
+            created_at: now_iso(),
+        };
+        // 实现会先 remove_file(tmp) 再 create_new：remove 只删目录项，不应触达 victim；
+        // 随后 create_new 在 intent 目录内建普通文件并成功写入。无论成功还是失败，victim 必须不变。
+        let _ = write_finalize_intent(&receive_dir, &intent).await;
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"KEEP-ME",
+            "不得跟随 intent tmp symlink 截断外部文件"
+        );
 
         let _ = fs::remove_dir_all(&receive_dir);
         let _ = fs::remove_dir_all(&outside_dir);
