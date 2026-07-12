@@ -257,36 +257,57 @@ impl SmokeCase {
     ///     否则异常阻塞会拖到 job 超时，导致 cleanup/artifact 无法可靠执行。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     spawn 后在后台线程 `wait_with_output` 收集 stdout/stderr（避免 pipe 填满死锁），
-    ///     主线程按 `op_timeout` 轮询；超时只 kill 该 child 并返回诊断 Err。
+    ///     保留 Child 句柄；侧线程分别 drain stdout/stderr，主线程 `try_wait` 轮询。
+    ///     超时走 Child API kill + 有界 reap（禁止无界 `Command::status()` kill/taskkill），
+    ///     再 join drain 线程收集已缓冲输出。
     pub fn run_cli(&self, args: &[&str]) -> Result<CapturedCli, String> {
-        let child = self
+        let mut child = self
             .backend_command(args)
             .spawn()
             .map_err(|e| format!("spawn {:?} 失败: {e}", args))?;
         let child_pid = child.id();
-        // 后台 drain+wait，防止 stdout/stderr pipe 缓冲填满导致子进程阻塞。
-        let waiter = thread::spawn(move || child.wait_with_output());
-        let deadline = Instant::now() + self.op_timeout;
-        loop {
-            if waiter.is_finished() {
-                let output = waiter
-                    .join()
-                    .map_err(|_| format!("CLI {:?} waiter 线程 panic", args))?
-                    .map_err(|e| format!("wait {:?} 失败: {e}", args))?;
-                return Ok(captured_from_output(output));
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let stdout_drain = thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stdout {
+                use std::io::Read;
+                let _ = pipe.read_to_end(&mut buf);
             }
-            if Instant::now() >= deadline {
-                // 只终止本 CLI 子进程；detached serve 由 control/PID teardown 管理。
-                let _ = kill_pid_hard(child_pid);
-                // 给 waiter 一点时间 reap 并带出已缓冲输出。
-                let reap_deadline = Instant::now() + Duration::from_secs(2);
-                while !waiter.is_finished() && Instant::now() < reap_deadline {
-                    thread::sleep(Duration::from_millis(20));
-                }
-                if waiter.is_finished() {
-                    if let Ok(Ok(output)) = waiter.join() {
-                        let captured = captured_from_output(output);
+            buf
+        });
+        let stderr_drain = thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stderr {
+                use std::io::Read;
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        });
+
+        let deadline = Instant::now() + self.op_timeout;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        // 只终止本 CLI 子进程；detached serve 由 control/PID teardown 管理。
+                        let _ = child.kill();
+                        let status = reap_child_with_timeout(
+                            &mut child,
+                            Duration::from_secs(2),
+                            child_pid,
+                            args,
+                        )?;
+                        let stdout = join_drain_with_timeout(stdout_drain, Duration::from_secs(1))
+                            .unwrap_or_default();
+                        let stderr = join_drain_with_timeout(stderr_drain, Duration::from_secs(1))
+                            .unwrap_or_default();
+                        let captured = captured_from_output(Output {
+                            status,
+                            stdout,
+                            stderr,
+                        });
                         return Err(format!(
                             "CLI {:?} 超时 ({}s)\n{}\ncase={}",
                             args,
@@ -295,16 +316,30 @@ impl SmokeCase {
                             self.case_dir.display()
                         ));
                     }
+                    thread::sleep(POLL_INTERVAL);
                 }
-                return Err(format!(
-                    "CLI {:?} 超时 ({}s) 且未能完整回收输出 (pid={child_pid})\ncase={}",
-                    args,
-                    self.op_timeout.as_secs(),
-                    self.case_dir.display()
-                ));
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = reap_child_with_timeout(
+                        &mut child,
+                        Duration::from_secs(1),
+                        child_pid,
+                        args,
+                    );
+                    return Err(format!("try_wait {:?} 失败: {e}", args));
+                }
             }
-            thread::sleep(POLL_INTERVAL);
-        }
+        };
+
+        let stdout = join_drain_with_timeout(stdout_drain, Duration::from_secs(2))
+            .map_err(|e| format!("stdout drain {:?}: {e}", args))?;
+        let stderr = join_drain_with_timeout(stderr_drain, Duration::from_secs(2))
+            .map_err(|e| format!("stderr drain {:?}: {e}", args))?;
+        Ok(captured_from_output(Output {
+            status,
+            stdout,
+            stderr,
+        }))
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -776,33 +811,35 @@ pub fn dead_pid() -> Result<u32, String> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     Unix 用 `kill -0`；Windows 用 `tasklist` 过滤 PID。
+///     探测命令本身也走有界 spawn+try_wait，避免 probe 挂起拖死 smoke。
 pub fn process_is_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
     #[cfg(unix)]
     {
-        Command::new("kill")
-            .arg("-0")
+        let mut cmd = Command::new("kill");
+        cmd.arg("-0")
             .arg(pid.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+            .stderr(Stdio::null());
+        run_signal_command_bounded(cmd, Duration::from_secs(2), &format!("kill -0 {pid}")).is_ok()
     }
     #[cfg(windows)]
     {
-        Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        let mut cmd = Command::new("tasklist");
+        cmd.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .stdin(Stdio::null())
-            .output()
-            .map(|output| {
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        match spawn_and_collect_output_bounded(cmd, Duration::from_secs(2)) {
+            Ok(output) => {
                 output.status.success()
                     && String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
-            })
-            .unwrap_or(false)
+            }
+            Err(_) => false,
+        }
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -812,39 +849,88 @@ pub fn process_is_alive(pid: u32) -> bool {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     run_cli 超时后必须有界 reap child，避免无限 `wait` 卡住 smoke。
+///
+/// Code Logic（这个函数做什么）:
+///     在 timeout 内轮询 `try_wait`；超时返回 Err，绝不调用无界 `wait`/`status`。
+fn reap_child_with_timeout(
+    child: &mut Child,
+    timeout: Duration,
+    pid: u32,
+    args: &[&str],
+) -> Result<std::process::ExitStatus, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // 再补一次 Child::kill；仍不阻塞。
+                    let _ = child.kill();
+                    // 最后一次非阻塞 probe。
+                    if let Ok(Some(status)) = child.try_wait() {
+                        return Ok(status);
+                    }
+                    return Err(format!(
+                        "CLI {:?} 超时后无法在 {:?} 内 reap (pid={pid})",
+                        args, timeout
+                    ));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => return Err(format!("CLI {:?} try_wait 失败: {e}", args)),
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     stdout/stderr drain 线程在子进程被 kill 后通常会很快结束，但仍需有界 join，
+///     防止极端 pipe 状态让 smoke 永久卡住。
+///
+/// Code Logic（这个函数做什么）:
+///     轮询 `JoinHandle::is_finished`；完成后 join 取 Vec；超时返回 Err。
+fn join_drain_with_timeout(
+    handle: thread::JoinHandle<Vec<u8>>,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    let deadline = Instant::now() + timeout;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            // 无法安全 abort 标准库线程；超时后丢弃 handle（detach）并返回空缓冲诊断。
+            // 调用方用 unwrap_or_default 时得到空输出；此处返回 Err 让上层决定。
+            std::mem::forget(handle);
+            return Err(format!("drain 线程在 {timeout:?} 内未结束"));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    handle.join().map_err(|_| "drain 线程 panic".to_string())
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     优雅停止失败后需要先发可恢复的终止信号。
 ///
 /// Code Logic（这个函数做什么）:
-///     Unix SIGTERM；Windows taskkill 不带 /F。
+///     Unix SIGTERM；Windows taskkill 不带 /F。所有 kill/taskkill 经有界 spawn+try_wait，
+///     禁止 `Command::status()` 无界阻塞。
 fn terminate_pid(pid: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
-        let status = Command::new("kill")
-            .arg("-TERM")
+        let mut cmd = Command::new("kill");
+        cmd.arg("-TERM")
             .arg(pid.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!("kill -TERM {pid} 失败: {status}")))
-        }
+            .stderr(Stdio::null());
+        run_signal_command_bounded(cmd, Duration::from_secs(2), &format!("kill -TERM {pid}"))
     }
     #[cfg(windows)]
     {
-        let status = Command::new("taskkill")
-            .args(["/PID", &pid.to_string()])
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!("taskkill {pid} 失败: {status}")))
-        }
+            .stderr(Stdio::null());
+        run_signal_command_bounded(cmd, Duration::from_secs(2), &format!("taskkill {pid}"))
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -857,44 +943,127 @@ fn terminate_pid(pid: u32) -> io::Result<()> {
 ///     有界等待后仍存活的测试 PID 必须强杀，避免污染后续 case。
 ///
 /// Code Logic（这个函数做什么）:
-///     Unix SIGKILL；Windows `taskkill /F`。
+///     Unix SIGKILL；Windows `taskkill /F`。经有界 spawn+try_wait，禁止无界 `status()`。
 fn kill_pid_hard(pid: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
-        let status = Command::new("kill")
-            .arg("-KILL")
+        let mut cmd = Command::new("kill");
+        cmd.arg("-KILL")
             .arg(pid.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!("kill -KILL {pid} 失败: {status}")))
-        }
+            .stderr(Stdio::null());
+        run_signal_command_bounded(cmd, Duration::from_secs(2), &format!("kill -KILL {pid}"))
     }
     #[cfg(windows)]
     {
-        let status = Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/F", "/PID", &pid.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!(
-                "taskkill /F {pid} 失败: {status}"
-            )))
-        }
+            .stderr(Stdio::null());
+        run_signal_command_bounded(cmd, Duration::from_secs(2), &format!("taskkill /F {pid}"))
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         Ok(())
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     kill/taskkill 本身也可能挂起；smoke 清理路径必须全程有界。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn 信号命令后在 timeout 内 `try_wait`；超时 `Child::kill` 再 probe，
+///     成功退出码非 0 时返回 error（进程已死时 kill 也可能非 0，调用方通常忽略）。
+fn run_signal_command_bounded(
+    mut command: Command,
+    timeout: Duration,
+    label: &str,
+) -> io::Result<()> {
+    let mut child = command.spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return Ok(());
+                }
+                return Err(io::Error::other(format!("{label} 失败: {status}")));
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    // 短 grace 再 probe，仍不阻塞。
+                    let grace = Instant::now() + Duration::from_millis(200);
+                    while Instant::now() < grace {
+                        if let Ok(Some(_)) = child.try_wait() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    return Err(io::Error::other(format!("{label} 在 {timeout:?} 内未结束")));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Windows `tasklist` 等 probe 需要读 stdout，同样不能用无界 `output()`/`status()`。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn 后侧线程 drain stdout，主线程有界 `try_wait`；超时 kill+reap 并返回 error。
+#[cfg(windows)]
+fn spawn_and_collect_output_bounded(mut command: Command, timeout: Duration) -> io::Result<Output> {
+    let mut child = command.spawn()?;
+    let stdout = child.stdout.take();
+    let drain = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stdout {
+            use std::io::Read;
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let grace = Instant::now() + Duration::from_millis(200);
+                    while Instant::now() < grace {
+                        if let Ok(Some(status)) = child.try_wait() {
+                            let stdout = join_drain_with_timeout(drain, Duration::from_millis(200))
+                                .unwrap_or_default();
+                            return Ok(Output {
+                                status,
+                                stdout,
+                                stderr: Vec::new(),
+                            });
+                        }
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    return Err(io::Error::other(format!(
+                        "probe 命令在 {timeout:?} 内未结束"
+                    )));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(err) => return Err(err),
+        }
+    };
+    let stdout = join_drain_with_timeout(drain, Duration::from_secs(1)).unwrap_or_default();
+    Ok(Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    })
 }
 
 /// Business Logic（为什么需要这个函数）:

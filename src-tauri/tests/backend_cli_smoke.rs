@@ -361,6 +361,27 @@ fn concurrent_duplicate_start_only_one_backend_survives() {
         );
     }
 
+    // 从两次 start 输出收集报告的 pid，用于检测“双持有锁后双开 serve”的 ABA 回归。
+    let mut reported_pids: Vec<u32> = Vec::new();
+    for (label, captured) in [("start#1", &first), ("start#2", &second)] {
+        if let Ok(status) = captured.parse_status_json() {
+            if let Some(control) = status.control.as_ref() {
+                if control.pid != 0 {
+                    reported_pids.push(control.pid);
+                    case.record_pid(control.pid);
+                }
+            }
+        } else if captured.success {
+            fail_case(
+                &mut case,
+                format!(
+                    "{label} 成功但无法解析 status JSON\n{}",
+                    captured.diagnostic()
+                ),
+            );
+        }
+    }
+
     // 收敛：以 control 文件 + status 为准，断言唯一存活 backend。
     let control = match case.wait_for_control_file() {
         Ok(c) => c,
@@ -407,7 +428,33 @@ fn concurrent_duplicate_start_only_one_backend_survives() {
         );
     }
 
-    // 额外保险：同一 data_dir 下不应再出现第二个存活 listener（health 只认 control 端口）。
+    // 若两次 start 都报告了 pid，它们必须是同一 serve（或仅一个存活）；
+    // 出现两个不同且仍存活的 pid 即 dual-serve 回归。
+    let mut unique_live: Vec<u32> = Vec::new();
+    for pid in reported_pids
+        .into_iter()
+        .chain(std::iter::once(control.pid))
+    {
+        if pid == 0 || !process_is_alive(pid) {
+            continue;
+        }
+        if !unique_live.contains(&pid) {
+            unique_live.push(pid);
+        }
+    }
+    if unique_live.len() != 1 || unique_live[0] != control.pid {
+        fail_case(
+            &mut case,
+            format!(
+                "并发 start 后出现多个存活 backend pid: live={unique_live:?} control={}\n--- first ---\n{}\n--- second ---\n{}",
+                control.pid,
+                first.diagnostic(),
+                second.diagnostic()
+            ),
+        );
+    }
+
+    // 额外保险：同一 data_dir 下 control 端口只能有一个 listener。
     // stop 必须回收该唯一实例。
     let stop = case.cli_stop();
     if !stop.success {
