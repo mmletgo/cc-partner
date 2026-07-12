@@ -14,8 +14,9 @@
 //!     - `handle_complete(state, id)`：显式终态握手；对 size=0 或 resume 已满的任务触发 finalize，
 //!       并返回与 chunk 相同的 `{success, received_bytes}`（命中墓碑则幂等回放）。
 //!     - finalize：SHA256 校验 .tmp，通过后在 receive_dir 锁内原子 no-replace 落盘。
-//!     - finalize intent journal：落盘前持久化候选最终路径，覆盖 place→history 崩溃窗口，
-//!       重启后 init/complete 可晋升 durable，禁止同 transfer_id 后缀重复副本。
+//!     - finalize intent journal：每个候选 final 路径（首选与后缀）place 前先持久化 intent，
+//!       覆盖 place→history 崩溃窗口；重启后 init/complete 可晋升 durable，禁止同 transfer_id
+//!       后缀重复副本（含首选名已存在时的后缀落盘路径）。
 //!
 //! 临时文件命名 `.{transfer_id}.tmp` 与 Python 一致（断点续传识别）。
 //! 文件名冲突处理（file.txt → file (1).txt → file (2).txt）与 Python `_resolve_filename` 一致。
@@ -726,7 +727,7 @@ pub async fn handle_complete(state: &AppState, transfer_id: &str) -> Result<Chun
 ///     2. 若 active 已是 Completed（落盘成功但 history 未写入），只重试 durable 晋升；
 ///     3. 计算 .tmp 的 SHA256，与任务记录的 sha256 比较；
 ///     4. 校验失败：标记 failed + 删除 .tmp + emit failed；
-///     5. 校验通过：持 receive_dir 锁，循环 resolve 候选名并 atomic no-replace 落盘；
+///     5. 校验通过：持 receive_dir 锁，**每个候选**严格 resolve → 写 intent → no-replace place；
 ///     6. 先 mark_completed 保留 active（可恢复），再 durable record；成功后才 remove + 墓碑 + emit。
 pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<(), AppError> {
     let task = match state.transfers.get(transfer_id) {
@@ -785,81 +786,27 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
     let dir_lock = state.transfers.receive_dir_lock();
     let _dir_guard = dir_lock.lock().await;
 
-    // 先 resolve 候选 final 路径，**在 place 之前**持久化 intent（跨崩溃恢复）。
-    let final_filename = resolve_filename(&receive_dir, &safe_filename);
-    if let Err(e) = sanitize_receive_basename(&final_filename, "final_filename") {
-        on_receive_failed(state, transfer_id, &format!("非法最终文件名: {e}")).await;
-        return Ok(());
-    }
-    let final_path = receive_dir.join(&final_filename);
-    if let Err(e) = ensure_path_within_dir(&receive_dir, &final_path) {
-        on_receive_failed(state, transfer_id, &format!("最终路径非法: {e}")).await;
-        return Ok(());
-    }
-
-    let intent = FinalizeIntent {
-        transfer_id: transfer_id.to_string(),
-        filename: task.filename.clone(),
-        size: task.size,
-        sha256: task.sha256.clone(),
-        chunk_size: task.chunk_size,
-        final_filename: final_filename.clone(),
-        final_path: final_path.to_string_lossy().to_string(),
-        created_at: now_iso(),
-    };
-    if let Err(e) = write_finalize_intent(&receive_dir, &intent).await {
-        on_receive_failed(
-            state,
-            transfer_id,
-            &format!("写入 finalize intent 失败: {e}"),
-        )
-        .await;
-        return Ok(());
-    }
-
-    // place 到 intent 声明的路径；冲突则清 intent 后走完整 exclusive 循环。
-    let placed_path = match commit_tmp_to_final_no_replace(&tmp_path, &final_path).await {
-        Ok(()) => final_path,
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-            let _ = clear_finalize_intent(&receive_dir, transfer_id).await;
-            let placed =
-                match place_final_file_exclusive(&receive_dir, &safe_filename, &tmp_path).await {
-                    Ok(p) => p,
-                    Err(pe) => {
-                        on_receive_failed(state, transfer_id, &format!("原子落盘失败: {pe}")).await;
-                        return Ok(());
-                    }
-                };
-            let intent2 = FinalizeIntent {
-                transfer_id: transfer_id.to_string(),
-                filename: task.filename.clone(),
-                size: task.size,
-                sha256: task.sha256.clone(),
-                chunk_size: task.chunk_size,
-                final_filename: placed.final_filename.clone(),
-                final_path: placed.final_path.to_string_lossy().to_string(),
-                created_at: now_iso(),
-            };
-            // place 已成功后 intent 必须立刻落盘；失败仍 mark_completed，靠文件存在恢复。
-            if let Err(ie) = write_finalize_intent(&receive_dir, &intent2).await {
-                tracing::error!(
-                    "place 成功后补写 intent 失败（依赖 active/文件恢复）: {transfer_id}, {ie}"
-                );
-            }
-            placed.final_path
-        }
+    // 每个候选（首选与后缀）严格：resolve → 持久化 intent → no-replace place。
+    // 禁止先 place 再补写 intent，也禁止 place 前删除 intent（place 成功但 history 前崩溃会丢 journal）。
+    let placed = match place_final_file_with_intent(
+        &receive_dir,
+        &safe_filename,
+        &tmp_path,
+        transfer_id,
+        &task,
+    )
+    .await
+    {
+        Ok(p) => p,
         Err(e) => {
-            let _ = clear_finalize_intent(&receive_dir, transfer_id).await;
             on_receive_failed(state, transfer_id, &format!("原子落盘失败: {e}")).await;
             return Ok(());
         }
     };
+    let placed_path = placed.final_path;
     tracing::debug!(
         "receive exclusive place ok: {transfer_id} -> {} ({})",
-        placed_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?"),
+        placed.final_filename,
         placed_path.display()
     );
 
@@ -1106,6 +1053,67 @@ struct PlacedFile {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     finalize 在 place 前必须为**每个**候选 final 路径（首选与后缀）写 durable intent。
+///     若仅在首次候选写 intent，冲突后清 intent 再 place 后缀，place→补写 intent 之间崩溃
+///     会丢失 journal：重启后同 transfer_id 可 reopen 并生成第二份后缀副本。
+///
+/// Code Logic（这个函数做什么）:
+///     有限循环：resolve 候选 → 校验 basename/边界 → **先** write_finalize_intent 指向该候选
+///     → no-replace place；AlreadyExists 则保留/覆盖下一候选 intent 再试，绝不 place 无匹配
+///     intent 的路径；其它错误上抛（intent 指向未成功路径时 recovery 会清 intent 允许干净重传）。
+///     调用方必须已持有 receive_dir 锁。
+async fn place_final_file_with_intent(
+    receive_dir: &Path,
+    safe_filename: &str,
+    tmp_path: &Path,
+    transfer_id: &str,
+    task: &TransferTask,
+) -> Result<PlacedFile, AppError> {
+    // 有限重试：极端并发下 resolve 可能反复撞车；上限防止死循环。
+    for _ in 0..10_000 {
+        let final_filename = resolve_filename(receive_dir, safe_filename);
+        if let Err(e) = sanitize_receive_basename(&final_filename, "final_filename") {
+            return Err(AppError::validation(format!("非法最终文件名: {e}")));
+        }
+        let final_path = receive_dir.join(&final_filename);
+        ensure_path_within_dir(receive_dir, &final_path)?;
+
+        // 每个候选：先 journal 再 place（含首次与后缀）。
+        let intent = FinalizeIntent {
+            transfer_id: transfer_id.to_string(),
+            filename: task.filename.clone(),
+            size: task.size,
+            sha256: task.sha256.clone(),
+            chunk_size: task.chunk_size,
+            final_filename: final_filename.clone(),
+            final_path: final_path.to_string_lossy().to_string(),
+            created_at: now_iso(),
+        };
+        write_finalize_intent(receive_dir, &intent).await?;
+
+        match commit_tmp_to_final_no_replace(tmp_path, &final_path).await {
+            Ok(()) => {
+                return Ok(PlacedFile {
+                    final_filename,
+                    final_path,
+                });
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                // 候选被占：下一轮会写新候选 intent 再 place，禁止无 intent 的 place helper。
+                continue;
+            }
+            Err(e) => {
+                // 非冲突失败：intent 仍在但 final 缺失；recovery 会清 intent 允许重传。
+                return Err(AppError::generic(format!("提交最终文件失败: {e}")));
+            }
+        }
+    }
+    Err(AppError::generic(
+        "无法分配不冲突的最终文件名（重试耗尽）".to_string(),
+    ))
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     并发同名接收时，仅 `exists()` 检查后 rename 会在 POSIX 上静默覆盖先落地的文件。
 ///     零字节占位再 rename 仍有 TOCTOU：外部进程可在两步之间替换路径；失败时无条件
 ///     `remove_file` 还可能误删竞争者文件；崩溃会留下“看似成功”的零字节最终文件。
@@ -1116,7 +1124,10 @@ struct PlacedFile {
 ///     （已存在 → AlreadyExists，换后缀继续）→ 成功后删除 tmp（失败仅 warn，最终文件已落地）。
 ///     hard_link 在跨卷等场景不可用时，回退到平台 no-replace rename（见
 ///     `commit_tmp_to_final_no_replace`），仍保证失败路径不删除非本次创建的文件。
+///     **生产 finalize 必须走 `place_final_file_with_intent`**（每个候选 journal-before-place）；
+///     本 helper 仅用于无 journal 的底层 no-replace 单测。
 ///     调用方必须已持有 receive_dir 锁（同进程额外协调）。
+#[cfg(test)]
 async fn place_final_file_exclusive(
     receive_dir: &Path,
     safe_filename: &str,
@@ -2794,6 +2805,147 @@ mod tests {
             .unwrap()
             .expect("history 应写入");
         assert_eq!(hist.status, TransferStatus::Completed);
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     首选文件名已存在时，finalize 会落盘到后缀路径；若 place 后缀后、history 前崩溃
+    ///     且 intent 未指向该后缀路径，重启后同 transfer_id 会 reopen 并再生成第二份后缀副本。
+    ///     每个候选必须 journal-before-place，崩溃后 init 应 conflict、complete 应恢复。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     预置 preferred 同名文件 → complete 落盘到 `name (1).ext`；注入 history 失败后
+    ///     清空 registry 模拟重启；assert intent 指向后缀文件；init 必须 conflict；
+    ///     complete 恢复 durable；不得出现 `name (2).ext` 第二份后缀副本。
+    #[tokio::test]
+    async fn suffix_place_before_history_crash_recovers_via_intent_without_second_suffix() {
+        use sha2::{Digest, Sha256};
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let payload = b"suffix-intent-crash-payload";
+        let sha = format!("{:x}", Sha256::digest(payload));
+        let transfer_id = "suffix-intent-crash".to_string();
+
+        // 首选文件名已存在 → finalize 必须走后缀候选。
+        fs::write(receive_dir.join("report.bin"), b"preexisting-preferred").unwrap();
+
+        handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "report.bin".to_string(),
+                size: payload.len() as u64,
+                sha256: sha.clone(),
+                chunk_size: 8,
+            },
+        )
+        .await
+        .expect("init");
+
+        let tmp = receive_dir.join(format!(".{transfer_id}.tmp"));
+        fs::write(&tmp, payload).unwrap();
+
+        // place + 后缀 intent 成功，history durable 失败。
+        sqlx::query("DROP TABLE transfer_history")
+            .execute(&state.db)
+            .await
+            .expect("drop history");
+        let err = handle_complete(&state, &transfer_id)
+            .await
+            .expect_err("history 失败应 Unavailable");
+        assert!(matches!(err, AppError::Unavailable(_)));
+
+        let preferred = receive_dir.join("report.bin");
+        let suffix1 = receive_dir.join("report (1).bin");
+        let suffix2 = receive_dir.join("report (2).bin");
+        assert_eq!(
+            fs::read(&preferred).unwrap(),
+            b"preexisting-preferred",
+            "不得覆盖既有首选文件"
+        );
+        assert_eq!(fs::read(&suffix1).unwrap(), payload, "应落盘到第一后缀候选");
+        assert!(!suffix2.exists(), "place 阶段不得提前写第二后缀");
+
+        let intent_path = receive_dir
+            .join(FINALIZE_INTENT_DIR)
+            .join(format!("{transfer_id}.json"));
+        assert!(
+            intent_path.exists(),
+            "后缀 place 后、history 前必须保留 intent"
+        );
+        let intent_raw = fs::read_to_string(&intent_path).expect("read intent");
+        assert!(
+            intent_raw.contains("report (1).bin"),
+            "intent 必须指向已 place 的后缀路径，而非已清空的首选: {intent_raw}"
+        );
+
+        // 模拟进程重启：清空内存 active + 墓碑。
+        state.transfers.remove(&transfer_id);
+        state.transfers.clear_tombstones_for_test();
+        assert!(state.transfers.get(&transfer_id).is_none());
+        assert!(state.transfers.tombstone(&transfer_id).is_none());
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS transfer_history (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                peer_device_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                transferred_bytes INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            )",
+        )
+        .execute(&state.db)
+        .await
+        .expect("recreate history");
+
+        let init_err = handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "report.bin".to_string(),
+                size: payload.len() as u64,
+                sha256: sha,
+                chunk_size: 8,
+            },
+        )
+        .await
+        .expect_err("后缀 intent+final 存在时 init 必须 conflict");
+        assert!(
+            matches!(init_err, AppError::Conflict(_)),
+            "应 conflict 禁止重传: {init_err:?}"
+        );
+
+        let recovered = handle_complete(&state, &transfer_id)
+            .await
+            .expect("complete 应从后缀 intent 恢复");
+        assert!(recovered.success);
+        assert_eq!(fs::read(&suffix1).unwrap(), payload);
+        assert_eq!(fs::read(&preferred).unwrap(), b"preexisting-preferred");
+        assert!(
+            !suffix2.exists(),
+            "不得因重启 reopen 生成第二份后缀副本 report (2).bin"
+        );
+        assert!(!intent_path.exists(), "恢复后应清除 intent");
+        let hist = state
+            .transfer_repo
+            .get_by_id(&transfer_id)
+            .await
+            .unwrap()
+            .expect("history 应写入");
+        assert_eq!(hist.status, TransferStatus::Completed);
+        assert!(
+            hist.file_path.ends_with("report (1).bin"),
+            "history 应记录后缀最终路径: {}",
+            hist.file_path
+        );
 
         let _ = fs::remove_dir_all(&receive_dir);
     }
