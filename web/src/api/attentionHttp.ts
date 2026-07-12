@@ -23,6 +23,17 @@ export const ATTENTION_MOBILE_HTTP_PATH = '/api/mobile/attention' as const;
 export const ATTENTION_HEALTH_PATH = '/api/health' as const;
 
 /**
+ * Attention HTTP GET 默认超时（毫秒）。
+ *
+ * Business Logic（为什么需要这个常量）:
+ *   半开连接或无响应后端会让 mobile Inbox 永久 loading；与 Provider 层超时形成双保险。
+ *
+ * Code Logic（这个常量做什么）:
+ *   传给 getJson 的 timeoutMs，内部 AbortController.abort。
+ */
+export const ATTENTION_HTTP_TIMEOUT_MS = 30_000;
+
+/**
  * health 响应中与能力探测相关的字段（snake_case，对齐 P2P health）。
  *
  * Business Logic（为什么需要这个类型）:
@@ -97,7 +108,9 @@ export function supportsAttentionV1(info: AttentionHealthProtocolInfo | null | u
  */
 export async function assertAttentionCapability(
   fetchHealth: () => Promise<AttentionHealthProtocolInfo> = () =>
-    getJson<AttentionHealthProtocolInfo>(ATTENTION_HEALTH_PATH),
+    getJson<AttentionHealthProtocolInfo>(ATTENTION_HEALTH_PATH, {
+      timeoutMs: ATTENTION_HTTP_TIMEOUT_MS,
+    }),
 ): Promise<void> {
   let health: AttentionHealthProtocolInfo;
   try {
@@ -120,7 +133,7 @@ export async function assertAttentionCapability(
  *   Mobile Inbox 在能力就绪后加载完整 Attention 快照。
  *
  * Code Logic（这个函数做什么）:
- *   先 assertAttentionCapability，再 GET /api/mobile/attention。
+ *   先 assertAttentionCapability，再 GET /api/mobile/attention（默认带超时 abort）。
  */
 export async function listAttentionSnapshotHttp(
   options: {
@@ -130,7 +143,11 @@ export async function listAttentionSnapshotHttp(
 ): Promise<AttentionSnapshot> {
   await assertAttentionCapability(options.fetchHealth);
   const fetchSnapshot =
-    options.fetchSnapshot ?? (() => getJson<AttentionSnapshot>(ATTENTION_MOBILE_HTTP_PATH));
+    options.fetchSnapshot ??
+    (() =>
+      getJson<AttentionSnapshot>(ATTENTION_MOBILE_HTTP_PATH, {
+        timeoutMs: ATTENTION_HTTP_TIMEOUT_MS,
+      }));
   try {
     return await fetchSnapshot();
   } catch (reason) {
