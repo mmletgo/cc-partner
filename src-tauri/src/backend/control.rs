@@ -241,7 +241,10 @@ impl Drop for StartLockGuard {
             )
             .level(tracing::Level::WARN)
             .error_code("internal")
-            .message(format!("释放 backend start 锁失败 path={:?}: {err}", self.path))
+            .message(format!(
+                "释放 backend start 锁失败 path={:?}: {err}",
+                self.path
+            ))
             .emit();
         }
     }

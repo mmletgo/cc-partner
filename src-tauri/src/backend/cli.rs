@@ -442,7 +442,9 @@ async fn serve() -> Result<(), AppError> {
         "serve_start",
         crate::backend::logging::OperationResult::Ok,
     )
-    .message(format!("cc-partner headless backend 已启动，监听端口 {port}"))
+    .message(format!(
+        "cc-partner headless backend 已启动，监听端口 {port}"
+    ))
     .emit();
 
     wait_for_shutdown(shutdown_rx).await;
@@ -1021,10 +1023,7 @@ mod tests {
         assert!(err.contains("未知选项"));
         let err = super::parse_doctor_args(&["extra".to_string()]).expect_err("多余参数应失败");
         assert!(err.contains("多余参数"));
-        assert_eq!(
-            super::parse_doctor_args(&[]).expect("无参应成功"),
-            false
-        );
+        assert_eq!(super::parse_doctor_args(&[]).expect("无参应成功"), false);
         assert_eq!(
             super::parse_doctor_args(&["--json".to_string()]).expect("--json 应成功"),
             true
@@ -1147,10 +1146,7 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains(HOME_PLACEHOLDER));
-        assert!(!parsed["logPath"]
-            .as_str()
-            .unwrap_or("")
-            .contains("/Users/"));
+        assert!(!parsed["logPath"].as_str().unwrap_or("").contains("/Users/"));
     }
 
     /// 验证人类文本包含 status/检查/日志路径且无私有原始路径。
@@ -1170,7 +1166,9 @@ mod tests {
         assert!(text.contains("status: degraded"));
         assert!(text.contains("stopped (normal)"));
         assert!(text.contains("WARNING deps.tmux.missing"));
-        assert!(text.contains(&format!("log: {HOME_PLACEHOLDER}/.cc-partner/logs/backend.log")));
+        assert!(text.contains(&format!(
+            "log: {HOME_PLACEHOLDER}/.cc-partner/logs/backend.log"
+        )));
         assert!(text.contains("recent errors:"));
         assert!(text.contains("peer request timed out"));
         assert!(!text.contains("/Users/"));
@@ -1186,10 +1184,7 @@ mod tests {
     ///     对 healthy/degraded/unhealthy 与 Err 调用 `doctor_exit_from_result` 断言 0/1/2/2。
     #[test]
     fn doctor_exit_codes_map_status_and_probe_failure() {
-        assert_eq!(
-            super::doctor_exit_from_result(Ok(DoctorStatus::Healthy)),
-            0
-        );
+        assert_eq!(super::doctor_exit_from_result(Ok(DoctorStatus::Healthy)), 0);
         assert_eq!(
             super::doctor_exit_from_result(Ok(DoctorStatus::Degraded)),
             1

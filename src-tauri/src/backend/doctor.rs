@@ -248,12 +248,7 @@ pub fn compute_overall_status(
     mdns: &DoctorCheck,
     dependencies: &DoctorDependencies,
 ) -> DoctorStatus {
-    let core_checks = [
-        &paths.data,
-        &paths.database,
-        &paths.log,
-        &backend.health,
-    ];
+    let core_checks = [&paths.data, &paths.database, &paths.log, &backend.health];
     if core_checks
         .iter()
         .any(|check| check.status == DoctorCheckStatus::Error)
@@ -681,18 +676,16 @@ pub fn assemble_snapshot_from_inputs(
 ) -> DoctorSnapshot {
     let backend = probe_backend_check(&inputs.backend_status, &inputs.control_path);
     let paths = probe_path_checks(&inputs.data_dir, &inputs.database_path, &inputs.log_dir);
-    let mdns = inputs
-        .mdns_override
-        .unwrap_or_else(probe_mdns_bounded);
+    let mdns = inputs.mdns_override.unwrap_or_else(probe_mdns_bounded);
     let dependencies = DoctorDependencies {
         git: dependency_to_check("git", &inputs.git),
         tmux: dependency_to_check("tmux", &inputs.tmux),
         wsl: dependency_to_check("wsl", &inputs.wsl),
         claude_cli: dependency_to_check("claude_cli", &inputs.claude_cli),
     };
-    let mut recent_errors = inputs.recent_errors_override.unwrap_or_else(|| {
-        read_recent_errors_from_logs(&inputs.log_path, &inputs.log_dir)
-    });
+    let mut recent_errors = inputs
+        .recent_errors_override
+        .unwrap_or_else(|| read_recent_errors_from_logs(&inputs.log_path, &inputs.log_dir));
     // 若 recent errors 读取过程中发现畸形行，read helper 会把 warning 码写入最后一项 code 前缀；
     // 这里不额外抬升 overall（畸形只产生 warning check 由 caller 可选合并）。
     let _ = &mut recent_errors;
@@ -855,7 +848,11 @@ fn is_local_port_free(port: u16) -> bool {
 /// Code Logic（这个函数做什么）:
 ///     data/log：目录存在可创建 + 可写探测文件立即删除；database：文件存在则 open 读 1 字节，
 ///     不存在则检查父目录可写。
-pub fn probe_path_checks(data_dir: &Path, database_path: &Path, log_dir: &Path) -> DoctorPathChecks {
+pub fn probe_path_checks(
+    data_dir: &Path,
+    database_path: &Path,
+    log_dir: &Path,
+) -> DoctorPathChecks {
     DoctorPathChecks {
         data: probe_directory_usable(data_dir, "paths.data"),
         database: probe_database_readable(database_path),
@@ -1057,10 +1054,7 @@ fn dependency_to_check(name: &str, probe: &OptionalDependencyProbe) -> DoctorChe
 /// Code Logic（这个函数做什么）:
 ///     读 `backend.log` 与 `backend.log.1` 的尾部字节，按行解析受控 JSON，
 ///     仅接受 level=error；re-sanitize、cap 条数与 summary 长度；畸形行记 warning 跳过。
-pub fn read_recent_errors_from_logs(
-    current_log: &Path,
-    log_dir: &Path,
-) -> Vec<DoctorErrorSummary> {
+pub fn read_recent_errors_from_logs(current_log: &Path, log_dir: &Path) -> Vec<DoctorErrorSummary> {
     let mut lines: Vec<String> = Vec::new();
     // newest history first for recency when merging tails
     let history_1 = log_dir.join(format!(
@@ -1285,12 +1279,17 @@ mod tests {
         assert_eq!(value["backend"]["state"], json!("running"));
         assert_eq!(
             value["backend"]["controlPath"],
-            json!(format!("{HOME_PLACEHOLDER}/.cc-partner/backend-control.json"))
+            json!(format!(
+                "{HOME_PLACEHOLDER}/.cc-partner/backend-control.json"
+            ))
         );
         assert_eq!(value["backend"]["pid"], json!(4242));
         assert_eq!(value["backend"]["port"], json!(62116));
         assert_eq!(value["backend"]["health"]["status"], json!("ok"));
-        assert_eq!(value["backend"]["health"]["code"], json!("backend.health.ok"));
+        assert_eq!(
+            value["backend"]["health"]["code"],
+            json!("backend.health.ok")
+        );
         assert_eq!(value["paths"]["data"]["status"], json!("ok"));
         assert_eq!(value["paths"]["database"]["status"], json!("ok"));
         assert_eq!(value["paths"]["log"]["status"], json!("ok"));
@@ -1314,8 +1313,7 @@ mod tests {
         assert!(value.get("env").is_none());
 
         let text = serde_json::to_string(&snapshot).expect("to_string");
-        let round_trip: DoctorSnapshot =
-            serde_json::from_str(&text).expect("from_str round-trip");
+        let round_trip: DoctorSnapshot = serde_json::from_str(&text).expect("from_str round-trip");
         assert_eq!(round_trip, snapshot);
 
         // 再走 Value 断言 camelCase key 集合稳定
@@ -1683,10 +1681,7 @@ mod tests {
     fn fixture_stopped_healthy() {
         let (_tmp, data, db, log_dir) = temp_paths();
         let status = classify_status(None, false, false, None);
-        let snap = assemble_snapshot_from_inputs(
-            base_inputs(status, data, db, log_dir),
-            None,
-        );
+        let snap = assemble_snapshot_from_inputs(base_inputs(status, data, db, log_dir), None);
         assert_eq!(snap.status, DoctorStatus::Healthy);
         assert_eq!(snap.backend.state, "stopped");
         assert_eq!(snap.backend.health.status, DoctorCheckStatus::Info);
@@ -1698,7 +1693,7 @@ mod tests {
         let (_tmp, data, db, log_dir) = temp_paths();
         // pid 不存在且端口可绑定 → recoverable stale warning
         let control = BackendControlFile {
-            pid: 0, // process_is_alive(0) == false
+            pid: 0,  // process_is_alive(0) == false
             port: 0, // is_local_port_free(0) == true
             device_id: "dev-1".into(),
             device_name: "test".into(),
@@ -1707,10 +1702,7 @@ mod tests {
         };
         let status = classify_status(Some(control), false, false, None);
         assert_eq!(status.kind, BackendStatusKind::Stale);
-        let snap = assemble_snapshot_from_inputs(
-            base_inputs(status, data, db, log_dir),
-            None,
-        );
+        let snap = assemble_snapshot_from_inputs(base_inputs(status, data, db, log_dir), None);
         assert_eq!(snap.status, DoctorStatus::Degraded);
         assert_eq!(snap.backend.health.status, DoctorCheckStatus::Warning);
         assert_eq!(snap.backend.health.code, "backend.control.stale");
@@ -1733,10 +1725,7 @@ mod tests {
         };
         let status = classify_status(Some(control), true, false, None);
         assert_eq!(status.kind, BackendStatusKind::Stale);
-        let snap = assemble_snapshot_from_inputs(
-            base_inputs(status, data, db, log_dir),
-            None,
-        );
+        let snap = assemble_snapshot_from_inputs(base_inputs(status, data, db, log_dir), None);
         assert_eq!(snap.status, DoctorStatus::Unhealthy);
         assert_eq!(snap.backend.health.status, DoctorCheckStatus::Error);
         assert_eq!(snap.backend.health.code, "backend.health.unreachable");
@@ -1758,10 +1747,7 @@ mod tests {
             control_token: "tok".into(),
         };
         let status = classify_status(Some(control), false, false, None);
-        let snap = assemble_snapshot_from_inputs(
-            base_inputs(status, data, db, log_dir),
-            None,
-        );
+        let snap = assemble_snapshot_from_inputs(base_inputs(status, data, db, log_dir), None);
         assert_eq!(snap.status, DoctorStatus::Unhealthy);
         assert_eq!(snap.backend.health.status, DoctorCheckStatus::Error);
         assert_eq!(snap.backend.health.code, "backend.port.conflict");
@@ -1778,10 +1764,7 @@ mod tests {
         let db = data.join("data.db");
         let log_dir = data.join("logs");
         let status = classify_status(None, false, false, None);
-        let snap = assemble_snapshot_from_inputs(
-            base_inputs(status, data, db, log_dir),
-            None,
-        );
+        let snap = assemble_snapshot_from_inputs(base_inputs(status, data, db, log_dir), None);
         assert_eq!(snap.status, DoctorStatus::Unhealthy);
         assert_eq!(snap.paths.data.status, DoctorCheckStatus::Error);
         assert!(snap.paths.data.code.contains("inaccessible"));
@@ -1843,9 +1826,7 @@ mod tests {
         let log_dir = tmp.path().to_path_buf();
         let current = log_dir.join("backend.log");
         let mut body = String::new();
-        body.push_str(
-            r#"{"timestamp":"2026-07-11T11:00:00Z","level":"info","message":"ok"}"#,
-        );
+        body.push_str(r#"{"timestamp":"2026-07-11T11:00:00Z","level":"info","message":"ok"}"#);
         body.push('\n');
         body.push_str(
             r#"{"timestamp":"2026-07-11T11:01:00Z","level":"error","error_code":"net.timeout","message":"peer request timed out","request_id":"req-1"}"#,

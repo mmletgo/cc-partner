@@ -472,11 +472,14 @@ fn strip_header_body_shaped(input: &str) -> String {
     });
     let body_re = BODY_RE.get_or_init(|| {
         // 形如 body={...} / body: [...] / request body: {...}
-        Regex::new(r"(?i)\b(request\s*)?body\s*[:=]\s*[\[{].{0,4096}")
-            .expect("body regex")
+        Regex::new(r"(?i)\b(request\s*)?body\s*[:=]\s*[\[{].{0,4096}").expect("body regex")
     });
-    let mut text = header_re.replace_all(input, "<HEADER_OMITTED>").into_owned();
-    text = body_re.replace_all(&text, "body=<BODY_OMITTED>").into_owned();
+    let mut text = header_re
+        .replace_all(input, "<HEADER_OMITTED>")
+        .into_owned();
+    text = body_re
+        .replace_all(&text, "body=<BODY_OMITTED>")
+        .into_owned();
     text
 }
 
@@ -836,9 +839,8 @@ where
 pub fn open_backend_logging(
     config: BackendLogConfig,
 ) -> Result<(NonBlocking, BackendLoggingGuard), AppError> {
-    let writer = RotatingLogWriter::open(config).map_err(|error| {
-        AppError::generic(format!("无法打开后端日志文件: {error}"))
-    })?;
+    let writer = RotatingLogWriter::open(config)
+        .map_err(|error| AppError::generic(format!("无法打开后端日志文件: {error}")))?;
     Ok(writer.into_non_blocking())
 }
 
@@ -858,8 +860,8 @@ pub fn init_backend_tracing(config: BackendLogConfig) -> Result<BackendLoggingGu
     use tracing_subscriber::EnvFilter;
 
     let (non_blocking, guard) = open_backend_logging(config)?;
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,mdns_sd=off"));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,mdns_sd=off"));
     let file_layer = sanitized_json_layer(non_blocking);
     let stderr_layer = tracing_subscriber::fmt::layer()
         .event_format(SanitizedTextFormatter)
@@ -891,8 +893,8 @@ pub fn init_doctor_tracing() {
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::EnvFilter;
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,mdns_sd=off"));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,mdns_sd=off"));
     let stderr_layer = tracing_subscriber::fmt::layer()
         .event_format(SanitizedTextFormatter)
         .with_ansi(false)
@@ -978,7 +980,11 @@ impl OperationLog {
     ///
     /// Code Logic（这个函数做什么）:
     ///     以 INFO/空可选字段初始化，调用方再覆盖 level 等。
-    pub fn new(domain: impl Into<String>, operation: impl Into<String>, result: OperationResult) -> Self {
+    pub fn new(
+        domain: impl Into<String>,
+        operation: impl Into<String>,
+        result: OperationResult,
+    ) -> Self {
         Self {
             level: Level::INFO,
             request_id: None,
@@ -1420,11 +1426,7 @@ mod tests {
         assert_eq!(dir_mode, 0o700, "日志目录应为 0700");
 
         for path in [config.current_path(), config.history_path(1)] {
-            let mode = fs::metadata(&path)
-                .expect("file meta")
-                .permissions()
-                .mode()
-                & 0o777;
+            let mode = fs::metadata(&path).expect("file meta").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "{path:?} 应为 0600");
         }
     }
@@ -1447,6 +1449,93 @@ mod tests {
         use std::io::Read;
         f.read_to_string(&mut buf).expect("read");
         assert!(buf.contains("hello-windows"));
+    }
+
+    /// Windows：轮转路径在 close→rename→reopen 下不得因“文件仍被占用”失败，且 history 上限为 3。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     Windows 上打开句柄会导致 rename 失败；RotatingLogWriter 必须先 close 再 rename，
+    ///     跨平台 smoke 依赖该契约证明日志不会卡死或生成 .4。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用极小 max_bytes 连续写触发多次轮转；断言无 `.4`、history `.1` 最新，
+    ///     且 current 在轮转后仍可被本进程读写（无 open-handle rename 残留）。
+    #[cfg(windows)]
+    #[test]
+    fn windows_rotation_closes_before_rename_and_keeps_three_history() {
+        use std::io::Read;
+
+        let (_dir, config) = test_config(4, 3);
+        let mut writer = RotatingLogWriter::open(config.clone()).expect("open");
+
+        for payload in [b"AAAA", b"BBBB", b"CCCC", b"DDDD", b"EEEE"] {
+            writer
+                .write_all(payload)
+                .unwrap_or_else(|e| panic!("Windows 轮转写入失败（疑似 open-handle rename）: {e}"));
+        }
+        writer.flush().expect("flush");
+
+        assert_eq!(read_string(&config.current_path()), "EEEE");
+        assert_eq!(read_string(&config.history_path(1)), "DDDD");
+        assert_eq!(read_string(&config.history_path(2)), "CCCC");
+        assert_eq!(read_string(&config.history_path(3)), "BBBB");
+        assert!(
+            !config.history_path(4).exists(),
+            "Windows 轮转不得生成 backend.log.4"
+        );
+
+        // 轮转后 current 必须仍可被本进程读写（证明句柄已正确重开）
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(config.current_path())
+            .expect("轮转后 current 应可读写");
+        let mut buf = String::new();
+        f.read_to_string(&mut buf).expect("read after rotate");
+        assert!(buf.contains("EEEE"), "轮转后 current 内容异常: {buf}");
+    }
+
+    /// Unix：history 上限 3 + 目录 0700 / 文件 0600 在连续轮转后仍成立。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     跨平台 smoke 要求 macOS 上权限与 3-history 契约在多次 close/rename/reopen 后仍成立。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     连续写触发 4 次轮转，断言无 `.4`，并对 dir/current/history 校验 mode。
+    #[cfg(unix)]
+    #[test]
+    fn unix_rotation_history_ceiling_and_modes_after_multiple_rotates() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, config) = test_config(4, 3);
+        let mut writer = RotatingLogWriter::open(config.clone()).expect("open");
+        for payload in [b"AAAA", b"BBBB", b"CCCC", b"DDDD", b"EEEE"] {
+            writer.write_all(payload).expect("write");
+        }
+        writer.flush().expect("flush");
+
+        assert_eq!(read_string(&config.current_path()), "EEEE");
+        assert_eq!(read_string(&config.history_path(1)), "DDDD");
+        assert_eq!(read_string(&config.history_path(2)), "CCCC");
+        assert_eq!(read_string(&config.history_path(3)), "BBBB");
+        assert!(!config.history_path(4).exists(), "Unix 轮转不得生成 .4");
+
+        let dir_mode = fs::metadata(&config.log_dir)
+            .expect("dir meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "多次轮转后目录仍应为 0700");
+
+        for path in [
+            config.current_path(),
+            config.history_path(1),
+            config.history_path(2),
+            config.history_path(3),
+        ] {
+            let mode = fs::metadata(&path).expect("file meta").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{path:?} 多次轮转后应为 0600");
+        }
     }
 
     #[test]
@@ -1518,10 +1607,7 @@ mod tests {
             cleaned.contains("<HOME>"),
             "home 应替换为 <HOME>: {cleaned}"
         );
-        assert!(
-            !cleaned.contains(&home),
-            "原始 home 不得残留: {cleaned}"
-        );
+        assert!(!cleaned.contains(&home), "原始 home 不得残留: {cleaned}");
         assert!(
             !cleaned.contains("SUPERSECRET_TOKEN_XYZ"),
             "Bearer token 必须 redact: {cleaned}"
@@ -1597,8 +1683,7 @@ mod tests {
         }
 
         let make_writer = SharedRotating(Arc::clone(&file_writer));
-        let subscriber = tracing_subscriber::registry()
-            .with(sanitized_json_layer(make_writer));
+        let subscriber = tracing_subscriber::registry().with(sanitized_json_layer(make_writer));
 
         let home = dirs::home_dir()
             .map(|p| p.to_string_lossy().into_owned())
@@ -1614,8 +1699,7 @@ mod tests {
         const API_KEY: &str = "sk_live_hostilefixturekeymaterial0001";
         const PROMPT_TEXT: &str = "PROMPT_TEXT_SENTINEL_do_not_log_me";
         const FILE_SENTINEL: &str = "FILE_CONTENT_SENTINEL_xyz987";
-        const BODY_JSON: &str =
-            r#"{"prompt":"PROMPT_TEXT_SENTINEL_do_not_log_me","password":"P@ssw0rd_Hostile_Fixture"}"#;
+        const BODY_JSON: &str = r#"{"prompt":"PROMPT_TEXT_SENTINEL_do_not_log_me","password":"P@ssw0rd_Hostile_Fixture"}"#;
 
         let bearer_b64 = B64.encode(BEARER.as_bytes());
         let password_b64 = B64.encode(PASSWORD.as_bytes());
@@ -1664,10 +1748,7 @@ mod tests {
         file_writer.lock().expect("lock").flush().ok();
 
         let all = read_all_log_files(&config);
-        assert!(
-            !all.trim().is_empty(),
-            "应写出至少一条日志，实际为空"
-        );
+        assert!(!all.trim().is_empty(), "应写出至少一条日志，实际为空");
 
         // --- 禁止出现的敏感原文 / 编码 ---
         for banned in [
@@ -1702,14 +1783,8 @@ mod tests {
                 || all.contains("\"domain\":\"http\""),
             "domain 应保留: {all}"
         );
-        assert!(
-            all.contains("\"operation\""),
-            "operation 应保留: {all}"
-        );
-        assert!(
-            all.contains("\"result\""),
-            "result 应保留: {all}"
-        );
+        assert!(all.contains("\"operation\""), "operation 应保留: {all}");
+        assert!(all.contains("\"result\""), "result 应保留: {all}");
         assert!(
             all.contains("elapsed_ms") || all.contains("\"elapsed_ms\":"),
             "elapsed_ms 应保留: {all}"
@@ -1809,10 +1884,8 @@ mod tests {
     fn dual_layer_lifecycle_persists_structured_event_to_file() {
         let (_dir, config) = test_config(BACKEND_LOG_MAX_BYTES, BACKEND_LOG_HISTORY_FILES);
         let path = config.current_path();
-        let (non_blocking, guard) =
-            open_backend_logging(config).expect("应能打开隔离日志文件");
-        let subscriber = tracing_subscriber::registry()
-            .with(sanitized_json_layer(non_blocking));
+        let (non_blocking, guard) = open_backend_logging(config).expect("应能打开隔离日志文件");
+        let subscriber = tracing_subscriber::registry().with(sanitized_json_layer(non_blocking));
 
         tracing::subscriber::with_default(subscriber, || {
             OperationLog::new("control", "serve_lifecycle_probe", OperationResult::Ok)
