@@ -340,9 +340,11 @@ async fn create_local_task_with_action(
 
 /// Business Logic（为什么需要这个函数）:
 ///     HTTP/mobile 本机创建必须同时支持 clientRequestId 幂等和三种 createAction，避免重试产生重复任务。
+///     Start 动作的全局 dispatch 只能在首次插入后执行，重放不得再调度其他排队任务。
 ///
 /// Code Logic（这个函数做什么）:
-///     构造本机任务 row，调用 repo 幂等创建入口按 createAction 落库，并在 Start 时 best-effort dispatch 后刷新。
+///     构造本机任务 row，调用 repo 幂等创建入口按 createAction 落库；
+///     仅 `newly_created=true` 时对 Start 做 best-effort dispatch 并刷新，命中重放直接返回既有任务。
 async fn create_local_task_for_client_request(
     state: &AppState,
     client_request_id: &str,
@@ -350,11 +352,14 @@ async fn create_local_task_for_client_request(
 ) -> Result<OrchestratorTaskRow, AppError> {
     let create_action = request.create_action;
     let row = build_orchestrator_task_row(request)?;
-    let created = state
+    let outcome = state
         .orchestrator_repo
         .create_remote_task_for_client_request(client_request_id, &row, create_action)
         .await?;
-    refresh_task_after_create_action(state, created, create_action).await
+    if !outcome.newly_created {
+        return Ok(outcome.task);
+    }
+    refresh_task_after_create_action(state, outcome.task, create_action).await
 }
 
 /// Business Logic（为什么需要这个函数）:
