@@ -118,7 +118,7 @@ cd web && npm install
 
 ### 无头后端
 
-见上文 **Headless 后端 CLI**。打包后的 sidecar / PATH 中使用 `cc-partner-backend <cmd>`。
+见上文 **Headless 后端 CLI**。打包后的 sidecar / PATH 中使用 `cc-partner-backend <cmd>`。端口、防火墙、路径与 `doctor` 细节见 [`docs/development/backend-operations.md`](docs/development/backend-operations.md)。
 
 ## 网络与架构
 
@@ -194,7 +194,7 @@ curl http://<远端 IP>:<实际端口>/api/health
 - macOS 权限弹窗
 - 多机 mDNS
 
-Release 安装包由发版工作流产出，**不是**上述 smoke 的范围。
+Release 安装包由发版工作流产出，**不是**上述 smoke 的范围。完整本地命令 / CI 对照表见 [`docs/development/testing.md`](docs/development/testing.md)。
 
 ## 使用提示
 
@@ -269,6 +269,7 @@ git push origin v<版本号>
 
 - 多为可选依赖（tmux / WSL / git / Claude CLI 等）缺失；退出码 1 表示 degraded，不等于进程崩溃
 - 日志：`~/.cc-partner/logs/backend.log`
+- 退出码约定、JSON 快照与路径表见 [`docs/development/backend-operations.md`](docs/development/backend-operations.md)
 
 ## 技术栈
 
@@ -280,6 +281,8 @@ git push origin v<版本号>
 ## 文档与开发
 
 - 产品需求：[`docs/prd.md`](docs/prd.md)
+- 质量门禁与平台矩阵：[`docs/development/testing.md`](docs/development/testing.md)
+- 后端 CLI / 端口 / 日志 / doctor：[`docs/development/backend-operations.md`](docs/development/backend-operations.md)
 - 仓库协作约定：[`AGENTS.md`](AGENTS.md)
 - 前端指令：[`web/CLAUDE.md`](web/CLAUDE.md)
 - 后端指令：[`src-tauri/CLAUDE.md`](src-tauri/CLAUDE.md)

@@ -413,7 +413,7 @@ cd src-tauri && cargo test --locked --test backend_cli_smoke -- --nocapture --te
 cd src-tauri && cargo test --locked --test backend_doctor_smoke -- --nocapture --test-threads=1
 ```
 
-领域测试、Vitest/jsdom 策略、Attention/Workbench 回归命令见 `web/CLAUDE.md`；P2P/protocol、doctor/logs、macOS/Windows smoke 范围与 NOT VERIFIED 见 `src-tauri/CLAUDE.md`。
+领域测试、Vitest/jsdom 策略、Attention/Workbench 回归命令见 `web/CLAUDE.md`；P2P/protocol、doctor/logs、macOS/Windows smoke 范围与 NOT VERIFIED 见 `src-tauri/CLAUDE.md`。人类向质量门禁矩阵见 [`docs/development/testing.md`](docs/development/testing.md)；后端生命周期 / 端口 / doctor 见 [`docs/development/backend-operations.md`](docs/development/backend-operations.md)。
 
 ### 7.2 启动与设计系统预览
 
@@ -447,7 +447,7 @@ git tag v<版本号> && git push origin v<版本号>  # 触发 release-tauri.yml
 
 - P2P HTTP **首选 TCP 62116**；被占用则 **+1 递增**；`config.http_port=0`/非法表示“用首选默认”，**不是** OS `port=0` 临时端口
 - 实际监听端口以 UI 或 `GET /api/health` 的 `http_port` 为准；mDNS 为 UDP **5353**
-- 防火墙示例与 doctor 探测见 `src-tauri/CLAUDE.md` / README，文档不得宣称自动改防火墙
+- 防火墙示例与 doctor 探测见 `src-tauri/CLAUDE.md` / README / [`docs/development/backend-operations.md`](docs/development/backend-operations.md)，文档不得宣称自动改防火墙
 
 ## 8. 与 Rust 后端协作
 
