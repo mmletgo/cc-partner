@@ -33,6 +33,7 @@ src/
 ├── net/               — mdns-sd 发现 + axum server + reqwest client [已实现 M3]
 ├── mobile/            — 移动端局域网 `/mobile` 访问 URL 生成（过滤 localhost/loopback）[已实现]
 ├── orchestrator/      — 自动编排器后端：任务模型、状态机、SQLite repo、scheduler、Workbench 可见 Runner、Prompt 生成、验证与交付 [已实现]
+├── attention/         — 全局 Inbox 聚合领域：DTO/source trait/确定性 aggregator（无 Inbox 表；source/command/route 后续接入）[部分实现]
 ├── transfer/          — 分块传输 + SHA256 + 断点续传              [M5]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
 ├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥 [已实现]
@@ -43,6 +44,15 @@ src/
 └── commands/updater.rs — 自动更新 5 命令（check/download/status/cancel/install，对齐前端 types.ts）[M8 已实现]
 migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，全 CREATE TABLE IF NOT EXISTS 兼容旧库）
 ```
+
+## Attention 聚合约定（src/attention/）
+
+- **功能定位**：全局 Inbox 只做实时投影，不新增 Inbox 表、已读状态或“稍后/忽略”动作。条目只导航到权威业务界面，不在列表内执行 Deliver/Retry/Discard/安装依赖。
+- **DTO 契约**：`models.rs` 精确序列化为 TS 字面量（camelCase）：category=`decision|blocked|environment`，freshness=`live|cached`，sourceKind=`orchestratorHumanReview|orchestratorBlocked|remoteOutboxFailed|workbenchDependency`；target 用内部 tag `kind`（`orchestratorTask`/`remoteOutbox`/`settings`），`cachedAt` 可空，**禁止**返回后端 URL。
+- **Source trait**：`source.rs::AttentionSource::collect(&AppState) -> BoxFuture<Result<Vec<AttentionItemDto>, AppError>>`；任一 source 错误使整次聚合失败，不得返回部分快照。
+- **Aggregator**：`aggregator.rs::aggregate_attention_sources` 顺序收集 source → 稳定 ID 去重（相等保留首次，内容冲突返回完整性错误）→ 分类序 decision→blocked→environment → 同分类 `updatedAt` 降序 → 同时间 ID 升序 → counts.total 与分类计数一致；`generatedAt` 仅在全部 source 成功后生成。
+- **稳定 ID**：`orchestrator:human-review:<taskId>` / `orchestrator:blocked:<taskId>` / `orchestrator:outbox-failed:<outboxId>` / `workbench:dependency:tmux`；远端 taskId 使用既有 `remote:<deviceId>:<inner>` 包装。
+- **未接入**：orchestrator_source / workbench_dependency_source / Tauri command / Mobile route 由后续 task 落地。
 
 ## Orchestrator 基础约定（src/orchestrator/）
 

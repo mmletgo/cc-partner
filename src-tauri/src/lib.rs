@@ -11,6 +11,7 @@
 //!     setup 闭包内：load config → 建 SqlitePool（WAL + 手动建表）→ 构造 AppState → manage。
 //!     所有命令在 invoke_handler 注册。保留 M0 的 ping。
 
+mod attention;
 pub mod backend;
 mod cc;
 mod claude_cli;
