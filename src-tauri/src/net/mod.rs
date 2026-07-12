@@ -13,6 +13,7 @@ pub mod discovery;
 pub mod http_server;
 pub mod peer_client;
 pub mod protocol;
+pub mod request_context;
 pub mod routes;
 
 /// mDNS 服务类型。跟随应用名 cc-partner，供局域网内同版本实例互相发现。
