@@ -12,6 +12,7 @@
 
 use crate::commands::prompt_optimizer::OrchestratorTaskPromptCompletionDto;
 use crate::error::AppError;
+use crate::net::peer_error::{parse_peer_response, PeerCallError};
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{OrchestratorEvidenceDto, OrchestratorTaskDto};
 use crate::orchestrator::remote_protocol::{
@@ -21,7 +22,6 @@ use crate::orchestrator::remote_protocol::{
     RemoteTaskReworkReq,
 };
 use serde::{de::DeserializeOwned, Serialize};
-use serde_json::Value;
 use std::time::Duration;
 
 const SHORT_REMOTE_ORCHESTRATOR_TIMEOUT_SECS: u64 = 15;
@@ -384,12 +384,12 @@ impl RemoteOrchestratorClient {
     {
         let response = self
             .client
-            .get(url)
+            .get(&url)
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
             .map_err(|error| AppError::generic(format!("远端 Orchestrator 请求失败: {error}")))?;
-        parse_json_response(response).await
+        parse_json_response(response, &url).await
     }
 
     /// 发送 POST JSON 请求并解析响应。
@@ -411,13 +411,13 @@ impl RemoteOrchestratorClient {
     {
         let response = self
             .client
-            .post(url)
+            .post(&url)
             .json(body)
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
             .map_err(|error| AppError::generic(format!("远端 Orchestrator 请求失败: {error}")))?;
-        parse_json_response(response).await
+        parse_json_response(response, &url).await
     }
 }
 
@@ -467,48 +467,57 @@ fn endpoint_url(base_url: &str, path: &str) -> String {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     所有远端 Orchestrator 响应都需要统一错误语义，避免各方法返回不同格式的错误文案。
+///     Task 7 起改用共享的 `net::peer_error::parse_peer_response` 统一解析 v1 信封与 v0 老形态，
+///     保证与 peer_client 行为一致；最终映射回命令层 `AppError`（保留原有 UI 文案）。
 ///
 /// Code Logic（这个函数做什么）:
-///     检查 HTTP 2xx 状态；非 2xx 返回 `AppError::generic`；成功时按泛型解析 JSON。
-async fn parse_json_response<T>(response: reqwest::Response) -> Result<T, AppError>
+///     委托 `parse_peer_response` 一次性消费 status/header request_id/body bytes，
+///     成功时按泛型解析 JSON；失败时按 `PeerCallError` 变体映射为 `AppError`。
+async fn parse_json_response<T>(response: reqwest::Response, url: &str) -> Result<T, AppError>
 where
     T: DeserializeOwned,
 {
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(AppError::generic(remote_error_message(status, &body)));
-    }
-    response
-        .json::<T>()
+    parse_peer_response::<T>(response, url)
         .await
-        .map_err(|error| AppError::generic(format!("远端 Orchestrator 响应解析失败: {error}")))
+        .map_err(remote_error_to_app_error)
 }
 
-/// 提取远端错误文案。
+/// 把统一的 `PeerCallError` 映射为命令层 `AppError`。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     远端业务错误通常由对端 AppError 序列化为 `{error}`，本机应保留原始业务文案。
+///     Orchestrator 命令层沿用 `AppError`；远端调用失败需转成可读的中文错误文案供 UI 展示，
+///     同时保留 code/status 语义（如 unavailable 触发上层重试逻辑）。
 ///
 /// Code Logic（这个函数做什么）:
-///     优先从 JSON body 读取非空 error 字段；否则返回 HTTP 状态与截断后的正文摘要。
-fn remote_error_message(status: reqwest::StatusCode, body: &str) -> String {
-    let trimmed = body.trim();
-    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        if let Some(error) = value.get("error").and_then(Value::as_str) {
-            let error = error.trim();
-            if !error.is_empty() {
-                return error.to_string();
+///     - `Network`/`InvalidResponse` → generic（网络/协议层，非业务失败）；
+///     - `Unsupported` → unavailable（对端能力不足，调用方不应重试同一对端）；
+///     - `Remote` → 用对端原始 message（v1 信封或 v0 老形态的 `error` 字段），
+///       避免本地化文案匹配；message 为空时回落到状态码摘要。
+fn remote_error_to_app_error(error: PeerCallError) -> AppError {
+    match error {
+        PeerCallError::Network { url, source } => {
+            AppError::generic(format!("远端 Orchestrator 请求失败 ({url}): {source}"))
+        }
+        PeerCallError::InvalidResponse { url, reason } => AppError::generic(format!(
+            "远端 Orchestrator 响应无法解析 ({url}): {reason}"
+        )),
+        PeerCallError::Unsupported { url, capability } => AppError::unavailable(format!(
+            "远端 Orchestrator ({url}) 不支持能力 {capability}"
+        )),
+        PeerCallError::Remote {
+            message,
+            status,
+            url,
+            ..
+        } => {
+            let msg = message.trim();
+            if msg.is_empty() {
+                AppError::generic(format!("远端 Orchestrator 请求失败 ({url}): HTTP {status}"))
+            } else {
+                AppError::generic(msg.to_string())
             }
         }
     }
-    if trimmed.is_empty() {
-        return format!("远端 Orchestrator 请求失败: HTTP {status}");
-    }
-    format!(
-        "远端 Orchestrator 请求失败: HTTP {status}: {}",
-        truncate_error_body(trimmed)
-    )
 }
 
 /// 截断远端错误正文。
@@ -531,6 +540,14 @@ fn truncate_error_body(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::AppErrorCategory;
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
 
     /// Business Logic（为什么需要这个测试）:
     ///     远端 Orchestrator client 需要复用统一 URL 拼接规则，避免 base_url 尾部斜杠造成双斜杠请求。
@@ -546,37 +563,159 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     远端 Orchestrator 业务错误由对端序列化为 `{error}`，本机 UI 应展示对端原始中文文案。
+    ///     远端 Orchestrator 业务错误由对端序列化为 `{error}`（v0 老形态）；Task 7 起改用共享
+    ///     `parse_peer_response`，本机 UI 仍应展示对端原始中文文案，而不是 HTTP 状态包装。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     直接调用错误解析 helper，断言 JSON error 字段优先于 HTTP 状态包装。
-    #[test]
-    fn remote_error_message_prefers_json_error_field() {
-        let message = remote_error_message(
-            reqwest::StatusCode::BAD_REQUEST,
-            r#"{"error":"远端 Orchestrator 项目不存在"}"#,
+    ///     临时服务返回 400 + 老形态 `{error}`，调用 list_tasks，断言错误文案 == 对端 message。
+    #[tokio::test]
+    async fn remote_error_uses_peer_message_from_legacy_body() {
+        let app = Router::new().route(
+            "/api/orchestrator/tasks/list",
+            post(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "远端 Orchestrator 项目不存在" })),
+                )
+            }),
         );
-
-        assert_eq!(message, "远端 Orchestrator 项目不存在");
+        let base_url = spawn_orchestrator_server(app).await;
+        let err = RemoteOrchestratorClient::new()
+            .list_tasks(&base_url, "project-1")
+            .await
+            .expect_err("400 老形态应失败");
+        assert_eq!(err.to_string(), "远端 Orchestrator 项目不存在");
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     对端代理或崩溃时可能返回非 JSON 正文，客户端仍要给出可读且有限长度的错误。
+    ///     v1 对端返回完整错误信封时，客户端仍应展示对端 message（与 v0 行为一致），且 code/status
+    ///     可用于程序化分支（不依赖文案）。本测试验证 Task 7 统一解析后 v1 信封的 message 被正确传递。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     传入非 JSON 正文，断言错误包含 HTTP 状态和正文摘要。
-    #[test]
-    fn remote_error_message_falls_back_to_status_and_body() {
-        let message = remote_error_message(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom");
-
-        assert_eq!(
-            message,
-            "远端 Orchestrator 请求失败: HTTP 500 Internal Server Error: boom"
+    ///     临时服务返回 503 + v1 信封（code=unavailable），调用 list_tasks，
+    ///     断言错误文案 == message 且分类为 Internal（generic）。
+    #[tokio::test]
+    async fn remote_error_uses_peer_message_from_v1_envelope() {
+        let app = Router::new().route(
+            "/api/orchestrator/tasks/list",
+            post(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": "对端调度忙",
+                        "code": "unavailable",
+                        "request_id": "req-1",
+                        "retryable": true,
+                        "details": {}
+                    })),
+                )
+            }),
         );
+        let base_url = spawn_orchestrator_server(app).await;
+        let err = RemoteOrchestratorClient::new()
+            .list_tasks(&base_url, "project-1")
+            .await
+            .expect_err("503 v1 信封应失败");
+        assert_eq!(err.to_string(), "对端调度忙");
+        assert_eq!(err.classify(), AppErrorCategory::Internal);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     对端代理或崩溃返回非 JSON 正文时，客户端应归为 InvalidResponse 并给出含 url 的可读错误，
+    ///     不能把代理 500 误当业务失败。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     临时服务返回 502 + 纯文本 body，调用 list_tasks，断言错误为 generic 且含 url 上下文。
+    #[tokio::test]
+    async fn remote_non_json_body_becomes_invalid_response_error() {
+        let app = Router::new().route(
+            "/api/orchestrator/tasks/list",
+            post(|| async { (StatusCode::BAD_GATEWAY, "upstream proxy down") }),
+        );
+        let base_url = spawn_orchestrator_server(app).await;
+        let err = RemoteOrchestratorClient::new()
+            .list_tasks(&base_url, "project-1")
+            .await
+            .expect_err("非 JSON 应失败");
+        let msg = err.to_string();
+        assert!(msg.contains("无法解析"), "应归为 InvalidResponse: {msg}");
+        assert!(msg.contains("127.0.0.1"), "应含 url 上下文: {msg}");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     capability gate 必须在缺失能力时**不**调用目标路由。用一个共享 hit 计数器挂在新路由上，
+    ///     缺失能力时计数器应保持 0，证明 gate 提前返回（与 peer_client 行为对齐）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动 v0 health 服务 + 一个带计数器的 orchestrator 新路由，
+    ///     先用 peer_client.require_capability 拦截（返回 Unsupported），再断言新路由计数器为 0。
+    #[tokio::test]
+    async fn capability_gate_stops_before_orchestrator_route_when_unsupported() {
+        use crate::net::peer_client::PeerClient;
+        use crate::net::routes::health::HealthResponse;
+
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_clone = hits.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                axum::routing::get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "test".to_string(),
+                        device_name: "test".to_string(),
+                        http_port: 8765,
+                        ts: 1_700_000_000,
+                        protocol_version: 0, // v0：不支持任何 v1 能力
+                        capabilities: vec![],
+                    })
+                }),
+            )
+            .route(
+                "/api/orchestrator/future-route",
+                post(move || {
+                    let hits = hits_clone.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({"ok": true}))
+                    }
+                }),
+            );
+        let base_url = spawn_orchestrator_server(app).await;
+
+        // 能力门拦截：v0 对端不支持 errors.envelope.v1。
+        let gate_err = PeerClient::new()
+            .require_capability(&base_url, "errors.envelope.v1")
+            .await
+            .expect_err("v0 应被能力门拦截");
+        use crate::net::peer_client::PeerCallError;
+        assert!(matches!(gate_err, PeerCallError::Unsupported { .. }));
+
+        // 关键断言：缺失能力时新路由不应被调用（计数器为 0）。
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "能力门未通过时不应调用新路由"
+        );
+    }
+
+    /// 启动临时 Orchestrator server（返回 base_url）。
+    ///
+    /// Code Logic: 绑定 127.0.0.1:0 由 OS 分配端口，后台 tokio::spawn 运行 axum::serve。
+    async fn spawn_orchestrator_server(app: Router) -> String {
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
     }
 
     /// Business Logic（为什么需要这个测试）:
     ///     远端 HTML/堆栈正文可能很长，错误展示必须避免把超长正文整段塞进 UI。
+    ///     truncate_error_body 现仅用于潜在的非 JSON 兜底（当前统一解析已覆盖），保留回归测试。
     ///
     /// Code Logic（这个测试做什么）:
     ///     传入超过限制的正文，断言截断结果追加省略号且长度可控。

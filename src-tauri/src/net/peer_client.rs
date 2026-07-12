@@ -12,52 +12,18 @@
 //!     - `health(addr, port)`：legacy 布尔包装，复用 health_info，仅返回 ok 字段（旧调用方兼容）。
 //!     - sync/transfer 方法（pull/push/init/chunk 等）。
 
+use crate::net::peer_error::parse_peer_response;
+use crate::net::protocol::PeerProtocolInfo;
 use crate::net::routes::health::HealthResponse;
 use std::time::Duration;
 
 /// health 请求超时（秒）。对照 Python `DEFAULT_TIMEOUT=5`，Rust 版略放宽到 10s 提升弱网容错。
 const HEALTH_TIMEOUT_SECS: u64 = 10;
 
-/// 对端 P2P 调用错误：网络/HTTP/JSON 解析三类失败的统一封装。
-///
-/// Business Logic（为什么需要这个枚举）:
-///     `health_info` 等新增 typed 调用必须把失败原因明确回传调用方（用于日志、能力探测分支、
-///     重试决策），不能像 legacy `health(addr, port)` 那样只回 bool 屏蔽原因。同时仍保持
-///     `Display` 友好，便于 tracing 直接记录。
-///
-/// Code Logic（这个枚举做什么）:
-///     - `Network`：reqwest send 失败（DNS/连接/超时/拒绝）。
-///     - `Status`：HTTP 非 200（携带状态码与对端 URL 上下文）。
-///     - `Decode`：响应体反序列化失败（JSON 字段缺失或类型不匹配）。
-#[derive(Debug, thiserror::Error)]
-pub enum PeerCallError {
-    /// 网络/连接层失败（reqwest send 返回 Err）。
-    #[error("对端调用网络失败 ({url}): {source}")]
-    Network {
-        /// 对端 URL，便于日志定位是哪个 peer。
-        url: String,
-        /// 原始 reqwest 错误。
-        #[source]
-        source: reqwest::Error,
-    },
-    /// HTTP 非 200 响应（携带状态码）。
-    #[error("对端调用 HTTP 状态失败 ({url}): {status}")]
-    Status {
-        /// 对端 URL。
-        url: String,
-        /// HTTP 状态码（非 200）。
-        status: u16,
-    },
-    /// 响应体 JSON 解析失败。
-    #[error("对端调用响应解析失败 ({url}): {source}")]
-    Decode {
-        /// 对端 URL。
-        url: String,
-        /// 原始 reqwest 错误（json() 解码）。
-        #[source]
-        source: reqwest::Error,
-    },
-}
+// 兼容性再导出：历史上 `PeerCallError` 定义在本模块；Task 7 把它统一到 `net::peer_error`，
+// 这里再导出统一类型，使旧调用点（`use crate::net::peer_client::PeerCallError`）无需改动，
+// 同时 `health_info` 等签名自动指向新枚举（Network/Unsupported/InvalidResponse/Remote）。
+pub use crate::net::peer_error::PeerCallError;
 
 /// sync/pull 响应体（字段名对照 Python `handle_sync_pull` 返回 `{prompts: [...]}`）。
 #[derive(Debug, serde::Deserialize)]
@@ -156,8 +122,11 @@ impl PeerClient {
     ///
     /// Code Logic（这个函数做什么）:
     ///     GET `{base_url}/api/health`（base_url 形如 `http://192.168.1.5:8765`，无尾斜杠），
-    ///     status==200 时解析 HealthResponse 返回 Ok；其它状态返回 `PeerCallError::Status`，
-    ///     send 失败返回 `Network`，json 解析失败返回 `Decode`。
+    ///     经统一解析器 `parse_peer_response` 消费 status/header request_id/body：
+    ///     - send 失败 → `PeerCallError::Network`；
+    ///     - 2xx 且 body 可解析为 HealthResponse → Ok；
+    ///     - 2xx 但 body 无法解析 / 非 2xx 且 body 非 JSON → `InvalidResponse`；
+    ///     - 非 2xx 且 body 是错误信封（v1 或 v0 老形态）→ `Remote`（携带 code/status）。
     pub async fn health_info(&self, base_url: &str) -> Result<HealthResponse, PeerCallError> {
         let url = format!("{base_url}/api/health");
         let resp = self.client.get(&url).send().await.map_err(|e| {
@@ -167,18 +136,39 @@ impl PeerClient {
                 source: e,
             }
         })?;
-        if resp.status().as_u16() != 200 {
-            let status = resp.status().as_u16();
-            tracing::debug!("health_info HTTP 非 200 ({url}): {status}");
-            return Err(PeerCallError::Status { url, status });
-        }
-        resp.json::<HealthResponse>().await.map_err(|e| {
-            tracing::debug!("health_info 响应解析失败 ({url}): {e}");
-            PeerCallError::Decode {
-                url,
-                source: e,
-            }
+        parse_peer_response::<HealthResponse>(resp, &url).await.map_err(|e| {
+            tracing::debug!("health_info 解析失败 ({url}): {e}");
+            e
         })
+    }
+
+    /// 能力门：调用新路由前检查对端是否支持某能力，不支持则直接返回 `Unsupported` 而不发起路由请求。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     P2P 调用新路由（仅 v1 对端才实现）前必须先确认对端具备对应能力 token，否则会打到旧版对端
+    ///     返回 404/HTML 等噪音错误。本函数集中能力探测：始终拉取权威 health 元数据（而非依赖可能过期的
+    ///     缓存），缺失能力时返回 `PeerCallError::Unsupported` 且**不**调用目标路由，避免无效请求。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     1. `health_info(base_url)` 取对端权威 `PeerProtocolInfo`（失败原样上抛 Network/InvalidResponse/Remote）；
+    ///     2. `info.supports(capability)` 判定能力存在；
+    ///     3. 命中返回 Ok(HealthResponse)（调用方复用做后续调用）；
+    ///     4. 未命中返回 `Unsupported { url, capability }`。
+    pub async fn require_capability(
+        &self,
+        base_url: &str,
+        capability: &'static str,
+    ) -> Result<HealthResponse, PeerCallError> {
+        let health = self.health_info(base_url).await?;
+        let info: PeerProtocolInfo = health.protocol_info();
+        if info.supports(capability) {
+            Ok(health)
+        } else {
+            Err(PeerCallError::Unsupported {
+                url: base_url.to_string(),
+                capability,
+            })
+        }
     }
 
     /// 健康检查（legacy 布尔）：GET 对端 /api/health，返回 true 表示可达。
@@ -696,6 +686,7 @@ impl Default for PeerClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
 
     /// Business Logic（为什么需要这个测试）:
     ///     对端可能是尚未携带 protocol_version / capabilities 字段的旧版；客户端必须能容忍缺失字段
@@ -747,24 +738,37 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     PeerCallError 是 health_info 失败的统一封装；调用方需对网络/HTTP/解码三类失败分别处理
-    ///     （例如 HTTP 502 触发重试，解码失败只告警），所以必须能用 match 区分 variant。
+    ///     `PeerCallError`（统一到 `net::peer_error` 后）仍是 health_info 失败的统一封装；
+    ///     调用方需对 Network/Unsupported/InvalidResponse/Remote 四类失败分别处理，必须能用 match 区分。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     手工构造三类 PeerCallError，断言它们互不相等且 Display 含上下文。
-    ///     （不构造真实 reqwest::Error，因为该错误无公共构造器；Display 仅做烟测。）
+    ///     手工构造 `Remote` 与 `Unsupported`（无需 reqwest::Error），断言 Display 含 url/状态/code 上下文。
     #[test]
     fn peer_call_error_variants_carry_url_context() {
-        // 用 stable Display 文本断言枚举形态稳定，避免触碰 reqwest::Error 私有构造。
-        let net_msg = format!(
+        let remote_msg = format!(
             "{}",
-            PeerCallError::Status {
+            PeerCallError::Remote {
                 url: "http://1.2.3.4:8765/api/health".to_string(),
                 status: 503,
+                code: "unavailable".to_string(),
+                message: "busy".to_string(),
+                request_id: "r".to_string(),
+                retryable: true,
+                legacy: false,
             }
         );
-        assert!(net_msg.contains("503"));
-        assert!(net_msg.contains("1.2.3.4:8765"));
+        assert!(remote_msg.contains("503"));
+        assert!(remote_msg.contains("1.2.3.4:8765"));
+        assert!(remote_msg.contains("unavailable"));
+
+        let unsupported_msg = format!(
+            "{}",
+            PeerCallError::Unsupported {
+                url: "http://1.2.3.4:8765".to_string(),
+                capability: "errors.envelope.v1",
+            }
+        );
+        assert!(unsupported_msg.contains("errors.envelope.v1"));
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -783,5 +787,186 @@ mod tests {
         let full = format!("{base_url}/api/health");
         assert_eq!(full, "http://192.168.1.10:8765/api/health");
         assert!(!full.contains("//api"), "URL 出现重复斜杠: {full}");
+    }
+
+    // ===== Task 7: require_capability 能力门 =====
+
+    /// 启动临时 health 服务，返回 base_url 与协议元数据可控的句柄。
+    ///
+    /// Code Logic: 用 axum 挂一个 `/api/health` handler，按入参 protocol_version/capabilities
+    ///     返回 HealthResponse；端口绑定 0 由 OS 分配，避免与真实服务冲突。
+    async fn spawn_health_server(
+        protocol_version: u32,
+        capabilities: Vec<String>,
+    ) -> String {
+        use axum::routing::get;
+        let state = HealthState {
+            protocol_version,
+            capabilities,
+        };
+        let app = axum::Router::new()
+            .route("/api/health", get(health_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// 测试用 health handler 状态。
+    #[derive(Clone)]
+    struct HealthState {
+        protocol_version: u32,
+        capabilities: Vec<String>,
+    }
+
+    /// 测试用 health handler：按 state 返回 HealthResponse。
+    async fn health_handler(
+        axum::extract::State(state): axum::extract::State<HealthState>,
+    ) -> axum::Json<HealthResponse> {
+        axum::Json(HealthResponse {
+            ok: true,
+            device_id: "test".to_string(),
+            device_name: "test".to_string(),
+            http_port: 8765,
+            ts: 1_700_000_000,
+            protocol_version: state.protocol_version,
+            capabilities: state.capabilities,
+        })
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     对端支持所需能力时，`require_capability` 必须返回 Ok(HealthResponse)，且调用方可复用结果。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动 v1 + errors.envelope.v1 的 health 服务，调用 require_capability，
+    ///     断言 Ok 且 protocol_version == 1。
+    #[tokio::test]
+    async fn require_capability_passes_when_peer_supports_token() {
+        let base_url =
+            spawn_health_server(1, vec!["errors.envelope.v1".to_string()]).await;
+        let client = PeerClient::new();
+        let health = client
+            .require_capability(&base_url, "errors.envelope.v1")
+            .await
+            .expect("支持能力时应通过");
+        assert_eq!(health.protocol_version, 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     对端不支持所需能力时，`require_capability` 必须返回 `Unsupported`，
+    ///     调用方据此跳过新路由，不打到对端。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动 v0（无能力）的 health 服务，调用 require_capability("errors.envelope.v1")，
+    ///     断言错误为 Unsupported 且 capability 字段匹配。
+    #[tokio::test]
+    async fn require_capability_blocks_when_peer_lacks_token() {
+        let base_url = spawn_health_server(0, vec![]).await;
+        let client = PeerClient::new();
+        let err = client
+            .require_capability(&base_url, "errors.envelope.v1")
+            .await
+            .expect_err("缺失能力应被拦截");
+        match err {
+            PeerCallError::Unsupported { capability, .. } => {
+                assert_eq!(capability, "errors.envelope.v1");
+            }
+            other => panic!("应为 Unsupported，实际: {other:?}"),
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     对端离线（端口不可达）时，`require_capability` 必须把 health 失败原样上抛为 `Network`，
+    ///     不能误报为 Unsupported（离线 ≠ 不支持）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     绑定一个立刻关闭的端口（用 ephemeral 端口但不启服务），调用 require_capability，
+    ///     断言错误为 Network。
+    #[tokio::test]
+    async fn require_capability_propagates_network_error_when_offline() {
+        // 绑定后立即释放，得到一个几乎必然连接被拒的端口。
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let base_url = format!("http://{addr}");
+        let client = PeerClient::new();
+        let err = client
+            .require_capability(&base_url, "errors.envelope.v1")
+            .await
+            .expect_err("离线应为 Network");
+        assert!(
+            matches!(err, PeerCallError::Network { .. }),
+            "离线应上报 Network，实际: {err:?}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     capability gate 必须在缺失能力时**不**调用目标路由。用一个共享 hit 计数器挂在新路由上，
+    ///     缺失能力时计数器应保持 0，证明 gate 提前返回。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动 v0 health 服务 + 一个 `/api/inbox/messages` 探测路由（带 Arc<AtomicU32> 计数器），
+    ///     先调 require_capability（返回 Unsupported），再断言探测路由计数器仍为 0。
+    #[tokio::test]
+    async fn capability_gate_stops_before_new_route_when_unsupported() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_clone = hits.clone();
+        let app = axum::Router::new()
+            .route(
+                "/api/health",
+                axum::routing::get(|| async {
+                    axum::Json(HealthResponse {
+                        ok: true,
+                        device_id: "test".to_string(),
+                        device_name: "test".to_string(),
+                        http_port: 8765,
+                        ts: 1_700_000_000,
+                        protocol_version: 0, // v0：不支持任何 v1 能力
+                        capabilities: vec![],
+                    })
+                }),
+            )
+            .route(
+                "/api/inbox/messages",
+                axum::routing::get(move || {
+                    let hits = hits_clone.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(serde_json::json!({"messages": []}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base_url = format!("http://{addr}");
+        let client = PeerClient::new();
+
+        // 能力门拦截：v0 对端不支持 inbox.messages.v1。
+        let gate_err = client
+            .require_capability(&base_url, "inbox.messages.v1")
+            .await
+            .expect_err("v0 应被能力门拦截");
+        assert!(matches!(gate_err, PeerCallError::Unsupported { .. }));
+
+        // 关键断言：缺失能力时新路由不应被调用（计数器为 0）。
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "能力门未通过时不应调用新路由"
+        );
     }
 }
