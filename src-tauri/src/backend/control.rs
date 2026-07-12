@@ -2,6 +2,8 @@ use crate::config::config_dir;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -10,6 +12,7 @@ use tokio::sync::watch;
 
 const CONTROL_FILE_NAME: &str = "backend-control.json";
 const PID_FILE_NAME: &str = "backend.pid";
+const START_LOCK_FILE_NAME: &str = "backend-start.lock";
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
@@ -117,9 +120,11 @@ pub struct BackendStatus {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     GUI、CLI 与独立后端必须在同一用户配置目录下定位同一份控制文件，避免多处硬编码路径。
+///     CLI/smoke 通过 `CC_PARTNER_DATA_DIR` 隔离时，控制文件也必须落在同一数据根。
 ///
 /// Code Logic（这个函数做什么）:
-///     基于 `config_dir()` 派生 `backend-control.json` 的绝对路径。
+///     基于 `config_dir()`（内部委托 `data_dir()`，支持 `CC_PARTNER_DATA_DIR` override）
+///     派生 `backend-control.json` 的绝对路径。
 pub fn control_file_path() -> PathBuf {
     config_dir().join(CONTROL_FILE_NAME)
 }
@@ -130,7 +135,7 @@ pub fn control_file_path() -> PathBuf {
 ///     stop/status 等命令需要一个轻量 pid 文件与控制 JSON 并存，兼容只需读取进程号的后续逻辑。
 ///
 /// Code Logic（这个函数做什么）:
-///     基于 `config_dir()` 派生 `backend.pid` 的绝对路径。
+///     基于 `config_dir()`（内部委托 `data_dir()`）派生 `backend.pid` 的绝对路径。
 pub fn pid_file_path() -> PathBuf {
     config_dir().join(PID_FILE_NAME)
 }
@@ -185,6 +190,136 @@ pub fn remove_control_files() -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+/// 返回 data_dir 作用域下的 start 互斥锁文件路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     并发 `start` 必须按隔离数据根互斥，避免两个进程同时观察到 stopped 后双开 serve。
+///
+/// Code Logic（这个函数做什么）:
+///     基于 `config_dir()` 派生 `backend-start.lock` 绝对路径。
+pub fn start_lock_path() -> PathBuf {
+    config_dir().join(START_LOCK_FILE_NAME)
+}
+
+/// data_dir 作用域的跨进程 start 锁守卫。
+///
+/// Business Logic（为什么需要这个结构）:
+///     `start` 的 check-then-spawn 不是原子的；必须用磁盘锁串行化同一 data_dir 上的启动声明。
+///
+/// Code Logic（这个结构做什么）:
+///     持有已 `try_lock`/`lock` 成功的 OS 文件锁句柄；进程退出或 Drop 时内核自动释放，
+///     不依赖删除路径，避免 create_new+pid 文件的 ABA / 空文件误回收竞态。
+pub struct StartLockGuard {
+    path: PathBuf,
+    file: fs::File,
+    ownership_token: String,
+}
+
+impl Drop for StartLockGuard {
+    /// 释放 start 锁。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     无论 start 成功、超时还是 panic，都必须释放 data_dir 级启动互斥，避免永久卡死后续 start。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当锁文件仍包含本守卫写入的 ownership token 时才 best-effort 清理诊断内容并 unlock；
+    ///     文件删除不是互斥前提——OS 文件锁在 fd 关闭时自动释放。
+    fn drop(&mut self) {
+        if lock_file_owned_by(&self.path, &self.ownership_token) {
+            // 诊断字段可清，但不要 unlink：其它进程可能已 open 同一路径等待 lock。
+            let _ = self.file.set_len(0);
+        }
+        // 全限定调用 fs4，避免解析到 std::fs::File::unlock（MSRV 1.89+）。
+        if let Err(err) = fs4::FileExt::unlock(&self.file) {
+            tracing::warn!("释放 backend start 锁失败 path={:?}: {err}", self.path);
+        }
+    }
+}
+
+/// 在有界时间内获取 data_dir 作用域的跨进程 start 锁。
+///
+/// Business Logic（为什么需要这个函数）:
+///     两个并发 `start` 都可能读到 stopped 并各自 spawn serve，随后竞争 control 文件留下孤儿进程。
+///     需要按隔离根原子声明“我正在启动”。
+///
+/// Code Logic（这个函数做什么）:
+///     打开（或创建）`backend-start.lock` 后用 OS 级 exclusive lock（`fs4::FileExt::try_lock`，
+///     全限定调用以避开 std 1.89+ 同名方法与 crate MSRV 1.77 冲突）抢占；
+///     成功后写入 ownership token + pid 作诊断。进程崩溃时内核自动释放锁，无需 pid 回收，
+///     也消除了“空/半写锁文件被误删”导致双持有的 ABA。轮询 try_lock 直到 deadline。
+pub async fn acquire_start_lock(timeout: Duration) -> Result<StartLockGuard, AppError> {
+    let path = start_lock_path();
+    let dir = config_dir();
+    fs::create_dir_all(&dir)?;
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+
+        // 全限定调用 fs4，避免 rustc 优先解析到 std::fs::File::try_lock（MSRV 1.89+）。
+        match fs4::FileExt::try_lock(&file) {
+            Ok(()) => {
+                let ownership_token = uuid::Uuid::new_v4().to_string();
+                write_start_lock_payload(&mut file, &ownership_token)?;
+                return Ok(StartLockGuard {
+                    path,
+                    file,
+                    ownership_token,
+                });
+            }
+            Err(fs4::TryLockError::WouldBlock) => {
+                drop(file);
+                if Instant::now() >= deadline {
+                    return Err(AppError::conflict(format!(
+                        "获取 backend start 锁超时（{timeout:?}）: start 锁被占用: {}",
+                        path.display()
+                    )));
+                }
+                tokio::time::sleep(STATUS_POLL_INTERVAL).await;
+            }
+            Err(fs4::TryLockError::Error(err)) => return Err(err.into()),
+        }
+    }
+}
+
+/// 把 ownership token 与持有者 pid 写入 start 锁文件（仅诊断，不参与互斥）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OS 文件锁保证互斥；锁文件内容仅用于排障时识别谁持有锁，避免再走 pid 回收路径。
+///
+/// Code Logic（这个函数做什么）:
+///     truncate 后写入 `token=`/`pid=` 两行并 flush。
+fn write_start_lock_payload(file: &mut fs::File, ownership_token: &str) -> Result<(), AppError> {
+    file.set_len(0)?;
+    let payload = format!("token={ownership_token}\npid={}\n", std::process::id());
+    file.write_all(payload.as_bytes())?;
+    file.flush()?;
+    Ok(())
+}
+
+/// 判断 start 锁文件是否仍由给定 ownership token 持有。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Drop 时不应误清他人写入的诊断内容；仅 token 匹配才允许 truncate。
+///
+/// Code Logic（这个函数做什么）:
+///     读锁文件，解析 `token=` 行并与期望 token 比较；读失败视为不匹配。
+fn lock_file_owned_by(path: &std::path::Path, ownership_token: &str) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    content.lines().any(|line| {
+        line.strip_prefix("token=")
+            .map(|raw| raw.trim() == ownership_token)
+            .unwrap_or(false)
+    })
 }
 
 /// 返回进程内后端关闭通知槽。
