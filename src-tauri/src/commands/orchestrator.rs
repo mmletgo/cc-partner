@@ -552,14 +552,17 @@ fn map_remote_runtime_snapshot_for_shortcut(
 ///     必须映射回四态空快照，保持 cold offline 与 unavailable 语义。
 ///
 /// Code Logic（这个函数做什么）:
-///     仅按 `AppError::classify()` / `is_remote_network_error` 类型分支：
-///     Unavailable/Timeout → offline；其它 → unavailable。
+///     仅真实传输离线（设备缺失 / 本机 Network 类 Unavailable|Timeout，如连接中断）→ offline；
+///     `AppError::Remote` 是在线对端返回的业务信封（含 unavailable/timeout code）→ unavailable，
+///     不得把 503/504 业务响应误判为离线并展示陈旧缓存。
 ///     展示文案固定中文提示，不拼接 base_url/IP/端口，也不用中文 contains 判定四态。
 fn remote_runtime_snapshot_from_open_error(
     project: &WorkbenchProjectRow,
     error: AppError,
 ) -> OrchestratorRuntimeSnapshotDto {
-    if is_remote_network_error(&error) {
+    // Remote 业务信封来自已可达的对端，协议/业务不可用 ≠ 设备传输离线。
+    let is_remote_envelope = matches!(error, AppError::Remote { .. });
+    if !is_remote_envelope && is_remote_network_error(&error) {
         return remote_runtime_snapshot_empty(
             project,
             "offline",
@@ -3356,6 +3359,52 @@ mod tests {
         assert_eq!(
             misleading.latest_error.as_deref(),
             Some("路径无效：远端连接配置离线占位")
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     在线 owner 返回的结构化 503/504 业务信封（AppError::Remote）不得被误判为传输离线，
+    ///     否则会错误展示陈旧 offline 缓存；契约要求映射为 unavailable。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 code=unavailable/timeout 的 Remote 信封调用 preflight 映射，断言 remoteStatus=unavailable。
+    #[test]
+    fn remote_runtime_snapshot_open_preflight_maps_remote_envelope_to_unavailable() {
+        let project = remote_shortcut_row();
+        let remote_unavailable = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::remote(
+                "owner open 暂不可用",
+                crate::error::RemoteErrorMeta {
+                    code: "unavailable".to_string(),
+                    status: 503,
+                    retryable: true,
+                    request_id: "req-503".to_string(),
+                    details: serde_json::json!({}),
+                },
+            ),
+        );
+        assert_eq!(remote_unavailable.remote_status, "unavailable");
+        assert!(remote_unavailable.running_tasks.is_empty());
+        assert!(remote_unavailable.recent_events.is_empty());
+
+        let remote_timeout = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::remote(
+                "owner open 超时",
+                crate::error::RemoteErrorMeta {
+                    code: "timeout".to_string(),
+                    status: 504,
+                    retryable: true,
+                    request_id: "req-504".to_string(),
+                    details: serde_json::json!({}),
+                },
+            ),
+        );
+        assert_eq!(remote_timeout.remote_status, "unavailable");
+        assert_eq!(
+            remote_timeout.latest_error.as_deref(),
+            Some("owner open 超时")
         );
     }
 

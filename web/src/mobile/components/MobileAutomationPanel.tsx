@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
+import { toRuntimeLoadError } from '@/api/orchestratorRuntimeTransportError';
 import { httpOrchestratorTransport } from '@/api/workbenchHttp';
 import type { HttpCreateOrchestratorTaskAction } from '@/api/workbenchHttp';
 import { orchestratorEvidenceKindTone } from '@/lib/orchestrator';
@@ -490,10 +491,12 @@ export function MobileAutomationPanel({
       if (next && activeProjectIdRef.current === projectId) setRuntimeDisplay(next);
     } catch (reason) {
       if (activeProjectIdRef.current !== projectId) return;
+      // 必须保留 adapter 的 OrchestratorRuntimeTransportError.kind；
+      // 用 new Error(message) 会抹掉 network，warm offline 缓存永远不可达。
       const next = applyMobileRuntimeSnapshotFailure(
         projectId,
         requestSeq,
-        new Error(getErrorMessage(reason)),
+        toRuntimeLoadError(reason),
       );
       if (next && activeProjectIdRef.current === projectId) setRuntimeDisplay(next);
     }
@@ -821,6 +824,18 @@ export function MobileAutomationPanel({
               ) : null}
               {runtimeDisplay.snapshot ? (
                 <>
+                  <p className={styles.mobileListMeta}>
+                    {t('workbench:mobile.automationPanel.runtimeGeneratedAt', {
+                      time: formatRuntimeTimestamp(runtimeDisplay.snapshot.generatedAt),
+                    })}
+                  </p>
+                  <p className={styles.mobileListMeta}>
+                    {t('workbench:mobile.automationPanel.runtimeLatestTickAt', {
+                      time: runtimeDisplay.snapshot.latestTickAt
+                        ? formatRuntimeTimestamp(runtimeDisplay.snapshot.latestTickAt)
+                        : t('workbench:mobile.automationPanel.runtimeLatestTickUnknown'),
+                    })}
+                  </p>
                   <p>
                     {t('workbench:mobile.automationPanel.runtimeSlots', {
                       used: runtimeDisplay.snapshot.slotsUsed,
@@ -835,6 +850,18 @@ export function MobileAutomationPanel({
                         error: runtimeDisplay.snapshot.latestError,
                       })}
                     </p>
+                  ) : null}
+                  {runtimeDisplay.snapshot.recentEvents.length > 0 ? (
+                    <div className={styles.mobileList}>
+                      <p className={styles.mobileListMeta}>
+                        {t('workbench:mobile.automationPanel.runtimeRecentEvents')}
+                      </p>
+                      {runtimeDisplay.snapshot.recentEvents.map((event) => (
+                        <p className={styles.mobileListMeta} key={event.id}>
+                          {event.taskTitle}: {event.message}
+                        </p>
+                      ))}
+                    </div>
                   ) : null}
                 </>
               ) : null}

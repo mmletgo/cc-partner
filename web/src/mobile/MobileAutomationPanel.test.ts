@@ -75,6 +75,66 @@ describe('MobileAutomationPanel', () => {
     );
     assertContains(
       panelSource,
+      'toRuntimeLoadError',
+      'mobile automation runtime load catch must preserve transport Error kind via toRuntimeLoadError',
+    );
+    assertNotContains(
+      panelSource,
+      'new Error(getErrorMessage(reason))',
+      'mobile automation must not rewrap runtime load errors and drop transport kind',
+    );
+    assertContains(
+      panelSource,
+      'runtimeDisplay.snapshot.generatedAt',
+      'mobile runtime strip must render owner generatedAt',
+    );
+    assertContains(
+      panelSource,
+      'runtimeDisplay.snapshot.latestTickAt',
+      'mobile runtime strip must render owner latestTickAt',
+    );
+    assertContains(
+      panelSource,
+      'runtimeDisplay.snapshot.recentEvents',
+      'mobile runtime strip must render owner recentEvents',
+    );
+    assertContains(
+      panelSource,
+      'runtimeGeneratedAt',
+      'mobile automation must reference runtimeGeneratedAt i18n key',
+    );
+    assertContains(
+      panelSource,
+      'runtimeLatestTickAt',
+      'mobile automation must reference runtimeLatestTickAt i18n key',
+    );
+    assertContains(
+      panelSource,
+      'runtimeRecentEvents',
+      'mobile automation must reference runtimeRecentEvents i18n key',
+    );
+    assertContains(
+      zhWorkbench,
+      '"runtimeGeneratedAt": "生成时间 {{time}}"',
+      'zh locale must include runtime generatedAt copy',
+    );
+    assertContains(
+      enWorkbench,
+      '"runtimeGeneratedAt": "Generated {{time}}"',
+      'en locale must include runtime generatedAt copy',
+    );
+    assertContains(
+      zhWorkbench,
+      '"runtimeRecentEvents": "最近事件"',
+      'zh locale must include recent events copy',
+    );
+    assertContains(
+      enWorkbench,
+      '"runtimeRecentEvents": "Recent events"',
+      'en locale must include recent events copy',
+    );
+    assertContains(
+      panelSource,
       'runtimeCachedHint',
       'mobile automation should mark offline cached runtime as display-only',
     );

@@ -89,3 +89,19 @@ export function toOrchestratorRuntimeTransportError(
   }
   return new OrchestratorRuntimeTransportError(String(reason), kind);
 }
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   面板/store 的 catch 路径必须保留 adapter 已抛出的 transport kind，
+ *   否则 network reject 会被抹成普通 Error，warm offline 缓存永远进不去。
+ *
+ * Code Logic（这个函数做什么）:
+ *   已是 Error（含 OrchestratorRuntimeTransportError）则原样返回；
+ *   非 Error reject 才用 helper 包装为 kind=unknown 的传输错误。
+ */
+export function toRuntimeLoadError(reason: unknown): Error {
+  if (reason instanceof Error) {
+    return reason;
+  }
+  return toOrchestratorRuntimeTransportError(reason, 'unknown');
+}
