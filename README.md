@@ -28,8 +28,7 @@ cc-partner 以 **Workbench** 为核心：本机与远端项目、worktree、终�
 
 远端或不想开桌面窗口时，独立二进制 `cc-partner-backend` 提供同一局域网服务与健康检查：
 
-```text
-cc-partner-backend start
+```textcc-partner-backend start
 cc-partner-backend status
 cc-partner-backend doctor
 cc-partner-backend doctor --json
@@ -249,7 +248,6 @@ git push origin v<版本号>
    3. **assemble-latest-json**：从 Release 签名独立组装 `latest.json` 供应用内更新
 
 细节、密钥与平台矩阵以 [`.github/workflows/release-tauri.yml`](.github/workflows/release-tauri.yml) 为准，本文不重复 secrets 历史。
-
 ## 常见问题
 
 ### 两台电脑互相看不到？
