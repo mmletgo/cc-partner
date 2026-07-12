@@ -128,8 +128,8 @@ fn build_echo_exit_input(token: &str) -> String {
 ///     按 `\n`/`\r` 切行后，只有整行（trim 尾部空白）等于 marker 才算命中。
 fn output_contains_standalone_marker(buf: &[u8], marker: &str) -> bool {
     let text = String::from_utf8_lossy(buf);
-    text.split(|c| c == '\n' || c == '\r')
-        .any(|line| line.trim_end_matches(|c: char| c == ' ' || c == '\t') == marker)
+    text.split(['\n', '\r'])
+        .any(|line| line.trim_end_matches([' ', '\t']) == marker)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -199,10 +199,7 @@ fn persist_pty_failure_diagnostics(reason: &str, marker: &str, output: &[u8]) {
 ///
 /// Code Logic（这个函数做什么）:
 ///     先 kill，再轮询 try_wait 直到退出或超时；绝不调用无界 wait。
-fn force_reap_child(
-    child: &mut Box<dyn portable_pty::Child + Send + Sync>,
-    timeout: Duration,
-) {
+fn force_reap_child(child: &mut Box<dyn portable_pty::Child + Send + Sync>, timeout: Duration) {
     let _ = child.kill();
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -519,10 +516,7 @@ fn native_pty_echo_token_and_exit_zero() {
     // 父进程必须释放 slave，否则 child 退出后 master 读端可能永远等不到 EOF。
     drop(pair.slave);
 
-    let mut writer = pair
-        .master
-        .take_writer()
-        .expect("PTY writer 应可取出");
+    let mut writer = pair.master.take_writer().expect("PTY writer 应可取出");
     let reader = pair
         .master
         .try_clone_reader()
@@ -540,11 +534,7 @@ fn native_pty_echo_token_and_exit_zero() {
     if let Err((buf, msg)) = wait_for_standalone_marker(&drain, &marker, PTY_SMOKE_TIMEOUT) {
         drop(writer);
         force_reap_child(&mut child, Duration::from_secs(2));
-        persist_pty_failure_diagnostics(
-            &format!("marker_timeout: {msg}"),
-            &marker,
-            &buf,
-        );
+        persist_pty_failure_diagnostics(&format!("marker_timeout: {msg}"), &marker, &buf);
         panic!(
             "未读到独立成行 marker `{marker}`: {msg}; partial={}",
             escape_bytes_for_diagnostic(&buf)
@@ -560,7 +550,11 @@ fn native_pty_echo_token_and_exit_zero() {
         Err(err) => {
             drop(writer);
             let snap = drain.snapshot();
-            persist_pty_failure_diagnostics(&format!("exit_timeout_or_nonzero: {err}"), &marker, &snap);
+            persist_pty_failure_diagnostics(
+                &format!("exit_timeout_or_nonzero: {err}"),
+                &marker,
+                &snap,
+            );
             panic!("{err}");
         }
     };
@@ -634,10 +628,7 @@ fn unix_process_group_cleanup_leaves_no_child() {
         }
     }
 
-    assert!(
-        !process_is_alive(pid),
-        "进程组清理后 pid={pid} 不应再存活"
-    );
+    assert!(!process_is_alive(pid), "进程组清理后 pid={pid} 不应再存活");
 }
 
 /// Business Logic（为什么需要这个测试）:
@@ -684,5 +675,7 @@ fn windows_detached_lifecycle_skipped_on_non_windows() {
 #[cfg(not(unix))]
 #[test]
 fn unix_process_group_lifecycle_skipped_on_non_unix() {
-    eprintln!("skip: Unix process-group lifecycle 仅在 macOS/Linux runner 验证（setpgid + killpg）");
+    eprintln!(
+        "skip: Unix process-group lifecycle 仅在 macOS/Linux runner 验证（setpgid + killpg）"
+    );
 }

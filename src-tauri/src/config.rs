@@ -112,9 +112,7 @@ fn resolve_data_dir_override(raw: std::ffi::OsString) -> Result<PathBuf, AppErro
 
     let path = PathBuf::from(trimmed);
     if !path.is_absolute() {
-        return Err(AppError::validation(
-            "CC_PARTNER_DATA_DIR 必须是绝对路径",
-        ));
+        return Err(AppError::validation("CC_PARTNER_DATA_DIR 必须是绝对路径"));
     }
 
     fs::create_dir_all(&path)?;
@@ -785,17 +783,11 @@ mod tests {
     #[test]
     fn data_dir_rejects_blank_override() {
         let _guard = install_data_dir_env(Some(""));
-        assert!(
-            data_dir().is_err(),
-            "空字符串 override 应被拒绝"
-        );
+        assert!(data_dir().is_err(), "空字符串 override 应被拒绝");
 
         drop(_guard);
         let _guard = install_data_dir_env(Some("   "));
-        assert!(
-            data_dir().is_err(),
-            "纯空白 override 应被拒绝"
-        );
+        assert!(data_dir().is_err(), "纯空白 override 应被拒绝");
     }
 
     /// 验证相对路径 override 被拒绝。

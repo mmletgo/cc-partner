@@ -5,12 +5,12 @@
 
 mod support;
 
+use std::thread;
+use std::time::Duration;
 use support::{
     dead_pid, ensure_platform_supported, process_is_alive, read_control_file, unused_local_port,
     write_control_file, CapturedCli, ControlFileJson, SmokeCase,
 };
-use std::thread;
-use std::time::Duration;
 
 /// Business Logic（为什么需要这个函数）:
 ///     测试失败时要把 CLI 输出与 case 路径挂到 panic，便于 CI 诊断；
@@ -51,10 +51,7 @@ fn record_pid_from_status(case: &mut SmokeCase, status: &support::CliStatusJson)
 ///     success=false 时 fail_case。
 fn assert_cli_ok(case: &mut SmokeCase, label: &str, captured: &CapturedCli) {
     if !captured.success {
-        fail_case(
-            case,
-            format!("{label} 失败\n{}", captured.diagnostic()),
-        );
+        fail_case(case, format!("{label} 失败\n{}", captured.diagnostic()));
     }
 }
 
@@ -199,19 +196,14 @@ fn start_health_status_stop() {
         thread::sleep(Duration::from_millis(100));
     }
     if process_is_alive(control.pid) {
-        fail_case(
-            &mut case,
-            format!("stop 后 pid {} 仍存活", control.pid),
-        );
+        fail_case(&mut case, format!("stop 后 pid {} 仍存活", control.pid));
     }
     let control_exists = case.control_file_path().exists();
     let pid_exists = case.pid_file_path().exists();
     if control_exists || pid_exists {
         fail_case(
             &mut case,
-            format!(
-                "stop 后 control/pid 文件仍存在: control={control_exists} pid={pid_exists}"
-            ),
+            format!("stop 后 control/pid 文件仍存在: control={control_exists} pid={pid_exists}"),
         );
     }
 
@@ -421,16 +413,10 @@ fn stale_control_status_and_start_recovery() {
     case.record_pid(recovered.pid);
 
     if recovered.pid == dead {
-        fail_case(
-            &mut case,
-            format!("recovery 仍使用死 pid {dead}"),
-        );
+        fail_case(&mut case, format!("recovery 仍使用死 pid {dead}"));
     }
     if !process_is_alive(recovered.pid) {
-        fail_case(
-            &mut case,
-            format!("recovery pid {} 未存活", recovered.pid),
-        );
+        fail_case(&mut case, format!("recovery pid {} 未存活", recovered.pid));
     }
     if let Err(err) = case.wait_for_health(recovered.port) {
         fail_case(&mut case, err);
