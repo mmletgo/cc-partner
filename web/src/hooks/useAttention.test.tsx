@@ -13,7 +13,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 
 import type { AttentionSnapshot } from '@/lib/types';
-import { ATTENTION_POLL_INTERVAL_MS, AttentionProvider } from './useAttention';
+import {
+  ATTENTION_LOAD_TIMEOUT_MS,
+  ATTENTION_POLL_INTERVAL_MS,
+  AttentionProvider,
+} from './useAttention';
 import { useAttention } from './attentionContext';
 
 /**
@@ -366,6 +370,70 @@ describe('AttentionProvider', () => {
     });
     const total = screen.getByTestId('total').textContent;
     expect(total === '3' || total === '7').toBe(true);
+  });
+
+  test('never-resolving loader times out and manual refresh recovers', async () => {
+    let visibility: DocumentVisibilityState = 'visible';
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => visibility,
+    });
+
+    let callCount = 0;
+    const loadSnapshot = vi.fn(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        // 永不 settle：模拟半开连接 / 挂起 IPC。
+        return new Promise<AttentionSnapshot>(() => {});
+      }
+      return Promise.resolve(buildSnapshot({ total: 11, generatedAt: 'recovered' }));
+    });
+
+    renderProvider(loadSnapshot);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('loading').textContent).toBe('true');
+
+    // 隐藏页面暂停 10s 轮询，避免 pending 在超时后自动再拉一次掩盖失败态断言。
+    visibility = 'hidden';
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      await Promise.resolve();
+    });
+    // 超时前不得堆第二请求。
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+
+    // 推进到硬超时：inFlight 必须释放，失败进入 loadFailed。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ATTENTION_LOAD_TIMEOUT_MS);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+    expect(screen.getByTestId('error').textContent).toMatch(/超时/);
+    expect(screen.getByTestId('total').textContent).toBe('null');
+    // 挂起期间不得因轮询再起请求（hidden 已暂停 interval）。
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+
+    // 手动 refresh 必须能启动新请求并恢复（证明 single-flight 已解锁）。
+    await act(async () => {
+      screen.getByRole('button', { name: 'refresh' }).click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('total').textContent).toBe('11');
+    });
+    expect(screen.getByTestId('generatedAt').textContent).toBe('recovered');
+    expect(screen.getByTestId('error').textContent).toBe('');
+    expect(loadSnapshot.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
   test('useAttention outside provider throws', () => {

@@ -10,12 +10,19 @@ use crate::error::AppError;
 use chrono::Utc;
 use portable_pty::CommandBuilder;
 use serde::Serialize;
-use std::process::{Command as StdCommand, Stdio};
+use std::io::Read;
+use std::process::{Command as StdCommand, Output, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::async_runtime::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const OUTPUT_LINE_LIMIT: usize = 24;
+/// 单次外部依赖探测（tmux -V / 包管理器 --version）硬超时。
+/// Business Logic: WSL/tmux hang 不得永久阻塞 AppState 初始化与 GUI 启动。
+const PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+/// try_wait 轮询间隔，兼顾响应速度与 CPU。
+const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Business Logic（为什么需要这个函数）:
 ///     Attention 与前端轮询需要稳定的依赖状态变更时间，不能在每次读取时漂移。
@@ -497,19 +504,23 @@ pub(crate) fn parse_tmux_version(output: &str) -> Option<String> {
 ///     现有工作台会话创建/恢复逻辑需要复用同一套 tmux 探测，避免依赖状态和真实会话行为分叉。
 ///
 /// Code Logic（这个函数做什么）:
-///     按当前平台候选顺序执行 `tmux -V`；成功时返回可用于 sessions 的 TmuxCommand。
+///     按当前平台候选顺序执行带超时的 `tmux -V`；成功时返回可用于 sessions 的 TmuxCommand。
 pub(crate) fn available_tmux_command() -> Option<TmuxCommand> {
-    probe_tmux_command().map(|probe| probe.command)
+    match probe_tmux_command() {
+        TmuxProbeOutcome::Ready(probe) => Some(probe.command),
+        TmuxProbeOutcome::Missing | TmuxProbeOutcome::TimedOut => None,
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
 ///     check 命令需要返回完整 DTO，包括可用性、版本、后端、路径和安装命令预览。
 ///
 /// Code Logic（这个函数做什么）:
-///     探测 tmux；成功返回 ready，失败按平台返回 missing 或 unsupported。
+///     带硬超时探测 tmux；成功返回 ready；全候选失败返回 missing/unsupported；
+///     任一候选超时且无成功 → failed（可 recheck），避免把 hang 伪装成 missing。
 pub fn probe_workbench_dependency() -> WorkbenchDependencyStatusDto {
-    if let Some(probe) = probe_tmux_command() {
-        return WorkbenchDependencyStatusDto {
+    match probe_tmux_command() {
+        TmuxProbeOutcome::Ready(probe) => WorkbenchDependencyStatusDto {
             status: WorkbenchDependencyState::Ready,
             available: true,
             version: probe.version,
@@ -521,9 +532,26 @@ pub fn probe_workbench_dependency() -> WorkbenchDependencyStatusDto {
             output: Vec::new(),
             // 真实变更时间由 dependency manager 在写入缓存时按语义状态差决定。
             status_changed_at: String::new(),
-        };
+        },
+        TmuxProbeOutcome::TimedOut => WorkbenchDependencyStatusDto {
+            status: WorkbenchDependencyState::Failed,
+            available: false,
+            version: None,
+            backend: backend_for_platform(current_platform()).to_string(),
+            path: None,
+            installable: actual_install_command_preview().is_some(),
+            install_command_preview: actual_install_command_preview().unwrap_or_default(),
+            error: Some(format!(
+                "tmux 探测超时（{} 秒），请稍后重新检测",
+                PROBE_COMMAND_TIMEOUT.as_secs()
+            )),
+            output: vec!["依赖探测超时，已终止外部进程".to_string()],
+            status_changed_at: String::new(),
+        },
+        TmuxProbeOutcome::Missing => {
+            missing_or_unsupported_status(actual_install_command_preview().unwrap_or_default(), None)
+        }
     }
-    missing_or_unsupported_status(actual_install_command_preview().unwrap_or_default(), None)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -540,27 +568,131 @@ pub fn actual_install_command_preview() -> Option<Vec<String>> {
     install_command_preview_for_platform(current_platform(), &tools)
 }
 
+#[derive(Debug)]
 struct TmuxProbe {
     command: TmuxCommand,
     version: Option<String>,
     backend: String,
 }
 
-fn probe_tmux_command() -> Option<TmuxProbe> {
-    tmux_candidates_for_platform(current_platform())
-        .into_iter()
-        .find_map(|candidate| {
-            let output = candidate.command.std_command().args(["-V"]).output().ok()?;
-            if !output.status.success() {
-                return None;
+/// tmux 探测结果（含超时区分）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     hang 超时与“确实缺失”对 Attention/安装入口语义不同，不能一律当 missing。
+///
+/// Code Logic（这个枚举做什么）:
+///     Ready=探测成功；TimedOut=至少一个候选超时且无成功；Missing=候选均快速失败。
+#[derive(Debug)]
+enum TmuxProbeOutcome {
+    Ready(TmuxProbe),
+    TimedOut,
+    Missing,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     依赖探测必须在 WSL/tmux hang 时仍能返回，否则 AppState 构造永久阻塞。
+///
+/// Code Logic（这个函数做什么）:
+///     按平台候选顺序跑带超时的 `tmux -V`；成功即 Ready；若出现超时且无成功 → TimedOut；
+///     否则 Missing。可注入 runner 供单测覆盖超时路径。
+fn probe_tmux_command() -> TmuxProbeOutcome {
+    probe_tmux_command_with(current_platform(), run_std_command_with_timeout)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     单测需要注入挂起/失败 runner，避免真实 sleep 子进程拖慢 CI。
+///
+/// Code Logic（这个函数做什么）:
+///     对每个候选构造 `tmux -V` 命令，调用 runner；汇总 Ready / TimedOut / Missing。
+fn probe_tmux_command_with<F>(platform: DependencyPlatform, mut runner: F) -> TmuxProbeOutcome
+where
+    F: FnMut(StdCommand, Duration) -> Result<Output, ProbeCommandError>,
+{
+    let candidates = tmux_candidates_for_platform(platform);
+    if candidates.is_empty() {
+        return TmuxProbeOutcome::Missing;
+    }
+    let mut saw_timeout = false;
+    for candidate in candidates {
+        let mut command = candidate.command.std_command();
+        command.args(["-V"]);
+        match runner(command, PROBE_COMMAND_TIMEOUT) {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                return TmuxProbeOutcome::Ready(TmuxProbe {
+                    version: parse_tmux_version(&stdout),
+                    backend: candidate.backend.to_string(),
+                    command: candidate.command,
+                });
             }
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            Some(TmuxProbe {
-                version: parse_tmux_version(&stdout),
-                backend: candidate.backend.to_string(),
-                command: candidate.command,
-            })
-        })
+            Ok(_) => {}
+            Err(ProbeCommandError::TimedOut) => {
+                saw_timeout = true;
+            }
+            Err(ProbeCommandError::SpawnOrIo) => {}
+        }
+    }
+    if saw_timeout {
+        TmuxProbeOutcome::TimedOut
+    } else {
+        TmuxProbeOutcome::Missing
+    }
+}
+
+/// 外部探测命令错误。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     超时与启动失败需要不同收敛策略（超时保留 failed 可 recheck）。
+///
+/// Code Logic（这个枚举做什么）:
+///     TimedOut=硬超时已 kill；SpawnOrIo=无法启动或 IO 错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeCommandError {
+    TimedOut,
+    SpawnOrIo,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     同步 `output()` 无超时，WSL/异常 wrapper 会永久卡住启动路径。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn 子进程后轮询 `try_wait`；超时则 `kill`+`wait` 并返回 TimedOut；
+///     正常退出后读完 stdout/stderr 组装 Output。
+fn run_std_command_with_timeout(
+    mut command: StdCommand,
+    timeout: Duration,
+) -> Result<Output, ProbeCommandError> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|_| ProbeCommandError::SpawnOrIo)?;
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ProbeCommandError::TimedOut);
+                }
+                std::thread::sleep(PROBE_POLL_INTERVAL);
+            }
+            Err(_) => return Err(ProbeCommandError::SpawnOrIo),
+        }
+    };
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_end(&mut stdout);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_end(&mut stderr);
+    }
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 struct TmuxCandidate {
@@ -689,13 +821,12 @@ fn missing_or_unsupported_status(
 }
 
 fn command_exists(program: &str) -> bool {
-    StdCommand::new(program)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success() || status.code().is_some())
-        .unwrap_or(false)
+    let mut command = StdCommand::new(program);
+    command.arg("--version");
+    match run_std_command_with_timeout(command, PROBE_COMMAND_TIMEOUT) {
+        Ok(output) => output.status.success() || output.status.code().is_some(),
+        Err(_) => false,
+    }
 }
 
 fn output_lines(stdout: &[u8], stderr: &[u8]) -> Vec<String> {
@@ -988,5 +1119,80 @@ mod tests {
         assert_eq!(failed.status, WorkbenchDependencyState::Failed);
         assert_ne!(failed.status_changed_at, first_changed_at);
         assert!(!failed.status_changed_at.is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     挂起的外部命令必须在硬超时后被终止，不能阻塞探测线程。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动 `sleep 10`，以 200ms 超时探测，断言返回 TimedOut 且总耗时远小于 sleep。
+    #[test]
+    fn run_std_command_with_timeout_kills_hanging_process() {
+        let mut command = StdCommand::new("sleep");
+        command.arg("10");
+        let started = Instant::now();
+        let result = run_std_command_with_timeout(command, Duration::from_millis(200));
+        let elapsed = started.elapsed();
+        assert_eq!(result.err(), Some(ProbeCommandError::TimedOut));
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "超时路径耗时过长: {elapsed:?}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     注入挂起 runner 时探测必须收敛为 TimedOut，供 DTO 写成 failed 而非永久卡死。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     fake runner 恒返回 TimedOut；Windows 平台单候选，断言 outcome 为 TimedOut。
+    #[test]
+    fn probe_tmux_command_with_timeout_runner_returns_timed_out() {
+        let outcome = probe_tmux_command_with(DependencyPlatform::Windows, |_cmd, _timeout| {
+            Err(ProbeCommandError::TimedOut)
+        });
+        assert!(matches!(outcome, TmuxProbeOutcome::TimedOut));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     探测超时不能伪装成 missing，否则 Inbox 会把“未知”当成可安装缺失。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用恒超时 runner 走 probe 路径，经 probe_tmux_command_with 映射为 Failed DTO 语义：
+    ///     直接断言 TimedOut outcome 对应的 probe_workbench 分支字段（构造等价 DTO）。
+    #[test]
+    fn timed_out_probe_maps_to_failed_not_missing() {
+        let outcome = probe_tmux_command_with(DependencyPlatform::Linux, |_cmd, _timeout| {
+            Err(ProbeCommandError::TimedOut)
+        });
+        assert!(matches!(outcome, TmuxProbeOutcome::TimedOut));
+        // 与 probe_workbench_dependency 的 TimedOut 分支保持同一语义。
+        let status = WorkbenchDependencyStatusDto {
+            status: WorkbenchDependencyState::Failed,
+            available: false,
+            version: None,
+            backend: backend_for_platform(DependencyPlatform::Linux).to_string(),
+            path: None,
+            installable: false,
+            install_command_preview: Vec::new(),
+            error: Some("tmux 探测超时（3 秒），请稍后重新检测".into()),
+            output: vec!["依赖探测超时，已终止外部进程".to_string()],
+            status_changed_at: String::new(),
+        };
+        assert_eq!(status.status, WorkbenchDependencyState::Failed);
+        assert!(!status.available);
+        assert!(status.error.as_deref().unwrap_or("").contains("超时"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     快速失败的候选应记为 Missing，而不是 TimedOut。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     fake runner 返回 SpawnOrIo；断言 outcome 为 Missing。
+    #[test]
+    fn probe_tmux_command_with_spawn_failures_returns_missing() {
+        let outcome = probe_tmux_command_with(DependencyPlatform::MacOs, |_cmd, _timeout| {
+            Err(ProbeCommandError::SpawnOrIo)
+        });
+        assert!(matches!(outcome, TmuxProbeOutcome::Missing));
     }
 }

@@ -29,6 +29,18 @@ import {
 export const ATTENTION_POLL_INTERVAL_MS = 10_000;
 
 /**
+ * 单次 loadSnapshot 硬超时（毫秒）。
+ *
+ * Business Logic（为什么需要这个常量）:
+ *   若 loadSnapshot 永不 settle（半开连接/挂起 invoke），single-flight 的 inFlight 会永久锁死，
+ *   后续轮询/focus/手动刷新只能 mark pending 而无法恢复。
+ *
+ * Code Logic（这个常量做什么）:
+ *   超时后 reject，finally 清除 inFlight；显式 refresh 可启动新请求。
+ */
+export const ATTENTION_LOAD_TIMEOUT_MS = 35_000;
+
+/**
  * AttentionProvider props。
  *
  * Business Logic（为什么需要这个类型）:
@@ -80,12 +92,14 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
   /**
    * Business Logic（为什么需要这个函数）:
    *   所有触发源（挂载/focus/可见/轮询/手动）必须走同一 load 路径与 stale guard；
-   *   慢聚合（远端 open-project/task-list 可达 30s）不能被 10s 轮询反复废弃。
+   *   慢聚合（远端 open-project/task-list 可达 30s）不能被 10s 轮询反复废弃；
+   *   永久挂起的 loader 必须能超时释放 single-flight，否则 Inbox 永久停在 loading。
    *
    * Code Logic（这个函数做什么）:
    *   force=false（轮询）：若已 in-flight，只 mark pending 并返回；
    *   force=true（挂载/focus/可见/手动/invalidation）：可递增 requestId 使旧响应失效，
    *   但若已 in-flight 仍 coalesce，完成后只再跑一次；
+   *   loadSnapshot 包一层 ATTENTION_LOAD_TIMEOUT_MS 超时 Promise.race，超时 reject 并在 finally 清 inFlight；
    *   用 while 循环消化 pending，避免回调自引用破坏 React Compiler memoization。
    */
   const runLoad = useCallback(async (options?: { force?: boolean }) => {
@@ -116,7 +130,7 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
       );
 
       try {
-        const snapshot = await loadSnapshotRef.current();
+        const snapshot = await withAttentionLoadTimeout(loadSnapshotRef.current());
         if (mountedRef.current && isCurrentAttentionRequest(requestId, requestIdRef.current)) {
           const receivedAt = new Date().toISOString();
           setState((current) =>
@@ -253,6 +267,43 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
   );
 
   return <AttentionContext.Provider value={value}>{children}</AttentionContext.Provider>;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   loadSnapshot 可能永不 settle（半开 HTTP / 挂起 IPC），必须用硬超时保证 single-flight 可释放。
+ *
+ * Code Logic（这个函数做什么）:
+ *   Promise.race 包装 loader 与 setTimeout reject；超时后抛 Error，不取消底层 Promise
+ *   （浏览器 fetch 取消需 AbortSignal，见 attentionHttp；此处至少释放 inFlight）。
+ */
+function withAttentionLoadTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number = ATTENTION_LOAD_TIMEOUT_MS,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`Attention 加载超时（${timeoutMs}ms）`));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (reason: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(reason);
+      },
+    );
+  });
 }
 
 // 再导出读取 hook，便于页面 `import { useAttention, AttentionProvider } from '@/hooks/useAttention'`。
