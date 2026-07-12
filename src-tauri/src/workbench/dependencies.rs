@@ -1349,12 +1349,192 @@ fn missing_or_unsupported_status(
     }
 }
 
-fn command_exists(program: &str) -> bool {
+/// 带硬超时探测 PATH 中的命令是否可执行（非安装、不改 PATH）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     doctor 与 install 预览需要同一套有界探测，避免 WSL/坏 PATH 导致 hang。
+///
+/// Code Logic（这个函数做什么）:
+///     对 program 跑 `--version`，超时或 spawn 失败视为不可用；有 exit code 即视为找到可执行文件。
+pub(crate) fn command_exists(program: &str) -> bool {
     let mut command = StdCommand::new(program);
     command.arg("--version");
     match run_std_command_with_timeout(command, PROBE_COMMAND_TIMEOUT) {
         Ok(output) => output.status.success() || output.status.code().is_some(),
         Err(_) => false,
+    }
+}
+
+/// 可选依赖探测结果（非 mutating）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     doctor 需要把 Git/tmux/WSL/Claude CLI 的存在性映射为 ok/warning/info，
+///     且平台不适用时不得伪装成缺失警告。
+///
+/// Code Logic（这个结构做什么）:
+///     available=探测到可用命令；applicable=当前平台相关；version 可选；detail 供 summary。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionalDependencyProbe {
+    pub available: bool,
+    pub applicable: bool,
+    pub version: Option<String>,
+    pub detail: String,
+}
+
+/// 非 mutating 探测系统 git（仅 location/version，不改配置）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     doctor 可选依赖块需要 Git 可用性；探测不得 clone/commit/改 identity。
+///
+/// Code Logic（这个函数做什么）:
+///     带 3s 超时执行 `git --version`；成功解析版本字符串，失败标记 unavailable。
+pub fn probe_git_non_mutating() -> OptionalDependencyProbe {
+    let mut command = StdCommand::new("git");
+    command.arg("--version");
+    match run_std_command_with_timeout(command, PROBE_COMMAND_TIMEOUT) {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .to_string();
+            OptionalDependencyProbe {
+                available: true,
+                applicable: true,
+                version: if version.is_empty() {
+                    None
+                } else {
+                    Some(version)
+                },
+                detail: "git is available".to_string(),
+            }
+        }
+        _ => OptionalDependencyProbe {
+            available: false,
+            applicable: true,
+            version: None,
+            detail: "git is missing or not runnable".to_string(),
+        },
+    }
+}
+
+/// 非 mutating 探测 tmux（复用 workbench 探测，不安装）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     doctor 与 Workbench dependency 必须共享同一 tmux 探测口径，避免分叉。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 `probe_tmux_command`：Ready→available；TimedOut/Missing→unavailable。
+pub fn probe_tmux_non_mutating() -> OptionalDependencyProbe {
+    match probe_tmux_command() {
+        TmuxProbeOutcome::Ready(probe) => OptionalDependencyProbe {
+            available: true,
+            applicable: true,
+            version: probe.version,
+            detail: "tmux is available".to_string(),
+        },
+        TmuxProbeOutcome::TimedOut => OptionalDependencyProbe {
+            available: false,
+            applicable: true,
+            version: None,
+            detail: "tmux probe timed out".to_string(),
+        },
+        TmuxProbeOutcome::Missing => OptionalDependencyProbe {
+            available: false,
+            applicable: true,
+            version: None,
+            detail: "tmux is missing".to_string(),
+        },
+    }
+}
+
+/// 非 mutating 探测 WSL（仅 Windows 相关；其它平台 not applicable）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Windows 上 WSL 是 tmux 宿主；非 Windows 平台报告 info 而非 warning。
+///
+/// Code Logic（这个函数做什么）:
+///     非 Windows → applicable=false；Windows 上 `wsl.exe --status` 或 `--version` 有界探测。
+pub fn probe_wsl_non_mutating() -> OptionalDependencyProbe {
+    if current_platform() != DependencyPlatform::Windows {
+        return OptionalDependencyProbe {
+            available: false,
+            applicable: false,
+            version: None,
+            detail: "WSL is not applicable on this platform".to_string(),
+        };
+    }
+    // 仅探测 wsl.exe 是否存在且能返回版本/状态，绝不 start 发行版或改配置。
+    let mut command = StdCommand::new("wsl.exe");
+    command.arg("--status");
+    match run_std_command_with_timeout(command, PROBE_COMMAND_TIMEOUT) {
+        Ok(output) if output.status.success() || output.status.code().is_some() => {
+            OptionalDependencyProbe {
+                available: true,
+                applicable: true,
+                version: None,
+                detail: "WSL is available".to_string(),
+            }
+        }
+        _ => {
+            // --status 在部分发行版不可用时回退 --version
+            let mut fallback = StdCommand::new("wsl.exe");
+            fallback.arg("--version");
+            match run_std_command_with_timeout(fallback, PROBE_COMMAND_TIMEOUT) {
+                Ok(output) if output.status.success() || output.status.code().is_some() => {
+                    OptionalDependencyProbe {
+                        available: true,
+                        applicable: true,
+                        version: None,
+                        detail: "WSL is available".to_string(),
+                    }
+                }
+                _ => OptionalDependencyProbe {
+                    available: false,
+                    applicable: true,
+                    version: None,
+                    detail: "WSL is missing".to_string(),
+                },
+            }
+        }
+    }
+}
+
+/// 非 mutating 探测 Claude CLI（仅 --version，不跑用户配置/会话）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     doctor 需要知道 Claude Code CLI 是否可调用；不得触发 headless 任务或读凭据。
+///
+/// Code Logic（这个函数做什么）:
+///     对 cli_path（空则 `claude`）带 3s 超时执行 `--version`。
+pub fn probe_claude_cli_non_mutating(cli_path: &str) -> OptionalDependencyProbe {
+    let program = if cli_path.trim().is_empty() {
+        "claude"
+    } else {
+        cli_path.trim()
+    };
+    let mut command = StdCommand::new(program);
+    command.arg("--version");
+    match run_std_command_with_timeout(command, PROBE_COMMAND_TIMEOUT) {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .to_string();
+            OptionalDependencyProbe {
+                available: true,
+                applicable: true,
+                version: if version.is_empty() {
+                    None
+                } else {
+                    Some(version)
+                },
+                detail: "claude CLI is available".to_string(),
+            }
+        }
+        _ => OptionalDependencyProbe {
+            available: false,
+            applicable: true,
+            version: None,
+            detail: "claude CLI is missing or not runnable".to_string(),
+        },
     }
 }
 

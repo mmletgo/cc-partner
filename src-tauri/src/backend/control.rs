@@ -558,10 +558,11 @@ async fn health_ok(control: &BackendControlFile) -> bool {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     stale 控制文件的常见形态是 pid 已退出；status/start/stop 都需要先识别这种残留。
+///     doctor 在区分“可恢复 stale”与“端口被占/进程存活但不可达”时也需要同一口径。
 ///
 /// Code Logic（这个函数做什么）:
 ///     委托平台相关实现查询进程存在性；pid 为 0 直接视为无效。
-fn process_is_alive(pid: u32) -> bool {
+pub(crate) fn process_is_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
