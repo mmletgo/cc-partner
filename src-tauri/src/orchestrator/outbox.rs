@@ -26,10 +26,12 @@ const REMOTE_OUTBOX_SENDING_LEASE_SECS: u64 = 300;
 /// 远端任务投递 outbox 状态。
 ///
 /// Business Logic（为什么需要这个枚举）:
-///     离线创建的远端任务需要清楚区分等待发送、发送中、已镜像和不可重试失败，供后台 dispatcher 与 UI 判断。
+///     离线创建的远端任务需要清楚区分等待发送、发送中、已镜像、不可自动重试失败，以及用户主动放弃后的终态，
+///     供后台 dispatcher、Automation UI 的 Retry/Discard 与后续 Attention 投影判断。
 ///
 /// Code Logic（这个枚举做什么）:
-///     提供 SQLite 小写存储值与 Rust enum 的互转，未知值视为数据损坏并返回业务错误。
+///     提供 SQLite 小写存储值与 Rust enum 的互转；`discarded` 复用现有 status 文本列，无额外迁移；
+///     未知值视为数据损坏并返回业务错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RemoteOutboxStatus {
@@ -37,11 +39,12 @@ pub enum RemoteOutboxStatus {
     Sending,
     Mirrored,
     Failed,
+    Discarded,
 }
 
 impl RemoteOutboxStatus {
     /// Business Logic（为什么需要这个函数）:
-    ///     SQLite outbox 表保存稳定小写状态，便于人工排查 pending/sending 队列。
+    ///     SQLite outbox 表保存稳定小写状态，便于人工排查 pending/sending 队列与 discarded 审计。
     ///
     /// Code Logic（这个函数做什么）:
     ///     将 enum 映射为数据库字符串。
@@ -51,6 +54,7 @@ impl RemoteOutboxStatus {
             Self::Sending => "sending",
             Self::Mirrored => "mirrored",
             Self::Failed => "failed",
+            Self::Discarded => "discarded",
         }
     }
 
@@ -65,6 +69,7 @@ impl RemoteOutboxStatus {
             "sending" => Ok(Self::Sending),
             "mirrored" => Ok(Self::Mirrored),
             "failed" => Ok(Self::Failed),
+            "discarded" => Ok(Self::Discarded),
             other => Err(AppError::generic(format!(
                 "未知 Orchestrator 远端 outbox 状态: {other}"
             ))),
