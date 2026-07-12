@@ -40,7 +40,7 @@ use crate::commands::workbench::{
 use crate::error::AppError;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
-use crate::net::routes::{api_error_to_p2p, ApiError};
+use crate::net::routes::api_error_to_p2p;
 use crate::state::AppState;
 use crate::workbench::browser_models::{
     WorkbenchBrowserDiscoverReq, WorkbenchBrowserDiscovery, WorkbenchBrowserPreview,
@@ -1113,11 +1113,13 @@ pub async fn stream_prompt_optimizer_to_session(
 ///     接收 projectId/worktreeId，委托 commands 层 remote-aware discover helper。
 pub async fn mobile_discover_browser_targets(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<WorkbenchBrowserDiscoverReq>,
-) -> Result<Json<WorkbenchBrowserDiscovery>, ApiError> {
+) -> P2pResult<Json<WorkbenchBrowserDiscovery>> {
     let discovery =
         discover_workbench_browser_targets_for_state(&state, req.project_id, req.worktree_id)
-            .await?;
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.browser.discover"))?;
     Ok(Json(discovery))
 }
 
@@ -1130,15 +1132,17 @@ pub async fn mobile_discover_browser_targets(
 ///     接收 project/worktree/targetUrl，委托 commands 层 remote-aware preview helper。
 pub async fn mobile_create_browser_preview(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<WorkbenchBrowserPreviewReq>,
-) -> Result<Json<WorkbenchBrowserPreview>, ApiError> {
+) -> P2pResult<Json<WorkbenchBrowserPreview>> {
     let preview = create_workbench_browser_preview_for_state(
         &state,
         req.project_id,
         req.worktree_id,
         req.target_url,
     )
-    .await?;
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.browser.preview"))?;
     Ok(Json(preview))
 }
 
@@ -1151,9 +1155,10 @@ pub async fn mobile_create_browser_preview(
 ///     从 mobile proxy path 提取 previewId 和 wildcard path，复用 browser_proxy 转发逻辑。
 pub async fn mobile_proxy_browser_preview(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     AxumPath((preview_id, path)): AxumPath<(String, String)>,
     req: Request<Body>,
-) -> Result<Response, ApiError> {
+) -> Result<Response, P2pError> {
     proxy_workbench_browser_request(
         state,
         preview_id,
@@ -1162,6 +1167,7 @@ pub async fn mobile_proxy_browser_preview(
         MOBILE_BROWSER_PROXY_ROUTE_PREFIX,
     )
     .await
+    .map_err(|e| api_error_to_p2p(e, &ctx))
 }
 
 /// 列出手机端可管理的 Workbench 项目。
@@ -1173,8 +1179,13 @@ pub async fn mobile_proxy_browser_preview(
 ///     读取本机 Workbench 项目仓库并直接返回 DTO；远端快捷方式保持 remote kind。
 pub async fn mobile_list_projects(
     State(state): State<AppState>,
-) -> Result<Json<Vec<WorkbenchProjectDto>>, AppError> {
-    let rows = state.workbench_project_repo.list().await?;
+    Extension(ctx): Extension<P2pRequestContext>,
+) -> P2pResult<Json<Vec<WorkbenchProjectDto>>> {
+    let rows = state
+        .workbench_project_repo
+        .list()
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.projects.list"))?;
     Ok(Json(rows.iter().map(WorkbenchProjectRow::to_dto).collect()))
 }
 
@@ -1187,12 +1198,15 @@ pub async fn mobile_list_projects(
 ///     校验 path 非空后复用本机 add-project helper，返回项目 DTO。
 pub async fn mobile_open_project(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemotePathReq>,
-) -> Result<Json<WorkbenchProjectDto>, AppError> {
-    let path = validate_remote_path(req.path)?;
-    Ok(Json(
-        add_local_workbench_project_from_path(&state, path).await?,
-    ))
+) -> P2pResult<Json<WorkbenchProjectDto>> {
+    let path = validate_remote_path(req.path)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.projects.open"))?;
+    let project = add_local_workbench_project_from_path(&state, path)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.projects.open"))?;
+    Ok(Json(project))
 }
 
 /// 手机端列出本机或远端项目的 worktree。
@@ -1204,11 +1218,13 @@ pub async fn mobile_open_project(
 ///     接收本机 projectId 或 remote shortcut projectId，委托 commands 层 remote-aware helper。
 pub async fn mobile_list_worktrees(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteProjectReq>,
-) -> Result<Json<Vec<WorkbenchWorktreeDto>>, AppError> {
-    Ok(Json(
-        list_workbench_worktrees_for_state(&state, req.project_id).await?,
-    ))
+) -> P2pResult<Json<Vec<WorkbenchWorktreeDto>>> {
+    let worktrees = list_workbench_worktrees_for_state(&state, req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.list"))?;
+    Ok(Json(worktrees))
 }
 
 /// 手机端创建本机或远端项目 worktree。
@@ -1220,17 +1236,18 @@ pub async fn mobile_list_worktrees(
 ///     接收 projectId/branchName/baseBranch，委托 commands 层 remote-aware helper。
 pub async fn mobile_create_worktree(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCreateWorktreeReq>,
-) -> Result<Json<WorkbenchWorktreeDto>, AppError> {
-    Ok(Json(
-        create_workbench_worktree_for_state(
-            &state,
-            req.project_id,
-            req.branch_name,
-            req.base_branch,
-        )
-        .await?,
-    ))
+) -> P2pResult<Json<WorkbenchWorktreeDto>> {
+    let worktree = create_workbench_worktree_for_state(
+        &state,
+        req.project_id,
+        req.branch_name,
+        req.base_branch,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.create"))?;
+    Ok(Json(worktree))
 }
 
 /// 手机端提交本机或远端 worktree。
@@ -1242,11 +1259,13 @@ pub async fn mobile_create_worktree(
 ///     接收 worktreeId 和可选 message，委托 commands 层按 local/remote 目标执行。
 pub async fn mobile_commit_worktree(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCommitWorktreeReq>,
-) -> Result<Json<WorkbenchWorktreeDto>, AppError> {
-    Ok(Json(
-        commit_workbench_worktree_for_state(&state, req.worktree_id, req.message).await?,
-    ))
+) -> P2pResult<Json<WorkbenchWorktreeDto>> {
+    let worktree = commit_workbench_worktree_for_state(&state, req.worktree_id, req.message)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.commit"))?;
+    Ok(Json(worktree))
 }
 
 /// 手机端推送本机或远端 worktree。
@@ -1258,11 +1277,13 @@ pub async fn mobile_commit_worktree(
 ///     接收 worktreeId，委托 commands 层 remote-aware push helper。
 pub async fn mobile_push_worktree(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteWorktreeReq>,
-) -> Result<Json<WorkbenchWorktreeDto>, AppError> {
-    Ok(Json(
-        push_workbench_worktree_for_state(&state, req.worktree_id).await?,
-    ))
+) -> P2pResult<Json<WorkbenchWorktreeDto>> {
+    let worktree = push_workbench_worktree_for_state(&state, req.worktree_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.push"))?;
+    Ok(Json(worktree))
 }
 
 /// 手机端合并本机或远端 worktree。
@@ -1274,11 +1295,13 @@ pub async fn mobile_push_worktree(
 ///     接收 worktreeId，委托 commands 层 remote-aware merge helper。
 pub async fn mobile_merge_worktree(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteWorktreeReq>,
-) -> Result<Json<WorkbenchMergeResultDto>, AppError> {
-    Ok(Json(
-        merge_workbench_worktree_for_state(&state, req.worktree_id).await?,
-    ))
+) -> P2pResult<Json<WorkbenchMergeResultDto>> {
+    let result = merge_workbench_worktree_for_state(&state, req.worktree_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.merge"))?;
+    Ok(Json(result))
 }
 
 /// 手机端删除本机或远端 worktree。
@@ -1290,11 +1313,13 @@ pub async fn mobile_merge_worktree(
 ///     接收 worktreeId/force，委托 commands 层 remote-aware remove helper。
 pub async fn mobile_remove_worktree(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteRemoveWorktreeReq>,
-) -> Result<Json<Value>, AppError> {
-    Ok(Json(
-        remove_workbench_worktree_for_state(&state, req.worktree_id, req.force).await?,
-    ))
+) -> P2pResult<Json<Value>> {
+    let value = remove_workbench_worktree_for_state(&state, req.worktree_id, req.force)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.remove"))?;
+    Ok(Json(value))
 }
 
 /// 手机端列出本机或远端项目提交历史。
@@ -1306,17 +1331,18 @@ pub async fn mobile_remove_worktree(
 ///     接收 projectId/worktreeId/limit，委托 commands 层 remote-aware Git helper。
 pub async fn mobile_list_git_commits(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteGitCommitsReq>,
-) -> Result<Json<Vec<WorkbenchGitCommitDto>>, AppError> {
-    Ok(Json(
-        list_workbench_git_commits_for_state(
-            &state,
-            req.project_id,
-            req.worktree_id,
-            Some(req.limit.clamp(1, 100) as usize),
-        )
-        .await?,
-    ))
+) -> P2pResult<Json<Vec<WorkbenchGitCommitDto>>> {
+    let commits = list_workbench_git_commits_for_state(
+        &state,
+        req.project_id,
+        req.worktree_id,
+        Some(req.limit.clamp(1, 100) as usize),
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.git.commits"))?;
+    Ok(Json(commits))
 }
 
 /// 手机端列出本机或远端项目目录。
@@ -1328,11 +1354,13 @@ pub async fn mobile_list_git_commits(
 ///     接收 projectId/worktreeId/path，委托 commands 层 remote-aware 文件树 helper。
 pub async fn mobile_list_workbench_dir(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteListDirReq>,
-) -> Result<Json<Vec<WorkbenchFileNode>>, AppError> {
-    Ok(Json(
-        list_workbench_dir_for_state(&state, req.project_id, req.worktree_id, req.path).await?,
-    ))
+) -> P2pResult<Json<Vec<WorkbenchFileNode>>> {
+    let entries = list_workbench_dir_for_state(&state, req.project_id, req.worktree_id, req.path)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.files.list_dir"))?;
+    Ok(Json(entries))
 }
 
 /// 手机端读取本机或远端项目路径信息。
@@ -1344,12 +1372,13 @@ pub async fn mobile_list_workbench_dir(
 ///     接收 projectId/worktreeId/path，委托 commands 层 remote-aware path info helper。
 pub async fn mobile_workbench_path_info(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemotePathInfoReq>,
-) -> Result<Json<WorkbenchPathInfo>, AppError> {
-    Ok(Json(
-        get_workbench_path_info_for_state(&state, req.project_id, req.worktree_id, req.path)
-            .await?,
-    ))
+) -> P2pResult<Json<WorkbenchPathInfo>> {
+    let info = get_workbench_path_info_for_state(&state, req.project_id, req.worktree_id, req.path)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.files.info"))?;
+    Ok(Json(info))
 }
 
 /// 手机端打开本机或远端项目文件。
@@ -1361,11 +1390,13 @@ pub async fn mobile_workbench_path_info(
 ///     接收 projectId/worktreeId/path，委托 commands 层 remote-aware open file helper。
 pub async fn mobile_open_workbench_file(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteOpenFileReq>,
-) -> Result<Json<WorkbenchOpenFileDto>, AppError> {
-    Ok(Json(
-        open_workbench_file_for_state(&state, req.project_id, req.worktree_id, req.path).await?,
-    ))
+) -> P2pResult<Json<WorkbenchOpenFileDto>> {
+    let file = open_workbench_file_for_state(&state, req.project_id, req.worktree_id, req.path)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.files.open"))?;
+    Ok(Json(file))
 }
 
 /// 手机端保存本机或远端项目文本文件。
@@ -1377,19 +1408,20 @@ pub async fn mobile_open_workbench_file(
 ///     接收保存请求，委托 commands 层 remote-aware save-text helper。
 pub async fn mobile_save_workbench_text_file(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSaveTextReq>,
-) -> Result<Json<WorkbenchSaveTextResultDto>, AppError> {
-    Ok(Json(
-        save_workbench_text_file_for_state(
-            &state,
-            req.project_id,
-            req.worktree_id,
-            req.path,
-            req.content,
-            req.base_hash,
-        )
-        .await?,
-    ))
+) -> P2pResult<Json<WorkbenchSaveTextResultDto>> {
+    let result = save_workbench_text_file_for_state(
+        &state,
+        req.project_id,
+        req.worktree_id,
+        req.path,
+        req.content,
+        req.base_hash,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.files.save_text"))?;
+    Ok(Json(result))
 }
 
 /// 手机端列出本机或远端项目 terminal window。
@@ -1401,11 +1433,13 @@ pub async fn mobile_save_workbench_text_file(
 ///     接收可选 projectId，委托 commands 层 remote-aware session list helper。
 pub async fn mobile_list_workbench_sessions(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteListSessionsReq>,
-) -> Result<Json<Vec<WorkbenchSessionDto>>, AppError> {
-    Ok(Json(
-        list_workbench_sessions_for_state(&state, req.project_id).await?,
-    ))
+) -> P2pResult<Json<Vec<WorkbenchSessionDto>>> {
+    let sessions = list_workbench_sessions_for_state(&state, req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.list"))?;
+    Ok(Json(sessions))
 }
 
 /// 手机端创建本机或远端 terminal window。
@@ -1417,18 +1451,19 @@ pub async fn mobile_list_workbench_sessions(
 ///     接收 projectId/worktreeId/初始尺寸，委托 commands 层 remote-aware create session helper。
 pub async fn mobile_create_workbench_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCreateSessionReq>,
-) -> Result<Json<WorkbenchSessionDto>, AppError> {
-    Ok(Json(
-        create_workbench_session_for_state(
-            &state,
-            req.project_id,
-            req.worktree_id,
-            req.initial_cols,
-            req.initial_rows,
-        )
-        .await?,
-    ))
+) -> P2pResult<Json<WorkbenchSessionDto>> {
+    let session = create_workbench_session_for_state(
+        &state,
+        req.project_id,
+        req.worktree_id,
+        req.initial_cols,
+        req.initial_rows,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.create"))?;
+    Ok(Json(session))
 }
 
 /// 手机端 replay 本机或远端 terminal 输出。
@@ -1440,11 +1475,13 @@ pub async fn mobile_create_workbench_session(
 ///     接收 sessionId，委托 commands 层 remote-aware replay helper 并返回映射后的 sessionId。
 pub async fn mobile_replay_workbench_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteReplaySessionReq>,
-) -> Result<Json<WorkbenchSessionReplayDto>, AppError> {
-    Ok(Json(
-        replay_workbench_session_for_state(&state, req.session_id).await?,
-    ))
+) -> P2pResult<Json<WorkbenchSessionReplayDto>> {
+    let replay = replay_workbench_session_for_state(&state, req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.replay"))?;
+    Ok(Json(replay))
 }
 
 /// 手机端写入本机或远端 terminal 输入。
@@ -1456,11 +1493,13 @@ pub async fn mobile_replay_workbench_session(
 ///     接收 sessionId/data，委托 commands 层 remote-aware write helper。
 pub async fn mobile_write_workbench_session_input(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteWriteSessionInputReq>,
-) -> Result<Json<Value>, AppError> {
-    Ok(Json(
-        write_workbench_session_input_for_state(&state, req.session_id, req.data).await?,
-    ))
+) -> P2pResult<Json<Value>> {
+    let value = write_workbench_session_input_for_state(&state, req.session_id, req.data)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.write"))?;
+    Ok(Json(value))
 }
 
 /// 手机端调整本机或远端 terminal 尺寸。
@@ -1472,11 +1511,14 @@ pub async fn mobile_write_workbench_session_input(
 ///     接收 sessionId/cols/rows，委托 commands 层 remote-aware resize helper。
 pub async fn mobile_resize_workbench_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteResizeSessionReq>,
-) -> Result<Json<Value>, AppError> {
-    Ok(Json(
-        resize_workbench_session_for_state(&state, req.session_id, req.cols, req.rows).await?,
-    ))
+) -> P2pResult<Json<Value>> {
+    let value =
+        resize_workbench_session_for_state(&state, req.session_id, req.cols, req.rows)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.resize"))?;
+    Ok(Json(value))
 }
 
 /// 手机端聚焦本机或远端 terminal window。
@@ -1488,11 +1530,13 @@ pub async fn mobile_resize_workbench_session(
 ///     接收 sessionId，委托 commands 层 remote-aware focus helper。
 pub async fn mobile_focus_workbench_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSessionReq>,
-) -> Result<Json<Value>, AppError> {
-    Ok(Json(
-        focus_workbench_session_for_state(&state, req.session_id).await?,
-    ))
+) -> P2pResult<Json<Value>> {
+    let value = focus_workbench_session_for_state(&state, req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.focus"))?;
+    Ok(Json(value))
 }
 
 /// 手机端查询本机或远端当前聚焦 terminal。
@@ -1504,11 +1548,14 @@ pub async fn mobile_focus_workbench_session(
 ///     接收 projectId/worktreeId，委托 commands 层 remote-aware focused helper。
 pub async fn mobile_focused_workbench_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteFocusedSessionReq>,
-) -> Result<Json<Value>, AppError> {
-    Ok(Json(
-        get_focused_workbench_session_for_state(&state, req.project_id, req.worktree_id).await?,
-    ))
+) -> P2pResult<Json<Value>> {
+    let value =
+        get_focused_workbench_session_for_state(&state, req.project_id, req.worktree_id)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.focused"))?;
+    Ok(Json(value))
 }
 
 /// 手机端新增本机或远端 terminal pane。
@@ -1520,11 +1567,13 @@ pub async fn mobile_focused_workbench_session(
 ///     接收 sessionId/direction，委托 commands 层 remote-aware split-pane helper。
 pub async fn mobile_split_workbench_pane(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSplitPaneReq>,
-) -> Result<Json<Value>, AppError> {
-    Ok(Json(
-        split_workbench_pane_for_state(&state, req.session_id, req.direction).await?,
-    ))
+) -> P2pResult<Json<Value>> {
+    let value = split_workbench_pane_for_state(&state, req.session_id, req.direction)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.split_pane"))?;
+    Ok(Json(value))
 }
 
 /// 手机端切换本机或远端 terminal pane。
@@ -1536,11 +1585,13 @@ pub async fn mobile_split_workbench_pane(
 ///     接收 sessionId，委托 commands 层 remote-aware switch-pane helper。
 pub async fn mobile_switch_workbench_pane(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSessionReq>,
-) -> Result<Json<Value>, AppError> {
-    Ok(Json(
-        switch_workbench_pane_for_state(&state, req.session_id).await?,
-    ))
+) -> P2pResult<Json<Value>> {
+    let value = switch_workbench_pane_for_state(&state, req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.switch_pane"))?;
+    Ok(Json(value))
 }
 
 /// 手机端确保本机或远端 terminal pane zoom。
@@ -1552,11 +1603,13 @@ pub async fn mobile_switch_workbench_pane(
 ///     接收 sessionId，委托 commands 层 remote-aware zoom-pane helper。
 pub async fn mobile_zoom_workbench_pane(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSessionReq>,
-) -> Result<Json<Value>, AppError> {
-    Ok(Json(
-        zoom_workbench_pane_for_state(&state, req.session_id).await?,
-    ))
+) -> P2pResult<Json<Value>> {
+    let value = zoom_workbench_pane_for_state(&state, req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.zoom_pane"))?;
+    Ok(Json(value))
 }
 
 /// 手机端关闭本机或远端 terminal pane。
@@ -1568,11 +1621,13 @@ pub async fn mobile_zoom_workbench_pane(
 ///     接收 sessionId，委托 commands 层 remote-aware close-pane helper。
 pub async fn mobile_close_workbench_pane(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSessionReq>,
-) -> Result<Json<Value>, AppError> {
-    Ok(Json(
-        close_workbench_pane_for_state(&state, req.session_id).await?,
-    ))
+) -> P2pResult<Json<Value>> {
+    let value = close_workbench_pane_for_state(&state, req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.close_pane"))?;
+    Ok(Json(value))
 }
 
 /// 手机端关闭本机或远端 terminal window。
@@ -1584,11 +1639,13 @@ pub async fn mobile_close_workbench_pane(
 ///     接收 sessionId，委托 commands 层 remote-aware close session helper。
 pub async fn mobile_close_workbench_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSessionReq>,
-) -> Result<Json<Value>, AppError> {
-    Ok(Json(
-        close_workbench_session_for_state(&state, req.session_id).await?,
-    ))
+) -> P2pResult<Json<Value>> {
+    let value = close_workbench_session_for_state(&state, req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.close"))?;
+    Ok(Json(value))
 }
 
 /// 手机端把 Prompt 优化后写入本机或远端 terminal。
@@ -1600,9 +1657,10 @@ pub async fn mobile_close_workbench_session(
 ///     接收 prompt/workingDirectory/targetLanguage/sessionId，委托 commands 层 remote-aware prompt helper。
 pub async fn mobile_stream_prompt_optimizer_to_session(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemotePromptOptimizerReq>,
-) -> Result<Json<Value>, AppError> {
-    Ok(Json(
+) -> P2pResult<Json<Value>> {
+    let value =
         stream_optimize_prompt_to_workbench_session_for_state(
             &state,
             req.prompt,
@@ -1610,8 +1668,9 @@ pub async fn mobile_stream_prompt_optimizer_to_session(
             req.target_language,
             req.session_id,
         )
-        .await?,
-    ))
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.prompt_optimizer.stream"))?;
+    Ok(Json(value))
 }
 
 /// 搜索远端设备本机 worktree 内的 Claude Code 历史 session。
