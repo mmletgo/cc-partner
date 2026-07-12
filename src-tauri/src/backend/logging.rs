@@ -762,6 +762,120 @@ where
         .with_writer(make_writer)
 }
 
+/// 人类可读但仍走同一 sanitizer 的 stderr formatter。
+///
+/// Business Logic（为什么需要这个结构）:
+///     serve 子进程 stderr 需便于人工排查，同时不得比文件层更宽松地泄漏密钥/正文/家目录。
+///
+/// Code Logic（这个结构做什么）:
+///     实现 `FormatEvent`：收集白名单字段后输出单行文本，message 经 `sanitize_diagnostic_text`。
+#[derive(Debug, Default, Clone)]
+pub struct SanitizedTextFormatter;
+
+impl<S, N> FormatEvent<S, N> for SanitizedTextFormatter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    /// 将事件格式化为人类可读单行。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     stderr 与文件层共用 sanitizer，只改变排版，避免双通道隐私策略漂移。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Visit 白名单字段 → 拼接 `LEVEL domain=.. operation=.. message=..` → writeln。
+    fn format_event(
+        &self,
+        _ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let mut visitor = WhitelistFieldVisitor::default();
+        event.record(&mut visitor);
+
+        write!(
+            writer,
+            "{} ",
+            level_to_str(event.metadata().level()).to_uppercase()
+        )?;
+        if let Some(domain) = visitor.domain.as_deref() {
+            write!(writer, "domain={domain} ")?;
+        }
+        if let Some(operation) = visitor.operation.as_deref() {
+            write!(writer, "operation={operation} ")?;
+        }
+        if let Some(result) = visitor.result.as_deref() {
+            write!(writer, "result={result} ")?;
+        }
+        if let Some(request_id) = visitor.request_id.as_deref() {
+            write!(writer, "request_id={request_id} ")?;
+        }
+        if let Some(error_code) = visitor.error_code.as_deref() {
+            write!(writer, "error_code={error_code} ")?;
+        }
+        if let Some(elapsed_ms) = visitor.elapsed_ms {
+            write!(writer, "elapsed_ms={elapsed_ms} ")?;
+        }
+        if let Some(message) = visitor.message.as_deref() {
+            write!(writer, "message={message}")?;
+        } else {
+            // 无结构化 message 时，至少输出 target，避免空行；仍不回退到原始 Debug payload。
+            write!(writer, "target={}", event.metadata().target())?;
+        }
+        writeln!(writer)
+    }
+}
+
+/// 打开轮转文件 writer 并包装为 non-blocking + 生命周期守卫。
+///
+/// Business Logic（为什么需要这个函数）:
+///     serve 与生命周期测试都需要同一套“打开日志文件失败即显式失败”的入口，避免静默丢诊断。
+///
+/// Code Logic（这个函数做什么）:
+///     `RotatingLogWriter::open` → `into_non_blocking`；IO 错误映射为 `AppError`。
+pub fn open_backend_logging(
+    config: BackendLogConfig,
+) -> Result<(NonBlocking, BackendLoggingGuard), AppError> {
+    let writer = RotatingLogWriter::open(config).map_err(|error| {
+        AppError::generic(format!("无法打开后端日志文件: {error}"))
+    })?;
+    Ok(writer.into_non_blocking())
+}
+
+/// 初始化 serve 子进程双通道 tracing（stderr 文本 + 严格 JSON 文件）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     detached serve 子进程是诊断证据的唯一写入方：文件层供 doctor 读取，stderr 供前台调试；
+///     父进程 `start` 不得同时打开同一轮转文件，避免双写与轮转竞态。
+///
+/// Code Logic（这个函数做什么）:
+///     打开轮转 writer → 组装 EnvFilter + 白名单 JSON 文件 layer + 脱敏文本 stderr layer →
+///     `try_init` 设为全局默认 subscriber；返回必须持有到 serve 结束的 `BackendLoggingGuard`。
+///     日志目录/文件不可用或 subscriber 初始化失败时返回错误（启动失败，不静默降级）。
+pub fn init_backend_tracing(config: BackendLogConfig) -> Result<BackendLoggingGuard, AppError> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::EnvFilter;
+
+    let (non_blocking, guard) = open_backend_logging(config)?;
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,mdns_sd=off"));
+    let file_layer = sanitized_json_layer(non_blocking);
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .event_format(SanitizedTextFormatter)
+        .with_ansi(false)
+        .with_writer(std::io::stderr);
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(file_layer)
+        .with(stderr_layer)
+        .try_init()
+        .map_err(|error| AppError::generic(format!("初始化后端 tracing 失败: {error}")))?;
+
+    Ok(guard)
+}
+
 // ---------------------------------------------------------------------------
 // Production structured logging helpers
 // ---------------------------------------------------------------------------
@@ -1652,6 +1766,67 @@ mod tests {
         assert!(!out.contains("should-drop"), "未知字段值丢弃: {out}");
         assert!(!out.contains("password"), "未知字段名丢弃: {out}");
         assert!(!out.contains("should-drop-body"), "body 丢弃: {out}");
+    }
+
+    /// 验证 open_backend_logging + dual layer 能把结构化事件落到 backend.log。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     serve 子进程生命周期要求：emit 已知事件 → shutdown/flush → 文件可被 doctor 读取；
+    ///     该契约不能依赖真实 HTTP/mDNS，否则测试脆弱。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     在隔离 log_dir 上 open writer，用 with_default 挂 JSON 文件 layer（不抢全局 subscriber），
+    ///     emit OperationLog，drop guard flush 后断言 current 含 domain/operation/message。
+    #[test]
+    fn dual_layer_lifecycle_persists_structured_event_to_file() {
+        let (_dir, config) = test_config(BACKEND_LOG_MAX_BYTES, BACKEND_LOG_HISTORY_FILES);
+        let path = config.current_path();
+        let (non_blocking, guard) =
+            open_backend_logging(config).expect("应能打开隔离日志文件");
+        let subscriber = tracing_subscriber::registry()
+            .with(sanitized_json_layer(non_blocking));
+
+        tracing::subscriber::with_default(subscriber, || {
+            OperationLog::new("control", "serve_lifecycle_probe", OperationResult::Ok)
+                .message("lifecycle-probe-marker-p7-t3")
+                .emit();
+        });
+        drop(guard);
+
+        let body = read_string(&path);
+        assert!(
+            body.contains("lifecycle-probe-marker-p7-t3"),
+            "文件应包含已知结构化 message，实际: {body}"
+        );
+        assert!(
+            body.contains("\"domain\":\"control\"")
+                && body.contains("\"operation\":\"serve_lifecycle_probe\""),
+            "文件应为白名单 JSON，实际: {body}"
+        );
+    }
+
+    /// 验证日志路径不可用时 init/open 显式失败。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     serve 启动时若无法写诊断文件必须失败，不能静默退回“只 stderr、无证据”。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     把 log_dir 指到一个普通文件路径的父级冲突场景：log_dir 本身是已存在文件，open 应 Err。
+    #[test]
+    fn open_backend_logging_fails_when_log_dir_unavailable() {
+        let tmp = tempfile::tempdir().expect("temp");
+        let blocker = tmp.path().join("not-a-dir");
+        fs::write(&blocker, b"block").expect("write blocker file");
+        let config = BackendLogConfig {
+            log_dir: blocker,
+            max_bytes: BACKEND_LOG_MAX_BYTES,
+            history_files: BACKEND_LOG_HISTORY_FILES,
+        };
+        let err = open_backend_logging(config).expect_err("log_dir 为文件时应失败");
+        assert!(
+            err.to_string().contains("无法打开后端日志文件"),
+            "错误应明确指向日志文件打开失败，实际: {err}"
+        );
     }
 
     #[test]
