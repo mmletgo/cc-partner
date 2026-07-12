@@ -372,18 +372,18 @@ describe('AttentionProvider', () => {
     expect(total === '3' || total === '7').toBe(true);
   });
 
-  test('never-resolving loader times out and manual refresh recovers', async () => {
-    let visibility: DocumentVisibilityState = 'visible';
+  test('visible hung loader times out without poll chain; manual refresh recovers', async () => {
+    // 页面保持 visible：真实路径覆盖「10s 轮询 + 35s 超时」交互，不得靠 hidden 规避。
     Object.defineProperty(document, 'visibilityState', {
       configurable: true,
-      get: () => visibility,
+      get: () => 'visible' as DocumentVisibilityState,
     });
 
     let callCount = 0;
     const loadSnapshot = vi.fn(() => {
       callCount += 1;
+      // 首次永不 settle；手动 refresh 后恢复。
       if (callCount === 1) {
-        // 永不 settle：模拟半开连接 / 挂起 IPC。
         return new Promise<AttentionSnapshot>(() => {});
       }
       return Promise.resolve(buildSnapshot({ total: 11, generatedAt: 'recovered' }));
@@ -397,18 +397,16 @@ describe('AttentionProvider', () => {
     expect(loadSnapshot).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('loading').textContent).toBe('true');
 
-    // 隐藏页面暂停 10s 轮询，避免 pending 在超时后自动再拉一次掩盖失败态断言。
-    visibility = 'hidden';
+    // 可见轮询在 in-flight 期间只能 mark poll-pending，不得再起请求。
     await act(async () => {
-      document.dispatchEvent(new Event('visibilitychange'));
+      await vi.advanceTimersByTimeAsync(ATTENTION_POLL_INTERVAL_MS);
       await Promise.resolve();
     });
-    // 超时前不得堆第二请求。
     expect(loadSnapshot).toHaveBeenCalledTimes(1);
 
-    // 推进到硬超时：inFlight 必须释放，失败进入 loadFailed。
+    // 再推进一轮轮询 + 到硬超时：应展示错误，且不得因 poll-pending 连环第二挂起请求。
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(ATTENTION_LOAD_TIMEOUT_MS);
+      await vi.advanceTimersByTimeAsync(ATTENTION_LOAD_TIMEOUT_MS - ATTENTION_POLL_INTERVAL_MS);
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -418,10 +416,20 @@ describe('AttentionProvider', () => {
     });
     expect(screen.getByTestId('error').textContent).toMatch(/超时/);
     expect(screen.getByTestId('total').textContent).toBe('null');
-    // 挂起期间不得因轮询再起请求（hidden 已暂停 interval）。
+    // 超时后 poll-pending 必须被丢弃：并发/遗留调用保持有界（仅首次挂起 + 未因轮询再起）。
     expect(loadSnapshot).toHaveBeenCalledTimes(1);
 
-    // 手动 refresh 必须能启动新请求并恢复（证明 single-flight 已解锁）。
+    // 超时后继续推进可见轮询：自动轮询应被熔断，不得再起挂起请求。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ATTENTION_POLL_INTERVAL_MS * 3);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('error').textContent).toMatch(/超时/);
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+
+    // 手动 refresh 必须能启动新请求并恢复（证明 single-flight 已解锁且 force 可恢复）。
     await act(async () => {
       screen.getByRole('button', { name: 'refresh' }).click();
       await Promise.resolve();
@@ -433,7 +441,7 @@ describe('AttentionProvider', () => {
     });
     expect(screen.getByTestId('generatedAt').textContent).toBe('recovered');
     expect(screen.getByTestId('error').textContent).toBe('');
-    expect(loadSnapshot.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(loadSnapshot.mock.calls.length).toBe(2);
   });
 
   test('useAttention outside provider throws', () => {

@@ -8,7 +8,8 @@
  * Code Logic（这个模块做什么）:
  *   接受 loadSnapshot prop；用 attentionReducer + requestId 管理状态；
  *   注册 focus/visibility/interval 监听并在卸载时清理；
- *   in-flight load 采用 single-flight/coalescing，避免 10s 轮询饿死慢请求。
+ *   in-flight load 采用 single-flight/coalescing，避免 10s 轮询饿死慢请求；
+ *   超时后清除轮询 pending、展示错误，不因可见轮询自动连环重试挂起请求。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -55,13 +56,26 @@ export interface AttentionProviderProps {
 }
 
 /**
+ * Business Logic（为什么需要这个函数）:
+ *   超时错误需要与业务失败区分，以便清除轮询 pending 并暂停自动重试。
+ *
+ * Code Logic（这个函数做什么）:
+ *   识别 withAttentionLoadTimeout 抛出的超时 Error 文案。
+ */
+function isAttentionLoadTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.message.includes('Attention 加载超时');
+}
+
+/**
  * Business Logic（为什么需要这个组件）:
  *   全局 Inbox 需要跨导航保持 badge 与列表一致，并在焦点/可见时刷新。
  *
  * Code Logic（这个组件做什么）:
  *   维护 AttentionViewState；显式刷新可递增 requestId 使旧响应失效；
- *   定时轮询若已有 in-flight 只标记 pending，完成后最多再跑一次；
- *   可见时 setInterval 10s；hidden 暂停；focus/visibilitychange 触发 refresh。
+ *   区分轮询 pending 与显式 force pending：超时后丢弃轮询 pending 并暂停自动轮询，
+ *   仅 focus/手动/invalidation/可见恢复等 force 路径可恢复；
+ *   可见时 setInterval 10s；hidden 暂停。
  */
 export function AttentionProvider({ children, loadSnapshot }: AttentionProviderProps) {
   const [state, setState] = useState<AttentionViewState>(() => createInitialAttentionState());
@@ -71,8 +85,20 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
   const loadSnapshotRef = useRef(loadSnapshot);
   /** 是否已有 load 正在执行（single-flight 互斥）。 */
   const inFlightRef = useRef(false);
-  /** 当前 in-flight 期间是否收到过新的刷新意图（coalesce 成一次后续 load）。 */
-  const pendingRefreshRef = useRef(false);
+  /**
+   * 显式刷新意图（挂载/focus/可见/手动/invalidation）。
+   * 超时后仍可在 in-flight 结束后继续消化一次。
+   */
+  const pendingForceRefreshRef = useRef(false);
+  /**
+   * 定时轮询刷新意图。超时后必须丢弃，避免「超时→立刻再挂起」死循环。
+   */
+  const pendingPollRefreshRef = useRef(false);
+  /**
+   * 超时后暂停自动轮询，直到下一次 force 刷新（focus/手动/invalidation/可见恢复）。
+   * 避免可见页面上 10s 定时器在错误态下立即再起挂起请求。
+   */
+  const allowAutomaticPollRef = useRef(true);
 
   useEffect(() => {
     stateRef.current = state;
@@ -93,32 +119,45 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
    * Business Logic（为什么需要这个函数）:
    *   所有触发源（挂载/focus/可见/轮询/手动）必须走同一 load 路径与 stale guard；
    *   慢聚合（远端 open-project/task-list 可达 30s）不能被 10s 轮询反复废弃；
-   *   永久挂起的 loader 必须能超时释放 single-flight，否则 Inbox 永久停在 loading。
+   *   永久挂起的 loader 必须能超时释放 single-flight 并展示错误，不能靠轮询无限连环重试。
    *
    * Code Logic（这个函数做什么）:
-   *   force=false（轮询）：若已 in-flight，只 mark pending 并返回；
-   *   force=true（挂载/focus/可见/手动/invalidation）：可递增 requestId 使旧响应失效，
-   *   但若已 in-flight 仍 coalesce，完成后只再跑一次；
-   *   loadSnapshot 包一层 ATTENTION_LOAD_TIMEOUT_MS 超时 Promise.race，超时 reject 并在 finally 清 inFlight；
-   *   用 while 循环消化 pending，避免回调自引用破坏 React Compiler memoization。
+   *   force=false（轮询）：若已 in-flight 只 mark poll-pending；超时后 poll-pending 丢弃且不自动链式；
+   *   force=true（挂载/focus/可见/手动/invalidation）：可 bump requestId，in-flight 时 mark force-pending；
+   *   loadSnapshot 包 ATTENTION_LOAD_TIMEOUT_MS；超时后暂停自动轮询，仅 force 路径恢复；
+   *   while 循环只消化 force-pending，或非超时后的 poll-pending。
    */
   const runLoad = useCallback(async (options?: { force?: boolean }) => {
     let force = options?.force === true;
 
     // 可能连续消化多次 pending（每次 loop 最多一个 in-flight）。
     while (true) {
+      if (force) {
+        // force 路径重新允许自动轮询（超时熔断后的恢复入口）。
+        allowAutomaticPollRef.current = true;
+      }
+
       if (inFlightRef.current) {
-        // 已有请求：只合并一次后续刷新意图，不启动新请求（避免风暴与饥饿）。
-        pendingRefreshRef.current = true;
+        // 已有请求：区分轮询与显式意图，不启动新请求（避免风暴与饥饿）。
         if (force) {
+          pendingForceRefreshRef.current = true;
           // 显式刷新仍推进 requestId，使更早的 in-flight 结果被判定为 stale。
           requestIdRef.current = nextAttentionRequestId(requestIdRef.current);
+        } else {
+          pendingPollRefreshRef.current = true;
         }
         return;
       }
 
+      if (!force && !allowAutomaticPollRef.current) {
+        // 超时熔断期间忽略纯轮询，等待用户/焦点显式恢复。
+        return;
+      }
+
       inFlightRef.current = true;
-      pendingRefreshRef.current = false;
+      // 启动前清空两类 pending；本轮结束后再按需链式。
+      pendingForceRefreshRef.current = false;
+      pendingPollRefreshRef.current = false;
       const requestId = nextAttentionRequestId(requestIdRef.current);
       requestIdRef.current = requestId;
       const hasSnapshot = stateRef.current.snapshot !== null;
@@ -129,6 +168,7 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
         }),
       );
 
+      let timedOut = false;
       try {
         const snapshot = await withAttentionLoadTimeout(loadSnapshotRef.current());
         if (mountedRef.current && isCurrentAttentionRequest(requestId, requestIdRef.current)) {
@@ -142,6 +182,12 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
           );
         }
       } catch (reason) {
+        timedOut = isAttentionLoadTimeoutError(reason);
+        if (timedOut) {
+          // 超时：丢弃轮询 pending，暂停自动轮询，展示错误态，不连环再起挂起请求。
+          pendingPollRefreshRef.current = false;
+          allowAutomaticPollRef.current = false;
+        }
         if (mountedRef.current && isCurrentAttentionRequest(requestId, requestIdRef.current)) {
           const error = reason instanceof Error ? reason : new Error(String(reason));
           setState((current) =>
@@ -156,12 +202,27 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
         inFlightRef.current = false;
       }
 
-      if (!mountedRef.current || !pendingRefreshRef.current) {
+      if (!mountedRef.current) {
         return;
       }
-      // 合并期间的刷新意图在当前请求结束后再跑一次（仍走 force，保留最新意图）。
-      pendingRefreshRef.current = false;
-      force = true;
+
+      // 超时后只允许消化显式 force pending；轮询 pending 已清空。
+      if (pendingForceRefreshRef.current) {
+        pendingForceRefreshRef.current = false;
+        pendingPollRefreshRef.current = false;
+        force = true;
+        continue;
+      }
+
+      if (!timedOut && pendingPollRefreshRef.current) {
+        pendingPollRefreshRef.current = false;
+        // 非超时的慢请求结束后，用 force 消化一次合并的轮询意图，保证最新快照。
+        force = true;
+        continue;
+      }
+
+      pendingPollRefreshRef.current = false;
+      return;
     }
   }, []);
 
@@ -176,7 +237,9 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
     });
     return () => {
       requestIdRef.current = nextAttentionRequestId(requestIdRef.current);
-      pendingRefreshRef.current = false;
+      pendingForceRefreshRef.current = false;
+      pendingPollRefreshRef.current = false;
+      allowAutomaticPollRef.current = true;
       inFlightRef.current = false;
     };
   }, [runLoad]);
@@ -213,7 +276,8 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
      *   仅在页面可见时保留 10 秒兜底轮询，隐藏时暂停避免后台空转。
      *
      * Code Logic（这个函数做什么）:
-     *   根据 visibilityState 启停 setInterval；轮询走 non-force single-flight。
+     *   根据 visibilityState 启停 setInterval；轮询走 non-force single-flight；
+     *   超时熔断后 interval 仍跑但 runLoad 会忽略非 force 请求。
      */
     const syncInterval = () => {
       const visible =
@@ -224,7 +288,7 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
             if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
               return;
             }
-            // 定时轮询不强制废弃 in-flight 请求。
+            // 定时轮询不强制废弃 in-flight 请求；超时熔断后由 allowAutomaticPoll 拦截。
             void runLoad({ force: false });
           }, ATTENTION_POLL_INTERVAL_MS);
         }

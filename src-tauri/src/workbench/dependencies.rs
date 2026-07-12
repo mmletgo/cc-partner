@@ -11,18 +11,24 @@ use chrono::Utc;
 use portable_pty::CommandBuilder;
 use serde::Serialize;
 use std::io::Read;
-use std::process::{Command as StdCommand, Output, Stdio};
+use std::process::{Child, Command as StdCommand, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::async_runtime::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const OUTPUT_LINE_LIMIT: usize = 24;
-/// 单次外部依赖探测（tmux -V / 包管理器 --version）硬超时。
+/// 单次外部依赖探测（tmux -V / 包管理器 --version）端到端硬超时。
 /// Business Logic: WSL/tmux hang 不得永久阻塞 AppState 初始化与 GUI 启动。
+/// Code Logic: 覆盖 try_wait 轮询、kill、wait/reap 与 stdout/stderr drain 的共享截止时间。
 const PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 /// try_wait 轮询间隔，兼顾响应速度与 CPU。
 const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// kill/wait 与管道排空的额外宽限（在共享截止时间之后仍允许的小额回收窗口）。
+/// Business Logic: 截止后仍需 best-effort 回收僵尸，但不得无限阻塞 AppState 初始化。
+const PROBE_TERMINATE_GRACE: Duration = Duration::from_millis(250);
+/// 管道 drain 线程 join 的单管道宽限。
+const PROBE_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(150);
 
 /// Business Logic（为什么需要这个函数）:
 ///     Attention 与前端轮询需要稳定的依赖状态变更时间，不能在每次读取时漂移。
@@ -653,46 +659,172 @@ enum ProbeCommandError {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     同步 `output()` 无超时，WSL/异常 wrapper 会永久卡住启动路径。
+///     同步 `output()` 无超时，WSL/异常 wrapper 会永久卡住启动路径；
+///     仅约束 try_wait 不够——kill/wait 失败或后代持有管道时仍会无限阻塞。
 ///
 /// Code Logic（这个函数做什么）:
-///     spawn 子进程后轮询 `try_wait`；超时则 `kill`+`wait` 并返回 TimedOut；
-///     正常退出后读完 stdout/stderr 组装 Output。
+///     以共享 deadline 覆盖整个探测生命周期：Unix 上用独立进程组 spawn，
+///     超时后 kill/killpg + 有界 wait/reap，stdout/stderr 在后台线程 drain 且带 join 超时；
+///     截止后绝不阻塞超过 deadline + PROBE_TERMINATE_GRACE。
 fn run_std_command_with_timeout(
     mut command: StdCommand,
     timeout: Duration,
 ) -> Result<Output, ProbeCommandError> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Unix：独立进程组，便于超时 killpg 覆盖 wrapper 后代。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // 0 = 子进程成为新进程组组长（setpgid(0,0)）。
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     let mut child = command.spawn().map_err(|_| ProbeCommandError::SpawnOrIo)?;
-    let started = Instant::now();
+    let deadline = Instant::now() + timeout;
+    let process_group_id = child.id();
+
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
-                if started.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                if Instant::now() >= deadline {
+                    terminate_probe_child(&mut child, process_group_id, deadline);
                     return Err(ProbeCommandError::TimedOut);
                 }
-                std::thread::sleep(PROBE_POLL_INTERVAL);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(remaining.min(PROBE_POLL_INTERVAL));
             }
-            Err(_) => return Err(ProbeCommandError::SpawnOrIo),
+            Err(_) => {
+                // try_wait 失败也走终止路径，避免留下僵尸。
+                terminate_probe_child(&mut child, process_group_id, deadline);
+                return Err(ProbeCommandError::SpawnOrIo);
+            }
         }
     };
 
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    if let Some(mut out) = child.stdout.take() {
-        let _ = out.read_to_end(&mut stdout);
-    }
-    if let Some(mut err) = child.stderr.take() {
-        let _ = err.read_to_end(&mut stderr);
-    }
+    // 正常退出：在共享截止时间（+ 小额 grace）内有界 drain 管道，避免后代持有 pipe 时无界 read_to_end。
+    let (stdout, stderr) = drain_probe_pipes(&mut child, deadline);
     Ok(Output {
         status,
         stdout,
         stderr,
     })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     超时或 IO 失败后必须 best-effort 终止进程树并回收，但 kill 失败时不能无条件 child.wait() 永久挂起。
+///
+/// Code Logic（这个函数做什么）:
+///     Unix 先 killpg(SIGKILL) 再 child.kill()；Windows 仅 child.kill()；
+///     随后在 deadline+PROBE_TERMINATE_GRACE 内轮询 try_wait，超时则丢弃 wait（接受潜在僵尸而非阻塞启动）。
+fn terminate_probe_child(child: &mut Child, process_group_id: u32, deadline: Instant) {
+    #[cfg(unix)]
+    {
+        let _ = kill_probe_process_group(process_group_id);
+    }
+    let _ = child.kill();
+
+    let reap_deadline = deadline + PROBE_TERMINATE_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= reap_deadline {
+                    // 截止：不再阻塞 wait；管道 handle 随 Child drop 关闭。
+                    break;
+                }
+                let remaining = reap_deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(remaining.min(PROBE_POLL_INTERVAL));
+            }
+            Err(_) => break,
+        }
+    }
+
+    // 丢弃管道，避免后续任何无界读。
+    let _ = child.stdout.take();
+    let _ = child.stderr.take();
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Unix wrapper（如 wsl 包装脚本）可能留下持有 stdout 的孙进程，仅 kill 直接子进程不够。
+///
+/// Code Logic（这个函数做什么）:
+///     对独立进程组发送 SIGKILL；pgid 非法时返回错误。
+#[cfg(unix)]
+fn kill_probe_process_group(process_group_id: u32) -> Result<(), std::io::Error> {
+    let pgid: libc::pid_t = process_group_id.try_into().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "process group id out of range",
+        )
+    })?;
+    // 负号表示进程组；SIGKILL 立即终止。
+    let result = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     正常退出后仍可能因孙进程持有 pipe 导致 read_to_end 永不返回，必须有界 drain。
+///
+/// Code Logic（这个函数做什么）:
+///     把 stdout/stderr take 到独立线程 read_to_end；主线程在 deadline+grace 内 join，
+///     超时则 detach（线程随 pipe 关闭结束）并返回已读（可能空）缓冲。
+fn drain_probe_pipes(child: &mut Child, deadline: Instant) -> (Vec<u8>, Vec<u8>) {
+    let stdout_handle = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut err| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = err.read_to_end(&mut buf);
+            buf
+        })
+    });
+
+    let join_deadline = deadline + PROBE_PIPE_DRAIN_GRACE;
+    let stdout = join_pipe_thread(stdout_handle, join_deadline);
+    let stderr = join_pipe_thread(stderr_handle, join_deadline);
+    (stdout, stderr)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     drain 线程 join 必须可超时，否则与无界 read_to_end 等价。
+///
+/// Code Logic（这个函数做什么）:
+///     在 join_deadline 前轮询 is_finished + join；超时返回空缓冲并让线程继续（pipe 关闭后自然退出）。
+fn join_pipe_thread(
+    handle: Option<std::thread::JoinHandle<Vec<u8>>>,
+    join_deadline: Instant,
+) -> Vec<u8> {
+    let Some(handle) = handle else {
+        return Vec::new();
+    };
+    loop {
+        if handle.is_finished() {
+            return handle.join().unwrap_or_default();
+        }
+        if Instant::now() >= join_deadline {
+            // 超时：丢弃 JoinHandle（detach），不阻塞主路径。
+            drop(handle);
+            return Vec::new();
+        }
+        let remaining = join_deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(remaining.min(PROBE_POLL_INTERVAL));
+    }
 }
 
 struct TmuxCandidate {
@@ -1138,6 +1270,79 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "超时路径耗时过长: {elapsed:?}"
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     超时路径不能依赖「kill 必然成功」；即便进程已退出，terminate 也必须有界返回。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对已退出的 sleep 0 子进程调用 terminate_probe_child，断言在 grace 内返回且不 panic。
+    #[test]
+    fn terminate_probe_child_is_bounded_when_process_already_exited() {
+        let mut child = StdCommand::new("sleep")
+            .arg("0")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep 0");
+        let pgid = child.id();
+        // 等子进程自然退出，使后续 kill/wait 走「已退出 / kill 失败」分支。
+        let _ = child.wait();
+        let deadline = Instant::now();
+        let started = Instant::now();
+        terminate_probe_child(&mut child, pgid, deadline);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "已退出进程的 terminate 耗时过长: {elapsed:?}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     正常退出后的管道 drain 必须有界；即便 deadline 已过，也不能无界 read_to_end。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     跑 `printf hi`，以已过去的 deadline 调用 drain_probe_pipes，断言快速返回（缓冲可空）。
+    #[test]
+    fn drain_probe_pipes_respects_past_deadline() {
+        let mut child = StdCommand::new("printf")
+            .arg("hi")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn printf");
+        let _ = child.wait();
+        let started = Instant::now();
+        let past_deadline = Instant::now() - Duration::from_millis(1);
+        let (stdout, stderr) = drain_probe_pipes(&mut child, past_deadline);
+        let elapsed = started.elapsed();
+        // 允许小额 grace；必须远小于无界阻塞。
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "过期 deadline 的 drain 耗时过长: {elapsed:?}"
+        );
+        // 结果可空（超时 detach）或含 "hi"；关键是不阻塞。
+        let _ = (stdout, stderr);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     成功路径在截止时间内应读到完整 stdout，验证 drain 不只是「永远返回空」。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     跑 `printf hello` 并在充足 deadline 下 drain，断言 stdout 含 hello。
+    #[test]
+    fn drain_probe_pipes_reads_stdout_within_deadline() {
+        let mut child = StdCommand::new("printf")
+            .arg("hello")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn printf");
+        let status = child.wait().expect("wait printf");
+        assert!(status.success());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (stdout, _stderr) = drain_probe_pipes(&mut child, deadline);
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello");
     }
 
     /// Business Logic（为什么需要这个测试）:
