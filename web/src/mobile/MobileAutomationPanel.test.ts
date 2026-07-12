@@ -94,6 +94,21 @@ describe('MobileAutomationPanel', () => {
       'mobile automation cached hint requires warm offline snapshot+cachedAt',
     );
     assertContains(
+      panelSource,
+      'selectMobileRuntimeDisplayForProject',
+      'mobile automation must isolate runtime display by project on first render',
+    );
+    assertContains(
+      panelSource,
+      'emptyMobileRuntimeDisplayState(true, null, projectId)',
+      'project change must synchronously reset runtime display owned by new projectId',
+    );
+    assertContains(
+      panelSource,
+      'OwnedMobileRuntimeDisplayState',
+      'mobile runtime display state must carry owning projectId',
+    );
+    assertContains(
       zhWorkbench,
       '"runtimeStatusOffline": "离线"',
       'zh offline label must be neutral offline without claiming cache',

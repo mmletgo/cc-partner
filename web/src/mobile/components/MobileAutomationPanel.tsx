@@ -16,7 +16,6 @@ import type {
   OrchestratorRemoteOutboxStatus,
   OrchestratorRemoteRuntimeStatus,
   OrchestratorRunState,
-  OrchestratorRuntimeDisplayState,
   OrchestratorTask,
   OrchestratorTaskView,
   OrchestratorWorkflowState,
@@ -26,8 +25,11 @@ import {
   applyMobileRuntimeSnapshotFailure,
   applyMobileRuntimeSnapshotSuccess,
   beginMobileRuntimeSnapshotLoad,
+  emptyMobileRuntimeDisplayState,
   nextMobileRuntimeSnapshotRequestSeq,
   resetMobileRuntimeSnapshotStore,
+  selectMobileRuntimeDisplayForProject,
+  type OwnedMobileRuntimeDisplayState,
 } from '../mobileRuntimeSnapshotStore';
 import styles from '../MobileWorkbench.module.css';
 
@@ -364,13 +366,9 @@ export function MobileAutomationPanel({
   const [completingPrompt, setCompletingPrompt] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
-  const [runtimeDisplay, setRuntimeDisplay] = useState<OrchestratorRuntimeDisplayState>({
-    snapshot: null,
-    remoteStatus: null,
-    cachedAt: null,
-    loading: false,
-    error: null,
-  });
+  const [runtimeDisplayState, setRuntimeDisplay] = useState<OwnedMobileRuntimeDisplayState>(
+    () => emptyMobileRuntimeDisplayState(false),
+  );
   const requestIdRef = useRef<number>(0);
   const evidenceRequestIdRef = useRef<number>(0);
   const activeProjectIdRef = useRef<string | null>(null);
@@ -380,6 +378,11 @@ export function MobileAutomationPanel({
   const detailTitleId = useId();
   const runtimeTitleId = useId();
   const hasProject = Boolean(project);
+  // Render 阶段隔离：A→B 首帧 effect 尚未重置 state 时，不得展示旧项目 runtime 快照。
+  const runtimeDisplay = selectMobileRuntimeDisplayForProject(
+    runtimeDisplayState,
+    project?.id ?? null,
+  );
   const creating = creatingAction !== null;
   const trimmedPromptDraft = promptDraft.trim();
   const trimmedTitle = title.trim();
@@ -477,12 +480,14 @@ export function MobileAutomationPanel({
    */
   const loadRuntimeSnapshot = useCallback(async (projectId: string): Promise<void> => {
     const requestSeq = nextMobileRuntimeSnapshotRequestSeq(projectId);
+    // 同项目 refresh 可保留本项目 live 缓存作骨架；跨项目时 begin 只会读到目标 project 缓存。
     setRuntimeDisplay(beginMobileRuntimeSnapshotLoad(projectId));
     try {
       const snapshot = await httpOrchestratorTransport.getRuntimeSnapshot(projectId);
       if (activeProjectIdRef.current !== projectId) return;
       const next = applyMobileRuntimeSnapshotSuccess(projectId, requestSeq, snapshot);
-      if (next) setRuntimeDisplay(next);
+      // next 已 stamp projectId；active 守卫后再 set，避免旧项目响应写入。
+      if (next && activeProjectIdRef.current === projectId) setRuntimeDisplay(next);
     } catch (reason) {
       if (activeProjectIdRef.current !== projectId) return;
       const next = applyMobileRuntimeSnapshotFailure(
@@ -490,7 +495,7 @@ export function MobileAutomationPanel({
         requestSeq,
         new Error(getErrorMessage(reason)),
       );
-      if (next) setRuntimeDisplay(next);
+      if (next && activeProjectIdRef.current === projectId) setRuntimeDisplay(next);
     }
   }, []);
 
@@ -515,13 +520,12 @@ export function MobileAutomationPanel({
     setTitle('');
     setGoal('');
     setAcceptanceCriteria('');
-    setRuntimeDisplay({
-      snapshot: null,
-      remoteStatus: null,
-      cachedAt: null,
-      loading: false,
-      error: null,
-    });
+    // 同步重置为归属新项目的空/loading 态，避免 effect 间首帧串台（render selector 是双保险）。
+    setRuntimeDisplay(
+      projectId
+        ? emptyMobileRuntimeDisplayState(true, null, projectId)
+        : emptyMobileRuntimeDisplayState(false),
+    );
 
     if (projectId) {
       void loadTasks(projectId);
