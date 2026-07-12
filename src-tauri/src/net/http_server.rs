@@ -16,8 +16,8 @@ use crate::backend::control::{self, BackendControlFile};
 use crate::net::error_response::{envelope_fallback_middleware, P2pError, P2pErrorCode, P2pResult};
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
-    cc_history, claude_code_assets, claude_md_sync, health, mobile, orchestrator, scratchpad_sync,
-    ssh_target_sync, sync, transfer, workbench,
+    attention, cc_history, claude_code_assets, claude_md_sync, health, mobile, orchestrator,
+    scratchpad_sync, ssh_target_sync, sync, transfer, workbench,
 };
 use crate::state::AppState;
 use axum::body::Body;
@@ -368,6 +368,8 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route("/api/backend/control/stop", post(stop_backend_control))
         // 移动端访问入口：返回手机可访问的局域网 /mobile URL（过滤 localhost/loopback）
         .route("/api/mobile/access-info", get(mobile::access_info))
+        // Mobile Attention 快照：与 Tauri list_attention_items 共享聚合 helper；能力 token attention.v1
+        .route("/api/mobile/attention", get(attention::list_attention))
         // P2P 同步协议（M4）：对端调 pull/push，字段对照 Python protocol.py
         .route("/api/sync/pull", post(sync::sync_pull))
         .route("/api/sync/push", post(sync::sync_push))
@@ -716,6 +718,14 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/orchestrator/task-views/create",
             post(orchestrator::create_task_view),
+        )
+        .route(
+            "/api/orchestrator/outbox/retry",
+            post(orchestrator::retry_remote_outbox),
+        )
+        .route(
+            "/api/orchestrator/outbox/discard",
+            post(orchestrator::discard_remote_outbox),
         )
         .route(
             "/api/orchestrator/tasks/evidence",

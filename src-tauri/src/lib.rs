@@ -11,6 +11,7 @@
 //!     setup 闭包内：load config → 建 SqlitePool（WAL + 手动建表）→ 构造 AppState → manage。
 //!     所有命令在 invoke_handler 注册。保留 M0 的 ping。
 
+mod attention;
 pub mod backend;
 mod cc;
 mod claude_cli;
@@ -42,7 +43,7 @@ use crate::backend::runtime::{
 };
 use crate::backend::ui::{BackendUi, TauriBackendUi};
 use crate::commands::{
-    backend as backend_cmd, cc_history as cc_history_cmd,
+    attention as attention_cmd, backend as backend_cmd, cc_history as cc_history_cmd,
     claude_code_assets as claude_code_assets_cmd, claude_md as claude_md_cmd,
     cloud_sync as cloud_sync_cmd, config as config_cmd, devices as device_cmd,
     github_trending as github_trending_cmd, health as health_cmd,
@@ -212,6 +213,7 @@ pub fn run() {
             config_cmd::get_version,
             config_cmd::choose_dir,
             mobile_cmd::get_mobile_access_info,
+            attention_cmd::list_attention_items,
             device_cmd::list_devices,
             device_cmd::get_local_device,
             sync_cmd::trigger_sync,
@@ -289,6 +291,8 @@ pub fn run() {
             orchestrator_cmd::refresh_orchestrator_project,
             orchestrator_cmd::queue_orchestrator_task_view,
             orchestrator_cmd::retry_orchestrator_task_view,
+            orchestrator_cmd::retry_orchestrator_remote_outbox,
+            orchestrator_cmd::discard_orchestrator_remote_outbox,
             orchestrator_cmd::abort_orchestrator_task_view,
             orchestrator_cmd::list_orchestrator_task_evidence_for_project,
             orchestrator_cmd::get_orchestrator_config_for_project,

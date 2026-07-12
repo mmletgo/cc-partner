@@ -160,10 +160,12 @@ export type WorkbenchDependencyBackend = 'native' | 'wsl' | string;
  * 工作台运行时依赖状态（tmux）。
  *
  * Business Logic（为什么需要这个类型）:
- *   Workbench 的真实 window/pane 体验依赖 tmux，前端需要展示检测、安装、失败和重检状态。
+ *   Workbench 的真实 window/pane 体验依赖 tmux，前端需要展示检测、安装、失败和重检状态；
+ *   Attention 还需要稳定的状态变更时间作为 environment 条目 updatedAt。
  *
  * Code Logic（字段说明）:
- *   对齐后端 dependency manager DTO；installCommandPreview 是只读预览，不代表前端可直接执行命令。
+ *   对齐后端 dependency manager DTO；installCommandPreview 是只读预览，不代表前端可直接执行命令；
+ *   statusChangedAt 是进程内语义状态最近变化时间（RFC3339），重复轮询不会重置。
  */
 export interface WorkbenchDependencyStatus {
   status: WorkbenchDependencyState;
@@ -175,6 +177,7 @@ export interface WorkbenchDependencyStatus {
   installCommandPreview: string[];
   error: string | null;
   output: string[];
+  statusChangedAt: string;
 }
 
 export type LanFirewallPlatform = 'macos' | 'windows' | 'linux' | 'unsupported' | string;
@@ -617,7 +620,114 @@ export interface OrchestratorRuntimeDisplayState {
  * Code Logic（这个类型做什么）:
  *   以字符串字面量枚举锁定 Rust OrchestratorRemoteOutboxStatus 序列化后的状态值。
  */
-export type OrchestratorRemoteOutboxStatus = 'pending' | 'sending' | 'mirrored' | 'failed';
+export type OrchestratorRemoteOutboxStatus = 'pending' | 'sending' | 'mirrored' | 'failed' | 'discarded';
+
+
+/**
+ * Attention 分类。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   全局 Inbox 按“需要决策 / 运行受阻 / 环境受阻”三档呈现，badge 与分组都依赖稳定字面量。
+ *
+ * Code Logic（这个类型做什么）:
+ *   对齐 Rust AttentionCategory 序列化值：decision | blocked | environment。
+ */
+export type AttentionCategory = 'decision' | 'blocked' | 'environment';
+
+/**
+ * Attention 条目新鲜度。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   远端 mirror 回退时用户需要区分 live 与 cached，避免把陈旧数据当实时状态。
+ *
+ * Code Logic（这个类型做什么）:
+ *   对齐 Rust AttentionFreshness：live | cached。
+ */
+export type AttentionFreshness = 'live' | 'cached';
+
+/**
+ * Attention 条目来源类型。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   前端按 sourceKind 映射动作文案与导航语义，禁止页面散落业务判断。
+ *
+ * Code Logic（这个类型做什么）:
+ *   对齐 Rust AttentionSourceKind 四个稳定字面量。
+ */
+export type AttentionSourceKind =
+  | 'orchestratorHumanReview'
+  | 'orchestratorBlocked'
+  | 'remoteOutboxFailed'
+  | 'workbenchDependency';
+
+/**
+ * Attention 语义化跳转目标。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   后端只返回语义 target，由桌面/移动端各自映射导航，禁止携带后端 URL。
+ *
+ * Code Logic（这个类型做什么）:
+ *   discriminated union：orchestratorTask / remoteOutbox / settings(dependencies)。
+ */
+export type AttentionTarget =
+  | { kind: 'orchestratorTask'; projectId: string; taskId: string }
+  | { kind: 'remoteOutbox'; projectId: string; outboxId: string }
+  | { kind: 'settings'; tab: 'dependencies' };
+
+/**
+ * 单条 Attention 条目 DTO。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   Inbox 列表、badge 与 Provider 都以条目为最小展示单元，字段契约必须跨端一致。
+ *
+ * Code Logic（字段说明）:
+ *   camelCase 对齐 Rust AttentionItemDto；project/device/cachedAt 可空。
+ */
+export interface AttentionItem {
+  id: string;
+  category: AttentionCategory;
+  sourceKind: AttentionSourceKind;
+  title: string;
+  summary: string;
+  updatedAt: string;
+  freshness: AttentionFreshness;
+  cachedAt: string | null;
+  project: { id: string; name: string; kind: 'local' | 'remote' } | null;
+  device: { id: string; name: string } | null;
+  target: AttentionTarget;
+}
+
+/**
+ * Attention 分类计数。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   前端 badge 与分组空态依赖 total 与三类计数一致。
+ *
+ * Code Logic（字段说明）:
+ *   total/decision/blocked/environment，对齐后端 counts。
+ */
+export interface AttentionCounts {
+  total: number;
+  decision: number;
+  blocked: number;
+  environment: number;
+}
+
+/**
+ * Attention 快照 DTO。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   一次聚合成功后才产出完整快照，失败不得返回部分列表；Provider 以 snapshot 为单位缓存。
+ *
+ * Code Logic（字段说明）:
+ *   generatedAt + counts + items，对齐 Rust AttentionSnapshotDto。
+ */
+export interface AttentionSnapshot {
+  generatedAt: string;
+  counts: AttentionCounts;
+  items: AttentionItem[];
+}
+
 
 /**
  * Orchestrator 远端 outbox DTO（对齐 Rust OrchestratorRemoteOutboxDto，camelCase）。

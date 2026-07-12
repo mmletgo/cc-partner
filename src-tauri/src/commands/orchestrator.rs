@@ -2562,6 +2562,187 @@ pub async fn abort_orchestrator_task(
     Ok(OrchestratorTaskDto::from(updated))
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     失败 outbox 的 Retry/Discard 必须在本机 remote shortcut 上下文中执行，outbox 行只存在于当前设备，
+///     不能递归代理到 owning device，也不能操作不属于当前 shortcut 的条目。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 Workbench 项目，要求 kind=remote；读取 outbox 并校验 device_id/path 与 shortcut 一致；
+///     再调用仓储 failed-only 原子转移，返回 camelCase DTO。
+pub(crate) async fn retry_orchestrator_remote_outbox_for_repos(
+    orchestrator_repo: &OrchestratorRepo,
+    workbench_project_repo: &crate::storage::WorkbenchProjectRepo,
+    project_id: &str,
+    outbox_id: &str,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    mutate_failed_remote_outbox_for_repos(
+        orchestrator_repo,
+        workbench_project_repo,
+        project_id,
+        outbox_id,
+        RemoteOutboxMutation::Retry,
+    )
+    .await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     用户确认放弃失败 outbox 后，本机应把该条目标为 discarded 审计终态，且不转发远端。
+///
+/// Code Logic（这个函数做什么）:
+///     复用项目归属与 outbox 归属校验，再调用 discard_failed_remote_outbox_item。
+pub(crate) async fn discard_orchestrator_remote_outbox_for_repos(
+    orchestrator_repo: &OrchestratorRepo,
+    workbench_project_repo: &crate::storage::WorkbenchProjectRepo,
+    project_id: &str,
+    outbox_id: &str,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    mutate_failed_remote_outbox_for_repos(
+        orchestrator_repo,
+        workbench_project_repo,
+        project_id,
+        outbox_id,
+        RemoteOutboxMutation::Discard,
+    )
+    .await
+}
+
+/// 本机 failed outbox 人工动作。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     Retry 与 Discard 共享项目/outbox 归属校验，但最终仓储转移不同。
+///
+/// Code Logic（这个枚举做什么）:
+///     区分 retry 与 discard 两条 failed-only 原子路径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteOutboxMutation {
+    Retry,
+    Discard,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Retry/Discard 的项目归属、outbox 归属与 failed-only 约束必须集中，避免 Tauri 与 HTTP 路径分叉。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 project 存在且为 remote shortcut，校验 outbox 存在且 device_id/path 匹配，再调用对应仓储方法。
+async fn mutate_failed_remote_outbox_for_repos(
+    orchestrator_repo: &OrchestratorRepo,
+    workbench_project_repo: &crate::storage::WorkbenchProjectRepo,
+    project_id: &str,
+    outbox_id: &str,
+    mutation: RemoteOutboxMutation,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    let project_id = project_id.trim();
+    let outbox_id = outbox_id.trim();
+    if project_id.is_empty() {
+        return Err(AppError::validation("项目 ID 不能为空"));
+    }
+    if outbox_id.is_empty() {
+        return Err(AppError::validation("远端 outbox ID 不能为空"));
+    }
+
+    let project = workbench_project_repo
+        .get(project_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("工作台项目不存在"))?;
+    if project.kind != "remote" {
+        return Err(AppError::validation(
+            "只有远端项目快捷方式可以操作本机 remote outbox",
+        ));
+    }
+
+    let item = orchestrator_repo
+        .get_remote_outbox_item(outbox_id)
+        .await?
+        .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {outbox_id}")))?;
+    if item.device_id != project.device_id || item.remote_project_path != project.path {
+        return Err(AppError::validation("远端 outbox 不属于当前项目快捷方式"));
+    }
+
+    let updated = match mutation {
+        RemoteOutboxMutation::Retry => {
+            orchestrator_repo
+                .retry_failed_remote_outbox_item(outbox_id)
+                .await?
+        }
+        RemoteOutboxMutation::Discard => {
+            orchestrator_repo
+                .discard_failed_remote_outbox_item(outbox_id)
+                .await?
+        }
+    };
+    Ok(updated.to_dto())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     桌面 Automation UI 需要对本机 failed outbox 执行 Retry，且不得代理到远端 owner。
+///
+/// Code Logic（这个函数做什么）:
+///     从 AppState 取仓储，委托 retry_orchestrator_remote_outbox_for_repos。
+pub(crate) async fn retry_orchestrator_remote_outbox_for_state(
+    state: &AppState,
+    project_id: &str,
+    outbox_id: &str,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    retry_orchestrator_remote_outbox_for_repos(
+        state.orchestrator_repo.as_ref(),
+        state.workbench_project_repo.as_ref(),
+        project_id,
+        outbox_id,
+    )
+    .await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     桌面 Automation UI 需要对本机 failed outbox 执行 Discard，且不得代理到远端 owner。
+///
+/// Code Logic（这个函数做什么）:
+///     从 AppState 取仓储，委托 discard_orchestrator_remote_outbox_for_repos。
+pub(crate) async fn discard_orchestrator_remote_outbox_for_state(
+    state: &AppState,
+    project_id: &str,
+    outbox_id: &str,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    discard_orchestrator_remote_outbox_for_repos(
+        state.orchestrator_repo.as_ref(),
+        state.workbench_project_repo.as_ref(),
+        project_id,
+        outbox_id,
+    )
+    .await
+}
+
+/// 重试失败的远端 outbox。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在原 Automation UI 对 failed outbox 点 Retry 时，应保留原 payload/clientRequestId 并回到 pending。
+///
+/// Code Logic（这个函数做什么）:
+///     Tauri command 解包 State 与字符串参数，委托 state helper。
+#[tauri::command]
+pub async fn retry_orchestrator_remote_outbox(
+    state: State<'_, AppState>,
+    project_id: String,
+    outbox_id: String,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    retry_orchestrator_remote_outbox_for_state(state.inner(), &project_id, &outbox_id).await
+}
+
+/// 放弃失败的远端 outbox。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户确认放弃后，failed outbox 进入 discarded 审计终态，不再参与 dispatcher/active 列表。
+///
+/// Code Logic（这个函数做什么）:
+///     Tauri command 解包 State 与字符串参数，委托 state helper。
+#[tauri::command]
+pub async fn discard_orchestrator_remote_outbox(
+    state: State<'_, AppState>,
+    project_id: String,
+    outbox_id: String,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    discard_orchestrator_remote_outbox_for_state(state.inner(), &project_id, &outbox_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4429,5 +4610,213 @@ mod tests {
             abort_orchestrator_task_target_status(OrchestratorTaskStatus::Queued),
             OrchestratorTaskStatus::Aborted
         );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     outbox Retry/Discard 命令测试需要隔离 SQLite 与 Workbench 项目表，验证归属与状态机。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建单连接内存库、初始化 Orchestrator schema 与最小 workbench_projects 表，返回两个仓储。
+    async fn setup_outbox_action_repos() -> (OrchestratorRepo, crate::storage::WorkbenchProjectRepo)
+    {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .expect("sqlite options")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("sqlite pool");
+        OrchestratorRepo::init_schema(&pool)
+            .await
+            .expect("orchestrator schema");
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS workbench_projects (\
+             id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL, \
+             device_name TEXT NOT NULL, path TEXT NOT NULL, last_opened_at TEXT NOT NULL, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("workbench projects schema");
+        (
+            OrchestratorRepo::new(pool.clone()),
+            crate::storage::WorkbenchProjectRepo::new(pool),
+        )
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     outbox 动作测试需要稳定插入 remote shortcut 与 failed outbox。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     upsert remote project，插入 pending outbox 后标 failed，返回 outbox id。
+    async fn insert_failed_outbox_for_shortcut(
+        orchestrator_repo: &OrchestratorRepo,
+        workbench_project_repo: &crate::storage::WorkbenchProjectRepo,
+        project_id: &str,
+        request_json: &str,
+    ) -> String {
+        let project = remote_shortcut_row();
+        let mut row = project.clone();
+        row.id = project_id.to_string();
+        workbench_project_repo
+            .upsert(&row)
+            .await
+            .expect("upsert project");
+        let item = orchestrator_repo
+            .insert_remote_outbox_pending(
+                &project.device_id,
+                &project.device_name,
+                &project.path,
+                None,
+                request_json,
+            )
+            .await
+            .expect("insert outbox");
+        let claimed = orchestrator_repo
+            .claim_remote_outbox_item_as_sending(&item.id)
+            .await
+            .expect("claim")
+            .expect("claimed");
+        orchestrator_repo
+            .mark_remote_outbox_failed(&claimed.id, "协议错误：远端拒绝")
+            .await
+            .expect("mark failed");
+        claimed.id
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Retry 只能作用在当前 remote shortcut 拥有的 failed outbox，且必须保留 payload 并清空 last_error。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 failed outbox，调用 retry helper，断言 DTO camelCase 字段、status=pending、request_json 不变。
+    #[tokio::test]
+    async fn retry_remote_outbox_action_requires_project_ownership_and_failed_status() {
+        let (orchestrator_repo, workbench_project_repo) = setup_outbox_action_repos().await;
+        let request_json = r#"{"projectId":"remote-local","title":"t","goal":"g","acceptanceCriteria":"a","priority":0,"createAction":"backlog","clientRequestId":"req-1"}"#;
+        let outbox_id = insert_failed_outbox_for_shortcut(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            request_json,
+        )
+        .await;
+
+        let dto = retry_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            &outbox_id,
+        )
+        .await
+        .expect("retry failed outbox");
+
+        assert_eq!(dto.id, outbox_id);
+        assert_eq!(dto.status.as_str(), "pending");
+        assert_eq!(dto.request_json, request_json);
+        assert!(dto.last_error.is_none());
+        assert_eq!(dto.device_id, "device-a");
+        assert_eq!(dto.remote_project_path, "/Users/hans/remote-project");
+
+        let json = serde_json::to_value(&dto).expect("serialize dto");
+        assert!(json.get("deviceId").is_some());
+        assert!(json.get("remoteProjectPath").is_some());
+        assert!(json.get("requestJson").is_some());
+        assert!(json.get("lastError").is_some());
+        assert!(json.get("device_id").is_none());
+
+        let missing = retry_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            "missing-outbox",
+        )
+        .await
+        .expect_err("missing outbox");
+        assert!(missing.to_string().contains("不存在"));
+
+        let wrong_project = remote_shortcut_row();
+        let mut other = wrong_project;
+        other.id = "other-shortcut".to_string();
+        other.path = "/other/path".to_string();
+        workbench_project_repo
+            .upsert(&other)
+            .await
+            .expect("other project");
+        let wrong = retry_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "other-shortcut",
+            &outbox_id,
+        )
+        .await
+        .expect_err("wrong project ownership");
+        assert!(wrong.to_string().contains("不属于当前项目"));
+
+        // pending 后再次 retry 必须拒绝，证明 failed-only。
+        let again = retry_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            &outbox_id,
+        )
+        .await
+        .expect_err("non-failed retry");
+        assert!(again.to_string().contains("失败"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Discard 只能作用在当前 shortcut 的 failed outbox，并保留 last_error 审计。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 failed outbox，调用 discard helper，断言 status=discarded 且 last_error 保留；local 项目被拒绝。
+    #[tokio::test]
+    async fn discard_remote_outbox_action_is_local_only_and_failed_only() {
+        let (orchestrator_repo, workbench_project_repo) = setup_outbox_action_repos().await;
+        let request_json = r#"{"projectId":"remote-local","title":"t","goal":"g","acceptanceCriteria":"a","priority":0,"createAction":"backlog","clientRequestId":"req-2"}"#;
+        let outbox_id = insert_failed_outbox_for_shortcut(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            request_json,
+        )
+        .await;
+
+        let local = local_project_row("/tmp/local-project".to_string());
+        workbench_project_repo
+            .upsert(&local)
+            .await
+            .expect("local project");
+        let local_err = discard_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "project-1",
+            &outbox_id,
+        )
+        .await
+        .expect_err("local project must not operate remote outbox");
+        assert!(local_err.to_string().contains("远端项目快捷方式"));
+
+        let dto = discard_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            &outbox_id,
+        )
+        .await
+        .expect("discard failed outbox");
+        assert_eq!(dto.status.as_str(), "discarded");
+        assert_eq!(dto.request_json, request_json);
+        assert_eq!(dto.last_error.as_deref(), Some("协议错误：远端拒绝"));
+
+        let again = discard_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            &outbox_id,
+        )
+        .await
+        .expect_err("discarded cannot discard again");
+        assert!(again.to_string().contains("失败"));
     }
 }

@@ -1,7 +1,9 @@
 import { useCallback, useState } from 'react';
 import type { ComponentType, ReactElement, ReactNode, SVGProps } from 'react';
 import { useTranslation } from 'react-i18next';
+import { formatAttentionBadgeCount } from '@/lib/attention';
 import {
+  BellIcon,
   BrowserIcon,
   ChevronDownIcon,
   FileIcon,
@@ -34,6 +36,7 @@ interface MobileNavItem {
 
 const MOBILE_NAV_ICONS: Record<MobileWorkbenchPanel, MobileNavIcon> = {
   projects: FolderIcon,
+  attention: BellIcon,
   terminal: TerminalIcon,
   browser: BrowserIcon,
   files: FileIcon,
@@ -60,12 +63,15 @@ export interface MobileWorkbenchShellProps {
   worktreeStatusExpanded?: boolean;
   onWorktreeStatusClick?: () => void;
   onPanelChange: (panel: MobileWorkbenchPanel) => void;
+  /** Attention 总数；0/null 不显示 badge，规则与桌面 formatAttentionBadgeCount 一致。 */
+  attentionTotal?: number | null;
   children: ReactNode;
 }
 
 interface MobilePanelNavProps {
   activePanel: MobileWorkbenchPanel;
   onSelect: (panel: MobileWorkbenchPanel) => void;
+  attentionBadge: string | null;
 }
 
 /**
@@ -77,10 +83,15 @@ interface MobilePanelNavProps {
  * Code Logic（这个组件做什么）:
  *   遍历 MOBILE_NAV_ITEMS 渲染 button 导航项，根据 activePanel 标记当前项，并把点击事件交给父组件。
  */
-function MobilePanelNav({ activePanel, onSelect }: MobilePanelNavProps): ReactElement {
-  const { t } = useTranslation(['workbench']);
+function MobilePanelNav({
+  activePanel,
+  onSelect,
+  attentionBadge,
+}: MobilePanelNavProps): ReactElement {
+  const { t } = useTranslation(['workbench', 'attention']);
   const labels: Record<MobileWorkbenchPanel, string> = {
     projects: t('workbench:mobile.nav.projects'),
+    attention: t('workbench:mobile.nav.attention'),
     terminal: t('workbench:mobile.nav.terminal'),
     browser: t('workbench:mobile.nav.browser'),
     files: t('workbench:mobile.nav.files'),
@@ -96,6 +107,7 @@ function MobilePanelNav({ activePanel, onSelect }: MobilePanelNavProps): ReactEl
       {MOBILE_NAV_ITEMS.map((item) => {
         const Icon = item.icon;
         const isActive = item.panel === activePanel;
+        const showAttentionBadge = item.panel === 'attention' && attentionBadge !== null;
 
         return (
           <button
@@ -103,10 +115,20 @@ function MobilePanelNav({ activePanel, onSelect }: MobilePanelNavProps): ReactEl
             type="button"
             className={`${styles.navItem} ${isActive ? styles.navActive : ''}`}
             aria-current={isActive ? 'page' : undefined}
+            aria-label={
+              showAttentionBadge
+                ? t('attention:badgeAriaLabel', { count: attentionBadge ?? '0' })
+                : undefined
+            }
             onClick={() => onSelect(item.panel)}
           >
             <Icon size={16} aria-hidden="true" />
             <span>{labels[item.panel]}</span>
+            {showAttentionBadge ? (
+              <span className={styles.mobileBadge} aria-hidden="true">
+                {attentionBadge}
+              </span>
+            ) : null}
           </button>
         );
       })}
@@ -134,11 +156,14 @@ export function MobileWorkbenchShell({
   worktreeStatusExpanded = false,
   onWorktreeStatusClick,
   onPanelChange,
+  attentionTotal = null,
   children,
 }: MobileWorkbenchShellProps): ReactElement {
   const [isNavOpen, setIsNavOpen] = useState<boolean>(() => getInitialMobileNavOpen());
   const { t } = useTranslation(['workbench']);
   const worktreeStatusLabel = worktree ?? t('workbench:mobile.status.worktree');
+  const attentionBadge =
+    attentionTotal == null ? null : formatAttentionBadgeCount(attentionTotal);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -218,7 +243,11 @@ export function MobileWorkbenchShell({
                 <XIcon size={16} aria-hidden="true" />
               </button>
             </div>
-            <MobilePanelNav activePanel={panel} onSelect={handleSelectPanel} />
+            <MobilePanelNav
+              activePanel={panel}
+              onSelect={handleSelectPanel}
+              attentionBadge={attentionBadge}
+            />
           </aside>
         </>
       ) : null}
@@ -228,7 +257,11 @@ export function MobileWorkbenchShell({
           <p className={styles.topTitle}>{t('workbench:mobile.topTitle')}</p>
           <p className={styles.topMeta}>{project ?? t('workbench:mobile.noProject')}</p>
         </div>
-        <MobilePanelNav activePanel={panel} onSelect={handleSelectPanel} />
+        <MobilePanelNav
+          activePanel={panel}
+          onSelect={handleSelectPanel}
+          attentionBadge={attentionBadge}
+        />
       </aside>
 
       <main className={styles.content}>

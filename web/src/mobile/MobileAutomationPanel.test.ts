@@ -65,6 +65,37 @@ describe('MobileAutomationPanel', () => {
     );
     assertContains(
       panelSource,
+      'httpOrchestratorTransport.outbox.retry',
+      'mobile automation should retry failed outbox through local HTTP route',
+    );
+    assertContains(
+      panelSource,
+      'httpOrchestratorTransport.outbox.discard',
+      'mobile automation should discard failed outbox through local HTTP route',
+    );
+    assertContains(
+      panelSource,
+      "item.status === 'failed'",
+      'mobile outbox actions should render only for failed status',
+    );
+    assertContains(
+      panelSource,
+      "window.confirm(t('workbench:mobile.automationPanel.pendingDiscardConfirm'))",
+      'mobile discard should require confirmation',
+    );
+    assertContains(
+      zhWorkbench,
+      '"pendingRetry"',
+      'zh workbench mobile automation should include pendingRetry',
+    );
+    assertContains(
+      enWorkbench,
+      '"pendingDiscard"',
+      'en workbench mobile automation should include pendingDiscard',
+    );
+
+    assertContains(
+      panelSource,
       'httpOrchestratorTransport.getRuntimeSnapshot',
       'mobile automation should load remote-aware runtime snapshot through mobile HTTP route',
     );
@@ -454,5 +485,6 @@ describe('MobileAutomationPanel', () => {
       'canStartOrchestratorTaskForProject(runtimeDisplay.snapshot',
       'start action must not consume runtimeDisplay.snapshot',
     );
+
   });
 });

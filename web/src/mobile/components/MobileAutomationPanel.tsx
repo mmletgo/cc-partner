@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { toRuntimeLoadError } from '@/api/orchestratorRuntimeTransportError';
 import { httpOrchestratorTransport } from '@/api/workbenchHttp';
 import type { HttpCreateOrchestratorTaskAction } from '@/api/workbenchHttp';
+import { requestAttentionInvalidation } from '@/hooks/attentionInvalidation';
 import { orchestratorEvidenceKindTone } from '@/lib/orchestrator';
 import {
   splitOrchestratorTaskViews,
@@ -43,6 +44,16 @@ export interface MobileAutomationExecutionContext {
 export interface MobileAutomationPanelProps {
   project: WorkbenchProject | null;
   onOpenExecutionContext?: (context: MobileAutomationExecutionContext) => void;
+  /** Attention 跳转：聚焦真实任务详情/Evidence。 */
+  focusTaskId?: string | null;
+  /** Attention 跳转：聚焦 failed outbox 行。 */
+  focusOutboxId?: string | null;
+  /** 聚焦结果回调：missing 时父级刷新 Inbox 并回到 Attention。 */
+  onFocusResult?: (result: {
+    status: 'found' | 'missing';
+    entity: 'task' | 'outbox';
+    id: string;
+  }) => void;
 }
 
 type MobileAutomationTaskGroups = Record<
@@ -158,6 +169,7 @@ const MOBILE_AUTOMATION_PENDING_STATUS_LABEL_KEYS: Record<
   sending: 'workbench:mobile.automationPanel.pendingStatus.sending',
   mirrored: 'workbench:mobile.automationPanel.pendingStatus.mirrored',
   failed: 'workbench:mobile.automationPanel.pendingStatus.failed',
+  discarded: 'workbench:mobile.automationPanel.pendingStatus.discarded',
 };
 
 const MOBILE_AUTOMATION_EVIDENCE_KIND_LABEL_KEYS = {
@@ -349,10 +361,16 @@ function mobileAutomationEvidenceKindLabelKey(
 export function MobileAutomationPanel({
   project,
   onOpenExecutionContext,
+  focusTaskId = null,
+  focusOutboxId = null,
+  onFocusResult,
 }: MobileAutomationPanelProps): ReactElement {
   const { t } = useTranslation(['workbench', 'orchestrator']);
   const [taskViews, setTaskViews] = useState<OrchestratorTaskView[]>([]);
   const [selectedTaskView, setSelectedTaskView] = useState<OrchestratorTaskView | null>(null);
+  const [focusedOutboxId, setFocusedOutboxId] = useState<string | null>(null);
+  const appliedFocusTaskIdRef = useRef<string | null>(null);
+  const appliedFocusOutboxIdRef = useRef<string | null>(null);
   const [evidenceItems, setEvidenceItems] = useState<OrchestratorEvidence[]>([]);
   const [evidenceLoading, setEvidenceLoading] = useState<boolean>(false);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
@@ -362,6 +380,7 @@ export function MobileAutomationPanel({
   const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);
   const [promptDraft, setPromptDraft] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
+  const [outboxActionId, setOutboxActionId] = useState<string | null>(null);
   const [creatingAction, setCreatingAction] =
     useState<HttpCreateOrchestratorTaskAction | null>(null);
   const [completingPrompt, setCompletingPrompt] = useState<boolean>(false);
@@ -508,8 +527,11 @@ export function MobileAutomationPanel({
     activeProjectIdRef.current = projectId;
     requestIdRef.current += 1;
     evidenceRequestIdRef.current += 1;
+    appliedFocusTaskIdRef.current = null;
+    appliedFocusOutboxIdRef.current = null;
     setTaskViews([]);
     setSelectedTaskView(null);
+    setFocusedOutboxId(null);
     setEvidenceItems([]);
     setEvidenceError(null);
     setEvidenceLoading(false);
@@ -537,6 +559,52 @@ export function MobileAutomationPanel({
       resetMobileRuntimeSnapshotStore();
     }
   }, [loadRuntimeSnapshot, loadTasks, project?.id]);
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   Attention 跳转到 automation 后需要在列表加载完成时聚焦 task 或 outbox；找不到则回报 missing。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   在非 loading 时匹配 focusTaskId/focusOutboxId；成功选中详情或高亮 outbox，失败回调 onFocusResult(missing)。
+   */
+  useEffect(() => {
+    if (loading) return;
+    if (!project?.id) return;
+
+    if (focusTaskId && appliedFocusTaskIdRef.current !== focusTaskId) {
+      appliedFocusTaskIdRef.current = focusTaskId;
+      const match = taskViews.find(
+        (view) => view.origin !== 'pendingRemote' && view.task.id === focusTaskId,
+      );
+      if (match) {
+        setSelectedTaskView(match);
+        onFocusResult?.({ status: 'found', entity: 'task', id: focusTaskId });
+      } else {
+        setSelectedTaskView(null);
+        onFocusResult?.({ status: 'missing', entity: 'task', id: focusTaskId });
+      }
+    }
+
+    if (focusOutboxId && appliedFocusOutboxIdRef.current !== focusOutboxId) {
+      appliedFocusOutboxIdRef.current = focusOutboxId;
+      const match = pendingRemoteItems.find((item) => item.id === focusOutboxId);
+      if (match) {
+        setFocusedOutboxId(focusOutboxId);
+        onFocusResult?.({ status: 'found', entity: 'outbox', id: focusOutboxId });
+      } else {
+        setFocusedOutboxId(null);
+        onFocusResult?.({ status: 'missing', entity: 'outbox', id: focusOutboxId });
+      }
+    }
+  }, [
+    focusOutboxId,
+    focusTaskId,
+    loading,
+    onFocusResult,
+    pendingRemoteItems,
+    project?.id,
+    taskViews,
+  ]);
 
   useEffect(() => {
     const projectId = activeProjectIdRef.current;
@@ -590,6 +658,77 @@ export function MobileAutomationPanel({
     void loadTasks(projectId);
     void loadRuntimeSnapshot(projectId);
   }, [loadRuntimeSnapshot, loadTasks]);
+
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机 Automation 面板对 failed outbox 点 Retry 时，应在本机把条目回到 pending、刷新列表，
+   *   并立即失效全局 Inbox 投影。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验 project 与 busy 状态，调用 httpOrchestratorTransport.outbox.retry，
+   *   成功后 loadTasks 并 requestAttentionInvalidation。
+   */
+  const handleRetryRemoteOutbox = useCallback(
+    async (outboxId: string): Promise<void> => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || outboxActionId) return;
+      setOutboxActionId(outboxId);
+      setError(null);
+      try {
+        await httpOrchestratorTransport.outbox.retry(projectId, outboxId);
+        if (activeProjectIdRef.current !== projectId) return;
+        await loadTasks(projectId);
+        requestAttentionInvalidation();
+      } catch (reason) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setError(
+          `${t('workbench:mobile.automationPanel.errors.retryOutbox')}: ${getErrorMessage(reason)}`,
+        );
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setOutboxActionId(null);
+        }
+      }
+    },
+    [loadTasks, outboxActionId, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机 Automation 面板对 failed outbox 点 Discard 时，需要确认后进入 discarded 审计终态，
+   *   并从 Inbox 移除对应 failed outbox 投影。
+   *
+   * Code Logic（这个函数做什么）:
+   *   window.confirm 后调用 outbox.discard，成功后 loadTasks 并 requestAttentionInvalidation。
+   */
+  const handleDiscardRemoteOutbox = useCallback(
+    async (outboxId: string): Promise<void> => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || outboxActionId) return;
+      const confirmed = window.confirm(t('workbench:mobile.automationPanel.pendingDiscardConfirm'));
+      if (!confirmed) return;
+      setOutboxActionId(outboxId);
+      setError(null);
+      try {
+        await httpOrchestratorTransport.outbox.discard(projectId, outboxId);
+        if (activeProjectIdRef.current !== projectId) return;
+        await loadTasks(projectId);
+        requestAttentionInvalidation();
+      } catch (reason) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setError(
+          `${t('workbench:mobile.automationPanel.errors.discardOutbox')}: ${getErrorMessage(reason)}`,
+        );
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setOutboxActionId(null);
+        }
+      }
+    },
+    [loadTasks, outboxActionId, t],
+  );
+
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -981,7 +1120,13 @@ export function MobileAutomationPanel({
                 </div>
                 <div className={styles.mobileList}>
                   {pendingRemoteItems.map((item) => (
-                    <article key={item.id} className={styles.mobileListItem}>
+                    <article
+                      key={item.id}
+                      className={`${styles.mobileListItem} ${
+                        focusedOutboxId === item.id ? styles.mobileListItemActive : ''
+                      }`}
+                      data-attention-outbox={focusedOutboxId === item.id ? 'true' : undefined}
+                    >
                       <div className={styles.mobileListTitleRow}>
                         <strong className={styles.mobileListTitle}>
                           {pendingRemoteTaskTitle(item)}
@@ -1011,6 +1156,30 @@ export function MobileAutomationPanel({
                           {t('workbench:mobile.automationPanel.origin.pending')}
                         </span>
                       </div>
+                      {item.status === 'failed' ? (
+                        <div className={styles.mobileBadgeRow}>
+                          <button
+                            type="button"
+                            className={styles.secondaryButton}
+                            disabled={outboxActionId !== null}
+                            onClick={() => {
+                              void handleRetryRemoteOutbox(item.id);
+                            }}
+                          >
+                            {t('workbench:mobile.automationPanel.pendingRetry')}
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.secondaryButton}
+                            disabled={outboxActionId !== null}
+                            onClick={() => {
+                              void handleDiscardRemoteOutbox(item.id);
+                            }}
+                          >
+                            {t('workbench:mobile.automationPanel.pendingDiscard')}
+                          </button>
+                        </div>
+                      ) : null}
                     </article>
                   ))}
                 </div>

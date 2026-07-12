@@ -10,10 +10,11 @@
 
 use crate::commands::orchestrator::{
     build_orchestrator_task_row, create_orchestrator_task_view_for_http,
-    dispatch_orchestrator_best_effort, ensure_reviewed_delivery_allowed,
-    get_orchestrator_runtime_snapshot_for_project, get_orchestrator_runtime_snapshot_for_state,
-    list_orchestrator_task_views_for_state, run_delivery_for_task, CreateOrchestratorTaskRequest,
-    OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
+    discard_orchestrator_remote_outbox_for_repos, dispatch_orchestrator_best_effort,
+    ensure_reviewed_delivery_allowed, get_orchestrator_runtime_snapshot_for_project,
+    get_orchestrator_runtime_snapshot_for_state, list_orchestrator_task_views_for_state,
+    retry_orchestrator_remote_outbox_for_repos, run_delivery_for_task,
+    CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
 };
 use crate::commands::prompt_optimizer::{
     local_complete_orchestrator_task_prompt, OrchestratorTaskPromptCompletionDto,
@@ -27,6 +28,7 @@ use crate::orchestrator::models::{
     OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus,
 };
 use crate::orchestrator::outbox::open_remote_project_for_shortcut;
+use crate::orchestrator::outbox::OrchestratorRemoteOutboxDto;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::{
     MobileRuntimeSnapshotReq, RemoteCompleteOrchestratorTaskPromptReq,
@@ -41,7 +43,7 @@ use crate::storage::WorkbenchProjectRepo;
 use crate::workbench::models::WorkbenchProjectRow;
 use axum::extract::{Extension, State};
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
 /// Orchestrator 远端 route 需要的共享状态子集。
@@ -834,6 +836,99 @@ pub async fn get_config(
 ) -> P2pResult<Json<RemoteOrchestratorConfigResp>> {
     let context = OrchestratorRouteContext::from_app_state(&state);
     Ok(Json(get_config_for_state(&context)))
+}
+
+/// Mobile HTTP 本机 failed outbox 动作请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     手机 Automation 面板的 Retry/Discard 需要绑定当前 remote shortcut 与 outbox 行，
+///     outbox 只存在于当前 cc-partner 设备，不能代理到远端 owner。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase 接收 `{projectId,outboxId}`。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileRemoteOutboxActionReq {
+    pub project_id: String,
+    pub outbox_id: String,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     手机端对 failed outbox 点 Retry 时，必须复用与 Tauri 相同的本机归属校验与 failed-only 转移。
+///
+/// Code Logic（这个函数做什么）:
+///     从 AppState 取仓储，委托 retry_orchestrator_remote_outbox_for_repos，返回 camelCase DTO。
+pub async fn retry_remote_outbox(
+    State(state): State<AppState>,
+    Json(req): Json<MobileRemoteOutboxActionReq>,
+) -> Result<Json<OrchestratorRemoteOutboxDto>, AppError> {
+    Ok(Json(
+        retry_orchestrator_remote_outbox_for_repos(
+            state.orchestrator_repo.as_ref(),
+            state.workbench_project_repo.as_ref(),
+            &req.project_id,
+            &req.outbox_id,
+        )
+        .await?,
+    ))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     手机端对 failed outbox 点 Discard 时，必须复用与 Tauri 相同的本机归属校验与 failed-only 转移。
+///
+/// Code Logic（这个函数做什么）:
+///     从 AppState 取仓储，委托 discard_orchestrator_remote_outbox_for_repos，返回 camelCase DTO。
+pub async fn discard_remote_outbox(
+    State(state): State<AppState>,
+    Json(req): Json<MobileRemoteOutboxActionReq>,
+) -> Result<Json<OrchestratorRemoteOutboxDto>, AppError> {
+    Ok(Json(
+        discard_orchestrator_remote_outbox_for_repos(
+            state.orchestrator_repo.as_ref(),
+            state.workbench_project_repo.as_ref(),
+            &req.project_id,
+            &req.outbox_id,
+        )
+        .await?,
+    ))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     route 测试需要与 retry handler 相同的仓储路径，验证 HTTP 层不会递归代理。
+///
+/// Code Logic（这个函数做什么）:
+///     从 route context 的仓储直接调用共享 helper；仅测试使用。
+#[cfg(test)]
+async fn retry_remote_outbox_for_context(
+    context: &OrchestratorRouteContext,
+    req: MobileRemoteOutboxActionReq,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    retry_orchestrator_remote_outbox_for_repos(
+        context.orchestrator_repo.as_ref(),
+        context.workbench_project_repo.as_ref(),
+        &req.project_id,
+        &req.outbox_id,
+    )
+    .await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     route 测试需要与 discard handler 相同的仓储路径。
+///
+/// Code Logic（这个函数做什么）:
+///     从 route context 的仓储直接调用共享 helper；仅测试使用。
+#[cfg(test)]
+async fn discard_remote_outbox_for_context(
+    context: &OrchestratorRouteContext,
+    req: MobileRemoteOutboxActionReq,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    discard_orchestrator_remote_outbox_for_repos(
+        context.orchestrator_repo.as_ref(),
+        context.workbench_project_repo.as_ref(),
+        &req.project_id,
+        &req.outbox_id,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1729,5 +1824,151 @@ mod tests {
         .await
         .expect_err("remote shortcut must be rejected on owning-device route");
         assert_eq!(rejected.to_string(), "远端 Orchestrator 只接受对端本机项目");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Mobile outbox retry route 必须校验 project 归属、failed-only，并返回 camelCase DTO，
+    ///     且 outbox 行只在本机处理，不转发远端。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 remote shortcut 与 failed outbox，调用 context helper 断言 pending 与 request_json 保留。
+    #[tokio::test]
+    async fn mobile_outbox_retry_route_is_local_failed_only_and_camel_case() {
+        let state = test_state().await;
+        let mut project = project_row_with_kind("remote");
+        project.id = "shortcut-1".to_string();
+        project.device_id = "device-a".to_string();
+        project.device_name = "Mac mini".to_string();
+        project.path = "/Users/hans/remote-project".to_string();
+        state
+            .workbench_project_repo
+            .upsert(&project)
+            .await
+            .expect("upsert remote shortcut");
+        let request_json = r#"{"projectId":"x","title":"t","goal":"g","acceptanceCriteria":"a","priority":0,"createAction":"backlog","clientRequestId":"req-http-1"}"#;
+        let item = state
+            .orchestrator_repo
+            .insert_remote_outbox_pending(
+                "device-a",
+                "Mac mini",
+                "/Users/hans/remote-project",
+                None,
+                request_json,
+            )
+            .await
+            .expect("insert outbox");
+        let claimed = state
+            .orchestrator_repo
+            .claim_remote_outbox_item_as_sending(&item.id)
+            .await
+            .expect("claim")
+            .expect("claimed");
+        state
+            .orchestrator_repo
+            .mark_remote_outbox_failed(&claimed.id, "协议错误")
+            .await
+            .expect("failed");
+
+        let dto = retry_remote_outbox_for_context(
+            &state,
+            MobileRemoteOutboxActionReq {
+                project_id: "shortcut-1".to_string(),
+                outbox_id: claimed.id.clone(),
+            },
+        )
+        .await
+        .expect("retry");
+        assert_eq!(dto.status.as_str(), "pending");
+        assert_eq!(dto.request_json, request_json);
+        assert!(dto.last_error.is_none());
+
+        let json = serde_json::to_value(&dto).expect("json");
+        assert!(json.get("outboxId").is_none());
+        assert!(json.get("deviceId").is_some());
+        assert!(json.get("requestJson").is_some());
+
+        let wrong = retry_remote_outbox_for_context(
+            &state,
+            MobileRemoteOutboxActionReq {
+                project_id: "shortcut-1".to_string(),
+                outbox_id: claimed.id.clone(),
+            },
+        )
+        .await
+        .expect_err("pending cannot retry");
+        assert!(wrong.to_string().contains("失败"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Mobile outbox discard route 必须拒绝错误项目快捷方式，并在 failed 时进入 discarded。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 failed outbox，错误 path 的 shortcut 拒绝；正确 shortcut discard 成功。
+    #[tokio::test]
+    async fn mobile_outbox_discard_route_rejects_wrong_project_and_discards_failed() {
+        let state = test_state().await;
+        let mut project = project_row_with_kind("remote");
+        project.id = "shortcut-1".to_string();
+        project.device_id = "device-a".to_string();
+        project.device_name = "Mac mini".to_string();
+        project.path = "/Users/hans/remote-project".to_string();
+        state
+            .workbench_project_repo
+            .upsert(&project)
+            .await
+            .expect("upsert");
+        let mut other = project.clone();
+        other.id = "shortcut-2".to_string();
+        other.path = "/other".to_string();
+        state
+            .workbench_project_repo
+            .upsert(&other)
+            .await
+            .expect("other");
+        let item = state
+            .orchestrator_repo
+            .insert_remote_outbox_pending(
+                "device-a",
+                "Mac mini",
+                "/Users/hans/remote-project",
+                None,
+                r#"{"clientRequestId":"req-http-2","projectId":"x","title":"t","goal":"g","acceptanceCriteria":"a","priority":0,"createAction":"backlog"}"#,
+            )
+            .await
+            .expect("insert");
+        let claimed = state
+            .orchestrator_repo
+            .claim_remote_outbox_item_as_sending(&item.id)
+            .await
+            .expect("claim")
+            .expect("claimed");
+        state
+            .orchestrator_repo
+            .mark_remote_outbox_failed(&claimed.id, "协议错误")
+            .await
+            .expect("failed");
+
+        let wrong = discard_remote_outbox_for_context(
+            &state,
+            MobileRemoteOutboxActionReq {
+                project_id: "shortcut-2".to_string(),
+                outbox_id: claimed.id.clone(),
+            },
+        )
+        .await
+        .expect_err("wrong project");
+        assert!(wrong.to_string().contains("不属于当前项目"));
+
+        let dto = discard_remote_outbox_for_context(
+            &state,
+            MobileRemoteOutboxActionReq {
+                project_id: "shortcut-1".to_string(),
+                outbox_id: claimed.id.clone(),
+            },
+        )
+        .await
+        .expect("discard");
+        assert_eq!(dto.status.as_str(), "discarded");
+        assert_eq!(dto.last_error.as_deref(), Some("协议错误"));
     }
 }

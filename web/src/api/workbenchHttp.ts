@@ -10,6 +10,7 @@
 
 import type {
   OrchestratorEvidence,
+  OrchestratorRemoteOutboxItem,
   OrchestratorRuntimeSnapshot,
   OrchestratorTask,
   OrchestratorTaskPromptCompletion,
@@ -141,13 +142,40 @@ export async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 /**
+ * getJson 可选参数。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   Attention mobile loader 等场景需要 AbortSignal / 超时，避免半开连接永久挂起。
+ *
+ * Code Logic（字段说明）:
+ *   signal 透传 fetch；timeoutMs 若给定且未传 signal，则内部 AbortController 超时 abort。
+ */
+export interface GetJsonOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+/**
  * Business Logic（为什么需要这个函数）:
- *   少量 Workbench/mobile routes 使用 GET，移动端需要与 POST helper 一致的错误处理。
+ *   少量 Workbench/mobile routes 使用 GET，移动端需要与 POST helper 一致的错误处理；
+ *   Attention 等路径还需要可选超时，防止无响应后端锁死 Inbox single-flight。
  *
  * Code Logic（这个函数做什么）:
- *   发起同源 GET 请求，成功时解析 JSON，失败时读取 JSON error/message 或文本后抛 Error。
+ *   发起同源 GET；可选 AbortSignal / timeoutMs（超时 abort）；
+ *   成功解析 JSON，失败读 JSON error/message 或文本后抛 Error。
  */
-export async function getJson<T>(path: string): Promise<T> {
+export async function getJson<T>(path: string, options: GetJsonOptions = {}): Promise<T> {
+  const { signal: externalSignal, timeoutMs } = options;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let controller: AbortController | null = null;
+  let signal = externalSignal;
+
+  if (typeof timeoutMs === 'number' && timeoutMs > 0 && !externalSignal) {
+    controller = new AbortController();
+    signal = controller.signal;
+    timeoutId = setTimeout(() => controller?.abort(), timeoutMs);
+  }
+
   let response: Response;
   try {
     response = await fetch(path, {
@@ -155,9 +183,14 @@ export async function getJson<T>(path: string): Promise<T> {
       headers: {
         Accept: 'application/json',
       },
+      signal,
     });
   } catch (reason) {
     throw toOrchestratorRuntimeTransportError(reason, 'network');
+  } finally {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
   }
   return parseJsonResponse<T>(response);
 }
@@ -266,6 +299,26 @@ export const httpOrchestratorTransport = {
    * Code Logic（这个函数做什么）:
    *   POST `/api/mobile/orchestrator/runtime-snapshot`，body `{projectId}`，返回 camelCase snapshot DTO。
    */
+
+  /**
+   * Business Logic（为什么需要这个对象）:
+   *   手机 Automation 面板需要对本机 failed outbox 执行 Retry/Discard，且只打本机同源 HTTP。
+   *
+   * Code Logic（这个对象做什么）:
+   *   POST `/api/orchestrator/outbox/{retry,discard}`，body `{projectId,outboxId}`，返回 outbox DTO。
+   */
+  outbox: {
+    retry: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
+      postJson<OrchestratorRemoteOutboxItem>('/api/orchestrator/outbox/retry', {
+        projectId,
+        outboxId,
+      }),
+    discard: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
+      postJson<OrchestratorRemoteOutboxItem>('/api/orchestrator/outbox/discard', {
+        projectId,
+        outboxId,
+      }),
+  },
   getRuntimeSnapshot: (projectId: string): Promise<OrchestratorRuntimeSnapshot> =>
     postJson<OrchestratorRuntimeSnapshot>('/api/mobile/orchestrator/runtime-snapshot', {
       projectId,

@@ -28,7 +28,11 @@ Every route is assigned exactly one class:
 `src-tauri/src/net/protocol.rs`). New routes that depend on a wire-format
 change must add a capability constant, advertise it in `server_protocol_info()`,
 and gate the client call behind `PeerProtocolInfo::supports(...)`. The current
-advertised capability is `errors.envelope.v1`.
+advertised capabilities are:
+
+- `attention.v1` — Mobile Attention snapshot (`GET /api/mobile/attention`)
+- `errors.envelope.v1` — standard error envelope wire format
+- `orchestrator.runtime-snapshot.v1` — owning-device runtime snapshot route
 
 ### Semantics of `errors.envelope.v1` (important)
 
@@ -44,14 +48,15 @@ route access or route existence. Concretely:
   Confirming route existence is a separate concern (health/version probe or
   handling 404). Do not use `supports("errors.envelope.v1")` as a proxy for
   "new routes are available".
-- This is the only v1 capability advertised today. Future capabilities (Runtime
-  notifications, Inbox, …) will ship as **independent** tokens alongside their
-  own routes and must not reuse this token to mean "new routes supported".
+- Route-specific capabilities (`attention.v1`, `orchestrator.runtime-snapshot.v1`,
+  …) ship as **independent** tokens alongside their own routes and must not reuse
+  `errors.envelope.v1` to mean "new routes supported".
 
 The existing capability gate (`peer_client::require_capability`) is therefore a
-**format** gate, not an authorization gate: it lets a caller avoid sending a
-v1-envelope-dependent request to a v0 peer that would only return a legacy
-error. It does not restrict which routes a peer may call.
+**format** gate when used with `errors.envelope.v1`, and a **route** gate when
+used with route-specific tokens: it lets a caller avoid sending a request the
+peer cannot serve. It does not restrict which routes a peer may call beyond the
+capability contract.
 
 ## Route inventory
 
@@ -64,6 +69,7 @@ the router so the inventory check matches exactly.
 | GET | `/api/health` | `routes/health.rs` | none | read-only | — |
 | POST | `/api/backend/control/stop` | `http_server.rs` | signals local `serve` shutdown via control-token gate | no-transport-retry | `controlToken` must match control file; retry after timeout can hit a recycled port |
 | GET | `/api/mobile/access-info` | `routes/mobile.rs` | none | read-only | — |
+| GET | `/api/mobile/attention` | `routes/attention.rs` | none; aggregates local Attention snapshot | read-only | capability-gated by `attention.v1`; reuses `list_attention_items_for_state`; may refresh each remote owning device once via orchestrator source, never recursively asks another device to aggregate attention |
 | POST | `/api/sync/pull` | `routes/sync.rs` | none; returns rows the caller is missing | read-only | vector-clock comparison only reads local DB |
 | POST | `/api/sync/push` | `routes/sync.rs` | upserts prompt rows after vector-clock merge | naturally-idempotent | `sync_push_impl` re-merges each row; `bulk_upsert` with merged clock converges on replay |
 | POST | `/api/sync/claude_md/pull` | `routes/claude_md_sync.rs` | none; returns the singleton row | read-only | — |
@@ -157,6 +163,8 @@ the router so the inventory check matches exactly.
 | POST | `/api/orchestrator/tasks/list` | `routes/orchestrator.rs` | none | read-only | — |
 | POST | `/api/orchestrator/task-views/list` | `routes/orchestrator.rs` | none | read-only | — |
 | POST | `/api/orchestrator/task-views/create` | `routes/orchestrator.rs` | creates mobile task view (local project row, pending outbox, or remote mirror) | requires-idempotency-key | preserves `clientRequestId` via `create_orchestrator_task_view_for_http`; pending outbox keeps the same key |
+| POST | `/api/orchestrator/outbox/retry` | `routes/orchestrator.rs` | failed outbox → pending on current device only | naturally-idempotent | failed-only SQL guard via `retry_failed_remote_outbox_item`; ownership checked against local remote shortcut |
+| POST | `/api/orchestrator/outbox/discard` | `routes/orchestrator.rs` | failed outbox → discarded audit on current device only | naturally-idempotent | failed-only SQL guard via `discard_failed_remote_outbox_item`; ownership checked against local remote shortcut |
 | POST | `/api/orchestrator/tasks/evidence` | `routes/orchestrator.rs` | none; reads evidence list | read-only | — |
 | POST | `/api/orchestrator/tasks/queue` | `routes/orchestrator.rs` | atomic Draft→Queued transition | no-transport-retry | Orchestrator lifecycle action; replay after timeout races the scheduler claim |
 | POST | `/api/orchestrator/tasks/start` | `routes/orchestrator.rs` | moves task into scheduler path + best-effort dispatch | no-transport-retry | Orchestrator lifecycle action |

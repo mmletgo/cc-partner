@@ -136,8 +136,23 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     workbenchSource,
-    '<OrchestratorPanel embedded onOpenWorkbench={handleOpenAutomationTaskWorkbench} />',
+    '<OrchestratorPanel',
     'mounted automation layer should contain the embedded Orchestrator UI',
+  );
+  assertContains(
+    workbenchSource,
+    'onOpenWorkbench={handleOpenAutomationTaskWorkbench}',
+    'embedded Orchestrator should hand open-workbench back to Workbench',
+  );
+  assertContains(
+    workbenchSource,
+    'focusTaskId={automationFocusTaskId}',
+    'Attention automation deep links should pass focusTaskId into OrchestratorPanel',
+  );
+  assertContains(
+    workbenchSource,
+    'focusOutboxId={automationFocusOutboxId}',
+    'Attention automation deep links should pass focusOutboxId into OrchestratorPanel',
   );
   assertNotContains(
     workbenchSource,

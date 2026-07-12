@@ -67,15 +67,16 @@ cc-partner/
 │   │   │   ├── Transfer/         # 02-transfer.html
 │   │   │   ├── Prompts/          # 03-prompts.html
 │   │   │   ├── PromptOptimizer/  # Prompt 优化（本机 Claude CLI pure/headless）
+│   │   │   ├── Attention/        # 全局 Inbox（/attention）：实时阻塞投影，只导航不动作
 │   │   │   ├── Workbench/        # 本机/远端项目文件夹 + 多项目终端 + 文件树/文件工作区 + Git 提交树 + 自动化工作区
 │   │   │   ├── Orchestrator/     # 自动编排器可嵌入面板；旧路由重定向 Workbench
 │   │   │   ├── Devices/          # 04-devices.html
 │   │   │   ├── Settings/         # 05-settings.html
 │   │   │   ├── Welcome/          # 06-welcome.html
 │   │   │   └── DesignSystem/     # 🆕 设计系统预览（仅 dev）
-│   │   ├── api/                  # HTTP 客户端（fetch 封装）
-│   │   ├── hooks/                # 自定义 hooks（useTheme 等）
-│   │   ├── lib/                  # 通用工具 + icon 库
+│   │   ├── api/                  # HTTP 客户端（fetch 封装；含 attention / attentionHttp）
+│   │   ├── hooks/                # 自定义 hooks（useTheme、AttentionProvider、attentionInvalidation 等）
+│   │   ├── lib/                  # 通用工具 + icon 库（含 attention pure helpers）
 │   │   └── assets/
 │   ├── public/
 │   ├── index.html
@@ -83,8 +84,9 @@ cc-partner/
 │   ├── tsconfig.json
 │   └── package.json
 ├── src-tauri/                    # Tauri 2 Rust 后端（见 src-tauri/CLAUDE.md）
-│   ├── src/                      # lib.rs(入口) config/state/error/commands/models/storage/sync/net/transfer/screenshot/workbench/orchestrator/permissions/hotkey/tray
+│   ├── src/                      # lib.rs(入口) config/state/error/commands/models/storage/sync/net/transfer/screenshot/workbench/orchestrator/attention/permissions/hotkey/tray
 │   │   ├── backend/              # GUI/headless 共享运行时、独立后端 CLI lifecycle/control 和 UI adapter
+│   │   ├── attention/            # 全局 Inbox 聚合（无持久化表；source/aggregator）
 │   │   └── orchestrator/         # 自动编排器任务、调度、Runner 和交付逻辑
 │   ├── migrations/               # SQL schema 文档
 │   ├── capabilities/             # Tauri 权限清单（default.json）

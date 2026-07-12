@@ -48,6 +48,62 @@ export interface PromptOptimizerSettingsForm {
 /** 健康提醒 tab 的受控表单值;与 HealthConfig 同构,直接整体提交给 update_health_config。 */
 export type HealthForm = HealthConfig;
 
+/** Settings 页内子 tab id（与 Settings.tsx SETTINGS_TABS 对齐）。 */
+export type SettingsTabId =
+  | 'general'
+  | 'dependencies'
+  | 'health'
+  | 'sync'
+  | 'ai'
+  | 'automation'
+  | 'about';
+
+/** 合法 Settings tab 集合。 */
+export const SETTINGS_TAB_IDS: readonly SettingsTabId[] = [
+  'general',
+  'dependencies',
+  'health',
+  'sync',
+  'ai',
+  'automation',
+  'about',
+] as const;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Settings 深链与 Attention 跳转依赖 ?tab= 参数；未知值必须回退 general，避免空白面板。
+ *
+ * Code Logic（这个函数做什么）:
+ *   校验 raw 是否为已知 SettingsTabId，否则返回 fallback（默认 general）。
+ */
+export function resolveSettingsTabId(
+  raw: string | null | undefined,
+  fallback: SettingsTabId = 'general',
+): SettingsTabId {
+  if (!raw) return fallback;
+  return (SETTINGS_TAB_IDS as readonly string[]).includes(raw)
+    ? (raw as SettingsTabId)
+    : fallback;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Settings 已挂载时 location.search 变化（含 Attention 跳转）必须同步 activeTab，不能只读初始值。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从 search 字符串读取 tab 并 resolve；供 effect / 测试复用。
+ */
+export function parseSettingsTabFromSearch(
+  search: string,
+  fallback: SettingsTabId = 'general',
+): SettingsTabId {
+  const params = new URLSearchParams(
+    search === '' || search.startsWith('?') ? search : `?${search}`,
+  );
+  return resolveSettingsTabId(params.get('tab'), fallback);
+}
+
+
 /** 可提交到 update_config 的 Settings 字段。 */
 export type SettingsConfigUpdate = Partial<Pick<AppConfig, 'deviceName' | 'receiveDir' | 'screenshotHotkey'>>;
 

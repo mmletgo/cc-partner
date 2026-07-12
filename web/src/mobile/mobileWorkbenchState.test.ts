@@ -187,14 +187,32 @@ describe('mobileWorkbenchState', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
+   *   全局 Inbox 在移动端必须是导航第二项：projects→attention→automation→terminal，默认首屏仍是 projects。
+   *
+   * Code Logic（这个测试做什么）:
+   *   断言初始面板为 projects，完整顺序以 projects/attention/automation/terminal 开头。
+   */
+  test('attention is second nav item and never the default panel', () => {
+    const panels = getMobileWorkbenchPanelOrder();
+
+    assertEqual(getInitialMobileWorkbenchPanel(), 'projects');
+    assertEqual(panels[0], 'projects');
+    assertEqual(panels[1], 'attention');
+    assertEqual(panels[2], 'automation');
+    assertEqual(panels[3], 'terminal');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
    *   Browser preview 是移动端 Workbench 的一等面板，必须固定在 terminal 后、files 前，避免后续导航调整破坏功能入口。
    *
    * Code Logic（这个测试做什么）:
-   *   读取移动端面板顺序 helper，并逐项断言完整顺序包含 browser。
+   *   读取移动端面板顺序 helper，并逐项断言完整顺序包含 browser 与 attention。
    */
   test('mobile workbench panel order includes browser preview', () => {
     assertArrayEqual(getMobileWorkbenchPanelOrder(), [
       'projects',
+      'attention',
       'automation',
       'terminal',
       'browser',

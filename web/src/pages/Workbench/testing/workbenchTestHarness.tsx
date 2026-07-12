@@ -31,6 +31,8 @@ import type { WorkbenchProjectsContextValue } from '@/hooks/workbenchProjectsCon
 import { WorkbenchDependencyContext } from '@/hooks/workbenchDependencyContext';
 import type { WorkbenchDependencyContextValue } from '@/hooks/workbenchDependencyContext';
 import { WorkbenchTerminalBuffersProvider } from '@/hooks/useWorkbenchTerminalBuffers';
+import { AttentionProvider } from '@/hooks/useAttention';
+import type { AttentionSnapshot } from '@/lib/types';
 import type {
   PromptOptimizerFillLanguage,
   WorkbenchFileNode,
@@ -475,6 +477,7 @@ export function buildDefaultInvokeHandler(data: {
           installCommandPreview: [],
           error: null,
           output: [],
+          statusChangedAt: '2026-07-12T00:00:00.000Z',
         };
       case 'get_config':
         return {
@@ -575,6 +578,7 @@ export function buildDependencyContextValue(
       installCommandPreview: [],
       error: null,
       output: [],
+      statusChangedAt: '2026-07-12T00:00:00.000Z',
     },
     checking: false,
     installing: false,
@@ -717,6 +721,13 @@ export interface RenderedWorkbench {
  * Code Logic: 用一个内部 stateful 包装组件持有 projects/dependency value，rerender 时不重建 Workbench，
  * 保留 ref/effect 连续性，便于断言 stale guard、focus 同步等时序行为。
  */
+
+const emptyAttentionSnapshot = async (): Promise<AttentionSnapshot> => ({
+  generatedAt: '2026-07-11T00:00:00.000Z',
+  counts: { total: 0, decision: 0, blocked: 0, environment: 0 },
+  items: [],
+});
+
 export function renderWorkbench(
   projectsValue: WorkbenchProjectsContextValue,
   dependencyValue: WorkbenchDependencyContextValue,
@@ -737,7 +748,11 @@ export function renderWorkbench(
       >
         <WorkbenchProjectsContext.Provider value={projects}>
           <WorkbenchDependencyContext.Provider value={dependency}>
-            <WorkbenchTerminalBuffersProvider>{<Workbench />}</WorkbenchTerminalBuffersProvider>
+            <WorkbenchTerminalBuffersProvider>
+              <AttentionProvider loadSnapshot={emptyAttentionSnapshot}>
+                <Workbench />
+              </AttentionProvider>
+            </WorkbenchTerminalBuffersProvider>
           </WorkbenchDependencyContext.Provider>
         </WorkbenchProjectsContext.Provider>
       </MemoryRouter>

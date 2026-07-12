@@ -1,15 +1,17 @@
 import { describe, test } from 'vitest';
 import type { AppConfig, HealthConfig } from '../../lib/types';
 import {
+  PENDING_HEALTH_FORM,
   buildConfigUpdate,
-  cloudSyncFormToUpdate,
   cloudSyncConfigToForm,
+  cloudSyncFormToUpdate,
   githubTrendingConfigToForm,
   healthConfigToForm,
   isSettingsStateDirty,
-  PENDING_HEALTH_FORM,
+  parseSettingsTabFromSearch,
   promptOptimizerSettingsConfigToForm,
   promptOptimizerSettingsFormToUpdate,
+  resolveSettingsTabId,
   settingsStateFromConfig,
 } from './settingsState';
 
@@ -217,3 +219,27 @@ function testHealthConfigToFormConfig(): void {
   });
   assertNotSameRef(form, cfg);
 }
+
+
+describe('settings tab deep link helpers', () => {
+  test('resolves known tabs and falls back for unknown', () => {
+    if (resolveSettingsTabId('dependencies') !== 'dependencies') {
+      throw new Error('expected dependencies');
+    }
+    if (resolveSettingsTabId('nope', 'general') !== 'general') {
+      throw new Error('expected fallback general');
+    }
+  });
+
+  test('parses tab from search including while remounted query changes', () => {
+    if (parseSettingsTabFromSearch('?tab=dependencies') !== 'dependencies') {
+      throw new Error('expected dependencies from search');
+    }
+    if (parseSettingsTabFromSearch('?tab=automation') !== 'automation') {
+      throw new Error('expected automation from search');
+    }
+    if (parseSettingsTabFromSearch('?tab=unknown') !== 'general') {
+      throw new Error('expected unknown to fall back');
+    }
+  });
+});
