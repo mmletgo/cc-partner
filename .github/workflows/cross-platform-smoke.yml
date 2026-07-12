@@ -120,6 +120,8 @@ jobs:
             # 日志轮转/脱敏/平台 mode 与 Windows close-before-rename（Task 7）
             cargo test --locked backend::logging::tests -- --nocapture
             cargo test --locked backend::doctor::tests -- --nocapture
+            # Windows Job Object / CREATE_SUSPENDED / fail-closed 探测契约（含 windows_probe_job_*）
+            cargo test --locked workbench::dependencies::tests -- --nocapture
           } 2>&1 | tee "${{ runner.temp }}/cargo-logs/unit.log"
 
       - name: Backend CLI lifecycle smoke

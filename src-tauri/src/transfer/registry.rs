@@ -105,13 +105,13 @@ impl TransferRegistry {
         }
     }
 
-    /// 获取某 transfer_id 的 finalize 单飞锁（Finding 4）。
+    /// 获取某 transfer_id 的 chunk/finalize 单飞锁（Finding 4 + fix6）。
     ///
     /// Business Logic（为什么需要这个方法）:
-    ///     最后一块请求可能在传输层被重试，导致并发的两个 handle_chunk 都看到
-    ///     `new_transferred >= task.size` 并同时进入 finalize。单飞锁确保同一
-    ///     transfer_id 的 finalize 串行：第一个请求持锁完成 finalize（任务移除 + 写墓碑），
-    ///     第二个请求拿锁后再看 registry 已为空，直接走墓碑兜底返回第一次的成功结果。
+    ///     最后一块请求可能在传输层被重试。锁必须覆盖 re-read 任务/墓碑、open/write、
+    ///     进度更新与 finalize：若只在 finalize 前加锁，迟到请求可在 rename 后仍持旧 fd
+    ///     改写已校验文件。第一个请求持锁完成 finalize（任务移除 + 写墓碑），
+    ///     第二个请求拿锁后先命中墓碑，不得再 open 文件。
     ///
     /// Code Logic: 锁 map 用 std Mutex（无 await），按 id 取/建 Arc<AsyncMutex>（持锁跨越 await）。
     pub fn finalize_lock(&self, id: &str) -> Arc<AsyncMutex<()>> {

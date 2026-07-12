@@ -1280,60 +1280,52 @@ fn run_std_command_with_timeout_guarded(
     }
     // Windows：CREATE_SUSPENDED → AssignProcessToJobObject → ResumeThread，
     // 保证用户代码运行前根进程已在 Job 内，短命 wrapper 的后代不会逃逸。
+    // Job 创建/配置失败必须 fail closed：spawn 前返回 SpawnOrIo，绝不启动未受 Job 约束的探测。
     #[cfg(windows)]
-    let prepared_job = WindowsProbeJob::create().ok();
+    let prepared_job = match WindowsProbeJob::create() {
+        Ok(job) => job,
+        Err(err) => {
+            tracing::warn!(error = %err, "probe 未能创建 Job Object，拒绝启动未受约束探测");
+            return Err(ProbeCommandError::SpawnOrIo);
+        }
+    };
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // 仅当 Job 创建成功时才挂起；否则走普通 spawn + taskkill fallback。
-        if prepared_job.is_some() {
-            command.creation_flags(CREATE_SUSPENDED);
-        }
+        command.creation_flags(CREATE_SUSPENDED);
     }
     let mut child = command.spawn().map_err(|_| ProbeCommandError::SpawnOrIo)?;
     let deadline = Instant::now() + effective;
     let process_group_id = child.id();
     #[cfg(windows)]
     let probe_job: Option<Arc<WindowsProbeJob>> = {
-        match prepared_job {
-            Some(job) => {
-                // 挂起态绑定 Job；Assign/Resume 失败必须杀挂起根并返回错误，
-                // 不能带着永不 resume 的僵尸继续探测。
-                if let Err(err) = job.assign_child(&child) {
-                    tracing::warn!(
-                        pid = process_group_id,
-                        error = %err,
-                        "probe 未能 AssignProcessToJobObject"
-                    );
-                    kill_suspended_probe_child(&mut child);
-                    return Err(ProbeCommandError::SpawnOrIo);
-                }
-                if let Err(err) = resume_suspended_process(process_group_id) {
-                    tracing::warn!(
-                        pid = process_group_id,
-                        error = %err,
-                        "probe ResumeThread 失败，终止挂起根进程"
-                    );
-                    // Assign 已成功：用 job.terminate 清树，再 reap 根。
-                    let _ = job.terminate();
-                    kill_suspended_probe_child(&mut child);
-                    return Err(ProbeCommandError::SpawnOrIo);
-                }
-                let job = Arc::new(job);
-                if let Some(guard) = guard {
-                    guard.register_job(process_group_id, Arc::clone(&job));
-                }
-                Some(job)
-            }
-            None => {
-                // Job 创建失败：上面未设 CREATE_SUSPENDED，子进程已在跑；回退 taskkill。
-                tracing::warn!(
-                    pid = process_group_id,
-                    "probe 未能创建 Job Object，超时将回退 taskkill /T"
-                );
-                None
-            }
+        // 挂起态绑定 Job；Assign/Resume 失败必须杀挂起根并返回错误，
+        // 不能带着永不 resume 的僵尸继续探测。
+        if let Err(err) = prepared_job.assign_child(&child) {
+            tracing::warn!(
+                pid = process_group_id,
+                error = %err,
+                "probe 未能 AssignProcessToJobObject"
+            );
+            kill_suspended_probe_child(&mut child);
+            return Err(ProbeCommandError::SpawnOrIo);
         }
+        if let Err(err) = resume_suspended_process(process_group_id) {
+            tracing::warn!(
+                pid = process_group_id,
+                error = %err,
+                "probe ResumeThread 失败，终止挂起根进程"
+            );
+            // Assign 已成功：用 job.terminate 清树，再 reap 根。
+            let _ = prepared_job.terminate();
+            kill_suspended_probe_child(&mut child);
+            return Err(ProbeCommandError::SpawnOrIo);
+        }
+        let job = Arc::new(prepared_job);
+        if let Some(guard) = guard {
+            guard.register_job(process_group_id, Arc::clone(&job));
+        }
+        Some(job)
     };
     if let Some(guard) = guard {
         guard.register_child(process_group_id);
@@ -3189,6 +3181,22 @@ mod tests {
         assert!(
             production.contains("CREATE_SUSPENDED") && production.contains("creation_flags"),
             "必须 CREATE_SUSPENDED 挂起 spawn，用户代码运行前再 Assign"
+        );
+        // Job 创建失败必须 fail closed：spawn 前返回 SpawnOrIo，禁止 .ok() 吞错后走未挂起路径。
+        assert!(
+            !production
+                .split("fn run_std_command_with_timeout_guarded")
+                .nth(1)
+                .and_then(|rest| rest.split("fn terminate_probe_child").next())
+                .expect("应能切出 run_std_command_with_timeout_guarded")
+                .contains("WindowsProbeJob::create().ok()"),
+            "禁止 WindowsProbeJob::create().ok() 吞掉 Job 创建失败"
+        );
+        assert!(
+            production.contains("拒绝启动未受约束探测")
+                || production.contains("fail closed")
+                || production.contains("未能创建 Job Object，拒绝"),
+            "Job 创建失败必须在 spawn 前 fail closed"
         );
         assert!(
             production.contains("AssignProcessToJobObject"),

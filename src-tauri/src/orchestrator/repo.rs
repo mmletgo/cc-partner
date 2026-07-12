@@ -245,7 +245,9 @@ const ORCHESTRATOR_REMOTE_TASK_MIRROR_PROJECT_INDEX: &str =
 pub const ORCHESTRATOR_REMOTE_TASK_CREATE_REQUEST_SCHEMA: &str =
     "CREATE TABLE IF NOT EXISTS orchestrator_remote_task_create_requests (
   request_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL DEFAULT '',
   task_id TEXT NOT NULL,
+  request_fingerprint TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 )";
@@ -337,6 +339,8 @@ impl OrchestratorRepo {
         ] {
             sqlx::query(statement).execute(pool).await?;
         }
+        // 旧库仅有 request_id 主键时补齐 project_id / request_fingerprint，并把 project_id 回填为任务归属。
+        migrate_remote_task_create_request_scope(pool).await?;
         Ok(())
     }
 
@@ -396,11 +400,16 @@ impl OrchestratorRepo {
 
     /// Business Logic（为什么需要这个函数）:
     ///     远端 P2P create 请求可能在 owning device 已创建任务后响应超时，客户端会用同一 clientRequestId 重试。
-    ///     仓储必须把 requestId->taskId 与任务创建放在同一事务中，避免重复任务。
+    ///     仓储必须把 requestId->taskId 与任务创建放在同一事务中，避免重复任务；
+    ///     同时必须按 project 隔离幂等键，防止跨项目返回另一项目的任务内容。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在事务内先尝试登记非空 client_request_id；已存在则返回既有 task。首次登记后按 createAction
-    ///     映射 legacy/split state 并插入任务，最后读取并返回完整 Row。
+    ///     在事务内对非空 client_request_id：
+    ///     1) 按 request_id 查找既有映射；
+    ///     2) 映射的 project_id 与本次请求不一致 → conflict（跨项目不得复用）；
+    ///     3) 同项目且 fingerprint 匹配（或旧行空指纹）→ 返回既有 task；
+    ///     4) 同项目但 fingerprint 不同 → conflict；
+    ///     5) 首次登记写入 (request_id, project_id, fingerprint, task_id) 后插入任务。
     pub async fn create_remote_task_idempotent(
         &self,
         client_request_id: Option<&str>,
@@ -410,54 +419,63 @@ impl OrchestratorRepo {
         let client_request_id = client_request_id.and_then(non_empty_trimmed);
         let row_to_insert = task_row_for_create_action(row, create_action);
         let external_labels_json = serialize_external_labels(&row_to_insert.external_labels)?;
+        let request_fingerprint =
+            create_request_fingerprint(&row_to_insert, create_action, &external_labels_json)?;
         let mut tx = self.pool.begin().await?;
 
         if let Some(request_id) = client_request_id {
             if let Some(existing) = sqlx::query(
-                "SELECT task_id FROM orchestrator_remote_task_create_requests WHERE request_id = ?",
+                "SELECT project_id, task_id, request_fingerprint \
+                 FROM orchestrator_remote_task_create_requests WHERE request_id = ?",
             )
             .bind(request_id)
             .fetch_optional(&mut *tx)
             .await?
             {
-                let task_id: String = existing.try_get("task_id")?;
-                let task_row = sqlx::query(&format!(
-                    "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
-                ))
-                .bind(&task_id)
-                .fetch_one(&mut *tx)
+                let task = resolve_existing_create_request(
+                    &mut tx,
+                    request_id,
+                    &row_to_insert.project_id,
+                    &request_fingerprint,
+                    existing,
+                )
                 .await?;
                 tx.commit().await?;
-                return row_to_task(&task_row);
+                return Ok(task);
             }
 
             let now = Utc::now().to_rfc3339();
             let inserted = sqlx::query(
                 "INSERT OR IGNORE INTO orchestrator_remote_task_create_requests \
-                 (request_id, task_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                 (request_id, project_id, task_id, request_fingerprint, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(request_id)
+            .bind(&row_to_insert.project_id)
             .bind(&row_to_insert.id)
+            .bind(&request_fingerprint)
             .bind(&now)
             .bind(&now)
             .execute(&mut *tx)
             .await?;
             if inserted.rows_affected() != 1 {
                 let existing = sqlx::query(
-                    "SELECT task_id FROM orchestrator_remote_task_create_requests WHERE request_id = ?",
+                    "SELECT project_id, task_id, request_fingerprint \
+                     FROM orchestrator_remote_task_create_requests WHERE request_id = ?",
                 )
                 .bind(request_id)
                 .fetch_one(&mut *tx)
                 .await?;
-                let task_id: String = existing.try_get("task_id")?;
-                let task_row = sqlx::query(&format!(
-                    "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
-                ))
-                .bind(&task_id)
-                .fetch_one(&mut *tx)
+                let task = resolve_existing_create_request(
+                    &mut tx,
+                    request_id,
+                    &row_to_insert.project_id,
+                    &request_fingerprint,
+                    existing,
+                )
                 .await?;
                 tx.commit().await?;
-                return row_to_task(&task_row);
+                return Ok(task);
             }
         }
 
@@ -2638,6 +2656,133 @@ impl OrchestratorRepo {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     幂等键必须绑定项目与请求内容指纹，避免跨项目泄露任务 goal/acceptance，或同键不同 payload 静默复用旧任务。
+///
+/// Code Logic（这个函数做什么）:
+///     对 create 语义字段做稳定序列化后 SHA256，输出小写 hex 指纹。
+fn create_request_fingerprint(
+    row: &OrchestratorTaskRow,
+    create_action: OrchestratorCreateAction,
+    external_labels_json: &Option<String>,
+) -> Result<String, AppError> {
+    use sha2::{Digest, Sha256};
+
+    let action = match create_action {
+        OrchestratorCreateAction::Backlog => "backlog",
+        OrchestratorCreateAction::Todo => "todo",
+        OrchestratorCreateAction::Start => "start",
+    };
+    let labels = external_labels_json.as_deref().unwrap_or("");
+    let payload = format!(
+        "project_id={}\0title={}\0goal={}\0acceptance={}\0priority={}\0action={}\0source={}\0external_id={}\0external_identifier={}\0external_url={}\0external_state={}\0external_labels={}",
+        row.project_id,
+        row.title,
+        row.goal,
+        row.acceptance_criteria,
+        row.priority,
+        action,
+        row.source,
+        row.external_id.as_deref().unwrap_or(""),
+        row.external_identifier.as_deref().unwrap_or(""),
+        row.external_url.as_deref().unwrap_or(""),
+        row.external_state.as_deref().unwrap_or(""),
+        labels,
+    );
+    let digest = Sha256::digest(payload.as_bytes());
+    Ok(format!("{digest:x}"))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     幂等命中后必须校验项目与指纹，不能把 project A 的任务返回给 project B 或不同 payload。
+///
+/// Code Logic（这个函数做什么）:
+///     比对映射行的 project_id / request_fingerprint；通过后读取并返回既有 task。
+///     调用方负责 commit 事务（本函数不接管 Transaction 所有权）。
+async fn resolve_existing_create_request(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    request_id: &str,
+    project_id: &str,
+    request_fingerprint: &str,
+    existing: SqliteRow,
+) -> Result<OrchestratorTaskRow, AppError> {
+    let mapped_project_id: String = existing.try_get("project_id")?;
+    let task_id: String = existing.try_get("task_id")?;
+    let mapped_fingerprint: String = existing
+        .try_get::<String, _>("request_fingerprint")
+        .unwrap_or_default();
+
+    // 旧行可能 project_id 为空：回退到任务表归属做跨项目校验。
+    let effective_project_id = if mapped_project_id.trim().is_empty() {
+        let task_project: Option<String> =
+            sqlx::query_scalar("SELECT project_id FROM orchestrator_tasks WHERE id = ?")
+                .bind(&task_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+        task_project.unwrap_or_default()
+    } else {
+        mapped_project_id
+    };
+
+    if effective_project_id != project_id {
+        return Err(AppError::conflict(format!(
+            "clientRequestId `{request_id}` 已绑定项目 `{effective_project_id}`，不能用于项目 `{project_id}`"
+        )));
+    }
+    // 新写入的映射始终带非空指纹；旧库空指纹仅允许同项目复用，避免升级后所有重试直接 conflict。
+    if !mapped_fingerprint.is_empty() && mapped_fingerprint != request_fingerprint {
+        return Err(AppError::conflict(format!(
+            "clientRequestId `{request_id}` 已用于不同创建内容，拒绝冲突重放"
+        )));
+    }
+
+    let task_row = sqlx::query(&format!(
+        "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
+    ))
+    .bind(&task_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    row_to_task(&task_row)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     旧库的幂等表只有 request_id 主键，缺少 project 作用域与 payload 指纹，升级后必须补齐列并回填 project_id。
+///
+/// Code Logic（这个函数做什么）:
+///     ensure 两列存在；把空 project_id 按 task_id 回填为任务归属项目，保留用户历史映射。
+async fn migrate_remote_task_create_request_scope(pool: &SqlitePool) -> Result<(), AppError> {
+    ensure_column(
+        pool,
+        "orchestrator_remote_task_create_requests",
+        "project_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "orchestrator_remote_task_create_requests",
+        "request_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
+    // 回填 project_id：仅更新仍为空的旧行，避免覆盖新写入的作用域。
+    sqlx::query(
+        "UPDATE orchestrator_remote_task_create_requests \
+         SET project_id = (
+             SELECT t.project_id FROM orchestrator_tasks t \
+             WHERE t.id = orchestrator_remote_task_create_requests.task_id
+         ) \
+         WHERE (project_id IS NULL OR project_id = '') \
+           AND EXISTS (
+             SELECT 1 FROM orchestrator_tasks t \
+             WHERE t.id = orchestrator_remote_task_create_requests.task_id
+           )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     用户可能从旧版本直接升级，旧 SQLite 表缺少新列时必须原地补齐且保留已有任务数据。
 ///
 /// Code Logic（这个函数做什么）:
@@ -3430,15 +3575,26 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     远端 create 请求超时重试时，同一个 clientRequestId 必须返回第一次创建的任务，避免 owning device 产生重复任务。
+    ///     远端 create 请求超时重试时，同一个 clientRequestId + 同项目 + 同 payload 必须返回第一次创建的任务，避免 owning device 产生重复任务。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     用同一 clientRequestId 传入两条不同 task row，断言第二次返回第一条任务且数据库只保留一条。
+    ///     用同一 clientRequestId 与语义等价 payload（仅 task id 不同）重放，断言第二次返回第一条任务且数据库只保留一条。
     #[tokio::test]
     async fn remote_create_client_request_is_idempotent() {
         let (_pool, repo) = setup_repo().await;
         let first = task_row("task-1", "project-1", OrchestratorTaskStatus::Draft);
-        let second = task_row("task-2", "project-1", OrchestratorTaskStatus::Draft);
+        // 重放时 id 由客户端每次生成不同 UUID，但业务 payload 与 createAction 必须一致才算幂等。
+        let mut second = task_row("task-2", "project-1", OrchestratorTaskStatus::Draft);
+        second.title = first.title.clone();
+        second.goal = first.goal.clone();
+        second.acceptance_criteria = first.acceptance_criteria.clone();
+        second.priority = first.priority;
+        second.source = first.source.clone();
+        second.external_id = first.external_id.clone();
+        second.external_identifier = first.external_identifier.clone();
+        second.external_url = first.external_url.clone();
+        second.external_state = first.external_state.clone();
+        second.external_labels = first.external_labels.clone();
 
         let created = repo
             .create_remote_task_for_client_request(
@@ -3452,7 +3608,7 @@ mod tests {
             .create_remote_task_for_client_request(
                 "client-request-1",
                 &second,
-                OrchestratorCreateAction::Backlog,
+                OrchestratorCreateAction::Todo,
             )
             .await
             .unwrap();
@@ -3463,6 +3619,80 @@ mod tests {
         assert_eq!(replayed.id, "task-1");
         assert_eq!(replayed.status, OrchestratorTaskStatus::Queued);
         assert_eq!(listed.len(), 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同一 clientRequestId 若被用于不同 project，绝不能返回 project A 的任务给 project B（数据泄露）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先在 project-1 创建，再以相同 requestId 请求 project-2，断言 conflict 且 project-2 无任务。
+    #[tokio::test]
+    async fn remote_create_client_request_rejects_cross_project_reuse() {
+        let (_pool, repo) = setup_repo().await;
+        let first = task_row("task-a", "project-1", OrchestratorTaskStatus::Draft);
+        let second = task_row("task-b", "project-2", OrchestratorTaskStatus::Draft);
+
+        repo.create_remote_task_for_client_request(
+            "shared-request",
+            &first,
+            OrchestratorCreateAction::Todo,
+        )
+        .await
+        .unwrap();
+
+        let err = repo
+            .create_remote_task_for_client_request(
+                "shared-request",
+                &second,
+                OrchestratorCreateAction::Todo,
+            )
+            .await
+            .expect_err("跨项目复用 clientRequestId 必须 conflict");
+        assert!(
+            matches!(err, AppError::Conflict(_)),
+            "应返回 Conflict: {err:?}"
+        );
+        let listed_b = repo.list_tasks(Some("project-2")).await.unwrap();
+        assert!(listed_b.is_empty(), "project-2 不得创建任务");
+        let listed_a = repo.list_tasks(Some("project-1")).await.unwrap();
+        assert_eq!(listed_a.len(), 1);
+        assert_eq!(listed_a[0].id, "task-a");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同项目同 clientRequestId 但 payload 不同时，必须 conflict，避免静默返回错误内容的旧任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     首次创建后用不同 goal 重放同一 requestId，断言 Conflict 且仍只保留第一条。
+    #[tokio::test]
+    async fn remote_create_client_request_rejects_same_project_payload_mismatch() {
+        let (_pool, repo) = setup_repo().await;
+        let first = task_row("task-1", "project-1", OrchestratorTaskStatus::Draft);
+        let mut second = task_row("task-2", "project-1", OrchestratorTaskStatus::Draft);
+        second.goal = "completely-different-goal".to_string();
+
+        repo.create_remote_task_for_client_request(
+            "payload-mismatch",
+            &first,
+            OrchestratorCreateAction::Todo,
+        )
+        .await
+        .unwrap();
+        let err = repo
+            .create_remote_task_for_client_request(
+                "payload-mismatch",
+                &second,
+                OrchestratorCreateAction::Todo,
+            )
+            .await
+            .expect_err("同键不同 payload 必须 conflict");
+        assert!(
+            matches!(err, AppError::Conflict(_)),
+            "应返回 Conflict: {err:?}"
+        );
+        let listed = repo.list_tasks(Some("project-1")).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "task-1");
     }
 
     /// Business Logic（为什么需要这个函数）:

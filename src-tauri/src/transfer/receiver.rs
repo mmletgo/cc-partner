@@ -134,12 +134,11 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
 ///
 /// Business Logic: 对端逐块发来数据，本端按 offset 写入临时文件；全部收齐后校验并保存。
 ///     Finding 4: 最后一块可能在传输层被重试，重放时 registry 已移除会误返回 success:false。
-///     通过 finalize 单飞锁 + 终态墓碑保证重放安全：第一个请求完成 finalize 写墓碑，
-///     重放命中墓碑返回第一次的成功结果。
+///     通过 per-transfer 单飞锁 + 终态墓碑保证重放安全：第一个请求完成 finalize 写墓碑，
+///     迟到请求必须在任何文件 open/write 前命中墓碑，返回第一次的成功结果。
 /// Code Logic:
-///     1. 查 registry 任务：不存在先查墓碑，命中成功墓碑返回成功响应（重放兜底），
-///        否则返回 success:false（对照 Python）；
-///     2. 持 finalize 单飞锁（仅最后一块触发 finalize 时锁有意义）；
+///     1. 先取 per-transfer 单飞锁（覆盖 re-read 任务/墓碑、写块、进度、finalize 全临界区）；
+///     2. 持锁后重读 registry：不存在则查墓碑，命中则直接返回第一次结果（禁止 open 文件）；
 ///     3. 打开/创建 .tmp（写模式，允许读写以 seek），seek 到 offset 写入；
 ///     4. 更新 transferred_bytes；
 ///     5. 若 transferred >= size 则 finalize（SHA256 校验 + 重命名）；
@@ -150,7 +149,12 @@ pub async fn handle_chunk(
     offset: u64,
     data: Vec<u8>,
 ) -> Result<ChunkResp, AppError> {
-    // 任务不存在：先查墓碑（重放兜底）。
+    // 单飞锁必须覆盖 re-read → open/write → progress → finalize。
+    // 若只在 finalize 前加锁，并发末块可在 rename 后仍持有旧 fd 改写已校验文件。
+    let chunk_lock = state.transfers.finalize_lock(transfer_id);
+    let _guard = chunk_lock.lock().await;
+
+    // 持锁后重读任务/墓碑：迟到请求必须在任何文件打开前命中墓碑。
     let task = match state.transfers.get(transfer_id) {
         Some(t) => t,
         None => {
@@ -176,9 +180,6 @@ pub async fn handle_chunk(
         }
     };
 
-    // 拿 finalize 单飞锁（保留 task.size 用于判断是否最后一块）。锁在 transfer_id 生命周期内常驻。
-    let finalize_guard = state.transfers.finalize_lock(transfer_id);
-
     state
         .transfers
         .set_status(transfer_id, TransferStatus::Transferring);
@@ -196,40 +197,32 @@ pub async fn handle_chunk(
     file.seek(std::io::SeekFrom::Start(offset)).await?;
     file.write_all(&data).await?;
     file.flush().await?;
+    // 显式 drop 文件句柄，finalize 的 rename 前不持有写 fd。
+    drop(file);
 
     let new_transferred = offset + data.len() as u64;
     state
         .transfers
         .update_progress(transfer_id, new_transferred, TransferStatus::Transferring);
 
-    // 收齐则 finalize：持单飞锁串行化，确保重放的最后一块等第一次 finalize 完成。
+    // 收齐则 finalize（已持锁，串行化）。
     if new_transferred >= task.size {
-        let _guard = finalize_guard.lock().await;
-        // 拿锁后再查 registry：若已被前一次 finalize 移除，说明本请求是重放，走墓碑兜底。
-        if state.transfers.get(transfer_id).is_none() {
-            if let Some(tomb) = state.transfers.tombstone(transfer_id) {
-                tracing::info!(
-                    "持锁后发现任务已被前一次 finalize 移除，命中墓碑兜底: {transfer_id}, outcome={:?}",
-                    tomb.outcome
-                );
-                let success = matches!(
-                    tomb.outcome,
-                    crate::transfer::registry::TransferOutcome::Completed { .. }
-                );
-                return Ok(ChunkResp {
-                    success,
-                    received_bytes: tomb.received_bytes,
-                });
-            }
-            // 罕见：任务被移除但无墓碑（例如外部 cancel），返回 success:false 兜底。
-            tracing::warn!("持锁后任务已移除且无墓碑: {transfer_id}，返回 success:false");
-            return Ok(ChunkResp {
-                success: false,
-                received_bytes: new_transferred,
-            });
-        }
         if let Err(e) = finalize_transfer(state, transfer_id).await {
             tracing::error!("finalize 失败: {transfer_id}, {e}");
+        }
+    }
+
+    // finalize 后若任务已移除，优先返回墓碑结果（成功/失败），避免并发重放把失败当成功。
+    if state.transfers.get(transfer_id).is_none() {
+        if let Some(tomb) = state.transfers.tombstone(transfer_id) {
+            let success = matches!(
+                tomb.outcome,
+                crate::transfer::registry::TransferOutcome::Completed { .. }
+            );
+            return Ok(ChunkResp {
+                success,
+                received_bytes: tomb.received_bytes,
+            });
         }
     }
 
@@ -545,5 +538,214 @@ mod tests {
         let got = resolve_filename(&dir, "README");
         assert_eq!(got, "README (1)");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 构造 transfer 测试用最小 AppState（隔离 receive_dir + 内存 SQLite）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     并发 finalize 回归必须走真实 handle_chunk/finalize 路径，需要可写 receive_dir 与 transfer_repo。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建唯一临时 receive_dir、内存 transfer_history 表与完整 AppState 字段；
+    ///     workbench_dependency::new 会同步探测 tmux（最多约 3s），仅测试可接受。
+    async fn build_transfer_test_state(receive_dir: &Path) -> AppState {
+        use crate::backend::ui::HeadlessBackendUi;
+        use crate::config::{
+            AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+        };
+        use crate::net::peer_client::PeerClient;
+        use crate::orchestrator::repo::OrchestratorRepo;
+        use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
+        use crate::storage::{
+            ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, SshTargetRepo,
+            TransferRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo,
+            WorkbenchWorktreeRepo,
+        };
+        use crate::transfer::registry::TransferRegistry;
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+        use std::sync::atomic::AtomicU16;
+        use std::sync::{Arc, Mutex, RwLock};
+
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS transfer_history (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                peer_device_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                transferred_bytes INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let config = AppConfig {
+            device_id: "device-test".to_string(),
+            device_name: "test-device".to_string(),
+            http_port: 0,
+            receive_dir: receive_dir.to_string_lossy().to_string(),
+            db_path: receive_dir.join("data.db").to_string_lossy().to_string(),
+            screenshot_hotkey: "<cmd>+s".to_string(),
+            prompt_optimizer_hotkey: "<ctrl>".to_string(),
+            prompt_optimizer_fill_language: "zh".to_string(),
+            cloud_sync_repo_url: None,
+            cloud_sync_enabled: false,
+            cloud_sync_auto: false,
+            cloud_sync_interval_secs: 600,
+            cloud_sync_branch: None,
+            health: HealthConfig::default(),
+            orchestrator: OrchestratorAutomationConfig::default(),
+            github_trending: GithubTrendingConfig::default(),
+        };
+
+        AppState {
+            config: Arc::new(RwLock::new(config)),
+            db: pool.clone(),
+            prompt_repo: Arc::new(PromptRepo::new(pool.clone())),
+            transfer_repo: Arc::new(TransferRepo::new(pool.clone())),
+            claude_md_repo: Arc::new(ClaudeMdRepo::new(pool.clone())),
+            scratchpad_repo: Arc::new(ScratchpadRepo::new(pool.clone())),
+            ssh_target_repo: Arc::new(SshTargetRepo::new(pool.clone())),
+            device_id: Arc::new("device-test".to_string()),
+            devices: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            actual_http_port: Arc::new(AtomicU16::new(0)),
+            discovery: Arc::new(Mutex::new(None)),
+            peer_client: Arc::new(PeerClient::new()),
+            transfers: Arc::new(TransferRegistry::new()),
+            ui: Arc::new(HeadlessBackendUi::new(receive_dir.join("dist"))),
+            update_status: Arc::new(RwLock::new(
+                crate::commands::updater::UpdateDownloadStatus::default(),
+            )),
+            update_pending: Arc::new(Mutex::new(None)),
+            update_bytes: Arc::new(Mutex::new(None)),
+            update_download_task: Arc::new(Mutex::new(None)),
+            update_cancel_token: Arc::new(Mutex::new(None)),
+            cc_history_repo: Arc::new(ClaudeHistoryRepo::new(pool.clone())),
+            workbench_project_repo: Arc::new(WorkbenchProjectRepo::new(pool.clone())),
+            workbench_session_repo: Arc::new(WorkbenchSessionRepo::new(pool.clone())),
+            workbench_worktree_repo: Arc::new(WorkbenchWorktreeRepo::new(pool.clone())),
+            workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
+            workbench_browser_previews: Arc::new(
+                crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
+            ),
+            workbench_sessions: Arc::new(
+                crate::workbench::sessions::WorkbenchSessionRegistry::new(),
+            ),
+            workbench_remote_events: {
+                let (tx, _) = tokio::sync::broadcast::channel(8);
+                tx
+            },
+            workbench_remote_event_bridges: Arc::new(
+                crate::workbench::remote_events::RemoteEventBridgeRegistry::new(),
+            ),
+            workbench_dependency: Arc::new(
+                crate::workbench::dependencies::WorkbenchDependencyInstallRuntime::new(),
+            ),
+            cc_collector_cancel: Arc::new(Mutex::new(None)),
+            cloud_sync_cancel: Arc::new(Mutex::new(None)),
+            health: Arc::new(crate::health::HealthRuntime::new()),
+            health_repo: Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone())),
+            health_cancel: Arc::new(Mutex::new(None)),
+            orchestrator_repo: Arc::new(OrchestratorRepo::new(pool)),
+            orchestrator_scheduler_telemetry: OrchestratorSchedulerTelemetry::new(),
+            orchestrator_cancel: Arc::new(Mutex::new(None)),
+            orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
+            workbench_claude_session_indexes: Arc::new(RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_watchers: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     并发末块若在 finalize 锁外 open/write，迟到请求可改写已校验落地文件；必须保证最终内容与哈希一致。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     1) 并发发送两份相同正确末块，断言均 success 且最终文件字节正确；
+    ///     2) 再发错误数据重放，仍 success（墓碑）且最终文件不被改写。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_final_chunks_cannot_corrupt_verified_file() {
+        use sha2::{Digest, Sha256};
+
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+
+        let good_bytes = b"A".to_vec();
+        let bad_bytes = b"B".to_vec();
+        let sha = format!("{:x}", Sha256::digest(&good_bytes));
+        let transfer_id = "concurrent-final-chunk".to_string();
+        let tmp_path = receive_dir.join(format!(".{transfer_id}.tmp"));
+
+        state.transfers.add(TransferTask {
+            id: transfer_id.clone(),
+            filename: "payload.bin".to_string(),
+            file_path: tmp_path.to_string_lossy().to_string(),
+            size: 1,
+            sha256: sha,
+            chunk_size: 1,
+            direction: TransferDirection::Receive,
+            peer_device_id: String::new(),
+            status: TransferStatus::Pending,
+            transferred_bytes: 0,
+            created_at: now_iso(),
+            completed_at: None,
+        });
+
+        let state_a = state.clone();
+        let state_b = state.clone();
+        let id_a = transfer_id.clone();
+        let id_b = transfer_id.clone();
+        let good1 = good_bytes.clone();
+        let good2 = good_bytes.clone();
+
+        let (r1, r2) = tokio::join!(
+            async move { handle_chunk(&state_a, &id_a, 0, good1).await },
+            async move { handle_chunk(&state_b, &id_b, 0, good2).await },
+        );
+
+        let c1 = r1.expect("chunk A");
+        let c2 = r2.expect("chunk B");
+        assert!(c1.success && c2.success, "并发正确末块均应成功");
+
+        let final_path = receive_dir.join("payload.bin");
+        let content = fs::read(&final_path).expect("最终文件应存在");
+        assert_eq!(
+            content, good_bytes,
+            "并发 finalize 后文件必须与校验哈希一致"
+        );
+
+        // 迟到的不同 payload 必须在 open/write 前命中墓碑，不得污染最终文件。
+        let late = handle_chunk(&state, &transfer_id, 0, bad_bytes)
+            .await
+            .expect("late chunk");
+        assert!(late.success, "迟到请求应命中成功墓碑");
+        let content_after = fs::read(&final_path).expect("最终文件应仍存在");
+        assert_eq!(
+            content_after, good_bytes,
+            "迟到错误数据不得改写已校验落地文件"
+        );
+        assert!(
+            !tmp_path.exists(),
+            "成功 finalize 后临时文件应已被 rename 移除"
+        );
+
+        let _ = fs::remove_dir_all(&receive_dir);
     }
 }
