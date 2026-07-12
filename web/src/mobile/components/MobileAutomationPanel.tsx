@@ -2,7 +2,10 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toRuntimeLoadError } from '@/api/orchestratorRuntimeTransportError';
-import { httpOrchestratorTransport } from '@/api/workbenchHttp';
+import {
+  createHttpOrchestratorClientRequestId,
+  httpOrchestratorTransport,
+} from '@/api/workbenchHttp';
 import type { HttpCreateOrchestratorTaskAction } from '@/api/workbenchHttp';
 import { requestAttentionInvalidation } from '@/hooks/attentionInvalidation';
 import { orchestratorEvidenceKindTone } from '@/lib/orchestrator';
@@ -392,6 +395,11 @@ export function MobileAutomationPanel({
   const requestIdRef = useRef<number>(0);
   const evidenceRequestIdRef = useRef<number>(0);
   const activeProjectIdRef = useRef<string | null>(null);
+  /**
+   * 一次逻辑创建提交的幂等键：表单内容不变的重试复用；成功/取消/表单变更后清空。
+   */
+  const createClientRequestIdRef = useRef<string | null>(null);
+  const createClientRequestFingerprintRef = useRef<string | null>(null);
   const promptDraftRef = useRef<HTMLTextAreaElement | null>(null);
   const titleId = useId();
   const dialogTitleId = useId();
@@ -739,6 +747,9 @@ export function MobileAutomationPanel({
    */
   const handleOpenCreateDialog = useCallback((): void => {
     if (!activeProjectIdRef.current) return;
+    // 打开新弹窗视为新逻辑提交周期，清空旧幂等键。
+    createClientRequestIdRef.current = null;
+    createClientRequestFingerprintRef.current = null;
     setError(null);
     setStatus(null);
     setCreateDialogOpen(true);
@@ -749,10 +760,12 @@ export function MobileAutomationPanel({
    *   弹窗关闭应避免打断正在创建或 AI 完善的请求，防止用户误以为操作已取消。
    *
    * Code Logic（这个函数做什么）:
-   *   若没有 pending 请求则关闭 dialog；请求中忽略关闭动作。
+   *   若没有 pending 请求则关闭 dialog 并清空逻辑提交幂等键；请求中忽略关闭动作。
    */
   const handleCloseCreateDialog = useCallback((): void => {
     if (creating || completingPrompt) return;
+    createClientRequestIdRef.current = null;
+    createClientRequestFingerprintRef.current = null;
     setCreateDialogOpen(false);
   }, [creating, completingPrompt]);
 
@@ -826,9 +839,11 @@ export function MobileAutomationPanel({
   /**
    * Business Logic（为什么需要这个函数）:
    *   手机端创建任务必须显式支持 Backlog、Todo 和 Start 三种业务动作，与桌面 workflow board 对齐。
+   *   响应丢失后用户重试必须复用同一 clientRequestId，避免 owner 侧重复建任务。
    *
    * Code Logic（这个函数做什么）:
-   *   校验项目和表单后调用 HTTP createView，并显式传 createAction；成功后合并 task view 并清空弹窗。
+   *   校验项目和表单；按表单指纹在逻辑提交周期内复用 clientRequestId；调用 HTTP createView；
+   *   成功后清空弹窗与幂等键，失败保留键供重试。
    */
   const handleCreateTask = useCallback(async (
     createAction: HttpCreateOrchestratorTaskAction,
@@ -844,6 +859,23 @@ export function MobileAutomationPanel({
       return;
     }
 
+    // 表单内容指纹：任一字段变化视为新逻辑提交，重新 mint 幂等键。
+    const fingerprint = [
+      projectId,
+      trimmedTitle,
+      trimmedGoal,
+      trimmedAcceptanceCriteria,
+      createAction,
+    ].join('\u0001');
+    if (
+      createClientRequestIdRef.current === null
+      || createClientRequestFingerprintRef.current !== fingerprint
+    ) {
+      createClientRequestIdRef.current = createHttpOrchestratorClientRequestId();
+      createClientRequestFingerprintRef.current = fingerprint;
+    }
+    const clientRequestId = createClientRequestIdRef.current;
+
     setCreatingAction(createAction);
     setError(null);
     setStatus(null);
@@ -855,6 +887,7 @@ export function MobileAutomationPanel({
         acceptanceCriteria: trimmedAcceptanceCriteria,
         priority: 0,
         createAction,
+        clientRequestId,
       });
       if (activeProjectIdRef.current !== projectId) return;
       setTaskViews((current) => upsertOrchestratorTaskView(current, createdTaskView));
@@ -865,6 +898,8 @@ export function MobileAutomationPanel({
       setGoal('');
       setAcceptanceCriteria('');
       setPromptDraft('');
+      createClientRequestIdRef.current = null;
+      createClientRequestFingerprintRef.current = null;
       setCreateDialogOpen(false);
       setStatus(t(statusKey));
     } catch (reason) {

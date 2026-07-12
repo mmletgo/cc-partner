@@ -22,7 +22,9 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
@@ -288,7 +290,8 @@ impl RotatingLogWriter {
     ///     轮转中的 rename/remove/chmod 失败不能留下 `file=None`，否则后续所有写入都会永久报句柄丢失。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     best-effort `open_current_file`，并从 metadata 恢复 `current_len`；打开失败则保持 None 并记 0。
+    ///     best-effort `open_current_file`，并从 metadata 恢复 `current_len`；打开失败则保持 None，
+    ///     并以**带外限频 stderr**报告（禁止 `tracing::*`，避免 non-blocking 文件 layer 自反馈）。
     fn recover_current_file_locked(&self, state: &mut WriterState) {
         let current = self.config.current_path();
         match open_current_file(&current) {
@@ -298,11 +301,11 @@ impl RotatingLogWriter {
                 state.current_len = len;
             }
             Err(recover_err) => {
-                tracing::warn!(
-                    error = %recover_err,
-                    path = %current.display(),
-                    "日志轮转失败后 reopen current 也失败，文件日志暂时不可用"
-                );
+                report_log_writer_fault_out_of_band(&format!(
+                    "日志轮转失败后 reopen current 也失败，文件日志暂时不可用: path={} error={}",
+                    current.display(),
+                    recover_err
+                ));
                 state.file = None;
                 state.current_len = 0;
             }
@@ -340,6 +343,57 @@ impl RotatingLogWriter {
             apply_file_mode_0600(&first_history)?;
         }
         Ok(())
+    }
+}
+
+/// 日志 writer 故障带外报告的最小间隔，防止 stderr 洪泛。
+const LOG_WRITER_FAULT_REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// 重入保护：writer 故障报告路径内禁止再次进入（即使未来误用 tracing 也不会形成环）。
+static LOG_WRITER_FAULT_REENTRANT: AtomicBool = AtomicBool::new(false);
+
+/// 上次带外报告相对进程单调时钟的毫秒（0 表示尚未报告）。
+static LOG_WRITER_FAULT_LAST_REPORT_MS: AtomicU64 = AtomicU64::new(0);
+
+/// 进程内单调时钟原点，供限频比较使用。
+static LOG_WRITER_FAULT_CLOCK_ORIGIN: OnceLock<Instant> = OnceLock::new();
+
+/// Business Logic（为什么需要这个函数）:
+///     RotatingLogWriter 本身可能是 tracing 文件 layer 的底层 writer；若 recover 失败时再发
+///     `tracing::warn!`，non-blocking worker 会把失败事件再次写入同一 writer，形成无限自反馈。
+///
+/// Code Logic（这个函数做什么）:
+///     用 AtomicBool 重入保护 + 5s 限频，直接写 stderr（不经 tracing subscriber）；任何错误静默丢弃。
+fn report_log_writer_fault_out_of_band(message: &str) {
+    // 重入：若已在报告路径中，直接返回，避免嵌套。
+    if LOG_WRITER_FAULT_REENTRANT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let _guard = LogWriterFaultReentrancyGuard;
+    let origin = LOG_WRITER_FAULT_CLOCK_ORIGIN.get_or_init(Instant::now);
+    let now_ms = Instant::now()
+        .saturating_duration_since(*origin)
+        .as_millis();
+    let now_ms = u64::try_from(now_ms).unwrap_or(u64::MAX).saturating_add(1); // 0 保留给“从未报告”
+    let last_ms = LOG_WRITER_FAULT_LAST_REPORT_MS.load(Ordering::Acquire);
+    if last_ms != 0
+        && now_ms.saturating_sub(last_ms) < LOG_WRITER_FAULT_REPORT_INTERVAL.as_millis() as u64
+    {
+        return;
+    }
+    LOG_WRITER_FAULT_LAST_REPORT_MS.store(now_ms, Ordering::Release);
+    let sanitized = sanitize_diagnostic_text(message);
+    let _ = writeln!(std::io::stderr(), "[cc-partner-log-writer] {sanitized}");
+}
+
+/// drop 时清除 reentrancy flag。
+struct LogWriterFaultReentrancyGuard;
+impl Drop for LogWriterFaultReentrancyGuard {
+    fn drop(&mut self) {
+        LOG_WRITER_FAULT_REENTRANT.store(false, Ordering::Release);
     }
 }
 
@@ -1664,6 +1718,57 @@ mod tests {
         assert!(
             content.contains("recovered"),
             "恢复后 current 应包含后续写入: {content:?}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     file=None 且路径持续不可开时，writer 故障不得通过同一 tracing subscriber 再入队，
+    ///     否则 non-blocking 文件 layer 会形成自维持失败循环。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用目录占住 current 使 open 永久失败；把 RotatingLogWriter 接到真实 non-blocking + tracing
+    ///     subscriber；循环 write/flush 并主动 emit tracing 事件，断言不会因自反馈 panic/卡死，
+    ///     且 recover 路径不走 tracing（仅带外 stderr，测试侧只验证 write 错误与 file=None 保持）。
+    #[cfg(unix)]
+    #[test]
+    fn recover_failure_does_not_reenter_tracing_via_non_blocking_layer() {
+        use tracing_subscriber::prelude::*;
+
+        let (_dir, config) = test_config(64, 3);
+        let writer = RotatingLogWriter::open(config.clone()).expect("open");
+        {
+            let mut guard = writer.state.lock().expect("lock");
+            if let Some(file) = guard.file.take() {
+                drop(file);
+            }
+            guard.current_len = 0;
+        }
+        let current = config.current_path();
+        let _ = fs::remove_file(&current);
+        fs::create_dir_all(&current).expect("block current with directory");
+
+        // 真实 non-blocking 接线：与生产 serve 文件 layer 同构（NonBlocking 作 MakeWriter）。
+        let (non_blocking, guard) = writer.into_non_blocking();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(non_blocking),
+        );
+        let _default = tracing::subscriber::set_default(subscriber);
+
+        // 多次 emit 驱动 non-blocking worker 调用 Write::write/flush → recover。
+        // 若 recover 内仍用 tracing::warn，worker 会把 warn 再写入并再次 recover → 自反馈。
+        for i in 0..32 {
+            tracing::warn!(attempt = i, "probe external event while file unavailable");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // 给 worker 一点时间排空；不应 hang / 栈溢出。
+        std::thread::sleep(Duration::from_millis(150));
+        drop(guard);
+
+        assert!(
+            current.is_dir(),
+            "测试夹具应保持 current 为目录以模拟持续不可打开"
         );
     }
 

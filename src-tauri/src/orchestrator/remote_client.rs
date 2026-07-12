@@ -412,9 +412,9 @@ impl RemoteOrchestratorClient {
             .require_capability(base_url, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1)
             .await?;
 
-        // 出站 request_id：非空入参优先转发（多跳调用链关联），空入参生成新 UUID
-        // （与 `with_forwarded_request_id` 的空串语义一致，避免空 ID 污染对端日志）。
-        let outbound_request_id: String = if request_id.trim().is_empty() {
+        // 出站 request_id：非空入参原样转发（含首尾空格，与 middleware 可打印 ASCII 契约一致），
+        // 仅真正空串生成新 UUID（禁止 trim，避免 ` req-1 ` 被改写）。
+        let outbound_request_id: String = if request_id.is_empty() {
             crate::net::request_context::new_request_id()
         } else {
             request_id.to_string()

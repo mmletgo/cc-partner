@@ -986,11 +986,13 @@ fn run_std_command_with_timeout_guarded(
 
 /// Business Logic（为什么需要这个函数）:
 ///     超时或 IO 失败后必须 best-effort 终止进程树并回收，但 kill 失败时不能无条件 child.wait() 永久挂起。
+///     Windows 上 WSL/wrapper 会派生子孙进程：仅 Child::kill 会留下后代，且过早 unregister 后
+///     cancel_and_reap 无法再 taskkill /T。
 ///
 /// Code Logic（这个函数做什么）:
 ///     Unix 先 killpg(SIGKILL) 再 child.kill()，killpg 失败时记 warning（含 ESRCH 外的真实错误）；
-///     Windows 仅 child.kill()；随后在 deadline+PROBE_TERMINATE_GRACE 内轮询 try_wait，
-///     超时则丢弃 wait（接受潜在僵尸而非阻塞启动），并 drop 管道读端。
+///     Windows 在共享截止时间内对直接子 PID 执行有界 taskkill /T /F，再 child.kill() 兜底；
+///     随后在 deadline+PROBE_TERMINATE_GRACE 内轮询 try_wait，超时则丢弃 wait，并 drop 管道读端。
 fn terminate_probe_child(child: &mut Child, process_group_id: u32, deadline: Instant) {
     #[cfg(unix)]
     {
@@ -1003,6 +1005,23 @@ fn terminate_probe_child(child: &mut Child, process_group_id: u32, deadline: Ins
                     "probe killpg 失败，后续仅依赖 child.kill 与关闭管道读端"
                 );
             }
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Business Logic: 必须在 unregister 前杀进程树，否则后代存活且 cancel_and_reap 已丢 PID。
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(1));
+        let grace = remaining
+            .min(PROBE_TERMINATE_GRACE)
+            .max(Duration::from_millis(50));
+        if let Err(err) = kill_probe_pid_windows(process_group_id, grace) {
+            tracing::debug!(
+                pid = process_group_id,
+                error = %err,
+                "probe taskkill /T 未完全成功，继续 child.kill 兜底"
+            );
         }
     }
     if let Err(err) = child.kill() {
@@ -2187,6 +2206,65 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     Windows 单次 probe 超时必须走 taskkill /T 杀进程树，而不能只 Child::kill 直接子进程。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     通过 TEST_WINDOWS_TASKKILL_SPAWN hook 记录 terminate_probe_child 触发的 PID，
+    ///     对 sleep 0 已退出子进程调用后断言 hook 被调用且 PID 匹配。
+    #[cfg(windows)]
+    #[test]
+    fn terminate_probe_child_windows_uses_taskkill_tree() {
+        let mut child = StdCommand::new("cmd")
+            .args(["/C", "exit", "0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn exited child");
+        let pid = child.id();
+        // 等子进程退出，避免真实 taskkill 干扰；hook 拦截 spawn。
+        let _ = child.wait();
+        // 重新 spawn 一个仍存活的 sleep 以便 try_wait 路径存在。
+        let mut child = StdCommand::new("cmd")
+            .args(["/C", "ping", "-n", "3", "127.0.0.1", ">", "nul"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn hanging child");
+        let pid = child.id();
+
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<u32>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_hook = seen.clone();
+        {
+            let mut hook = TEST_WINDOWS_TASKKILL_SPAWN.lock().expect("hook lock");
+            *hook = Some(Box::new(move |kill_pid| {
+                seen_hook.lock().expect("seen").push(kill_pid);
+                // 返回已退出的 helper，避免 wait_child_bounded hang。
+                StdCommand::new("cmd")
+                    .args(["/C", "exit", "0"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+            }));
+        }
+
+        let deadline = Instant::now() + Duration::from_millis(200);
+        terminate_probe_child(&mut child, pid, deadline);
+
+        {
+            let mut hook = TEST_WINDOWS_TASKKILL_SPAWN.lock().expect("hook lock");
+            *hook = None;
+        }
+        let pids = seen.lock().expect("seen").clone();
+        assert_eq!(
+            pids,
+            vec![pid],
+            "terminate_probe_child 必须对直接子 PID 调 taskkill /T"
+        );
+        let _ = child.try_wait();
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     正常退出后的管道 drain 必须有界；即便 deadline 已过，也不能无界阻塞读。
     ///
     /// Code Logic（这个测试做什么）:
@@ -2473,10 +2551,11 @@ mod tests {
     #[test]
     fn unix_drain_source_closes_side_on_set_nonblocking_failure() {
         let source = include_str!("dependencies.rs");
+        // 生产区可能含 `#[cfg(test)]` hook 分支；以 tests 模块边界切分，避免误截断。
         let production = source
-            .split("#[cfg(test)]")
+            .split("mod tests {")
             .next()
-            .expect("dependencies.rs 应包含 #[cfg(test)] 测试模块");
+            .expect("dependencies.rs 应包含 mod tests");
         let unix_fn = production
             .split("fn drain_child_pipes_nonblocking_unix")
             .nth(1)
@@ -2527,10 +2606,11 @@ mod tests {
     fn probe_drain_source_has_no_forgotten_reader_fallback() {
         let source = include_str!("dependencies.rs");
         // 测试模块自身会提到这些符号；只审查生产实现段。
+        // 生产区可能含 `#[cfg(test)]` hook 分支；以 tests 模块边界切分，避免误截断。
         let production = source
-            .split("#[cfg(test)]")
+            .split("mod tests {")
             .next()
-            .expect("dependencies.rs 应包含 #[cfg(test)] 测试模块");
+            .expect("dependencies.rs 应包含 mod tests");
         let forget_token = format!("{}::forget(", "mem");
         assert!(
             !production.contains(&forget_token),
@@ -2555,10 +2635,11 @@ mod tests {
     #[test]
     fn windows_drain_source_uses_peek_named_pipe_before_read() {
         let source = include_str!("dependencies.rs");
+        // 生产区可能含 `#[cfg(test)]` hook 分支；以 tests 模块边界切分，避免误截断。
         let production = source
-            .split("#[cfg(test)]")
+            .split("mod tests {")
             .next()
-            .expect("dependencies.rs 应包含 #[cfg(test)] 测试模块");
+            .expect("dependencies.rs 应包含 mod tests");
         assert!(
             production.contains("fn plan_windows_pipe_read"),
             "应导出可单测的 plan_windows_pipe_read 决策函数"
