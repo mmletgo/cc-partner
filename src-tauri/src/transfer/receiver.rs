@@ -994,10 +994,12 @@ async fn ensure_regular_intent_dir(receive_dir: &Path) -> Result<PathBuf, AppErr
 
 /// Business Logic（为什么需要这个函数）:
 ///     写 intent 临时文件时若路径已是指向外部的 symlink，tokio::fs::write 会跟随并截断外部文件。
+///     create_new 后若关闭再按路径重开，攻击者可在两次 open 之间把临时文件换成 hardlink/普通文件，
+///     O_NOFOLLOW 拦不住 hardlink，会写坏外部目标。
 ///
 /// Code Logic（这个函数做什么）:
-///     create_new 创建普通文件（已存在含 symlink 时失败）；再以 no-follow 可写打开并写满字节后 sync。
-///     失败时 best-effort 删除本次创建的 tmp（若 create_new 成功）。
+///     先 remove 残留同名 tmp（只删目录项）；create_new 打开后**不丢弃句柄**，直接在该 File 上
+///     write_all + flush + sync_all，禁止按路径 reopen；失败 best-effort 删除本次 tmp。
 async fn write_bytes_create_new_nofollow(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     // 先清可能残留的同名 tmp（仅删除目录项；symlink 也只删链接本身）。
     let _ = tokio::fs::remove_file(path).await;
@@ -1014,20 +1016,17 @@ async fn write_bytes_create_new_nofollow(path: &Path, bytes: &[u8]) -> Result<()
             )));
         }
     };
-    drop(created);
-    // 再用 no-follow 可写打开，拒绝竞态换成的 symlink/reparse。
-    let mut file = match open_regular_file_nofollow(path, true).await {
-        Ok(f) => f,
-        Err(err) => {
-            let _ = tokio::fs::remove_file(path).await;
-            return Err(err);
-        }
-    };
+    // 使用 create_new 句柄本身完成写盘，禁止关闭后按路径 reopen（TOCTOU hardlink/swap）。
+    let mut file = tokio::fs::File::from_std(created);
     if let Err(err) = file.write_all(bytes).await {
         let _ = tokio::fs::remove_file(path).await;
         return Err(AppError::from(err));
     }
     if let Err(err) = file.flush().await {
+        let _ = tokio::fs::remove_file(path).await;
+        return Err(AppError::from(err));
+    }
+    if let Err(err) = file.sync_all().await {
         let _ = tokio::fs::remove_file(path).await;
         return Err(AppError::from(err));
     }
@@ -3702,6 +3701,47 @@ mod tests {
             fs::read(&victim).unwrap(),
             b"KEEP-ME",
             "不得跟随 intent tmp symlink 截断外部文件"
+        );
+
+        let _ = fs::remove_dir_all(&receive_dir);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     若 create_new 后关闭句柄再按路径 reopen 写字节，攻击者可在两次 open 之间把 tmp 换成
+    ///     指向外部文件的 hardlink；O_NOFOLLOW 只拦 symlink，会写坏外部目标。
+    ///     单句柄写入：remove 只删目录项，create_new 建新 inode，写操作不得触达 victim。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     外部 victim + intent 目录内 hardlink 到 victim 作为 tmp；调用 write_bytes_create_new_nofollow；
+    ///     成功或失败均断言 victim 仍为 KEEP-HARD（不得经 hardlink 写坏外部文件）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_bytes_create_new_nofollow_does_not_overwrite_existing_hardlink_target() {
+        let receive_dir = unique_temp_dir();
+        let outside_dir = unique_temp_dir();
+        fs::create_dir_all(&receive_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        let intent_dir = receive_dir.join(FINALIZE_INTENT_DIR);
+        fs::create_dir_all(&intent_dir).unwrap();
+        let victim = outside_dir.join("victim-hardlink-target.json");
+        fs::write(&victim, b"KEEP-HARD").unwrap();
+        let tmp = intent_dir.join("hardlink-tmp.json.tmp");
+        fs::hard_link(&victim, &tmp).expect("plant hardlink tmp -> victim");
+
+        // remove 只删 hardlink 目录项；create_new 新建独立 inode 并写入——victim 必须不变。
+        write_bytes_create_new_nofollow(&tmp, b"OVERWRITE")
+            .await
+            .expect("应在新 inode 上写入，而非 hardlink 目标");
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"KEEP-HARD",
+            "不得经 hardlink 覆盖外部 victim"
+        );
+        assert_eq!(
+            fs::read(&tmp).unwrap(),
+            b"OVERWRITE",
+            "tmp 应为新普通文件内容"
         );
 
         let _ = fs::remove_dir_all(&receive_dir);

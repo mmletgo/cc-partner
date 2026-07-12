@@ -108,8 +108,9 @@ pub async fn prepare_repair_runner(
 ///     每一轮 Runner attempt 都要创建新的 terminal session，并记录 prompt/worktree/session 到 attempt history。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验本机项目；attempt=1 创建新 worktree，attempt>1 复用 task.worktree_id；随后创建 session，
-///     用 Preparing 条件更新任务 active runner 字段；写 attempt/terminal 前重读 active runner，避免 Abort 后仍启动旧 Claude。
+///     校验本机项目；attempt=1 创建/复用确定性 worktree，attempt>1 复用 task.worktree_id；长步骤前后 touch Preparing lease；
+///     随后创建 session，用 Preparing 条件更新任务 active runner 字段；写 attempt/terminal 前重读 active runner，
+///     避免 Abort 后仍启动旧 Claude。
 pub async fn prepare_runner_attempt(
     state: &AppState,
     task: &OrchestratorTaskRow,
@@ -139,7 +140,22 @@ pub async fn prepare_runner_attempt(
         .branch_name
         .clone()
         .unwrap_or_else(|| task_branch_name(&task.id, &task.title));
+    // 长 git worktree 创建前续租，避免调度 lease 误回收仍在 prepare 的任务。
+    if !state
+        .orchestrator_repo
+        .touch_preparing_lease(&task.id)
+        .await?
+    {
+        return state.orchestrator_repo.get_task(&task.id).await;
+    }
     let worktree = prepare_worktree_for_attempt(state, task, &branch_name, attempt).await?;
+    if !state
+        .orchestrator_repo
+        .touch_preparing_lease(&task.id)
+        .await?
+    {
+        return state.orchestrator_repo.get_task(&task.id).await;
+    }
     let session = local_create_workbench_session(
         state,
         task.project_id.clone(),
@@ -148,6 +164,14 @@ pub async fn prepare_runner_attempt(
         Some(DEFAULT_TERMINAL_ROWS),
     )
     .await?;
+    // session 创建后再续租一次，覆盖慢盘/hook 场景，再 CAS 进 Running。
+    if !state
+        .orchestrator_repo
+        .touch_preparing_lease(&task.id)
+        .await?
+    {
+        return state.orchestrator_repo.get_task(&task.id).await;
+    }
 
     let running_task = state
         .orchestrator_repo

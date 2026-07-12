@@ -1071,6 +1071,7 @@ impl OrchestratorRepo {
     ///     legacy Blocked + workflow Rework + run Blocked（与 from_legacy_status(Blocked) 一致），
     ///     写入固定中文 blocked_reason 与 updated_at；返回恢复行数。
     ///     用户可通过 retry 回到 Queued/Idle 后再被 claim。
+    ///     仍在 prepare 的 runner 必须周期 touch_preparing_lease 刷新 updated_at，否则长 git 步骤会被误回收。
     pub async fn recover_stale_local_preparing_tasks(
         &self,
         lease: Duration,
@@ -1099,6 +1100,27 @@ impl OrchestratorRepo {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     git worktree / session 创建可能超过调度 lease；若不在 Preparing 阶段续租 updated_at，
+    ///     并发 dispatch 会把仍在合法 prepare 的任务回收为 Blocked，原 runner 继续创建后 Running CAS 失败并留下孤儿现场。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当 status=Preparing 且 run_state=Preparing 时刷新 updated_at；命中返回 true，状态已变返回 false。
+    pub async fn touch_preparing_lease(&self, task_id: &str) -> Result<bool, AppError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks SET updated_at = ? \
+             WHERE id = ? AND status = ? AND run_state = ?",
+        )
+        .bind(now)
+        .bind(task_id)
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(OrchestratorRunState::Preparing.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -4251,6 +4273,58 @@ mod tests {
         assert!(task.blocked_reason.is_some());
         // Blocked 不占 active 容量。
         assert_eq!(active_count, 0);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     长 git worktree 创建可能超过调度 lease；prepare 续租后，并发 recover 不得误杀仍在 Preparing 的任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入 Preparing 任务并故意把 updated_at 回拨到 2020；调用 touch_preparing_lease 刷新后，
+    ///     recover_stale_local_preparing_tasks(60s) 必须返回 0 且状态仍为 Preparing。
+    #[tokio::test]
+    async fn touch_preparing_lease_keeps_active_prepare_from_stale_recovery() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        repo.create_task(&task_row(
+            "live-preparing",
+            "project-1",
+            OrchestratorTaskStatus::Preparing,
+        ))
+        .await
+        .unwrap();
+        set_task_split_state(
+            &pool,
+            "live-preparing",
+            OrchestratorWorkflowState::InProgress,
+            OrchestratorRunState::Preparing,
+            None,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET updated_at = '2020-01-01T00:00:00Z' WHERE id = ?",
+        )
+        .bind("live-preparing")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let touched = repo.touch_preparing_lease("live-preparing").await.unwrap();
+        assert!(touched, "仍在 Preparing 时续租必须命中");
+
+        let recovered = repo
+            .recover_stale_local_preparing_tasks(std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        let task = repo.get_task("live-preparing").await.unwrap();
+
+        assert_eq!(recovered, 0);
+        assert_eq!(task.status, OrchestratorTaskStatus::Preparing);
+        assert_eq!(task.run_state, OrchestratorRunState::Preparing);
+        assert!(
+            task.updated_at.as_str() > "2020-01-01T00:00:00Z",
+            "touch 必须刷新 updated_at"
+        );
     }
 
     /// Business Logic（为什么需要这个函数）:
