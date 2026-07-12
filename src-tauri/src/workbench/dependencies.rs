@@ -997,18 +997,120 @@ fn drain_child_pipes_nonblocking_unix(
     (stdout_buf, stderr_buf, timed_out)
 }
 
+/// Windows 管道有界读取规划。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     Windows 阻塞 `read` 无法被 deadline 打断；必须先按 PeekNamedPipe 结果决定下一步，
+///     才能保证探测路径在父进程退出、后代仍持写端时仍有界返回。
+///
+/// Code Logic（这个枚举做什么）:
+///     Wait=暂无字节，禁止 read；Read(n)=最多读取 n 字节；Eof=写端已断，结束该侧。
+///     在 Unix 上仅供单测编译（`cfg(test)`），生产路径由 Unix nonblocking drain 接管。
+#[cfg(any(not(unix), test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsPipeReadPlan {
+    Wait,
+    Read(usize),
+    Eof,
+}
+
 /// Business Logic（为什么需要这个函数）:
-///     非 Unix 平台同样不能用可 forget 的阻塞 reader 线程排空探测管道。
+///     把 PeekNamedPipe 的可用字节数映射成“是否允许调用阻塞 read”，便于跨平台单测
+///     锁住“零字节绝不 read”的回归约束。
 ///
 /// Code Logic（这个函数做什么）:
-///     best-effort 短读轮询到 deadline；超时 drop 读端返回已读缓冲。Windows 管道无统一
-///     非阻塞 API，这里用小缓冲 read + 时间盒；极端阻塞场景仍受 probe 总超时约束。
+///     available=None 表示管道断开→Eof；Some(0)→Wait；Some(n>0)→Read(min(n, cap))。
+#[cfg(any(not(unix), test))]
+fn plan_windows_pipe_read(available: Option<u32>, cap: usize) -> WindowsPipeReadPlan {
+    match available {
+        None => WindowsPipeReadPlan::Eof,
+        Some(0) => WindowsPipeReadPlan::Wait,
+        Some(n) => {
+            if cap == 0 {
+                WindowsPipeReadPlan::Wait
+            } else {
+                WindowsPipeReadPlan::Read((n as usize).min(cap))
+            }
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     非 Unix 平台同样不能用可 forget 的阻塞 reader 线程排空探测管道；
+///     Windows 上还禁止“先检查 deadline 再无界 read”——read 一旦阻塞就再也不看 deadline。
+///
+/// Code Logic（这个函数做什么）:
+///     用 PeekNamedPipe 查询可用字节，仅在 available>0 时按预算 read；无数据则 sleep 到
+///     deadline；超时立刻 drop 读端返回已读缓冲，绝无无界阻塞 read。
 #[cfg(not(unix))]
 fn drain_child_pipes_nonblocking_fallback(
     mut stdout: Option<ChildStdout>,
     mut stderr: Option<ChildStderr>,
     deadline: Instant,
 ) -> (Vec<u8>, Vec<u8>, bool) {
+    use std::os::windows::io::{AsRawHandle, RawHandle};
+
+    /// Business Logic: PeekNamedPipe 失败（含 ERROR_BROKEN_PIPE）表示写端已断，应结束该侧。
+    /// Code Logic: 成功返回 Some(avail)；失败（含断开）返回 None，调用方按 Eof 处理。
+    fn peek_named_pipe_available(handle: RawHandle) -> Option<u32> {
+        type BOOL = i32;
+        type DWORD = u32;
+        type HANDLE = *mut core::ffi::c_void;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn PeekNamedPipe(
+                h_named_pipe: HANDLE,
+                lp_buffer: *mut u8,
+                n_buffer_size: DWORD,
+                lp_bytes_read: *mut DWORD,
+                lp_total_bytes_avail: *mut DWORD,
+                lp_bytes_left_this_message: *mut DWORD,
+            ) -> BOOL;
+        }
+
+        let mut available: DWORD = 0;
+        let ok = unsafe {
+            PeekNamedPipe(
+                handle as HANDLE,
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null_mut(),
+                &mut available,
+                core::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            None
+        } else {
+            Some(available)
+        }
+    }
+
+    /// Business Logic: 单侧管道只能在 Peek 确认有字节后才 read，避免 WSL 后代挂死启动。
+    /// Code Logic: Peek→plan→有预算才 read；EOF/错误标记 done；Wait 不推进 progress。
+    fn pump_windows_side<R: Read + AsRawHandle>(
+        pipe: &mut R,
+        chunk: &mut [u8],
+        buf: &mut Vec<u8>,
+    ) -> WindowsPipeReadPlan {
+        let plan =
+            plan_windows_pipe_read(peek_named_pipe_available(pipe.as_raw_handle()), chunk.len());
+        match plan {
+            WindowsPipeReadPlan::Wait | WindowsPipeReadPlan::Eof => plan,
+            WindowsPipeReadPlan::Read(max_n) => match pipe.read(&mut chunk[..max_n]) {
+                Ok(0) => WindowsPipeReadPlan::Eof,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    WindowsPipeReadPlan::Read(n)
+                }
+                Err(err) if err.kind() == ErrorKind::Interrupted => WindowsPipeReadPlan::Wait,
+                Err(err) if err.kind() == ErrorKind::WouldBlock => WindowsPipeReadPlan::Wait,
+                Err(_) => WindowsPipeReadPlan::Eof,
+            },
+        }
+    }
+
     let mut stdout_buf = Vec::new();
     let mut stderr_buf = Vec::new();
     let mut stdout_done = stdout.is_none();
@@ -1017,6 +1119,7 @@ fn drain_child_pipes_nonblocking_fallback(
     let mut chunk = [0u8; 4096];
 
     while !(stdout_done && stderr_done) {
+        // deadline 必须在任何可能阻塞的系统调用之前检查，并在 Wait 路径再次校验。
         if Instant::now() >= deadline {
             timed_out = true;
             break;
@@ -1025,21 +1128,13 @@ fn drain_child_pipes_nonblocking_fallback(
         let mut progress = false;
         if !stdout_done {
             if let Some(out) = stdout.as_mut() {
-                match out.read(&mut chunk) {
-                    Ok(0) => {
+                match pump_windows_side(out, &mut chunk, &mut stdout_buf) {
+                    WindowsPipeReadPlan::Eof => {
                         stdout_done = true;
                         progress = true;
                     }
-                    Ok(n) => {
-                        stdout_buf.extend_from_slice(&chunk[..n]);
-                        progress = true;
-                    }
-                    Err(err) if err.kind() == ErrorKind::Interrupted => progress = true,
-                    Err(err) if err.kind() == ErrorKind::WouldBlock => {}
-                    Err(_) => {
-                        stdout_done = true;
-                        progress = true;
-                    }
+                    WindowsPipeReadPlan::Read(n) if n > 0 => progress = true,
+                    WindowsPipeReadPlan::Read(_) | WindowsPipeReadPlan::Wait => {}
                 }
             } else {
                 stdout_done = true;
@@ -1047,21 +1142,13 @@ fn drain_child_pipes_nonblocking_fallback(
         }
         if !stderr_done {
             if let Some(err_pipe) = stderr.as_mut() {
-                match err_pipe.read(&mut chunk) {
-                    Ok(0) => {
+                match pump_windows_side(err_pipe, &mut chunk, &mut stderr_buf) {
+                    WindowsPipeReadPlan::Eof => {
                         stderr_done = true;
                         progress = true;
                     }
-                    Ok(n) => {
-                        stderr_buf.extend_from_slice(&chunk[..n]);
-                        progress = true;
-                    }
-                    Err(err) if err.kind() == ErrorKind::Interrupted => progress = true,
-                    Err(err) if err.kind() == ErrorKind::WouldBlock => {}
-                    Err(_) => {
-                        stderr_done = true;
-                        progress = true;
-                    }
+                    WindowsPipeReadPlan::Read(n) if n > 0 => progress = true,
+                    WindowsPipeReadPlan::Read(_) | WindowsPipeReadPlan::Wait => {}
                 }
             } else {
                 stderr_done = true;
@@ -1078,7 +1165,7 @@ fn drain_child_pipes_nonblocking_fallback(
         }
     }
 
-    // 显式 drop 读端：超时后不再保留任何 reader。
+    // 显式 drop 读端：超时后不再保留任何 reader，也不再进入阻塞 read。
     drop(stdout);
     drop(stderr);
     (stdout_buf, stderr_buf, timed_out)
@@ -1776,6 +1863,77 @@ mod tests {
         assert!(
             production.contains("fn drain_child_pipes_nonblocking"),
             "生产代码应定义非阻塞 drain_child_pipes_nonblocking"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Windows 路径若在 Peek 之前裸调用阻塞 read，deadline 无法打断 hang，会卡死 AppState 初始化。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     审查生产源码：Windows fallback 必须含 PeekNamedPipe + plan_windows_pipe_read；
+    ///     且 fallback 函数体内不得出现未先 plan 的“裸 read 循环”注释回归。
+    #[test]
+    fn windows_drain_source_uses_peek_named_pipe_before_read() {
+        let source = include_str!("dependencies.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("dependencies.rs 应包含 #[cfg(test)] 测试模块");
+        assert!(
+            production.contains("fn plan_windows_pipe_read"),
+            "应导出可单测的 plan_windows_pipe_read 决策函数"
+        );
+        assert!(
+            production.contains("PeekNamedPipe"),
+            "Windows drain 必须通过 PeekNamedPipe 查询可用字节"
+        );
+        assert!(
+            production.contains("fn drain_child_pipes_nonblocking_fallback"),
+            "应保留非 Unix drain fallback 入口"
+        );
+        // 禁止回归到“注释宣称受总超时约束 + 直接 out.read”的错误实现。
+        assert!(
+            !production.contains("极端阻塞场景仍受 probe 总超时约束"),
+            "不得再声称阻塞 read 受 probe 总超时约束"
+        );
+        let fallback = production
+            .split("fn drain_child_pipes_nonblocking_fallback")
+            .nth(1)
+            .and_then(|rest| rest.split("struct TmuxCandidate").next())
+            .expect("应能切出 Windows fallback 函数体");
+        assert!(
+            fallback.contains("PeekNamedPipe") || fallback.contains("peek_named_pipe_available"),
+            "fallback 函数体必须调用 PeekNamedPipe"
+        );
+        assert!(
+            fallback.contains("plan_windows_pipe_read"),
+            "fallback 函数体必须经 plan_windows_pipe_read 决策后再 read"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Peek 结果到 read 预算的映射是 Windows 有界 drain 的核心；零字节必须禁止 read。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     覆盖 None/0/正数/cap 裁剪四类输入，断言 Wait/Eof/Read 规划正确。
+    #[test]
+    fn plan_windows_pipe_read_never_allows_blocking_when_empty() {
+        assert_eq!(plan_windows_pipe_read(None, 4096), WindowsPipeReadPlan::Eof);
+        assert_eq!(
+            plan_windows_pipe_read(Some(0), 4096),
+            WindowsPipeReadPlan::Wait
+        );
+        assert_eq!(
+            plan_windows_pipe_read(Some(100), 0),
+            WindowsPipeReadPlan::Wait
+        );
+        assert_eq!(
+            plan_windows_pipe_read(Some(100), 4096),
+            WindowsPipeReadPlan::Read(100)
+        );
+        assert_eq!(
+            plan_windows_pipe_read(Some(8000), 4096),
+            WindowsPipeReadPlan::Read(4096)
         );
     }
 
