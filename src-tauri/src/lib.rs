@@ -19,6 +19,8 @@ mod claude_code_assets;
 mod cloud_sync;
 mod commands;
 mod config;
+mod config_runtime;
+mod config_store;
 mod error;
 mod health;
 mod hotkey;
