@@ -451,7 +451,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 
 ## 跨平台 Smoke（macOS / Windows）覆盖范围
 
-Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runner 上验证 **backend CLI 生命周期、data_dir 隔离、原生 PTY echo/exit、doctor --json、日志轮转/脱敏、清理/可重复性与失败证据**。不依赖 GUI、tmux 或 WSL；结果不得宣称覆盖下方「明确未验证」项。workflow：`.github/workflows/cross-platform-smoke.yml`（name: **Cross-Platform Smoke**）。三平台 release 安装包仍由 `release-tauri.yml` 负责，**不能替代本 smoke**。
+Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runner 上验证 **backend CLI 生命周期、data_dir 隔离、原生 PTY echo/exit、doctor --json、日志轮转/脱敏、固定 LAN trust boundary 集成 smoke、清理/可重复性与失败证据**。不依赖 GUI、tmux 或 WSL；结果不得宣称覆盖下方「明确未验证」项。workflow：`.github/workflows/cross-platform-smoke.yml`（name: **Cross-Platform Smoke**）。三平台 release 安装包仍由 `release-tauri.yml` 负责，**不能替代本 smoke**。
 
 ### 已验证（Verified）
 
@@ -465,6 +465,7 @@ Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runne
 - **doctor 单测**：`backend::doctor::tests`（healthy/degraded/unhealthy、隐私归一化、有界 probe fixture）
 - **doctor --json smoke**：`tests/backend_doctor_smoke.rs` — stopped/running 仅接受 exit 0/1（正常路径 fail on 2）；stdout 必须是纯 JSON（schemaVersion=1）；可选依赖缺失 → degraded/1 而非基础设施崩溃；核心路径 fixture（`logs` 被文件占位）→ unhealthy/2；敌意 secret/Prompt/file-sentinel/home 只出现在输入侧；diagnostics 不复制 raw logs，产物扫描不得按 `*-logs` 豁免且失败信息不回显 sentinel 明文；失败时保留 doctor stdout/stderr/exit
 - **原生 PTY**：create → echo 可控 token → exit 0；Unix process-group / Windows detached 生命周期（非本平台 case 必须带显式 skip reason，禁止静默 skip）
+- **固定 LAN trust boundary 集成 smoke**：`tests/lan_trust_boundary_smoke.rs` + `net/lan_trust_boundary_harness.rs` — 绑定 `127.0.0.1:0` 的真实 HTTP + 生产顺序 middleware（request_id → lan_socket_gate → browser_guard → envelope → body limit）；覆盖无凭据 loopback 业务读写、native 无 Origin、同源 mobile 写、hostile Host/wrong port、跨站/null Origin、simple Content-Type、preview proxy null 延期、stop loopback+token 组合、全局 32MiB 与 chunk 960KiB 上限；denied/public + XFF spoof 与 non-loopback stop 使用 oneshot ConnectInfo 并标注 `INJECTED_PEER_EVIDENCE`（**不得**当作真实多机/公网证据）。preview 会话 registry/WebSocket 与文件 5MiB 细节保留 unit；Browser L1 Playwright 归 S6
 - **最小构建门禁**：`cargo fmt --check`、`cargo check --locked --bins`
 - **清理与可重复性**：每 case 独立 root/control/端口；Drop 与 CI cleanup 只 stop/kill **本 case 记录的 PID** 与 live `backend-control.json`，不扫全局、不删失败 diagnostics
 - **失败证据**：case 失败或 `CC_PARTNER_SMOKE_KEEP=1` 时保留 case_dir/diagnostics（control 快照、summary、PTY raw/escaped 输出、doctor stdout/stderr/exit 等）；CI 失败上传 smoke 根 + cargo-logs（保留 7 天）；job summary 区分 Verified / NOT VERIFIED
@@ -476,7 +477,9 @@ Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runne
 | Windows WSL + tmux | NOT VERIFIED — hosted runner scope |
 | GUI / WebView | NOT VERIFIED — hosted runner scope |
 | macOS 权限弹窗（屏幕录制/辅助功能等） | NOT VERIFIED — hosted runner scope |
-| 多机 mDNS / 跨主机 P2P | NOT VERIFIED — hosted runner scope |
+| 多机 mDNS / 跨主机 P2P / 手机 QR | NOT VERIFIED — hosted runner scope |
+| 真实公网 peer 生产网卡路径 | NOT VERIFIED — injected ConnectInfo/XFF 不是生产证据 |
+| Browser L1 Playwright LAN journey | NOT VERIFIED in S1 — owned by S6 |
 | 完整 release 安装包矩阵 | 由 `release-tauri.yml` 独立负责，**不是**本 smoke 的替代 |
 
 ### 本地运行
@@ -498,6 +501,7 @@ cargo test --locked backend::doctor::tests
 cargo test --locked --test backend_cli_smoke -- --nocapture --test-threads=1
 cargo test --locked --test backend_doctor_smoke -- --nocapture --test-threads=1
 cargo test --locked --test pty_smoke -- --nocapture --test-threads=1
+cargo test --locked --test lan_trust_boundary_smoke -- --nocapture --test-threads=1
 cargo check --locked --bins
 ```
 
@@ -509,7 +513,7 @@ export CC_PARTNER_SMOKE_KEEP=1
 mkdir -p "$CC_PARTNER_SMOKE_ROOT"
 ```
 
-相关文件：`tests/backend_cli_smoke.rs`（start/health/status/stop、sequential + concurrent duplicate start、start 与 direct serve 并发 PID 归属、stale control）、`tests/backend_doctor_smoke.rs`（doctor --json pure JSON / exit 0|1|2 / privacy sentinel / core-path unhealthy / malformed recent-errors degraded）、`tests/pty_smoke.rs`（原生 shell echo/exit + 生产 helper 绑定的 Unix process-group / Windows detached flags + PTY RAII child cleanup）、`tests/support/mod.rs`（隔离根、CLI 硬超时、PID cleanup、diagnostics）。
+相关文件：`tests/backend_cli_smoke.rs`（start/health/status/stop、sequential + concurrent duplicate start、start 与 direct serve 并发 PID 归属、stale control）、`tests/backend_doctor_smoke.rs`（doctor --json pure JSON / exit 0|1|2 / privacy sentinel / core-path unhealthy / malformed recent-errors degraded）、`tests/pty_smoke.rs`（原生 shell echo/exit + 生产 helper 绑定的 Unix process-group / Windows detached flags + PTY RAII child cleanup）、`tests/lan_trust_boundary_smoke.rs` + `src/net/lan_trust_boundary_harness.rs`（固定 LAN 边界绑定服务器矩阵 + injected peer 证据）、`tests/support/mod.rs`（隔离根、CLI 硬超时、PID cleanup、diagnostics）。
 
 ### CI 触发与矩阵
 

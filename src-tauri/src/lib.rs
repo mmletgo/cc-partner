@@ -14,6 +14,8 @@
 mod attention;
 pub mod backend;
 mod cc;
+// 集成 smoke（tests/lan_trust_boundary_smoke.rs）经 app_lib 调用固定 LAN 边界矩阵。
+pub use net::lan_trust_boundary_harness;
 mod claude_cli;
 mod claude_code_assets;
 mod cloud_sync;
