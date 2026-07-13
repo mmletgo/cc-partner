@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 
 import i18n from '@/i18n';
@@ -86,6 +86,54 @@ afterEach(() => {
 });
 
 describe('Prompts mutation UI contracts', () => {
+  test('double-click create invokes create API once', async () => {
+    let resolveCreate: ((value: Prompt) => void) | undefined;
+    vi.mocked(promptsApi.create).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+
+    renderPrompts();
+    await screen.findByText('Alpha title');
+
+    fireEvent.click(screen.getByRole('button', { name: /新建|New/i }));
+    const titleInput = await screen.findByLabelText(/Prompt 标题|Prompt title/i);
+    const contentInput = screen.getByLabelText(/Prompt 内容|Prompt content/i);
+    fireEvent.change(titleInput, { target: { value: 'Once only' } });
+    fireEvent.change(contentInput, { target: { value: 'Single submit body' } });
+
+    const saveBtn = screen.getByRole('button', { name: /保存|Save/i });
+    fireEvent.click(saveBtn);
+    // 第二次点击在 re-render 前同步发生；pending ref 门闩应挡住第二次 create
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(promptsApi.create).toHaveBeenCalledTimes(1);
+    });
+    expect(promptsApi.create).toHaveBeenCalledWith({
+      title: 'Once only',
+      content: 'Single submit body',
+      tags: [],
+    });
+
+    await act(async () => {
+      resolveCreate?.(
+        buildPrompt({
+          id: 'server-once',
+          title: 'Once only',
+          content: 'Single submit body',
+          tags: [],
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Once only')).toBeTruthy();
+    });
+  });
+
   test('create rejection rolls back row, reopens draft, shows error, and retry reuses payload', async () => {
     vi.mocked(promptsApi.create)
       .mockRejectedValueOnce(new Error('create-denied'))

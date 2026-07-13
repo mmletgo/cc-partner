@@ -103,11 +103,19 @@ export function usePermissions(
 
   const statusRef = useRef<PermissionsStatus | null>(null);
   const requestingPromisesRef = useRef<Map<PermissionType, Promise<void>>>(new Map());
+  const mountedRef = useRef(true);
 
   // 在 effect 中同步 ref，避免 render 期间写 ref（react-hooks/refs 规则）
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -115,11 +123,11 @@ export function usePermissions(
    *
    * Code Logic（这个函数做什么）:
    *   并行拉取 TCC + 通知权限；成功写 status 并清 error；失败写 error 且不覆盖旧 status；
-   *   finally 结束 loading/refreshing。
+   *   finally 结束 loading/refreshing；卸载后不 setState。
    */
   const loadStatus = useCallback(async () => {
     const hadStatus = statusRef.current !== null;
-    if (hadStatus) {
+    if (hadStatus && mountedRef.current) {
       setRefreshing(true);
     }
     try {
@@ -127,6 +135,7 @@ export function usePermissions(
         configApi.permissions(),
         checkNotificationGranted(),
       ]);
+      if (!mountedRef.current) return;
       const next: PermissionsStatus = {
         ...tcc,
         notification: { granted: notifyGranted },
@@ -135,9 +144,11 @@ export function usePermissions(
       setStatus(next);
       setError(null);
     } catch (err) {
+      if (!mountedRef.current) return;
       setError(toErrorMessage(err));
       // 已有状态时不覆盖 status，保留 stale 投影
     } finally {
+      if (!mountedRef.current) return;
       setLoading(false);
       setRefreshing(false);
     }
@@ -160,7 +171,7 @@ export function usePermissions(
    *   委托 runNow 做 single-flight 刷新。
    */
   const refresh = useCallback(async () => {
-    await runNow();
+    await runNow({ force: true });
   }, [runNow]);
 
   /**
@@ -191,17 +202,21 @@ export function usePermissions(
           } else {
             await configApi.requestPermission(type, openSettings);
           }
-          await runNow();
+          await runNow({ force: true });
         } catch (err) {
-          setError(toErrorMessage(err));
+          if (mountedRef.current) {
+            setError(toErrorMessage(err));
+          }
           throw err;
         } finally {
           requestingPromisesRef.current.delete(type);
-          setRequesting((prev) => {
-            const next = new Set(prev);
-            next.delete(type);
-            return next;
-          });
+          if (mountedRef.current) {
+            setRequesting((prev) => {
+              const next = new Set(prev);
+              next.delete(type);
+              return next;
+            });
+          }
         }
       })();
 

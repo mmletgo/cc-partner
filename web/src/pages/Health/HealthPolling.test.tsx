@@ -244,5 +244,18 @@ describe('Health visibility polling', () => {
     expect(getStatusMock.mock.calls.length).toBeGreaterThan(afterSuccess);
     expect(screen.getByText('健康提醒')).toBeTruthy();
     expect(screen.queryByText('加载中…')).toBeNull();
+    expect(screen.getByTestId('health-stale-banner').textContent).toMatch(/刷新失败|保留/);
+    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+  });
+
+  test('first load status failure shows error and retry instead of permanent loading', async () => {
+    getStatusMock.mockRejectedValue(new Error('status unavailable'));
+
+    renderHealth();
+    await flushMicrotasks(20);
+
+    expect(screen.queryByText('加载中…')).toBeNull();
+    expect(screen.getByRole('alert').textContent).toMatch(/加载失败|重试|status unavailable|健康状态/);
+    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
   });
 });

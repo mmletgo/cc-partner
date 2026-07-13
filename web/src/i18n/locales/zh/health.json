@@ -96,5 +96,7 @@
   "Fri": "五",
   "Sat": "六",
   "Sun": "日",
-  "staleRefreshFailed": "健康数据刷新失败，已保留上次结果"
+  "staleRefreshFailed": "健康数据刷新失败，已保留上次结果",
+  "loadFailed": "健康状态加载失败，请重试",
+  "toggleFailed": "操作失败，已恢复原状态：{{error}}"
 }

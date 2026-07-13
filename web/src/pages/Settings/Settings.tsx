@@ -683,6 +683,14 @@ export function Settings() {
    * Code Logic（这个函数做什么）:
    *   合并 resourceResults 中对应 group，再按 group 写 state。
    */
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   单组 retry 成功后只应用该组，且不得覆盖用户未保存草稿。
+   *
+   * Code Logic（这个函数做什么）:
+   *   合并 resourceResults 中对应 group；仅当该组先前为 error 或 form 未 dirty 时写 form；
+   *   dirty 时只更新服务端权威 config 元数据与 error 标记。
+   */
   const applyGroupResult = useCallback(
     (
       group: SettingsResourceGroup,
@@ -693,7 +701,10 @@ export function Settings() {
         | PairResourceResult<import('@/lib/types').GithubTrendingConfig>
         | PairResourceResult<import('@/lib/types').HealthConfig>
         | PairResourceResult<import('@/api/orchestratorConfig').OrchestratorAutomationConfig>,
+      options?: { allowRewriteForm?: boolean },
     ) => {
+      const allowRewriteForm = options?.allowRewriteForm === true;
+
       setResourceResults((prev) => {
         if (!prev) return prev;
         return { ...prev, [group]: groupResult } as SettingsResourceResults;
@@ -704,10 +715,14 @@ export function Settings() {
         if (isResourceReady(result)) {
           const config = result.value;
           const loaded = settingsStateFromConfig(config);
-          setState(loaded);
+          const rewrite =
+            allowRewriteForm || !isSettingsStateDirty(state, initialState);
+          if (rewrite) {
+            setState(loaded);
+            setPromptOptimizerForm(promptOptimizerSettingsConfigToForm(config));
+          }
           setInitialState(loaded);
           setPromptOptimizerConfig(promptOptimizerSettingsConfigToForm(config));
-          setPromptOptimizerForm(promptOptimizerSettingsConfigToForm(config));
           setLoadError(null);
         } else {
           setLoadError(result.error.message || t('error.loadConfigFailed'));
@@ -739,7 +754,13 @@ export function Settings() {
         const pair = groupResult as PairResourceResult<import('@/lib/types').CloudSyncConfig>;
         if (isResourceReady(pair.current)) {
           setCloudSync(pair.current.value);
-          setCloudSyncForm(cloudSyncConfigToForm(pair.current.value));
+          const serverForm = cloudSyncConfigToForm(pair.current.value);
+          const dirty =
+            cloudSync !== null &&
+            JSON.stringify(cloudSyncForm) !== JSON.stringify(cloudSyncConfigToForm(cloudSync));
+          if (allowRewriteForm || !dirty) {
+            setCloudSyncForm(serverForm);
+          }
           setCloudSyncError(null);
         }
         if (isResourceReady(pair.defaults)) {
@@ -752,7 +773,14 @@ export function Settings() {
         const pair = groupResult as PairResourceResult<import('@/lib/types').GithubTrendingConfig>;
         if (isResourceReady(pair.current)) {
           setGithubTrendingConfig(pair.current.value);
-          setGithubTrendingForm(githubTrendingConfigToForm(pair.current.value));
+          const serverForm = githubTrendingConfigToForm(pair.current.value);
+          const dirty =
+            githubTrendingConfig !== null &&
+            JSON.stringify(githubTrendingForm) !==
+              JSON.stringify(githubTrendingConfigToForm(githubTrendingConfig));
+          if (allowRewriteForm || !dirty) {
+            setGithubTrendingForm(serverForm);
+          }
           setGithubTrendingError(null);
         }
         if (isResourceReady(pair.defaults)) {
@@ -765,7 +793,13 @@ export function Settings() {
         const pair = groupResult as PairResourceResult<import('@/lib/types').HealthConfig>;
         if (isResourceReady(pair.current)) {
           setHealthConfig(pair.current.value);
-          setHealthForm(healthConfigToForm(pair.current.value));
+          const serverForm = healthConfigToForm(pair.current.value);
+          const dirty =
+            healthConfig !== null &&
+            JSON.stringify(healthForm) !== JSON.stringify(healthConfigToForm(healthConfig));
+          if (allowRewriteForm || !dirty) {
+            setHealthForm(serverForm);
+          }
           setHealthError(null);
         }
         if (isResourceReady(pair.defaults)) {
@@ -780,7 +814,10 @@ export function Settings() {
         >;
         if (isResourceReady(pair.current)) {
           const loadedAutomationForm = automationConfigToForm(pair.current.value);
-          setAutomationForm(loadedAutomationForm);
+          const dirty = isAutomationFormDirty(automationForm, initialAutomationForm);
+          if (allowRewriteForm || !dirty) {
+            setAutomationForm(loadedAutomationForm);
+          }
           setInitialAutomationForm(loadedAutomationForm);
           setAutomationError(null);
         }
@@ -789,7 +826,19 @@ export function Settings() {
         }
       }
     },
-    [t],
+    [
+      t,
+      state,
+      initialState,
+      cloudSync,
+      cloudSyncForm,
+      githubTrendingConfig,
+      githubTrendingForm,
+      healthConfig,
+      healthForm,
+      automationForm,
+      initialAutomationForm,
+    ],
   );
 
   /**
@@ -803,13 +852,26 @@ export function Settings() {
     async (group: SettingsResourceGroup) => {
       setRetryingGroup(group);
       try {
+        const prev = resourceResults;
         const groupResult = await retrySettingsResource(settingsResourceApi, group);
-        applyGroupResult(group, groupResult);
+        // 失败组重试成功允许写 form；已 ready 组重试则遵守 dirty 保护
+        const prevStatus =
+          group === 'core' || group === 'defaults' || group === 'version'
+            ? prev?.[group]?.status
+            : group === 'cloudSync' ||
+                group === 'githubTrending' ||
+                group === 'health' ||
+                group === 'automation'
+              ? prev?.[group]?.current.status
+              : undefined;
+        applyGroupResult(group, groupResult, {
+          allowRewriteForm: prevStatus === 'error' || prevStatus === undefined,
+        });
       } finally {
         setRetryingGroup(null);
       }
     },
-    [applyGroupResult, settingsResourceApi],
+    [applyGroupResult, settingsResourceApi, resourceResults],
   );
 
   // 组件挂载时分组加载配置（allSettled，非整页 Promise.all）

@@ -17,7 +17,7 @@
  *   - 同一实体 pending 时禁用冲突编辑/删除；标签从 prompts 派生
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Input, Tag } from '@/components/primitives';
@@ -45,6 +45,17 @@ interface DraftPrompt extends PromptDraft {
 type LoadState = 'loading' | 'success' | 'error';
 
 /**
+ * create mutation 的稳定 pending 键。
+ *
+ * Business Logic（为什么需要这个常量）:
+ *   每次 create 会生成新的 optimisticId，若用它做门闩则双重点击变成两个实体。
+ *
+ * Code Logic（这个常量做什么）:
+ *   所有 create 路径共用固定键，保证同一会话只允许一个 in-flight create。
+ */
+const CREATE_PENDING_KEY = 'create';
+
+/**
  * Business Logic（为什么需要这个函数）:
  *   API 错误需要可读文案；非 Error 对象不能直接展示。
  *
@@ -53,6 +64,17 @@ type LoadState = 'loading' | 'success' | 'error';
  */
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? err.message : fallback;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   pending 门闩必须对 create 使用稳定键，对 update/delete 使用实体 id。
+ *
+ * Code Logic（这个函数做什么）:
+ *   create → CREATE_PENDING_KEY；其余 → promptMutationEntityId。
+ */
+function pendingKeyForMutation(mutation: PromptMutation): string {
+  return mutation.kind === 'create' ? CREATE_PENDING_KEY : promptMutationEntityId(mutation);
 }
 
 /**
@@ -87,6 +109,8 @@ export function Prompts() {
   const [pendingEntityIds, setPendingEntityIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  /** 同步门闩：避免 React state 批更新窗口内双过 pending 检查 */
+  const pendingEntityIdsRef = useRef<Set<string>>(new Set());
   const [failedMutation, setFailedMutation] = useState<PromptMutation | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -175,17 +199,14 @@ export function Prompts() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   pending 集合需要可增删而不丢失其他实体。
+   *   pending 集合需要可增删而不丢失其他实体，且同步占用避免双重点击。
    *
    * Code Logic（这个函数做什么）:
-   *   返回加入 entityId 后的新 Set。
+   *   同步写入 ref 并 setState 加入 entityId。
    */
   const markPending = useCallback((entityId: string) => {
-    setPendingEntityIds((prev) => {
-      const next = new Set(prev);
-      next.add(entityId);
-      return next;
-    });
+    pendingEntityIdsRef.current.add(entityId);
+    setPendingEntityIds(new Set(pendingEntityIdsRef.current));
   }, []);
 
   /**
@@ -193,15 +214,12 @@ export function Prompts() {
    *   mutation 结束后释放该实体，允许再次编辑/删除。
    *
    * Code Logic（这个函数做什么）:
-   *   返回移除 entityId 后的新 Set。
+   *   同步从 ref 删除并 setState。
    */
   const clearPending = useCallback((entityId: string) => {
-    setPendingEntityIds((prev) => {
-      if (!prev.has(entityId)) return prev;
-      const next = new Set(prev);
-      next.delete(entityId);
-      return next;
-    });
+    if (!pendingEntityIdsRef.current.has(entityId)) return;
+    pendingEntityIdsRef.current.delete(entityId);
+    setPendingEntityIds(new Set(pendingEntityIdsRef.current));
   }, []);
 
   /**
@@ -240,20 +258,20 @@ export function Prompts() {
    *   create/update/delete 共用同一套乐观 apply → API → commit/rollback 流程。
    *
    * Code Logic（这个函数做什么）:
-   *   标记 pending，应用乐观变更，调用 run，成功 commit 并清除错误；失败 rollback、
-   *   保存 failedMutation、恢复草稿（create/update）、展示错误。
+   *   用 ref 同步门闩（create 稳定键）；标记 pending，应用乐观变更，调用 run，
+   *   成功 commit 并清除错误；失败 rollback、保存 failedMutation、恢复草稿、展示错误。
    */
   const runMutation = useCallback(
     async (
       mutation: PromptMutation,
       run: () => Promise<Prompt | void>,
     ): Promise<boolean> => {
-      const entityId = promptMutationEntityId(mutation);
-      if (pendingEntityIds.has(entityId)) {
+      const pendingKey = pendingKeyForMutation(mutation);
+      if (pendingEntityIdsRef.current.has(pendingKey)) {
         return false;
       }
 
-      markPending(entityId);
+      markPending(pendingKey);
       setFailedMutation(null);
       setMutationError(null);
       setPrompts((prev) => applyOptimisticPromptMutation(prev, mutation));
@@ -294,29 +312,26 @@ export function Prompts() {
         }
         return false;
       } finally {
-        clearPending(entityId);
+        clearPending(pendingKey);
       }
     },
-    [pendingEntityIds, markPending, clearPending, restoreDraftFromMutation, t],
+    [markPending, clearPending, restoreDraftFromMutation, t],
   );
 
   // ── 进入编辑模式 ──
-  const startEdit = useCallback(
-    (p: Prompt) => {
-      if (pendingEntityIds.has(p.id)) return;
-      setCreatingNew(false);
-      setEditingId(p.id);
-      setDraft({
-        id: p.id,
-        title: p.title,
-        content: p.content,
-        tags: p.tags && p.tags.length > 0 ? p.tags : p.tag ? [p.tag] : [],
-      });
-      setFailedMutation(null);
-      setMutationError(null);
-    },
-    [pendingEntityIds],
-  );
+  const startEdit = useCallback((p: Prompt) => {
+    if (pendingEntityIdsRef.current.has(p.id)) return;
+    setCreatingNew(false);
+    setEditingId(p.id);
+    setDraft({
+      id: p.id,
+      title: p.title,
+      content: p.content,
+      tags: p.tags && p.tags.length > 0 ? p.tags : p.tag ? [p.tag] : [],
+    });
+    setFailedMutation(null);
+    setMutationError(null);
+  }, []);
 
   const cancelEdit = useCallback(() => {
     setEditingId(null);
@@ -340,6 +355,7 @@ export function Prompts() {
       };
 
       if (creatingNew) {
+        if (pendingEntityIdsRef.current.has(CREATE_PENDING_KEY)) return;
         const optimisticId = draft.id.startsWith('new-')
           ? `local-${Date.now()}`
           : draft.id;
@@ -360,7 +376,7 @@ export function Prompts() {
 
       const before = prompts.find((p) => p.id === draft.id);
       if (!before) return;
-      if (pendingEntityIds.has(draft.id)) return;
+      if (pendingEntityIdsRef.current.has(draft.id)) return;
 
       const mutation: PromptMutation = {
         kind: 'update',
@@ -376,20 +392,21 @@ export function Prompts() {
         }),
       );
     },
-    [draft, creatingNew, prompts, pendingEntityIds, runMutation],
+    [draft, creatingNew, prompts, runMutation],
   );
 
   // ── 删除确认 ──
   const confirmDelete = useCallback(async () => {
     if (!pendingDeleteId) return;
     const id = pendingDeleteId;
-    if (pendingEntityIds.has(id)) return;
+    if (pendingEntityIdsRef.current.has(id)) return;
     const index = prompts.findIndex((p) => p.id === id);
     if (index < 0) {
       setPendingDeleteId(null);
       return;
     }
     const before = prompts[index];
+    if (!before) return;
     const mutation: PromptMutation = {
       kind: 'delete',
       id,
@@ -399,7 +416,7 @@ export function Prompts() {
     await runMutation(mutation, async () => {
       await promptsApi.remove(id);
     });
-  }, [pendingDeleteId, pendingEntityIds, prompts, runMutation]);
+  }, [pendingDeleteId, prompts, runMutation]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -605,6 +622,7 @@ export function Prompts() {
                 <EditPromptCard
                   draft={draft}
                   isNew
+                  saving={pendingEntityIds.has(CREATE_PENDING_KEY)}
                   onChange={setDraft}
                   onSave={(event) => {
                     void saveDraft(event);
@@ -620,6 +638,7 @@ export function Prompts() {
                   <EditPromptCard
                     draft={draft}
                     isNew={false}
+                    saving={pendingEntityIds.has(p.id)}
                     onChange={setDraft}
                     onSave={(event) => {
                       void saveDraft(event);
@@ -634,7 +653,7 @@ export function Prompts() {
                     actionsDisabled={pendingEntityIds.has(p.id)}
                     onEdit={() => startEdit(p)}
                     onDelete={() => {
-                      if (pendingEntityIds.has(p.id)) return;
+                      if (pendingEntityIdsRef.current.has(p.id)) return;
                       setPendingDeleteId(p.id);
                     }}
                   />
@@ -782,20 +801,22 @@ function PromptCardView({
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   新建与编辑共用同一表单卡片。
+ *   新建与编辑共用同一表单卡片；保存中必须禁用提交，防止双重点击。
  *
  * Code Logic（这个组件做什么）:
- *   渲染 title/content/tags 表单与保存/取消按钮。
+ *   渲染 title/content/tags 表单与保存/取消按钮；saving 时禁用 submit。
  */
 function EditPromptCard({
   draft,
   isNew,
+  saving,
   onChange,
   onSave,
   onCancel,
 }: {
   draft: DraftPrompt;
   isNew: boolean;
+  saving: boolean;
   onChange: (next: DraftPrompt) => void;
   onSave: (e?: FormEvent) => void;
   onCancel: () => void;
@@ -812,6 +833,7 @@ function EditPromptCard({
             placeholder={t('prompts:titlePlaceholder')}
             aria-label={t('prompts:titleAriaLabel')}
             autoFocus={isNew}
+            disabled={saving}
           />
         </Card.Header>
         <Card.Body className={styles.promptBody}>
@@ -822,6 +844,7 @@ function EditPromptCard({
             placeholder={t('prompts:contentPlaceholder')}
             aria-label={t('prompts:contentAriaLabel')}
             rows={4}
+            disabled={saving}
           />
           <div className={styles.editMeta}>
             <TagInput
@@ -832,7 +855,14 @@ function EditPromptCard({
           </div>
         </Card.Body>
         <Card.Footer className={styles.promptFoot}>
-          <Button variant="ghost" size="sm" icon={<XIcon />} onClick={onCancel} type="button">
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<XIcon />}
+            onClick={onCancel}
+            type="button"
+            disabled={saving}
+          >
             {t('common:action.cancel')}
           </Button>
           <Button
@@ -840,7 +870,9 @@ function EditPromptCard({
             size="sm"
             icon={<CheckIcon />}
             type="submit"
-            disabled={!draft.content.trim()}
+            disabled={!draft.content.trim() || saving}
+            loading={saving}
+            aria-busy={saving || undefined}
           >
             {t('common:action.save')}
           </Button>

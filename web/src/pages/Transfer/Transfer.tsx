@@ -12,7 +12,7 @@
  *   - pending/transferring 仅传 onCancel；cancellingIds + taskActionErrors 行级反馈
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Pill } from '@/components/primitives';
@@ -98,17 +98,29 @@ export function Transfer() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [cancellingIds, setCancellingIds] = useState<ReadonlySet<string>>(() => new Set());
   const [taskActionErrors, setTaskActionErrors] = useState<Record<string, string>>({});
+  /** 同步门闩：双击 cancel 在 re-render 前也不可重入 */
+  const cancellingIdsRef = useRef<Set<string>>(new Set());
+  /** 组件挂载守卫：异步 loader 写 state 前检查 */
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   设备下拉需要与后端发现列表对齐；刷新失败不得清空已成功数据。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 devicesApi.list；成功写数组；失败保留 prev 并标 error。
+   *   调用 devicesApi.list；成功写数组；失败保留 prev 并标 error；卸载后不 setState。
    */
   const loadDevices = useCallback(async () => {
     try {
       const data = await devicesApi.list();
+      if (!mountedRef.current) return;
       const next = Array.isArray(data) ? data : [];
       setDevices(next);
       if (next.length > 0) {
@@ -117,6 +129,7 @@ export function Transfer() {
       setDevicesState('success');
       setDevicesError(null);
     } catch (err) {
+      if (!mountedRef.current) return;
       setDevicesState('error');
       setDevicesError(t('transfer:deviceLoadFailed', { error: errorMessage(err) }));
       // 保留已有 devices，不覆盖为空
@@ -128,15 +141,17 @@ export function Transfer() {
    *   任务列表是发送/取消后的权威进度源；刷新失败保留旧列表。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 transferApi.list；成功写数组；失败保留 prev 并标 error。
+   *   调用 transferApi.list；成功写数组；失败保留 prev 并标 error；卸载后不 setState。
    */
   const loadTasks = useCallback(async () => {
     try {
       const data = await transferApi.list();
+      if (!mountedRef.current) return;
       setTasks(Array.isArray(data) ? data : []);
       setTasksState('success');
       setTasksError(null);
     } catch (err) {
+      if (!mountedRef.current) return;
       setTasksState('error');
       setTasksError(t('transfer:taskLoadFailed', { error: errorMessage(err) }));
       // 保留已有 tasks，不覆盖为空
@@ -245,10 +260,10 @@ export function Transfer() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户确认发送后必须真实调用 send_transfer，成功刷新任务列表。
+   *   用户确认发送后必须真实调用 send_transfer，成功后强制刷新任务列表（不得只 join 旧 poll）。
    *
    * Code Logic（这个函数做什么）:
-   *   校验 selection/device；await transferApi.send；成功清空选择并 runTasksNow；失败保留选择。
+   *   校验 selection/device；await transferApi.send；成功清空选择并 runTasksNow({force:true})；失败保留选择。
    */
   const handleSendClick = useCallback(async () => {
     if (!selectedFile || !selectedDeviceId || sending) return;
@@ -258,7 +273,7 @@ export function Transfer() {
       await transferApi.send(selectedDeviceId, selectedFile.path);
       setSelectedFile(null);
       setSelectionNotice(null);
-      await runTasksNow();
+      await runTasksNow({ force: true });
     } catch (err) {
       setSendError(t('transfer:sendFailed', { error: errorMessage(err) }));
     } finally {
@@ -268,18 +283,17 @@ export function Transfer() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户可取消 pending/transferring 任务，失败需行级提示且保留任务。
+   *   用户可取消 pending/transferring 任务，失败需行级提示且保留任务；
+   *   双击不得在 re-render 前发出第二次 cancel。
    *
    * Code Logic（这个函数做什么）:
-   *   维护 cancellingIds；await cancel；成功清错误并 runTasksNow；失败写 taskActionErrors。
+   *   用 cancellingIdsRef 同步门闩；await cancel；成功 force runTasksNow；失败写 taskActionErrors。
    */
   const handleCancelTask = useCallback(
     async (taskId: string) => {
-      setCancellingIds((prev) => {
-        const next = new Set(prev);
-        next.add(taskId);
-        return next;
-      });
+      if (cancellingIdsRef.current.has(taskId)) return;
+      cancellingIdsRef.current.add(taskId);
+      setCancellingIds(new Set(cancellingIdsRef.current));
       setTaskActionErrors((prev) => {
         if (!(taskId in prev)) return prev;
         const next = { ...prev };
@@ -288,18 +302,15 @@ export function Transfer() {
       });
       try {
         await transferApi.cancel(taskId);
-        await runTasksNow();
+        await runTasksNow({ force: true });
       } catch (err) {
         setTaskActionErrors((prev) => ({
           ...prev,
           [taskId]: t('transfer:cancelFailed', { error: errorMessage(err) }),
         }));
       } finally {
-        setCancellingIds((prev) => {
-          const next = new Set(prev);
-          next.delete(taskId);
-          return next;
-        });
+        cancellingIdsRef.current.delete(taskId);
+        setCancellingIds(new Set(cancellingIdsRef.current));
       }
     },
     [runTasksNow, t],

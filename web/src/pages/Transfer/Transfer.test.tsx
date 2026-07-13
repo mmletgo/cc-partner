@@ -27,7 +27,8 @@ const pickTransferFileMock = vi.fn();
 const subscribeTransferFileDropsMock = vi.fn();
 
 type PollingTask = () => Promise<void>;
-type RunNowFn = (() => Promise<void>) & {
+type RunNowOptions = { force?: boolean };
+type RunNowFn = ((options?: RunNowOptions) => Promise<void>) & {
   mock: { calls: unknown[][] };
 };
 const pollingRegistrations: Array<{
@@ -61,7 +62,7 @@ vi.mock('@/hooks/useVisibilityPolling', () => ({
     let entry = pollingRegistrations.find((item) => item.options.intervalMs === options.intervalMs);
     if (!entry) {
       const taskRef = { current: task };
-      const runNow = vi.fn(async () => {
+      const runNow = vi.fn(async (_options?: RunNowOptions) => {
         await taskRef.current();
       }) as unknown as RunNowFn;
       entry = { taskRef, options, runNow, started: false };
@@ -382,6 +383,45 @@ describe('Transfer page journey', () => {
     await waitFor(() => {
       expect(cancelTransferMock).toHaveBeenCalledWith('task-ok');
       expect(getPolling(3000).runNow.mock.calls.length).toBeGreaterThan(runNowBefore);
+      const lastCall = getPolling(3000).runNow.mock.calls.at(-1);
+      expect(lastCall?.[0]).toEqual({ force: true });
+    });
+  });
+
+  test('double-click cancel invokes cancel API once', async () => {
+    listTransfersMock.mockResolvedValue([
+      buildTask({
+        id: 'task-dbl',
+        status: 'pending',
+        fileName: 'dbl.bin',
+        progress: 0,
+        speed: undefined,
+      }),
+    ]);
+    let resolveCancel: ((value: { ok: true; id: string }) => void) | undefined;
+    cancelTransferMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCancel = resolve;
+        }),
+    );
+
+    renderTransfer();
+
+    await waitFor(() => {
+      expect(screen.getByText('dbl.bin')).toBeTruthy();
+    });
+
+    const cancelBtn = screen.getByRole('button', { name: '取消' });
+    fireEvent.click(cancelBtn);
+    fireEvent.click(cancelBtn);
+
+    await waitFor(() => {
+      expect(cancelTransferMock).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      resolveCancel?.({ ok: true, id: 'task-dbl' });
     });
   });
 

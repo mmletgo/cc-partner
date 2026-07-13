@@ -96,5 +96,7 @@
   "Fri": "Fri",
   "Sat": "Sat",
   "Sun": "Sun",
-  "staleRefreshFailed": "Health data refresh failed; showing last known data"
+  "staleRefreshFailed": "Health data refresh failed; showing last known data",
+  "loadFailed": "Failed to load health status. Please retry.",
+  "toggleFailed": "Action failed; restored previous state: {{error}}"
 }

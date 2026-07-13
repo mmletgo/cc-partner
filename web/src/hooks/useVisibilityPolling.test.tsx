@@ -248,6 +248,80 @@ describe('useVisibilityPolling', () => {
     expect(result.current.inFlight).toBe(false);
   });
 
+  test('force runNow after in-flight poll executes a second task run', async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    let call = 0;
+    const task = vi.fn(() => {
+      call += 1;
+      return call === 1 ? first.promise : second.promise;
+    });
+
+    const { result } = renderHook(() =>
+      useVisibilityPolling(task, {
+        intervalMs: 10_000,
+        runImmediately: false,
+      }),
+    );
+
+    let pollPromise!: Promise<void>;
+    let forcePromise!: Promise<void>;
+    await act(async () => {
+      pollPromise = result.current.runNow();
+      forcePromise = result.current.runNow({ force: true });
+    });
+
+    expect(task).toHaveBeenCalledTimes(1);
+    expect(forcePromise).toBe(pollPromise);
+
+    await act(async () => {
+      first.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(task).toHaveBeenCalledTimes(2);
+    expect(result.current.inFlight).toBe(true);
+
+    await act(async () => {
+      second.resolve();
+      await forcePromise;
+    });
+
+    expect(result.current.inFlight).toBe(false);
+    expect(task).toHaveBeenCalledTimes(2);
+  });
+
+  test('plain runNow still joins in-flight without forcing a second run', async () => {
+    const pending = deferred<void>();
+    const task = vi.fn(() => pending.promise);
+
+    const { result } = renderHook(() =>
+      useVisibilityPolling(task, {
+        intervalMs: 10_000,
+        runImmediately: false,
+      }),
+    );
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    await act(async () => {
+      first = result.current.runNow();
+      second = result.current.runNow();
+    });
+
+    expect(task).toHaveBeenCalledTimes(1);
+    expect(second).toBe(first);
+
+    await act(async () => {
+      pending.resolve();
+      await first;
+      await Promise.resolve();
+    });
+
+    expect(task).toHaveBeenCalledTimes(1);
+  });
+
   test('interval ticks swallow rejections so they stay unhandled-safe', async () => {
     const task = vi
       .fn()

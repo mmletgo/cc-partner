@@ -268,15 +268,15 @@ export function Devices() {
    */
   /**
    * Business Logic（为什么需要这个函数）:
-   *   手动刷新应立即对齐设备列表与 SSH 配置。
+   *   手动刷新应立即对齐设备列表与 SSH 配置；若轮询 in-flight 须强制再跑一轮。
    *
    * Code Logic（这个函数做什么）:
-   *   置 loading，runDevicesNow + fetchSshConfig。
+   *   置 loading，runDevicesNow({force:true}) + fetchSshConfig。
    */
   const handleRefresh = () => {
     setLoading(true);
     setSshLoading(true);
-    void runDevicesNow();
+    void runDevicesNow({ force: true });
     void fetchSshConfig();
   };
 
