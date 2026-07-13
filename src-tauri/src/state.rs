@@ -24,14 +24,13 @@ use crate::storage::{
     WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
 };
 use crate::transfer::registry::TransferRegistry;
+use crate::updater::UpdateRuntime;
 use mdns_sd::ServiceDaemon;
 use serde::Serialize;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, RwLock};
-use tauri::async_runtime::JoinHandle;
-use tauri_plugin_updater::Update;
 
 /// 应用全局共享状态。Clone 仅增加 Arc 引用计数。
 #[derive(Clone)]
@@ -64,19 +63,8 @@ pub struct AppState {
     pub transfers: Arc<TransferRegistry>,
     /// 后端 UI adapter（GUI 使用 Tauri，headless 使用 filesystem/no-op）
     pub ui: Arc<dyn BackendUi>,
-    /// M8 更新下载状态机（status/progress/error/filePath/url/filename/size），对齐前端 UpdateDownloadStatus，
-    /// 前端 get_download_status 轮询读取
-    pub update_status: Arc<RwLock<crate::commands::updater::UpdateDownloadStatus>>,
-    /// M8 check_update 命中新版本后缓存的 Update 对象（download/install 时取出 clone 操作），
-    /// 避免跨命令重复请求 endpoint。Update 实现 Clone，owned 无生命周期参数，可安全长期持有
-    pub update_pending: Arc<Mutex<Option<Update>>>,
-    /// M8 download 完成后缓存的安装包字节（install 时取出喂给 update.install）。
-    /// tauri-plugin-updater 的 install 接受 &[u8]，下载结果需跨命令传递
-    pub update_bytes: Arc<Mutex<Option<Vec<u8>>>>,
-    /// M8 正在进行的下载任务句柄（cancel_download 时 abort 强制中断 reqwest 流）
-    pub update_download_task: Arc<Mutex<Option<JoinHandle<()>>>>,
-    /// M8 当前下载任务的取消令牌（cancel_download 时 cancel()，spawn 体内 is_cancelled 判定为 Cancelled）
-    pub update_cancel_token: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// M8 自动更新 generation 状态机（单锁聚合 status/pending/bytes/task/token）
+    pub update_runtime: Arc<UpdateRuntime>,
     /// Claude Code 历史仓库（claude_history / claude_history_scan_state 表访问）
     pub cc_history_repo: Arc<ClaudeHistoryRepo>,
     /// SSH 目标仓库（ssh_targets 表访问，跨设备同步）

@@ -35,6 +35,7 @@ mod storage;
 mod sync;
 mod transfer;
 mod tray;
+mod updater;
 mod workbench;
 
 use std::sync::Arc;
