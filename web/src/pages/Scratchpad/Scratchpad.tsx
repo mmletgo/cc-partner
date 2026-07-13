@@ -8,25 +8,20 @@
  * Code Logic（这个页面做什么）:
  *   - 从 Rust/SQLite 加载页面摘要列表和当前页面正文
  *   - 左侧展示页面列表，右侧编辑标题与正文
- *   - 正文 500ms debounce 自动保存，并在切页/删除/同步前 flush 当前页待保存内容
- *   - 支持创建、重命名、删除、复制、清空和同步操作
+ *   - 正文经 AppShell 常驻 ScratchpadAutosaveQueue 做 500ms debounce 保存
+ *   - 切页/删除/同步前 await flushPage；路由卸载与 pagehide best-effort flushAll
+ *   - 订阅 queue 快照驱动 saving/error/retry UI
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import { configApi } from '@/api/config';
 import { scratchpadApi } from '@/api/scratchpad';
 import { Button, Card, Input } from '@/components/primitives';
+import { useScratchpadAutosave } from '@/hooks/scratchpadAutosaveContext';
 import { CopyIcon, PlusIcon, SyncIcon, TrashIcon, XIcon } from '@/lib/icons';
 import type { ScratchpadPage, ScratchpadPageSummary } from '@/lib/types';
 import styles from './Scratchpad.module.css';
-
-const AUTOSAVE_DELAY_MS = 500;
-
-interface PendingSave {
-  pageId: string;
-  content: string;
-}
 
 /**
  * Business Logic（为什么需要）:
@@ -76,10 +71,11 @@ function formatLocalDateTime(value: string): string {
  *
  * Code Logic（做什么）:
  *   管理页面列表、当前页、标题草稿、正文草稿和保存/同步状态；
- *   所有持久化与同步都通过 Tauri invoke 交给 Rust 后端。
+ *   正文保存走常驻 queue.schedule/flushPage，卸载时 void queue.flushAll()。
  */
 export function Scratchpad() {
   const { t } = useTranslation(['scratchpad', 'common']);
+  const queue = useScratchpadAutosave();
   const [pages, setPages] = useState<ScratchpadPageSummary[]>([]);
   const [currentPage, setCurrentPage] = useState<ScratchpadPage | null>(null);
   const [titleDraft, setTitleDraft] = useState('');
@@ -87,76 +83,96 @@ export function Scratchpad() {
   const [pendingClear, setPendingClear] = useState(false);
   const [pendingDelete, setPendingDelete] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [titleSaving, setTitleSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
-  const saveTimerRef = useRef<number | null>(null);
-  const pendingSaveRef = useRef<PendingSave | null>(null);
   const textRef = useRef('');
   const currentPageIdRef = useRef<string | null>(null);
 
-  const charCount = text.length;
+  const autosaveSnapshot = useSyncExternalStore(
+    queue.subscribe,
+    queue.getSnapshot,
+    queue.getSnapshot,
+  );
+
   const currentPageId = currentPage?.id ?? null;
+  const currentAutosave = currentPageId ? autosaveSnapshot.pages[currentPageId] : undefined;
+  const contentSaving = Boolean(
+    currentAutosave &&
+      (currentAutosave.inFlight || currentAutosave.pendingVersion > currentAutosave.savedVersion),
+  );
+  const autosaveError = currentAutosave?.error ?? null;
+  const saving = titleSaving || contentSaving;
+  const charCount = text.length;
+
+  const displayError = useMemo(() => {
+    if (error) return error;
+    if (autosaveError) {
+      return t('scratchpad:saveFailedWithReason', { reason: autosaveError });
+    }
+    return null;
+  }, [autosaveError, error, t]);
 
   /**
    * Business Logic（为什么需要）:
    *   切页、删除、同步前必须保存用户尚未落库的正文，避免内容丢失。
    *
    * Code Logic（做什么）:
-   *   清除 debounce timer，使用 pendingSaveRef 内捕获的旧 pageId 和 content 调后端保存。
+   *   对当前 pageId 调用 queue.flushPage；无当前页时直接返回。
    */
   const flushPendingSave = useCallback(async () => {
-    const pending = pendingSaveRef.current;
-    if (!pending) return;
-
-    if (saveTimerRef.current !== null) {
-      window.clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-
-    pendingSaveRef.current = null;
-    setSaving(true);
+    const pageId = currentPageIdRef.current;
+    if (!pageId) return;
     try {
-      const saved = await scratchpadApi.updatePageContent(pending.pageId, pending.content);
-      setStatus(t('scratchpad:savedAt', { time: new Date(saved.updatedAt).toLocaleTimeString() }));
-      const latestPages = await scratchpadApi.listPages();
-      setPages(latestPages);
-      if (currentPageIdRef.current === saved.id) {
-        setCurrentPage(saved);
-        setTitleDraft(saved.title);
+      await queue.flushPage(pageId);
+      const snap = queue.getSnapshot().pages[pageId];
+      if (snap && snap.savedVersion >= snap.pendingVersion && !snap.error) {
+        setStatus(t('scratchpad:savedAt', { time: new Date().toLocaleTimeString() }));
+        const latestPages = await scratchpadApi.listPages();
+        setPages(latestPages);
       }
     } catch (err) {
       setError(getErrorMessage(err, t('scratchpad:saveFailed')));
       throw err;
-    } finally {
-      setSaving(false);
     }
-  }, [t]);
+  }, [queue, t]);
 
   /**
    * Business Logic（为什么需要）:
    *   正文编辑应自动保存，但不能每次按键都立即写库。
    *
    * Code Logic（做什么）:
-   *   用 pageId 和 content 写入 pendingSaveRef，并启动 500ms debounce；
-   *   timer 触发时调用 flushPendingSave，确保保存目标页不受后续切页影响。
+   *   调用 queue.schedule 合并同页最新正文并启动 debounce。
    */
   const scheduleContentSave = useCallback(
     (pageId: string, content: string) => {
-      pendingSaveRef.current = { pageId, content };
-      setSaving(true);
+      setError(null);
       setStatus(null);
-      if (saveTimerRef.current !== null) {
-        window.clearTimeout(saveTimerRef.current);
-      }
-      saveTimerRef.current = window.setTimeout(() => {
-        saveTimerRef.current = null;
-        void flushPendingSave().catch(() => undefined);
-      }, AUTOSAVE_DELAY_MS);
+      queue.schedule(pageId, content);
     },
-    [flushPendingSave],
+    [queue],
   );
+
+  /**
+   * Business Logic（为什么需要）:
+   *   保存失败后用户需要可重试，且不得丢弃 pending 正文。
+   *
+   * Code Logic（做什么）:
+   *   对当前页再次 flushPage；成功后刷新列表与状态。
+   */
+  const handleRetrySave = useCallback(async () => {
+    if (!currentPageId) return;
+    setError(null);
+    try {
+      await queue.flushPage(currentPageId);
+      setStatus(t('scratchpad:savedAt', { time: new Date().toLocaleTimeString() }));
+      const latestPages = await scratchpadApi.listPages();
+      setPages(latestPages);
+    } catch (err) {
+      setError(getErrorMessage(err, t('scratchpad:saveFailed')));
+    }
+  }, [currentPageId, queue, t]);
 
   /**
    * Business Logic（为什么需要）:
@@ -165,20 +181,17 @@ export function Scratchpad() {
    * Code Logic（做什么）:
    *   读取页面详情并同步 currentPage/titleDraft/text/ref 状态。
    */
-  const openPage = useCallback(
-    async (pageId: string) => {
-      const page = await scratchpadApi.getPage(pageId);
-      currentPageIdRef.current = page.id;
-      textRef.current = page.content;
-      setCurrentPage(page);
-      setTitleDraft(page.title);
-      setText(page.content);
-      setPendingClear(false);
-      setPendingDelete(false);
-      return page;
-    },
-    [],
-  );
+  const openPage = useCallback(async (pageId: string) => {
+    const page = await scratchpadApi.getPage(pageId);
+    currentPageIdRef.current = page.id;
+    textRef.current = page.content;
+    setCurrentPage(page);
+    setTitleDraft(page.title);
+    setText(page.content);
+    setPendingClear(false);
+    setPendingDelete(false);
+    return page;
+  }, []);
 
   /**
    * Business Logic（为什么需要）:
@@ -253,12 +266,27 @@ export function Scratchpad() {
 
     return () => {
       cancelled = true;
-      if (saveTimerRef.current !== null) {
-        window.clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
+      // 路由卸载：立即 flush 全部 pending（queue 本身常驻 AppShell，不随页面卸载）
+      void queue.flushAll().catch(() => undefined);
     };
-  }, [reloadPages, t]);
+  }, [queue, reloadPages, t]);
+
+  useEffect(() => {
+    /**
+     * Business Logic（为什么需要）:
+     *   浏览器/WebView pagehide 时尽量再 flush 一次，作为卸载路径的 best-effort 补充。
+     *
+     * Code Logic（做什么）:
+     *   监听 pagehide，调用 queue.flushAll 且不 await 阻塞卸载。
+     */
+    const onPageHide = () => {
+      void queue.flushAll().catch(() => undefined);
+    };
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+    };
+  }, [queue]);
 
   /**
    * Business Logic（为什么需要）:
@@ -283,7 +311,7 @@ export function Scratchpad() {
    *   用户需要在多页速记本之间切换上下文。
    *
    * Code Logic（做什么）:
-   *   切页前 flush 当前页待保存内容，再读取目标页面详情。
+   *   切页前 await flushPage 当前页，再 getPage 目标页。
    */
   const handleSelectPage = useCallback(
     async (pageId: string) => {
@@ -333,7 +361,7 @@ export function Scratchpad() {
     }
 
     setError(null);
-    setSaving(true);
+    setTitleSaving(true);
     try {
       const renamed = await scratchpadApi.renamePage(currentPage.id, nextTitle);
       const latestPages = await scratchpadApi.listPages();
@@ -346,7 +374,7 @@ export function Scratchpad() {
     } catch (err) {
       setError(getErrorMessage(err, t('scratchpad:renameFailed')));
     } finally {
-      setSaving(false);
+      setTitleSaving(false);
     }
   }, [currentPage, t, titleDraft]);
 
@@ -357,14 +385,11 @@ export function Scratchpad() {
    * Code Logic（做什么）:
    *   拦截 Enter 默认行为并提交标题。
    */
-  const handleTitleKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLInputElement>) => {
-      if (event.key !== 'Enter') return;
-      event.preventDefault();
-      event.currentTarget.blur();
-    },
-    [],
-  );
+  const handleTitleKeyDown = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    event.currentTarget.blur();
+  }, []);
 
   /**
    * Business Logic（为什么需要）:
@@ -443,7 +468,7 @@ export function Scratchpad() {
   const confirmDelete = useCallback(async () => {
     if (!currentPageId) return;
     setError(null);
-    setSaving(true);
+    setTitleSaving(true);
     try {
       await flushPendingSave();
       const deleted = await scratchpadApi.deletePage(currentPageId);
@@ -455,7 +480,7 @@ export function Scratchpad() {
     } catch (err) {
       setError(getErrorMessage(err, t('scratchpad:deleteFailed')));
     } finally {
-      setSaving(false);
+      setTitleSaving(false);
       setPendingDelete(false);
     }
   }, [currentPageId, flushPendingSave, reloadPages, t]);
@@ -538,7 +563,12 @@ export function Scratchpad() {
         {loading ? <span>{t('scratchpad:loading')}</span> : null}
         {!loading && saving ? <span>{t('scratchpad:saving')}</span> : null}
         {!loading && !saving && status ? <span>{status}</span> : null}
-        {error ? <span className={styles.error}>{error}</span> : null}
+        {displayError ? <span className={styles.error}>{displayError}</span> : null}
+        {autosaveError ? (
+          <Button variant="secondary" size="sm" onClick={() => void handleRetrySave()}>
+            {t('scratchpad:retrySave')}
+          </Button>
+        ) : null}
       </div>
 
       <div className={styles.workspace}>

@@ -29,10 +29,13 @@ import { WorkbenchProjectsProvider } from './hooks/useWorkbenchProjects';
 import { WorkbenchDependencyProvider } from './hooks/useWorkbenchDependency';
 import { WorkbenchTerminalBuffersProvider } from './hooks/useWorkbenchTerminalBuffers';
 import { AttentionProvider } from './hooks/useAttention';
+import { ScratchpadAutosaveProvider } from './hooks/ScratchpadAutosaveProvider';
 import { attentionApi } from './api/attention';
 import { Attention } from './pages/Attention';
 import { checkNotificationGranted } from './lib/notification';
 import { backendApi } from './api/backend';
+import { flushPendingWritesThenClose } from './lib/closeFlush';
+import { pendingWrites } from './lib/pendingWrites';
 import styles from './App.module.css';
 
 const isDev = import.meta.env.DEV;
@@ -174,24 +177,41 @@ function HealthReminderListener() {
   return null;
 }
 
+
+/**
+ * BackendCloseChoiceListener props（测试可注入初始 open）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   单测无法稳定触发 Tauri onCloseRequested，需要可直接打开对话框验证 flush 门闩。
+ *
+ * Code Logic（字段说明）:
+ *   initialOpenForTest 仅用于测试；生产默认 false。
+ */
+export interface BackendCloseChoiceListenerProps {
+  initialOpenForTest?: boolean;
+}
+
 /**
  * BackendCloseChoiceListener - GUI 关闭时选择是否同时停止后台 sidecar。
  *
  * Business Logic（为什么需要这个组件）:
  *   GUI 关闭不能再直接退出进程；用户可能希望仅关闭桌面窗口并保留后台后端继续为手机/局域网服务，
  *   也可能希望完整关闭前后端。托盘退出与窗口关闭必须进入同一选择流程。
+ *   关闭前必须 await 全部 pending write（如速记本），失败时中止关闭并在对话框展示错误。
  *
  * Code Logic（这个组件做什么）:
  *   - 仅在 Tauri 主窗口 label=`main` 时注册关闭监听，避免截图/健康 overlay 辅助窗口被拦截
  *   - 主窗口监听 Tauri `getCurrentWindow().onCloseRequested` 并 `preventDefault()`
  *   - 主窗口监听 Rust 托盘 emit 的 `backend:close-requested`
- *   - modal 中“仅关闭 GUI”只调用 `backendApi.exitGui()`
- *   - “前后端都关闭”先 `backendApi.stop()` 再 `backendApi.exitGui()`
+ *   - modal 中两条关闭路径都先 `await pendingWrites.flushAll()`，再 stop/exit
+ *   - flush 失败保持对话框打开、复位 busy、展示 close-dialog error
  *   - hooks 全部在 early return 之前
  */
-function BackendCloseChoiceListener() {
+export function BackendCloseChoiceListener({
+  initialOpenForTest = false,
+}: BackendCloseChoiceListenerProps = {}) {
   const { t } = useTranslation(['common']);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initialOpenForTest);
   const [closingMode, setClosingMode] = useState<'gui' | 'full' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -215,23 +235,44 @@ function BackendCloseChoiceListener() {
     };
   }, []);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   仅关闭 GUI 时仍需先落库 pending write，避免静默丢正文。
+   *
+   * Code Logic（这个函数做什么）:
+   *   设置 busy → await flushPendingWritesThenClose(gui) → 失败复位 busy 并展示错误。
+   */
   const handleGuiOnlyClose = async () => {
     setClosingMode('gui');
     setError(null);
     try {
-      await backendApi.exitGui();
+      await flushPendingWritesThenClose('gui', {
+        flushAll: () => pendingWrites.flushAll(),
+        stop: () => backendApi.stop(),
+        exitGui: () => backendApi.exitGui(),
+      });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       setClosingMode(null);
     }
   };
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   前后端都关闭前必须先 flush pending write，再停 sidecar 与退出 GUI。
+   *
+   * Code Logic（这个函数做什么）:
+   *   设置 busy → await flushPendingWritesThenClose(full) → 失败保持对话框。
+   */
   const handleFullClose = async () => {
     setClosingMode('full');
     setError(null);
     try {
-      await backendApi.stop();
-      await backendApi.exitGui();
+      await flushPendingWritesThenClose('full', {
+        flushAll: () => pendingWrites.flushAll(),
+        stop: () => backendApi.stop(),
+        exitGui: () => backendApi.exitGui(),
+      });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       setClosingMode(null);
@@ -307,7 +348,9 @@ export default function App() {
                 <WorkbenchProjectsProvider>
                   <WorkbenchTerminalBuffersProvider>
                     <AttentionProvider loadSnapshot={attentionApi.listSnapshot}>
-                      <AppShell />
+                      <ScratchpadAutosaveProvider>
+                        <AppShell />
+                      </ScratchpadAutosaveProvider>
                     </AttentionProvider>
                   </WorkbenchTerminalBuffersProvider>
                 </WorkbenchProjectsProvider>

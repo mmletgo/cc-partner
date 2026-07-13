@@ -49,5 +49,7 @@
   "clearConfirmTitle": "Clear all?",
   "clearConfirmText": "The current page content will be cleared. This action cannot be undone.",
   "deleteConfirmTitle": "Delete this page?",
-  "deleteConfirmText": "“{{title}}” will be deleted. This action cannot be undone."
+  "deleteConfirmText": "“{{title}}” will be deleted. This action cannot be undone.",
+  "retrySave": "Retry save",
+  "saveFailedWithReason": "Failed to save scratchpad: {{reason}}"
 }

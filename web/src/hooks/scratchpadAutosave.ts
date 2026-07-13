@@ -148,15 +148,42 @@ export function createScratchpadAutosaveQueue(
   const delayMs = options.delayMs ?? SCRATCHPAD_AUTOSAVE_DELAY_MS;
   const pages = new Map<string, PageAutosaveState>();
   const listeners = new Set<() => void>();
+  let cachedSnapshot: ScratchpadAutosaveSnapshot = { pages: {} };
+  let snapshotDirty = true;
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   useSyncExternalStore 要求 getSnapshot 在数据未变时返回同一引用。
+   *
+   * Code Logic（这个函数做什么）:
+   *   在 pages 状态变化后标记 dirty，首次读取时重建只读快照并缓存。
+   */
+  function rebuildSnapshotIfNeeded(): ScratchpadAutosaveSnapshot {
+    if (!snapshotDirty) return cachedSnapshot;
+    const snapshotPages: Record<string, ScratchpadPageAutosaveSnapshot> = {};
+    for (const [pageId, state] of pages) {
+      snapshotPages[pageId] = {
+        pendingVersion: state.pendingVersion,
+        savedVersion: state.savedVersion,
+        content: state.content,
+        inFlight: state.inFlight !== null,
+        error: state.error,
+      };
+    }
+    cachedSnapshot = { pages: snapshotPages };
+    snapshotDirty = false;
+    return cachedSnapshot;
+  }
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   UI 与测试通过 subscribe 感知 saving/error 变化。
    *
    * Code Logic（这个函数做什么）:
-   *   同步调用全部 listener；listener 抛错不影响其它订阅者。
+   *   标记快照 dirty 后同步调用全部 listener；listener 抛错不影响其它订阅者。
    */
   function emit(): void {
+    snapshotDirty = true;
     for (const listener of listeners) {
       try {
         listener();
@@ -343,17 +370,7 @@ export function createScratchpadAutosaveQueue(
      *   返回 pages 的只读浅拷贝快照（不含 timer）。
      */
     getSnapshot(): ScratchpadAutosaveSnapshot {
-      const snapshotPages: Record<string, ScratchpadPageAutosaveSnapshot> = {};
-      for (const [pageId, state] of pages) {
-        snapshotPages[pageId] = {
-          pendingVersion: state.pendingVersion,
-          savedVersion: state.savedVersion,
-          content: state.content,
-          inFlight: state.inFlight !== null,
-          error: state.error,
-        };
-      }
-      return { pages: snapshotPages };
+      return rebuildSnapshotIfNeeded();
     },
 
     /**
