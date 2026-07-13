@@ -108,21 +108,40 @@ pub async fn prepare_repair_runner(
 ///     每一轮 Runner attempt 都要创建新的 terminal session，并记录 prompt/worktree/session 到 attempt history。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验本机项目；attempt=1 创建新 worktree，attempt>1 复用 task.worktree_id；随后创建 session，
-///     用 Preparing 条件更新任务 active runner 字段；写 attempt/terminal 前重读 active runner，避免 Abort 后仍启动旧 Claude。
+///     校验本机项目；attempt=1 创建/复用确定性 worktree，attempt>1 复用 task.worktree_id；长步骤前后 touch Preparing lease；
+///     随后创建 session，用 Preparing 条件更新任务 active runner 字段；写 attempt/terminal 前重读 active runner，
+///     避免 Abort 后仍启动旧 Claude。
 pub async fn prepare_runner_attempt(
     state: &AppState,
     task: &OrchestratorTaskRow,
     prompt: String,
     attempt: i64,
 ) -> Result<OrchestratorTaskRow, AppError> {
-    let preparing_task = state
+    let claim_token = task
+        .prepare_claim_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| AppError::generic("Preparing 任务缺少 claim token，拒绝继续 prepare"))?
+        .to_string();
+
+    // phase CAS 必须返回 hit/miss：miss 时绝不能采用 DB 中另一世代的 token 继续 prepare。
+    let Some(preparing_task) = state
         .orchestrator_repo
-        .update_task_attempt_phase(&task.id, OrchestratorAttemptPhase::PreparingWorkspace)
-        .await?;
+        .update_task_attempt_phase(
+            &task.id,
+            OrchestratorAttemptPhase::PreparingWorkspace,
+            &claim_token,
+        )
+        .await?
+    else {
+        // claim 已过期/被回收/重新签发：旧 runner 立即终止。
+        return state.orchestrator_repo.get_task(&task.id).await;
+    };
     if preparing_task.status != OrchestratorTaskStatus::Preparing {
         return Ok(preparing_task);
     }
+    // 命中后继续使用本轮 claim_token（与 CAS 入参一致），禁止采用返回行中可能不同的 token。
 
     let project = state
         .workbench_project_repo
@@ -139,7 +158,22 @@ pub async fn prepare_runner_attempt(
         .branch_name
         .clone()
         .unwrap_or_else(|| task_branch_name(&task.id, &task.title));
+    // 长 git worktree 创建前续租，避免调度 lease 误回收仍在 prepare 的任务。
+    if !state
+        .orchestrator_repo
+        .touch_preparing_lease(&task.id, &claim_token)
+        .await?
+    {
+        return state.orchestrator_repo.get_task(&task.id).await;
+    }
     let worktree = prepare_worktree_for_attempt(state, task, &branch_name, attempt).await?;
+    if !state
+        .orchestrator_repo
+        .touch_preparing_lease(&task.id, &claim_token)
+        .await?
+    {
+        return state.orchestrator_repo.get_task(&task.id).await;
+    }
     let session = local_create_workbench_session(
         state,
         task.project_id.clone(),
@@ -148,10 +182,25 @@ pub async fn prepare_runner_attempt(
         Some(DEFAULT_TERMINAL_ROWS),
     )
     .await?;
+    // session 创建后再续租一次，覆盖慢盘/hook 场景，再 CAS 进 Running。
+    if !state
+        .orchestrator_repo
+        .touch_preparing_lease(&task.id, &claim_token)
+        .await?
+    {
+        return state.orchestrator_repo.get_task(&task.id).await;
+    }
 
     let running_task = state
         .orchestrator_repo
-        .mark_task_running_attempt(&task.id, &branch_name, &worktree.id, &session.id, attempt)
+        .mark_task_running_attempt(
+            &task.id,
+            &branch_name,
+            &worktree.id,
+            &session.id,
+            attempt,
+            &claim_token,
+        )
         .await?;
     if running_task.status != OrchestratorTaskStatus::Running {
         return Ok(running_task);
@@ -555,6 +604,7 @@ mod tests {
             branch_name: Some("agent/task-1".to_string()),
             worktree_id: worktree_id.map(str::to_string),
             session_id: None,
+            prepare_claim_token: None,
             blocked_reason: None,
             attempt,
             created_at: "2026-07-05T00:00:00Z".to_string(),

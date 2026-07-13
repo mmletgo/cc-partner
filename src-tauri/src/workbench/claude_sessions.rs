@@ -19,7 +19,7 @@ use crate::cc::collector::claude_projects_dir;
 use crate::state::AppState;
 use crate::workbench::claude_path::encode_claude_project_path;
 use chrono::Utc;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher, EventKind};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -452,7 +452,9 @@ pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
 ///     4. target_dir = claude_projects_dir.join(encoded_cwd)，不存在返回空索引；
 ///     5. 逐文件 build_session_index（单文件超时跳过），组装 WorktreeSessionIndex。
 pub fn scan_worktree_sessions(worktree_path: &Path) -> WorktreeSessionIndex {
-    let canonical = worktree_path.canonicalize().unwrap_or_else(|_| worktree_path.to_path_buf());
+    let canonical = worktree_path
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_path.to_path_buf());
     let canonical_str = canonical.to_string_lossy().to_string();
     let encoded_cwd = encode_claude_project_path(&canonical_str);
 
@@ -548,7 +550,11 @@ pub fn search_sessions(
     limit: usize,
 ) -> Vec<SessionSearchHit> {
     let query_trimmed = query.trim();
-    let limit = if limit == 0 { DEFAULT_SEARCH_LIMIT } else { limit };
+    let limit = if limit == 0 {
+        DEFAULT_SEARCH_LIMIT
+    } else {
+        limit
+    };
 
     let mut hits: Vec<SessionSearchHit> = Vec::new();
 
@@ -808,10 +814,7 @@ fn spawn_session_watcher(
                 }
             };
             // 只关心 Create/Modify，且路径扩展名为 jsonl
-            let is_relevant = matches!(
-                event.kind,
-                EventKind::Create(_) | EventKind::Modify(_)
-            );
+            let is_relevant = matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_));
             if !is_relevant {
                 return;
             }
@@ -945,9 +948,7 @@ fn remove_index_on_failure(state: &AppState, key: &str) {
         }
     };
     if indexes.remove(key).is_some() {
-        tracing::info!(
-            "监听失败已移除 worktree session 索引缓存（下次搜索重扫）key={key}"
-        );
+        tracing::info!("监听失败已移除 worktree session 索引缓存（下次搜索重扫）key={key}");
     }
 }
 
@@ -1280,17 +1281,23 @@ mod tests {
         let _p1 = write_jsonl(
             &tmp,
             "old",
-            &[r#"{"type":"user","message":{"role":"user","content":"old"},"timestamp":"2026-01-01T00:00:00Z"}"#],
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"old"},"timestamp":"2026-01-01T00:00:00Z"}"#,
+            ],
         );
         let _p2 = write_jsonl(
             &tmp,
             "mid",
-            &[r#"{"type":"user","message":{"role":"user","content":"mid"},"timestamp":"2026-06-01T00:00:00Z"}"#],
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"mid"},"timestamp":"2026-06-01T00:00:00Z"}"#,
+            ],
         );
         let _p3 = write_jsonl(
             &tmp,
             "new",
-            &[r#"{"type":"user","message":{"role":"user","content":"new"},"timestamp":"2026-07-01T00:00:00Z"}"#],
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"new"},"timestamp":"2026-07-01T00:00:00Z"}"#,
+            ],
         );
 
         let mut sessions = HashMap::new();
@@ -1461,7 +1468,10 @@ mod tests {
             "snippet 应保留原文大小写，实际: {snippet}"
         );
         // 片段长度应 <= 关键词长度 + 前后各 30 字符
-        assert!(snippet.chars().count() <= "foo Target bar".chars().count() + 2 * PREVIEW_SNIPPET_RADIUS);
+        assert!(
+            snippet.chars().count()
+                <= "foo Target bar".chars().count() + 2 * PREVIEW_SNIPPET_RADIUS
+        );
         // 应包含关键词前面的部分上下文
         assert!(snippet.contains('x'));
     }

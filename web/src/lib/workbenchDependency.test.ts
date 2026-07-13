@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import type { WorkbenchDependencyStatus } from './types';
 import {
   canInstallWorkbenchDependency,
@@ -26,28 +27,31 @@ function dependency(
     installCommandPreview: ['brew', 'install', 'tmux'],
     error: null,
     output: [],
+    statusChangedAt: '2026-07-12T00:00:00.000Z',
     ...patch,
   };
 }
 
-if (dependencyStatusTone(dependency({ status: 'ready', available: true })) !== 'success') {
-  throw new Error('ready dependency should use success tone');
-}
+describe('workbenchDependency', () => {
+  test('maps tones and install/recheck action gates', () => {
+    if (dependencyStatusTone(dependency({ status: 'ready', available: true })) !== 'success') {
+      throw new Error('ready dependency should use success tone');
+    }
 
-if (!canInstallWorkbenchDependency(dependency({ status: 'missing', installable: true }))) {
-  throw new Error('missing installable dependency should allow install action');
-}
+    if (!canInstallWorkbenchDependency(dependency({ status: 'missing', installable: true }))) {
+      throw new Error('missing installable dependency should allow install action');
+    }
 
-if (canInstallWorkbenchDependency(dependency({ status: 'installing', installable: true }))) {
-  throw new Error('installing dependency must not start another install');
-}
+    if (canInstallWorkbenchDependency(dependency({ status: 'installing', installable: true }))) {
+      throw new Error('installing dependency must not start another install');
+    }
 
-if (!canRecheckWorkbenchDependency(dependency({ status: 'failed' }))) {
-  throw new Error('failed dependency should allow recheck action');
-}
+    if (!canRecheckWorkbenchDependency(dependency({ status: 'failed' }))) {
+      throw new Error('failed dependency should allow recheck action');
+    }
 
-if (formatInstallCommandPreview(['wsl.exe', '--exec', 'sh', '-lc', 'sudo apt-get install -y tmux']) !== 'wsl.exe --exec sh -lc "sudo apt-get install -y tmux"') {
-  throw new Error('install preview should quote shell command arguments');
-}
-
-console.log('workbenchDependency.test.ts passed');
+    if (formatInstallCommandPreview(['wsl.exe', '--exec', 'sh', '-lc', 'sudo apt-get install -y tmux']) !== 'wsl.exe --exec sh -lc "sudo apt-get install -y tmux"') {
+      throw new Error('install preview should quote shell command arguments');
+    }
+  });
+});

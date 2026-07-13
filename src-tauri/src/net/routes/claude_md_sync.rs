@@ -13,9 +13,11 @@
 
 use crate::error::AppError;
 use crate::models::claude_md::ClaudeMdRow;
+use crate::net::error_response::{P2pError, P2pResult};
+use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
 use crate::sync::vector_clock::{compare, ClockOrder};
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -59,8 +61,20 @@ pub struct ClaudeMdPushResp {
 ///        After/Concurrent（本端领先/并发）→ 回 Some(local)，否则 None。
 pub async fn claude_md_pull(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<ClaudeMdPullReq>,
-) -> Result<Json<ClaudeMdPullResp>, AppError> {
+) -> P2pResult<Json<ClaudeMdPullResp>> {
+    let claude_md = claude_md_pull_impl(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "claude_md.pull"))?;
+    Ok(Json(ClaudeMdPullResp { claude_md }))
+}
+
+/// claude_md_pull 业务实现：本端领先/并发时返回本端 CLAUDE.md。
+async fn claude_md_pull_impl(
+    state: &AppState,
+    req: ClaudeMdPullReq,
+) -> Result<Option<ClaudeMdRow>, AppError> {
     let local = state.claude_md_repo.get().await?;
     let claude_md = match local {
         None => None,
@@ -74,7 +88,7 @@ pub async fn claude_md_pull(
             }
         }
     };
-    Ok(Json(ClaudeMdPullResp { claude_md }))
+    Ok(claude_md)
 }
 
 /// POST /api/sync/claude_md/push：接收对端推送的 CLAUDE.md，覆盖落库 + 写文件。
@@ -88,8 +102,17 @@ pub async fn claude_md_pull(
 ///     3. accepted 表示本地同步字段是否发生变化。
 pub async fn claude_md_push(
     State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<ClaudeMdPushReq>,
-) -> Result<Json<ClaudeMdPushResp>, AppError> {
+) -> P2pResult<Json<ClaudeMdPushResp>> {
+    let accepted = claude_md_push_impl(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "claude_md.push"))?;
+    Ok(Json(ClaudeMdPushResp { accepted }))
+}
+
+/// claude_md_push 业务实现：覆盖落库 + 写文件，返回是否实际发生变化。
+async fn claude_md_push_impl(state: &AppState, req: ClaudeMdPushReq) -> Result<bool, AppError> {
     let local = state.claude_md_repo.get().await?;
     // 用 `Option::map_or` 而非 `Option::is_none_or`（后者 1.82 才 stable），
     // 项目 MSRV 是 1.77.2，clippy 的 `-D warnings` 会阻断。
@@ -101,5 +124,5 @@ pub async fn claude_md_push(
     });
     state.claude_md_repo.upsert(&req.claude_md).await?;
     crate::sync::claude_md::write_file_if_changed(&req.claude_md.content).await?;
-    Ok(Json(ClaudeMdPushResp { accepted }))
+    Ok(accepted)
 }

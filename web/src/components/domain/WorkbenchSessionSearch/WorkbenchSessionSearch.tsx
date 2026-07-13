@@ -210,6 +210,7 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
   }, [open, runSearch]);
 
   /** 打开浮层时清空 preview 视图并聚焦输入框 */
+  /* eslint-disable react-hooks/set-state-in-effect -- 受控 open 同步清空 preview/query 属于 UI 状态复位 */
   useEffect(() => {
     if (!open) return;
     setPreviewHit(null);
@@ -227,6 +228,7 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     setHits([]);
     setError(null);
   }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
    * 进入 preview：拉取该 session 的最近 20 条对话。
@@ -452,7 +454,8 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
                 data-active={idx === activeIndex || undefined}
                 tabIndex={-1}
                 onMouseEnter={() => setActiveIndex(idx)}
-                onClick={() => openPreview(hit)}
+                /* eslint-disable-next-line react-hooks/refs -- openPreview only runs on click; body uses request seq ref after event */
+                onClick={() => { void openPreview(hit); }}
               >
                 <span className={styles.timelineDot} data-fresh={fresh || undefined} />
                 <div className={styles.resultMain}>

@@ -7,14 +7,603 @@
 //!     提供 tmux 探测、版本解析、平台安装命令选择、DTO 序列化与安装状态机。
 
 use crate::error::AppError;
+use chrono::Utc;
 use portable_pty::CommandBuilder;
 use serde::Serialize;
-use std::process::{Command as StdCommand, Stdio};
+use std::io::{ErrorKind, Read};
+use std::process::{Child, ChildStderr, ChildStdout, Command as StdCommand, Output, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::async_runtime::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const OUTPUT_LINE_LIMIT: usize = 24;
+/// 单次外部依赖探测（tmux -V / 包管理器 --version）端到端硬超时。
+/// Business Logic: WSL/tmux hang 不得永久阻塞 AppState 初始化与 GUI 启动。
+/// Code Logic: 覆盖 try_wait 轮询、kill、wait/reap 与 stdout/stderr drain 的共享截止时间。
+const PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+/// try_wait 轮询间隔，兼顾响应速度与 CPU。
+const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// kill/wait 与管道排空的额外宽限（在共享截止时间之后仍允许的小额回收窗口）。
+/// Business Logic: 截止后仍需 best-effort 回收僵尸，但不得无限阻塞 AppState 初始化。
+const PROBE_TERMINATE_GRACE: Duration = Duration::from_millis(250);
+/// 管道非阻塞 drain 的截止宽限（在共享 deadline 之后仍允许的小额读取窗口）。
+const PROBE_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(150);
+/// 探测管道 stdout+stderr 合计读取预算，防止持续写入的逃逸后代无限扩张缓冲。
+/// Business Logic: 依赖探测只需版本行/少量错误输出；无限泵出会拖死 AppState 初始化。
+/// Code Logic: pump 在累计字节达此上限后立刻标记该侧 done 并视为超时。
+const PROBE_PIPE_DRAIN_BYTE_BUDGET: usize = 256 * 1024;
+
+/// Doctor/依赖探测的共享取消与进程树登记。
+///
+/// Business Logic（为什么需要这个结构）:
+///     doctor 硬超时后若只 forget 采集线程，git/tmux/wsl/claude 子进程可能继续跑；
+///     必须把剩余 deadline 与取消信号传入 probe，并在返回前有界 reap 已登记进程树。
+///
+/// Code Logic（这个结构做什么）:
+///     持有 AtomicBool 取消标志，以及已 spawn 的 Unix pgid / 子进程 pid 列表；
+///     Windows 额外登记 Job Object（KILL_ON_JOB_CLOSE），覆盖根进程已退出后的后代树；
+///     overall deadline 由调用方传入 probe。
+#[derive(Debug, Default)]
+pub struct ProbeRuntimeGuard {
+    cancel: std::sync::atomic::AtomicBool,
+    /// Unix 进程组 id 列表（探测 spawn 时登记）。
+    process_groups: Mutex<Vec<u32>>,
+    /// 直接子进程 pid 列表（全平台）。
+    child_pids: Mutex<Vec<u32>>,
+    /// Windows：pid → Job Object；超时 cancel_and_reap 可终止整棵进程树。
+    #[cfg(windows)]
+    jobs: Mutex<Vec<(u32, Arc<WindowsProbeJob>)>>,
+}
+
+impl ProbeRuntimeGuard {
+    /// Business Logic（为什么需要这个函数）:
+    ///     采集线程与主线程共享同一 guard，超时侧可取消并 reap，探测侧可读剩余预算。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回默认未取消、空登记的 guard。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     硬超时或上层取消时必须立刻让后续 probe 快速失败并停止 spawn。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     置 cancel=true（Release）。
+    pub fn cancel(&self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     probe 在 spawn 前/轮询中需要知道是否应提前放弃。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读取 cancel 标志（Acquire）。
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     探测子进程启动后必须可被 doctor 超时路径定位并 kill。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     登记 pid；Unix 同时登记 process group id（与 setpgid 后的 pgid 相同）。
+    pub fn register_child(&self, pid: u32) {
+        if let Ok(mut pids) = self.child_pids.lock() {
+            pids.push(pid);
+        }
+        #[cfg(unix)]
+        if let Ok(mut groups) = self.process_groups.lock() {
+            groups.push(pid);
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Windows 上根进程可能先退出，仅登记 pid 后 taskkill /T 无法可靠枚举树；
+    ///     必须把 Job Object 句柄交给 guard，硬超时路径才能 TerminateJobObject。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 pid 登记 Arc<WindowsProbeJob>；同一 pid 重复登记时覆盖。
+    #[cfg(windows)]
+    pub fn register_job(&self, pid: u32, job: Arc<WindowsProbeJob>) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            if let Some(existing) = jobs.iter_mut().find(|(p, _)| *p == pid) {
+                existing.1 = job;
+            } else {
+                jobs.push((pid, job));
+            }
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     子进程正常退出后不再需要超时路径 kill，避免误伤 pid 复用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 pid / pgid / job 列表移除该 id（保留其它仍在跑的探测）。
+    pub fn unregister_child(&self, pid: u32) {
+        if let Ok(mut pids) = self.child_pids.lock() {
+            pids.retain(|value| *value != pid);
+        }
+        #[cfg(unix)]
+        if let Ok(mut groups) = self.process_groups.lock() {
+            groups.retain(|value| *value != pid);
+        }
+        #[cfg(windows)]
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.retain(|(value, _)| *value != pid);
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     doctor 硬超时返回前必须 best-effort 终止仍在跑的依赖探测进程树。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先 cancel；Windows 优先 TerminateJobObject（覆盖已退出根下的后代）；
+    ///     再 Unix killpg + 全平台对登记 pid 发 kill（taskkill 作无 job 时的 fallback）；
+    ///     短 sleep 作为有界 reap 窗口。
+    pub fn cancel_and_reap(&self) {
+        self.cancel();
+        #[cfg(windows)]
+        {
+            if let Ok(mut jobs) = self.jobs.lock() {
+                for (_pid, job) in jobs.drain(..) {
+                    if let Err(err) = job.terminate() {
+                        tracing::debug!(error = %err, "probe job TerminateJobObject 未完全成功");
+                    }
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            if let Ok(groups) = self.process_groups.lock() {
+                for pgid in groups.iter().copied() {
+                    let _ = kill_probe_process_group(pgid);
+                }
+            }
+        }
+        if let Ok(pids) = self.child_pids.lock() {
+            for pid in pids.iter().copied() {
+                let _ = kill_probe_pid(pid);
+            }
+        }
+        // 有界 reap 窗口：给内核回收僵尸的时间，但不 join 采集线程。
+        std::thread::sleep(PROBE_TERMINATE_GRACE);
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     非 Unix 或需要按 pid 兜底 kill 时，不能只依赖 process group。
+///
+/// Code Logic（这个函数做什么）:
+///     Unix 使用 libc::kill(SIGKILL)；Windows 使用有界 spawn/try_wait/kill/reap 的 taskkill；
+///     其它平台 no-op。Windows 绝不能无界 `.status()`，否则 doctor hard deadline 后仍可挂死。
+fn kill_probe_pid(pid: u32) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        let raw: libc::pid_t = pid.try_into().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "pid out of range")
+        })?;
+        let result = unsafe { libc::kill(raw, libc::SIGKILL) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        kill_probe_pid_windows(pid, PROBE_TERMINATE_GRACE)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        Ok(())
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     doctor 超时后 cancel_and_reap 仍必须在 grace 内返回；Windows taskkill 被安全软件挂起时
+///     不能用无界 `Command::status()` 突破 hard deadline。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn `taskkill /PID /T /F`，再委托有界 wait；超时 kill taskkill 自身。
+///     `cfg(test)` 可通过 hook 注入假挂起命令。
+#[cfg(windows)]
+fn kill_probe_pid_windows(pid: u32, grace: Duration) -> Result<(), std::io::Error> {
+    let mut child = spawn_windows_taskkill(pid)?;
+    match wait_child_bounded(&mut child, grace) {
+        Ok(code) if code.success() => Ok(()),
+        Ok(code) => Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("taskkill exit {code}"),
+        )),
+        Err(err) if err.kind() == std::io::ErrorKind::TimedOut => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("taskkill /PID {pid} 超过 grace {grace:?}"),
+        )),
+        Err(err) => Err(err),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     doctor hard deadline 之后的回收命令本身也必须有界；否则 Windows taskkill hang
+///     会把整次 doctor 卡死在“已超时”之后。
+///
+/// Code Logic（这个函数做什么）:
+///     在 `grace` 内轮询 `try_wait`；到期 kill 子进程并 best-effort try_wait，返回 TimedOut。
+///     生产路径仅 Windows taskkill 使用；单元测试在所有平台注入挂起 helper 校验有界性。
+#[cfg(any(windows, test))]
+fn wait_child_bounded(
+    child: &mut Child,
+    grace: Duration,
+) -> Result<std::process::ExitStatus, std::io::Error> {
+    let deadline = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.try_wait();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("子进程回收超过 grace {grace:?}"),
+                    ));
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(remaining.min(PROBE_POLL_INTERVAL));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Windows 回收命令需要可测试的 spawn 入口，才能注入“taskkill 挂起”故障而不依赖真实系统工具。
+///
+/// Code Logic（这个函数做什么）:
+///     默认 spawn `taskkill /PID <pid> /T /F` 并丢弃 stdout/stderr；测试 hook 可替换实现。
+#[cfg(windows)]
+fn spawn_windows_taskkill(pid: u32) -> Result<std::process::Child, std::io::Error> {
+    #[cfg(test)]
+    {
+        if let Some(hook) = TEST_WINDOWS_TASKKILL_SPAWN
+            .lock()
+            .expect("taskkill spawn hook 锁中毒")
+            .as_ref()
+        {
+            return hook(pid);
+        }
+    }
+    StdCommand::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+#[cfg(all(windows, test))]
+static TEST_WINDOWS_TASKKILL_SPAWN: std::sync::Mutex<
+    Option<Box<dyn Fn(u32) -> Result<std::process::Child, std::io::Error> + Send>>,
+> = std::sync::Mutex::new(None);
+
+/// Business Logic（为什么需要这个函数）:
+///     Attention 与前端轮询需要稳定的依赖状态变更时间，不能在每次读取时漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     返回当前 UTC 时刻的 RFC3339 字符串，用作进程内 `status_changed_at`。
+/// Windows 探测 Job Object：根进程退出后仍可终止整棵后代树。
+///
+/// Business Logic（为什么需要这个结构）:
+///     wrapper（如 wsl/cmd）常先启动持管道的后代再自行退出；此时仅对死根 PID
+///     `taskkill /T` 不可靠。Job Object + KILL_ON_JOB_CLOSE 把整棵树绑在句柄生命周期上。
+///     绑定必须在用户代码运行前完成：CREATE_SUSPENDED → AssignProcessToJobObject → ResumeThread，
+///     否则短命 wrapper 可在 Assign 前派生后代并逃逸。
+///
+/// Code Logic（这个结构做什么）:
+///     持有 CREATE 的 job HANDLE（OwnedHandle）；Drop/Close 触发 KILL_ON_JOB_CLOSE；
+///     `terminate` 显式 TerminateJobObject 供超时路径使用；
+///     `create` + `assign_child` 与 `resume_suspended_process` 组成原子进 job 路径。
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct WindowsProbeJob {
+    handle: std::os::windows::io::OwnedHandle,
+}
+
+/// Windows CreateProcess 的 CREATE_SUSPENDED 标志。
+/// Business Logic: 用户代码不得在进入 Job 前运行，否则后代可逃逸。
+/// Code Logic: 0x4，与 CommandExt::creation_flags 组合使用。
+#[cfg(windows)]
+const CREATE_SUSPENDED: u32 = 0x0000_0004;
+
+#[cfg(windows)]
+impl WindowsProbeJob {
+    /// Business Logic（为什么需要这个函数）:
+    ///     必须先建好带 KILL_ON_JOB_CLOSE 的 Job，再挂起 spawn 的根进程，才能在 Resume 前完成绑定。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     CreateJobObjectW → 设置 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE；不绑定进程。
+    pub fn create() -> Result<Self, std::io::Error> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+        type BOOL = i32;
+        type DWORD = u32;
+        type HANDLE = *mut core::ffi::c_void;
+
+        const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x0000_2000;
+        const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
+
+        #[repr(C)]
+        struct JobObjectBasicLimitInformation {
+            per_process_user_time_limit: i64,
+            per_job_user_time_limit: i64,
+            limit_flags: DWORD,
+            minimum_working_set_size: usize,
+            maximum_working_set_size: usize,
+            active_process_limit: DWORD,
+            affinity: usize,
+            priority_class: DWORD,
+            scheduling_class: DWORD,
+        }
+
+        #[repr(C)]
+        struct IoCounters {
+            read_operation_count: u64,
+            write_operation_count: u64,
+            other_operation_count: u64,
+            read_transfer_count: u64,
+            write_transfer_count: u64,
+            other_transfer_count: u64,
+        }
+
+        #[repr(C)]
+        struct JobObjectExtendedLimitInformation {
+            basic_limit_information: JobObjectBasicLimitInformation,
+            io_info: IoCounters,
+            process_memory_limit: usize,
+            job_memory_limit: usize,
+            peak_process_memory_used: usize,
+            peak_job_memory_used: usize,
+        }
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CreateJobObjectW(
+                lp_job_attributes: *mut core::ffi::c_void,
+                lp_name: *const u16,
+            ) -> HANDLE;
+            fn SetInformationJobObject(
+                h_job: HANDLE,
+                job_object_information_class: i32,
+                lp_job_object_information: *mut core::ffi::c_void,
+                cb_job_object_information_length: DWORD,
+            ) -> BOOL;
+        }
+
+        let raw = unsafe { CreateJobObjectW(core::ptr::null_mut(), core::ptr::null()) };
+        if raw.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw as _) };
+
+        let mut info = JobObjectExtendedLimitInformation {
+            basic_limit_information: JobObjectBasicLimitInformation {
+                per_process_user_time_limit: 0,
+                per_job_user_time_limit: 0,
+                limit_flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                minimum_working_set_size: 0,
+                maximum_working_set_size: 0,
+                active_process_limit: 0,
+                affinity: 0,
+                priority_class: 0,
+                scheduling_class: 0,
+            },
+            io_info: IoCounters {
+                read_operation_count: 0,
+                write_operation_count: 0,
+                other_operation_count: 0,
+                read_transfer_count: 0,
+                write_transfer_count: 0,
+                other_transfer_count: 0,
+            },
+            process_memory_limit: 0,
+            job_memory_limit: 0,
+            peak_process_memory_used: 0,
+            peak_job_memory_used: 0,
+        };
+
+        let ok = unsafe {
+            SetInformationJobObject(
+                handle.as_raw_handle() as HANDLE,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                (&mut info as *mut JobObjectExtendedLimitInformation).cast(),
+                std::mem::size_of::<JobObjectExtendedLimitInformation>() as DWORD,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Ok(Self { handle })
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     挂起进程必须在 Resume 前进入 Job，后续派生的后代才会继承 Job 成员身份。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     AssignProcessToJobObject(self, child process handle)；失败返回 last_os_error。
+    pub fn assign_child(&self, child: &Child) -> Result<(), std::io::Error> {
+        use std::os::windows::io::AsRawHandle;
+
+        type BOOL = i32;
+        type HANDLE = *mut core::ffi::c_void;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn AssignProcessToJobObject(h_job: HANDLE, h_process: HANDLE) -> BOOL;
+        }
+
+        let process = child.as_raw_handle() as HANDLE;
+        let ok =
+            unsafe { AssignProcessToJobObject(self.handle.as_raw_handle() as HANDLE, process) };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     超时/管道排空失败时必须立刻终止 job 内全部进程，不能等 Drop。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用 TerminateJobObject(handle, 1)；失败返回 last_os_error。
+    pub fn terminate(&self) -> Result<(), std::io::Error> {
+        use std::os::windows::io::AsRawHandle;
+
+        type BOOL = i32;
+        type DWORD = u32;
+        type HANDLE = *mut core::ffi::c_void;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn TerminateJobObject(h_job: HANDLE, u_exit_code: DWORD) -> BOOL;
+        }
+
+        let ok = unsafe { TerminateJobObject(self.handle.as_raw_handle() as HANDLE, 1) };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     CREATE_SUSPENDED 后 std::process::Command 会关闭主线程句柄；必须再找到主线程并 Resume，
+///     否则探测命令永远挂起。
+///
+/// Code Logic（这个函数做什么）:
+///     CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD) 枚举线程，找到 owner==pid 的首个线程，
+///     OpenThread(THREAD_SUSPEND_RESUME) → ResumeThread → CloseHandle；找不到线程返回 NotFound。
+#[cfg(windows)]
+fn resume_suspended_process(pid: u32) -> Result<(), std::io::Error> {
+    type BOOL = i32;
+    type DWORD = u32;
+    type HANDLE = *mut core::ffi::c_void;
+
+    const TH32CS_SNAPTHREAD: DWORD = 0x0000_0004;
+    const THREAD_SUSPEND_RESUME: DWORD = 0x0002;
+    const INVALID_HANDLE_VALUE: HANDLE = !0usize as HANDLE;
+
+    #[repr(C)]
+    struct ThreadEntry32 {
+        dw_size: DWORD,
+        cnt_usage: DWORD,
+        th32_thread_id: DWORD,
+        th32_owner_process_id: DWORD,
+        tp_base_pri: i32,
+        tp_delta_pri: i32,
+        dw_flags: DWORD,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dw_flags: DWORD, th32_process_id: DWORD) -> HANDLE;
+        fn Thread32First(h_snapshot: HANDLE, lpte: *mut ThreadEntry32) -> BOOL;
+        fn Thread32Next(h_snapshot: HANDLE, lpte: *mut ThreadEntry32) -> BOOL;
+        fn OpenThread(
+            dw_desired_access: DWORD,
+            b_inherit_handle: BOOL,
+            dw_thread_id: DWORD,
+        ) -> HANDLE;
+        fn ResumeThread(h_thread: HANDLE) -> DWORD;
+        fn CloseHandle(h_object: HANDLE) -> BOOL;
+    }
+
+    // 线程枚举可能短暂滞后于 CreateProcess；短重试避免误报 NotFound。
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut last_err = std::io::Error::new(
+        ErrorKind::NotFound,
+        format!("suspended process {pid} has no thread to resume"),
+    );
+    loop {
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+            last_err = std::io::Error::last_os_error();
+        } else {
+            let mut entry = ThreadEntry32 {
+                dw_size: std::mem::size_of::<ThreadEntry32>() as DWORD,
+                cnt_usage: 0,
+                th32_thread_id: 0,
+                th32_owner_process_id: 0,
+                tp_base_pri: 0,
+                tp_delta_pri: 0,
+                dw_flags: 0,
+            };
+            let mut thread_id: Option<DWORD> = None;
+            let mut has = unsafe { Thread32First(snapshot, &mut entry) };
+            while has != 0 {
+                if entry.th32_owner_process_id == pid {
+                    thread_id = Some(entry.th32_thread_id);
+                    break;
+                }
+                has = unsafe { Thread32Next(snapshot, &mut entry) };
+            }
+            unsafe {
+                let _ = CloseHandle(snapshot);
+            }
+
+            if let Some(tid) = thread_id {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, tid) };
+                if thread.is_null() {
+                    last_err = std::io::Error::last_os_error();
+                } else {
+                    let prev = unsafe { ResumeThread(thread) };
+                    unsafe {
+                        let _ = CloseHandle(thread);
+                    }
+                    // ResumeThread 失败返回 u32::MAX。
+                    if prev == DWORD::MAX {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err(last_err);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     挂起 spawn 后若 Assign/Resume 失败，必须立刻杀掉根进程，避免留下永不 resume 的僵尸。
+///
+/// Code Logic（这个函数做什么）:
+///     child.kill() + 有界 try_wait 轮询；忽略已退出错误。
+#[cfg(windows)]
+fn kill_suspended_probe_child(child: &mut Child) {
+    let _ = child.kill();
+    let deadline = Instant::now() + PROBE_TERMINATE_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => break,
+        }
+    }
+}
+
+fn now_status_changed_at() -> String {
+    Utc::now().to_rfc3339()
+}
 
 /// tmux 工作目录路径模式。
 ///
@@ -177,10 +766,12 @@ pub enum WorkbenchDependencyState {
 /// Workbench tmux 依赖状态 DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     Workbench 和设置页需要同一份后端状态，既能展示检测结果，也能展示安装进度与错误摘要。
+///     Workbench 和设置页需要同一份后端状态，既能展示检测结果，也能展示安装进度与错误摘要；
+///     Attention 还需要稳定的状态变更时间，避免轮询把环境条目的 updatedAt 不断刷新。
 ///
 /// Code Logic（这个结构体做什么）:
-///     序列化为 camelCase，字段与前端 WorkbenchDependencyStatus 对齐。
+///     序列化为 camelCase，字段与前端 WorkbenchDependencyStatus 对齐；
+///     `status_changed_at` 仅在语义状态枚举变化时由 dependency manager 更新，不落 SQLite。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchDependencyStatusDto {
@@ -193,15 +784,19 @@ pub struct WorkbenchDependencyStatusDto {
     pub install_command_preview: Vec<String>,
     pub error: Option<String>,
     pub output: Vec<String>,
+    /// 进程内最近一次语义状态枚举变化时间（RFC3339），序列化为 statusChangedAt。
+    pub status_changed_at: String,
 }
 
 /// 依赖安装运行时状态。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     安装命令跨 invoke 调用运行，前端需要轮询状态、读取最近输出并能取消进行中的任务。
+///     安装命令跨 invoke 调用运行，前端需要轮询状态、读取最近输出并能取消进行中的任务；
+///     Attention 还需要依赖状态变更时间保持稳定，不能在每次探测/轮询时重置。
 ///
 /// Code Logic（这个结构体做什么）:
-///     用 Mutex 保存当前 DTO、后台任务句柄与取消令牌；所有状态更新都通过小方法集中处理。
+///     用 Mutex 保存当前 DTO、后台任务句柄与取消令牌；状态写入统一走 `apply_status_transition`，
+///     仅在语义 status 枚举变化时刷新 `status_changed_at`（进程内，不落 SQLite）。
 pub struct WorkbenchDependencyInstallRuntime {
     inner: Mutex<DependencyInstallInner>,
 }
@@ -214,14 +809,16 @@ struct DependencyInstallInner {
 
 impl WorkbenchDependencyInstallRuntime {
     /// Business Logic（为什么需要这个函数）:
-    ///     AppState 初始化时需要一个空闲的依赖管理运行时，供所有命令共享。
+    ///     AppState 初始化时需要一个空闲的依赖管理运行时，供所有命令共享；
+    ///     启动后 Attention 可能立刻读取缓存，绝不能把“未探测”伪装成真实 missing。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造初始 missing/unsupported 状态占位；真正检测由 check 命令刷新。
+    ///     构造时同步执行一次真实 tmux 探测并写入 `status_changed_at`，
+    ///     使桌面/headless/移动端冷启动都能拿到真实依赖状态，而不是 missing 占位。
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(DependencyInstallInner {
-                status: missing_or_unsupported_status(Vec::new(), None),
+                status: stamp_initial_status(probe_workbench_dependency()),
                 task: None,
                 cancel_token: None,
             }),
@@ -229,10 +826,11 @@ impl WorkbenchDependencyInstallRuntime {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     前端轮询状态时不能拿到内部锁或任务句柄，只需要当前 DTO 快照。
+    ///     前端轮询状态时不能拿到内部锁或任务句柄，只需要当前 DTO 快照；
+    ///     Attention source 也必须只读缓存，不能触发探测。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     克隆并返回当前状态。
+    ///     克隆并返回当前状态（含稳定的 status_changed_at）。
     pub fn status(&self) -> WorkbenchDependencyStatusDto {
         self.inner
             .lock()
@@ -245,14 +843,15 @@ impl WorkbenchDependencyInstallRuntime {
     ///     检测命令需要把最新 tmux 状态写入共享运行时，供后续 status 读取。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     非安装中状态直接覆盖 DTO；安装中时保留安装进度，避免 recheck 把 UI 状态打回 missing。
+    ///     非安装中状态经 `apply_status_transition` 覆盖 DTO（同枚举保留时间戳）；
+    ///     安装中时保留安装进度，避免 recheck 把 UI 状态打回 missing。
     pub fn set_checked_status(
         &self,
         status: WorkbenchDependencyStatusDto,
     ) -> WorkbenchDependencyStatusDto {
         let mut inner = self.inner.lock().expect("workbench dependency 锁中毒");
         if inner.status.status != WorkbenchDependencyState::Installing {
-            inner.status = status;
+            inner.status = apply_status_transition(&inner.status, status);
         }
         inner.status.clone()
     }
@@ -273,6 +872,7 @@ impl WorkbenchDependencyInstallRuntime {
             install_command_preview: command,
             error: None,
             output: vec!["开始安装 tmux".to_string()],
+            status_changed_at: String::new(),
         });
     }
 
@@ -297,6 +897,7 @@ impl WorkbenchDependencyInstallRuntime {
             install_command_preview: actual_install_command_preview().unwrap_or_default(),
             error: Some(error),
             output: truncate_output_lines(lines),
+            status_changed_at: String::new(),
         });
         self.clear_task();
     }
@@ -398,10 +999,8 @@ impl WorkbenchDependencyInstallRuntime {
     }
 
     fn replace_status(&self, status: WorkbenchDependencyStatusDto) {
-        self.inner
-            .lock()
-            .expect("workbench dependency 锁中毒")
-            .status = status;
+        let mut inner = self.inner.lock().expect("workbench dependency 锁中毒");
+        inner.status = apply_status_transition(&inner.status, status);
     }
 
     fn clear_task(&self) {
@@ -409,6 +1008,33 @@ impl WorkbenchDependencyInstallRuntime {
         inner.task = None;
         inner.cancel_token = None;
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     依赖探测结果本身不携带稳定变更时间；manager 需要在写入缓存时决定是否刷新时间戳。
+///
+/// Code Logic（这个函数做什么）:
+///     若新旧语义 status 枚举相同，则保留旧 `status_changed_at`；否则写入当前 UTC RFC3339。
+fn apply_status_transition(
+    previous: &WorkbenchDependencyStatusDto,
+    mut next: WorkbenchDependencyStatusDto,
+) -> WorkbenchDependencyStatusDto {
+    if previous.status == next.status {
+        next.status_changed_at = previous.status_changed_at.clone();
+    } else {
+        next.status_changed_at = now_status_changed_at();
+    }
+    next
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     运行时首次构造时还没有“旧状态”，也必须给出非空的状态变更时间供 Attention 使用。
+///
+/// Code Logic（这个函数做什么）:
+///     给初始 DTO 写入当前 UTC RFC3339 的 `status_changed_at`。
+fn stamp_initial_status(mut status: WorkbenchDependencyStatusDto) -> WorkbenchDependencyStatusDto {
+    status.status_changed_at = now_status_changed_at();
+    status
 }
 
 impl Default for WorkbenchDependencyInstallRuntime {
@@ -450,19 +1076,23 @@ pub(crate) fn parse_tmux_version(output: &str) -> Option<String> {
 ///     现有工作台会话创建/恢复逻辑需要复用同一套 tmux 探测，避免依赖状态和真实会话行为分叉。
 ///
 /// Code Logic（这个函数做什么）:
-///     按当前平台候选顺序执行 `tmux -V`；成功时返回可用于 sessions 的 TmuxCommand。
+///     按当前平台候选顺序执行带超时的 `tmux -V`；成功时返回可用于 sessions 的 TmuxCommand。
 pub(crate) fn available_tmux_command() -> Option<TmuxCommand> {
-    probe_tmux_command().map(|probe| probe.command)
+    match probe_tmux_command() {
+        TmuxProbeOutcome::Ready(probe) => Some(probe.command),
+        TmuxProbeOutcome::Missing | TmuxProbeOutcome::TimedOut => None,
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
 ///     check 命令需要返回完整 DTO，包括可用性、版本、后端、路径和安装命令预览。
 ///
 /// Code Logic（这个函数做什么）:
-///     探测 tmux；成功返回 ready，失败按平台返回 missing 或 unsupported。
+///     带硬超时探测 tmux；成功返回 ready；全候选失败返回 missing/unsupported；
+///     任一候选超时且无成功 → failed（可 recheck），避免把 hang 伪装成 missing。
 pub fn probe_workbench_dependency() -> WorkbenchDependencyStatusDto {
-    if let Some(probe) = probe_tmux_command() {
-        return WorkbenchDependencyStatusDto {
+    match probe_tmux_command() {
+        TmuxProbeOutcome::Ready(probe) => WorkbenchDependencyStatusDto {
             status: WorkbenchDependencyState::Ready,
             available: true,
             version: probe.version,
@@ -472,9 +1102,29 @@ pub fn probe_workbench_dependency() -> WorkbenchDependencyStatusDto {
             install_command_preview: Vec::new(),
             error: None,
             output: Vec::new(),
-        };
+            // 真实变更时间由 dependency manager 在写入缓存时按语义状态差决定。
+            status_changed_at: String::new(),
+        },
+        TmuxProbeOutcome::TimedOut => WorkbenchDependencyStatusDto {
+            status: WorkbenchDependencyState::Failed,
+            available: false,
+            version: None,
+            backend: backend_for_platform(current_platform()).to_string(),
+            path: None,
+            installable: actual_install_command_preview().is_some(),
+            install_command_preview: actual_install_command_preview().unwrap_or_default(),
+            error: Some(format!(
+                "tmux 探测超时（{} 秒），请稍后重新检测",
+                PROBE_COMMAND_TIMEOUT.as_secs()
+            )),
+            output: vec!["依赖探测超时，已终止外部进程".to_string()],
+            status_changed_at: String::new(),
+        },
+        TmuxProbeOutcome::Missing => missing_or_unsupported_status(
+            actual_install_command_preview().unwrap_or_default(),
+            None,
+        ),
     }
-    missing_or_unsupported_status(actual_install_command_preview().unwrap_or_default(), None)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -491,27 +1141,812 @@ pub fn actual_install_command_preview() -> Option<Vec<String>> {
     install_command_preview_for_platform(current_platform(), &tools)
 }
 
+#[derive(Debug)]
 struct TmuxProbe {
     command: TmuxCommand,
     version: Option<String>,
     backend: String,
 }
 
-fn probe_tmux_command() -> Option<TmuxProbe> {
-    tmux_candidates_for_platform(current_platform())
-        .into_iter()
-        .find_map(|candidate| {
-            let output = candidate.command.std_command().args(["-V"]).output().ok()?;
-            if !output.status.success() {
-                return None;
+/// tmux 探测结果（含超时区分）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     hang 超时与“确实缺失”对 Attention/安装入口语义不同，不能一律当 missing。
+///
+/// Code Logic（这个枚举做什么）:
+///     Ready=探测成功；TimedOut=至少一个候选超时且无成功；Missing=候选均快速失败。
+#[derive(Debug)]
+enum TmuxProbeOutcome {
+    Ready(TmuxProbe),
+    TimedOut,
+    Missing,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     依赖探测必须在 WSL/tmux hang 时仍能返回，否则 AppState 构造永久阻塞。
+///
+/// Code Logic（这个函数做什么）:
+///     按平台候选顺序跑带超时的 `tmux -V`；成功即 Ready；若出现超时且无成功 → TimedOut；
+///     否则 Missing。可注入 runner 供单测覆盖超时路径。
+fn probe_tmux_command() -> TmuxProbeOutcome {
+    probe_tmux_command_with(current_platform(), run_std_command_with_timeout)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     单测需要注入挂起/失败 runner，避免真实 sleep 子进程拖慢 CI。
+///
+/// Code Logic（这个函数做什么）:
+///     对每个候选构造 `tmux -V` 命令，调用 runner；汇总 Ready / TimedOut / Missing。
+fn probe_tmux_command_with<F>(platform: DependencyPlatform, mut runner: F) -> TmuxProbeOutcome
+where
+    F: FnMut(StdCommand, Duration) -> Result<Output, ProbeCommandError>,
+{
+    let candidates = tmux_candidates_for_platform(platform);
+    if candidates.is_empty() {
+        return TmuxProbeOutcome::Missing;
+    }
+    let mut saw_timeout = false;
+    for candidate in candidates {
+        let mut command = candidate.command.std_command();
+        command.args(["-V"]);
+        match runner(command, PROBE_COMMAND_TIMEOUT) {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                return TmuxProbeOutcome::Ready(TmuxProbe {
+                    version: parse_tmux_version(&stdout),
+                    backend: candidate.backend.to_string(),
+                    command: candidate.command,
+                });
             }
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            Some(TmuxProbe {
-                version: parse_tmux_version(&stdout),
-                backend: candidate.backend.to_string(),
-                command: candidate.command,
+            Ok(_) => {}
+            Err(ProbeCommandError::TimedOut) => {
+                saw_timeout = true;
+            }
+            Err(ProbeCommandError::SpawnOrIo) => {}
+        }
+    }
+    if saw_timeout {
+        TmuxProbeOutcome::TimedOut
+    } else {
+        TmuxProbeOutcome::Missing
+    }
+}
+
+/// 外部探测命令错误。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     超时与启动失败需要不同收敛策略（超时保留 failed 可 recheck）。
+///
+/// Code Logic（这个枚举做什么）:
+///     TimedOut=硬超时已 kill；SpawnOrIo=无法启动或 IO 错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeCommandError {
+    TimedOut,
+    SpawnOrIo,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     同步 `output()` 无超时，WSL/异常 wrapper 会永久卡住启动路径；
+///     仅约束 try_wait 不够——kill/wait 失败或后代持有管道时仍会无限阻塞。
+///
+/// Code Logic（这个函数做什么）:
+///     以共享 deadline 覆盖整个探测生命周期：Unix 上用独立进程组 spawn，
+///     超时后 kill/killpg + 有界 wait/reap；stdout/stderr 在当前线程非阻塞 poll/read，
+///     超时后关闭读端，绝不 spawn 可 forget 的 reader 线程。
+fn run_std_command_with_timeout(
+    command: StdCommand,
+    timeout: Duration,
+) -> Result<Output, ProbeCommandError> {
+    run_std_command_with_timeout_guarded(command, timeout, None, None)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     doctor 硬 deadline 必须压缩每个依赖 probe 的剩余预算，并在全局取消时立刻停止。
+///
+/// Code Logic（这个函数做什么）:
+///     取 `min(timeout, remaining_overall)`；若已取消或剩余为 0 直接 TimedOut；
+///     spawn 后登记到 guard，退出/超时时注销；轮询中检查 cancel。
+fn run_std_command_with_timeout_guarded(
+    mut command: StdCommand,
+    timeout: Duration,
+    overall_deadline: Option<Instant>,
+    guard: Option<&ProbeRuntimeGuard>,
+) -> Result<Output, ProbeCommandError> {
+    if guard.is_some_and(ProbeRuntimeGuard::is_cancelled) {
+        return Err(ProbeCommandError::TimedOut);
+    }
+    let mut effective = timeout;
+    if let Some(overall) = overall_deadline {
+        let remaining = overall.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(ProbeCommandError::TimedOut);
+        }
+        effective = effective.min(remaining);
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Unix：独立进程组，便于超时 killpg 覆盖 wrapper 后代。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // 0 = 子进程成为新进程组组长（setpgid(0,0)）。
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    // Windows：CREATE_SUSPENDED → AssignProcessToJobObject → ResumeThread，
+    // 保证用户代码运行前根进程已在 Job 内，短命 wrapper 的后代不会逃逸。
+    // Job 创建/配置失败必须 fail closed：spawn 前返回 SpawnOrIo，绝不启动未受 Job 约束的探测。
+    #[cfg(windows)]
+    let prepared_job = match WindowsProbeJob::create() {
+        Ok(job) => job,
+        Err(err) => {
+            tracing::warn!(error = %err, "probe 未能创建 Job Object，拒绝启动未受约束探测");
+            return Err(ProbeCommandError::SpawnOrIo);
+        }
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_SUSPENDED);
+    }
+    let mut child = command.spawn().map_err(|_| ProbeCommandError::SpawnOrIo)?;
+    let deadline = Instant::now() + effective;
+    let process_group_id = child.id();
+    #[cfg(windows)]
+    let probe_job: Option<Arc<WindowsProbeJob>> = {
+        // 挂起态绑定 Job；Assign/Resume 失败必须杀挂起根并返回错误，
+        // 不能带着永不 resume 的僵尸继续探测。
+        if let Err(err) = prepared_job.assign_child(&child) {
+            tracing::warn!(
+                pid = process_group_id,
+                error = %err,
+                "probe 未能 AssignProcessToJobObject"
+            );
+            kill_suspended_probe_child(&mut child);
+            return Err(ProbeCommandError::SpawnOrIo);
+        }
+        if let Err(err) = resume_suspended_process(process_group_id) {
+            tracing::warn!(
+                pid = process_group_id,
+                error = %err,
+                "probe ResumeThread 失败，终止挂起根进程"
+            );
+            // Assign 已成功：用 job.terminate 清树，再 reap 根。
+            let _ = prepared_job.terminate();
+            kill_suspended_probe_child(&mut child);
+            return Err(ProbeCommandError::SpawnOrIo);
+        }
+        let job = Arc::new(prepared_job);
+        if let Some(guard) = guard {
+            guard.register_job(process_group_id, Arc::clone(&job));
+        }
+        Some(job)
+    };
+    if let Some(guard) = guard {
+        guard.register_child(process_group_id);
+    }
+
+    let status = loop {
+        if guard.is_some_and(ProbeRuntimeGuard::is_cancelled) {
+            terminate_probe_child(
+                &mut child,
+                process_group_id,
+                deadline,
+                #[cfg(windows)]
+                probe_job.as_deref(),
+            );
+            if let Some(guard) = guard {
+                guard.unregister_child(process_group_id);
+            }
+            return Err(ProbeCommandError::TimedOut);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    terminate_probe_child(
+                        &mut child,
+                        process_group_id,
+                        deadline,
+                        #[cfg(windows)]
+                        probe_job.as_deref(),
+                    );
+                    if let Some(guard) = guard {
+                        guard.unregister_child(process_group_id);
+                    }
+                    return Err(ProbeCommandError::TimedOut);
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(remaining.min(PROBE_POLL_INTERVAL));
+            }
+            Err(_) => {
+                // try_wait 失败也走终止路径，避免留下僵尸。
+                terminate_probe_child(
+                    &mut child,
+                    process_group_id,
+                    deadline,
+                    #[cfg(windows)]
+                    probe_job.as_deref(),
+                );
+                if let Some(guard) = guard {
+                    guard.unregister_child(process_group_id);
+                }
+                return Err(ProbeCommandError::SpawnOrIo);
+            }
+        }
+    };
+
+    // 正常退出：在共享截止时间（+ 小额 grace）内有界非阻塞 drain，避免后代持 pipe 时无界阻塞。
+    let (stdout, stderr) = drain_probe_pipes(
+        &mut child,
+        deadline,
+        #[cfg(windows)]
+        probe_job.as_deref(),
+    );
+    if let Some(guard) = guard {
+        guard.unregister_child(process_group_id);
+    }
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     超时或 IO 失败后必须 best-effort 终止进程树并回收，但 kill 失败时不能无条件 child.wait() 永久挂起。
+///     Windows 上 WSL/wrapper 会派生子孙进程：仅 Child::kill 会留下后代；根进程已退出时
+///     taskkill /T 也不可靠，必须优先 TerminateJobObject。
+///
+/// Code Logic（这个函数做什么）:
+///     Unix 先 killpg(SIGKILL) 再 child.kill()，killpg 失败时记 warning（含 ESRCH 外的真实错误）；
+///     Windows 优先 TerminateJobObject；无 job 或失败时再有界 taskkill /T /F，最后 child.kill()；
+///     随后在 deadline+PROBE_TERMINATE_GRACE 内轮询 try_wait，超时则丢弃 wait，并 drop 管道读端。
+fn terminate_probe_child(
+    child: &mut Child,
+    process_group_id: u32,
+    deadline: Instant,
+    #[cfg(windows)] job: Option<&WindowsProbeJob>,
+) {
+    #[cfg(unix)]
+    {
+        if let Err(err) = kill_probe_process_group(process_group_id) {
+            // ESRCH = 进程组已无成员，属预期；其它错误必须可见，便于排查 setsid 逃逸等场景。
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                tracing::warn!(
+                    process_group_id,
+                    error = %err,
+                    "probe killpg 失败，后续仅依赖 child.kill 与关闭管道读端"
+                );
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Business Logic: 根已退出时 taskkill /T 不可靠；job 才能覆盖持管道后代。
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(1));
+        let grace = remaining
+            .min(PROBE_TERMINATE_GRACE)
+            .max(Duration::from_millis(50));
+        let mut job_ok = false;
+        if let Some(job) = job {
+            match job.terminate() {
+                Ok(()) => job_ok = true,
+                Err(err) => {
+                    tracing::debug!(
+                        pid = process_group_id,
+                        error = %err,
+                        "probe TerminateJobObject 失败，回退 taskkill /T"
+                    );
+                }
+            }
+        }
+        if !job_ok {
+            if let Err(err) = kill_probe_pid_windows(process_group_id, grace) {
+                tracing::debug!(
+                    pid = process_group_id,
+                    error = %err,
+                    "probe taskkill /T 未完全成功，继续 child.kill 兜底"
+                );
+            }
+        }
+    }
+    if let Err(err) = child.kill() {
+        // 子进程已退出时 kill 失败属常见路径，不必抬高日志级别。
+        tracing::debug!(error = %err, "probe child.kill 未生效（可能已退出）");
+    }
+
+    let reap_deadline = deadline + PROBE_TERMINATE_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= reap_deadline {
+                    // 截止：不再阻塞 wait；管道 handle 随 Child drop 关闭。
+                    break;
+                }
+                let remaining = reap_deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(remaining.min(PROBE_POLL_INTERVAL));
+            }
+            Err(_) => break,
+        }
+    }
+
+    // 显式关闭读端：即使写端仍被逃逸后代持有，也不再保留 reader 资源。
+    let _ = child.stdout.take();
+    let _ = child.stderr.take();
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Unix wrapper（如 wsl 包装脚本）可能留下持有 stdout 的孙进程，仅 kill 直接子进程不够。
+///
+/// Code Logic（这个函数做什么）:
+///     对独立进程组发送 SIGKILL；pgid 非法时返回错误。
+#[cfg(unix)]
+fn kill_probe_process_group(process_group_id: u32) -> Result<(), std::io::Error> {
+    let pgid: libc::pid_t = process_group_id.try_into().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "process group id out of range",
+        )
+    })?;
+    // 负号表示进程组；SIGKILL 立即终止。
+    let result = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     正常退出后仍可能因孙进程持有 pipe 导致阻塞读永不返回；旧实现用后台线程 + mem::forget
+///     会在 setsid/killpg 失败时永久累积 reader 线程。
+///
+/// Code Logic（这个函数做什么）:
+///     在当前线程把 stdout/stderr 设为 nonblocking，poll/select 到 deadline 为止增量读取；
+///     超时则 killpg/job+kill child 并 drop 读端，绝不 spawn/detach 线程。
+fn drain_probe_pipes(
+    child: &mut Child,
+    deadline: Instant,
+    #[cfg(windows)] job: Option<&WindowsProbeJob>,
+) -> (Vec<u8>, Vec<u8>) {
+    let process_group_id = child.id();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let drain_deadline = deadline + PROBE_PIPE_DRAIN_GRACE;
+
+    let (stdout_buf, stderr_buf, timed_out) =
+        drain_child_pipes_nonblocking(stdout, stderr, drain_deadline);
+
+    if timed_out {
+        // 写端可能仍被后代持有：终止进程组/job/子进程，读端已在本函数作用域 drop。
+        terminate_probe_child(
+            child,
+            process_group_id,
+            Instant::now(),
+            #[cfg(windows)]
+            job,
+        );
+    }
+
+    (stdout_buf, stderr_buf)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     把 stdout/stderr 有界排空抽成纯 IO 逻辑，便于单测「deadline 内读完 / 超时关闭读端」。
+///
+/// Code Logic（这个函数做什么）:
+///     Unix 走 nonblocking + poll；其它平台 best-effort 非阻塞轮询读；返回 (stdout, stderr, timed_out)。
+fn drain_child_pipes_nonblocking(
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    deadline: Instant,
+) -> (Vec<u8>, Vec<u8>, bool) {
+    #[cfg(unix)]
+    {
+        drain_child_pipes_nonblocking_unix(stdout, stderr, deadline)
+    }
+    #[cfg(not(unix))]
+    {
+        drain_child_pipes_nonblocking_fallback(stdout, stderr, deadline)
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Unix 探测路径必须在 setsid 逃逸/killpg 失败时仍能有界返回并关闭读端，
+///     不能依赖可遗忘的阻塞 reader 线程；持续写入的后代也不能让 pump 越过 deadline。
+///
+/// Code Logic（这个函数做什么）:
+///     fcntl O_NONBLOCK + poll(2) 等待可读；fcntl 失败立即关闭该侧（绝不阻塞 read）；
+///     pump 在每次 read 前检查 deadline 与字节预算；超时/预算耗尽 drop 读端返回。
+#[cfg(unix)]
+fn drain_child_pipes_nonblocking_unix(
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    deadline: Instant,
+) -> (Vec<u8>, Vec<u8>, bool) {
+    use std::os::fd::{AsRawFd, RawFd};
+
+    enum PipeKind {
+        Stdout,
+        Stderr,
+    }
+
+    struct PipeSide {
+        kind: PipeKind,
+        reader: Box<dyn Read>,
+        fd: RawFd,
+        buf: Vec<u8>,
+        done: bool,
+    }
+
+    /// Business Logic: 探测管道必须非阻塞；fcntl 失败时绝不能继续阻塞 read。
+    /// Code Logic: F_GETFL/F_SETFL 叠加 O_NONBLOCK；任一失败返回 Err，调用方立刻关该侧。
+    fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    /// Business Logic: 从单条管道尽量排空当前可读字节，但不得越过 deadline 或字节预算。
+    /// Code Logic: 每次 read 前检查 deadline/预算；0=EOF；WouldBlock 停本轮；预算/超时标记 done。
+    /// 返回 true 表示因 deadline 或字节预算结束（调用方应记 timed_out）。
+    fn pump_side(side: &mut PipeSide, deadline: Instant, total_read: &mut usize) -> bool {
+        if side.done {
+            return false;
+        }
+        let mut chunk = [0u8; 4096];
+        loop {
+            if Instant::now() >= deadline {
+                side.done = true;
+                return true;
+            }
+            if *total_read >= PROBE_PIPE_DRAIN_BYTE_BUDGET {
+                side.done = true;
+                return true;
+            }
+            let remaining_budget = PROBE_PIPE_DRAIN_BYTE_BUDGET - *total_read;
+            let to_read = chunk.len().min(remaining_budget);
+            match side.reader.read(&mut chunk[..to_read]) {
+                Ok(0) => {
+                    side.done = true;
+                    return false;
+                }
+                Ok(n) => {
+                    side.buf.extend_from_slice(&chunk[..n]);
+                    *total_read = total_read.saturating_add(n);
+                    if *total_read >= PROBE_PIPE_DRAIN_BYTE_BUDGET {
+                        side.done = true;
+                        return true;
+                    }
+                }
+                Err(err) if err.kind() == ErrorKind::WouldBlock => return false,
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    side.done = true;
+                    return false;
+                }
+            }
+        }
+    }
+
+    let mut sides: Vec<PipeSide> = Vec::with_capacity(2);
+    let mut timed_out = false;
+    if let Some(out) = stdout {
+        let fd = out.as_raw_fd();
+        match set_nonblocking(fd) {
+            Ok(()) => sides.push(PipeSide {
+                kind: PipeKind::Stdout,
+                reader: Box::new(out),
+                fd,
+                buf: Vec::new(),
+                done: false,
+            }),
+            // fcntl 失败：立刻丢弃读端，绝不进入可能阻塞的 read。
+            Err(_) => {
+                drop(out);
+                timed_out = true;
+            }
+        }
+    }
+    if let Some(err) = stderr {
+        let fd = err.as_raw_fd();
+        match set_nonblocking(fd) {
+            Ok(()) => sides.push(PipeSide {
+                kind: PipeKind::Stderr,
+                reader: Box::new(err),
+                fd,
+                buf: Vec::new(),
+                done: false,
+            }),
+            Err(_) => {
+                drop(err);
+                timed_out = true;
+            }
+        }
+    }
+
+    let mut total_read = 0usize;
+
+    // 先排空已有缓冲，避免 poll 前丢数据；每次 pump 都受 deadline/预算约束。
+    for side in &mut sides {
+        if pump_side(side, deadline, &mut total_read) {
+            timed_out = true;
+        }
+    }
+
+    while sides.iter().any(|s| !s.done) {
+        let now = Instant::now();
+        if now >= deadline || total_read >= PROBE_PIPE_DRAIN_BYTE_BUDGET {
+            timed_out = true;
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+
+        let mut pollfds: Vec<libc::pollfd> = sides
+            .iter()
+            .filter(|s| !s.done)
+            .map(|s| libc::pollfd {
+                fd: s.fd,
+                events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                revents: 0,
             })
-        })
+            .collect();
+
+        if pollfds.is_empty() {
+            break;
+        }
+
+        let rc = unsafe {
+            libc::poll(
+                pollfds.as_mut_ptr(),
+                pollfds.len() as libc::nfds_t,
+                timeout_ms,
+            )
+        };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            // poll 失败时不再阻塞；关闭读端并返回已读内容。
+            timed_out = true;
+            break;
+        }
+        if rc == 0 {
+            timed_out = true;
+            break;
+        }
+
+        // 按仍活跃 side 顺序对齐 revents。
+        let mut poll_idx = 0usize;
+        for side in &mut sides {
+            if side.done {
+                continue;
+            }
+            let revents = pollfds[poll_idx].revents;
+            poll_idx += 1;
+            if revents == 0 {
+                continue;
+            }
+            if pump_side(side, deadline, &mut total_read) {
+                timed_out = true;
+            }
+        }
+        if timed_out {
+            // 预算/截止触发后立即停止，drop 剩余读端。
+            break;
+        }
+    }
+
+    // 超时/预算耗尽：标记未完成侧 done，随后 drop 关闭 fd。
+    if timed_out {
+        for side in &mut sides {
+            side.done = true;
+        }
+    }
+
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    for side in sides {
+        match side.kind {
+            PipeKind::Stdout => stdout_buf = side.buf,
+            PipeKind::Stderr => stderr_buf = side.buf,
+        }
+    }
+
+    // drop sides → 关闭读端；即使写端仍开着也不会留下 reader 线程。
+    (stdout_buf, stderr_buf, timed_out)
+}
+
+/// Windows 管道有界读取规划。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     Windows 阻塞 `read` 无法被 deadline 打断；必须先按 PeekNamedPipe 结果决定下一步，
+///     才能保证探测路径在父进程退出、后代仍持写端时仍有界返回。
+///
+/// Code Logic（这个枚举做什么）:
+///     Wait=暂无字节，禁止 read；Read(n)=最多读取 n 字节；Eof=写端已断，结束该侧。
+///     在 Unix 上仅供单测编译（`cfg(test)`），生产路径由 Unix nonblocking drain 接管。
+#[cfg(any(not(unix), test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsPipeReadPlan {
+    Wait,
+    Read(usize),
+    Eof,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     把 PeekNamedPipe 的可用字节数映射成“是否允许调用阻塞 read”，便于跨平台单测
+///     锁住“零字节绝不 read”的回归约束。
+///
+/// Code Logic（这个函数做什么）:
+///     available=None 表示管道断开→Eof；Some(0)→Wait；Some(n>0)→Read(min(n, cap))。
+#[cfg(any(not(unix), test))]
+fn plan_windows_pipe_read(available: Option<u32>, cap: usize) -> WindowsPipeReadPlan {
+    match available {
+        None => WindowsPipeReadPlan::Eof,
+        Some(0) => WindowsPipeReadPlan::Wait,
+        Some(n) => {
+            if cap == 0 {
+                WindowsPipeReadPlan::Wait
+            } else {
+                WindowsPipeReadPlan::Read((n as usize).min(cap))
+            }
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     非 Unix 平台同样不能用可 forget 的阻塞 reader 线程排空探测管道；
+///     Windows 上还禁止“先检查 deadline 再无界 read”——read 一旦阻塞就再也不看 deadline。
+///
+/// Code Logic（这个函数做什么）:
+///     用 PeekNamedPipe 查询可用字节，仅在 available>0 时按预算 read；无数据则 sleep 到
+///     deadline；超时立刻 drop 读端返回已读缓冲，绝无无界阻塞 read。
+#[cfg(not(unix))]
+fn drain_child_pipes_nonblocking_fallback(
+    mut stdout: Option<ChildStdout>,
+    mut stderr: Option<ChildStderr>,
+    deadline: Instant,
+) -> (Vec<u8>, Vec<u8>, bool) {
+    use std::os::windows::io::{AsRawHandle, RawHandle};
+
+    /// Business Logic: PeekNamedPipe 失败（含 ERROR_BROKEN_PIPE）表示写端已断，应结束该侧。
+    /// Code Logic: 成功返回 Some(avail)；失败（含断开）返回 None，调用方按 Eof 处理。
+    fn peek_named_pipe_available(handle: RawHandle) -> Option<u32> {
+        type BOOL = i32;
+        type DWORD = u32;
+        type HANDLE = *mut core::ffi::c_void;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn PeekNamedPipe(
+                h_named_pipe: HANDLE,
+                lp_buffer: *mut u8,
+                n_buffer_size: DWORD,
+                lp_bytes_read: *mut DWORD,
+                lp_total_bytes_avail: *mut DWORD,
+                lp_bytes_left_this_message: *mut DWORD,
+            ) -> BOOL;
+        }
+
+        let mut available: DWORD = 0;
+        let ok = unsafe {
+            PeekNamedPipe(
+                handle as HANDLE,
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null_mut(),
+                &mut available,
+                core::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            None
+        } else {
+            Some(available)
+        }
+    }
+
+    /// Business Logic: 单侧管道只能在 Peek 确认有字节后才 read，避免 WSL 后代挂死启动。
+    /// Code Logic: Peek→plan→有预算才 read；EOF/错误标记 done；Wait 不推进 progress。
+    fn pump_windows_side<R: Read + AsRawHandle>(
+        pipe: &mut R,
+        chunk: &mut [u8],
+        buf: &mut Vec<u8>,
+    ) -> WindowsPipeReadPlan {
+        let plan =
+            plan_windows_pipe_read(peek_named_pipe_available(pipe.as_raw_handle()), chunk.len());
+        match plan {
+            WindowsPipeReadPlan::Wait | WindowsPipeReadPlan::Eof => plan,
+            WindowsPipeReadPlan::Read(max_n) => match pipe.read(&mut chunk[..max_n]) {
+                Ok(0) => WindowsPipeReadPlan::Eof,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    WindowsPipeReadPlan::Read(n)
+                }
+                Err(err) if err.kind() == ErrorKind::Interrupted => WindowsPipeReadPlan::Wait,
+                Err(err) if err.kind() == ErrorKind::WouldBlock => WindowsPipeReadPlan::Wait,
+                Err(_) => WindowsPipeReadPlan::Eof,
+            },
+        }
+    }
+
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    let mut stdout_done = stdout.is_none();
+    let mut stderr_done = stderr.is_none();
+    let mut timed_out = false;
+    let mut chunk = [0u8; 4096];
+
+    while !(stdout_done && stderr_done) {
+        // deadline 必须在任何可能阻塞的系统调用之前检查，并在 Wait 路径再次校验。
+        if Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
+
+        let mut progress = false;
+        if !stdout_done {
+            if let Some(out) = stdout.as_mut() {
+                match pump_windows_side(out, &mut chunk, &mut stdout_buf) {
+                    WindowsPipeReadPlan::Eof => {
+                        stdout_done = true;
+                        progress = true;
+                    }
+                    WindowsPipeReadPlan::Read(n) if n > 0 => progress = true,
+                    WindowsPipeReadPlan::Read(_) | WindowsPipeReadPlan::Wait => {}
+                }
+            } else {
+                stdout_done = true;
+            }
+        }
+        if !stderr_done {
+            if let Some(err_pipe) = stderr.as_mut() {
+                match pump_windows_side(err_pipe, &mut chunk, &mut stderr_buf) {
+                    WindowsPipeReadPlan::Eof => {
+                        stderr_done = true;
+                        progress = true;
+                    }
+                    WindowsPipeReadPlan::Read(n) if n > 0 => progress = true,
+                    WindowsPipeReadPlan::Read(_) | WindowsPipeReadPlan::Wait => {}
+                }
+            } else {
+                stderr_done = true;
+            }
+        }
+
+        if !progress {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                timed_out = true;
+                break;
+            }
+            std::thread::sleep(remaining.min(PROBE_POLL_INTERVAL));
+        }
+    }
+
+    // 显式 drop 读端：超时后不再保留任何 reader，也不再进入阻塞 read。
+    drop(stdout);
+    drop(stderr);
+    (stdout_buf, stderr_buf, timed_out)
 }
 
 struct TmuxCandidate {
@@ -634,17 +2069,222 @@ fn missing_or_unsupported_status(
         install_command_preview,
         error,
         output: Vec::new(),
+        // 真实变更时间由 dependency manager 在写入缓存时按语义状态差决定。
+        status_changed_at: String::new(),
     }
 }
 
-fn command_exists(program: &str) -> bool {
-    StdCommand::new(program)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success() || status.code().is_some())
-        .unwrap_or(false)
+/// 带硬超时探测 PATH 中的命令是否可执行（非安装、不改 PATH）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     doctor 与 install 预览需要同一套有界探测，避免 WSL/坏 PATH 导致 hang。
+///
+/// Code Logic（这个函数做什么）:
+///     对 program 跑 `--version`，超时或 spawn 失败视为不可用；有 exit code 即视为找到可执行文件。
+pub(crate) fn command_exists(program: &str) -> bool {
+    let mut command = StdCommand::new(program);
+    command.arg("--version");
+    match run_std_command_with_timeout(command, PROBE_COMMAND_TIMEOUT) {
+        Ok(output) => output.status.success() || output.status.code().is_some(),
+        Err(_) => false,
+    }
+}
+
+/// 可选依赖探测结果（非 mutating）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     doctor 需要把 Git/tmux/WSL/Claude CLI 的存在性映射为 ok/warning/info，
+///     且平台不适用时不得伪装成缺失警告。
+///
+/// Code Logic（这个结构做什么）:
+///     available=探测到可用命令；applicable=当前平台相关；version 可选；detail 供 summary。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionalDependencyProbe {
+    pub available: bool,
+    pub applicable: bool,
+    pub version: Option<String>,
+    pub detail: String,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     doctor 采集必须把剩余全局 deadline 传给 git 探测，避免硬超时后仍留下 git 子进程。
+///
+/// Code Logic（这个函数做什么）:
+///     带 3s 超时执行 `git --version`；成功解析版本字符串，失败标记 unavailable；使用 guarded runner 与可选 overall deadline/guard。
+pub fn probe_git_non_mutating_with_budget(
+    overall_deadline: Option<Instant>,
+    guard: Option<&ProbeRuntimeGuard>,
+) -> OptionalDependencyProbe {
+    let mut command = StdCommand::new("git");
+    command.arg("--version");
+    match run_std_command_with_timeout_guarded(
+        command,
+        PROBE_COMMAND_TIMEOUT,
+        overall_deadline,
+        guard,
+    ) {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            OptionalDependencyProbe {
+                available: true,
+                applicable: true,
+                version: if version.is_empty() {
+                    None
+                } else {
+                    Some(version)
+                },
+                detail: "git is available".to_string(),
+            }
+        }
+        _ => OptionalDependencyProbe {
+            available: false,
+            applicable: true,
+            version: None,
+            detail: "git is missing or not runnable".to_string(),
+        },
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     doctor 需要把剩余 deadline/取消信号传入 tmux 探测，防止 hard timeout 后遗留 tmux wrapper。
+///
+/// Code Logic（这个函数做什么）:
+///     使用 guarded runner 调用 `probe_tmux_command_with`（Ready→available；TimedOut/Missing→unavailable）。
+pub fn probe_tmux_non_mutating_with_budget(
+    overall_deadline: Option<Instant>,
+    guard: Option<&ProbeRuntimeGuard>,
+) -> OptionalDependencyProbe {
+    let outcome = probe_tmux_command_with(current_platform(), |command, timeout| {
+        run_std_command_with_timeout_guarded(command, timeout, overall_deadline, guard)
+    });
+    match outcome {
+        TmuxProbeOutcome::Ready(probe) => OptionalDependencyProbe {
+            available: true,
+            applicable: true,
+            version: probe.version,
+            detail: "tmux is available".to_string(),
+        },
+        TmuxProbeOutcome::TimedOut => OptionalDependencyProbe {
+            available: false,
+            applicable: true,
+            version: None,
+            detail: "tmux probe timed out".to_string(),
+        },
+        TmuxProbeOutcome::Missing => OptionalDependencyProbe {
+            available: false,
+            applicable: true,
+            version: None,
+            detail: "tmux is missing".to_string(),
+        },
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     doctor 在 Windows 上探测 WSL 时必须尊重全局 deadline，避免 hard timeout 后留下 wsl.exe。
+///
+/// Code Logic（这个函数做什么）:
+///     非 Windows 直接 not-applicable；Windows 用 guarded runner 跑 `--status` / `--version`。
+pub fn probe_wsl_non_mutating_with_budget(
+    overall_deadline: Option<Instant>,
+    guard: Option<&ProbeRuntimeGuard>,
+) -> OptionalDependencyProbe {
+    if current_platform() != DependencyPlatform::Windows {
+        return OptionalDependencyProbe {
+            available: false,
+            applicable: false,
+            version: None,
+            detail: "WSL is not applicable on this platform".to_string(),
+        };
+    }
+    // 仅探测 wsl.exe 是否存在且能返回版本/状态，绝不 start 发行版或改配置。
+    let mut command = StdCommand::new("wsl.exe");
+    command.arg("--status");
+    match run_std_command_with_timeout_guarded(
+        command,
+        PROBE_COMMAND_TIMEOUT,
+        overall_deadline,
+        guard,
+    ) {
+        Ok(output) if output.status.success() || output.status.code().is_some() => {
+            OptionalDependencyProbe {
+                available: true,
+                applicable: true,
+                version: None,
+                detail: "WSL is available".to_string(),
+            }
+        }
+        _ => {
+            // --status 在部分发行版不可用时回退 --version
+            let mut fallback = StdCommand::new("wsl.exe");
+            fallback.arg("--version");
+            match run_std_command_with_timeout_guarded(
+                fallback,
+                PROBE_COMMAND_TIMEOUT,
+                overall_deadline,
+                guard,
+            ) {
+                Ok(output) if output.status.success() || output.status.code().is_some() => {
+                    OptionalDependencyProbe {
+                        available: true,
+                        applicable: true,
+                        version: None,
+                        detail: "WSL is available".to_string(),
+                    }
+                }
+                _ => OptionalDependencyProbe {
+                    available: false,
+                    applicable: true,
+                    version: None,
+                    detail: "WSL is missing".to_string(),
+                },
+            }
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     doctor 探测自定义 Claude wrapper 时必须共享全局 deadline，防止 hard timeout 后遗留 wrapper 进程。
+///
+/// Code Logic（这个函数做什么）:
+///     对 cli_path（空则 `claude`）用 guarded runner 执行 `--version`。
+pub fn probe_claude_cli_non_mutating_with_budget(
+    cli_path: &str,
+    overall_deadline: Option<Instant>,
+    guard: Option<&ProbeRuntimeGuard>,
+) -> OptionalDependencyProbe {
+    let program = if cli_path.trim().is_empty() {
+        "claude"
+    } else {
+        cli_path.trim()
+    };
+    let mut command = StdCommand::new(program);
+    command.arg("--version");
+    match run_std_command_with_timeout_guarded(
+        command,
+        PROBE_COMMAND_TIMEOUT,
+        overall_deadline,
+        guard,
+    ) {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            OptionalDependencyProbe {
+                available: true,
+                applicable: true,
+                version: if version.is_empty() {
+                    None
+                } else {
+                    Some(version)
+                },
+                detail: "claude CLI is available".to_string(),
+            }
+        }
+        _ => OptionalDependencyProbe {
+            available: false,
+            applicable: true,
+            version: None,
+            detail: "claude CLI is missing or not runnable".to_string(),
+        },
+    }
 }
 
 fn output_lines(stdout: &[u8], stderr: &[u8]) -> Vec<String> {
@@ -791,12 +2431,14 @@ mod tests {
             install_command_preview: Vec::new(),
             error: None,
             output: Vec::new(),
+            status_changed_at: "2026-07-12T00:00:00Z".to_string(),
         };
 
         let json = serde_json::to_value(status).unwrap();
 
         assert_eq!(json["status"], "ready");
         assert_eq!(json["installCommandPreview"], serde_json::json!([]));
+        assert_eq!(json["statusChangedAt"], "2026-07-12T00:00:00Z");
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -815,5 +2457,1001 @@ mod tests {
         assert_eq!(status.status, WorkbenchDependencyState::Failed);
         assert_eq!(status.error.as_deref(), Some("安装已取消"));
         assert!(status.output.iter().any(|line| line.contains("安装已取消")));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Attention 需要依赖初始状态带有非空变更时间，才能稳定投影 environment 条目。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     新建 runtime 后读取 status，断言 status_changed_at 非空。
+    #[test]
+    fn initial_status_has_status_changed_at_timestamp() {
+        let runtime = WorkbenchDependencyInstallRuntime::new();
+        let status = runtime.status();
+
+        assert!(!status.status_changed_at.is_empty());
+        assert!(chrono::DateTime::parse_from_rfc3339(&status.status_changed_at).is_ok());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     冷启动若把未探测伪装成 missing，有项目时 Inbox 会错误计数环境阻塞；
+    ///     初始化必须与真实探测结果一致。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对比 `new()` 缓存与 `probe_workbench_dependency()` 的 status/available/path，
+    ///     并在探测为 ready 时确认不会被当成 missing。
+    #[test]
+    fn new_runtime_uses_real_probe_not_placeholder_missing() {
+        let probed = probe_workbench_dependency();
+        let runtime = WorkbenchDependencyInstallRuntime::new();
+        let status = runtime.status();
+
+        assert_eq!(status.status, probed.status);
+        assert_eq!(status.available, probed.available);
+        assert_eq!(status.path, probed.path);
+        assert_eq!(status.version, probed.version);
+        if probed.status == WorkbenchDependencyState::Ready {
+            assert_ne!(status.status, WorkbenchDependencyState::Missing);
+            assert!(status.available);
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     相同语义状态的重复探测/轮询不能刷新变更时间，否则 Inbox 会把旧问题伪装成新事件。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入 missing 后再次 set 同枚举不同 payload，再连续 status() 读取，断言时间戳保持不变。
+    #[test]
+    fn same_semantic_status_preserves_status_changed_at_across_polls() {
+        let runtime = WorkbenchDependencyInstallRuntime::new();
+        let initial = runtime.status();
+        let initial_changed_at = initial.status_changed_at.clone();
+
+        let again = runtime.set_checked_status(WorkbenchDependencyStatusDto {
+            status: initial.status,
+            available: false,
+            version: None,
+            backend: "native".to_string(),
+            path: None,
+            installable: true,
+            install_command_preview: vec!["brew".into(), "install".into(), "tmux".into()],
+            error: Some("still missing".into()),
+            output: vec!["recheck".into()],
+            status_changed_at: "should-be-ignored".into(),
+        });
+        assert_eq!(again.status_changed_at, initial_changed_at);
+
+        let polled_once = runtime.status();
+        let polled_twice = runtime.status();
+        assert_eq!(polled_once.status_changed_at, initial_changed_at);
+        assert_eq!(polled_twice.status_changed_at, initial_changed_at);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     真实状态迁移（如 missing→ready 或 ready→failed）必须更新变更时间，Attention 才能按最新阻塞排序。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先强制写入与当前探测不同的状态，再切到另一状态，断言每次语义变化后 status_changed_at 都前进。
+    #[test]
+    fn semantic_status_change_updates_status_changed_at() {
+        let runtime = WorkbenchDependencyInstallRuntime::new();
+        let initial = runtime.status();
+        let initial_changed_at = initial.status_changed_at.clone();
+
+        // 确保时间戳至少相差 1ms；先切到与初始不同的状态（冷启动可能已是 ready）。
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let first_target = if initial.status == WorkbenchDependencyState::Missing {
+            WorkbenchDependencyState::Ready
+        } else {
+            WorkbenchDependencyState::Missing
+        };
+        let first = runtime.set_checked_status(WorkbenchDependencyStatusDto {
+            status: first_target,
+            available: first_target == WorkbenchDependencyState::Ready,
+            version: if first_target == WorkbenchDependencyState::Ready {
+                Some("3.4".into())
+            } else {
+                None
+            },
+            backend: "native".into(),
+            path: if first_target == WorkbenchDependencyState::Ready {
+                Some("/opt/homebrew/bin/tmux".into())
+            } else {
+                None
+            },
+            installable: first_target == WorkbenchDependencyState::Missing,
+            install_command_preview: Vec::new(),
+            error: None,
+            output: Vec::new(),
+            status_changed_at: String::new(),
+        });
+        assert_eq!(first.status, first_target);
+        assert_ne!(first.status_changed_at, initial_changed_at);
+        assert!(!first.status_changed_at.is_empty());
+
+        let first_changed_at = first.status_changed_at.clone();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        runtime.mark_failed("probe failed", vec!["stderr".into()]);
+        let failed = runtime.status();
+        assert_eq!(failed.status, WorkbenchDependencyState::Failed);
+        assert_ne!(failed.status_changed_at, first_changed_at);
+        assert!(!failed.status_changed_at.is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     挂起的外部命令必须在硬超时后被终止，不能阻塞探测线程。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动 `sleep 10`，以 200ms 超时探测，断言返回 TimedOut 且总耗时远小于 sleep。
+    #[test]
+    fn run_std_command_with_timeout_kills_hanging_process() {
+        let mut command = StdCommand::new("sleep");
+        command.arg("10");
+        let started = Instant::now();
+        let result = run_std_command_with_timeout(command, Duration::from_millis(200));
+        let elapsed = started.elapsed();
+        assert_eq!(result.err(), Some(ProbeCommandError::TimedOut));
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "超时路径耗时过长: {elapsed:?}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     doctor 超时后的回收命令本身也必须有界；挂起的 kill 辅助进程不得突破 hard deadline。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     spawn 长 sleep 模拟挂起的 taskkill/kill helper，用极短 grace 调用 wait_child_bounded，
+    ///     断言 TimedOut 且耗时远小于无界 wait。
+    #[test]
+    fn wait_child_bounded_times_out_and_kills_hanging_helper() {
+        let mut child = StdCommand::new("sleep")
+            .arg("10")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn hanging helper");
+        let started = Instant::now();
+        let err = wait_child_bounded(&mut child, Duration::from_millis(80))
+            .expect_err("挂起 helper 必须在 grace 内超时");
+        let elapsed = started.elapsed();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "有界回收耗时过长: {elapsed:?}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     超时路径不能依赖「kill 必然成功」；即便进程已退出，terminate 也必须有界返回。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对已退出的 sleep 0 子进程调用 terminate_probe_child，断言在 grace 内返回且不 panic。
+    #[test]
+    fn terminate_probe_child_is_bounded_when_process_already_exited() {
+        let mut child = StdCommand::new("sleep")
+            .arg("0")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep 0");
+        let pgid = child.id();
+        // 等子进程自然退出，使后续 kill/wait 走「已退出 / kill 失败」分支。
+        let _ = child.wait();
+        let deadline = Instant::now();
+        let started = Instant::now();
+        terminate_probe_child(
+            &mut child,
+            pgid,
+            deadline,
+            #[cfg(windows)]
+            None,
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "已退出进程的 terminate 耗时过长: {elapsed:?}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Windows 单次 probe 超时必须走 taskkill /T 杀进程树，而不能只 Child::kill 直接子进程。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     通过 TEST_WINDOWS_TASKKILL_SPAWN hook 记录 terminate_probe_child 触发的 PID，
+    ///     对 sleep 0 已退出子进程调用后断言 hook 被调用且 PID 匹配。
+    #[cfg(windows)]
+    #[test]
+    fn terminate_probe_child_windows_uses_taskkill_tree() {
+        let mut child = StdCommand::new("cmd")
+            .args(["/C", "exit", "0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn exited child");
+        let pid = child.id();
+        // 等子进程退出，避免真实 taskkill 干扰；hook 拦截 spawn。
+        let _ = child.wait();
+        // 重新 spawn 一个仍存活的 sleep 以便 try_wait 路径存在。
+        let mut child = StdCommand::new("cmd")
+            .args(["/C", "ping", "-n", "3", "127.0.0.1", ">", "nul"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn hanging child");
+        let pid = child.id();
+
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<u32>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_hook = seen.clone();
+        {
+            let mut hook = TEST_WINDOWS_TASKKILL_SPAWN.lock().expect("hook lock");
+            *hook = Some(Box::new(move |kill_pid| {
+                seen_hook.lock().expect("seen").push(kill_pid);
+                // 返回已退出的 helper，避免 wait_child_bounded hang。
+                StdCommand::new("cmd")
+                    .args(["/C", "exit", "0"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+            }));
+        }
+
+        let deadline = Instant::now() + Duration::from_millis(200);
+        terminate_probe_child(
+            &mut child,
+            pid,
+            deadline,
+            #[cfg(windows)]
+            None,
+        );
+
+        {
+            let mut hook = TEST_WINDOWS_TASKKILL_SPAWN.lock().expect("hook lock");
+            *hook = None;
+        }
+        let pids = seen.lock().expect("seen").clone();
+        assert_eq!(
+            pids,
+            vec![pid],
+            "terminate_probe_child 必须对直接子 PID 调 taskkill /T"
+        );
+        let _ = child.try_wait();
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     正常退出后的管道 drain 必须有界；即便 deadline 已过，也不能无界阻塞读。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     跑 `printf hi`，以已过去的 deadline 调用 drain_probe_pipes，断言快速返回（缓冲可空）。
+    #[test]
+    fn drain_probe_pipes_respects_past_deadline() {
+        let mut child = StdCommand::new("printf")
+            .arg("hi")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn printf");
+        let _ = child.wait();
+        let started = Instant::now();
+        let past_deadline = Instant::now() - Duration::from_millis(1);
+        let (stdout, stderr) = drain_probe_pipes(
+            &mut child,
+            past_deadline,
+            #[cfg(windows)]
+            None,
+        );
+        let elapsed = started.elapsed();
+        // 允许小额 grace；必须远小于无界阻塞。
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "过期 deadline 的 drain 耗时过长: {elapsed:?}"
+        );
+        // 结果可空（超时关闭读端）或含 "hi"；关键是不阻塞。
+        let _ = (stdout, stderr);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     成功路径在截止时间内应读到完整 stdout，验证非阻塞 drain 不只是「永远返回空」。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     跑 `printf hello` 并在充足 deadline 下 drain，断言 stdout 含 hello。
+    #[test]
+    fn drain_probe_pipes_reads_stdout_within_deadline() {
+        let mut child = StdCommand::new("printf")
+            .arg("hello")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn printf");
+        let status = child.wait().expect("wait printf");
+        assert!(status.success());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (stdout, _stderr) = drain_probe_pipes(
+            &mut child,
+            deadline,
+            #[cfg(windows)]
+            None,
+        );
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     父进程先退出但同进程组孙进程仍持 stdout 时，必须有界返回并 killpg 清理后代。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Unix：独立进程组 spawn `sh -c 'sleep 60 &'`，等 shell 退出后以过期 deadline drain；
+    ///     断言 drain 有界返回，且 kill(pgid,0) 失败（进程组已无存活成员）。
+    #[cfg(unix)]
+    #[test]
+    fn drain_timeout_kills_descendant_holding_pipe() {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = StdCommand::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 60 &")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("spawn sh with background sleep");
+        let pgid = child.id();
+
+        // 等待 shell 自身退出，留下持有 stdout 的 sleep 后代。
+        let wait_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    assert!(Instant::now() < wait_deadline, "shell 未在预期时间内退出");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("try_wait shell failed: {err}"),
+            }
+        }
+
+        // 过期 deadline 强制走 drain 超时 → killpg 路径。
+        let started = Instant::now();
+        let past_deadline = Instant::now() - Duration::from_millis(1);
+        let (_stdout, _stderr) = drain_probe_pipes(
+            &mut child,
+            past_deadline,
+            #[cfg(windows)]
+            None,
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "descendant-hold-pipe 的 drain 超时路径耗时过长: {elapsed:?}"
+        );
+
+        // 进程组应已被 SIGKILL。SIGKILL 后可能短暂残留僵尸，轮询等待 reaper 回收。
+        let pgid_i: libc::pid_t = pgid.try_into().expect("pgid fits pid_t");
+        let assert_deadline = Instant::now() + Duration::from_secs(1);
+        let mut still_alive = true;
+        while Instant::now() < assert_deadline {
+            still_alive = unsafe { libc::kill(-pgid_i, 0) } == 0;
+            if !still_alive {
+                break;
+            }
+            // 再补一次 killpg，覆盖 terminate 与断言之间的竞态窗口。
+            let _ = kill_probe_process_group(pgid);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!still_alive, "drain 超时后进程组仍有存活后代 (pgid={pgid})");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     后代 setsid 逃离原进程组后 killpg 无效；旧实现会 mem::forget 阻塞 reader，
+    ///     每次依赖重检都累积线程。新实现必须有界返回并关闭读端，无 reader 线程爆炸。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 python 子进程 setsid 后 sleep 并继承 stdout；父 shell 退出后反复 drain；
+    ///     断言每次 probe 在 deadline 内返回，且过程不依赖 mem::forget/detach 线程。
+    ///     最后单独 kill 逃逸后代，避免污染测试环境。
+    #[cfg(unix)]
+    #[test]
+    fn drain_timeout_with_setsid_escape_stays_bounded_across_repeated_probes() {
+        use std::os::unix::process::CommandExt;
+
+        // 逃逸后代把 pid 写到临时文件，便于测试结束清理；stdout 继承 shell 管道保持打开。
+        let pid_file = std::env::temp_dir().join(format!(
+            "cc-partner-probe-setsid-{}.pid",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&pid_file);
+        let pid_path = pid_file.to_string_lossy().replace('\'', "");
+
+        let script = format!(
+            "python3 -c 'import os,time; os.setsid(); open(\"{pid_path}\",\"w\").write(str(os.getpid())); time.sleep(120)' &"
+        );
+
+        let mut escaped_pids: Vec<i32> = Vec::new();
+        // 多次探测：证明不会因 forget reader 而线程/耗时爆炸。
+        for round in 0..3 {
+            let mut command = StdCommand::new("sh");
+            command
+                .arg("-c")
+                .arg(&script)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setpgid(0, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let mut child = command
+                .spawn()
+                .expect("spawn sh with setsid-escaped python");
+
+            let wait_deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {
+                        assert!(
+                            Instant::now() < wait_deadline,
+                            "round {round}: shell 未在预期时间内退出"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("round {round}: try_wait shell failed: {err}"),
+                }
+            }
+
+            // 读取逃逸 pid（best-effort，用于最终清理）。
+            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = text.trim().parse::<i32>() {
+                    escaped_pids.push(pid);
+                }
+            }
+            let _ = std::fs::remove_file(&pid_file);
+
+            let started = Instant::now();
+            // 给极短 grace：非阻塞 poll 应在 deadline 后立刻因超时关闭读端返回。
+            let past_deadline = Instant::now() - Duration::from_millis(1);
+            let (_stdout, _stderr) = drain_probe_pipes(
+                &mut child,
+                past_deadline,
+                #[cfg(windows)]
+                None,
+            );
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "round {round}: setsid-escape drain 超时路径耗时过长: {elapsed:?}"
+            );
+            // 读端已关闭：Child 上不应再持有 stdout/stderr handle。
+            assert!(child.stdout.is_none());
+            assert!(child.stderr.is_none());
+        }
+
+        // 清理 setsid 逃逸后代（它们不在原 pgid，drain 的 killpg 管不到）。
+        for pid in escaped_pids {
+            unsafe {
+                let _ = libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        let _ = std::fs::remove_file(&pid_file);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     持续向继承管道写数据的后代会使旧 pump_side 在 WouldBlock 前无限扩张缓冲，
+    ///     阻塞 AppState 初始化；修复后必须在 deadline/字节预算内返回并关闭读端。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Unix：独立进程组 spawn `sh -c 'yes ... &'`，shell 退出后后代持续写 stdout；
+    ///     以短但非零 deadline drain，断言有界返回、读端已 drop、缓冲不超过字节预算。
+    #[cfg(unix)]
+    #[test]
+    fn drain_timeout_with_continuous_writing_descendant_stays_bounded() {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = StdCommand::new("sh");
+        command
+            .arg("-c")
+            // yes 继承 shell stdout（探测管道）并持续写入；父 shell 退出后管道仍可读。
+            .arg("yes probe-continuous-write 2>/dev/null &")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command
+            .spawn()
+            .expect("spawn continuous-writing descendant");
+        let pgid = child.id();
+
+        let wait_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    assert!(
+                        Instant::now() < wait_deadline,
+                        "continuous-write shell 未在预期时间内退出"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("try_wait continuous-write shell failed: {err}"),
+            }
+        }
+
+        // 给真实 grace 窗口：管道始终可读时，旧实现会无限 pump；新实现靠 deadline/预算退出。
+        let started = Instant::now();
+        let drain_deadline = Instant::now() + Duration::from_millis(200);
+        let (stdout, _stderr) = drain_probe_pipes(
+            &mut child,
+            drain_deadline,
+            #[cfg(windows)]
+            None,
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "continuous-write drain 超时路径耗时过长: {elapsed:?}"
+        );
+        assert!(
+            stdout.len() <= PROBE_PIPE_DRAIN_BYTE_BUDGET,
+            "stdout 超过字节预算: {}",
+            stdout.len()
+        );
+        assert!(child.stdout.is_none());
+        assert!(child.stderr.is_none());
+
+        // best-effort 清理同组 yes 后代（drain 超时路径通常已 killpg）。
+        let pgid_i: libc::pid_t = pgid.try_into().expect("pgid fits pid_t");
+        unsafe {
+            let _ = libc::kill(-pgid_i, libc::SIGKILL);
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     fcntl 失败后若仍进入阻塞 read，deadline 无法打断；源码必须在失败时立刻关侧。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     审查 Unix drain 生产实现：set_nonblocking 返回 Result，失败分支 drop 读端且
+    ///     不在失败路径上直接 pump/read。
+    #[cfg(unix)]
+    #[test]
+    fn unix_drain_source_closes_side_on_set_nonblocking_failure() {
+        let source = include_str!("dependencies.rs");
+        // 生产区可能含 `#[cfg(test)]` hook 分支；以 tests 模块边界切分，避免误截断。
+        let production = source
+            .split("mod tests {")
+            .next()
+            .expect("dependencies.rs 应包含 mod tests");
+        let unix_fn = production
+            .split("fn drain_child_pipes_nonblocking_unix")
+            .nth(1)
+            .and_then(|rest| rest.split("fn plan_windows_pipe_read").next())
+            .or_else(|| {
+                production
+                    .split("fn drain_child_pipes_nonblocking_unix")
+                    .nth(1)
+                    .and_then(|rest| {
+                        rest.split("fn drain_child_pipes_nonblocking_fallback")
+                            .next()
+                    })
+            })
+            .expect("应能切出 Unix drain 函数体");
+        assert!(
+            unix_fn.contains("fn set_nonblocking(fd: RawFd) -> std::io::Result<()>")
+                || unix_fn.contains("fn set_nonblocking(fd: RawFd) -> Result<(),"),
+            "set_nonblocking 必须返回 Result，禁止静默忽略 fcntl 失败"
+        );
+        assert!(
+            unix_fn.contains("match set_nonblocking(fd)"),
+            "调用方必须 match set_nonblocking 结果"
+        );
+        assert!(
+            unix_fn.contains("drop(out)") || unix_fn.contains("drop(err)"),
+            "fcntl 失败路径必须 drop 读端，禁止继续阻塞 read"
+        );
+        assert!(
+            !unix_fn.contains("失败时仍尝试读") && !unix_fn.contains("最坏靠 deadline 退出"),
+            "不得再声称 fcntl 失败后靠 deadline 退出阻塞 read"
+        );
+        assert!(
+            unix_fn.contains("PROBE_PIPE_DRAIN_BYTE_BUDGET") || unix_fn.contains("total_read"),
+            "pump_side 必须受字节预算约束"
+        );
+        assert!(
+            unix_fn.contains("Instant::now() >= deadline"),
+            "pump_side 循环内必须检查 deadline"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     生产代码必须消除 forget-reader 与后台 join reader 回退，避免回归到永久线程泄漏。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     只检查 `#[cfg(test)]` 之前的生产源码，断言不存在 forget 调用 / join_pipe_thread 定义。
+    #[test]
+    fn probe_drain_source_has_no_forgotten_reader_fallback() {
+        let source = include_str!("dependencies.rs");
+        // 测试模块自身会提到这些符号；只审查生产实现段。
+        // 生产区可能含 `#[cfg(test)]` hook 分支；以 tests 模块边界切分，避免误截断。
+        let production = source
+            .split("mod tests {")
+            .next()
+            .expect("dependencies.rs 应包含 mod tests");
+        let forget_token = format!("{}::forget(", "mem");
+        assert!(
+            !production.contains(&forget_token),
+            "生产代码仍包含 mem::forget 调用，禁止作为 pipe drain 回退"
+        );
+        assert!(
+            !production.contains("fn join_pipe_thread"),
+            "生产代码仍包含 fn join_pipe_thread 后台 reader 路径"
+        );
+        assert!(
+            production.contains("fn drain_child_pipes_nonblocking"),
+            "生产代码应定义非阻塞 drain_child_pipes_nonblocking"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Windows 路径若在 Peek 之前裸调用阻塞 read，deadline 无法打断 hang，会卡死 AppState 初始化。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     审查生产源码：Windows fallback 必须含 PeekNamedPipe + plan_windows_pipe_read；
+    ///     且 fallback 函数体内不得出现未先 plan 的“裸 read 循环”注释回归。
+    #[test]
+    fn windows_drain_source_uses_peek_named_pipe_before_read() {
+        let source = include_str!("dependencies.rs");
+        // 生产区可能含 `#[cfg(test)]` hook 分支；以 tests 模块边界切分，避免误截断。
+        let production = source
+            .split("mod tests {")
+            .next()
+            .expect("dependencies.rs 应包含 mod tests");
+        assert!(
+            production.contains("fn plan_windows_pipe_read"),
+            "应导出可单测的 plan_windows_pipe_read 决策函数"
+        );
+        assert!(
+            production.contains("PeekNamedPipe"),
+            "Windows drain 必须通过 PeekNamedPipe 查询可用字节"
+        );
+        assert!(
+            production.contains("fn drain_child_pipes_nonblocking_fallback"),
+            "应保留非 Unix drain fallback 入口"
+        );
+        // 禁止回归到“注释宣称受总超时约束 + 直接 out.read”的错误实现。
+        assert!(
+            !production.contains("极端阻塞场景仍受 probe 总超时约束"),
+            "不得再声称阻塞 read 受 probe 总超时约束"
+        );
+        let fallback = production
+            .split("fn drain_child_pipes_nonblocking_fallback")
+            .nth(1)
+            .and_then(|rest| rest.split("struct TmuxCandidate").next())
+            .expect("应能切出 Windows fallback 函数体");
+        assert!(
+            fallback.contains("PeekNamedPipe") || fallback.contains("peek_named_pipe_available"),
+            "fallback 函数体必须调用 PeekNamedPipe"
+        );
+        assert!(
+            fallback.contains("plan_windows_pipe_read"),
+            "fallback 函数体必须经 plan_windows_pipe_read 决策后再 read"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     根进程先退出后 taskkill /T 不可靠；生产路径必须在用户代码运行前绑定 Job Object。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     审查生产源码含 CREATE_SUSPENDED / CreateJobObjectW / KILL_ON_JOB_CLOSE /
+    ///     AssignProcessToJobObject / ResumeThread / TerminateJobObject，且
+    ///     terminate_probe_child / cancel_and_reap 优先使用 job。
+    ///     真实“父退子存”杀树验证需 windows-latest runner；非 Windows 以本源码契约测试代替。
+    #[test]
+    fn windows_probe_job_object_source_contract() {
+        let source = include_str!("dependencies.rs");
+        let production = source
+            .split("mod tests {")
+            .next()
+            .expect("dependencies.rs 应包含 mod tests");
+        assert!(
+            production.contains("CreateJobObjectW"),
+            "Windows probe 必须 CreateJobObjectW"
+        );
+        assert!(
+            production.contains("JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE")
+                || production.contains("0x0000_2000")
+                || production.contains("0x00002000"),
+            "Job 必须启用 KILL_ON_JOB_CLOSE"
+        );
+        assert!(
+            production.contains("CREATE_SUSPENDED") && production.contains("creation_flags"),
+            "必须 CREATE_SUSPENDED 挂起 spawn，用户代码运行前再 Assign"
+        );
+        // Job 创建失败必须 fail closed：spawn 前返回 SpawnOrIo，禁止 .ok() 吞错后走未挂起路径。
+        assert!(
+            !production
+                .split("fn run_std_command_with_timeout_guarded")
+                .nth(1)
+                .and_then(|rest| rest.split("fn terminate_probe_child").next())
+                .expect("应能切出 run_std_command_with_timeout_guarded")
+                .contains("WindowsProbeJob::create().ok()"),
+            "禁止 WindowsProbeJob::create().ok() 吞掉 Job 创建失败"
+        );
+        assert!(
+            production.contains("拒绝启动未受约束探测")
+                || production.contains("fail closed")
+                || production.contains("未能创建 Job Object，拒绝"),
+            "Job 创建失败必须在 spawn 前 fail closed"
+        );
+        assert!(
+            production.contains("AssignProcessToJobObject"),
+            "必须 AssignProcessToJobObject"
+        );
+        assert!(
+            production.contains("ResumeThread") || production.contains("resume_suspended_process"),
+            "Assign 后必须 ResumeThread 再跑用户代码"
+        );
+        // 禁止旧的“先 spawn 再 create_for_child”竞态路径出现在生产代码。
+        assert!(
+            !production.contains("create_for_child"),
+            "禁止 spawn 后 create_for_child（Assign 竞态）"
+        );
+        assert!(
+            production.contains("TerminateJobObject"),
+            "超时路径必须 TerminateJobObject"
+        );
+        assert!(
+            production.contains("register_job") || production.contains("jobs:"),
+            "ProbeRuntimeGuard 必须登记 job 句柄"
+        );
+        let terminate = production
+            .split("fn terminate_probe_child")
+            .nth(1)
+            .and_then(|rest| rest.split("fn kill_probe_process_group").next())
+            .expect("应能切出 terminate_probe_child");
+        assert!(
+            terminate.contains("job.terminate") || terminate.contains("TerminateJobObject"),
+            "terminate_probe_child 必须优先 job.terminate"
+        );
+        assert!(
+            terminate.contains("kill_probe_pid_windows") || terminate.contains("taskkill"),
+            "无 job 时仍保留 taskkill fallback"
+        );
+        let cancel = production
+            .split("fn cancel_and_reap")
+            .nth(1)
+            .and_then(|rest| rest.split("fn kill_probe_pid").next())
+            .expect("应能切出 cancel_and_reap");
+        assert!(
+            cancel.contains("TerminateJobObject")
+                || cancel.contains("job.terminate")
+                || cancel.contains("jobs.drain"),
+            "cancel_and_reap 必须终止已登记 job"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Windows 上父进程派生持管道后代后立即退出时，deadline 后必须能通过 Job 终止后代。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     仅 Windows：CREATE_SUSPENDED 起 powershell wrapper → Assign → Resume；
+    ///     wrapper 写 ready 信号文件（含真实后代 PID）后立刻退出，后代继续 sleep；
+    ///     断言 ready 时后代存活，TerminateJobObject 后后代退出。使用 NUL 而非 /dev/null。
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_kills_descendants_after_root_exits() {
+        use std::os::windows::process::CommandExt;
+        use std::path::PathBuf;
+
+        let ready_path: PathBuf =
+            std::env::temp_dir().join(format!("cc-partner-job-ready-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&ready_path);
+        let ready_str = ready_path.to_string_lossy().replace('\'', "''");
+
+        // wrapper：启动长 sleep 后代，把后代 PID 写入 ready 文件，然后立刻 exit。
+        // 必须在 Assign 之后 Resume 才运行，否则后代可能逃逸 Job。
+        let script = format!(
+            "$p = Start-Process -FilePath 'ping.exe' -ArgumentList '-n','60','127.0.0.1' -WindowStyle Hidden -PassThru; Set-Content -LiteralPath '{ready}' -Value $p.Id -Encoding ascii; exit 0",
+            ready = ready_str
+        );
+
+        let job = WindowsProbeJob::create().expect("create empty job");
+        let mut command = StdCommand::new("powershell");
+        command
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_SUSPENDED);
+        let mut child = command.spawn().expect("spawn suspended powershell wrapper");
+        job.assign_child(&child)
+            .expect("assign suspended root to job");
+        resume_suspended_process(child.id()).expect("resume after assign");
+
+        // 等待 ready 信号并解析真实后代 PID。
+        let wait_ready = Instant::now() + Duration::from_secs(5);
+        let descendant_pid: u32 = loop {
+            if let Ok(content) = std::fs::read_to_string(&ready_path) {
+                let trimmed = content.trim();
+                if let Ok(pid) = trimmed.parse::<u32>() {
+                    break pid;
+                }
+            }
+            assert!(
+                Instant::now() < wait_ready,
+                "wrapper 未在时限内写出 ready 信号/后代 PID"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        // 根应很快退出；后代此时仍应存活。
+        let wait_root = Instant::now() + Duration::from_secs(5);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    assert!(Instant::now() < wait_root, "powershell 根进程未及时退出");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(err) => panic!("try_wait wrapper failed: {err}"),
+            }
+        }
+        assert!(
+            windows_pid_is_alive(descendant_pid),
+            "ready 后、Terminate 前后代 PID {descendant_pid} 应仍存活"
+        );
+
+        let started = Instant::now();
+        job.terminate().expect("TerminateJobObject after root exit");
+        // 轮询确认后代被 Job 杀掉。
+        let kill_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if !windows_pid_is_alive(descendant_pid) {
+                break;
+            }
+            assert!(
+                Instant::now() < kill_deadline,
+                "TerminateJobObject 后后代 PID {descendant_pid} 仍存活"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "job 杀树过长: {elapsed:?}"
+        );
+        let _ = std::fs::remove_file(&ready_path);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Windows 杀树回归测试需要观察真实后代 PID 是否仍存活。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) 成功即视为存活；失败视为已退出。
+    #[cfg(windows)]
+    fn windows_pid_is_alive(pid: u32) -> bool {
+        type BOOL = i32;
+        type DWORD = u32;
+        type HANDLE = *mut core::ffi::c_void;
+        const PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn OpenProcess(
+                dw_desired_access: DWORD,
+                b_inherit_handle: BOOL,
+                dw_process_id: DWORD,
+            ) -> HANDLE;
+            fn CloseHandle(h_object: HANDLE) -> BOOL;
+            fn GetExitCodeProcess(h_process: HANDLE, lp_exit_code: *mut DWORD) -> BOOL;
+        }
+
+        const STILL_ACTIVE: DWORD = 259;
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let mut code: DWORD = 0;
+        let ok = unsafe { GetExitCodeProcess(handle, &mut code) };
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        ok != 0 && code == STILL_ACTIVE
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Peek 结果到 read 预算的映射是 Windows 有界 drain 的核心；零字节必须禁止 read。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     覆盖 None/0/正数/cap 裁剪四类输入，断言 Wait/Eof/Read 规划正确。
+    #[test]
+    fn plan_windows_pipe_read_never_allows_blocking_when_empty() {
+        assert_eq!(plan_windows_pipe_read(None, 4096), WindowsPipeReadPlan::Eof);
+        assert_eq!(
+            plan_windows_pipe_read(Some(0), 4096),
+            WindowsPipeReadPlan::Wait
+        );
+        assert_eq!(
+            plan_windows_pipe_read(Some(100), 0),
+            WindowsPipeReadPlan::Wait
+        );
+        assert_eq!(
+            plan_windows_pipe_read(Some(100), 4096),
+            WindowsPipeReadPlan::Read(100)
+        );
+        assert_eq!(
+            plan_windows_pipe_read(Some(8000), 4096),
+            WindowsPipeReadPlan::Read(4096)
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     注入挂起 runner 时探测必须收敛为 TimedOut，供 DTO 写成 failed 而非永久卡死。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     fake runner 恒返回 TimedOut；Windows 平台单候选，断言 outcome 为 TimedOut。
+    #[test]
+    fn probe_tmux_command_with_timeout_runner_returns_timed_out() {
+        let outcome = probe_tmux_command_with(DependencyPlatform::Windows, |_cmd, _timeout| {
+            Err(ProbeCommandError::TimedOut)
+        });
+        assert!(matches!(outcome, TmuxProbeOutcome::TimedOut));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     探测超时不能伪装成 missing，否则 Inbox 会把“未知”当成可安装缺失。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用恒超时 runner 走 probe 路径，经 probe_tmux_command_with 映射为 Failed DTO 语义：
+    ///     直接断言 TimedOut outcome 对应的 probe_workbench 分支字段（构造等价 DTO）。
+    #[test]
+    fn timed_out_probe_maps_to_failed_not_missing() {
+        let outcome = probe_tmux_command_with(DependencyPlatform::Linux, |_cmd, _timeout| {
+            Err(ProbeCommandError::TimedOut)
+        });
+        assert!(matches!(outcome, TmuxProbeOutcome::TimedOut));
+        // 与 probe_workbench_dependency 的 TimedOut 分支保持同一语义。
+        let status = WorkbenchDependencyStatusDto {
+            status: WorkbenchDependencyState::Failed,
+            available: false,
+            version: None,
+            backend: backend_for_platform(DependencyPlatform::Linux).to_string(),
+            path: None,
+            installable: false,
+            install_command_preview: Vec::new(),
+            error: Some("tmux 探测超时（3 秒），请稍后重新检测".into()),
+            output: vec!["依赖探测超时，已终止外部进程".to_string()],
+            status_changed_at: String::new(),
+        };
+        assert_eq!(status.status, WorkbenchDependencyState::Failed);
+        assert!(!status.available);
+        assert!(status.error.as_deref().unwrap_or("").contains("超时"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     快速失败的候选应记为 Missing，而不是 TimedOut。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     fake runner 返回 SpawnOrIo；断言 outcome 为 Missing。
+    #[test]
+    fn probe_tmux_command_with_spawn_failures_returns_missing() {
+        let outcome = probe_tmux_command_with(DependencyPlatform::MacOs, |_cmd, _timeout| {
+            Err(ProbeCommandError::SpawnOrIo)
+        });
+        assert!(matches!(outcome, TmuxProbeOutcome::Missing));
     }
 }

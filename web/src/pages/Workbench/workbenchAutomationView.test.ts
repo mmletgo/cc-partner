@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import { readFileSync } from 'node:fs';
 import assertNode from 'node:assert/strict';
 import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
@@ -43,7 +44,8 @@ function assertNotContains(source: string, unexpected: string, message: string):
  *   读取 Workbench、Orchestrator、AppShell、路由和 i18n 资源，检查自动化控制台入口、嵌入组件、
  *   deep link 回终端、层级样式、侧栏导航收敛和执行现场文案契约。
  */
-async function main(): Promise<void> {
+describe('workbenchAutomationView', () => {
+  test('keeps automation console inside Workbench and the embedded Orchestrator contract intact', async () => {
   const workbenchSource = readFileSync(new URL('./Workbench.tsx', import.meta.url), 'utf8');
   const workbenchFilesSource = readFileSync(new URL('./workbenchFiles.ts', import.meta.url), 'utf8');
   const workbenchStyles = readFileSync(new URL('./Workbench.module.css', import.meta.url), 'utf8');
@@ -134,8 +136,23 @@ async function main(): Promise<void> {
   );
   assertContains(
     workbenchSource,
-    '<OrchestratorPanel embedded onOpenWorkbench={handleOpenAutomationTaskWorkbench} />',
+    '<OrchestratorPanel',
     'mounted automation layer should contain the embedded Orchestrator UI',
+  );
+  assertContains(
+    workbenchSource,
+    'onOpenWorkbench={handleOpenAutomationTaskWorkbench}',
+    'embedded Orchestrator should hand open-workbench back to Workbench',
+  );
+  assertContains(
+    workbenchSource,
+    'focusTaskId={automationFocusTaskId}',
+    'Attention automation deep links should pass focusTaskId into OrchestratorPanel',
+  );
+  assertContains(
+    workbenchSource,
+    'focusOutboxId={automationFocusOutboxId}',
+    'Attention automation deep links should pass focusOutboxId into OrchestratorPanel',
   );
   assertNotContains(
     workbenchSource,
@@ -269,8 +286,8 @@ async function main(): Promise<void> {
   );
   assertContains(
     orchestratorSource,
-    'orchestratorApi.getRuntimeSnapshot(',
-    'Orchestrator panel loads the local project runtime snapshot',
+    'useOrchestratorRuntimeSnapshot',
+    'Orchestrator panel loads runtime snapshots through the desktop cache/stale-guard hook',
   );
   assertContains(
     typesSource,
@@ -294,8 +311,18 @@ async function main(): Promise<void> {
   );
   assertContains(
     typesSource,
-    "remoteStatus: 'local' | 'unsupported' | 'unavailable' | 'offline';",
-    'runtime snapshot type includes explicit local/remote status',
+    "remoteStatus: 'local' | OrchestratorRemoteRuntimeStatus",
+    'runtime snapshot type includes explicit local/remote status with live',
+  );
+  assertContains(
+    typesSource,
+    "export type OrchestratorRemoteRuntimeStatus =",
+    'runtime display types include OrchestratorRemoteRuntimeStatus',
+  );
+  assertContains(
+    typesSource,
+    "| 'live'",
+    'runtime snapshot remote status includes live for owning-device data',
   );
   assertContains(
     orchestratorSource,
@@ -309,22 +336,22 @@ async function main(): Promise<void> {
   );
   assertContains(
     orchestratorSource,
-    'activeRuntimeSnapshotResult.snapshot.latestTickAt',
+    'runtimeSnapshot.latestTickAt',
     'runtime snapshot status strip renders latest scheduler tick time',
   );
   assertContains(
     orchestratorSource,
-    'activeRuntimeSnapshotResult.snapshot.generatedAt',
+    'runtimeSnapshot.generatedAt',
     'runtime snapshot status strip renders snapshot generated time',
   );
   assertContains(
     orchestratorSource,
-    'activeRuntimeSnapshotResult.snapshot.runningTasks.length',
+    'runtimeSnapshot.runningTasks.length',
     'runtime snapshot status strip renders running task count',
   );
   assertContains(
     orchestratorSource,
-    'activeRuntimeSnapshotResult.snapshot.recentEvents.map',
+    'runtimeSnapshot.recentEvents.map',
     'runtime snapshot status strip renders recent event summaries',
   );
   assertContains(
@@ -480,6 +507,5 @@ async function main(): Promise<void> {
   assertContains(enOrchestrator, '"openWorkbench": "Open execution context"', 'en Orchestrator action opens execution context');
   assertNotContains(zhOrchestrator, '"终端现场"', 'zh Orchestrator copy must not imply task belongs to the current worktree terminal');
   assertNotContains(enOrchestrator, '"Open Workbench"', 'en Orchestrator copy must not imply a generic Workbench jump');
-}
-
-void main();
+  });
+});

@@ -71,7 +71,11 @@
     "recentEvents": "最近事件",
     "workflowError": "工作流错误：{{error}}",
     "latestError": "最近错误：{{error}}",
-    "remoteUnavailable": "远端运行时快照暂不可用；请在所属设备查看自动化状态。"
+    "remoteUnavailable": "远端运行时快照暂不可用；请在所属设备查看自动化状态。",
+    "remoteUnsupported": "该远端设备不支持运行时快照；请在所属设备查看，或升级对端版本。",
+    "remoteOffline": "远端设备离线，当前无法获取运行时状态。",
+    "remoteOfflineCached": "正在显示上次成功的运行时状态。最后更新 {{time}}。",
+    "remoteOfflineCachedBadge": "缓存 · {{time}}"
   },
   "queue": {
     "title": "任务队列",
@@ -90,8 +94,12 @@
       "pending": "待发送",
       "sending": "发送中",
       "mirrored": "已镜像",
-      "failed": "发送失败"
-    }
+      "failed": "发送失败",
+      "discarded": "已放弃"
+    },
+    "retry": "重新发送",
+    "discard": "放弃",
+    "discardConfirm": "确定放弃这条失败的远端发送请求？放弃后仅保留审计，不再重试。"
   },
   "detail": {
     "drawerAria": "任务详情侧边栏",
@@ -211,6 +219,8 @@
     "completePrompt": "AI 自动完善失败。",
     "noProject": "请先在侧栏选择一个 Workbench 项目。",
     "promptRequired": "请先填写简单 Prompt。",
-    "required": "请填写标题、目标和验收标准。"
+    "required": "请填写标题、目标和验收标准。",
+    "retryOutbox": "重新发送失败。",
+    "discardOutbox": "放弃发送失败。"
   }
 }

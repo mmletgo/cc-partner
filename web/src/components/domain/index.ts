@@ -65,7 +65,10 @@ export type {
 } from './WorkbenchFileWorkspace';
 export { WorkbenchSessionSearch } from './WorkbenchSessionSearch';
 export type { WorkbenchSessionSearchProps } from './WorkbenchSessionSearch';
-export { WorkbenchBrowserWorkspace, getWorkbenchBrowserFrameSrc } from './WorkbenchBrowserWorkspace';
+export {
+  WorkbenchBrowserWorkspace,
+  getWorkbenchBrowserFrameSrc,
+} from './WorkbenchBrowserWorkspace';
 export type {
   WorkbenchBrowserSurface,
   WorkbenchBrowserWorkspaceProps,

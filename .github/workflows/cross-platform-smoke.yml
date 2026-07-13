@@ -1,0 +1,344 @@
+# Cross-Platform Smoke — macOS / Windows 后端 CLI + 原生 PTY + doctor/日志 冒烟
+#
+# 目的：
+#   在真实 macos-latest / windows-latest hosted runner 上验证：
+#   - backend CLI 生命周期（start→health→status→stop、duplicate start、stale control）
+#   - 平台路径 / 进程语义相关单测
+#   - 原生 PTY echo/exit
+#   - backend doctor --json（stopped/running、纯 JSON、exit 0/1/2 契约、隐私扫描）
+#   - 日志轮转 / 脱敏单测（3-history 上限、Unix mode、Windows close-before-rename）
+#   - 最小 `cargo check --locked --bins`
+#
+# 明确不验证（见 job summary）：
+#   WSL+tmux、GUI/WebView、macOS 权限弹窗、多机 mDNS。
+#   三平台 release 安装包仍由 release-tauri.yml 负责，不能替代本 smoke。
+#
+# 触发：
+#   - PR（路径过滤，仅相关变更）
+#   - 每日 schedule（UTC 18:23，无路径过滤，完整矩阵）
+#   - workflow_dispatch 手动
+#
+# 约束：
+#   - 无 continue-on-error；fail-fast: false（单平台失败不取消另一平台）
+#   - 隔离目录：CC_PARTNER_SMOKE_ROOT=${{ runner.temp }}/cc-partner-smoke
+#   - 失败上传 smoke 目录 + cargo 日志，保留 7 天
+
+name: Cross-Platform Smoke
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - 'src-tauri/**'
+      - 'web/src/pages/Workbench/**'
+      - 'web/src/hooks/workbench*'
+      - 'scripts/**'
+      - '.github/workflows/**'
+      - 'web/package-lock.json'
+  # 每日 UTC 18:23 完整矩阵（不依赖本地夏令时）
+  schedule:
+    - cron: '23 18 * * *'
+  workflow_dispatch:
+
+# 同 ref 新 run 取消旧 run，省额度；schedule 按日期独立
+concurrency:
+  group: cross-platform-smoke-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  # 所有 smoke case 写到 runner 临时目录，不触碰 ~/.cc-partner
+  CC_PARTNER_SMOKE_ROOT: ${{ runner.temp }}/cc-partner-smoke
+
+jobs:
+  smoke:
+    name: smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust stable (rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+          # 按平台隔离缓存，避免 macOS/Windows 缓存碰撞
+          shared-key: smoke-${{ matrix.os }}
+
+      - name: Prepare smoke root and log dirs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${CC_PARTNER_SMOKE_ROOT}"
+          mkdir -p "${{ runner.temp }}/cargo-logs"
+          echo "CC_PARTNER_SMOKE_ROOT=${CC_PARTNER_SMOKE_ROOT}"
+          echo "runner.temp=${{ runner.temp }}"
+          echo "os=${{ matrix.os }}"
+
+      # 每个 cargo 步骤 timeout-minutes 必须小于 job 30m，给 always() cleanup/artifact 留余量。
+      - name: Rust format check
+        id: fmt
+        working-directory: src-tauri
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          cargo fmt --check 2>&1 | tee "${{ runner.temp }}/cargo-logs/fmt.log"
+
+      - name: cargo check --locked --bins
+        id: check_bins
+        working-directory: src-tauri
+        shell: bash
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          cargo check --locked --bins 2>&1 | tee "${{ runner.temp }}/cargo-logs/check-bins.log"
+
+      - name: Focused unit tests (control / cli / sessions / logging / doctor)
+        id: unit
+        working-directory: src-tauri
+        shell: bash
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          {
+            cargo test --locked backend::control::tests -- --nocapture
+            cargo test --locked backend::cli::tests -- --nocapture
+            cargo test --locked workbench::sessions::tests -- --nocapture
+            # 日志轮转/脱敏/平台 mode 与 Windows close-before-rename（Task 7）
+            cargo test --locked backend::logging::tests -- --nocapture
+            cargo test --locked backend::doctor::tests -- --nocapture
+            # Windows Job Object / CREATE_SUSPENDED / fail-closed 探测契约（含 windows_probe_job_*）
+            cargo test --locked workbench::dependencies::tests -- --nocapture
+          } 2>&1 | tee "${{ runner.temp }}/cargo-logs/unit.log"
+
+      - name: Backend CLI lifecycle smoke
+        id: cli_smoke
+        working-directory: src-tauri
+        shell: bash
+        timeout-minutes: 12
+        env:
+          CC_PARTNER_SMOKE_ROOT: ${{ env.CC_PARTNER_SMOKE_ROOT }}
+          RUST_BACKTRACE: '1'
+        run: |
+          set -euo pipefail
+          cargo test --locked --test backend_cli_smoke -- --nocapture --test-threads=1 \
+            2>&1 | tee "${{ runner.temp }}/cargo-logs/backend-cli-smoke.log"
+
+      - name: Backend doctor + privacy smoke
+        id: doctor_smoke
+        working-directory: src-tauri
+        shell: bash
+        timeout-minutes: 12
+        env:
+          CC_PARTNER_SMOKE_ROOT: ${{ env.CC_PARTNER_SMOKE_ROOT }}
+          RUST_BACKTRACE: '1'
+        run: |
+          set -euo pipefail
+          # doctor --json 纯 JSON / exit 0|1|2 / privacy sentinel 扫描 / core-path unhealthy
+          # 串行：共享隔离根下避免并行 case 抢端口/进程诊断
+          cargo test --locked --test backend_doctor_smoke -- --nocapture --test-threads=1 \
+            2>&1 | tee "${{ runner.temp }}/cargo-logs/backend-doctor-smoke.log"
+
+      - name: Native PTY echo/exit smoke
+        id: pty_smoke
+        working-directory: src-tauri
+        shell: bash
+        timeout-minutes: 10
+        env:
+          # 与 CLI smoke 共用隔离根，失败时 pty 也会把 raw/escaped 输出落盘到此
+          CC_PARTNER_SMOKE_ROOT: ${{ env.CC_PARTNER_SMOKE_ROOT }}
+          RUST_BACKTRACE: '1'
+        run: |
+          set -euo pipefail
+          cargo test --locked --test pty_smoke -- --nocapture --test-threads=1 \
+            2>&1 | tee "${{ runner.temp }}/cargo-logs/pty-smoke.log"
+
+      # 无条件清理：只读 smoke 目录下 control 文件，停止记录的 PID，写出诊断
+      # 注意：case 失败时 Rust harness 已在 case_dir/diagnostics 留下 control/summary 快照；
+      # 本步骤只清理残留 PID，绝不删除 case_dir/diagnostics 或 cargo-logs。
+      - name: Cleanup smoke processes and write diagnostics
+        id: cleanup
+        if: always()
+        shell: bash
+        env:
+          CC_PARTNER_SMOKE_ROOT: ${{ env.CC_PARTNER_SMOKE_ROOT }}
+        run: |
+          set +e
+          set -u
+          ROOT="${CC_PARTNER_SMOKE_ROOT}"
+          DIAG="${ROOT}/diagnostics"
+          mkdir -p "${DIAG}"
+          echo "=== smoke cleanup @ $(date -u +%Y-%m-%dT%H:%M:%SZ) ===" | tee "${DIAG}/cleanup.log"
+          echo "ROOT=${ROOT}" | tee -a "${DIAG}/cleanup.log"
+          echo "event=${{ github.event_name }} os=${{ matrix.os }} run=${{ github.run_id }}" | tee -a "${DIAG}/cleanup.log"
+
+          if [ ! -d "${ROOT}" ]; then
+            echo "smoke root missing; nothing to clean" | tee -a "${DIAG}/cleanup.log"
+            exit 0
+          fi
+
+          # 列出 smoke 目录树（有界）；保留 case diagnostics 供 artifact
+          {
+            echo "--- tree (depth 5) ---"
+            if command -v find >/dev/null 2>&1; then
+              find "${ROOT}" -maxdepth 5 \( -type f -o -type d \) 2>/dev/null | head -n 600
+            else
+              ls -laR "${ROOT}" 2>/dev/null | head -n 600
+            fi
+            echo "--- retained case diagnostics (if any) ---"
+            find "${ROOT}" -type d -name diagnostics 2>/dev/null | head -n 50
+            find "${ROOT}" -type f \( -name 'summary.txt' -o -name 'backend-control.json' -o -name 'output.escaped.txt' -o -name 'process-port.txt' -o -name 'doctor-*-stdout.json' -o -name 'doctor-*-stderr.txt' -o -name 'doctor-*-exit.txt' \) 2>/dev/null | head -n 120
+          } > "${DIAG}/tree.txt" 2>&1
+
+          # 仅处理 smoke 拥有的 backend-control.json（live control，不含 diagnostics 快照副本）
+          CONTROL_FILES=()
+          while IFS= read -r -d '' f; do
+            # 跳过 diagnostics 目录内的快照，避免误删证据
+            case "$f" in
+              */diagnostics/*) continue ;;
+            esac
+            CONTROL_FILES+=("$f")
+          done < <(find "${ROOT}" -name 'backend-control.json' -type f -print0 2>/dev/null)
+
+          echo "found ${#CONTROL_FILES[@]} live control file(s)" | tee -a "${DIAG}/cleanup.log"
+
+          for cf in "${CONTROL_FILES[@]:-}"; do
+            [ -n "${cf:-}" ] || continue
+            echo "control: ${cf}" | tee -a "${DIAG}/cleanup.log"
+            # 解析 pid / port（轻量 JSON 抽取，避免依赖 jq）
+            pid="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "${cf}" | head -n 1)"
+            port="$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "${cf}" | head -n 1)"
+            echo "  pid=${pid:-?} port=${port:-?}" | tee -a "${DIAG}/cleanup.log"
+            if [ -n "${pid:-}" ]; then
+              if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
+                tasklist //FI "PID eq ${pid}" 2>/dev/null | tee -a "${DIAG}/cleanup.log"
+                taskkill //PID "${pid}" //F 2>/dev/null | tee -a "${DIAG}/cleanup.log"
+              else
+                ps -p "${pid}" -o pid,ppid,stat,command 2>/dev/null | tee -a "${DIAG}/cleanup.log"
+                kill -TERM "${pid}" 2>/dev/null
+                sleep 1
+                if kill -0 "${pid}" 2>/dev/null; then
+                  kill -KILL "${pid}" 2>/dev/null
+                fi
+              fi
+            fi
+            # 删除本 case 的 live control / pid 文件（不扫全局；不碰 diagnostics 快照）
+            dir="$(dirname "${cf}")"
+            rm -f "${cf}" "${dir}/backend.pid" 2>/dev/null
+          done
+
+          # 进程/端口快照（诊断用，不用于扫杀）
+          {
+            echo "--- process snapshot ---"
+            if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
+              tasklist 2>/dev/null | head -n 80
+            else
+              ps aux 2>/dev/null | head -n 80
+            fi
+            echo "--- listening ports (best effort) ---"
+            if command -v lsof >/dev/null 2>&1; then
+              lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | head -n 80
+            elif command -v netstat >/dev/null 2>&1; then
+              netstat -ano 2>/dev/null | head -n 80
+            fi
+          } > "${DIAG}/process-port.txt" 2>&1
+
+          # 复制 cargo 日志进 smoke 根，便于单一 artifact
+          if [ -d "${{ runner.temp }}/cargo-logs" ]; then
+            mkdir -p "${ROOT}/cargo-logs"
+            cp -R "${{ runner.temp }}/cargo-logs/." "${ROOT}/cargo-logs/" 2>/dev/null || true
+          fi
+
+          # 证据清单：失败时 artifact 至少应能看到 cargo-logs 与任一 case diagnostics
+          {
+            echo "smoke_root=${ROOT}"
+            echo "cargo_logs=${ROOT}/cargo-logs"
+            echo "case_diagnostics:"
+            find "${ROOT}" -type d -name diagnostics 2>/dev/null | head -n 50
+          } > "${DIAG}/evidence-index.txt" 2>&1
+
+          echo "cleanup finished" | tee -a "${DIAG}/cleanup.log"
+          # 清理步骤本身不阻断 job（诊断优先）；真正失败由前置 step 决定
+          exit 0
+
+      - name: Upload smoke evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          # 每个 matrix OS 独立 artifact，避免互相覆盖
+          name: cross-platform-smoke-${{ matrix.os }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/cc-partner-smoke
+            ${{ runner.temp }}/cargo-logs
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Job summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # step outcome → PASS / FAIL / SKIPPED
+          mark() {
+            local o="$1"
+            case "${o}" in
+              success) echo "PASS" ;;
+              failure) echo "FAIL" ;;
+              cancelled) echo "CANCELLED" ;;
+              skipped) echo "SKIPPED" ;;
+              *) echo "${o:-UNKNOWN}" ;;
+            esac
+          }
+
+          FMT="$(mark '${{ steps.fmt.outcome }}')"
+          CHECK="$(mark '${{ steps.check_bins.outcome }}')"
+          UNIT="$(mark '${{ steps.unit.outcome }}')"
+          CLI="$(mark '${{ steps.cli_smoke.outcome }}')"
+          DOCTOR="$(mark '${{ steps.doctor_smoke.outcome }}')"
+          PTY="$(mark '${{ steps.pty_smoke.outcome }}')"
+          CLEAN="$(mark '${{ steps.cleanup.outcome }}')"
+
+          {
+            echo "## Cross-Platform Smoke — \`${{ matrix.os }}\`"
+            echo ""
+            echo "Trigger: \`${{ github.event_name }}\` · Run: ${{ github.run_id }} · UTC cron note: schedule is \`23 18 * * *\` (18:23 UTC daily)."
+            echo ""
+            echo "### Verified on this runner"
+            echo ""
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| cargo fmt --check | ${FMT} |"
+            echo "| cargo check --locked --bins | ${CHECK} |"
+            echo "| focused unit (control/cli/sessions/logging/doctor) | ${UNIT} |"
+            echo "| backend CLI lifecycle smoke | ${CLI} |"
+            echo "| backend doctor + privacy smoke | ${DOCTOR} |"
+            echo "| native PTY echo/exit smoke | ${PTY} |"
+            echo "| cleanup / diagnostics | ${CLEAN} |"
+            echo ""
+            echo "### Explicitly NOT VERIFIED — hosted runner scope"
+            echo ""
+            echo "| Capability | Status |"
+            echo "| --- | --- |"
+            echo "| WSL + tmux | NOT VERIFIED — hosted runner scope |"
+            echo "| GUI / WebView | NOT VERIFIED — hosted runner scope |"
+            echo "| macOS permission dialogs | NOT VERIFIED — hosted runner scope |"
+            echo "| multi-host mDNS | NOT VERIFIED — hosted runner scope |"
+            echo ""
+            echo "Isolation: \`CC_PARTNER_SMOKE_ROOT=${CC_PARTNER_SMOKE_ROOT}\` · \`RUST_BACKTRACE=1\`."
+            echo "Doctor: pure JSON stdout; exit 0/1 expected on normal paths; core-path fixture must be unhealthy/2; privacy sentinels must not leak."
+            echo "No \`continue-on-error\`; required checks above block on failure."
+          } >> "${GITHUB_STEP_SUMMARY}"

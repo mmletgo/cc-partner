@@ -25,7 +25,7 @@ const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_criteria, st
     workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
     external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
     transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
-    last_runtime_message, branch_name, worktree_id, session_id, blocked_reason, attempt, \
+    last_runtime_message, branch_name, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, \
     created_at, updated_at, started_at, finished_at";
 const WORKFLOW_LANE_ORDER: [OrchestratorWorkflowState; 8] = [
     OrchestratorWorkflowState::Backlog,
@@ -77,6 +77,21 @@ const REMOTE_OUTBOX_COLUMNS: &str = "id, device_id, device_name, remote_project_
 const REMOTE_MIRROR_COLUMNS: &str = "id, device_id, device_name, remote_project_id, \
     remote_project_path, remote_task_id, payload_json, last_synced_at";
 
+/// 幂等 create 结果：任务行 + 是否首次插入。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     客户端用同一 clientRequestId 重试 create 时，仓储必须返回既有任务，但调用方还需要知道
+///     本次是否真的新建了任务。Start 动作只能在首次插入后触发全局 dispatch，否则会在 A 完成后
+///     误启动队列中的任务 B。
+///
+/// Code Logic（这个结构体做什么）:
+///     `task` 是权威任务行；`newly_created=true` 表示本请求完成了 insert，`false` 表示幂等命中。
+#[derive(Debug, Clone)]
+pub struct IdempotentCreateTaskOutcome {
+    pub task: OrchestratorTaskRow,
+    pub newly_created: bool,
+}
+
 pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestrator_tasks (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
@@ -104,6 +119,7 @@ pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestra
   branch_name TEXT,
   worktree_id TEXT,
   session_id TEXT,
+  prepare_claim_token TEXT,
   blocked_reason TEXT,
   attempt INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
@@ -245,7 +261,9 @@ const ORCHESTRATOR_REMOTE_TASK_MIRROR_PROJECT_INDEX: &str =
 pub const ORCHESTRATOR_REMOTE_TASK_CREATE_REQUEST_SCHEMA: &str =
     "CREATE TABLE IF NOT EXISTS orchestrator_remote_task_create_requests (
   request_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL DEFAULT '',
   task_id TEXT NOT NULL,
+  request_fingerprint TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 )";
@@ -313,6 +331,7 @@ impl OrchestratorRepo {
         ensure_column(pool, "orchestrator_tasks", "last_activity_at", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "last_runtime_event", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "last_runtime_message", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "prepare_claim_token", "TEXT").await?;
         if added_workflow_state || added_run_state {
             backfill_split_state_from_legacy_status(pool).await?;
         }
@@ -337,6 +356,8 @@ impl OrchestratorRepo {
         ] {
             sqlx::query(statement).execute(pool).await?;
         }
+        // 旧库仅有 request_id 主键时补齐 project_id / request_fingerprint，并把 project_id 回填为任务归属。
+        migrate_remote_task_create_request_scope(pool).await?;
         Ok(())
     }
 
@@ -353,9 +374,9 @@ impl OrchestratorRepo {
               workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
               external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
               transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
-              last_runtime_message, worktree_id, session_id, blocked_reason, attempt, created_at, \
+              last_runtime_message, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, created_at, \
               updated_at, started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.project_id)
@@ -383,6 +404,7 @@ impl OrchestratorRepo {
         .bind(&row.last_runtime_message)
         .bind(&row.worktree_id)
         .bind(&row.session_id)
+        .bind(&row.prepare_claim_token)
         .bind(&row.blocked_reason)
         .bind(row.attempt)
         .bind(&row.created_at)
@@ -396,68 +418,90 @@ impl OrchestratorRepo {
 
     /// Business Logic（为什么需要这个函数）:
     ///     远端 P2P create 请求可能在 owning device 已创建任务后响应超时，客户端会用同一 clientRequestId 重试。
-    ///     仓储必须把 requestId->taskId 与任务创建放在同一事务中，避免重复任务。
+    ///     仓储必须把 requestId->taskId 与任务创建放在同一事务中，避免重复任务；
+    ///     同时必须按 project 隔离幂等键，防止跨项目返回另一项目的任务内容。
+    ///     调用方还需要区分“首次插入”与“幂等命中”，避免 Start 重放再次触发全局调度副作用。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在事务内先尝试登记非空 client_request_id；已存在则返回既有 task。首次登记后按 createAction
-    ///     映射 legacy/split state 并插入任务，最后读取并返回完整 Row。
+    ///     在事务内对非空 client_request_id：
+    ///     1) 按 request_id 查找既有映射；
+    ///     2) 映射的 project_id 与本次请求不一致 → conflict（跨项目不得复用）；
+    ///     3) 同项目且 fingerprint 匹配 → 返回既有 task，`newly_created=false`；
+    ///     4) 同项目但 fingerprint 为空或不同 → conflict（旧行空指纹 fail-closed）；
+    ///     5) 首次登记写入 (request_id, project_id, fingerprint, task_id) 后插入任务，
+    ///        返回 `newly_created=true`。
     pub async fn create_remote_task_idempotent(
         &self,
         client_request_id: Option<&str>,
         row: &OrchestratorTaskRow,
         create_action: OrchestratorCreateAction,
-    ) -> Result<OrchestratorTaskRow, AppError> {
+    ) -> Result<IdempotentCreateTaskOutcome, AppError> {
         let client_request_id = client_request_id.and_then(non_empty_trimmed);
         let row_to_insert = task_row_for_create_action(row, create_action);
         let external_labels_json = serialize_external_labels(&row_to_insert.external_labels)?;
+        let request_fingerprint =
+            create_request_fingerprint(&row_to_insert, create_action, &external_labels_json)?;
         let mut tx = self.pool.begin().await?;
 
         if let Some(request_id) = client_request_id {
             if let Some(existing) = sqlx::query(
-                "SELECT task_id FROM orchestrator_remote_task_create_requests WHERE request_id = ?",
+                "SELECT project_id, task_id, request_fingerprint \
+                 FROM orchestrator_remote_task_create_requests WHERE request_id = ?",
             )
             .bind(request_id)
             .fetch_optional(&mut *tx)
             .await?
             {
-                let task_id: String = existing.try_get("task_id")?;
-                let task_row = sqlx::query(&format!(
-                    "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
-                ))
-                .bind(&task_id)
-                .fetch_one(&mut *tx)
+                let task = resolve_existing_create_request(
+                    &mut tx,
+                    request_id,
+                    &row_to_insert.project_id,
+                    &request_fingerprint,
+                    existing,
+                )
                 .await?;
                 tx.commit().await?;
-                return row_to_task(&task_row);
+                return Ok(IdempotentCreateTaskOutcome {
+                    task,
+                    newly_created: false,
+                });
             }
 
             let now = Utc::now().to_rfc3339();
             let inserted = sqlx::query(
                 "INSERT OR IGNORE INTO orchestrator_remote_task_create_requests \
-                 (request_id, task_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                 (request_id, project_id, task_id, request_fingerprint, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(request_id)
+            .bind(&row_to_insert.project_id)
             .bind(&row_to_insert.id)
+            .bind(&request_fingerprint)
             .bind(&now)
             .bind(&now)
             .execute(&mut *tx)
             .await?;
             if inserted.rows_affected() != 1 {
                 let existing = sqlx::query(
-                    "SELECT task_id FROM orchestrator_remote_task_create_requests WHERE request_id = ?",
+                    "SELECT project_id, task_id, request_fingerprint \
+                     FROM orchestrator_remote_task_create_requests WHERE request_id = ?",
                 )
                 .bind(request_id)
                 .fetch_one(&mut *tx)
                 .await?;
-                let task_id: String = existing.try_get("task_id")?;
-                let task_row = sqlx::query(&format!(
-                    "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
-                ))
-                .bind(&task_id)
-                .fetch_one(&mut *tx)
+                let task = resolve_existing_create_request(
+                    &mut tx,
+                    request_id,
+                    &row_to_insert.project_id,
+                    &request_fingerprint,
+                    existing,
+                )
                 .await?;
                 tx.commit().await?;
-                return row_to_task(&task_row);
+                return Ok(IdempotentCreateTaskOutcome {
+                    task,
+                    newly_created: false,
+                });
             }
         }
 
@@ -467,9 +511,9 @@ impl OrchestratorRepo {
               workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
               external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
               transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
-              last_runtime_message, worktree_id, session_id, blocked_reason, attempt, created_at, \
+              last_runtime_message, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, created_at, \
               updated_at, started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row_to_insert.id)
         .bind(&row_to_insert.project_id)
@@ -497,6 +541,7 @@ impl OrchestratorRepo {
         .bind(&row_to_insert.last_runtime_message)
         .bind(&row_to_insert.worktree_id)
         .bind(&row_to_insert.session_id)
+        .bind(&row_to_insert.prepare_claim_token)
         .bind(&row_to_insert.blocked_reason)
         .bind(row_to_insert.attempt)
         .bind(&row_to_insert.created_at)
@@ -513,7 +558,10 @@ impl OrchestratorRepo {
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
-        row_to_task(&task_row)
+        Ok(IdempotentCreateTaskOutcome {
+            task: row_to_task(&task_row)?,
+            newly_created: true,
+        })
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -526,7 +574,7 @@ impl OrchestratorRepo {
         client_request_id: &str,
         row: &OrchestratorTaskRow,
         create_action: OrchestratorCreateAction,
-    ) -> Result<OrchestratorTaskRow, AppError> {
+    ) -> Result<IdempotentCreateTaskOutcome, AppError> {
         self.create_remote_task_idempotent(Some(client_request_id), row, create_action)
             .await
     }
@@ -897,10 +945,13 @@ impl OrchestratorRepo {
     /// Business Logic（为什么需要这个函数）:
     ///     全局 scheduler 一次 tick 需要按设备级剩余容量，在所有本机 local Workbench 项目中领取项目 workflow 允许的活跃泳道任务。
     ///     remote 项目必须跳过；项目 WORKFLOW.md 无效时不能把该项目任务提前 claim 到 Preparing。
+    ///     仅看板拖入 Todo 的 Draft 不得被隐式启动——必须 legacy status=Queued（queue/start/createAction）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在单个事务内完成 active local run_state 计数、剩余容量计算、idle/blocked 候选读取和 Preparing 条件更新。
+    ///     在单个事务内完成 active local run_state 计数、剩余容量计算、**仅 Queued+Idle** 候选读取和 Preparing 条件更新。
+    ///     Blocked 必须先经用户 retry 原子回到 Queued/Idle，后台 scheduler 不得自动重跑。
     ///     每个候选按 Workbench 项目 path 动态解析 WORKFLOW.md，使用 ResolvedWorkflow.active_states 判断是否可领取。
+    ///     SELECT 与最终 UPDATE CAS 均要求 status=Queued，避免 Draft/Todo/Idle 被拖拽后自动 claim。
     pub async fn claim_next_local_queued_tasks_with_global_capacity(
         &self,
         limit: i64,
@@ -929,19 +980,22 @@ impl OrchestratorRepo {
             return Ok(Vec::new());
         }
 
+        // 只领取显式入队的 Queued + Idle（Todo/Rework 等 active_states 过滤在下方）；
+        // 禁止领取 Draft（仅拖拽泳道）与 Blocked——Blocked 必须经用户 retry → Idle/Queued。
         let selected = sqlx::query(&format!(
             "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
              WHERE id IN (\
                SELECT task.id FROM orchestrator_tasks task \
                INNER JOIN workbench_projects project ON project.id = task.project_id \
                WHERE project.kind = 'local' \
-                 AND task.run_state IN (?, ?) \
+                 AND task.status = ? \
+                 AND task.run_state = ? \
                ORDER BY task.priority DESC, task.created_at ASC\
              ) \
              ORDER BY priority DESC, created_at ASC"
         ))
+        .bind(OrchestratorTaskStatus::Queued.as_str())
         .bind(OrchestratorRunState::Idle.as_str())
-        .bind(OrchestratorRunState::Blocked.as_str())
         .fetch_all(&mut *tx)
         .await?;
 
@@ -974,23 +1028,27 @@ impl OrchestratorRepo {
                 continue;
             }
             let now = Utc::now().to_rfc3339();
+            // 每次 claim 签发新 token，使旧 runner 的 touch/mark_running CAS 全部失效。
+            let claim_token = Uuid::new_v4().to_string();
             let result = sqlx::query(
                 "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, updated_at = ? \
+                 SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, prepare_claim_token = ?, updated_at = ? \
                  WHERE id = ? \
+                   AND status = ? \
                    AND workflow_state = ? \
-                   AND run_state IN (?, ?)",
+                   AND run_state = ?",
             )
             .bind(OrchestratorTaskStatus::Preparing.as_str())
             .bind(OrchestratorWorkflowState::InProgress.as_str())
             .bind(OrchestratorRunState::Preparing.as_str())
             .bind(OrchestratorAttemptPhase::PreparingWorkspace.as_str())
             .bind(Option::<&str>::None)
+            .bind(&claim_token)
             .bind(now)
             .bind(&task_id)
+            .bind(OrchestratorTaskStatus::Queued.as_str())
             .bind(candidate.workflow_state.as_str())
             .bind(OrchestratorRunState::Idle.as_str())
-            .bind(OrchestratorRunState::Blocked.as_str())
             .execute(&mut *tx)
             .await?;
 
@@ -1009,6 +1067,77 @@ impl OrchestratorRepo {
 
         tx.commit().await?;
         Ok(claimed)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     claim 把任务批量挂到 Preparing 后若进程崩溃或 runner 启动前失败补偿中断，Preparing 会永久占用全局容量；
+    ///     启动与每次 scheduler tick 必须回收过期 Preparing，否则槽位可被卡死。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 local 项目中 status=Preparing 且 run_state=Preparing、updated_at 早于 lease 截止的任务原子恢复为
+    ///     legacy Blocked + workflow Rework + run Blocked（与 from_legacy_status(Blocked) 一致），
+    ///     写入固定中文 blocked_reason 与 updated_at；返回恢复行数。
+    ///     用户可通过 retry 回到 Queued/Idle 后再被 claim。
+    ///     仍在 prepare 的 runner 必须周期 touch_preparing_lease 刷新 updated_at，否则长 git 步骤会被误回收。
+    pub async fn recover_stale_local_preparing_tasks(
+        &self,
+        lease: Duration,
+    ) -> Result<u64, AppError> {
+        let lease = chrono::Duration::from_std(lease)
+            .map_err(|err| AppError::generic(format!("Preparing lease 无效: {err}")))?;
+        let cutoff = (Utc::now() - lease).to_rfc3339();
+        let now = Utc::now().to_rfc3339();
+        let reason = "Preparing 中断（进程崩溃或启动未完成），请重试";
+        let blocked = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Blocked);
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, updated_at = ? \
+             WHERE status = ? AND run_state = ? AND updated_at < ? \
+               AND project_id IN (SELECT id FROM workbench_projects WHERE kind = 'local')",
+        )
+        .bind(OrchestratorTaskStatus::Blocked.as_str())
+        .bind(blocked.workflow_state.as_str())
+        .bind(blocked.run_state.as_str())
+        .bind(OrchestratorAttemptPhase::Failed.as_str())
+        .bind(reason)
+        .bind(now)
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(OrchestratorRunState::Preparing.as_str())
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     git worktree / session 创建可能超过调度 lease；若不在 Preparing 阶段续租 updated_at，
+    ///     并发 dispatch 会把仍在合法 prepare 的任务回收为 Blocked，原 runner 继续创建后 Running CAS 失败并留下孤儿现场。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当 status=Preparing、run_state=Preparing 且 prepare_claim_token 匹配本轮 claim 时刷新 updated_at；
+    ///     命中返回 true；状态已变或 token 不匹配（旧 runner）返回 false。
+    pub async fn touch_preparing_lease(
+        &self,
+        task_id: &str,
+        prepare_claim_token: &str,
+    ) -> Result<bool, AppError> {
+        let token = prepare_claim_token.trim();
+        if token.is_empty() {
+            return Err(AppError::generic("Preparing claim token 不能为空"));
+        }
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks SET updated_at = ? \
+             WHERE id = ? AND status = ? AND run_state = ? AND prepare_claim_token = ?",
+        )
+        .bind(now)
+        .bind(task_id)
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(OrchestratorRunState::Preparing.as_str())
+        .bind(token)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1147,9 +1276,14 @@ impl OrchestratorRepo {
         worktree_id: &str,
         session_id: &str,
         attempt: i64,
+        prepare_claim_token: &str,
     ) -> Result<OrchestratorTaskRow, AppError> {
         if attempt <= 0 {
             return Err(AppError::generic("任务尝试轮次必须大于 0"));
+        }
+        let token = prepare_claim_token.trim();
+        if token.is_empty() {
+            return Err(AppError::generic("Preparing claim token 不能为空"));
         }
         let now = Utc::now().to_rfc3339();
         let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Running);
@@ -1157,8 +1291,8 @@ impl OrchestratorRepo {
             "UPDATE orchestrator_tasks \
              SET status = ?, workflow_state = ?, run_state = ?, runner_provider = ?, branch_name = ?, worktree_id = ?, session_id = ?, attempt = ?, \
                  claude_session_id = ?, transcript_path = ?, runtime_started_at = ?, last_activity_at = ?, last_runtime_event = ?, last_runtime_message = ?, \
-                 blocked_reason = ?, started_at = COALESCE(started_at, ?), updated_at = ? \
-             WHERE id = ? AND status = ?",
+                 blocked_reason = ?, prepare_claim_token = NULL, started_at = COALESCE(started_at, ?), updated_at = ? \
+             WHERE id = ? AND status = ? AND prepare_claim_token = ?",
         )
         .bind(OrchestratorTaskStatus::Running.as_str())
         .bind(split_state.workflow_state.as_str())
@@ -1179,6 +1313,7 @@ impl OrchestratorRepo {
         .bind(now.clone())
         .bind(task_id)
         .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(token)
         .execute(&self.pool)
         .await?;
         self.get_task(task_id).await
@@ -1186,27 +1321,39 @@ impl OrchestratorRepo {
 
     /// Business Logic（为什么需要这个函数）:
     ///     Runner 准备阶段需要持续反馈 PreparingWorkspace/BuildingPrompt/Streaming 等细分进度，方便用户判断当前卡点。
+    ///     claim 世代隔离要求：旧 token 的 phase CAS 未命中时绝不能伪装成成功并让 runner 继续。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     仅在任务仍处于 Preparing 时更新 attempt_phase 和 updated_at；Running 后必须改用 active runner guard helper。
+    ///     仅在任务仍处于 Preparing 且 prepare_claim_token 匹配时更新 attempt_phase 和 updated_at；
+    ///     命中返回 Some(row)；token/status 不匹配返回 None（任务存在性仍校验）；Running 后必须改用 active runner guard helper。
     pub async fn update_task_attempt_phase(
         &self,
         task_id: &str,
         phase: OrchestratorAttemptPhase,
-    ) -> Result<OrchestratorTaskRow, AppError> {
+        prepare_claim_token: &str,
+    ) -> Result<Option<OrchestratorTaskRow>, AppError> {
+        let token = prepare_claim_token.trim();
+        if token.is_empty() {
+            return Err(AppError::generic("Preparing claim token 不能为空"));
+        }
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE orchestrator_tasks \
              SET attempt_phase = ?, updated_at = ? \
-             WHERE id = ? AND status = ?",
+             WHERE id = ? AND status = ? AND prepare_claim_token = ?",
         )
         .bind(phase.as_str())
         .bind(now)
         .bind(task_id)
         .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(token)
         .execute(&self.pool)
         .await?;
-        self.get_task(task_id).await
+        if result.rows_affected() == 1 {
+            return self.get_task(task_id).await.map(Some);
+        }
+        self.get_task(task_id).await?;
+        Ok(None)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1306,9 +1453,17 @@ impl OrchestratorRepo {
         branch_name: &str,
         worktree_id: &str,
         session_id: &str,
+        prepare_claim_token: &str,
     ) -> Result<OrchestratorTaskRow, AppError> {
-        self.mark_task_running_attempt(task_id, branch_name, worktree_id, session_id, 1)
-            .await
+        self.mark_task_running_attempt(
+            task_id,
+            branch_name,
+            worktree_id,
+            session_id,
+            1,
+            prepare_claim_token,
+        )
+        .await
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1507,6 +1662,45 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     verifier failed 自动修复轮必须原子地 Verifying→Preparing 并签发新 prepare_claim_token，
+    ///     否则 prepare_runner_attempt 因空 token 直接失败并被误标 Blocked。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当 status=Verifying 时写入 Preparing/Rework/Preparing/Failed phase，并签发 UUID claim token；
+    ///     命中返回 Some(row)；未命中确认任务存在后返回 None。
+    pub async fn try_transition_verifying_to_preparing_with_claim(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<OrchestratorTaskRow>, AppError> {
+        let now = Utc::now().to_rfc3339();
+        let claim_token = Uuid::new_v4().to_string();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                 blocked_reason = ?, prepare_claim_token = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(OrchestratorWorkflowState::Rework.as_str())
+        .bind(OrchestratorRunState::Preparing.as_str())
+        .bind(OrchestratorAttemptPhase::Failed.as_str())
+        .bind(Option::<&str>::None)
+        .bind(&claim_token)
+        .bind(now)
+        .bind(task_id)
+        .bind(OrchestratorTaskStatus::Verifying.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(task_id).await.map(Some);
+        }
+
+        self.get_task(task_id).await?;
+        Ok(None)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     terminal sentinel 来自某个具体 session/attempt，旧 session 的迟到哨兵不能推进当前 active runner。
     ///
     /// Code Logic（这个函数做什么）:
@@ -1636,13 +1830,11 @@ impl OrchestratorRepo {
     ///     清空 blocked_reason 和 attempt_phase，保留 worktree/session/evidence。
     pub async fn start_task(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
         let current = self.get_task(task_id).await?;
-        let can_start_from_backlog =
-            current.status == OrchestratorTaskStatus::Draft
-                && current.workflow_state == OrchestratorWorkflowState::Backlog
-                && current.run_state == OrchestratorRunState::Idle;
-        let can_start_from_todo =
-            current.workflow_state == OrchestratorWorkflowState::Todo
-                && current.run_state == OrchestratorRunState::Idle;
+        let can_start_from_backlog = current.status == OrchestratorTaskStatus::Draft
+            && current.workflow_state == OrchestratorWorkflowState::Backlog
+            && current.run_state == OrchestratorRunState::Idle;
+        let can_start_from_todo = current.workflow_state == OrchestratorWorkflowState::Todo
+            && current.run_state == OrchestratorRunState::Idle;
         if !can_start_from_backlog && !can_start_from_todo {
             return Err(AppError::generic(format!(
                 "只有待整理草稿或待办空闲任务可以开始，当前 workflow={}, run={}, status={}",
@@ -2228,6 +2420,99 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     用户在原 Automation UI 对协议/校验失败的 outbox 选择「重新发送」时，必须原子恢复为 pending，
+    ///     并保留原 request payload 与 clientRequestId，避免创建重复远端任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅用 `WHERE id=? AND status='failed'` 更新 status=pending、清空 last_error、刷新 updated_at，
+    ///     绝不改写 request_json；0 行更新时读取当前状态，缺失返回 not_found，其它状态返回 conflict。
+    pub async fn retry_failed_remote_outbox_item(
+        &self,
+        item_id: &str,
+    ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
+        let item_id = item_id.trim();
+        if item_id.is_empty() {
+            return Err(AppError::validation("远端 outbox ID 不能为空"));
+        }
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_remote_outbox \
+             SET status = ?, last_error = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(RemoteOutboxStatus::Pending.as_str())
+        .bind(Option::<&str>::None)
+        .bind(&now)
+        .bind(item_id)
+        .bind(RemoteOutboxStatus::Failed.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self
+                .get_remote_outbox_item(item_id)
+                .await?
+                .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")));
+        }
+
+        match self.get_remote_outbox_item(item_id).await? {
+            None => Err(AppError::not_found(format!(
+                "远端 outbox 不存在: {item_id}"
+            ))),
+            Some(current) => Err(AppError::conflict(format!(
+                "只有失败的远端 outbox 可以重新发送，当前状态为 {}",
+                current.status.as_str()
+            ))),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户确认放弃某条失败 outbox 后，条目应进入 discarded 终态：保留审计与 last_error，
+    ///     但不再参与 dispatcher、active 列表或 Attention 投影。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅用 `WHERE id=? AND status='failed'` 更新 status=discarded 与 updated_at，保留 last_error/request_json；
+    ///     0 行更新时读取当前状态，缺失返回 not_found，其它状态返回 conflict。
+    pub async fn discard_failed_remote_outbox_item(
+        &self,
+        item_id: &str,
+    ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
+        let item_id = item_id.trim();
+        if item_id.is_empty() {
+            return Err(AppError::validation("远端 outbox ID 不能为空"));
+        }
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE orchestrator_remote_outbox \
+             SET status = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(RemoteOutboxStatus::Discarded.as_str())
+        .bind(&now)
+        .bind(item_id)
+        .bind(RemoteOutboxStatus::Failed.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self
+                .get_remote_outbox_item(item_id)
+                .await?
+                .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")));
+        }
+
+        match self.get_remote_outbox_item(item_id).await? {
+            None => Err(AppError::not_found(format!(
+                "远端 outbox 不存在: {item_id}"
+            ))),
+            Some(current) => Err(AppError::conflict(format!(
+                "只有失败的远端 outbox 可以放弃发送，当前状态为 {}",
+                current.status.as_str()
+            ))),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     dispatcher 打开远端项目后会拿到远端 local projectId，outbox 行应记录该映射便于后续排查和 UI 展示。
     ///
     /// Code Logic（这个函数做什么）:
@@ -2547,6 +2832,142 @@ impl OrchestratorRepo {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     幂等键必须绑定项目与请求内容指纹，避免跨项目泄露任务 goal/acceptance，或同键不同 payload 静默复用旧任务。
+///     指纹编码必须无歧义：字段内 NUL/分隔符不得制造跨字段边界碰撞，否则 fail-closed 会被绕过。
+///
+/// Code Logic（这个函数做什么）:
+///     将 create 语义字段打包为固定 key 顺序的 JSON 对象后 SHA256，输出小写 hex 指纹。
+///     JSON 字符串转义保证字段边界无歧义，比 NUL-join 更安全。
+fn create_request_fingerprint(
+    row: &OrchestratorTaskRow,
+    create_action: OrchestratorCreateAction,
+    external_labels_json: &Option<String>,
+) -> Result<String, AppError> {
+    use sha2::{Digest, Sha256};
+
+    let action = match create_action {
+        OrchestratorCreateAction::Backlog => "backlog",
+        OrchestratorCreateAction::Todo => "todo",
+        OrchestratorCreateAction::Start => "start",
+    };
+    // 固定 key 顺序的结构化对象：serde_json::json! 按插入顺序序列化，字段值经 JSON 转义，
+    // title="a\0goal=b" 与跨字段迁移不会产生相同字节串。
+    let payload = serde_json::json!({
+        "project_id": row.project_id,
+        "title": row.title,
+        "goal": row.goal,
+        "acceptance": row.acceptance_criteria,
+        "priority": row.priority,
+        "action": action,
+        "source": row.source,
+        "external_id": row.external_id.as_deref().unwrap_or(""),
+        "external_identifier": row.external_identifier.as_deref().unwrap_or(""),
+        "external_url": row.external_url.as_deref().unwrap_or(""),
+        "external_state": row.external_state.as_deref().unwrap_or(""),
+        "external_labels": external_labels_json.as_deref().unwrap_or(""),
+    });
+    let encoded = serde_json::to_vec(&payload)?;
+    let digest = Sha256::digest(&encoded);
+    Ok(format!("{digest:x}"))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     幂等命中后必须校验项目与指纹，不能把 project A 的任务返回给 project B 或不同 payload。
+///
+/// Code Logic（这个函数做什么）:
+///     比对映射行的 project_id / request_fingerprint；通过后读取并返回既有 task。
+///     调用方负责 commit 事务（本函数不接管 Transaction 所有权）。
+async fn resolve_existing_create_request(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    request_id: &str,
+    project_id: &str,
+    request_fingerprint: &str,
+    existing: SqliteRow,
+) -> Result<OrchestratorTaskRow, AppError> {
+    let mapped_project_id: String = existing.try_get("project_id")?;
+    let task_id: String = existing.try_get("task_id")?;
+    let mapped_fingerprint: String = existing
+        .try_get::<String, _>("request_fingerprint")
+        .unwrap_or_default();
+
+    // 旧行可能 project_id 为空：回退到任务表归属做跨项目校验。
+    let effective_project_id = if mapped_project_id.trim().is_empty() {
+        let task_project: Option<String> =
+            sqlx::query_scalar("SELECT project_id FROM orchestrator_tasks WHERE id = ?")
+                .bind(&task_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+        task_project.unwrap_or_default()
+    } else {
+        mapped_project_id
+    };
+
+    if effective_project_id != project_id {
+        return Err(AppError::conflict(format!(
+            "clientRequestId `{request_id}` 已绑定项目 `{effective_project_id}`，不能用于项目 `{project_id}`"
+        )));
+    }
+    // 旧库迁移后 request_fingerprint 可能仍为空：无法可靠比对 payload，必须 fail-closed，
+    // 要求客户端换新 request id，禁止把空指纹当通配符静默匹配任意 payload。
+    if mapped_fingerprint.trim().is_empty() {
+        return Err(AppError::conflict(format!(
+            "clientRequestId `{request_id}` 缺少可靠请求指纹，请使用新的 clientRequestId 重新创建"
+        )));
+    }
+    if mapped_fingerprint != request_fingerprint {
+        return Err(AppError::conflict(format!(
+            "clientRequestId `{request_id}` 已用于不同创建内容，拒绝冲突重放"
+        )));
+    }
+
+    let task_row = sqlx::query(&format!(
+        "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
+    ))
+    .bind(&task_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    row_to_task(&task_row)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     旧库的幂等表只有 request_id 主键，缺少 project 作用域与 payload 指纹，升级后必须补齐列并回填 project_id。
+///
+/// Code Logic（这个函数做什么）:
+///     ensure 两列存在；把空 project_id 按 task_id 回填为任务归属项目，保留用户历史映射。
+async fn migrate_remote_task_create_request_scope(pool: &SqlitePool) -> Result<(), AppError> {
+    ensure_column(
+        pool,
+        "orchestrator_remote_task_create_requests",
+        "project_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "orchestrator_remote_task_create_requests",
+        "request_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
+    // 回填 project_id：仅更新仍为空的旧行，避免覆盖新写入的作用域。
+    sqlx::query(
+        "UPDATE orchestrator_remote_task_create_requests \
+         SET project_id = (
+             SELECT t.project_id FROM orchestrator_tasks t \
+             WHERE t.id = orchestrator_remote_task_create_requests.task_id
+         ) \
+         WHERE (project_id IS NULL OR project_id = '') \
+           AND EXISTS (
+             SELECT 1 FROM orchestrator_tasks t \
+             WHERE t.id = orchestrator_remote_task_create_requests.task_id
+           )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     用户可能从旧版本直接升级，旧 SQLite 表缺少新列时必须原地补齐且保留已有任务数据。
 ///
 /// Code Logic（这个函数做什么）:
@@ -2606,7 +3027,7 @@ async fn backfill_split_state_from_legacy_status(pool: &SqlitePool) -> Result<()
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     旧版 split state 曾把 legacy Queued 映射为 Todo/Queued；升级后 scheduler 只领取 Idle/Blocked，必须避免这些旧排队任务卡住。
+///     旧版 split state 曾把 legacy Queued 映射为 Todo/Queued；升级后 scheduler 只领取 Idle，必须避免这些旧排队任务卡住。
 ///
 /// Code Logic（这个函数做什么）:
 ///     精准把 status=queued、workflow_state=todo、run_state=queued 的历史行规范化为 Todo/Idle，不覆盖其它用户调整过的 split state。
@@ -2697,6 +3118,7 @@ fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppError> {
         branch_name: row.try_get("branch_name")?,
         worktree_id: row.try_get("worktree_id")?,
         session_id: row.try_get("session_id")?,
+        prepare_claim_token: row.try_get("prepare_claim_token")?,
         blocked_reason: row.try_get("blocked_reason")?,
         attempt: row.try_get("attempt")?,
         created_at: row.try_get("created_at")?,
@@ -3339,15 +3761,26 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     远端 create 请求超时重试时，同一个 clientRequestId 必须返回第一次创建的任务，避免 owning device 产生重复任务。
+    ///     远端 create 请求超时重试时，同一个 clientRequestId + 同项目 + 同 payload 必须返回第一次创建的任务，避免 owning device 产生重复任务。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     用同一 clientRequestId 传入两条不同 task row，断言第二次返回第一条任务且数据库只保留一条。
+    ///     用同一 clientRequestId 与语义等价 payload（仅 task id 不同）重放，断言第二次返回第一条任务且数据库只保留一条。
     #[tokio::test]
     async fn remote_create_client_request_is_idempotent() {
         let (_pool, repo) = setup_repo().await;
         let first = task_row("task-1", "project-1", OrchestratorTaskStatus::Draft);
-        let second = task_row("task-2", "project-1", OrchestratorTaskStatus::Draft);
+        // 重放时 id 由客户端每次生成不同 UUID，但业务 payload 与 createAction 必须一致才算幂等。
+        let mut second = task_row("task-2", "project-1", OrchestratorTaskStatus::Draft);
+        second.title = first.title.clone();
+        second.goal = first.goal.clone();
+        second.acceptance_criteria = first.acceptance_criteria.clone();
+        second.priority = first.priority;
+        second.source = first.source.clone();
+        second.external_id = first.external_id.clone();
+        second.external_identifier = first.external_identifier.clone();
+        second.external_url = first.external_url.clone();
+        second.external_state = first.external_state.clone();
+        second.external_labels = first.external_labels.clone();
 
         let created = repo
             .create_remote_task_for_client_request(
@@ -3361,17 +3794,93 @@ mod tests {
             .create_remote_task_for_client_request(
                 "client-request-1",
                 &second,
-                OrchestratorCreateAction::Backlog,
+                OrchestratorCreateAction::Todo,
             )
             .await
             .unwrap();
         let listed = repo.list_tasks(Some("project-1")).await.unwrap();
 
-        assert_eq!(created.id, "task-1");
-        assert_eq!(created.status, OrchestratorTaskStatus::Queued);
-        assert_eq!(replayed.id, "task-1");
-        assert_eq!(replayed.status, OrchestratorTaskStatus::Queued);
+        assert!(created.newly_created);
+        assert!(!replayed.newly_created);
+        assert_eq!(created.task.id, "task-1");
+        assert_eq!(created.task.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(replayed.task.id, "task-1");
+        assert_eq!(replayed.task.status, OrchestratorTaskStatus::Queued);
         assert_eq!(listed.len(), 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同一 clientRequestId 若被用于不同 project，绝不能返回 project A 的任务给 project B（数据泄露）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先在 project-1 创建，再以相同 requestId 请求 project-2，断言 conflict 且 project-2 无任务。
+    #[tokio::test]
+    async fn remote_create_client_request_rejects_cross_project_reuse() {
+        let (_pool, repo) = setup_repo().await;
+        let first = task_row("task-a", "project-1", OrchestratorTaskStatus::Draft);
+        let second = task_row("task-b", "project-2", OrchestratorTaskStatus::Draft);
+
+        repo.create_remote_task_for_client_request(
+            "shared-request",
+            &first,
+            OrchestratorCreateAction::Todo,
+        )
+        .await
+        .unwrap();
+
+        let err = repo
+            .create_remote_task_for_client_request(
+                "shared-request",
+                &second,
+                OrchestratorCreateAction::Todo,
+            )
+            .await
+            .expect_err("跨项目复用 clientRequestId 必须 conflict");
+        assert!(
+            matches!(err, AppError::Conflict(_)),
+            "应返回 Conflict: {err:?}"
+        );
+        let listed_b = repo.list_tasks(Some("project-2")).await.unwrap();
+        assert!(listed_b.is_empty(), "project-2 不得创建任务");
+        let listed_a = repo.list_tasks(Some("project-1")).await.unwrap();
+        assert_eq!(listed_a.len(), 1);
+        assert_eq!(listed_a[0].id, "task-a");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同项目同 clientRequestId 但 payload 不同时，必须 conflict，避免静默返回错误内容的旧任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     首次创建后用不同 goal 重放同一 requestId，断言 Conflict 且仍只保留第一条。
+    #[tokio::test]
+    async fn remote_create_client_request_rejects_same_project_payload_mismatch() {
+        let (_pool, repo) = setup_repo().await;
+        let first = task_row("task-1", "project-1", OrchestratorTaskStatus::Draft);
+        let mut second = task_row("task-2", "project-1", OrchestratorTaskStatus::Draft);
+        second.goal = "completely-different-goal".to_string();
+
+        repo.create_remote_task_for_client_request(
+            "payload-mismatch",
+            &first,
+            OrchestratorCreateAction::Todo,
+        )
+        .await
+        .unwrap();
+        let err = repo
+            .create_remote_task_for_client_request(
+                "payload-mismatch",
+                &second,
+                OrchestratorCreateAction::Todo,
+            )
+            .await
+            .expect_err("同键不同 payload 必须 conflict");
+        assert!(
+            matches!(err, AppError::Conflict(_)),
+            "应返回 Conflict: {err:?}"
+        );
+        let listed = repo.list_tasks(Some("project-1")).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "task-1");
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -3399,11 +3908,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(created.status, OrchestratorTaskStatus::Queued);
-        assert_eq!(created.workflow_state, OrchestratorWorkflowState::Todo);
-        assert_eq!(created.run_state, OrchestratorRunState::Idle);
+        assert!(created.newly_created);
+        assert_eq!(created.task.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(created.task.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(created.task.run_state, OrchestratorRunState::Idle);
         assert_eq!(claimed.len(), 1);
-        assert_eq!(claimed[0].id, created.id);
+        assert_eq!(claimed[0].id, created.task.id);
         assert_eq!(claimed[0].status, OrchestratorTaskStatus::Preparing);
         assert_eq!(
             claimed[0].workflow_state,
@@ -3431,9 +3941,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(created.status, OrchestratorTaskStatus::Draft);
-        assert_eq!(created.workflow_state, OrchestratorWorkflowState::Backlog);
-        assert_eq!(created.run_state, OrchestratorRunState::Idle);
+        assert!(created.newly_created);
+        assert_eq!(created.task.status, OrchestratorTaskStatus::Draft);
+        assert_eq!(
+            created.task.workflow_state,
+            OrchestratorWorkflowState::Backlog
+        );
+        assert_eq!(created.task.run_state, OrchestratorRunState::Idle);
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -3455,9 +3969,182 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(created.status, OrchestratorTaskStatus::Queued);
-        assert_eq!(created.workflow_state, OrchestratorWorkflowState::Todo);
-        assert_eq!(created.run_state, OrchestratorRunState::Idle);
+        assert!(created.newly_created);
+        assert_eq!(created.task.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(created.task.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(created.task.run_state, OrchestratorRunState::Idle);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     NUL-join 指纹可在字段边界被内部 NUL 碰撞；结构化 JSON 编码必须区分此类不同语义元组。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 title/goal 跨字段 NUL 迁移的两份 payload，断言指纹不同，且同 clientRequestId 重放 conflict。
+    #[tokio::test]
+    async fn create_request_fingerprint_resists_nul_field_boundary_collision() {
+        let mut left = task_row("task-left", "project-1", OrchestratorTaskStatus::Draft);
+        left.title = "a\0goal=b".to_string();
+        left.goal = "c".to_string();
+
+        let mut right = task_row("task-right", "project-1", OrchestratorTaskStatus::Draft);
+        right.title = "a".to_string();
+        right.goal = "b\0goal=c".to_string();
+
+        let fp_left =
+            create_request_fingerprint(&left, OrchestratorCreateAction::Todo, &None).unwrap();
+        let fp_right =
+            create_request_fingerprint(&right, OrchestratorCreateAction::Todo, &None).unwrap();
+        assert_ne!(
+            fp_left, fp_right,
+            "跨字段 NUL 迁移不得生成相同指纹: left={fp_left} right={fp_right}"
+        );
+
+        // 分隔符文本本身也不应碰撞：显式含 key 名的字段值 vs 真实字段赋值。
+        let mut spoof = task_row("task-spoof", "project-1", OrchestratorTaskStatus::Draft);
+        spoof.title = "x".to_string();
+        spoof.goal = "y\0acceptance=z".to_string();
+        spoof.acceptance_criteria = "".to_string();
+        let mut real = task_row("task-real", "project-1", OrchestratorTaskStatus::Draft);
+        real.title = "x".to_string();
+        real.goal = "y".to_string();
+        real.acceptance_criteria = "z".to_string();
+        let fp_spoof =
+            create_request_fingerprint(&spoof, OrchestratorCreateAction::Todo, &None).unwrap();
+        let fp_real =
+            create_request_fingerprint(&real, OrchestratorCreateAction::Todo, &None).unwrap();
+        assert_ne!(fp_spoof, fp_real, "分隔符文本不得伪造字段边界");
+
+        // 端到端：同 request id 的不同语义 payload 必须 conflict，不得误判幂等命中。
+        let (_pool, repo) = setup_repo().await;
+        repo.create_remote_task_for_client_request(
+            "nul-collision-request",
+            &left,
+            OrchestratorCreateAction::Todo,
+        )
+        .await
+        .unwrap();
+        let err = repo
+            .create_remote_task_for_client_request(
+                "nul-collision-request",
+                &right,
+                OrchestratorCreateAction::Todo,
+            )
+            .await
+            .expect_err("NUL 边界不同 payload 必须 conflict");
+        assert!(
+            matches!(err, AppError::Conflict(_)),
+            "应返回 Conflict: {err:?}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧库映射行 request_fingerprint 为空时不能当通配符；同键不同 payload 必须 conflict，
+    ///     强制客户端换新 request id，避免静默返回错误内容的旧任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     直接插入空 fingerprint 映射与任务，再用不同 payload 调用幂等 create，断言 Conflict。
+    #[tokio::test]
+    async fn remote_create_legacy_empty_fingerprint_conflicts_on_payload_mismatch() {
+        let (pool, repo) = setup_repo().await;
+        let first = task_row("task-legacy", "project-1", OrchestratorTaskStatus::Draft);
+        repo.create_task(&first).await.unwrap();
+        sqlx::query(
+            "INSERT INTO orchestrator_remote_task_create_requests \
+             (request_id, project_id, task_id, request_fingerprint, created_at, updated_at) \
+             VALUES (?, ?, ?, '', ?, ?)",
+        )
+        .bind("legacy-empty-fp")
+        .bind("project-1")
+        .bind("task-legacy")
+        .bind("2026-07-05T00:00:00Z")
+        .bind("2026-07-05T00:00:00Z")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut second = task_row("task-new", "project-1", OrchestratorTaskStatus::Draft);
+        second.goal = "different-payload-goal".to_string();
+        let err = repo
+            .create_remote_task_for_client_request(
+                "legacy-empty-fp",
+                &second,
+                OrchestratorCreateAction::Todo,
+            )
+            .await
+            .expect_err("legacy empty fingerprint must fail closed");
+        assert!(
+            matches!(err, AppError::Conflict(_)),
+            "应返回 Conflict: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("缺少可靠请求指纹")
+                || err.to_string().contains("clientRequestId"),
+            "错误应提示指纹不可靠: {err}"
+        );
+        let listed = repo.list_tasks(Some("project-1")).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "task-legacy");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Start 幂等命中必须返回 newly_created=false，调用方据此跳过 dispatch，
+    ///     防止任务 A 完成后同键重放启动队列中的任务 B。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     首次 Start 创建 A，再创建排队任务 B 并标记 A 为 Done；同键重放 Start 断言
+    ///     newly_created=false 且 B 仍保持 Todo/Idle（未被 claim）。
+    #[tokio::test]
+    async fn remote_create_start_replay_reports_not_newly_created_when_other_tasks_queued() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+
+        let first = task_row("task-a", "project-1", OrchestratorTaskStatus::Draft);
+        let created = repo
+            .create_remote_task_for_client_request(
+                "start-replay-key",
+                &first,
+                OrchestratorCreateAction::Start,
+            )
+            .await
+            .unwrap();
+        assert!(created.newly_created);
+        assert_eq!(created.task.id, "task-a");
+
+        // 模拟 A 已完成，队列中另有可调度任务 B。
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET status='done', workflow_state='done', \
+             run_state='idle', updated_at=? WHERE id=?",
+        )
+        .bind("2026-07-05T00:01:00Z")
+        .bind("task-a")
+        .execute(&pool)
+        .await
+        .unwrap();
+        let queued_b = task_row("task-b", "project-1", OrchestratorTaskStatus::Queued);
+        repo.create_task(&queued_b).await.unwrap();
+
+        let mut replay_row = task_row("task-a-replay", "project-1", OrchestratorTaskStatus::Draft);
+        replay_row.title = first.title.clone();
+        replay_row.goal = first.goal.clone();
+        replay_row.acceptance_criteria = first.acceptance_criteria.clone();
+        let replayed = repo
+            .create_remote_task_for_client_request(
+                "start-replay-key",
+                &replay_row,
+                OrchestratorCreateAction::Start,
+            )
+            .await
+            .unwrap();
+        assert!(!replayed.newly_created);
+        assert_eq!(replayed.task.id, "task-a");
+
+        let b = repo.get_task("task-b").await.unwrap();
+        assert_eq!(b.status, OrchestratorTaskStatus::Queued);
+        assert_eq!(b.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(b.run_state, OrchestratorRunState::Idle);
+        let listed = repo.list_tasks(Some("project-1")).await.unwrap();
+        assert_eq!(listed.len(), 2);
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -3581,6 +4268,339 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     看板拖拽只改 workflow_state，不得把 Draft 变成可调度的 Queued；否则启用自动化后拖入 Todo 会隐式启动 Claude。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Draft 任务并 move 到 Todo，再 claim，断言 0 领取且 status 仍为 Draft。
+    #[tokio::test]
+    async fn draft_moved_to_todo_is_not_claimable_without_queue() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        let created = task_row(
+            "draft-todo-drag",
+            "project-1",
+            OrchestratorTaskStatus::Draft,
+        );
+        repo.create_task(&created).await.unwrap();
+        let moved = repo
+            .move_task_workflow_state(&created.id, OrchestratorWorkflowState::Todo)
+            .await
+            .unwrap();
+        assert_eq!(moved.status, OrchestratorTaskStatus::Draft);
+        assert_eq!(moved.workflow_state, OrchestratorWorkflowState::Todo);
+
+        let claimed = repo
+            .claim_next_local_queued_tasks_with_global_capacity(4)
+            .await
+            .unwrap();
+        let persisted = repo.get_task(&created.id).await.unwrap();
+
+        assert!(claimed.is_empty());
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Draft);
+        assert_eq!(persisted.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(persisted.run_state, OrchestratorRunState::Idle);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     claim 后崩溃留下的 Preparing 必须可被回收，否则全局槽位永久耗尽。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入过期 Preparing 任务，调用 recover_stale_local_preparing_tasks，断言变为 Blocked 并释放 active 计数。
+    #[tokio::test]
+    async fn recover_stale_local_preparing_tasks_blocks_and_frees_capacity() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        repo.create_task(&task_row(
+            "stale-preparing",
+            "project-1",
+            OrchestratorTaskStatus::Preparing,
+        ))
+        .await
+        .unwrap();
+        set_task_split_state(
+            &pool,
+            "stale-preparing",
+            OrchestratorWorkflowState::InProgress,
+            OrchestratorRunState::Preparing,
+            None,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET updated_at = '2020-01-01T00:00:00Z' WHERE id = ?",
+        )
+        .bind("stale-preparing")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let recovered = repo
+            .recover_stale_local_preparing_tasks(std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        let task = repo.get_task("stale-preparing").await.unwrap();
+        let active_count: i64 = sqlx::query(
+            "SELECT COUNT(*) AS count FROM orchestrator_tasks \
+             WHERE run_state IN ('preparing','running','verifying','delivering')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .try_get("count")
+        .unwrap();
+
+        assert_eq!(recovered, 1);
+        assert_eq!(task.status, OrchestratorTaskStatus::Blocked);
+        assert_eq!(task.run_state, OrchestratorRunState::Blocked);
+        assert!(task.blocked_reason.is_some());
+        // Blocked 不占 active 容量。
+        assert_eq!(active_count, 0);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     长 git worktree 创建可能超过调度 lease；prepare 续租后，并发 recover 不得误杀仍在 Preparing 的任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入 Preparing 任务并故意把 updated_at 回拨到 2020；调用 touch_preparing_lease 刷新后，
+    ///     recover_stale_local_preparing_tasks(60s) 必须返回 0 且状态仍为 Preparing。
+    #[tokio::test]
+    async fn touch_preparing_lease_keeps_active_prepare_from_stale_recovery() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        repo.create_task(&task_row(
+            "live-preparing",
+            "project-1",
+            OrchestratorTaskStatus::Preparing,
+        ))
+        .await
+        .unwrap();
+        set_task_split_state(
+            &pool,
+            "live-preparing",
+            OrchestratorWorkflowState::InProgress,
+            OrchestratorRunState::Preparing,
+            None,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET updated_at = '2020-01-01T00:00:00Z', prepare_claim_token = 'token-live' WHERE id = ?",
+        )
+        .bind("live-preparing")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let touched = repo
+            .touch_preparing_lease("live-preparing", "token-live")
+            .await
+            .unwrap();
+        assert!(touched, "仍在 Preparing 时续租必须命中");
+        assert!(!repo
+            .touch_preparing_lease("live-preparing", "token-stale")
+            .await
+            .unwrap());
+
+        let recovered = repo
+            .recover_stale_local_preparing_tasks(std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        let task = repo.get_task("live-preparing").await.unwrap();
+
+        assert_eq!(recovered, 0);
+        assert_eq!(task.status, OrchestratorTaskStatus::Preparing);
+        assert_eq!(task.run_state, OrchestratorRunState::Preparing);
+        assert!(
+            task.updated_at.as_str() > "2020-01-01T00:00:00Z",
+            "touch 必须刷新 updated_at"
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧 Preparing runner lease 过期被回收后，retry 会签发新 claim token；旧 touch/mark 不得劫持新 claim。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     claim 得 token-A → 回收 → 重回 Queued 再 claim 得 token-B；旧 token-A 的 touch/mark 不命中，token-B 可 mark Running。
+    #[tokio::test]
+    async fn prepare_claim_token_cas_blocks_stale_runner_hijack() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        let created = task_row("task-aba", "project-1", OrchestratorTaskStatus::Queued);
+        repo.create_task(&created).await.unwrap();
+        let claimed = repo
+            .claim_next_local_queued_tasks_with_global_capacity(1)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        let token_a = claimed[0]
+            .prepare_claim_token
+            .clone()
+            .expect("claim 必须签发 token");
+
+        let recovered = repo
+            .recover_stale_local_preparing_tasks(std::time::Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(recovered, 1);
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET status = 'queued', workflow_state = 'todo', run_state = 'idle',              prepare_claim_token = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind("task-aba")
+        .execute(&pool)
+        .await
+        .unwrap();
+        let claimed2 = repo
+            .claim_next_local_queued_tasks_with_global_capacity(1)
+            .await
+            .unwrap();
+        assert_eq!(claimed2.len(), 1);
+        let token_b = claimed2[0]
+            .prepare_claim_token
+            .clone()
+            .expect("新 claim 必须签发新 token");
+        assert_ne!(token_a, token_b);
+
+        assert!(!repo
+            .touch_preparing_lease("task-aba", &token_a)
+            .await
+            .unwrap());
+        assert!(repo
+            .touch_preparing_lease("task-aba", &token_b)
+            .await
+            .unwrap());
+
+        let hijack = repo
+            .mark_task_running_attempt("task-aba", "agent/old", "wt-old", "sess-old", 1, &token_a)
+            .await
+            .unwrap();
+        assert_eq!(hijack.status, OrchestratorTaskStatus::Preparing);
+        assert_ne!(hijack.session_id.as_deref(), Some("sess-old"));
+
+        let running = repo
+            .mark_task_running_attempt("task-aba", "agent/new", "wt-new", "sess-new", 1, &token_b)
+            .await
+            .unwrap();
+        assert_eq!(running.status, OrchestratorTaskStatus::Running);
+        assert_eq!(running.session_id.as_deref(), Some("sess-new"));
+        assert!(running.prepare_claim_token.is_none());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧 runner 在 phase CAS 未命中时若采用返回行的新 token，会绕过 claim 世代隔离继续 prepare。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     claim token-A → 回收 → 再 claim token-B；旧 token-A 的 update_task_attempt_phase 必须返回 None，
+    ///     且不得把 phase 写成旧 runner 想写的值覆盖新 claim。
+    #[tokio::test]
+    async fn update_task_attempt_phase_miss_returns_none_on_stale_claim_token() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        let created = task_row(
+            "task-phase-aba",
+            "project-1",
+            OrchestratorTaskStatus::Queued,
+        );
+        repo.create_task(&created).await.unwrap();
+        let claimed = repo
+            .claim_next_local_queued_tasks_with_global_capacity(1)
+            .await
+            .unwrap();
+        let token_a = claimed[0]
+            .prepare_claim_token
+            .clone()
+            .expect("claim 必须签发 token");
+
+        let recovered = repo
+            .recover_stale_local_preparing_tasks(std::time::Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(recovered, 1);
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET status = 'queued', workflow_state = 'todo', run_state = 'idle',              prepare_claim_token = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind("task-phase-aba")
+        .execute(&pool)
+        .await
+        .unwrap();
+        let claimed2 = repo
+            .claim_next_local_queued_tasks_with_global_capacity(1)
+            .await
+            .unwrap();
+        let token_b = claimed2[0]
+            .prepare_claim_token
+            .clone()
+            .expect("新 claim 必须签发新 token");
+        assert_ne!(token_a, token_b);
+
+        let miss = repo
+            .update_task_attempt_phase(
+                "task-phase-aba",
+                OrchestratorAttemptPhase::BuildingPrompt,
+                &token_a,
+            )
+            .await
+            .unwrap();
+        assert!(miss.is_none(), "旧 token phase CAS 必须 miss");
+
+        let hit = repo
+            .update_task_attempt_phase(
+                "task-phase-aba",
+                OrchestratorAttemptPhase::PreparingWorkspace,
+                &token_b,
+            )
+            .await
+            .unwrap()
+            .expect("新 token 必须命中");
+        assert_eq!(
+            hit.attempt_phase,
+            Some(OrchestratorAttemptPhase::PreparingWorkspace)
+        );
+        assert_eq!(hit.prepare_claim_token.as_deref(), Some(token_b.as_str()));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     verifier failed 修复转换必须签发 claim token，否则 repair prepare 会因空 token 失败。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Verifying 任务调用 try_transition_verifying_to_preparing_with_claim，断言 Preparing/Rework
+    ///     且 prepare_claim_token 非空。
+    #[tokio::test]
+    async fn verifying_to_preparing_with_claim_issues_token() {
+        let (_pool, repo) = setup_repo().await;
+        let task = task_row(
+            "task-verify-claim",
+            "project-1",
+            OrchestratorTaskStatus::Verifying,
+        );
+        repo.create_task(&task).await.unwrap();
+
+        let updated = repo
+            .try_transition_verifying_to_preparing_with_claim(&task.id)
+            .await
+            .unwrap()
+            .expect("Verifying 任务应转换");
+        assert_eq!(updated.status, OrchestratorTaskStatus::Preparing);
+        assert_eq!(updated.workflow_state, OrchestratorWorkflowState::Rework);
+        assert_eq!(updated.run_state, OrchestratorRunState::Preparing);
+        assert_eq!(
+            updated.attempt_phase,
+            Some(OrchestratorAttemptPhase::Failed)
+        );
+        let token = updated
+            .prepare_claim_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .expect("修复轮必须签发 claim token");
+        assert!(!token.is_empty());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     显式 startTask 动作需要把草稿或待办任务放入 scheduler 可领取路径，而不是直接进入交付或清理现场。
     ///
     /// Code Logic（这个函数做什么）:
@@ -3682,7 +4702,10 @@ mod tests {
         let persisted_plain_done = repo.get_task(&plain_done.id).await.unwrap();
 
         assert_eq!(delivering.status, OrchestratorTaskStatus::Delivering);
-        assert_eq!(delivering.workflow_state, OrchestratorWorkflowState::Merging);
+        assert_eq!(
+            delivering.workflow_state,
+            OrchestratorWorkflowState::Merging
+        );
         assert_eq!(delivering.run_state, OrchestratorRunState::Delivering);
         assert!(error.to_string().contains("人工复核"));
         assert_eq!(persisted_plain_done.status, OrchestratorTaskStatus::Done);
@@ -3705,9 +4728,15 @@ mod tests {
         created.worktree_id = Some("worktree-1".to_string());
         created.session_id = Some("session-1".to_string());
         repo.create_task(&created).await.unwrap();
-        repo.add_evidence(&created.id, "verificationOutput", "验证", "running", "still running")
-            .await
-            .unwrap();
+        repo.add_evidence(
+            &created.id,
+            "verificationOutput",
+            "验证",
+            "running",
+            "still running",
+        )
+        .await
+        .unwrap();
 
         let canceled = repo.cancel_task(&created.id).await.unwrap();
         let evidence = repo.list_evidence(&created.id).await.unwrap();
@@ -4314,6 +5343,46 @@ mod tests {
         assert_eq!(active, 3);
     }
 
+    /// Business Logic（为什么需要这个测试）:
+    ///     Blocked 表示用户必须显式 retry 才能再跑；后台 scheduler 若把 Blocked 当可领取态，
+    ///     会造成无界自动重跑、Attention 闪烁，并破坏 Blocked→Queued 用户契约。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入一个 legacy Blocked + run_state=Blocked 的本机任务；全局 claim 后断言 0 条领取，
+    ///     且任务仍保持 Blocked（含 blocked_reason）。
+    #[tokio::test]
+    async fn claim_next_local_queued_tasks_does_not_auto_claim_blocked() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "local-a", "local").await;
+        repo.create_task(&task_row(
+            "blocked-task",
+            "local-a",
+            OrchestratorTaskStatus::Blocked,
+        ))
+        .await
+        .unwrap();
+        set_task_split_state(
+            &pool,
+            "blocked-task",
+            OrchestratorWorkflowState::Rework,
+            OrchestratorRunState::Blocked,
+            Some("verification failed"),
+        )
+        .await;
+
+        let claimed = repo
+            .claim_next_local_queued_tasks_with_global_capacity(3)
+            .await
+            .unwrap();
+        let still = repo.get_task("blocked-task").await.unwrap();
+
+        assert!(claimed.is_empty(), "Blocked 不得被后台 scheduler 自动领取");
+        assert_eq!(still.status, OrchestratorTaskStatus::Blocked);
+        assert_eq!(still.run_state, OrchestratorRunState::Blocked);
+        assert_eq!(still.blocked_reason.as_deref(), Some("verification failed"));
+    }
+
     /// Business Logic（为什么需要这个函数）:
     ///     Phase 7 的 terminal completion sentinel 依赖 attempt history；schema 和仓储方法必须先能稳定记录和完成一轮尝试。
     ///
@@ -4518,8 +5587,19 @@ mod tests {
         let task = task_row("task-1", "project-1", OrchestratorTaskStatus::Preparing);
         repo.create_task(&task).await.unwrap();
 
+        sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+            .bind(&task.id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
         let running = repo
-            .mark_task_running(&task.id, "agent/task-1-test", "worktree-1", "session-1")
+            .mark_task_running(
+                &task.id,
+                "agent/task-1-test",
+                "worktree-1",
+                "session-1",
+                "tok",
+            )
             .await
             .unwrap();
 
@@ -4556,6 +5636,11 @@ mod tests {
         .await
         .unwrap();
 
+        sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+            .bind(&task.id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
         let running = repo
             .mark_task_running_attempt(
                 &task.id,
@@ -4563,6 +5648,7 @@ mod tests {
                 "worktree-2",
                 "session-2",
                 2,
+                "tok",
             )
             .await
             .unwrap();
@@ -4597,10 +5683,16 @@ mod tests {
         let task = task_row("task-phase", "project-1", OrchestratorTaskStatus::Preparing);
         repo.create_task(&task).await.unwrap();
 
-        let updated = repo
-            .update_task_attempt_phase(&task.id, OrchestratorAttemptPhase::BuildingPrompt)
+        sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+            .bind(&task.id)
+            .execute(&repo.pool)
             .await
             .unwrap();
+        let updated = repo
+            .update_task_attempt_phase(&task.id, OrchestratorAttemptPhase::BuildingPrompt, "tok")
+            .await
+            .unwrap()
+            .expect("matching claim token must hit phase CAS");
 
         assert_eq!(
             updated.attempt_phase,
@@ -4623,12 +5715,18 @@ mod tests {
             OrchestratorTaskStatus::Preparing,
         );
         repo.create_task(&task).await.unwrap();
+        sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+            .bind(&task.id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
         repo.mark_task_running_attempt(
             &task.id,
             "agent/task-active-guard",
             "worktree-2",
             "session-new",
             2,
+            "tok",
         )
         .await
         .unwrap();
@@ -4710,12 +5808,18 @@ mod tests {
             OrchestratorTaskStatus::Preparing,
         );
         repo.create_task(&task).await.unwrap();
+        sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+            .bind(&task.id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
         repo.mark_task_running_attempt(
             &task.id,
             "agent/task-runtime",
             "worktree-1",
             "session-1",
             1,
+            "tok",
         )
         .await
         .unwrap();
@@ -4804,8 +5908,19 @@ mod tests {
             .await
             .unwrap();
 
+        sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+            .bind(&task.id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
         let returned = repo
-            .mark_task_running(&task.id, "agent/task-1-test", "worktree-1", "session-1")
+            .mark_task_running(
+                &task.id,
+                "agent/task-1-test",
+                "worktree-1",
+                "session-1",
+                "tok",
+            )
             .await
             .unwrap();
         let persisted = repo.get_task(&task.id).await.unwrap();
@@ -4843,5 +5958,246 @@ mod tests {
         assert_eq!(items[0].title, "npm test");
         assert_eq!(items[0].summary, "passed");
         assert_eq!(items[0].content, "output");
+    }
+
+    /// Business Logic（为什么需要这个辅助函数）:
+    ///     Retry/Discard 单测需要快速把 outbox 推到 failed，才能验证 failed-only 状态机。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入 pending → claim sending → mark failed，返回最终 failed 行。
+    async fn seed_failed_remote_outbox(
+        repo: &OrchestratorRepo,
+        request_json: &str,
+        last_error: &str,
+    ) -> OrchestratorRemoteOutboxRow {
+        let item = repo
+            .insert_remote_outbox_pending(
+                "device-1",
+                "Mac mini",
+                "/Users/hans/project",
+                None,
+                request_json,
+            )
+            .await
+            .expect("insert pending");
+        repo.claim_remote_outbox_item_as_sending(&item.id)
+            .await
+            .expect("claim")
+            .expect("claimed");
+        repo.mark_remote_outbox_failed(&item.id, last_error)
+            .await
+            .expect("mark failed")
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户对协议/校验失败的 outbox 选择重新发送时，必须原子回到 pending，清空 last_error，
+    ///     并完整保留原 request_json/clientRequestId，避免重复创建远端任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造带 clientRequestId 的 failed item，调用 retry_failed_remote_outbox_item，
+    ///     断言 status=pending、last_error 清空、request_json 原样保留；重复 retry 与非 failed 状态返回 conflict，
+    ///     缺失 id 返回 not_found；discarded 不出现在 active/dispatcher 查询中。
+    #[tokio::test]
+    async fn retry_failed_remote_outbox() {
+        let (_pool, repo) = setup_repo().await;
+        let request_json = r#"{"projectId":"p1","title":"t","goal":"g","acceptanceCriteria":"a","clientRequestId":"client-req-42","createAction":"todo"}"#;
+        let failed = seed_failed_remote_outbox(&repo, request_json, "项目不能为空").await;
+        assert_eq!(failed.status, RemoteOutboxStatus::Failed);
+        assert_eq!(failed.last_error.as_deref(), Some("项目不能为空"));
+        assert_eq!(failed.request_json, request_json);
+
+        let retried = repo
+            .retry_failed_remote_outbox_item(&failed.id)
+            .await
+            .expect("retry failed");
+        assert_eq!(retried.status, RemoteOutboxStatus::Pending);
+        assert!(retried.last_error.is_none());
+        assert_eq!(retried.request_json, request_json);
+        assert!(retried.request_json.contains("client-req-42"));
+        assert!(retried.remote_task_id.is_none());
+        assert!(retried.sent_at.is_none());
+
+        let pending = repo
+            .list_pending_remote_outbox_items(20)
+            .await
+            .expect("list pending");
+        assert!(pending.iter().any(|item| item.id == failed.id));
+
+        let active = repo
+            .list_remote_outbox_items_for_project_path("device-1", "/Users/hans/project")
+            .await
+            .expect("list active");
+        assert!(active.iter().any(|item| item.id == failed.id));
+
+        let duplicate = repo.retry_failed_remote_outbox_item(&failed.id).await;
+        assert!(duplicate.is_err());
+        let duplicate_err = duplicate.unwrap_err().to_string();
+        assert!(
+            duplicate_err.contains("只有失败的远端 outbox 可以重新发送"),
+            "duplicate retry should be invalid-transition: {duplicate_err}"
+        );
+
+        let missing = repo
+            .retry_failed_remote_outbox_item("missing-outbox-id")
+            .await;
+        assert!(missing.is_err());
+        let missing_err = missing.unwrap_err().to_string();
+        assert!(
+            missing_err.contains("不存在"),
+            "missing retry should be not-found: {missing_err}"
+        );
+
+        for status in [
+            RemoteOutboxStatus::Pending,
+            RemoteOutboxStatus::Sending,
+            RemoteOutboxStatus::Mirrored,
+            RemoteOutboxStatus::Discarded,
+        ] {
+            let item = repo
+                .insert_remote_outbox_pending(
+                    "device-1",
+                    "Mac mini",
+                    "/Users/hans/project",
+                    None,
+                    request_json,
+                )
+                .await
+                .expect("insert for rejection");
+            sqlx::query(
+                "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ? WHERE id = ?",
+            )
+            .bind(status.as_str())
+            .bind("prior error")
+            .bind(&item.id)
+            .execute(&_pool)
+            .await
+            .expect("force status");
+            let rejected = repo.retry_failed_remote_outbox_item(&item.id).await;
+            assert!(
+                rejected.is_err(),
+                "retry should reject status {}",
+                status.as_str()
+            );
+            let err = rejected.unwrap_err().to_string();
+            assert!(
+                err.contains("只有失败的远端 outbox 可以重新发送"),
+                "status {} should be invalid-transition: {err}",
+                status.as_str()
+            );
+            let persisted = repo
+                .get_remote_outbox_item(&item.id)
+                .await
+                .expect("get")
+                .expect("exists");
+            assert_eq!(persisted.status, status);
+            assert_eq!(persisted.request_json, request_json);
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户放弃失败 outbox 后，条目必须进入 discarded 终态：保留 last_error 与 request 审计，
+    ///     但不再出现在 active 列表或 dispatcher pending 队列中。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 failed item 后调用 discard_failed_remote_outbox_item，断言 status=discarded、
+    ///     last_error/request_json 保留；重复 discard 与非 failed 状态返回 conflict，缺失返回 not_found；
+    ///     discarded 被 active/pending 查询排除。
+    #[tokio::test]
+    async fn discard_failed_remote_outbox() {
+        let (_pool, repo) = setup_repo().await;
+        let request_json = r#"{"projectId":"p1","title":"t","goal":"g","acceptanceCriteria":"a","clientRequestId":"client-req-99","createAction":"backlog"}"#;
+        let failed = seed_failed_remote_outbox(&repo, request_json, "远端拒绝: 校验失败").await;
+
+        let discarded = repo
+            .discard_failed_remote_outbox_item(&failed.id)
+            .await
+            .expect("discard failed");
+        assert_eq!(discarded.status, RemoteOutboxStatus::Discarded);
+        assert_eq!(discarded.last_error.as_deref(), Some("远端拒绝: 校验失败"));
+        assert_eq!(discarded.request_json, request_json);
+        assert!(discarded.request_json.contains("client-req-99"));
+
+        let pending = repo
+            .list_pending_remote_outbox_items(20)
+            .await
+            .expect("list pending");
+        assert!(!pending.iter().any(|item| item.id == failed.id));
+
+        let active = repo
+            .list_remote_outbox_items_for_project_path("device-1", "/Users/hans/project")
+            .await
+            .expect("list active");
+        assert!(!active.iter().any(|item| item.id == failed.id));
+
+        let still_there = repo
+            .get_remote_outbox_item(&failed.id)
+            .await
+            .expect("get discarded")
+            .expect("audit retained");
+        assert_eq!(still_there.status, RemoteOutboxStatus::Discarded);
+
+        let duplicate = repo.discard_failed_remote_outbox_item(&failed.id).await;
+        assert!(duplicate.is_err());
+        let duplicate_err = duplicate.unwrap_err().to_string();
+        assert!(
+            duplicate_err.contains("只有失败的远端 outbox 可以放弃发送"),
+            "duplicate discard should be invalid-transition: {duplicate_err}"
+        );
+
+        let missing = repo
+            .discard_failed_remote_outbox_item("missing-outbox-id")
+            .await;
+        assert!(missing.is_err());
+        let missing_err = missing.unwrap_err().to_string();
+        assert!(
+            missing_err.contains("不存在"),
+            "missing discard should be not-found: {missing_err}"
+        );
+
+        for status in [
+            RemoteOutboxStatus::Pending,
+            RemoteOutboxStatus::Sending,
+            RemoteOutboxStatus::Mirrored,
+            RemoteOutboxStatus::Discarded,
+        ] {
+            let item = repo
+                .insert_remote_outbox_pending(
+                    "device-1",
+                    "Mac mini",
+                    "/Users/hans/project",
+                    None,
+                    request_json,
+                )
+                .await
+                .expect("insert for rejection");
+            sqlx::query(
+                "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ? WHERE id = ?",
+            )
+            .bind(status.as_str())
+            .bind("prior error")
+            .bind(&item.id)
+            .execute(&_pool)
+            .await
+            .expect("force status");
+            let rejected = repo.discard_failed_remote_outbox_item(&item.id).await;
+            assert!(
+                rejected.is_err(),
+                "discard should reject status {}",
+                status.as_str()
+            );
+            let err = rejected.unwrap_err().to_string();
+            assert!(
+                err.contains("只有失败的远端 outbox 可以放弃发送"),
+                "status {} should be invalid-transition: {err}",
+                status.as_str()
+            );
+            let persisted = repo
+                .get_remote_outbox_item(&item.id)
+                .await
+                .expect("get")
+                .expect("exists");
+            assert_eq!(persisted.status, status);
+            assert_eq!(persisted.last_error.as_deref(), Some("prior error"));
+        }
     }
 }

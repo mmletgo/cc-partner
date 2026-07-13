@@ -234,6 +234,22 @@
       "remoteProjectPath": "Remote path: {{path}}",
       "runtimeMessage": "Runtime: {{value}}",
       "runtimeRefs": "Claude: {{claudeSessionId}} · Transcript: {{transcriptPath}}",
+      "runtimeSnapshotTitle": "Runtime status",
+      "runtimeSnapshotLoading": "Refreshing",
+      "runtimeStatusLocal": "Local",
+      "runtimeStatusLive": "Live",
+      "runtimeStatusOffline": "Offline",
+      "runtimeStatusUnsupported": "Unsupported on peer",
+      "runtimeStatusUnavailable": "Unavailable",
+      "runtimeStatusUnknown": "Status unknown",
+      "runtimeLastUpdated": "Last updated {{time}}",
+      "runtimeCachedHint": "Cache is display-only and never enables task actions",
+      "runtimeGeneratedAt": "Generated {{time}}",
+      "runtimeLatestTickAt": "Latest tick {{time}}",
+      "runtimeLatestTickUnknown": "unknown",
+      "runtimeRecentEvents": "Recent events",
+      "runtimeSlots": "Slots {{used}}/{{max}} · running {{running}} · retrying {{retrying}}",
+      "runtimeLatestError": "Latest error: {{error}}",
       "detailKicker": "Task detail",
       "closeDetails": "Close details",
       "workflowState": "Workflow",
@@ -303,7 +319,8 @@
         "pending": "Pending send",
         "sending": "Sending",
         "mirrored": "Synced",
-        "failed": "Send failed"
+        "failed": "Send failed",
+        "discarded": "Discarded"
       },
       "errors": {
         "list": "Failed to load automation tasks",
@@ -311,8 +328,13 @@
         "evidence": "Failed to load evidence",
         "completePrompt": "Failed to fill task with AI",
         "promptRequired": "Enter a simple prompt first",
-        "required": "Fill in the task title, goal, and acceptance criteria"
-      }
+        "required": "Fill in the task title, goal, and acceptance criteria",
+        "retryOutbox": "Failed to retry outbox",
+        "discardOutbox": "Failed to discard outbox"
+      },
+      "pendingRetry": "Retry send",
+      "pendingDiscard": "Discard",
+      "pendingDiscardConfirm": "Discard this failed remote outbox item?"
     },
     "status": {
       "project": "Project",
@@ -328,12 +350,17 @@
       "worktrees": "Worktrees",
       "prompt": "Prompt",
       "automation": "Automation",
-      "settings": "Settings"
+      "settings": "Settings",
+      "attention": "Attention"
     },
     "placeholders": {
       "projects": {
         "title": "Projects",
         "label": "Select a project"
+      },
+      "attention": {
+        "title": "Attention",
+        "label": "See items that block work"
       },
       "terminal": {
         "title": "Terminal",
@@ -597,6 +624,8 @@
     "createSession": "Failed to create terminal",
     "focusSession": "Failed to switch terminal window",
     "splitPane": "Failed to split pane",
+    "switchPane": "Failed to switch pane",
+    "zoomPane": "Failed to switch single-pane view",
     "closePane": "Failed to close pane",
     "closeSession": "Failed to close terminal",
     "renameSession": "Failed to rename session",

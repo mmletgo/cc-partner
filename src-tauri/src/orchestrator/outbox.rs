@@ -26,10 +26,12 @@ const REMOTE_OUTBOX_SENDING_LEASE_SECS: u64 = 300;
 /// 远端任务投递 outbox 状态。
 ///
 /// Business Logic（为什么需要这个枚举）:
-///     离线创建的远端任务需要清楚区分等待发送、发送中、已镜像和不可重试失败，供后台 dispatcher 与 UI 判断。
+///     离线创建的远端任务需要清楚区分等待发送、发送中、已镜像、不可自动重试失败，以及用户主动放弃后的终态，
+///     供后台 dispatcher、Automation UI 的 Retry/Discard 与后续 Attention 投影判断。
 ///
 /// Code Logic（这个枚举做什么）:
-///     提供 SQLite 小写存储值与 Rust enum 的互转，未知值视为数据损坏并返回业务错误。
+///     提供 SQLite 小写存储值与 Rust enum 的互转；`discarded` 复用现有 status 文本列，无额外迁移；
+///     未知值视为数据损坏并返回业务错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RemoteOutboxStatus {
@@ -37,11 +39,12 @@ pub enum RemoteOutboxStatus {
     Sending,
     Mirrored,
     Failed,
+    Discarded,
 }
 
 impl RemoteOutboxStatus {
     /// Business Logic（为什么需要这个函数）:
-    ///     SQLite outbox 表保存稳定小写状态，便于人工排查 pending/sending 队列。
+    ///     SQLite outbox 表保存稳定小写状态，便于人工排查 pending/sending 队列与 discarded 审计。
     ///
     /// Code Logic（这个函数做什么）:
     ///     将 enum 映射为数据库字符串。
@@ -51,6 +54,7 @@ impl RemoteOutboxStatus {
             Self::Sending => "sending",
             Self::Mirrored => "mirrored",
             Self::Failed => "failed",
+            Self::Discarded => "discarded",
         }
     }
 
@@ -65,6 +69,7 @@ impl RemoteOutboxStatus {
             "sending" => Ok(Self::Sending),
             "mirrored" => Ok(Self::Mirrored),
             "failed" => Ok(Self::Failed),
+            "discarded" => Ok(Self::Discarded),
             other => Err(AppError::generic(format!(
                 "未知 Orchestrator 远端 outbox 状态: {other}"
             ))),
@@ -214,7 +219,8 @@ pub fn remote_device_base_url(state: &AppState, device_id: &str) -> Result<Strin
     let devices = state.devices.read().expect("devices 读锁中毒");
     let device = devices
         .get(device_id)
-        .ok_or_else(|| AppError::generic("远端设备不在线"))?;
+        // 设备缺失属于暂态离线：用 Unavailable 分类，禁止靠中文文案匹配。
+        .ok_or_else(|| AppError::unavailable("远端设备不在线"))?;
     Ok(device.base_url())
 }
 
@@ -222,15 +228,14 @@ pub fn remote_device_base_url(state: &AppState, device_id: &str) -> Result<Strin
 ///     网络离线类错误应保持 pending，协议/校验类错误才应标 failed。
 ///
 /// Code Logic（这个函数做什么）:
-///     基于现有远端客户端错误前缀和设备离线文案做分类；非网络错误默认按协议/校验失败处理。
+///     只读 `AppError::classify()`：`Unavailable`/`Timeout` 视为网络/离线，其它归协议/业务失败。
+///     禁止 `contains/starts_with` 匹配本地化文案。
 pub fn is_remote_network_error(error: &AppError) -> bool {
-    let message = error.to_string();
-    if message.contains("远端设备不在线") {
-        return true;
-    }
-    let request_failed = message.starts_with("远端 Orchestrator 请求失败:")
-        || message.starts_with("远端 Workbench 请求失败:");
-    request_failed && !message.contains("HTTP ")
+    use crate::error::AppErrorCategory;
+    matches!(
+        error.classify(),
+        AppErrorCategory::Unavailable | AppErrorCategory::Timeout
+    )
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -238,6 +243,16 @@ pub fn is_remote_network_error(error: &AppError) -> bool {
 ///
 /// Code Logic（这个函数做什么）:
 ///     若请求已有非空 client_request_id 则保持不变；缺失或空白时写入 fallback_id，并返回是否修改过。
+/// Business Logic（为什么需要这个函数）:
+///     多跳代理必须把入站 request_id 原样转发到下一跳；trim 会让 ` req-1 ` 变成 `req-1`，
+///     与 middleware/响应信封中的原值脱节，破坏跨设备日志关联。
+///
+/// Code Logic（这个函数做什么）:
+///     空串视为缺失返回 None；非空（含首尾空格）原样返回 `Some`。
+pub(crate) fn select_forwarded_request_id(forwarded_request_id: Option<&str>) -> Option<&str> {
+    forwarded_request_id.filter(|value| !value.is_empty())
+}
+
 fn ensure_remote_create_client_request_id(
     request: &mut RemoteCreateOrchestratorTaskReq,
     fallback_id: &str,
@@ -371,9 +386,15 @@ pub fn start_orchestrator_remote_outbox_dispatcher(state: AppState) -> Cancellat
 pub async fn sync_remote_task_mirror_for_project(
     state: &AppState,
     remote_shortcut: &WorkbenchProjectRow,
+    forwarded_request_id: Option<&str>,
 ) -> Result<Vec<RemoteMirrorTask>, AppError> {
-    let context = open_remote_project_for_shortcut(state, remote_shortcut).await?;
-    let tasks = RemoteOrchestratorClient::new()
+    let context =
+        open_remote_project_for_shortcut(state, remote_shortcut, forwarded_request_id).await?;
+    let mut client = RemoteOrchestratorClient::new();
+    if let Some(request_id) = select_forwarded_request_id(forwarded_request_id) {
+        client = client.with_forwarded_request_id(request_id);
+    }
+    let tasks = client
         .list_tasks(&context.base_url, &context.remote_project_id)
         .await?;
 
@@ -418,14 +439,20 @@ pub struct RemoteOrchestratorProjectContext {
 ///     所有远端 Orchestrator 操作都必须先通过 Workbench open-project 确保对端有本机 local 项目记录。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验 remote shortcut，解析 base_url，调用 RemoteWorkbenchClient::open_project，并返回远端 local projectId。
+///     校验 remote shortcut，解析 base_url；原样转发非空 request_id（不 trim）后调用
+///     RemoteWorkbenchClient::open_project，并返回远端 local projectId。
 pub async fn open_remote_project_for_shortcut(
     state: &AppState,
     remote_shortcut: &WorkbenchProjectRow,
+    forwarded_request_id: Option<&str>,
 ) -> Result<RemoteOrchestratorProjectContext, AppError> {
     ensure_remote_shortcut(remote_shortcut)?;
     let base_url = remote_device_base_url(state, &remote_shortcut.device_id)?;
-    let remote = RemoteWorkbenchClient::new()
+    let mut client = RemoteWorkbenchClient::new();
+    if let Some(request_id) = select_forwarded_request_id(forwarded_request_id) {
+        client = client.with_forwarded_request_id(request_id);
+    }
+    let remote = client
         .open_project(&base_url, &remote_shortcut.path)
         .await?;
     Ok(RemoteOrchestratorProjectContext {
@@ -475,7 +502,7 @@ async fn dispatch_claimed_remote_outbox_item(
         created_at: item.created_at.clone(),
         updated_at: item.updated_at.clone(),
     };
-    let context = open_remote_project_for_shortcut(state, &shortcut)
+    let context = open_remote_project_for_shortcut(state, &shortcut, None)
         .await
         .map_err(classify_remote_error)?;
 
@@ -1048,20 +1075,53 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     outbox 只能把真实网络/离线错误保持 pending；HTTP 协议响应异常应标 failed 以避免无限重试。
+    ///     合法 request_id 可含首尾空格（可打印 ASCII）；代理层 trim 会破坏 H4 多跳关联。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     构造设备离线、reqwest 发送失败和 HTTP 500 fallback 三类错误文案，断言仅前两类属于网络错误。
+    ///     断言 select_forwarded_request_id 原样保留 ` req-1 `，空串→None，None→None。
+    #[test]
+    fn select_forwarded_request_id_keeps_leading_trailing_spaces() {
+        assert_eq!(
+            select_forwarded_request_id(Some(" req-1 ")),
+            Some(" req-1 ")
+        );
+        assert_eq!(select_forwarded_request_id(Some("req-1")), Some("req-1"));
+        assert_eq!(select_forwarded_request_id(Some("")), None);
+        assert_eq!(select_forwarded_request_id(None), None);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     outbox 只能把真实网络/离线错误保持 pending；协议/业务错误应标 failed 以避免无限重试。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用类型化 AppError 变体断言：Unavailable/Timeout 为网络，Validation/Internal/Remote 非网络。
     #[test]
     fn network_error_classifier_excludes_http_protocol_failures() {
-        assert!(is_remote_network_error(&AppError::generic(
+        assert!(is_remote_network_error(&AppError::unavailable(
             "远端设备不在线"
         )));
-        assert!(is_remote_network_error(&AppError::generic(
-            "远端 Orchestrator 请求失败: error sending request"
+        assert!(is_remote_network_error(&AppError::unavailable(
+            "远端 Orchestrator 请求失败 (http://peer/api/x): body interrupted"
         )));
+        assert!(is_remote_network_error(&AppError::timeout(
+            "远端 Orchestrator 请求超时"
+        )));
+        // 业务/协议失败即使文案含“连接”也不应判网络。
         assert!(!is_remote_network_error(&AppError::generic(
             "远端 Orchestrator 请求失败: HTTP 500"
+        )));
+        assert!(!is_remote_network_error(&AppError::validation(
+            "路径不能为空，连接配置无效"
+        )));
+        assert!(!is_remote_network_error(&AppError::remote(
+            "连接超时业务码",
+            crate::error::RemoteErrorMeta {
+                code: "validation_error".to_string(),
+                status: 400,
+                retryable: false,
+                request_id: "req".to_string(),
+                details: serde_json::json!({}),
+            }
         )));
     }
 }

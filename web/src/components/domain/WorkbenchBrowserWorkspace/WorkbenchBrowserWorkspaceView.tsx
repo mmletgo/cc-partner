@@ -8,14 +8,14 @@ import type {
   WorkbenchBrowserPreview,
   WorkbenchBrowserTarget,
 } from '@/lib/types';
+import type { WorkbenchBrowserWorkspaceProps } from './WorkbenchBrowserWorkspace';
 import {
   canApplyWorkbenchBrowserRequest,
   getWorkbenchBrowserFrameSrc,
   getWorkbenchBrowserTargetSourceLabelKey,
   WORKBENCH_BROWSER_IFRAME_SANDBOX,
   type WorkbenchBrowserRequestSnapshot,
-  type WorkbenchBrowserWorkspaceProps,
-} from './WorkbenchBrowserWorkspace';
+} from './workbenchBrowserHelpers';
 import styles from './WorkbenchBrowserWorkspace.module.css';
 
 /**
@@ -42,8 +42,11 @@ export function WorkbenchBrowserWorkspaceView({
   const worktreeId = worktree?.id ?? null;
   const requestStateRef = useRef({ sequence: 0, projectId, worktreeId });
   const frameSrc = useMemo(() => getWorkbenchBrowserFrameSrc(preview, surface), [preview, surface]);
-  requestStateRef.current.projectId = projectId;
-  requestStateRef.current.worktreeId = worktreeId;
+  // 同步 project/worktree 到 ref，避免 render 期写 ref 触发 react-hooks/refs。
+  useEffect(() => {
+    requestStateRef.current.projectId = projectId;
+    requestStateRef.current.worktreeId = worktreeId;
+  }, [projectId, worktreeId]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -135,6 +138,7 @@ export function WorkbenchBrowserWorkspaceView({
     [beginBrowserRequest, isCurrentBrowserRequest, transport],
   );
 
+  /* eslint-disable react-hooks/set-state-in-effect -- project/worktree 切换时重置预览上下文；随后异步 loadDiscovery */
   useEffect(() => {
     setDiscovery(null);
     setPreview(null);
@@ -146,6 +150,7 @@ export function WorkbenchBrowserWorkspaceView({
     }
     void loadDiscovery();
   }, [loadDiscovery, projectId, worktreeId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   return (
     <section className={styles.workspace} aria-label={t('workbench:browserPreview.title')}>

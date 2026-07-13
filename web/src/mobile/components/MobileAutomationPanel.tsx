@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
-import { httpOrchestratorTransport } from '@/api/workbenchHttp';
+import { toRuntimeLoadError } from '@/api/orchestratorRuntimeTransportError';
+import {
+  createHttpOrchestratorClientRequestId,
+  httpOrchestratorTransport,
+} from '@/api/workbenchHttp';
 import type { HttpCreateOrchestratorTaskAction } from '@/api/workbenchHttp';
+import { requestAttentionInvalidation } from '@/hooks/attentionInvalidation';
 import { orchestratorEvidenceKindTone } from '@/lib/orchestrator';
 import {
   splitOrchestratorTaskViews,
@@ -14,12 +19,23 @@ import type {
   OrchestratorEvidence,
   OrchestratorRemoteOutboxItem,
   OrchestratorRemoteOutboxStatus,
+  OrchestratorRemoteRuntimeStatus,
   OrchestratorRunState,
   OrchestratorTask,
   OrchestratorTaskView,
   OrchestratorWorkflowState,
   WorkbenchProject,
 } from '@/lib/types';
+import {
+  applyMobileRuntimeSnapshotFailure,
+  applyMobileRuntimeSnapshotSuccess,
+  beginMobileRuntimeSnapshotLoad,
+  emptyMobileRuntimeDisplayState,
+  nextMobileRuntimeSnapshotRequestSeq,
+  resetMobileRuntimeSnapshotStore,
+  selectMobileRuntimeDisplayForProject,
+  type OwnedMobileRuntimeDisplayState,
+} from '../mobileRuntimeSnapshotStore';
 import styles from '../MobileWorkbench.module.css';
 
 export interface MobileAutomationExecutionContext {
@@ -31,6 +47,16 @@ export interface MobileAutomationExecutionContext {
 export interface MobileAutomationPanelProps {
   project: WorkbenchProject | null;
   onOpenExecutionContext?: (context: MobileAutomationExecutionContext) => void;
+  /** Attention 跳转：聚焦真实任务详情/Evidence。 */
+  focusTaskId?: string | null;
+  /** Attention 跳转：聚焦 failed outbox 行。 */
+  focusOutboxId?: string | null;
+  /** 聚焦结果回调：missing 时父级刷新 Inbox 并回到 Attention。 */
+  onFocusResult?: (result: {
+    status: 'found' | 'missing';
+    entity: 'task' | 'outbox';
+    id: string;
+  }) => void;
 }
 
 type MobileAutomationTaskGroups = Record<
@@ -146,6 +172,7 @@ const MOBILE_AUTOMATION_PENDING_STATUS_LABEL_KEYS: Record<
   sending: 'workbench:mobile.automationPanel.pendingStatus.sending',
   mirrored: 'workbench:mobile.automationPanel.pendingStatus.mirrored',
   failed: 'workbench:mobile.automationPanel.pendingStatus.failed',
+  discarded: 'workbench:mobile.automationPanel.pendingStatus.discarded',
 };
 
 const MOBILE_AUTOMATION_EVIDENCE_KIND_LABEL_KEYS = {
@@ -259,6 +286,44 @@ function formatAutomationTimestamp(value: string): string {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   runtime 状态条需要把后端 remoteStatus 映射成移动端可本地化的文案 key。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按四态返回 workbench mobile automation i18n key；offline 主文案为中性“离线”。
+ */
+function mobileRuntimeStatusLabelKey(
+  status: OrchestratorRemoteRuntimeStatus,
+):
+  | 'workbench:mobile.automationPanel.runtimeStatusLive'
+  | 'workbench:mobile.automationPanel.runtimeStatusOffline'
+  | 'workbench:mobile.automationPanel.runtimeStatusUnsupported'
+  | 'workbench:mobile.automationPanel.runtimeStatusUnavailable' {
+  // display state 的 remoteStatus 已把本机 local 归一为 null，此处只处理远端四态。
+  switch (status) {
+    case 'live':
+      return 'workbench:mobile.automationPanel.runtimeStatusLive';
+    case 'offline':
+      return 'workbench:mobile.automationPanel.runtimeStatusOffline';
+    case 'unsupported':
+      return 'workbench:mobile.automationPanel.runtimeStatusUnsupported';
+    case 'unavailable':
+      return 'workbench:mobile.automationPanel.runtimeStatusUnavailable';
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   缓存时间需要可读展示，帮助用户判断 offline 快照新旧。
+ *
+ * Code Logic（这个函数做什么）:
+ *   复用 evidence 时间格式化 helper。
+ */
+function formatRuntimeTimestamp(value: string): string {
+  return formatAutomationTimestamp(value);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   详情面板只支持真实 local/remote 任务，pendingRemote outbox 不应触发 evidence 或 action。
  *
  * Code Logic（这个函数做什么）:
@@ -299,10 +364,16 @@ function mobileAutomationEvidenceKindLabelKey(
 export function MobileAutomationPanel({
   project,
   onOpenExecutionContext,
+  focusTaskId = null,
+  focusOutboxId = null,
+  onFocusResult,
 }: MobileAutomationPanelProps): ReactElement {
   const { t } = useTranslation(['workbench', 'orchestrator']);
   const [taskViews, setTaskViews] = useState<OrchestratorTaskView[]>([]);
   const [selectedTaskView, setSelectedTaskView] = useState<OrchestratorTaskView | null>(null);
+  const [focusedOutboxId, setFocusedOutboxId] = useState<string | null>(null);
+  const appliedFocusTaskIdRef = useRef<string | null>(null);
+  const appliedFocusOutboxIdRef = useRef<string | null>(null);
   const [evidenceItems, setEvidenceItems] = useState<OrchestratorEvidence[]>([]);
   const [evidenceLoading, setEvidenceLoading] = useState<boolean>(false);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
@@ -312,19 +383,34 @@ export function MobileAutomationPanel({
   const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);
   const [promptDraft, setPromptDraft] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
+  const [outboxActionId, setOutboxActionId] = useState<string | null>(null);
   const [creatingAction, setCreatingAction] =
     useState<HttpCreateOrchestratorTaskAction | null>(null);
   const [completingPrompt, setCompletingPrompt] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [runtimeDisplayState, setRuntimeDisplay] = useState<OwnedMobileRuntimeDisplayState>(
+    () => emptyMobileRuntimeDisplayState(false),
+  );
   const requestIdRef = useRef<number>(0);
   const evidenceRequestIdRef = useRef<number>(0);
   const activeProjectIdRef = useRef<string | null>(null);
+  /**
+   * 一次逻辑创建提交的幂等键：表单内容不变的重试复用；成功/取消/表单变更后清空。
+   */
+  const createClientRequestIdRef = useRef<string | null>(null);
+  const createClientRequestFingerprintRef = useRef<string | null>(null);
   const promptDraftRef = useRef<HTMLTextAreaElement | null>(null);
   const titleId = useId();
   const dialogTitleId = useId();
   const detailTitleId = useId();
+  const runtimeTitleId = useId();
   const hasProject = Boolean(project);
+  // Render 阶段隔离：A→B 首帧 effect 尚未重置 state 时，不得展示旧项目 runtime 快照。
+  const runtimeDisplay = selectMobileRuntimeDisplayForProject(
+    runtimeDisplayState,
+    project?.id ?? null,
+  );
   const creating = creatingAction !== null;
   const trimmedPromptDraft = promptDraft.trim();
   const trimmedTitle = title.trim();
@@ -365,6 +451,23 @@ export function MobileAutomationPanel({
       onOpenExecutionContext &&
       (selectedTask.worktreeId || selectedTask.sessionId),
   );
+  const runtimeStatusLabel = useMemo(() => {
+    // local 成功：display remoteStatus 归一为 null，但 snapshot.remoteStatus 仍是 local。
+    if (runtimeDisplay.snapshot?.remoteStatus === 'local') {
+      return t('workbench:mobile.automationPanel.runtimeStatusLocal');
+    }
+    const statusValue = runtimeDisplay.remoteStatus;
+    if (!statusValue) {
+      // cold offline / 未知：中性未知，不声称“显示缓存”。
+      return t('workbench:mobile.automationPanel.runtimeStatusUnknown');
+    }
+    return t(mobileRuntimeStatusLabelKey(statusValue));
+  }, [runtimeDisplay.remoteStatus, runtimeDisplay.snapshot, t]);
+  // 仅 warm offline（有 snapshot + cachedAt）展示缓存提示；cold offline 不声称有缓存。
+  const showRuntimeCachedHint =
+    runtimeDisplay.remoteStatus === 'offline' &&
+    runtimeDisplay.snapshot !== null &&
+    runtimeDisplay.cachedAt !== null;
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -396,14 +499,47 @@ export function MobileAutomationPanel({
     }
   }, [t]);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   项目切换或手动刷新时需要拉取 remote-aware runtime snapshot，并与任务列表解耦。
+   *
+   * Code Logic（这个函数做什么）:
+   *   通过模块 store 生成 request seq、调用 mobile HTTP route，成功/失败归并显示缓存；缓存不驱动动作。
+   */
+  const loadRuntimeSnapshot = useCallback(async (projectId: string): Promise<void> => {
+    const requestSeq = nextMobileRuntimeSnapshotRequestSeq(projectId);
+    // 同项目 refresh 可保留本项目 live 缓存作骨架；跨项目时 begin 只会读到目标 project 缓存。
+    setRuntimeDisplay(beginMobileRuntimeSnapshotLoad(projectId));
+    try {
+      const snapshot = await httpOrchestratorTransport.getRuntimeSnapshot(projectId);
+      if (activeProjectIdRef.current !== projectId) return;
+      const next = applyMobileRuntimeSnapshotSuccess(projectId, requestSeq, snapshot);
+      // next 已 stamp projectId；active 守卫后再 set，避免旧项目响应写入。
+      if (next && activeProjectIdRef.current === projectId) setRuntimeDisplay(next);
+    } catch (reason) {
+      if (activeProjectIdRef.current !== projectId) return;
+      // 必须保留 adapter 的 OrchestratorRuntimeTransportError.kind；
+      // 用 new Error(message) 会抹掉 network，warm offline 缓存永远不可达。
+      const next = applyMobileRuntimeSnapshotFailure(
+        projectId,
+        requestSeq,
+        toRuntimeLoadError(reason),
+      );
+      if (next && activeProjectIdRef.current === projectId) setRuntimeDisplay(next);
+    }
+  }, []);
+
   /* eslint-disable react-hooks/set-state-in-effect -- 项目切换时必须同步自动化任务上下文 */
   useEffect(() => {
     const projectId = project?.id ?? null;
     activeProjectIdRef.current = projectId;
     requestIdRef.current += 1;
     evidenceRequestIdRef.current += 1;
+    appliedFocusTaskIdRef.current = null;
+    appliedFocusOutboxIdRef.current = null;
     setTaskViews([]);
     setSelectedTaskView(null);
+    setFocusedOutboxId(null);
     setEvidenceItems([]);
     setEvidenceError(null);
     setEvidenceLoading(false);
@@ -417,11 +553,66 @@ export function MobileAutomationPanel({
     setTitle('');
     setGoal('');
     setAcceptanceCriteria('');
+    // 同步重置为归属新项目的空/loading 态，避免 effect 间首帧串台（render selector 是双保险）。
+    setRuntimeDisplay(
+      projectId
+        ? emptyMobileRuntimeDisplayState(true, null, projectId)
+        : emptyMobileRuntimeDisplayState(false),
+    );
 
     if (projectId) {
       void loadTasks(projectId);
+      void loadRuntimeSnapshot(projectId);
+    } else {
+      resetMobileRuntimeSnapshotStore();
     }
-  }, [loadTasks, project?.id]);
+  }, [loadRuntimeSnapshot, loadTasks, project?.id]);
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   Attention 跳转到 automation 后需要在列表加载完成时聚焦 task 或 outbox；找不到则回报 missing。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   在非 loading 时匹配 focusTaskId/focusOutboxId；成功选中详情或高亮 outbox，失败回调 onFocusResult(missing)。
+   */
+  useEffect(() => {
+    if (loading) return;
+    if (!project?.id) return;
+
+    if (focusTaskId && appliedFocusTaskIdRef.current !== focusTaskId) {
+      appliedFocusTaskIdRef.current = focusTaskId;
+      const match = taskViews.find(
+        (view) => view.origin !== 'pendingRemote' && view.task.id === focusTaskId,
+      );
+      if (match) {
+        setSelectedTaskView(match);
+        onFocusResult?.({ status: 'found', entity: 'task', id: focusTaskId });
+      } else {
+        setSelectedTaskView(null);
+        onFocusResult?.({ status: 'missing', entity: 'task', id: focusTaskId });
+      }
+    }
+
+    if (focusOutboxId && appliedFocusOutboxIdRef.current !== focusOutboxId) {
+      appliedFocusOutboxIdRef.current = focusOutboxId;
+      const match = pendingRemoteItems.find((item) => item.id === focusOutboxId);
+      if (match) {
+        setFocusedOutboxId(focusOutboxId);
+        onFocusResult?.({ status: 'found', entity: 'outbox', id: focusOutboxId });
+      } else {
+        setFocusedOutboxId(null);
+        onFocusResult?.({ status: 'missing', entity: 'outbox', id: focusOutboxId });
+      }
+    }
+  }, [
+    focusOutboxId,
+    focusTaskId,
+    loading,
+    onFocusResult,
+    pendingRemoteItems,
+    project?.id,
+    taskViews,
+  ]);
 
   useEffect(() => {
     const projectId = activeProjectIdRef.current;
@@ -464,16 +655,88 @@ export function MobileAutomationPanel({
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户点击刷新时需要重新读取当前项目的任务列表，未选项目不应发起请求。
+   *   用户点击刷新时需要重新读取当前项目的任务列表与 runtime 状态，未选项目不应发起请求。
    *
    * Code Logic（这个函数做什么）:
-   *   校验当前 project id，存在时调用 loadTasks；错误由 loadTasks 写入面板状态。
+   *   校验当前 project id，存在时并行调用 loadTasks 与 loadRuntimeSnapshot。
    */
   const handleRefresh = useCallback((): void => {
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
     void loadTasks(projectId);
-  }, [loadTasks]);
+    void loadRuntimeSnapshot(projectId);
+  }, [loadRuntimeSnapshot, loadTasks]);
+
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机 Automation 面板对 failed outbox 点 Retry 时，应在本机把条目回到 pending、刷新列表，
+   *   并立即失效全局 Inbox 投影。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验 project 与 busy 状态，调用 httpOrchestratorTransport.outbox.retry，
+   *   成功后 loadTasks 并 requestAttentionInvalidation。
+   */
+  const handleRetryRemoteOutbox = useCallback(
+    async (outboxId: string): Promise<void> => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || outboxActionId) return;
+      setOutboxActionId(outboxId);
+      setError(null);
+      try {
+        await httpOrchestratorTransport.outbox.retry(projectId, outboxId);
+        if (activeProjectIdRef.current !== projectId) return;
+        await loadTasks(projectId);
+        requestAttentionInvalidation();
+      } catch (reason) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setError(
+          `${t('workbench:mobile.automationPanel.errors.retryOutbox')}: ${getErrorMessage(reason)}`,
+        );
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setOutboxActionId(null);
+        }
+      }
+    },
+    [loadTasks, outboxActionId, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机 Automation 面板对 failed outbox 点 Discard 时，需要确认后进入 discarded 审计终态，
+   *   并从 Inbox 移除对应 failed outbox 投影。
+   *
+   * Code Logic（这个函数做什么）:
+   *   window.confirm 后调用 outbox.discard，成功后 loadTasks 并 requestAttentionInvalidation。
+   */
+  const handleDiscardRemoteOutbox = useCallback(
+    async (outboxId: string): Promise<void> => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || outboxActionId) return;
+      const confirmed = window.confirm(t('workbench:mobile.automationPanel.pendingDiscardConfirm'));
+      if (!confirmed) return;
+      setOutboxActionId(outboxId);
+      setError(null);
+      try {
+        await httpOrchestratorTransport.outbox.discard(projectId, outboxId);
+        if (activeProjectIdRef.current !== projectId) return;
+        await loadTasks(projectId);
+        requestAttentionInvalidation();
+      } catch (reason) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setError(
+          `${t('workbench:mobile.automationPanel.errors.discardOutbox')}: ${getErrorMessage(reason)}`,
+        );
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setOutboxActionId(null);
+        }
+      }
+    },
+    [loadTasks, outboxActionId, t],
+  );
+
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -484,6 +747,9 @@ export function MobileAutomationPanel({
    */
   const handleOpenCreateDialog = useCallback((): void => {
     if (!activeProjectIdRef.current) return;
+    // 打开新弹窗视为新逻辑提交周期，清空旧幂等键。
+    createClientRequestIdRef.current = null;
+    createClientRequestFingerprintRef.current = null;
     setError(null);
     setStatus(null);
     setCreateDialogOpen(true);
@@ -494,10 +760,12 @@ export function MobileAutomationPanel({
    *   弹窗关闭应避免打断正在创建或 AI 完善的请求，防止用户误以为操作已取消。
    *
    * Code Logic（这个函数做什么）:
-   *   若没有 pending 请求则关闭 dialog；请求中忽略关闭动作。
+   *   若没有 pending 请求则关闭 dialog 并清空逻辑提交幂等键；请求中忽略关闭动作。
    */
   const handleCloseCreateDialog = useCallback((): void => {
     if (creating || completingPrompt) return;
+    createClientRequestIdRef.current = null;
+    createClientRequestFingerprintRef.current = null;
     setCreateDialogOpen(false);
   }, [creating, completingPrompt]);
 
@@ -571,9 +839,11 @@ export function MobileAutomationPanel({
   /**
    * Business Logic（为什么需要这个函数）:
    *   手机端创建任务必须显式支持 Backlog、Todo 和 Start 三种业务动作，与桌面 workflow board 对齐。
+   *   响应丢失后用户重试必须复用同一 clientRequestId，避免 owner 侧重复建任务。
    *
    * Code Logic（这个函数做什么）:
-   *   校验项目和表单后调用 HTTP createView，并显式传 createAction；成功后合并 task view 并清空弹窗。
+   *   校验项目和表单；按表单指纹在逻辑提交周期内复用 clientRequestId；调用 HTTP createView；
+   *   成功后清空弹窗与幂等键，失败保留键供重试。
    */
   const handleCreateTask = useCallback(async (
     createAction: HttpCreateOrchestratorTaskAction,
@@ -589,6 +859,23 @@ export function MobileAutomationPanel({
       return;
     }
 
+    // 表单内容指纹：任一字段变化视为新逻辑提交，重新 mint 幂等键。
+    const fingerprint = [
+      projectId,
+      trimmedTitle,
+      trimmedGoal,
+      trimmedAcceptanceCriteria,
+      createAction,
+    ].join('\u0001');
+    if (
+      createClientRequestIdRef.current === null
+      || createClientRequestFingerprintRef.current !== fingerprint
+    ) {
+      createClientRequestIdRef.current = createHttpOrchestratorClientRequestId();
+      createClientRequestFingerprintRef.current = fingerprint;
+    }
+    const clientRequestId = createClientRequestIdRef.current;
+
     setCreatingAction(createAction);
     setError(null);
     setStatus(null);
@@ -600,6 +887,7 @@ export function MobileAutomationPanel({
         acceptanceCriteria: trimmedAcceptanceCriteria,
         priority: 0,
         createAction,
+        clientRequestId,
       });
       if (activeProjectIdRef.current !== projectId) return;
       setTaskViews((current) => upsertOrchestratorTaskView(current, createdTaskView));
@@ -610,6 +898,8 @@ export function MobileAutomationPanel({
       setGoal('');
       setAcceptanceCriteria('');
       setPromptDraft('');
+      createClientRequestIdRef.current = null;
+      createClientRequestFingerprintRef.current = null;
       setCreateDialogOpen(false);
       setStatus(t(statusKey));
     } catch (reason) {
@@ -680,6 +970,90 @@ export function MobileAutomationPanel({
 
       {hasProject ? (
         <>
+          <section className={styles.mobileAutomationGroup} aria-labelledby={runtimeTitleId}>
+            <div className={styles.mobileAutomationGroupHeader}>
+              <span id={runtimeTitleId}>
+                {t('workbench:mobile.automationPanel.runtimeSnapshotTitle')}
+              </span>
+              <span className={`${styles.mobileBadge} ${styles.mobileBadgeAccent}`}>
+                {runtimeDisplay.loading
+                  ? t('workbench:mobile.automationPanel.runtimeSnapshotLoading')
+                  : runtimeStatusLabel}
+              </span>
+            </div>
+            <div className={styles.automationTaskBody}>
+              {runtimeDisplay.loading && !runtimeDisplay.snapshot ? (
+                <p className={styles.panelState}>
+                  {t('workbench:mobile.automationPanel.runtimeSnapshotLoading')}
+                </p>
+              ) : null}
+              {runtimeDisplay.error ? (
+                <p className={styles.panelState}>{runtimeDisplay.error.message}</p>
+              ) : null}
+              {!runtimeDisplay.loading &&
+              !runtimeDisplay.snapshot &&
+              runtimeDisplay.remoteStatus &&
+              runtimeDisplay.remoteStatus !== 'live' ? (
+                <p className={styles.panelState}>{runtimeStatusLabel}</p>
+              ) : null}
+              {runtimeDisplay.snapshot ? (
+                <>
+                  <p className={styles.mobileListMeta}>
+                    {t('workbench:mobile.automationPanel.runtimeGeneratedAt', {
+                      time: formatRuntimeTimestamp(runtimeDisplay.snapshot.generatedAt),
+                    })}
+                  </p>
+                  <p className={styles.mobileListMeta}>
+                    {t('workbench:mobile.automationPanel.runtimeLatestTickAt', {
+                      time: runtimeDisplay.snapshot.latestTickAt
+                        ? formatRuntimeTimestamp(runtimeDisplay.snapshot.latestTickAt)
+                        : t('workbench:mobile.automationPanel.runtimeLatestTickUnknown'),
+                    })}
+                  </p>
+                  <p>
+                    {t('workbench:mobile.automationPanel.runtimeSlots', {
+                      used: runtimeDisplay.snapshot.slotsUsed,
+                      max: runtimeDisplay.snapshot.maxConcurrentTasks,
+                      running: runtimeDisplay.snapshot.runningTasks.length,
+                      retrying: runtimeDisplay.snapshot.retryingTasks.length,
+                    })}
+                  </p>
+                  {runtimeDisplay.snapshot.latestError ? (
+                    <p>
+                      {t('workbench:mobile.automationPanel.runtimeLatestError', {
+                        error: runtimeDisplay.snapshot.latestError,
+                      })}
+                    </p>
+                  ) : null}
+                  {runtimeDisplay.snapshot.recentEvents.length > 0 ? (
+                    <div className={styles.mobileList}>
+                      <p className={styles.mobileListMeta}>
+                        {t('workbench:mobile.automationPanel.runtimeRecentEvents')}
+                      </p>
+                      {runtimeDisplay.snapshot.recentEvents.map((event) => (
+                        <p className={styles.mobileListMeta} key={event.id}>
+                          {event.taskTitle}: {event.message}
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+              {runtimeDisplay.cachedAt ? (
+                <p className={styles.mobileListMeta}>
+                  {t('workbench:mobile.automationPanel.runtimeLastUpdated', {
+                    time: formatRuntimeTimestamp(runtimeDisplay.cachedAt),
+                  })}
+                </p>
+              ) : null}
+              {showRuntimeCachedHint ? (
+                <p className={styles.mobileListMeta}>
+                  {t('workbench:mobile.automationPanel.runtimeCachedHint')}
+                </p>
+              ) : null}
+            </div>
+          </section>
+
           {loading ? <p className={styles.panelState}>{t('workbench:loading')}</p> : null}
           {isListEmpty ? (
             <p className={styles.panelState}>{t('workbench:mobile.automationPanel.empty')}</p>
@@ -781,7 +1155,13 @@ export function MobileAutomationPanel({
                 </div>
                 <div className={styles.mobileList}>
                   {pendingRemoteItems.map((item) => (
-                    <article key={item.id} className={styles.mobileListItem}>
+                    <article
+                      key={item.id}
+                      className={`${styles.mobileListItem} ${
+                        focusedOutboxId === item.id ? styles.mobileListItemActive : ''
+                      }`}
+                      data-attention-outbox={focusedOutboxId === item.id ? 'true' : undefined}
+                    >
                       <div className={styles.mobileListTitleRow}>
                         <strong className={styles.mobileListTitle}>
                           {pendingRemoteTaskTitle(item)}
@@ -811,6 +1191,30 @@ export function MobileAutomationPanel({
                           {t('workbench:mobile.automationPanel.origin.pending')}
                         </span>
                       </div>
+                      {item.status === 'failed' ? (
+                        <div className={styles.mobileBadgeRow}>
+                          <button
+                            type="button"
+                            className={styles.secondaryButton}
+                            disabled={outboxActionId !== null}
+                            onClick={() => {
+                              void handleRetryRemoteOutbox(item.id);
+                            }}
+                          >
+                            {t('workbench:mobile.automationPanel.pendingRetry')}
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.secondaryButton}
+                            disabled={outboxActionId !== null}
+                            onClick={() => {
+                              void handleDiscardRemoteOutbox(item.id);
+                            }}
+                          >
+                            {t('workbench:mobile.automationPanel.pendingDiscard')}
+                          </button>
+                        </div>
+                      ) : null}
                     </article>
                   ))}
                 </div>

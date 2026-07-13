@@ -83,10 +83,13 @@ pub struct MoveOrchestratorTaskWorkflowStateRequest {
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     Workbench 自动化状态条需要展示调度器、workflow、执行槽位和任务运行摘要，帮助用户判断自动化为何运行或停滞。
+///     未来 owning-device P2P 路由（T2）会通过 HTTP 把本 DTO 返回给请求端，
+///     请求端需要把 JSON 反序列化回同一 DTO，因此除了 Serialize 还需要 Deserialize。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     聚合设备级 Settings、scheduler telemetry、项目 workflow resolver、repo 槽位统计、最近任务事件和远端可用性状态。
-#[derive(Debug, Clone, Serialize)]
+///     同时派生 Serialize 与 Deserialize，保证 owning-device 路由的响应可被远端客户端用同一类型解析。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestratorRuntimeSnapshotDto {
     pub project_id: String,
@@ -113,10 +116,12 @@ pub struct OrchestratorRuntimeSnapshotDto {
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     状态条需要以低噪音方式展示正在运行和等待重试的任务，用户不必展开完整任务卡片也能判断现场。
+///     作为 OrchestratorRuntimeSnapshotDto 的嵌套字段，需要随父 DTO 一起被远端客户端反序列化。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     从 OrchestratorTaskRow 投影用户可识别字段和 runner runtime 字段，使用 camelCase 序列化给前端。
-#[derive(Debug, Clone, Serialize)]
+///     派生 Deserialize 以支持 owning-device P2P 路由响应的客户端解析。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestratorRuntimeTaskSummaryDto {
     pub task_id: String,
@@ -134,10 +139,12 @@ pub struct OrchestratorRuntimeTaskSummaryDto {
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     状态条需要展示最近 scheduler/runner 事件，帮助用户理解任务为何运行、阻塞或等待。
+///     作为 OrchestratorRuntimeSnapshotDto 的嵌套字段，需要随父 DTO 一起被远端客户端反序列化。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     从 orchestrator_task_events join 查询行投影可展示字段，不暴露 payload_json 等内部调试细节。
-#[derive(Debug, Clone, Serialize)]
+///     派生 Deserialize 以支持 owning-device P2P 路由响应的客户端解析。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestratorRuntimeEventDto {
     pub id: String,
@@ -249,6 +256,7 @@ pub(crate) fn build_orchestrator_task_row(
         branch_name: None,
         worktree_id: None,
         session_id: None,
+        prepare_claim_token: None,
         blocked_reason: None,
         attempt: 0,
         created_at: now.clone(),
@@ -333,9 +341,11 @@ async fn create_local_task_with_action(
 
 /// Business Logic（为什么需要这个函数）:
 ///     HTTP/mobile 本机创建必须同时支持 clientRequestId 幂等和三种 createAction，避免重试产生重复任务。
+///     Start 动作的全局 dispatch 只能在首次插入后执行，重放不得再调度其他排队任务。
 ///
 /// Code Logic（这个函数做什么）:
-///     构造本机任务 row，调用 repo 幂等创建入口按 createAction 落库，并在 Start 时 best-effort dispatch 后刷新。
+///     构造本机任务 row，调用 repo 幂等创建入口按 createAction 落库；
+///     仅 `newly_created=true` 时对 Start 做 best-effort dispatch 并刷新，命中重放直接返回既有任务。
 async fn create_local_task_for_client_request(
     state: &AppState,
     client_request_id: &str,
@@ -343,11 +353,14 @@ async fn create_local_task_for_client_request(
 ) -> Result<OrchestratorTaskRow, AppError> {
     let create_action = request.create_action;
     let row = build_orchestrator_task_row(request)?;
-    let created = state
+    let outcome = state
         .orchestrator_repo
         .create_remote_task_for_client_request(client_request_id, &row, create_action)
         .await?;
-    refresh_task_after_create_action(state, created, create_action).await
+    if !outcome.newly_created {
+        return Ok(outcome.task);
+    }
+    refresh_task_after_create_action(state, outcome.task, create_action).await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -428,17 +441,21 @@ fn runtime_event_from_row(row: OrchestratorRecentEventRow) -> OrchestratorRuntim
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     远端项目的 runtime snapshot 不能用本机 scheduler/config/workflow 冒充，必须明确标记本轮不可用。
+///     远端项目的 runtime snapshot 不能用本机 scheduler/config/workflow 冒充；
+///     当对端不支持、离线或业务不可用时，必须返回明确状态的空快照，而不是伪装本机数据。
 ///
 /// Code Logic（这个函数做什么）:
-///     构造 remoteStatus=unsupported 的空 snapshot；除 project 元信息和错误文案外不读取本机运行状态。
-fn remote_runtime_snapshot_unavailable(
+///     构造仅含 project 元信息与错误文案的空 snapshot；`remote_status` 与 `latest_error` 由调用方传入，
+///     槽位/任务/事件清零，不读取本机 scheduler/config/workflow。
+fn remote_runtime_snapshot_empty(
     project: &WorkbenchProjectRow,
+    remote_status: &str,
+    latest_error: &str,
 ) -> OrchestratorRuntimeSnapshotDto {
     OrchestratorRuntimeSnapshotDto {
         project_id: project.id.clone(),
         project_kind: project.kind.clone(),
-        remote_status: "unsupported".to_string(),
+        remote_status: remote_status.to_string(),
         generated_at: Utc::now().to_rfc3339(),
         latest_tick_at: None,
         last_dispatch_at: None,
@@ -450,10 +467,177 @@ fn remote_runtime_snapshot_unavailable(
         max_concurrent_tasks: 0,
         slots_used: 0,
         slots_available: 0,
-        latest_error: Some("远端项目暂不支持运行时快照；请在所属设备查看自动化状态".to_string()),
+        latest_error: Some(latest_error.to_string()),
         running_tasks: Vec::new(),
         retrying_tasks: Vec::new(),
         recent_events: Vec::new(),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     兼容既有“capability 缺失 / unsupported”空快照入口，避免调用方重复拼装文案。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `remote_runtime_snapshot_empty`，固定 remoteStatus=unsupported 与既有中文提示。
+fn remote_runtime_snapshot_unavailable(
+    project: &WorkbenchProjectRow,
+) -> OrchestratorRuntimeSnapshotDto {
+    remote_runtime_snapshot_empty(
+        project,
+        "unsupported",
+        "远端项目暂不支持运行时快照；请在所属设备查看自动化状态",
+    )
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端 runtime snapshot 的四态必须由 `PeerCallError` 变体类型驱动，
+///     不能解析本地化错误文案，也不能把 404 当成 capability 判断。
+///
+/// Code Logic（这个函数做什么）:
+///     按变体映射：Unsupported→unsupported，Network→offline，InvalidResponse/Remote→unavailable，
+///     并返回对应空 snapshot（不读取本机运行时数据）。
+fn remote_runtime_snapshot_from_peer_error(
+    project: &WorkbenchProjectRow,
+    error: crate::net::peer_error::PeerCallError,
+) -> OrchestratorRuntimeSnapshotDto {
+    use crate::net::peer_error::PeerCallError;
+    match error {
+        PeerCallError::Unsupported { .. } => remote_runtime_snapshot_unavailable(project),
+        PeerCallError::Network { .. } => remote_runtime_snapshot_empty(
+            project,
+            "offline",
+            "远端设备离线，暂时无法获取运行时快照",
+        ),
+        PeerCallError::InvalidResponse { .. } | PeerCallError::Remote { .. } => {
+            remote_runtime_snapshot_empty(project, "unavailable", "远端运行时快照暂时不可用")
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     owning device 返回的 runtime snapshot 使用远端裸 ID 与 local projectId；
+///     本机 shortcut 表面必须映射为 remote 实体 ID，并标记 live，才能与前端 remote-aware 通道一致。
+///
+/// Code Logic（这个函数做什么）:
+///     仅改写身份/表面元数据：outer projectId=本机 shortcut id、projectKind=remote、remoteStatus=live，
+///     并把 running/retrying/events 中的 task/worktree/session id 包成 `remote:<device>:<inner>`。
+///     保留 owner 的 generatedAt/tick/slots/attempt/events/workflow 等字段，不替换本机 telemetry。
+fn map_remote_runtime_snapshot_for_shortcut(
+    mut snapshot: OrchestratorRuntimeSnapshotDto,
+    remote_shortcut: &WorkbenchProjectRow,
+) -> OrchestratorRuntimeSnapshotDto {
+    snapshot.project_id = remote_shortcut.id.clone();
+    snapshot.project_kind = "remote".to_string();
+    snapshot.remote_status = "live".to_string();
+
+    let map_task = |task: &mut OrchestratorRuntimeTaskSummaryDto| {
+        task.task_id = remote_entity_id(&remote_shortcut.device_id, &task.task_id);
+        task.worktree_id = task
+            .worktree_id
+            .as_deref()
+            .map(|id| remote_entity_id(&remote_shortcut.device_id, id));
+        task.session_id = task
+            .session_id
+            .as_deref()
+            .map(|id| remote_entity_id(&remote_shortcut.device_id, id));
+    };
+    for task in &mut snapshot.running_tasks {
+        map_task(task);
+    }
+    for task in &mut snapshot.retrying_tasks {
+        map_task(task);
+    }
+    for event in &mut snapshot.recent_events {
+        event.task_id = remote_entity_id(&remote_shortcut.device_id, &event.task_id);
+    }
+    snapshot
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     open-project/设备查找失败时不能把含 owner base URL 的 AppError 直接抛给 mobile/Tauri 调用方，
+///     必须映射回四态空快照，保持 cold offline 与 unavailable 语义。
+///
+/// Code Logic（这个函数做什么）:
+///     仅真实传输离线（设备缺失 / 本机 Network 类 Unavailable|Timeout，如连接中断）→ offline；
+///     `AppError::Remote` 是在线对端返回的业务信封（含 unavailable/timeout code）→ unavailable，
+///     不得把 503/504 业务响应误判为离线并展示陈旧缓存。
+///     展示文案固定中文提示，不拼接 base_url/IP/端口，也不用中文 contains 判定四态。
+fn remote_runtime_snapshot_from_open_error(
+    project: &WorkbenchProjectRow,
+    error: AppError,
+) -> OrchestratorRuntimeSnapshotDto {
+    // Remote 业务信封来自已可达的对端，协议/业务不可用 ≠ 设备传输离线。
+    let is_remote_envelope = matches!(error, AppError::Remote { .. });
+    if !is_remote_envelope && is_remote_network_error(&error) {
+        return remote_runtime_snapshot_empty(
+            project,
+            "offline",
+            "远端设备离线，暂时无法获取运行时快照",
+        );
+    }
+    // 脱敏：业务/协议失败也绝不把 owner URL 写入 latest_error。
+    let sanitized = error.to_string();
+    let looks_like_url = sanitized.contains("http://") || sanitized.contains("https://");
+    let message = if looks_like_url || sanitized.trim().is_empty() {
+        "远端运行时快照暂时不可用".to_string()
+    } else {
+        sanitized
+    };
+    remote_runtime_snapshot_empty(project, "unavailable", &message)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的 runtime snapshot 必须向 owning device 拉取权威数据，
+///     不能用本机 scheduler/config/workflow 冒充远端状态。
+///
+/// Code Logic（这个函数做什么）:
+///     通过 open_remote_project_for_shortcut 解析 base_url 与远端 local projectId；
+///     open/device preflight 失败映射 offline/unavailable 空快照（不泄漏 owner URL）；
+///     调用 RemoteOrchestratorClient::runtime_snapshot 成功则映射 shortcut 身份字段，
+///     peer 失败则按 PeerCallError 变体回落到 unsupported/offline/unavailable 空快照。
+async fn get_remote_orchestrator_runtime_snapshot(
+    state: &AppState,
+    remote_shortcut: &WorkbenchProjectRow,
+    forwarded_request_id: Option<&str>,
+) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
+    let context = match open_remote_project_for_shortcut(
+        state,
+        remote_shortcut,
+        forwarded_request_id,
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            return Ok(remote_runtime_snapshot_from_open_error(
+                remote_shortcut,
+                error,
+            ));
+        }
+    };
+    // Business Logic: 多跳代理（mobile→本机→owner）必须复用入站 request_id；Tauri IPC 无入站 ID 时由客户端生成。
+    // 原样保留入站 request_id（含首尾空格），仅空串回落生成新 UUID。
+    let request_id = forwarded_request_id
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(crate::net::request_context::new_request_id);
+    let mut client = RemoteOrchestratorClient::new();
+    // 原样转发入站 request_id（含首尾空格）；middleware 接受可打印 ASCII，trim 会破坏跨跳关联。
+    if let Some(request_id) = forwarded_request_id.filter(|value| !value.is_empty()) {
+        client = client.with_forwarded_request_id(request_id);
+    }
+    match client
+        .runtime_snapshot(&context.base_url, &context.remote_project_id, &request_id)
+        .await
+    {
+        Ok(owner_snapshot) => Ok(map_remote_runtime_snapshot_for_shortcut(
+            owner_snapshot,
+            remote_shortcut,
+        )),
+        Err(error) => Ok(remote_runtime_snapshot_from_peer_error(
+            remote_shortcut,
+            error,
+        )),
     }
 }
 
@@ -523,18 +707,21 @@ pub(crate) async fn move_orchestrator_task_workflow_state_for_project(
 
 /// Business Logic（为什么需要这个函数）:
 ///     Workbench 状态条需要项目级 runtime snapshot，但实际数据分散在 Settings、workflow resolver 和 repo 统计中。
+///     本函数是本机命令与未来 owning-device P2P 路由（T2）共享的唯一构造入口，
+///     两端必须使用同一份本地快照构造逻辑，避免远端设备状态条与本机状态条出现分叉。
 ///
 /// Code Logic（这个函数做什么）:
-///     本机项目解析 WORKFLOW.md、统计槽位、任务摘要和最近事件；远端项目返回明确 unsupported 空快照。
+///     纯本地快照构造：解析 WORKFLOW.md、统计槽位、任务摘要和最近事件，组装 remoteStatus=local 的 DTO。
+///     本函数不再内部分支远端 shortcut——调用方必须先解析并校验 project.kind，
+///     远端 shortcut 应由命令/路由层先调用 remote_runtime_snapshot_unavailable 提前返回，
+///     再把已校验的本地 WorkbenchProject 传入本函数。这样 P2P owning-device 路由可以
+///     直接复用本构造逻辑而无需复制代码或处理与己无关的远端语义。
 pub(crate) async fn get_orchestrator_runtime_snapshot_for_project(
     repo: &OrchestratorRepo,
     config: &OrchestratorAutomationConfig,
     project: &WorkbenchProjectRow,
     scheduler_snapshot: &OrchestratorSchedulerTelemetrySnapshot,
 ) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
-    if project.kind == "remote" {
-        return Ok(remote_runtime_snapshot_unavailable(project));
-    }
     let project_path = Path::new(&project.path);
     let (workflow_source, workflow_valid, workflow_error) =
         match resolve_project_workflow(project_path) {
@@ -727,12 +914,18 @@ async fn create_remote_orchestrator_task_online(
     state: &AppState,
     remote_shortcut: &WorkbenchProjectRow,
     mut request: RemoteCreateOrchestratorTaskReq,
+    forwarded_request_id: Option<&str>,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
-    let context = open_remote_project_for_shortcut(state, remote_shortcut).await?;
+    // Business Logic: mobile→本机→owner 创建任务必须复用同一 request_id，便于多跳排障。
+    let context =
+        open_remote_project_for_shortcut(state, remote_shortcut, forwarded_request_id).await?;
     request.project_id = context.remote_project_id.clone();
-    let task = RemoteOrchestratorClient::new()
-        .create_task(&context.base_url, request)
-        .await?;
+    let mut client = RemoteOrchestratorClient::new();
+    // 原样转发入站 request_id（含首尾空格）；middleware 接受可打印 ASCII，trim 会破坏跨跳关联。
+    if let Some(request_id) = forwarded_request_id.filter(|value| !value.is_empty()) {
+        client = client.with_forwarded_request_id(request_id);
+    }
+    let task = client.create_task(&context.base_url, request).await?;
     upsert_remote_task_view(
         state,
         remote_shortcut,
@@ -785,7 +978,7 @@ where
     F: FnOnce(RemoteOrchestratorClient, String, String) -> Fut,
     Fut: std::future::Future<Output = Result<OrchestratorTaskDto, AppError>>,
 {
-    let context = open_remote_project_for_shortcut(state, remote_shortcut).await?;
+    let context = open_remote_project_for_shortcut(state, remote_shortcut, None).await?;
     let remote_task_id = remote_inner_task_id_for_shortcut(remote_shortcut, task_id)?;
     let task = operation(
         RemoteOrchestratorClient::new(),
@@ -1204,23 +1397,17 @@ async fn transition_verified_task_to_human_review(
 
 /// Business Logic（为什么需要这个函数）:
 ///     verifier 判定失败后只有仍处于 Verifying 的任务可以回到 Preparing，避免用户 Abort 被旧流程覆盖。
+///     修复轮 prepare 强制要求非空 claim token，转换时必须原子签发。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用仓储 split-state 条件 helper 做 Verifying->Preparing/Rework/Preparing/Failed；未命中时读取当前任务并标记未转换。
+///     调用专用 Verifying→Preparing helper，同时写入 Rework/Preparing/Failed 并签发 prepare_claim_token；
+///     未命中时读取当前任务并标记未转换。
 async fn transition_failed_verification_task_to_preparing(
     repo: &OrchestratorRepo,
     task_id: &str,
 ) -> Result<ConditionalRepairTransition, AppError> {
     match repo
-        .try_transition_task_split_state(
-            task_id,
-            OrchestratorTaskStatus::Verifying,
-            OrchestratorTaskStatus::Preparing,
-            OrchestratorWorkflowState::Rework,
-            OrchestratorRunState::Preparing,
-            Some(OrchestratorAttemptPhase::Failed),
-            None,
-        )
+        .try_transition_verifying_to_preparing_with_claim(task_id)
         .await?
     {
         Some(task) => Ok(ConditionalRepairTransition {
@@ -1490,11 +1677,24 @@ pub async fn create_orchestrator_task(
 ///     Phase 6 前端需要在远端项目中展示远端真实任务、本机 pending outbox 和离线 mirror 快照。
 ///
 /// Code Logic（这个函数做什么）:
-///     local 项目读取本机任务并包装 Local；remote 项目在线时同步 mirror，离线时读最近 mirror；
-///     最后追加 pending/sending/failed outbox 项。
+///     local 项目读取本机任务并包装 Local；remote 项目在线时同步 mirror（可转发 request_id），
+///     离线时读最近 mirror；最后追加 pending/sending/failed outbox 项。
 pub(crate) async fn list_orchestrator_task_views_for_state(
     state: &AppState,
     project_id: Option<String>,
+) -> Result<Vec<OrchestratorTaskViewDto>, AppError> {
+    list_orchestrator_task_views_for_state_with_request_id(state, project_id, None).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     mobile HTTP list 需要把入站 request_id 贯穿 open-project 与 owner list，避免多跳 ID 断链。
+///
+/// Code Logic（这个函数做什么）:
+///     与 `list_orchestrator_task_views_for_state` 相同，但把 `forwarded_request_id` 传给 mirror 同步。
+pub(crate) async fn list_orchestrator_task_views_for_state_with_request_id(
+    state: &AppState,
+    project_id: Option<String>,
+    forwarded_request_id: Option<&str>,
 ) -> Result<Vec<OrchestratorTaskViewDto>, AppError> {
     let Some(project_id) = project_id else {
         let rows = state.orchestrator_repo.list_tasks(None).await?;
@@ -1510,16 +1710,17 @@ pub(crate) async fn list_orchestrator_task_views_for_state(
         return Ok(rows.into_iter().map(local_task_view).collect());
     }
 
-    let mirrors = match sync_remote_task_mirror_for_project(state, &project).await {
-        Ok(mirrors) => mirrors,
-        Err(err) if is_remote_network_error(&err) => {
-            state
-                .orchestrator_repo
-                .list_remote_task_mirrors_for_project_path(&project.device_id, &project.path)
-                .await?
-        }
-        Err(err) => return Err(err),
-    };
+    let mirrors =
+        match sync_remote_task_mirror_for_project(state, &project, forwarded_request_id).await {
+            Ok(mirrors) => mirrors,
+            Err(err) if is_remote_network_error(&err) => {
+                state
+                    .orchestrator_repo
+                    .list_remote_task_mirrors_for_project_path(&project.device_id, &project.path)
+                    .await?
+            }
+            Err(err) => return Err(err),
+        };
     let mut views = remote_mirror_views(mirrors, &project)?;
     views.extend(pending_remote_task_views_for_project(state, &project).await?);
     Ok(views)
@@ -1552,7 +1753,10 @@ pub(crate) async fn create_orchestrator_task_view_for_state(
     }
 
     let remote_request = remote_create_request_from_local(&request);
-    match create_remote_orchestrator_task_online(state, &project, remote_request.clone()).await {
+    // Tauri IPC 无入站 request_id，第二跳由 client 生成新 ID。
+    match create_remote_orchestrator_task_online(state, &project, remote_request.clone(), None)
+        .await
+    {
         Ok(view) => Ok(view),
         Err(err) if is_remote_network_error(&err) => {
             let item = create_pending_remote_task(state, &project, remote_request).await?;
@@ -1741,7 +1945,7 @@ pub async fn refresh_orchestrator_project(
         });
     }
 
-    let context = open_remote_project_for_shortcut(state.inner(), &project).await?;
+    let context = open_remote_project_for_shortcut(state.inner(), &project, None).await?;
     let refreshed = RemoteOrchestratorClient::new()
         .refresh_project(&context.base_url, &context.remote_project_id)
         .await?;
@@ -1772,19 +1976,43 @@ pub async fn move_orchestrator_task_workflow_state(
     .await
 }
 
-/// 获取 Orchestrator 项目运行时快照。
+/// 获取 Orchestrator 项目运行时快照（remote-aware 共享入口）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     Workbench 自动化状态条需要一个轻量观测接口展示 scheduler、workflow 和槽位状态。
+///     桌面 Tauri 命令与 `/mobile` HTTP 路由都需要同一套 local/remote 四态分发，
+///     避免手机浏览器绕过 owning-device 拉取或读到本机冒充远端的快照。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取 Workbench 项目和设备级 Settings 后，构造 runtime snapshot DTO。
-#[tauri::command]
-pub async fn get_orchestrator_runtime_snapshot(
-    state: State<'_, AppState>,
-    project_id: String,
+///     读取 Workbench 项目；local 走共享 builder + 本机 config/telemetry；
+///     remote 走 open_remote_project_for_shortcut + RemoteOrchestratorClient::runtime_snapshot，
+///     成功映射 identity 字段，失败按 PeerCallError 变体回落空快照。
+///     本函数从不向调用方暴露 owning device 的 P2P base URL。
+pub(crate) async fn get_orchestrator_runtime_snapshot_for_state(
+    state: &AppState,
+    project_id: &str,
 ) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
-    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    get_orchestrator_runtime_snapshot_for_state_with_request_id(state, project_id, None).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Mobile HTTP 入口携带入站 request_id，需要沿两跳链路转发到 owning device；
+///     Tauri IPC 入口没有入站 ID，传 None 由下游生成。
+///
+/// Code Logic（这个函数做什么）:
+///     与 `get_orchestrator_runtime_snapshot_for_state` 相同的 local/remote 四态分发，
+///     但把可选 `forwarded_request_id` 传给 remote open-project / runtime_snapshot。
+pub(crate) async fn get_orchestrator_runtime_snapshot_for_state_with_request_id(
+    state: &AppState,
+    project_id: &str,
+    forwarded_request_id: Option<&str>,
+) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
+    let project = get_orchestrator_workbench_project(state, project_id).await?;
+    // 远端 shortcut 不得读本机 scheduler/config/workflow 冒充 owner 状态。
+    // 共享 builder 只负责本地项目；远端守卫与四态分发留在命令层。
+    if project.kind == "remote" {
+        return get_remote_orchestrator_runtime_snapshot(state, &project, forwarded_request_id)
+            .await;
+    }
     let config = state
         .config
         .read()
@@ -1801,6 +2029,22 @@ pub async fn get_orchestrator_runtime_snapshot(
     .await
 }
 
+/// 获取 Orchestrator 项目运行时快照。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Workbench 自动化状态条需要一个轻量观测接口展示 scheduler、workflow 和槽位状态；
+///     远端 shortcut 必须向 owning device 拉取权威快照，并映射为 live/offline/unsupported/unavailable。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `get_orchestrator_runtime_snapshot_for_state`，供桌面 Tauri invoke 使用。
+#[tauri::command]
+pub async fn get_orchestrator_runtime_snapshot(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
+    get_orchestrator_runtime_snapshot_for_state(state.inner(), &project_id).await
+}
+
 /// 通过 HTTP task-view 协议创建 remote-aware Orchestrator 任务。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -1809,9 +2053,15 @@ pub async fn get_orchestrator_runtime_snapshot(
 /// Code Logic（这个函数做什么）:
 ///     local 项目用 clientRequestId 幂等创建并按 createAction 决定初始状态；remote 项目保持同一 requestId 转发到 owning device，
 ///     网络失败时写 pending outbox 并返回 PendingRemote。
-pub(crate) async fn create_orchestrator_task_view_for_http(
+/// Business Logic（为什么需要这个函数）:
+///     mobile create 入站 request_id 必须贯穿 open-project 与 owner create，否则 owner 侧看到重生 ID。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 clientRequestId；local 幂等创建；remote 把 `forwarded_request_id` 传给 open-project 与 owner create。
+pub(crate) async fn create_orchestrator_task_view_for_http_with_request_id(
     state: &AppState,
     req: RemoteCreateOrchestratorTaskReq,
+    forwarded_request_id: Option<&str>,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
     let project = get_orchestrator_workbench_project(state, &req.project_id).await?;
     let client_request_id = req
@@ -1849,7 +2099,14 @@ pub(crate) async fn create_orchestrator_task_view_for_http(
         client_request_id: Some(client_request_id),
         ..req
     };
-    match create_remote_orchestrator_task_online(state, &project, remote_request.clone()).await {
+    match create_remote_orchestrator_task_online(
+        state,
+        &project,
+        remote_request.clone(),
+        forwarded_request_id,
+    )
+    .await
+    {
         Ok(view) => Ok(view),
         Err(err) if is_remote_network_error(&err) => {
             let item = create_pending_remote_task(state, &project, remote_request).await?;
@@ -1981,7 +2238,7 @@ pub async fn list_orchestrator_task_evidence_for_project(
     if project.kind != "remote" {
         return state.orchestrator_repo.list_evidence(&task_id).await;
     }
-    let context = open_remote_project_for_shortcut(state.inner(), &project).await?;
+    let context = open_remote_project_for_shortcut(state.inner(), &project, None).await?;
     let remote_task_id = remote_inner_task_id_for_shortcut(&project, &task_id)?;
     let evidence = RemoteOrchestratorClient::new()
         .get_evidence(&context.base_url, &remote_task_id)
@@ -2011,7 +2268,7 @@ pub async fn get_orchestrator_config_for_project(
             .clone();
         return Ok(config.into());
     }
-    let context = open_remote_project_for_shortcut(state.inner(), &project).await?;
+    let context = open_remote_project_for_shortcut(state.inner(), &project, None).await?;
     RemoteOrchestratorClient::new()
         .get_config(&context.base_url)
         .await
@@ -2374,6 +2631,187 @@ pub async fn abort_orchestrator_task(
     Ok(OrchestratorTaskDto::from(updated))
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     失败 outbox 的 Retry/Discard 必须在本机 remote shortcut 上下文中执行，outbox 行只存在于当前设备，
+///     不能递归代理到 owning device，也不能操作不属于当前 shortcut 的条目。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 Workbench 项目，要求 kind=remote；读取 outbox 并校验 device_id/path 与 shortcut 一致；
+///     再调用仓储 failed-only 原子转移，返回 camelCase DTO。
+pub(crate) async fn retry_orchestrator_remote_outbox_for_repos(
+    orchestrator_repo: &OrchestratorRepo,
+    workbench_project_repo: &crate::storage::WorkbenchProjectRepo,
+    project_id: &str,
+    outbox_id: &str,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    mutate_failed_remote_outbox_for_repos(
+        orchestrator_repo,
+        workbench_project_repo,
+        project_id,
+        outbox_id,
+        RemoteOutboxMutation::Retry,
+    )
+    .await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     用户确认放弃失败 outbox 后，本机应把该条目标为 discarded 审计终态，且不转发远端。
+///
+/// Code Logic（这个函数做什么）:
+///     复用项目归属与 outbox 归属校验，再调用 discard_failed_remote_outbox_item。
+pub(crate) async fn discard_orchestrator_remote_outbox_for_repos(
+    orchestrator_repo: &OrchestratorRepo,
+    workbench_project_repo: &crate::storage::WorkbenchProjectRepo,
+    project_id: &str,
+    outbox_id: &str,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    mutate_failed_remote_outbox_for_repos(
+        orchestrator_repo,
+        workbench_project_repo,
+        project_id,
+        outbox_id,
+        RemoteOutboxMutation::Discard,
+    )
+    .await
+}
+
+/// 本机 failed outbox 人工动作。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     Retry 与 Discard 共享项目/outbox 归属校验，但最终仓储转移不同。
+///
+/// Code Logic（这个枚举做什么）:
+///     区分 retry 与 discard 两条 failed-only 原子路径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteOutboxMutation {
+    Retry,
+    Discard,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Retry/Discard 的项目归属、outbox 归属与 failed-only 约束必须集中，避免 Tauri 与 HTTP 路径分叉。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 project 存在且为 remote shortcut，校验 outbox 存在且 device_id/path 匹配，再调用对应仓储方法。
+async fn mutate_failed_remote_outbox_for_repos(
+    orchestrator_repo: &OrchestratorRepo,
+    workbench_project_repo: &crate::storage::WorkbenchProjectRepo,
+    project_id: &str,
+    outbox_id: &str,
+    mutation: RemoteOutboxMutation,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    let project_id = project_id.trim();
+    let outbox_id = outbox_id.trim();
+    if project_id.is_empty() {
+        return Err(AppError::validation("项目 ID 不能为空"));
+    }
+    if outbox_id.is_empty() {
+        return Err(AppError::validation("远端 outbox ID 不能为空"));
+    }
+
+    let project = workbench_project_repo
+        .get(project_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("工作台项目不存在"))?;
+    if project.kind != "remote" {
+        return Err(AppError::validation(
+            "只有远端项目快捷方式可以操作本机 remote outbox",
+        ));
+    }
+
+    let item = orchestrator_repo
+        .get_remote_outbox_item(outbox_id)
+        .await?
+        .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {outbox_id}")))?;
+    if item.device_id != project.device_id || item.remote_project_path != project.path {
+        return Err(AppError::validation("远端 outbox 不属于当前项目快捷方式"));
+    }
+
+    let updated = match mutation {
+        RemoteOutboxMutation::Retry => {
+            orchestrator_repo
+                .retry_failed_remote_outbox_item(outbox_id)
+                .await?
+        }
+        RemoteOutboxMutation::Discard => {
+            orchestrator_repo
+                .discard_failed_remote_outbox_item(outbox_id)
+                .await?
+        }
+    };
+    Ok(updated.to_dto())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     桌面 Automation UI 需要对本机 failed outbox 执行 Retry，且不得代理到远端 owner。
+///
+/// Code Logic（这个函数做什么）:
+///     从 AppState 取仓储，委托 retry_orchestrator_remote_outbox_for_repos。
+pub(crate) async fn retry_orchestrator_remote_outbox_for_state(
+    state: &AppState,
+    project_id: &str,
+    outbox_id: &str,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    retry_orchestrator_remote_outbox_for_repos(
+        state.orchestrator_repo.as_ref(),
+        state.workbench_project_repo.as_ref(),
+        project_id,
+        outbox_id,
+    )
+    .await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     桌面 Automation UI 需要对本机 failed outbox 执行 Discard，且不得代理到远端 owner。
+///
+/// Code Logic（这个函数做什么）:
+///     从 AppState 取仓储，委托 discard_orchestrator_remote_outbox_for_repos。
+pub(crate) async fn discard_orchestrator_remote_outbox_for_state(
+    state: &AppState,
+    project_id: &str,
+    outbox_id: &str,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    discard_orchestrator_remote_outbox_for_repos(
+        state.orchestrator_repo.as_ref(),
+        state.workbench_project_repo.as_ref(),
+        project_id,
+        outbox_id,
+    )
+    .await
+}
+
+/// 重试失败的远端 outbox。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在原 Automation UI 对 failed outbox 点 Retry 时，应保留原 payload/clientRequestId 并回到 pending。
+///
+/// Code Logic（这个函数做什么）:
+///     Tauri command 解包 State 与字符串参数，委托 state helper。
+#[tauri::command]
+pub async fn retry_orchestrator_remote_outbox(
+    state: State<'_, AppState>,
+    project_id: String,
+    outbox_id: String,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    retry_orchestrator_remote_outbox_for_state(state.inner(), &project_id, &outbox_id).await
+}
+
+/// 放弃失败的远端 outbox。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户确认放弃后，failed outbox 进入 discarded 审计终态，不再参与 dispatcher/active 列表。
+///
+/// Code Logic（这个函数做什么）:
+///     Tauri command 解包 State 与字符串参数，委托 state helper。
+#[tauri::command]
+pub async fn discard_orchestrator_remote_outbox(
+    state: State<'_, AppState>,
+    project_id: String,
+    outbox_id: String,
+) -> Result<OrchestratorRemoteOutboxDto, AppError> {
+    discard_orchestrator_remote_outbox_for_state(state.inner(), &project_id, &outbox_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2422,6 +2860,7 @@ mod tests {
             branch_name: None,
             worktree_id: Some("worktree-1".to_string()),
             session_id: None,
+            prepare_claim_token: None,
             blocked_reason: None,
             attempt: 0,
             created_at: "2026-07-05T00:00:00Z".to_string(),
@@ -2874,37 +3313,855 @@ mod tests {
             .contains("WORKFLOW.md"));
     }
 
+    /// Business Logic（为什么需要这个函数）:
+    ///     远端 live 映射测试需要一个含任务/事件/telemetry 的 owner 快照，验证本机只改身份字段。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构造带唯一 generatedAt/tick/slots/workflow 与 running/retrying/events 的 owner DTO，
+    ///     使用远端裸 task/worktree/session id 以便断言映射结果。
+    fn owner_runtime_snapshot_fixture() -> OrchestratorRuntimeSnapshotDto {
+        OrchestratorRuntimeSnapshotDto {
+            project_id: "owner-local-project-1".to_string(),
+            project_kind: "local".to_string(),
+            remote_status: "local".to_string(),
+            generated_at: "2026-07-12T09:08:07.006Z".to_string(),
+            latest_tick_at: Some("2026-07-12T09:07:00Z".to_string()),
+            last_dispatch_at: Some("2026-07-12T09:06:30Z".to_string()),
+            last_dispatched_count: 4,
+            scheduler_enabled: true,
+            workflow_source: "projectOverride".to_string(),
+            workflow_valid: true,
+            workflow_error: None,
+            max_concurrent_tasks: 5,
+            slots_used: 2,
+            slots_available: 3,
+            latest_error: Some("owner-only-latest-error".to_string()),
+            running_tasks: vec![OrchestratorRuntimeTaskSummaryDto {
+                task_id: "task-owner-running".to_string(),
+                title: "远端运行任务".to_string(),
+                workflow_state: OrchestratorWorkflowState::InProgress,
+                run_state: OrchestratorRunState::Running,
+                attempt_phase: Some(OrchestratorAttemptPhase::Streaming),
+                session_id: Some("session-owner-1".to_string()),
+                worktree_id: Some("worktree-owner-1".to_string()),
+                last_runtime_message: Some("owner streaming".to_string()),
+                last_activity_at: Some("2026-07-12T09:05:00Z".to_string()),
+            }],
+            retrying_tasks: vec![OrchestratorRuntimeTaskSummaryDto {
+                task_id: "task-owner-retry".to_string(),
+                title: "远端重试任务".to_string(),
+                workflow_state: OrchestratorWorkflowState::Rework,
+                run_state: OrchestratorRunState::Blocked,
+                attempt_phase: None,
+                session_id: None,
+                worktree_id: Some("worktree-owner-2".to_string()),
+                last_runtime_message: Some("owner blocked".to_string()),
+                last_activity_at: Some("2026-07-12T09:04:00Z".to_string()),
+            }],
+            recent_events: vec![OrchestratorRuntimeEventDto {
+                id: "event-owner-1".to_string(),
+                task_id: "task-owner-running".to_string(),
+                task_title: "远端运行任务".to_string(),
+                kind: "runner".to_string(),
+                message: "owner event".to_string(),
+                created_at: "2026-07-12T09:03:00Z".to_string(),
+            }],
+        }
+    }
+
     /// Business Logic（为什么需要这个测试）:
-    ///     远端项目的 runtime snapshot 不能展示本机 scheduler/config/workflow，否则用户会误判远端自动化状态。
+    ///     live 成功路径必须把 owning device 快照映射到本机 remote shortcut 表面，
+    ///     并保留 owner telemetry；任何本机 scheduler/config 值都不得混入。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     用 remote shortcut 调用 snapshot helper，断言本轮明确拒绝而不是读取本机状态。
-    #[tokio::test]
-    async fn runtime_snapshot_reports_remote_project_unavailable() {
-        let repo = setup_orchestrator_repo().await;
+    ///     用 owner fixture 调用 map_remote_runtime_snapshot_for_shortcut，
+    ///     断言 project/task/worktree/session id 映射，以及 generatedAt/tick/slots/events 原样保留。
+    #[test]
+    fn remote_runtime_snapshot_maps_live_owner_fields_and_ids() {
+        let shortcut = remote_shortcut_row();
+        let owner = owner_runtime_snapshot_fixture();
+
+        let mapped = map_remote_runtime_snapshot_for_shortcut(owner, &shortcut);
+
+        assert_eq!(mapped.project_id, "shortcut-project-1");
+        assert_eq!(mapped.project_kind, "remote");
+        assert_eq!(mapped.remote_status, "live");
+        assert_eq!(mapped.generated_at, "2026-07-12T09:08:07.006Z");
+        assert_eq!(
+            mapped.latest_tick_at.as_deref(),
+            Some("2026-07-12T09:07:00Z")
+        );
+        assert_eq!(
+            mapped.last_dispatch_at.as_deref(),
+            Some("2026-07-12T09:06:30Z")
+        );
+        assert_eq!(mapped.last_dispatched_count, 4);
+        assert!(mapped.scheduler_enabled);
+        assert_eq!(mapped.workflow_source, "projectOverride");
+        assert!(mapped.workflow_valid);
+        assert!(mapped.workflow_error.is_none());
+        assert_eq!(mapped.max_concurrent_tasks, 5);
+        assert_eq!(mapped.slots_used, 2);
+        assert_eq!(mapped.slots_available, 3);
+        assert_eq!(
+            mapped.latest_error.as_deref(),
+            Some("owner-only-latest-error")
+        );
+        assert_eq!(mapped.running_tasks.len(), 1);
+        assert_eq!(
+            mapped.running_tasks[0].task_id,
+            "remote:device-a:task-owner-running"
+        );
+        assert_eq!(
+            mapped.running_tasks[0].session_id.as_deref(),
+            Some("remote:device-a:session-owner-1")
+        );
+        assert_eq!(
+            mapped.running_tasks[0].worktree_id.as_deref(),
+            Some("remote:device-a:worktree-owner-1")
+        );
+        assert_eq!(
+            mapped.running_tasks[0].last_runtime_message.as_deref(),
+            Some("owner streaming")
+        );
+        assert_eq!(mapped.retrying_tasks.len(), 1);
+        assert_eq!(
+            mapped.retrying_tasks[0].task_id,
+            "remote:device-a:task-owner-retry"
+        );
+        assert_eq!(
+            mapped.retrying_tasks[0].worktree_id.as_deref(),
+            Some("remote:device-a:worktree-owner-2")
+        );
+        assert_eq!(mapped.recent_events.len(), 1);
+        assert_eq!(
+            mapped.recent_events[0].task_id,
+            "remote:device-a:task-owner-running"
+        );
+        assert_eq!(mapped.recent_events[0].message, "owner event");
+        // 回归：映射结果中不得出现本机 local project id / local telemetry 文案。
+        assert_ne!(mapped.project_id, "project-1");
+        assert_ne!(mapped.generated_at, "local-telemetry-should-not-appear");
+        assert!(!mapped
+            .latest_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("local"));
+    }
+
+    /// Business Logic（为什么需要这个测试 / T7 owner 端到端透传）:
+    ///     route→client 解析后的 owner DTO 再经 command 层 shortcut 映射时，
+    ///     generatedAt/tick/slots/events 必须与 owner 种子逐字相等，仅 ID/表面字段被改写。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用唯一 owner 指纹构造 DTO，JSON round-trip 模拟 remote client 反序列化，
+    ///     再 map_remote_runtime_snapshot_for_shortcut，断言 owner 运行时字段精确相等，
+    ///     仅 projectId/kind/status 与 entity id 发生表面映射。
+    #[test]
+    fn remote_runtime_snapshot_preserves_owner_fields_after_client_json_and_shortcut_mapping() {
+        let shortcut = remote_shortcut_row();
+        let owner = owner_runtime_snapshot_fixture();
+        let owner_generated_at = owner.generated_at.clone();
+        let owner_tick = owner.latest_tick_at.clone();
+        let owner_dispatch = owner.last_dispatch_at.clone();
+        let owner_dispatched_count = owner.last_dispatched_count;
+        let owner_slots_used = owner.slots_used;
+        let owner_slots_available = owner.slots_available;
+        let owner_max = owner.max_concurrent_tasks;
+        let owner_latest_error = owner.latest_error.clone();
+        let owner_event_message = owner.recent_events[0].message.clone();
+        let owner_running_message = owner.running_tasks[0].last_runtime_message.clone();
+        let owner_workflow_source = owner.workflow_source.clone();
+
+        // 模拟 remote_client 成功路径：owner JSON → Deserialize → command 映射。
+        let wire = serde_json::to_value(&owner).expect("owner DTO serialize");
+        let decoded: OrchestratorRuntimeSnapshotDto =
+            serde_json::from_value(wire).expect("owner DTO deserialize after client parse");
+        let mapped = map_remote_runtime_snapshot_for_shortcut(decoded, &shortcut);
+
+        // 表面/身份映射。
+        assert_eq!(mapped.project_id, shortcut.id);
+        assert_eq!(mapped.project_kind, "remote");
+        assert_eq!(mapped.remote_status, "live");
+        assert_eq!(
+            mapped.running_tasks[0].task_id,
+            "remote:device-a:task-owner-running"
+        );
+        assert_eq!(
+            mapped.running_tasks[0].session_id.as_deref(),
+            Some("remote:device-a:session-owner-1")
+        );
+        assert_eq!(
+            mapped.running_tasks[0].worktree_id.as_deref(),
+            Some("remote:device-a:worktree-owner-1")
+        );
+        assert_eq!(
+            mapped.retrying_tasks[0].task_id,
+            "remote:device-a:task-owner-retry"
+        );
+        assert_eq!(
+            mapped.recent_events[0].task_id,
+            "remote:device-a:task-owner-running"
+        );
+
+        // owner 运行时字段逐字保留（禁止本机 telemetry 替代）。
+        assert_eq!(mapped.generated_at, owner_generated_at);
+        assert_eq!(mapped.latest_tick_at, owner_tick);
+        assert_eq!(mapped.last_dispatch_at, owner_dispatch);
+        assert_eq!(mapped.last_dispatched_count, owner_dispatched_count);
+        assert_eq!(mapped.slots_used, owner_slots_used);
+        assert_eq!(mapped.slots_available, owner_slots_available);
+        assert_eq!(mapped.max_concurrent_tasks, owner_max);
+        assert_eq!(mapped.latest_error, owner_latest_error);
+        assert_eq!(mapped.workflow_source, owner_workflow_source);
+        assert_eq!(
+            mapped.running_tasks[0].last_runtime_message,
+            owner_running_message
+        );
+        assert_eq!(mapped.recent_events[0].message, owner_event_message);
+        assert_ne!(
+            mapped.generated_at, "local-telemetry-should-not-appear",
+            "不得用本机 telemetry 补 owner generatedAt"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     open-project preflight 设备缺失/传输中断必须回落 offline 空快照，且不得把 owner URL 写进 DTO。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用类型化 Unavailable（设备缺失、send 失败、body-read 中断带 URL）调用
+    ///     remote_runtime_snapshot_from_open_error，断言 remoteStatus=offline 且脱敏。
+    #[test]
+    fn remote_runtime_snapshot_open_preflight_maps_device_missing_to_offline_without_url() {
         let project = remote_shortcut_row();
-        let scheduler_snapshot = empty_scheduler_snapshot();
+        let offline = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::unavailable("远端设备不在线"),
+        );
+        assert_eq!(offline.remote_status, "offline");
+        assert_eq!(offline.project_id, "shortcut-project-1");
+        assert!(offline.running_tasks.is_empty());
+        assert!(offline.recent_events.is_empty());
+        let offline_err = offline.latest_error.unwrap_or_default();
+        assert!(offline_err.contains("离线"));
+        assert!(!offline_err.contains("http://"));
+        assert!(!offline_err.contains("https://"));
+
+        // send 失败（旧前缀形态）
+        let network = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::unavailable(
+                "远端 Workbench 请求失败: error sending request for url (http://192.168.9.9:62116/api/workbench/projects/open)",
+            ),
+        );
+        assert_eq!(network.remote_status, "offline");
+        let network_err = network.latest_error.unwrap_or_default();
+        assert!(!network_err.contains("http://"));
+        assert!(!network_err.contains("192.168.9.9"));
+        assert!(!network_err.contains("62116"));
+
+        // body-read 中断（peer_call_error_to_app_error 括号 URL 形态）仍按类型判 offline
+        let body_read = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::unavailable(
+                "远端 Workbench 请求失败 (http://192.168.9.9:62116/api/workbench/projects/open): connection reset",
+            ),
+        );
+        assert_eq!(body_read.remote_status, "offline");
+        let body_err = body_read.latest_error.unwrap_or_default();
+        assert!(!body_err.contains("http://"));
+        assert!(!body_err.contains("192.168.9.9"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     open-project 业务/协议失败必须回落 unavailable，且响应不得泄漏 owner base URL；
+    ///     即使文案含“连接/离线”等误导词也不能靠文案误判 offline。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 Validation/Internal 类型错误（含 URL 与误导中文）映射，断言 unavailable 且脱敏。
+    #[test]
+    fn remote_runtime_snapshot_open_preflight_maps_business_failure_to_unavailable_without_url() {
+        let project = remote_shortcut_row();
+        let with_url = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::generic(
+                "打开远端项目失败: http://10.0.0.8:62116/api/workbench/projects/open",
+            ),
+        );
+        assert_eq!(with_url.remote_status, "unavailable");
+        let msg = with_url.latest_error.unwrap_or_default();
+        assert!(!msg.contains("http://"));
+        assert!(!msg.contains("10.0.0.8"));
+        assert!(!msg.contains("62116"));
+
+        let plain =
+            remote_runtime_snapshot_from_open_error(&project, AppError::generic("路径不能为空"));
+        assert_eq!(plain.remote_status, "unavailable");
+        assert_eq!(plain.latest_error.as_deref(), Some("路径不能为空"));
+        assert!(plain.running_tasks.is_empty());
+        assert_eq!(plain.max_concurrent_tasks, 0);
+
+        // 误导文案 + Validation 分类：必须 unavailable，不能被“离线/连接”关键词带偏。
+        let misleading = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::validation("路径无效：远端连接配置离线占位"),
+        );
+        assert_eq!(misleading.remote_status, "unavailable");
+        assert_eq!(
+            misleading.latest_error.as_deref(),
+            Some("路径无效：远端连接配置离线占位")
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     在线 owner 返回的结构化 503/504 业务信封（AppError::Remote）不得被误判为传输离线，
+    ///     否则会错误展示陈旧 offline 缓存；契约要求映射为 unavailable。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 code=unavailable/timeout 的 Remote 信封调用 preflight 映射，断言 remoteStatus=unavailable。
+    #[test]
+    fn remote_runtime_snapshot_open_preflight_maps_remote_envelope_to_unavailable() {
+        let project = remote_shortcut_row();
+        let remote_unavailable = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::remote(
+                "owner open 暂不可用",
+                crate::error::RemoteErrorMeta {
+                    code: "unavailable".to_string(),
+                    status: 503,
+                    retryable: true,
+                    request_id: "req-503".to_string(),
+                    details: serde_json::json!({}),
+                },
+            ),
+        );
+        assert_eq!(remote_unavailable.remote_status, "unavailable");
+        assert!(remote_unavailable.running_tasks.is_empty());
+        assert!(remote_unavailable.recent_events.is_empty());
+
+        let remote_timeout = remote_runtime_snapshot_from_open_error(
+            &project,
+            AppError::remote(
+                "owner open 超时",
+                crate::error::RemoteErrorMeta {
+                    code: "timeout".to_string(),
+                    status: 504,
+                    retryable: true,
+                    request_id: "req-504".to_string(),
+                    details: serde_json::json!({}),
+                },
+            ),
+        );
+        assert_eq!(remote_timeout.remote_status, "unavailable");
+        assert_eq!(
+            remote_timeout.latest_error.as_deref(),
+            Some("owner open 超时")
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     capability 缺失时状态条必须展示 unsupported，而不是 offline/unavailable 或本机数据。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 PeerCallError::Unsupported 调用 remote_runtime_snapshot_from_peer_error，
+    ///     断言 remoteStatus=unsupported 且为空快照。
+    #[test]
+    fn remote_runtime_snapshot_maps_unsupported_peer_error() {
+        use crate::net::peer_error::PeerCallError;
+        let project = remote_shortcut_row();
+        let error = PeerCallError::Unsupported {
+            url: "http://peer.local".to_string(),
+            capability: "orchestrator.runtime-snapshot.v1",
+        };
+
+        let snapshot = remote_runtime_snapshot_from_peer_error(&project, error);
+
+        assert_eq!(snapshot.project_id, "shortcut-project-1");
+        assert_eq!(snapshot.project_kind, "remote");
+        assert_eq!(snapshot.remote_status, "unsupported");
+        assert!(!snapshot.scheduler_enabled);
+        assert_eq!(snapshot.max_concurrent_tasks, 0);
+        assert_eq!(snapshot.slots_used, 0);
+        assert_eq!(snapshot.slots_available, 0);
+        assert!(snapshot.running_tasks.is_empty());
+        assert!(snapshot.retrying_tasks.is_empty());
+        assert!(snapshot.recent_events.is_empty());
+        assert!(snapshot.latest_tick_at.is_none());
+        assert!(snapshot.last_dispatch_at.is_none());
+        assert_eq!(snapshot.last_dispatched_count, 0);
+        assert!(snapshot
+            .latest_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("暂不支持运行时快照"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     对端离线时状态条必须展示 offline，不能误报 unsupported 或把本机 scheduler 当远端。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     通过真实不可达地址构造 PeerCallError::Network，断言 remoteStatus=offline 空快照。
+    #[tokio::test]
+    async fn remote_runtime_snapshot_maps_network_peer_error_to_offline() {
+        use crate::net::peer_error::PeerCallError;
+        let project = remote_shortcut_row();
+        // 通过真实失败的 reqwest 请求构造 Network 变体（reqwest::Error 无法手工 new）。
+        let network_err = reqwest::Client::new()
+            .get("http://127.0.0.1:1/")
+            .timeout(std::time::Duration::from_millis(50))
+            .send()
+            .await
+            .expect_err("unreachable local port should fail");
+        let error = PeerCallError::Network {
+            url: "http://127.0.0.1:1".to_string(),
+            source: network_err,
+        };
+
+        let snapshot = remote_runtime_snapshot_from_peer_error(&project, error);
+
+        assert_eq!(snapshot.remote_status, "offline");
+        assert_eq!(snapshot.project_kind, "remote");
+        assert!(!snapshot.scheduler_enabled);
+        assert!(snapshot.running_tasks.is_empty());
+        assert!(snapshot.retrying_tasks.is_empty());
+        assert!(snapshot.recent_events.is_empty());
+        assert_eq!(snapshot.max_concurrent_tasks, 0);
+        assert!(snapshot
+            .latest_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("离线"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     协议违例或对端业务错误应展示 unavailable，不能把 404/文案误判为 capability 缺失。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     分别构造 InvalidResponse 与 Remote 变体，断言两者都映射到 remoteStatus=unavailable。
+    #[test]
+    fn remote_runtime_snapshot_maps_invalid_and_remote_peer_errors_to_unavailable() {
+        use crate::net::peer_error::PeerCallError;
+        let project = remote_shortcut_row();
+
+        let invalid = remote_runtime_snapshot_from_peer_error(
+            &project,
+            PeerCallError::InvalidResponse {
+                url: "http://peer.local".to_string(),
+                reason: "not json".to_string(),
+            },
+        );
+        let remote = remote_runtime_snapshot_from_peer_error(
+            &project,
+            PeerCallError::Remote {
+                url: "http://peer.local".to_string(),
+                status: 503,
+                code: "unavailable".to_string(),
+                message: "owner busy".to_string(),
+                request_id: "req-1".to_string(),
+                retryable: true,
+                legacy: false,
+                details: serde_json::json!({}),
+            },
+        );
+
+        for snapshot in [invalid, remote] {
+            assert_eq!(snapshot.remote_status, "unavailable");
+            assert_eq!(snapshot.project_kind, "remote");
+            assert!(!snapshot.scheduler_enabled);
+            assert!(snapshot.running_tasks.is_empty());
+            assert!(snapshot.retrying_tasks.is_empty());
+            assert!(snapshot.recent_events.is_empty());
+            assert_eq!(snapshot.slots_used, 0);
+            assert_eq!(snapshot.workflow_source, "remoteUnavailable");
+            assert!(!snapshot.workflow_valid);
+            assert!(snapshot
+                .latest_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("暂时不可用"));
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端空态不得读取本机 scheduler/config/workflow；即使本机有 telemetry，
+    ///     empty helper 也必须返回清零槽位与空任务列表。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     直接调用 remote_runtime_snapshot_empty 的四种状态，断言均不包含本机 runtime 字段。
+    #[test]
+    fn remote_runtime_snapshot_empty_states_ignore_local_runtime() {
+        let project = remote_shortcut_row();
+        for status in ["unsupported", "offline", "unavailable"] {
+            let snapshot = remote_runtime_snapshot_empty(&project, status, "msg");
+            assert_eq!(snapshot.remote_status, status);
+            assert_eq!(snapshot.project_id, project.id);
+            assert_eq!(snapshot.project_kind, "remote");
+            assert!(!snapshot.scheduler_enabled);
+            assert_eq!(snapshot.max_concurrent_tasks, 0);
+            assert_eq!(snapshot.slots_used, 0);
+            assert_eq!(snapshot.slots_available, 0);
+            assert_eq!(snapshot.last_dispatched_count, 0);
+            assert!(snapshot.latest_tick_at.is_none());
+            assert!(snapshot.last_dispatch_at.is_none());
+            assert!(snapshot.running_tasks.is_empty());
+            assert!(snapshot.retrying_tasks.is_empty());
+            assert!(snapshot.recent_events.is_empty());
+            assert_eq!(snapshot.workflow_source, "remoteUnavailable");
+            assert!(!snapshot.workflow_valid);
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     runtime snapshot DTO 是本机命令与未来 owning-device P2P 路由共享的稳定契约，
+    ///     任何字段顺序、camelCase 形状或字段集变化都会破坏两端一致性。golden test 锁住完整本地 DTO。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造一个 running + 一个 rework/blocked 任务并追加事件，写入完整 scheduler telemetry
+    ///     （含 lastDispatchAt、lastDispatchedCount 与 latestError）后调用共享 builder，
+    ///     断言全部 DTO 字段、任务摘要字段、事件字段、generatedAt 形状、lastDispatchAt 与 lastDispatchedCount。
+    #[tokio::test]
+    async fn runtime_snapshot_locks_full_local_dto_for_local_and_remote_callers() {
+        let repo = setup_orchestrator_repo().await;
+        let project_dir = temp_project_dir("orch-snapshot-golden");
+        let project = local_project_row(project_dir);
+        let mut running = command_task_row("task-running-golden", OrchestratorTaskStatus::Running);
+        running.title = "实现运行时快照".to_string();
+        running.attempt_phase = Some(OrchestratorAttemptPhase::Streaming);
+        running.session_id = Some("session-golden".to_string());
+        running.worktree_id = Some("worktree-golden".to_string());
+        running.last_runtime_message = Some("正在执行测试".to_string());
+        running.last_activity_at = Some("2026-07-12T01:02:03Z".to_string());
+        let mut retrying =
+            command_task_row("task-retrying-golden", OrchestratorTaskStatus::Blocked);
+        retrying.title = "修复验证失败".to_string();
+        retrying.workflow_state = OrchestratorWorkflowState::Rework;
+        retrying.run_state = OrchestratorRunState::Blocked;
+        retrying.blocked_reason = Some("验证器要求修复".to_string());
+        retrying.updated_at = "2026-07-12T01:03:00Z".to_string();
+        repo.create_task(&running).await.unwrap();
+        repo.create_task(&retrying).await.unwrap();
+        repo.add_event(&running.id, "runner", "Runner 已启动", None)
+            .await
+            .unwrap();
+        repo.add_event(&retrying.id, "blocked", "验证器要求修复", None)
+            .await
+            .unwrap();
+        let config = OrchestratorAutomationConfig {
+            enabled: true,
+            max_concurrent_tasks: 3,
+            ..OrchestratorAutomationConfig::default()
+        };
+        let telemetry = OrchestratorSchedulerTelemetry::new();
+        telemetry.record_dispatch_result(
+            "2026-07-12T01:04:05Z".to_string(),
+            2,
+            Some("  ".to_string()),
+        );
+
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &config,
+            &project,
+            &telemetry.snapshot(),
+        )
+        .await
+        .unwrap();
+
+        // 顶层 DTO 契约：projectId/kind、remoteStatus=local、generatedAt RFC3339、tick/slot/调度字段。
+        assert_eq!(snapshot.project_id, "project-1");
+        assert_eq!(snapshot.project_kind, "local");
+        assert_eq!(snapshot.remote_status, "local");
+        assert!(snapshot.scheduler_enabled);
+        // generatedAt 由 chrono to_rfc3339() 生成，形如 2026-07-12T01:02:03+00:00，
+        // 锁定其结构而非具体值：包含日期分隔符 'T' 与 UTC offset（Z 或 +00:00）。
+        assert!(snapshot.generated_at.contains('T'));
+        assert!(
+            snapshot.generated_at.ends_with('Z') || snapshot.generated_at.ends_with("+00:00"),
+            "generatedAt 应是 UTC RFC3339 时间，实际: {}",
+            snapshot.generated_at
+        );
+        assert!(snapshot.generated_at.len() > 15);
+        assert_eq!(
+            snapshot.latest_tick_at.as_deref(),
+            Some("2026-07-12T01:04:05Z")
+        );
+        assert_eq!(
+            snapshot.last_dispatch_at.as_deref(),
+            Some("2026-07-12T01:04:05Z")
+        );
+        assert_eq!(snapshot.last_dispatched_count, 2);
+        // 空 telemetry 错误会被归一为 None，此时 latestError 由 repo 的最近 blocked_reason 回填。
+        assert_eq!(snapshot.latest_error.as_deref(), Some("验证器要求修复"));
+        assert_eq!(snapshot.workflow_source, "builtInDefault");
+        assert!(snapshot.workflow_valid);
+        assert!(snapshot.workflow_error.is_none());
+        assert_eq!(snapshot.max_concurrent_tasks, 3);
+        assert_eq!(snapshot.slots_used, 1); // 仅 running 计入 active 槽位
+        assert_eq!(snapshot.slots_available, 2);
+
+        // running 摘要契约：包含 runner runtime 字段，供 P2P 远端 UI 与本机状态条共用。
+        assert_eq!(snapshot.running_tasks.len(), 1);
+        let running_summary = &snapshot.running_tasks[0];
+        assert_eq!(running_summary.task_id, "task-running-golden");
+        assert_eq!(running_summary.title, "实现运行时快照");
+        assert_eq!(
+            running_summary.workflow_state,
+            OrchestratorWorkflowState::InProgress
+        );
+        assert_eq!(running_summary.run_state, OrchestratorRunState::Running);
+        assert_eq!(
+            running_summary.attempt_phase,
+            Some(OrchestratorAttemptPhase::Streaming)
+        );
+        assert_eq!(
+            running_summary.session_id.as_deref(),
+            Some("session-golden")
+        );
+        assert_eq!(
+            running_summary.worktree_id.as_deref(),
+            Some("worktree-golden")
+        );
+        assert_eq!(
+            running_summary.last_runtime_message.as_deref(),
+            Some("正在执行测试")
+        );
+        assert_eq!(
+            running_summary.last_activity_at.as_deref(),
+            Some("2026-07-12T01:02:03Z")
+        );
+
+        // retrying 摘要契约：rework/blocked 任务进入 retrying 列表，本机命令与 P2P 路由共用。
+        assert_eq!(snapshot.retrying_tasks.len(), 1);
+        let retrying_summary = &snapshot.retrying_tasks[0];
+        assert_eq!(retrying_summary.task_id, "task-retrying-golden");
+        assert_eq!(retrying_summary.title, "修复验证失败");
+        assert_eq!(
+            retrying_summary.workflow_state,
+            OrchestratorWorkflowState::Rework
+        );
+        assert_eq!(retrying_summary.run_state, OrchestratorRunState::Blocked);
+
+        // recent_events 契约：camelCase DTO 字段稳定。
+        assert_eq!(snapshot.recent_events.len(), 2);
+        let runner_event = snapshot
+            .recent_events
+            .iter()
+            .find(|event| event.kind == "runner")
+            .expect("runner event present");
+        assert_eq!(runner_event.task_id, "task-running-golden");
+        assert_eq!(runner_event.task_title, "实现运行时快照");
+        assert_eq!(runner_event.message, "Runner 已启动");
+        assert!(runner_event.created_at.contains('T'));
+        assert!(!runner_event.id.is_empty());
+
+        // 序列化形状：camelCase key 锁死，未来 P2P 客户端反序列化与前端契约保持一致。
+        let value = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert_eq!(value["projectId"], "project-1");
+        assert_eq!(value["projectKind"], "local");
+        assert_eq!(value["remoteStatus"], "local");
+        assert_eq!(value["schedulerEnabled"], true);
+        assert_eq!(value["latestTickAt"], "2026-07-12T01:04:05Z");
+        assert_eq!(value["lastDispatchAt"], "2026-07-12T01:04:05Z");
+        assert_eq!(value["lastDispatchedCount"], 2);
+        assert_eq!(value["maxConcurrentTasks"], 3);
+        assert_eq!(value["slotsUsed"], 1);
+        assert_eq!(value["slotsAvailable"], 2);
+        assert_eq!(value["runningTasks"][0]["taskId"], "task-running-golden");
+        assert_eq!(value["runningTasks"][0]["attemptPhase"], "streaming");
+        // recentEvents 顺序依赖数据库 created_at/id，断言存在性而非位置以避免抖动。
+        let recent_events = value["recentEvents"]
+            .as_array()
+            .expect("recentEvents is array");
+        assert_eq!(recent_events.len(), 2);
+        assert!(recent_events.iter().any(|event| {
+            event["taskId"] == "task-running-golden" && event["kind"] == "runner"
+        }));
+        assert!(recent_events.iter().any(|event| {
+            event["taskId"] == "task-retrying-golden" && event["kind"] == "blocked"
+        }));
+        // 单条事件 camelCase 字段形状稳定（取 runner 事件作为代表）。
+        let runner_event_value = recent_events
+            .iter()
+            .find(|event| event["kind"] == "runner")
+            .expect("runner event in serialized output");
+        assert_eq!(runner_event_value["taskTitle"], "实现运行时快照");
+        assert_eq!(runner_event_value["message"], "Runner 已启动");
+        assert!(!runner_event_value["createdAt"].as_str().unwrap().is_empty());
+        assert!(!runner_event_value["id"].as_str().unwrap().is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     scheduler 最近一次 dispatch 失败时，latestError 必须回填到 snapshot，让用户能在状态条看到调度异常。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用空项目目录调用 builder，scheduler telemetry 写入错误，断言 latestError 来自 telemetry 且槽位为空。
+    #[tokio::test]
+    async fn runtime_snapshot_surfaces_scheduler_latest_error() {
+        let repo = setup_orchestrator_repo().await;
+        let project = local_project_row(temp_project_dir("orch-snapshot-scheduler-error"));
+        let telemetry = OrchestratorSchedulerTelemetry::new();
+        telemetry.record_dispatch_result(
+            "2026-07-12T02:00:00Z".to_string(),
+            0,
+            Some("runner 启动失败".to_string()),
+        );
 
         let snapshot = get_orchestrator_runtime_snapshot_for_project(
             &repo,
             &OrchestratorAutomationConfig::default(),
             &project,
-            &scheduler_snapshot,
+            &telemetry.snapshot(),
         )
         .await
-        .expect("remote snapshot should return explicit unsupported status");
+        .unwrap();
 
-        assert_eq!(snapshot.project_kind, "remote");
-        assert_eq!(snapshot.remote_status, "unsupported");
-        assert!(!snapshot.scheduler_enabled);
+        assert_eq!(snapshot.latest_error.as_deref(), Some("runner 启动失败"));
+        assert_eq!(snapshot.last_dispatched_count, 0);
+        assert_eq!(snapshot.slots_used, 0);
+        assert_eq!(snapshot.max_concurrent_tasks, 1);
+        assert_eq!(snapshot.slots_available, 1);
         assert!(snapshot.running_tasks.is_empty());
         assert!(snapshot.retrying_tasks.is_empty());
         assert!(snapshot.recent_events.is_empty());
-        assert!(snapshot
-            .latest_error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("远端项目暂不支持运行时快照"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     repo 查询槽位失败时（例如数据库不可用），builder 必须把错误透传，而不是用 0 槽位掩盖仓储异常。
+    ///     本机命令与未来 P2P 路由调用同一 builder，错误语义必须一致。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用未初始化 schema 的内存 SQLite 构造 repo，调用 builder，断言返回仓储错误而非空快照。
+    #[tokio::test]
+    async fn runtime_snapshot_propagates_repo_failure() {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .expect("sqlite options")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("sqlite pool");
+        // 故意不调用 OrchestratorRepo::init_schema，模拟表缺失导致的仓储错误。
+        let repo = OrchestratorRepo::new(pool);
+        let project = local_project_row(temp_project_dir("orch-snapshot-repo-failure"));
+
+        let result = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &OrchestratorAutomationConfig::default(),
+            &project,
+            &empty_scheduler_snapshot(),
+        )
+        .await;
+
+        assert!(result.is_err(), "repo 查询失败必须透传，不能用空快照掩盖");
+        let error = result.expect_err("snapshot must error");
+        assert!(
+            error.to_string().to_lowercase().contains("no such table")
+                || error.to_string().contains("orchestrator"),
+            "错误信息应指向 orchestrator 表缺失，实际: {error}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     未来 owning-device P2P 路由（T2）会绕过 tauri 命令直接调用共享 builder，
+    ///     因此 builder 必须只接受已校验的本地 WorkbenchProject，不能内部分支远端 shortcut。
+    ///     本测试通过直接调用 builder 确认其行为稳定，T2 接入时无需改动 builder 逻辑。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用本地项目行直接调用 builder（模拟 P2P 路由的调用路径），断言返回 local 快照，
+    ///     证明命令入口与未来 P2P 路由使用的是同一构造逻辑。
+    #[tokio::test]
+    async fn runtime_snapshot_builder_is_reusable_by_p2p_route() {
+        let repo = setup_orchestrator_repo().await;
+        let project = local_project_row(temp_project_dir("orch-snapshot-p2p-route"));
+        let config = OrchestratorAutomationConfig {
+            enabled: true,
+            max_concurrent_tasks: 2,
+            ..OrchestratorAutomationConfig::default()
+        };
+
+        // 模拟 P2P 路由：仅持有 repo + 已校验的本地 project + scheduler snapshot，
+        // 不经过 tauri command 层，确认同一 builder 直接可用。
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &config,
+            &project,
+            &empty_scheduler_snapshot(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(snapshot.project_id, "project-1");
+        assert_eq!(snapshot.project_kind, "local");
+        assert_eq!(snapshot.remote_status, "local");
+        assert!(snapshot.scheduler_enabled);
+        assert_eq!(snapshot.slots_available, 2);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     未来 owning-device P2P 路由会把本机 builder 产出的 OrchestratorRuntimeSnapshotDto
+    ///     序列化为 JSON 返回给请求端，请求端必须能用同一类型反序列化。本测试锁死 DTO 图的
+    ///     round-trip（Serialize -> Deserialize）能力，证明 Deserialize 派生覆盖了所有嵌套类型。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用本地 builder 构造真实 snapshot，序列化为 JSON Value 后再反序列化回
+    ///     OrchestratorRuntimeSnapshotDto，断言关键字段与原 DTO 一致，证明远端客户端可解析。
+    #[tokio::test]
+    async fn runtime_snapshot_dto_round_trips_through_json_for_remote_client() {
+        let repo = setup_orchestrator_repo().await;
+        let mut running = command_task_row("task-roundtrip", OrchestratorTaskStatus::Running);
+        running.attempt_phase = Some(OrchestratorAttemptPhase::Streaming);
+        running.session_id = Some("session-roundtrip".to_string());
+        repo.create_task(&running).await.unwrap();
+        repo.add_event(&running.id, "runner", "Runner roundtrip", None)
+            .await
+            .unwrap();
+        let project = local_project_row(temp_project_dir("orch-snapshot-roundtrip"));
+        let config = OrchestratorAutomationConfig {
+            enabled: true,
+            max_concurrent_tasks: 2,
+            ..OrchestratorAutomationConfig::default()
+        };
+        let telemetry = OrchestratorSchedulerTelemetry::new();
+        telemetry.record_dispatch_result("2026-07-12T03:00:00Z".to_string(), 1, None);
+
+        let snapshot = get_orchestrator_runtime_snapshot_for_project(
+            &repo,
+            &config,
+            &project,
+            &telemetry.snapshot(),
+        )
+        .await
+        .unwrap();
+
+        let json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        let parsed: OrchestratorRuntimeSnapshotDto =
+            serde_json::from_value(json).expect("deserialize snapshot for remote client");
+
+        assert_eq!(parsed.project_id, "project-1");
+        assert_eq!(parsed.project_kind, "local");
+        assert_eq!(parsed.remote_status, "local");
+        assert!(parsed.scheduler_enabled);
+        assert_eq!(
+            parsed.latest_tick_at.as_deref(),
+            Some("2026-07-12T03:00:00Z")
+        );
+        assert_eq!(parsed.last_dispatched_count, 1);
+        assert_eq!(parsed.slots_used, 1);
+        assert_eq!(parsed.slots_available, 1);
+        assert_eq!(parsed.running_tasks.len(), 1);
+        assert_eq!(parsed.running_tasks[0].task_id, "task-roundtrip");
+        assert_eq!(
+            parsed.running_tasks[0].attempt_phase,
+            Some(OrchestratorAttemptPhase::Streaming)
+        );
+        assert_eq!(
+            parsed.running_tasks[0].session_id.as_deref(),
+            Some("session-roundtrip")
+        );
+        assert_eq!(parsed.recent_events.len(), 1);
+        assert_eq!(parsed.recent_events[0].task_id, "task-roundtrip");
+        assert_eq!(parsed.recent_events[0].kind, "runner");
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -3162,6 +4419,14 @@ mod tests {
             persisted.attempt_phase,
             Some(OrchestratorAttemptPhase::Failed)
         );
+        let token = persisted
+            .prepare_claim_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .expect("repair transition must issue claim token");
+        assert!(!token.is_empty());
+        assert_eq!(transition.task.prepare_claim_token.as_deref(), Some(token));
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -3253,7 +4518,7 @@ mod tests {
             .expect("query running attempt");
 
         assert_eq!(completed.status, "completed");
-        assert_eq!(completed.completed_at.is_some(), true);
+        assert!(completed.completed_at.is_some());
         assert!(running.is_none());
     }
 
@@ -3275,6 +4540,7 @@ mod tests {
             branch_name: None,
             worktree_id: Some("worktree-1".to_string()),
             session_id: None,
+            prepare_claim_token: None,
             blocked_reason: None,
             attempt: 0,
             created_at: "2026-07-05T00:00:00Z".to_string(),
@@ -3423,5 +4689,213 @@ mod tests {
             abort_orchestrator_task_target_status(OrchestratorTaskStatus::Queued),
             OrchestratorTaskStatus::Aborted
         );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     outbox Retry/Discard 命令测试需要隔离 SQLite 与 Workbench 项目表，验证归属与状态机。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建单连接内存库、初始化 Orchestrator schema 与最小 workbench_projects 表，返回两个仓储。
+    async fn setup_outbox_action_repos() -> (OrchestratorRepo, crate::storage::WorkbenchProjectRepo)
+    {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .expect("sqlite options")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("sqlite pool");
+        OrchestratorRepo::init_schema(&pool)
+            .await
+            .expect("orchestrator schema");
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS workbench_projects (\
+             id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL, \
+             device_name TEXT NOT NULL, path TEXT NOT NULL, last_opened_at TEXT NOT NULL, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("workbench projects schema");
+        (
+            OrchestratorRepo::new(pool.clone()),
+            crate::storage::WorkbenchProjectRepo::new(pool),
+        )
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     outbox 动作测试需要稳定插入 remote shortcut 与 failed outbox。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     upsert remote project，插入 pending outbox 后标 failed，返回 outbox id。
+    async fn insert_failed_outbox_for_shortcut(
+        orchestrator_repo: &OrchestratorRepo,
+        workbench_project_repo: &crate::storage::WorkbenchProjectRepo,
+        project_id: &str,
+        request_json: &str,
+    ) -> String {
+        let project = remote_shortcut_row();
+        let mut row = project.clone();
+        row.id = project_id.to_string();
+        workbench_project_repo
+            .upsert(&row)
+            .await
+            .expect("upsert project");
+        let item = orchestrator_repo
+            .insert_remote_outbox_pending(
+                &project.device_id,
+                &project.device_name,
+                &project.path,
+                None,
+                request_json,
+            )
+            .await
+            .expect("insert outbox");
+        let claimed = orchestrator_repo
+            .claim_remote_outbox_item_as_sending(&item.id)
+            .await
+            .expect("claim")
+            .expect("claimed");
+        orchestrator_repo
+            .mark_remote_outbox_failed(&claimed.id, "协议错误：远端拒绝")
+            .await
+            .expect("mark failed");
+        claimed.id
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Retry 只能作用在当前 remote shortcut 拥有的 failed outbox，且必须保留 payload 并清空 last_error。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 failed outbox，调用 retry helper，断言 DTO camelCase 字段、status=pending、request_json 不变。
+    #[tokio::test]
+    async fn retry_remote_outbox_action_requires_project_ownership_and_failed_status() {
+        let (orchestrator_repo, workbench_project_repo) = setup_outbox_action_repos().await;
+        let request_json = r#"{"projectId":"remote-local","title":"t","goal":"g","acceptanceCriteria":"a","priority":0,"createAction":"backlog","clientRequestId":"req-1"}"#;
+        let outbox_id = insert_failed_outbox_for_shortcut(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            request_json,
+        )
+        .await;
+
+        let dto = retry_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            &outbox_id,
+        )
+        .await
+        .expect("retry failed outbox");
+
+        assert_eq!(dto.id, outbox_id);
+        assert_eq!(dto.status.as_str(), "pending");
+        assert_eq!(dto.request_json, request_json);
+        assert!(dto.last_error.is_none());
+        assert_eq!(dto.device_id, "device-a");
+        assert_eq!(dto.remote_project_path, "/Users/hans/remote-project");
+
+        let json = serde_json::to_value(&dto).expect("serialize dto");
+        assert!(json.get("deviceId").is_some());
+        assert!(json.get("remoteProjectPath").is_some());
+        assert!(json.get("requestJson").is_some());
+        assert!(json.get("lastError").is_some());
+        assert!(json.get("device_id").is_none());
+
+        let missing = retry_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            "missing-outbox",
+        )
+        .await
+        .expect_err("missing outbox");
+        assert!(missing.to_string().contains("不存在"));
+
+        let wrong_project = remote_shortcut_row();
+        let mut other = wrong_project;
+        other.id = "other-shortcut".to_string();
+        other.path = "/other/path".to_string();
+        workbench_project_repo
+            .upsert(&other)
+            .await
+            .expect("other project");
+        let wrong = retry_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "other-shortcut",
+            &outbox_id,
+        )
+        .await
+        .expect_err("wrong project ownership");
+        assert!(wrong.to_string().contains("不属于当前项目"));
+
+        // pending 后再次 retry 必须拒绝，证明 failed-only。
+        let again = retry_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            &outbox_id,
+        )
+        .await
+        .expect_err("non-failed retry");
+        assert!(again.to_string().contains("失败"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Discard 只能作用在当前 shortcut 的 failed outbox，并保留 last_error 审计。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 failed outbox，调用 discard helper，断言 status=discarded 且 last_error 保留；local 项目被拒绝。
+    #[tokio::test]
+    async fn discard_remote_outbox_action_is_local_only_and_failed_only() {
+        let (orchestrator_repo, workbench_project_repo) = setup_outbox_action_repos().await;
+        let request_json = r#"{"projectId":"remote-local","title":"t","goal":"g","acceptanceCriteria":"a","priority":0,"createAction":"backlog","clientRequestId":"req-2"}"#;
+        let outbox_id = insert_failed_outbox_for_shortcut(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            request_json,
+        )
+        .await;
+
+        let local = local_project_row("/tmp/local-project".to_string());
+        workbench_project_repo
+            .upsert(&local)
+            .await
+            .expect("local project");
+        let local_err = discard_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "project-1",
+            &outbox_id,
+        )
+        .await
+        .expect_err("local project must not operate remote outbox");
+        assert!(local_err.to_string().contains("远端项目快捷方式"));
+
+        let dto = discard_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            &outbox_id,
+        )
+        .await
+        .expect("discard failed outbox");
+        assert_eq!(dto.status.as_str(), "discarded");
+        assert_eq!(dto.request_json, request_json);
+        assert_eq!(dto.last_error.as_deref(), Some("协议错误：远端拒绝"));
+
+        let again = discard_orchestrator_remote_outbox_for_repos(
+            &orchestrator_repo,
+            &workbench_project_repo,
+            "shortcut-project-1",
+            &outbox_id,
+        )
+        .await
+        .expect_err("discarded cannot discard again");
+        assert!(again.to_string().contains("失败"));
     }
 }

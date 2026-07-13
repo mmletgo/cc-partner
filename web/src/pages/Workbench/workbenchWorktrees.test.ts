@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import type { WorkbenchGitCommit, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import {
   DEFAULT_WORKTREE_BRANCH_PREFIX,
@@ -447,18 +448,22 @@ function testShouldAutoDismissMergeStages(): void {
   }
 }
 
-testSessionsForWorktree();
-testActiveWorktreeRootPath();
-testWorktreeStatusTone();
-testCanCommitWorktreeIgnoresStaleCleanStatus();
-testGitHistoryActionAvailability();
-testNormalizeWorktreeBranchName();
-testComposeWorktreeBranchName();
-await testCreateWorktreeWithTerminalWindowCreatesSessionForNewWorktree();
-testSharedWorktreeBranchPrefixExports();
-testWorktreeChangeCount();
-testFormatCommitRelativeTime();
-testHasGitHistory();
-testBuildGitGraphRowsForMergeHistory();
-testFormatWorkbenchMergeStages();
-testShouldAutoDismissMergeStages();
+describe('workbenchWorktrees', () => {
+  test('helpers cover sessions, root path, status, branch names, history graph and merge stages', async () => {
+    testSessionsForWorktree();
+    testActiveWorktreeRootPath();
+    testWorktreeStatusTone();
+    testCanCommitWorktreeIgnoresStaleCleanStatus();
+    testGitHistoryActionAvailability();
+    testNormalizeWorktreeBranchName();
+    testComposeWorktreeBranchName();
+    await testCreateWorktreeWithTerminalWindowCreatesSessionForNewWorktree();
+    testSharedWorktreeBranchPrefixExports();
+    testWorktreeChangeCount();
+    testFormatCommitRelativeTime();
+    testHasGitHistory();
+    testBuildGitGraphRowsForMergeHistory();
+    testFormatWorkbenchMergeStages();
+    testShouldAutoDismissMergeStages();
+  });
+});

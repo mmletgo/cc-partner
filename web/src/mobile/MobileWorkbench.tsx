@@ -2,20 +2,33 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
-import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import { useAttention } from '@/hooks/attentionContext';
+import type {
+  AttentionItem,
+  WorkbenchProject,
+  WorkbenchSession,
+  WorkbenchWorktree,
+} from '@/lib/types';
 import {
   MobileAutomationPanel,
   type MobileAutomationExecutionContext,
 } from './components/MobileAutomationPanel';
+import { MobileAttentionPanel } from './components/MobileAttentionPanel';
 import { MobileBrowserPanel } from './components/MobileBrowserPanel';
 import { MobileFilesPanel } from './components/MobileFilesPanel';
 import { MobileGitPanel } from './components/MobileGitPanel';
 import { MobilePromptPanel } from './components/MobilePromptPanel';
+import { MobileSettingsPanel } from './components/MobileSettingsPanel';
 import { MobileTerminalPanel } from './components/MobileTerminalPanel';
 import { MobileProjectPanel } from './components/MobileProjectPanel';
 import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
 import { MobileWorktreeQuickSwitch } from './components/MobileWorktreeQuickSwitch';
 import { MobileWorktreePanel } from './components/MobileWorktreePanel';
+import {
+  mapMobileAttentionTarget,
+  resolveMobileAttentionMissingTargetPanel,
+  type MobileAttentionNavigation,
+} from './mobileAttentionTarget';
 import {
   canOpenMobileWorktreeSwitcher,
   canSelectMobileProject,
@@ -96,6 +109,9 @@ export function MobileWorkbench(): ReactElement {
   });
   const [filesDiscardContextToken, setFilesDiscardContextToken] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
+  const [attentionNotice, setAttentionNotice] = useState<string | null>(null);
+  const [attentionFocusTaskId, setAttentionFocusTaskId] = useState<string | null>(null);
+  const [attentionFocusOutboxId, setAttentionFocusOutboxId] = useState<string | null>(null);
   const projectsRequestIdRef = useRef<number>(0);
   const projectDetailsRequestIdRef = useRef<number>(0);
   const worktreesRequestIdRef = useRef<number>(0);
@@ -105,12 +121,19 @@ export function MobileWorkbench(): ReactElement {
   const worktreeOperationBusyRef = useRef<boolean>(false);
   const worktreeOperationCountRef = useRef<number>(0);
   const sessionsRef = useRef<WorkbenchSession[]>([]);
-  const { t } = useTranslation(['workbench']);
+  const projectsRef = useRef<WorkbenchProject[]>([]);
+  const { t } = useTranslation(['workbench', 'attention']);
+  const { snapshot: attentionSnapshot, refresh: refreshAttention } = useAttention();
+  const attentionTotal = attentionSnapshot?.counts.total ?? null;
 
   const panelPlaceholders: Record<MobileWorkbenchPanel, { title: string; label: string }> = {
     projects: {
       title: t('workbench:mobile.placeholders.projects.title'),
       label: t('workbench:mobile.placeholders.projects.label'),
+    },
+    attention: {
+      title: t('workbench:mobile.placeholders.attention.title'),
+      label: t('workbench:mobile.placeholders.attention.label'),
     },
     terminal: {
       title: t('workbench:mobile.placeholders.terminal.title'),
@@ -168,6 +191,10 @@ export function MobileWorkbench(): ReactElement {
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -390,19 +417,23 @@ export function MobileWorkbench(): ReactElement {
    * Code Logic（这个函数做什么）:
    *   未支持项目类型直接提示；支持的 local/remote 项目并行请求 worktrees/sessions，选择默认 worktree/session 后切到 terminal。
    */
-  const selectProject = useCallback(async (project: WorkbenchProject): Promise<void> => {
+  const selectProject = useCallback(async (
+    project: WorkbenchProject,
+    options: { nextPanel?: MobileWorkbenchPanel } = {},
+  ): Promise<boolean> => {
+    const nextPanel = options.nextPanel ?? 'terminal';
     if (!canSelectMobileProject(project)) {
       projectDetailsRequestIdRef.current += 1;
       setProjectDetailsLoading(false);
       setError(t('workbench:mobile.projectPanel.unsupportedProjectKind'));
-      return;
+      return false;
     }
     if (activeProject?.id === project.id) {
-      setPanel('terminal');
-      return;
+      setPanel(nextPanel);
+      return true;
     }
     if (!confirmFileContextSwitch(createMobileFilePanelContext(project, null))) {
-      return;
+      return false;
     }
 
     worktreesRequestIdRef.current += 1;
@@ -426,7 +457,7 @@ export function MobileWorkbench(): ReactElement {
         httpWorkbenchTransport.worktrees.list(project.id),
         httpWorkbenchTransport.sessions.list(project.id),
       ]);
-      if (projectDetailsRequestIdRef.current !== requestId) return;
+      if (projectDetailsRequestIdRef.current !== requestId) return false;
 
       const nextActiveWorktree = selectPreferredMobileWorktree(nextWorktrees);
       const nextActiveSession = selectPreferredMobileSession(
@@ -440,10 +471,12 @@ export function MobileWorkbench(): ReactElement {
       sessionsRef.current = nextSessions;
       setSessions(nextSessions);
       setActiveSession(nextActiveSession);
-      setPanel('terminal');
+      setPanel(nextPanel);
+      return true;
     } catch (reason) {
-      if (projectDetailsRequestIdRef.current !== requestId) return;
+      if (projectDetailsRequestIdRef.current !== requestId) return false;
       setError(getErrorMessage(reason));
+      return false;
     } finally {
       if (projectDetailsRequestIdRef.current === requestId) {
         setProjectDetailsLoading(false);
@@ -734,6 +767,73 @@ export function MobileWorkbench(): ReactElement {
     [worktrees],
   );
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Attention 条目只导航到现有 Automation/Settings，不在列表内执行副作用动作。
+   *
+   * Code Logic（这个函数做什么）:
+   *   mapMobileAttentionTarget 后：settings 直接切 settings；task/outbox 先选项目再进入 automation 并写入 focus id。
+   */
+  const handleOpenAttentionItem = useCallback(
+    async (item: AttentionItem): Promise<void> => {
+      const navigation: MobileAttentionNavigation = mapMobileAttentionTarget(item.target);
+      setAttentionNotice(null);
+
+      if (navigation.kind === 'settingsDependencies') {
+        setAttentionFocusTaskId(null);
+        setAttentionFocusOutboxId(null);
+        setPanel('settings');
+        return;
+      }
+
+      const project =
+        projectsRef.current.find((entry) => entry.id === navigation.projectId) ?? null;
+      if (!project) {
+        setAttentionNotice(t('attention:resolvedOrChanged'));
+        void refreshAttention();
+        setPanel('attention');
+        return;
+      }
+
+      setAttentionFocusTaskId(
+        navigation.kind === 'automationTask' ? navigation.taskId : null,
+      );
+      setAttentionFocusOutboxId(
+        navigation.kind === 'automationOutbox' ? navigation.outboxId : null,
+      );
+      const selected = await selectProject(project, { nextPanel: 'automation' });
+      if (!selected) {
+        setAttentionNotice(t('attention:resolvedOrChanged'));
+        void refreshAttention();
+        setPanel('attention');
+      }
+    },
+    [refreshAttention, selectProject, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Automation 聚焦 task/outbox 失败（已解决）时必须刷新 Inbox 并回到 Attention。
+   *
+   * Code Logic（这个函数做什么）:
+   *   missing 时清理 focus id、提示文案、refreshAttention、setPanel(attention)。
+   */
+  const handleAutomationFocusResult = useCallback(
+    (result: {
+      status: 'found' | 'missing';
+      entity: 'task' | 'outbox';
+      id: string;
+    }): void => {
+      if (result.status === 'found') return;
+      setAttentionFocusTaskId(null);
+      setAttentionFocusOutboxId(null);
+      setAttentionNotice(t('attention:resolvedOrChanged'));
+      void refreshAttention();
+      setPanel(resolveMobileAttentionMissingTargetPanel({ status: 'missing', entity: result.entity }));
+    },
+    [refreshAttention, t],
+  );
+
   /* eslint-disable react-hooks/set-state-in-effect -- 移动端入口挂载时需要加载最近项目列表 */
   useEffect(() => {
     void loadProjects();
@@ -754,8 +854,17 @@ export function MobileWorkbench(): ReactElement {
         activeProjectId={activeProject?.id ?? null}
         loading={projectsLoading}
         error={error}
-        onSelect={selectProject}
+        onSelect={(project) => {
+          void selectProject(project);
+        }}
         onRefresh={handleRefreshProjects}
+      />
+    ) : panel === 'attention' ? (
+      <MobileAttentionPanel
+        onOpenItem={(item) => {
+          void handleOpenAttentionItem(item);
+        }}
+        notice={attentionNotice}
       />
     ) : panel === 'worktrees' ? (
       <MobileWorktreePanel
@@ -787,7 +896,12 @@ export function MobileWorkbench(): ReactElement {
       <MobileAutomationPanel
         project={activeProject}
         onOpenExecutionContext={handleOpenAutomationExecutionContext}
+        focusTaskId={attentionFocusTaskId}
+        focusOutboxId={attentionFocusOutboxId}
+        onFocusResult={handleAutomationFocusResult}
       />
+    ) : panel === 'settings' ? (
+      <MobileSettingsPanel />
     ) : panel === 'browser' ? (
       <MobileBrowserPanel
         transport={httpWorkbenchTransport}
@@ -835,6 +949,7 @@ export function MobileWorkbench(): ReactElement {
       worktreeStatusExpanded={worktreeSwitcherOpen}
       onWorktreeStatusClick={handleOpenWorktreeSwitcher}
       onPanelChange={handlePanelChange}
+      attentionTotal={attentionTotal}
     >
       {panelContent}
       <MobileWorktreeQuickSwitch

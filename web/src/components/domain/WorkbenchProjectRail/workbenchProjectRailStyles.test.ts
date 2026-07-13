@@ -1,3 +1,4 @@
+import { describe, test } from 'vitest';
 import { readFileSync } from 'node:fs';
 
 /**
@@ -20,17 +21,17 @@ function assertContains(source: string, expected: string, message: string): void
  * Code Logic（这个测试做什么）:
  *   锁定 `.sourcePopover` 使用 box-sizing 与不超过侧栏内容区的 width 计算。
  */
-async function main(): Promise<void> {
-  const css = readFileSync(new URL('./WorkbenchProjectRail.module.css', import.meta.url), 'utf8');
-  assertContains(css, '.sourcePopover {', 'source popover style exists');
-  assertContains(css, 'box-sizing: border-box;', 'source popover should include border and padding in width');
-  assertContains(
-    css,
-    'width: min(260px, calc(var(--sidebar-width) - var(--space-6)));',
-    'source popover should fit within sidebar content width',
-  );
-  assertContains(css, '.sourceOption > svg {', 'source option icon style exists');
-  assertContains(css, 'flex: 0 0 auto;', 'source option icon should not shrink');
-}
-
-void main();
+describe('workbenchProjectRailStyles', () => {
+  test('source popover and option icon styles stay within sidebar content width', () => {
+    const css = readFileSync(new URL('./WorkbenchProjectRail.module.css', import.meta.url), 'utf8');
+    assertContains(css, '.sourcePopover {', 'source popover style exists');
+    assertContains(css, 'box-sizing: border-box;', 'source popover should include border and padding in width');
+    assertContains(
+      css,
+      'width: min(260px, calc(var(--sidebar-width) - var(--space-6)));',
+      'source popover should fit within sidebar content width',
+    );
+    assertContains(css, '.sourceOption > svg {', 'source option icon style exists');
+    assertContains(css, 'flex: 0 0 auto;', 'source option icon should not shrink');
+  });
+});

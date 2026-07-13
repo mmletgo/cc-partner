@@ -10,6 +10,8 @@
 
 import type {
   OrchestratorEvidence,
+  OrchestratorRemoteOutboxItem,
+  OrchestratorRuntimeSnapshot,
   OrchestratorTask,
   OrchestratorTaskPromptCompletion,
   OrchestratorTaskView,
@@ -28,6 +30,10 @@ import type {
 } from '@/lib/types';
 import type { WorkbenchPaneSplitDirection } from './workbench';
 import type { OrchestratorCreateAction } from './orchestrator';
+import {
+  OrchestratorRuntimeTransportError,
+  toOrchestratorRuntimeTransportError,
+} from './orchestratorRuntimeTransportError';
 import type { WorkbenchTransport } from './workbenchTransport';
 
 export type HttpCreateOrchestratorTaskAction = OrchestratorCreateAction;
@@ -45,6 +51,11 @@ export interface HttpCreateOrchestratorTaskRequest {
   externalUrl?: string;
   externalState?: string;
   externalLabels?: string[];
+  /**
+   * 逻辑提交幂等键。调用方在一次提交开始时生成并在失败重试间复用；
+   * 未提供时 transport 才会 mint 新 id（兼容旧调用方，但移动端应显式传入）。
+   */
+  clientRequestId?: string;
 }
 
 export interface HttpCompleteOrchestratorTaskPromptRequest {
@@ -104,7 +115,8 @@ async function readHttpErrorMessage(response: Response): Promise<string> {
 async function parseJsonResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const message = await readHttpErrorMessage(response);
-    throw new Error(message);
+    // HTTP 非 2xx 是协议/业务失败：用 protocol，禁止 hook 因 message 含“连接”误判 offline。
+    throw new OrchestratorRuntimeTransportError(message, 'protocol');
   }
   return (await response.json()) as T;
 }
@@ -117,31 +129,74 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
  *   以 application/json 发送 body，解析成功 JSON；非 2xx 时抛出后端 error/message。
  */
 export async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (reason) {
+    // fetch 本身失败（断网/DNS/CORS 等）是传输层 network，不靠文案匹配。
+    throw toOrchestratorRuntimeTransportError(reason, 'network');
+  }
   return parseJsonResponse<T>(response);
 }
 
 /**
+ * getJson 可选参数。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   Attention mobile loader 等场景需要 AbortSignal / 超时，避免半开连接永久挂起。
+ *
+ * Code Logic（字段说明）:
+ *   signal 透传 fetch；timeoutMs 若给定且未传 signal，则内部 AbortController 超时 abort。
+ */
+export interface GetJsonOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+/**
  * Business Logic（为什么需要这个函数）:
- *   少量 Workbench/mobile routes 使用 GET，移动端需要与 POST helper 一致的错误处理。
+ *   少量 Workbench/mobile routes 使用 GET，移动端需要与 POST helper 一致的错误处理；
+ *   Attention 等路径还需要可选超时，防止无响应后端锁死 Inbox single-flight。
  *
  * Code Logic（这个函数做什么）:
- *   发起同源 GET 请求，成功时解析 JSON，失败时读取 JSON error/message 或文本后抛 Error。
+ *   发起同源 GET；可选 AbortSignal / timeoutMs（超时 abort）；
+ *   成功解析 JSON，失败读 JSON error/message 或文本后抛 Error。
  */
-export async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(path, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-    },
-  });
+export async function getJson<T>(path: string, options: GetJsonOptions = {}): Promise<T> {
+  const { signal: externalSignal, timeoutMs } = options;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let controller: AbortController | null = null;
+  let signal = externalSignal;
+
+  if (typeof timeoutMs === 'number' && timeoutMs > 0 && !externalSignal) {
+    controller = new AbortController();
+    signal = controller.signal;
+    timeoutId = setTimeout(() => controller?.abort(), timeoutMs);
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+      },
+      signal,
+    });
+  } catch (reason) {
+    throw toOrchestratorRuntimeTransportError(reason, 'network');
+  } finally {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+  }
   return parseJsonResponse<T>(response);
 }
 
@@ -163,6 +218,24 @@ export function createHttpOrchestratorClientRequestId(): string {
 }
 
 /**
+ * Business Logic（为什么需要这个函数）:
+ *   create/createView 必须始终携带非空 clientRequestId；若调用方已在逻辑提交开始时生成，
+ *   则必须原样复用，避免“响应丢失 + 用户重试”因换键产生重复任务。
+ *
+ * Code Logic（这个函数做什么）:
+ *   若 request.clientRequestId 去空白后非空则返回该值；否则 mint 新 id。
+ */
+export function resolveHttpOrchestratorClientRequestId(
+  request: Pick<HttpCreateOrchestratorTaskRequest, 'clientRequestId'>,
+): string {
+  const existing = request.clientRequestId?.trim();
+  if (existing) {
+    return existing;
+  }
+  return createHttpOrchestratorClientRequestId();
+}
+
+/**
  * HTTP Orchestrator Transport。
  *
  * Business Logic（为什么需要这个常量）:
@@ -170,7 +243,7 @@ export function createHttpOrchestratorClientRequestId(): string {
  *
  * Code Logic（这个常量做什么）:
  *   将任务 list/create/action/evidence 映射到 `/api/orchestrator/tasks/...` routes；create/createView 显式携带
- *   createAction、tracker 预留字段和非空 clientRequestId。
+ *   createAction、tracker 预留字段和非空 clientRequestId（优先复用调用方传入的逻辑提交 id）。
  */
 export const httpOrchestratorTransport = {
   tasks: {
@@ -202,7 +275,7 @@ export const httpOrchestratorTransport = {
         externalUrl: request.externalUrl,
         externalState: request.externalState,
         externalLabels: request.externalLabels,
-        clientRequestId: createHttpOrchestratorClientRequestId(),
+        clientRequestId: resolveHttpOrchestratorClientRequestId(request),
       }),
     createView: (request: HttpCreateOrchestratorTaskRequest): Promise<OrchestratorTaskView> =>
       postJson<OrchestratorTaskView>('/api/orchestrator/task-views/create', {
@@ -218,7 +291,7 @@ export const httpOrchestratorTransport = {
         externalUrl: request.externalUrl,
         externalState: request.externalState,
         externalLabels: request.externalLabels,
-        clientRequestId: createHttpOrchestratorClientRequestId(),
+        clientRequestId: resolveHttpOrchestratorClientRequestId(request),
       }),
     completePrompt: (
       request: HttpCompleteOrchestratorTaskPromptRequest,
@@ -242,6 +315,37 @@ export const httpOrchestratorTransport = {
       return response.evidence;
     },
   },
+  /**
+   * Business Logic（为什么需要这个方法）:
+   *   手机自动化面板需要拉取本机/远端 shortcut 的 runtime snapshot，且不能直连 owning device P2P base URL。
+   *
+   * Code Logic（这个函数做什么）:
+   *   POST `/api/mobile/orchestrator/runtime-snapshot`，body `{projectId}`，返回 camelCase snapshot DTO。
+   */
+
+  /**
+   * Business Logic（为什么需要这个对象）:
+   *   手机 Automation 面板需要对本机 failed outbox 执行 Retry/Discard，且只打本机同源 HTTP。
+   *
+   * Code Logic（这个对象做什么）:
+   *   POST `/api/orchestrator/outbox/{retry,discard}`，body `{projectId,outboxId}`，返回 outbox DTO。
+   */
+  outbox: {
+    retry: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
+      postJson<OrchestratorRemoteOutboxItem>('/api/orchestrator/outbox/retry', {
+        projectId,
+        outboxId,
+      }),
+    discard: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
+      postJson<OrchestratorRemoteOutboxItem>('/api/orchestrator/outbox/discard', {
+        projectId,
+        outboxId,
+      }),
+  },
+  getRuntimeSnapshot: (projectId: string): Promise<OrchestratorRuntimeSnapshot> =>
+    postJson<OrchestratorRuntimeSnapshot>('/api/mobile/orchestrator/runtime-snapshot', {
+      projectId,
+    }),
 } as const;
 
 /**

@@ -18,6 +18,10 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 const SCHEDULER_TICK_SECS: u64 = 10;
+/// claim 后进程崩溃留下的 Preparing 超过该 lease 才回收。
+/// prepare 会在长步骤前后续租 updated_at；lease 需明显大于单次 git worktree/session 创建，
+/// 避免仍在合法 prepare 的任务被并发 dispatch 误杀为 Blocked 并留下孤儿现场。
+const PREPARING_STALE_LEASE_SECS: u64 = 600;
 
 /// Orchestrator scheduler 运行时句柄。
 ///
@@ -190,7 +194,7 @@ pub async fn dispatch_once(state: &AppState) -> Result<usize, AppError> {
 ///     dispatch_once 需要在外层统一记录可观测 tick，同时保留原调度流程的错误传播。
 ///
 /// Code Logic（这个函数做什么）:
-///     执行原始 claim 和 runner 准备流程，返回本次成功派发数量。
+///     先回收过期 Preparing 释放容量，再 claim 并逐任务启动 runner；runner 失败写 Blocked 补偿，返回成功派发数量。
 async fn dispatch_once_inner(state: &AppState) -> Result<usize, AppError> {
     let config = state
         .config
@@ -207,7 +211,15 @@ async fn dispatch_once_inner(state: &AppState) -> Result<usize, AppError> {
             }
             Err(err) => {
                 let reason = err.to_string();
-                record_runner_failure(&state.orchestrator_repo, &task.id, &reason).await?;
+                // 单任务补偿失败不得中断后续任务：记录错误后继续，避免一个失败让其余 Preparing 永久占槽。
+                if let Err(compensate_err) =
+                    record_runner_failure(&state.orchestrator_repo, &task.id, &reason).await
+                {
+                    tracing::error!(
+                        task_id = %task.id,
+                        "Runner 失败补偿写入 Blocked 失败: {compensate_err}（原始失败: {reason}）"
+                    );
+                }
             }
         }
     }
@@ -218,11 +230,18 @@ async fn dispatch_once_inner(state: &AppState) -> Result<usize, AppError> {
 ///     后台 scheduler 和手动 dispatch 应共享全局开关与容量解释，测试也需要在不构造 GUI 句柄的情况下验证领取语义。
 ///
 /// Code Logic（这个函数做什么）:
-///     enabled=false 时返回空；enabled=true 时委托 repo 在事务内按全局本机容量领取 Todo/Rework 且未运行的 local 任务。
+///     enabled=false 时仍回收过期 Preparing（释放卡死容量）后返回空；enabled=true 时先回收再委托 repo
+///     按全局本机容量领取 **Queued+Idle** 且 workflow 允许的 local 任务。
 async fn claim_tasks_for_dispatch(
     repo: &OrchestratorRepo,
     config: &OrchestratorAutomationConfig,
 ) -> Result<Vec<OrchestratorTaskRow>, AppError> {
+    let recovered = repo
+        .recover_stale_local_preparing_tasks(Duration::from_secs(PREPARING_STALE_LEASE_SECS))
+        .await?;
+    if recovered > 0 {
+        tracing::warn!("已回收 {recovered} 个过期 Preparing 任务，释放调度容量");
+    }
     if !config.enabled {
         return Ok(Vec::new());
     }
@@ -394,6 +413,7 @@ mod tests {
             branch_name: None,
             worktree_id: None,
             session_id: None,
+            prepare_claim_token: None,
             blocked_reason: None,
             attempt: 0,
             created_at: "2026-07-05T00:00:00Z".to_string(),
@@ -558,28 +578,52 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     split state 后，scheduler 应只领取 Todo/Idle 与 Rework/Blocked 这类 active workflow 任务，Backlog 不应自动启动。
+    ///     split state 后，scheduler 只领取 **Queued + Idle** 且 active workflow 上的任务（Todo/Rework）；
+    ///     Backlog 不自动启动，仅拖入 Todo 的 Draft 不启动，Blocked 必须经用户 retry 回到 Idle 后才能再 claim。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造 Backlog idle、Todo idle 和 Rework blocked 三个本机任务，断言只领取 Todo/Rework 并写入 Preparing split state。
+    ///     构造 Backlog/Draft idle、Queued Todo idle、Queued Rework idle 与 Blocked Rework 四个本机任务，
+    ///     断言只领取 Queued 的 Todo/Rework Idle 项，Blocked 保持阻塞。
     #[tokio::test]
     async fn scheduler_claims_todo_and_rework_only() {
         let (pool, repo) = setup_repo().await;
         create_workbench_projects_table(&pool).await;
         insert_workbench_project(&pool, "local-a", "local").await;
-        for id in ["backlog-idle", "todo-idle", "rework-blocked"] {
+        repo.create_task(&task_row_for_project(
+            "backlog-idle",
+            "local-a",
+            OrchestratorTaskStatus::Draft,
+        ))
+        .await
+        .unwrap();
+        for id in ["todo-idle", "rework-idle"] {
             repo.create_task(&task_row_for_project(
                 id,
                 "local-a",
-                OrchestratorTaskStatus::Draft,
+                OrchestratorTaskStatus::Queued,
             ))
             .await
             .unwrap();
         }
+        repo.create_task(&task_row_for_project(
+            "rework-blocked",
+            "local-a",
+            OrchestratorTaskStatus::Blocked,
+        ))
+        .await
+        .unwrap();
         set_task_split_state(
             &pool,
             "todo-idle",
             OrchestratorWorkflowState::Todo,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+        set_task_split_state(
+            &pool,
+            "rework-idle",
+            OrchestratorWorkflowState::Rework,
             OrchestratorRunState::Idle,
             None,
         )
@@ -597,7 +641,7 @@ mod tests {
             .await
             .unwrap();
         let backlog = repo.get_task("backlog-idle").await.unwrap();
-        let rework = repo.get_task("rework-blocked").await.unwrap();
+        let rework_blocked = repo.get_task("rework-blocked").await.unwrap();
 
         let claimed_ids = claimed
             .iter()
@@ -605,7 +649,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(claimed_ids.len(), 2);
         assert!(claimed_ids.contains(&"todo-idle"));
-        assert!(claimed_ids.contains(&"rework-blocked"));
+        assert!(claimed_ids.contains(&"rework-idle"));
+        assert!(!claimed_ids.contains(&"rework-blocked"));
         assert!(claimed.iter().all(|task| {
             task.status == OrchestratorTaskStatus::Preparing
                 && task.workflow_state == OrchestratorWorkflowState::InProgress
@@ -615,7 +660,108 @@ mod tests {
         }));
         assert_eq!(backlog.workflow_state, OrchestratorWorkflowState::Backlog);
         assert_eq!(backlog.run_state, OrchestratorRunState::Idle);
-        assert_eq!(rework.blocked_reason, None);
+        assert_eq!(rework_blocked.run_state, OrchestratorRunState::Blocked);
+        assert_eq!(rework_blocked.blocked_reason.as_deref(), Some("验证失败"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户仅把 Draft 拖到 Todo 泳道时不得隐式启动 Runner；只有 queue/start/createAction 产生的 Queued 才可 claim。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 Draft 任务后 move_task_workflow_state 到 Todo，再跑 claim helper，断言不被领取且仍为 Draft/Todo/Idle。
+    #[tokio::test]
+    async fn draft_dragged_to_todo_is_not_claimed_by_scheduler() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "local-a", "local").await;
+        let created = task_row_for_project("draft-drag", "local-a", OrchestratorTaskStatus::Draft);
+        repo.create_task(&created).await.unwrap();
+        let moved = repo
+            .move_task_workflow_state(&created.id, OrchestratorWorkflowState::Todo)
+            .await
+            .unwrap();
+        assert_eq!(moved.status, OrchestratorTaskStatus::Draft);
+        assert_eq!(moved.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(moved.run_state, OrchestratorRunState::Idle);
+
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 3))
+            .await
+            .unwrap();
+        let persisted = repo.get_task(&created.id).await.unwrap();
+
+        assert!(claimed.is_empty(), "仅拖拽 Draft→Todo 不得 claim");
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Draft);
+        assert_eq!(persisted.workflow_state, OrchestratorWorkflowState::Todo);
+        assert_eq!(persisted.run_state, OrchestratorRunState::Idle);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     claim 后进程崩溃留下的 Preparing 必须在下一 tick 回收，否则会永久占满全局容量。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入过期 Preparing 任务（updated_at 早于 lease）与一个 Queued 任务；claim helper 应先回收 Preparing 再领取 Queued。
+    #[tokio::test]
+    async fn stale_preparing_is_reclaimed_before_claim_frees_capacity() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "local-a", "local").await;
+        repo.create_task(&task_row_for_project(
+            "stale-prep",
+            "local-a",
+            OrchestratorTaskStatus::Preparing,
+        ))
+        .await
+        .unwrap();
+        set_task_split_state(
+            &pool,
+            "stale-prep",
+            OrchestratorWorkflowState::InProgress,
+            OrchestratorRunState::Preparing,
+            None,
+        )
+        .await;
+        // 回拨 updated_at 到 lease 之外，模拟 claim 后崩溃。
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET updated_at = '2020-01-01T00:00:00Z' WHERE id = ?",
+        )
+        .bind("stale-prep")
+        .execute(&pool)
+        .await
+        .unwrap();
+        repo.create_task(&task_row_for_project(
+            "queued-next",
+            "local-a",
+            OrchestratorTaskStatus::Queued,
+        ))
+        .await
+        .unwrap();
+        set_task_split_state(
+            &pool,
+            "queued-next",
+            OrchestratorWorkflowState::Todo,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+
+        // max=1：若不回收 stale Preparing，queued-next 永远无法领取。
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 1))
+            .await
+            .unwrap();
+        let stale = repo.get_task("stale-prep").await.unwrap();
+
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, "queued-next");
+        assert_eq!(stale.status, OrchestratorTaskStatus::Blocked);
+        assert_eq!(stale.run_state, OrchestratorRunState::Blocked);
+        assert!(
+            stale
+                .blocked_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("Preparing"),
+            "回收后应写入中文阻塞原因"
+        );
     }
 
     /// Business Logic（为什么需要这个函数）:

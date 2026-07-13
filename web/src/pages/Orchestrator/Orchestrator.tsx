@@ -25,6 +25,8 @@ import { orchestratorApi } from '@/api/orchestrator';
 import type { OrchestratorCreateAction } from '@/api/orchestrator';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
 import { Button, Card, Input, Pill } from '@/components/primitives';
+import { requestAttentionInvalidation } from '@/hooks/attentionInvalidation';
+import { useOrchestratorRuntimeSnapshot } from '@/hooks/useOrchestratorRuntimeSnapshot';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import {
   CheckIcon,
@@ -67,7 +69,6 @@ import type {
   OrchestratorEvidence,
   OrchestratorRemoteOutboxStatus,
   OrchestratorRunState,
-  OrchestratorRuntimeSnapshot,
   OrchestratorRuntimeEvent,
   OrchestratorRuntimeTaskSummary,
   OrchestratorTask,
@@ -81,6 +82,7 @@ import {
   groupRenderableTasksByWorkflowState,
   ORCHESTRATOR_BOARD_LANES,
 } from './orchestratorBoard';
+import { resolveOrchestratorFocusTarget } from './orchestratorFocus';
 import styles from './Orchestrator.module.css';
 
 /**
@@ -127,7 +129,8 @@ type OrchestratorRemoteOutboxStatusLabelKey =
   | 'orchestrator:pending.status.pending'
   | 'orchestrator:pending.status.sending'
   | 'orchestrator:pending.status.mirrored'
-  | 'orchestrator:pending.status.failed';
+  | 'orchestrator:pending.status.failed'
+  | 'orchestrator:pending.status.discarded';
 
 type OrchestratorWorkflowStateLabelKey =
   | 'orchestrator:workflow.backlog'
@@ -235,20 +238,6 @@ const EMPTY_ORCHESTRATOR_EVIDENCE_ITEMS: OrchestratorEvidence[] = [];
 
 /**
  * Business Logic（为什么需要这个类型）:
- *   运行时快照只对本机 Workbench 项目可用，加载失败不能覆盖任务列表错误，也不能在项目切换后残留。
- *
- * Code Logic（这个类型做什么）:
- *   保存 snapshot 所属 projectId、当前 loading 状态、成功返回的 snapshot 和非阻塞错误文案。
- */
-interface OrchestratorRuntimeSnapshotResult {
-  projectId: string;
-  snapshot: OrchestratorRuntimeSnapshot | null;
-  loading: boolean;
-  error: string | null;
-}
-
-/**
- * Business Logic（为什么需要这个类型）:
  *   创建/入队这类用户动作的错误只应该在触发动作的项目下展示，项目切换后不能残留旧错误。
  *
  * Code Logic（这个类型做什么）:
@@ -269,6 +258,17 @@ interface OrchestratorActionError {
 interface OrchestratorPanelProps {
   embedded?: boolean;
   onOpenWorkbench?: (url: string) => void;
+  /** Attention deep link：加载完成后打开任务详情/Evidence。 */
+  focusTaskId?: string | null;
+  /** Attention deep link：加载完成后聚焦 failed outbox 行。 */
+  focusOutboxId?: string | null;
+  /** 焦点目标已成功应用后的回调（供 Workbench 清 staged 标记）。 */
+  onFocusTargetResolved?: (result: { kind: 'task' | 'outbox'; id: string }) => void;
+  /**
+   * 焦点目标不存在/已解决时的类型化回调。
+   * Workbench 协调器应 refresh Attention 并回退 `/attention`，不得打开空白详情或终端。
+   */
+  onFocusTargetNotFound?: (result: { kind: 'task' | 'outbox'; id: string }) => void;
 }
 
 interface OrchestratorDialogPortalProps {
@@ -323,6 +323,7 @@ const PENDING_REMOTE_STATUS_LABEL_KEYS: Record<
   sending: 'orchestrator:pending.status.sending',
   mirrored: 'orchestrator:pending.status.mirrored',
   failed: 'orchestrator:pending.status.failed',
+  discarded: 'orchestrator:pending.status.discarded',
 };
 
 const WORKFLOW_STATE_LABEL_KEYS: Record<
@@ -463,6 +464,7 @@ function pendingRemoteStatusTone(
     case 'mirrored':
       return 'success';
     case 'pending':
+    case 'discarded':
       return 'neutral';
   }
 }
@@ -560,12 +562,21 @@ function buildWorkbenchTaskUrl(task: OrchestratorTask | null): string {
  *   维持 activeProject、task view 列表、点击任务后的详情抽屉与 evidence stale guard；embedded=true 时省略页面级 header。
  */
 export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
-  const { embedded = false, onOpenWorkbench } = props;
+  const {
+    embedded = false,
+    onOpenWorkbench,
+    focusTaskId = null,
+    focusOutboxId = null,
+    onFocusTargetResolved,
+    onFocusTargetNotFound,
+  } = props;
   const { t } = useTranslation(['orchestrator', 'nav', 'common']);
   const navigate = useNavigate();
   const { activeProject, projectsLoading } = useWorkbenchProjects();
   const [taskListResult, setTaskListResult] = useState<OrchestratorTaskListResult | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [focusedOutboxId, setFocusedOutboxId] = useState<string | null>(null);
+  const focusHandledRef = useRef<string | null>(null);
   const [form, setForm] = useState<OrchestratorCreateForm>(EMPTY_FORM);
   const [creatingAction, setCreatingAction] = useState<OrchestratorCreateAction | null>(null);
   const [startingTaskId, setStartingTaskId] = useState<string | null>(null);
@@ -578,29 +589,35 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const [movingTaskId, setMovingTaskId] = useState<string | null>(null);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [evidenceResult, setEvidenceResult] = useState<OrchestratorEvidenceResult | null>(null);
-  const [runtimeSnapshotResult, setRuntimeSnapshotResult] =
-    useState<OrchestratorRuntimeSnapshotResult | null>(null);
   const [actionError, setActionError] = useState<OrchestratorActionError | null>(null);
+  const [outboxActionId, setOutboxActionId] = useState<string | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);
   const [completionPrompt, setCompletionPrompt] = useState('');
   const [completingPrompt, setCompletingPrompt] = useState(false);
   const completionPromptRef = useRef<HTMLTextAreaElement | null>(null);
   const activeProjectId = activeProject?.id ?? null;
-  const activeProjectKind = activeProject?.kind ?? null;
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
-  const activeProjectKindRef = useRef<string | null>(activeProjectKind);
   const taskLoadDecision = useMemo(
     () => resolveOrchestratorTaskLoad(projectsLoading, activeProjectId),
     [activeProjectId, projectsLoading],
   );
+  const runtimeSnapshotEnabled = taskLoadDecision.kind === 'load';
+  const runtimeSnapshotProjectId = runtimeSnapshotEnabled ? taskLoadDecision.projectId : null;
+  const {
+    snapshot: runtimeSnapshot,
+    remoteStatus: runtimeRemoteStatus,
+    cachedAt: runtimeCachedAt,
+    loading: runtimeSnapshotLoading,
+    error: runtimeSnapshotError,
+    refresh: refreshRuntimeSnapshot,
+  } = useOrchestratorRuntimeSnapshot({
+    projectId: runtimeSnapshotProjectId,
+    enabled: runtimeSnapshotEnabled,
+  });
 
   useEffect(() => {
     activeProjectIdRef.current = activeProjectId;
   }, [activeProjectId]);
-
-  useEffect(() => {
-    activeProjectKindRef.current = activeProjectKind;
-  }, [activeProjectKind]);
 
   const activeTaskListResult =
     taskLoadDecision.kind === 'load' && taskListResult?.projectId === taskLoadDecision.projectId
@@ -617,6 +634,62 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const visibleActionError =
     actionError?.projectId === activeProjectId ? actionError.message : null;
   const error = visibleActionError ?? taskLoadError;
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   Attention deep link 必须在 task/outbox 列表加载后聚焦详情或失败项；
+   *   目标已解决时要类型化回报协调器，不能渲染空白详情或打开终端。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   用 resolveOrchestratorFocusTarget 判定；found 时选中任务/高亮 outbox；
+   *   not_found 时调用 onFocusTargetNotFound 一次（按 focus key 去重）。
+   */
+  useEffect(() => {
+    const focusKey = `${focusTaskId ?? ''}|${focusOutboxId ?? ''}|${activeProjectId ?? ''}`;
+    const result = resolveOrchestratorFocusTarget({
+      loading,
+      focusTaskId,
+      focusOutboxId,
+      taskIds: tasks.map((item) => item.task.id),
+      outboxIds: pendingRemoteItems.map((item) => item.id),
+    });
+
+    if (result.status === 'none' || result.status === 'pending') {
+      if (result.status === 'none') {
+        focusHandledRef.current = null;
+      }
+      return;
+    }
+
+    if (focusHandledRef.current === focusKey) return;
+    focusHandledRef.current = focusKey;
+
+    if (result.status === 'found') {
+      queueMicrotask(() => {
+        if (result.kind === 'task') {
+          setSelectedTaskId(result.id);
+          setFocusedOutboxId(null);
+        } else {
+          setFocusedOutboxId(result.id);
+        }
+        onFocusTargetResolved?.(result);
+      });
+      return;
+    }
+
+    queueMicrotask(() => {
+      onFocusTargetNotFound?.(result);
+    });
+  }, [
+    activeProjectId,
+    focusOutboxId,
+    focusTaskId,
+    loading,
+    onFocusTargetNotFound,
+    onFocusTargetResolved,
+    pendingRemoteItems,
+    tasks,
+  ]);
 
   const groups = useMemo(() => groupRenderableTasksByWorkflowState(tasks), [tasks]);
   const selectedRenderableTask = useMemo(() => {
@@ -640,12 +713,10 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   );
   const selectedTaskProgressMessage = orchestratorTaskProgressMessage(selectedTaskView, t);
   const selectedTaskTerminalLabel = selectedTask?.sessionId ?? selectedTask?.worktreeId ?? null;
-  const activeRuntimeSnapshotResult =
-    activeProjectKind === 'local' &&
-    taskLoadDecision.kind === 'load' &&
-    runtimeSnapshotResult?.projectId === taskLoadDecision.projectId
-      ? runtimeSnapshotResult
-      : null;
+  const runtimeSnapshotErrorMessage = runtimeSnapshotError
+    ? displayOrchestratorErrorMessage(runtimeSnapshotError, t('orchestrator:errors.snapshot'))
+    : null;
+  const showRuntimeSnapshotContent = Boolean(runtimeSnapshot);
   const activeEvidenceResult =
     selectedTask &&
     taskLoadDecision.kind === 'load' &&
@@ -725,59 +796,113 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [createDialogOpen, handleCloseTaskDrawer, selectedTask]);
 
-  const refreshRuntimeSnapshot = useCallback(
-    async (projectId: string) => {
-      if (activeProjectIdRef.current !== projectId || activeProjectKindRef.current !== 'local') {
-        return;
-      }
-      setRuntimeSnapshotResult((current) => ({
+  const handleRefreshRuntimeSnapshot = useCallback(() => {
+    if (!activeProjectId) return;
+    void refreshRuntimeSnapshot();
+  }, [activeProjectId, refreshRuntimeSnapshot]);
+
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   failed outbox 的 Retry/Discard 成功后需要刷新当前项目的 task-view 列表，
+   *   让 pending 区反映 pending/discarded 变化，并立即失效全局 Inbox 投影。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用 active projectId 调 listTaskViews，并用 activeProjectIdRef 做 stale guard；
+   *   列表刷新成功后调用 requestAttentionInvalidation。
+   */
+  const reloadTaskViewsForActiveProject = useCallback(async (): Promise<void> => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return;
+    try {
+      const nextViews = await orchestratorApi.listTaskViews(projectId);
+      if (activeProjectIdRef.current !== projectId) return;
+      setTaskListResult({ projectId, views: nextViews, error: null });
+      setSelectedTaskId((current) => {
+        const nextSplit = splitOrchestratorTaskViews(nextViews);
+        if (current && nextSplit.tasks.some((item) => item.task.id === current)) return current;
+        return null;
+      });
+      requestAttentionInvalidation();
+    } catch (err) {
+      if (activeProjectIdRef.current !== projectId) return;
+      setActionError({
         projectId,
-        snapshot: current?.projectId === projectId ? current.snapshot : null,
-        loading: true,
-        error: null,
-      }));
+        message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.load')),
+      });
+    }
+  }, [t]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户在原 Automation UI 对 failed outbox 点 Retry 时，应保留 payload 回到 pending。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验 active project 与 busy 状态，调用 orchestratorApi.retryRemoteOutbox，成功后 reload 列表。
+   */
+  const handleRetryRemoteOutbox = useCallback(
+    async (outboxId: string): Promise<void> => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || outboxActionId) return;
+      setOutboxActionId(outboxId);
+      setActionError(null);
       try {
-        const snapshot = await orchestratorApi.getRuntimeSnapshot(projectId);
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeProjectKindRef.current !== 'local' ||
-          snapshot.projectId !== projectId
-        ) {
-          return;
-        }
-        setRuntimeSnapshotResult({ projectId, snapshot, loading: false, error: null });
+        await orchestratorApi.retryRemoteOutbox(projectId, outboxId);
+        if (activeProjectIdRef.current !== projectId) return;
+        await reloadTaskViewsForActiveProject();
       } catch (err) {
-        if (activeProjectIdRef.current === projectId && activeProjectKindRef.current === 'local') {
-          setRuntimeSnapshotResult({
-            projectId,
-            snapshot: null,
-            loading: false,
-            error: displayOrchestratorErrorMessage(err, t('orchestrator:errors.snapshot')),
-          });
+        if (activeProjectIdRef.current !== projectId) return;
+        setActionError({
+          projectId,
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.retryOutbox')),
+        });
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setOutboxActionId(null);
         }
       }
     },
-    [t],
+    [outboxActionId, reloadTaskViewsForActiveProject, t],
   );
 
-  const handleRefreshRuntimeSnapshot = useCallback(() => {
-    if (!activeProjectId || activeProjectKind !== 'local') return;
-    void refreshRuntimeSnapshot(activeProjectId);
-  }, [activeProjectId, activeProjectKind, refreshRuntimeSnapshot]);
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户在原 Automation UI 对 failed outbox 点 Discard 时，需要确认后再进入 discarded 审计终态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   window.confirm 后调用 discardRemoteOutbox，成功后 reload 列表。
+   */
+  const handleDiscardRemoteOutbox = useCallback(
+    async (outboxId: string): Promise<void> => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || outboxActionId) return;
+      const confirmed = window.confirm(t('orchestrator:pending.discardConfirm'));
+      if (!confirmed) return;
+      setOutboxActionId(outboxId);
+      setActionError(null);
+      try {
+        await orchestratorApi.discardRemoteOutbox(projectId, outboxId);
+        if (activeProjectIdRef.current !== projectId) return;
+        await reloadTaskViewsForActiveProject();
+      } catch (err) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setActionError({
+          projectId,
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.discardOutbox')),
+        });
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setOutboxActionId(null);
+        }
+      }
+    },
+    [outboxActionId, reloadTaskViewsForActiveProject, t],
+  );
+
 
   const handleOpenAutomationSettings = useCallback(() => {
     navigate('/settings?tab=automation');
   }, [navigate]);
-
-  useEffect(() => {
-    if (taskLoadDecision.kind !== 'load' || activeProjectKind !== 'local') return undefined;
-    const refreshTimer = window.setTimeout(() => {
-      void refreshRuntimeSnapshot(taskLoadDecision.projectId);
-    }, 0);
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-  }, [activeProjectKind, refreshRuntimeSnapshot, taskLoadDecision]);
 
   useEffect(() => {
     if (taskLoadDecision.kind !== 'load') return undefined;
@@ -913,7 +1038,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         setForm(EMPTY_FORM);
         setCompletionPrompt('');
         setCreateDialogOpen(false);
-        void refreshRuntimeSnapshot(projectId);
+        void refreshRuntimeSnapshot();
       } catch (err) {
         setActionError({
           projectId,
@@ -1013,7 +1138,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
           return;
         }
         replaceTaskViewInCurrentProject(projectId, moved);
-        void refreshRuntimeSnapshot(projectId);
+        void refreshRuntimeSnapshot();
       } catch (err) {
         if (activeProjectIdRef.current === projectId) {
           setActionError({
@@ -1058,7 +1183,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         return;
       }
       replaceTaskViewInCurrentProject(projectId, started);
-      void refreshRuntimeSnapshot(projectId);
+      void refreshRuntimeSnapshot();
     } catch (err) {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
         setActionError({
@@ -1093,7 +1218,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         return;
       }
       replaceTaskViewInCurrentProject(projectId, { origin: 'local', task: updated });
-      void refreshRuntimeSnapshot(projectId);
+      void refreshRuntimeSnapshot();
       try {
         const items = await orchestratorApi.listEvidence(projectId, taskId);
         if (activeProjectIdRef.current === projectId) {
@@ -1158,7 +1283,8 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         return;
       }
       replaceTaskViewInCurrentProject(projectId, updated);
-      void refreshRuntimeSnapshot(projectId);
+      void refreshRuntimeSnapshot();
+      requestAttentionInvalidation();
       const items = await orchestratorApi.listEvidence(projectId, taskId);
       if (activeProjectIdRef.current === projectId) {
         setEvidenceResult({ projectId, taskId, items, error: null });
@@ -1206,7 +1332,8 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         return;
       }
       replaceTaskViewInCurrentProject(projectId, updated);
-      void refreshRuntimeSnapshot(projectId);
+      void refreshRuntimeSnapshot();
+      requestAttentionInvalidation();
       const items = await orchestratorApi.listEvidence(projectId, taskId);
       if (activeProjectIdRef.current === projectId) {
         setEvidenceResult({ projectId, taskId, items, error: null });
@@ -1262,7 +1389,8 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         return;
       }
       replaceTaskViewInCurrentProject(projectId, updated);
-      void refreshRuntimeSnapshot(projectId);
+      void refreshRuntimeSnapshot();
+      requestAttentionInvalidation();
     } catch (err) {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
         setActionError({
@@ -1305,7 +1433,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         return;
       }
       replaceTaskViewInCurrentProject(projectId, updated);
-      void refreshRuntimeSnapshot(projectId);
+      void refreshRuntimeSnapshot();
     } catch (err) {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
         setActionError({
@@ -1340,7 +1468,8 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         if (current && nextSplit.tasks.some((item) => item.task.id === current)) return current;
         return null;
       });
-      void refreshRuntimeSnapshot(projectId);
+      void refreshRuntimeSnapshot();
+      requestAttentionInvalidation();
     } catch (err) {
       if (activeProjectIdRef.current === projectId) {
         setActionError({
@@ -1412,20 +1541,25 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                 <div className={styles.snapshotHeader}>
                   <span className={styles.label}>{t('orchestrator:snapshot.title')}</span>
                   <div className={styles.snapshotActions}>
-                    {activeProjectKind === 'local' && activeRuntimeSnapshotResult?.loading ? (
+                    {runtimeSnapshotLoading ? (
                       <Pill tone="accent">{t('orchestrator:snapshot.loading')}</Pill>
                     ) : null}
-                    {activeProjectKind === 'local' ? (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        icon={<RefreshIcon />}
-                        disabled={activeRuntimeSnapshotResult?.loading ?? false}
-                        onClick={handleRefreshRuntimeSnapshot}
-                      >
-                        {t('orchestrator:snapshot.refresh')}
-                      </Button>
+                    {runtimeRemoteStatus === 'offline' && runtimeCachedAt ? (
+                      <Pill tone="warn">
+                        {t('orchestrator:snapshot.remoteOfflineCachedBadge', {
+                          time: formatTaskTimestamp(runtimeCachedAt),
+                        })}
+                      </Pill>
                     ) : null}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={<RefreshIcon />}
+                      disabled={runtimeSnapshotLoading}
+                      onClick={handleRefreshRuntimeSnapshot}
+                    >
+                      {t('orchestrator:snapshot.refresh')}
+                    </Button>
                     <Button
                       variant="ghost"
                       size="sm"
@@ -1436,174 +1570,169 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                     </Button>
                   </div>
                 </div>
-                {activeProjectKind === 'local' ? (
+                {showRuntimeSnapshotContent && runtimeSnapshot ? (
                   <>
-                    {activeRuntimeSnapshotResult?.snapshot ? (
-                      <>
-                        <div className={styles.snapshotItems}>
-                          <Pill
-                            tone={
-                              activeRuntimeSnapshotResult.snapshot.schedulerEnabled
-                                ? 'success'
-                                : 'warn'
-                            }
-                            dot
-                          >
-                            {activeRuntimeSnapshotResult.snapshot.schedulerEnabled
-                              ? t('orchestrator:snapshot.schedulerEnabled')
-                              : t('orchestrator:snapshot.schedulerDisabled')}
-                          </Pill>
-                          <Pill
-                            tone={
-                              activeRuntimeSnapshotResult.snapshot.workflowValid
-                                ? 'success'
-                                : 'danger'
-                            }
-                            dot
-                          >
-                            {activeRuntimeSnapshotResult.snapshot.workflowValid
-                              ? t('orchestrator:snapshot.workflowValid')
-                              : t('orchestrator:snapshot.workflowInvalid')}
-                          </Pill>
-                          <span className={styles.snapshotMetric}>
-                            {t('orchestrator:snapshot.slotsUsed', {
-                              used: activeRuntimeSnapshotResult.snapshot.slotsUsed,
-                              max: activeRuntimeSnapshotResult.snapshot.maxConcurrentTasks,
-                            })}
-                          </span>
-                          <span className={styles.snapshotMetric}>
-                            {t('orchestrator:snapshot.slotsAvailable', {
-                              available: activeRuntimeSnapshotResult.snapshot.slotsAvailable,
-                            })}
-                          </span>
-                          <span className={styles.snapshotMetric}>
-                            {t('orchestrator:snapshot.runningCount', {
-                              count: activeRuntimeSnapshotResult.snapshot.runningTasks.length,
-                            })}
-                          </span>
-                          <span className={styles.snapshotMetric}>
-                            {t('orchestrator:snapshot.retryingCount', {
-                              count: activeRuntimeSnapshotResult.snapshot.retryingTasks.length,
-                            })}
-                          </span>
-                        </div>
-                        <div className={styles.snapshotMetaGrid}>
-                          <span className={styles.snapshotMetric}>
-                            {t('orchestrator:snapshot.generatedAt', {
-                              time: formatTaskTimestamp(
-                                activeRuntimeSnapshotResult.snapshot.generatedAt,
-                              ),
-                            })}
-                          </span>
-                          <span className={styles.snapshotMetric}>
-                            {t('orchestrator:snapshot.latestTickAt', {
-                              time: formatOptionalTaskTimestamp(
-                                activeRuntimeSnapshotResult.snapshot.latestTickAt,
-                                t('orchestrator:snapshot.latestTickUnknown'),
-                              ),
-                            })}
-                          </span>
-                          <span className={styles.snapshotMetric}>
-                            {t('orchestrator:snapshot.lastDispatchedCount', {
-                              count: activeRuntimeSnapshotResult.snapshot.lastDispatchedCount,
-                            })}
-                          </span>
-                        </div>
-                        {activeRuntimeSnapshotResult.snapshot.runningTasks.length > 0 ? (
-                          <section className={styles.snapshotSection}>
-                            <h3 className={styles.snapshotSectionTitle}>
-                              {t('orchestrator:snapshot.runningTasks')}
-                            </h3>
-                            <ul className={styles.snapshotList}>
-                              {activeRuntimeSnapshotResult.snapshot.runningTasks.map(
-                                (task: OrchestratorRuntimeTaskSummary) => (
-                                  <li className={styles.snapshotListItem} key={task.taskId}>
-                                    <span className={styles.snapshotItemTitle}>{task.title}</span>
-                                    <span className={styles.snapshotItemMeta}>
-                                      {t(RUN_STATE_LABEL_KEYS[task.runState])}
-                                      {task.attemptPhase
-                                        ? ` · ${t(ATTEMPT_PHASE_LABEL_KEYS[task.attemptPhase])}`
-                                        : ''}
-                                      {task.lastRuntimeMessage
-                                        ? ` · ${task.lastRuntimeMessage}`
-                                        : ''}
-                                    </span>
-                                  </li>
-                                ),
-                              )}
-                            </ul>
-                          </section>
-                        ) : null}
-                        {activeRuntimeSnapshotResult.snapshot.retryingTasks.length > 0 ? (
-                          <section className={styles.snapshotSection}>
-                            <h3 className={styles.snapshotSectionTitle}>
-                              {t('orchestrator:snapshot.retryingTasks')}
-                            </h3>
-                            <ul className={styles.snapshotList}>
-                              {activeRuntimeSnapshotResult.snapshot.retryingTasks.map(
-                                (task: OrchestratorRuntimeTaskSummary) => (
-                                  <li className={styles.snapshotListItem} key={task.taskId}>
-                                    <span className={styles.snapshotItemTitle}>{task.title}</span>
-                                    <span className={styles.snapshotItemMeta}>
-                                      {t(WORKFLOW_STATE_LABEL_KEYS[task.workflowState])}
-                                      {' · '}
-                                      {t(RUN_STATE_LABEL_KEYS[task.runState])}
-                                    </span>
-                                  </li>
-                                ),
-                              )}
-                            </ul>
-                          </section>
-                        ) : null}
-                        {activeRuntimeSnapshotResult.snapshot.recentEvents.length > 0 ? (
-                          <section className={styles.snapshotSection}>
-                            <h3 className={styles.snapshotSectionTitle}>
-                              {t('orchestrator:snapshot.recentEvents')}
-                            </h3>
-                            <ul className={styles.snapshotList}>
-                              {activeRuntimeSnapshotResult.snapshot.recentEvents.map(
-                                (event: OrchestratorRuntimeEvent) => (
-                                  <li className={styles.snapshotListItem} key={event.id}>
-                                    <span className={styles.snapshotItemTitle}>
-                                      {event.taskTitle}
-                                    </span>
-                                    <span className={styles.snapshotItemMeta}>
-                                      {event.kind} · {event.message} ·{' '}
-                                      {formatTaskTimestamp(event.createdAt)}
-                                    </span>
-                                  </li>
-                                ),
-                              )}
-                            </ul>
-                          </section>
-                        ) : null}
-                      </>
+                    {runtimeRemoteStatus === 'offline' && runtimeCachedAt ? (
+                      <p className={styles.snapshotMuted} role="status">
+                        {t('orchestrator:snapshot.remoteOfflineCached', {
+                          time: formatTaskTimestamp(runtimeCachedAt),
+                        })}
+                      </p>
                     ) : null}
-                    {activeRuntimeSnapshotResult?.snapshot?.workflowError ? (
+                    <div className={styles.snapshotItems}>
+                      <Pill
+                        tone={runtimeSnapshot.schedulerEnabled ? 'success' : 'warn'}
+                        dot
+                      >
+                        {runtimeSnapshot.schedulerEnabled
+                          ? t('orchestrator:snapshot.schedulerEnabled')
+                          : t('orchestrator:snapshot.schedulerDisabled')}
+                      </Pill>
+                      <Pill tone={runtimeSnapshot.workflowValid ? 'success' : 'danger'} dot>
+                        {runtimeSnapshot.workflowValid
+                          ? t('orchestrator:snapshot.workflowValid')
+                          : t('orchestrator:snapshot.workflowInvalid')}
+                      </Pill>
+                      <span className={styles.snapshotMetric}>
+                        {t('orchestrator:snapshot.slotsUsed', {
+                          used: runtimeSnapshot.slotsUsed,
+                          max: runtimeSnapshot.maxConcurrentTasks,
+                        })}
+                      </span>
+                      <span className={styles.snapshotMetric}>
+                        {t('orchestrator:snapshot.slotsAvailable', {
+                          available: runtimeSnapshot.slotsAvailable,
+                        })}
+                      </span>
+                      <span className={styles.snapshotMetric}>
+                        {t('orchestrator:snapshot.runningCount', {
+                          count: runtimeSnapshot.runningTasks.length,
+                        })}
+                      </span>
+                      <span className={styles.snapshotMetric}>
+                        {t('orchestrator:snapshot.retryingCount', {
+                          count: runtimeSnapshot.retryingTasks.length,
+                        })}
+                      </span>
+                    </div>
+                    <div className={styles.snapshotMetaGrid}>
+                      <span className={styles.snapshotMetric}>
+                        {t('orchestrator:snapshot.generatedAt', {
+                          time: formatTaskTimestamp(runtimeSnapshot.generatedAt),
+                        })}
+                      </span>
+                      <span className={styles.snapshotMetric}>
+                        {t('orchestrator:snapshot.latestTickAt', {
+                          time: formatOptionalTaskTimestamp(
+                            runtimeSnapshot.latestTickAt,
+                            t('orchestrator:snapshot.latestTickUnknown'),
+                          ),
+                        })}
+                      </span>
+                      <span className={styles.snapshotMetric}>
+                        {t('orchestrator:snapshot.lastDispatchedCount', {
+                          count: runtimeSnapshot.lastDispatchedCount,
+                        })}
+                      </span>
+                    </div>
+                    {runtimeSnapshot.runningTasks.length > 0 ? (
+                      <section className={styles.snapshotSection}>
+                        <h3 className={styles.snapshotSectionTitle}>
+                          {t('orchestrator:snapshot.runningTasks')}
+                        </h3>
+                        <ul className={styles.snapshotList}>
+                          {runtimeSnapshot.runningTasks.map(
+                            (task: OrchestratorRuntimeTaskSummary) => (
+                              <li className={styles.snapshotListItem} key={task.taskId}>
+                                <span className={styles.snapshotItemTitle}>{task.title}</span>
+                                <span className={styles.snapshotItemMeta}>
+                                  {t(RUN_STATE_LABEL_KEYS[task.runState])}
+                                  {task.attemptPhase
+                                    ? ` · ${t(ATTEMPT_PHASE_LABEL_KEYS[task.attemptPhase])}`
+                                    : ''}
+                                  {task.lastRuntimeMessage
+                                    ? ` · ${task.lastRuntimeMessage}`
+                                    : ''}
+                                </span>
+                              </li>
+                            ),
+                          )}
+                        </ul>
+                      </section>
+                    ) : null}
+                    {runtimeSnapshot.retryingTasks.length > 0 ? (
+                      <section className={styles.snapshotSection}>
+                        <h3 className={styles.snapshotSectionTitle}>
+                          {t('orchestrator:snapshot.retryingTasks')}
+                        </h3>
+                        <ul className={styles.snapshotList}>
+                          {runtimeSnapshot.retryingTasks.map(
+                            (task: OrchestratorRuntimeTaskSummary) => (
+                              <li className={styles.snapshotListItem} key={task.taskId}>
+                                <span className={styles.snapshotItemTitle}>{task.title}</span>
+                                <span className={styles.snapshotItemMeta}>
+                                  {t(WORKFLOW_STATE_LABEL_KEYS[task.workflowState])}
+                                  {' · '}
+                                  {t(RUN_STATE_LABEL_KEYS[task.runState])}
+                                </span>
+                              </li>
+                            ),
+                          )}
+                        </ul>
+                      </section>
+                    ) : null}
+                    {runtimeSnapshot.recentEvents.length > 0 ? (
+                      <section className={styles.snapshotSection}>
+                        <h3 className={styles.snapshotSectionTitle}>
+                          {t('orchestrator:snapshot.recentEvents')}
+                        </h3>
+                        <ul className={styles.snapshotList}>
+                          {runtimeSnapshot.recentEvents.map(
+                            (event: OrchestratorRuntimeEvent) => (
+                              <li className={styles.snapshotListItem} key={event.id}>
+                                <span className={styles.snapshotItemTitle}>
+                                  {event.taskTitle}
+                                </span>
+                                <span className={styles.snapshotItemMeta}>
+                                  {event.kind} · {event.message} ·{' '}
+                                  {formatTaskTimestamp(event.createdAt)}
+                                </span>
+                              </li>
+                            ),
+                          )}
+                        </ul>
+                      </section>
+                    ) : null}
+                    {runtimeSnapshot.workflowError ? (
                       <p className={styles.snapshotWarning}>
                         {t('orchestrator:snapshot.workflowError', {
-                          error: activeRuntimeSnapshotResult.snapshot.workflowError,
+                          error: runtimeSnapshot.workflowError,
                         })}
                       </p>
                     ) : null}
-                    {activeRuntimeSnapshotResult?.snapshot?.latestError ? (
+                    {runtimeSnapshot.latestError ? (
                       <p className={styles.snapshotWarning}>
                         {t('orchestrator:snapshot.latestError', {
-                          error: activeRuntimeSnapshotResult.snapshot.latestError,
+                          error: runtimeSnapshot.latestError,
                         })}
-                      </p>
-                    ) : null}
-                    {activeRuntimeSnapshotResult?.error ? (
-                      <p className={styles.snapshotWarning} role="status">
-                        {activeRuntimeSnapshotResult.error}
                       </p>
                     ) : null}
                   </>
-                ) : (
-                  <p className={styles.snapshotMuted}>
-                    {t('orchestrator:snapshot.remoteUnavailable')}
+                ) : null}
+                {!showRuntimeSnapshotContent && !runtimeSnapshotLoading ? (
+                  <p className={styles.snapshotMuted} role="status">
+                    {runtimeRemoteStatus === 'unsupported'
+                      ? t('orchestrator:snapshot.remoteUnsupported')
+                      : runtimeRemoteStatus === 'offline'
+                        ? t('orchestrator:snapshot.remoteOffline')
+                        : t('orchestrator:snapshot.remoteUnavailable')}
                   </p>
-                )}
+                ) : null}
+                {runtimeSnapshotErrorMessage ? (
+                  <p className={styles.snapshotWarning} role="status">
+                    {runtimeSnapshotErrorMessage}
+                  </p>
+                ) : null}
               </div>
             ) : null}
             {loading ? <p className={styles.muted}>{t('common:loading')}</p> : null}
@@ -1688,7 +1817,14 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                 </div>
                 <div className={styles.taskList}>
                   {pendingRemoteItems.map((item) => (
-                    <div className={styles.pendingTask} key={item.id}>
+                    <div
+                      className={styles.pendingTask}
+                      key={item.id}
+                      data-focused={focusedOutboxId === item.id || undefined}
+                      data-testid={
+                        focusedOutboxId === item.id ? `orchestrator-outbox-focused-${item.id}` : undefined
+                      }
+                    >
                       <div className={styles.pendingTaskHeader}>
                         <span className={styles.taskTitle}>{item.deviceName}</span>
                         <Pill tone={pendingRemoteStatusTone(item.status)}>
@@ -1704,6 +1840,32 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                         <p className={styles.pendingError}>
                           {t('orchestrator:pending.lastError', { error: item.lastError })}
                         </p>
+                      ) : null}
+                      {item.status === 'failed' ? (
+                        <div className={styles.pendingTaskActions}>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            loading={outboxActionId === item.id}
+                            disabled={outboxActionId !== null && outboxActionId !== item.id}
+                            onClick={() => {
+                              void handleRetryRemoteOutbox(item.id);
+                            }}
+                          >
+                            {t('orchestrator:pending.retry')}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            loading={outboxActionId === item.id}
+                            disabled={outboxActionId !== null && outboxActionId !== item.id}
+                            onClick={() => {
+                              void handleDiscardRemoteOutbox(item.id);
+                            }}
+                          >
+                            {t('orchestrator:pending.discard')}
+                          </Button>
+                        </div>
                       ) : null}
                     </div>
                   ))}

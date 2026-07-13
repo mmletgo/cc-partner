@@ -503,6 +503,8 @@ pub struct OrchestratorTaskRow {
     pub branch_name: Option<String>,
     pub worktree_id: Option<String>,
     pub session_id: Option<String>,
+    /// Preparing claim 世代 token：claim 签发；touch/phase/mark_running 必须 CAS 匹配。
+    pub prepare_claim_token: Option<String>,
     pub blocked_reason: Option<String>,
     pub attempt: i64,
     pub created_at: String,
@@ -570,6 +572,8 @@ pub struct OrchestratorTaskDto {
     pub branch_name: Option<String>,
     pub worktree_id: Option<String>,
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepare_claim_token: Option<String>,
     pub blocked_reason: Option<String>,
     pub attempt: i64,
     pub created_at: String,
@@ -661,6 +665,7 @@ impl OrchestratorTaskRow {
             branch_name: None,
             worktree_id: None,
             session_id: None,
+            prepare_claim_token: None,
             blocked_reason: None,
             attempt: 0,
             created_at: String::new(),
@@ -726,6 +731,7 @@ impl From<OrchestratorTaskRow> for OrchestratorTaskDto {
             branch_name: row.branch_name,
             worktree_id: row.worktree_id,
             session_id: row.session_id,
+            prepare_claim_token: row.prepare_claim_token,
             blocked_reason: row.blocked_reason,
             attempt: row.attempt,
             created_at: row.created_at,

@@ -1,6 +1,9 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
+import { attentionHttpApi } from '@/api/attentionHttp';
 import { useWorkbenchHttpEvents } from '@/hooks/useWorkbenchHttpEvents';
+import { AttentionProvider } from '@/hooks/useAttention';
+import { WorkbenchDependencyProvider } from '@/hooks/useWorkbenchDependency';
 import {
   createWorkbenchTerminalBufferStore,
   type WorkbenchTerminalBufferStore,
@@ -15,10 +18,12 @@ import { MobileWorkbench } from './MobileWorkbench';
  * MobileApp（移动端 Workbench 应用根）
  *
  * Business Logic（为什么需要这个组件）:
- *   `/mobile` 是独立于桌面 Tauri shell 的普通浏览器 SPA，需要在根组件启动 HTTP 事件流并提供终端输出缓存。
+ *   `/mobile` 是独立于桌面 Tauri shell 的普通浏览器 SPA，需要在根组件启动 HTTP 事件流、
+ *   提供终端输出缓存，并挂载共享 Attention Provider（Inbox badge/列表）。
  *
  * Code Logic（这个组件做什么）:
- *   懒初始化 session 级 terminal buffer store，启用 NDJSON HTTP event hook，并通过 Context 向移动端工作台提供 store/reset/remove。
+ *   懒初始化 terminal buffer store；启用 NDJSON HTTP event hook；
+ *   用 AttentionProvider(loadSnapshot=attentionHttpApi) 与 WorkbenchDependencyProvider 包裹 MobileWorkbench。
  */
 export function MobileApp(): ReactElement {
   const [store] = useState<WorkbenchTerminalBufferStore>(() =>
@@ -55,6 +60,18 @@ export function MobileApp(): ReactElement {
     [store],
   );
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   AttentionProvider 需要稳定的 loadSnapshot 引用，避免不必要的 effect 重跑。
+   *
+   * Code Logic（这个函数做什么）:
+   *   委托 attentionHttpApi.listSnapshot（capability-gated HTTP）。
+   */
+  const loadAttentionSnapshot = useCallback(
+    () => attentionHttpApi.listSnapshot(),
+    [],
+  );
+
   const contextValue = useMemo<WorkbenchTerminalBuffersContextValue>(
     () => ({
       store,
@@ -66,7 +83,11 @@ export function MobileApp(): ReactElement {
 
   return (
     <WorkbenchTerminalBuffersContext.Provider value={contextValue}>
-      <MobileWorkbench />
+      <WorkbenchDependencyProvider>
+        <AttentionProvider loadSnapshot={loadAttentionSnapshot}>
+          <MobileWorkbench />
+        </AttentionProvider>
+      </WorkbenchDependencyProvider>
     </WorkbenchTerminalBuffersContext.Provider>
   );
 }

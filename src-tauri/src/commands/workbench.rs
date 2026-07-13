@@ -457,19 +457,24 @@ async fn merged_session_dtos(
 ///     应用重启后，进入工作台项目时应自动恢复之前打开的终端 tab 和可重连上下文。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取持久化会话；registry 已有则跳过；项目存在时补齐可读 worktree 名再调用 registry.restore，
-///     成功后写回最新 row，项目缺失则删除孤儿会话。
+///     读取持久化会话；用 `try_claim_restore` 原子占位避免并发重复恢复（Finding 5）；
+///     项目存在时补齐可读 worktree 名再调用 registry.restore，成功后写回最新 row；
+///     无论成功/失败都释放占位；项目缺失则删除孤儿会话。
 async fn restore_persisted_sessions(
     state: &AppState,
     project_id: Option<&str>,
 ) -> Result<(), AppError> {
     let rows = state.workbench_session_repo.list(project_id).await?;
     for row in rows {
-        if state.workbench_sessions.contains(&row.id) {
+        // Finding 5: 原子占位 — 把"已运行期 + 是否有其他 caller 在 restore"的检查合为单步，
+        // 消除 contains() 与 restore() 之间的 TOCTOU 窗口。
+        if !state.workbench_sessions.try_claim_restore(&row.id) {
             continue;
         }
+        // 后续所有路径都必须释放占位，否则该 session 会被永久跳过。
         let Some(project) = state.workbench_project_repo.get(&row.project_id).await? else {
             state.workbench_session_repo.delete(&row.id).await?;
+            state.workbench_sessions.release_restore_claim(&row.id);
             continue;
         };
         let worktree_name =
@@ -491,13 +496,16 @@ async fn restore_persisted_sessions(
             }
             Err(error) => {
                 tracing::warn!("恢复工作台终端会话失败: {error}");
-                let mut disconnected = row;
+                let mut disconnected = row.clone();
                 disconnected.status = "disconnected".to_string();
                 disconnected.exited_at = Some(now_iso());
                 disconnected.updated_at = now_iso();
                 state.workbench_session_repo.upsert(&disconnected).await?;
             }
         }
+        // 成功路径：spawn_row 已写入 sessions map，contains 自然命中；
+        // 失败路径：释放占位允许后续请求重试 restore。
+        state.workbench_sessions.release_restore_claim(&row.id);
     }
     Ok(())
 }
@@ -1408,9 +1416,14 @@ pub async fn list_workbench_worktrees(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户希望在 Workbench 中直接从当前项目切出独立工作区，后续 terminal window、文件树和 Prompt 优化都绑定该路径。
+///     Orchestrator Runner 在 Preparing 崩溃后 Retry 会再次使用相同确定性路径；若路径/元数据已属于本分支，
+///     必须复用既有现场，否则永久 Blocked 并留下孤儿 worktree。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验 Git 仓库和分支名，生成应用数据目录下的 worktree 路径，执行 `git worktree add -b` 并持久化 row。
+///     校验 Git 仓库和分支名，生成应用数据目录下的 worktree 路径；
+///     若路径已存在，必须经 `git worktree list --porcelain` 确认 canonical path、owning repo、
+///     实际分支全部匹配后才复用（拒绝 symlink/残留普通目录；分支不匹配 → conflict）；
+///     有匹配 DB row 则复用其 id，否则重新登记；否则执行 `git worktree add -b` 并持久化 row。
 pub(crate) async fn local_create_workbench_worktree(
     state: &AppState,
     project_id: String,
@@ -1424,16 +1437,49 @@ pub(crate) async fn local_create_workbench_worktree(
     }
     let repo_root = workbench_git::repo_root(Path::new(&project.path))?;
     let worktree_path = worktree_storage_path(state, &project_id, branch);
-    if worktree_path.exists() {
-        return Err(AppError::generic("目标 worktree 目录已存在"));
-    }
-    if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let base = base_branch
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+
+    // Preparing 崩溃恢复 / Retry：路径存在时仅当 Git 注册 + 分支匹配才复用，禁止 is_dir 冒充。
+    if path_exists_nofollow(&worktree_path)? {
+        let verified = workbench_git::verify_registered_worktree(
+            Path::new(&repo_root),
+            &worktree_path,
+            branch,
+        )?;
+        let now = now_iso();
+        let path = verified.to_string_lossy().to_string();
+        if let Some(mut existing) =
+            find_reusable_worktree_row(state, &project_id, &verified, branch).await?
+        {
+            // 校正 path 为 canonical，避免历史相对/非规范路径。
+            if existing.path != path {
+                existing.path = path;
+                existing.updated_at = now;
+                state.workbench_worktree_repo.upsert(&existing).await?;
+            }
+            return Ok(worktree_to_dto(&existing));
+        }
+        let row = WorkbenchWorktreeRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            project_id: project_id.clone(),
+            name: branch.to_string(),
+            branch: Some(branch.to_string()),
+            base_branch: base.map(str::to_string),
+            path,
+            is_main: false,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        state.workbench_worktree_repo.upsert(&row).await?;
+        return Ok(worktree_to_dto(&row));
+    }
+
+    if let Some(parent) = worktree_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     workbench_git::create_worktree(Path::new(&repo_root), &worktree_path, branch, base)?;
     let now = now_iso();
     let path = worktree_path
@@ -1454,6 +1500,65 @@ pub(crate) async fn local_create_workbench_worktree(
     };
     state.workbench_worktree_repo.upsert(&row).await?;
     Ok(worktree_to_dto(&row))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     exists() 会跟随 symlink；复用决策前必须 no-follow 判断路径是否存在目录项。
+///
+/// Code Logic（这个函数做什么）:
+///     symlink_metadata：Ok→存在；NotFound→不存在；其它 IO 错误上抛。
+fn path_exists_nofollow(path: &Path) -> Result<bool, AppError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(AppError::from(err)),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Git 已确认可复用后，优先复用同 project+path 的既有 DB row，保持 worktree id 稳定。
+///
+/// Code Logic（这个函数做什么）:
+///     列出 project 下 worktree，按规范化 path 匹配；要求 branch 与请求分支一致（或 DB branch 为空时用 name 兜底）。
+async fn find_reusable_worktree_row(
+    state: &AppState,
+    project_id: &str,
+    worktree_path: &Path,
+    branch: &str,
+) -> Result<Option<WorkbenchWorktreeRow>, AppError> {
+    let expected = worktree_path
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_path.to_path_buf());
+    let expected_str = expected.to_string_lossy();
+    let rows = state
+        .workbench_worktree_repo
+        .list_by_project(project_id)
+        .await?;
+    for row in rows {
+        if row.is_main {
+            continue;
+        }
+        let row_path = Path::new(&row.path);
+        let row_canon = row_path
+            .canonicalize()
+            .unwrap_or_else(|_| row_path.to_path_buf());
+        if row_canon != expected
+            && row.path != expected_str
+            && row.path != worktree_path.to_string_lossy()
+        {
+            continue;
+        }
+        let row_branch = row
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(row.name.as_str());
+        if row_branch == branch {
+            return Ok(Some(row));
+        }
+    }
+    Ok(None)
 }
 
 /// 创建一个项目 Git worktree。
@@ -4447,6 +4552,8 @@ mod tests {
                 port: 14210,
                 last_seen: Utc::now(),
                 online: true,
+                proto_version: 0,
+                capabilities: Vec::new(),
             },
         );
 

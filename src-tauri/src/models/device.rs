@@ -16,6 +16,8 @@ use chrono::{DateTime, Utc};
 ///
 /// Business Logic: mDNS 发现的每个对端实例用一个 Device 表示，存入 AppState 的 devices 表。
 ///     host 用 String 保存 IP（与 Python 一致，统一 IPv4 点分十进制）。
+///     proto_version / capabilities 为 mDNS TXT 提示的非权威拷贝，仅用于发现层预筛；
+///     调用对端新路由前必须以对端 health 返回的 `PeerProtocolInfo` 为准（见 net::protocol）。
 #[derive(Debug, Clone)]
 pub struct Device {
     /// 设备唯一标识（UUID，来自对端 TXT 记录的 device_id）
@@ -30,6 +32,12 @@ pub struct Device {
     pub last_seen: DateTime<Utc>,
     /// 是否在线（发现即 true，移除即从表剔除）
     pub online: bool,
+    /// 对端协议版本提示（来自 mDNS `proto` TXT；缺失/非法视为 v0）。非权威。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub proto_version: u32,
+    /// 对端能力清单提示（来自 mDNS `caps` TXT；空 token 已剔除）。非权威。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub capabilities: Vec<String>,
 }
 
 impl Device {
@@ -60,6 +68,12 @@ pub struct DeviceDto {
     /// 是否本机设备（list_devices 时对对端为 false，get_local_device 为 true）
     #[serde(default)]
     pub is_self: bool,
+    /// 协议版本提示（mDNS 非权威；缺失/旧版为 0）。前端可用于灰显未支持能力的对端。
+    #[serde(default)]
+    pub proto_version: u32,
+    /// 能力清单提示（mDNS 非权威；可能因 TXT 长度上限被裁剪，仅作预筛展示）。
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 impl Device {
@@ -75,6 +89,8 @@ impl Device {
             last_seen: self.last_seen.to_rfc3339(),
             online: self.online,
             is_self,
+            proto_version: self.proto_version,
+            capabilities: self.capabilities.clone(),
         }
     }
 }

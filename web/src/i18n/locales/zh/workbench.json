@@ -230,6 +230,22 @@
       "remoteProjectPath": "远端路径：{{path}}",
       "runtimeMessage": "Runtime：{{value}}",
       "runtimeRefs": "Claude：{{claudeSessionId}} · Transcript：{{transcriptPath}}",
+      "runtimeSnapshotTitle": "运行时状态",
+      "runtimeSnapshotLoading": "刷新中",
+      "runtimeStatusLocal": "本机",
+      "runtimeStatusLive": "在线",
+      "runtimeStatusOffline": "离线",
+      "runtimeStatusUnsupported": "对端不支持",
+      "runtimeStatusUnavailable": "暂不可用",
+      "runtimeStatusUnknown": "状态未知",
+      "runtimeLastUpdated": "最后更新 {{time}}",
+      "runtimeCachedHint": "缓存仅用于显示，不启用任务动作",
+      "runtimeGeneratedAt": "生成时间 {{time}}",
+      "runtimeLatestTickAt": "最近 tick {{time}}",
+      "runtimeLatestTickUnknown": "未知",
+      "runtimeRecentEvents": "最近事件",
+      "runtimeSlots": "槽位 {{used}}/{{max}} · 运行 {{running}} · 重试 {{retrying}}",
+      "runtimeLatestError": "最近错误：{{error}}",
       "detailKicker": "任务详情",
       "closeDetails": "关闭详情",
       "workflowState": "Workflow",
@@ -298,7 +314,8 @@
         "pending": "待发送",
         "sending": "发送中",
         "mirrored": "已同步",
-        "failed": "发送失败"
+        "failed": "发送失败",
+        "discarded": "已放弃"
       },
       "errors": {
         "list": "读取自动化任务失败",
@@ -306,8 +323,13 @@
         "evidence": "读取 evidence 失败",
         "completePrompt": "AI 自动完善失败",
         "promptRequired": "请先输入简单 Prompt",
-        "required": "请填写任务标题、目标和验收标准"
-      }
+        "required": "请填写任务标题、目标和验收标准",
+        "retryOutbox": "重新发送失败",
+        "discardOutbox": "放弃发送失败"
+      },
+      "pendingRetry": "重新发送",
+      "pendingDiscard": "放弃",
+      "pendingDiscardConfirm": "确定放弃这条失败的远端发送请求？"
     },
     "status": {
       "project": "项目",
@@ -316,6 +338,7 @@
     },
     "nav": {
       "projects": "项目",
+      "attention": "待处理",
       "terminal": "终端",
       "browser": "预览",
       "files": "文件",
@@ -329,6 +352,10 @@
       "projects": {
         "title": "项目",
         "label": "选择项目"
+      },
+      "attention": {
+        "title": "待处理",
+        "label": "查看阻塞工作的事项"
       },
       "terminal": {
         "title": "终端",
@@ -590,6 +617,8 @@
     "createSession": "创建终端失败",
     "focusSession": "切换终端 window 失败",
     "splitPane": "分割 pane 失败",
+    "switchPane": "切换 pane 失败",
+    "zoomPane": "切换单 pane 视图失败",
     "closePane": "关闭 pane 失败",
     "closeSession": "关闭终端失败",
     "renameSession": "重命名会话失败",

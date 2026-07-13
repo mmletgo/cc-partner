@@ -13,123 +13,51 @@
  *   - hooks 全部在 early return 之前，避免 React hooks 调用顺序问题
  */
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { listen } from '@tauri-apps/api/event';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { configApi } from '@/api/config';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
-import { workbenchApi } from '@/api/workbench';
 import { tauriWorkbenchTransport } from '@/api/workbenchTransport';
 import { OrchestratorPanel } from '@/pages/Orchestrator';
-import {
-  WorkbenchBrowserWorkspace,
-  WorkbenchDependencyCard,
-  WorkbenchFileWorkspace,
-} from '@/components/domain';
-import type { WorkbenchOpenFileTab } from '@/components/domain';
-import { WorkbenchSessionSearch } from '@/components/domain';
+import { WorkbenchBrowserWorkspace, WorkbenchDependencyCard, WorkbenchFileWorkspace, WorkbenchSessionSearch } from '@/components/domain';
 import { WorkbenchWorkspaceNav } from '@/components/layout';
-import { Button, Card, Input, Pill } from '@/components/primitives';
+import { Button } from '@/components/primitives';
 import { useWorkbenchDependency } from '@/hooks/workbenchDependencyContext';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
+import { useWorkbenchTerminalBuffers } from '@/hooks/workbenchTerminalBuffersContext';
+import { useAttention } from '@/hooks/useAttention';
 import {
-  useWorkbenchTerminalBuffer,
-  useWorkbenchTerminalBuffers,
-} from '@/hooks/workbenchTerminalBuffersContext';
-import {
-  isRemoteWorkbenchOfflineError,
-  isRemoteWorkbenchProjectOffline,
-} from '@/lib/workbenchRemoteProjects';
-import {
-  ChevronRightIcon,
-  BrowserIcon,
-  CopyIcon,
-  EditIcon,
-  FileIcon,
-  FolderIcon,
-  MaximizeIcon,
-  MinimizeIcon,
-  OrchestratorIcon,
-  PlusIcon,
-  RefreshIcon,
-  SearchIcon,
-  SplitDownIcon,
-  SplitRightIcon,
-  SyncIcon,
-  TrashIcon,
-  UploadIcon,
-  XIcon,
+  BrowserIcon, EditIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon,
+  PlusIcon, RefreshIcon, SearchIcon, SplitDownIcon, SplitRightIcon, XIcon,
 } from '@/lib/icons';
-import type {
-  PromptOptimizerFillLanguage,
-  WorkbenchFileNode,
-  WorkbenchGitCommit,
-  WorkbenchHtmlAsset,
-  WorkbenchMergeProgressEvent,
-  WorkbenchMergeStage,
-  WorkbenchMergeStageId,
-  WorkbenchPathInfo,
-  WorkbenchSession,
-  WorkbenchTerminalStatusEvent,
-  WorkbenchWorktree,
-} from '@/lib/types';
+import type { PromptOptimizerFillLanguage } from '@/lib/types';
 import styles from './Workbench.module.css';
 import { parseWorkbenchDeepLink } from './workbenchDeepLink';
-import {
-  canFillPromptIntoTerminal,
-  createPromptOptimizerShortcutState,
-  promptOptimizerInputKeyAction,
-  promptOptimizerShortcutAction,
-  reducePromptOptimizerShortcut,
-  resetPromptOptimizerTextState,
-  shouldCommitPromptOptimizerPanelPosition,
-} from './promptOptimizerWidget';
-import { mountedTerminalSessions, visibleTerminalSessions } from './terminalSessionOrder';
-import { workbenchTerminalOptions, workbenchTerminalTheme } from './terminalOptions';
-import {
-  planTerminalBufferWrite,
-  shouldForwardTerminalInput,
-  writeTerminalReplay,
-} from './terminalReplay';
-import { canRefreshTerminalSize, terminalPanePixelSize } from './terminalSizing';
+import { workbenchTerminalOptions } from './terminalOptions';
+import { terminalPanePixelSize } from './terminalSizing';
 import type { TerminalLayoutMode } from './terminalSizing';
-import {
-  activeWorktreeRootPath,
-  buildGitGraphRows,
-  canCommitWorktree,
-  canMergeWorktree,
-  canPushWorktree,
-  canRemoveWorktree,
-  composeWorktreeBranchName,
-  createWorktreeWithTerminalWindow,
-  DEFAULT_WORKTREE_BRANCH_PREFIX,
-  formatWorkbenchMergeStages,
-  formatCommitRelativeTime,
-  hasGitHistory,
-  sessionsForWorktree,
-  shouldAutoDismissMergeStages,
-  WORKTREE_BRANCH_PREFIXES,
-  worktreeChangeCount,
-  worktreeStatusTone,
-} from './workbenchWorktrees';
-import type { WorktreeBranchPrefix } from './workbenchWorktrees';
-import {
-  collectTabsForPath,
-  dirtyTabNames,
-  dropExpandedPathTree,
-  dropPathTreeEntries,
-  isLatestRequest,
-  validateJsonText,
-  validateTomlText,
-  validateYamlText,
-  workbenchDirRequestKey,
-  workbenchDirRequestKeyMatchesPath,
-} from './workbenchFiles';
+import { useWorkbenchProjectController } from './controllers/useWorkbenchProjectController';
+import { useWorkbenchTerminalController } from './controllers/useWorkbenchTerminalController';
+import type { WorkbenchTerminalErrorKey } from './controllers/useWorkbenchTerminalController';
+import { useWorkbenchWorktreeGitController } from './controllers/useWorkbenchWorktreeGitController';
+import type { WorkbenchWorktreeGitErrorKey } from './controllers/useWorkbenchWorktreeGitController';
+import { useWorkbenchFileController } from './controllers/useWorkbenchFileController';
+import type { WorkbenchFileErrorKey, WorkbenchFileMessageKey } from './controllers/useWorkbenchFileController';
+import { useWorkbenchAutomationController } from './controllers/useWorkbenchAutomationController';
+import { useWorkbenchPromptOptimizerController } from './controllers/useWorkbenchPromptOptimizerController';
+import type { PromptOptimizerConfigLoadResult } from './controllers/useWorkbenchPromptOptimizerController';
+import { useWorkbenchSessionSearchController } from './controllers/useWorkbenchSessionSearchController';
+import { WorkbenchTerminalArea } from './WorkbenchTerminalArea';
+import { WorkbenchInspector } from './WorkbenchInspector';
+import type { WorkbenchInspectorTab } from './WorkbenchInspector';
+import { WorkbenchStatusCard } from './WorkbenchStatusCard';
+import { WorkbenchWorktreeBar } from './WorkbenchWorktreeBar';
+import { activeWorktreeRootPath, DEFAULT_WORKTREE_BRANCH_PREFIX } from './workbenchWorktrees';
 import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
 
 interface TauriInternalsWindow extends Window {
@@ -138,62 +66,14 @@ interface TauriInternalsWindow extends Window {
   };
 }
 
-type WorkbenchInspectorTab = 'files' | 'history';
-
-const GIT_GRAPH_LANE_WIDTH = 14;
-const GIT_GRAPH_ROW_HEIGHT = 58;
-const GIT_GRAPH_DOT_Y = 22;
-const GIT_GRAPH_DOT_RADIUS = 4;
-
-interface FileTreeProps {
-  nodes: WorkbenchFileNode[];
-  childrenByPath: Record<string, WorkbenchFileNode[]>;
-  expandedPaths: Set<string>;
-  selectedPath: string | null;
-  loadingPath: string | null;
-  onToggle: (node: WorkbenchFileNode) => void;
-  onSelect: (node: WorkbenchFileNode) => void;
-}
-
-interface FileTreeNodeProps extends FileTreeProps {
-  node: WorkbenchFileNode;
-  depth: number;
-}
-
-interface TerminalPaneProps {
-  session: WorkbenchSession | null;
-  placeholder: string;
-  inputEnabled: boolean;
-  onInput: (sessionId: string, data: string) => void;
-  onResize: (sessionId: string, cols: number, rows: number) => void;
-  resizeRequestKey?: number;
-  onCursorAnchorChange?: (anchor: TerminalCursorAnchor | null) => void;
-}
-
 interface TerminalSize {
   cols: number;
   rows: number;
 }
 
-interface TerminalCursorAnchor {
-  left: number;
-  top: number;
-  bottom: number;
-}
-
-interface PromptOptimizerPanelPosition {
-  left: number;
-  top: number;
-}
-
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 6;
 const TERMINAL_PANE_HEADER_PX = 36;
-const TMUX_FOCUS_SYNC_INTERVAL_MS = 700;
-const LOCAL_FOCUS_GRACE_MS = 500;
-const MERGE_STAGE_AUTO_DISMISS_MS = 2500;
-
-const INITIAL_MERGE_STAGE_ID: WorkbenchMergeStageId = 'checkSource';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -205,139 +85,6 @@ const INITIAL_MERGE_STAGE_ID: WorkbenchMergeStageId = 'checkSource';
 function canListenToTauriEvents(): boolean {
   const internals = (window as TauriInternalsWindow).__TAURI_INTERNALS__;
   return typeof internals?.transformCallback === 'function';
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   文件操作默认作用在当前选中文件夹；若选中的是文件，则作用在它的父目录。
- *
- * Code Logic（这个函数做什么）:
- *   从相对路径中取最后一个 `/` 之前的部分；根级文件返回空字符串。
- */
-function parentPathOf(path: string): string {
-  const index = path.lastIndexOf('/');
-  return index >= 0 ? path.slice(0, index) : '';
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   文件树和状态栏需要展示简短路径名；根目录没有 basename 时显示根符号。
- *
- * Code Logic（这个函数做什么）:
- *   取相对路径最后一段；空路径返回 `/`。
- */
-function basename(path: string, rootLabel: string): string {
-  if (!path) return rootLabel;
-  const parts = path.split('/').filter(Boolean);
-  return parts[parts.length - 1] ?? rootLabel;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   文件工作区 tab id 需要同时区分 main worktree 与功能 worktree，避免同一路径跨 worktree 冲突。
- *
- * Code Logic（这个函数做什么）:
- *   按当前 worktreeId 和文件相对路径生成稳定 tab id；主工作区使用 main 前缀。
- */
-function workbenchFileTabId(worktreeId: string | null, path: string): string {
-  return `${worktreeId ?? 'main'}:${path}`;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   用户重命名文件或目录后，已打开 tab 需要继续指向新的相对路径并保留未保存编辑。
- *
- * Code Logic（这个函数做什么）:
- *   命中原路径时返回新路径；命中原目录后代时拼接新目录路径和原后缀；不相关路径返回 null。
- */
-function renamedPathForTab(path: string, originalPath: string, renamedPath: string): string | null {
-  if (path === originalPath) return renamedPath;
-  if (!originalPath || !path.startsWith(`${originalPath}/`)) return null;
-  return `${renamedPath}${path.slice(originalPath.length)}`;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   dirty tab 重新打开时可以刷新 preview/metadata，但不能刷新保存基线，否则会绕过后端 optimistic lock。
- *
- * Code Logic（这个函数做什么）:
- *   基于后端最新 opened payload 更新 metadata/preview；当 tab 已 dirty 时保留原 opened.text 作为 baseHash、
- *   baseModifiedAt 和打开时 content 的来源。
- */
-function mergeOpenedForReopenedTab(
-  existingTab: WorkbenchOpenFileTab,
-  freshTab: WorkbenchOpenFileTab,
-): WorkbenchOpenFileTab {
-  if (!existingTab.dirty) return freshTab;
-
-  return {
-    ...existingTab,
-    path: freshTab.path,
-    name: freshTab.name,
-    opened: {
-      ...freshTab.opened,
-      text: existingTab.opened.text,
-    },
-  };
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   关闭或删除 tab 后需要选择合理的相邻 tab，避免 activeFileTabId 指向不存在的文件。
- *
- * Code Logic（这个函数做什么）:
- *   如果当前 active tab 未被移除则保持不变；否则优先选择原 active 前一个邻居，再退到最后一个剩余 tab。
- */
-function nextActiveFileTabIdAfterRemoval(
-  currentTabs: WorkbenchOpenFileTab[],
-  removedTabIds: Set<string>,
-  activeTabId: string | null,
-): string | null {
-  const remainingTabs = currentTabs.filter((tab) => !removedTabIds.has(tab.id));
-  if (remainingTabs.length === 0) return null;
-  if (activeTabId && !removedTabIds.has(activeTabId)) return activeTabId;
-
-  const activeIndex = activeTabId
-    ? currentTabs.findIndex((tab) => tab.id === activeTabId)
-    : -1;
-  const fallbackIndex = activeIndex >= 0 ? Math.max(0, activeIndex - 1) : 0;
-  return remainingTabs[Math.min(fallbackIndex, remainingTabs.length - 1)]?.id ?? null;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   检查器要展示文件大小，直接展示字节数不利于扫描。
- *
- * Code Logic（这个函数做什么）:
- *   把字节数格式化为 B/KB/MB/GB；目录或未知大小返回占位符。
- */
-function formatSize(size: number | null, emptyValue: string): string {
-  if (size === null) return emptyValue;
-  if (size < 1024) return `${size} B`;
-  const kb = size / 1024;
-  if (kb < 1024) return `${kb.toFixed(1)} KB`;
-  const mb = kb / 1024;
-  if (mb < 1024) return `${mb.toFixed(1)} MB`;
-  return `${(mb / 1024).toFixed(1)} GB`;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   最近打开时间、文件修改时间需要展示成用户本地可读格式。
- *
- * Code Logic（这个函数做什么）:
- *   使用浏览器本地化短日期时间；解析失败时回退原始字符串。
- */
-function formatDateTime(value: string | null, emptyValue: string): string {
-  if (!value) return emptyValue;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString(undefined, {
-    month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
 }
 
 /**
@@ -376,26 +123,6 @@ function formatRuntime(
 function clampU16(value: number, min: number): number {
   const rounded = Math.max(min, Math.round(value));
   return Math.min(65535, rounded);
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   Prompt 优化浮层应出现在当前终端输入光标下方，但不能超出终端工作区。
- *
- * Code Logic（这个函数做什么）:
- *   把 viewport 绝对坐标系的光标锚点转换为 terminalArea 内相对坐标，并按面板宽高做 clamp。
- */
-function promptOptimizerPanelPosition(
-  areaRect: DOMRect,
-  anchor: TerminalCursorAnchor,
-): PromptOptimizerPanelPosition {
-  const panelWidth = Math.min(560, Math.max(280, areaRect.width - 32));
-  const estimatedPanelHeight = Math.min(520, Math.max(280, areaRect.height - 32));
-  const maxLeft = Math.max(16, areaRect.width - panelWidth - 16);
-  const maxTop = Math.max(16, areaRect.height - estimatedPanelHeight - 16);
-  const left = Math.min(maxLeft, Math.max(16, anchor.left - areaRect.left));
-  const top = Math.min(maxTop, Math.max(16, anchor.bottom - areaRect.top + 8));
-  return { left, top };
 }
 
 /**
@@ -475,41 +202,6 @@ function displayErrorMessage(error: unknown, fallback: string, desktopUnavailabl
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   Git graph 需要多条稳定颜色 lane，但具体颜色由 design token 控制。
- *
- * Code Logic（这个函数做什么）:
- *   将 graph helper 的 colorIndex 映射到 CSS custom property。
- */
-function gitGraphColorStyle(colorIndex: number): CSSProperties {
-  return {
-    '--git-graph-color': `var(--git-graph-${colorIndex % 6})`,
-  } as CSSProperties;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   Git graph SVG 需要按 lane 数动态扩展宽度，避免 merge 线被裁切。
- *
- * Code Logic（这个函数做什么）:
- *   根据 laneCount 计算紧凑 graph 宽度。
- */
-function gitGraphWidth(laneCount: number): number {
-  return Math.max(24, laneCount * GIT_GRAPH_LANE_WIDTH + 10);
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   Git graph 每个 lane 需要稳定 x 坐标，供点、竖线和 merge 曲线复用。
- *
- * Code Logic（这个函数做什么）:
- *   将 lane index 映射到 SVG 内部横坐标。
- */
-function gitGraphX(lane: number): number {
-  return 5 + lane * GIT_GRAPH_LANE_WIDTH;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
  *   React lint 要求 effect 主体不要同步触发级联 setState；工作台仍需要在依赖变化后重置或拉取状态。
  *
  * Code Logic（这个函数做什么）:
@@ -521,255 +213,6 @@ function deferEffect(work: () => void): () => void {
 }
 
 /**
- * Business Logic（为什么需要这个函数）:
- *   状态 Pill 需要把 session status 映射为稳定 tone，便于用户快速判断运行/退出/断开。
- *
- * Code Logic（这个函数做什么）:
- *   running→success，exited→neutral，disconnected→danger，其余状态使用 warn。
- */
-function statusTone(status: string): 'neutral' | 'success' | 'warn' | 'danger' {
-  if (status === 'running') return 'success';
-  if (status === 'exited') return 'neutral';
-  if (status === 'disconnected') return 'danger';
-  return 'warn';
-}
-
-/**
- * Business Logic（为什么需要这个组件）:
- *   xterm 生命周期较重，应隔离在独立组件内，避免页面其他状态刷新时重复初始化终端实例。
- *
- * Code Logic（这个组件做什么）:
- *   session 变化时创建/销毁 Terminal；buffer revision 变化时只写入新增输出；
- *   仅 inputEnabled=true 的 active 终端转发 onData；ResizeObserver 触发 FitAddon.fit 后把 cols/rows clamp 后回传后端。
- */
-const TerminalPane = memo(function TerminalPane(props: TerminalPaneProps) {
-  const {
-    session,
-    placeholder,
-    inputEnabled,
-    onInput,
-    onResize,
-    resizeRequestKey = 0,
-    onCursorAnchorChange,
-  } = props;
-  const viewportRef = useRef<HTMLDivElement | null>(null);
-  const terminalRef = useRef<Terminal | null>(null);
-  const bufferRef = useRef<string>('');
-  const writtenBufferRef = useRef<string>('');
-  const replayGateRef = useRef<boolean>(false);
-  const inputEnabledRef = useRef<boolean>(inputEnabled);
-  const resizeTimerRef = useRef<number | null>(null);
-  const forceResizeRef = useRef<(() => void) | null>(null);
-  const cursorAnchorCallbackRef = useRef<TerminalPaneProps['onCursorAnchorChange']>(
-    onCursorAnchorChange,
-  );
-  const sessionId = session?.id ?? null;
-  const { buffer, revision } = useWorkbenchTerminalBuffer(sessionId);
-
-  useEffect(() => {
-    bufferRef.current = buffer;
-  }, [buffer]);
-
-  useEffect(() => {
-    inputEnabledRef.current = inputEnabled;
-  }, [inputEnabled]);
-
-  useEffect(() => {
-    cursorAnchorCallbackRef.current = onCursorAnchorChange;
-  }, [onCursorAnchorChange]);
-
-  useEffect(() => {
-    const viewport = viewportRef.current;
-    if (!viewport || !sessionId) return undefined;
-
-    const terminal = new Terminal(workbenchTerminalOptions());
-    const fit = new FitAddon();
-    terminal.loadAddon(fit);
-    terminal.open(viewport);
-    fit.fit();
-    const emitCursorAnchor = () => {
-      try {
-        const rect = viewport.getBoundingClientRect();
-        const cellWidth = rect.width / Math.max(terminal.cols, 1);
-        const cellHeight = rect.height / Math.max(terminal.rows, 1);
-        const cursorX = terminal.buffer.active.cursorX;
-        const cursorY = terminal.buffer.active.cursorY;
-        const left = rect.left + cursorX * cellWidth;
-        const top = rect.top + cursorY * cellHeight;
-        cursorAnchorCallbackRef.current?.({ left, top, bottom: top + cellHeight });
-      } catch {
-        // 光标定位仅用于浮层摆放，失败不影响终端显示与输入。
-      }
-    };
-    const dataDisposable = terminal.onData((data: string) => {
-      if (!shouldForwardTerminalInput(replayGateRef, inputEnabledRef.current)) return;
-      onInput(sessionId, data);
-    });
-    const cursorDisposable = terminal.onCursorMove(emitCursorAnchor);
-    writeTerminalReplay(terminal, bufferRef.current, replayGateRef);
-    writtenBufferRef.current = bufferRef.current;
-    emitCursorAnchor();
-    const resize = () => {
-      try {
-        fit.fit();
-        onResize(
-          sessionId,
-          clampU16(terminal.cols, MIN_TERMINAL_COLS),
-          clampU16(terminal.rows, MIN_TERMINAL_ROWS),
-        );
-        emitCursorAnchor();
-      } catch {
-        // xterm 在容器不可见时 fit 可能失败，下一次 ResizeObserver 会重试。
-      }
-    };
-    const observer = new ResizeObserver(() => {
-      if (resizeTimerRef.current !== null) {
-        window.clearTimeout(resizeTimerRef.current);
-      }
-      resizeTimerRef.current = window.setTimeout(resize, 80);
-    });
-    observer.observe(viewport);
-    forceResizeRef.current = resize;
-    resize();
-    terminalRef.current = terminal;
-
-    return () => {
-      observer.disconnect();
-      dataDisposable.dispose();
-      cursorDisposable.dispose();
-      if (resizeTimerRef.current !== null) {
-        window.clearTimeout(resizeTimerRef.current);
-        resizeTimerRef.current = null;
-      }
-      cursorAnchorCallbackRef.current?.(null);
-      terminal.dispose();
-      terminalRef.current = null;
-      forceResizeRef.current = null;
-      writtenBufferRef.current = '';
-      replayGateRef.current = false;
-    };
-  }, [onInput, onResize, sessionId]);
-
-  useEffect(() => {
-    if (resizeRequestKey <= 0) return;
-    forceResizeRef.current?.();
-  }, [resizeRequestKey]);
-
-  useEffect(() => {
-    const applyTheme = () => {
-      const terminal = terminalRef.current;
-      if (terminal) {
-        terminal.options.theme = workbenchTerminalTheme();
-      }
-    };
-    window.addEventListener('cp-theme-change', applyTheme);
-    window.addEventListener('storage', applyTheme);
-    return () => {
-      window.removeEventListener('cp-theme-change', applyTheme);
-      window.removeEventListener('storage', applyTheme);
-    };
-  }, []);
-
-  useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal || !sessionId) return;
-    const plan = planTerminalBufferWrite(writtenBufferRef.current, buffer);
-    if (plan.mode === 'replay') {
-      terminal.clear();
-      writeTerminalReplay(terminal, plan.data, replayGateRef);
-      writtenBufferRef.current = buffer;
-      return;
-    }
-    if (plan.mode === 'append') {
-      terminal.write(plan.data);
-      writtenBufferRef.current = buffer;
-    }
-  }, [buffer, revision, sessionId]);
-
-  return (
-    <div className={styles.terminalHost}>
-      <div className={styles.terminalViewport} ref={viewportRef} />
-      {!session ? <div className={styles.terminalPlaceholder}>{placeholder}</div> : null}
-    </div>
-  );
-});
-
-/**
- * Business Logic（为什么需要这个组件）:
- *   文件树需要懒加载多级目录，同时保持目录展开、选中态和 loading 态一致。
- *
- * Code Logic（这个组件做什么）:
- *   递归渲染 WorkbenchFileNode；目录按钮负责展开/收起，文件点击只更新选中路径。
- */
-function FileTreeNode(props: FileTreeNodeProps) {
-  const { node, depth, childrenByPath, expandedPaths, selectedPath, loadingPath, onToggle, onSelect } =
-    props;
-  const isDir = node.kind === 'dir';
-  const expanded = expandedPaths.has(node.path);
-  const selected = selectedPath === node.path;
-  const children = childrenByPath[node.path] ?? [];
-  const paddingStyle = { paddingLeft: 8 + depth * 14 } as CSSProperties;
-
-  return (
-    <div className={styles.treeBranch}>
-      <button
-        type="button"
-        className={styles.treeRow}
-        data-selected={selected || undefined}
-        style={paddingStyle}
-        onClick={() => {
-          onSelect(node);
-          if (isDir) onToggle(node);
-        }}
-      >
-        <span className={styles.treeChevron} data-expanded={expanded || undefined}>
-          {isDir ? <ChevronRightIcon size={14} /> : null}
-        </span>
-        <span className={styles.treeIcon}>
-          {isDir ? <FolderIcon size={14} /> : <FileIcon size={14} />}
-        </span>
-        <span className={styles.treeName}>{node.name}</span>
-        {loadingPath === node.path ? <span className={styles.treeLoading}>…</span> : null}
-      </button>
-      {isDir && expanded ? (
-        <FileTree
-          nodes={children}
-          childrenByPath={childrenByPath}
-          expandedPaths={expandedPaths}
-          selectedPath={selectedPath}
-          loadingPath={loadingPath}
-          onToggle={onToggle}
-          onSelect={onSelect}
-          depth={depth + 1}
-        />
-      ) : null}
-    </div>
-  );
-}
-
-interface NestedFileTreeProps extends FileTreeProps {
-  depth?: number;
-}
-
-/**
- * Business Logic（为什么需要这个组件）:
- *   右侧检查器需要展示可交互项目文件夹，支持目录展开与文件选中。
- *
- * Code Logic（这个组件做什么）:
- *   渲染同层节点列表，并把当前递归深度传给 FileTreeNode 控制缩进。
- */
-function FileTree(props: NestedFileTreeProps) {
-  const { nodes, depth = 0 } = props;
-  return (
-    <div className={styles.treeList}>
-      {nodes.map((node) => (
-        <FileTreeNode key={node.path || node.name} {...props} node={node} depth={depth} />
-      ))}
-    </div>
-  );
-}
-
-/**
  * Business Logic（为什么需要这个组件）:
  *   工作台是用户进入项目并操作项目终端的主界面。
  *
@@ -777,7 +220,7 @@ function FileTree(props: NestedFileTreeProps) {
  *   聚合项目、会话、终端输出 buffer、文件树与文件操作状态，并组合三栏布局。
  */
 export function Workbench() {
-  const { t } = useTranslation(['workbench', 'common', 'promptOptimizer']);
+  const { t } = useTranslation(['workbench', 'common', 'promptOptimizer', 'attention']);
   const location = useLocation();
   const navigate = useNavigate();
   const { status: dependencyStatus } = useWorkbenchDependency();
@@ -795,127 +238,285 @@ export function Workbench() {
     () => parseWorkbenchDeepLink(locationSearch),
     [locationSearch],
   );
-  const deepLinkProjectId = workbenchDeepLink.projectId;
-  const deepLinkWorktreeId = workbenchDeepLink.worktreeId;
-  const deepLinkSessionId = workbenchDeepLink.sessionId;
-  const [sessions, setSessions] = useState<WorkbenchSession[]>([]);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [sessionNameDraft, setSessionNameDraft] = useState<string>('');
-  const [sessionBusy, setSessionBusy] = useState<boolean>(false);
-  const [sessionError, setSessionError] = useState<string | null>(null);
-  const [terminalFullscreen, setTerminalFullscreen] = useState<boolean>(false);
-  const [terminalResizeRequestKey, setTerminalResizeRequestKey] = useState<number>(0);
-  const [remoteOfflineProjectId, setRemoteOfflineProjectId] = useState<string | null>(null);
-  const [worktrees, setWorktrees] = useState<WorkbenchWorktree[]>([]);
+  // Business Logic: 项目域（远端离线状态机 + 跨项目请求守卫 + 项目级 deep link）由独立 controller 持有，
+  // 避免在 Workbench.tsx 里散落多处 state/effect；controller 接收窄 API/回调，不复制邻接域 state。
+  const {
+    remoteProjectOffline,
+    remoteWriteDisabled,
+    isCurrentProject,
+    markRequestFailure,
+    markRequestSuccess,
+    selectProjectFromDeepLink,
+  } = useWorkbenchProjectController({
+    activeProject,
+    activeProjectId,
+    projects,
+    selectProject,
+  });
   const [activeWorktreeId, setActiveWorktreeId] = useState<string | null>(null);
-  const [worktreeBusy, setWorktreeBusy] = useState<string | null>(null);
-  const [worktreeError, setWorktreeError] = useState<string | null>(null);
-  const [createWorktreeOpen, setCreateWorktreeOpen] = useState<boolean>(false);
-  const [createWorktreeBranchPrefix, setCreateWorktreeBranchPrefix] =
-    useState<WorktreeBranchPrefix>(DEFAULT_WORKTREE_BRANCH_PREFIX);
-  const [createWorktreeBranchSuffixDraft, setCreateWorktreeBranchSuffixDraft] =
-    useState<string>('');
-  const [rootNodes, setRootNodes] = useState<WorkbenchFileNode[]>([]);
-  const [childrenByPath, setChildrenByPath] = useState<Record<string, WorkbenchFileNode[]>>({});
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [selectedInfo, setSelectedInfo] = useState<WorkbenchPathInfo | null>(null);
-  const [fileLoadingPath, setFileLoadingPath] = useState<string | null>(null);
-  const [fileError, setFileError] = useState<string | null>(null);
-  const [fileNotice, setFileNotice] = useState<string | null>(null);
-  const [fileTabs, setFileTabs] = useState<WorkbenchOpenFileTab[]>([]);
-  const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
+  // Business Logic: workspaceView / automationConsoleOpen 是跨域共享状态（终端全屏、自动化控制台、文件 tab 都会改写），
+  // 仍由 Workbench.tsx 持有；文件域 controller 通过 requestWorkspaceView / requestHideAutomationConsole 回调表达意图。
   const [workspaceView, setWorkspaceView] = useState<WorkbenchFileWorkspaceView>('terminal');
   const [automationConsoleOpen, setAutomationConsoleOpen] = useState<boolean>(false);
-  const [fileSaving, setFileSaving] = useState<boolean>(false);
-  const [newEntryName, setNewEntryName] = useState<string>('');
-  const [renameName, setRenameName] = useState<string>('');
   const [inspectorTab, setInspectorTab] = useState<WorkbenchInspectorTab>('files');
-  const [gitCommits, setGitCommits] = useState<WorkbenchGitCommit[]>([]);
-  const [gitHistoryLoading, setGitHistoryLoading] = useState<boolean>(false);
-  const [gitHistoryError, setGitHistoryError] = useState<string | null>(null);
-  const [mergeProgressWorktreeId, setMergeProgressWorktreeId] = useState<string | null>(null);
-  const [mergeStages, setMergeStages] = useState<WorkbenchMergeStage[]>([]);
   const [runtimeNow, setRuntimeNow] = useState<number>(() => Date.now());
-  const [sessionSearchOpen, setSessionSearchOpen] = useState<boolean>(false);
-  const [promptPanelOpen, setPromptPanelOpen] = useState<boolean>(false);
-  const [promptInput, setPromptInput] = useState<string>('');
-  const [promptOptimizing, setPromptOptimizing] = useState<boolean>(false);
-  const [promptOptimizerHotkey, setPromptOptimizerHotkey] = useState<string>('<ctrl>');
-  const [promptOptimizerFillLanguage, setPromptOptimizerFillLanguage] =
-    useState<PromptOptimizerFillLanguage>('zh');
-  const [promptPanelPosition, setPromptPanelPosition] = useState<PromptOptimizerPanelPosition>({
-    left: 24,
-    top: 24,
-  });
   const activeProjectIdRef = useRef<string | null>(null);
   const activeWorktreeIdRef = useRef<string | null>(null);
-  const knownSessionIdsRef = useRef<Set<string>>(new Set());
   const terminalPanelRef = useRef<HTMLElement | null>(null);
   const terminalAreaRef = useRef<HTMLDivElement | null>(null);
   const worktreeBranchInputRef = useRef<HTMLInputElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
-  const promptShortcutStateRef = useRef(createPromptOptimizerShortcutState());
-  const promptPanelOpenRef = useRef<boolean>(false);
-  const cursorAnchorRef = useRef<TerminalCursorAnchor | null>(null);
-  const lastLocalFocusAtRef = useRef<number>(0);
-  const mergeProgressWorktreeIdRef = useRef<string | null>(null);
-  const mergeStageDismissTimerRef = useRef<number | null>(null);
-  const fileTabsRef = useRef<WorkbenchOpenFileTab[]>([]);
-  const activeFileTabIdRef = useRef<string | null>(null);
-  const openFileRequestSeqRef = useRef<number>(0);
-  const saveRequestSeqRef = useRef<Record<string, number>>({});
-  const formatRequestSeqRef = useRef<Record<string, number>>({});
-  const sqlitePreviewRequestSeqRef = useRef<Record<string, number>>({});
-  const dirRequestSeqRef = useRef<Record<string, number>>({});
-  const deepLinkApplicationRef = useRef<{
-    search: string;
-    projectId: string | null;
-    worktreeId: string | null;
-    sessionId: string | null;
-  }>({
-    search: locationSearch,
-    projectId: null,
-    worktreeId: null,
-    sessionId: null,
+
+  // Business Logic: 终端域（session 生命周期 + focus 同步 + pane 操作 + terminal-status 事件）由独立 controller
+  // 持有，避免在 Workbench.tsx 里散落多处 state/effect/handler；controller 接收窄 API/回调，不复制邻接域 state，
+  // 也绝不持有终端字节内容（字节内容仍归 WorkbenchTerminalBuffersProvider 所有）。
+  const desktopUnavailableMessage = t('workbench:errors.desktopUnavailable');
+  // Business Logic: translateError 必须稳定（useCallback），否则 controller 内 loadSessions 等 useCallback 的依赖
+  // 每次渲染都变，导致 project-switch effect 反复重跑 loadSessions，把 terminal-status 事件更新覆盖回 running。
+  const translateTerminalError = useCallback(
+    (key: WorkbenchTerminalErrorKey): string => t(`workbench:errors.${key}`),
+    [t],
+  );
+  const terminalController = useWorkbenchTerminalController({
+    activeProjectId,
+    activeWorktreeId,
+    remoteWriteDisabled,
+    terminalPanelRef,
+    resetBuffer: resetTerminalBuffer,
+    removeBuffer: removeTerminalBuffer,
+    refreshProjectSessionStats,
+    markRequestFailure,
+    markRequestSuccess,
+    isCurrentProject,
+    measureInitialTerminalSize,
+    displayErrorMessage,
+    translateError: translateTerminalError,
+    desktopUnavailableMessage,
+    canListenToTauriEvents,
   });
+  const {
+    scopedSessions,
+    activeSession,
+    activeSessionId,
+    visibleSessions,
+    mountedSessions,
+    renderedActiveSessionId,
+    sessionNameDraft,
+    sessionBusy,
+    sessionError,
+    terminalFullscreen,
+    terminalResizeRequestKey,
+    canUsePanes,
+    canRefreshCurrentTerminalSize,
+    setSessionNameDraft,
+    setSessionError,
+    setActiveSessionId,
+    setSessions,
+    loadSessions,
+    focusSession,
+    handleCreateSession,
+    handleSplitPane,
+    handleClosePane,
+    handleCloseSession,
+    handleRenameSession,
+    handleInput,
+    handleResize,
+    handleRefreshTerminalSize,
+  } = terminalController;
+  // Business Logic: worktree/Git 域（worktree 生命周期 + 创建表单/busy/error + Git 提交刷新 + merge 阶段）
+  // 由独立 controller 持有，避免在 Workbench.tsx 里散落多处 state/effect/handler；controller 接收窄 API/回调 +
+  // terminalBridge，不复制邻接域 state。activeWorktreeId 仍由页面持有（终端域 controller / 文件 effect /
+  // deep link effect 都读取同一值），controller 通过 setActiveWorktreeId 回写。
+  // Code Logic: translateWorktreeError 必须稳定（useCallback），否则 controller 内 useCallback 依赖每次渲染都变。
+  const translateWorktreeError = useCallback(
+    (key: WorkbenchWorktreeGitErrorKey): string => t(`workbench:errors.${key}`),
+    [t],
+  );
+  const translateWorktreeMessage = useCallback(
+    (
+      key: 'mergeConfirm' | 'removeConfirm' | 'checkSourceMessage',
+      vars?: Record<string, unknown>,
+    ): string => {
+      if (key === 'mergeConfirm') return t('workbench:worktrees.mergeConfirm', vars);
+      if (key === 'removeConfirm') return t('workbench:worktrees.removeConfirm', vars);
+      return t('workbench:mergeStages.messages.checkSource');
+    },
+    [t],
+  );
+  const confirmWorktreeAction = useCallback(
+    (message: string): boolean => window.confirm(message),
+    [],
+  );
+  const worktreeGitController = useWorkbenchWorktreeGitController({
+    activeProjectId,
+    activeWorktreeId,
+    setActiveWorktreeId,
+    remoteWriteDisabled,
+    inspectorTab,
+    isCurrentProject,
+    markRequestFailure,
+    markRequestSuccess,
+    refreshProjectSessionStats,
+    terminalBridge: terminalController,
+    displayErrorMessage,
+    desktopUnavailableMessage,
+    translateError: translateWorktreeError,
+    translateWorktreeMessage,
+    confirmAction: confirmWorktreeAction,
+    canListenToTauriEvents,
+  });
+  const {
+    worktrees,
+    setWorktrees,
+    worktreeBusy,
+    worktreeError,
+    createWorktreeOpen,
+    setCreateWorktreeOpen,
+    createWorktreeBranchPrefix,
+    createWorktreeBranchSuffixDraft,
+    setCreateWorktreeBranchPrefix,
+    setCreateWorktreeBranchSuffixDraft,
+    gitCommits,
+    setGitCommits,
+    gitHistoryLoading,
+    gitHistoryError,
+    setGitHistoryError,
+    mergeStages,
+    loadWorktrees,
+    loadGitHistory,
+    handleOpenCreateWorktree,
+    handleCancelCreateWorktree,
+    handleCreateWorktree,
+    handleCommitWorktree,
+    handlePushWorktree,
+    handleMergeWorktree,
+    handleRemoveWorktree,
+    clearMergeStagePanel,
+  } = worktreeGitController;
+  // Business Logic: 文件工作区域（目录树 + tab + dirty/save/format + create/rename/delete/copy）由独立 controller
+  // 持有，避免在 Workbench.tsx 里散落多处 state/handler/effect；controller 接收窄 API/回调，不复制邻接域 state。
+  // workspaceView / automationConsoleOpen 仍由页面持有（跨域共享），controller 通过 request* 回调表达切换意图。
+  // Code Logic: translateFileError / translateFileMessage 必须稳定（useCallback），否则 controller 内 useCallback
+  // 依赖每次渲染都变，导致项目/worktree 切换 effect 反复重跑 loadDir。
+  const translateFileError = useCallback(
+    (key: WorkbenchFileErrorKey): string => t(`workbench:errors.${key}`),
+    [t],
+  );
+  const translateFileMessage = useCallback(
+    (key: WorkbenchFileMessageKey, vars?: Record<string, unknown>): string => {
+      if (key === 'saved') return t('workbench:fileWorkspace.saved');
+      if (key === 'formatted') return t('workbench:fileWorkspace.formatted');
+      if (key === 'pathCopied') return t('workbench:pathCopied');
+      if (key === 'confirmCloseDirtyFile') return t('workbench:confirmCloseDirtyFile', vars);
+      if (key === 'confirmDeleteDirtyFiles') return t('workbench:confirmDeleteDirtyFiles', vars);
+      return t('workbench:confirmDeletePath', vars);
+    },
+    [t],
+  );
+  const requestWorkspaceView = useCallback(
+    (view: WorkbenchFileWorkspaceView) => {
+      setWorkspaceView(view);
+    },
+    [],
+  );
+  const requestHideAutomationConsole = useCallback(() => {
+    setAutomationConsoleOpen(false);
+  }, []);
+  const fileController = useWorkbenchFileController({
+    activeProjectId,
+    activeWorktreeId,
+    remoteWriteDisabled,
+    isCurrentProject,
+    markRequestFailure,
+    markRequestSuccess,
+    requestWorkspaceView,
+    requestHideAutomationConsole,
+    displayErrorMessage,
+    desktopUnavailableMessage,
+    translateFileError,
+    translateFileMessage,
+  });
+  const {
+    rootNodes,
+    childrenByPath,
+    expandedPaths,
+    selectedPath,
+    selectedInfo,
+    fileLoadingPath,
+    fileError,
+    fileNotice,
+    fileTabs,
+    activeFileTabId,
+    fileSaving,
+    newEntryName,
+    renameName,
+    setNewEntryName,
+    setRenameName,
+    loadDir,
+    handleToggleNode,
+    handleSelectNode,
+    handleActivateFileTab,
+    handleCloseFileTab,
+    handleFileContentChange,
+    handleFileModeChange,
+    handleSaveFileTab,
+    handleFormatFileTab,
+    handleSelectSqliteTable,
+    handleLoadHtmlAsset,
+    handleCreateEntry,
+    handleRenamePath,
+    handleDeletePath,
+    handleCopySelectedPath,
+    resetForContext: resetFileForContext,
+  } = fileController;
+  // Business Logic: 自动化域（自动化控制台开/关 + staged deep link 应用 + 执行现场回跳）由独立 controller 持有，
+  // 避免在 Workbench.tsx 里散落 deepLinkApplicationRef 与三段式 deep link effect。
+  // automationConsoleOpen / workspaceView 仍是跨域共享状态（终端全屏、自动化控制台、文件 tab 都会改写），
+  // 由页面持有；controller 通过 setAutomationConsoleOpen / requestWorkspaceView 回调表达意图，
+  // 并通过 selectProjectFromDeepLink / setActiveWorktreeId / focusSession 触发跨域编排。
+  // controller 不持有 task fetching、worktree 列表、session 列表或终端字节内容。
+  const automationController = useWorkbenchAutomationController({
+    deepLink: workbenchDeepLink,
+    locationSearch,
+    activeProjectId,
+    activeWorktreeId,
+    activeSessionId,
+    projects,
+    worktrees,
+    scopedSessions,
+    automationConsoleOpen,
+    selectProjectFromDeepLink,
+    setActiveWorktreeId,
+    focusSession,
+    setAutomationConsoleOpen,
+    requestWorkspaceView,
+    navigate,
+  });
+  const {
+    closeAutomation: closeAutomationConsole,
+    openTaskWorkbench,
+    focusTaskId: automationFocusTaskId,
+    focusOutboxId: automationFocusOutboxId,
+  } = automationController;
+  const { refresh: refreshAttention } = useAttention();
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Attention deep link 目标已解决时不能打开空白详情/终端，应提示并回到 Inbox。
+   *
+   * Code Logic（这个函数做什么）:
+   *   显示提示文案、refresh Attention、navigate `/attention`。
+   */
+  const handleAttentionTargetNotFound = useCallback(() => {
+    window.alert(t('attention:targetResolved'));
+    void refreshAttention();
+    navigate('/attention');
+  }, [navigate, refreshAttention, t]);
 
   const activeWorktree = useMemo(
     () => worktrees.find((worktree) => worktree.id === activeWorktreeId) ?? worktrees[0] ?? null,
     [activeWorktreeId, worktrees],
   );
-  const activeWorktreeSessionId = activeWorktree?.id ?? null;
-  const scopedSessions = useMemo(
-    () => sessionsForWorktree(sessions, activeWorktreeSessionId),
-    [activeWorktreeSessionId, sessions],
-  );
-  const activeSession = useMemo(
-    () => scopedSessions.find((session) => session.id === activeSessionId) ?? null,
-    [activeSessionId, scopedSessions],
-  );
-  const visibleSessions = useMemo(
-    () => visibleTerminalSessions({ sessions: scopedSessions, activeSessionId }),
-    [activeSessionId, scopedSessions],
-  );
-  const mountedSessions = useMemo(
-    () => mountedTerminalSessions({ sessions }),
-    [sessions],
-  );
-  const gitGraphRows = useMemo(() => buildGitGraphRows(gitCommits), [gitCommits]);
-  const renderedMergeStages = useMemo(
-    () => (mergeStages.length > 0 ? formatWorkbenchMergeStages(mergeStages) : []),
-    [mergeStages],
-  );
-  const renderedActiveSessionId = activeSession?.id ?? visibleSessions[0]?.id ?? null;
-  const selectedParentPath = selectedInfo
-    ? selectedInfo.kind === 'dir'
-      ? selectedInfo.path
-      : parentPathOf(selectedInfo.path)
-    : '';
-  const selectedDisplayPath = selectedInfo?.path ?? '';
-  const desktopUnavailableMessage = t('workbench:errors.desktopUnavailable');
   const emptyValue = t('workbench:emptyValue');
-  const rootPath = t('workbench:rootPath');
   const activeRootPath = activeWorktreeRootPath(activeProject?.path ?? '', activeWorktree);
   const activeSessionRuntime = formatRuntime(
     activeSession?.startedAt ?? null,
@@ -923,403 +524,96 @@ export function Workbench() {
     runtimeNow,
     emptyValue,
   );
-  const canUsePanes = Boolean(
-    activeSession?.supportsPanes && activeSession.status === 'running',
-  );
   const TerminalFullscreenIcon = terminalFullscreen ? MinimizeIcon : MaximizeIcon;
   const terminalFullscreenLabel = terminalFullscreen
     ? t('workbench:terminalExitFullscreen')
     : t('workbench:terminalEnterFullscreen');
-  const remoteProjectOffline = isRemoteWorkbenchProjectOffline(
-    activeProject,
-    remoteOfflineProjectId,
-  );
-  const remoteWriteDisabled = remoteProjectOffline;
-  const canRefreshCurrentTerminalSize = canRefreshTerminalSize(activeSession, remoteWriteDisabled);
   const promptWorkingDirectory = activeRootPath || undefined;
-  const composedWorktreeBranchName = composeWorktreeBranchName(
-    createWorktreeBranchPrefix,
-    createWorktreeBranchSuffixDraft,
-  );
-  const mergeStageLabel = useCallback(
-    (stageId: WorkbenchMergeStageId): string => {
-      switch (stageId) {
-        case 'checkSource':
-          return t('workbench:mergeStages.labels.checkSource');
-        case 'closeSessions':
-          return t('workbench:mergeStages.labels.closeSessions');
-        case 'mergeMain':
-          return t('workbench:mergeStages.labels.mergeMain');
-        case 'resolveConflicts':
-          return t('workbench:mergeStages.labels.resolveConflicts');
-        case 'cleanup':
-          return t('workbench:mergeStages.labels.cleanup');
-      }
-    },
+  // Business Logic: Prompt 优化浮层域（配置加载 + 打开/输入/定位 + Control 单键快捷键 + IME 安全 +
+  // 流式写入终端 + 焦点回归 + 重新打开清空）由独立 controller 持有，避免在 Workbench.tsx 里散落
+  // 多处 state/effect/handler；controller 接收窄 API/回调 + 共享 refs，不复制邻接域 state。
+  // Code Logic: translateFillFailed / translateOptimizeFailed / loadConfig / streamToTerminal 必须稳定
+  // （useCallback / useCallback 包装），否则 controller 内 runPromptOptimization 的 useCallback 依赖每次渲染都变。
+  const translatePromptFillFailed = useCallback(
+    (): string => t('workbench:promptOptimizer.fillFailed'),
     [t],
   );
-  const mergeStageFallbackMessage = useCallback(
-    (stage: WorkbenchMergeStage): string => {
-      switch (stage.status) {
-        case 'pending':
-          return t('workbench:mergeStages.status.pending');
-        case 'running':
-          return t('workbench:mergeStages.status.running');
-        case 'completed':
-          return t('workbench:mergeStages.status.completed');
-        case 'failed':
-          return t('workbench:mergeStages.status.failed');
-        case 'skipped':
-          return t('workbench:mergeStages.status.skipped');
-      }
-    },
+  const translatePromptOptimizeFailed = useCallback(
+    (): string => t('workbench:promptOptimizer.optimizeFailed'),
     [t],
   );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户可能连续发起 merge 或切换项目，旧的自动隐藏计时器不能误清新一轮进度。
-   *
-   * Code Logic（这个函数做什么）:
-   *   如果存在 merge 阶段条隐藏计时器，则取消并清空 ref。
-   */
-  const clearMergeStageDismissTimer = useCallback(() => {
-    if (mergeStageDismissTimerRef.current === null) return;
-    window.clearTimeout(mergeStageDismissTimerRef.current);
-    mergeStageDismissTimerRef.current = null;
-  }, []);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   项目切换或成功完成后的阶段条应释放 Git 历史区域空间。
-   *
-   * Code Logic（这个函数做什么）:
-   *   取消隐藏计时器，清空当前追踪 worktree 与阶段列表。
-   */
-  const clearMergeStagePanel = useCallback(() => {
-    clearMergeStageDismissTimer();
-    mergeProgressWorktreeIdRef.current = null;
-    setMergeProgressWorktreeId(null);
-    setMergeStages([]);
-  }, [clearMergeStageDismissTimer]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   远端项目一旦发现设备离线，页面需要进入只读/不可写状态，避免用户继续点击必然失败的远端写操作。
-   *
-   * Code Logic（这个函数做什么）:
-   *   只在当前 active project 仍是同一个 remote project 且错误包含后端离线文案时，记录离线 projectId。
-   */
-  const markRemoteOfflineFromError = useCallback(
-    (projectId: string, error: unknown) => {
-      if (activeProjectIdRef.current !== projectId) return;
-      if (activeProject?.id !== projectId || activeProject.kind !== 'remote') return;
-      if (!isRemoteWorkbenchOfflineError(error)) return;
-      setRemoteOfflineProjectId(projectId);
-    },
-    [activeProject],
+  const translatePromptRemoteOffline = useCallback(
+    (): string =>
+      t('workbench:remoteOfflineNotice', {
+        device: activeProject?.deviceName ?? t('workbench:emptyValue'),
+      }),
+    [activeProject?.deviceName, t],
   );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   远端设备恢复在线并有请求成功后，应恢复当前项目的可写操作。
-   *
-   * Code Logic（这个函数做什么）:
-   *   仅当成功请求对应当前记录的离线 projectId 时清空状态，避免误清其他项目的离线提示。
-   */
-  const clearRemoteOfflineForProject = useCallback((projectId: string) => {
-    setRemoteOfflineProjectId((current) => (current === projectId ? null : current));
-  }, []);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   成功 merge 后用户只需要短暂看到完成反馈，不应长期保留状态条占位。
-   *
-   * Code Logic（这个函数做什么）:
-   *   为指定 worktree 安排延迟隐藏；触发时若已经开始追踪别的 worktree，则不清理新状态。
-   */
-  const scheduleMergeStagePanelDismiss = useCallback(
-    (worktreeId: string) => {
-      clearMergeStageDismissTimer();
-      mergeStageDismissTimerRef.current = window.setTimeout(() => {
-        mergeStageDismissTimerRef.current = null;
-        if (mergeProgressWorktreeIdRef.current !== worktreeId) return;
-        mergeProgressWorktreeIdRef.current = null;
-        setMergeProgressWorktreeId(null);
-        setMergeStages([]);
-      }, MERGE_STAGE_AUTO_DISMISS_MS);
-    },
-    [clearMergeStageDismissTimer],
-  );
-
-  const updateActiveSession = useCallback((nextSessions: WorkbenchSession[]) => {
-    const candidates = sessionsForWorktree(nextSessions, activeWorktreeIdRef.current);
-    setActiveSessionId((current) => {
-      if (current && candidates.some((session) => session.id === current)) return current;
-      return candidates[0]?.id ?? null;
-    });
-  }, []);
-
-  const focusSession = useCallback((sessionId: string) => {
-    lastLocalFocusAtRef.current = Date.now();
-    setActiveSessionId(sessionId);
-  }, []);
-
-  useEffect(() => {
-    if (!activeSessionId) return undefined;
-    let cancelled = false;
-    void workbenchApi.sessions.focus(activeSessionId).catch((error) => {
-      if (cancelled) return;
-      const projectId = activeProjectIdRef.current;
-      if (projectId) markRemoteOfflineFromError(projectId, error);
-      setSessionError(
-        displayErrorMessage(
-          error,
-          t('workbench:errors.focusSession'),
-          desktopUnavailableMessage,
-        ),
-      );
-    });
-    return () => {
-      cancelled = true;
+  const loadPromptOptimizerConfig = useCallback(async (): Promise<PromptOptimizerConfigLoadResult> => {
+    const config = await configApi.get();
+    return {
+      promptOptimizerHotkey: config.promptOptimizerHotkey,
+      promptOptimizerFillLanguage: config.promptOptimizerFillLanguage,
     };
-  }, [activeSessionId, desktopUnavailableMessage, markRemoteOfflineFromError, t]);
-
-  useEffect(() => {
-    if (!activeProjectId || !activeWorktreeSessionId || scopedSessions.length === 0) {
-      return undefined;
-    }
-    let cancelled = false;
-
-    const syncFocusedSession = () => {
-      if (Date.now() - lastLocalFocusAtRef.current < LOCAL_FOCUS_GRACE_MS) return;
-      void workbenchApi.sessions
-        .focused(activeProjectId, activeWorktreeSessionId)
-        .then(({ sessionId }) => {
-          if (cancelled || !sessionId) return;
-          if (!scopedSessions.some((session) => session.id === sessionId)) return;
-          setActiveSessionId((current) => (current === sessionId ? current : sessionId));
-        })
-        .catch(() => {
-          // tmux focus sync 是辅助状态同步；失败不应打断终端输入和显示。
-        });
-    };
-
-    syncFocusedSession();
-    const timer = window.setInterval(syncFocusedSession, TMUX_FOCUS_SYNC_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [activeProjectId, activeWorktreeSessionId, scopedSessions]);
-
-  const loadSessions = useCallback(
-    async (projectId: string) => {
-      try {
-        setSessionError(null);
-        const list = await workbenchApi.sessions.list(projectId);
-        if (activeProjectIdRef.current !== projectId) return;
-        clearRemoteOfflineForProject(projectId);
-        knownSessionIdsRef.current = new Set(list.map((session) => session.id));
-        setSessions(list);
-        updateActiveSession(list);
-        void refreshProjectSessionStats(projectId);
-      } catch (error) {
-        if (activeProjectIdRef.current !== projectId) return;
-        markRemoteOfflineFromError(projectId, error);
-        setSessionError(
-          displayErrorMessage(error, t('workbench:errors.sessions'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [
-      clearRemoteOfflineForProject,
-      desktopUnavailableMessage,
-      markRemoteOfflineFromError,
-      refreshProjectSessionStats,
-      t,
-      updateActiveSession,
-    ],
-  );
-
-  const loadWorktrees = useCallback(
-    async (projectId: string) => {
-      try {
-        setWorktreeError(null);
-        const list = await workbenchApi.worktrees.list(projectId);
-        if (activeProjectIdRef.current !== projectId) return;
-        clearRemoteOfflineForProject(projectId);
-        setWorktrees(list);
-        setActiveWorktreeId((current) => {
-          if (current && list.some((worktree) => worktree.id === current)) return current;
-          return list[0]?.id ?? null;
-        });
-      } catch (error) {
-        if (activeProjectIdRef.current !== projectId) return;
-        markRemoteOfflineFromError(projectId, error);
-        setWorktreeError(
-          displayErrorMessage(error, t('workbench:errors.worktrees'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [clearRemoteOfflineForProject, desktopUnavailableMessage, markRemoteOfflineFromError, t],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   文件树展开和刷新会对同一路径发起多次异步请求，旧响应不能覆盖最新目录内容或错误状态。
-   *
-   * Code Logic（这个函数做什么）:
-   *   按 project/worktree/path 生成请求 key 并递增序号；响应、错误和 loading 清理只在当前序号仍最新时回写。
-   */
-  const loadDir = useCallback(
-    async (path: string) => {
-      const projectId = activeProjectIdRef.current;
-      if (!projectId) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      const requestKey = workbenchDirRequestKey(projectId, worktreeId, path);
-      const requestSeq = (dirRequestSeqRef.current[requestKey] ?? 0) + 1;
-      dirRequestSeqRef.current[requestKey] = requestSeq;
-      try {
-        setFileError(null);
-        setFileLoadingPath(path);
-        const nodes = await workbenchApi.files.listDir(projectId, path, worktreeId);
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          !isLatestRequest(dirRequestSeqRef.current[requestKey], requestSeq)
-        ) {
-          return;
-        }
-        if (path === '') {
-          setRootNodes(nodes);
-        } else {
-          setChildrenByPath((current) => ({ ...current, [path]: nodes }));
-        }
-        clearRemoteOfflineForProject(projectId);
-      } catch (error) {
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          !isLatestRequest(dirRequestSeqRef.current[requestKey], requestSeq)
-        ) {
-          return;
-        }
-        markRemoteOfflineFromError(projectId, error);
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.files'), desktopUnavailableMessage),
-        );
-      } finally {
-        if (
-          activeProjectIdRef.current === projectId &&
-          activeWorktreeIdRef.current === worktreeId &&
-          isLatestRequest(dirRequestSeqRef.current[requestKey], requestSeq)
-        ) {
-          setFileLoadingPath((current) => (current === path ? null : current));
-        }
-      }
-    },
-    [clearRemoteOfflineForProject, desktopUnavailableMessage, markRemoteOfflineFromError, t],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   删除或重命名目录后，旧目录子树的异步加载响应不能再写回文件树。
-   *
-   * Code Logic（这个函数做什么）:
-   *   遍历当前目录请求序号表，命中同 project/worktree/path 子树的 key 就递增序号，使旧响应 stale。
-   */
-  const invalidateDirRequestsForPath = useCallback((path: string) => {
-    const projectId = activeProjectIdRef.current;
-    if (!projectId) return;
-    const worktreeId = activeWorktreeIdRef.current;
-    for (const [requestKey, requestSeq] of Object.entries(dirRequestSeqRef.current)) {
-      if (workbenchDirRequestKeyMatchesPath(requestKey, projectId, worktreeId, path)) {
-        dirRequestSeqRef.current[requestKey] = requestSeq + 1;
-      }
-    }
   }, []);
-
-  const loadGitHistory = useCallback(async () => {
-    const projectId = activeProjectIdRef.current;
-    if (!projectId) {
-      setGitCommits([]);
-      setGitHistoryError(null);
-      setGitHistoryLoading(false);
-      return;
-    }
-    const worktreeId = activeWorktreeIdRef.current;
-    try {
-      setGitHistoryLoading(true);
-      setGitHistoryError(null);
-      const commits = await workbenchApi.git.listCommits(projectId, worktreeId, 30);
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      setGitCommits(commits);
-      clearRemoteOfflineForProject(projectId);
-    } catch (error) {
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      markRemoteOfflineFromError(projectId, error);
-      setGitCommits([]);
-      setGitHistoryError(
-        displayErrorMessage(error, t('workbench:errors.gitHistory'), desktopUnavailableMessage),
-      );
-    } finally {
-      if (activeProjectIdRef.current === projectId && activeWorktreeIdRef.current === worktreeId) {
-        setGitHistoryLoading(false);
-      }
-    }
-  }, [clearRemoteOfflineForProject, desktopUnavailableMessage, markRemoteOfflineFromError, t]);
-
-  const loadPathInfo = useCallback(
-    async (path: string) => {
-      const projectId = activeProjectIdRef.current;
-      if (!projectId) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      try {
-        const info = await workbenchApi.files.info(projectId, path, worktreeId);
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId
-        ) {
-          return;
-        }
-        setSelectedInfo(info);
-        setRenameName(info.name);
-        clearRemoteOfflineForProject(projectId);
-      } catch (error) {
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId
-        ) {
-          return;
-        }
-        markRemoteOfflineFromError(projectId, error);
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.pathInfo'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [clearRemoteOfflineForProject, desktopUnavailableMessage, markRemoteOfflineFromError, t],
+  const streamPromptToTerminal = useCallback(
+    (
+      prompt: string,
+      options: {
+        workingDirectory?: string | null;
+        targetLanguage: PromptOptimizerFillLanguage;
+        sessionId: string;
+      },
+    ) => promptOptimizerApi.streamToTerminal(prompt, options),
+    [],
   );
+  const promptOptimizerController = useWorkbenchPromptOptimizerController({
+    activeSession,
+    activeProjectId,
+    promptWorkingDirectory,
+    remoteWriteDisabled,
+    automationConsoleOpen,
+    workspaceView,
+    terminalAreaRef,
+    promptInputRef,
+    loadConfig: loadPromptOptimizerConfig,
+    streamToTerminal: streamPromptToTerminal,
+    markRequestFailure,
+    setSessionError,
+    displayErrorMessage,
+    desktopUnavailableMessage,
+    translateFillFailed: translatePromptFillFailed,
+    translateOptimizeFailed: translatePromptOptimizeFailed,
+    translateRemoteOffline: translatePromptRemoteOffline,
+  });
+  const {
+    promptPanelOpen,
+    promptInput,
+    promptOptimizing,
+    promptPanelPosition,
+    setPromptInput,
+    closePromptPanel,
+    togglePromptOptimizerPanel,
+    handleCursorAnchorChange,
+    handlePromptInputKeyDown,
+  } = promptOptimizerController;
+  // Business Logic: Session 搜索浮层域（⌘K/Ctrl+K 开/关 + resume 成功刷新 sessions/focus 新 session/关闭浮层）
+  // 由独立 controller 持有，避免在 Workbench.tsx 里散落 open state 与 keydown 监听；controller 只持有 open 状态
+  // 与 resume 编排，搜索结果数据（query/hits/preview）仍归 WorkbenchSessionSearch 组件所有。
+  const {
+    sessionSearchOpen,
+    openSessionSearch,
+    closeSessionSearch,
+    handleResumed: handleSessionSearchResumed,
+  } = useWorkbenchSessionSearchController({
+    workspaceView,
+    activeProjectId,
+    loadSessions,
+    focusSession,
+  });
 
   useEffect(() => {
     activeProjectIdRef.current = activeProjectId;
-  }, [activeProjectId]);
-
-  useEffect(() => {
-    queueMicrotask(() => {
-      setRemoteOfflineProjectId(null);
-    });
   }, [activeProjectId]);
 
   useEffect(() => {
@@ -1327,161 +621,9 @@ export function Workbench() {
   }, [activeWorktreeId]);
 
   useEffect(() => {
-    deepLinkApplicationRef.current = {
-      search: locationSearch,
-      projectId: null,
-      worktreeId: null,
-      sessionId: null,
-    };
-  }, [locationSearch]);
-
-  useEffect(() => {
-    if (!deepLinkProjectId) return;
-    const applied = deepLinkApplicationRef.current;
-    if (applied.search !== locationSearch || applied.projectId === deepLinkProjectId) return;
-    if (activeProjectId === deepLinkProjectId) {
-      applied.projectId = deepLinkProjectId;
-      return;
-    }
-    const targetProject = projects.find((project) => project.id === deepLinkProjectId);
-    if (!targetProject) return;
-    applied.projectId = deepLinkProjectId;
-    void selectProject(targetProject);
-  }, [activeProjectId, deepLinkProjectId, locationSearch, projects, selectProject]);
-
-  useEffect(() => {
-    if (!deepLinkWorktreeId) return;
-    if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
-    const applied = deepLinkApplicationRef.current;
-    if (applied.search !== locationSearch || applied.worktreeId === deepLinkWorktreeId) return;
-    if (!worktrees.some((worktree) => worktree.id === deepLinkWorktreeId)) return;
-    applied.worktreeId = deepLinkWorktreeId;
-    queueMicrotask(() => {
-      setActiveWorktreeId((current) =>
-        current === deepLinkWorktreeId ? current : deepLinkWorktreeId,
-      );
-    });
-  }, [
-    activeProjectId,
-    deepLinkProjectId,
-    deepLinkWorktreeId,
-    locationSearch,
-    worktrees,
-  ]);
-
-  useEffect(() => {
-    if (!deepLinkSessionId) return;
-    if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
-    if (deepLinkWorktreeId && activeWorktreeId !== deepLinkWorktreeId) return;
-    const applied = deepLinkApplicationRef.current;
-    if (applied.search !== locationSearch || applied.sessionId === deepLinkSessionId) return;
-    if (!scopedSessions.some((session) => session.id === deepLinkSessionId)) return;
-    applied.sessionId = deepLinkSessionId;
-    if (activeSessionId !== deepLinkSessionId) {
-      queueMicrotask(() => {
-        focusSession(deepLinkSessionId);
-      });
-    }
-  }, [
-    activeProjectId,
-    activeSessionId,
-    activeWorktreeId,
-    deepLinkProjectId,
-    deepLinkSessionId,
-    deepLinkWorktreeId,
-    focusSession,
-    locationSearch,
-    scopedSessions,
-  ]);
-
-  useEffect(() => {
-    promptPanelOpenRef.current = promptPanelOpen;
-  }, [promptPanelOpen]);
-
-  useEffect(() => {
-    mergeProgressWorktreeIdRef.current = mergeProgressWorktreeId;
-  }, [mergeProgressWorktreeId]);
-
-  useEffect(() => {
-    knownSessionIdsRef.current = new Set(sessions.map((session) => session.id));
-  }, [sessions]);
-
-  useEffect(() => {
-    activeFileTabIdRef.current = activeFileTabId;
-  }, [activeFileTabId]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   文件 tab 的异步 stale guard 依赖 fileTabsRef 读取最新内容；如果只等 React effect 同步 ref，
-   *   编辑、保存或预览请求返回的窄窗口内可能读到旧 tab 状态。
-   *
-   * Code Logic（这个函数做什么）:
-   *   基于 fileTabsRef.current 计算下一份 tabs，立即写入 ref，再调用 React setState；不把副作用放进
-   *   React functional updater，避免 Strict Mode 下 updater 重放带来不一致。
-   */
-  const setFileTabsState = useCallback(
-    (
-      updater:
-        | WorkbenchOpenFileTab[]
-        | ((currentTabs: WorkbenchOpenFileTab[]) => WorkbenchOpenFileTab[]),
-    ) => {
-      const currentTabs = fileTabsRef.current;
-      const nextTabs = typeof updater === 'function' ? updater(currentTabs) : updater;
-      fileTabsRef.current = nextTabs;
-      setFileTabs(nextTabs);
-      return nextTabs;
-    },
-    [],
-  );
-
-  useEffect(() => {
-    return deferEffect(() => {
-      setActiveSessionId((current) => {
-        if (current && scopedSessions.some((session) => session.id === current)) return current;
-        return scopedSessions[0]?.id ?? null;
-      });
-    });
-  }, [scopedSessions]);
-
-  useEffect(() => {
-    return deferEffect(() => {
-      setSessionNameDraft(activeSession?.name ?? '');
-    });
-  }, [activeSession?.name]);
-
-  useEffect(() => {
     const timer = window.setInterval(() => setRuntimeNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
-
-  useEffect(() => clearMergeStageDismissTimer, [clearMergeStageDismissTimer]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void configApi
-      .get()
-      .then((config) => {
-        if (cancelled) return;
-        setPromptOptimizerHotkey(config.promptOptimizerHotkey || '<ctrl>');
-        setPromptOptimizerFillLanguage(
-          config.promptOptimizerFillLanguage === 'en' ? 'en' : 'zh',
-        );
-      })
-      .catch(() => {
-        // 普通浏览器调试环境没有 Tauri invoke；保留默认快捷键与语言即可。
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!promptPanelOpen) return undefined;
-    const frame = window.requestAnimationFrame(() => {
-      promptInputRef.current?.focus();
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [promptPanelOpen]);
 
   useEffect(() => {
     if (!createWorktreeOpen) return undefined;
@@ -1494,14 +636,11 @@ export function Workbench() {
   useEffect(() => {
     return deferEffect(() => {
       clearMergeStagePanel();
+      // Business Logic: 文件域（含 open/save/format/sqlite/dir stale 守卫）由 fileController.resetForContext 统一重置。
+      // Code Logic: resetForContext 忽略入参（仅作语义占位），不依赖当前 activeWorktreeId，因此本 effect 不订阅
+      // activeWorktreeId 变化——避免 worktree 切换时重跑 loadSessions 把 terminal-status 事件更新覆盖回 running。
+      resetFileForContext(activeProjectId, null);
       if (!activeProjectId) {
-        openFileRequestSeqRef.current += 1;
-        saveRequestSeqRef.current = {};
-        formatRequestSeqRef.current = {};
-        sqlitePreviewRequestSeqRef.current = {};
-        dirRequestSeqRef.current = {};
-        activeFileTabIdRef.current = null;
-        knownSessionIdsRef.current = new Set();
         setSessions([]);
         setActiveSessionId(null);
         setWorktrees([]);
@@ -1509,77 +648,36 @@ export function Workbench() {
         setCreateWorktreeOpen(false);
         setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
         setCreateWorktreeBranchSuffixDraft('');
-        setRootNodes([]);
-        setChildrenByPath({});
-        setExpandedPaths(new Set());
-        setSelectedPath(null);
-        setSelectedInfo(null);
-        setFileTabsState([]);
-        setActiveFileTabId(null);
         setWorkspaceView('terminal');
-        setFileSaving(false);
-        setFileError(null);
-        setFileNotice(null);
         setGitCommits([]);
         setGitHistoryError(null);
         return;
       }
-      openFileRequestSeqRef.current += 1;
-      saveRequestSeqRef.current = {};
-      formatRequestSeqRef.current = {};
-      sqlitePreviewRequestSeqRef.current = {};
-      dirRequestSeqRef.current = {};
-      activeFileTabIdRef.current = null;
-      setRootNodes([]);
-      knownSessionIdsRef.current = new Set();
       setWorktrees([]);
       setActiveWorktreeId(null);
       setCreateWorktreeOpen(false);
       setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
       setCreateWorktreeBranchSuffixDraft('');
-      setChildrenByPath({});
-      setExpandedPaths(new Set());
-      setSelectedPath(null);
-      setSelectedInfo(null);
-      setFileTabsState([]);
-      setActiveFileTabId(null);
       setWorkspaceView('terminal');
-      setFileSaving(false);
-      setFileError(null);
-      setFileNotice(null);
       setGitCommits([]);
       setGitHistoryError(null);
       void loadWorktrees(activeProjectId);
       void loadSessions(activeProjectId);
     });
-  }, [activeProjectId, clearMergeStagePanel, loadSessions, loadWorktrees, setFileTabsState]);
+  }, [activeProjectId, clearMergeStagePanel, loadSessions, loadWorktrees, resetFileForContext, setActiveSessionId, setSessions, setWorktrees, setCreateWorktreeOpen, setCreateWorktreeBranchPrefix, setCreateWorktreeBranchSuffixDraft, setGitCommits, setGitHistoryError]);
 
   useEffect(() => {
     return deferEffect(() => {
-      openFileRequestSeqRef.current += 1;
-      saveRequestSeqRef.current = {};
-      formatRequestSeqRef.current = {};
-      sqlitePreviewRequestSeqRef.current = {};
-      dirRequestSeqRef.current = {};
-      activeFileTabIdRef.current = null;
-      setRootNodes([]);
-      setChildrenByPath({});
-      setExpandedPaths(new Set());
-      setSelectedPath(null);
-      setSelectedInfo(null);
-      setFileTabsState([]);
-      setActiveFileTabId(null);
+      // Business Logic: worktree 切换时文件域需要彻底重置（含 stale 守卫），随后按新 worktree 重新加载根目录。
+      resetFileForContext(activeProjectId, activeWorktreeId);
       setWorkspaceView('terminal');
-      setFileSaving(false);
-      setFileError(null);
-      setFileNotice(null);
       setGitCommits([]);
       setGitHistoryError(null);
       if (activeProjectId && activeWorktreeId) {
         void loadDir('');
       }
     });
-  }, [activeProjectId, activeWorktreeId, loadDir, setFileTabsState]);
+  }, [activeProjectId, activeWorktreeId, loadDir, resetFileForContext, setGitCommits, setGitHistoryError]);
 
   useEffect(() => {
     if (inspectorTab !== 'history') return undefined;
@@ -1588,1563 +686,90 @@ export function Workbench() {
     });
   }, [activeProjectId, activeWorktreeId, inspectorTab, loadGitHistory]);
 
-  useEffect(() => {
-    if (!canListenToTauriEvents()) return undefined;
-    const statusUnlisten = listen<WorkbenchTerminalStatusEvent>(
-      'workbench:terminal-status',
-      (event) => {
-        const payload = event.payload;
-        setSessions((current) =>
-          current.map((session) =>
-            session.id === payload.sessionId
-              ? {
-                  ...session,
-                  status: payload.status,
-                  exitCode: payload.exitCode,
-                  exitedAt:
-                    payload.status === 'exited' || payload.status === 'disconnected'
-                      ? new Date(payload.ts).toISOString()
-                      : session.exitedAt,
-                }
-              : session,
-          ),
-        );
-      },
-    );
-    return () => {
-      void statusUnlisten.then((fn) => fn());
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!canListenToTauriEvents()) return undefined;
-    const mergeUnlisten = listen<WorkbenchMergeProgressEvent>(
-      'workbench:merge-progress',
-      (event) => {
-        const payload = event.payload;
-        const activeProjectId = activeProjectIdRef.current;
-        if (!activeProjectId || payload.projectId !== activeProjectId) return;
-        const trackedWorktreeId = mergeProgressWorktreeIdRef.current;
-        if (trackedWorktreeId && trackedWorktreeId !== payload.worktreeId) return;
-        if (!trackedWorktreeId) {
-          mergeProgressWorktreeIdRef.current = payload.worktreeId;
-          setMergeProgressWorktreeId(payload.worktreeId);
-        }
-        setMergeStages((current) =>
-          formatWorkbenchMergeStages([
-            ...current.filter((stage) => stage.id !== payload.stage.id),
-            payload.stage,
-          ]),
-        );
-      },
-    );
-    return () => {
-      void mergeUnlisten.then((fn) => fn());
-    };
-  }, []);
-
-  const handleCreateSession = useCallback(async () => {
-    const projectId = activeProjectIdRef.current;
-    if (!projectId) return;
-    const worktreeId = activeWorktreeIdRef.current;
-    try {
-      setSessionBusy(true);
-      setSessionError(null);
-      const initialSize = measureInitialTerminalSize(terminalPanelRef.current, 'single');
-      const session = await workbenchApi.sessions.create(projectId, initialSize, worktreeId);
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      setSessions((current) => [...current, session]);
-      knownSessionIdsRef.current.add(session.id);
-      focusSession(session.id);
-      resetTerminalBuffer(session.id);
-      void refreshProjectSessionStats(projectId);
-    } catch (error) {
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      markRemoteOfflineFromError(projectId, error);
-      setSessionError(
-        displayErrorMessage(
-          error,
-          t('workbench:errors.createSession'),
-          desktopUnavailableMessage,
-        ),
-      );
-    } finally {
-      setSessionBusy(false);
-    }
-  }, [
-    desktopUnavailableMessage,
-    focusSession,
-    markRemoteOfflineFromError,
-    refreshProjectSessionStats,
-    resetTerminalBuffer,
-    t,
-  ]);
-
-  const handleSplitPane = useCallback(
-    async (direction: 'right' | 'down') => {
-      if (!activeSession) return;
-      if (remoteWriteDisabled) return;
-      try {
-        setSessionError(null);
-        await workbenchApi.sessions.splitPane(activeSession.id, direction);
-        await loadSessions(activeSession.projectId);
-      } catch (error) {
-        markRemoteOfflineFromError(activeSession.projectId, error);
-        setSessionError(
-          displayErrorMessage(
-            error,
-            t('workbench:errors.splitPane'),
-            desktopUnavailableMessage,
-          ),
-        );
-      }
-    },
-    [
-      activeSession,
-      desktopUnavailableMessage,
-      loadSessions,
-      markRemoteOfflineFromError,
-      remoteWriteDisabled,
-      t,
-    ],
-  );
-
-  const handleClosePane = useCallback(async () => {
-    if (!activeSession) return;
-    if (remoteWriteDisabled) return;
-    try {
-      setSessionError(null);
-      const result = await workbenchApi.sessions.closePane(activeSession.id);
-      const projectId = activeSession.projectId;
-      if (result.closedWindow) {
-        setSessions((current) => {
-          const next = current.filter((session) => session.id !== result.sessionId);
-          updateActiveSession(next);
-          return next;
-        });
-        knownSessionIdsRef.current.delete(result.sessionId);
-        removeTerminalBuffer(result.sessionId);
-      }
-      await loadSessions(projectId);
-    } catch (error) {
-      markRemoteOfflineFromError(activeSession.projectId, error);
-      setSessionError(
-        displayErrorMessage(error, t('workbench:errors.closePane'), desktopUnavailableMessage),
-      );
-    }
-  }, [
-    activeSession,
-    desktopUnavailableMessage,
-    loadSessions,
-    markRemoteOfflineFromError,
-    removeTerminalBuffer,
-    remoteWriteDisabled,
-    t,
-    updateActiveSession,
-  ]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   桌面端用户需要把当前终端临时铺满屏幕，隐藏项目标题、worktree 管理层、文件层和右侧检查器以专注操作。
-   *
-   * Code Logic（这个函数做什么）:
-   *   关闭可能遮挡终端的 Prompt 优化浮层，切回 terminal 工作区，并打开 terminalLayer 的 fixed overlay 状态。
-   */
+  // Business Logic: 桌面端用户需要把当前终端临时铺满屏幕，隐藏项目标题、worktree 管理层、文件层和右侧检查器。
+  // Code Logic: 关闭 Prompt 优化浮层，切回 terminal 工作区，并通过 controller 打开 terminalLayer fixed overlay。
   const handleEnterTerminalFullscreen = useCallback((): void => {
-    setPromptPanelOpen(false);
+    closePromptPanel();
     setWorkspaceView('terminal');
-    setTerminalFullscreen(true);
-  }, []);
+    terminalController.handleEnterTerminalFullscreen();
+  }, [closePromptPanel, terminalController]);
 
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   进入终端全屏后必须有明确出口，恢复完整 Workbench 布局和其他面板内容。
-   *
-   * Code Logic（这个函数做什么）:
-   *   关闭 terminalLayer 的 fixed overlay 状态；不改变当前 session/worktree 或文件 tab 状态。
-   */
+  // Business Logic: 进入终端全屏后必须有明确出口，恢复完整 Workbench 布局。
+  // Code Logic: 通过 controller 关闭 terminalLayer 的 fixed overlay 状态；不改变 session/worktree 或文件 tab。
   const handleExitTerminalFullscreen = useCallback((): void => {
-    setTerminalFullscreen(false);
-  }, []);
+    terminalController.handleExitTerminalFullscreen();
+  }, [terminalController]);
 
-  const handleInput = useCallback(async (sessionId: string, data: string) => {
-    if (remoteWriteDisabled) return;
-    try {
-      await workbenchApi.sessions.writeInput(sessionId, data);
-    } catch {
-      // 输入写入失败时通常是会话刚退出；状态事件或下一次操作会反映错误。
-    }
-  }, [remoteWriteDisabled]);
-
-  const openPromptOptimizerPanel = useCallback(() => {
-    const reset = resetPromptOptimizerTextState();
-    setPromptInput(reset.input);
-    const area = terminalAreaRef.current;
-    const anchor = cursorAnchorRef.current;
-    if (area && anchor) {
-      setPromptPanelPosition(promptOptimizerPanelPosition(area.getBoundingClientRect(), anchor));
-    }
-    setPromptPanelOpen(true);
-  }, []);
-
-  const handleCursorAnchorChange = useCallback((anchor: TerminalCursorAnchor | null) => {
-    cursorAnchorRef.current = anchor;
-    const area = terminalAreaRef.current;
-    if (!area || !anchor) return;
-    const nextPosition = promptOptimizerPanelPosition(area.getBoundingClientRect(), anchor);
-    if (!promptPanelOpenRef.current) return;
-    setPromptPanelPosition((current) =>
-      shouldCommitPromptOptimizerPanelPosition(true, current, nextPosition)
-        ? nextPosition
-        : current,
-    );
-  }, []);
-
-  const runPromptOptimization = useCallback(
-    async () => {
-      if (!promptInput.trim() || promptOptimizing) {
-        promptInputRef.current?.focus();
-        return;
-      }
-      if (!activeSession || !canFillPromptIntoTerminal(activeSession)) {
-        setSessionError(t('workbench:promptOptimizer.fillFailed'));
-        return;
-      }
-      if (remoteWriteDisabled) {
-        setSessionError(t('workbench:remoteOfflineNotice', {
-          device: activeProject?.deviceName ?? t('workbench:emptyValue'),
-        }));
-        return;
-      }
-      try {
-        setPromptOptimizing(true);
-        await promptOptimizerApi.streamToTerminal(promptInput, {
-          workingDirectory: promptWorkingDirectory,
-          targetLanguage: promptOptimizerFillLanguage,
-          sessionId: activeSession.id,
-        });
-        setPromptPanelOpen(false);
-      } catch (error) {
-        if (activeProjectIdRef.current) {
-          markRemoteOfflineFromError(activeProjectIdRef.current, error);
-        }
-        setSessionError(
-          displayErrorMessage(
-            error,
-            t('workbench:promptOptimizer.optimizeFailed'),
-            desktopUnavailableMessage,
-          ),
-        );
-      } finally {
-        setPromptOptimizing(false);
-      }
-    },
-    [
-      activeSession,
-      activeProject?.deviceName,
-      desktopUnavailableMessage,
-      markRemoteOfflineFromError,
-      promptInput,
-      promptOptimizing,
-      promptOptimizerFillLanguage,
-      promptWorkingDirectory,
-      remoteWriteDisabled,
-      t,
-    ],
-  );
-
-  const triggerPromptOptimizerShortcut = useCallback(() => {
-    if (automationConsoleOpen) return;
-    if (!activeProjectIdRef.current || workspaceView !== 'terminal') return;
-    if (remoteWriteDisabled && !promptPanelOpen) return;
-    const action = promptOptimizerShortcutAction(promptPanelOpen, promptInput);
-    if (action === 'open') {
-      openPromptOptimizerPanel();
-      return;
-    }
-    if (action === 'close') {
-      setPromptPanelOpen(false);
-      return;
-    }
-    void runPromptOptimization();
-  }, [
-    openPromptOptimizerPanel,
-    promptInput,
-    promptPanelOpen,
-    remoteWriteDisabled,
-    runPromptOptimization,
-    automationConsoleOpen,
-    workspaceView,
-  ]);
-
-  useEffect(() => {
-    const handleShortcutEvent = (event: KeyboardEvent) => {
-      if (automationConsoleOpen) return;
-      if (workspaceView !== 'terminal') return;
-      const result = reducePromptOptimizerShortcut(
-        promptShortcutStateRef.current,
-        {
-          type: event.type === 'keyup' ? 'keyup' : 'keydown',
-          key: event.key,
-          ctrlKey: event.ctrlKey,
-          metaKey: event.metaKey,
-          altKey: event.altKey,
-          shiftKey: event.shiftKey,
-          repeat: event.repeat,
-        },
-        promptOptimizerHotkey,
-      );
-      promptShortcutStateRef.current = result.state;
-      if (!result.triggered) return;
-      event.preventDefault();
-      event.stopPropagation();
-      triggerPromptOptimizerShortcut();
-    };
-
-    window.addEventListener('keydown', handleShortcutEvent, { capture: true });
-    window.addEventListener('keyup', handleShortcutEvent, { capture: true });
-    return () => {
-      window.removeEventListener('keydown', handleShortcutEvent, { capture: true });
-      window.removeEventListener('keyup', handleShortcutEvent, { capture: true });
-    };
-  }, [automationConsoleOpen, promptOptimizerHotkey, triggerPromptOptimizerShortcut, workspaceView]);
-
-  // ⌘K / Ctrl+K 打开 Claude session 搜索浮层（仅终端视图）
-  useEffect(() => {
-    if (workspaceView !== 'terminal') return undefined;
-    const handleSessionSearchShortcut = (event: KeyboardEvent) => {
-      if (event.repeat) return;
-      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key === 'k') {
-        event.preventDefault();
-        setSessionSearchOpen(true);
-      }
-    };
-    window.addEventListener('keydown', handleSessionSearchShortcut);
-    return () => window.removeEventListener('keydown', handleSessionSearchShortcut);
-  }, [workspaceView]);
-
-  const handleResize = useCallback(async (sessionId: string, cols: number, rows: number) => {
-    try {
-      await workbenchApi.sessions.resize(
-        sessionId,
-        clampU16(cols, MIN_TERMINAL_COLS),
-        clampU16(rows, MIN_TERMINAL_ROWS),
-      );
-    } catch {
-      // 容器 resize 高频触发，失败不阻断终端显示。
-    }
-  }, []);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   移动端使用同一终端后可能把共享 tmux/PTY 尺寸改成手机视口，桌面用户需要一键恢复为当前 PC 终端尺寸。
-   *
-   * Code Logic（这个函数做什么）:
-   *   在可用时递增 resize request key，由当前可见 TerminalPane 使用自身 xterm 实例重新 fit 并复用现有后端 resize。
-   */
-  const handleRefreshTerminalSize = useCallback(() => {
-    if (!canRefreshCurrentTerminalSize) return;
-    setTerminalResizeRequestKey((current) => current + 1);
-  }, [canRefreshCurrentTerminalSize]);
-
-  const handleCloseSession = useCallback(
-    async (sessionId: string) => {
-      if (remoteWriteDisabled) return;
-      try {
-        await workbenchApi.sessions.close(sessionId);
-        setSessions((current) => {
-          const next = current.filter((session) => session.id !== sessionId);
-          updateActiveSession(next);
-          return next;
-        });
-        knownSessionIdsRef.current.delete(sessionId);
-        removeTerminalBuffer(sessionId);
-        const projectId = activeProjectIdRef.current;
-        if (projectId) void refreshProjectSessionStats(projectId);
-      } catch (error) {
-        const projectId = activeProjectIdRef.current;
-        if (projectId) markRemoteOfflineFromError(projectId, error);
-        setSessionError(
-          displayErrorMessage(
-            error,
-            t('workbench:errors.closeSession'),
-            desktopUnavailableMessage,
-          ),
-        );
-      }
-    },
-    [
-      desktopUnavailableMessage,
-      markRemoteOfflineFromError,
-      refreshProjectSessionStats,
-      removeTerminalBuffer,
-      remoteWriteDisabled,
-      t,
-      updateActiveSession,
-    ],
-  );
-
-  const handleRenameSession = useCallback(async () => {
-    if (!activeSession || !sessionNameDraft.trim()) return;
-    if (remoteWriteDisabled) return;
-    try {
-      setSessionError(null);
-      const renamed = await workbenchApi.sessions.rename(activeSession.id, sessionNameDraft.trim());
-      setSessions((current) =>
-        current.map((session) => (session.id === renamed.id ? renamed : session)),
-      );
-    } catch (error) {
-      markRemoteOfflineFromError(activeSession.projectId, error);
-      setSessionError(
-        displayErrorMessage(error, t('workbench:errors.renameSession'), desktopUnavailableMessage),
-      );
-    }
-  }, [
-    activeSession,
-    desktopUnavailableMessage,
-    markRemoteOfflineFromError,
-    remoteWriteDisabled,
-    sessionNameDraft,
-    t,
-  ]);
-
-  const handleOpenCreateWorktree = useCallback(() => {
-    if (!activeProjectIdRef.current || worktreeBusy !== null || remoteWriteDisabled) return;
-    setWorktreeError(null);
-    setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
-    setCreateWorktreeBranchSuffixDraft('');
-    setCreateWorktreeOpen(true);
-  }, [remoteWriteDisabled, worktreeBusy]);
-
-  const handleCancelCreateWorktree = useCallback(() => {
-    if (worktreeBusy === 'create') return;
-    setCreateWorktreeOpen(false);
-    setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
-    setCreateWorktreeBranchSuffixDraft('');
-  }, [worktreeBusy]);
-
-  const handleCreateWorktree = useCallback(async () => {
-    const projectId = activeProjectIdRef.current;
-    if (!projectId) return;
-    if (remoteWriteDisabled) return;
-    const branchName = composeWorktreeBranchName(
-      createWorktreeBranchPrefix,
-      createWorktreeBranchSuffixDraft,
-    );
-    if (!branchName) return;
-    try {
-      setWorktreeBusy('create');
-      setWorktreeError(null);
-      setSessionError(null);
-      const initialSize = measureInitialTerminalSize(terminalPanelRef.current, 'single');
-      const { worktree: created, session, sessionError: createSessionError } =
-        await createWorktreeWithTerminalWindow({
-          projectId,
-          branchName,
-          initialSize,
-          createWorktree: (targetProjectId, targetBranchName, targetBaseBranch) =>
-            workbenchApi.worktrees.create(targetProjectId, targetBranchName, targetBaseBranch),
-          createSession: (targetProjectId, targetInitialSize, targetWorktreeId) =>
-            workbenchApi.sessions.create(targetProjectId, targetInitialSize, targetWorktreeId),
-        });
-      if (activeProjectIdRef.current !== projectId) return;
-      await loadWorktrees(projectId);
-      if (activeProjectIdRef.current !== projectId) return;
-      setActiveWorktreeId(created.id);
-      if (session) {
-        setSessions((current) => [...current, session]);
-        knownSessionIdsRef.current.add(session.id);
-        focusSession(session.id);
-        resetTerminalBuffer(session.id);
-        void refreshProjectSessionStats(projectId);
-      } else if (createSessionError) {
-        markRemoteOfflineFromError(projectId, createSessionError);
-        setSessionError(
-          displayErrorMessage(
-            createSessionError,
-            t('workbench:errors.createSession'),
-            desktopUnavailableMessage,
-          ),
-        );
-      }
-      setCreateWorktreeOpen(false);
-      setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
-      setCreateWorktreeBranchSuffixDraft('');
-    } catch (error) {
-      if (activeProjectIdRef.current !== projectId) return;
-      markRemoteOfflineFromError(projectId, error);
-      setWorktreeError(
-        displayErrorMessage(
-          error,
-          t('workbench:errors.createWorktree'),
-          desktopUnavailableMessage,
-        ),
-      );
-    } finally {
-      setWorktreeBusy(null);
-    }
-  }, [
-    createWorktreeBranchPrefix,
-    createWorktreeBranchSuffixDraft,
-    desktopUnavailableMessage,
-    focusSession,
-    loadWorktrees,
-    markRemoteOfflineFromError,
-    refreshProjectSessionStats,
-    resetTerminalBuffer,
-    remoteWriteDisabled,
-    t,
-  ]);
-
-  const handleCommitWorktree = useCallback(async () => {
-    if (!activeWorktree) return;
-    if (remoteWriteDisabled) return;
-    try {
-      setWorktreeBusy('commit');
-      setWorktreeError(null);
-      await workbenchApi.worktrees.commit(activeWorktree.id, null);
-      await loadWorktrees(activeWorktree.projectId);
-      if (inspectorTab === 'history') await loadGitHistory();
-    } catch (error) {
-      markRemoteOfflineFromError(activeWorktree.projectId, error);
-      await loadWorktrees(activeWorktree.projectId);
-      if (inspectorTab === 'history') await loadGitHistory();
-      setWorktreeError(
-        displayErrorMessage(error, t('workbench:errors.commitWorktree'), desktopUnavailableMessage),
-      );
-    } finally {
-      setWorktreeBusy(null);
-    }
-  }, [
-    activeWorktree,
-    desktopUnavailableMessage,
-    inspectorTab,
-    loadGitHistory,
-    loadWorktrees,
-    markRemoteOfflineFromError,
-    remoteWriteDisabled,
-    t,
-  ]);
-
-  const handlePushWorktree = useCallback(async () => {
-    if (!activeWorktree) return;
-    if (remoteWriteDisabled) return;
-    try {
-      setWorktreeBusy('push');
-      setWorktreeError(null);
-      await workbenchApi.worktrees.push(activeWorktree.id);
-      await loadWorktrees(activeWorktree.projectId);
-      if (inspectorTab === 'history') await loadGitHistory();
-    } catch (error) {
-      markRemoteOfflineFromError(activeWorktree.projectId, error);
-      setWorktreeError(
-        displayErrorMessage(error, t('workbench:errors.pushWorktree'), desktopUnavailableMessage),
-      );
-    } finally {
-      setWorktreeBusy(null);
-    }
-  }, [
-    activeWorktree,
-    desktopUnavailableMessage,
-    inspectorTab,
-    loadGitHistory,
-    loadWorktrees,
-    markRemoteOfflineFromError,
-    remoteWriteDisabled,
-    t,
-  ]);
-
-  const handleMergeWorktree = useCallback(async () => {
-    if (!activeWorktree || activeWorktree.isMain) return;
-    if (remoteWriteDisabled) return;
-    if (!window.confirm(t('workbench:worktrees.mergeConfirm', { name: activeWorktree.name }))) {
-      return;
-    }
-    const projectId = activeWorktree.projectId;
-    const worktreeId = activeWorktree.id;
-    try {
-      clearMergeStageDismissTimer();
-      setWorktreeBusy('merge');
-      setWorktreeError(null);
-      setMergeProgressWorktreeId(worktreeId);
-      mergeProgressWorktreeIdRef.current = worktreeId;
-      setMergeStages(
-        formatWorkbenchMergeStages([
-          {
-            id: INITIAL_MERGE_STAGE_ID,
-            status: 'running',
-            message: t('workbench:mergeStages.messages.checkSource'),
-          },
-        ]),
-      );
-      const result = await workbenchApi.worktrees.merge(worktreeId);
-      const finalStages = formatWorkbenchMergeStages(result.stages);
-      setMergeStages(finalStages);
-      if (shouldAutoDismissMergeStages(finalStages)) {
-        scheduleMergeStagePanelDismiss(worktreeId);
-      }
-      await loadWorktrees(projectId);
-      await loadSessions(projectId);
-      sessionsForWorktree(sessions, worktreeId).forEach((session) => {
-        removeTerminalBuffer(session.id);
-      });
-      void refreshProjectSessionStats(projectId);
-      if (inspectorTab === 'history') await loadGitHistory();
-    } catch (error) {
-      markRemoteOfflineFromError(projectId, error);
-      const message = displayErrorMessage(
-        error,
-        t('workbench:errors.mergeWorktree'),
-        desktopUnavailableMessage,
-      );
-      clearMergeStageDismissTimer();
-      setMergeStages((current) => {
-        const formatted = formatWorkbenchMergeStages(current);
-        if (formatted.some((stage) => stage.status === 'failed')) return formatted;
-        const failedStage = formatted.find((stage) => stage.status === 'running') ?? formatted[0];
-        return formatted.map((stage) =>
-          stage.id === failedStage.id ? { ...stage, status: 'failed', message } : stage,
-        );
-      });
-      await loadWorktrees(projectId);
-      await loadSessions(projectId);
-      setWorktreeError(
-        message,
-      );
-    } finally {
-      setWorktreeBusy(null);
-    }
-  }, [
-    activeWorktree,
-    clearMergeStageDismissTimer,
-    desktopUnavailableMessage,
-    inspectorTab,
-    loadGitHistory,
-    loadSessions,
-    loadWorktrees,
-    markRemoteOfflineFromError,
-    remoteWriteDisabled,
-    refreshProjectSessionStats,
-    removeTerminalBuffer,
-    scheduleMergeStagePanelDismiss,
-    sessions,
-    t,
-  ]);
-
-  const handleRemoveWorktree = useCallback(async () => {
-    if (!activeWorktree || activeWorktree.isMain) return;
-    if (remoteWriteDisabled) return;
-    if (!window.confirm(t('workbench:worktrees.removeConfirm', { name: activeWorktree.name }))) {
-      return;
-    }
-    try {
-      setWorktreeBusy('remove');
-      setWorktreeError(null);
-      await workbenchApi.worktrees.remove(activeWorktree.id);
-      if (activeWorktreeIdRef.current === activeWorktree.id) {
-        const next = worktrees.find((worktree) => worktree.id !== activeWorktree.id);
-        setActiveWorktreeId(next?.id ?? null);
-      }
-      await loadWorktrees(activeWorktree.projectId);
-    } catch (error) {
-      markRemoteOfflineFromError(activeWorktree.projectId, error);
-      setWorktreeError(
-        displayErrorMessage(error, t('workbench:errors.removeWorktree'), desktopUnavailableMessage),
-      );
-    } finally {
-      setWorktreeBusy(null);
-    }
-  }, [
-    activeWorktree,
-    desktopUnavailableMessage,
-    loadWorktrees,
-    markRemoteOfflineFromError,
-    remoteWriteDisabled,
-    t,
-    worktrees,
-  ]);
-
-  const handleToggleNode = useCallback(
-    (node: WorkbenchFileNode) => {
-      if (node.kind !== 'dir') return;
-      setExpandedPaths((current) => {
-        const next = new Set(current);
-        if (next.has(node.path)) {
-          next.delete(node.path);
-        } else {
-          next.add(node.path);
-          if (!childrenByPath[node.path]) {
-            void loadDir(node.path);
-          }
-        }
-        return next;
-      });
-    },
-    [childrenByPath, loadDir],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户从右侧文件树点选文件时，需要在 Workbench 中打开文件工作区，同时保留终端会话上下文。
-   *
-   * Code Logic（这个函数做什么）:
-   *   对当前 project/worktree 发起带序号的 open 文件请求；只有最后一次点击的响应允许激活 tab。
-   *   已有 dirty tab 保留用户编辑内容、模式和原 opened.text 保存基线，只更新后端 metadata/preview。
-   */
-  const handleOpenFile = useCallback(
-    async (node: WorkbenchFileNode) => {
-      if (node.kind !== 'file') return;
-      const projectId = activeProjectIdRef.current;
-      if (!projectId) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      const requestSeq = openFileRequestSeqRef.current + 1;
-      openFileRequestSeqRef.current = requestSeq;
-
-      try {
-        setFileError(null);
-        setFileNotice(null);
-        const opened = await workbenchApi.files.open(projectId, node.path, worktreeId);
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          openFileRequestSeqRef.current !== requestSeq
-        ) {
-          return;
-        }
-
-        const tabId = workbenchFileTabId(worktreeId, opened.metadata.path);
-        const freshTab: WorkbenchOpenFileTab = {
-          id: tabId,
-          path: opened.metadata.path,
-          name: opened.metadata.name,
-          opened,
-          content: opened.text?.content ?? '',
-          dirty: false,
-          mode: opened.capabilities.defaultMode,
-        };
-
-        setFileTabsState((currentTabs) => {
-          const existingTab = currentTabs.find((tab) => tab.id === tabId);
-          if (!existingTab) {
-            return [...currentTabs, freshTab];
-          }
-
-          return currentTabs.map((tab) => {
-            if (tab.id !== tabId) return tab;
-            return mergeOpenedForReopenedTab(tab, freshTab);
-          });
-        });
-        activeFileTabIdRef.current = tabId;
-        setActiveFileTabId(tabId);
-        setAutomationConsoleOpen(false);
-        setWorkspaceView('files');
-      } catch (error) {
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          openFileRequestSeqRef.current !== requestSeq
-        ) {
-          return;
-        }
-        markRemoteOfflineFromError(projectId, error);
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.openFile'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [desktopUnavailableMessage, markRemoteOfflineFromError, setFileTabsState, t],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   HTML 预览组件只知道当前文件路径，项目/worktree 上下文由页面层持有，因此资源读取必须经页面层转接。
-   *
-   * Code Logic（这个函数做什么）:
-   *   捕获当前 projectId/worktreeId，调用 workbench files API 获取 data URL；失败返回 null 让预览移除该资源引用。
-   */
-  const handleLoadHtmlAsset = useCallback(
-    async (documentPath: string, assetPath: string): Promise<WorkbenchHtmlAsset | null> => {
-      const projectId = activeProjectId;
-      if (!projectId) return null;
-      const worktreeId = activeWorktreeId;
-
-      try {
-        return await workbenchApi.files.previewHtmlAsset(
-          projectId,
-          documentPath,
-          assetPath,
-          worktreeId,
-        );
-      } catch {
-        return null;
-      }
-    },
-    [activeProjectId, activeWorktreeId],
-  );
-
-  const handleSelectNode = useCallback(
-    (node: WorkbenchFileNode) => {
-      setSelectedPath(node.path);
-      setSelectedInfo({
-        name: node.name,
-        path: node.path,
-        kind: node.kind,
-        size: node.size,
-        modifiedAt: node.modifiedAt,
-      });
-      setRenameName(node.name);
-      void loadPathInfo(node.path);
-      if (node.kind === 'file') {
-        void handleOpenFile(node);
-      }
-    },
-    [handleOpenFile, loadPathInfo],
-  );
-
-  const refreshParentDir = useCallback(
-    async (path: string) => {
-      const parent = parentPathOf(path);
-      await loadDir(parent);
-      if (parent === '') await loadDir('');
-    },
-    [loadDir],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户在文件工作区点击 tab 时，需要切回文件视图并激活对应文件，而不是影响右侧检查器 tab。
-   *
-   * Code Logic（这个函数做什么）:
-   *   只更新 activeFileTabId 和 workspaceView，具体 tab 内容由 WorkbenchFileWorkspace 根据 id 渲染。
-   */
-  const handleActivateFileTab = useCallback((id: string) => {
-    activeFileTabIdRef.current = id;
-    setActiveFileTabId(id);
-    setAutomationConsoleOpen(false);
-    setWorkspaceView('files');
-  }, []);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户关闭文件 tab 后，工作区需要选择相邻文件继续显示；dirty tab 不能在未确认时丢弃修改。
-   *
-   * Code Logic（这个函数做什么）:
-   *   关闭前检查目标 tab 是否 dirty；用户确认后移除目标 tab，并在关闭 active tab 时选择相邻或剩余 tab。
-   */
-  const handleCloseFileTab = useCallback(
-    (id: string) => {
-      const currentTabs = fileTabsRef.current;
-      const targetTab = currentTabs.find((tab) => tab.id === id);
-      if (!targetTab) return;
-      if (
-        targetTab.dirty &&
-        !window.confirm(
-          t('workbench:confirmCloseDirtyFile', {
-            names: dirtyTabNames([targetTab]).join(', '),
-          }),
-        )
-      ) {
-        return;
-      }
-      const removedTabIds = new Set([id]);
-      const nextTabs = currentTabs.filter((tab) => tab.id !== id);
-      const nextActiveTabId = nextActiveFileTabIdAfterRemoval(
-        currentTabs,
-        removedTabIds,
-        activeFileTabIdRef.current,
-      );
-      activeFileTabIdRef.current = nextActiveTabId;
-      setFileTabsState(nextTabs);
-      setActiveFileTabId(nextActiveTabId);
-      setWorkspaceView(nextActiveTabId ? 'files' : 'terminal');
-    },
-    [setFileTabsState, t],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   文件浏览/编辑完成后，用户需要回到原本常驻的终端工作区继续操作。
-   *
-   * Code Logic（这个函数做什么）:
-   *   将中心工作区视图切回 terminal；终端 DOM 一直保持挂载，只是恢复可见和可输入。
-   */
+  // Business Logic: 文件域操作函数（toggle/select/open/activate/close/content-change/mode-change/
+  // save/format/sqlite/html-asset/create/rename/delete/copy）已迁移到 useWorkbenchFileController；
+  // 页面只保留 handleReturnToTerminal / handleReturnToFiles 两个跨域导航回调（它们同时影响 workspaceView
+  // 与 automationConsoleOpen 共享状态，且 workbenchWorkspaceSwitch 静态测试需要这两个名字留在页面源码里）。
   const handleReturnToTerminal = useCallback(() => {
-    setAutomationConsoleOpen(false);
-    setWorkspaceView('terminal');
-  }, []);
+    fileController.handleReturnToTerminal();
+  }, [fileController]);
+
+  // Business Logic: worktree chip 切换前先调用 fileController.guardDirtyContextChange（Plan 2 新增保护：原
+  //   Workbench.tsx eae5bef chip/其余 context 切换均无 dirty guard；当前已更严格，Finding 1 确认非回归）。用户取消则中止。
+  const handleSelectWorktree = useCallback(
+    async (nextWorktreeId: string): Promise<void> => {
+      const ok = await fileController.guardDirtyContextChange();
+      if (!ok) return;
+      setActiveWorktreeId(nextWorktreeId);
+    },
+    [fileController, setActiveWorktreeId],
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户从文件预览返回终端后，仍需要从终端工具栏一键回到已打开的文件工作区，形成对称导航。
    *
    * Code Logic（这个函数做什么）:
-   *   优先恢复当前 active 文件 tab；如果 ref 丢失但仍有打开文件，则选择第一个 tab 并切换到 files 视图。
+   *   委托给文件域 controller 的 handleReturnToFiles（恢复 active tab、隐藏自动化控制台并切回 files 视图）。
+   *   保留页面层 useCallback 包装以稳定引用并满足 workbenchWorkspaceSwitch 静态契约。
    */
   const handleReturnToFiles = useCallback(() => {
-    const targetTabId = activeFileTabIdRef.current ?? fileTabsRef.current[0]?.id ?? null;
-    if (!targetTabId) return;
-    activeFileTabIdRef.current = targetTabId;
-    setActiveFileTabId(targetTabId);
-    setAutomationConsoleOpen(false);
     setWorkspaceView('files');
-  }, []);
+    fileController.handleReturnToFiles();
+  }, [fileController]);
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户需要从 Workbench 项目层级进入或退出自动化任务队列，避免再通过自动化层内部的返回按钮理解页面层级。
    *
    * Code Logic（这个函数做什么）:
-   *   当前已打开时关闭项目自动化控制台并切回 terminal；未打开时关闭 Prompt 浮层并打开项目级自动化控制台。
+   *   当前已打开时通过 automation controller 的 closeAutomation 关闭控制台并切回 terminal；
+   *   未打开时关闭 Prompt 浮层并打开项目级自动化控制台。
+   *   保留 setAutomationConsoleOpen(true) / setWorkspaceView('terminal') 字面调用以稳定共享状态写入顺序，
+   *   并满足 workbenchAutomationView 静态契约。
    */
   const handleToggleProjectAutomation = useCallback(() => {
-    setPromptPanelOpen(false);
+    closePromptPanel();
     if (automationConsoleOpen) {
-      setAutomationConsoleOpen(false);
-      setWorkspaceView('terminal');
+      closeAutomationConsole();
       return;
     }
     setWorkspaceView('terminal');
     setAutomationConsoleOpen(true);
-  }, [automationConsoleOpen]);
+  }, [automationConsoleOpen, closeAutomationConsole, closePromptPanel]);
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户在自动化看板中点击 blocked 任务的现场入口时，需要回到对应 Workbench 项目、worktree 和终端。
    *
    * Code Logic（这个函数做什么）:
-   *   应用 Orchestrator 构造出的 deep link，并把中心工作区切回 terminal，让 deep link 聚焦结果可见。
+   *   委托给 automation controller 的 openTaskWorkbench：navigate 到 deep link、关闭控制台并把中心工作区
+   *   切回 terminal，让 deep link 聚焦结果可见。
    */
   const handleOpenAutomationTaskWorkbench = useCallback(
     (url: string): void => {
-      navigate(url);
-      setAutomationConsoleOpen(false);
-      setWorkspaceView('terminal');
+      void openTaskWorkbench(url);
     },
-    [navigate],
+    [openTaskWorkbench],
   );
 
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户编辑文件内容时需要标记未保存状态，避免保存按钮和 tab 脏标记失真。
-   *
-   * Code Logic（这个函数做什么）:
-   *   按 tab id 更新 content 并设置 dirty=true，其他 tab 保持不变。
-   */
-  const handleFileContentChange = useCallback((id: string, value: string) => {
-    if (remoteWriteDisabled) return;
-    setFileTabsState((currentTabs) =>
-      currentTabs.map((tab) => (tab.id === id ? { ...tab, content: value, dirty: true } : tab)),
-    );
-  }, [remoteWriteDisabled, setFileTabsState]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   Markdown 等文件支持多种查看/编辑模式，用户切换模式后应随 tab 保持。
-   *
-   * Code Logic（这个函数做什么）:
-   *   按 tab id 写入新的 mode，不改变文件内容和保存状态。
-   */
-  const handleFileModeChange = useCallback((id: string, mode: WorkbenchOpenFileTab['mode']) => {
-    setFileTabsState((currentTabs) =>
-      currentTabs.map((tab) => (tab.id === id ? { ...tab, mode } : tab)),
-    );
-  }, [setFileTabsState]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   JSON/TOML/YAML 保存前必须先做前端语法校验，避免明显错误内容覆盖项目文件。
-   *
-   * Code Logic（这个函数做什么）:
-   *   根据后端 detectedType 选择对应校验器；非结构化文本不做额外校验。
-   */
-  const validateStructuredFileTab = useCallback(
-    (tab: WorkbenchOpenFileTab): string | null => {
-      if (tab.opened.detectedType === 'json') {
-        const result = validateJsonText(tab.content);
-        return result.ok ? null : result.message;
-      }
-
-      if (tab.opened.detectedType === 'toml') {
-        const result = validateTomlText(tab.content);
-        return result.ok ? null : result.message;
-      }
-
-      if (tab.opened.detectedType === 'yaml') {
-        const result = validateYamlText(tab.content);
-        return result.ok ? null : result.message;
-      }
-
-      return null;
-    },
-    [],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户保存文件 tab 时，需要使用后端 baseHash 乐观锁写回当前 worktree，并刷新文件树元信息。
-   *
-   * Code Logic（这个函数做什么）:
-   *   找到目标 tab、校验 JSON/TOML/YAML、捕获提交内容和请求序号后调用 saveText；响应仍最新时更新保存基线，
-   *   若保存期间又有内存编辑则保留当前 content 和 dirty=true，否则清除 dirty，并刷新路径信息。
-   */
-  const handleSaveFileTab = useCallback(
-    async (id: string) => {
-      const tab = fileTabsRef.current.find((candidate) => candidate.id === id);
-      if (!tab) return;
-      if (remoteWriteDisabled) return;
-
-      const baseHash = tab.opened.text?.baseHash;
-      if (!baseHash) {
-        setFileError(t('workbench:errors.saveFile'));
-        return;
-      }
-
-      const validationMessage = validateStructuredFileTab(tab);
-      if (validationMessage) {
-        setFileError(`${t('workbench:errors.saveFile')}: ${validationMessage}`);
-        return;
-      }
-
-      const projectId = activeProjectIdRef.current;
-      if (!projectId) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      const submittedContent = tab.content;
-      const requestSeq = (saveRequestSeqRef.current[id] ?? 0) + 1;
-      saveRequestSeqRef.current[id] = requestSeq;
-
-      try {
-        setFileSaving(true);
-        setFileError(null);
-        setFileNotice(null);
-        const saved = await workbenchApi.files.saveText(
-          projectId,
-          tab.path,
-          submittedContent,
-          baseHash,
-          worktreeId,
-        );
-        const latestTab = fileTabsRef.current.find((candidate) => candidate.id === id);
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          !isLatestRequest(saveRequestSeqRef.current[id], requestSeq) ||
-          !latestTab
-        ) {
-          return;
-        }
-
-        setFileTabsState((currentTabs) =>
-          currentTabs.map((currentTab) => {
-            if (currentTab.id !== id) return currentTab;
-            const contentChangedAfterSubmit = currentTab.content !== submittedContent;
-            return {
-              ...currentTab,
-              path: saved.metadata.path,
-              name: saved.metadata.name,
-              dirty: contentChangedAfterSubmit,
-              opened: {
-                ...currentTab.opened,
-                metadata: saved.metadata,
-                text: currentTab.opened.text
-                  ? {
-                      ...currentTab.opened.text,
-                      content: submittedContent,
-                      baseHash: saved.baseHash,
-                      baseModifiedAt: saved.baseModifiedAt,
-                    }
-                  : currentTab.opened.text,
-              },
-              content: contentChangedAfterSubmit ? currentTab.content : submittedContent,
-            };
-          }),
-        );
-        await refreshParentDir(tab.path);
-        if (selectedPath === tab.path) {
-          await loadPathInfo(tab.path);
-        }
-        setFileNotice(t('workbench:fileWorkspace.saved'));
-        setFileError(null);
-      } catch (error) {
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          !isLatestRequest(saveRequestSeqRef.current[id], requestSeq)
-        ) {
-          return;
-        }
-        markRemoteOfflineFromError(projectId, error);
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.saveFile'), desktopUnavailableMessage),
-        );
-      } finally {
-        if (
-          activeProjectIdRef.current === projectId &&
-          activeWorktreeIdRef.current === worktreeId &&
-          isLatestRequest(saveRequestSeqRef.current[id], requestSeq)
-        ) {
-          setFileSaving(false);
-        }
-      }
-    },
-    [
-      desktopUnavailableMessage,
-      loadPathInfo,
-      refreshParentDir,
-      setFileTabsState,
-      selectedPath,
-      markRemoteOfflineFromError,
-      remoteWriteDisabled,
-      t,
-      validateStructuredFileTab,
-    ],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户需要在保存前格式化 JSON/TOML/YAML，但格式化不应自动写盘。
-   *
-   * Code Logic（这个函数做什么）:
-   *   捕获提交时的内容、project/worktree 和 tab 请求序号；响应回来后仍是最新请求且内容未变化时，
-   *   才用后端格式化输出更新 tab 并标记 dirty。
-   */
-  const handleFormatFileTab = useCallback(
-    async (id: string) => {
-      const tab = fileTabsRef.current.find((candidate) => candidate.id === id);
-      if (!tab) return;
-      if (remoteWriteDisabled) return;
-      const kind =
-        tab.opened.detectedType === 'json' ||
-        tab.opened.detectedType === 'toml' ||
-        tab.opened.detectedType === 'yaml'
-          ? tab.opened.detectedType
-          : null;
-      if (!kind) return;
-
-      const validationMessage = validateStructuredFileTab(tab);
-      if (validationMessage) {
-        setFileError(`${t('workbench:errors.formatFile')}: ${validationMessage}`);
-        return;
-      }
-      const projectId = activeProjectIdRef.current;
-      if (!projectId) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      const submittedContent = tab.content;
-      const requestSeq = (formatRequestSeqRef.current[id] ?? 0) + 1;
-      formatRequestSeqRef.current[id] = requestSeq;
-
-      try {
-        setFileError(null);
-        setFileNotice(null);
-        const result = await workbenchApi.files.formatStructured(kind, submittedContent);
-        const latestTab = fileTabsRef.current.find((candidate) => candidate.id === id);
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          formatRequestSeqRef.current[id] !== requestSeq ||
-          !latestTab ||
-          latestTab.content !== submittedContent
-        ) {
-          return;
-        }
-        setFileTabsState((currentTabs) =>
-          currentTabs.map((currentTab) =>
-            currentTab.id === id && currentTab.content === submittedContent
-              ? {
-                  ...currentTab,
-                  content: result.formatted,
-                  dirty: true,
-                }
-              : currentTab,
-          ),
-        );
-        setFileNotice(t('workbench:fileWorkspace.formatted'));
-      } catch (error) {
-        const latestTab = fileTabsRef.current.find((candidate) => candidate.id === id);
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          formatRequestSeqRef.current[id] !== requestSeq ||
-          !latestTab ||
-          latestTab.content !== submittedContent
-        ) {
-          return;
-        }
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.formatFile'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [
-      desktopUnavailableMessage,
-      remoteWriteDisabled,
-      setFileTabsState,
-      t,
-      validateStructuredFileTab,
-    ],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   SQLite 文件预览需要按用户选择的表重新加载行数据，而不是重新打开整个文件 tab。
-   *
-   * Code Logic（这个函数做什么）:
-   *   为每个 tab 的表预览请求递增序号；响应仍属于当前 project/worktree 且是该 tab 最新请求时，
-   *   才替换 tab.opened.sqlite。
-   */
-  const handleSelectSqliteTable = useCallback(
-    async (id: string, table: string) => {
-      const tab = fileTabsRef.current.find((candidate) => candidate.id === id);
-      const projectId = activeProjectIdRef.current;
-      if (!tab || !projectId) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      const requestSeq = (sqlitePreviewRequestSeqRef.current[id] ?? 0) + 1;
-      sqlitePreviewRequestSeqRef.current[id] = requestSeq;
-
-      try {
-        setFileError(null);
-        const sqlite = await workbenchApi.files.previewSqlite(
-          projectId,
-          tab.path,
-          table,
-          100,
-          worktreeId,
-        );
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          sqlitePreviewRequestSeqRef.current[id] !== requestSeq ||
-          !fileTabsRef.current.some((candidate) => candidate.id === id)
-        ) {
-          return;
-        }
-        setFileTabsState((currentTabs) =>
-          currentTabs.map((currentTab) =>
-            currentTab.id === id
-              ? {
-                  ...currentTab,
-                  opened: {
-                    ...currentTab.opened,
-                    sqlite,
-                  },
-                }
-              : currentTab,
-          ),
-        );
-      } catch (error) {
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId ||
-          sqlitePreviewRequestSeqRef.current[id] !== requestSeq ||
-          !fileTabsRef.current.some((candidate) => candidate.id === id)
-        ) {
-          return;
-        }
-        markRemoteOfflineFromError(projectId, error);
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.previewSqlite'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [desktopUnavailableMessage, markRemoteOfflineFromError, setFileTabsState, t],
-  );
-
-  const handleCreateEntry = useCallback(
-    async (kind: 'file' | 'dir') => {
-      const projectId = activeProjectIdRef.current;
-      if (!projectId || !newEntryName.trim()) return;
-      if (remoteWriteDisabled) return;
-      const worktreeId = activeWorktreeIdRef.current;
-      try {
-        setFileError(null);
-        setFileNotice(null);
-        const parentPath = selectedParentPath;
-        const created =
-          kind === 'file'
-            ? await workbenchApi.files.createFile(
-                projectId,
-                parentPath,
-                newEntryName.trim(),
-                worktreeId,
-              )
-            : await workbenchApi.files.createDir(
-                projectId,
-                parentPath,
-                newEntryName.trim(),
-                worktreeId,
-              );
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId
-        ) {
-          return;
-        }
-        setNewEntryName('');
-        setSelectedPath(created.path);
-        setSelectedInfo(created);
-        setRenameName(created.name);
-        if (parentPath) {
-          setExpandedPaths((current) => new Set(current).add(parentPath));
-        }
-        await loadDir(parentPath);
-      } catch (error) {
-        if (
-          activeProjectIdRef.current !== projectId ||
-          activeWorktreeIdRef.current !== worktreeId
-        ) {
-          return;
-        }
-        markRemoteOfflineFromError(projectId, error);
-        setFileError(
-          displayErrorMessage(error, t('workbench:errors.createPath'), desktopUnavailableMessage),
-        );
-      }
-    },
-    [
-      desktopUnavailableMessage,
-      loadDir,
-      markRemoteOfflineFromError,
-      newEntryName,
-      remoteWriteDisabled,
-      selectedParentPath,
-      t,
-    ],
-  );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   文件树重命名成功后，用户已经打开的文件 tab 应继续指向新路径，且不能丢失未保存编辑。
-   *
-   * Code Logic（这个函数做什么）:
-   *   调用后端 rename 后按原路径映射所有受影响 tab 的 path/id/metadata；activeFileTabId 同步改名后的 id，
-   *   content、dirty、mode 和保存基线保持不变，并让此前发出的旧路径 open 响应失效。
-   */
-  const handleRenamePath = useCallback(async () => {
-    const projectId = activeProjectIdRef.current;
-    if (!projectId || !selectedInfo || !renameName.trim()) return;
-    if (remoteWriteDisabled) return;
-    const worktreeId = activeWorktreeIdRef.current;
-    try {
-      setFileError(null);
-      setFileNotice(null);
-      const originalPath = selectedInfo.path;
-      const renamed = await workbenchApi.files.renamePath(
-        projectId,
-        originalPath,
-        renameName.trim(),
-        worktreeId,
-      );
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      openFileRequestSeqRef.current += 1;
-      if (selectedInfo.kind === 'dir') {
-        invalidateDirRequestsForPath(originalPath);
-        invalidateDirRequestsForPath(renamed.path);
-        setChildrenByPath((current) =>
-          dropPathTreeEntries(dropPathTreeEntries(current, originalPath), renamed.path),
-        );
-        setExpandedPaths((current) =>
-          dropExpandedPathTree(dropExpandedPathTree(current, originalPath), renamed.path),
-        );
-      }
-      const renamedTabIds = new Map<string, string>();
-      const nextTabs = fileTabsRef.current.map((tab) => {
-        const nextPath = renamedPathForTab(tab.path, originalPath, renamed.path);
-        if (!nextPath) return tab;
-
-        const nextId = workbenchFileTabId(worktreeId, nextPath);
-        const nextName = tab.path === originalPath ? renamed.name : basename(nextPath, tab.name);
-        renamedTabIds.set(tab.id, nextId);
-        return {
-          ...tab,
-          id: nextId,
-          path: nextPath,
-          name: nextName,
-          opened: {
-            ...tab.opened,
-            metadata: {
-              ...tab.opened.metadata,
-              ...(tab.path === originalPath ? renamed : {}),
-              path: nextPath,
-              name: nextName,
-            },
-          },
-        };
-      });
-      setFileTabsState(nextTabs);
-      const nextActiveFileTabId = activeFileTabIdRef.current
-        ? renamedTabIds.get(activeFileTabIdRef.current) ?? activeFileTabIdRef.current
-        : null;
-      activeFileTabIdRef.current = nextActiveFileTabId;
-      setActiveFileTabId(nextActiveFileTabId);
-      setSelectedPath(renamed.path);
-      setSelectedInfo(renamed);
-      setRenameName(renamed.name);
-      await refreshParentDir(originalPath);
-    } catch (error) {
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      markRemoteOfflineFromError(projectId, error);
-      setFileError(
-        displayErrorMessage(error, t('workbench:errors.renamePath'), desktopUnavailableMessage),
-      );
-    }
-  }, [
-    desktopUnavailableMessage,
-    invalidateDirRequestsForPath,
-    markRemoteOfflineFromError,
-    refreshParentDir,
-    renameName,
-    remoteWriteDisabled,
-    selectedInfo,
-    setFileTabsState,
-    t,
-  ]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   文件树删除路径成功后，被删除文件或目录下的已打开 tab 不能继续指向不存在的路径；
-   *   如果这些 tab 有未保存编辑，必须先让用户确认放弃。
-   *
-   * Code Logic（这个函数做什么）:
-   *   删除前用当前 tabs 收集受影响路径并提示 dirty 文件；确认后调用后端 delete，成功后关闭命中 tab，
-   *   active tab 被删除时按相邻/剩余 tab 重新选择，并让此前发出的旧路径 open 响应失效。
-   */
-  const handleDeletePath = useCallback(async () => {
-    const projectId = activeProjectIdRef.current;
-    if (!projectId || !selectedInfo) return;
-    if (remoteWriteDisabled) return;
-    const affectedTabs = collectTabsForPath(fileTabsRef.current, selectedInfo.path, selectedInfo.kind);
-    const affectedDirtyNames = dirtyTabNames(affectedTabs);
-    if (
-      affectedDirtyNames.length > 0 &&
-      !window.confirm(
-        t('workbench:confirmDeleteDirtyFiles', {
-          names: affectedDirtyNames.join(', '),
-        }),
-      )
-    ) {
-      return;
-    }
-    if (!window.confirm(t('workbench:confirmDeletePath', { name: selectedInfo.name }))) return;
-    const worktreeId = activeWorktreeIdRef.current;
-    const path = selectedInfo.path;
-    try {
-      setFileError(null);
-      setFileNotice(null);
-      await workbenchApi.files.deletePath(projectId, path, worktreeId);
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      openFileRequestSeqRef.current += 1;
-      if (selectedInfo.kind === 'dir') {
-        invalidateDirRequestsForPath(path);
-        setChildrenByPath((current) => dropPathTreeEntries(current, path));
-        setExpandedPaths((current) => dropExpandedPathTree(current, path));
-      }
-      const removedTabIds = new Set(
-        collectTabsForPath(fileTabsRef.current, path, selectedInfo.kind).map((tab) => tab.id),
-      );
-      const nextActiveTabId = nextActiveFileTabIdAfterRemoval(
-        fileTabsRef.current,
-        removedTabIds,
-        activeFileTabIdRef.current,
-      );
-      const nextTabs = fileTabsRef.current.filter((tab) => !removedTabIds.has(tab.id));
-      activeFileTabIdRef.current = nextActiveTabId;
-      setFileTabsState(nextTabs);
-      setActiveFileTabId(nextActiveTabId);
-      setWorkspaceView(nextActiveTabId ? 'files' : 'terminal');
-      setSelectedPath(null);
-      setSelectedInfo(null);
-      setRenameName('');
-      await refreshParentDir(path);
-    } catch (error) {
-      if (
-        activeProjectIdRef.current !== projectId ||
-        activeWorktreeIdRef.current !== worktreeId
-      ) {
-        return;
-      }
-      markRemoteOfflineFromError(projectId, error);
-      setFileError(
-        displayErrorMessage(error, t('workbench:errors.deletePath'), desktopUnavailableMessage),
-      );
-    }
-  }, [
-    desktopUnavailableMessage,
-    invalidateDirRequestsForPath,
-    markRemoteOfflineFromError,
-    refreshParentDir,
-    remoteWriteDisabled,
-    selectedInfo,
-    setFileTabsState,
-    t,
-  ]);
-
-  const handleCopySelectedPath = useCallback(async () => {
-    if (!selectedInfo) return;
-    try {
-      const value = selectedInfo.path || '.';
-      await navigator.clipboard.writeText(value);
-      setFileError(null);
-      setFileNotice(t('workbench:pathCopied'));
-    } catch (error) {
-      setFileError(
-        displayErrorMessage(error, t('workbench:errors.copyPath'), desktopUnavailableMessage),
-      );
-    }
-  }, [desktopUnavailableMessage, selectedInfo, t]);
-
-  const sessionStatusLabel = activeSession
-    ? activeSession.status === 'running'
-      ? t('workbench:sessionStatus.running')
-      : activeSession.status === 'exited'
-        ? t('workbench:sessionStatus.exited')
-        : activeSession.status === 'disconnected'
-          ? t('workbench:sessionStatus.disconnected')
-          : activeSession.status
-    : t('workbench:sessionStatus.none');
-  const selectedKindLabel = selectedInfo
-    ? selectedInfo.kind === 'dir'
-      ? t('workbench:pathKinds.dir')
-      : selectedInfo.kind === 'file'
-        ? t('workbench:pathKinds.file')
-        : selectedInfo.kind
-    : emptyValue;
   const workspaceLine = activeProject
     ? `${activeProject.deviceName} · ${activeProject.path}`
     : t('workbench:noProjectHint');
-  const activeWorktreeTone = activeWorktree ? worktreeStatusTone(activeWorktree) : 'neutral';
-  const activeWorktreePillTone = activeWorktreeTone === 'warning' ? 'warn' : activeWorktreeTone;
-  const activeWorktreeChangedCount = worktreeChangeCount(activeWorktree);
-  const activeWorktreeStatusLabel = activeWorktree
-    ? activeWorktree.status.conflicts > 0
-      ? t('workbench:worktrees.status.conflict', { count: activeWorktree.status.conflicts })
-      : activeWorktree.status.clean
-        ? t('workbench:worktrees.status.clean')
-        : t('workbench:worktrees.status.dirty', { count: activeWorktree.status.changed })
-    : emptyValue;
   const promptPanelStyle = {
     '--prompt-panel-left': `${promptPanelPosition.left}px`,
     '--prompt-panel-top': `${promptPanelPosition.top}px`,
@@ -3194,113 +819,26 @@ export function Workbench() {
           aria-label={t('workbench:worktrees.label')}
           hidden={automationConsoleOpen}
         >
-          <div className={styles.worktreeStrip}>
-            {worktrees.length === 0 ? (
-              <span className={styles.worktreeEmpty}>{t('workbench:worktrees.empty')}</span>
-            ) : (
-              worktrees.map((worktree) => {
-                const tone = worktreeStatusTone(worktree);
-                const label = worktree.branch ?? worktree.name;
-                return (
-                  <button
-                    key={worktree.id}
-                    type="button"
-                    className={styles.worktreeChip}
-                    data-active={worktree.id === activeWorktree?.id || undefined}
-                    data-tone={tone}
-                    onClick={() => setActiveWorktreeId(worktree.id)}
-                  >
-                    <span className={styles.worktreeDot} data-tone={tone} />
-                    <span className={styles.worktreeName}>{label}</span>
-                    <span className={styles.worktreeMeta}>
-                      {worktree.isMain
-                        ? t('workbench:worktrees.main')
-                        : t('workbench:worktrees.linked')}
-                    </span>
-                  </button>
-                );
-              })
-            )}
-          </div>
-          <div className={styles.worktreeActions}>
-            {createWorktreeOpen ? (
-              <form
-                className={styles.worktreeCreateForm}
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void handleCreateWorktree();
-                }}
-              >
-                <label className={styles.worktreePrefixField}>
-                  <span className={styles.srOnly}>{t('workbench:worktrees.prefixLabel')}</span>
-                  <select
-                    className={styles.worktreePrefixSelect}
-                    value={createWorktreeBranchPrefix}
-                    disabled={worktreeBusy === 'create' || remoteWriteDisabled}
-                    aria-label={t('workbench:worktrees.prefixLabel')}
-                    onChange={(event) =>
-                      setCreateWorktreeBranchPrefix(event.target.value as WorktreeBranchPrefix)
-                    }
-                  >
-                    {WORKTREE_BRANCH_PREFIXES.map((prefix) => (
-                      <option key={prefix} value={prefix}>
-                        {prefix}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <span className={styles.worktreeBranchSlash}>/</span>
-                <Input
-                  ref={worktreeBranchInputRef}
-                  size="sm"
-                  mono
-                  className={styles.worktreeBranchInput}
-                  value={createWorktreeBranchSuffixDraft}
-                  placeholder={t('workbench:worktrees.suffixPlaceholder')}
-                  aria-label={t('workbench:worktrees.suffixLabel')}
-                  disabled={worktreeBusy === 'create' || remoteWriteDisabled}
-                  onChange={(event) => setCreateWorktreeBranchSuffixDraft(event.target.value)}
-                />
-                <Button
-                  type="submit"
-                  size="sm"
-                  variant="primary"
-                  loading={worktreeBusy === 'create'}
-                  disabled={!composedWorktreeBranchName || worktreeBusy !== null || remoteWriteDisabled}
-                >
-                  {t('common:action.confirm')}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={worktreeBusy === 'create'}
-                  onClick={handleCancelCreateWorktree}
-                >
-                  {t('common:action.cancel')}
-                </Button>
-              </form>
-            ) : (
-              <Button
-                size="sm"
-                variant="secondary"
-                icon={<PlusIcon />}
-                loading={worktreeBusy === 'create'}
-                disabled={!activeProjectId || worktreeBusy !== null || remoteWriteDisabled}
-                onClick={handleOpenCreateWorktree}
-              >
-                {t('workbench:worktrees.create')}
-              </Button>
-            )}
-            <Button
-              variant="icon"
-              icon={<TrashIcon />}
-              title={t('workbench:worktrees.remove')}
-              aria-label={t('workbench:worktrees.remove')}
-              loading={worktreeBusy === 'remove'}
-              disabled={!canRemoveWorktree(activeWorktree, worktreeBusy) || remoteWriteDisabled}
-              onClick={() => void handleRemoveWorktree()}
-            />
-          </div>
+          <WorkbenchWorktreeBar
+            worktrees={worktrees}
+            activeWorktree={activeWorktree}
+            activeProjectId={activeProjectId}
+            remoteWriteDisabled={remoteWriteDisabled}
+            worktreeBusy={worktreeBusy}
+            createWorktreeOpen={createWorktreeOpen}
+            createWorktreeBranchPrefix={createWorktreeBranchPrefix}
+            createWorktreeBranchSuffixDraft={createWorktreeBranchSuffixDraft}
+            worktreeBranchInputRef={worktreeBranchInputRef}
+            onSelectWorktree={(id) => {
+              void handleSelectWorktree(id);
+            }}
+            setCreateWorktreeBranchPrefix={setCreateWorktreeBranchPrefix}
+            setCreateWorktreeBranchSuffixDraft={setCreateWorktreeBranchSuffixDraft}
+            handleOpenCreateWorktree={handleOpenCreateWorktree}
+            handleCancelCreateWorktree={handleCancelCreateWorktree}
+            handleCreateWorktree={handleCreateWorktree}
+            handleRemoveWorktree={handleRemoveWorktree}
+          />
         </section>
 
         <div className={styles.noticeStack}>
@@ -3313,18 +851,13 @@ export function Workbench() {
           ) : null}
           {sessionError ? <div className={styles.errorBox}>{sessionError}</div> : null}
           {worktreeError ? <div className={styles.errorBox}>{worktreeError}</div> : null}
-          {dependencyStatus.status !== 'ready' ? (
-            <WorkbenchDependencyCard compact className={styles.dependencyNotice} />
-          ) : null}
+          {dependencyStatus.status !== 'ready' ? <WorkbenchDependencyCard compact className={styles.dependencyNotice} /> : null}
         </div>
 
         <div className={styles.mainWorkspace}>
           <div
             className={styles.terminalLayer}
-            data-hidden={
-              (!terminalFullscreen && (automationConsoleOpen || workspaceView !== 'terminal')) ||
-              undefined
-            }
+            data-hidden={(!terminalFullscreen && (automationConsoleOpen || workspaceView !== 'terminal')) || undefined}
             data-fullscreen={terminalFullscreen || undefined}
           >
             <WorkbenchWorkspaceNav
@@ -3406,7 +939,7 @@ export function Workbench() {
                       aria-label={t('workbench:sessionSearch.open')}
                       data-workbench-responsive-action="true"
                       disabled={!activeProjectId || !activeWorktree}
-                      onClick={() => setSessionSearchOpen(true)}
+                      onClick={openSessionSearch}
                     >
                       <span data-workbench-responsive-label="true">
                         {t('workbench:sessionSearch.open')}
@@ -3424,13 +957,7 @@ export function Workbench() {
                       data-workbench-responsive-action="true"
                       data-active={promptPanelOpen || undefined}
                       disabled={!activeSession || (remoteWriteDisabled && !promptPanelOpen)}
-                      onClick={() => {
-                        if (promptPanelOpen) {
-                          setPromptPanelOpen(false);
-                        } else {
-                          openPromptOptimizerPanel();
-                        }
-                      }}
+                      onClick={togglePromptOptimizerPanel}
                     >
                       <span data-workbench-responsive-label="true">
                         {t('workbench:promptOptimizer.open')}
@@ -3535,109 +1062,30 @@ export function Workbench() {
               }
             />
 
-            <div className={styles.terminalArea} ref={terminalAreaRef}>
-              {promptPanelOpen && !terminalFullscreen ? (
-                <aside
-                  className={styles.promptOptimizerPanel}
-                  style={promptPanelStyle}
-                  aria-label={t('workbench:promptOptimizer.panelAriaLabel')}
-                >
-                  <textarea
-                    ref={promptInputRef}
-                    className={styles.promptOptimizerInput}
-                    value={promptInput}
-                    onChange={(event) => setPromptInput(event.target.value)}
-                    onKeyDown={(event) => {
-                      const action = promptOptimizerInputKeyAction(
-                        {
-                          key: event.key,
-                          shiftKey: event.shiftKey,
-                          isComposing: event.nativeEvent.isComposing,
-                        },
-                        promptInput,
-                      );
-                      if (action !== 'optimize') return;
-                      event.preventDefault();
-                      event.stopPropagation();
-                      void runPromptOptimization();
-                    }}
-                    placeholder={t('promptOptimizer:inputPlaceholder')}
-                    aria-label={t('promptOptimizer:inputAriaLabel')}
-                    disabled={promptOptimizing || remoteWriteDisabled}
-                  />
-                </aside>
-              ) : null}
-
-              <section
-                className={styles.terminalPanel}
-                data-layout="single"
-                ref={terminalPanelRef}
-              >
-                {visibleSessions.length === 0 ? (
-                  <TerminalPane
-                    session={null}
-                    placeholder={
-                      activeProject
-                        ? t('workbench:terminalPlaceholder')
-                        : t('workbench:terminalNoProject')
-                    }
-                    onInput={handleInput}
-                    onResize={handleResize}
-                    resizeRequestKey={0}
-                    inputEnabled={false}
-                    onCursorAnchorChange={
-                      !automationConsoleOpen && workspaceView === 'terminal'
-                        ? handleCursorAnchorChange
-                        : undefined
-                    }
-                  />
-                ) : null}
-                {mountedSessions.map((session) => (
-                  <div
-                    key={session.id}
-                    className={styles.terminalPaneFrame}
-                    data-active={session.id === renderedActiveSessionId || undefined}
-                    onClick={() => focusSession(session.id)}
-                  >
-                    <div className={styles.terminalPaneHeader}>
-                      <span className={styles.sessionDot} data-status={session.status} />
-                      <span className={styles.sessionName}>{session.name}</span>
-                      <span className={styles.terminalPaneStatus}>
-                        {session.status === 'running'
-                          ? t('workbench:sessionStatus.running')
-                          : session.status === 'exited'
-                            ? t('workbench:sessionStatus.exited')
-                            : session.status === 'disconnected'
-                              ? t('workbench:sessionStatus.disconnected')
-                              : session.status}
-                      </span>
-                    </div>
-                    <TerminalPane
-                      session={session}
-                      placeholder={t('workbench:terminalPlaceholder')}
-                      onInput={handleInput}
-                      onResize={handleResize}
-                      resizeRequestKey={
-                        session.id === renderedActiveSessionId ? terminalResizeRequestKey : 0
-                      }
-                      inputEnabled={
-                        !automationConsoleOpen &&
-                        workspaceView === 'terminal' &&
-                        session.id === renderedActiveSessionId &&
-                        !remoteWriteDisabled
-                      }
-                      onCursorAnchorChange={
-                        !automationConsoleOpen &&
-                        workspaceView === 'terminal' &&
-                        session.id === renderedActiveSessionId
-                          ? handleCursorAnchorChange
-                          : undefined
-                      }
-                    />
-                  </div>
-                ))}
-              </section>
-            </div>
+            <WorkbenchTerminalArea
+              terminalAreaRef={terminalAreaRef}
+              terminalPanelRef={terminalPanelRef}
+              promptPanelOpen={promptPanelOpen}
+              terminalFullscreen={terminalFullscreen}
+              promptPanelStyle={promptPanelStyle}
+              promptInputRef={promptInputRef}
+              promptInput={promptInput}
+              setPromptInput={setPromptInput}
+              handlePromptInputKeyDown={handlePromptInputKeyDown}
+              promptOptimizing={promptOptimizing}
+              remoteWriteDisabled={remoteWriteDisabled}
+              automationConsoleOpen={automationConsoleOpen}
+              workspaceView={workspaceView}
+              activeProject={activeProject}
+              visibleSessions={visibleSessions}
+              mountedSessions={mountedSessions}
+              renderedActiveSessionId={renderedActiveSessionId}
+              terminalResizeRequestKey={terminalResizeRequestKey}
+              handleInput={handleInput}
+              handleResize={handleResize}
+              handleCursorAnchorChange={handleCursorAnchorChange}
+              focusSession={focusSession}
+            />
           </div>
 
           <div
@@ -3678,15 +1126,9 @@ export function Workbench() {
             <div className={styles.automationLayer}>
               <header className={styles.automationHeader}>
                 <div className={styles.automationHeadingGroup}>
-                  <span className={styles.automationEyebrow}>
-                    {t('workbench:projectAutomation.scope')}
-                  </span>
-                  <h2 className={styles.automationTitle}>
-                    {t('workbench:projectAutomation.title')}
-                  </h2>
-                  <p className={styles.automationDescription}>
-                    {t('workbench:projectAutomation.description')}
-                  </p>
+                  <span className={styles.automationEyebrow}>{t('workbench:projectAutomation.scope')}</span>
+                  <h2 className={styles.automationTitle}>{t('workbench:projectAutomation.title')}</h2>
+                  <p className={styles.automationDescription}>{t('workbench:projectAutomation.description')}</p>
                 </div>
                 <div className={styles.automationContext}>
                   <span>
@@ -3697,7 +1139,13 @@ export function Workbench() {
                 </div>
               </header>
               <div className={styles.automationBody}>
-                <OrchestratorPanel embedded onOpenWorkbench={handleOpenAutomationTaskWorkbench} />
+                <OrchestratorPanel
+                  embedded
+                  onOpenWorkbench={handleOpenAutomationTaskWorkbench}
+                  focusTaskId={automationFocusTaskId}
+                  focusOutboxId={automationFocusOutboxId}
+                  onFocusTargetNotFound={handleAttentionTargetNotFound}
+                />
               </div>
             </div>
           ) : null}
@@ -3705,430 +1153,69 @@ export function Workbench() {
       </main>
 
       <aside className={styles.inspectorPane}>
-        <Card className={styles.statusCard} padding="sm">
-          <div className={styles.cardTitleRow}>
-            <h3 className={styles.cardTitle}>{t('workbench:sessionStatusTitle')}</h3>
-            <Pill tone={activeSession ? statusTone(activeSession.status) : 'neutral'} dot>
-              {sessionStatusLabel}
-            </Pill>
-          </div>
-          <dl className={styles.statusGrid}>
-            <div>
-              <dt>{t('workbench:statusDevice')}</dt>
-              <dd>{activeProject?.deviceName ?? emptyValue}</dd>
-            </div>
-            <div>
-              <dt>{t('workbench:statusProject')}</dt>
-              <dd>{activeProject?.name ?? emptyValue}</dd>
-            </div>
-            <div>
-              <dt>{t('workbench:statusWorktree')}</dt>
-              <dd>{activeWorktree?.name ?? emptyValue}</dd>
-            </div>
-            <div>
-              <dt>{t('workbench:statusProjectPath')}</dt>
-              <dd>{activeRootPath || emptyValue}</dd>
-            </div>
-            <div>
-              <dt>{t('workbench:statusSession')}</dt>
-              <dd>{activeSession?.name ?? emptyValue}</dd>
-            </div>
-            <div>
-              <dt>{t('workbench:statusCommand')}</dt>
-              <dd>{activeSession?.command ?? emptyValue}</dd>
-            </div>
-            <div>
-              <dt>{t('workbench:statusState')}</dt>
-              <dd>{sessionStatusLabel}</dd>
-            </div>
-            <div>
-              <dt>{t('workbench:statusRuntime')}</dt>
-              <dd>{activeSessionRuntime}</dd>
-            </div>
-            <div>
-              <dt>{t('workbench:statusSize')}</dt>
-              <dd>{activeSession ? `${activeSession.cols} × ${activeSession.rows}` : emptyValue}</dd>
-            </div>
-            <div>
-              <dt>{t('workbench:statusStarted')}</dt>
-              <dd>{formatDateTime(activeSession?.startedAt ?? null, emptyValue)}</dd>
-            </div>
-            <div>
-              <dt>{t('workbench:statusExit')}</dt>
-              <dd>{activeSession?.exitCode ?? emptyValue}</dd>
-            </div>
-          </dl>
-          <div className={styles.statusActions}>
-            <Input
-              value={sessionNameDraft}
-              onChange={(event) => setSessionNameDraft(event.target.value)}
-              placeholder={t('workbench:sessionNamePlaceholder')}
-              size="sm"
-              disabled={!activeSession || remoteWriteDisabled}
-            />
-            <div className={styles.statusButtonRow}>
-              <Button
-                size="sm"
-                variant="secondary"
-                icon={<EditIcon />}
-                disabled={!activeSession || !sessionNameDraft.trim() || remoteWriteDisabled}
-                onClick={() => void handleRenameSession()}
-              >
-                {t('workbench:renameSession')}
-              </Button>
-              <Button
-                size="sm"
-                variant="danger"
-                icon={<XIcon />}
-                disabled={!activeSession || remoteWriteDisabled}
-                onClick={() => activeSession && void handleCloseSession(activeSession.id)}
-              >
-                {t('workbench:closeTerminal')}
-              </Button>
-            </div>
-          </div>
-        </Card>
+        <WorkbenchStatusCard
+          activeProject={activeProject}
+          activeWorktree={activeWorktree}
+          activeSession={activeSession}
+          activeRootPath={activeRootPath}
+          remoteWriteDisabled={remoteWriteDisabled}
+          sessionNameDraft={sessionNameDraft}
+          setSessionNameDraft={setSessionNameDraft}
+          handleRenameSession={handleRenameSession}
+          handleCloseSession={handleCloseSession}
+          activeSessionRuntime={activeSessionRuntime}
+        />
 
-        <div className={styles.inspectorTabs} role="tablist" aria-label={t('workbench:inspectorTabs')}>
-          <button
-            type="button"
-            className={styles.inspectorTab}
-            data-active={inspectorTab === 'files' || undefined}
-            role="tab"
-            aria-selected={inspectorTab === 'files'}
-            onClick={() => setInspectorTab('files')}
-          >
-            {t('workbench:filesTitle')}
-          </button>
-          <button
-            type="button"
-            className={styles.inspectorTab}
-            data-active={inspectorTab === 'history' || undefined}
-            role="tab"
-            aria-selected={inspectorTab === 'history'}
-            onClick={() => setInspectorTab('history')}
-          >
-            {t('workbench:gitHistoryTitle')}
-          </button>
-        </div>
-
-        {inspectorTab === 'files' ? (
-          <Card className={styles.filesCard} padding="sm">
-            <div className={styles.cardTitleRow}>
-              <h3 className={styles.cardTitle}>{t('workbench:filesTitle')}</h3>
-              <Button
-                variant="icon"
-                icon={<SyncIcon />}
-                title={t('workbench:refreshFiles')}
-                aria-label={t('workbench:refreshFiles')}
-                disabled={!activeProjectId}
-                onClick={() => void loadDir('')}
-              />
-            </div>
-
-            {fileError ? <div className={styles.errorBox}>{fileError}</div> : null}
-            {fileNotice ? <div className={styles.noticeBox}>{fileNotice}</div> : null}
-
-            <div className={styles.fileActions}>
-              <Input
-                value={newEntryName}
-                onChange={(event) => setNewEntryName(event.target.value)}
-                placeholder={t('workbench:newEntryPlaceholder')}
-                size="sm"
-              />
-              <div className={styles.fileActionButtons}>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  icon={<FileIcon />}
-                  disabled={!activeProjectId || !newEntryName.trim() || remoteWriteDisabled}
-                  onClick={() => void handleCreateEntry('file')}
-                >
-                  {t('workbench:createFile')}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  icon={<FolderIcon />}
-                  disabled={!activeProjectId || !newEntryName.trim() || remoteWriteDisabled}
-                  onClick={() => void handleCreateEntry('dir')}
-                >
-                  {t('workbench:createFolder')}
-                </Button>
-              </div>
-            </div>
-
-            <div className={styles.treePanel}>
-              {!activeProjectId ? (
-                <div className={styles.treeEmpty}>{t('workbench:filesNoProject')}</div>
-              ) : rootNodes.length === 0 && fileLoadingPath === '' ? (
-                <div className={styles.treeEmpty}>{t('workbench:loading')}</div>
-              ) : rootNodes.length === 0 ? (
-                <div className={styles.treeEmpty}>{t('workbench:filesEmpty')}</div>
-              ) : (
-                <FileTree
-                  nodes={rootNodes}
-                  childrenByPath={childrenByPath}
-                  expandedPaths={expandedPaths}
-                  selectedPath={selectedPath}
-                  loadingPath={fileLoadingPath}
-                  onToggle={handleToggleNode}
-                  onSelect={handleSelectNode}
-                />
-              )}
-            </div>
-
-            <div className={styles.pathInfo}>
-              <div className={styles.pathInfoHeader}>
-                <span className={styles.pathInfoName}>{basename(selectedDisplayPath, rootPath)}</span>
-                <span className={styles.pathInfoPath}>{selectedDisplayPath || emptyValue}</span>
-              </div>
-              <dl className={styles.pathInfoGrid}>
-                <div>
-                  <dt>{t('workbench:pathKind')}</dt>
-                  <dd>{selectedKindLabel}</dd>
-                </div>
-                <div>
-                  <dt>{t('workbench:pathSize')}</dt>
-                  <dd>{formatSize(selectedInfo?.size ?? null, emptyValue)}</dd>
-                </div>
-                <div>
-                  <dt>{t('workbench:pathModified')}</dt>
-                  <dd>{formatDateTime(selectedInfo?.modifiedAt ?? null, emptyValue)}</dd>
-                </div>
-                <div>
-                  <dt>{t('workbench:pathParent')}</dt>
-                  <dd>{selectedParentPath || rootPath}</dd>
-                </div>
-              </dl>
-              <div className={styles.renameRow}>
-                <Input
-                  value={renameName}
-                  onChange={(event) => setRenameName(event.target.value)}
-                  placeholder={t('workbench:renamePlaceholder')}
-                  size="sm"
-                  disabled={!selectedInfo || remoteWriteDisabled}
-                />
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  icon={<CopyIcon />}
-                  disabled={!selectedInfo}
-                  onClick={() => void handleCopySelectedPath()}
-                >
-                  {t('workbench:copyRelativePath')}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  icon={<EditIcon />}
-                  disabled={!selectedInfo || !renameName.trim() || remoteWriteDisabled}
-                  onClick={() => void handleRenamePath()}
-                >
-                  {t('workbench:rename')}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="danger"
-                  icon={<TrashIcon />}
-                  disabled={!selectedInfo || remoteWriteDisabled}
-                  onClick={() => void handleDeletePath()}
-                >
-                  {t('workbench:delete')}
-                </Button>
-              </div>
-            </div>
-          </Card>
-        ) : (
-          <Card className={styles.historyCard} padding="sm">
-            <div className={styles.cardTitleRow}>
-              <h3 className={styles.cardTitle}>{t('workbench:gitHistoryTitle')}</h3>
-              <Button
-                variant="icon"
-                icon={<SyncIcon />}
-                title={t('workbench:refreshGitHistory')}
-                aria-label={t('workbench:refreshGitHistory')}
-                disabled={!activeProjectId || gitHistoryLoading}
-                onClick={() => void loadGitHistory()}
-              />
-            </div>
-
-            <div className={styles.gitActionBar}>
-              <div className={styles.gitActionStatus}>
-                <Pill tone={activeWorktreePillTone} dot>
-                  {activeWorktreeStatusLabel}
-                </Pill>
-                <span className={styles.gitActionBranch}>
-                  {activeWorktree?.branch ?? activeWorktree?.name ?? emptyValue}
-                </span>
-              </div>
-              <div className={styles.gitActionButtons}>
-                <Button
-                  size="sm"
-                  variant={activeWorktreeChangedCount > 0 ? 'primary' : 'secondary'}
-                  icon={<EditIcon />}
-                  loading={worktreeBusy === 'commit'}
-                  disabled={!canCommitWorktree(activeWorktree, worktreeBusy) || remoteWriteDisabled}
-                  onClick={() => void handleCommitWorktree()}
-                >
-                  {t('workbench:worktrees.commit')}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  icon={<UploadIcon />}
-                  loading={worktreeBusy === 'push'}
-                  disabled={!canPushWorktree(activeWorktree, worktreeBusy) || remoteWriteDisabled}
-                  onClick={() => void handlePushWorktree()}
-                >
-                  {t('workbench:worktrees.push')}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  icon={<SyncIcon />}
-                  loading={worktreeBusy === 'merge'}
-                  disabled={!canMergeWorktree(activeWorktree, worktreeBusy) || remoteWriteDisabled}
-                  onClick={() => void handleMergeWorktree()}
-                >
-                  {t('workbench:worktrees.merge')}
-                </Button>
-              </div>
-            </div>
-
-            {renderedMergeStages.length > 0 ? (
-              <div className={styles.mergeStagePanel} role="status" aria-live="polite">
-                {renderedMergeStages.map((stage) => (
-                  <div
-                    key={stage.id}
-                    className={styles.mergeStageItem}
-                    data-status={stage.status}
-                  >
-                    <span className={styles.mergeStageDot} aria-hidden="true" />
-                    <div className={styles.mergeStageCopy}>
-                      <span className={styles.mergeStageLabel}>
-                        {mergeStageLabel(stage.id)}
-                      </span>
-                      <span className={styles.mergeStageMessage}>
-                        {stage.message || mergeStageFallbackMessage(stage)}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-
-            {gitHistoryError ? <div className={styles.errorBox}>{gitHistoryError}</div> : null}
-
-            <div className={styles.historyPanel}>
-              {!activeProjectId ? (
-                <div className={styles.treeEmpty}>{t('workbench:gitHistoryNoProject')}</div>
-              ) : gitHistoryLoading ? (
-                <div className={styles.treeEmpty}>{t('workbench:gitHistoryLoading')}</div>
-              ) : !hasGitHistory(gitCommits) ? (
-                <div className={styles.treeEmpty}>{t('workbench:gitHistoryEmpty')}</div>
-              ) : (
-                <div className={styles.commitList}>
-                  {gitGraphRows.map((row) => {
-                    const graphWidth = gitGraphWidth(row.laneCount);
-                    return (
-                      <article key={row.commit.hash} className={styles.commitItem}>
-                        <div className={styles.commitGraph} style={{ width: graphWidth }}>
-                          <svg
-                            className={styles.commitGraphSvg}
-                            viewBox={`0 0 ${graphWidth} ${GIT_GRAPH_ROW_HEIGHT}`}
-                            aria-hidden="true"
-                          >
-                            {row.activeLanes.map((lane, laneIndex) => {
-                              const x = gitGraphX(laneIndex);
-                              const isCommitLane = laneIndex === row.lane;
-                              const continues = row.parentLanes.includes(laneIndex);
-                              const y2 = isCommitLane && !continues ? GIT_GRAPH_DOT_Y : GIT_GRAPH_ROW_HEIGHT;
-                              return (
-                                <line
-                                  key={`${row.commit.hash}-${lane.hash}-${laneIndex}`}
-                                  className={styles.graphLine}
-                                  style={gitGraphColorStyle(lane.colorIndex)}
-                                  x1={x}
-                                  y1={0}
-                                  x2={x}
-                                  y2={y2}
-                                />
-                              );
-                            })}
-                            {row.parentLanes
-                              .filter((parentLane) => parentLane !== row.lane)
-                              .map((parentLane) => {
-                                const fromX = gitGraphX(row.lane);
-                                const toX = gitGraphX(parentLane);
-                                return (
-                                  <path
-                                    key={`${row.commit.hash}-${parentLane}`}
-                                    className={styles.graphLine}
-                                    style={gitGraphColorStyle(row.colorIndex)}
-                                    d={`M ${fromX} ${GIT_GRAPH_DOT_Y} C ${fromX} 32 ${toX} 32 ${toX} ${GIT_GRAPH_ROW_HEIGHT}`}
-                                  />
-                                );
-                              })}
-                            <circle
-                              className={styles.graphDot}
-                              style={gitGraphColorStyle(row.colorIndex)}
-                              cx={gitGraphX(row.lane)}
-                              cy={GIT_GRAPH_DOT_Y}
-                              r={GIT_GRAPH_DOT_RADIUS}
-                            />
-                          </svg>
-                        </div>
-                        <div className={styles.commitContent}>
-                          <div className={styles.commitHeader}>
-                            <span className={styles.commitSummary}>
-                              {row.commit.summary || emptyValue}
-                            </span>
-                            <span className={styles.commitTime}>
-                              {formatCommitRelativeTime(row.commit.authoredAt, emptyValue)}
-                            </span>
-                          </div>
-                          {row.commit.refs.length > 0 ? (
-                            <div className={styles.refList}>
-                              {row.commit.refs.map((ref) => (
-                                <span
-                                  key={`${row.commit.hash}-${ref.fullName}`}
-                                  className={styles.refBadge}
-                                  data-kind={ref.kind}
-                                  title={ref.fullName}
-                                >
-                                  {ref.kind === 'remote' ? <UploadIcon size={12} /> : null}
-                                  {ref.name}
-                                </span>
-                              ))}
-                            </div>
-                          ) : null}
-                          <div className={styles.commitMeta}>
-                            <span className={styles.commitHash}>{row.commit.shortHash}</span>
-                            <span>{row.commit.authorName || row.commit.authorEmail || emptyValue}</span>
-                          </div>
-                        </div>
-                      </article>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </Card>
-        )}
+        <WorkbenchInspector
+          inspectorTab={inspectorTab}
+          setInspectorTab={setInspectorTab}
+          fileInspector={{
+            activeProjectId,
+            remoteWriteDisabled,
+            rootNodes,
+            childrenByPath,
+            expandedPaths,
+            selectedPath,
+            selectedInfo,
+            fileLoadingPath,
+            fileError,
+            fileNotice,
+            newEntryName,
+            renameName,
+            setNewEntryName,
+            setRenameName,
+            loadDir,
+            handleToggleNode,
+            handleSelectNode,
+            handleCreateEntry,
+            handleRenamePath,
+            handleDeletePath,
+            handleCopySelectedPath,
+          }}
+          gitInspector={{
+            activeProjectId,
+            activeWorktree,
+            remoteWriteDisabled,
+            gitCommits,
+            gitHistoryLoading,
+            gitHistoryError,
+            worktreeBusy,
+            mergeStages,
+            loadGitHistory,
+            handleCommitWorktree,
+            handlePushWorktree,
+            handleMergeWorktree,
+          }}
+        />
       </aside>
       <WorkbenchSessionSearch
         open={sessionSearchOpen}
-        onClose={() => setSessionSearchOpen(false)}
+        onClose={closeSessionSearch}
         projectId={activeProjectId}
         worktreeId={activeWorktreeId}
         offline={remoteProjectOffline}
         worktreeName={activeWorktree?.name}
-        onResumed={(newSessionId) => {
-          if (activeProjectId) void loadSessions(activeProjectId);
-          focusSession(newSessionId);
-          setSessionSearchOpen(false);
-        }}
+        onResumed={handleSessionSearchResumed}
       />
     </div>
   );

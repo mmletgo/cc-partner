@@ -1,0 +1,47 @@
+# Docs guard — static documentation fact checks
+#
+# Triggers on pull requests and pushes to master when Markdown, this checker,
+# or this workflow change. Single lightweight job: checkout + Node 22 only.
+# Does not install frontend or Rust dependencies. No continue-on-error.
+
+name: Docs
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '**/*.md'
+      - 'scripts/check-docs.mjs'
+      - 'src-tauri/src/backend/cli.rs'
+      - '.github/workflows/docs.yml'
+  push:
+    branches: [master]
+    paths:
+      - '**/*.md'
+      - 'scripts/check-docs.mjs'
+      - 'src-tauri/src/backend/cli.rs'
+      - '.github/workflows/docs.yml'
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    name: Documentation facts
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Self-test checker fixtures
+        run: node scripts/check-docs.mjs --self-test
+
+      - name: Check current documentation set
+        # No fixed file list: default mode scans all tracked Markdown except docs/superpowers/**
+        run: node scripts/check-docs.mjs

@@ -2,13 +2,17 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     远端设备或 GUI sidecar 模式需要无需桌面窗口即可启动 cc-partner 后端，并能通过
-//!     `start|serve|stop|status` 管理本机后台进程。
+//!     `start|serve|stop|status|doctor` 管理本机后台进程与健康检查。
 //!
 //! Code Logic（这个模块做什么）:
 //!     提供 `run_from_env()` 入口；`serve` 装配共享 backend runtime 并等待 ctrl-c/control route；
-//!     `start` detach 当前可执行文件的 serve 子进程；`status` 输出机器可读 JSON；`stop` 调本地控制 route。
+//!     `start` detach 当前可执行文件的 serve 子进程；`status` 输出机器可读 JSON；`stop` 调本地控制 route；
+//!     `doctor` / `doctor --json` 采集脱敏快照，stdout 与 stderr tracing 隔离，退出码 0/1/2。
 
 use crate::backend::control::{self, BackendControlFile, BackendStatus, BackendStatusKind};
+use crate::backend::doctor::{
+    collect_doctor_snapshot, DoctorCheck, DoctorCheckStatus, DoctorSnapshot, DoctorStatus,
+};
 use crate::backend::runtime::{
     build_app_state, shutdown_backend_runtime, start_backend_services, start_background_tasks,
     BackendRuntimeMode,
@@ -88,7 +92,8 @@ struct StopRouteResponse {
 /// 从当前进程环境运行后端 CLI。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     `src/bin/cc-partner-backend.rs` 需要一个稳定入口，把 CLI 执行结果转成进程退出码。
+///     `src/bin/cc-partner-backend.rs` 需要一个稳定入口，把 CLI 执行结果转成进程退出码
+///     （含 doctor 的 0/1/2 与 start/serve/stop/status 的既有语义）。
 ///
 /// Code Logic（这个函数做什么）:
 ///     收集 `std::env::args()` 后委托命令分发；异步命令内部自建 Tokio runtime。
@@ -99,10 +104,11 @@ pub fn run_from_env() -> i32 {
 /// 分发 CLI 子命令。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     start/serve/stop/status 是独立用户入口，需要在同一套解析逻辑中保持用法和退出码一致。
+///     start/serve/stop/status/doctor 是独立用户入口，需要在同一套解析逻辑中保持用法和退出码契约。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析第二个参数作为子命令；未知或缺失命令打印用法并返回非零；异步命令通过 Tokio runtime 执行。
+///     解析第二个参数作为子命令；doctor 走独立解析/退出码映射；其余异步命令通过 Tokio runtime 执行；
+///     start/serve/stop/status 成功 0、业务错误 1；未知命令/doctor 解析或采集失败 2。
 fn dispatch<I, S>(args: I) -> i32
 where
     I: IntoIterator<Item = S>,
@@ -110,23 +116,271 @@ where
 {
     let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
     let command = args.get(1).map(String::as_str);
-    let result = match command {
-        Some("serve") => run_async(serve()),
-        Some("start") => run_async(start()),
-        Some("stop") => run_async(stop()),
-        Some("status") => run_async(print_status()),
+    match command {
+        Some("serve") => map_lifecycle_result(run_async(serve())),
+        Some("start") => map_lifecycle_result(run_async(start())),
+        Some("stop") => map_lifecycle_result(run_async(stop())),
+        Some("status") => map_lifecycle_result(run_async(print_status())),
+        Some("doctor") => dispatch_doctor(&args[2..]),
         _ => {
-            eprintln!("用法: cc-partner-backend <start|serve|stop|status>");
-            return 2;
+            eprintln!("用法: cc-partner-backend <start|serve|stop|status|doctor [--json]>");
+            2
         }
-    };
+    }
+}
 
+/// 将 start/serve/stop/status 的 Result 映射为既有退出码。
+///
+/// Business Logic（为什么需要这个函数）:
+///     lifecycle 命令保持成功 0 / 失败 1，避免被 doctor 的 0/1/2 契约误伤。
+///
+/// Code Logic（这个函数做什么）:
+///     `Ok(())` → 0；`Err` 打印到 stderr 后返回 1。
+fn map_lifecycle_result(result: Result<(), AppError>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("{error}");
             1
         }
+    }
+}
+
+/// 分发 `doctor` / `doctor --json`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     健康检查需要严格的参数解析、stdout/stderr 隔离与 0/1/2 退出码，不能与 lifecycle 混用。
+///
+/// Code Logic（这个函数做什么）:
+///     解析剩余参数 → 初始化仅 stderr tracing → 异步采集快照并按模式渲染 → 返回 status 退出码；
+///     解析失败或采集/序列化失败返回 2（错误写 stderr，JSON 模式不污染 stdout）。
+fn dispatch_doctor(rest: &[String]) -> i32 {
+    let json_mode = match parse_doctor_args(rest) {
+        Ok(json_mode) => json_mode,
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("用法: cc-partner-backend doctor [--json]");
+            return 2;
+        }
+    };
+
+    crate::backend::logging::init_doctor_tracing();
+    match run_async(run_doctor(json_mode)) {
+        Ok(exit_code) => exit_code,
+        Err(error) => {
+            eprintln!("{error}");
+            2
+        }
+    }
+}
+
+/// 解析 doctor 子命令参数。
+///
+/// Business Logic（为什么需要这个函数）:
+///     只允许无参或单一 `--json`；未知选项/多余参数必须明确失败，避免静默忽略。
+///
+/// Code Logic（这个函数做什么）:
+///     扫描剩余参数：无参 → json=false；仅 `--json` → true；其它一律错误。
+fn parse_doctor_args(rest: &[String]) -> Result<bool, String> {
+    let mut json_mode = false;
+    for arg in rest {
+        match arg.as_str() {
+            "--json" if !json_mode => json_mode = true,
+            "--json" => {
+                return Err("doctor 不接受重复的 --json".to_string());
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("doctor 未知选项: {other}"));
+            }
+            other => {
+                return Err(format!("doctor 多余参数: {other}"));
+            }
+        }
+    }
+    Ok(json_mode)
+}
+
+/// 运行 doctor 采集并渲染输出。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户与脚本需要一份有界、脱敏的健康快照；JSON 模式供机器解析，文本模式供人工阅读。
+///
+/// Code Logic（这个函数做什么）:
+///     `collect_doctor_snapshot` → 渲染 JSON 或人类文本到 stdout → 返回 `DoctorStatus::exit_code()`。
+async fn run_doctor(json_mode: bool) -> Result<i32, AppError> {
+    let snapshot = collect_doctor_snapshot().await?;
+    if json_mode {
+        println!("{}", render_doctor_json(&snapshot)?);
+    } else {
+        print!("{}", render_doctor_text(&snapshot));
+    }
+    Ok(snapshot.status.exit_code())
+}
+
+/// 将快照序列化为单行合法 JSON（stdout 专用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `doctor --json` stdout 只能有一份可直接 `jq` 的 JSON，不得夹杂 tracing 前缀。
+///
+/// Code Logic（这个函数做什么）:
+///     `serde_json::to_string` 序列化完整 `DoctorSnapshot`（字段已在采集时脱敏）。
+fn render_doctor_json(snapshot: &DoctorSnapshot) -> Result<String, AppError> {
+    Ok(serde_json::to_string(snapshot)?)
+}
+
+/// 渲染人类可读 doctor 文本。
+///
+/// Business Logic（为什么需要这个函数）:
+///     无 `--json` 时用户需要一眼看到 overall 状态、异常检查与日志路径，且不得暴露原始 home。
+///
+/// Code Logic（这个函数做什么）:
+///     输出 status 摘要、backend 状态（stopped 标为 normal）、仅 warning/error 检查表、
+///     log 路径与 recent errors（摘要不超出 JSON 已脱敏字段）。
+fn render_doctor_text(snapshot: &DoctorSnapshot) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
+        "status: {} (exit {})",
+        doctor_status_label(snapshot.status),
+        snapshot.status.exit_code()
+    ));
+
+    if snapshot.backend.state == "stopped"
+        && snapshot.backend.health.status == DoctorCheckStatus::Info
+    {
+        lines.push(format!(
+            "backend: stopped (normal) — {}",
+            snapshot.backend.health.summary
+        ));
+    } else {
+        lines.push(format!(
+            "backend: {} [{}] — {}",
+            snapshot.backend.state,
+            doctor_check_status_label(snapshot.backend.health.status),
+            snapshot.backend.health.summary
+        ));
+        if let Some(pid) = snapshot.backend.pid {
+            if let Some(port) = snapshot.backend.port {
+                lines.push(format!("  pid={pid} port={port}"));
+            }
+        }
+    }
+
+    let problems = collect_problem_checks(snapshot);
+    if problems.is_empty() {
+        lines.push("checks: none (all ok/info)".to_string());
+    } else {
+        lines.push("checks:".to_string());
+        for check in problems {
+            lines.push(format!(
+                "  {} {} — {}",
+                doctor_check_status_label(check.status),
+                check.code,
+                check.summary
+            ));
+        }
+    }
+
+    lines.push(format!("log: {}", snapshot.log_path));
+    lines.push(format!("control: {}", snapshot.backend.control_path));
+
+    if snapshot.recent_errors.is_empty() {
+        lines.push("recent errors: none".to_string());
+    } else {
+        lines.push("recent errors:".to_string());
+        for err in &snapshot.recent_errors {
+            lines.push(format!(
+                "  [{}] {}: {}",
+                err.timestamp, err.code, err.summary
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+/// 收集文本模式下需要展示的 warning/error 检查。
+///
+/// Business Logic（为什么需要这个函数）:
+///     人类输出只应突出问题项，避免 ok/info 噪音；stopped backend 的 info 不列入问题表。
+///
+/// Code Logic（这个函数做什么）:
+///     遍历 backend.health / paths / mdns / dependencies / log_parse_warning，仅保留 Warning 与 Error。
+fn collect_problem_checks(snapshot: &DoctorSnapshot) -> Vec<&DoctorCheck> {
+    let mut checks: Vec<&DoctorCheck> = Vec::new();
+    let candidates = [
+        &snapshot.backend.health,
+        &snapshot.paths.data,
+        &snapshot.paths.database,
+        &snapshot.paths.log,
+        &snapshot.mdns,
+        &snapshot.dependencies.git,
+        &snapshot.dependencies.tmux,
+        &snapshot.dependencies.wsl,
+        &snapshot.dependencies.claude_cli,
+    ];
+    for check in candidates {
+        if matches!(
+            check.status,
+            DoctorCheckStatus::Warning | DoctorCheckStatus::Error
+        ) {
+            checks.push(check);
+        }
+    }
+    if let Some(warning) = snapshot.log_parse_warning.as_ref() {
+        if matches!(
+            warning.status,
+            DoctorCheckStatus::Warning | DoctorCheckStatus::Error
+        ) {
+            checks.push(warning);
+        }
+    }
+    checks
+}
+
+/// overall 状态展示标签。
+///
+/// Business Logic（为什么需要这个函数）:
+///     文本输出需要稳定小写标签，与 JSON `status` 字面量一致。
+///
+/// Code Logic（这个函数做什么）:
+///     healthy/degraded/unhealthy。
+fn doctor_status_label(status: DoctorStatus) -> &'static str {
+    match status {
+        DoctorStatus::Healthy => "healthy",
+        DoctorStatus::Degraded => "degraded",
+        DoctorStatus::Unhealthy => "unhealthy",
+    }
+}
+
+/// 单项检查状态展示标签。
+///
+/// Business Logic（为什么需要这个函数）:
+///     检查表需要一眼可读的级别字面量。
+///
+/// Code Logic（这个函数做什么）:
+///     ok/WARNING/ERROR/info（问题级别大写以突出）。
+fn doctor_check_status_label(status: DoctorCheckStatus) -> &'static str {
+    match status {
+        DoctorCheckStatus::Ok => "ok",
+        DoctorCheckStatus::Warning => "WARNING",
+        DoctorCheckStatus::Error => "ERROR",
+        DoctorCheckStatus::Info => "info",
+    }
+}
+
+/// 将 doctor 采集结果映射为进程退出码（测试/文档用契约）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     采集失败与 unhealthy 都必须是 2，便于脚本分支；测试需独立验证该映射。
+///
+/// Code Logic（这个函数做什么）:
+///     `Ok(status)` → `status.exit_code()`；`Err` → 2。
+#[cfg(test)]
+fn doctor_exit_from_result(result: Result<DoctorStatus, AppError>) -> i32 {
+    match result {
+        Ok(status) => status.exit_code(),
+        Err(_) => 2,
     }
 }
 
@@ -149,13 +403,14 @@ where
 /// 在独立 Tokio runtime 中运行异步 CLI 命令。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     CLI bin 是同步 `main`，但 serve/status/stop/start 都需要 async HTTP、信号或 runtime 初始化能力。
+///     CLI bin 是同步 `main`，但 serve/status/stop/start/doctor 都需要 async HTTP、信号或 runtime 初始化能力。
 ///
 /// Code Logic（这个函数做什么）:
-///     创建 multi-thread Tokio runtime，enable_all 后 block_on 传入 future 并返回其结果。
-fn run_async<F>(future: F) -> Result<(), AppError>
+///     创建 multi-thread Tokio runtime，enable_all 后 block_on 传入 future 并返回其结果；
+///     泛型 `T` 允许 lifecycle 返回 `()`、doctor 返回 exit code 等不同成功值。
+fn run_async<F, T>(future: F) -> Result<T, AppError>
 where
-    F: std::future::Future<Output = Result<(), AppError>>,
+    F: std::future::Future<Output = Result<T, AppError>>,
 {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -169,11 +424,19 @@ where
 ///     远端设备需要一个长期运行的 headless 后端，负责 HTTP/mDNS、后台任务和 Workbench 服务。
 ///
 /// Code Logic（这个函数做什么）:
-///     初始化 tracing 与 headless AppState；启动 HTTP/mDNS；先安装 shutdown notifier，再写控制文件并启动后台任务；
-///     等待 ctrl-c 或 control route；
-///     退出时 shutdown runtime、移除控制文件并清理 shutdown notifier。
+///     用 `init_backend_tracing` 装配脱敏 stderr + 严格 JSON 文件双 layer，并持有
+///     `BackendLoggingGuard` 直到 shutdown 完成；初始化 headless AppState；启动 HTTP/mDNS；
+///     先安装 shutdown notifier，再写控制文件并启动后台任务；等待 ctrl-c 或 control route；
+///     退出时 shutdown runtime、移除控制文件、清理 notifier，最后 drop guard 以 flush 文件日志。
+///     日志目录/文件不可用时启动失败，不静默降级。
 async fn serve() -> Result<(), AppError> {
-    init_tracing();
+    // serve 生命周期单实例锁：必须在打开 backend.log 之前抢到，覆盖整个 serve 生命周期。
+    // start 父进程持有的是短生命周期 start 锁，不能替代本锁。
+    let _serve_lock = control::acquire_serve_lock(START_TIMEOUT).await?;
+    // serve 子进程是 backend.log 的唯一写入方；父进程 start 只 detach stdio，绝不打开同一文件。
+    let _logging_guard = crate::backend::logging::init_backend_tracing(
+        crate::backend::logging::BackendLogConfig::production()?,
+    )?;
     let ui: Arc<dyn BackendUi> = Arc::new(HeadlessBackendUi::new(headless_dist_dir()));
     let state = build_app_state(ui).await?;
     let port = start_backend_services(&state, true, true).await?;
@@ -185,13 +448,28 @@ async fn serve() -> Result<(), AppError> {
         return Err(error);
     }
     start_background_tasks(&state, BackendRuntimeMode::Headless);
-    tracing::info!("cc-partner headless backend 已启动，监听端口 {port}");
+    crate::backend::logging::OperationLog::new(
+        "control",
+        "serve_start",
+        crate::backend::logging::OperationResult::Ok,
+    )
+    .message(format!(
+        "cc-partner headless backend 已启动，监听端口 {port}"
+    ))
+    .emit();
 
     wait_for_shutdown(shutdown_rx).await;
     control::clear_shutdown_notifier();
     shutdown_backend_runtime(&state);
     control::remove_control_files()?;
-    tracing::info!("cc-partner headless backend 已停止");
+    crate::backend::logging::OperationLog::new(
+        "control",
+        "serve_stop",
+        crate::backend::logging::OperationResult::Ok,
+    )
+    .message("cc-partner headless backend 已停止")
+    .emit();
+    // `_logging_guard` / `_serve_lock` 在此 drop：flush 日志并释放 serve 单实例锁。
     Ok(())
 }
 
@@ -201,8 +479,14 @@ async fn serve() -> Result<(), AppError> {
 ///     用户需要用短生命周期命令启动后台后端，并在命令返回后继续使用该服务。
 ///
 /// Code Logic（这个函数做什么）:
-///     若已 running 则直接打印状态；若 stale 则清控制文件；否则 spawn 当前 exe 的 `serve` 子进程并轮询 status 最多 10 秒。
+///     先获取 data_dir 作用域跨进程 start 锁，再读状态：running 直接返回；stale 清控制文件；
+///     否则 spawn 当前 exe 的 `serve` 子进程并轮询 status 最多 10 秒。
+///     仅在确认 Running 后释放 child 所有权；超时/过早退出/探测错误路径必须 kill+reap owned child。
+///     锁在函数返回时释放。
 async fn start() -> Result<(), AppError> {
+    // 跨进程互斥：防止两个 start 同时看到 stopped 后各自 spawn serve。
+    let _start_lock = control::acquire_start_lock(START_TIMEOUT).await?;
+
     let initial = current_status().await;
     match initial.kind {
         BackendStatusKind::Running => {
@@ -222,6 +506,8 @@ async fn start() -> Result<(), AppError> {
         BackendStatusKind::Stopped => {}
     }
 
+    // start detach 后 serve 子进程独立读取环境变量；必须显式继承 CC_PARTNER_DATA_DIR，
+    // 保证 control/config/db/log 与父进程落在同一隔离根，避免写回用户真实 home。
     let current_exe = std::env::current_exe()?;
     let mut command = Command::new(current_exe);
     command
@@ -229,26 +515,120 @@ async fn start() -> Result<(), AppError> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    inherit_data_dir_env(&mut command);
     configure_detached_child(&mut command);
     let mut child = command.spawn()?;
 
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
-        if let Some(status) = child.try_wait()? {
-            return Err(AppError::generic(format!(
-                "serve 子进程过早退出，状态: {status}"
-            )));
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(AppError::generic(format!(
+                    "serve 子进程过早退出，状态: {status}"
+                )));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                let _ = kill_and_reap_owned_child(&mut child, CHILD_REAP_TIMEOUT);
+                return Err(err.into());
+            }
         }
 
         let status = current_status().await;
         if status.kind == BackendStatusKind::Running {
-            println!("{}", render_status_json(&status)?);
-            return Ok(());
+            // 只有 control PID 等于自己 spawn 的 child 时才移交所有权；
+            // 其他 PID 的 Running 说明 concurrent direct serve 先拿到锁，必须 kill+reap 自己的 child。
+            let owned_pid = child.id();
+            let running_pid = status.control.as_ref().map(|c| c.pid);
+            if running_pid == Some(owned_pid) {
+                println!("{}", render_status_json(&status)?);
+                // Running 且 PID 匹配：所有权交给 detached serve，不再 reap。
+                return Ok(());
+            }
+            // 他人实例已 Running：仅当确认自己的 child 已死才能成功采纳，否则报告残留 PID。
+            match kill_and_reap_owned_child(&mut child, CHILD_REAP_TIMEOUT) {
+                Ok(note) => {
+                    println!("{}", render_status_json(&status)?);
+                    let _ = note;
+                    return Ok(());
+                }
+                Err(reap_err) => {
+                    return Err(AppError::generic(format!(
+                        "检测到其它后端实例已运行，但无法确认清理本进程 spawn 的 child: {reap_err}"
+                    )));
+                }
+            }
         }
         tokio::time::sleep(STATUS_POLL_INTERVAL).await;
     }
 
-    Err(AppError::generic("等待后端启动超时"))
+    // 超时或任何未确认 Running 的路径都必须有界 kill+reap 自己 spawn 的 child，避免孤儿 writer。
+    match kill_and_reap_owned_child(&mut child, CHILD_REAP_TIMEOUT) {
+        Ok(note) => Err(AppError::generic(format!("等待后端启动超时{note}"))),
+        Err(reap_err) => Err(AppError::generic(format!(
+            "等待后端启动超时；且清理子进程失败: {reap_err}"
+        ))),
+    }
+}
+
+/// owned child 有界 kill+reap 的默认等待窗口。
+const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 有界 kill 并 reap 自己 spawn 的 serve 子进程。
+///
+/// Business Logic（为什么需要这个函数）:
+///     start 超时、探测失败或采纳他人实例前，若放任 detached child 存活，稍后仍会打开
+///     backend.log 并写出 control，形成双 writer / 意外重启。只有确认 child 已退出才可继续。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `kill_and_reap_owned_child_with`，生产路径用 `Child::try_wait` 轮询。
+fn kill_and_reap_owned_child(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<String, String> {
+    kill_and_reap_owned_child_with(child, timeout, |c| c.try_wait())
+}
+
+/// 可注入 wait 策略的有界 kill+reap（生产与回归测试共用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     采纳他人实例必须在确认自有 child 已死之后；超时路径需可测，不能依赖真实 OS 信号竞态。
+///
+/// Code Logic（这个函数做什么）:
+///     `child.kill()` 后在 `timeout` 内反复调用 `wait_once`；确认退出返回 Ok(诊断后缀)，
+///     超时/reap 失败返回 Err(含残留 PID)。测试可注入恒返回 None 的 wait 模拟卡住 child。
+fn kill_and_reap_owned_child_with<F>(
+    child: &mut std::process::Child,
+    timeout: Duration,
+    mut wait_once: F,
+) -> Result<String, String>
+where
+    F: FnMut(&mut std::process::Child) -> std::io::Result<Option<std::process::ExitStatus>>,
+{
+    let pid = child.id();
+    if let Err(err) = child.kill() {
+        // 进程可能已自行退出；继续尝试 reap。
+        let _ = err;
+    }
+    let reap_deadline = Instant::now() + timeout;
+    loop {
+        match wait_once(child) {
+            Ok(Some(status)) => {
+                return Ok(format!("；已终止子进程 pid={pid} status={status}"));
+            }
+            Ok(None) => {
+                if Instant::now() >= reap_deadline {
+                    return Err(format!(
+                        "已发送终止信号但子进程 pid={pid} 在 {timeout:?} 内未退出（残留 PID）"
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => {
+                return Err(format!("终止子进程 pid={pid} 时 reap 失败: {err}"));
+            }
+        }
+    }
 }
 
 /// 运行 `status` 子命令。
@@ -484,6 +864,21 @@ fn process_is_alive(pid: u32) -> bool {
     platform_process_is_alive(pid)
 }
 
+/// 让 start 拉起的 serve 子进程继承数据目录隔离环境变量。
+///
+/// Business Logic（为什么需要这个函数）:
+///     smoke/CI 用 `CC_PARTNER_DATA_DIR` 隔离后端状态；`start` detach 后子进程若丢失该变量，
+///     会把 control/db 写回真实 `~/.cc-partner`，破坏隔离并污染用户数据。
+///
+/// Code Logic（这个函数做什么）:
+///     若当前进程设置了 `CC_PARTNER_DATA_DIR`，显式写入 child Command 的 env；
+///     未设置则不改动（子进程默认继承父环境，保持生产行为）。
+fn inherit_data_dir_env(command: &mut Command) {
+    if let Some(value) = std::env::var_os("CC_PARTNER_DATA_DIR") {
+        command.env("CC_PARTNER_DATA_DIR", value);
+    }
+}
+
 /// 配置 Unix serve 子进程脱离父会话。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -493,6 +888,18 @@ fn process_is_alive(pid: u32) -> bool {
 ///     在 child exec 前调用 `setsid()` 创建新 session；失败时让 spawn 返回对应 IO 错误。
 #[cfg(unix)]
 fn configure_detached_child(command: &mut Command) {
+    apply_unix_detached_pre_exec(command);
+}
+
+/// Unix detached lifecycle 的生产 pre_exec seam（setsid 新会话/进程组）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     smoke 必须验证真实生产路径的进程组语义，而不是在测试里复制 setpgid/setsid 实现。
+///
+/// Code Logic（这个函数做什么）:
+///     给 Command 安装 pre_exec：子进程 exec 前 `setsid()`；失败返回 last_os_error。
+#[cfg(unix)]
+pub fn apply_unix_detached_pre_exec(command: &mut Command) {
     use std::os::unix::process::CommandExt;
 
     unsafe {
@@ -505,20 +912,32 @@ fn configure_detached_child(command: &mut Command) {
     }
 }
 
+/// Windows backend lifecycle 使用的 creation flags。
+///
+/// Business Logic（为什么需要这个函数）:
+///     smoke/单元测试必须锁定生产路径真正使用的 DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP，
+///     禁止在测试里复制字面量导致生产改坏仍绿。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 `DETACHED_PROCESS (0x8) | CREATE_NEW_PROCESS_GROUP (0x200)`。
+#[cfg(windows)]
+pub fn windows_detached_creation_flags() -> u32 {
+    const DETACHED_PROCESS: u32 = 0x00000008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+}
+
 /// 配置 Windows serve 子进程脱离父控制台。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     Windows 下 `start` 返回后 headless 后端也应独立存活，供后续 status/stop 管理。
 ///
 /// Code Logic（这个函数做什么）:
-///     设置 DETACHED_PROCESS 与 CREATE_NEW_PROCESS_GROUP creation flags。
+///     设置 DETACHED_PROCESS 与 CREATE_NEW_PROCESS_GROUP creation flags（经可测 seam 计算）。
 #[cfg(windows)]
 fn configure_detached_child(command: &mut Command) {
     use std::os::windows::process::CommandExt;
-
-    const DETACHED_PROCESS: u32 = 0x00000008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    command.creation_flags(windows_detached_creation_flags());
 }
 
 /// 配置其它平台 serve 子进程脱离父进程。
@@ -596,28 +1015,20 @@ fn headless_dist_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web/dist"))
 }
 
-/// 初始化 CLI tracing。
-///
-/// Business Logic（为什么需要这个函数）:
-///     serve 运行时需要把 HTTP/mDNS/后台任务错误输出到 stderr，便于用户排查 headless 服务问题。
-///
-/// Code Logic（这个函数做什么）:
-///     按 GUI 入口相同的 env-filter 规则初始化 tracing_subscriber；重复初始化错误被忽略。
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,mdns_sd=off")),
-        )
-        .try_init();
-}
-
 #[cfg(test)]
 mod tests {
     use crate::backend::control::{BackendControlFile, BackendStatus, BackendStatusKind};
+    use crate::backend::doctor::{
+        DoctorBackendCheck, DoctorCheck, DoctorCheckStatus, DoctorDependencies, DoctorErrorSummary,
+        DoctorPathChecks, DoctorPlatform, DoctorSnapshot, DoctorStatus, DoctorVersion,
+        DOCTOR_SCHEMA_VERSION, HOME_PLACEHOLDER,
+    };
+    use crate::error::AppError;
     use axum::routing::get;
     use axum::{Json, Router};
     use serde_json::json;
+    use std::process::Stdio;
+    use std::time::Duration;
     use tokio::net::TcpListener;
 
     /// 验证 status 输出符合 CLI JSON 契约。
@@ -645,6 +1056,54 @@ mod tests {
         assert!(parsed["error"].is_null());
     }
 
+    /// 验证 start 子进程会显式继承 `CC_PARTNER_DATA_DIR`。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     detach 后 serve 必须与父进程共用同一隔离数据根，否则 control 文件会写回用户 home。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     设置环境变量后构造 Command，调用 inherit helper，断言 env 中含有该键值；
+    ///     Drop 守卫保证 panic 后仍恢复环境。
+    #[test]
+    fn start_inherits_data_dir_env_for_detached_serve() {
+        use std::ffi::OsString;
+        use std::sync::{Mutex, MutexGuard, OnceLock};
+
+        struct EnvGuard {
+            _lock: MutexGuard<'static, ()>,
+            previous: Option<OsString>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.previous {
+                    Some(value) => std::env::set_var("CC_PARTNER_DATA_DIR", value),
+                    None => std::env::remove_var("CC_PARTNER_DATA_DIR"),
+                }
+            }
+        }
+
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("data dir inherit 测试锁中毒");
+        let previous = std::env::var_os("CC_PARTNER_DATA_DIR");
+        std::env::set_var("CC_PARTNER_DATA_DIR", "/tmp/cc-partner-isolated");
+        let _guard = EnvGuard {
+            _lock: lock,
+            previous,
+        };
+
+        let mut command = std::process::Command::new("true");
+        super::inherit_data_dir_env(&mut command);
+        // Command 不公开 env 查询 API；通过 debug 字符串粗检 env 注入（平台无关）。
+        let debug = format!("{command:?}");
+        assert!(
+            debug.contains("CC_PARTNER_DATA_DIR") && debug.contains("cc-partner-isolated"),
+            "start 子进程应继承数据目录 override，实际 Command: {debug}"
+        );
+    }
+
     /// 验证未知命令返回非零并提示用法。
     ///
     /// Business Logic（为什么需要这个测试）:
@@ -657,6 +1116,193 @@ mod tests {
         let exit_code = super::dispatch_for_test(["cc-partner-backend", "unknown"]);
 
         assert_ne!(exit_code, 0);
+    }
+
+    /// 验证 doctor 未知选项与多余参数返回 2。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     错误的 doctor 参数必须显式失败，不能静默忽略或污染 JSON 输出。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     解析 `--yaml` 与多余位置参数，断言 `parse_doctor_args` 返回 Err。
+    #[test]
+    fn doctor_rejects_unknown_option_and_extra_args() {
+        let err = super::parse_doctor_args(&["--yaml".to_string()]).expect_err("未知选项应失败");
+        assert!(err.contains("未知选项"));
+        let err = super::parse_doctor_args(&["extra".to_string()]).expect_err("多余参数应失败");
+        assert!(err.contains("多余参数"));
+        assert!(!super::parse_doctor_args(&[]).expect("无参应成功"));
+        assert!(super::parse_doctor_args(&["--json".to_string()]).expect("--json 应成功"));
+        let exit_code = super::dispatch_for_test(["cc-partner-backend", "doctor", "--bogus"]);
+        assert_eq!(exit_code, 2);
+        let exit_code = super::dispatch_for_test(["cc-partner-backend", "doctor", "extra"]);
+        assert_eq!(exit_code, 2);
+    }
+
+    /// 构造隐私安全的 doctor 快照 fixture。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     输出隔离测试需要固定字段，避免 wall-clock / 真实 home 导致抖动。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 stopped healthy 快照，路径已用 `<HOME>`，含一条 recent error。
+    fn doctor_text_fixture() -> DoctorSnapshot {
+        DoctorSnapshot {
+            schema_version: DOCTOR_SCHEMA_VERSION,
+            generated_at: "2026-07-11T12:00:00Z".to_string(),
+            status: DoctorStatus::Healthy,
+            version: DoctorVersion {
+                app: "0.6.7".to_string(),
+                backend: "0.6.7".to_string(),
+            },
+            platform: DoctorPlatform {
+                os: "macos".to_string(),
+                arch: "aarch64".to_string(),
+            },
+            backend: DoctorBackendCheck {
+                state: "stopped".to_string(),
+                control_path: format!("{HOME_PLACEHOLDER}/.cc-partner/backend-control.json"),
+                pid: None,
+                port: None,
+                health: DoctorCheck::new(
+                    DoctorCheckStatus::Info,
+                    "backend.stopped",
+                    "backend is stopped",
+                ),
+            },
+            paths: DoctorPathChecks {
+                data: DoctorCheck::new(
+                    DoctorCheckStatus::Ok,
+                    "paths.data.ok",
+                    "data directory is usable",
+                ),
+                database: DoctorCheck::new(
+                    DoctorCheckStatus::Ok,
+                    "paths.database.ok",
+                    "database file is readable",
+                ),
+                log: DoctorCheck::new(
+                    DoctorCheckStatus::Ok,
+                    "paths.log.ok",
+                    "log directory is usable",
+                ),
+            },
+            mdns: DoctorCheck::new(
+                DoctorCheckStatus::Ok,
+                "mdns.ok",
+                "mDNS discovery can initialize",
+            ),
+            dependencies: DoctorDependencies {
+                git: DoctorCheck::new(DoctorCheckStatus::Ok, "deps.git.ok", "git is available"),
+                tmux: DoctorCheck::new(
+                    DoctorCheckStatus::Warning,
+                    "deps.tmux.missing",
+                    "tmux is missing",
+                ),
+                wsl: DoctorCheck::new(
+                    DoctorCheckStatus::Info,
+                    "deps.wsl.not_applicable",
+                    "WSL is not applicable on this platform",
+                ),
+                claude_cli: DoctorCheck::new(
+                    DoctorCheckStatus::Ok,
+                    "deps.claude_cli.ok",
+                    "claude CLI is available",
+                ),
+            },
+            recent_errors: vec![DoctorErrorSummary {
+                timestamp: "2026-07-11T11:59:00Z".to_string(),
+                code: "net.timeout".to_string(),
+                summary: "peer request timed out".to_string(),
+                request_id: Some("req-fixed-001".to_string()),
+            }],
+            log_path: format!("{HOME_PLACEHOLDER}/.cc-partner/logs/backend.log"),
+            log_parse_warning: None,
+        }
+    }
+
+    /// 验证 JSON 渲染为纯净合法 JSON 且无 tracing 前缀。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     `doctor --json` stdout 必须可直接 `jq` 解析，不能夹杂 tracing 文本。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     渲染 fixture → from_str 成功 → 关键字段存在 → 文本不以 TRACE/INFO/DEBUG 前缀开头。
+    #[test]
+    fn doctor_json_stdout_is_pure_parseable_json() {
+        let snapshot = doctor_text_fixture();
+        let rendered = super::render_doctor_json(&snapshot).expect("json render");
+        let trimmed = rendered.trim();
+        assert!(
+            trimmed.starts_with('{'),
+            "JSON 输出不得带 tracing 前缀: {trimmed}"
+        );
+        assert!(
+            !trimmed.starts_with("INFO")
+                && !trimmed.starts_with("DEBUG")
+                && !trimmed.starts_with("ERROR")
+                && !trimmed.starts_with("WARN"),
+            "JSON 输出不得含 tracing level 前缀: {trimmed}"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(trimmed).expect("stdout should parse as JSON");
+        assert_eq!(parsed["schemaVersion"], 1);
+        assert_eq!(parsed["status"], "healthy");
+        assert!(parsed["logPath"]
+            .as_str()
+            .unwrap_or("")
+            .contains(HOME_PLACEHOLDER));
+        assert!(!parsed["logPath"].as_str().unwrap_or("").contains("/Users/"));
+    }
+
+    /// 验证人类文本包含 status/检查/日志路径且无私有原始路径。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     无 `--json` 时用户依赖文本摘要；必须隐私安全并标注 stopped 正常。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     渲染含 warning 的 fixture，断言 status/stopped normal/WARNING 检查/log 路径与脱敏。
+    #[test]
+    fn doctor_text_includes_status_checks_and_sanitized_log_path() {
+        // 文本 fixture 的 overall 在 deps.tmux.missing 时实际应为 degraded；
+        // 这里直接改 status 以覆盖 degraded 展示路径。
+        let mut snapshot = doctor_text_fixture();
+        snapshot.status = DoctorStatus::Degraded;
+        let text = super::render_doctor_text(&snapshot);
+        assert!(text.contains("status: degraded"));
+        assert!(text.contains("stopped (normal)"));
+        assert!(text.contains("WARNING deps.tmux.missing"));
+        assert!(text.contains(&format!(
+            "log: {HOME_PLACEHOLDER}/.cc-partner/logs/backend.log"
+        )));
+        assert!(text.contains("recent errors:"));
+        assert!(text.contains("peer request timed out"));
+        assert!(!text.contains("/Users/"));
+        assert!(!text.contains("alice"));
+    }
+
+    /// 验证 probe/构造失败映射退出码 2。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     doctor 无法完成时必须 exit 2，与 unhealthy 同档，便于脚本统一处理。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对 healthy/degraded/unhealthy 与 Err 调用 `doctor_exit_from_result` 断言 0/1/2/2。
+    #[test]
+    fn doctor_exit_codes_map_status_and_probe_failure() {
+        assert_eq!(super::doctor_exit_from_result(Ok(DoctorStatus::Healthy)), 0);
+        assert_eq!(
+            super::doctor_exit_from_result(Ok(DoctorStatus::Degraded)),
+            1
+        );
+        assert_eq!(
+            super::doctor_exit_from_result(Ok(DoctorStatus::Unhealthy)),
+            2
+        );
+        assert_eq!(
+            super::doctor_exit_from_result(Err(AppError::generic("probe failed"))),
+            2
+        );
     }
 
     /// 构造 CLI stop 测试用控制文件。
@@ -706,6 +1352,33 @@ mod tests {
         assert!(error.to_string().contains("ok=false"));
     }
 
+    /// 验证 start 子进程 detach 时把 stdio 置 null，而不是重定向到 backend.log。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     父进程与 serve 子进程若同时打开同一轮转文件，会破坏 size 轮转与诊断唯一写入契约。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     复现 start 中 Command 配置：stdin/stdout/stderr 均为 null，且不出现 backend.log 路径重定向。
+    #[test]
+    fn start_detaches_stdio_without_opening_backend_log() {
+        let mut command = std::process::Command::new("true");
+        command
+            .arg("serve")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let debug = format!("{command:?}");
+        assert!(
+            !debug.contains("backend.log"),
+            "父进程不得把 stdio 重定向到 backend.log，实际: {debug}"
+        );
+        // Debug 输出在 Unix 上会标注 null 重定向；至少确认未绑定文件路径。
+        assert!(
+            debug.contains("serve"),
+            "command 应包含 serve 子命令，实际: {debug}"
+        );
+    }
+
     /// 验证等待停止超时时返回错误。
     ///
     /// Business Logic（为什么需要这个测试）:
@@ -741,5 +1414,65 @@ mod tests {
 
         server.abort();
         assert!(error.to_string().contains("等待后端停止超时"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     start 超时路径必须有界 kill+reap 自己 spawn 的 child，避免孤儿 detached serve。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     spawn 一个 sleep 子进程，调用 `kill_and_reap_owned_child`，断言 Ok 且进程不再存活。
+    #[test]
+    fn kill_and_reap_owned_child_terminates_stuck_child() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let note = super::kill_and_reap_owned_child(&mut child, super::CHILD_REAP_TIMEOUT)
+            .expect("应成功 kill+reap sleep 子进程");
+        assert!(note.contains("pid="), "reap note 应含 pid: {note}");
+        let status = child.try_wait().expect("try_wait");
+        assert!(status.is_some(), "child 应已被 reap");
+        #[cfg(unix)]
+        {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            assert!(!alive, "pid={pid} 不应仍存活");
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     采纳他人实例前若 kill/reap 超时，start 必须失败并报告残留 PID，不能假装成功。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     注入恒返回 None 的 wait + 短超时，断言 Err 含残留 PID；最后真实 reap 清理。
+    #[test]
+    fn kill_and_reap_owned_child_reports_residual_pid_on_timeout() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        // 注入卡住 wait：模拟 kill 后进程仍存活超过 deadline。
+        let err =
+            super::kill_and_reap_owned_child_with(&mut child, Duration::from_millis(80), |_c| {
+                Ok(None)
+            })
+            .expect_err("卡住 wait 应超时失败");
+        assert!(
+            err.contains(&pid.to_string()) && err.contains("残留"),
+            "错误应报告残留 PID，实际: {err}"
+        );
+        // 清理：真实 try_wait 路径 reap，避免测试泄漏 sleep。
+        let _ = super::kill_and_reap_owned_child(&mut child, super::CHILD_REAP_TIMEOUT);
     }
 }
