@@ -20,5 +20,13 @@
   "contentPlaceholder": "Prompt content…",
   "contentAriaLabel": "Prompt content",
   "tagInputPlaceholder": "Type a tag and press Enter to add",
-  "skeletonAriaLabel": "Loading prompts"
+  "skeletonAriaLabel": "Loading prompts",
+  "createFailed": "Failed to create: {{error}}",
+  "createFailedGeneric": "Failed to create prompt",
+  "updateFailed": "Failed to update: {{error}}",
+  "updateFailedGeneric": "Failed to update prompt",
+  "deleteFailed": "Failed to delete: {{error}}",
+  "deleteFailedGeneric": "Failed to delete prompt",
+  "syncFailed": "Failed to sync: {{error}}",
+  "syncFailedGeneric": "Failed to sync prompts"
 }
