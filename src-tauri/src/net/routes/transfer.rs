@@ -36,8 +36,13 @@ pub async fn transfer_init(
 
 /// POST /api/transfer/chunk/:id：接收一个数据块，写入临时文件指定 offset。
 ///
-/// Code Logic: 从 `X-Chunk-Offset` header 取 offset（缺省 0），body 为原始 bytes；
-///     调 receiver::handle_chunk 写入并在收齐时自动 finalize；事件通过 AppState 后端 UI adapter 发布。
+/// Business Logic（为什么需要这个函数）:
+///     对端按协议分块上传文件；单块不得超过 CHUNK_SIZE，避免恶意大 body 耗尽磁盘/内存。
+///
+/// Code Logic（这个函数做什么）:
+///     从 `X-Chunk-Offset` header 取 offset（缺省 0），body 为原始 bytes；
+///     路由层另有 route-local DefaultBodyLimit(CHUNK_SIZE)；再调 receiver::handle_chunk
+///     （二次校验 + 写入 + 收齐时 finalize）；事件通过 AppState 后端 UI adapter 发布。
 pub async fn transfer_chunk(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,

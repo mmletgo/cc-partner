@@ -1341,7 +1341,7 @@ mod tests {
         let req = Request::builder()
             .method("POST")
             .uri("http://127.0.0.1/proxy")
-            .body(Body::from(vec![b'x'; 32 * 1024 * 1024 + 1]))
+            .body(Body::from(vec![b'x'; PROXY_BODY_LIMIT_BYTES + 1]))
             .unwrap();
 
         let error = proxy_http_request_for_session(
@@ -1355,6 +1355,61 @@ mod tests {
 
         assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(*upstream_hits.lock().unwrap(), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     边界回归：恰好等于 PROXY_BODY_LIMIT_BYTES 的 body 必须仍被接受并转发，
+    ///     防止 limit 实现写成 `<` 导致合法 32 MiB 请求被误杀。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造恰好 32 MiB 的 POST body，断言 proxy 成功且 upstream 收到 1 次请求。
+    #[tokio::test]
+    async fn http_proxy_accepts_exact_body_limit_and_forwards() {
+        let upstream_hits = std::sync::Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/upload",
+                any(
+                    |State(hits): State<std::sync::Arc<Mutex<usize>>>| async move {
+                        *hits.lock().unwrap() += 1;
+                        "ok"
+                    },
+                ),
+            )
+            .with_state(upstream_hits.clone());
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        let preview = registry.create_local(
+            "project-a".to_string(),
+            None,
+            format!("http://{addr}/"),
+            62116,
+        );
+        let session = registry.lookup(&preview.preview_id).unwrap();
+        let req = Request::builder()
+            .method("POST")
+            .uri("http://127.0.0.1/proxy")
+            .body(Body::from(vec![b'x'; PROXY_BODY_LIMIT_BYTES]))
+            .unwrap();
+
+        let response = proxy_http_request_for_session(
+            session,
+            "upload".to_string(),
+            req,
+            DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
+        )
+        .await
+        .expect("exact PROXY_BODY_LIMIT_BYTES body must be accepted");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(*upstream_hits.lock().unwrap(), 1);
     }
 
     /// Business Logic（为什么需要这个测试）:
