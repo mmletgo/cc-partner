@@ -103,13 +103,15 @@ fn config_atomic_store_recovers_from_injected_stage_failures() {
     // DirectorySync 在原子替换之后：目标文件可能已是新内容，但必须仍是合法 JSON，
     // 且后续健康保存可收敛。
     {
-        let io = FaultInjectingConfigIo::fail_once(Arc::new(StdConfigIo), ConfigIoStage::DirectorySync);
+        let io =
+            FaultInjectingConfigIo::fail_once(Arc::new(StdConfigIo), ConfigIoStage::DirectorySync);
         let fault_store = FsConfigStore::new(config_path.clone(), Arc::new(io));
         let mut candidate = initial.clone();
         candidate.device_name = "after-rename".into();
         let _ = fault_store.save_atomic(&candidate);
         let text = fs::read_to_string(&config_path).unwrap();
-        let parsed: AppConfig = serde_json::from_str(&text).expect("JSON still valid after dir-sync fault");
+        let parsed: AppConfig =
+            serde_json::from_str(&text).expect("JSON still valid after dir-sync fault");
         assert!(parsed.device_name == "smoke" || parsed.device_name == "after-rename");
     }
 
@@ -241,20 +243,26 @@ fn updater_generation_cancel_smoke() {
 /// Health 极端输入被拒绝。
 #[test]
 fn health_extreme_inputs_rejected() {
-    let mut cfg = HealthConfig::default();
-    cfg.work_window_seconds = i64::MAX;
+    let cfg = HealthConfig {
+        work_window_seconds: i64::MAX,
+        ..HealthConfig::default()
+    };
     assert!(validate_health_config(&cfg).is_err());
     assert!(validate_health_config_with_field(&cfg)
         .unwrap_err()
         .starts_with("health."));
 
-    cfg = HealthConfig::default();
-    cfg.break_seconds = 0;
+    let cfg = HealthConfig {
+        break_seconds: 0,
+        ..HealthConfig::default()
+    };
     assert!(validate_health_config(&cfg).is_err());
 
-    cfg = HealthConfig::default();
-    cfg.dnd_start = Some("7:00".into());
-    cfg.dnd_end = Some("08:00".into());
+    let cfg = HealthConfig {
+        dnd_start: Some("7:00".into()),
+        dnd_end: Some("08:00".into()),
+        ..HealthConfig::default()
+    };
     assert!(validate_health_config(&cfg).is_err());
 
     assert!(checked_future_timestamp(1_000, 0).is_err());

@@ -11,12 +11,13 @@
 //!     - update_config: 经 `ConfigRuntime` 事务路径应用 patch；成功提交后再热更新截图快捷键。
 //!     - get_version: 返回 {version, buildDate}，version 取 CARGO_PKG_VERSION。
 
-use crate::config::{default_preference_values, normalize_prompt_optimizer_fill_language, AppConfig};
+use crate::config::{
+    default_preference_values, normalize_prompt_optimizer_fill_language, AppConfig,
+};
 use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
 use crate::error::AppError;
 use crate::hotkey::{
-    compensate_screenshot_hotkey_os, replace_screenshot_hotkey_os,
-    TauriGlobalShortcutBackend,
+    compensate_screenshot_hotkey_os, replace_screenshot_hotkey_os, TauriGlobalShortcutBackend,
 };
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
@@ -175,11 +176,7 @@ pub async fn update_config(
         Err(e) => {
             if need_os_compensate {
                 if let Some(ref new_hotkey) = screenshot_hotkey {
-                    if let Err(rb) =
-                        compensate_screenshot_hotkey_os(&mut backend, &old_hotkey, new_hotkey)
-                    {
-                        return Err(rb);
-                    }
+                    compensate_screenshot_hotkey_os(&mut backend, &old_hotkey, new_hotkey)?;
                 }
             }
             Err(e)
@@ -188,7 +185,6 @@ pub async fn update_config(
 }
 
 /// 版本信息查询。
-
 ///
 /// Business Logic: 前端关于页/设置页展示当前版本号。
 /// Code Logic: version 取编译期 CARGO_PKG_VERSION；buildDate 暂返回 null（M8 接入打包日期后补）。

@@ -263,7 +263,8 @@ pub async fn download_update(
             }
             Err(e) => {
                 let cancelled = cancel_for_check.is_cancelled();
-                if runtime.finish_download(generation, Err(format!("下载失败: {e}")), cancelled) {
+                if runtime.finish_download(generation, Err(format!("下载失败: {e}")), cancelled)
+                {
                     if cancelled {
                         tracing::info!("更新下载已取消: {}", url_for_event);
                     } else {
@@ -327,9 +328,10 @@ pub async fn install_update(
     let bytes = lease.bytes;
 
     tracing::info!("开始安装更新并重启...");
-    let install_result = tauri::async_runtime::spawn_blocking(move || update.install(bytes.as_ref()))
-        .await
-        .map_err(|e| AppError::generic(format!("安装任务执行失败: {e}")))?;
+    let install_result =
+        tauri::async_runtime::spawn_blocking(move || update.install(bytes.as_ref()))
+            .await
+            .map_err(|e| AppError::generic(format!("安装任务执行失败: {e}")))?;
 
     match install_result {
         Ok(()) => {
@@ -364,7 +366,6 @@ pub async fn install_update(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     //! 命令编排竞态测试：用 UpdateRuntime 公共 API + 测试 helper 模拟
@@ -373,8 +374,8 @@ mod tests {
     use super::*;
     use crate::error::AppError;
     use crate::updater::runtime::{InstallOutcome, UpdatePhase, UpdateRuntime};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     /// Business Logic: 测试需要把状态机推进到下载/安装等相位，无需真实 Update。
     /// Code Logic: 直接写 phase/generation/bytes/status，与 runtime 测试 helper 对齐。
@@ -434,7 +435,7 @@ mod tests {
         assert!(!rt.finish_download(3, Err("net".into()), true));
         assert_eq!(rt.status().status, UpdateStatusValue::Cancelled);
         assert!(!rt.has_bytes());
-        assert!((rt.status().progress - 0.0).abs() < f64::EPSILON || true);
+        assert!((rt.status().progress - 0.0).abs() < f64::EPSILON);
     }
 
     /// 重复 begin_download 在 Downloading 时 Conflict。

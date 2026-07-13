@@ -223,7 +223,7 @@ where
         tracing::error!("无法解析截图快捷键（pynput={}），跳过注册", hotkey_pynput);
         return false;
     };
-    let _ = app.global_shortcut().unregister(shortcut.clone());
+    let _ = app.global_shortcut().unregister(shortcut);
     match app.global_shortcut().on_shortcut(shortcut, handler) {
         Ok(()) => {
             tracing::info!("已注册截图快捷键: {}", hotkey_pynput);
