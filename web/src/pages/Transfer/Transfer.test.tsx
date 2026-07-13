@@ -7,7 +7,8 @@
  *
  * Code Logic（这个测试做什么）:
  *   mock transfer/devices API、path adapter 与 useVisibilityPolling；
- *   覆盖选文件、多文件 drop、发送成功/失败、取消 busy/error、刷新失败保列表。
+ *   覆盖选文件、多文件 drop、发送成功/失败、双击 send/cancel 只调一次 API、
+ *   取消 busy/error、刷新失败保列表。
  */
 
 // @vitest-environment jsdom
@@ -331,6 +332,48 @@ describe('Transfer page journey', () => {
       const sendBtn = screen.getByRole('button', { name: /发送「keep-me\.txt」/ });
       expect(sendBtn.hasAttribute('disabled')).toBe(false);
       expect(screen.getByText('已选择：keep-me.txt')).toBeTruthy();
+    });
+  });
+
+  test('double-click send invokes send API once', async () => {
+    const windowsPath = 'C:\\Users\\hans\\Desktop\\dbl-send.txt';
+    pickTransferFileMock.mockResolvedValueOnce(windowsPath);
+    let resolveSend: ((value: unknown) => void) | undefined;
+    sendTransferMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+
+    renderTransfer();
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '浏览…' })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '浏览…' }));
+    await waitFor(() => {
+      const sendBtn = screen.getByRole('button', { name: /发送「dbl-send\.txt」/ });
+      expect(sendBtn.hasAttribute('disabled')).toBe(false);
+    });
+
+    const sendBtn = screen.getByRole('button', { name: /发送「dbl-send\.txt」/ });
+    fireEvent.click(sendBtn);
+    fireEvent.click(sendBtn);
+
+    await waitFor(() => {
+      expect(sendTransferMock).toHaveBeenCalledTimes(1);
+      expect(sendTransferMock).toHaveBeenCalledWith('device-a', windowsPath);
+    });
+
+    await act(async () => {
+      resolveSend?.({
+        accepted: true,
+        deviceId: 'device-a',
+        filePath: windowsPath,
+        id: 'transfer-dbl',
+      });
     });
   });
 

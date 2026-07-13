@@ -8,8 +8,8 @@
  * Code Logic（这个页面做什么）:
  *   - 设备 5s / 任务 3s visibility-aware polling；刷新失败保留已有数组
  *   - 选中文件存 {path,name}；Enter/Space/点击走 pickTransferFile；native drop 只取首路径
- *   - handleSendClick await transferApi.send 后 await runTasksNow；track sending/sendError
- *   - pending/transferring 仅传 onCancel；cancellingIds + taskActionErrors 行级反馈
+ *   - handleSendClick 用 sendingRef 同步门闩防双击，await transferApi.send 后 force runTasksNow
+ *   - pending/transferring 仅传 onCancel；cancellingIdsRef 同步门闩 + taskActionErrors 行级反馈
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -98,6 +98,8 @@ export function Transfer() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [cancellingIds, setCancellingIds] = useState<ReadonlySet<string>>(() => new Set());
   const [taskActionErrors, setTaskActionErrors] = useState<Record<string, string>>({});
+  /** 同步门闩：双击 send 在 re-render 前也不可重入（仅 React state 不够） */
+  const sendingRef = useRef(false);
   /** 同步门闩：双击 cancel 在 re-render 前也不可重入 */
   const cancellingIdsRef = useRef<Set<string>>(new Set());
   /** 组件挂载守卫：异步 loader 写 state 前检查 */
@@ -260,13 +262,16 @@ export function Transfer() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户确认发送后必须真实调用 send_transfer，成功后强制刷新任务列表（不得只 join 旧 poll）。
+   *   用户确认发送后必须真实调用 send_transfer，成功后强制刷新任务列表（不得只 join 旧 poll）；
+   *   双击不得在 re-render 前发出第二次 send。
    *
    * Code Logic（这个函数做什么）:
-   *   校验 selection/device；await transferApi.send；成功清空选择并 runTasksNow({force:true})；失败保留选择。
+   *   用 sendingRef 同步门闩 + sending 状态；await transferApi.send；
+   *   成功清空选择并 runTasksNow({force:true})；失败保留选择；finally 释放门闩。
    */
   const handleSendClick = useCallback(async () => {
-    if (!selectedFile || !selectedDeviceId || sending) return;
+    if (!selectedFile || !selectedDeviceId || sendingRef.current) return;
+    sendingRef.current = true;
     setSending(true);
     setSendError(null);
     try {
@@ -277,9 +282,10 @@ export function Transfer() {
     } catch (err) {
       setSendError(t('transfer:sendFailed', { error: errorMessage(err) }));
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
-  }, [selectedFile, selectedDeviceId, sending, runTasksNow, t]);
+  }, [selectedFile, selectedDeviceId, runTasksNow, t]);
 
   /**
    * Business Logic（为什么需要这个函数）:
