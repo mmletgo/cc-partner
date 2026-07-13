@@ -136,4 +136,21 @@ describe('lanFirewallDependency', () => {
       throw new Error('macOS command preview should include socketfilterfw allow-app command');
     }
   });
+
+  test('status DTO keeps LAN IP, actual HTTP port and UDP 5353 for risk surfaces', () => {
+    const status = dependency({
+      lanIp: '10.0.0.4',
+      httpPort: 62117,
+      mdnsPort: 5353,
+    });
+    if (status.lanIp !== '10.0.0.4') {
+      throw new Error('LanFirewallDependencyCard data must retain LAN IP');
+    }
+    if (status.httpPort !== 62117) {
+      throw new Error('LanFirewallDependencyCard data must retain actual HTTP port');
+    }
+    if (status.mdnsPort !== 5353) {
+      throw new Error('LanFirewallDependencyCard data must retain UDP 5353');
+    }
+  });
 });
