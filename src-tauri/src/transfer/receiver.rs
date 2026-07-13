@@ -318,11 +318,23 @@ fn ensure_path_within_dir(dir: &Path, candidate: &Path) -> Result<(), AppError> 
     let canonical_parent = match parent.canonicalize() {
         Ok(p) => p,
         Err(_) => {
-            // 父目录可能尚未创建；用 dir 的 canonical + 相对剩余部分做逻辑归一化。
+            // 父目录可能尚未创建：必须基于 *canonical_dir* 拼相对后缀。
+            // macOS 上 `/var` 与 canonicalize 后的 `/private/var` 不一致，
+            // 若对不存在父路径只做 normalize_path 会误判逃逸。
             if parent == dir {
                 canonical_dir.clone()
+            } else if let Ok(rel) = parent.strip_prefix(dir) {
+                canonical_dir.join(rel)
+            } else if let Ok(rel) = parent.strip_prefix(&canonical_dir) {
+                canonical_dir.join(rel)
             } else {
-                normalize_path(parent)
+                // 回退：相对路径拼到 canonical_dir；绝对且不在 dir 下则交给后续 starts_with 拒绝。
+                let normalized = normalize_path(parent);
+                if normalized.is_absolute() {
+                    normalized
+                } else {
+                    canonical_dir.join(normalized)
+                }
             }
         }
     };
@@ -905,35 +917,59 @@ async fn promote_completed_to_durable(
 
 /// Business Logic（为什么需要这个函数）:
 ///     place 前必须把候选 final 路径持久化到 journal，才能在进程崩溃后避免同 transfer_id 重传后缀副本。
-///     intent 目录/文件若是 symlink/reparse，普通 create_dir_all/write 会跟随写出 receive_dir。
+///     intent 目录/文件若是 symlink/reparse，普通 create_dir_all/write 会跟随写出 receive_dir；
+///     路径检查后再 create/rename 仍有父目录交换 TOCTOU，必须绑定已验证目录 fd。
 ///
 /// Code Logic（这个函数做什么）:
-///     确保 intent 目录为 receive_dir 内普通目录（拒绝 symlink）；临时文件 create_new + no-follow 写字节；
-///     同目录 rename 覆盖正式 intent；任一步失败清理本次 tmp。
+///     Unix：open 已验证 receive_dir fd → openat/mkdirat 绑定 intent 目录 → openat 创建 tmp 写字节
+///     + sync_all → renameat 正式 intent → fsync intent 目录；Windows：no-follow 校验普通目录后
+///     同目录 create_new 写 + rename，并对 intent 目录 FlushFileBuffers。
 async fn write_finalize_intent(
     receive_dir: &Path,
     intent: &FinalizeIntent,
 ) -> Result<(), AppError> {
-    let dir = ensure_regular_intent_dir(receive_dir).await?;
-    let path = finalize_intent_path(receive_dir, &intent.transfer_id)?;
-    // 词法路径已校验在 receive_dir 内；仍要求 parent 即 no-follow 确认的 intent 目录。
-    if path.parent() != Some(dir.as_path()) {
-        return Err(AppError::validation(format!(
-            "intent 路径不在已校验目录内: {}",
-            path.display()
-        )));
-    }
-    let tmp = path.with_extension("json.tmp");
+    // 先拒绝 symlink intent 目录（no-follow），再 dirfd 写入。
+    let _path = finalize_intent_path(receive_dir, &intent.transfer_id)?;
+    let safe_id = sanitize_receive_basename(&intent.transfer_id, "transfer_id")?;
+    let intent_name = format!("{safe_id}.json");
+    let tmp_name = format!("{safe_id}.json.tmp");
     let bytes = serde_json::to_vec_pretty(intent)?;
-    write_bytes_create_new_nofollow(&tmp, &bytes).await?;
-    // 同进程覆盖：先 remove 旧 intent（Windows rename 到已存在路径可能失败）。
-    // remove 跟随与否：若 path 是 symlink 指向外部，remove_file 只删目录项本身（Unix），不触达目标。
-    let _ = tokio::fs::remove_file(&path).await;
-    if let Err(err) = tokio::fs::rename(&tmp, &path).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(AppError::from(err));
+
+    #[cfg(unix)]
+    {
+        let joined = tokio::task::spawn_blocking({
+            let receive_dir = receive_dir.to_path_buf();
+            let intent_name = intent_name.clone();
+            let tmp_name = tmp_name.clone();
+            let bytes = bytes.clone();
+            move || write_finalize_intent_unix_dirfd(&receive_dir, &intent_name, &tmp_name, &bytes)
+        })
+        .await
+        .map_err(|e| AppError::generic(format!("write_finalize_intent join 失败: {e}")))?;
+        joined
     }
-    Ok(())
+
+    #[cfg(not(unix))]
+    {
+        let dir = ensure_regular_intent_dir(receive_dir).await?;
+        if path.parent() != Some(dir.as_path()) {
+            return Err(AppError::validation(format!(
+                "intent 路径不在已校验目录内: {}",
+                path.display()
+            )));
+        }
+        let tmp = dir.join(&tmp_name);
+        write_bytes_create_new_nofollow(&tmp, &bytes).await?;
+        let final_path = dir.join(&intent_name);
+        let _ = tokio::fs::remove_file(&final_path).await;
+        if let Err(err) = tokio::fs::rename(&tmp, &final_path).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(AppError::from(err));
+        }
+        // intent rename 后 fsync 目录，保证断电后目录项可见。
+        fsync_dir(&dir)?;
+        Ok(())
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -941,7 +977,8 @@ async fn write_finalize_intent(
 ///
 /// Code Logic（这个函数做什么）:
 ///     对 receive_dir 下 FINALIZE_INTENT_DIR：不存在则 create_dir（目录项本身）；存在则 symlink_metadata
-///     拒绝 symlink/非目录；返回校验后的绝对/相对 path。
+///     拒绝 symlink/非目录；返回校验后的 path。Windows / 非 dirfd 路径使用。
+#[cfg_attr(unix, allow(dead_code))]
 async fn ensure_regular_intent_dir(receive_dir: &Path) -> Result<PathBuf, AppError> {
     let dir = receive_dir.join(FINALIZE_INTENT_DIR);
     ensure_path_within_dir(receive_dir, &dir)?;
@@ -963,17 +1000,13 @@ async fn ensure_regular_intent_dir(receive_dir: &Path) -> Result<PathBuf, AppErr
             Ok(dir)
         }
         Err(e) if e.kind() == ErrorKind::NotFound => {
-            // 仅创建本层目录；不 create_dir_all 跟随深层 symlink。
-            // receive_dir 本身由配置保证存在；若 receive_dir 缺失，create_dir 会失败。
             match tokio::fs::create_dir(&dir).await {
                 Ok(()) => {}
                 Err(err) if err.kind() == ErrorKind::AlreadyExists => {
-                    // 竞态：他方刚创建或种植了 symlink；重新走校验分支。
                     return Box::pin(ensure_regular_intent_dir(receive_dir)).await;
                 }
                 Err(err) => return Err(AppError::from(err)),
             }
-            // 创建后重读，拒绝 TOCTOU 换成 symlink。
             match tokio::fs::symlink_metadata(&dir).await {
                 Ok(meta) => {
                     let ft = meta.file_type();
@@ -994,14 +1027,12 @@ async fn ensure_regular_intent_dir(receive_dir: &Path) -> Result<PathBuf, AppErr
 
 /// Business Logic（为什么需要这个函数）:
 ///     写 intent 临时文件时若路径已是指向外部的 symlink，tokio::fs::write 会跟随并截断外部文件。
-///     create_new 后若关闭再按路径重开，攻击者可在两次 open 之间把临时文件换成 hardlink/普通文件，
-///     O_NOFOLLOW 拦不住 hardlink，会写坏外部目标。
+///     create_new 后若关闭再按路径重开，攻击者可在两次 open 之间把临时文件换成 hardlink/普通文件。
 ///
 /// Code Logic（这个函数做什么）:
-///     先 remove 残留同名 tmp（只删目录项）；create_new 打开后**不丢弃句柄**，直接在该 File 上
-///     write_all + flush + sync_all，禁止按路径 reopen；失败 best-effort 删除本次 tmp。
+///     先 remove 残留同名 tmp；create_new 打开后不丢弃句柄，write_all + flush + sync_all。
+#[cfg_attr(unix, allow(dead_code))]
 async fn write_bytes_create_new_nofollow(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
-    // 先清可能残留的同名 tmp（仅删除目录项；symlink 也只删链接本身）。
     let _ = tokio::fs::remove_file(path).await;
     let created = match std::fs::OpenOptions::new()
         .write(true)
@@ -1016,7 +1047,6 @@ async fn write_bytes_create_new_nofollow(path: &Path, bytes: &[u8]) -> Result<()
             )));
         }
     };
-    // 使用 create_new 句柄本身完成写盘，禁止关闭后按路径 reopen（TOCTOU hardlink/swap）。
     let mut file = tokio::fs::File::from_std(created);
     if let Err(err) = file.write_all(bytes).await {
         let _ = tokio::fs::remove_file(path).await;
@@ -1030,6 +1060,180 @@ async fn write_bytes_create_new_nofollow(path: &Path, bytes: &[u8]) -> Result<()
         let _ = tokio::fs::remove_file(path).await;
         return Err(AppError::from(err));
     }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     rename/hardlink/unlink 后若不同步父目录，断电可能丢失目录项，而 SQLite history 已 completed。
+///
+/// Code Logic（这个函数做什么）:
+///     打开目录并 fsync（Unix）或 FlushFileBuffers（Windows）；失败上抛。
+fn fsync_dir(dir: &Path) -> Result<(), AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::File::open(dir).map_err(|e| {
+            AppError::from(std::io::Error::new(
+                e.kind(),
+                format!("打开目录以 fsync 失败 {}: {e}", dir.display()),
+            ))
+        })?;
+        let rc = unsafe { libc::fsync(file.as_raw_fd()) };
+        if rc != 0 {
+            return Err(AppError::from(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_BACKUP_SEMANTICS 才能打开目录句柄。
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(dir)
+            .map_err(|e| {
+                AppError::from(std::io::Error::new(
+                    e.kind(),
+                    format!("打开目录以 FlushFileBuffers 失败 {}: {e}", dir.display()),
+                ))
+            })?;
+        // 目录 HANDLE 上 sync_all ≈ FlushFileBuffers。
+        file.sync_all().map_err(AppError::from)?;
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     place 前必须把接收 tmp 的数据刷到稳定存储，否则断电可能只剩 history completed 而文件内容丢失。
+///
+/// Code Logic（这个函数做什么）:
+///     no-follow 打开普通文件后 sync_all（含元数据）。
+async fn sync_regular_file(path: &Path) -> Result<(), AppError> {
+    let file = open_regular_file_nofollow(path, false).await?;
+    // tokio File sync_all
+    let std_file = file.into_std().await;
+    std_file.sync_all().map_err(AppError::from)?;
+    Ok(())
+}
+
+/// Unix：在已验证 receive_dir fd 上 openat/mkdirat/renameat 写 intent，关闭父目录交换 TOCTOU。
+#[cfg(unix)]
+fn write_finalize_intent_unix_dirfd(
+    receive_dir: &Path,
+    intent_name: &str,
+    tmp_name: &str,
+    bytes: &[u8],
+) -> Result<(), AppError> {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let receive_c = CString::new(receive_dir.as_os_str().as_bytes())
+        .map_err(|_| AppError::validation("receive_dir 含内部 NUL"))?;
+    let intent_dir_c =
+        CString::new(FINALIZE_INTENT_DIR).map_err(|_| AppError::validation("intent dir 名非法"))?;
+    let intent_c = CString::new(intent_name.as_bytes())
+        .map_err(|_| AppError::validation("intent 文件名含内部 NUL"))?;
+    let tmp_c = CString::new(tmp_name.as_bytes())
+        .map_err(|_| AppError::validation("intent tmp 名含内部 NUL"))?;
+
+    // O_DIRECTORY|O_RDONLY；若 receive_dir 是 symlink，open 跟随其目标——配置路径可信，关键是 intent 子项不逃逸。
+    let receive_fd = unsafe {
+        libc::open(
+            receive_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if receive_fd < 0 {
+        return Err(AppError::from(std::io::Error::last_os_error()));
+    }
+    let receive_file = unsafe { std::fs::File::from_raw_fd(receive_fd) };
+
+    // mkdirat intent 目录；EEXIST 时 openat 校验为普通目录。
+    let mkdir_rc = unsafe { libc::mkdirat(receive_file.as_raw_fd(), intent_dir_c.as_ptr(), 0o700) };
+    if mkdir_rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EEXIST) {
+            return Err(AppError::from(err));
+        }
+    }
+    let intent_dir_fd = unsafe {
+        libc::openat(
+            receive_file.as_raw_fd(),
+            intent_dir_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if intent_dir_fd < 0 {
+        let err = std::io::Error::last_os_error();
+        // O_NOFOLLOW 遇 symlink → ELOOP/EPERM
+        return Err(AppError::validation(format!(
+            "intent 目录是符号链接或不可绑定的普通目录: {err}"
+        )));
+    }
+    let intent_dir_file = unsafe { std::fs::File::from_raw_fd(intent_dir_fd) };
+
+    // 清残留 tmp 目录项（unlinkat 不跟随）。
+    let _ = unsafe { libc::unlinkat(intent_dir_file.as_raw_fd(), tmp_c.as_ptr(), 0) };
+
+    let tmp_fd = unsafe {
+        libc::openat(
+            intent_dir_file.as_raw_fd(),
+            tmp_c.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if tmp_fd < 0 {
+        return Err(AppError::from(std::io::Error::last_os_error()));
+    }
+    let mut tmp_file = unsafe { std::fs::File::from_raw_fd(tmp_fd) };
+    if let Err(err) = tmp_file.write_all(bytes) {
+        let _ = unsafe { libc::unlinkat(intent_dir_file.as_raw_fd(), tmp_c.as_ptr(), 0) };
+        return Err(AppError::from(err));
+    }
+    if let Err(err) = tmp_file.flush() {
+        let _ = unsafe { libc::unlinkat(intent_dir_file.as_raw_fd(), tmp_c.as_ptr(), 0) };
+        return Err(AppError::from(err));
+    }
+    if let Err(err) = tmp_file.sync_all() {
+        let _ = unsafe { libc::unlinkat(intent_dir_file.as_raw_fd(), tmp_c.as_ptr(), 0) };
+        return Err(AppError::from(err));
+    }
+    drop(tmp_file);
+
+    // 覆盖正式 intent：先 unlink 旧目录项，再 renameat。
+    let _ = unsafe { libc::unlinkat(intent_dir_file.as_raw_fd(), intent_c.as_ptr(), 0) };
+    let rename_rc = unsafe {
+        libc::renameat(
+            intent_dir_file.as_raw_fd(),
+            tmp_c.as_ptr(),
+            intent_dir_file.as_raw_fd(),
+            intent_c.as_ptr(),
+        )
+    };
+    if rename_rc != 0 {
+        let err = std::io::Error::last_os_error();
+        let _ = unsafe { libc::unlinkat(intent_dir_file.as_raw_fd(), tmp_c.as_ptr(), 0) };
+        return Err(AppError::from(err));
+    }
+    // fsync intent 目录，保证 rename 目录项断电后可见。
+    let rc = unsafe { libc::fsync(intent_dir_file.as_raw_fd()) };
+    if rc != 0 {
+        return Err(AppError::from(std::io::Error::last_os_error()));
+    }
+    // 保持 receive_file 活到此处，避免 fd 过早关闭。
+    drop(intent_dir_file);
+    drop(receive_file);
     Ok(())
 }
 
@@ -1050,10 +1254,41 @@ async fn clear_finalize_intent(receive_dir: &Path, transfer_id: &str) -> Result<
 /// Code Logic: 拼 intent 文件路径并校验仍在 receive_dir 内。
 fn finalize_intent_path(receive_dir: &Path, transfer_id: &str) -> Result<PathBuf, AppError> {
     let safe_id = sanitize_receive_basename(transfer_id, "transfer_id")?;
-    let path = receive_dir
+    let intent_dir = receive_dir.join(FINALIZE_INTENT_DIR);
+    // intent 目录若是 symlink，canonicalize 会跟随逃逸；先 no-follow 拒绝。
+    match std::fs::symlink_metadata(&intent_dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(AppError::validation(format!(
+                "intent 目录是符号链接，拒绝写入: {}",
+                intent_dir.display()
+            )));
+        }
+        Ok(meta) if !meta.file_type().is_dir() => {
+            return Err(AppError::validation(format!(
+                "intent 路径不是目录: {}",
+                intent_dir.display()
+            )));
+        }
+        Ok(_) | Err(_) => {}
+    }
+    let path = intent_dir.join(format!("{safe_id}.json"));
+    // 词法边界：用 normalize 而非对可能不存在/symlink 父目录 canonicalize。
+    let canonical_dir = match receive_dir.canonicalize() {
+        Ok(p) => p,
+        Err(_) => normalize_path(receive_dir),
+    };
+    let lexical = canonical_dir
         .join(FINALIZE_INTENT_DIR)
         .join(format!("{safe_id}.json"));
-    ensure_path_within_dir(receive_dir, &path)?;
+    if !lexical.starts_with(&canonical_dir) {
+        return Err(AppError::validation(
+            "目标路径逃逸 receive_dir，拒绝写入".to_string(),
+        ));
+    }
+    // 若 intent 目录已是普通目录，再做一次真实路径校验。
+    if intent_dir.is_dir() {
+        ensure_path_within_dir(receive_dir, &path)?;
+    }
     Ok(path)
 }
 
@@ -1339,6 +1574,10 @@ async fn place_final_file_exclusive(
 ///     3) hard_link 因跨卷/不支持失败 → 平台 no-replace rename 回退；
 ///        回退失败绝不 remove final（可能是竞争者文件）。
 async fn commit_tmp_to_final_no_replace(tmp_path: &Path, final_path: &Path) -> std::io::Result<()> {
+    // place 前把 tmp 数据刷到稳定存储，避免断电丢内容而 history 已 completed。
+    if let Err(e) = sync_regular_file(tmp_path).await {
+        return Err(std::io::Error::other(format!("sync tmp 失败: {e}")));
+    }
     // hard_link 是同步 syscall；放在 blocking 上下文外也可接受（单次元数据操作）。
     match std::fs::hard_link(tmp_path, final_path) {
         Ok(()) => {
@@ -1348,13 +1587,30 @@ async fn commit_tmp_to_final_no_replace(tmp_path: &Path, final_path: &Path) -> s
                     tmp_path.display()
                 );
             }
+            // 最终目录项 + unlink 后 fsync receive_dir。
+            if let Some(parent) = final_path.parent() {
+                if let Err(e) = fsync_dir(parent) {
+                    return Err(std::io::Error::other(format!(
+                        "fsync receive_dir 失败: {e}"
+                    )));
+                }
+            }
             Ok(())
         }
         Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(e),
         Err(link_err) => {
             // 跨卷/不支持 hard_link：回退到平台 no-replace rename，仍禁止覆盖已有 final。
             match rename_no_replace(tmp_path, final_path).await {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    if let Some(parent) = final_path.parent() {
+                        if let Err(e) = fsync_dir(parent) {
+                            return Err(std::io::Error::other(format!(
+                                "fsync receive_dir 失败: {e}"
+                            )));
+                        }
+                    }
+                    Ok(())
+                }
                 Err(rename_err) if rename_err.kind() == ErrorKind::AlreadyExists => Err(rename_err),
                 Err(rename_err) => {
                     // 保留原始 hard_link 错误上下文，便于诊断跨卷场景。
@@ -3869,10 +4125,15 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/src/transfer/receiver.rs"
         ));
-        let after_windows = src
+        // 定位 rename_no_replace_blocking 内的 Windows 分支，避免命中 fsync_dir 等其它 #[cfg(windows)]。
+        let rename_fn = src
+            .split("fn rename_no_replace_blocking")
+            .nth(1)
+            .expect("应存在 rename_no_replace_blocking");
+        let after_windows = rename_fn
             .split("#[cfg(windows)]")
             .nth(1)
-            .expect("应存在 #[cfg(windows)] 分支");
+            .expect("rename_no_replace_blocking 应存在 #[cfg(windows)] 分支");
         let windows_block = after_windows
             .split("#[cfg(not(any(target_os = \"linux\"")
             .next()

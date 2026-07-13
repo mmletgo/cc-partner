@@ -11,7 +11,7 @@ use crate::error::AppError;
 use crate::workbench::models::{
     WorkbenchGitCommitDto, WorkbenchGitRefDto, WorkbenchGitRefKindDto, WorkbenchGitStatusDto,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// `git worktree list --porcelain` 的单项解析结果。
@@ -200,6 +200,100 @@ pub fn repo_root(path: &Path) -> Result<String, AppError> {
 pub fn list_worktrees(repo_path: &Path, main_path: &str) -> Result<Vec<ParsedWorktree>, AppError> {
     let output = run_git(repo_path, &["worktree", "list", "--porcelain"])?;
     Ok(parse_worktree_porcelain(&output, main_path))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Retry/崩溃恢复复用确定性 worktree 路径时，不能仅靠 is_dir 或 DB 记录：slug 碰撞、
+///     失败的 `git worktree add` 残留目录、symlink 都可能让 Runner 在错误甚至非 Git 目录启动。
+///
+/// Code Logic（这个函数做什么）:
+///     1) 拒绝 symlink/reparse 与非目录；
+///     2) 在 owning repo 上执行 `git worktree list --porcelain`；
+///     3) 要求存在 canonical path 匹配项，且 branch 与请求分支一致；
+///     4) 用 worktree 内 `rev-parse --show-toplevel` 再确认所属仓库根与 repo_root 一致。
+///     未注册残留目录 / 分支不匹配 / 跨仓路径 → AppError（conflict 语义用 Bad）。
+pub fn verify_registered_worktree(
+    owning_repo: &Path,
+    worktree_path: &Path,
+    expected_branch: &str,
+) -> Result<PathBuf, AppError> {
+    let expected_branch = expected_branch.trim();
+    if expected_branch.is_empty() {
+        return Err(AppError::generic("分支名不能为空"));
+    }
+    let meta = std::fs::symlink_metadata(worktree_path).map_err(|err| {
+        AppError::generic(format!(
+            "读取 worktree 路径失败 {}: {err}",
+            worktree_path.display()
+        ))
+    })?;
+    let ft = meta.file_type();
+    if ft.is_symlink() {
+        return Err(AppError::conflict(format!(
+            "目标 worktree 路径是符号链接，拒绝复用: {}",
+            worktree_path.display()
+        )));
+    }
+    if !ft.is_dir() {
+        return Err(AppError::conflict(format!(
+            "目标 worktree 路径不是目录: {}",
+            worktree_path.display()
+        )));
+    }
+
+    let expected_canon = worktree_path
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_path.to_path_buf());
+    let owning_canon = owning_repo
+        .canonicalize()
+        .unwrap_or_else(|_| owning_repo.to_path_buf());
+    let owning_str = owning_canon.to_string_lossy().to_string();
+    let listed = list_worktrees(owning_repo, &owning_str)?;
+    let matched = listed.into_iter().find(|item| {
+        let item_path = Path::new(&item.path);
+        let item_canon = item_path
+            .canonicalize()
+            .unwrap_or_else(|_| item_path.to_path_buf());
+        item_canon == expected_canon
+            || item.path.trim_end_matches('/')
+                == expected_canon.to_string_lossy().trim_end_matches('/')
+            || item.path == worktree_path.to_string_lossy()
+    });
+    let Some(item) = matched else {
+        return Err(AppError::conflict(format!(
+            "目标路径不是 owning 仓库已注册的 Git worktree: {}",
+            worktree_path.display()
+        )));
+    };
+    let actual_branch = item
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("");
+    if actual_branch != expected_branch {
+        return Err(AppError::conflict(format!(
+            "目标 worktree 分支不匹配: 期望 {expected_branch}，实际 {}",
+            if actual_branch.is_empty() {
+                "<detached/unknown>".to_string()
+            } else {
+                actual_branch.to_string()
+            }
+        )));
+    }
+
+    // 二次确认：worktree 内 toplevel 必须仍是同一 owning repo。
+    let wt_root = repo_root(&expected_canon)?;
+    let wt_root_path = Path::new(&wt_root)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(&wt_root));
+    if owning_canon != wt_root_path {
+        return Err(AppError::conflict(format!(
+            "目标 worktree 不属于当前项目仓库: {} (toplevel={wt_root})",
+            worktree_path.display()
+        )));
+    }
+    Ok(expected_canon)
 }
 
 /// Business Logic（为什么需要这个函数）:
