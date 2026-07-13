@@ -1101,6 +1101,8 @@ async fn write_bytes_create_new_nofollow(path: &Path, bytes: &[u8]) -> Result<()
 ///
 /// Code Logic（这个函数做什么）:
 ///     打开目录并 fsync（Unix）或 FlushFileBuffers（Windows）；失败上抛。
+///     Windows 必须用可写目录句柄（GENERIC_WRITE / write access）：`FlushFileBuffers`
+///     要求写权限，只读句柄会 AccessDenied，导致 durability 永远无法晋升。
 fn fsync_dir(dir: &Path) -> Result<(), AppError> {
     #[cfg(unix)]
     {
@@ -1120,11 +1122,13 @@ fn fsync_dir(dir: &Path) -> Result<(), AppError> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        // FILE_FLAG_BACKUP_SEMANTICS 才能打开目录句柄。
+        // FILE_FLAG_BACKUP_SEMANTICS 才能打开目录句柄；OPEN_REPARSE_POINT 拒绝跟随 junction。
+        // write(true) 申请 GENERIC_WRITE，满足 FlushFileBuffers 权限要求。
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         let file = std::fs::OpenOptions::new()
             .read(true)
+            .write(true)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(dir)
             .map_err(|e| {
@@ -1133,7 +1137,7 @@ fn fsync_dir(dir: &Path) -> Result<(), AppError> {
                     format!("打开目录以 FlushFileBuffers 失败 {}: {e}", dir.display()),
                 ))
             })?;
-        // 目录 HANDLE 上 sync_all ≈ FlushFileBuffers。
+        // 目录 HANDLE 上 sync_all ≈ FlushFileBuffers（需 GENERIC_WRITE）。
         file.sync_all().map_err(AppError::from)?;
         Ok(())
     }
@@ -1148,9 +1152,10 @@ fn fsync_dir(dir: &Path) -> Result<(), AppError> {
 ///     place 前必须把接收 tmp 的数据刷到稳定存储，否则断电可能只剩 history completed 而文件内容丢失。
 ///
 /// Code Logic（这个函数做什么）:
-///     no-follow 打开普通文件后 sync_all（含元数据）。
+///     no-follow 以可写方式打开普通文件后 sync_all（含元数据）。
+///     Windows 上 `sync_all` → FlushFileBuffers 需要 GENERIC_WRITE，只读句柄会 AccessDenied。
 async fn sync_regular_file(path: &Path) -> Result<(), AppError> {
-    let file = open_regular_file_nofollow(path, false).await?;
+    let file = open_regular_file_nofollow(path, true).await?;
     // tokio File sync_all
     let std_file = file.into_std().await;
     std_file.sync_all().map_err(AppError::from)?;
@@ -2975,11 +2980,11 @@ fn dirent_identity_via_parent(final_path: &Path) -> Result<BoundFileIdentity, Ap
 ///     替换后的同尺寸普通文件会静默通过 no-follow 并被认证为成功。
 ///
 /// Code Logic（这个函数做什么）:
-///     1) no-follow 打开普通文件句柄；
+///     1) no-follow **读写**打开普通文件句柄（Windows FlushFileBuffers 需 GENERIC_WRITE）；
 ///     2) 读 len，流式 SHA256（同一句柄）；
 ///     3) 与 expected size/sha 比对；
 ///     4) 同一句柄 sync_all；
-///     5) fsync 父目录；
+///     5) fsync 父目录（Windows 目录句柄同样需写权限）；
 ///     6) 经父目录 HANDLE/fd 重新打开目录项，比对 file id/inode，不一致则拒绝晋升。
 async fn certify_final_file_for_history(
     final_path: &Path,
@@ -3000,6 +3005,8 @@ async fn certify_final_file_for_history(
 ///
 /// Code Logic（这个函数做什么）:
 ///     见 `certify_final_file_for_history`。
+///     以 writable=true no-follow 打开：Windows 上同一句柄 `sync_all`→FlushFileBuffers
+///     需要 GENERIC_WRITE；只读打开会 AccessDenied，Completed history 永远无法晋升。
 fn certify_final_file_for_history_blocking(
     final_path: &Path,
     expected_size: u64,
@@ -3007,8 +3014,8 @@ fn certify_final_file_for_history_blocking(
 ) -> Result<(), AppError> {
     use std::io::Read;
 
-    // 同步 no-follow 打开（与 open_regular_file_nofollow 语义对齐）。
-    let std_file = open_regular_file_nofollow_std(final_path, false)?;
+    // 同步 no-follow 读写打开：读用于 hash，写权限用于 Windows FlushFileBuffers。
+    let std_file = open_regular_file_nofollow_std(final_path, true)?;
     let meta = std_file.metadata().map_err(AppError::from)?;
     if meta.len() != expected_size {
         return Err(AppError::validation(format!(
@@ -3039,7 +3046,7 @@ fn certify_final_file_for_history_blocking(
         )));
     }
 
-    // 同一句柄 fsync。
+    // 同一句柄 fsync（Windows 需写权限句柄）。
     file.sync_all().map_err(AppError::from)?;
     if let Some(parent) = final_path.parent() {
         fsync_dir(parent)?;
@@ -5899,6 +5906,101 @@ mod tests {
         assert!(
             completed_retry_body.contains("promote_completed_to_durable"),
             "Completed 重试应直接 promote（内部 certify）"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Windows 上 FlushFileBuffers 要求句柄具备 GENERIC_WRITE；若 certify/fsync_dir
+    ///     仍用只读句柄，AccessDenied 会使 Completed history 永远无法晋升，任务永久
+    ///     停在 DurabilityPending。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     源码契约：certify_final_file_for_history_blocking 以 writable=true 打开；
+    ///     fsync_dir 的 Windows 分支含 write(true)；sync_regular_file 以 writable=true
+    ///     打开。Unix 路径不改语义（writable 额外 write 标志在 fsync 前仍可读 hash）。
+    #[test]
+    fn windows_certify_and_fsync_dir_request_write_access_source_contract() {
+        let src = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/transfer/receiver.rs"
+        ));
+
+        // certify：必须 writable=true 打开（hash+FlushFileBuffers 同一句柄）。
+        let certify_fn = src
+            .split("fn certify_final_file_for_history_blocking")
+            .nth(1)
+            .expect("应存在 certify_final_file_for_history_blocking");
+        let certify_body = certify_fn
+            .split("/// Business Logic（为什么需要这个函数）:")
+            .next()
+            .expect("certify 函数体应在下一 Business Logic 前结束");
+        assert!(
+            certify_body.contains("open_regular_file_nofollow_std(final_path, true)"),
+            "certify 必须以 writable=true no-follow 打开（Windows FlushFileBuffers 需 GENERIC_WRITE）"
+        );
+        assert!(
+            !certify_body.contains("open_regular_file_nofollow_std(final_path, false)"),
+            "certify 禁止只读打开后 sync_all（Windows 会 AccessDenied）"
+        );
+        assert!(
+            certify_body.contains("file.sync_all()"),
+            "certify 仍须同一句柄 sync_all"
+        );
+        assert!(
+            certify_body.contains("fsync_dir(parent)"),
+            "certify 仍须 fsync 父目录"
+        );
+
+        // fsync_dir Windows：目录句柄必须 write(true)。
+        let fsync_fn = src
+            .split("fn fsync_dir(dir: &Path)")
+            .nth(1)
+            .expect("应存在 fsync_dir");
+        let fsync_body = fsync_fn
+            .split("/// Business Logic（为什么需要这个函数）:")
+            .next()
+            .expect("fsync_dir 函数体应在下一 Business Logic 前结束");
+        let fsync_windows = fsync_body
+            .split("#[cfg(windows)]")
+            .nth(1)
+            .expect("fsync_dir 应存在 #[cfg(windows)] 分支");
+        let fsync_windows_block = fsync_windows
+            .split("#[cfg(not(any(unix, windows)))]")
+            .next()
+            .expect("windows 分支应在 not-any 前结束");
+        assert!(
+            fsync_windows_block.contains(".write(true)"),
+            "Windows fsync_dir 必须以 write(true) 打开目录（FlushFileBuffers 需 GENERIC_WRITE）"
+        );
+        assert!(
+            fsync_windows_block.contains("FILE_FLAG_BACKUP_SEMANTICS"),
+            "Windows fsync_dir 仍需 BACKUP_SEMANTICS 打开目录"
+        );
+        assert!(
+            fsync_windows_block.contains("FILE_FLAG_OPEN_REPARSE_POINT"),
+            "Windows fsync_dir 仍需 OPEN_REPARSE_POINT（no-follow）"
+        );
+        assert!(
+            fsync_windows_block.contains("sync_all()"),
+            "Windows fsync_dir 仍须 sync_all≈FlushFileBuffers"
+        );
+
+        // place 前/后的普通文件 sync 同样需要写权限句柄。
+        let sync_fn = src
+            .split("async fn sync_regular_file")
+            .nth(1)
+            .expect("应存在 sync_regular_file");
+        let sync_body = sync_fn
+            .split("/// Business Logic（为什么需要这个函数）:")
+            .next()
+            .expect("sync_regular_file 函数体应在下一 Business Logic 前结束");
+        assert!(
+            sync_body.contains("open_regular_file_nofollow(path, true)"),
+            "sync_regular_file 必须以 writable=true 打开（Windows FlushFileBuffers）"
+        );
+        assert!(
+            !sync_body.contains("open_regular_file_nofollow(path, false)"),
+            "sync_regular_file 禁止只读打开后 sync_all"
         );
     }
 
