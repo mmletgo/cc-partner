@@ -385,13 +385,14 @@ fn normalize_path(path: &Path) -> PathBuf {
 ///     后续 complete 重试路径永不执行。
 /// Code Logic:
 ///     1. 先取 per-transfer 单飞锁（覆盖 re-read 任务/墓碑、写块、进度、finalize 全临界区）；
-///     2. 持锁后重读 registry：不存在则查墓碑，命中则直接返回第一次结果（禁止 open 文件）；
-///     3. 存在但 direction≠Receive → 拒绝写入并返回 success:false；
-///     4. active 已 Completed → 只重试 durable 晋升；失败上抛 Unavailable；
-///     5. 打开/创建 .tmp（写模式，允许读写以 seek），seek 到 offset 写入；
-///     6. 更新 transferred_bytes；
-///     7. 若 transferred >= size 则 finalize；place 成功但 history 未 durable → Unavailable；
-///     8. 返回 `{success:true, received_bytes}` 或墓碑结果。
+///     2. 持锁后若 `data.len() > CHUNK_SIZE` 立即 Validation 拒绝（禁止 open/write 磁盘）；
+///     3. 持锁后重读 registry：不存在则查墓碑，命中则直接返回第一次结果（禁止 open 文件）；
+///     4. 存在但 direction≠Receive → 拒绝写入并返回 success:false；
+///     5. active 已 Completed → 只重试 durable 晋升；失败上抛 Unavailable；
+///     6. 打开/创建 .tmp（写模式，允许读写以 seek），seek 到 offset 写入；
+///     7. 更新 transferred_bytes；
+///     8. 若 transferred >= size 则 finalize；place 成功但 history 未 durable → Unavailable；
+///     9. 返回 `{success:true, received_bytes}` 或墓碑结果。
 pub async fn handle_chunk(
     state: &AppState,
     transfer_id: &str,
@@ -402,6 +403,16 @@ pub async fn handle_chunk(
     // 若只在 finalize 前加锁，并发末块可在 rename 后仍持有旧 fd 改写已校验文件。
     let chunk_lock = state.transfers.finalize_lock(transfer_id);
     let _guard = chunk_lock.lock().await;
+
+    // 资源边界：单块不得超过 CHUNK_SIZE，必须在任何磁盘 open/write 前拒绝。
+    // HTTP 路由另有 route-local body limit；此处覆盖直接调用与协议防御。
+    if data.len() > CHUNK_SIZE {
+        return Err(AppError::validation(format!(
+            "chunk 大小 {} 超过上限 {} 字节",
+            data.len(),
+            CHUNK_SIZE
+        )));
+    }
 
     // 持锁后重读任务/墓碑：迟到请求必须在任何文件打开前命中墓碑。
     let task = match state.transfers.get(transfer_id) {
@@ -4145,6 +4156,72 @@ mod tests {
         assert!(
             state.transfers.get(&transfer_id).is_none(),
             "重放 init 不得重建 active 任务"
+        );
+
+        let _ = fs::remove_dir_all(&receive_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     协议约定单块上限 CHUNK_SIZE（960 KiB）；超限 chunk 必须在 open/write 临时文件前拒绝，
+    ///     否则恶意对端可用超大 body 浪费磁盘与 IO。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先 init 接收任务，再提交 CHUNK_SIZE+1 的 chunk，断言 Validation 错误且 tmp 未被创建/改写。
+    #[tokio::test]
+    async fn handle_chunk_rejects_oversized_payload_before_disk_mutation() {
+        let receive_dir = unique_temp_dir();
+        let state = build_transfer_test_state(&receive_dir).await;
+        let transfer_id = "chunk-too-large".to_string();
+        handle_init(
+            &state,
+            InitMeta {
+                transfer_id: Some(transfer_id.clone()),
+                filename: "big.bin".to_string(),
+                size: (CHUNK_SIZE as u64) * 2,
+                sha256: "deadbeef".to_string(),
+                chunk_size: CHUNK_SIZE as u64,
+            },
+        )
+        .await
+        .expect("init oversized-chunk fixture");
+
+        let tmp_path = receive_dir.join(format!(".{transfer_id}.tmp"));
+        assert!(
+            !tmp_path.exists(),
+            "init 后尚未写入任何 chunk，tmp 不应存在"
+        );
+
+        let oversized = vec![0u8; CHUNK_SIZE + 1];
+        let err = handle_chunk(&state, &transfer_id, 0, oversized)
+            .await
+            .expect_err("CHUNK_SIZE+1 must be rejected before disk mutation");
+        assert!(
+            matches!(err, AppError::Validation(_)),
+            "超限 chunk 应返回 Validation: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("上限") || err.to_string().contains(&CHUNK_SIZE.to_string()),
+            "错误消息应提及上限: {err}"
+        );
+        assert!(
+            !tmp_path.exists(),
+            "超限 chunk 拒绝后不得创建或写入临时文件"
+        );
+
+        // 恰好 CHUNK_SIZE 必须仍可通过大小校验（落盘前不再因 size 被拒）。
+        let exact = vec![1u8; CHUNK_SIZE];
+        let resp = handle_chunk(&state, &transfer_id, 0, exact)
+            .await
+            .expect("exact CHUNK_SIZE must pass size gate");
+        assert!(resp.success);
+        assert_eq!(resp.received_bytes, CHUNK_SIZE as u64);
+        assert!(
+            tmp_path.exists(),
+            "合法 CHUNK_SIZE chunk 应写入临时文件"
+        );
+        assert_eq!(
+            fs::metadata(&tmp_path).expect("tmp meta").len(),
+            CHUNK_SIZE as u64
         );
 
         let _ = fs::remove_dir_all(&receive_dir);

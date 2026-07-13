@@ -24,6 +24,7 @@ use crate::net::routes::{
     scratchpad_sync, ssh_target_sync, sync, transfer, workbench,
 };
 use crate::state::AppState;
+use crate::transfer::CHUNK_SIZE;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension};
 use axum::http::{header, HeaderValue, Request, Response, StatusCode};
@@ -392,7 +393,12 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         )
         // P2P 文件传输协议（M5）：init/chunk/complete/status；X-Chunk-Offset + complete 握手
         .route("/api/transfer/init", post(transfer::transfer_init))
-        .route("/api/transfer/chunk/:id", post(transfer::transfer_chunk))
+        // chunk 路由本地上限 = CHUNK_SIZE（960 KiB），在 receiver 落盘校验前拒绝更大 body；
+        // 外层仍保留全局 32 MiB DefaultBodyLimit，不复制成全路由策略表。
+        .route(
+            "/api/transfer/chunk/:id",
+            post(transfer::transfer_chunk).layer(DefaultBodyLimit::max(CHUNK_SIZE)),
+        )
         .route(
             "/api/transfer/complete/:id",
             post(transfer::transfer_complete),
@@ -1359,16 +1365,21 @@ mod tests {
     ///     用一个简单 `ok` handler 替代真实 health/workbench handler，聚焦验证 middleware 栈在 router 层确实生效。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造 `/probe` 占位 handler，layer 顺序（last=outermost）对齐生产：
+    ///     构造 `/probe` 占位 handler（GET/POST），layer 顺序（last=outermost）对齐生产：
     ///     DefaultBodyLimit → envelope_fallback → lan_socket_gate → request_id_middleware。
     ///     request_id 测试会注入 loopback ConnectInfo，避免 gate 拒绝。
     fn middleware_test_router() -> Router {
         async fn ok() -> (StatusCode, &'static str) {
             (StatusCode::OK, "ok")
         }
+        /// POST probe 必须消费 body，DefaultBodyLimit 只在 body 被提取/读取时触发 413。
+        async fn ok_post(body: axum::body::Bytes) -> (StatusCode, &'static str) {
+            let _ = body;
+            (StatusCode::OK, "ok")
+        }
         let params = browser_guard_params("device-a", 62116);
         Router::new()
-            .route("/probe", get(ok))
+            .route("/probe", get(ok).post(ok_post))
             .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
             .layer(axum::middleware::from_fn(envelope_fallback_middleware))
             .layer(axum::middleware::from_fn(move |req, next| {
@@ -1377,6 +1388,44 @@ mod tests {
             }))
             .layer(axum::middleware::from_fn(lan_socket_gate))
             .layer(axum::middleware::from_fn(request_id_middleware))
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     全局 32 MiB DefaultBodyLimit 触发的 413 必须被错误信封兜底，客户端才能稳定解析
+    ///     `payload_too_large`，而不是拿到 axum 裸状态码/非 JSON body。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     通过与生产一致的 middleware 栈 POST `BODY_LIMIT_BYTES + 1` 字节 body，
+    ///     断言 HTTP 413 且 body 为 P2P 错误信封（code=payload_too_large, retryable=false）。
+    #[tokio::test]
+    async fn default_body_limit_rejects_oversized_body_with_error_envelope() {
+        use axum::body::to_bytes;
+        use tower::ServiceExt;
+
+        let router = middleware_test_router();
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/probe")
+            .header("host", "127.0.0.1:62116")
+            .header("content-type", "application/octet-stream")
+            .body(Body::from(vec![0u8; BODY_LIMIT_BYTES + 1]))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((Ipv4Addr::LOCALHOST, 1))));
+        let response = router.oneshot(request).await.expect("router 不可失败");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(response.headers().get("x-cc-request-id").is_some());
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("应能读取 413 body");
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("413 必须包成 JSON 错误信封");
+        assert_eq!(body["code"], "payload_too_large");
+        assert_eq!(body["retryable"], false);
+        assert!(body["error"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(body["request_id"].as_str().is_some_and(|s| !s.is_empty()));
     }
 
     /// Business Logic（为什么需要这个测试）:
