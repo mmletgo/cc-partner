@@ -6,12 +6,14 @@
   "loading": "加载中…",
   "noDevices": "未发现设备",
   "sendFile": "发送「{{file}}」",
+  "sendingFile": "正在发送「{{file}}」…",
   "pickFile": "选择文件",
   "browse": "浏览…",
   "dropAria": "拖拽文件到此处或点击选择",
   "dropTitleEmpty": "拖拽文件到此处 或 点击选择",
   "dropTitlePicked": "已选择：{{file}}",
   "chunkHint": "支持任意大小 · 自动分块 1MB · 断点可续传 · SHA256 校验",
+  "firstFileOnly": "本轮仅发送第一个文件，其余已忽略。",
   "tasksTitle": "传输任务",
   "active": "活跃 {{n}}",
   "completed": "已完成 {{n}}",
@@ -20,5 +22,7 @@
   "emptyHint": "选择目标设备和文件后即可开始传输",
   "deviceLoadFailed": "设备列表加载失败：{{error}}。",
   "taskLoadFailed": "任务列表加载失败：{{error}}。",
+  "sendFailed": "发送失败：{{error}}",
+  "cancelFailed": "取消失败：{{error}}",
   "skeletonAria": "加载传输任务"
 }

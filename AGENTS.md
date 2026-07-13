@@ -269,7 +269,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 |------|-----------|------|
 | PromptCard | prompt, onEdit, onDelete, onCopy | Prompt 卡片 |
 | DeviceCard | device, onClick | 设备卡片 |
-| TransferItem | task, onPause, onCancel, onRetry | 传输项 |
+| TransferItem | task, onCancel?, onPause?, onResume?, onRetry?, onOpen?, cancelling? | 传输项；每个动作仅在对应回调存在时渲染（当前页面只传 pending/transferring 的 onCancel） |
 | PermissionCard | icon, title, description, granted | 权限卡片 |
 | GithubRepoCard | repo, language, onOpen | GitHub 周热门项目卡片 |
 | MobileAccessCard | compact, className | 局域网移动端 Workbench 访问链接与二维码卡片 |
