@@ -14,7 +14,10 @@
 use crate::config::{default_preference_values, normalize_prompt_optimizer_fill_language, AppConfig};
 use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
 use crate::error::AppError;
-use crate::hotkey::{register_screenshot_hotkey, screenshot_handler};
+use crate::hotkey::{
+    compensate_screenshot_hotkey_os, replace_screenshot_hotkey_os,
+    TauriGlobalShortcutBackend,
+};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -142,24 +145,50 @@ pub async fn update_config(
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
 ) -> Result<ConfigDto, AppError> {
-    let hotkey_changed = screenshot_hotkey.is_some();
-    let dto = update_config_for_runtime(
+    // 截图快捷键：先 OS 切换（注册新→注销旧），再事务持久化；失败则补偿 OS。
+    let old_hotkey = state
+        .config
+        .read()
+        .expect("config 读锁中毒")
+        .screenshot_hotkey
+        .clone();
+    let mut backend = TauriGlobalShortcutBackend::new(app.clone());
+    let mut need_os_compensate = false;
+    if let Some(ref new_hotkey) = screenshot_hotkey {
+        if new_hotkey != &old_hotkey {
+            replace_screenshot_hotkey_os(&mut backend, &old_hotkey, new_hotkey)?;
+            need_os_compensate = true;
+        }
+    }
+
+    match update_config_for_runtime(
         &state.config_runtime,
         device_name,
         receive_dir,
-        screenshot_hotkey,
+        screenshot_hotkey.clone(),
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
     )
-    .await?;
-    // screenshotHotkey 变更时仅在事务提交成功后热更新全局快捷键
-    if hotkey_changed {
-        register_screenshot_hotkey(&app, &dto.screenshot_hotkey, screenshot_handler);
+    .await
+    {
+        Ok(dto) => Ok(dto),
+        Err(e) => {
+            if need_os_compensate {
+                if let Some(ref new_hotkey) = screenshot_hotkey {
+                    if let Err(rb) =
+                        compensate_screenshot_hotkey_os(&mut backend, &old_hotkey, new_hotkey)
+                    {
+                        return Err(rb);
+                    }
+                }
+            }
+            Err(e)
+        }
     }
-    Ok(dto)
 }
 
 /// 版本信息查询。
+
 ///
 /// Business Logic: 前端关于页/设置页展示当前版本号。
 /// Code Logic: version 取编译期 CARGO_PKG_VERSION；buildDate 暂返回 null（M8 接入打包日期后补）。
