@@ -7,14 +7,19 @@
 //!     export+commit+push 再来一轮（最多 1 次重试 = 总共 2 轮）即可收敛。
 //!     本地 SQLite + 向量时钟是权威源，git 只做传输，冲突解决完全复用 merge_*。
 //!     CLAUDE.md 不参与云端自动同步，只由 CLAUDE.md 页面用户主动推送。
+//!     所有正式工作区写流程经 CloudSyncRuntime 单飞，避免并发 reset/export 踩踏。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `trigger_cloud_sync`：完整同步，返回 CloudSyncResult（pulled/pushed/note）。
-//!     - `test_connection`：探测 git + 远端连通，返回 gitVersion/defaultBranch/error。
+//!     - `trigger_cloud_sync`：完整同步（经 exclusive gate），返回 CloudSyncResult。
+//!     - `trigger_cloud_sync_with`：指定 trigger/policy 的入口（scheduler/manual 共用）。
+//!     - `test_connection`：探测 git + 远端连通；复用正式 workdir 时取 gate。
 //!     - `ensure_repo`：确保工作区存在（首次 clone + 设身份），解析同步分支。
 //!     - `cloud_sync_workdir`：工作区路径 `~/.cc-partner/cloud-sync/`。
 
 use crate::cloud_sync::git_cli::{self, PushError};
+use crate::cloud_sync::runtime::{
+    run_cloud_sync_exclusive, wait_policy, CloudSyncBusyPolicy, CloudSyncTrigger,
+};
 use crate::cloud_sync::snapshot::{export_from_db, import_to_db, ExportStats, ImportStats};
 use crate::config::config_dir;
 use crate::error::AppError;
@@ -83,10 +88,11 @@ pub fn cloud_sync_workdir() -> PathBuf {
 /// Business Logic: CLAUDE.md 不参与 cloud auto sync；用户在 CLAUDE.md 页面点击推送时，
 ///     GitHub 云端也必须被更新为触发设备的版本。这里不 import/merge 远端 CLAUDE.md，
 ///     只在远端最新工作树上覆盖写入本机 CLAUDE.md 快照并 push。
+///     与完整 sync 共享 CloudSyncRuntime 门闸，避免并发写同一工作区。
 ///
-/// Code Logic: 未配置 repo_url 则跳过；否则 detect_git → ensure_repo → fetch/reset 到
-///     origin/<branch>（若远端分支存在）→ 写 claude_md/claude_md.json → 仅提交该 pathspec
-///     → push。push 被拒时重试一轮。
+/// Code Logic: 未配置 repo_url 则跳过（无需取锁）；否则经
+///     `run_cloud_sync_exclusive(ClaudeMdPush, Wait{300s})` 后：detect_git → ensure_repo
+///     （获锁后重读 config）→ fetch/reset → 写快照 → commit pathspec → push（可重试一轮）。
 pub async fn push_claude_md_to_cloud(
     state: &AppState,
     row: &ClaudeMdRow,
@@ -103,7 +109,31 @@ pub async fn push_claude_md_to_cloud(
         });
     }
 
+    let outcome = run_cloud_sync_exclusive(
+        &state.cloud_sync_runtime,
+        CloudSyncTrigger::ClaudeMdPush,
+        wait_policy(),
+        || async {
+            push_claude_md_to_cloud_locked(state, row).await
+        },
+    )
+    .await?;
+
+    // Wait 策略下 outcome 必为 Some；Timeout 已转 Err
+    outcome.ok_or_else(|| AppError::generic("CLAUDE.md 推送到 GitHub 未完成（门闸异常）"))
+}
+
+/// 已持 CloudSyncRuntime gate 时执行 CLAUDE.md 云端推送。
+///
+/// Business Logic: 门闸外层保证单飞；本函数专注 Git 工作区写路径。
+/// Code Logic: detect_git → ensure_repo（重读 config）→ fetch/reset → 写快照 →
+///     commit pathspec → push；Rejected 重试一轮。
+async fn push_claude_md_to_cloud_locked(
+    state: &AppState,
+    row: &ClaudeMdRow,
+) -> Result<CloudClaudeMdPushResult, AppError> {
     let git = git_cli::detect_git()?;
+    // 获锁后重读 repo URL/branch（ensure_repo 内部读 config）
     let (workdir, branch) = ensure_repo(state, &git).await?;
 
     for attempt in 0..2u8 {
@@ -165,15 +195,59 @@ fn write_claude_md_snapshot(workdir: &Path, row: &ClaudeMdRow) -> Result<(), App
     Ok(())
 }
 
-/// 触发一次完整的云端同步（手动按钮 / scheduler 均调此入口）。
+/// 触发一次完整的云端同步（默认手动策略 Wait 300s）。
 ///
-/// Business Logic: 把 pull→import→export→commit→push 完整跑一遍。任一步骤失败返回
-///     ok:false + 友好中文 note，绝不 panic。push 被拒时按"再 fetch+reset+import+
-///     export+commit+push 一轮"收敛（总共最多 2 轮）。
-///
-/// Code Logic: 流程见模块顶部说明。pulled = 各轮 import 条数总和，pushed = 最后一次
-///     export 的条数（export 是覆盖式，以最后一轮为准）。
+/// Business Logic: 前端「立即同步」按钮调用；与 scheduler 共享同一 gate。
+/// Code Logic: 委托 `trigger_cloud_sync_with(Manual, Wait{300s})`。
 pub async fn trigger_cloud_sync(state: &AppState) -> CloudSyncResult {
+    trigger_cloud_sync_with(state, CloudSyncTrigger::Manual, wait_policy()).await
+}
+
+/// 按指定 trigger/policy 触发完整云端同步。
+///
+/// Business Logic: 手动 Wait；scheduler 用 ReturnBusy 忙则跳过本 tick。
+///     获锁后重读 config（ensure_repo），覆盖 ensure→push 全流程。
+///
+/// Code Logic: `run_cloud_sync_exclusive` → 内层 `trigger_cloud_sync_locked`。
+///     ReturnBusy 返回 ok=true note 标明跳过；Timeout 返回 ok=false。
+pub async fn trigger_cloud_sync_with(
+    state: &AppState,
+    trigger: CloudSyncTrigger,
+    policy: CloudSyncBusyPolicy,
+) -> CloudSyncResult {
+    let now = chrono::Utc::now().to_rfc3339();
+    match run_cloud_sync_exclusive(
+        &state.cloud_sync_runtime,
+        trigger,
+        policy,
+        || async { Ok(trigger_cloud_sync_locked(state).await) },
+    )
+    .await
+    {
+        Ok(Some(result)) => result,
+        Ok(None) => CloudSyncResult {
+            ok: true,
+            pulled: 0,
+            pushed: 0,
+            note: "云端同步繁忙，本轮已跳过".to_string(),
+            synced_at: now,
+        },
+        Err(e) => CloudSyncResult {
+            ok: false,
+            pulled: 0,
+            pushed: 0,
+            note: e.to_string(),
+            synced_at: now,
+        },
+    }
+}
+
+/// 已持 CloudSyncRuntime gate 时执行完整同步。
+///
+/// Business Logic: 本地 SQLite 是权威源，git 只做传输。
+/// Code Logic: detect_git → ensure_repo（重读 config）→ 最多两轮
+///     fetch/reset/import/export/commit/push；Rejected 重试一轮。
+async fn trigger_cloud_sync_locked(state: &AppState) -> CloudSyncResult {
     let now = chrono::Utc::now().to_rfc3339();
     let ok_note = |pulled: u64, pushed: u64| {
         let mut parts: Vec<String> = Vec::new();
@@ -196,7 +270,7 @@ pub async fn trigger_cloud_sync(state: &AppState) -> CloudSyncResult {
         }
     };
 
-    // 2. 确保工作区就绪 + 定分支
+    // 2. 确保工作区就绪 + 定分支（获锁后重读 repo URL/branch）
     let (workdir, branch) = match ensure_repo(state, &git).await {
         Ok(v) => v,
         Err(e) => {
@@ -360,8 +434,10 @@ pub async fn trigger_cloud_sync(state: &AppState) -> CloudSyncResult {
 ///
 /// Business Logic: 前端设置页"测试连接"按钮调用，让用户确认 git 可用、仓库可达、
 ///     拿到默认分支名供展示。不产生任何 commit/push 副作用。
-/// Code Logic: detect_git → git_version；若已配 repo_url 且工作区已存在 → fetch 测连通 +
-///     default_remote_branch；若配了 url 但无工作区 → clone 到临时目录测 + 解析默认分支。
+///     使用独立临时目录测连通时无需门闸；复用正式 workdir 做 fetch 时必须取 gate。
+/// Code Logic: detect_git → git_version；若已配 repo_url 且工作区已存在 →
+///     `run_cloud_sync_exclusive(Manual, Wait)` 后 fetch + default_remote_branch；
+///     若配了 url 但无工作区 → clone 到临时目录测 + 解析默认分支（不取锁）。
 pub async fn test_connection(state: &AppState) -> TestCloudSyncResult {
     // 1. 探测 git + 版本
     let git = match git_cli::detect_git() {
@@ -411,34 +487,63 @@ pub async fn test_connection(state: &AppState) -> TestCloudSyncResult {
     }
 
     let workdir = cloud_sync_workdir();
-    // 工作区已存在：fetch 测连通 + 解析默认分支
+    // 工作区已存在：必须取 gate 再 fetch（正式 workdir）
     if workdir.is_dir() && workdir.join(".git").exists() {
-        match git_cli::fetch_origin(&git, &workdir).await {
-            Ok(()) => {}
-            Err(e) => {
-                return TestCloudSyncResult {
-                    ok: false,
-                    git_version: Some(git_version),
-                    default_branch: None,
-                    error: Some(format!("fetch 远端失败: {e}")),
-                };
-            }
-        }
-        let branch = git_cli::default_remote_branch(&git, &workdir)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("cloud_sync test: 解析默认分支失败: {e}");
-                "main".to_string()
-            });
-        return TestCloudSyncResult {
-            ok: true,
-            git_version: Some(git_version),
-            default_branch: Some(branch),
-            error: None,
+        let git_version_for_gate = git_version.clone();
+        let gate_result = run_cloud_sync_exclusive(
+            &state.cloud_sync_runtime,
+            CloudSyncTrigger::Manual,
+            wait_policy(),
+            || {
+                let git = git.clone();
+                let workdir = workdir.clone();
+                let git_version = git_version_for_gate.clone();
+                async move {
+                    match git_cli::fetch_origin(&git, &workdir).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            return Ok(TestCloudSyncResult {
+                                ok: false,
+                                git_version: Some(git_version),
+                                default_branch: None,
+                                error: Some(format!("fetch 远端失败: {e}")),
+                            });
+                        }
+                    }
+                    let branch = git_cli::default_remote_branch(&git, &workdir)
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::warn!("cloud_sync test: 解析默认分支失败: {e}");
+                            "main".to_string()
+                        });
+                    Ok(TestCloudSyncResult {
+                        ok: true,
+                        git_version: Some(git_version),
+                        default_branch: Some(branch),
+                        error: None,
+                    })
+                }
+            },
+        )
+        .await;
+        return match gate_result {
+            Ok(Some(r)) => r,
+            Ok(None) => TestCloudSyncResult {
+                ok: false,
+                git_version: Some(git_version),
+                default_branch: None,
+                error: Some("云端同步繁忙，测试连接已跳过".to_string()),
+            },
+            Err(e) => TestCloudSyncResult {
+                ok: false,
+                git_version: Some(git_version),
+                default_branch: None,
+                error: Some(e.to_string()),
+            },
         };
     }
 
-    // 无工作区：clone 到临时目录测连通（测完删除）
+    // 无工作区：clone 到临时目录测连通（测完删除；独立 temp 无需锁）
     let tmp = std::env::temp_dir().join(format!("cp-cloud-sync-test-{}", uuid_str()));
     let clone_res = git_cli::clone(&git, &url, &tmp).await;
     let result = match clone_res {
@@ -570,4 +675,120 @@ async fn has_remote_branch(git: &Path, workdir: &Path) -> bool {
 /// 生成一个临时 uuid 字符串（用于临时 clone 目录名，避免并发冲突）。
 fn uuid_str() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cloud_sync::runtime::{
+        run_cloud_sync_exclusive, wait_policy, CloudSyncRuntime, CloudSyncTrigger,
+    };
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    /// 记录一次工作区写步骤（模拟 reset/write）。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum WorkStep {
+        Begin(String),
+        Reset(String),
+        Write(String),
+        End(String),
+    }
+
+    /// Business Logic: 手动 sync 与 CLAUDE.md push 不得在同一 workdir 交错 reset/write。
+    /// Code Logic: 两任务经同一 CloudSyncRuntime Wait 门闸，记录步骤序列，断言无交错。
+    #[tokio::test]
+    async fn writers_do_not_overlap() {
+        let runtime = Arc::new(CloudSyncRuntime::new());
+        let log: Arc<Mutex<Vec<WorkStep>>> = Arc::new(Mutex::new(Vec::new()));
+        let first_entered = Arc::new(tokio::sync::Notify::new());
+
+        let run_flow = |name: &'static str,
+                        trigger: CloudSyncTrigger,
+                        rt: Arc<CloudSyncRuntime>,
+                        log: Arc<Mutex<Vec<WorkStep>>>,
+                        notify_enter: Option<Arc<tokio::sync::Notify>>| async move {
+            run_cloud_sync_exclusive(&rt, trigger, wait_policy(), || {
+                let log = log.clone();
+                let notify_enter = notify_enter.clone();
+                async move {
+                    {
+                        let mut g = log.lock().unwrap();
+                        g.push(WorkStep::Begin(name.into()));
+                    }
+                    if let Some(n) = notify_enter {
+                        n.notify_one();
+                    }
+                    // 模拟 reset
+                    {
+                        let mut g = log.lock().unwrap();
+                        g.push(WorkStep::Reset(name.into()));
+                    }
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                    // 模拟 write
+                    {
+                        let mut g = log.lock().unwrap();
+                        g.push(WorkStep::Write(name.into()));
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    {
+                        let mut g = log.lock().unwrap();
+                        g.push(WorkStep::End(name.into()));
+                    }
+                    Ok::<(), AppError>(())
+                }
+            })
+            .await
+        };
+
+        let rt1 = runtime.clone();
+        let log1 = log.clone();
+        let n1 = first_entered.clone();
+        let t1 = tokio::spawn(async move {
+            run_flow(
+                "manual",
+                CloudSyncTrigger::Manual,
+                rt1,
+                log1,
+                Some(n1),
+            )
+            .await
+        });
+
+        first_entered.notified().await;
+
+        let rt2 = runtime.clone();
+        let log2 = log.clone();
+        let t2 = tokio::spawn(async move {
+            run_flow(
+                "claude_md",
+                CloudSyncTrigger::ClaudeMdPush,
+                rt2,
+                log2,
+                None,
+            )
+            .await
+        });
+
+        let (r1, r2) = tokio::join!(t1, t2);
+        assert!(r1.unwrap().unwrap().is_some());
+        assert!(r2.unwrap().unwrap().is_some());
+
+        let steps = log.lock().unwrap().clone();
+        // 必须整段完成后再开始下一段：Begin..End 成对不交错
+        assert_eq!(
+            steps,
+            vec![
+                WorkStep::Begin("manual".into()),
+                WorkStep::Reset("manual".into()),
+                WorkStep::Write("manual".into()),
+                WorkStep::End("manual".into()),
+                WorkStep::Begin("claude_md".into()),
+                WorkStep::Reset("claude_md".into()),
+                WorkStep::Write("claude_md".into()),
+                WorkStep::End("claude_md".into()),
+            ],
+            "manual 与 claude_md 写流程不得交错: {steps:?}"
+        );
+    }
 }

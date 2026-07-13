@@ -414,6 +414,7 @@ pub async fn build_app_state(ui: Arc<dyn BackendUi>) -> Result<AppState, AppErro
         workbench_remote_event_bridges,
         workbench_dependency,
         cc_collector_cancel: Arc::new(Mutex::new(None)),
+        cloud_sync_runtime: Arc::new(crate::cloud_sync::CloudSyncRuntime::new()),
         cloud_sync_cancel: Arc::new(Mutex::new(None)),
         health,
         health_repo,

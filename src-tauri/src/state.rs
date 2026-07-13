@@ -23,6 +23,7 @@ use crate::storage::{
     ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, TransferRepo,
     WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
 };
+use crate::cloud_sync::CloudSyncRuntime;
 use crate::transfer::registry::TransferRegistry;
 use crate::updater::UpdateRuntime;
 use mdns_sd::ServiceDaemon;
@@ -97,6 +98,8 @@ pub struct AppState {
         Arc<crate::workbench::dependencies::WorkbenchDependencyInstallRuntime>,
     /// CC 历史采集器的取消令牌（应用退出时 cancel 优雅停止后台扫描任务）
     pub cc_collector_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// 云端同步（GitHub 私有仓库）工作区单飞门闸（手动/scheduler/CLAUDE.md push 共享）
+    pub cloud_sync_runtime: Arc<CloudSyncRuntime>,
     /// 云端同步（GitHub 私有仓库）后台 scheduler 的取消令牌（应用退出时 cancel 优雅停止）
     pub cloud_sync_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// 健康提醒运行时共享状态（状态机 + 贪睡/暂停标记，daemon task 与命令层共享同一份）
