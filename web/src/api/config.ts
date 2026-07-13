@@ -70,13 +70,19 @@ export const configApi = {
   downloadUpdate: (url: string, filename: string) =>
     invoke<{ ok: boolean; error?: string }>('download_update', { url, filename }),
 
-  /** 轮询下载进度状态（前端进度条）（M8 实现） */
+  /**
+   * 轮询更新状态（checking / downloading / installing 等）。
+   * 进度条仅对 downloading 有意义；installing 不伪造进度。
+   */
   getDownloadStatus: () => invoke<UpdateDownloadStatus>('get_download_status'),
 
   /** 取消正在进行的下载（M8 实现） */
   cancelDownload: () => invoke<{ ok: boolean; error?: string }>('cancel_download'),
 
-  /** 安装已下载的更新包并重启（进程随后退出）（M8 实现） */
+  /**
+   * 安装已下载的更新包并重启（进程随后退出）。
+   * 失败时状态回到 completed 且 error 非空，前端可展示重试安装。
+   */
   installUpdate: () => invoke<{ ok: boolean; error?: string }>('install_update'),
 
   /** 检查 macOS 权限状态（屏幕录制、输入监控）（M7 实现） */

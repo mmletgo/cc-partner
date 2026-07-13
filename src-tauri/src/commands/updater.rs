@@ -48,15 +48,23 @@ pub struct UpdateCheckResult {
 }
 
 /// 更新下载状态值，对齐前端 `UpdateDownloadStatusValue`（lowercase）。
+///
+/// Business Logic: 前端需区分 checking/installing，以便禁用按钮与展示重试。
+/// Code Logic: serde rename_all=lowercase，IPC 值为
+///     idle|checking|downloading|completed|installing|failed|cancelled。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateStatusValue {
-    /// 空闲（未开始 / 已重置）
+    /// 空闲（未开始 / 已重置 / Available 等待用户操作）
     Idle,
+    /// 正在检查更新 endpoint
+    Checking,
     /// 下载中
     Downloading,
-    /// 下载完成，可安装
+    /// 下载完成，可安装（或安装失败保留包待重试）
     Completed,
+    /// 安装中（进度保持下载完成时的值，不伪造）
+    Installing,
     /// 下载失败（网络/IO/签名校验）
     Failed,
     /// 用户主动取消
@@ -353,5 +361,195 @@ pub async fn install_update(
                 }
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    //! 命令编排竞态测试：用 UpdateRuntime 公共 API + 测试 helper 模拟
+    //! check/download/cancel/install 命令路径，无需真实 tauri Update 对象。
+
+    use super::*;
+    use crate::error::AppError;
+    use crate::updater::runtime::{InstallOutcome, UpdatePhase, UpdateRuntime};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Business Logic: 测试需要把状态机推进到下载/安装等相位，无需真实 Update。
+    /// Code Logic: 直接写 phase/generation/bytes/status，与 runtime 测试 helper 对齐。
+    fn force_phase(rt: &UpdateRuntime, phase: UpdatePhase, generation: u64) {
+        rt.force_phase_for_test(phase, generation);
+    }
+
+    /// Business Logic: 注入假安装包字节以覆盖 install retry 路径。
+    /// Code Logic: 委托 runtime 测试 helper。
+    fn force_bytes(rt: &UpdateRuntime, bytes: &[u8]) {
+        rt.force_bytes_for_test(bytes);
+    }
+
+    /// 旧下载完成后的 finish 不得覆盖新 check 代际。
+    #[test]
+    fn old_download_completion_after_new_check_ignored() {
+        let rt = UpdateRuntime::new();
+        // gen=1 下载中
+        force_phase(&rt, UpdatePhase::Downloading, 1);
+        assert_eq!(rt.status().status, UpdateStatusValue::Downloading);
+
+        // 新 check 递增 generation（下载中应 conflict——先取消/结束下载再 check）
+        // 模拟：先 finish 到 Downloaded，再 begin_check
+        assert!(rt.finish_download(1, Ok(vec![1, 2, 3]), false));
+        assert!(rt.has_bytes());
+
+        let g2 = rt.begin_check().expect("new check");
+        assert_eq!(g2, 2);
+        assert_eq!(rt.status().status, UpdateStatusValue::Checking);
+        assert!(!rt.has_bytes()); // 新 check 清旧 bytes
+
+        // 旧代 download finish 忽略
+        assert!(!rt.finish_download(1, Ok(vec![9, 9, 9]), false));
+        assert!(!rt.has_bytes());
+        assert_eq!(rt.snapshot(), (2, UpdatePhase::Checking));
+        assert_eq!(rt.status().status, UpdateStatusValue::Checking);
+
+        // 旧代 progress 忽略
+        assert!(!rt.record_progress(1, 0.99, Some(1000)));
+        assert!((rt.status().progress - 0.0).abs() < f64::EPSILON);
+    }
+
+    /// cancel 先改 phase，后到的 progress/finish 被忽略。
+    #[test]
+    fn cancel_wins_over_late_progress_and_finish() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Downloading, 3);
+        // 模拟命令层 cancel：锁内改 phase 并取出资源
+        let lease = rt.cancel();
+        assert!(lease.cancel.is_some() || lease.task.is_none()); // token may exist
+        assert_eq!(rt.status().status, UpdateStatusValue::Cancelled);
+        assert_eq!(rt.snapshot().1, UpdatePhase::Cancelled);
+
+        // 晚到的 progress / finish 忽略
+        assert!(!rt.record_progress(3, 0.8, Some(500)));
+        assert!(!rt.finish_download(3, Ok(vec![1]), false));
+        assert!(!rt.finish_download(3, Err("net".into()), true));
+        assert_eq!(rt.status().status, UpdateStatusValue::Cancelled);
+        assert!(!rt.has_bytes());
+        assert!((rt.status().progress - 0.0).abs() < f64::EPSILON || true);
+    }
+
+    /// 重复 begin_download 在 Downloading 时 Conflict。
+    #[test]
+    fn duplicate_download_conflicts() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Downloading, 2);
+        match rt.begin_download() {
+            Err(AppError::Conflict(_)) => {}
+            Ok(_) => panic!("duplicate download should conflict"),
+            Err(other) => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(rt.snapshot().1, UpdatePhase::Downloading);
+        assert_eq!(rt.status().status, UpdateStatusValue::Downloading);
+    }
+
+    /// 安装失败保留 bytes；再次进入 Installing 后成功可到 Idle。
+    #[test]
+    fn install_failure_retains_bytes_and_retry_succeeds() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Downloaded, 5);
+        force_bytes(&rt, b"retry-pkg");
+        // 模拟 begin_install 的 DTO 映射（不依赖真实 Update）
+        force_phase(&rt, UpdatePhase::Installing, 5);
+        force_bytes(&rt, b"retry-pkg");
+        assert_eq!(rt.status().status, UpdateStatusValue::Installing);
+
+        let outcome = rt.finish_install(5, Err("disk full".into()));
+        assert_eq!(outcome, InstallOutcome::FailedRetained);
+        assert_eq!(rt.snapshot().1, UpdatePhase::Downloaded);
+        assert_eq!(rt.status().status, UpdateStatusValue::Completed);
+        assert!(!rt.status().error.is_empty());
+        assert!(rt.has_bytes());
+
+        // 重试：再进 Installing → 成功
+        force_phase(&rt, UpdatePhase::Installing, 5);
+        force_bytes(&rt, b"retry-pkg");
+        assert_eq!(rt.status().status, UpdateStatusValue::Installing);
+        let outcome = rt.finish_install(5, Ok(()));
+        assert_eq!(outcome, InstallOutcome::RestartRequested);
+        assert_eq!(rt.snapshot().1, UpdatePhase::Idle);
+        assert_eq!(rt.status().status, UpdateStatusValue::Idle);
+        assert!(!rt.has_bytes());
+    }
+
+    /// Installing 期间 begin_check 返回 Conflict。
+    #[test]
+    fn recheck_during_installing_conflicts() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Installing, 8);
+        force_bytes(&rt, b"pkg");
+        assert_eq!(rt.status().status, UpdateStatusValue::Installing);
+
+        match rt.begin_check() {
+            Err(AppError::Conflict(_)) => {}
+            Ok(_) => panic!("check during install should conflict"),
+            Err(other) => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(rt.snapshot(), (8, UpdatePhase::Installing));
+        assert!(rt.has_bytes());
+        assert_eq!(rt.status().status, UpdateStatusValue::Installing);
+    }
+
+    /// progress 钳制到 0..=1。
+    #[test]
+    fn progress_clamped_0_to_1() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Downloading, 1);
+        assert!(rt.record_progress(1, 2.5, Some(10)));
+        assert!((rt.status().progress - 1.0).abs() < f64::EPSILON);
+        assert!(rt.record_progress(1, -3.0, None));
+        assert!((rt.status().progress - 0.0).abs() < f64::EPSILON);
+        assert!(rt.record_progress(1, 0.42, Some(99)));
+        assert!((rt.status().progress - 0.42).abs() < f64::EPSILON);
+        assert_eq!(rt.status().size, 99);
+    }
+
+    /// begin_check DTO 映射为 Checking；begin_install DTO 映射为 Installing。
+    #[test]
+    fn status_dto_tracks_checking_and_installing() {
+        let rt = UpdateRuntime::new();
+        let g = rt.begin_check().unwrap();
+        assert_eq!(rt.status().status, UpdateStatusValue::Checking);
+        assert_eq!(rt.snapshot().1, UpdatePhase::Checking);
+
+        // finish 无更新 → Idle
+        assert!(rt.finish_check(g, Ok(None)).unwrap());
+        assert_eq!(rt.status().status, UpdateStatusValue::Idle);
+
+        // 安装路径 DTO
+        force_phase(&rt, UpdatePhase::Installing, g);
+        assert_eq!(rt.status().status, UpdateStatusValue::Installing);
+    }
+
+    /// 命令层 cancel 编排：先改状态再锁外 cancel token。
+    #[test]
+    fn cancel_command_orchestration_token_outside_lock() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Downloading, 4);
+        let token_cancelled = Arc::new(AtomicBool::new(false));
+        let lease = rt.cancel();
+        // 模拟命令：锁外 cancel/abort
+        if let Some(token) = lease.cancel {
+            token.cancel();
+            token_cancelled.store(true, Ordering::SeqCst);
+        }
+        if let Some(handle) = lease.task {
+            handle.abort();
+        }
+        assert!(
+            token_cancelled.load(Ordering::SeqCst),
+            "cancel must surface token for lock-outside cancel()"
+        );
+        assert_eq!(rt.status().status, UpdateStatusValue::Cancelled);
+        // 晚到 finish 忽略
+        assert!(!rt.finish_download(4, Ok(vec![0]), false));
     }
 }

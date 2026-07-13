@@ -48,8 +48,8 @@ src/
 ├── hotkey.rs          — pynput→plugin 快捷键格式转换 + 注册/热更新  [M7 已实现]
 ├── tray.rs            — 系统托盘（Tauri 2 tray API）              [M7 已实现]
 ├── health/            — 久坐监测 daemon（state 状态机 + monitor 采样 + reminder 免打扰） [已实现]
-├── updater/           — 自动更新 generation 状态机（单锁 UpdateRuntime：check/download/cancel/install 相位 + generation 守卫）[S3 T5]
-└── commands/updater.rs — 自动更新 5 命令（check/download/status/cancel/install，对齐前端 types.ts；委托 UpdateRuntime）[M8 已实现]
+├── updater/           — 自动更新 generation 状态机（单锁 UpdateRuntime：check/download/cancel/install 相位 + generation 守卫；DTO status 含 checking/installing）[S3 T5/T6]
+└── commands/updater.rs — 自动更新 5 命令（check/download/status/cancel/install，对齐前端 types.ts；委托 UpdateRuntime；install 失败可重试）[M8/S3 T6]
 migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，全 CREATE TABLE IF NOT EXISTS 兼容旧库）
 ```
 
@@ -264,14 +264,14 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 - **签名密钥**：`npx tauri signer generate -w ~/.tauri/claude-partner.updater.key --password ""`（空密码，免 CI 配置）。私钥路径 `~/.tauri/claude-partner.updater.key`（**不进 git**），公钥 `~/.tauri/claude-partner.updater.key.pub` 的内容已入 tauri.conf.json 的 `plugins.updater.pubkey`（base64）。**M9 CI 需配 secret `TAURI_SIGNING_PRIVATE_KEY`**（值为私钥文件内容）；空密码则 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 可省。
 - **返回类型严格对齐前端 `web/src/lib/types.ts`（camelCase）**：
   - `UpdateCheckResult`（`commands/updater.rs::UpdateCheckResult`，`#[serde(rename_all="camelCase")]`）：`{hasUpdate, version?, body?, downloadUrl?, filename?, size?, error?}`。有更新：`{hasUpdate:true, version, body, downloadUrl(=update.download_url), filename(从 url 路径末段解析), size:Some(0)(check 阶段无 content_length)}`；无更新：全 None；检查异常：`{hasUpdate:false, error}`。
-  - `UpdateDownloadStatus`（`UpdateDownloadStatus`）：字段**全非可选**（前端 types.ts 定义 error/filePath/url/filename 为 string、size 为 number），故用 String/u64。`status` 枚举 serde lowercase 对齐 `'idle'|'downloading'|'completed'|'failed'|'cancelled'`；progress 0.0~1.0。filePath 恒空串（updater 下载到内存非文件）。
+  - `UpdateDownloadStatus`（`UpdateDownloadStatus`）：字段**全非可选**（前端 types.ts 定义 error/filePath/url/filename 为 string、size 为 number），故用 String/u64。`status` 枚举 serde lowercase 对齐 `'idle'|'checking'|'downloading'|'completed'|'installing'|'failed'|'cancelled'`；progress 0.0~1.0（安装中不伪造进度，保持下载完成值）。filePath 恒空串（updater 下载到内存非文件）。安装失败时 status 回 `completed` 且 error 非空、bytes 保留，允许重试安装。
   - download/cancel/install 返回 `{ok: boolean, error?: string}`（serde_json::Value）。
 - **5 个命令（commands/updater.rs，lib.rs invoke_handler 注册）**：
-  - `check_update(app, state)`：`UpdateRuntime::begin_check` 递增 generation（Downloading/Installing 时 Conflict）→ `app.updater()?.check().await` → `finish_check` 回写 Available/Idle/Failed。
+  - `check_update(app, state)`：`UpdateRuntime::begin_check` 递增 generation、DTO status=checking（Downloading/Installing 时 Conflict）→ `app.updater()?.check().await` → `finish_check` 回写 Available(status=idle)/Idle/Failed。
   - `download_update(app, state, url?, filename?)`：`begin_download` 取 lease（Update clone + cancel token + generation）→ spawn `update.download`，回调 `record_progress(generation, …)` / `finish_download`；`attach_download_task` 登记句柄。**url/filename 入参仅兼容前端透传**。
   - `get_download_status(state)`：读 `state.update_runtime.status()` 返回 `UpdateDownloadStatus`。
   - `cancel_download(state)`：`UpdateRuntime::cancel` 锁内原子取出 token/handle 并置 Cancelled，锁外 `token.cancel()` + `handle.abort()`。
-  - `install_update(app, state)`：`begin_install` 克隆 `Arc<[u8]>`（不 take）→ `spawn_blocking(install)` → `finish_install`：成功 RestartRequested 后 `request_restart`；失败 FailedRetained 回到 Downloaded 保留 bytes 供重试。
+  - `install_update(app, state)`：`begin_install` 置 DTO status=installing，克隆 `Arc<[u8]>`（不 take）→ `spawn_blocking(install)` → `finish_install`：成功 RestartRequested（phase/status=Idle）后 `request_restart`；失败 FailedRetained 回到 Downloaded/status=completed + error，保留 bytes 供重试。
 - **updater 生命周期 / generation**：`Update` 是 owned Clone；权威状态在 `AppState.update_runtime: Arc<UpdateRuntime>`（单 `std::sync::Mutex`）。generation **仅** `begin_check` 递增；下载进度/完成与安装完成必须 generation+phase 匹配，旧代回调忽略。新 check 清旧 bytes。锁内不做网络/安装。
 - **取消机制**：`download(on_chunk, on_finish)` 无原生取消参数；download 放 `tauri::async_runtime::spawn`，JoinHandle 由 runtime 持有；cancel 先改 phase 再 abort。
 - **AppState 扩展**：`update_runtime: Arc<UpdateRuntime>`（替代原先五字段 `update_status/update_pending/update_bytes/update_download_task/update_cancel_token`）。
