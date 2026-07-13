@@ -1397,23 +1397,17 @@ async fn transition_verified_task_to_human_review(
 
 /// Business Logic（为什么需要这个函数）:
 ///     verifier 判定失败后只有仍处于 Verifying 的任务可以回到 Preparing，避免用户 Abort 被旧流程覆盖。
+///     修复轮 prepare 强制要求非空 claim token，转换时必须原子签发。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用仓储 split-state 条件 helper 做 Verifying->Preparing/Rework/Preparing/Failed；未命中时读取当前任务并标记未转换。
+///     调用专用 Verifying→Preparing helper，同时写入 Rework/Preparing/Failed 并签发 prepare_claim_token；
+///     未命中时读取当前任务并标记未转换。
 async fn transition_failed_verification_task_to_preparing(
     repo: &OrchestratorRepo,
     task_id: &str,
 ) -> Result<ConditionalRepairTransition, AppError> {
     match repo
-        .try_transition_task_split_state(
-            task_id,
-            OrchestratorTaskStatus::Verifying,
-            OrchestratorTaskStatus::Preparing,
-            OrchestratorWorkflowState::Rework,
-            OrchestratorRunState::Preparing,
-            Some(OrchestratorAttemptPhase::Failed),
-            None,
-        )
+        .try_transition_verifying_to_preparing_with_claim(task_id)
         .await?
     {
         Some(task) => Ok(ConditionalRepairTransition {
@@ -4425,6 +4419,14 @@ mod tests {
             persisted.attempt_phase,
             Some(OrchestratorAttemptPhase::Failed)
         );
+        let token = persisted
+            .prepare_claim_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .expect("repair transition must issue claim token");
+        assert!(!token.is_empty());
+        assert_eq!(transition.task.prepare_claim_token.as_deref(), Some(token));
     }
 
     /// Business Logic（为什么需要这个函数）:

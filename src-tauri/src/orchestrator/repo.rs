@@ -1321,21 +1321,23 @@ impl OrchestratorRepo {
 
     /// Business Logic（为什么需要这个函数）:
     ///     Runner 准备阶段需要持续反馈 PreparingWorkspace/BuildingPrompt/Streaming 等细分进度，方便用户判断当前卡点。
+    ///     claim 世代隔离要求：旧 token 的 phase CAS 未命中时绝不能伪装成成功并让 runner 继续。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     仅在任务仍处于 Preparing 时更新 attempt_phase 和 updated_at；Running 后必须改用 active runner guard helper。
+    ///     仅在任务仍处于 Preparing 且 prepare_claim_token 匹配时更新 attempt_phase 和 updated_at；
+    ///     命中返回 Some(row)；token/status 不匹配返回 None（任务存在性仍校验）；Running 后必须改用 active runner guard helper。
     pub async fn update_task_attempt_phase(
         &self,
         task_id: &str,
         phase: OrchestratorAttemptPhase,
         prepare_claim_token: &str,
-    ) -> Result<OrchestratorTaskRow, AppError> {
+    ) -> Result<Option<OrchestratorTaskRow>, AppError> {
         let token = prepare_claim_token.trim();
         if token.is_empty() {
             return Err(AppError::generic("Preparing claim token 不能为空"));
         }
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE orchestrator_tasks \
              SET attempt_phase = ?, updated_at = ? \
              WHERE id = ? AND status = ? AND prepare_claim_token = ?",
@@ -1347,7 +1349,11 @@ impl OrchestratorRepo {
         .bind(token)
         .execute(&self.pool)
         .await?;
-        self.get_task(task_id).await
+        if result.rows_affected() == 1 {
+            return self.get_task(task_id).await.map(Some);
+        }
+        self.get_task(task_id).await?;
+        Ok(None)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1644,6 +1650,45 @@ impl OrchestratorRepo {
         .bind(now)
         .bind(task_id)
         .bind(expected_status.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(task_id).await.map(Some);
+        }
+
+        self.get_task(task_id).await?;
+        Ok(None)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     verifier failed 自动修复轮必须原子地 Verifying→Preparing 并签发新 prepare_claim_token，
+    ///     否则 prepare_runner_attempt 因空 token 直接失败并被误标 Blocked。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当 status=Verifying 时写入 Preparing/Rework/Preparing/Failed phase，并签发 UUID claim token；
+    ///     命中返回 Some(row)；未命中确认任务存在后返回 None。
+    pub async fn try_transition_verifying_to_preparing_with_claim(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<OrchestratorTaskRow>, AppError> {
+        let now = Utc::now().to_rfc3339();
+        let claim_token = Uuid::new_v4().to_string();
+        let result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                 blocked_reason = ?, prepare_claim_token = ?, updated_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(OrchestratorWorkflowState::Rework.as_str())
+        .bind(OrchestratorRunState::Preparing.as_str())
+        .bind(OrchestratorAttemptPhase::Failed.as_str())
+        .bind(Option::<&str>::None)
+        .bind(&claim_token)
+        .bind(now)
+        .bind(task_id)
+        .bind(OrchestratorTaskStatus::Verifying.as_str())
         .execute(&self.pool)
         .await?;
 
@@ -4444,6 +4489,118 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     旧 runner 在 phase CAS 未命中时若采用返回行的新 token，会绕过 claim 世代隔离继续 prepare。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     claim token-A → 回收 → 再 claim token-B；旧 token-A 的 update_task_attempt_phase 必须返回 None，
+    ///     且不得把 phase 写成旧 runner 想写的值覆盖新 claim。
+    #[tokio::test]
+    async fn update_task_attempt_phase_miss_returns_none_on_stale_claim_token() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        let created = task_row(
+            "task-phase-aba",
+            "project-1",
+            OrchestratorTaskStatus::Queued,
+        );
+        repo.create_task(&created).await.unwrap();
+        let claimed = repo
+            .claim_next_local_queued_tasks_with_global_capacity(1)
+            .await
+            .unwrap();
+        let token_a = claimed[0]
+            .prepare_claim_token
+            .clone()
+            .expect("claim 必须签发 token");
+
+        let recovered = repo
+            .recover_stale_local_preparing_tasks(std::time::Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(recovered, 1);
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET status = 'queued', workflow_state = 'todo', run_state = 'idle',              prepare_claim_token = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind("task-phase-aba")
+        .execute(&pool)
+        .await
+        .unwrap();
+        let claimed2 = repo
+            .claim_next_local_queued_tasks_with_global_capacity(1)
+            .await
+            .unwrap();
+        let token_b = claimed2[0]
+            .prepare_claim_token
+            .clone()
+            .expect("新 claim 必须签发新 token");
+        assert_ne!(token_a, token_b);
+
+        let miss = repo
+            .update_task_attempt_phase(
+                "task-phase-aba",
+                OrchestratorAttemptPhase::BuildingPrompt,
+                &token_a,
+            )
+            .await
+            .unwrap();
+        assert!(miss.is_none(), "旧 token phase CAS 必须 miss");
+
+        let hit = repo
+            .update_task_attempt_phase(
+                "task-phase-aba",
+                OrchestratorAttemptPhase::PreparingWorkspace,
+                &token_b,
+            )
+            .await
+            .unwrap()
+            .expect("新 token 必须命中");
+        assert_eq!(
+            hit.attempt_phase,
+            Some(OrchestratorAttemptPhase::PreparingWorkspace)
+        );
+        assert_eq!(hit.prepare_claim_token.as_deref(), Some(token_b.as_str()));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     verifier failed 修复转换必须签发 claim token，否则 repair prepare 会因空 token 失败。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Verifying 任务调用 try_transition_verifying_to_preparing_with_claim，断言 Preparing/Rework
+    ///     且 prepare_claim_token 非空。
+    #[tokio::test]
+    async fn verifying_to_preparing_with_claim_issues_token() {
+        let (_pool, repo) = setup_repo().await;
+        let task = task_row(
+            "task-verify-claim",
+            "project-1",
+            OrchestratorTaskStatus::Verifying,
+        );
+        repo.create_task(&task).await.unwrap();
+
+        let updated = repo
+            .try_transition_verifying_to_preparing_with_claim(&task.id)
+            .await
+            .unwrap()
+            .expect("Verifying 任务应转换");
+        assert_eq!(updated.status, OrchestratorTaskStatus::Preparing);
+        assert_eq!(updated.workflow_state, OrchestratorWorkflowState::Rework);
+        assert_eq!(updated.run_state, OrchestratorRunState::Preparing);
+        assert_eq!(
+            updated.attempt_phase,
+            Some(OrchestratorAttemptPhase::Failed)
+        );
+        let token = updated
+            .prepare_claim_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .expect("修复轮必须签发 claim token");
+        assert!(!token.is_empty());
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     显式 startTask 动作需要把草稿或待办任务放入 scheduler 可领取路径，而不是直接进入交付或清理现场。
     ///
     /// Code Logic（这个函数做什么）:
@@ -5534,7 +5691,8 @@ mod tests {
         let updated = repo
             .update_task_attempt_phase(&task.id, OrchestratorAttemptPhase::BuildingPrompt, "tok")
             .await
-            .unwrap();
+            .unwrap()
+            .expect("matching claim token must hit phase CAS");
 
         assert_eq!(
             updated.attempt_phase,

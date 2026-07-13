@@ -193,6 +193,27 @@ pub fn repo_root(path: &Path) -> Result<String, AppError> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     linked worktree 的 `--show-toplevel` 返回 worktree 自身路径，不能用来判断是否属于同一仓库；
+///     归属校验必须比较共享的 git 对象库目录。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 `git rev-parse --git-common-dir`，规范化为绝对 canonical 路径后返回。
+pub fn git_common_dir(path: &Path) -> Result<PathBuf, AppError> {
+    let output = run_git(path, &["rev-parse", "--git-common-dir"])?;
+    let common = output.trim();
+    if common.is_empty() {
+        return Err(AppError::generic("无法解析 git common dir"));
+    }
+    let raw = PathBuf::from(common);
+    let absolute = if raw.is_absolute() {
+        raw
+    } else {
+        path.join(raw)
+    };
+    Ok(absolute.canonicalize().unwrap_or(absolute))
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     Workbench 需要展示当前项目下 Git 已知的全部 worktree，便于和本地记录对齐。
 ///
 /// Code Logic（这个函数做什么）:
@@ -210,7 +231,8 @@ pub fn list_worktrees(repo_path: &Path, main_path: &str) -> Result<Vec<ParsedWor
 ///     1) 拒绝 symlink/reparse 与非目录；
 ///     2) 在 owning repo 上执行 `git worktree list --porcelain`；
 ///     3) 要求存在 canonical path 匹配项，且 branch 与请求分支一致；
-///     4) 用 worktree 内 `rev-parse --show-toplevel` 再确认所属仓库根与 repo_root 一致。
+///     4) 比较 owning repo 与 worktree 的 canonical `git rev-parse --git-common-dir`
+///        （linked worktree 的 toplevel 是自身，不能用 show-toplevel 做归属判断）。
 ///     未注册残留目录 / 分支不匹配 / 跨仓路径 → AppError（conflict 语义用 Bad）。
 pub fn verify_registered_worktree(
     owning_repo: &Path,
@@ -282,15 +304,15 @@ pub fn verify_registered_worktree(
         )));
     }
 
-    // 二次确认：worktree 内 toplevel 必须仍是同一 owning repo。
-    let wt_root = repo_root(&expected_canon)?;
-    let wt_root_path = Path::new(&wt_root)
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(&wt_root));
-    if owning_canon != wt_root_path {
+    // 二次确认：owning repo 与 worktree 必须共享同一 git-common-dir（支持 linked worktree）。
+    let owning_common = git_common_dir(&owning_canon)?;
+    let wt_common = git_common_dir(&expected_canon)?;
+    if owning_common != wt_common {
         return Err(AppError::conflict(format!(
-            "目标 worktree 不属于当前项目仓库: {} (toplevel={wt_root})",
-            worktree_path.display()
+            "目标 worktree 不属于当前项目仓库: {} (owning_common={}, wt_common={})",
+            worktree_path.display(),
+            owning_common.display(),
+            wt_common.display()
         )));
     }
     Ok(expected_canon)
@@ -1172,6 +1194,76 @@ UU web/src/App.tsx
         assert_eq!(branch_slug("feat/worktree ui!!"), "feat-worktree-ui");
         assert_eq!(branch_slug("  hotfix  "), "hotfix");
         assert_eq!(branch_slug("///"), "worktree");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Retry/崩溃恢复必须能复用合法 linked worktree，不能因 toplevel!=main 误判跨仓。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     真实临时仓库创建 linked worktree 后调用 verify_registered_worktree，断言 Ok。
+    #[test]
+    fn verify_registered_worktree_accepts_linked_worktree() {
+        let root = temp_git_dir("workbench-verify-linked-wt");
+        let repo = root.join("repo");
+        let worktree = root.join("linked-wt");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "main"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+        create_worktree(&repo, &worktree, "feature/reuse", Some("HEAD"))
+            .expect("create linked worktree");
+
+        let verified = verify_registered_worktree(&repo, &worktree, "feature/reuse")
+            .expect("linked worktree must verify");
+        assert_eq!(
+            verified,
+            worktree.canonicalize().unwrap_or(worktree.clone())
+        );
+
+        let _ = remove_worktree(&repo, &worktree, true);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     跨仓路径绝不能被当成当前项目 worktree 复用，否则会在错误仓库启动 Runner。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     两个独立仓库；对 A 校验 B 的路径，断言 conflict。
+    #[test]
+    fn verify_registered_worktree_rejects_cross_repo_path() {
+        let root = temp_git_dir("workbench-verify-cross-repo");
+        let repo_a = root.join("repo-a");
+        let repo_b = root.join("repo-b");
+        for repo in [&repo_a, &repo_b] {
+            fs::create_dir_all(repo).expect("create repo dir");
+            git_test_command(repo, &["init"]);
+            git_test_command(repo, &["checkout", "-b", "main"]);
+            git_test_command(repo, &["config", "user.email", "test@example.com"]);
+            git_test_command(repo, &["config", "user.name", "Workbench Test"]);
+            fs::write(repo.join("README.md"), "base\n").expect("write base");
+            git_test_command(repo, &["add", "README.md"]);
+            git_test_command(repo, &["commit", "-m", "initial"]);
+        }
+        let worktree_b = root.join("b-wt");
+        create_worktree(&repo_b, &worktree_b, "feature/b", Some("HEAD")).expect("create b wt");
+
+        let err = verify_registered_worktree(&repo_a, &worktree_b, "feature/b")
+            .expect_err("cross-repo must reject");
+        let message = err.to_string();
+        assert!(
+            message.contains("不属于当前项目仓库")
+                || message.contains("不是 owning 仓库已注册")
+                || message.contains("conflict")
+                || message.contains("冲突"),
+            "unexpected error: {message}"
+        );
+
+        let _ = remove_worktree(&repo_b, &worktree_b, true);
+        let _ = fs::remove_dir_all(root);
     }
 
     /// Business Logic（为什么需要这个测试）:

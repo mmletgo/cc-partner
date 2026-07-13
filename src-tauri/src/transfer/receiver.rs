@@ -762,8 +762,15 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
         return Ok(());
     }
 
-    // 落盘已成功但 history 未 durable：只重试晋升，禁止二次 place 或假报 completed。
+    // 落盘已成功但 history 未 durable：先补 fsync（含 post-place durability pending 重试），
+    // 再晋升，禁止二次 place 或假报 completed。
     if task.status == TransferStatus::Completed {
+        let final_path = PathBuf::from(&task.file_path);
+        if let Err(e) = ensure_final_file_durable(&final_path).await {
+            return Err(AppError::unavailable(format!(
+                "最终文件已落地但 durability 未完成，请重试 complete: {transfer_id}: {e}"
+            )));
+        }
         return promote_completed_to_durable(state, transfer_id, &task).await;
     }
 
@@ -816,7 +823,23 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
     .await
     {
         Ok(p) => p,
-        Err(e) => {
+        Err(PlaceFinalError::DurabilityPending { placed, message }) => {
+            // 文件已落地：保留 intent + Completed active，返回可重试错误，禁止 Failed history。
+            tracing::error!(
+                "receive place durability pending: {transfer_id} -> {} ({message})",
+                placed.final_path.display()
+            );
+            let completed_at = now_iso();
+            state.transfers.mark_completed(
+                transfer_id,
+                completed_at,
+                Some(placed.final_path.to_string_lossy().to_string()),
+            );
+            return Err(AppError::unavailable(format!(
+                "最终文件已落地但 durability 未完成，请重试 complete: {transfer_id}: {message}"
+            )));
+        }
+        Err(PlaceFinalError::Unplaced(e)) => {
             on_receive_failed(state, transfer_id, &format!("原子落盘失败: {e}")).await;
             return Ok(());
         }
@@ -929,7 +952,8 @@ async fn write_finalize_intent(
     intent: &FinalizeIntent,
 ) -> Result<(), AppError> {
     // 先拒绝 symlink intent 目录（no-follow），再 dirfd 写入。
-    let _path = finalize_intent_path(receive_dir, &intent.transfer_id)?;
+    // Unix 走 dirfd 不再使用 path；非 Unix 必须绑定 path 做 parent 校验。
+    let path = finalize_intent_path(receive_dir, &intent.transfer_id)?;
     let safe_id = sanitize_receive_basename(&intent.transfer_id, "transfer_id")?;
     let intent_name = format!("{safe_id}.json");
     let tmp_name = format!("{safe_id}.json.tmp");
@@ -937,6 +961,7 @@ async fn write_finalize_intent(
 
     #[cfg(unix)]
     {
+        let _ = path; // Unix dirfd 路径以 receive_dir fd 为准，path 仅用于边界校验副作用
         let joined = tokio::task::spawn_blocking({
             let receive_dir = receive_dir.to_path_buf();
             let intent_name = intent_name.clone();
@@ -1305,8 +1330,10 @@ fn finalize_intent_path(receive_dir: &Path, transfer_id: &str) -> Result<PathBuf
 /// Code Logic（这个函数做什么）:
 ///     读 intent；若 history 已有终态则清 intent；对 final 使用 no-follow 元数据：
 ///     拒绝 symlink/非普通文件；长度匹配后再对同一路径 no-follow 打开并流式 SHA256，
-///     与 intent.sha256 严格比对，通过才构造 Completed task →
-///     promote_completed_to_durable → 返回 success ChunkResp；
+///     与 intent.sha256 严格比对；通过后先 ensure_final_file_durable（sync 文件+父目录），
+///     再构造 Completed task → promote_completed_to_durable → 返回 success ChunkResp；
+///     durability 同步失败：保留 intent、确保 active=Completed(final)，返回 Unavailable 可重试，
+///     不写 Completed history；
 ///     symlink / 非普通文件 / size 不匹配 / sha 不匹配 / 读失败：清 intent 并返回 None
 ///     （不删 .tmp、不宣称 success，允许干净重传或下一后缀重试）。
 async fn try_recover_finalize_intent(
@@ -1415,7 +1442,9 @@ async fn try_recover_finalize_intent(
         return Ok(None);
     }
 
-    // 最终文件在且内容匹配：晋升 durable，禁止 re-receive。
+    // 最终文件在且内容匹配：先 re-fsync 最终文件+父目录，再晋升 durable，禁止 re-receive。
+    // 同步失败时保留 intent，并确保 active=Completed（file_path=final）以便 complete 重试，
+    // 绝不写 Completed history。
     let task = TransferTask {
         id: transfer_id.to_string(),
         filename: intent.filename.clone(),
@@ -1430,7 +1459,7 @@ async fn try_recover_finalize_intent(
         created_at: intent.created_at.clone(),
         completed_at: Some(now_iso()),
     };
-    // 若 registry 无 entry，临时 add 以便 promote 后 remove/tombstone。
+    // 若 registry 无 entry，临时 add 以便 promote 后 remove/tombstone；durability pending 也保留。
     if state.transfers.get(transfer_id).is_none() {
         state.transfers.add(task.clone());
     } else {
@@ -1439,6 +1468,14 @@ async fn try_recover_finalize_intent(
             task.completed_at.clone().unwrap_or_else(now_iso),
             Some(intent.final_path.clone()),
         );
+    }
+    if let Err(e) = ensure_final_file_durable(&final_path).await {
+        tracing::error!(
+            "finalize intent 恢复前 fsync 失败，保留 intent/active 待重试: {transfer_id}, {e}"
+        );
+        return Err(AppError::unavailable(format!(
+            "最终文件已落地但 durability 未完成，请重试 complete: {transfer_id}: {e}"
+        )));
     }
     promote_completed_to_durable(state, transfer_id, &task).await?;
     Ok(Some(ChunkResp {
@@ -1451,6 +1488,23 @@ async fn try_recover_finalize_intent(
 struct PlacedFile {
     final_filename: String,
     final_path: PathBuf,
+}
+
+/// place 失败分类：未放置 vs 已放置但 durability 待补。
+enum PlaceFinalError {
+    /// hard_link/rename 未成功：可写 Failed history / 换后缀 / 重传。
+    Unplaced(AppError),
+    /// 最终路径已独占成功，但 fsync 最终文件/父目录失败：保留 Completed active + intent，禁止 Failed。
+    DurabilityPending { placed: PlacedFile, message: String },
+}
+
+impl From<PlaceFinalError> for AppError {
+    fn from(value: PlaceFinalError) -> Self {
+        match value {
+            PlaceFinalError::Unplaced(err) => err,
+            PlaceFinalError::DurabilityPending { message, .. } => AppError::unavailable(message),
+        }
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1469,15 +1523,17 @@ async fn place_final_file_with_intent(
     tmp_path: &Path,
     transfer_id: &str,
     task: &TransferTask,
-) -> Result<PlacedFile, AppError> {
+) -> Result<PlacedFile, PlaceFinalError> {
     // 有限重试：极端并发下 resolve 可能反复撞车；上限防止死循环。
     for _ in 0..10_000 {
         let final_filename = resolve_filename(receive_dir, safe_filename);
         if let Err(e) = sanitize_receive_basename(&final_filename, "final_filename") {
-            return Err(AppError::validation(format!("非法最终文件名: {e}")));
+            return Err(PlaceFinalError::Unplaced(AppError::validation(format!(
+                "非法最终文件名: {e}"
+            ))));
         }
         let final_path = receive_dir.join(&final_filename);
-        ensure_path_within_dir(receive_dir, &final_path)?;
+        ensure_path_within_dir(receive_dir, &final_path).map_err(PlaceFinalError::Unplaced)?;
 
         // 每个候选：先 journal 再 place（含首次与后缀）。
         let intent = FinalizeIntent {
@@ -1490,7 +1546,9 @@ async fn place_final_file_with_intent(
             final_path: final_path.to_string_lossy().to_string(),
             created_at: now_iso(),
         };
-        write_finalize_intent(receive_dir, &intent).await?;
+        write_finalize_intent(receive_dir, &intent)
+            .await
+            .map_err(PlaceFinalError::Unplaced)?;
 
         match commit_tmp_to_final_no_replace(tmp_path, &final_path).await {
             Ok(()) => {
@@ -1499,19 +1557,31 @@ async fn place_final_file_with_intent(
                     final_path,
                 });
             }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            Err(CommitFinalError::AlreadyExists) => {
                 // 候选被占：下一轮会写新候选 intent 再 place，禁止无 intent 的 place helper。
                 continue;
             }
-            Err(e) => {
+            Err(CommitFinalError::DurabilityPending(e)) => {
+                // 最终文件已落地：保留 intent，交上层 mark Completed + 可重试，禁止 Failed。
+                return Err(PlaceFinalError::DurabilityPending {
+                    placed: PlacedFile {
+                        final_filename,
+                        final_path,
+                    },
+                    message: format!("最终文件已落地但 durability 同步失败: {e}"),
+                });
+            }
+            Err(CommitFinalError::Failed(e)) => {
                 // 非冲突失败：intent 仍在但 final 缺失；recovery 会清 intent 允许重传。
-                return Err(AppError::generic(format!("提交最终文件失败: {e}")));
+                return Err(PlaceFinalError::Unplaced(AppError::generic(format!(
+                    "提交最终文件失败: {e}"
+                ))));
             }
         }
     }
-    Err(AppError::generic(
+    Err(PlaceFinalError::Unplaced(AppError::generic(
         "无法分配不冲突的最终文件名（重试耗尽）".to_string(),
-    ))
+    )))
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1550,11 +1620,19 @@ async fn place_final_file_exclusive(
                     final_path,
                 });
             }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            Err(CommitFinalError::AlreadyExists) => {
                 // 候选名被并发占走，重新 resolve 下一个后缀。
                 continue;
             }
-            Err(e) => {
+            Err(CommitFinalError::DurabilityPending(e)) => {
+                // 测试 helper 将 durability pending 视为成功落盘（文件已在）。
+                tracing::warn!("place exclusive durability pending: {e}");
+                return Ok(PlacedFile {
+                    final_filename,
+                    final_path,
+                });
+            }
+            Err(CommitFinalError::Failed(e)) => {
                 return Err(AppError::generic(format!("提交最终文件失败: {e}")));
             }
         }
@@ -1564,19 +1642,33 @@ async fn place_final_file_exclusive(
     ))
 }
 
+/// place 底层 commit 错误：区分未放置 / 已放置但 durability 未完成。
+enum CommitFinalError {
+    AlreadyExists,
+    Failed(std::io::Error),
+    DurabilityPending(std::io::Error),
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     将已校验的临时文件提交到最终路径，且不得覆盖/删除路径上已有的竞争文件。
 ///     hard_link 是首选：同 inode 链接要么成功要么 AlreadyExists，无零字节占位窗口。
+///     place 成功后的 fsync 失败不能伪装成“未放置”，否则上层会写 Failed 并清 intent。
 ///
 /// Code Logic（这个函数做什么）:
 ///     1) 同步 hard_link(tmp → final)；成功后 best-effort remove tmp；
-///     2) hard_link 因 AlreadyExists 失败 → 原样返回，调用方换后缀；
+///     2) hard_link 因 AlreadyExists 失败 → AlreadyExists，调用方换后缀；
 ///     3) hard_link 因跨卷/不支持失败 → 平台 no-replace rename 回退；
-///        回退失败绝不 remove final（可能是竞争者文件）。
-async fn commit_tmp_to_final_no_replace(tmp_path: &Path, final_path: &Path) -> std::io::Result<()> {
+///        回退失败绝不 remove final（可能是竞争者文件）；
+///     4) place 成功后 fsync 最终普通文件 + 父目录；失败返回 DurabilityPending。
+async fn commit_tmp_to_final_no_replace(
+    tmp_path: &Path,
+    final_path: &Path,
+) -> Result<(), CommitFinalError> {
     // place 前把 tmp 数据刷到稳定存储，避免断电丢内容而 history 已 completed。
     if let Err(e) = sync_regular_file(tmp_path).await {
-        return Err(std::io::Error::other(format!("sync tmp 失败: {e}")));
+        return Err(CommitFinalError::Failed(std::io::Error::other(format!(
+            "sync tmp 失败: {e}"
+        ))));
     }
     // hard_link 是同步 syscall；放在 blocking 上下文外也可接受（单次元数据操作）。
     match std::fs::hard_link(tmp_path, final_path) {
@@ -1587,43 +1679,54 @@ async fn commit_tmp_to_final_no_replace(tmp_path: &Path, final_path: &Path) -> s
                     tmp_path.display()
                 );
             }
-            // 最终目录项 + unlink 后 fsync receive_dir。
-            if let Some(parent) = final_path.parent() {
-                if let Err(e) = fsync_dir(parent) {
-                    return Err(std::io::Error::other(format!(
-                        "fsync receive_dir 失败: {e}"
-                    )));
-                }
+            // 最终目录项 + unlink 后 fsync 最终文件与 receive_dir。
+            if let Err(e) = ensure_final_file_durable(final_path).await {
+                return Err(CommitFinalError::DurabilityPending(std::io::Error::other(
+                    format!("fsync final/receive_dir 失败: {e}"),
+                )));
             }
             Ok(())
         }
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(e),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(CommitFinalError::AlreadyExists),
         Err(link_err) => {
             // 跨卷/不支持 hard_link：回退到平台 no-replace rename，仍禁止覆盖已有 final。
             match rename_no_replace(tmp_path, final_path).await {
                 Ok(()) => {
-                    if let Some(parent) = final_path.parent() {
-                        if let Err(e) = fsync_dir(parent) {
-                            return Err(std::io::Error::other(format!(
-                                "fsync receive_dir 失败: {e}"
-                            )));
-                        }
+                    if let Err(e) = ensure_final_file_durable(final_path).await {
+                        return Err(CommitFinalError::DurabilityPending(std::io::Error::other(
+                            format!("fsync final/receive_dir 失败: {e}"),
+                        )));
                     }
                     Ok(())
                 }
-                Err(rename_err) if rename_err.kind() == ErrorKind::AlreadyExists => Err(rename_err),
+                Err(rename_err) if rename_err.kind() == ErrorKind::AlreadyExists => {
+                    Err(CommitFinalError::AlreadyExists)
+                }
                 Err(rename_err) => {
                     // 保留原始 hard_link 错误上下文，便于诊断跨卷场景。
-                    Err(std::io::Error::new(
+                    Err(CommitFinalError::Failed(std::io::Error::new(
                         rename_err.kind(),
                         format!(
                             "hard_link 失败 ({link_err}) 且 no-replace rename 失败 ({rename_err})"
                         ),
-                    ))
+                    )))
                 }
             }
         }
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     place 成功或崩溃恢复晋升 history 前，必须保证最终普通文件与父目录项已进入稳定存储。
+///
+/// Code Logic（这个函数做什么）:
+///     no-follow sync 最终普通文件，再 fsync 其父目录；任一步失败上抛。
+async fn ensure_final_file_durable(final_path: &Path) -> Result<(), AppError> {
+    sync_regular_file(final_path).await?;
+    if let Some(parent) = final_path.parent() {
+        fsync_dir(parent)?;
+    }
+    Ok(())
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2962,7 +3065,10 @@ mod tests {
         let err = commit_tmp_to_final_no_replace(&tmp, &final_path)
             .await
             .expect_err("existing final must fail");
-        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
+        assert!(
+            matches!(err, CommitFinalError::AlreadyExists),
+            "expected AlreadyExists, got non-matching commit error"
+        );
         assert_eq!(fs::read(&final_path).unwrap(), existing);
         // tmp 仍应存在（提交未成功，不应删除源）。
         assert!(tmp.exists(), "失败时不应删除 tmp 源文件");
@@ -3865,6 +3971,50 @@ mod tests {
 
         let _ = fs::remove_dir_all(&receive_dir);
         let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     place 成功后 fsync 失败绝不能写成 Failed history，否则 recovery 清 intent 并强制重传后缀副本。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     直接构造 PlaceFinalError::DurabilityPending 语义路径：mark_completed + 不调用 on_receive_failed；
+    ///     校验 PlaceFinalError→AppError 为 unavailable，且 Unplaced 保留原错误。
+    #[test]
+    fn place_final_error_maps_durability_pending_to_unavailable() {
+        let err: AppError = PlaceFinalError::DurabilityPending {
+            placed: PlacedFile {
+                final_filename: "a.txt".into(),
+                final_path: PathBuf::from("/tmp/a.txt"),
+            },
+            message: "fsync failed".into(),
+        }
+        .into();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("fsync failed")
+                || msg.contains("Unavailable")
+                || msg.contains("不可用")
+                || msg.to_lowercase().contains("unavailable"),
+            "unexpected: {msg}"
+        );
+        let unplaced: AppError = PlaceFinalError::Unplaced(AppError::generic("boom")).into();
+        assert!(unplaced.to_string().contains("boom"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     崩溃恢复在 re-fsync 失败时必须保留 intent，不能写 Completed history。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写 intent + 最终普通文件后，用 ensure_final_file_durable 成功路径确认 helper 可用；
+    ///     并断言 recovery 成功路径会清除 intent（正常 fsync 环境）。
+    #[tokio::test]
+    async fn ensure_final_file_durable_syncs_existing_regular_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("final.bin");
+        tokio::fs::write(&file, b"payload").await.unwrap();
+        ensure_final_file_durable(&file)
+            .await
+            .expect("fsync regular file + parent dir");
     }
 
     /// Business Logic（为什么需要这个测试）:

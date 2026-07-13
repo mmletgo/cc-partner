@@ -125,25 +125,23 @@ pub async fn prepare_runner_attempt(
         .ok_or_else(|| AppError::generic("Preparing 任务缺少 claim token，拒绝继续 prepare"))?
         .to_string();
 
-    let preparing_task = state
+    // phase CAS 必须返回 hit/miss：miss 时绝不能采用 DB 中另一世代的 token 继续 prepare。
+    let Some(preparing_task) = state
         .orchestrator_repo
         .update_task_attempt_phase(
             &task.id,
             OrchestratorAttemptPhase::PreparingWorkspace,
             &claim_token,
         )
-        .await?;
+        .await?
+    else {
+        // claim 已过期/被回收/重新签发：旧 runner 立即终止。
+        return state.orchestrator_repo.get_task(&task.id).await;
+    };
     if preparing_task.status != OrchestratorTaskStatus::Preparing {
         return Ok(preparing_task);
     }
-    // claim 被回收/重发后 token 会变；以最新任务行 token 为准。
-    let claim_token = preparing_task
-        .prepare_claim_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .unwrap_or(claim_token.as_str())
-        .to_string();
+    // 命中后继续使用本轮 claim_token（与 CAS 入参一致），禁止采用返回行中可能不同的 token。
 
     let project = state
         .workbench_project_repo
