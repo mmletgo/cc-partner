@@ -1,24 +1,34 @@
-//! net/lan_guard.rs — 固定 LAN socket peer 范围门禁
+//! net/lan_guard.rs — 固定 LAN socket peer 范围 + 浏览器 Host/Origin/Content-Type 门禁
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     产品只支持本机与局域网访问。HTTP 业务 API 对合法 loopback/LAN peer 一律无凭据放行，
 //!     但对全局可路由、unspecified、multicast、文档保留或无法判定的 peer 必须在 handler 前拒绝。
-//!     该门禁约束支持网络范围，不是身份鉴权；不得读取代理来源 header。
+//!     浏览器侧还需 Host/Origin/Content-Type 与 WebSocket 来源检查，降低 DNS rebinding 与跨站滥用风险，
+//!     同时兼容无 Origin 的 native P2P 与 opaque preview iframe 的受限 `Origin: null`。
+//!     这些检查是部署边界与请求完整性保护，不是身份鉴权；不得读取代理来源 header，也不发 CORS。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `LanPeerScope`：内部三类 peer 范围（Loopback / Lan / Denied），不是用户配置或权限模式；
 //!     - `classify_peer_ip`：纯函数，规范化 IPv4-mapped IPv6 后按固定地址范围分类；
 //!     - `lan_socket_gate`：axum middleware，仅信任 `ConnectInfo<SocketAddr>`，拒绝 Denied/缺失 peer；
-//!     - `require_loopback_peer`：backend stop 等本机生命周期接口在 token 比较前强制 loopback。
+//!     - `require_loopback_peer`：backend stop 等本机生命周期接口在 token 比较前强制 loopback；
+//!     - `BrowserGuardParams` + `evaluate_browser_request`：Host/Origin/Content-Type 纯判定；
+//!     - `browser_request_guard`：axum middleware，从 AppState 读取实际端口与受控 mDNS 名后执行判定；
+//!     - preview proxy 的 `Origin: null` 仅在全局标记为可延期，最终是否放行由 browser_proxy 会话查找决定。
 
 use crate::net::error_response::{P2pError, P2pErrorCode};
 use crate::net::request_context::{new_request_id, P2pRequestContext};
+use crate::state::AppState;
+use crate::workbench::browser_proxy::{
+    DESKTOP_BROWSER_PROXY_ROUTE_PREFIX, MOBILE_BROWSER_PROXY_ROUTE_PREFIX,
+};
 use axum::body::Body;
-use axum::extract::ConnectInfo;
-use axum::http::Request;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{header, Method, Request};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::Ordering;
 
 /// 内部 socket peer 范围分类。
 ///
@@ -197,15 +207,411 @@ pub async fn lan_socket_gate(request: Request<Body>, next: Next) -> Response {
     }
 }
 
+
+/// 浏览器请求门禁参数（实际端口 + 受控 mDNS hostname）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     Host 允许列表只能来自本进程真实监听端口与既有 mDNS 命名，绝不能从请求 Host 学习域名。
+///
+/// Code Logic（这个结构体做什么）:
+///     `actual_http_port` 对应 `AppState.actual_http_port`；`controlled_mdns_host` 为
+///     `cc-{device_id}.local`（无尾点，比较时同时接受尾点形式）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserGuardParams {
+    /// HTTP server 实际监听端口。
+    pub actual_http_port: u16,
+    /// 当前进程受控 mDNS 主机名（无尾点），形如 `cc-{device_id}.local`。
+    pub controlled_mdns_host: String,
+}
+
+/// 构造浏览器门禁参数。
+///
+/// Business Logic（为什么需要这个函数）:
+///     生产 middleware 与单测需要同一套从 device_id/端口生成允许 Host 的规则。
+///
+/// Code Logic（这个函数做什么）:
+///     生成 `cc-{device_id}.local` 并与实际端口一起封装为 `BrowserGuardParams`。
+pub fn browser_guard_params(device_id: &str, actual_http_port: u16) -> BrowserGuardParams {
+    BrowserGuardParams {
+        actual_http_port,
+        controlled_mdns_host: controlled_mdns_hostname(device_id),
+    }
+}
+
+/// 当前进程受控 mDNS hostname（无尾点）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     discovery 使用 `cc-{device_id}.local.` 发布；浏览器 Host 校验必须与之对齐。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 `cc-{device_id}.local`（比较时再兼容尾点）。
+pub fn controlled_mdns_hostname(device_id: &str) -> String {
+    format!("cc-{device_id}.local")
+}
+
+/// 请求路径类别（仅用于 Origin/Content-Type 规则分支，不是权限模式）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     preview proxy、普通 API 与 mobile/静态资源对 `Origin: null` 与 Content-Type 的规则不同。
+///
+/// Code Logic（这个枚举做什么）:
+///     按 path 前缀分类：PreviewProxy / OrdinaryApi / MobileOrStatic / Other。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestPathKind {
+    /// desktop/mobile browser preview proxy 命名空间。
+    PreviewProxy,
+    /// 其它 `/api/*` 业务路由。
+    OrdinaryApi,
+    /// `/mobile` SPA 与 `/assets/*` 静态资源。
+    MobileOrStatic,
+    /// 其它路径（仍强制 Host，Origin 按保守策略）。
+    Other,
+}
+
+/// Origin 分类结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     native P2P、同源浏览器、opaque iframe 与跨站请求需要不同处理。
+///
+/// Code Logic（这个枚举做什么）:
+///     Missing / SameOrigin / OpaqueNull / CrossOrigin。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OriginClass {
+    Missing,
+    SameOrigin,
+    OpaqueNull,
+    CrossOrigin,
+}
+
+/// 解析 Host 头为 (hostname, optional_port)。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Host 必须可被严格比对到受控 IP/localhost/mDNS 名与实际端口，防止 DNS rebinding。
+///
+/// Code Logic（这个函数做什么）:
+///     支持 `host`、`host:port`、`[ipv6]`、`[ipv6]:port`；非法形式返回 None。
+///     返回的 hostname：IPv6 为无括号字面量，其它为原始 host 标签。
+pub fn parse_http_host_header(host: &str) -> Option<(String, Option<u16>)> {
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    if host.starts_with('[') {
+        let end = host.find(']')?;
+        let ip = &host[1..end];
+        if ip.is_empty() || ip.parse::<Ipv6Addr>().is_err() {
+            return None;
+        }
+        let rest = &host[end + 1..];
+        if rest.is_empty() {
+            return Some((ip.to_string(), None));
+        }
+        let port_str = rest.strip_prefix(':')?;
+        if port_str.is_empty() {
+            return None;
+        }
+        let port: u16 = port_str.parse().ok()?;
+        return Some((ip.to_string(), Some(port)));
+    }
+    // 无括号形式不允许内嵌未转义 IPv6。
+    if let Some((name, port_str)) = host.rsplit_once(':') {
+        if !name.is_empty() && !name.contains(':') && port_str.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(port) = port_str.parse::<u16>() {
+                return Some((name.to_string(), Some(port)));
+            }
+        }
+    }
+    if host.contains(':') {
+        return None;
+    }
+    Some((host.to_string(), None))
+}
+
+/// 判断 hostname 是否属于受控允许列表。
+///
+/// Business Logic（为什么需要这个函数）:
+///     仅允许支持范围内的字面 IP、localhost 与当前进程 mDNS 名；任意域名一律拒绝。
+///
+/// Code Logic（这个函数做什么）:
+///     去尾点后大小写不敏感比较 localhost/受控名；否则解析 IP 并用 `classify_peer_ip` 要求 Loopback/Lan。
+pub fn is_allowed_browser_hostname(hostname: &str, controlled_mdns_host: &str) -> bool {
+    let host = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    if host == "localhost" {
+        return true;
+    }
+    let controlled = controlled_mdns_host
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host == controlled {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(ip) => matches!(
+            classify_peer_ip(ip),
+            LanPeerScope::Loopback | LanPeerScope::Lan
+        ),
+        Err(_) => false,
+    }
+}
+
+/// 分类 Origin 头。
+///
+/// Business Logic（为什么需要这个函数）:
+///     同源浏览器、native 无 Origin、opaque null 与跨站必须分支处理。
+///
+/// Code Logic（这个函数做什么）:
+///     缺失 → Missing；字面 `null` → OpaqueNull；等于 `http://{Host}` → SameOrigin；否则 CrossOrigin。
+fn classify_request_origin(origin: Option<&str>, host_header: &str) -> OriginClass {
+    match origin {
+        None => OriginClass::Missing,
+        Some(raw) => {
+            let value = raw.trim();
+            if value.eq_ignore_ascii_case("null") {
+                OriginClass::OpaqueNull
+            } else if value == format!("http://{host_header}") {
+                OriginClass::SameOrigin
+            } else {
+                OriginClass::CrossOrigin
+            }
+        }
+    }
+}
+
+/// 分类请求路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     preview proxy 的 null-origin 例外不能扩散到其它 `/api/*`。
+///
+/// Code Logic（这个函数做什么）:
+///     按 desktop/mobile proxy 前缀、`/api/`、`/mobile`、`/assets/` 分类。
+fn classify_request_path(path: &str) -> RequestPathKind {
+    let path = path.split('?').next().unwrap_or(path);
+    if is_preview_proxy_path(path) {
+        RequestPathKind::PreviewProxy
+    } else if path.starts_with("/api/") || path == "/api" {
+        RequestPathKind::OrdinaryApi
+    } else if path == "/mobile"
+        || path.starts_with("/mobile/")
+        || path.starts_with("/assets/")
+        || path == "/assets"
+    {
+        RequestPathKind::MobileOrStatic
+    } else {
+        RequestPathKind::Other
+    }
+}
+
+/// 判断 path 是否为 browser preview proxy 命名空间。
+///
+/// Business Logic（为什么需要这个函数）:
+///     仅该命名空间可在会话校验后接受 opaque `Origin: null`。
+///
+/// Code Logic（这个函数做什么）:
+///     匹配 desktop/mobile proxy 前缀（含后续 previewId 与 tail）。
+pub fn is_preview_proxy_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    path.starts_with(&format!("{DESKTOP_BROWSER_PROXY_ROUTE_PREFIX}/"))
+        || path.starts_with(&format!("{MOBILE_BROWSER_PROXY_ROUTE_PREFIX}/"))
+        || path == DESKTOP_BROWSER_PROXY_ROUTE_PREFIX
+        || path == MOBILE_BROWSER_PROXY_ROUTE_PREFIX
+}
+
+/// 是否为禁止的 simple-request Content-Type。
+///
+/// Business Logic（为什么需要这个函数）:
+///     恶意网页可用 form-urlencoded/multipart/text/plain 发起“简单请求”绕过 CORS 预检触发写操作。
+///
+/// Code Logic（这个函数做什么）:
+///     取 media type（分号前）小写比较三种禁止类型；缺失 Content-Type 返回 false。
+pub fn is_forbidden_simple_write_content_type(content_type: Option<&str>) -> bool {
+    let Some(raw) = content_type else {
+        return false;
+    };
+    let media = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        media.as_str(),
+        "application/x-www-form-urlencoded" | "multipart/form-data" | "text/plain"
+    )
+}
+
+/// 纯函数：校验浏览器/HTTP 请求的 Host、Origin 与普通 API Content-Type。
+///
+/// Business Logic（为什么需要这个函数）:
+///     在 handler 前拒绝恶意 Host、跨站 Origin、普通 API 的 opaque null 与 simple-request 写类型，
+///     同时放行 native 无 Origin、同源 mobile 与 preview proxy 的延期 null-origin。
+///
+/// Code Logic（这个函数做什么）:
+///     1) 强制合法 Host；2) 按 path 类别应用 Origin 矩阵；3) 普通 API 非 GET/HEAD 拒绝三种 simple Content-Type。
+///     不发送任何 CORS 头。返回 Ok 表示可进入后续中间件/handler（preview null 仍待会话确认）。
+pub fn evaluate_browser_request(
+    method: &Method,
+    path: &str,
+    host_header: Option<&str>,
+    origin_header: Option<&str>,
+    content_type: Option<&str>,
+    params: &BrowserGuardParams,
+    context: &P2pRequestContext,
+) -> Result<(), P2pError> {
+    let host = host_header
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| browser_guard_error("缺少 Host", context))?;
+    // 复用端口/允许列表逻辑，但错误需带真实 request_id。
+    let Some((hostname, port)) = parse_http_host_header(host) else {
+        return Err(browser_guard_error("非法 Host", context));
+    };
+    if !is_allowed_browser_hostname(&hostname, &params.controlled_mdns_host) {
+        return Err(browser_guard_error("Host 不在支持范围", context));
+    }
+    let port_ok = match port {
+        Some(p) => p == params.actual_http_port,
+        None => params.actual_http_port == 80 || params.actual_http_port == 443,
+    };
+    if !port_ok {
+        return Err(browser_guard_error(
+            "Host 端口与实际监听端口不一致",
+            context,
+        ));
+    }
+
+    let path_kind = classify_request_path(path);
+    let origin_class = classify_request_origin(origin_header, host);
+    match (path_kind, origin_class) {
+        (_, OriginClass::CrossOrigin) => {
+            return Err(browser_guard_error("跨站 Origin 不被允许", context));
+        }
+        (RequestPathKind::OrdinaryApi, OriginClass::OpaqueNull)
+        | (RequestPathKind::Other, OriginClass::OpaqueNull) => {
+            return Err(browser_guard_error(
+                "普通 API 不接受 opaque Origin",
+                context,
+            ));
+        }
+        // preview：null 延期到会话查找；mobile/static：资源加载允许 null；Missing/SameOrigin 全放行。
+        (RequestPathKind::PreviewProxy, OriginClass::OpaqueNull)
+        | (RequestPathKind::MobileOrStatic, OriginClass::OpaqueNull)
+        | (_, OriginClass::Missing)
+        | (_, OriginClass::SameOrigin) => {}
+    }
+
+    let is_write = method != Method::GET && method != Method::HEAD;
+    if is_write
+        && path_kind == RequestPathKind::OrdinaryApi
+        && is_forbidden_simple_write_content_type(content_type)
+    {
+        return Err(browser_guard_error(
+            "普通 API 写请求不接受该 Content-Type",
+            context,
+        ));
+    }
+    Ok(())
+}
+
+/// 从 Request 执行浏览器门禁判定。
+///
+/// Business Logic（为什么需要这个函数）:
+///     middleware 与单测需要从 HTTP 头提取字段并复用同一 evaluate 逻辑。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 Host/Origin/Content-Type 与 method/path，调用 `evaluate_browser_request`。
+pub fn evaluate_browser_request_from_http(
+    request: &Request<Body>,
+    params: &BrowserGuardParams,
+) -> Result<(), P2pError> {
+    let context = request_context_from_request(request);
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok());
+    let origin = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok());
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
+    evaluate_browser_request(
+        request.method(),
+        request.uri().path(),
+        host,
+        origin,
+        content_type,
+        params,
+        &context,
+    )
+}
+
+/// 浏览器 Host/Origin/Content-Type 门禁中间件（生产路径，读取 AppState）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     所有 HTTP/P2P/Mobile 请求在 socket gate 之后、业务 handler 之前完成浏览器请求完整性检查。
+///
+/// Code Logic（这个函数做什么）:
+///     从 AppState 读取 `actual_http_port` 与 `device_id` 构造参数；失败返回 403 信封；成功 `next.run`。
+///     不添加 CORS 响应头。preview 的 `Origin: null` 仅延期放行到 handler，由 browser_proxy 会话确认。
+pub async fn browser_request_guard(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let port = state.actual_http_port.load(Ordering::SeqCst);
+    let params = browser_guard_params(state.device_id.as_str(), port);
+    match evaluate_browser_request_from_http(&request, &params) {
+        Ok(()) => next.run(request).await,
+        Err(err) => err.into_response(),
+    }
+}
+
+/// 使用显式参数的浏览器门禁中间件（单测/无 AppState 装配）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     单元测试需要在不构造完整 AppState 的情况下覆盖 Host/Origin 矩阵。
+///
+/// Code Logic（这个函数做什么）:
+///     与 `browser_request_guard` 相同判定，参数由调用方注入。
+pub async fn browser_request_guard_with_params(
+    params: BrowserGuardParams,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    match evaluate_browser_request_from_http(&request, &params) {
+        Ok(()) => next.run(request).await,
+        Err(err) => err.into_response(),
+    }
+}
+
+/// 构造浏览器门禁 403 错误。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Host/Origin 失败不是身份鉴权失败，使用 403 `forbidden` 稳定信封。
+///
+/// Code Logic（这个函数做什么）:
+///     `P2pError::from_code` + Forbidden。
+fn browser_guard_error(message: &str, context: &P2pRequestContext) -> P2pError {
+    P2pError::from_code(message, P2pErrorCode::Forbidden, context)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::to_bytes;
-    use axum::http::{HeaderMap, HeaderValue, StatusCode};
-    use axum::routing::get;
+    use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
+    use axum::routing::{get, post};
     use axum::Router;
     use serde_json::Value;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     /// Business Logic（为什么需要这个测试）:
@@ -470,5 +876,371 @@ mod tests {
             .await
             .expect("读取 body");
         serde_json::from_slice(&bytes).expect("响应应为 JSON 信封")
+    }
+
+    /// 默认浏览器门禁测试参数。
+    ///
+    /// Business Logic（为什么需要这个辅助）:
+    ///     矩阵测试需要稳定的实际端口与受控 mDNS 名。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 port=62116、host=`cc-device-a.local`。
+    fn sample_browser_params() -> BrowserGuardParams {
+        browser_guard_params("device-a", 62116)
+    }
+
+    /// 构造带 Host/Origin 的请求。
+    ///
+    /// Business Logic（为什么需要这个辅助）:
+    ///     浏览器矩阵需要快速构造不同 Host/Origin/Content-Type 组合。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     构建 Request 并注入 loopback ConnectInfo，可选写入 Origin/Content-Type。
+    fn browser_request(
+        method: Method,
+        path: &str,
+        host: &str,
+        origin: Option<&str>,
+        content_type: Option<&str>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", host)
+            .header("x-cc-request-id", "req-browser-matrix");
+        if let Some(origin) = origin {
+            builder = builder.header("origin", origin);
+        }
+        if let Some(content_type) = content_type {
+            builder = builder.header("content-type", content_type);
+        }
+        let mut request = builder.body(Body::empty()).expect("构造请求");
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((Ipv4Addr::LOCALHOST, 20000))));
+        request
+    }
+
+    /// 构造浏览器门禁测试 Router。
+    ///
+    /// Business Logic（为什么需要这个辅助）:
+    ///     需要验证 middleware 顺序下 Host/Origin 失败不会进入 handler。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     注册 probe 与若干 API/proxy 路由；layer：body 无；envelope 无；
+    ///     browser_request_guard_with_params → lan_socket_gate → request_id（外层）。
+    fn browser_guard_test_router(params: BrowserGuardParams) -> Router {
+        Router::new()
+            .route("/probe", get(|| async { "reached" }))
+            .route(
+                "/api/mobile/workbench/files/save-text",
+                post(|| async { "saved" }),
+            )
+            .route("/api/health", get(|| async { "ok" }))
+            .route(
+                "/api/workbench/browser/proxy/:previewId/*path",
+                get(|| async { "proxy" }),
+            )
+            .route(
+                "/api/mobile/workbench/browser/proxy/:previewId/*path",
+                get(|| async { "mobile-proxy" }),
+            )
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let params = params.clone();
+                async move { browser_request_guard_with_params(params, req, next).await }
+            }))
+            .layer(axum::middleware::from_fn(lan_socket_gate))
+            .layer(axum::middleware::from_fn(
+                crate::net::request_context::request_id_middleware,
+            ))
+    }
+
+    /// Business Logic（为什么需要这个测试模块）:
+    ///     Host/Origin/Content-Type/WebSocket 敌意矩阵是 Task 2 产品契约，必须表驱动覆盖。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     覆盖合法 Host、非法 Host/端口、同源写、跨站/null Origin、native 无 Origin、
+    ///     跨站 WS、simple Content-Type 写、preview null 不能访问其它 /api/*。
+    mod browser_request_matrix {
+        use super::*;
+
+        #[test]
+        fn valid_lan_loopback_and_controlled_local_hosts_succeed() {
+            let params = sample_browser_params();
+            let ctx = P2pRequestContext {
+                request_id: "req-host-ok".into(),
+            };
+            let hosts = [
+                "127.0.0.1:62116",
+                "192.168.1.20:62116",
+                "10.0.0.8:62116",
+                "localhost:62116",
+                "cc-device-a.local:62116",
+                "cc-device-a.local.:62116",
+                "[::1]:62116",
+                "[fe80::1]:62116",
+                "[fd12:3456:789a::1]:62116",
+            ];
+            for host in hosts {
+                evaluate_browser_request(
+                    &Method::GET,
+                    "/api/health",
+                    Some(host),
+                    None,
+                    None,
+                    &params,
+                    &ctx,
+                )
+                .unwrap_or_else(|e| panic!("host {host} 应通过: {e:?}"));
+            }
+        }
+
+        #[test]
+        fn arbitrary_host_and_wrong_port_fail() {
+            let params = sample_browser_params();
+            let ctx = P2pRequestContext {
+                request_id: "req-host-bad".into(),
+            };
+            let cases = [
+                "evil.example:62116",
+                "192.168.1.20:9",
+                "127.0.0.1",
+                "8.8.8.8:62116",
+                "localhost:1",
+                "cc-other.local:62116",
+            ];
+            for host in cases {
+                let err = evaluate_browser_request(
+                    &Method::GET,
+                    "/api/health",
+                    Some(host),
+                    None,
+                    None,
+                    &params,
+                    &ctx,
+                )
+                .expect_err("应拒绝");
+                assert_eq!(err.status(), StatusCode::FORBIDDEN, "host={host}");
+            }
+        }
+
+        #[test]
+        fn same_origin_mobile_write_succeeds() {
+            let params = sample_browser_params();
+            let ctx = P2pRequestContext {
+                request_id: "req-same-origin-write".into(),
+            };
+            evaluate_browser_request(
+                &Method::POST,
+                "/api/mobile/workbench/files/save-text",
+                Some("192.168.1.20:62116"),
+                Some("http://192.168.1.20:62116"),
+                Some("application/json"),
+                &params,
+                &ctx,
+            )
+            .expect("同源 mobile 写应通过");
+        }
+
+        #[test]
+        fn cross_origin_and_ordinary_null_origin_fail() {
+            let params = sample_browser_params();
+            let ctx = P2pRequestContext {
+                request_id: "req-origin-bad".into(),
+            };
+            let err = evaluate_browser_request(
+                &Method::POST,
+                "/api/mobile/workbench/files/save-text",
+                Some("192.168.1.20:62116"),
+                Some("http://evil.test"),
+                Some("application/json"),
+                &params,
+                &ctx,
+            )
+            .expect_err("跨站应失败");
+            assert_eq!(err.status(), StatusCode::FORBIDDEN);
+
+            let err = evaluate_browser_request(
+                &Method::GET,
+                "/api/health",
+                Some("127.0.0.1:62116"),
+                Some("null"),
+                None,
+                &params,
+                &ctx,
+            )
+            .expect_err("普通 API Origin:null 应失败");
+            assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        }
+
+        #[test]
+        fn native_p2p_without_origin_succeeds() {
+            let params = sample_browser_params();
+            let ctx = P2pRequestContext {
+                request_id: "req-native".into(),
+            };
+            evaluate_browser_request(
+                &Method::POST,
+                "/api/sync/pull",
+                Some("192.168.1.20:62116"),
+                None,
+                Some("application/json"),
+                &params,
+                &ctx,
+            )
+            .expect("native 无 Origin 应通过");
+        }
+
+        #[test]
+        fn cross_origin_websocket_fails() {
+            let params = sample_browser_params();
+            let ctx = P2pRequestContext {
+                request_id: "req-ws".into(),
+            };
+            // WebSocket upgrade 使用 GET + Origin；跨站必须拒绝。
+            let err = evaluate_browser_request(
+                &Method::GET,
+                "/api/workbench/sessions/events",
+                Some("127.0.0.1:62116"),
+                Some("http://attacker.example"),
+                None,
+                &params,
+                &ctx,
+            )
+            .expect_err("跨站 WS Origin 应失败");
+            assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        }
+
+        #[test]
+        fn form_multipart_text_plain_ordinary_writes_fail() {
+            let params = sample_browser_params();
+            let ctx = P2pRequestContext {
+                request_id: "req-ct".into(),
+            };
+            for ct in [
+                "application/x-www-form-urlencoded",
+                "multipart/form-data; boundary=abc",
+                "text/plain",
+                "text/plain;charset=UTF-8",
+            ] {
+                let err = evaluate_browser_request(
+                    &Method::POST,
+                    "/api/sync/push",
+                    Some("127.0.0.1:62116"),
+                    None,
+                    Some(ct),
+                    &params,
+                    &ctx,
+                )
+                .expect_err("simple content-type 写应失败");
+                assert_eq!(err.status(), StatusCode::FORBIDDEN, "ct={ct}");
+            }
+            // preview proxy 不受该限制
+            evaluate_browser_request(
+                &Method::POST,
+                "/api/workbench/browser/proxy/abc/save",
+                Some("127.0.0.1:62116"),
+                Some("null"),
+                Some("application/x-www-form-urlencoded"),
+                &params,
+                &ctx,
+            )
+            .expect("preview proxy 可携带任意业务 Content-Type");
+        }
+
+        #[tokio::test]
+        async fn preview_null_origin_exception_cannot_access_other_api() {
+            let params = sample_browser_params();
+            let router = browser_guard_test_router(params);
+
+            // 普通 /api/health + Origin:null → 403，不得进入 handler。
+            let reached = Arc::new(AtomicBool::new(false));
+            let flag = reached.clone();
+            let router_health = Router::new()
+                .route(
+                    "/api/health",
+                    get(move || {
+                        let flag = flag.clone();
+                        async move {
+                            flag.store(true, AtomicOrdering::SeqCst);
+                            "ok"
+                        }
+                    }),
+                )
+                .layer(axum::middleware::from_fn(move |req, next| {
+                    let params = sample_browser_params();
+                    async move { browser_request_guard_with_params(params, req, next).await }
+                }))
+                .layer(axum::middleware::from_fn(lan_socket_gate))
+                .layer(axum::middleware::from_fn(
+                    crate::net::request_context::request_id_middleware,
+                ));
+
+            let request = browser_request(
+                Method::GET,
+                "/api/health",
+                "127.0.0.1:62116",
+                Some("null"),
+                None,
+            );
+            let response = router_health.oneshot(request).await.expect("router");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(
+                !reached.load(AtomicOrdering::SeqCst),
+                "Origin:null 不得访问普通 /api/*"
+            );
+
+            // preview proxy + Origin:null 在全局 guard 可延期通过（会话校验在 handler）。
+            let request = browser_request(
+                Method::GET,
+                "/api/workbench/browser/proxy/live-id/index.html",
+                "127.0.0.1:62116",
+                Some("null"),
+                None,
+            );
+            let response = router.oneshot(request).await.expect("router");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "preview proxy null Origin 应延期进入 handler"
+            );
+        }
+
+        #[tokio::test]
+        async fn middleware_rejects_before_handler_on_bad_host() {
+            let reached = Arc::new(AtomicBool::new(false));
+            let flag = reached.clone();
+            let router = Router::new()
+                .route(
+                    "/api/health",
+                    get(move || {
+                        let flag = flag.clone();
+                        async move {
+                            flag.store(true, AtomicOrdering::SeqCst);
+                            "ok"
+                        }
+                    }),
+                )
+                .layer(axum::middleware::from_fn(move |req, next| {
+                    let params = sample_browser_params();
+                    async move { browser_request_guard_with_params(params, req, next).await }
+                }))
+                .layer(axum::middleware::from_fn(lan_socket_gate))
+                .layer(axum::middleware::from_fn(
+                    crate::net::request_context::request_id_middleware,
+                ));
+            let request = browser_request(
+                Method::GET,
+                "/api/health",
+                "evil.example:62116",
+                None,
+                None,
+            );
+            let response = router.oneshot(request).await.expect("router");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(!reached.load(AtomicOrdering::SeqCst));
+            let body = response_json(response).await;
+            assert_eq!(body["code"], "forbidden");
+        }
     }
 }

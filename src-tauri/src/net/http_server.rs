@@ -14,7 +14,10 @@
 
 use crate::backend::control::{self, BackendControlFile};
 use crate::net::error_response::{envelope_fallback_middleware, P2pError, P2pErrorCode, P2pResult};
-use crate::net::lan_guard::{lan_socket_gate, require_loopback_peer};
+use crate::net::lan_guard::{
+    browser_guard_params, browser_request_guard, browser_request_guard_with_params, lan_socket_gate,
+    require_loopback_peer,
+};
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
     attention, cc_history, claude_code_assets, claude_md_sync, health, mobile, orchestrator,
@@ -794,13 +797,20 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         // 永远拿到稳定的 {error, code, request_id, retryable, details} 结构。放在 request_id_middleware
         // 之内，使其能从 extensions 读到 P2pRequestContext 并写入信封。
         .layer(axum::middleware::from_fn(envelope_fallback_middleware))
+        // 浏览器 Host/Origin/Content-Type 门禁：socket gate 之后、body limit/handler 之前。
+        // 读取 AppState.actual_http_port 与 device_id 受控 mDNS 名；不发送 CORS 头。
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            browser_request_guard,
+        ))
         // 固定 LAN socket peer 门禁：仅信任 ConnectInfo 真实 peer，忽略代理 header；
         // Denied/缺失 peer 在 handler 前返回 403。放在 request_id 内层，以便拒绝响应可复用 request context。
         .layer(axum::middleware::from_fn(lan_socket_gate))
         // P2P/mobile API 请求 ID 边界：所有请求自动获得 X-CC-Request-Id（客户端带入或服务端生成 UUID），
         // 注入 P2pRequestContext 供 handler 使用，并打开带 `request_id` 字段的 tracing span。
         // 放在最外层（相对业务 middleware），使其覆盖全部 /api 路由 + /mobile SPA fallback。
-        // axum 最后 .layer 最外：请求顺序 ConnectInfo → request_id → lan_socket_gate → envelope → body limit → handler。
+        // axum 最后 .layer 最外：请求顺序 ConnectInfo → request_id → lan_socket_gate
+        // → browser_request_guard → envelope → body limit → handler。
         .layer(axum::middleware::from_fn(request_id_middleware))
         .with_state(state.clone());
 
@@ -1356,10 +1366,15 @@ mod tests {
         async fn ok() -> (StatusCode, &'static str) {
             (StatusCode::OK, "ok")
         }
+        let params = browser_guard_params("device-a", 62116);
         Router::new()
             .route("/probe", get(ok))
             .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
             .layer(axum::middleware::from_fn(envelope_fallback_middleware))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let params = params.clone();
+                async move { browser_request_guard_with_params(params, req, next).await }
+            }))
             .layer(axum::middleware::from_fn(lan_socket_gate))
             .layer(axum::middleware::from_fn(request_id_middleware))
     }
@@ -1377,6 +1392,7 @@ mod tests {
         let router = middleware_test_router();
         let mut request = Request::builder()
             .uri("/probe")
+            .header("host", "127.0.0.1:62116")
             .body(Body::empty())
             .unwrap();
         // 生产 serve 会注入 ConnectInfo；oneshot 测试需手动注入 loopback peer。
@@ -1407,6 +1423,7 @@ mod tests {
         let router = middleware_test_router();
         let mut request = Request::builder()
             .uri("/probe")
+            .header("host", "127.0.0.1:62116")
             .header("x-cc-request-id", "trace-abc-001")
             .body(Body::empty())
             .unwrap();
