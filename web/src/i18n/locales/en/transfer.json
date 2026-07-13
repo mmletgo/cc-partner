@@ -6,12 +6,14 @@
   "loading": "Loading…",
   "noDevices": "No devices found",
   "sendFile": "Send \"{{file}}\"",
+  "sendingFile": "Sending \"{{file}}\"…",
   "pickFile": "Choose file",
   "browse": "Browse…",
   "dropAria": "Drop a file here or click to select",
   "dropTitleEmpty": "Drop a file here or click to select",
   "dropTitlePicked": "Selected: {{file}}",
   "chunkHint": "Any size · Auto-chunked 1MB · Resumable · SHA256 verified",
+  "firstFileOnly": "Only the first file will be sent this round; the rest were ignored.",
   "tasksTitle": "Transfer tasks",
   "active": "Active {{n}}",
   "completed": "Completed {{n}}",
@@ -20,5 +22,7 @@
   "emptyHint": "Pick a target device and a file to start transferring",
   "deviceLoadFailed": "Failed to load devices: {{error}}.",
   "taskLoadFailed": "Failed to load tasks: {{error}}.",
+  "sendFailed": "Send failed: {{error}}",
+  "cancelFailed": "Cancel failed: {{error}}",
   "skeletonAria": "Loading transfer tasks"
 }
