@@ -10,8 +10,8 @@
 //!     - `get_default_cloud_sync_config`：返回后端云同步默认值，供设置页恢复默认。
 //!     - `update_cloud_sync_config`：经 ConfigRuntime 事务路径应用 patch 后返回最新 DTO。
 //!       scheduler 无需重启（setup 无条件启动，内部每 tick 按 config 决定）。
-//!     - `trigger_cloud_sync_cmd`：调 engine::trigger_cloud_sync。
-//!     - `test_cloud_sync`：调 engine::test_connection。
+//!     - `trigger_cloud_sync_cmd`：调 engine::trigger_cloud_sync（经 CloudSyncRuntime Wait 门闸）。
+//!     - `test_cloud_sync`：调 engine::test_connection（正式 workdir 取 gate；temp clone 免锁）。
 
 use crate::cloud_sync::engine::{self, CloudSyncResult, TestCloudSyncResult};
 use crate::config::default_cloud_sync_values;
@@ -141,6 +141,8 @@ pub async fn update_cloud_sync_config(
 /// 手动触发一次云端同步。
 ///
 /// Business Logic: 前端"立即同步"按钮调用，不受 enabled/auto 开关限制（用户主动触发）。
+///     经 CloudSyncRuntime Wait{300s} 与 scheduler/CLAUDE.md push 串行写工作区。
+/// Code Logic: 委托 engine::trigger_cloud_sync（内部 exclusive gate）。
 #[tauri::command]
 pub async fn trigger_cloud_sync_cmd(
     state: State<'_, AppState>,

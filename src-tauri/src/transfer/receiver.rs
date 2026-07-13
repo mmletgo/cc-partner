@@ -3890,6 +3890,7 @@ mod tests {
                 crate::workbench::dependencies::WorkbenchDependencyInstallRuntime::new(),
             ),
             cc_collector_cancel: Arc::new(Mutex::new(None)),
+            cloud_sync_runtime: Arc::new(crate::cloud_sync::CloudSyncRuntime::new()),
             cloud_sync_cancel: Arc::new(Mutex::new(None)),
             health: Arc::new(crate::health::HealthRuntime::new()),
             health_repo: Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone())),

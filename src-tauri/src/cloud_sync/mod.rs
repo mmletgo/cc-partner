@@ -13,11 +13,15 @@
 //!       reset_hard/commit_all/push 等），应用不管理认证（复用本机 git 凭证）。
 //!     - `snapshot`：工作区 JSON 文件 ↔ DB Row 的导入导出（含 id→文件名可逆映射）。
 //!     - `engine`：拼装完整同步流程（含 push rejected 一次重试收敛）+ 测试连通。
+//!     - `runtime`：CloudSyncRuntime 全流程单飞门闸（手动/scheduler/CLAUDE.md push）。
 //!     - `scheduler`：后台轮询任务，每 tick 重读 config 决定是否真同步、用多少间隔。
 //!
 //! 同步范围：prompts + CC 历史 + SSH 目标（含软删除传播）。
 
 pub mod engine;
 pub mod git_cli;
+pub mod runtime;
 pub mod scheduler;
 pub mod snapshot;
+
+pub use runtime::CloudSyncRuntime;
