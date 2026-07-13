@@ -227,6 +227,8 @@
     "downloadCancelled": "Download cancelled",
     "redownload": "Download again",
     "noAsset": "No installer found for your platform. Please download it manually from GitHub Releases.",
+    "retryInstall": "Retry install",
+    "installFailed": "Install failed",
     "checkingHint": "Checking for updates…",
     "cancel": "Cancel"
   },

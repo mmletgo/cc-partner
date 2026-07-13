@@ -189,8 +189,7 @@ impl UpdateRuntime {
             s.status.error.clear();
             s.status.progress = 0.0;
             s.status.file_path.clear();
-            // T5：DTO 尚无 checking；保持 idle 语义兼容前端
-            s.status.status = UpdateStatusValue::Idle;
+            s.status.status = UpdateStatusValue::Checking;
             Ok(s.generation)
         })
     }
@@ -383,8 +382,8 @@ impl UpdateRuntime {
                 AppError::validation("更新元数据缺失，请重新检查更新".to_string())
             })?;
             s.phase = UpdatePhase::Installing;
-            // T5：DTO 尚无 installing；保持 completed 兼容前端按钮态
-            s.status.status = UpdateStatusValue::Completed;
+            // 安装中展示 installing；progress 保持下载完成值，不伪造
+            s.status.status = UpdateStatusValue::Installing;
             s.status.error.clear();
             Ok(InstallLease {
                 generation: s.generation,
@@ -438,6 +437,58 @@ impl UpdateRuntime {
         self.with_state(|s| s.bytes.is_some())
     }
 
+    /// Business Logic: 命令级竞态测试需要强制推进相位，无需真实 Update 对象。
+    /// Code Logic: 写 phase/generation 并按 phase 同步 DTO status；Downloading 附带 cancel token。
+    #[cfg(test)]
+    pub fn force_phase_for_test(&self, phase: UpdatePhase, generation: u64) {
+        self.with_state(|s| {
+            s.phase = phase;
+            s.generation = generation;
+            match phase {
+                UpdatePhase::Downloading => {
+                    s.status.status = UpdateStatusValue::Downloading;
+                    s.cancel = Some(CancellationToken::new());
+                }
+                UpdatePhase::Downloaded => {
+                    s.status.status = UpdateStatusValue::Completed;
+                    if s.bytes.is_none() {
+                        s.bytes = Some(Arc::from(b"pkg".as_slice()));
+                    }
+                }
+                UpdatePhase::Installing => {
+                    s.status.status = UpdateStatusValue::Installing;
+                    if s.bytes.is_none() {
+                        s.bytes = Some(Arc::from(b"pkg".as_slice()));
+                    }
+                }
+                UpdatePhase::Failed => {
+                    s.status.status = UpdateStatusValue::Failed;
+                }
+                UpdatePhase::Cancelled => {
+                    s.status.status = UpdateStatusValue::Cancelled;
+                }
+                UpdatePhase::Checking => {
+                    s.status.status = UpdateStatusValue::Checking;
+                }
+                UpdatePhase::Available => {
+                    s.status.status = UpdateStatusValue::Idle;
+                }
+                UpdatePhase::Idle => {
+                    s.status = UpdateDownloadStatus::default();
+                }
+            }
+        });
+    }
+
+    /// Business Logic: 安装重试测试需要注入假安装包字节。
+    /// Code Logic: 覆盖 state.bytes。
+    #[cfg(test)]
+    pub fn force_bytes_for_test(&self, bytes: &[u8]) {
+        self.with_state(|s| {
+            s.bytes = Some(Arc::from(bytes));
+        });
+    }
+
     /// Code Logic: 统一加锁，毒化时 panic（与项目其他 Mutex 一致）。
     fn with_state<R>(&self, f: impl FnOnce(&mut UpdateRuntimeState) -> R) -> R {
         let mut guard = self.inner.lock().expect("update_runtime 锁中毒");
@@ -482,7 +533,7 @@ mod tests {
                     }
                 }
                 UpdatePhase::Installing => {
-                    s.status.status = UpdateStatusValue::Completed;
+                    s.status.status = UpdateStatusValue::Installing;
                     if s.bytes.is_none() {
                         s.bytes = Some(Arc::from(b"pkg".as_slice()));
                     }
@@ -494,7 +545,7 @@ mod tests {
                     s.status.status = UpdateStatusValue::Cancelled;
                 }
                 UpdatePhase::Checking => {
-                    s.status.status = UpdateStatusValue::Idle;
+                    s.status.status = UpdateStatusValue::Checking;
                 }
                 UpdatePhase::Available => {
                     s.status.status = UpdateStatusValue::Idle;
@@ -523,10 +574,12 @@ mod tests {
         let g1 = rt.begin_check().expect("begin_check");
         assert_eq!(g1, 1);
         assert_eq!(rt.snapshot(), (1, UpdatePhase::Checking));
+        assert_eq!(rt.status().status, UpdateStatusValue::Checking);
 
         // finish 无更新
         assert!(rt.finish_check(1, Ok(None)).unwrap());
         assert_eq!(rt.snapshot(), (1, UpdatePhase::Idle));
+        assert_eq!(rt.status().status, UpdateStatusValue::Idle);
 
         // 再次 check generation 再 +1，非 begin 路径不递增
         let g2 = rt.begin_check().expect("begin_check 2");
@@ -666,6 +719,7 @@ mod tests {
         assert_eq!(g, 2);
         assert!(!rt.has_bytes());
         assert_eq!(rt.snapshot().1, UpdatePhase::Checking);
+        assert_eq!(rt.status().status, UpdateStatusValue::Checking);
         assert!(rt.status().error.is_empty());
     }
 
@@ -716,6 +770,36 @@ mod tests {
         assert_eq!(rt.snapshot().1, UpdatePhase::Failed);
         assert_eq!(rt.status().status, UpdateStatusValue::Failed);
         assert_eq!(rt.status().error, "timeout");
+    }
+
+    #[test]
+    fn status_dto_is_checking_during_check() {
+        let rt = UpdateRuntime::new();
+        let g = rt.begin_check().unwrap();
+        assert_eq!(rt.status().status, UpdateStatusValue::Checking);
+        assert_eq!(rt.snapshot().1, UpdatePhase::Checking);
+        // Available path: finish with None -> Idle (no separate Available DTO status)
+        assert!(rt.finish_check(g, Ok(None)).unwrap());
+        assert_eq!(rt.status().status, UpdateStatusValue::Idle);
+    }
+
+    #[test]
+    fn status_dto_is_installing_during_install() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Downloaded, 3);
+        force_bytes(&rt, b"pkg");
+        // 模拟 begin_install 的 DTO 效果
+        force_phase(&rt, UpdatePhase::Installing, 3);
+        force_bytes(&rt, b"pkg");
+        assert_eq!(rt.status().status, UpdateStatusValue::Installing);
+        // progress 不伪造：force 不改 progress，默认 0；真实 begin_install 保留下载进度
+        let progress_before = rt.status().progress;
+        let outcome = rt.finish_install(3, Err("boom".into()));
+        assert_eq!(outcome, InstallOutcome::FailedRetained);
+        assert_eq!(rt.status().status, UpdateStatusValue::Completed);
+        assert_eq!(rt.status().error, "boom");
+        // 失败后 progress 不变
+        assert!((rt.status().progress - progress_before).abs() < f64::EPSILON);
     }
 
     #[test]

@@ -4,6 +4,8 @@ import type {
   GithubTrendingConfig,
   HealthConfig,
   PromptOptimizerFillLanguage,
+  UpdateDownloadStatus,
+  UpdateDownloadStatusValue,
 } from '../../lib/types';
 import { getDefaultShortcutValue } from './shortcutRecorder';
 
@@ -384,4 +386,86 @@ export function buildConfigUpdate(
     update.screenshotHotkey = currentHotkey;
   }
   return update;
+}
+
+/**
+ * 更新 UI 阶段：后端 IPC 状态，或前端本地乐观 checking/installing。
+ * local-* 用于后端尚未回写 status 时的按钮禁用与文案。
+ */
+export type UpdateUiPhase = UpdateDownloadStatusValue | 'local-checking' | 'local-installing';
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   检查更新与安装进行中时，用户不应再点“检查更新”，否则会并发触发冲突或掩盖当前阶段。
+ *
+ * Code Logic（这个函数做什么）:
+ *   checkingUpdate 为 true，或 downloadStatus.status 为 checking/installing 时返回 true。
+ */
+export function isUpdateCheckDisabled(opts: {
+  checkingUpdate: boolean;
+  downloadStatus: UpdateDownloadStatus | null;
+}): boolean {
+  if (opts.checkingUpdate) return true;
+  const status = opts.downloadStatus?.status;
+  return status === 'checking' || status === 'installing';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   检查/安装/下载进行中时禁止启动下载，避免与后端状态机冲突或重复下载。
+ *
+ * Code Logic（这个函数做什么）:
+ *   checkingUpdate 为 true，或 status 属于 checking/installing/downloading 时返回 true。
+ */
+export function isUpdateDownloadDisabled(opts: {
+  checkingUpdate: boolean;
+  downloadStatus: UpdateDownloadStatus | null;
+}): boolean {
+  if (opts.checkingUpdate) return true;
+  const status = opts.downloadStatus?.status;
+  return status === 'checking' || status === 'installing' || status === 'downloading';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   安装失败后后端保留 completed + 非空 error（字节仍可重试安装）；UI 需与“下载成功可安装”区分。
+ *
+ * Code Logic（这个函数做什么）:
+ *   仅当 status===completed 且 error.trim() 非空时返回 true；普通 completed 与 failed 下载为 false。
+ */
+export function shouldShowInstallRetry(status: UpdateDownloadStatus | null): boolean {
+  if (!status || status.status !== 'completed') return false;
+  return status.error.trim().length > 0;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   前端需在检查/下载/安装阶段轮询 getDownloadStatus，终态停止，避免空转。
+ *
+ * Code Logic（这个函数做什么）:
+ *   status 为 checking|downloading|installing 时返回 true。
+ */
+export function shouldPollUpdateStatus(status: UpdateDownloadStatus | null): boolean {
+  const s = status?.status;
+  return s === 'checking' || s === 'downloading' || s === 'installing';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   安装按钮文案在“安装并重启 / 安装中 / 重试安装”间切换，安装失败可重试且不与下载失败混淆。
+ *
+ * Code Logic（这个函数做什么）:
+ *   installing 或 status=installing → installing；completed+error → retryInstall；否则 install。
+ */
+export function installButtonMode(opts: {
+  installing: boolean;
+  downloadStatus: UpdateDownloadStatus | null;
+}): 'install' | 'installing' | 'retryInstall' {
+  if (opts.installing || opts.downloadStatus?.status === 'installing') {
+    return 'installing';
+  }
+  if (shouldShowInstallRetry(opts.downloadStatus)) {
+    return 'retryInstall';
+  }
+  return 'install';
 }
