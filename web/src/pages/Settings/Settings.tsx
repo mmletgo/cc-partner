@@ -9,7 +9,7 @@
  * Code Logic（这个页面做什么）:
  *   - 子 tab：常规 / 依赖环境 / 健康提醒 / 同步 / AI / 自动化 / 关于，把既有 Card 按查看任务分组
  *   - Card 区块：基本设置 / 截图快捷键 / 依赖环境（权限管理、Workbench、局域网）/ 云端同步 / GitHub Trending / 自动化 / 关于
- *   - 组件挂载时从后端加载配置和版本信息
+ *   - 组件挂载时经 settingsResources allSettled 分组加载配置；core 成功即可展示壳层，局部失败可重试
  *   - Toggle 控件内联实现，避免引入额外 Switch 组件；状态切换走
  *     受控的 onClick + role="switch" + aria-checked
  *   - 底部按钮组：恢复默认走 ghost 风格重置状态、保存走 primary 风格
@@ -30,7 +30,19 @@ import { orchestratorConfigApi } from '@/api/orchestratorConfig';
 import { requestNotificationPermission } from '@/lib/notification';
 import { githubTrendingApi } from '@/api/githubTrending';
 import { usePermissions } from '@/hooks/usePermissions';
+import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import { mapPermissions } from '@/lib/permissionEntries';
+import {
+  createSettingsResourceApi,
+  isResourceReady,
+  loadSettingsResources,
+  pairCurrentError,
+  retrySettingsResource,
+  type PairResourceResult,
+  type ResourceResult,
+  type SettingsResourceGroup,
+  type SettingsResourceResults,
+} from './settingsResources';
 import { AutomationSettingsPanel } from './AutomationSettingsPanel';
 import { HealthPanel } from './HealthPanel';
 import {
@@ -252,9 +264,80 @@ export function Settings() {
   const [automationError, setAutomationError] = useState<string | null>(null);
   const [automationSaved, setAutomationSaved] = useState(false);
 
+  // 分组资源结果：局部失败可重试，不重置其他 tab 草稿
+  const [resourceResults, setResourceResults] = useState<SettingsResourceResults | null>(null);
+  const [retryingGroup, setRetryingGroup] = useState<SettingsResourceGroup | null>(null);
+
   // macOS 权限状态（设置页手动授权入口，持续轮询以反映用户在系统设置的变更）
   const [tWelcome] = useTranslation('welcome');
   const { status: permStatus, loading: permLoading, refresh: refreshPermissions } = usePermissions();
+
+  /**
+   * Business Logic（为什么需要这个常量）:
+   *   Settings 加载/重试依赖稳定的 11 端点 API 面，避免每次 render 重建。
+   *
+   * Code Logic（这个常量做什么）:
+   *   绑定生产 config/health/github/orchestrator API。
+   */
+  const settingsResourceApi = useMemo(
+    () =>
+      createSettingsResourceApi({
+        configApi,
+        githubTrendingApi,
+        healthApi,
+        orchestratorConfigApi,
+      }),
+    [],
+  );
+
+  /** core 默认配置是否可用（决定常规 tab「恢复默认」） */
+  const canResetCoreDefaults = resourceResults?.defaults.status === 'ready';
+  /** 云端同步默认配置是否可用 */
+  const canResetCloudSyncDefaults = resourceResults?.cloudSync.defaults.status === 'ready';
+  /** GitHub Trending 默认配置是否可用 */
+  const canResetGithubTrendingDefaults =
+    resourceResults?.githubTrending.defaults.status === 'ready';
+  /** Prompt 优化默认（来自 core defaults）是否可用 */
+  const canResetPromptOptimizerDefaults = canResetCoreDefaults;
+  /** 健康提醒默认配置是否可用 */
+  const canResetHealthDefaults = resourceResults?.health.defaults.status === 'ready';
+  /** 自动化默认配置是否可用 */
+  const canResetAutomationDefaults = resourceResults?.automation.defaults.status === 'ready';
+
+  /** 业务 tab current 加载错误（仅 current 失败阻断 panel） */
+  const cloudSyncLoadError = resourceResults ? pairCurrentError(resourceResults.cloudSync) : null;
+  const githubTrendingLoadError = resourceResults
+    ? pairCurrentError(resourceResults.githubTrending)
+    : null;
+  const healthLoadError = resourceResults ? pairCurrentError(resourceResults.health) : null;
+  const automationLoadError = resourceResults ? pairCurrentError(resourceResults.automation) : null;
+  const versionLoadError =
+    resourceResults && resourceResults.version.status === 'error'
+      ? resourceResults.version.error
+      : null;
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   下载进行中需要轮询进度，但后台标签页不得空转，且不得与旧 setInterval 重叠。
+   *
+   * Code Logic（这个函数做什么）:
+   *   拉取 getDownloadStatus 并写回 downloadStatus；失败静默等下一轮。
+   */
+  const pollDownloadStatus = useCallback(async () => {
+    try {
+      const status = await configApi.getDownloadStatus();
+      setDownloadStatus(status);
+    } catch {
+      // 轮询失败静默，下一轮重试
+    }
+  }, []);
+
+  // 仅在 downloading 时启用可见性感知 800ms 轮询（T1 hook）
+  useVisibilityPolling(pollDownloadStatus, {
+    intervalMs: 800,
+    enabled: downloadStatus?.status === 'downloading',
+    runImmediately: true,
+  });
 
   /**
    * 页内 tab 键盘切换：支持左右方向键 / Home / End，保持 tablist 可访问性
@@ -512,79 +595,243 @@ export function Settings() {
     }
   };
 
-  // 组件挂载时从后端加载配置和版本信息
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   allSettled 结果需按 ready 写入对应 state；失败不得用 defaults 顶替 current。
+   *
+   * Code Logic（这个函数做什么）:
+   *   仅对 status=ready 的分组写表单/快照；defaults 独立写入默认快照。
+   */
+  const applyResourceResults = useCallback((results: SettingsResourceResults) => {
+    if (isResourceReady(results.core)) {
+      const config = results.core.value;
+      const loaded = settingsStateFromConfig(config);
+      setState(loaded);
+      setInitialState(loaded);
+      setPromptOptimizerConfig(promptOptimizerSettingsConfigToForm(config));
+      setPromptOptimizerForm(promptOptimizerSettingsConfigToForm(config));
+    }
+
+    if (isResourceReady(results.defaults)) {
+      const defaultConfig = results.defaults.value;
+      setDefaultState(settingsStateFromConfig(defaultConfig));
+      setDefaultPromptOptimizerForm(promptOptimizerSettingsConfigToForm(defaultConfig));
+    }
+
+    if (isResourceReady(results.version)) {
+      setVersionInfo(results.version.value);
+    } else {
+      setVersionInfo(null);
+    }
+
+    if (isResourceReady(results.cloudSync.current)) {
+      const cloudSyncConfig = results.cloudSync.current.value;
+      setCloudSync(cloudSyncConfig);
+      setCloudSyncForm(cloudSyncConfigToForm(cloudSyncConfig));
+      setCloudSyncError(null);
+    }
+    if (isResourceReady(results.cloudSync.defaults)) {
+      setDefaultCloudSyncForm(cloudSyncConfigToForm(results.cloudSync.defaults.value));
+    }
+
+    if (isResourceReady(results.githubTrending.current)) {
+      const githubTrendingLoaded = results.githubTrending.current.value;
+      setGithubTrendingConfig(githubTrendingLoaded);
+      setGithubTrendingForm(githubTrendingConfigToForm(githubTrendingLoaded));
+      setGithubTrendingError(null);
+    }
+    if (isResourceReady(results.githubTrending.defaults)) {
+      setDefaultGithubTrendingForm(
+        githubTrendingConfigToForm(results.githubTrending.defaults.value),
+      );
+    }
+
+    if (isResourceReady(results.health.current)) {
+      const healthLoaded = results.health.current.value;
+      setHealthConfig(healthLoaded);
+      setHealthForm(healthConfigToForm(healthLoaded));
+      setHealthError(null);
+    }
+    if (isResourceReady(results.health.defaults)) {
+      setDefaultHealthForm(healthConfigToForm(results.health.defaults.value));
+    }
+
+    if (isResourceReady(results.automation.current)) {
+      const loadedAutomationForm = automationConfigToForm(results.automation.current.value);
+      setAutomationForm(loadedAutomationForm);
+      setInitialAutomationForm(loadedAutomationForm);
+      setAutomationError(null);
+    }
+    if (isResourceReady(results.automation.defaults)) {
+      setDefaultAutomationForm(automationConfigToForm(results.automation.defaults.value));
+    }
+
+    // core 失败 → 整页错误；成功则清除 page-level loadError（保留 save 错误另议）
+    if (results.core.status === 'error') {
+      setLoadError(results.core.error.message || t('error.loadConfigFailed'));
+    } else {
+      setLoadError(null);
+    }
+  }, [t]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   单组 retry 成功后只应用该组，避免覆盖其他 tab 未保存草稿。
+   *
+   * Code Logic（这个函数做什么）:
+   *   合并 resourceResults 中对应 group，再按 group 写 state。
+   */
+  const applyGroupResult = useCallback(
+    (
+      group: SettingsResourceGroup,
+      groupResult:
+        | ResourceResult<import('@/lib/types').AppConfig>
+        | ResourceResult<import('@/lib/types').VersionInfo>
+        | PairResourceResult<import('@/lib/types').CloudSyncConfig>
+        | PairResourceResult<import('@/lib/types').GithubTrendingConfig>
+        | PairResourceResult<import('@/lib/types').HealthConfig>
+        | PairResourceResult<import('@/api/orchestratorConfig').OrchestratorAutomationConfig>,
+    ) => {
+      setResourceResults((prev) => {
+        if (!prev) return prev;
+        return { ...prev, [group]: groupResult } as SettingsResourceResults;
+      });
+
+      if (group === 'core') {
+        const result = groupResult as ResourceResult<import('@/lib/types').AppConfig>;
+        if (isResourceReady(result)) {
+          const config = result.value;
+          const loaded = settingsStateFromConfig(config);
+          setState(loaded);
+          setInitialState(loaded);
+          setPromptOptimizerConfig(promptOptimizerSettingsConfigToForm(config));
+          setPromptOptimizerForm(promptOptimizerSettingsConfigToForm(config));
+          setLoadError(null);
+        } else {
+          setLoadError(result.error.message || t('error.loadConfigFailed'));
+        }
+        return;
+      }
+
+      if (group === 'defaults') {
+        const result = groupResult as ResourceResult<import('@/lib/types').AppConfig>;
+        if (isResourceReady(result)) {
+          const defaultConfig = result.value;
+          setDefaultState(settingsStateFromConfig(defaultConfig));
+          setDefaultPromptOptimizerForm(promptOptimizerSettingsConfigToForm(defaultConfig));
+        }
+        return;
+      }
+
+      if (group === 'version') {
+        const result = groupResult as ResourceResult<import('@/lib/types').VersionInfo>;
+        if (isResourceReady(result)) {
+          setVersionInfo(result.value);
+        } else {
+          setVersionInfo(null);
+        }
+        return;
+      }
+
+      if (group === 'cloudSync') {
+        const pair = groupResult as PairResourceResult<import('@/lib/types').CloudSyncConfig>;
+        if (isResourceReady(pair.current)) {
+          setCloudSync(pair.current.value);
+          setCloudSyncForm(cloudSyncConfigToForm(pair.current.value));
+          setCloudSyncError(null);
+        }
+        if (isResourceReady(pair.defaults)) {
+          setDefaultCloudSyncForm(cloudSyncConfigToForm(pair.defaults.value));
+        }
+        return;
+      }
+
+      if (group === 'githubTrending') {
+        const pair = groupResult as PairResourceResult<import('@/lib/types').GithubTrendingConfig>;
+        if (isResourceReady(pair.current)) {
+          setGithubTrendingConfig(pair.current.value);
+          setGithubTrendingForm(githubTrendingConfigToForm(pair.current.value));
+          setGithubTrendingError(null);
+        }
+        if (isResourceReady(pair.defaults)) {
+          setDefaultGithubTrendingForm(githubTrendingConfigToForm(pair.defaults.value));
+        }
+        return;
+      }
+
+      if (group === 'health') {
+        const pair = groupResult as PairResourceResult<import('@/lib/types').HealthConfig>;
+        if (isResourceReady(pair.current)) {
+          setHealthConfig(pair.current.value);
+          setHealthForm(healthConfigToForm(pair.current.value));
+          setHealthError(null);
+        }
+        if (isResourceReady(pair.defaults)) {
+          setDefaultHealthForm(healthConfigToForm(pair.defaults.value));
+        }
+        return;
+      }
+
+      if (group === 'automation') {
+        const pair = groupResult as PairResourceResult<
+          import('@/api/orchestratorConfig').OrchestratorAutomationConfig
+        >;
+        if (isResourceReady(pair.current)) {
+          const loadedAutomationForm = automationConfigToForm(pair.current.value);
+          setAutomationForm(loadedAutomationForm);
+          setInitialAutomationForm(loadedAutomationForm);
+          setAutomationError(null);
+        }
+        if (isResourceReady(pair.defaults)) {
+          setDefaultAutomationForm(automationConfigToForm(pair.defaults.value));
+        }
+      }
+    },
+    [t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   panel 局部失败时用户点重试，只请求该分组端点。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 retrySettingsResource，成功/失败都写回该组结果；不触碰其他组。
+   */
+  const handleRetryResourceGroup = useCallback(
+    async (group: SettingsResourceGroup) => {
+      setRetryingGroup(group);
+      try {
+        const groupResult = await retrySettingsResource(settingsResourceApi, group);
+        applyGroupResult(group, groupResult);
+      } finally {
+        setRetryingGroup(null);
+      }
+    },
+    [applyGroupResult, settingsResourceApi],
+  );
+
+  // 组件挂载时分组加载配置（allSettled，非整页 Promise.all）
   useEffect(() => {
     let cancelled = false;
 
     /**
-     * 加载 Settings 页面所需的全部配置
+     * 加载 Settings 页面所需的全部分组资源
      *
      * Business Logic（为什么需要这个函数）:
-     *   Settings 各 tab 共享同一次初始化流程，用户进入页面时需要同时获得当前配置、默认值和版本信息，
-     *   自动化 tab 也必须与同步/AI/健康 tab 一样取得当前值与恢复默认基准。
+     *   用户进入设置页时需要并行获得当前配置、默认值和版本信息；任一非 core 失败不得拖垮整页。
      *
      * Code Logic（这个函数做什么）:
-     *   并行调用各配置 API；返回后先检查 cancelled guard，再把后端 DTO 映射为各 tab 的受控表单状态。
+     *   loadSettingsResources + applyResourceResults；core 失败写 loadError，其余分组局部错误保留在 resourceResults。
      */
     async function loadConfig() {
       try {
-        const [
-          config,
-          defaultConfig,
-          version,
-          cloudSyncConfig,
-          defaultCloudSyncConfig,
-          githubTrendingLoaded,
-          defaultGithubTrendingLoaded,
-          healthLoaded,
-          defaultHealthLoaded,
-          automationLoaded,
-          defaultAutomationLoaded,
-        ] = await Promise.all([
-          configApi.get(),
-          configApi.getDefaults(),
-          configApi.version(),
-          configApi.getCloudSyncConfig(),
-          configApi.getDefaultCloudSyncConfig(),
-          githubTrendingApi.getConfig(),
-          githubTrendingApi.getDefaultConfig(),
-          healthApi.getConfig(),
-          healthApi.getDefaultConfig(),
-          orchestratorConfigApi.get(),
-          orchestratorConfigApi.getDefaults(),
-        ]);
+        const results = await loadSettingsResources(settingsResourceApi);
         if (cancelled) return;
-
-        const loaded = settingsStateFromConfig(config);
-        const defaults = settingsStateFromConfig(defaultConfig);
-        setState(loaded);
-        // 把已加载配置作为"未保存"比较的基准快照
-        setInitialState(loaded);
-        setDefaultState(defaults);
-        setVersionInfo(version);
-        // 云端同步：初始化已应用配置与受控表单值
-        setCloudSync(cloudSyncConfig);
-        setCloudSyncForm(cloudSyncConfigToForm(cloudSyncConfig));
-        setDefaultCloudSyncForm(cloudSyncConfigToForm(defaultCloudSyncConfig));
-        // GitHub Trending：初始化已应用配置与受控表单值
-        setGithubTrendingConfig(githubTrendingLoaded);
-        setGithubTrendingForm(githubTrendingConfigToForm(githubTrendingLoaded));
-        setDefaultGithubTrendingForm(githubTrendingConfigToForm(defaultGithubTrendingLoaded));
-        // Workbench Prompt 优化：初始化已应用配置与受控表单值 + 默认表单
-        setPromptOptimizerConfig(promptOptimizerSettingsConfigToForm(config));
-        setPromptOptimizerForm(promptOptimizerSettingsConfigToForm(config));
-        setDefaultPromptOptimizerForm(promptOptimizerSettingsConfigToForm(defaultConfig));
-        // 健康提醒：初始化已应用配置与受控表单值 + 默认表单
-        setHealthConfig(healthLoaded);
-        setHealthForm(healthConfigToForm(healthLoaded));
-        setDefaultHealthForm(healthConfigToForm(defaultHealthLoaded));
-        // Orchestrator 自动化：初始化当前表单、已应用快照与后端默认表单
-        const loadedAutomationForm = automationConfigToForm(automationLoaded);
-        setAutomationForm(loadedAutomationForm);
-        setInitialAutomationForm(loadedAutomationForm);
-        setDefaultAutomationForm(automationConfigToForm(defaultAutomationLoaded));
+        setResourceResults(results);
+        applyResourceResults(results);
       } catch (err) {
         if (cancelled) return;
+        // allSettled 本身不应抛；兜底仍显示整页错误
         setLoadError(err instanceof Error ? err.message : t('error.loadConfigFailed'));
       } finally {
         if (!cancelled) {
@@ -594,29 +841,12 @@ export function Settings() {
     }
 
     void loadConfig();
-    return () => { cancelled = true; };
-    // 仅在挂载时执行一次；t 在错误分支兜底，但依赖项保持挂载语义
+    return () => {
+      cancelled = true;
+    };
+    // 仅在挂载时执行一次
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // 下载进行中时轮询进度状态，每 800ms 一次；进入终态（completed/failed/cancelled）后停止
-  useEffect(() => {
-    if (downloadStatus?.status !== 'downloading') return;
-    let active = true;
-    const timer = window.setInterval(async () => {
-      if (!active) return;
-      try {
-        const status = await configApi.getDownloadStatus();
-        if (active) setDownloadStatus(status);
-      } catch {
-        // 轮询失败静默，下一轮重试
-      }
-    }, 800);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, [downloadStatus?.status]);
 
   /**
    * 启动更新下载：透传检查结果的 downloadUrl/filename，立即进入 downloading 状态
@@ -983,8 +1213,9 @@ export function Settings() {
     );
   }
 
-  // 加载失败状态
+  // core 配置加载失败：整页错误 + 重试（save 失败也复用此分支）
   if (loadError) {
+    const isCoreLoadFailure = resourceResults?.core.status === 'error';
     return (
       <div className={styles.page}>
         <div className={styles.container}>
@@ -994,6 +1225,20 @@ export function Settings() {
             <p className={`${styles.lead} ${styles.dangerText}`}>
               {t('settings:loadFailed', { error: loadError })}
             </p>
+            {isCoreLoadFailure ? (
+              <div className={styles.resourceErrorActions}>
+                <Button
+                  variant="secondary"
+                  size="md"
+                  onClick={() => void handleRetryResourceGroup('core')}
+                  disabled={retryingGroup === 'core'}
+                >
+                  {retryingGroup === 'core'
+                    ? t('settings:resource.retrying')
+                    : t('settings:resource.retry')}
+                </Button>
+              </div>
+            ) : null}
           </header>
         </div>
       </div>
@@ -1136,7 +1381,14 @@ export function Settings() {
             ) : null}
           </div>
           <div className={styles.footerActions}>
-            <Button variant="ghost" onClick={handleResetDefaults}>
+            <Button
+              variant="ghost"
+              onClick={handleResetDefaults}
+              disabled={!canResetCoreDefaults}
+              title={
+                canResetCoreDefaults ? undefined : t('settings:resource.defaultsUnavailable')
+              }
+            >
               {t('settings:action.resetDefault')}
             </Button>
             <Button variant="primary" onClick={handleSave} disabled={!isDirty || saving}>
@@ -1154,15 +1406,34 @@ export function Settings() {
             role="tabpanel"
             aria-labelledby="settings-tab-health"
           >
-            <HealthPanel
-              form={healthForm}
-              applied={healthConfig}
-              onPatch={patchHealthForm}
-              onResetDefaults={handleResetHealthDefaults}
-              onApply={handleApplyHealth}
-              applying={applyingHealth}
-              error={healthError}
-            />
+            {healthLoadError ? (
+              <div className={styles.resourceError} role="alert">
+                <span className={styles.updateError}>
+                  {t('settings:resource.loadFailed', { error: healthLoadError.message })}
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void handleRetryResourceGroup('health')}
+                  disabled={retryingGroup === 'health'}
+                >
+                  {retryingGroup === 'health'
+                    ? t('settings:resource.retrying')
+                    : t('settings:resource.retry')}
+                </Button>
+              </div>
+            ) : (
+              <HealthPanel
+                form={healthForm}
+                applied={healthConfig}
+                onPatch={patchHealthForm}
+                onResetDefaults={handleResetHealthDefaults}
+                onApply={handleApplyHealth}
+                applying={applyingHealth}
+                error={healthError}
+                canResetDefaults={canResetHealthDefaults}
+              />
+            )}
           </div>
         ) : null}
 
@@ -1358,6 +1629,12 @@ export function Settings() {
                 variant="ghost"
                 size="md"
                 onClick={handleResetCloudSyncDefaults}
+                disabled={!canResetCloudSyncDefaults}
+                title={
+                  canResetCloudSyncDefaults
+                    ? undefined
+                    : t('settings:resource.defaultsUnavailable')
+                }
               >
                 {t('settings:action.resetDefault')}
               </Button>
@@ -1413,6 +1690,25 @@ export function Settings() {
                         note: syncResult.note,
                       })}
                 </span>
+              </div>
+            ) : null}
+
+            {/* 分组加载失败：局部重试，不重置其他 tab */}
+            {cloudSyncLoadError ? (
+              <div className={styles.resourceError} role="alert">
+                <span className={styles.updateError}>
+                  {t('settings:resource.loadFailed', { error: cloudSyncLoadError.message })}
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void handleRetryResourceGroup('cloudSync')}
+                  disabled={retryingGroup === 'cloudSync'}
+                >
+                  {retryingGroup === 'cloudSync'
+                    ? t('settings:resource.retrying')
+                    : t('settings:resource.retry')}
+                </Button>
               </div>
             ) : null}
 
@@ -1554,6 +1850,12 @@ export function Settings() {
                 variant="ghost"
                 size="md"
                 onClick={handleResetGithubTrendingDefaults}
+                disabled={!canResetGithubTrendingDefaults}
+                title={
+                  canResetGithubTrendingDefaults
+                    ? undefined
+                    : t('settings:resource.defaultsUnavailable')
+                }
               >
                 {t('settings:action.resetDefault')}
               </Button>
@@ -1582,6 +1884,26 @@ export function Settings() {
                       })}
                 </span>
               </span>
+            ) : null}
+
+            {githubTrendingLoadError ? (
+              <div className={styles.resourceError} role="alert">
+                <span className={styles.updateError}>
+                  {t('settings:resource.loadFailed', {
+                    error: githubTrendingLoadError.message,
+                  })}
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void handleRetryResourceGroup('githubTrending')}
+                  disabled={retryingGroup === 'githubTrending'}
+                >
+                  {retryingGroup === 'githubTrending'
+                    ? t('settings:resource.retrying')
+                    : t('settings:resource.retry')}
+                </Button>
+              </div>
             ) : null}
 
             {githubTrendingError ? (
@@ -1722,6 +2044,12 @@ export function Settings() {
                 variant="ghost"
                 size="md"
                 onClick={handleResetPromptOptimizerSettingsDefaults}
+                disabled={!canResetPromptOptimizerDefaults}
+                title={
+                  canResetPromptOptimizerDefaults
+                    ? undefined
+                    : t('settings:resource.defaultsUnavailable')
+                }
               >
                 {t('settings:action.resetDefault')}
               </Button>
@@ -1752,17 +2080,36 @@ export function Settings() {
             role="tabpanel"
             aria-labelledby="settings-tab-automation"
           >
-            <AutomationSettingsPanel
-              form={automationForm}
-              defaults={defaultAutomationForm}
-              dirty={automationDirty}
-              saving={savingAutomation}
-              error={automationError}
-              saved={automationSaved}
-              onChange={handleAutomationFormChange}
-              onResetDefaults={handleResetAutomationDefaults}
-              onSave={handleSaveAutomation}
-            />
+            {automationLoadError ? (
+              <div className={styles.resourceError} role="alert">
+                <span className={styles.updateError}>
+                  {t('settings:resource.loadFailed', { error: automationLoadError.message })}
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void handleRetryResourceGroup('automation')}
+                  disabled={retryingGroup === 'automation'}
+                >
+                  {retryingGroup === 'automation'
+                    ? t('settings:resource.retrying')
+                    : t('settings:resource.retry')}
+                </Button>
+              </div>
+            ) : (
+              <AutomationSettingsPanel
+                form={automationForm}
+                defaults={defaultAutomationForm}
+                dirty={automationDirty}
+                saving={savingAutomation}
+                error={automationError}
+                saved={automationSaved}
+                onChange={handleAutomationFormChange}
+                onResetDefaults={handleResetAutomationDefaults}
+                onSave={handleSaveAutomation}
+                canResetDefaults={canResetAutomationDefaults}
+              />
+            )}
           </div>
         ) : null}
 
@@ -1780,6 +2127,25 @@ export function Settings() {
             <h2 className={styles.sectionTitle}>{t('settings:about.title')}</h2>
           </Card.Header>
           <Card.Body padding="md">
+            {versionLoadError ? (
+              <div className={styles.resourceError} role="alert">
+                <span className={styles.updateError}>
+                  {t('settings:resource.versionLoadFailed', {
+                    error: versionLoadError.message,
+                  })}
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void handleRetryResourceGroup('version')}
+                  disabled={retryingGroup === 'version'}
+                >
+                  {retryingGroup === 'version'
+                    ? t('settings:resource.retrying')
+                    : t('settings:resource.retry')}
+                </Button>
+              </div>
+            ) : null}
             <dl className={styles.metaList}>
               <div className={styles.metaRow}>
                 <dt className={styles.metaKey}>{t('settings:about.versionLabel')}</dt>

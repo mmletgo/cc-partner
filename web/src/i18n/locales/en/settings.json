@@ -27,7 +27,10 @@
     "placeholder": "Click, then press a shortcut",
     "recording": "Press a new shortcut…",
     "recordingHelper": "Recording keys; Esc cancels, Delete clears.",
-    "screenshot": { "label": "Screenshot shortcut", "helper": "Select an area and copy it to the clipboard." }
+    "screenshot": {
+      "label": "Screenshot shortcut",
+      "helper": "Select an area and copy it to the clipboard."
+    }
   },
   "sync": {
     "enabled": "On",
@@ -36,11 +39,26 @@
   "cloudSync": {
     "title": "Cloud sync",
     "subtitle": "Sync across networks via a GitHub private repository. Git access (SSH key or HTTPS credentials) must be configured on this machine.",
-    "repoUrl": { "label": "Repository URL", "helper": "e.g. git@github.com:user/repo.git or an HTTPS URL." },
-    "branch": { "label": "Branch (optional)", "helper": "Leave empty to use the repository default branch." },
-    "enabled": { "label": "Enable cloud sync", "helper": "Sync Prompts, CC history, and SSH settings to the GitHub repository. CLAUDE.md is manual push only." },
-    "auto": { "label": "Auto sync on a schedule", "helper": "Automatically sync at the configured interval." },
-    "interval": { "label": "Sync interval", "helper": "Interval between automatic syncs, in seconds." },
+    "repoUrl": {
+      "label": "Repository URL",
+      "helper": "e.g. git@github.com:user/repo.git or an HTTPS URL."
+    },
+    "branch": {
+      "label": "Branch (optional)",
+      "helper": "Leave empty to use the repository default branch."
+    },
+    "enabled": {
+      "label": "Enable cloud sync",
+      "helper": "Sync Prompts, CC history, and SSH settings to the GitHub repository. CLAUDE.md is manual push only."
+    },
+    "auto": {
+      "label": "Auto sync on a schedule",
+      "helper": "Automatically sync at the configured interval."
+    },
+    "interval": {
+      "label": "Sync interval",
+      "helper": "Interval between automatic syncs, in seconds."
+    },
     "testConnection": "Test connection",
     "testing": "Testing…",
     "apply": "Apply",
@@ -58,10 +76,22 @@
   "githubTrending": {
     "title": "AI tools (Claude CLI)",
     "subtitle": "Configure the local Claude Code CLI shared by GitHub Trending explanations and Prompt Optimizer. Trending explanations are cached locally; Prompt Optimizer only shows and copies the current result.",
-    "aiEnabled": { "label": "Enable GitHub explanations", "helper": "When off, the homepage still shows GitHub descriptions. Prompt Optimizer can still call Claude CLI with this path and model." },
-    "claudeCliPath": { "label": "Claude CLI path", "helper": "Used by GitHub explanations and Prompt Optimizer. Use claude, or a full path such as /home/you/.local/bin/claude." },
-    "claudeModel": { "label": "Model", "helper": "Claude Code CLI model alias or full model name for GitHub explanations and Prompt Optimizer. Defaults to sonnet." },
-    "cacheTtlHours": { "label": "Cache TTL (hours)", "helper": "Defaults to 24 hours. Only GitHub Trending fetches and explanations use this cache; Prompt Optimizer is not cached." },
+    "aiEnabled": {
+      "label": "Enable GitHub explanations",
+      "helper": "When off, the homepage still shows GitHub descriptions. Prompt Optimizer can still call Claude CLI with this path and model."
+    },
+    "claudeCliPath": {
+      "label": "Claude CLI path",
+      "helper": "Used by GitHub explanations and Prompt Optimizer. Use claude, or a full path such as /home/you/.local/bin/claude."
+    },
+    "claudeModel": {
+      "label": "Model",
+      "helper": "Claude Code CLI model alias or full model name for GitHub explanations and Prompt Optimizer. Defaults to sonnet."
+    },
+    "cacheTtlHours": {
+      "label": "Cache TTL (hours)",
+      "helper": "Defaults to 24 hours. Only GitHub Trending fetches and explanations use this cache; Prompt Optimizer is not cached."
+    },
     "appliedConfig": "Applied config",
     "testCli": "Test Claude CLI",
     "testing": "Testing…",
@@ -248,5 +278,12 @@
     "checkFailed": "Failed to check for updates",
     "loadConfigFailed": "Failed to load config",
     "startDownloadFailed": "Failed to start download"
+  },
+  "resource": {
+    "retry": "Retry",
+    "retrying": "Retrying…",
+    "loadFailed": "This section failed to load: {{error}}",
+    "versionLoadFailed": "Failed to load version info: {{error}}",
+    "defaultsUnavailable": "Defaults unavailable; reset is disabled"
   }
 }

@@ -573,3 +573,22 @@
     flex-direction: column;
   }
 }
+
+/* 分组资源加载失败：局部错误 + 重试 */
+.resourceError {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: var(--space-3) 0;
+  padding: var(--space-3);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+.resourceErrorActions {
+  margin-top: var(--space-3);
+  display: flex;
+  gap: var(--space-2);
+}
