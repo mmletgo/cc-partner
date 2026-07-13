@@ -877,7 +877,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod config_writer_tests {
     use super::*;
@@ -927,15 +926,9 @@ mod config_writer_tests {
         store.fail_next_save();
         let runtime = ConfigRuntime::new(initial, store.clone());
 
-        let err = update_github_trending_config_for_runtime(
-            &runtime,
-            Some(true),
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect_err("should fail");
+        let err = update_github_trending_config_for_runtime(&runtime, Some(true), None, None, None)
+            .await
+            .expect_err("should fail");
         assert!(err.to_string().contains("注入故障"));
         assert!(!runtime.snapshot().unwrap().github_trending.ai_enabled);
         assert!(!store.snapshot().unwrap().github_trending.ai_enabled);

@@ -201,9 +201,7 @@ where
             Ok(g) => g,
             Err(_) => {
                 runtime.increment_skipped_busy();
-                tracing::info!(
-                    "cloud_sync: trigger={trigger:?} 忙，ReturnBusy 跳过本轮"
-                );
+                tracing::info!("cloud_sync: trigger={trigger:?} 忙，ReturnBusy 跳过本轮");
                 return Ok(None);
             }
         },
@@ -569,20 +567,15 @@ mod tests {
         let h = hold.clone();
         let hd = held.clone();
         let holder = tokio::spawn(async move {
-            run_cloud_sync_exclusive(
-                &rt,
-                CloudSyncTrigger::Manual,
-                wait_policy(),
-                || {
-                    let h = h.clone();
-                    let hd = hd.clone();
-                    async move {
-                        hd.notify_one();
-                        h.notified().await;
-                        Ok::<(), AppError>(())
-                    }
-                },
-            )
+            run_cloud_sync_exclusive(&rt, CloudSyncTrigger::Manual, wait_policy(), || {
+                let h = h.clone();
+                let hd = hd.clone();
+                async move {
+                    hd.notify_one();
+                    h.notified().await;
+                    Ok::<(), AppError>(())
+                }
+            })
             .await
         });
         held.notified().await;

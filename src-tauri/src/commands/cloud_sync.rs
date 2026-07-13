@@ -158,7 +158,6 @@ pub async fn test_cloud_sync(state: State<'_, AppState>) -> Result<TestCloudSync
     Ok(engine::test_connection(state.inner()).await)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,15 +220,8 @@ mod tests {
         let t2 = tokio::spawn(async move {
             s2.fetch_add(1, Ordering::SeqCst);
             b2.wait().await;
-            update_cloud_sync_config_for_runtime(
-                &r2,
-                None,
-                None,
-                None,
-                None,
-                Some("main".into()),
-            )
-            .await
+            update_cloud_sync_config_for_runtime(&r2, None, None, None, None, Some("main".into()))
+                .await
         });
 
         let (a, b) = tokio::join!(t1, t2);
@@ -255,16 +247,10 @@ mod tests {
         store.fail_next_save();
         let runtime = ConfigRuntime::new(initial, store.clone());
 
-        let err = update_cloud_sync_config_for_runtime(
-            &runtime,
-            None,
-            Some(true),
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect_err("should fail");
+        let err =
+            update_cloud_sync_config_for_runtime(&runtime, None, Some(true), None, None, None)
+                .await
+                .expect_err("should fail");
         assert!(err.to_string().contains("注入故障"));
         assert!(!runtime.snapshot().unwrap().cloud_sync_enabled);
         assert!(!store.snapshot().unwrap().cloud_sync_enabled);

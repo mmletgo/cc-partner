@@ -375,9 +375,10 @@ impl UpdateRuntime {
                     "安装包未就绪，请先完成下载".to_string(),
                 ));
             }
-            let bytes = s.bytes.clone().ok_or_else(|| {
-                AppError::validation("安装包数据缺失，请重新下载".to_string())
-            })?;
+            let bytes = s
+                .bytes
+                .clone()
+                .ok_or_else(|| AppError::validation("安装包数据缺失，请重新下载".to_string()))?;
             let update = s.pending.clone().ok_or_else(|| {
                 AppError::validation("更新元数据缺失，请重新检查更新".to_string())
             })?;

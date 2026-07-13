@@ -16,6 +16,7 @@
 //!     discovery 句柄用 Mutex<Option<...>>（仅启动/关闭时写）。
 
 use crate::backend::ui::{serialize_event_payload, BackendAsset, BackendUi};
+use crate::cloud_sync::CloudSyncRuntime;
 use crate::config::AppConfig;
 use crate::config_runtime::ConfigRuntime;
 use crate::models::device::Device;
@@ -26,7 +27,6 @@ use crate::storage::{
     ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, TransferRepo,
     WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
 };
-use crate::cloud_sync::CloudSyncRuntime;
 use crate::transfer::registry::TransferRegistry;
 use crate::updater::UpdateRuntime;
 use mdns_sd::ServiceDaemon;

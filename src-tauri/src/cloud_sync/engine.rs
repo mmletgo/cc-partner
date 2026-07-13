@@ -113,9 +113,7 @@ pub async fn push_claude_md_to_cloud(
         &state.cloud_sync_runtime,
         CloudSyncTrigger::ClaudeMdPush,
         wait_policy(),
-        || async {
-            push_claude_md_to_cloud_locked(state, row).await
-        },
+        || async { push_claude_md_to_cloud_locked(state, row).await },
     )
     .await?;
 
@@ -216,12 +214,9 @@ pub async fn trigger_cloud_sync_with(
     policy: CloudSyncBusyPolicy,
 ) -> CloudSyncResult {
     let now = chrono::Utc::now().to_rfc3339();
-    match run_cloud_sync_exclusive(
-        &state.cloud_sync_runtime,
-        trigger,
-        policy,
-        || async { Ok(trigger_cloud_sync_locked(state).await) },
-    )
+    match run_cloud_sync_exclusive(&state.cloud_sync_runtime, trigger, policy, || async {
+        Ok(trigger_cloud_sync_locked(state).await)
+    })
     .await
     {
         Ok(Some(result)) => result,
@@ -745,14 +740,7 @@ mod tests {
         let log1 = log.clone();
         let n1 = first_entered.clone();
         let t1 = tokio::spawn(async move {
-            run_flow(
-                "manual",
-                CloudSyncTrigger::Manual,
-                rt1,
-                log1,
-                Some(n1),
-            )
-            .await
+            run_flow("manual", CloudSyncTrigger::Manual, rt1, log1, Some(n1)).await
         });
 
         first_entered.notified().await;
@@ -760,14 +748,7 @@ mod tests {
         let rt2 = runtime.clone();
         let log2 = log.clone();
         let t2 = tokio::spawn(async move {
-            run_flow(
-                "claude_md",
-                CloudSyncTrigger::ClaudeMdPush,
-                rt2,
-                log2,
-                None,
-            )
-            .await
+            run_flow("claude_md", CloudSyncTrigger::ClaudeMdPush, rt2, log2, None).await
         });
 
         let (r1, r2) = tokio::join!(t1, t2);

@@ -63,8 +63,7 @@ impl HealthFieldError {
 ///     检查 work/break/retain/water 范围与 DND 对，成功则 clone 并强制 `water_enabled=true`、
 ///     `reminder_fullscreen=true` 后返回；失败映射为 `AppError::validation`（消息含稳定字段码）。
 pub fn validate_health_config(input: &HealthConfig) -> Result<HealthConfig, AppError> {
-    validate_health_config_inner(input)
-        .map_err(|e| AppError::validation(e.message))
+    validate_health_config_inner(input).map_err(|e| AppError::validation(e.message))
 }
 
 /// 校验 Health 配置；失败时只返回稳定字段码（供 daemon 日志）。
@@ -149,21 +148,16 @@ pub fn validate_dnd_pair(start: Option<&str>, end: Option<&str>) -> Result<(), A
 ///     与 public API 共用同一规则，并保留字段码供 daemon 日志。
 /// Code Logic（这个函数做什么）:
 ///     trim 后空串视为空；两端空 Ok；两端有值则各自 parse_strict_hhmm；半开报错。
-fn validate_dnd_pair_inner(
-    start: Option<&str>,
-    end: Option<&str>,
-) -> Result<(), HealthFieldError> {
+fn validate_dnd_pair_inner(start: Option<&str>, end: Option<&str>) -> Result<(), HealthFieldError> {
     let start_v = start.map(str::trim).filter(|s| !s.is_empty());
     let end_v = end.map(str::trim).filter(|s| !s.is_empty());
     match (start_v, end_v) {
         (None, None) => Ok(()),
         (Some(s), Some(e)) => {
-            parse_strict_hhmm(s).map_err(|m| {
-                HealthFieldError::new("health.dnd_start", format!("非法: {m}"))
-            })?;
-            parse_strict_hhmm(e).map_err(|m| {
-                HealthFieldError::new("health.dnd_end", format!("非法: {m}"))
-            })?;
+            parse_strict_hhmm(s)
+                .map_err(|m| HealthFieldError::new("health.dnd_start", format!("非法: {m}")))?;
+            parse_strict_hhmm(e)
+                .map_err(|m| HealthFieldError::new("health.dnd_end", format!("非法: {m}")))?;
             Ok(())
         }
         _ => Err(HealthFieldError::new(
@@ -226,11 +220,7 @@ pub fn checked_future_timestamp(now: i64, minutes: i64) -> Result<i64, AppError>
 ///     不得改写 `WaterState`。
 /// Code Logic（这个函数做什么）:
 ///     校验 minutes 1..=1440；interval 必须 >0（否则 Validation）；全程 checked_mul/add/sub。
-pub fn checked_water_snooze_origin(
-    now: i64,
-    interval: i64,
-    minutes: i64,
-) -> Result<i64, AppError> {
+pub fn checked_water_snooze_origin(now: i64, interval: i64, minutes: i64) -> Result<i64, AppError> {
     if !(SNOOZE_MINUTES_MIN..=SNOOZE_MINUTES_MAX).contains(&minutes) {
         return Err(AppError::validation(format!(
             "snooze.minutes 必须在 {SNOOZE_MINUTES_MIN}..={SNOOZE_MINUTES_MAX}"
@@ -383,7 +373,10 @@ mod tests {
         assert!(checked_future_timestamp(1_000, i64::MIN).is_err());
         assert!(checked_future_timestamp(1_000, i64::MAX).is_err());
         assert_eq!(checked_future_timestamp(1_000, 1).unwrap(), 1_060);
-        assert_eq!(checked_future_timestamp(1_000, 1440).unwrap(), 1_000 + 1440 * 60);
+        assert_eq!(
+            checked_future_timestamp(1_000, 1440).unwrap(),
+            1_000 + 1440 * 60
+        );
         // 接近 i64::MAX 的 now 会溢出
         assert!(checked_future_timestamp(i64::MAX - 10, 1).is_err());
     }
@@ -421,10 +414,7 @@ mod tests {
         match validate_health_config_with_field(&bad) {
             Ok(_) => panic!("expected invalid"),
             Err(field) => {
-                assert!(
-                    field.starts_with("health."),
-                    "stable field code: {field}"
-                );
+                assert!(field.starts_with("health."), "stable field code: {field}");
                 // 不计算 overflowing cutoff
             }
         }

@@ -876,7 +876,6 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
     })
 }
 
-
 /// 校验快捷键字段。
 ///
 /// Business Logic（为什么需要这个函数）:

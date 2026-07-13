@@ -266,9 +266,8 @@ impl ConfigStore for FsConfigStore {
             drop(file);
 
             let reread_text = fs::read_to_string(&temp)?;
-            let reread: AppConfig = serde_json::from_str(&reread_text).map_err(|e| {
-                AppError::generic(format!("配置临时文件重读反序列化失败: {e}"))
-            })?;
+            let reread: AppConfig = serde_json::from_str(&reread_text)
+                .map_err(|e| AppError::generic(format!("配置临时文件重读反序列化失败: {e}")))?;
             if !configs_equivalent(&reread, candidate) {
                 return Err(AppError::generic(
                     "配置临时文件重读内容与候选不一致，拒绝提交",
