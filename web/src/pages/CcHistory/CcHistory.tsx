@@ -5,13 +5,16 @@
  *   Claude Code 在本地 ~/.claude/projects 下沉淀了用户输入的 prompt 历史，
  *   这些是宝贵的"真实使用记录"。本页面把它们按项目(cwd)分组、以时间线呈现，
  *   让用户搜索 / 复制 / 一键转存为正式 Prompt / 删除，并可手动刷新采集、跨设备同步。
+ *   项目切换与搜索词变更会并发请求；必须丢弃逆序响应，且刷新/同步失败不得静默。
  *
  * Code Logic（这个页面做什么）:
  *   - 顶部 page header（eyebrow/title/lead）
  *   - 工具栏：「刷新采集」按钮（ccHistoryApi.refresh）+「同步」按钮（promptsApi.sync）
  *   - 主体双栏 grid：左栏项目列表（点击高亮选中）、右栏选中项目的 prompt 时间线（顶部搜索框）
  *   - 数据流：loadProjects → 进页默认选中第一个项目；selectedProjectPath/search 变化 → loadPrompts
- *   - 复制/转存：成功后顶部 toast 提示
+ *   - 使用独立 projectGuard / promptGuard（createLatestRequestGuard）在 success/catch/finally
+ *     写状态前校验 token+context；selectedProject 变为 null 时 invalidate promptGuard
+ *   - 复制/转存：成功后顶部 toast 提示；刷新/同步失败同样 toast（非阻塞）
  *   - 删除：弹 confirm 二次确认，确认后乐观移除
  *   - hooks 全部声明在顶部、用条件渲染（三元）而非 early return（项目铁律）
  */
@@ -26,12 +29,22 @@ import { promptsApi } from '@/api/prompts';
 import type { CcProject, CcHistoryItem } from '@/lib/types';
 import { SearchIcon, SyncIcon, TrashIcon, HistoryIcon } from '@/lib/icons';
 import { debounce, formatRelativeTime } from '@/lib/format';
+import {
+  buildCcHistoryPromptContext,
+  createLatestRequestGuard,
+} from './ccHistoryRequestState';
 import styles from './CcHistory.module.css';
 
 type LoadState = 'loading' | 'success' | 'error';
 
 /**
  * CcHistory 页面主组件
+ *
+ * Business Logic（为什么需要这个组件）:
+ *   用户需要在单一页面浏览/搜索/复制/转存 Claude 历史 prompt，并安全处理并发加载。
+ *
+ * Code Logic（这个组件做什么）:
+ *   维护 projects/prompts 双列表状态，经 latest-request 守卫加载，渲染双栏 UI。
  */
 export function CcHistory() {
   const { t, i18n } = useTranslation(['ccHistory', 'common']);
@@ -58,13 +71,24 @@ export function CcHistory() {
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ── 独立 latest-request 守卫（项目列表 / prompt 列表）──
+  const projectGuardRef = useRef(createLatestRequestGuard<null>());
+  const promptGuardRef = useRef(createLatestRequestGuard<string>());
+
   /**
-   * 拉取项目列表；成功后若当前未选中且列表非空，默认选中第一个
+   * Business Logic（为什么需要这个函数）:
+   *   用户进入页面或刷新后需要看到按 cwd 聚合的项目列表，并默认选中可继续浏览的项目。
+   *
+   * Code Logic（这个函数做什么）:
+   *   begin projectGuard → listProjects；仅 isCurrent 时写 projects/error/loadState；
+   *   成功后若当前选中失效则回落到列表首项。
    */
   const loadProjects = useCallback(async () => {
+    const token = projectGuardRef.current.begin(null);
     setProjectsLoadState('loading');
     try {
       const data = await ccHistoryApi.listProjects();
+      if (!projectGuardRef.current.isCurrent(token, null)) return;
       const list = Array.isArray(data) ? data : [];
       setProjects(list);
       setProjectsLoadState('success');
@@ -74,6 +98,7 @@ export function CcHistory() {
         return list.length > 0 ? list[0].projectPath : null;
       });
     } catch (err) {
+      if (!projectGuardRef.current.isCurrent(token, null)) return;
       setProjectsLoadState('error');
       setProjectsError(err instanceof Error ? err.message : t('ccHistory:loadFailedGeneric'));
     }
@@ -86,17 +111,26 @@ export function CcHistory() {
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
-   * 拉取选中项目的 prompt 列表（带可选搜索词）
+   * Business Logic（为什么需要这个函数）:
+   *   选中项目或搜索词变化后，右栏必须只展示该上下文的 prompt，旧请求不得覆盖。
+   *
+   * Code Logic（这个函数做什么）:
+   *   以 buildCcHistoryPromptContext 作 context begin promptGuard；listPrompts 后
+   *   在 success/catch 写状态前 isCurrent 校验。
    */
   const loadPrompts = useCallback(
-    async (projectPath: string, search?: string) => {
+    async (projectPath: string, searchTerm?: string) => {
+      const context = buildCcHistoryPromptContext(projectPath, searchTerm);
+      const token = promptGuardRef.current.begin(context);
       setPromptsLoadState('loading');
       try {
-        const data = await ccHistoryApi.listPrompts(projectPath, search);
+        const data = await ccHistoryApi.listPrompts(projectPath, searchTerm);
+        if (!promptGuardRef.current.isCurrent(token, context)) return;
         setPrompts(Array.isArray(data) ? data : []);
         setPromptsLoadState('success');
         setPromptsError(null);
       } catch (err) {
+        if (!promptGuardRef.current.isCurrent(token, context)) return;
         setPromptsLoadState('error');
         setPromptsError(err instanceof Error ? err.message : t('ccHistory:loadFailedGeneric'));
       }
@@ -107,8 +141,10 @@ export function CcHistory() {
   /* eslint-disable react-hooks/set-state-in-effect -- 合法 fetch-in-effect，setState 在 await 后异步执行 */
   useEffect(() => {
     if (!selectedProjectPath) {
+      promptGuardRef.current.invalidate();
       setPrompts([]);
       setPromptsLoadState('success');
+      setPromptsError(null);
       return;
     }
     void loadPrompts(selectedProjectPath, search || undefined);
@@ -124,6 +160,13 @@ export function CcHistory() {
     [],
   );
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   搜索输入需即时回显，但请求应 debounce 避免每个按键打 API。
+   *
+   * Code Logic（这个函数做什么）:
+   *   更新 searchInput，并经 300ms debounce 写入 search 触发 loadPrompts。
+   */
   const handleSearchInput = useCallback(
     (e: ChangeEvent<HTMLInputElement>) => {
       const v = e.target.value;
@@ -133,7 +176,13 @@ export function CcHistory() {
     [debouncedSetSearch],
   );
 
-  // ── toast 短暂提示（2.4s 后自动消失）──
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   复制/转存/刷新/同步成功或失败都需要非阻塞反馈。
+   *
+   * Code Logic（这个函数做什么）:
+   *   设置 toast 文案，2.4s 后自动清空。
+   */
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -146,12 +195,19 @@ export function CcHistory() {
     };
   }, []);
 
-  // ── 立即刷新采集 ──
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户点击「刷新采集」时需重新扫描本地 Claude 会话并反馈结果；失败不得静默。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调 refresh；成功后经受保护 loader 刷新 projects/prompts 并 toast 采集数；
+   *   失败 toast 错误文案；finally 仅在仍刷新中时清 refreshing（避免并发覆盖）。
+   */
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
       const res = await ccHistoryApi.refresh();
-      // 采集完成后刷新项目 + 当前选中项目的 prompt
+      // 采集完成后刷新项目 + 当前选中项目的 prompt（复用带守卫的 loader）
       await loadProjects();
       if (selectedProjectPath) {
         await loadPrompts(selectedProjectPath, search || undefined);
@@ -159,14 +215,21 @@ export function CcHistory() {
       if (res?.ok) {
         showToast(t('ccHistory:refreshDone', { count: res.collected }));
       }
-    } catch {
-      // 静默失败
+    } catch (err) {
+      const message = err instanceof Error ? err.message : t('ccHistory:refreshFailedGeneric');
+      showToast(t('ccHistory:refreshFailed', { error: message }));
     } finally {
       setRefreshing(false);
     }
   }, [loadProjects, loadPrompts, selectedProjectPath, search, showToast, t]);
 
-  // ── 跨设备同步（复用 trigger_sync）──
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户点击「同步」时需触发跨设备同步并刷新历史；失败不得静默。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调 promptsApi.sync；成功后经受保护 loader 刷新；失败 toast。
+   */
   const handleSync = useCallback(async () => {
     try {
       await promptsApi.sync();
@@ -174,17 +237,30 @@ export function CcHistory() {
       if (selectedProjectPath) {
         await loadPrompts(selectedProjectPath, search || undefined);
       }
-    } catch {
-      // 静默失败
+    } catch (err) {
+      const message = err instanceof Error ? err.message : t('ccHistory:syncFailedGeneric');
+      showToast(t('ccHistory:syncFailed', { error: message }));
     }
-  }, [loadProjects, loadPrompts, selectedProjectPath, search]);
+  }, [loadProjects, loadPrompts, selectedProjectPath, search, showToast, t]);
 
-  // ── 复制成功 toast ──
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   复制成功需要即时反馈。
+   *
+   * Code Logic（这个函数做什么）:
+   *   toast 已复制文案。
+   */
   const handleCopied = useCallback(() => {
     showToast(t('ccHistory:copied'));
   }, [showToast, t]);
 
-  // ── 转存为 Prompt：用 content 前 40 字做 title ──
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户希望把历史 prompt 一键转存到 Prompt 库。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用 content 前 40 字做 title 调 promptsApi.create；成功 toast。
+   */
   const handleSaveAsPrompt = useCallback(
     async (item: CcHistoryItem) => {
       try {
@@ -192,13 +268,19 @@ export function CcHistory() {
         await promptsApi.create({ title, content: item.content, tags: [] });
         showToast(t('ccHistory:savedAsPrompt'));
       } catch {
-        // 静默失败
+        // 静默失败（转存非本任务范围）
       }
     },
     [showToast, t],
   );
 
-  // ── 请求删除：记录 id 触发确认弹层 ──
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   删除需二次确认，防止误触。
+   *
+   * Code Logic（这个函数做什么）:
+   *   记录 pendingDeleteId 触发确认弹层。
+   */
   const handleRequestDelete = useCallback((item: CcHistoryItem) => {
     setPendingDeleteId(item.id);
   }, []);
@@ -209,6 +291,13 @@ export function CcHistory() {
     [prompts, pendingDeleteId],
   );
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户确认后应从时间线移除该历史 prompt。
+   *
+   * Code Logic（这个函数做什么）:
+   *   乐观从 prompts/projects 计数移除，再调 remove；失败静默（非本任务范围）。
+   */
   const confirmDelete = useCallback(async () => {
     if (!pendingDeleteId) return;
     const id = pendingDeleteId;
@@ -462,7 +551,13 @@ export function CcHistory() {
 // 子组件
 // ────────────────────────────────────────────────────────────────
 
-/** 时间线骨架屏 */
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   首屏/切换项目时右栏应显示骨架，避免空白闪烁。
+ *
+ * Code Logic（这个组件做什么）:
+ *   渲染 4 条时间线骨架块。
+ */
 function TimelineSkeleton() {
   const { t } = useTranslation(['ccHistory']);
   return (
