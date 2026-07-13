@@ -27,6 +27,38 @@ const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, 
 /** 分钟选项 */
 const MINUTE_OPTIONS = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0'));
 
+/**
+ * 健康配置数字字段前端 UX 范围（分钟/天），对齐后端秒级合法区间。
+ * 后端仍是权威校验；此处仅约束输入控件 min/max。
+ *
+ * - work: 60..=28800 秒 → 1..=480 分钟
+ * - break: UI 分钟 1..=120（后端允许 30 秒，UI 仍以整分钟为主）
+ * - water: 300..=86400 秒 → 5..=1440 分钟
+ * - retain: 1..=3650 天
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- HEALTH_RANGE 供测试直接 import
+export const HEALTH_RANGE = {
+  workWindowMinutes: { min: 1, max: 480 },
+  breakMinutes: { min: 1, max: 120 },
+  waterIntervalMinutes: { min: 5, max: 1440 },
+  retainDays: { min: 1, max: 3650 },
+} as const;
+
+/**
+ * 判断免打扰起止是否构成「全天免打扰」
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   后端约定 dndStart === dndEnd 且两者非空表示全天免打扰，属于合法配置；
+ *   设置页需提示用户该语义，避免误以为是关闭免打扰。
+ *
+ * Code Logic（这个函数做什么）:
+ *   两端均非空字符串且严格相等时返回 true。
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- isAllDayDnd 供测试直接 import
+export function isAllDayDnd(start: string | null, end: string | null): boolean {
+  return Boolean(start && end && start === end);
+}
+
 interface TimeParts {
   hour: string;
   minute: string;
@@ -281,6 +313,8 @@ export function HealthPanel({
   error,
 }: HealthPanelProps) {
   const { t } = useTranslation(['settings', 'health', 'common']);
+  // 全天免打扰：起止均非空且相等（后端合法语义）；派生值须在任何 early return 之前
+  const allDayDnd = isAllDayDnd(form.dndStart, form.dndEnd);
 
   return (
     <>
@@ -301,22 +335,24 @@ export function HealthPanel({
           <NumberRow
             label={t('health:workWindowMinutes')}
             helper={t('health:workWindowDescription')}
-            min={1}
-            max={120}
+            min={HEALTH_RANGE.workWindowMinutes.min}
+            max={HEALTH_RANGE.workWindowMinutes.max}
             value={Math.round(form.workWindowSeconds / 60)}
             onChange={(v) => onPatch({ workWindowSeconds: v * 60 })}
           />
           <NumberRow
             label={t('health:breakMinutes')}
             helper={t('health:breakDescription')}
-            min={1}
+            min={HEALTH_RANGE.breakMinutes.min}
+            max={HEALTH_RANGE.breakMinutes.max}
             value={Math.round(form.breakSeconds / 60)}
             onChange={(v) => onPatch({ breakSeconds: v * 60 })}
           />
           <NumberRow
             label={t('health:waterIntervalMinutes')}
             helper={t('health:waterIntervalDescription')}
-            min={1}
+            min={HEALTH_RANGE.waterIntervalMinutes.min}
+            max={HEALTH_RANGE.waterIntervalMinutes.max}
             value={Math.round(form.waterIntervalSeconds / 60)}
             onChange={(v) => onPatch({ waterIntervalSeconds: v * 60 })}
           />
@@ -336,6 +372,11 @@ export function HealthPanel({
             onChange={(v) => onPatch({ dndEnd: v })}
           />
         </div>
+        {allDayDnd ? (
+          <p className={styles.helper} data-testid="health-all-day-dnd">
+            {t('health:allDayDnd')}
+          </p>
+        ) : null}
       </HealthSection>
 
       <HealthSection id="settings-health-notification-privacy" title={t('health:privacyGroup')}>
@@ -356,7 +397,8 @@ export function HealthPanel({
         <NumberRow
           label={t('health:retainDays')}
           helper={t('health:retainDaysDescription')}
-          min={1}
+          min={HEALTH_RANGE.retainDays.min}
+          max={HEALTH_RANGE.retainDays.max}
           value={form.retainDays}
           onChange={(v) => onPatch({ retainDays: v })}
         />

@@ -4,11 +4,13 @@
 //! - `state`:工作/休息状态机(纯算法)
 //! - `monitor`:键鼠采样(跨平台)
 //! - `reminder`:提醒生命周期 + 免打扰
+//! - `validation`:配置范围/DND/贪睡检查算术
 //! - daemon 入口 `start_health_daemon`(本文件)
 
 pub mod monitor;
 pub mod reminder;
 pub mod state;
+pub mod validation;
 pub mod water;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -105,10 +107,15 @@ pub fn start_health_daemon(app: AppHandle, state: std::sync::Arc<AppState>) -> C
     cancel
 }
 
-/// 处理一次采样:写库 → 推进状态机 → 满足条件 emit `health:reminder`。
+/// 处理一次采样:写库 → 校验配置 → 推进状态机 → 满足条件 emit `health:reminder`。
 ///
-/// 跨 await 不持 RwLockReadGuard:开头 `state.config.read().unwrap().health.clone()`
-/// 先 clone 出配置副本并释放读锁,后续 await 安全。
+/// Business Logic（为什么需要这个函数）:
+///     daemon 每分钟需要落库活动、在启用时推进久坐/喝水提醒并清理过期明细；
+///     磁盘上若出现非法范围/DND，本 tick 必须跳过提醒与清理，避免错误计时或算术溢出。
+/// Code Logic（这个函数做什么）:
+///     跨 await 不持 RwLockReadGuard:开头 clone health 配置；写 activity 后若未启用/暂停则返回；
+///     再用 `validate_health_config_with_field` 校验——失败 `warn(field=...)` 并跳过提醒/清理；
+///     通过后用归一化 cfg 推进状态机/水提醒，并用 `checked_retain_cutoff` 做清理。
 async fn handle_sample(
     app: &AppHandle,
     state: &AppState,
@@ -137,6 +144,18 @@ async fn handle_sample(
     if !active_for_reminder {
         return Ok(());
     }
+
+    // 非法配置:跳过本 tick 的提醒/清理(活动记录已写)。
+    let cfg = match validation::validate_health_config_with_field(&cfg) {
+        Ok(c) => c,
+        Err(field_code) => {
+            tracing::warn!(
+                field = %field_code,
+                "health.invalid_config skip reminder/cleanup"
+            );
+            return Ok(());
+        }
+    };
 
     // 推进状态机(持锁区间内不 await,advance 是纯 CPU 计算)
     let thresholds = HealthThresholds {
@@ -204,8 +223,14 @@ async fn handle_sample(
         }
     }
 
-    // 数据清理(DELETE 幂等,成本低;每次跑可优化为跨天清理)
-    let cutoff = now - cfg.retain_days * 86400;
+    // 数据清理:检查算术 cutoff,溢出则跳过本 tick 清理(不 panic)。
+    let cutoff = match validation::checked_retain_cutoff(now, cfg.retain_days) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "health.retain_cutoff overflow skip cleanup");
+            return Ok(());
+        }
+    };
     if let Err(e) = state.health_repo.cleanup_older_than(cutoff).await {
         tracing::warn!("活动记录清理失败: {e}");
     }

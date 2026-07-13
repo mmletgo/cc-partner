@@ -12,11 +12,16 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, RwLock};
 use tauri::State;
 
-use crate::config::HealthConfig;
+use crate::config::{AppConfig, HealthConfig};
 use crate::error::AppError;
 use crate::health::state::MachineState;
+use crate::health::validation::{
+    checked_future_timestamp, checked_water_snooze_origin, validate_health_config,
+};
+use crate::health::HealthRuntime;
 use crate::state::AppState;
 
 /// 计算本地当日 0 点对应的 Unix 秒时间戳。
@@ -238,15 +243,111 @@ pub async fn toggle_health_paused(
     Ok(())
 }
 
+/// 计算久坐贪睡到期时间戳（纯函数，供命令与单测复用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     「稍后提醒」必须在改写运行时前拒绝非法 minutes 与溢出，避免静默错误到期。
+/// Code Logic（这个函数做什么）:
+///     委托 `checked_future_timestamp(now, minutes)`，返回 `now + minutes*60`。
+fn prepare_snooze_until(now: i64, minutes: i64) -> Result<i64, AppError> {
+    checked_future_timestamp(now, minutes)
+}
+
+/// 计算喝水延迟后的 last_drink_ts（纯函数）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     喝水「延迟 N 分钟」需在持锁改 WaterState 前完成范围与检查算术校验。
+/// Code Logic（这个函数做什么）:
+///     委托 `checked_water_snooze_origin(now, interval, minutes)`。
+fn prepare_water_snooze(now: i64, interval: i64, minutes: i64) -> Result<i64, AppError> {
+    checked_water_snooze_origin(now, interval, minutes)
+}
+
+/// 把前端 DTO 映射为待写入的 `HealthConfig` 并校验归一化。
+///
+/// Business Logic（为什么需要这个函数）:
+///     设置页保存必须在拿到 config 写锁/落盘前拒绝超范围与非法 DND，保证失败无副作用。
+/// Code Logic（这个函数做什么）:
+///     从 DTO 构造 HealthConfig（water/fullscreen 先置 true），再 `validate_health_config`。
+fn prepare_health_config_update(dto: HealthConfigDto) -> Result<HealthConfig, AppError> {
+    let mapped = HealthConfig {
+        enabled: dto.enabled,
+        work_window_seconds: dto.work_window_seconds,
+        break_seconds: dto.break_seconds,
+        record_window_title: dto.record_window_title,
+        retain_days: dto.retain_days,
+        notify_enabled: dto.notify_enabled,
+        dnd_start: dto.dnd_start,
+        dnd_end: dto.dnd_end,
+        water_enabled: true,
+        water_interval_seconds: dto.water_interval_seconds,
+        reminder_fullscreen: true,
+    };
+    validate_health_config(&mapped)
+}
+
+/// 在校验通过后把健康配置写入共享 `AppConfig` 并落盘（测试可注入 Arc）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     命令层与 no-side-effect 单测需要同一条「先校验、再写锁、再 save」路径。
+/// Code Logic（这个函数做什么）:
+///     `prepare_health_config_update` → 写锁覆盖 `health` → `save()` → 返回 DTO。
+fn apply_update_health_config_for_state(
+    config: &Arc<RwLock<AppConfig>>,
+    dto: HealthConfigDto,
+) -> Result<HealthConfigDto, AppError> {
+    let normalized = prepare_health_config_update(dto)?;
+    {
+        let mut cfg = config.write().unwrap();
+        cfg.health = normalized;
+        cfg.save()?;
+    }
+    Ok(config.read().unwrap().health.clone().into())
+}
+
+/// 校验后写入久坐贪睡到期时间（测试可注入 HealthRuntime）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     非法 minutes 不得改写 `snooze_until`。
+/// Code Logic（这个函数做什么）:
+///     `prepare_snooze_until` 成功后再锁 `snooze_until` 写入。
+fn apply_snooze_reminder_for_runtime(
+    health: &HealthRuntime,
+    now: i64,
+    minutes: i64,
+) -> Result<(), AppError> {
+    let until = prepare_snooze_until(now, minutes)?;
+    *health.snooze_until.lock().unwrap() = Some(until);
+    Ok(())
+}
+
+/// 校验后写入喝水延迟起点（测试可注入 HealthRuntime）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     非法 minutes/interval 或溢出不得改写 `WaterState`。
+/// Code Logic（这个函数做什么）:
+///     `prepare_water_snooze` 成功后再锁 water 写 `last_drink_ts` 并清 pending。
+fn apply_snooze_water_reminder_for_runtime(
+    health: &HealthRuntime,
+    now: i64,
+    interval: i64,
+    minutes: i64,
+) -> Result<(), AppError> {
+    let origin = prepare_water_snooze(now, interval, minutes)?;
+    let mut w = health.water.lock().unwrap();
+    w.last_drink_ts = origin;
+    w.pending_remind = false;
+    Ok(())
+}
+
 /// 贪睡 N 分钟（设置贪睡到期时间戳，期间提醒静默）。
 ///
 /// Business Logic: 前端「稍后提醒」；到期前 daemon 不 emit 提醒事件。
-/// Code Logic: 以当前 UTC 时间戳 + minutes*60 设贪睡到期，写入 HealthRuntime.snooze_until。
+/// Code Logic: 先校验 minutes 1..=1440 与检查算术，再写入 HealthRuntime.snooze_until。
 #[tauri::command]
 pub async fn snooze_reminder(state: State<'_, AppState>, minutes: i64) -> Result<(), AppError> {
     let now = chrono::Utc::now().timestamp();
-    *state.health.snooze_until.lock().unwrap() = Some(now + minutes * 60);
-    Ok(())
+    apply_snooze_reminder_for_runtime(&state.health, now, minutes)
 }
 
 /// 跳过当前提醒（重置状态机回到 Idle 初态，清空贪睡）。
@@ -262,29 +363,14 @@ pub async fn skip_reminder(state: State<'_, AppState>) -> Result<(), AppError> {
 
 /// 更新健康提醒配置（整体覆盖写 config.health 并落盘）。
 ///
-/// Business Logic: 前端设置页「保存」；把 DTO 写回磁盘配置并持久化。
-/// Code Logic: 拿 config 写锁逐字段覆盖 + 固定启用字段归一为 true + `cfg.save()`，返回更新后的配置 DTO。
+/// Business Logic: 前端设置页「保存」；把 DTO 写回磁盘配置并持久化；非法输入拒绝且不改配置。
+/// Code Logic: 先 `prepare_health_config_update` 校验归一化，再写锁覆盖 + `save()`，返回 DTO。
 #[tauri::command]
 pub async fn update_health_config(
     state: State<'_, AppState>,
     config: HealthConfigDto,
 ) -> Result<HealthConfigDto, AppError> {
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.health.enabled = config.enabled;
-        cfg.health.work_window_seconds = config.work_window_seconds;
-        cfg.health.break_seconds = config.break_seconds;
-        cfg.health.record_window_title = config.record_window_title;
-        cfg.health.retain_days = config.retain_days;
-        cfg.health.notify_enabled = config.notify_enabled;
-        cfg.health.dnd_start = config.dnd_start.clone();
-        cfg.health.dnd_end = config.dnd_end.clone();
-        cfg.health.water_enabled = true;
-        cfg.health.water_interval_seconds = config.water_interval_seconds;
-        cfg.health.reminder_fullscreen = true;
-        cfg.save()?;
-    }
-    Ok(state.config.read().unwrap().health.clone().into())
+    apply_update_health_config_for_state(&state.config, config)
 }
 
 /// 查询 [since_ts, +∞) 区间内的活跃/闲置分钟数。
@@ -368,11 +454,9 @@ pub async fn skip_water_reminder(state: State<'_, AppState>) -> Result<(), AppEr
 /// 延迟 N 分钟再提醒喝水(把下次提醒推迟 minutes 分钟 + 清未响应提醒,不入库)。
 ///
 /// Business Logic: 前端喝水遮罩「延迟 5/10 分钟」按钮;用户想稍后再被提醒喝水,需要把下次提醒
-///                  推迟指定分钟数(而非一个完整间隔)。不落库(没有真实喝水行为)。
-/// Code Logic: 先读 config 读锁取 `water_interval_seconds` 并立即释放锁(不跨 await 持读锁),
-///             再以 `last_drink_ts = now - interval + minutes*60` 把计时起点回拨,使
-///             `now - last_drink_ts` 距离 interval 还差 minutes 分钟(即 minutes 分钟后到阈值);
-///             pending_remind 置 false。参照 `snooze_reminder` 风格。
+///                  推迟指定分钟数(而非一个完整间隔)。不落库(没有真实喝水行为)。非法 minutes 无副作用。
+/// Code Logic: 先读 config 取 `water_interval_seconds` 并释放读锁,再 `prepare_water_snooze`
+///             校验/检查算术,成功后才写 `last_drink_ts` 并清 pending。
 #[tauri::command]
 pub async fn snooze_water_reminder(
     state: State<'_, AppState>,
@@ -381,12 +465,7 @@ pub async fn snooze_water_reminder(
     // 先读 interval 并释放 config 读锁,避免跨 await 持 RwLockReadGuard(非 Send)。
     let interval = state.config.read().unwrap().health.water_interval_seconds;
     let now = chrono::Utc::now().timestamp();
-    {
-        let mut w = state.health.water.lock().unwrap();
-        w.last_drink_ts = now - interval + minutes * 60;
-        w.pending_remind = false;
-    }
-    Ok(())
+    apply_snooze_water_reminder_for_runtime(&state.health, now, interval, minutes)
 }
 
 /// 关闭所有全屏健康提醒遮罩窗口(供前端遮罩页「推迟/跳过」按钮调用)。
@@ -535,5 +614,105 @@ mod habit_stats_tests {
         assert_eq!((Some(0i64)).unwrap_or(7).clamp(1, 31), 1);
         assert_eq!((Some(100i64)).unwrap_or(7).clamp(1, 31), 31);
         assert_eq!((Some(-5i64)).unwrap_or(7).clamp(1, 31), 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::health::validation::{
+        checked_retain_cutoff, validate_health_config_with_field,
+    };
+
+    /// 构造合法默认 DTO。
+    fn valid_dto() -> HealthConfigDto {
+        HealthConfig::default().into()
+    }
+
+    #[test]
+    fn rejects_invalid_work_window_without_side_effect_on_prepare() {
+        let mut dto = valid_dto();
+        dto.work_window_seconds = 59;
+        assert!(prepare_health_config_update(dto).is_err());
+        let mut dto = valid_dto();
+        dto.work_window_seconds = 28801;
+        assert!(prepare_health_config_update(dto).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_dnd_half_pair() {
+        let mut dto = valid_dto();
+        dto.dnd_start = Some("22:00".into());
+        dto.dnd_end = None;
+        let err = prepare_health_config_update(dto).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("health.dnd_start") || msg.contains("dnd_end"),
+            "msg={msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_snooze_minutes_without_changing_runtime() {
+        let rt = HealthRuntime::new();
+        *rt.snooze_until.lock().unwrap() = Some(42);
+        let before = *rt.snooze_until.lock().unwrap();
+        assert!(apply_snooze_reminder_for_runtime(&rt, 1_000, 0).is_err());
+        assert!(apply_snooze_reminder_for_runtime(&rt, 1_000, 1441).is_err());
+        assert!(apply_snooze_reminder_for_runtime(&rt, 1_000, i64::MAX).is_err());
+        assert_eq!(*rt.snooze_until.lock().unwrap(), before);
+    }
+
+    #[test]
+    fn rejects_invalid_water_snooze_without_changing_water_state() {
+        let rt = HealthRuntime::new();
+        {
+            let mut w = rt.water.lock().unwrap();
+            w.last_drink_ts = 12345;
+            w.pending_remind = true;
+        }
+        let (before_ts, before_pending) = {
+            let w = rt.water.lock().unwrap();
+            (w.last_drink_ts, w.pending_remind)
+        };
+        assert!(apply_snooze_water_reminder_for_runtime(&rt, 10_000, 3600, 0).is_err());
+        assert!(apply_snooze_water_reminder_for_runtime(&rt, 10_000, 3600, 2000).is_err());
+        let w = rt.water.lock().unwrap();
+        assert_eq!(w.last_drink_ts, before_ts);
+        assert_eq!(w.pending_remind, before_pending);
+    }
+
+    #[test]
+    fn accepts_valid_snooze_and_water_helpers() {
+        let rt = HealthRuntime::new();
+        apply_snooze_reminder_for_runtime(&rt, 1_000, 10).unwrap();
+        assert_eq!(*rt.snooze_until.lock().unwrap(), Some(1_000 + 600));
+
+        apply_snooze_water_reminder_for_runtime(&rt, 10_000, 3600, 5).unwrap();
+        let w = rt.water.lock().unwrap();
+        assert_eq!(w.last_drink_ts, 10_000 - 3600 + 300);
+        assert!(!w.pending_remind);
+    }
+
+    #[test]
+    fn rejects_invalid_config_prepare_preserves_normalized_flags_on_ok() {
+        let mut dto = valid_dto();
+        dto.water_enabled = false;
+        dto.reminder_fullscreen = false;
+        let cfg = prepare_health_config_update(dto).unwrap();
+        assert!(cfg.water_enabled);
+        assert!(cfg.reminder_fullscreen);
+    }
+
+    /// 模拟 daemon：非法 retain/work_window 时跳过 cutoff，且 checked 算术不 panic。
+    #[test]
+    fn rejects_invalid_daemon_config_skips_overflowing_cutoff() {
+        let mut bad = HealthConfig::default();
+        bad.work_window_seconds = 59;
+        bad.retain_days = 0;
+        let field = validate_health_config_with_field(&bad).unwrap_err();
+        assert!(field.starts_with("health."));
+        // 即使强行用非法 retain，checked 也应 Err 而非 panic
+        assert!(checked_retain_cutoff(100, i64::MAX).is_err());
     }
 }

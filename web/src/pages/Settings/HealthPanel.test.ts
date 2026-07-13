@@ -3,12 +3,14 @@
  *
  * Business Logic（为什么需要这个测试）:
  *   健康 tab 免打扰时间需要使用 24 小时制选择器,避免用户手动输入 HH:MM,
- *   也避免原生 time input 受系统 locale 影响显示成 12 小时制。
+ *   也避免原生 time input 受系统 locale 影响显示成 12 小时制；
+ *   数字字段 min/max 需对齐后端合法区间，起止相等时展示「全天免打扰」说明。
  *
  * Code Logic（做什么）:
  *   先注册 css-stub loader(HealthPanel.tsx 经 @/components/primitives 间接 import *.module.css,
- *   tsx 无 CSS loader,需 stub 成空对象);再动态 import HealthPanel 取 timePartsToConfig,
- *   验证空值/null 映射、三个 section、四个 select、00-23 小时选项以及健康网格 CSS 覆盖顺序。
+ *   tsx 无 CSS loader,需 stub 成空对象);再动态 import HealthPanel 取 timePartsToConfig /
+ *   HEALTH_RANGE / isAllDayDnd,验证空值/null 映射、三个 section、四个 select、
+ *   00-23 小时选项、健康网格 CSS 覆盖顺序、数字输入 min/max 属性与全天免打扰文案。
  *   健康监测开启后久坐/喝水/全屏遮罩始终启用,因此不应再渲染喝水启用或全屏遮罩开关。
  */
 
@@ -25,7 +27,13 @@ describe('HealthPanel', () => {
     const { default: i18n } = await import('../../i18n');
     await i18n.changeLanguage('zh');
 
-    const { HealthPanel, splitTimeValue, timePartsToConfig } = await import('./HealthPanel');
+    const {
+      HealthPanel,
+      splitTimeValue,
+      timePartsToConfig,
+      HEALTH_RANGE,
+      isAllDayDnd,
+    } = await import('./HealthPanel');
 
     const cases: Array<[string, string, string | null]> = [
       ['', '', null],
@@ -54,6 +62,25 @@ describe('HealthPanel', () => {
           `splitTimeValue('${String(input)}') expected ${expectedHour}:${expectedMinute}, got ${actual.hour}:${actual.minute}`,
         );
       }
+    }
+
+    if (HEALTH_RANGE.workWindowMinutes.min !== 1 || HEALTH_RANGE.workWindowMinutes.max !== 480) {
+      throw new Error(`HEALTH_RANGE.workWindowMinutes expected 1..480, got ${HEALTH_RANGE.workWindowMinutes.min}..${HEALTH_RANGE.workWindowMinutes.max}`);
+    }
+    if (HEALTH_RANGE.breakMinutes.min !== 1 || HEALTH_RANGE.breakMinutes.max !== 120) {
+      throw new Error(`HEALTH_RANGE.breakMinutes expected 1..120, got ${HEALTH_RANGE.breakMinutes.min}..${HEALTH_RANGE.breakMinutes.max}`);
+    }
+    if (HEALTH_RANGE.waterIntervalMinutes.min !== 5 || HEALTH_RANGE.waterIntervalMinutes.max !== 1440) {
+      throw new Error(`HEALTH_RANGE.waterIntervalMinutes expected 5..1440, got ${HEALTH_RANGE.waterIntervalMinutes.min}..${HEALTH_RANGE.waterIntervalMinutes.max}`);
+    }
+    if (HEALTH_RANGE.retainDays.min !== 1 || HEALTH_RANGE.retainDays.max !== 3650) {
+      throw new Error(`HEALTH_RANGE.retainDays expected 1..3650, got ${HEALTH_RANGE.retainDays.min}..${HEALTH_RANGE.retainDays.max}`);
+    }
+    if (isAllDayDnd(null, null) || isAllDayDnd('22:00', null) || isAllDayDnd('22:00', '07:00')) {
+      throw new Error('isAllDayDnd should only be true when both ends non-null and equal');
+    }
+    if (!isAllDayDnd('22:00', '22:00')) {
+      throw new Error('isAllDayDnd expected true for equal non-null DND ends');
     }
 
     const rendered = renderToStaticMarkup(
@@ -110,6 +137,52 @@ describe('HealthPanel', () => {
 
     if (rendered.includes('AM') || rendered.includes('PM')) {
       throw new Error('HealthPanel 24-hour picker must not render AM/PM labels');
+    }
+
+    for (const attr of ['min="1"', 'max="480"', 'max="120"', 'min="5"', 'max="1440"', 'max="3650"']) {
+      if (!rendered.includes(attr)) {
+        throw new Error(`HealthPanel number inputs missing attribute ${attr}`);
+      }
+    }
+
+    // 默认 dnd 均为 null 时不应展示全天免打扰
+    if (rendered.includes('全天免打扰') || rendered.includes('data-testid="health-all-day-dnd"')) {
+      throw new Error('HealthPanel must not show all-day DND when ends are empty');
+    }
+
+    // 后端错误文案原样透出
+    const errorRendered = renderToStaticMarkup(
+      createElement(HealthPanel, {
+        form: PENDING_HEALTH_FORM,
+        applied: null,
+        onPatch: () => undefined,
+        onResetDefaults: () => undefined,
+        onApply: () => undefined,
+        applying: false,
+        error: 'health.work_window_seconds 必须在 60..=28800',
+      }),
+    );
+    if (!errorRendered.includes('health.work_window_seconds 必须在 60..=28800')) {
+      throw new Error('HealthPanel should render backend field error as-is');
+    }
+
+    // dndStart === dndEnd 时展示「全天免打扰」
+    const allDayRendered = renderToStaticMarkup(
+      createElement(HealthPanel, {
+        form: { ...PENDING_HEALTH_FORM, dndStart: '22:00', dndEnd: '22:00' },
+        applied: null,
+        onPatch: () => undefined,
+        onResetDefaults: () => undefined,
+        onApply: () => undefined,
+        applying: false,
+        error: null,
+      }),
+    );
+    if (!allDayRendered.includes('全天免打扰')) {
+      throw new Error('HealthPanel should label equal DND ends as 全天免打扰');
+    }
+    if (!allDayRendered.includes('data-testid="health-all-day-dnd"')) {
+      throw new Error('HealthPanel all-day DND helper missing test id');
     }
 
     const cssSource = await readFile(new URL('./Settings.module.css', import.meta.url), 'utf8');
