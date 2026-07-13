@@ -41,6 +41,7 @@
   "recordWindowTitleDescription": "Include foreground window titles in activity details for better stats.",
   "dndStart": "Do-not-disturb start",
   "dndEnd": "Do-not-disturb end",
+  "allDayDnd": "All-day do-not-disturb",
   "waterIntervalMinutes": "Water reminder interval (minutes)",
   "waterIntervalDescription": "Time between hydration reminders.",
   "retainDays": "Activity detail retention (days)",

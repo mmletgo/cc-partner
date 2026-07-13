@@ -570,7 +570,7 @@ impl Default for GithubTrendingConfig {
 /// Code Logic（这个结构做什么）:
 ///     纯数据载体(serde Serialize/Deserialize),字段 snake_case 落盘。`Default` 提供全套默认;
 ///     各 `default_*` 函数供 serde 在单字段缺失时回退(与 Default 字面值一致)。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthConfig {
     /// 久坐监测总开关,默认开启(用户决策:装好即生效)
     #[serde(default = "default_true")]
@@ -779,7 +779,8 @@ impl AppConfig {
             }
         }
 
-        validate_health_config_fields(&self.health)?;
+        // Health 范围/DND 共用 health::validation；此处只校验不强制改写 self.health。
+        crate::health::validation::validate_health_config_fields(&self.health)?;
         validate_orchestrator_config_fields(&mut self.orchestrator)?;
         Ok(())
     }
@@ -892,92 +893,6 @@ fn validate_hotkey_field(field: &str, value: &str) -> Result<(), AppError> {
     // 能 parse 最好；不能 parse 但非空时仍接受（覆盖单修饰键等插件相关格式）。
     let _ = crate::hotkey::parse_shortcut(trimmed);
     Ok(())
-}
-
-/// 校验 Health 配置字段范围与 DND 格式。
-///
-/// Business Logic（为什么需要这个函数）:
-///     超范围 work/break/water/retain 或半开 DND 会导致 daemon 错误计时或永不提醒。
-///
-/// Code Logic（这个函数做什么）:
-///     固定范围：work 60..=28800、break 30..=7200、retain 1..=3650、water 300..=86400；
-///     DND 两端同时空/None，或两端均为严格 HH:MM。
-fn validate_health_config_fields(health: &HealthConfig) -> Result<(), AppError> {
-    if !(60..=28800).contains(&health.work_window_seconds) {
-        return Err(AppError::validation(
-            "health.work_window_seconds 必须在 60..=28800",
-        ));
-    }
-    if !(30..=7200).contains(&health.break_seconds) {
-        return Err(AppError::validation(
-            "health.break_seconds 必须在 30..=7200",
-        ));
-    }
-    if !(1..=3650).contains(&health.retain_days) {
-        return Err(AppError::validation("health.retain_days 必须在 1..=3650"));
-    }
-    if !(300..=86400).contains(&health.water_interval_seconds) {
-        return Err(AppError::validation(
-            "health.water_interval_seconds 必须在 300..=86400",
-        ));
-    }
-    validate_dnd_pair(health.dnd_start.as_deref(), health.dnd_end.as_deref())?;
-    Ok(())
-}
-
-/// 校验免打扰起止时间对。
-///
-/// Business Logic（为什么需要这个函数）:
-///     只填一端会让 DND 语义歧义；格式错误会导致运行时解析失败。
-///
-/// Code Logic（这个函数做什么）:
-///     两端皆空/None 通过；两端皆 present 且严格 `HH:MM`（两位小时 00-23、分钟 00-59）。
-fn validate_dnd_pair(start: Option<&str>, end: Option<&str>) -> Result<(), AppError> {
-    let start_empty = start.map(str::trim).filter(|s| !s.is_empty());
-    let end_empty = end.map(str::trim).filter(|s| !s.is_empty());
-    match (start_empty, end_empty) {
-        (None, None) => Ok(()),
-        (Some(s), Some(e)) => {
-            parse_strict_hhmm(s).map_err(|m| {
-                AppError::validation(format!("health.dnd_start 非法: {m}"))
-            })?;
-            parse_strict_hhmm(e).map_err(|m| {
-                AppError::validation(format!("health.dnd_end 非法: {m}"))
-            })?;
-            Ok(())
-        }
-        _ => Err(AppError::validation(
-            "health.dnd_start 与 dnd_end 必须同时为空或同时为 HH:MM",
-        )),
-    }
-}
-
-/// 解析严格两位 `HH:MM`。
-///
-/// Business Logic（为什么需要这个函数）:
-///     DND 只接受规范两位数字，避免 `9:00`/`24:00` 等歧义输入进入运行时。
-///
-/// Code Logic（这个函数做什么）:
-///     要求长度 5、中间为 `:`，小时 00-23、分钟 00-59，全部为 ASCII 数字。
-fn parse_strict_hhmm(value: &str) -> Result<(u8, u8), String> {
-    let value = value.trim();
-    if value.len() != 5 || value.as_bytes().get(2) != Some(&b':') {
-        return Err("必须为严格 HH:MM".into());
-    }
-    let (h, m) = value.split_at(2);
-    let m = &m[1..];
-    if !h.chars().all(|c| c.is_ascii_digit()) || !m.chars().all(|c| c.is_ascii_digit()) {
-        return Err("时分必须为数字".into());
-    }
-    let hour: u8 = h.parse().map_err(|_| "小时解析失败".to_string())?;
-    let minute: u8 = m.parse().map_err(|_| "分钟解析失败".to_string())?;
-    if hour > 23 {
-        return Err("小时必须在 00..=23".into());
-    }
-    if minute > 59 {
-        return Err("分钟必须在 00..=59".into());
-    }
-    Ok((hour, minute))
 }
 
 /// 校验并就地规范化 Orchestrator 自动化配置。
