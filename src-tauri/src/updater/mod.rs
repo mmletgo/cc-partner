@@ -11,4 +11,4 @@
 
 pub mod runtime;
 
-pub use runtime::{InstallOutcome, UpdateRuntime};
+pub use runtime::{InstallOutcome, UpdatePhase, UpdateRuntime, UpdateRuntimeState};

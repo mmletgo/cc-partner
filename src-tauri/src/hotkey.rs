@@ -55,6 +55,7 @@ pub struct RegisteredHotkeyChange {
 pub trait GlobalShortcutBackend: Send + Sync {
     fn register_hotkey(&mut self, hotkey_pynput: &str) -> Result<(), AppError>;
     fn unregister_hotkey(&mut self, hotkey_pynput: &str) -> Result<(), AppError>;
+    #[allow(dead_code)]
     fn registered(&self) -> Vec<String>;
 }
 
@@ -101,6 +102,7 @@ impl GlobalShortcutBackend for TauriGlobalShortcutBackend {
 }
 
 /// 可测试的内存 Fake 快捷键后端。
+#[cfg(test)]
 #[derive(Debug, Default, Clone)]
 pub struct FakeGlobalShortcutBackend {
     pub registered: Vec<String>,
@@ -108,6 +110,7 @@ pub struct FakeGlobalShortcutBackend {
     pub fail_unregister: Vec<String>,
 }
 
+#[cfg(test)]
 impl GlobalShortcutBackend for FakeGlobalShortcutBackend {
     fn register_hotkey(&mut self, hotkey_pynput: &str) -> Result<(), AppError> {
         if parse_shortcut(hotkey_pynput).is_none() {
