@@ -1,8 +1,10 @@
 # cc-partner
 
-**Local-first 多设备项目工作台** — 在可信局域网内，用桌面端、手机浏览器与无头后端一起推进同一份代码与自动化任务。
+**Local-first 多设备项目工作台** — 在本机与局域网内，用桌面端、手机浏览器与无头后端一起推进同一份代码与自动化任务。
 
 cc-partner 以 **Workbench** 为核心：本机与远端项目、worktree、终端、文件与 Git 在同一界面协作；手机可打开 Mobile Workbench；Orchestrator 负责自动编排并让执行过程可见；无 GUI 机器可用 headless 后端接入同一局域网。文件传输、截图、Prompt 与草稿本是围绕工作台的配套能力，而不是产品主叙事。
+
+**固定局域网语义（无调用者身份校验）**：业务 API 不对 peer 做账号/配对/token 鉴权；合法 loopback/LAN 地址范围内的任何可达设备均可读取、写入和执行。系统不验证调用者身份。产品只有这一种局域网行为，不提供可切换的暴露/只读模式或逐设备权限。
 
 ## 功能一览
 
@@ -14,8 +16,8 @@ cc-partner 以 **Workbench** 为核心：本机与远端项目、worktree、终�
 
 ### 2. Mobile Workbench
 
-- 桌面/后端 HTTP 服务提供 `/mobile` 浏览器入口（个人可信局域网，不要求访问 token）
-- 全局侧栏手机按钮展示可复制访问链接与二维码
+- 桌面/后端 HTTP 服务提供 `/mobile` 浏览器入口（合法 LAN peer 无访问 token；同一可达网络任意设备可读写执行）
+- 全局侧栏手机按钮展示可复制访问链接与二维码，并固定展示无身份校验风险提示
 - 可进入 worktree、terminal、files、git、prompt 与自动化面板；远端项目经本机代理到 owning device
 
 ### 3. Orchestrator 自动编排与可见执行
@@ -135,12 +137,14 @@ cd web && npm install
 
 ### 防火墙（手动示例，应用不会自动改防火墙）
 
-若设备能发现但传输、Mobile Workbench 或打开远端项目失败，请确认同一局域网，并**手动**放行入站：
+若设备能发现但传输、Mobile Workbench 或打开远端项目失败，请确认同一局域网，并**手动**放行入站（建议限定 Private/Home/LAN profile）。应用不会自动修改主机防火墙。
 
 | 用途 | 协议/端口 | 说明 |
 |------|-----------|------|
-| 设备发现 | UDP 5353 | mDNS |
-| P2P HTTP / Workbench / Mobile | TCP 62116（或实际端口） | 文件传输、同步、移动端与远端项目 |
+| 设备发现 | UDP **5353** | mDNS（`_cc-partner._tcp.local.`） |
+| P2P HTTP / Workbench / Mobile | TCP **实际端口**（首选 **62116**，占用则 +1） | 文件传输、同步、移动端与远端项目；以 `GET /api/health` 的 `http_port` 为准 |
+
+**风险**：同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份。
 
 **macOS**（系统防火墙通常按 App 放行；也可手动）：
 
