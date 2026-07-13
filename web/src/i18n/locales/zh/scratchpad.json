@@ -46,5 +46,7 @@
   "clearConfirmTitle": "确认清空？",
   "clearConfirmText": "当前页面内容将被清空，该操作不可撤销。",
   "deleteConfirmTitle": "删除这个页面？",
-  "deleteConfirmText": "“{{title}}” 将被删除，该操作不可撤销。"
+  "deleteConfirmText": "“{{title}}” 将被删除，该操作不可撤销。",
+  "retrySave": "重试保存",
+  "saveFailedWithReason": "速记本保存失败：{{reason}}"
 }
