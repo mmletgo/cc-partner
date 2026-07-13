@@ -1421,9 +1421,9 @@ pub async fn list_workbench_worktrees(
 ///
 /// Code Logic（这个函数做什么）:
 ///     校验 Git 仓库和分支名，生成应用数据目录下的 worktree 路径；
-///     若路径已存在且 DB 中有同 project+path 且 branch 匹配的 row，直接复用；
-///     若路径存在但无匹配 row，在路径是目录时为该分支重新登记 row（不覆盖目录、不 git worktree add）；
-///     否则执行 `git worktree add -b` 并持久化 row。
+///     若路径已存在，必须经 `git worktree list --porcelain` 确认 canonical path、owning repo、
+///     实际分支全部匹配后才复用（拒绝 symlink/残留普通目录；分支不匹配 → conflict）；
+///     有匹配 DB row 则复用其 id，否则重新登记；否则执行 `git worktree add -b` 并持久化 row。
 pub(crate) async fn local_create_workbench_worktree(
     state: &AppState,
     project_id: String,
@@ -1442,37 +1442,39 @@ pub(crate) async fn local_create_workbench_worktree(
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    // Preparing 崩溃恢复 / Retry：确定性路径已存在时，按 project+path+branch 身份复用，禁止硬失败。
-    if worktree_path.exists() {
-        if let Some(existing) =
-            find_reusable_worktree_row(state, &project_id, &worktree_path, branch).await?
+    // Preparing 崩溃恢复 / Retry：路径存在时仅当 Git 注册 + 分支匹配才复用，禁止 is_dir 冒充。
+    if path_exists_nofollow(&worktree_path)? {
+        let verified = workbench_git::verify_registered_worktree(
+            Path::new(&repo_root),
+            &worktree_path,
+            branch,
+        )?;
+        let now = now_iso();
+        let path = verified.to_string_lossy().to_string();
+        if let Some(mut existing) =
+            find_reusable_worktree_row(state, &project_id, &verified, branch).await?
         {
+            // 校正 path 为 canonical，避免历史相对/非规范路径。
+            if existing.path != path {
+                existing.path = path;
+                existing.updated_at = now;
+                state.workbench_worktree_repo.upsert(&existing).await?;
+            }
             return Ok(worktree_to_dto(&existing));
         }
-        if worktree_path.is_dir() {
-            let now = now_iso();
-            let path = worktree_path
-                .canonicalize()
-                .unwrap_or_else(|_| worktree_path.clone())
-                .to_string_lossy()
-                .to_string();
-            let row = WorkbenchWorktreeRow {
-                id: uuid::Uuid::new_v4().to_string(),
-                project_id: project_id.clone(),
-                name: branch.to_string(),
-                branch: Some(branch.to_string()),
-                base_branch: base.map(str::to_string),
-                path,
-                is_main: false,
-                created_at: now.clone(),
-                updated_at: now,
-            };
-            state.workbench_worktree_repo.upsert(&row).await?;
-            return Ok(worktree_to_dto(&row));
-        }
-        return Err(AppError::generic(
-            "目标 worktree 路径已存在且不是可复用目录",
-        ));
+        let row = WorkbenchWorktreeRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            project_id: project_id.clone(),
+            name: branch.to_string(),
+            branch: Some(branch.to_string()),
+            base_branch: base.map(str::to_string),
+            path,
+            is_main: false,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        state.workbench_worktree_repo.upsert(&row).await?;
+        return Ok(worktree_to_dto(&row));
     }
 
     if let Some(parent) = worktree_path.parent() {
@@ -1501,7 +1503,20 @@ pub(crate) async fn local_create_workbench_worktree(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Retry/崩溃恢复需要在确定性 worktree 路径已存在时识别“是否就是本任务分支的现场”，避免误复用他人目录。
+///     exists() 会跟随 symlink；复用决策前必须 no-follow 判断路径是否存在目录项。
+///
+/// Code Logic（这个函数做什么）:
+///     symlink_metadata：Ok→存在；NotFound→不存在；其它 IO 错误上抛。
+fn path_exists_nofollow(path: &Path) -> Result<bool, AppError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(AppError::from(err)),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Git 已确认可复用后，优先复用同 project+path 的既有 DB row，保持 worktree id 稳定。
 ///
 /// Code Logic（这个函数做什么）:
 ///     列出 project 下 worktree，按规范化 path 匹配；要求 branch 与请求分支一致（或 DB branch 为空时用 name 兜底）。

@@ -413,6 +413,7 @@ mod tests {
             branch_name: None,
             worktree_id: None,
             session_id: None,
+            prepare_claim_token: None,
             blocked_reason: None,
             attempt: 0,
             created_at: "2026-07-05T00:00:00Z".to_string(),

@@ -25,7 +25,7 @@ const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_criteria, st
     workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
     external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
     transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
-    last_runtime_message, branch_name, worktree_id, session_id, blocked_reason, attempt, \
+    last_runtime_message, branch_name, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, \
     created_at, updated_at, started_at, finished_at";
 const WORKFLOW_LANE_ORDER: [OrchestratorWorkflowState; 8] = [
     OrchestratorWorkflowState::Backlog,
@@ -119,6 +119,7 @@ pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestra
   branch_name TEXT,
   worktree_id TEXT,
   session_id TEXT,
+  prepare_claim_token TEXT,
   blocked_reason TEXT,
   attempt INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
@@ -330,6 +331,7 @@ impl OrchestratorRepo {
         ensure_column(pool, "orchestrator_tasks", "last_activity_at", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "last_runtime_event", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "last_runtime_message", "TEXT").await?;
+        ensure_column(pool, "orchestrator_tasks", "prepare_claim_token", "TEXT").await?;
         if added_workflow_state || added_run_state {
             backfill_split_state_from_legacy_status(pool).await?;
         }
@@ -372,9 +374,9 @@ impl OrchestratorRepo {
               workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
               external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
               transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
-              last_runtime_message, worktree_id, session_id, blocked_reason, attempt, created_at, \
+              last_runtime_message, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, created_at, \
               updated_at, started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.project_id)
@@ -402,6 +404,7 @@ impl OrchestratorRepo {
         .bind(&row.last_runtime_message)
         .bind(&row.worktree_id)
         .bind(&row.session_id)
+        .bind(&row.prepare_claim_token)
         .bind(&row.blocked_reason)
         .bind(row.attempt)
         .bind(&row.created_at)
@@ -508,9 +511,9 @@ impl OrchestratorRepo {
               workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
               external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
               transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
-              last_runtime_message, worktree_id, session_id, blocked_reason, attempt, created_at, \
+              last_runtime_message, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, created_at, \
               updated_at, started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row_to_insert.id)
         .bind(&row_to_insert.project_id)
@@ -538,6 +541,7 @@ impl OrchestratorRepo {
         .bind(&row_to_insert.last_runtime_message)
         .bind(&row_to_insert.worktree_id)
         .bind(&row_to_insert.session_id)
+        .bind(&row_to_insert.prepare_claim_token)
         .bind(&row_to_insert.blocked_reason)
         .bind(row_to_insert.attempt)
         .bind(&row_to_insert.created_at)
@@ -1024,9 +1028,11 @@ impl OrchestratorRepo {
                 continue;
             }
             let now = Utc::now().to_rfc3339();
+            // 每次 claim 签发新 token，使旧 runner 的 touch/mark_running CAS 全部失效。
+            let claim_token = Uuid::new_v4().to_string();
             let result = sqlx::query(
                 "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, updated_at = ? \
+                 SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, prepare_claim_token = ?, updated_at = ? \
                  WHERE id = ? \
                    AND status = ? \
                    AND workflow_state = ? \
@@ -1037,6 +1043,7 @@ impl OrchestratorRepo {
             .bind(OrchestratorRunState::Preparing.as_str())
             .bind(OrchestratorAttemptPhase::PreparingWorkspace.as_str())
             .bind(Option::<&str>::None)
+            .bind(&claim_token)
             .bind(now)
             .bind(&task_id)
             .bind(OrchestratorTaskStatus::Queued.as_str())
@@ -1107,17 +1114,27 @@ impl OrchestratorRepo {
     ///     并发 dispatch 会把仍在合法 prepare 的任务回收为 Blocked，原 runner 继续创建后 Running CAS 失败并留下孤儿现场。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     仅当 status=Preparing 且 run_state=Preparing 时刷新 updated_at；命中返回 true，状态已变返回 false。
-    pub async fn touch_preparing_lease(&self, task_id: &str) -> Result<bool, AppError> {
+    ///     仅当 status=Preparing、run_state=Preparing 且 prepare_claim_token 匹配本轮 claim 时刷新 updated_at；
+    ///     命中返回 true；状态已变或 token 不匹配（旧 runner）返回 false。
+    pub async fn touch_preparing_lease(
+        &self,
+        task_id: &str,
+        prepare_claim_token: &str,
+    ) -> Result<bool, AppError> {
+        let token = prepare_claim_token.trim();
+        if token.is_empty() {
+            return Err(AppError::generic("Preparing claim token 不能为空"));
+        }
         let now = Utc::now().to_rfc3339();
         let result = sqlx::query(
             "UPDATE orchestrator_tasks SET updated_at = ? \
-             WHERE id = ? AND status = ? AND run_state = ?",
+             WHERE id = ? AND status = ? AND run_state = ? AND prepare_claim_token = ?",
         )
         .bind(now)
         .bind(task_id)
         .bind(OrchestratorTaskStatus::Preparing.as_str())
         .bind(OrchestratorRunState::Preparing.as_str())
+        .bind(token)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() == 1)
@@ -1259,9 +1276,14 @@ impl OrchestratorRepo {
         worktree_id: &str,
         session_id: &str,
         attempt: i64,
+        prepare_claim_token: &str,
     ) -> Result<OrchestratorTaskRow, AppError> {
         if attempt <= 0 {
             return Err(AppError::generic("任务尝试轮次必须大于 0"));
+        }
+        let token = prepare_claim_token.trim();
+        if token.is_empty() {
+            return Err(AppError::generic("Preparing claim token 不能为空"));
         }
         let now = Utc::now().to_rfc3339();
         let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Running);
@@ -1269,8 +1291,8 @@ impl OrchestratorRepo {
             "UPDATE orchestrator_tasks \
              SET status = ?, workflow_state = ?, run_state = ?, runner_provider = ?, branch_name = ?, worktree_id = ?, session_id = ?, attempt = ?, \
                  claude_session_id = ?, transcript_path = ?, runtime_started_at = ?, last_activity_at = ?, last_runtime_event = ?, last_runtime_message = ?, \
-                 blocked_reason = ?, started_at = COALESCE(started_at, ?), updated_at = ? \
-             WHERE id = ? AND status = ?",
+                 blocked_reason = ?, prepare_claim_token = NULL, started_at = COALESCE(started_at, ?), updated_at = ? \
+             WHERE id = ? AND status = ? AND prepare_claim_token = ?",
         )
         .bind(OrchestratorTaskStatus::Running.as_str())
         .bind(split_state.workflow_state.as_str())
@@ -1291,6 +1313,7 @@ impl OrchestratorRepo {
         .bind(now.clone())
         .bind(task_id)
         .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(token)
         .execute(&self.pool)
         .await?;
         self.get_task(task_id).await
@@ -1305,17 +1328,23 @@ impl OrchestratorRepo {
         &self,
         task_id: &str,
         phase: OrchestratorAttemptPhase,
+        prepare_claim_token: &str,
     ) -> Result<OrchestratorTaskRow, AppError> {
+        let token = prepare_claim_token.trim();
+        if token.is_empty() {
+            return Err(AppError::generic("Preparing claim token 不能为空"));
+        }
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "UPDATE orchestrator_tasks \
              SET attempt_phase = ?, updated_at = ? \
-             WHERE id = ? AND status = ?",
+             WHERE id = ? AND status = ? AND prepare_claim_token = ?",
         )
         .bind(phase.as_str())
         .bind(now)
         .bind(task_id)
         .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(token)
         .execute(&self.pool)
         .await?;
         self.get_task(task_id).await
@@ -1418,9 +1447,17 @@ impl OrchestratorRepo {
         branch_name: &str,
         worktree_id: &str,
         session_id: &str,
+        prepare_claim_token: &str,
     ) -> Result<OrchestratorTaskRow, AppError> {
-        self.mark_task_running_attempt(task_id, branch_name, worktree_id, session_id, 1)
-            .await
+        self.mark_task_running_attempt(
+            task_id,
+            branch_name,
+            worktree_id,
+            session_id,
+            1,
+            prepare_claim_token,
+        )
+        .await
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -3036,6 +3073,7 @@ fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppError> {
         branch_name: row.try_get("branch_name")?,
         worktree_id: row.try_get("worktree_id")?,
         session_id: row.try_get("session_id")?,
+        prepare_claim_token: row.try_get("prepare_claim_token")?,
         blocked_reason: row.try_get("blocked_reason")?,
         attempt: row.try_get("attempt")?,
         created_at: row.try_get("created_at")?,
@@ -4302,15 +4340,22 @@ mod tests {
         )
         .await;
         sqlx::query(
-            "UPDATE orchestrator_tasks SET updated_at = '2020-01-01T00:00:00Z' WHERE id = ?",
+            "UPDATE orchestrator_tasks SET updated_at = '2020-01-01T00:00:00Z', prepare_claim_token = 'token-live' WHERE id = ?",
         )
         .bind("live-preparing")
         .execute(&pool)
         .await
         .unwrap();
 
-        let touched = repo.touch_preparing_lease("live-preparing").await.unwrap();
+        let touched = repo
+            .touch_preparing_lease("live-preparing", "token-live")
+            .await
+            .unwrap();
         assert!(touched, "仍在 Preparing 时续租必须命中");
+        assert!(!repo
+            .touch_preparing_lease("live-preparing", "token-stale")
+            .await
+            .unwrap());
 
         let recovered = repo
             .recover_stale_local_preparing_tasks(std::time::Duration::from_secs(60))
@@ -4325,6 +4370,77 @@ mod tests {
             task.updated_at.as_str() > "2020-01-01T00:00:00Z",
             "touch 必须刷新 updated_at"
         );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧 Preparing runner lease 过期被回收后，retry 会签发新 claim token；旧 touch/mark 不得劫持新 claim。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     claim 得 token-A → 回收 → 重回 Queued 再 claim 得 token-B；旧 token-A 的 touch/mark 不命中，token-B 可 mark Running。
+    #[tokio::test]
+    async fn prepare_claim_token_cas_blocks_stale_runner_hijack() {
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "project-1", "local").await;
+        let created = task_row("task-aba", "project-1", OrchestratorTaskStatus::Queued);
+        repo.create_task(&created).await.unwrap();
+        let claimed = repo
+            .claim_next_local_queued_tasks_with_global_capacity(1)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        let token_a = claimed[0]
+            .prepare_claim_token
+            .clone()
+            .expect("claim 必须签发 token");
+
+        let recovered = repo
+            .recover_stale_local_preparing_tasks(std::time::Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(recovered, 1);
+        sqlx::query(
+            "UPDATE orchestrator_tasks SET status = 'queued', workflow_state = 'todo', run_state = 'idle',              prepare_claim_token = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind("task-aba")
+        .execute(&pool)
+        .await
+        .unwrap();
+        let claimed2 = repo
+            .claim_next_local_queued_tasks_with_global_capacity(1)
+            .await
+            .unwrap();
+        assert_eq!(claimed2.len(), 1);
+        let token_b = claimed2[0]
+            .prepare_claim_token
+            .clone()
+            .expect("新 claim 必须签发新 token");
+        assert_ne!(token_a, token_b);
+
+        assert!(!repo
+            .touch_preparing_lease("task-aba", &token_a)
+            .await
+            .unwrap());
+        assert!(repo
+            .touch_preparing_lease("task-aba", &token_b)
+            .await
+            .unwrap());
+
+        let hijack = repo
+            .mark_task_running_attempt("task-aba", "agent/old", "wt-old", "sess-old", 1, &token_a)
+            .await
+            .unwrap();
+        assert_eq!(hijack.status, OrchestratorTaskStatus::Preparing);
+        assert_ne!(hijack.session_id.as_deref(), Some("sess-old"));
+
+        let running = repo
+            .mark_task_running_attempt("task-aba", "agent/new", "wt-new", "sess-new", 1, &token_b)
+            .await
+            .unwrap();
+        assert_eq!(running.status, OrchestratorTaskStatus::Running);
+        assert_eq!(running.session_id.as_deref(), Some("sess-new"));
+        assert!(running.prepare_claim_token.is_none());
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -5314,8 +5430,19 @@ mod tests {
         let task = task_row("task-1", "project-1", OrchestratorTaskStatus::Preparing);
         repo.create_task(&task).await.unwrap();
 
+        sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+            .bind(&task.id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
         let running = repo
-            .mark_task_running(&task.id, "agent/task-1-test", "worktree-1", "session-1")
+            .mark_task_running(
+                &task.id,
+                "agent/task-1-test",
+                "worktree-1",
+                "session-1",
+                "tok",
+            )
             .await
             .unwrap();
 
@@ -5352,6 +5479,11 @@ mod tests {
         .await
         .unwrap();
 
+        sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+            .bind(&task.id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
         let running = repo
             .mark_task_running_attempt(
                 &task.id,
@@ -5359,6 +5491,7 @@ mod tests {
                 "worktree-2",
                 "session-2",
                 2,
+                "tok",
             )
             .await
             .unwrap();
@@ -5393,8 +5526,13 @@ mod tests {
         let task = task_row("task-phase", "project-1", OrchestratorTaskStatus::Preparing);
         repo.create_task(&task).await.unwrap();
 
+        sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+            .bind(&task.id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
         let updated = repo
-            .update_task_attempt_phase(&task.id, OrchestratorAttemptPhase::BuildingPrompt)
+            .update_task_attempt_phase(&task.id, OrchestratorAttemptPhase::BuildingPrompt, "tok")
             .await
             .unwrap();
 
@@ -5419,12 +5557,18 @@ mod tests {
             OrchestratorTaskStatus::Preparing,
         );
         repo.create_task(&task).await.unwrap();
+        sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+            .bind(&task.id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
         repo.mark_task_running_attempt(
             &task.id,
             "agent/task-active-guard",
             "worktree-2",
             "session-new",
             2,
+            "tok",
         )
         .await
         .unwrap();
@@ -5506,12 +5650,18 @@ mod tests {
             OrchestratorTaskStatus::Preparing,
         );
         repo.create_task(&task).await.unwrap();
+        sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+            .bind(&task.id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
         repo.mark_task_running_attempt(
             &task.id,
             "agent/task-runtime",
             "worktree-1",
             "session-1",
             1,
+            "tok",
         )
         .await
         .unwrap();
@@ -5600,8 +5750,19 @@ mod tests {
             .await
             .unwrap();
 
+        sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+            .bind(&task.id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
         let returned = repo
-            .mark_task_running(&task.id, "agent/task-1-test", "worktree-1", "session-1")
+            .mark_task_running(
+                &task.id,
+                "agent/task-1-test",
+                "worktree-1",
+                "session-1",
+                "tok",
+            )
             .await
             .unwrap();
         let persisted = repo.get_task(&task.id).await.unwrap();

@@ -117,13 +117,33 @@ pub async fn prepare_runner_attempt(
     prompt: String,
     attempt: i64,
 ) -> Result<OrchestratorTaskRow, AppError> {
+    let claim_token = task
+        .prepare_claim_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| AppError::generic("Preparing 任务缺少 claim token，拒绝继续 prepare"))?
+        .to_string();
+
     let preparing_task = state
         .orchestrator_repo
-        .update_task_attempt_phase(&task.id, OrchestratorAttemptPhase::PreparingWorkspace)
+        .update_task_attempt_phase(
+            &task.id,
+            OrchestratorAttemptPhase::PreparingWorkspace,
+            &claim_token,
+        )
         .await?;
     if preparing_task.status != OrchestratorTaskStatus::Preparing {
         return Ok(preparing_task);
     }
+    // claim 被回收/重发后 token 会变；以最新任务行 token 为准。
+    let claim_token = preparing_task
+        .prepare_claim_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(claim_token.as_str())
+        .to_string();
 
     let project = state
         .workbench_project_repo
@@ -143,7 +163,7 @@ pub async fn prepare_runner_attempt(
     // 长 git worktree 创建前续租，避免调度 lease 误回收仍在 prepare 的任务。
     if !state
         .orchestrator_repo
-        .touch_preparing_lease(&task.id)
+        .touch_preparing_lease(&task.id, &claim_token)
         .await?
     {
         return state.orchestrator_repo.get_task(&task.id).await;
@@ -151,7 +171,7 @@ pub async fn prepare_runner_attempt(
     let worktree = prepare_worktree_for_attempt(state, task, &branch_name, attempt).await?;
     if !state
         .orchestrator_repo
-        .touch_preparing_lease(&task.id)
+        .touch_preparing_lease(&task.id, &claim_token)
         .await?
     {
         return state.orchestrator_repo.get_task(&task.id).await;
@@ -167,7 +187,7 @@ pub async fn prepare_runner_attempt(
     // session 创建后再续租一次，覆盖慢盘/hook 场景，再 CAS 进 Running。
     if !state
         .orchestrator_repo
-        .touch_preparing_lease(&task.id)
+        .touch_preparing_lease(&task.id, &claim_token)
         .await?
     {
         return state.orchestrator_repo.get_task(&task.id).await;
@@ -175,7 +195,14 @@ pub async fn prepare_runner_attempt(
 
     let running_task = state
         .orchestrator_repo
-        .mark_task_running_attempt(&task.id, &branch_name, &worktree.id, &session.id, attempt)
+        .mark_task_running_attempt(
+            &task.id,
+            &branch_name,
+            &worktree.id,
+            &session.id,
+            attempt,
+            &claim_token,
+        )
         .await?;
     if running_task.status != OrchestratorTaskStatus::Running {
         return Ok(running_task);
@@ -579,6 +606,7 @@ mod tests {
             branch_name: Some("agent/task-1".to_string()),
             worktree_id: worktree_id.map(str::to_string),
             session_id: None,
+            prepare_claim_token: None,
             blocked_reason: None,
             attempt,
             created_at: "2026-07-05T00:00:00Z".to_string(),
