@@ -249,7 +249,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 - **权限命令（commands/permissions.rs）**：`check_permissions`（无 state）、`request_permission(type)` 两个 invoke，lib.rs 注册。
 - **全局快捷键（hotkey.rs + tauri-plugin-global-shortcut 2）**：
   - **格式转换** `hotkey_pynput_to_plugin`：config 存 pynput 格式（`<cmd>+<shift>+s`，macOS；`<ctrl>...` 其他），转插件格式 `CommandOrControl+Shift+S`。`<cmd>/<ctrl>/<win>` → `CommandOrControl`（插件按平台解析 macOS=Command / Win/Linux=Ctrl），`<shift>` → `Shift`，`<alt>/<option>` → `Option`，普通键大写。配 3 个单测。
-  - **注册**：v2 的 `on_shortcut(shortcut, handler)` 需随快捷键传入 handler（不是 Builder 全局 handler）；`register_screenshot_hotkey(app, hotkey, handler)` 先 `unregister_all` 再 `on_shortcut`。handler = `screenshot_handler`，按下时直接调 `screenshot::overlay::start_region_capture`（Rust 直接起 overlay，不依赖前端 emit）。
+  - **注册**：v2 的 `on_shortcut(shortcut, handler)` 需随快捷键传入 handler（不是 Builder 全局 handler）；启动路径 `register_screenshot_hotkey` 只注销同 shortcut 后 `on_shortcut`。**热更新禁止 `unregister_all`**：`replace_screenshot_hotkey_os` 先注册新值、再注销旧值，配置事务失败则 `compensate_screenshot_hotkey_os` 恢复旧值；补偿失败返回 `hotkey.rollback_failed`（磁盘/内存保持旧配置，需重启）。handler = `screenshot_handler`。
   - **热更新**：`commands::config::update_config` 加 `app: AppHandle` 参数，screenshotHotkey 变更后 `register_screenshot_hotkey(app, new_hotkey, screenshot_handler)` 重注册。
   - setup 里读 `config.screenshot_hotkey` 注册。
 - **系统托盘（tray.rs，对照 tray.py）**：`TrayIconBuilder` id=`main-tray`，托盘图标优先用 `include_bytes!("../icons/tray-icon.png")` 解码，且 `icon_as_template(true)` 使用 macOS template icon 语义（菜单栏自动适配深浅色）；失败才回退 `app.default_window_icon()`，tooltip=`cc-partner`。菜单三项：显示主窗口 / 截图（直接调 overlay::start_region_capture）/ 退出（`app.exit(0)`）。**左键单击托盘**显示主窗口（Python 是双击；Tauri 2 托盘 Click 事件更顺手，行为等价）。需 `tauri` crate 开 `tray-icon` feature。`build.rs` 显式 `rerun-if-changed` 监听 `tauri.conf.json` 与 `icons/*`，确保更换图标会触发 Rust 重编译并刷新嵌入图标。托盘源图在 `scripts/cc-partner-tray-icon.svg`，应保持透明背景、单色形状。
@@ -525,6 +525,16 @@ mkdir -p "$CC_PARTNER_SMOKE_ROOT"
   - `workflow_dispatch` 手动
 - **矩阵**：`macos-latest` + `windows-latest`；`fail-fast: false`（单平台失败不取消另一平台）；**无 `continue-on-error`**，required checks 失败即阻断
 - **约束**：每 job/cargo/子进程有 timeout；隔离目录写数据；job summary 必须显式列出 NOT VERIFIED 能力与 doctor/privacy 契约；缺少可选环境时写明 skip reason 并进 summary，禁止静默 skip
+
+## 事务化运行时保证（S3）
+
+- **配置提交顺序**：`clone → mutate → validate → temp write → flush/fsync → re-read → atomic replace → directory fsync → memory swap`；任一步失败则内存与旧 `config.json` 保持一致。Unix config 文件 `0600`；Windows replace-existing + write-through，无先删空窗。
+- **配置 writer**：全部经 `AppState.config_runtime` / `update_config_transactionally`（同一 `tokio::sync::Mutex`）；禁止生产路径 `cfg.save()` / 直接 `fs::write` config。
+- **Cloud Sync 单飞**：`CloudSyncRuntime` 覆盖 ensure/clone/fetch/reset/import/export/commit/push；手动与 CLAUDE.md push 使用 `Wait{timeout:300s}`，scheduler 使用 `ReturnBusy`（递增 `skippedBusy`，不排队）。获锁后重读 repo URL/branch。
+- **Updater**：单一 `UpdateRuntime`（generation + phase）；DTO status 含 `idle|checking|downloading|completed|installing|failed|cancelled`；install 失败保留 `Arc<[u8]>` 可重试；cancel 先改 phase/取 handle，再锁外 abort。
+- **Health**：范围 work `60..=28800`、break `30..=7200`、retain `1..=3650`、water `300..=86400`、snooze `1..=1440`；DND 两端皆空或严格 `HH:MM`；时间用 checked 算术；非法输入 Validation 且不改 config/runtime/DB。daemon 遇非法磁盘配置记稳定 field code 并跳过本 tick 提醒/清理。
+- **本计划无 SQLite schema 变更**，无需 schema 回滚脚本。
+- **NOT VERIFIED**：真实磁盘满硬件、GUI 全局快捷键冲突、真实 updater 安装/重启。
 
 ## 关键约定
 

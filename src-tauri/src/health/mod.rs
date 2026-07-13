@@ -56,6 +56,14 @@ impl HealthRuntime {
     }
 }
 
+impl Default for HealthRuntime {
+    /// Business Logic: 缺省即空闲初态。
+    /// Code Logic: 委托 `new()`。
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 启动健康监测后台 daemon。返回 `CancellationToken`,供应用退出时取消。
 ///
 /// 一个 `std::thread` 采样(线程局部持有非 Send 的 `DeviceState`)

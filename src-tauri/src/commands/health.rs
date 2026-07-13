@@ -708,18 +708,18 @@ mod config_writer_tests {
             .await
             .expect_err("invalid should fail");
         assert!(err.to_string().contains("health.work_window_seconds"));
-        assert_eq!(runtime.snapshot().unwrap().health.work_window_seconds, before);
+        assert_eq!(
+            runtime.snapshot().unwrap().health.work_window_seconds,
+            before
+        );
         assert_eq!(store.snapshot().unwrap().health.work_window_seconds, before);
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::health::validation::{
-        checked_retain_cutoff, validate_health_config_with_field,
-    };
+    use crate::health::validation::{checked_retain_cutoff, validate_health_config_with_field};
 
     /// 构造合法默认 DTO。
     fn valid_dto() -> HealthConfigDto {
@@ -804,13 +804,14 @@ mod tests {
     /// 模拟 daemon：非法 retain/work_window 时跳过 cutoff，且 checked 算术不 panic。
     #[test]
     fn rejects_invalid_daemon_config_skips_overflowing_cutoff() {
-        let mut bad = HealthConfig::default();
-        bad.work_window_seconds = 59;
-        bad.retain_days = 0;
+        let bad = HealthConfig {
+            work_window_seconds: 59,
+            retain_days: 0,
+            ..HealthConfig::default()
+        };
         let field = validate_health_config_with_field(&bad).unwrap_err();
         assert!(field.starts_with("health."));
         // 即使强行用非法 retain，checked 也应 Err 而非 panic
         assert!(checked_retain_cutoff(100, i64::MAX).is_err());
     }
 }
-
