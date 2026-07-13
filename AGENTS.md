@@ -75,7 +75,7 @@ cc-partner/
 │   │   │   ├── Welcome/          # 06-welcome.html
 │   │   │   └── DesignSystem/     # 🆕 设计系统预览（仅 dev）
 │   │   ├── api/                  # 桌面 invoke + mobile HTTP 封装（含 attention / workbenchHttp）
-│   │   ├── hooks/                # 自定义 hooks（useTheme、AttentionProvider、attentionInvalidation 等）
+│   │   ├── hooks/                # 自定义 hooks（useTheme、useVisibilityPolling、usePermissions、ScratchpadAutosaveProvider、AttentionProvider、attentionInvalidation 等）
 │   │   ├── lib/                  # 通用工具 + icon 库（含 attention pure helpers）
 │   │   └── assets/
 │   ├── public/
@@ -270,7 +270,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | PromptCard | prompt, onEdit, onDelete, onCopy | Prompt 卡片 |
 | DeviceCard | device, onClick | 设备卡片 |
 | TransferItem | task, onCancel?, onPause?, onResume?, onRetry?, onOpen?, cancelling? | 传输项；每个动作仅在对应回调存在时渲染（当前页面只传 pending/transferring 的 onCancel） |
-| PermissionCard | icon, title, description, granted | 权限卡片 |
+| PermissionCard | icon, title, description, granted, requesting?, onRequestAccess | 权限卡片；逐项 request，requesting 时按钮 busy |
 | GithubRepoCard | repo, language, onOpen | GitHub 周热门项目卡片 |
 | MobileAccessCard | compact, className | 局域网移动端 Workbench 访问链接与二维码卡片 |
 | LanFirewallDependencyCard | className | Settings 依赖环境页展示局域网互联防火墙端口/IP、开放状态与系统打开方法 |
