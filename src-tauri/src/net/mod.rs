@@ -12,6 +12,7 @@
 pub mod discovery;
 pub mod error_response;
 pub mod http_server;
+pub mod lan_guard;
 pub mod peer_client;
 pub mod peer_error;
 pub mod protocol;
