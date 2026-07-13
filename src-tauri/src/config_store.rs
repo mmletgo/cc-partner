@@ -274,8 +274,16 @@ impl ConfigStore for FsConfigStore {
                 ));
             }
 
+            // rename/replace 是 durability commit 点：成功后磁盘权威已是 candidate。
+            // DirectorySync 仅加固目录项元数据；失败不得回滚已提交内容，也不应让上层
+            // 误判为“未提交”而跳过 memory swap（否则 disk=NEW / memory=OLD → lost update）。
             self.io.atomic_replace(&temp, &self.path)?;
-            self.io.sync_directory(parent)?;
+            if let Err(e) = self.io.sync_directory(parent) {
+                tracing::warn!(
+                    "配置目录 fsync 失败（config 已原子替换成功，继续提交）: {e}; path={}",
+                    self.path.display()
+                );
+            }
             Ok(())
         })();
 
@@ -416,6 +424,9 @@ fn windows_atomic_replace(temp: &Path, target: &Path) -> Result<(), AppError> {
     let target_w = to_wide(target);
 
     if target.exists() {
+        // ReplaceFileW 无 write-through 标志；替换成功后对目标文件 FlushFileBuffers，
+        // 对齐首创路径 MoveFileExW(...|WRITE_THROUGH) 的文件数据落盘语义。
+        // 父目录 sync 仍由 save_atomic 的 sync_directory 负责（目录项 durability）。
         let ok = unsafe {
             ReplaceFileW(
                 target_w.as_ptr(),
@@ -428,6 +439,20 @@ fn windows_atomic_replace(temp: &Path, target: &Path) -> Result<(), AppError> {
         };
         if ok == 0 {
             return Err(AppError::from(std::io::Error::last_os_error()));
+        }
+        // best-effort write-through：打开已替换目标并 fsync 文件数据。
+        match OpenOptions::new().write(true).open(target) {
+            Ok(mut f) => {
+                if let Err(e) = f.flush() {
+                    tracing::warn!("Windows ReplaceFileW 后 flush 目标失败: {e}");
+                }
+                if let Err(e) = f.sync_all() {
+                    tracing::warn!("Windows ReplaceFileW 后 fsync 目标失败: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Windows ReplaceFileW 后打开目标做 fsync 失败: {e}");
+            }
         }
         Ok(())
     } else {
@@ -812,9 +837,9 @@ mod tests {
     }
 
     #[test]
-    fn fault_at_directory_sync_preserves_old_json() {
-        // directory-sync 失败发生在 rename 之后：文件可能已是新内容。
-        // 契约：注入错误返回 Err，无 temp 残留，后续健康 save 成功。
+    fn fault_at_directory_sync_still_commits_new_json() {
+        // directory-sync 失败发生在 rename 之后：rename 已是 commit 点。
+        // 契约：save_atomic 返回 Ok，磁盘权威 = NEW，无 temp 残留。
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("config.json");
         let initial = sample_config("old");
@@ -828,17 +853,21 @@ mod tests {
         ));
         let store = FsConfigStore::new(path.clone(), io);
         let candidate = sample_config("new-after-rename");
-        let err = store
+        store
             .save_atomic(&candidate)
-            .expect_err("dir sync 失败应返回 Err");
-        assert!(err.to_string().contains("注入故障"));
+            .expect("dir sync 失败不应回滚已 rename 的提交");
         assert_eq!(count_temp_files(temp.path()), 0);
-        let _ = assert_disk_parses(&path);
+        let on_disk = assert_disk_parses(&path);
+        assert_eq!(
+            on_disk.device_name, "new-after-rename",
+            "rename 后磁盘权威必须是 NEW"
+        );
 
         let healthy = FsConfigStore::new(path, Arc::new(StdConfigIo));
-        healthy
-            .save_atomic(&candidate)
-            .expect("后续健康 save 应成功");
+        let mut next = candidate.clone();
+        next.device_name = "healthy-next".into();
+        healthy.save_atomic(&next).expect("后续健康 save 应成功");
+        assert_eq!(healthy.load().unwrap().device_name, "healthy-next");
     }
 
     #[test]

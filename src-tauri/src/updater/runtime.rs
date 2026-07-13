@@ -47,15 +47,18 @@ pub enum UpdatePhase {
 /// 安装完成结果。
 ///
 /// Business Logic: 安装成功后应请求重启；失败则保留 bytes 供重试。
-/// Code Logic: 由 `finish_install` 返回给命令层，决定是否 `request_restart`。
+///     重启请求本身失败时仍须保留 bytes 供重试（design §6.3）。
+/// Code Logic: 由 `finish_install` / `confirm_restart_requested` 返回给命令层。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallOutcome {
-    /// 安装成功，命令层应请求重启
+    /// 安装成功，命令层应请求重启（bytes 仍保留，待 confirm 后再清）
     RestartRequested,
     /// 安装失败，phase 已回到 Downloaded 并保留 bytes
     FailedRetained,
     /// generation/phase 不匹配，忽略本次完成（不改状态）
     Stale,
+    /// 重启已确认成功，bytes/pending 已清理，phase=Idle
+    RestartConfirmed,
 }
 
 /// 下载启动租约：命令层在锁外 spawn 下载任务。
@@ -172,9 +175,9 @@ impl UpdateRuntime {
 
     /// Business Logic: 用户点击「检查更新」；下载/安装进行中禁止新 check，避免静默打断。
     /// Code Logic: Downloading/Installing → Conflict；否则 generation+=1，清 bytes/error/task/token，
-    ///     phase=Checking，返回新 generation。
+    ///     phase=Checking，返回新 generation。若仍有旧 JoinHandle 且未结束则 abort。
     pub fn begin_check(&self) -> Result<u64, AppError> {
-        self.with_state(|s| {
+        let old_task = self.with_state(|s| {
             if matches!(s.phase, UpdatePhase::Downloading | UpdatePhase::Installing) {
                 return Err(AppError::conflict(
                     "更新下载或安装进行中，请稍后再检查更新".to_string(),
@@ -184,14 +187,22 @@ impl UpdateRuntime {
             s.phase = UpdatePhase::Checking;
             s.bytes = None;
             s.cancel = None;
-            // 旧任务句柄丢弃（若仍在跑，其回调会因 generation 不匹配被忽略）
-            let _old_task = s.task.take();
+            // 取出旧任务句柄：仍存活则 abort，避免 attach 竞态/未完成 cancel 留下僵尸任务
+            let old_task = s.task.take();
             s.status.error.clear();
             s.status.progress = 0.0;
             s.status.file_path.clear();
             s.status.status = UpdateStatusValue::Checking;
-            Ok(s.generation)
-        })
+            Ok((s.generation, old_task))
+        })?;
+        let (generation, old_task) = old_task;
+        if let Some(handle) = old_task {
+            // tauri JoinHandle 无 is_finished 公开方法；通过 inner tokio handle 判断。
+            if !handle.inner().is_finished() {
+                handle.abort();
+            }
+        }
+        Ok(generation)
     }
 
     /// Business Logic: check 网络结果回写；仅当前代 Checking 才生效。
@@ -394,9 +405,11 @@ impl UpdateRuntime {
         })
     }
 
-    /// Business Logic: 安装结果回写；失败保留 bytes 回到 Downloaded 供重试；成功请求重启。
+    /// Business Logic: 安装结果回写；失败保留 bytes 回到 Downloaded 供重试；
+    ///     成功先标记 RestartRequested 且**保留 bytes**，待 `confirm_restart_requested`
+    ///     确认重启 API 成功后再清理（design §6.3）。
     /// Code Logic: generation 匹配且 phase=Installing 才处理；
-    ///     Ok → RestartRequested（清理 bytes/pending，phase=Idle）；
+    ///     Ok → RestartRequested（phase 暂保持 Installing，bytes 保留）；
     ///     Err → FailedRetained（phase=Downloaded，保留 bytes，写 error）；
     ///     不匹配 → Stale。
     pub fn finish_install(&self, generation: u64, result: Result<(), String>) -> InstallOutcome {
@@ -406,13 +419,10 @@ impl UpdateRuntime {
             }
             match result {
                 Ok(()) => {
-                    // 成功后清理；重启由命令层触发
-                    s.phase = UpdatePhase::Idle;
-                    s.bytes = None;
-                    s.pending = None;
-                    s.cancel = None;
-                    s.task = None;
-                    s.status = UpdateDownloadStatus::default();
+                    // 安装成功但尚未确认重启：保留 bytes/pending，供 restart 失败重试。
+                    // status 保持 installing，避免前端误判为空闲。
+                    s.status.status = UpdateStatusValue::Installing;
+                    s.status.error.clear();
                     InstallOutcome::RestartRequested
                 }
                 Err(err) => {
@@ -423,6 +433,46 @@ impl UpdateRuntime {
                     InstallOutcome::FailedRetained
                 }
             }
+        })
+    }
+
+    /// Business Logic: 安装成功且重启请求已发出后，才清理 bytes/pending。
+    ///     若重启 API 失败，命令层不得调用本方法，bytes 保持可重试。
+    ///
+    /// Code Logic: generation 匹配且 phase=Installing 时清 bytes/pending，phase=Idle；
+    ///     否则 Stale 不改状态。
+    pub fn confirm_restart_requested(&self, generation: u64) -> InstallOutcome {
+        self.with_state(|s| {
+            if s.generation != generation || s.phase != UpdatePhase::Installing {
+                return InstallOutcome::Stale;
+            }
+            s.phase = UpdatePhase::Idle;
+            s.bytes = None;
+            s.pending = None;
+            s.cancel = None;
+            s.task = None;
+            s.status = UpdateDownloadStatus::default();
+            InstallOutcome::RestartConfirmed
+        })
+    }
+
+    /// Business Logic: 安装成功但 `request_restart` 失败时，回到 Downloaded 保留 bytes 供重试。
+    ///
+    /// Code Logic: generation 匹配且 phase=Installing → Downloaded + Completed + error。
+    pub fn retain_bytes_after_restart_failure(
+        &self,
+        generation: u64,
+        error: String,
+    ) -> InstallOutcome {
+        self.with_state(|s| {
+            if s.generation != generation || s.phase != UpdatePhase::Installing {
+                return InstallOutcome::Stale;
+            }
+            s.phase = UpdatePhase::Downloaded;
+            s.status.status = UpdateStatusValue::Completed;
+            s.status.error = error;
+            // bytes / pending 保留
+            InstallOutcome::FailedRetained
         })
     }
 
@@ -641,11 +691,17 @@ mod tests {
         assert!(rt.has_bytes());
         assert_eq!(rt.status().error, "disk full");
 
-        // Downloaded → Installing → RestartRequested → Idle
+        // Downloaded → Installing → RestartRequested（bytes 保留）→ confirm → Idle
         force_phase(&rt, UpdatePhase::Installing, g);
         force_bytes(&rt, &[1, 2, 3]);
         let outcome = rt.finish_install(g, Ok(()));
         assert_eq!(outcome, InstallOutcome::RestartRequested);
+        assert_eq!(rt.snapshot().1, UpdatePhase::Installing);
+        assert!(rt.has_bytes(), "确认重启前必须保留 bytes");
+        assert_eq!(
+            rt.confirm_restart_requested(g),
+            InstallOutcome::RestartConfirmed
+        );
         assert_eq!(rt.snapshot().1, UpdatePhase::Idle);
         assert!(!rt.has_bytes());
     }
@@ -745,17 +801,38 @@ mod tests {
     }
 
     #[test]
-    fn install_success_is_terminal_idle() {
+    fn install_success_retains_bytes_until_restart_confirmed() {
         let rt = UpdateRuntime::new();
         force_phase(&rt, UpdatePhase::Installing, 9);
         force_bytes(&rt, b"pkg");
 
         let outcome = rt.finish_install(9, Ok(()));
         assert_eq!(outcome, InstallOutcome::RestartRequested);
+        assert_eq!(rt.snapshot().1, UpdatePhase::Installing);
+        assert!(rt.has_bytes());
+        assert_eq!(rt.status().status, UpdateStatusValue::Installing);
+
+        // restart 失败：回到 Downloaded 保留 bytes
+        let retained = rt.retain_bytes_after_restart_failure(9, "restart failed".into());
+        assert_eq!(retained, InstallOutcome::FailedRetained);
+        assert_eq!(rt.snapshot().1, UpdatePhase::Downloaded);
+        assert!(rt.has_bytes());
+        assert_eq!(rt.status().error, "restart failed");
+
+        // 再次安装成功并确认重启
+        force_phase(&rt, UpdatePhase::Installing, 9);
+        force_bytes(&rt, b"pkg");
+        assert_eq!(
+            rt.finish_install(9, Ok(())),
+            InstallOutcome::RestartRequested
+        );
+        assert_eq!(
+            rt.confirm_restart_requested(9),
+            InstallOutcome::RestartConfirmed
+        );
         assert_eq!(rt.snapshot().1, UpdatePhase::Idle);
         assert!(!rt.has_bytes());
         assert_eq!(rt.status().status, UpdateStatusValue::Idle);
-        assert!(rt.pending_clone().is_none());
     }
 
     #[test]

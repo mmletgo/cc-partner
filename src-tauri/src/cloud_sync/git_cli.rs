@@ -298,6 +298,60 @@ pub async fn reset_hard(git: &Path, workdir: &Path, branch: &str) -> Result<(), 
     Ok(())
 }
 
+/// 有界探测既有 workdir 的 `.git` 完整性 + `git status --porcelain`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     取消/崩溃后可能留下半写工作树；复用 workdir 前必须确认 `.git` 可用且 status 可执行，
+///     半写树不得被下一任务当成功（design §5 / plan T4）。
+///
+/// Code Logic（这个函数做什么）:
+///     1) 要求 workdir 是目录且 `.git` 存在；
+///     2) `git rev-parse --git-dir` 成功（.git 可解析）；
+///     3) `git status --porcelain` 成功（索引/工作树可读）；
+///     返回 Ok(porcelain 文本，可能为空)。任一失败返回 AppError。
+pub async fn probe_workdir_integrity(git: &Path, workdir: &Path) -> Result<String, AppError> {
+    if !workdir.is_dir() {
+        return Err(AppError::generic(format!(
+            "云端同步工作区不是目录: {}",
+            workdir.display()
+        )));
+    }
+    if !workdir.join(".git").exists() {
+        return Err(AppError::generic(format!(
+            "云端同步工作区缺少 .git: {}",
+            workdir.display()
+        )));
+    }
+    // rev-parse 验证 .git 可解析（损坏/半写 clone 会失败）
+    run(
+        git,
+        workdir,
+        &["rev-parse", "--git-dir"],
+        Duration::from_secs(LOCAL_TIMEOUT_SECS),
+    )
+    .await
+    .map_err(|e| {
+        AppError::generic(format!(
+            "云端同步工作区 .git 完整性检查失败（{}）: {e}",
+            workdir.display()
+        ))
+    })?;
+    // status --porcelain 验证索引/工作树可读；输出本身可脏，脏由后续 fetch/reset 收敛
+    let porcelain = run(
+        git,
+        workdir,
+        &["status", "--porcelain"],
+        Duration::from_secs(LOCAL_TIMEOUT_SECS),
+    )
+    .await
+    .map_err(|e| {
+        AppError::generic(format!(
+            "云端同步工作区 git status 失败（半写/损坏树）: {e}"
+        ))
+    })?;
+    Ok(porcelain)
+}
+
 /// 把全部改动（含新增/删除）加入索引并提交。
 ///
 /// Business Logic: export 把本地权威写回工作区后，需 commit 成一个新版本供 push。
@@ -485,5 +539,33 @@ mod tests {
         }
         assert_eq!(classify(PushError::Rejected), "rejected");
         assert_eq!(classify(PushError::Other(AppError::generic("x"))), "other");
+    }
+
+    /// 完整性预检：缺少 .git 的目录必须失败，不得当成功。
+    #[tokio::test]
+    async fn probe_workdir_integrity_rejects_missing_git() {
+        let git = match detect_git() {
+            Ok(g) => g,
+            Err(_) => return, // 无 git 环境跳过
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        // 普通空目录，无 .git
+        let err = probe_workdir_integrity(&git, temp.path())
+            .await
+            .expect_err("无 .git 应失败");
+        assert!(
+            err.to_string().contains(".git") || err.to_string().contains("完整性"),
+            "错误应提示 .git/完整性: {err}"
+        );
+
+        // 假 .git 文件（非有效仓库）也应失败
+        std::fs::write(temp.path().join(".git"), b"not-a-repo").unwrap();
+        let err = probe_workdir_integrity(&git, temp.path())
+            .await
+            .expect_err("假 .git 应失败");
+        assert!(
+            err.to_string().contains("完整性") || err.to_string().contains("git"),
+            "错误应来自 git 探测: {err}"
+        );
     }
 }

@@ -255,19 +255,32 @@ pub async fn download_update(
             )
             .await;
 
-        match download_result {
-            Ok(bytes) => {
-                if runtime.finish_download(generation, Ok(bytes), false) {
-                    tracing::info!("更新下载完成: {} ({} bytes)", url_for_event, downloaded);
+        // 即使 download 返回 Ok，若 cancel token 已置位，也按取消处理，避免软取消后仍接受 bytes。
+        if cancel_for_check.is_cancelled() {
+            match download_result {
+                Ok(_bytes) => {
+                    if runtime.finish_download(generation, Err("下载已取消".to_string()), true)
+                    {
+                        tracing::info!("更新下载已取消（完成前检测到 cancel）: {}", url_for_event);
+                    }
+                }
+                Err(e) => {
+                    if runtime.finish_download(generation, Err(format!("下载失败: {e}")), true)
+                    {
+                        tracing::info!("更新下载已取消: {}", url_for_event);
+                    }
                 }
             }
-            Err(e) => {
-                let cancelled = cancel_for_check.is_cancelled();
-                if runtime.finish_download(generation, Err(format!("下载失败: {e}")), cancelled)
-                {
-                    if cancelled {
-                        tracing::info!("更新下载已取消: {}", url_for_event);
-                    } else {
+        } else {
+            match download_result {
+                Ok(bytes) => {
+                    if runtime.finish_download(generation, Ok(bytes), false) {
+                        tracing::info!("更新下载完成: {} ({} bytes)", url_for_event, downloaded);
+                    }
+                }
+                Err(e) => {
+                    if runtime.finish_download(generation, Err(format!("下载失败: {e}")), false)
+                    {
                         tracing::error!("更新下载失败: {e}");
                     }
                 }
@@ -336,14 +349,23 @@ pub async fn install_update(
     match install_result {
         Ok(()) => {
             match state.update_runtime.finish_install(generation, Ok(())) {
-                InstallOutcome::RestartRequested | InstallOutcome::Stale => {
-                    // Stale 也尝试重启（本代已成功安装）
+                InstallOutcome::RestartRequested => {
+                    // design §6.3：仅在重启请求成功后清理 bytes；
+                    // request_restart() 为同步标记退出路径，调用即视为已请求。
+                    // 若未来 API 返回 Result，失败时应 retain_bytes_after_restart_failure。
                     tracing::info!("安装完成，请求重启应用");
+                    app.request_restart();
+                    let _ = state.update_runtime.confirm_restart_requested(generation);
+                    Ok(serde_json::json!({ "ok": true }))
+                }
+                InstallOutcome::Stale => {
+                    // 本代状态已被取代；安装本身已成功，仍尝试重启，但不强制清 bytes
+                    tracing::warn!("安装完成但状态机 generation/phase 已过期，仍请求重启");
                     app.request_restart();
                     Ok(serde_json::json!({ "ok": true }))
                 }
-                InstallOutcome::FailedRetained => {
-                    // 不应出现：Ok(()) 路径
+                InstallOutcome::FailedRetained | InstallOutcome::RestartConfirmed => {
+                    // 不应出现于 Ok(()) 路径
                     Ok(serde_json::json!({ "ok": true }))
                 }
             }
@@ -354,13 +376,10 @@ pub async fn install_update(
                 .update_runtime
                 .finish_install(generation, Err(msg.clone()));
             match outcome {
-                InstallOutcome::FailedRetained | InstallOutcome::Stale => {
-                    Err(AppError::generic(msg))
-                }
-                InstallOutcome::RestartRequested => {
-                    // 不应出现
-                    Err(AppError::generic(msg))
-                }
+                InstallOutcome::FailedRetained
+                | InstallOutcome::Stale
+                | InstallOutcome::RestartRequested
+                | InstallOutcome::RestartConfirmed => Err(AppError::generic(msg)),
             }
         }
     }
@@ -470,15 +489,33 @@ mod tests {
         assert!(!rt.status().error.is_empty());
         assert!(rt.has_bytes());
 
-        // 重试：再进 Installing → 成功
+        // 重试：再进 Installing → 成功 → 确认重启后才清 bytes
         force_phase(&rt, UpdatePhase::Installing, 5);
         force_bytes(&rt, b"retry-pkg");
         assert_eq!(rt.status().status, UpdateStatusValue::Installing);
         let outcome = rt.finish_install(5, Ok(()));
         assert_eq!(outcome, InstallOutcome::RestartRequested);
+        assert!(rt.has_bytes(), "确认重启前保留 bytes");
+        assert_eq!(
+            rt.confirm_restart_requested(5),
+            InstallOutcome::RestartConfirmed
+        );
         assert_eq!(rt.snapshot().1, UpdatePhase::Idle);
         assert_eq!(rt.status().status, UpdateStatusValue::Idle);
         assert!(!rt.has_bytes());
+    }
+
+    /// cancel token 置位后，Ok(bytes) 也应按取消处理（M4）。
+    #[test]
+    fn cancelled_token_rejects_ok_bytes() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Downloading, 6);
+        // 模拟 download 任务：token 已 cancel，但仍拿到 Ok(bytes)
+        let cancelled = true;
+        assert!(rt.finish_download(6, Err("下载已取消".into()), cancelled));
+        assert_eq!(rt.snapshot().1, UpdatePhase::Cancelled);
+        assert!(!rt.has_bytes());
+        assert_eq!(rt.status().status, UpdateStatusValue::Cancelled);
     }
 
     /// Installing 期间 begin_check 返回 Conflict。

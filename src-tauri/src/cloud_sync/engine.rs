@@ -600,7 +600,29 @@ async fn ensure_repo(state: &AppState, git: &Path) -> Result<(PathBuf, String), 
         ));
     }
 
-    if !workdir.is_dir() || !workdir.join(".git").exists() {
+    if workdir.is_dir() && workdir.join(".git").exists() {
+        // 复用既有 workdir：有界 integrity 预检（.git + status --porcelain）。
+        // 半写/损坏树不得当成功；预检失败则清理后重新 clone。
+        match git_cli::probe_workdir_integrity(git, &workdir).await {
+            Ok(porcelain) => {
+                if !porcelain.trim().is_empty() {
+                    tracing::info!(
+                        "cloud_sync: 复用 workdir 时检测到脏状态（将由 fetch/reset 收敛）: {} 行",
+                        porcelain.lines().count()
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("cloud_sync: workdir 完整性预检失败，清理后重新 clone: {e}");
+                let _ = std::fs::remove_dir_all(&workdir);
+                if let Some(parent) = workdir.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                git_cli::clone(git, &repo_url, &workdir).await?;
+                git_cli::set_local_identity(git, &workdir).await?;
+            }
+        }
+    } else {
         // 首次：clone（若残留非 git 目录，先清理避免 clone 到非空目录失败）
         if workdir.exists() {
             let _ = std::fs::remove_dir_all(&workdir);

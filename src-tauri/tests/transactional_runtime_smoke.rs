@@ -100,19 +100,21 @@ fn config_atomic_store_recovers_from_injected_stage_failures() {
         assert_eq!(parsed.device_name, "smoke", "stage {stage:?}");
     }
 
-    // DirectorySync 在原子替换之后：目标文件可能已是新内容，但必须仍是合法 JSON，
-    // 且后续健康保存可收敛。
+    // DirectorySync 在原子替换之后：rename 是 commit 点，磁盘权威必须是 NEW，
+    // 且 save_atomic 返回 Ok（dirsync 失败仅 warn）。
     {
         let io =
             FaultInjectingConfigIo::fail_once(Arc::new(StdConfigIo), ConfigIoStage::DirectorySync);
         let fault_store = FsConfigStore::new(config_path.clone(), Arc::new(io));
         let mut candidate = initial.clone();
         candidate.device_name = "after-rename".into();
-        let _ = fault_store.save_atomic(&candidate);
+        fault_store
+            .save_atomic(&candidate)
+            .expect("dirsync fault after rename must still commit");
         let text = fs::read_to_string(&config_path).unwrap();
         let parsed: AppConfig =
             serde_json::from_str(&text).expect("JSON still valid after dir-sync fault");
-        assert!(parsed.device_name == "smoke" || parsed.device_name == "after-rename");
+        assert_eq!(parsed.device_name, "after-rename");
     }
 
     let healthy = FsConfigStore::new(config_path.clone(), Arc::new(StdConfigIo));

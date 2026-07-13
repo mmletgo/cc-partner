@@ -848,14 +848,9 @@ impl AppConfig {
         }
     }
 
-    /// 保存配置到 `~/.cc-partner/config.json`（委托原子 store）。
-    ///
-    /// Business Logic: 用户修改配置后需持久化，下次启动生效；迁移期保留薄包装兼容旧调用。
-    /// Code Logic: 委托 `FsConfigStore::save_atomic` 做 durable replace。
-    pub fn save(&self) -> Result<(), AppError> {
-        let store = crate::config_store::FsConfigStore::default_path()?;
-        store.save_atomic(self)
-    }
+    // 生产路径禁止 AppConfig::save 旁路 writer gate。
+    // 启动迁移/首装由 load() 直接使用 FsConfigStore::save_atomic；
+    // 运行期配置写入必须经 ConfigRuntime / update_config_transactionally。
 }
 
 /// 把 Option<String> trim 后空串归一为 None。

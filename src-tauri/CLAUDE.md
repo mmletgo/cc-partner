@@ -24,11 +24,11 @@ src/
 ├── state.rs           — AppState（`config` 与 `config_runtime.value` 共享同一 Arc；生产 writer 走 `config_runtime` 事务路径；db pool + prompt_repo + device_id）[已实现 T2]
 ├── error.rs           — AppError（thiserror + serde 成 {error:"msg"}）              [已实现]
 ├── config.rs          — AppConfig：读 ~/.cc-partner/config.json，缺失生成默认；`validate()` 校验 device/path/port/cloud/hotkey/Health/Orchestrator 范围；load/migration/first-install 经 `FsConfigStore::save_atomic` 落盘；`data_dir()` 统一解析数据根——合法绝对 `CC_PARTNER_DATA_DIR` override 覆盖 config/control/db/log 路径（拒绝空白/相对/NUL），未设置时保持 home 默认；目录首次启动从旧 ~/.claude-partner 重命名迁移；load() 额外做字段级迁移——把 config.json 残留的 db_path 绝对路径前缀 `~/.claude-partner/` 改写为 `~/.cc-partner/`（fs::rename 不改文件内容，必须在 load 时修补否则 init_db 找不到文件 panic）；override 生效时再强制纠正逃逸隔离根的 `db_path`（指向真实 home 或其它外部绝对路径时改回根内 `data.db` 并 save_atomic）；`default_receive_dir` 返回 Result：有 home → `~/cc-partner-files`，无 home 且设置合法 `CC_PARTNER_DATA_DIR` → `<data_dir>/received-files`，否则 Validation（首次 load 不 panic）；提供设置页恢复默认所需的基础偏好默认值、Workbench Prompt 优化快捷键/填入语言默认值与云同步默认值；macOS 旧 `<ctrl>` 截图快捷键自动替换 `<cmd>`；预留 `backend_log_dir`/`backend_log_path`（`<data_dir>/logs/backend.log`）[已实现]
-├── config_store.rs    — 配置 durable atomic store：`ConfigStore`/`FsConfigStore`/`ConfigIo`；同目录 `.config.json.<uuid>.tmp` → flush/sync → re-read 等价校验 → Unix rename+dir fsync / Windows ReplaceFileW|MoveFileExW；失败只删本次 temp；启动清理 >24h 陈旧 temp；故障注入 adapter 覆盖 create/write/flush/file-sync/rename/directory-sync [已实现 T1]
-├── config_runtime.rs  — `ConfigRuntime` + `update_config_transactionally`：异步 update_lock 串行 clone→mutate→validate→save_atomic→memory swap；禁止 std RwLockGuard 跨 await；失败不改内存/旧文件；挂在 `AppState.config_runtime`，所有生产配置 writer（config/cloud_sync/github_trending/health/orchestrator_config）经此路径，禁止命令层 `cfg.save()` [已实现 T1+T2]
+├── config_store.rs    — 配置 durable atomic store：`ConfigStore`/`FsConfigStore`/`ConfigIo`；同目录 `.config.json.<uuid>.tmp` → flush/sync → re-read 等价校验 → Unix rename+dir fsync / Windows ReplaceFileW（后 best-effort 目标 fsync）|MoveFileExW(WRITE_THROUGH)；**rename 是 commit 点**，DirectorySync 失败仅 warn 仍返回 Ok；失败只删本次 temp；启动清理 >24h 陈旧 temp；故障注入 adapter 覆盖 create/write/flush/file-sync/rename/directory-sync [已实现 T1 + S3 fix H1/M7]
+├── config_runtime.rs  — `ConfigRuntime` + `update_config_transactionally`：异步 update_lock 串行 clone→mutate→validate→`spawn_blocking(save_atomic)`→memory swap；禁止 std RwLockGuard 跨 await；提供 `lock_for_update`/`store_handle`/`swap_memory` 供热键 OS 与 config 同临界区；挂在 `AppState.config_runtime`，所有生产配置 writer 经此路径，**禁止生产 `AppConfig::save` 旁路** [已实现 T1+T2 + S3 fix H1/H2/M1/M2]
 ├── cc/                — Claude Code 历史采集（collector）+ 合并（merger，复用 sync/vector_clock）+ 同步（engine）+ 模型 [已实现]
 ├── claude_cli.rs      — Claude Code CLI headless/stream-json 调用共享 helper（GitHub Trending + Prompt 优化复用，支持 pure 与项目上下文两种模式）[已实现]
-├── cloud_sync/        — GitHub 私有仓库云端同步（git_cli 系统 git 封装 + snapshot 工作区↔DB 导入导出 + engine 流程编排 + runtime 全流程单飞门闸 + scheduler 轮询） [已实现 S3 T4]
+├── cloud_sync/        — GitHub 私有仓库云端同步（git_cli 系统 git 封装 + snapshot 工作区↔DB 导入导出 + engine 流程编排 + runtime 全流程单飞门闸 + scheduler 轮询；复用 workdir 前 `probe_workdir_integrity` 有界 git status/--git-dir 预检，半写树清理后 re-clone） [已实现 S3 T4 + fix M3]
 ├── commands/          — #[tauri::command]：backend lifecycle + prompts + prompt_optimizer + scratchpad + cc_history + cloud_sync + github_trending + config + devices + sync + transfer + screenshot + permissions + updater + ssh_target + health + workbench [已实现]
 ├── models/prompt.rs   — PromptRow（snake_case，DB/同步）+ PromptDto（camelCase，前端） [已实现]
 ├── models/scratchpad.rs — ScratchpadRow（多页面，DB/同步）+ ScratchpadPageDto/SummaryDto（camelCase，前端） [已实现]
@@ -48,8 +48,8 @@ src/
 ├── hotkey.rs          — pynput→plugin 快捷键格式转换 + 注册/热更新  [M7 已实现]
 ├── tray.rs            — 系统托盘（Tauri 2 tray API）              [M7 已实现]
 ├── health/            — 久坐监测 daemon（state 状态机 + monitor 采样 + reminder 免打扰） [已实现]
-├── updater/           — 自动更新 generation 状态机（单锁 UpdateRuntime：check/download/cancel/install 相位 + generation 守卫；DTO status 含 checking/installing）[S3 T5/T6]
-└── commands/updater.rs — 自动更新 5 命令（check/download/status/cancel/install，对齐前端 types.ts；委托 UpdateRuntime；install 失败可重试）[M8/S3 T6]
+├── updater/           — 自动更新 generation 状态机（单锁 UpdateRuntime：check/download/cancel/install 相位 + generation 守卫；begin_check abort 旧 JoinHandle；finish_install 成功保留 bytes 至 confirm_restart_requested；DTO status 含 checking/installing）[S3 T5/T6 + fix M4/M5/Spec M2]
+└── commands/updater.rs — 自动更新 5 命令（check/download/status/cancel/install；download Ok 若 cancel token 置位按取消处理；install 成功后 request_restart 再清 bytes）[M8/S3 T6 + fix]
 migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，全 CREATE TABLE IF NOT EXISTS 兼容旧库）
 ```
 
@@ -137,7 +137,7 @@ migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，�
 - **delete 是软删除**：`soft_delete` 设 `deleted=1` + `updated_at=now` + 写回推进后的 vector_clock（修正了 Python handler 自增 clock 却未落库的 bug）。
 - **PromptDto** 比 Row 多 `tag`（tags[0] 投影，兼容旧前端），对照 Python `_prompt_to_frontend_dict`。
 - **httpPort**：M1 未实际监听 HTTP，`get_config` 返回配置值（0）；M3 axum 接入后改为真实端口。
-- **配置命令**：`get_config` 返回当前持久化配置；`get_default_config` 返回设备名/接收目录/截图快捷键、Workbench Prompt 优化快捷键和填入语言的环境默认值（当前 device_id/http_port 保持不变），供设置页“恢复默认”使用；`update_config` 是 patch 语义，只覆盖传入字段，经 `ConfigRuntime`/`update_config_transactionally` 串行落盘（失败不改内存/文件）；`screenshotHotkey` 仅在事务提交成功后热更新全局快捷键；`promptOptimizerHotkey` / `promptOptimizerFillLanguage` 仅作为 Workbench 页面内偏好保存，不触发截图全局快捷键重注册。同类 writer：`update_cloud_sync_config` / `update_github_trending_config` / `toggle_health_enabled` / `update_health_config` / `update_orchestrator_config` 均走同一事务路径，命令层不得直接 `cfg.save()`。
+- **配置命令**：`get_config` 返回当前持久化配置；`get_default_config` 返回设备名/接收目录/截图快捷键、Workbench Prompt 优化快捷键和填入语言的环境默认值（当前 device_id/http_port 保持不变），供设置页“恢复默认”使用；`update_config` 是 patch 语义，只覆盖传入字段，经 `ConfigRuntime` 串行落盘；`screenshotHotkey` 变更时在**同一 update_lock 临界区**内 OS replace → save_atomic → memory swap，失败同临界区 compensate；`promptOptimizerHotkey` / `promptOptimizerFillLanguage` 仅作为 Workbench 页面内偏好保存，不触发截图全局快捷键重注册。同类 writer：`update_cloud_sync_config` / `update_github_trending_config` / `toggle_health_enabled` / `update_health_config` / `update_orchestrator_config` 均走同一事务路径，命令层不得直接旁路落盘。
 
 ## M3 已落地行为约定（移植自 Python network/，逐方法对照）
 
@@ -267,13 +267,13 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
   - `UpdateDownloadStatus`（`UpdateDownloadStatus`）：字段**全非可选**（前端 types.ts 定义 error/filePath/url/filename 为 string、size 为 number），故用 String/u64。`status` 枚举 serde lowercase 对齐 `'idle'|'checking'|'downloading'|'completed'|'installing'|'failed'|'cancelled'`；progress 0.0~1.0（安装中不伪造进度，保持下载完成值）。filePath 恒空串（updater 下载到内存非文件）。安装失败时 status 回 `completed` 且 error 非空、bytes 保留，允许重试安装。
   - download/cancel/install 返回 `{ok: boolean, error?: string}`（serde_json::Value）。
 - **5 个命令（commands/updater.rs，lib.rs invoke_handler 注册）**：
-  - `check_update(app, state)`：`UpdateRuntime::begin_check` 递增 generation、DTO status=checking（Downloading/Installing 时 Conflict）→ `app.updater()?.check().await` → `finish_check` 回写 Available(status=idle)/Idle/Failed。
-  - `download_update(app, state, url?, filename?)`：`begin_download` 取 lease（Update clone + cancel token + generation）→ spawn `update.download`，回调 `record_progress(generation, …)` / `finish_download`；`attach_download_task` 登记句柄。**url/filename 入参仅兼容前端透传**。
+  - `check_update(app, state)`：`UpdateRuntime::begin_check` 递增 generation（abort 未结束旧 JoinHandle）、DTO status=checking（Downloading/Installing 时 Conflict）→ `app.updater()?.check().await` → `finish_check` 回写 Available(status=idle)/Idle/Failed。
+  - `download_update(app, state, url?, filename?)`：`begin_download` 取 lease → spawn `update.download`；**cancel token 置位时即使 Ok(bytes) 也按取消处理**；`attach_download_task` 登记句柄。**url/filename 入参仅兼容前端透传**。
   - `get_download_status(state)`：读 `state.update_runtime.status()` 返回 `UpdateDownloadStatus`。
   - `cancel_download(state)`：`UpdateRuntime::cancel` 锁内原子取出 token/handle 并置 Cancelled，锁外 `token.cancel()` + `handle.abort()`。
-  - `install_update(app, state)`：`begin_install` 置 DTO status=installing，克隆 `Arc<[u8]>`（不 take）→ `spawn_blocking(install)` → `finish_install`：成功 RestartRequested（phase/status=Idle）后 `request_restart`；失败 FailedRetained 回到 Downloaded/status=completed + error，保留 bytes 供重试。
+  - `install_update(app, state)`：`begin_install` 置 installing，克隆 `Arc<[u8]>`（不 take）→ `spawn_blocking(install)` → `finish_install`：成功 `RestartRequested` **仍保留 bytes** → `request_restart` → `confirm_restart_requested` 清 bytes；失败 FailedRetained 回到 Downloaded + error，保留 bytes 供重试。
 - **updater 生命周期 / generation**：`Update` 是 owned Clone；权威状态在 `AppState.update_runtime: Arc<UpdateRuntime>`（单 `std::sync::Mutex`）。generation **仅** `begin_check` 递增；下载进度/完成与安装完成必须 generation+phase 匹配，旧代回调忽略。新 check 清旧 bytes。锁内不做网络/安装。
-- **取消机制**：`download(on_chunk, on_finish)` 无原生取消参数；download 放 `tauri::async_runtime::spawn`，JoinHandle 由 runtime 持有；cancel 先改 phase 再 abort。
+- **取消机制**：`download(on_chunk, on_finish)` 无原生取消参数；download 放 `tauri::async_runtime::spawn`，JoinHandle 由 runtime 持有；cancel 先改 phase 再 abort；finish 路径再查 token。
 - **AppState 扩展**：`update_runtime: Arc<UpdateRuntime>`（替代原先五字段 `update_status/update_pending/update_bytes/update_download_task/update_cancel_token`）。
 
 - `cargo build`（在 `src-tauri/` 下）—— M1 交付标准，必须通过
@@ -528,10 +528,10 @@ mkdir -p "$CC_PARTNER_SMOKE_ROOT"
 
 ## 事务化运行时保证（S3）
 
-- **配置提交顺序**：`clone → mutate → validate → temp write → flush/fsync → re-read → atomic replace → directory fsync → memory swap`；任一步失败则内存与旧 `config.json` 保持一致。Unix config 文件 `0600`；Windows replace-existing + write-through，无先删空窗。
-- **配置 writer**：全部经 `AppState.config_runtime` / `update_config_transactionally`（同一 `tokio::sync::Mutex`）；禁止生产路径 `cfg.save()` / 直接 `fs::write` config。
-- **Cloud Sync 单飞**：`CloudSyncRuntime` 覆盖 ensure/clone/fetch/reset/import/export/commit/push；手动与 CLAUDE.md push 使用 `Wait{timeout:300s}`，scheduler 使用 `ReturnBusy`（递增 `skippedBusy`，不排队）。获锁后重读 repo URL/branch。
-- **Updater**：单一 `UpdateRuntime`（generation + phase）；DTO status 含 `idle|checking|downloading|completed|installing|failed|cancelled`；install 失败保留 `Arc<[u8]>` 可重试；cancel 先改 phase/取 handle，再锁外 abort。
+- **配置提交顺序**：`clone → mutate → validate → temp write → flush/fsync → re-read → atomic replace → directory fsync → memory swap`。**atomic replace 是 commit 点**：DirectorySync 失败仅 warn，`save_atomic` 仍 Ok，ConfigRuntime 必须 swap 内存到 NEW（禁止 disk=NEW/memory=OLD）。pre-rename 任一步失败则内存与旧 `config.json` 保持一致。Unix config 文件 `0600`；Windows 首创 `MoveFileExW(WRITE_THROUGH)`，已有目标 `ReplaceFileW` 后 best-effort 目标文件 fsync + 父目录 sync。
+- **配置 writer**：全部经 `AppState.config_runtime` / `update_config_transactionally` 或 `lock_for_update` 同临界区路径（同一 `tokio::sync::Mutex`）；durable IO 走 `spawn_blocking`；**无生产 `AppConfig::save`**。截图快捷键 OS replace/compensate 与 config 事务同锁。
+- **Cloud Sync 单飞**：`CloudSyncRuntime` 覆盖 ensure/clone/fetch/reset/import/export/commit/push；手动与 CLAUDE.md push 使用 `Wait{timeout:300s}`，scheduler 使用 `ReturnBusy`（递增 `skippedBusy`，不排队）。获锁后重读 repo URL/branch；复用 workdir 前 `probe_workdir_integrity`（rev-parse + status --porcelain），失败清理 re-clone。
+- **Updater**：单一 `UpdateRuntime`（generation + phase）；DTO status 含 `idle|checking|downloading|completed|installing|failed|cancelled`；install 失败保留 `Arc<[u8]>`；install 成功仅在 `confirm_restart_requested` 后清 bytes；download Ok 仍检查 cancel token；begin_check abort 旧 handle；cancel 先改 phase/取 handle，再锁外 abort。
 - **Health**：范围 work `60..=28800`、break `30..=7200`、retain `1..=3650`、water `300..=86400`、snooze `1..=1440`；DND 两端皆空或严格 `HH:MM`；时间用 checked 算术；非法输入 Validation 且不改 config/runtime/DB。daemon 遇非法磁盘配置记稳定 field code 并跳过本 tick 提醒/清理。
 - **本计划无 SQLite schema 变更**，无需 schema 回滚脚本。
 - **NOT VERIFIED**：真实磁盘满硬件、GUI 全局快捷键冲突、真实 updater 安装/重启。
