@@ -46,7 +46,8 @@ src/
 ├── hotkey.rs          — pynput→plugin 快捷键格式转换 + 注册/热更新  [M7 已实现]
 ├── tray.rs            — 系统托盘（Tauri 2 tray API）              [M7 已实现]
 ├── health/            — 久坐监测 daemon（state 状态机 + monitor 采样 + reminder 免打扰） [已实现]
-└── commands/updater.rs — 自动更新 5 命令（check/download/status/cancel/install，对齐前端 types.ts）[M8 已实现]
+├── updater/           — 自动更新 generation 状态机（单锁 UpdateRuntime：check/download/cancel/install 相位 + generation 守卫）[S3 T5]
+└── commands/updater.rs — 自动更新 5 命令（check/download/status/cancel/install，对齐前端 types.ts；委托 UpdateRuntime）[M8 已实现]
 migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，全 CREATE TABLE IF NOT EXISTS 兼容旧库）
 ```
 
@@ -264,14 +265,14 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
   - `UpdateDownloadStatus`（`UpdateDownloadStatus`）：字段**全非可选**（前端 types.ts 定义 error/filePath/url/filename 为 string、size 为 number），故用 String/u64。`status` 枚举 serde lowercase 对齐 `'idle'|'downloading'|'completed'|'failed'|'cancelled'`；progress 0.0~1.0。filePath 恒空串（updater 下载到内存非文件）。
   - download/cancel/install 返回 `{ok: boolean, error?: string}`（serde_json::Value）。
 - **5 个命令（commands/updater.rs，lib.rs invoke_handler 注册）**：
-  - `check_update(app, state)`：`app.updater()?.check().await`（`use tauri_plugin_updater::UpdaterExt`）。`Some(update)` → 缓存 Update 到 `state.update_pending` + 返回元数据；`None` → hasUpdate:false；`Err` → hasUpdate:false + error。
-  - `download_update(app, state, url?, filename?)`：从 `update_pending` 取 Update clone（跨命令复用同一 check 结果），spawn 异步任务跑 `update.download(on_chunk, on_finish)`，`on_chunk(chunk_len, content_length)` 累计 downloaded + 写状态 + emit `update:download-progress`（{progress, downloaded, total}）。完成存 bytes 到 `update_bytes` + 置 completed；失败置 failed；取消置 cancelled。**url/filename 入参仅兼容前端透传，实际用 Update 内的 download_url**。
-  - `get_download_status(state)`：读 `update_status` 返回 `UpdateDownloadStatus`。
-  - `cancel_download(state)`：`update_cancel_token.take().cancel()`（软中断，spawn 体内 is_cancelled 判定 Cancelled）+ `update_download_task.take().abort()`（强中断 reqwest 流）+ 主动置 cancelled 兜底。
-  - `install_update(app, state)`：校验 status==completed → 取 `update_bytes` + `update_pending` Update → `spawn_blocking(move || update.install(&bytes))`（同步 fs/外部进程，避免阻塞 async 运行时）→ `app.request_restart()`。
-- **updater 生命周期处理**：`Update` 是 `#[derive(Clone)]` owned 结构（无生命周期参数），check 后存入 `AppState.update_pending: Arc<Mutex<Option<Update>>>`，download/install 时 clone 取出——**不跨命令重新 check**，避免重复请求 endpoint 且保证 version 一致。
-- **取消机制**：updater 的 `download(on_chunk, on_finish)` 无原生取消参数（on_chunk 是 FnMut 不可中断 reqwest 流），故 download 放进 `tauri::async_runtime::spawn`，JoinHandle 存 `update_download_task`，cancel 时 `abort()` 强制中断整个 future 树；辅以 `CancellationToken`（存 `update_cancel_token`）软中断让 spawn 体内 is_cancelled 区分 cancelled vs failed。
-- **AppState 扩展**：`update_status: Arc<RwLock<UpdateDownloadStatus>>`、`update_pending: Arc<Mutex<Option<Update>>>`、`update_bytes: Arc<Mutex<Option<Vec<u8>>>>`、`update_download_task: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>`、`update_cancel_token: Arc<Mutex<Option<CancellationToken>>>`。
+  - `check_update(app, state)`：`UpdateRuntime::begin_check` 递增 generation（Downloading/Installing 时 Conflict）→ `app.updater()?.check().await` → `finish_check` 回写 Available/Idle/Failed。
+  - `download_update(app, state, url?, filename?)`：`begin_download` 取 lease（Update clone + cancel token + generation）→ spawn `update.download`，回调 `record_progress(generation, …)` / `finish_download`；`attach_download_task` 登记句柄。**url/filename 入参仅兼容前端透传**。
+  - `get_download_status(state)`：读 `state.update_runtime.status()` 返回 `UpdateDownloadStatus`。
+  - `cancel_download(state)`：`UpdateRuntime::cancel` 锁内原子取出 token/handle 并置 Cancelled，锁外 `token.cancel()` + `handle.abort()`。
+  - `install_update(app, state)`：`begin_install` 克隆 `Arc<[u8]>`（不 take）→ `spawn_blocking(install)` → `finish_install`：成功 RestartRequested 后 `request_restart`；失败 FailedRetained 回到 Downloaded 保留 bytes 供重试。
+- **updater 生命周期 / generation**：`Update` 是 owned Clone；权威状态在 `AppState.update_runtime: Arc<UpdateRuntime>`（单 `std::sync::Mutex`）。generation **仅** `begin_check` 递增；下载进度/完成与安装完成必须 generation+phase 匹配，旧代回调忽略。新 check 清旧 bytes。锁内不做网络/安装。
+- **取消机制**：`download(on_chunk, on_finish)` 无原生取消参数；download 放 `tauri::async_runtime::spawn`，JoinHandle 由 runtime 持有；cancel 先改 phase 再 abort。
+- **AppState 扩展**：`update_runtime: Arc<UpdateRuntime>`（替代原先五字段 `update_status/update_pending/update_bytes/update_download_task/update_cancel_token`）。
 
 - `cargo build`（在 `src-tauri/` 下）—— M1 交付标准，必须通过
 - `./web/node_modules/.bin/tauri dev` — 开发（启动 vite + `cargo run` + 热重载）
