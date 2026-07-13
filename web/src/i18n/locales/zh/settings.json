@@ -262,7 +262,10 @@
   },
   "permission": {
     "title": "权限管理",
-    "checking": "正在检查权限状态…"
+    "checking": "正在检查权限状态…",
+    "recheck": "重新检查",
+    "loadFailed": "权限状态加载失败：{{error}}",
+    "unknownError": "未知错误"
   },
   "action": {
     "apply": "应用配置",

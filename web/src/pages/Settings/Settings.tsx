@@ -27,7 +27,6 @@ import { CheckIcon, XIcon, DevicesIcon, FolderIcon, KeyboardIcon, SyncIcon, Info
 import { configApi } from '@/api/config';
 import { healthApi } from '@/api/health';
 import { orchestratorConfigApi } from '@/api/orchestratorConfig';
-import { requestNotificationPermission } from '@/lib/notification';
 import { githubTrendingApi } from '@/api/githubTrending';
 import { usePermissions } from '@/hooks/usePermissions';
 import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
@@ -270,7 +269,15 @@ export function Settings() {
 
   // macOS 权限状态（设置页手动授权入口，持续轮询以反映用户在系统设置的变更）
   const [tWelcome] = useTranslation('welcome');
-  const { status: permStatus, loading: permLoading, refresh: refreshPermissions } = usePermissions();
+  const {
+    status: permStatus,
+    loading: permLoading,
+    refreshing: permRefreshing,
+    error: permError,
+    requesting: permRequesting,
+    request: requestPermissionItem,
+    refresh: refreshPermissions,
+  } = usePermissions();
 
   /**
    * Business Logic（为什么需要这个常量）:
@@ -367,24 +374,19 @@ export function Settings() {
   }, [setActiveTab]);
 
   /**
-   * 单项权限「去设置」：请求该项权限（默认弹框 + 开面板）后刷新状态
+   * Business Logic（为什么需要这个函数）:
+   *   设置页权限卡需要逐项请求授权，且错误由 usePermissions 统一投影。
    *
-   * @param type 权限类型 screenCapture / accessibility / inputMonitoring / notification（notification 走前端 JS API）
+   * Code Logic（这个函数做什么）:
+   *   调用 requestPermissionItem(type)，吞掉 rejection（error 已由 hook 写入）。
+   *
+   * @param type 权限类型 screenCapture / accessibility / inputMonitoring / notification
    */
   const handleRequestAccess = useCallback(
-    async (type: PermissionType) => {
-      try {
-        if (type === 'notification') {
-          await requestNotificationPermission();
-        } else {
-          await configApi.requestPermission(type);
-        }
-        await refreshPermissions();
-      } catch {
-        // 请求失败静默，轮询会持续反映真实状态
-      }
+    (type: PermissionType) => {
+      void requestPermissionItem(type).catch(() => undefined);
     },
-    [refreshPermissions],
+    [requestPermissionItem],
   );
 
   // 计算是否处于"未保存"状态：当前 state 与最近一次已保存/已加载的快照是否一致
@@ -1450,10 +1452,34 @@ export function Settings() {
                 <h2 className={styles.sectionTitle}>{t('settings:permission.title')}</h2>
               </Card.Header>
               <Card.Body padding="md">
-                {permLoading || !permStatus ? (
+                {permLoading ? (
                   <p className={styles.helper}>{t('settings:permission.checking')}</p>
+                ) : !permStatus ? (
+                  <div className={styles.permissionList}>
+                    <p className={styles.helper} role="alert">
+                      {permError
+                        ? t('settings:permission.loadFailed', { error: permError })
+                        : t('settings:permission.loadFailed', {
+                            error: t('settings:permission.unknownError'),
+                          })}
+                    </p>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void refreshPermissions()}
+                      loading={permRefreshing}
+                      aria-busy={permRefreshing}
+                    >
+                      {t('settings:permission.recheck')}
+                    </Button>
+                  </div>
                 ) : (
                   <div className={styles.permissionList}>
+                    {permError ? (
+                      <p className={styles.helper} role="alert">
+                        {t('settings:permission.loadFailed', { error: permError })}
+                      </p>
+                    ) : null}
                     {mapPermissions(permStatus, tWelcome).map((p) => (
                       <PermissionCard
                         key={p.id}
@@ -1461,9 +1487,21 @@ export function Settings() {
                         title={p.title}
                         description={p.description}
                         granted={p.granted}
-                        onRequestAccess={() => void handleRequestAccess(p.id as PermissionType)}
+                        requesting={permRequesting.has(p.id as PermissionType)}
+                        onRequestAccess={() => handleRequestAccess(p.id as PermissionType)}
                       />
                     ))}
+                    <div>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => void refreshPermissions()}
+                        loading={permRefreshing}
+                        aria-busy={permRefreshing}
+                      >
+                        {t('settings:permission.recheck')}
+                      </Button>
+                    </div>
                   </div>
                 )}
               </Card.Body>

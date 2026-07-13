@@ -8,12 +8,13 @@
  *   今日活跃/休息占比如何,并能直接进入完整配置项。
  *
  * Code Logic（这个组件做什么）:
- *   - refresh:并行取 status + stats + detail(startOfDay 起);每 30s 轮询刷新
+ *   - refresh:并行取 status + stats + detail(startOfDay 起);每 5s 可见性感知轮询
  *   - 将运行状态派生成概览卡片、进度条、指标网格和图表面板
  *   - 开关 enabled / 暂停 paused:乐观更新本地 status,后端失败回滚
  *   - hooks 全部在 early return 之前(项目规则 20)
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
+import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Button, Card, Pill, ProgressBar } from '@/components/primitives';
@@ -25,8 +26,8 @@ import styles from './Health.module.css';
 import { StatsChart } from './StatsChart';
 import { HabitStatsCard } from './HabitStatsCard';
 
-/** 页面刷新间隔(ms) */
-const REFRESH_INTERVAL_MS = 30000;
+/** 页面网络刷新间隔(ms)；HealthOverlay 本地倒计时不属于本轮询 */
+const REFRESH_INTERVAL_MS = 5000;
 
 /**
  * 将运行时 phase 映射为完整静态 i18n key 字面量(i18next v26 的 t() 对动态
@@ -175,13 +176,10 @@ export function Health() {
     setLoading(false);
   }, []);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- 合法 fetch-in-effect,setState 在 await 后异步执行 */
-  useEffect(() => {
-    void refresh();
-    const id = setInterval(refresh, REFRESH_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [refresh]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+  // 健康页网络刷新：5s 可见性感知轮询；HealthOverlay 本地倒计时不变
+  useVisibilityPolling(refresh, {
+    intervalMs: REFRESH_INTERVAL_MS,
+  });
 
   /** 切换监测开关:乐观更新本地 status,后端失败时回滚 enabled 并提示 */
   const toggleEnabled = useCallback(async () => {

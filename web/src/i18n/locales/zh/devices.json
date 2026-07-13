@@ -7,5 +7,6 @@
   "fetchSelfFailed": "获取本机信息失败",
   "fetchListFailed": "拉取设备列表失败",
   "lastSeenPrefix": "最后活跃",
-  "cardAria": "设备 {{name}}"
+  "cardAria": "设备 {{name}}",
+  "staleRefreshFailed": "设备列表刷新失败，已保留上次结果"
 }

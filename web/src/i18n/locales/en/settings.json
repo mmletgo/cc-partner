@@ -262,7 +262,10 @@
   },
   "permission": {
     "title": "Permissions",
-    "checking": "Checking permission status…"
+    "checking": "Checking permission status…",
+    "recheck": "Recheck",
+    "loadFailed": "Failed to load permissions: {{error}}",
+    "unknownError": "Unknown error"
   },
   "action": {
     "apply": "Apply",

@@ -27,6 +27,10 @@
   },
   "permissionCard": {
     "granted": "已授权",
-    "goSettings": "去设置"
-  }
+    "goSettings": "去设置",
+    "requesting": "授权中…"
+  },
+  "recheck": "重新检查",
+  "checkFailed": "检查权限失败：{{error}}",
+  "unknownError": "未知错误"
 }

@@ -95,5 +95,6 @@
   "Thu": "Thu",
   "Fri": "Fri",
   "Sat": "Sat",
-  "Sun": "Sun"
+  "Sun": "Sun",
+  "staleRefreshFailed": "Health data refresh failed; showing last known data"
 }

@@ -12,12 +12,13 @@
  *   - 顶部 outlined Card 显示本机信息（通过 /api/health 获取，设备名 + IP + 端口 + 状态）
  *   - SSH 目标管理是设备页主操作区：局域网设备自动成为连接目标，也可手动添加 IP；
  *     行内保存 username/port，一键复制 ssh 命令，配置可跨设备同步
- *   - 启动后用 setInterval 每 5 秒拉取一次设备列表；
- *     卸载时清除 interval 防止内存泄漏
+ *   - 设备列表用 useVisibilityPolling 每 5 秒刷新：隐藏暂停、可见立即刷新、
+ *     single-flight；刷新失败保留已有 devices 并展示 error
  *   - 容器居中、限宽，保证在大窗口下也保持可读
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import { Card, Pill, Button, Input } from '@/components/primitives';
 import { devicesApi } from '@/api/devices';
 import type { HealthResponse } from '@/api/devices';
@@ -110,8 +111,6 @@ export function Devices() {
   const [manualPort, setManualPort] = useState<string>('22');
   const [manualLabel, setManualLabel] = useState<string>('');
   const [edits, setEdits] = useState<Record<string, { username: string; port: string }>>({});
-  const [tick, setTick] = useState<number>(0);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   /**
    * 从 /api/health 获取本机设备信息
@@ -130,16 +129,20 @@ export function Devices() {
   }, [t]);
 
   /**
-   * 拉取设备列表；按后端契约映射为前端 Device 类型。
-   * API 错误以空列表 + 错误提示形式呈现，不会阻塞 UI。
+   * Business Logic（为什么需要这个函数）:
+   *   设备列表需与 mDNS 发现对齐；刷新失败不得清空已成功列表。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 devicesApi.list；成功写数组清 error；失败保留 prev 并写 error。
    */
   const fetchDevices = useCallback(async () => {
     try {
       const list = await devicesApi.list();
-      setDevices(list);
+      setDevices(Array.isArray(list) ? list : []);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : t('devices:fetchListFailed'));
+      // 保留已有 devices，不覆盖为空
     } finally {
       setLoading(false);
     }
@@ -184,25 +187,10 @@ export function Devices() {
   }, [fetchSshConfig]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  // 首次挂载 + tick 变化时重新拉取设备列表
-  /* eslint-disable react-hooks/set-state-in-effect -- 合法 fetch-in-effect，setState 在 await 后异步执行 */
-  useEffect(() => {
-    fetchDevices();
-  }, [fetchDevices, tick]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  // 启动 5s 定时器，定期刷新设备列表
-  useEffect(() => {
-    intervalRef.current = setInterval(() => {
-      setTick((prev) => prev + 1);
-    }, REFRESH_INTERVAL_MS);
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-    };
-  }, []);
+  // 设备列表：可见性感知 5s 轮询（隐藏暂停、可见立即刷新、single-flight）
+  const { runNow: runDevicesNow } = useVisibilityPolling(fetchDevices, {
+    intervalMs: REFRESH_INTERVAL_MS,
+  });
 
   const onlineCount = devices.filter((d) => d.status === 'online').length;
 
@@ -278,10 +266,17 @@ export function Devices() {
   /**
    * 手动触发刷新：递增 tick，下一次 effect 会重新拉取
    */
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手动刷新应立即对齐设备列表与 SSH 配置。
+   *
+   * Code Logic（这个函数做什么）:
+   *   置 loading，runDevicesNow + fetchSshConfig。
+   */
   const handleRefresh = () => {
     setLoading(true);
     setSshLoading(true);
-    setTick((prev) => prev + 1);
+    void runDevicesNow();
     void fetchSshConfig();
   };
 

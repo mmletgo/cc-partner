@@ -27,6 +27,10 @@
   },
   "permissionCard": {
     "granted": "Granted",
-    "goSettings": "Open Settings"
-  }
+    "goSettings": "Open Settings",
+    "requesting": "Requesting…"
+  },
+  "recheck": "Recheck",
+  "checkFailed": "Failed to check permissions: {{error}}",
+  "unknownError": "Unknown error"
 }

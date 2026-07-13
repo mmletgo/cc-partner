@@ -95,5 +95,6 @@
   "Thu": "四",
   "Fri": "五",
   "Sat": "六",
-  "Sun": "日"
+  "Sun": "日",
+  "staleRefreshFailed": "健康数据刷新失败，已保留上次结果"
 }
