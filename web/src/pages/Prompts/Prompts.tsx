@@ -5,6 +5,7 @@
  *   Prompt 是 cc-partner 的核心资产之一：用户在日常工作中沉淀的指令模板。
  *   该页面是 /prompts 路由下的主视图，集中提供：搜索 / 标签筛选 / 同步 / 新建 / 卡片浏览 / inline 编辑 / 删除。
  *   同时让用户一眼看到自己收藏与最近使用的 Prompt。
+ *   新建 / 更新 / 删除采用乐观更新，但 API 失败必须回滚并允许原地重试，不得静默保留伪成功状态。
  *
  * Code Logic（这个页面做什么）:
  *   - 顶部 page header + 副标题描述
@@ -12,7 +13,8 @@
  *   - Prompt 网格：调用 promptsApi.list() 拉取，按搜索关键词 + 激活标签本地过滤
  *   - 点击卡片进入 inline 编辑模式（input + textarea + save/cancel）
  *   - 点击删除时弹 confirm 二次确认
- *   - 失败时显示错误提示，空数据时显示引导文案
+ *   - mutation 走 applyOptimistic / commit / rollback 纯函数；失败恢复草稿并展示错误横幅
+ *   - 同一实体 pending 时禁用冲突编辑/删除；标签从 prompts 派生
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -25,19 +27,42 @@ import type { Prompt } from '@/lib/types';
 import { PlusIcon, SearchIcon, SyncIcon, TrashIcon, XIcon, CheckIcon, EditIcon } from '@/lib/icons';
 import { debounce } from '@/lib/format';
 import styles from './Prompts.module.css';
+import {
+  applyOptimisticPromptMutation,
+  commitPromptMutation,
+  deriveTagsFromPrompts,
+  promptMutationEntityId,
+  rollbackPromptMutation,
+  type PromptDraft,
+  type PromptMutation,
+} from './promptMutations';
 
-/** 编辑卡片用的草稿状态 */
-interface DraftPrompt {
+/** 编辑卡片用的草稿状态（含本地 id 供表单 key） */
+interface DraftPrompt extends PromptDraft {
   id: string;
-  title: string;
-  content: string;
-  tags: string[];
 }
 
 type LoadState = 'loading' | 'success' | 'error';
 
 /**
+ * Business Logic（为什么需要这个函数）:
+ *   API 错误需要可读文案；非 Error 对象不能直接展示。
+ *
+ * Code Logic（这个函数做什么）:
+ *   提取 Error.message，否则回退到 fallback。
+ */
+function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof Error && err.message ? err.message : fallback;
+}
+
+/**
  * Prompts 页面主组件
+ *
+ * Business Logic（为什么需要这个组件）:
+ *   用户需要在一个页面完成 Prompt 的浏览、筛选、同步与 CRUD。
+ *
+ * Code Logic（这个组件做什么）:
+ *   管理列表 / 草稿 / pending / failedMutation 状态，把 API 调用包在事务式 mutation 流程中。
  */
 export function Prompts() {
   const { t } = useTranslation(['prompts', 'common']);
@@ -51,7 +76,6 @@ export function Prompts() {
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [activeTag, setActiveTag] = useState<string>('all');
-  const [allTags, setAllTags] = useState<string[]>([]);
 
   // ── 编辑 / 新建 / 删除 ──
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -59,21 +83,39 @@ export function Prompts() {
   const [creatingNew, setCreatingNew] = useState(false);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
+  // ── 事务式 mutation 状态 ──
+  const [pendingEntityIds, setPendingEntityIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [failedMutation, setFailedMutation] = useState<PromptMutation | null>(null);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
   /**
-   * 拉取 Prompt 列表；API 成功使用真实数据，失败则保留现有数据或置空并设置错误状态
+   * Business Logic（为什么需要这个函数）:
+   *   标签 chips 必须以当前列表为真源，避免 tags API 与乐观列表分叉。
+   *
+   * Code Logic（这个函数做什么）:
+   *   从 prompts 派生排序后的标签数组。
+   */
+  const allTags = useMemo(() => deriveTagsFromPrompts(prompts), [prompts]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   页面初次与同步后需要权威列表。
+   *
+   * Code Logic（这个函数做什么）:
+   *   拉取 list；成功写入 prompts；失败保留现有数据并设置错误状态。
+   *   标签不再依赖 listTags，统一从 prompts 派生。
    */
   const loadPrompts = useCallback(async () => {
     try {
-      const [data, tags] = await Promise.all([
-        promptsApi.list(),
-        promptsApi.listTags(),
-      ]);
+      const data = await promptsApi.list();
       setPrompts(Array.isArray(data) ? data : []);
-      setAllTags(Array.isArray(tags) ? tags : []);
       setLoadState('success');
       setLoadError(null);
     } catch (err) {
-      setPrompts((prev) => prev);
       setLoadState('error');
       setLoadError(err instanceof Error ? err.message : t('prompts:loadFailedGeneric'));
     }
@@ -108,7 +150,7 @@ export function Prompts() {
     const lower = search.trim().toLowerCase();
     return prompts.filter((p) => {
       if (activeTag !== 'all') {
-        const promptTags = p.tags ?? (p.tag ? [p.tag] : []);
+        const promptTags = p.tags && p.tags.length > 0 ? p.tags : p.tag ? [p.tag] : [];
         if (!promptTags.includes(activeTag)) return false;
       }
       if (!lower) return true;
@@ -123,25 +165,158 @@ export function Prompts() {
   const tagCounts = useMemo(() => {
     const counts: Record<string, number> = { all: prompts.length };
     for (const p of prompts) {
-      const promptTags = p.tags ?? (p.tag ? [p.tag] : []);
-      for (const t of promptTags) {
-        counts[t] = (counts[t] || 0) + 1;
+      const promptTags = p.tags && p.tags.length > 0 ? p.tags : p.tag ? [p.tag] : [];
+      for (const tag of promptTags) {
+        counts[tag] = (counts[tag] || 0) + 1;
       }
     }
     return counts;
   }, [prompts]);
 
-  // ── 进入编辑模式 ──
-  const startEdit = useCallback((p: Prompt) => {
-    setCreatingNew(false);
-    setEditingId(p.id);
-    setDraft({
-      id: p.id,
-      title: p.title,
-      content: p.content,
-      tags: p.tags ?? (p.tag ? [p.tag] : []),
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   pending 集合需要可增删而不丢失其他实体。
+   *
+   * Code Logic（这个函数做什么）:
+   *   返回加入 entityId 后的新 Set。
+   */
+  const markPending = useCallback((entityId: string) => {
+    setPendingEntityIds((prev) => {
+      const next = new Set(prev);
+      next.add(entityId);
+      return next;
     });
   }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   mutation 结束后释放该实体，允许再次编辑/删除。
+   *
+   * Code Logic（这个函数做什么）:
+   *   返回移除 entityId 后的新 Set。
+   */
+  const clearPending = useCallback((entityId: string) => {
+    setPendingEntityIds((prev) => {
+      if (!prev.has(entityId)) return prev;
+      const next = new Set(prev);
+      next.delete(entityId);
+      return next;
+    });
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   失败后需要恢复用户正在编辑的草稿，而不是丢失输入。
+   *
+   * Code Logic（这个函数做什么）:
+   *   根据 mutation 种类恢复 creatingNew / editingId / draft。
+   */
+  const restoreDraftFromMutation = useCallback((mutation: PromptMutation) => {
+    if (mutation.kind === 'create') {
+      setCreatingNew(true);
+      setEditingId(null);
+      setDraft({
+        id: mutation.optimisticId,
+        title: mutation.draft.title,
+        content: mutation.draft.content,
+        tags: [...mutation.draft.tags],
+      });
+      return;
+    }
+    if (mutation.kind === 'update') {
+      setCreatingNew(false);
+      setEditingId(mutation.id);
+      setDraft({
+        id: mutation.id,
+        title: mutation.draft.title,
+        content: mutation.draft.content,
+        tags: [...mutation.draft.tags],
+      });
+    }
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   create/update/delete 共用同一套乐观 apply → API → commit/rollback 流程。
+   *
+   * Code Logic（这个函数做什么）:
+   *   标记 pending，应用乐观变更，调用 run，成功 commit 并清除错误；失败 rollback、
+   *   保存 failedMutation、恢复草稿（create/update）、展示错误。
+   */
+  const runMutation = useCallback(
+    async (
+      mutation: PromptMutation,
+      run: () => Promise<Prompt | void>,
+    ): Promise<boolean> => {
+      const entityId = promptMutationEntityId(mutation);
+      if (pendingEntityIds.has(entityId)) {
+        return false;
+      }
+
+      markPending(entityId);
+      setFailedMutation(null);
+      setMutationError(null);
+      setPrompts((prev) => applyOptimisticPromptMutation(prev, mutation));
+
+      // 关闭编辑态，等结果
+      setEditingId(null);
+      setDraft(null);
+      setCreatingNew(false);
+      setPendingDeleteId(null);
+
+      try {
+        const server = await run();
+        setPrompts((prev) =>
+          commitPromptMutation(
+            prev,
+            mutation,
+            server && typeof server === 'object' ? server : undefined,
+          ),
+        );
+        setFailedMutation(null);
+        setMutationError(null);
+        return true;
+      } catch (err) {
+        setPrompts((prev) => rollbackPromptMutation(prev, mutation));
+        setFailedMutation(mutation);
+        setMutationError(
+          errorMessage(
+            err,
+            mutation.kind === 'create'
+              ? t('prompts:createFailedGeneric')
+              : mutation.kind === 'update'
+                ? t('prompts:updateFailedGeneric')
+                : t('prompts:deleteFailedGeneric'),
+          ),
+        );
+        if (mutation.kind === 'create' || mutation.kind === 'update') {
+          restoreDraftFromMutation(mutation);
+        }
+        return false;
+      } finally {
+        clearPending(entityId);
+      }
+    },
+    [pendingEntityIds, markPending, clearPending, restoreDraftFromMutation, t],
+  );
+
+  // ── 进入编辑模式 ──
+  const startEdit = useCallback(
+    (p: Prompt) => {
+      if (pendingEntityIds.has(p.id)) return;
+      setCreatingNew(false);
+      setEditingId(p.id);
+      setDraft({
+        id: p.id,
+        title: p.title,
+        content: p.content,
+        tags: p.tags && p.tags.length > 0 ? p.tags : p.tag ? [p.tag] : [],
+      });
+      setFailedMutation(null);
+      setMutationError(null);
+    },
+    [pendingEntityIds],
+  );
 
   const cancelEdit = useCallback(() => {
     setEditingId(null);
@@ -158,73 +333,151 @@ export function Prompts() {
       const content = draft.content.trim();
       if (!content) return;
 
+      const draftPayload: PromptDraft = {
+        title,
+        content,
+        tags: [...draft.tags],
+      };
+
       if (creatingNew) {
-        // 本地乐观更新：先展示，API 成功后替换为服务端返回的真实记录
-        const newPrompt: Prompt = {
-          id: `local-${Date.now()}`,
-          title,
-          content,
-          tags: draft.tags,
-          updatedAt: new Date().toISOString(),
+        const optimisticId = draft.id.startsWith('new-')
+          ? `local-${Date.now()}`
+          : draft.id;
+        const mutation: PromptMutation = {
+          kind: 'create',
+          optimisticId,
+          draft: draftPayload,
         };
-        setPrompts((prev) => [newPrompt, ...prev]);
-        try {
-          const created = await promptsApi.create({ title, content, tags: draft.tags });
-          if (created) {
-            setPrompts((prev) => prev.map((p) => (p.id === newPrompt.id ? created : p)));
-          }
-        } catch {
-          // 静默失败：保留本地新建
-        }
-      } else {
-        // 更新
-        setPrompts((prev) =>
-          prev.map((p) =>
-            p.id === draft.id
-              ? { ...p, title, content, tags: draft.tags, updatedAt: new Date().toISOString() }
-              : p,
-          ),
+        await runMutation(mutation, () =>
+          promptsApi.create({
+            title: draftPayload.title,
+            content: draftPayload.content,
+            tags: draftPayload.tags,
+          }),
         );
-        try {
-          await promptsApi.update(draft.id, { title, content, tags: draft.tags });
-        } catch {
-          // 静默失败：保留本地更新
-        }
+        return;
       }
-      cancelEdit();
+
+      const before = prompts.find((p) => p.id === draft.id);
+      if (!before) return;
+      if (pendingEntityIds.has(draft.id)) return;
+
+      const mutation: PromptMutation = {
+        kind: 'update',
+        id: draft.id,
+        before,
+        draft: draftPayload,
+      };
+      await runMutation(mutation, () =>
+        promptsApi.update(draft.id, {
+          title: draftPayload.title,
+          content: draftPayload.content,
+          tags: draftPayload.tags,
+        }),
+      );
     },
-    [draft, creatingNew, cancelEdit],
+    [draft, creatingNew, prompts, pendingEntityIds, runMutation],
   );
 
   // ── 删除确认 ──
   const confirmDelete = useCallback(async () => {
     if (!pendingDeleteId) return;
     const id = pendingDeleteId;
-    setPrompts((prev) => prev.filter((p) => p.id !== id));
-    setPendingDeleteId(null);
-    try {
-      await promptsApi.remove(id);
-    } catch {
-      // 静默失败
+    if (pendingEntityIds.has(id)) return;
+    const index = prompts.findIndex((p) => p.id === id);
+    if (index < 0) {
+      setPendingDeleteId(null);
+      return;
     }
-  }, [pendingDeleteId]);
+    const before = prompts[index];
+    const mutation: PromptMutation = {
+      kind: 'delete',
+      id,
+      before,
+      index,
+    };
+    await runMutation(mutation, async () => {
+      await promptsApi.remove(id);
+    });
+  }, [pendingDeleteId, pendingEntityIds, prompts, runMutation]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   失败后用户应能用同一 payload 原地重试，无需重新填写。
+   *
+   * Code Logic（这个函数做什么）:
+   *   读取 failedMutation，按 kind 重放 create/update/delete API。
+   */
+  const retryFailedMutation = useCallback(async () => {
+    if (!failedMutation) return;
+    const mutation = failedMutation;
+    if (mutation.kind === 'create') {
+      await runMutation(mutation, () =>
+        promptsApi.create({
+          title: mutation.draft.title,
+          content: mutation.draft.content,
+          tags: mutation.draft.tags,
+        }),
+      );
+      return;
+    }
+    if (mutation.kind === 'update') {
+      await runMutation(mutation, () =>
+        promptsApi.update(mutation.id, {
+          title: mutation.draft.title,
+          content: mutation.draft.content,
+          tags: mutation.draft.tags,
+        }),
+      );
+      return;
+    }
+    await runMutation(mutation, async () => {
+      await promptsApi.remove(mutation.id);
+    });
+  }, [failedMutation, runMutation]);
 
   // ── 同步 ──
   const handleSync = useCallback(async () => {
+    if (syncing) return;
+    setSyncing(true);
+    setSyncError(null);
     try {
       await promptsApi.sync();
       await loadPrompts();
-    } catch {
-      // 静默失败
+      setSyncError(null);
+    } catch (err) {
+      setSyncError(errorMessage(err, t('prompts:syncFailedGeneric')));
+    } finally {
+      setSyncing(false);
     }
-  }, [loadPrompts]);
+  }, [loadPrompts, syncing, t]);
 
   // ── 新建 ──
   const handleCreate = useCallback(() => {
     setEditingId(null);
     setCreatingNew(true);
     setDraft({ id: `new-${Date.now()}`, title: '', content: '', tags: [] });
+    setFailedMutation(null);
+    setMutationError(null);
   }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   错误横幅需要区分 create/update/delete 文案。
+   *
+   * Code Logic（这个函数做什么）:
+   *   根据 failedMutation.kind 与 mutationError 生成展示文案。
+   */
+  const mutationErrorText = useMemo(() => {
+    if (!mutationError || !failedMutation) return null;
+    if (failedMutation.kind === 'create') {
+      return t('prompts:createFailed', { error: mutationError });
+    }
+    if (failedMutation.kind === 'update') {
+      return t('prompts:updateFailed', { error: mutationError });
+    }
+    return t('prompts:deleteFailed', { error: mutationError });
+  }, [mutationError, failedMutation, t]);
 
   // ── 渲染 ──
   return (
@@ -251,7 +504,16 @@ export function Prompts() {
             />
           </div>
           <div className={styles.toolbarActions}>
-            <Button variant="secondary" size="sm" icon={<SyncIcon />} onClick={handleSync}>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<SyncIcon />}
+              onClick={() => {
+                void handleSync();
+              }}
+              loading={syncing}
+              disabled={syncing}
+            >
               {t('prompts:sync')}
             </Button>
             <Button variant="primary" size="sm" icon={<PlusIcon />} onClick={handleCreate}>
@@ -266,30 +528,62 @@ export function Prompts() {
             active={activeTag === 'all'}
             onClick={() => setActiveTag('all')}
           />
-          {allTags.map((t) => (
+          {allTags.map((tag) => (
             <FilterChip
-              key={t}
-              label={t}
-              count={tagCounts[t] ?? 0}
-              active={activeTag === t}
-              onClick={() => setActiveTag(t)}
+              key={tag}
+              label={tag}
+              count={tagCounts[tag] ?? 0}
+              active={activeTag === tag}
+              onClick={() => setActiveTag(tag)}
             />
           ))}
         </div>
       </div>
 
-      {/* 错误提示条 */}
+      {/* 加载错误提示条 */}
       {loadState === 'error' ? (
         <p className={styles.notice} role="status">
           {loadError ? t('prompts:loadFailed', { error: loadError }) : t('prompts:loadFailedGeneric')}
         </p>
       ) : null}
 
+      {/* mutation 失败 + 重试 */}
+      {mutationErrorText && failedMutation ? (
+        <div className={styles.noticeBanner} data-testid="prompt-mutation-error" role="alert">
+          <p className={styles.noticeText}>{mutationErrorText}</p>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              void retryFailedMutation();
+            }}
+          >
+            {t('common:action.retry')}
+          </Button>
+        </div>
+      ) : null}
+
+      {/* 同步失败 */}
+      {syncError ? (
+        <div className={styles.noticeBanner} data-testid="prompt-sync-error" role="alert">
+          <p className={styles.noticeText}>{t('prompts:syncFailed', { error: syncError })}</p>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              void handleSync();
+            }}
+          >
+            {t('common:action.retry')}
+          </Button>
+        </div>
+      ) : null}
+
       {/* 网格区 */}
       <section className={styles.gridSection}>
         {loadState === 'loading' && prompts.length === 0 ? (
           <GridSkeleton />
-        ) : filtered.length === 0 ? (
+        ) : filtered.length === 0 && !creatingNew ? (
           <div className={styles.empty}>
             {prompts.length === 0 ? (
               <>
@@ -312,7 +606,9 @@ export function Prompts() {
                   draft={draft}
                   isNew
                   onChange={setDraft}
-                  onSave={saveDraft}
+                  onSave={(event) => {
+                    void saveDraft(event);
+                  }}
                   onCancel={cancelEdit}
                 />
               </li>
@@ -325,7 +621,9 @@ export function Prompts() {
                     draft={draft}
                     isNew={false}
                     onChange={setDraft}
-                    onSave={saveDraft}
+                    onSave={(event) => {
+                      void saveDraft(event);
+                    }}
                     onCancel={cancelEdit}
                   />
                 </li>
@@ -333,8 +631,12 @@ export function Prompts() {
                 <li key={p.id}>
                   <PromptCardView
                     prompt={p}
+                    actionsDisabled={pendingEntityIds.has(p.id)}
                     onEdit={() => startEdit(p)}
-                    onDelete={() => setPendingDeleteId(p.id)}
+                    onDelete={() => {
+                      if (pendingEntityIds.has(p.id)) return;
+                      setPendingDeleteId(p.id);
+                    }}
                   />
                 </li>
               ),
@@ -355,7 +657,14 @@ export function Prompts() {
               <Button variant="secondary" size="sm" onClick={() => setPendingDeleteId(null)}>
                 {t('common:action.cancel')}
               </Button>
-              <Button variant="danger" size="sm" icon={<TrashIcon />} onClick={confirmDelete}>
+              <Button
+                variant="danger"
+                size="sm"
+                icon={<TrashIcon />}
+                onClick={() => {
+                  void confirmDelete();
+                }}
+              >
                 {t('common:action.delete')}
               </Button>
             </div>
@@ -370,7 +679,13 @@ export function Prompts() {
 // 子组件
 // ────────────────────────────────────────────────────────────────
 
-/** 标签筛选 chip */
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   标签筛选需要可点击 chip 与计数角标。
+ *
+ * Code Logic（这个组件做什么）:
+ *   渲染带 aria-pressed 的筛选按钮。
+ */
 function FilterChip({
   label,
   count,
@@ -395,19 +710,31 @@ function FilterChip({
   );
 }
 
-/** 展示态 Prompt 卡片 */
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   展示态卡片提供编辑/删除入口；pending 时必须禁用冲突动作。
+ *
+ * Code Logic（这个组件做什么）:
+ *   渲染标题/内容/标签与动作按钮；actionsDisabled 时禁用 edit/delete。
+ */
 function PromptCardView({
   prompt,
+  actionsDisabled,
   onEdit,
   onDelete,
 }: {
   prompt: Prompt;
+  actionsDisabled: boolean;
   onEdit: () => void;
   onDelete: () => void;
 }) {
   const { t } = useTranslation(['prompts', 'common']);
   return (
-    <Card variant="elevated" className={styles.promptCard}>
+    <Card
+      variant="elevated"
+      className={styles.promptCard}
+      data-testid={`prompt-card-${prompt.id}`}
+    >
       <Card.Header className={styles.promptHeader}>
         <h3 className={styles.promptTitle}>{prompt.title}</h3>
         <div className={styles.promptActions}>
@@ -416,6 +743,7 @@ function PromptCardView({
             size="sm"
             icon={<EditIcon />}
             onClick={onEdit}
+            disabled={actionsDisabled}
             aria-label={t('common:action.edit')}
             title={t('common:action.edit')}
           />
@@ -424,6 +752,7 @@ function PromptCardView({
             size="sm"
             icon={<TrashIcon />}
             onClick={onDelete}
+            disabled={actionsDisabled}
             aria-label={t('common:action.delete')}
             title={t('common:action.delete')}
           />
@@ -435,15 +764,29 @@ function PromptCardView({
       <Card.Footer className={styles.promptFoot}>
         {prompt.tags && prompt.tags.length > 0 ? (
           <div className={styles.tagList}>
-            {prompt.tags.map((t) => <Tag key={t} size="sm">{t}</Tag>)}
+            {prompt.tags.map((tag) => (
+              <Tag key={tag} size="sm">
+                {tag}
+              </Tag>
+            ))}
           </div>
-        ) : prompt.tag ? <Tag size="sm">{prompt.tag}</Tag> : <span />}
+        ) : prompt.tag ? (
+          <Tag size="sm">{prompt.tag}</Tag>
+        ) : (
+          <span />
+        )}
       </Card.Footer>
     </Card>
   );
 }
 
-/** 编辑 / 新建态卡片 */
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   新建与编辑共用同一表单卡片。
+ *
+ * Code Logic（这个组件做什么）:
+ *   渲染 title/content/tags 表单与保存/取消按钮。
+ */
 function EditPromptCard({
   draft,
   isNew,
@@ -489,13 +832,7 @@ function EditPromptCard({
           </div>
         </Card.Body>
         <Card.Footer className={styles.promptFoot}>
-          <Button
-            variant="ghost"
-            size="sm"
-            icon={<XIcon />}
-            onClick={onCancel}
-            type="button"
-          >
+          <Button variant="ghost" size="sm" icon={<XIcon />} onClick={onCancel} type="button">
             {t('common:action.cancel')}
           </Button>
           <Button
@@ -513,7 +850,13 @@ function EditPromptCard({
   );
 }
 
-/** 网格骨架屏 */
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   首屏加载时避免空白闪烁。
+ *
+ * Code Logic（这个组件做什么）:
+ *   渲染 6 个骨架卡片。
+ */
 function GridSkeleton() {
   const { t } = useTranslation(['prompts']);
   return (
