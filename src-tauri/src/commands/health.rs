@@ -7,7 +7,7 @@
 //!     喝水提醒与全屏遮罩随健康监测固定启用，旧配置中的关闭值会在命令边界归一。
 //!
 //! Code Logic: 通过 `State<'_, AppState>` 注入共享状态；DTO 一律 `#[serde(rename_all="camelCase")]`
-//!     对齐前端 types。配置类命令直接读写 `state.config`（RwLock）并 `cfg.save()` 落盘；
+//!     对齐前端 types。配置类命令经 `ConfigRuntime` 事务路径更新；
 //!     运行时类命令（暂停/贪睡/跳过）操作 `HealthRuntime` 的原子标记与状态机。
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,7 @@ use std::sync::atomic::Ordering;
 use tauri::State;
 
 use crate::config::HealthConfig;
+use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
 use crate::error::AppError;
 use crate::health::state::MachineState;
 use crate::state::AppState;
@@ -41,7 +42,7 @@ fn local_start_of_day_ts() -> i64 {
 ///
 /// Business Logic: 前端设置页用一份扁平结构展示/编辑全部健康配置。
 /// Code Logic: 字段与 `HealthConfig` 基本对应，`From<HealthConfig>` 完成转换并把固定启用字段归一为 true。
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthConfigDto {
     /// 久坐监测总开关。
@@ -208,21 +209,35 @@ pub async fn get_health_status(state: State<'_, AppState>) -> Result<HealthStatu
     })
 }
 
+/// 在 ConfigRuntime 上切换 health.enabled。
+///
+/// Business Logic（为什么需要这个函数）:
+///     启用/停用监测必须事务落盘；抽出 helper 便于 save 失败回滚单测。
+///
+/// Code Logic（这个函数做什么）:
+///     事务更新 candidate.health.enabled，返回提交后的 HealthConfigDto。
+pub async fn toggle_health_enabled_for_runtime(
+    runtime: &ConfigRuntime,
+    enabled: bool,
+) -> Result<HealthConfigDto, AppError> {
+    let (_committed, dto) = update_config_transactionally(runtime, |cfg| {
+        cfg.health.enabled = enabled;
+        Ok(cfg.health.clone().into())
+    })
+    .await?;
+    Ok(dto)
+}
+
 /// 切换监测总开关（写 config.health.enabled 并落盘）。
 ///
 /// Business Logic: 前端「启用/停用久坐监测」开关；关闭后 daemon 仅写库不触发提醒。
-/// Code Logic: 拿 config 写锁改字段后 `cfg.save()`，返回更新后的配置 DTO。
+/// Code Logic: 委托 ConfigRuntime 事务 helper，返回更新后的配置 DTO。
 #[tauri::command]
 pub async fn toggle_health_enabled(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> Result<HealthConfigDto, AppError> {
-    {
-        let mut cfg = state.config.write().unwrap();
-        cfg.health.enabled = enabled;
-        cfg.save()?;
-    }
-    Ok(state.config.read().unwrap().health.clone().into())
+    toggle_health_enabled_for_runtime(&state.config_runtime, enabled).await
 }
 
 /// 切换暂停标记（运行时原子标记，不落盘）。
@@ -260,17 +275,18 @@ pub async fn skip_reminder(state: State<'_, AppState>) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 更新健康提醒配置（整体覆盖写 config.health 并落盘）。
+/// 在 ConfigRuntime 上整体覆盖 health 配置。
 ///
-/// Business Logic: 前端设置页「保存」；把 DTO 写回磁盘配置并持久化。
-/// Code Logic: 拿 config 写锁逐字段覆盖 + 固定启用字段归一为 true + `cfg.save()`，返回更新后的配置 DTO。
-#[tauri::command]
-pub async fn update_health_config(
-    state: State<'_, AppState>,
+/// Business Logic（为什么需要这个函数）:
+///     设置页保存健康配置必须失败回滚；helper 便于单测与命令层共用。
+///
+/// Code Logic（这个函数做什么）:
+///     事务内逐字段覆盖 + 固定启用字段归一为 true，返回提交后的 DTO。
+pub async fn update_health_config_for_runtime(
+    runtime: &ConfigRuntime,
     config: HealthConfigDto,
 ) -> Result<HealthConfigDto, AppError> {
-    {
-        let mut cfg = state.config.write().unwrap();
+    let (_committed, dto) = update_config_transactionally(runtime, |cfg| {
         cfg.health.enabled = config.enabled;
         cfg.health.work_window_seconds = config.work_window_seconds;
         cfg.health.break_seconds = config.break_seconds;
@@ -282,9 +298,22 @@ pub async fn update_health_config(
         cfg.health.water_enabled = true;
         cfg.health.water_interval_seconds = config.water_interval_seconds;
         cfg.health.reminder_fullscreen = true;
-        cfg.save()?;
-    }
-    Ok(state.config.read().unwrap().health.clone().into())
+        Ok(cfg.health.clone().into())
+    })
+    .await?;
+    Ok(dto)
+}
+
+/// 更新健康提醒配置（整体覆盖写 config.health 并落盘）。
+///
+/// Business Logic: 前端设置页「保存」；把 DTO 写回磁盘配置并持久化。
+/// Code Logic: 委托 ConfigRuntime 事务 helper，返回更新后的配置 DTO。
+#[tauri::command]
+pub async fn update_health_config(
+    state: State<'_, AppState>,
+    config: HealthConfigDto,
+) -> Result<HealthConfigDto, AppError> {
+    update_health_config_for_runtime(&state.config_runtime, config).await
 }
 
 /// 查询 [since_ts, +∞) 区间内的活跃/闲置分钟数。
@@ -535,5 +564,63 @@ mod habit_stats_tests {
         assert_eq!((Some(0i64)).unwrap_or(7).clamp(1, 31), 1);
         assert_eq!((Some(100i64)).unwrap_or(7).clamp(1, 31), 31);
         assert_eq!((Some(-5i64)).unwrap_or(7).clamp(1, 31), 1);
+    }
+}
+
+
+#[cfg(test)]
+mod config_writer_tests {
+    use super::*;
+    use crate::config::{
+        AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+    };
+    use crate::config_runtime::ConfigRuntime;
+    use crate::config_store::MemoryConfigStore;
+    use std::sync::Arc;
+
+    fn sample_config() -> AppConfig {
+        AppConfig {
+            device_id: "dev-health-1".into(),
+            device_name: "health-device".into(),
+            http_port: 0,
+            receive_dir: "/tmp/recv".into(),
+            db_path: "/tmp/db.db".into(),
+            screenshot_hotkey: "<ctrl>+s".into(),
+            prompt_optimizer_hotkey: "<ctrl>".into(),
+            prompt_optimizer_fill_language: "zh".into(),
+            cloud_sync_repo_url: None,
+            cloud_sync_enabled: false,
+            cloud_sync_auto: false,
+            cloud_sync_interval_secs: 600,
+            cloud_sync_branch: None,
+            health: HealthConfig {
+                enabled: true,
+                ..HealthConfig::default()
+            },
+            orchestrator: OrchestratorAutomationConfig::default(),
+            github_trending: GithubTrendingConfig::default(),
+        }
+    }
+
+    /// 验证 health 配置 save 失败时回滚。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     切换监测开关失败时，前端不得看到半提交的 enabled。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     fail_next_save 后 toggle enabled=false，断言 Err 且 snapshot 仍 true。
+    #[tokio::test]
+    async fn save_failure_rolls_back() {
+        let initial = sample_config();
+        let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
+        store.fail_next_save();
+        let runtime = ConfigRuntime::new(initial, store.clone());
+
+        let err = toggle_health_enabled_for_runtime(&runtime, false)
+            .await
+            .expect_err("should fail");
+        assert!(err.to_string().contains("注入故障"));
+        assert!(runtime.snapshot().unwrap().health.enabled);
+        assert!(store.snapshot().unwrap().health.enabled);
     }
 }

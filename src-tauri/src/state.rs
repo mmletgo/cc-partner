@@ -9,12 +9,15 @@
 //! Code Logic（这个模块做什么）:
 //!     用 `Arc` 内部可变（config 用 RwLock 因可写；device_id 只读故 String 足够），
 //!     整体 Clone 廉价（Arc 引用计数），满足 Tauri manage/State 与 axum State 的要求。
+//!     `config` 与 `config_runtime.value` 共享同一 `Arc<RwLock<AppConfig>>`；生产 writer 走
+//!     `config_runtime` 事务路径，读路径可继续用廉价 `config` 读锁。
 //!     devices 用 RwLock<HashMap>（发现写入 / 命令读取并发）；
 //!     actual_http_port 用 AtomicU16（启动后高频只读，无锁更高效）；
 //!     discovery 句柄用 Mutex<Option<...>>（仅启动/关闭时写）。
 
 use crate::backend::ui::{serialize_event_payload, BackendAsset, BackendUi};
 use crate::config::AppConfig;
+use crate::config_runtime::ConfigRuntime;
 use crate::models::device::Device;
 use crate::net::peer_client::PeerClient;
 use crate::orchestrator::repo::OrchestratorRepo;
@@ -35,8 +38,10 @@ use std::sync::{Arc, Mutex, RwLock};
 /// 应用全局共享状态。Clone 仅增加 Arc 引用计数。
 #[derive(Clone)]
 pub struct AppState {
-    /// 配置（前端可写 deviceName/receiveDir/screenshotHotkey，故 RwLock）
+    /// 配置读路径（与 `config_runtime.value` 共享同一 Arc，禁止旁路 save）
     pub config: Arc<RwLock<AppConfig>>,
+    /// 配置串行事务运行时（生产 writer 唯一入口）
+    pub config_runtime: Arc<ConfigRuntime>,
     /// SQLite 连接池（M3+ axum server 共享此 pool；M1 仅 prompt_repo 通过独立 clone 使用）
     #[allow(dead_code)]
     pub db: SqlitePool,

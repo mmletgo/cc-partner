@@ -3845,9 +3845,15 @@ mod tests {
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
         };
+        let store = Arc::new(crate::config_store::MemoryConfigStore::with_config(
+            config.clone(),
+        ));
+        let config_runtime = Arc::new(crate::config_runtime::ConfigRuntime::new(config, store));
+        let config = config_runtime.shared_value();
 
         AppState {
-            config: Arc::new(RwLock::new(config)),
+            config,
+            config_runtime,
             db: pool.clone(),
             prompt_repo: Arc::new(PromptRepo::new(pool.clone())),
             transfer_repo: Arc::new(TransferRepo::new(pool.clone())),

@@ -8,6 +8,7 @@
 //!     提供三条 Tauri invoke：读取当前配置、读取默认配置、应用 patch 并保存 config.json；
 //!     具体校验和归一化委托 `orchestrator::config`。
 
+use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
 use crate::error::AppError;
 use crate::orchestrator::config::{
     apply_orchestrator_config_patch, default_orchestrator_automation_config,
@@ -63,26 +64,37 @@ pub async fn get_default_orchestrator_config() -> Result<OrchestratorAutomationC
     ))
 }
 
+/// 在 ConfigRuntime 上应用 Orchestrator 自动化 patch。
+///
+/// Business Logic（为什么需要这个函数）:
+///     自动化 tab 保存必须事务落盘；抽出 helper 便于命令与 save 失败回滚单测。
+///
+/// Code Logic（这个函数做什么）:
+///     经 `update_config_transactionally` 调用 patch helper，返回提交后的 DTO。
+pub async fn update_orchestrator_config_for_runtime(
+    runtime: &ConfigRuntime,
+    patch: OrchestratorAutomationConfigPatch,
+) -> Result<OrchestratorAutomationConfigDto, AppError> {
+    let (_committed, dto) = update_config_transactionally(runtime, |cfg| {
+        apply_orchestrator_patch_to_app_config(cfg, patch)
+    })
+    .await?;
+    Ok(dto)
+}
+
 /// 更新 Orchestrator 自动化全局配置。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户保存设置页自动化 tab 后，需要把 patch 归一化、校验并持久化到本设备 config.json。
 ///
 /// Code Logic（这个函数做什么）:
-///     在写锁内 clone 当前 orchestrator、应用 patch、替换字段并同步 save；全程不跨 await 持锁。
+///     委托 ConfigRuntime 事务 helper 应用 patch；失败不改内存与文件。
 #[tauri::command]
 pub async fn update_orchestrator_config(
     state: State<'_, AppState>,
     patch: OrchestratorAutomationConfigPatch,
 ) -> Result<OrchestratorAutomationConfigDto, AppError> {
-    let dto = {
-        let mut cfg = state.config.write().unwrap();
-        let dto = apply_orchestrator_patch_to_app_config(&mut cfg, patch)?;
-        cfg.save()?;
-        dto
-    };
-
-    Ok(dto)
+    update_orchestrator_config_for_runtime(&state.config_runtime, patch).await
 }
 
 #[cfg(test)]
@@ -231,5 +243,35 @@ mod tests {
             original.verification_commands
         );
         assert_eq!(cfg.orchestrator.auto_commit, original.auto_commit);
+    }
+
+    /// 验证 orchestrator 配置 save 失败时回滚。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     自动化 tab 保存失败时不得半提交 enabled。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     fail_next_save 后 patch enabled=true，断言 Err 且 snapshot 仍 false。
+    #[tokio::test]
+    async fn save_failure_rolls_back() {
+        use crate::config_runtime::ConfigRuntime;
+        use crate::config_store::MemoryConfigStore;
+        use std::sync::Arc;
+
+        let initial = test_app_config(OrchestratorAutomationConfig::default());
+        let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
+        store.fail_next_save();
+        let runtime = ConfigRuntime::new(initial, store.clone());
+        let patch = OrchestratorAutomationConfigPatch {
+            enabled: Some(true),
+            ..Default::default()
+        };
+
+        let err = super::update_orchestrator_config_for_runtime(&runtime, patch)
+            .await
+            .expect_err("should fail");
+        assert!(err.to_string().contains("注入故障"));
+        assert!(!runtime.snapshot().unwrap().orchestrator.enabled);
+        assert!(!store.snapshot().unwrap().orchestrator.enabled);
     }
 }

@@ -10,6 +10,8 @@
 use crate::backend::control;
 use crate::backend::ui::BackendUi;
 use crate::config::AppConfig;
+use crate::config_runtime::ConfigRuntime;
+use crate::config_store::FsConfigStore;
 use crate::error::AppError;
 use crate::net::{discovery, http_server, peer_client::PeerClient};
 use crate::orchestrator::repo::OrchestratorRepo;
@@ -358,12 +360,25 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
 ///     GUI 与 headless 后端都需要相同的配置、数据库仓储、Workbench registry、健康运行时和 Orchestrator telemetry。
 ///
 /// Code Logic（这个函数做什么）:
-///     加载 `AppConfig`，调用 `init_db`，为每个仓储/registry 创建 Arc，并把调用方提供的 `BackendUi`
+///     加载 `AppConfig`，用 `FsConfigStore` 装配 `ConfigRuntime`（`config` 与 runtime 共享同一
+///     `Arc`），调用 `init_db`，为每个仓储/registry 创建 Arc，并把调用方提供的 `BackendUi`
 ///     注入 AppState 作为 GUI/headless 的 UI 边界。
 pub async fn build_app_state(ui: Arc<dyn BackendUi>) -> Result<AppState, AppError> {
-    let config = AppConfig::load()?;
-    let pool = init_db(&config.db_path).await?;
-    let device_id = config.device_id.clone();
+    let loaded = AppConfig::load()?;
+    let store = Arc::new(FsConfigStore::default_path()?);
+    let config_runtime = Arc::new(ConfigRuntime::new(loaded, store));
+    let config = config_runtime.shared_value();
+    let device_id = config
+        .read()
+        .map_err(|_| AppError::generic("配置读锁中毒"))?
+        .device_id
+        .clone();
+    let db_path = config
+        .read()
+        .map_err(|_| AppError::generic("配置读锁中毒"))?
+        .db_path
+        .clone();
+    let pool = init_db(&db_path).await?;
 
     let prompt_repo = Arc::new(PromptRepo::new(pool.clone()));
     let transfer_repo = Arc::new(TransferRepo::new(pool.clone()));
@@ -388,7 +403,8 @@ pub async fn build_app_state(ui: Arc<dyn BackendUi>) -> Result<AppState, AppErro
     let health = Arc::new(crate::health::HealthRuntime::new());
 
     Ok(AppState {
-        config: Arc::new(RwLock::new(config)),
+        config,
+        config_runtime,
         db: pool,
         prompt_repo,
         transfer_repo,
