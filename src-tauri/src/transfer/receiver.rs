@@ -941,19 +941,20 @@ async fn promote_completed_to_durable(
 /// Business Logic（为什么需要这个函数）:
 ///     place 前必须把候选 final 路径持久化到 journal，才能在进程崩溃后避免同 transfer_id 重传后缀副本。
 ///     intent 目录/文件若是 symlink/reparse，普通 create_dir_all/write 会跟随写出 receive_dir；
-///     路径检查后再 create/rename 仍有父目录交换 TOCTOU，必须绑定已验证目录 fd。
+///     路径检查后再 create/rename 仍有父目录交换 TOCTOU，必须绑定已验证目录 HANDLE/fd。
 ///
 /// Code Logic（这个函数做什么）:
 ///     Unix：open 已验证 receive_dir fd → openat/mkdirat 绑定 intent 目录 → openat 创建 tmp 写字节
-///     + sync_all → renameat 正式 intent → fsync intent 目录；Windows：no-follow 校验普通目录后
-///     同目录 create_new 写 + rename，并对 intent 目录 FlushFileBuffers。
+///     + sync_all → renameat 正式 intent → fsync intent 目录；
+///     Windows：CreateFile 打开 receive_dir（BACKUP_SEMANTICS）→ NtCreateFile 相对路径创建/打开
+///     普通 intent 目录（OPEN_REPARSE_POINT 后拒绝 reparse）→ 相对路径 create/write/rename/unlink，
+///     检查后不再用绝对 path 做 create/rename/delete。
 async fn write_finalize_intent(
     receive_dir: &Path,
     intent: &FinalizeIntent,
 ) -> Result<(), AppError> {
-    // 先拒绝 symlink intent 目录（no-follow），再 dirfd 写入。
-    // Unix 走 dirfd 不再使用 path；非 Unix 必须绑定 path 做 parent 校验。
-    let path = finalize_intent_path(receive_dir, &intent.transfer_id)?;
+    // 词法边界校验（basename/逃逸）；真正写入走 dirfd / directory HANDLE，不再 path-ops。
+    let _path = finalize_intent_path(receive_dir, &intent.transfer_id)?;
     let safe_id = sanitize_receive_basename(&intent.transfer_id, "transfer_id")?;
     let intent_name = format!("{safe_id}.json");
     let tmp_name = format!("{safe_id}.json.tmp");
@@ -961,7 +962,6 @@ async fn write_finalize_intent(
 
     #[cfg(unix)]
     {
-        let _ = path; // Unix dirfd 路径以 receive_dir fd 为准，path 仅用于边界校验副作用
         let joined = tokio::task::spawn_blocking({
             let receive_dir = receive_dir.to_path_buf();
             let intent_name = intent_name.clone();
@@ -974,26 +974,28 @@ async fn write_finalize_intent(
         joined
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let dir = ensure_regular_intent_dir(receive_dir).await?;
-        if path.parent() != Some(dir.as_path()) {
-            return Err(AppError::validation(format!(
-                "intent 路径不在已校验目录内: {}",
-                path.display()
-            )));
-        }
-        let tmp = dir.join(&tmp_name);
-        write_bytes_create_new_nofollow(&tmp, &bytes).await?;
-        let final_path = dir.join(&intent_name);
-        let _ = tokio::fs::remove_file(&final_path).await;
-        if let Err(err) = tokio::fs::rename(&tmp, &final_path).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(AppError::from(err));
-        }
-        // intent rename 后 fsync 目录，保证断电后目录项可见。
-        fsync_dir(&dir)?;
-        Ok(())
+        let joined = tokio::task::spawn_blocking({
+            let receive_dir = receive_dir.to_path_buf();
+            let intent_name = intent_name.clone();
+            let tmp_name = tmp_name.clone();
+            let bytes = bytes.clone();
+            move || {
+                write_finalize_intent_windows_handle(&receive_dir, &intent_name, &tmp_name, &bytes)
+            }
+        })
+        .await
+        .map_err(|e| AppError::generic(format!("write_finalize_intent join 失败: {e}")))?;
+        joined
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (receive_dir, intent_name, tmp_name, bytes);
+        Err(AppError::generic(
+            "当前平台无法以目录句柄相对路径写 finalize intent".to_string(),
+        ))
     }
 }
 
@@ -1002,8 +1004,9 @@ async fn write_finalize_intent(
 ///
 /// Code Logic（这个函数做什么）:
 ///     对 receive_dir 下 FINALIZE_INTENT_DIR：不存在则 create_dir（目录项本身）；存在则 symlink_metadata
-///     拒绝 symlink/非目录；返回校验后的 path。Windows / 非 dirfd 路径使用。
-#[cfg_attr(unix, allow(dead_code))]
+///     拒绝 symlink/非目录；返回校验后的 path。
+///     生产写路径已改用 Unix dirfd / Windows directory HANDLE；本 helper 仅保留给单测与诊断。
+#[allow(dead_code)]
 async fn ensure_regular_intent_dir(receive_dir: &Path) -> Result<PathBuf, AppError> {
     let dir = receive_dir.join(FINALIZE_INTENT_DIR);
     ensure_path_within_dir(receive_dir, &dir)?;
@@ -1056,7 +1059,8 @@ async fn ensure_regular_intent_dir(receive_dir: &Path) -> Result<PathBuf, AppErr
 ///
 /// Code Logic（这个函数做什么）:
 ///     先 remove 残留同名 tmp；create_new 打开后不丢弃句柄，write_all + flush + sync_all。
-#[cfg_attr(unix, allow(dead_code))]
+///     生产 intent 写入已改用目录句柄相对路径；本 helper 供单测验证 create_new 语义。
+#[allow(dead_code)]
 async fn write_bytes_create_new_nofollow(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     let _ = tokio::fs::remove_file(path).await;
     let created = match std::fs::OpenOptions::new()
@@ -1262,18 +1266,854 @@ fn write_finalize_intent_unix_dirfd(
     Ok(())
 }
 
+/// Windows：绑定 receive_dir / intent 目录 HANDLE，用相对路径 create/rename/unlink，
+/// 拒绝 reparse/junction，关闭检查后路径操作 TOCTOU。
+///
 /// Business Logic（为什么需要这个函数）:
-///     durable history + 墓碑成功后必须删除 intent，避免后续误恢复。
+///     Windows 上 path-check-then-path-ops 可在校验后把 intent 目录换成 junction/reparse，
+///     使 create/rename/delete 逃逸 receive_dir；必须相对已验证目录 HANDLE 操作。
 ///
 /// Code Logic（这个函数做什么）:
-///     删除 intent 文件；不存在视为成功。
-async fn clear_finalize_intent(receive_dir: &Path, transfer_id: &str) -> Result<(), AppError> {
-    let path = finalize_intent_path(receive_dir, transfer_id)?;
-    match tokio::fs::remove_file(&path).await {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(AppError::from(e)),
+///     1) CreateFileW 打开 receive_dir（BACKUP_SEMANTICS，不跟随 reparse 打开目录自身后拒绝 reparse）；
+///     2) NtCreateFile 相对 receive HANDLE 创建/打开 intent 子目录（OPEN_REPARSE_POINT 后拒绝 reparse）；
+///     3) 相对 intent HANDLE 删除旧 tmp/intent 目录项、CREATE_NEW 写 tmp、FlushFileBuffers、
+///        FILE_RENAME_INFORMATION 原子改名；4) FlushFileBuffers(intent 目录)。
+#[cfg(windows)]
+fn write_finalize_intent_windows_handle(
+    receive_dir: &Path,
+    intent_name: &str,
+    tmp_name: &str,
+    bytes: &[u8],
+) -> Result<(), AppError> {
+    use std::ffi::c_void;
+    use std::io::{ErrorKind, Write};
+    use std::mem::{size_of, zeroed};
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle};
+    use std::ptr;
+
+    type BOOL = i32;
+    type DWORD = u32;
+    type HANDLE = *mut c_void;
+    type NTSTATUS = i32;
+    type ULONG = u32;
+    type USHORT = u16;
+    type ACCESS_MASK = u32;
+
+    const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
+    const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: DWORD = 0x0020_0000;
+    const FILE_SHARE_READ: DWORD = 0x0000_0001;
+    const FILE_SHARE_WRITE: DWORD = 0x0000_0002;
+    const FILE_SHARE_DELETE: DWORD = 0x0000_0004;
+    const OPEN_EXISTING: DWORD = 3;
+    const GENERIC_READ: DWORD = 0x8000_0000;
+    const GENERIC_WRITE: DWORD = 0x4000_0000;
+    const FILE_ATTRIBUTE_DIRECTORY: DWORD = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: DWORD = 0x400;
+    const FILE_ATTRIBUTE_NORMAL: DWORD = 0x80;
+    const ERROR_ALREADY_EXISTS: i32 = 183;
+    const ERROR_FILE_EXISTS: i32 = 80;
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+    const ERROR_PATH_NOT_FOUND: i32 = 3;
+    const FILE_OPEN: ULONG = 0x0000_0001;
+    const FILE_CREATE: ULONG = 0x0000_0002;
+    const FILE_OPEN_IF: ULONG = 0x0000_0003;
+    const FILE_DIRECTORY_FILE: ULONG = 0x0000_0001;
+    const FILE_NON_DIRECTORY_FILE: ULONG = 0x0000_0040;
+    const FILE_SYNCHRONOUS_IO_NONALERT: ULONG = 0x0000_0020;
+    const FILE_OPEN_REPARSE_POINT: ULONG = 0x0020_0000;
+    const FILE_DELETE_ON_CLOSE: ULONG = 0x0000_1000;
+    const DELETE: ACCESS_MASK = 0x0001_0000;
+    const FILE_LIST_DIRECTORY: ACCESS_MASK = 0x0001;
+    const FILE_ADD_FILE: ACCESS_MASK = 0x0002;
+    const FILE_ADD_SUBDIRECTORY: ACCESS_MASK = 0x0004;
+    const FILE_WRITE_DATA: ACCESS_MASK = 0x0002;
+    const FILE_READ_ATTRIBUTES: ACCESS_MASK = 0x0080;
+    const FILE_WRITE_ATTRIBUTES: ACCESS_MASK = 0x0100;
+    const SYNCHRONIZE: ACCESS_MASK = 0x0010_0000;
+    const FILE_GENERIC_WRITE: ACCESS_MASK =
+        GENERIC_WRITE | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE;
+    const FILE_RENAME_INFORMATION_CLASS: u32 = 10;
+    const OBJ_CASE_INSENSITIVE: ULONG = 0x0000_0040;
+    const STATUS_OBJECT_NAME_COLLISION: NTSTATUS = 0xC000_0035u32 as NTSTATUS;
+    const STATUS_OBJECT_NAME_NOT_FOUND: NTSTATUS = 0xC000_0034u32 as NTSTATUS;
+    const STATUS_OBJECT_PATH_NOT_FOUND: NTSTATUS = 0xC000_003Au32 as NTSTATUS;
+    const STATUS_DELETE_PENDING: NTSTATUS = 0xC000_0056u32 as NTSTATUS;
+
+    #[repr(C)]
+    struct UnicodeString {
+        length: USHORT,
+        maximum_length: USHORT,
+        buffer: *mut u16,
     }
+
+    #[repr(C)]
+    struct ObjectAttributes {
+        length: ULONG,
+        root_directory: HANDLE,
+        object_name: *mut UnicodeString,
+        attributes: ULONG,
+        security_descriptor: *mut c_void,
+        security_quality_of_service: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct IoStatusBlock {
+        status: NTSTATUS,
+        information: usize,
+    }
+
+    #[repr(C)]
+    struct FileRenameInformation {
+        replace_if_exists: BOOL,
+        root_directory: HANDLE,
+        file_name_length: ULONG,
+        // file_name: [u16; 1] follows in buffer
+        file_name: [u16; 1],
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateFileW(
+            lp_file_name: *const u16,
+            dw_desired_access: DWORD,
+            dw_share_mode: DWORD,
+            lp_security_attributes: *mut c_void,
+            dw_creation_disposition: DWORD,
+            dw_flags_and_attributes: DWORD,
+            h_template_file: HANDLE,
+        ) -> HANDLE;
+        fn GetFileInformationByHandle(
+            h_file: HANDLE,
+            lp_file_information: *mut ByHandleFileInformation,
+        ) -> BOOL;
+        fn SetFileInformationByHandle(
+            h_file: HANDLE,
+            file_information_class: u32,
+            lp_file_information: *mut c_void,
+            dw_buffer_size: DWORD,
+        ) -> BOOL;
+        fn FlushFileBuffers(h_file: HANDLE) -> BOOL;
+    }
+
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtCreateFile(
+            file_handle: *mut HANDLE,
+            desired_access: ACCESS_MASK,
+            object_attributes: *mut ObjectAttributes,
+            io_status_block: *mut IoStatusBlock,
+            allocation_size: *mut i64,
+            file_attributes: ULONG,
+            share_access: ULONG,
+            create_disposition: ULONG,
+            create_options: ULONG,
+            ea_buffer: *mut c_void,
+            ea_length: ULONG,
+        ) -> NTSTATUS;
+        fn RtlNtStatusToDosError(status: NTSTATUS) -> DWORD;
+    }
+
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        file_attributes: DWORD,
+        creation_time: u64,
+        last_access_time: u64,
+        last_write_time: u64,
+        volume_serial_number: DWORD,
+        file_size_high: DWORD,
+        file_size_low: DWORD,
+        number_of_links: DWORD,
+        file_index_high: DWORD,
+        file_index_low: DWORD,
+    }
+
+    /// Business Logic: 路径必须是合法宽字符串，供 CreateFileW / NtCreateFile 使用。
+    /// Code Logic: encode_wide + 拒绝内部 NUL + 追加 NUL 终止符。
+    fn to_wide(path: &Path) -> Result<Vec<u16>, AppError> {
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.iter().any(|&u| u == 0) {
+            return Err(AppError::validation("路径含内部 NUL".to_string()));
+        }
+        wide.push(0);
+        Ok(wide)
+    }
+
+    /// Business Logic: 相对路径组件名（intent 目录/文件）同样需宽字符串。
+    /// Code Logic: 按 UTF-8 字节转宽字符；拒绝空串与内部 NUL。
+    fn name_to_wide(name: &str) -> Result<Vec<u16>, AppError> {
+        if name.is_empty() || name.contains('\0') {
+            return Err(AppError::validation("相对路径名非法".to_string()));
+        }
+        let mut wide: Vec<u16> = std::ffi::OsStr::new(name).encode_wide().collect();
+        if wide.iter().any(|&u| u == 0) {
+            return Err(AppError::validation("相对路径名含内部 NUL".to_string()));
+        }
+        wide.push(0);
+        Ok(wide)
+    }
+
+    /// Business Logic: NTSTATUS 非成功时映射为 Win32 错误，便于上层处理 AlreadyExists/NotFound。
+    /// Code Logic: status >= 0 成功；否则 RtlNtStatusToDosError。
+    fn nt_ok(status: NTSTATUS) -> Result<(), std::io::Error> {
+        if status >= 0 {
+            Ok(())
+        } else {
+            let dos = unsafe { RtlNtStatusToDosError(status) };
+            Err(std::io::Error::from_raw_os_error(dos as i32))
+        }
+    }
+
+    /// Business Logic: 目录 HANDLE 必须是普通目录，不能是 reparse/junction。
+    /// Code Logic: GetFileInformationByHandle 检查 DIRECTORY 且无 REPARSE_POINT。
+    fn ensure_plain_directory_handle(handle: HANDLE) -> Result<(), AppError> {
+        let mut info: ByHandleFileInformation = unsafe { zeroed() };
+        let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+        if ok == 0 {
+            return Err(AppError::from(std::io::Error::last_os_error()));
+        }
+        if info.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+            return Err(AppError::validation(
+                "intent 路径不是目录（句柄绑定失败）".to_string(),
+            ));
+        }
+        if info.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(AppError::validation(
+                "intent 目录是 reparse/junction，拒绝写入".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Business Logic: 相对父目录 HANDLE 打开/创建子对象，避免绝对 path 在校验后被交换。
+    /// Code Logic: 组装 UNICODE_STRING + OBJECT_ATTRIBUTES，调用 NtCreateFile。
+    unsafe fn open_relative(
+        parent: HANDLE,
+        name_wide: &mut [u16],
+        desired_access: ACCESS_MASK,
+        create_disposition: ULONG,
+        create_options: ULONG,
+        file_attributes: ULONG,
+    ) -> Result<OwnedHandle, AppError> {
+        // name_wide 含结尾 NUL；Length 不含 NUL。
+        let name_units = name_wide.len().saturating_sub(1);
+        let byte_len = name_units * 2;
+        if byte_len > u16::MAX as usize {
+            return Err(AppError::validation("相对路径名过长".to_string()));
+        }
+        let mut unicode = UnicodeString {
+            length: byte_len as USHORT,
+            maximum_length: (byte_len + 2) as USHORT,
+            buffer: name_wide.as_mut_ptr(),
+        };
+        let mut attrs = ObjectAttributes {
+            length: size_of::<ObjectAttributes>() as ULONG,
+            root_directory: parent,
+            object_name: &mut unicode,
+            attributes: OBJ_CASE_INSENSITIVE,
+            security_descriptor: ptr::null_mut(),
+            security_quality_of_service: ptr::null_mut(),
+        };
+        let mut iosb: IoStatusBlock = zeroed();
+        let mut out: HANDLE = ptr::null_mut();
+        let status = NtCreateFile(
+            &mut out,
+            desired_access,
+            &mut attrs,
+            &mut iosb,
+            ptr::null_mut(),
+            file_attributes,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            create_disposition,
+            create_options,
+            ptr::null_mut(),
+            0,
+        );
+        if let Err(err) = nt_ok(status) {
+            // 统一 AlreadyExists 语义，供调用方判断。
+            if status == STATUS_OBJECT_NAME_COLLISION
+                || err.raw_os_error() == Some(ERROR_ALREADY_EXISTS)
+                || err.raw_os_error() == Some(ERROR_FILE_EXISTS)
+            {
+                return Err(AppError::from(std::io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    err,
+                )));
+            }
+            if status == STATUS_OBJECT_NAME_NOT_FOUND
+                || status == STATUS_OBJECT_PATH_NOT_FOUND
+                || err.raw_os_error() == Some(ERROR_FILE_NOT_FOUND)
+                || err.raw_os_error() == Some(ERROR_PATH_NOT_FOUND)
+            {
+                return Err(AppError::from(std::io::Error::new(
+                    ErrorKind::NotFound,
+                    err,
+                )));
+            }
+            return Err(AppError::from(err));
+        }
+        if out.is_null() || out == INVALID_HANDLE_VALUE {
+            return Err(AppError::generic(
+                "NtCreateFile 返回无效 HANDLE".to_string(),
+            ));
+        }
+        Ok(OwnedHandle::from_raw_handle(out as RawHandle))
+    }
+
+    /// Business Logic: 删除 intent 目录项必须相对目录 HANDLE，不能再走绝对 path remove。
+    /// Code Logic: 以 DELETE|FILE_DELETE_ON_CLOSE 打开后立即 drop（关闭时删除）。
+    unsafe fn unlink_relative(parent: HANDLE, name_wide: &mut [u16]) -> Result<(), AppError> {
+        match open_relative(
+            parent,
+            name_wide,
+            DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+            FILE_OPEN,
+            FILE_NON_DIRECTORY_FILE
+                | FILE_SYNCHRONOUS_IO_NONALERT
+                | FILE_DELETE_ON_CLOSE
+                | FILE_OPEN_REPARSE_POINT,
+            0,
+        ) {
+            Ok(handle) => {
+                drop(handle);
+                Ok(())
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("os error 2")
+                    || msg.contains("os error 3")
+                    || msg.contains("NotFound")
+                    || msg.contains("找不到")
+                {
+                    Ok(())
+                } else {
+                    // 也接受 std NotFound kind。
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Business Logic: rename 必须相对同一 intent 目录 HANDLE，禁止 path rename 被 junction 劫持。
+    /// Code Logic: SetFileInformationByHandle(FileRenameInformation) + ReplaceIfExists=TRUE。
+    unsafe fn rename_relative(file: HANDLE, new_name_wide: &[u16]) -> Result<(), AppError> {
+        let name_units = new_name_wide.len().saturating_sub(1);
+        let name_bytes = name_units * 2;
+        // 结构体 + 文件名（不含内嵌的 1 个 wchar，需额外 (name_units-1)）
+        let extra = name_units.saturating_sub(1) * 2;
+        let total = size_of::<FileRenameInformation>() + extra;
+        let mut buf = vec![0u8; total];
+        let info = buf.as_mut_ptr() as *mut FileRenameInformation;
+        (*info).replace_if_exists = 1;
+        (*info).root_directory = ptr::null_mut();
+        (*info).file_name_length = name_bytes as ULONG;
+        ptr::copy_nonoverlapping(
+            new_name_wide.as_ptr(),
+            (*info).file_name.as_mut_ptr(),
+            name_units,
+        );
+        let ok = SetFileInformationByHandle(
+            file,
+            FILE_RENAME_INFORMATION_CLASS,
+            buf.as_mut_ptr() as *mut c_void,
+            total as DWORD,
+        );
+        if ok == 0 {
+            return Err(AppError::from(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    let receive_wide = to_wide(receive_dir)?;
+    let mut intent_dir_wide = name_to_wide(FINALIZE_INTENT_DIR)?;
+    let mut intent_name_wide = name_to_wide(intent_name)?;
+    let mut tmp_name_wide = name_to_wide(tmp_name)?;
+
+    // 打开 receive_dir 自身（BACKUP_SEMANTICS + OPEN_REPARSE_POINT），再拒绝 reparse。
+    let receive_raw = unsafe {
+        CreateFileW(
+            receive_wide.as_ptr(),
+            GENERIC_READ | FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if receive_raw.is_null() || receive_raw == INVALID_HANDLE_VALUE {
+        return Err(AppError::from(std::io::Error::last_os_error()));
+    }
+    let receive_handle = unsafe { OwnedHandle::from_raw_handle(receive_raw as RawHandle) };
+    ensure_plain_directory_handle(receive_handle.as_raw_handle() as HANDLE)?;
+
+    // 相对 receive HANDLE 创建/打开 intent 目录；OPEN_REPARSE_POINT 后拒绝 reparse。
+    let intent_dir_handle = match unsafe {
+        open_relative(
+            receive_handle.as_raw_handle() as HANDLE,
+            &mut intent_dir_wide,
+            GENERIC_READ
+                | FILE_LIST_DIRECTORY
+                | FILE_ADD_FILE
+                | FILE_ADD_SUBDIRECTORY
+                | FILE_WRITE_ATTRIBUTES
+                | SYNCHRONIZE
+                | DELETE,
+            FILE_OPEN_IF,
+            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+            FILE_ATTRIBUTE_DIRECTORY,
+        )
+    } {
+        Ok(h) => h,
+        Err(e) => {
+            return Err(AppError::validation(format!(
+                "无法绑定 intent 目录 HANDLE: {e}"
+            )));
+        }
+    };
+    ensure_plain_directory_handle(intent_dir_handle.as_raw_handle() as HANDLE)?;
+
+    let parent = intent_dir_handle.as_raw_handle() as HANDLE;
+
+    // 清残留 tmp 目录项（相对 unlink，不跟随 reparse 目标内容）。
+    let _ = unsafe { unlink_relative(parent, &mut tmp_name_wide) };
+
+    // CREATE_NEW 相对创建 tmp 普通文件；立即 into_raw 交给 File，避免与 OwnedHandle double-close。
+    let tmp_owned = unsafe {
+        open_relative(
+            parent,
+            &mut tmp_name_wide,
+            FILE_GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
+            FILE_CREATE,
+            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+            FILE_ATTRIBUTE_NORMAL,
+        )
+    }
+    .map_err(|e| {
+        AppError::from(std::io::Error::new(
+            ErrorKind::Other,
+            format!("创建 intent 临时文件失败: {e}"),
+        ))
+    })?;
+    let mut tmp_file = unsafe { std::fs::File::from_raw_handle(tmp_owned.into_raw_handle()) };
+    if let Err(err) = (|| -> Result<(), AppError> {
+        tmp_file.write_all(bytes).map_err(AppError::from)?;
+        tmp_file.flush().map_err(AppError::from)?;
+        tmp_file.sync_all().map_err(AppError::from)?;
+        Ok(())
+    })() {
+        // 写失败：关闭句柄后相对 unlink 残留 tmp。
+        drop(tmp_file);
+        let _ = unsafe { unlink_relative(parent, &mut tmp_name_wide) };
+        return Err(err);
+    }
+
+    // 删除旧正式 intent 目录项（若存在），再把 tmp rename 为正式名。
+    // rename 需要仍打开的文件 HANDLE。
+    let _ = unsafe { unlink_relative(parent, &mut intent_name_wide) };
+    let tmp_raw = tmp_file.into_raw_handle();
+    let tmp_handle = unsafe { OwnedHandle::from_raw_handle(tmp_raw) };
+    if let Err(err) =
+        unsafe { rename_relative(tmp_handle.as_raw_handle() as HANDLE, &intent_name_wide) }
+    {
+        drop(tmp_handle);
+        let _ = unsafe { unlink_relative(parent, &mut tmp_name_wide) };
+        return Err(err);
+    }
+    drop(tmp_handle);
+
+    // FlushFileBuffers(intent 目录)，保证 rename 目录项断电后可见。
+    let flush_ok = unsafe { FlushFileBuffers(parent) };
+    if flush_ok == 0 {
+        return Err(AppError::from(std::io::Error::last_os_error()));
+    }
+
+    drop(intent_dir_handle);
+    drop(receive_handle);
+    let _ = (STATUS_DELETE_PENDING, FILE_OPEN);
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     durable history + 墓碑成功后必须删除 intent，避免后续误恢复。
+///     删除同样不能在 path-check 后再用绝对 path remove（父目录可被换成 reparse）。
+///
+/// Code Logic（这个函数做什么）:
+///     Unix：receive_dir fd + openat intent 目录 + unlinkat；Windows：目录 HANDLE 相对 unlink；
+///     其它平台：词法路径 remove（无 dirfd 原语时的降级，生产目标平台为 unix/windows）。
+async fn clear_finalize_intent(receive_dir: &Path, transfer_id: &str) -> Result<(), AppError> {
+    // 边界校验副作用（非法 id / 逃逸）。
+    let _ = finalize_intent_path(receive_dir, transfer_id)?;
+    let safe_id = sanitize_receive_basename(transfer_id, "transfer_id")?;
+    let intent_name = format!("{safe_id}.json");
+
+    #[cfg(unix)]
+    {
+        let receive_dir = receive_dir.to_path_buf();
+        let intent_name = intent_name.clone();
+        tokio::task::spawn_blocking(move || {
+            clear_finalize_intent_unix_dirfd(&receive_dir, &intent_name)
+        })
+        .await
+        .map_err(|e| AppError::generic(format!("clear_finalize_intent join 失败: {e}")))?
+    }
+
+    #[cfg(windows)]
+    {
+        let receive_dir = receive_dir.to_path_buf();
+        let intent_name = intent_name.clone();
+        tokio::task::spawn_blocking(move || {
+            clear_finalize_intent_windows_handle(&receive_dir, &intent_name)
+        })
+        .await
+        .map_err(|e| AppError::generic(format!("clear_finalize_intent join 失败: {e}")))?
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let path = finalize_intent_path(receive_dir, transfer_id)?;
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(AppError::from(e)),
+        }
+    }
+}
+
+/// Unix：相对 receive_dir / intent 目录 fd unlinkat 删除 intent。
+#[cfg(unix)]
+fn clear_finalize_intent_unix_dirfd(receive_dir: &Path, intent_name: &str) -> Result<(), AppError> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let receive_c = CString::new(receive_dir.as_os_str().as_bytes())
+        .map_err(|_| AppError::validation("receive_dir 含内部 NUL"))?;
+    let intent_dir_c =
+        CString::new(FINALIZE_INTENT_DIR).map_err(|_| AppError::validation("intent dir 名非法"))?;
+    let intent_c = CString::new(intent_name.as_bytes())
+        .map_err(|_| AppError::validation("intent 文件名含内部 NUL"))?;
+
+    let receive_fd = unsafe {
+        libc::open(
+            receive_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if receive_fd < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == ErrorKind::NotFound {
+            return Ok(());
+        }
+        return Err(AppError::from(err));
+    }
+    let receive_file = unsafe { std::fs::File::from_raw_fd(receive_fd) };
+
+    let intent_dir_fd = unsafe {
+        libc::openat(
+            receive_file.as_raw_fd(),
+            intent_dir_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if intent_dir_fd < 0 {
+        let err = std::io::Error::last_os_error();
+        // 目录不存在 / 是 symlink → 视为无 intent 可清。
+        if err.kind() == ErrorKind::NotFound
+            || err.raw_os_error() == Some(libc::ELOOP)
+            || err.raw_os_error() == Some(libc::EPERM)
+        {
+            return Ok(());
+        }
+        return Err(AppError::from(err));
+    }
+    let intent_dir_file = unsafe { std::fs::File::from_raw_fd(intent_dir_fd) };
+    let rc = unsafe { libc::unlinkat(intent_dir_file.as_raw_fd(), intent_c.as_ptr(), 0) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() != ErrorKind::NotFound {
+            return Err(AppError::from(err));
+        }
+    }
+    drop(intent_dir_file);
+    drop(receive_file);
+    Ok(())
+}
+
+/// Windows：相对目录 HANDLE 删除 intent 文件，拒绝 reparse 目录上的 path-ops。
+#[cfg(windows)]
+fn clear_finalize_intent_windows_handle(
+    receive_dir: &Path,
+    intent_name: &str,
+) -> Result<(), AppError> {
+    // 复用写路径的打开语义：绑定 plain directory HANDLE 后相对 unlink。
+    // 为避免重复大段 FFI，这里走“打开 intent 目录 HANDLE + 相对 DELETE_ON_CLOSE”。
+    use std::ffi::c_void;
+    use std::mem::{size_of, zeroed};
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+    use std::ptr;
+
+    type BOOL = i32;
+    type DWORD = u32;
+    type HANDLE = *mut c_void;
+    type NTSTATUS = i32;
+    type ULONG = u32;
+    type USHORT = u16;
+    type ACCESS_MASK = u32;
+
+    const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
+    const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: DWORD = 0x0020_0000;
+    const FILE_SHARE_READ: DWORD = 0x1;
+    const FILE_SHARE_WRITE: DWORD = 0x2;
+    const FILE_SHARE_DELETE: DWORD = 0x4;
+    const OPEN_EXISTING: DWORD = 3;
+    const GENERIC_READ: DWORD = 0x8000_0000;
+    const FILE_ATTRIBUTE_DIRECTORY: DWORD = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: DWORD = 0x400;
+    const FILE_OPEN: ULONG = 0x1;
+    const FILE_DIRECTORY_FILE: ULONG = 0x1;
+    const FILE_NON_DIRECTORY_FILE: ULONG = 0x40;
+    const FILE_SYNCHRONOUS_IO_NONALERT: ULONG = 0x20;
+    const FILE_OPEN_REPARSE_POINT: ULONG = 0x0020_0000;
+    const FILE_DELETE_ON_CLOSE: ULONG = 0x1000;
+    const DELETE: ACCESS_MASK = 0x0001_0000;
+    const FILE_LIST_DIRECTORY: ACCESS_MASK = 0x1;
+    const FILE_READ_ATTRIBUTES: ACCESS_MASK = 0x80;
+    const SYNCHRONIZE: ACCESS_MASK = 0x0010_0000;
+    const OBJ_CASE_INSENSITIVE: ULONG = 0x40;
+
+    #[repr(C)]
+    struct UnicodeString {
+        length: USHORT,
+        maximum_length: USHORT,
+        buffer: *mut u16,
+    }
+    #[repr(C)]
+    struct ObjectAttributes {
+        length: ULONG,
+        root_directory: HANDLE,
+        object_name: *mut UnicodeString,
+        attributes: ULONG,
+        security_descriptor: *mut c_void,
+        security_quality_of_service: *mut c_void,
+    }
+    #[repr(C)]
+    struct IoStatusBlock {
+        status: NTSTATUS,
+        information: usize,
+    }
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        file_attributes: DWORD,
+        creation_time: u64,
+        last_access_time: u64,
+        last_write_time: u64,
+        volume_serial_number: DWORD,
+        file_size_high: DWORD,
+        file_size_low: DWORD,
+        number_of_links: DWORD,
+        file_index_high: DWORD,
+        file_index_low: DWORD,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateFileW(
+            lp_file_name: *const u16,
+            dw_desired_access: DWORD,
+            dw_share_mode: DWORD,
+            lp_security_attributes: *mut c_void,
+            dw_creation_disposition: DWORD,
+            dw_flags_and_attributes: DWORD,
+            h_template_file: HANDLE,
+        ) -> HANDLE;
+        fn GetFileInformationByHandle(
+            h_file: HANDLE,
+            lp_file_information: *mut ByHandleFileInformation,
+        ) -> BOOL;
+    }
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtCreateFile(
+            file_handle: *mut HANDLE,
+            desired_access: ACCESS_MASK,
+            object_attributes: *mut ObjectAttributes,
+            io_status_block: *mut IoStatusBlock,
+            allocation_size: *mut i64,
+            file_attributes: ULONG,
+            share_access: ULONG,
+            create_disposition: ULONG,
+            create_options: ULONG,
+            ea_buffer: *mut c_void,
+            ea_length: ULONG,
+        ) -> NTSTATUS;
+        fn RtlNtStatusToDosError(status: NTSTATUS) -> DWORD;
+    }
+
+    fn to_wide(path: &Path) -> Result<Vec<u16>, AppError> {
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.iter().any(|&u| u == 0) {
+            return Err(AppError::validation("路径含内部 NUL".to_string()));
+        }
+        wide.push(0);
+        Ok(wide)
+    }
+    fn name_to_wide(name: &str) -> Result<Vec<u16>, AppError> {
+        if name.is_empty() || name.contains('\0') {
+            return Err(AppError::validation("相对路径名非法".to_string()));
+        }
+        let mut wide: Vec<u16> = std::ffi::OsStr::new(name).encode_wide().collect();
+        if wide.iter().any(|&u| u == 0) {
+            return Err(AppError::validation("相对路径名含内部 NUL".to_string()));
+        }
+        wide.push(0);
+        Ok(wide)
+    }
+    fn ensure_plain_directory_handle(handle: HANDLE) -> Result<(), AppError> {
+        let mut info: ByHandleFileInformation = unsafe { zeroed() };
+        let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+        if ok == 0 {
+            return Err(AppError::from(std::io::Error::last_os_error()));
+        }
+        if info.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+            return Err(AppError::validation("intent 路径不是目录".to_string()));
+        }
+        if info.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(AppError::validation(
+                "intent 目录是 reparse/junction，拒绝删除".to_string(),
+            ));
+        }
+        Ok(())
+    }
+    unsafe fn open_relative(
+        parent: HANDLE,
+        name_wide: &mut [u16],
+        desired_access: ACCESS_MASK,
+        create_disposition: ULONG,
+        create_options: ULONG,
+    ) -> Result<OwnedHandle, AppError> {
+        let name_units = name_wide.len().saturating_sub(1);
+        let byte_len = name_units * 2;
+        let mut unicode = UnicodeString {
+            length: byte_len as USHORT,
+            maximum_length: (byte_len + 2) as USHORT,
+            buffer: name_wide.as_mut_ptr(),
+        };
+        let mut attrs = ObjectAttributes {
+            length: size_of::<ObjectAttributes>() as ULONG,
+            root_directory: parent,
+            object_name: &mut unicode,
+            attributes: OBJ_CASE_INSENSITIVE,
+            security_descriptor: ptr::null_mut(),
+            security_quality_of_service: ptr::null_mut(),
+        };
+        let mut iosb: IoStatusBlock = zeroed();
+        let mut out: HANDLE = ptr::null_mut();
+        let status = NtCreateFile(
+            &mut out,
+            desired_access,
+            &mut attrs,
+            &mut iosb,
+            ptr::null_mut(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            create_disposition,
+            create_options,
+            ptr::null_mut(),
+            0,
+        );
+        if status < 0 {
+            let dos = RtlNtStatusToDosError(status) as i32;
+            if dos == 2 || dos == 3 {
+                return Err(AppError::from(std::io::Error::new(
+                    ErrorKind::NotFound,
+                    std::io::Error::from_raw_os_error(dos),
+                )));
+            }
+            return Err(AppError::from(std::io::Error::from_raw_os_error(dos)));
+        }
+        Ok(OwnedHandle::from_raw_handle(out as RawHandle))
+    }
+
+    let receive_wide = to_wide(receive_dir)?;
+    let mut intent_dir_wide = name_to_wide(FINALIZE_INTENT_DIR)?;
+    let mut intent_name_wide = name_to_wide(intent_name)?;
+
+    let receive_raw = unsafe {
+        CreateFileW(
+            receive_wide.as_ptr(),
+            GENERIC_READ | FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if receive_raw.is_null() || receive_raw == INVALID_HANDLE_VALUE {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == ErrorKind::NotFound {
+            return Ok(());
+        }
+        return Err(AppError::from(err));
+    }
+    let receive_handle = unsafe { OwnedHandle::from_raw_handle(receive_raw as RawHandle) };
+    if let Err(e) = ensure_plain_directory_handle(receive_handle.as_raw_handle() as HANDLE) {
+        // receive_dir 本身是 reparse：拒绝 path 删除，直接失败更安全。
+        return Err(e);
+    }
+
+    let intent_dir_handle = match unsafe {
+        open_relative(
+            receive_handle.as_raw_handle() as HANDLE,
+            &mut intent_dir_wide,
+            GENERIC_READ | FILE_LIST_DIRECTORY | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+        )
+    } {
+        Ok(h) => h,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("NotFound") || msg.contains("os error 2") || msg.contains("os error 3")
+            {
+                return Ok(());
+            }
+            return Err(e);
+        }
+    };
+    if let Err(_e) = ensure_plain_directory_handle(intent_dir_handle.as_raw_handle() as HANDLE) {
+        // intent 目录是 reparse：不跟随删除外部目标，视为已无安全 intent。
+        return Ok(());
+    }
+
+    match unsafe {
+        open_relative(
+            intent_dir_handle.as_raw_handle() as HANDLE,
+            &mut intent_name_wide,
+            DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+            FILE_OPEN,
+            FILE_NON_DIRECTORY_FILE
+                | FILE_SYNCHRONOUS_IO_NONALERT
+                | FILE_DELETE_ON_CLOSE
+                | FILE_OPEN_REPARSE_POINT,
+        )
+    } {
+        Ok(h) => drop(h),
+        Err(e) => {
+            let msg = e.to_string();
+            if !(msg.contains("NotFound")
+                || msg.contains("os error 2")
+                || msg.contains("os error 3"))
+            {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Code Logic: 拼 intent 文件路径并校验仍在 receive_dir 内。
@@ -4303,6 +5143,87 @@ mod tests {
         assert!(
             !windows_block.contains("MOVEFILE_REPLACE_EXISTING)"),
             "不得在 flags 中传入 MOVEFILE_REPLACE_EXISTING"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Windows intent 写入不得在校验后再用绝对 path create/rename/delete，
+    ///     否则 intent 目录可被换成 junction 导致写出 receive_dir。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     源码契约：存在 write_finalize_intent_windows_handle；函数内使用 NtCreateFile /
+    ///     FILE_OPEN_REPARSE_POINT / SetFileInformationByHandle；write_finalize_intent 的
+    ///     Windows 分支调用该 helper，且不再调用 ensure_regular_intent_dir /
+    ///     write_bytes_create_new_nofollow / tokio::fs::rename。
+    #[test]
+    fn windows_intent_write_uses_directory_handle_relative_ops_source_contract() {
+        let src = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/transfer/receiver.rs"
+        ));
+        assert!(
+            src.contains("fn write_finalize_intent_windows_handle"),
+            "必须存在 Windows directory HANDLE 相对路径 intent 写 helper"
+        );
+        assert!(
+            src.contains("fn clear_finalize_intent_windows_handle"),
+            "必须存在 Windows directory HANDLE 相对路径 intent 删除 helper"
+        );
+
+        let write_fn = src
+            .split("fn write_finalize_intent_windows_handle")
+            .nth(1)
+            .expect("应存在 write_finalize_intent_windows_handle");
+        // 截到下一个顶层 async fn / fn clear，避免吞掉全文件。
+        let write_body = write_fn
+            .split("async fn clear_finalize_intent")
+            .next()
+            .expect("write helper 应在 clear_finalize_intent 之前结束");
+        assert!(
+            write_body.contains("NtCreateFile"),
+            "Windows intent 写必须 NtCreateFile 相对目录 HANDLE"
+        );
+        assert!(
+            write_body.contains("FILE_OPEN_REPARSE_POINT"),
+            "必须 OPEN_REPARSE_POINT 后拒绝 reparse/junction"
+        );
+        assert!(
+            write_body.contains("SetFileInformationByHandle"),
+            "rename 必须 SetFileInformationByHandle 相对同一目录"
+        );
+        assert!(
+            write_body.contains("FILE_FLAG_BACKUP_SEMANTICS"),
+            "打开目录 HANDLE 需要 FILE_FLAG_BACKUP_SEMANTICS"
+        );
+        assert!(
+            !write_body.contains("tokio::fs::rename"),
+            "Windows intent helper 禁止 path-based tokio::fs::rename"
+        );
+        assert!(
+            !write_body.contains("tokio::fs::remove_file"),
+            "Windows intent helper 禁止 path-based remove_file"
+        );
+
+        // write_finalize_intent 的 Windows 分支应调用 handle helper，不再 path-ops。
+        let write_intent = src
+            .split("async fn write_finalize_intent")
+            .nth(1)
+            .expect("应存在 write_finalize_intent");
+        let write_intent_body = write_intent
+            .split("async fn ensure_regular_intent_dir")
+            .next()
+            .expect("write_finalize_intent 应在 ensure_regular_intent_dir 前结束");
+        assert!(
+            write_intent_body.contains("write_finalize_intent_windows_handle"),
+            "write_finalize_intent Windows 分支必须调用 handle helper"
+        );
+        assert!(
+            !write_intent_body.contains("ensure_regular_intent_dir(receive_dir)"),
+            "write_finalize_intent 不得再 path-check-then-ops ensure_regular_intent_dir"
+        );
+        assert!(
+            !write_intent_body.contains("write_bytes_create_new_nofollow"),
+            "write_finalize_intent 不得再 path create_new 写 intent tmp"
         );
     }
 
