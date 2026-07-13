@@ -762,15 +762,9 @@ pub async fn finalize_transfer(state: &AppState, transfer_id: &str) -> Result<()
         return Ok(());
     }
 
-    // 落盘已成功但 history 未 durable：先补 fsync（含 post-place durability pending 重试），
+    // 落盘已成功但 history 未 durable：在同一绑定句柄上重做 len+SHA+fsync，并确认目录项身份未替换，
     // 再晋升，禁止二次 place 或假报 completed。
     if task.status == TransferStatus::Completed {
-        let final_path = PathBuf::from(&task.file_path);
-        if let Err(e) = ensure_final_file_durable(&final_path).await {
-            return Err(AppError::unavailable(format!(
-                "最终文件已落地但 durability 未完成，请重试 complete: {transfer_id}: {e}"
-            )));
-        }
         return promote_completed_to_durable(state, transfer_id, &task).await;
     }
 
@@ -890,13 +884,22 @@ async fn promote_completed_to_durable(
         )));
     }
 
+    // 写 Completed history 前必须在同一绑定句柄上证明 len/SHA/fsync，并确认父目录项身份未替换。
+    // 禁止仅按路径 reopen+fsync：普通文件原子替换后 no-follow 仍会通过，导致静默错误认证。
+    let final_path = PathBuf::from(&task.file_path);
+    if let Err(e) = certify_final_file_for_history(&final_path, task.size, &task.sha256).await {
+        return Err(AppError::unavailable(format!(
+            "最终文件已落地但 durability 未完成，请重试 complete: {transfer_id}: {e}"
+        )));
+    }
+
     state.transfer_repo.record(task).await.map_err(|e| {
         tracing::error!("transfer_history 写入失败，保留 active 等待重试: {transfer_id}, {e}");
         e
     })?;
 
-    let final_path = task.file_path.clone();
-    let final_filename = Path::new(&final_path)
+    let final_path_str = final_path.to_string_lossy().to_string();
+    let final_filename = final_path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(task.filename.as_str())
@@ -909,7 +912,7 @@ async fn promote_completed_to_durable(
         crate::transfer::registry::TransferTombstone {
             outcome: crate::transfer::registry::TransferOutcome::Completed {
                 final_filename,
-                file_path: final_path.clone(),
+                file_path: final_path_str.clone(),
             },
             received_bytes: task.size,
             size: task.size,
@@ -930,11 +933,11 @@ async fn promote_completed_to_durable(
         serde_json::json!({
             "id": transfer_id,
             "status": "completed",
-            "filePath": final_path,
+            "filePath": final_path_str,
         }),
     );
 
-    tracing::info!("文件接收完成: {transfer_id} -> {final_path}");
+    tracing::info!("文件接收完成: {transfer_id} -> {final_path_str}");
     Ok(())
 }
 
@@ -947,7 +950,8 @@ async fn promote_completed_to_durable(
 ///     Unix：open 已验证 receive_dir fd → openat/mkdirat 绑定 intent 目录 → openat 创建 tmp 写字节
 ///     + sync_all → renameat 正式 intent → fsync intent 目录；
 ///     Windows：CreateFile 打开 receive_dir（BACKUP_SEMANTICS）→ NtCreateFile 相对路径创建/打开
-///     普通 intent 目录（OPEN_REPARSE_POINT 后拒绝 reparse）→ 相对路径 create/write/rename/unlink，
+///     普通 intent 目录（OPEN_REPARSE_POINT 后拒绝 reparse）→ 相对路径 create/write/
+///     NtSetInformationFile(FileRenameInformation=10, RootDirectory=intent HANDLE)/unlink，
 ///     检查后不再用绝对 path 做 create/rename/delete。
 async fn write_finalize_intent(
     receive_dir: &Path,
@@ -1277,7 +1281,8 @@ fn write_finalize_intent_unix_dirfd(
 ///     1) CreateFileW 打开 receive_dir（BACKUP_SEMANTICS，不跟随 reparse 打开目录自身后拒绝 reparse）；
 ///     2) NtCreateFile 相对 receive HANDLE 创建/打开 intent 子目录（OPEN_REPARSE_POINT 后拒绝 reparse）；
 ///     3) 相对 intent HANDLE 删除旧 tmp/intent 目录项、CREATE_NEW 写 tmp、FlushFileBuffers、
-///        FILE_RENAME_INFORMATION 原子改名；4) FlushFileBuffers(intent 目录)。
+///        NtSetInformationFile(FileRenameInformation=10, RootDirectory=intent HANDLE) 原子改名；
+///     4) FlushFileBuffers(intent 目录)。
 #[cfg(windows)]
 fn write_finalize_intent_windows_handle(
     receive_dir: &Path,
@@ -1334,7 +1339,8 @@ fn write_finalize_intent_windows_handle(
     const SYNCHRONIZE: ACCESS_MASK = 0x0010_0000;
     const FILE_GENERIC_WRITE: ACCESS_MASK =
         GENERIC_WRITE | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE;
-    const FILE_RENAME_INFORMATION_CLASS: u32 = 10;
+    // NtSetInformationFile 的 FileRenameInformation = 10（不是 Win32 FileRenameInfo=3）。
+    const FILE_RENAME_INFORMATION_CLASS: ULONG = 10;
     const OBJ_CASE_INSENSITIVE: ULONG = 0x0000_0040;
     const STATUS_OBJECT_NAME_COLLISION: NTSTATUS = 0xC000_0035u32 as NTSTATUS;
     const STATUS_OBJECT_NAME_NOT_FOUND: NTSTATUS = 0xC000_0034u32 as NTSTATUS;
@@ -1364,9 +1370,10 @@ fn write_finalize_intent_windows_handle(
         information: usize,
     }
 
+    /// NtSetInformationFile(FileRenameInformation) 缓冲布局：BOOLEAN + 对齐后的 RootDirectory。
     #[repr(C)]
     struct FileRenameInformation {
-        replace_if_exists: BOOL,
+        replace_if_exists: u8, // BOOLEAN
         root_directory: HANDLE,
         file_name_length: ULONG,
         // file_name: [u16; 1] follows in buffer
@@ -1388,12 +1395,6 @@ fn write_finalize_intent_windows_handle(
             h_file: HANDLE,
             lp_file_information: *mut ByHandleFileInformation,
         ) -> BOOL;
-        fn SetFileInformationByHandle(
-            h_file: HANDLE,
-            file_information_class: u32,
-            lp_file_information: *mut c_void,
-            dw_buffer_size: DWORD,
-        ) -> BOOL;
         fn FlushFileBuffers(h_file: HANDLE) -> BOOL;
     }
 
@@ -1411,6 +1412,13 @@ fn write_finalize_intent_windows_handle(
             create_options: ULONG,
             ea_buffer: *mut c_void,
             ea_length: ULONG,
+        ) -> NTSTATUS;
+        fn NtSetInformationFile(
+            file_handle: HANDLE,
+            io_status_block: *mut IoStatusBlock,
+            file_information: *mut c_void,
+            length: ULONG,
+            file_information_class: ULONG,
         ) -> NTSTATUS;
         fn RtlNtStatusToDosError(status: NTSTATUS) -> DWORD;
     }
@@ -1595,9 +1603,19 @@ fn write_finalize_intent_windows_handle(
         }
     }
 
-    /// Business Logic: rename 必须相对同一 intent 目录 HANDLE，禁止 path rename 被 junction 劫持。
-    /// Code Logic: SetFileInformationByHandle(FileRenameInformation) + ReplaceIfExists=TRUE。
-    unsafe fn rename_relative(file: HANDLE, new_name_wide: &[u16]) -> Result<(), AppError> {
+    /// Business Logic: rename 必须相对已验证 intent 目录 HANDLE，禁止 basename 相对 CWD 解析。
+    /// Code Logic: NtSetInformationFile(FileRenameInformation=10) + RootDirectory=intent HANDLE
+    ///     + ReplaceIfExists=TRUE；禁止 Win32 FileRenameInfo 信息类或 RootDirectory=NULL。
+    unsafe fn rename_relative(
+        file: HANDLE,
+        intent_dir: HANDLE,
+        new_name_wide: &[u16],
+    ) -> Result<(), AppError> {
+        if intent_dir.is_null() || intent_dir == INVALID_HANDLE_VALUE {
+            return Err(AppError::generic(
+                "intent 目录 HANDLE 无效，拒绝 rename".to_string(),
+            ));
+        }
         let name_units = new_name_wide.len().saturating_sub(1);
         let name_bytes = name_units * 2;
         // 结构体 + 文件名（不含内嵌的 1 个 wchar，需额外 (name_units-1)）
@@ -1606,23 +1624,23 @@ fn write_finalize_intent_windows_handle(
         let mut buf = vec![0u8; total];
         let info = buf.as_mut_ptr() as *mut FileRenameInformation;
         (*info).replace_if_exists = 1;
-        (*info).root_directory = ptr::null_mut();
+        // 关键：绑定已验证 intent 目录 HANDLE，basename 不得相对进程 CWD。
+        (*info).root_directory = intent_dir;
         (*info).file_name_length = name_bytes as ULONG;
         ptr::copy_nonoverlapping(
             new_name_wide.as_ptr(),
             (*info).file_name.as_mut_ptr(),
             name_units,
         );
-        let ok = SetFileInformationByHandle(
+        let mut iosb: IoStatusBlock = zeroed();
+        let status = NtSetInformationFile(
             file,
-            FILE_RENAME_INFORMATION_CLASS,
+            &mut iosb,
             buf.as_mut_ptr() as *mut c_void,
-            total as DWORD,
+            total as ULONG,
+            FILE_RENAME_INFORMATION_CLASS,
         );
-        if ok == 0 {
-            return Err(AppError::from(std::io::Error::last_os_error()));
-        }
-        Ok(())
+        nt_ok(status).map_err(AppError::from)
     }
 
     let receive_wide = to_wide(receive_dir)?;
@@ -1714,9 +1732,13 @@ fn write_finalize_intent_windows_handle(
     let _ = unsafe { unlink_relative(parent, &mut intent_name_wide) };
     let tmp_raw = tmp_file.into_raw_handle();
     let tmp_handle = unsafe { OwnedHandle::from_raw_handle(tmp_raw) };
-    if let Err(err) =
-        unsafe { rename_relative(tmp_handle.as_raw_handle() as HANDLE, &intent_name_wide) }
-    {
+    if let Err(err) = unsafe {
+        rename_relative(
+            tmp_handle.as_raw_handle() as HANDLE,
+            parent,
+            &intent_name_wide,
+        )
+    } {
         drop(tmp_handle);
         let _ = unsafe { unlink_relative(parent, &mut tmp_name_wide) };
         return Err(err);
@@ -2170,9 +2192,9 @@ fn finalize_intent_path(receive_dir: &Path, transfer_id: &str) -> Result<PathBuf
 /// Code Logic（这个函数做什么）:
 ///     读 intent；若 history 已有终态则清 intent；对 final 使用 no-follow 元数据：
 ///     拒绝 symlink/非普通文件；长度匹配后再对同一路径 no-follow 打开并流式 SHA256，
-///     与 intent.sha256 严格比对；通过后先 ensure_final_file_durable（sync 文件+父目录），
-///     再构造 Completed task → promote_completed_to_durable → 返回 success ChunkResp；
-///     durability 同步失败：保留 intent、确保 active=Completed(final)，返回 Unavailable 可重试，
+///     与 intent.sha256 严格比对；通过后构造 Completed task → promote_completed_to_durable
+///     （内部在同一绑定句柄上 re-hash + fsync + 父目录项身份确认）→ 返回 success ChunkResp；
+///     durability / 身份确认失败：保留 intent、确保 active=Completed(final)，返回 Unavailable 可重试，
 ///     不写 Completed history；
 ///     symlink / 非普通文件 / size 不匹配 / sha 不匹配 / 读失败：清 intent 并返回 None
 ///     （不删 .tmp、不宣称 success，允许干净重传或下一后缀重试）。
@@ -2282,8 +2304,9 @@ async fn try_recover_finalize_intent(
         return Ok(None);
     }
 
-    // 最终文件在且内容匹配：先 re-fsync 最终文件+父目录，再晋升 durable，禁止 re-receive。
-    // 同步失败时保留 intent，并确保 active=Completed（file_path=final）以便 complete 重试，
+    // 最终文件在且内容匹配：构造 Completed task 后由 promote 在同一绑定句柄上
+    // 再次 len+SHA+fsync 并确认父目录项身份，再写 durable history，禁止 re-receive。
+    // 失败时保留 intent，并确保 active=Completed（file_path=final）以便 complete 重试，
     // 绝不写 Completed history。
     let task = TransferTask {
         id: transfer_id.to_string(),
@@ -2309,14 +2332,8 @@ async fn try_recover_finalize_intent(
             Some(intent.final_path.clone()),
         );
     }
-    if let Err(e) = ensure_final_file_durable(&final_path).await {
-        tracing::error!(
-            "finalize intent 恢复前 fsync 失败，保留 intent/active 待重试: {transfer_id}, {e}"
-        );
-        return Err(AppError::unavailable(format!(
-            "最终文件已落地但 durability 未完成，请重试 complete: {transfer_id}: {e}"
-        )));
-    }
+    // promote 内部 certify；此处不再 close-then-reopen 按路径 fsync（身份切换窗口）。
+    let _ = final_path;
     promote_completed_to_durable(state, transfer_id, &task).await?;
     Ok(Some(ChunkResp {
         success: true,
@@ -2557,7 +2574,8 @@ async fn commit_tmp_to_final_no_replace(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     place 成功或崩溃恢复晋升 history 前，必须保证最终普通文件与父目录项已进入稳定存储。
+///     place 成功后的即时 fsync：最终普通文件与父目录项进入稳定存储。
+///     **不得**单独用于 Completed history 晋升：路径 reopen 无法抵御普通文件替换。
 ///
 /// Code Logic（这个函数做什么）:
 ///     no-follow sync 最终普通文件，再 fsync 其父目录；任一步失败上抛。
@@ -2567,6 +2585,547 @@ async fn ensure_final_file_durable(final_path: &Path) -> Result<(), AppError> {
         fsync_dir(parent)?;
     }
     Ok(())
+}
+
+/// 绑定文件身份：用于 durability 晋升前确认父目录项仍指向同一普通文件。
+///
+/// Business Logic（为什么需要这个结构）:
+///     durability 失败与重试之间，最终路径上的普通文件可被原子替换；仅 no-follow open
+///     会通过，但内容/身份已变，不能再按原始 size/SHA 写 Completed history。
+///
+/// Code Logic（这个结构做什么）:
+///     Unix 存 (dev,ino)；Windows 存 (volume_serial, file_index)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BoundFileIdentity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(windows)]
+    volume_serial: u32,
+    #[cfg(windows)]
+    file_index: u64,
+    #[cfg(not(any(unix, windows)))]
+    _marker: u8,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     从已打开的普通文件句柄读取稳定身份，供 fsync 后与父目录项对照。
+///
+/// Code Logic（这个函数做什么）:
+///     Unix: fstat → (st_dev, st_ino)；Windows: GetFileInformationByHandle →
+///     (volume_serial_number, file_index_high<<32|file_index_low)。
+fn file_identity_from_std(file: &std::fs::File) -> Result<BoundFileIdentity, AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = file.metadata().map_err(AppError::from)?;
+        Ok(BoundFileIdentity {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        type BOOL = i32;
+        type DWORD = u32;
+        type HANDLE = *mut std::ffi::c_void;
+
+        #[repr(C)]
+        struct ByHandleFileInformation {
+            file_attributes: DWORD,
+            creation_time: u64,
+            last_access_time: u64,
+            last_write_time: u64,
+            volume_serial_number: DWORD,
+            file_size_high: DWORD,
+            file_size_low: DWORD,
+            number_of_links: DWORD,
+            file_index_high: DWORD,
+            file_index_low: DWORD,
+        }
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetFileInformationByHandle(
+                h_file: HANDLE,
+                lp_file_information: *mut ByHandleFileInformation,
+            ) -> BOOL;
+        }
+
+        let mut info = unsafe { std::mem::zeroed::<ByHandleFileInformation>() };
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) };
+        if ok == 0 {
+            return Err(AppError::from(std::io::Error::last_os_error()));
+        }
+        let file_index = ((info.file_index_high as u64) << 32) | (info.file_index_low as u64);
+        Ok(BoundFileIdentity {
+            volume_serial: info.volume_serial_number,
+            file_index,
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        Err(AppError::from(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "当前平台无法读取文件身份",
+        )))
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     fsync 后必须通过父目录 HANDLE/fd 再次打开同名目录项，证明仍是同一 inode/file id。
+///
+/// Code Logic（这个函数做什么）:
+///     Unix: open 父目录 O_DIRECTORY → openat(O_NOFOLLOW|O_RDONLY) → fstat 身份；
+///     Windows: CreateFileW 打开父目录（BACKUP_SEMANTICS|OPEN_REPARSE_POINT，拒绝 reparse）
+///     → NtCreateFile 相对 basename 打开普通文件 → GetFileInformationByHandle。
+fn dirent_identity_via_parent(final_path: &Path) -> Result<BoundFileIdentity, AppError> {
+    let parent = final_path.parent().ok_or_else(|| {
+        AppError::validation(format!(
+            "最终路径无父目录，无法确认目录项身份: {}",
+            final_path.display()
+        ))
+    })?;
+    let name = final_path.file_name().ok_or_else(|| {
+        AppError::validation(format!(
+            "最终路径无文件名，无法确认目录项身份: {}",
+            final_path.display()
+        ))
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+
+        let parent_c = CString::new(parent.as_os_str().as_bytes())
+            .map_err(|_| AppError::validation("父目录路径含内部 NUL"))?;
+        let name_c = CString::new(name.as_bytes())
+            .map_err(|_| AppError::validation("最终文件名含内部 NUL"))?;
+        let parent_fd = unsafe {
+            libc::open(
+                parent_c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if parent_fd < 0 {
+            return Err(AppError::from(std::io::Error::last_os_error()));
+        }
+        let parent_file = unsafe { std::fs::File::from_raw_fd(parent_fd) };
+        let child_fd = unsafe {
+            libc::openat(
+                parent_file.as_raw_fd(),
+                name_c.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if child_fd < 0 {
+            let err = std::io::Error::last_os_error();
+            return Err(AppError::from(std::io::Error::new(
+                err.kind(),
+                format!(
+                    "经父目录确认最终文件身份失败 {}: {err}",
+                    final_path.display()
+                ),
+            )));
+        }
+        let child = unsafe { std::fs::File::from_raw_fd(child_fd) };
+        let id = file_identity_from_std(&child)?;
+        drop(child);
+        drop(parent_file);
+        Ok(id)
+    }
+
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+        use std::mem::{size_of, zeroed};
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+        use std::ptr;
+
+        type BOOL = i32;
+        type DWORD = u32;
+        type HANDLE = *mut c_void;
+        type NTSTATUS = i32;
+        type ULONG = u32;
+        type USHORT = u16;
+        type ACCESS_MASK = u32;
+
+        const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
+        const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: DWORD = 0x0020_0000;
+        const FILE_SHARE_READ: DWORD = 0x1;
+        const FILE_SHARE_WRITE: DWORD = 0x2;
+        const FILE_SHARE_DELETE: DWORD = 0x4;
+        const OPEN_EXISTING: DWORD = 3;
+        const GENERIC_READ: DWORD = 0x8000_0000;
+        const FILE_LIST_DIRECTORY: ACCESS_MASK = 0x0001;
+        const FILE_READ_ATTRIBUTES: ACCESS_MASK = 0x0080;
+        const SYNCHRONIZE: ACCESS_MASK = 0x0010_0000;
+        const FILE_OPEN: ULONG = 0x0000_0001;
+        const FILE_NON_DIRECTORY_FILE: ULONG = 0x0000_0040;
+        const FILE_SYNCHRONOUS_IO_NONALERT: ULONG = 0x0000_0020;
+        const FILE_OPEN_REPARSE_POINT: ULONG = 0x0020_0000;
+        const OBJ_CASE_INSENSITIVE: ULONG = 0x0000_0040;
+        const FILE_ATTRIBUTE_DIRECTORY: DWORD = 0x10;
+        const FILE_ATTRIBUTE_REPARSE_POINT: DWORD = 0x400;
+
+        #[repr(C)]
+        struct UnicodeString {
+            length: USHORT,
+            maximum_length: USHORT,
+            buffer: *mut u16,
+        }
+        #[repr(C)]
+        struct ObjectAttributes {
+            length: ULONG,
+            root_directory: HANDLE,
+            object_name: *mut UnicodeString,
+            attributes: ULONG,
+            security_descriptor: *mut c_void,
+            security_quality_of_service: *mut c_void,
+        }
+        #[repr(C)]
+        struct IoStatusBlock {
+            status: NTSTATUS,
+            information: usize,
+        }
+        #[repr(C)]
+        struct ByHandleFileInformation {
+            file_attributes: DWORD,
+            creation_time: u64,
+            last_access_time: u64,
+            last_write_time: u64,
+            volume_serial_number: DWORD,
+            file_size_high: DWORD,
+            file_size_low: DWORD,
+            number_of_links: DWORD,
+            file_index_high: DWORD,
+            file_index_low: DWORD,
+        }
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CreateFileW(
+                lp_file_name: *const u16,
+                dw_desired_access: DWORD,
+                dw_share_mode: DWORD,
+                lp_security_attributes: *mut c_void,
+                dw_creation_disposition: DWORD,
+                dw_flags_and_attributes: DWORD,
+                h_template_file: HANDLE,
+            ) -> HANDLE;
+            fn GetFileInformationByHandle(
+                h_file: HANDLE,
+                lp_file_information: *mut ByHandleFileInformation,
+            ) -> BOOL;
+        }
+        #[link(name = "ntdll")]
+        extern "system" {
+            fn NtCreateFile(
+                file_handle: *mut HANDLE,
+                desired_access: ACCESS_MASK,
+                object_attributes: *mut ObjectAttributes,
+                io_status_block: *mut IoStatusBlock,
+                allocation_size: *mut i64,
+                file_attributes: ULONG,
+                share_access: ULONG,
+                create_disposition: ULONG,
+                create_options: ULONG,
+                ea_buffer: *mut c_void,
+                ea_length: ULONG,
+            ) -> NTSTATUS;
+            fn RtlNtStatusToDosError(status: NTSTATUS) -> DWORD;
+        }
+
+        fn to_wide(path: &Path) -> Result<Vec<u16>, AppError> {
+            let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+            if wide.iter().any(|&u| u == 0) {
+                return Err(AppError::validation("路径含内部 NUL".to_string()));
+            }
+            wide.push(0);
+            Ok(wide)
+        }
+        fn name_to_wide(name: &std::ffi::OsStr) -> Result<Vec<u16>, AppError> {
+            let mut wide: Vec<u16> = name.encode_wide().collect();
+            if wide.is_empty() || wide.iter().any(|&u| u == 0) {
+                return Err(AppError::validation("相对路径名非法".to_string()));
+            }
+            wide.push(0);
+            Ok(wide)
+        }
+
+        let parent_wide = to_wide(parent)?;
+        let mut name_wide = name_to_wide(name)?;
+        let parent_raw = unsafe {
+            CreateFileW(
+                parent_wide.as_ptr(),
+                GENERIC_READ | FILE_LIST_DIRECTORY,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                ptr::null_mut(),
+            )
+        };
+        if parent_raw.is_null() || parent_raw == INVALID_HANDLE_VALUE {
+            return Err(AppError::from(std::io::Error::last_os_error()));
+        }
+        let parent_handle = unsafe { OwnedHandle::from_raw_handle(parent_raw as RawHandle) };
+        let mut pinfo: ByHandleFileInformation = unsafe { zeroed() };
+        let pok = unsafe {
+            GetFileInformationByHandle(parent_handle.as_raw_handle() as HANDLE, &mut pinfo)
+        };
+        if pok == 0 {
+            return Err(AppError::from(std::io::Error::last_os_error()));
+        }
+        if pinfo.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+            || pinfo.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(AppError::validation(
+                "父目录不是普通目录（reparse/非目录），拒绝确认身份".to_string(),
+            ));
+        }
+
+        let name_units = name_wide.len().saturating_sub(1);
+        let byte_len = name_units * 2;
+        if byte_len > u16::MAX as usize {
+            return Err(AppError::validation("相对路径名过长".to_string()));
+        }
+        let mut unicode = UnicodeString {
+            length: byte_len as USHORT,
+            maximum_length: (byte_len + 2) as USHORT,
+            buffer: name_wide.as_mut_ptr(),
+        };
+        let mut attrs = ObjectAttributes {
+            length: size_of::<ObjectAttributes>() as ULONG,
+            root_directory: parent_handle.as_raw_handle() as HANDLE,
+            object_name: &mut unicode,
+            attributes: OBJ_CASE_INSENSITIVE,
+            security_descriptor: ptr::null_mut(),
+            security_quality_of_service: ptr::null_mut(),
+        };
+        let mut iosb: IoStatusBlock = unsafe { zeroed() };
+        let mut out: HANDLE = ptr::null_mut();
+        let status = unsafe {
+            NtCreateFile(
+                &mut out,
+                GENERIC_READ | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                &mut attrs,
+                &mut iosb,
+                ptr::null_mut(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_OPEN,
+                FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if status < 0 {
+            let dos = unsafe { RtlNtStatusToDosError(status) };
+            return Err(AppError::from(std::io::Error::from_raw_os_error(
+                dos as i32,
+            )));
+        }
+        if out.is_null() || out == INVALID_HANDLE_VALUE {
+            return Err(AppError::generic(
+                "NtCreateFile 返回无效 HANDLE（dirent 身份确认）".to_string(),
+            ));
+        }
+        let child = unsafe { OwnedHandle::from_raw_handle(out as RawHandle) };
+        let mut cinfo: ByHandleFileInformation = unsafe { zeroed() };
+        let cok =
+            unsafe { GetFileInformationByHandle(child.as_raw_handle() as HANDLE, &mut cinfo) };
+        if cok == 0 {
+            return Err(AppError::from(std::io::Error::last_os_error()));
+        }
+        if cinfo.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+            || cinfo.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(AppError::validation(
+                "最终目录项不是普通文件（reparse/目录）".to_string(),
+            ));
+        }
+        let file_index = ((cinfo.file_index_high as u64) << 32) | (cinfo.file_index_low as u64);
+        Ok(BoundFileIdentity {
+            volume_serial: cinfo.volume_serial_number,
+            file_index,
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (parent, name);
+        Err(AppError::from(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "当前平台无法经父目录确认文件身份",
+        )))
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Completed history 晋升（含 DurabilityPending 重试与 intent 恢复）前，必须证明路径上的
+///     普通文件仍是原始传输内容，且 fsync 作用在该同一句柄上。若仅按路径 reopen+fsync，
+///     替换后的同尺寸普通文件会静默通过 no-follow 并被认证为成功。
+///
+/// Code Logic（这个函数做什么）:
+///     1) no-follow 打开普通文件句柄；
+///     2) 读 len，流式 SHA256（同一句柄）；
+///     3) 与 expected size/sha 比对；
+///     4) 同一句柄 sync_all；
+///     5) fsync 父目录；
+///     6) 经父目录 HANDLE/fd 重新打开目录项，比对 file id/inode，不一致则拒绝晋升。
+async fn certify_final_file_for_history(
+    final_path: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<(), AppError> {
+    let path = final_path.to_path_buf();
+    let expected_sha = expected_sha256.to_string();
+    tokio::task::spawn_blocking(move || {
+        certify_final_file_for_history_blocking(&path, expected_size, &expected_sha)
+    })
+    .await
+    .map_err(|e| AppError::generic(format!("certify_final_file_for_history join 失败: {e}")))?
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     certify 的同步实现，在 blocking 线程持有文件句柄完成 hash/fsync/身份确认。
+///
+/// Code Logic（这个函数做什么）:
+///     见 `certify_final_file_for_history`。
+fn certify_final_file_for_history_blocking(
+    final_path: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<(), AppError> {
+    use std::io::Read;
+
+    // 同步 no-follow 打开（与 open_regular_file_nofollow 语义对齐）。
+    let std_file = open_regular_file_nofollow_std(final_path, false)?;
+    let meta = std_file.metadata().map_err(AppError::from)?;
+    if meta.len() != expected_size {
+        return Err(AppError::validation(format!(
+            "最终文件长度与任务不一致: path={}, len={}, expected={expected_size}",
+            final_path.display(),
+            meta.len()
+        )));
+    }
+    let bound_id = file_identity_from_std(&std_file)?;
+
+    // 同一句柄流式 SHA256。
+    let mut file = std_file;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 8192];
+    // 从头读：open 后默认 offset=0。
+    loop {
+        let n = file.read(&mut buf).map_err(AppError::from)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if actual != expected_sha256 {
+        return Err(AppError::validation(format!(
+            "最终文件 SHA256 与任务不一致（可能被替换）: path={}, actual={actual}, expected={expected_sha256}",
+            final_path.display()
+        )));
+    }
+
+    // 同一句柄 fsync。
+    file.sync_all().map_err(AppError::from)?;
+    if let Some(parent) = final_path.parent() {
+        fsync_dir(parent)?;
+    }
+
+    // 经父目录重新打开目录项，确认仍是同一 file id/inode。
+    let dirent_id = dirent_identity_via_parent(final_path)?;
+    if dirent_id != bound_id {
+        return Err(AppError::validation(format!(
+            "最终文件目录项身份已变化（可能被原子替换），拒绝写 Completed history: {}",
+            final_path.display()
+        )));
+    }
+    // 保持 file 活到身份确认之后，缩小替换窗口。
+    drop(file);
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     certify 在 blocking 上下文需要同步 no-follow 打开，避免 async runtime 跨 await 丢句柄。
+///
+/// Code Logic（这个函数做什么）:
+///     与 `open_regular_file_nofollow` 相同平台语义，返回 `std::fs::File`。
+fn open_regular_file_nofollow_std(path: &Path, writable: bool) -> Result<std::fs::File, AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true).custom_flags(libc::O_NOFOLLOW);
+        if writable {
+            opts.write(true);
+        }
+        let std_file = opts.open(path).map_err(|e| {
+            if e.kind() == ErrorKind::Other
+                || e.raw_os_error() == Some(libc::ELOOP)
+                || e.raw_os_error() == Some(libc::EPERM)
+            {
+                std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("拒绝跟随符号链接打开: {}: {e}", path.display()),
+                )
+            } else {
+                e
+            }
+        })?;
+        let meta = std_file.metadata()?;
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            return Err(AppError::from(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("目标不是普通文件: {}", path.display()),
+            )));
+        }
+        Ok(std_file)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        if writable {
+            opts.write(true);
+        }
+        let std_file = opts.open(path)?;
+        let meta = std_file.metadata()?;
+        let ft = meta.file_type();
+        if ft.is_symlink()
+            || !ft.is_file()
+            || (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+        {
+            return Err(AppError::from(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("目标不是普通文件: {}", path.display()),
+            )));
+        }
+        Ok(std_file)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, writable);
+        Err(AppError::from(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "当前平台无法 no-follow 打开文件",
+        )))
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -5148,12 +5707,15 @@ mod tests {
 
     /// Business Logic（为什么需要这个测试）:
     ///     Windows intent 写入不得在校验后再用绝对 path create/rename/delete，
-    ///     否则 intent 目录可被换成 junction 导致写出 receive_dir。
+    ///     否则 intent 目录可被换成 junction 导致写出 receive_dir；rename 也不得
+    ///     用错 API 信息类或 RootDirectory=NULL（basename 会相对进程 CWD）。
     ///
     /// Code Logic（这个测试做什么）:
     ///     源码契约：存在 write_finalize_intent_windows_handle；函数内使用 NtCreateFile /
-    ///     FILE_OPEN_REPARSE_POINT / SetFileInformationByHandle；write_finalize_intent 的
-    ///     Windows 分支调用该 helper，且不再调用 ensure_regular_intent_dir /
+    ///     FILE_OPEN_REPARSE_POINT / NtSetInformationFile(FileRenameInformation=10) 且
+    ///     RootDirectory 绑定 intent 目录 HANDLE（非 null）；禁止 SetFileInformationByHandle
+    ///     与 RootDirectory=null_mut 的 rename 路径；write_finalize_intent 的 Windows 分支
+    ///     调用该 helper，且不再调用 ensure_regular_intent_dir /
     ///     write_bytes_create_new_nofollow / tokio::fs::rename。
     #[test]
     fn windows_intent_write_uses_directory_handle_relative_ops_source_contract() {
@@ -5188,8 +5750,38 @@ mod tests {
             "必须 OPEN_REPARSE_POINT 后拒绝 reparse/junction"
         );
         assert!(
-            write_body.contains("SetFileInformationByHandle"),
-            "rename 必须 SetFileInformationByHandle 相对同一目录"
+            write_body.contains("NtSetInformationFile"),
+            "rename 必须 NtSetInformationFile(FileRenameInformation=10)，非 SetFileInformationByHandle"
+        );
+        assert!(
+            write_body.contains("FILE_RENAME_INFORMATION_CLASS: ULONG = 10")
+                || write_body.contains("const FILE_RENAME_INFORMATION_CLASS: ULONG = 10"),
+            "FileRenameInformation class 必须为 10（Nt 路径）"
+        );
+        // rename_relative 必须把 intent_dir 写入 root_directory，禁止 null_mut。
+        let rename_fn = write_body
+            .split("unsafe fn rename_relative")
+            .nth(1)
+            .expect("应存在 rename_relative");
+        let rename_body = rename_fn
+            .split("let receive_wide")
+            .next()
+            .expect("rename_relative 应在 receive_wide 前结束");
+        assert!(
+            rename_body.contains("root_directory = intent_dir")
+                || rename_body.contains("(*info).root_directory = intent_dir"),
+            "RootDirectory 必须绑定 intent 目录 HANDLE"
+        );
+        assert!(
+            !rename_body.contains("root_directory = ptr::null_mut()")
+                && !rename_body.contains("root_directory = std::ptr::null_mut()"),
+            "禁止 RootDirectory=NULL（basename 会相对 CWD）"
+        );
+        // 生产路径不得声明/调用 Win32 SetFile* rename API（注释中的禁令除外，用 Nt 判定）。
+        assert!(
+            !write_body.contains("fn SetFileInformationByHandle")
+                && !write_body.contains("SetFileInformationByHandle("),
+            "禁止声明或调用 SetFileInformationByHandle 做 rename（信息类错误）"
         );
         assert!(
             write_body.contains("FILE_FLAG_BACKUP_SEMANTICS"),
@@ -5224,6 +5816,89 @@ mod tests {
         assert!(
             !write_intent_body.contains("write_bytes_create_new_nofollow"),
             "write_finalize_intent 不得再 path create_new 写 intent tmp"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     DurabilityPending 重试若只按路径 reopen+fsync，普通文件被原子替换后仍可能
+    ///     用原始 size/SHA 写 Completed history，造成静默数据丢失。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入原始内容并 certify 成功；再原子 rename 替换为另一普通文件（不同 SHA），
+    ///     再 certify 必须失败；源码契约要求 promote 走 certify_final_file_for_history。
+    #[test]
+    fn certify_final_file_rejects_ordinary_file_replacement() {
+        let dir = unique_temp_dir();
+        let final_path = dir.join("payload.bin");
+        let original = b"original-transfer-bytes-v1";
+        fs::write(&final_path, original).unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(original);
+        let sha = format!("{:x}", hasher.finalize());
+        let size = original.len() as u64;
+
+        certify_final_file_for_history_blocking(&final_path, size, &sha)
+            .expect("原始文件应通过 handle-bound certify");
+
+        // 原子替换：另一普通文件覆盖同名目录项（同尺寸不同内容）。
+        let mut replacement = b"REPLACED-BY-RACE-CONTENT".to_vec();
+        while replacement.len() < original.len() {
+            replacement.push(b'X');
+        }
+        replacement.truncate(original.len());
+        assert_ne!(&replacement[..], &original[..]);
+        let swap = dir.join("payload.bin.swap");
+        fs::write(&swap, &replacement).unwrap();
+        fs::rename(&swap, &final_path).unwrap();
+
+        let err = certify_final_file_for_history_blocking(&final_path, size, &sha)
+            .expect_err("替换后的普通文件不得用原 SHA 认证成功");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SHA256")
+                || msg.contains("身份")
+                || msg.contains("替换")
+                || msg.contains("不一致"),
+            "错误应说明内容/身份不匹配: {msg}"
+        );
+
+        // 源码契约：promote 必须调用 certify，而非仅 ensure_final_file_durable。
+        let src = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/transfer/receiver.rs"
+        ));
+        let promote = src
+            .split("async fn promote_completed_to_durable")
+            .nth(1)
+            .expect("应存在 promote_completed_to_durable");
+        let promote_body = promote
+            .split("/// Business Logic（为什么需要这个函数）:")
+            .next()
+            .expect("promote 函数体应在下一 Business Logic 前结束");
+        assert!(
+            promote_body.contains("certify_final_file_for_history"),
+            "promote 写 history 前必须 certify_final_file_for_history"
+        );
+        // Completed 重试分支不得只调 ensure_final_file_durable 后直接 promote。
+        let finalize = src
+            .split("pub async fn finalize_transfer")
+            .nth(1)
+            .expect("应存在 finalize_transfer");
+        let completed_retry = finalize
+            .split("if task.status == TransferStatus::Completed")
+            .nth(1)
+            .expect("应存在 Completed 重试分支");
+        let completed_retry_body = completed_retry
+            .split("let tmp_path")
+            .next()
+            .expect("Completed 分支应在 tmp_path 前结束");
+        assert!(
+            !completed_retry_body.contains("ensure_final_file_durable"),
+            "Completed 重试不得仅 ensure_final_file_durable（缺身份确认）"
+        );
+        assert!(
+            completed_retry_body.contains("promote_completed_to_durable"),
+            "Completed 重试应直接 promote（内部 certify）"
         );
     }
 
