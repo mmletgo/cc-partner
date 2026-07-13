@@ -13,6 +13,7 @@
 
 use crate::claude_cli;
 use crate::config::GithubTrendingConfig;
+use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
 use crate::error::AppError;
 use crate::state::AppState;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -138,20 +139,21 @@ pub async fn get_default_github_trending_config() -> Result<GithubTrendingConfig
     Ok(config_to_dto(&GithubTrendingConfig::default()))
 }
 
-/// 更新 GitHub Trending / Claude 解说配置。
+/// 在 ConfigRuntime 上应用 GitHub Trending patch。
 ///
-/// Business Logic: 用户在设置页应用配置后需落盘，下次首页刷新立即按新配置生效。
-/// Code Logic: 取写锁应用 patch；对数值做保守下限/上限；保存 config.json；返回最新 DTO。
-#[tauri::command]
-pub async fn update_github_trending_config(
-    state: State<'_, AppState>,
+/// Business Logic（为什么需要这个函数）:
+///     AI tab 保存配置需事务落盘，失败回滚；helper 便于命令与回滚单测共用。
+///
+/// Code Logic（这个函数做什么）:
+///     事务内应用 patch（路径/模型空串回默认，TTL clamp 1..168），返回提交后 DTO。
+pub async fn update_github_trending_config_for_runtime(
+    runtime: &ConfigRuntime,
     ai_enabled: Option<bool>,
     claude_cli_path: Option<String>,
     claude_model: Option<String>,
     cache_ttl_hours: Option<i64>,
 ) -> Result<GithubTrendingConfigDto, AppError> {
-    {
-        let mut cfg = state.config.write().unwrap();
+    let (_committed, dto) = update_config_transactionally(runtime, |cfg| {
         if let Some(enabled) = ai_enabled {
             cfg.github_trending.ai_enabled = enabled;
         }
@@ -172,11 +174,32 @@ pub async fn update_github_trending_config(
         if let Some(hours) = cache_ttl_hours {
             cfg.github_trending.cache_ttl_hours = hours.clamp(1, 168);
         }
-        cfg.save()?;
-    }
+        Ok(config_to_dto(&cfg.github_trending))
+    })
+    .await?;
+    Ok(dto)
+}
 
-    let cfg = state.config.read().unwrap();
-    Ok(config_to_dto(&cfg.github_trending))
+/// 更新 GitHub Trending / Claude 解说配置。
+///
+/// Business Logic: 用户在设置页应用配置后需落盘，下次首页刷新立即按新配置生效。
+/// Code Logic: 委托 ConfigRuntime 事务 helper 应用 patch 并返回最新 DTO。
+#[tauri::command]
+pub async fn update_github_trending_config(
+    state: State<'_, AppState>,
+    ai_enabled: Option<bool>,
+    claude_cli_path: Option<String>,
+    claude_model: Option<String>,
+    cache_ttl_hours: Option<i64>,
+) -> Result<GithubTrendingConfigDto, AppError> {
+    update_github_trending_config_for_runtime(
+        &state.config_runtime,
+        ai_enabled,
+        claude_cli_path,
+        claude_model,
+        cache_ttl_hours,
+    )
+    .await
 }
 
 /// 测试 Claude Code CLI 是否可用。
@@ -851,5 +874,70 @@ mod tests {
             .expect("some");
         assert_eq!(loaded.repos[0].full_name, "owner/repo");
         assert_eq!(loaded.ai_status, "ready");
+    }
+}
+
+
+#[cfg(test)]
+mod config_writer_tests {
+    use super::*;
+    use crate::config::{
+        AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+    };
+    use crate::config_store::MemoryConfigStore;
+    use std::sync::Arc;
+
+    fn sample_config() -> AppConfig {
+        AppConfig {
+            device_id: "dev-gt-1".into(),
+            device_name: "gt-device".into(),
+            http_port: 0,
+            receive_dir: "/tmp/recv".into(),
+            db_path: "/tmp/db.db".into(),
+            screenshot_hotkey: "<ctrl>+s".into(),
+            prompt_optimizer_hotkey: "<ctrl>".into(),
+            prompt_optimizer_fill_language: "zh".into(),
+            cloud_sync_repo_url: None,
+            cloud_sync_enabled: false,
+            cloud_sync_auto: false,
+            cloud_sync_interval_secs: 600,
+            cloud_sync_branch: None,
+            health: HealthConfig::default(),
+            orchestrator: OrchestratorAutomationConfig::default(),
+            github_trending: GithubTrendingConfig {
+                ai_enabled: false,
+                claude_cli_path: "claude".into(),
+                claude_model: "sonnet".into(),
+                cache_ttl_hours: 24,
+            },
+        }
+    }
+
+    /// 验证 GitHub Trending 配置 save 失败回滚。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     AI tab 保存失败时不得半提交 ai_enabled。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     fail_next_save 后打开 ai_enabled，断言 Err 且 snapshot 仍 false。
+    #[tokio::test]
+    async fn save_failure_rolls_back() {
+        let initial = sample_config();
+        let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
+        store.fail_next_save();
+        let runtime = ConfigRuntime::new(initial, store.clone());
+
+        let err = update_github_trending_config_for_runtime(
+            &runtime,
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("should fail");
+        assert!(err.to_string().contains("注入故障"));
+        assert!(!runtime.snapshot().unwrap().github_trending.ai_enabled);
+        assert!(!store.snapshot().unwrap().github_trending.ai_enabled);
     }
 }

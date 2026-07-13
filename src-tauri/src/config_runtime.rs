@@ -49,7 +49,6 @@ impl ConfigRuntime {
     ///
     /// Code Logic（这个函数做什么）:
     ///     clone `Arc<RwLock<AppConfig>>`。
-    #[allow(dead_code)]
     pub fn shared_value(&self) -> Arc<RwLock<AppConfig>> {
         Arc::clone(&self.value)
     }
