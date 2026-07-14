@@ -72,6 +72,17 @@ export type WorkbenchMutationEnvelope<T> =
   | { kind: 'unknown'; clientOperationId: string; transportClass?: 'timeout' | 'network' }
 ```
 
+## Task Dependency Graph
+
+```text
+T1 → (T2 | T3 | T4 | T5)
+T5 → T6
+(T5, T6) → T7
+(T2, T3, T4, T7) → T8
+```
+
+`T2–T5` 可在独立 task worktree 并行，最多四个 implementer；`T6/T7` 消费 mutation ledger/transport，`T8` 统一触达反馈组件、i18n 与持久合同，必须最后集成。
+
 ### Task 1: Implement Pure Save and Operation Context Contracts
 
 **Files:**

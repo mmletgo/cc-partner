@@ -45,6 +45,14 @@
 
 Each execution binds stable id, full 40-character `subjectCommit`, exact Tauri version, RC workflow run id, `artifactMatrixId`, package filename/SHA, redacted device class, exact macOS build, executor identifier, RFC3339 executed/expires timestamps, checklist result and relative artifact SHA. `evidenceCommit` is resolved from the protected evidence ref and is not embedded in the manifest.
 
+## Task Dependency Graph
+
+```text
+T1 → T2 → T3 → T4 → T5 → T6
+```
+
+基础设施进入 subject 后才能 freeze；GUI evidence 是 VoiceOver 前置，go/no-go 消费两项 execution，发布只可在 frozen bundle 后作为获授权的最后动作，故全部串行。
+
 ### Task 1: Land the macOS arm64 Beta Certification Infrastructure
 
 **Files:** Follow the File Structure above except real evidence directories.

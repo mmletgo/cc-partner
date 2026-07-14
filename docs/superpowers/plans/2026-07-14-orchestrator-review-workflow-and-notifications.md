@@ -57,6 +57,14 @@ pub struct WorkflowDocument {
 }
 ```
 
+## Task Dependency Graph
+
+```text
+T1 → T2 → T3 → T4 → T5 → T6 → T7
+```
+
+diff、route、delivery digest、WORKFLOW API/UI 与 operational events 依次扩展相同 orchestrator/remote/UI 合同；共享写集和用户旅程不可交换，故本 Plan 串行。
+
 ### Task 1: Extract a Bounded Review Diff Snapshot from the Verifier
 
 **Files:**

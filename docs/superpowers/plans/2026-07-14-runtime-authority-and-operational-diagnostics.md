@@ -54,6 +54,14 @@ pub struct ConfigUpdateRequest {
 
 `RuntimeConfigPatch` uses `deny_unknown_fields` and an explicit allowlist; GUI theme/window and N4 `gui-bootstrap.json` never enter this DTO. Small control JSON body ≤256 KiB and ordinary metadata response ≤1 MiB; event lines retain the separate 1 MiB stream limit. Workbench data-plane routes are separate: text files ≤5 MiB, image/HTML preview ≤10 MiB and browser bodies ≤32 MiB, using streamed/binary bodies rather than JSON/base64 amplification.
 
+## Task Dependency Graph
+
+```text
+T1 → T2 → T3 → T4 → T5 → T6 → T7
+```
+
+控制描述符、CAS、GUI client、Workbench owner、event relay 与 diagnostics 依次扩展同一 control/runtime 写集，必须串行；任务内只可并行运行彼此隔离的测试/实现子步骤。
+
 ### Task 1: Establish Runtime Role and Versioned Control Descriptor
 
 **Files:**

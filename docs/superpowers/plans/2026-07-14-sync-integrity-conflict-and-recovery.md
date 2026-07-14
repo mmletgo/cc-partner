@@ -60,6 +60,14 @@ pub enum SyncDomainOutcome {
 }
 ```
 
+## Task Dependency Graph
+
+```text
+T1 → T2 → T3 → T4 → T5 → T6 → T7
+```
+
+typed protocol、事务 ledger、truth aggregation、冲突/水位与 maintenance gate 逐层消费前序 schema/route；共享 sync/storage/runtime 写集不可交换，故本 Plan 串行。
+
 ### Task 1: Define the Pure Sync Plan Protocol and Limits
 
 **Files:**

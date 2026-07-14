@@ -15,7 +15,7 @@
 - 同一 clientOperationId 不得创建重复 attempt；request ID 仅追踪；unknown mutation 必须先对账。
 - Open/Reveal 只允许 same-device desktop GUI 打开本机收到的 completed 文件；P2P/mobile unsupported。
 - 旧 peer 无 resume capability 时只提供 retry，不显示假续传。
-- 1 GiB 真正 resume 只在 N8 L3 后标 PASS。
+- 1 GiB 真正 resume 只在未来 dual-host L3 真机执行后标 PASS；当前 Mac-only N8 保持 `NOT VERIFIED`。
 
 ---
 
@@ -51,6 +51,14 @@ pub enum TransferOperationStatus { NotFound, Pending, Succeeded { task_id: Strin
 ```
 
 Every sender-side durable attempt stores `client_operation_id`, canonical `operation_payload_hash`, `logical_transfer_id`, `attempt_id`, and `protocol_transfer_id`; resume preserves the protocol id, while a full retry may mint a new one. `request_id` remains trace-only. Receiver durability is keyed only by `protocol_transfer_id`.
+
+## Task Dependency Graph
+
+```text
+T1 → T2 → T3 → T4 → T5 → T6 → T7
+```
+
+schema、retry/resume、uncertain reconciliation、local opener、TS schema/API 与 UI action matrix 逐层消费前序合同，并共享 transfer command/repo/API 写集，必须串行。
 
 ### Task 1: Persist Compatible Phase, Failure, Logical/Attempt/Protocol IDs, and Client Operation ID
 
@@ -351,7 +359,7 @@ git commit -m "feat(transfer): complete recovery actions"
 
 - [ ] **Step 1: Document capabilities, retry matrix and L3 handoff**
 
-Record old-peer fallback, client-operation idempotency versus trace request ID, stable resume protocol id, source fingerprint checks, same-device GUI Open/Reveal rule and that 1 GiB remains N8 until executed.
+Record old-peer fallback, client-operation idempotency versus trace request ID, stable resume protocol id, source fingerprint checks, same-device GUI Open/Reveal rule and that 1 GiB remains in the deferred dual-host L3 backlog until executed.
 
 - [ ] **Step 2: Run full gates**
 
@@ -377,7 +385,7 @@ Expected: all exit 0.
 
 Review tests/logs proving retry/reconcile does not invoke final rename twice or accept mismatched hash.
 
-- [ ] **Step 4: Record N8 prerequisites**
+- [ ] **Step 4: Record the deferred dual-host L3 prerequisite**
 
 Add the exact 1 GiB disconnect/restart/resume/SHA scenario to real-device certification without marking PASS.
 

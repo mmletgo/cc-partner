@@ -86,7 +86,7 @@ pub struct TransferFailure {
 3. 源 fingerprint 变化拒绝 resume；旧 peer 正确回退 retry。
 4. 每个 phase 只渲染合法动作，TransferItem callback 缺失时动作不存在。
 5. Open/Reveal 成功、文件缺失、权限失败、GUI control owner offline 与 mobile/P2P unsupported 均有 typed 结果。
-6. 1 GiB 中途断网、进程重启、恢复完成与 SHA-256 一致性进入 N8 L3。
+6. 1 GiB 中途断网、进程重启、恢复完成与 SHA-256 一致性进入未来 dual-host L3；当前 Mac-only N8 保持 `NOT VERIFIED`。
 
 ## 9. 持久文档
 
@@ -96,4 +96,4 @@ pub struct TransferFailure {
 
 - send/cancel 与 durable finalize 不重做；只补恢复和结果闭环。
 - retry、resume、uncertain、open/reveal 的动作条件没有歧义。
-- 真实大文件续传只在 N8 取得真机证据后宣称通过。
+- 真实大文件续传只在未来 dual-host L3 取得真机证据后宣称通过；不由当前 `macos-aarch64-beta` 推定。

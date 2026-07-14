@@ -111,7 +111,7 @@ GUI 首次启动 → build/manage state + 创建窗口/读取本地设置 → Ap
 3. 720px 高侧栏无 footer overlap，键盘可到达所有 nav/project 动作。
 4. 无项目 Workbench 不渲染禁用工具栏和空 inspector，只显示三个动作。
 5. 首次未确认不由 GUI ensure sidecar；确认后只启动一次；升级 disclosureVersion 才重新提示；升级用户和 Welcome 跳过路径同样受守卫约束。
-6. 固定四个 viewport 通过全页 layout assertions 与命名截图评审；移动软键盘/safe-area 在 N8 真机验证。
+6. 固定四个 viewport 通过全页 layout assertions 与命名截图评审；物理移动端软键盘/safe-area 保持 `NOT VERIFIED`，进入 N8 延期认证 backlog。
 7. token 对比度自动检查普通正文组合不低于 4.5:1。
 
 ## 10. 持久文档

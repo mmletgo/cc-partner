@@ -52,6 +52,16 @@ pub struct ClaudeIndexBudget {
 }
 ```
 
+## Task Dependency Graph
+
+```text
+T1 → (T2 | T3 | T4 | T6 | T7)
+T4 → T5
+(T2, T3, T5, T6, T7) → T8
+```
+
+基线后五条热点可按依赖与写集在独立 task worktree 并行，但同一时刻最多四个 implementer；`T5` 消费 session index，`T8` 汇总全部 before/after 证据并最后执行。
+
 ### Task 1: Capture Reproducible Performance Baselines
 
 **Files:**

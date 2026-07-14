@@ -59,6 +59,16 @@ export type WorkbenchLaunchResource<T> =
   | { kind: 'error'; message: string; cached?: T }
 ```
 
+## Task Dependency Graph
+
+```text
+T1 → T2
+T2 → (T3 | T4)
+(T3, T4) → T5 → T6 → T7
+```
+
+`T3/T4` 可在隔离 worktree 并行；后续任务会共同修改 Workbench/layout/tests/styles，按图串行合并。`T7` 消费全部语义与 viewport 结果后执行最终视觉/可访问性门禁。
+
 ### Task 1: Gate GUI Sidecar Startup on Versioned LAN Disclosure
 
 **Files:**
@@ -364,7 +374,7 @@ Map every existing panel exactly once. Keep the existing top menu + Drawer, use 
 
 Run: `cd web && npm test -- mobileWorkbenchState.test.ts MobileWorktreeQuickSwitch.test.ts Settings.test.tsx WorkbenchInspector.test.tsx && npm run check:i18n && npm run test:e2e -- mobile-workbench.spec.ts workbench.spec.ts`
 
-Expected: PASS; actual iOS/Android keyboard remains N8.
+Expected: PASS；物理 iOS/Android 软键盘仍属于 N8 延期认证 backlog，不是当前 Apple Silicon Mac beta 的完成条件。
 
 - [ ] **Step 5: Commit**
 
