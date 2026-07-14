@@ -183,25 +183,30 @@ export const SETTINGS_FIXTURES = {
  *   在 goto 前写入 onboarded/语言/主题，避免 Welcome 拦截与语言抖动。
  *
  * Code Logic（这个函数做什么）:
- *   page.addInitScript 设置 localStorage。
+ *   page.addInitScript 设置 localStorage；语言默认 zh，可选 en 覆盖供英文 L1 旅程。
  *
  * @param page Playwright Page
  * @param options.permissionOnboarded 是否写 cp-permission-onboarded（默认 true）
+ * @param options.lang 写入 cp-lang 的语言（默认 'zh'）
  */
 export async function installAppLocalStorage(
   page: Page,
-  options: { permissionOnboarded?: boolean } = {},
+  options: { permissionOnboarded?: boolean; lang?: 'zh' | 'en' } = {},
 ): Promise<void> {
   const permissionOnboarded = options.permissionOnboarded ?? true;
-  await page.addInitScript((onboarded) => {
-    if (onboarded) {
-      window.localStorage.setItem('cp-permission-onboarded', '1');
-    } else {
-      window.localStorage.removeItem('cp-permission-onboarded');
-    }
-    window.localStorage.setItem('cp-lang', 'zh');
-    window.localStorage.setItem('cp-theme', 'light');
-  }, permissionOnboarded);
+  const lang = options.lang ?? 'zh';
+  await page.addInitScript(
+    ({ onboarded, language }) => {
+      if (onboarded) {
+        window.localStorage.setItem('cp-permission-onboarded', '1');
+      } else {
+        window.localStorage.removeItem('cp-permission-onboarded');
+      }
+      window.localStorage.setItem('cp-lang', language);
+      window.localStorage.setItem('cp-theme', 'light');
+    },
+    { onboarded: permissionOnboarded, language: lang },
+  );
 }
 
 export type RegisterAppShellOptions = {

@@ -498,16 +498,14 @@ test.describe('E2E-MOBILE-001 Mobile Workbench journey', () => {
       kind: 'fault',
       profile: 'networkOffline',
     });
-    // 触发 refresh：再进一次导航或点刷新
+    // 触发 refresh：优先点刷新；否则派发 visibilitychange，再用 expect 等待 stale 文案（禁止固定 sleep）
     const refresh = page.getByRole('button', { name: /刷新|重新/ }).first();
     if (await refresh.count()) {
       await refresh.click();
     } else {
-      // 依赖可见轮询：短暂等待后手动触发 visibility 路径
       await page.evaluate(() => {
         document.dispatchEvent(new Event('visibilitychange'));
       });
-      await page.waitForTimeout(1_500);
     }
 
     await expect(page.getByText('状态可能已过期')).toBeVisible({ timeout: 15_000 });

@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import type { AttentionSnapshot } from '@/lib/types';
+import { classifyTransportFault, planFaultRecovery } from '@/lib/faultRecovery';
 import { AttentionContext, type AttentionContextValue } from './attentionContext';
 import { subscribeAttentionInvalidation } from './attentionInvalidation';
 import {
@@ -198,13 +199,22 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
         }
         if (mountedRef.current && isCurrentAttentionRequest(requestId, requestIdRef.current)) {
           const error = reason instanceof Error ? reason : new Error(String(reason));
-          setState((current) =>
-            attentionReducer(current, {
+          // 用 typed 故障分类决定 keepStale vs clear，避免依赖中文文案匹配。
+          const classification = classifyTransportFault(reason);
+          setState((current) => {
+            const hasCache = current.snapshot !== null || hasSnapshot;
+            const plan = planFaultRecovery({
+              classification,
+              hasCache,
+              optimisticApplied: false,
+            });
+            // loadFailed 仅有 hasSnapshot 语义：keepCache → 保留列表 + stale；clear → 清空快照。
+            return attentionReducer(current, {
               type: 'loadFailed',
               error,
-              hasSnapshot: current.snapshot !== null || hasSnapshot,
-            }),
-          );
+              hasSnapshot: plan.keepCache,
+            });
+          });
         }
       } finally {
         inFlightRef.current = false;

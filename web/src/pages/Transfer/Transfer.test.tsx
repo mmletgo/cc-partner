@@ -468,7 +468,7 @@ describe('Transfer page journey', () => {
     });
   });
 
-  test('refresh failure preserves existing task list', async () => {
+  test('refresh failure preserves existing task list on network offline', async () => {
     listTransfersMock.mockResolvedValue([
       buildTask({ id: 'keep-1', fileName: 'keep-alive.txt', status: 'completed', progress: 1 }),
     ]);
@@ -479,14 +479,37 @@ describe('Transfer page journey', () => {
       expect(screen.getByText('keep-alive.txt')).toBeTruthy();
     });
 
-    listTransfersMock.mockRejectedValueOnce(new Error('network down'));
+    // networkOffline → keepStale；错误文案优先展示稳定 code
+    listTransfersMock.mockRejectedValueOnce(new Error('network offline'));
 
     await act(async () => {
       await getPolling(3000).task();
     });
 
     expect(screen.getByText('keep-alive.txt')).toBeTruthy();
-    expect(screen.getByRole('status').textContent).toContain('任务列表加载失败：network down');
+    expect(screen.getByRole('status').textContent).toContain('任务列表加载失败：NETWORK_OFFLINE');
+  });
+
+  test('refresh failure clears task list on malformed payload', async () => {
+    listTransfersMock.mockResolvedValue([
+      buildTask({ id: 'clear-1', fileName: 'to-clear.txt', status: 'completed', progress: 1 }),
+    ]);
+
+    renderTransfer();
+
+    await waitFor(() => {
+      expect(screen.getByText('to-clear.txt')).toBeTruthy();
+    });
+
+    const syntaxErr = new SyntaxError('Unexpected token');
+    listTransfersMock.mockRejectedValueOnce(syntaxErr);
+
+    await act(async () => {
+      await getPolling(3000).task();
+    });
+
+    expect(screen.queryByText('to-clear.txt')).toBeNull();
+    expect(screen.getByRole('status').textContent).toContain('任务列表加载失败：MALFORMED_JSON');
   });
 
   test('does not render pause/retry/open for listed tasks', async () => {

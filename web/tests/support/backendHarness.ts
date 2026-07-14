@@ -727,7 +727,9 @@ export class BackendHarnessCore implements BackendHarness {
    *   统一 fault profile 到 invoke/fetch 可消费的错误或占位值。
    *
    * Code Logic（这个方法做什么）:
-   *   timeout 挂起至 abort；malformedJson 在 invoke 返回非法形状；其余 throw 带 code 的 Error。
+   *   timeout 挂起至 abort；malformedJson 在 fetch 路径由 handleFetch 写非 JSON body，
+   *   在 invoke 路径 **resolve** 非法但可 JSON 序列化的 DTO 形状（生产 invokeDecoded → ContractDecodeError）；
+   *   其余 throw 带 code 的 Error。
    */
   private async applyFault(
     profile: FaultProfile,
@@ -741,13 +743,11 @@ export class BackendHarnessCore implements BackendHarness {
         throw createFaultError('NetworkError', 'network offline', 'NETWORK_OFFLINE');
       case 'malformedJson':
         if (surface === 'fetch') {
+          // handleFetch 对 malformedJson 覆盖 bodyText 为 '{not-json'；此处返回占位即可。
           return null;
         }
-        throw createFaultError(
-          'SyntaxError',
-          'malformed JSON payload',
-          'MALFORMED_JSON',
-        );
+        // invoke：resolve 非法 DTO，让生产 invokeDecoded 抛 ContractDecodeError（禁止 throw SyntaxError）。
+        return { notAValidDto: true };
       case 'permissionDenied':
         throw createFaultError('Error', 'permission denied', 'PERMISSION_DENIED');
       case 'conflict':

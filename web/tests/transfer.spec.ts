@@ -87,6 +87,21 @@ function registerTransferCommands(harness: PlaywrightBackendHarness): void {
 }
 
 test.describe('E2E-TRANSFER-001 Transfer critical journey', () => {
+  test('English critical L1 UI strings when cp-lang=en', async ({ page, backendHarness }) => {
+    await installAppLocalStorage(page, { lang: 'en' });
+    registerTransferCommands(backendHarness);
+
+    await page.goto('/transfer');
+    await expect(page.getByRole('heading', { name: 'File Transfer' })).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByText('Transfer tasks')).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Drop a file here or click to select' }),
+    ).toBeVisible();
+    await expect(page.getByLabel('Select target device')).toBeVisible();
+  });
+
   test('native path send → progress/completed → cancel; unsupported actions hidden; dropzone keyboard', async ({
     page,
     backendHarness,

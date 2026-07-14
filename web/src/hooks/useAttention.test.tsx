@@ -206,11 +206,12 @@ describe('AttentionProvider', () => {
     expect(screen.getByTestId('total').textContent).toBe('null');
   });
 
-  test('refresh failure keeps snapshot and marks stale; success clears stale', async () => {
+  test('network offline refresh keeps snapshot and marks stale; success clears stale', async () => {
     const loadSnapshot = vi
       .fn()
       .mockResolvedValueOnce(buildSnapshot({ total: 3, generatedAt: 'ok-1' }))
-      .mockRejectedValueOnce(new Error('refresh failed'))
+      // networkOffline → planFaultRecovery keepStale
+      .mockRejectedValueOnce(new Error('network offline'))
       .mockResolvedValueOnce(buildSnapshot({ total: 4, generatedAt: 'ok-2' }));
 
     renderProvider(loadSnapshot);
@@ -228,7 +229,7 @@ describe('AttentionProvider', () => {
       expect(screen.getByTestId('stale').textContent).toBe('true');
     });
     expect(screen.getByTestId('total').textContent).toBe('3');
-    expect(screen.getByTestId('error').textContent).toBe('refresh failed');
+    expect(screen.getByTestId('error').textContent).toBe('network offline');
 
     await act(async () => {
       screen.getByRole('button', { name: 'refresh' }).click();
@@ -240,6 +241,30 @@ describe('AttentionProvider', () => {
     });
     expect(screen.getByTestId('total').textContent).toBe('4');
     expect(screen.getByTestId('error').textContent).toBe('');
+  });
+
+  test('malformed refresh clears snapshot (fail-closed)', async () => {
+    const loadSnapshot = vi
+      .fn()
+      .mockResolvedValueOnce(buildSnapshot({ total: 5, generatedAt: 'ok-m' }))
+      .mockRejectedValueOnce(new SyntaxError('Unexpected token'));
+
+    renderProvider(loadSnapshot);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('total').textContent).toBe('5');
+    });
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'refresh' }).click();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('total').textContent).toBe('null');
+    });
+    expect(screen.getByTestId('stale').textContent).toBe('false');
+    expect(screen.getByTestId('error').textContent).toMatch(/Unexpected token/);
   });
 
   test('invalidation event triggers refresh without waiting for poll', async () => {

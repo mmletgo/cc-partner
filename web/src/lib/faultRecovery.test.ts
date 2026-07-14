@@ -228,9 +228,9 @@ describe('faultRecovery planFaultRecovery', () => {
 describe('faultRecovery harness-backed errors', () => {
   test('BackendHarnessCore fault profiles produce classifiable errors', async () => {
     const harness = new BackendHarnessCore();
-    const invokeProfiles: FaultProfile[] = [
+    // malformedJson 在 invoke 上 resolve 非法 DTO（非 throw），单独断言
+    const throwingInvokeProfiles: FaultProfile[] = [
       'networkOffline',
-      'malformedJson',
       'permissionDenied',
       'conflict',
       'dbBusy',
@@ -238,7 +238,7 @@ describe('faultRecovery harness-backed errors', () => {
       'crossSiteRejected',
     ];
 
-    for (const profile of invokeProfiles) {
+    for (const profile of throwingInvokeProfiles) {
       harness.command(`cmd_${profile}`, { kind: 'fault', profile });
       let caught: unknown;
       try {
@@ -261,6 +261,17 @@ describe('faultRecovery harness-backed errors', () => {
       expect(plan.allowOptimisticCommit).toBe(false);
       expect(plan.noOptimisticDivergence).toBe(true);
     }
+
+    harness.command('cmd_malformedJson', { kind: 'fault', profile: 'malformedJson' });
+    await expect(harness.handleInvoke('cmd_malformedJson')).resolves.toEqual({
+      notAValidDto: true,
+    });
+    // 生产路径：invokeDecoded 对非法 DTO 抛 ContractDecodeError/校验失败；分类侧以 SyntaxError 合同覆盖
+    const malformedClassification = classifyTransportFault(
+      new SyntaxError('Unexpected token'),
+    );
+    expect(malformedClassification.kind).toBe('malformedJson');
+    expect(malformedClassification.cachePolicy).toBe('clear');
   });
 
   test('timeout fault via AbortSignal classifies as timeout keepStale', async () => {

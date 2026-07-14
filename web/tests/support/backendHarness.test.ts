@@ -234,6 +234,12 @@ describe('BackendHarnessCore faults', () => {
       expect(() => JSON.parse(result.bodyText)).toThrow();
     }
   });
+
+  test('malformedJson invoke resolves invalid DTO shape without throwing', async () => {
+    const core = new BackendHarnessCore();
+    core.command('broken_dto', { kind: 'fault', profile: 'malformedJson' });
+    await expect(core.handleInvoke('broken_dto')).resolves.toEqual({ notAValidDto: true });
+  });
 });
 
 describe('BackendHarnessCore events and settlement', () => {
