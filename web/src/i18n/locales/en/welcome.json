@@ -32,5 +32,22 @@
   },
   "recheck": "Recheck",
   "checkFailed": "Failed to check permissions: {{error}}",
-  "unknownError": "Unknown error"
+  "unknownError": "Unknown error",
+  "lanDisclosure": {
+    "title": "LAN risk acknowledgement",
+    "subtitle": "Review the following risk and access details before starting LAN services",
+    "loading": "Loading startup status…",
+    "localAddresses": "Local address candidates",
+    "noAddresses": "No LAN address detected yet",
+    "preferredPort": "Preferred TCP port {{port}}",
+    "portIncrement": "If the preferred port is busy, the listener increments the port by 1 until bind succeeds",
+    "mdnsPort": "Device discovery uses mDNS UDP {{port}}",
+    "alreadyRunning": "An independent backend is already running (actual port {{port}})",
+    "cliRunningHint": "Acknowledgement only lets this GUI enter the product; it does not start or stop the existing CLI listener",
+    "noIdentityRisk": "Any device on the same reachable network can read, write, and execute; the system does not verify caller identity",
+    "acknowledge": "I understand the risk — start LAN services",
+    "retry": "Retry",
+    "openDiagnostics": "Open diagnostics",
+    "error": "Startup failed: {{error}}"
+  }
 }

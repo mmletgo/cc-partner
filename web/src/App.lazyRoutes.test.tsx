@@ -77,4 +77,12 @@ describe('App lazy routes contract', () => {
     const boundaryCount = (appSource.match(/RouteErrorBoundary/g) ?? []).length;
     expect(boundaryCount).toBeGreaterThanOrEqual(2);
   });
+
+  test('wraps app with LanDisclosureGate above routes and onboarding', () => {
+    expect(appSource).toMatch(/import\s*\{\s*LanDisclosureGate\s*\}/);
+    // export default App 内 gate 包裹 Routes 与 OnboardingGuard
+    const appFn = appSource.slice(appSource.indexOf('export default function App'));
+    expect(appFn).toMatch(/<LanDisclosureGate>[\s\S]*<Routes>[\s\S]*OnboardingGuard/);
+    expect(appFn).toMatch(/<\/LanDisclosureGate>/);
+  });
 });

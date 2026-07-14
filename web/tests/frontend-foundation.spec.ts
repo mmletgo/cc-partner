@@ -92,6 +92,25 @@ async function installFoundationMocks(
             inputMonitoring: { granted: true },
           };
         }
+        if (cmd === 'get_lan_disclosure_status') {
+          return {
+            required: false,
+            version: 1,
+            localAddresses: ['192.168.1.10'],
+            preferredPort: 62116,
+            mdnsPort: 5353,
+            alreadyRunning: false,
+            actualHttpPort: 62116,
+          };
+        }
+        if (cmd === 'acknowledge_lan_disclosure_and_start_backend') {
+          return {
+            actualHttpPort: 62116,
+            localAddresses: ['192.168.1.10'],
+            reusedExisting: false,
+            version: 1,
+          };
+        }
         if (cmd === 'list_workbench_projects') return projects;
         if (cmd === 'list_workbench_sessions') return sessions;
         if (cmd === 'list_workbench_worktrees') {
@@ -526,5 +545,107 @@ test.describe('frontend foundation smoke', () => {
     };
     expect(toMs(metrics.animationDuration)).toBeLessThan(1);
     expect(toMs(metrics.transitionDuration)).toBeLessThan(1);
+  });
+
+  test('unacknowledged first launch shows LAN disclosure and blocks shell until confirm', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem('cp-permission-onboarded', '1');
+      window.localStorage.setItem('cp-lang', 'zh');
+      window.localStorage.setItem('cp-theme', 'light');
+
+      let required = true;
+      let callbackId = 0;
+      window.__TAURI_INTERNALS__ = {
+        metadata: {
+          currentWindow: { label: 'main' },
+          currentWebview: { windowLabel: 'main', label: 'main' },
+        },
+        invoke: async (cmd: string) => {
+          if (cmd === 'plugin:event|listen') return 1;
+          if (cmd === 'plugin:event|unlisten') return undefined;
+          if (cmd === 'get_lan_disclosure_status') {
+            return {
+              required,
+              version: 1,
+              localAddresses: ['192.168.1.10'],
+              preferredPort: 62116,
+              mdnsPort: 5353,
+              alreadyRunning: false,
+              actualHttpPort: null,
+            };
+          }
+          if (cmd === 'acknowledge_lan_disclosure_and_start_backend') {
+            required = false;
+            return {
+              actualHttpPort: 62116,
+              localAddresses: ['192.168.1.10'],
+              reusedExisting: false,
+              version: 1,
+            };
+          }
+          if (cmd === 'check_permissions') {
+            return {
+              screenCapture: { granted: true },
+              accessibility: { granted: true },
+              inputMonitoring: { granted: true },
+            };
+          }
+          if (cmd === 'get_version') return { version: '0.0.0-test', buildDate: '2026-07-14' };
+          if (cmd === 'list_workbench_projects') return [];
+          if (cmd === 'list_workbench_sessions') return [];
+          if (cmd === 'list_attention_items') {
+            return {
+              generatedAt: '2026-07-14T00:00:00.000Z',
+              counts: { total: 0, decision: 0, blocked: 0, environment: 0 },
+              items: [],
+            };
+          }
+          if (
+            cmd === 'check_workbench_dependency' ||
+            cmd === 'get_workbench_dependency_install_status'
+          ) {
+            return {
+              status: 'ready',
+              available: true,
+              version: '3.0',
+              backend: 'native',
+              path: '/usr/bin/tmux',
+              installable: false,
+              installCommandPreview: [],
+              error: null,
+              output: [],
+              statusChangedAt: '2026-07-14T00:00:00.000Z',
+            };
+          }
+          if (cmd === 'list_github_trending_repos') {
+            return { repos: [], cached: true, generatedAt: null };
+          }
+          return undefined;
+        },
+        transformCallback: () => {
+          callbackId += 1;
+          return callbackId;
+        },
+        unregisterCallback: () => undefined,
+      };
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+        unregisterListener: () => undefined,
+      };
+    });
+
+    await page.goto('/');
+    await expect(page.getByTestId('lan-disclosure-gate')).toBeVisible({ timeout: 15_000 });
+    await expect(
+      page.getByText('同一可达网络任意设备均可读写执行，系统不验证调用者身份'),
+    ).toBeVisible();
+    await expect(page.getByText('首选 TCP 端口 62116')).toBeVisible();
+    await expect(page.getByText(/mDNS UDP 5353/)).toBeVisible();
+    // 未确认前不应进入主壳
+    await expect(page.getByRole('navigation')).toHaveCount(0);
+
+    await page.getByTestId('lan-disclosure-acknowledge').click();
+    await expect(page.getByTestId('lan-disclosure-gate')).toHaveCount(0, { timeout: 15_000 });
   });
 });

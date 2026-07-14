@@ -19,6 +19,7 @@ import { checkNotificationGranted } from './lib/notification';
 import { backendApi } from './api/backend';
 import { flushPendingWritesThenClose } from './lib/closeFlush';
 import { pendingWrites } from './lib/pendingWrites';
+import { LanDisclosureGate } from './LanDisclosureGate';
 import styles from './App.module.css';
 
 const isDev = import.meta.env.DEV;
@@ -460,7 +461,7 @@ export function BackendCloseChoiceListener({
 
 export default function App() {
   return (
-    <>
+    <LanDisclosureGate>
       <PermissionNeededListener />
       <HealthReminderListener />
       <BackendCloseChoiceListener />
@@ -546,6 +547,6 @@ export default function App() {
           </Route>
         </Route>
       </Routes>
-    </>
+    </LanDisclosureGate>
   );
 }

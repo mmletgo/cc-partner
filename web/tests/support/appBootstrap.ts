@@ -180,6 +180,62 @@ export const SETTINGS_FIXTURES = {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   默认 E2E 应从已确认 LAN disclosure 基线启动，仅专用旅程模拟未确认。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 required=false 的 LanDisclosureStatus DTO。
+ */
+export function makeAcknowledgedLanDisclosureStatus(): {
+  required: boolean;
+  version: number;
+  localAddresses: string[];
+  preferredPort: number;
+  mdnsPort: number;
+  alreadyRunning: boolean;
+  actualHttpPort: number | null;
+} {
+  return {
+    required: false,
+    version: 1,
+    localAddresses: ['192.168.1.10'],
+    preferredPort: 62116,
+    mdnsPort: 5353,
+    alreadyRunning: false,
+    actualHttpPort: 62116,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   首启未确认旅程需要 required=true 的 status。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 required=true 的 DTO，可选 alreadyRunning。
+ */
+export function makeRequiredLanDisclosureStatus(
+  options: { alreadyRunning?: boolean; actualHttpPort?: number | null } = {},
+): {
+  required: boolean;
+  version: number;
+  localAddresses: string[];
+  preferredPort: number;
+  mdnsPort: number;
+  alreadyRunning: boolean;
+  actualHttpPort: number | null;
+} {
+  return {
+    required: true,
+    version: 1,
+    localAddresses: ['192.168.1.10'],
+    preferredPort: 62116,
+    mdnsPort: 5353,
+    alreadyRunning: options.alreadyRunning ?? false,
+    actualHttpPort: options.actualHttpPort ?? null,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   在 goto 前写入 onboarded/语言/主题，避免 Welcome 拦截与语言抖动。
  *
  * Code Logic（这个函数做什么）:
@@ -275,6 +331,20 @@ export function registerAppShellCommands(
       url: 'http://192.168.1.10:62116/mobile',
       lanAddresses: ['192.168.1.10'],
       httpPort: 62116,
+    },
+  });
+  // 默认已确认 LAN disclosure，避免无关 E2E 被 gate 拦截
+  harness.command('get_lan_disclosure_status', {
+    kind: 'resolve',
+    value: makeAcknowledgedLanDisclosureStatus(),
+  });
+  harness.command('acknowledge_lan_disclosure_and_start_backend', {
+    kind: 'resolve',
+    value: {
+      actualHttpPort: 62116,
+      localAddresses: ['192.168.1.10'],
+      reusedExisting: false,
+      version: 1,
     },
   });
 
