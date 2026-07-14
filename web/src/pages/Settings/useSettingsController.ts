@@ -198,6 +198,8 @@ export interface UseSettingsControllerResult {
   isDirty: boolean;
   savedAt: Date | null;
   saving: boolean;
+  /** 常规 tab 保存失败文案；不得写入 loadError，否则整页会卸掉脏表单 */
+  saveError: string | null;
   choosingDir: boolean;
   canResetCoreDefaults: boolean;
   recordingShortcutId: string | null;
@@ -328,6 +330,8 @@ export function useSettingsController(): UseSettingsControllerResult {
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  /** 仅常规 tab 保存失败；与 core 加载失败的 loadError 分离 */
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -598,6 +602,8 @@ export function useSettingsController(): UseSettingsControllerResult {
    */
   const patchState = useCallback((partial: Partial<SettingsState>) => {
     setState((prev) => ({ ...prev, ...partial }));
+    // 用户继续编辑时清掉上一次保存错误，避免陈旧 alert 误导
+    setSaveError(null);
   }, []);
 
   /**
@@ -745,9 +751,17 @@ export function useSettingsController(): UseSettingsControllerResult {
 
   /**
    * 保存按钮：把当前 state 发送到后端持久化
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   用户应用常规偏好；失败时必须保留脏表单与本地修改，不能整页卸载成 loadError。
+   *
+   * Code Logic（这个函数做什么）:
+   *   update_config 成功写 initialState/savedAt 并清 saveError；
+   *   失败只 setSaveError，不碰 loadError / state / initialState。
    */
   const handleSave = async () => {
     setSaving(true);
+    setSaveError(null);
     try {
       const updatedConfig = await configApi.update(buildConfigUpdate(state, initialState));
       const savedState = settingsStateFromConfig(updatedConfig);
@@ -755,9 +769,10 @@ export function useSettingsController(): UseSettingsControllerResult {
       // 保存成功后，把已保存快照更新为当前 state，使 isDirty 归零
       setInitialState(savedState);
       setSavedAt(new Date());
+      setSaveError(null);
     } catch (err) {
-      // 保存失败时在 UI 提示错误
-      setLoadError(err instanceof Error ? err.message : t('error.saveFailed'));
+      // 局部错误：保留脏草稿，暴露 localized 文案供 panel 展示
+      setSaveError(err instanceof Error ? err.message : t('error.saveFailed'));
     } finally {
       setSaving(false);
     }
@@ -1485,6 +1500,7 @@ export function useSettingsController(): UseSettingsControllerResult {
     isDirty,
     savedAt,
     saving,
+    saveError,
     choosingDir,
     canResetCoreDefaults,
     recordingShortcutId,

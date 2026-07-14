@@ -30,6 +30,8 @@ export interface SettingsGeneralPanelProps {
   isDirty: boolean;
   savedAt: Date | null;
   saving: boolean;
+  /** 最近一次保存失败文案；有值时在 footer 展示且不卸表单 */
+  saveError: string | null;
   choosingDir: boolean;
   canResetCoreDefaults: boolean;
   recordingShortcutId: string | null;
@@ -78,6 +80,7 @@ export function SettingsGeneralPanel({
   isDirty,
   savedAt,
   saving,
+  saveError,
   choosingDir,
   canResetCoreDefaults,
   recordingShortcutId,
@@ -185,6 +188,11 @@ export function SettingsGeneralPanel({
 {/* 底部按钮组：只保存常规 tab 的基础配置 */}
 <div className={styles.footer}>
   <div className={styles.footerLeft}>
+    {saveError ? (
+      <span className={styles.updateError} role="alert">
+        {t('settings:status.saveFailed')}: {saveError}
+      </span>
+    ) : null}
     {isDirty ? (
       <span className={styles.dirtyHint}>{t('settings:status.dirtyHint')}</span>
     ) : savedAt ? (

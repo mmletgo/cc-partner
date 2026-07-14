@@ -57,7 +57,7 @@ export function Settings(): ReactElement {
     );
   }
 
-  // core 配置加载失败：整页错误 + 重试（save 失败也复用此分支）
+  // core 配置加载失败：整页错误 + 重试（常规 tab 保存失败走 saveError，不进此分支）
   if (ctrl.loadError) {
     const isCoreLoadFailure = ctrl.resourceResults?.core.status === 'error';
     return (
@@ -130,6 +130,7 @@ export function Settings(): ReactElement {
               isDirty={ctrl.isDirty}
               savedAt={ctrl.savedAt}
               saving={ctrl.saving}
+              saveError={ctrl.saveError}
               choosingDir={ctrl.choosingDir}
               canResetCoreDefaults={ctrl.canResetCoreDefaults}
               recordingShortcutId={ctrl.recordingShortcutId}
