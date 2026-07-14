@@ -6,65 +6,31 @@
 //! Code Logic（这个模块做什么）:
 //!     命令与 pub(crate) helper。
 
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
 use crate::claude_cli;
 use crate::error::AppError;
-use crate::models::device::Device;
 use crate::state::AppState;
-use crate::workbench::browser::{
-    discover_workbench_browser_targets as discover_local_workbench_browser_targets,
-    normalize_browser_target_url,
-};
-use crate::workbench::browser_models::{WorkbenchBrowserDiscovery, WorkbenchBrowserPreview};
-use crate::workbench::claude_sessions::{
-    ensure_worktree_session_index_scanned, search_sessions, to_session_preview, ClaudeSessionIndex,
-    SessionPreview, SessionSearchHit,
-};
 use crate::workbench::models::{
-    WorkbenchDetectedFileType, WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchGitStatusDto,
-    WorkbenchHtmlAssetDto, WorkbenchOpenFileDto, WorkbenchPathInfo, WorkbenchProjectDto,
-    WorkbenchProjectRow, WorkbenchRemoteDirectoryEntryDto, WorkbenchRemotePathInfoDto,
-    WorkbenchRemoteRootDto, WorkbenchSaveTextResultDto, WorkbenchSessionDto, WorkbenchSessionRow,
-    WorkbenchSqlitePreview, WorkbenchTextContent, WorkbenchWorktreeDto, WorkbenchWorktreeRow,
+    WorkbenchDetectedFileType, WorkbenchGitCommitDto, WorkbenchOpenFileDto, WorkbenchProjectRow,
+    WorkbenchTextContent, WorkbenchWorktreeDto, WorkbenchWorktreeRow,
 };
-use crate::workbench::sessions::{
-    kill_persisted_backend, pane_count_for_row, PaneCloseOutcome, PaneSplitDirection,
-    WorkbenchSessionReplayDto,
-};
+use crate::workbench::sessions::kill_persisted_backend;
 use crate::workbench::{
-    file_content, file_preview, fs as workbench_fs, git as workbench_git, html_assets, projects,
-    remote_client::RemoteWorkbenchClient,
+    file_content, file_preview, git as workbench_git, remote_client::RemoteWorkbenchClient,
     remote_events::{
-        publish_workbench_remote_event_from_state, RemoteEventBridgeProjectMapping,
-        WorkbenchMergeProgressPayload, WorkbenchRemoteEvent,
+        publish_workbench_remote_event_from_state, WorkbenchMergeProgressPayload,
+        WorkbenchRemoteEvent,
     },
-    remote_ids::{parse_remote_entity_id, remote_entity_id, remote_project_id},
-    remote_protocol::{
-        RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq,
-        RemoteCreateSessionReq, RemoteCreateWorktreeReq, RemoteDeletePathReq,
-        RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteRenamePathReq, RemoteSaveTextReq,
-        RemoteSearchClaudeSessionsReq, RemoteWorkbenchBrowserDiscoverReq,
-        RemoteWorkbenchBrowserPreviewReq, ResumeClaudeSessionResult,
-    },
+    remote_ids::remote_entity_id,
+    remote_protocol::{RemoteCommitWorktreeReq, RemoteCreateWorktreeReq},
     sqlite_preview,
 };
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
-use std::path::Component;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
 use tauri::State;
 
-use super::browser::*;
 use super::common::*;
-use super::files::*;
-use super::projects::*;
-use super::sessions::*;
+use super::projects::list_workbench_worktrees_for_state;
 
 /// 列出项目下的 Git worktree。
 ///

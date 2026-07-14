@@ -3,6 +3,12 @@
 #![allow(unused_imports)]
 
 use super::common::*;
+use super::git::{
+    build_commit_message_instruction, build_merge_conflict_resolution_instruction,
+    content_has_conflict_markers, map_remote_merge_result_value, merge_conflict_resolution_schema,
+    safe_merge_resolution_path, validate_merge_resolution_path, workbench_commit_message_schema,
+};
+use super::sessions::should_attempt_session_zoom;
 use super::*;
 use crate::models::device::Device;
 use crate::workbench::git as workbench_git;

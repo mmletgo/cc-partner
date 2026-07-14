@@ -4,7 +4,7 @@
 //!     保持 workbench_cmd:: 注册名不变。
 //!
 //! Code Logic（这个模块做什么）:
-//!     子模块 + pub use 再导出。
+//!     子模块 + 显式 pub / pub(crate) use 再导出 tauri 命令（含 generate_handler 隐藏符号）与 crate 内 helper。
 
 mod browser;
 mod common;
@@ -16,9 +16,122 @@ mod sessions;
 #[cfg(test)]
 mod tests;
 
-pub use browser::*;
-pub use common::*;
-pub use files::*;
-pub use git::*;
-pub use projects::*;
-pub use sessions::*;
+// ---- tauri 命令（pub，含 __cmd__/__tauri_command_name_ 供 generate_handler）----
+
+pub use browser::{
+    __cmd__create_workbench_browser_preview, __cmd__discover_workbench_browser_targets,
+    __tauri_command_name_create_workbench_browser_preview,
+    __tauri_command_name_discover_workbench_browser_targets, create_workbench_browser_preview,
+    discover_workbench_browser_targets
+};
+
+pub use files::{
+    __cmd__format_workbench_structured_content, __cmd__open_workbench_file,
+    __cmd__preview_workbench_html_asset, __cmd__preview_workbench_sqlite,
+    __cmd__save_workbench_text_file, __tauri_command_name_format_workbench_structured_content,
+    __tauri_command_name_open_workbench_file, __tauri_command_name_preview_workbench_html_asset,
+    __tauri_command_name_preview_workbench_sqlite, __tauri_command_name_save_workbench_text_file,
+    format_workbench_structured_content, open_workbench_file, preview_workbench_html_asset,
+    preview_workbench_sqlite, save_workbench_text_file
+};
+
+pub use git::{
+    __cmd__commit_workbench_worktree, __cmd__create_workbench_worktree,
+    __cmd__list_workbench_git_commits, __cmd__list_workbench_worktrees,
+    __cmd__merge_workbench_worktree, __cmd__push_workbench_worktree,
+    __cmd__remove_workbench_worktree, __tauri_command_name_commit_workbench_worktree,
+    __tauri_command_name_create_workbench_worktree,
+    __tauri_command_name_list_workbench_git_commits, __tauri_command_name_list_workbench_worktrees,
+    __tauri_command_name_merge_workbench_worktree, __tauri_command_name_push_workbench_worktree,
+    __tauri_command_name_remove_workbench_worktree, commit_workbench_worktree,
+    create_workbench_worktree, list_workbench_git_commits, list_workbench_worktrees,
+    merge_workbench_worktree, push_workbench_worktree, remove_workbench_worktree
+};
+
+pub use projects::{
+    __cmd__add_workbench_project, __cmd__get_workbench_remote_path_info,
+    __cmd__list_workbench_projects, __cmd__list_workbench_remote_dir,
+    __cmd__list_workbench_remote_roots, __cmd__open_workbench_remote_project,
+    __cmd__remove_workbench_project, __cmd__touch_workbench_project,
+    __tauri_command_name_add_workbench_project,
+    __tauri_command_name_get_workbench_remote_path_info,
+    __tauri_command_name_list_workbench_projects, __tauri_command_name_list_workbench_remote_dir,
+    __tauri_command_name_list_workbench_remote_roots,
+    __tauri_command_name_open_workbench_remote_project,
+    __tauri_command_name_remove_workbench_project, __tauri_command_name_touch_workbench_project,
+    add_workbench_project, get_workbench_remote_path_info, list_workbench_projects,
+    list_workbench_remote_dir, list_workbench_remote_roots, open_workbench_remote_project,
+    remove_workbench_project, touch_workbench_project
+};
+
+pub use sessions::{
+    __cmd__close_workbench_pane, __cmd__close_workbench_session, __cmd__create_workbench_dir,
+    __cmd__create_workbench_file, __cmd__create_workbench_session, __cmd__delete_workbench_path,
+    __cmd__focus_workbench_session, __cmd__get_claude_session_preview,
+    __cmd__get_focused_workbench_session, __cmd__get_workbench_path_info,
+    __cmd__list_workbench_dir, __cmd__list_workbench_sessions, __cmd__rename_workbench_path,
+    __cmd__rename_workbench_session, __cmd__resize_workbench_session, __cmd__resume_claude_session,
+    __cmd__search_claude_sessions, __cmd__split_workbench_pane, __cmd__switch_workbench_pane,
+    __cmd__write_workbench_session_input, __cmd__zoom_workbench_pane,
+    __tauri_command_name_close_workbench_pane, __tauri_command_name_close_workbench_session,
+    __tauri_command_name_create_workbench_dir, __tauri_command_name_create_workbench_file,
+    __tauri_command_name_create_workbench_session, __tauri_command_name_delete_workbench_path,
+    __tauri_command_name_focus_workbench_session, __tauri_command_name_get_claude_session_preview,
+    __tauri_command_name_get_focused_workbench_session,
+    __tauri_command_name_get_workbench_path_info, __tauri_command_name_list_workbench_dir,
+    __tauri_command_name_list_workbench_sessions, __tauri_command_name_rename_workbench_path,
+    __tauri_command_name_rename_workbench_session, __tauri_command_name_resize_workbench_session,
+    __tauri_command_name_resume_claude_session, __tauri_command_name_search_claude_sessions,
+    __tauri_command_name_split_workbench_pane, __tauri_command_name_switch_workbench_pane,
+    __tauri_command_name_write_workbench_session_input, __tauri_command_name_zoom_workbench_pane,
+    close_workbench_pane, close_workbench_session, create_workbench_dir, create_workbench_file,
+    create_workbench_session, delete_workbench_path, focus_workbench_session,
+    get_claude_session_preview, get_focused_workbench_session, get_workbench_path_info,
+    list_workbench_dir, list_workbench_sessions, rename_workbench_path, rename_workbench_session,
+    resize_workbench_session, resume_claude_session, search_claude_sessions, split_workbench_pane,
+    switch_workbench_pane, write_workbench_session_input, zoom_workbench_pane
+};
+
+pub use projects::add_local_workbench_project_from_path;
+
+// ---- crate 内 helper / DTO（pub(crate)）----
+
+pub(crate) use browser::create_workbench_browser_preview_for_state;
+
+pub(crate) use common::{device_base_url, WorkbenchMergeResultDto};
+
+pub(crate) use files::{
+    list_workbench_sessions_for_state, local_list_workbench_sessions,
+    local_preview_workbench_html_asset, local_preview_workbench_sqlite,
+    local_save_workbench_text_file, save_workbench_text_file_for_state,
+};
+
+pub(crate) use git::{
+    commit_workbench_worktree_for_state, create_workbench_worktree_for_state,
+    list_workbench_git_commits_for_state, local_commit_workbench_worktree,
+    local_create_workbench_worktree, local_list_workbench_git_commits, local_merge_workbench_worktree,
+    local_open_workbench_file, local_push_workbench_worktree, local_remove_workbench_worktree,
+    merge_workbench_worktree_for_state, open_workbench_file_for_state,
+    push_workbench_worktree_for_state, remove_workbench_worktree_for_state,
+};
+
+pub(crate) use projects::{
+    discover_workbench_browser_targets_for_state, list_workbench_worktrees_for_state,
+    local_get_workbench_worktree, local_list_workbench_worktrees,
+};
+
+pub(crate) use sessions::{
+    close_workbench_pane_for_state, close_workbench_session_for_state,
+    create_workbench_session_for_state, focus_workbench_session_for_state,
+    get_claude_session_preview_for_state, get_focused_workbench_session_for_state,
+    get_workbench_path_info_for_state, list_workbench_dir_for_state, local_close_workbench_pane,
+    local_close_workbench_session, local_create_workbench_dir, local_create_workbench_file,
+    local_create_workbench_session, local_delete_workbench_path, local_focus_workbench_session,
+    local_get_workbench_path_info, local_list_workbench_dir, local_rename_workbench_path,
+    local_rename_workbench_session, local_resize_workbench_session, local_split_workbench_pane,
+    local_switch_workbench_pane, local_write_workbench_session_input, local_zoom_workbench_pane,
+    replay_workbench_session_for_state, resize_workbench_session_for_state,
+    resume_claude_session_for_state, search_claude_sessions_for_state, split_workbench_pane_for_state,
+    switch_workbench_pane_for_state, write_workbench_session_input_for_state,
+    zoom_workbench_pane_for_state,
+};
