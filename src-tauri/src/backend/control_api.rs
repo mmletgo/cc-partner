@@ -356,6 +356,7 @@ fn control_token_matches(request_token: &str, control: Option<&BackendControlFil
 fn build_owner_status(state: &AppState) -> Result<RuntimeOwnerStatus, AppError> {
     let terminal_session_count = state.workbench_sessions.list(None).len();
     let bridge_count = state.workbench_remote_event_bridges.active_bridge_count();
+    let bridges = state.workbench_remote_event_bridges.snapshots();
     let orch_snap = state.orchestrator_scheduler_telemetry.snapshot();
     let orch = OrchestratorRuntimeSummary {
         latest_tick_at: orch_snap.latest_tick_at,
@@ -364,9 +365,13 @@ fn build_owner_status(state: &AppState) -> Result<RuntimeOwnerStatus, AppError> 
             .as_ref()
             .map(|_| "scheduler_error".to_string()),
     };
-    state
-        .config_runtime
-        .owner_status(terminal_session_count, bridge_count, "idle", orch)
+    state.config_runtime.owner_status_with_bridges(
+        terminal_session_count,
+        bridge_count,
+        "idle",
+        orch,
+        bridges,
+    )
 }
 
 /// 序列化后检查响应不超过 1 MiB。

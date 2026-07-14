@@ -6,13 +6,18 @@
  *   编排留在 controller，本组件只渲染。
  *
  * Code Logic（这个组件做什么）:
- *   渲染权限 Card（含 mapPermissions 列表）与 WorkbenchDependencyCard / LanFirewallDependencyCard；
- *   不直接 import @/api 或 invoke。
+ *   渲染权限 Card（含 mapPermissions 列表）、RuntimeDiagnosticsCard、
+ *   WorkbenchDependencyCard / LanFirewallDependencyCard；不直接 import @/api 或 invoke。
  */
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Button } from '@/components/primitives';
-import { LanFirewallDependencyCard, PermissionCard, WorkbenchDependencyCard } from '@/components/domain';
+import {
+  LanFirewallDependencyCard,
+  PermissionCard,
+  RuntimeDiagnosticsCard,
+  WorkbenchDependencyCard,
+} from '@/components/domain';
 import { mapPermissions } from '@/lib/permissionEntries';
 import type { PermissionType, PermissionsStatus } from '@/lib/types';
 import styles from './Settings.module.css';
@@ -123,6 +128,7 @@ export function SettingsDependenciesPanel({
   </Card.Body>
 </Card>
 
+<RuntimeDiagnosticsCard />
 <WorkbenchDependencyCard />
 <LanFirewallDependencyCard />
     </>

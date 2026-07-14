@@ -1,0 +1,73 @@
+/**
+ * RuntimeDiagnosticsCard 样式
+ *
+ * Business Logic（为什么需要这个文件）:
+ *   运行状态分区需要与依赖卡片一致的 token 化布局。
+ *
+ * Code Logic（这个文件做什么）:
+ *   使用 tokens 定义标题、网格与动作行间距。
+ */
+
+.title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  color: var(--fg);
+}
+
+.headerRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.helper {
+  margin: 0;
+  color: var(--meta);
+  font-size: var(--font-size-sm);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.metaGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.metaGrid dt {
+  margin: 0;
+  color: var(--meta);
+  font-size: var(--font-size-xs);
+}
+
+.metaGrid dd {
+  margin: var(--space-1) 0 0;
+  color: var(--fg);
+  font-size: var(--font-size-sm);
+  word-break: break-all;
+}
+
+.mono {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: var(--font-size-xs);
+}
+
+.bridgeList {
+  margin: 0;
+  padding-left: var(--space-4);
+  color: var(--fg);
+  font-size: var(--font-size-sm);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}

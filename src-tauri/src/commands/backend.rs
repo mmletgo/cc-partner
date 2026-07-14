@@ -8,11 +8,15 @@
 //!     提供 status/start/stop/exit_gui 四个 invoke 命令；packaged 环境通过 tauri-plugin-shell sidecar
 //!     执行 `cc-partner-backend start|stop`，开发环境回退到 target/debug binary 或 cargo run。
 
+use crate::backend::authority::RuntimeRole;
 use crate::backend::control::{self, BackendStatus, BackendStatusKind};
+use crate::backend::control_client::BackendControlClient;
+use crate::config_runtime::{OrchestratorRuntimeSummary, SanitizedRuntimeDiagnostics};
 use crate::error::AppError;
+use crate::state::AppState;
 use std::path::PathBuf;
 use std::process::Stdio;
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 use tauri_plugin_shell::ShellExt;
 use tokio::process::Command;
 
@@ -79,6 +83,104 @@ pub async fn stop_backend_process(app: AppHandle) -> Result<BackendStatus, AppEr
 pub fn exit_gui(app: AppHandle) -> Result<(), AppError> {
     app.exit(0);
     Ok(())
+}
+
+/// 读取 sidecar 脱敏运行诊断。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Settings「运行状态」需要 owner/generation/bridge 计数与相位，禁止 token/内容。
+///
+/// Code Logic（这个函数做什么）:
+///     GuiClient 经 BackendControlClient::status 取权威快照；HeadlessOwner 本地组装；
+///     返回 `SanitizedRuntimeDiagnostics`（counts/phases/error codes only）。
+#[tauri::command]
+pub async fn get_runtime_diagnostics(
+    state: State<'_, AppState>,
+) -> Result<SanitizedRuntimeDiagnostics, AppError> {
+    get_runtime_diagnostics_for_state(&state).await
+}
+
+/// 状态无关 helper：供命令与单测复用。
+///
+/// Business Logic（为什么需要这个函数）:
+///     诊断组装逻辑需在 GuiClient 代理与 owner 本地路径间共享。
+///
+/// Code Logic（这个函数做什么）:
+///     按 runtime_role 分支；成功映射 `to_sanitized_diagnostics`。
+pub async fn get_runtime_diagnostics_for_state(
+    state: &AppState,
+) -> Result<SanitizedRuntimeDiagnostics, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        let status = client.status().await?;
+        return Ok(status.to_sanitized_diagnostics());
+    }
+    let terminal_session_count = state.workbench_sessions.list(None).len();
+    let bridge_count = state.workbench_remote_event_bridges.active_bridge_count();
+    let bridges = state.workbench_remote_event_bridges.snapshots();
+    let orch_snap = state.orchestrator_scheduler_telemetry.snapshot();
+    let orch = OrchestratorRuntimeSummary {
+        latest_tick_at: orch_snap.latest_tick_at,
+        latest_error_class: orch_snap
+            .latest_error
+            .as_ref()
+            .map(|_| "scheduler_error".to_string()),
+    };
+    let status = state.config_runtime.owner_status_with_bridges(
+        terminal_session_count,
+        bridge_count,
+        "idle",
+        orch,
+        bridges,
+    )?;
+    Ok(status.to_sanitized_diagnostics())
+}
+
+/// 在系统文件管理器中打开后端日志目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     诊断页「打开日志目录」需让用户查看 `backend.log`，不把路径写入复制摘要。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 `backend_log_dir()`；macOS `open`、Windows `explorer`、其它 `xdg-open`。
+#[tauri::command]
+pub async fn open_backend_log_dir() -> Result<(), AppError> {
+    let dir = crate::config::backend_log_dir()?;
+    tokio::task::spawn_blocking(move || open_path_in_file_manager(&dir))
+        .await
+        .map_err(|e| AppError::generic(format!("打开日志目录任务失败: {e}")))?
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     各平台打开目录命令不同，集中封装避免命令层分支膨胀。
+///
+/// Code Logic（这个函数做什么）:
+///     同步 spawn 平台 opener；失败映射为中文 AppError。
+fn open_path_in_file_manager(path: &std::path::Path) -> Result<(), AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .status()
+            .map_err(|e| AppError::generic(format!("打开日志目录失败: {e}")))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(path)
+            .status()
+            .map_err(|e| AppError::generic(format!("打开日志目录失败: {e}")))?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .status()
+            .map_err(|e| AppError::generic(format!("打开日志目录失败: {e}")))?;
+        Ok(())
+    }
 }
 
 /// 确保 GUI 可复用的独立后端已运行。

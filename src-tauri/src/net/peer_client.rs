@@ -251,9 +251,12 @@ fn status_json_bytes_fully_received(status: &serde_json::Value) -> bool {
 ///
 /// Business Logic: 所有对端调用复用同一 Client（内部连接池），提升效率。
 ///     Client 本身是 Clone 廉贵的（内部 Arc），故 PeerClient 可直接 Clone 共享。
+///     长连接事件桥复用无默认超时的 `stream_client`，禁止每桥 `Client::new()`。
 #[allow(dead_code)]
 pub struct PeerClient {
     client: reqwest::Client,
+    /// 无默认请求超时的共享 client，仅供 NDJSON 长连接复用。
+    stream_client: reqwest::Client,
 }
 
 impl PeerClient {
@@ -261,12 +264,44 @@ impl PeerClient {
     ///
     /// Code Logic: reqwest::Client::builder 设置 timeout；rustls-tls feature 已在 Cargo.toml 启用，
     ///     无需系统 OpenSSL。本机自签场景实际走 http，TLS 仅用于 https 资源（如 GitHub Releases）。
+    ///     另建无默认超时的 stream_client 供 remote event bridge 长连接。
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS))
             .build()
             .expect("构造 reqwest Client 失败（rustls-tls 初始化异常）");
-        Self { client }
+        let stream_client = reqwest::Client::builder()
+            .pool_max_idle_per_host(8)
+            .build()
+            .expect("构造 stream reqwest Client 失败（rustls-tls 初始化异常）");
+        Self {
+            client,
+            stream_client,
+        }
+    }
+
+    /// 打开 NDJSON 事件流 GET（无默认超时）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote event bridge 需要长连接读 `/api/workbench/events`，不能用带 10s 默认超时的
+    ///     业务 client，也禁止每桥新建未分类 Client。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用 `stream_client` GET `url`，注入 request id；send 失败 → Network。
+    ///     成功返回原始 Response 供调用方按 chunk 读取，不在此聚合 body。
+    pub async fn open_ndjson_stream(&self, url: &str) -> Result<reqwest::Response, PeerCallError> {
+        self.stream_client
+            .get(url)
+            .header(REQUEST_ID_HEADER, new_request_id())
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::debug!("open_ndjson_stream 网络失败 ({url}): {e}");
+                PeerCallError::Network {
+                    url: url.to_string(),
+                    source: e,
+                }
+            })
     }
 
     /// 健康检查（typed）：GET 对端 /api/health，返回完整 HealthResponse。

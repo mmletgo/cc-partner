@@ -573,6 +573,10 @@ pub fn shutdown_backend_runtime(state: &AppState) {
     if cleaned > 0 {
         tracing::info!("工作台会话已清理: {cleaned}");
     }
+
+    // 同步路径：cancel + abort 全部 remote event bridge，避免关机后 ghost reconnect。
+    // 测试路径可 await `RemoteEventBridgeRegistry::shutdown_all` 等待任务自然退出。
+    state.workbench_remote_event_bridges.force_shutdown();
 }
 
 /// 验证 browse-only 模式应复用的 sidecar 端口。

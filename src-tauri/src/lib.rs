@@ -236,6 +236,8 @@ pub fn run() {
             backend_cmd::start_backend_process,
             backend_cmd::stop_backend_process,
             backend_cmd::exit_gui,
+            backend_cmd::get_runtime_diagnostics,
+            backend_cmd::open_backend_log_dir,
             prompt_cmd::list_prompts,
             prompt_cmd::get_prompt,
             prompt_cmd::create_prompt,

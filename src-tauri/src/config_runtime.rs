@@ -158,13 +158,37 @@ impl ConfigRuntime {
     ///     GUI 诊断与对账需要 owner/generation/fingerprint；终端/bridge 计数由调用方注入。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     组装 `RuntimeOwnerStatus`；metrics 由参数填入（Task 2 可传 0）。
+    ///     组装 `RuntimeOwnerStatus`；metrics 与 bridge 快照由参数填入。
     pub fn owner_status(
         &self,
         terminal_session_count: usize,
         bridge_count: usize,
         cloud_sync_phase: &str,
         orchestrator: OrchestratorRuntimeSummary,
+    ) -> Result<RuntimeOwnerStatus, AppError> {
+        self.owner_status_with_bridges(
+            terminal_session_count,
+            bridge_count,
+            cloud_sync_phase,
+            orchestrator,
+            Vec::new(),
+        )
+    }
+
+    /// 构造含 bridge 脱敏快照的 owner 状态。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Task 6 诊断需要 phases/error codes，但仍禁止 token/内容。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     与 `owner_status` 相同，并附带 `bridges` 快照列表。
+    pub fn owner_status_with_bridges(
+        &self,
+        terminal_session_count: usize,
+        bridge_count: usize,
+        cloud_sync_phase: &str,
+        orchestrator: OrchestratorRuntimeSummary,
+        bridges: Vec<crate::workbench::remote_events::RemoteEventBridgeSnapshot>,
     ) -> Result<RuntimeOwnerStatus, AppError> {
         let config = self.snapshot()?;
         Ok(RuntimeOwnerStatus {
@@ -175,6 +199,7 @@ impl ConfigRuntime {
             cloud_sync_phase: cloud_sync_phase.to_string(),
             terminal_session_count,
             bridge_count,
+            bridges,
             orchestrator,
         })
     }
@@ -472,7 +497,7 @@ pub struct ConfigUpdateResponse {
 ///     GUI 诊断与配置对账需要 owner/generation/fingerprint 与轻量 runtime 计数。
 ///
 /// Code Logic（这个结构做什么）:
-///     camelCase DTO；不含 token/Prompt/路径凭据。
+///     camelCase DTO；不含 token/Prompt/路径凭据；bridges 仅 phase/attempt/error class。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeOwnerStatus {
@@ -483,7 +508,69 @@ pub struct RuntimeOwnerStatus {
     pub cloud_sync_phase: String,
     pub terminal_session_count: usize,
     pub bridge_count: usize,
+    /// 各 bridge 脱敏相位快照（默认空以兼容旧调用方）。
+    #[serde(default)]
+    pub bridges: Vec<crate::workbench::remote_events::RemoteEventBridgeSnapshot>,
     pub orchestrator: OrchestratorRuntimeSummary,
+}
+
+impl RuntimeOwnerStatus {
+    /// 转为可复制的脱敏诊断摘要。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Settings「复制脱敏诊断摘要」只允许 counts/phases/error codes。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     映射为 `SanitizedRuntimeDiagnostics`（字段集合与 status 对齐，无额外敏感键）。
+    pub fn to_sanitized_diagnostics(&self) -> SanitizedRuntimeDiagnostics {
+        SanitizedRuntimeDiagnostics {
+            owner_instance_id: self.owner_instance_id.clone(),
+            generation: self.generation,
+            started_at: self.started_at.clone(),
+            config_fingerprint: self.config_fingerprint.clone(),
+            cloud_sync_phase: self.cloud_sync_phase.clone(),
+            terminal_session_count: self.terminal_session_count,
+            bridge_count: self.bridge_count,
+            bridges: self.bridges.clone(),
+            orchestrator: self.orchestrator.clone(),
+        }
+    }
+}
+
+/// 脱敏运行诊断摘要（可复制 JSON）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     用户反馈问题需要一份不含 secret/内容的 owner 快照。
+///
+/// Code Logic（这个结构做什么）:
+///     与 RuntimeOwnerStatus 同构；序列化后供剪贴板；测试扫描禁止 token/content 键。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SanitizedRuntimeDiagnostics {
+    pub owner_instance_id: String,
+    pub generation: u64,
+    pub started_at: String,
+    pub config_fingerprint: String,
+    pub cloud_sync_phase: String,
+    pub terminal_session_count: usize,
+    pub bridge_count: usize,
+    pub bridges: Vec<crate::workbench::remote_events::RemoteEventBridgeSnapshot>,
+    pub orchestrator: OrchestratorRuntimeSummary,
+}
+
+impl SanitizedRuntimeDiagnostics {
+    /// 漂亮打印 JSON（供复制）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     前端一键复制需要稳定字符串。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     serde_json pretty；失败回落紧凑序列化或 `{}`。
+    pub fn to_pretty_json(&self) -> String {
+        serde_json::to_string_pretty(self)
+            .or_else(|_| serde_json::to_string(self))
+            .unwrap_or_else(|_| "{}".to_string())
+    }
 }
 
 /// Orchestrator 运行时摘要（status 轻量字段）。

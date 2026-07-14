@@ -9,9 +9,13 @@
  *   mock 各 API 与 router/i18n，渲染 Settings，断言局部错误与重试入口。
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { AppConfig, CloudSyncConfig, GithubTrendingConfig, HealthConfig, VersionInfo } from '@/lib/types';
 import type { OrchestratorAutomationConfig } from '@/api/orchestratorConfig';
+import {
+  findForbiddenDiagnosticsKeys,
+  formatDiagnosticsForCopy,
+} from '@/api/runtimeDiagnostics';
 
 const appConfig = (partial: Partial<AppConfig> = {}): AppConfig => ({
   deviceId: 'device-1',
@@ -161,11 +165,70 @@ vi.mock('@/lib/permissionEntries', () => ({
   mapPermissions: () => [],
 }));
 
-vi.mock('@/components/domain', () => ({
-  LanFirewallDependencyCard: () => <div data-testid="lan-card" />,
-  PermissionCard: () => <div data-testid="perm-card" />,
-  WorkbenchDependencyCard: () => <div data-testid="wb-card" />,
-}));
+const {
+  runtimeDiagnosticsFixture,
+  getRuntimeDiagnostics,
+  openBackendLogDir,
+} = vi.hoisted(() => {
+  const runtimeDiagnosticsFixture = {
+    ownerInstanceId: 'owner-test',
+    generation: 3,
+    startedAt: '2026-07-14T00:00:00Z',
+    configFingerprint: 'fp-test',
+    cloudSyncPhase: 'idle',
+    terminalSessionCount: 1,
+    bridgeCount: 0,
+    bridges: [] as Array<{ phase: string; attempt: number; lastErrorClass?: string | null }>,
+    orchestrator: {
+      latestTickAt: null as string | null,
+      latestErrorClass: null as string | null,
+    },
+  };
+  return {
+    runtimeDiagnosticsFixture,
+    getRuntimeDiagnostics: vi.fn(async () => runtimeDiagnosticsFixture),
+    openBackendLogDir: vi.fn(async () => undefined),
+  };
+});
+
+vi.mock('@/api/runtimeDiagnostics', async () => {
+  const actual = await vi.importActual<typeof import('@/api/runtimeDiagnostics')>(
+    '@/api/runtimeDiagnostics',
+  );
+  return {
+    ...actual,
+    runtimeDiagnosticsApi: {
+      get: () => getRuntimeDiagnostics(),
+      openLogDir: () => openBackendLogDir(),
+    },
+  };
+});
+
+vi.mock('@/components/domain', () => {
+  // 轻量 stub：避免 importActual 拉起真实 RuntimeDiagnosticsCard 依赖链。
+  // 诊断复制敏感字段合同由本文件下方纯函数断言 + 此 stub 的 data-testid 覆盖。
+  const RuntimeDiagnosticsCardStub = () => (
+    <div data-testid="runtime-diagnostics-card">
+      <span data-testid="runtime-owner">owner-test</span>
+      <button
+        type="button"
+        data-testid="runtime-copy-diagnostics"
+        onClick={() => {
+          const text = JSON.stringify(runtimeDiagnosticsFixture);
+          void navigator.clipboard.writeText(text);
+        }}
+      >
+        copy
+      </button>
+    </div>
+  );
+  return {
+    LanFirewallDependencyCard: () => <div data-testid="lan-card" />,
+    PermissionCard: () => <div data-testid="perm-card" />,
+    WorkbenchDependencyCard: () => <div data-testid="wb-card" />,
+    RuntimeDiagnosticsCard: RuntimeDiagnosticsCardStub,
+  };
+});
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => {
@@ -229,6 +292,13 @@ beforeEach(() => {
   getDefaultHealthConfig.mockResolvedValue(health());
   getAutomationConfig.mockResolvedValue(automation());
   getDefaultAutomationConfig.mockResolvedValue(automation());
+  getRuntimeDiagnostics.mockResolvedValue(runtimeDiagnosticsFixture);
+  openBackendLogDir.mockResolvedValue(undefined);
+  Object.assign(navigator, {
+    clipboard: {
+      writeText: vi.fn(async () => undefined),
+    },
+  });
 });
 
 afterEach(() => {
@@ -287,5 +357,30 @@ describe('Settings partial resource loading', () => {
         screen.getByText(/settings:resource.versionLoadFailed:version down/),
       ).toBeTruthy();
     });
+  });
+
+  test('dependencies tab shows runtime diagnostics and copy has no sensitive fields', async () => {
+    searchParamsState.value = new URLSearchParams('tab=dependencies');
+    renderSettings();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('runtime-diagnostics-card')).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('runtime-owner').textContent).toBe('owner-test');
+    });
+
+    const copyText = formatDiagnosticsForCopy(runtimeDiagnosticsFixture);
+    expect(findForbiddenDiagnosticsKeys(copyText)).toEqual([]);
+
+    fireEvent.click(screen.getByTestId('runtime-copy-diagnostics'));
+    await waitFor(() => {
+      expect(navigator.clipboard.writeText).toHaveBeenCalled();
+    });
+    const written = (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[0] as string;
+    expect(findForbiddenDiagnosticsKeys(written)).toEqual([]);
+    expect(written).toContain('ownerInstanceId');
+    expect(written).not.toMatch(/token|content|prompt|password/i);
   });
 });
