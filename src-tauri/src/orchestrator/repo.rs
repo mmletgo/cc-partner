@@ -3,6 +3,9 @@
 #![allow(dead_code)]
 
 use crate::error::AppError;
+use crate::orchestrator::claim::{
+    ClaimCandidate, ClaimScanCursor, CLAIM_CANDIDATE_LIMIT,
+};
 use crate::orchestrator::claude_runtime::ClaudeRuntimeSummary;
 use crate::orchestrator::models::{
     OrchestratorAttemptPhase, OrchestratorCreateAction, OrchestratorEvidenceDto,
@@ -17,7 +20,7 @@ use crate::orchestrator::workflow::resolve_project_workflow;
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -27,6 +30,20 @@ const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_criteria, st
     transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
     last_runtime_message, branch_name, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, \
     created_at, updated_at, started_at, finished_at";
+
+/// Business Logic（为什么需要这个函数）:
+///     claim 候选 SELECT 需要 JOIN `workbench_projects`，未加表前缀时 `id/created_at/updated_at` 会与 project 列歧义。
+///
+/// Code Logic（这个函数做什么）:
+///     把 `TASK_COLUMNS` 每个字段加上 `table.` 前缀，供 JOIN 查询使用。
+fn task_columns_for_alias(table: &str) -> String {
+    TASK_COLUMNS
+        .split(',')
+        .map(|column| format!("{table}.{}", column.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 const WORKFLOW_LANE_ORDER: [OrchestratorWorkflowState; 8] = [
     OrchestratorWorkflowState::Backlog,
     OrchestratorWorkflowState::Todo,
@@ -1067,6 +1084,85 @@ impl OrchestratorRepo {
 
         tx.commit().await?;
         Ok(claimed)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     三阶段 claim 的阶段 A 需要在短 DB 读取中拿到有界 Queued/Idle local 候选快照，
+    ///     且每行一次 JOIN 带出 project path，避免事务内逐候选查项目或无界 SELECT。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     不开启事务、不调用 workflow resolver。JOIN `workbench_projects` 过滤 `kind='local'`，
+    ///     且 `status=queued`、`run_state=idle`。排序固定 `priority DESC, created_at ASC, id ASC`。
+    ///     `limit` 绑定为 `min(requested, CLAIM_CANDIDATE_LIMIT)`；`cursor` 非空时使用 keyset 谓词继续翻页。
+    ///     返回的每行 `ClaimCandidate` 已携带 JOIN 得到的 `project_path`。
+    pub async fn list_local_queued_claim_candidates(
+        &self,
+        cursor: Option<&ClaimScanCursor>,
+        limit: u32,
+    ) -> Result<Vec<ClaimCandidate>, AppError> {
+        let page_limit = limit.min(CLAIM_CANDIDATE_LIMIT);
+        if page_limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let task_columns = task_columns_for_alias("task");
+        let base_sql = format!(
+            "SELECT {task_columns}, project.path AS project_path \
+             FROM orchestrator_tasks task \
+             INNER JOIN workbench_projects project ON project.id = task.project_id \
+             WHERE project.kind = 'local' \
+               AND task.status = ? \
+               AND task.run_state = ?"
+        );
+
+        let rows = if let Some(cursor) = cursor {
+            // keyset: after (priority DESC, created_at ASC, id ASC)
+            let sql = format!(
+                "{base_sql} \
+                 AND ( \
+                   task.priority < ? \
+                   OR (task.priority = ? AND task.created_at > ?) \
+                   OR (task.priority = ? AND task.created_at = ? AND task.id > ?) \
+                 ) \
+                 ORDER BY task.priority DESC, task.created_at ASC, task.id ASC \
+                 LIMIT ?"
+            );
+            sqlx::query(&sql)
+                .bind(OrchestratorTaskStatus::Queued.as_str())
+                .bind(OrchestratorRunState::Idle.as_str())
+                .bind(cursor.priority)
+                .bind(cursor.priority)
+                .bind(&cursor.created_at)
+                .bind(cursor.priority)
+                .bind(&cursor.created_at)
+                .bind(&cursor.id)
+                .bind(page_limit as i64)
+                .fetch_all(&self.pool)
+                .await?
+        } else {
+            let sql = format!(
+                "{base_sql} \
+                 ORDER BY task.priority DESC, task.created_at ASC, task.id ASC \
+                 LIMIT ?"
+            );
+            sqlx::query(&sql)
+                .bind(OrchestratorTaskStatus::Queued.as_str())
+                .bind(OrchestratorRunState::Idle.as_str())
+                .bind(page_limit as i64)
+                .fetch_all(&self.pool)
+                .await?
+        };
+
+        let mut candidates = Vec::with_capacity(rows.len());
+        for row in rows {
+            let task = row_to_task(&row)?;
+            let project_path: String = row.try_get("project_path")?;
+            candidates.push(ClaimCandidate {
+                task,
+                project_path: PathBuf::from(project_path),
+            });
+        }
+        Ok(candidates)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -5381,6 +5477,224 @@ mod tests {
         assert_eq!(still.status, OrchestratorTaskStatus::Blocked);
         assert_eq!(still.run_state, OrchestratorRunState::Blocked);
         assert_eq!(still.blocked_reason.as_deref(), Some("verification failed"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     有界 claim 候选读取必须稳定分页且排除 remote/Draft/Blocked，否则阶段 A 无法替换无界 SELECT。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 300 条同优先级 local Queued/Idle 任务，并混入 remote/Draft/Blocked 噪声；
+    ///     断言 page1=256、page2=44、并集 300 唯一 ID，排序为 priority DESC/created_at ASC/id ASC，
+    ///     且每行 JOIN 已带 project path，无需二次查询。
+    #[tokio::test]
+    async fn claim_candidate_list_keyset_pages_300_and_skips_noise() {
+        use crate::orchestrator::claim::{ClaimScanCursor, CLAIM_CANDIDATE_LIMIT};
+        use std::collections::HashSet;
+
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "local-a", "local").await;
+        insert_workbench_project(&pool, "remote-a", "remote").await;
+
+        // 300 条同优先级 local Queued/Idle；id 零填充保证字典序与插入序一致。
+        for i in 0..300 {
+            let id = format!("q-{i:04}");
+            let created_at = format!("2026-07-05T00:{:02}:{:02}Z", i / 60, i % 60);
+            let mut row = task_row(&id, "local-a", OrchestratorTaskStatus::Queued);
+            row.priority = 10;
+            row.created_at = created_at.clone();
+            row.updated_at = created_at;
+            repo.create_task(&row).await.unwrap();
+            set_task_split_state(
+                &pool,
+                &id,
+                OrchestratorWorkflowState::Todo,
+                OrchestratorRunState::Idle,
+                None,
+            )
+            .await;
+        }
+
+        // 噪声：remote queued、local draft、local blocked，均不得进入候选。
+        repo.create_task(&task_row(
+            "remote-queued",
+            "remote-a",
+            OrchestratorTaskStatus::Queued,
+        ))
+        .await
+        .unwrap();
+        set_task_split_state(
+            &pool,
+            "remote-queued",
+            OrchestratorWorkflowState::Todo,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+        repo.create_task(&task_row(
+            "local-draft",
+            "local-a",
+            OrchestratorTaskStatus::Draft,
+        ))
+        .await
+        .unwrap();
+        set_task_split_state(
+            &pool,
+            "local-draft",
+            OrchestratorWorkflowState::Todo,
+            OrchestratorRunState::Idle,
+            None,
+        )
+        .await;
+        repo.create_task(&task_row(
+            "local-blocked",
+            "local-a",
+            OrchestratorTaskStatus::Blocked,
+        ))
+        .await
+        .unwrap();
+        set_task_split_state(
+            &pool,
+            "local-blocked",
+            OrchestratorWorkflowState::Rework,
+            OrchestratorRunState::Blocked,
+            Some("hold"),
+        )
+        .await;
+
+        let page1 = repo
+            .list_local_queued_claim_candidates(None, CLAIM_CANDIDATE_LIMIT)
+            .await
+            .expect("page1");
+        assert_eq!(page1.len(), 256, "page1 必须正好 256");
+        assert_eq!(CLAIM_CANDIDATE_LIMIT, 256);
+
+        // 请求更大 limit 仍被硬上限夹到 256。
+        let capped = repo
+            .list_local_queued_claim_candidates(None, 10_000)
+            .await
+            .expect("capped");
+        assert_eq!(capped.len(), 256);
+
+        let last = page1.last().expect("page1 non-empty");
+        assert_eq!(
+            last.project_path.as_os_str(),
+            std::ffi::OsStr::new("/tmp/local-a"),
+            "JOIN 必须直接带回 project path"
+        );
+        let cursor = ClaimScanCursor::from_task(&last.task);
+
+        let page2 = repo
+            .list_local_queued_claim_candidates(Some(&cursor), CLAIM_CANDIDATE_LIMIT)
+            .await
+            .expect("page2");
+        assert_eq!(page2.len(), 44, "page2 必须正好 44");
+
+        let mut union = HashSet::new();
+        let mut ordered_ids = Vec::new();
+        for candidate in page1.iter().chain(page2.iter()) {
+            assert_eq!(
+                candidate.project_path.as_os_str(),
+                std::ffi::OsStr::new("/tmp/local-a")
+            );
+            assert_eq!(candidate.task.status, OrchestratorTaskStatus::Queued);
+            assert_eq!(candidate.task.run_state, OrchestratorRunState::Idle);
+            assert_eq!(candidate.task.project_id, "local-a");
+            assert!(
+                union.insert(candidate.task.id.clone()),
+                "候选 ID 不得重复: {}",
+                candidate.task.id
+            );
+            ordered_ids.push(candidate.task.id.clone());
+        }
+        assert_eq!(union.len(), 300);
+        assert_eq!(ordered_ids.len(), 300);
+
+        // 全序：priority DESC, created_at ASC, id ASC
+        let mut expected = ordered_ids.clone();
+        expected.sort_by(|a, b| {
+            // 本 fixture priority 全相同，按 id 即 created_at/id 升序（id 与 created 同步编码）
+            a.cmp(b)
+        });
+        assert_eq!(ordered_ids, expected);
+
+        // 噪声 ID 不得出现
+        for noise in ["remote-queued", "local-draft", "local-blocked"] {
+            assert!(
+                !union.contains(noise),
+                "噪声任务 {noise} 不得进入 claim 候选"
+            );
+        }
+
+        // 第三页应为空（已耗尽）
+        let last2 = page2.last().expect("page2 non-empty");
+        let page3 = repo
+            .list_local_queued_claim_candidates(
+                Some(&ClaimScanCursor::from_task(&last2.task)),
+                CLAIM_CANDIDATE_LIMIT,
+            )
+            .await
+            .expect("page3");
+        assert!(page3.is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     跨优先级 keyset 必须先消耗更高 priority，再按 created_at/id 前进，否则高优任务会被饿死。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入不同 priority 的 local Queued 任务，断言首页顺序与 cursor 后第二页首条正确。
+    #[tokio::test]
+    async fn claim_candidate_list_orders_by_priority_desc_then_created_id_asc() {
+        use crate::orchestrator::claim::ClaimScanCursor;
+
+        let (pool, repo) = setup_repo().await;
+        create_workbench_projects_table(&pool).await;
+        insert_workbench_project(&pool, "local-a", "local").await;
+
+        for (id, priority, created_at) in [
+            ("mid-b", 50_i64, "2026-07-05T00:00:02Z"),
+            ("high-a", 100, "2026-07-05T00:00:03Z"),
+            ("mid-a", 50, "2026-07-05T00:00:01Z"),
+            ("low-a", 10, "2026-07-05T00:00:00Z"),
+            ("high-b", 100, "2026-07-05T00:00:04Z"),
+        ] {
+            let mut row = task_row(id, "local-a", OrchestratorTaskStatus::Queued);
+            row.priority = priority;
+            row.created_at = created_at.to_string();
+            row.updated_at = created_at.to_string();
+            repo.create_task(&row).await.unwrap();
+            set_task_split_state(
+                &pool,
+                id,
+                OrchestratorWorkflowState::Todo,
+                OrchestratorRunState::Idle,
+                None,
+            )
+            .await;
+        }
+
+        let page = repo
+            .list_local_queued_claim_candidates(None, 3)
+            .await
+            .expect("page");
+        assert_eq!(
+            page.iter()
+                .map(|c| c.task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["high-a", "high-b", "mid-a"]
+        );
+
+        let cursor = ClaimScanCursor::from_task(&page[2].task);
+        let rest = repo
+            .list_local_queued_claim_candidates(Some(&cursor), 10)
+            .await
+            .expect("rest");
+        assert_eq!(
+            rest.iter()
+                .map(|c| c.task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mid-b", "low-a"]
+        );
     }
 
     /// Business Logic（为什么需要这个函数）:
