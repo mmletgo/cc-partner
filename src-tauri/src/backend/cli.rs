@@ -740,10 +740,12 @@ fn render_status_json(status: &BackendStatus) -> Result<String, AppError> {
 /// 构造 serve 进程控制文件内容。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     start/stop/status 需要通过磁盘控制文件跨进程共享 pid、端口、设备身份和 stop 令牌。
+///     start/stop/status 需要通过磁盘控制文件跨进程共享 pid、端口、设备身份和 stop 令牌；
+///     同时发布本 sidecar 进程唯一的 owner 实例 id 与 control schema 版本，供 GUI 识别权威 owner。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 AppState 读取设备信息，填入当前进程 pid、实际 HTTP 端口、UTC 启动时间和随机 UUID token。
+///     从 AppState 读取设备信息，填入当前进程 pid、实际 HTTP 端口、UTC 启动时间、随机 control token，
+///     以及 `CONTROL_SCHEMA_VERSION` 与一次 UUID `owner_instance_id`；不记录 control token 到日志。
 fn build_control_file(state: &AppState, port: u16) -> BackendControlFile {
     BackendControlFile {
         pid: std::process::id(),
@@ -752,6 +754,8 @@ fn build_control_file(state: &AppState, port: u16) -> BackendControlFile {
         device_name: state.device_name(),
         started_at: Utc::now().to_rfc3339(),
         control_token: Uuid::new_v4().to_string(),
+        control_schema_version: crate::backend::authority::CONTROL_SCHEMA_VERSION,
+        owner_instance_id: Some(Uuid::new_v4().to_string()),
     }
 }
 
@@ -1375,6 +1379,8 @@ mod tests {
             device_name: "测试设备".to_string(),
             started_at: "2026-01-01T00:00:00Z".to_string(),
             control_token: "expected-token".to_string(),
+            control_schema_version: crate::backend::authority::CONTROL_SCHEMA_VERSION,
+            owner_instance_id: Some("owner-test".to_string()),
         }
     }
 

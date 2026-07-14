@@ -6,6 +6,7 @@
 //! Code Logic（这个模块做什么）:
 //!     聚合控制文件、UI 适配、共享 runtime 和 CLI 命令入口。
 
+pub mod authority;
 pub mod cli;
 pub mod control;
 pub mod doctor;

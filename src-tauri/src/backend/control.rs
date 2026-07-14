@@ -49,10 +49,12 @@ struct StopRouteResponse {
 ///
 /// Business Logic（为什么需要这个结构）:
 ///     GUI 和后续 `cc-partner-backend` CLI 需要用同一份控制文件识别后端进程、HTTP 端口和设备身份，
-///     从而支持 start/stop/status 的跨进程协作。
+///     从而支持 start/stop/status 的跨进程协作；并携带 versioned owner 描述符供 GUI 判断权威性。
 ///
 /// Code Logic（这个结构做什么）:
-///     以 camelCase JSON 保存 pid、port、设备信息、启动时间和控制令牌；读写 helper 直接序列化/反序列化该结构。
+///     以 camelCase JSON 保存 pid、port、设备信息、启动时间、控制令牌、
+///     `control_schema_version` 与可选 `owner_instance_id`；读写 helper 直接序列化/反序列化该结构。
+///     schema/owner 字段带 serde default，legacy JSON 可先反序列化再由 authority 分类为 stale。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendControlFile {
@@ -62,6 +64,12 @@ pub struct BackendControlFile {
     pub device_name: String,
     pub started_at: String,
     pub control_token: String,
+    /// 控制文件 schema 版本；缺失时 serde default 为 0，分类为需重启。
+    #[serde(default)]
+    pub control_schema_version: u32,
+    /// 本 sidecar 进程 owner 实例 id；legacy 文件为 None，不可作权威 owner。
+    #[serde(default)]
+    pub owner_instance_id: Option<String>,
 }
 
 impl BackendControlFile {
@@ -71,9 +79,10 @@ impl BackendControlFile {
     ///     单元测试只关心状态分类所需的最小 pid/port/device_id，不应为无关字段重复造样板数据。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     用传入 pid、port、device_id 填充关键字段，并给 device_name、started_at、control_token 提供稳定占位值。
+    ///     用传入 pid、port、device_id 填充关键字段，并给 device_name、started_at、control_token 提供稳定占位值；
+    ///     schema/owner 默认为 legacy（0/None），需要权威描述符的测试再显式覆盖。
     #[cfg(test)]
-    fn for_test(pid: u32, port: u16, device_id: &str) -> Self {
+    pub(crate) fn for_test(pid: u32, port: u16, device_id: &str) -> Self {
         Self {
             pid,
             port,
@@ -81,6 +90,8 @@ impl BackendControlFile {
             device_name: "test-device".to_string(),
             started_at: "2026-01-01T00:00:00Z".to_string(),
             control_token: "test-token".to_string(),
+            control_schema_version: 0,
+            owner_instance_id: None,
         }
     }
 }
@@ -669,6 +680,45 @@ fn platform_process_is_alive(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::authority::classify_control_descriptor;
+
+    /// 验证控制文件 round-trip 保留 owner 描述符 camelCase 字段。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI 与 sidecar 通过控制文件交换 schema/owner id；序列化契约必须稳定为 camelCase。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     设置 control_schema_version 与 owner_instance_id 后 to_value，断言 camelCase 键值。
+    #[test]
+    fn control_file_round_trips_owner_descriptor() {
+        let mut file = BackendControlFile::for_test(1, 62116, "device-a");
+        file.control_schema_version = 2;
+        file.owner_instance_id = Some("owner-a".to_string());
+        let value = serde_json::to_value(&file).unwrap();
+        assert_eq!(value["controlSchemaVersion"], 2);
+        assert_eq!(value["ownerInstanceId"], "owner-a");
+    }
+
+    /// 验证 legacy 控制文件可反序列化但被分类为 needs_restart，不可作权威。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧 sidecar 写出的控制文件缺 schema/owner；GUI 必须提示重启，不能伪装实时成功。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化无 schema/owner 的 legacy JSON，断言 classify_control_descriptor.needs_restart()。
+    #[test]
+    fn legacy_control_file_is_stale_not_authoritative() {
+        let legacy = serde_json::json!({
+            "pid": 1,
+            "port": 62116,
+            "controlToken": "x",
+            "deviceId": "device-a",
+            "deviceName": "Desk A",
+            "startedAt": "2026-07-14T00:00:00Z"
+        });
+        let parsed: BackendControlFile = serde_json::from_value(legacy).unwrap();
+        assert!(classify_control_descriptor(&parsed).needs_restart());
+    }
 
     /// 验证缺少控制文件时状态为停止。
     ///

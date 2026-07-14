@@ -2037,6 +2037,8 @@ mod tests {
             device_name: "test".into(),
             started_at: "2026-07-11T00:00:00Z".into(),
             control_token: "tok".into(),
+            control_schema_version: 0,
+            owner_instance_id: None,
         };
         let status = classify_status(Some(control), true, true, None);
         let snap = assemble_snapshot_from_inputs(
@@ -2072,6 +2074,8 @@ mod tests {
             device_name: "test".into(),
             started_at: "2026-07-11T00:00:00Z".into(),
             control_token: "tok".into(),
+            control_schema_version: 0,
+            owner_instance_id: None,
         };
         let status = classify_status(Some(control), false, false, None);
         assert_eq!(status.kind, BackendStatusKind::Stale);
@@ -2095,6 +2099,8 @@ mod tests {
             device_name: "test".into(),
             started_at: "2026-07-11T00:00:00Z".into(),
             control_token: "tok".into(),
+            control_schema_version: 0,
+            owner_instance_id: None,
         };
         let status = classify_status(Some(control), true, false, None);
         assert_eq!(status.kind, BackendStatusKind::Stale);
@@ -2118,6 +2124,8 @@ mod tests {
             device_name: "test".into(),
             started_at: "2026-07-11T00:00:00Z".into(),
             control_token: "tok".into(),
+            control_schema_version: 0,
+            owner_instance_id: None,
         };
         let status = classify_status(Some(control), false, false, None);
         let snap = assemble_snapshot_from_inputs(base_inputs(status, data, db, log_dir), None);

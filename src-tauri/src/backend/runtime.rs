@@ -744,6 +744,8 @@ mod tests {
             device_name: "测试后端".to_string(),
             started_at: "2026-01-01T00:00:00Z".to_string(),
             control_token: "test-token".to_string(),
+            control_schema_version: crate::backend::authority::CONTROL_SCHEMA_VERSION,
+            owner_instance_id: Some("owner-test".to_string()),
         }
     }
 
