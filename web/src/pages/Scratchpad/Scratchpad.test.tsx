@@ -299,3 +299,160 @@ describe('Scratchpad autosave lifecycle', () => {
     });
   });
 });
+
+describe('Scratchpad navigation and sync reload guards', () => {
+  test('latest page selection wins when responses resolve out of order', async () => {
+    const pageA = buildPage({ id: 'page-a', title: '页面A', content: 'A' });
+    const pageB = buildPage({ id: 'page-b', title: '页面B', content: 'B' });
+    const pageC = buildPage({ id: 'page-c', title: '页面C', content: 'C' });
+
+    listPages.mockResolvedValue([toSummary(pageA), toSummary(pageB), toSummary(pageC)]);
+    getPage.mockImplementation(async (pageId: string) => {
+      if (pageId === 'page-a') return pageA;
+      if (pageId === 'page-b') return pageB;
+      if (pageId === 'page-c') return pageC;
+      throw new Error(`unknown page ${pageId}`);
+    });
+
+    const save = vi.fn<ScratchpadAutosaveSaveFn>(async () => undefined);
+    const queue = createScratchpadAutosaveQueue(save, { delayMs: 500 });
+    renderScratchpad(queue);
+
+    await waitFor(() => {
+      expect((screen.getByLabelText('速记本内容') as HTMLTextAreaElement).value).toBe('A');
+    });
+
+    const b = deferred<ScratchpadPage>();
+    const c = deferred<ScratchpadPage>();
+    getPage.mockReset();
+    getPage.mockImplementation((pageId: string) => {
+      if (pageId === 'page-b') return b.promise;
+      if (pageId === 'page-c') return c.promise;
+      throw new Error(`unexpected page ${pageId}`);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /页面B/ }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /页面C/ }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      c.resolve(pageC);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      b.resolve(pageB);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect((screen.getByRole('textbox', { name: '速记本内容' }) as HTMLTextAreaElement).value).toBe(
+        'C',
+      );
+    });
+    expect(screen.getByRole('button', { name: /页面C/ }).getAttribute('aria-current')).toBe('page');
+  });
+
+  test('sync reload updates baseline but preserves draft edited during sync', async () => {
+    const page = buildPage({ id: 'page-1', title: '页面一', content: 'baseline' });
+    listPages.mockResolvedValue([toSummary(page)]);
+    getPage.mockResolvedValue(page);
+
+    const save = vi.fn<ScratchpadAutosaveSaveFn>(async () => undefined);
+    const queue = createScratchpadAutosaveQueue(save, { delayMs: 500 });
+
+    const lanSync = deferred<{ synced: number }>();
+    sync.mockReturnValue(lanSync.promise);
+    triggerCloudSync.mockResolvedValue({ ok: true, note: 'ok' });
+
+    renderScratchpad(queue);
+
+    await waitFor(() => {
+      expect((screen.getByLabelText('速记本内容') as HTMLTextAreaElement).disabled).toBe(false);
+    });
+
+    fireEvent.change(screen.getByLabelText('速记本内容'), {
+      target: { value: 'draft-before-sync' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '同步' }));
+
+    await waitFor(() => {
+      expect(sync).toHaveBeenCalled();
+    });
+
+    fireEvent.change(screen.getByLabelText('速记本内容'), {
+      target: { value: 'draft-during-sync' },
+    });
+
+    const reloaded = buildPage({
+      id: 'page-1',
+      title: '页面一',
+      content: 'draft-before-sync',
+      updatedAt: '2026-07-14T12:00:00.000Z',
+    });
+    listPages.mockResolvedValue([toSummary(reloaded)]);
+    getPage.mockResolvedValue(reloaded);
+
+    await act(async () => {
+      lanSync.resolve({ synced: 1 });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/已与 1 台设备同步|GitHub 同步完成/)).toBeTruthy();
+    });
+
+    expect((screen.getByRole('textbox', { name: '速记本内容' }) as HTMLTextAreaElement).value).toBe(
+      'draft-during-sync',
+    );
+  });
+
+  test('page selection remains available while another page open is pending', async () => {
+    const pageA = buildPage({ id: 'page-a', title: '页面A', content: 'A' });
+    const pageB = buildPage({ id: 'page-b', title: '页面B', content: 'B' });
+    listPages.mockResolvedValue([toSummary(pageA), toSummary(pageB)]);
+    getPage.mockImplementation(async (pageId: string) => {
+      if (pageId === 'page-a') return pageA;
+      if (pageId === 'page-b') return pageB;
+      throw new Error(`unknown page ${pageId}`);
+    });
+
+    const save = vi.fn<ScratchpadAutosaveSaveFn>(async () => undefined);
+    const queue = createScratchpadAutosaveQueue(save, { delayMs: 500 });
+    renderScratchpad(queue);
+
+    await waitFor(() => {
+      expect((screen.getByLabelText('速记本内容') as HTMLTextAreaElement).value).toBe('A');
+    });
+
+    const b = deferred<ScratchpadPage>();
+    getPage.mockReset();
+    getPage.mockImplementation((pageId: string) => {
+      if (pageId === 'page-b') return b.promise;
+      throw new Error(`unexpected page ${pageId}`);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /页面B/ }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const pageBButton = screen.getByRole('button', { name: /页面B/ });
+    expect(pageBButton).not.toHaveProperty('disabled', true);
+    expect((pageBButton as HTMLButtonElement).disabled).toBe(false);
+
+    await act(async () => {
+      b.resolve(pageB);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect((screen.getByLabelText('速记本内容') as HTMLTextAreaElement).value).toBe('B');
+    });
+  });
+});
