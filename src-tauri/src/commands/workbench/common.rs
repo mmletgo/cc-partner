@@ -6,6 +6,8 @@
 //! Code Logic（这个模块做什么）:
 //!     monofile 前部共享定义。
 
+use crate::backend::authority::RuntimeRole;
+use crate::backend::control_client::BackendControlClient;
 use crate::error::AppError;
 use crate::models::device::Device;
 use crate::state::AppState;
@@ -21,10 +23,32 @@ use crate::workbench::{
     remote_ids::{parse_remote_entity_id, remote_entity_id, remote_project_id},
 };
 use chrono::Utc;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// GuiClient 时经 control client 代理 workbench op；否则返回 None 让调用方走本地 owner 路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面 GUI 进程是 GuiClient，不得直接执行 Workbench owner 逻辑（PTY/tmux/RemoteClient/bridge）；
+///     必须把完整 op 代理到 sidecar HeadlessOwner，保证唯一 runtime owner。
+///
+/// Code Logic（这个函数做什么）:
+///     若 `runtime_role != GuiClient` 返回 `Ok(None)`；否则 `BackendControlClient::from_control_file`
+///     后调用 `workbench_op(op, payload)`，成功时 `Ok(Some(T))`。
+pub(crate) async fn proxy_workbench_if_gui<T: DeserializeOwned>(
+    state: &AppState,
+    op: &str,
+    payload: impl Serialize,
+) -> Result<Option<T>, AppError> {
+    if state.runtime_role != RuntimeRole::GuiClient {
+        return Ok(None);
+    }
+    let client = BackendControlClient::from_control_file()?;
+    Ok(Some(client.workbench_op(op, payload).await?))
+}
 
 pub(crate) const COMMIT_MESSAGE_TIMEOUT_SECS: u64 = 180;
 pub(crate) const MERGE_CONFLICT_RESOLUTION_TIMEOUT_SECS: u64 = 300;
@@ -130,7 +154,7 @@ pub(crate) struct WorkbenchMergeResolvedFile {
 ///
 /// Code Logic（这个结构体做什么）:
 ///     使用 camelCase 序列化 `{formatted}`，承载格式化后的 UTF-8 文本。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchFormatResult {
     pub(crate) formatted: String,
@@ -433,6 +457,7 @@ pub(crate) async fn restore_persisted_sessions(
     state: &AppState,
     project_id: Option<&str>,
 ) -> Result<(), AppError> {
+    state.runtime_role.require_owner()?;
     let rows = state.workbench_session_repo.list(project_id).await?;
     for row in rows {
         // Finding 5: 原子占位 — 把"已运行期 + 是否有其他 caller 在 restore"的检查合为单步，
@@ -440,10 +465,14 @@ pub(crate) async fn restore_persisted_sessions(
         if !state.workbench_sessions.try_claim_restore(&row.id) {
             continue;
         }
-        // 后续所有路径都必须释放占位，否则该 session 会被永久跳过。
+        // RAII：任意 early return / Err 路径 Drop 都会释放 claim。
+        let mut claim_guard = crate::workbench::sessions::RestoreClaimGuard::new(
+            (*state.workbench_sessions).clone(),
+            row.id.clone(),
+        );
         let Some(project) = state.workbench_project_repo.get(&row.project_id).await? else {
             state.workbench_session_repo.delete(&row.id).await?;
-            state.workbench_sessions.release_restore_claim(&row.id);
+            // claim_guard Drop 释放占位
             continue;
         };
         let worktree_name =
@@ -461,7 +490,20 @@ pub(crate) async fn restore_persisted_sessions(
             .restore(state.clone(), project, row.clone(), worktree_name)
         {
             Ok(restored) => {
-                state.workbench_session_repo.upsert(&restored).await?;
+                // spawn 成功后 upsert 失败也必须回收 attach。
+                let mut spawn_guard = crate::workbench::sessions::SessionSpawnGuard::new(
+                    (*state.workbench_sessions).clone(),
+                    restored.id.clone(),
+                );
+                match state.workbench_session_repo.upsert(&restored).await {
+                    Ok(()) => {
+                        spawn_guard.commit();
+                    }
+                    Err(error) => {
+                        tracing::warn!("恢复工作台终端后持久化失败，已回收 attach: {error}");
+                        // spawn_guard Drop → close
+                    }
+                }
             }
             Err(error) => {
                 tracing::warn!("恢复工作台终端会话失败: {error}");
@@ -469,11 +511,11 @@ pub(crate) async fn restore_persisted_sessions(
                 disconnected.status = "disconnected".to_string();
                 disconnected.exited_at = Some(now_iso());
                 disconnected.updated_at = now_iso();
-                state.workbench_session_repo.upsert(&disconnected).await?;
+                let _ = state.workbench_session_repo.upsert(&disconnected).await;
             }
         }
-        // 成功路径：spawn_row 已写入 sessions map，contains 自然命中；
-        // 失败路径：释放占位允许后续请求重试 restore。
+        // 显式 disarm 也可；即使不 disarm，Drop 幂等 release 也安全。
+        claim_guard.disarm();
         state.workbench_sessions.release_restore_claim(&row.id);
     }
     Ok(())
@@ -689,6 +731,7 @@ pub(crate) async fn ensure_remote_project_context(
     state: &AppState,
     project: &WorkbenchProjectRow,
 ) -> Result<RemoteWorkbenchProjectContext, AppError> {
+    state.runtime_role.require_owner()?;
     if project.kind != "remote" {
         return Err(AppError::generic("当前项目不是远端项目"));
     }
@@ -717,6 +760,7 @@ pub(crate) async fn ensure_remote_worktree_context(
     device_id: String,
     inner_worktree_id: String,
 ) -> Result<RemoteWorkbenchWorktreeContext, AppError> {
+    state.runtime_role.require_owner()?;
     let base_url = device_base_url(state, &device_id)?;
     let worktree = RemoteWorkbenchClient::new()
         .get_worktree(&base_url, &inner_worktree_id)
@@ -900,6 +944,9 @@ pub(crate) fn ensure_remote_event_bridge_for_context(
     state: &AppState,
     context: &RemoteWorkbenchProjectContext,
 ) {
+    if state.runtime_role.require_owner().is_err() {
+        return;
+    }
     ensure_remote_event_bridge_for_project_mapping(
         state,
         &context.device_id,
@@ -921,6 +968,9 @@ pub(crate) fn ensure_remote_event_bridge_for_project_mapping(
     inner_project_id: &str,
     local_project_id: &str,
 ) {
+    if state.runtime_role.require_owner().is_err() {
+        return;
+    }
     state.workbench_remote_event_bridges.ensure_bridge(
         device_id.to_string(),
         base_url.to_string(),
@@ -942,6 +992,9 @@ pub(crate) fn ensure_remote_event_bridge_for_device(
     device_id: &str,
     base_url: &str,
 ) {
+    if state.runtime_role.require_owner().is_err() {
+        return;
+    }
     state.workbench_remote_event_bridges.ensure_bridge(
         device_id.to_string(),
         base_url.to_string(),
@@ -959,6 +1012,9 @@ pub(crate) fn ensure_remote_event_bridge_for_worktree_context(
     state: &AppState,
     context: &RemoteWorkbenchWorktreeContext,
 ) {
+    if state.runtime_role.require_owner().is_err() {
+        return;
+    }
     ensure_remote_event_bridge_for_project_mapping(
         state,
         &context.device_id,

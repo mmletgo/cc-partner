@@ -98,7 +98,13 @@ pub use projects::add_local_workbench_project_from_path;
 
 pub(crate) use browser::create_workbench_browser_preview_for_state;
 
-pub(crate) use common::{device_base_url, WorkbenchMergeResultDto};
+// control_workbench 与其它 crate 内 owner 路径需要 common 中的远程映射/设备 helper。
+pub(crate) use common::{
+    build_remote_project_shortcut_row, device_base_url, device_name_from_state,
+    ensure_remote_event_bridge_for_project_mapping, ensure_remote_project_context, get_project,
+    local_project_id_for_remote_inner_project, map_remote_session_dtos_with_project, now_iso,
+    remote_inner_session_id, remote_inner_worktree_id, WorkbenchMergeResultDto,
+};
 
 pub(crate) use files::{
     list_workbench_sessions_for_state, local_list_workbench_sessions,

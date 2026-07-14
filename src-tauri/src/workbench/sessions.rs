@@ -1174,6 +1174,8 @@ fn decode_utf8_chunk(bytes: &[u8], pending: &mut Vec<u8>) -> String {
 ///
 /// Code Logic（这个结构体做什么）:
 ///     用 HashMap 保存 session_id 到会话句柄和 replay buffer 的映射；外层 Arc 允许后台读写线程更新状态。
+///     Clone 廉价（内部全是 Arc），供 `SessionSpawnGuard` / `RestoreClaimGuard` 持有。
+#[derive(Clone)]
 pub struct WorkbenchSessionRegistry {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>>,
     replay_buffers: Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
@@ -1186,6 +1188,107 @@ pub struct WorkbenchSessionRegistry {
     ///     第二个直接跳过。restore 完成后由 caller 释放 claim（成功路径 spawn_row 已写入 sessions，
     ///     contains 自然命中；失败路径释放后允许后续重试）。
     restoring: Arc<Mutex<HashSet<String>>>,
+}
+
+/// Session 创建后的 RAII 补偿守卫：repo 持久化失败时自动关闭 attach，禁止 ghost registry/child。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     create/restore 先 spawn PTY 再写 SQLite；若 upsert 失败必须回收运行期资源，
+///     否则 sidecar 留下无元数据的 ghost 终端。
+///
+/// Code Logic（这个结构体做什么）:
+///     持有 registry 与 session_id；未 `commit()` 时 Drop 调用 `close` 移除并 kill child。
+pub struct SessionSpawnGuard {
+    registry: WorkbenchSessionRegistry,
+    session_id: String,
+    committed: bool,
+}
+
+impl SessionSpawnGuard {
+    /// Business Logic（为什么需要这个函数）:
+    ///     spawn 成功后立刻接管生命周期，后续任何 early return 都能自动补偿。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     记录 registry/session_id，`committed=false`。
+    pub fn new(registry: WorkbenchSessionRegistry, session_id: String) -> Self {
+        Self {
+            registry,
+            session_id,
+            committed: false,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     SQLite upsert 成功后才允许会话进入正式运行期，不再被 Drop 回收。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     置 `committed=true`，Drop 变为 no-op。
+    pub fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for SessionSpawnGuard {
+    /// Business Logic（为什么需要这个函数）:
+    ///     任何未提交路径（含 panic）都必须关闭 attach，防止 ghost child/registry。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     未 commit 时 best-effort `close(session_id)`（会话已不存在则忽略）。
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.registry.close(&self.session_id);
+        }
+    }
+}
+
+/// restore claim 的 RAII 守卫：任何 early return 都释放占位，避免永久跳过恢复。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     `try_claim_restore` 成功后若中途失败却未释放 claim，后续 list 永远不会再恢复该 session。
+///
+/// Code Logic（这个结构体做什么）:
+///     Drop 时若未 `disarm`/`commit` 则调用 `release_restore_claim`。
+pub struct RestoreClaimGuard {
+    registry: WorkbenchSessionRegistry,
+    session_id: String,
+    armed: bool,
+}
+
+impl RestoreClaimGuard {
+    /// Business Logic（为什么需要这个函数）:
+    ///     claim 成功后立刻接管释放责任。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     记录 registry/session_id，armed=true。
+    pub fn new(registry: WorkbenchSessionRegistry, session_id: String) -> Self {
+        Self {
+            registry,
+            session_id,
+            armed: true,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     调用方已显式 release 时禁止 Drop 二次释放（幂等但仍避免重复日志路径）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     armed=false。
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RestoreClaimGuard {
+    /// Business Logic（为什么需要这个函数）:
+    ///     restore 任意失败出口都必须释放 claim。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     armed 时调用 `release_restore_claim`。
+    fn drop(&mut self) {
+        if self.armed {
+            self.registry.release_restore_claim(&self.session_id);
+        }
+    }
 }
 
 impl WorkbenchSessionRegistry {
@@ -1265,7 +1368,8 @@ impl WorkbenchSessionRegistry {
     ///     3. 若 restoring 集合已有该 session_id（另一个 caller 正在 restore），返回 false；
     ///     4. 否则写入 restoring 集合并返回 true（caller 独占 restore 责任）。
     ///
-    /// 返回 true 表示 caller 必须 restore 并在完成后调用 `release_restore_claim`。
+    /// 返回 true 表示 caller 必须 restore 并在完成后调用 `release_restore_claim`
+    ///（或持有 `RestoreClaimGuard` 直至结束）。
     pub fn try_claim_restore(&self, session_id: &str) -> bool {
         let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
         if sessions.contains_key(session_id) {
@@ -1288,6 +1392,47 @@ impl WorkbenchSessionRegistry {
     pub fn release_restore_claim(&self, session_id: &str) {
         let mut restoring = self.restoring.lock().expect("restoring 集合锁中毒");
         restoring.remove(session_id);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试与诊断需要知道运行期 registry 当前会话数（含 ghost 残留）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 sessions map 长度。
+    pub fn registry_len(&self) -> usize {
+        self.sessions
+            .lock()
+            .expect("workbench sessions 锁中毒")
+            .len()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     RAII 故障注入测试需要确认 Drop 后没有存活 child/fake 句柄。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     统计 status=running 的会话数（Fake 与 Pty 均计入）。
+    pub fn live_child_count(&self) -> usize {
+        let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+        sessions
+            .values()
+            .filter(|handle| {
+                let handle = handle.lock().expect("workbench session 锁中毒");
+                handle.row.status == "running"
+            })
+            .count()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试需要查询 restore claim 是否仍占用，验证 Drop 是否释放。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     检查 restoring 集合是否包含 session_id。
+    #[cfg(test)]
+    pub fn is_restore_claim_held(&self, session_id: &str) -> bool {
+        self.restoring
+            .lock()
+            .expect("restoring 集合锁中毒")
+            .contains(session_id)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2202,6 +2347,61 @@ mod tests {
         let registry = WorkbenchSessionRegistry::new();
 
         assert!(registry.close("missing").is_err());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     repo upsert 失败时必须回收刚 spawn 的 attach，禁止 ghost registry/child。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     insert fake session → SessionSpawnGuard 不 commit → Drop → registry 空且无 live child。
+    #[test]
+    fn repo_failure_closes_spawned_session() {
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_fake_session_for_test("s-spawn-1", "p1");
+        assert_eq!(registry.registry_len(), 1);
+        assert_eq!(registry.live_child_count(), 1);
+
+        {
+            let _guard = SessionSpawnGuard::new(registry.clone(), "s-spawn-1".to_string());
+            // 模拟 upsert 失败：不 commit，离开作用域触发 Drop。
+        }
+
+        assert_eq!(registry.registry_len(), 0);
+        assert_eq!(registry.live_child_count(), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     upsert 成功后必须 commit，否则 Drop 会误杀合法 session。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     insert → guard.commit → drop → session 仍在 registry。
+    #[test]
+    fn session_spawn_guard_commit_keeps_session() {
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_fake_session_for_test("s-keep", "p1");
+        {
+            let mut guard = SessionSpawnGuard::new(registry.clone(), "s-keep".to_string());
+            guard.commit();
+        }
+        assert_eq!(registry.registry_len(), 1);
+        assert!(registry.contains("s-keep"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     restore 中途失败时 Drop 必须释放 claim，允许后续重试。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     try_claim → RestoreClaimGuard 不 disarm → Drop → claim 已释放，可再次 claim。
+    #[test]
+    fn restore_claim_guard_releases_on_drop() {
+        let registry = WorkbenchSessionRegistry::new();
+        assert!(registry.try_claim_restore("s-restore"));
+        {
+            let _guard = RestoreClaimGuard::new(registry.clone(), "s-restore".to_string());
+        }
+        assert!(!registry.is_restore_claim_held("s-restore"));
+        assert!(registry.try_claim_restore("s-restore"));
+        registry.release_restore_claim("s-restore");
     }
 
     /// Business Logic（为什么需要这个测试）:

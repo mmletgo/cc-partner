@@ -45,6 +45,9 @@ pub async fn list_workbench_worktrees(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Vec<WorkbenchWorktreeDto>, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "worktrees.list", serde_json::json!({ "projectId": project_id.clone() })).await? {
+        return Ok(v);
+    }
     list_workbench_worktrees_for_state(state.inner(), project_id).await
 }
 
@@ -66,6 +69,7 @@ pub(crate) async fn local_create_workbench_worktree(
     branch_name: String,
     base_branch: Option<String>,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let branch = branch_name.trim();
     if branch.is_empty() {
@@ -245,6 +249,9 @@ pub async fn create_workbench_worktree(
     branch_name: String,
     base_branch: Option<String>,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "worktrees.create", serde_json::json!({ "projectId": project_id.clone(), "branchName": branch_name.clone(), "baseBranch": base_branch.clone() })).await? {
+        return Ok(v);
+    }
     create_workbench_worktree_for_state(state.inner(), project_id, branch_name, base_branch).await
 }
 
@@ -261,6 +268,7 @@ pub(crate) async fn local_commit_workbench_worktree(
     worktree_id: String,
     message: Option<String>,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
+    state.runtime_role.require_owner()?;
     let row = state
         .workbench_worktree_repo
         .get(&worktree_id)
@@ -333,6 +341,9 @@ pub async fn commit_workbench_worktree(
     worktree_id: String,
     message: Option<String>,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "worktrees.commit", serde_json::json!({ "worktreeId": worktree_id.clone(), "message": message.clone() })).await? {
+        return Ok(v);
+    }
     commit_workbench_worktree_for_state(state.inner(), worktree_id, message).await
 }
 
@@ -436,6 +447,7 @@ pub(crate) async fn local_push_workbench_worktree(
     state: &AppState,
     worktree_id: String,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
+    state.runtime_role.require_owner()?;
     let row = state
         .workbench_worktree_repo
         .get(&worktree_id)
@@ -494,6 +506,9 @@ pub async fn push_workbench_worktree(
     state: State<'_, AppState>,
     worktree_id: String,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "worktrees.push", serde_json::json!({ "worktreeId": worktree_id.clone() })).await? {
+        return Ok(v);
+    }
     push_workbench_worktree_for_state(state.inner(), worktree_id).await
 }
 
@@ -510,6 +525,7 @@ pub(crate) async fn local_merge_workbench_worktree(
     state: &AppState,
     worktree_id: String,
 ) -> Result<WorkbenchMergeResultDto, AppError> {
+    state.runtime_role.require_owner()?;
     let mut stages = initial_merge_stages();
 
     let row = match state.workbench_worktree_repo.get(&worktree_id).await {
@@ -793,6 +809,9 @@ pub async fn merge_workbench_worktree(
     state: State<'_, AppState>,
     worktree_id: String,
 ) -> Result<WorkbenchMergeResultDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "worktrees.merge", serde_json::json!({ "worktreeId": worktree_id.clone() })).await? {
+        return Ok(v);
+    }
     merge_workbench_worktree_for_state(state.inner(), worktree_id).await
 }
 
@@ -1274,6 +1293,7 @@ pub(crate) async fn local_remove_workbench_worktree(
     worktree_id: String,
     force: Option<bool>,
 ) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
     let row = state
         .workbench_worktree_repo
         .get(&worktree_id)
@@ -1346,6 +1366,9 @@ pub async fn remove_workbench_worktree(
     worktree_id: String,
     force: Option<bool>,
 ) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "worktrees.remove", serde_json::json!({ "worktreeId": worktree_id.clone(), "force": force.clone() })).await? {
+        return Ok(v);
+    }
     remove_workbench_worktree_for_state(state.inner(), worktree_id, force).await
 }
 
@@ -1374,6 +1397,7 @@ pub(crate) async fn local_list_workbench_git_commits(
     worktree_id: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<WorkbenchGitCommitDto>, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let limit = limit.unwrap_or(30).clamp(1, 100);
@@ -1424,6 +1448,9 @@ pub async fn list_workbench_git_commits(
     worktree_id: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<WorkbenchGitCommitDto>, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "git.commits", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "limit": limit.clone() })).await? {
+        return Ok(v);
+    }
     list_workbench_git_commits_for_state(state.inner(), project_id, worktree_id, limit).await
 }
 
@@ -1441,6 +1468,7 @@ pub(crate) async fn local_open_workbench_file(
     worktree_id: Option<String>,
     path: String,
 ) -> Result<WorkbenchOpenFileDto, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let root = PathBuf::from(worktree.path);

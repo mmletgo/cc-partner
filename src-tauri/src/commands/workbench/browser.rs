@@ -15,7 +15,7 @@ use crate::workbench::remote_protocol::RemoteWorkbenchBrowserPreviewReq;
 use std::sync::atomic::Ordering;
 use tauri::State;
 
-use super::common::{ensure_remote_project_context, get_project, remote_inner_worktree_id};
+use super::common::{ensure_remote_project_context, get_project, proxy_workbench_if_gui, remote_inner_worktree_id};
 use super::projects::discover_workbench_browser_targets_for_state;
 
 /// 发现 Workbench 浏览器预览目标。
@@ -31,6 +31,9 @@ pub async fn discover_workbench_browser_targets(
     project_id: String,
     worktree_id: Option<String>,
 ) -> Result<WorkbenchBrowserDiscovery, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "browser.discover", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone() })).await? {
+        return Ok(v);
+    }
     discover_workbench_browser_targets_for_state(state.inner(), project_id, worktree_id).await
 }
 
@@ -109,6 +112,9 @@ pub async fn create_workbench_browser_preview(
     worktree_id: Option<String>,
     target_url: String,
 ) -> Result<WorkbenchBrowserPreview, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "browser.create_preview", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "targetUrl": target_url.clone() })).await? {
+        return Ok(v);
+    }
     create_workbench_browser_preview_for_state(state.inner(), project_id, worktree_id, target_url)
         .await
 }

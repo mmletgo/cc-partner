@@ -11,6 +11,7 @@ pub mod cli;
 pub mod control;
 pub mod control_api;
 pub mod control_client;
+pub mod control_workbench;
 pub mod doctor;
 pub mod logging;
 pub mod runtime;

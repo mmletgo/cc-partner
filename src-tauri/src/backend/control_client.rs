@@ -42,6 +42,64 @@ struct ControlAuthBody {
     control_token: String,
 }
 
+/// Workbench control 请求 body（token + op + payload）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlWorkbenchRequestBody {
+    control_token: String,
+    op: String,
+    payload: serde_json::Value,
+}
+
+/// Workbench control 响应（owner + result）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlWorkbenchResponseBody {
+    owner_instance_id: String,
+    result: serde_json::Value,
+}
+
+/// Workbench control 元数据/data 路径选择。
+///
+/// Business Logic（为什么需要这个函数）:
+///     文件内容/预览/browser 预览等可能超过元数据 256 KiB，需走 data 路径避免被 control body limit 截断。
+///
+/// Code Logic（这个函数做什么）:
+///     open/save/preview/browser/replay/write 走 `workbench/data`，其余走 `workbench`。
+fn workbench_control_path(op: &str) -> &'static str {
+    match op {
+        "files.open"
+        | "files.save_text"
+        | "files.preview_sqlite"
+        | "files.preview_html_asset"
+        | "browser.discover"
+        | "browser.create_preview"
+        | "sessions.replay"
+        | "sessions.write" => "workbench/data",
+        _ => "workbench",
+    }
+}
+
+/// Workbench control 超时选择。
+///
+/// Business Logic（为什么需要这个函数）:
+///     commit/merge/resume 等长操作不能用默认 15s mutation 超时。
+///
+/// Code Logic（这个函数做什么）:
+///     长 Git/Claude 类 op 用 360s，其余用 MUTATE_TIMEOUT。
+fn workbench_control_timeout(op: &str) -> Duration {
+    match op {
+        "worktrees.commit"
+        | "worktrees.merge"
+        | "worktrees.push"
+        | "worktrees.create"
+        | "claude.resume"
+        | "files.open"
+        | "files.save_text" => Duration::from_secs(360),
+        _ => MUTATE_TIMEOUT,
+    }
+}
+
 /// update-config HTTP body（token + CAS）。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -281,6 +339,97 @@ impl BackendControlClient {
                 "control_response_uncertain: {e}"
             ))),
         }
+    }
+
+    /// 经 control API 代理 Workbench 操作并反序列化 `result`。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 不得自建 Workbench runtime / RemoteWorkbenchClient / event bridge；
+    ///     全部 projects/files/Git/browser/session 操作必须代理到 sidecar HeadlessOwner。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/backend/control/workbench` 或大数据路径 `workbench/data`；
+    ///     body = `{controlToken, op, payload}`；解包 `ControlWorkbenchResponse.result` 为 T。
+    pub async fn workbench_op<T: DeserializeOwned>(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+    ) -> Result<T, AppError> {
+        let value = self.workbench_op_value(op, payload).await?;
+        serde_json::from_value(value).map_err(|e| {
+            AppError::generic(format!("workbench control result 解析失败 ({op}): {e}"))
+        })
+    }
+
+    /// 经 control API 代理 Workbench 操作，返回原始 JSON `result`。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     merge/remove 等返回轻量 JSON 的命令需要 Value，不强制 DTO。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 op 选择元数据/data 路径，mutation 语义 send_once；校验 owner_instance_id 非空后返回 result。
+    pub async fn workbench_op_value(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+    ) -> Result<serde_json::Value, AppError> {
+        let (_owner, result) = self.workbench_op_with_owner_value(op, payload).await?;
+        Ok(result)
+    }
+
+    /// 经 control API 代理 Workbench 操作，返回 ownerInstanceId 与强类型 result。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试/对账需要同时确认响应来自当前 owner 实例与业务结果。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用 value 路径后把 result 反序列化为 T。
+    pub async fn workbench_op_with_owner<T: DeserializeOwned>(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+    ) -> Result<(String, T), AppError> {
+        let (owner, value) = self.workbench_op_with_owner_value(op, payload).await?;
+        let result = serde_json::from_value(value).map_err(|e| {
+            AppError::generic(format!("workbench control result 解析失败 ({op}): {e}"))
+        })?;
+        Ok((owner, result))
+    }
+
+    /// 经 control API 代理 Workbench 操作，返回 ownerInstanceId 与原始 result。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     workbench_op / workbench_op_value / with_owner 共享唯一 mutate 发送路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST workbench 或 workbench/data；send_once 不自动重试；校验 owner 非空。
+    async fn workbench_op_with_owner_value(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+    ) -> Result<(String, serde_json::Value), AppError> {
+        let path = workbench_control_path(op);
+        let timeout = workbench_control_timeout(op);
+        let body = ControlWorkbenchRequestBody {
+            control_token: self.control_token.clone(),
+            op: op.to_string(),
+            payload: serde_json::to_value(payload).map_err(|e| {
+                AppError::generic(format!("序列化 workbench payload 失败: {e}"))
+            })?,
+        };
+        let resp: ControlWorkbenchResponseBody = match self.send_once(path, &body, timeout).await {
+            ControlCallOutcome::Ok(v) => v,
+            ControlCallOutcome::Failed(e) => return Err(e),
+            ControlCallOutcome::Uncertain(e) => {
+                return Err(AppError::unavailable(format!(
+                    "control_response_uncertain: {e}"
+                )));
+            }
+        };
+        if resp.owner_instance_id.trim().is_empty() {
+            return Err(AppError::generic("workbench control 响应缺少 ownerInstanceId"));
+        }
+        Ok((resp.owner_instance_id, resp.result))
     }
 
     /// 提交字段级 patch：先读 status 再 CAS 一次。
@@ -813,4 +962,131 @@ mod tests {
             "owner 保持旧热键"
         );
     }
+
+    /// 验证 workbench_op 命中 mock control workbench 路由并返回 result。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI 代理路径必须真正 POST control workbench 并校验 token/op/owner 信封。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动 127.0.0.1:0 mock；断言 controlToken/op=projects.list；返回 owner + 空列表 result。
+    #[tokio::test]
+    async fn workbench_op_projects_list_hits_control_route() {
+        use axum::extract::State as AxumState;
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct HitState {
+            ops: Arc<Mutex<Vec<String>>>,
+            token: String,
+            owner: String,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WbReq {
+            control_token: String,
+            op: String,
+            #[serde(default)]
+            #[allow(dead_code)]
+            payload: serde_json::Value,
+        }
+
+        let ops = Arc::new(Mutex::new(Vec::new()));
+        let token = "tok-wb-1".to_string();
+        let owner = "owner-sidecar-1".to_string();
+        let state = HitState {
+            ops: Arc::clone(&ops),
+            token: token.clone(),
+            owner: owner.clone(),
+        };
+
+        let app = Router::new()
+            .route(
+                "/api/backend/control/workbench",
+                post(
+                    |AxumState(s): AxumState<HitState>, Json(body): Json<WbReq>| async move {
+                        if body.control_token != s.token {
+                            return Err((
+                                StatusCode::UNAUTHORIZED,
+                                Json(serde_json::json!({"error":"bad token","code":"unauthorized"})),
+                            ));
+                        }
+                        s.ops.lock().unwrap().push(body.op.clone());
+                        let result = if body.op == "projects.list" {
+                            serde_json::json!([])
+                        } else {
+                            serde_json::json!({"ok": true})
+                        };
+                        Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(serde_json::json!({
+                            "ownerInstanceId": s.owner,
+                            "result": result,
+                        })))
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let client = BackendControlClient::for_test(port, &token, &owner).unwrap();
+        let (got_owner, items): (String, Vec<serde_json::Value>) = client
+            .workbench_op_with_owner("projects.list", serde_json::json!({}))
+            .await
+            .expect("workbench_op projects.list");
+        assert_eq!(got_owner, owner);
+        assert!(items.is_empty());
+        assert_eq!(ops.lock().unwrap().as_slice(), &["projects.list".to_string()]);
+    }
+
+    /// 验证 GuiClient 的 require_owner 冲突码（与 bridge ensure 拒绝路径一致）。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI 进程不得成为 Workbench owner；require_owner 必须稳定拒绝。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     调用 RuntimeRole::GuiClient.require_owner() 并断言 Conflict + runtime_owner_required。
+    #[test]
+    fn gui_client_require_owner_is_conflict() {
+        use crate::backend::authority::RuntimeRole;
+        use crate::error::AppErrorCategory;
+        let err = RuntimeRole::GuiClient
+            .require_owner()
+            .expect_err("GuiClient 必须被拒绝");
+        assert_eq!(err.classify(), AppErrorCategory::Conflict);
+        assert_eq!(err.to_string(), "runtime_owner_required");
+    }
+
+    /// 验证 workbench control 路径选择：大 payload op 走 data。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     元数据 256 KiB limit 不能截断 open/save/preview/browser。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 workbench_control_path 对 metadata/data 类 op 的分流。
+    #[test]
+    fn workbench_control_path_routes_large_ops_to_data() {
+        assert_eq!(workbench_control_path("projects.list"), "workbench");
+        assert_eq!(workbench_control_path("sessions.create"), "workbench");
+        assert_eq!(workbench_control_path("files.open"), "workbench/data");
+        assert_eq!(workbench_control_path("files.save_text"), "workbench/data");
+        assert_eq!(
+            workbench_control_path("files.preview_sqlite"),
+            "workbench/data"
+        );
+        assert_eq!(
+            workbench_control_path("browser.create_preview"),
+            "workbench/data"
+        );
+        assert_eq!(workbench_control_path("sessions.write"), "workbench/data");
+    }
+
 }

@@ -54,8 +54,8 @@ mod workbench;
 use std::sync::Arc;
 
 use crate::backend::runtime::{
-    build_app_state, shutdown_backend_runtime, start_background_tasks, start_gui_backend_services,
-    BackendRuntimeMode,
+    build_app_state_with_role, shutdown_backend_runtime, start_background_tasks,
+    start_gui_backend_services, BackendRuntimeMode,
 };
 use crate::backend::ui::{BackendUi, TauriBackendUi};
 use crate::commands::{
@@ -129,7 +129,12 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let (state, runtime_mode) = tauri::async_runtime::block_on(async {
                 let ui: Arc<dyn BackendUi> = Arc::new(TauriBackendUi::new(app_handle.clone()));
-                let state = build_app_state(ui).await?;
+                // GUI 进程仅作 GuiClient：Workbench/runtime mutation 一律代理到 sidecar owner。
+                let state = build_app_state_with_role(
+                    ui,
+                    crate::backend::authority::RuntimeRole::GuiClient,
+                )
+                .await?;
                 let backend_status =
                     backend_cmd::ensure_backend_process_for_gui(&app_handle).await?;
                 let runtime_mode = start_gui_backend_services(&state).await?;

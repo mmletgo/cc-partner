@@ -34,6 +34,9 @@ use super::common::*;
 pub async fn list_workbench_projects(
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkbenchProjectDto>, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.list", serde_json::json!({})).await? {
+        return Ok(v);
+    }
     let rows = state.workbench_project_repo.list().await?;
     Ok(rows.iter().map(WorkbenchProjectRow::to_dto).collect())
 }
@@ -130,6 +133,9 @@ pub async fn add_workbench_project(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<WorkbenchProjectDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.add", serde_json::json!({ "path": path.clone() })).await? {
+        return Ok(v);
+    }
     add_local_workbench_project_from_path(&state, path).await
 }
 
@@ -145,6 +151,9 @@ pub async fn list_workbench_remote_roots(
     state: State<'_, AppState>,
     device_id: String,
 ) -> Result<Vec<WorkbenchRemoteRootDto>, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.remote_roots", serde_json::json!({ "deviceId": device_id.clone() })).await? {
+        return Ok(v);
+    }
     let base_url = device_base_url(&state, &device_id)?;
     RemoteWorkbenchClient::new().roots(&base_url).await
 }
@@ -162,6 +171,9 @@ pub async fn list_workbench_remote_dir(
     device_id: String,
     path: String,
 ) -> Result<Vec<WorkbenchRemoteDirectoryEntryDto>, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.remote_list_dir", serde_json::json!({ "deviceId": device_id.clone(), "path": path.clone() })).await? {
+        return Ok(v);
+    }
     let base_url = device_base_url(&state, &device_id)?;
     RemoteWorkbenchClient::new()
         .list_dir(&base_url, &path)
@@ -181,6 +193,9 @@ pub async fn get_workbench_remote_path_info(
     device_id: String,
     path: String,
 ) -> Result<WorkbenchRemotePathInfoDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.remote_path_info", serde_json::json!({ "deviceId": device_id.clone(), "path": path.clone() })).await? {
+        return Ok(v);
+    }
     let base_url = device_base_url(&state, &device_id)?;
     RemoteWorkbenchClient::new()
         .path_info(&base_url, &path)
@@ -200,6 +215,9 @@ pub async fn open_workbench_remote_project(
     device_id: String,
     path: String,
 ) -> Result<WorkbenchProjectDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.remote_open", serde_json::json!({ "deviceId": device_id.clone(), "path": path.clone() })).await? {
+        return Ok(v);
+    }
     let base_url = device_base_url(&state, &device_id)?;
     let current_device_name = device_name_from_state(&state, &device_id);
     let remote = RemoteWorkbenchClient::new()
@@ -231,6 +249,9 @@ pub async fn remove_workbench_project(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.remove", serde_json::json!({ "projectId": project_id.clone() })).await? {
+        return Ok(v);
+    }
     let _ = get_project(&state, &project_id).await?;
     let session_rows = state.workbench_session_repo.list(Some(&project_id)).await?;
     for row in session_rows {
@@ -261,6 +282,9 @@ pub async fn touch_workbench_project(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<WorkbenchProjectDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.touch", serde_json::json!({ "projectId": project_id.clone() })).await? {
+        return Ok(v);
+    }
     let mut row = get_project(&state, &project_id).await?;
     let now = now_iso();
     row.last_opened_at = now.clone();
@@ -280,6 +304,7 @@ pub(crate) async fn local_list_workbench_worktrees(
     state: &AppState,
     project_id: String,
 ) -> Result<Vec<WorkbenchWorktreeDto>, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     ensure_main_worktree(state, &project).await?;
     sync_git_worktrees(state, &project).await?;
@@ -301,6 +326,7 @@ pub(crate) async fn local_get_workbench_worktree(
     state: &AppState,
     worktree_id: String,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
+    state.runtime_role.require_owner()?;
     let row = state
         .workbench_worktree_repo
         .get(&worktree_id)

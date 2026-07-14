@@ -385,6 +385,7 @@ async fn build_local_state(device_id: &str) -> AppState {
         workbench_claude_session_indexes: Arc::new(RwLock::new(HashMap::new())),
         workbench_claude_session_watchers: Arc::new(Mutex::new(HashMap::new())),
         runtime_metrics: Arc::new(crate::backend::runtime_metrics::RuntimeMetrics::new()),
+        runtime_role: crate::backend::authority::RuntimeRole::HeadlessOwner,
     }
 }
 

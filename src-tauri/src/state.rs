@@ -15,6 +15,7 @@
 //!     actual_http_port 用 AtomicU16（启动后高频只读，无锁更高效）；
 //!     discovery 句柄用 Mutex<Option<...>>（仅启动/关闭时写）。
 
+use crate::backend::authority::RuntimeRole;
 use crate::backend::runtime_metrics::RuntimeMetrics;
 use crate::backend::ui::{serialize_event_payload, BackendAsset, BackendUi};
 use crate::cloud_sync::CloudSyncRuntime;
@@ -135,6 +136,8 @@ pub struct AppState {
     pub workbench_claude_session_watchers: Arc<Mutex<HashMap<String, notify::RecommendedWatcher>>>,
     /// 进程内有界本地运行时指标（耗时/计数/EWMA）；不上传、不记录正文/路径/凭据。
     pub runtime_metrics: Arc<RuntimeMetrics>,
+    /// 运行时角色：sidecar=`HeadlessOwner`（唯一 Workbench/runtime owner），GUI=`GuiClient`（仅代理）。
+    pub runtime_role: RuntimeRole,
 }
 
 impl AppState {

@@ -38,6 +38,9 @@ pub async fn open_workbench_file(
     worktree_id: Option<String>,
     path: String,
 ) -> Result<WorkbenchOpenFileDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "files.open", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "path": path.clone() })).await? {
+        return Ok(v);
+    }
     open_workbench_file_for_state(state.inner(), project_id, worktree_id, path).await
 }
 
@@ -57,6 +60,7 @@ pub(crate) async fn local_save_workbench_text_file(
     content: String,
     base_hash: String,
 ) -> Result<WorkbenchSaveTextResultDto, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let root = PathBuf::from(worktree.path);
@@ -129,6 +133,9 @@ pub async fn save_workbench_text_file(
     content: String,
     base_hash: String,
 ) -> Result<WorkbenchSaveTextResultDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "files.save_text", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "path": path.clone(), "content": content.clone(), "baseHash": base_hash.clone() })).await? {
+        return Ok(v);
+    }
     save_workbench_text_file_for_state(
         state.inner(),
         project_id,
@@ -149,9 +156,19 @@ pub async fn save_workbench_text_file(
 ///     根据 kind 调用 file_content::format_structured_content，并把格式化文本包装为 `{formatted}`。
 #[tauri::command]
 pub async fn format_workbench_structured_content(
+    state: State<'_, AppState>,
     kind: String,
     content: String,
 ) -> Result<WorkbenchFormatResult, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "files.format",
+        serde_json::json!({ "kind": kind.clone(), "content": content.clone() }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
     let formatted =
         run_blocking_fs(move || file_content::format_structured_content(&kind, &content)).await?;
     Ok(WorkbenchFormatResult { formatted })
@@ -172,6 +189,7 @@ pub(crate) async fn local_preview_workbench_sqlite(
     table: Option<String>,
     limit_rows: Option<i64>,
 ) -> Result<WorkbenchSqlitePreview, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let root = PathBuf::from(worktree.path);
@@ -195,6 +213,9 @@ pub async fn preview_workbench_sqlite(
     table: Option<String>,
     limit_rows: Option<i64>,
 ) -> Result<WorkbenchSqlitePreview, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "files.preview_sqlite", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "path": path.clone(), "table": table.clone(), "limitRows": limit_rows.clone() })).await? {
+        return Ok(v);
+    }
     let project = get_project(&state, &project_id).await?;
     if project.kind == "remote" {
         let context = ensure_remote_project_context(&state, &project).await?;
@@ -229,6 +250,7 @@ pub(crate) async fn local_preview_workbench_html_asset(
     document_path: String,
     asset_path: String,
 ) -> Result<WorkbenchHtmlAssetDto, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let root = PathBuf::from(worktree.path);
@@ -251,6 +273,9 @@ pub async fn preview_workbench_html_asset(
     document_path: String,
     asset_path: String,
 ) -> Result<WorkbenchHtmlAssetDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "files.preview_html_asset", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "documentPath": document_path.clone(), "assetPath": asset_path.clone() })).await? {
+        return Ok(v);
+    }
     let project = get_project(&state, &project_id).await?;
     if project.kind == "remote" {
         let context = ensure_remote_project_context(&state, &project).await?;
@@ -282,6 +307,7 @@ pub(crate) async fn local_list_workbench_sessions(
     state: &AppState,
     project_id: Option<String>,
 ) -> Result<Vec<WorkbenchSessionDto>, AppError> {
+    state.runtime_role.require_owner()?;
     restore_persisted_sessions(state, project_id.as_deref()).await?;
     merged_session_dtos(state, project_id.as_deref()).await
 }

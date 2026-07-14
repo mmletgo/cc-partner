@@ -46,6 +46,9 @@ pub async fn list_workbench_sessions(
     state: State<'_, AppState>,
     project_id: Option<String>,
 ) -> Result<Vec<WorkbenchSessionDto>, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.list", serde_json::json!({ "projectId": project_id.clone() })).await? {
+        return Ok(v);
+    }
     list_workbench_sessions_for_state(state.inner(), project_id).await
 }
 
@@ -64,6 +67,7 @@ pub(crate) async fn local_create_workbench_session(
     initial_cols: Option<u16>,
     initial_rows: Option<u16>,
 ) -> Result<WorkbenchSessionDto, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let row = state.workbench_sessions.create(
@@ -75,7 +79,14 @@ pub(crate) async fn local_create_workbench_session(
         initial_cols,
         initial_rows,
     )?;
+    // RAII：upsert 失败时 Drop 自动 close，避免 ghost PTY/registry。
+    let mut spawn_guard =
+        crate::workbench::sessions::SessionSpawnGuard::new(
+            (*state.workbench_sessions).clone(),
+            row.id.clone(),
+        );
     state.workbench_session_repo.upsert(&row).await?;
+    spawn_guard.commit();
     Ok(row.to_dto())
 }
 
@@ -159,6 +170,9 @@ pub async fn create_workbench_session(
     initial_cols: Option<u16>,
     initial_rows: Option<u16>,
 ) -> Result<WorkbenchSessionDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.create", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "initialCols": initial_cols.clone(), "initialRows": initial_rows.clone() })).await? {
+        return Ok(v);
+    }
     create_workbench_session_for_state(
         state.inner(),
         project_id,
@@ -181,6 +195,7 @@ pub(crate) async fn local_write_workbench_session_input(
     session_id: String,
     data: String,
 ) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
     state.workbench_sessions.write_input(&session_id, &data)?;
     Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
 }
@@ -222,6 +237,9 @@ pub async fn write_workbench_session_input(
     session_id: String,
     data: String,
 ) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.write", serde_json::json!({ "sessionId": session_id.clone(), "data": data.clone() })).await? {
+        return Ok(v);
+    }
     write_workbench_session_input_for_state(state.inner(), session_id, data).await
 }
 
@@ -238,6 +256,7 @@ pub(crate) async fn local_resize_workbench_session(
     cols: u16,
     rows: u16,
 ) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
     let row = state.workbench_sessions.resize(&session_id, cols, rows)?;
     state.workbench_session_repo.upsert(&row).await?;
     Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
@@ -282,6 +301,9 @@ pub async fn resize_workbench_session(
     cols: u16,
     rows: u16,
 ) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.resize", serde_json::json!({ "sessionId": session_id.clone(), "cols": cols.clone(), "rows": rows.clone() })).await? {
+        return Ok(v);
+    }
     resize_workbench_session_for_state(state.inner(), session_id, cols, rows).await
 }
 
@@ -296,6 +318,7 @@ pub(crate) async fn local_focus_workbench_session(
     state: &AppState,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
     state.workbench_sessions.focus_window(&session_id)?;
     Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
 }
@@ -335,6 +358,9 @@ pub async fn focus_workbench_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.focus", serde_json::json!({ "sessionId": session_id.clone() })).await? {
+        return Ok(v);
+    }
     focus_workbench_session_for_state(state.inner(), session_id).await
 }
 
@@ -384,6 +410,9 @@ pub async fn get_focused_workbench_session(
     project_id: String,
     worktree_id: Option<String>,
 ) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.focused", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone() })).await? {
+        return Ok(v);
+    }
     get_focused_workbench_session_for_state(state.inner(), project_id, worktree_id).await
 }
 
@@ -399,6 +428,7 @@ pub(crate) async fn local_split_workbench_pane(
     session_id: String,
     direction: String,
 ) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
     let split_direction = PaneSplitDirection::from_api(&direction)?;
     let _row = state
         .workbench_session_repo
@@ -450,6 +480,9 @@ pub async fn split_workbench_pane(
     session_id: String,
     direction: String,
 ) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.split", serde_json::json!({ "sessionId": session_id.clone(), "direction": direction.clone() })).await? {
+        return Ok(v);
+    }
     split_workbench_pane_for_state(state.inner(), session_id, direction).await
 }
 
@@ -464,6 +497,7 @@ pub(crate) async fn local_switch_workbench_pane(
     state: &AppState,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
     let _row = state
         .workbench_session_repo
         .get(&session_id)
@@ -508,6 +542,9 @@ pub async fn switch_workbench_pane(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.switch", serde_json::json!({ "sessionId": session_id.clone() })).await? {
+        return Ok(v);
+    }
     switch_workbench_pane_for_state(state.inner(), session_id).await
 }
 
@@ -522,6 +559,7 @@ pub(crate) async fn local_zoom_workbench_pane(
     state: &AppState,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
     let row = state
         .workbench_session_repo
         .get(&session_id)
@@ -582,6 +620,9 @@ pub async fn zoom_workbench_pane(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.zoom", serde_json::json!({ "sessionId": session_id.clone() })).await? {
+        return Ok(v);
+    }
     zoom_workbench_pane_for_state(state.inner(), session_id).await
 }
 
@@ -596,6 +637,7 @@ pub(crate) async fn local_close_workbench_pane(
     state: &AppState,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
     match state.workbench_sessions.close_active_pane(&session_id)? {
         PaneCloseOutcome::PaneClosed => {
             Ok(serde_json::json!({ "ok": true, "sessionId": session_id, "closedWindow": false }))
@@ -645,6 +687,9 @@ pub async fn close_workbench_pane(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.close_pane", serde_json::json!({ "sessionId": session_id.clone() })).await? {
+        return Ok(v);
+    }
     close_workbench_pane_for_state(state.inner(), session_id).await
 }
 
@@ -659,6 +704,7 @@ pub(crate) async fn local_close_workbench_session(
     state: &AppState,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
     match state.workbench_sessions.close(&session_id) {
         Ok(row) => {
             kill_persisted_backend(&row);
@@ -712,6 +758,9 @@ pub async fn close_workbench_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.close", serde_json::json!({ "sessionId": session_id.clone() })).await? {
+        return Ok(v);
+    }
     close_workbench_session_for_state(state.inner(), session_id).await
 }
 
@@ -727,6 +776,7 @@ pub(crate) async fn local_rename_workbench_session(
     session_id: String,
     name: String,
 ) -> Result<WorkbenchSessionDto, AppError> {
+    state.runtime_role.require_owner()?;
     match state.workbench_sessions.rename(&session_id, &name) {
         Ok(row) => {
             state.workbench_session_repo.upsert(&row).await?;
@@ -760,6 +810,9 @@ pub async fn rename_workbench_session(
     session_id: String,
     name: String,
 ) -> Result<WorkbenchSessionDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.rename", serde_json::json!({ "sessionId": session_id.clone(), "name": name.clone() })).await? {
+        return Ok(v);
+    }
     if let Some(parsed) = parse_remote_entity_id(&session_id) {
         let base_url = device_base_url(&state, &parsed.device_id)?;
         let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
@@ -805,6 +858,7 @@ pub(crate) async fn local_list_workbench_dir(
     worktree_id: Option<String>,
     path: Option<String>,
 ) -> Result<Vec<WorkbenchFileNode>, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let root = PathBuf::from(worktree.path);
@@ -855,6 +909,9 @@ pub async fn list_workbench_dir(
     worktree_id: Option<String>,
     path: Option<String>,
 ) -> Result<Vec<WorkbenchFileNode>, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "files.list_dir", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "path": path.clone() })).await? {
+        return Ok(v);
+    }
     list_workbench_dir_for_state(state.inner(), project_id, worktree_id, path).await
 }
 
@@ -871,6 +928,7 @@ pub(crate) async fn local_get_workbench_path_info(
     worktree_id: Option<String>,
     path: String,
 ) -> Result<WorkbenchPathInfo, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let root = PathBuf::from(worktree.path);
@@ -920,6 +978,9 @@ pub async fn get_workbench_path_info(
     worktree_id: Option<String>,
     path: String,
 ) -> Result<WorkbenchPathInfo, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "files.info", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "path": path.clone() })).await? {
+        return Ok(v);
+    }
     get_workbench_path_info_for_state(state.inner(), project_id, worktree_id, path).await
 }
 
@@ -937,6 +998,7 @@ pub(crate) async fn local_create_workbench_file(
     parent_path: String,
     name: String,
 ) -> Result<WorkbenchPathInfo, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let root = PathBuf::from(worktree.path);
@@ -958,6 +1020,9 @@ pub async fn create_workbench_file(
     parent_path: String,
     name: String,
 ) -> Result<WorkbenchPathInfo, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "files.create_file", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "parentPath": parent_path.clone(), "name": name.clone() })).await? {
+        return Ok(v);
+    }
     let project = get_project(&state, &project_id).await?;
     if project.kind == "remote" {
         let context = ensure_remote_project_context(&state, &project).await?;
@@ -991,6 +1056,7 @@ pub(crate) async fn local_create_workbench_dir(
     parent_path: String,
     name: String,
 ) -> Result<WorkbenchPathInfo, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let root = PathBuf::from(worktree.path);
@@ -1012,6 +1078,9 @@ pub async fn create_workbench_dir(
     parent_path: String,
     name: String,
 ) -> Result<WorkbenchPathInfo, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "files.create_dir", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "parentPath": parent_path.clone(), "name": name.clone() })).await? {
+        return Ok(v);
+    }
     let project = get_project(&state, &project_id).await?;
     if project.kind == "remote" {
         let context = ensure_remote_project_context(&state, &project).await?;
@@ -1045,6 +1114,7 @@ pub(crate) async fn local_rename_workbench_path(
     path: String,
     new_name: String,
 ) -> Result<WorkbenchPathInfo, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let root = PathBuf::from(worktree.path);
@@ -1066,6 +1136,9 @@ pub async fn rename_workbench_path(
     path: String,
     new_name: String,
 ) -> Result<WorkbenchPathInfo, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "files.rename", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "path": path.clone(), "newName": new_name.clone() })).await? {
+        return Ok(v);
+    }
     let project = get_project(&state, &project_id).await?;
     if project.kind == "remote" {
         let context = ensure_remote_project_context(&state, &project).await?;
@@ -1098,6 +1171,7 @@ pub(crate) async fn local_delete_workbench_path(
     worktree_id: Option<String>,
     path: String,
 ) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let root = PathBuf::from(worktree.path);
@@ -1120,6 +1194,9 @@ pub async fn delete_workbench_path(
     worktree_id: Option<String>,
     path: String,
 ) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "files.delete", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "path": path.clone() })).await? {
+        return Ok(v);
+    }
     let project = get_project(&state, &project_id).await?;
     if project.kind == "remote" {
         let context = ensure_remote_project_context(&state, &project).await?;
@@ -1193,6 +1270,9 @@ pub async fn search_claude_sessions(
     worktree_id: Option<String>,
     query: String,
 ) -> Result<Vec<SessionSearchHit>, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "claude.search", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "query": query.clone() })).await? {
+        return Ok(v);
+    }
     search_claude_sessions_for_state(state.inner(), &project_id, worktree_id.as_deref(), &query)
         .await
 }
@@ -1252,6 +1332,9 @@ pub async fn get_claude_session_preview(
     worktree_id: Option<String>,
     session_id: String,
 ) -> Result<SessionPreview, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "claude.preview", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "sessionId": session_id.clone() })).await? {
+        return Ok(v);
+    }
     get_claude_session_preview_for_state(
         state.inner(),
         &project_id,
@@ -1351,6 +1434,9 @@ pub async fn resume_claude_session(
     worktree_id: Option<String>,
     session_id: String,
 ) -> Result<ResumeClaudeSessionResult, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(state.inner(), "claude.resume", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "sessionId": session_id.clone() })).await? {
+        return Ok(v);
+    }
     resume_claude_session_for_state(
         state.inner(),
         &project_id,

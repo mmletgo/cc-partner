@@ -3917,6 +3917,7 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             runtime_metrics: Arc::new(crate::backend::runtime_metrics::RuntimeMetrics::new()),
+            runtime_role: crate::backend::authority::RuntimeRole::HeadlessOwner,
         }
     }
 

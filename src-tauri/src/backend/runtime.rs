@@ -357,17 +357,29 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     Ok(pool)
 }
 
-/// 构造共享 AppState。
+/// 构造共享 `AppState`（默认 HeadlessOwner）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     GUI 与 headless 后端都需要相同的配置、数据库仓储、Workbench registry、健康运行时、
-///     Orchestrator telemetry 与进程内有界 runtime metrics。
+///     GUI 与 headless sidecar 共享初始化路径，但运行时角色不同：
+///     sidecar 是唯一 `HeadlessOwner`，GUI 是 `GuiClient` 只能代理。
 ///
 /// Code Logic（这个函数做什么）:
-///     加载 `AppConfig`，用 `FsConfigStore` 装配 `ConfigRuntime`（`config` 与 runtime 共享同一
-///     `Arc`），调用 `init_db`，为每个仓储/registry 创建 Arc，注入一份 `RuntimeMetrics`，
-///     并把调用方提供的 `BackendUi` 注入 AppState 作为 GUI/headless 的 UI 边界。
+///     委托 `build_app_state_with_role`，默认 `HeadlessOwner`（CLI/serve 与多数测试）。
 pub async fn build_app_state(ui: Arc<dyn BackendUi>) -> Result<AppState, AppError> {
+    build_app_state_with_role(ui, crate::backend::authority::RuntimeRole::HeadlessOwner).await
+}
+
+/// 按运行时角色构造 `AppState`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI setup 必须显式注入 `GuiClient`，禁止 GUI 进程本地 attach/bridge/mutation。
+///
+/// Code Logic（这个函数做什么）:
+///     load config → init_db → 组装 AppState，写入 `runtime_role`。
+pub async fn build_app_state_with_role(
+    ui: Arc<dyn BackendUi>,
+    runtime_role: crate::backend::authority::RuntimeRole,
+) -> Result<AppState, AppError> {
     let loaded = AppConfig::load()?;
     let store = Arc::new(FsConfigStore::default_path()?);
     // sidecar/GUI 共享构造入口：生成一次 owner 实例 id，供 control 文件与 ConfigRuntime CAS 共用。
@@ -449,6 +461,7 @@ pub async fn build_app_state(ui: Arc<dyn BackendUi>) -> Result<AppState, AppErro
         workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
         workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
         runtime_metrics: Arc::new(RuntimeMetrics::new()),
+        runtime_role,
     })
 }
 
