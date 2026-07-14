@@ -11,7 +11,6 @@
 
 //! Orchestrator SQLite repository.
 
-
 use crate::error::AppError;
 use crate::orchestrator::claim::{
     preflight_claim_candidates, ClaimCandidate, ClaimCasOutcome, ClaimScanCursor,
