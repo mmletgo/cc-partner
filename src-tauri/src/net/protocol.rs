@@ -81,6 +81,18 @@ pub const CAPABILITY_ATTENTION_V1: &str = "attention.v1";
 /// `server_protocol_info()` 中宣告。
 pub const CAPABILITY_TRANSFER_COMPLETE_V1: &str = "transfer.complete.v1";
 
+/// 能力 token：v1 CC History 分页同步
+/// （`POST /api/cc-history/sync/{manifest-page,items,push-batch}`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     新客户端在走有界分页协议前必须确认对端已挂载三个 paged 路由；旧版本缺失该能力时
+///     必须回退 legacy `/pull|/push`，不得猜测 paged 路由存在。本 token 与三条路由原子上线。
+///
+/// Code Logic（这个函数做什么）:
+///     字符串常量，与 `PeerProtocolInfo::supports()` 做精确匹配；随路由一起在
+///     `server_protocol_info()` 中宣告。
+pub const CAPABILITY_CC_HISTORY_PAGED_SYNC_V1: &str = "cc-history.paged-sync.v1";
+
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -121,9 +133,8 @@ impl PeerProtocolInfo {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     本机对外（health/对端探测）需要宣告自身支持的能力集合，且必须是当前 build 实际存在路由的子集。
-///     本轮宣告 `attention.v1`、`errors.envelope.v1`、`orchestrator.runtime-snapshot.v1`
-///     与 `transfer.complete.v1`；后三者分别与 attention 路由、runtime-snapshot 路由、
-///     transfer complete 路由原子上线。
+///     本轮宣告 `attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、
+///     `orchestrator.runtime-snapshot.v1` 与 `transfer.complete.v1`；各自与对应路由原子上线。
 ///
 /// Code Logic（这个函数做什么）:
 ///     构造 `protocol_version = 1`，capabilities 为已排序、去重的当前支持能力列表。
@@ -132,6 +143,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
         protocol_version: PROTOCOL_VERSION_V1,
         capabilities: vec![
             CAPABILITY_ATTENTION_V1.to_string(),
+            CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string(),
             CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string(),
             CAPABILITY_TRANSFER_COMPLETE_V1.to_string(),
@@ -265,12 +277,13 @@ mod tests {
 
     /// Business Logic（为什么需要这个测试）:
     ///     `server_protocol_info()` 是本机对外的能力宣告入口，本轮必须宣告 v1
-    ///     且包含 `attention.v1`、`errors.envelope.v1`、`orchestrator.runtime-snapshot.v1`
-    ///     与 `transfer.complete.v1`（分别与对应路由原子上线）。
+    ///     且包含 `attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、
+    ///     `orchestrator.runtime-snapshot.v1` 与 `transfer.complete.v1`
+    ///     （分别与对应路由原子上线；paged-sync 与三条 CC History 分页路由同 build）。
     ///
     /// Code Logic（这个测试做什么）:
     ///     调用 `server_protocol_info()`，断言 protocol_version == 1 且 capabilities
-    ///     去重排序后正好等于四 token 字典序列表。
+    ///     去重排序后正好等于五 token 字典序列表；并确认 supports(paged-sync) 为 true。
     #[test]
     fn server_protocol_info_advertises_v1_with_current_capabilities() {
         let info = server_protocol_info();
@@ -279,10 +292,12 @@ mod tests {
             info.capabilities,
             vec![
                 "attention.v1".to_string(),
+                "cc-history.paged-sync.v1".to_string(),
                 "errors.envelope.v1".to_string(),
                 "orchestrator.runtime-snapshot.v1".to_string(),
                 "transfer.complete.v1".to_string(),
             ]
         );
+        assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
     }
 }

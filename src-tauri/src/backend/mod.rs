@@ -11,4 +11,5 @@ pub mod control;
 pub mod doctor;
 pub mod logging;
 pub mod runtime;
+pub mod runtime_metrics;
 pub mod ui;

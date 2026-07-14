@@ -123,7 +123,38 @@ cargo test --locked net::lan_guard --lib
 cargo test --locked net::http_server --lib
 ```
 
+## Backend scale & observability (S5)
+
+Local correctness and protocol inventory for bounded Orchestrator claim + paged CC History:
+
+```bash
+# Protocol inventory + docs facts (route count +3 for manifest-page/items/push-batch)
+node scripts/check-p2p-route-inventory.mjs
+node scripts/check-docs.mjs
+node scripts/check-docs.mjs --self-test
+
+cd src-tauri
+cargo test --locked net::protocol --lib
+cargo test --locked net::routes::cc_history --lib
+cargo test --locked --test backend_scale -- --nocapture --test-threads=1
+# Optional load gate (ignored; prints desensitized JSON only — no IDs/content/path).
+# CC_PARTNER_BENCH_POOL=1|2 selects one pool; unset runs both (3 samples each).
+# CC_PARTNER_BENCH_POOL=1 cargo test --release --locked --test backend_scale backend_scale_benchmark -- --ignored --nocapture --test-threads=1
+# CC_PARTNER_BENCH_POOL=2 cargo test --release --locked --test backend_scale backend_scale_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+Non-ignored `scale_safety_*` gates (bounded fixture): request limits, resolver outside SQLite tx, no duplicate CAS claims, partial-batch rollback, `SQLITE_BUSY == 0`.
+
+| Surface | Status |
+| --- | --- |
+| Paged routes + capability `cc-history.paged-sync.v1` atomic | Verified by inventory + protocol unit tests |
+| Mixed-version new↔new / new↔legacy / legacy↔new | Verified (`backend_scale` + mixed_version_harness) |
+| Claim IO outside SQLite transaction / CAS no duplicate | Verified (`backend_scale` orchestrator_claim_* + `scale_safety_*`) |
+| Production SQLite pool expansion to 2 | **NOT VERIFIED / keep `max_connections(1)`** — Task 8 `backend_scale_benchmark` (release, 6 JSON samples: pool 1×3 + pool 2×3) **did not authorize expansion**. §4.2 gates: (1) pool=1 acquire wait p95 was 27/21/23ms — **not** >50ms for three consecutive runs; (2) pool=2 p95 29/29/33ms did **not** cut wait ≥30% (worse/flat vs baseline); (3) correctness suite green; (4) pool=2 SQLITE_BUSY 0/0/2 **not** ≤ pool=1 baseline 0/0/0; (5) no max≥3. Production remains `max_connections(1)`. |
+| Metrics telemetry upload | **Out of product scope** — process-local + sanitized tracing only |
+
 ## Hosted smoke: NOT VERIFIED
+
 
 Do not claim Cross-Platform Smoke (or “CI smoke”) already proves:
 

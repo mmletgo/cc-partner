@@ -106,6 +106,7 @@ impl OrchestratorTaskStatus {
     ///
     /// Code Logic（这个函数做什么）:
     ///     解析小写状态字符串；未知值返回业务错误，暴露数据损坏或迁移问题。
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Result<Self, AppError> {
         match value {
             "draft" => Ok(Self::Draft),
@@ -218,6 +219,7 @@ impl OrchestratorWorkflowState {
     ///
     /// Code Logic（这个函数做什么）:
     ///     解析稳定存储字符串；未知值转为 AppError，显式暴露数据损坏或迁移遗漏。
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Result<Self, AppError> {
         match value {
             "backlog" => Ok(Self::Backlog),
@@ -279,6 +281,7 @@ impl OrchestratorRunState {
     ///
     /// Code Logic（这个函数做什么）:
     ///     解析稳定存储字符串；未知值返回 AppError。
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Result<Self, AppError> {
         match value {
             "idle" => Ok(Self::Idle),
@@ -346,6 +349,7 @@ impl OrchestratorAttemptPhase {
     ///
     /// Code Logic（这个函数做什么）:
     ///     解析 camelCase 存储字符串；未知值返回 AppError。
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Result<Self, AppError> {
         match value {
             "preparingWorkspace" => Ok(Self::PreparingWorkspace),

@@ -8,6 +8,7 @@
 //!     提供数据库初始化、AppState 构造、HTTP/mDNS 服务启动、后台任务启动与退出清理函数。
 
 use crate::backend::control;
+use crate::backend::runtime_metrics::RuntimeMetrics;
 use crate::backend::ui::BackendUi;
 use crate::config::AppConfig;
 use crate::config_runtime::ConfigRuntime;
@@ -286,12 +287,14 @@ const WORKBENCH_BROWSER_TARGET_INDEX: &str =
 ///     GUI 与 headless 后端必须共享完全一致的数据 schema 初始化路径，保证旧用户库无损升级。
 ///
 /// Code Logic（这个函数做什么）:
-///     用 `SqliteConnectOptions` 开启 create_if_missing 与 WAL，单连接连接池模拟 Python aiosqlite 语义，
+///     用 `SqliteConnectOptions` 开启 create_if_missing、WAL，并**显式** `busy_timeout=5s`
+///     （不依赖 sqlx 默认值，避免升级时无声漂移）；`max_connections(1)` 保持单连接语义；
 ///     再按固定顺序逐条执行幂等建表 SQL 与各 repo 的 schema 迁移 helper。
 pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError> {
     let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path))?
         .create_if_missing(true)
-        .pragma("journal_mode", "WAL");
+        .pragma("journal_mode", "WAL")
+        .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)
@@ -357,12 +360,13 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
 /// 构造共享 AppState。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     GUI 与 headless 后端都需要相同的配置、数据库仓储、Workbench registry、健康运行时和 Orchestrator telemetry。
+///     GUI 与 headless 后端都需要相同的配置、数据库仓储、Workbench registry、健康运行时、
+///     Orchestrator telemetry 与进程内有界 runtime metrics。
 ///
 /// Code Logic（这个函数做什么）:
 ///     加载 `AppConfig`，用 `FsConfigStore` 装配 `ConfigRuntime`（`config` 与 runtime 共享同一
-///     `Arc`），调用 `init_db`，为每个仓储/registry 创建 Arc，并把调用方提供的 `BackendUi`
-///     注入 AppState 作为 GUI/headless 的 UI 边界。
+///     `Arc`），调用 `init_db`，为每个仓储/registry 创建 Arc，注入一份 `RuntimeMetrics`，
+///     并把调用方提供的 `BackendUi` 注入 AppState 作为 GUI/headless 的 UI 边界。
 pub async fn build_app_state(ui: Arc<dyn BackendUi>) -> Result<AppState, AppError> {
     let loaded = AppConfig::load()?;
     let store = Arc::new(FsConfigStore::default_path()?);
@@ -442,6 +446,7 @@ pub async fn build_app_state(ui: Arc<dyn BackendUi>) -> Result<AppState, AppErro
         orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
         workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
         workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        runtime_metrics: Arc::new(RuntimeMetrics::new()),
     })
 }
 

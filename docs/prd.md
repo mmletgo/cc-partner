@@ -92,6 +92,8 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 支持把历史 Prompt 一键转存到正式 Prompt 库
 - 支持删除单条历史 Prompt，删除结果参与跨设备同步
 - 支持手动刷新采集，并在全局同步中通过独立 `cc-history` 链路跨设备合并
+- 跨设备 CC 历史同步为**有界、可收敛**行为：支持分页的对端按摘要页与分批正文交换合并；不支持分页能力的旧对端继续走完整摘要/正文路径；任一轮中断后下一轮从摘要起点重新交换，合并语义幂等，不会出现半批次落库
+- 单条历史正文与单批同步体量有固定上限；超限时本轮同步以稳定错误结束该批次，不静默丢弃或半写入
 - Claude Code 历史纳入 GitHub 私有仓库云端同步范围
 
 ### 2.5 user 级 CLAUDE.md 管理
@@ -135,6 +137,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 各类同步数据均使用向量时钟追踪版本，避免丢失更新
 - 并发冲突采用 Last-Writer-Wins 策略，时间戳相等时按设备 ID 稳定决策
 - 软删除数据需要参与同步传播，避免刷新或同步后复活
+- Claude Code 历史在两端均支持分页能力时按有界分页协议交换；任一端缺少该能力时自动回退完整 pull/push，混合版本仍可完成合并
 - 全局同步不传输普通文件，不同步 Workbench 工作区文件副本；文件传输和 Workbench 远端代理走独立通道
 - `CLAUDE.md` 不进入普通全局自动同步，只通过 `CLAUDE.md` 页面主动推送
 
@@ -461,8 +464,11 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 | POST | /api/sync/push | 推送 Prompt |
 | POST | /api/scratchpad/sync/pull | 拉取 Scratchpad 页面（含向量时钟摘要） |
 | POST | /api/scratchpad/sync/push | 推送 Scratchpad 页面 |
-| POST | /api/cc-history/sync/pull | 拉取 Claude Code 历史 Prompt |
-| POST | /api/cc-history/sync/push | 推送 Claude Code 历史 Prompt |
+| POST | /api/cc-history/sync/pull | 拉取 Claude Code 历史 Prompt（legacy；缺分页能力时使用） |
+| POST | /api/cc-history/sync/push | 推送 Claude Code 历史 Prompt（legacy；缺分页能力时使用） |
+| POST | /api/cc-history/sync/manifest-page | 分页拉取 CC 历史摘要（capability `cc-history.paged-sync.v1`） |
+| POST | /api/cc-history/sync/items | 按 ID 批取 CC 历史正文（capability `cc-history.paged-sync.v1`） |
+| POST | /api/cc-history/sync/push-batch | 分批事务推送 CC 历史（capability `cc-history.paged-sync.v1`） |
 | POST | /api/ssh-target/sync/pull | 拉取 SSH 目标（含向量时钟摘要） |
 | POST | /api/ssh-target/sync/push | 推送 SSH 目标 |
 | POST | /api/sync/claude_md/pull | 拉取 user 级 CLAUDE.md（兼容协议） |

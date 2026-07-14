@@ -15,6 +15,7 @@
 //!     actual_http_port 用 AtomicU16（启动后高频只读，无锁更高效）；
 //!     discovery 句柄用 Mutex<Option<...>>（仅启动/关闭时写）。
 
+use crate::backend::runtime_metrics::RuntimeMetrics;
 use crate::backend::ui::{serialize_event_payload, BackendAsset, BackendUi};
 use crate::cloud_sync::CloudSyncRuntime;
 use crate::config::AppConfig;
@@ -132,6 +133,8 @@ pub struct AppState {
     /// 每个 worktree 的文件监听句柄，key 同 workbench_claude_session_indexes。
     /// 监听失败时该 key 不存在（降级为每次重扫）。
     pub workbench_claude_session_watchers: Arc<Mutex<HashMap<String, notify::RecommendedWatcher>>>,
+    /// 进程内有界本地运行时指标（耗时/计数/EWMA）；不上传、不记录正文/路径/凭据。
+    pub runtime_metrics: Arc<RuntimeMetrics>,
 }
 
 impl AppState {

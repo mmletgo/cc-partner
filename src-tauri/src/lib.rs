@@ -16,6 +16,11 @@ pub mod backend;
 mod cc;
 // 集成 smoke（tests/lan_trust_boundary_smoke.rs）经 app_lib 调用固定 LAN 边界矩阵。
 pub use net::lan_trust_boundary_harness;
+// S5 Task6: mixed-version CC history sync harness for integration tests.
+pub use cc::mixed_version_harness;
+// S5 scale_safety 产品路径 rollback / bulk 测试需要直连 repo 与 row 类型。
+pub use cc::models::ClaudeHistoryRow;
+pub use storage::ClaudeHistoryRepo;
 mod claude_cli;
 mod claude_code_assets;
 pub mod cloud_sync;
@@ -29,7 +34,7 @@ mod hotkey;
 mod mobile;
 mod models;
 mod net;
-mod orchestrator;
+pub mod orchestrator;
 mod permissions;
 mod screenshot;
 mod state;
