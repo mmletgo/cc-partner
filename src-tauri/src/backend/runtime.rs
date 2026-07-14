@@ -370,7 +370,9 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
 pub async fn build_app_state(ui: Arc<dyn BackendUi>) -> Result<AppState, AppError> {
     let loaded = AppConfig::load()?;
     let store = Arc::new(FsConfigStore::default_path()?);
-    let config_runtime = Arc::new(ConfigRuntime::new(loaded, store));
+    // sidecar/GUI 共享构造入口：生成一次 owner 实例 id，供 control 文件与 ConfigRuntime CAS 共用。
+    let owner_instance_id = uuid::Uuid::new_v4().to_string();
+    let config_runtime = Arc::new(ConfigRuntime::with_owner(loaded, store, owner_instance_id));
     let config = config_runtime.shared_value();
     let device_id = config
         .read()

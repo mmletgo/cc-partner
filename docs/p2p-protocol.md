@@ -101,6 +101,9 @@ the router so the inventory check matches exactly.
 | --- | --- | --- | --- | --- | --- |
 | GET | `/api/health` | `routes/health.rs` | none | read-only | — |
 | POST | `/api/backend/control/stop` | `http_server.rs` | signals local `serve` shutdown via control-token gate | no-transport-retry | `controlToken` must match control file; retry after timeout can hit a recycled port |
+| POST | `/api/backend/control/status` | `backend/control_api.rs` | none; returns owner/generation runtime status | read-only | loopback + control-file token; body ≤256 KiB; response ≤1 MiB; never logs token |
+| POST | `/api/backend/control/get-config` | `backend/control_api.rs` | none; returns authoritative config snapshot | read-only | loopback + control-file token; body ≤256 KiB; response ≤1 MiB |
+| POST | `/api/backend/control/update-config` | `backend/control_api.rs` | CAS patch of runtime config via owner/generation | no-transport-retry | loopback + control-file token; `expectedOwnerInstanceId` + `expectedGeneration` + allowlisted `RuntimeConfigPatch` (`deny_unknown_fields`); generation conflict → 409; body ≤256 KiB; response ≤1 MiB |
 | GET | `/api/mobile/access-info` | `routes/mobile.rs` | none | read-only | — |
 | GET | `/api/mobile/attention` | `routes/attention.rs` | none; aggregates local Attention snapshot | read-only | capability-gated by `attention.v1`; reuses `list_attention_items_for_state`; may refresh each remote owning device once via orchestrator source, never recursively asks another device to aggregate attention |
 | POST | `/api/sync/pull` | `routes/sync.rs` | none; returns rows the caller is missing | read-only | vector-clock comparison only reads local DB |

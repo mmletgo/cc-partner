@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex, RwLock};
 pub struct AppState {
     /// 配置读路径（与 `config_runtime.value` 共享同一 Arc，禁止旁路 save）
     pub config: Arc<RwLock<AppConfig>>,
-    /// 配置串行事务运行时（生产 writer 唯一入口）
+    /// 配置串行事务运行时（生产 writer 唯一入口；持有 owner_instance_id + generation CAS）
     pub config_runtime: Arc<ConfigRuntime>,
     /// SQLite 连接池（M3+ axum server 共享此 pool；M1 仅 prompt_repo 通过独立 clone 使用）
     #[allow(dead_code)]

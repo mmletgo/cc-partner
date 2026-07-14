@@ -1,46 +1,80 @@
-//! config_runtime.rs — 配置内存态的串行事务更新
+//! config_runtime.rs — 配置内存态的串行事务更新与 owner generation CAS
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     多个命令可能并发修改不同配置字段；若各自 clone→改→写盘→swap，会产生 lost update。
 //!     需要单一 writer gate：clone → mutate → validate → durable save → memory swap。
 //!     截图快捷键 OS 注册也必须与 config 事务同锁串行，避免 OS/config 分叉。
+//!     跨进程（GUI→sidecar）配置更新必须带 owner/generation CAS，禁止提交完整 stale AppConfig。
 //!
 //! Code Logic（这个模块做什么）:
-//!     `ConfigRuntime` 持有 `Arc<RwLock<AppConfig>>`、异步 `update_lock` 与 `ConfigStore`；
+//!     `ConfigRuntime` 持有 `Arc<RwLock<AppConfig>>`、异步 `update_lock`、`ConfigStore`、
+//!     owner 实例 id 与单调 `generation`；
 //!     `update_config_transactionally` 串行化写路径，durable IO 走 `spawn_blocking`，
-//!     且不把 std `RwLockGuard` 跨 await。
+//!     且不把 std `RwLockGuard` 跨 await；成功 swap 后递增 generation。
+//!     `apply_patch_if_generation` 在同一 update_lock 下校验 owner/generation 后应用 allowlist patch。
 
-use crate::config::AppConfig;
+use crate::config::{
+    normalize_prompt_optimizer_fill_language, AppConfig, GithubTrendingConfig, HealthConfig,
+    OrchestratorAutomationConfig,
+};
 use crate::config_store::ConfigStore;
 use crate::error::AppError;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-/// 配置运行时：共享内存值 + 串行 writer + 持久化后端。
+/// 配置运行时：共享内存值 + 串行 writer + 持久化后端 + owner generation。
 ///
 /// Business Logic（为什么需要这个结构）:
 ///     读路径需要廉价 clone；写路径必须串行并在落盘成功后才 swap，避免半提交状态。
+///     配置 CAS 需要稳定 owner 身份与单调 generation，供 GUI 对账与冲突重试。
 ///
 /// Code Logic（这个结构做什么）:
-///     `value` 供读；`update_lock` 串行事务；`store` 执行 durable save。
+///     `value` 供读；`update_lock` 串行事务；`store` 执行 durable save；
+///     `owner_instance_id`/`generation` 在成功 memory swap 后可被 CAS 路径观测。
 pub struct ConfigRuntime {
     pub value: Arc<RwLock<AppConfig>>,
     update_lock: tokio::sync::Mutex<()>,
     store: Arc<dyn ConfigStore>,
+    owner_instance_id: String,
+    generation: AtomicU64,
+    started_at: String,
 }
 
 impl ConfigRuntime {
-    /// 用已加载的配置与 store 构造 runtime。
+    /// 用已加载的配置与 store 构造 runtime（owner 为空串，generation=0）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     启动时 load 一次后注入共享状态，供命令层读写。
+    ///     启动时 load 一次后注入共享状态，供命令层读写；无 owner 的路径（单元测试/过渡）仍可事务写。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     包装 value 与 store，初始化空 update_lock。
+    ///     委托 `with_owner(..., "")`。
     pub fn new(initial: AppConfig, store: Arc<dyn ConfigStore>) -> Self {
+        Self::with_owner(initial, store, String::new())
+    }
+
+    /// 用指定 owner 实例 id 构造 runtime。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     sidecar 启动时生成一次 owner UUID，必须同时写入 ConfigRuntime 与控制文件，
+    ///     以便 control API 的 CAS 与 status 对账。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     包装 value/store，初始化 update_lock、generation=0、started_at=UTC now。
+    pub fn with_owner(
+        initial: AppConfig,
+        store: Arc<dyn ConfigStore>,
+        owner_instance_id: String,
+    ) -> Self {
         Self {
             value: Arc::new(RwLock::new(initial)),
             update_lock: tokio::sync::Mutex::new(()),
             store,
+            owner_instance_id,
+            generation: AtomicU64::new(0),
+            started_at: Utc::now().to_rfc3339(),
         }
     }
 
@@ -55,6 +89,39 @@ impl ConfigRuntime {
         Arc::clone(&self.value)
     }
 
+    /// 返回本 runtime 的 owner 实例 id。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     control 文件写入与 status/CAS 响应需要同一 owner 身份。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回内部 owner_instance_id 字符串切片。
+    pub fn owner_instance_id(&self) -> &str {
+        &self.owner_instance_id
+    }
+
+    /// 返回当前 generation（无锁快照）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     status/get-config 需要快速读取 generation；写路径在 update_lock 下 CAS 比对。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `AtomicU64::load(SeqCst)`。
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// 返回 owner 启动时间（RFC3339）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     RuntimeOwnerStatus 需要展示 sidecar 启动时间。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回构造时写入的 started_at。
+    pub fn started_at(&self) -> &str {
+        &self.started_at
+    }
+
     /// 只读克隆当前内存配置。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -67,6 +134,49 @@ impl ConfigRuntime {
             .read()
             .map(|g| g.clone())
             .map_err(|_| AppError::generic("配置读锁中毒"))
+    }
+
+    /// 返回带 generation/owner 的配置快照。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     CAS 测试与 control get-config 需要 generation 与配置一并观测。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读配置后组装 `ConfigSnapshot`（含非敏感 fingerprint）。
+    pub fn snapshot_with_generation(&self) -> Result<ConfigSnapshot, AppError> {
+        let config = self.snapshot()?;
+        Ok(ConfigSnapshot::from_runtime(
+            &self.owner_instance_id,
+            self.generation(),
+            &config,
+        ))
+    }
+
+    /// 构造运行时 owner 状态（供 control status）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GUI 诊断与对账需要 owner/generation/fingerprint；终端/bridge 计数由调用方注入。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     组装 `RuntimeOwnerStatus`；metrics 由参数填入（Task 2 可传 0）。
+    pub fn owner_status(
+        &self,
+        terminal_session_count: usize,
+        bridge_count: usize,
+        cloud_sync_phase: &str,
+        orchestrator: OrchestratorRuntimeSummary,
+    ) -> Result<RuntimeOwnerStatus, AppError> {
+        let config = self.snapshot()?;
+        Ok(RuntimeOwnerStatus {
+            owner_instance_id: self.owner_instance_id.clone(),
+            generation: self.generation(),
+            started_at: self.started_at.clone(),
+            config_fingerprint: config_fingerprint(&config),
+            cloud_sync_phase: cloud_sync_phase.to_string(),
+            terminal_session_count,
+            bridge_count,
+            orchestrator,
+        })
     }
 
     /// 获取串行 writer 锁（热键 OS 切换等需与 config 事务同临界区时使用）。
@@ -91,24 +201,106 @@ impl ConfigRuntime {
         Arc::clone(&self.store)
     }
 
-    /// 将已落盘成功的 candidate 写入内存（仅在持有 update_lock 且 save 成功后调用）。
+    /// 将已落盘成功的 candidate 写入内存并递增 generation（仅在持有 update_lock 且 save 成功后调用）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     热键同锁路径在锁外 spawn_blocking 落盘后，需在同一临界区完成 memory swap。
+    ///     热键同锁路径在锁外 spawn_blocking 落盘后，需在同一临界区完成 memory swap 与 generation 递增。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     写锁覆盖 `value`。
+    ///     写锁覆盖 `value`，再 `fetch_add(1)` generation。
     pub fn swap_memory(&self, candidate: AppConfig) -> Result<(), AppError> {
+        self.commit_memory_swap(candidate)?;
+        Ok(())
+    }
+
+    /// 在 owner/generation CAS 下应用 allowlist patch。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GUI 不得提交完整 stale AppConfig；必须用 expected generation + allowlist patch
+    ///     更新 sidecar 权威配置，冲突时刷新后重试。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持有 `update_lock`：校验 owner/generation → 应用 patch → validate →
+    ///     spawn_blocking save_atomic → memory swap → generation+1；
+    ///     失败不 swap、不递增。
+    pub async fn apply_patch_if_generation(
+        &self,
+        expected_owner_instance_id: &str,
+        expected_generation: u64,
+        patch: RuntimeConfigPatch,
+    ) -> Result<ConfigUpdateResponse, AppError> {
+        let _guard = self.update_lock.lock().await;
+
+        if self.owner_instance_id != expected_owner_instance_id {
+            return Err(AppError::conflict("config_owner_conflict"));
+        }
+        let current_gen = self.generation.load(Ordering::SeqCst);
+        if current_gen != expected_generation {
+            return Err(AppError::conflict("config_generation_conflict"));
+        }
+
+        let mut candidate = {
+            let read = self
+                .value
+                .read()
+                .map_err(|_| AppError::generic("配置读锁中毒"))?;
+            read.clone()
+        };
+
+        patch.apply_to(&mut candidate)?;
+        candidate.validate()?;
+
+        let store = Arc::clone(&self.store);
+        let to_save = candidate.clone();
+        let save_result = tokio::task::spawn_blocking(move || store.save_atomic(&to_save))
+            .await
+            .map_err(|e| AppError::generic(format!("配置落盘任务失败: {e}")))?;
+        save_result?;
+
+        let generation = self.commit_memory_swap(candidate.clone())?;
+        Ok(ConfigUpdateResponse {
+            owner_instance_id: self.owner_instance_id.clone(),
+            generation,
+            snapshot: ConfigSnapshot::from_runtime(
+                &self.owner_instance_id,
+                generation,
+                &candidate,
+            ),
+        })
+    }
+
+    /// memory swap + generation 递增（调用方须已持 update_lock 且 durable save 成功）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     所有成功配置替换必须共享同一 commit 点语义：内存与 generation 同步前进。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写锁替换 value；`generation.fetch_add(1, SeqCst)+1` 返回新值。
+    fn commit_memory_swap(&self, candidate: AppConfig) -> Result<u64, AppError> {
         let mut write = self
             .value
             .write()
             .map_err(|_| AppError::generic("配置写锁中毒"))?;
         *write = candidate;
-        Ok(())
+        drop(write);
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(generation)
+    }
+
+    /// 测试专用：强制设置 generation。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     CAS 单测需要从指定 generation 起步，而不必先成功提交 N 次。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `store` 指定 generation。
+    #[cfg(test)]
+    pub fn force_generation_for_test(&self, generation: u64) {
+        self.generation.store(generation, Ordering::SeqCst);
     }
 }
 
-/// 串行事务更新配置：clone → mutate → validate → save_atomic → swap。
+/// 串行事务更新配置：clone → mutate → validate → save_atomic → swap → generation++。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     所有配置 writer 必须经此 helper，保证失败时内存与旧文件不变，成功时字段合并不丢。
@@ -116,7 +308,7 @@ impl ConfigRuntime {
 /// Code Logic（这个函数做什么）:
 ///     1) 持有异步 `update_lock` 全程；2) 读锁 clone candidate 后立即释放；
 ///     3) mutate；4) `validate`；5) `spawn_blocking(store.save_atomic)`（不阻塞 runtime worker）；
-///     6) 写锁 swap 内存；返回提交后的配置与 mutate 结果。
+///     6) 写锁 swap 内存并递增 generation；返回提交后的配置与 mutate 结果。
 ///     错误路径不做 memory swap（rename 已提交时 store 返回 Ok，故仍会 swap）。
 ///     热键 OS 副作用请走 `lock_for_update` + 命令层同临界区路径，不经过本 helper 的闭包钩子。
 pub async fn update_config_transactionally<T, F>(
@@ -147,15 +339,452 @@ where
         .map_err(|e| AppError::generic(format!("配置落盘任务失败: {e}")))?;
     save_result?;
 
-    {
-        let mut write = runtime
-            .value
-            .write()
-            .map_err(|_| AppError::generic("配置写锁中毒"))?;
-        *write = candidate.clone();
-    }
+    runtime.commit_memory_swap(candidate.clone())?;
 
     Ok((candidate, result))
+}
+
+// ---------------------------------------------------------------------------
+// CAS / control DTO
+// ---------------------------------------------------------------------------
+
+/// 配置快照（owner + generation + 可展示运行配置投影）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GUI get-config / CAS 响应对账需要 generation 与权威字段，且不含 GUI 主题/窗口偏好。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase DTO；fingerprint 为非敏感字段摘要。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigSnapshot {
+    pub owner_instance_id: String,
+    pub generation: u64,
+    pub config_fingerprint: String,
+    pub device_name: String,
+    pub receive_dir: String,
+    pub http_port: i64,
+    pub screenshot_hotkey: String,
+    pub prompt_optimizer_hotkey: String,
+    pub prompt_optimizer_fill_language: String,
+    pub cloud_sync_repo_url: Option<String>,
+    pub cloud_sync_enabled: bool,
+    pub cloud_sync_auto: bool,
+    pub cloud_sync_interval_secs: u64,
+    pub cloud_sync_branch: Option<String>,
+    pub health: HealthConfig,
+    pub orchestrator: OrchestratorAutomationConfig,
+    pub github_trending: GithubTrendingConfig,
+}
+
+impl ConfigSnapshot {
+    /// 从 runtime 身份与当前配置构造快照。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     status/get-config/update 成功响应共用同一投影，避免字段漂移。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     复制可展示运行配置字段并计算 fingerprint。
+    pub fn from_runtime(owner_instance_id: &str, generation: u64, config: &AppConfig) -> Self {
+        Self {
+            owner_instance_id: owner_instance_id.to_string(),
+            generation,
+            config_fingerprint: config_fingerprint(config),
+            device_name: config.device_name.clone(),
+            receive_dir: config.receive_dir.clone(),
+            http_port: config.http_port,
+            screenshot_hotkey: config.screenshot_hotkey.clone(),
+            prompt_optimizer_hotkey: config.prompt_optimizer_hotkey.clone(),
+            prompt_optimizer_fill_language: normalize_prompt_optimizer_fill_language(
+                &config.prompt_optimizer_fill_language,
+            ),
+            cloud_sync_repo_url: config.cloud_sync_repo_url.clone(),
+            cloud_sync_enabled: config.cloud_sync_enabled,
+            cloud_sync_auto: config.cloud_sync_auto,
+            cloud_sync_interval_secs: config.cloud_sync_interval_secs,
+            cloud_sync_branch: config.cloud_sync_branch.clone(),
+            health: config.health.clone(),
+            orchestrator: config.orchestrator.clone(),
+            github_trending: config.github_trending.clone(),
+        }
+    }
+}
+
+/// 配置 CAS 更新请求。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GUI 必须携带 expected owner/generation 与 allowlist patch，禁止提交完整 stale AppConfig。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase DTO，供 control update-config 反序列化。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigUpdateRequest {
+    pub expected_owner_instance_id: String,
+    pub expected_generation: u64,
+    pub patch: RuntimeConfigPatch,
+}
+
+/// 配置 CAS 更新成功响应。
+///
+/// Business Logic（为什么需要这个结构）:
+///     成功后 GUI 需用新 generation 与快照刷新表单/对账。
+///
+/// Code Logic（这个结构做什么）:
+///     返回 owner、新 generation 与 ConfigSnapshot。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigUpdateResponse {
+    pub owner_instance_id: String,
+    pub generation: u64,
+    pub snapshot: ConfigSnapshot,
+}
+
+/// 运行时 owner 状态（control status）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GUI 诊断与配置对账需要 owner/generation/fingerprint 与轻量 runtime 计数。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase DTO；不含 token/Prompt/路径凭据。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeOwnerStatus {
+    pub owner_instance_id: String,
+    pub generation: u64,
+    pub started_at: String,
+    pub config_fingerprint: String,
+    pub cloud_sync_phase: String,
+    pub terminal_session_count: usize,
+    pub bridge_count: usize,
+    pub orchestrator: OrchestratorRuntimeSummary,
+}
+
+/// Orchestrator 运行时摘要（status 轻量字段）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     status 只需展示最近 tick 类摘要，不暴露任务正文。
+///
+/// Code Logic（这个结构做什么）:
+///     可序列化占位；后续 diagnostics 任务可扩展字段。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorRuntimeSummary {
+    /// 最近 scheduler tick 时间（RFC3339），未知时为空。
+    #[serde(default)]
+    pub latest_tick_at: Option<String>,
+    /// 最近错误类别（脱敏 token），未知时为空。
+    #[serde(default)]
+    pub latest_error_class: Option<String>,
+}
+
+/// 权威运行配置 allowlist patch（deny_unknown_fields）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     只允许改 sidecar 权威运行配置；GUI 主题/窗口与 N4 `gui-bootstrap.json` 永不进入本 DTO。
+///
+/// Code Logic（这个结构做什么）:
+///     全部字段 Option 表示“未传则保留”；`deny_unknown_fields` 拒绝未知键。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeConfigPatch {
+    #[serde(default)]
+    pub device_name: Option<String>,
+    #[serde(default)]
+    pub receive_dir: Option<String>,
+    #[serde(default)]
+    pub http_port: Option<i64>,
+    #[serde(default)]
+    pub screenshot_hotkey: Option<String>,
+    #[serde(default)]
+    pub prompt_optimizer_hotkey: Option<String>,
+    #[serde(default)]
+    pub prompt_optimizer_fill_language: Option<String>,
+    #[serde(default)]
+    pub cloud_sync_repo_url: Option<String>,
+    #[serde(default)]
+    pub cloud_sync_enabled: Option<bool>,
+    #[serde(default)]
+    pub cloud_sync_auto: Option<bool>,
+    #[serde(default)]
+    pub cloud_sync_interval_secs: Option<u64>,
+    #[serde(default)]
+    pub cloud_sync_branch: Option<String>,
+    #[serde(default)]
+    pub health: Option<HealthRuntimePatch>,
+    #[serde(default)]
+    pub orchestrator: Option<OrchestratorRuntimePatch>,
+    #[serde(default)]
+    pub github_trending: Option<GithubTrendingRuntimePatch>,
+}
+
+impl RuntimeConfigPatch {
+    /// 将 allowlist patch 应用到 candidate 配置。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     CAS 写路径只改调用方显式提交的字段，未编辑字段保持当前权威值。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     对 Some 字段写入 candidate；空串 cloud URL/branch 归一为 None；语言字段归一化。
+    pub fn apply_to(&self, cfg: &mut AppConfig) -> Result<(), AppError> {
+        if let Some(ref name) = self.device_name {
+            cfg.device_name = name.clone();
+        }
+        if let Some(ref dir) = self.receive_dir {
+            cfg.receive_dir = dir.clone();
+        }
+        if let Some(port) = self.http_port {
+            cfg.http_port = port;
+        }
+        if let Some(ref hotkey) = self.screenshot_hotkey {
+            cfg.screenshot_hotkey = hotkey.clone();
+        }
+        if let Some(ref hotkey) = self.prompt_optimizer_hotkey {
+            cfg.prompt_optimizer_hotkey = hotkey.clone();
+        }
+        if let Some(ref language) = self.prompt_optimizer_fill_language {
+            cfg.prompt_optimizer_fill_language =
+                normalize_prompt_optimizer_fill_language(language);
+        }
+        if let Some(ref url) = self.cloud_sync_repo_url {
+            cfg.cloud_sync_repo_url = if url.trim().is_empty() {
+                None
+            } else {
+                Some(url.clone())
+            };
+        }
+        if let Some(enabled) = self.cloud_sync_enabled {
+            cfg.cloud_sync_enabled = enabled;
+        }
+        if let Some(auto) = self.cloud_sync_auto {
+            cfg.cloud_sync_auto = auto;
+        }
+        if let Some(interval) = self.cloud_sync_interval_secs {
+            cfg.cloud_sync_interval_secs = interval.max(30);
+        }
+        if let Some(ref branch) = self.cloud_sync_branch {
+            cfg.cloud_sync_branch = if branch.trim().is_empty() {
+                None
+            } else {
+                Some(branch.clone())
+            };
+        }
+        if let Some(ref health) = self.health {
+            health.apply_to(&mut cfg.health);
+        }
+        if let Some(ref orch) = self.orchestrator {
+            orch.apply_to(&mut cfg.orchestrator)?;
+        }
+        if let Some(ref trending) = self.github_trending {
+            trending.apply_to(&mut cfg.github_trending);
+        }
+        Ok(())
+    }
+}
+
+/// Health 运行配置 allowlist patch。
+///
+/// Business Logic（为什么需要这个结构）:
+///     健康监测参数属 sidecar 运行态，经 CAS 更新；不包含 GUI 主题。
+///
+/// Code Logic（这个结构做什么）:
+///     Option 字段 patch；deny_unknown_fields。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HealthRuntimePatch {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub work_window_seconds: Option<i64>,
+    #[serde(default)]
+    pub break_seconds: Option<i64>,
+    #[serde(default)]
+    pub record_window_title: Option<bool>,
+    #[serde(default)]
+    pub retain_days: Option<i64>,
+    #[serde(default)]
+    pub notify_enabled: Option<bool>,
+    #[serde(default)]
+    pub dnd_start: Option<Option<String>>,
+    #[serde(default)]
+    pub dnd_end: Option<Option<String>>,
+    #[serde(default)]
+    pub water_interval_seconds: Option<i64>,
+}
+
+impl HealthRuntimePatch {
+    /// 将 health patch 应用到 candidate。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     只覆盖传入字段，保留未编辑阈值。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     对 Some 字段写入 HealthConfig。
+    fn apply_to(&self, health: &mut HealthConfig) {
+        if let Some(v) = self.enabled {
+            health.enabled = v;
+        }
+        if let Some(v) = self.work_window_seconds {
+            health.work_window_seconds = v;
+        }
+        if let Some(v) = self.break_seconds {
+            health.break_seconds = v;
+        }
+        if let Some(v) = self.record_window_title {
+            health.record_window_title = v;
+        }
+        if let Some(v) = self.retain_days {
+            health.retain_days = v;
+        }
+        if let Some(v) = self.notify_enabled {
+            health.notify_enabled = v;
+        }
+        if let Some(ref v) = self.dnd_start {
+            health.dnd_start = v.clone();
+        }
+        if let Some(ref v) = self.dnd_end {
+            health.dnd_end = v.clone();
+        }
+        if let Some(v) = self.water_interval_seconds {
+            health.water_interval_seconds = v;
+        }
+    }
+}
+
+/// Orchestrator 运行配置 allowlist patch。
+///
+/// Business Logic（为什么需要这个结构）:
+///     设备级自动化策略经 sidecar CAS 更新。
+///
+/// Code Logic（这个结构做什么）:
+///     Option 字段；verification_commands 直接传 Vec（已归一化列表）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OrchestratorRuntimePatch {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub max_concurrent_tasks: Option<i64>,
+    #[serde(default)]
+    pub verification_commands: Option<Vec<String>>,
+    #[serde(default)]
+    pub auto_commit: Option<bool>,
+    #[serde(default)]
+    pub auto_push_task_branch: Option<bool>,
+    #[serde(default)]
+    pub auto_merge_to_main: Option<bool>,
+    #[serde(default)]
+    pub auto_push_main: Option<bool>,
+}
+
+impl OrchestratorRuntimePatch {
+    /// 将 orchestrator patch 应用到 candidate。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     CAS 路径与 Settings 自动化 tab 字段对齐。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写入传入字段；max_concurrent_tasks 基础范围校验委托最终 `AppConfig::validate`。
+    fn apply_to(&self, orch: &mut OrchestratorAutomationConfig) -> Result<(), AppError> {
+        if let Some(v) = self.enabled {
+            orch.enabled = v;
+        }
+        if let Some(v) = self.max_concurrent_tasks {
+            orch.max_concurrent_tasks = v;
+        }
+        if let Some(ref cmds) = self.verification_commands {
+            orch.verification_commands = cmds.clone();
+        }
+        if let Some(v) = self.auto_commit {
+            orch.auto_commit = v;
+        }
+        if let Some(v) = self.auto_push_task_branch {
+            orch.auto_push_task_branch = v;
+        }
+        if let Some(v) = self.auto_merge_to_main {
+            orch.auto_merge_to_main = v;
+        }
+        if let Some(v) = self.auto_push_main {
+            orch.auto_push_main = v;
+        }
+        Ok(())
+    }
+}
+
+/// GitHub Trending 运行配置 allowlist patch。
+///
+/// Business Logic（为什么需要这个结构）:
+///     CLI 路径/模型/缓存属 sidecar 运行偏好，经 CAS 更新。
+///
+/// Code Logic（这个结构做什么）:
+///     Option 字段 + deny_unknown_fields。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GithubTrendingRuntimePatch {
+    #[serde(default)]
+    pub ai_enabled: Option<bool>,
+    #[serde(default)]
+    pub claude_cli_path: Option<String>,
+    #[serde(default)]
+    pub claude_model: Option<String>,
+    #[serde(default)]
+    pub cache_ttl_hours: Option<i64>,
+}
+
+impl GithubTrendingRuntimePatch {
+    /// 将 github_trending patch 应用到 candidate。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     只覆盖传入 AI/CLI 偏好字段。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写入 GithubTrendingConfig。
+    fn apply_to(&self, trending: &mut GithubTrendingConfig) {
+        if let Some(v) = self.ai_enabled {
+            trending.ai_enabled = v;
+        }
+        if let Some(ref path) = self.claude_cli_path {
+            trending.claude_cli_path = path.clone();
+        }
+        if let Some(ref model) = self.claude_model {
+            trending.claude_model = model.clone();
+        }
+        if let Some(v) = self.cache_ttl_hours {
+            trending.cache_ttl_hours = v;
+        }
+    }
+}
+
+/// 计算非敏感配置 fingerprint。
+///
+/// Business Logic（为什么需要这个函数）:
+///     status/诊断需要判断配置是否一致，但不得包含 URL 凭据、token 或路径敏感内容的原始泄露路径；
+///     fingerprint 用规范化摘要，不记录 control token。
+///
+/// Code Logic（这个函数做什么）:
+///     选取非敏感运行字段构造稳定 JSON，SHA256 十六进制摘要。
+pub fn config_fingerprint(config: &AppConfig) -> String {
+    let payload = serde_json::json!({
+        "device_name": config.device_name,
+        "receive_dir": config.receive_dir,
+        "http_port": config.http_port,
+        "screenshot_hotkey": config.screenshot_hotkey,
+        "prompt_optimizer_hotkey": config.prompt_optimizer_hotkey,
+        "prompt_optimizer_fill_language": config.prompt_optimizer_fill_language,
+        "cloud_sync_enabled": config.cloud_sync_enabled,
+        "cloud_sync_auto": config.cloud_sync_auto,
+        "cloud_sync_interval_secs": config.cloud_sync_interval_secs,
+        "cloud_sync_branch": config.cloud_sync_branch,
+        "cloud_sync_repo_configured": config.cloud_sync_repo_url.as_ref().map(|u| !u.trim().is_empty()).unwrap_or(false),
+        "health_enabled": config.health.enabled,
+        "orchestrator_enabled": config.orchestrator.enabled,
+        "orchestrator_max_concurrent_tasks": config.orchestrator.max_concurrent_tasks,
+        "github_trending_ai_enabled": config.github_trending.ai_enabled,
+        "github_trending_cache_ttl_hours": config.github_trending.cache_ttl_hours,
+    });
+    let encoded = serde_json::to_vec(&payload).unwrap_or_default();
+    let digest = Sha256::digest(&encoded);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -190,6 +819,158 @@ mod tests {
         }
     }
 
+    /// 构造带 owner/generation 的测试 runtime。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     CAS 并发测试需要可控的 owner 与起始 generation。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     MemoryConfigStore + with_owner + force_generation_for_test。
+    async fn test_config_runtime(owner: &str, generation: u64) -> ConfigRuntime {
+        let initial = sample_config();
+        let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
+        let runtime = ConfigRuntime::with_owner(initial, store, owner.to_string());
+        runtime.force_generation_for_test(generation);
+        runtime
+    }
+
+    /// 仅改 device_name 的 allowlist patch。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     并发 CAS 测试只需互不相同的可见字段变化。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 RuntimeConfigPatch { device_name: Some(name) }。
+    fn patch_name(name: &str) -> RuntimeConfigPatch {
+        RuntimeConfigPatch {
+            device_name: Some(name.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// 同一 expected generation 的并发 CAS 只允许一个 writer 成功。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI 双请求/重试不得导致 split-brain 配置；generation 必须单调 +1。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     并发两个 expected_generation=0 的 patch，断言恰好一个 Ok，最终 generation=1。
+    #[tokio::test]
+    async fn concurrent_expected_generation_allows_one_writer() {
+        let runtime = Arc::new(test_config_runtime("owner-a", 0).await);
+        let first = runtime.apply_patch_if_generation("owner-a", 0, patch_name("first"));
+        let second = runtime.apply_patch_if_generation("owner-a", 0, patch_name("second"));
+        let (a, b) = tokio::join!(first, second);
+        assert_eq!([a.is_ok(), b.is_ok()].into_iter().filter(|v| *v).count(), 1);
+        assert_eq!(
+            runtime
+                .snapshot_with_generation()
+                .expect("snapshot")
+                .generation,
+            1
+        );
+    }
+
+    /// 错误 owner 必须 conflict，不改 generation。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧 sidecar/错误实例不得写配置。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用错误 owner 调用 apply_patch_if_generation，断言 conflict 且 generation 不变。
+    #[tokio::test]
+    async fn wrong_owner_is_conflict_and_leaves_generation() {
+        let runtime = test_config_runtime("owner-a", 3).await;
+        let err = runtime
+            .apply_patch_if_generation("owner-b", 3, patch_name("x"))
+            .await
+            .expect_err("wrong owner");
+        assert_eq!(err.classify(), crate::error::AppErrorCategory::Conflict);
+        assert_eq!(err.to_string(), "config_owner_conflict");
+        assert_eq!(runtime.generation(), 3);
+        assert_eq!(runtime.snapshot().unwrap().device_name, "runtime-device");
+    }
+
+    /// stale generation 必须 conflict。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI 持有过期 generation 时必须刷新后重试。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     expected_generation 落后当前值，断言 conflict 码。
+    #[tokio::test]
+    async fn stale_generation_is_conflict() {
+        let runtime = test_config_runtime("owner-a", 2).await;
+        let err = runtime
+            .apply_patch_if_generation("owner-a", 1, patch_name("x"))
+            .await
+            .expect_err("stale generation");
+        assert_eq!(err.to_string(), "config_generation_conflict");
+        assert_eq!(runtime.generation(), 2);
+    }
+
+    /// 未知 patch 字段必须被 deny_unknown_fields 拒绝。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI 主题/未知键不得混入 sidecar 配置 DTO。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化含 theme 字段的 JSON，断言失败。
+    #[test]
+    fn runtime_config_patch_denies_unknown_fields() {
+        let raw = r#"{"deviceName":"a","theme":"dark"}"#;
+        let err = serde_json::from_str::<RuntimeConfigPatch>(raw).expect_err("theme 必须拒绝");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field") || msg.contains("theme"),
+            "应拒绝未知字段: {msg}"
+        );
+    }
+
+    /// 事务路径成功后 generation 递增。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     本地 writer 与 CAS 共享 generation 单调语义。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     update_config_transactionally 成功后 generation 从 0→1。
+    #[tokio::test]
+    async fn transactional_writer_increments_generation() {
+        let initial = sample_config();
+        let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
+        let runtime = ConfigRuntime::with_owner(initial, store, "owner-a".into());
+        assert_eq!(runtime.generation(), 0);
+        update_config_transactionally(&runtime, |cfg| {
+            cfg.device_name = "n1".into();
+            Ok(())
+        })
+        .await
+        .expect("update");
+        assert_eq!(runtime.generation(), 1);
+        assert_eq!(runtime.snapshot().unwrap().device_name, "n1");
+    }
+
+    /// 落盘失败不递增 generation。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     半失败不得伪装配置已替换。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     store.fail_next_save 后 CAS，断言 Err 且 generation 不变。
+    #[tokio::test]
+    async fn save_failure_does_not_increment_generation() {
+        let initial = sample_config();
+        let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
+        store.fail_next_save();
+        let runtime = ConfigRuntime::with_owner(initial, store, "owner-a".into());
+        let err = runtime
+            .apply_patch_if_generation("owner-a", 0, patch_name("x"))
+            .await
+            .expect_err("save fail");
+        assert!(err.to_string().contains("注入故障") || err.to_string().contains("Memory"));
+        assert_eq!(runtime.generation(), 0);
+    }
+
     #[tokio::test]
     async fn save_failure_leaves_memory_unchanged() {
         let initial = sample_config();
@@ -215,6 +996,7 @@ mod tests {
             "runtime-device",
             "磁盘/store 侧也应保持旧值"
         );
+        assert_eq!(runtime.generation(), 0, "失败不得递增 generation");
     }
 
     #[tokio::test]
@@ -261,6 +1043,7 @@ mod tests {
         let final_cfg = runtime.snapshot().expect("final");
         assert_eq!(final_cfg.device_name, "name-from-a");
         assert_eq!(final_cfg.receive_dir, "/tmp/from-b");
+        assert_eq!(runtime.generation(), 2);
     }
 
     #[tokio::test]
@@ -281,6 +1064,7 @@ mod tests {
         );
         assert_eq!(runtime.snapshot().unwrap().device_id, initial.device_id);
         assert_eq!(store.snapshot().unwrap().device_id, initial.device_id);
+        assert_eq!(runtime.generation(), 0);
     }
 
     /// H1：DirectorySync 故障发生在 rename 之后，内存必须跟随磁盘 NEW，避免后续 lost update。
@@ -319,6 +1103,7 @@ mod tests {
         let disk: AppConfig =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(disk.device_name, "new-after-rename");
+        assert_eq!(runtime.generation(), 1);
 
         // 后续 writer 基于 NEW 内存，不会丢失已提交字段。
         let (next, _) = update_config_transactionally(&runtime, |cfg| {
@@ -329,6 +1114,7 @@ mod tests {
         .expect("后续更新");
         assert_eq!(next.device_name, "new-after-rename");
         assert_eq!(next.receive_dir, "/tmp/only-recv");
+        assert_eq!(runtime.generation(), 2);
     }
 
     /// H2：`lock_for_update` 与 config 事务同锁；并发 side-effect 不得交错。
@@ -385,6 +1171,7 @@ mod tests {
             1,
             "side-effect 不得与其它 writer 重叠"
         );
+        assert_eq!(runtime.generation(), 2);
     }
 
     /// 持锁路径 save 失败时不得 swap 内存（补偿由命令层负责）。
@@ -406,5 +1193,6 @@ mod tests {
         // 故意不 swap
         drop(_guard);
         assert_eq!(runtime.snapshot().unwrap().device_name, "runtime-device");
+        assert_eq!(runtime.generation(), 0);
     }
 }

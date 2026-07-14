@@ -1,0 +1,403 @@
+//! backend/control_api.rs — loopback control API（status / get-config / update-config）。
+//!
+//! Business Logic（为什么需要这个模块）:
+//!     GUI 只能通过本机控制面读取/更新 sidecar 权威运行配置，不得自建第二 runtime。
+//!     control API 与无鉴权 LAN 业务 API 分离：仅 loopback + control-file token。
+//!
+//! Code Logic（这个模块做什么）:
+//!     提供 status / get-config / update-config handler 与路由挂载；
+//!     请求体 ≤256 KiB，普通元数据响应 ≤1 MiB；鉴权顺序：ConnectInfo loopback → token；
+//!     从不记录 control token。
+
+use crate::backend::control::{self, BackendControlFile};
+use crate::config_runtime::{
+    ConfigSnapshot, ConfigUpdateResponse, OrchestratorRuntimeSummary, RuntimeConfigPatch,
+    RuntimeOwnerStatus,
+};
+use crate::error::AppError;
+use crate::net::error_response::{P2pError, P2pErrorCode, P2pResult};
+use crate::net::lan_guard::require_loopback_peer;
+use crate::net::request_context::P2pRequestContext;
+use crate::state::AppState;
+use axum::extract::{ConnectInfo, Extension, State};
+use axum::Json;
+use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
+
+/// control API 请求体上限（256 KiB）。
+pub const CONTROL_REQUEST_BODY_LIMIT_BYTES: usize = 256 * 1024;
+/// control API 普通元数据响应上限（1 MiB）。
+pub const CONTROL_RESPONSE_BODY_LIMIT_BYTES: usize = 1024 * 1024;
+
+/// 带 control token 的鉴权请求体（status / get-config）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     调用方必须证明读到本机控制文件令牌；token 只走请求体比较，不写日志。
+///
+/// Code Logic（这个结构做什么）:
+///     反序列化 camelCase `controlToken`。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlAuthRequest {
+    pub control_token: String,
+}
+
+/// update-config HTTP 请求（token + CAS 字段）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     配置更新需同时鉴权（token）与 CAS（owner/generation/patch）。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + expectedOwnerInstanceId + expectedGeneration + patch。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlConfigUpdateRequest {
+    pub control_token: String,
+    pub expected_owner_instance_id: String,
+    pub expected_generation: u64,
+    pub patch: RuntimeConfigPatch,
+}
+
+/// get-config 响应包装。
+///
+/// Business Logic（为什么需要这个结构）:
+///     与 status 区分，明确返回配置快照。
+///
+/// Code Logic（这个结构做什么）:
+///     直接嵌套 ConfigSnapshot。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlConfigResponse {
+    pub snapshot: ConfigSnapshot,
+}
+
+/// 返回 sidecar 权威 owner status。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI 诊断/对账在 mutation 前后读取 owner/generation/fingerprint。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → 组装 RuntimeOwnerStatus（终端/bridge 计数取自 AppState 轻量观测）。
+pub async fn control_status(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlAuthRequest>,
+) -> P2pResult<Json<RuntimeOwnerStatus>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    let status = build_owner_status(&state)
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.status"))?;
+    ensure_response_within_limit(&status, &context)?;
+    Ok(Json(status))
+}
+
+/// 返回权威配置快照。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI 在 generation 冲突后刷新表单需要完整 allowlisted 运行配置投影。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → `config_runtime.snapshot_with_generation`。
+pub async fn control_get_config(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlAuthRequest>,
+) -> P2pResult<Json<ControlConfigResponse>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    let snapshot = state
+        .config_runtime
+        .snapshot_with_generation()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.get_config"))?;
+    let body = ControlConfigResponse { snapshot };
+    ensure_response_within_limit(&body, &context)?;
+    Ok(Json(body))
+}
+
+/// CAS 更新权威运行配置。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI 提交 allowlist patch + expected generation；sidecar 在既有事务 writer 下提交。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → `apply_patch_if_generation`；冲突映射为 409。
+pub async fn control_update_config(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlConfigUpdateRequest>,
+) -> P2pResult<Json<ConfigUpdateResponse>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    let response = state
+        .config_runtime
+        .apply_patch_if_generation(
+            &request.expected_owner_instance_id,
+            request.expected_generation,
+            request.patch,
+        )
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.update_config"))?;
+    ensure_response_within_limit(&response, &context)?;
+    Ok(Json(response))
+}
+
+/// loopback + control token 双重鉴权。
+///
+/// Business Logic（为什么需要这个函数）:
+///     control API 不是 LAN 业务面：非本机 peer 即使持有 token 也必须 403；
+///     token 不匹配返回 401；从不把 token 写入日志。
+///
+/// Code Logic（这个函数做什么）:
+///     先 `require_loopback_peer`，再读控制文件比较 token；空 token 拒绝。
+fn authorize_control_request(
+    peer: SocketAddr,
+    context: &P2pRequestContext,
+    request_token: &str,
+) -> Result<(), P2pError> {
+    require_loopback_peer(peer.ip(), context)?;
+    let control = control::read_control_file()
+        .map_err(|_| P2pError::from_code("控制文件不可读", P2pErrorCode::Unauthorized, context))?;
+    if !control_token_matches(request_token, control.as_ref()) {
+        return Err(P2pError::from_code(
+            "控制令牌不匹配",
+            P2pErrorCode::Unauthorized,
+            context,
+        ));
+    }
+    Ok(())
+}
+
+/// 校验请求 token 是否匹配控制文件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     与 stop route 一致：空 token 或缺失控制文件一律失败。
+///
+/// Code Logic（这个函数做什么）:
+///     控制文件存在且请求 token 非空并与 `control_token` 完全一致。
+fn control_token_matches(request_token: &str, control: Option<&BackendControlFile>) -> bool {
+    let Some(control) = control else {
+        return false;
+    };
+    !request_token.is_empty() && request_token == control.control_token
+}
+
+/// 从 AppState 组装 RuntimeOwnerStatus。
+///
+/// Business Logic（为什么需要这个函数）:
+///     status 需要 owner/generation 与轻量 runtime 计数，供 GUI 诊断页展示。
+///
+/// Code Logic（这个函数做什么）:
+///     terminal/bridge 计数取 list/len 轻量观测；cloud_sync_phase 暂固定 idle；
+///     orchestrator 摘要只暴露 tick 时间与错误类别 token，不回传原文。
+fn build_owner_status(state: &AppState) -> Result<RuntimeOwnerStatus, AppError> {
+    let terminal_session_count = state.workbench_sessions.list(None).len();
+    let bridge_count = state.workbench_remote_event_bridges.active_bridge_count();
+    let orch_snap = state.orchestrator_scheduler_telemetry.snapshot();
+    let orch = OrchestratorRuntimeSummary {
+        latest_tick_at: orch_snap.latest_tick_at,
+        latest_error_class: orch_snap
+            .latest_error
+            .as_ref()
+            .map(|_| "scheduler_error".to_string()),
+    };
+    state
+        .config_runtime
+        .owner_status(terminal_session_count, bridge_count, "idle", orch)
+}
+
+/// 序列化后检查响应不超过 1 MiB。
+///
+/// Business Logic（为什么需要这个函数）:
+///     control 元数据响应有独立 1 MiB 上限，防止意外膨胀。
+///
+/// Code Logic（这个函数做什么）:
+///     serde_json 序列化后比长度；超限返回 413。
+fn ensure_response_within_limit<T: Serialize>(
+    value: &T,
+    context: &P2pRequestContext,
+) -> Result<(), P2pError> {
+    let encoded = serde_json::to_vec(value).map_err(|_| {
+        P2pError::from_code("控制响应序列化失败", P2pErrorCode::Internal, context)
+    })?;
+    if encoded.len() > CONTROL_RESPONSE_BODY_LIMIT_BYTES {
+        return Err(P2pError::from_code(
+            "控制响应超过 1 MiB 限制",
+            P2pErrorCode::PayloadTooLarge,
+            context,
+        ));
+    }
+    Ok(())
+}
+
+/// 为测试注入 control 鉴权（不经过真实磁盘控制文件）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     单测需覆盖 wrong-token / non-loopback，而不依赖全局控制文件路径。
+///
+/// Code Logic（这个函数做什么）:
+///     暴露 loopback + token 比较的 pure helper。
+#[cfg(test)]
+pub(crate) fn authorize_control_for_test(
+    peer: SocketAddr,
+    context: &P2pRequestContext,
+    request_token: &str,
+    control: Option<&BackendControlFile>,
+) -> Result<(), P2pError> {
+    require_loopback_peer(peer.ip(), context)?;
+    if !control_token_matches(request_token, control) {
+        return Err(P2pError::from_code(
+            "控制令牌不匹配",
+            P2pErrorCode::Unauthorized,
+            context,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::authority::CONTROL_SCHEMA_VERSION;
+    use crate::backend::control::BackendControlFile;
+    use crate::config::{
+        AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+    };
+    use crate::config_runtime::ConfigRuntime;
+    use crate::config_store::MemoryConfigStore;
+    use crate::net::request_context::P2pRequestContext;
+    use axum::http::StatusCode;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+
+    fn test_ctx() -> P2pRequestContext {
+        P2pRequestContext {
+            request_id: "req-control-test".into(),
+        }
+    }
+
+    fn loopback_peer() -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 9))
+    }
+
+    fn lan_peer() -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::new(192, 168, 1, 50), 9))
+    }
+
+    fn control_file(token: &str) -> BackendControlFile {
+        BackendControlFile {
+            pid: 1,
+            port: 62116,
+            device_id: "device-a".into(),
+            device_name: "Desk".into(),
+            started_at: "2026-07-14T00:00:00Z".into(),
+            control_token: token.into(),
+            control_schema_version: CONTROL_SCHEMA_VERSION,
+            owner_instance_id: Some("owner-a".into()),
+        }
+    }
+
+    /// 错误 token 必须 401 unauthorized。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     无令牌调用方不得读取/更新 control 面。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     loopback + wrong token → Unauthorized。
+    #[test]
+    fn wrong_token_is_rejected() {
+        let ctx = test_ctx();
+        let control = control_file("expected-token");
+        let err = authorize_control_for_test(loopback_peer(), &ctx, "wrong-token", Some(&control))
+            .expect_err("wrong token");
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(err.envelope().code, "unauthorized");
+    }
+
+    /// 非 loopback 即使 token 正确也 403。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     control API 不得从局域网对端调用。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     LAN peer + 正确 token → Forbidden。
+    #[test]
+    fn non_loopback_is_rejected_even_with_valid_token() {
+        let ctx = test_ctx();
+        let control = control_file("expected-token");
+        let err =
+            authorize_control_for_test(lan_peer(), &ctx, "expected-token", Some(&control))
+                .expect_err("non-loopback");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.envelope().code, "forbidden");
+    }
+
+    /// loopback + 正确 token 通过。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     合法本机 GUI/CLI 必须能进入 control 面。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     authorize_control_for_test 返回 Ok。
+    #[test]
+    fn loopback_with_valid_token_accepted() {
+        let ctx = test_ctx();
+        let control = control_file("expected-token");
+        authorize_control_for_test(loopback_peer(), &ctx, "expected-token", Some(&control))
+            .expect("should accept");
+    }
+
+    /// CAS 经 control 路径：正确 generation 成功，旧 generation 冲突。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     update-config 最终落到 ConfigRuntime CAS。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 runtime，成功一次 generation=1，再用 0 调用失败。
+    #[tokio::test]
+    async fn update_config_cas_path_conflict_on_stale_generation() {
+        let initial = AppConfig {
+            device_id: "dev-a".into(),
+            device_name: "n".into(),
+            http_port: 0,
+            receive_dir: "/tmp/r".into(),
+            db_path: "/tmp/d.db".into(),
+            screenshot_hotkey: "<cmd>+s".into(),
+            prompt_optimizer_hotkey: "<ctrl>".into(),
+            prompt_optimizer_fill_language: "zh".into(),
+            cloud_sync_repo_url: None,
+            cloud_sync_enabled: false,
+            cloud_sync_auto: false,
+            cloud_sync_interval_secs: 600,
+            cloud_sync_branch: None,
+            health: HealthConfig::default(),
+            orchestrator: OrchestratorAutomationConfig::default(),
+            github_trending: GithubTrendingConfig::default(),
+        };
+        let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
+        let runtime = ConfigRuntime::with_owner(initial, store, "owner-a".into());
+        let ok = runtime
+            .apply_patch_if_generation(
+                "owner-a",
+                0,
+                RuntimeConfigPatch {
+                    device_name: Some("next".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("first");
+        assert_eq!(ok.generation, 1);
+        let err = runtime
+            .apply_patch_if_generation(
+                "owner-a",
+                0,
+                RuntimeConfigPatch {
+                    device_name: Some("stale".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("stale");
+        assert_eq!(err.to_string(), "config_generation_conflict");
+    }
+}

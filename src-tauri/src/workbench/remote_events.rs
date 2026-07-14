@@ -142,6 +142,20 @@ impl RemoteEventBridgeRegistry {
         Self::default()
     }
 
+    /// 返回当前登记的远端事件桥数量。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     control status / 诊断需要轻量 bridge 计数，不暴露设备 URL 或订阅细节。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁读取 tasks HashMap 长度。
+    pub fn active_bridge_count(&self) -> usize {
+        self.tasks
+            .lock()
+            .expect("remote event bridge 锁中毒")
+            .len()
+    }
+
     /// Business Logic（为什么需要这个函数）:
     ///     每次进入 remote terminal 项目或创建 remote session 后，都要确保事件桥已连接，并记住项目映射。
     ///

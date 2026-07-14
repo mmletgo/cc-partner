@@ -755,7 +755,15 @@ fn build_control_file(state: &AppState, port: u16) -> BackendControlFile {
         started_at: Utc::now().to_rfc3339(),
         control_token: Uuid::new_v4().to_string(),
         control_schema_version: crate::backend::authority::CONTROL_SCHEMA_VERSION,
-        owner_instance_id: Some(Uuid::new_v4().to_string()),
+        // 与 ConfigRuntime 共用同一 owner 实例 id，保证 CAS 对账一致。
+        owner_instance_id: {
+            let id = state.config_runtime.owner_instance_id();
+            if id.is_empty() {
+                Some(Uuid::new_v4().to_string())
+            } else {
+                Some(id.to_string())
+            }
+        },
     }
 }
 
