@@ -19,11 +19,31 @@
   "active": "Active {{n}}",
   "completed": "Completed {{n}}",
   "failed": "Failed {{n}}",
+  "groupActive": "In progress",
+  "groupNeedsAttention": "Needs attention",
+  "groupCompleted": "Recently completed",
+  "retryTransfer": "Retry transfer",
+  "resumeTransfer": "Resume transfer",
+  "revealInFolder": "Show in folder",
+  "reconciling": "Confirming result…",
   "empty": "No transfer tasks",
   "emptyHint": "Pick a target device and a file to start transferring",
   "deviceLoadFailed": "Failed to load devices: {{error}}.",
   "taskLoadFailed": "Failed to load tasks: {{error}}.",
   "sendFailed": "Send failed: {{error}}",
   "cancelFailed": "Cancel failed: {{error}}",
-  "skeletonAria": "Loading transfer tasks"
+  "retryFailed": "Retry transfer failed: {{error}}",
+  "resumeFailed": "Resume transfer failed: {{error}}",
+  "openFailed": "Open failed: {{error}}",
+  "revealFailed": "Show in folder failed: {{error}}",
+  "skeletonAria": "Loading transfer tasks",
+  "phase": {
+    "queued": "Queued",
+    "connecting": "Connecting",
+    "transferring": "Transferring",
+    "finalizing": "Finalizing",
+    "completed": "Completed",
+    "cancelled": "Cancelled",
+    "failed": "Failed"
+  }
 }

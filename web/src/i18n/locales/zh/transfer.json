@@ -19,11 +19,31 @@
   "active": "活跃 {{n}}",
   "completed": "已完成 {{n}}",
   "failed": "失败 {{n}}",
+  "groupActive": "进行中",
+  "groupNeedsAttention": "需要处理",
+  "groupCompleted": "最近完成",
+  "retryTransfer": "重新传输",
+  "resumeTransfer": "继续传输",
+  "revealInFolder": "在文件夹中显示",
+  "reconciling": "正在确认结果",
   "empty": "暂无传输任务",
   "emptyHint": "选择目标设备和文件后即可开始传输",
   "deviceLoadFailed": "设备列表加载失败：{{error}}。",
   "taskLoadFailed": "任务列表加载失败：{{error}}。",
   "sendFailed": "发送失败：{{error}}",
   "cancelFailed": "取消失败：{{error}}",
-  "skeletonAria": "加载传输任务"
+  "retryFailed": "重新传输失败：{{error}}",
+  "resumeFailed": "继续传输失败：{{error}}",
+  "openFailed": "打开失败：{{error}}",
+  "revealFailed": "在文件夹中显示失败：{{error}}",
+  "skeletonAria": "加载传输任务",
+  "phase": {
+    "queued": "排队中",
+    "connecting": "连接中",
+    "transferring": "传输中",
+    "finalizing": "收尾中",
+    "completed": "已完成",
+    "cancelled": "已取消",
+    "failed": "失败"
+  }
 }

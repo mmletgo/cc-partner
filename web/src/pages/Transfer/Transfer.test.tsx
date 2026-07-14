@@ -1,20 +1,20 @@
 /**
- * Transfer 页面 send/cancel 旅程测试。
+ * Transfer 页面 send/cancel/recovery 旅程测试。
  *
  * Business Logic（为什么需要这个测试）:
  *   桌面传输必须用原生路径发送/取消，展示 basename，轮询失败保留列表，
- *   且不得渲染后端未支持的 pause/retry/open。
+ *   且按 phase/action 矩阵只渲染合法 recovery 动作（resume/retry/open/reveal）。
  *
  * Code Logic（这个测试做什么）:
  *   mock transfer/devices API、path adapter 与 useVisibilityPolling；
  *   覆盖选文件、多文件 drop、发送成功/失败、双击 send/cancel 只调一次 API、
- *   取消 busy/error、刷新失败保列表。
+ *   取消 busy/error、刷新失败保列表、action matrix 与 uncertain 对账。
  */
 
 // @vitest-environment jsdom
 
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 
 import i18n from '@/i18n';
@@ -24,6 +24,11 @@ const listDevicesMock = vi.fn();
 const listTransfersMock = vi.fn();
 const sendTransferMock = vi.fn();
 const cancelTransferMock = vi.fn();
+const retryTransferMock = vi.fn();
+const resumeTransferMock = vi.fn();
+const getOperationMock = vi.fn();
+const openTransferMock = vi.fn();
+const revealTransferMock = vi.fn();
 const pickTransferFileMock = vi.fn();
 const subscribeTransferFileDropsMock = vi.fn();
 
@@ -50,6 +55,11 @@ vi.mock('@/api/transfer', () => ({
     list: (...args: unknown[]) => listTransfersMock(...args),
     send: (...args: unknown[]) => sendTransferMock(...args),
     cancel: (...args: unknown[]) => cancelTransferMock(...args),
+    retry: (...args: unknown[]) => retryTransferMock(...args),
+    resume: (...args: unknown[]) => resumeTransferMock(...args),
+    getOperation: (...args: unknown[]) => getOperationMock(...args),
+    open: (...args: unknown[]) => openTransferMock(...args),
+    reveal: (...args: unknown[]) => revealTransferMock(...args),
   },
 }));
 
@@ -147,6 +157,40 @@ function getPolling(intervalMs: number) {
   };
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   action matrix 断言需限制在某个任务行内。
+ *
+ * Code Logic（这个函数做什么）:
+ *   通过文件名找到 li，再 within 查询按钮。
+ */
+function taskRowByFileName(fileName: string): HTMLElement {
+  const nameNode = screen.getByText(fileName);
+  const row = nameNode.closest('li');
+  if (!row) throw new Error(`row not found for ${fileName}`);
+  return row;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   验证任务行只出现期望动作。
+ *
+ * Code Logic（这个函数做什么）:
+ *   within(row) 检查动作按钮集合。
+ */
+function expectRowActions(fileName: string, actions: string[]): void {
+  const row = taskRowByFileName(fileName);
+  const known = ['取消', '继续传输', '重新传输', '打开', '在文件夹中显示', '暂停', '重试'];
+  for (const name of known) {
+    const nodes = within(row).queryAllByRole('button', { name });
+    if (actions.includes(name)) {
+      expect(nodes.length).toBeGreaterThan(0);
+    } else {
+      expect(nodes.length).toBe(0);
+    }
+  }
+}
+
 beforeAll(async () => {
   await i18n.changeLanguage('zh');
 });
@@ -157,6 +201,11 @@ beforeEach(() => {
   listTransfersMock.mockReset();
   sendTransferMock.mockReset();
   cancelTransferMock.mockReset();
+  retryTransferMock.mockReset();
+  resumeTransferMock.mockReset();
+  getOperationMock.mockReset();
+  openTransferMock.mockReset();
+  revealTransferMock.mockReset();
   pickTransferFileMock.mockReset();
   subscribeTransferFileDropsMock.mockReset();
 
@@ -512,21 +561,82 @@ describe('Transfer page journey', () => {
     expect(screen.getByRole('status').textContent).toContain('任务列表加载失败：MALFORMED_JSON');
   });
 
-  test('does not render pause/retry/open for listed tasks', async () => {
-    listTransfersMock.mockResolvedValue([
-      buildTask({ id: 't-transferring', status: 'transferring', fileName: 'a.bin' }),
+  test.each([
+    [
+      'transferring',
       buildTask({
-        id: 't-failed',
+        id: 't-transferring',
+        status: 'transferring',
+        fileName: 'a.bin',
+      }),
+      ['取消'],
+    ],
+    [
+      'failed-resumable',
+      buildTask({
+        id: 't-resumable',
         status: 'failed',
         fileName: 'b.bin',
-        progress: 0.1,
-        errorMessage: 'x',
+        progress: 0.4,
+        transferredBytes: 800,
+        failure: {
+          stage: 'transfer',
+          code: 'chunk_failed',
+          retryable: true,
+          message: 'drop',
+        },
         speed: undefined,
       }),
+      ['继续传输'],
+    ],
+    [
+      'failed-retryable',
       buildTask({
-        id: 't-completed',
-        status: 'completed',
+        id: 't-retryable',
+        status: 'failed',
         fileName: 'c.bin',
+        progress: 0,
+        transferredBytes: 0,
+        failure: {
+          stage: 'connect',
+          code: 'connect_failed',
+          retryable: true,
+          message: 'offline',
+        },
+        speed: undefined,
+      }),
+      ['重新传输'],
+    ],
+    [
+      'completed-received',
+      buildTask({
+        id: 't-received',
+        status: 'completed',
+        direction: 'receive',
+        fileName: 'd.bin',
+        progress: 1,
+        speed: undefined,
+      }),
+      ['打开', '在文件夹中显示'],
+    ],
+  ] as const)('%s renders only legal actions', async (_fixture, task, actions) => {
+    listTransfersMock.mockResolvedValue([task]);
+    renderTransfer();
+
+    await waitFor(() => {
+      expect(screen.getByText(task.fileName)).toBeTruthy();
+    });
+
+    expectRowActions(task.fileName, [...actions]);
+  });
+
+  test('completed send does not render open/reveal', async () => {
+    listTransfersMock.mockResolvedValue([
+      buildTask({
+        id: 't-sent',
+        status: 'completed',
+        direction: 'send',
+        fileName: 'sent.bin',
         progress: 1,
         speed: undefined,
       }),
@@ -535,15 +645,154 @@ describe('Transfer page journey', () => {
     renderTransfer();
 
     await waitFor(() => {
-      expect(screen.getByText('a.bin')).toBeTruthy();
-      expect(screen.getByText('b.bin')).toBeTruthy();
-      expect(screen.getByText('c.bin')).toBeTruthy();
+      expect(screen.getByText('sent.bin')).toBeTruthy();
     });
 
-    expect(screen.queryByRole('button', { name: '暂停' })).toBeNull();
-    expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
-    expect(screen.queryByRole('button', { name: '打开' })).toBeNull();
-    expect(screen.getAllByRole('button', { name: '取消' }).length).toBeGreaterThan(0);
+    expectRowActions('sent.bin', []);
+  });
+
+  test('resume calls API with stable clientOperationId', async () => {
+    listTransfersMock.mockResolvedValue([
+      buildTask({
+        id: 'task-resume',
+        status: 'failed',
+        fileName: 'resume.bin',
+        progress: 0.5,
+        transferredBytes: 1024,
+        failure: {
+          stage: 'transfer',
+          code: 'chunk_failed',
+          retryable: true,
+          message: 'drop',
+        },
+        speed: undefined,
+      }),
+    ]);
+    resumeTransferMock.mockResolvedValueOnce(
+      buildTask({ id: 'task-resume-2', status: 'pending', fileName: 'resume.bin' }),
+    );
+
+    renderTransfer();
+
+    await waitFor(() => {
+      expect(screen.getByText('resume.bin')).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '继续传输' }));
+
+    await waitFor(() => {
+      expect(resumeTransferMock).toHaveBeenCalledTimes(1);
+      const [taskId, clientOperationId] = resumeTransferMock.mock.calls[0] as [string, string];
+      expect(taskId).toBe('task-resume');
+      expect(typeof clientOperationId).toBe('string');
+      expect(clientOperationId.length).toBeGreaterThan(0);
+    });
+  });
+
+  test('retry timeout enters reconciling and suppresses duplicate action', async () => {
+    listTransfersMock.mockResolvedValue([
+      buildTask({
+        id: 'task-uncertain',
+        status: 'failed',
+        fileName: 'uncertain.bin',
+        progress: 0,
+        transferredBytes: 0,
+        failure: {
+          stage: 'connect',
+          code: 'timeout',
+          retryable: true,
+          message: 'timeout',
+        },
+        speed: undefined,
+      }),
+    ]);
+    const timeoutErr = Object.assign(new Error('request timeout'), { code: 'TIMEOUT' });
+    retryTransferMock.mockRejectedValueOnce(timeoutErr);
+    getOperationMock.mockResolvedValueOnce({ status: 'pending' });
+
+    renderTransfer();
+
+    await waitFor(() => {
+      expect(screen.getByText('uncertain.bin')).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '重新传输' }));
+
+    await waitFor(() => {
+      expect(retryTransferMock).toHaveBeenCalledTimes(1);
+      expect(getOperationMock).toHaveBeenCalledTimes(1);
+      expect(screen.getAllByText('正在确认结果').length).toBeGreaterThan(0);
+      expect(screen.queryByRole('button', { name: '重新传输' })).toBeNull();
+    });
+  });
+
+  test('open and reveal invoke APIs for received completed', async () => {
+    listTransfersMock.mockResolvedValue([
+      buildTask({
+        id: 'task-open',
+        status: 'completed',
+        direction: 'receive',
+        fileName: 'open-me.bin',
+        progress: 1,
+        speed: undefined,
+      }),
+    ]);
+    openTransferMock.mockResolvedValueOnce({
+      taskId: 'task-open',
+      action: 'open',
+      path: '/tmp/open-me.bin',
+    });
+    revealTransferMock.mockResolvedValueOnce({
+      taskId: 'task-open',
+      action: 'reveal',
+      path: '/tmp/open-me.bin',
+    });
+
+    renderTransfer();
+
+    await waitFor(() => {
+      expect(screen.getByText('open-me.bin')).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '打开' }));
+    await waitFor(() => {
+      expect(openTransferMock).toHaveBeenCalledWith('task-open');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '在文件夹中显示' }));
+    await waitFor(() => {
+      expect(revealTransferMock).toHaveBeenCalledWith('task-open');
+    });
+  });
+
+  test('groups tasks and omits empty sections', async () => {
+    listTransfersMock.mockResolvedValue([
+      buildTask({ id: 'a1', status: 'transferring', fileName: 'active.bin' }),
+      buildTask({
+        id: 'f1',
+        status: 'failed',
+        fileName: 'failed.bin',
+        progress: 0,
+        failure: {
+          stage: 'connect',
+          code: 'x',
+          retryable: true,
+          message: 'x',
+        },
+        speed: undefined,
+      }),
+    ]);
+
+    renderTransfer();
+
+    await waitFor(() => {
+      expect(screen.getByText('active.bin')).toBeTruthy();
+      expect(screen.getByText('failed.bin')).toBeTruthy();
+    });
+
+    expect(screen.getByText('进行中')).toBeTruthy();
+    expect(screen.getByText('需要处理')).toBeTruthy();
+    expect(screen.queryByText('最近完成')).toBeNull();
   });
 
   test('dialog cancel keeps previous selection', async () => {
