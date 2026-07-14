@@ -743,6 +743,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::mobile_remove_worktree),
         )
         .route(
+            "/api/mobile/workbench/worktrees/mutation-operation",
+            post(workbench::mobile_get_mutation_operation),
+        )
+        .route(
             "/api/mobile/workbench/git/commits",
             post(workbench::mobile_list_git_commits),
         )

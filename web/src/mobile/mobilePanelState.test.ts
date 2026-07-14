@@ -6,6 +6,9 @@ import {
   isMobileFileSaveResponseCurrent,
   isMobileGitActionResponseCurrent,
   isMobileGitMergeResponseCurrent,
+  isMobileMutationActionLocked,
+  pickMobileMutationOperationId,
+  resolveMobileMutationPhase,
   shouldBlockMobileFileContextSwitch,
   shouldConfirmMobileFileDirtyContextSwitch,
   shouldSkipMobileFileContextConfirmForDiscardToken,
@@ -658,5 +661,48 @@ describe('mobilePanelState', () => {
       'null worktree should produce stable key',
     );
     assertEqual(getMobileFileContextKey(null), '', 'null context should produce empty key');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   unknown envelope 必须先 reconciling，对账成功才 confirmed；same-message/different-tree 由 pure matrix 保持 unknown。
+   *
+   * Code Logic（这个测试做什么）:
+   *   断言 resolveMobileMutationPhase 与 operation id 复用/锁定规则。
+   */
+  test('mobile mutation phase reuses operation id and locks ambiguous unknown', () => {
+    assertEqual(
+      resolveMobileMutationPhase('succeeded', null),
+      'confirmedSucceeded',
+      'succeeded envelope should confirm immediately',
+    );
+    assertEqual(
+      resolveMobileMutationPhase('unknown', null),
+      'reconciling',
+      'unknown without reconcile result should reconciling',
+    );
+    assertEqual(
+      resolveMobileMutationPhase('unknown', 'confirmedSucceeded'),
+      'confirmedSucceeded',
+      'reconcile confirmed should advance',
+    );
+    assertEqual(
+      resolveMobileMutationPhase('unknown', 'unknown'),
+      'unknown',
+      'ambiguous reconcile must stay unknown',
+    );
+
+    assertEqual(
+      pickMobileMutationOperationId('unknown', 'op-1', 'op-2'),
+      'op-1',
+      'unknown must reuse stable operation id',
+    );
+    assertEqual(
+      pickMobileMutationOperationId('idle', null, 'op-2'),
+      'op-2',
+      'idle may mint new operation id',
+    );
+    assertEqual(isMobileMutationActionLocked('unknown'), true, 'unknown locks actions');
+    assertEqual(isMobileMutationActionLocked('idle'), false, 'idle unlocks actions');
   });
 });

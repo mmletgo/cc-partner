@@ -6,18 +6,24 @@ import {
   canRunMobileWorktreeDestructiveAction,
   canSwitchMobilePane,
   closeMobileNav,
+  getMobileConnectionCachedAt,
   getMobileWorkbenchPanelOrder,
   getMobileTerminalChromeVisibility,
   getMobileCreatePaneDirection,
   getInitialMobileWorkbenchPanel,
   getInitialMobileNavOpen,
   getMobileWorktreeStatusKind,
+  markMobileConnectionOffline,
+  markMobileConnectionOnline,
+  markMobileConnectionReconnecting,
   openMobileNav,
   selectMobileWorktreeWorkspacePanel,
   selectMobilePanelForProject,
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
   selectMobilePanel,
+  shouldRefreshMobilePanelOnReconnect,
+  shouldSkipMobileProjectReload,
   type MobileWorkbenchPanel,
 } from './mobileWorkbenchState';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
@@ -569,5 +575,57 @@ describe('mobileWorkbenchState', () => {
     assertEqual(fullscreenChrome.paneActions, true);
     assertEqual(fullscreenChrome.terminalSurface, true);
     assertEqual(fullscreenChrome.exitFullscreen, true);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   同项目早退只允许 ready；error/loading 必须允许重试详情。
+   *
+   * Code Logic（这个测试做什么）:
+   *   断言 ready 早退 true；error/loading/idle 为 false。
+   */
+  test('shouldSkipMobileProjectReload only when same project is ready', () => {
+    assertEqual(shouldSkipMobileProjectReload('p1', 'p1', 'ready'), true);
+    assertEqual(shouldSkipMobileProjectReload('p1', 'p1', 'error'), false);
+    assertEqual(shouldSkipMobileProjectReload('p1', 'p1', 'loading'), false);
+    assertEqual(shouldSkipMobileProjectReload('p1', 'p1', 'idle'), false);
+    assertEqual(shouldSkipMobileProjectReload('p1', 'p2', 'ready'), false);
+    assertEqual(shouldSkipMobileProjectReload(null, 'p1', 'ready'), false);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   连接态切换要保留缓存起点，并在 offline→online 触发可见 panel 刷新。
+   *
+   * Code Logic（这个测试做什么）:
+   *   覆盖 online/reconnecting/offline 转换与 shouldRefresh 判定。
+   */
+  test('mobile connection state preserves cache and detects reconnect', () => {
+    const online = markMobileConnectionOnline(1_000);
+    assertEqual(online.kind, 'online');
+    assertEqual(getMobileConnectionCachedAt(online), 1_000);
+
+    const reconnecting = markMobileConnectionReconnecting(2, online);
+    assertEqual(reconnecting.kind, 'reconnecting');
+    if (reconnecting.kind === 'reconnecting') {
+      assertEqual(reconnecting.attempt, 2);
+      assertEqual(reconnecting.cachedSince, 1_000);
+    }
+
+    const offline = markMobileConnectionOffline('timeout', 2_000, reconnecting);
+    assertEqual(offline.kind, 'offline');
+    if (offline.kind === 'offline') {
+      assertEqual(offline.since, 2_000);
+      assertEqual(offline.lastError, 'timeout');
+    }
+
+    const stillOffline = markMobileConnectionOffline('network', 3_000, offline);
+    if (stillOffline.kind === 'offline') {
+      assertEqual(stillOffline.since, 2_000);
+      assertEqual(stillOffline.lastError, 'network');
+    }
+
+    assertEqual(shouldRefreshMobilePanelOnReconnect(offline, markMobileConnectionOnline(4_000)), true);
+    assertEqual(shouldRefreshMobilePanelOnReconnect(online, markMobileConnectionOnline(4_000)), false);
   });
 });

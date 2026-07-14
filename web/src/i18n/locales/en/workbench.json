@@ -106,7 +106,9 @@
     "projectPanel": {
       "title": "Projects",
       "error": "Load failed",
-      "unsupportedProjectKind": "This project type is not supported on mobile yet"
+      "unsupportedProjectKind": "This project type is not supported on mobile yet",
+      "reload": "Reload project",
+      "detailError": "Failed to load project details"
     },
     "browser": {
       "title": "Mobile project preview"
@@ -184,7 +186,8 @@
       "committing": "Committing",
       "pushing": "Pushing",
       "merging": "Merging",
-      "commitMeta": "{{author}} · {{date}}"
+      "commitMeta": "{{author}} · {{date}}",
+      "reconciling": "Reconciling…"
     },
     "worktreePanel": {
       "title": "Worktrees",
@@ -195,7 +198,8 @@
       "merging": "Merging",
       "removing": "Removing",
       "sync": "Sync",
-      "removeConfirm": "Remove worktree “{{name}}”? Make sure this workspace is no longer needed."
+      "removeConfirm": "Remove worktree “{{name}}”? Make sure this workspace is no longer needed.",
+      "reconciling": "Reconciling…"
     },
     "promptPanel": {
       "title": "Prompt",
@@ -398,6 +402,13 @@
         "title": "Settings",
         "label": "Mobile"
       }
+    },
+    "connection": {
+      "online": "Online",
+      "reconnecting": "Reconnecting…",
+      "offline": "Offline",
+      "cachedAt": "Cached at {{time}}",
+      "lastError": "Last error: {{error}}"
     }
   },
   "worktrees": {

@@ -214,6 +214,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/mobile/workbench/worktrees/push` | `routes/workbench.rs` | `git push` | requires-idempotency-key | same ledger/envelope |
 | POST | `/api/mobile/workbench/worktrees/merge` | `routes/workbench.rs` | `git merge --no-ff` + cleanup | requires-idempotency-key | same ledger/envelope |
 | POST | `/api/mobile/workbench/worktrees/remove` | `routes/workbench.rs` | `git worktree remove` + row delete | requires-idempotency-key | same ledger/envelope |
+| POST | `/api/mobile/workbench/worktrees/mutation-operation` | `routes/workbench.rs` | none; reads durable ledger by `clientOperationId` | read-only | mobile ledger query for unknown envelope reconciliation |
 | POST | `/api/mobile/workbench/git/commits` | `routes/workbench.rs` | none; `git log` read | read-only | — |
 | POST | `/api/mobile/workbench/files/list-dir` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/files/info` | `routes/workbench.rs` | none | read-only | — |

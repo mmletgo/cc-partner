@@ -29,7 +29,7 @@ import type {
   WorkbenchWorktree,
 } from '@/lib/types';
 import type { Decoder } from '@/lib/runtimeSchema';
-import { ContractDecodeError } from '@/lib/runtimeSchema';
+import { ContractDecodeError, nullableDecoder } from '@/lib/runtimeSchema';
 import {
   orchestratorRemoteOutboxItemDecoder,
   orchestratorRuntimeSnapshotDecoder,
@@ -47,8 +47,10 @@ import {
   workbenchWorktreeDecoder,
   workbenchMergeResultDecoder,
   workbenchMutationEnvelopeDecoder,
+  workbenchMutationOperationDecoder,
   workbenchRemoveResultDecoder,
 } from '@/lib/schemas/workbench';
+import type { WorkbenchMutationOperation } from '@/lib/types';
 import type { WorkbenchPaneSplitDirection } from './workbench';
 import type { OrchestratorCreateAction } from './orchestrator';
 import {
@@ -764,8 +766,8 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
           branchName,
           baseBranch: baseBranch ?? null,
         }, { policy: { kind: 'mutation' }, decoder: workbenchWorktreeDecoder }),
-    // Business Logic: WorkbenchTransport 旧签名仍返回权威 value；完整 envelope 对账见 workbenchHttp.git。
-    // Code Logic: mint 临时 clientOperationId；succeeded 解包，unknown 抛中文错误（T7 将改用 envelope API）。
+    // Business Logic: 兼容旧调用方；新 Git/worktree 面板应直接消费 workbenchHttp.git envelope + 对账。
+    // Code Logic: mint 临时 clientOperationId；succeeded 解包，unknown 抛中文错误（禁止盲重放）。
     commit: async (worktreeId, message) => {
       const envelope = await workbenchHttp.git.commit({
         worktreeId,
@@ -1111,6 +1113,32 @@ export const workbenchHttp = {
         clientOperationId,
         request.policy ?? { kind: 'mutation' },
         workbenchRemoveResultDecoder,
+      );
+    },
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   unknown envelope 后 Mobile controller 必须查询 owning ledger 取得 intent，禁止盲重放。
+     *
+     * Code Logic（这个函数做什么）:
+     *   POST `/api/mobile/workbench/worktrees/mutation-operation`，query 策略，解码 nullable operation。
+     */
+    getMutationOperation: (
+      clientOperationId: string,
+      policy?: HttpRequestPolicy,
+    ): Promise<WorkbenchMutationOperation | null> => {
+      const id = clientOperationId.trim();
+      if (!id) {
+        return Promise.reject(
+          new OrchestratorRuntimeTransportError('clientOperationId 不能为空', 'protocol'),
+        );
+      }
+      return postJson<WorkbenchMutationOperation | null>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/worktrees/mutation-operation`,
+        { clientOperationId: id },
+        {
+          policy: policy ?? { kind: 'query' },
+          decoder: nullableDecoder(workbenchMutationOperationDecoder),
+        },
       );
     },
   },

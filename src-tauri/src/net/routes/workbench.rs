@@ -1473,6 +1473,21 @@ pub async fn mobile_merge_worktree(
 ///
 /// Code Logic（这个函数做什么）:
 ///     接收 worktreeId/force/clientOperationId，委托 commands 层 remote-aware remove helper。
+/// 手机端查询 workbench mutation operation ledger。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Mobile unknown envelope 后必须按 clientOperationId 查询 owning ledger intent 再对账。
+///
+/// Code Logic（这个函数做什么）:
+///     复用 P2P get_mutation_operation；本机 ledger 查询（远端 ledger 缺失保持 unknown）。
+pub async fn mobile_get_mutation_operation(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<crate::workbench::remote_protocol::RemoteMutationOperationReq>,
+) -> P2pResult<Json<Option<crate::workbench::operation_ledger::WorkbenchMutationOperationDto>>> {
+    get_mutation_operation(State(state), Extension(ctx), Json(req)).await
+}
+
 pub async fn mobile_remove_worktree(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,

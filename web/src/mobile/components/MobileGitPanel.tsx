@@ -1,14 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
-import { httpWorkbenchTransport } from '@/api/workbenchHttp';
-import type { WorkbenchGitCommit, WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
 import {
-  shouldReloadMobileGitCommitsAfterAction,
+  createHttpOrchestratorClientRequestId,
+  httpWorkbenchTransport,
+  workbenchHttp,
+} from '@/api/workbenchHttp';
+import { isMutationSucceeded, isMutationUnknown } from '@/lib/asyncState/mutationOutcome';
+import type {
+  MutationAuthoritySnapshot,
+  MutationIntent,
+  WorkbenchGitCommit,
+  WorkbenchProject,
+  WorkbenchWorktree,
+} from '@/lib/types';
+import { reconcileWorkbenchMutation } from '@/lib/workbenchMutationReconciliation';
+import {
   isMobileGitActionResponseCurrent,
   isMobileGitMergeResponseCurrent,
-  type MobileGitPanelAction,
+  isMobileMutationActionLocked,
+  pickMobileMutationOperationId,
+  resolveMobileMutationPhase,
+  shouldReloadMobileGitCommitsAfterAction,
   type MobileGitActionContext,
+  type MobileGitPanelAction,
+  type MobileMutationPhase,
 } from '../mobilePanelState';
 import { getMobileWorktreeStatusKind } from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
@@ -55,9 +71,10 @@ function getErrorMessage(reason: unknown): string {
  *
  * Business Logic（为什么需要这个组件）:
  *   手机端 Workbench 需要能查看当前 worktree Git 状态、最近提交，并执行提交、推送和合并到主工作区。
+ *   mutation 在 timeout/network 下必须稳定 operation id + ledger 对账，禁止盲重放。
  *
  * Code Logic（这个组件做什么）:
- *   通过 HTTP transport 加载 commit 列表和调用 worktree Git 操作；使用 request id 防止旧 worktree 响应覆盖当前 UI。
+ *   通过 HTTP envelope API 执行 commit/push；unknown 后查询 ledger、刷新权威 worktree 并用 pure matrix 对账。
  */
 export function MobileGitPanel({
   project,
@@ -71,9 +88,12 @@ export function MobileGitPanel({
   const [commits, setCommits] = useState<WorkbenchGitCommit[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [actionBusy, setActionBusy] = useState<'commit' | 'push' | 'merge' | null>(null);
+  const [mutationPhase, setMutationPhase] = useState<MobileMutationPhase>('idle');
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef<number>(0);
   const currentContextRef = useRef<MobileGitActionContext | null>(null);
+  const commitOperationIdRef = useRef<string | null>(null);
+  const pushOperationIdRef = useRef<string | null>(null);
   const statusLabel = useMemo(() => {
     if (!worktree) return t('workbench:mobile.gitPanel.noWorktree');
     const statusKind = getMobileWorktreeStatusKind(worktree);
@@ -163,80 +183,257 @@ export function MobileGitPanel({
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   typed unknown 后禁止盲重放；按 ledger intent + 可观察权威状态纯对账。
+   *
+   * Code Logic（这个函数做什么）:
+   *   查询 getMutationOperation；刷新 worktrees；merge/remove 可观察 identity；commit/push 缺 head 权威字段保持 unknown。
+   */
+  const reconcileUnknownMutation = useCallback(
+    async (
+      clientOperationId: string,
+      actionContext: MobileGitActionContext,
+    ): Promise<'confirmedSucceeded' | 'unknown'> => {
+      setMutationPhase('reconciling');
+      let ledger = null as Awaited<ReturnType<typeof workbenchHttp.git.getMutationOperation>>;
+      try {
+        ledger = await workbenchHttp.git.getMutationOperation(clientOperationId);
+      } catch {
+        ledger = null;
+      }
+      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
+        return 'unknown';
+      }
+
+      await onRefreshWorktrees?.({ expectedProjectId: actionContext.projectId });
+      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
+        return 'unknown';
+      }
+
+      const intent: MutationIntent | null = ledger?.intent ?? null;
+      if (!intent) return 'unknown';
+
+      const authority: MutationAuthoritySnapshot = {};
+      if (intent.kind === 'merge' || intent.kind === 'remove') {
+        try {
+          const latest = await httpWorkbenchTransport.worktrees.list(actionContext.projectId);
+          if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
+            return 'unknown';
+          }
+          if (intent.kind === 'merge') {
+            authority.sourceWorktreePresent = latest.some(
+              (item) => item.id === intent.sourceWorktreeId,
+            );
+          } else {
+            authority.worktreeIdentityPresent = latest.some(
+              (item) => item.id === intent.worktreeId,
+            );
+          }
+        } catch {
+          return 'unknown';
+        }
+      }
+      // commit same-message/different-tree：无 headTree 权威字段时 pure matrix 返回 unknown（不猜 message）。
+
+      return reconcileWorkbenchMutation(intent, ledger, authority);
+    },
+    [onRefreshWorktrees],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   手机端需要触发后端 Claude Code 生成提交信息并提交当前 worktree 改动。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 worktrees.commit(worktreeId, null)，成功后通知父组件更新 active worktree 并刷新列表/提交历史。
+   *   稳定 clientOperationId + workbenchHttp.git.commit envelope；unknown 对账，不盲重放。
    */
   const handleCommit = useCallback(async (): Promise<void> => {
     if (busy || !project || !worktree) return;
+    if (isMobileMutationActionLocked(mutationPhase) && mutationPhase !== 'unknown') return;
     const actionContext = { projectId: project.id, worktreeId: worktree.id };
+    const clientOperationId = pickMobileMutationOperationId(
+      mutationPhase,
+      commitOperationIdRef.current,
+      createHttpOrchestratorClientRequestId(),
+    );
+    commitOperationIdRef.current = clientOperationId;
     setActionBusy('commit');
+    setMutationPhase('busy');
     setError(null);
     try {
-      const nextWorktree = await httpWorkbenchTransport.worktrees.commit(worktree.id, null);
+      const envelope = await workbenchHttp.git.commit({
+        worktreeId: worktree.id,
+        message: null,
+        clientOperationId,
+      });
       if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
-      onWorktreeChange?.(nextWorktree);
-      await refreshAfterAction('commit', actionContext);
+
+      if (isMutationSucceeded(envelope)) {
+        commitOperationIdRef.current = null;
+        setMutationPhase('idle');
+        onWorktreeChange?.(envelope.value);
+        await refreshAfterAction('commit', actionContext);
+        return;
+      }
+
+      if (isMutationUnknown(envelope)) {
+        const confirmed = await reconcileUnknownMutation(
+          envelope.clientOperationId,
+          actionContext,
+        );
+        if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+        const phase = resolveMobileMutationPhase('unknown', confirmed);
+        if (phase === 'confirmedSucceeded') {
+          commitOperationIdRef.current = null;
+          setMutationPhase('idle');
+          setError(null);
+          await refreshAfterAction('commit', actionContext);
+        } else {
+          setMutationPhase('unknown');
+          setError(t('workbench:errors.mutationUnknown'));
+        }
+      }
     } catch (reason) {
+      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+      setMutationPhase('idle');
+      commitOperationIdRef.current = null;
       setError(`${t('workbench:errors.commitWorktree')}: ${getErrorMessage(reason)}`);
     } finally {
-      setActionBusy(null);
+      if (isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
+        setActionBusy(null);
+      }
     }
-  }, [busy, onWorktreeChange, project, refreshAfterAction, t, worktree]);
+  }, [
+    busy,
+    mutationPhase,
+    onWorktreeChange,
+    project,
+    reconcileUnknownMutation,
+    refreshAfterAction,
+    t,
+    worktree,
+  ]);
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   当前 worktree 有可推送分支时，手机端需要能把本地提交推送到后端判定的远端。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 worktrees.push，成功后同步 active worktree 状态并刷新 worktree/commit 数据。
+   *   稳定 clientOperationId + push envelope；unknown 对账不盲重放。
    */
   const handlePush = useCallback(async (): Promise<void> => {
     if (busy || !project || !worktree) return;
+    if (isMobileMutationActionLocked(mutationPhase) && mutationPhase !== 'unknown') return;
     const actionContext = { projectId: project.id, worktreeId: worktree.id };
+    const clientOperationId = pickMobileMutationOperationId(
+      mutationPhase,
+      pushOperationIdRef.current,
+      createHttpOrchestratorClientRequestId(),
+    );
+    pushOperationIdRef.current = clientOperationId;
     setActionBusy('push');
+    setMutationPhase('busy');
     setError(null);
     try {
-      const nextWorktree = await httpWorkbenchTransport.worktrees.push(worktree.id);
+      const envelope = await workbenchHttp.git.push({
+        worktreeId: worktree.id,
+        clientOperationId,
+      });
       if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
-      onWorktreeChange?.(nextWorktree);
-      await refreshAfterAction('push', actionContext);
+
+      if (isMutationSucceeded(envelope)) {
+        pushOperationIdRef.current = null;
+        setMutationPhase('idle');
+        onWorktreeChange?.(envelope.value);
+        await refreshAfterAction('push', actionContext);
+        return;
+      }
+
+      if (isMutationUnknown(envelope)) {
+        const confirmed = await reconcileUnknownMutation(
+          envelope.clientOperationId,
+          actionContext,
+        );
+        if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+        const phase = resolveMobileMutationPhase('unknown', confirmed);
+        if (phase === 'confirmedSucceeded') {
+          pushOperationIdRef.current = null;
+          setMutationPhase('idle');
+          setError(null);
+          await refreshAfterAction('push', actionContext);
+        } else {
+          setMutationPhase('unknown');
+          setError(t('workbench:errors.mutationUnknown'));
+        }
+      }
     } catch (reason) {
+      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+      setMutationPhase('idle');
+      pushOperationIdRef.current = null;
       setError(`${t('workbench:errors.pushWorktree')}: ${getErrorMessage(reason)}`);
     } finally {
-      setActionBusy(null);
+      if (isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
+        setActionBusy(null);
+      }
     }
-  }, [busy, onWorktreeChange, project, refreshAfterAction, t, worktree]);
+  }, [
+    busy,
+    mutationPhase,
+    onWorktreeChange,
+    project,
+    reconcileUnknownMutation,
+    refreshAfterAction,
+    t,
+    worktree,
+  ]);
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   功能 worktree 完成后，手机端需要能触发合并回主工作区，沿用后端既有 merge 流程。
    *
    * Code Logic（这个函数做什么）:
-   *   委托父级执行 dirty guard 与后端 merge；取消时不改本地提交，成功后清空源 worktree commits。
+   *   委托父级执行 dirty guard 与 envelope merge；取消时不改本地提交，成功后清空源 worktree commits。
    */
   const handleMerge = useCallback(async (): Promise<void> => {
     if (busy || !project || !worktree || worktree.isMain) return;
+    if (isMobileMutationActionLocked(mutationPhase)) return;
     const actionContext = { projectId: project.id, worktreeId: worktree.id };
     setActionBusy('merge');
+    setMutationPhase('busy');
     setError(null);
     try {
       const didMerge = await onMergeWorktree(worktree);
-      if (!didMerge) return;
+      if (!didMerge) {
+        setMutationPhase('idle');
+        return;
+      }
       if (!isMobileGitMergeResponseCurrent(actionContext, currentContextRef.current)) return;
       requestIdRef.current += 1;
       setCommits([]);
       setError(null);
       setLoading(false);
+      setMutationPhase('idle');
     } catch (reason) {
-      setError(`${t('workbench:errors.mergeWorktree')}: ${getErrorMessage(reason)}`);
+      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+      const message = getErrorMessage(reason);
+      if (message.includes('结果未知') || message.includes('mutationUnknown')) {
+        setMutationPhase('unknown');
+        setError(t('workbench:errors.mutationUnknown'));
+      } else {
+        setMutationPhase('idle');
+        setError(`${t('workbench:errors.mergeWorktree')}: ${message}`);
+      }
     } finally {
-      setActionBusy(null);
+      if (isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
+        setActionBusy(null);
+      }
     }
-  }, [busy, onMergeWorktree, project, t, worktree]);
+  }, [busy, mutationPhase, onMergeWorktree, project, t, worktree]);
 
-  const actionDisabled = busy || actionBusy !== null || !worktree;
+  const actionDisabled =
+    busy ||
+    actionBusy !== null ||
+    !worktree ||
+    isMobileMutationActionLocked(mutationPhase);
 
   return (
     <section className={styles.panel} aria-labelledby="mobile-git-panel-title">
@@ -257,8 +454,13 @@ export function MobileGitPanel({
 
       {!project ? <p className={styles.panelState}>{t('workbench:mobile.gitPanel.noProject')}</p> : null}
       {loading ? <p className={styles.panelState}>{t('workbench:gitHistoryLoading')}</p> : null}
+      {mutationPhase === 'reconciling' ? (
+        <p className={styles.panelState} role="status">
+          {t('workbench:mobile.gitPanel.reconciling')}
+        </p>
+      ) : null}
       {error ? (
-        <p className={styles.panelError}>
+        <p className={styles.panelError} role="alert">
           <span>{t('workbench:mobile.projectPanel.error')}</span>
           <span>{error}</span>
         </p>
