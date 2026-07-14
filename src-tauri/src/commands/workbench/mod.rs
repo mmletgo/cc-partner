@@ -38,9 +38,9 @@ pub use files::{
 pub use git::{
     __cmd__commit_workbench_worktree, __cmd__create_workbench_worktree,
     __cmd__get_workbench_mutation_operation, __cmd__list_workbench_git_commits,
-    __cmd__list_workbench_worktrees, __cmd__merge_workbench_worktree, __cmd__push_workbench_worktree,
-    __cmd__remove_workbench_worktree, __tauri_command_name_commit_workbench_worktree,
-    __tauri_command_name_create_workbench_worktree,
+    __cmd__list_workbench_worktrees, __cmd__merge_workbench_worktree,
+    __cmd__push_workbench_worktree, __cmd__remove_workbench_worktree,
+    __tauri_command_name_commit_workbench_worktree, __tauri_command_name_create_workbench_worktree,
     __tauri_command_name_get_workbench_mutation_operation,
     __tauri_command_name_list_workbench_git_commits, __tauri_command_name_list_workbench_worktrees,
     __tauri_command_name_merge_workbench_worktree, __tauri_command_name_push_workbench_worktree,

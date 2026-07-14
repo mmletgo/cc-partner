@@ -412,6 +412,7 @@ pub fn write_tree_hash(path: &Path) -> Result<String, AppError> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     `git rev-parse HEAD^`；无父/空仓库返回 None。
+#[allow(dead_code)] // N3 MutationAuthoritySnapshot 采集 helper；当前前端对账，后端 pure confirm 单测/后续复用
 pub fn head_parent_hash(path: &Path) -> Result<Option<String>, AppError> {
     let output = Command::new("git")
         .args(["rev-parse", "--verify", "HEAD^"])
@@ -459,16 +460,18 @@ pub fn head_tree_hash(path: &Path) -> Result<Option<String>, AppError> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     返回 (local_ref, remote_ref_name, local_head)；remote_ref 优先 upstream，否则 origin/<branch>。
-pub fn push_ref_identity(
-    path: &Path,
-    branch: &str,
-) -> Result<(String, String, String), AppError> {
+pub fn push_ref_identity(path: &Path, branch: &str) -> Result<(String, String, String), AppError> {
     let local_head = head_hash(path)?
         .ok_or_else(|| AppError::generic("当前 worktree 没有可推送的 HEAD".to_string()))?;
     let local_ref = format!("refs/heads/{branch}");
     // 优先 @{upstream} 的 remote tracking ref；失败回退 origin/<branch>
     let upstream = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+        .args([
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ])
         .current_dir(path)
         .output()?;
     let remote_ref = if upstream.status.success() {
@@ -492,6 +495,7 @@ pub fn push_ref_identity(
 ///
 /// Code Logic（这个函数做什么）:
 ///     `git rev-parse --verify <remote_ref>`；不存在返回 None。
+#[allow(dead_code)] // N3 MutationAuthoritySnapshot 采集 helper；当前前端对账，后端 pure confirm 单测/后续复用
 pub fn rev_parse_ref(path: &Path, git_ref: &str) -> Result<Option<String>, AppError> {
     let output = Command::new("git")
         .args(["rev-parse", "--verify", git_ref])
@@ -515,6 +519,7 @@ pub fn rev_parse_ref(path: &Path, git_ref: &str) -> Result<Option<String>, AppEr
 ///
 /// Code Logic（这个函数做什么）:
 ///     `git merge-base --is-ancestor <source_head> HEAD` 在 main 路径执行；0=true，1=false。
+#[allow(dead_code)] // N3 MutationAuthoritySnapshot 采集 helper；当前前端对账，后端 pure confirm 单测/后续复用
 pub fn is_ancestor(main_path: &Path, source_head: &str) -> Result<bool, AppError> {
     let output = Command::new("git")
         .args(["merge-base", "--is-ancestor", source_head, "HEAD"])
@@ -560,6 +565,10 @@ pub fn create_worktree(
 ///
 /// Code Logic（这个函数做什么）:
 ///     执行 `git add -A` 后检查 staged/working 状态；有变更时执行 `git commit -m`，无变更返回 false。
+///
+/// 生产 delivery 走 ledger `local_commit_workbench_worktree`；本 helper 供 delivery 单测 harness 与
+/// 简单 stage+commit 场景复用。
+#[cfg(test)]
 pub fn commit_all(path: &Path, message: &str) -> Result<bool, AppError> {
     if !stage_all_for_commit(path)? {
         return Ok(false);

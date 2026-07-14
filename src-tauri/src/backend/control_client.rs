@@ -565,12 +565,9 @@ impl BackendControlClient {
         match self.workbench_op_outcome_value(op, payload).await {
             Ok(v) => Ok(v),
             Err(MutationControlError::Failed(e)) => Err(e),
-            Err(MutationControlError::Uncertain { transport }) => {
-                Err(AppError::unavailable(format!(
-                    "control_response_uncertain: {}",
-                    transport.as_str()
-                )))
-            }
+            Err(MutationControlError::Uncertain { transport }) => Err(AppError::unavailable(
+                format!("control_response_uncertain: {}", transport.as_str()),
+            )),
         }
     }
 

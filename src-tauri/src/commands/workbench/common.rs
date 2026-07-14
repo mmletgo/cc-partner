@@ -72,8 +72,10 @@ pub(crate) async fn proxy_workbench_mutation_if_gui<T: DeserializeOwned>(
     let client = BackendControlClient::from_control_file()?;
     match client.workbench_mutation_op_value(op, payload).await {
         Ok(value) => {
-            let env: WorkbenchMutationEnvelopeDto<T> = serde_json::from_value(value)
-                .map_err(|e| AppError::generic(format!("mutation envelope 解析失败 ({op}): {e}")))?;
+            let env: WorkbenchMutationEnvelopeDto<T> =
+                serde_json::from_value(value).map_err(|e| {
+                    AppError::generic(format!("mutation envelope 解析失败 ({op}): {e}"))
+                })?;
             Ok(Some(env))
         }
         Err(MutationControlError::Uncertain { transport }) => Ok(Some(

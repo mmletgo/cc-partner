@@ -309,7 +309,11 @@ pub enum ClaimOutcome {
 }
 
 /// 权威 Git/worktree 状态快照，供纯 confirm 矩阵使用。
+///
+/// N3 owner 侧 / 前端对账共享此快照形状；当前生产 path 由前端采集 authority，
+/// 后端 `confirm_mutation` 提供 pure 矩阵（单测 + 后续 owner auto-confirm 复用）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(dead_code)] // N3 pure confirm 公共 surface；生产对账当前在前端，后端矩阵供测试与后续 owner 复用
 pub struct MutationAuthoritySnapshot {
     /// 当前 HEAD hash。
     pub head: Option<String>,
@@ -329,6 +333,7 @@ pub struct MutationAuthoritySnapshot {
 
 /// 纯 confirm 结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // 与 MutationAuthoritySnapshot 配套的 pure 结果类型
 pub enum MutationConfirmResult {
     ConfirmedSucceeded,
     Unknown,
@@ -367,6 +372,16 @@ impl WorkbenchMutationLedger {
         payload_hash: &str,
         intent: &MutationIntent,
     ) -> Result<ClaimOutcome, AppError> {
+        // 幂等建表：测试/旧库无 init_db 时 claim 也可直接用
+        self.ensure_schema().await?;
+        // intent.kind 与 claim kind 必须一致，防止 payload 与 kind 漂移
+        if intent.kind() != kind {
+            return Err(AppError::generic(format!(
+                "mutation intent kind 与 claim kind 不一致: intent={:?} claim={:?}",
+                intent.kind(),
+                kind
+            )));
+        }
         let id = normalize_client_operation_id(client_operation_id)?;
         if let Some(existing) = self.get(&id).await? {
             if existing.payload_hash == payload_hash {
@@ -597,6 +612,7 @@ pub fn canonical_remove_payload(worktree_id: &str, force: bool) -> Value {
 ///     push: remote_ref_head == local_head
 ///     merge: main_contains_source_head==true && source_worktree_present==false
 ///     remove: worktree_identity_present==false
+#[allow(dead_code)] // N3 pure confirm 矩阵；生产前端对账，后端单测 + 后续 owner auto-confirm
 pub fn confirm_mutation(
     intent: &MutationIntent,
     authority: &MutationAuthoritySnapshot,
@@ -672,32 +688,46 @@ where
             "clientOperationId 已绑定不同 payload（existingHash={}）",
             existing.payload_hash
         ))),
-        ClaimOutcome::Replay(existing) => match existing.state {
-            MutationState::Succeeded => {
-                let value = existing.outcome.ok_or_else(|| {
-                    AppError::generic("mutation ledger succeeded 但缺少 outcome")
-                })?;
-                let decoded: T = serde_json::from_value(value).map_err(|e| {
-                    AppError::generic(format!("反序列化 mutation outcome 失败: {e}"))
-                })?;
-                Ok(WorkbenchMutationEnvelopeDto::succeeded(
-                    decoded,
-                    existing.client_operation_id,
-                ))
-            }
-            MutationState::Failed => Err(AppError::generic(
-                existing
-                    .error_message
-                    .unwrap_or_else(|| "mutation 先前已失败".to_string()),
-            )),
-            MutationState::Claimed | MutationState::Running => {
-                Ok(WorkbenchMutationEnvelopeDto::unknown(
+        ClaimOutcome::Replay(existing) => {
+            // 终态回放 outcome；pending 返回 unknown（禁止二次执行）
+            if existing.state.is_pending() {
+                return Ok(WorkbenchMutationEnvelopeDto::unknown(
                     existing.client_operation_id,
                     None,
-                ))
+                ));
             }
-        },
-        ClaimOutcome::Fresh(_) => {
+            // is_terminal()：succeeded 回放 value；failed 回放错误
+            debug_assert!(existing.state.is_terminal());
+            match existing.state {
+                MutationState::Succeeded => {
+                    let value = existing.outcome.ok_or_else(|| {
+                        AppError::generic("mutation ledger succeeded 但缺少 outcome")
+                    })?;
+                    let decoded: T = serde_json::from_value(value).map_err(|e| {
+                        AppError::generic(format!("反序列化 mutation outcome 失败: {e}"))
+                    })?;
+                    Ok(WorkbenchMutationEnvelopeDto::succeeded(
+                        decoded,
+                        existing.client_operation_id,
+                    ))
+                }
+                MutationState::Failed => Err(AppError::generic(
+                    existing
+                        .error_message
+                        .unwrap_or_else(|| "mutation 先前已失败".to_string()),
+                )),
+                MutationState::Claimed | MutationState::Running => {
+                    // 理论上 is_pending 已覆盖；防御性 unknown
+                    Ok(WorkbenchMutationEnvelopeDto::unknown(
+                        existing.client_operation_id,
+                        None,
+                    ))
+                }
+            }
+        }
+        ClaimOutcome::Fresh(fresh) => {
+            // Fresh 行的 kind 写入 ledger 时已校验；此处仅消费字段消除 dead_code
+            debug_assert_eq!(fresh.kind, fresh.intent.kind());
             ledger.mark_running(client_operation_id).await?;
             match execute().await {
                 Ok(value) => {
@@ -708,7 +738,9 @@ where
                     ))
                 }
                 Err(err) => {
-                    let _ = ledger.mark_failed(client_operation_id, &err.to_string()).await;
+                    let _ = ledger
+                        .mark_failed(client_operation_id, &err.to_string())
+                        .await;
                     Err(err)
                 }
             }
@@ -980,10 +1012,7 @@ mod tests {
 
     #[test]
     fn envelope_serde_roundtrip() {
-        let env = WorkbenchMutationEnvelopeDto::succeeded(
-            serde_json::json!({"id": "wt"}),
-            "op-x",
-        );
+        let env = WorkbenchMutationEnvelopeDto::succeeded(serde_json::json!({"id": "wt"}), "op-x");
         let raw = serde_json::to_string(&env).unwrap();
         assert!(raw.contains("\"kind\":\"succeeded\""));
         assert!(raw.contains("\"clientOperationId\":\"op-x\""));

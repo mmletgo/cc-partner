@@ -1128,8 +1128,14 @@ mod tests {
     }
 
     /// pull_items 对并发左右正文必须保留 conflict 副本。
+    ///
+    /// 必须持有 apply_fail_test_lock：并行 inject 测试会写进程级 APPLY_FAIL，
+    /// 否则可能误命中 AfterActiveRows 注入错误。
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional serial inject lock across await
     async fn apply_prompt_pull_items_keeps_conflict_copy() {
+        let _lock = apply_fail_test_lock();
+        clear_apply_merge_fail_point();
         let (pool, repo) = setup().await;
         let local = prompt("p-pull", "left", "left-body", 1, false);
         repo.bulk_upsert(std::slice::from_ref(&local))

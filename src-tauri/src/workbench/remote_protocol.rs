@@ -8,11 +8,6 @@
 
 use serde::{Deserialize, Serialize};
 
-// 便于 client/route 复用 mutation envelope/operation DTO。
-pub use crate::workbench::operation_ledger::{
-    MutationTransportClass, WorkbenchMutationEnvelopeDto, WorkbenchMutationOperationDto,
-};
-
 /// 远端浏览器候选发现请求体。
 ///
 /// Business Logic（为什么需要这个类型）:

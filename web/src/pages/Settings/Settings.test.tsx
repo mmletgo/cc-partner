@@ -163,7 +163,20 @@ const {
   rollbackJob,
   pickExport,
   pickArchive,
-} = vi.hoisted(() => ({
+} = vi.hoisted(() => {
+  // 稳定空数组引用：避免 effect 每次 setState(new []) 触发无限重渲染
+  const EMPTY_RECOVERY_JOBS: Array<{
+    id: string;
+    status: string;
+    archivePath?: string | null;
+    preRestoreBackupPath?: string | null;
+    selectedDomainsJson: string;
+    mode: string;
+    errorSummary?: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }> = [];
+  return {
   triggerLanSync: vi.fn(async () => ({
     accepted: true,
     succeeded_devices: 0,
@@ -224,17 +237,7 @@ const {
     preRestoreBackupPath: '/tmp/pre.zip',
     errorSummary: null,
   })),
-  listJobs: vi.fn(async () => [] as Array<{
-    id: string;
-    status: string;
-    archivePath?: string | null;
-    preRestoreBackupPath?: string | null;
-    selectedDomainsJson: string;
-    mode: string;
-    errorSummary?: string | null;
-    createdAt: string;
-    updatedAt: string;
-  }>),
+  listJobs: vi.fn(async () => EMPTY_RECOVERY_JOBS),
   rollbackJob: vi.fn(async () => ({
     jobId: 'job-1',
     status: 'succeeded',
@@ -242,7 +245,8 @@ const {
   })),
   pickExport: vi.fn(async () => '/tmp/export.zip'),
   pickArchive: vi.fn(async () => '/tmp/restore.zip'),
-}));
+  };
+});
 
 vi.mock('@/api/sync', async () => {
   const actual = await vi.importActual<typeof import('@/api/sync')>('@/api/sync');
@@ -294,7 +298,13 @@ vi.mock('@/hooks/usePermissions', () => ({
       notification: true,
     },
     loading: false,
-    refresh: vi.fn(),
+    refreshing: false,
+    error: null,
+    requesting: new Set(),
+    request: vi.fn(async () => undefined),
+    refresh: vi.fn(async () => undefined),
+    allRequiredGranted: true,
+    allGranted: true,
   }),
 }));
 
@@ -371,21 +381,25 @@ vi.mock('@/components/domain', () => {
   };
 });
 
+// 稳定 t 引用：真实 i18next 的 t 跨 render 稳定；不稳定 mock 会让依赖 [t] 的
+// useCallback/useEffect（如 recovery jobs 刷新）每次 render 重建 → 无限 setState 循环，
+// 最终让 act()/safe-save 测试卡死到 5s timeout。
+const stableT = vi.hoisted(() => {
+  const t = (key: string, opts?: Record<string, unknown>) => {
+    if (opts && 'error' in (opts ?? {})) return `${key}:${String(opts.error)}`;
+    if (opts && 'time' in (opts ?? {})) return `${key}:${String(opts.time)}`;
+    return key;
+  };
+  // 支持 const { t } = useTranslation(...) 与 const [t] = useTranslation(...)
+  return Object.assign([t, {}, false], {
+    t,
+    i18n: { language: 'zh' },
+    ready: true,
+  });
+});
+
 vi.mock('react-i18next', () => ({
-  useTranslation: () => {
-    const t = (key: string, opts?: Record<string, unknown>) => {
-      if (opts && 'error' in (opts ?? {})) return `${key}:${String(opts.error)}`;
-      if (opts && 'time' in (opts ?? {})) return `${key}:${String(opts.time)}`;
-      return key;
-    };
-    // 支持 const { t } = useTranslation(...) 与 const [t] = useTranslation(...)
-    const result = Object.assign([t, {}, false], {
-      t,
-      i18n: { language: 'zh' },
-      ready: true,
-    });
-    return result;
-  },
+  useTranslation: () => stableT,
 }));
 
 const searchParamsState = { value: new URLSearchParams() };

@@ -8,7 +8,7 @@
 
 use crate::claude_cli;
 use crate::error::{AppError, AppErrorCategory};
-use crate::net::protocol::{PeerProtocolInfo, CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1};
+use crate::net::protocol::CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1;
 use crate::state::AppState;
 use crate::workbench::models::{
     WorkbenchDetectedFileType, WorkbenchGitCommitDto, WorkbenchOpenFileDto, WorkbenchProjectRow,
@@ -32,8 +32,6 @@ use crate::workbench::{
     remote_protocol::{RemoteCommitWorktreeReq, RemoteCreateWorktreeReq},
     sqlite_preview,
 };
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -440,7 +438,10 @@ pub(crate) async fn commit_workbench_worktree_for_state(
                 ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
             let client = RemoteWorkbenchClient::new();
             let supports = client
-                .peer_supports_capability(&context.base_url, CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1)
+                .peer_supports_capability(
+                    &context.base_url,
+                    CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1,
+                )
                 .await
                 .unwrap_or(false);
             if supports {
@@ -484,13 +485,8 @@ pub(crate) async fn commit_workbench_worktree_for_state(
             }
         }
         WorktreeCommandTarget::Local(local_worktree_id) => {
-            local_commit_workbench_worktree_with_ledger(
-                state,
-                local_worktree_id,
-                message,
-                op_id,
-            )
-            .await
+            local_commit_workbench_worktree_with_ledger(state, local_worktree_id, message, op_id)
+                .await
         }
     }
 }
@@ -523,13 +519,8 @@ pub async fn commit_workbench_worktree(
     {
         return Ok(v);
     }
-    commit_workbench_worktree_for_state(
-        state.inner(),
-        worktree_id,
-        message,
-        client_operation_id,
-    )
-    .await
+    commit_workbench_worktree_for_state(state.inner(), worktree_id, message, client_operation_id)
+        .await
 }
 
 /// Business Logic: 把远端 worktree DTO envelope 的 id 映射为本机 remote: 前缀。
@@ -554,44 +545,6 @@ fn map_remote_worktree_envelope(
         }
         other => other,
     }
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     Commit 按钮应自动根据当前 staged diff 生成 commit message，且让 Claude Code 读取项目上下文。
-///
-/// Code Logic（这个函数做什么）:
-///     stage 全部改动；无改动返回 false；有改动时读取 diff，使用配置里的 Claude CLI 路径和模型，
-///     在 worktree cwd 下执行项目上下文 headless JSON 调用，清洗 message 后提交 staged 内容。
-pub(crate) async fn commit_worktree_with_generated_message(
-    state: &AppState,
-    path: &Path,
-) -> Result<bool, AppError> {
-    if !workbench_git::stage_all_for_commit(path)? {
-        return Ok(false);
-    }
-    let changes = workbench_git::staged_changes_for_commit_message(path)?;
-    let (cli_path, model) = {
-        let cfg = state.config.read().unwrap();
-        (
-            cfg.github_trending.claude_cli_path.clone(),
-            cfg.github_trending.claude_model.clone(),
-        )
-    };
-    let schema = workbench_commit_message_schema();
-    let instruction = build_commit_message_instruction(&changes);
-    let generated = claude_cli::run_structured_json_with_cwd::<WorkbenchCommitMessageResponse>(
-        &cli_path,
-        &model,
-        &schema.to_string(),
-        &instruction,
-        Some(path),
-        COMMIT_MESSAGE_TIMEOUT_SECS,
-        "生成 commit message",
-    )
-    .await?;
-    let message = workbench_git::sanitize_commit_message(&generated.message)?;
-    workbench_git::commit_staged(path, &message)?;
-    Ok(true)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -735,7 +688,10 @@ pub(crate) async fn push_workbench_worktree_for_state(
                 ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
             let client = RemoteWorkbenchClient::new();
             let supports = client
-                .peer_supports_capability(&context.base_url, CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1)
+                .peer_supports_capability(
+                    &context.base_url,
+                    CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1,
+                )
                 .await
                 .unwrap_or(false);
             if supports {
@@ -1081,7 +1037,10 @@ pub(crate) async fn merge_workbench_worktree_for_state(
                 ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
             let client = RemoteWorkbenchClient::new();
             let supports = client
-                .peer_supports_capability(&context.base_url, CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1)
+                .peer_supports_capability(
+                    &context.base_url,
+                    CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1,
+                )
                 .await
                 .unwrap_or(false);
             if supports {
@@ -1092,7 +1051,10 @@ pub(crate) async fn merge_workbench_worktree_for_state(
                         Some(op_id.clone()),
                     )
                     .await?;
-                Ok(map_remote_merge_value_envelope(&context.device_id, envelope)?)
+                Ok(map_remote_merge_value_envelope(
+                    &context.device_id,
+                    envelope,
+                )?)
             } else {
                 let legacy = client
                     .merge_worktree(&context.base_url, &context.inner_worktree_id)
@@ -1792,7 +1754,10 @@ pub(crate) async fn remove_workbench_worktree_for_state(
                 ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
             let client = RemoteWorkbenchClient::new();
             let supports = client
-                .peer_supports_capability(&context.base_url, CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1)
+                .peer_supports_capability(
+                    &context.base_url,
+                    CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1,
+                )
                 .await
                 .unwrap_or(false);
             if supports {
@@ -1892,6 +1857,8 @@ pub(crate) async fn get_workbench_mutation_operation_for_state(
     client_operation_id: String,
 ) -> Result<Option<WorkbenchMutationOperationDto>, AppError> {
     let ledger = WorkbenchMutationLedger::new(state.db.clone());
+    // 幂等建表：旧库 / 测试库无 migration 时 query 路径也可用
+    ledger.ensure_schema().await?;
     ledger.get(&client_operation_id).await
 }
 

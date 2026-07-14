@@ -274,11 +274,9 @@ async fn dispatch_workbench_op(
         }
         "worktrees.mutation_operation" => {
             let client_operation_id = required_string(&payload, "clientOperationId")?;
-            let item = workbench::get_workbench_mutation_operation_for_state(
-                state,
-                client_operation_id,
-            )
-            .await?;
+            let item =
+                workbench::get_workbench_mutation_operation_for_state(state, client_operation_id)
+                    .await?;
             Ok(serde_json::to_value(item)?)
         }
         "git.commits" => {

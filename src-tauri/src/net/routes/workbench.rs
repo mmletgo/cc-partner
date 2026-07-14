@@ -82,8 +82,8 @@ use std::convert::Infallible;
 use std::path::Path;
 use std::time::Duration;
 use tokio::time::interval;
-use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::StreamExt;
 
 /// 远端路径请求体。
@@ -435,19 +435,25 @@ pub async fn commit_worktree(
             )
             .await
             .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.commit"))?;
-            Ok(Json(
-                serde_json::to_value(envelope)
-                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.commit"))?,
-            ))
+            Ok(Json(serde_json::to_value(envelope).map_err(|e| {
+                P2pError::from_app_error(
+                    AppError::generic(e.to_string()),
+                    &ctx,
+                    "workbench.worktrees.commit",
+                )
+            })?))
         }
         None => {
             let worktree = local_commit_workbench_worktree(&state, req.worktree_id, req.message)
                 .await
                 .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.commit"))?;
-            Ok(Json(
-                serde_json::to_value(worktree)
-                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.commit"))?,
-            ))
+            Ok(Json(serde_json::to_value(worktree).map_err(|e| {
+                P2pError::from_app_error(
+                    AppError::generic(e.to_string()),
+                    &ctx,
+                    "workbench.worktrees.commit",
+                )
+            })?))
         }
     }
 }
@@ -481,19 +487,25 @@ pub async fn push_worktree(
             )
             .await
             .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.push"))?;
-            Ok(Json(
-                serde_json::to_value(envelope)
-                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.push"))?,
-            ))
+            Ok(Json(serde_json::to_value(envelope).map_err(|e| {
+                P2pError::from_app_error(
+                    AppError::generic(e.to_string()),
+                    &ctx,
+                    "workbench.worktrees.push",
+                )
+            })?))
         }
         None => {
             let worktree = local_push_workbench_worktree(&state, req.worktree_id)
                 .await
                 .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.push"))?;
-            Ok(Json(
-                serde_json::to_value(worktree)
-                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.push"))?,
-            ))
+            Ok(Json(serde_json::to_value(worktree).map_err(|e| {
+                P2pError::from_app_error(
+                    AppError::generic(e.to_string()),
+                    &ctx,
+                    "workbench.worktrees.push",
+                )
+            })?))
         }
     }
 }
@@ -527,19 +539,25 @@ pub async fn merge_worktree(
             )
             .await
             .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.merge"))?;
-            Ok(Json(
-                serde_json::to_value(envelope)
-                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.merge"))?,
-            ))
+            Ok(Json(serde_json::to_value(envelope).map_err(|e| {
+                P2pError::from_app_error(
+                    AppError::generic(e.to_string()),
+                    &ctx,
+                    "workbench.worktrees.merge",
+                )
+            })?))
         }
         None => {
             let result = local_merge_workbench_worktree(&state, req.worktree_id)
                 .await
                 .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.merge"))?;
-            Ok(Json(
-                serde_json::to_value(result)
-                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.merge"))?,
-            ))
+            Ok(Json(serde_json::to_value(result).map_err(|e| {
+                P2pError::from_app_error(
+                    AppError::generic(e.to_string()),
+                    &ctx,
+                    "workbench.worktrees.merge",
+                )
+            })?))
         }
     }
 }
@@ -574,10 +592,13 @@ pub async fn remove_worktree(
             )
             .await
             .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.remove"))?;
-            Ok(Json(
-                serde_json::to_value(envelope)
-                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.remove"))?,
-            ))
+            Ok(Json(serde_json::to_value(envelope).map_err(|e| {
+                P2pError::from_app_error(
+                    AppError::generic(e.to_string()),
+                    &ctx,
+                    "workbench.worktrees.remove",
+                )
+            })?))
         }
         None => {
             let value = local_remove_workbench_worktree(&state, req.worktree_id, req.force)
@@ -1401,7 +1422,9 @@ pub async fn mobile_commit_worktree(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCommitWorktreeReq>,
-) -> P2pResult<Json<crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>>> {
+) -> P2pResult<
+    Json<crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>>,
+> {
     let client_operation_id = req
         .client_operation_id
         .clone()
@@ -1429,16 +1452,17 @@ pub async fn mobile_push_worktree(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteWorktreeReq>,
-) -> P2pResult<Json<crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>>> {
+) -> P2pResult<
+    Json<crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>>,
+> {
     let client_operation_id = req
         .client_operation_id
         .clone()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| format!("mobile-{}", uuid::Uuid::new_v4()));
-    let envelope =
-        push_workbench_worktree_for_state(&state, req.worktree_id, client_operation_id)
-            .await
-            .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.push"))?;
+    let envelope = push_workbench_worktree_for_state(&state, req.worktree_id, client_operation_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.push"))?;
     Ok(Json(envelope))
 }
 
@@ -1453,16 +1477,17 @@ pub async fn mobile_merge_worktree(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteWorktreeReq>,
-) -> P2pResult<Json<crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto<WorkbenchMergeResultDto>>> {
+) -> P2pResult<
+    Json<crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto<WorkbenchMergeResultDto>>,
+> {
     let client_operation_id = req
         .client_operation_id
         .clone()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| format!("mobile-{}", uuid::Uuid::new_v4()));
-    let envelope =
-        merge_workbench_worktree_for_state(&state, req.worktree_id, client_operation_id)
-            .await
-            .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.merge"))?;
+    let envelope = merge_workbench_worktree_for_state(&state, req.worktree_id, client_operation_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.merge"))?;
     Ok(Json(envelope))
 }
 
@@ -1980,7 +2005,10 @@ mod tests {
             serde_json::from_str(line.trim()).expect("heartbeat line must be valid JSON");
         assert_eq!(value["type"], "heartbeat");
         assert_eq!(value["sentAt"], sent_at);
-        assert!(value.get("payload").is_none(), "heartbeat has no payload wrapper");
+        assert!(
+            value.get("payload").is_none(),
+            "heartbeat has no payload wrapper"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
