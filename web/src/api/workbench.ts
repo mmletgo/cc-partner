@@ -10,7 +10,17 @@
  *   所有参数使用 camelCase，返回类型对齐 `src/lib/types.ts`。
  */
 
-import { invoke } from './client';
+import { invoke, invokeDecoded } from './client';
+import {
+  workbenchPathInfoDecoder,
+  workbenchProjectDecoder,
+  workbenchProjectsDecoder,
+  workbenchSaveTextResultDecoder,
+  workbenchSessionDecoder,
+  workbenchSessionsDecoder,
+  workbenchWorktreeDecoder,
+  workbenchWorktreesDecoder,
+} from '@/lib/schemas/workbench';
 import type {
   ResumeClaudeSessionResult,
   SessionPreview,
@@ -28,10 +38,8 @@ import type {
   WorkbenchRemoteDirectoryEntry,
   WorkbenchRemotePathInfo,
   WorkbenchRemoteRoot,
-  WorkbenchSaveTextResult,
   WorkbenchSession,
   WorkbenchSqlitePreview,
-  WorkbenchWorktree,
 } from '@/lib/types';
 
 interface WorkbenchTerminalSize {
@@ -44,11 +52,12 @@ export type WorkbenchPaneSplitDirection = 'right' | 'down';
 export const workbenchApi = {
   projects: {
     /** 列出工作台最近项目，后端按 lastOpenedAt 倒序返回。 */
-    list: () => invoke<WorkbenchProject[]>('list_workbench_projects'),
+    list: () =>
+      invokeDecoded('list_workbench_projects', undefined, workbenchProjectsDecoder),
 
     /** 添加或重新打开一个项目文件夹，path 为本机或已挂载局域网目录。 */
     add: (path: string) =>
-      invoke<WorkbenchProject>('add_workbench_project', { path }),
+      invokeDecoded('add_workbench_project', { path }, workbenchProjectDecoder),
 
     /** 从最近项目列表移除项目记录，不删除磁盘文件。 */
     remove: (projectId: string) =>
@@ -56,7 +65,7 @@ export const workbenchApi = {
 
     /** 更新最近打开时间，并返回最新项目 DTO。 */
     touch: (projectId: string) =>
-      invoke<WorkbenchProject>('touch_workbench_project', { projectId }),
+      invokeDecoded('touch_workbench_project', { projectId }, workbenchProjectDecoder),
   },
 
   remote: {
@@ -78,28 +87,42 @@ export const workbenchApi = {
   },
 
   worktrees: {
-    /** 列出项目下主工作区和功能 worktree。 */
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   worktree strip 与 Git 操作依赖完整 worktree 列表，损坏 status 不得写入页面状态。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded list_workbench_worktrees → WorkbenchWorktree[]。
+     */
     list: (projectId: string) =>
-      invoke<WorkbenchWorktree[]>('list_workbench_worktrees', { projectId }),
+      invokeDecoded('list_workbench_worktrees', { projectId }, workbenchWorktreesDecoder),
 
     /** 从项目创建一个新的 Git worktree 和分支。 */
     create: (projectId: string, branchName: string, baseBranch?: string | null) =>
-      invoke<WorkbenchWorktree>('create_workbench_worktree', {
-        projectId,
-        branchName,
-        baseBranch: baseBranch ?? null,
-      }),
+      invokeDecoded(
+        'create_workbench_worktree',
+        {
+          projectId,
+          branchName,
+          baseBranch: baseBranch ?? null,
+        },
+        workbenchWorktreeDecoder,
+      ),
 
     /** 提交当前 worktree 的全部本地改动；message 为空时由后端 Claude Code 生成。 */
     commit: (worktreeId: string, message?: string | null) =>
-      invoke<WorkbenchWorktree>('commit_workbench_worktree', {
-        worktreeId,
-        message: message ?? null,
-      }),
+      invokeDecoded(
+        'commit_workbench_worktree',
+        {
+          worktreeId,
+          message: message ?? null,
+        },
+        workbenchWorktreeDecoder,
+      ),
 
     /** 推送当前 worktree 分支到已有 upstream；没有 upstream 时只默认推送到 origin。 */
     push: (worktreeId: string) =>
-      invoke<WorkbenchWorktree>('push_workbench_worktree', { worktreeId }),
+      invokeDecoded('push_workbench_worktree', { worktreeId }, workbenchWorktreeDecoder),
 
     /** 合并当前 worktree 分支到主工作区。 */
     merge: (worktreeId: string) =>
@@ -148,20 +171,32 @@ export const workbenchApi = {
   },
 
   sessions: {
-    /** 列出 terminal window；projectId 为空则返回全部。 */
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   终端 tabs 依赖 session 列表；残缺 DTO 不得覆盖 active session。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded list_workbench_sessions → WorkbenchSession[]。
+     */
     list: (projectId?: string) =>
-      invoke<WorkbenchSession[]>('list_workbench_sessions', {
-        projectId: projectId ?? null,
-      }),
+      invokeDecoded(
+        'list_workbench_sessions',
+        { projectId: projectId ?? null },
+        workbenchSessionsDecoder,
+      ),
 
     /** 在指定项目下创建一个 terminal window。 */
     create: (projectId: string, initialSize?: WorkbenchTerminalSize, worktreeId?: string | null) =>
-      invoke<WorkbenchSession>('create_workbench_session', {
-        projectId,
-        worktreeId: worktreeId ?? null,
-        initialCols: initialSize?.cols ?? null,
-        initialRows: initialSize?.rows ?? null,
-      }),
+      invokeDecoded(
+        'create_workbench_session',
+        {
+          projectId,
+          worktreeId: worktreeId ?? null,
+          initialCols: initialSize?.cols ?? null,
+          initialRows: initialSize?.rows ?? null,
+        },
+        workbenchSessionDecoder,
+      ),
 
     /** 向指定 terminal window 的 PTY attach 写入输入数据。 */
     writeInput: (sessionId: string, data: string) =>
@@ -265,13 +300,23 @@ export const workbenchApi = {
         path: path ?? null,
       }),
 
-    /** 获取项目内路径信息。 */
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   选中路径后刷新检查器元信息，错误 kind/nullability 不得污染文件树。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded get_workbench_path_info → WorkbenchPathInfo。
+     */
     info: (projectId: string, path: string, worktreeId?: string | null) =>
-      invoke<WorkbenchPathInfo>('get_workbench_path_info', {
-        projectId,
-        worktreeId: worktreeId ?? null,
-        path,
-      }),
+      invokeDecoded(
+        'get_workbench_path_info',
+        {
+          projectId,
+          worktreeId: worktreeId ?? null,
+          path,
+        },
+        workbenchPathInfoDecoder,
+      ),
 
     /** 打开项目内文件，返回类型能力与可用内容或预览。 */
     open: (projectId: string, path: string, worktreeId?: string | null) =>
@@ -281,7 +326,13 @@ export const workbenchApi = {
         path,
       }),
 
-    /** 保存可编辑文本文件；后端按真实文件名检测类型，baseHash 用于乐观锁校验。 */
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   保存成功后的 baseHash/metadata 是乐观锁基线，损坏结果不得写入 tab。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded save_workbench_text_file → WorkbenchSaveTextResult。
+     */
     saveText: (
       projectId: string,
       path: string,
@@ -289,13 +340,17 @@ export const workbenchApi = {
       baseHash: string,
       worktreeId?: string | null,
     ) =>
-      invoke<WorkbenchSaveTextResult>('save_workbench_text_file', {
-        projectId,
-        worktreeId: worktreeId ?? null,
-        path,
-        content,
-        baseHash,
-      }),
+      invokeDecoded(
+        'save_workbench_text_file',
+        {
+          projectId,
+          worktreeId: worktreeId ?? null,
+          path,
+          content,
+          baseHash,
+        },
+        workbenchSaveTextResultDecoder,
+      ),
 
     /** 格式化 JSON/TOML/YAML 内容，不直接保存文件。 */
     formatStructured: (kind: 'json' | 'toml' | 'yaml', content: string) =>

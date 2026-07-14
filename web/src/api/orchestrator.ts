@@ -8,8 +8,12 @@
  *   封装 remote-aware Tauri invoke，并导出纯参数构造 helper 供契约测试覆盖。
  */
 
-import { invoke } from './client';
-import { toOrchestratorRuntimeTransportError } from './orchestratorRuntimeTransportError';
+import {
+  orchestratorRemoteOutboxItemDecoder,
+  orchestratorRuntimeSnapshotDecoder,
+  orchestratorTaskViewDecoder,
+  orchestratorTaskViewListDecoder,
+} from '@/lib/schemas/orchestrator';
 import type {
   OrchestratorEvidence,
   OrchestratorRemoteOutboxItem,
@@ -18,6 +22,9 @@ import type {
   OrchestratorTaskView,
   OrchestratorWorkflowState,
 } from '@/lib/types';
+import { ContractDecodeError } from '@/lib/runtimeSchema';
+import { invoke, invokeDecoded } from './client';
+import { toOrchestratorRuntimeTransportError } from './orchestratorRuntimeTransportError';
 
 /**
  * Business Logic（为什么需要这个常量）:
@@ -240,12 +247,13 @@ export const orchestratorApi = {
    *   Orchestrator 任务页需要读取某个项目下的本机任务、远端任务和待发送 outbox。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 list_orchestrator_task_views，并通过 helper 归一化 projectId 参数。
+   *   invokeDecoded list_orchestrator_task_views；参数经 helper 归一化 projectId。
    */
   listTaskViews: (projectId?: string | null) =>
-    invoke<OrchestratorTaskView[]>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.listTaskViews,
       buildListOrchestratorTaskViewsInvokeArgs(projectId),
+      orchestratorTaskViewListDecoder,
     ),
 
   /**
@@ -253,12 +261,13 @@ export const orchestratorApi = {
    *   用户提交任务表单后，需要创建本机/远端任务视图，远端离线时可能返回 pendingRemote。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 create_orchestrator_task_view，并保持 request 字段原样交给后端校验。
+   *   invokeDecoded create_orchestrator_task_view；request 字段原样交给后端校验。
    */
   createTaskView: (request: CreateOrchestratorTaskRequest) =>
-    invoke<OrchestratorTaskView>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.createTaskView,
       buildCreateOrchestratorTaskViewInvokeArgs(request),
+      orchestratorTaskViewDecoder,
     ),
 
   /**
@@ -333,14 +342,18 @@ export const orchestratorApi = {
    *   调用 get_orchestrator_runtime_snapshot；reject 包装为 OrchestratorRuntimeTransportError(kind=unknown)，
    *   因为后端成功路径已把远端四态收敛为 DTO，真正抛错通常是本机命令/协议层，不能推断 network。
    */
-  getRuntimeSnapshot: async (projectId: string) => {
+  getRuntimeSnapshot: async (projectId: string): Promise<OrchestratorRuntimeSnapshot> => {
     try {
-      return await invoke<OrchestratorRuntimeSnapshot>(
+      return await invokeDecoded(
         ORCHESTRATOR_REMOTE_COMMANDS.getRuntimeSnapshot,
         buildOrchestratorRuntimeSnapshotInvokeArgs(projectId),
+        orchestratorRuntimeSnapshotDecoder,
       );
     } catch (reason) {
-      // 后端成功路径已收敛四态 DTO；invoke 抛错多为本机命令/协议层，不能关键词推断 network。
+      // 契约失败原样抛出；其它 invoke reject 收敛为 unknown transport（不可关键词猜 offline）。
+      if (reason instanceof ContractDecodeError) {
+        throw reason;
+      }
       throw toOrchestratorRuntimeTransportError(reason, 'unknown');
     }
   },
@@ -441,26 +454,28 @@ export const orchestratorApi = {
    *   桌面 Automation UI 对 failed outbox 点 Retry 时，应在本机把状态回到 pending，不代理远端。
    *
    * Code Logic（这个函数做什么）:
-   *   invoke retry_orchestrator_remote_outbox，返回更新后的 outbox DTO。
+   *   invokeDecoded retry_orchestrator_remote_outbox → OrchestratorRemoteOutboxItem。
    */
   retryRemoteOutbox: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
-    invoke<OrchestratorRemoteOutboxItem>(ORCHESTRATOR_REMOTE_COMMANDS.retryRemoteOutbox, {
-      projectId,
-      outboxId,
-    }),
+    invokeDecoded(
+      ORCHESTRATOR_REMOTE_COMMANDS.retryRemoteOutbox,
+      { projectId, outboxId },
+      orchestratorRemoteOutboxItemDecoder,
+    ),
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   桌面 Automation UI 对 failed outbox 点 Discard 时，应在本机进入 discarded 审计终态。
    *
    * Code Logic（这个函数做什么）:
-   *   invoke discard_orchestrator_remote_outbox，返回更新后的 outbox DTO。
+   *   invokeDecoded discard_orchestrator_remote_outbox → OrchestratorRemoteOutboxItem。
    */
   discardRemoteOutbox: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
-    invoke<OrchestratorRemoteOutboxItem>(ORCHESTRATOR_REMOTE_COMMANDS.discardRemoteOutbox, {
-      projectId,
-      outboxId,
-    }),
+    invokeDecoded(
+      ORCHESTRATOR_REMOTE_COMMANDS.discardRemoteOutbox,
+      { projectId, outboxId },
+      orchestratorRemoteOutboxItemDecoder,
+    ),
 
 
   /**

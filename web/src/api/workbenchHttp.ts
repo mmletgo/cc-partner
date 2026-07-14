@@ -28,6 +28,24 @@ import type {
   WorkbenchSessionReplay,
   WorkbenchWorktree,
 } from '@/lib/types';
+import type { Decoder } from '@/lib/runtimeSchema';
+import { ContractDecodeError } from '@/lib/runtimeSchema';
+import {
+  orchestratorRemoteOutboxItemDecoder,
+  orchestratorRuntimeSnapshotDecoder,
+  orchestratorTaskViewDecoder,
+  orchestratorTaskViewListResponseDecoder,
+} from '@/lib/schemas/orchestrator';
+import {
+  workbenchPathInfoDecoder,
+  workbenchProjectsDecoder,
+  workbenchProjectDecoder,
+  workbenchSaveTextResultDecoder,
+  workbenchSessionsDecoder,
+  workbenchSessionDecoder,
+  workbenchWorktreesDecoder,
+  workbenchWorktreeDecoder,
+} from '@/lib/schemas/workbench';
 import type { WorkbenchPaneSplitDirection } from './workbench';
 import type { OrchestratorCreateAction } from './orchestrator';
 import {
@@ -110,15 +128,40 @@ async function readHttpErrorMessage(response: Response): Promise<string> {
  *   Workbench HTTP helper 需要统一处理非 2xx 状态和 JSON 反序列化，避免每个 API 方法重复样板代码。
  *
  * Code Logic（这个函数做什么）:
- *   检查 Response.ok；失败时抛出带可读消息的 Error，成功时按泛型 T 解析 JSON。
+ *   检查 Response.ok；失败时抛出带可读消息的 Error，成功时解析 JSON；
+ *   若提供 decoder 则只对成功 body decode（失败体不走 schema）。
  */
-async function parseJsonResponse<T>(response: Response): Promise<T> {
+async function parseJsonResponse<T>(response: Response, decoder?: Decoder<T>): Promise<T> {
   if (!response.ok) {
     const message = await readHttpErrorMessage(response);
     // HTTP 非 2xx 是协议/业务失败：用 protocol，禁止 hook 因 message 含“连接”误判 offline。
     throw new OrchestratorRuntimeTransportError(message, 'protocol');
   }
-  return (await response.json()) as T;
+  const raw: unknown = await response.json();
+  if (!decoder) {
+    return raw as T;
+  }
+  try {
+    return decoder.decode(raw, '$');
+  } catch (reason) {
+    if (reason instanceof ContractDecodeError) {
+      throw reason;
+    }
+    throw reason;
+  }
+}
+
+/**
+ * postJson 可选参数。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   关键 HTTP 成功体需要可选 runtime decoder。
+ *
+ * Code Logic（字段说明）:
+ *   decoder 仅用于 2xx body。
+ */
+export interface PostJsonOptions<T> {
+  decoder?: Decoder<T>;
 }
 
 /**
@@ -126,9 +169,13 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
  *   Workbench HTTP routes 大多通过 POST 接收 camelCase JSON 请求体，移动端需要一个统一入口。
  *
  * Code Logic（这个函数做什么）:
- *   以 application/json 发送 body，解析成功 JSON；非 2xx 时抛出后端 error/message。
+ *   以 application/json 发送 body，解析成功 JSON；可选 decoder 校验成功体；非 2xx 时抛出后端 error/message。
  */
-export async function postJson<T>(path: string, body: unknown): Promise<T> {
+export async function postJson<T>(
+  path: string,
+  body: unknown,
+  options: PostJsonOptions<T> = {},
+): Promise<T> {
   let response: Response;
   try {
     response = await fetch(path, {
@@ -143,21 +190,24 @@ export async function postJson<T>(path: string, body: unknown): Promise<T> {
     // fetch 本身失败（断网/DNS/CORS 等）是传输层 network，不靠文案匹配。
     throw toOrchestratorRuntimeTransportError(reason, 'network');
   }
-  return parseJsonResponse<T>(response);
+  return parseJsonResponse<T>(response, options.decoder);
 }
 
 /**
  * getJson 可选参数。
  *
  * Business Logic（为什么需要这个类型）:
- *   Attention mobile loader 等场景需要 AbortSignal / 超时，避免半开连接永久挂起。
+ *   Attention mobile loader 等场景需要 AbortSignal / 超时，避免半开连接永久挂起；
+ *   关键路径可附加 decoder 校验成功体。
  *
  * Code Logic（字段说明）:
- *   signal 透传 fetch；timeoutMs 若给定且未传 signal，则内部 AbortController 超时 abort。
+ *   signal 透传 fetch；timeoutMs 若给定且未传 signal，则内部 AbortController 超时 abort；
+ *   decoder 仅用于 2xx body。
  */
-export interface GetJsonOptions {
+export interface GetJsonOptions<T = unknown> {
   signal?: AbortSignal;
   timeoutMs?: number;
+  decoder?: Decoder<T>;
 }
 
 /**
@@ -167,10 +217,10 @@ export interface GetJsonOptions {
  *
  * Code Logic（这个函数做什么）:
  *   发起同源 GET；可选 AbortSignal / timeoutMs（超时 abort）；
- *   成功解析 JSON，失败读 JSON error/message 或文本后抛 Error。
+ *   成功解析 JSON，可选 decoder；失败读 JSON error/message 或文本后抛 Error。
  */
-export async function getJson<T>(path: string, options: GetJsonOptions = {}): Promise<T> {
-  const { signal: externalSignal, timeoutMs } = options;
+export async function getJson<T>(path: string, options: GetJsonOptions<T> = {}): Promise<T> {
+  const { signal: externalSignal, timeoutMs, decoder } = options;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   let controller: AbortController | null = null;
   let signal = externalSignal;
@@ -197,7 +247,7 @@ export async function getJson<T>(path: string, options: GetJsonOptions = {}): Pr
       clearTimeout(timeoutId);
     }
   }
-  return parseJsonResponse<T>(response);
+  return parseJsonResponse<T>(response, decoder);
 }
 
 /**
@@ -258,6 +308,9 @@ export const httpOrchestratorTransport = {
       const response = await postJson<HttpOrchestratorTaskViewListResponse>(
         '/api/orchestrator/task-views/list',
         { projectId },
+        {
+          decoder: orchestratorTaskViewListResponseDecoder,
+        },
       );
       return response.views;
     },
@@ -278,21 +331,25 @@ export const httpOrchestratorTransport = {
         clientRequestId: resolveHttpOrchestratorClientRequestId(request),
       }),
     createView: (request: HttpCreateOrchestratorTaskRequest): Promise<OrchestratorTaskView> =>
-      postJson<OrchestratorTaskView>('/api/orchestrator/task-views/create', {
-        projectId: request.projectId,
-        title: request.title,
-        goal: request.goal,
-        acceptanceCriteria: request.acceptanceCriteria,
-        priority: request.priority ?? 0,
-        createAction: request.createAction ?? 'backlog',
-        source: request.source,
-        externalId: request.externalId,
-        externalIdentifier: request.externalIdentifier,
-        externalUrl: request.externalUrl,
-        externalState: request.externalState,
-        externalLabels: request.externalLabels,
-        clientRequestId: resolveHttpOrchestratorClientRequestId(request),
-      }),
+      postJson<OrchestratorTaskView>(
+        '/api/orchestrator/task-views/create',
+        {
+          projectId: request.projectId,
+          title: request.title,
+          goal: request.goal,
+          acceptanceCriteria: request.acceptanceCriteria,
+          priority: request.priority ?? 0,
+          createAction: request.createAction ?? 'backlog',
+          source: request.source,
+          externalId: request.externalId,
+          externalIdentifier: request.externalIdentifier,
+          externalUrl: request.externalUrl,
+          externalState: request.externalState,
+          externalLabels: request.externalLabels,
+          clientRequestId: resolveHttpOrchestratorClientRequestId(request),
+        },
+        { decoder: orchestratorTaskViewDecoder },
+      ),
     completePrompt: (
       request: HttpCompleteOrchestratorTaskPromptRequest,
     ): Promise<OrchestratorTaskPromptCompletion> =>
@@ -332,20 +389,32 @@ export const httpOrchestratorTransport = {
    */
   outbox: {
     retry: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
-      postJson<OrchestratorRemoteOutboxItem>('/api/orchestrator/outbox/retry', {
-        projectId,
-        outboxId,
-      }),
+      postJson<OrchestratorRemoteOutboxItem>(
+        '/api/orchestrator/outbox/retry',
+        {
+          projectId,
+          outboxId,
+        },
+        { decoder: orchestratorRemoteOutboxItemDecoder },
+      ),
     discard: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
-      postJson<OrchestratorRemoteOutboxItem>('/api/orchestrator/outbox/discard', {
-        projectId,
-        outboxId,
-      }),
+      postJson<OrchestratorRemoteOutboxItem>(
+        '/api/orchestrator/outbox/discard',
+        {
+          projectId,
+          outboxId,
+        },
+        { decoder: orchestratorRemoteOutboxItemDecoder },
+      ),
   },
   getRuntimeSnapshot: (projectId: string): Promise<OrchestratorRuntimeSnapshot> =>
-    postJson<OrchestratorRuntimeSnapshot>('/api/mobile/orchestrator/runtime-snapshot', {
-      projectId,
-    }),
+    postJson<OrchestratorRuntimeSnapshot>(
+      '/api/mobile/orchestrator/runtime-snapshot',
+      {
+        projectId,
+      },
+      { decoder: orchestratorRuntimeSnapshotDecoder },
+    ),
 } as const;
 
 /**
@@ -359,27 +428,51 @@ export const httpOrchestratorTransport = {
  */
 export const httpWorkbenchTransport: WorkbenchTransport = {
   projects: {
-    list: () => getJson<WorkbenchProject[]>(`${MOBILE_WORKBENCH_API_PREFIX}/projects/list`),
-    open: (path) => postJson<WorkbenchProject>(`${MOBILE_WORKBENCH_API_PREFIX}/projects/open`, { path }),
+    list: () =>
+      getJson<WorkbenchProject[]>(`${MOBILE_WORKBENCH_API_PREFIX}/projects/list`, {
+        decoder: workbenchProjectsDecoder,
+      }),
+    open: (path) =>
+      postJson<WorkbenchProject>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/projects/open`,
+        { path },
+        { decoder: workbenchProjectDecoder },
+      ),
   },
   worktrees: {
     list: (projectId) =>
-      postJson<WorkbenchWorktree[]>(`${MOBILE_WORKBENCH_API_PREFIX}/worktrees/list`, { projectId }),
+      postJson<WorkbenchWorktree[]>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/worktrees/list`,
+        { projectId },
+        { decoder: workbenchWorktreesDecoder },
+      ),
     create: (projectId, branchName, baseBranch) =>
-      postJson<WorkbenchWorktree>(`${MOBILE_WORKBENCH_API_PREFIX}/worktrees/create`, {
-        projectId,
-        branchName,
-        baseBranch: baseBranch ?? null,
-      }),
+      postJson<WorkbenchWorktree>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/worktrees/create`,
+        {
+          projectId,
+          branchName,
+          baseBranch: baseBranch ?? null,
+        },
+        { decoder: workbenchWorktreeDecoder },
+      ),
     commit: (worktreeId, message) =>
-      postJson<WorkbenchWorktree>(`${MOBILE_WORKBENCH_API_PREFIX}/worktrees/commit`, {
-        worktreeId,
-        message: message ?? null,
-      }),
+      postJson<WorkbenchWorktree>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/worktrees/commit`,
+        {
+          worktreeId,
+          message: message ?? null,
+        },
+        { decoder: workbenchWorktreeDecoder },
+      ),
     push: (worktreeId) =>
-      postJson<WorkbenchWorktree>(`${MOBILE_WORKBENCH_API_PREFIX}/worktrees/push`, {
-        worktreeId,
-      }),
+      postJson<WorkbenchWorktree>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/worktrees/push`,
+        {
+          worktreeId,
+        },
+        { decoder: workbenchWorktreeDecoder },
+      ),
     merge: (worktreeId) =>
       postJson<WorkbenchMergeResult>(`${MOBILE_WORKBENCH_API_PREFIX}/worktrees/merge`, {
         worktreeId,
@@ -392,16 +485,24 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
   },
   sessions: {
     list: (projectId) =>
-      postJson<WorkbenchSession[]>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/list`, {
-        projectId: projectId ?? null,
-      }),
+      postJson<WorkbenchSession[]>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/sessions/list`,
+        {
+          projectId: projectId ?? null,
+        },
+        { decoder: workbenchSessionsDecoder },
+      ),
     create: (projectId, initialSize, worktreeId) =>
-      postJson<WorkbenchSession>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/create`, {
-        projectId,
-        worktreeId: worktreeId ?? null,
-        initialCols: initialSize?.cols ?? null,
-        initialRows: initialSize?.rows ?? null,
-      }),
+      postJson<WorkbenchSession>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/sessions/create`,
+        {
+          projectId,
+          worktreeId: worktreeId ?? null,
+          initialCols: initialSize?.cols ?? null,
+          initialRows: initialSize?.rows ?? null,
+        },
+        { decoder: workbenchSessionDecoder },
+      ),
     writeInput: (sessionId, data) =>
       postJson<{ ok: boolean; sessionId: string }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/write`, {
         sessionId,
@@ -458,11 +559,15 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
         path: path ?? null,
       }),
     info: (projectId, path, worktreeId) =>
-      postJson<WorkbenchPathInfo>(`${MOBILE_WORKBENCH_API_PREFIX}/files/info`, {
-        projectId,
-        worktreeId: worktreeId ?? null,
-        path,
-      }),
+      postJson<WorkbenchPathInfo>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/files/info`,
+        {
+          projectId,
+          worktreeId: worktreeId ?? null,
+          path,
+        },
+        { decoder: workbenchPathInfoDecoder },
+      ),
     open: (projectId, path, worktreeId) =>
       postJson<WorkbenchOpenFile>(`${MOBILE_WORKBENCH_API_PREFIX}/files/open`, {
         projectId,
@@ -470,13 +575,17 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
         path,
       }),
     saveText: (projectId, path, content, baseHash, worktreeId) =>
-      postJson<WorkbenchSaveTextResult>(`${MOBILE_WORKBENCH_API_PREFIX}/files/save-text`, {
-        projectId,
-        worktreeId: worktreeId ?? null,
-        path,
-        content,
-        baseHash,
-      }),
+      postJson<WorkbenchSaveTextResult>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/files/save-text`,
+        {
+          projectId,
+          worktreeId: worktreeId ?? null,
+          path,
+          content,
+          baseHash,
+        },
+        { decoder: workbenchSaveTextResultDecoder },
+      ),
   },
   git: {
     listCommits: (projectId, worktreeId, limit = 30) =>

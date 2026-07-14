@@ -12,6 +12,115 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+/** 最小合法 OrchestratorTask，供 createView decoder 通过。 */
+const validTaskFixture = {
+  id: 't1',
+  projectId: 'p1',
+  title: 'Title',
+  goal: 'Goal',
+  acceptanceCriteria: 'AC',
+  status: 'queued',
+  workflowState: 'todo',
+  runState: 'idle',
+  attemptPhase: null,
+  source: 'internal',
+  externalId: null,
+  externalIdentifier: null,
+  externalUrl: null,
+  externalState: null,
+  externalLabels: null,
+  runnerProvider: null,
+  claudeSessionId: null,
+  transcriptPath: null,
+  runtimeStartedAt: null,
+  lastActivityAt: null,
+  lastRuntimeEvent: null,
+  lastRuntimeMessage: null,
+  priority: 0,
+  branchName: null,
+  worktreeId: null,
+  sessionId: null,
+  blockedReason: null,
+  attempt: 0,
+  createdAt: '2026-07-13T00:00:00.000Z',
+  updatedAt: '2026-07-13T00:00:00.000Z',
+  startedAt: null,
+  finishedAt: null,
+};
+
+/** 最小合法 outbox DTO。 */
+const validOutboxFixture = {
+  id: 'o1',
+  deviceId: 'd1',
+  deviceName: 'Peer',
+  remoteProjectPath: '/tmp/p',
+  remoteProjectId: null,
+  requestJson: '{}',
+  status: 'failed',
+  remoteTaskId: null,
+  lastError: 'offline',
+  createdAt: '2026-07-13T00:00:00.000Z',
+  updatedAt: '2026-07-13T00:00:00.000Z',
+  sentAt: null,
+};
+
+/** 最小合法 runtime snapshot。 */
+const validRuntimeFixture = {
+  projectId: 'p1',
+  projectKind: 'local',
+  remoteStatus: 'local',
+  generatedAt: '2026-07-13T00:00:00.000Z',
+  latestTickAt: null,
+  lastDispatchAt: null,
+  lastDispatchedCount: 0,
+  schedulerEnabled: true,
+  workflowSource: 'builtin',
+  workflowValid: true,
+  workflowError: null,
+  maxConcurrentTasks: 1,
+  slotsUsed: 0,
+  slotsAvailable: 1,
+  latestError: null,
+  runningTasks: [],
+  retryingTasks: [],
+  recentEvents: [],
+};
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   decoder-aware HTTP 成功体需要形状合法，否则契约测试无法验证请求 body/route。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 URL 返回最小合法成功 JSON；未匹配路径回退到 {ok:true}。
+ */
+function mockSuccessBodyForUrl(url: string): unknown {
+  if (url.includes('/task-views/list')) {
+    return { views: [] };
+  }
+  if (url.includes('/task-views/create')) {
+    return { origin: 'local', task: validTaskFixture };
+  }
+  if (url.includes('/outbox/retry') || url.includes('/outbox/discard')) {
+    return validOutboxFixture;
+  }
+  if (url.includes('/runtime-snapshot')) {
+    return validRuntimeFixture;
+  }
+  if (url.includes('/tasks/list')) {
+    return { tasks: [] };
+  }
+  if (url.includes('/tasks/create')) {
+    return validTaskFixture;
+  }
+  if (url.includes('/tasks/evidence')) {
+    return { evidence: [] };
+  }
+  if (url.includes('/tasks/complete-prompt')) {
+    return { title: 't', goal: 'g', acceptanceCriteria: 'a' };
+  }
+  return { ok: true, sessionId: 'session-1' };
+}
+
 describe('workbenchHttp', () => {
   test('mobile workbench and orchestrator HTTP adapters send expected routes and bodies', async () => {
     const capturedBodies: unknown[] = [];
@@ -19,11 +128,12 @@ describe('workbenchHttp', () => {
     const originalFetch = globalThis.fetch;
 
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      capturedUrls.push(String(input));
+      const url = String(input);
+      capturedUrls.push(url);
       capturedBodies.push(JSON.parse(String(init?.body ?? '{}')) as unknown);
       return {
         ok: true,
-        json: async () => ({ ok: true, sessionId: 'session-1' }),
+        json: async () => mockSuccessBodyForUrl(url),
       } as Response;
     };
 
@@ -296,11 +406,12 @@ describe('workbenchHttp createView idempotency', () => {
   test('createView reuses caller-provided clientRequestId across retries', async () => {
     const capturedBodies: unknown[] = [];
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
       capturedBodies.push(JSON.parse(String(init?.body ?? '{}')) as unknown);
       return {
         ok: true,
-        json: async () => ({ ok: true, id: 'task-1' }),
+        json: async () => mockSuccessBodyForUrl(url),
       } as Response;
     };
 
@@ -348,11 +459,12 @@ describe('workbenchHttp createView idempotency', () => {
   test('createView mints non-empty clientRequestId when omitted', async () => {
     const capturedBodies: unknown[] = [];
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
       capturedBodies.push(JSON.parse(String(init?.body ?? '{}')) as unknown);
       return {
         ok: true,
-        json: async () => ({ ok: true }),
+        json: async () => mockSuccessBodyForUrl(url),
       } as Response;
     };
 
@@ -379,4 +491,3 @@ describe('workbenchHttp createView idempotency', () => {
     }
   });
 });
-

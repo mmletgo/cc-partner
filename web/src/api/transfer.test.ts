@@ -5,25 +5,33 @@
  *   send/cancel 必须对齐后端真实 DTO，不能再把 send 当 TransferTask、cancel 当 void。
  *
  * Code Logic（这个测试做什么）:
- *   mock invoke，锁定命令名、参数与 SendTransferResult / CancelTransferResult 返回形状。
+ *   mock invoke，并通过 invokeDecoded 走真实 decoder；锁定命令名、参数与返回形状。
  */
 
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-
-vi.mock('./client', () => ({
-  invoke: vi.fn(),
-}));
-
-import { invoke } from './client';
-import { transferApi } from './transfer';
+import type { Decoder } from '@/lib/runtimeSchema';
 import type { CancelTransferResult, SendTransferResult, TransferTask } from '@/lib/types';
 
-const mockedInvoke = vi.mocked(invoke);
+const mockInvoke = vi.fn();
+
+vi.mock('./client', () => ({
+  invoke: (...args: unknown[]) => mockInvoke(...args),
+  invokeDecoded: async <T>(
+    cmd: string,
+    args: Record<string, unknown> | undefined,
+    decoder: Decoder<T>,
+  ): Promise<T> => {
+    const raw = await mockInvoke(cmd, args);
+    return decoder.decode(raw, '$');
+  },
+}));
+
+import { transferApi } from './transfer';
 
 describe('transferApi', () => {
   beforeEach(() => {
-    mockedInvoke.mockReset();
+    mockInvoke.mockReset();
   });
 
   test('list invokes list_transfers and returns TransferTask[]', async () => {
@@ -39,11 +47,11 @@ describe('transferApi', () => {
         startedAt: '2026-07-13T00:00:00.000Z',
       },
     ];
-    mockedInvoke.mockResolvedValueOnce(tasks);
+    mockInvoke.mockResolvedValueOnce(tasks);
 
     const result = await transferApi.list();
 
-    expect(mockedInvoke).toHaveBeenCalledWith('list_transfers');
+    expect(mockInvoke).toHaveBeenCalledWith('list_transfers', undefined);
     expect(result).toEqual(tasks);
   });
 
@@ -55,11 +63,11 @@ describe('transferApi', () => {
       filePath: windowsPath,
       id: 'transfer-1',
     };
-    mockedInvoke.mockResolvedValueOnce(payload);
+    mockInvoke.mockResolvedValueOnce(payload);
 
     const result = await transferApi.send('device-a', windowsPath);
 
-    expect(mockedInvoke).toHaveBeenCalledWith('send_transfer', {
+    expect(mockInvoke).toHaveBeenCalledWith('send_transfer', {
       deviceId: 'device-a',
       filePath: windowsPath,
     });
@@ -71,20 +79,21 @@ describe('transferApi', () => {
 
   test('cancel maps CancelTransferResult {ok,id} shape', async () => {
     const payload: CancelTransferResult = { ok: true, id: 'transfer-9' };
-    mockedInvoke.mockResolvedValueOnce(payload);
+    mockInvoke.mockResolvedValueOnce(payload);
 
     const result = await transferApi.cancel('transfer-9');
 
-    expect(mockedInvoke).toHaveBeenCalledWith('cancel_transfer', { taskId: 'transfer-9' });
+    expect(mockInvoke).toHaveBeenCalledWith('cancel_transfer', { taskId: 'transfer-9' });
     expect(result).toEqual(payload);
     expect(result.ok).toBe(true);
     expect(result.id).toBe('transfer-9');
   });
 
-  test('source wires invoke generics to send/cancel result DTOs', () => {
+  test('source wires invokeDecoded to send/cancel/list result DTOs', () => {
     const source = readFileSync(new URL('./transfer.ts', import.meta.url), 'utf8');
-    expect(source).toContain("invoke<SendTransferResult>('send_transfer'");
-    expect(source).toContain("invoke<CancelTransferResult>('cancel_transfer'");
+    expect(source).toContain("invokeDecoded('send_transfer'");
+    expect(source).toContain("invokeDecoded('cancel_transfer'");
+    expect(source).toContain("invokeDecoded('list_transfers'");
     expect(source).not.toContain("invoke<TransferTask>('send_transfer'");
     expect(source).not.toContain("invoke<void>('cancel_transfer'");
   });
