@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "check:css-tokens": "node scripts/check-css-tokens.mjs",
+    "check:tokens": "node scripts/check-css-tokens.mjs",
     "check:bundle": "node scripts/check-bundle-contract.mjs",
     "check:i18n": "node scripts/check-i18n-jsx.mjs",
     "check:modules": "node ../scripts/check-module-boundaries.mjs",

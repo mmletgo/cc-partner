@@ -136,6 +136,8 @@ export const test = base.extend<BrowserDiagnosticsFixtures>({
     const harness = createBackendHarness();
     await harness.install(page);
 
+    // Playwright fixture 第二参固定名 `use`（非 React Hook）。
+    // eslint-disable-next-line react-hooks/rules-of-hooks -- Playwright fixture `use` callback
     await use(harness);
 
     const testFailed = testInfo.status !== testInfo.expectedStatus;

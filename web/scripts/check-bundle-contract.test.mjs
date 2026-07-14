@@ -18,12 +18,20 @@ import { gzipSync } from 'node:zlib';
 import {
   analyzeBundleContract,
   collectStaticClosure,
+  collectSourcemapRawBytes,
+  effectiveCeiling,
   extractStylesheetHrefs,
   findForbiddenModules,
   formatBudgetKiB,
+  getFinalBudgetTargets,
+  LAZY_CHUNK_BUDGET_BYTES,
   MOBILE_FORBIDDEN_PATTERNS,
   normalizeCssFiles,
+  parseBaselineMetrics,
+  SOURCEMAP_BUDGET_BYTES,
   sumGzipBytes,
+  topChunksByGzip,
+  TOTAL_RUNTIME_JS_BUDGET_BYTES,
 } from './check-bundle-contract.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -206,14 +214,33 @@ describe('normalizeCssFiles', () => {
   });
 });
 
+/**
+ * 为 fixture 图补齐全部 chunk 文件内容（含 lazy）。
+ *
+ * Business Logic:
+ *   扩展预算会读取全部 chunk；测试文件映射必须完整。
+ *
+ * Code Logic:
+ *   合并 overrides 与默认小样本。
+ *
+ * @param {Record<string, string>} [overrides]
+ * @returns {Record<string, string>}
+ */
+function buildFixtureFiles(overrides = {}) {
+  return {
+    'assets/main.js': makeSource(1000, 'A'),
+    'assets/mobile.js': makeSource(1000, 'B'),
+    'assets/shared.js': makeSource(1000, 'C'),
+    'assets/route-health.js': makeSource(500, 'R'),
+    'assets/mobile-terminal.js': makeSource(500, 'T'),
+    ...overrides,
+  };
+}
+
 describe('analyzeBundleContract', () => {
   it('passes under-budget graphs without forbidden modules', () => {
     const contract = buildContractFixture();
-    const files = {
-      'assets/main.js': makeSource(1000, 'A'),
-      'assets/mobile.js': makeSource(1000, 'B'),
-      'assets/shared.js': makeSource(1000, 'C'),
-    };
+    const files = buildFixtureFiles();
     const result = analyzeBundleContract(contract, {
       readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
       budgets: {
@@ -234,13 +261,10 @@ describe('analyzeBundleContract', () => {
       main: ['assets/main.css'],
       mobile: ['assets/mobile.css'],
     };
-    const files = {
-      'assets/main.js': makeSource(1000, 'A'),
-      'assets/mobile.js': makeSource(1000, 'B'),
-      'assets/shared.js': makeSource(1000, 'C'),
+    const files = buildFixtureFiles({
       'assets/main.css': makeSource(2000, 'M'),
       'assets/mobile.css': makeSource(1500, 'N'),
-    };
+    });
     const result = analyzeBundleContract(contract, {
       readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
       budgets: {
@@ -263,12 +287,12 @@ describe('analyzeBundleContract', () => {
   it('fails budget when CSS alone exceeds limit', () => {
     const contract = buildContractFixture();
     const noisy = Array.from({ length: 4000 }, (_, i) => String.fromCharCode(32 + (i % 90))).join('');
-    const files = {
+    const files = buildFixtureFiles({
       'assets/main.js': makeSource(20, 'A'),
       'assets/mobile.js': makeSource(20, 'B'),
       'assets/shared.js': makeSource(20, 'C'),
       'assets/main.css': noisy,
-    };
+    });
     const result = analyzeBundleContract(contract, {
       readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
       entryStyles: {
@@ -280,9 +304,11 @@ describe('analyzeBundleContract', () => {
         mobile: 280 * 1024,
       },
     });
-    assert.equal(result.diagnostics.length, 1);
-    assert.match(result.diagnostics[0], /main initial graph over budget/i);
-    assert.match(result.diagnostics[0], /css=/);
+    assert.ok(result.diagnostics.some((d) => /main initial graph over budget/i.test(d)));
+    assert.match(
+      result.diagnostics.find((d) => /main initial graph over budget/i.test(d)) ?? '',
+      /css=/,
+    );
     assert.ok(result.entryReports.main.cssGzipBytes > 0);
     // JS 小样本本身远小于 noisy CSS；总超预算由 CSS 主导
     assert.ok(result.entryReports.main.cssGzipBytes > result.entryReports.main.jsGzipBytes);
@@ -293,11 +319,11 @@ describe('analyzeBundleContract', () => {
     const contract = buildContractFixture();
     // 用高熵内容降低 gzip 压缩比，确保超过 10 字节预算
     const noisy = Array.from({ length: 4000 }, (_, i) => String.fromCharCode(32 + (i % 90))).join('');
-    const files = {
+    const files = buildFixtureFiles({
       'assets/main.js': noisy,
       'assets/mobile.js': makeSource(100, 'B'),
       'assets/shared.js': noisy,
-    };
+    });
     const result = analyzeBundleContract(contract, {
       readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
       budgets: {
@@ -305,9 +331,11 @@ describe('analyzeBundleContract', () => {
         mobile: 280 * 1024,
       },
     });
-    assert.equal(result.diagnostics.length, 1);
-    assert.match(result.diagnostics[0], /main initial graph over budget/i);
-    assert.match(result.diagnostics[0], /budget=10B/);
+    assert.ok(result.diagnostics.some((d) => /main initial graph over budget/i.test(d)));
+    assert.match(
+      result.diagnostics.find((d) => /main initial graph over budget/i.test(d)) ?? '',
+      /final=10B|ceiling=10B/,
+    );
   });
 
   it('reports forbidden module diagnostics for mobile initial closure only', () => {
@@ -317,11 +345,11 @@ describe('analyzeBundleContract', () => {
       '/src/styles/tokens.css',
       '/node_modules/@xterm/xterm/lib/xterm.js',
     ];
-    const files = {
+    const files = buildFixtureFiles({
       'assets/main.js': makeSource(100, 'A'),
       'assets/mobile.js': makeSource(100, 'B'),
       'assets/shared.js': makeSource(100, 'C'),
-    };
+    });
     const result = analyzeBundleContract(contract, {
       readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
       budgets: {
@@ -345,6 +373,204 @@ describe('formatBudgetKiB', () => {
   it('formats byte budgets as integer KiB labels', () => {
     assert.equal(formatBudgetKiB(320 * 1024), '320 KiB');
     assert.equal(formatBudgetKiB(280 * 1024), '280 KiB');
+  });
+});
+
+describe('extended budgets (lazy / total JS / sourcemap / baseline)', () => {
+  it('exposes final hard targets that cannot be raised', () => {
+    const finals = getFinalBudgetTargets();
+    assert.equal(finals.mainInitialGzipBytes, 320 * 1024);
+    assert.equal(finals.mobileInitialGzipBytes, 280 * 1024);
+    assert.equal(finals.lazyChunkGzipBytes, LAZY_CHUNK_BUDGET_BYTES);
+    assert.equal(finals.totalRuntimeJsGzipBytes, TOTAL_RUNTIME_JS_BUDGET_BYTES);
+    assert.equal(finals.sourcemapRawBytes, SOURCEMAP_BUDGET_BYTES);
+    assert.equal(LAZY_CHUNK_BUDGET_BYTES, 700 * 1024);
+    assert.equal(TOTAL_RUNTIME_JS_BUDGET_BYTES, 1400 * 1024);
+    assert.equal(SOURCEMAP_BUDGET_BYTES, 2 * 1024 * 1024);
+  });
+
+  it('effectiveCeiling never exceeds final and respects baseline ratchet', () => {
+    assert.equal(effectiveCeiling(100, 80), 80);
+    assert.equal(effectiveCeiling(100, 150), 100);
+    assert.equal(effectiveCeiling(100, null), 100);
+    assert.equal(effectiveCeiling(100, undefined), 100);
+    assert.equal(effectiveCeiling(100, -1), 100);
+  });
+
+  it('fails individual lazy chunk over final 700 KiB budget', () => {
+    const contract = buildContractFixture();
+    // 高熵内容，gzip 后仍可超过较小测试预算
+    const noisy = Array.from({ length: 50_000 }, (_, i) => String.fromCharCode(32 + (i % 90))).join('');
+    const files = {
+      'assets/main.js': makeSource(100, 'A'),
+      'assets/mobile.js': makeSource(100, 'B'),
+      'assets/shared.js': makeSource(100, 'C'),
+      'assets/route-health.js': noisy,
+      'assets/mobile-terminal.js': makeSource(100, 'T'),
+    };
+    const result = analyzeBundleContract(contract, {
+      readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
+      budgets: {
+        main: 320 * 1024,
+        mobile: 280 * 1024,
+        lazyChunk: 200,
+      },
+    });
+    assert.ok(
+      result.diagnostics.some((d) => /lazy chunk over budget/i.test(d) && d.includes('route-health')),
+      `expected lazy chunk diagnostic, got: ${result.diagnostics.join('\n')}`,
+    );
+    assert.ok(result.metrics.maxLazyChunkGzipBytes > 200);
+  });
+
+  it('fails total runtime JS gzip over budget', () => {
+    const contract = buildContractFixture();
+    const noisy = Array.from({ length: 20_000 }, (_, i) => String.fromCharCode(32 + (i % 90))).join('');
+    const files = {
+      'assets/main.js': noisy,
+      'assets/mobile.js': noisy,
+      'assets/shared.js': noisy,
+      'assets/route-health.js': noisy,
+      'assets/mobile-terminal.js': noisy,
+    };
+    const result = analyzeBundleContract(contract, {
+      readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
+      budgets: {
+        main: 320 * 1024,
+        mobile: 280 * 1024,
+        totalRuntimeJs: 500,
+      },
+    });
+    assert.ok(
+      result.diagnostics.some((d) => /total runtime JS over budget/i.test(d)),
+      `expected total JS diagnostic, got: ${result.diagnostics.join('\n')}`,
+    );
+    assert.ok(result.metrics.totalRuntimeJsGzipBytes > 500);
+  });
+
+  it('passes when dist has no sourcemaps and fails when map raw exceeds budget', () => {
+    const contract = buildContractFixture();
+    const files = buildFixtureFiles({
+      'assets/main.js': makeSource(100, 'A'),
+      'assets/mobile.js': makeSource(100, 'B'),
+      'assets/shared.js': makeSource(100, 'C'),
+    });
+    const ok = analyzeBundleContract(contract, {
+      readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
+      sourcemapRawBytes: 0,
+      budgets: { sourcemap: 100 },
+    });
+    assert.equal(
+      ok.diagnostics.some((d) => /sourcemap over budget/i.test(d)),
+      false,
+    );
+
+    const over = analyzeBundleContract(contract, {
+      readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
+      sourcemapRawBytes: 5000,
+      budgets: { sourcemap: 100 },
+    });
+    assert.ok(over.diagnostics.some((d) => /sourcemap over budget/i.test(d)));
+  });
+
+  it('baseline ratchet forbids growth below final and cannot raise final', () => {
+    const contract = buildContractFixture();
+    const noisy = Array.from({ length: 8000 }, (_, i) => String.fromCharCode(32 + (i % 90))).join('');
+    const files = buildFixtureFiles({
+      'assets/main.js': noisy,
+      'assets/mobile.js': makeSource(1000, 'B'),
+      'assets/shared.js': noisy,
+    });
+    const actualMain = sumGzipBytes(['assets/main.js', 'assets/shared.js'], (f) =>
+      Buffer.from(files[f], 'utf8'),
+    );
+    // baseline 比 actual 更小 → 触发 no-growth；同时 baseline 故意大于 final 时仍受 final 约束
+    const result = analyzeBundleContract(contract, {
+      readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
+      budgets: {
+        main: 320 * 1024,
+        mobile: 280 * 1024,
+      },
+      baseline: {
+        mainInitialGzipBytes: Math.max(1, actualMain - 10),
+      },
+    });
+    assert.ok(
+      result.diagnostics.some((d) => /main initial graph over budget/i.test(d)),
+      `expected baseline ratchet fail, got: ${result.diagnostics.join('\n')}`,
+    );
+    assert.ok(result.entryReports.main.budgetBytes < 320 * 1024);
+
+    const cannotRaise = analyzeBundleContract(contract, {
+      readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
+      budgets: {
+        main: 100,
+        mobile: 280 * 1024,
+      },
+      baseline: {
+        mainInitialGzipBytes: 10_000_000,
+      },
+    });
+    assert.equal(cannotRaise.entryReports.main.budgetBytes, 100);
+    assert.ok(
+      cannotRaise.diagnostics.some((d) => /main initial graph over budget/i.test(d)),
+      `expected final hard ceiling fail, got: ${cannotRaise.diagnostics.join('\n')}`,
+    );
+  });
+
+  it('parseBaselineMetrics accepts finite metrics only', () => {
+    assert.equal(parseBaselineMetrics(null), null);
+    assert.deepEqual(
+      parseBaselineMetrics({
+        metrics: {
+          mainInitialGzipBytes: 12,
+          mobileInitialGzipBytes: -1,
+          maxLazyChunkGzipBytes: 'x',
+          totalRuntimeJsGzipBytes: 99,
+        },
+      }),
+      {
+        mainInitialGzipBytes: 12,
+        totalRuntimeJsGzipBytes: 99,
+      },
+    );
+  });
+
+  it('topChunksByGzip returns largest first', () => {
+    const top = topChunksByGzip(
+      [
+        { fileName: 'a.js', gzipBytes: 10 },
+        { fileName: 'b.js', gzipBytes: 50 },
+        { fileName: 'c.js', gzipBytes: 30 },
+      ],
+      2,
+    );
+    assert.deepEqual(
+      top.map((c) => c.fileName),
+      ['b.js', 'c.js'],
+    );
+  });
+
+  it('collectSourcemapRawBytes returns zero for missing dir', () => {
+    const result = collectSourcemapRawBytes(resolve(webRoot, 'definitely-missing-dist-xyz'));
+    assert.equal(result.totalBytes, 0);
+    assert.deepEqual(result.files, []);
+  });
+
+  it('counts shared chunk once in total runtime JS', () => {
+    const contract = buildContractFixture();
+    const files = buildFixtureFiles();
+    const result = analyzeBundleContract(contract, {
+      readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
+    });
+    const expected = sumGzipBytes(Object.keys(files), (f) => Buffer.from(files[f], 'utf8'));
+    assert.equal(result.metrics.totalRuntimeJsGzipBytes, expected);
+    // shared 只计一次：不等于 main闭包 + mobile闭包
+    const mainJs = result.entryReports.main.jsGzipBytes;
+    const mobileJs = result.entryReports.mobile.jsGzipBytes;
+    assert.ok(result.metrics.totalRuntimeJsGzipBytes < mainJs + mobileJs + expected);
+    // main 闭包与 mobile 闭包都含 shared；总 runtime 应小于两者之和（再加 lazy 后也可能仍小于双计 shared 的假想和）
+    assert.ok(result.metrics.totalRuntimeJsGzipBytes < mainJs + mobileJs + result.metrics.maxLazyChunkGzipBytes * 2);
   });
 });
 
