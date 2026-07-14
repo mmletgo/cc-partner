@@ -2,14 +2,17 @@
  * Transfer 页面 - 局域网文件传输
  *
  * Business Logic（为什么需要这个页面）:
- *   用户需要在一个屏幕里完成：选目标设备、选本机文件路径、发送、监控进度与取消。
- *   路径必须来自原生 dialog/drag，展示 basename，完整路径仅内存保存并透传后端。
+ *   用户需要在一个屏幕里完成：选目标设备、选本机文件路径、发送、监控进度与取消，
+ *   并对失败任务执行 resume/retry，对本机已接收 completed 任务 Open/Reveal；
+ *   结果不确定时必须先对账，禁止 blind retry。
  *
  * Code Logic（这个页面做什么）:
  *   - 设备 5s / 任务 3s visibility-aware polling；刷新失败保留已有数组
  *   - 选中文件存 {path,name}；Enter/Space/点击走 pickTransferFile；native drop 只取首路径
  *   - handleSendClick 用 sendingRef 同步门闩防双击，await transferApi.send 后 force runTasksNow
- *   - pending/transferring 仅传 onCancel；cancellingIdsRef 同步门闩 + taskActionErrors 行级反馈
+ *   - pending/transferring 传 onCancel；failed 传 resume 或 retry；receive completed 传 open/reveal
+ *   - retry/resume 稳定 clientOperationId；uncertain → reconciling + getOperation，不盲重放
+ *   - 历史按 active/needs-attention/recent-completed 分区，空组省略
  *   - Tauri 环境下 listen transfer:progress 与 completed/failed/cancelled，fail-closed 解码后 merge
  */
 
@@ -19,7 +22,7 @@ import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
 import { Button, Card, Pill } from '@/components/primitives';
 import { TransferItem } from '@/components/domain';
-import { devicesApi } from '@/api/devices';
+import { deviceSupportsTransferResume, devicesApi } from '@/api/devices';
 import { transferApi } from '@/api/transfer';
 import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import { classifyTransportFault, planFaultRecovery } from '@/lib/faultRecovery';
@@ -33,6 +36,14 @@ import {
   mergeTransferStatusEvent,
 } from '@/lib/transferProgress';
 import { pickTransferFile, subscribeTransferFileDrops } from './transferFileSelection';
+import {
+  canOpenRevealTransfer,
+  groupTransferTasks,
+  isTransferOutcomeUncertain,
+  isTransferResumable,
+  isTransferRetryable,
+  mintTransferClientOperationId,
+} from './transferHistory';
 import styles from './Transfer.module.css';
 
 const TASK_REFRESH_INTERVAL_MS = 3000;
@@ -46,6 +57,14 @@ const TRANSFER_STATUS_EVENTS = [
 ] as const;
 
 type LoadState = 'loading' | 'success' | 'error';
+
+/** 用户意图级 recovery 操作（稳定 clientOperationId）。 */
+type RecoveryKind = 'retry' | 'resume';
+
+interface PendingRecovery {
+  clientOperationId: string;
+  kind: RecoveryKind;
+}
 
 interface TauriInternalsWindow extends Window {
   __TAURI_INTERNALS__?: {
@@ -122,11 +141,11 @@ function errorMessage(err: unknown): string {
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   局域网文件传输主视图：设备选择、路径选择、发送、任务监控与取消。
+ *   局域网文件传输主视图：设备选择、路径选择、发送、任务监控与恢复动作。
  *
  * Code Logic（这个组件做什么）:
  *   挂载 visibility polling、native drop 与 transfer progress/status 事件订阅，
- *   管理 send/cancel 状态机并渲染列表。
+ *   管理 send/cancel/retry/resume/open/reveal 状态机并按分区渲染列表。
  */
 export function Transfer() {
   const { t } = useTranslation(['transfer', 'common']);
@@ -147,15 +166,21 @@ export function Transfer() {
   const [isDragOver, setIsDragOver] = useState(false);
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
 
-  // ── 发送 / 取消动作状态 ──
+  // ── 发送 / 取消 / recovery 动作状态 ──
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [cancellingIds, setCancellingIds] = useState<ReadonlySet<string>>(() => new Set());
   const [taskActionErrors, setTaskActionErrors] = useState<Record<string, string>>({});
+  /** 结果不确定、正在 getOperation 对账的 taskId */
+  const [reconcilingIds, setReconcilingIds] = useState<ReadonlySet<string>>(() => new Set());
   /** 同步门闩：双击 send 在 re-render 前也不可重入（仅 React state 不够） */
   const sendingRef = useRef(false);
   /** 同步门闩：双击 cancel 在 re-render 前也不可重入 */
   const cancellingIdsRef = useRef<Set<string>>(new Set());
+  /** 同步门闩：同一 task 的 recovery 不可并发 */
+  const recoveryBusyRef = useRef<Set<string>>(new Set());
+  /** 稳定 clientOperationId：user intent 在 pending/unknown 期间复用 */
+  const pendingRecoveriesRef = useRef<Record<string, PendingRecovery>>({});
   /** 组件挂载守卫：异步 loader 写 state 前检查 */
   const mountedRef = useRef(true);
 
@@ -248,6 +273,11 @@ export function Transfer() {
       { active: 0, completed: 0, failed: 0 },
     );
   }, [tasks]);
+
+  const groupedTasks = useMemo(
+    () => groupTransferTasks(tasks, reconcilingIds),
+    [tasks, reconcilingIds],
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -381,6 +411,55 @@ export function Transfer() {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   清理行级错误文案。
+   *
+   * Code Logic（这个函数做什么）:
+   *   从 taskActionErrors 删除指定 taskId。
+   */
+  const clearTaskActionError = useCallback((taskId: string) => {
+    setTaskActionErrors((prev) => {
+      if (!(taskId in prev)) return prev;
+      const next = { ...prev };
+      delete next[taskId];
+      return next;
+    });
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   recovery 成功或对账终态后释放 clientOperationId 占用。
+   *
+   * Code Logic（这个函数做什么）:
+   *   同步删 pendingRecoveriesRef 与 state。
+   */
+  const clearPendingRecovery = useCallback((taskId: string) => {
+    if (!(taskId in pendingRecoveriesRef.current)) return;
+    const next = { ...pendingRecoveriesRef.current };
+    delete next[taskId];
+    pendingRecoveriesRef.current = next;
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   进入/离开对账态时更新 reconciling 集合。
+   *
+   * Code Logic（这个函数做什么）:
+   *   不可变 Set 更新。
+   */
+  const setReconciling = useCallback((taskId: string, on: boolean) => {
+    setReconcilingIds((prev) => {
+      const has = prev.has(taskId);
+      if (on && has) return prev;
+      if (!on && !has) return prev;
+      const next = new Set(prev);
+      if (on) next.add(taskId);
+      else next.delete(taskId);
+      return next;
+    });
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   用户确认发送后必须真实调用 send_transfer，成功后强制刷新任务列表（不得只 join 旧 poll）；
    *   双击不得在 re-render 前发出第二次 send。
    *
@@ -419,12 +498,7 @@ export function Transfer() {
       if (cancellingIdsRef.current.has(taskId)) return;
       cancellingIdsRef.current.add(taskId);
       setCancellingIds(new Set(cancellingIdsRef.current));
-      setTaskActionErrors((prev) => {
-        if (!(taskId in prev)) return prev;
-        const next = { ...prev };
-        delete next[taskId];
-        return next;
-      });
+      clearTaskActionError(taskId);
       try {
         await transferApi.cancel(taskId);
         await runTasksNow({ force: true });
@@ -438,7 +512,220 @@ export function Transfer() {
         setCancellingIds(new Set(cancellingIdsRef.current));
       }
     },
-    [runTasksNow, t],
+    [clearTaskActionError, runTasksNow, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   timeout/network 后先 getOperation 对账，终态才释放动作锁；pending 保持 reconciling。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 transferApi.getOperation；succeeded/failed/notFound 清 reconciling 并 force 刷新；
+   *   pending 保持 reconciling；查询失败也保持 reconciling。
+   */
+  const reconcilePendingRecovery = useCallback(
+    async (taskId: string, clientOperationId: string) => {
+      setReconciling(taskId, true);
+      try {
+        const status = await transferApi.getOperation(clientOperationId);
+        if (!mountedRef.current) return;
+        if (status.status === 'pending') {
+          // 仍未收敛：保持 reconciling + 保留 clientOperationId，不盲重放
+          return;
+        }
+        // 终态（succeeded/failed/notFound）释放意图并刷新列表
+        clearPendingRecovery(taskId);
+        setReconciling(taskId, false);
+        await runTasksNow({ force: true });
+        if (status.status === 'failed') {
+          setTaskActionErrors((prev) => ({
+            ...prev,
+            [taskId]: t('transfer:retryFailed', { error: status.code }),
+          }));
+        }
+      } catch (err) {
+        if (!mountedRef.current) return;
+        // 对账本身失败：仍保持 reconciling，仅展示错误
+        setTaskActionErrors((prev) => ({
+          ...prev,
+          [taskId]: t('transfer:retryFailed', { error: errorMessage(err) }),
+        }));
+      }
+    },
+    [clearPendingRecovery, runTasksNow, setReconciling, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户对失败任务点「继续传输」/「重新传输」时必须带稳定 clientOperationId；
+   *   uncertain 不得 mint 新 id 盲重放。
+   *
+   * Code Logic（这个函数做什么）:
+   *   复用 pendingRecoveries 中同 kind 的 id，否则 mint；调用 retry/resume；
+   *   成功清 pending 并 force 刷新；uncertain → reconciling + getOperation。
+   */
+  const handleRecovery = useCallback(
+    async (taskId: string, kind: RecoveryKind) => {
+      if (recoveryBusyRef.current.has(taskId)) return;
+      if (reconcilingIds.has(taskId)) return;
+
+      recoveryBusyRef.current.add(taskId);
+      clearTaskActionError(taskId);
+
+      const existing = pendingRecoveriesRef.current[taskId];
+      const clientOperationId =
+        existing && existing.kind === kind
+          ? existing.clientOperationId
+          : mintTransferClientOperationId();
+      const nextPending: PendingRecovery = { clientOperationId, kind };
+      pendingRecoveriesRef.current = {
+        ...pendingRecoveriesRef.current,
+        [taskId]: nextPending,
+      };
+
+      try {
+        if (kind === 'resume') {
+          await transferApi.resume(taskId, clientOperationId);
+        } else {
+          await transferApi.retry(taskId, clientOperationId);
+        }
+        if (!mountedRef.current) return;
+        clearPendingRecovery(taskId);
+        setReconciling(taskId, false);
+        await runTasksNow({ force: true });
+      } catch (err) {
+        if (!mountedRef.current) return;
+        if (isTransferOutcomeUncertain(err)) {
+          // N3：uncertain → 正在确认结果，不 blind retry
+          await reconcilePendingRecovery(taskId, clientOperationId);
+          return;
+        }
+        clearPendingRecovery(taskId);
+        setReconciling(taskId, false);
+        const key = kind === 'resume' ? 'transfer:resumeFailed' : 'transfer:retryFailed';
+        setTaskActionErrors((prev) => ({
+          ...prev,
+          [taskId]: t(key, { error: errorMessage(err) }),
+        }));
+      } finally {
+        recoveryBusyRef.current.delete(taskId);
+      }
+    },
+    [
+      clearPendingRecovery,
+      clearTaskActionError,
+      reconcilePendingRecovery,
+      reconcilingIds,
+      runTasksNow,
+      setReconciling,
+      t,
+    ],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   本机已接收 completed 任务可打开文件。
+   *
+   * Code Logic（这个函数做什么）:
+   *   await transferApi.open；失败写行级错误。
+   */
+  const handleOpenTask = useCallback(
+    async (taskId: string) => {
+      clearTaskActionError(taskId);
+      try {
+        await transferApi.open(taskId);
+      } catch (err) {
+        setTaskActionErrors((prev) => ({
+          ...prev,
+          [taskId]: t('transfer:openFailed', { error: errorMessage(err) }),
+        }));
+      }
+    },
+    [clearTaskActionError, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   本机已接收 completed 任务可在文件夹中显示。
+   *
+   * Code Logic（这个函数做什么）:
+   *   await transferApi.reveal；失败写行级错误。
+   */
+  const handleRevealTask = useCallback(
+    async (taskId: string) => {
+      clearTaskActionError(taskId);
+      try {
+        await transferApi.reveal(taskId);
+      } catch (err) {
+        setTaskActionErrors((prev) => ({
+          ...prev,
+          [taskId]: t('transfer:revealFailed', { error: errorMessage(err) }),
+        }));
+      }
+    },
+    [clearTaskActionError, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   分区列表需要按合法动作矩阵组装 TransferItem props。
+   *
+   * Code Logic（这个函数做什么）:
+   *   根据 status/resumable/retryable/receive completed 选择性传入回调。
+   */
+  const renderTaskRow = useCallback(
+    (task: TransferTask) => {
+      const reconciling = reconcilingIds.has(task.id);
+      const canCancel = task.status === 'pending' || task.status === 'transferring';
+      const peer = task.peerDeviceId
+        ? devices.find((d) => d.id === task.peerDeviceId)
+        : undefined;
+      const peerSupportsResume = deviceSupportsTransferResume(peer);
+      const canResume = !reconciling && isTransferResumable(task, peerSupportsResume);
+      const canRetry = !reconciling && isTransferRetryable(task, peerSupportsResume);
+      const canOpenReveal = !reconciling && canOpenRevealTransfer(task);
+      const actionError = taskActionErrors[task.id];
+      return (
+        <li key={task.id} className={styles.taskRow}>
+          <TransferItem
+            task={{
+              id: task.id,
+              fileName: task.fileName,
+              fileSize: task.fileSize,
+              direction: task.direction,
+              status: task.status,
+              progress: task.progress,
+              peerDevice: task.peerDeviceName,
+              speed: task.speed,
+              errorMessage: task.failure?.message ?? task.errorMessage,
+              phase: task.phase,
+              reconciling,
+            }}
+            onCancel={canCancel ? () => void handleCancelTask(task.id) : undefined}
+            onResume={canResume ? () => void handleRecovery(task.id, 'resume') : undefined}
+            onRetry={canRetry ? () => void handleRecovery(task.id, 'retry') : undefined}
+            onOpen={canOpenReveal ? () => void handleOpenTask(task.id) : undefined}
+            onReveal={canOpenReveal ? () => void handleRevealTask(task.id) : undefined}
+            cancelling={cancellingIds.has(task.id)}
+          />
+          {actionError ? (
+            <p className={styles.rowAlert} role="alert">
+              {actionError}
+            </p>
+          ) : null}
+        </li>
+      );
+    },
+    [
+      cancellingIds,
+      devices,
+      handleCancelTask,
+      handleOpenTask,
+      handleRecovery,
+      handleRevealTask,
+      reconcilingIds,
+      taskActionErrors,
+    ],
   );
 
   const dropzoneClasses = [styles.dropzone, isDragOver ? styles.dropzoneOver : '']
@@ -596,36 +883,31 @@ export function Transfer() {
             <p className={styles.emptyHint}>{t('transfer:emptyHint')}</p>
           </div>
         ) : (
-          <ul className={styles.taskList}>
-            {tasks.map((task) => {
-              const canCancel = task.status === 'pending' || task.status === 'transferring';
-              const actionError = taskActionErrors[task.id];
-              return (
-                <li key={task.id} className={styles.taskRow}>
-                  <TransferItem
-                    task={{
-                      id: task.id,
-                      fileName: task.fileName,
-                      fileSize: task.fileSize,
-                      direction: task.direction,
-                      status: task.status,
-                      progress: task.progress,
-                      peerDevice: task.peerDeviceName,
-                      speed: task.speed,
-                      errorMessage: task.errorMessage,
-                    }}
-                    onCancel={canCancel ? () => void handleCancelTask(task.id) : undefined}
-                    cancelling={cancellingIds.has(task.id)}
-                  />
-                  {actionError ? (
-                    <p className={styles.rowAlert} role="alert">
-                      {actionError}
-                    </p>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
+          <div className={styles.groupStack}>
+            {groupedTasks.active.length > 0 ? (
+              <section className={styles.taskGroup} aria-label={t('transfer:groupActive')}>
+                <h3 className={styles.groupTitle}>{t('transfer:groupActive')}</h3>
+                <ul className={styles.taskList}>{groupedTasks.active.map(renderTaskRow)}</ul>
+              </section>
+            ) : null}
+            {groupedTasks.needsAttention.length > 0 ? (
+              <section
+                className={styles.taskGroup}
+                aria-label={t('transfer:groupNeedsAttention')}
+              >
+                <h3 className={styles.groupTitle}>{t('transfer:groupNeedsAttention')}</h3>
+                <ul className={styles.taskList}>
+                  {groupedTasks.needsAttention.map(renderTaskRow)}
+                </ul>
+              </section>
+            ) : null}
+            {groupedTasks.completed.length > 0 ? (
+              <section className={styles.taskGroup} aria-label={t('transfer:groupCompleted')}>
+                <h3 className={styles.groupTitle}>{t('transfer:groupCompleted')}</h3>
+                <ul className={styles.taskList}>{groupedTasks.completed.map(renderTaskRow)}</ul>
+              </section>
+            ) : null}
+          </div>
         )}
 
         {tasksState === 'error' ? (

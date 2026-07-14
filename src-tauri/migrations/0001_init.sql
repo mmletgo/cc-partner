@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS prompts (
     deleted INTEGER DEFAULT 0
 );
 
--- transfer_history 表：文件传输历史记录（M5 完整使用，M1 先建表保兼容）
+-- transfer_history 表：文件传输历史记录（M5 完整使用；N5 增加 recovery 字段）
+-- 实际建表/升级由 backend/runtime.rs TRANSFER_SCHEMA + TransferRepo::ensure_schema 幂等执行
+-- （禁止 sqlx::migrate!）。旧库缺列时 ALTER ADD；client_operation_id 非空全局唯一。
 CREATE TABLE IF NOT EXISTS transfer_history (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL,
@@ -28,8 +30,22 @@ CREATE TABLE IF NOT EXISTS transfer_history (
     status TEXT NOT NULL,
     transferred_bytes INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
-    completed_at TEXT
+    completed_at TEXT,
+    phase TEXT,
+    failure_stage TEXT,
+    failure_code TEXT,
+    failure_retryable INTEGER,
+    failure_message TEXT,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    logical_transfer_id TEXT,
+    attempt_id TEXT,
+    protocol_transfer_id TEXT,
+    client_operation_id TEXT,
+    operation_payload_hash TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transfer_history_client_operation_id
+    ON transfer_history(client_operation_id)
+    WHERE client_operation_id IS NOT NULL;
 
 -- scratchpad 表：速记本多页面文本
 -- 旧默认页 id 恒为 "scratchpad"，新页面使用 UUID；清空内容是 content=""，删除页面是 deleted=1。

@@ -24,7 +24,7 @@ Docs may only reference registered `E2E-` / `L2-` / `L3-` IDs (`node scripts/che
 
 | ID | Spec | Surface |
 | --- | --- | --- |
-| `E2E-TRANSFER-001` | `web/tests/transfer.spec.ts` | Transfer send/progress/cancel |
+| `E2E-TRANSFER-001` | `web/tests/transfer.spec.ts` | Transfer send/progress/cancel (recovery matrix covered by unit L0; not dual-host) |
 | `E2E-SCRATCH-001` | `web/tests/scratchpad.spec.ts` | Scratchpad unmount flush / save reject |
 | `E2E-PROMPTS-001` | `web/tests/prompts.spec.ts` | Prompt create/update/delete rollback |
 | `E2E-PERM-001` | `web/tests/permissions.spec.ts` | Permission check fail/retry |
@@ -40,7 +40,9 @@ Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY
 | ID | Level | Evidence |
 | --- | --- | --- |
 | `L0-RUNTIME-SCHEMA-001` | L0 | `web/src/lib/runtimeSchema.test.ts` + `web/src/lib/schemas/*` |
+| `L0-TRANSFER-RECOVERY-001` | L0 | Transfer recovery schema/API/UI matrix + Rust model/repo/sender unit (`phase`/`clientOperationId`/action guards) |
 | `L2-QUALITY-FAULTS-001` | L2 | `src-tauri/tests/quality_faults.rs` (batch rollback / busy bound / idempotent peer / malformed transfer DTO) — also on Cross-Platform Smoke |
+| `L2-TRANSFER-RECOVERY-001` | L2 | `src-tauri/tests/transfer_recovery_smoke.rs` (idempotent resume/retry claim, resume capability, lost-ACK reconcile without second finalize) |
 | `L2-LAN-TRUST-BOUNDARY-001` | L2 | `src-tauri/tests/lan_trust_boundary_smoke.rs` |
 | `L2-BACKEND-CLI-SMOKE-001` | L2 | `src-tauri/tests/backend_cli_smoke.rs` |
 | `L2-BACKEND-DOCTOR-SMOKE-001` | L2 | `src-tauri/tests/backend_doctor_smoke.rs` |
@@ -50,7 +52,7 @@ Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY
 | `L3-WINDOWS-GUI-001` | L3 | Packaged Windows GUI / transfer dialog / native terminal — **NOT VERIFIED** |
 | `L3-WINDOWS-WSL-001` | L3 | Windows WSL + tmux Workbench recovery — **NOT VERIFIED** (separate from native terminal) |
 | `L3-UBUNTU-GUI-001` | L3 | AppImage/deb GUI + terminal/files — **NOT VERIFIED** |
-| `L3-DUAL-HOST-LAN-001` | L3 | Two physical hosts: mDNS, credential-free native/mobile R/W, boundary reject, remote stop reject, 1GiB transfer/resume — **NOT VERIFIED** |
+| `L3-DUAL-HOST-LAN-001` | L3 | Two physical hosts: mDNS, credential-free native/mobile R/W, boundary reject, remote stop reject, **1GiB mid-transfer disconnect + process restart + resume + SHA-256** — **NOT VERIFIED** (deferred; L2 smoke is not a substitute) |
 
 Honest L3 row schema (version, commit, OS build, status, evidence, date, 90-day expiry) and the full NOT VERIFIED inventory: [`real-device-certification.md`](real-device-certification.md). Do **not** invent caller identity auth. LAN product semantics remain credential-free for legal loopback/LAN peers; Host/Origin/Content-Type and socket peer class are deployment boundaries, not identity.
 

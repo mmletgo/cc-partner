@@ -2,20 +2,29 @@
  * TransferItem 业务组件
  *
  * Business Logic（为什么需要这个组件）:
- *   文件传输列表需要为每个传输任务渲染一行可视单元，展示文件名/方向/进度/对端/状态/速度，
- *   并根据后端真实支持的动作提供操作按钮。当前后端仅有 cancel，不得渲染 pause/retry/open 占位。
+ *   文件传输列表需要为每个传输任务渲染一行可视单元，展示文件名/方向/进度/对端/状态/速度/阶段，
+ *   并根据后端真实支持的动作提供操作按钮。无回调的动作不得渲染；对账中不提供重复动作。
  *
  * Code Logic（这个组件做什么）:
  *   - 基于 Card（flat）渲染，2px 左边框 + 状态色背景
- *   - 左侧方向图标，中间文件名/对端/进度条，右侧 Pill+速度+操作按钮
- *   - 每个动作按钮仅在对应回调存在时渲染，避免 no-op UI
+ *   - 左侧方向图标，中间文件名/对端/进度条/失败信息，右侧 Pill+速度+操作按钮
+ *   - 每个动作按钮仅在对应回调存在时渲染；reconciling 时只显示“正在确认结果”
  */
 
 import { memo, useCallback } from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Pill, ProgressBar } from '@/components/primitives';
-import { CheckIcon, DownloadIcon, PauseIcon, PlayIcon, SendIcon, XIcon } from '@/lib/icons';
+import {
+  CheckIcon,
+  DownloadIcon,
+  FolderIcon,
+  PauseIcon,
+  PlayIcon,
+  SendIcon,
+  XIcon,
+} from '@/lib/icons';
+import type { TransferPhase } from '@/lib/types';
 import styles from './TransferItem.module.css';
 
 export type TransferDirection = 'send' | 'receive';
@@ -34,15 +43,26 @@ export interface TransferItemTask {
   /** 字节/秒 */
   speed?: number;
   errorMessage?: string;
+  /** 细粒度阶段（可选展示） */
+  phase?: TransferPhase;
+  /**
+   * 结果不确定、正在按 clientOperationId 对账时为 true。
+   * 此时不得再渲染 retry/resume/send 类动作。
+   */
+  reconciling?: boolean;
 }
 
 export interface TransferItemProps {
   task: TransferItemTask;
   onPause?: () => void;
+  /** 失败可续传：显示「继续传输」 */
   onResume?: () => void;
   onCancel?: () => void;
+  /** 失败可重传 / 取消后重发：显示「重新传输」 */
   onRetry?: () => void;
   onOpen?: () => void;
+  /** 在文件夹中显示（仅 same-device receive completed） */
+  onReveal?: () => void;
   /** 取消进行中时禁用取消按钮并标 aria-busy */
   cancelling?: boolean;
   className?: string;
@@ -111,7 +131,8 @@ function formatSpeed(bytesPerSec: number): string {
  *   列表行需要根据任务状态与可用回调渲染安全的操作入口。
  *
  * Code Logic（这个函数做什么）:
- *   渲染文件名/进度/状态，并仅在回调存在时显示 pause/resume/cancel/retry/open。
+ *   渲染文件名/进度/阶段/状态；reconciling 仅提示对账；
+ *   其余仅在回调存在时显示 pause/resume/cancel/retry/open/reveal。
  */
 function TransferItemInner({
   task,
@@ -120,26 +141,37 @@ function TransferItemInner({
   onCancel,
   onRetry,
   onOpen,
+  onReveal,
   cancelling = false,
   className,
   style,
 }: TransferItemProps) {
-  const { t } = useTranslation(['common']);
-  const tone = STATUS_TONE[task.status];
-  const label = t(`common:status.transfer.${task.status}`);
-  const bg = STATUS_BG[task.status];
-  const border = STATUS_BORDER[task.status];
+  const { t } = useTranslation(['common', 'transfer']);
+  const reconciling = Boolean(task.reconciling);
+  const tone = reconciling ? 'warn' : STATUS_TONE[task.status];
+  const bg = reconciling
+    ? 'color-mix(in oklab, var(--warn) 14%, transparent)'
+    : STATUS_BG[task.status];
+  const border = reconciling ? 'var(--warn)' : STATUS_BORDER[task.status];
   // ProgressBar 不支持 neutral，未传输/未开始的也用 accent 表示「进行中」色
   const progressTone: 'accent' | 'success' | 'warn' | 'danger' =
     tone === 'neutral' ? 'accent' : tone;
+
+  const statusLabel = reconciling
+    ? t('transfer:reconciling')
+    : task.phase
+      ? t(`transfer:phase.${task.phase}`)
+      : t(`common:status.transfer.${task.status}`);
 
   const handlePause = useCallback(() => onPause?.(), [onPause]);
   const handleResume = useCallback(() => onResume?.(), [onResume]);
   const handleCancel = useCallback(() => onCancel?.(), [onCancel]);
   const handleRetry = useCallback(() => onRetry?.(), [onRetry]);
   const handleOpen = useCallback(() => onOpen?.(), [onOpen]);
+  const handleReveal = useCallback(() => onReveal?.(), [onReveal]);
 
-  const isProgressVisible = task.status === 'transferring' || task.status === 'pending';
+  const isProgressVisible =
+    !reconciling && (task.status === 'transferring' || task.status === 'pending');
   const transferredBytes = Math.max(0, Math.min(1, task.progress)) * task.fileSize;
 
   const cardClasses = [styles.card, className].filter(Boolean).join(' ');
@@ -151,6 +183,7 @@ function TransferItemInner({
   };
 
   const DirectionIcon = task.direction === 'send' ? SendIcon : DownloadIcon;
+  const showActions = !reconciling;
 
   return (
     <Card variant="flat" className={cardClasses} style={cardStyle}>
@@ -166,7 +199,9 @@ function TransferItemInner({
             <div className={styles.fileName} title={task.fileName}>
               {task.fileName}
             </div>
-            <div className={styles.peer}>{task.peerDevice ?? t(`common:direction.${task.direction}`)}</div>
+            <div className={styles.peer}>
+              {task.peerDevice ?? t(`common:direction.${task.direction}`)}
+            </div>
             {isProgressVisible ? (
               <div className={styles.progressRow}>
                 <ProgressBar value={task.progress} tone={progressTone} className={styles.progress} />
@@ -177,88 +212,99 @@ function TransferItemInner({
             ) : (
               <div className={styles.sizeRow}>
                 <span className={styles.sizeText}>{formatBytes(task.fileSize)}</span>
-                {task.errorMessage ? <span className={styles.errorText}>{task.errorMessage}</span> : null}
+                {task.errorMessage ? (
+                  <span className={styles.errorText}>{task.errorMessage}</span>
+                ) : null}
               </div>
             )}
+            {reconciling ? (
+              <p className={styles.reconcilingText} role="status">
+                {t('transfer:reconciling')}
+              </p>
+            ) : null}
           </div>
 
           <div className={styles.right}>
             <Pill tone={tone} className={styles.statusPill}>
-              {label}
+              {statusLabel}
             </Pill>
-            {task.status === 'transferring' && task.speed !== undefined ? (
+            {task.status === 'transferring' && task.speed !== undefined && !reconciling ? (
               <span className={styles.speed}>{formatSpeed(task.speed)}</span>
             ) : null}
-            <div className={styles.actions}>
-              {task.status === 'transferring' && onPause ? (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  icon={<PauseIcon />}
-                  onClick={handlePause}
-                  aria-label={t('common:action.pause')}
-                  title={t('common:action.pause')}
-                />
-              ) : null}
-              {task.status === 'transferring' && onCancel ? (
-                <Button
-                  variant="danger"
-                  size="sm"
-                  icon={<XIcon />}
-                  onClick={handleCancel}
-                  disabled={cancelling}
-                  aria-busy={cancelling || undefined}
-                  aria-label={t('common:action.cancel')}
-                  title={t('common:action.cancel')}
-                />
-              ) : null}
-              {task.status === 'pending' && onCancel ? (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  icon={<XIcon />}
-                  onClick={handleCancel}
-                  disabled={cancelling}
-                  aria-busy={cancelling || undefined}
-                  aria-label={t('common:action.cancel')}
-                  title={t('common:action.cancel')}
-                />
-              ) : null}
-              {task.status === 'failed' && onRetry ? (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  icon={<PlayIcon />}
-                  onClick={handleRetry}
-                  aria-label={t('common:action.retry')}
-                  title={t('common:action.retry')}
-                >
-                  {t('common:action.retry')}
-                </Button>
-              ) : null}
-              {task.status === 'cancelled' && onResume ? (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  icon={<PlayIcon />}
-                  onClick={handleResume}
-                  aria-label={t('common:action.continue')}
-                  title={t('common:action.continue')}
-                >
-                  {t('common:action.continue')}
-                </Button>
-              ) : null}
-              {task.status === 'completed' && onOpen ? (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  icon={<CheckIcon />}
-                  onClick={handleOpen}
-                  aria-label={t('common:action.open')}
-                  title={t('common:action.open')}
-                />
-              ) : null}
-            </div>
+            {showActions ? (
+              <div className={styles.actions}>
+                {task.status === 'transferring' && onPause ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={<PauseIcon />}
+                    onClick={handlePause}
+                    aria-label={t('common:action.pause')}
+                    title={t('common:action.pause')}
+                  />
+                ) : null}
+                {(task.status === 'transferring' || task.status === 'pending') && onCancel ? (
+                  <Button
+                    variant={task.status === 'transferring' ? 'danger' : 'ghost'}
+                    size="sm"
+                    icon={<XIcon />}
+                    onClick={handleCancel}
+                    disabled={cancelling}
+                    aria-busy={cancelling || undefined}
+                    aria-label={t('common:action.cancel')}
+                    title={t('common:action.cancel')}
+                  />
+                ) : null}
+                {task.status === 'failed' && onResume ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    icon={<PlayIcon />}
+                    onClick={handleResume}
+                    aria-label={t('transfer:resumeTransfer')}
+                    title={t('transfer:resumeTransfer')}
+                  >
+                    {t('transfer:resumeTransfer')}
+                  </Button>
+                ) : null}
+                {(task.status === 'failed' || task.status === 'cancelled') && onRetry ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    icon={<PlayIcon />}
+                    onClick={handleRetry}
+                    aria-label={t('transfer:retryTransfer')}
+                    title={t('transfer:retryTransfer')}
+                  >
+                    {t('transfer:retryTransfer')}
+                  </Button>
+                ) : null}
+                {task.status === 'completed' && onOpen ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={<CheckIcon />}
+                    onClick={handleOpen}
+                    aria-label={t('common:action.open')}
+                    title={t('common:action.open')}
+                  >
+                    {t('common:action.open')}
+                  </Button>
+                ) : null}
+                {task.status === 'completed' && onReveal ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={<FolderIcon />}
+                    onClick={handleReveal}
+                    aria-label={t('transfer:revealInFolder')}
+                    title={t('transfer:revealInFolder')}
+                  >
+                    {t('transfer:revealInFolder')}
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </div>
       </Card.Body>

@@ -50,7 +50,7 @@ certification in this Task 10 session. Status is therefore **NOT VERIFIED**.
 | L3-WINDOWS-GUI-001 | Windows packaged GUI; file transfer path/dialog; native terminal | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
 | L3-WINDOWS-WSL-001 | Windows WSL + tmux Workbench terminal recovery | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
 | L3-UBUNTU-GUI-001 | Ubuntu AppImage/deb GUI; terminal + file flows | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
-| L3-DUAL-HOST-LAN-001 | Two physical hosts same LAN: mDNS; native P2P + mobile credential-free R/W; public peer / XFF / Host / Origin / WS / remote stop rejection; 1GiB transfer + resume | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
+| L3-DUAL-HOST-LAN-001 | Two physical hosts same LAN: mDNS; native P2P + mobile credential-free R/W; public peer / XFF / Host / Origin / WS / remote stop rejection; **1GiB transfer: mid-stream disconnect + process restart + resume from confirmed offset + SHA-256 match** | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
 
 ### What automated layers already cover (not L3)
 
@@ -74,9 +74,29 @@ Only mark `PASS` when **all** of the following are true for that row:
 4. For `L3-DUAL-HOST-LAN-001`: two **physical** hosts on the same L2/L3
    network completed mDNS discovery, credential-free native + `/mobile`
    read/write, boundary rejections (public peer, XFF spoof, hostile
-   Host/Origin, invalid WebSocket Origin, remote stop), and a ≥1GiB transfer
-   with resume. Injected `ConnectInfo` / `X-Forwarded-For` is **not** enough.
+   Host/Origin, invalid WebSocket Origin, remote stop), **and** the deferred
+   **1 GiB resume scenario** below. Injected `ConnectInfo` / `X-Forwarded-For`
+   is **not** enough. `L2-TRANSFER-RECOVERY-001` / single-host N8 smoke is
+   **not** a substitute and must not flip this row to PASS.
 5. `expiresAt` is set to execution date + 90 days.
+
+### Deferred 1 GiB dual-host transfer resume (N5 → L3 handoff)
+
+Keep **`L3-DUAL-HOST-LAN-001` = NOT VERIFIED** until an operator executes all of:
+
+1. Host A sends a **≥1 GiB** file to Host B over real LAN (not loopback-only).
+2. Mid-stream **network disconnect** after a confirmed non-zero `resume_offset`
+   (receiver tmp partially written; both peers show failed/interrupted with
+   resume metadata where supported).
+3. Optional: kill/restart the **cc-partner-backend / app process** on either side
+   while the partial tmp + protocol transfer id remain durable.
+4. User chooses **继续传输** (`resume_transfer` with stable `clientOperationId` +
+   reused `protocolTransferId`) when peer advertises `transfer.resume.v1`; if
+   peer lacks the capability, only full **重新传输** is offered (no fake resume).
+5. Transfer reaches `completed` on both sides; **receiver SHA-256 equals source**;
+   Open/Reveal works only on Host B desktop GUI for the received path.
+6. Record sanitized evidence path, OS builds of both hosts, app version, and
+   full git commit; then set status PASS with `expiresAt = date + 90d`.
 
 After expiry, documentation may only say “historically passed on &lt;date&gt;;
 current tree not re-certified.”
@@ -101,7 +121,7 @@ The following remain **NOT VERIFIED** until a real-device pass is recorded:
 14. Real public-peer / non-LAN NIC path rejection on production interfaces
 15. Production XFF/Host/Origin/WebSocket boundary on multi-homed hosts (beyond injected L2 evidence)
 16. Remote backend stop rejection from a second physical host (valid token still forbidden)
-17. 1GiB file transfer and resume across two physical hosts
+17. 1GiB file transfer: mid-stream disconnect + process restart + resume from confirmed offset + SHA-256 match across two physical hosts (`L3-DUAL-HOST-LAN-001`, deferred from N5; remains **NOT VERIFIED**)
 
 ## How to re-run L2 automation (not L3)
 

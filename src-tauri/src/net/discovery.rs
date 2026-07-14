@@ -594,7 +594,7 @@ mod tests {
         // encode_mdns_capabilities 按字典序排序去重，与 server_protocol_info() 当前全部能力一致。
         assert_eq!(
             caps,
-            "attention.v1,cc-history.paged-sync.v1,errors.envelope.v1,orchestrator.runtime-snapshot.v1,sync.manifest.v2,transfer.complete.v1,workbench.mutation-outcome.v1"
+            "attention.v1,cc-history.paged-sync.v1,errors.envelope.v1,orchestrator.runtime-snapshot.v1,sync.manifest.v2,transfer.complete.v1,transfer.resume.v1,workbench.mutation-outcome.v1"
         );
         assert!(
             !caps.starts_with("caps="),

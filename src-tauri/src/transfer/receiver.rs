@@ -225,6 +225,7 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
         transferred_bytes: resume_offset,
         created_at: now_iso(),
         completed_at: None,
+        ..TransferTask::recovery_defaults(&transfer_id)
     };
     state.transfers.add(task);
 
@@ -2337,6 +2338,7 @@ async fn try_recover_finalize_intent(
         transferred_bytes: intent.size,
         created_at: intent.created_at.clone(),
         completed_at: Some(now_iso()),
+        ..TransferTask::recovery_defaults(transfer_id)
     };
     // 若 registry 无 entry，临时 add 以便 promote 后 remove/tombstone；durability pending 也保留。
     if state.transfers.get(transfer_id).is_none() {
@@ -3719,6 +3721,7 @@ pub fn resolve_filename(dir: &Path, filename: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::TransferRepo;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Once;
@@ -3837,6 +3840,8 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        // N5 recovery 列：幂等升级（与生产 ensure_schema 一致）。
+        TransferRepo::ensure_schema(&pool).await.unwrap();
 
         let config = AppConfig {
             device_id: "device-test".to_string(),
@@ -3957,6 +3962,7 @@ mod tests {
             transferred_bytes: 0,
             created_at: now_iso(),
             completed_at: None,
+            ..TransferTask::recovery_defaults(&transfer_id)
         });
 
         let state_a = state.clone();
@@ -4258,6 +4264,7 @@ mod tests {
             transferred_bytes: 0,
             created_at: now_iso(),
             completed_at: None,
+            ..TransferTask::recovery_defaults(&transfer_id)
         });
 
         let resp = handle_chunk(&state, &transfer_id, 0, b"XXXX".to_vec())
@@ -4304,6 +4311,7 @@ mod tests {
             transferred_bytes: 0,
             created_at: now_iso(),
             completed_at: None,
+            ..TransferTask::recovery_defaults(&transfer_id)
         });
 
         let err = handle_init(
@@ -4440,7 +4448,7 @@ mod tests {
             (id_b.clone(), tmp_b.clone(), payload_b.len() as u64, sha_b),
         ] {
             state.transfers.add(TransferTask {
-                id,
+                id: id.clone(),
                 filename: "report.txt".to_string(),
                 file_path: tmp.to_string_lossy().to_string(),
                 size,
@@ -4452,6 +4460,7 @@ mod tests {
                 transferred_bytes: size,
                 created_at: now_iso(),
                 completed_at: None,
+                ..TransferTask::recovery_defaults(&id)
             });
         }
 
@@ -4838,6 +4847,9 @@ mod tests {
         .execute(&state.db)
         .await
         .expect("recreate history");
+        TransferRepo::ensure_schema(&state.db)
+            .await
+            .expect("ensure recovery schema");
 
         let retry = handle_complete(&state, &transfer_id)
             .await
@@ -4939,6 +4951,9 @@ mod tests {
         .execute(&state.db)
         .await
         .expect("recreate history");
+        TransferRepo::ensure_schema(&state.db)
+            .await
+            .expect("ensure recovery schema");
 
         let init_err = handle_init(
             &state,
@@ -5074,6 +5089,9 @@ mod tests {
         .execute(&state.db)
         .await
         .expect("recreate history");
+        TransferRepo::ensure_schema(&state.db)
+            .await
+            .expect("ensure recovery schema");
 
         let init_err = handle_init(
             &state,
@@ -5435,6 +5453,7 @@ mod tests {
             transferred_bytes: 0,
             created_at: now_iso(),
             completed_at: None,
+            ..crate::models::transfer::TransferTask::recovery_defaults(&transfer_id)
         };
         state.transfers.add(task);
 
@@ -5722,6 +5741,9 @@ mod tests {
         .execute(&state.db)
         .await
         .expect("recreate history");
+        TransferRepo::ensure_schema(&state.db)
+            .await
+            .expect("ensure recovery schema");
 
         let retry = handle_chunk(&state, &transfer_id, 0, payload.to_vec())
             .await

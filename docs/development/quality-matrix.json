@@ -14,7 +14,9 @@
         "web/src/lib/schemas/orchestrator.test.ts",
         "web/src/lib/schemas/protocol.test.ts",
         "web/src/lib/schemas/transfer.test.ts",
-        "web/src/lib/schemas/workbench.test.ts"
+        "web/src/lib/schemas/workbench.test.ts",
+        "web/src/api/transfer.test.ts",
+        "web/src/pages/Transfer/transferHistory.test.ts"
       ],
       "command": "cd web && npm test -- src/lib/runtimeSchema.test.ts src/lib/schemas",
       "ciJob": "frontend-unit",
@@ -44,10 +46,13 @@
       "exclusions": [
         "real Tauri file dialog",
         "multi-host LAN transfer",
-        "packaged desktop GUI"
+        "packaged desktop GUI",
+        "1 GiB dual-host resume (see L3-DUAL-HOST-LAN-001)"
       ],
       "docs": [
-        "docs/development/testing.md"
+        "docs/development/testing.md",
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-07-14-transfer-lifecycle-and-recovery-design.md"
       ]
     },
     {
@@ -565,7 +570,7 @@
       "tests": [
         "docs/development/real-device-certification.md"
       ],
-      "command": "manual: two physical hosts mDNS + credential-free R/W + boundary reject + 1GiB transfer/resume",
+      "command": "manual: two physical hosts mDNS + credential-free R/W + boundary reject + 1GiB transfer disconnect mid-stream + process restart + resume from confirmed offset + SHA-256 match",
       "ciJob": "manual",
       "platforms": [
         "dual-host-lan"
@@ -574,7 +579,9 @@
         "single-process injected ConnectInfo substitute",
         "browser L1 mock substitute",
         "X-Forwarded-For spoof as public peer evidence",
-        "identity auth (product has none)"
+        "identity auth (product has none)",
+        "Mac-only single-host N8 smoke as dual-host substitute",
+        "L2 transfer_recovery_smoke as 1GiB proof"
       ],
       "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
       "version": "0.6.7",
@@ -585,7 +592,9 @@
       "osBuild": null,
       "docs": [
         "docs/development/testing.md",
-        "docs/development/real-device-certification.md"
+        "docs/development/real-device-certification.md",
+        "docs/superpowers/specs/2026-07-14-transfer-lifecycle-and-recovery-design.md",
+        "docs/p2p-protocol.md"
       ]
     },
     {
@@ -669,6 +678,64 @@
       "docs": [
         "docs/prd.md",
         "docs/superpowers/specs/2026-07-14-sync-integrity-conflict-and-recovery-design.md"
+      ]
+    },
+    {
+      "id": "L0-TRANSFER-RECOVERY-001",
+      "surface": "transfer-recovery",
+      "level": "L0",
+      "tests": [
+        "web/src/lib/schemas/transfer.test.ts",
+        "web/src/api/transfer.test.ts",
+        "web/src/pages/Transfer/transferHistory.test.ts",
+        "web/src/components/domain/TransferItem/TransferItem.test.tsx",
+        "web/src/pages/Transfer/Transfer.test.tsx",
+        "src-tauri/src/models/transfer.rs",
+        "src-tauri/src/storage/transfer_repo.rs",
+        "src-tauri/src/transfer/sender.rs"
+      ],
+      "command": "cd web && npm test -- src/lib/schemas/transfer.test.ts src/api/transfer.test.ts src/pages/Transfer/transferHistory.test.ts src/components/domain/TransferItem/TransferItem.test.tsx src/pages/Transfer/Transfer.test.tsx --run && cd ../src-tauri && cargo test --locked models::transfer storage::transfer_repo transfer::sender --lib",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04",
+        "node-linux"
+      ],
+      "exclusions": [
+        "real multi-host LAN transfer",
+        "1 GiB dual-host disconnect/resume (see L3-DUAL-HOST-LAN-001)",
+        "packaged desktop Open/Reveal OS dialogs"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md",
+        "docs/p2p-protocol.md",
+        "docs/superpowers/specs/2026-07-14-transfer-lifecycle-and-recovery-design.md"
+      ]
+    },
+    {
+      "id": "L2-TRANSFER-RECOVERY-001",
+      "surface": "transfer-recovery",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/transfer_recovery_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test transfer_recovery_smoke -- --nocapture --test-threads=1",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "1 GiB dual-host disconnect/restart/resume/SHA (see L3-DUAL-HOST-LAN-001)",
+        "packaged GUI Open/Reveal",
+        "real public multi-NIC peer path",
+        "Mac-only N8 as dual-host substitute"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/real-device-certification.md",
+        "docs/p2p-protocol.md",
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-07-14-transfer-lifecycle-and-recovery-design.md"
       ]
     }
   ]

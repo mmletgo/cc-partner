@@ -22,7 +22,13 @@ interface DeviceDto {
   lastSeen?: string;
   online: boolean;
   isSelf?: boolean;
+  /** mDNS 非权威能力提示 */
+  capabilities?: string[];
+  protoVersion?: number;
 }
+
+/** 对端 resume 能力 token（与 Rust CAPABILITY_TRANSFER_RESUME_V1 对齐）。 */
+export const TRANSFER_RESUME_CAPABILITY_V1 = 'transfer.resume.v1';
 
 /** 本机设备信息（对齐旧 /api/health 响应字段，snake_case，供 Devices 页 toSelfDevice 消费） */
 export interface HealthResponse {
@@ -51,7 +57,22 @@ function toDevice(dto: DeviceDto): Device {
     port: dto.port,
     status: dto.online ? 'online' : 'offline',
     lastSeen: dto.lastSeen,
+    capabilities: Array.isArray(dto.capabilities) ? dto.capabilities : [],
+    protoVersion: typeof dto.protoVersion === 'number' ? dto.protoVersion : 0,
   };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Transfer UI「继续传输」必须在旧 peer 上回退为「重新传输」，不能显示假 resume。
+ *
+ * Code Logic（这个函数做什么）:
+ *   capabilities 精确包含 transfer.resume.v1。
+ */
+export function deviceSupportsTransferResume(device: Pick<Device, 'capabilities'> | null | undefined): boolean {
+  const caps = device?.capabilities;
+  if (!Array.isArray(caps)) return false;
+  return caps.includes(TRANSFER_RESUME_CAPABILITY_V1);
 }
 
 export const devicesApi = {

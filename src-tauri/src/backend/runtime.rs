@@ -108,6 +108,8 @@ const PROMPTS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS prompts (
     deleted INTEGER DEFAULT 0
 )";
 
+/// transfer_history 建表（文档 + 新库基线）。N5 recovery 列由 CREATE 声明；
+/// 旧库升级走 `TransferRepo::ensure_schema` 的幂等 ALTER（禁止 sqlx::migrate!）。
 const TRANSFER_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS transfer_history (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL,
@@ -119,7 +121,18 @@ const TRANSFER_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS transfer_history (
     status TEXT NOT NULL,
     transferred_bytes INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
-    completed_at TEXT
+    completed_at TEXT,
+    phase TEXT,
+    failure_stage TEXT,
+    failure_code TEXT,
+    failure_retryable INTEGER,
+    failure_message TEXT,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    logical_transfer_id TEXT,
+    attempt_id TEXT,
+    protocol_transfer_id TEXT,
+    client_operation_id TEXT,
+    operation_payload_hash TEXT
 )";
 
 /// Claude Code 历史 prompt 表（采集入库 + 跨设备同步）。
@@ -303,6 +316,8 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
 
     sqlx::query(PROMPTS_SCHEMA).execute(&pool).await?;
     sqlx::query(TRANSFER_SCHEMA).execute(&pool).await?;
+    // N5 transfer recovery：幂等补列 + client_operation_id 部分唯一索引
+    crate::storage::TransferRepo::ensure_schema(&pool).await?;
     sqlx::query(CC_HISTORY_SCHEMA).execute(&pool).await?;
     sqlx::query(CC_SCAN_STATE_SCHEMA).execute(&pool).await?;
     for stmt in CC_INDEXES.split(';') {
@@ -592,6 +607,27 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
                         Ok(_) => {}
                         Err(e) => {
                             tracing::warn!("回收卡住 recovery jobs 失败: {e}");
+                        }
+                    }
+                });
+            }
+            // N5：恢复 insert-before-spawn 的 transfer Queued claim 行。
+            {
+                let transfer_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    match crate::transfer::sender::recover_pending_claimed_operations(
+                        &transfer_state,
+                    )
+                    .await
+                    {
+                        Ok(n) if n > 0 => {
+                            tracing::info!(
+                                "已恢复 {n} 个 transfer insert-before-spawn Queued 任务"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("恢复 pending transfer claim 失败: {e}");
                         }
                     }
                 });
