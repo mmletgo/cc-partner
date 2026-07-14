@@ -8,18 +8,19 @@
  *   或对话内容搜索 Claude session，预览最近对话后一键新建 window 执行 resume。
  *
  * Code Logic（这个组件做什么）:
- *   受控浮层（open/onClose），内部维护 query/hits/activeIndex/preview 等 state；
- *   useEffect 监听 query+scope 做 300ms debounce 搜索；input 的 onKeyDown 处理
- *   ↑↓ 导航 / ⏎ 进入 preview / esc 返回或关闭；选中后切到 preview 视图渲染最近
- *   20 条对话，底部 resume 按钮回调父组件刷新 sessions 并 focus 新 window。
- *   hooks 全部声明在 early return 之前（AGENTS.md 第 20 条）。
+ *   受控浮层（open/onClose）经共享 Dialog 提供 portal/backdrop/focus trap/列表 Esc 关闭；
+ *   内部维护 query/hits/activeIndex/preview 等 state；useEffect 监听 query+scope 做
+ *   300ms debounce 搜索；input 的 onKeyDown 处理 ↑↓ 导航 / ⏎ 进入 preview；
+ *   preview 内 Esc 返回列表（closeOnEscape={!previewHit}）；选中后切到 preview 视图
+ *   渲染最近 20 条对话，底部 resume 按钮回调父组件刷新 sessions 并 focus 新 window。
+ *   hooks 全部声明在任何条件渲染之前（AGENTS.md 第 20 条）。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { workbenchApi } from '@/api/workbench';
-import { Button } from '@/components/primitives';
+import { Button, Dialog } from '@/components/primitives';
 import { SearchIcon } from '@/lib/icons';
 import type { SessionPreview, SessionSearchHit } from '@/lib/types';
 import styles from './WorkbenchSessionSearch.module.css';
@@ -300,7 +301,8 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
   /**
    * 列表视图键盘导航。
    * Business Logic：纯键盘操作结果列表，符合 Command Palette 惯例。
-   * Code Logic：↑↓ 循环移动高亮索引、⏎ 打开当前选中项的 preview、esc 关闭浮层。
+   * Code Logic：↑↓ 循环移动高亮索引、⏎ 打开当前选中项的 preview；
+   *   列表 Esc 关闭由共享 Dialog 负责，此处不再处理 Escape。
    */
   const handleListKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -318,12 +320,9 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
           e.preventDefault();
           openPreview(target);
         }
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        onClose();
       }
     },
-    [hits, activeIndex, openPreview, onClose],
+    [hits, activeIndex, openPreview],
   );
 
   /**
@@ -359,24 +358,6 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     return () => clearTimeout(timer);
   }, [previewHit]);
 
-  /**
-   * 点击遮罩关闭浮层。
-   * Business Logic：点 palette 外的半透明区域应视为取消搜索，关闭浮层。
-   * Code Logic：直接调 onClose。
-   */
-  const handleScrimClick = useCallback(() => {
-    onClose();
-  }, [onClose]);
-
-  /**
-   * 阻止 palette 内部点击冒泡到 scrim。
-   * Business Logic：palette 内的任何点击都不应触发 scrim 的关闭逻辑。
-   * Code Logic：stopPropagation 中断事件冒泡。
-   */
-  const stopPropagation = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-  }, []);
-
   /** 去除首尾空格后的 query，用于命中高亮匹配（避免空格导致无意义拆分） */
   const trimmedQuery = query.trim();
   /**
@@ -392,9 +373,6 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
       }),
     [hits.length, t],
   );
-
-  // early return 必须在所有 hooks 之后（AGENTS.md 第 20 条）
-  if (!open) return null;
 
   /**
    * 渲染搜索视图主体（loading / error / empty / results 四态分支）。
@@ -570,91 +548,92 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
       ];
 
   return (
-    <>
-      <div className={styles.scrim} onClick={handleScrimClick} aria-hidden="true" />
-      <div
-        className={styles.palette}
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('workbench:sessionSearch.panelAriaLabel')}
-        onClick={stopPropagation}
-      >
-        {previewHit ? (
-          <div
-            ref={previewContainerRef}
-            className={styles.previewContainer}
-            tabIndex={-1}
-            onKeyDown={handlePreviewKeyDown}
-          >
-            <div className={styles.previewHeader}>
-              <Button
-                className={styles.backButton}
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setPreviewHit(null);
-                  setPreviewData(null);
-                  setPreviewError(null);
-                  setTimeout(() => inputRef.current?.focus(), 30);
-                }}
-              >
-                {t('workbench:sessionSearch.backToList')}
-              </Button>
-              <div className={styles.previewTitleWrap}>
-                <div className={styles.previewTitle}>{previewHit.title}</div>
-                <div className={styles.previewSubtitle}>
-                  {previewHit.messageCount} · {previewHit.sessionId.slice(0, 8)}
-                </div>
+    <Dialog
+      open={open}
+      titleId="workbench-session-search-title"
+      onClose={onClose}
+      className={styles.palette}
+      initialFocusRef={inputRef}
+      closeOnEscape={!previewHit}
+    >
+      <h2 id="workbench-session-search-title" className="sr-only">
+        {t('workbench:sessionSearch.panelAriaLabel')}
+      </h2>
+      {previewHit ? (
+        <div
+          ref={previewContainerRef}
+          className={styles.previewContainer}
+          tabIndex={-1}
+          onKeyDown={handlePreviewKeyDown}
+        >
+          <div className={styles.previewHeader}>
+            <Button
+              className={styles.backButton}
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setPreviewHit(null);
+                setPreviewData(null);
+                setPreviewError(null);
+                setTimeout(() => inputRef.current?.focus(), 30);
+              }}
+            >
+              {t('workbench:sessionSearch.backToList')}
+            </Button>
+            <div className={styles.previewTitleWrap}>
+              <div className={styles.previewTitle}>{previewHit.title}</div>
+              <div className={styles.previewSubtitle}>
+                {previewHit.messageCount} · {previewHit.sessionId.slice(0, 8)}
               </div>
             </div>
-            {renderPreviewBody()}
+          </div>
+          {renderPreviewBody()}
+        </div>
+      ) : (
+        <div className={styles.header}>
+          <SearchIcon size={20} className={styles.searchIcon} />
+          <input
+            ref={inputRef}
+            className={styles.input}
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={handleListKeyDown}
+            placeholder={t('workbench:sessionSearch.placeholder')}
+            spellCheck={false}
+            autoComplete="off"
+            disabled={offline}
+          />
+          <span className={styles.scopeBadge}>{t('workbench:sessionSearch.scopeWorktree')}</span>
+        </div>
+      )}
+
+      {!previewHit && renderBody()}
+
+      <div className={styles.footer}>
+        <div className={styles.footerHints}>
+          {footerHrefs.map((hint) => (
+            <span key={hint.label} className={styles.footerHint}>
+              <span className={styles.kbd}>{hint.kbd}</span>
+              {hint.label}
+            </span>
+          ))}
+        </div>
+        {previewHit ? (
+          <div className={styles.footerActions}>
+            <Button variant="ghost" size="sm" onClick={onClose} disabled={resuming}>
+              {t('workbench:sessionSearch.cancelButton')}
+            </Button>
+            <Button variant="primary" size="sm" loading={resuming} onClick={handleResume}>
+              {t('workbench:sessionSearch.resumeButton')}
+            </Button>
           </div>
         ) : (
-          <div className={styles.header}>
-            <SearchIcon size={20} className={styles.searchIcon} />
-            <input
-              ref={inputRef}
-              className={styles.input}
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={handleListKeyDown}
-              placeholder={t('workbench:sessionSearch.placeholder')}
-              spellCheck={false}
-              autoComplete="off"
-              disabled={offline}
-            />
-            <span className={styles.scopeBadge}>{t('workbench:sessionSearch.scopeWorktree')}</span>
-          </div>
+          <span className={styles.footerHint}>
+            {offline ? t('workbench:sessionSearch.offline') : resultCountText}
+          </span>
         )}
-
-        {!previewHit && renderBody()}
-
-        <div className={styles.footer}>
-          <div className={styles.footerHints}>
-            {footerHrefs.map((hint) => (
-              <span key={hint.label} className={styles.footerHint}>
-                <span className={styles.kbd}>{hint.kbd}</span>
-                {hint.label}
-              </span>
-            ))}
-          </div>
-          {previewHit ? (
-            <div className={styles.footerActions}>
-              <Button variant="ghost" size="sm" onClick={onClose} disabled={resuming}>
-                {t('workbench:sessionSearch.cancelButton')}
-              </Button>
-              <Button variant="primary" size="sm" loading={resuming} onClick={handleResume}>
-                {t('workbench:sessionSearch.resumeButton')}
-              </Button>
-            </div>
-          ) : (
-            <span className={styles.footerHint}>
-              {offline ? t('workbench:sessionSearch.offline') : resultCountText}
-            </span>
-          )}
-        </div>
       </div>
-    </>
+    </Dialog>
   );
 }

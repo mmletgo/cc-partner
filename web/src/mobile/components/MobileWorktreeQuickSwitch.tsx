@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useId } from 'react';
+import { useCallback, useId } from 'react';
 import type { ReactElement } from 'react';
 import type { TFunction } from 'i18next';
+import { Dialog } from '@/components/primitives';
 import type { WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
 import {
   getMobileWorktreeStatusKind,
@@ -60,7 +61,9 @@ function getStatusClassName(statusKind: MobileWorktreeStatusKind): string {
  *   手机端用户在终端、文件和 Git 面板之间工作时，需要从顶部 worktree pill 快速查看、刷新并切换当前 worktree。
  *
  * Code Logic（这个组件做什么）:
- *   在打开态渲染 modal bottom sheet，展示 worktree 列表、主工作区/状态 badge，并提供刷新、进入完整管理面板和关闭操作。
+ *   以共享 Dialog 原语渲染 modal bottom sheet（portal / Escape / backdrop / focus trap），
+ *   展示 worktree 列表、主工作区/状态 badge，并提供刷新、进入完整管理面板和关闭操作。
+ *   hooks 全部在 return 前；open=false 时由 Dialog 返回 null。
  */
 export function MobileWorktreeQuickSwitch({
   open,
@@ -120,119 +123,78 @@ export function MobileWorktreeQuickSwitch({
     [busy, onClose, onSelect],
   );
 
-  useEffect(() => {
-    if (!open) return undefined;
-
-    /**
-     * Business Logic（为什么需要这个函数）:
-     *   bottom sheet 打开后，用户需要能用 Escape 快速退出而不触发任何 worktree 切换。
-     *
-     * Code Logic（这个函数做什么）:
-     *   监听 window keydown，遇到 Escape 时关闭 sheet。
-     */
-    function handleKeyDown(event: KeyboardEvent): void {
-      if (event.key === 'Escape') {
-        onClose();
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose, open]);
-
-  if (!open) return null;
-
   return (
-    <>
-      <button
-        type="button"
-        className={styles.quickSwitchBackdrop}
-        aria-label={t('mobile.worktreeQuickSwitch.close')}
-        onClick={onClose}
-      />
-      <section
-        className={styles.quickSwitchSheet}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-      >
-        <header className={styles.quickSwitchHeader}>
-          <div className={styles.quickSwitchTitle}>
-            <p>{t('mobile.kicker')}</p>
-            <h2 id={titleId}>
-              {t('mobile.worktreeQuickSwitch.title', { project: project?.name ?? '' })}
-            </h2>
-          </div>
-          <div className={styles.quickSwitchActions}>
-            <button
-              type="button"
-              className={styles.quickSwitchActionButton}
-              disabled={busy}
-              onClick={handleRefresh}
-            >
-              {t('mobile.worktreeQuickSwitch.refresh')}
-            </button>
-            <button
-              type="button"
-              className={styles.quickSwitchActionButton}
-              disabled={busy}
-              onClick={handleManage}
-            >
-              {t('mobile.worktreeQuickSwitch.manage')}
-            </button>
-            <button
-              type="button"
-              className={styles.quickSwitchCloseButton}
-              onClick={onClose}
-            >
-              {t('mobile.worktreeQuickSwitch.close')}
-            </button>
-          </div>
-        </header>
+    <Dialog open={open} titleId={titleId} onClose={onClose} className={styles.quickSwitchSheet}>
+      <header className={styles.quickSwitchHeader}>
+        <div className={styles.quickSwitchTitle}>
+          <p>{t('mobile.kicker')}</p>
+          <h2 id={titleId}>
+            {t('mobile.worktreeQuickSwitch.title', { project: project?.name ?? '' })}
+          </h2>
+        </div>
+        <div className={styles.quickSwitchActions}>
+          <button
+            type="button"
+            className={styles.quickSwitchActionButton}
+            disabled={busy}
+            onClick={handleRefresh}
+          >
+            {t('mobile.worktreeQuickSwitch.refresh')}
+          </button>
+          <button
+            type="button"
+            className={styles.quickSwitchActionButton}
+            disabled={busy}
+            onClick={handleManage}
+          >
+            {t('mobile.worktreeQuickSwitch.manage')}
+          </button>
+          <button type="button" className={styles.quickSwitchCloseButton} onClick={onClose}>
+            {t('mobile.worktreeQuickSwitch.close')}
+          </button>
+        </div>
+      </header>
 
-        {!project ? (
-          <p className={styles.panelState}>{t('mobile.worktreePanel.noProject')}</p>
-        ) : null}
-        {isEmpty ? <p className={styles.panelState}>{t('worktrees.empty')}</p> : null}
+      {!project ? (
+        <p className={styles.panelState}>{t('mobile.worktreePanel.noProject')}</p>
+      ) : null}
+      {isEmpty ? <p className={styles.panelState}>{t('worktrees.empty')}</p> : null}
 
-        {project ? (
-          <div className={styles.quickSwitchList}>
-            {worktrees.map((worktree) => {
-              const isActive = worktree.id === activeWorktreeId;
-              const statusKind = getMobileWorktreeStatusKind(worktree);
-              const itemClassName = `${styles.quickSwitchItem} ${
-                isActive ? styles.quickSwitchItemActive : ''
-              }`;
-              const statusClassName = `${styles.quickSwitchStatus} ${getStatusClassName(
-                statusKind,
-              )}`;
+      {project ? (
+        <div className={styles.quickSwitchList}>
+          {worktrees.map((worktree) => {
+            const isActive = worktree.id === activeWorktreeId;
+            const statusKind = getMobileWorktreeStatusKind(worktree);
+            const itemClassName = `${styles.quickSwitchItem} ${
+              isActive ? styles.quickSwitchItemActive : ''
+            }`;
+            const statusClassName = `${styles.quickSwitchStatus} ${getStatusClassName(statusKind)}`;
 
-              return (
-                <button
-                  key={worktree.id}
-                  type="button"
-                  className={itemClassName}
-                  aria-current={isActive ? 'true' : undefined}
-                  disabled={busy}
-                  onClick={() => handleSelect(worktree)}
-                >
-                  <span className={styles.quickSwitchItemHeader}>
-                    <strong>{worktree.name}</strong>
-                    <span className={styles.quickSwitchBadge}>
-                      {worktree.isMain ? t('worktrees.main') : t('worktrees.linked')}
-                    </span>
+            return (
+              <button
+                key={worktree.id}
+                type="button"
+                className={itemClassName}
+                aria-current={isActive ? 'true' : undefined}
+                disabled={busy}
+                onClick={() => handleSelect(worktree)}
+              >
+                <span className={styles.quickSwitchItemHeader}>
+                  <strong>{worktree.name}</strong>
+                  <span className={styles.quickSwitchBadge}>
+                    {worktree.isMain ? t('worktrees.main') : t('worktrees.linked')}
                   </span>
-                  <span className={styles.quickSwitchMeta}>
-                    {worktree.branch ?? t('emptyValue')}
-                  </span>
-                  <span className={styles.quickSwitchPath}>{worktree.path}</span>
-                  <span className={statusClassName}>{getStatusLabel(worktree, t)}</span>
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
-      </section>
-    </>
+                </span>
+                <span className={styles.quickSwitchMeta}>
+                  {worktree.branch ?? t('emptyValue')}
+                </span>
+                <span className={styles.quickSwitchPath}>{worktree.path}</span>
+                <span className={statusClassName}>{getStatusLabel(worktree, t)}</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </Dialog>
   );
 }

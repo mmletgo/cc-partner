@@ -29,21 +29,15 @@
   gap: var(--space-1);
 }
 
+/* 挂在共享 Dialog surface 上：居中模态，宽度仍限制在侧栏内容区量级 */
 .sourcePopover {
-  position: absolute;
-  top: calc(100% + var(--space-2));
-  right: 0;
-  z-index: var(--z-overlay);
   width: min(260px, calc(var(--sidebar-width) - var(--space-6)));
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   box-sizing: border-box;
-  border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
-  background: var(--surface);
   padding: var(--space-2);
-  box-shadow: var(--shadow-md);
 }
 
 .sourceOption {
@@ -321,18 +315,10 @@
   line-height: var(--leading-normal);
 }
 
-.modalBackdrop {
-  position: fixed;
-  inset: 0;
-  z-index: var(--z-modal);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: color-mix(in oklab, var(--bg) 64%, transparent);
-  padding: var(--space-4);
-}
-
+/* 挂在共享 Dialog surface 上：远端项目选择器内容区 */
 .modalDialog {
+  width: min(720px, 100%);
   max-width: 100%;
-  max-height: 100%;
+  max-height: min(760px, calc(100vh - var(--space-10)));
+  overflow: auto;
 }

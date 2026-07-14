@@ -226,13 +226,18 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     orchestratorSource,
-    '<OrchestratorDialogPortal>',
-    'Orchestrator task detail and evidence should render in a body-level side panel',
+    '<Drawer',
+    'Orchestrator task detail and evidence should render in the shared Drawer primitive',
   );
   assertContains(
     orchestratorSource,
-    'className={styles.taskDrawerOverlay}',
-    'Orchestrator task detail opens from the board as a side drawer overlay',
+    'className={styles.taskDrawer}',
+    'Orchestrator task detail opens from the board as a side drawer surface',
+  );
+  assertContains(
+    orchestratorSource,
+    'titleId="orchestrator-task-drawer-title"',
+    'Orchestrator task detail drawer exposes an accessible title id',
   );
   assertContains(
     orchestratorSource,
@@ -401,23 +406,43 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     orchestratorSource,
-    'role="dialog"',
-    'Orchestrator task creation should render as an accessible dialog',
+    '<Dialog',
+    'Orchestrator task creation should render through the shared Dialog primitive',
   );
   assertContains(
+    orchestratorSource,
+    'titleId="orchestrator-create-dialog-title"',
+    'Orchestrator task creation dialog exposes an accessible title id',
+  );
+  assertContains(
+    orchestratorSource,
+    'closeOnEscape={!(creatingAction || completingPrompt)}',
+    'Orchestrator create dialog blocks Escape while creating or completing prompt',
+  );
+  assertContains(
+    orchestratorSource,
+    'closeOnBackdrop={!(creatingAction || completingPrompt)}',
+    'Orchestrator create dialog blocks backdrop close while creating or completing prompt',
+  );
+  assertContains(
+    orchestratorSource,
+    'initialFocusRef={completionPromptRef}',
+    'Orchestrator create dialog focuses the AI prompt field via Dialog initialFocusRef',
+  );
+  assertNotContains(
     orchestratorSource,
     "import { createPortal } from 'react-dom';",
-    'desktop Orchestrator task creation dialog should use a body portal to escape Workbench scroll and terminal layers',
+    'desktop Orchestrator must not keep a local createPortal import after Dialog/Drawer migration',
   );
-  assertContains(
+  assertNotContains(
     orchestratorSource,
     'createPortal(',
-    'desktop Orchestrator task creation dialog should render through a React portal',
+    'desktop Orchestrator must not call createPortal after Dialog/Drawer migration',
   );
-  assertContains(
+  assertNotContains(
     orchestratorSource,
-    'document.body',
-    'desktop Orchestrator task creation dialog should render at document.body level',
+    'window.addEventListener',
+    'desktop Orchestrator must not attach window keydown Escape listeners after Dialog/Drawer migration',
   );
   assertContains(
     orchestratorSource,
@@ -426,13 +451,18 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     orchestratorStyles,
-    '.createDialogOverlay',
-    'Orchestrator task creation dialog should have an overlay style boundary',
+    '.createDialog',
+    'Orchestrator task creation dialog should keep surface style class for Dialog className merge',
   );
-  assertContains(
+  assertNotContains(
     orchestratorStyles,
-    'z-index: calc(var(--z-modal) + 1);',
-    'Orchestrator task creation dialog overlay should sit above Workbench terminal fullscreen modal layer',
+    '.createDialogOverlay',
+    'Orchestrator create dialog overlay styles are owned by Dialog primitive after migration',
+  );
+  assertNotContains(
+    orchestratorStyles,
+    '.taskDrawerOverlay',
+    'Orchestrator task drawer overlay styles are owned by Drawer primitive after migration',
   );
   assertNotContains(
     orchestratorSource,

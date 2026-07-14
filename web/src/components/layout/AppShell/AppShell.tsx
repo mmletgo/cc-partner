@@ -10,12 +10,13 @@
  * Code Logic（这个组件做什么）:
  *   - 全屏 flex 布局：左侧 Sidebar（240px）+ 右侧 main 区域
  *   - Sidebar 内包含 Logo、导航项、项目文件夹入口、footer（版本号 + 语言/主题切换 + 手机访问按钮）
+ *   - 手机访问入口经共享 Dialog 呈现 MobileAccessCard（Escape/backdrop/焦点恢复由 Dialog 合同处理）
  *   - 右侧 main 区域是 <Outlet /> 出口，由 React Router 注入子页面，
  *     main 自带 overflow: auto 实现独立滚动
  *
  *   注意：本组件是 <Outlet /> 容器，children 不直接使用。
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -44,6 +45,7 @@ import { LanguageSwitcher } from '../LanguageSwitcher';
 import { MobileAccessCard } from '@/components/domain/MobileAccessCard';
 import { PermissionStatusBadge } from '@/components/domain/PermissionStatusBadge';
 import { WorkbenchProjectRail } from '@/components/domain/WorkbenchProjectRail';
+import { Dialog } from '@/components/primitives';
 // 应用内健康 toast 已停用（改用系统通知 HealthReminderListener + 全屏遮罩 HealthOverlay），
 // 组件代码保留以便恢复。先测试系统级提醒是否够用。
 // import ReminderToast from '@/pages/Health/ReminderToast';
@@ -57,6 +59,7 @@ export interface AppShellProps {
 }
 
 const MOBILE_ACCESS_DIALOG_ID = 'app-shell-mobile-access-dialog';
+const MOBILE_ACCESS_TITLE_ID = 'app-shell-mobile-access-title';
 
 export function AppShell({ children }: AppShellProps) {
   // 版本号以后端 __init__.py 的 __version__ 为唯一权威来源，通过 useAppVersion
@@ -69,15 +72,14 @@ export function AppShell({ children }: AppShellProps) {
   const { t } = useTranslation(['common', 'nav', 'settings']);
   const [mobileAccessOpen, setMobileAccessOpen] = useState<boolean>(false);
   const mobileAccessButtonRef = useRef<HTMLButtonElement | null>(null);
-  const mobileAccessDialogRef = useRef<HTMLDivElement | null>(null);
   const appName = t('common:app.name');
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户打开移动端 Workbench 访问弹层后，需要能通过按钮、Escape 或外部点击快速收起。
+   *   用户打开移动端 Workbench 访问对话框后，需要能通过关闭按钮、Escape 或 backdrop 收起。
    *
    * Code Logic（这个函数做什么）:
-   *   将 AppShell 内部的移动访问弹层状态置为关闭，供多个事件处理入口复用。
+   *   将 AppShell 内部的移动访问对话框状态置为关闭，供按钮与 Dialog onClose 复用。
    */
   const closeMobileAccess = useCallback((): void => {
     setMobileAccessOpen(false);
@@ -85,7 +87,7 @@ export function AppShell({ children }: AppShellProps) {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   侧栏 footer 的手机按钮需要在不跳转页面的情况下打开或关闭移动访问弹层。
+   *   侧栏 footer 的手机按钮需要在不跳转页面的情况下打开或关闭移动访问对话框。
    *
    * Code Logic（这个函数做什么）:
    *   使用函数式 setState 基于前一状态取反，避免依赖当前渲染闭包里的状态值。
@@ -93,43 +95,6 @@ export function AppShell({ children }: AppShellProps) {
   const toggleMobileAccess = useCallback((): void => {
     setMobileAccessOpen((open) => !open);
   }, []);
-
-  useEffect(() => {
-    if (!mobileAccessOpen) return undefined;
-
-    /**
-     * Business Logic（为什么需要这个函数）:
-     *   弹层打开后，键盘用户需要能用 Escape 退出当前移动访问信息面板。
-     *
-     * Code Logic（这个函数做什么）:
-     *   监听全局 keydown；当按键为 Escape 时关闭弹层。
-     */
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') closeMobileAccess();
-    };
-
-    /**
-     * Business Logic（为什么需要这个函数）:
-     *   弹层打开后，鼠标或触控用户点击弹层外部应回到普通侧栏状态。
-     *
-     * Code Logic（这个函数做什么）:
-     *   捕获 pointerdown，若事件目标不在弹层或触发按钮内，则关闭弹层。
-     */
-    const handlePointerDown = (event: PointerEvent): void => {
-      const { target } = event;
-      if (!(target instanceof Node)) return;
-      if (mobileAccessDialogRef.current?.contains(target)) return;
-      if (mobileAccessButtonRef.current?.contains(target)) return;
-      closeMobileAccess();
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    document.addEventListener('pointerdown', handlePointerDown, true);
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown);
-      document.removeEventListener('pointerdown', handlePointerDown, true);
-    };
-  }, [closeMobileAccess, mobileAccessOpen]);
 
   return (
     <div className={styles.layout}>
@@ -157,26 +122,6 @@ export function AppShell({ children }: AppShellProps) {
                 </button>
               </div>
             </div>
-            {mobileAccessOpen ? (
-              <div
-                ref={mobileAccessDialogRef}
-                id={MOBILE_ACCESS_DIALOG_ID}
-                className={styles.mobileAccessPopover}
-                role="dialog"
-                aria-label={t('settings:mobileAccess.dialogLabel')}
-              >
-                <button
-                  type="button"
-                  className={styles.mobileAccessClose}
-                  onClick={closeMobileAccess}
-                  aria-label={t('settings:mobileAccess.close')}
-                  title={t('settings:mobileAccess.close')}
-                >
-                  <XIcon size={14} />
-                </button>
-                <MobileAccessCard compact className={styles.mobileAccessCard} />
-              </div>
-            ) : null}
           </div>
         }
       >
@@ -207,6 +152,28 @@ export function AppShell({ children }: AppShellProps) {
         <PermissionStatusBadge />
       </Sidebar>
       <main className={styles.main}>{children ?? <Outlet />}</main>
+      <Dialog
+        open={mobileAccessOpen}
+        titleId={MOBILE_ACCESS_TITLE_ID}
+        onClose={closeMobileAccess}
+        className={styles.mobileAccessDialog}
+      >
+        <div id={MOBILE_ACCESS_DIALOG_ID} className={styles.mobileAccessDialogBody}>
+          <h2 id={MOBILE_ACCESS_TITLE_ID} className="sr-only">
+            {t('settings:mobileAccess.dialogLabel')}
+          </h2>
+          <button
+            type="button"
+            className={styles.mobileAccessClose}
+            onClick={closeMobileAccess}
+            aria-label={t('settings:mobileAccess.close')}
+            title={t('settings:mobileAccess.close')}
+          >
+            <XIcon size={14} />
+          </button>
+          <MobileAccessCard compact className={styles.mobileAccessCard} />
+        </div>
+      </Dialog>
       {/* 应用内健康 toast 已停用（改用系统通知 + 全屏遮罩），代码保留以便恢复（先测试）：
           <ReminderToast />
           <WaterToast /> */}

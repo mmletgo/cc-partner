@@ -7,6 +7,7 @@ import {
   httpOrchestratorTransport,
 } from '@/api/workbenchHttp';
 import type { HttpCreateOrchestratorTaskAction } from '@/api/workbenchHttp';
+import { Dialog } from '@/components/primitives';
 import { requestAttentionInvalidation } from '@/hooks/attentionInvalidation';
 import { orchestratorEvidenceKindTone } from '@/lib/orchestrator';
 import {
@@ -769,29 +770,6 @@ export function MobileAutomationPanel({
     setCreateDialogOpen(false);
   }, [creating, completingPrompt]);
 
-  useEffect(() => {
-    if (!createDialogOpen) return undefined;
-    const focusTimer = window.setTimeout(() => {
-      promptDraftRef.current?.focus();
-    }, 0);
-    return () => {
-      window.clearTimeout(focusTimer);
-    };
-  }, [createDialogOpen]);
-
-  useEffect(() => {
-    if (!createDialogOpen) return undefined;
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        handleCloseCreateDialog();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [createDialogOpen, handleCloseCreateDialog]);
-
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户常会只输入一句简单需求，手机端也应能像桌面端一样让 AI 结构化生成任务标题、目标和验收标准。
@@ -1349,142 +1327,134 @@ export function MobileAutomationPanel({
             </aside>
           ) : null}
 
-          {createDialogOpen ? (
-            <div
-              className={styles.mobileDialogOverlay}
-              onMouseDown={(event) => {
-                if (event.target === event.currentTarget) {
-                  handleCloseCreateDialog();
-                }
-              }}
-            >
-              <div
-                className={styles.mobileDialog}
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby={dialogTitleId}
+          <Dialog
+            open={createDialogOpen}
+            titleId={dialogTitleId}
+            onClose={handleCloseCreateDialog}
+            closeOnEscape={!(creating || completingPrompt)}
+            closeOnBackdrop={!(creating || completingPrompt)}
+            initialFocusRef={promptDraftRef}
+            className={styles.mobileDialog}
+          >
+            <div className={styles.mobileDialogHeader}>
+              <div className={styles.panelHeader}>
+                <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
+                <h2 id={dialogTitleId}>{t('workbench:mobile.automationPanel.createOpen')}</h2>
+              </div>
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                disabled={creating || completingPrompt}
+                onClick={handleCloseCreateDialog}
               >
-                <div className={styles.mobileDialogHeader}>
-                  <div className={styles.panelHeader}>
-                    <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
-                    <h2 id={dialogTitleId}>{t('workbench:mobile.automationPanel.createOpen')}</h2>
-                  </div>
-                  <button
-                    type="button"
-                    className={styles.secondaryButton}
-                    disabled={creating || completingPrompt}
-                    onClick={handleCloseCreateDialog}
-                  >
-                    {t('workbench:mobile.automationPanel.closeCreate')}
-                  </button>
-                </div>
+                {t('workbench:mobile.automationPanel.closeCreate')}
+              </button>
+            </div>
 
-                <div className={styles.mobileDialogBody}>
-                  <div className={styles.mobileDialogAssist}>
-                    <label className={styles.mobileField}>
-                      <span>{t('workbench:mobile.automationPanel.shortPrompt')}</span>
-                      <textarea
-                        ref={promptDraftRef}
-                        className={styles.mobileTextarea}
-                        value={promptDraft}
-                        disabled={creating || completingPrompt}
-                        placeholder={t('workbench:mobile.automationPanel.shortPromptPlaceholder')}
-                        onChange={(event) => {
-                          setPromptDraft(event.target.value);
-                          setStatus(null);
-                        }}
-                      />
-                    </label>
+            <div className={styles.mobileDialogBody}>
+              <div className={styles.mobileDialogAssist}>
+                <label className={styles.mobileField}>
+                  <span>{t('workbench:mobile.automationPanel.shortPrompt')}</span>
+                  <textarea
+                    ref={promptDraftRef}
+                    className={styles.mobileTextarea}
+                    value={promptDraft}
+                    disabled={creating || completingPrompt}
+                    placeholder={t('workbench:mobile.automationPanel.shortPromptPlaceholder')}
+                    onChange={(event) => {
+                      setPromptDraft(event.target.value);
+                      setStatus(null);
+                    }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className={styles.mobileTerminalPrimaryButton}
+                  disabled={!canCompletePrompt}
+                  onClick={() => {
+                    void handleCompletePrompt();
+                  }}
+                >
+                  {completingPrompt
+                    ? t('workbench:mobile.automationPanel.completingPrompt')
+                    : t('workbench:mobile.automationPanel.completeWithAi')}
+                </button>
+              </div>
+
+              <form
+                className={styles.mobileFormInline}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                }}
+              >
+                <label className={styles.mobileField}>
+                  <span>{t('workbench:mobile.automationPanel.fields.title')}</span>
+                  <input
+                    className={styles.mobileInput}
+                    value={title}
+                    disabled={creating || completingPrompt}
+                    placeholder={t('workbench:mobile.automationPanel.placeholders.title')}
+                    onChange={(event) => {
+                      setTitle(event.target.value);
+                      setStatus(null);
+                    }}
+                  />
+                </label>
+
+                <label className={styles.mobileField}>
+                  <span>{t('workbench:mobile.automationPanel.fields.goal')}</span>
+                  <textarea
+                    className={styles.mobileTextarea}
+                    value={goal}
+                    disabled={creating || completingPrompt}
+                    placeholder={t('workbench:mobile.automationPanel.placeholders.goal')}
+                    onChange={(event) => {
+                      setGoal(event.target.value);
+                      setStatus(null);
+                    }}
+                  />
+                </label>
+
+                <label className={styles.mobileField}>
+                  <span>{t('workbench:mobile.automationPanel.fields.acceptanceCriteria')}</span>
+                  <textarea
+                    className={styles.mobileTextarea}
+                    value={acceptanceCriteria}
+                    disabled={creating || completingPrompt}
+                    placeholder={t(
+                      'workbench:mobile.automationPanel.placeholders.acceptanceCriteria',
+                    )}
+                    onChange={(event) => {
+                      setAcceptanceCriteria(event.target.value);
+                      setStatus(null);
+                    }}
+                  />
+                </label>
+
+                <div className={styles.mobileAutomationCreateActions}>
+                  {MOBILE_AUTOMATION_CREATE_ACTIONS.map((action) => (
                     <button
+                      key={action.createAction}
                       type="button"
-                      className={styles.mobileTerminalPrimaryButton}
-                      disabled={!canCompletePrompt}
+                      className={
+                        action.createAction === 'start'
+                          ? styles.mobileTerminalPrimaryButton
+                          : styles.secondaryButton
+                      }
+                      disabled={!canSubmit}
                       onClick={() => {
-                        void handleCompletePrompt();
+                        void handleCreateTask(action.createAction, action.statusKey);
                       }}
                     >
-                      {completingPrompt
-                        ? t('workbench:mobile.automationPanel.completingPrompt')
-                        : t('workbench:mobile.automationPanel.completeWithAi')}
+                      {creatingAction === action.createAction
+                        ? t('workbench:mobile.automationPanel.creating')
+                        : t(action.labelKey)}
                     </button>
-                  </div>
-
-                  <form
-                    className={styles.mobileFormInline}
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                    }}
-                  >
-                    <label className={styles.mobileField}>
-                      <span>{t('workbench:mobile.automationPanel.fields.title')}</span>
-                      <input
-                        className={styles.mobileInput}
-                        value={title}
-                        disabled={creating || completingPrompt}
-                        placeholder={t('workbench:mobile.automationPanel.placeholders.title')}
-                        onChange={(event) => {
-                          setTitle(event.target.value);
-                          setStatus(null);
-                        }}
-                      />
-                    </label>
-
-                    <label className={styles.mobileField}>
-                      <span>{t('workbench:mobile.automationPanel.fields.goal')}</span>
-                      <textarea
-                        className={styles.mobileTextarea}
-                        value={goal}
-                        disabled={creating || completingPrompt}
-                        placeholder={t('workbench:mobile.automationPanel.placeholders.goal')}
-                        onChange={(event) => {
-                          setGoal(event.target.value);
-                          setStatus(null);
-                        }}
-                      />
-                    </label>
-
-                    <label className={styles.mobileField}>
-                      <span>{t('workbench:mobile.automationPanel.fields.acceptanceCriteria')}</span>
-                      <textarea
-                        className={styles.mobileTextarea}
-                        value={acceptanceCriteria}
-                        disabled={creating || completingPrompt}
-                        placeholder={t(
-                          'workbench:mobile.automationPanel.placeholders.acceptanceCriteria',
-                        )}
-                        onChange={(event) => {
-                          setAcceptanceCriteria(event.target.value);
-                          setStatus(null);
-                        }}
-                      />
-                    </label>
-
-                    <div className={styles.mobileAutomationCreateActions}>
-                      {MOBILE_AUTOMATION_CREATE_ACTIONS.map((action) => (
-                        <button
-                          key={action.createAction}
-                          type="button"
-                          className={
-                            action.createAction === 'start'
-                              ? styles.mobileTerminalPrimaryButton
-                              : styles.secondaryButton
-                          }
-                          disabled={!canSubmit}
-                          onClick={() => {
-                            void handleCreateTask(action.createAction, action.statusKey);
-                          }}
-                        >
-                          {creatingAction === action.createAction
-                            ? t('workbench:mobile.automationPanel.creating')
-                            : t(action.labelKey)}
-                        </button>
-                      ))}
-                    </div>
-                  </form>
+                  ))}
                 </div>
-              </div>
+              </form>
             </div>
-          ) : null}
+          </Dialog>
         </>
       ) : null}
     </section>

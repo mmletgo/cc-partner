@@ -4,8 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { sendNotification } from '@tauri-apps/plugin-notification';
-import { Button } from './components/primitives/Button';
-import { Card } from './components/primitives/Card';
+import { Button, Card, Dialog } from '@/components/primitives';
 import { AppShell } from './components/layout/AppShell';
 import { RouteErrorBoundary } from './components/layout/RouteErrorBoundary';
 import { configApi } from './api/config';
@@ -292,9 +291,11 @@ export interface BackendCloseChoiceListenerProps {
  *   - 仅在 Tauri 主窗口 label=`main` 时注册关闭监听，避免截图/健康 overlay 辅助窗口被拦截
  *   - 主窗口监听 Tauri `getCurrentWindow().onCloseRequested` 并 `preventDefault()`
  *   - 主窗口监听 Rust 托盘 emit 的 `backend:close-requested`
+ *   - 共享 Dialog 原语承载选择 UI（portal / focus trap / Escape / backdrop）
+ *   - busy（closingMode !== null）时 closeOnEscape/closeOnBackdrop=false，onClose early return
  *   - modal 中两条关闭路径都先 `await pendingWrites.flushAll()`，再 stop/exit
  *   - flush 失败保持对话框打开、复位 busy、展示 close-dialog error
- *   - hooks 全部在 early return 之前
+ *   - hooks 全部在条件渲染之前；open=false 时由 Dialog 返回 null
  */
 export function BackendCloseChoiceListener({
   initialOpenForTest = false,
@@ -368,17 +369,29 @@ export function BackendCloseChoiceListener({
     }
   };
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户取消关闭选择时必须能回到应用；但 flush/stop 进行中禁止丢弃 busy 状态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   closingMode 非 null 时 early return；否则关闭对话框并清空错误。
+   */
   const handleCancelClose = () => {
     if (closingMode !== null) return;
     setOpen(false);
     setError(null);
   };
 
-  if (!open) return null;
-
   return (
-    <div className={styles.closeDialogBackdrop} role="dialog" aria-modal="true" aria-labelledby="backend-close-title">
-      <Card variant="elevated" className={styles.closeDialog}>
+    <Dialog
+      open={open}
+      titleId="backend-close-title"
+      onClose={handleCancelClose}
+      className={styles.closeDialog}
+      closeOnEscape={closingMode === null}
+      closeOnBackdrop={closingMode === null}
+    >
+      <Card variant="elevated" className={styles.closeDialogCard}>
         <Card.Header>
           <h2 id="backend-close-title" className={styles.closeDialogTitle}>
             {t('common:backendClose.title')}
@@ -414,7 +427,7 @@ export function BackendCloseChoiceListener({
           </Button>
         </Card.Footer>
       </Card>
-    </div>
+    </Dialog>
   );
 }
 

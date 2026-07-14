@@ -104,20 +104,17 @@
   outline-offset: 2px;
 }
 
-.mobileAccessPopover {
-  position: fixed;
-  left: calc(var(--sidebar-width) + var(--space-3));
-  bottom: var(--space-5);
-  z-index: var(--z-modal);
-  width: min(360px, calc(100vw - var(--sidebar-width) - var(--space-8)));
+/* 共享 Dialog surface：窄卡片模态，承载 MobileAccessCard */
+.mobileAccessDialog {
+  width: min(360px, 100%);
   max-height: calc(100vh - var(--space-10));
   overflow: auto;
+}
+
+.mobileAccessDialogBody {
+  position: relative;
   box-sizing: border-box;
   padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  box-shadow: var(--shadow-lg);
 }
 
 .mobileAccessClose {
@@ -147,13 +144,4 @@
 
 .mobileAccessCard {
   padding-top: var(--space-3);
-}
-
-@media (max-width: 760px) {
-  .mobileAccessPopover {
-    left: var(--space-3);
-    right: var(--space-3);
-    bottom: var(--space-3);
-    width: auto;
-  }
 }
