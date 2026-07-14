@@ -1,0 +1,39 @@
+/* Dialog 原子组件样式
+ * 颜色/间距/圆角/阴影/层级全部使用 design token
+ */
+
+.root {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+}
+
+.backdrop {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in oklab, var(--bg) 72%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.surface {
+  position: relative;
+  z-index: 1;
+  width: min(720px, 100%);
+  max-height: min(760px, calc(100vh - var(--space-10)));
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-window);
+  color: var(--fg);
+  outline: none;
+}
+
+.surface:focus-visible {
+  box-shadow: var(--shadow-window), 0 0 0 2px var(--accent-soft);
+}
