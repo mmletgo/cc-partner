@@ -40,6 +40,26 @@ describe('MobileAutomationPanel', () => {
       new URL('./components/MobileAutomationPanel.tsx', import.meta.url),
       'utf8',
     );
+    const controllerSource = readFileSync(
+      new URL('./controllers/useMobileAutomationController.ts', import.meta.url),
+      'utf8',
+    );
+    const createDialogSource = readFileSync(
+      new URL('./components/MobileAutomationCreateDialog.tsx', import.meta.url),
+      'utf8',
+    );
+    const taskListSource = readFileSync(
+      new URL('./components/MobileAutomationTaskList.tsx', import.meta.url),
+      'utf8',
+    );
+    const taskDetailSource = readFileSync(
+      new URL('./components/MobileAutomationTaskDetail.tsx', import.meta.url),
+      'utf8',
+    );
+    const outboxSource = readFileSync(
+      new URL('./components/MobileAutomationOutbox.tsx', import.meta.url),
+      'utf8',
+    );
     const mobileWorkbenchSource = readFileSync(new URL('./MobileWorkbench.tsx', import.meta.url), 'utf8');
     const stylesSource = readFileSync(new URL('./MobileWorkbench.module.css', import.meta.url), 'utf8');
     const workbenchHttpSource = readFileSync(new URL('../api/workbenchHttp.ts', import.meta.url), 'utf8');
@@ -47,75 +67,125 @@ describe('MobileAutomationPanel', () => {
     const enWorkbench = readFileSync(new URL('../i18n/locales/en/workbench.json', import.meta.url), 'utf8');
     const typesSource = readFileSync(new URL('../lib/types/orchestrator.ts', import.meta.url), 'utf8');
 
+    // Ownership: views/panel must not own transport/API; controller must own transport and not Dialog JSX.
+    for (const [name, source] of [
+      ['panel', panelSource],
+      ['taskList', taskListSource],
+      ['taskDetail', taskDetailSource],
+      ['createDialog', createDialogSource],
+      ['outbox', outboxSource],
+    ] as const) {
+      assertNotContains(
+        source,
+        'httpOrchestratorTransport',
+        `${name} must not import or call httpOrchestratorTransport`,
+      );
+      assertNotContains(
+        source,
+        '@/api/',
+        `${name} must not import @/api/* modules`,
+      );
+    }
     assertContains(
-      panelSource,
+      controllerSource,
+      'httpOrchestratorTransport',
+      'controller should own orchestrator transport calls',
+    );
+    assertNotContains(
+      controllerSource,
+      '<Dialog',
+      'controller must not render Dialog JSX tree',
+    );
+    assertNotContains(
+      controllerSource,
+      'pendingRemoteItems.map',
+      'controller must not render outbox item map trees',
+    );
+    assertNotContains(
+      controllerSource,
+      'groupedTasks[workflowState].map',
+      'controller must not render task-row map trees',
+    );
+    assertContains(
+      createDialogSource,
+      '<Dialog',
+      'create dialog component should own Dialog JSX',
+    );
+
+    assertContains(
+      controllerSource,
       'const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);',
       'mobile automation task creation should use dialog open state',
     );
-    assertContains(panelSource, '<Dialog', 'mobile automation task creation should render shared Dialog');
+    assertContains(createDialogSource, '<Dialog', 'mobile automation task creation should render shared Dialog');
     assertContains(
-      panelSource,
+      createDialogSource,
       "from '@/components/primitives'",
       'mobile automation should import Dialog from primitives',
     );
-    assertContains(panelSource, 'titleId={dialogTitleId}', 'mobile automation Dialog should wire titleId');
+    assertContains(createDialogSource, 'titleId={dialogTitleId}', 'mobile automation Dialog should wire titleId');
     assertContains(
-      panelSource,
+      createDialogSource,
       'closeOnEscape={!(creating || completingPrompt)}',
       'mobile automation Dialog should block Escape while creating/completing',
     );
     assertContains(
-      panelSource,
+      createDialogSource,
       'closeOnBackdrop={!(creating || completingPrompt)}',
       'mobile automation Dialog should block backdrop close while creating/completing',
     );
     assertContains(
-      panelSource,
+      createDialogSource,
       'initialFocusRef={promptDraftRef}',
       'mobile automation Dialog should focus short prompt on open',
     );
     assertNotContains(
-      panelSource,
+      createDialogSource,
       'role="dialog"',
       'mobile automation should not hand-write dialog role',
     );
     assertNotContains(
-      panelSource,
+      createDialogSource,
       'aria-modal="true"',
       'mobile automation should not hand-write aria-modal',
     );
     assertNotContains(
-      panelSource,
+      createDialogSource,
       "window.addEventListener('keydown'",
       'mobile automation Escape should be owned by Dialog, not local listener',
-    )
-    assertContains(
+    );
+    assertNotContains(
       panelSource,
+      'role="dialog"',
+      'panel should not hand-write dialog role',
+    );
+    assertContains(
+      controllerSource,
       'httpOrchestratorTransport.tasks.completePrompt',
       'mobile automation task creation should call AI prompt completion through HTTP transport',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'httpOrchestratorTransport.tasks.listViews',
       'mobile automation should list local or remote tasks through task view HTTP proxy',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'httpOrchestratorTransport.outbox.retry',
       'mobile automation should retry failed outbox through local HTTP route',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'httpOrchestratorTransport.outbox.discard',
       'mobile automation should discard failed outbox through local HTTP route',
     );
     assertContains(
-      panelSource,
+      outboxSource,
       "item.status === 'failed'",
       'mobile outbox actions should render only for failed status',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       "window.confirm(t('workbench:mobile.automationPanel.pendingDiscardConfirm'))",
       'mobile discard should require confirmation',
     );
@@ -131,22 +201,22 @@ describe('MobileAutomationPanel', () => {
     );
 
     assertContains(
-      panelSource,
+      controllerSource,
       'httpOrchestratorTransport.getRuntimeSnapshot',
       'mobile automation should load remote-aware runtime snapshot through mobile HTTP route',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'applyMobileRuntimeSnapshotSuccess',
       'mobile automation should apply in-memory runtime snapshot cache store',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'toRuntimeLoadError',
       'mobile automation runtime load catch must preserve transport Error kind via toRuntimeLoadError',
     );
     assertNotContains(
-      panelSource,
+      controllerSource,
       'new Error(getErrorMessage(reason))',
       'mobile automation must not rewrap runtime load errors and drop transport kind',
     );
@@ -206,32 +276,32 @@ describe('MobileAutomationPanel', () => {
       'mobile automation should mark offline cached runtime as display-only',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       "runtimeDisplay.snapshot?.remoteStatus === 'local'",
       'mobile automation local success must use local status label',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'runtimeStatusLocal',
       'mobile automation must reference runtimeStatusLocal for local snapshots',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'runtimeDisplay.cachedAt !== null',
       'mobile automation cached hint requires warm offline snapshot+cachedAt',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'selectMobileRuntimeDisplayForProject',
       'mobile automation must isolate runtime display by project on first render',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'emptyMobileRuntimeDisplayState(true, null, projectId)',
       'project change must synchronously reset runtime display owned by new projectId',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'OwnedMobileRuntimeDisplayState',
       'mobile runtime display state must carry owning projectId',
     );
@@ -256,7 +326,7 @@ describe('MobileAutomationPanel', () => {
       'en local runtime label must exist',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'loadRuntimeSnapshot(projectId)',
       'mobile automation should refresh runtime snapshot with tasks',
     );
@@ -266,32 +336,32 @@ describe('MobileAutomationPanel', () => {
       'HTTP transport should call mobile runtime-snapshot route rather than owner P2P base URL',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'httpOrchestratorTransport.tasks.createView',
       'mobile automation should create local or remote tasks through task view HTTP proxy',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'splitOrchestratorTaskViews(taskViews)',
       'mobile automation should split task-view data into real tasks and pending remote outbox',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'MOBILE_AUTOMATION_WORKFLOW_STATES',
       'mobile automation should render compact groups by task.workflowState',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'groupedTasks[task.task.workflowState].push(task)',
       'mobile automation grouping must use workflowState rather than legacy status',
     );
     assertContains(
-      panelSource,
+      outboxSource,
       'pendingRemoteItems.map',
       'mobile automation pending remote outbox should render in a separate list',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'setSelectedTaskView(view)',
       'mobile automation should support click-to-expand task details instead of drag interactions',
     );
@@ -300,48 +370,53 @@ describe('MobileAutomationPanel', () => {
       'draggable=',
       'mobile automation must not implement horizontal drag/drop board behavior',
     );
+    assertNotContains(
+      taskListSource,
+      'draggable=',
+      'task list must not implement horizontal drag/drop board behavior',
+    );
     assertContains(
-      panelSource,
+      controllerSource,
       'httpOrchestratorTransport.tasks.listEvidence',
       'mobile automation details should load task evidence through HTTP transport',
     );
     assertContains(
-      panelSource,
+      taskListSource,
       'lastRuntimeMessage',
       'mobile automation rows should show runtime summary with lastRuntimeMessage',
     );
     assertContains(
-      panelSource,
+      taskListSource,
       'claudeSessionId',
       'mobile automation rows should show Claude session runtime metadata',
     );
     assertContains(
-      panelSource,
+      taskListSource,
       'transcriptPath',
       'mobile automation rows should show transcript runtime metadata',
     );
     assertContains(
-      panelSource,
+      taskDetailSource,
       'blockedReason',
       'mobile automation detail should show blocked reason when available',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'workbench:mobile.automationPanel.unknown',
       'mobile automation runtime metadata should use localized unknown fallback',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       "createAction: 'backlog'",
       'mobile automation create dialog should support create-to-backlog action',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       "createAction: 'todo'",
       'mobile automation create dialog should support create-to-todo action',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       "createAction: 'start'",
       'mobile automation create dialog should support create-and-start action',
     );
@@ -356,17 +431,22 @@ describe('MobileAutomationPanel', () => {
       'MobileWorkbench should let automation details switch to the existing terminal panel',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'onOpenExecutionContext',
-      'MobileAutomationPanel should expose open-terminal action through a callback prop',
+      'MobileAutomationPanel controller should expose open-terminal action through a callback prop',
     );
     assertContains(
       panelSource,
+      'MobileAutomationPanelProps',
+      'MobileAutomationPanel should re-export panel props type for MobileWorkbench imports',
+    );
+    assertContains(
+      controllerSource,
       'projectId,',
       'mobile AI completion should include projectId so the HTTP route can proxy remote projects',
     );
     assertContains(
-      panelSource,
+      createDialogSource,
       'workbench:mobile.automationPanel.completeWithAi',
       'mobile automation task creation should expose localized AI completion action',
     );
@@ -432,6 +512,10 @@ describe('MobileAutomationPanel', () => {
       new URL('./components/MobileAutomationPanel.tsx', import.meta.url),
       'utf8',
     );
+    const controllerSource = readFileSync(
+      new URL('./controllers/useMobileAutomationController.ts', import.meta.url),
+      'utf8',
+    );
     const desktopHookSource = readFileSync(
       new URL('../hooks/useOrchestratorRuntimeSnapshot.ts', import.meta.url),
       'utf8',
@@ -456,6 +540,16 @@ describe('MobileAutomationPanel', () => {
       panelSource,
       'sessionStorage',
       'MobileAutomationPanel must not touch sessionStorage for runtime cache',
+    );
+    assertNotContains(
+      controllerSource,
+      'localStorage',
+      'controller must not touch localStorage for runtime cache',
+    );
+    assertNotContains(
+      controllerSource,
+      'sessionStorage',
+      'controller must not touch sessionStorage for runtime cache',
     );
     assertNotContains(
       desktopHookSource,
@@ -496,31 +590,30 @@ describe('MobileAutomationPanel', () => {
     );
     // 面板任务动作走 task view transport；runtime snapshot 只出现在状态条文案，不驱动 create/start。
     assertContains(
-      panelSource,
+      controllerSource,
       'httpOrchestratorTransport.tasks.listViews',
       'actions path continues to use task views transport',
     );
     assertContains(
-      panelSource,
+      controllerSource,
       'httpOrchestratorTransport.tasks.createView',
       'create actions use task createView, not runtime snapshot cache',
     );
     assertNotContains(
-      panelSource,
+      controllerSource,
       'canStartOrchestratorTaskForProject(runtime',
       'start availability must not be computed from runtime snapshot cache',
     );
     // 状态条文案可读取 runtimeDisplay.snapshot；任务动作 gate 不得用 snapshot 真值分支。
     assertNotContains(
-      panelSource,
+      controllerSource,
       'if (runtimeDisplay.snapshot) {',
       'task action gates must not branch on runtimeDisplay.snapshot truthiness',
     );
     assertNotContains(
-      panelSource,
+      controllerSource,
       'canStartOrchestratorTaskForProject(runtimeDisplay.snapshot',
       'start action must not consume runtimeDisplay.snapshot',
     );
-
   });
 });
