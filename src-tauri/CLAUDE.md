@@ -72,7 +72,7 @@ migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，�
 
 ## Orchestrator 基础约定（src/orchestrator/）
 
-- **模块边界（S6 Task 8）**：`orchestrator/repo/` 为目录模块（`mod/schema/tasks/attempts/evidence/remote` + `tests`），公共类型仍为 `crate::orchestrator::repo::{OrchestratorRepo,IdempotentCreateTaskOutcome,...}`。`commands/orchestrator/` 与 `commands/workbench/` 同为目录模块（`pub use` 再导出，Tauri 命令名不变）；`orchestrator_config.rs` / `workbench_dependencies.rs` 保持独立。
+- **模块边界（S6 Task 8）**：`orchestrator/repo/` 为目录模块（`mod/schema/tasks/attempts/evidence/remote` + `tests`），公共类型仍为 `crate::orchestrator::repo::{OrchestratorRepo,IdempotentCreateTaskOutcome,...}`。`commands/orchestrator/` 为目录模块：叶模块只依赖 `common` + 窄 sibling 导入（禁止兄弟 glob 循环），`mod.rs` 显式 re-export Tauri 命令（含 `__cmd__`/`__tauri_command_name_`）、pub DTO 与 `pub(crate)` helper，命令名不变；`commands/workbench/` 同为目录模块；`orchestrator_config.rs` / `workbench_dependencies.rs` 保持独立。
 
 
 - **功能定位**：Orchestrator 是内置自动编排器的后端层，当前负责任务模型、状态机、SQLite schema/repo、设备级自动化配置读写、legacy `orchestrator_project_config` 存储/兼容/调试接口、基础任务命令、全局 scheduler、Workbench 可见 Runner、任务 Prompt 生成、开发完成哨兵检测、验证命令、Claude verifier 修复循环、full-auto 交付和 evidence 归档；Workbench query deep link 不属于后端交付语义。
