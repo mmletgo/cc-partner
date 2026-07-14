@@ -258,6 +258,8 @@
     "downloadCancelled": "下载已取消",
     "redownload": "重新下载",
     "noAsset": "未找到当前平台的安装包，请前往 GitHub Releases 手动下载。",
+    "retryInstall": "重试安装",
+    "installFailed": "安装失败",
     "checkingHint": "正在检查更新…",
     "cancel": "取消"
   },

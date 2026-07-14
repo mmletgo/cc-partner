@@ -10,7 +10,8 @@
 //!         DB 无行时返回空 DTO（content/updatedAt 为空串，vectorClock 为空 map）。
 //!     `update_claude_md`：先 create_dir_all + write 文件，再推进 vector_clock，
 //!         upsert DB 行后返回 DTO（update 刚写过文件，无需再对账）。
-//!     `push_claude_md`：先把前端当前内容保存为本机版本，再推送到局域网设备和 GitHub 云端。
+//!     `push_claude_md`：先把前端当前内容保存为本机版本，再推送到局域网设备和 GitHub 云端
+//!         （云端推送经 CloudSyncRuntime Wait 门闸，与完整 sync 串行）。
 //!     返回类型用 camelCase 的 `ClaudeMdDto`，对齐前端 TS 类型。
 
 use crate::error::AppError;

@@ -482,3 +482,13 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 | POST | /api/workbench/sessions/* | Workbench terminal window/pane 列表、创建、replay、输入、resize、focus、分屏、关闭和重命名 |
 | POST | /api/workbench/prompt-optimizer/stream-to-session | P2P Workbench 远端网关 Prompt 优化并流式写入对端 local 终端 |
 | GET/POST | /api/mobile/workbench/* | Mobile Workbench 本机入口；可继续代理 remote shortcut 的 worktree、terminal、files、Git 和 Prompt 操作 |
+
+
+## 事务化配置与运行时
+
+- 配置写入经统一事务路径原子落盘；失败不改变内存与旧文件
+- Cloud Sync 同一工作区单飞：手动/CLAUDE.md 推送可等待最多 5 分钟，自动同步忙时跳过
+- 截图快捷键热更新：先注册新值再注销旧值；配置保存失败则恢复旧快捷键，无法恢复时提示重启
+- 应用内更新：检查/下载/安装使用 generation 状态机；安装失败可保留已下载包重试
+- 健康提醒：数值与免打扰格式由后端强制校验；非法输入不改变已保存配置与运行时状态
+- 本能力不涉及 SQLite schema 变更

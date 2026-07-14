@@ -9,12 +9,16 @@
 //! Code Logic（这个模块做什么）:
 //!     用 `Arc` 内部可变（config 用 RwLock 因可写；device_id 只读故 String 足够），
 //!     整体 Clone 廉价（Arc 引用计数），满足 Tauri manage/State 与 axum State 的要求。
+//!     `config` 与 `config_runtime.value` 共享同一 `Arc<RwLock<AppConfig>>`；生产 writer 走
+//!     `config_runtime` 事务路径，读路径可继续用廉价 `config` 读锁。
 //!     devices 用 RwLock<HashMap>（发现写入 / 命令读取并发）；
 //!     actual_http_port 用 AtomicU16（启动后高频只读，无锁更高效）；
 //!     discovery 句柄用 Mutex<Option<...>>（仅启动/关闭时写）。
 
 use crate::backend::ui::{serialize_event_payload, BackendAsset, BackendUi};
+use crate::cloud_sync::CloudSyncRuntime;
 use crate::config::AppConfig;
+use crate::config_runtime::ConfigRuntime;
 use crate::models::device::Device;
 use crate::net::peer_client::PeerClient;
 use crate::orchestrator::repo::OrchestratorRepo;
@@ -24,20 +28,21 @@ use crate::storage::{
     WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
 };
 use crate::transfer::registry::TransferRegistry;
+use crate::updater::UpdateRuntime;
 use mdns_sd::ServiceDaemon;
 use serde::Serialize;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, RwLock};
-use tauri::async_runtime::JoinHandle;
-use tauri_plugin_updater::Update;
 
 /// 应用全局共享状态。Clone 仅增加 Arc 引用计数。
 #[derive(Clone)]
 pub struct AppState {
-    /// 配置（前端可写 deviceName/receiveDir/screenshotHotkey，故 RwLock）
+    /// 配置读路径（与 `config_runtime.value` 共享同一 Arc，禁止旁路 save）
     pub config: Arc<RwLock<AppConfig>>,
+    /// 配置串行事务运行时（生产 writer 唯一入口）
+    pub config_runtime: Arc<ConfigRuntime>,
     /// SQLite 连接池（M3+ axum server 共享此 pool；M1 仅 prompt_repo 通过独立 clone 使用）
     #[allow(dead_code)]
     pub db: SqlitePool,
@@ -64,19 +69,8 @@ pub struct AppState {
     pub transfers: Arc<TransferRegistry>,
     /// 后端 UI adapter（GUI 使用 Tauri，headless 使用 filesystem/no-op）
     pub ui: Arc<dyn BackendUi>,
-    /// M8 更新下载状态机（status/progress/error/filePath/url/filename/size），对齐前端 UpdateDownloadStatus，
-    /// 前端 get_download_status 轮询读取
-    pub update_status: Arc<RwLock<crate::commands::updater::UpdateDownloadStatus>>,
-    /// M8 check_update 命中新版本后缓存的 Update 对象（download/install 时取出 clone 操作），
-    /// 避免跨命令重复请求 endpoint。Update 实现 Clone，owned 无生命周期参数，可安全长期持有
-    pub update_pending: Arc<Mutex<Option<Update>>>,
-    /// M8 download 完成后缓存的安装包字节（install 时取出喂给 update.install）。
-    /// tauri-plugin-updater 的 install 接受 &[u8]，下载结果需跨命令传递
-    pub update_bytes: Arc<Mutex<Option<Vec<u8>>>>,
-    /// M8 正在进行的下载任务句柄（cancel_download 时 abort 强制中断 reqwest 流）
-    pub update_download_task: Arc<Mutex<Option<JoinHandle<()>>>>,
-    /// M8 当前下载任务的取消令牌（cancel_download 时 cancel()，spawn 体内 is_cancelled 判定为 Cancelled）
-    pub update_cancel_token: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// M8 自动更新 generation 状态机（单锁聚合 status/pending/bytes/task/token）
+    pub update_runtime: Arc<UpdateRuntime>,
     /// Claude Code 历史仓库（claude_history / claude_history_scan_state 表访问）
     pub cc_history_repo: Arc<ClaudeHistoryRepo>,
     /// SSH 目标仓库（ssh_targets 表访问，跨设备同步）
@@ -109,6 +103,8 @@ pub struct AppState {
         Arc<crate::workbench::dependencies::WorkbenchDependencyInstallRuntime>,
     /// CC 历史采集器的取消令牌（应用退出时 cancel 优雅停止后台扫描任务）
     pub cc_collector_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// 云端同步（GitHub 私有仓库）工作区单飞门闸（手动/scheduler/CLAUDE.md push 共享）
+    pub cloud_sync_runtime: Arc<CloudSyncRuntime>,
     /// 云端同步（GitHub 私有仓库）后台 scheduler 的取消令牌（应用退出时 cancel 优雅停止）
     pub cloud_sync_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// 健康提醒运行时共享状态（状态机 + 贪睡/暂停标记，daemon task 与命令层共享同一份）

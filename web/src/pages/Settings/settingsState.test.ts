@@ -1,5 +1,5 @@
 import { describe, test } from 'vitest';
-import type { AppConfig, HealthConfig } from '../../lib/types';
+import type { AppConfig, HealthConfig, UpdateDownloadStatus } from '../../lib/types';
 import {
   PENDING_HEALTH_FORM,
   buildConfigUpdate,
@@ -7,12 +7,17 @@ import {
   cloudSyncFormToUpdate,
   githubTrendingConfigToForm,
   healthConfigToForm,
+  installButtonMode,
   isSettingsStateDirty,
+  isUpdateCheckDisabled,
+  isUpdateDownloadDisabled,
   parseSettingsTabFromSearch,
   promptOptimizerSettingsConfigToForm,
   promptOptimizerSettingsFormToUpdate,
   resolveSettingsTabId,
   settingsStateFromConfig,
+  shouldPollUpdateStatus,
+  shouldShowInstallRetry,
 } from './settingsState';
 
 /**
@@ -240,6 +245,164 @@ describe('settings tab deep link helpers', () => {
     }
     if (parseSettingsTabFromSearch('?tab=unknown') !== 'general') {
       throw new Error('expected unknown to fall back');
+    }
+  });
+});
+
+
+/**
+ * Business Logic（为什么需要）:
+ *   Updater UI 决策 helper 必须对 checking/installing/install-retry 边界做纯函数断言，避免 Settings 页回归。
+ *
+ * Code Logic（做什么）:
+ *   构造最小 UpdateDownloadStatus 夹具，覆盖 disable / retry / poll / button mode。
+ */
+function updateStatusFixture(
+  partial: Partial<UpdateDownloadStatus> & Pick<UpdateDownloadStatus, 'status'>,
+): UpdateDownloadStatus {
+  return {
+    progress: 0,
+    error: '',
+    filePath: '',
+    url: '',
+    filename: '',
+    size: 0,
+    ...partial,
+  };
+}
+
+describe('updater UI helpers', () => {
+  test('disables check during local checking or backend checking/installing', () => {
+    if (!isUpdateCheckDisabled({ checkingUpdate: true, downloadStatus: null })) {
+      throw new Error('expected disabled when checkingUpdate');
+    }
+    if (
+      !isUpdateCheckDisabled({
+        checkingUpdate: false,
+        downloadStatus: updateStatusFixture({ status: 'checking' }),
+      })
+    ) {
+      throw new Error('expected disabled when status=checking');
+    }
+    if (
+      !isUpdateCheckDisabled({
+        checkingUpdate: false,
+        downloadStatus: updateStatusFixture({ status: 'installing' }),
+      })
+    ) {
+      throw new Error('expected disabled when status=installing');
+    }
+    if (
+      isUpdateCheckDisabled({
+        checkingUpdate: false,
+        downloadStatus: updateStatusFixture({ status: 'completed' }),
+      })
+    ) {
+      throw new Error('expected enabled when completed');
+    }
+  });
+
+  test('disables download during checking/installing/downloading', () => {
+    if (!isUpdateDownloadDisabled({ checkingUpdate: true, downloadStatus: null })) {
+      throw new Error('expected disabled when checkingUpdate');
+    }
+    for (const status of ['checking', 'installing', 'downloading'] as const) {
+      if (
+        !isUpdateDownloadDisabled({
+          checkingUpdate: false,
+          downloadStatus: updateStatusFixture({ status }),
+        })
+      ) {
+        throw new Error(`expected disabled when status=${status}`);
+      }
+    }
+    if (
+      isUpdateDownloadDisabled({
+        checkingUpdate: false,
+        downloadStatus: updateStatusFixture({ status: 'completed' }),
+      })
+    ) {
+      throw new Error('expected enabled when completed');
+    }
+  });
+
+  test('shouldShowInstallRetry only for completed with non-empty error', () => {
+    if (
+      !shouldShowInstallRetry(
+        updateStatusFixture({ status: 'completed', error: 'signature failed' }),
+      )
+    ) {
+      throw new Error('expected retry for completed+error');
+    }
+    if (shouldShowInstallRetry(updateStatusFixture({ status: 'completed', error: '' }))) {
+      throw new Error('expected no retry for completed empty error');
+    }
+    if (shouldShowInstallRetry(updateStatusFixture({ status: 'completed', error: '   ' }))) {
+      throw new Error('expected no retry for whitespace-only error');
+    }
+    if (
+      shouldShowInstallRetry(
+        updateStatusFixture({ status: 'failed', error: 'network down' }),
+      )
+    ) {
+      throw new Error('expected no install retry for failed download');
+    }
+    if (shouldShowInstallRetry(null)) {
+      throw new Error('expected no retry for null');
+    }
+  });
+
+  test('shouldPollUpdateStatus only for checking/downloading/installing', () => {
+    for (const status of ['checking', 'downloading', 'installing'] as const) {
+      if (!shouldPollUpdateStatus(updateStatusFixture({ status }))) {
+        throw new Error(`expected poll for ${status}`);
+      }
+    }
+    for (const status of ['idle', 'completed', 'failed', 'cancelled'] as const) {
+      if (shouldPollUpdateStatus(updateStatusFixture({ status }))) {
+        throw new Error(`expected no poll for ${status}`);
+      }
+    }
+    if (shouldPollUpdateStatus(null)) {
+      throw new Error('expected no poll for null');
+    }
+  });
+
+  test('installButtonMode covers install / installing / retryInstall', () => {
+    if (
+      installButtonMode({
+        installing: true,
+        downloadStatus: updateStatusFixture({ status: 'completed' }),
+      }) !== 'installing'
+    ) {
+      throw new Error('expected installing when local installing');
+    }
+    if (
+      installButtonMode({
+        installing: false,
+        downloadStatus: updateStatusFixture({ status: 'installing' }),
+      }) !== 'installing'
+    ) {
+      throw new Error('expected installing when status=installing');
+    }
+    if (
+      installButtonMode({
+        installing: false,
+        downloadStatus: updateStatusFixture({
+          status: 'completed',
+          error: 'install boom',
+        }),
+      }) !== 'retryInstall'
+    ) {
+      throw new Error('expected retryInstall for completed+error');
+    }
+    if (
+      installButtonMode({
+        installing: false,
+        downloadStatus: updateStatusFixture({ status: 'completed', error: '' }),
+      }) !== 'install'
+    ) {
+      throw new Error('expected install for completed empty error');
     }
   });
 });

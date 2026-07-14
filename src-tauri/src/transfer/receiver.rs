@@ -3856,9 +3856,15 @@ mod tests {
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
         };
+        let store = Arc::new(crate::config_store::MemoryConfigStore::with_config(
+            config.clone(),
+        ));
+        let config_runtime = Arc::new(crate::config_runtime::ConfigRuntime::new(config, store));
+        let config = config_runtime.shared_value();
 
         AppState {
-            config: Arc::new(RwLock::new(config)),
+            config,
+            config_runtime,
             db: pool.clone(),
             prompt_repo: Arc::new(PromptRepo::new(pool.clone())),
             transfer_repo: Arc::new(TransferRepo::new(pool.clone())),
@@ -3872,13 +3878,7 @@ mod tests {
             peer_client: Arc::new(PeerClient::new()),
             transfers: Arc::new(TransferRegistry::new()),
             ui: Arc::new(HeadlessBackendUi::new(receive_dir.join("dist"))),
-            update_status: Arc::new(RwLock::new(
-                crate::commands::updater::UpdateDownloadStatus::default(),
-            )),
-            update_pending: Arc::new(Mutex::new(None)),
-            update_bytes: Arc::new(Mutex::new(None)),
-            update_download_task: Arc::new(Mutex::new(None)),
-            update_cancel_token: Arc::new(Mutex::new(None)),
+            update_runtime: Arc::new(crate::updater::UpdateRuntime::new()),
             cc_history_repo: Arc::new(ClaudeHistoryRepo::new(pool.clone())),
             workbench_project_repo: Arc::new(WorkbenchProjectRepo::new(pool.clone())),
             workbench_session_repo: Arc::new(WorkbenchSessionRepo::new(pool.clone())),
@@ -3901,6 +3901,7 @@ mod tests {
                 crate::workbench::dependencies::WorkbenchDependencyInstallRuntime::new(),
             ),
             cc_collector_cancel: Arc::new(Mutex::new(None)),
+            cloud_sync_runtime: Arc::new(crate::cloud_sync::CloudSyncRuntime::new()),
             cloud_sync_cancel: Arc::new(Mutex::new(None)),
             health: Arc::new(crate::health::HealthRuntime::new()),
             health_repo: Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone())),

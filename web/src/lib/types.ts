@@ -1332,17 +1332,23 @@ export interface UpdateCheckResult {
   error?: string;
 }
 
-/** 更新下载状态机状态值 */
+/**
+ * 更新下载/安装状态机状态值（对齐后端 get_download_status）。
+ * checking：检查更新中；downloading：下载中；completed：下载完成可安装（若 error 非空表示安装失败可重试）；
+ * installing：安装中；failed/cancelled：下载失败/取消；idle：空闲。
+ */
 export type UpdateDownloadStatusValue =
   | 'idle'
+  | 'checking'
   | 'downloading'
   | 'completed'
+  | 'installing'
   | 'failed'
   | 'cancelled';
 
 export interface UpdateDownloadStatus {
   status: UpdateDownloadStatusValue;
-  /** 下载进度 0.0 ~ 1.0 */
+  /** 下载进度 0.0 ~ 1.0；installing 阶段不应伪造进度条 */
   progress: number;
   error: string;
   filePath: string;

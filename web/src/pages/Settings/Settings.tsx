@@ -62,7 +62,10 @@ import {
   createPendingSettingsState,
   githubTrendingConfigToForm,
   healthConfigToForm,
+  installButtonMode,
   isSettingsStateDirty,
+  isUpdateCheckDisabled,
+  isUpdateDownloadDisabled,
   PENDING_CLOUD_SYNC_FORM,
   PENDING_GITHUB_TRENDING_FORM,
   PENDING_HEALTH_FORM,
@@ -71,6 +74,8 @@ import {
   promptOptimizerSettingsFormToUpdate,
   settingsStateFromConfig,
   parseSettingsTabFromSearch,
+  shouldPollUpdateStatus,
+  shouldShowInstallRetry,
 } from './settingsState';
 import type {
   CloudSyncForm,
@@ -339,10 +344,10 @@ export function Settings() {
     }
   }, []);
 
-  // 仅在 downloading 时启用可见性感知 800ms 轮询（T1 hook）
+  // checking/downloading/installing 时启用可见性感知 800ms 轮询；终态停止
   useVisibilityPolling(pollDownloadStatus, {
     intervalMs: 800,
-    enabled: downloadStatus?.status === 'downloading',
+    enabled: shouldPollUpdateStatus(downloadStatus),
     runImmediately: true,
   });
 
@@ -404,6 +409,28 @@ export function Settings() {
     () => buildUpdateHint(updateResult, checkingUpdate, t),
     [updateResult, checkingUpdate, t],
   );
+
+  // 检查/下载按钮禁用：checking 或 installing 期间不可并发触发
+  const updateCheckDisabled = useMemo(
+    () => isUpdateCheckDisabled({ checkingUpdate, downloadStatus }),
+    [checkingUpdate, downloadStatus],
+  );
+  const updateDownloadDisabled = useMemo(
+    () => isUpdateDownloadDisabled({ checkingUpdate, downloadStatus }),
+    [checkingUpdate, downloadStatus],
+  );
+  const updateInstallRetry = useMemo(
+    () => shouldShowInstallRetry(downloadStatus),
+    [downloadStatus],
+  );
+  const updateInstallMode = useMemo(
+    () => installButtonMode({ installing, downloadStatus }),
+    [installing, downloadStatus],
+  );
+  const updateIsInstalling =
+    installing || downloadStatus?.status === 'installing';
+  const updateIsChecking =
+    checkingUpdate || downloadStatus?.status === 'checking';
 
   /**
    * 通用字段更新：merge 浅层部分字段
@@ -912,7 +939,7 @@ export function Settings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /**
+/**
    * 启动更新下载：透传检查结果的 downloadUrl/filename，立即进入 downloading 状态
    */
   const handleDownload = async () => {
@@ -957,14 +984,34 @@ export function Settings() {
   };
 
   /**
-   * 安装已下载的更新包并重启（进程随后退出）
+   * 安装已下载的更新包并重启（进程随后退出）。
+   * 失败时刷新 getDownloadStatus，以展示 completed + error 的重试安装态。
    */
   const handleInstall = async () => {
     setInstalling(true);
+    // 乐观进入 installing，禁用检查/下载并显示安装中文案；不伪造进度条
+    setDownloadStatus((prev) =>
+      prev
+        ? { ...prev, status: 'installing', error: '' }
+        : {
+            status: 'installing',
+            progress: 0,
+            error: '',
+            filePath: '',
+            url: '',
+            filename: '',
+            size: 0,
+          },
+    );
     try {
       await configApi.installUpdate();
     } catch {
-      // 安装失败静默，用户可重试
+      try {
+        const status = await configApi.getDownloadStatus();
+        setDownloadStatus(status);
+      } catch {
+        // 刷新失败时保留 installing 前状态由下一轮轮询/用户重试覆盖
+      }
     } finally {
       setInstalling(false);
     }
@@ -2268,9 +2315,9 @@ export function Settings() {
                 size="md"
                 icon={<SyncIcon />}
                 onClick={handleCheckUpdate}
-                disabled={checkingUpdate}
+                disabled={updateCheckDisabled}
               >
-                {checkingUpdate ? t('settings:about.checking') : t('settings:about.checkUpdate')}
+                {updateIsChecking ? t('settings:about.checking') : t('settings:about.checkUpdate')}
               </Button>
               <span className={styles.aboutHint}>
                 <InfoIcon size={14} />
@@ -2278,7 +2325,7 @@ export function Settings() {
               </span>
             </div>
 
-            {/* 发现新版本时展示：版本说明 + 下载/进度/安装 */}
+            {/* 发现新版本时展示：版本说明 + 下载/进度/安装；installing 不伪造进度条 */}
             {updateResult?.hasUpdate ? (
               <div className={styles.updateBlock}>
                 <div className={styles.metaRow}>
@@ -2309,18 +2356,40 @@ export function Settings() {
                       {t('settings:about.cancel')}
                     </Button>
                   </div>
-                ) : downloadStatus?.status === 'completed' ? (
+                ) : downloadStatus?.status === 'installing' || updateIsInstalling ? (
                   <div className={styles.updateActions}>
                     <Button
                       variant="primary"
                       size="sm"
                       icon={<DownloadIcon size={14} />}
-                      onClick={handleInstall}
-                      disabled={installing}
+                      disabled
                     >
-                      {installing ? t('settings:about.installing') : t('settings:about.installAndRestart')}
+                      {t('settings:about.installing')}
                     </Button>
-                    <span className={styles.aboutHint}>{t('settings:about.downloadCompleted')}</span>
+                    <span className={styles.aboutHint}>{t('settings:about.installing')}</span>
+                  </div>
+                ) : downloadStatus?.status === 'completed' ? (
+                  <div className={styles.updateActions}>
+                    {updateInstallRetry ? (
+                      <span className={styles.updateError}>
+                        {downloadStatus.error || t('settings:about.installFailed')}
+                      </span>
+                    ) : (
+                      <span className={styles.aboutHint}>{t('settings:about.downloadCompleted')}</span>
+                    )}
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      icon={<DownloadIcon size={14} />}
+                      onClick={handleInstall}
+                      disabled={updateIsInstalling}
+                    >
+                      {updateInstallMode === 'installing'
+                        ? t('settings:about.installing')
+                        : updateInstallMode === 'retryInstall'
+                          ? t('settings:about.retryInstall')
+                          : t('settings:about.installAndRestart')}
+                    </Button>
                   </div>
                 ) : downloadStatus?.status === 'failed' ? (
                   <div className={styles.updateActions}>
@@ -2332,6 +2401,7 @@ export function Settings() {
                       size="sm"
                       icon={<DownloadIcon size={14} />}
                       onClick={handleDownload}
+                      disabled={updateDownloadDisabled}
                     >
                       {t('settings:about.retryDownload')}
                     </Button>
@@ -2344,6 +2414,7 @@ export function Settings() {
                       size="sm"
                       icon={<DownloadIcon size={14} />}
                       onClick={handleDownload}
+                      disabled={updateDownloadDisabled}
                     >
                       {t('settings:about.redownload')}
                     </Button>
@@ -2355,6 +2426,7 @@ export function Settings() {
                       size="sm"
                       icon={<DownloadIcon size={14} />}
                       onClick={handleDownload}
+                      disabled={updateDownloadDisabled}
                     >
                       {t('settings:about.downloadUpdate', { size: formatSize(updateResult.size ?? 0) })}
                     </Button>

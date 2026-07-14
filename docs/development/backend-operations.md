@@ -246,3 +246,14 @@ Scripting tip: check process exit first; only then parse stdout as JSON for `doc
 - Product overview & quick CLI: [`README.md`](../../README.md)
 - Quality gates & smoke matrix: [`testing.md`](testing.md)
 - Backend engineering detail: [`src-tauri/CLAUDE.md`](../../src-tauri/CLAUDE.md)
+
+
+## 配置与事务化运行时
+
+- 权威配置文件：`<data_dir>/config.json`（可用 `CC_PARTNER_DATA_DIR` 隔离）。
+- 写入顺序固定为 clone→mutate→validate→temp→fsync→re-read→atomic replace→dir fsync→memory swap。
+- 故障注入：单元测试通过 `FaultInjectingConfigIo` 覆盖 create/write/flush/file-sync/rename/directory-sync；生产无对外故障注入开关。
+- Cloud Sync：手动与 CLAUDE.md 推送 `Wait 300s`；scheduler `ReturnBusy` + `skippedBusy`。
+- Updater 状态机在进程内，不持久化安装包字节。
+- Health 非法磁盘配置：daemon 跳过提醒/清理本 tick，不 panic。
+- **无** 本主题相关 SQLite 迁移/回滚脚本。

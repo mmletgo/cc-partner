@@ -12,6 +12,7 @@
 //!     - `save()` 序列化为紧凑 JSON（UTF-8，中文不转义）写回。
 //!     - macOS 下把旧配置里的 `<ctrl>` 快捷键迁移为 `<cmd>`（对齐 Python 行为）。
 
+use crate::config_store::ConfigStore;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -193,7 +194,13 @@ pub fn backend_log_path() -> Result<PathBuf, AppError> {
 }
 
 /// 配置文件完整路径：`~/.cc-partner/config.json`
-fn config_file_path() -> Result<PathBuf, AppError> {
+///
+/// Business Logic（为什么需要这个函数）:
+///     ConfigStore / 诊断路径需要与 load/save 使用同一权威文件位置。
+///
+/// Code Logic（这个函数做什么）:
+///     基于 `config_dir()` 拼接 `config.json`。
+pub(crate) fn config_file_path() -> Result<PathBuf, AppError> {
     Ok(config_dir()?.join("config.json"))
 }
 
@@ -563,7 +570,7 @@ impl Default for GithubTrendingConfig {
 /// Code Logic（这个结构做什么）:
 ///     纯数据载体(serde Serialize/Deserialize),字段 snake_case 落盘。`Default` 提供全套默认;
 ///     各 `default_*` 函数供 serde 在单字段缺失时回退(与 Default 字面值一致)。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthConfig {
     /// 久坐监测总开关,默认开启(用户决策:装好即生效)
     #[serde(default = "default_true")]
@@ -715,18 +722,83 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    /// 加载配置；文件不存在则生成默认配置并保存。
+    /// 校验配置是否满足运行时不变量。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     非法配置（空 device_id、超范围 Health 参数、不可解析快捷键等）若被写入，会导致
+    ///     启动异常或 daemon 行为不可预期；事务更新必须在落盘前拒绝。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     校验 device/path/port/cloud/hotkey/Health/Orchestrator 范围；规范化空 cloud URL/branch
+    ///     为 None（通过 `&mut self` 就地 trim）；`CC_PARTNER_DATA_DIR` 生效时检查 db 隔离。
+    pub fn validate(&mut self) -> Result<(), AppError> {
+        if self.device_id.trim().is_empty() {
+            return Err(AppError::validation("device_id 不能为空"));
+        }
+        if self.device_name.trim().is_empty() {
+            return Err(AppError::validation("device_name 不能为空"));
+        }
+        if self.receive_dir.trim().is_empty() {
+            return Err(AppError::validation("receive_dir 不能为空"));
+        }
+        if self.db_path.trim().is_empty() {
+            return Err(AppError::validation("db_path 不能为空"));
+        }
+
+        // http_port: 0 = 使用首选默认端口语义；否则必须是合法 TCP 端口。
+        if self.http_port != 0 && !(1..=65535).contains(&self.http_port) {
+            return Err(AppError::validation(
+                "http_port 必须为 0（首选默认）或 1..=65535",
+            ));
+        }
+
+        if self.cloud_sync_interval_secs < 30 {
+            return Err(AppError::validation(
+                "cloud_sync_interval_secs 不能小于 30 秒",
+            ));
+        }
+
+        // 规范化 cloud URL / branch：trim 后空串 → None
+        self.cloud_sync_repo_url = normalize_optional_string(self.cloud_sync_repo_url.take());
+        self.cloud_sync_branch = normalize_optional_string(self.cloud_sync_branch.take());
+
+        // 快捷键：优先 parse_shortcut；插件依赖/单修饰键等解析失败时，只要非空仍允许落盘
+        // （真实注册在 hotkey 层再处理；空串一律拒绝）。
+        validate_hotkey_field("screenshot_hotkey", &self.screenshot_hotkey)?;
+        validate_hotkey_field("prompt_optimizer_hotkey", &self.prompt_optimizer_hotkey)?;
+
+        // data_dir isolation：override 生效时 db_path 必须在根内
+        if std::env::var_os(DATA_DIR_ENV).is_some() {
+            let root = data_dir()?;
+            let db = PathBuf::from(&self.db_path);
+            if !is_path_within_data_dir(&db, &root) {
+                return Err(AppError::validation(format!(
+                    "CC_PARTNER_DATA_DIR 生效时 db_path 必须位于隔离根内: {}",
+                    self.db_path
+                )));
+            }
+        }
+
+        // Health 范围/DND 共用 health::validation；此处只校验不强制改写 self.health。
+        crate::health::validation::validate_health_config_fields(&self.health)?;
+        validate_orchestrator_config_fields(&mut self.orchestrator)?;
+        Ok(())
+    }
+
+    /// 加载配置；文件不存在则生成默认配置并原子保存。
     ///
     /// Business Logic: 启动时读取上次配置；首次运行初始化默认值并落盘。
-    /// Code Logic: 读 JSON 反序列化；做多步迁移/隔离修复后按需 save()：
+    /// Code Logic: 读 JSON 反序列化；做多步迁移/隔离修复后按需 `FsConfigStore::save_atomic`：
     ///             1) macOS 旧配置中 `<ctrl>` 快捷键替换为 `<cmd>`（对照 config.py）；
     ///             2) `db_path` 字段若仍指向已废弃的 `~/.claude-partner/`（目录迁移只
     ///                重命名目录、不改 JSON 字段），改写为 `~/.cc-partner/`；
     ///             3) 若设置了 `CC_PARTNER_DATA_DIR`，拒绝/强制纠正逃逸出隔离根的 `db_path`，
     ///                确保 config/control/db/log 全部落在 override 根内。
-    ///             文件缺失则用默认值构造并 save()。
+    ///             文件缺失则用默认值构造并 save_atomic()。
     pub fn load() -> Result<Self, AppError> {
         let path = config_file_path()?;
+        let store = crate::config_store::FsConfigStore::default_path()?;
+        let _ = store.cleanup_stale_temp_files();
         if path.exists() {
             let text = fs::read_to_string(&path)?;
             let mut cfg: AppConfig = serde_json::from_str(&text)?;
@@ -748,7 +820,7 @@ impl AppConfig {
                 dirty = true;
             }
             if dirty {
-                cfg.save()?;
+                store.save_atomic(&cfg)?;
             }
             Ok(cfg)
         } else {
@@ -771,31 +843,86 @@ impl AppConfig {
                 orchestrator: OrchestratorAutomationConfig::default(),
                 github_trending: GithubTrendingConfig::default(),
             };
-            cfg.save()?;
+            store.save_atomic(&cfg)?;
             Ok(cfg)
         }
     }
 
-    /// 保存配置到 `~/.cc-partner/config.json`。
-    ///
-    /// Business Logic: 用户修改配置后需持久化，下次启动生效。
-    /// Code Logic: 确保目录存在；序列化为 UTF-8 JSON（紧凑，中文不转义）写入。
-    pub fn save(&self) -> Result<(), AppError> {
-        let dir = config_dir()?;
-        ensure_dir(&dir)?;
-        let path = config_file_path()?;
-        // serde_json::to_string 生成紧凑标准 JSON，与 Python json.dumps(ensure_ascii=False) 互通
-        let text = serde_json::to_string(self)?;
-        fs::write(&path, text)?;
-        Ok(())
-    }
+    // 生产路径禁止 AppConfig::save 旁路 writer gate。
+    // 启动迁移/首装由 load() 直接使用 FsConfigStore::save_atomic；
+    // 运行期配置写入必须经 ConfigRuntime / update_config_transactionally。
 }
 
-/// 确保目录存在（递归创建），对应 Python 的 `Path.mkdir(parents=True, exist_ok=True)`。
-fn ensure_dir(path: &Path) -> Result<(), AppError> {
-    if !path.exists() {
-        fs::create_dir_all(path)?;
+/// 把 Option<String> trim 后空串归一为 None。
+///
+/// Business Logic（为什么需要这个函数）:
+///     前端可能提交空白 cloud URL/branch，落盘前应规范化为未配置。
+///
+/// Code Logic（这个函数做什么）:
+///     Some(s) trim 后非空保留，否则 None。
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    })
+}
+
+/// 校验快捷键字段。
+///
+/// Business Logic（为什么需要这个函数）:
+///     空快捷键无法注册；部分合法产品默认（如 `<ctrl>` 单键）在无插件上下文时
+///     `parse_shortcut` 可能返回 None，不能因此阻断配置保存。
+///
+/// Code Logic（这个函数做什么）:
+///     trim 后空串 → Validation；非空时优先 parse，失败也接受非空（插件运行时再判定）。
+fn validate_hotkey_field(field: &str, value: &str) -> Result<(), AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::validation(format!("{field} 不能为空")));
     }
+    // 能 parse 最好；不能 parse 但非空时仍接受（覆盖单修饰键等插件相关格式）。
+    let _ = crate::hotkey::parse_shortcut(trimmed);
+    Ok(())
+}
+
+/// 校验并就地规范化 Orchestrator 自动化配置。
+///
+/// Business Logic（为什么需要这个函数）:
+///     并发过高或验证命令过长会压垮本机 Runner；空行命令无意义应过滤。
+///
+/// Code Logic（这个函数做什么）:
+///     max_concurrent_tasks 1..=8；verification_commands trim/滤空/最多 20/单条 ≤500。
+fn validate_orchestrator_config_fields(
+    orch: &mut OrchestratorAutomationConfig,
+) -> Result<(), AppError> {
+    if !(1..=8).contains(&orch.max_concurrent_tasks) {
+        return Err(AppError::validation(
+            "orchestrator.max_concurrent_tasks 必须在 1..=8",
+        ));
+    }
+    let commands = orch
+        .verification_commands
+        .iter()
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect::<Vec<_>>();
+    if commands.len() > 20 {
+        return Err(AppError::validation(
+            "orchestrator.verification_commands 最多 20 条",
+        ));
+    }
+    for (index, command) in commands.iter().enumerate() {
+        if command.chars().count() > 500 {
+            return Err(AppError::validation(format!(
+                "orchestrator.verification_commands[{index}] 最长 500 字符"
+            )));
+        }
+    }
+    orch.verification_commands = commands;
     Ok(())
 }
 
@@ -1222,5 +1349,144 @@ mod tests {
         let mut cfg = cfg_with_db_path("/data/.claude-partner-backup/data.db");
         assert!(!migrate_legacy_db_path_with_home(&mut cfg, home));
         assert_eq!(cfg.db_path, "/data/.claude-partner-backup/data.db");
+    }
+
+    /// 合法默认配置应通过 validate。
+    #[test]
+    fn validate_accepts_default_like_config() {
+        let _env = install_data_dir_env(None);
+        let mut cfg = cfg_with_db_path("/tmp/data.db");
+        cfg.screenshot_hotkey = default_screenshot_hotkey();
+        cfg.prompt_optimizer_hotkey = default_prompt_optimizer_hotkey();
+        cfg.validate().expect("默认样例应通过");
+    }
+
+    #[test]
+    fn validate_rejects_empty_device_id() {
+        let _env = install_data_dir_env(None);
+        let mut cfg = cfg_with_db_path("/tmp/data.db");
+        cfg.device_id = "  ".into();
+        let err = cfg.validate().expect_err("空 device_id");
+        assert!(err.to_string().contains("device_id"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_device_name_and_paths() {
+        let _env = install_data_dir_env(None);
+        let mut cfg = cfg_with_db_path("/tmp/data.db");
+        cfg.device_name = "".into();
+        assert!(cfg.validate().is_err());
+        cfg.device_name = "ok".into();
+        cfg.receive_dir = " ".into();
+        assert!(cfg.validate().is_err());
+        cfg.receive_dir = "/r".into();
+        cfg.db_path = "".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_http_port_allows_zero_and_valid_range() {
+        let _env = install_data_dir_env(None);
+        let mut cfg = cfg_with_db_path("/tmp/data.db");
+        cfg.http_port = 0;
+        cfg.validate().expect("0 合法");
+        cfg.http_port = 62116;
+        cfg.validate().expect("合法端口");
+        cfg.http_port = 70000;
+        assert!(cfg.validate().is_err());
+        cfg.http_port = -1;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_cloud_interval_and_normalize_blank_url_branch() {
+        let _env = install_data_dir_env(None);
+        let mut cfg = cfg_with_db_path("/tmp/data.db");
+        cfg.cloud_sync_interval_secs = 29;
+        assert!(cfg.validate().is_err());
+        cfg.cloud_sync_interval_secs = 30;
+        cfg.cloud_sync_repo_url = Some("  ".into());
+        cfg.cloud_sync_branch = Some("  main  ".into());
+        cfg.validate().expect("30s ok");
+        assert_eq!(cfg.cloud_sync_repo_url, None);
+        assert_eq!(cfg.cloud_sync_branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_hotkeys_allows_product_defaults() {
+        let _env = install_data_dir_env(None);
+        let mut cfg = cfg_with_db_path("/tmp/data.db");
+        cfg.screenshot_hotkey = "  ".into();
+        assert!(cfg.validate().is_err());
+        cfg.screenshot_hotkey = default_screenshot_hotkey();
+        cfg.prompt_optimizer_hotkey = "".into();
+        assert!(cfg.validate().is_err());
+        cfg.prompt_optimizer_hotkey = default_prompt_optimizer_hotkey();
+        cfg.validate().expect("产品默认快捷键应通过");
+        // 单修饰键 <ctrl> 在无插件上下文可能 parse 失败，但仍应允许落盘
+        cfg.prompt_optimizer_hotkey = "<ctrl>".into();
+        cfg.validate().expect("<ctrl> 非空应通过");
+    }
+
+    #[test]
+    fn validate_health_ranges_and_dnd() {
+        let _env = install_data_dir_env(None);
+        let mut cfg = cfg_with_db_path("/tmp/data.db");
+        cfg.health.work_window_seconds = 59;
+        assert!(cfg.validate().is_err());
+        cfg.health.work_window_seconds = 60;
+        cfg.health.break_seconds = 29;
+        assert!(cfg.validate().is_err());
+        cfg.health.break_seconds = 30;
+        cfg.health.retain_days = 0;
+        assert!(cfg.validate().is_err());
+        cfg.health.retain_days = 1;
+        cfg.health.water_interval_seconds = 299;
+        assert!(cfg.validate().is_err());
+        cfg.health.water_interval_seconds = 300;
+        cfg.health.dnd_start = Some("22:00".into());
+        cfg.health.dnd_end = None;
+        assert!(cfg.validate().is_err(), "单端 DND 非法");
+        cfg.health.dnd_end = Some("7:00".into());
+        assert!(cfg.validate().is_err(), "非两位分钟/小时非法");
+        cfg.health.dnd_end = Some("07:00".into());
+        cfg.validate().expect("严格 HH:MM 合法");
+        cfg.health.dnd_start = None;
+        cfg.health.dnd_end = None;
+        cfg.validate().expect("双空合法");
+    }
+
+    #[test]
+    fn validate_orchestrator_ranges_and_command_limits() {
+        let _env = install_data_dir_env(None);
+        let mut cfg = cfg_with_db_path("/tmp/data.db");
+        cfg.orchestrator.max_concurrent_tasks = 0;
+        assert!(cfg.validate().is_err());
+        cfg.orchestrator.max_concurrent_tasks = 9;
+        assert!(cfg.validate().is_err());
+        cfg.orchestrator.max_concurrent_tasks = 8;
+        cfg.orchestrator.verification_commands = (0..21).map(|i| format!("cmd{i}")).collect();
+        assert!(cfg.validate().is_err());
+        cfg.orchestrator.verification_commands = vec!["  ".into(), "cargo test".into()];
+        cfg.validate().expect("空行过滤后应通过");
+        assert_eq!(cfg.orchestrator.verification_commands, vec!["cargo test"]);
+        cfg.orchestrator.verification_commands = vec!["x".repeat(501)];
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_escaped_db_path_under_data_dir_override() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("iso");
+        fs::create_dir_all(&root).unwrap();
+        let _guard = install_data_dir_env(Some(root.to_str().unwrap()));
+        let mut cfg = cfg_with_db_path(temp.path().join("escape.db").to_str().unwrap());
+        let err = cfg.validate().expect_err("逃逸 db 应被拒");
+        assert!(
+            err.to_string().contains("隔离") || err.to_string().contains("db_path"),
+            "{err}"
+        );
+        cfg.db_path = root.join("data.db").to_string_lossy().to_string();
+        cfg.validate().expect("根内 db 应通过");
     }
 }

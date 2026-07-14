@@ -9,22 +9,19 @@
 //!     的 UpdateCheckResult / UpdateDownloadStatus（camelCase，可空性与前端一致）。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - check_update：app.updater()?.check()，命中则缓存 Update + 写状态，返回元数据
-//!     - download_update：spawn 异步任务跑 update.download(on_chunk)，进度写状态 + emit 事件，
-//!       完成存 bytes 供 install；JoinHandle 存 AppState，cancel 时 abort 强制中断 reqwest 流
-//!     - get_download_status：读状态机
-//!     - cancel_download：abort 下载任务句柄 + 置 cancelled
-//!     - install_update：取出 bytes + Update，update.install(&bytes) 后 app.request_restart()
-//!     生命周期处理：Update 是 owned（derive Clone，无生命周期参数），check 后存入
-//!     AppState.update_pending，download/install 时 clone 取出，避免跨命令重复请求 endpoint
+//!     - check_update：begin_check → app.updater()?.check() → finish_check
+//!     - download_update：begin_download → spawn download → record_progress / finish_download
+//!     - get_download_status：读 UpdateRuntime.status
+//!     - cancel_download：cancel 取出 token/handle 后锁外 cancel/abort
+//!     - install_update：begin_install → spawn_blocking install → finish_install
+//!     生命周期与 generation 守卫集中在 `crate::updater::UpdateRuntime`。
 
 use crate::error::AppError;
 use crate::state::AppState;
+use crate::updater::InstallOutcome;
 use serde::{Deserialize, Serialize};
-use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_updater::UpdaterExt;
-use tokio_util::sync::CancellationToken;
 
 /// 更新检查结果，对齐前端 `UpdateCheckResult`（camelCase，字段可空）。
 ///
@@ -51,15 +48,23 @@ pub struct UpdateCheckResult {
 }
 
 /// 更新下载状态值，对齐前端 `UpdateDownloadStatusValue`（lowercase）。
+///
+/// Business Logic: 前端需区分 checking/installing，以便禁用按钮与展示重试。
+/// Code Logic: serde rename_all=lowercase，IPC 值为
+///     idle|checking|downloading|completed|installing|failed|cancelled。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateStatusValue {
-    /// 空闲（未开始 / 已重置）
+    /// 空闲（未开始 / 已重置 / Available 等待用户操作）
     Idle,
+    /// 正在检查更新 endpoint
+    Checking,
     /// 下载中
     Downloading,
-    /// 下载完成，可安装
+    /// 下载完成，可安装（或安装失败保留包待重试）
     Completed,
+    /// 安装中（进度保持下载完成时的值，不伪造）
+    Installing,
     /// 下载失败（网络/IO/签名校验）
     Failed,
     /// 用户主动取消
@@ -121,16 +126,15 @@ fn filename_from_url(url: &str) -> String {
 /// Business Logic: 前端「检查更新」按钮触发；从配置的 endpoint（latest.json）拉取新版本信息，
 /// tauri-plugin-updater 内部做版本比较 + 签名预校验。命中则缓存 Update 供后续 download/install。
 ///
-/// Code Logic: app.updater()?.check().await 返回 Option<Update>：
-///     - Some(update)：hasUpdate=true，缓存 update 到 update_pending，填 version/body/downloadUrl/filename
-///     - None：hasUpdate=false（已是最新）
-///     - Err：hasUpdate=false + error 字段（不 panic，返回给前端展示）
+/// Code Logic: begin_check 递增 generation；await plugin check 后 finish_check 回写；
+///     下载/安装中 begin_check 返回 Conflict。
 #[tauri::command]
 pub async fn check_update(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<UpdateCheckResult, AppError> {
-    // 用 updater_builder 而非 updater()，便于未来按需注入 headers/target；当前用默认配置
+    let generation = state.update_runtime.begin_check()?;
+
     let updater = app
         .updater()
         .map_err(|e| AppError::generic(format!("更新器初始化失败: {e}")))?;
@@ -141,8 +145,21 @@ pub async fn check_update(
             let download_url = update.download_url.to_string();
             let filename = filename_from_url(&download_url);
             tracing::info!("发现新版本: {} ({})", version, filename);
-            // 缓存 Update 供 download/install 命令复用（clone，owned 无生命周期问题）
-            *state.update_pending.lock().expect("update_pending 锁中毒") = Some(update);
+            let applied = state
+                .update_runtime
+                .finish_check(generation, Ok(Some(update)))?;
+            if !applied {
+                // 已被更新一代 check 取代
+                return Ok(UpdateCheckResult {
+                    has_update: false,
+                    version: None,
+                    body: None,
+                    download_url: None,
+                    filename: None,
+                    size: None,
+                    error: Some("检查结果已过期，请重试".to_string()),
+                });
+            }
             Ok(UpdateCheckResult {
                 has_update: true,
                 version: Some(version),
@@ -155,6 +172,7 @@ pub async fn check_update(
         }
         Ok(None) => {
             tracing::info!("已是最新版本");
+            let _ = state.update_runtime.finish_check(generation, Ok(None))?;
             Ok(UpdateCheckResult {
                 has_update: false,
                 version: None,
@@ -167,6 +185,10 @@ pub async fn check_update(
         }
         Err(e) => {
             tracing::error!("更新检查失败: {e}");
+            let msg = format!("更新检查失败: {e}");
+            let _ = state
+                .update_runtime
+                .finish_check(generation, Err(msg.clone()))?;
             Ok(UpdateCheckResult {
                 has_update: false,
                 version: None,
@@ -174,7 +196,7 @@ pub async fn check_update(
                 download_url: None,
                 filename: None,
                 size: None,
-                error: Some(format!("更新检查失败: {e}")),
+                error: Some(msg),
             })
         }
     }
@@ -184,12 +206,8 @@ pub async fn check_update(
 ///
 /// Business Logic: 前端发现新版本后「下载更新」，需后台流式下载并实时报告进度。
 ///
-/// Code Logic: tauri-plugin-updater 的 download 接口无原生取消参数，on_chunk 是 FnMut 不可中断 reqwest 流，
-///     故把 download 放进 tokio::spawn，存 JoinHandle，cancel 时 task.abort() 强制中断整个 future 树。
-///     - 从 update_pending 取 Update clone（若无则用入参 url 构造降级错误）
-///     - 重置状态为 downloading（保留 url/filename）
-///     - spawn 任务：update.download(on_chunk, on_finish)，on_chunk 累计 downloaded + 写状态 + emit 进度事件；
-///       完成存 bytes 到 update_bytes + 置 completed；失败置 failed；被 abort 置 cancelled（由 cancel_download 兜底）
+/// Code Logic: begin_download 返回 lease；spawn 任务在锁外 download，回调 record_progress /
+///     finish_download（带 generation 守卫）；attach_download_task 登记句柄供 cancel。
 #[tauri::command]
 #[allow(unused_variables)]
 pub async fn download_update(
@@ -198,63 +216,20 @@ pub async fn download_update(
     url: Option<String>,
     filename: Option<String>,
 ) -> Result<serde_json::Value, AppError> {
-    // 取出缓存的 Update clone（download/install 基于 check 阶段的同一对象）
-    let update_opt = state
-        .update_pending
-        .lock()
-        .expect("update_pending 锁中毒")
-        .clone();
-    let update = update_opt.ok_or_else(|| {
-        AppError::generic("尚未检查到可用更新，请先调用 check_update".to_string())
-    })?;
-
-    // 拒绝重复触发：已有下载在进行
-    {
-        let status = state.update_status.read().expect("update_status 读锁中毒");
-        if status.status == UpdateStatusValue::Downloading {
-            return Err(AppError::generic("已有下载任务进行中".to_string()));
-        }
-    }
-
-    let download_url = update.download_url.to_string();
-    let download_filename = filename_from_url(&download_url);
-
-    // 重置状态为 downloading（url/filename 来自缓存的 Update；入参 url/filename 仅作兼容透传，不覆盖）
-    {
-        let mut status = state.update_status.write().expect("update_status 写锁中毒");
-        status.status = UpdateStatusValue::Downloading;
-        status.progress = 0.0;
-        status.error.clear();
-        status.file_path.clear();
-        status.url = download_url.clone();
-        status.filename = download_filename.clone();
-        status.size = 0;
-    }
-
-    // 取消令牌：cancel_download 调 token.cancel()，spawn 体内 is_cancelled 判定为 Cancelled；
-    // 同时 JoinHandle::abort() 兜底强制中断 reqwest 流
-    let cancel_token = CancellationToken::new();
-    let cancel_for_check = cancel_token.clone();
-    // 存取消令牌到 AppState，cancel_download 取出 cancel()
-    *state
-        .update_cancel_token
-        .lock()
-        .expect("update_cancel_token 锁中毒") = Some(cancel_token);
-
-    let status_arc = state.update_status.clone();
-    let bytes_arc = state.update_bytes.clone();
+    let lease = state.update_runtime.begin_download()?;
+    let generation = lease.generation;
+    let update = lease.update;
+    let cancel_for_check = lease.cancel;
+    let runtime = state.update_runtime.clone();
     let app_handle = app.clone();
-    let url_for_event = download_url.clone();
+    let url_for_event = update.download_url.to_string();
 
-    // spawn 下载任务：JoinHandle 存 AppState，cancel 时 abort
-    let handle: JoinHandle<()> = tauri::async_runtime::spawn(async move {
+    let handle = tauri::async_runtime::spawn(async move {
         let mut downloaded: u64 = 0;
         let mut total: Option<u64> = None;
-        // on_chunk(chunk_len, content_length)：content_length 仅首个 chunk 非 None
         let download_result = update
             .download(
                 |chunk_len, content_length| {
-                    // 软取消：cancel_token 置位后，停止累计（reqwest 流仍会继续，由 abort 兜底）
                     if cancel_for_check.is_cancelled() {
                         return;
                     }
@@ -266,14 +241,7 @@ pub async fn download_update(
                         .filter(|&t| t > 0)
                         .map(|t| (downloaded as f64) / (t as f64))
                         .unwrap_or(0.0);
-                    // 写状态
-                    if let Ok(mut s) = status_arc.write() {
-                        s.progress = progress.min(1.0);
-                        if let Some(t) = total {
-                            s.size = t;
-                        }
-                    }
-                    // emit 进度事件（前端可选 listen）
+                    let _ = runtime.record_progress(generation, progress, total);
                     let _ = app_handle.emit(
                         "update:download-progress",
                         serde_json::json!({
@@ -283,43 +251,46 @@ pub async fn download_update(
                         }),
                     );
                 },
-                || {
-                    // on_download_finish：download 流结束（但签名校验在 download 内部最后执行，
-                    // 校验失败会让 download 返回 Err，走下面的 Err 分支）
-                },
+                || {},
             )
             .await;
 
-        match download_result {
-            Ok(bytes) => {
-                // 下载 + 签名校验通过，缓存 bytes 供 install
-                *bytes_arc.lock().expect("update_bytes 锁中毒") = Some(bytes);
-                let mut s = status_arc.write().expect("update_status 写锁中毒");
-                s.status = UpdateStatusValue::Completed;
-                s.progress = 1.0;
-                tracing::info!("更新下载完成: {} ({} bytes)", url_for_event, downloaded);
+        // 即使 download 返回 Ok，若 cancel token 已置位，也按取消处理，避免软取消后仍接受 bytes。
+        if cancel_for_check.is_cancelled() {
+            match download_result {
+                Ok(_bytes) => {
+                    if runtime.finish_download(generation, Err("下载已取消".to_string()), true)
+                    {
+                        tracing::info!("更新下载已取消（完成前检测到 cancel）: {}", url_for_event);
+                    }
+                }
+                Err(e) => {
+                    if runtime.finish_download(generation, Err(format!("下载失败: {e}")), true)
+                    {
+                        tracing::info!("更新下载已取消: {}", url_for_event);
+                    }
+                }
             }
-            Err(e) => {
-                // 区分取消 vs 失败：cancel_token 置位视为取消
-                let cancelled = cancel_for_check.is_cancelled();
-                let mut s = status_arc.write().expect("update_status 写锁中毒");
-                if cancelled {
-                    s.status = UpdateStatusValue::Cancelled;
-                    tracing::info!("更新下载已取消: {}", url_for_event);
-                } else {
-                    s.status = UpdateStatusValue::Failed;
-                    s.error = format!("下载失败: {e}");
-                    tracing::error!("更新下载失败: {e}");
+        } else {
+            match download_result {
+                Ok(bytes) => {
+                    if runtime.finish_download(generation, Ok(bytes), false) {
+                        tracing::info!("更新下载完成: {} ({} bytes)", url_for_event, downloaded);
+                    }
+                }
+                Err(e) => {
+                    if runtime.finish_download(generation, Err(format!("下载失败: {e}")), false)
+                    {
+                        tracing::error!("更新下载失败: {e}");
+                    }
                 }
             }
         }
     });
 
-    // 存 JoinHandle（覆盖旧句柄——旧任务应已完成或被 abort）
-    *state
-        .update_download_task
-        .lock()
-        .expect("update_download_task 锁中毒") = Some(handle);
+    state
+        .update_runtime
+        .attach_download_task(generation, handle);
 
     Ok(serde_json::json!({ "ok": true }))
 }
@@ -329,36 +300,24 @@ pub async fn download_update(
 pub async fn get_download_status(
     state: State<'_, AppState>,
 ) -> Result<UpdateDownloadStatus, AppError> {
-    let status = state.update_status.read().expect("update_status 读锁中毒");
-    Ok(status.clone())
+    Ok(state.update_runtime.status())
 }
 
 /// 取消正在进行的下载。
 ///
 /// Business Logic: 用户下载过程中改变主意，需中止下载。
-/// Code Logic: abort 下载任务 JoinHandle 强制中断 reqwest 流；同时置 cancelled 状态兜底
-///     （abort 后 spawn 体可能不再执行到 match，故主动置位）。
+/// Code Logic: cancel 锁内原子取出 token/handle 并置 Cancelled；锁外 cancel/abort。
 #[tauri::command]
 pub async fn cancel_download(state: State<'_, AppState>) -> Result<serde_json::Value, AppError> {
-    // 先触发软取消令牌（spawn 体内 is_cancelled 判定为 Cancelled）
-    let token = state
-        .update_cancel_token
-        .lock()
-        .expect("update_cancel_token 锁中毒")
-        .take();
-    if let Some(t) = token {
-        t.cancel();
+    let lease = state.update_runtime.cancel();
+    let had_work = lease.cancel.is_some() || lease.task.is_some();
+    if let Some(token) = lease.cancel {
+        token.cancel();
     }
-    // 再 abort 任务句柄强制中断 reqwest 流
-    let mut task_guard = state
-        .update_download_task
-        .lock()
-        .expect("update_download_task 锁中毒");
-    if let Some(handle) = task_guard.take() {
+    if let Some(handle) = lease.task {
         handle.abort();
-        // 主动置 cancelled 兜底（abort 后 spawn 体未必执行 match 分支）
-        let mut s = state.update_status.write().expect("update_status 写锁中毒");
-        s.status = UpdateStatusValue::Cancelled;
+    }
+    if had_work {
         Ok(serde_json::json!({ "ok": true }))
     } else {
         Ok(serde_json::json!({ "ok": false, "error": "无下载任务" }))
@@ -369,47 +328,266 @@ pub async fn cancel_download(state: State<'_, AppState>) -> Result<serde_json::V
 ///
 /// Business Logic: 下载完成后用户「安装并重启」，用新版本替换当前应用并重启进程。
 ///
-/// Code Logic: 从 update_bytes 取下载的字节 + 从 update_pending 取 Update，调 update.install(&bytes)
-///     （macOS 解 tar.gz 替换 .app / Windows 起 nsis/msi / Linux 替换 appimage/deb/rpm，均自带），
-///     随后 app.request_restart() 重启。install 失败返回错误给前端。
+/// Code Logic: begin_install 克隆 bytes（不 take）；spawn_blocking install；
+///     finish_install 失败回到 Downloaded 保留 bytes，成功请求重启。
 #[tauri::command]
 pub async fn install_update(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, AppError> {
-    // 校验下载已完成
-    {
-        let status = state.update_status.read().expect("update_status 读锁中毒");
-        if status.status != UpdateStatusValue::Completed {
-            return Err(AppError::generic("安装包未就绪，请先完成下载".to_string()));
-        }
-    }
-
-    let bytes_opt = state
-        .update_bytes
-        .lock()
-        .expect("update_bytes 锁中毒")
-        .take();
-    let bytes =
-        bytes_opt.ok_or_else(|| AppError::generic("安装包数据缺失，请重新下载".to_string()))?;
-
-    let update_opt = state
-        .update_pending
-        .lock()
-        .expect("update_pending 锁中毒")
-        .clone();
-    let update = update_opt
-        .ok_or_else(|| AppError::generic("更新元数据缺失，请重新检查更新".to_string()))?;
+    let lease = state.update_runtime.begin_install()?;
+    let generation = lease.generation;
+    let update = lease.update;
+    let bytes = lease.bytes;
 
     tracing::info!("开始安装更新并重启...");
-    // install 是同步阻塞调用（内部 fs 操作 + 可能起外部安装进程），用 spawn_blocking 避免阻塞 async 运行时
-    let install_result = tauri::async_runtime::spawn_blocking(move || update.install(&bytes))
-        .await
-        .map_err(|e| AppError::generic(format!("安装任务执行失败: {e}")))?;
-    install_result.map_err(|e| AppError::generic(format!("安装失败: {e}")))?;
+    let install_result =
+        tauri::async_runtime::spawn_blocking(move || update.install(bytes.as_ref()))
+            .await
+            .map_err(|e| AppError::generic(format!("安装任务执行失败: {e}")))?;
 
-    // 安装成功，请求重启（tauri Manager 自带，配合 tauri-plugin-process 的 restart 命令同效）
-    tracing::info!("安装完成，请求重启应用");
-    app.request_restart();
-    Ok(serde_json::json!({ "ok": true }))
+    match install_result {
+        Ok(()) => {
+            match state.update_runtime.finish_install(generation, Ok(())) {
+                InstallOutcome::RestartRequested => {
+                    // design §6.3：仅在重启请求成功后清理 bytes；
+                    // request_restart() 为同步标记退出路径，调用即视为已请求。
+                    // 若未来 API 返回 Result，失败时应 retain_bytes_after_restart_failure。
+                    tracing::info!("安装完成，请求重启应用");
+                    app.request_restart();
+                    let _ = state.update_runtime.confirm_restart_requested(generation);
+                    Ok(serde_json::json!({ "ok": true }))
+                }
+                InstallOutcome::Stale => {
+                    // 本代状态已被取代；安装本身已成功，仍尝试重启，但不强制清 bytes
+                    tracing::warn!("安装完成但状态机 generation/phase 已过期，仍请求重启");
+                    app.request_restart();
+                    Ok(serde_json::json!({ "ok": true }))
+                }
+                InstallOutcome::FailedRetained | InstallOutcome::RestartConfirmed => {
+                    // 不应出现于 Ok(()) 路径
+                    Ok(serde_json::json!({ "ok": true }))
+                }
+            }
+        }
+        Err(e) => {
+            let msg = format!("安装失败: {e}");
+            let outcome = state
+                .update_runtime
+                .finish_install(generation, Err(msg.clone()));
+            match outcome {
+                InstallOutcome::FailedRetained
+                | InstallOutcome::Stale
+                | InstallOutcome::RestartRequested
+                | InstallOutcome::RestartConfirmed => Err(AppError::generic(msg)),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! 命令编排竞态测试：用 UpdateRuntime 公共 API + 测试 helper 模拟
+    //! check/download/cancel/install 命令路径，无需真实 tauri Update 对象。
+
+    use super::*;
+    use crate::error::AppError;
+    use crate::updater::runtime::{InstallOutcome, UpdatePhase, UpdateRuntime};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Business Logic: 测试需要把状态机推进到下载/安装等相位，无需真实 Update。
+    /// Code Logic: 直接写 phase/generation/bytes/status，与 runtime 测试 helper 对齐。
+    fn force_phase(rt: &UpdateRuntime, phase: UpdatePhase, generation: u64) {
+        rt.force_phase_for_test(phase, generation);
+    }
+
+    /// Business Logic: 注入假安装包字节以覆盖 install retry 路径。
+    /// Code Logic: 委托 runtime 测试 helper。
+    fn force_bytes(rt: &UpdateRuntime, bytes: &[u8]) {
+        rt.force_bytes_for_test(bytes);
+    }
+
+    /// 旧下载完成后的 finish 不得覆盖新 check 代际。
+    #[test]
+    fn old_download_completion_after_new_check_ignored() {
+        let rt = UpdateRuntime::new();
+        // gen=1 下载中
+        force_phase(&rt, UpdatePhase::Downloading, 1);
+        assert_eq!(rt.status().status, UpdateStatusValue::Downloading);
+
+        // 新 check 递增 generation（下载中应 conflict——先取消/结束下载再 check）
+        // 模拟：先 finish 到 Downloaded，再 begin_check
+        assert!(rt.finish_download(1, Ok(vec![1, 2, 3]), false));
+        assert!(rt.has_bytes());
+
+        let g2 = rt.begin_check().expect("new check");
+        assert_eq!(g2, 2);
+        assert_eq!(rt.status().status, UpdateStatusValue::Checking);
+        assert!(!rt.has_bytes()); // 新 check 清旧 bytes
+
+        // 旧代 download finish 忽略
+        assert!(!rt.finish_download(1, Ok(vec![9, 9, 9]), false));
+        assert!(!rt.has_bytes());
+        assert_eq!(rt.snapshot(), (2, UpdatePhase::Checking));
+        assert_eq!(rt.status().status, UpdateStatusValue::Checking);
+
+        // 旧代 progress 忽略
+        assert!(!rt.record_progress(1, 0.99, Some(1000)));
+        assert!((rt.status().progress - 0.0).abs() < f64::EPSILON);
+    }
+
+    /// cancel 先改 phase，后到的 progress/finish 被忽略。
+    #[test]
+    fn cancel_wins_over_late_progress_and_finish() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Downloading, 3);
+        // 模拟命令层 cancel：锁内改 phase 并取出资源
+        let lease = rt.cancel();
+        assert!(lease.cancel.is_some() || lease.task.is_none()); // token may exist
+        assert_eq!(rt.status().status, UpdateStatusValue::Cancelled);
+        assert_eq!(rt.snapshot().1, UpdatePhase::Cancelled);
+
+        // 晚到的 progress / finish 忽略
+        assert!(!rt.record_progress(3, 0.8, Some(500)));
+        assert!(!rt.finish_download(3, Ok(vec![1]), false));
+        assert!(!rt.finish_download(3, Err("net".into()), true));
+        assert_eq!(rt.status().status, UpdateStatusValue::Cancelled);
+        assert!(!rt.has_bytes());
+        assert!((rt.status().progress - 0.0).abs() < f64::EPSILON);
+    }
+
+    /// 重复 begin_download 在 Downloading 时 Conflict。
+    #[test]
+    fn duplicate_download_conflicts() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Downloading, 2);
+        match rt.begin_download() {
+            Err(AppError::Conflict(_)) => {}
+            Ok(_) => panic!("duplicate download should conflict"),
+            Err(other) => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(rt.snapshot().1, UpdatePhase::Downloading);
+        assert_eq!(rt.status().status, UpdateStatusValue::Downloading);
+    }
+
+    /// 安装失败保留 bytes；再次进入 Installing 后成功可到 Idle。
+    #[test]
+    fn install_failure_retains_bytes_and_retry_succeeds() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Downloaded, 5);
+        force_bytes(&rt, b"retry-pkg");
+        // 模拟 begin_install 的 DTO 映射（不依赖真实 Update）
+        force_phase(&rt, UpdatePhase::Installing, 5);
+        force_bytes(&rt, b"retry-pkg");
+        assert_eq!(rt.status().status, UpdateStatusValue::Installing);
+
+        let outcome = rt.finish_install(5, Err("disk full".into()));
+        assert_eq!(outcome, InstallOutcome::FailedRetained);
+        assert_eq!(rt.snapshot().1, UpdatePhase::Downloaded);
+        assert_eq!(rt.status().status, UpdateStatusValue::Completed);
+        assert!(!rt.status().error.is_empty());
+        assert!(rt.has_bytes());
+
+        // 重试：再进 Installing → 成功 → 确认重启后才清 bytes
+        force_phase(&rt, UpdatePhase::Installing, 5);
+        force_bytes(&rt, b"retry-pkg");
+        assert_eq!(rt.status().status, UpdateStatusValue::Installing);
+        let outcome = rt.finish_install(5, Ok(()));
+        assert_eq!(outcome, InstallOutcome::RestartRequested);
+        assert!(rt.has_bytes(), "确认重启前保留 bytes");
+        assert_eq!(
+            rt.confirm_restart_requested(5),
+            InstallOutcome::RestartConfirmed
+        );
+        assert_eq!(rt.snapshot().1, UpdatePhase::Idle);
+        assert_eq!(rt.status().status, UpdateStatusValue::Idle);
+        assert!(!rt.has_bytes());
+    }
+
+    /// cancel token 置位后，Ok(bytes) 也应按取消处理（M4）。
+    #[test]
+    fn cancelled_token_rejects_ok_bytes() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Downloading, 6);
+        // 模拟 download 任务：token 已 cancel，但仍拿到 Ok(bytes)
+        let cancelled = true;
+        assert!(rt.finish_download(6, Err("下载已取消".into()), cancelled));
+        assert_eq!(rt.snapshot().1, UpdatePhase::Cancelled);
+        assert!(!rt.has_bytes());
+        assert_eq!(rt.status().status, UpdateStatusValue::Cancelled);
+    }
+
+    /// Installing 期间 begin_check 返回 Conflict。
+    #[test]
+    fn recheck_during_installing_conflicts() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Installing, 8);
+        force_bytes(&rt, b"pkg");
+        assert_eq!(rt.status().status, UpdateStatusValue::Installing);
+
+        match rt.begin_check() {
+            Err(AppError::Conflict(_)) => {}
+            Ok(_) => panic!("check during install should conflict"),
+            Err(other) => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(rt.snapshot(), (8, UpdatePhase::Installing));
+        assert!(rt.has_bytes());
+        assert_eq!(rt.status().status, UpdateStatusValue::Installing);
+    }
+
+    /// progress 钳制到 0..=1。
+    #[test]
+    fn progress_clamped_0_to_1() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Downloading, 1);
+        assert!(rt.record_progress(1, 2.5, Some(10)));
+        assert!((rt.status().progress - 1.0).abs() < f64::EPSILON);
+        assert!(rt.record_progress(1, -3.0, None));
+        assert!((rt.status().progress - 0.0).abs() < f64::EPSILON);
+        assert!(rt.record_progress(1, 0.42, Some(99)));
+        assert!((rt.status().progress - 0.42).abs() < f64::EPSILON);
+        assert_eq!(rt.status().size, 99);
+    }
+
+    /// begin_check DTO 映射为 Checking；begin_install DTO 映射为 Installing。
+    #[test]
+    fn status_dto_tracks_checking_and_installing() {
+        let rt = UpdateRuntime::new();
+        let g = rt.begin_check().unwrap();
+        assert_eq!(rt.status().status, UpdateStatusValue::Checking);
+        assert_eq!(rt.snapshot().1, UpdatePhase::Checking);
+
+        // finish 无更新 → Idle
+        assert!(rt.finish_check(g, Ok(None)).unwrap());
+        assert_eq!(rt.status().status, UpdateStatusValue::Idle);
+
+        // 安装路径 DTO
+        force_phase(&rt, UpdatePhase::Installing, g);
+        assert_eq!(rt.status().status, UpdateStatusValue::Installing);
+    }
+
+    /// 命令层 cancel 编排：先改状态再锁外 cancel token。
+    #[test]
+    fn cancel_command_orchestration_token_outside_lock() {
+        let rt = UpdateRuntime::new();
+        force_phase(&rt, UpdatePhase::Downloading, 4);
+        let token_cancelled = Arc::new(AtomicBool::new(false));
+        let lease = rt.cancel();
+        // 模拟命令：锁外 cancel/abort
+        if let Some(token) = lease.cancel {
+            token.cancel();
+            token_cancelled.store(true, Ordering::SeqCst);
+        }
+        if let Some(handle) = lease.task {
+            handle.abort();
+        }
+        assert!(
+            token_cancelled.load(Ordering::SeqCst),
+            "cancel must surface token for lock-outside cancel()"
+        );
+        assert_eq!(rt.status().status, UpdateStatusValue::Cancelled);
+        // 晚到 finish 忽略
+        assert!(!rt.finish_download(4, Ok(vec![0]), false));
+    }
 }

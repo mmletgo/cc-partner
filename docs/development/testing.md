@@ -145,3 +145,20 @@ Product support for WSL/tmux and desktop GUI is separate from automation coverag
 4. **`Docs`** runs Node-only static fact checks on documentation path changes; it does not install frontend/Rust toolchains.
 
 Backend lifecycle, ports, logs, and `doctor` usage for operators: [`backend-operations.md`](backend-operations.md).
+
+
+## Transactional runtime smoke
+
+```bash
+cd src-tauri
+cargo test --locked config_store:: --lib
+cargo test --locked config_runtime:: --lib
+cargo test --locked cloud_sync::runtime:: --lib
+cargo test --locked updater::runtime:: --lib
+cargo test --locked health::validation:: --lib
+cargo test --locked --test transactional_runtime_smoke -- --nocapture --test-threads=1
+```
+
+Cross-Platform Smoke workflow 在 macOS/Windows 上额外跑 `transactional_runtime_smoke`。
+
+**NOT VERIFIED**：真实磁盘满、GUI 全局快捷键冲突、真实 updater 安装/重启。

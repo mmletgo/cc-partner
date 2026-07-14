@@ -8,12 +8,18 @@
 //! Code Logic（这个模块做什么）:
 //!     - get_config: 读 RwLock 配置，转 ConfigDto（camelCase）。
 //!     - get_default_config: 返回环境感知默认偏好，供设置页恢复默认。
-//!     - update_config: 应用基础偏好与 Prompt 优化偏好 patch 后 save() 回 config.json。
+//!     - update_config: 经 `ConfigRuntime` 事务路径应用 patch；截图快捷键 OS 切换与落盘同锁串行。
 //!     - get_version: 返回 {version, buildDate}，version 取 CARGO_PKG_VERSION。
 
-use crate::config::{default_preference_values, normalize_prompt_optimizer_fill_language};
+use crate::config::{
+    default_preference_values, normalize_prompt_optimizer_fill_language, AppConfig,
+};
+use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
 use crate::error::AppError;
-use crate::hotkey::{register_screenshot_hotkey, screenshot_handler};
+use crate::hotkey::{
+    compensate_screenshot_hotkey_os, replace_screenshot_hotkey_os, GlobalShortcutBackend,
+    TauriGlobalShortcutBackend,
+};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -33,13 +39,15 @@ pub struct ConfigDto {
     pub http_port: i64,
 }
 
-/// 读取应用配置。
+/// 将 AppConfig 转为前端 ConfigDto。
 ///
-/// Business Logic: 前端设置页初始化时展示当前配置。
-#[tauri::command]
-pub async fn get_config(state: State<'_, AppState>) -> Result<ConfigDto, AppError> {
-    let cfg = state.config.read().unwrap();
-    Ok(ConfigDto {
+/// Business Logic（为什么需要这个函数）:
+///     读命令与事务更新成功后都要返回同一份 camelCase 结构，避免重复拼装字段。
+///
+/// Code Logic（这个函数做什么）:
+///     从配置克隆可展示字段，并对 Prompt 优化填入语言做归一化。
+fn config_to_dto(cfg: &AppConfig) -> ConfigDto {
+    ConfigDto {
         device_id: cfg.device_id.clone(),
         device_name: cfg.device_name.clone(),
         receive_dir: cfg.receive_dir.clone(),
@@ -49,7 +57,16 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<ConfigDto, AppErro
             &cfg.prompt_optimizer_fill_language,
         ),
         http_port: cfg.http_port,
-    })
+    }
+}
+
+/// 读取应用配置。
+///
+/// Business Logic: 前端设置页初始化时展示当前配置。
+#[tauri::command]
+pub async fn get_config(state: State<'_, AppState>) -> Result<ConfigDto, AppError> {
+    let cfg = state.config.read().unwrap();
+    Ok(config_to_dto(&cfg))
 }
 
 /// 读取应用偏好的环境默认值。
@@ -78,10 +95,144 @@ pub async fn get_default_config(state: State<'_, AppState>) -> Result<ConfigDto,
     })
 }
 
+/// 应用设置页 patch 字段到 candidate。
+///
+/// Business Logic（为什么需要这个函数）:
+///     普通事务与热键事务共用同一 patch 语义，避免分叉。
+///
+/// Code Logic（这个函数做什么）:
+///     对传入的 Option 字段写 candidate；语言字段做归一化。
+fn apply_config_patch(
+    cfg: &mut AppConfig,
+    device_name: Option<String>,
+    receive_dir: Option<String>,
+    screenshot_hotkey: Option<String>,
+    prompt_optimizer_hotkey: Option<String>,
+    prompt_optimizer_fill_language: Option<String>,
+) {
+    if let Some(n) = device_name {
+        cfg.device_name = n;
+    }
+    if let Some(d) = receive_dir {
+        cfg.receive_dir = d;
+    }
+    if let Some(h) = screenshot_hotkey {
+        cfg.screenshot_hotkey = h;
+    }
+    if let Some(h) = prompt_optimizer_hotkey {
+        cfg.prompt_optimizer_hotkey = h;
+    }
+    if let Some(language) = prompt_optimizer_fill_language {
+        cfg.prompt_optimizer_fill_language = normalize_prompt_optimizer_fill_language(&language);
+    }
+}
+
+/// 在 ConfigRuntime 上应用基础偏好 patch。
+///
+/// Business Logic（为什么需要这个函数）:
+///     设置页保存配置必须串行事务落盘；抽出 helper 便于命令层与单测共用，无需 Tauri State。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 `update_config_transactionally` 只改 candidate，返回提交后的 ConfigDto。
+pub async fn update_config_for_runtime(
+    runtime: &ConfigRuntime,
+    device_name: Option<String>,
+    receive_dir: Option<String>,
+    screenshot_hotkey: Option<String>,
+    prompt_optimizer_hotkey: Option<String>,
+    prompt_optimizer_fill_language: Option<String>,
+) -> Result<ConfigDto, AppError> {
+    let (_committed, dto) = update_config_transactionally(runtime, |cfg| {
+        apply_config_patch(
+            cfg,
+            device_name,
+            receive_dir,
+            screenshot_hotkey,
+            prompt_optimizer_hotkey,
+            prompt_optimizer_fill_language,
+        );
+        Ok(config_to_dto(cfg))
+    })
+    .await?;
+    Ok(dto)
+}
+
+/// 在同一 ConfigRuntime 临界区内完成 OS 热键切换 + 配置事务 + 失败补偿。
+///
+/// Business Logic（为什么需要这个函数）:
+///     并发 `update_config` 若在 writer lock 外先改 OS 注册，会交错 old_hotkey/补偿，
+///     导致 OS 与 config 分叉；必须串行化在同一 gate 内。
+///
+/// Code Logic（这个函数做什么）:
+///     持 `lock_for_update` → clone candidate → OS replace → mutate/validate →
+///     spawn_blocking save_atomic → 成功 swap 内存；失败同临界区 OS 补偿。
+pub async fn update_config_with_hotkey_backend(
+    runtime: &ConfigRuntime,
+    backend: &mut dyn GlobalShortcutBackend,
+    device_name: Option<String>,
+    receive_dir: Option<String>,
+    screenshot_hotkey: Option<String>,
+    prompt_optimizer_hotkey: Option<String>,
+    prompt_optimizer_fill_language: Option<String>,
+) -> Result<ConfigDto, AppError> {
+    let _guard = runtime.lock_for_update().await;
+
+    let mut candidate = runtime.snapshot()?;
+    let old_hotkey = candidate.screenshot_hotkey.clone();
+    let mut need_os_compensate = false;
+    let mut new_hotkey_for_compensate: Option<String> = None;
+
+    if let Some(ref new_hotkey) = screenshot_hotkey {
+        if new_hotkey != &old_hotkey {
+            replace_screenshot_hotkey_os(backend, &old_hotkey, new_hotkey)?;
+            need_os_compensate = true;
+            new_hotkey_for_compensate = Some(new_hotkey.clone());
+        }
+    }
+
+    apply_config_patch(
+        &mut candidate,
+        device_name,
+        receive_dir,
+        screenshot_hotkey,
+        prompt_optimizer_hotkey,
+        prompt_optimizer_fill_language,
+    );
+
+    if let Err(e) = candidate.validate() {
+        if need_os_compensate {
+            if let Some(ref new_hotkey) = new_hotkey_for_compensate {
+                compensate_screenshot_hotkey_os(backend, &old_hotkey, new_hotkey)?;
+            }
+        }
+        return Err(e);
+    }
+
+    let store = runtime.store_handle();
+    let to_save = candidate.clone();
+    let save_result = tokio::task::spawn_blocking(move || store.save_atomic(&to_save))
+        .await
+        .map_err(|e| AppError::generic(format!("配置落盘任务失败: {e}")))?;
+
+    if let Err(e) = save_result {
+        if need_os_compensate {
+            if let Some(ref new_hotkey) = new_hotkey_for_compensate {
+                // 补偿失败优先返回 rollback_failed，便于用户重启恢复
+                compensate_screenshot_hotkey_os(backend, &old_hotkey, new_hotkey)?;
+            }
+        }
+        return Err(e);
+    }
+
+    runtime.swap_memory(candidate.clone())?;
+    Ok(config_to_dto(&candidate))
+}
+
 /// 更新应用配置（基础偏好 + Workbench Prompt 优化偏好），并持久化。
 ///
 /// Business Logic: 用户在设置页保存修改后需落盘，下次启动生效。
-/// Code Logic: 取写锁应用 patch → save() → 返回最新配置 DTO。
+/// Code Logic: 经 ConfigRuntime 事务更新；截图快捷键 OS 切换与 config 提交在同一 writer 临界区，
+///     失败则同临界区补偿 OS，返回最新 DTO。
 #[tauri::command]
 pub async fn update_config(
     app: AppHandle,
@@ -92,34 +243,30 @@ pub async fn update_config(
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
 ) -> Result<ConfigDto, AppError> {
-    let hotkey_changed = screenshot_hotkey.is_some();
-    {
-        let mut cfg = state.config.write().unwrap();
-        if let Some(n) = device_name {
-            cfg.device_name = n;
-        }
-        if let Some(d) = receive_dir {
-            cfg.receive_dir = d;
-        }
-        if let Some(h) = screenshot_hotkey {
-            cfg.screenshot_hotkey = h;
-        }
-        if let Some(h) = prompt_optimizer_hotkey {
-            cfg.prompt_optimizer_hotkey = h;
-        }
-        if let Some(language) = prompt_optimizer_fill_language {
-            cfg.prompt_optimizer_fill_language =
-                normalize_prompt_optimizer_fill_language(&language);
-        }
-        cfg.save()?;
+    // 无热键变更时走通用事务路径（仍持同一 update_lock）。
+    if screenshot_hotkey.is_none() {
+        return update_config_for_runtime(
+            &state.config_runtime,
+            device_name,
+            receive_dir,
+            None,
+            prompt_optimizer_hotkey,
+            prompt_optimizer_fill_language,
+        )
+        .await;
     }
-    // screenshotHotkey 变更时热更新全局快捷键（unregister 旧 + register 新）
-    if hotkey_changed {
-        let new_hotkey = state.config.read().unwrap().screenshot_hotkey.clone();
-        register_screenshot_hotkey(&app, &new_hotkey, screenshot_handler);
-    }
-    // 复用 get_config 逻辑返回最新 DTO（避免重复构造）
-    get_config(state).await
+
+    let mut backend = TauriGlobalShortcutBackend::new(app);
+    update_config_with_hotkey_backend(
+        &state.config_runtime,
+        &mut backend,
+        device_name,
+        receive_dir,
+        screenshot_hotkey,
+        prompt_optimizer_hotkey,
+        prompt_optimizer_fill_language,
+    )
+    .await
 }
 
 /// 版本信息查询。
@@ -148,4 +295,160 @@ pub async fn choose_dir(app: AppHandle) -> Result<Option<String>, AppError> {
         .set_title("选择接收目录")
         .blocking_pick_folder();
     Ok(picked.map(|p| p.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig};
+    use crate::config_store::MemoryConfigStore;
+    use crate::hotkey::FakeGlobalShortcutBackend;
+    use std::sync::Arc;
+
+    fn sample_config() -> AppConfig {
+        AppConfig {
+            device_id: "dev-cfg-1".into(),
+            device_name: "cfg-device".into(),
+            http_port: 0,
+            receive_dir: "/tmp/recv".into(),
+            db_path: "/tmp/db.db".into(),
+            screenshot_hotkey: "<ctrl>+s".into(),
+            prompt_optimizer_hotkey: "<ctrl>".into(),
+            prompt_optimizer_fill_language: "zh".into(),
+            cloud_sync_repo_url: None,
+            cloud_sync_enabled: false,
+            cloud_sync_auto: false,
+            cloud_sync_interval_secs: 600,
+            cloud_sync_branch: None,
+            health: HealthConfig::default(),
+            orchestrator: OrchestratorAutomationConfig::default(),
+            github_trending: GithubTrendingConfig::default(),
+        }
+    }
+
+    /// 验证 save 失败时命令层 helper 回滚内存与 store。
+    #[tokio::test]
+    async fn save_failure_rolls_back() {
+        let initial = sample_config();
+        let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
+        store.fail_next_save();
+        let runtime = ConfigRuntime::new(initial.clone(), store.clone());
+
+        let err = update_config_for_runtime(
+            &runtime,
+            Some("mutated-name".into()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("save 失败应返回 Err");
+        assert!(
+            err.to_string().contains("注入故障") || err.to_string().contains("MemoryConfigStore"),
+            "应是 store 注入错误: {err}"
+        );
+
+        let snap = runtime.snapshot().expect("snapshot");
+        assert_eq!(snap.device_name, "cfg-device");
+        assert_eq!(
+            store.snapshot().unwrap().device_name,
+            "cfg-device",
+            "store 侧也应保持旧值"
+        );
+    }
+
+    /// 验证成功 patch 后 DTO 反映提交值。
+    #[tokio::test]
+    async fn successful_update_returns_committed_dto() {
+        let initial = sample_config();
+        let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
+        let runtime = ConfigRuntime::new(initial, store);
+
+        let dto = update_config_for_runtime(
+            &runtime,
+            Some("new-name".into()),
+            Some("/tmp/new-recv".into()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("update");
+
+        assert_eq!(dto.device_name, "new-name");
+        assert_eq!(dto.receive_dir, "/tmp/new-recv");
+        let snap = runtime.snapshot().unwrap();
+        assert_eq!(snap.device_name, "new-name");
+        assert_eq!(snap.receive_dir, "/tmp/new-recv");
+    }
+
+    /// H2：热键 OS 切换与 config 事务同锁；save 失败时 OS 补偿回旧值。
+    #[tokio::test]
+    async fn hotkey_os_compensates_when_config_save_fails() {
+        let initial = sample_config();
+        let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
+        store.fail_next_save();
+        let runtime = ConfigRuntime::new(initial, store);
+        let mut fake = FakeGlobalShortcutBackend {
+            registered: vec!["<ctrl>+s".into()],
+            ..Default::default()
+        };
+
+        let err = update_config_with_hotkey_backend(
+            &runtime,
+            &mut fake,
+            None,
+            None,
+            Some("<ctrl>+<shift>+s".into()),
+            None,
+            None,
+        )
+        .await
+        .expect_err("save 失败");
+
+        assert!(err.to_string().contains("注入故障"));
+        assert_eq!(
+            fake.registered(),
+            vec!["<ctrl>+s".to_string()],
+            "OS 应补偿回旧热键"
+        );
+        assert_eq!(
+            runtime.snapshot().unwrap().screenshot_hotkey,
+            "<ctrl>+s",
+            "内存保持旧热键"
+        );
+    }
+
+    /// H2：热键变更成功路径 OS 与 config 一致。
+    #[tokio::test]
+    async fn hotkey_os_and_config_commit_together() {
+        let initial = sample_config();
+        let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
+        let runtime = ConfigRuntime::new(initial, store);
+        let mut fake = FakeGlobalShortcutBackend {
+            registered: vec!["<ctrl>+s".into()],
+            ..Default::default()
+        };
+
+        let dto = update_config_with_hotkey_backend(
+            &runtime,
+            &mut fake,
+            Some("after".into()),
+            None,
+            Some("<ctrl>+<shift>+s".into()),
+            None,
+            None,
+        )
+        .await
+        .expect("ok");
+
+        assert_eq!(dto.screenshot_hotkey, "<ctrl>+<shift>+s");
+        assert_eq!(dto.device_name, "after");
+        assert_eq!(fake.registered(), vec!["<ctrl>+<shift>+s".to_string()]);
+        assert_eq!(
+            runtime.snapshot().unwrap().screenshot_hotkey,
+            "<ctrl>+<shift>+s"
+        );
+    }
 }

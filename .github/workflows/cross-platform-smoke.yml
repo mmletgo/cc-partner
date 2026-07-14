@@ -137,6 +137,18 @@ jobs:
           cargo test --locked --test backend_cli_smoke -- --nocapture --test-threads=1 \
             2>&1 | tee "${{ runner.temp }}/cargo-logs/backend-cli-smoke.log"
 
+      - name: Transactional runtime smoke
+        id: tx_runtime_smoke
+        shell: bash
+        env:
+          CC_PARTNER_SMOKE_ROOT: ${{ runner.temp }}/cc-partner-smoke
+          RUST_BACKTRACE: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/cargo-logs" "${CC_PARTNER_SMOKE_ROOT}"
+          cd src-tauri
+          cargo test --locked --test transactional_runtime_smoke -- --nocapture --test-threads=1             2>&1 | tee "${{ runner.temp }}/cargo-logs/transactional-runtime-smoke.log"
+
       - name: Backend doctor + privacy smoke
         id: doctor_smoke
         working-directory: src-tauri
@@ -344,7 +356,7 @@ jobs:
             echo "| LAN trust boundary smoke | ${LAN} |"
             echo "| cleanup / diagnostics | ${CLEAN} |"
             echo ""
-            echo "### Explicitly NOT VERIFIED — hosted runner scope"
+            echo "### Explicitly NOT VERIFIED (transactional runtime: real disk-full hardware, GUI global-shortcut conflicts, real updater install/restart) / NOT VERIFIED — hosted runner scope"
             echo ""
             echo "| Capability | Status |"
             echo "| --- | --- |"

@@ -7,11 +7,13 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     `start(state)` spawn 一个后台任务，loop { select!{ cancel.cancelled() => break,
-//!     sleep(interval) => 重读 config，若 !enabled || !auto 则 continue，否则跑 trigger_cloud_sync } }。
+//!     sleep(interval) => 重读 config，若 !enabled || !auto 则 continue，否则以
+//!     Scheduler + ReturnBusy 跑 trigger_cloud_sync_with } }。忙则跳过本 tick，不排队。
 //!     首次先 sleep 再检查（不立即跑，避免启动瞬间 IO 风暴）。错误仅 tracing::error 不 panic。
 //!     注意 spawn 入口用 `tauri::async_runtime::spawn` 而非 `tokio::spawn`（见 start 实现处注释）。
 
-use crate::cloud_sync::engine::trigger_cloud_sync;
+use crate::cloud_sync::engine::trigger_cloud_sync_with;
+use crate::cloud_sync::runtime::{scheduler_policy, CloudSyncTrigger};
 use crate::state::AppState;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -58,8 +60,13 @@ pub fn start(state: AppState) -> CancellationToken {
                         // 未启用 / 未开自动 → 跳过本轮（仍按 interval 继续等待）
                         continue;
                     }
-                    // 跑一次同步（错误仅记录，不中断 scheduler）
-                    let result = trigger_cloud_sync(&state).await;
+                    // 跑一次同步：ReturnBusy 忙则跳过本 tick（不排队）
+                    let result = trigger_cloud_sync_with(
+                        &state,
+                        CloudSyncTrigger::Scheduler,
+                        scheduler_policy(),
+                    )
+                    .await;
                     if !result.ok {
                         tracing::error!("cloud_sync scheduler 本轮同步失败: {}", result.note);
                     } else {

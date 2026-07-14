@@ -41,6 +41,7 @@
   "recordWindowTitleDescription": "开启后活动明细会包含前台窗口标题,便于统计。",
   "dndStart": "免打扰开始",
   "dndEnd": "免打扰结束",
+  "allDayDnd": "全天免打扰",
   "waterIntervalMinutes": "喝水提醒间隔(分钟)",
   "waterIntervalDescription": "两次喝水提醒之间的间隔时长。",
   "retainDays": "活动明细保留天数",
