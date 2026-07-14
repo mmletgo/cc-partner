@@ -81,6 +81,9 @@ jobs:
       - name: Frontend build (tsc 类型检查 + vite build)
         run: cd web && npm run build
 
+      - name: Frontend bundle contract (gzip budgets + mobile forbidden deps)
+        run: cd web && npm run check:bundle
+
       - name: Rust format check
         working-directory: src-tauri
         run: cargo fmt --check

@@ -10,23 +10,40 @@
  *   CSV、SQLite 或代码编辑组件；所有内容修改、模式切换、保存、格式化和表选择都通过 props 回调上抛。
  */
 
-import { useCallback, useMemo } from 'react';
+import { lazy, Suspense, useCallback, useMemo } from 'react';
 import type { KeyboardEvent, MouseEvent, ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { WorkbenchWorkspaceNav } from '@/components/layout';
 import { Button } from '@/components/primitives';
 import { CheckIcon, RefreshIcon, TerminalIcon, XIcon } from '@/lib/icons';
 import type { WorkbenchFileMode, WorkbenchOpenFile } from '@/lib/types';
-import { WorkbenchCodeEditor } from '../WorkbenchCodeEditor';
 import { WorkbenchCsvPreview } from '../WorkbenchCsvPreview';
-import { WorkbenchHtmlPreview } from '../WorkbenchHtmlPreview';
 import type { WorkbenchHtmlMode } from '../WorkbenchHtmlPreview';
 import type { WorkbenchHtmlAssetLoader } from '../WorkbenchHtmlPreview/htmlAssets';
 import { WorkbenchImagePreview } from '../WorkbenchImagePreview';
-import { WorkbenchMarkdownEditor } from '../WorkbenchMarkdownEditor';
 import type { WorkbenchMarkdownMode } from '../WorkbenchMarkdownEditor';
 import { WorkbenchSqlitePreview } from '../WorkbenchSqlitePreview';
 import styles from './WorkbenchFileWorkspace.module.css';
+
+/**
+ * Business Logic（为什么需要这些 lazy 边界）:
+ *   CodeMirror / Tiptap HTML·Markdown 编辑器体积大，不得进入桌面 main 或文件工作区
+ *   未打开对应类型文件时的同步依赖图；按类型动态加载才能满足拆包预算。
+ *
+ * Code Logic（这些常量做什么）:
+ *   用 React.lazy + 动态 import 适配 named export，首次渲染对应类型时才拉取 chunk。
+ */
+const WorkbenchCodeEditor = lazy(() =>
+  import('../WorkbenchCodeEditor').then((module) => ({ default: module.WorkbenchCodeEditor })),
+);
+const WorkbenchMarkdownEditor = lazy(() =>
+  import('../WorkbenchMarkdownEditor').then((module) => ({
+    default: module.WorkbenchMarkdownEditor,
+  })),
+);
+const WorkbenchHtmlPreview = lazy(() =>
+  import('../WorkbenchHtmlPreview').then((module) => ({ default: module.WorkbenchHtmlPreview })),
+);
 
 export interface WorkbenchOpenFileTab {
   id: string;
@@ -348,6 +365,12 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
     [activeTabStableId, onSelectSqliteTable],
   );
 
+  const editorFallback = (
+    <div className={styles.unavailable} role="status">
+      {t('workbench:loading')}
+    </div>
+  );
+
   let fileContent: ReactElement | null = null;
 
   if (activeTab) {
@@ -356,28 +379,32 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
     switch (opened.detectedType) {
       case 'markdown':
         fileContent = (
-          <WorkbenchMarkdownEditor
-            value={activeTab.content}
-            documentPath={activeTab.path}
-            mode={coerceMarkdownMode(activeTab.mode)}
-            readOnly={writeLocked}
-            loadAsset={loadHtmlAsset}
-            onModeChange={handleMarkdownModeChange}
-            onChange={handleContentChange}
-          />
+          <Suspense fallback={editorFallback}>
+            <WorkbenchMarkdownEditor
+              value={activeTab.content}
+              documentPath={activeTab.path}
+              mode={coerceMarkdownMode(activeTab.mode)}
+              readOnly={writeLocked}
+              loadAsset={loadHtmlAsset}
+              onModeChange={handleMarkdownModeChange}
+              onChange={handleContentChange}
+            />
+          </Suspense>
         );
         break;
       case 'html':
         fileContent = (
-          <WorkbenchHtmlPreview
-            value={activeTab.content}
-            documentPath={activeTab.path}
-            mode={coerceHtmlMode(activeTab.mode)}
-            readOnly={writeLocked}
-            loadAsset={loadHtmlAsset}
-            onModeChange={handleHtmlModeChange}
-            onChange={handleContentChange}
-          />
+          <Suspense fallback={editorFallback}>
+            <WorkbenchHtmlPreview
+              value={activeTab.content}
+              documentPath={activeTab.path}
+              mode={coerceHtmlMode(activeTab.mode)}
+              readOnly={writeLocked}
+              loadAsset={loadHtmlAsset}
+              onModeChange={handleHtmlModeChange}
+              onChange={handleContentChange}
+            />
+          </Suspense>
         );
         break;
       case 'image':
@@ -406,12 +433,14 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
         break;
       default:
         fileContent = (
-          <WorkbenchCodeEditor
-            value={activeTab.content}
-            language={deriveEditorLanguage(opened)}
-            readOnly={!opened.capabilities.canEdit || writeLocked}
-            onChange={handleContentChange}
-          />
+          <Suspense fallback={editorFallback}>
+            <WorkbenchCodeEditor
+              value={activeTab.content}
+              language={deriveEditorLanguage(opened)}
+              readOnly={!opened.capabilities.canEdit || writeLocked}
+              onChange={handleContentChange}
+            />
+          </Suspense>
         );
         break;
     }

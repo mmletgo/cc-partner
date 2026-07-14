@@ -41,7 +41,9 @@ import { Sidebar } from '../Sidebar';
 import { NavItem } from '../NavItem';
 import { ThemeToggle } from '../ThemeToggle';
 import { LanguageSwitcher } from '../LanguageSwitcher';
-import { MobileAccessCard, PermissionStatusBadge, WorkbenchProjectRail } from '@/components/domain';
+import { MobileAccessCard } from '@/components/domain/MobileAccessCard';
+import { PermissionStatusBadge } from '@/components/domain/PermissionStatusBadge';
+import { WorkbenchProjectRail } from '@/components/domain/WorkbenchProjectRail';
 // 应用内健康 toast 已停用（改用系统通知 HealthReminderListener + 全屏遮罩 HealthOverlay），
 // 组件代码保留以便恢复。先测试系统级提醒是否够用。
 // import ReminderToast from '@/pages/Health/ReminderToast';

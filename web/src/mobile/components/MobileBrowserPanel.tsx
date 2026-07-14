@@ -1,6 +1,6 @@
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
-import { WorkbenchBrowserWorkspace } from '@/components/domain';
+import { WorkbenchBrowserWorkspace } from '@/components/domain/WorkbenchBrowserWorkspace';
 import type { WorkbenchTransport } from '@/api/workbenchTransport';
 import type { WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
 import styles from './MobileBrowserPanel.module.css';
