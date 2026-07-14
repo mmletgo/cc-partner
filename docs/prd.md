@@ -47,13 +47,20 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 **功能点**：
 - 选择在线设备作为传输目标
 - 支持任意大小文件传输
-- 分块传输（1MB/块），显示传输进度
-- 断点续传：传输中断后可从已完成的位置继续
-- SHA256 校验确保文件完整性
-- 桌面发送闭环走真实后端命令：原生 dialog/drag 取得绝对路径 → `send_transfer` 受理 → 任务列表可见；用户可对 pending/transferring 任务 `cancel_transfer`
-- 仅渲染后端真实支持的动作：当前只暴露 send/cancel；pause/resume/retry/open 在无对应命令时不得渲染空回调
+- 分块传输（约 960KB/块），显示传输进度、phase 与速率
+- 断点续传：传输中断后，若双方 resume metadata 与源 fingerprint 仍匹配，可从已确认 offset 继续（复用稳定 `protocolTransferId`）
+- SHA256 校验确保文件完整性；receiver finalize 前 hash mismatch 拒绝落盘；source fingerprint `{size,mtimeNsOrNull,sha256}` 变化时拒绝旧 resume
+- 桌面发送闭环走真实后端命令：原生 dialog/drag 取得绝对路径 → `send_transfer` 受理 → 任务列表可见
+- 生命周期动作（仅渲染后端真实支持的 callback，无回调不渲染）：
+  - `pending` / `transferring` / `finalizing` → 仅 `cancel_transfer`
+  - `failed + retryable + resume metadata`（Send 且双方支持 `transfer.resume.v1`）→ `resume_transfer(taskId, clientOperationId)`「继续传输」
+  - `failed + retryable` 无 resume metadata、或旧 peer 无 resume capability、或 `cancelled` 且源仍匹配 → `retry_transfer`「重新传输」
+  - transport timeout / uncertain outcome → 先 `get_transfer_operation(clientOperationId)` 对账，展示「正在确认结果」，禁止 blind retry
+  - `direction=Receive` + `completed`（same-device desktop GUI only）→ Open / Reveal；P2P/mobile 明确 unsupported
+- 幂等合同：`clientOperationId` 是发送端全局唯一持久键（same id + same payload 回放；same id + different payload → `operationIdConflict`）；`X-CC-Request-Id` / invoke request id 仅追踪，不作幂等键。resume 复用稳定 protocol id 命中 receiver checkpoint；full retry 可 mint 新 protocol id。lost final ACK 时发送端按 protocol id 查询 receiver status，确认成功后本地提交 outcome，不二次破坏性 finalize
 - 路径为不透明 UTF-8 字符串透传，UI 只展示 basename；刷新失败保留已有 devices/tasks，不得用空数组覆盖
 - 文件接收后保存到用户配置的目录
+- 1 GiB 真机断网/重启/续传/SHA 一致性属于 dual-host L3（`L3-DUAL-HOST-LAN-001`），当前保持 **NOT VERIFIED**，不得由单机 CI 宣称通过
 
 ### 2.2 区域截图
 

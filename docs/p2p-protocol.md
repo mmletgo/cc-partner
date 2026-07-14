@@ -93,6 +93,7 @@ advertised capabilities are:
 - `orchestrator.runtime-snapshot.v1` — owning-device runtime snapshot route
 - `sync.manifest.v2` — bounded Prompt / SSH target / Scratchpad content sync (`POST /api/sync/prompts/{manifest-page,items,push-batch,ack-delete-epoch}`, `/api/ssh-target/sync/{...}`, `/api/scratchpad/sync/{...}`); token ships with transactional bulk upsert + request ledger + apply_merge_batch + dedicated watermark ack
 - `transfer.complete.v1` — explicit transfer finalize handshake (`POST /api/transfer/complete/:id`)
+- `transfer.resume.v1` — sender-side resume recovery (stable `protocolTransferId` + source fingerprint + peer checkpoint). Token ships with `resume_transfer` / operation ledger claim; **no new LAN route** — wire still uses init/chunk/complete/status keyed by the stable protocol id
 - `workbench.mutation-outcome.v1` — Workbench Git mutation envelope (`succeeded|unknown`) + durable operation ledger query (`POST /api/workbench/worktrees/mutation-operation`); token ships with commit/push/merge/remove envelope responses
 
 ### Semantics of `errors.envelope.v1` (important)
@@ -111,8 +112,9 @@ route access or route existence. Concretely:
   "new routes are available".
 - Route-specific capabilities (`attention.v1`, `cc-history.paged-sync.v1`,
   `orchestrator.runtime-snapshot.v1`, `sync.manifest.v2`,
-  `transfer.complete.v1`, …) ship as **independent** tokens alongside their own
-  routes and must not reuse `errors.envelope.v1` to mean "new routes supported".
+  `transfer.complete.v1`, `transfer.resume.v1`, …) ship as **independent** tokens
+  alongside their own contracts and must not reuse `errors.envelope.v1` to mean
+  "new routes supported".
 
 The existing capability gate (`peer_client::require_capability`) is therefore a
 **format** gate when used with `errors.envelope.v1`, and a **route** gate when
@@ -158,10 +160,10 @@ the router so the inventory check matches exactly.
 | POST | `/api/sync/prompts/ack-delete-epoch` | `routes/sync.rs` | advances peer/domain `acked_delete_epoch` only; no content upsert/ledger | naturally-idempotent | capability-gated by `sync.manifest.v2`; body `{claimed_device_id,acked_delete_epoch}` snake_case; empty/blank `claimed_device_id` → 400 Validation; Key/guard: `SyncWatermarkRepo::advance_ack` MAX-only (replay-safe); response `{ok:true}` |
 | POST | `/api/sync/claude_md/pull` | `routes/claude_md_sync.rs` | none; returns the singleton row | read-only | — |
 | POST | `/api/sync/claude_md/push` | `routes/claude_md_sync.rs` | overwrites singleton + `~/.claude/CLAUDE.md` | naturally-idempotent | sender only pushes its own already-merged version; re-applying the same row + `write_file_if_changed` is a no-op |
-| POST | `/api/transfer/init` | `routes/transfer.rs` | creates `.{transfer_id}.tmp` + receive registry entry | requires-idempotency-key | `transfer_id` is client-supplied and the tmp file is keyed by it, but the server does not enforce that a transport replay reuses the same `transfer_id`; a retry that mints a new id leaks a tmp file + registry entry. Clients MUST reuse the same `transfer_id` (the de-facto idempotency key) or MUST NOT auto-retry. tmp larger than declared size is rejected and deleted |
+| POST | `/api/transfer/init` | `routes/transfer.rs` | creates `.{transfer_id}.tmp` + receive registry entry | requires-idempotency-key | Wire `transfer_id` **is** the durable `protocolTransferId`. Resume reuses the same id to hit receiver checkpoint/tmp; full retry may mint a new id. Server does not enforce that a transport replay reuses the same id — minting a fresh id leaks a tmp + registry entry. Clients MUST reuse the original protocol id on resume/transport replay or MUST NOT auto-retry. tmp larger than declared size is rejected and deleted |
 | POST | `/api/transfer/chunk/:id` | `routes/transfer.rs` | writes bytes at offset, finalizes when complete | no-transport-retry | the final chunk triggers `finalize_transfer` which atomically places the tmp file into its final path via hard_link(tmp,final) no-replace commit (receive_dir lock; fallback rename_no_replace) and removes the registry entry; a transport-layer replay of the same final-chunk request previously hit a missing registry entry and returned `success:false`. The receiver now guards finalize with a per-`transfer_id` singleflight lock + a short-lived terminal tombstone, so a duplicate final chunk returns the first finalize's result — but middle chunks still mutate the tmp file at arbitrary offsets and there is no per-offset dedupe, so transport-layer retries must be disabled; callers surface the failure and let the user re-initiate |
-| POST | `/api/transfer/complete/:id` | `routes/transfer.rs` | SHA256 verify + atomic place when bytes are complete (incl. size=0 / full-tmp resume) | naturally-idempotent | capability-gated by `transfer.complete.v1`; sender only calls when peer advertises the token; legacy peers without it use last-chunk finalize for non-empty transfers and fail size=0/full-tmp as unsupported; tombstone makes replay return the first terminal outcome; client does bounded retries on network/5xx then status fallback |
-| GET | `/api/transfer/status/:id` | `routes/transfer.rs` | none | read-only | — |
+| POST | `/api/transfer/complete/:id` | `routes/transfer.rs` | SHA256 verify + atomic place when bytes are complete (incl. size=0 / full-tmp resume) | naturally-idempotent | capability-gated by `transfer.complete.v1`; sender only calls when peer advertises the token; legacy peers without it use last-chunk finalize for non-empty transfers and fail size=0/full-tmp as unsupported; tombstone makes replay return the first terminal outcome; client does bounded retries on network/5xx then status fallback. Hash mismatch fails finalize and does **not** place the file. Lost ACK: sender reconciles via `GET /api/transfer/status/:id` and must **not** invoke a second destructive finalize |
+| GET | `/api/transfer/status/:id` | `routes/transfer.rs` | none | read-only | authoritative receiver outcome for lost-ACK / uncertain reconcile; keyed only by `protocolTransferId` (not sender `clientOperationId`) |
 | POST | `/api/cc-history/sync/pull` | `routes/cc_history.rs` | none | read-only | legacy full-summary pull retained for mixed-version peers that lack `cc-history.paged-sync.v1` |
 | POST | `/api/cc-history/sync/push` | `routes/cc_history.rs` | upserts CC history rows after merge | naturally-idempotent | legacy full-body push; per-row `merge_cc_history` + `bulk_upsert`; replay converges |
 | POST | `/api/cc-history/sync/manifest-page` | `routes/cc_history.rs` | none; keyset page of `{id,vector_clock}` summaries | read-only | capability-gated by `cc-history.paged-sync.v1`; body `{cursor?,limit?}` snake_case; default limit 256, max 512; response `{summaries,next_cursor,done}`; **cursor is opaque** (base64url JSON `{v:1,last_id}`) — clients must not parse; illegal cursor → 400 `cc_history.invalid_cursor`; route body limit 8 MiB |
@@ -314,6 +316,24 @@ ships with transactional `apply_*_merge_batch` + `sync_request_ledger`.
 | Domain outcomes | Aggregated as `Succeeded{pulled,pushed,unchanged}` / `Partial` / `Unreachable` / `ProtocolError` / `ResourceLimit`. Only full-device `Succeeded` increments `succeeded_devices` / `synced`. |
 | Delete ack / floors | Incomplete manifest or failed apply must not ack. When content batches are empty, client calls dedicated `ack-delete-epoch`; when content exists, last push-batch may still carry ack. Tombstone GC (age ≥30d and all peers active in 90d have acked the epoch) is a server/local helper concern; floors reject offline-peer resurrection. |
 
+## Transfer lifecycle and recovery contract (`transfer.resume.v1`)
+
+Recovery sits **above** the existing init/chunk/complete/status wire. No new LAN
+routes are introduced for retry/resume/operation-query; those are sender-local
+Tauri/sidecar commands. Open/Reveal is **local control plane only**
+(`POST /api/backend/control/transfer/prepare-open`), never advertised on LAN.
+
+| Topic | Contract |
+| --- | --- |
+| Capability | `transfer.resume.v1` is advertised in `server_protocol_info()` / `/api/health` and mDNS caps. Sender may resume **only** when the peer `supports("transfer.resume.v1")`. Token ships with sender resume claim + stable protocol id reuse in the same build. |
+| Old-peer fallback | Peer without `transfer.resume.v1` → UI/API fall back to **full retry** only. Do **not** fake continue-from-offset. Chunk resume_offset from init still works for mid-transfer reconnects on the same protocol id; the recovery *command* surface is retry. |
+| `clientOperationId` vs request id | `clientOperationId` is the **sender-owned** durable idempotency key (`UNIQUE(client_operation_id)` + canonical payload hash covering operation kind, logical transfer/source identity, peer, expected protocol id). Same id + same hash → replay recorded outcome; same id + different hash → typed `operationIdConflict`. `get_transfer_operation` queries **only** this key. `X-CC-Request-Id` / per-invoke request ids are **trace-only** and never used as idempotency keys. |
+| Stable resume protocol id | Wire `transfer_id` **is** `protocolTransferId`. Resume reuses it so receiver tmp/checkpoint/finalize journal hit the same row. Full retry may mint a new protocol id. Receiver durability / finalize journal / status are keyed **only** by protocol id — receivers do **not** store `clientOperationId`. |
+| Source fingerprint | Fixed shape `{size, mtimeNsOrNull, sha256}`. SHA is computed in a blocking worker on the opened file handle; size/mtime rechecked before spawn. mtime unavailable → re-validate size+SHA. Any mismatch → reject resume / typed `source_changed`; never finalize on TOCTOU replace. Receiver must re-verify SHA before place; hash mismatch rejects and does not promote. |
+| Lost final ACK | After complete response loss, sender reads `GET /api/transfer/status/:protocolTransferId`. If receiver already `completed`, sender commits local task+operation outcome in one transaction. Must **not** re-enter destructive finalize/place. Still pending/unreachable → park as finalizing/uncertain; UI shows reconciling and blocks blind retry. |
+| Open / Reveal | Same-device **desktop GUI only** for `direction=Receive` + `completed`. Sidecar validates path (no-follow ordinary file) via loopback `prepare-open` and returns `LocalTransferOpenTarget`; GUI runs `plugin-opener` `openPath` / `revealItemInDir`. P2P and mobile return `unsupported`; never expose absolute paths over LAN. |
+| 1 GiB dual-host | Real disconnect/restart/resume/SHA on two physical hosts is deferred L3 (`L3-DUAL-HOST-LAN-001`, **NOT VERIFIED**). L0/L2 smoke must not claim that surface. |
+
 ## Notes on the mandatory classifications
 
 - **Server-enforced idempotency keys today.** (1) Orchestrator create:
@@ -324,17 +344,16 @@ ships with transactional `apply_*_merge_batch` + `sync_request_ledger`.
   layer and pending outbox. (2) Content sync v2 push-batch:
   `client_request_id` + optional `claimed_device_id` + domain via
   `sync_request_ledger` (same key/hash → recorded outcome; same key/different
-  hash → 409).
+  hash → 409). (3) Workbench Git mutation: `clientOperationId` +
+  `workbench_mutation_operations` ledger. (4) **Transfer sender recovery**:
+  sender-local `clientOperationId` + payload hash ledger (not a LAN route key);
+  wire reuses stable `protocolTransferId` as `transfer_id` for resume.
 - **`requires-idempotency-key` rows without a key yet.** Worktree create,
   terminal session create, split-pane, Claude resume, file/dir create,
-  browser-preview create, **and transfer/init** have no server-side dedupe today.
-  `transfer/init` keys its tmp file by the client-supplied `transfer_id`, but the
-  server does not enforce that a transport replay reuses the same id — a retry
-  that mints a fresh `transfer_id` leaks a tmp file. Until each of these gets its
-  own server-enforced key, the client transport MUST NOT auto-retry them: surface
-  the timeout and let the user re-trigger explicitly (for transfer/init the
-  client MAY auto-retry only if it deterministically reuses the original
-  `transfer_id`).
+  browser-preview create, **and transfer/init** have no *receiver* transport
+  dedupe key beyond the client-supplied `transfer_id`. Resume **must** reuse
+  that id; a full retry that mints a fresh id is intentional and creates a new
+  tmp. Transport MUST NOT auto-retry init with a newly minted id.
 - **`naturally-idempotent` rows are verified by code.** Each "Key / guard" cell
   cites the function or mechanism that makes replay converge:
   - legacy sync/cc-history/ssh-target/scratchpad push — per-row vector-clock
