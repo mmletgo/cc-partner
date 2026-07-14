@@ -15,6 +15,8 @@ pub mod apply_merge;
 pub mod claude_md;
 pub mod engine;
 pub mod merger;
+#[cfg(test)]
+pub mod mixed_version_harness;
 pub mod protocol;
 pub mod scratchpad;
 pub mod ssh_target;
