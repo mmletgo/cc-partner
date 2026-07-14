@@ -6,17 +6,19 @@
  *   Web 端需要提供侧边导航 + 主内容区的基本布局骨架，
  *   窗口标题栏由 PyQt6 原生提供，无需 Web 端自绘。
  *   侧边栏 footer 区域集中展示版本号、语言/主题切换和移动端访问入口。
+ *   主导航按 Explore/Work/Knowledge/Connect/System 分组，短窗口下可滚动。
  *
  * Code Logic（这个组件做什么）:
  *   - 全屏 flex 布局：左侧 Sidebar（240px）+ 右侧 main 区域
- *   - Sidebar 内包含 Logo、导航项、项目文件夹入口、footer（版本号 + 语言/主题切换 + 手机访问按钮）
+ *   - Sidebar 内包含 Logo、分组导航（section + 非聚焦 group label）、
+ *     Work 组内 ProjectRail、footer（版本号 + 语言/主题切换 + 手机访问按钮）
  *   - 手机访问入口经共享 Dialog 呈现 MobileAccessCard（Escape/backdrop/焦点恢复由 Dialog 合同处理）
  *   - 右侧 main 区域是 <Outlet /> 出口，由 React Router 注入子页面，
  *     main 自带 overflow: auto 实现独立滚动
  *
  *   注意：本组件是 <Outlet /> 容器，children 不直接使用。
  */
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState, type ReactNode } from 'react';
 import { Outlet } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -34,6 +36,7 @@ import {
   AlertIcon,
   SmartphoneIcon,
   XIcon,
+  FolderIcon,
 } from '../../../lib/icons';
 import { useAppVersion } from '../../../hooks/useAppVersion';
 import { useAttention } from '../../../hooks/useAttention';
@@ -60,6 +63,40 @@ export interface AppShellProps {
 
 const MOBILE_ACCESS_DIALOG_ID = 'app-shell-mobile-access-dialog';
 const MOBILE_ACCESS_TITLE_ID = 'app-shell-mobile-access-title';
+
+const NAV_GROUP_IDS = {
+  explore: 'nav-group-explore',
+  work: 'nav-group-work',
+  knowledge: 'nav-group-knowledge',
+  connect: 'nav-group-connect',
+  system: 'nav-group-system',
+} as const;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   侧栏导航按任务域分组后，每组需要统一的 section 外壳与不可聚焦标题。
+ *
+ * Code Logic（这个函数做什么）:
+ *   渲染带 aria-labelledby 的 section、非交互 group label，以及组内 children。
+ */
+function NavGroup({
+  id,
+  label,
+  children,
+}: {
+  id: string;
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className={styles.navGroup} aria-labelledby={id}>
+      <div id={id} className={styles.navGroupLabel}>
+        {label}
+      </div>
+      {children}
+    </section>
+  );
+}
 
 export function AppShell({ children }: AppShellProps) {
   // 版本号以后端 __init__.py 的 __version__ 为唯一权威来源，通过 useAppVersion
@@ -130,25 +167,36 @@ export function AppShell({ children }: AppShellProps) {
           <span className={styles.logoText}>{appName}</span>
         </div>
         <nav className={styles.navList} aria-label={t('nav:primaryNav')}>
-          <NavItem to="/" label={t('nav:home')} icon={<HomeIcon />} />
-          <NavItem
-            to="/attention"
-            label={t('nav:attention')}
-            icon={<AlertIcon />}
-            badge={attentionBadge ?? undefined}
-          />
-          <NavItem to="/prompts" label={t('nav:prompts')} icon={<PromptsIcon />} />
-          <NavItem to="/cc-history" label={t('nav:ccHistory')} icon={<HistoryIcon />} />
-          <NavItem to="/scratchpad" label={t('nav:scratchpad')} icon={<ScratchpadIcon />} />
-          <NavItem to="/prompt-optimizer" label={t('nav:promptOptimizer')} icon={<EditIcon />} />
-          <NavItem to="/transfer" label={t('nav:transfer')} icon={<TransferIcon />} />
-          <NavItem to="/claude-md" label={t('nav:claudeMd')} icon={<ClaudeMdIcon />} />
-          <NavItem to="/claude-code" label={t('nav:claudeCode')} icon={<TerminalIcon />} />
-          <NavItem to="/devices" label={t('nav:devices')} icon={<DevicesIcon />} />
-          <NavItem to="/health" label={t('nav:health')} icon={<HealthIcon />} />
-          <NavItem to="/settings" label={t('nav:settings')} icon={<SettingsIcon />} />
+          <NavGroup id={NAV_GROUP_IDS.explore} label={t('nav:groups.explore')}>
+            <NavItem to="/" label={t('nav:home')} icon={<HomeIcon />} />
+          </NavGroup>
+          <NavGroup id={NAV_GROUP_IDS.work} label={t('nav:groups.work')}>
+            <NavItem to="/workbench" label={t('nav:workbench')} icon={<FolderIcon />} />
+            <NavItem
+              to="/attention"
+              label={t('nav:attention')}
+              icon={<AlertIcon />}
+              badge={attentionBadge ?? undefined}
+            />
+            <NavItem to="/transfer" label={t('nav:transfer')} icon={<TransferIcon />} />
+            <WorkbenchProjectRail />
+          </NavGroup>
+          <NavGroup id={NAV_GROUP_IDS.knowledge} label={t('nav:groups.knowledge')}>
+            <NavItem to="/prompts" label={t('nav:prompts')} icon={<PromptsIcon />} />
+            <NavItem to="/cc-history" label={t('nav:ccHistory')} icon={<HistoryIcon />} />
+            <NavItem to="/scratchpad" label={t('nav:scratchpad')} icon={<ScratchpadIcon />} />
+            <NavItem to="/prompt-optimizer" label={t('nav:promptOptimizer')} icon={<EditIcon />} />
+            <NavItem to="/claude-md" label={t('nav:claudeMd')} icon={<ClaudeMdIcon />} />
+            <NavItem to="/claude-code" label={t('nav:claudeCode')} icon={<TerminalIcon />} />
+          </NavGroup>
+          <NavGroup id={NAV_GROUP_IDS.connect} label={t('nav:groups.connect')}>
+            <NavItem to="/devices" label={t('nav:devices')} icon={<DevicesIcon />} />
+          </NavGroup>
+          <NavGroup id={NAV_GROUP_IDS.system} label={t('nav:groups.system')}>
+            <NavItem to="/health" label={t('nav:health')} icon={<HealthIcon />} />
+            <NavItem to="/settings" label={t('nav:settings')} icon={<SettingsIcon />} />
+          </NavGroup>
         </nav>
-        <WorkbenchProjectRail />
         <PermissionStatusBadge />
       </Sidebar>
       <main className={styles.main}>{children ?? <Outlet />}</main>

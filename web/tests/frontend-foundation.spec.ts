@@ -648,4 +648,67 @@ test.describe('frontend foundation smoke', () => {
     await page.getByTestId('lan-disclosure-acknowledge').click();
     await expect(page.getByTestId('lan-disclosure-gate')).toHaveCount(0, { timeout: 15_000 });
   });
+
+  test('sidebar groups routes and content/footer do not overlap at 1280x720', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await installFoundationMocks(page);
+    await page.goto('/');
+
+    const nav = page.getByRole('navigation', { name: '主导航' });
+    await expect(nav).toBeVisible({ timeout: 15_000 });
+
+    // 分组标签可见且不可聚焦
+    for (const label of ['探索', '工作', '知识', '连接', '系统']) {
+      await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
+    }
+
+    const hrefs = await nav.locator('a[href]').evaluateAll((anchors) =>
+      anchors.map((anchor) => {
+        const href = anchor.getAttribute('href') ?? '';
+        try {
+          return new URL(href, 'http://local.test').pathname;
+        } catch {
+          return href;
+        }
+      }),
+    );
+    expect(hrefs[0]).toBe('/');
+    expect(hrefs).toContain('/workbench');
+    expect(hrefs).toContain('/attention');
+    expect(hrefs).toContain('/settings');
+    expect(hrefs.filter((href) => href === '/discover')).toHaveLength(0);
+
+    // 每条主导航链接是一个 tab stop（无 tabindex=-1）
+    const badTabStops = await nav.locator('a[href]').evaluateAll((anchors) =>
+      anchors
+        .map((anchor) => ({
+          href: anchor.getAttribute('href'),
+          tabIndex: (anchor as HTMLElement).tabIndex,
+        }))
+        .filter((item) => item.tabIndex < 0),
+    );
+    expect(badTabStops).toEqual([]);
+
+    const layout = await page.evaluate(() => {
+      const aside = document.querySelector('aside');
+      if (!aside) return null;
+      const content = aside.querySelector(':scope > div:first-child') as HTMLElement | null;
+      const footer = aside.querySelector(':scope > div:last-child') as HTMLElement | null;
+      if (!content || !footer || content === footer) return null;
+      const contentBox = content.getBoundingClientRect();
+      const footerBox = footer.getBoundingClientRect();
+      const contentStyle = getComputedStyle(content);
+      return {
+        contentBottom: contentBox.bottom,
+        footerTop: footerBox.top,
+        contentOverflowY: contentStyle.overflowY,
+        contentMinHeight: contentStyle.minHeight,
+      };
+    });
+
+    expect(layout).not.toBeNull();
+    expect(layout!.footerTop).toBeGreaterThanOrEqual(layout!.contentBottom - 1);
+    expect(['auto', 'scroll']).toContain(layout!.contentOverflowY);
+    expect(layout!.contentMinHeight === '0px' || layout!.contentMinHeight === '0').toBe(true);
+  });
 });

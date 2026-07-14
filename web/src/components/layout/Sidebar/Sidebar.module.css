@@ -1,11 +1,13 @@
 /* Sidebar - 侧边导航栏
  * 240px 宽，surface 背景，右边框，flex column 布局
- * 顶部 children（Logo + NavItem 列表），底部 footer slot
+ * 顶部 content（Logo + 分组导航）独立滚动；footer 固定在 flex 流底部，不与内容重叠
  */
 
 .sidebar {
   width: var(--sidebar-width);
   flex-shrink: 0;
+  height: 100%;
+  min-height: 0;
   background: var(--surface);
   border-right: 1px solid var(--border);
   padding: var(--space-5) var(--space-3);
@@ -13,7 +15,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  overflow-y: auto;
+  overflow: hidden;
   overflow-x: hidden;
 }
 
@@ -23,10 +25,13 @@
   gap: var(--space-2);
   flex: 1 1 auto;
   min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .footer {
-  margin-top: auto;
+  flex: 0 0 auto;
+  margin-top: 0;
   padding-top: var(--space-4);
   border-top: 1px solid var(--border-soft);
   display: flex;

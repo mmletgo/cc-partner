@@ -1,5 +1,6 @@
 {
   "home": "GitHub Trending",
+  "workbench": "Workbench",
   "attention": "Inbox",
   "transfer": "Transfer",
   "prompts": "Prompts",
@@ -12,5 +13,12 @@
   "devices": "Devices",
   "settings": "Settings",
   "health": "Health",
-  "primaryNav": "Primary"
+  "primaryNav": "Primary",
+  "groups": {
+    "explore": "Explore",
+    "work": "Work",
+    "knowledge": "Knowledge",
+    "connect": "Connect",
+    "system": "System"
+  }
 }
