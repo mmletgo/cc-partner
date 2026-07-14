@@ -316,5 +316,28 @@
     "loadFailed": "该分区加载失败：{{error}}",
     "versionLoadFailed": "版本信息加载失败：{{error}}",
     "defaultsUnavailable": "默认配置不可用，暂无法恢复默认"
+  },
+  "lanSync": {
+    "title": "局域网同步",
+    "subtitle": "与在线设备同步 Prompt、SSH 目标与速记本。只统计全成功设备。",
+    "syncNow": "立即同步局域网",
+    "syncing": "局域网同步中…",
+    "lastRun": "最近一次局域网同步",
+    "noDevices": "没有在线设备",
+    "summary": "全成功设备 {{succeeded}} / {{total}}",
+    "deviceStatus": {
+      "succeeded": "成功",
+      "partial": "部分失败",
+      "unreachable": "不可达",
+      "protocol_error": "协议错误",
+      "resource_limit": "资源限制"
+    },
+    "domain": {
+      "prompt": "Prompt",
+      "ssh_target": "SSH 目标",
+      "scratchpad": "速记本"
+    },
+    "counts": "拉取 {{pulled}} · 推送 {{pushed}} · 未变 {{unchanged}}",
+    "failed": "局域网同步失败"
   }
 }

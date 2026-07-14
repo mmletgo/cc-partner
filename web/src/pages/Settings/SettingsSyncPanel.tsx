@@ -17,6 +17,8 @@ import type {
   CloudSyncResult,
   TestCloudSyncResult,
 } from '@/lib/types';
+import type { DeviceSyncStatus, SyncRunResult } from '@/api/sync';
+import { isDeviceSucceeded, succeededCounts } from '@/api/sync';
 import type { CloudSyncForm } from './settingsState';
 import styles from './Settings.module.css';
 
@@ -60,12 +62,32 @@ export interface SettingsSyncPanelProps {
   loadError: Error | null;
   retrying: boolean;
   canResetDefaults: boolean;
+  /** 局域网同步结果 */
+  lanSyncResult: SyncRunResult | null;
+  lanSyncing: boolean;
+  lanSyncError: string | null;
   onPatch: (partial: Partial<CloudSyncForm>) => void;
   onResetDefaults: () => void;
   onTest: () => void;
   onApply: () => void;
   onSyncNow: () => void;
+  onLanSyncNow: () => void;
   onRetryLoad: () => void;
+}
+
+/**
+ * 设备状态 → Pill tone。
+ *
+ * Business Logic: partial/unreachable 不得使用 success 色。
+ * Code Logic: succeeded→success；其余 warn/danger/neutral。
+ */
+function deviceStatusTone(
+  status: DeviceSyncStatus,
+): 'success' | 'warn' | 'danger' | 'neutral' {
+  if (isDeviceSucceeded(status)) return 'success';
+  if (status === 'partial' || status === 'resource_limit') return 'warn';
+  if (status === 'unreachable' || status === 'protocol_error') return 'danger';
+  return 'neutral';
 }
 
 /**
@@ -92,11 +114,15 @@ export function SettingsSyncPanel({
   loadError: cloudSyncLoadError,
   retrying,
   canResetDefaults: canResetCloudSyncDefaults,
+  lanSyncResult,
+  lanSyncing,
+  lanSyncError,
   onPatch: patchCloudSyncForm,
   onResetDefaults: handleResetCloudSyncDefaults,
   onTest: handleTestCloudSync,
   onApply: handleApplyCloudSync,
   onSyncNow: handleSyncNow,
+  onLanSyncNow: handleLanSyncNow,
   onRetryLoad,
 }: SettingsSyncPanelProps): ReactElement {
   const { t } = useTranslation(['settings', 'common']);
@@ -104,6 +130,104 @@ export function SettingsSyncPanel({
 
   return (
     <>
+{/* Card: 局域网同步（per-device/domain 真值） */}
+<Card variant="flat" padding="md">
+  <Card.Header>
+    <h2 className={styles.sectionTitle}>{t('settings:lanSync.title')}</h2>
+  </Card.Header>
+  <Card.Body padding="md">
+    <p className={styles.helper}>{t('settings:lanSync.subtitle')}</p>
+    <div className={styles.aboutActions}>
+      <Button
+        variant="primary"
+        size="md"
+        icon={<SyncIcon />}
+        onClick={handleLanSyncNow}
+        disabled={lanSyncing}
+        data-testid="lan-sync-now"
+      >
+        {lanSyncing ? t('settings:lanSync.syncing') : t('settings:lanSync.syncNow')}
+      </Button>
+    </div>
+    {lanSyncResult ? (
+      <div data-testid="lan-sync-result">
+        <div className={styles.metaRow}>
+          <span className={styles.metaKey}>{t('settings:lanSync.lastRun')}</span>
+          <span className={styles.metaValue}>
+            {lanSyncResult.devices.length === 0
+              ? t('settings:lanSync.noDevices')
+              : t('settings:lanSync.summary', {
+                  succeeded: lanSyncResult.succeeded_devices,
+                  total: lanSyncResult.devices.length,
+                })}
+          </span>
+        </div>
+        {lanSyncResult.devices.map((device) => (
+          <div
+            key={device.device_id}
+            className={styles.metaRow}
+            data-testid={`lan-sync-device-${device.device_id}`}
+            data-status={device.status}
+          >
+            <span className={styles.metaKey}>
+              {device.device_name || device.device_id}
+            </span>
+            <span className={styles.metaValue}>
+              <Pill
+                tone={deviceStatusTone(device.status)}
+                dot
+                data-testid={`lan-sync-device-status-${device.device_id}`}
+              >
+                {t(`settings:lanSync.deviceStatus.${device.status}`)}
+              </Pill>
+              <ul className={styles.helper}>
+                {device.domains.map((domain) => {
+                  const counts = succeededCounts(domain.outcome);
+                  return (
+                    <li
+                      key={`${device.device_id}-${domain.domain}`}
+                      data-testid={`lan-sync-domain-${device.device_id}-${domain.domain}`}
+                      data-kind={domain.outcome.kind}
+                    >
+                      {t(`settings:lanSync.domain.${domain.domain}`, {
+                        defaultValue: domain.domain,
+                      })}
+                      {': '}
+                      {t(`settings:lanSync.deviceStatus.${
+                        domain.outcome.kind === 'succeeded'
+                          ? 'succeeded'
+                          : domain.outcome.kind === 'partial'
+                            ? 'partial'
+                            : domain.outcome.kind === 'unreachable'
+                              ? 'unreachable'
+                              : domain.outcome.kind === 'protocol_error'
+                                ? 'protocol_error'
+                                : 'resource_limit'
+                      }`)}
+                      {counts
+                        ? ` — ${t('settings:lanSync.counts', {
+                            pulled: counts.pulled,
+                            pushed: counts.pushed,
+                            unchanged: counts.unchanged,
+                          })}`
+                        : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            </span>
+          </div>
+        ))}
+      </div>
+    ) : null}
+    {lanSyncError ? (
+      <span className={styles.updateError} data-testid="lan-sync-error">
+        {lanSyncError}
+      </span>
+    ) : null}
+  </Card.Body>
+</Card>
+
 {/* Card: 云端同步（GitHub 私有仓库，独立操作块，不混入底部统一 Save） */}
 <Card variant="flat" padding="md">
   <Card.Header>

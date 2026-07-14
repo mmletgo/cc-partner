@@ -222,11 +222,15 @@ export function Settings(): ReactElement {
               loadError={ctrl.cloudSyncLoadError}
               retrying={ctrl.retryingGroup === 'cloudSync'}
               canResetDefaults={ctrl.canResetCloudSyncDefaults}
+              lanSyncResult={ctrl.lanSyncResult}
+              lanSyncing={ctrl.lanSyncing}
+              lanSyncError={ctrl.lanSyncError}
               onPatch={ctrl.patchCloudSyncForm}
               onResetDefaults={ctrl.handleResetCloudSyncDefaults}
               onTest={() => void ctrl.handleTestCloudSync()}
               onApply={() => void ctrl.handleApplyCloudSync()}
               onSyncNow={() => void ctrl.handleSyncNow()}
+              onLanSyncNow={() => void ctrl.handleLanSyncNow()}
               onRetryLoad={() => void ctrl.handleRetryResourceGroup('cloudSync')}
             />
           </div>

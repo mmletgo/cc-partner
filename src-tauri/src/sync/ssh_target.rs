@@ -1,16 +1,11 @@
-//! sync/ssh_target.rs — SSH 目标 LWW 冲突合并
+//! sync/ssh_target.rs — SSH 目标 LWW 冲突合并 + typed 双向同步
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     多设备同步 SSH 目标时，同一 host 可能在不同设备上被并发编辑（如两端同时改了用户名）。
-//!     需一套冲突解决策略保证最终一致。策略与 sync/merger.rs / cc/merger.rs 对齐：
-//!     - 严格领先：直接覆盖（向量时钟判定）；
-//!     - 并发：LWW，以 updated_at 时间戳决定胜出方；
-//!     - 时间戳相等：device_id 字典序 tie-break（确定性）；
-//!     - 无论谁胜出，最终都合并双方向量时钟以保留完整因果历史。
+//!     多设备同步 SSH 目标时，同一 host 可能在不同设备上被并发编辑。
+//!     需一套冲突解决策略保证最终一致，并在 N2 下返回 typed domain outcome。
 //!
 //! Code Logic（这个模块做什么）:
-//!     直接复用 crate::sync::vector_clock::{compare, merge}（不重复实现向量时钟）。
-
+//!     merge helpers + ssh_target_sync_with_peer（v2 plan / typed legacy）。
 use crate::models::ssh_target::SshTargetRow;
 use crate::sync::vector_clock::{compare, merge, ClockOrder};
 
@@ -58,59 +53,214 @@ pub fn merge_ssh_target(local: &SshTargetRow, remote: &SshTargetRow) -> SshTarge
 }
 
 use crate::state::AppState;
+use crate::sync::engine::{
+    fetch_complete_remote_manifest, peer_error_to_domain_outcome,
+};
+use crate::sync::protocol::{
+    compute_sync_plan, content_sha256_hex, SyncDomainOutcome, SyncSummary, PUSH_BATCH_ITEMS,
+};
+use std::collections::HashMap;
+use uuid::Uuid;
 
-/// 与单个对端执行 SSH 目标的双向同步。
+/// SSH 目标 LWW 冲突合并 helpers 保留在上方。
 ///
-/// Business Logic: 确保双方 SSH 目标配置一致。失败仅 warn 不阻断（由 sync/engine.rs::sync_with_peer
-///     末尾追加调用，SSH 同步失败不影响 prompts 计数）。
+/// SSH 行 → SyncSummary（id=host）。
 ///
-/// Code Logic: 与 cc/engine.rs::cc_sync_with_peer 同构（host 取代 id）：
-///     1. health 检查，不可达跳过；
-///     2. 本端 summaries（全部含 deleted 的 {host, vector_clock}）；
-///     3. Pull：ssh_target_pull 拿回对端需给的；逐条查本地，本地无则直接接收，本地有则
-///        merge_ssh_target，仅当合并结果与本地有差异时收集；bulk_upsert；
-///     4. Push：重新取本端全量，算补集（对端没有的 / 本端领先或并发的）→ ssh_target_push。
+/// Business Logic: v2 planner 需要与服务端一致的 content_hash。
+/// Code Logic: username/port/label 固定分隔后 SHA-256。
+pub fn ssh_to_summary(row: &SshTargetRow) -> SyncSummary<String> {
+    let label = row.label.as_deref().unwrap_or("");
+    let port = row.port.to_string();
+    let content_hash = content_sha256_hex(&[
+        row.username.as_bytes(),
+        b"\0",
+        port.as_bytes(),
+        b"\0",
+        label.as_bytes(),
+    ]);
+    SyncSummary {
+        id: row.host.clone(),
+        vector_clock: row.vector_clock.clone(),
+        content_hash,
+        size: (row.username.len() + row.label.as_ref().map(|s| s.len()).unwrap_or(0) + 8) as u64,
+        updated_at: row.updated_at.clone(),
+        deleted: row.deleted,
+    }
+}
+
+/// 与单个对端执行 SSH 目标双向同步，返回 typed domain outcome。
+///
+/// Business Logic: 失败不得伪装成功；支持 v2 时走 plan，否则 typed legacy。
+/// Code Logic: supports_v2 分支；不重复 health（由 engine 注入 base_url/capability）。
 pub async fn ssh_target_sync_with_peer(
     state: &AppState,
     device: &crate::models::device::Device,
-) -> Result<(), String> {
-    let base_url = device.base_url();
-    tracing::info!("开始与设备 {} 同步 SSH 目标 ({})", device.name, base_url);
+    base_url: &str,
+    supports_v2: bool,
+) -> SyncDomainOutcome {
+    if supports_v2 {
+        ssh_sync_v2(state, device, base_url).await
+    } else {
+        ssh_sync_legacy_typed(state, device, base_url).await
+    }
+}
 
-    // 1. 健康检查
-    if !state.peer_client.health(&device.host, device.port).await {
-        tracing::warn!("设备 {} 不可达，跳过 SSH 目标同步", device.name);
-        return Ok(());
+/// SSH v2 plan 路径。
+async fn ssh_sync_v2(
+    state: &AppState,
+    device: &crate::models::device::Device,
+    base_url: &str,
+) -> SyncDomainOutcome {
+    let remote = match fetch_complete_remote_manifest(|cursor| {
+        let client = state.peer_client.clone();
+        let base = base_url.to_string();
+        async move {
+            client
+                .list_ssh_manifest_page(&base, cursor.as_deref())
+                .await
+        }
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(o) => return o,
+    };
+
+    let local_all = match state.ssh_target_repo.get_all_for_sync().await {
+        Ok(v) => v,
+        Err(e) => {
+            return SyncDomainOutcome::ProtocolError {
+                code: format!("local_read_failed:{e}"),
+            };
+        }
+    };
+    let mut local_manifest: Vec<SyncSummary<String>> =
+        local_all.iter().map(ssh_to_summary).collect();
+    local_manifest.sort_by(|a, b| a.id.cmp(&b.id));
+    let local_by_id: HashMap<String, SshTargetRow> =
+        local_all.into_iter().map(|r| (r.host.clone(), r)).collect();
+
+    let plan = compute_sync_plan(&local_manifest, &remote);
+    let unchanged = plan.unchanged;
+    let mut pulled: u32 = 0;
+    let mut pushed: u32 = 0;
+
+    for chunk in plan.fetch_from_remote.chunks(PUSH_BATCH_ITEMS) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let ids: Vec<String> = chunk.to_vec();
+        let resp = match state.peer_client.fetch_ssh_items(base_url, &ids).await {
+            Ok(r) => r,
+            Err(e) => return peer_error_to_domain_outcome(&e),
+        };
+        let mut to_upsert: Vec<SshTargetRow> = Vec::new();
+        for remote_row in resp.items {
+            match local_by_id.get(&remote_row.host) {
+                None => to_upsert.push(remote_row),
+                Some(local_row) => {
+                    let merged = merge_ssh_target(local_row, &remote_row);
+                    if merged.vector_clock != local_row.vector_clock
+                        || merged.updated_at != local_row.updated_at
+                        || merged.username != local_row.username
+                        || merged.port != local_row.port
+                        || merged.label != local_row.label
+                        || merged.deleted != local_row.deleted
+                    {
+                        to_upsert.push(merged);
+                    }
+                }
+            }
+        }
+        if !to_upsert.is_empty() {
+            let n = to_upsert.len() as u32;
+            if let Err(e) = state.ssh_target_repo.bulk_upsert(&to_upsert).await {
+                return SyncDomainOutcome::ProtocolError {
+                    code: format!("bulk_upsert_failed:{e}"),
+                };
+            }
+            pulled = pulled.saturating_add(n);
+            tracing::info!("从 {} 拉取并更新了 {} 条 SSH 目标 (v2)", device.name, n);
+        }
     }
 
-    // 2. 本端全部 SSH 目标（含 deleted），投影为 summaries {host, vector_clock}
-    let local_all = state
-        .ssh_target_repo
-        .get_all_for_sync()
-        .await
-        .map_err(|e| format!("读取本地 SSH 目标失败: {e}"))?;
+    for chunk in plan.push_to_remote.chunks(PUSH_BATCH_ITEMS) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let items: Vec<SshTargetRow> = chunk
+            .iter()
+            .filter_map(|id| local_by_id.get(id).cloned())
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        let req_id = Uuid::new_v4().to_string();
+        match state
+            .peer_client
+            .push_ssh_batch(base_url, &items, &req_id)
+            .await
+        {
+            Ok(resp) => {
+                pushed = pushed.saturating_add(resp.accepted as u32);
+                tracing::info!(
+                    "向 {} 推送了 {} 条 SSH 目标 (v2 accepted={})",
+                    device.name,
+                    items.len(),
+                    resp.accepted
+                );
+            }
+            Err(e) => return peer_error_to_domain_outcome(&e),
+        }
+    }
+
+    SyncDomainOutcome::Succeeded {
+        pulled,
+        pushed,
+        unchanged,
+    }
+}
+
+/// SSH typed legacy 路径。
+async fn ssh_sync_legacy_typed(
+    state: &AppState,
+    device: &crate::models::device::Device,
+    base_url: &str,
+) -> SyncDomainOutcome {
+    let local_all = match state.ssh_target_repo.get_all_for_sync().await {
+        Ok(v) => v,
+        Err(e) => {
+            return SyncDomainOutcome::ProtocolError {
+                code: format!("local_read_failed:{e}"),
+            };
+        }
+    };
     let summary_values: Vec<serde_json::Value> = local_all
         .iter()
         .map(|p| serde_json::json!({ "host": p.host, "vector_clock": p.vector_clock }))
         .collect();
 
-    // 3. Pull：发本端 summaries，拿回对端认为本端需要的 SSH 目标
-    let remote_items: Vec<SshTargetRow> = state
+    let remote_items = match state
         .peer_client
-        .ssh_target_pull(&base_url, summary_values)
-        .await;
+        .ssh_target_pull_result(base_url, summary_values)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return peer_error_to_domain_outcome(&e),
+    };
 
     let mut to_upsert: Vec<SshTargetRow> = Vec::new();
     for remote in &remote_items {
-        let local_row = state
-            .ssh_target_repo
-            .get(&remote.host)
-            .await
-            .map_err(|e| format!("查询本地 SSH 目标 {} 失败: {e}", remote.host))?;
-        match local_row {
-            None => {
-                to_upsert.push(remote.clone());
+        let local_row = match state.ssh_target_repo.get(&remote.host).await {
+            Ok(v) => v,
+            Err(e) => {
+                return SyncDomainOutcome::ProtocolError {
+                    code: format!("local_get_failed:{e}"),
+                };
             }
+        };
+        match local_row {
+            None => to_upsert.push(remote.clone()),
             Some(local_row) => {
                 let merged = merge_ssh_target(&local_row, remote);
                 if merged.vector_clock != local_row.vector_clock
@@ -126,44 +276,41 @@ pub async fn ssh_target_sync_with_peer(
         }
     }
 
+    let mut pulled: u32 = 0;
     if !to_upsert.is_empty() {
-        let n = to_upsert.len();
-        state
-            .ssh_target_repo
-            .bulk_upsert(&to_upsert)
-            .await
-            .map_err(|e| format!("SSH 目标 bulk_upsert 失败: {e}"))?;
-        tracing::info!("从 {} 拉取并更新了 {} 条 SSH 目标", device.name, n);
+        let n = to_upsert.len() as u32;
+        if let Err(e) = state.ssh_target_repo.bulk_upsert(&to_upsert).await {
+            return SyncDomainOutcome::ProtocolError {
+                code: format!("bulk_upsert_failed:{e}"),
+            };
+        }
+        pulled = n;
+        tracing::info!("从 {} 拉取并更新了 {} 条 SSH 目标 (legacy)", device.name, n);
     }
 
-    // 4. Push：本端有而对端 pull 未返回的，推送给对端
     let remote_hosts: std::collections::HashSet<String> =
         remote_items.iter().map(|p| p.host.clone()).collect();
-    let remote_clock_map: std::collections::HashMap<
-        String,
-        &std::collections::HashMap<String, u64>,
-    > = remote_items
+    let remote_clock_map: HashMap<String, &HashMap<String, u64>> = remote_items
         .iter()
         .map(|p| (p.host.clone(), &p.vector_clock))
         .collect();
 
-    let local_all_after = state
-        .ssh_target_repo
-        .get_all_for_sync()
-        .await
-        .map_err(|e| format!("重新读取本地 SSH 目标失败: {e}"))?;
+    let local_all_after = match state.ssh_target_repo.get_all_for_sync().await {
+        Ok(v) => v,
+        Err(e) => {
+            return SyncDomainOutcome::ProtocolError {
+                code: format!("local_reread_failed:{e}"),
+            };
+        }
+    };
 
     let mut push_items: Vec<SshTargetRow> = Vec::new();
     for p in &local_all_after {
         match remote_clock_map.get(&p.host) {
-            None => {
-                push_items.push(p.clone());
-            }
+            None => push_items.push(p.clone()),
             Some(remote_clock) => {
                 let relation = compare(&p.vector_clock, remote_clock);
-                // 本端领先或并发，且 pull 未返回（避免重复推送）→ 推送（对端会做 LWW 合并）
-                if (matches!(relation, ClockOrder::After)
-                    || matches!(relation, ClockOrder::Concurrent))
+                if matches!(relation, ClockOrder::After | ClockOrder::Concurrent)
                     && !remote_hosts.contains(&p.host)
                 {
                     push_items.push(p.clone());
@@ -172,21 +319,36 @@ pub async fn ssh_target_sync_with_peer(
         }
     }
 
+    let mut pushed: u32 = 0;
     if !push_items.is_empty() {
-        let n = push_items.len();
-        let success = state
+        let n = push_items.len() as u32;
+        match state
             .peer_client
-            .ssh_target_push(&base_url, &push_items)
-            .await;
-        if success {
-            tracing::info!("向 {} 推送了 {} 条 SSH 目标", device.name, n);
-        } else {
-            tracing::warn!("向 {} 推送 SSH 目标失败", device.name);
+            .ssh_target_push_result(base_url, &push_items)
+            .await
+        {
+            Ok(true) => {
+                pushed = n;
+                tracing::info!("向 {} 推送了 {} 条 SSH 目标 (legacy)", device.name, n);
+            }
+            Ok(false) => {
+                return SyncDomainOutcome::ProtocolError {
+                    code: "push_rejected".to_string(),
+                };
+            }
+            Err(e) => return peer_error_to_domain_outcome(&e),
         }
     }
 
-    tracing::info!("与设备 {} SSH 目标同步完成", device.name);
-    Ok(())
+    let unchanged = local_all_after
+        .len()
+        .saturating_sub(pulled as usize)
+        .saturating_sub(pushed as usize) as u32;
+    SyncDomainOutcome::Succeeded {
+        pulled,
+        pushed,
+        unchanged,
+    }
 }
 
 #[cfg(test)]

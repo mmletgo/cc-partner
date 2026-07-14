@@ -128,6 +128,65 @@ vi.mock('@/api/githubTrending', () => ({
   },
 }));
 
+const { triggerLanSync } = vi.hoisted(() => ({
+  triggerLanSync: vi.fn(async () => ({
+    accepted: true,
+    succeeded_devices: 0,
+    synced: 0,
+    note: 'partial',
+    devices: [
+      {
+        device_id: 'peer-1',
+        device_name: 'Peer One',
+        status: 'partial',
+        domains: [
+          {
+            domain: 'prompt',
+            outcome: { kind: 'succeeded', pulled: 1, pushed: 0, unchanged: 0 },
+          },
+          {
+            domain: 'ssh_target',
+            outcome: { kind: 'succeeded', pulled: 0, pushed: 0, unchanged: 1 },
+          },
+          {
+            domain: 'scratchpad',
+            outcome: { kind: 'unreachable', class: 'network' },
+          },
+        ],
+      },
+      {
+        device_id: 'peer-2',
+        device_name: 'Peer Two',
+        status: 'unreachable',
+        domains: [
+          {
+            domain: 'prompt',
+            outcome: { kind: 'unreachable', class: 'timeout' },
+          },
+          {
+            domain: 'ssh_target',
+            outcome: { kind: 'unreachable', class: 'timeout' },
+          },
+          {
+            domain: 'scratchpad',
+            outcome: { kind: 'unreachable', class: 'timeout' },
+          },
+        ],
+      },
+    ],
+  })),
+}));
+
+vi.mock('@/api/sync', async () => {
+  const actual = await vi.importActual<typeof import('@/api/sync')>('@/api/sync');
+  return {
+    ...actual,
+    syncApi: {
+      trigger: () => triggerLanSync(),
+    },
+  };
+});
+
 vi.mock('@/api/health', () => ({
   healthApi: {
     getConfig: () => getHealthConfig(),
@@ -382,5 +441,37 @@ describe('Settings partial resource loading', () => {
     expect(findForbiddenDiagnosticsKeys(written)).toEqual([]);
     expect(written).toContain('ownerInstanceId');
     expect(written).not.toMatch(/token|content|prompt|password/i);
+  });
+
+
+  test('partial and unreachable never display as success on sync tab', async () => {
+    searchParamsState.value = new URLSearchParams('tab=sync');
+    renderSettings();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('lan-sync-now')).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByTestId('lan-sync-now'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('lan-sync-result')).toBeTruthy();
+    });
+
+    const partialDevice = screen.getByTestId('lan-sync-device-peer-1');
+    const unreachableDevice = screen.getByTestId('lan-sync-device-peer-2');
+    expect(partialDevice.getAttribute('data-status')).toBe('partial');
+    expect(unreachableDevice.getAttribute('data-status')).toBe('unreachable');
+
+    // status pill text must not be the success label for partial/unreachable
+    const partialStatus = screen.getByTestId('lan-sync-device-status-peer-1');
+    const unreachableStatus = screen.getByTestId('lan-sync-device-status-peer-2');
+    expect(partialStatus.textContent).not.toMatch(/deviceStatus\.succeeded/);
+    expect(unreachableStatus.textContent).not.toMatch(/deviceStatus\.succeeded/);
+    expect(partialStatus.textContent).toMatch(/partial/);
+    expect(unreachableStatus.textContent).toMatch(/unreachable/);
+
+    const scratch = screen.getByTestId('lan-sync-domain-peer-1-scratchpad');
+    expect(scratch.getAttribute('data-kind')).toBe('unreachable');
   });
 });

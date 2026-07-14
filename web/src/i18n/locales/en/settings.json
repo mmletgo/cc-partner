@@ -316,5 +316,28 @@
     "loadFailed": "This section failed to load: {{error}}",
     "versionLoadFailed": "Failed to load version info: {{error}}",
     "defaultsUnavailable": "Defaults unavailable; reset is disabled"
+  },
+  "lanSync": {
+    "title": "LAN sync",
+    "subtitle": "Sync Prompt, SSH targets, and Scratchpad with online peers. Only fully successful devices count.",
+    "syncNow": "Sync LAN now",
+    "syncing": "Syncing LAN…",
+    "lastRun": "Last LAN sync",
+    "noDevices": "No online devices",
+    "summary": "Fully succeeded devices {{succeeded}} / {{total}}",
+    "deviceStatus": {
+      "succeeded": "Succeeded",
+      "partial": "Partial",
+      "unreachable": "Unreachable",
+      "protocol_error": "Protocol error",
+      "resource_limit": "Resource limit"
+    },
+    "domain": {
+      "prompt": "Prompt",
+      "ssh_target": "SSH targets",
+      "scratchpad": "Scratchpad"
+    },
+    "counts": "pulled {{pulled}} · pushed {{pushed}} · unchanged {{unchanged}}",
+    "failed": "LAN sync failed"
   }
 }

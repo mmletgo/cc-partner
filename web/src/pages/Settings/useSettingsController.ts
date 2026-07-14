@@ -18,6 +18,7 @@ import { configApi } from '@/api/config';
 import { healthApi } from '@/api/health';
 import { orchestratorConfigApi } from '@/api/orchestratorConfig';
 import { githubTrendingApi } from '@/api/githubTrending';
+import { syncApi, type SyncRunResult } from '@/api/sync';
 import { usePermissions } from '@/hooks/usePermissions';
 import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import {
@@ -243,11 +244,19 @@ export interface UseSettingsControllerResult {
   syncing: boolean;
   cloudSyncLoadError: Error | null;
   canResetCloudSyncDefaults: boolean;
+  /** 局域网同步最近一次结果（per-device/domain） */
+  lanSyncResult: SyncRunResult | null;
+  /** 局域网同步进行中 */
+  lanSyncing: boolean;
+  /** 局域网同步错误文案 */
+  lanSyncError: string | null;
   patchCloudSyncForm: (partial: Partial<CloudSyncForm>) => void;
   handleResetCloudSyncDefaults: () => void;
   handleTestCloudSync: () => Promise<void>;
   handleApplyCloudSync: () => Promise<void>;
   handleSyncNow: () => Promise<void>;
+  /** 触发局域网 trigger_sync */
+  handleLanSyncNow: () => Promise<void>;
 
   // ai / github trending
   githubTrendingForm: GithubTrendingForm;
@@ -377,6 +386,9 @@ export function useSettingsController(): UseSettingsControllerResult {
   });
   const [cloudSync, setCloudSync] = useState<CloudSyncConfig | null>(null);
   const [syncResult, setSyncResult] = useState<CloudSyncResult | null>(null);
+  const [lanSyncResult, setLanSyncResult] = useState<SyncRunResult | null>(null);
+  const [lanSyncing, setLanSyncing] = useState(false);
+  const [lanSyncError, setLanSyncError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<TestCloudSyncResult | null>(null);
   const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
@@ -1276,6 +1288,28 @@ export function useSettingsController(): UseSettingsControllerResult {
   };
 
   /**
+   * 局域网同步「立即同步」：trigger_sync 返回 per-device/domain 真值。
+   *
+   * Business Logic: Settings 同步 tab 展示设备/领域状态；partial/unreachable 不计成功。
+   * Code Logic: syncApi.trigger() → setLanSyncResult；失败写 lanSyncError。
+   */
+  const handleLanSyncNow = async () => {
+    setLanSyncing(true);
+    setLanSyncError(null);
+    try {
+      const result = await syncApi.trigger();
+      setLanSyncResult(result);
+    } catch (err) {
+      setLanSyncResult(null);
+      setLanSyncError(
+        err instanceof Error ? err.message : t('settings:lanSync.failed'),
+      );
+    } finally {
+      setLanSyncing(false);
+    }
+  };
+
+  /**
    * 更新 Claude CLI / AI 表单字段
    */
   const patchGithubTrendingForm = useCallback((partial: Partial<GithubTrendingForm>) => {
@@ -1546,6 +1580,10 @@ export function useSettingsController(): UseSettingsControllerResult {
     handleTestCloudSync,
     handleApplyCloudSync,
     handleSyncNow,
+    lanSyncResult,
+    lanSyncing,
+    lanSyncError,
+    handleLanSyncNow,
 
     githubTrendingForm,
     githubTrendingConfig,

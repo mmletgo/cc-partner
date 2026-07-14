@@ -496,23 +496,8 @@ impl PeerClient {
         base_url: &str,
         local_summary: Vec<serde_json::Value>,
     ) -> Vec<crate::models::prompt::PromptRow> {
-        let url = format!("{base_url}/api/sync/pull");
-        let body = serde_json::json!({ "summaries": local_summary });
-        match self.request_post::<SyncPullResp, _>(&url, &body).await {
-            Ok(data) => {
-                // 只记条数与结果，不记录 prompt 正文或请求 body
-                crate::backend::logging::OperationLog::new(
-                    "p2p",
-                    "sync_pull",
-                    crate::backend::logging::OperationResult::Ok,
-                )
-                .message(format!(
-                    "sync_pull 从对端获取 {} 条 prompt",
-                    data.prompts.len()
-                ))
-                .emit();
-                data.prompts
-            }
+        match self.sync_pull_result(base_url, local_summary).await {
+            Ok(v) => v,
             Err(e) => {
                 crate::backend::logging::OperationLog::new(
                     "p2p",
@@ -520,12 +505,37 @@ impl PeerClient {
                     crate::backend::logging::OperationResult::Error,
                 )
                 .level(tracing::Level::WARN)
-                .error_code("unavailable")
+                .error_code(e.code().unwrap_or("unavailable"))
                 .message(format!("sync_pull 失败: {e}"))
                 .emit();
                 Vec::new()
             }
         }
+    }
+
+    /// Prompt legacy pull（typed）：失败上抛，禁止折叠空集。
+    ///
+    /// Business Logic: N2 引擎 legacy 路径需要区分“成功空远端”与 transport 失败。
+    /// Code Logic: POST `/api/sync/pull`，成功返回 prompts；失败 `PeerCallError`。
+    pub async fn sync_pull_result(
+        &self,
+        base_url: &str,
+        local_summary: Vec<serde_json::Value>,
+    ) -> Result<Vec<crate::models::prompt::PromptRow>, PeerCallError> {
+        let url = format!("{base_url}/api/sync/pull");
+        let body = serde_json::json!({ "summaries": local_summary });
+        let data: SyncPullResp = self.request_post(&url, &body).await?;
+        crate::backend::logging::OperationLog::new(
+            "p2p",
+            "sync_pull",
+            crate::backend::logging::OperationResult::Ok,
+        )
+        .message(format!(
+            "sync_pull 从对端获取 {} 条 prompt",
+            data.prompts.len()
+        ))
+        .emit();
+        Ok(data.prompts)
     }
 
     /// 同步 push：将本端有但对端缺少的 prompt 推送给对端。
@@ -540,19 +550,8 @@ impl PeerClient {
         base_url: &str,
         prompts: &[crate::models::prompt::PromptRow],
     ) -> bool {
-        let url = format!("{base_url}/api/sync/push");
-        let body = serde_json::json!({ "prompts": prompts });
-        match self.request_post::<SyncPushResp, _>(&url, &body).await {
-            Ok(data) => {
-                crate::backend::logging::OperationLog::new(
-                    "p2p",
-                    "sync_push",
-                    crate::backend::logging::OperationResult::Ok,
-                )
-                .message(format!("sync_push 成功，对端接收 {} 条", data.accepted))
-                .emit();
-                true
-            }
+        match self.sync_push_result(base_url, prompts).await {
+            Ok(v) => v,
             Err(e) => {
                 crate::backend::logging::OperationLog::new(
                     "p2p",
@@ -560,12 +559,34 @@ impl PeerClient {
                     crate::backend::logging::OperationResult::Error,
                 )
                 .level(tracing::Level::WARN)
-                .error_code("unavailable")
+                .error_code(e.code().unwrap_or("unavailable"))
                 .message(format!("sync_push 失败: {e}"))
                 .emit();
                 false
             }
         }
+    }
+
+    /// Prompt legacy push（typed）：失败上抛。
+    ///
+    /// Business Logic: N2 引擎需要 push 失败时返回 typed Protocol/Unreachable，不得假成功。
+    /// Code Logic: POST `/api/sync/push`，2xx → Ok(true)；错误上抛 PeerCallError。
+    pub async fn sync_push_result(
+        &self,
+        base_url: &str,
+        prompts: &[crate::models::prompt::PromptRow],
+    ) -> Result<bool, PeerCallError> {
+        let url = format!("{base_url}/api/sync/push");
+        let body = serde_json::json!({ "prompts": prompts });
+        let data: SyncPushResp = self.request_post(&url, &body).await?;
+        crate::backend::logging::OperationLog::new(
+            "p2p",
+            "sync_push",
+            crate::backend::logging::OperationResult::Ok,
+        )
+        .message(format!("sync_push 成功，对端接收 {} 条", data.accepted))
+        .emit();
+        Ok(true)
     }
 
     /// CLAUDE.md 主动 push：将本端的 CLAUDE.md 版本推送给对端。
@@ -1432,6 +1453,67 @@ impl PeerClient {
             });
         }
         Ok(())
+    }
+
+
+    /// SSH legacy pull（typed）。
+    ///
+    /// Business Logic: 引擎 legacy 路径区分空成功与传输失败。
+    /// Code Logic: POST `/api/ssh-target/sync/pull`，失败上抛。
+    pub async fn ssh_target_pull_result(
+        &self,
+        base_url: &str,
+        local_summary: Vec<serde_json::Value>,
+    ) -> Result<Vec<crate::models::ssh_target::SshTargetRow>, PeerCallError> {
+        let url = format!("{base_url}/api/ssh-target/sync/pull");
+        let body = serde_json::json!({ "summaries": local_summary });
+        let data: SshTargetPullResp = self.request_post(&url, &body).await?;
+        Ok(data.targets)
+    }
+
+    /// SSH legacy push（typed）。
+    ///
+    /// Business Logic: push 失败不得假成功。
+    /// Code Logic: POST `/api/ssh-target/sync/push`，2xx → Ok(true)。
+    pub async fn ssh_target_push_result(
+        &self,
+        base_url: &str,
+        targets: &[crate::models::ssh_target::SshTargetRow],
+    ) -> Result<bool, PeerCallError> {
+        let url = format!("{base_url}/api/ssh-target/sync/push");
+        let body = serde_json::json!({ "targets": targets });
+        let _data: SshTargetPushResp = self.request_post(&url, &body).await?;
+        Ok(true)
+    }
+
+    /// Scratchpad legacy pull（typed）。
+    ///
+    /// Business Logic: 引擎 legacy 路径区分空成功与传输失败。
+    /// Code Logic: POST `/api/scratchpad/sync/pull`，失败上抛。
+    pub async fn scratchpad_pull_result(
+        &self,
+        base_url: &str,
+        summaries: Vec<serde_json::Value>,
+    ) -> Result<Vec<crate::models::scratchpad::ScratchpadRow>, PeerCallError> {
+        let url = format!("{base_url}/api/scratchpad/sync/pull");
+        let body = serde_json::json!({ "summaries": summaries });
+        let data: ScratchpadPullResp = self.request_post(&url, &body).await?;
+        Ok(data.pages)
+    }
+
+    /// Scratchpad legacy push（typed）。
+    ///
+    /// Business Logic: push 失败不得假成功。
+    /// Code Logic: POST `/api/scratchpad/sync/push`，2xx → Ok(true)。
+    pub async fn scratchpad_push_result(
+        &self,
+        base_url: &str,
+        pages: &[crate::models::scratchpad::ScratchpadRow],
+    ) -> Result<bool, PeerCallError> {
+        let url = format!("{base_url}/api/scratchpad/sync/push");
+        let body = serde_json::json!({ "pages": pages });
+        let _data: ScratchpadPushResp = self.request_post(&url, &body).await?;
+        Ok(true)
     }
 
     /// Prompt v2：拉一页对端 manifest 摘要。
