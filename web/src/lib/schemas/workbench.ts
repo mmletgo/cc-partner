@@ -9,11 +9,19 @@
  */
 
 import type {
+  MutationIntent,
+  MutationKind,
+  MutationState,
+  MutationTransportClass,
   WorkbenchCsvPreview,
   WorkbenchFileCapabilities,
   WorkbenchFileNode,
   WorkbenchGitStatus,
   WorkbenchImagePreview,
+  WorkbenchMergeResult,
+  WorkbenchMergeStage,
+  WorkbenchMutationEnvelope,
+  WorkbenchMutationOperation,
   WorkbenchOpenFile,
   WorkbenchPathInfo,
   WorkbenchProject,
@@ -26,11 +34,15 @@ import type {
 import {
   arrayDecoder,
   booleanDecoder,
+  defineDecoder,
+  enumDecoder,
+  literalDecoder,
   nullableDecoder,
   numberDecoder,
   objectDecoder,
   optionalDecoder,
   stringDecoder,
+  unionDecoder,
   type Decoder,
 } from '../runtimeSchema';
 
@@ -97,6 +109,148 @@ export const workbenchWorktreeDecoder: Decoder<WorkbenchWorktree> = objectDecode
 export const workbenchWorktreesDecoder: Decoder<WorkbenchWorktree[]> = arrayDecoder(
   workbenchWorktreeDecoder,
 );
+
+const mutationTransportClassDecoder: Decoder<MutationTransportClass> = enumDecoder(
+  'MutationTransportClass',
+  ['timeout', 'network'] as const,
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   mutation 成功通道必须严格区分 succeeded / unknown，损坏 envelope 不得写入 controller。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   tag=kind 联合；succeeded 用 valueDecoder 解 value；unknown 可选 transportClass。
+ */
+export function workbenchMutationEnvelopeDecoder<T>(
+  valueDecoder: Decoder<T>,
+): Decoder<WorkbenchMutationEnvelope<T>> {
+  return unionDecoder<WorkbenchMutationEnvelope<T>>('WorkbenchMutationEnvelope', [
+    objectDecoder('WorkbenchMutationEnvelopeSucceeded', {
+      kind: literalDecoder('succeeded'),
+      value: valueDecoder,
+      clientOperationId: stringDecoder,
+    }),
+    objectDecoder('WorkbenchMutationEnvelopeUnknown', {
+      kind: literalDecoder('unknown'),
+      clientOperationId: stringDecoder,
+      transportClass: optionalDecoder(mutationTransportClassDecoder),
+    }),
+  ]);
+}
+
+const mutationKindDecoder: Decoder<MutationKind> = enumDecoder('MutationKind', [
+  'commit',
+  'push',
+  'merge',
+  'remove',
+] as const);
+
+const mutationStateDecoder: Decoder<MutationState> = enumDecoder('MutationState', [
+  'claimed',
+  'running',
+  'succeeded',
+  'failed',
+] as const);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   ledger intent 是 unknown 后对账唯一来源，kind 错位不得进入矩阵。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   tag=kind 联合解码 commit/push/merge/remove intent 字段。
+ */
+export const mutationIntentDecoder: Decoder<MutationIntent> = unionDecoder<MutationIntent>(
+  'MutationIntent',
+  [
+    objectDecoder('MutationIntentCommit', {
+      kind: literalDecoder('commit'),
+      projectId: stringDecoder,
+      worktreeId: stringDecoder,
+      beforeHead: nullableDecoder(stringDecoder),
+      expectedTree: stringDecoder,
+    }),
+    objectDecoder('MutationIntentPush', {
+      kind: literalDecoder('push'),
+      projectId: stringDecoder,
+      worktreeId: stringDecoder,
+      localRef: stringDecoder,
+      remoteRef: stringDecoder,
+      localHead: stringDecoder,
+    }),
+    objectDecoder('MutationIntentMerge', {
+      kind: literalDecoder('merge'),
+      projectId: stringDecoder,
+      sourceWorktreeId: stringDecoder,
+      sourceHead: stringDecoder,
+      mainHead: stringDecoder,
+    }),
+    objectDecoder('MutationIntentRemove', {
+      kind: literalDecoder('remove'),
+      projectId: stringDecoder,
+      worktreeId: stringDecoder,
+      path: stringDecoder,
+      branch: nullableDecoder(stringDecoder),
+    }),
+  ],
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   get_workbench_mutation_operation 返回 ledger 行，损坏不得驱动对账。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 operation 字段；outcome 允许任意 JSON（unknown）。
+ */
+export const workbenchMutationOperationDecoder: Decoder<WorkbenchMutationOperation> = objectDecoder(
+  'WorkbenchMutationOperation',
+  {
+    clientOperationId: stringDecoder,
+    kind: mutationKindDecoder,
+    payloadHash: stringDecoder,
+    intent: mutationIntentDecoder,
+    state: mutationStateDecoder,
+    // outcome 是权威 value JSON，运行时保持 unknown（允许任意 JSON，含 null 由 nullable 处理）。
+    outcome: nullableDecoder(defineDecoder<unknown>('MutationOutcomeJson', (value) => value)),
+    errorMessage: nullableDecoder(stringDecoder),
+    projectId: nullableDecoder(stringDecoder),
+    worktreeId: nullableDecoder(stringDecoder),
+    createdAt: stringDecoder,
+    updatedAt: stringDecoder,
+  },
+);
+
+const workbenchMergeStageDecoder: Decoder<WorkbenchMergeStage> = objectDecoder(
+  'WorkbenchMergeStage',
+  {
+    id: stringDecoder as Decoder<WorkbenchMergeStage['id']>,
+    status: stringDecoder as Decoder<WorkbenchMergeStage['status']>,
+    message: stringDecoder,
+  },
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   merge envelope 的 value 是阶段结果，损坏阶段 id/status 不得写入进度条。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 ok/worktreeId/stages。
+ */
+export const workbenchMergeResultDecoder: Decoder<WorkbenchMergeResult> = objectDecoder(
+  'WorkbenchMergeResult',
+  {
+    ok: booleanDecoder,
+    worktreeId: stringDecoder,
+    stages: arrayDecoder(workbenchMergeStageDecoder),
+  },
+);
+
+/** remove 成功 value：{ok, worktreeId}。 */
+export const workbenchRemoveResultDecoder: Decoder<{ ok: boolean; worktreeId: string }> =
+  objectDecoder('WorkbenchRemoveResult', {
+    ok: booleanDecoder,
+    worktreeId: stringDecoder,
+  });
 
 /**
  * Business Logic（为什么需要这个 decoder）:

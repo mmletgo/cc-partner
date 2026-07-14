@@ -105,6 +105,21 @@ CREATE TABLE IF NOT EXISTS workbench_browser_targets (
 CREATE INDEX IF NOT EXISTS idx_workbench_browser_targets_project
     ON workbench_browser_targets(project_id, updated_at DESC);
 
+-- workbench_mutation_operations 表：Workbench Git mutation 持久化 ledger（UNIQUE client_operation_id）
+CREATE TABLE IF NOT EXISTS workbench_mutation_operations (
+    client_operation_id TEXT PRIMARY KEY NOT NULL,
+    kind TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    intent_json TEXT NOT NULL,
+    state TEXT NOT NULL,
+    outcome_json TEXT,
+    error_message TEXT,
+    project_id TEXT,
+    worktree_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- orchestrator_tasks 表：Orchestrator 权威任务队列
 CREATE TABLE IF NOT EXISTS orchestrator_tasks (
     id TEXT PRIMARY KEY,

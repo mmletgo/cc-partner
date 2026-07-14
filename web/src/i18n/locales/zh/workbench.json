@@ -640,6 +640,7 @@
     "createPath": "创建路径失败",
     "copyPath": "复制路径失败",
     "renamePath": "重命名失败",
-    "deletePath": "删除失败"
+    "deletePath": "删除失败",
+    "mutationUnknown": "操作结果未知，请刷新后人工核对"
   }
 }

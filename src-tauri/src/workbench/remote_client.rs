@@ -9,6 +9,7 @@
 //!     解析错误统一转换为简洁中文 AppError。
 
 use crate::error::AppError;
+use crate::net::protocol::PeerProtocolInfo;
 use crate::workbench::browser_models::{WorkbenchBrowserDiscovery, WorkbenchBrowserPreview};
 use crate::workbench::claude_sessions::{SessionPreview, SessionSearchHit};
 use crate::workbench::models::{
@@ -17,14 +18,17 @@ use crate::workbench::models::{
     WorkbenchRemotePathInfoDto, WorkbenchRemoteRootDto, WorkbenchSaveTextResultDto,
     WorkbenchSessionDto, WorkbenchSqlitePreview, WorkbenchWorktreeDto,
 };
+use crate::workbench::operation_ledger::{
+    WorkbenchMutationEnvelopeDto, WorkbenchMutationOperationDto,
+};
 use crate::workbench::remote_protocol::{
     RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq,
     RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq,
     RemoteFocusedSessionResp, RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq,
-    RemoteOpenFileReq, RemotePathInfoReq, RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq,
-    RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq,
-    RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq, RemoteSaveTextReq,
-    RemoteSearchClaudeSessionsReq, RemoteSessionReq, RemoteSplitPaneReq,
+    RemoteMutationOperationReq, RemoteOpenFileReq, RemotePathInfoReq, RemotePreviewHtmlAssetReq,
+    RemotePreviewSqliteReq, RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq,
+    RemoteRenamePathReq, RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq,
+    RemoteSaveTextReq, RemoteSearchClaudeSessionsReq, RemoteSessionReq, RemoteSplitPaneReq,
     RemoteWorkbenchBrowserDiscoverReq, RemoteWorkbenchBrowserPreviewReq, RemoteWorktreeReq,
     RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
 };
@@ -285,6 +289,7 @@ impl RemoteWorkbenchClient {
             endpoint_url(base_url, "/api/workbench/worktrees/get"),
             &RemoteWorktreeReq {
                 worktree_id: worktree_id.to_string(),
+                client_operation_id: None,
             },
             RemoteRequestTimeoutKind::Short,
         )
@@ -327,6 +332,31 @@ impl RemoteWorkbenchClient {
             endpoint_url(base_url, "/api/workbench/worktrees/push"),
             &RemoteWorktreeReq {
                 worktree_id: worktree_id.to_string(),
+                client_operation_id: None,
+            },
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
+    /// 推送远端 worktree，解析 mutation envelope。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     新 peer 返回 succeeded|unknown envelope。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST push 并反序列化 WorkbenchMutationEnvelopeDto。
+    pub async fn push_worktree_envelope(
+        &self,
+        base_url: &str,
+        worktree_id: &str,
+        client_operation_id: Option<String>,
+    ) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/worktrees/push"),
+            &RemoteWorktreeReq {
+                worktree_id: worktree_id.to_string(),
+                client_operation_id,
             },
             RemoteRequestTimeoutKind::Long,
         )
@@ -349,6 +379,31 @@ impl RemoteWorkbenchClient {
             endpoint_url(base_url, "/api/workbench/worktrees/merge"),
             &RemoteWorktreeReq {
                 worktree_id: worktree_id.to_string(),
+                client_operation_id: None,
+            },
+            merge_worktree_timeout_kind(),
+        )
+        .await
+    }
+
+    /// 合并远端 worktree，解析 mutation envelope。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     新 peer merge 返回 envelope。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST merge 并解析 envelope。
+    pub async fn merge_worktree_envelope(
+        &self,
+        base_url: &str,
+        worktree_id: &str,
+        client_operation_id: Option<String>,
+    ) -> Result<WorkbenchMutationEnvelopeDto<Value>, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/worktrees/merge"),
+            &RemoteWorktreeReq {
+                worktree_id: worktree_id.to_string(),
+                client_operation_id,
             },
             merge_worktree_timeout_kind(),
         )
@@ -373,10 +428,104 @@ impl RemoteWorkbenchClient {
             &RemoteRemoveWorktreeReq {
                 worktree_id: worktree_id.to_string(),
                 force,
+                client_operation_id: None,
             },
             RemoteRequestTimeoutKind::Long,
         )
         .await
+    }
+
+    /// 删除远端 worktree，解析 mutation envelope。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     新 peer remove 返回 envelope。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST remove 并解析 envelope。
+    pub async fn remove_worktree_envelope(
+        &self,
+        base_url: &str,
+        worktree_id: &str,
+        force: Option<bool>,
+        client_operation_id: Option<String>,
+    ) -> Result<WorkbenchMutationEnvelopeDto<Value>, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/worktrees/remove"),
+            &RemoteRemoveWorktreeReq {
+                worktree_id: worktree_id.to_string(),
+                force,
+                client_operation_id,
+            },
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
+    /// 提交远端 worktree，解析 mutation envelope。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     新 peer 返回 succeeded|unknown。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST commit 并解析 envelope。
+    pub async fn commit_worktree_envelope(
+        &self,
+        base_url: &str,
+        req: RemoteCommitWorktreeReq,
+    ) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/worktrees/commit"),
+            &req,
+            commit_worktree_timeout_kind(),
+        )
+        .await
+    }
+
+    /// 查询远端 mutation ledger。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     unknown 后向 owning device 取 intent/state。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST mutation-operation。
+    ///
+    /// 注：桌面 get 当前经 control 代理到 owning sidecar 本地 ledger；本方法供
+    /// 未来 remote-aware 查询或对端诊断复用，生产路径暂未挂接。
+    #[allow(dead_code)]
+    pub async fn get_mutation_operation(
+        &self,
+        base_url: &str,
+        client_operation_id: &str,
+    ) -> Result<Option<WorkbenchMutationOperationDto>, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/worktrees/mutation-operation"),
+            &RemoteMutationOperationReq {
+                client_operation_id: client_operation_id.to_string(),
+            },
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 探测对端是否支持某 capability。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     mutation-outcome 等新契约只能在 capability 命中时使用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     GET /api/health 解析 PeerProtocolInfo::supports。
+    pub async fn peer_supports_capability(
+        &self,
+        base_url: &str,
+        capability: &str,
+    ) -> Result<bool, AppError> {
+        let info: PeerProtocolInfo = self
+            .get_json(
+                endpoint_url(base_url, "/api/health"),
+                RemoteRequestTimeoutKind::Short,
+            )
+            .await?;
+        Ok(info.supports(capability))
     }
 
     /// 列出远端 worktree 的 Git 提交。
@@ -1029,8 +1178,7 @@ impl RemoteWorkbenchClient {
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
-            // send 失败属于传输离线：用 Unavailable 分类，供 preflight/outbox 按类型分支。
-            .map_err(|error| AppError::unavailable(format!("远端 Workbench 请求失败: {error}")))?;
+            .map_err(map_remote_send_error)?;
         parse_json_response(response).await
     }
 
@@ -1080,9 +1228,19 @@ impl RemoteWorkbenchClient {
             .timeout(remote_request_timeout(timeout_kind))
             .send()
             .await
-            // send 失败属于传输离线：用 Unavailable 分类，供 preflight/outbox 按类型分支。
-            .map_err(|error| AppError::unavailable(format!("远端 Workbench 请求失败: {error}")))?;
+            .map_err(map_remote_send_error)?;
         parse_json_response(response).await
+    }
+}
+
+/// Business Logic: legacy mutation 路径需要区分 timeout vs network，才能映射 unknown envelope。
+/// Code Logic: reqwest error.is_timeout() → AppError::timeout，其它 send 失败 → unavailable。
+fn map_remote_send_error(error: reqwest::Error) -> AppError {
+    if error.is_timeout() {
+        AppError::timeout(format!("远端 Workbench 请求超时: {error}"))
+    } else {
+        // 非超时 send 失败属于传输离线，供 preflight/outbox 按 Unavailable 分支。
+        AppError::unavailable(format!("远端 Workbench 请求失败: {error}"))
     }
 }
 

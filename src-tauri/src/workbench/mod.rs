@@ -19,6 +19,7 @@ pub mod fs;
 pub mod git;
 pub mod html_assets;
 pub mod models;
+pub mod operation_ledger;
 pub mod projects;
 pub mod remote_client;
 pub mod remote_directory;

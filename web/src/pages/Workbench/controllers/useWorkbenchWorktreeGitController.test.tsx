@@ -21,7 +21,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, renderHook } from '@testing-library/react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { useWorkbenchWorktreeGitController } from './useWorkbenchWorktreeGitController';
 import type { WorkbenchWorktreeGitErrorKey } from './useWorkbenchWorktreeGitController';
@@ -46,19 +46,33 @@ interface FakeWorktreesApi {
   push: ReturnType<typeof vi.fn>;
   merge: ReturnType<typeof vi.fn>;
   remove: ReturnType<typeof vi.fn>;
+  getMutationOperation: ReturnType<typeof vi.fn>;
 }
 
 interface FakeGitApi {
   listCommits: ReturnType<typeof vi.fn>;
 }
 
+function succeededEnvelope<T>(value: T, clientOperationId = 'op-test') {
+  return { kind: 'succeeded' as const, value, clientOperationId };
+}
+
 const fakeWorktreesApi = vi.hoisted<FakeWorktreesApi>(() => ({
   list: vi.fn(async () => [] as WorkbenchWorktree[]),
   create: vi.fn(async () => ({}) as WorkbenchWorktree),
-  commit: vi.fn(async () => ({}) as WorkbenchWorktree),
-  push: vi.fn(async () => ({}) as WorkbenchWorktree),
-  merge: vi.fn(async () => ({ ok: true, worktreeId: 'wt', stages: [] }) as WorkbenchMergeResult),
-  remove: vi.fn(async () => ({ ok: true, worktreeId: 'wt' })),
+  commit: vi.fn(async () =>
+    succeededEnvelope({} as WorkbenchWorktree),
+  ),
+  push: vi.fn(async () =>
+    succeededEnvelope({} as WorkbenchWorktree),
+  ),
+  merge: vi.fn(async () =>
+    succeededEnvelope({ ok: true, worktreeId: 'wt', stages: [] } as WorkbenchMergeResult),
+  ),
+  remove: vi.fn(async () =>
+    succeededEnvelope({ ok: true, worktreeId: 'wt' }),
+  ),
+  getMutationOperation: vi.fn(async () => null),
 }));
 
 const fakeGitApi = vi.hoisted<FakeGitApi>(() => ({
@@ -248,6 +262,11 @@ function renderController(
   const renderResult = renderHook(
     (currentProps: ControllerProps) => {
       const [activeWt, setActiveWt] = useStateInternal(currentProps.activeWorktreeId);
+      // Business Logic: rerender 传入新 activeWorktreeId 时必须同步到 holder，否则 context-switch
+      // 测试无法真正切换 worktree 上下文（useState 只吃初始值）。
+      useEffect(() => {
+        setActiveWt(currentProps.activeWorktreeId);
+      }, [currentProps.activeWorktreeId]);
       activeWorktreeState.value = activeWt;
       activeWorktreeState.setValue = setActiveWt;
       // Business Logic: controller 调用 setActiveWorktreeId 时，既触发页面 state 更新（setActiveWt），
@@ -323,13 +342,23 @@ beforeEach(() => {
   fakeWorktreesApi.push.mockReset();
   fakeWorktreesApi.merge.mockReset();
   fakeWorktreesApi.remove.mockReset();
+  fakeWorktreesApi.getMutationOperation.mockReset();
   fakeGitApi.listCommits.mockReset();
   fakeWorktreesApi.list.mockImplementation(async () => [] as WorkbenchWorktree[]);
   fakeWorktreesApi.create.mockImplementation(async () => ({}) as WorkbenchWorktree);
-  fakeWorktreesApi.commit.mockImplementation(async () => ({}) as WorkbenchWorktree);
-  fakeWorktreesApi.push.mockImplementation(async () => ({}) as WorkbenchWorktree);
-  fakeWorktreesApi.merge.mockImplementation(async () => ({ ok: true, worktreeId: 'wt', stages: [] }) as WorkbenchMergeResult);
-  fakeWorktreesApi.remove.mockImplementation(async () => ({ ok: true, worktreeId: 'wt' }));
+  fakeWorktreesApi.commit.mockImplementation(async () =>
+    succeededEnvelope({} as WorkbenchWorktree),
+  );
+  fakeWorktreesApi.push.mockImplementation(async () =>
+    succeededEnvelope({} as WorkbenchWorktree),
+  );
+  fakeWorktreesApi.merge.mockImplementation(async () =>
+    succeededEnvelope({ ok: true, worktreeId: 'wt', stages: [] } as WorkbenchMergeResult),
+  );
+  fakeWorktreesApi.remove.mockImplementation(async () =>
+    succeededEnvelope({ ok: true, worktreeId: 'wt' }),
+  );
+  fakeWorktreesApi.getMutationOperation.mockImplementation(async () => null);
   fakeGitApi.listCommits.mockImplementation(async () => [] as WorkbenchGitCommit[]);
 });
 
@@ -674,7 +703,7 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
     const project = buildLocalProject();
     const mainWt = buildWorktree({ id: 'wt-main', projectId: project.id });
     const committed = buildWorktree({ id: 'wt-main', projectId: project.id, status: { ...mainWt.status, changed: 0 } });
-    fakeWorktreesApi.commit.mockResolvedValueOnce(committed);
+    fakeWorktreesApi.commit.mockResolvedValueOnce(succeededEnvelope(committed));
     fakeWorktreesApi.list.mockResolvedValueOnce([committed]);
     const commit = buildCommit({ hash: 'c1' });
     fakeGitApi.listCommits.mockResolvedValueOnce([commit]);
@@ -690,7 +719,11 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
       await flushMicrotasks();
     });
 
-    expect(fakeWorktreesApi.commit).toHaveBeenCalledWith('wt-main', null);
+    expect(fakeWorktreesApi.commit).toHaveBeenCalledWith(
+      'wt-main',
+      null,
+      expect.any(String),
+    );
     expect(fakeWorktreesApi.list).toHaveBeenCalledWith(project.id);
     expect(fakeGitApi.listCommits).toHaveBeenCalledWith(project.id, 'wt-main', 30);
     expect(result.current.gitCommits).toEqual([commit]);
@@ -699,7 +732,9 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
 
   test('handleCommitWorktree does not refresh git history when inspectorTab !== history', async () => {
     const project = buildLocalProject();
-    fakeWorktreesApi.commit.mockResolvedValueOnce(buildWorktree({ id: 'wt-main' }));
+    fakeWorktreesApi.commit.mockResolvedValueOnce(
+      succeededEnvelope(buildWorktree({ id: 'wt-main' })),
+    );
     fakeWorktreesApi.list.mockResolvedValueOnce([buildWorktree({ id: 'wt-main' })]);
 
     const { result } = renderController({
@@ -745,7 +780,9 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
 
   test('handlePushWorktree pushes, reloads worktrees, refreshes git history when on history tab', async () => {
     const project = buildLocalProject();
-    fakeWorktreesApi.push.mockResolvedValueOnce(buildWorktree({ id: 'wt-main' }));
+    fakeWorktreesApi.push.mockResolvedValueOnce(
+      succeededEnvelope(buildWorktree({ id: 'wt-main' })),
+    );
     fakeWorktreesApi.list.mockResolvedValueOnce([buildWorktree({ id: 'wt-main' })]);
     fakeGitApi.listCommits.mockResolvedValueOnce([buildCommit()]);
 
@@ -760,7 +797,7 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
       await flushMicrotasks();
     });
 
-    expect(fakeWorktreesApi.push).toHaveBeenCalledWith('wt-main');
+    expect(fakeWorktreesApi.push).toHaveBeenCalledWith('wt-main', expect.any(String));
     expect(result.current.worktreeBusy).toBeNull();
   });
 
@@ -801,6 +838,105 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
     expect(fakeWorktreesApi.commit).not.toHaveBeenCalled();
     expect(fakeWorktreesApi.push).not.toHaveBeenCalled();
   });
+
+  test.each(['resolve', 'reject'] as const)(
+    'old commit %s cannot mutate new context busy/error',
+    async (outcome) => {
+      const projectA = buildLocalProject({ id: 'project-A' });
+      const projectB = buildLocalProject({ id: 'project-B' });
+      let settle!: (value: unknown) => void;
+      let reject!: (reason?: unknown) => void;
+      const pending = new Promise((resolve, rej) => {
+        settle = resolve;
+        reject = rej;
+      });
+      fakeWorktreesApi.commit.mockReturnValueOnce(pending);
+
+      const { result, rerender } = renderController({
+        activeProjectId: projectA.id,
+        activeWorktreeId: 'wt-a',
+      });
+
+      let operation!: Promise<void>;
+      await act(async () => {
+        operation = result.current.handleCommitWorktree();
+        await flushMicrotasks();
+      });
+      expect(result.current.worktreeBusy).toBe('commit');
+
+      // 切到 B 上下文；旧 settlement 不得写 B 的 busy/error。
+      rerender({
+        ...baseControllerProps({
+          activeProjectId: projectB.id,
+          activeWorktreeId: 'wt-b',
+        }),
+      });
+      await act(async () => {
+        await flushMicrotasks();
+      });
+
+      await act(async () => {
+        if (outcome === 'resolve') {
+          settle(succeededEnvelope(buildWorktree({ id: 'wt-a', projectId: projectA.id })));
+        } else {
+          reject(new Error('stale commit failed'));
+        }
+        await operation.catch(() => undefined);
+        await flushMicrotasks();
+      });
+
+      expect(result.current.worktreeBusy).toBeNull();
+      expect(result.current.worktreeError).toBeNull();
+    },
+  );
+
+  test('unknown envelope sets mutationUnknown and queries ledger without blind replay', async () => {
+    const project = buildLocalProject();
+    fakeWorktreesApi.commit.mockResolvedValueOnce({
+      kind: 'unknown',
+      clientOperationId: 'op-unknown-1',
+      transportClass: 'timeout',
+    });
+    fakeWorktreesApi.getMutationOperation.mockResolvedValueOnce({
+      clientOperationId: 'op-unknown-1',
+      kind: 'commit',
+      payloadHash: 'h',
+      intent: {
+        kind: 'commit',
+        projectId: project.id,
+        worktreeId: 'wt-main',
+        beforeHead: 'a',
+        expectedTree: 't',
+      },
+      state: 'running',
+      outcome: null,
+      errorMessage: null,
+      projectId: project.id,
+      worktreeId: 'wt-main',
+      createdAt: '2026-07-14T00:00:00.000Z',
+      updatedAt: '2026-07-14T00:00:00.000Z',
+    });
+    fakeWorktreesApi.list.mockResolvedValue([buildWorktree({ id: 'wt-main' })]);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-main',
+      inspectorTab: 'files',
+      translateError: (key) =>
+        key === 'mutationUnknown' ? '结果未知，请刷新后人工核对' : `err:${key}`,
+    });
+
+    await act(async () => {
+      await result.current.handleCommitWorktree();
+      await flushMicrotasks();
+    });
+
+    expect(fakeWorktreesApi.getMutationOperation).toHaveBeenCalledWith('op-unknown-1');
+    // 不得二次 commit（盲重放）。
+    expect(fakeWorktreesApi.commit).toHaveBeenCalledTimes(1);
+    expect(result.current.worktreeError).toContain('结果未知');
+    expect(result.current.worktreeBusy).toBeNull();
+  });
 });
 
 /* ---------------------------------------------------------------------------
@@ -813,7 +949,9 @@ describe('useWorkbenchWorktreeGitController — remove', () => {
     const mainWt = buildWorktree({ id: 'wt-main', isMain: true });
     const featWt = buildWorktree({ id: 'wt-feat', isMain: false, name: 'feat', branch: 'feature/feat' });
     fakeWorktreesApi.list.mockResolvedValue([mainWt, featWt]);
-    fakeWorktreesApi.remove.mockResolvedValueOnce({ ok: true, worktreeId: 'wt-feat' });
+    fakeWorktreesApi.remove.mockResolvedValueOnce(
+      succeededEnvelope({ ok: true, worktreeId: 'wt-feat' }),
+    );
 
     const confirmAction = vi.fn(() => true);
     const bridge = buildBridgeFakes();
@@ -841,7 +979,11 @@ describe('useWorkbenchWorktreeGitController — remove', () => {
     });
 
     expect(confirmAction).toHaveBeenCalled();
-    expect(fakeWorktreesApi.remove).toHaveBeenCalledWith('wt-feat', false);
+    expect(fakeWorktreesApi.remove).toHaveBeenCalledWith(
+      'wt-feat',
+      false,
+      expect.any(String),
+    );
     // active worktree switched off the removed one (back to wt-main) via page setter。
     expect(setActive).toHaveBeenCalledWith('wt-main');
     expect(activeWorktreeState.value).toBe('wt-main');
@@ -932,7 +1074,7 @@ describe('useWorkbenchWorktreeGitController — merge', () => {
         { id: 'cleanup', status: 'completed', message: 'done' },
       ],
     };
-    fakeWorktreesApi.merge.mockResolvedValueOnce(mergeResult);
+    fakeWorktreesApi.merge.mockResolvedValueOnce(succeededEnvelope(mergeResult));
     fakeGitApi.listCommits.mockResolvedValueOnce([buildCommit()]);
     const confirmAction = vi.fn(() => true);
     const refreshStats = vi.fn();
@@ -962,7 +1104,7 @@ describe('useWorkbenchWorktreeGitController — merge', () => {
     });
 
     expect(confirmAction).toHaveBeenCalled();
-    expect(fakeWorktreesApi.merge).toHaveBeenCalledWith('wt-feat');
+    expect(fakeWorktreesApi.merge).toHaveBeenCalledWith('wt-feat', expect.any(String));
     // merge -> loadWorktrees -> loadSessions (bridge) -> clearBuffersForWorktree (bridge) -> loadGitHistory.
     expect(bridge.loadSessions).toHaveBeenCalledWith(project.id);
     expect(bridge.clearBuffersForWorktree).toHaveBeenCalledWith('wt-feat');
@@ -1050,11 +1192,13 @@ describe('useWorkbenchWorktreeGitController — merge', () => {
     const project = buildLocalProject();
     const featWt = buildWorktree({ id: 'wt-feat', isMain: false });
     fakeWorktreesApi.list.mockResolvedValue([buildWorktree({ id: 'wt-main' }), featWt]);
-    fakeWorktreesApi.merge.mockResolvedValueOnce({
-      ok: true,
-      worktreeId: 'wt-feat',
-      stages: [{ id: 'cleanup', status: 'completed', message: 'done' }],
-    });
+    fakeWorktreesApi.merge.mockResolvedValueOnce(
+      succeededEnvelope({
+        ok: true,
+        worktreeId: 'wt-feat',
+        stages: [{ id: 'cleanup', status: 'completed', message: 'done' }],
+      } as WorkbenchMergeResult),
+    );
     const bridge = buildBridgeFakes();
 
     const { result } = renderController(
@@ -1102,11 +1246,13 @@ describe('useWorkbenchWorktreeGitController — merge', () => {
     });
 
     // trigger merge to populate stages, then clear.
-    fakeWorktreesApi.merge.mockResolvedValueOnce({
-      ok: true,
-      worktreeId: 'wt-feat',
-      stages: [{ id: 'cleanup', status: 'failed', message: 'nope' }],
-    });
+    fakeWorktreesApi.merge.mockResolvedValueOnce(
+      succeededEnvelope({
+        ok: true,
+        worktreeId: 'wt-feat',
+        stages: [{ id: 'cleanup', status: 'failed', message: 'nope' }],
+      } as WorkbenchMergeResult),
+    );
     await act(async () => {
       await result.current.handleMergeWorktree();
       await flushMicrotasks();

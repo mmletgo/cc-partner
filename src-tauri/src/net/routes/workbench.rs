@@ -404,84 +404,204 @@ pub async fn get_worktree(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     remote shortcut 的 commit 动作需要在项目所在设备执行，并复用本机 commit message 生成逻辑。
+///     旧 peer 不带 clientOperationId 时期望 raw worktree DTO；新 peer 带 id 时返回 mutation envelope。
 ///
 /// Code Logic（这个函数做什么）:
-///     确认 worktree 属于 local 项目后调用本地 commit helper，返回最新 worktree DTO。
+///     确认 worktree 属于 local 项目；有 clientOperationId → ledger+envelope，否则 local_* raw DTO。
 pub async fn commit_worktree(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCommitWorktreeReq>,
-) -> P2pResult<Json<WorkbenchWorktreeDto>> {
+) -> P2pResult<Json<Value>> {
     ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.commit"))?;
-    let worktree = local_commit_workbench_worktree(&state, req.worktree_id, req.message)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.commit"))?;
-    Ok(Json(worktree))
+    let op_id = req
+        .client_operation_id
+        .clone()
+        .filter(|s| !s.trim().is_empty());
+    match op_id {
+        Some(client_operation_id) => {
+            let envelope = crate::commands::workbench::local_commit_workbench_worktree_with_ledger(
+                &state,
+                req.worktree_id,
+                req.message,
+                client_operation_id,
+            )
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.commit"))?;
+            Ok(Json(
+                serde_json::to_value(envelope)
+                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.commit"))?,
+            ))
+        }
+        None => {
+            let worktree = local_commit_workbench_worktree(&state, req.worktree_id, req.message)
+                .await
+                .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.commit"))?;
+            Ok(Json(
+                serde_json::to_value(worktree)
+                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.commit"))?,
+            ))
+        }
+    }
 }
 
 /// 推送远端设备本机 worktree。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     remote shortcut 的 push 动作需要在项目所在设备执行真实 git push。
+///     旧 peer 不带 clientOperationId 时期望 raw worktree DTO；新 peer 带 id 时返回 mutation envelope。
 ///
 /// Code Logic（这个函数做什么）:
-///     确认 worktree 属于 local 项目后调用本地 push helper，返回最新 worktree DTO。
+///     确认 worktree 属于 local 项目；有 clientOperationId → ledger+envelope，否则 local_* raw DTO。
 pub async fn push_worktree(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteWorktreeReq>,
-) -> P2pResult<Json<WorkbenchWorktreeDto>> {
+) -> P2pResult<Json<Value>> {
     ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.push"))?;
-    let worktree = local_push_workbench_worktree(&state, req.worktree_id)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.push"))?;
-    Ok(Json(worktree))
+    let op_id = req
+        .client_operation_id
+        .clone()
+        .filter(|s| !s.trim().is_empty());
+    match op_id {
+        Some(client_operation_id) => {
+            let envelope = crate::commands::workbench::local_push_workbench_worktree_with_ledger(
+                &state,
+                req.worktree_id,
+                client_operation_id,
+            )
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.push"))?;
+            Ok(Json(
+                serde_json::to_value(envelope)
+                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.push"))?,
+            ))
+        }
+        None => {
+            let worktree = local_push_workbench_worktree(&state, req.worktree_id)
+                .await
+                .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.push"))?;
+            Ok(Json(
+                serde_json::to_value(worktree)
+                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.push"))?,
+            ))
+        }
+    }
 }
 
 /// 合并远端设备本机 worktree。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     remote shortcut 的 merge 动作需要在项目所在设备推进阶段并发布本机 merge progress 事件。
+///     旧 peer 不带 clientOperationId 时期望 raw merge DTO；新 peer 带 id 时返回 mutation envelope。
 ///
 /// Code Logic（这个函数做什么）:
-///     确认 worktree 属于 local 项目后调用本地 merge helper，返回 merge result DTO。
+///     确认 worktree 属于 local 项目；有 clientOperationId → ledger+envelope，否则 local_* raw DTO。
 pub async fn merge_worktree(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteWorktreeReq>,
-) -> P2pResult<Json<WorkbenchMergeResultDto>> {
+) -> P2pResult<Json<Value>> {
     ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.merge"))?;
-    let result = local_merge_workbench_worktree(&state, req.worktree_id)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.merge"))?;
-    Ok(Json(result))
+    let op_id = req
+        .client_operation_id
+        .clone()
+        .filter(|s| !s.trim().is_empty());
+    match op_id {
+        Some(client_operation_id) => {
+            let envelope = crate::commands::workbench::local_merge_workbench_worktree_with_ledger(
+                &state,
+                req.worktree_id,
+                client_operation_id,
+            )
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.merge"))?;
+            Ok(Json(
+                serde_json::to_value(envelope)
+                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.merge"))?,
+            ))
+        }
+        None => {
+            let result = local_merge_workbench_worktree(&state, req.worktree_id)
+                .await
+                .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.merge"))?;
+            Ok(Json(
+                serde_json::to_value(result)
+                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.merge"))?,
+            ))
+        }
+    }
 }
 
 /// 删除远端设备本机 worktree。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     remote shortcut 删除 worktree 时，项目所在设备要执行 git worktree remove 并清理元数据。
+///     旧 peer 不带 clientOperationId 时期望 raw `{ok,worktreeId}`；新 peer 带 id 时返回 mutation envelope。
 ///
 /// Code Logic（这个函数做什么）:
-///     确认 worktree 属于 local 项目后调用本地 remove helper，返回 `{ok, worktreeId}`。
+///     确认 worktree 属于 local 项目；有 clientOperationId → ledger+envelope，否则 local_* raw JSON。
 pub async fn remove_worktree(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteRemoveWorktreeReq>,
-) -> P2pResult<Json<serde_json::Value>> {
+) -> P2pResult<Json<Value>> {
     ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.remove"))?;
-    let result = local_remove_workbench_worktree(&state, req.worktree_id, req.force)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.remove"))?;
-    Ok(Json(result))
+    let op_id = req
+        .client_operation_id
+        .clone()
+        .filter(|s| !s.trim().is_empty());
+    match op_id {
+        Some(client_operation_id) => {
+            let envelope = crate::commands::workbench::local_remove_workbench_worktree_with_ledger(
+                &state,
+                req.worktree_id,
+                req.force,
+                client_operation_id,
+            )
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.remove"))?;
+            Ok(Json(
+                serde_json::to_value(envelope)
+                    .map_err(|e| P2pError::from_app_error(AppError::generic(e.to_string()), &ctx, "workbench.worktrees.remove"))?,
+            ))
+        }
+        None => {
+            let value = local_remove_workbench_worktree(&state, req.worktree_id, req.force)
+                .await
+                .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.remove"))?;
+            Ok(Json(value))
+        }
+    }
+}
+
+/// 查询 workbench mutation operation ledger。
+///
+/// Business Logic（为什么需要这个函数）:
+///     unknown 后 peer/controller 按 clientOperationId 查询 owning device ledger。
+///
+/// Code Logic（这个函数做什么）:
+///     POST body clientOperationId → Option<WorkbenchMutationOperationDto>。
+pub async fn get_mutation_operation(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<crate::workbench::remote_protocol::RemoteMutationOperationReq>,
+) -> P2pResult<Json<Option<crate::workbench::operation_ledger::WorkbenchMutationOperationDto>>> {
+    let item = crate::commands::workbench::get_workbench_mutation_operation_for_state(
+        &state,
+        req.client_operation_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.mutation_operation"))?;
+    Ok(Json(item))
 }
 
 /// 列出远端设备本机项目的 Git 提交。
@@ -1251,11 +1371,21 @@ pub async fn mobile_commit_worktree(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteCommitWorktreeReq>,
-) -> P2pResult<Json<WorkbenchWorktreeDto>> {
-    let worktree = commit_workbench_worktree_for_state(&state, req.worktree_id, req.message)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.commit"))?;
-    Ok(Json(worktree))
+) -> P2pResult<Json<crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>>> {
+    let client_operation_id = req
+        .client_operation_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("mobile-{}", uuid::Uuid::new_v4()));
+    let envelope = commit_workbench_worktree_for_state(
+        &state,
+        req.worktree_id,
+        req.message,
+        client_operation_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.commit"))?;
+    Ok(Json(envelope))
 }
 
 /// 手机端推送本机或远端 worktree。
@@ -1264,16 +1394,22 @@ pub async fn mobile_commit_worktree(
 ///     手机端完成提交后应能把远端设备上的真实分支推送到 Git remote。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收 worktreeId，委托 commands 层 remote-aware push helper。
+///     接收 worktreeId + clientOperationId，委托 commands 层 remote-aware push helper。
 pub async fn mobile_push_worktree(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteWorktreeReq>,
-) -> P2pResult<Json<WorkbenchWorktreeDto>> {
-    let worktree = push_workbench_worktree_for_state(&state, req.worktree_id)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.push"))?;
-    Ok(Json(worktree))
+) -> P2pResult<Json<crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>>> {
+    let client_operation_id = req
+        .client_operation_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("mobile-{}", uuid::Uuid::new_v4()));
+    let envelope =
+        push_workbench_worktree_for_state(&state, req.worktree_id, client_operation_id)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.push"))?;
+    Ok(Json(envelope))
 }
 
 /// 手机端合并本机或远端 worktree。
@@ -1282,16 +1418,22 @@ pub async fn mobile_push_worktree(
 ///     手机端应能触发远端设备上的 merge/cleanup 流程，并接收映射后的结果。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收 worktreeId，委托 commands 层 remote-aware merge helper。
+///     接收 worktreeId + clientOperationId，委托 commands 层 remote-aware merge helper。
 pub async fn mobile_merge_worktree(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteWorktreeReq>,
-) -> P2pResult<Json<WorkbenchMergeResultDto>> {
-    let result = merge_workbench_worktree_for_state(&state, req.worktree_id)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.merge"))?;
-    Ok(Json(result))
+) -> P2pResult<Json<crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto<WorkbenchMergeResultDto>>> {
+    let client_operation_id = req
+        .client_operation_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("mobile-{}", uuid::Uuid::new_v4()));
+    let envelope =
+        merge_workbench_worktree_for_state(&state, req.worktree_id, client_operation_id)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.merge"))?;
+    Ok(Json(envelope))
 }
 
 /// 手机端删除本机或远端 worktree。
@@ -1300,16 +1442,26 @@ pub async fn mobile_merge_worktree(
 ///     手机端 worktree 面板需要清理远端设备上的废弃功能工作区。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收 worktreeId/force，委托 commands 层 remote-aware remove helper。
+///     接收 worktreeId/force/clientOperationId，委托 commands 层 remote-aware remove helper。
 pub async fn mobile_remove_worktree(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteRemoveWorktreeReq>,
-) -> P2pResult<Json<Value>> {
-    let value = remove_workbench_worktree_for_state(&state, req.worktree_id, req.force)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.remove"))?;
-    Ok(Json(value))
+) -> P2pResult<Json<crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto<Value>>> {
+    let client_operation_id = req
+        .client_operation_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("mobile-{}", uuid::Uuid::new_v4()));
+    let envelope = remove_workbench_worktree_for_state(
+        &state,
+        req.worktree_id,
+        req.force,
+        client_operation_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.remove"))?;
+    Ok(Json(envelope))
 }
 
 /// 手机端列出本机或远端项目提交历史。

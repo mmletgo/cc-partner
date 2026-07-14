@@ -7,11 +7,18 @@
 //!     命令与 pub(crate) helper。
 
 use crate::claude_cli;
-use crate::error::AppError;
+use crate::error::{AppError, AppErrorCategory};
+use crate::net::protocol::{PeerProtocolInfo, CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1};
 use crate::state::AppState;
 use crate::workbench::models::{
     WorkbenchDetectedFileType, WorkbenchGitCommitDto, WorkbenchOpenFileDto, WorkbenchProjectRow,
     WorkbenchTextContent, WorkbenchWorktreeDto, WorkbenchWorktreeRow,
+};
+use crate::workbench::operation_ledger::{
+    canonical_commit_payload, canonical_merge_payload, canonical_push_payload,
+    canonical_remove_payload, hash_canonical_payload, normalize_client_operation_id,
+    run_claimed_mutation, MutationIntent, MutationKind, MutationTransportClass,
+    WorkbenchMutationEnvelopeDto, WorkbenchMutationLedger, WorkbenchMutationOperationDto,
 };
 use crate::workbench::sessions::kill_persisted_backend;
 use crate::workbench::{
@@ -25,6 +32,8 @@ use crate::workbench::{
     remote_protocol::{RemoteCommitWorktreeReq, RemoteCreateWorktreeReq},
     sqlite_preview,
 };
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -32,6 +41,40 @@ use tauri::State;
 
 use super::common::*;
 use super::projects::list_workbench_worktrees_for_state;
+
+/// Business Logic: Timeout/Unavailable 映射为 unknown transport class。
+/// Code Logic: classify() → Timeout/Unavailable，其它返回 None。
+fn mutation_transport_class_from_error(err: &AppError) -> Option<MutationTransportClass> {
+    match err.classify() {
+        AppErrorCategory::Timeout => Some(MutationTransportClass::Timeout),
+        AppErrorCategory::Unavailable => Some(MutationTransportClass::Network),
+        _ => None,
+    }
+}
+
+/// Business Logic: 旧 peer 无 capability 时 success→succeeded，uncertain→unknown。
+/// Code Logic: Ok → succeeded envelope；Timeout/Unavailable → unknown；其它 Err。
+fn map_legacy_mutation_result<T>(
+    result: Result<T, AppError>,
+    client_operation_id: &str,
+) -> Result<WorkbenchMutationEnvelopeDto<T>, AppError> {
+    match result {
+        Ok(value) => Ok(WorkbenchMutationEnvelopeDto::succeeded(
+            value,
+            client_operation_id,
+        )),
+        Err(err) => {
+            if let Some(transport) = mutation_transport_class_from_error(&err) {
+                Ok(WorkbenchMutationEnvelopeDto::unknown(
+                    client_operation_id,
+                    Some(transport),
+                ))
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
 
 /// 列出项目下的 Git worktree。
 ///
@@ -274,39 +317,120 @@ pub(crate) async fn local_commit_workbench_worktree(
     worktree_id: String,
     message: Option<String>,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
+    // 兼容 orchestrator delivery 等无 operation id 的调用方：内部生成临时 id 走 ledger。
+    let op_id = format!("compat-{}", uuid::Uuid::new_v4());
+    match local_commit_workbench_worktree_with_ledger(state, worktree_id, message, op_id).await? {
+        WorkbenchMutationEnvelopeDto::Succeeded { value, .. } => Ok(value),
+        WorkbenchMutationEnvelopeDto::Unknown { .. } => Err(AppError::unavailable(
+            "commit 结果未知（兼容路径）".to_string(),
+        )),
+    }
+}
+
+/// 带 ledger 的本机 commit。
+///
+/// Business Logic（为什么需要这个函数）:
+///     执行前 claim client_operation_id 与 staged tree intent，timeout 后可精确对账。
+///
+/// Code Logic（这个函数做什么）:
+///     stage → 捕获 beforeHead/expectedTree → claim → 执行 commit → 返回 envelope。
+pub(crate) async fn local_commit_workbench_worktree_with_ledger(
+    state: &AppState,
+    worktree_id: String,
+    message: Option<String>,
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>, AppError> {
     state.runtime_role.require_owner()?;
+    let op_id = normalize_client_operation_id(&client_operation_id)?;
     let row = state
         .workbench_worktree_repo
         .get(&worktree_id)
         .await?
         .ok_or_else(|| AppError::not_found("工作台 worktree 不存在"))?;
     let path = Path::new(&row.path);
-    let committed = match message
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(manual_message) => workbench_git::commit_all(path, manual_message)?,
-        None => commit_worktree_with_generated_message(state, path).await?,
+    let before_head = workbench_git::head_hash(path)?;
+    let has_changes = workbench_git::stage_all_for_commit(path)?;
+    let expected_tree = if has_changes {
+        workbench_git::write_tree_hash(path)?
+    } else {
+        workbench_git::head_tree_hash(path)?.unwrap_or_default()
     };
-    if !committed {
-        return Ok(worktree_to_dto(&row));
-    }
-    Ok(worktree_to_dto(&row))
+    let intent = MutationIntent::Commit {
+        project_id: row.project_id.clone(),
+        worktree_id: worktree_id.clone(),
+        before_head: before_head.clone(),
+        expected_tree,
+    };
+    let payload = canonical_commit_payload(&worktree_id, &message);
+    let payload_hash = hash_canonical_payload(&payload)?;
+    let ledger = WorkbenchMutationLedger::new(state.db.clone());
+    let claim = ledger
+        .claim(&op_id, MutationKind::Commit, &payload_hash, &intent)
+        .await?;
+    let message_for_exec = message.clone();
+    let row_for_exec = row.clone();
+    run_claimed_mutation(&ledger, &op_id, claim, move || {
+        let state = state.clone();
+        async move {
+            let path = Path::new(&row_for_exec.path);
+            if !has_changes {
+                return Ok(worktree_to_dto(&row_for_exec));
+            }
+            match message_for_exec
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                Some(manual_message) => {
+                    workbench_git::commit_staged(path, manual_message)?;
+                }
+                None => {
+                    // index 已 stage；只生成 message 并 commit_staged，避免二次 stage 漂移。
+                    let changes = workbench_git::staged_changes_for_commit_message(path)?;
+                    let (cli_path, model) = {
+                        let cfg = state.config.read().unwrap();
+                        (
+                            cfg.github_trending.claude_cli_path.clone(),
+                            cfg.github_trending.claude_model.clone(),
+                        )
+                    };
+                    let schema = workbench_commit_message_schema();
+                    let instruction = build_commit_message_instruction(&changes);
+                    let generated =
+                        claude_cli::run_structured_json_with_cwd::<WorkbenchCommitMessageResponse>(
+                            &cli_path,
+                            &model,
+                            &schema.to_string(),
+                            &instruction,
+                            Some(path),
+                            COMMIT_MESSAGE_TIMEOUT_SECS,
+                            "生成 commit message",
+                        )
+                        .await?;
+                    let msg = workbench_git::sanitize_commit_message(&generated.message)?;
+                    workbench_git::commit_staged(path, &msg)?;
+                }
+            }
+            Ok(worktree_to_dto(&row_for_exec))
+        }
+    })
+    .await
 }
 
-/// 提交当前 worktree 的全部改动。
+/// 提交当前 worktree 的全部改动（ledger + envelope）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     本机 worktree 直接提交，remote worktree 必须转发到项目所在设备，不能误查本机 SQLite。
+///     本机/远端 commit 共用 typed envelope；远端按 capability 传播 id/envelope。
 ///
 /// Code Logic（这个函数做什么）:
-///     先按 worktreeId 解析 Local/Remote；Remote 通过 HTTP commit 后把返回 DTO 的 project/worktree id 映射回本机。
+///     Local 走 ledger；Remote 有 capability 则带 clientOperationId 并解析 envelope，否则 legacy 映射。
 pub(crate) async fn commit_workbench_worktree_for_state(
     state: &AppState,
     worktree_id: String,
     message: Option<String>,
-) -> Result<WorkbenchWorktreeDto, AppError> {
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>, AppError> {
+    let op_id = normalize_client_operation_id(&client_operation_id)?;
     match worktree_command_target(&worktree_id)? {
         WorktreeCommandTarget::Remote {
             device_id,
@@ -314,22 +438,59 @@ pub(crate) async fn commit_workbench_worktree_for_state(
         } => {
             let context =
                 ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
-            let item = RemoteWorkbenchClient::new()
-                .commit_worktree(
-                    &context.base_url,
-                    RemoteCommitWorktreeReq {
-                        worktree_id: context.inner_worktree_id,
-                        message,
-                    },
-                )
-                .await?;
-            map_remote_worktree_dtos(&context.device_id, &context.local_project_id, vec![item])
-                .into_iter()
-                .next()
-                .ok_or_else(|| AppError::generic("远端 worktree commit 结果为空"))
+            let client = RemoteWorkbenchClient::new();
+            let supports = client
+                .peer_supports_capability(&context.base_url, CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1)
+                .await
+                .unwrap_or(false);
+            if supports {
+                let envelope = client
+                    .commit_worktree_envelope(
+                        &context.base_url,
+                        RemoteCommitWorktreeReq {
+                            worktree_id: context.inner_worktree_id,
+                            message,
+                            client_operation_id: Some(op_id.clone()),
+                        },
+                    )
+                    .await?;
+                Ok(map_remote_worktree_envelope(
+                    &context.device_id,
+                    &context.local_project_id,
+                    envelope,
+                ))
+            } else {
+                let legacy = client
+                    .commit_worktree(
+                        &context.base_url,
+                        RemoteCommitWorktreeReq {
+                            worktree_id: context.inner_worktree_id,
+                            message,
+                            client_operation_id: None,
+                        },
+                    )
+                    .await
+                    .and_then(|item| {
+                        map_remote_worktree_dtos(
+                            &context.device_id,
+                            &context.local_project_id,
+                            vec![item],
+                        )
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| AppError::generic("远端 worktree commit 结果为空"))
+                    });
+                map_legacy_mutation_result(legacy, &op_id)
+            }
         }
         WorktreeCommandTarget::Local(local_worktree_id) => {
-            local_commit_workbench_worktree(state, local_worktree_id, message).await
+            local_commit_workbench_worktree_with_ledger(
+                state,
+                local_worktree_id,
+                message,
+                op_id,
+            )
+            .await
         }
     }
 }
@@ -337,26 +498,62 @@ pub(crate) async fn commit_workbench_worktree_for_state(
 /// 提交当前 worktree 的全部改动。
 ///
 /// Business Logic（为什么需要这个命令）:
-///     桌面端 Commit 按钮需要提交本机或远端项目 worktree 的全部改动。
+///     桌面端 Commit 按钮需要提交本机或远端项目 worktree 的全部改动，并返回 typed envelope。
 ///
 /// Code Logic（这个命令做什么）:
-///     Tauri command 只解包参数，再委托 for_state helper 复用 remote-aware 行为。
+///     GuiClient 经 mutation proxy；owner 走 for_state。
 #[tauri::command]
 pub async fn commit_workbench_worktree(
     state: State<'_, AppState>,
     worktree_id: String,
     message: Option<String>,
-) -> Result<WorkbenchWorktreeDto, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>, AppError> {
+    if let Some(v) = proxy_workbench_mutation_if_gui(
         state.inner(),
         "worktrees.commit",
-        serde_json::json!({ "worktreeId": worktree_id.clone(), "message": message.clone() }),
+        serde_json::json!({
+            "worktreeId": worktree_id.clone(),
+            "message": message.clone(),
+            "clientOperationId": client_operation_id.clone(),
+        }),
+        &client_operation_id,
     )
     .await?
     {
         return Ok(v);
     }
-    commit_workbench_worktree_for_state(state.inner(), worktree_id, message).await
+    commit_workbench_worktree_for_state(
+        state.inner(),
+        worktree_id,
+        message,
+        client_operation_id,
+    )
+    .await
+}
+
+/// Business Logic: 把远端 worktree DTO envelope 的 id 映射为本机 remote: 前缀。
+/// Code Logic: 仅转换 succeeded.value；unknown 原样。
+fn map_remote_worktree_envelope(
+    device_id: &str,
+    local_project_id: &str,
+    envelope: WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>,
+) -> WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto> {
+    match envelope {
+        WorkbenchMutationEnvelopeDto::Succeeded {
+            value,
+            client_operation_id,
+        } => {
+            let mapped = map_remote_worktree_dtos(device_id, local_project_id, vec![value]);
+            // map_remote_worktree_dtos 保持 1:1
+            let value = mapped
+                .into_iter()
+                .next()
+                .expect("map_remote_worktree_dtos preserves length");
+            WorkbenchMutationEnvelopeDto::succeeded(value, client_operation_id)
+        }
+        other => other,
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -459,7 +656,29 @@ pub(crate) async fn local_push_workbench_worktree(
     state: &AppState,
     worktree_id: String,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
+    let op_id = format!("compat-{}", uuid::Uuid::new_v4());
+    match local_push_workbench_worktree_with_ledger(state, worktree_id, op_id).await? {
+        WorkbenchMutationEnvelopeDto::Succeeded { value, .. } => Ok(value),
+        WorkbenchMutationEnvelopeDto::Unknown { .. } => Err(AppError::unavailable(
+            "push 结果未知（兼容路径）".to_string(),
+        )),
+    }
+}
+
+/// 带 ledger 的本机 push。
+///
+/// Business Logic（为什么需要这个函数）:
+///     推送前捕获 local/remote ref 与 local HEAD，timeout 后可确认 remote 是否到达。
+///
+/// Code Logic（这个函数做什么）:
+///     捕获 intent → claim → push_branch → envelope。
+pub(crate) async fn local_push_workbench_worktree_with_ledger(
+    state: &AppState,
+    worktree_id: String,
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>, AppError> {
     state.runtime_role.require_owner()?;
+    let op_id = normalize_client_operation_id(&client_operation_id)?;
     let row = state
         .workbench_worktree_repo
         .get(&worktree_id)
@@ -470,21 +689,43 @@ pub(crate) async fn local_push_workbench_worktree(
         .clone()
         .or_else(|| workbench_git::current_branch(Path::new(&row.path)))
         .ok_or_else(|| AppError::generic("当前 worktree 没有可推送的分支"))?;
-    workbench_git::push_branch(Path::new(&row.path), &branch)?;
-    Ok(worktree_to_dto(&row))
+    let (local_ref, remote_ref, local_head) =
+        workbench_git::push_ref_identity(Path::new(&row.path), &branch)?;
+    let intent = MutationIntent::Push {
+        project_id: row.project_id.clone(),
+        worktree_id: worktree_id.clone(),
+        local_ref,
+        remote_ref,
+        local_head,
+    };
+    let payload = canonical_push_payload(&worktree_id);
+    let payload_hash = hash_canonical_payload(&payload)?;
+    let ledger = WorkbenchMutationLedger::new(state.db.clone());
+    let claim = ledger
+        .claim(&op_id, MutationKind::Push, &payload_hash, &intent)
+        .await?;
+    let row_for_exec = row.clone();
+    let branch_for_exec = branch.clone();
+    run_claimed_mutation(&ledger, &op_id, claim, move || async move {
+        workbench_git::push_branch(Path::new(&row_for_exec.path), &branch_for_exec)?;
+        Ok(worktree_to_dto(&row_for_exec))
+    })
+    .await
 }
 
-/// 推送当前 worktree 分支。
+/// 推送当前 worktree 分支（ledger + envelope）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     remote shortcut 的 push 必须发生在远端设备，否则本机没有对应 worktree repo。
+///     remote/local push 共用 typed envelope。
 ///
 /// Code Logic（这个函数做什么）:
-///     先解析 worktree 目标；Remote 通过 HTTP push 并映射返回 DTO，Local 复用本地 helper。
+///     Local ledger；Remote 按 capability 传播 envelope 或 legacy 映射。
 pub(crate) async fn push_workbench_worktree_for_state(
     state: &AppState,
     worktree_id: String,
-) -> Result<WorkbenchWorktreeDto, AppError> {
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>, AppError> {
+    let op_id = normalize_client_operation_id(&client_operation_id)?;
     match worktree_command_target(&worktree_id)? {
         WorktreeCommandTarget::Remote {
             device_id,
@@ -492,16 +733,43 @@ pub(crate) async fn push_workbench_worktree_for_state(
         } => {
             let context =
                 ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
-            let item = RemoteWorkbenchClient::new()
-                .push_worktree(&context.base_url, &context.inner_worktree_id)
-                .await?;
-            map_remote_worktree_dtos(&context.device_id, &context.local_project_id, vec![item])
-                .into_iter()
-                .next()
-                .ok_or_else(|| AppError::generic("远端 worktree push 结果为空"))
+            let client = RemoteWorkbenchClient::new();
+            let supports = client
+                .peer_supports_capability(&context.base_url, CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1)
+                .await
+                .unwrap_or(false);
+            if supports {
+                let envelope = client
+                    .push_worktree_envelope(
+                        &context.base_url,
+                        &context.inner_worktree_id,
+                        Some(op_id.clone()),
+                    )
+                    .await?;
+                Ok(map_remote_worktree_envelope(
+                    &context.device_id,
+                    &context.local_project_id,
+                    envelope,
+                ))
+            } else {
+                let legacy = client
+                    .push_worktree(&context.base_url, &context.inner_worktree_id)
+                    .await
+                    .and_then(|item| {
+                        map_remote_worktree_dtos(
+                            &context.device_id,
+                            &context.local_project_id,
+                            vec![item],
+                        )
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| AppError::generic("远端 worktree push 结果为空"))
+                    });
+                map_legacy_mutation_result(legacy, &op_id)
+            }
         }
         WorktreeCommandTarget::Local(local_worktree_id) => {
-            local_push_workbench_worktree(state, local_worktree_id).await
+            local_push_workbench_worktree_with_ledger(state, local_worktree_id, op_id).await
         }
     }
 }
@@ -509,25 +777,30 @@ pub(crate) async fn push_workbench_worktree_for_state(
 /// 推送当前 worktree 分支。
 ///
 /// Business Logic（为什么需要这个命令）:
-///     桌面端 Push 按钮需要推送本机或远端项目的 active worktree 分支。
+///     桌面端 Push 返回 typed envelope。
 ///
 /// Code Logic（这个命令做什么）:
-///     Tauri command 解包 worktreeId 后委托 for_state helper。
+///     GuiClient mutation proxy；owner for_state。
 #[tauri::command]
 pub async fn push_workbench_worktree(
     state: State<'_, AppState>,
     worktree_id: String,
-) -> Result<WorkbenchWorktreeDto, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>, AppError> {
+    if let Some(v) = proxy_workbench_mutation_if_gui(
         state.inner(),
         "worktrees.push",
-        serde_json::json!({ "worktreeId": worktree_id.clone() }),
+        serde_json::json!({
+            "worktreeId": worktree_id.clone(),
+            "clientOperationId": client_operation_id.clone(),
+        }),
+        &client_operation_id,
     )
     .await?
     {
         return Ok(v);
     }
-    push_workbench_worktree_for_state(state.inner(), worktree_id).await
+    push_workbench_worktree_for_state(state.inner(), worktree_id, client_operation_id).await
 }
 
 /// 合并当前 worktree 到主工作区。
@@ -796,7 +1069,9 @@ pub(crate) async fn local_merge_workbench_worktree(
 pub(crate) async fn merge_workbench_worktree_for_state(
     state: &AppState,
     worktree_id: String,
-) -> Result<WorkbenchMergeResultDto, AppError> {
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchMergeResultDto>, AppError> {
+    let op_id = normalize_client_operation_id(&client_operation_id)?;
     match worktree_command_target(&worktree_id)? {
         WorktreeCommandTarget::Remote {
             device_id,
@@ -804,39 +1079,141 @@ pub(crate) async fn merge_workbench_worktree_for_state(
         } => {
             let context =
                 ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
-            let value = RemoteWorkbenchClient::new()
-                .merge_worktree(&context.base_url, &context.inner_worktree_id)
-                .await?;
-            map_remote_merge_result_value(&context.device_id, value)
+            let client = RemoteWorkbenchClient::new();
+            let supports = client
+                .peer_supports_capability(&context.base_url, CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1)
+                .await
+                .unwrap_or(false);
+            if supports {
+                let envelope = client
+                    .merge_worktree_envelope(
+                        &context.base_url,
+                        &context.inner_worktree_id,
+                        Some(op_id.clone()),
+                    )
+                    .await?;
+                Ok(map_remote_merge_value_envelope(&context.device_id, envelope)?)
+            } else {
+                let legacy = client
+                    .merge_worktree(&context.base_url, &context.inner_worktree_id)
+                    .await
+                    .and_then(|value| map_remote_merge_result_value(&context.device_id, value));
+                map_legacy_mutation_result(legacy, &op_id)
+            }
         }
         WorktreeCommandTarget::Local(local_worktree_id) => {
-            local_merge_workbench_worktree(state, local_worktree_id).await
+            local_merge_workbench_worktree_with_ledger(state, local_worktree_id, op_id).await
         }
     }
+}
+
+/// 带 ledger 的本机 merge。
+///
+/// Business Logic（为什么需要这个函数）:
+///     merge 前捕获 source/main HEAD，timeout 后验证 main 是否包含 source 且 source 已清理。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 source/main head → claim → 调用既有 local_merge → envelope。
+pub(crate) async fn local_merge_workbench_worktree_with_ledger(
+    state: &AppState,
+    worktree_id: String,
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchMergeResultDto>, AppError> {
+    state.runtime_role.require_owner()?;
+    let op_id = normalize_client_operation_id(&client_operation_id)?;
+    let row = state
+        .workbench_worktree_repo
+        .get(&worktree_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("工作台 worktree 不存在"))?;
+    if row.is_main {
+        return Err(AppError::validation("不能合并主工作区".to_string()));
+    }
+    let source_head = workbench_git::head_hash(Path::new(&row.path))?
+        .ok_or_else(|| AppError::generic("源 worktree 没有 HEAD".to_string()))?;
+    let main = state
+        .workbench_worktree_repo
+        .list_by_project(&row.project_id)
+        .await?
+        .into_iter()
+        .find(|wt| wt.is_main)
+        .ok_or_else(|| AppError::not_found("主工作区不存在"))?;
+    let main_head = workbench_git::head_hash(Path::new(&main.path))?
+        .ok_or_else(|| AppError::generic("主工作区没有 HEAD".to_string()))?;
+    let intent = MutationIntent::Merge {
+        project_id: row.project_id.clone(),
+        source_worktree_id: worktree_id.clone(),
+        source_head,
+        main_head,
+    };
+    let payload = canonical_merge_payload(&worktree_id);
+    let payload_hash = hash_canonical_payload(&payload)?;
+    let ledger = WorkbenchMutationLedger::new(state.db.clone());
+    let claim = ledger
+        .claim(&op_id, MutationKind::Merge, &payload_hash, &intent)
+        .await?;
+    let state_for_exec = state.clone();
+    let wt_for_exec = worktree_id.clone();
+    run_claimed_mutation(&ledger, &op_id, claim, move || async move {
+        local_merge_workbench_worktree(&state_for_exec, wt_for_exec).await
+    })
+    .await
 }
 
 /// 合并当前 worktree 到主工作区。
 ///
 /// Business Logic（为什么需要这个命令）:
-///     桌面端 Merge 按钮需要合并本机或远端项目 worktree，并接收阶段进度。
+///     桌面端 Merge 返回 typed envelope。
 ///
 /// Code Logic（这个命令做什么）:
-///     Tauri command 只解包 State，再委托 for_state helper。
+///     GuiClient mutation proxy；owner for_state。
 #[tauri::command]
 pub async fn merge_workbench_worktree(
     state: State<'_, AppState>,
     worktree_id: String,
-) -> Result<WorkbenchMergeResultDto, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchMergeResultDto>, AppError> {
+    if let Some(v) = proxy_workbench_mutation_if_gui(
         state.inner(),
         "worktrees.merge",
-        serde_json::json!({ "worktreeId": worktree_id.clone() }),
+        serde_json::json!({
+            "worktreeId": worktree_id.clone(),
+            "clientOperationId": client_operation_id.clone(),
+        }),
+        &client_operation_id,
     )
     .await?
     {
         return Ok(v);
     }
-    merge_workbench_worktree_for_state(state.inner(), worktree_id).await
+    merge_workbench_worktree_for_state(state.inner(), worktree_id, client_operation_id).await
+}
+
+/// Business Logic: 映射远端 merge envelope（Value）的 worktreeId 并转为 DTO。
+/// Code Logic: succeeded 时 map_remote_merge_result_value；unknown 原样。
+fn map_remote_merge_value_envelope(
+    device_id: &str,
+    envelope: WorkbenchMutationEnvelopeDto<Value>,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchMergeResultDto>, AppError> {
+    match envelope {
+        WorkbenchMutationEnvelopeDto::Succeeded {
+            value,
+            client_operation_id,
+        } => {
+            let dto = map_remote_merge_result_value(device_id, value)?;
+            Ok(WorkbenchMutationEnvelopeDto::succeeded(
+                dto,
+                client_operation_id,
+            ))
+        }
+        WorkbenchMutationEnvelopeDto::Unknown {
+            client_operation_id,
+            transport_class,
+        } => Ok(WorkbenchMutationEnvelopeDto::Unknown {
+            client_operation_id,
+            transport_class,
+        }),
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1317,7 +1694,30 @@ pub(crate) async fn local_remove_workbench_worktree(
     worktree_id: String,
     force: Option<bool>,
 ) -> Result<serde_json::Value, AppError> {
+    let op_id = format!("compat-{}", uuid::Uuid::new_v4());
+    match local_remove_workbench_worktree_with_ledger(state, worktree_id, force, op_id).await? {
+        WorkbenchMutationEnvelopeDto::Succeeded { value, .. } => Ok(value),
+        WorkbenchMutationEnvelopeDto::Unknown { .. } => Err(AppError::unavailable(
+            "remove 结果未知（兼容路径）".to_string(),
+        )),
+    }
+}
+
+/// 带 ledger 的本机 remove。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remove 前捕获 exact worktree identity，timeout 后确认身份缺席。
+///
+/// Code Logic（这个函数做什么）:
+///     intent=path+branch → claim → remove → envelope。
+pub(crate) async fn local_remove_workbench_worktree_with_ledger(
+    state: &AppState,
+    worktree_id: String,
+    force: Option<bool>,
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<serde_json::Value>, AppError> {
     state.runtime_role.require_owner()?;
+    let op_id = normalize_client_operation_id(&client_operation_id)?;
     let row = state
         .workbench_worktree_repo
         .get(&worktree_id)
@@ -1326,39 +1726,63 @@ pub(crate) async fn local_remove_workbench_worktree(
     if row.is_main {
         return Err(AppError::generic("不能删除主工作区"));
     }
-    let sessions = state
-        .workbench_session_repo
-        .list(Some(&row.project_id))
+    let intent = MutationIntent::Remove {
+        project_id: row.project_id.clone(),
+        worktree_id: worktree_id.clone(),
+        path: row.path.clone(),
+        branch: row.branch.clone(),
+    };
+    let force_flag = force.unwrap_or(false);
+    let payload = canonical_remove_payload(&worktree_id, force_flag);
+    let payload_hash = hash_canonical_payload(&payload)?;
+    let ledger = WorkbenchMutationLedger::new(state.db.clone());
+    let claim = ledger
+        .claim(&op_id, MutationKind::Remove, &payload_hash, &intent)
         .await?;
-    if sessions
-        .iter()
-        .any(|session| session.worktree_id.as_deref() == Some(&worktree_id))
-    {
-        return Err(AppError::generic("请先关闭该 worktree 下的终端窗口"));
-    }
-    let project = get_project(state, &row.project_id).await?;
-    let repo_root = workbench_git::repo_root(Path::new(&project.path))?;
-    workbench_git::remove_worktree(
-        Path::new(&repo_root),
-        Path::new(&row.path),
-        force.unwrap_or(false),
-    )?;
-    state.workbench_worktree_repo.delete(&worktree_id).await?;
-    Ok(serde_json::json!({ "ok": true, "worktreeId": worktree_id }))
+    let state_for_exec = state.clone();
+    let wt_for_exec = worktree_id.clone();
+    let row_for_exec = row.clone();
+    run_claimed_mutation(&ledger, &op_id, claim, move || async move {
+        let sessions = state_for_exec
+            .workbench_session_repo
+            .list(Some(&row_for_exec.project_id))
+            .await?;
+        if sessions
+            .iter()
+            .any(|session| session.worktree_id.as_deref() == Some(&wt_for_exec))
+        {
+            return Err(AppError::generic("请先关闭该 worktree 下的终端窗口"));
+        }
+        let project = get_project(&state_for_exec, &row_for_exec.project_id).await?;
+        let repo_root = workbench_git::repo_root(Path::new(&project.path))?;
+        workbench_git::remove_worktree(
+            Path::new(&repo_root),
+            Path::new(&row_for_exec.path),
+            force_flag,
+        )?;
+        state_for_exec
+            .workbench_worktree_repo
+            .delete(&wt_for_exec)
+            .await?;
+        Ok(serde_json::json!({ "ok": true, "worktreeId": wt_for_exec }))
+    })
+    .await
 }
 
-/// 删除一个非主 worktree。
+/// 删除一个非主 worktree（ledger + envelope）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     remote shortcut 删除 worktree 时，真实磁盘和 Git metadata 清理必须发生在远端设备。
+///     local/remote remove 共用 typed envelope。
 ///
 /// Code Logic（这个函数做什么）:
-///     先解析 Local/Remote 目标；Remote 通过 HTTP remove，并把返回 JSON 的 worktreeId 映射回 remote id。
+///     Local ledger；Remote capability 或 legacy 映射。
 pub(crate) async fn remove_workbench_worktree_for_state(
     state: &AppState,
     worktree_id: String,
     force: Option<bool>,
-) -> Result<serde_json::Value, AppError> {
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<serde_json::Value>, AppError> {
+    let op_id = normalize_client_operation_id(&client_operation_id)?;
     match worktree_command_target(&worktree_id)? {
         WorktreeCommandTarget::Remote {
             device_id,
@@ -1366,13 +1790,41 @@ pub(crate) async fn remove_workbench_worktree_for_state(
         } => {
             let context =
                 ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
-            let value = RemoteWorkbenchClient::new()
-                .remove_worktree(&context.base_url, &context.inner_worktree_id, force)
-                .await?;
-            Ok(map_remote_worktree_json_value(&context.device_id, value))
+            let client = RemoteWorkbenchClient::new();
+            let supports = client
+                .peer_supports_capability(&context.base_url, CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1)
+                .await
+                .unwrap_or(false);
+            if supports {
+                let envelope = client
+                    .remove_worktree_envelope(
+                        &context.base_url,
+                        &context.inner_worktree_id,
+                        force,
+                        Some(op_id.clone()),
+                    )
+                    .await?;
+                Ok(match envelope {
+                    WorkbenchMutationEnvelopeDto::Succeeded {
+                        value,
+                        client_operation_id,
+                    } => WorkbenchMutationEnvelopeDto::succeeded(
+                        map_remote_worktree_json_value(&context.device_id, value),
+                        client_operation_id,
+                    ),
+                    other => other,
+                })
+            } else {
+                let legacy = client
+                    .remove_worktree(&context.base_url, &context.inner_worktree_id, force)
+                    .await
+                    .map(|value| map_remote_worktree_json_value(&context.device_id, value));
+                map_legacy_mutation_result(legacy, &op_id)
+            }
         }
         WorktreeCommandTarget::Local(local_worktree_id) => {
-            local_remove_workbench_worktree(state, local_worktree_id, force).await
+            local_remove_workbench_worktree_with_ledger(state, local_worktree_id, force, op_id)
+                .await
         }
     }
 }
@@ -1380,26 +1832,67 @@ pub(crate) async fn remove_workbench_worktree_for_state(
 /// 删除一个非主 worktree。
 ///
 /// Business Logic（为什么需要这个命令）:
-///     桌面端需要删除本机或远端项目中不再需要的非主 worktree。
+///     桌面端 remove 返回 typed envelope。
 ///
 /// Code Logic（这个命令做什么）:
-///     Tauri command 解包参数后委托 for_state helper。
+///     GuiClient mutation proxy；owner for_state。
 #[tauri::command]
 pub async fn remove_workbench_worktree(
     state: State<'_, AppState>,
     worktree_id: String,
     force: Option<bool>,
-) -> Result<serde_json::Value, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<serde_json::Value>, AppError> {
+    if let Some(v) = proxy_workbench_mutation_if_gui(
         state.inner(),
         "worktrees.remove",
-        serde_json::json!({ "worktreeId": worktree_id.clone(), "force": force.clone() }),
+        serde_json::json!({
+            "worktreeId": worktree_id.clone(),
+            "force": force,
+            "clientOperationId": client_operation_id.clone(),
+        }),
+        &client_operation_id,
     )
     .await?
     {
         return Ok(v);
     }
-    remove_workbench_worktree_for_state(state.inner(), worktree_id, force).await
+    remove_workbench_worktree_for_state(state.inner(), worktree_id, force, client_operation_id)
+        .await
+}
+
+/// 查询 mutation operation ledger 状态。
+///
+/// Business Logic（为什么需要这个命令）:
+///     unknown 后 controller 按 clientOperationId 查询 owning ledger 取得 intent/state。
+///
+/// Code Logic（这个命令做什么）:
+///     GuiClient 代理；owner 读 SQLite ledger。
+#[tauri::command]
+pub async fn get_workbench_mutation_operation(
+    state: State<'_, AppState>,
+    client_operation_id: String,
+) -> Result<Option<WorkbenchMutationOperationDto>, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "worktrees.mutation_operation",
+        serde_json::json!({ "clientOperationId": client_operation_id.clone() }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    get_workbench_mutation_operation_for_state(state.inner(), client_operation_id).await
+}
+
+/// Business Logic: owner 路径查询 ledger。
+/// Code Logic: WorkbenchMutationLedger::get。
+pub(crate) async fn get_workbench_mutation_operation_for_state(
+    state: &AppState,
+    client_operation_id: String,
+) -> Result<Option<WorkbenchMutationOperationDto>, AppError> {
+    let ledger = WorkbenchMutationLedger::new(state.db.clone());
+    ledger.get(&client_operation_id).await
 }
 
 /// Business Logic（为什么需要这个函数）:
