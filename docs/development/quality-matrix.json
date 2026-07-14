@@ -587,6 +587,89 @@
         "docs/development/testing.md",
         "docs/development/real-device-certification.md"
       ]
+    },
+    {
+      "id": "L2-SYNC-MANIFEST-V2-001",
+      "surface": "content-sync-manifest-v2",
+      "level": "L2",
+      "tests": [
+        "src-tauri/src/sync/protocol.rs",
+        "src-tauri/src/sync/engine.rs",
+        "src-tauri/src/sync/apply_merge.rs",
+        "src-tauri/src/net/peer_client.rs",
+        "src-tauri/src/net/routes/sync.rs",
+        "src-tauri/src/net/protocol.rs",
+        "web/src/api/sync.test.ts",
+        "web/src/pages/Settings/Settings.test.tsx"
+      ],
+      "command": "cd src-tauri && cargo test --locked --lib sync::protocol sync::engine sync::apply_merge net::peer_client::tests net::routes::sync net::protocol && cd ../web && npm test -- sync.test.ts Settings.test.tsx --run",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "live multi-host peer exchange",
+        "full process kill/restart export-restore black-box",
+        "CC History paged protocol (cc-history.paged-sync.v1)"
+      ],
+      "docs": [
+        "docs/p2p-protocol.md",
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-07-14-sync-integrity-conflict-and-recovery-design.md"
+      ]
+    },
+    {
+      "id": "L2-BACKUP-RESTORE-001",
+      "surface": "backup-export-restore",
+      "level": "L2",
+      "tests": [
+        "src-tauri/src/backup/archive.rs",
+        "src-tauri/src/backup/restore.rs",
+        "src-tauri/src/storage/maintenance_gate.rs",
+        "src-tauri/src/storage/recovery_job_repo.rs",
+        "src-tauri/tests/backup_restore_smoke.rs",
+        "web/src/api/sync.test.ts",
+        "web/src/pages/Settings/Settings.test.tsx"
+      ],
+      "command": "cd src-tauri && cargo test --locked --lib backup:: storage::maintenance_gate:: storage::recovery_job && cargo test --locked --test backup_restore_smoke -- --nocapture --test-threads=1 && cd ../web && npm test -- sync.test.ts Settings.test.tsx --run",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "full sidecar process kill/restart export-restore black-box",
+        "secret scanner on production archives",
+        "cross-host restore"
+      ],
+      "docs": [
+        "docs/development/backend-operations.md",
+        "docs/prd.md",
+        "docs/p2p-protocol.md",
+        "docs/superpowers/specs/2026-07-14-sync-integrity-conflict-and-recovery-design.md"
+      ]
+    },
+    {
+      "id": "L0-SYNC-CONTENT-VERSIONS-001",
+      "surface": "content-versions-tombstone-gc",
+      "level": "L0",
+      "tests": [
+        "src-tauri/src/storage/content_version_repo.rs",
+        "src-tauri/src/storage/deletion_floor_repo.rs",
+        "src-tauri/src/storage/sync_watermark_repo.rs",
+        "src-tauri/src/sync/merger.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --lib content_version deletion_floor sync_watermark concurrent_text_keeps_conflict_copy",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "live multi-peer GC over 90 days wall clock"
+      ],
+      "docs": [
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-07-14-sync-integrity-conflict-and-recovery-design.md"
+      ]
     }
   ]
 }

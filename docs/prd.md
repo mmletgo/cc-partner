@@ -76,8 +76,10 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 **功能点**：
 - 创建 Prompt：标题 + 内容 + 标签
 - 编辑已有 Prompt
-- 删除 Prompt（软删除，用于同步）
+- 删除 Prompt（软删除，用于同步）：删除以 tombstone 传播，并铸造单调 `delete_epoch`；满足年龄 ≥30 天且近 90 天活跃对端均已 ack 该 epoch 后，才可压缩为 deletion floor，不得在未收敛前物理删除
 - 新建/更新/删除采用乐观更新；API reject 必须回滚列表并恢复草稿（create/update），展示错误与原地重试，不得静默伪成功
+- 并发且正文不同时保留 winner，并写入冲突副本（conflict copy）；详情提供“版本历史”抽屉（最近 20 个版本或 30 天，先达限；冲突副本至少保留 30 天），可查看摘要、复制内容、恢复为新版本（恢复推进本机向量时钟，不覆盖历史记录）
+- 冲突用非阻塞 Pill 标识，不禁用编辑与保存，不提供逐行三方合并编辑器
 - 一键复制 Prompt 内容到剪贴板
 - 标签管理：添加/移除标签
 - 按标签筛选 Prompt 列表
@@ -143,9 +145,12 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - Prompt 本地修改后自动同步到对端（500ms 防抖）
 - 定时触发全局同步（每 30 秒）
 - 各类同步数据均使用向量时钟追踪版本，避免丢失更新
-- 并发冲突采用 Last-Writer-Wins 策略，时间戳相等时按设备 ID 稳定决策
-- 软删除数据需要参与同步传播，避免刷新或同步后复活
-- Claude Code 历史在两端均支持分页能力时按有界分页协议交换；任一端缺少该能力时自动回退完整 pull/push，混合版本仍可完成合并
+- 并发冲突采用 Last-Writer-Wins 策略，时间戳相等时按设备 ID 稳定决策；并发且正文不同时额外保留 conflict copy（见 2.3 / 2.9）
+- 软删除数据需要参与同步传播，避免刷新或同步后复活；tombstone 仅在 age≥30 天且近 90 天活跃 peer 均已 ack `delete_epoch` 后压缩为 deletion floor
+- Prompt / SSH 目标 / Scratchpad 使用 typed 同步结果：`Succeeded` / `Partial` / `Unreachable` / `ProtocolError` / `ResourceLimit`；网络、HTTP、JSON、413 与部分失败**不得**折叠为空成功；仅全部领域 `Succeeded` 的设备计入 `synced` / `succeeded_devices`
+- 对端宣告 `sync.manifest.v2` 时，三域走有界 manifest-page / items / push-batch：完整拉完排序 manifest 后再算计划；manifest 精确相等时零正文交换；未完整结束的 manifest 流不得推进 delete ack
+- 混合版本：v2 客户端对未宣告能力的对端使用 typed legacy pull/push（失败仍 typed）；legacy 客户端继续使用仍挂载的 legacy 路由；不得因 404/空 body 伪造成功空集
+- Claude Code 历史在两端均支持分页能力时按有界分页协议交换；任一端缺少该能力时自动回退完整 pull/push，混合版本仍可完成合并（独立于 `sync.manifest.v2`）
 - 全局同步不传输普通文件，不同步 Workbench 工作区文件副本；文件传输和 Workbench 远端代理走独立通道
 - `CLAUDE.md` 不进入普通全局自动同步，只通过 `CLAUDE.md` 页面主动推送
 
@@ -174,7 +179,9 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 用户编辑正文后自动保存；AppShell 常驻 autosave queue，切换页面、删除页面、同步前先 flush 当前页待写内容
 - 关闭 GUI / 托盘退出前必须 flush 全部 pending write（含速记本）；flush 失败中止关闭并展示错误，不得静默丢数据
 - 保留复制当前页正文和清空当前页操作
-- 删除页面使用软删除传播，刷新或同步后不应复活
+- 删除页面使用软删除传播，刷新或同步后不应复活；tombstone / `delete_epoch` / deletion floor 规则与 Prompt 同步一致
+- 并发且正文不同时保留 conflict copy；详情提供“版本历史”抽屉（20 版本或 30 天；冲突 ≥30 天），可恢复为新版本（推进向量时钟）与复制内容；冲突用非阻塞 Pill 标识
+- 手动/全局同步结果按设备与领域展示 typed outcome；Partial/Unreachable 等不得显示为整机成功
 - 支持手动触发一次同步，同时执行局域网同步与 GitHub 云端同步，并纳入全局云端同步范围
 - 旧版单页速记本内容升级后保留为标题“速记本”的第一页
 
@@ -186,7 +193,8 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 在连接目标列表中合并局域网 mDNS 自动发现的设备（IP），并支持手动添加任意 IP
 - 为每个连接目标配置用户名与端口（默认 22）
 - 一键复制 ssh 连接命令（端口非 22 自动加 -p，用户名为空时省略）
-- 连接目标配置（host/username/port/label）基于向量时钟跨设备同步
+- 连接目标配置（host/username/port/label）基于向量时钟跨设备同步；模型不含私钥/凭据材料
+- SSH 目标同步结果为 typed domain outcome，纳入全局 `trigger_sync` 设备报告；失败不得折叠为空成功
 - 提供 mac/ubuntu/windows 三端开启 SSH 服务的配置指南
 - 按本机操作系统展示对应的连接端（ssh 客户端）用法
 
@@ -247,6 +255,9 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - macOS 权限引导与设置页共用 `usePermissions`：首轮检查失败结束 loading 并显示错误 +「重新检查」；刷新失败保留 stale 状态；逐项 request，notification 不阻塞 onboarding
 - 常规 / 同步 / AI 页签的恢复默认按钮始终可点击；常规恢复为后端按当前设备环境生成的默认设备名、默认接收目录和平台默认截图快捷键，同步和 AI 分别恢复为后端定义的云端同步默认配置与 Claude CLI/AI 默认配置
 - 同步、AI 和关于页签分别管理云端同步、Claude CLI/AI 能力和应用更新；AI 页签中的 CLI 路径与模型供 GitHub 项目解说和 Prompt 优化共用，启用开关与缓存时长仅作用于 GitHub 项目解说；AI 页签同时管理 Workbench Prompt 优化浮层快捷键与自动填入语言，默认轻按 Control、默认填入中文优化版；同步和 AI 的恢复默认只重置表单，仍需用户点击“应用配置”持久化
+- 同步 tab 局域网卡片展示每设备/领域的 `succeeded` / `partial` / `unreachable` / `protocol` / `resource-limit` 与 pulled/pushed/unchanged；仅全成功设备计入成功计数
+- 同步 tab 提供“导出数据 / 从备份恢复”：经 sidecar owner control 路由生成可校验 ZIP 备份；导出不含项目源码、终端 transcript、SSH 私钥、token、凭据 URL、lifecycle control token；配置仅导出只读 report，恢复时永不写回
+- 恢复前必须 inspect 预览（流式限制：archive ≤2 GiB、条目 ≤100k、单 entry ≤64 MiB、总解压 ≤4 GiB；拒绝 zip-slip / 符号链接 / 未知 formatVersion / 哈希失败）；用户确认后进入 exclusive maintenance gate，先创建恢复前备份（保留 7 天且最多 3 份，仅新备份完整落盘后清理旧份），再单事务 apply；失败整批回滚，并可一键 rollback 到恢复前备份
 
 ### 2.15 工作台
 

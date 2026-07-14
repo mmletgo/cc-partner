@@ -97,6 +97,15 @@ unless noted. Never transport-auto-retry mutations.
 | POST | `/api/backend/control/orchestrator/runtime-snapshot` | owner runtime snapshot |
 | POST | `/api/backend/control/events/catch-up` | event bus replay / Gap |
 | POST | `/api/backend/control/events/stream` | NDJSON catch-up + live |
+| POST | `/api/backend/control/cloud-sync/trigger` | owner Cloud Sync full cycle |
+| POST | `/api/backend/control/cloud-sync/test` | owner Cloud Sync connectivity |
+| POST | `/api/backend/control/cloud-sync/claude-md-push` | owner CLAUDE.md Git push |
+| POST | `/api/backend/control/backup/create` | verified export ZIP |
+| POST | `/api/backend/control/backup/inspect` | streaming archive inspect (zero DB writes) |
+| POST | `/api/backend/control/backup/restore` | exclusive-gate domain restore |
+| POST | `/api/backend/control/backup/list-jobs` | list recovery_jobs |
+| POST | `/api/backend/control/backup/list-backups` | list pre-restore backup ZIPs |
+| POST | `/api/backend/control/backup/rollback` | rollback a recovery job |
 
 `generation` increments only after a successful durable config replace. Wrong owner or
 generation → conflict; GUI refreshes and user retries. Diagnostics copied from Settings
@@ -277,11 +286,65 @@ Illustrative shape (values abbreviated):
 
 Scripting tip: check process exit first; only then parse stdout as JSON for `doctor --json`.
 
+## Backup export / restore (owner-only)
+
+Verified data backup is an **owner maintenance** surface. Only the sidecar
+`HeadlessOwner` may create, inspect, restore, list, or roll back archives.
+Desktop GUI Settings → Sync tab proxies via loopback control routes (or Tauri
+commands that rebind to the same control plane). Never expose these on the LAN
+P2P surface without the control-file token + loopback peer check.
+
+### Operator flow
+
+1. **Export** — `POST /api/backend/control/backup/create` with a destination path
+   chosen by the user (native save dialog on GUI). Produces a versioned ZIP with
+   per-file SHA-256. Config is written as a **report-only** JSON (preview aid);
+   it is **never** restored into `config.json`.
+2. **Inspect before restore** — `POST .../backup/inspect` streams the archive with
+   hard limits and **zero DB writes**:
+   - archive size ≤ **2 GiB**
+   - entries ≤ **100,000**
+   - single entry uncompressed ≤ **64 MiB**
+   - total uncompressed ≤ **4 GiB**
+   - rejects zip-slip, absolute paths, symlinks, unknown `formatVersion`, and
+     checksum mismatch
+3. **Restore** — user selects domains + `merge` / `replace-domain` mode, then
+   `POST .../backup/restore`. Owner takes the **exclusive** `DatabaseMaintenanceGate`
+   lease, writes a pre-restore backup under the data directory, applies domains in
+   a single SQLite transaction (+ index rebuild), and records a `recovery_jobs` row.
+4. **Rollback** — `POST .../backup/rollback` with a job id re-applies that job's
+   pre-restore backup under the same exclusive gate.
+
+### Retention
+
+- Pre-restore backups: keep **7 days** and at most **3** complete archives.
+- Only delete older pre-restore backups **after** a new pre-restore archive has
+  fully landed.
+
+### Export exclusions (must never appear)
+
+- Workbench project source trees
+- Terminal transcripts / PTY buffers
+- SSH private keys and other key material
+- Tokens (including lifecycle `controlToken`)
+- Credential URLs / secrets embedded in config report fields that would enable
+  remote access
+
+### Known verification scope (Task 6 smoke)
+
+`backup_restore_smoke` and unit coverage exercise **inspect-level** reject/accept
+paths, gate exclusivity, and recovery job shape. They are **not** a full process
+kill/restart export→restore→export black-box on a live multi-process sidecar.
+Treat full crash recovery matrices and secret-scanner sweeps as follow-up L3 /
+manual evidence, not claimed by the smoke.
+
 ## Privacy
 
 - Diagnostics normalize home directories to `<HOME>` and redact secrets.
 - No cloud log shipping, crash phone-home, or product telemetry from doctor/logs.
 - Do not paste raw `backend-control.json` (contains `controlToken`) into tickets; use `status` / `doctor` instead.
+- Backup archives and inspect previews must not be shared if they contain user
+  Prompt/Scratchpad text; control tokens never appear in export packages.
 
 ## Related
 

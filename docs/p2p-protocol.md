@@ -91,6 +91,7 @@ advertised capabilities are:
 - `cc-history.paged-sync.v1` — bounded CC History paged sync (`POST /api/cc-history/sync/{manifest-page,items,push-batch}`); token and the three routes ship atomically
 - `errors.envelope.v1` — standard error envelope wire format
 - `orchestrator.runtime-snapshot.v1` — owning-device runtime snapshot route
+- `sync.manifest.v2` — bounded Prompt / SSH target / Scratchpad content sync (`POST /api/sync/prompts/{manifest-page,items,push-batch}`, `/api/ssh-target/sync/{...}`, `/api/scratchpad/sync/{...}`); token ships with transactional bulk upsert + request ledger + apply_merge_batch
 - `transfer.complete.v1` — explicit transfer finalize handshake (`POST /api/transfer/complete/:id`)
 
 ### Semantics of `errors.envelope.v1` (important)
@@ -108,9 +109,9 @@ route access or route existence. Concretely:
   handling 404). Do not use `supports("errors.envelope.v1")` as a proxy for
   "new routes are available".
 - Route-specific capabilities (`attention.v1`, `cc-history.paged-sync.v1`,
-  `orchestrator.runtime-snapshot.v1`, `transfer.complete.v1`, …) ship as
-  **independent** tokens alongside their own routes and must not reuse
-  `errors.envelope.v1` to mean "new routes supported".
+  `orchestrator.runtime-snapshot.v1`, `sync.manifest.v2`,
+  `transfer.complete.v1`, …) ship as **independent** tokens alongside their own
+  routes and must not reuse `errors.envelope.v1` to mean "new routes supported".
 
 The existing capability gate (`peer_client::require_capability`) is therefore a
 **format** gate when used with `errors.envelope.v1`, and a **route** gate when
@@ -139,19 +140,19 @@ the router so the inventory check matches exactly.
 | POST | `/api/backend/control/cloud-sync/trigger` | `backend/control_api.rs` | runs owner CloudSyncRuntime full sync (Wait gate) | no-transport-retry | loopback + control-file token; requires HeadlessOwner; shares single Git workdir critical section with scheduler; body `{controlToken}` ≤256 KiB; never transport-retry |
 | POST | `/api/backend/control/cloud-sync/test` | `backend/control_api.rs` | may fetch workdir under owner gate for connectivity | no-transport-retry | loopback + control-file token; requires HeadlessOwner; body `{controlToken}` ≤256 KiB |
 | POST | `/api/backend/control/cloud-sync/claude-md-push` | `backend/control_api.rs` | owner-side CLAUDE.md Git workdir export/commit/push | no-transport-retry | loopback + control-file token; requires HeadlessOwner; body `{controlToken,content,updatedAt,deviceId,vectorClock}`; shares CloudSyncRuntime with trigger/scheduler |
-| POST | `/api/backend/control/backup/create` | `backend/control_api.rs` | writes verified export ZIP at destPath from owner DB | no-transport-retry | loopback + control-file token; requires HeadlessOwner; body `{controlToken,destPath}` ≤256 KiB; response `{path,formatVersion}`; never transport-retry; never logs token |
-| POST | `/api/backend/control/backup/inspect` | `backend/control_api.rs` | none; streaming checksum inspect + domain counts | no-transport-retry | loopback + control-file token; requires HeadlessOwner; body `{controlToken,archivePath}` ≤256 KiB; response `InspectPreview` ≤1 MiB; zero DB writes |
-| POST | `/api/backend/control/backup/restore` | `backend/control_api.rs` | exclusive maintenance_gate restore (pre-restore backup + domain apply) | no-transport-retry | loopback + control-file token; requires HeadlessOwner; body `{controlToken,archivePath,mode,domains}` ≤256 KiB; response `RestoreResult`; never transport-retry |
+| POST | `/api/backend/control/backup/create` | `backend/control_api.rs` | writes verified export ZIP at destPath from owner DB | no-transport-retry | loopback + control-file token; requires HeadlessOwner; body `{controlToken,destPath}` ≤256 KiB; response `{path,formatVersion}`; export excludes project source, terminal transcripts, private keys, tokens, credential URLs, control tokens; config is report-only; never transport-retry; never logs token |
+| POST | `/api/backend/control/backup/inspect` | `backend/control_api.rs` | none; streaming checksum inspect + domain counts | no-transport-retry | loopback + control-file token; requires HeadlessOwner; body `{controlToken,archivePath}` ≤256 KiB; response `InspectPreview` ≤1 MiB; **zero DB writes**; streaming limits archive ≤2 GiB / entries ≤100k / entry ≤64 MiB / total ≤4 GiB; rejects zip-slip, symlink, absolute path, unknown formatVersion, hash mismatch |
+| POST | `/api/backend/control/backup/restore` | `backend/control_api.rs` | exclusive maintenance_gate restore (pre-restore backup + domain apply) | no-transport-retry | loopback + control-file token; requires HeadlessOwner; body `{controlToken,archivePath,mode,domains}` ≤256 KiB; response `RestoreResult`; exclusive DB lease; pre-restore backup retained 7d / max 3 (delete old only after new complete); config report never restored; never transport-retry |
 | POST | `/api/backend/control/backup/list-jobs` | `backend/control_api.rs` | none; lists recovery_jobs | read-only | loopback + control-file token; requires HeadlessOwner; body `{controlToken,limit?}` ≤256 KiB; default limit 50; response ≤1 MiB |
 | POST | `/api/backend/control/backup/list-backups` | `backend/control_api.rs` | none; lists pre-restore ZIP paths under data_dir | read-only | loopback + control-file token; requires HeadlessOwner; body `{controlToken}` ≤256 KiB; response `[{path,createdAt?}]` ≤1 MiB |
-| POST | `/api/backend/control/backup/rollback` | `backend/control_api.rs` | replace-domain restore from pre-restore backup of a job | no-transport-retry | loopback + control-file token; requires HeadlessOwner; body `{controlToken,jobId}` ≤256 KiB; response `RestoreResult`; never transport-retry |
+| POST | `/api/backend/control/backup/rollback` | `backend/control_api.rs` | replace-domain restore from pre-restore backup of a job | no-transport-retry | loopback + control-file token; requires HeadlessOwner; body `{controlToken,jobId}` ≤256 KiB; response `RestoreResult`; exclusive gate; never transport-retry |
 | GET | `/api/mobile/access-info` | `routes/mobile.rs` | none | read-only | — |
 | GET | `/api/mobile/attention` | `routes/attention.rs` | none; aggregates local Attention snapshot | read-only | capability-gated by `attention.v1`; reuses `list_attention_items_for_state`; may refresh each remote owning device once via orchestrator source, never recursively asks another device to aggregate attention |
 | POST | `/api/sync/pull` | `routes/sync.rs` | none; returns rows the caller is missing | read-only | vector-clock comparison only reads local DB |
 | POST | `/api/sync/push` | `routes/sync.rs` | upserts prompt rows after vector-clock merge | naturally-idempotent | `sync_push_impl` re-merges each row; `bulk_upsert` with merged clock converges on replay |
-| POST | `/api/sync/prompts/manifest-page` | `routes/sync.rs` | none; keyset page of `SyncSummary` (id/vector_clock/content_hash/size/updated_at/deleted) | read-only | routes exist for Task 2 testing; **capability `sync.manifest.v2` not advertised until Task 3 ledger**; body `{cursor?,limit?}` snake_case; default/max page 500 items / 1 MiB estimate; response `{items,next_cursor}`; opaque base64url cursor; illegal cursor → 400 `prompts.invalid_cursor`; client must stream until `next_cursor=None` before classifying remote-only data |
-| POST | `/api/sync/prompts/items` | `routes/sync.rs` | none; returns existing full `PromptRow` for requested ids | read-only | body `{ids}` max 100; response ordered `{items,missing_ids}`; estimate ≤4 MiB else 413 `prompts.batch_too_large` (`retryable=false`); single content >1 MiB → 422 `prompts.item_too_large`; capability not advertised until Task 3 |
-| POST | `/api/sync/prompts/push-batch` | `routes/sync.rs` | merge + bulk_upsert batch of prompts | naturally-idempotent | body `{items:PromptRow[],client_request_id}` max 100 / 4 MiB; empty `client_request_id` → 400; returns `{accepted}`; ledger dedupe deferred to Task 3; capability not advertised until Task 3 |
+| POST | `/api/sync/prompts/manifest-page` | `routes/sync.rs` | none; keyset page of `SyncSummary` (id/vector_clock/content_hash/size/updated_at/deleted/delete_epoch) | read-only | capability-gated by `sync.manifest.v2` (advertised with transactional apply + ledger); body `{cursor?,limit?}` snake_case; default/max page **500 items / 1 MiB** estimate; response `{items,next_cursor}`; **opaque** base64url cursor; illegal cursor → 400 `prompts.invalid_cursor`; client must stream until `next_cursor=None` before classifying remote-only data or advancing delete ack |
+| POST | `/api/sync/prompts/items` | `routes/sync.rs` | none; returns existing full `PromptRow` for requested ids | read-only | capability-gated by `sync.manifest.v2`; body `{ids}` max **100** / 4 MiB; response ordered `{items,missing_ids}`; estimate ≤4 MiB else 413 `prompts.batch_too_large` (`retryable=false`); single content >1 MiB → 422 `prompts.item_too_large` |
+| POST | `/api/sync/prompts/push-batch` | `routes/sync.rs` | single-transaction `apply_prompt_merge_batch` (ledger + winners + conflict versions + delete_epoch + optional watermark ack) | naturally-idempotent | capability-gated by `sync.manifest.v2`; body `{items:PromptRow[],client_request_id,claimed_device_id?,acked_delete_epoch?}` max **100 / 4 MiB**; empty `client_request_id` → 400; `claimed_device_id` is a convergence **label not auth**; ledger `UNIQUE(claimed_device_id,domain,client_request_id)` + payload hash — same key/hash → recorded `{accepted}`; same key/different hash → **409 conflict**; incomplete manifest must not send ack |
 | POST | `/api/sync/claude_md/pull` | `routes/claude_md_sync.rs` | none; returns the singleton row | read-only | — |
 | POST | `/api/sync/claude_md/push` | `routes/claude_md_sync.rs` | overwrites singleton + `~/.claude/CLAUDE.md` | naturally-idempotent | sender only pushes its own already-merged version; re-applying the same row + `write_file_if_changed` is a no-op |
 | POST | `/api/transfer/init` | `routes/transfer.rs` | creates `.{transfer_id}.tmp` + receive registry entry | requires-idempotency-key | `transfer_id` is client-supplied and the tmp file is keyed by it, but the server does not enforce that a transport replay reuses the same `transfer_id`; a retry that mints a new id leaks a tmp file + registry entry. Clients MUST reuse the same `transfer_id` (the de-facto idempotency key) or MUST NOT auto-retry. tmp larger than declared size is rejected and deleted |
@@ -165,14 +166,14 @@ the router so the inventory check matches exactly.
 | POST | `/api/cc-history/sync/push-batch` | `routes/cc_history.rs` | merge + **single-transaction** upsert of a batch | naturally-idempotent | capability-gated by `cc-history.paged-sync.v1`; body `{items:ClaudeHistoryRow[]}` max 128 / 8 MiB estimate / 1 MiB content; `merge_cc_history` then `upsert_merged_batch` (all-or-nothing — **no partial accepted**); returns `{accepted}`; same limits/error codes as items; replay converges via vector-clock merge |
 | POST | `/api/ssh-target/sync/pull` | `routes/ssh_target_sync.rs` | none | read-only | — |
 | POST | `/api/ssh-target/sync/push` | `routes/ssh_target_sync.rs` | upserts SSH target rows after merge | naturally-idempotent | per-row `merge_ssh_target` + `bulk_upsert`; replay converges |
-| POST | `/api/ssh-target/sync/manifest-page` | `routes/ssh_target_sync.rs` | none; keyset page of SSH `SyncSummary` (id=host) | read-only | same budgets as prompts v2; illegal cursor → 400 `ssh_target.invalid_cursor`; **capability `sync.manifest.v2` not advertised until Task 3** |
-| POST | `/api/ssh-target/sync/items` | `routes/ssh_target_sync.rs` | none; returns existing full `SshTargetRow` for requested hosts | read-only | body `{ids}` max 100 / 4 MiB; 413 `ssh_target.batch_too_large`; capability not advertised until Task 3 |
-| POST | `/api/ssh-target/sync/push-batch` | `routes/ssh_target_sync.rs` | merge + bulk_upsert batch of SSH targets | naturally-idempotent | body `{items,client_request_id}` max 100 / 4 MiB; ledger deferred to Task 3; capability not advertised until Task 3 |
+| POST | `/api/ssh-target/sync/manifest-page` | `routes/ssh_target_sync.rs` | none; keyset page of SSH `SyncSummary` (id=host) | read-only | capability-gated by `sync.manifest.v2`; same budgets as prompts v2 (500/1 MiB, opaque cursor); illegal cursor → 400 `ssh_target.invalid_cursor` |
+| POST | `/api/ssh-target/sync/items` | `routes/ssh_target_sync.rs` | none; returns existing full `SshTargetRow` for requested hosts | read-only | capability-gated by `sync.manifest.v2`; body `{ids}` max 100 / 4 MiB; 413 `ssh_target.batch_too_large` |
+| POST | `/api/ssh-target/sync/push-batch` | `routes/ssh_target_sync.rs` | single-transaction `apply_ssh_merge_batch` (ledger + upsert + conflicts + epochs) | naturally-idempotent | capability-gated by `sync.manifest.v2`; body `{items,client_request_id,claimed_device_id?,acked_delete_epoch?}` max 100 / 4 MiB; ledger UNIQUE key + hash rules identical to prompts; 409 on same key/different hash |
 | POST | `/api/scratchpad/sync/pull` | `routes/scratchpad_sync.rs` | none | read-only | — |
 | POST | `/api/scratchpad/sync/push` | `routes/scratchpad_sync.rs` | upserts scratchpad pages after merge | naturally-idempotent | per-row `merge_scratchpad` + `bulk_upsert`; replay converges |
-| POST | `/api/scratchpad/sync/manifest-page` | `routes/scratchpad_sync.rs` | none; keyset page of scratchpad `SyncSummary` | read-only | same budgets as prompts v2; illegal cursor → 400 `scratchpad.invalid_cursor`; **capability `sync.manifest.v2` not advertised until Task 3** |
-| POST | `/api/scratchpad/sync/items` | `routes/scratchpad_sync.rs` | none; returns existing full `ScratchpadRow` for requested ids | read-only | body `{ids}` max 100 / 4 MiB; 413 `scratchpad.batch_too_large`; capability not advertised until Task 3 |
-| POST | `/api/scratchpad/sync/push-batch` | `routes/scratchpad_sync.rs` | merge + bulk_upsert batch of scratchpad pages | naturally-idempotent | body `{items,client_request_id}` max 100 / 4 MiB; ledger deferred to Task 3; capability not advertised until Task 3 |
+| POST | `/api/scratchpad/sync/manifest-page` | `routes/scratchpad_sync.rs` | none; keyset page of scratchpad `SyncSummary` | read-only | capability-gated by `sync.manifest.v2`; same budgets as prompts v2 (500/1 MiB, opaque cursor); illegal cursor → 400 `scratchpad.invalid_cursor` |
+| POST | `/api/scratchpad/sync/items` | `routes/scratchpad_sync.rs` | none; returns existing full `ScratchpadRow` for requested ids | read-only | capability-gated by `sync.manifest.v2`; body `{ids}` max 100 / 4 MiB; 413 `scratchpad.batch_too_large` |
+| POST | `/api/scratchpad/sync/push-batch` | `routes/scratchpad_sync.rs` | single-transaction `apply_scratchpad_merge_batch` (ledger + upsert + conflicts + epochs) | naturally-idempotent | capability-gated by `sync.manifest.v2`; body `{items,client_request_id,claimed_device_id?,acked_delete_epoch?}` max 100 / 4 MiB; ledger UNIQUE key + hash rules identical to prompts; 409 on same key/different hash |
 | GET | `/api/claude-code/assets/inventory` | `routes/claude_code_assets.rs` | none | read-only | — |
 | POST | `/api/claude-code/assets/bundle` | `routes/claude_code_assets.rs` | builds an in-memory zip; no persistent mutation | read-only | — |
 | GET | `/api/workbench/fs/roots` | `routes/workbench.rs` | none | read-only | — |
@@ -285,14 +286,36 @@ New↔new peers use the three routes above when health advertises
 | Metrics privacy | Process-local `RuntimeMetrics` may record fixed names such as `cc_history.sync_batch.*` / `cc_history.sync_round_ms` and orchestrator claim counters. Metrics stay in-process / sanitized tracing only — **no** telemetry upload, and **never** content, paths, project/device names, host, SQL, or credentials. |
 | SQLite pool | Production remains `max_connections(1)` with WAL and `busy_timeout=5s` unless a separate Task 8 load-gate commit documents evidence to raise it to **2** (never 3+). |
 
+## Content sync v2 contract (`sync.manifest.v2`)
+
+Covers **Prompt**, **SSH target**, and **Scratchpad** only (not CC History). New↔new
+peers use the nine v2 routes when health advertises `sync.manifest.v2`. The token
+ships with transactional `apply_*_merge_batch` + `sync_request_ledger`.
+
+| Topic | Contract |
+| --- | --- |
+| Capability gate | Client reads `/api/health` first. **Only** when `supports("sync.manifest.v2")` is true may it call any of the three domains' `manifest-page` / `items` / `push-batch`. |
+| Mixed-version | **v2 client ↔ legacy server**: use typed legacy `pull`/`push` for that domain; transport/HTTP/JSON failures remain typed (`Unreachable` / `ProtocolError` / …) and **must not** be fabricated into empty success. **Legacy client ↔ v2 server**: legacy routes stay mounted; server does not require the capability for legacy paths. Do not probe v2 paths and treat 404 as capability. |
+| Equal manifests | After both complete sorted manifests are available, exact equality (id + vector_clock + content_hash + deleted) yields `unchanged=N` with **zero** body fetch and **zero** push. |
+| Cursor opacity | `cursor` / `next_cursor` are opaque server keyset tokens. Clients must stream pages until `next_cursor=None` before classifying remote-only items. Incomplete streams → `ProtocolError` / incomplete_manifest and **must not** advance `acked_delete_epoch`. |
+| Limits | Manifest-page: max **500** items / **1 MiB** estimate. Items & push-batch: max **100** items / **4 MiB** estimate. Single content >1 MiB → 422 `*.item_too_large`. |
+| push-batch fields | Required non-empty `client_request_id`. Optional `claimed_device_id` is a convergence **label, not authentication**. Optional `acked_delete_epoch` only after a complete remote manifest stream + successful apply; otherwise omit/`null`. |
+| Ledger / idempotency | Server ledger key `UNIQUE(claimed_device_id, domain, client_request_id)` stores payload hash + `{accepted}` outcome. Same key + same hash → return recorded outcome without re-apply. Same key + different hash → **409 conflict**. Apply path is one SQLite transaction via `apply_*_merge_batch`. |
+| Error codes | `400 *.invalid_cursor` / empty `client_request_id`; `413 *.batch_too_large` (`retryable=false`); `422 *.item_too_large`; `409` ledger payload conflict. |
+| Domain outcomes | Aggregated as `Succeeded{pulled,pushed,unchanged}` / `Partial` / `Unreachable` / `ProtocolError` / `ResourceLimit`. Only full-device `Succeeded` increments `succeeded_devices` / `synced`. |
+| Delete ack / floors | Incomplete manifest or failed apply must not ack. Tombstone GC (age ≥30d and all peers active in 90d have acked the epoch) is a server/local helper concern; floors reject offline-peer resurrection. |
+
 ## Notes on the mandatory classifications
 
-- **Orchestrator create keeps `clientRequestId`.** `POST /api/orchestrator/tasks/create`
-  already rejects a missing/blank key and deduplicates via
-  `orchestrator_remote_task_create_requests` in the same transaction
-  (`create_remote_task_for_client_request`). Mobile `task-views/create` preserves
-  the same key end-to-end through the commands layer and pending outbox. Both
-  rows above are the only currently-implemented *server-enforced* idempotency keys.
+- **Server-enforced idempotency keys today.** (1) Orchestrator create:
+  `POST /api/orchestrator/tasks/create` rejects a missing/blank key and
+  deduplicates via `orchestrator_remote_task_create_requests` in the same
+  transaction (`create_remote_task_for_client_request`). Mobile
+  `task-views/create` preserves the same key end-to-end through the commands
+  layer and pending outbox. (2) Content sync v2 push-batch:
+  `client_request_id` + optional `claimed_device_id` + domain via
+  `sync_request_ledger` (same key/hash → recorded outcome; same key/different
+  hash → 409).
 - **`requires-idempotency-key` rows without a key yet.** Worktree create,
   terminal session create, split-pane, Claude resume, file/dir create,
   browser-preview create, **and transfer/init** have no server-side dedupe today.
@@ -305,8 +328,10 @@ New↔new peers use the three routes above when health advertises
   `transfer_id`).
 - **`naturally-idempotent` rows are verified by code.** Each "Key / guard" cell
   cites the function or mechanism that makes replay converge:
-  - sync/cc-history/ssh-target/scratchpad push — per-row vector-clock merge +
-    conditional `bulk_upsert`;
+  - legacy sync/cc-history/ssh-target/scratchpad push — per-row vector-clock
+    merge + conditional `bulk_upsert`;
+  - content sync v2 push-batch — `sync_request_ledger` +
+    `apply_*_merge_batch` single transaction (same key/hash → recorded outcome);
   - claude_md push — sender pushes its own merged version; re-apply is a no-op;
   - save-text — `baseHash` optimistic-lock guard;
   - projects/open — same canonical path reuses the same project id;
