@@ -17,6 +17,7 @@ import {
   orchestratorTaskDecoder,
   orchestratorTaskViewDecoder,
   orchestratorTaskViewListDecoder,
+  workflowDocumentDecoder,
 } from '@/lib/schemas/orchestrator';
 import type {
   OrchestratorRemoteOutboxItem,
@@ -25,6 +26,7 @@ import type {
   OrchestratorTask,
   OrchestratorTaskView,
   OrchestratorWorkflowState,
+  WorkflowDocument,
 } from '@/lib/types';
 import { ContractDecodeError } from '@/lib/runtimeSchema';
 import { invokeDecoded } from './client';
@@ -65,6 +67,9 @@ export const ORCHESTRATOR_REMOTE_COMMANDS = {
   refreshProject: 'refresh_orchestrator_project',
   listEvidenceForProject: 'list_orchestrator_task_evidence_for_project',
   getReviewDiff: 'get_orchestrator_review_diff',
+  getWorkflowDocument: 'get_workflow_document',
+  validateWorkflowDocument: 'validate_workflow_document',
+  saveWorkflowDocument: 'save_workflow_document',
   // 常量名保留 remote 以减少本轮迁移面；下面两个命令服务 Workbench 本机项目看板。
   moveTaskWorkflowState: 'move_orchestrator_task_workflow_state',
   getRuntimeSnapshot: 'get_orchestrator_runtime_snapshot',
@@ -208,6 +213,50 @@ export function buildGetOrchestratorReviewDiffInvokeArgs(
   taskId: string,
 ): Record<string, unknown> {
   return buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   向导 get/validate 需要稳定 projectId 参数形状。
+ *
+ * Code Logic（这个函数做什么）:
+ *   trim 后包装 `{ projectId }`。
+ */
+export function buildGetWorkflowDocumentInvokeArgs(projectId: string): Record<string, unknown> {
+  return { projectId: projectId.trim() };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   保存前权威校验必须带 projectId 与当前草稿 content。
+ *
+ * Code Logic（这个函数做什么）:
+ *   trim projectId，content 原样传递。
+ */
+export function buildValidateWorkflowDocumentInvokeArgs(
+  projectId: string,
+  content: string,
+): Record<string, unknown> {
+  return { projectId: projectId.trim(), content };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   CAS 保存必须同时带 expectedHash 与 content；冲突时保留草稿。
+ *
+ * Code Logic（这个函数做什么）:
+ *   trim projectId/expectedHash，content 原样传递。
+ */
+export function buildSaveWorkflowDocumentInvokeArgs(
+  projectId: string,
+  expectedHash: string,
+  content: string,
+): Record<string, unknown> {
+  return {
+    projectId: projectId.trim(),
+    expectedHash: expectedHash.trim(),
+    content,
+  };
 }
 
 /**
@@ -458,6 +507,52 @@ export const orchestratorApi = {
       ORCHESTRATOR_REMOTE_COMMANDS.getReviewDiff,
       buildGetOrchestratorReviewDiffInvokeArgs(projectId, taskId),
       orchestratorReviewDiffDecoder,
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   WORKFLOW 向导打开时需要检测 missing/valid/invalid/readError 与 contentHash。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded get_workflow_document → WorkflowDocument。
+   */
+  getWorkflowDocument: (projectId: string): Promise<WorkflowDocument> =>
+    invokeDecoded(
+      ORCHESTRATOR_REMOTE_COMMANDS.getWorkflowDocument,
+      buildGetWorkflowDocumentInvokeArgs(projectId),
+      workflowDocumentDecoder,
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   保存前必须调用后端权威 validator，返回 diagnostics 与规范化 preview。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded validate_workflow_document → WorkflowDocument。
+   */
+  validateWorkflowDocument: (projectId: string, content: string): Promise<WorkflowDocument> =>
+    invokeDecoded(
+      ORCHESTRATOR_REMOTE_COMMANDS.validateWorkflowDocument,
+      buildValidateWorkflowDocumentInvokeArgs(projectId, content),
+      workflowDocumentDecoder,
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   向导 CAS 保存 WORKFLOW.md；冲突返回 workflow_document_changed，成功不 dispatch。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded save_workflow_document(expectedHash, content) → WorkflowDocument。
+   */
+  saveWorkflowDocument: (
+    projectId: string,
+    expectedHash: string,
+    content: string,
+  ): Promise<WorkflowDocument> =>
+    invokeDecoded(
+      ORCHESTRATOR_REMOTE_COMMANDS.saveWorkflowDocument,
+      buildSaveWorkflowDocumentInvokeArgs(projectId, expectedHash, content),
+      workflowDocumentDecoder,
     ),
 
   /**

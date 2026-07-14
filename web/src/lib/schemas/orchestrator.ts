@@ -24,6 +24,9 @@ import type {
   OrchestratorTaskView,
   OrchestratorWorkflowState,
   ReviewDiffFile,
+  WorkflowDiagnostic,
+  WorkflowDocument,
+  WorkflowDocumentStatus,
 } from '../types/orchestrator';
 import {
   arrayDecoder,
@@ -33,6 +36,7 @@ import {
   nullableDecoder,
   numberDecoder,
   objectDecoder,
+  optionalDecoder,
   stringDecoder,
   unionDecoder,
   type Decoder,
@@ -360,3 +364,44 @@ export const orchestratorReviewDiffResponseDecoder: Decoder<{ diff: Orchestrator
   objectDecoder('OrchestratorReviewDiffResponse', {
     diff: orchestratorReviewDiffDecoder,
   });
+
+const workflowDocumentStatusDecoder: Decoder<WorkflowDocumentStatus> = enumDecoder(
+  'WorkflowDocumentStatus',
+  ['missing', 'valid', 'invalid', 'readError'] as const,
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   向导诊断列表必须 fail-closed，残缺 path/code/message 不得进入 UI。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 WorkflowDiagnostic 的 path/line/column/code/message。
+ */
+export const workflowDiagnosticDecoder: Decoder<WorkflowDiagnostic> = objectDecoder(
+  'WorkflowDiagnostic',
+  {
+    path: stringDecoder,
+    line: nullableDecoder(numberDecoder),
+    column: nullableDecoder(numberDecoder),
+    code: stringDecoder,
+    message: stringDecoder,
+  },
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   get/validate/save WORKFLOW 响应共享 DTO，损坏字段不得进入向导草稿或 CAS hash。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 status/content/contentHash/diagnostics 与可选 preview。
+ */
+export const workflowDocumentDecoder: Decoder<WorkflowDocument> = objectDecoder(
+  'WorkflowDocument',
+  {
+    status: workflowDocumentStatusDecoder,
+    content: nullableDecoder(stringDecoder),
+    contentHash: nullableDecoder(stringDecoder),
+    diagnostics: arrayDecoder(workflowDiagnosticDecoder),
+    preview: optionalDecoder(nullableDecoder(stringDecoder)),
+  },
+);

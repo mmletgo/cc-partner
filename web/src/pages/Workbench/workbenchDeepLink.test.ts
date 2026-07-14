@@ -128,4 +128,58 @@ describe('workbench deep links', () => {
       throw new Error(`expected outbox automation query, got ${url}`);
     }
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   WORKFLOW 向导必须通过 typed files deep link 打开 WORKFLOW.md，不能拼装自由字符串。
+   *
+   * Code Logic（这个测试做什么）:
+   *   构造/解析 view=files&path=WORKFLOW.md，断言 round-trip。
+   */
+  test('parses and builds files path deep links', () => {
+    const url = buildWorkbenchDeepLink({
+      projectId: 'proj-1',
+      worktreeId: null,
+      sessionId: null,
+      view: 'files',
+      path: 'WORKFLOW.md',
+    });
+    const parsed = parseWorkbenchDeepLink(url.replace('/workbench', ''));
+
+    if (
+      url !== '/workbench?projectId=proj-1&view=files&path=WORKFLOW.md' ||
+      parsed.view !== 'files' ||
+      parsed.path !== 'WORKFLOW.md'
+    ) {
+      throw new Error(`unexpected files deep link: ${url} / ${JSON.stringify(parsed)}`);
+    }
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   绝对路径与目录穿越不得进入文件工作区。
+   *
+   * Code Logic（这个测试做什么）:
+   *   解析含 .. 与绝对路径时 path 归一为 null；build 时丢弃不安全 path。
+   */
+  test('rejects absolute and traversal file paths', () => {
+    const parsedAbs = parseWorkbenchDeepLink('?projectId=p1&view=files&path=/etc/passwd');
+    const parsedDot = parseWorkbenchDeepLink('?projectId=p1&view=files&path=../secret');
+    const built = buildWorkbenchDeepLink({
+      projectId: 'p1',
+      worktreeId: null,
+      sessionId: null,
+      view: 'files',
+      path: '../secret',
+    });
+
+    if (parsedAbs.path !== null || parsedDot.path !== null) {
+      throw new Error(
+        `expected unsafe paths to be null, got ${JSON.stringify({ parsedAbs, parsedDot })}`,
+      );
+    }
+    if (built.includes('path=')) {
+      throw new Error(`expected build to drop traversal path, got ${built}`);
+    }
+  });
 });

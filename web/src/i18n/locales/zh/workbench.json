@@ -701,5 +701,9 @@
       "online": "在线",
       "offline": "离线"
     }
+  },
+  "deepLink": {
+    "filesPathRejected": "只能打开工作区内的相对路径文件。",
+    "openWorkflowFile": "正在打开 WORKFLOW.md"
   }
 }

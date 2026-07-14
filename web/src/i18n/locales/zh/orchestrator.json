@@ -254,6 +254,37 @@
     "promptRequired": "请先填写简单 Prompt。",
     "required": "请填写标题、目标和验收标准。",
     "retryOutbox": "重新发送失败。",
-    "discardOutbox": "放弃发送失败。"
+    "discardOutbox": "放弃发送失败。",
+    "workflowDocument": "WORKFLOW 文档加载失败。",
+    "workflowValidate": "WORKFLOW 文档校验失败。",
+    "workflowSave": "WORKFLOW 文档保存失败。"
+  },
+  "workflowWizard": {
+    "open": "WORKFLOW 向导",
+    "title": "WORKFLOW 就绪向导",
+    "subtitle": "检测、创建并安全保存项目根 WORKFLOW.md；不会改变 delivery。",
+    "close": "关闭 WORKFLOW 向导",
+    "loading": "正在检测 WORKFLOW 文档…",
+    "templatePreview": "默认模板预览",
+    "createFromTemplate": "从模板创建",
+    "openFile": "在文件工作区打开",
+    "validate": "校验",
+    "save": "保存",
+    "reload": "重新加载",
+    "draft": "草稿",
+    "draftPlaceholder": "在此编辑 WORKFLOW.md",
+    "summaryValid": "文档有效，可继续调度。",
+    "summaryNoDelivery": "保存不会启用或改变 delivery。",
+    "diagnostics": "诊断",
+    "diagnosticMeta": "{{path}} · 行 {{line}} · 列 {{column}} · {{code}}",
+    "conflict": "磁盘上的 WORKFLOW.md 已变化。草稿已保留，请重新加载后再保存。",
+    "hash": "期望哈希 {{hash}}…",
+    "status": {
+      "missing": "缺失",
+      "valid": "有效",
+      "invalid": "无效",
+      "readError": "读取失败",
+      "unknown": "未知"
+    }
   }
 }

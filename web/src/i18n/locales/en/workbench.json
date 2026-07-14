@@ -708,5 +708,9 @@
       "online": "Online",
       "offline": "Offline"
     }
+  },
+  "deepLink": {
+    "filesPathRejected": "Only relative paths inside the worktree can be opened.",
+    "openWorkflowFile": "Opening WORKFLOW.md"
   }
 }

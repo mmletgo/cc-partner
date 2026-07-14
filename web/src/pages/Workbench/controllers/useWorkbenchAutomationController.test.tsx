@@ -123,6 +123,7 @@ function buildHarness(overrides: HarnessOverrides = {}): WorkbenchAutomationCont
     focusSession: overrides.focusSession ?? vi.fn(async () => true),
     setAutomationConsoleOpen: overrides.setAutomationConsoleOpen ?? vi.fn(),
     requestWorkspaceView: overrides.requestWorkspaceView ?? vi.fn(),
+    openFileByPath: overrides.openFileByPath ?? vi.fn(async () => true),
     navigate: overrides.navigate ?? vi.fn(),
   };
 }
@@ -431,6 +432,46 @@ describe('useWorkbenchAutomationController', () => {
     });
 
     expect(setActiveWorktreeId).not.toHaveBeenCalled();
+    expect(focusSession).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   WORKFLOW 向导 files deep link 必须在 project/worktree 就绪后调用 file controller bridge。
+   *
+   * Code Logic（这个测试做什么）:
+   *   view=files&path=WORKFLOW.md 时关闭 automation、切 files 视图并 openFileByPath。
+   */
+  test('files deep link opens path via file controller after context is ready', async () => {
+    const openFileByPath = vi.fn(async () => true);
+    const setAutomationConsoleOpen = vi.fn();
+    const requestWorkspaceView = vi.fn();
+    const focusSession = vi.fn(async () => true);
+
+    renderController(
+      buildHarness({
+        deepLink: {
+          projectId: 'p1',
+          worktreeId: null,
+          sessionId: null,
+          view: 'files',
+          path: 'WORKFLOW.md',
+        },
+        locationSearch: '?projectId=p1&view=files&path=WORKFLOW.md',
+        activeProjectId: 'p1',
+        activeWorktreeId: 'wt-main',
+        openFileByPath,
+        setAutomationConsoleOpen,
+        requestWorkspaceView,
+        focusSession,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(openFileByPath).toHaveBeenCalledWith('WORKFLOW.md');
+    });
+    expect(setAutomationConsoleOpen).toHaveBeenCalledWith(false);
+    expect(requestWorkspaceView).toHaveBeenCalledWith('files');
     expect(focusSession).not.toHaveBeenCalled();
   });
 });

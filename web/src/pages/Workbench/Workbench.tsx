@@ -328,6 +328,7 @@ export function Workbench() {
     handleRenamePath,
     handleDeletePath,
     handleCopySelectedPath,
+    openFileByPath,
     resetForContext: resetFileForContext,
   } = fileController;
   // Business Logic: 自动化域（自动化控制台开/关 + staged deep link 应用 + 执行现场回跳）由独立 controller 持有，
@@ -351,6 +352,7 @@ export function Workbench() {
     focusSession,
     setAutomationConsoleOpen,
     requestWorkspaceView,
+    openFileByPath,
     navigate,
   });
   const {
