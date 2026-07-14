@@ -51,7 +51,8 @@ function canListenToTauriEvents(): boolean {
  *   终端输出缓存需要跨 Workbench 路由卸载保留，确保切出再切回时可 replay 已收到的 PTY/tmux 输出。
  *
  * Code Logic（这个组件做什么）:
- *   创建稳定的终端 buffer store，常驻监听后端 terminal-output 事件，并暴露 reset/remove 操作给 Workbench 页面。
+ *   以 options 形式创建稳定的 session 级 ring-buffer store（默认 rAF 帧批处理），
+ *   常驻监听后端 terminal-output 事件，并暴露 reset/remove 操作给 Workbench 页面。
  */
 export function WorkbenchTerminalBuffersProvider({
   children,
