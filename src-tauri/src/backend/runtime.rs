@@ -108,6 +108,8 @@ const PROMPTS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS prompts (
     deleted INTEGER DEFAULT 0
 )";
 
+/// transfer_history 建表（文档 + 新库基线）。N5 recovery 列由 CREATE 声明；
+/// 旧库升级走 `TransferRepo::ensure_schema` 的幂等 ALTER（禁止 sqlx::migrate!）。
 const TRANSFER_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS transfer_history (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL,
@@ -119,7 +121,18 @@ const TRANSFER_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS transfer_history (
     status TEXT NOT NULL,
     transferred_bytes INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
-    completed_at TEXT
+    completed_at TEXT,
+    phase TEXT,
+    failure_stage TEXT,
+    failure_code TEXT,
+    failure_retryable INTEGER,
+    failure_message TEXT,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    logical_transfer_id TEXT,
+    attempt_id TEXT,
+    protocol_transfer_id TEXT,
+    client_operation_id TEXT,
+    operation_payload_hash TEXT
 )";
 
 /// Claude Code 历史 prompt 表（采集入库 + 跨设备同步）。
@@ -303,6 +316,8 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
 
     sqlx::query(PROMPTS_SCHEMA).execute(&pool).await?;
     sqlx::query(TRANSFER_SCHEMA).execute(&pool).await?;
+    // N5 transfer recovery：幂等补列 + client_operation_id 部分唯一索引
+    crate::storage::TransferRepo::ensure_schema(&pool).await?;
     sqlx::query(CC_HISTORY_SCHEMA).execute(&pool).await?;
     sqlx::query(CC_SCAN_STATE_SCHEMA).execute(&pool).await?;
     for stmt in CC_INDEXES.split(';') {

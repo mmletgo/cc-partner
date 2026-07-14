@@ -352,6 +352,7 @@ mod tests {
             transferred_bytes: 0,
             created_at: "2026-07-12T00:00:00Z".to_string(),
             completed_at: None,
+            ..TransferTask::recovery_defaults(id)
         }
     }
 

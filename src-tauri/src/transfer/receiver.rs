@@ -225,7 +225,8 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
         transferred_bytes: resume_offset,
         created_at: now_iso(),
         completed_at: None,
-    };
+            ..TransferTask::recovery_defaults(&transfer_id)
+        };
     state.transfers.add(task);
 
     tracing::info!(
@@ -2337,6 +2338,7 @@ async fn try_recover_finalize_intent(
         transferred_bytes: intent.size,
         created_at: intent.created_at.clone(),
         completed_at: Some(now_iso()),
+        ..TransferTask::recovery_defaults(transfer_id)
     };
     // 若 registry 无 entry，临时 add 以便 promote 后 remove/tombstone；durability pending 也保留。
     if state.transfers.get(transfer_id).is_none() {
@@ -3957,6 +3959,7 @@ mod tests {
             transferred_bytes: 0,
             created_at: now_iso(),
             completed_at: None,
+            ..TransferTask::recovery_defaults(&transfer_id)
         });
 
         let state_a = state.clone();
@@ -4258,6 +4261,7 @@ mod tests {
             transferred_bytes: 0,
             created_at: now_iso(),
             completed_at: None,
+            ..TransferTask::recovery_defaults(&transfer_id)
         });
 
         let resp = handle_chunk(&state, &transfer_id, 0, b"XXXX".to_vec())
@@ -4304,6 +4308,7 @@ mod tests {
             transferred_bytes: 0,
             created_at: now_iso(),
             completed_at: None,
+            ..TransferTask::recovery_defaults(&transfer_id)
         });
 
         let err = handle_init(
@@ -4440,7 +4445,7 @@ mod tests {
             (id_b.clone(), tmp_b.clone(), payload_b.len() as u64, sha_b),
         ] {
             state.transfers.add(TransferTask {
-                id,
+                id: id.clone(),
                 filename: "report.txt".to_string(),
                 file_path: tmp.to_string_lossy().to_string(),
                 size,
@@ -4452,6 +4457,7 @@ mod tests {
                 transferred_bytes: size,
                 created_at: now_iso(),
                 completed_at: None,
+                ..TransferTask::recovery_defaults(&id)
             });
         }
 
@@ -5435,6 +5441,7 @@ mod tests {
             transferred_bytes: 0,
             created_at: now_iso(),
             completed_at: None,
+            ..crate::models::transfer::TransferTask::recovery_defaults(&transfer_id)
         };
         state.transfers.add(task);
 

@@ -119,7 +119,8 @@ pub fn start_sending(
         transferred_bytes: 0,
         created_at: now_iso(),
         completed_at: None,
-    };
+            ..TransferTask::recovery_defaults(&transfer_id)
+        };
 
     // 注册任务（附带 CancellationToken），spawn 前先 add 以便 cancel 命令可立即生效
     state.transfers.add(task.clone());
