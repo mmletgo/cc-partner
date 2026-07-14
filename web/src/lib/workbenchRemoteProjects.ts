@@ -1,9 +1,11 @@
+import { classifyTransportFault } from './faultRecovery';
 import type {
   WorkbenchProject,
   WorkbenchRemoteDirectoryEntry,
   WorkbenchRemotePathInfo,
 } from './types';
 
+/** 后端固定中文离线文案（legacy 兼容，优先仍走 typed NETWORK_OFFLINE）。 */
 const REMOTE_WORKBENCH_OFFLINE_ERROR = '远端设备不在线';
 
 /**
@@ -102,12 +104,21 @@ export function canOpenRemoteProjectSelection(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   远端设备掉线时，后端会返回固定业务错误，前端需要识别它来展示离线提示并禁用远端写操作。
+ *   远端设备掉线时，前端需要识别它来展示离线提示并禁用远端写操作；
+ *   优先 typed 故障码，中文固定文案仅作 backend legacy 回退。
  *
  * Code Logic（这个函数做什么）:
- *   从 Error/message/string 中提取文本，判断是否包含后端固定的远端离线错误。
+ *   先用 classifyTransportFault 判断 NETWORK_OFFLINE / networkOffline；
+ *   否则从 Error/message/string 中匹配后端固定中文「远端设备不在线」。
  */
 export function isRemoteWorkbenchOfflineError(error: unknown): boolean {
+  const classification = classifyTransportFault(error);
+  if (
+    classification.code === 'NETWORK_OFFLINE' ||
+    classification.kind === 'networkOffline'
+  ) {
+    return true;
+  }
   const message =
     error instanceof Error
       ? error.message

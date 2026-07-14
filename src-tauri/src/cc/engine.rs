@@ -443,9 +443,7 @@ async fn fetch_items_with_halving(
                 );
                 out.extend(resp.items);
             }
-            Err(e)
-                if (is_batch_too_large(&e) || is_item_too_large(&e)) && chunk.len() > 1 =>
-            {
+            Err(e) if (is_batch_too_large(&e) || is_item_too_large(&e)) && chunk.len() > 1 => {
                 let mid = chunk.len() / 2;
                 stack.push(chunk[mid..].to_vec());
                 stack.push(chunk[..mid].to_vec());
@@ -492,9 +490,7 @@ async fn push_batch_with_halving(
                 record_batch_metrics(state, n as u64, est as u64, batch_start.elapsed());
                 accepted_total += resp.accepted;
             }
-            Err(e)
-                if (is_batch_too_large(&e) || is_item_too_large(&e)) && chunk.len() > 1 =>
-            {
+            Err(e) if (is_batch_too_large(&e) || is_item_too_large(&e)) && chunk.len() > 1 => {
                 let mid = chunk.len() / 2;
                 stack.push(chunk[mid..].to_vec());
                 stack.push(chunk[..mid].to_vec());

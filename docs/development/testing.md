@@ -2,17 +2,69 @@
 
 Concise map of **what to run locally**, **which CI job owns it**, and **what is explicitly out of scope**. Domain-level Vitest patterns live in [`web/CLAUDE.md`](../../web/CLAUDE.md); backend unit/smoke harness details live in [`src-tauri/CLAUDE.md`](../../src-tauri/CLAUDE.md).
 
-## Matrix
+**Authoritative machine-readable coverage** lives in [`quality-matrix.json`](quality-matrix.json). Stable evidence IDs (`E2E-*` / `L0-*` / `L2-*` / `L3-*`) map surface → tests → command → CI job → platforms → exclusions. Validate with:
+
+```bash
+node scripts/check-quality-traceability.mjs --self-test
+node scripts/check-quality-traceability.mjs
+```
+
+Docs may only reference registered `E2E-` / `L2-` / `L3-` IDs (`node scripts/check-docs.mjs` checks existence; it does **not** re-validate the full JSON matrix).
+
+## Evidence layers
+
+| Level | Meaning | What it may claim | What it must not claim |
+| --- | --- | --- | --- |
+| **L0** | Unit / contract (Vitest, pure Rust unit) | Decoder fail-closed, pure policy, schema kinds | Real IPC host, WebView, multi-host LAN |
+| **L1** | Deterministic browser mock (Playwright Chromium + backendHarness) | UI journey, optimistic rollback, offline/stale guards, simulated boundary reject | Real Tauri command registration, system permission dialogs, real file dialog, multi-host mDNS / phone QR |
+| **L2** | Backend / integration / hosted smoke | CLI lifecycle, PTY, doctor, LAN socket peer + Host/Origin guards (incl. injected peer labels), fault injection seams | Packaged GUI, macOS permission sheets, WSL+tmux on hosted runners, real public NIC peer |
+| **L3** | Real-device certification | Packaged GUI, OS permissions, dual-host LAN, 1 GiB transfer — **only when executed** | Any PASS without commit/version/date/expiresAt; substituting L1/L2 |
+
+### Required L1 product journeys (CI `frontend-e2e`)
+
+| ID | Spec | Surface |
+| --- | --- | --- |
+| `E2E-TRANSFER-001` | `web/tests/transfer.spec.ts` | Transfer send/progress/cancel |
+| `E2E-SCRATCH-001` | `web/tests/scratchpad.spec.ts` | Scratchpad unmount flush / save reject |
+| `E2E-PROMPTS-001` | `web/tests/prompts.spec.ts` | Prompt create/update/delete rollback |
+| `E2E-PERM-001` | `web/tests/permissions.spec.ts` | Permission check fail/retry |
+| `E2E-SETTINGS-001` | `web/tests/settings.spec.ts` | Settings partial load + save dirty |
+| `E2E-WORKBENCH-001` | `web/tests/workbench.spec.ts` | Workbench stale/offline/files |
+| `E2E-MOBILE-001` | `web/tests/mobile-workbench.spec.ts` | Mobile 390×844 navigation/HTTP write |
+| `E2E-LAN-001` | `web/tests/lan-boundary.spec.ts` | L1 credential-free + simulated boundary reject |
+
+Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY-001`, `E2E-FRONTEND-FOUNDATION-001`, `E2E-SCREENSHOT-OVERLAY-001`.
+
+### L0 / L2 / L3 anchors
+
+| ID | Level | Evidence |
+| --- | --- | --- |
+| `L0-RUNTIME-SCHEMA-001` | L0 | `web/src/lib/runtimeSchema.test.ts` + `web/src/lib/schemas/*` |
+| `L2-QUALITY-FAULTS-001` | L2 | `src-tauri/tests/quality_faults.rs` (batch rollback / busy bound / idempotent peer / malformed transfer DTO) — also on Cross-Platform Smoke |
+| `L2-LAN-TRUST-BOUNDARY-001` | L2 | `src-tauri/tests/lan_trust_boundary_smoke.rs` |
+| `L2-BACKEND-CLI-SMOKE-001` | L2 | `src-tauri/tests/backend_cli_smoke.rs` |
+| `L2-BACKEND-DOCTOR-SMOKE-001` | L2 | `src-tauri/tests/backend_doctor_smoke.rs` |
+| `L2-PTY-SMOKE-001` | L2 | `src-tauri/tests/pty_smoke.rs` |
+| `L2-TRANSACTIONAL-RUNTIME-001` | L2 | `src-tauri/tests/transactional_runtime_smoke.rs` |
+| `L3-MACOS-GUI-PERMISSIONS-001` | L3 | Packaged macOS GUI + permission grant/deny/retry + screenshot clipboard — **NOT VERIFIED** ([real-device-certification.md](real-device-certification.md)) |
+| `L3-WINDOWS-GUI-001` | L3 | Packaged Windows GUI / transfer dialog / native terminal — **NOT VERIFIED** |
+| `L3-WINDOWS-WSL-001` | L3 | Windows WSL + tmux Workbench recovery — **NOT VERIFIED** (separate from native terminal) |
+| `L3-UBUNTU-GUI-001` | L3 | AppImage/deb GUI + terminal/files — **NOT VERIFIED** |
+| `L3-DUAL-HOST-LAN-001` | L3 | Two physical hosts: mDNS, credential-free native/mobile R/W, boundary reject, remote stop reject, 1GiB transfer/resume — **NOT VERIFIED** |
+
+Honest L3 row schema (version, commit, OS build, status, evidence, date, 90-day expiry) and the full NOT VERIFIED inventory: [`real-device-certification.md`](real-device-certification.md). Do **not** invent caller identity auth. LAN product semantics remain credential-free for legal loopback/LAN peers; Host/Origin/Content-Type and socket peer class are deployment boundaries, not identity.
+
+## Workflow matrix
 
 | Surface | Local command | CI job | Trigger | Verified scope | Explicit exclusions |
 | --- | --- | --- | --- | --- | --- |
-| Frontend unit | `cd web && npm test` | `frontend-unit` (`CI`) | PR → `master`; push `master` (docs-only push may skip via `paths-ignore`) | Vitest unit tests under `web/` | No Tauri WebView; no multi-host LAN |
-| Frontend E2E | `cd web && npm run test:e2e` | `frontend-e2e` (`CI`) | Same as above | Playwright (Chromium) browser flows | No packaged desktop GUI; no multi-host mDNS |
-| Frontend lint + build | `cd web && npm run lint` · `cd web && npm run build` | `quality` (`CI`) | Same as above | ESLint + `tsc -b` + Vite production bundle | Not a substitute for unit/E2E |
-| Ubuntu full quality (Rust) | `cd src-tauri && cargo fmt --check` · `cargo clippy --all-targets --locked -- -D warnings` · `cargo test --locked` | `quality` (`CI`) | Same as above | fmt / clippy (deny warnings) / full `cargo test` on **ubuntu-22.04** | Not macOS/Windows process or path smoke |
-| macOS / Windows smoke | See [local smoke](#local-cross-platform-smoke) | `smoke (macos-latest\|windows-latest)` (`Cross-Platform Smoke`) | Related PR path filter; daily `schedule` UTC `18:23`; `workflow_dispatch` | Backend CLI lifecycle, doctor `--json`, native PTY, **LAN trust boundary smoke**, logs rotation/sanitize, focused unit + `cargo check --bins` | **NOT VERIFIED on hosted runners:** WSL + tmux; GUI / WebView; macOS permission dialogs; multi-host mDNS / phone QR / multi-device P2P; real public-peer NIC path |
+| Frontend unit | `cd web && npm test` | `frontend-unit` (`CI`) | PR → `master`; push `master` (docs-only push may skip via `paths-ignore`) | Vitest unit tests under `web/` (incl. `L0-RUNTIME-SCHEMA-001`) | No Tauri WebView; no multi-host LAN |
+| Frontend E2E | `cd web && npm run test:e2e` | `frontend-e2e` (`CI`) | Same as above | Playwright (Chromium) browser flows (`E2E-*` L1 IDs) | No packaged desktop GUI; no multi-host mDNS |
+| Frontend lint + build + static gates | `cd web && npm run lint` · `npm run build` · token/bundle/module gates · `node scripts/check-quality-traceability.mjs` | `quality` (`CI`) | Same as above | ESLint + `tsc -b` + Vite production bundle + CSS token / bundle / module / quality-matrix gates | Not a substitute for unit/E2E or L3 |
+| Ubuntu full quality (Rust) | `cd src-tauri && cargo fmt --check` · `cargo clippy --all-targets --locked -- -D warnings` · `cargo test --locked` | `quality` (`CI`) | Same as above | fmt / clippy (deny warnings) / full `cargo test` on **ubuntu-22.04** (incl. `L2-QUALITY-FAULTS-001`) | Not macOS/Windows process or path smoke |
+| macOS / Windows smoke | See [local smoke](#local-cross-platform-smoke) | `smoke (macos-latest\|windows-latest)` (`Cross-Platform Smoke`) | Related PR path filter; daily `schedule` UTC `18:23`; `workflow_dispatch` | Backend CLI lifecycle, doctor `--json`, native PTY, **LAN trust boundary smoke**, **quality_faults L2**, transactional runtime, logs rotation/sanitize, focused unit + `cargo check --bins` | **NOT VERIFIED on hosted runners:** WSL + tmux; GUI / WebView; macOS permission dialogs; multi-host mDNS / phone QR / multi-device P2P; real public-peer NIC path; 1GiB dual-host transfer |
 | Release installers | Local: `./start.sh build` (dev); formal: tag only | `build` / `publish-release` / `assemble-latest-json` (`Build & Release (Tauri)`) | Push tag `v*` | Platform installers + `.sig` + `latest.json` assembly | **Not** a quality substitute for `CI` or Cross-Platform Smoke |
-| Documentation facts | `node scripts/check-docs.mjs` · `node scripts/check-docs.mjs --self-test` | `docs` (`Docs`) | PR/push `master` path filter on `**/*.md`, `scripts/check-docs.mjs`, workflow | Relative links, fence balance, scoped stale claims, README command allowlist | Not a substitute for product CI/smoke; skips `docs/superpowers/**` |
+| Documentation facts + matrix ID refs | `node scripts/check-docs.mjs` · `node scripts/check-docs.mjs --self-test` · `node scripts/check-quality-traceability.mjs` | `docs` (`Docs`) | PR/push `master` path filter on Markdown, quality-matrix, docs/traceability checkers, workflow | Relative links, fence balance, scoped stale claims, README command allowlist, evidence ID existence | Not a substitute for product CI/smoke; skips `docs/superpowers/**` |
 
 Workflows:
 
@@ -55,10 +107,12 @@ cd src-tauri && cargo clippy --all-targets --locked -- -D warnings
 cd src-tauri && cargo test --locked
 ```
 
-Optional inventory / docs guards (docs guard also runs in `Docs` workflow):
+Optional inventory / docs / coverage guards (docs + matrix also run in `Docs` workflow; matrix also in `CI` quality):
 
 ```bash
 node scripts/check-p2p-route-inventory.mjs
+node scripts/check-quality-traceability.mjs --self-test
+node scripts/check-quality-traceability.mjs
 node scripts/check-docs.mjs
 node scripts/check-docs.mjs --self-test
 ```
@@ -80,6 +134,8 @@ cargo test --locked --test backend_cli_smoke -- --nocapture --test-threads=1
 cargo test --locked --test backend_doctor_smoke -- --nocapture --test-threads=1
 cargo test --locked --test pty_smoke -- --nocapture --test-threads=1
 cargo test --locked --test lan_trust_boundary_smoke -- --nocapture --test-threads=1
+cargo test --locked --test quality_faults -- --nocapture --test-threads=1
+cargo test --locked --test transactional_runtime_smoke -- --nocapture --test-threads=1
 ```
 
 Isolate data away from a real home install:

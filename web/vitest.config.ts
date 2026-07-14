@@ -7,8 +7,9 @@ export default mergeConfig(
     test: {
       environment: 'node',
       globals: false,
-      include: ['src/**/*.test.{ts,tsx}'],
-      exclude: ['tests/**', 'node_modules/**', 'dist/**'],
+      // support/ 下的纯 harness 合同可走 Vitest；E2E *.spec.ts 仍只由 Playwright 收集
+      include: ['src/**/*.test.{ts,tsx}', 'tests/support/**/*.test.ts'],
+      exclude: ['tests/**/*.spec.ts', 'node_modules/**', 'dist/**'],
       passWithNoTests: false,
     },
   }),

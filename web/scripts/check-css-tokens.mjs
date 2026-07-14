@@ -14,9 +14,12 @@
  *
  * Usage:
  *   node scripts/check-css-tokens.mjs
+ *   node scripts/check-css-tokens.mjs --self-test
  *   npm run check:css-tokens
+ *   npm run check:tokens
  */
 
+import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -264,6 +267,27 @@ function listCssFiles(dir) {
 }
 
 /**
+ * 运行独立 fixture 测试（`--self-test`）。
+ *
+ * Business Logic:
+ *   计划要求脚本支持 `--self-test`，与既有 `node --test` 共用断言。
+ *
+ * Code Logic:
+ *   spawn `node --test` 指向同目录 test 文件。
+ *
+ * @param {string} scriptDir
+ * @returns {number}
+ */
+function runSelfTest(scriptDir) {
+  const testFile = resolve(scriptDir, 'check-css-tokens.test.mjs');
+  const result = spawnSync(process.execPath, ['--test', testFile], {
+    cwd: resolve(scriptDir, '..'),
+    stdio: 'inherit',
+  });
+  return result.status ?? 1;
+}
+
+/**
  * CLI 入口：扫描 web/src 并打印诊断。
  *
  * Business Logic:
@@ -273,10 +297,15 @@ function listCssFiles(dir) {
  *   读取 tokens.css 与全部 CSS，调用 analyzeCssTokenContract，
  *   无诊断打印成功文案 exit 0，否则打印诊断 exit 1。
  *
+ * @param {string[]} [argv]
  * @returns {number}
  */
-function main() {
+function main(argv = process.argv.slice(2)) {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
+  if (argv.includes('--self-test')) {
+    return runSelfTest(scriptDir);
+  }
+
   const webRoot = resolve(scriptDir, '..');
   const srcRoot = resolve(webRoot, 'src');
   const tokensPath = resolve(srcRoot, 'styles/tokens.css');

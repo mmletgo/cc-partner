@@ -1,8 +1,11 @@
-# Docs guard — static documentation fact checks
+# Docs guard — static documentation fact checks + quality matrix ID existence
 #
-# Triggers on pull requests and pushes to master when Markdown, this checker,
-# or this workflow change. Single lightweight job: checkout + Node 22 only.
+# Triggers on pull requests and pushes to master when Markdown, docs/matrix
+# checkers, quality-matrix.json, CLI source, or this workflow change.
+# Single lightweight job: checkout + Node 22 only.
 # Does not install frontend or Rust dependencies. No continue-on-error.
+# Full matrix schema validation also runs in CI quality; Docs re-runs it so
+# docs-only pushes (CI paths-ignore) still gate coverage traceability.
 
 name: Docs
 
@@ -11,14 +14,18 @@ on:
     branches: [master]
     paths:
       - '**/*.md'
+      - 'docs/development/quality-matrix.json'
       - 'scripts/check-docs.mjs'
+      - 'scripts/check-quality-traceability.mjs'
       - 'src-tauri/src/backend/cli.rs'
       - '.github/workflows/docs.yml'
   push:
     branches: [master]
     paths:
       - '**/*.md'
+      - 'docs/development/quality-matrix.json'
       - 'scripts/check-docs.mjs'
+      - 'scripts/check-quality-traceability.mjs'
       - 'src-tauri/src/backend/cli.rs'
       - '.github/workflows/docs.yml'
 
@@ -39,9 +46,16 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Self-test checker fixtures
+      - name: Self-test quality matrix traceability
+        run: node scripts/check-quality-traceability.mjs --self-test
+
+      - name: Check quality matrix
+        run: node scripts/check-quality-traceability.mjs
+
+      - name: Self-test docs checker fixtures
         run: node scripts/check-docs.mjs --self-test
 
       - name: Check current documentation set
         # No fixed file list: default mode scans all tracked Markdown except docs/superpowers/**
+        # Also verifies referenced E2E-/L2-/L3- IDs exist in quality-matrix.json
         run: node scripts/check-docs.mjs

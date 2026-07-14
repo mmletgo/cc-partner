@@ -1,0 +1,560 @@
+{
+  "version": 1,
+  "updatedAt": "2026-07-14",
+  "description": "Machine-readable quality evidence matrix. Stable IDs must not be renamed without updating docs and scripts/check-quality-traceability.mjs atomically. L1 browser mocks do not prove Tauri WebView, system permissions, real file dialogs, or multi-host LAN. L3 rows stay NOT VERIFIED until real-device certification lands.",
+  "entries": [
+    {
+      "id": "L0-RUNTIME-SCHEMA-001",
+      "surface": "runtime-schema",
+      "level": "L0",
+      "tests": [
+        "web/src/lib/runtimeSchema.test.ts",
+        "web/src/lib/schemas/attention.test.ts",
+        "web/src/lib/schemas/config.test.ts",
+        "web/src/lib/schemas/orchestrator.test.ts",
+        "web/src/lib/schemas/protocol.test.ts",
+        "web/src/lib/schemas/transfer.test.ts",
+        "web/src/lib/schemas/workbench.test.ts"
+      ],
+      "command": "cd web && npm test -- src/lib/runtimeSchema.test.ts src/lib/schemas",
+      "ciJob": "frontend-unit",
+      "platforms": [
+        "node-linux"
+      ],
+      "exclusions": [
+        "Tauri WebView IPC host",
+        "real multi-host LAN payloads"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-TRANSFER-001",
+      "surface": "transfer",
+      "level": "L1",
+      "tests": [
+        "web/tests/transfer.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- transfer.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real Tauri file dialog",
+        "multi-host LAN transfer",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-SCRATCH-001",
+      "surface": "scratchpad",
+      "level": "L1",
+      "tests": [
+        "web/tests/scratchpad.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- scratchpad.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real tray/GUI close path",
+        "multi-device scratchpad sync"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-PROMPTS-001",
+      "surface": "prompts",
+      "level": "L1",
+      "tests": [
+        "web/tests/prompts.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- prompts.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real P2P prompt sync",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-PERM-001",
+      "surface": "permissions",
+      "level": "L1",
+      "tests": [
+        "web/tests/permissions.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- permissions.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real macOS permission dialogs",
+        "system notification center",
+        "accessibility/input monitoring prompts"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-SETTINGS-001",
+      "surface": "settings",
+      "level": "L1",
+      "tests": [
+        "web/tests/settings.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- settings.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real updater install/restart",
+        "real dependency install side effects"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-WORKBENCH-001",
+      "surface": "workbench",
+      "level": "L1",
+      "tests": [
+        "web/tests/workbench.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- workbench.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real native PTY/tmux host",
+        "multi-host remote project ownership",
+        "packaged WebView"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-MOBILE-001",
+      "surface": "mobile-workbench",
+      "level": "L1",
+      "tests": [
+        "web/tests/mobile-workbench.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- mobile-workbench.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux-viewport-390x844"
+      ],
+      "exclusions": [
+        "phone QR second-device browser",
+        "real multi-host mobile relay",
+        "identity auth (product has none)"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-LAN-001",
+      "surface": "lan-boundary",
+      "level": "L1",
+      "tests": [
+        "web/tests/lan-boundary.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- lan-boundary.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real ConnectInfo peer classification",
+        "multi-host mDNS discovery",
+        "production public NIC path",
+        "identity auth (product has none)"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-ATTENTION-001",
+      "surface": "attention",
+      "level": "L1",
+      "tests": [
+        "web/tests/attention.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- attention.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real multi-device outbox delivery",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-CORE-INTEGRITY-001",
+      "surface": "core-integrity",
+      "level": "L1",
+      "tests": [
+        "web/tests/core-integrity.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- core-integrity.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real Tauri dialog plugin host",
+        "multi-host LAN"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-FRONTEND-FOUNDATION-001",
+      "surface": "frontend-foundation",
+      "level": "L1",
+      "tests": [
+        "web/tests/frontend-foundation.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- frontend-foundation.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "packaged desktop GUI",
+        "real system a11y trees outside Chromium"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-SCREENSHOT-OVERLAY-001",
+      "surface": "screenshot-overlay",
+      "level": "L1",
+      "tests": [
+        "web/tests/screenshot-overlay.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- screenshot-overlay.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real screen capture / system clipboard",
+        "macOS permission dialogs"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "L2-QUALITY-FAULTS-001",
+      "surface": "quality-faults",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/quality_faults.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test quality_faults -- --nocapture --test-threads=1",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04",
+        "macos-latest",
+        "windows-latest"
+      ],
+      "exclusions": [
+        "real disk-full hardware fault",
+        "production env fault switches",
+        "multi-host LAN (see L2-LAN-TRUST-BOUNDARY-001 / L3-DUAL-HOST-LAN-001)",
+        "GUI / Tauri command host"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/real-device-certification.md"
+      ]
+    },
+    {
+      "id": "L2-LAN-TRUST-BOUNDARY-001",
+      "surface": "lan-trust-boundary",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/lan_trust_boundary_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test lan_trust_boundary_smoke -- --nocapture --test-threads=1",
+      "ciJob": "smoke",
+      "platforms": [
+        "macos-latest",
+        "windows-latest",
+        "ubuntu-local"
+      ],
+      "exclusions": [
+        "multi-host mDNS discovery",
+        "phone QR second device",
+        "real public-peer production NIC",
+        "identity auth (product has none)"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "L2-BACKEND-CLI-SMOKE-001",
+      "surface": "backend-cli",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/backend_cli_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test backend_cli_smoke -- --nocapture --test-threads=1",
+      "ciJob": "smoke",
+      "platforms": [
+        "macos-latest",
+        "windows-latest"
+      ],
+      "exclusions": [
+        "GUI / WebView",
+        "WSL + tmux hosted path"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/backend-operations.md"
+      ]
+    },
+    {
+      "id": "L2-BACKEND-DOCTOR-SMOKE-001",
+      "surface": "backend-doctor",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/backend_doctor_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test backend_doctor_smoke -- --nocapture --test-threads=1",
+      "ciJob": "smoke",
+      "platforms": [
+        "macos-latest",
+        "windows-latest"
+      ],
+      "exclusions": [
+        "GUI permission dialogs",
+        "remote telemetry upload (out of scope)"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/backend-operations.md"
+      ]
+    },
+    {
+      "id": "L2-PTY-SMOKE-001",
+      "surface": "native-pty",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/pty_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test pty_smoke -- --nocapture --test-threads=1",
+      "ciJob": "smoke",
+      "platforms": [
+        "macos-latest",
+        "windows-latest"
+      ],
+      "exclusions": [
+        "WSL + tmux hosted path",
+        "packaged desktop terminal UI"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "L2-TRANSACTIONAL-RUNTIME-001",
+      "surface": "transactional-runtime",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/transactional_runtime_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test transactional_runtime_smoke -- --nocapture --test-threads=1",
+      "ciJob": "smoke",
+      "platforms": [
+        "macos-latest",
+        "windows-latest"
+      ],
+      "exclusions": [
+        "real disk full",
+        "real updater install/restart",
+        "GUI global shortcut conflicts"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "L3-MACOS-GUI-PERMISSIONS-001",
+      "surface": "macos-gui-permissions-screenshot",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: packaged macOS GUI + permissions grant/deny/retry + screenshot clipboard",
+      "ciJob": "manual",
+      "platforms": [
+        "macos"
+      ],
+      "exclusions": [
+        "hosted runner substitute",
+        "browser mock substitute",
+        "CI Playwright claim"
+      ],
+      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
+      "version": "0.6.7",
+      "date": "2026-07-14",
+      "expiresAt": "2026-10-12",
+      "status": "NOT VERIFIED",
+      "evidence": null,
+      "osBuild": null,
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/real-device-certification.md"
+      ]
+    },
+    {
+      "id": "L3-WINDOWS-GUI-001",
+      "surface": "windows-gui-transfer-terminal",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: packaged Windows GUI + transfer path/dialog + native terminal",
+      "ciJob": "manual",
+      "platforms": [
+        "windows"
+      ],
+      "exclusions": [
+        "hosted runner substitute",
+        "browser mock substitute",
+        "WSL + tmux (see L3-WINDOWS-WSL-001)"
+      ],
+      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
+      "version": "0.6.7",
+      "date": "2026-07-14",
+      "expiresAt": "2026-10-12",
+      "status": "NOT VERIFIED",
+      "evidence": null,
+      "osBuild": null,
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/real-device-certification.md"
+      ]
+    },
+    {
+      "id": "L3-WINDOWS-WSL-001",
+      "surface": "windows-wsl-tmux",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: Windows WSL + tmux Workbench recovery",
+      "ciJob": "manual",
+      "platforms": [
+        "windows-wsl"
+      ],
+      "exclusions": [
+        "hosted runner smoke claims WSL",
+        "native Windows terminal only (see L3-WINDOWS-GUI-001)"
+      ],
+      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
+      "version": "0.6.7",
+      "date": "2026-07-14",
+      "expiresAt": "2026-10-12",
+      "status": "NOT VERIFIED",
+      "evidence": null,
+      "osBuild": null,
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/real-device-certification.md"
+      ]
+    },
+    {
+      "id": "L3-UBUNTU-GUI-001",
+      "surface": "ubuntu-appimage-deb-gui",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: Ubuntu AppImage/deb GUI + terminal/files",
+      "ciJob": "manual",
+      "platforms": [
+        "ubuntu"
+      ],
+      "exclusions": [
+        "hosted runner substitute",
+        "browser mock substitute",
+        "ubuntu CI headless quality is not packaged GUI cert"
+      ],
+      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
+      "version": "0.6.7",
+      "date": "2026-07-14",
+      "expiresAt": "2026-10-12",
+      "status": "NOT VERIFIED",
+      "evidence": null,
+      "osBuild": null,
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/real-device-certification.md"
+      ]
+    },
+    {
+      "id": "L3-DUAL-HOST-LAN-001",
+      "surface": "dual-host-lan",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: two physical hosts mDNS + credential-free R/W + boundary reject + 1GiB transfer/resume",
+      "ciJob": "manual",
+      "platforms": [
+        "dual-host-lan"
+      ],
+      "exclusions": [
+        "single-process injected ConnectInfo substitute",
+        "browser L1 mock substitute",
+        "X-Forwarded-For spoof as public peer evidence",
+        "identity auth (product has none)"
+      ],
+      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
+      "version": "0.6.7",
+      "date": "2026-07-14",
+      "expiresAt": "2026-10-12",
+      "status": "NOT VERIFIED",
+      "evidence": null,
+      "osBuild": null,
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/real-device-certification.md"
+      ]
+    }
+  ]
+}

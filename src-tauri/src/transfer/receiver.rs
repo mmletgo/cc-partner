@@ -4217,10 +4217,7 @@ mod tests {
             .expect("exact CHUNK_SIZE must pass size gate");
         assert!(resp.success);
         assert_eq!(resp.received_bytes, CHUNK_SIZE as u64);
-        assert!(
-            tmp_path.exists(),
-            "合法 CHUNK_SIZE chunk 应写入临时文件"
-        );
+        assert!(tmp_path.exists(), "合法 CHUNK_SIZE chunk 应写入临时文件");
         assert_eq!(
             fs::metadata(&tmp_path).expect("tmp meta").len(),
             CHUNK_SIZE as u64

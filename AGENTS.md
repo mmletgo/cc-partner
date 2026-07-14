@@ -96,7 +96,7 @@ cc-partner/
 │   ├── icons/                    # 应用图标
 │   ├── tauri.conf.json           # Tauri 配置 + bundle + updater（版本号单一来源）
 │   └── Cargo.toml
-├── scripts/                      # bump-version / prepare-tauri-sidecar / check-p2p-route-inventory + 图标源
+├── scripts/                      # bump-version / prepare-tauri-sidecar / check-p2p-route-inventory / check-quality-traceability / check-docs + 图标源
 ├── .github/workflows/            # ci.yml · cross-platform-smoke.yml · release-tauri.yml · docs.yml
 ├── uiux/                         # 设计稿（参考资源，不参与构建）
 ├── docs/
@@ -415,13 +415,17 @@ cd web && npm ci && npm run lint && npm run build && npm test && npm run test:e2
 # Rust 质量
 cd src-tauri && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
 
-# 路由清单 / 后端 CLI 本地 smoke（按需）
+# 路由清单 / 质量矩阵 / 文档事实 / 后端 CLI 本地 smoke（按需）
 node scripts/check-p2p-route-inventory.mjs
+node scripts/check-quality-traceability.mjs --self-test
+node scripts/check-quality-traceability.mjs
+node scripts/check-docs.mjs
+node scripts/check-docs.mjs --self-test
 cd src-tauri && cargo test --locked --test backend_cli_smoke -- --nocapture --test-threads=1
 cd src-tauri && cargo test --locked --test backend_doctor_smoke -- --nocapture --test-threads=1
 ```
 
-领域测试、Vitest/jsdom 策略、Attention/Workbench 回归命令见 `web/CLAUDE.md`；P2P/protocol、doctor/logs、macOS/Windows smoke 范围与 NOT VERIFIED 见 `src-tauri/CLAUDE.md`。人类向质量门禁矩阵见 [`docs/development/testing.md`](docs/development/testing.md)；后端生命周期 / 端口 / doctor 见 [`docs/development/backend-operations.md`](docs/development/backend-operations.md)。
+领域测试、Vitest/jsdom 策略、Attention/Workbench 回归命令见 `web/CLAUDE.md`；P2P/protocol、doctor/logs、macOS/Windows smoke 范围与 NOT VERIFIED 见 `src-tauri/CLAUDE.md`。人类向质量门禁与 L0–L3 分层见 [`docs/development/testing.md`](docs/development/testing.md)；机器可读 evidence 表见 [`docs/development/quality-matrix.json`](docs/development/quality-matrix.json)（稳定 `E2E-`/`L2-`/`L3-` ID，L3 未执行保持 `NOT VERIFIED`）；后端生命周期 / 端口 / doctor 见 [`docs/development/backend-operations.md`](docs/development/backend-operations.md)。
 
 ### 7.2 启动与设计系统预览
 

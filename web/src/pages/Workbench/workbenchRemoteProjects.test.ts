@@ -183,6 +183,14 @@ function testRemoteOfflineStateOnlyMatchesCurrentRemoteProject(): void {
     'composed UI error should still be detected',
   );
   assert(
+    isRemoteWorkbenchOfflineError(Object.assign(new Error('network offline'), { code: 'NETWORK_OFFLINE' })),
+    'typed NETWORK_OFFLINE code should mark offline',
+  );
+  assert(
+    isRemoteWorkbenchOfflineError(new Error('Failed to fetch')),
+    'networkOffline classification from message should mark offline',
+  );
+  assert(
     !isRemoteWorkbenchOfflineError(new Error('读取终端失败')),
     'unrelated errors should not mark the project offline',
   );

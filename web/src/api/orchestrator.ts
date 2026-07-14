@@ -8,16 +8,25 @@
  *   封装 remote-aware Tauri invoke，并导出纯参数构造 helper 供契约测试覆盖。
  */
 
-import { invoke } from './client';
-import { toOrchestratorRuntimeTransportError } from './orchestratorRuntimeTransportError';
+import {
+  orchestratorEvidenceListDecoder,
+  orchestratorProjectRefreshResultDecoder,
+  orchestratorRemoteOutboxItemDecoder,
+  orchestratorRuntimeSnapshotDecoder,
+  orchestratorTaskDecoder,
+  orchestratorTaskViewDecoder,
+  orchestratorTaskViewListDecoder,
+} from '@/lib/schemas/orchestrator';
 import type {
-  OrchestratorEvidence,
   OrchestratorRemoteOutboxItem,
   OrchestratorRuntimeSnapshot,
   OrchestratorTask,
   OrchestratorTaskView,
   OrchestratorWorkflowState,
 } from '@/lib/types';
+import { ContractDecodeError } from '@/lib/runtimeSchema';
+import { invokeDecoded } from './client';
+import { toOrchestratorRuntimeTransportError } from './orchestratorRuntimeTransportError';
 
 /**
  * Business Logic（为什么需要这个常量）:
@@ -240,12 +249,13 @@ export const orchestratorApi = {
    *   Orchestrator 任务页需要读取某个项目下的本机任务、远端任务和待发送 outbox。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 list_orchestrator_task_views，并通过 helper 归一化 projectId 参数。
+   *   invokeDecoded list_orchestrator_task_views；参数经 helper 归一化 projectId。
    */
   listTaskViews: (projectId?: string | null) =>
-    invoke<OrchestratorTaskView[]>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.listTaskViews,
       buildListOrchestratorTaskViewsInvokeArgs(projectId),
+      orchestratorTaskViewListDecoder,
     ),
 
   /**
@@ -253,12 +263,13 @@ export const orchestratorApi = {
    *   用户提交任务表单后，需要创建本机/远端任务视图，远端离线时可能返回 pendingRemote。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 create_orchestrator_task_view，并保持 request 字段原样交给后端校验。
+   *   invokeDecoded create_orchestrator_task_view；request 字段原样交给后端校验。
    */
   createTaskView: (request: CreateOrchestratorTaskRequest) =>
-    invoke<OrchestratorTaskView>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.createTaskView,
       buildCreateOrchestratorTaskViewInvokeArgs(request),
+      orchestratorTaskViewDecoder,
     ),
 
   /**
@@ -266,12 +277,13 @@ export const orchestratorApi = {
    *   用户确认草稿任务后，需要把本机或远端真实任务切换为排队状态。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 queue_orchestrator_task_view，并通过 helper 归一化 projectId/taskId 参数。
+   *   invokeDecoded queue_orchestrator_task_view → OrchestratorTaskView；参数经 helper 归一。
    */
   queueTaskView: (projectId: string, taskId: string) =>
-    invoke<OrchestratorTaskView>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.queueTaskView,
       buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId),
+      orchestratorTaskViewDecoder,
     ),
 
   /**
@@ -279,12 +291,13 @@ export const orchestratorApi = {
    *   用户点击 Start 时，需要把本机或远端真实任务放入 scheduler 可领取路径。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 start_orchestrator_task_view，并通过 helper 归一化 projectId/taskId 参数。
+   *   invokeDecoded start_orchestrator_task_view → OrchestratorTaskView。
    */
   startTaskView: (projectId: string, taskId: string) =>
-    invoke<OrchestratorTaskView>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.startTaskView,
       buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId),
+      orchestratorTaskViewDecoder,
     ),
 
   /**
@@ -292,12 +305,13 @@ export const orchestratorApi = {
    *   任务详情需要读取当前项目下当前任务的验证输出与交付证据。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 list_orchestrator_task_evidence_for_project，并通过 projectId/taskId helper 归一参数。
+   *   invokeDecoded list_orchestrator_task_evidence_for_project → OrchestratorEvidence[]。
    */
   listEvidence: (projectId: string, taskId: string) =>
-    invoke<OrchestratorEvidence[]>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.listEvidenceForProject,
       buildListOrchestratorTaskEvidenceForProjectInvokeArgs(projectId, taskId),
+      orchestratorEvidenceListDecoder,
     ),
 
   /**
@@ -305,16 +319,17 @@ export const orchestratorApi = {
    *   用户在 Workbench 自动化看板拖拽本机任务时，需要把任务切换到相邻 workflow 泳道。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 move_orchestrator_task_workflow_state，并按后端要求用 `{ request }` 包裹参数。
+   *   invokeDecoded move_orchestrator_task_workflow_state → OrchestratorTaskView。
    */
   moveTaskWorkflowState: (
     projectId: string,
     taskId: string,
     targetState: OrchestratorWorkflowState,
   ) =>
-    invoke<OrchestratorTaskView>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.moveTaskWorkflowState,
       buildMoveOrchestratorTaskWorkflowStateInvokeArgs(projectId, taskId, targetState),
+      orchestratorTaskViewDecoder,
     ),
 
   /**
@@ -333,14 +348,18 @@ export const orchestratorApi = {
    *   调用 get_orchestrator_runtime_snapshot；reject 包装为 OrchestratorRuntimeTransportError(kind=unknown)，
    *   因为后端成功路径已把远端四态收敛为 DTO，真正抛错通常是本机命令/协议层，不能推断 network。
    */
-  getRuntimeSnapshot: async (projectId: string) => {
+  getRuntimeSnapshot: async (projectId: string): Promise<OrchestratorRuntimeSnapshot> => {
     try {
-      return await invoke<OrchestratorRuntimeSnapshot>(
+      return await invokeDecoded(
         ORCHESTRATOR_REMOTE_COMMANDS.getRuntimeSnapshot,
         buildOrchestratorRuntimeSnapshotInvokeArgs(projectId),
+        orchestratorRuntimeSnapshotDecoder,
       );
     } catch (reason) {
-      // 后端成功路径已收敛四态 DTO；invoke 抛错多为本机命令/协议层，不能关键词推断 network。
+      // 契约失败原样抛出；其它 invoke reject 收敛为 unknown transport（不可关键词猜 offline）。
+      if (reason instanceof ContractDecodeError) {
+        throw reason;
+      }
       throw toOrchestratorRuntimeTransportError(reason, 'unknown');
     }
   },
@@ -350,12 +369,13 @@ export const orchestratorApi = {
    *   用户确认 Claude Code 已完成后，需要触发后端验证并推进任务状态。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 complete_orchestrator_agent_run，并返回更新后的任务 DTO。
+   *   invokeDecoded complete_orchestrator_agent_run → OrchestratorTask（local-only）。
    */
   completeAgentRun: (taskId: string) =>
-    invoke<OrchestratorTask>(
+    invokeDecoded(
       'complete_orchestrator_agent_run',
       buildOrchestratorTaskIdInvokeArgs(taskId),
+      orchestratorTaskDecoder,
     ),
 
   /**
@@ -363,12 +383,13 @@ export const orchestratorApi = {
    *   Blocked 任务处理完原因后，需要重新进入队列等待后续调度。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 retry_orchestrator_task_view，并返回更新后的任务视图。
+   *   invokeDecoded retry_orchestrator_task_view → OrchestratorTaskView。
    */
   retryTaskView: (projectId: string, taskId: string) =>
-    invoke<OrchestratorTaskView>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.retryTaskView,
       buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId),
+      orchestratorTaskViewDecoder,
     ),
 
   /**
@@ -376,12 +397,13 @@ export const orchestratorApi = {
    *   人工复核未通过时，用户需要把本机或远端真实任务送回 Rework，并记录返工原因。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 request_orchestrator_task_rework_view，并传递 trim 后的 reason。
+   *   invokeDecoded request_orchestrator_task_rework_view → OrchestratorTaskView。
    */
   requestReworkTaskView: (projectId: string, taskId: string, reason: string) =>
-    invoke<OrchestratorTaskView>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.requestReworkTaskView,
       buildOrchestratorTaskReworkInvokeArgs(projectId, taskId, reason),
+      orchestratorTaskViewDecoder,
     ),
 
   /**
@@ -389,12 +411,13 @@ export const orchestratorApi = {
    *   人工复核通过且 Settings 允许 full-auto delivery 时，用户可以显式触发交付。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 deliver_reviewed_orchestrator_task_view，后端负责 Settings gate 与 delivery pipeline。
+   *   invokeDecoded deliver_reviewed_orchestrator_task_view → OrchestratorTaskView。
    */
   deliverReviewedTaskView: (projectId: string, taskId: string) =>
-    invoke<OrchestratorTaskView>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.deliverReviewedTaskView,
       buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId),
+      orchestratorTaskViewDecoder,
     ),
 
   /**
@@ -402,12 +425,13 @@ export const orchestratorApi = {
    *   用户决定停止任务时，需要把任务置为 Aborted 但保留 worktree/session。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 abort_orchestrator_task_view，并返回更新后的任务视图。
+   *   invokeDecoded abort_orchestrator_task_view → OrchestratorTaskView。
    */
   abortTaskView: (projectId: string, taskId: string) =>
-    invoke<OrchestratorTaskView>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.abortTaskView,
       buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId),
+      orchestratorTaskViewDecoder,
     ),
 
   /**
@@ -415,12 +439,13 @@ export const orchestratorApi = {
    *   用户取消任务时，需要进入 Canceled/Idle 并保留现场与 evidence。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 cancel_orchestrator_task_view，并返回更新后的任务视图。
+   *   invokeDecoded cancel_orchestrator_task_view → OrchestratorTaskView。
    */
   cancelTaskView: (projectId: string, taskId: string) =>
-    invoke<OrchestratorTaskView>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.cancelTaskView,
       buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId),
+      orchestratorTaskViewDecoder,
     ),
 
   /**
@@ -428,12 +453,13 @@ export const orchestratorApi = {
    *   用户需要显式刷新当前项目，触发一次后端 best-effort dispatch/reconcile。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 refresh_orchestrator_project，并返回 projectId/dispatched。
+   *   invokeDecoded refresh_orchestrator_project → OrchestratorProjectRefreshResult。
    */
   refreshProject: (projectId: string) =>
-    invoke<OrchestratorProjectRefreshResult>(
+    invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.refreshProject,
       buildOrchestratorRuntimeSnapshotInvokeArgs(projectId),
+      orchestratorProjectRefreshResultDecoder,
     ),
 
   /**
@@ -441,26 +467,28 @@ export const orchestratorApi = {
    *   桌面 Automation UI 对 failed outbox 点 Retry 时，应在本机把状态回到 pending，不代理远端。
    *
    * Code Logic（这个函数做什么）:
-   *   invoke retry_orchestrator_remote_outbox，返回更新后的 outbox DTO。
+   *   invokeDecoded retry_orchestrator_remote_outbox → OrchestratorRemoteOutboxItem。
    */
   retryRemoteOutbox: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
-    invoke<OrchestratorRemoteOutboxItem>(ORCHESTRATOR_REMOTE_COMMANDS.retryRemoteOutbox, {
-      projectId,
-      outboxId,
-    }),
+    invokeDecoded(
+      ORCHESTRATOR_REMOTE_COMMANDS.retryRemoteOutbox,
+      { projectId, outboxId },
+      orchestratorRemoteOutboxItemDecoder,
+    ),
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   桌面 Automation UI 对 failed outbox 点 Discard 时，应在本机进入 discarded 审计终态。
    *
    * Code Logic（这个函数做什么）:
-   *   invoke discard_orchestrator_remote_outbox，返回更新后的 outbox DTO。
+   *   invokeDecoded discard_orchestrator_remote_outbox → OrchestratorRemoteOutboxItem。
    */
   discardRemoteOutbox: (projectId: string, outboxId: string): Promise<OrchestratorRemoteOutboxItem> =>
-    invoke<OrchestratorRemoteOutboxItem>(ORCHESTRATOR_REMOTE_COMMANDS.discardRemoteOutbox, {
-      projectId,
-      outboxId,
-    }),
+    invokeDecoded(
+      ORCHESTRATOR_REMOTE_COMMANDS.discardRemoteOutbox,
+      { projectId, outboxId },
+      orchestratorRemoteOutboxItemDecoder,
+    ),
 
 
   /**

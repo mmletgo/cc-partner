@@ -139,8 +139,19 @@ export { workbenchTestState };
  * 注意：所有 factory 闭包引用 hoisted `workbenchTestState`，由测试运行前完成初始化。
  * ------------------------------------------------------------------------- */
 
-vi.mock('@/api/client', () => ({
-  invoke: async (cmd: string, args?: Record<string, unknown>): Promise<unknown> => {
+/**
+ * Business Logic（为什么需要这个 mock）:
+ *   characterization 测试接管全部 IPC；production 已大量使用 invokeDecoded，
+ *   mock 必须同时导出 invoke 与 invokeDecoded，否则 worktree/session/file 列表永远失败。
+ *
+ * Code Logic（这个 mock 做什么）:
+ *   invoke 走共享 handler + 调用日志；invokeDecoded 先 invoke 再 decoder.decode；
+ *   ContractDecodeError 原样抛出；api.invoke / api.invokeDecoded 同步暴露。
+ */
+vi.mock('@/api/client', async () => {
+  const { ContractDecodeError } = await import('@/lib/runtimeSchema');
+
+  async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
     const call: FakeInvokeCall = { cmd, args: args ?? {} };
     workbenchTestState.invokeCalls.push(call);
     const sameCmdCount = workbenchTestState.invokeCalls.filter((c) => c.cmd === cmd).length;
@@ -150,21 +161,33 @@ vi.mock('@/api/client', () => ({
     } catch (error) {
       throw error instanceof Error ? error : new Error(String(error));
     }
-  },
-  api: {
-    invoke: async (cmd: string, args?: Record<string, unknown>): Promise<unknown> => {
-      const call: FakeInvokeCall = { cmd, args: args ?? {} };
-      workbenchTestState.invokeCalls.push(call);
-      const sameCmdCount = workbenchTestState.invokeCalls.filter((c) => c.cmd === cmd).length;
-      const result = workbenchTestState.invokeHandler(call, sameCmdCount - 1);
-      try {
-        return await result;
-      } catch (error) {
-        throw error instanceof Error ? error : new Error(String(error));
+  }
+
+  async function mockInvokeDecoded<T>(
+    command: string,
+    args: Record<string, unknown> | undefined,
+    decoder: { decode: (value: unknown, path?: string) => T },
+  ): Promise<T> {
+    const raw = await mockInvoke(command, args);
+    try {
+      return decoder.decode(raw, '$');
+    } catch (reason) {
+      if (reason instanceof ContractDecodeError) {
+        throw reason;
       }
+      throw reason;
+    }
+  }
+
+  return {
+    invoke: mockInvoke,
+    invokeDecoded: mockInvokeDecoded,
+    api: {
+      invoke: mockInvoke,
+      invokeDecoded: mockInvokeDecoded,
     },
-  },
-}));
+  };
+});
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: async (
@@ -274,118 +297,249 @@ vi.mock('@/pages/Orchestrator', () => ({
   Orchestrator: () => <div data-testid="orchestrator" />,
 }));
 
+/**
+ * Business Logic（为什么需要这些 mock）:
+ *   Workbench.tsx 从 `@/components/domain/<Name>` 深路径导入重型子组件，
+ *   必须在桶路径与深路径同时 mock，否则真实 CodeMirror/SessionSearch 会进入 jsdom。
+ *
+ * Code Logic（这些 mock 做什么）:
+ *   factory 内联 stub（避免顶层组件函数触发 react-refresh only-export-components）；
+ *   用 data-testid 暴露状态并提供回调触发按钮。
+ */
 vi.mock('@/components/domain', async () => {
   const actual = await vi.importActual<Record<string, unknown>>('@/components/domain');
+  const WorkbenchFileWorkspace = (props: Record<string, unknown>) => (
+    <div
+      data-testid="workbench-file-workspace"
+      data-active-tab-id={String(props.activeTabId ?? '')}
+      data-saving={props.saving ? 'true' : undefined}
+      data-write-disabled={props.writeDisabled ? 'true' : undefined}
+      data-tab-count={Array.isArray(props.tabs) ? props.tabs.length : 0}
+    >
+      <button
+        type="button"
+        data-testid="workbench-file-workspace-return-terminal"
+        onClick={() => (props.onReturnToTerminal as (() => void) | undefined)?.()}
+      >
+        return
+      </button>
+      <button
+        type="button"
+        data-testid="workbench-file-workspace-save"
+        onClick={() =>
+          (props.onSave as ((id: string) => void) | undefined)?.(String(props.activeTabId ?? ''))
+        }
+      >
+        save
+      </button>
+      <button
+        type="button"
+        data-testid="workbench-file-workspace-format"
+        onClick={() =>
+          (props.onFormat as ((id: string) => void) | undefined)?.(String(props.activeTabId ?? ''))
+        }
+      >
+        format
+      </button>
+      <button
+        type="button"
+        data-testid="workbench-file-workspace-close"
+        onClick={() =>
+          (props.onClose as ((id: string) => void) | undefined)?.(String(props.activeTabId ?? ''))
+        }
+      >
+        close
+      </button>
+      <button
+        type="button"
+        data-testid="workbench-file-workspace-content-change"
+        data-file-content-value={String(
+          (Array.isArray(props.tabs)
+            ? (props.tabs as Array<{ id?: string; content?: string }>).find(
+                (tab) => tab.id === props.activeTabId,
+              )?.content
+            : undefined) ?? '',
+        )}
+        onClick={() =>
+          (props.onContentChange as ((id: string, value: string) => void) | undefined)?.(
+            String(props.activeTabId ?? ''),
+            'edited-content',
+          )
+        }
+      >
+        edit
+      </button>
+    </div>
+  );
+  const WorkbenchBrowserWorkspace = (props: Record<string, unknown>) => (
+    <div
+      data-testid="workbench-browser-workspace"
+      data-surface={String(props.surface ?? '')}
+      data-project-id={String((props.project as { id?: string } | null)?.id ?? '')}
+      data-worktree-id={String((props.worktree as { id?: string } | null)?.id ?? '')}
+    >
+      <button
+        type="button"
+        data-testid="workbench-browser-workspace-return"
+        onClick={() => (props.onReturnToTerminal as (() => void) | undefined)?.()}
+      >
+        return
+      </button>
+    </div>
+  );
+  const WorkbenchSessionSearch = (props: {
+    open?: boolean;
+    offline?: boolean;
+    projectId?: string | null;
+    worktreeId?: string | null;
+    onResumed?: (sessionId: string) => void;
+    onClose?: () => void;
+  }) => (
+    <div
+      data-testid="workbench-session-search"
+      data-open={props.open ? 'true' : undefined}
+      data-offline={props.offline ? 'true' : undefined}
+      data-project-id={String(props.projectId ?? '')}
+      data-worktree-id={String(props.worktreeId ?? '')}
+    >
+      <button
+        type="button"
+        data-testid="workbench-session-search-resume"
+        onClick={() => props.onResumed?.('resumed-session')}
+      >
+        resume
+      </button>
+      <button type="button" data-testid="workbench-session-search-close" onClick={() => props.onClose?.()}>
+        close
+      </button>
+    </div>
+  );
+  const WorkbenchDependencyCard = () => <div data-testid="workbench-dependency-card">dependency</div>;
   return {
     ...actual,
-    WorkbenchFileWorkspace: (props: Record<string, unknown>) => (
-      <div
-        data-testid="workbench-file-workspace"
-        data-active-tab-id={String(props.activeTabId ?? '')}
-        data-saving={props.saving ? 'true' : undefined}
-        data-write-disabled={props.writeDisabled ? 'true' : undefined}
-        data-tab-count={Array.isArray(props.tabs) ? props.tabs.length : 0}
-      >
-        <button
-          type="button"
-          data-testid="workbench-file-workspace-return-terminal"
-          onClick={() => (props.onReturnToTerminal as (() => void) | undefined)?.()}
-        >
-          return
-        </button>
-        {/* 暴露 onSave/onFormat/onContentChange/onClose/onActivate 触发器，便于测试驱动页面回调 */}
-        <button
-          type="button"
-          data-testid="workbench-file-workspace-save"
-          onClick={() => (props.onSave as ((id: string) => void) | undefined)?.(String(props.activeTabId ?? ''))}
-        >
-          save
-        </button>
-        <button
-          type="button"
-          data-testid="workbench-file-workspace-format"
-          onClick={() => (props.onFormat as ((id: string) => void) | undefined)?.(String(props.activeTabId ?? ''))}
-        >
-          format
-        </button>
-        <button
-          type="button"
-          data-testid="workbench-file-workspace-close"
-          onClick={() => (props.onClose as ((id: string) => void) | undefined)?.(String(props.activeTabId ?? ''))}
-        >
-          close
-        </button>
-        <button
-          type="button"
-          data-testid="workbench-file-workspace-content-change"
-          data-file-content-value={String(
-            (Array.isArray(props.tabs)
-              ? (props.tabs as Array<{ id?: string; content?: string }>).find(
-                  (tab) => tab.id === props.activeTabId,
-                )?.content
-              : undefined) ?? '',
-          )}
-          onClick={() =>
-            (props.onContentChange as ((id: string, value: string) => void) | undefined)?.(
-              String(props.activeTabId ?? ''),
-              'edited-content',
-            )
-          }
-        >
-          edit
-        </button>
-      </div>
-    ),
-    WorkbenchBrowserWorkspace: (props: Record<string, unknown>) => (
-      <div
-        data-testid="workbench-browser-workspace"
-        data-surface={String(props.surface ?? '')}
-        data-project-id={String((props.project as { id?: string } | null)?.id ?? '')}
-        data-worktree-id={String((props.worktree as { id?: string } | null)?.id ?? '')}
-      >
-        <button
-          type="button"
-          data-testid="workbench-browser-workspace-return"
-          onClick={() => (props.onReturnToTerminal as (() => void) | undefined)?.()}
-        >
-          return
-        </button>
-      </div>
-    ),
-    WorkbenchSessionSearch: (props: {
-      open?: boolean;
-      offline?: boolean;
-      projectId?: string | null;
-      worktreeId?: string | null;
-      onResumed?: (sessionId: string) => void;
-      onClose?: () => void;
-    }) => (
-      <div
-        data-testid="workbench-session-search"
-        data-open={props.open ? 'true' : undefined}
-        data-offline={props.offline ? 'true' : undefined}
-        data-project-id={String(props.projectId ?? '')}
-        data-worktree-id={String(props.worktreeId ?? '')}
-      >
-        <button
-          type="button"
-          data-testid="workbench-session-search-resume"
-          onClick={() => props.onResumed?.('resumed-session')}
-        >
-          resume
-        </button>
-        <button
-          type="button"
-          data-testid="workbench-session-search-close"
-          onClick={() => props.onClose?.()}
-        >
-          close
-        </button>
-      </div>
-    ),
-    WorkbenchDependencyCard: () => <div data-testid="workbench-dependency-card">dependency</div>,
+    WorkbenchFileWorkspace,
+    WorkbenchBrowserWorkspace,
+    WorkbenchSessionSearch,
+    WorkbenchDependencyCard,
   };
 });
+
+// 深路径 stub：Workbench.tsx 不经桶路径 import；此处返回与桶 mock 等价的轻量桩。
+vi.mock('@/components/domain/WorkbenchFileWorkspace', () => ({
+  WorkbenchFileWorkspace: (props: Record<string, unknown>) => (
+    <div
+      data-testid="workbench-file-workspace"
+      data-active-tab-id={String(props.activeTabId ?? '')}
+      data-saving={props.saving ? 'true' : undefined}
+      data-write-disabled={props.writeDisabled ? 'true' : undefined}
+      data-tab-count={Array.isArray(props.tabs) ? props.tabs.length : 0}
+    >
+      <button
+        type="button"
+        data-testid="workbench-file-workspace-return-terminal"
+        onClick={() => (props.onReturnToTerminal as (() => void) | undefined)?.()}
+      >
+        return
+      </button>
+      <button
+        type="button"
+        data-testid="workbench-file-workspace-save"
+        onClick={() =>
+          (props.onSave as ((id: string) => void) | undefined)?.(String(props.activeTabId ?? ''))
+        }
+      >
+        save
+      </button>
+      <button
+        type="button"
+        data-testid="workbench-file-workspace-format"
+        onClick={() =>
+          (props.onFormat as ((id: string) => void) | undefined)?.(String(props.activeTabId ?? ''))
+        }
+      >
+        format
+      </button>
+      <button
+        type="button"
+        data-testid="workbench-file-workspace-close"
+        onClick={() =>
+          (props.onClose as ((id: string) => void) | undefined)?.(String(props.activeTabId ?? ''))
+        }
+      >
+        close
+      </button>
+      <button
+        type="button"
+        data-testid="workbench-file-workspace-content-change"
+        data-file-content-value={String(
+          (Array.isArray(props.tabs)
+            ? (props.tabs as Array<{ id?: string; content?: string }>).find(
+                (tab) => tab.id === props.activeTabId,
+              )?.content
+            : undefined) ?? '',
+        )}
+        onClick={() =>
+          (props.onContentChange as ((id: string, value: string) => void) | undefined)?.(
+            String(props.activeTabId ?? ''),
+            'edited-content',
+          )
+        }
+      >
+        edit
+      </button>
+    </div>
+  ),
+}));
+vi.mock('@/components/domain/WorkbenchBrowserWorkspace', () => ({
+  WorkbenchBrowserWorkspace: (props: Record<string, unknown>) => (
+    <div
+      data-testid="workbench-browser-workspace"
+      data-surface={String(props.surface ?? '')}
+      data-project-id={String((props.project as { id?: string } | null)?.id ?? '')}
+      data-worktree-id={String((props.worktree as { id?: string } | null)?.id ?? '')}
+    >
+      <button
+        type="button"
+        data-testid="workbench-browser-workspace-return"
+        onClick={() => (props.onReturnToTerminal as (() => void) | undefined)?.()}
+      >
+        return
+      </button>
+    </div>
+  ),
+}));
+vi.mock('@/components/domain/WorkbenchSessionSearch', () => ({
+  WorkbenchSessionSearch: (props: {
+    open?: boolean;
+    offline?: boolean;
+    projectId?: string | null;
+    worktreeId?: string | null;
+    onResumed?: (sessionId: string) => void;
+    onClose?: () => void;
+  }) => (
+    <div
+      data-testid="workbench-session-search"
+      data-open={props.open ? 'true' : undefined}
+      data-offline={props.offline ? 'true' : undefined}
+      data-project-id={String(props.projectId ?? '')}
+      data-worktree-id={String(props.worktreeId ?? '')}
+    >
+      <button
+        type="button"
+        data-testid="workbench-session-search-resume"
+        onClick={() => props.onResumed?.('resumed-session')}
+      >
+        resume
+      </button>
+      <button type="button" data-testid="workbench-session-search-close" onClick={() => props.onClose?.()}>
+        close
+      </button>
+    </div>
+  ),
+}));
+vi.mock('@/components/domain/WorkbenchDependencyCard', () => ({
+  WorkbenchDependencyCard: () => <div data-testid="workbench-dependency-card">dependency</div>,
+}));
 
 /* ---------------------------------------------------------------------------
  * Deferred helpers
@@ -463,6 +617,48 @@ export function buildDefaultInvokeHandler(data: {
             modifiedAt: null,
           }
         );
+      }
+      case 'open_workbench_file': {
+        // open_workbench_file 现经 invokeDecoded；返回合法 WorkbenchOpenFile 形状，避免 ContractDecodeError。
+        const path = (call.args.path as string) ?? 'README.md';
+        const node = rootNodes.find((n) => n.path === path);
+        const metadata = node
+          ? {
+              name: node.name,
+              path: node.path,
+              kind: node.kind,
+              size: node.size,
+              modifiedAt: node.modifiedAt,
+            }
+          : {
+              name: path.split('/').pop() ?? path,
+              path,
+              kind: 'file' as const,
+              size: 12,
+              modifiedAt: '2026-07-01T00:00:00.000Z',
+            };
+        return {
+          metadata,
+          detectedType: 'markdown',
+          capabilities: {
+            canPreview: true,
+            canEdit: true,
+            canFormat: false,
+            mustValidateBeforeSave: false,
+            defaultMode: 'edit',
+            availableModes: ['edit', 'preview'],
+          },
+          text: {
+            content: '# hello\n',
+            baseHash: 'hash-readme',
+            baseModifiedAt: metadata.modifiedAt,
+          },
+          image: null,
+          csv: null,
+          sqlite: null,
+          truncated: false,
+          notice: null,
+        };
       }
       case 'touch_workbench_project':
         return projects.find((p) => p.id === call.args.projectId) ?? null;

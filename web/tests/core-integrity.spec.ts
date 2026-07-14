@@ -572,7 +572,10 @@ test.describe('Core product integrity', () => {
     await installPermissionMocks(page);
     await page.goto('/welcome');
 
-    await expect(page.getByRole('dialog')).toBeVisible({ timeout: 10_000 });
+    // Welcome 是独立 onboarding 路由（main），不是 modal dialog。
+    await expect(page.getByRole('heading', { name: /欢迎使用/ })).toBeVisible({
+      timeout: 10_000,
+    });
 
     // 首轮失败：结束 loading，展示错误 + 重新检查
     await expect(page.getByText(/检查权限失败：permission check failed/)).toBeVisible({

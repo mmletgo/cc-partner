@@ -1683,8 +1683,9 @@ mod tests {
                 registry.create_local_for_test("project-a", None, "http://127.0.0.1:5173/");
             let headers = null_origin_headers();
 
-            let session = accept_preview_request_with_origin(&registry, &preview.preview_id, &headers)
-                .expect("live preview should accept Origin:null");
+            let session =
+                accept_preview_request_with_origin(&registry, &preview.preview_id, &headers)
+                    .expect("live preview should accept Origin:null");
             assert_eq!(session.preview_id, preview.preview_id);
 
             // WebSocket 与 HTTP 共用同一会话后 Origin 判定。
@@ -1698,9 +1699,12 @@ mod tests {
             let preview =
                 registry.create_local_for_test("project-a", None, "http://127.0.0.1:5173/");
 
-            let session =
-                accept_preview_request_with_origin(&registry, &preview.preview_id, &same_origin_headers())
-                    .expect("live preview should accept same-origin non-null Origin");
+            let session = accept_preview_request_with_origin(
+                &registry,
+                &preview.preview_id,
+                &same_origin_headers(),
+            )
+            .expect("live preview should accept same-origin non-null Origin");
             assert_eq!(session.preview_id, preview.preview_id);
 
             let mut cross = HeaderMap::new();

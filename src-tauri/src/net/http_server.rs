@@ -1536,10 +1536,7 @@ mod tests {
             "/api/cc-history/sync/items",
             "/api/cc-history/sync/push-batch",
         ] {
-                        assert!(
-                src.contains(path),
-                "http_server must mount {path}"
-            );
+            assert!(src.contains(path), "http_server must mount {path}");
         }
 
         // axum 层：同 path 挂载后 oneshot 不得 404

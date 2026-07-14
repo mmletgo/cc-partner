@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "generatedAt": "2026-07-14T08:49:22.178Z",
+  "limits": {
+    "ts": {
+      "soft": 1000,
+      "hard": 1500
+    },
+    "tsx": {
+      "soft": 1000,
+      "hard": 1500
+    },
+    "rs": {
+      "soft": 2500,
+      "hard": 5000
+    }
+  },
+  "files": {
+    "src-tauri/src/backend/logging.rs": {
+      "lines": 2502
+    },
+    "src-tauri/src/transfer/receiver.rs": {
+      "lines": 6107,
+      "exception": {
+        "owner": "transfer-backend",
+        "reason": "Transfer receiver no-growth only; security/platform coupling requires dedicated split spec before refactor",
+        "expiresAt": "2026-10-12"
+      }
+    },
+    "src-tauri/src/workbench/dependencies.rs": {
+      "lines": 3457
+    },
+    "src-tauri/src/workbench/sessions.rs": {
+      "lines": 2947
+    },
+    "web/src/mobile/controllers/useMobileAutomationController.ts": {
+      "lines": 1230
+    },
+    "web/src/mobile/MobileWorkbench.tsx": {
+      "lines": 1053
+    },
+    "web/src/pages/Orchestrator/controllers/useOrchestratorController.ts": {
+      "lines": 1363
+    },
+    "web/src/pages/Settings/useSettingsController.ts": {
+      "lines": 1604,
+      "exception": {
+        "owner": "frontend-settings",
+        "reason": "Settings controller residual after panel split; further domain controllers deferred past S4",
+        "expiresAt": "2026-10-12"
+      }
+    },
+    "web/src/pages/Workbench/controllers/useWorkbenchFileController.ts": {
+      "lines": 1442
+    },
+    "web/src/pages/Workbench/Workbench.tsx": {
+      "lines": 1194
+    }
+  }
+}

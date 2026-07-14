@@ -234,6 +234,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 常规设置包含设备名、文件接收目录和截图快捷键
 - 截图快捷键通过只读录制控件修改，保存时不应覆盖未修改的设备名或接收目录
 - Settings 资源按组隔离加载：单组失败不得整页失败；失败组展示错误与重试，已成功组继续可用；恢复默认在 defaults 不可用时禁用并提示
+- 常规设置保存失败必须保留脏表单与 isDirty，展示保存错误与重试；不得把 save reject 提升为整页 loadError 卸掉草稿
 - 依赖环境页签展示 macOS 权限管理、Workbench tmux dependency manager 状态和局域网互联依赖；Workbench 依赖支持检测、查看后端/版本/路径、查看安装命令预览、触发安装、取消安装和重新检测；局域网互联依赖展示访问项目所需的实际 P2P HTTP TCP 端口、mDNS UDP 5353、局域网 IP、当前系统平台、端口是否已开放和对应打开方法。应用只读检测系统防火墙状态，不自动修改防火墙；无法读取到明确放行规则时按未开放显示；移动端 Workbench 的局域网访问链接与二维码由全局侧栏左下角手机按钮弹层展示
 - macOS 权限引导与设置页共用 `usePermissions`：首轮检查失败结束 loading 并显示错误 +「重新检查」；刷新失败保留 stale 状态；逐项 request，notification 不阻塞 onboarding
 - 常规 / 同步 / AI 页签的恢复默认按钮始终可点击；常规恢复为后端按当前设备环境生成的默认设备名、默认接收目录和平台默认截图快捷键，同步和 AI 分别恢复为后端定义的云端同步默认配置与 Claude CLI/AI 默认配置
@@ -317,6 +318,9 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 文件传输支持断点续传
 - 数据库使用 SQLite，数据持久化可靠
 - 设备离线后重新上线，同步应能恢复
+- 关键前端 IPC/HTTP 成功体在写入 UI 状态前经 runtime schema **fail-closed** 解码；畸形/未知必填失败不得用 payload 原文刷状态，错误只暴露 contract/path/primitive kind（及 request id），不序列化业务 payload；legacy 默认值必须在对应 schema 字段显式声明
+- Prompt / 速记本 / Settings 等写路径：乐观更新在 API reject 时必须回滚或保留 dirty 草稿并提供重试；关闭 GUI 前 flush 全部 pending write，flush 失败中止关闭
+- 质量证据分层（L0 合同 / L1 浏览器 mock / L2 后端与 smoke / L3 真机）以 `docs/development/quality-matrix.json` 登记；未执行的真机项保持 `NOT VERIFIED`，不得用 L1 mock 宣称 GUI/系统权限/双机 LAN 已认证
 
 ## 4. 技术架构
 

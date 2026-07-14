@@ -6,17 +6,22 @@
  *   避免把 send 误当成完整 TransferTask 或把 cancel 当成 void。
  *
  * Code Logic（这个模块做什么）:
- *   list → list_transfers → TransferTask[]；
+ *   list → list_transfers → TransferTask[]（runtime decode）；
  *   send → send_transfer → SendTransferResult；
  *   cancel → cancel_transfer → CancelTransferResult。
  */
 
-import { invoke } from './client';
+import {
+  cancelTransferResultDecoder,
+  sendTransferResultDecoder,
+  transferTasksDecoder,
+} from '@/lib/schemas/transfer';
 import type {
   CancelTransferResult,
   SendTransferResult,
   TransferTask,
 } from '@/lib/types';
+import { invokeDecoded } from './client';
 
 export const transferApi = {
   /**
@@ -24,28 +29,29 @@ export const transferApi = {
    *   传输页需要展示活跃任务与历史任务列表。
    *
    * Code Logic（这个函数做什么）:
-   *   invoke list_transfers，返回 TransferTask[]。
+   *   invokeDecoded list_transfers，返回 TransferTask[]。
    */
-  list: () => invoke<TransferTask[]>('list_transfers'),
+  list: (): Promise<TransferTask[]> =>
+    invokeDecoded('list_transfers', undefined, transferTasksDecoder),
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户选定目标设备与文件路径后发起发送；后端 spawn 异步任务并立即受理。
    *
    * Code Logic（这个函数做什么）:
-   *   invoke send_transfer({ deviceId, filePath })，返回 SendTransferResult。
+   *   invokeDecoded send_transfer({ deviceId, filePath })，返回 SendTransferResult。
    *   filePath 作为不透明 UTF-8 透传，不做分隔符改写或 URI decode。
    */
-  send: (deviceId: string, filePath: string) =>
-    invoke<SendTransferResult>('send_transfer', { deviceId, filePath }),
+  send: (deviceId: string, filePath: string): Promise<SendTransferResult> =>
+    invokeDecoded('send_transfer', { deviceId, filePath }, sendTransferResultDecoder),
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户取消进行中的传输任务。
    *
    * Code Logic（这个函数做什么）:
-   *   invoke cancel_transfer({ taskId })，返回 CancelTransferResult。
+   *   invokeDecoded cancel_transfer({ taskId })，返回 CancelTransferResult。
    */
-  cancel: (taskId: string) =>
-    invoke<CancelTransferResult>('cancel_transfer', { taskId }),
+  cancel: (taskId: string): Promise<CancelTransferResult> =>
+    invokeDecoded('cancel_transfer', { taskId }, cancelTransferResultDecoder),
 };

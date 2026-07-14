@@ -76,15 +76,23 @@ jobs:
         run: cd web && npm run lint
 
       - name: Frontend CSS token contract
-        run: cd web && npm run check:css-tokens
+        run: cd web && npm run check:tokens
 
       - name: Frontend i18n contract
         run: cd web && npm run check:i18n
 
+      - name: Module boundary ratchet
+        run: node scripts/check-module-boundaries.mjs
+
+      - name: Quality matrix traceability (self-test + matrix)
+        run: |
+          node scripts/check-quality-traceability.mjs --self-test
+          node scripts/check-quality-traceability.mjs
+
       - name: Frontend build (tsc 类型检查 + vite build)
         run: cd web && npm run build
 
-      - name: Frontend bundle contract (gzip budgets + mobile forbidden deps)
+      - name: Frontend bundle contract (initial/lazy/total/sourcemap budgets + mobile forbidden deps)
         run: cd web && npm run check:bundle
 
       - name: Rust format check

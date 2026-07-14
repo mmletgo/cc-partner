@@ -219,7 +219,6 @@ pub async fn lan_socket_gate(request: Request<Body>, next: Next) -> Response {
     }
 }
 
-
 /// 浏览器请求门禁参数（实际端口 + 受控 mDNS hostname）。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -1364,13 +1363,8 @@ mod tests {
                 .layer(axum::middleware::from_fn(
                     crate::net::request_context::request_id_middleware,
                 ));
-            let request = browser_request(
-                Method::GET,
-                "/api/health",
-                "evil.example:62116",
-                None,
-                None,
-            );
+            let request =
+                browser_request(Method::GET, "/api/health", "evil.example:62116", None, None);
             let response = router.oneshot(request).await.expect("router");
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
             assert!(!reached.load(AtomicOrdering::SeqCst));

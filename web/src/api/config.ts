@@ -11,13 +11,13 @@
  *   恢复默认通过 get_default_config 读取后端环境默认值，避免前端硬编码主机名/用户目录。
  */
 
-import { invoke } from './client';
+import { invoke, invokeDecoded } from './client';
+import { appConfigDecoder, permissionsStatusDecoder } from '@/lib/schemas/config';
 import type {
   AppConfig,
   VersionInfo,
   UpdateCheckResult,
   UpdateDownloadStatus,
-  PermissionsStatus,
   PermissionType,
   PermissionRequestResult,
   CloudSyncConfig,
@@ -45,14 +45,33 @@ export interface CloudSyncConfigUpdate {
 }
 
 export const configApi = {
-  /** 获取当前应用配置 */
-  get: () => invoke<AppConfig>('get_config'),
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   设置页核心资源需要当前配置。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded get_config → AppConfig。
+   */
+  get: () => invokeDecoded('get_config', undefined, appConfigDecoder),
 
-  /** 获取应用偏好默认值（设备名/接收目录/截图快捷键/Prompt 优化偏好） */
-  getDefaults: () => invoke<AppConfig>('get_default_config'),
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   「恢复默认」需要后端环境默认值。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded get_default_config → AppConfig。
+   */
+  getDefaults: () => invokeDecoded('get_default_config', undefined, appConfigDecoder),
 
-  /** 更新应用配置（基础偏好与 Workbench Prompt 优化偏好可写） */
-  update: (data: Partial<AppConfig>) => invoke<AppConfig>('update_config', data),
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   保存基础偏好与 Prompt 优化偏好。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded update_config → AppConfig。
+   */
+  update: (data: Partial<AppConfig>) =>
+    invokeDecoded('update_config', data as Record<string, unknown>, appConfigDecoder),
 
   /** 打开原生目录选择对话框，返回选中的路径 */
   chooseDir: async (): Promise<{ path: string | null }> => {
@@ -85,8 +104,15 @@ export const configApi = {
    */
   installUpdate: () => invoke<{ ok: boolean; error?: string }>('install_update'),
 
-  /** 检查 macOS 权限状态（屏幕录制、输入监控）（M7 实现） */
-  permissions: () => invoke<PermissionsStatus>('check_permissions'),
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Welcome/Settings 权限流需要三项 TCC 状态；notification 由 decoder 显式 default。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded check_permissions → PermissionsStatus。
+   */
+  permissions: () =>
+    invokeDecoded('check_permissions', undefined, permissionsStatusDecoder),
 
   /**
    * 触发权限请求（M7 实现）。

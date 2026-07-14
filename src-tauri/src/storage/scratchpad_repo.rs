@@ -290,10 +290,56 @@ impl ScratchpadRepo {
     ///
     /// Business Logic: 同步合并后需要批量落库胜出版本；每页以 id 为主键。
     /// Code Logic: 逐条 INSERT OR REPLACE，vector_clock 序列化为紧凑 JSON，deleted bool 转 0/1。
+    ///     生产路径保持无事务循环语义（与历史 bulk_upsert 一致），不因测试 seam 改变。
     pub async fn bulk_upsert(&self, rows: &[ScratchpadRow]) -> Result<(), AppError> {
         for row in rows {
             self.upsert(row).await?;
         }
+        Ok(())
+    }
+
+    /// 事务性 bulk_upsert，可选注入失败点，供 quality_faults L2 验证 rollback。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     生产 `bulk_upsert` 是无事务循环，失败可能 partial；L2 需要证明「若走事务边界，
+    ///     中途失败可整批回滚」。本 seam 仅 debug/test-only（`cfg(test)` 或 `debug_assertions`），
+    ///     release 剥离；不改变生产 `bulk_upsert` 成功路径语义。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     begin 事务 → 逐行：命中 `inject_fail_at` 则返回 Err（不 commit，tx drop 回滚）；
+    ///     否则同一 SQL 的 INSERT OR REPLACE；全部成功后 commit。
+    #[cfg(any(test, debug_assertions))]
+    pub async fn bulk_upsert_inject_fail_at(
+        &self,
+        rows: &[ScratchpadRow],
+        inject_fail_at: Option<usize>,
+    ) -> Result<(), AppError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.db.begin().await?;
+        for (idx, row) in rows.iter().enumerate() {
+            if inject_fail_at == Some(idx) {
+                return Err(AppError::generic("injected scratchpad bulk_upsert failure"));
+            }
+            let vc_text = serde_json::to_string(&row.vector_clock)?;
+            sqlx::query(
+                "INSERT OR REPLACE INTO scratchpad \
+                 (id, title, content, created_at, updated_at, device_id, vector_clock, deleted) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&row.id)
+            .bind(&row.title)
+            .bind(&row.content)
+            .bind(&row.created_at)
+            .bind(&row.updated_at)
+            .bind(&row.device_id)
+            .bind(vc_text)
+            .bind(row.deleted as i64)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 

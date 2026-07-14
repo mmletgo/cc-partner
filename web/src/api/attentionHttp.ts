@@ -11,6 +11,8 @@
  */
 
 import type { AttentionSnapshot } from '@/lib/types';
+import { attentionSnapshotDecoder } from '@/lib/schemas/attention';
+import { protocolHealthInfoDecoder } from '@/lib/schemas/protocol';
 import { getJson } from './workbenchHttp';
 
 /** P2P capability token：与后端 CAPABILITY_ATTENTION_V1 一致。 */
@@ -110,6 +112,7 @@ export async function assertAttentionCapability(
   fetchHealth: () => Promise<AttentionHealthProtocolInfo> = () =>
     getJson<AttentionHealthProtocolInfo>(ATTENTION_HEALTH_PATH, {
       timeoutMs: ATTENTION_HTTP_TIMEOUT_MS,
+      decoder: protocolHealthInfoDecoder,
     }),
 ): Promise<void> {
   let health: AttentionHealthProtocolInfo;
@@ -147,6 +150,7 @@ export async function listAttentionSnapshotHttp(
     (() =>
       getJson<AttentionSnapshot>(ATTENTION_MOBILE_HTTP_PATH, {
         timeoutMs: ATTENTION_HTTP_TIMEOUT_MS,
+        decoder: attentionSnapshotDecoder,
       }));
   try {
     return await fetchSnapshot();
