@@ -52,7 +52,7 @@ describe('workbenchAutomationView', () => {
   const orchestratorSource = readFileSync(new URL('../Orchestrator/Orchestrator.tsx', import.meta.url), 'utf8');
   const orchestratorStyles = readFileSync(new URL('../Orchestrator/Orchestrator.module.css', import.meta.url), 'utf8');
   const orchestratorLibSource = readFileSync(new URL('../../lib/orchestrator.ts', import.meta.url), 'utf8');
-  const typesSource = readFileSync(new URL('../../lib/types.ts', import.meta.url), 'utf8');
+  const typesSource = readFileSync(new URL('../../lib/types/orchestrator.ts', import.meta.url), 'utf8');
   const appShellSource = readFileSync(
     new URL('../../components/layout/AppShell/AppShell.tsx', import.meta.url),
     'utf8',

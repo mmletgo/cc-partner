@@ -471,7 +471,7 @@ git tag v<版本号> && git push origin v<版本号>  # 触发 release-tauri.yml
 
 1. **Rust**：`src-tauri/src/commands/<module>.rs` 加 `#[tauri::command]`，`lib.rs` `invoke_handler!` 注册；P2P 则 `net/routes/` 加路由并按 `src-tauri/CLAUDE.md` 的 7 步清单更新 `docs/p2p-protocol.md` + 能力 token
 2. **前端**：`web/src/api/<module>.ts` 加 `invoke` 或 mobile HTTP 封装
-3. **类型**：Rust DTO `#[serde(rename_all="camelCase")]`（P2P 部分路由仍 snake_case，见后端约定）对齐 `web/src/lib/types.ts`
+3. **类型**：Rust DTO `#[serde(rename_all="camelCase")]`（P2P 部分路由仍 snake_case，见后端约定）对齐 `web/src/lib/types/`（兼容 barrel `web/src/lib/types.ts`）
 
 ### 8.4 事件订阅（Tauri emit/listen）
 

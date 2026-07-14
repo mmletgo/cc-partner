@@ -92,7 +92,7 @@ describe('orchestrator', () => {
     );
 
     const orchestratorApiSource = readFileSync(new URL('./orchestrator.ts', import.meta.url), 'utf8');
-    const typesSource = readFileSync(new URL('../lib/types.ts', import.meta.url), 'utf8');
+    const typesSource = readFileSync(new URL('../lib/types/orchestrator.ts', import.meta.url), 'utf8');
 
     assert(
       !orchestratorApiSource.includes('buildGetOrchestratorConfigForProjectInvokeArgs'),
