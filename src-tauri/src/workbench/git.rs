@@ -394,6 +394,145 @@ pub fn head_hash(path: &Path) -> Result<Option<String>, AppError> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     mutation ledger 的 commit intent 需要 staged tree hash（不是 message），用于 unknown 后精确对账。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 `git write-tree`，返回当前 index 的 tree object hash。
+pub fn write_tree_hash(path: &Path) -> Result<String, AppError> {
+    let output = run_git(path, &["write-tree"])?;
+    let hash = output.trim().to_string();
+    if hash.is_empty() {
+        return Err(AppError::generic("git write-tree 返回空 hash".to_string()));
+    }
+    Ok(hash)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     commit confirm 需要 newHead.parent 与 beforeHead 比较。
+///
+/// Code Logic（这个函数做什么）:
+///     `git rev-parse HEAD^`；无父/空仓库返回 None。
+pub fn head_parent_hash(path: &Path) -> Result<Option<String>, AppError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD^"])
+        .current_dir(path)
+        .output()?;
+    if output.status.success() {
+        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!hash.is_empty()).then_some(hash));
+    }
+    // unborn / root commit / missing parent
+    if output.status.code() == Some(128) || output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    Err(AppError::generic(format!(
+        "Git 命令失败: {}",
+        git_failure_message(&output)
+    )))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     commit confirm 需要 newHead.tree == expectedTree。
+///
+/// Code Logic（这个函数做什么）:
+///     `git rev-parse HEAD^{tree}`；无 HEAD 返回 None。
+pub fn head_tree_hash(path: &Path) -> Result<Option<String>, AppError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD^{tree}"])
+        .current_dir(path)
+        .output()?;
+    if output.status.success() {
+        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!hash.is_empty()).then_some(hash));
+    }
+    if output.status.code() == Some(128) || output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    Err(AppError::generic(format!(
+        "Git 命令失败: {}",
+        git_failure_message(&output)
+    )))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     push intent 需要捕获 local/remote ref 与 local HEAD。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 (local_ref, remote_ref_name, local_head)；remote_ref 优先 upstream，否则 origin/<branch>。
+pub fn push_ref_identity(
+    path: &Path,
+    branch: &str,
+) -> Result<(String, String, String), AppError> {
+    let local_head = head_hash(path)?
+        .ok_or_else(|| AppError::generic("当前 worktree 没有可推送的 HEAD".to_string()))?;
+    let local_ref = format!("refs/heads/{branch}");
+    // 优先 @{upstream} 的 remote tracking ref；失败回退 origin/<branch>
+    let upstream = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+        .current_dir(path)
+        .output()?;
+    let remote_ref = if upstream.status.success() {
+        let name = String::from_utf8_lossy(&upstream.stdout).trim().to_string();
+        if name.is_empty() {
+            format!("refs/remotes/origin/{branch}")
+        } else if name.starts_with("refs/") {
+            name
+        } else {
+            // 形如 origin/feature/x
+            format!("refs/remotes/{name}")
+        }
+    } else {
+        format!("refs/remotes/origin/{branch}")
+    };
+    Ok((local_ref, remote_ref, local_head))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     push confirm 需要 remote ref 是否已到达 local HEAD。
+///
+/// Code Logic（这个函数做什么）:
+///     `git rev-parse --verify <remote_ref>`；不存在返回 None。
+pub fn rev_parse_ref(path: &Path, git_ref: &str) -> Result<Option<String>, AppError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", git_ref])
+        .current_dir(path)
+        .output()?;
+    if output.status.success() {
+        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!hash.is_empty()).then_some(hash));
+    }
+    if output.status.code() == Some(128) || output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    Err(AppError::generic(format!(
+        "Git 命令失败: {}",
+        git_failure_message(&output)
+    )))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge confirm 需要 main 是否包含 source HEAD。
+///
+/// Code Logic（这个函数做什么）:
+///     `git merge-base --is-ancestor <source_head> HEAD` 在 main 路径执行；0=true，1=false。
+pub fn is_ancestor(main_path: &Path, source_head: &str) -> Result<bool, AppError> {
+    let output = Command::new("git")
+        .args(["merge-base", "--is-ancestor", source_head, "HEAD"])
+        .current_dir(main_path)
+        .output()?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+    Err(AppError::generic(format!(
+        "Git 命令失败: {}",
+        git_failure_message(&output)
+    )))
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     用户输入分支名后，Workbench 需要在本机创建对应 Git worktree 和新分支。
 ///
 /// Code Logic（这个函数做什么）:

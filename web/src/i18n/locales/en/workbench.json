@@ -647,6 +647,7 @@
     "createPath": "Failed to create path",
     "copyPath": "Failed to copy path",
     "renamePath": "Failed to rename",
-    "deletePath": "Failed to delete"
+    "deletePath": "Failed to delete",
+    "mutationUnknown": "Result unknown. Refresh and verify manually."
   }
 }

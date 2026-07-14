@@ -581,6 +581,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::remove_worktree),
         )
         .route(
+            "/api/workbench/worktrees/mutation-operation",
+            post(workbench::get_mutation_operation),
+        )
+        .route(
             "/api/workbench/git/commits",
             post(workbench::list_git_commits),
         )

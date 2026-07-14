@@ -8,6 +8,11 @@
 
 use serde::{Deserialize, Serialize};
 
+// 便于 client/route 复用 mutation envelope/operation DTO。
+pub use crate::workbench::operation_ledger::{
+    MutationTransportClass, WorkbenchMutationEnvelopeDto, WorkbenchMutationOperationDto,
+};
+
 /// 远端浏览器候选发现请求体。
 ///
 /// Business Logic（为什么需要这个类型）:
@@ -67,6 +72,9 @@ pub struct RemoteCreateWorktreeReq {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteWorktreeReq {
     pub worktree_id: String,
+    /// 稳定 client operation id（mutation-outcome.v1；push/merge 共用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_operation_id: Option<String>,
 }
 
 /// 远端 commit worktree 请求体。
@@ -81,6 +89,9 @@ pub struct RemoteWorktreeReq {
 pub struct RemoteCommitWorktreeReq {
     pub worktree_id: String,
     pub message: Option<String>,
+    /// 稳定 client operation id（mutation-outcome.v1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_operation_id: Option<String>,
 }
 
 /// 远端删除 worktree 请求体。
@@ -95,6 +106,22 @@ pub struct RemoteCommitWorktreeReq {
 pub struct RemoteRemoveWorktreeReq {
     pub worktree_id: String,
     pub force: Option<bool>,
+    /// 稳定 client operation id（mutation-outcome.v1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_operation_id: Option<String>,
+}
+
+/// 远端查询 mutation operation 请求。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     unknown 后需向 owning device 查询 ledger intent/state。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase clientOperationId。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteMutationOperationReq {
+    pub client_operation_id: String,
 }
 
 /// 远端 Git 提交列表请求体。

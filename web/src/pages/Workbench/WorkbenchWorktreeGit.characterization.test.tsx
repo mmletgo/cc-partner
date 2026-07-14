@@ -148,7 +148,11 @@ describe('Workbench worktree / Git domain (characterization)', () => {
           return [];
         case 'remove_workbench_worktree':
           removed = true;
-          return { ok: true, worktreeId: 'wt-feat' };
+          return {
+            kind: 'succeeded',
+            clientOperationId: 'char-remove-1',
+            value: { ok: true, worktreeId: 'wt-feat' },
+          };
         case 'list_workbench_git_commits':
           return [];
         case 'list_workbench_dir':
@@ -218,12 +222,19 @@ describe('Workbench worktree / Git domain (characterization)', () => {
         case 'merge_workbench_worktree':
           merged = true;
           return {
-            mergedWorktreeId: 'wt-feat',
-            targetWorktreeId: 'wt-main',
-            stages: [
-              { id: 'checkSource', status: 'completed', message: 'ok' },
-              { id: 'mergeBranch', status: 'completed', message: 'ok' },
-            ],
+            kind: 'succeeded',
+            clientOperationId: 'char-merge-1',
+            value: {
+              ok: true,
+              worktreeId: 'wt-feat',
+              stages: [
+                { id: 'checkSource', status: 'completed', message: 'ok' },
+                { id: 'closeSessions', status: 'completed', message: 'ok' },
+                { id: 'mergeMain', status: 'completed', message: 'ok' },
+                { id: 'resolveConflicts', status: 'skipped', message: 'ok' },
+                { id: 'cleanup', status: 'completed', message: 'ok' },
+              ],
+            },
           };
         case 'list_workbench_git_commits':
           return [];

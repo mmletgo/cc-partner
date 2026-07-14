@@ -347,6 +347,9 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     sqlx::query(WORKBENCH_BROWSER_TARGET_INDEX)
         .execute(&pool)
         .await?;
+    sqlx::query(crate::workbench::operation_ledger::WORKBENCH_MUTATION_OPERATIONS_SCHEMA)
+        .execute(&pool)
+        .await?;
     WorkbenchWorktreeRepo::new(pool.clone())
         .ensure_schema()
         .await?;

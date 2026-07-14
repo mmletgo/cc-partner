@@ -11,12 +11,17 @@
  */
 
 import { invoke, invokeDecoded } from './client';
+import { nullableDecoder } from '@/lib/runtimeSchema';
 import {
   workbenchFileNodesDecoder,
+  workbenchMergeResultDecoder,
+  workbenchMutationEnvelopeDecoder,
+  workbenchMutationOperationDecoder,
   workbenchOpenFileDecoder,
   workbenchPathInfoDecoder,
   workbenchProjectDecoder,
   workbenchProjectsDecoder,
+  workbenchRemoveResultDecoder,
   workbenchSaveTextResultDecoder,
   workbenchSessionDecoder,
   workbenchSessionsDecoder,
@@ -33,11 +38,14 @@ import type {
   WorkbenchGitCommit,
   WorkbenchHtmlAsset,
   WorkbenchMergeResult,
+  WorkbenchMutationEnvelope,
+  WorkbenchMutationOperation,
   WorkbenchPathInfo,
   WorkbenchRemoteDirectoryEntry,
   WorkbenchRemotePathInfo,
   WorkbenchRemoteRoot,
   WorkbenchSqlitePreview,
+  WorkbenchWorktree,
 } from '@/lib/types';
 
 interface WorkbenchTerminalSize {
@@ -113,31 +121,99 @@ export const workbenchApi = {
         workbenchWorktreeDecoder,
       ),
 
-    /** 提交当前 worktree 的全部本地改动；message 为空时由后端 Claude Code 生成。 */
-    commit: (worktreeId: string, message?: string | null) =>
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   Commit 必须带稳定 clientOperationId，返回 typed envelope 供 timeout 后对账。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded commit_workbench_worktree → WorkbenchMutationEnvelope<WorkbenchWorktree>。
+     */
+    commit: (
+      worktreeId: string,
+      message: string | null | undefined,
+      clientOperationId: string,
+    ): Promise<WorkbenchMutationEnvelope<WorkbenchWorktree>> =>
       invokeDecoded(
         'commit_workbench_worktree',
         {
           worktreeId,
           message: message ?? null,
+          clientOperationId,
         },
-        workbenchWorktreeDecoder,
+        workbenchMutationEnvelopeDecoder(workbenchWorktreeDecoder),
       ),
 
-    /** 推送当前 worktree 分支到已有 upstream；没有 upstream 时只默认推送到 origin。 */
-    push: (worktreeId: string) =>
-      invokeDecoded('push_workbench_worktree', { worktreeId }, workbenchWorktreeDecoder),
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   Push 必须带 clientOperationId 并返回 envelope，禁止 timeout 后盲重放。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded push_workbench_worktree → WorkbenchMutationEnvelope<WorkbenchWorktree>。
+     */
+    push: (
+      worktreeId: string,
+      clientOperationId: string,
+    ): Promise<WorkbenchMutationEnvelope<WorkbenchWorktree>> =>
+      invokeDecoded(
+        'push_workbench_worktree',
+        { worktreeId, clientOperationId },
+        workbenchMutationEnvelopeDecoder(workbenchWorktreeDecoder),
+      ),
 
-    /** 合并当前 worktree 分支到主工作区。 */
-    merge: (worktreeId: string) =>
-      invoke<WorkbenchMergeResult>('merge_workbench_worktree', { worktreeId }),
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   Merge 返回 envelope 包装的阶段结果，uncertain transport 走 unknown。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded merge_workbench_worktree → WorkbenchMutationEnvelope<WorkbenchMergeResult>。
+     */
+    merge: (
+      worktreeId: string,
+      clientOperationId: string,
+    ): Promise<WorkbenchMutationEnvelope<WorkbenchMergeResult>> =>
+      invokeDecoded(
+        'merge_workbench_worktree',
+        { worktreeId, clientOperationId },
+        workbenchMutationEnvelopeDecoder(workbenchMergeResultDecoder),
+      ),
 
-    /** 删除非主 worktree；force 用于强制移除 Git worktree。 */
-    remove: (worktreeId: string, force = false) =>
-      invoke<{ ok: boolean; worktreeId: string }>('remove_workbench_worktree', {
-        worktreeId,
-        force,
-      }),
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   Remove 带 force 与 clientOperationId，成功 value 为 {ok, worktreeId}。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded remove_workbench_worktree → WorkbenchMutationEnvelope<{ok,worktreeId}>。
+     */
+    remove: (
+      worktreeId: string,
+      force: boolean,
+      clientOperationId: string,
+    ): Promise<WorkbenchMutationEnvelope<{ ok: boolean; worktreeId: string }>> =>
+      invokeDecoded(
+        'remove_workbench_worktree',
+        {
+          worktreeId,
+          force,
+          clientOperationId,
+        },
+        workbenchMutationEnvelopeDecoder(workbenchRemoveResultDecoder),
+      ),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   unknown 后按 clientOperationId 查询 owning sidecar ledger 取得 intent/state。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded get_workbench_mutation_operation → WorkbenchMutationOperation | null。
+     */
+    getMutationOperation: (
+      clientOperationId: string,
+    ): Promise<WorkbenchMutationOperation | null> =>
+      invokeDecoded(
+        'get_workbench_mutation_operation',
+        { clientOperationId },
+        nullableDecoder(workbenchMutationOperationDecoder),
+      ),
   },
 
   git: {
