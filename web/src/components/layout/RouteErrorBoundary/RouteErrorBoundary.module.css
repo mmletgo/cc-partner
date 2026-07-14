@@ -1,0 +1,57 @@
+/**
+ * RouteErrorBoundary 错误页样式
+ * 颜色/间距/圆角全部来自 tokens.css
+ */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  min-height: 12rem;
+  background: var(--surface);
+  color: var(--fg);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  color: var(--danger);
+}
+
+.description {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  color: var(--muted);
+  max-width: 40rem;
+  line-height: 1.5;
+}
+
+.detail {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg);
+  background: var(--danger-soft);
+  border-radius: var(--radius-sm);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.children {
+  display: contents;
+}

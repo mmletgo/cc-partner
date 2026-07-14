@@ -53,5 +53,11 @@
     "stopBackend": "Close GUI and backend",
     "cancel": "Cancel",
     "error": "Close failed: {{error}}"
+  },
+  "routeError": {
+    "title": "This page crashed",
+    "description": "The current route failed to render. The sidebar and other areas still work—retry this page or go home.",
+    "retry": "Retry this page",
+    "goHome": "Go home"
   }
 }

@@ -7,6 +7,7 @@
  *  - ThemeToggle: 浅色/深色主题切换
  *  - AppShell: 整个应用外壳
  *  - WorkbenchWorkspaceNav: Workbench 终端/文件预览/自动化共享导航栏
+ *  - RouteErrorBoundary: 路由级错误隔离（保留 AppShell，pathname 复位）
  */
 export { Sidebar } from './Sidebar';
 export type { SidebarProps } from './Sidebar';
@@ -22,3 +23,6 @@ export type { AppShellProps } from './AppShell';
 
 export { WorkbenchWorkspaceNav } from './WorkbenchWorkspaceNav';
 export type { WorkbenchWorkspaceNavProps } from './WorkbenchWorkspaceNav';
+
+export { RouteErrorBoundary } from './RouteErrorBoundary';
+export type { RouteErrorBoundaryProps } from './RouteErrorBoundary';

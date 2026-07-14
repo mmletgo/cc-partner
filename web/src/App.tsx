@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Routes, Route, Navigate, Outlet, useNavigate } from 'react-router-dom';
+import { lazy, Suspense, useEffect, useState, type ComponentType, type ReactNode } from 'react';
+import { Routes, Route, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -7,22 +7,7 @@ import { sendNotification } from '@tauri-apps/plugin-notification';
 import { Button } from './components/primitives/Button';
 import { Card } from './components/primitives/Card';
 import { AppShell } from './components/layout/AppShell';
-import { Home } from './pages/Home';
-import { Transfer } from './pages/Transfer';
-import { Prompts } from './pages/Prompts';
-import { CcHistory } from './pages/CcHistory';
-import { Workbench } from './pages/Workbench';
-import { Scratchpad } from './pages/Scratchpad';
-import { PromptOptimizer } from './pages/PromptOptimizer';
-import { ClaudeMd } from './pages/ClaudeMd';
-import { ClaudeCodeAssets } from './pages/ClaudeCodeAssets';
-import { Devices } from './pages/Devices';
-import { Settings } from './pages/Settings';
-import { Health } from './pages/Health';
-import { Welcome } from './pages/Welcome';
-import { DesignSystem } from './pages/DesignSystem';
-import { Overlay } from './pages/Screenshot/Overlay';
-import HealthOverlay from './pages/HealthOverlay';
+import { RouteErrorBoundary } from './components/layout/RouteErrorBoundary';
 import { configApi } from './api/config';
 import { PERMISSION_ONBOARDED_KEY } from './hooks/usePermissions';
 import { WorkbenchProjectsProvider } from './hooks/useWorkbenchProjects';
@@ -31,7 +16,6 @@ import { WorkbenchTerminalBuffersProvider } from './hooks/useWorkbenchTerminalBu
 import { AttentionProvider } from './hooks/useAttention';
 import { ScratchpadAutosaveProvider } from './hooks/ScratchpadAutosaveProvider';
 import { attentionApi } from './api/attention';
-import { Attention } from './pages/Attention';
 import { checkNotificationGranted } from './lib/notification';
 import { backendApi } from './api/backend';
 import { flushPendingWritesThenClose } from './lib/closeFlush';
@@ -39,6 +23,111 @@ import { pendingWrites } from './lib/pendingWrites';
 import styles from './App.module.css';
 
 const isDev = import.meta.env.DEV;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   页面 barrel 多为 named export，而 React.lazy 要求 default；需统一适配避免改每个页面。
+ *
+ * Code Logic（这个函数做什么）:
+ *   动态 import 模块后把 `module[name]` 包装为 `{ default: module.Name }` 供 lazy 使用。
+ */
+function lazyNamed<TModule extends Record<string, unknown>, TName extends keyof TModule>(
+  loader: () => Promise<TModule>,
+  name: TName,
+) {
+  return lazy(async () => {
+    const module = await loader();
+    const Component = module[name] as ComponentType;
+    return { default: Component };
+  });
+}
+
+// AppShell 内业务路由：全部 lazy，initial graph 不携带页面重型依赖
+const Home = lazyNamed(() => import('./pages/Home'), 'Home');
+const Attention = lazyNamed(() => import('./pages/Attention'), 'Attention');
+const Transfer = lazyNamed(() => import('./pages/Transfer'), 'Transfer');
+const Prompts = lazyNamed(() => import('./pages/Prompts'), 'Prompts');
+const CcHistory = lazyNamed(() => import('./pages/CcHistory'), 'CcHistory');
+const Workbench = lazyNamed(() => import('./pages/Workbench'), 'Workbench');
+const Scratchpad = lazyNamed(() => import('./pages/Scratchpad'), 'Scratchpad');
+const PromptOptimizer = lazyNamed(() => import('./pages/PromptOptimizer'), 'PromptOptimizer');
+const ClaudeMd = lazyNamed(() => import('./pages/ClaudeMd'), 'ClaudeMd');
+const ClaudeCodeAssets = lazyNamed(() => import('./pages/ClaudeCodeAssets'), 'ClaudeCodeAssets');
+const Devices = lazyNamed(() => import('./pages/Devices'), 'Devices');
+const Settings = lazyNamed(() => import('./pages/Settings'), 'Settings');
+const Health = lazyNamed(() => import('./pages/Health'), 'Health');
+const Welcome = lazyNamed(() => import('./pages/Welcome'), 'Welcome');
+const Overlay = lazyNamed(() => import('./pages/Screenshot/Overlay'), 'Overlay');
+const HealthOverlay = lazy(() => import('./pages/HealthOverlay'));
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   DesignSystem 仅开发预览，不得进入生产静态/同步依赖图。
+ *
+ * Code Logic（这个函数做什么）:
+ *   仅在 isDev 时创建 lazy 组件；生产返回 null。
+ */
+function createDesignSystemLazy(): React.LazyExoticComponent<ComponentType> | null {
+  if (!isDev) return null;
+  return lazy(() =>
+    import('./pages/DesignSystem').then((module) => ({ default: module.DesignSystem })),
+  );
+}
+
+const DesignSystem = createDesignSystemLazy();
+
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   lazy route 加载 chunk 期间需要稳定占位，避免 main 区域空白闪烁。
+ *
+ * Code Logic（这个组件做什么）:
+ *   Suspense fallback 展示 common:loading。
+ */
+function RouteLoadingFallback(): ReactNode {
+  const { t } = useTranslation(['common']);
+  return (
+    <div className={styles.routeLoading} data-testid="route-loading">
+      {t('common:loading')}
+    </div>
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   AppShell 内每个路由需独立 Suspense + error boundary，pathname 变化自动复位错误。
+ *
+ * Code Logic（这个组件做什么）:
+ *   读取 location.pathname 作为 resetKey，包裹 Suspense 与 RouteErrorBoundary。
+ */
+function ShellRoute({ children }: { children: ReactNode }): ReactNode {
+  const { pathname } = useLocation();
+  return (
+    <RouteErrorBoundary resetKey={pathname}>
+      <Suspense fallback={<RouteLoadingFallback />}>{children}</Suspense>
+    </RouteErrorBoundary>
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   截图/健康 overlay 与欢迎页不在 AppShell 内，但仍需错误隔离，避免白屏困住用户。
+ *
+ * Code Logic（这个组件做什么）:
+ *   使用固定 routeKey 作为 resetKey，包裹 Suspense + RouteErrorBoundary。
+ */
+function IsolatedRoute({
+  routeKey,
+  children,
+}: {
+  routeKey: string;
+  children: ReactNode;
+}): ReactNode {
+  return (
+    <RouteErrorBoundary resetKey={routeKey}>
+      <Suspense fallback={<RouteLoadingFallback />}>{children}</Suspense>
+    </RouteErrorBoundary>
+  );
+}
 
 type GuardState = 'loading' | 'pass' | 'redirect';
 
@@ -336,11 +425,32 @@ export default function App() {
       <HealthReminderListener />
       <BackendCloseChoiceListener />
       <Routes>
-        {/* 区域截图选区页：独立于 AppShell/OnboardingGuard，由 Tauri 选区窗口直接加载 */}
-        <Route path="/screenshot-overlay" element={<Overlay />} />
-        {/* 全屏健康提醒遮罩页：独立于 AppShell/OnboardingGuard，由 Tauri 透明置顶遮罩窗口直接加载 */}
-        <Route path="/health-overlay" element={<HealthOverlay />} />
-        <Route path="/welcome" element={<Welcome />} />
+        {/* 区域截图选区页：独立 boundary，主路由错误不得白屏 overlay 窗口 */}
+        <Route
+          path="/screenshot-overlay"
+          element={
+            <IsolatedRoute routeKey="/screenshot-overlay">
+              <Overlay />
+            </IsolatedRoute>
+          }
+        />
+        {/* 全屏健康提醒遮罩页：独立 boundary，与主路由错误隔离 */}
+        <Route
+          path="/health-overlay"
+          element={
+            <IsolatedRoute routeKey="/health-overlay">
+              <HealthOverlay />
+            </IsolatedRoute>
+          }
+        />
+        <Route
+          path="/welcome"
+          element={
+            <IsolatedRoute routeKey="/welcome">
+              <Welcome />
+            </IsolatedRoute>
+          }
+        />
         <Route element={<OnboardingGuard />}>
           <Route
             element={
@@ -357,22 +467,31 @@ export default function App() {
               </WorkbenchDependencyProvider>
             }
           >
-            <Route path="/" element={<Home />} />
-            <Route path="/attention" element={<Attention />} />
-            <Route path="/transfer" element={<Transfer />} />
-            <Route path="/prompts" element={<Prompts />} />
-            <Route path="/cc-history" element={<CcHistory />} />
-            <Route path="/workbench" element={<Workbench />} />
-            <Route path="/scratchpad" element={<Scratchpad />} />
-            <Route path="/prompt-optimizer" element={<PromptOptimizer />} />
-            <Route path="/claude-md" element={<ClaudeMd />} />
-            <Route path="/claude-code" element={<ClaudeCodeAssets />} />
+            <Route path="/" element={<ShellRoute><Home /></ShellRoute>} />
+            <Route path="/attention" element={<ShellRoute><Attention /></ShellRoute>} />
+            <Route path="/transfer" element={<ShellRoute><Transfer /></ShellRoute>} />
+            <Route path="/prompts" element={<ShellRoute><Prompts /></ShellRoute>} />
+            <Route path="/cc-history" element={<ShellRoute><CcHistory /></ShellRoute>} />
+            <Route path="/workbench" element={<ShellRoute><Workbench /></ShellRoute>} />
+            <Route path="/scratchpad" element={<ShellRoute><Scratchpad /></ShellRoute>} />
+            <Route path="/prompt-optimizer" element={<ShellRoute><PromptOptimizer /></ShellRoute>} />
+            <Route path="/claude-md" element={<ShellRoute><ClaudeMd /></ShellRoute>} />
+            <Route path="/claude-code" element={<ShellRoute><ClaudeCodeAssets /></ShellRoute>} />
             <Route path="/orchestrator" element={<Navigate to="/workbench" replace />} />
-            <Route path="/devices" element={<Devices />} />
+            <Route path="/devices" element={<ShellRoute><Devices /></ShellRoute>} />
             <Route path="/ssh" element={<Navigate to="/devices" replace />} />
-            <Route path="/settings" element={<Settings />} />
-            <Route path="/health" element={<Health />} />
-            {isDev && <Route path="/design-system" element={<DesignSystem />} />}
+            <Route path="/settings" element={<ShellRoute><Settings /></ShellRoute>} />
+            <Route path="/health" element={<ShellRoute><Health /></ShellRoute>} />
+            {isDev && DesignSystem ? (
+              <Route
+                path="/design-system"
+                element={
+                  <ShellRoute>
+                    <DesignSystem />
+                  </ShellRoute>
+                }
+              />
+            ) : null}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Route>
