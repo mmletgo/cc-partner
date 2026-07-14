@@ -45,7 +45,7 @@ describe('MobileAutomationPanel', () => {
     const workbenchHttpSource = readFileSync(new URL('../api/workbenchHttp.ts', import.meta.url), 'utf8');
     const zhWorkbench = readFileSync(new URL('../i18n/locales/zh/workbench.json', import.meta.url), 'utf8');
     const enWorkbench = readFileSync(new URL('../i18n/locales/en/workbench.json', import.meta.url), 'utf8');
-    const typesSource = readFileSync(new URL('../lib/types.ts', import.meta.url), 'utf8');
+    const typesSource = readFileSync(new URL('../lib/types/orchestrator.ts', import.meta.url), 'utf8');
 
     assertContains(
       panelSource,
