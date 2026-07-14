@@ -267,18 +267,20 @@ describe('dialog migration focus restore interactions', () => {
   });
 
   test('migrated ownership sources consume Dialog or Drawer primitives', () => {
+    // S4 拆分后 Orchestrator/MobileAutomation 的 Dialog/Drawer 落在 views 叶子，不再在壳层
     const ownershipFiles = [
       'App.tsx',
       'components/layout/AppShell/AppShell.tsx',
       'pages/Prompts/Prompts.tsx',
       'pages/Scratchpad/Scratchpad.tsx',
       'pages/CcHistory/CcHistory.tsx',
-      'pages/Orchestrator/Orchestrator.tsx',
+      'pages/Orchestrator/views/OrchestratorCreateDialog.tsx',
+      'pages/Orchestrator/views/OrchestratorTaskDrawer.tsx',
       'components/domain/WorkbenchSessionSearch/WorkbenchSessionSearch.tsx',
       'components/domain/WorkbenchProjectRail/WorkbenchProjectRail.tsx',
       'mobile/components/MobileWorkbenchShell.tsx',
       'mobile/components/MobileWorktreeQuickSwitch.tsx',
-      'mobile/components/MobileAutomationPanel.tsx',
+      'mobile/components/MobileAutomationCreateDialog.tsx',
     ];
 
     for (const rel of ownershipFiles) {
@@ -304,14 +306,25 @@ describe('dialog migration focus restore interactions', () => {
     expect(shellSource).toMatch(/<Drawer[\s>]/);
     expect(shellSource).toMatch(/side=["']left["']/);
 
-    const orchestratorSource = readFileSync(
-      path.join(SRC_ROOT, 'pages/Orchestrator/Orchestrator.tsx'),
+    const orchestratorCreateSource = readFileSync(
+      path.join(SRC_ROOT, 'pages/Orchestrator/views/OrchestratorCreateDialog.tsx'),
       'utf8',
     );
-    expect(orchestratorSource).toMatch(/<Dialog[\s>]/);
-    // detail 使用 Drawer 或 Dialog 均可，但不得自管 Escape 与 createPortal
-    expect(orchestratorSource).not.toMatch(/window\.addEventListener\(['"]keydown['"]/);
-    expect(orchestratorSource).not.toMatch(/createPortal/);
+    const orchestratorDrawerSource = readFileSync(
+      path.join(SRC_ROOT, 'pages/Orchestrator/views/OrchestratorTaskDrawer.tsx'),
+      'utf8',
+    );
+    const orchestratorControllerSource = readFileSync(
+      path.join(SRC_ROOT, 'pages/Orchestrator/controllers/useOrchestratorController.ts'),
+      'utf8',
+    );
+    expect(orchestratorCreateSource).toMatch(/<Dialog[\s>]/);
+    expect(orchestratorDrawerSource).toMatch(/<Drawer[\s>]/);
+    // detail/create 使用 primitives，controller/shell 不得自管 Escape 与 createPortal
+    expect(orchestratorControllerSource).not.toMatch(/window\.addEventListener\(['"]keydown['"]/);
+    expect(orchestratorControllerSource).not.toMatch(/createPortal/);
+    expect(orchestratorCreateSource).not.toMatch(/createPortal/);
+    expect(orchestratorDrawerSource).not.toMatch(/createPortal/);
   });
 
   test('session search and prompt delete source no longer attach Escape listeners', () => {

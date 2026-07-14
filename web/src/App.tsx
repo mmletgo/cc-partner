@@ -128,6 +128,33 @@ function IsolatedRoute({
   );
 }
 
+/**
+ * DEV/E2E 路由崩溃夹具。
+ *
+ * Business Logic（为什么需要这个组件）:
+ *   frontend-foundation E2E 需要可复现的「路由 render throw → boundary 兜底 → 重试恢复」路径，
+ *   且不得把崩溃夹具带进生产 bundle。
+ *
+ * Code Logic（这个组件做什么）:
+ *   仅 DEV 注册；当 sessionStorage `cp-force-route-error=1` 时 throw，否则渲染可测 ok 标记。
+ */
+function DevRouteErrorFixture(): ReactNode {
+  if (
+    typeof sessionStorage !== 'undefined' &&
+    sessionStorage.getItem('cp-force-route-error') === '1'
+  ) {
+    throw new Error('cp-force-route-error');
+  }
+  // 测试只依赖 data-testid；给最小可见盒避免 Playwright 把空节点判 hidden；无 letterful 文案
+  return (
+    <div
+      data-testid="route-error-fixture-ok"
+      style={{ width: 1, height: 1, overflow: 'hidden' }}
+      aria-hidden="true"
+    />
+  );
+}
+
 type GuardState = 'loading' | 'pass' | 'redirect';
 
 interface TauriInternalsWindow extends Window {
@@ -501,6 +528,16 @@ export default function App() {
                 element={
                   <ShellRoute>
                     <DesignSystem />
+                  </ShellRoute>
+                }
+              />
+            ) : null}
+            {isDev ? (
+              <Route
+                path="/__cp_route_error_fixture"
+                element={
+                  <ShellRoute>
+                    <DevRouteErrorFixture />
                   </ShellRoute>
                 }
               />

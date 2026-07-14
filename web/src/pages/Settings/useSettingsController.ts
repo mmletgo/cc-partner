@@ -84,7 +84,6 @@ import type {
   GithubTrendingConfig,
   HealthConfig,
 } from '@/lib/types';
-import type { OrchestratorAutomationConfig } from '@/api/orchestratorConfig';
 
 /** Settings 页内子 tab 定义 */
 export interface SettingsTab {
@@ -434,7 +433,6 @@ export function useSettingsController(): UseSettingsControllerResult {
   const [retryingGroup, setRetryingGroup] = useState<SettingsResourceGroup | null>(null);
 
   // macOS 权限状态（设置页手动授权入口，持续轮询以反映用户在系统设置的变更）
-  const [tWelcome] = useTranslation('welcome');
   const {
     status: permStatus,
     loading: permLoading,
