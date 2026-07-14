@@ -137,16 +137,20 @@ cd src-tauri
 cargo test --locked net::protocol --lib
 cargo test --locked net::routes::cc_history --lib
 cargo test --locked --test backend_scale -- --nocapture --test-threads=1
-# Optional load gate (ignored; prints desensitized JSON only — no IDs/content/path)
-# cargo test --release --locked --test backend_scale backend_scale_benchmark -- --ignored --nocapture --test-threads=1
+# Optional load gate (ignored; prints desensitized JSON only — no IDs/content/path).
+# CC_PARTNER_BENCH_POOL=1|2 selects one pool; unset runs both (3 samples each).
+# CC_PARTNER_BENCH_POOL=1 cargo test --release --locked --test backend_scale backend_scale_benchmark -- --ignored --nocapture --test-threads=1
+# CC_PARTNER_BENCH_POOL=2 cargo test --release --locked --test backend_scale backend_scale_benchmark -- --ignored --nocapture --test-threads=1
 ```
+
+Non-ignored `scale_safety_*` gates (bounded fixture): request limits, resolver outside SQLite tx, no duplicate CAS claims, partial-batch rollback, `SQLITE_BUSY == 0`.
 
 | Surface | Status |
 | --- | --- |
 | Paged routes + capability `cc-history.paged-sync.v1` atomic | Verified by inventory + protocol unit tests |
 | Mixed-version new↔new / new↔legacy / legacy↔new | Verified (`backend_scale` + mixed_version_harness) |
-| Claim IO outside SQLite transaction / CAS no duplicate | Verified (`backend_scale` orchestrator_claim_*) |
-| Production SQLite pool expansion to 2 | **NOT VERIFIED / keep `max_connections(1)`** until Task 8 five-gate evidence authorizes a separate commit |
+| Claim IO outside SQLite transaction / CAS no duplicate | Verified (`backend_scale` orchestrator_claim_* + `scale_safety_*`) |
+| Production SQLite pool expansion to 2 | **NOT VERIFIED / keep `max_connections(1)`** — Task 8 benchmark harness ships; current evidence does **not** authorize expansion (default KEEP_1 unless all five §4.2 gates pass on six valid JSON samples) |
 | Metrics telemetry upload | **Out of product scope** — process-local + sanitized tracing only |
 
 ## Hosted smoke: NOT VERIFIED
