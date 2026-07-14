@@ -192,10 +192,10 @@ describe('MobileGitPanel mutation reconciliation', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   same-message/different-tree 不能用 message 猜成功；authority 无 headTree 时 unknown。
+   *   same-message/different-tree 不能用 message 猜成功；authority 无 headTree 且 ledger 非终态时 unknown。
    *
    * Code Logic（这个测试做什么）:
-   *   ledger intent expectedTree 存在但 authority 无 headTree → unknown 文案。
+   *   ledger state=running + intent expectedTree 存在但 authority 无 headTree → unknown 文案。
    */
   test('same-message different-tree stays unknown without head authority', async () => {
     commitMock.mockResolvedValue({
@@ -205,6 +205,50 @@ describe('MobileGitPanel mutation reconciliation', () => {
     });
     getMutationOperationMock.mockResolvedValue({
       clientOperationId: 'op-1',
+      kind: 'commit',
+      payloadHash: 'hash',
+      intent: {
+        kind: 'commit',
+        projectId: 'project-1',
+        worktreeId: 'wt-1',
+        beforeHead: 'parent',
+        expectedTree: 'tree-A',
+      },
+      state: 'running',
+      outcome: null,
+      errorMessage: null,
+      projectId: 'project-1',
+      worktreeId: 'wt-1',
+      createdAt: '2026-07-14T00:00:00Z',
+      updatedAt: '2026-07-14T00:00:00Z',
+    });
+
+    renderPanel();
+    await waitFor(() => expect(listCommitsMock).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: 'Commit' }));
+
+    await screen.findByText(/操作结果未知/);
+    expect(commitMock).toHaveBeenCalledTimes(1);
+    expect(onWorktreeChangeMock).not.toHaveBeenCalled();
+    // same-id recovery 入口可见
+    expect(screen.getByRole('button', { name: /重新核对|Retry verify/i })).toBeTruthy();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   ledger 终态 succeeded 应确认成功，即使无 head 权威字段。
+   *
+   * Code Logic（这个测试做什么）:
+   *   unknown envelope + ledger state=succeeded → 不显示 unknown 锁。
+   */
+  test('ledger terminal succeeded confirms without head authority', async () => {
+    commitMock.mockResolvedValue({
+      kind: 'unknown',
+      clientOperationId: 'op-ledger',
+      transportClass: 'timeout',
+    });
+    getMutationOperationMock.mockResolvedValue({
+      clientOperationId: 'op-ledger',
       kind: 'commit',
       payloadHash: 'hash',
       intent: {
@@ -227,9 +271,11 @@ describe('MobileGitPanel mutation reconciliation', () => {
     await waitFor(() => expect(listCommitsMock).toHaveBeenCalled());
     fireEvent.click(screen.getByRole('button', { name: 'Commit' }));
 
-    await screen.findByText(/操作结果未知/);
-    expect(commitMock).toHaveBeenCalledTimes(1);
-    expect(onWorktreeChangeMock).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(getMutationOperationMock).toHaveBeenCalledWith('op-ledger');
+      expect(refreshWorktreesMock).toHaveBeenCalled();
+    });
+    expect(screen.queryByText(/操作结果未知/)).toBeNull();
   });
 
   /**

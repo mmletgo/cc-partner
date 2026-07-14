@@ -675,6 +675,70 @@ describe('useWorkbenchWorktreeGitController — create form / create action', ()
     expect(bridge.createSessionForWorktree).not.toHaveBeenCalled();
   });
 
+  test('create success after same-project worktree switch does not steal active worktree', async () => {
+    const project = buildLocalProject();
+    const mainWt = buildWorktree({ id: 'wt-main', isMain: true });
+    const featWt = buildWorktree({ id: 'wt-feat', isMain: false, name: 'feat' });
+    const createdWt = buildWorktree({
+      id: 'wt-new',
+      isMain: false,
+      branch: 'feature/late',
+      name: 'late',
+    });
+    let settleCreate!: (value: WorkbenchWorktree) => void;
+    fakeWorktreesApi.create.mockReturnValueOnce(
+      new Promise<WorkbenchWorktree>((resolve) => {
+        settleCreate = resolve;
+      }),
+    );
+    fakeWorktreesApi.list.mockResolvedValue([mainWt, featWt, createdWt]);
+    const setActive = vi.fn();
+    const bridge = buildBridgeFakes();
+
+    const { result, rerender } = renderController(
+      {
+        activeProjectId: project.id,
+        activeWorktreeId: 'wt-main',
+        setActiveWorktreeId: setActive,
+      },
+      bridge,
+    );
+
+    act(() => {
+      result.current.handleOpenCreateWorktree();
+      result.current.setCreateWorktreeBranchSuffixDraft('late');
+    });
+
+    let operation!: Promise<void>;
+    await act(async () => {
+      operation = result.current.handleCreateWorktree();
+      await flushMicrotasks();
+    });
+    expect(result.current.worktreeBusy).toBe('create');
+
+    // 同 project 内切到 feat；旧 create 不得 setActiveWorktreeId(created)。
+    rerender(
+      baseControllerProps({
+        activeProjectId: project.id,
+        activeWorktreeId: 'wt-feat',
+        setActiveWorktreeId: setActive,
+      }),
+    );
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    await act(async () => {
+      settleCreate(createdWt);
+      await operation;
+      await flushMicrotasks();
+    });
+
+    expect(setActive).not.toHaveBeenCalledWith('wt-new');
+    expect(bridge.focusSession).not.toHaveBeenCalled();
+    expect(result.current.worktreeBusy).toBeNull();
+  });
+
   test('handleCreateWorktree is a no-op without active project or when remoteWriteDisabled', async () => {
     const bridge = buildBridgeFakes();
     const { result } = renderController(
@@ -936,6 +1000,129 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
     expect(fakeWorktreesApi.commit).toHaveBeenCalledTimes(1);
     expect(result.current.worktreeError).toContain('结果未知');
     expect(result.current.worktreeBusy).toBeNull();
+    expect(result.current.unknownMutationLock).toEqual({
+      kind: 'commit',
+      projectId: project.id,
+      worktreeId: 'wt-main',
+      clientOperationId: 'op-unknown-1',
+    });
+  });
+
+  test('second commit after unknown reuses same clientOperationId and only reconciles', async () => {
+    const project = buildLocalProject();
+    fakeWorktreesApi.commit.mockResolvedValueOnce({
+      kind: 'unknown',
+      clientOperationId: 'op-stable',
+      transportClass: 'timeout',
+    });
+    fakeWorktreesApi.getMutationOperation
+      .mockResolvedValueOnce({
+        clientOperationId: 'op-stable',
+        kind: 'commit',
+        payloadHash: 'h',
+        intent: {
+          kind: 'commit',
+          projectId: project.id,
+          worktreeId: 'wt-main',
+          beforeHead: 'a',
+          expectedTree: 't',
+        },
+        state: 'running',
+        outcome: null,
+        errorMessage: null,
+        projectId: project.id,
+        worktreeId: 'wt-main',
+        createdAt: '2026-07-14T00:00:00.000Z',
+        updatedAt: '2026-07-14T00:00:00.000Z',
+      })
+      .mockResolvedValueOnce({
+        clientOperationId: 'op-stable',
+        kind: 'commit',
+        payloadHash: 'h',
+        intent: {
+          kind: 'commit',
+          projectId: project.id,
+          worktreeId: 'wt-main',
+          beforeHead: 'a',
+          expectedTree: 't',
+        },
+        state: 'succeeded',
+        outcome: null,
+        errorMessage: null,
+        projectId: project.id,
+        worktreeId: 'wt-main',
+        createdAt: '2026-07-14T00:00:00.000Z',
+        updatedAt: '2026-07-14T00:00:00.000Z',
+      });
+    fakeWorktreesApi.list.mockResolvedValue([buildWorktree({ id: 'wt-main' })]);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-main',
+      inspectorTab: 'files',
+      translateError: (key) =>
+        key === 'mutationUnknown' ? 'Result unknown. Refresh and verify manually.' : `err:${key}`,
+    });
+
+    await act(async () => {
+      await result.current.handleCommitWorktree();
+      await flushMicrotasks();
+    });
+    expect(result.current.unknownMutationLock?.clientOperationId).toBe('op-stable');
+    expect(fakeWorktreesApi.commit).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await result.current.handleCommitWorktree();
+      await flushMicrotasks();
+    });
+
+    // second click 只对账，不再 mint 新 id / 二次 commit。
+    expect(fakeWorktreesApi.commit).toHaveBeenCalledTimes(1);
+    expect(fakeWorktreesApi.getMutationOperation).toHaveBeenCalledTimes(2);
+    expect(fakeWorktreesApi.getMutationOperation).toHaveBeenLastCalledWith('op-stable');
+    expect(result.current.unknownMutationLock).toBeNull();
+    expect(result.current.worktreeError).toBeNull();
+  });
+
+  test('ledger terminal failed clears unknown lock and allows new id', async () => {
+    const project = buildLocalProject();
+    fakeWorktreesApi.commit.mockResolvedValueOnce({
+      kind: 'unknown',
+      clientOperationId: 'op-fail',
+    });
+    fakeWorktreesApi.getMutationOperation.mockResolvedValueOnce({
+      clientOperationId: 'op-fail',
+      kind: 'commit',
+      payloadHash: 'h',
+      intent: {
+        kind: 'commit',
+        projectId: project.id,
+        worktreeId: 'wt-main',
+        beforeHead: 'a',
+        expectedTree: 't',
+      },
+      state: 'failed',
+      outcome: null,
+      errorMessage: 'boom',
+      projectId: project.id,
+      worktreeId: 'wt-main',
+      createdAt: '2026-07-14T00:00:00.000Z',
+      updatedAt: '2026-07-14T00:00:00.000Z',
+    });
+    fakeWorktreesApi.list.mockResolvedValue([buildWorktree({ id: 'wt-main' })]);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-main',
+    });
+
+    await act(async () => {
+      await result.current.handleCommitWorktree();
+      await flushMicrotasks();
+    });
+
+    expect(result.current.unknownMutationLock).toBeNull();
+    expect(result.current.worktreeError).toBeTruthy();
   });
 });
 

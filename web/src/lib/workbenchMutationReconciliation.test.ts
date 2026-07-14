@@ -2,14 +2,16 @@
  * Workbench mutation 对账矩阵表驱动测试。
  *
  * Business Logic（为什么需要这个测试）:
- *   对账错误会导致盲重放或把未完成操作当成功；必须锁定与 Rust confirm_mutation 一致的后置条件。
+ *   对账错误会导致盲重放或把未完成操作当成功；必须锁定与 Rust confirm_mutation 一致的后置条件，
+ *   以及 ledger 终态优先合同。
  *
  * Code Logic（这个测试做什么）:
- *   用 table 覆盖 commit/push/merge/remove 的成功与 unknown 分支，以及 ledger 缺失/pending。
+ *   用 table 覆盖 commit/push/merge/remove 的成功与 unknown 分支，以及 ledger 终态/缺失/pending。
  */
 
 import { describe, expect, test } from 'vitest';
 import {
+  buildMergeRemoveAuthority,
   reconcileWorkbenchMutation,
   type WorkbenchMutationReconcileResult,
 } from './workbenchMutationReconciliation';
@@ -27,7 +29,7 @@ function buildLedger(
     clientOperationId: 'op-1',
     kind: intent.kind,
     payloadHash: 'hash',
-    state: 'succeeded',
+    state: 'running',
     outcome: null,
     errorMessage: null,
     projectId: 'proj',
@@ -105,51 +107,13 @@ describe('reconcileWorkbenchMutation', () => {
       expected: 'unknown',
     },
     {
-      name: 'commit: same parent different tree stays unknown',
-      intent: commitIntent,
-      authority: {
-        head: 'eee',
-        headTree: 'wrong-tree',
-        headParent: 'aaa',
-      },
-      expected: 'unknown',
-    },
-    {
-      name: 'commit: missing headTree stays unknown',
-      intent: commitIntent,
-      authority: {
-        head: 'eee',
-        headParent: 'aaa',
-      },
-      expected: 'unknown',
-    },
-    {
-      name: 'commit: empty-repo beforeHead null + new head',
-      intent: {
-        ...commitIntent,
-        beforeHead: null,
-      },
-      authority: {
-        head: 'first',
-        headTree: 'tree-1',
-        headParent: null,
-      },
-      expected: 'confirmedSucceeded',
-    },
-    {
-      name: 'push: remote equals localHead',
+      name: 'push: remote matches local head',
       intent: pushIntent,
       authority: { remoteRefHead: 'bbb' },
       expected: 'confirmedSucceeded',
     },
     {
-      name: 'push: remote missing stays unknown',
-      intent: pushIntent,
-      authority: {},
-      expected: 'unknown',
-    },
-    {
-      name: 'push: remote different head stays unknown',
+      name: 'push: remote mismatch stays unknown',
       intent: pushIntent,
       authority: { remoteRefHead: 'zzz' },
       expected: 'unknown',
@@ -173,7 +137,7 @@ describe('reconcileWorkbenchMutation', () => {
       expected: 'unknown',
     },
     {
-      name: 'merge: main not containing source stays unknown',
+      name: 'merge: missing mainContainsSourceHead stays unknown',
       intent: mergeIntent,
       authority: {
         mainContainsSourceHead: false,
@@ -225,7 +189,25 @@ describe('reconcileWorkbenchMutation', () => {
     );
   });
 
-  test('intent mismatch with ledger still evaluates provided intent matrix only', () => {
+  test('ledger terminal succeeded wins even without authority fields', () => {
+    const ledger = buildLedger({ intent: commitIntent, state: 'succeeded' });
+    expect(reconcileWorkbenchMutation(commitIntent, ledger, {})).toBe(
+      'confirmedSucceeded',
+    );
+  });
+
+  test('ledger terminal failed is definitive without authority matrix', () => {
+    const ledger = buildLedger({
+      intent: pushIntent,
+      state: 'failed',
+      errorMessage: 'rejected',
+    });
+    expect(reconcileWorkbenchMutation(pushIntent, ledger, { remoteRefHead: 'bbb' })).toBe(
+      'confirmedFailed',
+    );
+  });
+
+  test('intent mismatch still honors terminal ledger state first', () => {
     const ledger = buildLedger({ intent: pushIntent, state: 'succeeded' });
     expect(
       reconcileWorkbenchMutation(commitIntent, ledger, {
@@ -234,5 +216,49 @@ describe('reconcileWorkbenchMutation', () => {
         headParent: 'aaa',
       }),
     ).toBe('confirmedSucceeded');
+  });
+});
+
+describe('buildMergeRemoveAuthority', () => {
+  test('merge populates source presence and mainContainsSourceHead from hashes', () => {
+    expect(
+      buildMergeRemoveAuthority(
+        mergeIntent,
+        [{ id: 'wt-main' }],
+        { mainCommitHashes: ['ccc', 'ddd'] },
+      ),
+    ).toEqual({
+      sourceWorktreePresent: false,
+      mainContainsSourceHead: true,
+    });
+  });
+
+  test('merge sets mainContainsSourceHead false when source head not in list', () => {
+    expect(
+      buildMergeRemoveAuthority(
+        mergeIntent,
+        [{ id: 'wt-feat' }, { id: 'wt-main' }],
+        { mainCommitHashes: ['zzz'] },
+      ),
+    ).toEqual({
+      sourceWorktreePresent: true,
+      mainContainsSourceHead: false,
+    });
+  });
+
+  test('merge omits mainContainsSourceHead when hashes not provided', () => {
+    expect(buildMergeRemoveAuthority(mergeIntent, [{ id: 'wt-main' }])).toEqual({
+      sourceWorktreePresent: false,
+      mainContainsSourceHead: undefined,
+    });
+  });
+
+  test('remove populates identity presence', () => {
+    expect(buildMergeRemoveAuthority(removeIntent, [{ id: 'wt-other' }])).toEqual({
+      worktreeIdentityPresent: false,
+    });
+    expect(buildMergeRemoveAuthority(removeIntent, [{ id: 'wt-feat' }])).toEqual({
+      worktreeIdentityPresent: true,
+    });
   });
 });

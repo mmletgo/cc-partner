@@ -1,9 +1,13 @@
 import { describe, expect, test } from 'vitest';
 import {
+  getUnknownMutationClientOperationId,
   isMutationSucceeded,
   isMutationUnknown,
+  isWorkbenchMutationUnknownError,
+  MUTATION_UNKNOWN_ERROR_CODE,
   mutationSucceeded,
   mutationUnknown,
+  WorkbenchMutationUnknownError,
   type WorkbenchMutationEnvelope,
 } from './mutationOutcome';
 
@@ -42,5 +46,37 @@ describe('WorkbenchMutationEnvelope helpers', () => {
     expect(envelope).not.toHaveProperty('intent');
     expect(envelope).not.toHaveProperty('beforeHead');
     expect(envelope).not.toHaveProperty('expectedTree');
+  });
+});
+
+describe('WorkbenchMutationUnknownError typed detection', () => {
+  test('instance is detected without reading localized message', () => {
+    const err = new WorkbenchMutationUnknownError(
+      'op-en',
+      'Result unknown. Refresh and verify manually.',
+    );
+    expect(isWorkbenchMutationUnknownError(err)).toBe(true);
+    expect(err.code).toBe(MUTATION_UNKNOWN_ERROR_CODE);
+    expect(getUnknownMutationClientOperationId(err)).toBe('op-en');
+  });
+
+  test('duck-typed code is accepted for cross-bundle errors', () => {
+    const duck = Object.assign(new Error('任意本地化文案'), {
+      code: MUTATION_UNKNOWN_ERROR_CODE,
+      clientOperationId: 'op-duck',
+    });
+    expect(isWorkbenchMutationUnknownError(duck)).toBe(true);
+    expect(getUnknownMutationClientOperationId(duck)).toBe('op-duck');
+  });
+
+  test('Chinese substring alone does not classify as unknown', () => {
+    const plain = new Error('操作结果未知，请刷新后人工核对');
+    expect(isWorkbenchMutationUnknownError(plain)).toBe(false);
+    expect(getUnknownMutationClientOperationId(plain)).toBeNull();
+  });
+
+  test('English mutationUnknown substring alone does not classify as unknown', () => {
+    const plain = new Error('mutationUnknown');
+    expect(isWorkbenchMutationUnknownError(plain)).toBe(false);
   });
 });

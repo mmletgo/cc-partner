@@ -26,18 +26,19 @@ export type MobileMutationPhase = 'idle' | 'busy' | 'reconciling' | 'unknown';
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   envelope.succeeded 可立即推进 UI；unknown 先 reconciling，对账后再 confirmed 或 unknown。
+ *   envelope.succeeded 可立即推进 UI；unknown 先 reconciling，对账后再 confirmed / failed / unknown。
  *
  * Code Logic（这个函数做什么）:
- *   reconcileResult 为 null 表示对账进行中；'confirmedSucceeded' 表示可推进；否则 unknown。
+ *   reconcileResult 为 null 表示对账进行中；终态成功/失败分别返回 confirmed*；否则 unknown。
  */
 export function resolveMobileMutationPhase(
   envelopeKind: 'succeeded' | 'unknown',
-  reconcileResult: 'confirmedSucceeded' | 'unknown' | null,
-): 'confirmedSucceeded' | MobileMutationPhase {
+  reconcileResult: 'confirmedSucceeded' | 'confirmedFailed' | 'unknown' | null,
+): 'confirmedSucceeded' | 'confirmedFailed' | MobileMutationPhase {
   if (envelopeKind === 'succeeded') return 'confirmedSucceeded';
   if (reconcileResult === null) return 'reconciling';
   if (reconcileResult === 'confirmedSucceeded') return 'confirmedSucceeded';
+  if (reconcileResult === 'confirmedFailed') return 'confirmedFailed';
   return 'unknown';
 }
 

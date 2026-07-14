@@ -691,6 +691,11 @@ describe('mobilePanelState', () => {
       'unknown',
       'ambiguous reconcile must stay unknown',
     );
+    assertEqual(
+      resolveMobileMutationPhase('unknown', 'confirmedFailed'),
+      'confirmedFailed',
+      'ledger failed clears to confirmedFailed',
+    );
 
     assertEqual(
       pickMobileMutationOperationId('unknown', 'op-1', 'op-2'),

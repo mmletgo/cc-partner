@@ -7,15 +7,22 @@ import {
   workbenchHttp,
 } from '@/api/workbenchHttp';
 import { StatusMessage } from '@/components/primitives';
-import { isMutationSucceeded, isMutationUnknown } from '@/lib/asyncState/mutationOutcome';
+import {
+  getUnknownMutationClientOperationId,
+  isMutationSucceeded,
+  isMutationUnknown,
+  isWorkbenchMutationUnknownError,
+} from '@/lib/asyncState/mutationOutcome';
 import type {
-  MutationAuthoritySnapshot,
   MutationIntent,
   WorkbenchGitCommit,
   WorkbenchProject,
   WorkbenchWorktree,
 } from '@/lib/types';
-import { reconcileWorkbenchMutation } from '@/lib/workbenchMutationReconciliation';
+import {
+  buildMergeRemoveAuthority,
+  reconcileWorkbenchMutation,
+} from '@/lib/workbenchMutationReconciliation';
 import {
   isMobileGitActionResponseCurrent,
   isMobileGitMergeResponseCurrent,
@@ -75,7 +82,8 @@ function getErrorMessage(reason: unknown): string {
  *   mutation 在 timeout/network 下必须稳定 operation id + ledger 对账，禁止盲重放。
  *
  * Code Logic（这个组件做什么）:
- *   通过 HTTP envelope API 执行 commit/push；unknown 后查询 ledger、刷新权威 worktree 并用 pure matrix 对账。
+ *   通过 HTTP envelope API 执行 commit/push；unknown 后查询 ledger、刷新权威 worktree 并用 pure matrix 对账；
+ *   mutationPhase 按 project/worktree 重置；typed unknown 判定；StatusMessage 提供 same-id 重新核对。
  */
 export function MobileGitPanel({
   project,
@@ -95,6 +103,8 @@ export function MobileGitPanel({
   const currentContextRef = useRef<MobileGitActionContext | null>(null);
   const commitOperationIdRef = useRef<string | null>(null);
   const pushOperationIdRef = useRef<string | null>(null);
+  const mergeOperationIdRef = useRef<string | null>(null);
+  const unknownKindRef = useRef<'commit' | 'push' | 'merge' | null>(null);
   const statusLabel = useMemo(() => {
     if (!worktree) return t('workbench:mobile.gitPanel.noWorktree');
     const statusKind = getMobileWorktreeStatusKind(worktree);
@@ -107,11 +117,23 @@ export function MobileGitPanel({
     return t('workbench:worktrees.status.clean');
   }, [t, worktree]);
 
+  // Business Logic: project/worktree 切换后旧 unknown 锁不得污染新上下文。
+  /* eslint-disable react-hooks/set-state-in-effect -- context 切换时必须同步清空 phase/error/ids */
   useEffect(() => {
     currentContextRef.current = project
       ? { projectId: project.id, worktreeId: worktree?.id ?? null }
       : null;
-  }, [project, worktree?.id]);
+    setMutationPhase('idle');
+    setError(null);
+    setActionBusy(null);
+    commitOperationIdRef.current = null;
+    pushOperationIdRef.current = null;
+    mergeOperationIdRef.current = null;
+    unknownKindRef.current = null;
+  // 仅 project.id / worktree.id 驱动上下文重置；project 对象引用变化不重置 phase。
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional id-only scope
+  }, [project?.id, worktree?.id]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -184,16 +206,16 @@ export function MobileGitPanel({
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   typed unknown 后禁止盲重放；按 ledger intent + 可观察权威状态纯对账。
+   *   typed unknown 后禁止盲重放；ledger 终态优先，否则 authority 矩阵对账。
    *
    * Code Logic（这个函数做什么）:
-   *   查询 getMutationOperation；刷新 worktrees；merge/remove 可观察 identity；commit/push 缺 head 权威字段保持 unknown。
+   *   查询 getMutationOperation；刷新 worktrees；merge 填充 source + mainContainsSourceHead。
    */
   const reconcileUnknownMutation = useCallback(
     async (
       clientOperationId: string,
       actionContext: MobileGitActionContext,
-    ): Promise<'confirmedSucceeded' | 'unknown'> => {
+    ): Promise<'confirmedSucceeded' | 'confirmedFailed' | 'unknown'> => {
       setMutationPhase('reconciling');
       const ledger = await workbenchHttp.git
         .getMutationOperation(clientOperationId)
@@ -208,34 +230,103 @@ export function MobileGitPanel({
       }
 
       const intent: MutationIntent | null = ledger?.intent ?? null;
-      if (!intent) return 'unknown';
+      if (!intent) {
+        if (ledger?.state === 'succeeded') return 'confirmedSucceeded';
+        if (ledger?.state === 'failed') return 'confirmedFailed';
+        return 'unknown';
+      }
 
-      const authority: MutationAuthoritySnapshot = {};
+      if (ledger?.state === 'succeeded' || ledger?.state === 'failed') {
+        return reconcileWorkbenchMutation(intent, ledger, {});
+      }
+
       if (intent.kind === 'merge' || intent.kind === 'remove') {
         try {
           const latest = await httpWorkbenchTransport.worktrees.list(actionContext.projectId);
           if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
             return 'unknown';
           }
+          let mainCommitHashes: string[] | undefined;
           if (intent.kind === 'merge') {
-            authority.sourceWorktreePresent = latest.some(
-              (item) => item.id === intent.sourceWorktreeId,
-            );
-          } else {
-            authority.worktreeIdentityPresent = latest.some(
-              (item) => item.id === intent.worktreeId,
-            );
+            const main = latest.find((item) => item.isMain) ?? null;
+            if (main) {
+              try {
+                const mainCommits = await httpWorkbenchTransport.git.listCommits(
+                  actionContext.projectId,
+                  main.id,
+                  100,
+                );
+                if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
+                  return 'unknown';
+                }
+                mainCommitHashes = mainCommits.map((commit) => commit.hash);
+              } catch {
+                mainCommitHashes = undefined;
+              }
+            }
           }
+          const authority = buildMergeRemoveAuthority(intent, latest, { mainCommitHashes });
+          return reconcileWorkbenchMutation(intent, ledger, authority);
         } catch {
           return 'unknown';
         }
       }
-      // commit same-message/different-tree：无 headTree 权威字段时 pure matrix 返回 unknown（不猜 message）。
 
-      return reconcileWorkbenchMutation(intent, ledger, authority);
+      return reconcileWorkbenchMutation(intent, ledger, {});
     },
     [onRefreshWorktrees],
   );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   unknown 锁住后用户需要 same-id 重新核对，而不是盲发新 mutation。
+   *
+   * Code Logic（这个函数做什么）:
+   *   按 unknownKind 取对应 operation id，再跑 reconcileUnknownMutation。
+   */
+  const handleRetryReconcile = useCallback(async (): Promise<void> => {
+    if (busy || !project || !worktree || mutationPhase !== 'unknown') return;
+    const kind = unknownKindRef.current;
+    if (!kind) return;
+    const clientOperationId =
+      kind === 'commit'
+        ? commitOperationIdRef.current
+        : kind === 'push'
+          ? pushOperationIdRef.current
+          : mergeOperationIdRef.current;
+    if (!clientOperationId) return;
+    const actionContext = { projectId: project.id, worktreeId: worktree.id };
+    setActionBusy(kind);
+    setError(null);
+    try {
+      const confirmed = await reconcileUnknownMutation(clientOperationId, actionContext);
+      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+      const phase = resolveMobileMutationPhase('unknown', confirmed);
+      if (phase === 'confirmedSucceeded') {
+        if (kind === 'commit') commitOperationIdRef.current = null;
+        if (kind === 'push') pushOperationIdRef.current = null;
+        if (kind === 'merge') mergeOperationIdRef.current = null;
+        unknownKindRef.current = null;
+        setMutationPhase('idle');
+        setError(null);
+        await refreshAfterAction(kind === 'merge' ? 'merge' : kind, actionContext);
+      } else if (phase === 'confirmedFailed') {
+        if (kind === 'commit') commitOperationIdRef.current = null;
+        if (kind === 'push') pushOperationIdRef.current = null;
+        if (kind === 'merge') mergeOperationIdRef.current = null;
+        unknownKindRef.current = null;
+        setMutationPhase('idle');
+        setError(t('workbench:errors.mutationFailed'));
+      } else {
+        setMutationPhase('unknown');
+        setError(t('workbench:errors.mutationUnknown'));
+      }
+    } finally {
+      if (isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
+        setActionBusy(null);
+      }
+    }
+  }, [busy, mutationPhase, project, reconcileUnknownMutation, refreshAfterAction, t, worktree]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -247,6 +338,7 @@ export function MobileGitPanel({
   const handleCommit = useCallback(async (): Promise<void> => {
     if (busy || !project || !worktree) return;
     if (isMobileMutationActionLocked(mutationPhase) && mutationPhase !== 'unknown') return;
+    if (mutationPhase === 'unknown' && unknownKindRef.current !== 'commit') return;
     const actionContext = { projectId: project.id, worktreeId: worktree.id };
     const clientOperationId = pickMobileMutationOperationId(
       mutationPhase,
@@ -258,6 +350,30 @@ export function MobileGitPanel({
     setMutationPhase('busy');
     setError(null);
     try {
+      // unknown 相位只对账，不二次执行。
+      if (mutationPhase === 'unknown') {
+        const confirmed = await reconcileUnknownMutation(clientOperationId, actionContext);
+        if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+        const phase = resolveMobileMutationPhase('unknown', confirmed);
+        if (phase === 'confirmedSucceeded') {
+          commitOperationIdRef.current = null;
+          unknownKindRef.current = null;
+          setMutationPhase('idle');
+          setError(null);
+          await refreshAfterAction('commit', actionContext);
+        } else if (phase === 'confirmedFailed') {
+          commitOperationIdRef.current = null;
+          unknownKindRef.current = null;
+          setMutationPhase('idle');
+          setError(t('workbench:errors.mutationFailed'));
+        } else {
+          unknownKindRef.current = 'commit';
+          setMutationPhase('unknown');
+          setError(t('workbench:errors.mutationUnknown'));
+        }
+        return;
+      }
+
       const envelope = await workbenchHttp.git.commit({
         worktreeId: worktree.id,
         message: null,
@@ -267,6 +383,7 @@ export function MobileGitPanel({
 
       if (isMutationSucceeded(envelope)) {
         commitOperationIdRef.current = null;
+        unknownKindRef.current = null;
         setMutationPhase('idle');
         onWorktreeChange?.(envelope.value);
         await refreshAfterAction('commit', actionContext);
@@ -282,10 +399,17 @@ export function MobileGitPanel({
         const phase = resolveMobileMutationPhase('unknown', confirmed);
         if (phase === 'confirmedSucceeded') {
           commitOperationIdRef.current = null;
+          unknownKindRef.current = null;
           setMutationPhase('idle');
           setError(null);
           await refreshAfterAction('commit', actionContext);
+        } else if (phase === 'confirmedFailed') {
+          commitOperationIdRef.current = null;
+          unknownKindRef.current = null;
+          setMutationPhase('idle');
+          setError(t('workbench:errors.mutationFailed'));
         } else {
+          unknownKindRef.current = 'commit';
           setMutationPhase('unknown');
           setError(t('workbench:errors.mutationUnknown'));
         }
@@ -294,6 +418,7 @@ export function MobileGitPanel({
       if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
       setMutationPhase('idle');
       commitOperationIdRef.current = null;
+      unknownKindRef.current = null;
       setError(`${t('workbench:errors.commitWorktree')}: ${getErrorMessage(reason)}`);
     } finally {
       if (isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
@@ -321,6 +446,7 @@ export function MobileGitPanel({
   const handlePush = useCallback(async (): Promise<void> => {
     if (busy || !project || !worktree) return;
     if (isMobileMutationActionLocked(mutationPhase) && mutationPhase !== 'unknown') return;
+    if (mutationPhase === 'unknown' && unknownKindRef.current !== 'push') return;
     const actionContext = { projectId: project.id, worktreeId: worktree.id };
     const clientOperationId = pickMobileMutationOperationId(
       mutationPhase,
@@ -332,6 +458,29 @@ export function MobileGitPanel({
     setMutationPhase('busy');
     setError(null);
     try {
+      if (mutationPhase === 'unknown') {
+        const confirmed = await reconcileUnknownMutation(clientOperationId, actionContext);
+        if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+        const phase = resolveMobileMutationPhase('unknown', confirmed);
+        if (phase === 'confirmedSucceeded') {
+          pushOperationIdRef.current = null;
+          unknownKindRef.current = null;
+          setMutationPhase('idle');
+          setError(null);
+          await refreshAfterAction('push', actionContext);
+        } else if (phase === 'confirmedFailed') {
+          pushOperationIdRef.current = null;
+          unknownKindRef.current = null;
+          setMutationPhase('idle');
+          setError(t('workbench:errors.mutationFailed'));
+        } else {
+          unknownKindRef.current = 'push';
+          setMutationPhase('unknown');
+          setError(t('workbench:errors.mutationUnknown'));
+        }
+        return;
+      }
+
       const envelope = await workbenchHttp.git.push({
         worktreeId: worktree.id,
         clientOperationId,
@@ -340,6 +489,7 @@ export function MobileGitPanel({
 
       if (isMutationSucceeded(envelope)) {
         pushOperationIdRef.current = null;
+        unknownKindRef.current = null;
         setMutationPhase('idle');
         onWorktreeChange?.(envelope.value);
         await refreshAfterAction('push', actionContext);
@@ -355,10 +505,17 @@ export function MobileGitPanel({
         const phase = resolveMobileMutationPhase('unknown', confirmed);
         if (phase === 'confirmedSucceeded') {
           pushOperationIdRef.current = null;
+          unknownKindRef.current = null;
           setMutationPhase('idle');
           setError(null);
           await refreshAfterAction('push', actionContext);
+        } else if (phase === 'confirmedFailed') {
+          pushOperationIdRef.current = null;
+          unknownKindRef.current = null;
+          setMutationPhase('idle');
+          setError(t('workbench:errors.mutationFailed'));
         } else {
+          unknownKindRef.current = 'push';
           setMutationPhase('unknown');
           setError(t('workbench:errors.mutationUnknown'));
         }
@@ -367,6 +524,7 @@ export function MobileGitPanel({
       if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
       setMutationPhase('idle');
       pushOperationIdRef.current = null;
+      unknownKindRef.current = null;
       setError(`${t('workbench:errors.pushWorktree')}: ${getErrorMessage(reason)}`);
     } finally {
       if (isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
@@ -389,16 +547,45 @@ export function MobileGitPanel({
    *   功能 worktree 完成后，手机端需要能触发合并回主工作区，沿用后端既有 merge 流程。
    *
    * Code Logic（这个函数做什么）:
-   *   委托父级执行 dirty guard 与 envelope merge；取消时不改本地提交，成功后清空源 worktree commits。
+   *   委托父级执行 dirty guard 与 envelope merge；typed unknown 进入 unknown 相位，不解析本地化文案。
    */
   const handleMerge = useCallback(async (): Promise<void> => {
     if (busy || !project || !worktree || worktree.isMain) return;
-    if (isMobileMutationActionLocked(mutationPhase)) return;
+    if (isMobileMutationActionLocked(mutationPhase) && mutationPhase !== 'unknown') return;
+    if (mutationPhase === 'unknown' && unknownKindRef.current !== 'merge') return;
     const actionContext = { projectId: project.id, worktreeId: worktree.id };
     setActionBusy('merge');
     setMutationPhase('busy');
     setError(null);
     try {
+      if (mutationPhase === 'unknown' && mergeOperationIdRef.current) {
+        const confirmed = await reconcileUnknownMutation(
+          mergeOperationIdRef.current,
+          actionContext,
+        );
+        if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+        const phase = resolveMobileMutationPhase('unknown', confirmed);
+        if (phase === 'confirmedSucceeded') {
+          mergeOperationIdRef.current = null;
+          unknownKindRef.current = null;
+          setMutationPhase('idle');
+          setError(null);
+          requestIdRef.current += 1;
+          setCommits([]);
+          await onRefreshWorktrees?.({ expectedProjectId: actionContext.projectId });
+        } else if (phase === 'confirmedFailed') {
+          mergeOperationIdRef.current = null;
+          unknownKindRef.current = null;
+          setMutationPhase('idle');
+          setError(t('workbench:errors.mutationFailed'));
+        } else {
+          unknownKindRef.current = 'merge';
+          setMutationPhase('unknown');
+          setError(t('workbench:errors.mutationUnknown'));
+        }
+        return;
+      }
+
       const didMerge = await onMergeWorktree(worktree);
       if (!didMerge) {
         setMutationPhase('idle');
@@ -409,23 +596,38 @@ export function MobileGitPanel({
       setCommits([]);
       setError(null);
       setLoading(false);
+      mergeOperationIdRef.current = null;
+      unknownKindRef.current = null;
       setMutationPhase('idle');
     } catch (reason) {
       if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
-      const message = getErrorMessage(reason);
-      if (message.includes('结果未知') || message.includes('mutationUnknown')) {
+      if (isWorkbenchMutationUnknownError(reason)) {
+        const opId = getUnknownMutationClientOperationId(reason);
+        mergeOperationIdRef.current = opId;
+        unknownKindRef.current = 'merge';
         setMutationPhase('unknown');
         setError(t('workbench:errors.mutationUnknown'));
       } else {
         setMutationPhase('idle');
-        setError(`${t('workbench:errors.mergeWorktree')}: ${message}`);
+        mergeOperationIdRef.current = null;
+        unknownKindRef.current = null;
+        setError(`${t('workbench:errors.mergeWorktree')}: ${getErrorMessage(reason)}`);
       }
     } finally {
       if (isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
         setActionBusy(null);
       }
     }
-  }, [busy, mutationPhase, onMergeWorktree, project, t, worktree]);
+  }, [
+    busy,
+    mutationPhase,
+    onMergeWorktree,
+    onRefreshWorktrees,
+    project,
+    reconcileUnknownMutation,
+    t,
+    worktree,
+  ]);
 
   const actionDisabled =
     busy ||
@@ -458,7 +660,22 @@ export function MobileGitPanel({
         </StatusMessage>
       ) : null}
       {error ? (
-        <StatusMessage tone="danger" className={styles.panelError}>
+        <StatusMessage
+          tone="danger"
+          className={styles.panelError}
+          action={
+            mutationPhase === 'unknown' ? (
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                disabled={actionBusy !== null || busy}
+                onClick={() => void handleRetryReconcile()}
+              >
+                {t('workbench:mobile.gitPanel.retryReconcile')}
+              </button>
+            ) : undefined
+          }
+        >
           <span>{t('workbench:mobile.projectPanel.error')}</span>
           <span>{error}</span>
         </StatusMessage>

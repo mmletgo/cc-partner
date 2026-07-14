@@ -6,17 +6,23 @@ import {
   httpWorkbenchTransport,
   workbenchHttp,
 } from '@/api/workbenchHttp';
-import { isMutationSucceeded, isMutationUnknown } from '@/lib/asyncState/mutationOutcome';
+import {
+  isMutationSucceeded,
+  isMutationUnknown,
+  WorkbenchMutationUnknownError,
+} from '@/lib/asyncState/mutationOutcome';
 import { useAttention } from '@/hooks/attentionContext';
 import type {
   AttentionItem,
-  MutationAuthoritySnapshot,
   MutationIntent,
   WorkbenchProject,
   WorkbenchSession,
   WorkbenchWorktree,
 } from '@/lib/types';
-import { reconcileWorkbenchMutation } from '@/lib/workbenchMutationReconciliation';
+import {
+  buildMergeRemoveAuthority,
+  reconcileWorkbenchMutation,
+} from '@/lib/workbenchMutationReconciliation';
 import type { MobileAutomationExecutionContext } from './components/MobileAutomationPanel';
 import { MobileAttentionPanel } from './components/MobileAttentionPanel';
 import { MobileProjectPanel } from './components/MobileProjectPanel';
@@ -46,7 +52,6 @@ import {
 } from './mobileWorkbenchState';
 import {
   getMobileWorktreeMergeAppliedState,
-  resolveMobileMutationPhase,
   runMobileWorktreeMergeFlow,
   runMobileWorktreeRefreshFlow,
   shouldConfirmMobileFileDirtyContextSwitch,
@@ -850,23 +855,52 @@ export function MobileWorkbench(): ReactElement {
                 expectedProjectId: operationProjectId ?? undefined,
               });
               const intent: MutationIntent | null = ledger?.intent ?? null;
-              const authority: MutationAuthoritySnapshot = {};
+              if (ledger?.state === 'succeeded') return;
+              if (ledger?.state === 'failed') {
+                throw new Error(t('workbench:errors.mergeWorktree'));
+              }
               if (intent?.kind === 'merge' && operationProjectId) {
                 try {
                   const latest = await httpWorkbenchTransport.worktrees.list(operationProjectId);
-                  authority.sourceWorktreePresent = latest.some(
-                    (item) => item.id === intent.sourceWorktreeId,
-                  );
-                } catch {
+                  let mainCommitHashes: string[] | undefined;
+                  const main = latest.find((item) => item.isMain) ?? null;
+                  if (main) {
+                    try {
+                      const mainCommits = await httpWorkbenchTransport.git.listCommits(
+                        operationProjectId,
+                        main.id,
+                        100,
+                      );
+                      mainCommitHashes = mainCommits.map((commit) => commit.hash);
+                    } catch {
+                      mainCommitHashes = undefined;
+                    }
+                  }
+                  const authority = buildMergeRemoveAuthority(intent, latest, {
+                    mainCommitHashes,
+                  });
+                  const confirmed = reconcileWorkbenchMutation(intent, ledger, authority);
+                  if (confirmed === 'confirmedSucceeded') return;
+                  if (confirmed === 'confirmedFailed') {
+                    throw new Error(t('workbench:errors.mergeWorktree'));
+                  }
+                } catch (inner) {
+                  if (inner instanceof Error && inner.message === t('workbench:errors.mergeWorktree')) {
+                    throw inner;
+                  }
                   // keep unknown
                 }
+              } else if (intent) {
+                const confirmed = reconcileWorkbenchMutation(intent, ledger, {});
+                if (confirmed === 'confirmedSucceeded') return;
+                if (confirmed === 'confirmedFailed') {
+                  throw new Error(t('workbench:errors.mergeWorktree'));
+                }
               }
-              const confirmed = intent
-                ? reconcileWorkbenchMutation(intent, ledger, authority)
-                : 'unknown';
-              const phase = resolveMobileMutationPhase('unknown', confirmed);
-              if (phase === 'confirmedSucceeded') return;
-              throw new Error(t('workbench:errors.mutationUnknown'));
+              throw new WorkbenchMutationUnknownError(
+                envelope.clientOperationId,
+                t('workbench:errors.mutationUnknown'),
+              );
             }
           },
           applyMergeSuccess: async (plan) => {

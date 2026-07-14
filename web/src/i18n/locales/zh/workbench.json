@@ -184,7 +184,8 @@
       "pushing": "推送中",
       "merging": "合并中",
       "commitMeta": "{{author}} · {{date}}",
-      "reconciling": "核对结果中…"
+      "reconciling": "核对结果中…",
+      "retryReconcile": "重新核对"
     },
     "worktreePanel": {
       "title": "Worktrees",
@@ -196,7 +197,8 @@
       "removing": "移除中",
       "sync": "同步",
       "removeConfirm": "确定移除 worktree“{{name}}”？请先确认不再需要该工作区。",
-      "reconciling": "核对结果中…"
+      "reconciling": "核对结果中…",
+      "retryReconcile": "重新核对"
     },
     "promptPanel": {
       "title": "Prompt",
@@ -652,6 +654,7 @@
     "copyPath": "复制路径失败",
     "renamePath": "重命名失败",
     "deletePath": "删除失败",
-    "mutationUnknown": "操作结果未知，请刷新后人工核对"
+    "mutationUnknown": "操作结果未知，请刷新后人工核对",
+    "mutationFailed": "操作失败，可以重新发起。"
   }
 }
