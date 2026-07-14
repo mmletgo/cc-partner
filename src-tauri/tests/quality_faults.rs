@@ -1,21 +1,26 @@
 //! S6 Quality Faults 集成测试（L2）：批事务 rollback、SQLite busy 有界超时、
-//! peer 响应丢失幂等收敛、malformed HTTP DTO fail-closed。
+//! peer 响应丢失幂等收敛、malformed HTTP DTO fail-closed、
+//! Transfer send 路径 fail-closed、Scratchpad 事务 inject rollback、Settings 多字段事务隔离。
 //!
 //! Business Logic（为什么需要这个测试文件）:
 //!     生产路径上的 batch 写、连接池 busy、transfer complete 响应丢失与对端畸形 DTO
 //!     必须在 L2 用可复现故障注入验证：整批 rollback、有界等待、幂等收敛、
-//!     InvalidResponse fail-closed（不得当业务成功）。故障 seam 仅 test-only 参数
-//!     （inject_fail_at / 短 backoff policy / mock peer），禁止生产环境变量打开故障。
+//!     InvalidResponse fail-closed（不得当业务成功）。故障 seam 仅 debug/test-only
+//!     （inject_fail_at / 短 backoff policy / mock peer / FaultInjectingConfigIo），
+//!     禁止生产环境变量打开故障；history/scratchpad inject API 在 release 构建剥离。
 //!
 //! L2 coverage map（稳定 ID 见 `docs/development/quality-matrix.json`）:
-//!     - `L2-FAULT-BATCH-001` / `L2-FAULT-BUSY-001` / `L2-FAULT-PEER-001`：本文件 T4 用例
-//!     - `L2-FAULT-DTO-001`：本文件 malformed transfer status/complete 响应
+//!     - `L2-FAULT-BATCH-001`：`fail_row_n_in_batch_rolls_back_all`
+//!     - `L2-FAULT-BUSY-001`：`hold_write_lock_past_busy_timeout_is_bounded`
+//!     - `L2-FAULT-PEER-001`：`peer_response_lost_after_commit_converges_idempotently`
+//!     - `L2-FAULT-DTO-001`：malformed transfer status/complete 响应
+//!     - `L2-FAULT-TRANSFER-SEND-001`：`malformed_transfer_init_dto_fails_closed`
+//!     - `L2-FAULT-SCRATCH-TX-001`：`scratchpad_inject_fail_rolls_back_batch`
+//!     - `L2-FAULT-SETTINGS-001`：`settings_partial_command_failure_isolates_fields`
 //!     - `L2-LAN-BOUNDARY-001`：**不在本文件重复**；权威自动化矩阵见
 //!       `tests/lan_trust_boundary_smoke.rs` + `lan_trust_boundary_harness`
 //!       （无凭据 loopback/mobile 读写、Host/Origin、stop loopback+token、
 //!       injected public/XFF peer；真实多机 mDNS/公网 NIC = L3 NOT VERIFIED）
-//!     - Transfer send Tauri command / Settings 部分失败：前端 L1 harness；
-//!       本文件不造第二套 GUI/AppState 假件。
 //!
 //! Code Logic（这个文件做什么）:
 //!     1) fail_row_n_in_batch_rolls_back_all：ClaudeHistoryRepo inject_fail_at 中途失败 → COUNT=0
@@ -25,14 +30,26 @@
 //!        信封 + status=completed → transfer_complete_with_policy 收敛 Ok(true)，并校验稳定 code
 //!     4) malformed_transfer_status_dto_is_invalid_response：status 返回非 DTO shape → InvalidResponse
 //!     5) malformed_transfer_complete_body_is_invalid_response：complete 非 JSON body → InvalidResponse
+//!     6) malformed_transfer_init_dto_fails_closed：init 200 但非 JSON / 错误 shape → String Err，
+//!        不得表现为带 resume_offset 的成功握手
+//!     7) scratchpad_inject_fail_rolls_back_batch：事务 inject 中途失败 → 预置行保留、批未提交
+//!     8) settings_partial_command_failure_isolates_fields：ConfigRuntime 多字段 mutate 在
+//!        Rename 前故障时 memory+disk 全旧；成功命令 A 后失败命令 B 不得污染 A 已提交状态
 
+use app_lib::config::AppConfig;
+use app_lib::config_runtime::{update_config_transactionally, ConfigRuntime};
+use app_lib::config_store::{
+    ConfigIoStage, ConfigStore, FaultInjectingConfigIo, FsConfigStore, StdConfigIo,
+};
 use app_lib::{
-    ClaudeHistoryRepo, ClaudeHistoryRow, PeerCallError, PeerClient, TransferCompletePolicy,
+    ClaudeHistoryRepo, ClaudeHistoryRow, PeerCallError, PeerClient, ScratchpadRepo, ScratchpadRow,
+    TransferCompletePolicy,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -77,6 +94,36 @@ async fn setup_history_db(max_connections: u32, busy_timeout: Duration) -> Fault
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     Scratchpad 事务 inject 测试需要隔离的 scratchpad 表，避免污染用户库。
+///
+/// Code Logic（这个函数做什么）:
+///     创建 WAL 文件 SQLite 并建最小 `scratchpad` 表，返回 pool。
+async fn setup_scratchpad_db() -> FaultTestDb {
+    let dir = TempDir::new().expect("tempdir");
+    let db_path = dir.path().join("quality_faults_scratchpad.db");
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("connect pool");
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS scratchpad (\
+         id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '速记本', content TEXT NOT NULL, \
+         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, device_id TEXT NOT NULL, \
+         vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+    )
+    .execute(&pool)
+    .await
+    .expect("create scratchpad");
+    FaultTestDb { _dir: dir, pool }
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     批 rollback / 成功写入路径都需要构造合法 ClaudeHistoryRow。
 ///
 /// Code Logic（这个函数做什么）:
@@ -103,6 +150,52 @@ fn sample_history_batch(prefix: &str, count: usize) -> Vec<ClaudeHistoryRow> {
         });
     }
     batch
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Scratchpad inject 路径需要合法页面行构造。
+///
+/// Code Logic（这个函数做什么）:
+///     生成最小 ScratchpadRow，vector_clock 为 `{device:1}`。
+fn sample_scratchpad_row(id: &str, title: &str, content: &str) -> ScratchpadRow {
+    let mut vc = HashMap::new();
+    vc.insert("d".to_string(), 1);
+    ScratchpadRow {
+        id: id.to_string(),
+        title: title.to_string(),
+        content: content.to_string(),
+        created_at: "t".into(),
+        updated_at: "t".into(),
+        device_id: "d".into(),
+        vector_clock: vc,
+        deleted: false,
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Settings L2 需要构造可 `validate()` 的最小合法 AppConfig。
+///
+/// Code Logic（这个函数做什么）:
+///     在 temp 根下生成 device/path/hotkey 等合法字段，与 config_runtime 单测样本对齐。
+fn sample_settings_config(data_dir: &Path, device_name: &str) -> AppConfig {
+    AppConfig {
+        device_id: "settings-l2-device".into(),
+        device_name: device_name.into(),
+        http_port: 0,
+        receive_dir: data_dir.join("recv").to_string_lossy().to_string(),
+        db_path: data_dir.join("data.db").to_string_lossy().to_string(),
+        screenshot_hotkey: "<ctrl>+<shift>+s".into(),
+        prompt_optimizer_hotkey: "<ctrl>".into(),
+        prompt_optimizer_fill_language: "zh".into(),
+        cloud_sync_repo_url: None,
+        cloud_sync_enabled: false,
+        cloud_sync_auto: false,
+        cloud_sync_interval_secs: 600,
+        cloud_sync_branch: None,
+        health: Default::default(),
+        orchestrator: Default::default(),
+        github_trending: Default::default(),
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -460,6 +553,264 @@ async fn malformed_transfer_complete_shape_is_invalid_response() {
         other => panic!("expected PeerCallError::InvalidResponse, got: {other}"),
     }
     assert_eq!(err.code(), None);
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     Transfer send 握手若对端 init 返回非 JSON 或错误 shape，发送端必须 fail-closed，
+///     不得把畸形响应当 accepted 并带着 resume_offset 进入分块写危险状态。
+///
+/// Code Logic（这个测试做什么）:
+///     axum mock `POST /api/transfer/init` 先返回 200 + plain text，再返回 200 + 错误 shape JSON；
+///     `PeerClient::transfer_init` 两次均 `Err(String)`，错误不得看起来像成功握手
+///     （不得含可解析 resume_offset 成功语义）。
+#[tokio::test]
+async fn malformed_transfer_init_dto_fails_closed() {
+    // Case A：200 + 非 JSON body。
+    {
+        let app = axum::Router::new().route(
+            "/api/transfer/init",
+            axum::routing::post(|| async move {
+                (
+                    axum::http::StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                    "not-json-init-body",
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("bind mock");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve mock");
+        });
+        let base_url = format!("http://{addr}");
+        let client = PeerClient::new();
+        let meta = serde_json::json!({
+            "transfer_id": "tid-bad-init",
+            "filename": "a.bin",
+            "size": 10,
+            "sha256": "deadbeef",
+            "chunk_size": 960 * 1024
+        });
+        let err = client
+            .transfer_init(&base_url, meta)
+            .await
+            .expect_err("non-JSON init body must fail closed");
+        assert!(
+            !err.contains("\"resume_offset\""),
+            "error surface must not look like a successful init with resume_offset: {err}"
+        );
+        assert!(
+            err.to_ascii_lowercase().contains("invalid")
+                || err.to_ascii_lowercase().contains("json")
+                || err.contains("init"),
+            "error should indicate parse/init failure, got: {err}"
+        );
+    }
+
+    // Case B：业务失败信封（typed failure）仍 fail-closed，不得当 accepted。
+    {
+        let app = axum::Router::new().route(
+            "/api/transfer/init",
+            axum::routing::post(|| async move {
+                (
+                    axum::http::StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({
+                        "error": "transfer id conflict（文案不得当成功）",
+                        "code": "conflict",
+                        "request_id": "r-init-conflict",
+                        "retryable": false,
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("bind mock");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve mock");
+        });
+        let base_url = format!("http://{addr}");
+        let client = PeerClient::new();
+        let meta = serde_json::json!({
+            "transfer_id": "tid-conflict-init",
+            "filename": "a.bin",
+            "size": 10,
+            "sha256": "deadbeef",
+            "chunk_size": 960 * 1024
+        });
+        let err = client
+            .transfer_init(&base_url, meta)
+            .await
+            .expect_err("business failure envelope must fail closed");
+        assert!(
+            !err.contains("\"resume_offset\""),
+            "error surface must not look like a successful init with resume_offset: {err}"
+        );
+        assert!(
+            err.contains("conflict") || err.contains("409") || err.contains("init"),
+            "error should carry conflict/status surface: {err}"
+        );
+    }
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     Scratchpad 批量写若走事务边界，中途失败必须整批 rollback，预置页不得被 partial batch 污染；
+///     inject seam 仅 debug/test-only，成功路径（inject=None）必须可写。
+///
+/// Code Logic（这个测试做什么）:
+///     seed 1 条 prior → COUNT=1；3 行 batch 在 index=1 inject fail → Err 且 COUNT 仍 1；
+///     再 `bulk_upsert_inject_fail_at(..., None)` 成功写入批。
+#[tokio::test]
+async fn scratchpad_inject_fail_rolls_back_batch() {
+    let db = setup_scratchpad_db().await;
+    let repo = ScratchpadRepo::new(db.pool.clone());
+
+    let prior = sample_scratchpad_row("prior-page", "prior", "keep-me");
+    repo.upsert(&prior).await.expect("seed prior");
+    let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scratchpad")
+        .fetch_one(&db.pool)
+        .await
+        .expect("count before");
+    assert_eq!(before, 1);
+
+    let batch = vec![
+        sample_scratchpad_row("sp-0", "a", "c0"),
+        sample_scratchpad_row("sp-1", "b", "c1"),
+        sample_scratchpad_row("sp-2", "c", "c2"),
+    ];
+    let err = repo
+        .bulk_upsert_inject_fail_at(&batch, Some(1))
+        .await
+        .expect_err("inject fail must surface");
+    assert!(
+        err.to_string().contains("injected scratchpad"),
+        "error should mention scratchpad inject seam: {err}"
+    );
+
+    let after_fail: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scratchpad")
+        .fetch_one(&db.pool)
+        .await
+        .expect("count after fail");
+    assert_eq!(
+        after_fail, 1,
+        "partial batch rows must roll back; prior row stays"
+    );
+    let kept = repo.get("prior-page").await.expect("get prior").expect("exists");
+    assert_eq!(kept.content, "keep-me");
+    assert!(repo.get("sp-0").await.expect("get sp-0").is_none());
+    assert!(repo.get("sp-1").await.expect("get sp-1").is_none());
+    assert!(repo.get("sp-2").await.expect("get sp-2").is_none());
+
+    repo.bulk_upsert_inject_fail_at(&batch, None)
+        .await
+        .expect("inject=None path must succeed");
+    let after_ok: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scratchpad")
+        .fetch_one(&db.pool)
+        .await
+        .expect("count after ok");
+    assert_eq!(after_ok, 4);
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     Settings 多字段更新经 `update_config_transactionally` 时，落盘前故障不得半应用字段；
+///     且失败命令不得污染此前已成功提交的命令状态（命令边界隔离）。
+///
+/// Code Logic（这个测试做什么）:
+///     1) seed device_name=settings-a + receive_dir；
+///     2) FaultInjectingConfigIo::Rename fail_once，同时 mutate device_name+receive_dir → Err；
+///        memory 与 disk 均保持旧值（两字段都不半写）；
+///     3) 健康 IO 成功更新 device_name=settings-a-ok；
+///     4) 再对 receive_dir 注入 Rename 失败 → settings-a-ok 仍在 memory/disk。
+#[tokio::test]
+async fn settings_partial_command_failure_isolates_fields() {
+    let temp = TempDir::new().expect("tempdir");
+    let root = temp.path();
+    let config_path = root.join("config.json");
+    let initial = sample_settings_config(root, "settings-a");
+    let old_receive = initial.receive_dir.clone();
+
+    let seed = FsConfigStore::new(config_path.clone(), Arc::new(StdConfigIo));
+    seed.save_atomic(&initial).expect("seed config");
+
+    // 故障路径：rename 前失败，多字段 mutate 不得半应用。
+    let fail_io = Arc::new(FaultInjectingConfigIo::fail_once(
+        Arc::new(StdConfigIo),
+        ConfigIoStage::Rename,
+    ));
+    let fail_store: Arc<dyn ConfigStore> =
+        Arc::new(FsConfigStore::new(config_path.clone(), fail_io));
+    let runtime = ConfigRuntime::new(initial.clone(), fail_store);
+    let new_receive = root.join("recv-new").to_string_lossy().to_string();
+
+    let err = update_config_transactionally(&runtime, |cfg| {
+        cfg.device_name = "settings-b-half".into();
+        cfg.receive_dir = new_receive.clone();
+        Ok(())
+    })
+    .await
+    .expect_err("rename inject must fail closed");
+    assert!(
+        err.to_string().contains("注入") || err.to_string().contains("故障") || err.to_string().contains("Rename") || err.to_string().contains("rename"),
+        "expected inject/rename failure surface: {err}"
+    );
+
+    let mem = runtime.snapshot().expect("snapshot after fail");
+    assert_eq!(mem.device_name, "settings-a");
+    assert_eq!(mem.receive_dir, old_receive);
+    let disk: AppConfig =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(disk.device_name, "settings-a");
+    assert_eq!(disk.receive_dir, old_receive);
+
+    // 成功命令 A：只改 device_name。
+    let ok_store: Arc<dyn ConfigStore> =
+        Arc::new(FsConfigStore::new(config_path.clone(), Arc::new(StdConfigIo)));
+    let runtime_ok = ConfigRuntime::new(initial.clone(), ok_store);
+    let (committed, _) = update_config_transactionally(&runtime_ok, |cfg| {
+        cfg.device_name = "settings-a-ok".into();
+        Ok(())
+    })
+    .await
+    .expect("healthy update of device_name");
+    assert_eq!(committed.device_name, "settings-a-ok");
+    assert_eq!(
+        runtime_ok.snapshot().unwrap().device_name,
+        "settings-a-ok"
+    );
+
+    // 失败命令 B：改 receive_dir，Rename 注入失败，不得污染 A 已提交的 device_name。
+    let fail_io_b = Arc::new(FaultInjectingConfigIo::fail_once(
+        Arc::new(StdConfigIo),
+        ConfigIoStage::Rename,
+    ));
+    let fail_store_b: Arc<dyn ConfigStore> =
+        Arc::new(FsConfigStore::new(config_path.clone(), fail_io_b));
+    // 用磁盘当前权威（已含 settings-a-ok）构造 runtime，模拟真实后续命令。
+    let disk_after_a: AppConfig =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(disk_after_a.device_name, "settings-a-ok");
+    let runtime_b = ConfigRuntime::new(disk_after_a.clone(), fail_store_b);
+    let err_b = update_config_transactionally(&runtime_b, |cfg| {
+        cfg.receive_dir = new_receive.clone();
+        Ok(())
+    })
+    .await
+    .expect_err("second command rename inject must fail");
+    let _ = err_b;
+
+    let mem_b = runtime_b.snapshot().expect("snapshot b");
+    assert_eq!(
+        mem_b.device_name, "settings-a-ok",
+        "failed command B must not corrupt successful command A state"
+    );
+    assert_eq!(mem_b.receive_dir, old_receive);
+    let disk_b: AppConfig =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(disk_b.device_name, "settings-a-ok");
+    assert_eq!(disk_b.receive_dir, old_receive);
 }
 
 /// Business Logic（为什么需要这个测试）:

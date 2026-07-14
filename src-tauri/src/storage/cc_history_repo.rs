@@ -351,14 +351,18 @@ impl ClaudeHistoryRepo {
         self.upsert_merged_batch_inner(items, None).await
     }
 
-    /// 事务性 REPLACE；可选注入失败点，供 scale_safety 等产品路径 rollback 回归。
+    /// 事务性 REPLACE；可选注入失败点，供 scale_safety / quality_faults 等 rollback 回归。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     集成测试必须调用与生产相同的 `upsert_merged_batch` 事务边界，
     ///     而不能手写 begin+INSERT 假装覆盖了产品写路径。
+    ///     本 inject seam 仅 debug/test-only：`cfg(test)` 或 `debug_assertions` 下编译，
+    ///     release 构建（`not(debug_assertions)` 且无 test）会剥离，禁止生产路径注入失败。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     委托 `upsert_merged_batch_inner(items, inject_fail_at)`。
+    ///     委托 `upsert_merged_batch_inner(items, inject_fail_at)`；
+    ///     生产 `upsert_merged_batch` 始终可用且固定传 `None`。
+    #[cfg(any(test, debug_assertions))]
     pub async fn upsert_merged_batch_inject_fail_at(
         &self,
         items: &[ClaudeHistoryRow],

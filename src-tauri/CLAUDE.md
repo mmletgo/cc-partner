@@ -34,8 +34,8 @@ src/
 ├── models/prompt.rs   — PromptRow（snake_case，DB/同步）+ PromptDto（camelCase，前端） [已实现]
 ├── models/scratchpad.rs — ScratchpadRow（多页面，DB/同步）+ ScratchpadPageDto/SummaryDto（camelCase，前端） [已实现]
 ├── storage/prompt_repo.rs — sqlx 运行期 query（非宏），list/get/create/update/soft_delete/list_tags [已实现]
-├── storage/scratchpad_repo.rs — scratchpad 多页面 CRUD、旧表 title 迁移、同步 upsert [已实现]
-├── storage/cc_history_repo.rs — claude_history 表 CRUD + bulk_ingest(IGNORE)/bulk_upsert(REPLACE) + scan_state；`upsert_merged_batch_inject_fail_at` 为 test-only 事务中途失败 seam（生产 `upsert_merged_batch` 无注入）[已实现]
+├── storage/scratchpad_repo.rs — scratchpad 多页面 CRUD、旧表 title 迁移、同步 upsert；生产 `bulk_upsert` 保持无事务循环；`bulk_upsert_inject_fail_at` 为 debug_assertions/test-only 事务 inject seam（release 剥离）[已实现]
+├── storage/cc_history_repo.rs — claude_history 表 CRUD + bulk_ingest(IGNORE)/bulk_upsert(REPLACE) + scan_state；`upsert_merged_batch_inject_fail_at` 为 debug_assertions/test-only 事务中途失败 seam（`#[cfg(any(test, debug_assertions))]`，release 剥离；生产 `upsert_merged_batch` 始终无注入）[已实现]
 ├── storage/health_repo.rs — activity_records/water_records(自增 id)/rest_records 读写 + aggregate_minutes/daily 聚合统计 [已实现]
 ├── sync/              — 向量时钟 + LWW 合并 + engine              [M4]
 ├── net/               — mdns-sd 发现 + axum server + reqwest client [已实现 M3]
@@ -516,7 +516,8 @@ cargo test --locked --test backend_doctor_smoke -- --nocapture --test-threads=1
 cargo test --locked --test pty_smoke -- --nocapture --test-threads=1
 cargo test --locked --test lan_trust_boundary_smoke -- --nocapture --test-threads=1
 # S6 quality_faults L2：batch rollback / busy_timeout 有界 / peer 响应丢失幂等收敛 /
-# malformed transfer status|complete DTO fail-closed（test-only inject seam，无生产 env 故障开关）。
+# malformed transfer status|complete|init DTO fail-closed、scratchpad 事务 inject rollback、
+# settings 多字段事务隔离（debug_assertions/test-only inject seam，无生产 env 故障开关）。
 # LAN 真实 socket 矩阵不在此重复，见 lan_trust_boundary_smoke；L3 真机见 docs/development/real-device-certification.md
 cargo test --locked --test quality_faults -- --nocapture --test-threads=1
 cargo check --locked --bins
@@ -530,7 +531,7 @@ export CC_PARTNER_SMOKE_KEEP=1
 mkdir -p "$CC_PARTNER_SMOKE_ROOT"
 ```
 
-相关文件：`tests/backend_cli_smoke.rs`（start/health/status/stop、sequential + concurrent duplicate start、start 与 direct serve 并发 PID 归属、stale control）、`tests/backend_doctor_smoke.rs`（doctor --json pure JSON / exit 0|1|2 / privacy sentinel / core-path unhealthy / malformed recent-errors degraded）、`tests/pty_smoke.rs`（原生 shell echo/exit + 生产 helper 绑定的 Unix process-group / Windows detached flags + PTY RAII child cleanup）、`tests/lan_trust_boundary_smoke.rs` + `src/net/lan_trust_boundary_harness.rs`（固定 LAN 边界绑定服务器矩阵 + injected peer 证据）、`tests/quality_faults.rs`（batch inject_fail_at 整批 rollback、短 busy_timeout 有界写锁失败、peer complete 响应丢失 + status 幂等收敛与稳定 code、malformed transfer status/complete DTO → InvalidResponse；Cross-Platform Smoke 已串行执行）、`tests/support/mod.rs`（隔离根、CLI 硬超时、PID cleanup、diagnostics）。L3 真机矩阵见 `docs/development/real-device-certification.md`（未执行项保持 NOT VERIFIED）。
+相关文件：`tests/backend_cli_smoke.rs`（start/health/status/stop、sequential + concurrent duplicate start、start 与 direct serve 并发 PID 归属、stale control）、`tests/backend_doctor_smoke.rs`（doctor --json pure JSON / exit 0|1|2 / privacy sentinel / core-path unhealthy / malformed recent-errors degraded）、`tests/pty_smoke.rs`（原生 shell echo/exit + 生产 helper 绑定的 Unix process-group / Windows detached flags + PTY RAII child cleanup）、`tests/lan_trust_boundary_smoke.rs` + `src/net/lan_trust_boundary_harness.rs`（固定 LAN 边界绑定服务器矩阵 + injected peer 证据）、`tests/quality_faults.rs`（history inject_fail_at 整批 rollback、短 busy_timeout 有界写锁失败、peer complete 响应丢失 + status 幂等收敛与稳定 code、malformed transfer status/complete/init DTO fail-closed、scratchpad 事务 inject rollback、settings 多字段 ConfigRuntime 事务隔离；history/scratchpad inject seam 为 `debug_assertions`/test-only；Cross-Platform Smoke 已串行执行）、`tests/support/mod.rs`（隔离根、CLI 硬超时、PID cleanup、diagnostics）。L3 真机矩阵见 `docs/development/real-device-certification.md`（未执行项保持 NOT VERIFIED）。
 
 ### CI 触发与矩阵
 
