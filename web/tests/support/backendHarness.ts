@@ -1489,15 +1489,27 @@ export function createBackendHarness(): PlaywrightBackendHarness {
           win.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
             /**
              * Business Logic（为什么需要这个函数）:
-             *   Tauri event plugin 卸载 listener 的内部钩子。
+             *   Tauri event plugin 卸载 listener 的内部钩子；
+             *   部分 unlisten 路径只走 unregisterListener 而不再 invoke plugin:event|unlisten。
              *
              * Code Logic（这个函数做什么）:
-             *   同步删除页内映射（计数由 unlisten invoke 扣减）。
+             *   删除页内映射，并经 bridge 扣减 harness listener 计数（与 plugin:event|unlisten 对称）。
              */
             unregisterListener: (event: string, eventId: number) => {
+              // 若 plugin:event|unlisten 已清理映射，则不再二次扣减 listener 计数
+              if (!eventIdToEvent.has(eventId) && !eventIdToCallback.has(eventId)) {
+                return;
+              }
+              const eventName = eventIdToEvent.get(eventId) ?? event;
               eventIdToCallback.delete(eventId);
               eventIdToEvent.delete(eventId);
-              void event;
+              const unlistenBridge = (
+                window as unknown as Record<
+                  string,
+                  (eventName: string, id: number) => Promise<void>
+                >
+              )[unlistenName];
+              void unlistenBridge(eventName, eventId);
             },
           };
 
