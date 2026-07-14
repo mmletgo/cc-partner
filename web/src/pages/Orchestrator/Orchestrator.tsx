@@ -334,6 +334,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
           selectedTaskCanStart={c.selectedTaskCanStart}
           selectedTaskCanComplete={c.selectedTaskCanComplete}
           selectedTaskCanRequestRework={c.selectedTaskCanRequestRework}
+          selectedTaskShowDeliver={c.selectedTaskShowDeliver}
           selectedTaskCanDeliver={c.selectedTaskCanDeliver}
           selectedTaskCanCancel={c.selectedTaskCanCancel}
           selectedTaskCanControlBlocked={c.selectedTaskCanControlBlocked}
@@ -352,6 +353,21 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
           latestVerifierEvidence={c.latestVerifierEvidence}
           latestRepairPromptEvidence={c.latestRepairPromptEvidence}
           developmentAttemptEvidenceItems={c.developmentAttemptEvidenceItems}
+          detailTab={c.detailTab}
+          onDetailTabChange={c.setDetailTab}
+          reviewDiffState={c.reviewDiffState}
+          reviewDiff={c.reviewDiff}
+          reviewDiffError={c.reviewDiffError}
+          selectedReviewFilePath={c.selectedReviewFilePath}
+          onSelectReviewFilePath={c.setSelectedReviewFilePath}
+          onRetryReviewDiff={c.handleRetryReviewDiff}
+          reworkDialogOpen={c.reworkDialogOpen}
+          reworkError={c.reworkError}
+          onOpenReworkDialog={c.handleOpenReworkDialog}
+          onCloseReworkDialog={c.handleCloseReworkDialog}
+          onSubmitRework={(reason) => {
+            void c.handleSubmitRework(reason);
+          }}
           onClose={c.handleCloseTaskDrawer}
           onStart={() => {
             void c.handleStartSelectedTask();
@@ -362,9 +378,6 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
           onOpenWorkbench={c.handleOpenWorkbench}
           onRetry={() => {
             void c.handleRetryTask();
-          }}
-          onRequestRework={() => {
-            void c.handleRequestReworkTask();
           }}
           onDeliver={() => {
             void c.handleDeliverReviewedTask();

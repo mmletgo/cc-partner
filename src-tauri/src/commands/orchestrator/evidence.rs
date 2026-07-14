@@ -29,6 +29,9 @@ use super::common::{
 /// Human Review / Rework 之外请求 review diff 时的稳定业务 code。
 pub(crate) const REVIEW_DIFF_UNAVAILABLE_CODE: &str = "review_diff_unavailable";
 
+/// 交付前 worktree 相对审阅快照发生漂移时的稳定 Conflict code。
+pub(crate) const REVIEW_DIFF_CHANGED_CODE: &str = "review_diff_changed";
+
 /// Business Logic（为什么需要这个函数）:
 ///     review diff 只在 Human Review / Rework 阶段对用户有意义；其它泳道请求必须用稳定 code 拒绝，
 ///     避免前端把任意状态的任务误当成可审阅。
@@ -40,6 +43,70 @@ pub(crate) fn ensure_review_diff_available(task: &OrchestratorTaskRow) -> Result
         OrchestratorWorkflowState::HumanReview | OrchestratorWorkflowState::Rework => Ok(()),
         _ => Err(AppError::conflict(REVIEW_DIFF_UNAVAILABLE_CODE)),
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     owning device 始终具备 review-diff 能力，Deliver 必须携带用户刚确认的 digest；
+///     缺省或空白 digest 表示前端未完成审阅确认，不能进入 Git 交付。
+///
+/// Code Logic（这个函数做什么）:
+///     将 `Option<&str>` 规范化为非空 digest；缺失或全空白时返回 Validation。
+pub(crate) fn require_expected_review_digest(
+    expected_review_digest: Option<&str>,
+) -> Result<&str, AppError> {
+    expected_review_digest
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::validation("交付前必须提供 expectedReviewDigest"))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     用户确认的 digest 与交付瞬间 recollect 的 digest 必须一致，否则会交付未审变更。
+///
+/// Code Logic（这个函数做什么）:
+///     比较 expected 与 actual 字符串；不一致返回 Conflict `review_diff_changed`。
+pub(crate) fn ensure_review_digest_matches(
+    expected_review_digest: &str,
+    actual_review_digest: &str,
+) -> Result<(), AppError> {
+    if expected_review_digest != actual_review_digest {
+        return Err(AppError::conflict(REVIEW_DIFF_CHANGED_CODE));
+    }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Deliver 前必须在 worktree 上立即重采 snapshot，检测审阅后到交付前的漂移。
+///     该路径不依赖 AppState，便于单测用临时 Git 仓库锁定 digest 门禁。
+///
+/// Code Logic（这个函数做什么）:
+///     要求非空 expected digest，调用 `collect_review_diff_for_worktree`，再与 expected 比较。
+pub(crate) fn enforce_deliver_review_digest_for_worktree(
+    task_id: &str,
+    worktree_path: &Path,
+    preferred_base: Option<&str>,
+    expected_review_digest: Option<&str>,
+) -> Result<(), AppError> {
+    let expected = require_expected_review_digest(expected_review_digest)?;
+    let diff = collect_review_diff_for_worktree(task_id, worktree_path, preferred_base)?;
+    ensure_review_digest_matches(expected, &diff.review_digest)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     local Tauri 命令与 owning-device deliver 路由在切入 Delivering 前共享同一 digest 门禁，
+///     漂移时保持 Human Review，且不得触发任何 delivery side effect。
+///
+/// Code Logic（这个函数做什么）:
+///     要求非空 expected digest，经 `collect_local_orchestrator_review_diff` 立即 recollect，
+///     再与 expected 比较；失败返回 Conflict/Validation，不改写任务状态。
+pub(crate) async fn enforce_deliver_review_digest(
+    state: &AppState,
+    task: &OrchestratorTaskRow,
+    expected_review_digest: Option<&str>,
+) -> Result<(), AppError> {
+    let expected = require_expected_review_digest(expected_review_digest)?;
+    let diff = collect_local_orchestrator_review_diff(state, task).await?;
+    ensure_review_digest_matches(expected, &diff.review_digest)
 }
 
 /// Business Logic（为什么需要这个函数）:

@@ -927,3 +927,154 @@
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
 }
+
+.taskDrawerTabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: var(--space-1);
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+
+.taskDrawerTab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg-muted-readable);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+
+.taskDrawerTab[data-active='true'] {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+
+.taskDrawerTabPanel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.taskDrawerFooter {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+
+.reviewDiffLayout {
+  display: grid;
+  grid-template-columns: minmax(10rem, 14rem) minmax(0, 1fr);
+  gap: var(--space-3);
+  min-height: 12rem;
+}
+
+.reviewFileList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-height: 24rem;
+  overflow: auto;
+}
+
+.reviewFileButton {
+  width: 100%;
+  text-align: left;
+  appearance: none;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--fg);
+  padding: var(--space-2);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.reviewFileButton[data-active='true'] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+}
+
+.reviewFilePath {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.reviewFileMeta {
+  font-size: var(--text-xs);
+  color: var(--fg-muted-readable);
+}
+
+.reviewPatchPane {
+  min-width: 0;
+  max-height: 24rem;
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  padding: var(--space-2);
+}
+
+.reviewPatch {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
+
+.reworkDialog {
+  max-width: 32rem;
+}
+
+.reworkDialogHeader {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+}
+
+.reworkReasonLabel {
+  display: block;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+  margin-bottom: var(--space-1);
+}
+
+.reworkReasonInput {
+  width: 100%;
+  min-height: 8rem;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  padding: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.reworkDialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}

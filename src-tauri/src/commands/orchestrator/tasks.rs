@@ -236,21 +236,34 @@ pub async fn request_orchestrator_task_rework_view(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户复核通过后可以显式 deliver，但必须只有 Settings 允许 full-auto delivery 时才进入 Git delivery pipeline。
-///     remote shortcut 上交付必须由 owning device 检查其 Settings 并执行。
+///     交付前必须立即 recollect review digest，防止审阅后 worktree 漂移导致交付未审变更；
+///     remote shortcut 上交付必须由 owning device 检查其 Settings/digest 并执行。
 ///
 /// Code Logic（这个函数做什么）:
-///     local 项目先做 Settings gate，再用 repo.start_delivery_from_human_review 取得 Delivering 执行权并调用 delivery pipeline；
-///     remote 项目调用远端 deliver-reviewed endpoint 并刷新 mirror。
+///     local 项目先校验任务归属，再 enforce expectedReviewDigest（recollect+比较），再 Settings gate，
+///     最后 start_delivery_from_human_review 并跑 delivery pipeline；
+///     remote 项目把 expectedReviewDigest 转发给远端 deliver-reviewed endpoint 并刷新 mirror。
 #[tauri::command]
 pub async fn deliver_reviewed_orchestrator_task_view(
     state: State<'_, AppState>,
     project_id: String,
     task_id: String,
+    expected_review_digest: Option<String>,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
     let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
     if project.kind != "remote" {
-        get_local_project_task_for_action(state.orchestrator_repo.as_ref(), &project_id, &task_id)
-            .await?;
+        let task = get_local_project_task_for_action(
+            state.orchestrator_repo.as_ref(),
+            &project_id,
+            &task_id,
+        )
+        .await?;
+        super::enforce_deliver_review_digest(
+            state.inner(),
+            &task,
+            expected_review_digest.as_deref(),
+        )
+        .await?;
         let config = state
             .config
             .read()
@@ -270,7 +283,11 @@ pub async fn deliver_reviewed_orchestrator_task_view(
         state.inner(),
         &project,
         &task_id,
-        |client, base_url, id| async move { client.deliver_reviewed_task(&base_url, &id).await },
+        |client, base_url, id| async move {
+            client
+                .deliver_reviewed_task(&base_url, &id, expected_review_digest.as_deref())
+                .await
+        },
     )
     .await
 }

@@ -14,6 +14,7 @@ import type {
   OrchestratorRemoteOutboxItem,
   OrchestratorRemoteOutboxStatus,
   OrchestratorRemoteRuntimeStatus,
+  OrchestratorReviewDiff,
   OrchestratorRunState,
   OrchestratorRuntimeEvent,
   OrchestratorRuntimeSnapshot,
@@ -22,6 +23,7 @@ import type {
   OrchestratorTaskStatus,
   OrchestratorTaskView,
   OrchestratorWorkflowState,
+  ReviewDiffFile,
 } from '../types/orchestrator';
 import {
   arrayDecoder,
@@ -309,3 +311,52 @@ export const orchestratorProjectRefreshResultDecoder: Decoder<{
   projectId: stringDecoder,
   dispatched: numberDecoder,
 });
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   Changes tab 单文件条目必须带 path/status 与 binary/truncated 标记，残缺 patch 结构不得进入 UI。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 ReviewDiffFile 的 path/status/additions/deletions/patch/binary/truncated。
+ */
+export const reviewDiffFileDecoder: Decoder<ReviewDiffFile> = objectDecoder('ReviewDiffFile', {
+  path: stringDecoder,
+  status: stringDecoder,
+  additions: numberDecoder,
+  deletions: numberDecoder,
+  patch: nullableDecoder(stringDecoder),
+  binary: booleanDecoder,
+  truncated: booleanDecoder,
+});
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   Deliver 前 digest 与 Changes 展示依赖完整 review diff 快照；损坏 DTO 不得进入审阅态。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 OrchestratorReviewDiff 身份字段、files 列表、totalFiles/truncated 与 reviewDigest。
+ */
+export const orchestratorReviewDiffDecoder: Decoder<OrchestratorReviewDiff> = objectDecoder(
+  'OrchestratorReviewDiff',
+  {
+    taskId: stringDecoder,
+    baseRef: stringDecoder,
+    headRef: stringDecoder,
+    files: arrayDecoder(reviewDiffFileDecoder),
+    totalFiles: numberDecoder,
+    truncated: booleanDecoder,
+    reviewDigest: stringDecoder,
+  },
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   Mobile/P2P review-diff HTTP 响应包装为 `{diff}`，边界必须 fail-closed 解码。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 `{diff: OrchestratorReviewDiff}`。
+ */
+export const orchestratorReviewDiffResponseDecoder: Decoder<{ diff: OrchestratorReviewDiff }> =
+  objectDecoder('OrchestratorReviewDiffResponse', {
+    diff: orchestratorReviewDiffDecoder,
+  });

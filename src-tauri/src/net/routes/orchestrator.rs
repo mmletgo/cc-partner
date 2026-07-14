@@ -11,8 +11,9 @@
 use crate::commands::orchestrator::{
     build_orchestrator_task_row, create_orchestrator_task_view_for_http_with_request_id,
     discard_orchestrator_remote_outbox_for_repos, dispatch_orchestrator_best_effort,
-    ensure_reviewed_delivery_allowed, get_local_owner_orchestrator_review_diff,
-    get_orchestrator_review_diff_for_state, get_orchestrator_runtime_snapshot_for_project,
+    enforce_deliver_review_digest, ensure_reviewed_delivery_allowed,
+    get_local_owner_orchestrator_review_diff, get_orchestrator_review_diff_for_state,
+    get_orchestrator_runtime_snapshot_for_project,
     get_orchestrator_runtime_snapshot_for_state_with_request_id,
     list_orchestrator_task_views_for_state_with_request_id,
     retry_orchestrator_remote_outbox_for_repos, run_delivery_for_task,
@@ -34,10 +35,10 @@ use crate::orchestrator::outbox::OrchestratorRemoteOutboxDto;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::{
     MobileReviewDiffReq, MobileRuntimeSnapshotReq, RemoteCompleteOrchestratorTaskPromptReq,
-    RemoteCreateOrchestratorTaskReq, RemoteListTasksReq, RemoteOrchestratorConfigResp,
-    RemoteOrchestratorEvidenceResp, RemoteOrchestratorProjectRefreshResp,
-    RemoteOrchestratorReviewDiffResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
-    RemoteTaskReq, RemoteTaskReworkReq,
+    RemoteCreateOrchestratorTaskReq, RemoteDeliverReviewedReq, RemoteListTasksReq,
+    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp,
+    RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorReviewDiffResp,
+    RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq, RemoteTaskReq, RemoteTaskReworkReq,
 };
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetrySnapshot;
@@ -303,15 +304,19 @@ async fn request_rework_task_for_state(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     remote shortcut 的 deliverReviewedTask 必须受 owning device Settings 控制，并在 owning device 执行 Git delivery。
+///     owning device 始终具备 review-diff 能力，必须要求 expectedReviewDigest 并立即 recollect，
+///     漂移时保持 Human Review，不得产生 delivery side effect。
 ///
 /// Code Logic（这个函数做什么）:
-///     确认任务所属 local 项目，读取全局 Settings gate，通过后切入 Delivering 并调用共享 delivery pipeline。
+///     确认任务所属 local 项目，enforce digest（recollect+比较），读取 Settings gate，
+///     通过后切入 Delivering 并调用共享 delivery pipeline。
 async fn deliver_reviewed_task_for_state(
     state: &AppState,
-    req: RemoteTaskReq,
+    req: RemoteDeliverReviewedReq,
 ) -> Result<OrchestratorTaskDto, AppError> {
     let context = OrchestratorRouteContext::from_app_state(state);
     let task = get_local_project_task(&context, &req.task_id).await?;
+    enforce_deliver_review_digest(state, &task, req.expected_review_digest.as_deref()).await?;
     let config = context
         .config
         .read()
@@ -756,14 +761,15 @@ pub async fn request_rework_task(
 /// 交付人工复核任务 HTTP handler。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     remote shortcut 的 deliverReviewedTask 操作需要由 owning device 检查 Settings 并运行 delivery pipeline。
+///     remote shortcut 的 deliverReviewedTask 操作需要由 owning device 检查 Settings 并运行 delivery pipeline，
+///     同时用 expectedReviewDigest 防止交付审阅后漂移的未审变更。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收 `{taskId}` 请求体，委托 deliver_reviewed_task_for_state。
+///     接收 camelCase `{taskId, expectedReviewDigest?}` 请求体，委托 deliver_reviewed_task_for_state。
 pub async fn deliver_reviewed_task(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
-    Json(req): Json<RemoteTaskReq>,
+    Json(req): Json<RemoteDeliverReviewedReq>,
 ) -> P2pResult<Json<OrchestratorTaskDto>> {
     let task = deliver_reviewed_task_for_state(&state, req)
         .await

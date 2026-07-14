@@ -12,6 +12,7 @@ import {
   orchestratorEvidenceListDecoder,
   orchestratorProjectRefreshResultDecoder,
   orchestratorRemoteOutboxItemDecoder,
+  orchestratorReviewDiffDecoder,
   orchestratorRuntimeSnapshotDecoder,
   orchestratorTaskDecoder,
   orchestratorTaskViewDecoder,
@@ -19,6 +20,7 @@ import {
 } from '@/lib/schemas/orchestrator';
 import type {
   OrchestratorRemoteOutboxItem,
+  OrchestratorReviewDiff,
   OrchestratorRuntimeSnapshot,
   OrchestratorTask,
   OrchestratorTaskView,
@@ -62,6 +64,7 @@ export const ORCHESTRATOR_REMOTE_COMMANDS = {
   cancelTaskView: 'cancel_orchestrator_task_view',
   refreshProject: 'refresh_orchestrator_project',
   listEvidenceForProject: 'list_orchestrator_task_evidence_for_project',
+  getReviewDiff: 'get_orchestrator_review_diff',
   // 常量名保留 remote 以减少本轮迁移面；下面两个命令服务 Workbench 本机项目看板。
   moveTaskWorkflowState: 'move_orchestrator_task_workflow_state',
   getRuntimeSnapshot: 'get_orchestrator_runtime_snapshot',
@@ -168,6 +171,43 @@ export function buildOrchestratorTaskReworkInvokeArgs(
     taskId: taskId.trim(),
     reason: reason.trim(),
   };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Deliver 前必须把审阅 digest 一并交给后端做漂移比对；无 digest 时保持旧参数形状。
+ *
+ * Code Logic（这个函数做什么）:
+ *   projectId/taskId trim；expectedReviewDigest 非空时写入 camelCase 字段，否则省略。
+ */
+export function buildDeliverReviewedOrchestratorTaskViewInvokeArgs(
+  projectId: string,
+  taskId: string,
+  expectedReviewDigest?: string | null,
+): Record<string, unknown> {
+  const args: Record<string, unknown> = {
+    projectId: projectId.trim(),
+    taskId: taskId.trim(),
+  };
+  const digest = expectedReviewDigest?.trim();
+  if (digest) {
+    args.expectedReviewDigest = digest;
+  }
+  return args;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Changes tab / Deliver 前需要按 project+task 拉取有界 review diff，参数形状需契约锁定。
+ *
+ * Code Logic（这个函数做什么）:
+ *   复用 remote-aware action 参数结构，返回 `{ projectId, taskId }`。
+ */
+export function buildGetOrchestratorReviewDiffInvokeArgs(
+  projectId: string,
+  taskId: string,
+): Record<string, unknown> {
+  return buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId);
 }
 
 /**
@@ -408,15 +448,38 @@ export const orchestratorApi = {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   人工复核通过且 Settings 允许 full-auto delivery 时，用户可以显式触发交付。
+   *   Human Review Changes tab 与 Deliver 前需要拉取当前 attempt 有界 review diff 快照。
    *
    * Code Logic（这个函数做什么）:
-   *   invokeDecoded deliver_reviewed_orchestrator_task_view → OrchestratorTaskView。
+   *   invokeDecoded get_orchestrator_review_diff → OrchestratorReviewDiff。
    */
-  deliverReviewedTaskView: (projectId: string, taskId: string) =>
+  getReviewDiff: (projectId: string, taskId: string): Promise<OrchestratorReviewDiff> =>
+    invokeDecoded(
+      ORCHESTRATOR_REMOTE_COMMANDS.getReviewDiff,
+      buildGetOrchestratorReviewDiffInvokeArgs(projectId, taskId),
+      orchestratorReviewDiffDecoder,
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   人工复核通过且 Settings 允许 full-auto delivery 时，用户可以显式触发交付；
+   *   对 diff-capable owner 必须携带审阅 digest 做漂移校验。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded deliver_reviewed_orchestrator_task_view，args 在提供时含 expectedReviewDigest。
+   */
+  deliverReviewedTaskView: (
+    projectId: string,
+    taskId: string,
+    expectedReviewDigest?: string | null,
+  ) =>
     invokeDecoded(
       ORCHESTRATOR_REMOTE_COMMANDS.deliverReviewedTaskView,
-      buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId),
+      buildDeliverReviewedOrchestratorTaskViewInvokeArgs(
+        projectId,
+        taskId,
+        expectedReviewDigest,
+      ),
       orchestratorTaskViewDecoder,
     ),
 

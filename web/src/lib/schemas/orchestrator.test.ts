@@ -9,6 +9,8 @@ import {
   orchestratorEvidenceListDecoder,
   orchestratorProjectRefreshResultDecoder,
   orchestratorRemoteOutboxItemDecoder,
+  orchestratorReviewDiffDecoder,
+  orchestratorReviewDiffResponseDecoder,
   orchestratorRuntimeSnapshotDecoder,
   orchestratorTaskDecoder,
   orchestratorTaskViewDecoder,
@@ -140,6 +142,55 @@ describe('orchestrator schemas', () => {
   test('malformed refresh dispatched fails', () => {
     expect(() =>
       orchestratorProjectRefreshResultDecoder.decode({ ...validRefresh, dispatched: '2' }),
+    ).toThrow(ContractDecodeError);
+  });
+
+  test('decodes review diff snapshot and response wrapper', () => {
+    const validReviewDiff = {
+      taskId: 't1',
+      baseRef: 'main',
+      headRef: 'worktree',
+      files: [
+        {
+          path: 'src/a.ts',
+          status: 'modified',
+          additions: 2,
+          deletions: 1,
+          patch: '@@ -1 +1 @@\n-a\n+b\n',
+          binary: false,
+          truncated: false,
+        },
+        {
+          path: 'img.bin',
+          status: 'added',
+          additions: 0,
+          deletions: 0,
+          patch: null,
+          binary: true,
+          truncated: false,
+        },
+      ],
+      totalFiles: 2,
+      truncated: false,
+      reviewDigest: 'abc123',
+    };
+    expect(orchestratorReviewDiffDecoder.decode(validReviewDiff).reviewDigest).toBe('abc123');
+    expect(
+      orchestratorReviewDiffResponseDecoder.decode({ diff: validReviewDiff }).diff.files,
+    ).toHaveLength(2);
+  });
+
+  test('malformed review digest fails closed', () => {
+    expect(() =>
+      orchestratorReviewDiffDecoder.decode({
+        taskId: 't1',
+        baseRef: 'main',
+        headRef: 'wt',
+        files: [],
+        totalFiles: 0,
+        truncated: false,
+        reviewDigest: 12,
+      }),
     ).toThrow(ContractDecodeError);
   });
 });

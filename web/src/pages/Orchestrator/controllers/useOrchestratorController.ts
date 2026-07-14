@@ -43,11 +43,14 @@ import {
 } from '@/lib/orchestratorRemote';
 import type {
   OrchestratorEvidence,
+  OrchestratorReviewDiff,
+  OrchestratorReviewDiffLoadState,
   OrchestratorTask,
   OrchestratorTaskView,
   OrchestratorWorkflowState,
   WorkbenchProject,
 } from '@/lib/types';
+import type { OrchestratorDetailTab } from '../views/OrchestratorTaskDrawer';
 import type { OrchestratorBoardGroups } from '../orchestratorBoard';
 import {
   canMoveRenderableTaskToWorkflowState,
@@ -153,6 +156,7 @@ export interface UseOrchestratorControllerResult {
   selectedTaskCanStart: boolean;
   selectedTaskCanComplete: boolean;
   selectedTaskCanRequestRework: boolean;
+  selectedTaskShowDeliver: boolean;
   selectedTaskCanDeliver: boolean;
   selectedTaskCanCancel: boolean;
   selectedTaskCanControlBlocked: boolean;
@@ -206,7 +210,19 @@ export interface UseOrchestratorControllerResult {
   handleLaneDrop: (event: DragEvent<HTMLElement>, targetState: OrchestratorWorkflowState) => Promise<void>;
   handleStartSelectedTask: () => Promise<void>;
   handleCompleteAgentRun: () => Promise<void>;
-  handleRequestReworkTask: () => Promise<void>;
+  detailTab: OrchestratorDetailTab;
+  setDetailTab: (tab: OrchestratorDetailTab) => void;
+  reviewDiffState: OrchestratorReviewDiffLoadState;
+  reviewDiff: OrchestratorReviewDiff | null;
+  reviewDiffError: string | null;
+  selectedReviewFilePath: string | null;
+  setSelectedReviewFilePath: (path: string | null) => void;
+  handleRetryReviewDiff: () => void;
+  reworkDialogOpen: boolean;
+  reworkError: string | null;
+  handleOpenReworkDialog: () => void;
+  handleCloseReworkDialog: () => void;
+  handleSubmitRework: (reason: string) => Promise<void>;
   handleDeliverReviewedTask: () => Promise<void>;
   handleOpenWorkbench: () => void;
   handleRetryTask: () => Promise<void>;
@@ -257,6 +273,15 @@ export function useOrchestratorController(
   const [completionPrompt, setCompletionPrompt] = useState('');
   const [completingPrompt, setCompletingPrompt] = useState(false);
   const completionPromptRef = useRef<HTMLTextAreaElement | null>(null);
+  const [detailTab, setDetailTab] = useState<OrchestratorDetailTab>('summary');
+  const [reviewDiffState, setReviewDiffState] =
+    useState<OrchestratorReviewDiffLoadState>('idle');
+  const [reviewDiff, setReviewDiff] = useState<OrchestratorReviewDiff | null>(null);
+  const [reviewDiffError, setReviewDiffError] = useState<string | null>(null);
+  const [selectedReviewFilePath, setSelectedReviewFilePath] = useState<string | null>(null);
+  const reviewRequestSeqRef = useRef(0);
+  const [reworkDialogOpen, setReworkDialogOpen] = useState(false);
+  const [reworkError, setReworkError] = useState<string | null>(null);
   const activeProjectId = activeProject?.id ?? null;
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
   const taskLoadDecision = useMemo(
@@ -364,7 +389,11 @@ export function useOrchestratorController(
     isLocalOrchestratorTaskView(selectedTaskView) &&
     canCompleteAgentRunForProject(selectedTask, activeProjectId);
   const selectedTaskCanRequestRework = canRequestReworkForProject(selectedTask, activeProjectId);
-  const selectedTaskCanDeliver = canDeliverReviewedTaskForProject(selectedTask, activeProjectId);
+  const selectedTaskShowDeliver = canDeliverReviewedTaskForProject(selectedTask, activeProjectId);
+  const selectedTaskCanDeliver =
+    selectedTaskShowDeliver &&
+    (reviewDiffState === 'unsupported' ||
+      (reviewDiffState === 'ready' && Boolean(reviewDiff?.reviewDigest)));
   const selectedTaskCanCancel = canCancelOrchestratorTaskForProject(selectedTask, activeProjectId);
   const selectedTaskCanControlBlocked = canControlBlockedTaskForProject(
     selectedTask,
@@ -630,6 +659,144 @@ export function useOrchestratorController(
       cancelled = true;
     };
   }, [selectedTask, taskLoadDecision, t]);
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   Human Review / Rework 任务的 Changes 与 Deliver 依赖有界 review diff；
+   *   project/task/attempt 变化必须 abort 旧请求，旧响应不得回填。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   非复核态清空 review state；复核态递增 requestSeq 拉 getReviewDiff；
+   *   仅当 projectId/taskId/attempt/requestSeq 仍匹配时写入 ready/error/unsupported。
+   */
+  useEffect(() => {
+    if (taskLoadDecision.kind !== 'load' || !selectedTask) {
+      setReviewDiffState('idle');
+      setReviewDiff(null);
+      setReviewDiffError(null);
+      setSelectedReviewFilePath(null);
+      return undefined;
+    }
+    if (selectedTask.projectId !== taskLoadDecision.projectId) {
+      return undefined;
+    }
+    const needsReview =
+      selectedTask.workflowState === 'humanReview' || selectedTask.workflowState === 'rework';
+    if (!needsReview) {
+      setReviewDiffState('idle');
+      setReviewDiff(null);
+      setReviewDiffError(null);
+      setSelectedReviewFilePath(null);
+      return undefined;
+    }
+
+    const projectId = taskLoadDecision.projectId;
+    const taskId = selectedTask.id;
+    const nextSeq = reviewRequestSeqRef.current + 1;
+    reviewRequestSeqRef.current = nextSeq;
+        setReviewDiffState('loading');
+    setReviewDiff(null);
+    setReviewDiffError(null);
+    setSelectedReviewFilePath(null);
+
+    let cancelled = false;
+    void orchestratorApi
+      .getReviewDiff(projectId, taskId)
+      .then((diff) => {
+        if (
+          cancelled ||
+          activeProjectIdRef.current !== projectId ||
+          reviewRequestSeqRef.current !== nextSeq
+        ) {
+          return;
+        }
+        setReviewDiff(diff);
+        setReviewDiffState('ready');
+        setReviewDiffError(null);
+        setSelectedReviewFilePath(diff.files[0]?.path ?? null);
+      })
+      .catch((err: unknown) => {
+        if (
+          cancelled ||
+          activeProjectIdRef.current !== projectId ||
+          reviewRequestSeqRef.current !== nextSeq
+        ) {
+          return;
+        }
+        const message = displayOrchestratorErrorMessage(err, t('orchestrator:errors.reviewDiff'));
+        // 不记录 full patch；仅展示 message/capability 诊断。
+        if (
+          message.includes('orchestrator.review-diff.v1') ||
+          message.includes('不支持能力')
+        ) {
+          setReviewDiffState('unsupported');
+          setReviewDiff(null);
+          setReviewDiffError(null);
+          return;
+        }
+        setReviewDiffState('error');
+        setReviewDiff(null);
+        setReviewDiffError(message);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTask, taskLoadDecision, t]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户可在 Changes tab 手动重试加载 review diff。
+   *
+   * Code Logic（这个函数做什么）:
+   *   递增 requestSeq 并重拉 getReviewDiff，仅接受当前 key 响应。
+   */
+  const handleRetryReviewDiff = useCallback(() => {
+    if (!selectedTask || taskLoadDecision.kind !== 'load') return;
+    if (selectedTask.projectId !== taskLoadDecision.projectId) return;
+    const projectId = taskLoadDecision.projectId;
+    const taskId = selectedTask.id;
+    const nextSeq = reviewRequestSeqRef.current + 1;
+    reviewRequestSeqRef.current = nextSeq;
+        setReviewDiffState('loading');
+    setReviewDiff(null);
+    setReviewDiffError(null);
+    void orchestratorApi
+      .getReviewDiff(projectId, taskId)
+      .then((diff) => {
+        if (
+          activeProjectIdRef.current !== projectId ||
+          reviewRequestSeqRef.current !== nextSeq
+        ) {
+          return;
+        }
+        setReviewDiff(diff);
+        setReviewDiffState('ready');
+        setReviewDiffError(null);
+        setSelectedReviewFilePath(diff.files[0]?.path ?? null);
+      })
+      .catch((err: unknown) => {
+        if (
+          activeProjectIdRef.current !== projectId ||
+          reviewRequestSeqRef.current !== nextSeq
+        ) {
+          return;
+        }
+        const message = displayOrchestratorErrorMessage(err, t('orchestrator:errors.reviewDiff'));
+        if (
+          message.includes('orchestrator.review-diff.v1') ||
+          message.includes('不支持能力')
+        ) {
+          setReviewDiffState('unsupported');
+          setReviewDiff(null);
+          setReviewDiffError(null);
+          return;
+        }
+        setReviewDiffState('error');
+        setReviewDiff(null);
+        setReviewDiffError(message);
+      });
+  }, [selectedTask, t, taskLoadDecision]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1014,12 +1181,12 @@ export function useOrchestratorController(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   human review 任务可请求 rework，并把原因带回 runner。
+   *   打开返工 Dialog，用共享 Dialog 替代 window.prompt。
    *
    * Code Logic（这个函数做什么）:
-   *   window.prompt 收集 reason 后调用 requestReworkTaskView，成功后 invalidation Attention 并刷新 evidence。
+   *   校验可 rework 后 setReworkDialogOpen(true) 并清空 reworkError。
    */
-  const handleRequestReworkTask = useCallback(async () => {
+  const handleOpenReworkDialog = useCallback(() => {
     if (
       !selectedTask ||
       !isOrchestratorTaskViewActionable(selectedTaskView) ||
@@ -1028,52 +1195,86 @@ export function useOrchestratorController(
     ) {
       return;
     }
-    const reason = window
-      .prompt(
-        t('orchestrator:detail.requestReworkPrompt'),
-        latestVerifierEvidence?.content || t('orchestrator:detail.requestReworkDefaultReason'),
-      )
-      ?.trim();
-    if (!reason) return;
-    const taskId = selectedTask.id;
-    const projectId = selectedTask.projectId;
-    setReworkingTaskId(taskId);
-    setActionError(null);
-    try {
-      const updated = await orchestratorApi.requestReworkTaskView(projectId, taskId, reason);
-      const updatedProjectId = updated.origin === 'pendingRemote' ? null : updated.task.projectId;
+    setReworkError(null);
+    setReworkDialogOpen(true);
+  }, [reworkingTaskId, selectedTask, selectedTaskView]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户取消返工 Dialog 时不应留下错误态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   busy 时忽略；否则关闭 dialog 并清空 reworkError。
+   */
+  const handleCloseReworkDialog = useCallback(() => {
+    if (reworkingTaskId) return;
+    setReworkDialogOpen(false);
+    setReworkError(null);
+  }, [reworkingTaskId]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   human review 任务可请求 rework，并把原因带回 runner；失败时保留 Dialog 与意见。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 requestReworkTaskView(reason)；成功关闭 dialog 并刷新 evidence；失败写 reworkError。
+   */
+  const handleSubmitRework = useCallback(
+    async (reason: string) => {
       if (
-        !orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId) ||
-        updatedProjectId !== projectId
+        !selectedTask ||
+        !isOrchestratorTaskViewActionable(selectedTaskView) ||
+        !canRequestReworkForProject(selectedTask, activeProjectIdRef.current) ||
+        reworkingTaskId === selectedTask.id
       ) {
         return;
       }
-      replaceTaskViewInCurrentProject(projectId, updated);
-      void refreshRuntimeSnapshot();
-      requestAttentionInvalidation();
-      const items = await orchestratorApi.listEvidence(projectId, taskId);
-      if (activeProjectIdRef.current === projectId) {
-        setEvidenceResult({ projectId, taskId, items, error: null });
+      const trimmed = reason.trim();
+      if (trimmed.length < 1 || trimmed.length > 2000) {
+        setReworkError(t('orchestrator:detail.reworkReasonRequired'));
+        return;
       }
-    } catch (err) {
-      if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
-        setActionError({
-          projectId,
-          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.requestRework')),
-        });
+      const taskId = selectedTask.id;
+      const projectId = selectedTask.projectId;
+      setReworkingTaskId(taskId);
+      setReworkError(null);
+      setActionError(null);
+      try {
+        const updated = await orchestratorApi.requestReworkTaskView(projectId, taskId, trimmed);
+        const updatedProjectId = updated.origin === 'pendingRemote' ? null : updated.task.projectId;
+        if (
+          !orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId) ||
+          updatedProjectId !== projectId
+        ) {
+          return;
+        }
+        replaceTaskViewInCurrentProject(projectId, updated);
+        void refreshRuntimeSnapshot();
+        requestAttentionInvalidation();
+        setReworkDialogOpen(false);
+        const items = await orchestratorApi.listEvidence(projectId, taskId);
+        if (activeProjectIdRef.current === projectId) {
+          setEvidenceResult({ projectId, taskId, items, error: null });
+        }
+      } catch (err) {
+        if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
+          setReworkError(
+            displayOrchestratorErrorMessage(err, t('orchestrator:errors.requestRework')),
+          );
+        }
+      } finally {
+        setReworkingTaskId((current) => (current === taskId ? null : current));
       }
-    } finally {
-      setReworkingTaskId((current) => (current === taskId ? null : current));
-    }
-  }, [
-    latestVerifierEvidence,
-    refreshRuntimeSnapshot,
-    replaceTaskViewInCurrentProject,
-    reworkingTaskId,
-    selectedTask,
-    selectedTaskView,
-    t,
-  ]);
+    },
+    [
+      refreshRuntimeSnapshot,
+      replaceTaskViewInCurrentProject,
+      reworkingTaskId,
+      selectedTask,
+      selectedTaskView,
+      t,
+    ],
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1091,12 +1292,25 @@ export function useOrchestratorController(
     ) {
       return;
     }
+    // diff-capable: require ready digest; unsupported keeps legacy deliver without digest.
+    if (reviewDiffState !== 'unsupported') {
+      if (reviewDiffState !== 'ready' || !reviewDiff?.reviewDigest) {
+        return;
+      }
+    }
     const taskId = selectedTask.id;
     const projectId = selectedTask.projectId;
+    const expectedDigest =
+      reviewDiffState === 'ready' ? reviewDiff?.reviewDigest ?? null : null;
     setDeliveringTaskId(taskId);
     setActionError(null);
     try {
-      const updated = await orchestratorApi.deliverReviewedTaskView(projectId, taskId);
+      const updated = await orchestratorApi.deliverReviewedTaskView(
+        projectId,
+        taskId,
+        expectedDigest,
+      );
+
       const updatedProjectId = updated.origin === 'pendingRemote' ? null : updated.task.projectId;
       if (
         !orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId) ||
@@ -1113,30 +1327,68 @@ export function useOrchestratorController(
       }
     } catch (err) {
       if (orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
-        setActionError({
-          projectId,
-          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.deliver')),
-        });
+        const message = displayOrchestratorErrorMessage(err, t('orchestrator:errors.deliver'));
+        if (message.includes('review_diff_changed')) {
+          setReviewDiffState('idle');
+          setReviewDiff(null);
+          setReviewDiffError(t('orchestrator:review.diffChangedConflict'));
+          setSelectedReviewFilePath(null);
+          setActionError({
+            projectId,
+            message: t('orchestrator:review.diffChangedConflict'),
+          });
+          // force re-review: bump seq so effect/retry can reload
+          const nextSeq = reviewRequestSeqRef.current + 1;
+          reviewRequestSeqRef.current = nextSeq;
+                    setReviewDiffState('loading');
+          void orchestratorApi
+            .getReviewDiff(projectId, taskId)
+            .then((diff) => {
+              if (
+                activeProjectIdRef.current !== projectId ||
+                reviewRequestSeqRef.current !== nextSeq
+              ) {
+                return;
+              }
+              setReviewDiff(diff);
+              setReviewDiffState('ready');
+              setReviewDiffError(null);
+              setSelectedReviewFilePath(diff.files[0]?.path ?? null);
+            })
+            .catch((reloadErr: unknown) => {
+              if (
+                activeProjectIdRef.current !== projectId ||
+                reviewRequestSeqRef.current !== nextSeq
+              ) {
+                return;
+              }
+              setReviewDiffState('error');
+              setReviewDiff(null);
+              setReviewDiffError(
+                displayOrchestratorErrorMessage(
+                  reloadErr,
+                  t('orchestrator:errors.reviewDiff'),
+                ),
+              );
+            });
+        } else {
+          setActionError({ projectId, message });
+        }
       }
     } finally {
       setDeliveringTaskId((current) => (current === taskId ? null : current));
     }
-  }, [
+    }, [
     deliveringTaskId,
     refreshRuntimeSnapshot,
     replaceTaskViewInCurrentProject,
+    reviewDiff,
+    reviewDiffState,
     selectedTask,
     selectedTaskView,
     t,
   ]);
 
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   Blocked/运行中任务需要打开 Workbench 执行现场。
-   *
-   * Code Logic（这个函数做什么）:
-   *   构造 deep link；有 onOpenWorkbench 则回调，否则 navigate。
-   */
   const handleOpenWorkbench = useCallback(() => {
     const url = buildWorkbenchTaskUrl(selectedTask);
     if (onOpenWorkbench) {
@@ -1300,6 +1552,7 @@ export function useOrchestratorController(
     selectedTaskCanStart,
     selectedTaskCanComplete,
     selectedTaskCanRequestRework,
+    selectedTaskShowDeliver,
     selectedTaskCanDeliver,
     selectedTaskCanCancel,
     selectedTaskCanControlBlocked,
@@ -1351,9 +1604,21 @@ export function useOrchestratorController(
     handleTaskDragEnd,
     handleLaneDragOver,
     handleLaneDrop,
+    detailTab,
+    setDetailTab,
+    reviewDiffState,
+    reviewDiff,
+    reviewDiffError,
+    selectedReviewFilePath,
+    setSelectedReviewFilePath,
+    handleRetryReviewDiff,
+    reworkDialogOpen,
+    reworkError,
+    handleOpenReworkDialog,
+    handleCloseReworkDialog,
+    handleSubmitRework,
     handleStartSelectedTask,
     handleCompleteAgentRun,
-    handleRequestReworkTask,
     handleDeliverReviewedTask,
     handleOpenWorkbench,
     handleRetryTask,

@@ -2189,3 +2189,145 @@ fn review_diff_unavailable_code_is_stable_token() {
         "review_diff_unavailable"
     );
 }
+
+/// Business Logic（为什么需要这个测试）:
+///     稳定 Conflict code `review_diff_changed` 供前端识别漂移并强制重新审阅。
+///
+/// Code Logic（这个测试做什么）:
+///     断言 REVIEW_DIFF_CHANGED_CODE 字面量固定。
+#[test]
+fn review_diff_changed_code_is_stable_token() {
+    assert_eq!(super::REVIEW_DIFF_CHANGED_CODE, "review_diff_changed");
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     deliver digest 测试需要可复现的临时 Git worktree 夹具。
+///
+/// Code Logic（这个函数做什么）:
+///     初始化仓库并提交 base README，返回 TempDir。
+fn review_digest_git_fixture() -> tempfile::TempDir {
+    use std::process::Command;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.com"]);
+    fs::write(dir.path().join("README.md"), "base\n").expect("readme");
+    git(&["add", "README.md"]);
+    git(&["commit", "-m", "init"]);
+    dir
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     审阅后 worktree 若再被修改，Deliver 必须 Conflict `review_diff_changed`，
+///     且不得把任务切入 Delivering（无 delivery side effect）。
+///
+/// Code Logic（这个测试做什么）:
+///     采集 digest A → 修改文件 → 用 A 调用 enforce_deliver_review_digest_for_worktree；
+///     断言 Conflict code；再以当前 digest 调用应通过；缺 digest 返回 Validation。
+#[tokio::test]
+async fn review_diff_changed_blocks_local_deliver_after_worktree_mutation() {
+    use super::{
+        enforce_deliver_review_digest_for_worktree, require_expected_review_digest,
+        REVIEW_DIFF_CHANGED_CODE,
+    };
+    use crate::orchestrator::review_diff::collect_review_diff_for_worktree;
+
+    let dir = review_digest_git_fixture();
+    fs::write(dir.path().join("feature.rs"), "fn a() {}\n").expect("write feature");
+    let snapshot_a = collect_review_diff_for_worktree("task-digest", dir.path(), None)
+        .expect("collect digest A");
+    assert!(
+        !snapshot_a.review_digest.is_empty(),
+        "digest A 不应为空"
+    );
+
+    fs::write(dir.path().join("feature.rs"), "fn a() { /* mutated */ }\n").expect("mutate");
+
+    let err = enforce_deliver_review_digest_for_worktree(
+        "task-digest",
+        dir.path(),
+        None,
+        Some(snapshot_a.review_digest.as_str()),
+    )
+    .expect_err("mutated worktree must conflict");
+    assert_eq!(err.code(), REVIEW_DIFF_CHANGED_CODE);
+    assert_eq!(err.classify(), crate::error::AppErrorCategory::Conflict);
+
+    let snapshot_b = collect_review_diff_for_worktree("task-digest", dir.path(), None)
+        .expect("collect digest B");
+    enforce_deliver_review_digest_for_worktree(
+        "task-digest",
+        dir.path(),
+        None,
+        Some(snapshot_b.review_digest.as_str()),
+    )
+    .expect("matching digest must pass");
+
+    let missing = require_expected_review_digest(None).expect_err("digest required");
+    assert_eq!(missing.classify(), crate::error::AppErrorCategory::Validation);
+    let blank = require_expected_review_digest(Some("  ")).expect_err("blank digest");
+    assert_eq!(blank.classify(), crate::error::AppErrorCategory::Validation);
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     digest 门禁失败时任务必须仍停在 Human Review，start_delivery 不得被执行。
+///
+/// Code Logic（这个测试做什么）:
+///     写入 HumanReview 任务；先 enforce 失败；再 get_task 断言 status/workflow 未变，
+///     并确认证据列表仍无 delivery 记录。
+#[tokio::test]
+async fn review_diff_changed_leaves_task_in_human_review_without_delivery_side_effects() {
+    use super::{enforce_deliver_review_digest_for_worktree, REVIEW_DIFF_CHANGED_CODE};
+    use crate::orchestrator::review_diff::collect_review_diff_for_worktree;
+
+    let repo = setup_orchestrator_repo().await;
+    let mut task = command_task_row("task-hr-digest", OrchestratorTaskStatus::Done);
+    task.workflow_state = OrchestratorWorkflowState::HumanReview;
+    task.run_state = OrchestratorRunState::Idle;
+    repo.create_task(&task).await.expect("insert task");
+
+    let dir = review_digest_git_fixture();
+    fs::write(dir.path().join("lib.rs"), "pub fn v1() {}\n").expect("write");
+    let digest_a = collect_review_diff_for_worktree(&task.id, dir.path(), None)
+        .expect("digest A")
+        .review_digest;
+    fs::write(dir.path().join("lib.rs"), "pub fn v2() {}\n").expect("mutate");
+
+    let err = enforce_deliver_review_digest_for_worktree(
+        &task.id,
+        dir.path(),
+        None,
+        Some(digest_a.as_str()),
+    )
+    .expect_err("drift must fail");
+    assert_eq!(err.code(), REVIEW_DIFF_CHANGED_CODE);
+
+    // 门禁失败后不得调用 start_delivery；任务保持 Human Review。
+    let persisted = repo.get_task(&task.id).await.expect("get task");
+    assert_eq!(persisted.status, OrchestratorTaskStatus::Done);
+    assert_eq!(
+        persisted.workflow_state,
+        OrchestratorWorkflowState::HumanReview
+    );
+    assert_eq!(persisted.run_state, OrchestratorRunState::Idle);
+    let evidence = repo.list_evidence(&task.id).await.expect("list evidence");
+    assert!(
+        evidence
+            .iter()
+            .all(|item| item.kind != "delivery"),
+        "digest 冲突后不得写入 delivery evidence"
+    );
+}

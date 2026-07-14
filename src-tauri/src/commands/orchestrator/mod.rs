@@ -88,8 +88,10 @@ pub(crate) use common::{
     run_delivery_for_task,
 };
 pub(crate) use evidence::{
+    enforce_deliver_review_digest, enforce_deliver_review_digest_for_worktree,
     ensure_review_diff_available, get_local_owner_orchestrator_review_diff,
-    get_orchestrator_review_diff_for_state, REVIEW_DIFF_UNAVAILABLE_CODE,
+    get_orchestrator_review_diff_for_state, require_expected_review_digest,
+    REVIEW_DIFF_CHANGED_CODE, REVIEW_DIFF_UNAVAILABLE_CODE,
 };
 pub use common::{
     CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
