@@ -4,7 +4,7 @@
 
 **Goal:** 按八个独立、可验收子计划完成运行时权威、数据正确性、核心体验、新功能闭环、性能治理和真实设备发布认证。
 
-**Architecture:** 本计划只负责编排、依赖门禁、覆盖追踪和最终事实校准，不复制领域实现步骤。每个 N1–N8 使用独立 worktree/branch、TDD、focused gate 和提交序列；N8 只认证 N1–N7 合并后的候选版本。
+**Architecture:** 本计划只负责编排、依赖门禁、覆盖追踪和最终事实校准，不复制领域实现步骤。每个 N1–N8 使用独立 worktree/branch、TDD、focused gate 和提交序列；N8 只在当前 Apple Silicon Mac 上认证 N1–N7 合并后的 `macos-aarch64-beta` 候选版本。
 
 **Tech Stack:** Git worktrees, Rust/Tauri/axum/sqlx, React/TypeScript/Vite/Vitest/Playwright, quality/bundle/module/docs checkers, physical-device certification.
 
@@ -18,6 +18,7 @@
 - 数据库 schema 继续使用 runtime 幂等 init/repo helper，`migrations/0001_init.sql` 同步为文档；不启用 `sqlx::migrate!`。
 - 所有新增/修改业务函数与类遵守根 AGENTS 的中文 docstring、UTF-8、Rust/TypeScript 严格类型和 React Hooks 顺序要求。
 - 任何计划失败都不得用后续计划掩盖；N8 不修 bug，只回退 owning plan。
+- N8 当前固定 `claimMode=platform-beta`、`claimProfile=macos-aarch64-beta`；Windows、Ubuntu 与其他缺失硬件表面保持 `NOT VERIFIED`，不进入当前构建/执行/发布门禁。
 
 ---
 
@@ -131,9 +132,9 @@ N2 and N3 may merge in either order if shared docs are reconciled and both compl
 
 - [ ] **Step 1: Confirm N1/N3 consumption points**
 
-Listener startup uses N1 control/lifecycle; new Home/Welcome forms use N3 async feedback.
+Listener startup uses N1 control/lifecycle; Workbench launch/Welcome forms use N3 async feedback.
 
-- [ ] **Step 2: Execute disclosure, Home/Discover, navigation/sidebar, Workbench empty, mobile groups and contrast tasks**
+- [ ] **Step 2: Execute disclosure, Trending default-route guardrail, Workbench launch/empty states, navigation/sidebar, mobile groups and contrast tasks**
 
 - [ ] **Step 3: Run N4 completion gate and visual review**
 
@@ -151,7 +152,7 @@ Owner-scoped commands route through N1; uncertain UI uses N3 mutation/reconcilia
 
 - [ ] **Step 3: Run N5 completion gate**
 
-Expected: lost ACK does not duplicate finalize; old peer fallback and action matrix pass; 1 GiB remains N8 pending.
+Expected: lost ACK does not duplicate finalize; old peer fallback and action matrix pass; 1 GiB dual-host certification remains deferred `NOT VERIFIED` outside the current Mac-only N8 scope.
 
 ### Task 7: Execute N6 Orchestrator Review, Workflow and Notifications
 
@@ -196,7 +197,7 @@ Expected: root render and editor chunk improve; index bounded; module caps decre
 
 - [ ] **Step 1: Land N8 checker, updater harness, RC and evidence-aware release infrastructure**
 
-Merge the evidence schema/four new IDs, fixed profiles, non-public RC workflow, non-releasable updater certification harness and evidence-aware release gate before any candidate freeze. This is product/checker/workflow code and therefore must be part of `subjectCommit`.
+Merge the architecture-level evidence schema, Apple Silicon GUI/VoiceOver execution IDs, fixed `macos-aarch64-beta` profile, single-matrix non-public RC workflow, non-releasable updater certification harness and beta-only evidence-aware release gate before any candidate freeze. This is checker/workflow code and therefore must be part of `subjectCommit`; Windows/Linux/Intel build jobs remain deferred.
 
 - [ ] **Step 2: Prepare a unique release version**
 
@@ -249,33 +250,33 @@ git commit -m "docs: calibrate post-audit guarantees"
 
 Repeat Step 3 after the commit. When all gates pass, record this exact HEAD/version as `subjectCommit`; after this point only the evidence-ref allowlist may change. Any broad doc, product, checker or workflow edit creates a new subject and invalidates all candidate evidence.
 
-### Task 10: Execute N8 Evidence and Publish as the Final Action
+### Task 10: Execute Apple Silicon N8 Evidence and Optionally Publish the Beta
 
-**Files:** Follow Tasks 2–8 of `docs/superpowers/plans/2026-07-14-real-device-release-certification.md`; after freeze only `README.md`, `docs/development/{quality-matrix.json,real-device-certification.md,release-claim.json}`, `docs/testing/mobile-workbench-lan-test-cases.md` and regular files under `docs/development/evidence/**` may differ from subject.
+**Files:** Follow Tasks 2–6 of `docs/superpowers/plans/2026-07-14-real-device-release-certification.md`; after freeze only `README.md`, `docs/development/{quality-matrix.json,real-device-certification.md,release-claim.json}` and regular files under `docs/development/evidence/**` may differ from subject.
 
 - [ ] **Step 1: Build one immutable RC from the frozen subject**
 
-Create/push the ruleset-protected immutable `subjectTag`, verify it peels to `subjectCommit`, then dispatch RC workflow with `ref=<subjectTag>` plus the full SHA input. Verify `github.sha/head_sha`, exact inventory, live retention and production certification-marker scan. Candidate assets and non-releasable updater harness artifacts remain private.
+Create/push the ruleset-protected immutable `subjectTag`, verify it peels to `subjectCommit`, then dispatch RC workflow with `ref=<subjectTag>` plus the full SHA input. Verify `github.sha/head_sha`, exact `macos-aarch64` production/harness inventory, live retention and production certification-marker scan. Do not build Windows、Linux 或 Intel Mac assets. Candidate assets and non-releasable updater harness artifacts remain private.
 
-- [ ] **Step 2: Execute all nine independent L3 rows**
+- [ ] **Step 2: Execute the two required Apple Silicon L3 executions**
 
-Run macOS, Windows/WSL, Ubuntu, dual-host, iOS/Android and VoiceOver/NVDA against the same subject/run and exact package SHA tuples. Write execution PASS/FAIL and aggregate PASS/FAIL/PARTIAL only after real execution; missing hardware remains canonical matrix `NOT VERIFIED`.
+On the current Mac, run `L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64` and `L3-MACOS-VOICEOVER-001@macos-aarch64` against the same subject/run and exact package SHA tuples. Write execution PASS/FAIL and aggregate PASS/FAIL/PARTIAL only after real execution. Intel Mac、Windows/WSL、Ubuntu、dual-host、iOS/Android and NVDA remain canonical `NOT VERIFIED` without placeholder manifests.
 
 - [ ] **Step 3: Send every discovered defect back to its owning plan**
 
-After any product/checker/workflow fix, return to Task 9, create a new subject/RC and rerun all nine rows. Never edit commit/run fields or FAIL into PASS without execution.
+After any product/checker/workflow fix, return to Task 9, create a new subject/RC and rerun both current required executions. Never edit commit/run fields or FAIL into PASS without execution.
 
 - [ ] **Step 4: Run go/no-go and commit only allowlisted claim/evidence files**
 
-Run N8 checker against the fixed profile. Update release claim, README evidence wording, certification document/matrix/mobile test cases and evidence artifacts only. Commit them, resolve the evidence ref once to `expectedEvidenceCommit`, rerun the checker with that SHA, and freeze the exact subject tag/commit, RC, evidence ref/commit, profile and artifact publish bundle; do not publish yet.
+Run N8 checker against fixed `macos-aarch64-beta`. Update release claim, README evidence wording, certification document/matrix and the two evidence directories only. Commit them, resolve the evidence ref once to `expectedEvidenceCommit`, rerun the checker with that SHA, and freeze the exact subject tag/commit, RC, evidence ref/commit, profile and Apple Silicon artifact publish bundle; do not publish yet.
 
 - [ ] **Step 5: Run the final non-mutating gates**
 
 Run the evidence checker self-test/live command, docs self-test/live command and repository status/path-allowlist verification. Also verify the L0–L2 gate outputs recorded in Task 9 still correspond to `subjectCommit`; do not rerun a build that changes bytes. Any required edit returns to Step 3/new candidate.
 
-- [ ] **Step 6: Dispatch the evidence-aware release as the final irreversible action**
+- [ ] **Step 6: Stop after certification or dispatch the authorized beta as the final irreversible action**
 
-Dispatch `.github/workflows/release-tauri.yml` through Actions API with `ref=<subjectTag>` plus the exact frozen subject SHA, RC run, evidence ref, `expectedEvidenceCommit`, claim mode and fixed profile bundle. The workflow's first job must assert `github.sha == inputs.subjectCommit`, tag peel equality and `resolve(evidenceRef)==expectedEvidenceCommit`; only then may it publish profile-selected `releasable=true` RC bytes and provenance. Existing target tag/release is fatal; no force-move or asset overwrite. Do not run another code/doc mutation after release.
+If the requested outcome is certification only, return the frozen GO/NO-GO bundle and do not publish. If beta publication is explicitly in scope, dispatch the separate `.github/workflows/release-tauri-beta.yml` through Actions API with `ref=<subjectTag>` plus the exact frozen subject SHA, RC run, evidence ref, `expectedEvidenceCommit`, `platform-beta` and `macos-aarch64-beta`. The first job must assert `github.sha == inputs.subjectCommit`, tag peel equality and `resolve(evidenceRef)==expectedEvidenceCommit`; only then may it publish Apple Silicon `releasable=true` RC bytes and provenance to a new prerelease. Any stable metadata, extra-platform asset, existing target tag/release, force-move or asset overwrite is fatal；现有 stable `release-tauri.yml` 不在本里程碑调用，发布后不得再修改代码、文档或证据。
 
 ## Rollback and Failure Containment
 
@@ -286,7 +287,7 @@ Dispatch `.github/workflows/release-tauri.yml` through Actions API with `ref=<su
 ## Completion Contract
 
 - N1–N7 completion contracts pass on the integrated branch.
-- N8 evidence honestly supports release claims or blocks them.
+- N8 evidence honestly supports or blocks only `macos-aarch64-beta`; deferred platforms remain explicit `NOT VERIFIED`.
 - every master coverage row has test/evidence ownership.
 - user-owned old roadmap docs remain untouched and no global invariant regresses.
 

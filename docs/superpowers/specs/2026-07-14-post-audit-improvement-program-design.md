@@ -41,11 +41,11 @@
 | N1 | Runtime Authority & Operational Diagnostics | sidecar 单一 owner、generation、terminal runtime role/RAII、权威 snapshot、bridge 生命周期、运行诊断 | `2026-07-14-runtime-authority-and-operational-diagnostics-design.md` | `2026-07-14-runtime-authority-and-operational-diagnostics.md` |
 | N2 | Sync Integrity, Conflict & Recovery | typed sync、manifest/batch、事务、冲突副本、tombstone GC、导出恢复 | `2026-07-14-sync-integrity-conflict-and-recovery-design.md` | `2026-07-14-sync-integrity-conflict-and-recovery.md` |
 | N3 | Frontend Async State & Mobile Transport | safe-save、stale guard、错误恢复、operation context、移动端 timeout/cancel/reconcile | `2026-07-14-frontend-async-state-and-mobile-transport-design.md` | `2026-07-14-frontend-async-state-and-mobile-transport.md` |
-| N4 | Core Workbench Experience & LAN Onboarding | Continue Working 首页、导航分组、空态、LAN 首次确认、移动布局与对比度 | `2026-07-14-core-workbench-experience-and-lan-onboarding-design.md` | `2026-07-14-core-workbench-experience-and-lan-onboarding.md` |
+| N4 | Core Workbench Experience & LAN Onboarding | Trending 默认首页、Workbench Continue Working 启动页、导航分组、空态、LAN 首次确认、移动布局与对比度 | `2026-07-14-core-workbench-experience-and-lan-onboarding-design.md` | `2026-07-14-core-workbench-experience-and-lan-onboarding.md` |
 | N5 | Transfer Lifecycle & Recovery | retry/resume、失败阶段、结果对账、open/reveal、可操作历史 | `2026-07-14-transfer-lifecycle-and-recovery-design.md` | `2026-07-14-transfer-lifecycle-and-recovery.md` |
 | N6 | Orchestrator Review, Workflow & Notifications | Human Review diff、WORKFLOW 向导、系统通知、deep link 与去重 | `2026-07-14-orchestrator-review-workflow-and-notifications-design.md` | `2026-07-14-orchestrator-review-workflow-and-notifications.md` |
 | N7 | Targeted Performance & Maintainability | 1Hz 隔离、编辑器语言拆包、索引预算、timeout 分类、模块 ratchet | `2026-07-14-targeted-performance-and-maintainability-design.md` | `2026-07-14-targeted-performance-and-maintainability.md` |
-| N8 | Real-Device Release Certification | 五组 L3 真机证据、无障碍、移动弱网、90 天有效期与 go/no-go | `2026-07-14-real-device-release-certification-design.md` | `2026-07-14-real-device-release-certification.md` |
+| N8 | Real-Device Release Certification | 当前 Apple Silicon Mac GUI/权限与 VoiceOver 真机证据、90 天有效期、`macos-aarch64-beta` go/no-go；其他平台延期 | `2026-07-14-real-device-release-certification-design.md` | `2026-07-14-real-device-release-certification.md` |
 
 ## 5. 依赖波次
 
@@ -63,7 +63,7 @@ Wave 5: N8
 - N5 消费 N3 的 mutation 状态合同，可与 N4 并行；N4 先拥有 AppShell、Settings 响应式、deep-link/导航整合，合并后 N6 再增量接入 review/workflow/notification，避免并行修改同一 UI shell/config 文件。
 - N6 同时消费 N1 的权威 runtime snapshot 与 N3 safe-save 合同。
 - N7 只优化已经稳定的行为，不在性能任务中修改产品语义。
-- N8 必须针对 N1–N7 合并后的候选版本执行，不能用 L1/L2 替代真机证据。
+- N8 必须针对 N1–N7 合并后的候选版本执行，不能用 L1/L2 替代真机证据；当前只执行本机 `macos-aarch64-beta`，其他平台保持 `NOT VERIFIED` 且不阻断该 beta。
 
 ## 6. 审计发现覆盖矩阵
 
@@ -80,8 +80,8 @@ Wave 5: N8
 | Scratchpad 快速切页、Devices/CcHistory 失败恢复 | N3 | 逆序响应被丢弃；失败保留草稿或回滚后可重试；无后端 restore 合同时不展示假 Undo |
 | Mobile project 失败无法重试、HTTP 无统一 timeout | N3 | error 状态有重试；query 可取消/重试；mutation 可对账且不盲重放 |
 | Git 长操作污染新 project/worktree | N3 | success/catch/finally 全部校验 operation context |
-| 首页定位与核心 Workbench 不一致 | N4 | `/` 展示最近工作、Attention、运行任务、传输与设备摘要；Trending 下沉 Discover |
-| 侧栏短窗口溢出、Workbench 空态噪声 | N4 | 内容区独立滚动；未选项目只展示聚焦 CTA 与依赖次级动作 |
+| Trending 默认首页需要保持，Workbench 仍缺“继续工作”入口 | N4 | `/` 保持 Trending；`/workbench` 有项目未选中时展示最近工作摘要，完全无项目只显示聚焦 CTA |
+| 侧栏短窗口溢出、Workbench 空态噪声 | N4 | 内容区独立滚动；无项目时只展示聚焦 CTA 与依赖次级动作 |
 | LAN 无身份模型缺少首次知情确认 | N4 | GUI 首次启动 listener 前确认本机地址候选、首选 port/递增规则与风险，启动后展示实际监听地址；确认后仍是固定无鉴权模型 |
 | `--meta` 对比度与移动十面板认知负担 | N4 | 正文达到 4.5:1；移动导航分组并完成横屏/键盘/safe-area 设计合同 |
 | Transfer 只有 send/cancel，恢复操作不完整 | N5 | retry/resume/open/reveal 与失败阶段均有真实后端合同和 UI |
@@ -91,7 +91,7 @@ Wave 5: N8
 | Workbench 每秒整页重渲染 | N7 | 时钟下沉，Profiler/测试证明只更新运行时文本子树 |
 | CodeMirror 全语言静态导入 | N7 | 按语言动态加载缓存，bundle budget 不回退 |
 | Claude session 同步扫描与巨型模块 | N7 | `spawn_blocking` + 扫描预算；module exceptions 按期限收敛 |
-| 五组现有 L3 与四组移动/无障碍附加行未认证 | N8 | 九个稳定 ID 各自有真实设备证据或保持 `NOT VERIFIED` 并触发精确 go/no-go，不得聚合成假 PASS |
+| 当前只有 Apple Silicon Mac 可执行 L3 | N8 | 只消费 GUI/权限与 VoiceOver 的 `macos-aarch64` execution；Windows、Ubuntu、Intel Mac、dual-host、mobile、NVDA 保持 `NOT VERIFIED`，仅阻断对应未来宣称 |
 
 ## 7. 全局非目标
 
@@ -102,6 +102,7 @@ Wave 5: N8
 - 不在导出包中包含项目源码、终端 transcript、认证 token、SSH 私钥或 lifecycle control token。
 - 不为了拆文件而拆文件；只拆当前计划触达且有 characterization 的模块。
 - 不自动修改防火墙，不把未执行真机项标为通过。
+- 不让延期的 Windows/Ubuntu 等平台阻断固定 `macos-aarch64-beta`，也不把该 beta 扩写成 stable/full/cross-platform 认证。
 
 ## 8. 全局完成合同
 
@@ -109,12 +110,12 @@ Wave 5: N8
 2. 前端继续满足 `lint + build + test + test:e2e + token/i18n/module/bundle` 全部门禁。
 3. Rust 继续满足 `fmt + clippy -D warnings + cargo test --locked`，P2P 路由与 docs 检查保持一致。
 4. 任何失败、partial 或 uncertain 状态都能在 DTO、日志和 UI 中被区分，且不泄漏用户内容或凭据。
-5. N8 对候选版本执行真实设备认证；任一发布阻断项失败则不得宣称全平台、权限、双机 LAN 或 1GiB resume 已认证。
+5. N8 对候选版本执行本机 Apple Silicon GUI/权限与 VoiceOver 认证；任一当前必需 execution 失败则不得发布该 beta，延期项保持 `NOT VERIFIED`，不得宣称全平台、双机 LAN 或 1GiB resume 已认证。
 6. 最终仅按事实更新 README、PRD、测试矩阵和分层指令；旧未跟踪路线图保持用户所有权。
 
 ## 9. Spec 自审
 
-- 未决占位项：无；所有产品分支已选择唯一行为。
+- 未决占位项：无；N4 固定 Trending 默认首页，N8 固定 `macos-aarch64-beta` 当前执行范围。
 - 一致性：八条子项目各有唯一 owner，LAN 固定无鉴权边界在所有子项目中一致。
 - 范围：总纲只定义依赖和验收，不复制子计划实现步骤。
 - 歧义：旧 S1–S6 明确为已完成基线，旧 checkbox 不作为待办来源。

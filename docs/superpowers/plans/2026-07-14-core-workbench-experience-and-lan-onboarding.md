@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED EXECUTION FLOW: use `superpowers:using-git-worktrees`, then `superpowers:test-driven-development` task-by-task, and run `superpowers:verification-before-completion` before every completion claim. Native subagents may execute independent tasks; do not require unavailable `subagent-driven-development` or `executing-plans` skills. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把默认入口重构为“继续工作”控制台，修复侧栏/Workbench 空态和移动导航，并在 GUI 第一次启动 LAN sidecar 前完成一次性无身份风险确认。
+**Goal:** 保持 Trending 为默认首页，把“继续工作”收敛到 Workbench 启动页，修复侧栏/Workbench 空态和移动导航，并在 GUI 第一次启动 LAN sidecar 前完成一次性无身份风险确认。
 
-**Architecture:** 保留现有设计系统和路由语义，把 Trending 移到 Discover route，Home 消费 sidecar 有界只读 summary 并组合独立资源卡片。AppShell 分组但继续复用 NavItem/ProjectRail。LAN disclosure 写入 launcher-owned `gui-bootstrap.json`；App-level `LanDisclosureGate` + hook 覆盖新用户、升级用户与 Welcome skip，Rust startup coordinator 同时控制 ensure 与 GUI backend services。实现阶段用 `huashu-design` 对既有语言内的布局进行截图验证。
+**Architecture:** 保留现有设计系统与 `/`→Home/Trending 路由。Workbench 在“有项目但未选中”时消费 sidecar 有界只读 `WorkbenchLaunchSummary`；完全无项目时只显示聚焦 CTA，已有 active project 时维持现有工作区。启动摘要状态并入现有 `useWorkbenchProjectController`，不增加第八个页面 controller。AppShell 分组但继续复用 NavItem/ProjectRail。LAN disclosure 写入 launcher-owned `gui-bootstrap.json`；App-level `LanDisclosureGate` + hook 覆盖新用户、升级用户与 Welcome skip，Rust startup coordinator 同时控制 ensure 与 GUI backend services。实现阶段用 `huashu-design` 对既有语言内的布局进行截图验证。
 
 **Tech Stack:** React 19, React Router v6, TypeScript, CSS Modules/tokens, Tauri 2/Rust atomic launcher bootstrap file, Vitest, Playwright.
 
@@ -14,7 +14,8 @@
 - 所有 CSS 值来自 tokens；新增颜色/间距 token 同时定义浅深主题。
 - 合法 LAN peer 仍无身份鉴权；disclosure 不是 LAN 模式、token、配对或权限矩阵。
 - `gui-bootstrap.json` 只能存 disclosure version/timestamp，不得复制任何 sidecar runtime config；AppConfig 继续由 N1 owner 控制。
-- Home 各资源独立 loading/error/stale；不得单个失败拖垮整页。
+- `/` 必须继续显示 Trending；不得新增 `/discover` 搬迁页或把 Workbench 摘要塞入 Home。
+- Workbench 启动页各资源独立 loading/error/stale；不得单个失败拖垮整页。
 - Hooks 必须在 early return 前；复用 Card/Button/Dialog/Drawer/NavItem/ProjectRail。
 - 每任务 TDD、focused visual/interaction verification、commit。
 
@@ -22,13 +23,12 @@
 
 ## File Structure
 
-- Create: `web/src/pages/Discover/{Discover.tsx,Discover.module.css,index.ts}` — 承接现有 Trending。
-- Rewrite: `web/src/pages/Home/{Home.tsx,Home.module.css}` — Continue Working。
-- Create: `web/src/pages/Home/homeDashboardState.ts` and tests。
+- Preserve/test: `web/src/pages/Home/{Home.tsx,Home.module.css}` and `/` lazy route — Trending 默认首页。
 - Modify: `web/src/App.tsx` and lazy route tests; create `web/src/LanDisclosureGate.tsx`, `web/src/LanDisclosureGate.test.tsx`, `web/src/hooks/useLanDisclosureStartup.ts` and test。
 - Modify: `web/src/components/layout/AppShell/{AppShell.tsx,AppShell.module.css}`。
 - Modify: `web/src/components/layout/Sidebar/Sidebar.module.css`。
-- Modify: `web/src/pages/Workbench/{Workbench.tsx,Workbench.module.css}` and characterization tests。
+- Modify: `web/src/pages/Workbench/{Workbench.tsx,Workbench.module.css,controllers/useWorkbenchProjectController.ts}` and characterization/controller tests；create pure `workbenchLaunchState.ts` and tests。
+- Modify: `web/src/api/workbench.ts`, `src-tauri/src/commands/workbench/projects.rs` and N1 control API/client — 有界 `WorkbenchLaunchSummary`。
 - Modify: `web/src/mobile/{MobileWorkbench.tsx,MobileWorkbench.module.css,mobileWorkbenchState.ts}` and shell/tests。
 - Modify: `web/src/pages/Settings/Settings.tsx` and `web/src/pages/Settings/Settings.module.css`。
 - Modify: `web/src/styles/tokens.css`, `web/scripts/check-css-tokens.mjs`, `web/scripts/check-css-tokens.test.mjs`。
@@ -53,7 +53,7 @@ pub struct LanDisclosureStatus {
 ```
 
 ```ts
-export type HomeResource<T> =
+export type WorkbenchLaunchResource<T> =
   | { kind: 'loading' }
   | { kind: 'ready'; value: T; stale: boolean }
   | { kind: 'error'; message: string; cached?: T }
@@ -136,71 +136,52 @@ git add src-tauri/src/gui_bootstrap.rs src-tauri/src/gui_startup.rs src-tauri/sr
 git commit -m "feat(onboarding): require LAN risk acknowledgement"
 ```
 
-### Task 2: Move Trending to Discover and Build Independent Home Resource State
+### Task 2: Lock Trending as the Default Home
 
 **Files:**
-- Create: `web/src/pages/Discover/Discover.tsx`
-- Create: `web/src/pages/Discover/Discover.module.css`
-- Create: `web/src/pages/Discover/index.ts`
-- Create: `web/src/pages/Discover/Discover.test.tsx`
-- Modify: `web/src/App.tsx`
+- Modify: `web/src/pages/Home/Home.test.tsx`
 - Modify: `web/src/App.lazyRoutes.test.tsx`
-- Create: `web/src/pages/Home/homeDashboardState.ts`
-- Create: `web/src/pages/Home/homeDashboardState.test.ts`
-- Modify: `web/src/i18n/locales/zh/home.json`
-- Modify: `web/src/i18n/locales/en/home.json`
+- Modify if needed for landmark semantics only: `web/src/pages/Home/Home.tsx`
 
-**Interfaces:** Produces `/discover`; Home resources for recent projects/sessions, Attention, Orchestrator tasks, Transfer and devices/sync.
+**Interfaces:** Preserves `/` → existing Home/Trending and the current Trending data/loading/error contract. Produces no `/discover` route and no dashboard API.
 
-- [ ] **Step 1: Write route and partial-failure tests**
+- [ ] **Step 1: Add characterization tests before adjacent navigation work**
 
-```ts
-test('one failed home resource preserves the others', () => {
-  const state = reduceHomeResults([
-    success('projects', [project]),
-    failure('transfers', 'offline'),
-  ])
-  expect(state.projects.kind).toBe('ready')
-  expect(state.transfers.kind).toBe('error')
-})
-```
+Assert cold launch at `/`, sidebar Home activation and browser refresh all render the existing Trending heading/content; `/workbench` remains a separate lazy route. Also assert the production route table contains no `/discover` migration alias.
 
-- [ ] **Step 2: Run RED**
+- [ ] **Step 2: Run the preservation baseline**
 
-Run: `cd web && npm test -- homeDashboardState.test.ts App.lazyRoutes.test.tsx`
+Run: `cd web && npm test -- Home.test.tsx App.lazyRoutes.test.tsx`
 
-Expected: FAIL because Discover/state do not exist.
+Expected: PASS on the existing behavior. If it fails, repair the characterization fixture without changing the product route.
 
-- [ ] **Step 3: Move current Home implementation without visual redesign**
+- [ ] **Step 3: Keep the page landmark valid without redesign**
 
-Copy/move GitHub Trending page implementation and CSS to Discover, update imports and add lazy `/discover`. Replace the old inner `<main>` with a labelled `section`/`div` so AppShell remains the page's single main landmark. Add Discover behavior/route tests and keep production route accessible.
+Only if the existing Home renders a nested `<main>`, replace that inner landmark with a labelled `section`/`div` so AppShell remains the single main landmark. Do not move or duplicate Trending code and do not create a second navigation destination for it.
 
-- [ ] **Step 4: Implement pure independent resource reducer**
+- [ ] **Step 4: Verify and commit the guardrail**
 
-Each resource transitions separately; refresh failure may retain cached value with stale=true. No resource result clears another.
-
-- [ ] **Step 5: Verify and commit**
-
-Run: `cd web && npm test -- homeDashboardState.test.ts Discover.test.tsx App.lazyRoutes.test.tsx && npm run check:i18n && npm run build`
+Run: `cd web && npm test -- Home.test.tsx App.lazyRoutes.test.tsx && npm run check:i18n && npm run build`
 
 ```bash
-git add web/src/pages/Discover/Discover.tsx web/src/pages/Discover/Discover.module.css web/src/pages/Discover/Discover.test.tsx web/src/pages/Discover/index.ts web/src/pages/Home/homeDashboardState.ts web/src/pages/Home/homeDashboardState.test.ts web/src/App.tsx web/src/App.lazyRoutes.test.tsx web/src/i18n/locales/zh/home.json web/src/i18n/locales/en/home.json
-git commit -m "refactor(home): move trending to discover"
+git add web/src/pages/Home/Home.tsx web/src/pages/Home/Home.test.tsx web/src/App.lazyRoutes.test.tsx
+git commit -m "test(home): preserve trending as default route"
 ```
 
-### Task 3: Implement the Continue Working Home
+### Task 3: Implement the Continue Working Workbench Launch Surface
 
 **Files:**
-- Modify: `web/src/pages/Home/Home.tsx`
-- Modify: `web/src/pages/Home/Home.module.css`
-- Create: `web/src/pages/Home/Home.test.tsx`
-- Create: `web/src/pages/Home/useHomeDashboardController.ts`
-- Create: `web/src/pages/Home/useHomeDashboardController.test.tsx`
-- Create: `web/src/api/home.ts`
-- Create: `web/src/api/home.test.ts`
-- Create: `src-tauri/src/commands/home.rs`
-- Modify: `src-tauri/src/commands/mod.rs`
-- Modify: `src-tauri/src/lib.rs`
+- Modify: `web/src/pages/Workbench/Workbench.tsx`
+- Modify: `web/src/pages/Workbench/Workbench.module.css`
+- Modify: `web/src/pages/Workbench/controllers/useWorkbenchProjectController.ts`
+- Modify: `web/src/pages/Workbench/controllers/useWorkbenchProjectController.test.tsx`
+- Create: `web/src/pages/Workbench/workbenchLaunchState.ts`
+- Create: `web/src/pages/Workbench/workbenchLaunchState.test.ts`
+- Modify: `web/src/pages/Workbench/WorkbenchProject.characterization.test.tsx`
+- Modify: `web/src/api/workbench.ts`
+- Modify: `web/src/api/workbench.test.ts`
+- Modify: `src-tauri/src/commands/workbench/projects.rs`
+- Modify: `src-tauri/src/commands/workbench/mod.rs`
 - Modify: `src-tauri/src/backend/control_api.rs`
 - Modify: `src-tauri/src/backend/control_client.rs`
 - Modify: `src-tauri/src/net/http_server.rs`
@@ -210,48 +191,51 @@ git commit -m "refactor(home): move trending to discover"
 - Modify: `src-tauri/src/commands/devices.rs`
 - Modify: `src-tauri/tests/runtime_authority_smoke.rs`
 - Reuse: Attention provider and device read model
-- Modify: `web/src/i18n/locales/zh/home.json`
-- Modify: `web/src/i18n/locales/en/home.json`
+- Modify: `web/src/i18n/locales/zh/workbench.json`
+- Modify: `web/src/i18n/locales/en/workbench.json`
 
-**Interfaces:** Requires N1 Task 2/3's created `control_api.rs`/`control_client.rs`. Produces sidecar-owned read-only `HomeDashboardSummary` with five independent section outcomes, each ≤5: recent projects, recent active sessions, Orchestrator tasks, active/failed transfers and online/recent-sync devices. Consumes Task 2 resource state; Attention remains provider-owned. No mutation or per-project N+1.
+**Interfaces:** Requires N1 Task 2/3's `control_api.rs`/`control_client.rs`. Produces sidecar-owned read-only `WorkbenchLaunchSummary` with five independent section outcomes, each ≤5: recent projects, recent active sessions, Orchestrator tasks, active/failed transfers and online/recent-sync devices. Attention remains provider-owned. No mutation, no per-project N+1 and no eighth Workbench controller.
 
-- [ ] **Step 1: Write rendering/deep-link/error-isolation tests**
+- [ ] **Step 1: Write state, rendering, deep-link and error-isolation tests**
 
 ```ts
-test('renders recent project and attention while transfer fails', async () => {
-  mockHomeApis({ transferError: 'offline' })
-  render(<Home />)
-  expect(await screen.findByText('最近项目')).toBeVisible()
-  expect(screen.getByText('待处理')).toBeVisible()
-  expect(screen.getByText('offline')).toBeVisible()
+test('one failed launch resource preserves the others', () => {
+  const state = reduceWorkbenchLaunchResults([
+    success('projects', [project]),
+    failure('transfers', 'offline'),
+  ])
+  expect(state.projects.kind).toBe('ready')
+  expect(state.transfers.kind).toBe('error')
 })
 ```
 
+Also assert: existing projects + no selection renders “继续工作”; zero projects renders only the three focused actions; active project renders normal Workbench chrome; `/` still renders Trending.
+
 - [ ] **Step 2: Run RED**
 
-Run: `cd web && npm test -- Home.test.tsx`
+Run: `cd web && npm test -- workbenchLaunchState.test.ts useWorkbenchProjectController.test.tsx WorkbenchProject.characterization.test.tsx Home.test.tsx`
 
-Expected: FAIL because Home is still Trending.
+Expected: FAIL because the Workbench launch summary does not exist; the Home preservation assertion already passes.
 
 - [ ] **Step 3: Implement the bounded owner read model**
 
-Add `GET /api/backend/control/home-dashboard-summary` to the N1 `BackendControlApi` router and mount that router from `net/http_server.rs`; it is a lifecycle-control route, so real socket peer must be loopback and the control-file token is required, and it is never advertised as a LAN business route. `BackendControlClient` decodes the DTO, `commands/home.rs` is a thin Tauri adapter, and `lib.rs`/`commands/mod.rs` register it. The sidecar handler concurrently gathers each section and serializes per-section ready/error outcomes so one repository failure does not fail the response. Recent projects/sessions use a bounded indexed query, Orchestrator is global rather than current-project-only, and every section has deterministic recency ordering and max 5. Add query-count tests proving no per-project session/task N+1 plus a black-box GUI-command→loopback route→sidecar repository smoke; wrong token/non-loopback tests must fail before repository access.
+Add `GET /api/backend/control/workbench-launch-summary` to the N1 `BackendControlApi` router mounted from `net/http_server.rs`. It is a lifecycle-control route: real socket peer must be loopback and the control-file token is required; it is never advertised as a LAN business route. `BackendControlClient` decodes the DTO, existing `commands/workbench/projects.rs` remains the thin Tauri adapter, and `commands/workbench/mod.rs` registers it. The sidecar handler concurrently gathers each section and serializes per-section ready/error outcomes so one repository failure does not fail the response. Recent projects/sessions use bounded indexed queries, Orchestrator is global rather than current-project-only, and every section has deterministic recency ordering and max 5. Add query-count tests proving no per-project session/task N+1 plus a black-box GUI-command→loopback route→sidecar repository smoke; wrong token/non-loopback tests must fail before repository access.
 
-- [ ] **Step 4: Compose existing primitives into five priority sections**
+- [ ] **Step 4: Extend the existing project controller and compose the launch surface**
 
-Call `useHomeDashboardController` before every early return. Fetch on mount, existing invalidation and at most every 15 seconds while document visible; abort on unmount/context change and retain per-section stale timestamps on refresh failure. Compose Card/Button/Pill with existing deep-link helpers and Attention provider. Show real empty CTA, never fabricated metrics. Do not create a new global data store.
+Keep all seven Workbench controllers before every early return. Extend `useWorkbenchProjectController` with launch-summary state rather than creating another controller. Fetch only while there are existing projects but no active project, on mount/invalidation and at most every 15 seconds while document visible; abort on unmount/context change and retain per-section stale timestamps on refresh failure. Compose Card/Button/Pill with existing deep-link helpers and Attention provider. Show real empty CTA, never fabricated metrics, and do not create a new global data store.
 
-- [ ] **Step 5: Run Home tests and visual smoke**
+- [ ] **Step 5: Run focused tests and visual smoke**
 
-Run: `cd src-tauri && cargo test --locked commands::home && cd ../web && npm test -- Home.test.tsx useHomeDashboardController.test.tsx home.test.ts && npm run check:i18n && npm run build`
+Run: `cd src-tauri && cargo test --locked workbench_launch_summary && cd ../web && npm test -- workbenchLaunchState.test.ts useWorkbenchProjectController.test.tsx WorkbenchProject.characterization.test.tsx Home.test.tsx workbench.test.ts && npm run check:i18n && npm run build`
 
-Expected: PASS.
+Expected: PASS; Home remains Trending and the launch summary appears only inside Workbench.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src-tauri/src/commands/home.rs src-tauri/src/commands/devices.rs src-tauri/src/commands/mod.rs src-tauri/src/lib.rs src-tauri/src/backend/control_api.rs src-tauri/src/backend/control_client.rs src-tauri/src/net/http_server.rs src-tauri/src/workbench/claude_sessions.rs src-tauri/src/orchestrator/repo/tasks.rs src-tauri/src/storage/transfer_repo.rs src-tauri/tests/runtime_authority_smoke.rs web/src/api/home.ts web/src/api/home.test.ts web/src/pages/Home/Home.tsx web/src/pages/Home/Home.module.css web/src/pages/Home/Home.test.tsx web/src/pages/Home/useHomeDashboardController.ts web/src/pages/Home/useHomeDashboardController.test.tsx web/src/pages/Home/homeDashboardState.ts web/src/pages/Home/homeDashboardState.test.ts web/src/i18n/locales/zh/home.json web/src/i18n/locales/en/home.json
-git commit -m "feat(home): add continue working dashboard"
+git add src-tauri/src/commands/workbench/projects.rs src-tauri/src/commands/workbench/mod.rs src-tauri/src/commands/devices.rs src-tauri/src/backend/control_api.rs src-tauri/src/backend/control_client.rs src-tauri/src/net/http_server.rs src-tauri/src/workbench/claude_sessions.rs src-tauri/src/orchestrator/repo/tasks.rs src-tauri/src/storage/transfer_repo.rs src-tauri/tests/runtime_authority_smoke.rs web/src/api/workbench.ts web/src/api/workbench.test.ts web/src/pages/Workbench/Workbench.tsx web/src/pages/Workbench/Workbench.module.css web/src/pages/Workbench/WorkbenchProject.characterization.test.tsx web/src/pages/Workbench/controllers/useWorkbenchProjectController.ts web/src/pages/Workbench/controllers/useWorkbenchProjectController.test.tsx web/src/pages/Workbench/workbenchLaunchState.ts web/src/pages/Workbench/workbenchLaunchState.test.ts web/src/i18n/locales/zh/workbench.json web/src/i18n/locales/en/workbench.json
+git commit -m "feat(workbench): add continue working launch surface"
 ```
 
 ### Task 4: Group Navigation and Fix Short-Window Sidebar
@@ -279,7 +263,7 @@ Expected: FAIL for grouping/overlap.
 
 - [ ] **Step 3: Implement groups and scroll contract**
 
-Set content `min-height:0; overflow-y:auto`; keep footer in flex flow. Render semantic labelled sections, move ProjectRail into Work group and add Discover NavItem. Preserve all routes and badges.
+Set content `min-height:0; overflow-y:auto`; keep footer in flex flow. Render semantic labelled sections, keep the existing Home/Trending NavItem as the default Explore entry, move ProjectRail into Work group, and preserve all routes/badges. Do not add a duplicate Discover NavItem.
 
 - [ ] **Step 4: Verify keyboard and viewport**
 
@@ -453,19 +437,19 @@ git commit -m "feat(ux): complete core workbench onboarding"
 ## Rollback and Failure Containment
 
 - `gui-bootstrap.json` 为 additive launcher 状态；回退 UI 可忽略更高版本，但不得把它解释成可开关 LAN 模式、复制入 AppConfig 或自动撤销已确认记录。
-- Home/Discover/导航按 task commit 可独立回退，旧 Trending 数据与路由需保持可达，不删除用户状态。
+- Home/Trending 路由只增加防回归测试；Workbench 启动页与导航按 task commit 可独立回退，不删除用户状态。
 - listener 启动失败保留确认记录并进入诊断路径，不通过自动重复启动绕过失败。
 
 ## Completion Contract
 
 - GUI first-run cannot start LAN sidecar before disclosure acknowledgement.
-- Home answers “continue working”; Discover preserves Trending.
+- Home remains the default Trending page; Workbench answers “continue working”.
 - sidebar has grouped navigation and no 720px overlap.
 - no-project Workbench and mobile group flows are focused and keyboard accessible.
 - required small text meets 4.5:1 and full frontend gates pass.
 
 ## Plan Self-Review
 
-- Spec coverage: disclosure, Home, navigation, sidebar, empty state, mobile and contrast each map to tasks.
+- Spec coverage: disclosure, Trending default route, Workbench launch/empty states, navigation, sidebar, mobile and contrast each map to tasks.
 - Placeholder scan: no unresolved implementation placeholders.
-- Type consistency: disclosure version and Home resource types are defined once and reused.
+- Type consistency: disclosure version and Workbench launch resource types are defined once and reused.

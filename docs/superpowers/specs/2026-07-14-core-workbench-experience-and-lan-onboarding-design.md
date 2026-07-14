@@ -6,12 +6,12 @@
 
 ## 1. 问题
 
-产品核心价值是跨设备 Workbench 与自动化，但 `/` 默认展示 GitHub Trending，侧栏有 12 个同级入口。短窗口下内容区没有独立滚动，项目/权限内容与 footer 重叠。未选择项目时，Workbench 仍展示大量禁用 toolbar、空终端与空 inspector，主 CTA 藏在侧栏。GUI 启动即确保 sidecar，但 Welcome 没有在 LAN listener 启动前获得一次性知情确认。移动端十个扁平 panel 增加导航负担，meta 小字对比度低于普通正文要求。
+`/` 默认展示 GitHub Trending 是产品既有且需要保留的探索入口；核心 Workbench 体验应在自身路由内变得更聚焦，而不是取代默认首页。当前侧栏有 12 个同级入口，短窗口下内容区没有独立滚动，项目/权限内容与 footer 重叠。未选择项目时，Workbench 仍展示大量禁用 toolbar、空终端与空 inspector，主 CTA 藏在侧栏。GUI 启动即确保 sidecar，但 Welcome 没有在 LAN listener 启动前获得一次性知情确认。移动端十个扁平 panel 增加导航负担，meta 小字对比度低于普通正文要求。
 
 ## 2. 目标
 
-1. `/` 成为“继续工作”控制台，直接回答用户下一步要处理什么。
-2. 一级导航按任务域分组，Trending 下沉为 Discover，不删除现有能力。
+1. `/` 与 Home 继续以 GitHub Trending 为默认首页，不改变既有启动心智与路由。
+2. “继续工作”进入 `/workbench` 的未选项目入口；已有项目时提供最近项目、session 和运行状态摘要，无项目时只展示聚焦 CTA。
 3. 侧栏在 720px 等短窗口中可滚动且 footer 不被覆盖。
 4. Workbench 无项目时只呈现聚焦空态和明确 CTA。
 5. GUI 第一次启动 LAN listener 前展示本机地址候选、首选端口/递增规则、无身份校验风险并要求确认；启动后再展示实际监听地址。
@@ -22,37 +22,42 @@
 
 - 不重做品牌、字体、色板或所有页面视觉。
 - 不新增配对、token、可信设备、只读 LAN 模式或路由权限矩阵。
-- 不删除 GitHub Trending；只调整入口和默认首页。
-- 不把 Home 变成新的 mutation/决策真值；sidecar 只提供有界只读 dashboard read model，各 section 保留独立 loading/error/stale。
+- 不移动、复制或重命名 GitHub Trending 路由，不新增仅用于承接 Trending 的 Discover 页面。
+- 不把 Home 或 Workbench 启动页变成新的 mutation/决策真值；sidecar 只提供有界只读 launch read model，各 section 保留独立 loading/error/stale。
 
 ## 4. 信息架构
 
 ### 4.1 导航分组
 
 ```text
+探索 Explore
+  Trending（默认首页）
 工作 Work
-  首页 / 待处理 / 文件传输 / 项目 rail
+  工作台 / 待处理 / 文件传输 / 项目 rail
 知识 Knowledge
   Prompt库 / Claude历史 / 速记本 / Prompt优化 / CLAUDE.MD / Claude Plugin
 连接 Connect
-  设备 / 发现（GitHub Trending）
+  设备
 系统 System
   健康提醒 / 设置
 ```
 
 分组标题不是可聚焦元素，但每组用 `section aria-labelledby` 与可感知标题关联；现有 NavItem 路由、badge 和键盘行为保持不变。项目 rail 位于 Work 分组中，不在所有系统入口之后。
 
-### 4.2 Continue Working 首页
+### 4.2 Continue Working Workbench 启动页
 
-首页按优先级展示：
+`/workbench` 按三种状态渲染：
 
-1. 最近项目与最近 active session，“继续”直接进入 Workbench deep link。
-2. Attention 摘要：Human Review、Blocked、环境阻断数量，只导航。
-3. 正在运行/等待审核的 Orchestrator 任务。
-4. 活跃/失败 Transfer。
-5. 在线设备与同步最近结果。
+- 已选项目：保持现有终端、文件、Git 与自动化工作区。
+- 有项目但未选中：展示“继续工作”启动页，按优先级提供：
+  1. 最近项目与最近 active session，“继续”直接进入现有 Workbench deep link。
+  2. Attention 摘要：Human Review、Blocked、环境阻断数量，只导航。
+  3. 正在运行/等待审核的 Orchestrator 任务。
+  4. 活跃/失败 Transfer。
+  5. 在线设备与同步最近结果。
+- 完全无项目：不渲染上述摘要，只展示第 5 节定义的聚焦空态。
 
-sidecar 新增一个只读 `HomeDashboardSummary`，内部并发构建 recent projects/sessions、Orchestrator、Transfer、Devices 五个最多 5 条的独立 section outcome；它不触发 mutation，不按项目 N+1 拉 session，单 section failure 不拖垮其余结果。Attention 继续用 provider。Home controller 仅在 document visible 时以 15 秒间隔或既有事件失效刷新，所有请求可 abort，stale cache 标时间。空数据使用真实 CTA，不编造统计。Trending 通过 Discover 入口访问。
+sidecar 新增一个只读 `WorkbenchLaunchSummary`，内部并发构建 recent projects、recent sessions、Orchestrator、Transfer、Devices 五个最多 5 条的独立 section outcome；它不触发 mutation，不按项目 N+1 拉 session，单 section failure 不拖垮其余结果。Attention 继续用 provider。现有 `useWorkbenchProjectController` 扩展启动摘要状态，避免引入第八个页面 controller；仅在 document visible 时以 15 秒间隔或既有事件失效刷新，所有请求可 abort，stale cache 标时间。空数据使用真实 CTA，不编造统计。Home/Trending 不消费该 read model。
 
 ## 5. Workbench 空态
 
@@ -93,7 +98,7 @@ GUI 首次启动 → build/manage state + 创建窗口/读取本地设置 → Ap
 
 ## 8. 数据与错误
 
-- Home 通过 N1 sidecar control 读取有界 dashboard summary，Attention 复用现有 provider；各 section 保留 stale snapshot，首页不触发业务 mutation。
+- Workbench 通过 N1 sidecar control 读取有界 launch summary，Attention 复用现有 provider；各 section 保留 stale snapshot，启动页不触发业务 mutation。
 - deep link 失效时进入目标页面并显示可恢复空态，不静默跳回首页。
 - sidecar 启动失败保留风险确认结果，用户可以打开 Settings/Doctor。
 - App-level `LanDisclosureGate` + `useLanDisclosureStartup` 独立于 permission onboarding，覆盖新安装与已有 `cp-onboarding-complete=1` 的升级用户；它不放在无业务的 layout 层，Welcome 的跳过/完成路径不得绕过该守卫。
@@ -101,8 +106,8 @@ GUI 首次启动 → build/manage state + 创建窗口/读取本地设置 → Ap
 
 ## 9. 测试与验收
 
-1. 首页独立资源加载：一个 API reject 其余卡片仍可用。
-2. 最近项目/Attention/任务/Transfer CTA 使用现有 deep link 和 authority 页面。
+1. `/` 启动、侧栏点击和刷新均继续显示 Trending；不存在额外 `/discover` 搬迁路由。
+2. Workbench 启动页独立资源加载：一个 API reject 时其余卡片仍可用；最近项目/Attention/任务/Transfer CTA 使用现有 deep link 和 authority 页面。
 3. 720px 高侧栏无 footer overlap，键盘可到达所有 nav/project 动作。
 4. 无项目 Workbench 不渲染禁用工具栏和空 inspector，只显示三个动作。
 5. 首次未确认不由 GUI ensure sidecar；确认后只启动一次；升级 disclosureVersion 才重新提示；升级用户和 Welcome 跳过路径同样受守卫约束。
@@ -117,4 +122,4 @@ GUI 首次启动 → build/manage state + 创建窗口/读取本地设置 → Ap
 
 - UX 变化建立在现有设计系统和真实页面上，不发明新视觉语言。
 - LAN 确认是启动前的一次性 disclosure，不是可切换模式或身份机制。
-- Home、侧栏、空态、移动布局和对比度均有可测完成条件。
+- Trending 默认首页、Workbench 启动页、侧栏、空态、移动布局和对比度均有可测完成条件。
