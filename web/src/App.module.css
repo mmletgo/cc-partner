@@ -42,3 +42,11 @@
   font-size: var(--text-sm);
   line-height: 1.5;
 }
+
+/* lazy route Suspense 占位：保持 main 区域有稳定加载反馈 */
+.routeLoading {
+  padding: var(--space-6);
+  color: var(--muted);
+  font-size: var(--text-base);
+  font-family: var(--font-body);
+}

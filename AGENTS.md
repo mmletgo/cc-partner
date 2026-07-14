@@ -51,6 +51,7 @@ cc-partner/
 │   │   │   │   └── Drawer/       # 侧滑模态（side left/right，复用 useModalLayer）
 │   │   │   ├── layout/           # 布局组件
 │   │   │   │   ├── AppShell/     # 完整应用外壳（TitleBar + Sidebar + main）
+│   │   │   │   ├── RouteErrorBoundary/ # 路由错误隔离（pathname reset，保留 shell）
 │   │   │   │   ├── Window/       # 模拟 macOS 窗口
 │   │   │   │   ├── TitleBar/     # traffic lights + 拖拽区
 │   │   │   │   ├── Sidebar/
@@ -164,8 +165,7 @@ primitives  →  layout  →  domain  →  page
 | 层级 | 职责 | 例子 |
 |------|------|------|
 | **primitives** | 单一 UI 元素，无业务语义，无数据依赖 | Button, Card, Input, Tag, Pill, StatusDot, ProgressBar, Dialog, Drawer |
-| **layout** | 页面结构骨架，无业务数据 | AppShell, Window, TitleBar, Sidebar, NavItem, ThemeToggle |
-| **domain** | 组合 primitives + layout，承担具体业务对象的展示/交互 | PromptCard, DeviceCard, TransferItem, PermissionCard |
+| **layout** | 页面结构骨架，无业务数据 | AppShell, Window, TitleBar, Sidebar, NavItem, ThemeToggle, RouteErrorBoundary || **domain** | 组合 primitives + layout，承担具体业务对象的展示/交互 | PromptCard, DeviceCard, TransferItem, PermissionCard |
 | **page** | 一个路由对应一个页面，组合 domain 组件 + 数据 hook | Home, Transfer, Prompts, ... |
 
 ### 4.2 ⚠️ 核心开发规范（必读）
@@ -266,6 +266,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | NavItem | icon, label, to, badge | 路由导航项 |
 | ThemeToggle | - | 主题切换按钮 |
 | WorkbenchWorkspaceNav | ariaLabel, actionsAriaLabel, tabs, actions | Workbench 终端/文件预览/自动化共享导航栏 |
+| RouteErrorBoundary | resetKey, onRetry?, children | 路由级错误隔离：保留 AppShell/providers，pathname 作 resetKey，生产不展示 stack |
 
 **domain（业务）**：
 
