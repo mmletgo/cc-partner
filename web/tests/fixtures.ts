@@ -1,5 +1,9 @@
 import { test as base, expect, type ConsoleMessage, type Page } from '@playwright/test';
 import type { TestInfo } from '@playwright/test';
+import {
+  createBackendHarness,
+  type PlaywrightBackendHarness,
+} from './support/backendHarness';
 
 /**
  * Business Logic（为什么需要这个类型）:
@@ -7,10 +11,12 @@ import type { TestInfo } from '@playwright/test';
  *   以便 CI 与本地复现时直接看到「页面自己抛的错」而不是只看断言失败。
  *
  * Code Logic（这个类型做什么）:
- *   声明 auto fixture `guardBrowserErrors`，对每个用例自动挂载、无需测试体显式引用。
+ *   声明 auto fixture `guardBrowserErrors`，对每个用例自动挂载、无需测试体显式引用；
+ *   以及 opt-in `backendHarness` 确定性后端注入。
  */
 type BrowserDiagnosticsFixtures = {
   guardBrowserErrors: void;
+  backendHarness: PlaywrightBackendHarness;
 };
 
 /**
@@ -65,8 +71,28 @@ async function attachBrowserLogsIfNeeded(
 }
 
 /**
+ * Business Logic（为什么需要这个函数）:
+ *   harness 用例失败时需要把 invoke/fetch/event 调用轨迹附到报告。
+ *
+ * Code Logic（这个函数做什么）:
+ *   attach `harness-calls` JSON。
+ */
+async function attachHarnessCallLog(
+  testInfo: TestInfo,
+  harness: PlaywrightBackendHarness,
+): Promise<void> {
+  await testInfo.attach('harness-calls', {
+    body: harness.core.formatCallLog(),
+    contentType: 'application/json',
+  });
+}
+
+/**
  * 带浏览器 console/pageerror 守卫的 Playwright test。
  * 规格文件应从此模块导入 `test` / `expect`，而不是直接从 `@playwright/test`。
+ *
+ * `backendHarness` 为 opt-in：只有测试参数解构它时才安装；用后 assertSettled，
+ * 失败时附加 call log。未使用 harness 的既有 spec 行为不变。
  */
 export const test = base.extend<BrowserDiagnosticsFixtures>({
   guardBrowserErrors: [
@@ -96,6 +122,34 @@ export const test = base.extend<BrowserDiagnosticsFixtures>({
     },
     { auto: true },
   ],
+
+  backendHarness: async ({ page }, use, testInfo) => {
+    /**
+     * Business Logic（为什么需要这个 fixture）:
+     *   关键旅程 E2E 需要确定性 Tauri/fetch mock 与结束时 settlement 检查，
+     *   但不能强迫既有 ad-hoc mock 用例接入。
+     *
+     * Code Logic（这个 fixture 做什么）:
+     *   创建 harness → install(page) → 交给用例 → assertSettled；
+     *   失败或 settlement 异常时 attach harness-calls。
+     */
+    const harness = createBackendHarness();
+    await harness.install(page);
+
+    await use(harness);
+
+    const testFailed = testInfo.status !== testInfo.expectedStatus;
+    try {
+      harness.assertSettled();
+    } catch (error) {
+      await attachHarnessCallLog(testInfo, harness);
+      throw error;
+    }
+
+    if (testFailed) {
+      await attachHarnessCallLog(testInfo, harness);
+    }
+  },
 });
 
 export { expect };
