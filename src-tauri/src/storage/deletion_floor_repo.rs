@@ -192,6 +192,7 @@ impl DeletionFloorRepo {
     ///
     /// Business Logic: merge incoming live 前查询是否已被压缩删除。
     /// Code Logic: SELECT by PK。
+    #[allow(dead_code)] // public API; plan path uses get_on_tx, tests use get
     pub async fn get(
         &self,
         domain: &str,
@@ -321,6 +322,7 @@ impl DeletionFloorRepo {
     /// Code Logic（这个函数做什么）:
     ///     对每个 candidate 检查 eligible；合格则 upsert floor 并计入 deleted；
     ///     不合格 skipped。不直接改领域表（tombstone 行由调用方或 `run_production_tombstone_gc` 删除）。
+    #[allow(dead_code)] // structural helper retained; production uses run_production_tombstone_gc
     pub async fn compact_tombstones_to_floors(
         &self,
         watermarks: &SyncWatermarkRepo,
@@ -784,7 +786,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(still, 1);
-        assert!(floors.get(DOMAIN_PROMPTS, "p-block").await.unwrap().is_none());
+        assert!(floors
+            .get(DOMAIN_PROMPTS, "p-block")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     /// 生产 GC：age+ack 满足时写 floor 并删除领域 tombstone 行。
@@ -808,12 +814,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.deleted, 1);
-        let gone = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM prompts WHERE id = 'p-ok'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let gone = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM prompts WHERE id = 'p-ok'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(gone, 0);
         let floor = floors.get(DOMAIN_PROMPTS, "p-ok").await.unwrap().unwrap();
         assert_eq!(floor.delete_epoch, 5);
