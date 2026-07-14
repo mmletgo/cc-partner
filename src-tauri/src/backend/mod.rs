@@ -10,6 +10,7 @@ pub mod authority;
 pub mod cli;
 pub mod control;
 pub mod control_api;
+pub mod control_client;
 pub mod doctor;
 pub mod logging;
 pub mod runtime;

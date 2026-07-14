@@ -14,8 +14,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 use tauri::State;
 
+use crate::backend::control_client::BackendControlClient;
 use crate::config::HealthConfig;
-use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
+use crate::config_runtime::{
+    update_config_transactionally, ConfigRuntime, HealthRuntimePatch, RuntimeConfigPatch,
+};
 use crate::error::AppError;
 use crate::health::state::MachineState;
 use crate::health::validation::{
@@ -232,16 +235,29 @@ pub async fn toggle_health_enabled_for_runtime(
     Ok(dto)
 }
 
-/// 切换监测总开关（写 config.health.enabled 并落盘）。
+/// 切换监测总开关（写 sidecar 权威 config.health.enabled）。
 ///
 /// Business Logic: 前端「启用/停用久坐监测」开关；关闭后 daemon 仅写库不触发提醒。
-/// Code Logic: 委托 ConfigRuntime 事务 helper，返回更新后的配置 DTO。
+/// Code Logic: BackendControlClient 提交 health.enabled patch；刷新本地缓存。
 #[tauri::command]
 pub async fn toggle_health_enabled(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> Result<HealthConfigDto, AppError> {
-    toggle_health_enabled_for_runtime(&state.config_runtime, enabled).await
+    let client = BackendControlClient::from_control_file()?;
+    let resp = client
+        .apply_patch(RuntimeConfigPatch {
+            health: Some(HealthRuntimePatch {
+                enabled: Some(enabled),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await?;
+    if let Ok(mut cfg) = state.config.write() {
+        resp.snapshot.apply_to_local_config(&mut cfg);
+    }
+    Ok(resp.snapshot.health.into())
 }
 
 /// 切换暂停标记（运行时原子标记，不落盘）。
@@ -377,16 +393,37 @@ pub async fn update_health_config_for_runtime(
     Ok(dto)
 }
 
-/// 更新健康提醒配置（整体覆盖写 config.health 并落盘）。
+/// 更新健康提醒配置（整体覆盖写 sidecar 权威 config.health）。
 ///
-/// Business Logic: 前端设置页「保存」；非法输入拒绝且不改配置；合法值经 ConfigRuntime 事务持久化。
-/// Code Logic: 委托 `update_health_config_for_runtime`（校验 + 事务），返回更新后的配置 DTO。
+/// Business Logic: 前端设置页「保存」；非法输入拒绝且不改配置；合法值经 owner CAS 持久化。
+/// Code Logic: 本地先 validate 归一化，再经 BackendControlClient 提交 HealthRuntimePatch；刷新缓存。
 #[tauri::command]
 pub async fn update_health_config(
     state: State<'_, AppState>,
     config: HealthConfigDto,
 ) -> Result<HealthConfigDto, AppError> {
-    update_health_config_for_runtime(&state.config_runtime, config).await
+    let normalized = prepare_health_config_update(config)?;
+    let client = BackendControlClient::from_control_file()?;
+    let resp = client
+        .apply_patch(RuntimeConfigPatch {
+            health: Some(HealthRuntimePatch {
+                enabled: Some(normalized.enabled),
+                work_window_seconds: Some(normalized.work_window_seconds),
+                break_seconds: Some(normalized.break_seconds),
+                record_window_title: Some(normalized.record_window_title),
+                retain_days: Some(normalized.retain_days),
+                notify_enabled: Some(normalized.notify_enabled),
+                dnd_start: Some(normalized.dnd_start.clone()),
+                dnd_end: Some(normalized.dnd_end.clone()),
+                water_interval_seconds: Some(normalized.water_interval_seconds),
+            }),
+            ..Default::default()
+        })
+        .await?;
+    if let Ok(mut cfg) = state.config.write() {
+        resp.snapshot.apply_to_local_config(&mut cfg);
+    }
+    Ok(resp.snapshot.health.into())
 }
 
 /// 查询 [since_ts, +∞) 区间内的活跃/闲置分钟数。

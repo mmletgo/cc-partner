@@ -11,7 +11,8 @@
 //!     `update_claude_md`：先 create_dir_all + write 文件，再推进 vector_clock，
 //!         upsert DB 行后返回 DTO（update 刚写过文件，无需再对账）。
 //!     `push_claude_md`：先把前端当前内容保存为本机版本，再推送到局域网设备和 GitHub 云端
-//!         （云端推送经 CloudSyncRuntime Wait 门闸，与完整 sync 串行）。
+//!         （云端推送经本机 CloudSyncRuntime Wait 门闸，与完整 sync/手动 trigger 串行；
+//!          GUI 不启动 cloud scheduler，配置 CAS 已统一走 sidecar control client）。
 //!     返回类型用 camelCase 的 `ClaudeMdDto`，对齐前端 TS 类型。
 
 use crate::error::AppError;

@@ -408,6 +408,32 @@ impl ConfigSnapshot {
             github_trending: config.github_trending.clone(),
         }
     }
+
+    /// 将权威快照字段写回 GUI 本地缓存配置（不推进 GUI generation）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GUI 成功代理 mutation 后需刷新本地只读缓存，避免设置页立刻再读到旧值；
+    ///     GUI generation 非权威，仅镜像 allowlist 业务字段。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     覆盖 device/path/hotkey/cloud/health/orchestrator/github_trending 等投影字段。
+    pub fn apply_to_local_config(&self, cfg: &mut AppConfig) {
+        cfg.device_name = self.device_name.clone();
+        cfg.receive_dir = self.receive_dir.clone();
+        cfg.http_port = self.http_port;
+        cfg.screenshot_hotkey = self.screenshot_hotkey.clone();
+        cfg.prompt_optimizer_hotkey = self.prompt_optimizer_hotkey.clone();
+        cfg.prompt_optimizer_fill_language =
+            normalize_prompt_optimizer_fill_language(&self.prompt_optimizer_fill_language);
+        cfg.cloud_sync_repo_url = self.cloud_sync_repo_url.clone();
+        cfg.cloud_sync_enabled = self.cloud_sync_enabled;
+        cfg.cloud_sync_auto = self.cloud_sync_auto;
+        cfg.cloud_sync_interval_secs = self.cloud_sync_interval_secs;
+        cfg.cloud_sync_branch = self.cloud_sync_branch.clone();
+        cfg.health = self.health.clone();
+        cfg.orchestrator = self.orchestrator.clone();
+        cfg.github_trending = self.github_trending.clone();
+    }
 }
 
 /// 配置 CAS 更新请求。

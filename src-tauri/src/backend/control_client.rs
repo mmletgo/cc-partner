@@ -1,0 +1,816 @@
+//! backend/control_client.rs — GUI 本机 control-file 客户端。
+//!
+//! Business Logic（为什么需要这个模块）:
+//!     GUI 不得自建第二份运行时权威；配置 / Cloud Sync 等 mutation 必须代理到 sidecar owner。
+//!     客户端从本机 control file 读取 port + token，经 loopback control API 读写权威状态。
+//!
+//! Code Logic（这个模块做什么）:
+//!     提供 `BackendControlClient`：安全查询允许在连接失败时一次性刷新 control file；
+//!     mutation 经 `send_once` 只发送一次，响应不确定时绝不自动重放。
+//!     截图快捷键走两阶段补偿（CAS 预检 → OS replace → owner durable commit → 响应丢失对账）。
+
+use crate::backend::authority::{classify_control_descriptor, CONTROL_SCHEMA_VERSION};
+use crate::backend::control::{self, BackendControlFile};
+use crate::config_runtime::{
+    ConfigSnapshot, ConfigUpdateRequest, ConfigUpdateResponse, RuntimeConfigPatch,
+    RuntimeOwnerStatus,
+};
+use crate::error::AppError;
+use crate::hotkey::{
+    compensate_screenshot_hotkey_os, replace_screenshot_hotkey_os, GlobalShortcutBackend,
+};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// control 查询超时。
+const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
+/// control mutation 超时（配置落盘可能稍慢）。
+const MUTATE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 包装 get-config 响应（与 control_api::ControlConfigResponse 对齐）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlConfigResponseBody {
+    snapshot: ConfigSnapshot,
+}
+
+/// 仅带 controlToken 的鉴权 body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlAuthBody {
+    control_token: String,
+}
+
+/// update-config HTTP body（token + CAS）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlConfigUpdateBody {
+    control_token: String,
+    expected_owner_instance_id: String,
+    expected_generation: u64,
+    patch: RuntimeConfigPatch,
+}
+
+/// 对账后截图快捷键 OS 侧应保留的状态。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     响应丢失后必须按 owner 权威状态决定 OS 是否回滚，避免 config/OS split-brain。
+///
+/// Code Logic（这个枚举做什么）:
+///     KeepNew / RollbackToOld / ManualReconcile。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyOsReconcileDecision {
+    /// owner 已提交新快捷键，OS 保留新值。
+    KeepNew,
+    /// owner 仍为旧值，OS 回滚到旧快捷键。
+    RollbackToOld,
+    /// 无法判定，阻塞进一步编辑。
+    ManualReconcile,
+}
+
+/// 一次 control HTTP 调用的结果分类。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     mutation 在“确定失败”与“响应不确定”下补偿策略不同：后者禁止自动重放。
+///
+/// Code Logic（这个枚举做什么）:
+///     Ok / Failed / Uncertain。
+#[derive(Debug)]
+enum ControlCallOutcome<T> {
+    Ok(T),
+    Failed(AppError),
+    Uncertain(AppError),
+}
+
+/// GUI 侧 Backend control 客户端。
+///
+/// Business Logic（为什么需要这个结构）:
+///     所有 GUI 运行态 mutation 统一走本客户端，避免命令层各自拼 HTTP 导致 token/重试语义分叉。
+///
+/// Code Logic（这个结构做什么）:
+///     持有 port/token/http client；查询可一次刷新 control file；mutation 只发一次。
+#[derive(Debug, Clone)]
+pub struct BackendControlClient {
+    port: u16,
+    control_token: String,
+    owner_instance_id: Option<String>,
+    control_schema_version: u32,
+    http: reqwest::Client,
+}
+
+impl BackendControlClient {
+    /// 从本机 control file 构造客户端。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     生产 GUI 命令在 sidecar 已 ensure 后读取 control file 获得 port/token。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读 control file；缺失或非权威描述符返回 conflict/unavailable；构造带超时的 reqwest client。
+    pub fn from_control_file() -> Result<Self, AppError> {
+        let control = control::read_control_file()?.ok_or_else(|| {
+            AppError::unavailable("后端控制文件不存在，请先启动 sidecar")
+        })?;
+        Self::from_control(&control)
+    }
+
+    /// 从已解析的 control file 构造客户端。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     harness/测试可注入内存 control，无需依赖进程全局路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     校验 schema/owner 权威性后填充字段。
+    pub fn from_control(control: &BackendControlFile) -> Result<Self, AppError> {
+        if !classify_control_descriptor(control).is_authoritative() {
+            return Err(AppError::conflict(
+                "control_descriptor_stale: 需要重启后端以应用设置",
+            ));
+        }
+        if control.control_token.trim().is_empty() {
+            return Err(AppError::unavailable("控制令牌为空"));
+        }
+        let http = reqwest::Client::builder()
+            .timeout(MUTATE_TIMEOUT)
+            .build()
+            .map_err(|e| AppError::generic(format!("构造 control client 失败: {e}")))?;
+        Ok(Self {
+            port: control.port,
+            control_token: control.control_token.clone(),
+            owner_instance_id: control.owner_instance_id.clone(),
+            control_schema_version: control.control_schema_version,
+            http,
+        })
+    }
+
+    /// 测试用：直接注入 port/token（不读磁盘）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     单元/ smoke harness 启动临时 owner HTTP 后，不依赖真实 control 文件路径竞争。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     填充权威 schema 与 owner id，构造 client。
+    pub fn for_test(port: u16, control_token: &str, owner_instance_id: &str) -> Result<Self, AppError> {
+        let http = reqwest::Client::builder()
+            .timeout(MUTATE_TIMEOUT)
+            .build()
+            .map_err(|e| AppError::generic(format!("构造 control client 失败: {e}")))?;
+        Ok(Self {
+            port,
+            control_token: control_token.to_string(),
+            owner_instance_id: Some(owner_instance_id.to_string()),
+            control_schema_version: CONTROL_SCHEMA_VERSION,
+            http,
+        })
+    }
+
+    /// 当前 control 中的 owner 实例 id（若有）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     诊断与测试断言需要读取客户端已缓存的 owner 身份。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回可选 owner_instance_id 切片。
+    pub fn owner_instance_id(&self) -> Option<&str> {
+        self.owner_instance_id.as_deref()
+    }
+
+    /// 返回 control schema 版本。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试/诊断确认客户端绑定的是当前 schema。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回缓存的 control_schema_version。
+    pub fn control_schema_version(&self) -> u32 {
+        self.control_schema_version
+    }
+
+    /// 查询 owner status（安全查询：连接失败可一次性刷新 control file）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     CAS 预检与诊断页需要 owner/generation/fingerprint。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/backend/control/status`；查询路径允许一次 control-file 刷新后重试。
+    pub async fn status(&self) -> Result<RuntimeOwnerStatus, AppError> {
+        self.query_with_optional_refresh("status", &ControlAuthBody {
+            control_token: self.control_token.clone(),
+        })
+        .await
+    }
+
+    /// 查询权威配置快照。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     generation 冲突后刷新表单、热键对账都需要完整 allowlist 投影。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST get-config；解包 snapshot；查询允许一次 control-file 刷新。
+    pub async fn get_config(&self) -> Result<ConfigSnapshot, AppError> {
+        let body: ControlConfigResponseBody = self
+            .query_with_optional_refresh(
+                "get-config",
+                &ControlAuthBody {
+                    control_token: self.control_token.clone(),
+                },
+            )
+            .await?;
+        Ok(body.snapshot)
+    }
+
+    /// CAS 更新权威运行配置（mutation：永不自动重放）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GUI 只提交 allowlist patch + expected owner/generation。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST update-config 一次；不确定响应原样上抛，不重试。
+    pub async fn update_config(
+        &self,
+        request: ConfigUpdateRequest,
+    ) -> Result<ConfigUpdateResponse, AppError> {
+        let body = ControlConfigUpdateBody {
+            control_token: self.control_token.clone(),
+            expected_owner_instance_id: request.expected_owner_instance_id,
+            expected_generation: request.expected_generation,
+            patch: request.patch,
+        };
+        self.mutate("update-config", &body).await
+    }
+
+    /// 便捷：用当前 status 更新 device_name。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     smoke/harness 用最小补丁验证 generation 与 runtime 值收敛。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     以 before 的 owner/generation 提交 device_name patch。
+    pub async fn update_device_name(
+        &self,
+        before: &RuntimeOwnerStatus,
+        device_name: &str,
+    ) -> Result<ConfigUpdateResponse, AppError> {
+        self.update_config(ConfigUpdateRequest {
+            expected_owner_instance_id: before.owner_instance_id.clone(),
+            expected_generation: before.generation,
+            patch: RuntimeConfigPatch {
+                device_name: Some(device_name.to_string()),
+                ..Default::default()
+            },
+        })
+        .await
+    }
+
+    /// 通用 mutation：只发送一次，不自动重试。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     任意 control mutation 共享“不重放”语义，防止重复触发有副作用操作。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `send_once`，把 Failed/Uncertain 都映射为 AppError（不确定带前缀）。
+    pub async fn mutate<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+    ) -> Result<T, AppError> {
+        match self.send_once(path, body, MUTATE_TIMEOUT).await {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 提交字段级 patch：先读 status 再 CAS 一次。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     多数 GUI 配置 writer 只需业务 patch，不关心手写 generation 流程。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     status → update_config；冲突直接返回，由 UI 刷新后用户重试。
+    pub async fn apply_patch(&self, patch: RuntimeConfigPatch) -> Result<ConfigUpdateResponse, AppError> {
+        let status = self.status().await?;
+        self.update_config(ConfigUpdateRequest {
+            expected_owner_instance_id: status.owner_instance_id,
+            expected_generation: status.generation,
+            patch,
+        })
+        .await
+    }
+
+    /// 截图快捷键两阶段补偿更新。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     快捷键 OS 副作用在 GUI 进程；权威配置在 sidecar。必须先 CAS 预检，再 OS 切换，
+    ///     最后 durable commit；响应丢失时按 owner 对账，禁止 split-brain。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     1) get_config 预检；2) OS replace（若热键变化）；3) send_once update-config；
+    ///     4) Failed → OS 回滚；Uncertain → reconcile 后 KeepNew/Rollback/ManualReconcile。
+    pub async fn update_config_with_hotkey_compensation(
+        &self,
+        backend: &mut dyn GlobalShortcutBackend,
+        patch: RuntimeConfigPatch,
+    ) -> Result<ConfigUpdateResponse, AppError> {
+        // 预检：owner 可达 + 取 generation/旧热键
+        let before = self.get_config().await?;
+        let old_hotkey = before.screenshot_hotkey.clone();
+        let new_hotkey = patch
+            .screenshot_hotkey
+            .clone()
+            .unwrap_or_else(|| old_hotkey.clone());
+        let hotkey_changed = new_hotkey != old_hotkey;
+
+        // 预检冲突：若调用方已带 expected 语义，这里用 status generation 作为 CAS 基线
+        // （generation 在 get_config 与 commit 之间可能被抢占，commit 会 409）
+
+        let mut os_replaced = false;
+        if hotkey_changed {
+            replace_screenshot_hotkey_os(backend, &old_hotkey, &new_hotkey)?;
+            os_replaced = true;
+        }
+
+        let body = ControlConfigUpdateBody {
+            control_token: self.control_token.clone(),
+            expected_owner_instance_id: before.owner_instance_id.clone(),
+            expected_generation: before.generation,
+            patch,
+        };
+
+        match self
+            .send_once::<ConfigUpdateResponse>("update-config", &body, MUTATE_TIMEOUT)
+            .await
+        {
+            ControlCallOutcome::Ok(resp) => Ok(resp),
+            ControlCallOutcome::Failed(err) => {
+                if os_replaced {
+                    compensate_screenshot_hotkey_os(backend, &old_hotkey, &new_hotkey)?;
+                }
+                Err(err)
+            }
+            ControlCallOutcome::Uncertain(err) => {
+                if !os_replaced {
+                    return Err(AppError::unavailable(format!(
+                        "control_response_uncertain: {err}"
+                    )));
+                }
+                let decision = self
+                    .reconcile_hotkey_after_uncertain(&old_hotkey, &new_hotkey, before.generation)
+                    .await?;
+                match decision {
+                    HotkeyOsReconcileDecision::KeepNew => {
+                        // owner 已提交新值：保留 OS 新快捷键，再读一次配置返回
+                        let snap = self.get_config().await?;
+                        Ok(ConfigUpdateResponse {
+                            owner_instance_id: snap.owner_instance_id.clone(),
+                            generation: snap.generation,
+                            snapshot: snap,
+                        })
+                    }
+                    HotkeyOsReconcileDecision::RollbackToOld => {
+                        compensate_screenshot_hotkey_os(backend, &old_hotkey, &new_hotkey)?;
+                        Err(AppError::unavailable(format!(
+                            "control_response_uncertain_rolled_back: {err}"
+                        )))
+                    }
+                    HotkeyOsReconcileDecision::ManualReconcile => Err(AppError::conflict(format!(
+                        "hotkey_reconcile_required: OS 与配置可能不一致，请手动确认后重试 ({err})"
+                    ))),
+                }
+            }
+        }
+    }
+
+    /// 响应丢失后按 owner/generation/config 对账快捷键。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     不能盲目重放 mutation 或盲目回滚 OS；必须以 owner 权威状态为准。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查询 get_config；generation 前进且热键=new → KeepNew；
+    ///     generation 未变且热键=old → RollbackToOld；其它 → ManualReconcile。
+    pub async fn reconcile_hotkey_after_uncertain(
+        &self,
+        old_hotkey: &str,
+        new_hotkey: &str,
+        preflight_generation: u64,
+    ) -> Result<HotkeyOsReconcileDecision, AppError> {
+        let snap = match self.get_config().await {
+            Ok(s) => s,
+            Err(_) => return Ok(HotkeyOsReconcileDecision::ManualReconcile),
+        };
+        if snap.generation > preflight_generation && snap.screenshot_hotkey == new_hotkey {
+            return Ok(HotkeyOsReconcileDecision::KeepNew);
+        }
+        if snap.generation == preflight_generation && snap.screenshot_hotkey == old_hotkey {
+            return Ok(HotkeyOsReconcileDecision::RollbackToOld);
+        }
+        // generation 前进但热键不是 new，或 generation 未变但热键已变等歧义
+        if snap.screenshot_hotkey == new_hotkey && snap.generation >= preflight_generation {
+            return Ok(HotkeyOsReconcileDecision::KeepNew);
+        }
+        if snap.screenshot_hotkey == old_hotkey {
+            return Ok(HotkeyOsReconcileDecision::RollbackToOld);
+        }
+        Ok(HotkeyOsReconcileDecision::ManualReconcile)
+    }
+
+    /// 安全查询：失败时最多刷新一次 control file 再试。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     sidecar 重启后 port/token 可能变；查询允许一次刷新，避免 GUI 粘在旧 control。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     send_once；若失败且 from_control_file 成功得到新 client 字段，用新字段再发一次查询。
+    async fn query_with_optional_refresh<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+    ) -> Result<T, AppError> {
+        match self.send_once(path, body, QUERY_TIMEOUT).await {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(first) | ControlCallOutcome::Uncertain(first) => {
+                // 仅查询路径允许一次刷新；刷新失败则返回首次错误
+                let refreshed = match control::read_control_file() {
+                    Ok(Some(c)) => Self::from_control(&c).ok(),
+                    _ => None,
+                };
+                let Some(new_client) = refreshed else {
+                    return Err(first);
+                };
+                // 若 port/token 未变，不再重试避免放大故障
+                if new_client.port == self.port && new_client.control_token == self.control_token {
+                    return Err(first);
+                }
+                match new_client
+                    .send_once(
+                        path,
+                        &ControlAuthBody {
+                            control_token: new_client.control_token.clone(),
+                        },
+                        QUERY_TIMEOUT,
+                    )
+                    .await
+                {
+                    ControlCallOutcome::Ok(v) => Ok(v),
+                    ControlCallOutcome::Failed(e) | ControlCallOutcome::Uncertain(e) => Err(e),
+                }
+            }
+        }
+    }
+
+    /// 发送一次 control POST，不做自动重试。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     mutation 与查询的底层发送语义统一；mutation 调用方禁止循环调用本方法重放。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `http://127.0.0.1:{port}/api/backend/control/{path}`；
+    ///     连接级失败→Failed；超时/响应体损坏→Uncertain；HTTP 4xx/5xx 可解析信封→Failed。
+    async fn send_once<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+        timeout: Duration,
+    ) -> ControlCallOutcome<T> {
+        let url = format!("http://127.0.0.1:{}/api/backend/control/{path}", self.port);
+        let request = self.http.post(&url).timeout(timeout).json(body);
+        let response = match request.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                if e.is_timeout() {
+                    return ControlCallOutcome::Uncertain(AppError::timeout(format!(
+                        "control {path} 超时: {e}"
+                    )));
+                }
+                // 连接被拒绝等：请求很可能未到达 handler → Failed（可安全不补偿重放）
+                if e.is_connect() {
+                    return ControlCallOutcome::Failed(AppError::unavailable(format!(
+                        "control {path} 连接失败: {e}"
+                    )));
+                }
+                // 其它传输错误（可能已发送）→ Uncertain
+                return ControlCallOutcome::Uncertain(AppError::unavailable(format!(
+                    "control {path} 传输失败: {e}"
+                )));
+            }
+        };
+
+        let status = response.status();
+        let bytes = match response.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                return ControlCallOutcome::Uncertain(AppError::unavailable(format!(
+                    "control {path} 读取响应失败: {e}"
+                )));
+            }
+        };
+
+        if status.is_success() {
+            match serde_json::from_slice::<T>(&bytes) {
+                Ok(v) => ControlCallOutcome::Ok(v),
+                Err(e) => ControlCallOutcome::Uncertain(AppError::generic(format!(
+                    "control {path} 成功响应无法解析: {e}"
+                ))),
+            }
+        } else {
+            // 错误响应：尽量解析业务码；解析失败仍视为确定失败（带 HTTP 状态）
+            let msg = parse_control_error_message(&bytes)
+                .unwrap_or_else(|| format!("control {path} HTTP {status}"));
+            let err = if status.as_u16() == 409 {
+                AppError::conflict(msg)
+            } else if status.as_u16() == 401 || status.as_u16() == 403 {
+                AppError::unavailable(msg)
+            } else if status.as_u16() == 400 {
+                AppError::validation(msg)
+            } else if status.as_u16() == 404 {
+                AppError::not_found(msg)
+            } else if status.as_u16() == 503 {
+                AppError::unavailable(msg)
+            } else if status.as_u16() == 504 {
+                AppError::timeout(msg)
+            } else {
+                AppError::generic(msg)
+            };
+            ControlCallOutcome::Failed(err)
+        }
+    }
+}
+
+/// 从 control 错误响应 body 提取可读消息。
+///
+/// Business Logic（为什么需要这个函数）:
+///     优先展示服务端 error 信封消息，便于设置页提示 generation 冲突等。
+///
+/// Code Logic（这个函数做什么）:
+///     尝试解析 `{error}` JSON；失败返回 None。
+fn parse_control_error_message(bytes: &[u8]) -> Option<String> {
+    #[derive(Deserialize)]
+    struct ErrBody {
+        error: Option<String>,
+        code: Option<String>,
+    }
+    let body: ErrBody = serde_json::from_slice(bytes).ok()?;
+    if let Some(ref code) = body.code {
+        if code == "conflict" || code.contains("conflict") {
+            if let Some(err) = body.error {
+                return Some(err);
+            }
+            return Some(code.clone());
+        }
+    }
+    body.error.or(body.code)
+}
+
+/// 纯函数：根据观测到的 owner 快照决定热键 OS 对账动作（供单测无 HTTP）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     对账规则应可单测且不依赖网络。
+///
+/// Code Logic（这个函数做什么）:
+///     比较 preflight_generation 与 snap.generation/hotkey。
+pub fn decide_hotkey_reconcile(
+    snap_generation: u64,
+    snap_hotkey: &str,
+    preflight_generation: u64,
+    old_hotkey: &str,
+    new_hotkey: &str,
+) -> HotkeyOsReconcileDecision {
+    if snap_generation > preflight_generation && snap_hotkey == new_hotkey {
+        return HotkeyOsReconcileDecision::KeepNew;
+    }
+    if snap_generation == preflight_generation && snap_hotkey == old_hotkey {
+        return HotkeyOsReconcileDecision::RollbackToOld;
+    }
+    if snap_hotkey == new_hotkey && snap_generation >= preflight_generation {
+        return HotkeyOsReconcileDecision::KeepNew;
+    }
+    if snap_hotkey == old_hotkey {
+        return HotkeyOsReconcileDecision::RollbackToOld;
+    }
+    HotkeyOsReconcileDecision::ManualReconcile
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hotkey::FakeGlobalShortcutBackend;
+
+    /// 验证已提交新值时对账保留新快捷键。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     响应丢失但 owner 已 commit 时回滚 OS 会造成 split-brain。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     generation+1 且 hotkey=new → KeepNew。
+    #[test]
+    fn reconcile_keeps_new_when_owner_committed() {
+        let d = decide_hotkey_reconcile(1, "<ctrl>+n", 0, "<ctrl>+o", "<ctrl>+n");
+        assert_eq!(d, HotkeyOsReconcileDecision::KeepNew);
+    }
+
+    /// 验证确认未提交时对账回滚旧快捷键。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     owner 仍为旧 generation/hotkey 时 OS 必须恢复旧注册。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     generation 不变且 hotkey=old → RollbackToOld。
+    #[test]
+    fn reconcile_rolls_back_when_owner_still_old() {
+        let d = decide_hotkey_reconcile(0, "<ctrl>+o", 0, "<ctrl>+o", "<ctrl>+n");
+        assert_eq!(d, HotkeyOsReconcileDecision::RollbackToOld);
+    }
+
+    /// 验证歧义状态要求人工 reconcile。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     无法判定时不得擅自改 OS 或重放 mutation。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     generation 前进但 hotkey 既非 old 也非 new → ManualReconcile。
+    #[test]
+    fn reconcile_blocks_when_ambiguous() {
+        let d = decide_hotkey_reconcile(2, "<ctrl>+x", 0, "<ctrl>+o", "<ctrl>+n");
+        assert_eq!(d, HotkeyOsReconcileDecision::ManualReconcile);
+    }
+
+    /// 验证 OS replace 失败时不进入 owner commit（由调用方短路）。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     OS 侧失败必须保持旧快捷键，且不得提交配置。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Fake backend fail_register → replace 返回 Err，registered 仍为旧值。
+    #[test]
+    fn os_replace_failure_keeps_old_registration() {
+        let mut fake = FakeGlobalShortcutBackend {
+            registered: vec!["<ctrl>+s".into()],
+            fail_register: vec!["<ctrl>+<shift>+s".into()],
+            ..Default::default()
+        };
+        let err = replace_screenshot_hotkey_os(&mut fake, "<ctrl>+s", "<ctrl>+<shift>+s")
+            .expect_err("register 应失败");
+        assert!(err.to_string().contains("注入") || err.to_string().contains("注册失败"));
+        assert_eq!(fake.registered(), vec!["<ctrl>+s".to_string()]);
+    }
+
+    /// 验证 owner durable 失败时 OS 回滚旧快捷键。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     两阶段路径在 commit 明确失败时必须恢复 OS，避免 split-brain。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动最小 owner HTTP，inject 500 save 失败；OS 先切到新热键，失败后回滚。
+    #[tokio::test]
+    async fn hotkey_os_rolls_back_when_owner_durable_save_fails() {
+        use crate::config::{
+            AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+        };
+        use crate::config_runtime::ConfigRuntime;
+        use crate::config_store::MemoryConfigStore;
+        use axum::extract::State as AxumState;
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        #[derive(Clone)]
+        struct S {
+            runtime: Arc<ConfigRuntime>,
+            token: String,
+            fail: Arc<AtomicBool>,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Auth {
+            control_token: String,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Upd {
+            control_token: String,
+            expected_owner_instance_id: String,
+            expected_generation: u64,
+            patch: RuntimeConfigPatch,
+        }
+
+        let owner = "owner-hotkey-test";
+        let token = "tok-hotkey";
+        let initial = AppConfig {
+            device_id: "d".into(),
+            device_name: "n".into(),
+            http_port: 0,
+            receive_dir: "/tmp/r".into(),
+            db_path: "/tmp/d.db".into(),
+            screenshot_hotkey: "<ctrl>+s".into(),
+            prompt_optimizer_hotkey: "<ctrl>".into(),
+            prompt_optimizer_fill_language: "zh".into(),
+            cloud_sync_repo_url: None,
+            cloud_sync_enabled: false,
+            cloud_sync_auto: false,
+            cloud_sync_interval_secs: 600,
+            cloud_sync_branch: None,
+            health: HealthConfig::default(),
+            orchestrator: OrchestratorAutomationConfig::default(),
+            github_trending: GithubTrendingConfig::default(),
+        };
+        let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
+        let runtime = Arc::new(ConfigRuntime::with_owner(initial, store, owner.into()));
+        let fail = Arc::new(AtomicBool::new(true));
+        let state = S {
+            runtime: Arc::clone(&runtime),
+            token: token.into(),
+            fail: Arc::clone(&fail),
+        };
+        let app = Router::new()
+            .route(
+                "/api/backend/control/get-config",
+                post(|AxumState(s): AxumState<S>, Json(b): Json<Auth>| async move {
+                    if b.control_token != s.token {
+                        return Err((
+                            StatusCode::UNAUTHORIZED,
+                            Json(serde_json::json!({"error":"bad token","code":"unauthorized"})),
+                        ));
+                    }
+                    let snap = s.runtime.snapshot_with_generation().unwrap();
+                    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
+                        serde_json::json!({"snapshot": snap}),
+                    ))
+                }),
+            )
+            .route(
+                "/api/backend/control/update-config",
+                post(|AxumState(s): AxumState<S>, Json(b): Json<Upd>| async move {
+                    if b.control_token != s.token {
+                        return Err((
+                            StatusCode::UNAUTHORIZED,
+                            Json(serde_json::json!({"error":"bad token","code":"unauthorized"})),
+                        ));
+                    }
+                    if s.fail.swap(false, Ordering::SeqCst) {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "error":"注入: durable save 失败",
+                                "code":"internal"
+                            })),
+                        ));
+                    }
+                    match s
+                        .runtime
+                        .apply_patch_if_generation(
+                            &b.expected_owner_instance_id,
+                            b.expected_generation,
+                            b.patch,
+                        )
+                        .await
+                    {
+                        Ok(r) => Ok(Json(r)),
+                        Err(e) => Err((
+                            StatusCode::CONFLICT,
+                            Json(serde_json::json!({"error": e.to_string(), "code":"conflict"})),
+                        )),
+                    }
+                }),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let client = BackendControlClient::for_test(port, token, owner).unwrap();
+        let mut fake = FakeGlobalShortcutBackend {
+            registered: vec!["<ctrl>+s".into()],
+            ..Default::default()
+        };
+        let err = client
+            .update_config_with_hotkey_compensation(
+                &mut fake,
+                RuntimeConfigPatch {
+                    screenshot_hotkey: Some("<ctrl>+<shift>+s".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("durable fail");
+        assert!(err.to_string().contains("注入") || err.to_string().contains("save"));
+        assert_eq!(
+            fake.registered(),
+            vec!["<ctrl>+s".to_string()],
+            "OS 应回滚旧热键"
+        );
+        assert_eq!(
+            runtime.snapshot().unwrap().screenshot_hotkey,
+            "<ctrl>+s",
+            "owner 保持旧热键"
+        );
+    }
+}

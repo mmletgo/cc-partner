@@ -8,11 +8,15 @@
 //!     提供三条 Tauri invoke：读取当前配置、读取默认配置、应用 patch 并保存 config.json；
 //!     具体校验和归一化委托 `orchestrator::config`。
 
-use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
+use crate::backend::control_client::BackendControlClient;
+use crate::config_runtime::{
+    update_config_transactionally, ConfigRuntime, OrchestratorRuntimePatch, RuntimeConfigPatch,
+};
 use crate::error::AppError;
 use crate::orchestrator::config::{
     apply_orchestrator_config_patch, default_orchestrator_automation_config,
-    OrchestratorAutomationConfigDto, OrchestratorAutomationConfigPatch,
+    normalize_verification_commands, OrchestratorAutomationConfigDto,
+    OrchestratorAutomationConfigPatch,
 };
 use crate::state::AppState;
 use tauri::State;
@@ -85,16 +89,41 @@ pub async fn update_orchestrator_config_for_runtime(
 /// 更新 Orchestrator 自动化全局配置。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户保存设置页自动化 tab 后，需要把 patch 归一化、校验并持久化到本设备 config.json。
+///     用户保存设置页自动化 tab 后，需要把 patch 归一化并提交到 sidecar 权威配置。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 ConfigRuntime 事务 helper 应用 patch；失败不改内存与文件。
+///     归一化 verification_commands 后经 BackendControlClient 提交 OrchestratorRuntimePatch；
+///     刷新本地缓存并返回 DTO。
 #[tauri::command]
 pub async fn update_orchestrator_config(
     state: State<'_, AppState>,
     patch: OrchestratorAutomationConfigPatch,
 ) -> Result<OrchestratorAutomationConfigDto, AppError> {
-    update_orchestrator_config_for_runtime(&state.config_runtime, patch).await
+    let verification_commands = match patch.verification_commands {
+        Some(ref text) => Some(normalize_verification_commands(text)?),
+        None => None,
+    };
+    let client = BackendControlClient::from_control_file()?;
+    let resp = client
+        .apply_patch(RuntimeConfigPatch {
+            orchestrator: Some(OrchestratorRuntimePatch {
+                enabled: patch.enabled,
+                max_concurrent_tasks: patch.max_concurrent_tasks,
+                verification_commands,
+                auto_commit: patch.auto_commit,
+                auto_push_task_branch: patch.auto_push_task_branch,
+                auto_merge_to_main: patch.auto_merge_to_main,
+                auto_push_main: patch.auto_push_main,
+            }),
+            ..Default::default()
+        })
+        .await?;
+    if let Ok(mut cfg) = state.config.write() {
+        resp.snapshot.apply_to_local_config(&mut cfg);
+    }
+    Ok(OrchestratorAutomationConfigDto::from(
+        resp.snapshot.orchestrator,
+    ))
 }
 
 #[cfg(test)]

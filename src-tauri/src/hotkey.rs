@@ -102,7 +102,12 @@ impl GlobalShortcutBackend for TauriGlobalShortcutBackend {
 }
 
 /// 可测试的内存 Fake 快捷键后端。
-#[cfg(test)]
+///
+/// Business Logic（为什么需要这个结构）:
+///     单元与 runtime authority smoke 需注入 OS 热键成功/失败，而不依赖真实全局快捷键插件。
+///
+/// Code Logic（这个结构做什么）:
+///     内存 registered 列表；可选 fail_register/fail_unregister 注入。
 #[derive(Debug, Default, Clone)]
 pub struct FakeGlobalShortcutBackend {
     pub registered: Vec<String>,
@@ -110,7 +115,6 @@ pub struct FakeGlobalShortcutBackend {
     pub fail_unregister: Vec<String>,
 }
 
-#[cfg(test)]
 impl GlobalShortcutBackend for FakeGlobalShortcutBackend {
     fn register_hotkey(&mut self, hotkey_pynput: &str) -> Result<(), AppError> {
         if parse_shortcut(hotkey_pynput).is_none() {

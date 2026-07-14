@@ -6,16 +6,18 @@
 //!     返回 DTO camelCase 对齐前端 types.ts。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `get_cloud_sync_config`：读 config 转 CloudSyncConfigDto。
+//!     - `get_cloud_sync_config`：优先读 sidecar 权威快照。
 //!     - `get_default_cloud_sync_config`：返回后端云同步默认值，供设置页恢复默认。
-//!     - `update_cloud_sync_config`：经 ConfigRuntime 事务路径应用 patch 后返回最新 DTO。
-//!       scheduler 无需重启（setup 无条件启动，内部每 tick 按 config 决定）。
-//!     - `trigger_cloud_sync_cmd`：调 engine::trigger_cloud_sync（经 CloudSyncRuntime Wait 门闸）。
-//!     - `test_cloud_sync`：调 engine::test_connection（正式 workdir 取 gate；temp clone 免锁）。
+//!     - `update_cloud_sync_config`：GUI 经 BackendControlClient 提交 cloud_sync allowlist patch。
+//!     - `trigger_cloud_sync_cmd` / `test_cloud_sync`：当前仍走本机 AppState 上的 owner 引擎入口；
+//!       GUI 进程不启动 scheduler，与 sidecar 共享磁盘 workdir 时由 CloudSyncRuntime 门闸串行
+//!       （完整跨进程 trigger 控制路由在后续任务扩展；配置 CAS 已统一走 owner）。
+//!     - `*_for_runtime` helper 保留给 owner 侧单测。
 
+use crate::backend::control_client::BackendControlClient;
 use crate::cloud_sync::engine::{self, CloudSyncResult, TestCloudSyncResult};
 use crate::config::default_cloud_sync_values;
-use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
+use crate::config_runtime::{update_config_transactionally, ConfigRuntime, RuntimeConfigPatch};
 use crate::error::AppError;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
@@ -50,11 +52,25 @@ fn to_dto(cfg: &crate::config::AppConfig) -> CloudSyncConfigDto {
 
 /// 读取云端同步配置。
 ///
-/// Business Logic: 前端设置页初始化时展示当前云端同步配置。
+/// Business Logic: 前端设置页初始化时展示当前云端同步配置（优先 sidecar 权威）。
 #[tauri::command]
 pub async fn get_cloud_sync_config(
     state: State<'_, AppState>,
 ) -> Result<CloudSyncConfigDto, AppError> {
+    if let Ok(client) = BackendControlClient::from_control_file() {
+        if let Ok(snap) = client.get_config().await {
+            if let Ok(mut cfg) = state.config.write() {
+                snap.apply_to_local_config(&mut cfg);
+            }
+            return Ok(CloudSyncConfigDto {
+                repo_url: snap.cloud_sync_repo_url,
+                enabled: snap.cloud_sync_enabled,
+                auto: snap.cloud_sync_auto,
+                interval_secs: snap.cloud_sync_interval_secs,
+                branch: snap.cloud_sync_branch,
+            });
+        }
+    }
     let cfg = state.config.read().unwrap();
     Ok(to_dto(&cfg))
 }
@@ -116,8 +132,8 @@ pub async fn update_cloud_sync_config_for_runtime(
 
 /// 更新云端同步配置（所有字段可选 patch），并持久化。
 ///
-/// Business Logic: 用户在设置页保存配置后需落盘，scheduler 下个 tick 自动生效。
-/// Code Logic: 委托 `update_cloud_sync_config_for_runtime` 走 ConfigRuntime 事务路径。
+/// Business Logic: 用户在设置页保存配置后需落到 sidecar 权威配置，scheduler 下个 tick 自动生效。
+/// Code Logic: BackendControlClient 提交 RuntimeConfigPatch 的 cloud_sync 字段；刷新本地缓存。
 #[tauri::command]
 pub async fn update_cloud_sync_config(
     state: State<'_, AppState>,
@@ -127,15 +143,27 @@ pub async fn update_cloud_sync_config(
     interval_secs: Option<u64>,
     branch: Option<String>,
 ) -> Result<CloudSyncConfigDto, AppError> {
-    update_cloud_sync_config_for_runtime(
-        &state.config_runtime,
-        repo_url,
-        enabled,
-        auto,
-        interval_secs,
-        branch,
-    )
-    .await
+    let client = BackendControlClient::from_control_file()?;
+    let resp = client
+        .apply_patch(RuntimeConfigPatch {
+            cloud_sync_repo_url: repo_url,
+            cloud_sync_enabled: enabled,
+            cloud_sync_auto: auto,
+            cloud_sync_interval_secs: interval_secs,
+            cloud_sync_branch: branch,
+            ..Default::default()
+        })
+        .await?;
+    if let Ok(mut cfg) = state.config.write() {
+        resp.snapshot.apply_to_local_config(&mut cfg);
+    }
+    Ok(CloudSyncConfigDto {
+        repo_url: resp.snapshot.cloud_sync_repo_url,
+        enabled: resp.snapshot.cloud_sync_enabled,
+        auto: resp.snapshot.cloud_sync_auto,
+        interval_secs: resp.snapshot.cloud_sync_interval_secs,
+        branch: resp.snapshot.cloud_sync_branch,
+    })
 }
 
 /// 手动触发一次云端同步。

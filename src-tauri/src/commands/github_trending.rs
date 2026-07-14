@@ -11,9 +11,12 @@
 //!     - `test_claude_cli`：只执行 `claude --version` 验证本机 CLI 可用性。
 //!     - 私有 helper 负责 HTML 解析、SQLite cache；Claude CLI 结构化执行复用 `claude_cli`。
 
+use crate::backend::control_client::BackendControlClient;
 use crate::claude_cli;
 use crate::config::GithubTrendingConfig;
-use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
+use crate::config_runtime::{
+    update_config_transactionally, ConfigRuntime, GithubTrendingRuntimePatch, RuntimeConfigPatch,
+};
 use crate::error::AppError;
 use crate::state::AppState;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -182,8 +185,8 @@ pub async fn update_github_trending_config_for_runtime(
 
 /// 更新 GitHub Trending / Claude 解说配置。
 ///
-/// Business Logic: 用户在设置页应用配置后需落盘，下次首页刷新立即按新配置生效。
-/// Code Logic: 委托 ConfigRuntime 事务 helper 应用 patch 并返回最新 DTO。
+/// Business Logic: 用户在设置页应用配置后需落到 sidecar 权威配置，下次首页刷新生效。
+/// Code Logic: BackendControlClient 提交 GithubTrendingRuntimePatch；刷新本地缓存。
 #[tauri::command]
 pub async fn update_github_trending_config(
     state: State<'_, AppState>,
@@ -192,14 +195,37 @@ pub async fn update_github_trending_config(
     claude_model: Option<String>,
     cache_ttl_hours: Option<i64>,
 ) -> Result<GithubTrendingConfigDto, AppError> {
-    update_github_trending_config_for_runtime(
-        &state.config_runtime,
-        ai_enabled,
-        claude_cli_path,
-        claude_model,
-        cache_ttl_hours,
-    )
-    .await
+    let path = claude_cli_path.map(|p| {
+        if p.trim().is_empty() {
+            "claude".to_string()
+        } else {
+            p.trim().to_string()
+        }
+    });
+    let model = claude_model.map(|m| {
+        if m.trim().is_empty() {
+            "sonnet".to_string()
+        } else {
+            m.trim().to_string()
+        }
+    });
+    let ttl = cache_ttl_hours.map(|h| h.clamp(1, 168));
+    let client = BackendControlClient::from_control_file()?;
+    let resp = client
+        .apply_patch(RuntimeConfigPatch {
+            github_trending: Some(GithubTrendingRuntimePatch {
+                ai_enabled,
+                claude_cli_path: path,
+                claude_model: model,
+                cache_ttl_hours: ttl,
+            }),
+            ..Default::default()
+        })
+        .await?;
+    if let Ok(mut cfg) = state.config.write() {
+        resp.snapshot.apply_to_local_config(&mut cfg);
+    }
+    Ok(config_to_dto(&resp.snapshot.github_trending))
 }
 
 /// 测试 Claude Code CLI 是否可用。

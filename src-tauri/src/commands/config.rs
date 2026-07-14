@@ -6,15 +6,20 @@
 //!     handle_get_config / handle_update_config / handle_version。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - get_config: 读 RwLock 配置，转 ConfigDto（camelCase）。
+//!     - get_config: 优先读 sidecar 权威快照，失败回落本地缓存。
 //!     - get_default_config: 返回环境感知默认偏好，供设置页恢复默认。
-//!     - update_config: 经 `ConfigRuntime` 事务路径应用 patch；截图快捷键 OS 切换与落盘同锁串行。
+//!     - update_config: GUI 经 `BackendControlClient` 提交 allowlist patch；截图快捷键走两阶段补偿。
+//!     - `*_for_runtime` helper 仍保留给 owner 侧单测（进程内 ConfigRuntime）。
 //!     - get_version: 返回 {version, buildDate}，version 取 CARGO_PKG_VERSION。
 
+use crate::backend::control_client::BackendControlClient;
 use crate::config::{
     default_preference_values, normalize_prompt_optimizer_fill_language, AppConfig,
 };
-use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
+use crate::config_runtime::{
+    update_config_transactionally, ConfigSnapshot, ConfigUpdateResponse, ConfigRuntime,
+    RuntimeConfigPatch,
+};
 use crate::error::AppError;
 use crate::hotkey::{
     compensate_screenshot_hotkey_os, replace_screenshot_hotkey_os, GlobalShortcutBackend,
@@ -62,11 +67,147 @@ fn config_to_dto(cfg: &AppConfig) -> ConfigDto {
 
 /// 读取应用配置。
 ///
-/// Business Logic: 前端设置页初始化时展示当前配置。
+/// Business Logic: 前端设置页初始化时展示当前配置；优先展示 sidecar 权威值。
+/// Code Logic: control client get-config → 刷新本地缓存；失败回落本地 RwLock。
 #[tauri::command]
 pub async fn get_config(state: State<'_, AppState>) -> Result<ConfigDto, AppError> {
+    if let Ok(client) = BackendControlClient::from_control_file() {
+        if let Ok(snap) = client.get_config().await {
+            refresh_local_from_snapshot(&state, &snap)?;
+            return Ok(snapshot_to_config_dto(&snap, state.device_id.as_str()));
+        }
+    }
     let cfg = state.config.read().unwrap();
     Ok(config_to_dto(&cfg))
+}
+
+/// 将权威快照刷新到 GUI 本地配置缓存。
+///
+/// Business Logic（为什么需要这个函数）:
+///     代理写成功后设置页再读应看到新值，无需重启。
+///
+/// Code Logic（这个函数做什么）:
+///     写锁 `state.config` 并 `apply_to_local_config`。
+fn refresh_local_from_snapshot(state: &AppState, snap: &ConfigSnapshot) -> Result<(), AppError> {
+    let mut cfg = state
+        .config
+        .write()
+        .map_err(|_| AppError::generic("配置写锁中毒"))?;
+    snap.apply_to_local_config(&mut cfg);
+    Ok(())
+}
+
+/// 快照 → 设置页 ConfigDto。
+///
+/// Business Logic（为什么需要这个函数）:
+///     ConfigSnapshot 无 device_id，需与本机 device_id 拼装前端 DTO。
+///
+/// Code Logic（这个函数做什么）:
+///     投影 allowlist 字段 + 传入 device_id。
+fn snapshot_to_config_dto(snap: &ConfigSnapshot, device_id: &str) -> ConfigDto {
+    ConfigDto {
+        device_id: device_id.to_string(),
+        device_name: snap.device_name.clone(),
+        receive_dir: snap.receive_dir.clone(),
+        screenshot_hotkey: snap.screenshot_hotkey.clone(),
+        prompt_optimizer_hotkey: snap.prompt_optimizer_hotkey.clone(),
+        prompt_optimizer_fill_language: normalize_prompt_optimizer_fill_language(
+            &snap.prompt_optimizer_fill_language,
+        ),
+        http_port: snap.http_port,
+    }
+}
+
+/// 构建设置页基础偏好的 RuntimeConfigPatch。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI 只能提交字段级 patch，禁止整份 stale AppConfig。
+///
+/// Code Logic（这个函数做什么）:
+///     Option 字段映射到 RuntimeConfigPatch。
+fn build_preference_patch(
+    device_name: Option<String>,
+    receive_dir: Option<String>,
+    screenshot_hotkey: Option<String>,
+    prompt_optimizer_hotkey: Option<String>,
+    prompt_optimizer_fill_language: Option<String>,
+) -> RuntimeConfigPatch {
+    RuntimeConfigPatch {
+        device_name,
+        receive_dir,
+        screenshot_hotkey,
+        prompt_optimizer_hotkey,
+        prompt_optimizer_fill_language,
+        ..Default::default()
+    }
+}
+
+/// 经 owner control client 应用基础偏好 patch（无热键 OS 副作用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI 命令路径统一代理到 sidecar，返回后刷新本地缓存。
+///
+/// Code Logic（这个函数做什么）:
+///     BackendControlClient::apply_patch → refresh_local_from_snapshot → ConfigDto。
+async fn update_config_via_owner(
+    state: &AppState,
+    device_name: Option<String>,
+    receive_dir: Option<String>,
+    screenshot_hotkey: Option<String>,
+    prompt_optimizer_hotkey: Option<String>,
+    prompt_optimizer_fill_language: Option<String>,
+) -> Result<ConfigDto, AppError> {
+    let client = BackendControlClient::from_control_file()?;
+    let resp: ConfigUpdateResponse = client
+        .apply_patch(build_preference_patch(
+            device_name,
+            receive_dir,
+            screenshot_hotkey,
+            prompt_optimizer_hotkey,
+            prompt_optimizer_fill_language,
+        ))
+        .await?;
+    refresh_local_from_snapshot(state, &resp.snapshot)?;
+    Ok(snapshot_to_config_dto(
+        &resp.snapshot,
+        state.device_id.as_str(),
+    ))
+}
+
+/// 经 owner 两阶段补偿更新（含截图快捷键 OS）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     热键 OS 在 GUI；权威配置在 sidecar；必须两阶段 + 响应丢失对账。
+///
+/// Code Logic（这个函数做什么）:
+///     control client `update_config_with_hotkey_compensation` → 刷新本地 → DTO。
+async fn update_config_via_owner_with_hotkey(
+    state: &AppState,
+    backend: &mut dyn GlobalShortcutBackend,
+    device_name: Option<String>,
+    receive_dir: Option<String>,
+    screenshot_hotkey: Option<String>,
+    prompt_optimizer_hotkey: Option<String>,
+    prompt_optimizer_fill_language: Option<String>,
+) -> Result<ConfigDto, AppError> {
+    let client = BackendControlClient::from_control_file()?;
+    let resp = client
+        .update_config_with_hotkey_compensation(
+            backend,
+            build_preference_patch(
+                device_name,
+                receive_dir,
+                screenshot_hotkey,
+                prompt_optimizer_hotkey,
+                prompt_optimizer_fill_language,
+            ),
+        )
+        .await?;
+    refresh_local_from_snapshot(state, &resp.snapshot)?;
+    Ok(snapshot_to_config_dto(
+        &resp.snapshot,
+        state.device_id.as_str(),
+    ))
 }
 
 /// 读取应用偏好的环境默认值。
@@ -230,9 +371,9 @@ pub async fn update_config_with_hotkey_backend(
 
 /// 更新应用配置（基础偏好 + Workbench Prompt 优化偏好），并持久化。
 ///
-/// Business Logic: 用户在设置页保存修改后需落盘，下次启动生效。
-/// Code Logic: 经 ConfigRuntime 事务更新；截图快捷键 OS 切换与 config 提交在同一 writer 临界区，
-///     失败则同临界区补偿 OS，返回最新 DTO。
+/// Business Logic: 用户在设置页保存修改后需落到 sidecar 权威配置，下次启动与 LAN 运行态生效。
+/// Code Logic: GUI 经 BackendControlClient 提交 allowlist patch；截图快捷键走两阶段补偿；
+///     成功后刷新本地缓存 DTO。无本地 ConfigRuntime mutation fallback。
 #[tauri::command]
 pub async fn update_config(
     app: AppHandle,
@@ -243,10 +384,9 @@ pub async fn update_config(
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
 ) -> Result<ConfigDto, AppError> {
-    // 无热键变更时走通用事务路径（仍持同一 update_lock）。
     if screenshot_hotkey.is_none() {
-        return update_config_for_runtime(
-            &state.config_runtime,
+        return update_config_via_owner(
+            state.inner(),
             device_name,
             receive_dir,
             None,
@@ -257,8 +397,8 @@ pub async fn update_config(
     }
 
     let mut backend = TauriGlobalShortcutBackend::new(app);
-    update_config_with_hotkey_backend(
-        &state.config_runtime,
+    update_config_via_owner_with_hotkey(
+        state.inner(),
         &mut backend,
         device_name,
         receive_dir,
