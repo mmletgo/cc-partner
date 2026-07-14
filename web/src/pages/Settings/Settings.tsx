@@ -1315,7 +1315,7 @@ export function Settings() {
       <div className={styles.page}>
         <div className={styles.container}>
           <header className={styles.header}>
-            <span className={styles.eyebrow}>PREFERENCES</span>
+            <span className={styles.eyebrow}>{t('settings:eyebrow')}</span>
             <h1 className={styles.title}>{t('settings:title')}</h1>
             <p className={styles.lead}>{t('settings:loading')}</p>
           </header>
@@ -1331,7 +1331,7 @@ export function Settings() {
       <div className={styles.page}>
         <div className={styles.container}>
           <header className={styles.header}>
-            <span className={styles.eyebrow}>PREFERENCES</span>
+            <span className={styles.eyebrow}>{t('settings:eyebrow')}</span>
             <h1 className={styles.title}>{t('settings:title')}</h1>
             <p className={`${styles.lead} ${styles.dangerText}`}>
               {t('settings:loadFailed', { error: loadError })}
@@ -1361,7 +1361,7 @@ export function Settings() {
       <div className={styles.container}>
         {/* 页面头部 */}
         <header className={styles.header}>
-          <span className={styles.eyebrow}>PREFERENCES</span>
+          <span className={styles.eyebrow}>{t('settings:eyebrow')}</span>
           <h1 className={styles.title}>{t('settings:title')}</h1>
           <p className={styles.lead}>{t('settings:subtitle')}</p>
         </header>
@@ -2297,7 +2297,7 @@ export function Settings() {
               <div className={styles.metaRow}>
                 <dt className={styles.metaKey}>{t('settings:about.versionLabel')}</dt>
                 <dd className={styles.metaValue}>
-                  <Pill tone="accent">v{versionInfo?.version ?? '—'}</Pill>
+                  <Pill tone="accent">{`v${versionInfo?.version ?? '—'}`}</Pill>
                 </dd>
               </div>
               <div className={styles.metaRow}>
@@ -2330,7 +2330,7 @@ export function Settings() {
               <div className={styles.updateBlock}>
                 <div className={styles.metaRow}>
                   <span className={styles.metaKey}>{t('settings:about.latestVersion')}</span>
-                  <Pill tone="accent">v{updateResult.version}</Pill>
+                  <Pill tone="accent">{`v${updateResult.version}`}</Pill>
                 </div>
                 {updateResult.body ? (
                   <p className={styles.updateBody}>{updateResult.body}</p>

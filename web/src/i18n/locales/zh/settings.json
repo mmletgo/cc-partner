@@ -1,5 +1,6 @@
 {
   "title": "设置",
+  "eyebrow": "偏好设置",
   "subtitle": "管理设备名、截图快捷键、云端同步与版本信息。",
   "loading": "加载中…",
   "loadFailed": "加载失败：{{error}}",

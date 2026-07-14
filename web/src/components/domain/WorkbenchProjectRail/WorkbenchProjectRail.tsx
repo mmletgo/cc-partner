@@ -3,9 +3,12 @@
  *
  * Business Logic（为什么需要这个组件）:
  *   项目文件夹列表是进入工作台的主要入口，不需要再占用一个独立导航菜单项。
+ *   分区标题、空态说明与本机/局域网 CTA 提升旗舰功能可发现性；状态不只靠颜色。
  *
  * Code Logic（这个组件做什么）:
- *   渲染设置菜单项下方的项目列表、window/pane 统计、本机/远端添加入口和项目移除操作；点击项目后选择项目并跳转 `/workbench`。
+ *   渲染设置菜单项下方的项目列表、window/pane 统计、本机/远端添加入口和项目移除操作；
+ *   空态直接暴露 chooseAndAddProject / 远端选择器（复用既有回调，不新增项目 API）；
+ *   点击项目后选择项目并跳转 `/workbench`，保持 deep link 语义。
  */
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
@@ -50,12 +53,48 @@ export function WorkbenchProjectRail() {
     removeProject,
   } = useWorkbenchProjects();
 
+  const sectionTitle = t('workbench:projectRail.sectionTitle');
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   关闭远端选择器后应把焦点还给“添加项目”按钮，避免键盘焦点丢失。
+   *
+   * Code Logic（这个函数做什么）:
+   *   busy 且非 force 时忽略；否则关闭弹层并异步 focus 添加按钮。
+   */
   const closeRemotePicker = useCallback((options?: { force?: boolean }) => {
     if (remoteOpenBusy && !options?.force) return;
     setRemotePickerOpen(false);
     setRemoteOpenBusy(false);
     window.setTimeout(() => addProjectButtonRef.current?.focus(), 0);
   }, [remoteOpenBusy]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   本机项目 CTA（空态按钮与来源弹层）共用同一添加流程。
+   *
+   * Code Logic（这个函数做什么）:
+   *   关闭来源弹层后调用 chooseAndAddProject；成功则导航 /workbench。
+   */
+  const handleAddLocalProject = useCallback(() => {
+    setSourcePickerOpen(false);
+    void chooseAndAddProject().then((project) => {
+      if (project) navigate('/workbench');
+    });
+  }, [chooseAndAddProject, navigate]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   局域网项目 CTA 必须复用现有远端选择器，不新增项目 API。
+   *
+   * Code Logic（这个函数做什么）:
+   *   关闭来源弹层并打开 remote picker。
+   */
+  const handleOpenRemotePicker = useCallback(() => {
+    setSourcePickerOpen(false);
+    setRemoteOpenBusy(false);
+    setRemotePickerOpen(true);
+  }, []);
 
   useEffect(() => {
     if (!sourcePickerOpen) return;
@@ -103,9 +142,9 @@ export function WorkbenchProjectRail() {
   }, [closeRemotePicker, remotePickerOpen]);
 
   return (
-    <section className={styles.rail} aria-label={t('workbench:projectFolders')}>
+    <section className={styles.rail} aria-label={sectionTitle}>
       <div className={styles.header}>
-        <span className={styles.title}>{t('workbench:projectFolders')}</span>
+        <h2 className={styles.title}>{sectionTitle}</h2>
         <div className={styles.actions}>
           <Button
             variant="icon"
@@ -139,12 +178,7 @@ export function WorkbenchProjectRail() {
               <button
                 type="button"
                 className={styles.sourceOption}
-                onClick={() => {
-                  setSourcePickerOpen(false);
-                  void chooseAndAddProject().then((project) => {
-                    if (project) navigate('/workbench');
-                  });
-                }}
+                onClick={handleAddLocalProject}
               >
                 <FolderIcon />
                 <span>
@@ -155,11 +189,7 @@ export function WorkbenchProjectRail() {
               <button
                 type="button"
                 className={styles.sourceOption}
-                onClick={() => {
-                  setSourcePickerOpen(false);
-                  setRemoteOpenBusy(false);
-                  setRemotePickerOpen(true);
-                }}
+                onClick={handleOpenRemotePicker}
               >
                 <DevicesIcon />
                 <span>
@@ -179,7 +209,28 @@ export function WorkbenchProjectRail() {
         {!projectsLoading && projects.length === 0 ? (
           <div className={styles.emptyProject}>
             <FolderIcon />
-            <span>{t('workbench:emptyProjects')}</span>
+            <span className={styles.emptyTitle}>{t('workbench:emptyProjects')}</span>
+            <p className={styles.emptyExplanation}>
+              {t('workbench:projectRail.emptyExplanation')}
+            </p>
+            <div className={styles.emptyActions}>
+              <button
+                type="button"
+                className={styles.emptyCta}
+                onClick={handleAddLocalProject}
+                disabled={projectBusy}
+              >
+                {t('workbench:projectRail.addLocalCta')}
+              </button>
+              <button
+                type="button"
+                className={styles.emptyCta}
+                onClick={handleOpenRemotePicker}
+                disabled={projectBusy}
+              >
+                {t('workbench:projectRail.addRemoteCta')}
+              </button>
+            </div>
           </div>
         ) : null}
         {projects.map((project) => {
@@ -190,11 +241,15 @@ export function WorkbenchProjectRail() {
           const paneCountLabel = t('workbench:projectPaneCount', {
             count: stats.paneCount,
           });
+          const isActive = project.id === activeProjectId;
+          const statusLabel = isActive
+            ? t('workbench:projectRail.statusActive')
+            : t('workbench:projectRail.statusInactive');
           return (
             <div
               key={project.id}
               className={styles.projectItem}
-              data-active={project.id === activeProjectId || undefined}
+              data-active={isActive || undefined}
             >
               <button
                 type="button"
@@ -222,11 +277,12 @@ export function WorkbenchProjectRail() {
                       <span>{paneCountLabel}</span>
                     </span>
                   </span>
+                  <span className={styles.projectStatusText}>{statusLabel}</span>
                 </span>
               </button>
               <span
                 className={styles.projectStatusDot}
-                data-active={project.id === activeProjectId || undefined}
+                data-active={isActive || undefined}
                 aria-hidden="true"
               />
               <Button

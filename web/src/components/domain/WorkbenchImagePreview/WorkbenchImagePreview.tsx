@@ -43,7 +43,7 @@ export function WorkbenchImagePreview(props: WorkbenchImagePreviewProps): ReactE
           <div className={styles.metaItem}>
             <dt>{t('workbench:filePreviews.dimensions')}</dt>
             <dd>
-              {preview.width} x {preview.height}
+              {`${preview.width} × ${preview.height}`}
             </dd>
           </div>
         ) : null}

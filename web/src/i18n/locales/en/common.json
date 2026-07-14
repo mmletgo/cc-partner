@@ -59,5 +59,21 @@
     "description": "The current route failed to render. The sidebar and other areas still work—retry this page or go home.",
     "retry": "Retry this page",
     "goHome": "Go home"
+  },
+  "languageSwitcher": {
+    "label": "Language"
+  },
+  "screenshot": {
+    "toolRect": "Rectangle",
+    "toolArrow": "Arrow",
+    "undo": "Undo",
+    "confirm": "Confirm",
+    "cancel": "Cancel",
+    "colorRed": "Red",
+    "colorYellow": "Yellow",
+    "colorGreen": "Green",
+    "colorBlue": "Blue",
+    "colorWhite": "White",
+    "colorBlack": "Black"
   }
 }

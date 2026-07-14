@@ -6,6 +6,14 @@
   "emptyValue": "—",
   "rootPath": "/",
   "projectFolders": "Project folders",
+  "projectRail": {
+    "sectionTitle": "Workbench projects",
+    "emptyExplanation": "Add a local or LAN project to open the workbench from this rail anytime.",
+    "addLocalCta": "Add local project",
+    "addRemoteCta": "Choose LAN project",
+    "statusActive": "Active",
+    "statusInactive": "Not selected"
+  },
   "addProject": "Add project",
   "removeProject": "Remove project",
   "emptyProjects": "No project folders yet",

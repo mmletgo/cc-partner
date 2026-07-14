@@ -11,5 +11,6 @@
   "orchestrator": "Automation",
   "devices": "Devices",
   "settings": "Settings",
-  "health": "Health"
+  "health": "Health",
+  "primaryNav": "Primary"
 }

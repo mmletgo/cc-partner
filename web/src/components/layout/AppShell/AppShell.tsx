@@ -136,7 +136,7 @@ export function AppShell({ children }: AppShellProps) {
       <Sidebar
         footer={
           <div className={styles.footer}>
-            <span className={styles.footerVersion}>v{version ?? '—'}</span>
+            <span className={styles.footerVersion}>{`v${version ?? '—'}`}</span>
             <span>{appName}</span>
             <div className={styles.footerToggle}>
               <LanguageSwitcher />
@@ -184,7 +184,7 @@ export function AppShell({ children }: AppShellProps) {
           <img className={styles.logoMark} src={appIconUrl} alt="" aria-hidden="true" />
           <span className={styles.logoText}>{appName}</span>
         </div>
-        <nav className={styles.navList} aria-label="primary">
+        <nav className={styles.navList} aria-label={t('nav:primaryNav')}>
           <NavItem to="/" label={t('nav:home')} icon={<HomeIcon />} />
           <NavItem
             to="/attention"
