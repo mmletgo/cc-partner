@@ -15,9 +15,10 @@ use app_lib::backend::control_client::{
     decide_hotkey_reconcile, BackendControlClient, HotkeyOsReconcileDecision,
 };
 use app_lib::backend::event_bus::{
-    BackendRuntimeCursor, GuiEventRelayState, RelayClientAction, RuntimeEventBus,
-    RuntimeRelayMessage,
+    perform_gap_resync, BackendRuntimeCursor, GapResyncOutcome, GuiEventRelayState,
+    RelayClientAction, RuntimeEventBus, RuntimeRelayMessage,
 };
+use app_lib::backend::control_client::rebind_control_token_body;
 use app_lib::config::{
     AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
 };
@@ -667,8 +668,8 @@ async fn event_relay_disconnect_reconnect_replays_from_after_sequence() {
 ///
 /// Code Logic（这个测试做什么）:
 ///     小 ring 挤掉旧事件 → open_relay after 旧 cursor → Gap；GuiEventRelayState 记 resync。
-#[test]
-fn event_relay_broadcast_lag_emits_gap_and_triggers_resync() {
+#[tokio::test]
+async fn event_relay_broadcast_lag_emits_gap_and_triggers_resync() {
     let bus = RuntimeEventBus::with_capacity("owner-lag", 2, 2);
     let stale = bus.publish("e", json!(1));
     let _ = bus.publish("e", json!(2));
@@ -692,6 +693,10 @@ fn event_relay_broadcast_lag_emits_gap_and_triggers_resync() {
     let action = gui.on_message(msg);
     assert!(matches!(action, RelayClientAction::RequestResync { .. }));
     assert_eq!(gui.resync_count, 1);
+    // 行为断言：RequestResync 后必须走真实 resync hooks（非注释）
+    let outcome = perform_gap_resync(|| async { Ok(1u64) }, || async { Ok(1u64) }).await;
+    assert_eq!(outcome.terminal_replay_count, 1);
+    assert_eq!(outcome.runtime_snapshot_refresh_count, 1);
 }
 
 /// Gap 后应先 terminal/runtime resync，再 attach 最新 live 游标。
@@ -700,9 +705,10 @@ fn event_relay_broadcast_lag_emits_gap_and_triggers_resync() {
 ///     永久漏事件与重复去重都不可接受；resync 后从 latest 附着。
 ///
 /// Code Logic（这个测试做什么）:
-///     Gap → RequestResync → attach_at(latest) → 后续同 sequence 去重。
-#[test]
-fn event_relay_gap_triggers_terminal_and_runtime_resync() {
+///     Gap → RequestResync → perform_gap_resync 可观测 hook（非注释）→ attach_at(latest)
+///     → 后续同 sequence 去重。
+#[tokio::test]
+async fn event_relay_gap_triggers_terminal_and_runtime_resync() {
     let mut gui = GuiEventRelayState::default();
     let gap = RuntimeRelayMessage::Gap {
         owner_instance_id: "owner-a".into(),
@@ -718,7 +724,29 @@ fn event_relay_gap_triggers_terminal_and_runtime_resync() {
         } => {
             assert_eq!(oldest_available, 10);
             assert_eq!(latest, 20);
-            // 模拟：terminal replay + runtime snapshot 完成后 attach latest live cursor
+            let mut terminal_calls = 0u64;
+            let mut runtime_calls = 0u64;
+            let outcome = perform_gap_resync(
+                || {
+                    terminal_calls += 1;
+                    async move { Ok(3u64) }
+                },
+                || {
+                    runtime_calls += 1;
+                    async move { Ok(1u64) }
+                },
+            )
+            .await;
+            assert_eq!(
+                outcome,
+                GapResyncOutcome {
+                    terminal_replay_count: 3,
+                    runtime_snapshot_refresh_count: 1,
+                }
+            );
+            assert_eq!(terminal_calls, 1, "terminal replay hook 必须被调用");
+            assert_eq!(runtime_calls, 1, "runtime snapshot hook 必须被调用");
+            // 真实 resync 完成后再 attach latest live cursor
             gui.attach_at(BackendRuntimeCursor {
                 owner_instance_id: "owner-a".into(),
                 sequence: latest,
@@ -740,6 +768,135 @@ fn event_relay_gap_triggers_terminal_and_runtime_resync() {
         payload: json!(null),
     });
     assert!(matches!(next, RelayClientAction::Deliver { .. }));
+}
+
+/// query 刷新 control token 时必须保留原业务字段（projectId / afterSequence）。
+///
+/// Business Logic（为什么需要这个测试）:
+///     sidecar 重启后 port/token 变更时，重试若丢掉 projectId 会导致 snapshot 400；
+///     丢掉 afterSequence 会破坏 catch-up 游标契约。
+///
+/// Code Logic（这个测试做什么）:
+///     构造含 projectId 与 afterSequence 的 body，rebind 后断言业务字段仍在且 token 已替换。
+#[test]
+fn query_refresh_preserves_original_request_body_fields() {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SnapBody {
+        control_token: String,
+        project_id: String,
+    }
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct EventsBody {
+        control_token: String,
+        after_owner_instance_id: Option<String>,
+        after_sequence: Option<u64>,
+    }
+
+    let snap = SnapBody {
+        control_token: "old-token".into(),
+        project_id: "proj-42".into(),
+    };
+    let rebound = rebind_control_token_body(&snap, "new-token").expect("rebind snap");
+    assert_eq!(
+        rebound.get("controlToken").and_then(|v| v.as_str()),
+        Some("new-token")
+    );
+    assert_eq!(
+        rebound.get("projectId").and_then(|v| v.as_str()),
+        Some("proj-42")
+    );
+
+    let events = EventsBody {
+        control_token: "old-token".into(),
+        after_owner_instance_id: Some("owner-x".into()),
+        after_sequence: Some(17),
+    };
+    let rebound = rebind_control_token_body(&events, "token-2").expect("rebind events");
+    assert_eq!(
+        rebound.get("controlToken").and_then(|v| v.as_str()),
+        Some("token-2")
+    );
+    assert_eq!(
+        rebound
+            .get("afterOwnerInstanceId")
+            .and_then(|v| v.as_str()),
+        Some("owner-x")
+    );
+    assert_eq!(
+        rebound.get("afterSequence").and_then(|v| v.as_u64()),
+        Some(17)
+    );
+}
+
+/// Cloud Sync 手动与 scheduler 路径共享同一门闸：ReturnBusy 可观测 skipped。
+///
+/// Business Logic（为什么需要这个测试）:
+///     并发 GUI manual + owner scheduler 只能执行一个 Git 临界区；忙则 skip 而非双写 workdir。
+///
+/// Code Logic（这个测试做什么）:
+///     持 Wait 锁跑长任务的同时 ReturnBusy 触发；断言 skipped_busy 递增且 busy 路径返回 None。
+#[tokio::test]
+async fn cloud_sync_manual_and_scheduler_share_single_gate() {
+    use app_lib::cloud_sync::runtime::{
+        run_cloud_sync_exclusive, CloudSyncBusyPolicy, CloudSyncRuntime, CloudSyncTrigger,
+    };
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Barrier;
+
+    let runtime = Arc::new(CloudSyncRuntime::new());
+    let barrier = Arc::new(Barrier::new(2));
+
+    let r1 = Arc::clone(&runtime);
+    let b1 = Arc::clone(&barrier);
+    let holder = tokio::spawn(async move {
+        run_cloud_sync_exclusive(
+            &r1,
+            CloudSyncTrigger::Manual,
+            CloudSyncBusyPolicy::Wait {
+                timeout: Duration::from_secs(5),
+            },
+            || {
+                let b1 = Arc::clone(&b1);
+                async move {
+                    b1.wait().await;
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    Ok::<(), AppError>(())
+                }
+            },
+        )
+        .await
+    });
+
+    // 等 holder 进入 operation 临界区
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(runtime.phase_token(), "running");
+
+    let r2 = Arc::clone(&runtime);
+    let b2 = Arc::clone(&barrier);
+    let busy = tokio::spawn(async move {
+        // 先放行 holder 进入 operation
+        b2.wait().await;
+        run_cloud_sync_exclusive(
+            &r2,
+            CloudSyncTrigger::Scheduler,
+            CloudSyncBusyPolicy::ReturnBusy,
+            || async { Ok::<(), AppError>(()) },
+        )
+        .await
+    });
+
+    let (hold_res, busy_res) = tokio::join!(holder, busy);
+    hold_res.expect("join holder").expect("holder ok");
+    let skipped = busy_res.expect("join busy").expect("busy ok");
+    assert!(skipped.is_none(), "scheduler 在 busy 时必须 ReturnBusy → None");
+    assert!(
+        runtime.status_snapshot().skipped_busy >= 1,
+        "skipped_busy 必须可观测"
+    );
+    assert_eq!(runtime.phase_token(), "succeeded");
 }
 
 // 抑制未使用告警（部分类型仅用于 serde 形状对齐）

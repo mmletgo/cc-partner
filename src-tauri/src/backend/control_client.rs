@@ -29,6 +29,8 @@ use std::time::Duration;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// control mutation 超时（配置落盘可能稍慢）。
 const MUTATE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Cloud Sync mutation 超时（覆盖 Wait{300s} 门闸 + git 网络操作）。
+const CLOUD_SYNC_MUTATE_TIMEOUT: Duration = Duration::from_secs(360);
 
 /// 包装 get-config 响应（与 control_api::ControlConfigResponse 对齐）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +126,43 @@ struct ControlEventsBody {
     after_owner_instance_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     after_sequence: Option<u64>,
+}
+
+/// CLAUDE.md 云端推送 control body（token + 本机已保存 row 字段）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlClaudeMdPushBody {
+    control_token: String,
+    content: String,
+    updated_at: String,
+    device_id: String,
+    vector_clock: std::collections::HashMap<String, u64>,
+}
+
+/// 刷新 control token 后重建查询 body：保留全部业务字段，仅替换 `controlToken`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     sidecar 重启后 port/token 变更时，查询重试必须仍携带 projectId/afterSequence 等字段，
+///     否则 runtime-snapshot / events catch-up 会静默变成 auth-only 请求。
+///
+/// Code Logic（这个函数做什么）:
+///     `serde_json::to_value(body)` → 对象插入/覆盖 `controlToken`；非对象体报错。
+pub fn rebind_control_token_body(
+    body: &impl Serialize,
+    new_token: &str,
+) -> Result<serde_json::Value, AppError> {
+    let mut value = serde_json::to_value(body)
+        .map_err(|e| AppError::generic(format!("序列化 control 查询 body 失败: {e}")))?;
+    let Some(obj) = value.as_object_mut() else {
+        return Err(AppError::generic(
+            "control 查询 body 必须是 JSON 对象才能刷新 token",
+        ));
+    };
+    obj.insert(
+        "controlToken".to_string(),
+        serde_json::Value::String(new_token.to_string()),
+    );
+    Ok(value)
 }
 
 /// events catch-up 响应。
@@ -649,7 +688,8 @@ impl BackendControlClient {
     ///     sidecar 重启后 port/token 可能变；查询允许一次刷新，避免 GUI 粘在旧 control。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     send_once；若失败且 from_control_file 成功得到新 client 字段，用新字段再发一次查询。
+    ///     send_once；若失败且 from_control_file 成功得到新 client，用**保留原业务字段**的 body
+    ///     仅替换 `controlToken` 后再发一次查询（不得丢 projectId/afterSequence 等字段）。
     async fn query_with_optional_refresh<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -670,20 +710,102 @@ impl BackendControlClient {
                 if new_client.port == self.port && new_client.control_token == self.control_token {
                     return Err(first);
                 }
+                let retry_body = match rebind_control_token_body(body, &new_client.control_token) {
+                    Ok(v) => v,
+                    Err(e) => return Err(e),
+                };
                 match new_client
-                    .send_once(
-                        path,
-                        &ControlAuthBody {
-                            control_token: new_client.control_token.clone(),
-                        },
-                        QUERY_TIMEOUT,
-                    )
+                    .send_once(path, &retry_body, QUERY_TIMEOUT)
                     .await
                 {
                     ControlCallOutcome::Ok(v) => Ok(v),
                     ControlCallOutcome::Failed(e) | ControlCallOutcome::Uncertain(e) => Err(e),
                 }
             }
+        }
+    }
+
+    /// 经 control API 触发 owner 侧 Cloud Sync 完整同步（mutation，不自动重试）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 不得在本进程跑 Git workdir 写路径；手动「立即同步」必须进 sidecar 单飞门闸。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `cloud-sync/trigger`；超时 360s（Wait 门闸最长 300s）。
+    pub async fn cloud_sync_trigger(
+        &self,
+    ) -> Result<crate::cloud_sync::engine::CloudSyncResult, AppError> {
+        let body = ControlAuthBody {
+            control_token: self.control_token.clone(),
+        };
+        match self
+            .send_once("cloud-sync/trigger", &body, CLOUD_SYNC_MUTATE_TIMEOUT)
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧测试 Cloud Sync 连通性。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     连通性探测可能触达正式 workdir 的 fetch 路径，须走 owner gate，禁止 GUI 本地第二路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `cloud-sync/test`。
+    pub async fn cloud_sync_test(
+        &self,
+    ) -> Result<crate::cloud_sync::engine::TestCloudSyncResult, AppError> {
+        let body = ControlAuthBody {
+            control_token: self.control_token.clone(),
+        };
+        match self
+            .send_once("cloud-sync/test", &body, CLOUD_SYNC_MUTATE_TIMEOUT)
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧推送 CLAUDE.md 到 GitHub 工作区。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     CLAUDE.md 云推送与完整 sync 共享同一 Git workdir 临界区；GUI 只传已保存 row，不本地写 git。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `cloud-sync/claude-md-push` body = token + ClaudeMdRow 字段；mutation 不自动重试。
+    pub async fn cloud_sync_claude_md_push(
+        &self,
+        row: &crate::models::claude_md::ClaudeMdRow,
+    ) -> Result<crate::cloud_sync::engine::CloudClaudeMdPushResultDto, AppError> {
+        let body = ControlClaudeMdPushBody {
+            control_token: self.control_token.clone(),
+            content: row.content.clone(),
+            updated_at: row.updated_at.clone(),
+            device_id: row.device_id.clone(),
+            vector_clock: row.vector_clock.clone(),
+        };
+        match self
+            .send_once(
+                "cloud-sync/claude-md-push",
+                &body,
+                CLOUD_SYNC_MUTATE_TIMEOUT,
+            )
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
         }
     }
 

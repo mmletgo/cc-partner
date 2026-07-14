@@ -121,6 +121,17 @@ impl CloudSyncRuntime {
             .clone()
     }
 
+    /// 将运行时状态映射为稳定诊断 phase token（无 URL/原文）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     诊断面必须展示真实 Cloud Sync 相位，禁止硬编码 idle。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     running_trigger 有值 → `running`；否则按 last_result 映射 `succeeded`/`failed`；无结果 → `idle`。
+    pub fn phase_token(&self) -> &'static str {
+        cloud_sync_phase_token(&self.status_snapshot())
+    }
+
     /// Business Logic: 测试/调试记录上次结果。
     /// Code Logic: 写锁更新 last_result。
     fn record_last_result(&self, ok: bool, note: impl Into<String>) {
@@ -153,6 +164,24 @@ impl CloudSyncRuntime {
         let mut s = self.status.write().expect("cloud_sync status 写锁中毒");
         s.running_trigger = None;
         s.started_at = None;
+    }
+}
+
+/// 从 CloudSyncRuntimeStatus 映射稳定 phase token。
+///
+/// Business Logic（为什么需要这个函数）:
+///     control status 与 get_runtime_diagnostics 共用同一映射，避免漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     running → running；last ok → succeeded；last !ok → failed；否则 idle。
+pub fn cloud_sync_phase_token(status: &CloudSyncRuntimeStatus) -> &'static str {
+    if status.running_trigger.is_some() {
+        return "running";
+    }
+    match &status.last_result {
+        Some(result) if result.ok => "succeeded",
+        Some(_) => "failed",
+        None => "idle",
     }
 }
 
@@ -595,5 +624,43 @@ mod tests {
 
         hold.notify_one();
         let _ = holder.await;
+    }
+
+    /// Business Logic: 诊断 phase 必须反映真实运行态，禁止恒 idle。
+    /// Code Logic: 运行中 phase=running；完成后 ok → succeeded。
+    #[tokio::test]
+    async fn phase_token_maps_running_and_succeeded() {
+        let runtime = StdArc::new(CloudSyncRuntime::new());
+        assert_eq!(runtime.phase_token(), "idle");
+
+        let hold = StdArc::new(tokio::sync::Notify::new());
+        let held = StdArc::new(tokio::sync::Notify::new());
+        let rt = runtime.clone();
+        let h = hold.clone();
+        let hd = held.clone();
+        let holder = tokio::spawn(async move {
+            run_cloud_sync_exclusive(
+                &rt,
+                CloudSyncTrigger::Manual,
+                CloudSyncBusyPolicy::Wait {
+                    timeout: Duration::from_secs(5),
+                },
+                || {
+                    let h = h.clone();
+                    let hd = hd.clone();
+                    async move {
+                        hd.notify_one();
+                        h.notified().await;
+                        Ok::<(), AppError>(())
+                    }
+                },
+            )
+            .await
+        });
+        held.notified().await;
+        assert_eq!(runtime.phase_token(), "running");
+        hold.notify_one();
+        let _ = holder.await;
+        assert_eq!(runtime.phase_token(), "succeeded");
     }
 }

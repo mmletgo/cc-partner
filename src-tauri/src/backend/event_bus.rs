@@ -495,6 +495,59 @@ impl GuiEventRelayState {
     }
 }
 
+/// Gap 后 terminal + runtime 恢复的可观测结果。
+///
+/// Business Logic（为什么需要这个结构）:
+///     smoke/诊断必须证明 resync 发生了真实副作用，而非仅状态机注释。
+///
+/// Code Logic（这个结构做什么）:
+///     记录 terminal replay 与 runtime snapshot refresh 调用次数。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GapResyncOutcome {
+    /// 成功触发的 terminal session replay 次数。
+    pub terminal_replay_count: u64,
+    /// 成功触发的 runtime snapshot refresh 次数（含 emit 通知）。
+    pub runtime_snapshot_refresh_count: u64,
+}
+
+/// 执行 Gap 后的 terminal replay + runtime snapshot 恢复（先恢复再 attach live）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     ring gap/lag 后不能 silent loss：必须先恢复终端 buffer 与 Orchestrator 快照，
+///     再 attach latest 游标，避免后续 DropDuplicate 掩盖丢更新。
+///
+/// Code Logic（这个函数做什么）:
+///     顺序调用两个 hook 闭包；单边失败记 warn 并计 0，不阻断另一侧；返回可观测计数。
+pub async fn perform_gap_resync<FT, FR, FutT, FutR>(
+    terminal_replay: FT,
+    runtime_refresh: FR,
+) -> GapResyncOutcome
+where
+    FT: FnOnce() -> FutT,
+    FR: FnOnce() -> FutR,
+    FutT: std::future::Future<Output = Result<u64, crate::error::AppError>>,
+    FutR: std::future::Future<Output = Result<u64, crate::error::AppError>>,
+{
+    let terminal_replay_count = match terminal_replay().await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("gap resync: terminal replay 失败: {e}");
+            0
+        }
+    };
+    let runtime_snapshot_refresh_count = match runtime_refresh().await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("gap resync: runtime snapshot refresh 失败: {e}");
+            0
+        }
+    };
+    GapResyncOutcome {
+        terminal_replay_count,
+        runtime_snapshot_refresh_count,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

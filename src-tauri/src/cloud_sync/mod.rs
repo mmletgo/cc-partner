@@ -24,4 +24,4 @@ pub mod runtime;
 pub mod scheduler;
 pub mod snapshot;
 
-pub use runtime::CloudSyncRuntime;
+pub use runtime::{cloud_sync_phase_token, CloudSyncRuntime};

@@ -78,8 +78,22 @@ export function WorkbenchTerminalBuffersProvider({
         store.append(payload.sessionId, payload.chunk);
       },
     );
+    // Gap resync：owner ring 丢失中间事件后，Rust 侧 replay 完整 buffer 并重置前端 store。
+    const resyncUnlisten = listen<{
+      sessionId?: string;
+      buffer?: string;
+    }>('workbench:terminal-resync', (event) => {
+      const payload = event.payload;
+      const sessionId = payload.sessionId;
+      if (!sessionId) return;
+      store.reset(sessionId);
+      if (payload.buffer) {
+        store.append(sessionId, payload.buffer);
+      }
+    });
     return () => {
       void outputUnlisten.then((fn) => fn());
+      void resyncUnlisten.then((fn) => fn());
     };
   }, [store]);
 

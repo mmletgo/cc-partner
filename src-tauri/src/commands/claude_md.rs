@@ -10,11 +10,13 @@
 //!         DB 无行时返回空 DTO（content/updatedAt 为空串，vectorClock 为空 map）。
 //!     `update_claude_md`：先 create_dir_all + write 文件，再推进 vector_clock，
 //!         upsert DB 行后返回 DTO（update 刚写过文件，无需再对账）。
-//!     `push_claude_md`：先把前端当前内容保存为本机版本，再推送到局域网设备和 GitHub 云端
-//!         （云端推送经本机 CloudSyncRuntime Wait 门闸，与完整 sync/手动 trigger 串行；
-//!          GUI 不启动 cloud scheduler，配置 CAS 已统一走 sidecar control client）。
+//!     `push_claude_md`：先把前端当前内容保存为本机版本，再推送到局域网设备和 GitHub 云端。
+//!         云端推送在 GuiClient 下经 control `cloud-sync/claude-md-push` 进入 sidecar 唯一
+//!         CloudSyncRuntime 门闸；HeadlessOwner 仍直连 engine。
 //!     返回类型用 camelCase 的 `ClaudeMdDto`，对齐前端 TS 类型。
 
+use crate::backend::authority::RuntimeRole;
+use crate::backend::control_client::BackendControlClient;
 use crate::error::AppError;
 use crate::models::claude_md::{ClaudeMdDto, ClaudeMdRow, CLAUDE_MD_ID};
 use crate::state::AppState;
@@ -75,8 +77,9 @@ pub async fn update_claude_md(
 ///
 /// Business Logic: CLAUDE.md 页面里的"同步/推送"按钮应以本机编辑器内容为准分发到其他设备，
 ///     并覆盖 GitHub 云端的 CLAUDE.md 快照；不能复用全局 trigger_sync 的 pull/merge 语义。
-/// Code Logic: 复用本地写入逻辑推进 vector_clock，随后调用 push_claude_md_to_peers 和
-///     push_claude_md_to_cloud；返回 `{accepted,synced,note}`，与既有同步按钮结果结构保持一致。
+///     GitHub 写路径必须进入 sidecar 唯一 CloudSyncRuntime，禁止 GuiClient 本地第二 git 临界区。
+/// Code Logic: 写本地文件/DB → LAN peers；云端：GuiClient 经 control claude-md-push，
+///     HeadlessOwner 直连 push_claude_md_to_cloud；返回 `{accepted,synced,note}`。
 #[tauri::command]
 pub async fn push_claude_md(
     state: State<'_, AppState>,
@@ -84,7 +87,13 @@ pub async fn push_claude_md(
 ) -> Result<serde_json::Value, AppError> {
     let row = write_local_claude_md(state.inner(), content).await?;
     let lan = crate::sync::engine::push_claude_md_to_peers(state.inner(), &row).await;
-    let cloud = crate::cloud_sync::engine::push_claude_md_to_cloud(state.inner(), &row).await?;
+    let cloud = if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        let dto = client.cloud_sync_claude_md_push(&row).await?;
+        crate::cloud_sync::engine::CloudClaudeMdPushResult::from(dto)
+    } else {
+        crate::cloud_sync::engine::push_claude_md_to_cloud(state.inner(), &row).await?
+    };
     let note = format!("{}；{}", lan.note, cloud.note);
     Ok(serde_json::to_value(&crate::sync::engine::SyncResult {
         accepted: true,

@@ -8,7 +8,8 @@
 //!     实现 `BackendUi` trait，以及 Tauri GUI 和 headless 两种适配器。
 
 use crate::backend::control_client::BackendControlClient;
-use crate::backend::event_bus::{GuiEventRelayState, RelayClientAction};
+use crate::backend::event_bus::{GapResyncOutcome, GuiEventRelayState, RelayClientAction};
+use crate::error::AppError;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
@@ -17,8 +18,10 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
 
-/// GUI 收到 owner event Gap 后的 Tauri 事件名（触发 terminal replay + runtime snapshot 刷新）。
+/// GUI 收到 owner event Gap 后的 Tauri 事件名（触发前端 runtime snapshot 刷新）。
 pub const BACKEND_RUNTIME_GAP_EVENT: &str = "backend:runtime-gap";
+/// Gap resync 后终端 buffer 全量重置事件（sessionId + buffer）。
+pub const WORKBENCH_TERMINAL_RESYNC_EVENT: &str = "workbench:terminal-resync";
 
 /// 后端 UI 静态资源载荷。
 ///
@@ -92,12 +95,13 @@ impl BackendAsset {
 /// 运行 GUI 进程对本机 sidecar 的事件 relay 循环。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     sidecar 是唯一事件源；GUI 必须用 afterSequence 消费 owner 事件，Gap 时通知前端 resync。
+///     sidecar 是唯一事件源；GUI 必须用 afterSequence 消费 owner 事件，Gap 时先 terminal/runtime
+///     真实恢复再 attach latest，禁止 silent loss。
 ///
 /// Code Logic（这个函数做什么）:
 ///     循环：from_control_file → events_catch_up(after cursor) → GuiEventRelayState 处理；
-///     Deliver 转发原始 event；RequestResync 发 `backend:runtime-gap` 并 attach 到 latest；
-///     cancel 或持续短暂退避。
+///     Deliver 转发原始 event；RequestResync → perform_gap_resync（sessions.list/replay +
+///     发 `backend:runtime-gap`）→ attach_at(latest)；cancel 或持续短暂退避。
 pub async fn run_gui_owner_event_relay(ui: Arc<dyn BackendUi>, cancel: CancellationToken) {
     let mut relay_state = GuiEventRelayState::default();
     loop {
@@ -125,15 +129,21 @@ pub async fn run_gui_owner_event_relay(ui: Arc<dyn BackendUi>, cancel: Cancellat
                             oldest_available,
                             latest,
                         } => {
-                            ui.emit(
-                                BACKEND_RUNTIME_GAP_EVENT,
-                                json!({
-                                    "ownerInstanceId": owner_instance_id,
-                                    "oldestAvailable": oldest_available,
-                                    "latest": latest,
-                                }),
+                            let outcome = resync_after_gap(
+                                &client,
+                                ui.as_ref(),
+                                &owner_instance_id,
+                                oldest_available,
+                                latest,
+                            )
+                            .await;
+                            tracing::info!(
+                                terminal_replay_count = outcome.terminal_replay_count,
+                                runtime_snapshot_refresh_count =
+                                    outcome.runtime_snapshot_refresh_count,
+                                "GUI owner event relay gap resync completed"
                             );
-                            // Gap 后先以 latest 附着，等待前端完成 terminal/runtime 刷新。
+                            // 真实 resync 完成后再 attach latest，避免后续 DropDuplicate 掩盖丢更新。
                             relay_state.attach_at(batch.latest.clone());
                         }
                     }
@@ -151,6 +161,90 @@ pub async fn run_gui_owner_event_relay(ui: Arc<dyn BackendUi>, cancel: Cancellat
             _ = tokio::time::sleep(Duration::from_millis(250)) => {}
         }
     }
+}
+
+/// Gap 后执行 terminal replay + runtime snapshot 恢复（可观测）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     RequestResync 不能只发空事件；必须调用既有 sessions.list/replay 与 runtime 刷新路径。
+///
+/// Code Logic（这个函数做什么）:
+///     先 `resync_terminals_via_control`，再 emit `backend:runtime-gap`；
+///     计数汇总为 `GapResyncOutcome`（与 `perform_gap_resync` 语义一致，避免引用生命周期问题）。
+pub async fn resync_after_gap(
+    client: &BackendControlClient,
+    ui: &dyn BackendUi,
+    owner_instance_id: &str,
+    oldest_available: u64,
+    latest: u64,
+) -> GapResyncOutcome {
+    // 顺序恢复：terminal 先于 runtime 通知，保证前端 snapshot 刷新时 buffer 已开始重置。
+    let terminal_replay_count = match resync_terminals_via_control(client, ui).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("gap resync: terminal replay 失败: {e}");
+            0
+        }
+    };
+    ui.emit(
+        BACKEND_RUNTIME_GAP_EVENT,
+        json!({
+            "ownerInstanceId": owner_instance_id,
+            "oldestAvailable": oldest_available,
+            "latest": latest,
+            "resyncTerminal": true,
+            "resyncRuntime": true,
+        }),
+    );
+    GapResyncOutcome {
+        terminal_replay_count,
+        runtime_snapshot_refresh_count: 1,
+    }
+}
+
+/// 经 control workbench 列出 session 并 replay，向前端发出 terminal-resync。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Gap 后 GUI 本地 terminal buffer 可能缺中间输出；必须从 owner registry 拉 replay buffer。
+///
+/// Code Logic（这个函数做什么）:
+///     `sessions.list` → 每个 id `sessions.replay` → emit `workbench:terminal-resync`；
+///     单 session 失败跳过，返回成功次数。
+async fn resync_terminals_via_control(
+    client: &BackendControlClient,
+    ui: &dyn BackendUi,
+) -> Result<u64, AppError> {
+    let sessions: Vec<serde_json::Value> = client
+        .workbench_op("sessions.list", json!({}))
+        .await
+        .unwrap_or_default();
+    let mut count = 0u64;
+    for session in sessions {
+        let Some(session_id) = session
+            .get("id")
+            .or_else(|| session.get("sessionId"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        else {
+            continue;
+        };
+        match client
+            .workbench_op::<serde_json::Value>(
+                "sessions.replay",
+                json!({ "sessionId": session_id }),
+            )
+            .await
+        {
+            Ok(replay) => {
+                ui.emit(WORKBENCH_TERMINAL_RESYNC_EVENT, replay);
+                count = count.saturating_add(1);
+            }
+            Err(e) => {
+                tracing::debug!("gap resync: session replay 失败: {e}");
+            }
+        }
+    }
+    Ok(count)
 }
 
 /// 后端运行时访问 UI 能力的抽象边界。

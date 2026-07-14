@@ -73,6 +73,36 @@ pub struct CloudClaudeMdPushResult {
     pub note: String,
 }
 
+/// CLAUDE.md 云端推送结果 DTO（control API / client 序列化）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GUI 经 control 代理 CLAUDE.md 云推送时需要 camelCase JSON 回传 note。
+///
+/// Code Logic（这个结构做什么）:
+///     与内部 CloudClaudeMdPushResult 字段对齐的可序列化壳。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudClaudeMdPushResultDto {
+    /// 人类可读说明。
+    pub note: String,
+}
+
+impl From<CloudClaudeMdPushResult> for CloudClaudeMdPushResultDto {
+    /// Business Logic: control 边界只暴露可序列化 DTO。
+    /// Code Logic: 复制 note 字段。
+    fn from(value: CloudClaudeMdPushResult) -> Self {
+        Self { note: value.note }
+    }
+}
+
+impl From<CloudClaudeMdPushResultDto> for CloudClaudeMdPushResult {
+    /// Business Logic: 命令层合并 note 时复用内部类型。
+    /// Code Logic: 复制 note 字段。
+    fn from(value: CloudClaudeMdPushResultDto) -> Self {
+        Self { note: value.note }
+    }
+}
+
 /// 返回云端同步工作区路径：`~/.cc-partner/cloud-sync/`。
 ///
 /// Business Logic: cloud_sync 的 git 工作区集中放在应用数据根下，便于清理与定位。

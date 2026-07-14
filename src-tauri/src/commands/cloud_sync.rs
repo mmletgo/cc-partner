@@ -9,11 +9,11 @@
 //!     - `get_cloud_sync_config`：优先读 sidecar 权威快照。
 //!     - `get_default_cloud_sync_config`：返回后端云同步默认值，供设置页恢复默认。
 //!     - `update_cloud_sync_config`：GUI 经 BackendControlClient 提交 cloud_sync allowlist patch。
-//!     - `trigger_cloud_sync_cmd` / `test_cloud_sync`：当前仍走本机 AppState 上的 owner 引擎入口；
-//!       GUI 进程不启动 scheduler，与 sidecar 共享磁盘 workdir 时由 CloudSyncRuntime 门闸串行
-//!       （完整跨进程 trigger 控制路由在后续任务扩展；配置 CAS 已统一走 owner）。
+//!     - `trigger_cloud_sync_cmd` / `test_cloud_sync`：GuiClient 经 BackendControlClient 代理到
+//!       sidecar owner control 路由；HeadlessOwner 直接调用本机 CloudSyncRuntime 引擎。
 //!     - `*_for_runtime` helper 保留给 owner 侧单测。
 
+use crate::backend::authority::RuntimeRole;
 use crate::backend::control_client::BackendControlClient;
 use crate::cloud_sync::engine::{self, CloudSyncResult, TestCloudSyncResult};
 use crate::config::default_cloud_sync_values;
@@ -172,20 +172,30 @@ pub async fn update_cloud_sync_config(
 /// 手动触发一次云端同步。
 ///
 /// Business Logic: 前端"立即同步"按钮调用，不受 enabled/auto 开关限制（用户主动触发）。
-///     经 CloudSyncRuntime Wait{300s} 与 scheduler/CLAUDE.md push 串行写工作区。
-/// Code Logic: 委托 engine::trigger_cloud_sync（内部 exclusive gate）。
+///     必须与 sidecar scheduler 共享唯一 owner CloudSyncRuntime 门闸，禁止 GuiClient 本地写 git。
+/// Code Logic: GuiClient → control `cloud-sync/trigger`；HeadlessOwner → engine::trigger_cloud_sync。
 #[tauri::command]
 pub async fn trigger_cloud_sync_cmd(
     state: State<'_, AppState>,
 ) -> Result<CloudSyncResult, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        return client.cloud_sync_trigger().await;
+    }
     Ok(engine::trigger_cloud_sync(state.inner()).await)
 }
 
 /// 测试云端同步连通性。
 ///
 /// Business Logic: 前端"测试连接"按钮调用，验证 git 可用 + 远端可达 + 返回默认分支。
+///     探测可能触达正式 workdir，GuiClient 必须代理到 owner。
+/// Code Logic: GuiClient → control `cloud-sync/test`；HeadlessOwner → engine::test_connection。
 #[tauri::command]
 pub async fn test_cloud_sync(state: State<'_, AppState>) -> Result<TestCloudSyncResult, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        return client.cloud_sync_test().await;
+    }
     Ok(engine::test_connection(state.inner()).await)
 }
 

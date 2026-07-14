@@ -5,9 +5,10 @@
 //!     control API 与无鉴权 LAN 业务 API 分离：仅 loopback + control-file token。
 //!
 //! Code Logic（这个模块做什么）:
-//!     提供 status / get-config / update-config handler 与路由挂载；
+//!     提供 status / get-config / update-config / events / orchestrator snapshot /
+//!     cloud-sync/{trigger,test,claude-md-push} handler 与路由挂载；
 //!     请求体 ≤256 KiB，普通元数据响应 ≤1 MiB；鉴权顺序：ConnectInfo loopback → token；
-//!     从不记录 control token。
+//!     cloud_sync_phase 映射真实 CloudSyncRuntime 相位；从不记录 control token。
 
 use crate::backend::control::{self, BackendControlFile};
 use crate::backend::event_bus::{BackendRuntimeCursor, RuntimeRelayMessage};
@@ -351,7 +352,7 @@ fn control_token_matches(request_token: &str, control: Option<&BackendControlFil
 ///     status 需要 owner/generation 与轻量 runtime 计数，供 GUI 诊断页展示。
 ///
 /// Code Logic（这个函数做什么）:
-///     terminal/bridge 计数取 list/len 轻量观测；cloud_sync_phase 暂固定 idle；
+///     terminal/bridge 计数取 list/len 轻量观测；cloud_sync_phase 映射 owner CloudSyncRuntime 真实相位；
 ///     orchestrator 摘要只暴露 tick 时间与错误类别 token，不回传原文。
 fn build_owner_status(state: &AppState) -> Result<RuntimeOwnerStatus, AppError> {
     let terminal_session_count = state.workbench_sessions.list(None).len();
@@ -365,13 +366,110 @@ fn build_owner_status(state: &AppState) -> Result<RuntimeOwnerStatus, AppError> 
             .as_ref()
             .map(|_| "scheduler_error".to_string()),
     };
+    let cloud_sync_phase = state.cloud_sync_runtime.phase_token();
     state.config_runtime.owner_status_with_bridges(
         terminal_session_count,
         bridge_count,
-        "idle",
+        cloud_sync_phase,
         orch,
         bridges,
     )
+}
+
+/// CLAUDE.md 云端推送请求（token + 本机已保存 row 字段）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GUI 先落本地文件/DB，再把权威 row 交给 owner 写 Git workdir；禁止 GUI 自建第二 git 临界区。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + content/updatedAt/deviceId/vectorClock。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlClaudeMdPushRequest {
+    pub control_token: String,
+    pub content: String,
+    pub updated_at: String,
+    pub device_id: String,
+    pub vector_clock: std::collections::HashMap<String, u64>,
+}
+
+/// 手动触发 owner 侧 Cloud Sync。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI「立即同步」与 sidecar scheduler 必须共享同一 CloudSyncRuntime 单飞门闸。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `engine::trigger_cloud_sync`。
+pub async fn control_cloud_sync_trigger(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlAuthRequest>,
+) -> P2pResult<Json<crate::cloud_sync::engine::CloudSyncResult>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.cloud_sync_trigger"))?;
+    let result = crate::cloud_sync::engine::trigger_cloud_sync(&state).await;
+    ensure_response_within_limit(&result, &context)?;
+    Ok(Json(result))
+}
+
+/// 在 owner 侧测试 Cloud Sync 连通性。
+///
+/// Business Logic（为什么需要这个函数）:
+///     连通性探测可能触达正式 workdir fetch，须与写路径同一 owner。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `engine::test_connection`。
+pub async fn control_cloud_sync_test(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlAuthRequest>,
+) -> P2pResult<Json<crate::cloud_sync::engine::TestCloudSyncResult>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.cloud_sync_test"))?;
+    let result = crate::cloud_sync::engine::test_connection(&state).await;
+    ensure_response_within_limit(&result, &context)?;
+    Ok(Json(result))
+}
+
+/// 在 owner 侧推送 CLAUDE.md 到 GitHub 云端工作区。
+///
+/// Business Logic（为什么需要这个函数）:
+///     CLAUDE.md 云推送与完整 sync 共享 Git workdir 临界区；仅 sidecar HeadlessOwner 可写。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → 组装 ClaudeMdRow → `push_claude_md_to_cloud`。
+pub async fn control_cloud_sync_claude_md_push(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlClaudeMdPushRequest>,
+) -> P2pResult<Json<crate::cloud_sync::engine::CloudClaudeMdPushResultDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.cloud_sync_claude_md_push"))?;
+    let row = crate::models::claude_md::ClaudeMdRow {
+        id: crate::models::claude_md::CLAUDE_MD_ID.into(),
+        content: request.content,
+        updated_at: request.updated_at,
+        device_id: request.device_id,
+        vector_clock: request.vector_clock,
+    };
+    let result = crate::cloud_sync::engine::push_claude_md_to_cloud(&state, &row)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.cloud_sync_claude_md_push"))?;
+    let dto = crate::cloud_sync::engine::CloudClaudeMdPushResultDto::from(result);
+    ensure_response_within_limit(&dto, &context)?;
+    Ok(Json(dto))
 }
 
 /// 序列化后检查响应不超过 1 MiB。

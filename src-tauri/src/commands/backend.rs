@@ -126,10 +126,11 @@ pub async fn get_runtime_diagnostics_for_state(
             .as_ref()
             .map(|_| "scheduler_error".to_string()),
     };
+    let cloud_sync_phase = state.cloud_sync_runtime.phase_token();
     let status = state.config_runtime.owner_status_with_bridges(
         terminal_session_count,
         bridge_count,
-        "idle",
+        cloud_sync_phase,
         orch,
         bridges,
     )?;

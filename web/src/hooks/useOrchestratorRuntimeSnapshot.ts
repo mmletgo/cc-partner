@@ -326,6 +326,39 @@ export function useOrchestratorRuntimeSnapshot(
       requestSeqRef.current += 1;
     };
   }, [canLoad, loadSnapshot, projectId]);
+
+  // Gap resync：owner event bus 丢事件后强制刷新 runtime snapshot，避免静默陈旧。
+  useEffect(() => {
+    if (!canLoad || !projectId) return undefined;
+    if (typeof window === 'undefined') return undefined;
+    const internals = (window as unknown as {
+      __TAURI_INTERNALS__?: { transformCallback?: unknown };
+    }).__TAURI_INTERNALS__;
+    if (typeof internals?.transformCallback !== 'function') return undefined;
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import('@tauri-apps/api/event').then(({ listen }) => {
+      if (disposed) return;
+      void listen('backend:runtime-gap', () => {
+        if (disposed) return;
+        const target = projectIdRef.current;
+        if (target) {
+          void loadSnapshot(target);
+        }
+      }).then((fn) => {
+        if (disposed) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      });
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [canLoad, loadSnapshot, projectId]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Render 阶段隔离：当前 projectId 与 state 归属不一致时，立即返回 loading/空态，不展示旧项目数据。
