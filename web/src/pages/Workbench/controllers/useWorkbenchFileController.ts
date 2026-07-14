@@ -41,7 +41,7 @@ import type {
   WorkbenchHtmlAsset,
   WorkbenchPathInfo,
 } from '@/lib/types';
-import type { WorkbenchOpenFileTab } from '@/components/domain';
+import type { WorkbenchOpenFileTab } from '@/components/domain/WorkbenchFileWorkspace';
 import {
   collectTabsForPath,
   dirtyTabNames,
