@@ -78,6 +78,9 @@ jobs:
       - name: Frontend CSS token contract
         run: cd web && npm run check:css-tokens
 
+      - name: Frontend i18n contract
+        run: cd web && npm run check:i18n
+
       - name: Frontend build (tsc 类型检查 + vite build)
         run: cd web && npm run build
 

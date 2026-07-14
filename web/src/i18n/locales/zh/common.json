@@ -59,5 +59,21 @@
     "description": "当前页面渲染失败。侧栏与其它区域仍可使用，可重试本页或返回首页。",
     "retry": "重试当前页",
     "goHome": "返回首页"
+  },
+  "languageSwitcher": {
+    "label": "语言"
+  },
+  "screenshot": {
+    "toolRect": "矩形",
+    "toolArrow": "箭头",
+    "undo": "撤销",
+    "confirm": "确认",
+    "cancel": "取消",
+    "colorRed": "红",
+    "colorYellow": "黄",
+    "colorGreen": "绿",
+    "colorBlue": "蓝",
+    "colorWhite": "白",
+    "colorBlack": "黑"
   }
 }

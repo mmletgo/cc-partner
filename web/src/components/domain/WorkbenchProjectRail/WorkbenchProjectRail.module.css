@@ -249,6 +249,62 @@
   text-align: center;
 }
 
+.emptyTitle {
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.emptyExplanation {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.emptyActions {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.emptyCta {
+  width: 100%;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  text-align: center;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.emptyCta:hover:not(:disabled) {
+  border-color: var(--accent-soft);
+  box-shadow: var(--shadow-xs);
+}
+
+.emptyCta:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.projectStatusText {
+  color: var(--meta);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-normal);
+}
+
+.projectItem[data-active='true'] .projectStatusText {
+  color: var(--success);
+}
+
 .muted {
   color: var(--muted);
   font-size: var(--text-sm);

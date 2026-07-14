@@ -1,5 +1,6 @@
 {
   "title": "Settings",
+  "eyebrow": "Preferences",
   "subtitle": "Manage device name, screenshot shortcut, cloud sync, and version info.",
   "loading": "Loading…",
   "loadFailed": "Failed to load: {{error}}",

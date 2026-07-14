@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "check:css-tokens": "node scripts/check-css-tokens.mjs",
+    "check:i18n": "node scripts/check-i18n-jsx.mjs",
     "test": "vitest run",
     "test:unit:watch": "vitest",
     "test:e2e": "playwright test",

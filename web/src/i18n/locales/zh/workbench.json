@@ -6,6 +6,14 @@
   "emptyValue": "—",
   "rootPath": "/",
   "projectFolders": "项目文件夹",
+  "projectRail": {
+    "sectionTitle": "工作台项目",
+    "emptyExplanation": "添加本机或局域网项目后，可从侧栏随时进入工作台。",
+    "addLocalCta": "添加本机项目",
+    "addRemoteCta": "选择局域网项目",
+    "statusActive": "当前",
+    "statusInactive": "未选中"
+  },
   "addProject": "添加项目",
   "removeProject": "移除项目",
   "emptyProjects": "还没有项目文件夹",
