@@ -9,13 +9,34 @@
  *   mock 各 API 与 router/i18n，渲染 Settings，断言局部错误与重试入口。
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { AppConfig, CloudSyncConfig, GithubTrendingConfig, HealthConfig, VersionInfo } from '@/lib/types';
 import type { OrchestratorAutomationConfig } from '@/api/orchestratorConfig';
 import {
   findForbiddenDiagnosticsKeys,
   formatDiagnosticsForCopy,
 } from '@/api/runtimeDiagnostics';
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   安全保存回归需要手动控制 mutation 响应时机。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 promise 与 resolve/reject 控制器。
+ */
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 const appConfig = (partial: Partial<AppConfig> = {}): AppConfig => ({
   deviceId: 'device-1',
@@ -86,6 +107,11 @@ const getHealthConfig = vi.fn(async () => health());
 const getDefaultHealthConfig = vi.fn(async () => health());
 const getAutomationConfig = vi.fn(async () => automation());
 const getDefaultAutomationConfig = vi.fn(async () => automation());
+const updateConfig = vi.fn();
+const updateCloudSyncConfig = vi.fn();
+const updateGithubTrendingConfig = vi.fn();
+const updateHealthConfig = vi.fn();
+const updateAutomationConfig = vi.fn();
 const getDownloadStatus = vi.fn(async () => ({
   status: 'idle' as const,
   progress: 0,
@@ -103,7 +129,7 @@ vi.mock('@/api/config', () => ({
     version: () => getVersion(),
     getCloudSyncConfig: () => getCloudSyncConfig(),
     getDefaultCloudSyncConfig: () => getDefaultCloudSyncConfig(),
-    update: vi.fn(),
+    update: (...args: unknown[]) => updateConfig(...args),
     chooseDir: vi.fn(),
     checkUpdate: vi.fn(),
     downloadUpdate: vi.fn(),
@@ -112,7 +138,7 @@ vi.mock('@/api/config', () => ({
     installUpdate: vi.fn(),
     permissions: vi.fn(),
     requestPermission: vi.fn(),
-    updateCloudSyncConfig: vi.fn(),
+    updateCloudSyncConfig: (...args: unknown[]) => updateCloudSyncConfig(...args),
     triggerCloudSync: vi.fn(),
     testCloudSync: vi.fn(),
   },
@@ -122,7 +148,7 @@ vi.mock('@/api/githubTrending', () => ({
   githubTrendingApi: {
     getConfig: () => getGithubTrendingConfig(),
     getDefaultConfig: () => getDefaultGithubTrendingConfig(),
-    updateConfig: vi.fn(),
+    updateConfig: (...args: unknown[]) => updateGithubTrendingConfig(...args),
     testClaudeCli: vi.fn(),
     list: vi.fn(),
   },
@@ -132,7 +158,7 @@ vi.mock('@/api/health', () => ({
   healthApi: {
     getConfig: () => getHealthConfig(),
     getDefaultConfig: () => getDefaultHealthConfig(),
-    updateConfig: vi.fn(),
+    updateConfig: (...args: unknown[]) => updateHealthConfig(...args),
   },
 }));
 
@@ -140,7 +166,7 @@ vi.mock('@/api/orchestratorConfig', () => ({
   orchestratorConfigApi: {
     get: () => getAutomationConfig(),
     getDefaults: () => getDefaultAutomationConfig(),
-    update: vi.fn(),
+    update: (...args: unknown[]) => updateAutomationConfig(...args),
   },
 }));
 
@@ -292,6 +318,11 @@ beforeEach(() => {
   getDefaultHealthConfig.mockResolvedValue(health());
   getAutomationConfig.mockResolvedValue(automation());
   getDefaultAutomationConfig.mockResolvedValue(automation());
+  updateConfig.mockReset();
+  updateCloudSyncConfig.mockReset();
+  updateGithubTrendingConfig.mockReset();
+  updateHealthConfig.mockReset();
+  updateAutomationConfig.mockReset();
   getRuntimeDiagnostics.mockResolvedValue(runtimeDiagnosticsFixture);
   openBackendLogDir.mockResolvedValue(undefined);
   Object.assign(navigator, {
@@ -382,5 +413,195 @@ describe('Settings partial resource loading', () => {
     expect(findForbiddenDiagnosticsKeys(written)).toEqual([]);
     expect(written).toContain('ownerInstanceId');
     expect(written).not.toMatch(/token|content|prompt|password/i);
+  });
+});
+
+describe('Settings safe save preserves concurrent edits', () => {
+  test('keeps edits typed while general settings save is pending', async () => {
+    const save = deferred<AppConfig>();
+    updateConfig.mockReturnValue(save.promise);
+    renderSettings();
+
+    const deviceName = (await screen.findByLabelText(
+      'settings:basic.deviceName',
+    )) as HTMLInputElement;
+    fireEvent.change(deviceName, { target: { value: 'A' } });
+    fireEvent.click(screen.getByRole('button', { name: 'settings:action.apply' }));
+
+    await waitFor(() => {
+      expect(updateConfig).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.change(deviceName, { target: { value: 'AB' } });
+    expect(deviceName.value).toBe('AB');
+
+    await act(async () => {
+      save.resolve(appConfig({ deviceName: 'A' }));
+      await save.promise;
+    });
+
+    await waitFor(() => {
+      expect(updateConfig).toHaveBeenCalledTimes(1);
+    });
+    expect(deviceName.value).toBe('AB');
+    expect(screen.getByText('settings:status.dirtyHint')).toBeTruthy();
+  });
+
+  test('general save failure keeps draft and surfaces scoped saveError', async () => {
+    updateConfig.mockRejectedValue(new Error('save offline'));
+    renderSettings();
+
+    const deviceName = (await screen.findByLabelText(
+      'settings:basic.deviceName',
+    )) as HTMLInputElement;
+    fireEvent.change(deviceName, { target: { value: 'Draft-Name' } });
+    fireEvent.click(screen.getByRole('button', { name: 'settings:action.apply' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toContain('save offline');
+    });
+    expect(deviceName.value).toBe('Draft-Name');
+    expect(screen.getByText('settings:status.dirtyHint')).toBeTruthy();
+    expect(screen.queryByText(/settings:loadFailed/)).toBeNull();
+  });
+
+  test('keeps edits typed while cloud sync save is pending', async () => {
+    const save = deferred<CloudSyncConfig>();
+    updateCloudSyncConfig.mockReturnValue(save.promise);
+    searchParamsState.value = new URLSearchParams('tab=sync');
+    renderSettings();
+
+    const repoUrl = (await screen.findByLabelText(
+      'settings:cloudSync.repoUrl.label',
+    )) as HTMLInputElement;
+    fireEvent.change(repoUrl, { target: { value: 'git@github.com:u/new.git' } });
+    fireEvent.click(screen.getByRole('button', { name: 'settings:cloudSync.apply' }));
+
+    await waitFor(() => {
+      expect(updateCloudSyncConfig).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.change(repoUrl, { target: { value: 'git@github.com:u/new-edit.git' } });
+
+    await act(async () => {
+      save.resolve(cloudSync({ repoUrl: 'git@github.com:u/new.git' }));
+      await save.promise;
+    });
+
+    expect(repoUrl.value).toBe('git@github.com:u/new-edit.git');
+  });
+
+  test('keeps edits typed while github AI save is pending', async () => {
+    const save = deferred<GithubTrendingConfig>();
+    updateGithubTrendingConfig.mockReturnValue(save.promise);
+    searchParamsState.value = new URLSearchParams('tab=ai');
+    renderSettings();
+
+    const model = (await screen.findByLabelText(
+      'settings:githubTrending.claudeModel.label',
+    )) as HTMLInputElement;
+    fireEvent.change(model, { target: { value: 'opus' } });
+    fireEvent.click(screen.getByRole('button', { name: 'settings:githubTrending.apply' }));
+
+    await waitFor(() => {
+      expect(updateGithubTrendingConfig).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.change(model, { target: { value: 'opus-edit' } });
+
+    await act(async () => {
+      save.resolve(githubTrending({ claudeModel: 'opus' }));
+      await save.promise;
+    });
+
+    expect(model.value).toBe('opus-edit');
+  });
+
+  test('keeps fill language selection while prompt optimizer save is pending', async () => {
+    const save = deferred<AppConfig>();
+    updateConfig.mockReturnValue(save.promise);
+    searchParamsState.value = new URLSearchParams('tab=ai');
+    renderSettings();
+
+    const enOption = await screen.findByRole('radio', {
+      name: 'settings:promptOptimizerSettings.fillLanguage.en',
+    });
+    fireEvent.click(enOption);
+    fireEvent.click(
+      screen.getByRole('button', { name: 'settings:promptOptimizerSettings.apply' }),
+    );
+
+    await waitFor(() => {
+      expect(updateConfig).toHaveBeenCalledTimes(1);
+    });
+
+    const zhOption = screen.getByRole('radio', {
+      name: 'settings:promptOptimizerSettings.fillLanguage.zh',
+    });
+    fireEvent.click(zhOption);
+
+    await act(async () => {
+      save.resolve(appConfig({ promptOptimizerFillLanguage: 'en' }));
+      await save.promise;
+    });
+
+    // 保存期间改回 zh，成功响应不得回填 en
+    expect(zhOption.getAttribute('aria-checked')).toBe('true');
+  });
+
+  test('keeps edits typed while health save is pending', async () => {
+    const save = deferred<HealthConfig>();
+    updateHealthConfig.mockReturnValue(save.promise);
+    searchParamsState.value = new URLSearchParams('tab=health');
+    renderSettings();
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'settings:action.apply' })).toBeTruthy();
+    });
+
+    // Health NumberRow 无 htmlFor；按 number spinbutton 顺序取工作窗口分钟输入
+    const numberInputs = screen.getAllByRole('spinbutton') as HTMLInputElement[];
+    const workWindow = numberInputs[0];
+    fireEvent.change(workWindow, { target: { value: '20' } });
+    fireEvent.click(screen.getByRole('button', { name: 'settings:action.apply' }));
+
+    await waitFor(() => {
+      expect(updateHealthConfig).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.change(workWindow, { target: { value: '25' } });
+
+    await act(async () => {
+      save.resolve(health({ workWindowSeconds: 20 * 60 }));
+      await save.promise;
+    });
+
+    expect(workWindow.value).toBe('25');
+  });
+
+  test('keeps edits typed while automation save is pending', async () => {
+    const save = deferred<OrchestratorAutomationConfig>();
+    updateAutomationConfig.mockReturnValue(save.promise);
+    searchParamsState.value = new URLSearchParams('tab=automation');
+    renderSettings();
+
+    const commands = (await screen.findByLabelText(
+      'settings:automation.verificationCommands',
+    )) as HTMLTextAreaElement;
+    fireEvent.change(commands, { target: { value: 'npm test\nnpm run lint' } });
+    fireEvent.click(screen.getByRole('button', { name: 'settings:action.apply' }));
+
+    await waitFor(() => {
+      expect(updateAutomationConfig).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.change(commands, { target: { value: 'npm test\nnpm run lint\nnpm run build' } });
+
+    await act(async () => {
+      save.resolve(automation({ verificationCommands: ['npm test', 'npm run lint'] }));
+      await save.promise;
+    });
+
+    expect(commands.value).toBe('npm test\nnpm run lint\nnpm run build');
   });
 });

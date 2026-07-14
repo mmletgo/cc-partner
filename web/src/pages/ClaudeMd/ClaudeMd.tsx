@@ -9,7 +9,8 @@
  * Code Logic（这个页面做什么）:
  *   - 进页面调 get_claude_md 载入内容与元数据
  *   - textarea 实时编辑，"未保存"标记对比 text 与 savedText
- *   - 保存按钮调 update_claude_md 写回（内容未变时跳过）
+ *   - 保存/推送使用 saveAttempt 合同：递增 editVersion，submit 捕获 attempt；
+ *     success 更新 baseline，仅当 version 未变且 draft 仍等于 snapshot 时才回填
  *   - 推送按钮调 push_claude_md，把本机当前内容分发到局域网设备和 GitHub 云端
  *   - 操作反馈用本地 toast state（setTimeout 自动清除）
  *   - hooks 全部无条件声明在渲染之前（项目规则 20）
@@ -20,6 +21,11 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/primitives';
 import { ClaudeMdIcon, SyncIcon } from '@/lib/icons';
 import { claudeMdApi } from '@/api/claudeMd';
+import {
+  createSaveAttempt,
+  resolveSaveFailure,
+  resolveSaveSuccess,
+} from '@/lib/asyncState/saveAttempt';
 import styles from './ClaudeMd.module.css';
 
 export function ClaudeMd() {
@@ -33,6 +39,28 @@ export function ClaudeMd() {
 
   // toast 自动清除的定时器引用，避免重复提示叠加
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 用户每次编辑递增；submit 捕获 version 以判定响应期间是否有新输入 */
+  const editVersionRef = useRef(0);
+  /** 每次 save/push 提交递增；旧 seq 的 success/error 不改当前态 */
+  const requestSeqRef = useRef(0);
+  /** 最新 draft / baseline 的同步快照，供 await 后读取，避免闭包陈旧 */
+  const textRef = useRef(text);
+  const savedTextRef = useRef(savedText);
+  textRef.current = text;
+  savedTextRef.current = savedText;
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户编辑 CLAUDE.md 时需要即时更新草稿并标记版本，保存响应才能识别并发输入。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写入 text/textRef，并递增 editVersion。
+   */
+  const handleTextChange = useCallback((value: string) => {
+    textRef.current = value;
+    editVersionRef.current += 1;
+    setText(value);
+  }, []);
 
   /** 设置一条操作反馈，3s 后自动清除（覆盖上一次未清除的提示） */
   const showToast = useCallback((msg: string) => {
@@ -46,6 +74,8 @@ export function ClaudeMd() {
     setLoading(true);
     try {
       const dto = await claudeMdApi.get();
+      textRef.current = dto.content;
+      savedTextRef.current = dto.content;
       setText(dto.content);
       setSavedText(dto.content);
     } catch (err) {
@@ -70,35 +100,100 @@ export function ClaudeMd() {
     };
   }, []);
 
-  /** 保存：内容未变直接跳过，否则写回后端并刷新 savedText 基线 */
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   保存必须写回磁盘，且不得用响应覆盖保存期间的新输入。
+   *
+   * Code Logic（这个函数做什么）:
+   *   捕获 SaveAttempt → update_claude_md → resolveSaveSuccess/Failure；
+   *   仅 applied 时更新 baseline/draft 与 toast。
+   */
   const handleSave = useCallback(async () => {
-    if (text === savedText) return;
+    if (textRef.current === savedTextRef.current) return;
+    const attempt = createSaveAttempt(
+      ++requestSeqRef.current,
+      textRef.current,
+      editVersionRef.current,
+    );
     setSaving(true);
     try {
-      const dto = await claudeMdApi.update(text);
-      setSavedText(dto.content);
-      setText(dto.content);
+      const dto = await claudeMdApi.update(attempt.submittedSnapshot);
+      const resolution = resolveSaveSuccess({
+        attempt,
+        currentRequestSeq: requestSeqRef.current,
+        currentDraft: textRef.current,
+        currentEditVersion: editVersionRef.current,
+        serverValue: dto.content,
+        currentBaseline: savedTextRef.current,
+      });
+      if (!resolution.applied) return;
+      savedTextRef.current = resolution.baseline;
+      textRef.current = resolution.draft;
+      setSavedText(resolution.baseline);
+      setText(resolution.draft);
       showToast(t('claudeMd:saved'));
     } catch (err) {
+      const failure = resolveSaveFailure({
+        attempt,
+        currentRequestSeq: requestSeqRef.current,
+        currentDraft: textRef.current,
+        currentBaseline: savedTextRef.current,
+      });
+      if (!failure.applied) return;
       showToast(err instanceof Error ? err.message : String(err));
     } finally {
-      setSaving(false);
+      if (attempt.requestSeq === requestSeqRef.current) {
+        setSaving(false);
+      }
     }
-  }, [text, savedText, t, showToast]);
+  }, [t, showToast]);
 
-  /** 推送：保存当前编辑器内容，并向局域网设备和 GitHub 云端推送本机 CLAUDE.md */
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   推送会把提交瞬间内容分发到局域网/云端；推送期间的新编辑仍需保留。
+   *
+   * Code Logic（这个函数做什么）:
+   *   捕获 SaveAttempt → push_claude_md → 以 submittedSnapshot 作为成功 baseline
+   *   走 resolveSaveSuccess；失败走 resolveSaveFailure 保留 draft。
+   */
   const handlePush = useCallback(async () => {
+    const attempt = createSaveAttempt(
+      ++requestSeqRef.current,
+      textRef.current,
+      editVersionRef.current,
+    );
     setPushing(true);
     try {
-      const result = await claudeMdApi.push(text);
-      setSavedText(text);
+      const result = await claudeMdApi.push(attempt.submittedSnapshot);
+      const resolution = resolveSaveSuccess({
+        attempt,
+        currentRequestSeq: requestSeqRef.current,
+        currentDraft: textRef.current,
+        currentEditVersion: editVersionRef.current,
+        serverValue: attempt.submittedSnapshot,
+        currentBaseline: savedTextRef.current,
+      });
+      if (!resolution.applied) return;
+      savedTextRef.current = resolution.baseline;
+      textRef.current = resolution.draft;
+      setSavedText(resolution.baseline);
+      setText(resolution.draft);
       showToast(result.note || t('claudeMd:pushed'));
     } catch (err) {
+      const failure = resolveSaveFailure({
+        attempt,
+        currentRequestSeq: requestSeqRef.current,
+        currentDraft: textRef.current,
+        currentBaseline: savedTextRef.current,
+      });
+      if (!failure.applied) return;
       showToast(err instanceof Error ? err.message : String(err));
     } finally {
-      setPushing(false);
+      if (attempt.requestSeq === requestSeqRef.current) {
+        setPushing(false);
+      }
     }
-  }, [text, t, showToast]);
+  }, [t, showToast]);
 
   const dirty = text !== savedText;
 
@@ -139,7 +234,7 @@ export function ClaudeMd() {
       <textarea
         className={styles.editor}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => handleTextChange(e.target.value)}
         placeholder={t('claudeMd:placeholder')}
         disabled={loading}
         aria-label={t('claudeMd:title')}
