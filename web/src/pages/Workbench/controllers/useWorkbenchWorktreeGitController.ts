@@ -550,6 +550,35 @@ export function useWorkbenchWorktreeGitController(
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   unknown 是 worktree 级共享锁；仅同 kind reconcile/终态可清锁，sibling 成功/失败绝不能丢弃原锁。
+   *
+   * Code Logic（这个函数做什么）:
+   *   仅当当前 lock.kind 等于给定 kind 时置 null，否则保留原锁。
+   */
+  const clearUnknownMutationLockForKind = useCallback(
+    (kind: WorktreeUnknownMutationLock['kind']): void => {
+      setUnknownMutationLock((prev) => (prev && prev.kind === kind ? null : prev));
+    },
+    [],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   非 null unknownMutationLock 期间禁止 sibling kind 发起 Fresh claim。
+   *
+   * Code Logic（这个函数做什么）:
+   *   lock 为空或 kind 匹配时返回 true；否则 false。
+   */
+  const isMutationKindAllowedUnderUnknownLock = useCallback(
+    (kind: WorktreeUnknownMutationLock['kind']): boolean => {
+      if (!unknownMutationLock) return true;
+      return unknownMutationLock.kind === kind;
+    },
+    [unknownMutationLock],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   envelope.unknown 后禁止盲重放；ledger 终态优先，否则 authority 矩阵对账。
    *
    * Code Logic（这个函数做什么）:
@@ -721,6 +750,8 @@ export function useWorkbenchWorktreeGitController(
     if (remoteWriteDisabled) return;
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
+    // unknown 共享锁：sibling kind 禁止 Fresh claim / 清锁。
+    if (!isMutationKindAllowedUnderUnknownLock('commit')) return;
     const settled = beginMutationOperation(projectId, worktreeId);
     const clientOperationId = resolveClientOperationId(
       'commit',
@@ -745,11 +776,11 @@ export function useWorkbenchWorktreeGitController(
         );
         if (!isSettledCurrent(settled)) return;
         if (confirmed === 'confirmedSucceeded') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('commit');
           setWorktreeError(null);
           if (inspectorTab === 'history') await loadGitHistory();
         } else if (confirmed === 'confirmedFailed') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('commit');
           setWorktreeError(translateError('commitWorktree'));
         } else {
           setUnknownMutationLock({
@@ -768,7 +799,7 @@ export function useWorkbenchWorktreeGitController(
       if (!isSettledCurrent(settled)) return;
 
       if (isMutationSucceeded(envelope)) {
-        setUnknownMutationLock(null);
+        clearUnknownMutationLockForKind('commit');
         invalidateWorktreeListRequests(projectId);
         invalidateGitHistoryRequests(projectId, worktreeId);
         await loadWorktrees(projectId);
@@ -787,11 +818,11 @@ export function useWorkbenchWorktreeGitController(
         );
         if (!isSettledCurrent(settled)) return;
         if (confirmed === 'confirmedSucceeded') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('commit');
           setWorktreeError(null);
           if (inspectorTab === 'history') await loadGitHistory();
         } else if (confirmed === 'confirmedFailed') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('commit');
           setWorktreeError(translateError('commitWorktree'));
         } else {
           setUnknownMutationLock({
@@ -805,7 +836,7 @@ export function useWorkbenchWorktreeGitController(
       }
     } catch (error) {
       if (!isSettledCurrent(settled)) return;
-      setUnknownMutationLock(null);
+      clearUnknownMutationLockForKind('commit');
       markRequestFailure(projectId, error);
       await loadWorktrees(projectId);
       if (!isSettledCurrent(settled)) return;
@@ -821,11 +852,13 @@ export function useWorkbenchWorktreeGitController(
     }
   }, [
     beginMutationOperation,
+    clearUnknownMutationLockForKind,
     desktopUnavailableMessage,
     displayErrorMessage,
     inspectorTab,
     invalidateGitHistoryRequests,
     invalidateWorktreeListRequests,
+    isMutationKindAllowedUnderUnknownLock,
     isSettledCurrent,
     loadGitHistory,
     loadWorktrees,
@@ -850,6 +883,7 @@ export function useWorkbenchWorktreeGitController(
     if (remoteWriteDisabled) return;
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
+    if (!isMutationKindAllowedUnderUnknownLock('push')) return;
     const settled = beginMutationOperation(projectId, worktreeId);
     const clientOperationId = resolveClientOperationId(
       'push',
@@ -873,11 +907,11 @@ export function useWorkbenchWorktreeGitController(
         );
         if (!isSettledCurrent(settled)) return;
         if (confirmed === 'confirmedSucceeded') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('push');
           setWorktreeError(null);
           if (inspectorTab === 'history') await loadGitHistory();
         } else if (confirmed === 'confirmedFailed') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('push');
           setWorktreeError(translateError('pushWorktree'));
         } else {
           setUnknownMutationLock({
@@ -895,7 +929,7 @@ export function useWorkbenchWorktreeGitController(
       if (!isSettledCurrent(settled)) return;
 
       if (isMutationSucceeded(envelope)) {
-        setUnknownMutationLock(null);
+        clearUnknownMutationLockForKind('push');
         invalidateWorktreeListRequests(projectId);
         invalidateGitHistoryRequests(projectId, worktreeId);
         await loadWorktrees(projectId);
@@ -913,11 +947,11 @@ export function useWorkbenchWorktreeGitController(
         );
         if (!isSettledCurrent(settled)) return;
         if (confirmed === 'confirmedSucceeded') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('push');
           setWorktreeError(null);
           if (inspectorTab === 'history') await loadGitHistory();
         } else if (confirmed === 'confirmedFailed') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('push');
           setWorktreeError(translateError('pushWorktree'));
         } else {
           setUnknownMutationLock({
@@ -931,7 +965,7 @@ export function useWorkbenchWorktreeGitController(
       }
     } catch (error) {
       if (!isSettledCurrent(settled)) return;
-      setUnknownMutationLock(null);
+      clearUnknownMutationLockForKind('push');
       markRequestFailure(projectId, error);
       setWorktreeError(
         displayErrorMessage(error, translateError('pushWorktree'), desktopUnavailableMessage),
@@ -943,11 +977,13 @@ export function useWorkbenchWorktreeGitController(
     }
   }, [
     beginMutationOperation,
+    clearUnknownMutationLockForKind,
     desktopUnavailableMessage,
     displayErrorMessage,
     inspectorTab,
     invalidateGitHistoryRequests,
     invalidateWorktreeListRequests,
+    isMutationKindAllowedUnderUnknownLock,
     isSettledCurrent,
     loadGitHistory,
     loadWorktrees,
@@ -975,6 +1011,7 @@ export function useWorkbenchWorktreeGitController(
     if (remoteWriteDisabled) return;
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
+    if (!isMutationKindAllowedUnderUnknownLock('merge')) return;
     // Business Logic: 仅功能 worktree（非 main）允许 merge；主工作区没有合并目标。
     const current = worktrees.find((worktree) => worktree.id === worktreeId);
     if (!current || current.isMain) return;
@@ -1017,14 +1054,14 @@ export function useWorkbenchWorktreeGitController(
         );
         if (!isSettledCurrent(settled)) return;
         if (confirmed === 'confirmedSucceeded') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('merge');
           setWorktreeError(null);
           await terminalBridge.loadSessions(projectId);
           terminalBridge.clearBuffersForWorktree(worktreeId);
           void refreshProjectSessionStats(projectId);
           if (inspectorTab === 'history') await loadGitHistory();
         } else if (confirmed === 'confirmedFailed') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('merge');
           setWorktreeError(translateError('mergeWorktree'));
         } else {
           setUnknownMutationLock({
@@ -1042,7 +1079,7 @@ export function useWorkbenchWorktreeGitController(
       if (!isSettledCurrent(settled)) return;
 
       if (isMutationSucceeded(envelope)) {
-        setUnknownMutationLock(null);
+        clearUnknownMutationLockForKind('merge');
         const finalStages = formatWorkbenchMergeStages(envelope.value.stages);
         setMergeStages(finalStages);
         if (shouldAutoDismissMergeStages(finalStages)) {
@@ -1068,14 +1105,14 @@ export function useWorkbenchWorktreeGitController(
         );
         if (!isSettledCurrent(settled)) return;
         if (confirmed === 'confirmedSucceeded') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('merge');
           setWorktreeError(null);
           await terminalBridge.loadSessions(projectId);
           terminalBridge.clearBuffersForWorktree(worktreeId);
           void refreshProjectSessionStats(projectId);
           if (inspectorTab === 'history') await loadGitHistory();
         } else if (confirmed === 'confirmedFailed') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('merge');
           setWorktreeError(translateError('mergeWorktree'));
         } else {
           setUnknownMutationLock({
@@ -1089,7 +1126,7 @@ export function useWorkbenchWorktreeGitController(
       }
     } catch (error) {
       if (!isSettledCurrent(settled)) return;
-      setUnknownMutationLock(null);
+      clearUnknownMutationLockForKind('merge');
       markRequestFailure(projectId, error);
       const message = displayErrorMessage(
         error,
@@ -1117,12 +1154,14 @@ export function useWorkbenchWorktreeGitController(
     }
   }, [
     beginMutationOperation,
+    clearUnknownMutationLockForKind,
     clearMergeStageDismissTimer,
     desktopUnavailableMessage,
     displayErrorMessage,
     inspectorTab,
     invalidateGitHistoryRequests,
     invalidateWorktreeListRequests,
+    isMutationKindAllowedUnderUnknownLock,
     isSettledCurrent,
     loadGitHistory,
     loadWorktrees,
@@ -1157,6 +1196,7 @@ export function useWorkbenchWorktreeGitController(
     if (remoteWriteDisabled) return;
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
+    if (!isMutationKindAllowedUnderUnknownLock('remove')) return;
     const current = worktrees.find((worktree) => worktree.id === worktreeId);
     if (!current || current.isMain) return;
     if (!confirmAction(translateWorktreeMessage('removeConfirm', { name: current.name }))) {
@@ -1186,7 +1226,7 @@ export function useWorkbenchWorktreeGitController(
         );
         if (!isSettledCurrent(settled)) return;
         if (confirmed === 'confirmedSucceeded') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('remove');
           setWorktreeError(null);
           setWorktreeBusy(null);
           if (activeWorktreeIdRef.current === worktreeId) {
@@ -1194,7 +1234,7 @@ export function useWorkbenchWorktreeGitController(
             setActiveWorktreeId(next?.id ?? null);
           }
         } else if (confirmed === 'confirmedFailed') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('remove');
           setWorktreeError(translateError('removeWorktree'));
         } else {
           setUnknownMutationLock({
@@ -1216,7 +1256,7 @@ export function useWorkbenchWorktreeGitController(
       if (!isSettledCurrent(settled)) return;
 
       if (isMutationSucceeded(envelope)) {
-        setUnknownMutationLock(null);
+        clearUnknownMutationLockForKind('remove');
         // 先清 busy，再切 active worktree：切 active 会使 settled.worktreeId 不再匹配 current。
         setWorktreeBusy(null);
         if (activeWorktreeIdRef.current === worktreeId) {
@@ -1238,7 +1278,7 @@ export function useWorkbenchWorktreeGitController(
         );
         if (!isSettledCurrent(settled)) return;
         if (confirmed === 'confirmedSucceeded') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('remove');
           setWorktreeError(null);
           setWorktreeBusy(null);
           if (activeWorktreeIdRef.current === worktreeId) {
@@ -1246,7 +1286,7 @@ export function useWorkbenchWorktreeGitController(
             setActiveWorktreeId(next?.id ?? null);
           }
         } else if (confirmed === 'confirmedFailed') {
-          setUnknownMutationLock(null);
+          clearUnknownMutationLockForKind('remove');
           setWorktreeError(translateError('removeWorktree'));
         } else {
           setUnknownMutationLock({
@@ -1260,7 +1300,7 @@ export function useWorkbenchWorktreeGitController(
       }
     } catch (error) {
       if (!isSettledCurrent(settled)) return;
-      setUnknownMutationLock(null);
+      clearUnknownMutationLockForKind('remove');
       markRequestFailure(projectId, error);
       setWorktreeError(
         displayErrorMessage(error, translateError('removeWorktree'), desktopUnavailableMessage),
@@ -1272,10 +1312,12 @@ export function useWorkbenchWorktreeGitController(
     }
   }, [
     beginMutationOperation,
+    clearUnknownMutationLockForKind,
     desktopUnavailableMessage,
     displayErrorMessage,
     invalidateGitHistoryRequests,
     invalidateWorktreeListRequests,
+    isMutationKindAllowedUnderUnknownLock,
     isSettledCurrent,
     loadWorktrees,
     markRequestFailure,

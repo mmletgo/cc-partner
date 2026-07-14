@@ -24,7 +24,10 @@ import {
   worktreeStatusTone,
 } from './workbenchWorktrees';
 import type { WorktreeBranchPrefix } from './workbenchWorktrees';
-import type { WorktreeBusyKind } from './controllers/useWorkbenchWorktreeGitController';
+import type {
+  WorktreeBusyKind,
+  WorktreeUnknownMutationLock,
+} from './controllers/useWorkbenchWorktreeGitController';
 
 /**
  * worktree 切换条叶子组件的输入 props。
@@ -43,6 +46,8 @@ export interface WorkbenchWorktreeBarProps {
   activeProjectId: string | null;
   remoteWriteDisabled: boolean;
   worktreeBusy: WorktreeBusyKind | null;
+  /** unknown 共享锁；禁用 sibling remove Fresh claim。 */
+  unknownMutationLock: WorktreeUnknownMutationLock | null;
   createWorktreeOpen: boolean;
   createWorktreeBranchPrefix: WorktreeBranchPrefix;
   createWorktreeBranchSuffixDraft: string;
@@ -72,6 +77,7 @@ export function WorkbenchWorktreeBar(props: WorkbenchWorktreeBarProps) {
     activeProjectId,
     remoteWriteDisabled,
     worktreeBusy,
+    unknownMutationLock,
     createWorktreeOpen,
     createWorktreeBranchPrefix,
     createWorktreeBranchSuffixDraft,
@@ -195,7 +201,10 @@ export function WorkbenchWorktreeBar(props: WorkbenchWorktreeBarProps) {
           title={t('workbench:worktrees.remove')}
           aria-label={t('workbench:worktrees.remove')}
           loading={worktreeBusy === 'remove'}
-          disabled={!canRemoveWorktree(activeWorktree, worktreeBusy) || remoteWriteDisabled}
+          disabled={
+            !canRemoveWorktree(activeWorktree, worktreeBusy, unknownMutationLock)
+            || remoteWriteDisabled
+          }
           onClick={() => void handleRemoveWorktree()}
         />
       </div>

@@ -215,4 +215,195 @@ describe('MobileWorktreePanel remove reconciliation', () => {
     await screen.findByText(/操作结果未知/);
     expect(removeMock).toHaveBeenCalledTimes(1);
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   merge/remove 目标常不是 active worktree；切换 active 不得清空 unknown 锁，避免盲重放。
+   *
+   * Code Logic（这个测试做什么）:
+   *   feature unknown 后 rerender 切换 active；仍显示未知；再次 remove 只 reconcile，不二次 remove。
+   */
+  test('switching active worktree during unknown does not unlock blind re-remove', async () => {
+    const feature = createWorktree({ id: 'feature-1', name: 'feature/x' });
+    const other = createWorktree({ id: 'feature-2', name: 'feature/y' });
+    const main = createWorktree({ id: 'main', name: 'main', isMain: true });
+    removeMock.mockResolvedValue({
+      kind: 'unknown',
+      clientOperationId: 'op-remove-1',
+      transportClass: 'timeout',
+    });
+    getMutationOperationMock.mockResolvedValue({
+      clientOperationId: 'op-remove-1',
+      kind: 'remove',
+      payloadHash: 'hash',
+      intent: {
+        kind: 'remove',
+        projectId: 'project-1',
+        worktreeId: 'feature-1',
+        path: feature.path,
+        branch: feature.branch,
+      },
+      state: 'running',
+      outcome: null,
+      errorMessage: null,
+      projectId: 'project-1',
+      worktreeId: 'feature-1',
+      createdAt: '2026-07-14T00:00:00Z',
+      updatedAt: '2026-07-14T00:00:00Z',
+    });
+    listWorktreesMock.mockResolvedValue([main, feature, other]);
+
+    const view = render(
+      <I18nextProvider i18n={i18n}>
+        <MobileWorktreePanel
+          project={createProject()}
+          worktrees={[main, feature, other]}
+          activeWorktreeId="main"
+          onSelect={() => true}
+          onRefreshWorktrees={refreshMock}
+        />
+      </I18nextProvider>,
+    );
+
+    // 列表含 main（disabled）+ feature-1 + feature-2；点 feature-1（index 1）
+    const removeButtons = screen.getAllByRole('button', { name: '移除 worktree' });
+    fireEvent.click(removeButtons[1]!);
+
+    await screen.findByText(/操作结果未知/);
+    expect(removeMock).toHaveBeenCalledTimes(1);
+
+    view.rerender(
+      <I18nextProvider i18n={i18n}>
+        <MobileWorktreePanel
+          project={createProject()}
+          worktrees={[main, feature, other]}
+          activeWorktreeId="feature-2"
+          onSelect={() => true}
+          onRefreshWorktrees={refreshMock}
+        />
+      </I18nextProvider>,
+    );
+
+    // active 切换后 unknown 锁仍在，动作仍锁，不得盲重放。
+    expect(screen.getByText(/操作结果未知/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /重新核对/ }));
+
+    await waitFor(() => {
+      expect(getMutationOperationMock).toHaveBeenCalledTimes(2);
+    });
+    expect(removeMock).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   在途 reconcile 完成后若 project 已切换，不得把 unknown phase 写回新上下文。
+   *
+   * Code Logic（这个测试做什么）:
+   *   hang getMutationOperation；切 project；再 resolve；新 project 不应显示旧 unknown。
+   */
+  test('reconcile after project switch does not dirty-write phase into new context', async () => {
+    const feature = createWorktree({ id: 'feature-1', name: 'feature/x' });
+    const main = createWorktree({ id: 'main', name: 'main', isMain: true });
+    removeMock.mockResolvedValue({
+      kind: 'unknown',
+      clientOperationId: 'op-remove-1',
+      transportClass: 'network',
+    });
+
+    const deferredLedger: {
+      resolve: ((value: unknown) => void) | null;
+    } = { resolve: null };
+    getMutationOperationMock
+      .mockResolvedValueOnce({
+        clientOperationId: 'op-remove-1',
+        kind: 'remove',
+        payloadHash: 'hash',
+        intent: {
+          kind: 'remove',
+          projectId: 'project-1',
+          worktreeId: 'feature-1',
+          path: feature.path,
+          branch: feature.branch,
+        },
+        state: 'running',
+        outcome: null,
+        errorMessage: null,
+        projectId: 'project-1',
+        worktreeId: 'feature-1',
+        createdAt: '2026-07-14T00:00:00Z',
+        updatedAt: '2026-07-14T00:00:00Z',
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            deferredLedger.resolve = resolve;
+          }),
+      );
+    listWorktreesMock.mockResolvedValue([main, feature]);
+
+    const projectA = createProject();
+    const projectB = {
+      ...createProject(),
+      id: 'project-2',
+      name: 'other',
+    };
+    const view = render(
+      <I18nextProvider i18n={i18n}>
+        <MobileWorktreePanel
+          project={projectA}
+          worktrees={[main, feature]}
+          activeWorktreeId="main"
+          onSelect={() => true}
+          onRefreshWorktrees={refreshMock}
+        />
+      </I18nextProvider>,
+    );
+
+    const removeButtons = screen.getAllByRole('button', { name: '移除 worktree' });
+    fireEvent.click(removeButtons[removeButtons.length - 1]!);
+    await screen.findByText(/操作结果未知/);
+
+    fireEvent.click(screen.getByRole('button', { name: /重新核对/ }));
+    await waitFor(() => {
+      expect(getMutationOperationMock).toHaveBeenCalledTimes(2);
+    });
+
+    view.rerender(
+      <I18nextProvider i18n={i18n}>
+        <MobileWorktreePanel
+          project={projectB}
+          worktrees={[
+            createWorktree({ id: 'main-b', name: 'main', isMain: true, projectId: 'project-2' }),
+          ]}
+          activeWorktreeId="main-b"
+          onSelect={() => true}
+          onRefreshWorktrees={refreshMock}
+        />
+      </I18nextProvider>,
+    );
+
+    deferredLedger.resolve?.({
+      clientOperationId: 'op-remove-1',
+      kind: 'remove',
+      payloadHash: 'hash',
+      intent: {
+        kind: 'remove',
+        projectId: 'project-1',
+        worktreeId: 'feature-1',
+        path: feature.path,
+        branch: feature.branch,
+      },
+      state: 'running',
+      outcome: null,
+      errorMessage: null,
+      projectId: 'project-1',
+      worktreeId: 'feature-1',
+      createdAt: '2026-07-14T00:00:00Z',
+      updatedAt: '2026-07-14T00:00:00Z',
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText(/操作结果未知/)).toBeNull();
+    });
+  });
 });

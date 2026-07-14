@@ -373,6 +373,7 @@ export function Workbench() {
     worktrees,
     setWorktrees,
     worktreeBusy,
+    unknownMutationLock,
     worktreeError,
     createWorktreeOpen,
     setCreateWorktreeOpen,
@@ -829,6 +830,7 @@ export function Workbench() {
             activeProjectId={activeProjectId}
             remoteWriteDisabled={remoteWriteDisabled}
             worktreeBusy={worktreeBusy}
+            unknownMutationLock={unknownMutationLock}
             createWorktreeOpen={createWorktreeOpen}
             createWorktreeBranchPrefix={createWorktreeBranchPrefix}
             createWorktreeBranchSuffixDraft={createWorktreeBranchSuffixDraft}
@@ -1172,6 +1174,7 @@ export function Workbench() {
             gitHistoryLoading,
             gitHistoryError,
             worktreeBusy,
+            unknownMutationLock,
             mergeStages,
             loadGitHistory,
             handleCommitWorktree,

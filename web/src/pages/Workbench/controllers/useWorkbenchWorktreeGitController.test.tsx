@@ -1124,6 +1124,183 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
     expect(result.current.unknownMutationLock).toBeNull();
     expect(result.current.worktreeError).toBeTruthy();
   });
+
+  test('after commit unknown, sibling push/merge/remove are blocked and do not mint Fresh ids', async () => {
+    const project = buildLocalProject();
+    const featWt = buildWorktree({
+      id: 'wt-feat',
+      isMain: false,
+      name: 'feat',
+      branch: 'feature/feat',
+      status: {
+        branch: 'feature/feat',
+        changed: 0,
+        ahead: 1,
+        behind: 0,
+        conflicts: 0,
+        clean: true,
+        canPush: true,
+      },
+    });
+    fakeWorktreesApi.commit.mockResolvedValueOnce({
+      kind: 'unknown',
+      clientOperationId: 'op-commit-lock',
+      transportClass: 'timeout',
+    });
+    fakeWorktreesApi.getMutationOperation.mockResolvedValue({
+      clientOperationId: 'op-commit-lock',
+      kind: 'commit',
+      payloadHash: 'h',
+      intent: {
+        kind: 'commit',
+        projectId: project.id,
+        worktreeId: 'wt-feat',
+        beforeHead: 'a',
+        expectedTree: 't',
+      },
+      state: 'running',
+      outcome: null,
+      errorMessage: null,
+      projectId: project.id,
+      worktreeId: 'wt-feat',
+      createdAt: '2026-07-14T00:00:00.000Z',
+      updatedAt: '2026-07-14T00:00:00.000Z',
+    });
+    fakeWorktreesApi.list.mockResolvedValue([buildWorktree({ id: 'wt-main' }), featWt]);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-feat',
+      inspectorTab: 'files',
+      confirmAction: () => true,
+      translateError: (key) =>
+        key === 'mutationUnknown' ? '结果未知，请刷新后人工核对' : `err:${key}`,
+    });
+
+    await act(async () => {
+      await result.current.loadWorktrees(project.id);
+      await flushMicrotasks();
+    });
+
+    await act(async () => {
+      await result.current.handleCommitWorktree();
+      await flushMicrotasks();
+    });
+
+    expect(result.current.unknownMutationLock).toEqual({
+      kind: 'commit',
+      projectId: project.id,
+      worktreeId: 'wt-feat',
+      clientOperationId: 'op-commit-lock',
+    });
+
+    await act(async () => {
+      await result.current.handlePushWorktree();
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      await result.current.handleMergeWorktree();
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      await result.current.handleRemoveWorktree();
+      await flushMicrotasks();
+    });
+
+    expect(fakeWorktreesApi.push).not.toHaveBeenCalled();
+    expect(fakeWorktreesApi.merge).not.toHaveBeenCalled();
+    expect(fakeWorktreesApi.remove).not.toHaveBeenCalled();
+    expect(result.current.unknownMutationLock).toEqual({
+      kind: 'commit',
+      projectId: project.id,
+      worktreeId: 'wt-feat',
+      clientOperationId: 'op-commit-lock',
+    });
+
+    // same-kind second click still only reconciles with stable id
+    await act(async () => {
+      await result.current.handleCommitWorktree();
+      await flushMicrotasks();
+    });
+    expect(fakeWorktreesApi.commit).toHaveBeenCalledTimes(1);
+    expect(fakeWorktreesApi.getMutationOperation).toHaveBeenLastCalledWith('op-commit-lock');
+  });
+
+  test('sibling success cannot clear an unrelated unknownMutationLock', async () => {
+    const project = buildLocalProject();
+    const featWt = buildWorktree({
+      id: 'wt-feat',
+      isMain: false,
+      name: 'feat',
+      branch: 'feature/feat',
+      status: {
+        branch: 'feature/feat',
+        changed: 0,
+        ahead: 1,
+        behind: 0,
+        conflicts: 0,
+        clean: true,
+        canPush: true,
+      },
+    });
+    fakeWorktreesApi.commit.mockResolvedValueOnce({
+      kind: 'unknown',
+      clientOperationId: 'op-commit-keep',
+      transportClass: 'timeout',
+    });
+    fakeWorktreesApi.getMutationOperation.mockResolvedValue({
+      clientOperationId: 'op-commit-keep',
+      kind: 'commit',
+      payloadHash: 'h',
+      intent: {
+        kind: 'commit',
+        projectId: project.id,
+        worktreeId: 'wt-feat',
+        beforeHead: 'a',
+        expectedTree: 't',
+      },
+      state: 'running',
+      outcome: null,
+      errorMessage: null,
+      projectId: project.id,
+      worktreeId: 'wt-feat',
+      createdAt: '2026-07-14T00:00:00.000Z',
+      updatedAt: '2026-07-14T00:00:00.000Z',
+    });
+    fakeWorktreesApi.push.mockResolvedValueOnce(succeededEnvelope(featWt, 'op-push-sibling'));
+    fakeWorktreesApi.list.mockResolvedValue([buildWorktree({ id: 'wt-main' }), featWt]);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-feat',
+      inspectorTab: 'files',
+      translateError: (key) =>
+        key === 'mutationUnknown' ? '结果未知' : `err:${key}`,
+    });
+
+    await act(async () => {
+      await result.current.loadWorktrees(project.id);
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      await result.current.handleCommitWorktree();
+      await flushMicrotasks();
+    });
+    expect(result.current.unknownMutationLock?.clientOperationId).toBe('op-commit-keep');
+
+    // Even if push handler is invoked, it must not clear the commit lock.
+    await act(async () => {
+      await result.current.handlePushWorktree();
+      await flushMicrotasks();
+    });
+    expect(fakeWorktreesApi.push).not.toHaveBeenCalled();
+    expect(result.current.unknownMutationLock).toEqual({
+      kind: 'commit',
+      projectId: project.id,
+      worktreeId: 'wt-feat',
+      clientOperationId: 'op-commit-keep',
+    });
+  });
 });
 
 /* ---------------------------------------------------------------------------

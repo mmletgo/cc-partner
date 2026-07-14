@@ -33,7 +33,10 @@ import {
   worktreeStatusTone,
 } from './workbenchWorktrees';
 import type { WorkbenchGitGraphRow } from './workbenchWorktrees';
-import type { WorktreeBusyKind } from './controllers/useWorkbenchWorktreeGitController';
+import type {
+  WorktreeBusyKind,
+  WorktreeUnknownMutationLock,
+} from './controllers/useWorkbenchWorktreeGitController';
 
 const GIT_GRAPH_LANE_WIDTH = 14;
 const GIT_GRAPH_ROW_HEIGHT = 58;
@@ -89,6 +92,8 @@ export interface WorkbenchGitInspectorProps {
   gitHistoryLoading: boolean;
   gitHistoryError: string | null;
   worktreeBusy: WorktreeBusyKind | null;
+  /** unknown 共享锁；can* 禁用 sibling mutation。 */
+  unknownMutationLock: WorktreeUnknownMutationLock | null;
   mergeStages: WorkbenchMergeStage[];
   loadGitHistory: () => Promise<void>;
   handleCommitWorktree: () => Promise<void>;
@@ -114,6 +119,7 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
     gitHistoryLoading,
     gitHistoryError,
     worktreeBusy,
+    unknownMutationLock,
     mergeStages,
     loadGitHistory,
     handleCommitWorktree,
@@ -203,7 +209,10 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
             variant={activeWorktreeChangedCount > 0 ? 'primary' : 'secondary'}
             icon={<EditIcon />}
             loading={worktreeBusy === 'commit'}
-            disabled={!canCommitWorktree(activeWorktree, worktreeBusy) || remoteWriteDisabled}
+            disabled={
+              !canCommitWorktree(activeWorktree, worktreeBusy, unknownMutationLock)
+              || remoteWriteDisabled
+            }
             onClick={() => void handleCommitWorktree()}
           >
             {t('workbench:worktrees.commit')}
@@ -213,7 +222,10 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
             variant="secondary"
             icon={<UploadIcon />}
             loading={worktreeBusy === 'push'}
-            disabled={!canPushWorktree(activeWorktree, worktreeBusy) || remoteWriteDisabled}
+            disabled={
+              !canPushWorktree(activeWorktree, worktreeBusy, unknownMutationLock)
+              || remoteWriteDisabled
+            }
             onClick={() => void handlePushWorktree()}
           >
             {t('workbench:worktrees.push')}
@@ -223,7 +235,10 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
             variant="secondary"
             icon={<SyncIcon />}
             loading={worktreeBusy === 'merge'}
-            disabled={!canMergeWorktree(activeWorktree, worktreeBusy) || remoteWriteDisabled}
+            disabled={
+              !canMergeWorktree(activeWorktree, worktreeBusy, unknownMutationLock)
+              || remoteWriteDisabled
+            }
             onClick={() => void handleMergeWorktree()}
           >
             {t('workbench:worktrees.merge')}

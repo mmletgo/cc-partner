@@ -107,15 +107,24 @@ export function MobileWorktreePanel({
   const removeOperationIdRef = useRef<string | null>(null);
   const mergeOperationIdRef = useRef<string | null>(null);
   const unknownKindRef = useRef<'remove' | 'merge' | null>(null);
+  // Business Logic: merge/remove 目标常不是 active worktree；unknown 必须按操作 worktree id 作用域保留。
   const unknownWorktreeIdRef = useRef<string | null>(null);
+  // Business Logic: 对账/重试后写 phase 必须绑定 project + op worktree + sequence，防切项目后脏写。
+  const mutationSequenceRef = useRef(0);
+  const projectIdRef = useRef<string | null>(project?.id ?? null);
   const composedBranchName = composeWorktreeBranchName(branchPrefix, branchSuffix);
   const isEmpty = worktrees.length === 0;
   const isActionDisabled =
     busy || actionBusy !== null || isMobileMutationActionLocked(mutationPhase);
 
-  // Business Logic: project/worktree 列表上下文变化后，旧 unknown 锁不得污染新上下文。
-  /* eslint-disable react-hooks/set-state-in-effect -- context 切换时必须同步清空 phase/error/ids */
   useEffect(() => {
+    projectIdRef.current = project?.id ?? null;
+  }, [project?.id]);
+
+  // Business Logic: 离开项目时清空 unknown；仅 active 切换不得解锁仍挂起的 op worktree。
+  /* eslint-disable react-hooks/set-state-in-effect -- 离开项目时必须同步清空 phase/error/ids */
+  useEffect(() => {
+    mutationSequenceRef.current += 1;
     setMutationPhase('idle');
     setError(null);
     setActionBusy(null);
@@ -123,8 +132,44 @@ export function MobileWorktreePanel({
     mergeOperationIdRef.current = null;
     unknownKindRef.current = null;
     unknownWorktreeIdRef.current = null;
-  }, [project?.id, activeWorktreeId]);
+  }, [project?.id]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   发起 merge/remove/reconcile 时绑定 project + 操作 worktree + sequence。
+   *
+   * Code Logic（这个函数做什么）:
+   *   递增 mutationSequenceRef，返回 settled key。
+   */
+  const beginWorktreeMutationSettlement = useCallback(
+    (projectId: string, worktreeId: string): { projectId: string; worktreeId: string; sequence: number } => {
+      mutationSequenceRef.current += 1;
+      return {
+        projectId,
+        worktreeId,
+        sequence: mutationSequenceRef.current,
+      };
+    },
+    [],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   await 后写 phase/error/ids 前必须确认仍属于发起时的 project/op worktree/sequence。
+   *
+   * Code Logic（这个函数做什么）:
+   *   project 未切换且 sequence 仍最新时返回 true（active 切换不使 settled 过期）。
+   */
+  const isWorktreeMutationSettlementCurrent = useCallback(
+    (settled: { projectId: string; worktreeId: string; sequence: number }): boolean => {
+      return (
+        projectIdRef.current === settled.projectId
+        && mutationSequenceRef.current === settled.sequence
+      );
+    },
+    [],
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -198,22 +243,28 @@ export function MobileWorktreePanel({
    *   remove/merge unknown 后按 ledger 终态或 authority 矩阵对账，禁止盲重放。
    *
    * Code Logic（这个函数做什么）:
-   *   查询 getMutationOperation；刷新列表；merge 填充 source + mainContainsSourceHead。
+   *   查询 getMutationOperation；刷新列表；merge 填充 source + mainContainsSourceHead；
+   *   每个 await 后用 settled key 守卫（project + op worktree + sequence）。
    */
   const reconcileUnknownMutation = useCallback(
     async (
       clientOperationId: string,
       worktree: WorkbenchWorktree,
       expectedKind: 'remove' | 'merge',
+      settled: { projectId: string; worktreeId: string; sequence: number },
     ): Promise<'confirmedSucceeded' | 'confirmedFailed' | 'unknown'> => {
-      setMutationPhase('reconciling');
+      if (isWorktreeMutationSettlementCurrent(settled)) {
+        setMutationPhase('reconciling');
+      }
       const ledger = await workbenchHttp.git
         .getMutationOperation(clientOperationId)
         .catch(() => null);
+      if (!isWorktreeMutationSettlementCurrent(settled)) return 'unknown';
 
       await onRefreshWorktrees?.({
         expectedProjectId: worktree.projectId,
       });
+      if (!isWorktreeMutationSettlementCurrent(settled)) return 'unknown';
 
       const intent: MutationIntent | null = ledger?.intent ?? null;
       if (!intent || intent.kind !== expectedKind) {
@@ -228,6 +279,7 @@ export function MobileWorktreePanel({
 
       try {
         const latest = await httpWorkbenchTransport.worktrees.list(worktree.projectId);
+        if (!isWorktreeMutationSettlementCurrent(settled)) return 'unknown';
         let mainCommitHashes: string[] | undefined;
         if (intent.kind === 'merge') {
           const main = latest.find((item) => item.isMain) ?? null;
@@ -238,6 +290,7 @@ export function MobileWorktreePanel({
                 main.id,
                 100,
               );
+              if (!isWorktreeMutationSettlementCurrent(settled)) return 'unknown';
               mainCommitHashes = mainCommits.map((commit) => commit.hash);
             } catch {
               mainCommitHashes = undefined;
@@ -250,7 +303,7 @@ export function MobileWorktreePanel({
         return 'unknown';
       }
     },
-    [onRefreshWorktrees],
+    [isWorktreeMutationSettlementCurrent, onRefreshWorktrees],
   );
 
   /**
@@ -258,7 +311,8 @@ export function MobileWorktreePanel({
    *   unknown 后用户需要 same-id 重新核对，而不是死锁或盲发新 id。
    *
    * Code Logic（这个函数做什么）:
-   *   按 unknownKind + worktreeId 取 operation id，再跑 reconcileUnknownMutation。
+   *   按 unknownKind + worktreeId 取 operation id，再跑 reconcileUnknownMutation；
+   *   写入 phase 前 isWorktreeMutationSettlementCurrent 守卫。
    */
   const handleRetryReconcile = useCallback(async (): Promise<void> => {
     if (mutationPhase !== 'unknown' || !unknownKindRef.current || !unknownWorktreeIdRef.current) {
@@ -269,18 +323,27 @@ export function MobileWorktreePanel({
     const clientOperationId =
       kind === 'remove' ? removeOperationIdRef.current : mergeOperationIdRef.current;
     if (!clientOperationId) return;
+    const projectId = project?.id;
+    if (!projectId) return;
     const target = worktrees.find((item) => item.id === worktreeId);
     // remove/merge 成功后 worktree 可能已不在列表；仍用最小 stub 对账。
     const worktreeStub: WorkbenchWorktree =
       target
       ?? ({
         id: worktreeId,
-        projectId: project?.id ?? '',
+        projectId,
       } as WorkbenchWorktree);
+    const settled = beginWorktreeMutationSettlement(projectId, worktreeId);
     setActionBusy(`${kind}-${worktreeId}`);
     setError(null);
     try {
-      const confirmed = await reconcileUnknownMutation(clientOperationId, worktreeStub, kind);
+      const confirmed = await reconcileUnknownMutation(
+        clientOperationId,
+        worktreeStub,
+        kind,
+        settled,
+      );
+      if (!isWorktreeMutationSettlementCurrent(settled)) return;
       const phase = resolveMobileMutationPhase('unknown', confirmed);
       if (phase === 'confirmedSucceeded') {
         removeOperationIdRef.current = null;
@@ -302,9 +365,20 @@ export function MobileWorktreePanel({
         setError(t('workbench:errors.mutationUnknown'));
       }
     } finally {
-      setActionBusy(null);
+      if (isWorktreeMutationSettlementCurrent(settled)) {
+        setActionBusy(null);
+      }
     }
-  }, [mutationPhase, onRefreshWorktrees, project?.id, reconcileUnknownMutation, t, worktrees]);
+  }, [
+    beginWorktreeMutationSettlement,
+    isWorktreeMutationSettlementCurrent,
+    mutationPhase,
+    onRefreshWorktrees,
+    project?.id,
+    reconcileUnknownMutation,
+    t,
+    worktrees,
+  ]);
 
   const handleMergeWorktree = useCallback(
     async (worktree: WorkbenchWorktree): Promise<void> => {
@@ -312,6 +386,15 @@ export function MobileWorktreePanel({
         return;
       }
       if (mutationPhase === 'unknown' && unknownKindRef.current !== 'merge') return;
+      if (
+        mutationPhase === 'unknown'
+        && unknownWorktreeIdRef.current
+        && unknownWorktreeIdRef.current !== worktree.id
+      ) {
+        return;
+      }
+      const projectId = worktree.projectId;
+      const settled = beginWorktreeMutationSettlement(projectId, worktree.id);
       setActionBusy(`merge-${worktree.id}`);
       setMutationPhase('busy');
       setError(null);
@@ -321,7 +404,9 @@ export function MobileWorktreePanel({
             mergeOperationIdRef.current,
             worktree,
             'merge',
+            settled,
           );
+          if (!isWorktreeMutationSettlementCurrent(settled)) return;
           const phase = resolveMobileMutationPhase('unknown', confirmed);
           if (phase === 'confirmedSucceeded') {
             mergeOperationIdRef.current = null;
@@ -346,6 +431,7 @@ export function MobileWorktreePanel({
         }
 
         const result = await onMergeWorktree?.(worktree);
+        if (!isWorktreeMutationSettlementCurrent(settled)) return;
         if (result === false) {
           setMutationPhase('idle');
           return;
@@ -355,6 +441,7 @@ export function MobileWorktreePanel({
         unknownWorktreeIdRef.current = null;
         setMutationPhase('idle');
       } catch (reason) {
+        if (!isWorktreeMutationSettlementCurrent(settled)) return;
         if (isWorkbenchMutationUnknownError(reason)) {
           mergeOperationIdRef.current = getUnknownMutationClientOperationId(reason);
           unknownKindRef.current = 'merge';
@@ -369,10 +456,21 @@ export function MobileWorktreePanel({
           setError(`${t('workbench:errors.mergeWorktree')}: ${getErrorMessage(reason)}`);
         }
       } finally {
-        setActionBusy(null);
+        if (isWorktreeMutationSettlementCurrent(settled)) {
+          setActionBusy(null);
+        }
       }
     },
-    [isActionDisabled, mutationPhase, onMergeWorktree, onRefreshWorktrees, reconcileUnknownMutation, t],
+    [
+      beginWorktreeMutationSettlement,
+      isActionDisabled,
+      isWorktreeMutationSettlementCurrent,
+      mutationPhase,
+      onMergeWorktree,
+      onRefreshWorktrees,
+      reconcileUnknownMutation,
+      t,
+    ],
   );
 
   /**
@@ -402,6 +500,7 @@ export function MobileWorktreePanel({
         if (!shouldRemove) return;
       }
 
+      const settled = beginWorktreeMutationSettlement(worktree.projectId, worktree.id);
       setActionBusy(`remove-${worktree.id}`);
       setMutationPhase('busy');
       setError(null);
@@ -418,7 +517,9 @@ export function MobileWorktreePanel({
             clientOperationId,
             worktree,
             'remove',
+            settled,
           );
+          if (!isWorktreeMutationSettlementCurrent(settled)) return;
           const phase = resolveMobileMutationPhase('unknown', confirmed);
           if (phase === 'confirmedSucceeded') {
             removeOperationIdRef.current = null;
@@ -459,6 +560,7 @@ export function MobileWorktreePanel({
                 force: false,
                 clientOperationId,
               });
+              if (!isWorktreeMutationSettlementCurrent(settled)) return;
               if (isMutationSucceeded(envelope)) {
                 removeOperationIdRef.current = null;
                 unknownKindRef.current = null;
@@ -471,7 +573,9 @@ export function MobileWorktreePanel({
                   envelope.clientOperationId,
                   worktree,
                   'remove',
+                  settled,
                 );
+                if (!isWorktreeMutationSettlementCurrent(settled)) return;
                 const phase = resolveMobileMutationPhase('unknown', confirmed);
                 if (phase === 'confirmedSucceeded') {
                   removeOperationIdRef.current = null;
@@ -497,6 +601,7 @@ export function MobileWorktreePanel({
             }
           },
           applyRemoval: (plan) => {
+            if (!isWorktreeMutationSettlementCurrent(settled)) return;
             const sourceBecameActive =
               onIsWorktreeActive?.(worktree) ?? activeWorktreeId === worktree.id;
             onWorktreesChange?.(plan.nextWorktrees);
@@ -505,6 +610,7 @@ export function MobileWorktreePanel({
             }
           },
         });
+        if (!isWorktreeMutationSettlementCurrent(settled)) return;
         if (result === 'applied') {
           await onRefreshWorktrees?.({
             skipFileContextConfirm: activeWorktreeId === worktree.id,
@@ -517,6 +623,7 @@ export function MobileWorktreePanel({
           unknownWorktreeIdRef.current = null;
         }
       } catch (reason) {
+        if (!isWorktreeMutationSettlementCurrent(settled)) return;
         if (isWorkbenchMutationUnknownError(reason) || unknownKindRef.current === 'remove') {
           const opId = getUnknownMutationClientOperationId(reason) ?? removeOperationIdRef.current;
           removeOperationIdRef.current = opId;
@@ -532,12 +639,16 @@ export function MobileWorktreePanel({
           setError(`${t('workbench:errors.removeWorktree')}: ${getErrorMessage(reason)}`);
         }
       } finally {
-        setActionBusy(null);
+        if (isWorktreeMutationSettlementCurrent(settled)) {
+          setActionBusy(null);
+        }
       }
     },
     [
       activeWorktreeId,
+      beginWorktreeMutationSettlement,
       isActionDisabled,
+      isWorktreeMutationSettlementCurrent,
       mutationPhase,
       onActiveWorktreeChange,
       onBeginWorktreeOperation,

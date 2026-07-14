@@ -143,17 +143,50 @@ export function worktreeStatusTone(worktree: WorkbenchWorktree): WorktreeTone {
 }
 
 /**
+ * unknown 锁的最小形态（供 can* 纯 helper 使用，不耦合 controller 全字段）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   timeout/network 后 unknownMutationLock 是 worktree 级共享锁；UI 需按 kind 禁用 sibling 动作。
+ *
+ * Code Logic（字段说明）:
+ *   kind 为锁定的 mutation 种类；其它字段可选，can* 只按 kind 判断。
+ */
+export type WorktreeUnknownMutationLockLike = {
+  kind: 'commit' | 'push' | 'merge' | 'remove';
+} | null;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   unknown 锁住某种 mutation 后，只允许同 kind reconcile/retry，禁止 sibling Fresh 动作。
+ *
+ * Code Logic（这个函数做什么）:
+ *   lock 为空时放行；非空时仅当 kind 匹配 actionKind 才放行。
+ */
+export function isWorktreeMutationKindAllowedByUnknownLock(
+  actionKind: 'commit' | 'push' | 'merge' | 'remove',
+  unknownMutationLock: WorktreeUnknownMutationLockLike = null,
+): boolean {
+  if (!unknownMutationLock) return true;
+  return unknownMutationLock.kind === actionKind;
+}
+
+/**
  * Business Logic（为什么需要这个函数）:
  *   Git 状态来自轮询快照，用户在终端里改文件后快照可能暂时仍是 clean；Commit 点击应交给后端实时判断。
  *
  * Code Logic（这个函数做什么）:
- *   只检查是否有 active worktree 以及是否已有 worktree 操作进行，不依赖可能过期的 clean 状态。
+ *   只检查是否有 active worktree、是否 busy，以及 unknown 锁是否允许 commit（同 kind 可 reconcile）。
  */
 export function canCommitWorktree(
   activeWorktree: WorkbenchWorktree | null,
   worktreeBusy: string | null,
+  unknownMutationLock: WorktreeUnknownMutationLockLike = null,
 ): boolean {
-  return activeWorktree !== null && worktreeBusy === null;
+  return (
+    activeWorktree !== null
+    && worktreeBusy === null
+    && isWorktreeMutationKindAllowedByUnknownLock('commit', unknownMutationLock)
+  );
 }
 
 /**
@@ -161,13 +194,18 @@ export function canCommitWorktree(
  *   Git 历史工具条需要判断当前 worktree 是否可以 push，避免本地未发布仓库显示可点击 Push。
  *
  * Code Logic（这个函数做什么）:
- *   有 active worktree、存在 branch、后端判定存在可用推送目标且没有其他 worktree 操作时返回 true。
+ *   有 active worktree、存在 branch、后端 canPush、非 busy，且 unknown 锁允许 push。
  */
 export function canPushWorktree(
   activeWorktree: WorkbenchWorktree | null,
   worktreeBusy: string | null,
+  unknownMutationLock: WorktreeUnknownMutationLockLike = null,
 ): boolean {
-  return Boolean(activeWorktree?.branch && activeWorktree.status.canPush) && worktreeBusy === null;
+  return (
+    Boolean(activeWorktree?.branch && activeWorktree.status.canPush)
+    && worktreeBusy === null
+    && isWorktreeMutationKindAllowedByUnknownLock('push', unknownMutationLock)
+  );
 }
 
 /**
@@ -175,14 +213,19 @@ export function canPushWorktree(
  *   Git 历史工具条的 merge 只适用于功能 worktree 合回主工作区。
  *
  * Code Logic（这个函数做什么）:
- *   active worktree 存在、非主工作区且没有其他 worktree 操作时返回 true；
- *   dirty 检查交给后端实时执行，避免依赖可能过期的轮询快照。
+ *   active worktree 存在、非主、非 busy，且 unknown 锁允许 merge；dirty 交给后端实时判断。
  */
 export function canMergeWorktree(
   activeWorktree: WorkbenchWorktree | null,
   worktreeBusy: string | null,
+  unknownMutationLock: WorktreeUnknownMutationLockLike = null,
 ): boolean {
-  return activeWorktree !== null && !activeWorktree.isMain && worktreeBusy === null;
+  return (
+    activeWorktree !== null
+    && !activeWorktree.isMain
+    && worktreeBusy === null
+    && isWorktreeMutationKindAllowedByUnknownLock('merge', unknownMutationLock)
+  );
 }
 
 /**
@@ -220,16 +263,22 @@ export function shouldAutoDismissMergeStages(stages: WorkbenchMergeStage[]): boo
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   移除 worktree 是生命周期管理动作，不能对主工作区或 busy 状态开放。
+ *   移除 worktree 是生命周期管理动作，不能对主工作区、busy 或 sibling unknown 锁开放。
  *
  * Code Logic（这个函数做什么）:
- *   active worktree 存在、非主工作区且没有其他 worktree 操作时返回 true。
+ *   active worktree 存在、非主、非 busy，且 unknown 锁允许 remove（同 kind 可 reconcile）。
  */
 export function canRemoveWorktree(
   activeWorktree: WorkbenchWorktree | null,
   worktreeBusy: string | null,
+  unknownMutationLock: WorktreeUnknownMutationLockLike = null,
 ): boolean {
-  return activeWorktree !== null && !activeWorktree.isMain && worktreeBusy === null;
+  return (
+    activeWorktree !== null
+    && !activeWorktree.isMain
+    && worktreeBusy === null
+    && isWorktreeMutationKindAllowedByUnknownLock('remove', unknownMutationLock)
+  );
 }
 
 /**
