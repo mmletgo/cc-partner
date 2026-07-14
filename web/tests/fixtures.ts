@@ -142,7 +142,8 @@ export const test = base.extend<BrowserDiagnosticsFixtures>({
 
     const testFailed = testInfo.status !== testInfo.expectedStatus;
     try {
-      harness.assertSettled();
+      // App 常驻 PermissionNeeded/HealthReminder 等 listener 在 SPA 生命周期内不会 unlisten
+      harness.assertSettled({ allowLingeringListeners: true });
     } catch (error) {
       await attachHarnessCallLog(testInfo, harness);
       throw error;

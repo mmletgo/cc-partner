@@ -70,8 +70,20 @@ export interface BackendHarness {
   resolveDeferred(key: string, value?: unknown): void;
   rejectDeferred(key: string, error?: unknown): void;
   calls(): readonly HarnessCall[];
-  assertSettled(): void;
+  assertSettled(options?: AssertSettledOptions): void;
 }
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   浏览器 E2E 中 App 常驻 listener（截图权限/健康提醒等）在用例结束时仍挂载，
+ *   不能与纯单元测试里的“泄漏 listener”同等视为失败。
+ *
+ * Code Logic（这个类型做什么）:
+ *   allowLingeringListeners=true 时跳过 listener 计数检查。
+ */
+export type AssertSettledOptions = {
+  allowLingeringListeners?: boolean;
+};
 
 /**
  * Business Logic（为什么需要这个类型）:
@@ -346,12 +358,13 @@ export class BackendHarnessCore implements BackendHarness {
 
   /**
    * Business Logic（为什么需要这个方法）:
-   *   用例结束时必须没有挂起请求、未消费序列与泄漏 listener。
+   *   用例结束时必须没有挂起请求、未消费序列；纯单测还要无泄漏 listener。
    *
    * Code Logic（这个方法做什么）:
-   *   收集问题并抛 HarnessSettlementError。
+   *   收集问题并抛 HarnessSettlementError；
+   *   options.allowLingeringListeners 为真时跳过 listener 计数（Playwright App 常驻监听）。
    */
-  assertSettled(): void {
+  assertSettled(options?: AssertSettledOptions): void {
     const problems: string[] = [];
     if (this.pendingCount > 0) {
       problems.push(`pending requests: ${this.pendingCount}`);
@@ -369,7 +382,7 @@ export class BackendHarnessCore implements BackendHarness {
         problems.push(`unconsumed route expectations for "${key}": ${reg.queue.length}`);
       }
     }
-    if (this.listenerCount > 0) {
+    if (!options?.allowLingeringListeners && this.listenerCount > 0) {
       problems.push(`leaked event listeners: ${this.listenerCount}`);
     }
     if (problems.length > 0) {
@@ -864,13 +877,44 @@ function createAbortError(): Error {
 }
 
 /**
+ * FaultProfile → 稳定错误码映射（与 T4 faultRecovery 分类表对齐）。
+ *
+ * Business Logic（为什么需要这个常量）:
+ *   L0/L1 测试与前端分类器需要同一套 profile→code 合同，避免各处手写字符串漂移。
+ *
+ * Code Logic（这个常量做什么）:
+ *   导出只读 Record；timeout 在 invoke 路径常体现为 AbortError，仍保留 TIMEOUT 码供直接映射。
+ */
+export const FAULT_PROFILE_CODES: Readonly<Record<FaultProfile, string>> = {
+  networkOffline: 'NETWORK_OFFLINE',
+  timeout: 'TIMEOUT',
+  malformedJson: 'MALFORMED_JSON',
+  permissionDenied: 'PERMISSION_DENIED',
+  conflict: 'CONFLICT',
+  dbBusy: 'DB_BUSY',
+  lanBoundaryRejected: 'LAN_BOUNDARY_REJECTED',
+  crossSiteRejected: 'CROSS_SITE_REJECTED',
+};
+
+/**
  * Business Logic（为什么需要这个函数）:
- *   fault profile 需要带稳定 code 字段供前端分类。
+ *   测试与故障分类需要从 FaultProfile 拿到稳定 code，而不依赖 Error 实例形态。
+ *
+ * Code Logic（这个函数做什么）:
+ *   查 FAULT_PROFILE_CODES 表返回字符串码。
+ */
+export function faultProfileCode(profile: FaultProfile): string {
+  return FAULT_PROFILE_CODES[profile];
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   fault profile 需要带稳定 code 字段供前端分类；测试可直接构造同类错误。
  *
  * Code Logic（这个函数做什么）:
  *   创建 Error 并挂 name/message/code。
  */
-function createFaultError(name: string, message: string, code: string): Error {
+export function createFaultError(name: string, message: string, code: string): Error {
   const error = new Error(message);
   error.name = name;
   (error as Error & { code?: string }).code = code;
@@ -1076,8 +1120,8 @@ export function createBackendHarness(): PlaywrightBackendHarness {
      * Code Logic（这个方法做什么）:
      *   委托 core.assertSettled。
      */
-    assertSettled() {
-      core.assertSettled();
+    assertSettled(options) {
+      core.assertSettled(options);
     },
 
     /**

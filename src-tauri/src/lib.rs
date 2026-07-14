@@ -21,6 +21,9 @@ pub use cc::mixed_version_harness;
 // S5 scale_safety 产品路径 rollback / bulk 测试需要直连 repo 与 row 类型。
 pub use cc::models::ClaudeHistoryRow;
 pub use storage::ClaudeHistoryRepo;
+// S6 quality_faults：peer 响应丢失幂等收敛 + 稳定 code 分类需直连 PeerClient。
+pub use net::peer_client::{PeerClient, TransferCompletePolicy};
+pub use net::peer_error::PeerCallError;
 mod claude_cli;
 mod claude_code_assets;
 pub mod cloud_sync;
