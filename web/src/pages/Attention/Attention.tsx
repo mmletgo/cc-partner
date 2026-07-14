@@ -75,7 +75,7 @@ function defaultFormatTime(iso: string, language: string): string {
  *
  * Code Logic（这个组件做什么）:
  *   按 loading/error/empty/list 分支渲染；不使用 assertive 整表 live region；
- *   空组不渲染；行与 44×44 动作控件均可导航。
+ *   空组不渲染；每行仅一个 button（动作文案为内部 span），禁止嵌套可交互控件。
  */
 export function AttentionView({
   snapshot,
@@ -194,18 +194,11 @@ export function AttentionView({
                     const actionLabel = t(getAttentionActionI18nKey(item.sourceKind));
                     return (
                       <li key={item.id}>
-                        <div
+                        <button
+                          type="button"
                           className={styles.item}
-                          role="button"
-                          tabIndex={0}
                           data-testid={`attention-item-${item.id}`}
                           onClick={() => handleOpenItem(item)}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.preventDefault();
-                              handleOpenItem(item);
-                            }
-                          }}
                         >
                           <div className={styles.itemBody}>
                             <h3 className={styles.itemTitle}>{item.title}</h3>
@@ -236,19 +229,14 @@ export function AttentionView({
                               )}
                             </div>
                           </div>
-                          <button
-                            type="button"
+                          <span
                             className={styles.action}
                             data-testid={`attention-action-${item.id}`}
-                            aria-label={actionLabel}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              handleOpenItem(item);
-                            }}
+                            aria-hidden="true"
                           >
                             {actionLabel}
-                          </button>
-                        </div>
+                          </span>
+                        </button>
                       </li>
                     );
                   })}

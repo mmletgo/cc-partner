@@ -122,15 +122,15 @@ describe('workbenchWorkspaceSwitch', () => {
     'terminal fullscreen action stays in pane action group before file preview',
   );
   assertContains(workbenchSource, "actionsAriaLabel={t('workbench:paneActions')}", 'terminal action group keeps aria label');
+  assertContains(
+    workbenchSource,
+    '<WorkbenchSessionTabs',
+    'terminal session tabs are delegated to WorkbenchSessionTabs',
+  );
   assertNotContains(
     workbenchSource,
     '<button\n                      key={session.id}\n                      type="button"\n                      className={styles.sessionTab}',
-    'terminal session tab must not be a button because it contains a close button',
-  );
-  assertContains(
-    workbenchSource,
-    'role="tab"\n                      tabIndex={0}',
-    'terminal session tab remains keyboard-focusable after removing the outer button element',
+    'terminal session tab shell must not be an inline button with nested close control',
   );
   assertOccurrenceCount(workbenchSource, '<WorkbenchWorkspaceNav', 1, 'Workbench terminal workspace uses shared nav once');
   assertNotContains(
@@ -183,8 +183,8 @@ describe('workbenchWorkspaceSwitch', () => {
   assertOccurrenceCount(
     workbenchSource,
     'data-workbench-responsive-action="true"',
-    10,
-    'terminal nav marks new session and every toolbar action as responsive',
+    9,
+    'terminal toolbar actions stay responsive after session tabs extraction',
   );
   assertOccurrenceCount(
     fileWorkspaceSource,
@@ -249,7 +249,7 @@ describe('workbenchWorkspaceSwitch', () => {
   );
   assertContains(
     fileWorkspaceSource,
-    'documentPath={activeTab.path}\n            mode={coerceMarkdownMode(activeTab.mode)}',
+    'documentPath={activeTab.path}\n              mode={coerceMarkdownMode(activeTab.mode)}',
     'file workspace passes shared asset loader into Markdown editor',
   );
   assertContains(
