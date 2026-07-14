@@ -81,6 +81,9 @@ jobs:
       - name: Frontend i18n contract
         run: cd web && npm run check:i18n
 
+      - name: Module boundary ratchet
+        run: node scripts/check-module-boundaries.mjs
+
       - name: Frontend build (tsc 类型检查 + vite build)
         run: cd web && npm run build
 
