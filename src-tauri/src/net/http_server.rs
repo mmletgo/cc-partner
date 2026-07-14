@@ -1046,6 +1046,11 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/orchestrator/tasks/evidence",
             post(orchestrator::get_evidence),
         )
+        // Orchestrator owning-device review diff：capability orchestrator.review-diff.v1；仅本机 local 任务。
+        .route(
+            "/api/orchestrator/tasks/review-diff",
+            post(orchestrator::get_review_diff),
+        )
         .route(
             "/api/orchestrator/tasks/queue",
             post(orchestrator::queue_task),
@@ -1088,6 +1093,11 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/mobile/orchestrator/runtime-snapshot",
             post(orchestrator::mobile_runtime_snapshot),
+        )
+        // Mobile-facing review diff：remote-aware wrapper，capability 由 owning-device 路由门控。
+        .route(
+            "/api/mobile/orchestrator/tasks/review-diff",
+            post(orchestrator::mobile_get_review_diff),
         )
         .route("/api/orchestrator/config", get(orchestrator::get_config))
         // 移动端 SPA fallback：只服务 /mobile 命名空间；其它未知路径保持 404。

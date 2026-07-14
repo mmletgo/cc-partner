@@ -15,12 +15,16 @@ use crate::commands::prompt_optimizer::OrchestratorTaskPromptCompletionDto;
 use crate::error::AppError;
 use crate::net::peer_client::PeerClient;
 use crate::net::peer_error::{parse_peer_response, PeerCallError};
-use crate::net::protocol::CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1;
+use crate::net::protocol::{
+    CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1,
+};
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
-use crate::orchestrator::models::{OrchestratorEvidenceDto, OrchestratorTaskDto};
+use crate::orchestrator::models::{
+    OrchestratorEvidenceDto, OrchestratorReviewDiff, OrchestratorTaskDto,
+};
 use crate::orchestrator::remote_protocol::{
     RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq, RemoteListTasksReq,
-    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp,
+    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp, RemoteOrchestratorReviewDiffResp,
     RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
     RemoteTaskReq, RemoteTaskReworkReq,
 };
@@ -185,6 +189,53 @@ impl RemoteOrchestratorClient {
             )
             .await?;
         Ok(resp.evidence)
+    }
+
+    /// 读取 owning-device 有界 Human Review diff（capability-gated）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote shortcut 的 Changes tab 需要 owning device 生成的权威 diff；旧 peer 无
+    ///     `orchestrator.review-diff.v1` 时必须 Unsupported 且不打目标路由。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     1. `require_capability(.., CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1)`；
+    ///     2. POST `{base_url}/api/orchestrator/tasks/review-diff` body `{taskId}`；
+    ///     3. 解析 `{diff}` 为 `OrchestratorReviewDiff`。
+    pub async fn get_review_diff(
+        &self,
+        base_url: &str,
+        task_id: &str,
+    ) -> Result<OrchestratorReviewDiff, PeerCallError> {
+        PeerClient::new()
+            .require_capability(base_url, CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1)
+            .await?;
+
+        let url = endpoint_url(base_url, "/api/orchestrator/tasks/review-diff");
+        let body = RemoteTaskReq {
+            task_id: task_id.to_string(),
+        };
+        let outbound_request_id = self
+            .forwarded_request_id
+            .clone()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(crate::net::request_context::new_request_id);
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .header(
+                crate::net::request_context::REQUEST_ID_HEADER,
+                outbound_request_id,
+            )
+            .timeout(remote_request_timeout(RemoteRequestTimeoutKind::Short))
+            .send()
+            .await
+            .map_err(|error| PeerCallError::Network {
+                url: url.clone(),
+                source: error,
+            })?;
+        let resp = parse_peer_response::<RemoteOrchestratorReviewDiffResp>(response, &url).await?;
+        Ok(resp.diff)
     }
 
     /// 将远端草稿任务入队。
@@ -1354,6 +1405,74 @@ mod tests {
             "能力门未通过时 runtime-snapshot 路由不应被调用"
         );
     }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     review-diff 生产 client 方法必须把 require_capability 与路由调用合成原子方法；
+    ///     缺失 orchestrator.review-diff.v1 时返回 Unsupported 且不调用目标路由。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动无能力 token 的 health + review-diff 路由计数器服务，调用 get_review_diff，
+    ///     断言 Unsupported 且 hit=0。
+    #[tokio::test]
+    async fn review_diff_returns_unsupported_when_capability_absent() {
+        use crate::net::peer_error::PeerCallError;
+        use crate::net::protocol::CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1;
+        use crate::net::routes::health::HealthResponse;
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_route = hits.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "owning-device".to_string(),
+                        device_name: "Owning Device".to_string(),
+                        http_port: 8765,
+                        ts: 1_700_000_000,
+                        protocol_version: 1,
+                        capabilities: vec![],
+                    })
+                }),
+            )
+            .route(
+                "/api/orchestrator/tasks/review-diff",
+                post(move |Json(_body): Json<serde_json::Value>| {
+                    let hits = hits_route.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({
+                            "diff": {
+                                "taskId": "t1",
+                                "baseRef": "b",
+                                "headRef": "h",
+                                "files": [],
+                                "totalFiles": 0,
+                                "truncated": false,
+                                "reviewDigest": "d"
+                            }
+                        }))
+                    }
+                }),
+            );
+        let base_url = spawn_orchestrator_server(app).await;
+
+        let err = RemoteOrchestratorClient::new()
+            .get_review_diff(&base_url, "task-1")
+            .await
+            .expect_err("无能力 token 应被 capability gate 拦截");
+        assert!(
+            matches!(err, PeerCallError::Unsupported { capability, .. } if capability == CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1),
+            "expected Unsupported for review-diff capability, got {err:?}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "capability gate 不得调用目标路由");
+    }
+
 
     /// Business Logic（为什么需要这个测试）:
     ///     对端离线（health_info send 失败）时，方法必须返回 `PeerCallError::Network`，

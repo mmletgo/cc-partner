@@ -90,6 +90,7 @@ advertised capabilities are:
 - `attention.v1` — Mobile Attention snapshot (`GET /api/mobile/attention`)
 - `cc-history.paged-sync.v1` — bounded CC History paged sync (`POST /api/cc-history/sync/{manifest-page,items,push-batch}`); token and the three routes ship atomically
 - `errors.envelope.v1` — standard error envelope wire format
+- `orchestrator.review-diff.v1` — owning-device bounded Human Review / Rework diff (`POST /api/orchestrator/tasks/review-diff`); token and route ship atomically; mobile remote-aware wrapper at `/api/mobile/orchestrator/tasks/review-diff`
 - `orchestrator.runtime-snapshot.v1` — owning-device runtime snapshot route
 - `sync.manifest.v2` — bounded Prompt / SSH target / Scratchpad content sync (`POST /api/sync/prompts/{manifest-page,items,push-batch,ack-delete-epoch}`, `/api/ssh-target/sync/{...}`, `/api/scratchpad/sync/{...}`); token ships with transactional bulk upsert + request ledger + apply_merge_batch + dedicated watermark ack
 - `transfer.complete.v1` — explicit transfer finalize handshake (`POST /api/transfer/complete/:id`)
@@ -111,10 +112,10 @@ route access or route existence. Concretely:
   handling 404). Do not use `supports("errors.envelope.v1")` as a proxy for
   "new routes are available".
 - Route-specific capabilities (`attention.v1`, `cc-history.paged-sync.v1`,
-  `orchestrator.runtime-snapshot.v1`, `sync.manifest.v2`,
-  `transfer.complete.v1`, `transfer.resume.v1`, …) ship as **independent** tokens
-  alongside their own contracts and must not reuse `errors.envelope.v1` to mean
-  "new routes supported".
+  `orchestrator.review-diff.v1`, `orchestrator.runtime-snapshot.v1`,
+  `sync.manifest.v2`, `transfer.complete.v1`, `transfer.resume.v1`, …) ship as
+  **independent** tokens alongside their own contracts and must not reuse
+  `errors.envelope.v1` to mean "new routes supported".
 
 The existing capability gate (`peer_client::require_capability`) is therefore a
 **format** gate when used with `errors.envelope.v1`, and a **route** gate when
@@ -272,6 +273,8 @@ the router so the inventory check matches exactly.
 | POST | `/api/orchestrator/outbox/retry` | `routes/orchestrator.rs` | failed outbox → pending on current device only | naturally-idempotent | failed-only SQL guard via `retry_failed_remote_outbox_item`; ownership checked against local remote shortcut |
 | POST | `/api/orchestrator/outbox/discard` | `routes/orchestrator.rs` | failed outbox → discarded audit on current device only | naturally-idempotent | failed-only SQL guard via `discard_failed_remote_outbox_item`; ownership checked against local remote shortcut |
 | POST | `/api/orchestrator/tasks/evidence` | `routes/orchestrator.rs` | none; reads evidence list | read-only | — |
+| POST | `/api/orchestrator/tasks/review-diff` | `routes/orchestrator.rs` | none; reads bounded Human Review / Rework diff snapshot | read-only | capability-gated by `orchestrator.review-diff.v1`; body camelCase `{taskId}` only; base/head from task/worktree; rejects remote shortcuts; outside Human Review/Rework → conflict `review_diff_unavailable` |
+| POST | `/api/mobile/orchestrator/tasks/review-diff` | `routes/orchestrator.rs` | none; remote-aware review diff for mobile browser | read-only | body camelCase `{projectId,taskId}`; reuses Tauri remote-aware helper; never exposes owner P2P base URL |
 | POST | `/api/orchestrator/tasks/queue` | `routes/orchestrator.rs` | atomic Draft→Queued transition | no-transport-retry | Orchestrator lifecycle action; replay after timeout races the scheduler claim |
 | POST | `/api/orchestrator/tasks/start` | `routes/orchestrator.rs` | moves task into scheduler path + best-effort dispatch | no-transport-retry | Orchestrator lifecycle action |
 | POST | `/api/orchestrator/tasks/retry` | `routes/orchestrator.rs` | atomic Blocked→Queued transition | no-transport-retry | Orchestrator lifecycle action |

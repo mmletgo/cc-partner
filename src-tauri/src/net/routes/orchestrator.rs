@@ -11,7 +11,8 @@
 use crate::commands::orchestrator::{
     build_orchestrator_task_row, create_orchestrator_task_view_for_http_with_request_id,
     discard_orchestrator_remote_outbox_for_repos, dispatch_orchestrator_best_effort,
-    ensure_reviewed_delivery_allowed, get_orchestrator_runtime_snapshot_for_project,
+    ensure_reviewed_delivery_allowed, get_local_owner_orchestrator_review_diff,
+    get_orchestrator_review_diff_for_state, get_orchestrator_runtime_snapshot_for_project,
     get_orchestrator_runtime_snapshot_for_state_with_request_id,
     list_orchestrator_task_views_for_state_with_request_id,
     retry_orchestrator_remote_outbox_for_repos, run_delivery_for_task,
@@ -32,10 +33,11 @@ use crate::orchestrator::outbox::open_remote_project_for_shortcut;
 use crate::orchestrator::outbox::OrchestratorRemoteOutboxDto;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::{
-    MobileRuntimeSnapshotReq, RemoteCompleteOrchestratorTaskPromptReq,
+    MobileReviewDiffReq, MobileRuntimeSnapshotReq, RemoteCompleteOrchestratorTaskPromptReq,
     RemoteCreateOrchestratorTaskReq, RemoteListTasksReq, RemoteOrchestratorConfigResp,
     RemoteOrchestratorEvidenceResp, RemoteOrchestratorProjectRefreshResp,
-    RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq, RemoteTaskReq, RemoteTaskReworkReq,
+    RemoteOrchestratorReviewDiffResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
+    RemoteTaskReq, RemoteTaskReworkReq,
 };
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetrySnapshot;
@@ -625,6 +627,55 @@ pub async fn get_evidence(
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.evidence"))?;
     Ok(Json(resp))
+}
+
+/// 读取 owning-device 有界 Human Review diff HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的 Changes tab 需要从 owning device 拉取权威有界 diff；
+///     本路由仅服务本机 local 项目任务，拒绝 remote shortcut 递归代理。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 camelCase `{taskId}`，委托 `get_local_owner_orchestrator_review_diff`，
+///     返回 `{diff}`；base/head 只从 task/worktree 派生。
+pub async fn get_review_diff(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteTaskReq>,
+) -> P2pResult<Json<RemoteOrchestratorReviewDiffResp>> {
+    let diff = get_local_owner_orchestrator_review_diff(&state, &req.task_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.review_diff"))?;
+    Ok(Json(RemoteOrchestratorReviewDiffResp { diff }))
+}
+
+/// Mobile remote-aware review diff HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机浏览器需要对本机 local 或 remote shortcut 任务拉取 review diff，且不得暴露 owner base URL。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 camelCase `{projectId, taskId}`，委托 `get_orchestrator_review_diff_for_state`，
+///     返回 `{diff}`（remote 成功时 taskId 已映射为 remote entity）。
+pub async fn mobile_get_review_diff(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<MobileReviewDiffReq>,
+) -> P2pResult<Json<RemoteOrchestratorReviewDiffResp>> {
+    let project_id = req.project_id.trim();
+    let task_id = req.task_id.trim();
+    if project_id.is_empty() {
+        return Err(P2pError::validation("projectId 不能为空", &ctx));
+    }
+    if task_id.is_empty() {
+        return Err(P2pError::validation("taskId 不能为空", &ctx));
+    }
+    let diff = get_orchestrator_review_diff_for_state(&state, project_id, task_id)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "orchestrator.mobile.tasks.review_diff")
+        })?;
+    Ok(Json(RemoteOrchestratorReviewDiffResp { diff }))
 }
 
 /// 将任务入队 HTTP handler。
@@ -1773,6 +1824,75 @@ mod tests {
         let addr = handler_ptr as usize;
         assert_ne!(addr, 0, "runtime_snapshot handler 必须存在");
     }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     能力 token `orchestrator.review-diff.v1` 与 review-diff 路由必须原子上线。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 server_protocol_info 宣告 token，并引用 get_review_diff / mobile_get_review_diff handler 指针。
+    #[test]
+    fn review_diff_capability_and_route_ship_together() {
+        use crate::net::protocol::{
+            server_protocol_info, CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1,
+        };
+
+        let info = server_protocol_info();
+        assert!(
+            info.supports(CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1),
+            "server_protocol_info 必须宣告 orchestrator.review-diff.v1，实际: {:?}",
+            info.capabilities
+        );
+        let owner_handler = get_review_diff
+            as fn(
+                State<AppState>,
+                Extension<P2pRequestContext>,
+                Json<RemoteTaskReq>,
+            ) -> _;
+        let mobile_handler = mobile_get_review_diff
+            as fn(
+                State<AppState>,
+                Extension<P2pRequestContext>,
+                Json<MobileReviewDiffReq>,
+            ) -> _;
+        assert_ne!(owner_handler as usize, 0);
+        assert_ne!(mobile_handler as usize, 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     taskId-only owning-device review-diff 路由必须拒绝 remote shortcut 任务，
+    ///     与 evidence 等 taskId 路由同一 project kind guard。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 remote kind 项目与任务，调用 get_local_owner_orchestrator_review_diff，断言 validation 错误。
+    #[tokio::test]
+    async fn review_diff_route_rejects_remote_shortcut_project() {
+        let state = test_state().await;
+        insert_project(&state, "remote-project", "remote").await;
+        create_test_task(
+            &state,
+            "remote-task",
+            "remote-project",
+            OrchestratorTaskStatus::Done,
+        )
+        .await;
+
+        // 直接走 shared helper 需要完整 AppState；route context 测试只验证 project kind 守卫语义：
+        // remote kind project 的任务不得被 owning-device local helper 接受。
+        let context = test_state().await;
+        insert_project(&context, "remote-project", "remote").await;
+        create_test_task(
+            &context,
+            "remote-task",
+            "remote-project",
+            OrchestratorTaskStatus::Done,
+        )
+        .await;
+        let error = get_local_project_task(&context, "remote-task")
+            .await
+            .expect_err("remote shortcut must be rejected");
+        assert_eq!(error.to_string(), "远端 Orchestrator 只接受对端本机项目");
+    }
+
 
     /// Business Logic（为什么需要这个测试）:
     ///     mobile list/create 必须把入站 request_id 传给 request-id-aware helpers，

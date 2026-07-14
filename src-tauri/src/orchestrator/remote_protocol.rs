@@ -9,7 +9,7 @@
 
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
-    OrchestratorCreateAction, OrchestratorEvidenceDto, OrchestratorTaskDto,
+    OrchestratorCreateAction, OrchestratorEvidenceDto, OrchestratorReviewDiff, OrchestratorTaskDto,
 };
 use serde::{Deserialize, Serialize};
 
@@ -154,6 +154,34 @@ pub struct RemoteOrchestratorTaskListResp {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteOrchestratorEvidenceResp {
     pub evidence: Vec<OrchestratorEvidenceDto>,
+}
+
+/// 远端 Orchestrator review diff 响应。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     remote shortcut / mobile 需要展示 owning device 生成的有界 Human Review diff。
+///
+/// Code Logic（这个结构体做什么）:
+///     包装 camelCase `{diff}`，内部 diff 沿用 OrchestratorReviewDiff。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteOrchestratorReviewDiffResp {
+    pub diff: OrchestratorReviewDiff,
+}
+
+/// Mobile/remote-aware review diff 请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     手机浏览器与本机 remote-aware helper 需要同时携带 projectId 与 taskId，
+///     才能在 local/remote shortcut 上定位正确任务。
+///
+/// Code Logic（这个结构体做什么）:
+///     使用 camelCase 序列化 `{projectId, taskId}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileReviewDiffReq {
+    pub project_id: String,
+    pub task_id: String,
 }
 
 /// 远端 Orchestrator 全局配置响应。

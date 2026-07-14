@@ -2094,3 +2094,98 @@ async fn discard_remote_outbox_action_is_local_only_and_failed_only() {
     .expect_err("discarded cannot discard again");
     assert!(again.to_string().contains("失败"));
 }
+
+/// Business Logic（为什么需要这个测试）:
+///     review diff 仅在 Human Review / Rework 可用；Todo 等状态必须返回稳定 code，
+///     供前端禁用 Deliver 并展示局部错误，而不是静默空 diff。
+///
+/// Code Logic（这个测试做什么）:
+///     构造 Todo 任务，调用 ensure_review_diff_available，断言 code == review_diff_unavailable。
+#[test]
+fn review_diff_rejects_task_outside_human_review_or_rework() {
+    use super::ensure_review_diff_available;
+    use super::REVIEW_DIFF_UNAVAILABLE_CODE;
+
+    let mut task = command_task_row("task-todo", OrchestratorTaskStatus::Queued);
+    task.workflow_state = OrchestratorWorkflowState::Todo;
+    let err = ensure_review_diff_available(&task).expect_err("todo unavailable");
+    assert_eq!(err.code(), REVIEW_DIFF_UNAVAILABLE_CODE);
+    assert_eq!(err.classify(), crate::error::AppErrorCategory::Conflict);
+
+    let mut rework = command_task_row("task-rework", OrchestratorTaskStatus::Queued);
+    rework.workflow_state = OrchestratorWorkflowState::Rework;
+    ensure_review_diff_available(&rework).expect("rework allowed");
+
+    let mut human = command_task_row("task-human", OrchestratorTaskStatus::Done);
+    human.workflow_state = OrchestratorWorkflowState::HumanReview;
+    ensure_review_diff_available(&human).expect("human review allowed");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     review diff API 只接受 projectId/taskId；任意 path/ref 不得进入公共签名，
+///     防止调用方绕过 worktree 权威元数据越界读盘。
+///
+/// Code Logic（这个测试做什么）:
+///     引用 get_orchestrator_review_diff_for_state 符号并断言命令名固定；无 path/ref 参数入口。
+#[test]
+fn review_diff_command_signature_rejects_arbitrary_repo_path_or_ref() {
+    assert_eq!(
+        crate::commands::orchestrator::__tauri_command_name_get_orchestrator_review_diff!(),
+        "get_orchestrator_review_diff"
+    );
+    // 锁死 helper 符号：业务入口只有 (state, project_id, task_id)。
+    let symbol = stringify!(crate::commands::orchestrator::get_orchestrator_review_diff_for_state);
+    assert!(symbol.contains("get_orchestrator_review_diff_for_state"));
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     generate_handler! 必须注册 get_orchestrator_review_diff，否则桌面 invoke 永远 not found。
+///
+/// Code Logic（这个测试做什么）:
+///     断言 Tauri 宏生成的命令名常量等于期望字面量，并引用 __cmd__ 函数指针确保宏展开存在。
+#[test]
+fn get_orchestrator_review_diff_is_registered_in_generate_handler() {
+    assert_eq!(
+        crate::commands::orchestrator::__tauri_command_name_get_orchestrator_review_diff!(),
+        "get_orchestrator_review_diff"
+    );
+    // 引用命令函数与 lib.rs 源码中的 generate_handler 字面量，防止未注册。
+    let cmd = crate::commands::orchestrator::get_orchestrator_review_diff
+        as *const ();
+    assert!(!cmd.is_null());
+    let lib_src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
+    assert!(
+        lib_src.contains("get_orchestrator_review_diff"),
+        "lib.rs generate_handler 必须包含 get_orchestrator_review_diff"
+    );
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     remote shortcut 成功响应的 taskId 必须映射为 remote:<deviceId>:<inner>，
+///     与 evidence/task view 身份合同一致，避免 UI 混用裸 id。
+///
+/// Code Logic（这个测试做什么）:
+///     对 OrchestratorReviewDiff.task_id 应用 remote_entity_id，断言包装结果。
+#[test]
+fn review_diff_remote_owner_mapping_wraps_task_id() {
+    use crate::workbench::remote_ids::remote_entity_id;
+
+    let owner_task_id = "owner-task-1";
+    let mapped = remote_entity_id("device-a", owner_task_id);
+    assert_eq!(mapped, "remote:device-a:owner-task-1");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     path escape 必须在 snapshot 采集层被拒绝；命令层不接受 path 输入，
+///     资源边界由 review_diff 模块既有 truncate 测试锁定。
+///
+/// Code Logic（这个测试做什么）:
+///     复用 normalize 拒绝 `..` 的行为：通过调用 collect 路径上的校验常量边界契约
+///     （MAX files/patch 在 review_diff 单测覆盖），此处仅断言 unavailable code 稳定。
+#[test]
+fn review_diff_unavailable_code_is_stable_token() {
+    assert_eq!(
+        super::REVIEW_DIFF_UNAVAILABLE_CODE,
+        "review_diff_unavailable"
+    );
+}

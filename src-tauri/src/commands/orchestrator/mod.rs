@@ -29,13 +29,16 @@ pub use actions::{
 };
 pub use evidence::{
     __cmd__get_orchestrator_config_for_project, __cmd__get_orchestrator_project_config,
-    __cmd__list_orchestrator_task_evidence, __cmd__list_orchestrator_task_evidence_for_project,
+    __cmd__get_orchestrator_review_diff, __cmd__list_orchestrator_task_evidence,
+    __cmd__list_orchestrator_task_evidence_for_project,
     __tauri_command_name_get_orchestrator_config_for_project,
     __tauri_command_name_get_orchestrator_project_config,
+    __tauri_command_name_get_orchestrator_review_diff,
     __tauri_command_name_list_orchestrator_task_evidence,
     __tauri_command_name_list_orchestrator_task_evidence_for_project,
     get_orchestrator_config_for_project, get_orchestrator_project_config,
-    list_orchestrator_task_evidence, list_orchestrator_task_evidence_for_project,
+    get_orchestrator_review_diff, list_orchestrator_task_evidence,
+    list_orchestrator_task_evidence_for_project,
 };
 pub use remote::{
     __cmd__discard_orchestrator_remote_outbox, __cmd__retry_orchestrator_remote_outbox,
@@ -83,6 +86,10 @@ pub(crate) use common::{
     build_orchestrator_task_row, dispatch_orchestrator_best_effort,
     ensure_reviewed_delivery_allowed, get_orchestrator_runtime_snapshot_for_project,
     run_delivery_for_task,
+};
+pub(crate) use evidence::{
+    ensure_review_diff_available, get_local_owner_orchestrator_review_diff,
+    get_orchestrator_review_diff_for_state, REVIEW_DIFF_UNAVAILABLE_CODE,
 };
 pub use common::{
     CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
