@@ -4,7 +4,8 @@
 
 use crate::error::AppError;
 use crate::orchestrator::claim::{
-    ClaimCandidate, ClaimScanCursor, CLAIM_CANDIDATE_LIMIT,
+    preflight_claim_candidates, ClaimCandidate, ClaimCasOutcome, ClaimScanCursor,
+    CLAIM_CANDIDATE_LIMIT,
 };
 use crate::orchestrator::claude_runtime::ClaudeRuntimeSummary;
 use crate::orchestrator::models::{
@@ -16,11 +17,10 @@ use crate::orchestrator::models::{
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
 };
-use crate::orchestrator::workflow::resolve_project_workflow;
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -960,23 +960,52 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     全局 scheduler 一次 tick 需要按设备级剩余容量，在所有本机 local Workbench 项目中领取项目 workflow 允许的活跃泳道任务。
-    ///     remote 项目必须跳过；项目 WORKFLOW.md 无效时不能把该项目任务提前 claim 到 Preparing。
-    ///     仅看板拖入 Todo 的 Draft 不得被隐式启动——必须 legacy status=Queued（queue/start/createAction）。
+    ///     全局 scheduler / 手动 dispatch 需要按设备级剩余容量领取本机 local 且 workflow 允许的任务。
+    ///     兼容入口保持旧签名；内部改为三阶段：有界候选 → 事务外 preflight → 短 CAS 写事务，
+    ///     不再在事务内做文件 IO 或无界 SELECT。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在单个事务内完成 active local run_state 计数、剩余容量计算、**仅 Queued+Idle** 候选读取和 Preparing 条件更新。
-    ///     Blocked 必须先经用户 retry 原子回到 Queued/Idle，后台 scheduler 不得自动重跑。
-    ///     每个候选按 Workbench 项目 path 动态解析 WORKFLOW.md，使用 ResolvedWorkflow.active_states 判断是否可领取。
-    ///     SELECT 与最终 UPDATE CAS 均要求 status=Queued，避免 Draft/Todo/Idle 被拖拽后自动 claim。
+    ///     limit<=0 直接返回空。否则无 cursor 读最多 256 候选 → `preflight_claim_candidates` →
+    ///     `claim_preflighted_candidates_with_global_capacity`，返回 CAS 成功的 Preparing 行。
+    ///     不维护扫描游标（游标由 scheduler 生命周期拥有）。
     pub async fn claim_next_local_queued_tasks_with_global_capacity(
         &self,
         limit: i64,
     ) -> Result<Vec<OrchestratorTaskRow>, AppError> {
-        let mut tx = self.pool.begin().await?;
         if limit <= 0 {
-            tx.commit().await?;
             return Ok(Vec::new());
+        }
+        let candidates = self
+            .list_local_queued_claim_candidates(None, CLAIM_CANDIDATE_LIMIT)
+            .await?;
+        let preflight = preflight_claim_candidates(candidates).await?;
+        let outcome = self
+            .claim_preflighted_candidates_with_global_capacity(limit, &preflight.eligible)
+            .await?;
+        Ok(outcome.claimed)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     阶段 C 必须在极短写事务内按全局容量 CAS 领取已 preflight 的候选，
+    ///     保证并发 dispatch 不会重复 claim，且事务内零文件/YAML/路径 IO。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     begin 后重算 active local 槽位与 remaining；按 eligible 原序逐条
+    ///     `UPDATE ... WHERE status/workflow_state/run_state` 且
+    ///     `EXISTS(workbench_projects kind='local')`；命中签发新 UUID `prepare_claim_token` 并读回行。
+    ///     begin 之后禁止 std::fs / Path::exists / YAML / project path SELECT。
+    pub async fn claim_preflighted_candidates_with_global_capacity(
+        &self,
+        limit: i64,
+        eligible: &[ClaimCandidate],
+    ) -> Result<ClaimCasOutcome, AppError> {
+        let mut tx = self.pool.begin().await?;
+        if limit <= 0 || eligible.is_empty() {
+            tx.commit().await?;
+            return Ok(ClaimCasOutcome {
+                claimed: Vec::new(),
+                cas_miss: 0,
+            });
         }
 
         let active = sqlx::query(
@@ -994,66 +1023,35 @@ impl OrchestratorRepo {
         let remaining = limit - active;
         if remaining <= 0 {
             tx.commit().await?;
-            return Ok(Vec::new());
+            return Ok(ClaimCasOutcome {
+                claimed: Vec::new(),
+                cas_miss: 0,
+            });
         }
 
-        // 只领取显式入队的 Queued + Idle（Todo/Rework 等 active_states 过滤在下方）；
-        // 禁止领取 Draft（仅拖拽泳道）与 Blocked——Blocked 必须经用户 retry → Idle/Queued。
-        let selected = sqlx::query(&format!(
-            "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
-             WHERE id IN (\
-               SELECT task.id FROM orchestrator_tasks task \
-               INNER JOIN workbench_projects project ON project.id = task.project_id \
-               WHERE project.kind = 'local' \
-                 AND task.status = ? \
-                 AND task.run_state = ? \
-               ORDER BY task.priority DESC, task.created_at ASC\
-             ) \
-             ORDER BY priority DESC, created_at ASC"
-        ))
-        .bind(OrchestratorTaskStatus::Queued.as_str())
-        .bind(OrchestratorRunState::Idle.as_str())
-        .fetch_all(&mut *tx)
-        .await?;
-
         let mut claimed = Vec::new();
-        for row in selected {
+        let mut cas_miss = 0u64;
+        for candidate in eligible {
             if claimed.len() >= remaining as usize {
                 break;
             }
-            let task_id: String = row.try_get("id")?;
-            let project_id: String = row.try_get("project_id")?;
-            let candidate = row_to_task(&row)?;
-            let project_path =
-                sqlx::query("SELECT path FROM workbench_projects WHERE id = ? AND kind = 'local'")
-                    .bind(&project_id)
-                    .fetch_one(&mut *tx)
-                    .await?
-                    .try_get::<String, _>("path")?;
-            let workflow = match resolve_project_workflow(Path::new(&project_path)) {
-                Ok(workflow) => workflow,
-                Err(err) => {
-                    tracing::warn!(
-                        project_id = %project_id,
-                        project_path = %project_path,
-                        "跳过无效 WORKFLOW.md 项目的 Orchestrator dispatch: {err}"
-                    );
-                    continue;
-                }
-            };
-            if !workflow.active_states.contains(&candidate.workflow_state) {
-                continue;
-            }
+            let task_id = candidate.task.id.as_str();
             let now = Utc::now().to_rfc3339();
             // 每次 claim 签发新 token，使旧 runner 的 touch/mark_running CAS 全部失效。
             let claim_token = Uuid::new_v4().to_string();
             let result = sqlx::query(
                 "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, prepare_claim_token = ?, updated_at = ? \
+                 SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                     blocked_reason = ?, prepare_claim_token = ?, updated_at = ? \
                  WHERE id = ? \
                    AND status = ? \
                    AND workflow_state = ? \
-                   AND run_state = ?",
+                   AND run_state = ? \
+                   AND EXISTS (\
+                     SELECT 1 FROM workbench_projects project \
+                     WHERE project.id = orchestrator_tasks.project_id \
+                       AND project.kind = 'local'\
+                   )",
             )
             .bind(OrchestratorTaskStatus::Preparing.as_str())
             .bind(OrchestratorWorkflowState::InProgress.as_str())
@@ -1062,28 +1060,29 @@ impl OrchestratorRepo {
             .bind(Option::<&str>::None)
             .bind(&claim_token)
             .bind(now)
-            .bind(&task_id)
+            .bind(task_id)
             .bind(OrchestratorTaskStatus::Queued.as_str())
-            .bind(candidate.workflow_state.as_str())
+            .bind(candidate.task.workflow_state.as_str())
             .bind(OrchestratorRunState::Idle.as_str())
             .execute(&mut *tx)
             .await?;
 
             if result.rows_affected() != 1 {
+                cas_miss = cas_miss.saturating_add(1);
                 continue;
             }
 
             let updated = sqlx::query(&format!(
                 "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
             ))
-            .bind(&task_id)
+            .bind(task_id)
             .fetch_one(&mut *tx)
             .await?;
             claimed.push(row_to_task(&updated)?);
         }
 
         tx.commit().await?;
-        Ok(claimed)
+        Ok(ClaimCasOutcome { claimed, cas_miss })
     }
 
     /// Business Logic（为什么需要这个函数）:
