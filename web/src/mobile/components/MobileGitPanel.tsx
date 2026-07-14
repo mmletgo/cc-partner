@@ -6,6 +6,7 @@ import {
   httpWorkbenchTransport,
   workbenchHttp,
 } from '@/api/workbenchHttp';
+import { StatusMessage } from '@/components/primitives';
 import { isMutationSucceeded, isMutationUnknown } from '@/lib/asyncState/mutationOutcome';
 import type {
   MutationAuthoritySnapshot,
@@ -194,12 +195,9 @@ export function MobileGitPanel({
       actionContext: MobileGitActionContext,
     ): Promise<'confirmedSucceeded' | 'unknown'> => {
       setMutationPhase('reconciling');
-      let ledger = null as Awaited<ReturnType<typeof workbenchHttp.git.getMutationOperation>>;
-      try {
-        ledger = await workbenchHttp.git.getMutationOperation(clientOperationId);
-      } catch {
-        ledger = null;
-      }
+      const ledger = await workbenchHttp.git
+        .getMutationOperation(clientOperationId)
+        .catch(() => null);
       if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
         return 'unknown';
       }
@@ -455,15 +453,15 @@ export function MobileGitPanel({
       {!project ? <p className={styles.panelState}>{t('workbench:mobile.gitPanel.noProject')}</p> : null}
       {loading ? <p className={styles.panelState}>{t('workbench:gitHistoryLoading')}</p> : null}
       {mutationPhase === 'reconciling' ? (
-        <p className={styles.panelState} role="status">
+        <StatusMessage tone="info" className={styles.panelState}>
           {t('workbench:mobile.gitPanel.reconciling')}
-        </p>
+        </StatusMessage>
       ) : null}
       {error ? (
-        <p className={styles.panelError} role="alert">
+        <StatusMessage tone="danger" className={styles.panelError}>
           <span>{t('workbench:mobile.projectPanel.error')}</span>
           <span>{error}</span>
-        </p>
+        </StatusMessage>
       ) : null}
 
       <section className={styles.mobileStatusCard} aria-label={t('workbench:mobile.gitPanel.statusAriaLabel')}>
@@ -491,6 +489,8 @@ export function MobileGitPanel({
             type="button"
             className={styles.mobileTerminalPrimaryButton}
             disabled={actionDisabled}
+            aria-busy={actionBusy === 'commit' || undefined}
+            aria-label={t('workbench:worktrees.commit')}
             onClick={() => void handleCommit()}
           >
             {actionBusy === 'commit'
@@ -501,6 +501,8 @@ export function MobileGitPanel({
             type="button"
             className={styles.secondaryButton}
             disabled={actionDisabled || !worktree?.status.canPush}
+            aria-busy={actionBusy === 'push' || undefined}
+            aria-label={t('workbench:worktrees.push')}
             onClick={() => void handlePush()}
           >
             {actionBusy === 'push'
@@ -511,6 +513,8 @@ export function MobileGitPanel({
             type="button"
             className={styles.secondaryButton}
             disabled={actionDisabled || worktree?.isMain}
+            aria-busy={actionBusy === 'merge' || undefined}
+            aria-label={t('workbench:worktrees.merge')}
             onClick={() => void handleMerge()}
           >
             {actionBusy === 'merge'

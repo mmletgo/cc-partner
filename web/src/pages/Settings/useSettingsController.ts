@@ -472,18 +472,21 @@ export function useSettingsController(): UseSettingsControllerResult {
   const healthConfigRef = useRef(healthConfig);
   const automationFormRef = useRef(automationForm);
   const initialAutomationFormRef = useRef(initialAutomationForm);
-  stateRef.current = state;
-  initialStateRef.current = initialState;
-  cloudSyncFormRef.current = cloudSyncForm;
-  cloudSyncRef.current = cloudSync;
-  githubTrendingFormRef.current = githubTrendingForm;
-  githubTrendingConfigRef.current = githubTrendingConfig;
-  promptOptimizerFormRef.current = promptOptimizerForm;
-  promptOptimizerConfigRef.current = promptOptimizerConfig;
-  healthFormRef.current = healthForm;
-  healthConfigRef.current = healthConfig;
-  automationFormRef.current = automationForm;
-  initialAutomationFormRef.current = initialAutomationForm;
+  // 将最新表单快照写入 ref，供 await 后的 saveAttempt 解析读取；不得在 render 体直接写 ref.current
+  useEffect(() => {
+    stateRef.current = state;
+    initialStateRef.current = initialState;
+    cloudSyncFormRef.current = cloudSyncForm;
+    cloudSyncRef.current = cloudSync;
+    githubTrendingFormRef.current = githubTrendingForm;
+    githubTrendingConfigRef.current = githubTrendingConfig;
+    promptOptimizerFormRef.current = promptOptimizerForm;
+    promptOptimizerConfigRef.current = promptOptimizerConfig;
+    healthFormRef.current = healthForm;
+    healthConfigRef.current = healthConfig;
+    automationFormRef.current = automationForm;
+    initialAutomationFormRef.current = initialAutomationForm;
+  });
 
   // macOS 权限状态（设置页手动授权入口，持续轮询以反映用户在系统设置的变更）
   const {

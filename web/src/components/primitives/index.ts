@@ -34,6 +34,13 @@ export type { PillProps, PillTone } from './Pill';
 export { StatusDot } from './StatusDot';
 export type { StatusDotProps, StatusDotStatus, StatusDotSize } from './StatusDot';
 
+export { StatusMessage } from './StatusMessage';
+export type {
+  StatusMessageProps,
+  StatusMessageTone,
+  StatusMessageLive,
+} from './StatusMessage';
+
 export { ProgressBar } from './ProgressBar';
 export type { ProgressBarProps, ProgressBarSize, ProgressBarTone } from './ProgressBar';
 

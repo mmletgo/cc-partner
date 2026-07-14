@@ -29,7 +29,7 @@ import { WorkbenchDependencyCard } from '@/components/domain/WorkbenchDependency
 import { WorkbenchFileWorkspace } from '@/components/domain/WorkbenchFileWorkspace';
 import { WorkbenchSessionSearch } from '@/components/domain/WorkbenchSessionSearch';
 import { WorkbenchWorkspaceNav } from '@/components/layout';
-import { Button } from '@/components/primitives';
+import { Button, StatusMessage } from '@/components/primitives';
 import { useWorkbenchDependency } from '@/hooks/workbenchDependencyContext';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import { useWorkbenchTerminalBuffers } from '@/hooks/workbenchTerminalBuffersContext';
@@ -853,8 +853,8 @@ export function Workbench() {
               })}
             </div>
           ) : null}
-          {sessionError ? <div className={styles.errorBox}>{sessionError}</div> : null}
-          {worktreeError ? <div className={styles.errorBox}>{worktreeError}</div> : null}
+          {sessionError ? <StatusMessage tone="danger" className={styles.errorBox}>{sessionError}</StatusMessage> : null}
+          {worktreeError ? <StatusMessage tone="danger" className={styles.errorBox}>{worktreeError}</StatusMessage> : null}
           {dependencyStatus.status !== 'ready' ? <WorkbenchDependencyCard compact className={styles.dependencyNotice} /> : null}
         </div>
 

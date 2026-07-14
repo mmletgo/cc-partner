@@ -1,0 +1,54 @@
+/* StatusMessage 原子反馈样式
+ * 颜色/间距/圆角只读 tokens.css；tone 映射背景与文字色
+ */
+
+.message {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  background: var(--surface-warm);
+  color: var(--fg);
+}
+
+.body {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.action {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.tone-success {
+  border-color: color-mix(in oklab, var(--success) 35%, var(--border-soft));
+  background: color-mix(in oklab, var(--success) 12%, var(--surface));
+  color: var(--success);
+}
+
+.tone-info {
+  border-color: var(--border-soft);
+  background: var(--surface-warm);
+  color: var(--muted);
+}
+
+.tone-warn {
+  border-color: color-mix(in oklab, var(--warn) 40%, var(--border-soft));
+  background: color-mix(in oklab, var(--warn) 14%, var(--surface));
+  color: var(--fg);
+}
+
+.tone-danger {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}

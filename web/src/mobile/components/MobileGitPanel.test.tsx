@@ -181,6 +181,9 @@ describe('MobileGitPanel mutation reconciliation', () => {
     });
 
     await screen.findByText(/操作结果未知/);
+    // 阻断失败：StatusMessage role=alert 恰好一次；busy 按钮 accessible name 仍为 Commit
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'Commit' })).toBeTruthy();
 
     // 动作锁定：再次点击不会盲重放新 commit
     fireEvent.click(screen.getByRole('button', { name: 'Commit' }));

@@ -237,11 +237,13 @@ export function useWorkbenchWorktreeGitController(
 
   // Business Logic: 用户切换 project/worktree 后，挂起 mutation 的 UI busy/error 不得粘在新上下文。
   // Code Logic: 递增 sequence 使旧 settlement 过期，并清空 worktreeBusy/worktreeError。
+  /* eslint-disable react-hooks/set-state-in-effect -- context 切换时必须同步清空 busy/error，避免旧 UI 粘到新上下文 */
   useEffect(() => {
     mutationSequenceRef.current = nextOperationSequence(mutationSequenceRef.current);
     setWorktreeBusy(null);
     setWorktreeError(null);
   }, [activeProjectId, activeWorktreeId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
     mergeProgressWorktreeIdRef.current = mergeProgressWorktreeId;
@@ -586,14 +588,9 @@ export function useWorkbenchWorktreeGitController(
       worktreeId: string,
       settled: WorkbenchOperationKey,
     ): Promise<'confirmedSucceeded' | 'unknown'> => {
-      let ledger = null as Awaited<
-        ReturnType<typeof workbenchApi.worktrees.getMutationOperation>
-      >;
-      try {
-        ledger = await workbenchApi.worktrees.getMutationOperation(clientOperationId);
-      } catch {
-        ledger = null;
-      }
+      const ledger = await workbenchApi.worktrees
+        .getMutationOperation(clientOperationId)
+        .catch(() => null);
       if (!isSettledCurrent(settled)) return 'unknown';
 
       invalidateWorktreeListRequests(projectId);

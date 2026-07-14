@@ -12,7 +12,7 @@
  */
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Card, Pill } from '@/components/primitives';
+import { Button, Card, Pill, StatusMessage } from '@/components/primitives';
 import { EditIcon, SyncIcon, UploadIcon } from '@/lib/icons';
 import type {
   WorkbenchGitCommit,
@@ -253,7 +253,11 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
         </div>
       ) : null}
 
-      {gitHistoryError ? <div className={styles.errorBox}>{gitHistoryError}</div> : null}
+      {gitHistoryError ? (
+        <StatusMessage tone="danger" className={styles.errorBox}>
+          {gitHistoryError}
+        </StatusMessage>
+      ) : null}
 
       <div className={styles.historyPanel}>
         {!activeProjectId ? (

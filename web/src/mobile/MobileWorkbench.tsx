@@ -843,16 +843,9 @@ export function MobileWorkbench(): ReactElement {
             });
             if (isMutationSucceeded(envelope)) return;
             if (isMutationUnknown(envelope)) {
-              let ledger = null as Awaited<
-                ReturnType<typeof workbenchHttp.git.getMutationOperation>
-              >;
-              try {
-                ledger = await workbenchHttp.git.getMutationOperation(
-                  envelope.clientOperationId,
-                );
-              } catch {
-                ledger = null;
-              }
+              const ledger = await workbenchHttp.git
+                .getMutationOperation(envelope.clientOperationId)
+                .catch(() => null);
               await refreshWorktrees({
                 expectedProjectId: operationProjectId ?? undefined,
               });

@@ -152,6 +152,9 @@ describe('ClaudeMd safe save', () => {
     });
     expect(editor.value).toBe('KEEP-ME');
     expect(screen.getByText('claudeMd:unsaved')).toBeTruthy();
+    // 阻断失败：StatusMessage role=alert 恰好一次
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getByRole('alert').textContent).toContain('disk full');
   });
 
   test('stale save success does not overwrite newer draft after later save', async () => {

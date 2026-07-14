@@ -15,7 +15,7 @@
  *   - 使用独立 projectGuard / promptGuard（createLatestRequestGuard）在 success/catch/finally
  *     写状态前校验 token+context；selectedProject 变为 null 时 invalidate promptGuard
  *   - 复制/转存：成功后顶部 toast 提示；刷新/同步失败同样 toast（非阻塞）
- *   - 转存失败：role=alert + 可重试（保留条目快照）；Task 8 再迁 StatusMessage
+ *   - 转存/删除失败：StatusMessage tone=danger（role=alert）+ 可重试（保留条目快照）
  *   - 删除：弹 confirm 二次确认，确认后乐观移除；失败回滚列表项 + 可重试；
  *     成功删除不暴露假 Undo（无后端 restore 合同）
  *   - hooks 全部声明在顶部、用条件渲染（三元）而非 early return（项目铁律）
@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Card, Dialog, Input } from '@/components/primitives';
+import { Button, Card, Dialog, Input, StatusMessage } from '@/components/primitives';
 import { CcHistoryCard } from '@/components/domain';
 import { ccHistoryApi } from '@/api/ccHistory';
 import { promptsApi } from '@/api/prompts';
@@ -271,7 +271,7 @@ export function CcHistory() {
    *
    * Code Logic（这个函数做什么）:
    *   用 content 前 40 字做 title 调 promptsApi.create；成功 toast 并清 actionError；
-   *   失败写入 role=alert 表面与可重试快照（Task 8 再迁 StatusMessage）。
+   *   失败写入 StatusMessage(tone=danger) 与可重试快照。
    */
   const handleSaveAsPrompt = useCallback(
     async (item: CcHistoryItem) => {
@@ -456,14 +456,19 @@ export function CcHistory() {
         </p>
       ) : null}
 
-      {/* 动作失败（转存/删除）：accessible alert + 重试；Task 8 再迁 StatusMessage */}
+      {/* 动作失败（转存/删除）：StatusMessage alert + 重试 */}
       {actionError ? (
-        <div className={styles.actionError} role="alert">
-          <span>{actionError.message}</span>
-          <Button variant="secondary" size="sm" onClick={() => void handleRetryAction()}>
-            {t('common:action.retry')}
-          </Button>
-        </div>
+        <StatusMessage
+          tone="danger"
+          className={styles.actionError}
+          action={
+            <Button variant="secondary" size="sm" onClick={() => void handleRetryAction()}>
+              {t('common:action.retry')}
+            </Button>
+          }
+        >
+          {actionError.message}
+        </StatusMessage>
       ) : null}
 
       {/* 主体双栏 */}
@@ -599,11 +604,11 @@ export function CcHistory() {
         </div>
       </section>
 
-      {/* toast */}
+      {/* 非阻断成功提示：StatusMessage role=status */}
       {toast ? (
-        <div className={styles.toast} role="status" aria-live="polite">
+        <StatusMessage tone="success" className={styles.toast}>
           {toast}
-        </div>
+        </StatusMessage>
       ) : null}
 
       {/* 删除确认弹层：共享 Dialog（portal / Escape / focus trap） */}

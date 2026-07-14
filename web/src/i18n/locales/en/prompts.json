@@ -20,6 +20,7 @@
   "contentPlaceholder": "Prompt content…",
   "contentAriaLabel": "Prompt content",
   "tagInputPlaceholder": "Type a tag and press Enter to add",
+  "tagInputAriaLabel": "Prompt tags",
   "skeletonAriaLabel": "Loading prompts",
   "createFailed": "Failed to create: {{error}}",
   "createFailedGeneric": "Failed to create prompt",

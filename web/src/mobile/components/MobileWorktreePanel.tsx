@@ -210,12 +210,9 @@ export function MobileWorktreePanel({
       worktree: WorkbenchWorktree,
     ): Promise<'confirmedSucceeded' | 'unknown'> => {
       setMutationPhase('reconciling');
-      let ledger = null as Awaited<ReturnType<typeof workbenchHttp.git.getMutationOperation>>;
-      try {
-        ledger = await workbenchHttp.git.getMutationOperation(clientOperationId);
-      } catch {
-        ledger = null;
-      }
+      const ledger = await workbenchHttp.git
+        .getMutationOperation(clientOperationId)
+        .catch(() => null);
 
       await onRefreshWorktrees?.({
         expectedProjectId: worktree.projectId,
