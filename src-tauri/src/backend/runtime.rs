@@ -384,6 +384,9 @@ pub async fn build_app_state_with_role(
     let store = Arc::new(FsConfigStore::default_path()?);
     // sidecar/GUI 共享构造入口：生成一次 owner 实例 id，供 control 文件与 ConfigRuntime CAS 共用。
     let owner_instance_id = uuid::Uuid::new_v4().to_string();
+    let event_bus = Arc::new(crate::backend::event_bus::RuntimeEventBus::new(
+        owner_instance_id.clone(),
+    ));
     let config_runtime = Arc::new(ConfigRuntime::with_owner(loaded, store, owner_instance_id));
     let config = config_runtime.shared_value();
     let device_id = config
@@ -462,6 +465,7 @@ pub async fn build_app_state_with_role(
         workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
         runtime_metrics: Arc::new(RuntimeMetrics::new()),
         runtime_role,
+        event_bus,
     })
 }
 

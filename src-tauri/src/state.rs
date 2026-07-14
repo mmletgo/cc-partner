@@ -16,6 +16,7 @@
 //!     discovery 句柄用 Mutex<Option<...>>（仅启动/关闭时写）。
 
 use crate::backend::authority::RuntimeRole;
+use crate::backend::event_bus::RuntimeEventBus;
 use crate::backend::runtime_metrics::RuntimeMetrics;
 use crate::backend::ui::{serialize_event_payload, BackendAsset, BackendUi};
 use crate::cloud_sync::CloudSyncRuntime;
@@ -138,6 +139,8 @@ pub struct AppState {
     pub runtime_metrics: Arc<RuntimeMetrics>,
     /// 运行时角色：sidecar=`HeadlessOwner`（唯一 Workbench/runtime owner），GUI=`GuiClient`（仅代理）。
     pub runtime_role: RuntimeRole,
+    /// sidecar 有界事件总线（owner 发布；GUI 经 control relay afterSequence 消费）。
+    pub event_bus: Arc<RuntimeEventBus>,
 }
 
 impl AppState {
@@ -162,14 +165,20 @@ impl AppState {
     ///     运行时业务层需要广播终端输出、传输状态等事件，但 GUI/headless 两种模式的处理方式不同。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     先把任意可序列化 payload 转为 JSON Value；成功则委托 `BackendUi::emit`，失败则记录 warn。
+    ///     先把任意可序列化 payload 转为 JSON Value；HeadlessOwner 同时写入 `event_bus`
+    ///     （供 GUI control relay），再委托 `BackendUi::emit`；序列化失败仅 warn。
     #[allow(dead_code)]
     pub fn emit_event<T>(&self, event: &str, payload: T)
     where
         T: Serialize,
     {
         match serialize_event_payload(payload) {
-            Ok(value) => self.ui.emit(event, value),
+            Ok(value) => {
+                if self.runtime_role == RuntimeRole::HeadlessOwner {
+                    let _ = self.event_bus.publish(event, value.clone());
+                }
+                self.ui.emit(event, value);
+            }
             Err(error) => tracing::warn!("序列化事件 {event} 失败: {error}"),
         }
     }

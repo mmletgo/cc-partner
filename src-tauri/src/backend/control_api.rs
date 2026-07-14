@@ -10,6 +10,10 @@
 //!     从不记录 control token。
 
 use crate::backend::control::{self, BackendControlFile};
+use crate::backend::event_bus::{BackendRuntimeCursor, RuntimeRelayMessage};
+use crate::commands::orchestrator::{
+    get_orchestrator_runtime_snapshot_for_state_with_request_id, OrchestratorRuntimeSnapshotDto,
+};
 use crate::config_runtime::{
     ConfigSnapshot, ConfigUpdateResponse, OrchestratorRuntimeSummary, RuntimeConfigPatch,
     RuntimeOwnerStatus,
@@ -19,10 +23,16 @@ use crate::net::error_response::{P2pError, P2pErrorCode, P2pResult};
 use crate::net::lan_guard::require_loopback_peer;
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
+use axum::body::Body;
 use axum::extract::{ConnectInfo, Extension, State};
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures_util::stream;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 /// control API 请求体上限（256 KiB）。
 pub const CONTROL_REQUEST_BODY_LIMIT_BYTES: usize = 256 * 1024;
@@ -139,6 +149,160 @@ pub async fn control_update_config(
         .map_err(|e| P2pError::from_app_error(e, &context, "control.update_config"))?;
     ensure_response_within_limit(&response, &context)?;
     Ok(Json(response))
+}
+
+/// Orchestrator runtime snapshot 请求（token + projectId）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     桌面 GUI 不得读本地空 telemetry，必须经 control 拉取 sidecar remote-aware 快照。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + projectId。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlRuntimeSnapshotRequest {
+    pub control_token: String,
+    pub project_id: String,
+}
+
+/// 事件 catch-up / stream 请求。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GUI 用 afterSequence + owner 重连；owner 变化时服务端按新 owner 清旧游标语义处理。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + 可选 afterOwnerInstanceId + afterSequence。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlEventsRequest {
+    pub control_token: String,
+    #[serde(default)]
+    pub after_owner_instance_id: Option<String>,
+    #[serde(default)]
+    pub after_sequence: Option<u64>,
+}
+
+/// 事件 catch-up 响应。
+///
+/// Business Logic（为什么需要这个结构）:
+///     批量回放 + 最新游标，便于 smoke 与 GUI 先 resync 再 attach live。
+///
+/// Code Logic（这个结构做什么）:
+///     messages 为 Event/Gap；latest 为当前 owner 最新 cursor。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlEventsCatchUpResponse {
+    pub messages: Vec<RuntimeRelayMessage>,
+    pub latest: BackendRuntimeCursor,
+}
+
+/// 返回 sidecar 权威 Orchestrator runtime snapshot。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面状态条必须展示 owner scheduler tick，禁止 GUI 用本地空 telemetry 补值。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → `get_orchestrator_runtime_snapshot_for_state`（owner 本地 remote-aware 路径）。
+pub async fn control_orchestrator_runtime_snapshot(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlRuntimeSnapshotRequest>,
+) -> P2pResult<Json<OrchestratorRuntimeSnapshotDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    let snapshot = get_orchestrator_runtime_snapshot_for_state_with_request_id(
+        &state,
+        &request.project_id,
+        None,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &context, "control.runtime_snapshot"))?;
+    ensure_response_within_limit(&snapshot, &context)?;
+    Ok(Json(snapshot))
+}
+
+/// 有界事件 catch-up（afterSequence）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI 断线重连需要 ring 回放；若游标早于 ring 必须先收到 Gap。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → open_relay 排空 pending（catch-up 部分）→ 返回 messages + latest。
+pub async fn control_events_catch_up(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlEventsRequest>,
+) -> P2pResult<Json<ControlEventsCatchUpResponse>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    let after = match (
+        request.after_owner_instance_id.as_deref(),
+        request.after_sequence,
+    ) {
+        (Some(owner), Some(seq)) if !owner.is_empty() => Some(BackendRuntimeCursor {
+            owner_instance_id: owner.to_string(),
+            sequence: seq,
+        }),
+        _ => None,
+    };
+    let mut relay = state.event_bus.open_relay(after.as_ref());
+    let mut messages = Vec::new();
+    while let Some(msg) = relay.try_recv() {
+        messages.push(msg);
+    }
+    let latest = BackendRuntimeCursor {
+        owner_instance_id: state.event_bus.owner_instance_id().to_string(),
+        sequence: state.event_bus.latest_sequence(),
+    };
+    let body = ControlEventsCatchUpResponse { messages, latest };
+    ensure_response_within_limit(&body, &context)?;
+    Ok(Json(body))
+}
+
+/// 事件 NDJSON 流：先 catch-up，再 live（可取消连接即停）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI 需要可取消的本机 relay，持续接收 terminal/merge/transfer/runtime 事件。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → open_relay → NDJSON stream；鉴权失败返回 401/403 JSON。
+pub async fn control_events_stream(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlEventsRequest>,
+) -> Response {
+    if let Err(err) = authorize_control_request(peer, &context, &request.control_token) {
+        return err.into_response();
+    }
+    let after = match (
+        request.after_owner_instance_id.as_deref(),
+        request.after_sequence,
+    ) {
+        (Some(owner), Some(seq)) if !owner.is_empty() => Some(BackendRuntimeCursor {
+            owner_instance_id: owner.to_string(),
+            sequence: seq,
+        }),
+        _ => None,
+    };
+    let bus = Arc::clone(&state.event_bus);
+    let relay = bus.open_relay(after.as_ref());
+    let stream = stream::unfold(relay, |mut relay| async move {
+        let msg = relay.recv().await?;
+        let line = serde_json::to_string(&msg).ok()?;
+        Some((Ok::<_, Infallible>(format!("{line}\n")), relay))
+    });
+    let mut response = Response::new(Body::from_stream(stream));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/x-ndjson"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    response
 }
 
 /// loopback + control token 双重鉴权。

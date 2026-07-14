@@ -3918,6 +3918,9 @@ mod tests {
             )),
             runtime_metrics: Arc::new(crate::backend::runtime_metrics::RuntimeMetrics::new()),
             runtime_role: crate::backend::authority::RuntimeRole::HeadlessOwner,
+            event_bus: Arc::new(crate::backend::event_bus::RuntimeEventBus::new(
+                "transfer-test-owner",
+            )),
         }
     }
 

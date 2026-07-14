@@ -158,6 +158,20 @@ pub fn run() {
                 start_background_tasks(state.inner(), runtime_mode);
             }
 
+            // N1 Task5：GUI 订阅 sidecar 事件总线（afterSequence + Gap resync）。
+            {
+                let state: tauri::State<'_, AppState> = app.state();
+                let ui = Arc::clone(&state.ui);
+                let cancel = tokio_util::sync::CancellationToken::new();
+                // 与 health 一样挂到进程生命周期：应用退出时 cancel 由 shutdown 路径处理；
+                // 此处 token 在 GUI 进程存活期间保持，任务随进程结束。
+                let cancel_for_task = cancel.clone();
+                let _ = cancel; // 持有到 setup 结束即可；任务自行随进程退出
+                tauri::async_runtime::spawn(async move {
+                    crate::backend::ui::run_gui_owner_event_relay(ui, cancel_for_task).await;
+                });
+            }
+
             // 启动健康监测 daemon（采样线程 + 处理 task），取消令牌存入 AppState 供应用退出时优雅停止。
             // start_health_daemon 内部用 tauri::async_runtime::spawn，同步段调用安全（无需当前线程 reactor）。
             {

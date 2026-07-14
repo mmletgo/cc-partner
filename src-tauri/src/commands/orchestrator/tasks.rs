@@ -6,6 +6,8 @@
 //! Code Logic（这个模块做什么）:
 //!     命令与 pub(crate) helpers。
 
+use crate::backend::authority::RuntimeRole;
+use crate::backend::control_client::BackendControlClient;
 use crate::error::AppError;
 use crate::orchestrator::models::OrchestratorTaskDto;
 use crate::orchestrator::outbox::{
@@ -388,6 +390,13 @@ pub(crate) async fn get_orchestrator_runtime_snapshot_for_state_with_request_id(
     project_id: &str,
     forwarded_request_id: Option<&str>,
 ) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
+    // GuiClient 必须代理到 sidecar owner；禁止用 GUI 本地空 telemetry 填充 owner 字段。
+    // control API 在 HeadlessOwner 上调用本函数时不会进入此分支，避免递归。
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .orchestrator_runtime_snapshot(project_id)
+            .await;
+    }
     let project = get_orchestrator_workbench_project(state, project_id).await?;
     // 远端 shortcut 不得读本机 scheduler/config/workflow 冒充 owner 状态。
     // 共享 builder 只负责本地项目；远端守卫与四态分发留在命令层。

@@ -11,6 +11,8 @@
 
 use crate::backend::authority::{classify_control_descriptor, CONTROL_SCHEMA_VERSION};
 use crate::backend::control::{self, BackendControlFile};
+use crate::backend::event_bus::{BackendRuntimeCursor, RuntimeRelayMessage};
+use crate::commands::orchestrator::OrchestratorRuntimeSnapshotDto;
 use crate::config_runtime::{
     ConfigSnapshot, ConfigUpdateRequest, ConfigUpdateResponse, RuntimeConfigPatch,
     RuntimeOwnerStatus,
@@ -108,6 +110,33 @@ struct ControlConfigUpdateBody {
     expected_owner_instance_id: String,
     expected_generation: u64,
     patch: RuntimeConfigPatch,
+}
+
+/// runtime-snapshot HTTP body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlRuntimeSnapshotBody {
+    control_token: String,
+    project_id: String,
+}
+
+/// events catch-up HTTP body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlEventsBody {
+    control_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after_owner_instance_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after_sequence: Option<u64>,
+}
+
+/// events catch-up 响应。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlEventsCatchUp {
+    pub messages: Vec<RuntimeRelayMessage>,
+    pub latest: BackendRuntimeCursor,
 }
 
 /// 对账后截图快捷键 OS 侧应保留的状态。
@@ -430,6 +459,49 @@ impl BackendControlClient {
             return Err(AppError::generic("workbench control 响应缺少 ownerInstanceId"));
         }
         Ok((resp.owner_instance_id, resp.result))
+    }
+
+    /// 经 control API 拉取 sidecar Orchestrator runtime snapshot。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     桌面 GUI 不得用本机空 telemetry 填充 owner 字段；必须代理到 sidecar remote-aware 路由。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/runtime-snapshot`；查询允许一次 control-file 刷新。
+    pub async fn orchestrator_runtime_snapshot(
+        &self,
+        project_id: &str,
+    ) -> Result<OrchestratorRuntimeSnapshotDto, AppError> {
+        self.query_with_optional_refresh(
+            "orchestrator/runtime-snapshot",
+            &ControlRuntimeSnapshotBody {
+                control_token: self.control_token.clone(),
+                project_id: project_id.to_string(),
+            },
+        )
+        .await
+    }
+
+    /// 经 control API 做 afterSequence 事件 catch-up。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GUI 断线重连需要 ring 回放与显式 Gap，以便 terminal/runtime resync。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `events/catch-up`；可选 after owner/sequence；查询允许一次刷新。
+    pub async fn events_catch_up(
+        &self,
+        after: Option<&BackendRuntimeCursor>,
+    ) -> Result<ControlEventsCatchUp, AppError> {
+        self.query_with_optional_refresh(
+            "events/catch-up",
+            &ControlEventsBody {
+                control_token: self.control_token.clone(),
+                after_owner_instance_id: after.map(|c| c.owner_instance_id.clone()),
+                after_sequence: after.map(|c| c.sequence),
+            },
+        )
+        .await
     }
 
     /// 提交字段级 patch：先读 status 再 CAS 一次。

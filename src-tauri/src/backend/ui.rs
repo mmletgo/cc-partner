@@ -7,10 +7,18 @@
 //! Code Logic（这个模块做什么）:
 //!     实现 `BackendUi` trait，以及 Tauri GUI 和 headless 两种适配器。
 
+use crate::backend::control_client::BackendControlClient;
+use crate::backend::event_bus::{GuiEventRelayState, RelayClientAction};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+use tokio_util::sync::CancellationToken;
+
+/// GUI 收到 owner event Gap 后的 Tauri 事件名（触发 terminal replay + runtime snapshot 刷新）。
+pub const BACKEND_RUNTIME_GAP_EVENT: &str = "backend:runtime-gap";
 
 /// 后端 UI 静态资源载荷。
 ///
@@ -78,6 +86,70 @@ impl BackendAsset {
     ///     将内部 `Option<String>` 转为 `Option<&str>`，避免调用方 clone。
     pub fn csp_header(&self) -> Option<&str> {
         self.csp_header.as_deref()
+    }
+}
+
+/// 运行 GUI 进程对本机 sidecar 的事件 relay 循环。
+///
+/// Business Logic（为什么需要这个函数）:
+///     sidecar 是唯一事件源；GUI 必须用 afterSequence 消费 owner 事件，Gap 时通知前端 resync。
+///
+/// Code Logic（这个函数做什么）:
+///     循环：from_control_file → events_catch_up(after cursor) → GuiEventRelayState 处理；
+///     Deliver 转发原始 event；RequestResync 发 `backend:runtime-gap` 并 attach 到 latest；
+///     cancel 或持续短暂退避。
+pub async fn run_gui_owner_event_relay(ui: Arc<dyn BackendUi>, cancel: CancellationToken) {
+    let mut relay_state = GuiEventRelayState::default();
+    loop {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let client = match BackendControlClient::from_control_file() {
+            Ok(client) => client,
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
+        let after = relay_state.cursor();
+        match client.events_catch_up(after.as_ref()).await {
+            Ok(batch) => {
+                for message in batch.messages {
+                    match relay_state.on_message(message) {
+                        RelayClientAction::Deliver { event, payload } => {
+                            ui.emit(&event, payload);
+                        }
+                        RelayClientAction::DropDuplicate => {}
+                        RelayClientAction::RequestResync {
+                            owner_instance_id,
+                            oldest_available,
+                            latest,
+                        } => {
+                            ui.emit(
+                                BACKEND_RUNTIME_GAP_EVENT,
+                                json!({
+                                    "ownerInstanceId": owner_instance_id,
+                                    "oldestAvailable": oldest_available,
+                                    "latest": latest,
+                                }),
+                            );
+                            // Gap 后先以 latest 附着，等待前端完成 terminal/runtime 刷新。
+                            relay_state.attach_at(batch.latest.clone());
+                        }
+                    }
+                }
+                if relay_state.cursor().is_none() && batch.latest.sequence > 0 {
+                    relay_state.attach_at(batch.latest);
+                }
+            }
+            Err(error) => {
+                tracing::debug!("GUI owner event relay catch-up 失败: {error}");
+            }
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
     }
 }
 

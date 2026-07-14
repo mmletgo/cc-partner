@@ -13,6 +13,7 @@ pub mod control_api;
 pub mod control_client;
 pub mod control_workbench;
 pub mod doctor;
+pub mod event_bus;
 pub mod logging;
 pub mod runtime;
 pub mod runtime_metrics;
