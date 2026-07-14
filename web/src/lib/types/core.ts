@@ -106,6 +106,84 @@ export interface Device {
 export type TransferDirection = 'send' | 'receive';
 export type TransferStatus = 'pending' | 'transferring' | 'completed' | 'failed' | 'cancelled';
 
+/**
+ * 传输细粒度阶段（对齐 Rust TransferPhase camelCase）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   UI 动作矩阵与历史分区依赖 queued/connecting/transferring/finalizing 等阶段，
+ *   不能只靠 coarse status 判断是否允许 cancel/retry/resume。
+ *
+ * Code Logic（这个类型做什么）:
+ *   闭集字符串联合；未知后端值必须在 decoder 层 reject，不得映射 failed。
+ */
+export type TransferPhase =
+  | 'queued'
+  | 'connecting'
+  | 'transferring'
+  | 'finalizing'
+  | 'completed'
+  | 'cancelled'
+  | 'failed';
+
+/**
+ * 失败发生阶段（对齐 Rust TransferFailureStage）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   retry/resume 决策依赖失败发生在 connect/transfer/finalize/source 等哪一步。
+ *
+ * Code Logic（这个类型做什么）:
+ *   闭集字符串联合；未知 stage 由 decoder reject。
+ */
+export type TransferFailureStage =
+  | 'connect'
+  | 'transfer'
+  | 'finalize'
+  | 'source'
+  | 'protocol'
+  | 'local'
+  | 'unknown';
+
+/**
+ * 结构化失败信息（对齐 Rust TransferFailure）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   失败卡需要稳定 code、是否可重试与用户可读 message，不能只靠 errorMessage 字符串。
+ *
+ * Code Logic（字段说明）:
+ *   stage 为闭集；code/message 为字符串；retryable 决定是否渲染 Retry/Resume。
+ */
+export interface TransferFailure {
+  stage: TransferFailureStage;
+  code: string;
+  retryable: boolean;
+  message: string;
+}
+
+/**
+ * 发送端 clientOperationId 对账结果（对齐 Rust TransferOperationStatus）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   timeout/断线后 UI 不得盲重试；必须先按 clientOperationId 查询 notFound/pending/succeeded/failed。
+ *
+ * Code Logic（这个类型做什么）:
+ *   tag=`status` 判别联合；succeeded 带 taskId，failed 带稳定 code。
+ */
+export type TransferOperationStatus =
+  | { status: 'notFound' }
+  | { status: 'pending' }
+  | { status: 'succeeded'; taskId: string }
+  | { status: 'failed'; code: string };
+
+/**
+ * 传输任务 DTO（对齐 Rust TransferTaskDto camelCase + recovery 字段）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   列表与 retry/resume 返回值共享；UI 需要 phase/failure/attempt 身份字段驱动动作矩阵。
+ *
+ * Code Logic（字段说明）:
+ *   保留 coarse status；N5 增补 phase/failure/attempt 与 logical/attempt/protocol/clientOperation 身份；
+ *   可选字段兼容 mock/旧 fixture（后端 list/retry/resume 会填 recovery）。
+ */
 export interface TransferTask {
   id: string;
   fileName: string;
@@ -120,6 +198,24 @@ export interface TransferTask {
   errorMessage?: string;
   startedAt: string;
   completedAt?: string;
+  /** 已传输字节数（进度数字展示；旧 fixture 可缺） */
+  transferredBytes?: number;
+  /** 细粒度阶段；旧 fixture 可缺，后端 list 会由 status 推导后填入 */
+  phase?: TransferPhase;
+  /** 结构化失败；非失败任务为 null/缺省 */
+  failure?: TransferFailure | null;
+  /** 同一 logical transfer 下的 attempt 序号 */
+  attempt?: number;
+  /** 逻辑传输 ID（跨 retry 稳定） */
+  logicalTransferId?: string;
+  /** 本 attempt 身份 */
+  attemptId?: string;
+  /** 协议层 transfer id（resume 复用） */
+  protocolTransferId?: string;
+  /** 发送端全局幂等键 */
+  clientOperationId?: string | null;
+  /** 操作 payload 规范哈希 */
+  operationPayloadHash?: string | null;
 }
 
 /**

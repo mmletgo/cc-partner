@@ -2,13 +2,16 @@
  * Transfer API - 文件传输任务（Tauri invoke 版本）
  *
  * Business Logic（为什么需要这个模块）:
- *   传输面板通过 invoke 列出任务、发起发送、取消任务、以及 same-device Open/Reveal 准备；
- *   返回值必须对齐后端真实 DTO，避免把 send 误当成完整 TransferTask 或把 cancel 当成 void。
+ *   传输面板通过 invoke 列出任务、发起发送、取消任务、幂等 retry/resume、operation 对账，
+ *   以及 same-device Open/Reveal 准备；返回值必须对齐后端真实 DTO，避免把 send 误当成完整
+ *   TransferTask、把 cancel 当成 void，或把非法 phase/operation 写入 UI。
  *
  * Code Logic（这个模块做什么）:
  *   list → list_transfers → TransferTask[]（runtime decode）；
  *   send → send_transfer → SendTransferResult；
  *   cancel → cancel_transfer → CancelTransferResult；
+ *   retry/resume → retry_transfer/resume_transfer → TransferTask；
+ *   getOperation → get_transfer_operation → TransferOperationStatus；
  *   prepareOpen → prepare_transfer_open → LocalTransferOpenTarget；
  *   open/reveal → prepareOpen + Tauri plugin-opener（权限/平台失败映射稳定本地错误）。
  */
@@ -17,11 +20,14 @@ import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import {
   cancelTransferResultDecoder,
   sendTransferResultDecoder,
+  transferOperationStatusDecoder,
+  transferTaskDecoder,
   transferTasksDecoder,
 } from '@/lib/schemas/transfer';
 import type {
   CancelTransferResult,
   SendTransferResult,
+  TransferOperationStatus,
   TransferTask,
 } from '@/lib/types';
 import {
@@ -116,6 +122,48 @@ export const transferApi = {
    */
   cancel: (taskId: string): Promise<CancelTransferResult> =>
     invokeDecoded('cancel_transfer', { taskId }, cancelTransferResultDecoder),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   失败且可重试时用户点「重新传输」；同一 clientOperationId 幂等，禁止盲重放不同 payload。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded retry_transfer({ taskId, clientOperationId }) → TransferTask。
+   */
+  retry: (taskId: string, clientOperationId: string): Promise<TransferTask> =>
+    invokeDecoded(
+      'retry_transfer',
+      { taskId, clientOperationId },
+      transferTaskDecoder,
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   有 resume metadata 时用户点「继续传输」；稳定 clientOperationId 保证幂等 claim。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded resume_transfer({ taskId, clientOperationId }) → TransferTask。
+   */
+  resume: (taskId: string, clientOperationId: string): Promise<TransferTask> =>
+    invokeDecoded(
+      'resume_transfer',
+      { taskId, clientOperationId },
+      transferTaskDecoder,
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   transport timeout / lost ACK 后必须先对账，再决定是否 retry/resume。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded get_transfer_operation({ clientOperationId }) → TransferOperationStatus。
+   */
+  getOperation: (clientOperationId: string): Promise<TransferOperationStatus> =>
+    invokeDecoded(
+      'get_transfer_operation',
+      { clientOperationId },
+      transferOperationStatusDecoder,
+    ),
 
   /**
    * Business Logic（为什么需要这个函数）:

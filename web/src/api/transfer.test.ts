@@ -2,8 +2,9 @@
  * Transfer API 契约单元测试。
  *
  * Business Logic（为什么需要这个测试）:
- *   send/cancel 必须对齐后端真实 DTO，不能再把 send 当 TransferTask、cancel 当 void；
- *   prepareOpen/open/reveal 必须调用 prepare_transfer_open 且 opener 失败映射稳定本地错误。
+ *   send/cancel 必须对齐后端真实 DTO；retry/resume 必须带稳定 clientOperationId；
+ *   getOperation 解码 TransferOperationStatus；prepareOpen/open/reveal 必须调用
+ *   prepare_transfer_open 且 opener 失败映射稳定本地错误。
  *
  * Code Logic（这个测试做什么）:
  *   mock invoke 与 plugin-opener；通过 invokeDecoded 走真实 decoder；锁定命令名、参数与返回形状。
@@ -12,7 +13,12 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import type { Decoder } from '@/lib/runtimeSchema';
-import type { CancelTransferResult, SendTransferResult, TransferTask } from '@/lib/types';
+import type {
+  CancelTransferResult,
+  SendTransferResult,
+  TransferOperationStatus,
+  TransferTask,
+} from '@/lib/types';
 
 const mockInvoke = vi.fn();
 const mockOpenPath = vi.fn();
@@ -36,6 +42,23 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 }));
 
 import { mapOpenerError, transferApi } from './transfer';
+
+const recoveryTask: TransferTask = {
+  id: 't1',
+  fileName: 'a.txt',
+  filePath: '/tmp/a.txt',
+  fileSize: 1,
+  direction: 'send',
+  status: 'pending',
+  progress: 0,
+  startedAt: '2026-07-13T00:00:00.000Z',
+  phase: 'queued',
+  attempt: 2,
+  logicalTransferId: 'logical-1',
+  attemptId: 'attempt-2',
+  protocolTransferId: 'proto-1',
+  clientOperationId: 'op1',
+};
 
 describe('transferApi', () => {
   beforeEach(() => {
@@ -97,6 +120,42 @@ describe('transferApi', () => {
     expect(result).toEqual(payload);
     expect(result.ok).toBe(true);
     expect(result.id).toBe('transfer-9');
+  });
+
+  test('resume sends taskId and stable clientOperationId', async () => {
+    mockInvoke.mockResolvedValueOnce(recoveryTask);
+
+    await transferApi.resume('t1', 'op1');
+
+    expect(mockInvoke).toHaveBeenCalledWith('resume_transfer', {
+      taskId: 't1',
+      clientOperationId: 'op1',
+    });
+  });
+
+  test('retry sends taskId and stable clientOperationId', async () => {
+    mockInvoke.mockResolvedValueOnce(recoveryTask);
+
+    const result = await transferApi.retry('t1', 'op-retry');
+
+    expect(mockInvoke).toHaveBeenCalledWith('retry_transfer', {
+      taskId: 't1',
+      clientOperationId: 'op-retry',
+    });
+    expect(result.clientOperationId).toBe('op1');
+    expect(result.phase).toBe('queued');
+  });
+
+  test('getOperation decodes TransferOperationStatus', async () => {
+    const payload: TransferOperationStatus = { status: 'succeeded', taskId: 't9' };
+    mockInvoke.mockResolvedValueOnce(payload);
+
+    const result = await transferApi.getOperation('op-ledger');
+
+    expect(mockInvoke).toHaveBeenCalledWith('get_transfer_operation', {
+      clientOperationId: 'op-ledger',
+    });
+    expect(result).toEqual(payload);
   });
 
   test('prepareOpen invokes prepare_transfer_open with action', async () => {
@@ -173,11 +232,14 @@ describe('transferApi', () => {
     );
   });
 
-  test('source wires invokeDecoded to send/cancel/list/prepare result DTOs', () => {
+  test('source wires invokeDecoded to recovery and open result DTOs', () => {
     const source = readFileSync(new URL('./transfer.ts', import.meta.url), 'utf8');
     expect(source).toContain("invokeDecoded('send_transfer'");
     expect(source).toContain("invokeDecoded('cancel_transfer'");
     expect(source).toContain("invokeDecoded('list_transfers'");
+    expect(source).toContain("'retry_transfer'");
+    expect(source).toContain("'resume_transfer'");
+    expect(source).toContain("'get_transfer_operation'");
     expect(source).toContain("invokeDecoded(\n      'prepare_transfer_open'");
     expect(source).not.toContain("invoke<TransferTask>('send_transfer'");
     expect(source).not.toContain("invoke<void>('cancel_transfer'");

@@ -1,28 +1,37 @@
 /**
- * Transfer 任务 / 受理结果 / 进度事件运行时 schema。
+ * Transfer 任务 / 受理结果 / 进度事件 / recovery operation 运行时 schema。
  *
  * Business Logic（为什么需要这个模块）:
- *   传输页不得把 send 结果误当完整任务，也不得用损坏 progress 事件推进 UI。
+ *   传输页不得把 send 结果误当完整任务，也不得用损坏 progress 事件或非法 phase/failure/operation
+ *   推进 UI；retry/resume/getOperation 边界必须 fail-closed。
  *
  * Code Logic（这个模块做什么）:
- *   解码 TransferTask、Send/Cancel 结果与 progress/status 事件。
+ *   解码 TransferTask（含 recovery 字段）、Send/Cancel 结果、progress/status 事件与
+ *   TransferOperationStatus 判别联合；phase/failure/operation 闭集，未知值 reject。
  */
 
 import type {
   CancelTransferResult,
   SendTransferResult,
   TransferDirection,
+  TransferFailure,
+  TransferFailureStage,
+  TransferOperationStatus,
+  TransferPhase,
   TransferStatus,
   TransferTask,
 } from '../types/core';
 import {
   arrayDecoder,
+  booleanDecoder,
   enumDecoder,
   literalDecoder,
+  nullableDecoder,
   numberDecoder,
   objectDecoder,
   optionalDecoder,
   stringDecoder,
+  unionDecoder,
   type Decoder,
 } from '../runtimeSchema';
 
@@ -41,10 +50,80 @@ const statusDecoder: Decoder<TransferStatus> = enumDecoder('TransferStatus', [
 
 /**
  * Business Logic（为什么需要这个 decoder）:
- *   任务列表是传输页主状态。
+ *   phase 驱动动作矩阵；未知后端值不得映射 failed 或 silent 吞掉。
  *
  * Code Logic（这个 decoder 做什么）:
- *   必填核心字段；可选 peer/speed/error/completedAt 显式 optional。
+ *   闭集枚举：queued/connecting/transferring/finalizing/completed/cancelled/failed。
+ */
+export const transferPhaseDecoder: Decoder<TransferPhase> = enumDecoder('TransferPhase', [
+  'queued',
+  'connecting',
+  'transferring',
+  'finalizing',
+  'completed',
+  'cancelled',
+  'failed',
+] as const);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   failure.stage 决定 retry/resume 展示；非法 stage 不得进入状态。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   闭集枚举：connect/transfer/finalize/source/protocol/local/unknown。
+ */
+export const transferFailureStageDecoder: Decoder<TransferFailureStage> = enumDecoder(
+  'TransferFailureStage',
+  ['connect', 'transfer', 'finalize', 'source', 'protocol', 'local', 'unknown'] as const,
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   结构化失败卡需要完整 stage/code/retryable/message。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   必填四字段；stage 闭集；retryable 必须是 boolean。
+ */
+export const transferFailureDecoder: Decoder<TransferFailure> = objectDecoder('TransferFailure', {
+  stage: transferFailureStageDecoder,
+  code: stringDecoder,
+  retryable: booleanDecoder,
+  message: stringDecoder,
+});
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   timeout 后对账结果必须是闭集 status 联合，禁止把未知 tag 当 succeeded。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   tag=status 联合：notFound / pending / succeeded{taskId} / failed{code}。
+ */
+export const transferOperationStatusDecoder: Decoder<TransferOperationStatus> = unionDecoder<
+  TransferOperationStatus
+>('TransferOperationStatus', [
+  objectDecoder('TransferOperationStatusNotFound', {
+    status: literalDecoder('notFound'),
+  }),
+  objectDecoder('TransferOperationStatusPending', {
+    status: literalDecoder('pending'),
+  }),
+  objectDecoder('TransferOperationStatusSucceeded', {
+    status: literalDecoder('succeeded'),
+    taskId: stringDecoder,
+  }),
+  objectDecoder('TransferOperationStatusFailed', {
+    status: literalDecoder('failed'),
+    code: stringDecoder,
+  }),
+]);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   任务列表是传输页主状态；recovery 字段驱动历史动作。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   必填核心字段；可选 peer/speed/error/completedAt/recovery；
+ *   phase/failure 存在时严格闭集解码（含 null failure）。
  */
 export const transferTaskDecoder: Decoder<TransferTask> = objectDecoder('TransferTask', {
   id: stringDecoder,
@@ -60,6 +139,15 @@ export const transferTaskDecoder: Decoder<TransferTask> = objectDecoder('Transfe
   errorMessage: optionalDecoder(stringDecoder),
   startedAt: stringDecoder,
   completedAt: optionalDecoder(stringDecoder),
+  transferredBytes: optionalDecoder(numberDecoder),
+  phase: optionalDecoder(transferPhaseDecoder),
+  failure: optionalDecoder(nullableDecoder(transferFailureDecoder)),
+  attempt: optionalDecoder(numberDecoder),
+  logicalTransferId: optionalDecoder(stringDecoder),
+  attemptId: optionalDecoder(stringDecoder),
+  protocolTransferId: optionalDecoder(stringDecoder),
+  clientOperationId: optionalDecoder(nullableDecoder(stringDecoder)),
+  operationPayloadHash: optionalDecoder(nullableDecoder(stringDecoder)),
 });
 
 /** TransferTask[] decoder。 */
