@@ -28,7 +28,7 @@
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   letter-spacing: var(--tracking-wide);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   text-transform: uppercase;
 }
 

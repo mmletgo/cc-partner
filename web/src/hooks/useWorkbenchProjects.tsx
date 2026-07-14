@@ -161,10 +161,12 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       const list = await workbenchApi.projects.list();
       setProjects(list);
       setActiveProjectIdState((current) => {
+        // 仅保留仍存在于列表中的当前选中项；无效/空时保持 null，
+        // 让 Workbench 进入「继续工作」启动页（N4），而不是隐式选中 list[0]。
         const next =
           current && list.some((project) => project.id === current)
             ? current
-            : list[0]?.id ?? null;
+            : null;
         writeStoredActiveProjectId(next);
         return next;
       });

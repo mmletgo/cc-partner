@@ -425,7 +425,7 @@
 
 .worktreeMeta,
 .worktreeEmpty {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
   white-space: nowrap;
 }
@@ -830,7 +830,7 @@
 
 .statusGrid dt,
 .pathInfoGrid dt {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
 }
 
@@ -892,7 +892,7 @@
 .gitActionBranch {
   min-width: 0;
   overflow: hidden;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   text-overflow: ellipsis;
@@ -966,7 +966,7 @@
 .mergeStageMessage {
   min-width: 0;
   overflow: hidden;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1049,14 +1049,14 @@
 
 .commitHash {
   min-width: 0;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
 }
 
 .commitTime,
 .commitMeta {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
   white-space: nowrap;
 }
@@ -1180,7 +1180,7 @@
 }
 
 .treeLoading {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .pathInfo {
@@ -1212,20 +1212,29 @@
 }
 
 @media (max-width: 1180px) {
+  /* 1024×768 等中等视口：首屏同时露出终端工作区与 inspector 入口，避免整页终端把检查器顶出视口 */
   .page {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
     min-width: 0;
+    min-height: 100%;
+    height: 100%;
     overflow: auto;
   }
 
   .inspectorPane {
-    min-height: 420px;
+    min-height: calc(var(--space-24) * 2 + var(--space-8));
+    max-height: none;
     border-left: 0;
     border-top: 1px solid var(--border-soft);
+    /* 入口（tabs）在堆叠布局中保持可发现 */
+    scroll-margin-top: var(--space-4);
   }
 
   .centerPane {
-    min-height: calc(100vh + var(--space-24));
+    /* 不再强制 >100vh，为 inspector 入口预留首屏空间 */
+    min-height: min(58vh, 480px);
+    max-height: none;
   }
 }
 
@@ -1283,4 +1292,204 @@
   .centerPane {
     min-height: calc(100vh + var(--space-24));
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * Launch surface（零项目 CTA / 继续工作）
+ * 仅使用 design tokens；不引入硬编码色值。
+ * ------------------------------------------------------------------------- */
+
+.launchPage {
+  width: 100%;
+  height: 100%;
+  min-width: 720px;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  overflow: auto;
+}
+
+.launchEmptyMain,
+.launchContinueMain {
+  width: min(960px, 100%);
+  margin: 0 auto;
+  padding: var(--space-8) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* 零项目聚焦空态：垂直居中，仅 CTA + 一句解释，无 chrome 占位。 */
+.launchEmptyMain {
+  flex: 1;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  max-width: 520px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.launchHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.launchTitle {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-3xl);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+  line-height: var(--leading-tight);
+}
+
+.launchExplanation {
+  margin: var(--space-2) 0 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.launchEmptyActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  width: 100%;
+}
+
+.launchAttentionCard {
+  width: 100%;
+}
+
+.launchAttentionRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.launchAttentionText {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.launchSectionsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-4);
+}
+
+.launchSectionCard {
+  min-height: 160px;
+}
+
+.launchSectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.launchSectionTitle {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+}
+
+.launchSectionBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.launchSectionNotice {
+  margin-bottom: var(--space-2);
+}
+
+.launchMuted {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.launchEmptyBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.launchItemList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.launchItem {
+  margin: 0;
+}
+
+.launchItemButton {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  column-gap: var(--space-3);
+  row-gap: var(--space-1);
+  align-items: center;
+  text-align: left;
+  padding: var(--space-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--surface) 88%, var(--bg));
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.launchItemButton:hover {
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+.launchItemButton:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.launchItemTitle {
+  grid-column: 1;
+  grid-row: 1;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+}
+
+.launchItemMeta {
+  grid-column: 1;
+  grid-row: 2;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.launchRemoteDialog {
+  width: min(920px, 96vw);
+  max-height: min(80vh, 720px);
 }

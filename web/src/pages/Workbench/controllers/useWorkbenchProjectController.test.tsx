@@ -4,20 +4,28 @@
  *
  * Business Logic（为什么需要这个测试）:
  *   在 controller 抽取后，项目级 "当前项目请求守卫" 和 "远端离线状态机" 必须独立可测；
- *   这些行为在 Workbench.tsx 内曾由 markRemoteOfflineFromError / clearRemoteOfflineForProject /
- *   activeProjectIdRef 三者协作实现，本测试覆盖它们抽出后仍保持原有契约。
+ *   同时 launch summary 仅在「有项目未选中」时拉取，失败 section 隔离 / abort 清理必须锁定。
  *
  * Code Logic（这个测试做什么）:
  *   - 使用 @testing-library/react 的 renderHook 把 controller 挂在 React 树中；
  *   - 通过 rerender 修改 activeProject / projects 等输入，模拟项目切换；
- *   - 调用 markRequestSuccess / markRequestFailure / selectProjectFromDeepLink，断言
- *     remoteProjectOffline / remoteWriteDisabled / isCurrentProject 与 selectProject 调用日志。
+ *   - mock workbenchApi.getLaunchSummary 断言 fetch gating、abort、error isolation。
  */
-import { afterEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, renderHook } from '@testing-library/react';
 
-import { useWorkbenchProjectController } from './useWorkbenchProjectController';
 import type { WorkbenchProject } from '@/lib/types';
+import type { WorkbenchLaunchSummaryWire } from '@/lib/types';
+
+const getLaunchSummaryMock = vi.fn();
+
+vi.mock('@/api/workbench', () => ({
+  workbenchApi: {
+    getLaunchSummary: (...args: unknown[]) => getLaunchSummaryMock(...args),
+  },
+}));
+
+import { useWorkbenchProjectController } from './useWorkbenchProjectController';
 
 const REMOTE_OFFLINE_ERROR = '远端设备不在线';
 
@@ -51,6 +59,33 @@ function buildRemoteProject(overrides: Partial<WorkbenchProject> = {}): Workbenc
   };
 }
 
+function buildLaunchWire(
+  overrides: Partial<WorkbenchLaunchSummaryWire> = {},
+): WorkbenchLaunchSummaryWire {
+  return {
+    projects: {
+      kind: 'ready',
+      value: [
+        {
+          id: 'local-1',
+          name: 'local',
+          kind: 'local',
+          deviceId: 'self',
+          deviceName: 'Mac',
+          path: '/Users/hans/local',
+          lastOpenedAt: '2026-07-01T00:00:00Z',
+        },
+      ],
+    },
+    sessions: { kind: 'ready', value: [] },
+    tasks: { kind: 'ready', value: [] },
+    transfers: { kind: 'error', message: 'transfer offline' },
+    devices: { kind: 'ready', value: [] },
+    generatedAt: '2026-07-14T12:00:00.000Z',
+    ...overrides,
+  };
+}
+
 interface ControllerProps {
   activeProject: WorkbenchProject | null;
   activeProjectId: string | null;
@@ -79,6 +114,26 @@ async function flushMicrotasks(rounds = 6): Promise<void> {
     await Promise.resolve();
   }
 }
+
+/** 等待 macrotask（visibility polling / setTimeout 0 / promise settle）。 */
+async function flushMacrotasks(rounds = 4): Promise<void> {
+  for (let i = 0; i < rounds; i += 1) {
+    await act(async () => {
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 0);
+      });
+    });
+  }
+}
+
+beforeEach(() => {
+  getLaunchSummaryMock.mockReset();
+  getLaunchSummaryMock.mockResolvedValue(buildLaunchWire());
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => 'visible',
+  });
+});
 
 afterEach(() => {
   cleanup();
@@ -332,5 +387,162 @@ describe('useWorkbenchProjectController', () => {
 
     expect(result.current.isCurrentProject('p1')).toBe(false);
     expect(result.current.isCurrentProject('remote:device-a:r')).toBe(true);
+  });
+
+  test('fetches launch summary only when projects exist and none selected', async () => {
+    const local = buildLocalProject();
+    const selectProject = vi.fn(async (project: WorkbenchProject) => project);
+    const { result } = renderController({
+      activeProject: null,
+      activeProjectId: null,
+      projects: [local],
+      selectProject,
+    });
+
+    await flushMacrotasks();
+
+    expect(getLaunchSummaryMock).toHaveBeenCalled();
+    expect(result.current.launchSummary.projects.kind).toBe('ready');
+    expect(result.current.launchSummary.transfers.kind).toBe('error');
+    if (result.current.launchSummary.transfers.kind === 'error') {
+      expect(result.current.launchSummary.transfers.message).toBe('transfer offline');
+    }
+  });
+
+  test('does not fetch launch summary when zero projects', async () => {
+    const selectProject = vi.fn(async (project: WorkbenchProject) => project);
+    renderController({
+      activeProject: null,
+      activeProjectId: null,
+      projects: [],
+      selectProject,
+    });
+
+    await flushMacrotasks();
+    expect(getLaunchSummaryMock).not.toHaveBeenCalled();
+  });
+
+  test('does not fetch launch summary when active project selected', async () => {
+    const local = buildLocalProject();
+    const selectProject = vi.fn(async (project: WorkbenchProject) => project);
+    renderController({
+      activeProject: local,
+      activeProjectId: local.id,
+      projects: [local],
+      selectProject,
+    });
+
+    await flushMacrotasks();
+    expect(getLaunchSummaryMock).not.toHaveBeenCalled();
+  });
+
+  test('aborts in-flight launch summary when context becomes active project', async () => {
+    const local = buildLocalProject();
+    const selectProject = vi.fn(async (project: WorkbenchProject) => project);
+    let resolveWire: ((value: WorkbenchLaunchSummaryWire) => void) | null = null;
+    getLaunchSummaryMock.mockImplementation(
+      () =>
+        new Promise<WorkbenchLaunchSummaryWire>((resolve) => {
+          resolveWire = resolve;
+        }),
+    );
+
+    const { result, rerender } = renderController({
+      activeProject: null,
+      activeProjectId: null,
+      projects: [local],
+      selectProject,
+    });
+
+    await flushMicrotasks();
+    expect(getLaunchSummaryMock).toHaveBeenCalledTimes(1);
+    expect(result.current.launchSummary.projects.kind).toBe('loading');
+
+    // 选中项目：应 abort，后续 resolve 不得写入。
+    rerender({
+      activeProject: local,
+      activeProjectId: local.id,
+      projects: [local],
+      selectProject,
+    });
+    await flushMicrotasks();
+
+    await act(async () => {
+      resolveWire?.(buildLaunchWire());
+      await flushMicrotasks();
+    });
+
+    // 离开 launch 模式后保持进入前/离开时的状态机结果；不得被 stale resolve 写成 ready。
+    // 进入模式时已是 loading；abort 后仍 loading（未 mark ready）。
+    expect(result.current.launchSummary.projects.kind).toBe('loading');
+  });
+
+  test('per-section error isolation in controller state', async () => {
+    const local = buildLocalProject();
+    const selectProject = vi.fn(async (project: WorkbenchProject) => project);
+    getLaunchSummaryMock.mockResolvedValue(
+      buildLaunchWire({
+        projects: {
+          kind: 'ready',
+          value: [
+            {
+              id: local.id,
+              name: local.name,
+              kind: local.kind,
+              deviceId: local.deviceId,
+              deviceName: local.deviceName,
+              path: local.path,
+              lastOpenedAt: local.lastOpenedAt,
+            },
+          ],
+        },
+        sessions: { kind: 'error', message: 'sessions failed' },
+        tasks: { kind: 'ready', value: [] },
+        transfers: { kind: 'error', message: 'transfers failed' },
+        devices: { kind: 'ready', value: [] },
+      }),
+    );
+
+    const { result } = renderController({
+      activeProject: null,
+      activeProjectId: null,
+      projects: [local],
+      selectProject,
+    });
+
+    await flushMacrotasks();
+
+    expect(result.current.launchSummary.projects.kind).toBe('ready');
+    expect(result.current.launchSummary.sessions.kind).toBe('error');
+    expect(result.current.launchSummary.tasks.kind).toBe('ready');
+    expect(result.current.launchSummary.transfers.kind).toBe('error');
+    expect(result.current.launchSummary.devices.kind).toBe('ready');
+  });
+
+  test('refresh failure marks ready sections stale and keeps values', async () => {
+    const local = buildLocalProject();
+    const selectProject = vi.fn(async (project: WorkbenchProject) => project);
+    getLaunchSummaryMock.mockResolvedValueOnce(buildLaunchWire());
+
+    const { result } = renderController({
+      activeProject: null,
+      activeProjectId: null,
+      projects: [local],
+      selectProject,
+    });
+
+    await flushMacrotasks();
+    expect(result.current.launchSummary.projects.kind).toBe('ready');
+
+    getLaunchSummaryMock.mockRejectedValueOnce(new Error('network offline'));
+    await act(async () => {
+      await result.current.refreshLaunchSummary();
+    });
+
+    expect(result.current.launchSummary.projects.kind).toBe('ready');
+    if (result.current.launchSummary.projects.kind === 'ready') {
+      expect(result.current.launchSummary.projects.stale).toBe(true);
+      expect(result.current.launchSummary.projects.value[0]?.id).toBe(local.id);
+    }
   });
 });

@@ -56,7 +56,7 @@
 }
 
 .metaGrid dt {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
 }
 

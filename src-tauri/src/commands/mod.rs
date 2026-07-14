@@ -9,6 +9,7 @@
 pub mod attention;
 pub mod backend;
 pub mod backup;
+pub mod gui_bootstrap;
 pub mod cc_history;
 pub mod claude_code_assets;
 pub mod claude_md;

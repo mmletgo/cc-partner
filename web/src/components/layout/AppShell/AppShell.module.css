@@ -45,8 +45,30 @@
 .navList {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--space-3);
   margin-top: var(--space-2);
+}
+
+.navGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.navGroupLabel {
+  margin: 0;
+  padding: var(--space-1) var(--space-3) 0;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-normal);
+  color: var(--fg-muted-readable);
+  letter-spacing: var(--tracking-wide);
+  user-select: none;
+  pointer-events: none;
 }
 
 .footer {
@@ -55,7 +77,7 @@
   flex-direction: column;
   gap: var(--space-2);
   font-size: var(--text-sm);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .footerVersion {

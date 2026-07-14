@@ -290,6 +290,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | WorkbenchDependencyCard | compact, className | Workbench tmux 依赖状态与安装引导卡片 |
 | WorkbenchCodeEditor | value, language, readOnly, onChange | Workbench 代码/源码文件的 CodeMirror 编辑器 |
 | WorkbenchMarkdownEditor | value, mode, onModeChange, onChange | Workbench Markdown WYSIWYG/source/split 编辑器 |
+| LanDisclosureGate | children | App 级 LAN 风险披露守卫：未确认前挡住 Routes 与权限 onboarding；状态机 loading/required/starting/error/pass；展示地址候选/首选 TCP 62116/mDNS 5353/无身份校验风险；确认后 ensure sidecar |
 | WorkbenchHtmlPreview | value, mode, readOnly, onModeChange, onChange | Workbench HTML 源码/渲染预览/split 编辑器 |
 | WorkbenchImagePreview | preview, name | Workbench 图片只读预览 |
 | WorkbenchCsvPreview | preview | Workbench CSV 只读表格预览 |

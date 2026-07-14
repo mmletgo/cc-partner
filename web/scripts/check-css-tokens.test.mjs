@@ -3,8 +3,8 @@
  *
  * Business Logic:
  *   保证 CSS token 守卫对「已定义 / 嵌套 fallback / 未知语义 token /
- *   运行时 allowlist / 深色主题缺失 / reduced-motion」给出稳定诊断，
- *   避免静默失效或后续回归。
+ *   运行时 allowlist / 深色主题缺失 / reduced-motion / 正文对比度 /
+ *   未评审 meta 文本色」给出稳定诊断，避免静默失效或后续回归。
  *
  * Code Logic:
  *   使用临时 fixture 字符串调用 analyzeCssTokenContract，
@@ -16,10 +16,16 @@ import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analyzeCssTokenContract } from './check-css-tokens.mjs';
+import {
+  analyzeCssTokenContract,
+  contrastRatio,
+  MIN_NORMAL_TEXT_CONTRAST,
+  REQUIRED_TEXT_CONTRAST_PAIRS,
+} from './check-css-tokens.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const globalsCssPath = resolve(scriptDir, '../src/styles/globals.css');
+const realTokensPath = resolve(scriptDir, '../src/styles/tokens.css');
 
 /**
  * 构造最小 tokens 源，覆盖浅色/深色主题中的 canonical 示例。
@@ -32,17 +38,30 @@ const globalsCssPath = resolve(scriptDir, '../src/styles/globals.css');
  *
  * @param {object} [opts]
  * @param {boolean} [opts.omitDarkAccent]
+ * @param {boolean} [opts.omitFgMutedReadable]
+ * @param {boolean} [opts.weakReadable]
  * @returns {string}
  */
 function buildTokensSource(opts = {}) {
   const darkAccent = opts.omitDarkAccent ? '' : '  --accent: #d97757;\n';
+  const lightReadable = opts.omitFgMutedReadable
+    ? ''
+    : opts.weakReadable
+      ? '  --fg-muted-readable: #87867f;\n'
+      : '  --fg-muted-readable: #5e5d59;\n';
+  const darkReadable = opts.omitFgMutedReadable
+    ? ''
+    : opts.weakReadable
+      ? '  --fg-muted-readable: #787671;\n'
+      : '  --fg-muted-readable: #a8a59e;\n';
   return `
 :root {
   --bg: #f5f4ed;
   --surface: #faf9f5;
   --fg: #141413;
+  --fg-2: #3d3d3a;
   --muted: #5e5d59;
-  --meta: #87867f;
+${lightReadable}  --meta: #87867f;
   --border: #f0eee6;
   --border-soft: #e8e6dc;
   --accent: #c96442;
@@ -54,8 +73,9 @@ function buildTokensSource(opts = {}) {
   --bg: #1f1d1b;
   --surface: #272522;
   --fg: #faf9f5;
+  --fg-2: #d8d6cf;
   --muted: #a8a59e;
-  --meta: #787671;
+${darkReadable}  --meta: #787671;
   --border: #2e2b29;
   --border-soft: #262422;
 ${darkAccent}  --warn: #facc15;
@@ -119,6 +139,7 @@ describe('analyzeCssTokenContract', () => {
   left: var(--prompt-panel-left, var(--space-2));
   top: var(--prompt-panel-top);
   stroke: var(--git-graph-color);
+  height: var(--mobile-shell-height);
   color: var(--mystery-runtime);
 }
 `,
@@ -126,7 +147,7 @@ describe('analyzeCssTokenContract', () => {
       ],
       buildTokensSource(),
     );
-    assert.deepEqual(diagnostics, ['Workbench.module.css:6 --mystery-runtime']);
+    assert.deepEqual(diagnostics, ['Workbench.module.css:7 --mystery-runtime']);
   });
 
   it('detects color tokens missing dark theme values', () => {
@@ -153,6 +174,61 @@ describe('analyzeCssTokenContract', () => {
       buildTokensSource(),
     );
     assert.deepEqual(diagnostics, []);
+  });
+
+  it('flags missing or weak fg-muted-readable contrast pairs', () => {
+    const missing = analyzeCssTokenContract([], buildTokensSource({ omitFgMutedReadable: true }));
+    assert.ok(
+      missing.some((d) => d.includes('--fg-muted-readable') && d.includes('unresolved')),
+      `expected unresolved readable diagnostics, got: ${missing.join(' | ')}`,
+    );
+
+    const weak = analyzeCssTokenContract([], buildTokensSource({ weakReadable: true }));
+    assert.ok(
+      weak.some((d) => d.includes('contrast') && d.includes('--fg-muted-readable')),
+      `expected weak contrast diagnostics, got: ${weak.join(' | ')}`,
+    );
+  });
+
+  it('rejects color: var(--meta) outside reviewed allowlist', () => {
+    const diagnostics = analyzeCssTokenContract(
+      [
+        {
+          path: 'src/pages/Home/Home.module.css',
+          content: '.metaLabel {\n  color: var(--meta);\n}\n',
+        },
+      ],
+      buildTokensSource(),
+    );
+    assert.ok(
+      diagnostics.some((d) => d.includes('meta-color not allowlisted')),
+      `expected meta allowlist failure, got: ${diagnostics.join(' | ')}`,
+    );
+  });
+
+  it('allows reviewed placeholder meta color without contrast requirement on meta', () => {
+    const diagnostics = analyzeCssTokenContract(
+      [
+        {
+          path: 'src/components/primitives/Input/Input.module.css',
+          content: '.input::placeholder {\n  color: var(--meta);\n}\n',
+        },
+      ],
+      buildTokensSource(),
+    );
+    assert.deepEqual(diagnostics, []);
+  });
+
+  it('real tokens.css meets required normal-text contrast pairs', () => {
+    const tokensSource = readFileSync(realTokensPath, 'utf8');
+    const diagnostics = analyzeCssTokenContract([], tokensSource);
+    const contrastFails = diagnostics.filter((d) => d.includes('contrast'));
+    assert.deepEqual(contrastFails, []);
+    assert.ok(REQUIRED_TEXT_CONTRAST_PAIRS.length >= 8);
+    assert.equal(MIN_NORMAL_TEXT_CONTRAST, 4.5);
+    // meta must remain below body requirement on surface (decorative only)
+    assert.ok(contrastRatio('#87867f', '#faf9f5') < 4.5);
+    assert.ok(contrastRatio('#787671', '#272522') < 4.5);
   });
 });
 

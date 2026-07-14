@@ -17,7 +17,7 @@
 }
 
 .title {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
 }
@@ -289,7 +289,7 @@
 }
 
 .projectStatusText {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
   line-height: var(--leading-normal);

@@ -46,7 +46,7 @@
   font-weight: var(--weight-semibold);
   line-height: var(--leading-normal);
   letter-spacing: var(--tracking-normal);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   text-transform: uppercase;
 }
 
@@ -223,7 +223,7 @@
   font-weight: var(--weight-semibold);
   line-height: var(--leading-normal);
   letter-spacing: var(--tracking-normal);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   text-transform: uppercase;
 }
 
@@ -298,7 +298,7 @@
   font-weight: var(--weight-semibold);
   line-height: var(--leading-normal);
   letter-spacing: var(--tracking-normal);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   text-transform: uppercase;
 }
 
@@ -387,7 +387,7 @@
   font-weight: var(--weight-semibold);
   line-height: var(--leading-normal);
   letter-spacing: var(--tracking-normal);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   text-transform: uppercase;
 }
 
@@ -530,7 +530,7 @@
   font-weight: var(--weight-semibold);
   line-height: var(--leading-normal);
   letter-spacing: var(--tracking-normal);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   text-transform: uppercase;
 }
 
@@ -573,7 +573,7 @@
   margin: 0 0 var(--space-1);
   font-size: var(--text-xs);
   line-height: var(--leading-normal);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .metaGrid dd {
@@ -656,7 +656,7 @@
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   line-height: var(--leading-normal);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .evidenceContent {

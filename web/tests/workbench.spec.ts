@@ -510,3 +510,76 @@ test.describe('E2E-WORKBENCH-001 Workbench critical journey', () => {
       .toEqual({ status: 0, merge: 0 });
   });
 });
+
+test.describe('E2E-WORKBENCH-001 1024x768 inspector discoverability', () => {
+  test.use({ viewport: { width: 1024, height: 768 } });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   1024×768 堆叠布局下首屏须同时可见终端与 inspector 入口。
+   *
+   * Code Logic（这个测试做什么）:
+   *   打开单项目 Workbench，断言 terminal pane 与 workbench-inspector 均在视口内。
+   */
+  test('terminal and inspector entrance are both in first screen', async ({
+    page,
+    backendHarness,
+  }) => {
+    const project = makeProject({ id: 'p1024', name: 'project-1024' });
+    const worktree = makeWorktree({
+      id: 'p1024:main',
+      projectId: 'p1024',
+      name: 'main',
+      branch: 'main',
+    });
+    const session = makeSession({
+      id: 's1024',
+      projectId: 'p1024',
+      worktreeId: null,
+      name: 'shell-1024',
+    });
+
+    await installAppLocalStorage(page);
+    registerWorkbenchBaseline(backendHarness);
+    backendHarness.command('list_workbench_projects', {
+      kind: 'resolve',
+      value: [project],
+    });
+    backendHarness.command('list_workbench_worktrees', {
+      kind: 'resolve',
+      value: [worktree],
+    });
+    backendHarness.command('list_workbench_sessions', {
+      kind: 'resolve',
+      value: [session],
+    });
+    backendHarness.command('get_focused_workbench_session', {
+      kind: 'resolve',
+      value: { sessionId: session.id },
+    });
+    backendHarness.command('focus_workbench_session', {
+      kind: 'resolve',
+      value: { ok: true, sessionId: session.id },
+    });
+    backendHarness.command('touch_workbench_project', {
+      kind: 'resolve',
+      value: project,
+    });
+
+    await page.goto('/workbench?projectId=p1024');
+    await expect(page.getByRole('tablist', { name: '终端会话' })).toBeVisible({
+      timeout: 20_000,
+    });
+    await expect(page.getByTestId('terminal-pane')).toBeVisible({ timeout: 15_000 });
+    const inspector = page.getByTestId('workbench-inspector');
+    await expect(inspector).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('tablist', { name: '工作台右侧栏' })).toBeVisible();
+
+    const inspectorBox = await inspector.boundingBox();
+    expect(inspectorBox).toBeTruthy();
+    if (inspectorBox) {
+      // 入口应进入 768 高视口（允许少量 sticky chrome 偏移）
+      expect(inspectorBox.y).toBeLessThan(768);
+    }
+  });
+});

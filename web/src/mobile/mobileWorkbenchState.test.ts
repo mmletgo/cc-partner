@@ -6,7 +6,12 @@ import {
   canRunMobileWorktreeDestructiveAction,
   canSwitchMobilePane,
   closeMobileNav,
+  computeMobileKeyboardInset,
+  computeMobileTerminalMinHeight,
+  computeMobileViewportLayoutHints,
   getMobileConnectionCachedAt,
+  getMobileNavGroupIdForPanel,
+  getMobileWorkbenchNavGroups,
   getMobileWorkbenchPanelOrder,
   getMobileTerminalChromeVisibility,
   getMobileCreatePaneDirection,
@@ -178,56 +183,123 @@ describe('mobileWorkbenchState', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   自动化是移动端 Workbench 的项目级同级面板，不能被塞进 worktree quick switch 这类 worktree 附属入口。
+   *   设计合同要求固定五组映射，且每个既有 panel 恰好出现一次，避免第二套路由或重复入口。
    *
    * Code Logic（这个测试做什么）:
-   *   调用移动端面板顺序 helper，断言 automation 出现在主导航顺序中，且位于 projects 之后、terminal 之前。
+   *   断言 Projects/Attention/Work/Automation/More 精确 panel 列表，并校验扁平顺序无重复覆盖全部 panel。
    */
-  test('automation panel is a first-class mobile panel between projects and terminal', () => {
-    const panels = getMobileWorkbenchPanelOrder();
-
-    assertEqual(panels.includes('automation'), true);
-    assertEqual(panels.indexOf('projects') < panels.indexOf('automation'), true);
-    assertEqual(panels.indexOf('automation') < panels.indexOf('terminal'), true);
-  });
-
-  /**
-   * Business Logic（为什么需要这个测试）:
-   *   全局 Inbox 在移动端必须是导航第二项：projects→attention→automation→terminal，默认首屏仍是 projects。
-   *
-   * Code Logic（这个测试做什么）:
-   *   断言初始面板为 projects，完整顺序以 projects/attention/automation/terminal 开头。
-   */
-  test('attention is second nav item and never the default panel', () => {
-    const panels = getMobileWorkbenchPanelOrder();
-
-    assertEqual(getInitialMobileWorkbenchPanel(), 'projects');
-    assertEqual(panels[0], 'projects');
-    assertEqual(panels[1], 'attention');
-    assertEqual(panels[2], 'automation');
-    assertEqual(panels[3], 'terminal');
-  });
-
-  /**
-   * Business Logic（为什么需要这个测试）:
-   *   Browser preview 是移动端 Workbench 的一等面板，必须固定在 terminal 后、files 前，避免后续导航调整破坏功能入口。
-   *
-   * Code Logic（这个测试做什么）:
-   *   读取移动端面板顺序 helper，并逐项断言完整顺序包含 browser 与 attention。
-   */
-  test('mobile workbench panel order includes browser preview', () => {
-    assertArrayEqual(getMobileWorkbenchPanelOrder(), [
-      'projects',
-      'attention',
-      'automation',
+  test('mobile nav groups map every panel exactly once', () => {
+    const groups = getMobileWorkbenchNavGroups();
+    assertArrayEqual(
+      groups.map((group) => group.id),
+      ['projects', 'attention', 'work', 'automation', 'more'],
+    );
+    assertArrayEqual(groups[0]?.panels ?? [], ['projects', 'worktrees']);
+    assertArrayEqual(groups[1]?.panels ?? [], ['attention']);
+    assertArrayEqual(groups[2]?.panels ?? [], [
       'terminal',
       'browser',
       'files',
       'git',
-      'worktrees',
       'prompt',
+    ]);
+    assertArrayEqual(groups[3]?.panels ?? [], ['automation']);
+    assertArrayEqual(groups[4]?.panels ?? [], ['settings']);
+
+    const flat = getMobileWorkbenchPanelOrder();
+    assertArrayEqual(flat, [
+      'projects',
+      'worktrees',
+      'attention',
+      'terminal',
+      'browser',
+      'files',
+      'git',
+      'prompt',
+      'automation',
       'settings',
     ]);
+    assertEqual(new Set(flat).size, flat.length);
+    assertEqual(getMobileNavGroupIdForPanel('worktrees'), 'projects');
+    assertEqual(getMobileNavGroupIdForPanel('git'), 'work');
+    assertEqual(getMobileNavGroupIdForPanel('settings'), 'more');
+    assertEqual(getInitialMobileWorkbenchPanel(), 'projects');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   自动化是移动端 Workbench 的项目级同级面板，不能被塞进 worktree quick switch 这类 worktree 附属入口。
+   *
+   * Code Logic（这个测试做什么）:
+   *   调用移动端面板顺序 helper，断言 automation 出现在主导航顺序中，且位于 Work 组之后的独立 Automation 组。
+   */
+  test('automation panel is a first-class mobile panel after the work group', () => {
+    const panels = getMobileWorkbenchPanelOrder();
+
+    assertEqual(panels.includes('automation'), true);
+    assertEqual(panels.indexOf('prompt') < panels.indexOf('automation'), true);
+    assertEqual(panels.indexOf('automation') < panels.indexOf('settings'), true);
+    assertEqual(getMobileNavGroupIdForPanel('automation'), 'automation');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   全局 Inbox 在移动端必须是独立 Attention 分组，默认首屏仍是 projects。
+   *
+   * Code Logic（这个测试做什么）:
+   *   断言初始面板为 projects，Attention 分组仅含 attention，且 attention 不是默认面板。
+   */
+  test('attention is second nav group and never the default panel', () => {
+    const groups = getMobileWorkbenchNavGroups();
+
+    assertEqual(getInitialMobileWorkbenchPanel(), 'projects');
+    assertEqual(groups[1]?.id, 'attention');
+    assertArrayEqual(groups[1]?.panels ?? [], ['attention']);
+    assertEqual(getMobileWorkbenchPanelOrder().includes('attention'), true);
+    assertEqual(getInitialMobileWorkbenchPanel() === 'attention', false);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   Browser preview 是移动端 Workbench 的一等面板，必须固定在 Work 组内 terminal 后、files 前。
+   *
+   * Code Logic（这个测试做什么）:
+   *   读取分组扁平顺序，断言 browser 位于 terminal 与 files 之间。
+   */
+  test('mobile workbench panel order includes browser preview in work group', () => {
+    const panels = getMobileWorkbenchPanelOrder();
+    assertEqual(panels.indexOf('terminal') + 1, panels.indexOf('browser'));
+    assertEqual(panels.indexOf('browser') + 1, panels.indexOf('files'));
+    assertEqual(getMobileNavGroupIdForPanel('browser'), 'work');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   软键盘与横屏需要可测的 viewport 派生值，驱动 shell 高度与终端优先高度。
+   *
+   * Code Logic（这个测试做什么）:
+   *   断言 keyboardInset/shellHeight/landscape/terminalMinHeight 的计算合同。
+   */
+  test('viewport helpers derive keyboard inset and landscape terminal height', () => {
+    assertEqual(computeMobileKeyboardInset(844, 500, 0), 344);
+    assertEqual(computeMobileKeyboardInset(844, 500, 40), 304);
+    assertEqual(computeMobileKeyboardInset(844, 900, 0), 0);
+
+    const portrait = computeMobileViewportLayoutHints(390, 844, 500, 0);
+    assertEqual(portrait.keyboardInset, 344);
+    assertEqual(portrait.shellHeight, 500);
+    assertEqual(portrait.landscape, false);
+    assertEqual(portrait.terminalMinHeight, computeMobileTerminalMinHeight(390, 500, 344));
+
+    const landscape = computeMobileViewportLayoutHints(844, 390, 390, 0);
+    assertEqual(landscape.landscape, true);
+    assertEqual(landscape.keyboardInset, 0);
+    // 同高度下横屏 ratio 更高，优先终端可视高度
+    assertEqual(
+      landscape.terminalMinHeight > computeMobileTerminalMinHeight(390, 390, 0),
+      true,
+    );
+    assertEqual(landscape.terminalMinHeight, Math.max(160, Math.round(390 * 0.72)));
   });
 
   /**

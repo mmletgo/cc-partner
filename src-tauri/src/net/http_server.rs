@@ -391,6 +391,14 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             ),
         )
         .route(
+            "/api/backend/control/workbench-launch-summary",
+            post(crate::backend::control_api::control_workbench_launch_summary).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
             "/api/backend/control/update-config",
             post(crate::backend::control_api::control_update_config).layer(
                 axum::extract::DefaultBodyLimit::max(

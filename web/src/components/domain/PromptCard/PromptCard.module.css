@@ -79,7 +79,7 @@
 .timestamp {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-variant-numeric: tabular-nums;
   flex: 0 0 auto;
 }

@@ -232,6 +232,25 @@ async function installAttentionDesktopMocks(
             inputMonitoring: { granted: true },
           };
         }
+        if (cmd === 'get_lan_disclosure_status') {
+          return {
+            required: false,
+            version: 1,
+            localAddresses: ['192.168.1.10'],
+            preferredPort: 62116,
+            mdnsPort: 5353,
+            alreadyRunning: false,
+            actualHttpPort: 62116,
+          };
+        }
+        if (cmd === 'acknowledge_lan_disclosure_and_start_backend') {
+          return {
+            actualHttpPort: 62116,
+            localAddresses: ['192.168.1.10'],
+            reusedExisting: false,
+            version: 1,
+          };
+        }
         if (cmd === 'list_workbench_projects') return [];
         if (cmd === 'list_workbench_sessions') return [];
         if (

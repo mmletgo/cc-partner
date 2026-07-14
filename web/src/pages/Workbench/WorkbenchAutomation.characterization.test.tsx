@@ -79,7 +79,9 @@ describe('Workbench automation domain (characterization)', () => {
     });
   });
 
-  test('automation toggle is disabled when no active project', async () => {
+  test('zero projects hide automation chrome and show empty launch CTA', async () => {
+    // N4 启动表面：零项目不再渲染完整 Workbench chrome / 禁用的自动化按钮，
+    // 只展示聚焦空态 CTA（添加本机/连接远端/检查 tmux）。
     setInvokeHandler(() => ({ ok: true }));
     renderWorkbench(
       buildProjectsContextValue({ projects: [], activeProjectId: null }),
@@ -87,8 +89,8 @@ describe('Workbench automation domain (characterization)', () => {
     );
     await settle();
 
-    const button = screen.getByRole('button', { name: '项目自动化' });
-    expect(button.hasAttribute('disabled')).toBe(true);
+    expect(screen.getByTestId('workbench-launch-empty')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '项目自动化' })).toBeNull();
   });
 
   test('OrchestratorPanel open-workbench callback navigates via deep link and closes console', async () => {

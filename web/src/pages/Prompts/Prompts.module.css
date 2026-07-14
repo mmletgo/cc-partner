@@ -305,7 +305,7 @@
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   letter-spacing: var(--tracking-wide);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   text-transform: uppercase;
 }
 
@@ -329,7 +329,7 @@
 
 .emptyHint {
   font-size: var(--text-sm);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 /* ── 模态确认（Dialog surface + 内部 Card） ── */

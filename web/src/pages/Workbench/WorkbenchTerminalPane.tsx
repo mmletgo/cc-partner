@@ -209,7 +209,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   }, [buffer, revision, sessionId]);
 
   return (
-    <div className={styles.terminalHost}>
+    <div className={styles.terminalHost} data-testid="terminal-pane">
       <div className={styles.terminalViewport} ref={viewportRef} />
       {!session ? <div className={styles.terminalPlaceholder}>{placeholder}</div> : null}
     </div>

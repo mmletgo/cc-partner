@@ -367,6 +367,13 @@
       "settings": "Settings",
       "attention": "Attention"
     },
+    "navGroups": {
+      "projects": "Projects",
+      "attention": "Attention",
+      "work": "Work",
+      "automation": "Automation",
+      "more": "More"
+    },
     "placeholders": {
       "projects": {
         "title": "Projects",
@@ -663,5 +670,43 @@
     "deletePath": "Failed to delete",
     "mutationUnknown": "Result unknown. Refresh and verify manually.",
     "mutationFailed": "Operation failed. You can try again."
+  },
+  "launch": {
+    "title": "Continue working",
+    "emptyTitle": "Get started with Workbench",
+    "emptyExplanation": "After adding a project you can manage terminals, files, Git, and automation",
+    "addLocal": "Add local project",
+    "connectRemote": "Connect remote project",
+    "checkTmux": "Check tmux dependency",
+    "refresh": "Refresh summary",
+    "loading": "Loading…",
+    "error": "Failed to load: {{message}}",
+    "stale": "Data may be outdated",
+    "attentionSummary": "{{total}} attention items (decision {{decision}} · blocked {{blocked}} · environment {{environment}})",
+    "attentionOpen": "Open attention",
+    "attentionEmpty": "No attention items right now",
+    "sections": {
+      "projects": "Recent projects",
+      "sessions": "Active sessions",
+      "tasks": "Orchestrator tasks",
+      "transfers": "Transfers",
+      "devices": "Devices"
+    },
+    "empty": {
+      "projects": "No recent projects",
+      "sessions": "No active terminal sessions",
+      "tasks": "No in-progress tasks",
+      "transfers": "No active or failed transfers",
+      "devices": "No online or recently synced devices"
+    },
+    "openTransfer": "Open transfers",
+    "openDevices": "Open devices",
+    "openSettingsDependencies": "Open dependency settings",
+    "item": {
+      "remote": "Remote",
+      "local": "Local",
+      "online": "Online",
+      "offline": "Offline"
+    }
   }
 }

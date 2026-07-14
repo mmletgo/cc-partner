@@ -32,5 +32,22 @@
   },
   "recheck": "重新检查",
   "checkFailed": "检查权限失败：{{error}}",
-  "unknownError": "未知错误"
+  "unknownError": "未知错误",
+  "lanDisclosure": {
+    "title": "局域网风险确认",
+    "subtitle": "启动局域网服务前，请确认以下风险与访问信息",
+    "loading": "正在读取启动状态…",
+    "localAddresses": "本机地址候选",
+    "noAddresses": "暂未探测到局域网地址",
+    "preferredPort": "首选 TCP 端口 {{port}}",
+    "portIncrement": "若首选端口被占用，将自动端口 +1 递增直至绑定成功",
+    "mdnsPort": "设备发现使用 mDNS UDP {{port}}",
+    "alreadyRunning": "检测到独立后端已在运行（实际端口 {{port}}）",
+    "cliRunningHint": "确认仅允许本 GUI 进入产品，不会启动或停止已运行的独立后端 CLI",
+    "noIdentityRisk": "同一可达网络任意设备均可读写执行，系统不验证调用者身份",
+    "acknowledge": "我已了解风险，启动局域网服务",
+    "retry": "重试",
+    "openDiagnostics": "打开诊断日志",
+    "error": "启动失败：{{error}}"
+  }
 }

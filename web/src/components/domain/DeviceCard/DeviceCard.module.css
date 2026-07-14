@@ -70,12 +70,12 @@
   margin: 0;
   font-family: var(--font-mono);
   font-size: var(--text-sm);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-variant-numeric: tabular-nums;
 }
 
 .lastSeen {
   margin: 0;
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }

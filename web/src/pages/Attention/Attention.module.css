@@ -160,7 +160,7 @@
   flex-wrap: wrap;
   gap: var(--space-2) var(--space-3);
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .metaChip {
@@ -229,5 +229,5 @@
 
 .statusText {
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }

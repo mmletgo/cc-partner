@@ -66,6 +66,26 @@ impl WorkbenchProjectRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     Workbench 启动摘要只展示最近打开的少量项目，避免全表加载膨胀。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 last_opened_at DESC 单查询 LIMIT，limit 裁剪到 0..=5。
+    pub async fn list_recent(&self, limit: i64) -> Result<Vec<WorkbenchProjectRow>, AppError> {
+        let limit = limit.clamp(0, 5);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at \
+             FROM workbench_projects ORDER BY last_opened_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_project).collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     会话和文件系统命令需要用 project_id 找到项目根路径。
     ///
     /// Code Logic（这个函数做什么）:
@@ -252,5 +272,27 @@ mod tests {
 
         assert_eq!(existing.unwrap().id, "p1");
         assert!(missing.is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     workbench_launch_summary 项目区只展示最近 5 项，必须在 SQL 层 LIMIT。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 6 条后 list_recent(5) 返回 5 条且最旧不在列表。
+    #[tokio::test]
+    async fn workbench_launch_summary_list_recent_is_bounded() {
+        let repo = setup_repo().await;
+        for i in 0..6 {
+            repo.upsert(&row(
+                &format!("p{i}"),
+                &format!("2026-06-24T0{i}:00:00Z"),
+            ))
+            .await
+            .unwrap();
+        }
+        let listed = repo.list_recent(5).await.unwrap();
+        assert_eq!(listed.len(), 5);
+        assert_eq!(listed[0].id, "p5");
+        assert!(!listed.iter().any(|p| p.id == "p0"));
     }
 }

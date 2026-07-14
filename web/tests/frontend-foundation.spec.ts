@@ -92,6 +92,25 @@ async function installFoundationMocks(
             inputMonitoring: { granted: true },
           };
         }
+        if (cmd === 'get_lan_disclosure_status') {
+          return {
+            required: false,
+            version: 1,
+            localAddresses: ['192.168.1.10'],
+            preferredPort: 62116,
+            mdnsPort: 5353,
+            alreadyRunning: false,
+            actualHttpPort: 62116,
+          };
+        }
+        if (cmd === 'acknowledge_lan_disclosure_and_start_backend') {
+          return {
+            actualHttpPort: 62116,
+            localAddresses: ['192.168.1.10'],
+            reusedExisting: false,
+            version: 1,
+          };
+        }
         if (cmd === 'list_workbench_projects') return projects;
         if (cmd === 'list_workbench_sessions') return sessions;
         if (cmd === 'list_workbench_worktrees') {
@@ -223,12 +242,35 @@ async function installFoundationMocks(
         if (cmd === 'check_lan_firewall_dependency') {
           return {
             platform: 'macos',
+            platformLabel: 'macOS',
+            lanIp: '192.168.1.10',
             httpPort: 62116,
             mdnsPort: 5353,
-            lanIps: ['127.0.0.1'],
-            httpOpen: true,
-            mdnsOpen: true,
-            openMethods: [],
+            appPath: null,
+            checks: [
+              { id: 'httpListener', ok: true, detail: 'TCP 62116' },
+              { id: 'lanIp', ok: true, detail: '192.168.1.10' },
+              { id: 'tcpFirewall', ok: true, detail: 'TCP 62116' },
+              { id: 'mdnsFirewall', ok: true, detail: 'UDP 5353' },
+            ],
+            guidance: {
+              summaryKey: 'settings:lanFirewall.guidance.macos.summary',
+              steps: [],
+              commands: [],
+            },
+          };
+        }
+        if (cmd === 'get_runtime_diagnostics') {
+          return {
+            ownerInstanceId: 'owner-test',
+            generation: 1,
+            startedAt: '2026-07-14T00:00:00Z',
+            configFingerprint: 'fp-test',
+            cloudSyncPhase: 'idle',
+            terminalSessionCount: 0,
+            bridgeCount: 0,
+            bridges: [],
+            orchestrator: { latestTickAt: null, latestErrorClass: null },
           };
         }
         return undefined;
@@ -526,5 +568,237 @@ test.describe('frontend foundation smoke', () => {
     };
     expect(toMs(metrics.animationDuration)).toBeLessThan(1);
     expect(toMs(metrics.transitionDuration)).toBeLessThan(1);
+  });
+
+  test('unacknowledged first launch shows LAN disclosure and blocks shell until confirm', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem('cp-permission-onboarded', '1');
+      window.localStorage.setItem('cp-lang', 'zh');
+      window.localStorage.setItem('cp-theme', 'light');
+
+      let required = true;
+      let callbackId = 0;
+      window.__TAURI_INTERNALS__ = {
+        metadata: {
+          currentWindow: { label: 'main' },
+          currentWebview: { windowLabel: 'main', label: 'main' },
+        },
+        invoke: async (cmd: string) => {
+          if (cmd === 'plugin:event|listen') return 1;
+          if (cmd === 'plugin:event|unlisten') return undefined;
+          if (cmd === 'get_lan_disclosure_status') {
+            return {
+              required,
+              version: 1,
+              localAddresses: ['192.168.1.10'],
+              preferredPort: 62116,
+              mdnsPort: 5353,
+              alreadyRunning: false,
+              actualHttpPort: null,
+            };
+          }
+          if (cmd === 'acknowledge_lan_disclosure_and_start_backend') {
+            required = false;
+            return {
+              actualHttpPort: 62116,
+              localAddresses: ['192.168.1.10'],
+              reusedExisting: false,
+              version: 1,
+            };
+          }
+          if (cmd === 'check_permissions') {
+            return {
+              screenCapture: { granted: true },
+              accessibility: { granted: true },
+              inputMonitoring: { granted: true },
+            };
+          }
+          if (cmd === 'get_version') return { version: '0.0.0-test', buildDate: '2026-07-14' };
+          if (cmd === 'list_workbench_projects') return [];
+          if (cmd === 'list_workbench_sessions') return [];
+          if (cmd === 'list_attention_items') {
+            return {
+              generatedAt: '2026-07-14T00:00:00.000Z',
+              counts: { total: 0, decision: 0, blocked: 0, environment: 0 },
+              items: [],
+            };
+          }
+          if (
+            cmd === 'check_workbench_dependency' ||
+            cmd === 'get_workbench_dependency_install_status'
+          ) {
+            return {
+              status: 'ready',
+              available: true,
+              version: '3.0',
+              backend: 'native',
+              path: '/usr/bin/tmux',
+              installable: false,
+              installCommandPreview: [],
+              error: null,
+              output: [],
+              statusChangedAt: '2026-07-14T00:00:00.000Z',
+            };
+          }
+          if (cmd === 'list_github_trending_repos') {
+            return { repos: [], cached: true, generatedAt: null };
+          }
+          return undefined;
+        },
+        transformCallback: () => {
+          callbackId += 1;
+          return callbackId;
+        },
+        unregisterCallback: () => undefined,
+      };
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+        unregisterListener: () => undefined,
+      };
+    });
+
+    await page.goto('/');
+    await expect(page.getByTestId('lan-disclosure-gate')).toBeVisible({ timeout: 15_000 });
+    await expect(
+      page.getByText('同一可达网络任意设备均可读写执行，系统不验证调用者身份'),
+    ).toBeVisible();
+    await expect(page.getByText('首选 TCP 端口 62116')).toBeVisible();
+    await expect(page.getByText(/mDNS UDP 5353/)).toBeVisible();
+    // 未确认前不应进入主壳
+    await expect(page.getByRole('navigation')).toHaveCount(0);
+
+    await page.getByTestId('lan-disclosure-acknowledge').click();
+    await expect(page.getByTestId('lan-disclosure-gate')).toHaveCount(0, { timeout: 15_000 });
+  });
+
+  test('sidebar groups routes and content/footer do not overlap at 1280x720', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await installFoundationMocks(page);
+    await page.goto('/');
+
+    const nav = page.getByRole('navigation', { name: '主导航' });
+    await expect(nav).toBeVisible({ timeout: 15_000 });
+
+    // 分组标签可见且不可聚焦
+    for (const label of ['探索', '工作', '知识', '连接', '系统']) {
+      await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
+    }
+
+    const hrefs = await nav.locator('a[href]').evaluateAll((anchors) =>
+      anchors.map((anchor) => {
+        const href = anchor.getAttribute('href') ?? '';
+        try {
+          return new URL(href, 'http://local.test').pathname;
+        } catch {
+          return href;
+        }
+      }),
+    );
+    expect(hrefs[0]).toBe('/');
+    expect(hrefs).toContain('/workbench');
+    expect(hrefs).toContain('/attention');
+    expect(hrefs).toContain('/settings');
+    expect(hrefs.filter((href) => href === '/discover')).toHaveLength(0);
+
+    // 每条主导航链接是一个 tab stop（无 tabindex=-1）
+    const badTabStops = await nav.locator('a[href]').evaluateAll((anchors) =>
+      anchors
+        .map((anchor) => ({
+          href: anchor.getAttribute('href'),
+          tabIndex: (anchor as HTMLElement).tabIndex,
+        }))
+        .filter((item) => item.tabIndex < 0),
+    );
+    expect(badTabStops).toEqual([]);
+
+    const layout = await page.evaluate(() => {
+      const aside = document.querySelector('aside');
+      if (!aside) return null;
+      const content = aside.querySelector(':scope > div:first-child') as HTMLElement | null;
+      const footer = aside.querySelector(':scope > div:last-child') as HTMLElement | null;
+      if (!content || !footer || content === footer) return null;
+      const contentBox = content.getBoundingClientRect();
+      const footerBox = footer.getBoundingClientRect();
+      const contentStyle = getComputedStyle(content);
+      return {
+        contentBottom: contentBox.bottom,
+        footerTop: footerBox.top,
+        contentOverflowY: contentStyle.overflowY,
+        contentMinHeight: contentStyle.minHeight,
+      };
+    });
+
+    expect(layout).not.toBeNull();
+    expect(layout!.footerTop).toBeGreaterThanOrEqual(layout!.contentBottom - 1);
+    expect(['auto', 'scroll']).toContain(layout!.contentOverflowY);
+    expect(layout!.contentMinHeight === '0px' || layout!.contentMinHeight === '0').toBe(true);
+  });
+
+  for (const viewport of [
+    { width: 1024, height: 768, name: '1024x768' },
+    { width: 1280, height: 720, name: '1280x720' },
+  ] as const) {
+    test(`home layout has no horizontal overflow at ${viewport.name}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await installFoundationMocks(page);
+      await page.goto('/');
+
+      const nav = page.getByRole('navigation', { name: '主导航' });
+      await expect(nav).toBeVisible({ timeout: 15_000 });
+
+      // 主导航与「继续工作」入口可键盘到达
+      await expect(nav.locator('a[href="/workbench"]').first()).toBeVisible();
+      const workbenchTabIndex = await nav
+        .locator('a[href="/workbench"]')
+        .first()
+        .evaluate((el) => (el as HTMLElement).tabIndex);
+      expect(workbenchTabIndex).toBeGreaterThanOrEqual(0);
+
+      const metrics = await page.evaluate(() => {
+        const doc = document.documentElement;
+        const body = document.body;
+        return {
+          scrollWidth: Math.max(doc.scrollWidth, body.scrollWidth),
+          clientWidth: doc.clientWidth,
+        };
+      });
+      expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth + 1);
+
+      const shotPath = testInfo.outputPath(`layout-home-${viewport.name}.png`);
+      await page.screenshot({ path: shotPath, fullPage: true });
+      await testInfo.attach(`layout-home-${viewport.name}`, {
+        path: shotPath,
+        contentType: 'image/png',
+      });
+    });
+  }
+
+  test('settings deep-linked tab scrolls inside tablist at 680px', async ({ page }) => {
+    await page.setViewportSize({ width: 680, height: 900 });
+    await installFoundationMocks(page);
+    await page.goto('/settings?tab=dependencies');
+
+    const tablist = page.getByRole('tablist');
+    await expect(tablist).toBeVisible({ timeout: 15_000 });
+    const active = tablist.getByRole('tab', { selected: true });
+    await expect(active).toBeVisible();
+    await expect(active).toHaveAttribute('id', /dependencies|settings-tab-dependencies/);
+
+    // shell 在 rAF + smooth scroll 后把深链 tab 滚进 tablist 视口
+    await expect
+      .poll(
+        async () =>
+          active.evaluate((el) => {
+            const tab = el as HTMLElement;
+            const list = tab.closest('[role="tablist"]') as HTMLElement | null;
+            if (!list) return false;
+            const tabBox = tab.getBoundingClientRect();
+            const listBox = list.getBoundingClientRect();
+            return tabBox.left >= listBox.left - 2 && tabBox.right <= listBox.right + 2;
+          }),
+        { timeout: 5_000 },
+      )
+      .toBe(true);
   });
 });

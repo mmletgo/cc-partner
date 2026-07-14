@@ -178,4 +178,41 @@ describe('workbenchApi mutation ledger envelope', () => {
     expect(source).toContain('workbenchMutationEnvelopeDecoder');
     expect(source).toContain("get_workbench_mutation_operation");
   });
+
+  test('getLaunchSummary invokes get_workbench_launch_summary and decodes sections', async () => {
+    const wire = {
+      projects: {
+        kind: 'ready',
+        value: [
+          {
+            id: 'p1',
+            name: 'demo',
+            kind: 'local',
+            deviceId: 'self',
+            deviceName: 'Mac',
+            path: '/tmp/demo',
+            lastOpenedAt: '2026-07-14T00:00:00.000Z',
+          },
+        ],
+      },
+      sessions: { kind: 'ready', value: [] },
+      tasks: { kind: 'error', message: 'tasks down' },
+      transfers: { kind: 'ready', value: [] },
+      devices: { kind: 'ready', value: [] },
+      generatedAt: '2026-07-14T12:00:00.000Z',
+    };
+    mockInvoke.mockResolvedValueOnce(wire);
+
+    const result = await workbenchApi.getLaunchSummary();
+
+    expect(mockInvoke).toHaveBeenCalledWith('get_workbench_launch_summary', undefined);
+    expect(result.projects.kind).toBe('ready');
+    expect(result.tasks).toEqual({ kind: 'error', message: 'tasks down' });
+    expect(result.generatedAt).toBe('2026-07-14T12:00:00.000Z');
+  });
+
+  test('getLaunchSummary rejects malformed launch payload fail-closed', async () => {
+    mockInvoke.mockResolvedValueOnce({ projects: { kind: 'ready' } });
+    await expect(workbenchApi.getLaunchSummary()).rejects.toBeTruthy();
+  });
 });

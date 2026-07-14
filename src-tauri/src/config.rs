@@ -1000,7 +1000,7 @@ mod data_dir_env_test {
 }
 
 #[cfg(test)]
-pub use data_dir_env_test::install_data_dir_env;
+pub use data_dir_env_test::{install_data_dir_env, DataDirEnvGuard};
 
 #[cfg(test)]
 mod tests {

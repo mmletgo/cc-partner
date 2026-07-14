@@ -686,3 +686,80 @@ export interface ResumeClaudeSessionResult {
   /** 新建 terminal window 的 session id */
   sessionId: string;
 }
+
+/* ---------------------------------------------------------------------------
+ * Workbench launch summary（继续工作启动摘要 wire DTO）
+ * ------------------------------------------------------------------------- */
+
+/** 启动摘要：最近项目条目。 */
+export interface WorkbenchLaunchProject {
+  id: string;
+  name: string;
+  kind: string;
+  deviceId: string;
+  deviceName: string;
+  path: string;
+  lastOpenedAt: string;
+}
+
+/** 启动摘要：活跃会话条目。 */
+export interface WorkbenchLaunchSession {
+  id: string;
+  projectId: string;
+  projectName: string;
+  worktreeId?: string | null;
+  name: string;
+  status: string;
+  startedAt: string;
+}
+
+/** 启动摘要：Orchestrator 任务条目。 */
+export interface WorkbenchLaunchTask {
+  id: string;
+  projectId: string;
+  projectName?: string | null;
+  title: string;
+  status: string;
+  workflowState: string;
+  runState: string;
+  updatedAt: string;
+}
+
+/** 启动摘要：传输任务条目。 */
+export interface WorkbenchLaunchTransfer {
+  id: string;
+  filename: string;
+  status: string;
+  direction: string;
+  progress?: number | null;
+  size?: number | null;
+  updatedAt?: string | null;
+  createdAt?: string | null;
+}
+
+/** 启动摘要：设备条目。 */
+export interface WorkbenchLaunchDevice {
+  id: string;
+  name: string;
+  online: boolean;
+  lastSeen?: string | null;
+  address?: string | null;
+}
+
+/**
+ * 后端 launch section wire：ready 带 value 数组；error 仅 message。
+ * 单 section 失败不拖垮其余 section。
+ */
+export type WorkbenchLaunchSectionWire<T> =
+  | { kind: 'ready'; value: T[] }
+  | { kind: 'error'; message: string };
+
+/** 后端 `get_workbench_launch_summary` 完整 wire。 */
+export interface WorkbenchLaunchSummaryWire {
+  projects: WorkbenchLaunchSectionWire<WorkbenchLaunchProject>;
+  sessions: WorkbenchLaunchSectionWire<WorkbenchLaunchSession>;
+  tasks: WorkbenchLaunchSectionWire<WorkbenchLaunchTask>;
+  transfers: WorkbenchLaunchSectionWire<WorkbenchLaunchTransfer>;
+  devices: WorkbenchLaunchSectionWire<WorkbenchLaunchDevice>;
+  generatedAt: string;
+}

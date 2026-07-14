@@ -33,6 +33,146 @@ async function settle(): Promise<void> {
 }
 
 describe('Workbench project domain (characterization)', () => {
+  test('existing projects with no selection render continue-working launch surface', async () => {
+    const project = buildLocalProject({ name: 'demo-project' });
+    setInvokeHandler((call) => {
+      switch (call.cmd) {
+        case 'get_workbench_launch_summary':
+          return {
+            projects: {
+              kind: 'ready',
+              value: [
+                {
+                  id: project.id,
+                  name: project.name,
+                  kind: project.kind,
+                  deviceId: project.deviceId,
+                  deviceName: project.deviceName,
+                  path: project.path,
+                  lastOpenedAt: project.lastOpenedAt,
+                },
+              ],
+            },
+            sessions: { kind: 'ready', value: [] },
+            tasks: { kind: 'ready', value: [] },
+            transfers: { kind: 'ready', value: [] },
+            devices: { kind: 'ready', value: [] },
+            generatedAt: '2026-07-14T12:00:00.000Z',
+          };
+        default:
+          return { ok: true };
+      }
+    });
+
+    renderWorkbench(
+      buildProjectsContextValue({ projects: [project], activeProjectId: null }),
+      buildDependencyContextValue(),
+    );
+    await settle();
+
+    expect(screen.getByTestId('workbench-launch-continue')).toBeTruthy();
+    expect(screen.getByText('继续工作')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Worktree 管理' })).toBeNull();
+    expect(invokeCallsFor('get_workbench_launch_summary').length).toBeGreaterThan(0);
+  });
+
+  test('zero projects render only three focused empty actions', async () => {
+    setInvokeHandler(() => ({ ok: true }));
+    renderWorkbench(
+      buildProjectsContextValue({ projects: [], activeProjectId: null }),
+      buildDependencyContextValue(),
+    );
+    await settle();
+
+    expect(screen.getByTestId('workbench-launch-empty')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '添加本机项目' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '连接远端项目' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '检查 tmux 依赖' })).toBeTruthy();
+    expect(screen.queryByTestId('workbench-launch-continue')).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Worktree 管理' })).toBeNull();
+    expect(invokeCallsFor('get_workbench_launch_summary')).toHaveLength(0);
+  });
+
+  test('projectsLoading does not render empty or continue launch surface', async () => {
+    // M1: load 中 projects=[] 不得假零项目 CTA，也不得误入 continue。
+    setInvokeHandler(() => ({ ok: true }));
+    renderWorkbench(
+      buildProjectsContextValue(
+        { projects: [], activeProjectId: 'stored-project-id' },
+        { projectsLoading: true },
+      ),
+      buildDependencyContextValue(),
+    );
+    await settle();
+
+    expect(screen.getByTestId('workbench-projects-loading')).toBeTruthy();
+    expect(screen.getByText('加载中')).toBeTruthy();
+    expect(screen.queryByTestId('workbench-launch-empty')).toBeNull();
+    expect(screen.queryByTestId('workbench-launch-continue')).toBeNull();
+    expect(screen.queryByRole('button', { name: '添加本机项目' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Worktree 管理' })).toBeNull();
+    expect(invokeCallsFor('get_workbench_launch_summary')).toHaveLength(0);
+  });
+
+  test('no project shows focused actions without terminal chrome', async () => {
+    setInvokeHandler(() => ({ ok: true }));
+    renderWorkbench(
+      buildProjectsContextValue({ projects: [], activeProjectId: null }),
+      buildDependencyContextValue(),
+    );
+    await settle();
+
+    // Design §5：零项目只保留三个聚焦 CTA + 一句解释，不渲染禁用 toolbar / 空终端 / inspector。
+    expect(screen.getByRole('button', { name: '添加本机项目' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '连接远端项目' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '检查 tmux 依赖' })).toBeTruthy();
+    expect(
+      screen.getByText('项目添加后可管理终端、文件、Git 与自动化'),
+    ).toBeTruthy();
+    expect(screen.queryByTestId('terminal-pane')).toBeNull();
+    expect(screen.queryByTestId('workbench-inspector')).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Worktree 管理' })).toBeNull();
+    expect(screen.queryByRole('navigation', { name: '终端会话' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '文件预览' })).toBeNull();
+  });
+
+  test('active project still renders normal Workbench chrome', async () => {
+    const project = buildLocalProject({ name: 'demo-project' });
+    const worktree = buildWorktree({ id: 'wt-main', name: 'main', branch: 'main' });
+    const session = buildSession({ id: 's1', name: 'main shell' });
+    setInvokeHandler((call) => {
+      switch (call.cmd) {
+        case 'list_workbench_projects':
+          return [project];
+        case 'list_workbench_worktrees':
+          return [worktree];
+        case 'list_workbench_sessions':
+          return [session];
+        case 'list_workbench_git_commits':
+          return [];
+        case 'list_workbench_dir':
+          return [];
+        case 'get_workbench_launch_summary':
+          throw new Error('launch should not be fetched for active project');
+        default:
+          return { ok: true };
+      }
+    });
+
+    renderWorkbench(
+      buildProjectsContextValue({ projects: [project], activeProjectId: project.id }),
+      buildDependencyContextValue(),
+    );
+    await settle();
+
+    expect(screen.queryByTestId('workbench-launch-continue')).toBeNull();
+    expect(screen.queryByTestId('workbench-launch-empty')).toBeNull();
+    expect(screen.getByText(`${project.deviceName} · ${project.path}`)).toBeTruthy();
+    expect(screen.getAllByTestId('terminal-pane').length).toBeGreaterThan(0);
+    expect(screen.getByTestId('workbench-inspector')).toBeTruthy();
+    expect(invokeCallsFor('get_workbench_launch_summary')).toHaveLength(0);
+  });
+
   test('loads worktrees and sessions for the active project on mount', async () => {
     const project = buildLocalProject({ name: 'demo-project' });
     const worktree = buildWorktree({ id: 'wt-main', name: 'main', branch: 'main' });

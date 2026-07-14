@@ -226,7 +226,7 @@
   font-weight: var(--weight-semibold);
   line-height: var(--leading-normal);
   letter-spacing: var(--tracking-normal);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   text-transform: uppercase;
 }
 

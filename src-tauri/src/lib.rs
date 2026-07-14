@@ -15,6 +15,8 @@ mod attention;
 pub mod backend;
 pub mod backup;
 mod cc;
+mod gui_bootstrap;
+mod gui_startup;
 // 集成 smoke（tests/lan_trust_boundary_smoke.rs）经 app_lib 调用固定 LAN 边界矩阵。
 pub use net::lan_trust_boundary_harness;
 // S5 Task6: mixed-version CC history sync harness for integration tests.
@@ -63,7 +65,8 @@ use crate::commands::{
     attention as attention_cmd, backend as backend_cmd, backup as backup_cmd,
     cc_history as cc_history_cmd, claude_code_assets as claude_code_assets_cmd,
     claude_md as claude_md_cmd, cloud_sync as cloud_sync_cmd, config as config_cmd,
-    devices as device_cmd, github_trending as github_trending_cmd, health as health_cmd,
+    devices as device_cmd, github_trending as github_trending_cmd,
+    gui_bootstrap as gui_bootstrap_cmd, health as health_cmd,
     lan_firewall_dependency as lan_firewall_dependency_cmd, mobile as mobile_cmd,
     orchestrator as orchestrator_cmd, orchestrator_config as orchestrator_config_cmd,
     permissions as permissions_cmd, prompt_optimizer as prompt_optimizer_cmd,
@@ -72,6 +75,7 @@ use crate::commands::{
     updater as updater_cmd, workbench as workbench_cmd,
     workbench_dependencies as workbench_dependency_cmd,
 };
+use crate::gui_startup::{GuiStartupCoordinator, ProductionBackendLifecycle, SetupOutcome};
 use crate::state::AppState;
 use tauri::Manager;
 
@@ -126,48 +130,106 @@ pub fn run() {
             // 触发 "attempted to set a logger after the logging system was already initialized" panic。
             // （此 bug 从 M4 引入 tracing init 后潜伏，因 M4-M6 仅 cargo build/test 未跑 dev，直到 M7 后首次 dev 才暴露）
 
-            // 在 tauri 异步运行时上完成共享运行时初始化（load config + db + 建表 + service startup）
+            // 在 tauri 异步运行时上完成共享运行时初始化（load config + db + 建表）。
+            // LAN disclosure 未确认前跳过 ensure sidecar 与 start_gui_backend_services。
             let app_handle = app.handle().clone();
-            let (state, runtime_mode) = tauri::async_runtime::block_on(async {
+            let state = tauri::async_runtime::block_on(async {
                 let ui: Arc<dyn BackendUi> = Arc::new(TauriBackendUi::new(app_handle.clone()));
                 // GUI 进程仅作 GuiClient：Workbench/runtime mutation 一律代理到 sidecar owner。
-                let state = build_app_state_with_role(
-                    ui,
-                    crate::backend::authority::RuntimeRole::GuiClient,
-                )
-                .await?;
-                let backend_status =
-                    backend_cmd::ensure_backend_process_for_gui(&app_handle).await?;
-                let runtime_mode = start_gui_backend_services(&state).await?;
-                tracing::info!(
-                    "GUI 已连接独立后端 sidecar: kind={:?}, port={}",
-                    backend_status.kind,
-                    state
-                        .actual_http_port
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                );
-
-                Ok::<(AppState, BackendRuntimeMode), error::AppError>((state, runtime_mode))
+                build_app_state_with_role(ui, crate::backend::authority::RuntimeRole::GuiClient)
+                    .await
             })?;
 
-            // 注入共享状态供命令层使用（axum/mDNS 已持有同一份 Arc 的 Clone）
+            // 注入共享状态供命令层使用
             app.manage(state);
 
+            // 装配启动协调器（ensure/start 闭包在 manage 之后捕获 AppHandle）
+            let handle_for_ensure = app.handle().clone();
+            let ensure: Arc<
+                dyn Fn() -> std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = Result<
+                                        crate::backend::control::BackendStatus,
+                                        error::AppError,
+                                    >,
+                                > + Send,
+                        >,
+                    > + Send
+                    + Sync,
+            > = Arc::new(move || {
+                let handle = handle_for_ensure.clone();
+                Box::pin(async move {
+                    backend_cmd::ensure_backend_process_for_gui(&handle).await
+                })
+            });
+            let handle_for_start = app.handle().clone();
+            let start: Arc<
+                dyn Fn() -> std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<Output = Result<u16, error::AppError>>
+                                + Send,
+                        >,
+                    > + Send
+                    + Sync,
+            > = Arc::new(move || {
+                let handle = handle_for_start.clone();
+                Box::pin(async move {
+                    let state: tauri::State<'_, AppState> = handle.state();
+                    start_gui_backend_services(state.inner()).await?;
+                    Ok(state
+                        .actual_http_port
+                        .load(std::sync::atomic::Ordering::SeqCst))
+                })
+            });
+            let probe: Arc<
+                dyn Fn() -> std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = crate::backend::control::BackendStatus,
+                                > + Send,
+                        >,
+                    > + Send
+                    + Sync,
+            > = Arc::new(|| {
+                Box::pin(async { crate::backend::control::current_status().await })
+            });
+            let lifecycle = ProductionBackendLifecycle::new(ensure, start, probe);
+            let coordinator = GuiStartupCoordinator::new(lifecycle);
+
+            let setup_outcome =
+                tauri::async_runtime::block_on(coordinator.setup_if_acknowledged())?;
+            let lan_acked = matches!(setup_outcome, SetupOutcome::Started(_));
+            match &setup_outcome {
+                SetupOutcome::Started(result) => {
+                    tracing::info!(
+                        "GUI 已连接独立后端 sidecar: port={}, reused={}",
+                        result.actual_http_port,
+                        result.reused_existing
+                    );
+                }
+                SetupOutcome::SkippedUnacknowledged => {
+                    tracing::info!(
+                        "LAN 风险披露尚未确认：跳过 ensure sidecar 与 GUI backend services"
+                    );
+                }
+            }
+            app.manage(coordinator);
+
             // GUI 已连接独立 sidecar，仅 Headless 模式会启动后端后台任务。
-            {
+            if lan_acked {
                 let state: tauri::State<'_, AppState> = app.state();
-                start_background_tasks(state.inner(), runtime_mode);
+                start_background_tasks(state.inner(), BackendRuntimeMode::Gui);
             }
 
             // N1 Task5：GUI 订阅 sidecar 事件总线（afterSequence + Gap resync）。
+            // 未确认 disclosure 时 sidecar 可能尚未 ensure，relay 会等待 control/health 就绪。
             {
                 let state: tauri::State<'_, AppState> = app.state();
                 let ui = Arc::clone(&state.ui);
                 let cancel = tokio_util::sync::CancellationToken::new();
-                // 与 health 一样挂到进程生命周期：应用退出时 cancel 由 shutdown 路径处理；
-                // 此处 token 在 GUI 进程存活期间保持，任务随进程结束。
                 let cancel_for_task = cancel.clone();
-                let _ = cancel; // 持有到 setup 结束即可；任务自行随进程退出
+                let _ = cancel;
                 tauri::async_runtime::spawn(async move {
                     crate::backend::ui::run_gui_owner_event_relay(ui, cancel_for_task).await;
                 });
@@ -239,6 +301,8 @@ pub fn run() {
             backend_cmd::exit_gui,
             backend_cmd::get_runtime_diagnostics,
             backend_cmd::open_backend_log_dir,
+            gui_bootstrap_cmd::get_lan_disclosure_status,
+            gui_bootstrap_cmd::acknowledge_lan_disclosure_and_start_backend,
             prompt_cmd::list_prompts,
             prompt_cmd::get_prompt,
             prompt_cmd::create_prompt,
@@ -376,6 +440,7 @@ pub fn run() {
             health_cmd::get_habit_stats,
             // 工作台（本机项目 + Claude Code PTY 终端 + 项目文件树）
             workbench_cmd::list_workbench_projects,
+            workbench_cmd::get_workbench_launch_summary,
             workbench_cmd::add_workbench_project,
             workbench_cmd::list_workbench_remote_roots,
             workbench_cmd::list_workbench_remote_dir,

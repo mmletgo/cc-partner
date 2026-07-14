@@ -120,6 +120,25 @@ async function installTransferMocks(page: Page): Promise<void> {
             inputMonitoring: { granted: true },
           };
         }
+        if (cmd === 'get_lan_disclosure_status') {
+          return {
+            required: false,
+            version: 1,
+            localAddresses: ['192.168.1.10'],
+            preferredPort: 62116,
+            mdnsPort: 5353,
+            alreadyRunning: false,
+            actualHttpPort: 62116,
+          };
+        }
+        if (cmd === 'acknowledge_lan_disclosure_and_start_backend') {
+          return {
+            actualHttpPort: 62116,
+            localAddresses: ['192.168.1.10'],
+            reusedExisting: false,
+            version: 1,
+          };
+        }
         if (cmd === 'list_devices') {
           return [device];
         }
@@ -287,6 +306,25 @@ async function installPromptMocks(page: Page): Promise<void> {
             inputMonitoring: { granted: true },
           };
         }
+        if (cmd === 'get_lan_disclosure_status') {
+          return {
+            required: false,
+            version: 1,
+            localAddresses: ['192.168.1.10'],
+            preferredPort: 62116,
+            mdnsPort: 5353,
+            alreadyRunning: false,
+            actualHttpPort: 62116,
+          };
+        }
+        if (cmd === 'acknowledge_lan_disclosure_and_start_backend') {
+          return {
+            actualHttpPort: 62116,
+            localAddresses: ['192.168.1.10'],
+            reusedExisting: false,
+            version: 1,
+          };
+        }
         if (cmd === 'list_prompts') {
           return prompts;
         }
@@ -433,6 +471,25 @@ async function installPermissionMocks(page: Page): Promise<void> {
         currentWebview: { windowLabel: 'main', label: 'main' },
       },
       invoke: async (cmd: string) => {
+        if (cmd === 'get_lan_disclosure_status') {
+          return {
+            required: false,
+            version: 1,
+            localAddresses: ['192.168.1.10'],
+            preferredPort: 62116,
+            mdnsPort: 5353,
+            alreadyRunning: false,
+            actualHttpPort: 62116,
+          };
+        }
+        if (cmd === 'acknowledge_lan_disclosure_and_start_backend') {
+          return {
+            actualHttpPort: 62116,
+            localAddresses: ['192.168.1.10'],
+            reusedExisting: false,
+            version: 1,
+          };
+        }
         if (cmd === 'check_permissions') {
           if (permissionFail) {
             throw new Error('permission check failed');

@@ -40,7 +40,7 @@
 
 .blockLabel {
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .addBtn {
@@ -85,12 +85,12 @@
 
 .numUnit {
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .numSub {
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .numSub b {
@@ -145,7 +145,7 @@
   flex: 1;
   text-align: center;
   font-size: 10px;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .weekLabelToday {
@@ -165,7 +165,7 @@
   padding-top: var(--space-3);
   border-top: 1px dashed var(--border-soft);
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .footerLink {

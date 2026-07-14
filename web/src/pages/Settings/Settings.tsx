@@ -13,7 +13,7 @@
  *   - loading / core loadError early return 保留在壳层（hooks 已在 controller 无条件执行）
  *   - 所有用户可见文案经 i18next 翻译（settings ns + common ns）
  */
-import type { ReactElement } from 'react';
+import { useEffect, useRef, type ReactElement } from 'react';
 import { Button } from '@/components/primitives';
 import { AutomationSettingsPanel } from './AutomationSettingsPanel';
 import { HealthPanel } from './HealthPanel';
@@ -41,6 +41,38 @@ import styles from './Settings.module.css';
 export function Settings(): ReactElement {
   const ctrl = useSettingsController();
   const { t } = ctrl;
+  const tablistRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   ≤680px 深链选中的 tab 可能落在横向滚动区外，必须把选中 tab 滚进 tablist 视口，且不移动页面主滚动。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   activeTab 变化后在 rAF 中对 tablist 自身 scrollTo，把选中 tab 居中到可见区域。
+   */
+  useEffect(() => {
+    if (ctrl.loading || ctrl.loadError) return;
+    const tablist = tablistRef.current;
+    if (!tablist) return;
+    const selected = tablist.querySelector<HTMLElement>(
+      `[role="tab"][aria-selected="true"], #settings-tab-${ctrl.activeTab}`,
+    );
+    if (!selected) return;
+
+    const frame = window.requestAnimationFrame(() => {
+      const targetLeft = Math.max(
+        0,
+        selected.offsetLeft - (tablist.clientWidth - selected.offsetWidth) / 2,
+      );
+      // 浏览器用 scrollTo；jsdom 等无该方法时回退 scrollLeft，且只滚 tablist 不滚页面
+      if (typeof tablist.scrollTo === 'function') {
+        tablist.scrollTo({ left: targetLeft, behavior: 'smooth' });
+      } else {
+        tablist.scrollLeft = targetLeft;
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [ctrl.activeTab, ctrl.loading, ctrl.loadError]);
 
   // 加载状态
   if (ctrl.loading) {
@@ -99,7 +131,13 @@ export function Settings(): ReactElement {
           <p className={styles.lead}>{t('settings:subtitle')}</p>
         </header>
 
-        <div className={styles.tabs} role="tablist" aria-label={t('settings:tabsLabel')}>
+        <div
+          ref={tablistRef}
+          className={styles.tabs}
+          role="tablist"
+          aria-label={t('settings:tabsLabel')}
+          data-testid="settings-tablist"
+        >
           {ctrl.tabs.map((tab, index) => (
             <button
               key={tab.id}
@@ -110,6 +148,7 @@ export function Settings(): ReactElement {
               aria-controls={`settings-panel-${tab.id}`}
               tabIndex={ctrl.activeTab === tab.id ? 0 : -1}
               className={ctrl.activeTab === tab.id ? styles.tabActive : styles.tab}
+              data-testid={`settings-tab-${tab.id}`}
               onClick={() => ctrl.setActiveTab(tab.id)}
               onKeyDown={(e) => ctrl.handleTabKeyDown(e, index)}
             >

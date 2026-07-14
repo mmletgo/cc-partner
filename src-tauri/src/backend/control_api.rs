@@ -6,6 +6,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     提供 status / get-config / update-config / events / orchestrator snapshot /
+//!     workbench-launch-summary（5 段独立 section outcomes，每段 max 5）/
 //!     cloud-sync/{trigger,test,claude-md-push} / backup/{create,inspect,restore,list-jobs,list-backups,rollback}
 //!     handler 与路由挂载；请求体 ≤256 KiB，普通元数据响应 ≤1 MiB；
 //!     鉴权顺序：ConnectInfo loopback → token；cloud_sync_phase 映射真实 CloudSyncRuntime 相位；
@@ -26,6 +27,7 @@ use crate::config_runtime::{
     RuntimeOwnerStatus,
 };
 use crate::error::AppError;
+use crate::models::transfer::{TransferDirection, TransferStatus, TransferTask};
 use crate::net::error_response::{P2pError, P2pErrorCode, P2pResult};
 use crate::net::lan_guard::require_loopback_peer;
 use crate::net::request_context::P2pRequestContext;
@@ -36,8 +38,10 @@ use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use chrono::Utc;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -60,6 +64,124 @@ pub const CONTROL_RESPONSE_BODY_LIMIT_BYTES: usize = 1024 * 1024;
 pub struct ControlAuthRequest {
     pub control_token: String,
 }
+
+/// 启动摘要每段独立结果（成功 value 或错误 message）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     Workbench Continue Working 表面需要 projects/sessions/tasks/transfers/devices 五段摘要；
+///     任一段失败不得拖垮整响应，前端可按段展示降级。
+///
+/// Code Logic（这个结构做什么）:
+///     serde `tag = "kind"`：`{kind:"ready",value}` / `{kind:"error",message}`。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum SectionOutcome<T> {
+    #[serde(rename = "ready")]
+    Ready { value: T },
+    #[serde(rename = "error")]
+    Error { message: String },
+}
+
+impl<T> SectionOutcome<T> {
+    /// Business Logic（为什么需要这个函数）:
+    ///     section 查询成功/失败需统一映射为 Ready/Error，避免 handler 重复 match。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `Ok(v)→Ready`；`Err(e)→Error{message:e.to_string()}`。
+    pub fn from_result(result: Result<T, AppError>) -> Self {
+        match result {
+            Ok(value) => SectionOutcome::Ready { value },
+            Err(err) => SectionOutcome::Error {
+                message: err.to_string(),
+            },
+        }
+    }
+}
+
+/// Workbench 启动摘要总 DTO（五段独立 section + generatedAt）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     Continue Working 入口一次读出有界近期上下文，避免前端扇出多路 invoke。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase wire；每段 `SectionOutcome`；`generated_at` 为 RFC3339。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchLaunchSummaryDto {
+    pub projects: SectionOutcome<Vec<WorkbenchLaunchProjectDto>>,
+    pub sessions: SectionOutcome<Vec<WorkbenchLaunchSessionDto>>,
+    pub tasks: SectionOutcome<Vec<WorkbenchLaunchTaskDto>>,
+    pub transfers: SectionOutcome<Vec<WorkbenchLaunchTransferDto>>,
+    pub devices: SectionOutcome<Vec<WorkbenchLaunchDeviceDto>>,
+    pub generated_at: String,
+}
+
+/// 启动摘要项目段条目。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchLaunchProjectDto {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub device_id: String,
+    pub device_name: String,
+    pub path: String,
+    pub last_opened_at: String,
+}
+
+/// 启动摘要活跃会话段条目。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchLaunchSessionDto {
+    pub id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub worktree_id: Option<String>,
+    pub name: String,
+    pub status: String,
+    pub started_at: String,
+}
+
+/// 启动摘要编排任务段条目。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchLaunchTaskDto {
+    pub id: String,
+    pub project_id: String,
+    pub project_name: Option<String>,
+    pub title: String,
+    pub status: String,
+    pub workflow_state: String,
+    pub run_state: String,
+    pub updated_at: String,
+}
+
+/// 启动摘要传输段条目。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchLaunchTransferDto {
+    pub id: String,
+    pub filename: String,
+    pub status: String,
+    pub direction: String,
+    pub progress: Option<f64>,
+    pub size: Option<u64>,
+    pub updated_at: String,
+}
+
+/// 启动摘要设备段条目。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchLaunchDeviceDto {
+    pub id: String,
+    pub name: String,
+    pub online: bool,
+    pub last_seen: Option<String>,
+    pub address: Option<String>,
+}
+
+/// 启动摘要每段最大条数。
+pub const WORKBENCH_LAUNCH_SECTION_LIMIT: i64 = 5;
 
 /// update-config HTTP 请求（token + CAS 字段）。
 ///
@@ -131,6 +253,303 @@ pub async fn control_get_config(
     let body = ControlConfigResponse { snapshot };
     ensure_response_within_limit(&body, &context)?;
     Ok(Json(body))
+}
+
+/// 返回 Workbench Continue Working 启动摘要（五段独立 section）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI 启动表面需要 sidecar 权威的最近项目/会话/任务/传输/设备；不得读 GUI 本地空库。
+///
+/// Code Logic（这个函数做什么）:
+///     authorize 优先 → `build_workbench_launch_summary_for_state` → 1 MiB 上限。
+pub async fn control_workbench_launch_summary(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlAuthRequest>,
+) -> P2pResult<Json<WorkbenchLaunchSummaryDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    let body = build_workbench_launch_summary_for_state(&state).await;
+    ensure_response_within_limit(&body, &context)?;
+    Ok(Json(body))
+}
+
+/// 从 AppState 组装 Workbench 启动摘要（供 control handler 与 HeadlessOwner Tauri 命令复用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     owner 进程内可直接读库；五段互不依赖，单段失败仍返回其它段。
+///
+/// Code Logic（这个函数做什么）:
+///     `tokio::join!` 并发五段；每段 Result→SectionOutcome；`generated_at=Utc::now().to_rfc3339()`。
+pub async fn build_workbench_launch_summary_for_state(
+    state: &AppState,
+) -> WorkbenchLaunchSummaryDto {
+    let (projects, sessions, tasks, transfers, devices) = tokio::join!(
+        load_launch_projects_section(state),
+        load_launch_sessions_section(state),
+        load_launch_tasks_section(state),
+        load_launch_transfers_section(state),
+        async { load_launch_devices_section(state) },
+    );
+    WorkbenchLaunchSummaryDto {
+        projects,
+        sessions,
+        tasks,
+        transfers,
+        devices,
+        generated_at: Utc::now().to_rfc3339(),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     启动摘要项目区只展示最近打开项目。
+///
+/// Code Logic（这个函数做什么）:
+///     `workbench_project_repo.list_recent(5)` → LaunchProjectDto。
+async fn load_launch_projects_section(
+    state: &AppState,
+) -> SectionOutcome<Vec<WorkbenchLaunchProjectDto>> {
+    SectionOutcome::from_result(load_launch_projects(state).await)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     项目段查询失败时需捕获为 error message，而非 panic。
+///
+/// Code Logic（这个函数做什么）:
+///     list_recent → map 字段。
+async fn load_launch_projects(
+    state: &AppState,
+) -> Result<Vec<WorkbenchLaunchProjectDto>, AppError> {
+    let rows = state
+        .workbench_project_repo
+        .list_recent(WORKBENCH_LAUNCH_SECTION_LIMIT)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| WorkbenchLaunchProjectDto {
+            id: row.id,
+            name: row.name,
+            kind: row.kind,
+            device_id: row.device_id,
+            device_name: row.device_name,
+            path: row.path,
+            last_opened_at: row.last_opened_at,
+        })
+        .collect())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     启动摘要会话区展示最近活跃 workbench 终端（非 claude_sessions）。
+///
+/// Code Logic（这个函数做什么）:
+///     list_recent_active + 一次 projects list 建 id→name 映射（无 N+1）。
+async fn load_launch_sessions_section(
+    state: &AppState,
+) -> SectionOutcome<Vec<WorkbenchLaunchSessionDto>> {
+    SectionOutcome::from_result(load_launch_sessions(state).await)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     会话段独立失败路径。
+///
+/// Code Logic（这个函数做什么）:
+///     active sessions + project name map。
+async fn load_launch_sessions(
+    state: &AppState,
+) -> Result<Vec<WorkbenchLaunchSessionDto>, AppError> {
+    let sessions = state
+        .workbench_session_repo
+        .list_recent_active(WORKBENCH_LAUNCH_SECTION_LIMIT)
+        .await?;
+    if sessions.is_empty() {
+        return Ok(Vec::new());
+    }
+    // 一次加载项目表建映射；项目数量通常远小于会话 N+1 查询代价。
+    let projects = state.workbench_project_repo.list().await?;
+    let name_by_id: HashMap<String, String> = projects
+        .into_iter()
+        .map(|p| (p.id, p.name))
+        .collect();
+    Ok(sessions
+        .into_iter()
+        .map(|s| {
+            let project_name = name_by_id
+                .get(&s.project_id)
+                .cloned()
+                .unwrap_or_else(|| s.project_id.clone());
+            WorkbenchLaunchSessionDto {
+                id: s.id,
+                project_id: s.project_id,
+                project_name,
+                worktree_id: s.worktree_id,
+                name: s.name,
+                status: s.status,
+                started_at: s.started_at,
+            }
+        })
+        .collect())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     启动摘要任务区展示全局值得关注的编排任务。
+///
+/// Code Logic（这个函数做什么）:
+///     `list_launch_tasks(5)` + 一次 projects list 映射 projectName。
+async fn load_launch_tasks_section(
+    state: &AppState,
+) -> SectionOutcome<Vec<WorkbenchLaunchTaskDto>> {
+    SectionOutcome::from_result(load_launch_tasks(state).await)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     任务段独立失败路径。
+///
+/// Code Logic（这个函数做什么）:
+///     list_launch_tasks → DTO + project name map。
+async fn load_launch_tasks(state: &AppState) -> Result<Vec<WorkbenchLaunchTaskDto>, AppError> {
+    let tasks = state
+        .orchestrator_repo
+        .list_launch_tasks(WORKBENCH_LAUNCH_SECTION_LIMIT)
+        .await?;
+    if tasks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let projects = state.workbench_project_repo.list().await?;
+    let name_by_id: HashMap<String, String> = projects
+        .into_iter()
+        .map(|p| (p.id, p.name))
+        .collect();
+    Ok(tasks
+        .into_iter()
+        .map(|t| WorkbenchLaunchTaskDto {
+            id: t.id,
+            project_name: name_by_id.get(&t.project_id).cloned(),
+            project_id: t.project_id,
+            title: t.title,
+            status: t.status.as_str().to_string(),
+            workflow_state: t.workflow_state.as_str().to_string(),
+            run_state: t.run_state.as_str().to_string(),
+            updated_at: t.updated_at,
+        })
+        .collect())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     启动摘要传输区合并活跃 registry 与最近 failed 历史。
+///
+/// Code Logic（这个函数做什么）:
+///     active list + history list → 过滤 pending/transferring/failed → 按时间倒序 max 5。
+async fn load_launch_transfers_section(
+    state: &AppState,
+) -> SectionOutcome<Vec<WorkbenchLaunchTransferDto>> {
+    SectionOutcome::from_result(load_launch_transfers(state).await)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     传输段独立失败路径。
+///
+/// Code Logic（这个函数做什么）:
+///     合并 active + history failed，去重后有界排序。
+async fn load_launch_transfers(
+    state: &AppState,
+) -> Result<Vec<WorkbenchLaunchTransferDto>, AppError> {
+    let mut by_id: HashMap<String, TransferTask> = HashMap::new();
+    for task in state.transfers.list() {
+        if matches!(
+            task.status,
+            TransferStatus::Pending | TransferStatus::Transferring | TransferStatus::Failed
+        ) {
+            by_id.insert(task.id.clone(), task);
+        }
+    }
+    let history = state.transfer_repo.list().await?;
+    for task in history {
+        if matches!(
+            task.status,
+            TransferStatus::Pending | TransferStatus::Transferring | TransferStatus::Failed
+        ) {
+            by_id.entry(task.id.clone()).or_insert(task);
+        }
+    }
+    let mut items: Vec<TransferTask> = by_id.into_values().collect();
+    items.sort_by(|a, b| {
+        let a_ts = a.completed_at.as_deref().unwrap_or(a.created_at.as_str());
+        let b_ts = b.completed_at.as_deref().unwrap_or(b.created_at.as_str());
+        b_ts.cmp(a_ts).then_with(|| b.id.cmp(&a.id))
+    });
+    items.truncate(WORKBENCH_LAUNCH_SECTION_LIMIT as usize);
+    Ok(items
+        .into_iter()
+        .map(|t| {
+            let progress = t.progress();
+            let status = match t.status {
+                TransferStatus::Pending => "pending",
+                TransferStatus::Transferring => "transferring",
+                TransferStatus::Completed => "completed",
+                TransferStatus::Failed => "failed",
+                TransferStatus::Cancelled => "cancelled",
+            };
+            let direction = match t.direction {
+                TransferDirection::Send => "send",
+                TransferDirection::Receive => "receive",
+            };
+            let updated_at = t
+                .completed_at
+                .clone()
+                .unwrap_or_else(|| t.created_at.clone());
+            WorkbenchLaunchTransferDto {
+                id: t.id,
+                filename: t.filename,
+                status: status.to_string(),
+                direction: direction.to_string(),
+                progress: Some(progress),
+                size: Some(t.size),
+                updated_at,
+            }
+        })
+        .collect())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     启动摘要设备区展示在线优先的最近设备。
+///
+/// Code Logic（这个函数做什么）:
+///     读 devices RwLock → online 优先 + last_seen DESC → max 5；无网络 I/O。
+fn load_launch_devices_section(state: &AppState) -> SectionOutcome<Vec<WorkbenchLaunchDeviceDto>> {
+    SectionOutcome::from_result(load_launch_devices(state))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     设备段独立失败路径（锁中毒等）。
+///
+/// Code Logic（这个函数做什么）:
+///     排序截断后 map 到 LaunchDeviceDto（address=host:port）。
+fn load_launch_devices(state: &AppState) -> Result<Vec<WorkbenchLaunchDeviceDto>, AppError> {
+    let devices = state
+        .devices
+        .read()
+        .map_err(|_| AppError::generic("devices 读锁中毒"))?
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut devices = devices;
+    devices.sort_by(|a, b| {
+        b.online
+            .cmp(&a.online)
+            .then_with(|| b.last_seen.cmp(&a.last_seen))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    devices.truncate(WORKBENCH_LAUNCH_SECTION_LIMIT as usize);
+    Ok(devices
+        .into_iter()
+        .map(|d| WorkbenchLaunchDeviceDto {
+            id: d.id,
+            name: d.name,
+            online: d.online,
+            last_seen: Some(d.last_seen.to_rfc3339()),
+            address: Some(format!("{}:{}", d.host, d.port)),
+        })
+        .collect())
 }
 
 /// CAS 更新权威运行配置。
@@ -837,6 +1256,75 @@ mod tests {
         let control = control_file("expected-token");
         authorize_control_for_test(loopback_peer(), &ctx, "expected-token", Some(&control))
             .expect("should accept");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     workbench_launch_summary 鉴权必须先于任何 repo 访问；错误 token 不得进入构建路径。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     authorize_control_for_test + wrong token → Unauthorized。
+    #[test]
+    fn workbench_launch_summary_auth_fails_before_repo() {
+        let ctx = test_ctx();
+        let control = control_file("expected-token");
+        let err = authorize_control_for_test(loopback_peer(), &ctx, "wrong-token", Some(&control))
+            .expect_err("wrong token");
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(err.envelope().code, "unauthorized");
+        let err = authorize_control_for_test(lan_peer(), &ctx, "expected-token", Some(&control))
+            .expect_err("non-loopback");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     任一段 Ready/Error 必须独立序列化为 kind/value/message，互不折叠。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造混有 Ready/Error 的 summary 并 round-trip JSON 断言 wire shape。
+    #[test]
+    fn workbench_launch_summary_independent_section_outcomes() {
+        let summary = WorkbenchLaunchSummaryDto {
+            projects: SectionOutcome::Ready {
+                value: vec![WorkbenchLaunchProjectDto {
+                    id: "p1".into(),
+                    name: "P".into(),
+                    kind: "local".into(),
+                    device_id: "d".into(),
+                    device_name: "Desk".into(),
+                    path: "/tmp/p".into(),
+                    last_opened_at: "2026-07-15T00:00:00Z".into(),
+                }],
+            },
+            sessions: SectionOutcome::Error {
+                message: "session boom".into(),
+            },
+            tasks: SectionOutcome::Ready { value: vec![] },
+            transfers: SectionOutcome::Error {
+                message: "transfer boom".into(),
+            },
+            devices: SectionOutcome::Ready { value: vec![] },
+            generated_at: "2026-07-15T00:00:00Z".into(),
+        };
+        let json = serde_json::to_value(&summary).expect("serialize");
+        assert_eq!(json["projects"]["kind"], "ready");
+        assert_eq!(json["projects"]["value"][0]["id"], "p1");
+        assert_eq!(json["sessions"]["kind"], "error");
+        assert_eq!(json["sessions"]["message"], "session boom");
+        assert_eq!(json["tasks"]["kind"], "ready");
+        assert_eq!(json["transfers"]["kind"], "error");
+        assert!(json["sessions"].get("value").is_none());
+        // 其它段仍 ready，证明独立 outcome 不被折叠
+        assert_eq!(json["devices"]["kind"], "ready");
+
+        let from_err = SectionOutcome::<Vec<String>>::from_result(Err(AppError::generic(
+            "unit section failure",
+        )));
+        match from_err {
+            SectionOutcome::Error { message } => {
+                assert!(message.contains("unit section failure"));
+            }
+            SectionOutcome::Ready { .. } => panic!("expected error outcome"),
+        }
     }
 
     /// CAS 经 control 路径：正确 generation 成功，旧 generation 冲突。

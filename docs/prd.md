@@ -264,7 +264,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 **描述**：以项目文件夹为中心管理 Git worktree、普通交互式终端、当前工作区文件夹、文件内容浏览/编辑和 Git 提交树。支持本机目录、已挂载局域网目录，以及通过局域网 P2P 直连选择远端 cc-partner 设备项目目录（无调用者身份校验）；用户可直接浏览已发现设备的目录并选择远端项目文件夹，文件、Git、worktree、终端和 Prompt 优化均代理到远端设备执行。
 
 **功能点**：
-- 工作台布局：项目文件夹列表紧跟全局左侧栏“设置”菜单项下方，作为进入工作台的入口，不再设置独立“工作台”主导航项；主区域依次展示工作台标题、terminal sessions 标识、worktree 管理层、依赖提示槽和中心工作区；中心工作区在当前 worktree 的终端层与文件 tab 工作区之间切换，预览文件时终端可以隐藏但 xterm DOM 必须保持挂载并停止接收输入；终端工具栏按钮与文件工作区工具栏保持一致，均显示图标和文字；桌面端终端全屏按钮位于 pane 操作导航栏，全屏时隐藏 Workbench 外围内容和文件预览入口，但保留 terminal window tabs、pane 操作、退出全屏按钮和当前终端输出，确保全屏中仍可切换 window；文件预览按钮仅在已有打开文件 tab 时启用，点击后回到当前或首个文件 tab，与文件工作区的返回终端按钮对称；右侧检查器承载当前 window 状态，并提供当前 worktree 文件夹 / Git 提交树 tab，窄宽下排到首屏终端之后
+- 工作台布局：侧栏 Work 组含「工作台」导航与 `WorkbenchProjectRail` 项目列表；`/` 保持 GitHub Trending。主区域依次展示工作台标题、terminal sessions 标识、worktree 管理层、依赖提示槽和中心工作区；中心工作区在当前 worktree 的终端层与文件 tab 工作区之间切换，预览文件时终端可以隐藏但 xterm DOM 必须保持挂载并停止接收输入；终端工具栏按钮与文件工作区工具栏保持一致，均显示图标和文字；桌面端终端全屏按钮位于 pane 操作导航栏，全屏时隐藏 Workbench 外围内容和文件预览入口，但保留 terminal window tabs、pane 操作、退出全屏按钮和当前终端输出，确保全屏中仍可切换 window；文件预览按钮仅在已有打开文件 tab 时启用，点击后回到当前或首个文件 tab，与文件工作区的返回终端按钮对称；右侧检查器承载当前 window 状态，并提供当前 worktree 文件夹 / Git 提交树 tab，窄宽下排到首屏终端之后
 - 工作台内置项目预览：可在终端/文件预览旁打开 dev server 浏览器预览，自动发现终端输出和常见框架端口；本机、远端项目 shortcut 与移动端 `/mobile` 均通过 cc-partner 安全代理访问。后端只允许代理 loopback `http(s)` 且显式端口目标，避免成为开放代理；代理请求体上限为 32MB，超限返回 413 且不转发上游；上游响应体必须流式转发，避免超大或持续分块响应在后端整包聚合；远端项目必须在 owning device 上发现和访问目标，当前设备只暴露 relay proxy；前端预览 iframe 必须 sandbox 隔离且不允许 `allow-same-origin`，避免预览项目 JS 同源访问 cc-partner API；候选来源文案由前端按当前语言渲染，不依赖后端 label 字段
 - 项目自动化控制台：Orchestrator 自动化保持项目级语义，入口位于 Workbench 顶层标题区，文案为“项目自动化 / Project Automation”，不再混入终端工具栏或文件预览工具组；控制台顶部必须明确“范围：项目”并显示当前项目名，主体默认只嵌入项目级任务泳道看板、运行时状态条、remote outbox 区（pending/sending/failed）和创建任务入口；failed outbox 在该区提供 Retry/Discard，pending/sending 仅展示状态无动作；任务列表加载完成后即使当前项目没有任务也必须显示固定空泳道，不用“暂无任务”提示替代看板；不自动选中第一条任务，也不常驻展示任务详情或 Evidence；用户点击具体任务后，任务详情与 Evidence 才在右侧抽屉中显示，关闭抽屉后回到纯看板。“项目自动化”按钮是开关：关闭态点击打开控制台，打开态再次点击直接切回终端视图，控制台内部不再提供“返回终端”按钮。创建任务入口必须是独立弹窗，不固定占用控制台页面；桌面端弹窗必须脱离控制台滚动区域和终端全屏层，避免被工作台底层内容遮挡；弹窗支持用户手动填写标题、目标和验收标准，也支持用户输入简单 Prompt 后由 AI 自动完善这三项，AI 只填充表单，用户通过“创建到 Backlog / 创建到 Todo / 创建并启动”三个按钮确认创建，按钮直接决定 `createAction`，不得用单一提交按钮隐式默认 Backlog。打开控制台时 worktree 管理条必须完全隐藏，终端/文件层可隐藏但 xterm DOM 必须保持挂载并停止接收输入；自动化控制台自身只在打开态挂载可见面板，且作为中心工作区的正常文档流内容撑开高度，避免隐藏或绝对定位空层留下黑屏；任务运行后才绑定 worktree/session。嵌入模式下 blocked 任务的“打开执行现场”入口应应用任务 deep link 并切回终端视图，让对应项目 / worktree / session 聚焦结果可见。旧 `/orchestrator` 深链应重定向到 `/workbench`，侧栏不再提供独立自动化主导航项
 - Orchestrator 创建任务契约：所有桌面、移动端 HTTP 和 P2P create 入口统一使用 `createAction: 'backlog' | 'todo' | 'start'`，缺省为 `backlog`。`backlog` 创建 legacy Draft + `workflowState=backlog` + `runState=idle`；`todo` 创建 legacy Queued + `workflowState=todo` + `runState=idle`；`start` 先按 Todo/Idle 落库，再 best-effort 触发 scheduler dispatch/refresh，Settings 关闭、容量不足或 runner 准备失败不得回滚创建，也不得启用 delivery。
@@ -532,12 +532,17 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 **功能点 / 约束**：
 - 颜色/间距/圆角/阴影仅使用 `tokens.css` 已定义 token；`prefers-reduced-motion: reduce` 下全局归零 animation/transition duration
+- 普通小字/次要信息文本使用 `--fg-muted-readable`（浅/深均与 `--bg`/`--surface` 对比度 ≥4.5:1）；`--meta` 仅用于 placeholder/disabled/装饰，且 `color: var(--meta)` 必须落在 checker 评审 allowlist；`check:css-tokens` 自动断言正文语义色对
 - 产品模态统一 `Dialog`/`Drawer` 原语：portal、focus trap、Escape、背景 inert、scroll lock、关闭焦点恢复；业务页禁止手写 focus trap
 - 路由级 `RouteErrorBoundary` + lazy routes：单页 render 失败不得拖垮 AppShell；DEV 提供 `/__cp_route_error_fixture` 崩溃恢复夹具供 E2E
 - desktop main initial ≤ 320 KiB gzip；mobile initial ≤ 280 KiB gzip；mobile initial 禁止 xterm/Tiptap/CodeMirror/Recharts；生产默认无 sourcemap
 - Settings / 桌面 Orchestrator / Mobile Automation 按 controller + pure views 拆分：views 无 API/transport，controllers 无 board/modal JSX
 - Workbench 仅七个域 controller，页面组合层 ≤1200 行；终端 window tabs 使用 roving tablist（Arrow/Home/End）
 - Attention 列表每行仅一个 tab stop（单 button，动作文案为 span）
+- 侧栏按 Explore/Work/Knowledge/Connect/System 分组；`/` 仍是 GitHub Trending；Workbench 在 Work 组；短窗口侧栏 content 可滚、footer 不覆盖
+- GUI 首次启动 LAN listener 前必须完成风险披露确认（首选 TCP 62116 / 端口递增 / mDNS UDP 5353 / 无身份校验）；确认写入 `gui-bootstrap.json`，不是可切换 LAN 模式
+- Workbench 无项目时仅聚焦空态 CTA（添加本机/连接远端/检查 tmux）；有项目未选中时展示“继续工作”启动页；Mobile 导航固定五组（Projects/Attention/Work/Automation/More）
 - 侧栏 `WorkbenchProjectRail` 为项目导航权威入口；添加来源/远端选择走共享 Dialog
+- 固定布局回归 viewport：1024×768、1280×720、390×844、844×390；断言无横向溢出、关键入口键盘可达，命名截图供人工评审（本轮不宣称像素 baseline）
 - 验证：`npm run check:css-tokens && npm run check:i18n && npm run lint && npm run build && npm run check:bundle && npm test && npm run test:e2e`；E2E foundation 冒烟 `frontend-foundation.spec.ts`；手动 VoiceOver/NVDA 覆盖 Dialog/Drawer/Attention/终端 tabs
 
