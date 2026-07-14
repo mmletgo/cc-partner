@@ -16,9 +16,9 @@ use tauri::State;
 
 use crate::backend::control_client::BackendControlClient;
 use crate::config::HealthConfig;
-use crate::config_runtime::{
-    update_config_transactionally, ConfigRuntime, HealthRuntimePatch, RuntimeConfigPatch,
-};
+#[cfg(test)]
+use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
+use crate::config_runtime::{HealthRuntimePatch, RuntimeConfigPatch};
 use crate::error::AppError;
 use crate::health::state::MachineState;
 use crate::health::validation::{
@@ -216,6 +216,7 @@ pub async fn get_health_status(state: State<'_, AppState>) -> Result<HealthStatu
     })
 }
 
+#[cfg(test)]
 /// 在 ConfigRuntime 上切换 health.enabled。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -372,6 +373,7 @@ pub async fn skip_reminder(state: State<'_, AppState>) -> Result<(), AppError> {
     Ok(())
 }
 
+#[cfg(test)]
 /// 在 ConfigRuntime 上整体覆盖 health 配置。
 ///
 /// Business Logic（为什么需要这个函数）:

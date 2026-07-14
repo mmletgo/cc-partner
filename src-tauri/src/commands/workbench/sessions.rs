@@ -46,7 +46,13 @@ pub async fn list_workbench_sessions(
     state: State<'_, AppState>,
     project_id: Option<String>,
 ) -> Result<Vec<WorkbenchSessionDto>, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.list", serde_json::json!({ "projectId": project_id.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.list",
+        serde_json::json!({ "projectId": project_id.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     list_workbench_sessions_for_state(state.inner(), project_id).await
@@ -80,11 +86,10 @@ pub(crate) async fn local_create_workbench_session(
         initial_rows,
     )?;
     // RAII：upsert 失败时 Drop 自动 close，避免 ghost PTY/registry。
-    let mut spawn_guard =
-        crate::workbench::sessions::SessionSpawnGuard::new(
-            (*state.workbench_sessions).clone(),
-            row.id.clone(),
-        );
+    let mut spawn_guard = crate::workbench::sessions::SessionSpawnGuard::new(
+        (*state.workbench_sessions).clone(),
+        row.id.clone(),
+    );
     state.workbench_session_repo.upsert(&row).await?;
     spawn_guard.commit();
     Ok(row.to_dto())
@@ -237,7 +242,13 @@ pub async fn write_workbench_session_input(
     session_id: String,
     data: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.write", serde_json::json!({ "sessionId": session_id.clone(), "data": data.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.write",
+        serde_json::json!({ "sessionId": session_id.clone(), "data": data.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     write_workbench_session_input_for_state(state.inner(), session_id, data).await
@@ -358,7 +369,13 @@ pub async fn focus_workbench_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.focus", serde_json::json!({ "sessionId": session_id.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.focus",
+        serde_json::json!({ "sessionId": session_id.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     focus_workbench_session_for_state(state.inner(), session_id).await
@@ -410,7 +427,13 @@ pub async fn get_focused_workbench_session(
     project_id: String,
     worktree_id: Option<String>,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.focused", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.focused",
+        serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     get_focused_workbench_session_for_state(state.inner(), project_id, worktree_id).await
@@ -480,7 +503,13 @@ pub async fn split_workbench_pane(
     session_id: String,
     direction: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.split", serde_json::json!({ "sessionId": session_id.clone(), "direction": direction.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.split",
+        serde_json::json!({ "sessionId": session_id.clone(), "direction": direction.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     split_workbench_pane_for_state(state.inner(), session_id, direction).await
@@ -542,7 +571,13 @@ pub async fn switch_workbench_pane(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.switch", serde_json::json!({ "sessionId": session_id.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.switch",
+        serde_json::json!({ "sessionId": session_id.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     switch_workbench_pane_for_state(state.inner(), session_id).await
@@ -620,7 +655,13 @@ pub async fn zoom_workbench_pane(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.zoom", serde_json::json!({ "sessionId": session_id.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.zoom",
+        serde_json::json!({ "sessionId": session_id.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     zoom_workbench_pane_for_state(state.inner(), session_id).await
@@ -687,7 +728,13 @@ pub async fn close_workbench_pane(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.close_pane", serde_json::json!({ "sessionId": session_id.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.close_pane",
+        serde_json::json!({ "sessionId": session_id.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     close_workbench_pane_for_state(state.inner(), session_id).await
@@ -758,7 +805,13 @@ pub async fn close_workbench_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.close", serde_json::json!({ "sessionId": session_id.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.close",
+        serde_json::json!({ "sessionId": session_id.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     close_workbench_session_for_state(state.inner(), session_id).await
@@ -810,7 +863,13 @@ pub async fn rename_workbench_session(
     session_id: String,
     name: String,
 ) -> Result<WorkbenchSessionDto, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "sessions.rename", serde_json::json!({ "sessionId": session_id.clone(), "name": name.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.rename",
+        serde_json::json!({ "sessionId": session_id.clone(), "name": name.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     if let Some(parsed) = parse_remote_entity_id(&session_id) {

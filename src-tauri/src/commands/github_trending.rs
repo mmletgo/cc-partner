@@ -14,9 +14,9 @@
 use crate::backend::control_client::BackendControlClient;
 use crate::claude_cli;
 use crate::config::GithubTrendingConfig;
-use crate::config_runtime::{
-    update_config_transactionally, ConfigRuntime, GithubTrendingRuntimePatch, RuntimeConfigPatch,
-};
+#[cfg(test)]
+use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
+use crate::config_runtime::{GithubTrendingRuntimePatch, RuntimeConfigPatch};
 use crate::error::AppError;
 use crate::state::AppState;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -142,6 +142,7 @@ pub async fn get_default_github_trending_config() -> Result<GithubTrendingConfig
     Ok(config_to_dto(&GithubTrendingConfig::default()))
 }
 
+#[cfg(test)]
 /// 在 ConfigRuntime 上应用 GitHub Trending patch。
 ///
 /// Business Logic（为什么需要这个函数）:

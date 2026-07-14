@@ -385,9 +385,8 @@ fn ensure_response_within_limit<T: Serialize>(
     value: &T,
     context: &P2pRequestContext,
 ) -> Result<(), P2pError> {
-    let encoded = serde_json::to_vec(value).map_err(|_| {
-        P2pError::from_code("控制响应序列化失败", P2pErrorCode::Internal, context)
-    })?;
+    let encoded = serde_json::to_vec(value)
+        .map_err(|_| P2pError::from_code("控制响应序列化失败", P2pErrorCode::Internal, context))?;
     if encoded.len() > CONTROL_RESPONSE_BODY_LIMIT_BYTES {
         return Err(P2pError::from_code(
             "控制响应超过 1 MiB 限制",
@@ -493,9 +492,8 @@ mod tests {
     fn non_loopback_is_rejected_even_with_valid_token() {
         let ctx = test_ctx();
         let control = control_file("expected-token");
-        let err =
-            authorize_control_for_test(lan_peer(), &ctx, "expected-token", Some(&control))
-                .expect_err("non-loopback");
+        let err = authorize_control_for_test(lan_peer(), &ctx, "expected-token", Some(&control))
+            .expect_err("non-loopback");
         assert_eq!(err.status(), StatusCode::FORBIDDEN);
         assert_eq!(err.envelope().code, "forbidden");
     }

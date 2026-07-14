@@ -16,15 +16,13 @@ use crate::backend::control_client::BackendControlClient;
 use crate::config::{
     default_preference_values, normalize_prompt_optimizer_fill_language, AppConfig,
 };
-use crate::config_runtime::{
-    update_config_transactionally, ConfigSnapshot, ConfigUpdateResponse, ConfigRuntime,
-    RuntimeConfigPatch,
-};
+#[cfg(test)]
+use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
+use crate::config_runtime::{ConfigSnapshot, ConfigUpdateResponse, RuntimeConfigPatch};
 use crate::error::AppError;
-use crate::hotkey::{
-    compensate_screenshot_hotkey_os, replace_screenshot_hotkey_os, GlobalShortcutBackend,
-    TauriGlobalShortcutBackend,
-};
+#[cfg(test)]
+use crate::hotkey::{compensate_screenshot_hotkey_os, replace_screenshot_hotkey_os};
+use crate::hotkey::{GlobalShortcutBackend, TauriGlobalShortcutBackend};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -236,6 +234,7 @@ pub async fn get_default_config(state: State<'_, AppState>) -> Result<ConfigDto,
     })
 }
 
+#[cfg(test)]
 /// 应用设置页 patch 字段到 candidate。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -268,6 +267,7 @@ fn apply_config_patch(
     }
 }
 
+#[cfg(test)]
 /// 在 ConfigRuntime 上应用基础偏好 patch。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -298,6 +298,7 @@ pub async fn update_config_for_runtime(
     Ok(dto)
 }
 
+#[cfg(test)]
 /// 在同一 ConfigRuntime 临界区内完成 OS 热键切换 + 配置事务 + 失败补偿。
 ///
 /// Business Logic（为什么需要这个函数）:

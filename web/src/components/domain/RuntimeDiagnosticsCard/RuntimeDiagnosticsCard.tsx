@@ -62,9 +62,29 @@ export function RuntimeDiagnosticsCard(): ReactElement {
     }
   }, [t]);
 
+  // 挂载首次加载：在 promise then/finally 中 setState，避免 effect 体内同步 setState 触发 lint。
   useEffect(() => {
-    void load(false);
-  }, [load]);
+    let cancelled = false;
+    void runtimeDiagnosticsApi
+      .get()
+      .then((next) => {
+        if (cancelled) return;
+        setDiagnostics(next);
+        setError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : t('settings:runtime.loadFailed'));
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+        setRefreshing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [t]);
 
   /**
    * Business Logic（为什么需要这个函数）:

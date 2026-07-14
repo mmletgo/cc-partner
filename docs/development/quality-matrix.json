@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-07-14",
+  "updatedAt": "2026-07-15",
   "description": "Machine-readable quality evidence matrix. Stable IDs must not be renamed without updating docs and scripts/check-quality-traceability.mjs atomically. L1 browser mocks do not prove Tauri WebView, system permissions, real file dialogs, or multi-host LAN. L3 rows stay NOT VERIFIED until real-device certification lands.",
   "entries": [
     {
@@ -409,6 +409,38 @@
       ],
       "docs": [
         "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "L2-RUNTIME-AUTHORITY-001",
+      "surface": "runtime-authority",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/runtime_authority_smoke.rs",
+        "src-tauri/src/backend/control_api.rs",
+        "src-tauri/src/backend/control.rs",
+        "src-tauri/src/config_runtime.rs",
+        "src-tauri/src/workbench/remote_events.rs",
+        "web/src/pages/Settings/Settings.test.tsx"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test runtime_authority_smoke -- --nocapture --test-threads=1 && cargo test --locked backend::control backend::control_api config_runtime workbench::remote_events --lib && cd ../web && npm test -- Settings.test.tsx",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04",
+        "macos-latest",
+        "windows-latest"
+      ],
+      "exclusions": [
+        "packaged multi-process GUI host with real global shortcuts",
+        "multi-host LAN (control plane is loopback-only)",
+        "real public peer path"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/backend-operations.md",
+        "docs/p2p-protocol.md",
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-07-14-runtime-authority-and-operational-diagnostics-design.md"
       ]
     },
     {

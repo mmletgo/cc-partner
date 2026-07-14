@@ -26,9 +26,17 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 合法 loopback/LAN socket peer 调用 P2P、Mobile、Workbench 与 Orchestrator 业务 API 时，不需要账号、配对、token、cookie、session、签名或设备身份；
 - 业务查询、写入与执行对范围内 peer 一律放行，不提供可切换暴露模式、只读模式、逐设备权限或路由级授权矩阵；
 - 网络范围、Host/Origin/Content-Type 与资源上限是部署边界与请求完整性保护，不是身份鉴权；
-- `/api/backend/control/stop` 是本机进程生命周期接口，继续要求 loopback peer + 控制文件 token，不把 token 扩散到业务 API。
+- `/api/backend/control/*` 是本机 loopback 控制面（lifecycle + 运行时权威读写），要求 loopback peer + 控制文件 token；token 与 `controlSchemaVersion` 不进入 LAN 业务 API 或 health capabilities。
 
 **固定风险声明**：同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份。
+
+### 1.4 运行时权威（sidecar owner）
+
+- 独立后端 sidecar（`cc-partner-backend serve`）是配置、Cloud Sync、Workbench 终端/远端 bridge、Orchestrator telemetry 的唯一运行时 owner（`HeadlessOwner`）。
+- 桌面 GUI 为 `GuiClient`：保留窗口/托盘/系统快捷键与事件转发；凡影响 LAN/Workbench/Orchestrator/Cloud Sync 的运行态 mutation 经 loopback control client 提交到 sidecar，不得在 GUI 进程自建第二套 runtime 写路径。
+- 每次权威配置成功落盘后返回稳定 `ownerInstanceId` 与单调递增 `generation`；GUI 以 allowlist patch + expected owner/generation 做 CAS，冲突后刷新再由用户重试。
+- 终端 create/restore 仅 sidecar 拥有；失败路径用 RAII 补偿，禁止双进程同时 attach 同一 session。
+- Settings「依赖环境」展示脱敏运行诊断（owner/generation/phase/计数/错误类别）；复制摘要不得包含 Prompt、文件内容、终端文本、远端 URL 凭据或 control token。
 
 ## 2. 功能需求
 
@@ -119,7 +127,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 独立后端提供 `cc-partner-backend doctor` 与 `cc-partner-backend doctor --json` 做本机诊断：人类可读检查表与机器可读 `DoctorSnapshot`（schemaVersion=1，camelCase）；`healthy → exit 0`、`degraded → exit 1`、`unhealthy` 或 doctor 无法完成 → exit 2；正常 stopped 后端为 healthy/info 而非错误；可选依赖缺失通常 degraded；核心路径（data/db/log）或 backend health 失败为 unhealthy
 - 后端诊断日志本地落盘到 `<data_dir>/logs/backend.log`（默认 `~/.cc-partner/logs/backend.log`）：当前文件上限 5 MiB，最多 3 个历史文件（`.1` 最新 … `.3`），不生成 `.4`；路径 home 归一为 `<HOME>`、密钥与 Prompt/body 脱敏；**不上传**、不建远程 Issue、不收集 telemetry；doctor 只读 tail，不写 backend.log
 - 数据与日志默认在 `~/.cc-partner/`；可用合法绝对路径环境变量 `CC_PARTNER_DATA_DIR` 隔离到其它目录
-- 桌面 GUI 启动时如果独立后端未运行，应自动启动后端进程；GUI 只做前端壳、事件转发和 lifecycle 管理，不重复 advertise 自己
+- 桌面 GUI 启动时如果独立后端未运行，应自动启动后端进程；GUI 只做前端壳、事件转发和 lifecycle 管理，不重复 advertise 自己，也不在本机 GUI 进程内作为第二 runtime owner 执行配置/Workbench/Orchestrator mutation
 - 桌面 GUI 关闭或托盘退出时必须弹窗，让用户选择“仅关闭 GUI 并保留后端”或“前后端都关闭”
 - 自动发现同一局域网内的其他实例
 - 在设备页显示在线数量，并把自动发现的设备合并进连接目标列表（设备名、IP、在线状态）

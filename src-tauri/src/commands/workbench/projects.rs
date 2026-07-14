@@ -34,7 +34,9 @@ use super::common::*;
 pub async fn list_workbench_projects(
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkbenchProjectDto>, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.list", serde_json::json!({})).await? {
+    if let Some(v) =
+        proxy_workbench_if_gui(state.inner(), "projects.list", serde_json::json!({})).await?
+    {
         return Ok(v);
     }
     let rows = state.workbench_project_repo.list().await?;
@@ -133,7 +135,13 @@ pub async fn add_workbench_project(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<WorkbenchProjectDto, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.add", serde_json::json!({ "path": path.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.add",
+        serde_json::json!({ "path": path.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     add_local_workbench_project_from_path(&state, path).await
@@ -151,7 +159,13 @@ pub async fn list_workbench_remote_roots(
     state: State<'_, AppState>,
     device_id: String,
 ) -> Result<Vec<WorkbenchRemoteRootDto>, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.remote_roots", serde_json::json!({ "deviceId": device_id.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.remote_roots",
+        serde_json::json!({ "deviceId": device_id.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     let base_url = device_base_url(&state, &device_id)?;
@@ -171,7 +185,13 @@ pub async fn list_workbench_remote_dir(
     device_id: String,
     path: String,
 ) -> Result<Vec<WorkbenchRemoteDirectoryEntryDto>, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.remote_list_dir", serde_json::json!({ "deviceId": device_id.clone(), "path": path.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.remote_list_dir",
+        serde_json::json!({ "deviceId": device_id.clone(), "path": path.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     let base_url = device_base_url(&state, &device_id)?;
@@ -193,7 +213,13 @@ pub async fn get_workbench_remote_path_info(
     device_id: String,
     path: String,
 ) -> Result<WorkbenchRemotePathInfoDto, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.remote_path_info", serde_json::json!({ "deviceId": device_id.clone(), "path": path.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.remote_path_info",
+        serde_json::json!({ "deviceId": device_id.clone(), "path": path.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     let base_url = device_base_url(&state, &device_id)?;
@@ -215,7 +241,13 @@ pub async fn open_workbench_remote_project(
     device_id: String,
     path: String,
 ) -> Result<WorkbenchProjectDto, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.remote_open", serde_json::json!({ "deviceId": device_id.clone(), "path": path.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.remote_open",
+        serde_json::json!({ "deviceId": device_id.clone(), "path": path.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     let base_url = device_base_url(&state, &device_id)?;
@@ -249,7 +281,13 @@ pub async fn remove_workbench_project(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.remove", serde_json::json!({ "projectId": project_id.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.remove",
+        serde_json::json!({ "projectId": project_id.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     let _ = get_project(&state, &project_id).await?;
@@ -282,7 +320,13 @@ pub async fn touch_workbench_project(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<WorkbenchProjectDto, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "projects.touch", serde_json::json!({ "projectId": project_id.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.touch",
+        serde_json::json!({ "projectId": project_id.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     let mut row = get_project(&state, &project_id).await?;

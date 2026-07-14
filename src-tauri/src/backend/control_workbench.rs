@@ -279,13 +279,9 @@ async fn dispatch_workbench_op(
             let project_id = required_string(&payload, "projectId")?;
             let worktree_id = optional_string(&payload, "worktreeId");
             let path = required_string(&payload, "path")?;
-            let info = workbench::get_workbench_path_info_for_state(
-                state,
-                project_id,
-                worktree_id,
-                path,
-            )
-            .await?;
+            let info =
+                workbench::get_workbench_path_info_for_state(state, project_id, worktree_id, path)
+                    .await?;
             Ok(serde_json::to_value(info)?)
         }
         "files.open" => {
@@ -354,15 +350,9 @@ async fn dispatch_workbench_op(
             let path = required_string(&payload, "path")?;
             let table = optional_string(&payload, "table");
             let limit_rows = payload.get("limitRows").and_then(|v| v.as_i64());
-            let item = preview_sqlite_for_state(
-                state,
-                project_id,
-                worktree_id,
-                path,
-                table,
-                limit_rows,
-            )
-            .await?;
+            let item =
+                preview_sqlite_for_state(state, project_id, worktree_id, path, table, limit_rows)
+                    .await?;
             Ok(serde_json::to_value(item)?)
         }
         "files.preview_html_asset" => {
@@ -473,12 +463,9 @@ async fn dispatch_workbench_op(
         "sessions.focused" => {
             let project_id = required_string(&payload, "projectId")?;
             let worktree_id = optional_string(&payload, "worktreeId");
-            let item = workbench::get_focused_workbench_session_for_state(
-                state,
-                project_id,
-                worktree_id,
-            )
-            .await?;
+            let item =
+                workbench::get_focused_workbench_session_for_state(state, project_id, worktree_id)
+                    .await?;
             Ok(serde_json::to_value(item)?)
         }
         "sessions.split" => {
@@ -946,9 +933,8 @@ fn ensure_response_within_limit<T: Serialize>(
     value: &T,
     context: &P2pRequestContext,
 ) -> Result<(), P2pError> {
-    let encoded = serde_json::to_vec(value).map_err(|_| {
-        P2pError::from_code("控制响应序列化失败", P2pErrorCode::Internal, context)
-    })?;
+    let encoded = serde_json::to_vec(value)
+        .map_err(|_| P2pError::from_code("控制响应序列化失败", P2pErrorCode::Internal, context))?;
     if encoded.len() > CONTROL_RESPONSE_BODY_LIMIT_BYTES {
         return Err(P2pError::from_code(
             "控制响应超过 1 MiB 限制",

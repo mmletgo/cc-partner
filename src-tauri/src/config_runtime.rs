@@ -286,11 +286,7 @@ impl ConfigRuntime {
         Ok(ConfigUpdateResponse {
             owner_instance_id: self.owner_instance_id.clone(),
             generation,
-            snapshot: ConfigSnapshot::from_runtime(
-                &self.owner_instance_id,
-                generation,
-                &candidate,
-            ),
+            snapshot: ConfigSnapshot::from_runtime(&self.owner_instance_id, generation, &candidate),
         })
     }
 
@@ -656,8 +652,7 @@ impl RuntimeConfigPatch {
             cfg.prompt_optimizer_hotkey = hotkey.clone();
         }
         if let Some(ref language) = self.prompt_optimizer_fill_language {
-            cfg.prompt_optimizer_fill_language =
-                normalize_prompt_optimizer_fill_language(language);
+            cfg.prompt_optimizer_fill_language = normalize_prompt_optimizer_fill_language(language);
         }
         if let Some(ref url) = self.cloud_sync_repo_url {
             cfg.cloud_sync_repo_url = if url.trim().is_empty() {
@@ -1072,6 +1067,8 @@ mod tests {
     ///     store.fail_next_save 后 CAS，断言 Err 且 generation 不变。
     #[tokio::test]
     async fn save_failure_does_not_increment_generation() {
+        // 并行测试可能短暂设置 CC_PARTNER_DATA_DIR；清空 override，避免 sample /tmp/db.db 被隔离校验提前拒绝。
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let initial = sample_config();
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         store.fail_next_save();
@@ -1086,6 +1083,8 @@ mod tests {
 
     #[tokio::test]
     async fn save_failure_leaves_memory_unchanged() {
+        // 并行测试可能短暂设置 CC_PARTNER_DATA_DIR；清空 override，避免 sample /tmp/db.db 被隔离校验提前拒绝。
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let initial = sample_config();
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         store.fail_next_save();

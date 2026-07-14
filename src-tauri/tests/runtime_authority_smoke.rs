@@ -22,7 +22,7 @@ use app_lib::config::{
     AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
 };
 use app_lib::config_runtime::{
-    ConfigSnapshot, ConfigUpdateResponse, RuntimeConfigPatch, RuntimeOwnerStatus, ConfigRuntime,
+    ConfigRuntime, ConfigSnapshot, ConfigUpdateResponse, RuntimeConfigPatch, RuntimeOwnerStatus,
 };
 use app_lib::config_store::MemoryConfigStore;
 use app_lib::error::AppError;
@@ -116,11 +116,7 @@ impl RuntimeAuthorityHarness {
         let token = format!("token-{}", uuid::Uuid::new_v4());
         let initial = sample_config();
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
-        let runtime = Arc::new(ConfigRuntime::with_owner(
-            initial,
-            store,
-            owner_id.clone(),
-        ));
+        let runtime = Arc::new(ConfigRuntime::with_owner(initial, store, owner_id.clone()));
         let fail_next_save = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let event_bus = Arc::new(RuntimeEventBus::new(owner_id.clone()));
         let latest_tick = Arc::new(Mutex::new(None));
@@ -165,8 +161,8 @@ impl RuntimeAuthorityHarness {
         // 给 server 一拍启动时间
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        let client = BackendControlClient::for_test(addr.port(), &token, &owner_id)
-            .expect("client");
+        let client =
+            BackendControlClient::for_test(addr.port(), &token, &owner_id).expect("client");
         let _ = token; // token 已注入 client
         Self {
             runtime,
@@ -388,10 +384,7 @@ async fn h_events_catch_up(
             Json(serde_json::json!({"error": m, "code": "unauthorized"})),
         )
     })?;
-    let after = match (
-        body.after_owner_instance_id.as_deref(),
-        body.after_sequence,
-    ) {
+    let after = match (body.after_owner_instance_id.as_deref(), body.after_sequence) {
         (Some(owner), Some(seq)) if !owner.is_empty() => Some(BackendRuntimeCursor {
             owner_instance_id: owner.to_string(),
             sequence: seq,
@@ -471,10 +464,7 @@ async fn hotkey_preflight_conflict_on_stale_generation() {
         "err={err}"
     );
     // owner 热键未变
-    assert_eq!(
-        harness.owner_config().await.screenshot_hotkey,
-        "<ctrl>+s"
-    );
+    assert_eq!(harness.owner_config().await.screenshot_hotkey, "<ctrl>+s");
 }
 
 /// owner durable-save 失败时 generation 不变。

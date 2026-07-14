@@ -91,13 +91,8 @@ fn workbench_control_path(op: &str) -> &'static str {
 ///     长 Git/Claude 类 op 用 360s，其余用 MUTATE_TIMEOUT。
 fn workbench_control_timeout(op: &str) -> Duration {
     match op {
-        "worktrees.commit"
-        | "worktrees.merge"
-        | "worktrees.push"
-        | "worktrees.create"
-        | "claude.resume"
-        | "files.open"
-        | "files.save_text" => Duration::from_secs(360),
+        "worktrees.commit" | "worktrees.merge" | "worktrees.push" | "worktrees.create"
+        | "claude.resume" | "files.open" | "files.save_text" => Duration::from_secs(360),
         _ => MUTATE_TIMEOUT,
     }
 }
@@ -195,9 +190,8 @@ impl BackendControlClient {
     /// Code Logic（这个函数做什么）:
     ///     读 control file；缺失或非权威描述符返回 conflict/unavailable；构造带超时的 reqwest client。
     pub fn from_control_file() -> Result<Self, AppError> {
-        let control = control::read_control_file()?.ok_or_else(|| {
-            AppError::unavailable("后端控制文件不存在，请先启动 sidecar")
-        })?;
+        let control = control::read_control_file()?
+            .ok_or_else(|| AppError::unavailable("后端控制文件不存在，请先启动 sidecar"))?;
         Self::from_control(&control)
     }
 
@@ -237,7 +231,11 @@ impl BackendControlClient {
     ///
     /// Code Logic（这个函数做什么）:
     ///     填充权威 schema 与 owner id，构造 client。
-    pub fn for_test(port: u16, control_token: &str, owner_instance_id: &str) -> Result<Self, AppError> {
+    pub fn for_test(
+        port: u16,
+        control_token: &str,
+        owner_instance_id: &str,
+    ) -> Result<Self, AppError> {
         let http = reqwest::Client::builder()
             .timeout(MUTATE_TIMEOUT)
             .build()
@@ -281,9 +279,12 @@ impl BackendControlClient {
     /// Code Logic（这个函数做什么）:
     ///     POST `/api/backend/control/status`；查询路径允许一次 control-file 刷新后重试。
     pub async fn status(&self) -> Result<RuntimeOwnerStatus, AppError> {
-        self.query_with_optional_refresh("status", &ControlAuthBody {
-            control_token: self.control_token.clone(),
-        })
+        self.query_with_optional_refresh(
+            "status",
+            &ControlAuthBody {
+                control_token: self.control_token.clone(),
+            },
+        )
         .await
     }
 
@@ -442,9 +443,8 @@ impl BackendControlClient {
         let body = ControlWorkbenchRequestBody {
             control_token: self.control_token.clone(),
             op: op.to_string(),
-            payload: serde_json::to_value(payload).map_err(|e| {
-                AppError::generic(format!("序列化 workbench payload 失败: {e}"))
-            })?,
+            payload: serde_json::to_value(payload)
+                .map_err(|e| AppError::generic(format!("序列化 workbench payload 失败: {e}")))?,
         };
         let resp: ControlWorkbenchResponseBody = match self.send_once(path, &body, timeout).await {
             ControlCallOutcome::Ok(v) => v,
@@ -456,7 +456,9 @@ impl BackendControlClient {
             }
         };
         if resp.owner_instance_id.trim().is_empty() {
-            return Err(AppError::generic("workbench control 响应缺少 ownerInstanceId"));
+            return Err(AppError::generic(
+                "workbench control 响应缺少 ownerInstanceId",
+            ));
         }
         Ok((resp.owner_instance_id, resp.result))
     }
@@ -511,7 +513,10 @@ impl BackendControlClient {
     ///
     /// Code Logic（这个函数做什么）:
     ///     status → update_config；冲突直接返回，由 UI 刷新后用户重试。
-    pub async fn apply_patch(&self, patch: RuntimeConfigPatch) -> Result<ConfigUpdateResponse, AppError> {
+    pub async fn apply_patch(
+        &self,
+        patch: RuntimeConfigPatch,
+    ) -> Result<ConfigUpdateResponse, AppError> {
         let status = self.status().await?;
         self.update_config(ConfigUpdateRequest {
             expected_owner_instance_id: status.owner_instance_id,
@@ -951,53 +956,63 @@ mod tests {
         let app = Router::new()
             .route(
                 "/api/backend/control/get-config",
-                post(|AxumState(s): AxumState<S>, Json(b): Json<Auth>| async move {
-                    if b.control_token != s.token {
-                        return Err((
-                            StatusCode::UNAUTHORIZED,
-                            Json(serde_json::json!({"error":"bad token","code":"unauthorized"})),
-                        ));
-                    }
-                    let snap = s.runtime.snapshot_with_generation().unwrap();
-                    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
-                        serde_json::json!({"snapshot": snap}),
-                    ))
-                }),
+                post(
+                    |AxumState(s): AxumState<S>, Json(b): Json<Auth>| async move {
+                        if b.control_token != s.token {
+                            return Err((
+                                StatusCode::UNAUTHORIZED,
+                                Json(
+                                    serde_json::json!({"error":"bad token","code":"unauthorized"}),
+                                ),
+                            ));
+                        }
+                        let snap = s.runtime.snapshot_with_generation().unwrap();
+                        Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
+                            serde_json::json!({"snapshot": snap}),
+                        ))
+                    },
+                ),
             )
             .route(
                 "/api/backend/control/update-config",
-                post(|AxumState(s): AxumState<S>, Json(b): Json<Upd>| async move {
-                    if b.control_token != s.token {
-                        return Err((
-                            StatusCode::UNAUTHORIZED,
-                            Json(serde_json::json!({"error":"bad token","code":"unauthorized"})),
-                        ));
-                    }
-                    if s.fail.swap(false, Ordering::SeqCst) {
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({
-                                "error":"注入: durable save 失败",
-                                "code":"internal"
-                            })),
-                        ));
-                    }
-                    match s
-                        .runtime
-                        .apply_patch_if_generation(
-                            &b.expected_owner_instance_id,
-                            b.expected_generation,
-                            b.patch,
-                        )
-                        .await
-                    {
-                        Ok(r) => Ok(Json(r)),
-                        Err(e) => Err((
-                            StatusCode::CONFLICT,
-                            Json(serde_json::json!({"error": e.to_string(), "code":"conflict"})),
-                        )),
-                    }
-                }),
+                post(
+                    |AxumState(s): AxumState<S>, Json(b): Json<Upd>| async move {
+                        if b.control_token != s.token {
+                            return Err((
+                                StatusCode::UNAUTHORIZED,
+                                Json(
+                                    serde_json::json!({"error":"bad token","code":"unauthorized"}),
+                                ),
+                            ));
+                        }
+                        if s.fail.swap(false, Ordering::SeqCst) {
+                            return Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(serde_json::json!({
+                                    "error":"注入: durable save 失败",
+                                    "code":"internal"
+                                })),
+                            ));
+                        }
+                        match s
+                            .runtime
+                            .apply_patch_if_generation(
+                                &b.expected_owner_instance_id,
+                                b.expected_generation,
+                                b.patch,
+                            )
+                            .await
+                        {
+                            Ok(r) => Ok(Json(r)),
+                            Err(e) => Err((
+                                StatusCode::CONFLICT,
+                                Json(
+                                    serde_json::json!({"error": e.to_string(), "code":"conflict"}),
+                                ),
+                            )),
+                        }
+                    },
+                ),
             )
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1084,7 +1099,9 @@ mod tests {
                         if body.control_token != s.token {
                             return Err((
                                 StatusCode::UNAUTHORIZED,
-                                Json(serde_json::json!({"error":"bad token","code":"unauthorized"})),
+                                Json(
+                                    serde_json::json!({"error":"bad token","code":"unauthorized"}),
+                                ),
                             ));
                         }
                         s.ops.lock().unwrap().push(body.op.clone());
@@ -1116,7 +1133,10 @@ mod tests {
             .expect("workbench_op projects.list");
         assert_eq!(got_owner, owner);
         assert!(items.is_empty());
-        assert_eq!(ops.lock().unwrap().as_slice(), &["projects.list".to_string()]);
+        assert_eq!(
+            ops.lock().unwrap().as_slice(),
+            &["projects.list".to_string()]
+        );
     }
 
     /// 验证 GuiClient 的 require_owner 冲突码（与 bridge ensure 拒绝路径一致）。
@@ -1160,5 +1180,4 @@ mod tests {
         );
         assert_eq!(workbench_control_path("sessions.write"), "workbench/data");
     }
-
 }

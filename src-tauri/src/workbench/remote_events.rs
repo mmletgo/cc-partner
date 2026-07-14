@@ -321,10 +321,7 @@ impl RemoteEventBridgeRegistry {
     /// Code Logic（这个函数做什么）:
     ///     持锁读取 tasks HashMap 长度。
     pub fn active_bridge_count(&self) -> usize {
-        self.tasks
-            .lock()
-            .expect("remote event bridge 锁中毒")
-            .len()
+        self.tasks.lock().expect("remote event bridge 锁中毒").len()
     }
 
     /// 收集全部 bridge 脱敏快照。
@@ -467,7 +464,13 @@ fn spawn_bridge_task(
         )
         .await;
         loop_runtime.finished.store(true, Ordering::SeqCst);
-        if loop_runtime.phase.lock().expect("bridge phase 锁中毒").as_str() != "stopped" {
+        if loop_runtime
+            .phase
+            .lock()
+            .expect("bridge phase 锁中毒")
+            .as_str()
+            != "stopped"
+        {
             loop_runtime.set_phase("finished");
         }
     });
@@ -595,7 +598,9 @@ async fn remote_event_loop(
                 runtime.set_error_class(Some(class));
                 let next = runtime.attempt.fetch_add(1, Ordering::SeqCst) + 1;
                 runtime.set_phase("backoff");
-                tracing::debug!("Workbench 远端事件流断开，将退避重连: class={class} attempt={next}");
+                tracing::debug!(
+                    "Workbench 远端事件流断开，将退避重连: class={class} attempt={next}"
+                );
             }
         }
 
@@ -738,7 +743,7 @@ fn process_event_chunk_to_events(
     // 快速路径：追加前检查 pending 预算。
     if buffer.len().saturating_add(chunk.len()) > MAX_PENDING_BUFFER_BYTES {
         // 若合并后仍无换行且超限 → 资源上限。
-        let has_newline = buffer.iter().any(|b| *b == b'\n') || chunk.iter().any(|b| *b == b'\n');
+        let has_newline = buffer.contains(&b'\n') || chunk.contains(&b'\n');
         if !has_newline {
             buffer.clear();
             return Err(EventStreamError::ResourceLimit);
@@ -804,8 +809,7 @@ pub async fn parse_ndjson_chunks(
     let mut events = Vec::new();
     let project_ids = HashMap::new();
     for chunk in chunks {
-        let partial =
-            process_event_chunk_to_events("device-a", &project_ids, &mut buffer, &chunk)?;
+        let partial = process_event_chunk_to_events("device-a", &project_ids, &mut buffer, &chunk)?;
         events.extend(partial);
     }
     Ok(events)

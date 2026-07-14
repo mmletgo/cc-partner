@@ -9,18 +9,20 @@
 //!     具体校验和归一化委托 `orchestrator::config`。
 
 use crate::backend::control_client::BackendControlClient;
-use crate::config_runtime::{
-    update_config_transactionally, ConfigRuntime, OrchestratorRuntimePatch, RuntimeConfigPatch,
-};
+#[cfg(test)]
+use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
+use crate::config_runtime::{OrchestratorRuntimePatch, RuntimeConfigPatch};
 use crate::error::AppError;
+#[cfg(test)]
+use crate::orchestrator::config::apply_orchestrator_config_patch;
 use crate::orchestrator::config::{
-    apply_orchestrator_config_patch, default_orchestrator_automation_config,
-    normalize_verification_commands, OrchestratorAutomationConfigDto,
-    OrchestratorAutomationConfigPatch,
+    default_orchestrator_automation_config, normalize_verification_commands,
+    OrchestratorAutomationConfigDto, OrchestratorAutomationConfigPatch,
 };
 use crate::state::AppState;
 use tauri::State;
 
+#[cfg(test)]
 /// 应用 Orchestrator 自动化配置 patch 到 AppConfig 并返回 DTO。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -68,6 +70,7 @@ pub async fn get_default_orchestrator_config() -> Result<OrchestratorAutomationC
     ))
 }
 
+#[cfg(test)]
 /// 在 ConfigRuntime 上应用 Orchestrator 自动化 patch。
 ///
 /// Business Logic（为什么需要这个函数）:

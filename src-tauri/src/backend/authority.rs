@@ -126,8 +126,7 @@ pub fn classify_control_descriptor(
         .as_ref()
         .map(|id| id.trim().is_empty())
         .unwrap_or(true);
-    let needs_restart =
-        control.control_schema_version != CONTROL_SCHEMA_VERSION || owner_missing;
+    let needs_restart = control.control_schema_version != CONTROL_SCHEMA_VERSION || owner_missing;
     ControlDescriptorClassification { needs_restart }
 }
 

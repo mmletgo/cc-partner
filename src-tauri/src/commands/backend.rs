@@ -163,7 +163,7 @@ fn open_path_in_file_manager(path: &std::path::Path) -> Result<(), AppError> {
             .arg(path)
             .status()
             .map_err(|e| AppError::generic(format!("打开日志目录失败: {e}")))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "windows")]
     {
@@ -171,7 +171,7 @@ fn open_path_in_file_manager(path: &std::path::Path) -> Result<(), AppError> {
             .arg(path)
             .status()
             .map_err(|e| AppError::generic(format!("打开日志目录失败: {e}")))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

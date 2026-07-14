@@ -45,7 +45,13 @@ pub async fn list_workbench_worktrees(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Vec<WorkbenchWorktreeDto>, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "worktrees.list", serde_json::json!({ "projectId": project_id.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "worktrees.list",
+        serde_json::json!({ "projectId": project_id.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     list_workbench_worktrees_for_state(state.inner(), project_id).await
@@ -341,7 +347,13 @@ pub async fn commit_workbench_worktree(
     worktree_id: String,
     message: Option<String>,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "worktrees.commit", serde_json::json!({ "worktreeId": worktree_id.clone(), "message": message.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "worktrees.commit",
+        serde_json::json!({ "worktreeId": worktree_id.clone(), "message": message.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     commit_workbench_worktree_for_state(state.inner(), worktree_id, message).await
@@ -506,7 +518,13 @@ pub async fn push_workbench_worktree(
     state: State<'_, AppState>,
     worktree_id: String,
 ) -> Result<WorkbenchWorktreeDto, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "worktrees.push", serde_json::json!({ "worktreeId": worktree_id.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "worktrees.push",
+        serde_json::json!({ "worktreeId": worktree_id.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     push_workbench_worktree_for_state(state.inner(), worktree_id).await
@@ -809,7 +827,13 @@ pub async fn merge_workbench_worktree(
     state: State<'_, AppState>,
     worktree_id: String,
 ) -> Result<WorkbenchMergeResultDto, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "worktrees.merge", serde_json::json!({ "worktreeId": worktree_id.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "worktrees.merge",
+        serde_json::json!({ "worktreeId": worktree_id.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     merge_workbench_worktree_for_state(state.inner(), worktree_id).await
@@ -1366,7 +1390,13 @@ pub async fn remove_workbench_worktree(
     worktree_id: String,
     force: Option<bool>,
 ) -> Result<serde_json::Value, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "worktrees.remove", serde_json::json!({ "worktreeId": worktree_id.clone(), "force": force.clone() })).await? {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "worktrees.remove",
+        serde_json::json!({ "worktreeId": worktree_id.clone(), "force": force.clone() }),
+    )
+    .await?
+    {
         return Ok(v);
     }
     remove_workbench_worktree_for_state(state.inner(), worktree_id, force).await

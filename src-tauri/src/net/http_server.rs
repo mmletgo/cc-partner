@@ -376,24 +376,27 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
         .route(
             "/api/backend/control/status",
-            post(crate::backend::control_api::control_status)
-                .layer(axum::extract::DefaultBodyLimit::max(
+            post(crate::backend::control_api::control_status).layer(
+                axum::extract::DefaultBodyLimit::max(
                     crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
-                )),
+                ),
+            ),
         )
         .route(
             "/api/backend/control/get-config",
-            post(crate::backend::control_api::control_get_config)
-                .layer(axum::extract::DefaultBodyLimit::max(
+            post(crate::backend::control_api::control_get_config).layer(
+                axum::extract::DefaultBodyLimit::max(
                     crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
-                )),
+                ),
+            ),
         )
         .route(
             "/api/backend/control/update-config",
-            post(crate::backend::control_api::control_update_config)
-                .layer(axum::extract::DefaultBodyLimit::max(
+            post(crate::backend::control_api::control_update_config).layer(
+                axum::extract::DefaultBodyLimit::max(
                     crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
-                )),
+                ),
+            ),
         )
         // N1 Task4：Workbench owner control（metadata 256 KiB；data 32 MiB）
         // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
@@ -407,9 +410,8 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         )
         .route(
             "/api/backend/control/workbench/data",
-            post(crate::backend::control_workbench::control_workbench_data).layer(
-                axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024),
-            ),
+            post(crate::backend::control_workbench::control_workbench_data)
+                .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
         )
         // N1 Task5：owner 事件 relay + Orchestrator runtime snapshot 代理
         // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。

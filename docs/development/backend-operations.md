@@ -61,6 +61,48 @@ cargo run --locked --bin cc-partner-backend -- stop
 
 `serve` is not a normal operator entry; prefer `start` / `stop`.
 
+## Runtime authority (sidecar owner)
+
+The headless `serve` process is the sole **runtime owner** (`HeadlessOwner`) for
+config, Cloud Sync engine, Workbench terminal/PTY, remote bridges, and Orchestrator
+telemetry. The desktop GUI is a **GuiClient**: it may own window/tray/OS shortcuts and
+forward Tauri events, but runtime mutations go through loopback control routes.
+
+### Control file
+
+`backend-control.json` (camelCase) includes at least:
+
+- `pid`, `port`, `deviceId`, `deviceName`, `startedAt`, `controlToken`
+- `controlSchemaVersion` (current **2**)
+- `ownerInstanceId` (UUID generated once per sidecar process)
+
+Legacy files missing schema/owner deserialize but are classified **stale / needs restart**
+and must not be treated as an authoritative owner. CLI `status` JSON never prints the
+control token. `controlSchemaVersion` / `ownerInstanceId` stay on the control file and
+control status responses — they are **not** LAN health capabilities.
+
+### Loopback control routes
+
+All require **loopback peer + control token**. Metadata body ≤256 KiB / response ≤1 MiB
+unless noted. Never transport-auto-retry mutations.
+
+| Method | Path | Role |
+| --- | --- | --- |
+| POST | `/api/backend/control/stop` | graceful shutdown |
+| POST | `/api/backend/control/status` | owner/generation + sanitized diagnostics |
+| POST | `/api/backend/control/get-config` | authoritative config snapshot |
+| POST | `/api/backend/control/update-config` | CAS allowlist patch (`expectedOwnerInstanceId` + `expectedGeneration`) |
+| POST | `/api/backend/control/workbench` | Workbench metadata ops on owner |
+| POST | `/api/backend/control/workbench/data` | large file/browser payloads (body ≤32 MiB) |
+| POST | `/api/backend/control/orchestrator/runtime-snapshot` | owner runtime snapshot |
+| POST | `/api/backend/control/events/catch-up` | event bus replay / Gap |
+| POST | `/api/backend/control/events/stream` | NDJSON catch-up + live |
+
+`generation` increments only after a successful durable config replace. Wrong owner or
+generation → conflict; GUI refreshes and user retries. Diagnostics copied from Settings
+must omit tokens, Prompt/file/terminal content, and remote URL credentials.
+
+
 ## Ports & discovery
 
 | Role | Protocol | Value |

@@ -31,6 +31,33 @@ cc-partner P2P/Mobile/Workbench/Orchestrator HTTP is **local/LAN only** and has
   text **5 MiB**, preview proxy **32 MiB**) — not a per-route authorization matrix.
 - `POST /api/backend/control/stop` is local lifecycle only (loopback + control-file
   token). Business routes never require that token.
+
+## Local control plane (not LAN business)
+
+Routes under `/api/backend/control/*` are **local process control**, not LAN peer
+APIs. They must stay separate from unauthenticated P2P/Mobile/Workbench/Orchestrator
+business routes:
+
+| Concern | LAN business `/api/*` (excl. control) | Local control `/api/backend/control/*` |
+| --- | --- | --- |
+| Peer scope | supported loopback/LAN ranges | **loopback socket only** (`ConnectInfo`) |
+| Auth | none (no caller identity) | control-file **token** in JSON body |
+| Capability ads | `server_protocol_info()` / health | **never** advertised as LAN capabilities |
+| Version | `protocol_version` + capability tokens | `controlSchemaVersion` + `ownerInstanceId` live only in control file / status |
+| Typical callers | peers, mobile browser, remote devices | GUI `BackendControlClient`, CLI stop |
+
+Control inventory rows (status / get-config / update-config / workbench /
+workbench-data / orchestrator runtime-snapshot / events catch-up / stream / stop)
+share the table below so `check-p2p-route-inventory.mjs` can audit every literal
+router path, but product and protocol docs must not describe `controlSchemaVersion`
+as a LAN authorization capability or add it to `server_protocol_info()`.
+
+Limits:
+- metadata control JSON body ≤ **256 KiB**, ordinary metadata response ≤ **1 MiB**
+- Workbench control data-plane body ≤ **32 MiB** (text/file/browser domain budgets stay 5/10/32 MiB on LAN routes)
+- event NDJSON stream lines retain the separate **1 MiB** stream limit
+- handlers must **never** log control tokens, Prompt/file/terminal content, or remote URL credentials
+
 - Protocol capabilities (`attention.v1`, `errors.envelope.v1`, …) describe wire
   format / route existence only. There is **no** LAN permission capability token
   and no capability negotiation for LAN access. Old and new native peers remain

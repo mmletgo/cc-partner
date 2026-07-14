@@ -17,7 +17,9 @@
 use crate::backend::control_client::BackendControlClient;
 use crate::cloud_sync::engine::{self, CloudSyncResult, TestCloudSyncResult};
 use crate::config::default_cloud_sync_values;
-use crate::config_runtime::{update_config_transactionally, ConfigRuntime, RuntimeConfigPatch};
+use crate::config_runtime::RuntimeConfigPatch;
+#[cfg(test)]
+use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
 use crate::error::AppError;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
@@ -91,6 +93,7 @@ pub async fn get_default_cloud_sync_config() -> Result<CloudSyncConfigDto, AppEr
     })
 }
 
+#[cfg(test)]
 /// 在 ConfigRuntime 上应用云同步 patch。
 ///
 /// Business Logic（为什么需要这个函数）:
