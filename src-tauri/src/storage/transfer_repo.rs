@@ -5,24 +5,39 @@
 //!     返回"活跃任务 + 历史"合并列表。表 schema 由 lib.rs 建表（CREATE TABLE IF NOT EXISTS）。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `record(task)`：INSERT OR REPLACE 写入一条历史（终态任务落库）。
+//!     - `record(task)`：shared write lease 下 INSERT OR REPLACE 写入一条历史（终态任务落库）。
 //!     - `list()`：按 created_at 倒序返回全部历史。
-//!     - `update_status(...)`：更新某任务的状态/进度/完成时间（断点续传场景可能用到）。
+//!     - `update_status(...)`：shared write lease 下更新某任务的状态/进度/完成时间。
 
 use crate::error::AppError;
 use crate::models::transfer::{TransferDirection, TransferStatus, TransferTask};
+use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
+use std::sync::Arc;
 
 /// 传输历史仓库。
 pub struct TransferRepo {
     db: SqlitePool,
+    /// 维护屏障：写路径持 shared lease，restore exclusive 时阻塞。
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl TransferRepo {
-    /// 构造仓库。
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
+    ///
+    /// Business Logic: 单测无需共享 AppState.maintenance_gate。
+    /// Code Logic: 内部 `with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))`。
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: 全部 ordinary writer 与 restore 共用同一 gate。
+    /// Code Logic: 保存 pool + Arc gate。
+    pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { db, gate }
     }
 
     /// 将一行映射为 TransferTask。
@@ -48,6 +63,9 @@ impl TransferRepo {
     }
 
     /// 写入一条历史（INSERT OR REPLACE，终态任务落库）。
+    ///
+    /// Business Logic: 发送/接收终态后必须 durable 落库，供重启后 complete/status 收敛。
+    /// Code Logic: 持 shared write lease 后 INSERT OR REPLACE。
     pub async fn record(&self, task: &TransferTask) -> Result<(), AppError> {
         let direction_str = match task.direction {
             TransferDirection::Send => "send",
@@ -60,25 +78,28 @@ impl TransferRepo {
             TransferStatus::Failed => "failed",
             TransferStatus::Cancelled => "cancelled",
         };
-        sqlx::query(
-            "INSERT OR REPLACE INTO transfer_history \
-             (id, filename, file_path, size, sha256, direction, peer_device_id, status, transferred_bytes, created_at, completed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&task.id)
-        .bind(&task.filename)
-        .bind(&task.file_path)
-        .bind(task.size as i64)
-        .bind(&task.sha256)
-        .bind(direction_str)
-        .bind(&task.peer_device_id)
-        .bind(status_str)
-        .bind(task.transferred_bytes as i64)
-        .bind(&task.created_at)
-        .bind(&task.completed_at)
-        .execute(&self.db)
-        .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT OR REPLACE INTO transfer_history \
+                 (id, filename, file_path, size, sha256, direction, peer_device_id, status, transferred_bytes, created_at, completed_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&task.id)
+            .bind(&task.filename)
+            .bind(&task.file_path)
+            .bind(task.size as i64)
+            .bind(&task.sha256)
+            .bind(direction_str)
+            .bind(&task.peer_device_id)
+            .bind(status_str)
+            .bind(task.transferred_bytes as i64)
+            .bind(&task.created_at)
+            .bind(&task.completed_at)
+            .execute(&self.db)
+            .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// 列出全部历史（按 created_at 倒序）。
@@ -112,6 +133,9 @@ impl TransferRepo {
     }
 
     /// 更新某任务的状态/进度/完成时间。
+    ///
+    /// Business Logic: 断点续传等场景可能需要局部改状态。
+    /// Code Logic: 持 shared write lease 后 UPDATE。
     #[allow(dead_code)]
     pub async fn update_status(
         &self,
@@ -127,15 +151,18 @@ impl TransferRepo {
             TransferStatus::Failed => "failed",
             TransferStatus::Cancelled => "cancelled",
         };
-        sqlx::query(
-            "UPDATE transfer_history SET status = ?, transferred_bytes = ?, completed_at = ? WHERE id = ?",
-        )
-        .bind(status_str)
-        .bind(transferred_bytes as i64)
-        .bind(completed_at)
-        .bind(id)
-        .execute(&self.db)
-        .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE transfer_history SET status = ?, transferred_bytes = ?, completed_at = ? WHERE id = ?",
+            )
+            .bind(status_str)
+            .bind(transferred_bytes as i64)
+            .bind(completed_at)
+            .bind(id)
+            .execute(&self.db)
+            .await?;
+            Ok(())
+        })
+        .await
     }
 }

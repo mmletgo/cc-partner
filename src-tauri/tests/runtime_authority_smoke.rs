@@ -11,6 +11,7 @@
 //!     event bus 用有界 ring/broadcast 验证 replay/gap/owner 重启。
 
 use app_lib::backend::authority::CONTROL_SCHEMA_VERSION;
+use app_lib::backend::control_client::rebind_control_token_body;
 use app_lib::backend::control_client::{
     decide_hotkey_reconcile, BackendControlClient, HotkeyOsReconcileDecision,
 };
@@ -18,7 +19,6 @@ use app_lib::backend::event_bus::{
     perform_gap_resync, BackendRuntimeCursor, GapResyncOutcome, GuiEventRelayState,
     RelayClientAction, RuntimeEventBus, RuntimeRelayMessage,
 };
-use app_lib::backend::control_client::rebind_control_token_body;
 use app_lib::config::{
     AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
 };
@@ -819,9 +819,7 @@ fn query_refresh_preserves_original_request_body_fields() {
         Some("token-2")
     );
     assert_eq!(
-        rebound
-            .get("afterOwnerInstanceId")
-            .and_then(|v| v.as_str()),
+        rebound.get("afterOwnerInstanceId").and_then(|v| v.as_str()),
         Some("owner-x")
     );
     assert_eq!(
@@ -891,7 +889,10 @@ async fn cloud_sync_manual_and_scheduler_share_single_gate() {
     let (hold_res, busy_res) = tokio::join!(holder, busy);
     hold_res.expect("join holder").expect("holder ok");
     let skipped = busy_res.expect("join busy").expect("busy ok");
-    assert!(skipped.is_none(), "scheduler 在 busy 时必须 ReturnBusy → None");
+    assert!(
+        skipped.is_none(),
+        "scheduler 在 busy 时必须 ReturnBusy → None"
+    );
     assert!(
         runtime.status_snapshot().skipped_busy >= 1,
         "skipped_busy 必须可观测"

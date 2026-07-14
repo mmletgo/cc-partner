@@ -1,22 +1,33 @@
-//! sync/scratchpad.rs — 速记本多页面同步合并与 P2P 流程
+//! sync/scratchpad.rs — 速记本多页面同步合并与 typed P2P 流程
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     Scratchpad 是多页面自动保存文本，同一页面可能在多设备并发编辑或重命名。需要与 Prompt/SSH
-//!     一致的向量时钟 + LWW 策略，保证局域网和 GitHub 同步最终收敛。
+//!     Scratchpad 是多页面自动保存文本，需与 Prompt/SSH 一致的向量时钟 + LWW，
+//!     并在 N2 下返回 typed domain outcome。
 //!
 //! Code Logic（这个模块做什么）:
-//!     `merge_scratchpad` 复用 vector_clock compare/merge；`scratchpad_sync_with_peer`
-//!     复用全局 trigger_sync 的设备遍历，由每个对端执行 summaries pull + merge + push。
+//!     merge helpers（含 conflict draft）+ scratchpad_sync_with_peer（v2 plan / typed legacy）。
 
 use crate::models::scratchpad::ScratchpadRow;
 use crate::state::AppState;
+use crate::storage::content_version_repo::KIND_CONFLICT;
+use crate::storage::sync_request_ledger_repo::DOMAIN_SCRATCHPAD;
+use crate::sync::apply_merge::apply_scratchpad_pull_items;
+use crate::sync::engine::{
+    fetch_complete_remote_manifest, mid_batch_fail_outcome, peer_error_to_domain_outcome,
+};
+use crate::sync::merger::{ContentVersionDraft, DomainMergeResult};
+use crate::sync::protocol::{
+    compute_sync_plan, content_sha256_hex, decide_acked_delete_epoch,
+    max_delete_epoch_from_summaries, SyncDomainOutcome, SyncSummary, PUSH_BATCH_ITEMS,
+};
 use crate::sync::vector_clock::{compare, merge, ClockOrder};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// 判断两条速记本行是否在同步相关字段上不同。
 ///
-/// Business Logic: 合并后只有真正改变本地内容/时钟/删除状态时才需要落库，减少无意义写入。
-/// Code Logic: 比较向量时钟、更新时间、内容、device_id、deleted。
+/// Business Logic: 合并后只有真正改变本地内容/时钟/删除状态时才需要落库。
+/// Code Logic: 比较向量时钟、更新时间、内容、device_id、deleted、delete_epoch。
 pub fn scratchpad_changed(merged: &ScratchpadRow, local: &ScratchpadRow) -> bool {
     merged.vector_clock != local.vector_clock
         || merged.updated_at != local.updated_at
@@ -24,12 +35,10 @@ pub fn scratchpad_changed(merged: &ScratchpadRow, local: &ScratchpadRow) -> bool
         || merged.content != local.content
         || merged.device_id != local.device_id
         || merged.deleted != local.deleted
+        || merged.delete_epoch != local.delete_epoch
 }
 
 /// 判断 remote 是否应覆盖 local。
-///
-/// Business Logic: 严格领先的远端版本必须被本机吸收；落后或相等版本不覆盖。
-/// Code Logic: compare(remote, local)；并发分支只按 updated_at 初判，tie-break 在 wins_concurrent 中处理。
 pub fn should_update_scratchpad(local: &ScratchpadRow, remote: &ScratchpadRow) -> bool {
     let relation = compare(&remote.vector_clock, &local.vector_clock);
     match relation {
@@ -41,10 +50,6 @@ pub fn should_update_scratchpad(local: &ScratchpadRow, remote: &ScratchpadRow) -
 }
 
 /// 并发冲突时决定 remote 是否胜出。
-///
-/// Business Logic: 两台设备同时编辑同一速记本文本时，用 LWW 选择更新时间更晚者；
-///     时间完全相同则用 device_id 字典序保证所有设备作出同一选择。
-/// Code Logic: 先比较 updated_at 字符串（RFC3339 可字典序比较），相同再比较 device_id。
 pub fn wins_concurrent_scratchpad(local: &ScratchpadRow, remote: &ScratchpadRow) -> bool {
     if remote.updated_at > local.updated_at {
         return true;
@@ -56,10 +61,6 @@ pub fn wins_concurrent_scratchpad(local: &ScratchpadRow, remote: &ScratchpadRow)
 }
 
 /// 合并两条速记本版本，返回胜出内容 + 合并后的向量时钟。
-///
-/// Business Logic: 保证局域网/GitHub 同步冲突处理与 Prompt/SSH 一致：严格领先覆盖，并发 LWW，
-///     无论哪边胜出都合并双方向量时钟以保留因果历史。
-/// Code Logic: compare(remote, local) 后决定 winner，最后把 merged_clock 写回 winner。
 pub fn merge_scratchpad(local: &ScratchpadRow, remote: &ScratchpadRow) -> ScratchpadRow {
     let merged_clock = merge(&local.vector_clock, &remote.vector_clock);
     let relation = compare(&remote.vector_clock, &local.vector_clock);
@@ -79,80 +80,327 @@ pub fn merge_scratchpad(local: &ScratchpadRow, remote: &ScratchpadRow) -> Scratc
     }
 }
 
-/// 与单个对端同步全部速记本页面。
+/// 计算 Scratchpad 正文指纹（title/content）。
 ///
-/// Business Logic: 全局 `trigger_sync` 应自动纳入速记本。此函数在 prompt/cc/ssh 同步后执行，
-///     对端不可达或旧版本无 scratchpad 路由时只记录告警，不影响主同步计数。
+/// Business Logic（为什么需要这个函数）:
+///     并发 conflict 行需要稳定 content_hash，与 manifest hash 对齐。
 ///
-/// Code Logic:
-///     1. health 检查；
-///     2. 本端 get_all_for_sync 投影 summaries 发给对端 pull；
-///     3. 对端返回本端缺少/落后/并发的 pages，本端逐条 merge 后 bulk_upsert；
-///     4. 重新读取本端全量，按远端 summaries 计算本端需 push 的页面。
+/// Code Logic（这个函数做什么）:
+///     title/content 固定分隔后 SHA-256 hex。
+pub fn scratchpad_text_content_hash(row: &ScratchpadRow) -> String {
+    content_sha256_hex(&[row.title.as_bytes(), b"\0", row.content.as_bytes()])
+}
+
+/// 判断两条速记本正文是否不同。
+///
+/// Business Logic: 仅 title/content 不同才写 conflict。
+/// Code Logic: 字段比较。
+fn scratchpad_payload_differs(a: &ScratchpadRow, b: &ScratchpadRow) -> bool {
+    a.title != b.title || a.content != b.content
+}
+
+/// 合并两条速记本，并在并发且正文不同时产出 conflict 副本草稿。
+///
+/// Business Logic（为什么需要这个函数）:
+///     N2 要求并发不同 payload 时保留 winner 并写 conflict copy。
+///
+/// Code Logic（这个函数做什么）:
+///     `merge_scratchpad` 得 winner；Concurrent 且 title/content 不同时把 loser 做成 draft；
+///     domain=`DOMAIN_SCRATCHPAD`。
+pub fn merge_scratchpad_with_conflicts(
+    local: &ScratchpadRow,
+    remote: &ScratchpadRow,
+    now: &str,
+) -> DomainMergeResult<ScratchpadRow> {
+    let winner = merge_scratchpad(local, remote);
+    let relation = compare(&remote.vector_clock, &local.vector_clock);
+    let mut conflict_versions = Vec::new();
+    if relation == ClockOrder::Concurrent && scratchpad_payload_differs(local, remote) {
+        let remote_wins = wins_concurrent_scratchpad(local, remote);
+        let loser = if remote_wins { local } else { remote };
+        conflict_versions.push(ContentVersionDraft {
+            domain: DOMAIN_SCRATCHPAD.to_string(),
+            item_id: loser.id.clone(),
+            source_device: loser.device_id.clone(),
+            content_hash: scratchpad_text_content_hash(loser),
+            created_at: now.to_string(),
+            kind: KIND_CONFLICT.to_string(),
+            snapshot_json: serde_json::to_string(loser).unwrap_or_default(),
+        });
+    }
+    DomainMergeResult {
+        winner,
+        conflict_versions,
+    }
+}
+
+/// Scratchpad 行 → SyncSummary。
+///
+/// Business Logic: v2 planner 需要与服务端一致的 content_hash。
+/// Code Logic: title/content 固定分隔后 SHA-256。
+pub fn scratchpad_to_summary(row: &ScratchpadRow) -> SyncSummary<String> {
+    let content_hash = content_sha256_hex(&[row.title.as_bytes(), b"\0", row.content.as_bytes()]);
+    SyncSummary {
+        id: row.id.clone(),
+        vector_clock: row.vector_clock.clone(),
+        content_hash,
+        size: row.content.len() as u64,
+        updated_at: row.updated_at.clone(),
+        deleted: row.deleted,
+        delete_epoch: row.delete_epoch,
+    }
+}
+
+/// 与单个对端同步全部速记本页面，返回 typed domain outcome。
+///
+/// Business Logic: 失败不得伪装成功；支持 v2 时走 plan，否则 typed legacy。
+/// Code Logic: supports_v2 分支；不重复 health。
 pub async fn scratchpad_sync_with_peer(
     state: &AppState,
     device: &crate::models::device::Device,
-) -> Result<(), String> {
-    let base_url = device.base_url();
-    tracing::info!("开始与设备 {} 同步速记本 ({})", device.name, base_url);
-
-    if !state.peer_client.health(&device.host, device.port).await {
-        tracing::warn!("设备 {} 不可达，跳过速记本同步", device.name);
-        return Ok(());
+    base_url: &str,
+    supports_v2: bool,
+) -> SyncDomainOutcome {
+    if supports_v2 {
+        scratchpad_sync_v2(state, device, base_url).await
+    } else {
+        scratchpad_sync_legacy_typed(state, device, base_url).await
     }
+}
 
-    let local_all = state
-        .scratchpad_repo
-        .get_all_for_sync()
-        .await
-        .map_err(|e| format!("读取本地速记本失败: {e}"))?;
-    let summaries: Vec<serde_json::Value> = local_all
-        .iter()
-        .map(|p| serde_json::json!({ "id": p.id, "vector_clock": p.vector_clock }))
-        .collect();
+/// Scratchpad v2 plan 路径。
+///
+/// Business Logic: 完整 manifest + 成功 apply 后才 ack；有正文末批携带 epoch，无正文走 ack-delete-epoch。
+/// Code Logic: 与 prompt_sync_v2 同构。
+async fn scratchpad_sync_v2(
+    state: &AppState,
+    device: &crate::models::device::Device,
+    base_url: &str,
+) -> SyncDomainOutcome {
+    let remote = match fetch_complete_remote_manifest(|cursor| {
+        let client = state.peer_client.clone();
+        let base = base_url.to_string();
+        async move {
+            client
+                .list_scratchpad_manifest_page(&base, cursor.as_deref())
+                .await
+        }
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(o) => return o,
+    };
+    let max_remote_epoch = max_delete_epoch_from_summaries(&remote);
 
-    let remote_pages: Vec<ScratchpadRow> = state
-        .peer_client
-        .scratchpad_pull(&base_url, summaries.clone())
-        .await;
+    let local_all = match state.scratchpad_repo.get_all_for_sync().await {
+        Ok(v) => v,
+        Err(e) => {
+            return SyncDomainOutcome::ProtocolError {
+                code: format!("local_read_failed:{e}"),
+            };
+        }
+    };
+    let mut local_manifest: Vec<SyncSummary<String>> =
+        local_all.iter().map(scratchpad_to_summary).collect();
+    local_manifest.sort_by(|a, b| a.id.cmp(&b.id));
+    let local_by_id: HashMap<String, ScratchpadRow> =
+        local_all.into_iter().map(|r| (r.id.clone(), r)).collect();
 
-    let mut to_upsert: Vec<ScratchpadRow> = Vec::new();
-    for remote in &remote_pages {
-        let local = state
-            .scratchpad_repo
-            .get(&remote.id)
+    let plan = compute_sync_plan(&local_manifest, &remote);
+    let unchanged = plan.unchanged;
+    let mut pulled: u32 = 0;
+    let mut pushed: u32 = 0;
+
+    for chunk in plan.fetch_from_remote.chunks(PUSH_BATCH_ITEMS) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let ids: Vec<String> = chunk.to_vec();
+        let resp = match state
+            .peer_client
+            .fetch_scratchpad_items(base_url, &ids)
             .await
-            .map_err(|e| format!("查询本地速记本页面 {} 失败: {e}", remote.id))?;
-        match local {
-            None => to_upsert.push(remote.clone()),
-            Some(local_row) => {
-                let merged = merge_scratchpad(&local_row, remote);
-                if scratchpad_changed(&merged, &local_row) {
-                    to_upsert.push(merged);
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let applied = pulled.saturating_add(pushed);
+                if applied > 0 {
+                    return mid_batch_fail_outcome(applied, format!("fetch_failed:{e}"));
+                }
+                return peer_error_to_domain_outcome(&e);
+            }
+        };
+        if !resp.items.is_empty() {
+            match apply_scratchpad_pull_items(
+                &state.scratchpad_repo.pool(),
+                state.maintenance_gate.as_ref(),
+                state.scratchpad_repo.as_ref(),
+                &resp.items,
+            )
+            .await
+            {
+                Ok(n) => {
+                    if n > 0 {
+                        pulled = pulled.saturating_add(n as u32);
+                        tracing::info!(
+                            "从 {} 拉取并更新了 {} 个速记本页面 (v2 apply_merge)",
+                            device.name,
+                            n
+                        );
+                    }
+                }
+                Err(e) => {
+                    return mid_batch_fail_outcome(
+                        pulled.saturating_add(pushed),
+                        format!("apply_merge_failed:{e}"),
+                    );
                 }
             }
         }
     }
 
-    if !to_upsert.is_empty() {
-        let n = to_upsert.len();
-        state
-            .scratchpad_repo
-            .bulk_upsert(&to_upsert)
-            .await
-            .map_err(|e| format!("速记本 bulk_upsert 失败: {e}"))?;
-        tracing::info!("从 {} 拉取并更新了 {} 个速记本页面", device.name, n);
+    // 完整 manifest + apply 成功后：有正文末批携带 ack；无正文走专用 ack-delete-epoch
+    let ack_epoch = decide_acked_delete_epoch(true, true, max_remote_epoch);
+    let claimed = state.device_id.as_str();
+
+    let mut batches: Vec<Vec<ScratchpadRow>> = Vec::new();
+    for chunk in plan.push_to_remote.chunks(PUSH_BATCH_ITEMS) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let items: Vec<ScratchpadRow> = chunk
+            .iter()
+            .filter_map(|id| local_by_id.get(id).cloned())
+            .collect();
+        if !items.is_empty() {
+            batches.push(items);
+        }
+    }
+
+    if batches.is_empty() {
+        // 无正文可推：专用 ack-delete-epoch（禁止空 push-batch）
+        if let Some(epoch) = ack_epoch {
+            if let Err(e) = state
+                .peer_client
+                .ack_scratchpad_delete_epoch(base_url, claimed, epoch)
+                .await
+            {
+                let applied = pulled.saturating_add(pushed);
+                if applied > 0 {
+                    return mid_batch_fail_outcome(applied, format!("ack_failed:{e}"));
+                }
+                return peer_error_to_domain_outcome(&e);
+            }
+        }
+    } else {
+        let last = batches.len() - 1;
+        for (i, items) in batches.into_iter().enumerate() {
+            let epoch = if i == last { ack_epoch } else { None };
+            let req_id = Uuid::new_v4().to_string();
+            match state
+                .peer_client
+                .push_scratchpad_batch(base_url, &items, &req_id, claimed, epoch)
+                .await
+            {
+                Ok(resp) => {
+                    pushed = pushed.saturating_add(resp.accepted as u32);
+                    tracing::info!(
+                        "向 {} 推送了 {} 个速记本页面 (v2 accepted={})",
+                        device.name,
+                        items.len(),
+                        resp.accepted
+                    );
+                }
+                Err(e) => {
+                    let applied = pulled.saturating_add(pushed);
+                    if applied > 0 {
+                        return mid_batch_fail_outcome(applied, format!("push_failed:{e}"));
+                    }
+                    return peer_error_to_domain_outcome(&e);
+                }
+            }
+        }
+    }
+
+    SyncDomainOutcome::Succeeded {
+        pulled,
+        pushed,
+        unchanged,
+    }
+}
+
+/// Scratchpad typed legacy 路径。
+///
+/// Business Logic: 旧对端无 v2 时仍可同步；本地 apply 必须保留 conflict 副本。
+/// Code Logic: pull_result → apply_scratchpad_pull_items → push_result。
+async fn scratchpad_sync_legacy_typed(
+    state: &AppState,
+    device: &crate::models::device::Device,
+    base_url: &str,
+) -> SyncDomainOutcome {
+    let local_all = match state.scratchpad_repo.get_all_for_sync().await {
+        Ok(v) => v,
+        Err(e) => {
+            return SyncDomainOutcome::ProtocolError {
+                code: format!("local_read_failed:{e}"),
+            };
+        }
+    };
+    let summaries: Vec<serde_json::Value> = local_all
+        .iter()
+        .map(|p| serde_json::json!({ "id": p.id, "vector_clock": p.vector_clock }))
+        .collect();
+
+    let remote_pages = match state
+        .peer_client
+        .scratchpad_pull_result(base_url, summaries)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return peer_error_to_domain_outcome(&e),
+    };
+
+    let mut pulled: u32 = 0;
+    if !remote_pages.is_empty() {
+        match apply_scratchpad_pull_items(
+            &state.scratchpad_repo.pool(),
+            state.maintenance_gate.as_ref(),
+            state.scratchpad_repo.as_ref(),
+            &remote_pages,
+        )
+        .await
+        {
+            Ok(n) => {
+                pulled = n as u32;
+                if n > 0 {
+                    tracing::info!(
+                        "从 {} 拉取并更新了 {} 个速记本页面 (legacy apply_merge)",
+                        device.name,
+                        n
+                    );
+                }
+            }
+            Err(e) => {
+                return SyncDomainOutcome::ProtocolError {
+                    code: format!("apply_merge_failed:{e}"),
+                };
+            }
+        }
     }
 
     let remote_clock_map: HashMap<String, &HashMap<String, u64>> = remote_pages
         .iter()
         .map(|p| (p.id.clone(), &p.vector_clock))
         .collect();
-    let local_after = state
-        .scratchpad_repo
-        .get_all_for_sync()
-        .await
-        .map_err(|e| format!("读取合并后速记本失败: {e}"))?;
+    let local_after = match state.scratchpad_repo.get_all_for_sync().await {
+        Ok(v) => v,
+        Err(e) => {
+            return SyncDomainOutcome::ProtocolError {
+                code: format!("local_reread_failed:{e}"),
+            };
+        }
+    };
 
     let mut push_pages: Vec<ScratchpadRow> = Vec::new();
     for page in &local_after {
@@ -160,30 +408,43 @@ pub async fn scratchpad_sync_with_peer(
             None => push_pages.push(page.clone()),
             Some(clock) => {
                 let relation = compare(&page.vector_clock, clock);
-                if (matches!(relation, ClockOrder::After)
-                    || matches!(relation, ClockOrder::Concurrent))
-                {
+                if matches!(relation, ClockOrder::After | ClockOrder::Concurrent) {
                     push_pages.push(page.clone());
                 }
             }
         }
     }
 
+    let mut pushed: u32 = 0;
     if !push_pages.is_empty() {
-        let n = push_pages.len();
-        if state
+        let n = push_pages.len() as u32;
+        match state
             .peer_client
-            .scratchpad_push(&base_url, &push_pages)
+            .scratchpad_push_result(base_url, &push_pages)
             .await
         {
-            tracing::info!("向 {} 推送了 {} 个速记本页面", device.name, n);
-        } else {
-            tracing::warn!("向 {} 推送速记本失败", device.name);
+            Ok(true) => {
+                pushed = n;
+                tracing::info!("向 {} 推送了 {} 个速记本页面 (legacy)", device.name, n);
+            }
+            Ok(false) => {
+                return SyncDomainOutcome::ProtocolError {
+                    code: "push_rejected".to_string(),
+                };
+            }
+            Err(e) => return peer_error_to_domain_outcome(&e),
         }
     }
 
-    tracing::info!("与设备 {} 速记本同步完成", device.name);
-    Ok(())
+    let unchanged = local_after
+        .len()
+        .saturating_sub(pulled as usize)
+        .saturating_sub(pushed as usize) as u32;
+    SyncDomainOutcome::Succeeded {
+        pulled,
+        pushed,
+        unchanged,
+    }
 }
 
 #[cfg(test)]
@@ -205,6 +466,7 @@ mod tests {
             device_id: device_id.to_string(),
             vector_clock,
             deleted: false,
+            delete_epoch: 0,
         }
     }
 

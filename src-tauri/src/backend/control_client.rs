@@ -1,7 +1,7 @@
 //! backend/control_client.rs — GUI 本机 control-file 客户端。
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     GUI 不得自建第二份运行时权威；配置 / Cloud Sync 等 mutation 必须代理到 sidecar owner。
+//!     GUI 不得自建第二份运行时权威；配置 / Cloud Sync / backup 等 mutation 必须代理到 sidecar owner。
 //!     客户端从本机 control file 读取 port + token，经 loopback control API 读写权威状态。
 //!
 //! Code Logic（这个模块做什么）:
@@ -31,6 +31,8 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const MUTATE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Cloud Sync mutation 超时（覆盖 Wait{300s} 门闸 + git 网络操作）。
 const CLOUD_SYNC_MUTATE_TIMEOUT: Duration = Duration::from_secs(360);
+/// 备份创建/恢复/回退超时（ZIP 读写 + exclusive maintenance_gate + 领域 bulk）。
+const BACKUP_MUTATE_TIMEOUT: Duration = Duration::from_secs(360);
 
 /// 包装 get-config 响应（与 control_api::ControlConfigResponse 对齐）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +139,49 @@ struct ControlClaudeMdPushBody {
     updated_at: String,
     device_id: String,
     vector_clock: std::collections::HashMap<String, u64>,
+}
+
+/// backup/create body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlBackupCreateBody {
+    control_token: String,
+    dest_path: String,
+}
+
+/// backup/inspect body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlBackupInspectBody {
+    control_token: String,
+    archive_path: String,
+}
+
+/// backup/restore body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlBackupRestoreBody {
+    control_token: String,
+    archive_path: String,
+    mode: crate::backup::RestoreMode,
+    domains: Vec<String>,
+}
+
+/// backup/list-jobs body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlBackupListJobsBody {
+    control_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<i64>,
+}
+
+/// backup/rollback body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlBackupRollbackBody {
+    control_token: String,
+    job_id: String,
 }
 
 /// 刷新 control token 后重建查询 body：保留全部业务字段，仅替换 `controlToken`。
@@ -714,10 +759,7 @@ impl BackendControlClient {
                     Ok(v) => v,
                     Err(e) => return Err(e),
                 };
-                match new_client
-                    .send_once(path, &retry_body, QUERY_TIMEOUT)
-                    .await
-                {
+                match new_client.send_once(path, &retry_body, QUERY_TIMEOUT).await {
                     ControlCallOutcome::Ok(v) => Ok(v),
                     ControlCallOutcome::Failed(e) | ControlCallOutcome::Uncertain(e) => Err(e),
                 }
@@ -799,6 +841,154 @@ impl BackendControlClient {
                 &body,
                 CLOUD_SYNC_MUTATE_TIMEOUT,
             )
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧创建导出备份。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GUI 不得直读 sidecar DB 写 ZIP；导出路径由用户选择后代理到 owner。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `backup/create`；超时 BACKUP_MUTATE_TIMEOUT；mutation 不自动重试。
+    pub async fn create_backup(
+        &self,
+        dest_path: &str,
+    ) -> Result<crate::backup::CreateBackupResult, AppError> {
+        let body = ControlBackupCreateBody {
+            control_token: self.control_token.clone(),
+            dest_path: dest_path.to_string(),
+        };
+        match self
+            .send_once("backup/create", &body, BACKUP_MUTATE_TIMEOUT)
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧只读 inspect 备份包。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     恢复确认前预览；inspect 不写 DB，但仍走 owner 统一校验入口。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `backup/inspect`；超时 MUTATE_TIMEOUT；不确定响应不自动重试。
+    pub async fn inspect_backup(
+        &self,
+        archive_path: &str,
+    ) -> Result<crate::backup::InspectPreview, AppError> {
+        let body = ControlBackupInspectBody {
+            control_token: self.control_token.clone(),
+            archive_path: archive_path.to_string(),
+        };
+        match self
+            .send_once("backup/inspect", &body, MUTATE_TIMEOUT)
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧事务恢复。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     exclusive maintenance_gate 与 recovery_jobs 仅 sidecar owner 持有。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `backup/restore`；超时 BACKUP_MUTATE_TIMEOUT；mutation 不自动重试。
+    pub async fn restore_backup(
+        &self,
+        archive_path: &str,
+        mode: crate::backup::RestoreMode,
+        domains: Vec<String>,
+    ) -> Result<crate::backup::RestoreResult, AppError> {
+        let body = ControlBackupRestoreBody {
+            control_token: self.control_token.clone(),
+            archive_path: archive_path.to_string(),
+            mode,
+            domains,
+        };
+        match self
+            .send_once("backup/restore", &body, BACKUP_MUTATE_TIMEOUT)
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 列出 recovery jobs。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     job 表在 sidecar；GUI 只展示。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `backup/list-jobs`；query 语义允许一次 token 刷新。
+    pub async fn list_recovery_jobs(
+        &self,
+        limit: Option<i64>,
+    ) -> Result<Vec<crate::storage::RecoveryJobRow>, AppError> {
+        let body = ControlBackupListJobsBody {
+            control_token: self.control_token.clone(),
+            limit,
+        };
+        self.query_with_optional_refresh("backup/list-jobs", &body)
+            .await
+    }
+
+    /// 经 control API 列出 pre-restore 备份。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     备份目录在 sidecar data_dir；GUI 只读列表。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `backup/list-backups`；query 语义允许一次 token 刷新。
+    pub async fn list_pre_restore_backups(
+        &self,
+    ) -> Result<Vec<crate::backup::PreRestoreBackupInfo>, AppError> {
+        let body = ControlAuthBody {
+            control_token: self.control_token.clone(),
+        };
+        self.query_with_optional_refresh("backup/list-backups", &body)
+            .await
+    }
+
+    /// 经 control API 按 job 回退。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     回退会再次 replace-domain 写库，必须走 owner exclusive gate。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `backup/rollback`；超时 BACKUP_MUTATE_TIMEOUT；mutation 不自动重试。
+    pub async fn rollback_recovery_job(
+        &self,
+        job_id: &str,
+    ) -> Result<crate::backup::RestoreResult, AppError> {
+        let body = ControlBackupRollbackBody {
+            control_token: self.control_token.clone(),
+            job_id: job_id.to_string(),
+        };
+        match self
+            .send_once("backup/rollback", &body, BACKUP_MUTATE_TIMEOUT)
             .await
         {
             ControlCallOutcome::Ok(v) => Ok(v),

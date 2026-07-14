@@ -185,6 +185,14 @@
   border-bottom: 1px solid var(--border);
 }
 
+.titleCluster {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .titleInput {
   flex: 1;
   min-width: calc(var(--space-20) + var(--space-20));

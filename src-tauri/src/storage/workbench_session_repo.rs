@@ -5,14 +5,17 @@
 //!     必须持久化到 SQLite。
 //!
 //! Code Logic（这个模块做什么）:
-//!     封装 `workbench_sessions` 表 CRUD；使用运行期 sqlx::query，不依赖编译期 DATABASE_URL。
+//!     封装 `workbench_sessions` 表 CRUD；写路径经 `with_shared_write_lease`；
+//!     使用运行期 sqlx::query，不依赖编译期 DATABASE_URL。
 
 #![allow(dead_code)]
 
 use crate::error::AppError;
+use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use crate::workbench::models::WorkbenchSessionRow;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
+use std::sync::Arc;
 
 /// 工作台终端会话仓库，封装所有 workbench_sessions 表操作。
 ///
@@ -20,27 +23,40 @@ use sqlx::Row;
 ///     命令层和会话恢复流程需要复用同一套会话元数据持久化逻辑。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有 SQLite pool，并提供 list/get/upsert/delete/delete_by_project 五类方法。
+///     持有 SQLite pool + maintenance gate，并提供 list/get/upsert/delete 等 CRUD。
 #[derive(Clone)]
 pub struct WorkbenchSessionRepo {
     pool: SqlitePool,
+    /// 维护屏障：写路径持 shared lease，restore exclusive 时阻塞。
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl WorkbenchSessionRepo {
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
+    ///
     /// Business Logic（为什么需要这个函数）:
     ///     Tauri setup 需要用同一个 SQLite pool 构造会话仓库，供命令层共享。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     保存 SqlitePool clone；pool 内部是 Arc，clone 廉价。
+    ///     内部 `with_gate(pool, Arc::new(DatabaseMaintenanceGate::new()))`。
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self::with_gate(pool, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: 全部 ordinary writer 与 restore 共用同一 gate。
+    /// Code Logic: 保存 pool + Arc gate。
+    pub fn with_gate(pool: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { pool, gate }
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     数据库相关修改必须兼容旧库；旧版本 workbench_sessions 没有 tmux window、worktree 与 cwd 列。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     用 PRAGMA table_info 检查列名，缺失时逐列 ALTER TABLE ADD COLUMN。
+    ///     用 PRAGMA table_info 检查列名，缺失时逐列 ALTER TABLE ADD COLUMN；
+    ///     schema bootstrap 不经 write lease。
     pub async fn ensure_schema(&self) -> Result<(), AppError> {
         let columns = sqlx::query("PRAGMA table_info(workbench_sessions)")
             .fetch_all(&self.pool)
@@ -140,78 +156,90 @@ impl WorkbenchSessionRepo {
     ///     新建、恢复、重命名和 resize 后都需要保存会话元数据，供下次启动恢复。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     用 INSERT OR REPLACE 写入完整 row。
+    ///     持 shared write lease 后用 INSERT OR REPLACE 写入完整 row。
     pub async fn upsert(&self, row: &WorkbenchSessionRow) -> Result<(), AppError> {
-        sqlx::query(
-            "INSERT OR REPLACE INTO workbench_sessions \
-             (id, project_id, worktree_id, name, command, cwd, status, cols, rows, started_at, exited_at, exit_code, \
-              backend, backend_id, backend_window_id, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&row.id)
-        .bind(&row.project_id)
-        .bind(&row.worktree_id)
-        .bind(&row.name)
-        .bind(&row.command)
-        .bind(&row.cwd)
-        .bind(&row.status)
-        .bind(i64::from(row.cols))
-        .bind(i64::from(row.rows))
-        .bind(&row.started_at)
-        .bind(&row.exited_at)
-        .bind(row.exit_code)
-        .bind(&row.backend)
-        .bind(&row.backend_id)
-        .bind(&row.backend_window_id)
-        .bind(&row.created_at)
-        .bind(&row.updated_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT OR REPLACE INTO workbench_sessions \
+                 (id, project_id, worktree_id, name, command, cwd, status, cols, rows, started_at, exited_at, exit_code, \
+                  backend, backend_id, backend_window_id, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&row.id)
+            .bind(&row.project_id)
+            .bind(&row.worktree_id)
+            .bind(&row.name)
+            .bind(&row.command)
+            .bind(&row.cwd)
+            .bind(&row.status)
+            .bind(i64::from(row.cols))
+            .bind(i64::from(row.rows))
+            .bind(&row.started_at)
+            .bind(&row.exited_at)
+            .bind(row.exit_code)
+            .bind(&row.backend)
+            .bind(&row.backend_id)
+            .bind(&row.backend_window_id)
+            .bind(&row.created_at)
+            .bind(&row.updated_at)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     用户关闭终端 tab 后，该 tab 不应在应用重启后再次出现。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     按 id 删除会话记录。
+    ///     持 shared write lease 后按 id 删除会话记录。
     pub async fn delete(&self, id: &str) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM workbench_sessions WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query("DELETE FROM workbench_sessions WHERE id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     用户移除工作台项目时，该项目关联的历史终端 tab 也应一起移除，避免孤儿会话。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     按 project_id 删除全部会话记录。
+    ///     持 shared write lease 后按 project_id 删除全部会话记录。
     pub async fn delete_by_project(&self, project_id: &str) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM workbench_sessions WHERE project_id = ?")
-            .bind(project_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query("DELETE FROM workbench_sessions WHERE project_id = ?")
+                .bind(project_id)
+                .execute(&self.pool)
+                .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     worktree merge 完成并删除磁盘工作区后，该 worktree 的 terminal metadata 不应在应用重启后恢复。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     按 project_id + worktree_id 删除匹配会话记录，不触碰主工作区或其他 worktree。
+    ///     持 shared write lease 后按 project_id + worktree_id 删除匹配会话记录。
     pub async fn delete_by_worktree(
         &self,
         project_id: &str,
         worktree_id: &str,
     ) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM workbench_sessions WHERE project_id = ? AND worktree_id = ?")
-            .bind(project_id)
-            .bind(worktree_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query("DELETE FROM workbench_sessions WHERE project_id = ? AND worktree_id = ?")
+                .bind(project_id)
+                .bind(worktree_id)
+                .execute(&self.pool)
+                .await?;
+            Ok(())
+        })
+        .await
     }
 }
 

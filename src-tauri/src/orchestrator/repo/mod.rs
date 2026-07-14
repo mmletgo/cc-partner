@@ -28,7 +28,9 @@ pub use helpers::{
 #[allow(unused_imports)]
 pub(crate) use helpers::*;
 
+use crate::storage::maintenance_gate::DatabaseMaintenanceGate;
 use sqlx::sqlite::SqlitePool;
+use std::sync::Arc;
 
 /// 幂等 create 结果：任务行 + 是否首次插入。
 ///
@@ -46,23 +48,36 @@ pub struct IdempotentCreateTaskOutcome {
 /// Orchestrator 仓储。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     持久化任务队列与证据。
+///     持久化任务队列与证据；生产写路径必须经全局 maintenance gate，
+///     以便 restore exclusive 期间阻塞 ordinary writer。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有 SqlitePool 并提供 CRUD/CAS 方法。
+///     持有 SqlitePool + DatabaseMaintenanceGate，提供 CRUD/CAS 方法；
+///     写事务走 begin_shared_write，单语句写走 with_shared_write_lease。
 #[derive(Clone)]
 pub struct OrchestratorRepo {
     pub(crate) pool: SqlitePool,
+    pub(crate) gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl OrchestratorRepo {
     /// Business Logic（为什么需要这个函数）:
-    ///     Tauri setup 需要用同一个 SQLite pool 构造 Orchestrator 仓储。
+    ///     Tauri setup / 测试可用默认独立 gate 构造仓储（fixture 不共享 restore 屏障）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     保存 SqlitePool clone；pool 内部是 Arc，clone 廉价。
+    ///     包装 `with_gate(pool, Arc::new(DatabaseMaintenanceGate::new()))`。
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self::with_gate(pool, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     生产路径必须把 orchestrator 写路径接到 AppState 共享 maintenance_gate，
+    ///     才能在 restore exclusive 期间真正阻塞 claim/outbox 等写。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     保存 pool 与 gate 的 Arc 引用（二者 clone 廉价）。
+    pub fn with_gate(pool: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { pool, gate }
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -72,5 +87,15 @@ impl OrchestratorRepo {
     ///     返回内部 pool 引用（clone 廉价，调用方可 `acquire`）。
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     调用方在已持有 shared lease 时可能需要复用同一 gate（较少见）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 gate 的 Arc 引用。
+    #[allow(dead_code)]
+    pub(crate) fn gate(&self) -> &Arc<DatabaseMaintenanceGate> {
+        &self.gate
     }
 }

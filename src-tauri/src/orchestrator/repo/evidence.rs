@@ -26,9 +26,10 @@ use crate::orchestrator::models::{
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
 };
+use crate::storage::maintenance_gate::with_shared_write_lease;
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
-use sqlx::{Acquire, Row};
+use sqlx::Row;
 use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
@@ -46,18 +47,21 @@ impl OrchestratorRepo {
         message: &str,
         payload_json: Option<&str>,
     ) -> Result<(), AppError> {
-        sqlx::query(
-            "INSERT INTO orchestrator_task_events \
-             (id, task_id, kind, message, payload_json, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(Uuid::new_v4().to_string())
-        .bind(task_id)
-        .bind(kind)
-        .bind(message)
-        .bind(payload_json)
-        .bind(Utc::now().to_rfc3339())
-        .execute(&self.pool)
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO orchestrator_task_events \
+                 (id, task_id, kind, message, payload_json, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(task_id)
+            .bind(kind)
+            .bind(message)
+            .bind(payload_json)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await
+        })
         .await?;
         Ok(())
     }
@@ -75,19 +79,22 @@ impl OrchestratorRepo {
         summary: &str,
         content: &str,
     ) -> Result<(), AppError> {
-        sqlx::query(
-            "INSERT INTO orchestrator_task_evidence \
-             (id, task_id, kind, title, summary, content, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(Uuid::new_v4().to_string())
-        .bind(task_id)
-        .bind(kind)
-        .bind(title)
-        .bind(summary)
-        .bind(content)
-        .bind(Utc::now().to_rfc3339())
-        .execute(&self.pool)
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO orchestrator_task_evidence \
+                 (id, task_id, kind, title, summary, content, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(task_id)
+            .bind(kind)
+            .bind(title)
+            .bind(summary)
+            .bind(content)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await
+        })
         .await?;
         Ok(())
     }

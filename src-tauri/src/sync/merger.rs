@@ -1,4 +1,4 @@
-//! sync/merger.rs — LWW 冲突合并
+//! sync/merger.rs — LWW 冲突合并 + 并发冲突副本
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     多设备同步 Prompt 时，可能出现同一条 Prompt 在不同设备上被独立修改的情况。需要一套
@@ -8,6 +8,8 @@
 //!     - 时间戳相等：用 `device_id` 做 tie-break（确定性，对照任务要求；Python 端在相等时
 //!       默认保留 local，此处提供确定性方向避免双端抖动）；
 //!     - 无论谁胜出，最终都合并双方向量时钟以保留完整因果历史。
+//!     N2 扩展：并发且正文（title/content/tags）不同时，保留 winner，同时产出
+//!     `content_versions` conflict draft 供同事务落库，避免静默丢 loser。
 //!
 //! Code Logic（这个模块做什么）:
 //!     should_update(local, remote) 返回 bool：对照 Python PromptMerger.should_update，
@@ -15,9 +17,14 @@
 //!     merge_prompt(local, remote) 返回 PromptRow：对照 Python merge_prompt，返回
 //!         胜出方内容 + 合并后的向量时钟。
 //!     `wins_concurrent(local, remote)`：并发时的纯判定（含确定性 tie-break）。
+//!     `merge_prompt_with_conflicts` / `merge_concurrent_text`：在 merge 基础上产出
+//!         conflict draft（loser 快照）。
 
 use crate::models::prompt::PromptRow;
+use crate::storage::content_version_repo::{ContentVersionRepo, KIND_CONFLICT};
+use crate::sync::protocol::content_sha256_hex;
 use crate::sync::vector_clock::{compare, merge, ClockOrder};
+use serde_json::json;
 
 /// 判断是否应使用 remote 覆盖 local。
 ///
@@ -97,6 +104,171 @@ pub fn merge_prompt(local: &PromptRow, remote: &PromptRow) -> PromptRow {
     }
 }
 
+/// 待落库的冲突/历史版本草稿（无需 DB id 也可构造；id 由确定性函数生成）。
+///
+/// Business Logic: merge 纯函数不得触库，但 apply 事务需要完整 conflict 行字段。
+/// Code Logic: 与 ContentVersion 字段对齐，由引擎 `insert_idempotent_on_tx` 写入。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentVersionDraft {
+    /// 领域 token
+    pub domain: String,
+    /// item id
+    pub item_id: String,
+    /// 产生该版本的设备
+    pub source_device: String,
+    /// 正文 hash
+    pub content_hash: String,
+    /// 创建时间
+    pub created_at: String,
+    /// `conflict` | `history`
+    pub kind: String,
+    /// 完整行快照 JSON
+    pub snapshot_json: String,
+}
+
+impl ContentVersionDraft {
+    /// 转为可落库 ContentVersion（确定性 id）。
+    ///
+    /// Business Logic: 同批重放必须使用稳定主键。
+    /// Code Logic: id = conflict_row_id(domain,item,source,hash)。
+    #[allow(dead_code)] // apply_merge_batch 接线使用
+    pub fn into_content_version(self) -> crate::storage::content_version_repo::ContentVersion {
+        let id = ContentVersionRepo::deterministic_id(
+            &self.domain,
+            &self.item_id,
+            &self.source_device,
+            &self.content_hash,
+        );
+        crate::storage::content_version_repo::ContentVersion {
+            id,
+            domain: self.domain,
+            item_id: self.item_id,
+            source_device: self.source_device,
+            content_hash: self.content_hash,
+            created_at: self.created_at,
+            kind: self.kind,
+            snapshot_json: self.snapshot_json,
+        }
+    }
+}
+
+/// 通用域合并结果：winner + 可选 conflict 副本草稿。
+///
+/// Business Logic: Prompt/SSH/Scratchpad 共用同一落库形状（active + conflict）。
+/// Code Logic: 泛型 T 为各域 Row；非并发或正文相同时 conflict_versions 为空。
+#[derive(Debug, Clone)]
+pub struct DomainMergeResult<T> {
+    /// LWW 胜出方（含合并后 vector_clock）
+    pub winner: T,
+    /// 需保留的 conflict 副本（通常 0 或 1）
+    pub conflict_versions: Vec<ContentVersionDraft>,
+}
+
+/// 并发文本合并结果：winner + 可选 conflict 副本草稿（Prompt 专用别名）。
+///
+/// Business Logic: 调用方同事务写 active winner 与 conflict_versions。
+/// Code Logic: 等价于 `DomainMergeResult<PromptRow>`。
+pub type ConcurrentTextMergeResult = DomainMergeResult<PromptRow>;
+
+/// 计算 Prompt 正文指纹（title/content/tags），与 routes/sync 一致。
+///
+/// Business Logic: conflict 行 content_hash 必须与 manifest hash 算法一致。
+/// Code Logic: 固定 `\0` 分隔后 SHA-256 hex。
+pub fn prompt_text_content_hash(row: &PromptRow) -> String {
+    let tags_json = serde_json::to_string(&row.tags).unwrap_or_else(|_| "[]".to_string());
+    content_sha256_hex(&[
+        row.title.as_bytes(),
+        b"\0",
+        row.content.as_bytes(),
+        b"\0",
+        tags_json.as_bytes(),
+    ])
+}
+
+/// 判断两条 Prompt 正文（title/content/tags）是否不同。
+///
+/// Business Logic: 仅正文不同才需要 conflict copy；元数据-only 差异不保留副本。
+/// Code Logic: 逐字段比较 tags 序列。
+fn prompt_text_differs(a: &PromptRow, b: &PromptRow) -> bool {
+    a.title != b.title || a.content != b.content || a.tags != b.tags
+}
+
+/// 将 PromptRow 序列化为 conflict 快照 JSON。
+///
+/// Business Logic: 恢复/复制冲突需要完整字段。
+/// Code Logic: serde_json 序列化 PromptRow。
+fn prompt_snapshot_json(row: &PromptRow) -> String {
+    serde_json::to_string(row).unwrap_or_else(|_| {
+        json!({
+            "id": row.id,
+            "title": row.title,
+            "content": row.content,
+            "tags": row.tags,
+            "device_id": row.device_id,
+            "updated_at": row.updated_at,
+            "deleted": row.deleted,
+        })
+        .to_string()
+    })
+}
+
+/// 为 loser 构造 conflict draft。
+///
+/// Business Logic: 并发且正文不同时 loser 进入 content_versions(kind=conflict)。
+/// Code Logic: domain/item/source/hash/now + snapshot。
+fn conflict_draft_from_loser(loser: &PromptRow, domain: &str, now: &str) -> ContentVersionDraft {
+    ContentVersionDraft {
+        domain: domain.to_string(),
+        item_id: loser.id.clone(),
+        source_device: loser.device_id.clone(),
+        content_hash: prompt_text_content_hash(loser),
+        created_at: now.to_string(),
+        kind: KIND_CONFLICT.to_string(),
+        snapshot_json: prompt_snapshot_json(loser),
+    }
+}
+
+/// 合并两条 Prompt，并在并发且正文不同时产出 conflict 副本草稿。
+///
+/// Business Logic（为什么需要这个函数）:
+///     N2 要求并发不同正文时保留 winner + 写 conflict copy，避免 LWW 静默覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     先 `merge_prompt` 得 winner；若 `compare` 为 Concurrent 且 title/content/tags 不同，
+///     将 loser 做成 kind=conflict 的 ContentVersionDraft；非并发时 conflicts 为空。
+pub fn merge_prompt_with_conflicts(
+    local: &PromptRow,
+    remote: &PromptRow,
+    domain: &str,
+    now: &str,
+) -> ConcurrentTextMergeResult {
+    let winner = merge_prompt(local, remote);
+    let relation = compare(&remote.vector_clock, &local.vector_clock);
+    let mut conflict_versions = Vec::new();
+    if relation == ClockOrder::Concurrent && prompt_text_differs(local, remote) {
+        let remote_wins = wins_concurrent(local, remote);
+        let loser = if remote_wins { local } else { remote };
+        conflict_versions.push(conflict_draft_from_loser(loser, domain, now));
+    }
+    ConcurrentTextMergeResult {
+        winner,
+        conflict_versions,
+    }
+}
+
+/// 并发文本合并入口（供测试名 `concurrent_text_keeps_conflict_copy` 与引擎复用）。
+///
+/// Business Logic: 明确“左右并发编辑”语义的薄包装，domain 固定 prompts。
+/// Code Logic: 委托 `merge_prompt_with_conflicts`；async 仅为对齐测试签名。
+#[allow(dead_code)] // intentional public concurrent-merge entry
+pub async fn merge_concurrent_text(
+    local: PromptRow,
+    remote: PromptRow,
+) -> ConcurrentTextMergeResult {
+    let now = chrono::Utc::now().to_rfc3339();
+    merge_prompt_with_conflicts(&local, &remote, "prompts", &now)
+}
+
 #[cfg(test)]
 mod tests {
     //! merger 单测：覆盖严格领先取新、并发 LWW、时间戳相等 device_id tie-break。
@@ -124,6 +296,7 @@ mod tests {
             device_id: device_id.to_string(),
             vector_clock,
             deleted,
+            delete_epoch: 0,
         }
     }
 
@@ -229,5 +402,44 @@ mod tests {
         // remote 严格领先（d1:2 > d1:1）→ remote 胜，删除事件传播
         assert!(merged.deleted);
         assert_eq!(merged.device_id, "d2");
+    }
+
+    /// 并发且正文不同 → 保留 1 条 conflict 副本（loser）。
+    #[tokio::test]
+    async fn concurrent_text_keeps_conflict_copy() {
+        let local = row(
+            "p1",
+            "left",
+            "2024-01-01T00:00:00+00:00",
+            &[("left", 1)],
+            false,
+        );
+        let remote = row(
+            "p1",
+            "right",
+            "2024-01-03T00:00:00+00:00",
+            &[("right", 1)],
+            false,
+        );
+        // 确保正文不同（row helper 用 device_id 生成 title/content）
+        assert_ne!(local.content, remote.content);
+        let result = merge_concurrent_text(local.clone(), remote.clone()).await;
+        assert_eq!(
+            result.conflict_versions.len(),
+            1,
+            "并发不同正文必须保留一条 conflict copy"
+        );
+        // remote 时间更晚 → winner = right；loser = left
+        assert_eq!(result.winner.device_id, "right");
+        assert_eq!(result.conflict_versions[0].source_device, "left");
+        assert_eq!(result.conflict_versions[0].kind, KIND_CONFLICT);
+        assert_eq!(result.conflict_versions[0].item_id, "p1");
+
+        // 非并发：无 conflict
+        let local2 = row("p1", "d1", "2024-01-01T00:00:00+00:00", &[("d1", 1)], false);
+        let remote2 = row("p1", "d2", "2024-01-02T00:00:00+00:00", &[("d1", 2)], false);
+        let result2 =
+            merge_prompt_with_conflicts(&local2, &remote2, "prompts", "2024-01-02T00:00:00+00:00");
+        assert!(result2.conflict_versions.is_empty());
     }
 }

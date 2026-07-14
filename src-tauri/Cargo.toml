@@ -96,3 +96,6 @@ libc = "0.2"
 # backend_cli_smoke harness：解析 CLI status / control JSON。
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# backup_restore_smoke：手工构造 ZIP + SHA256 校验坏/好包。
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+sha2 = "0.10"

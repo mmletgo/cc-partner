@@ -36,6 +36,9 @@ pub struct ScratchpadRow {
     pub vector_clock: HashMap<String, u64>,
     /// 软删除标记；当前清空不使用软删除
     pub deleted: bool,
+    /// 本域删除序号（tombstone 水位/GC 用；未删除为 0；旧 JSON 缺省 0）
+    #[serde(default)]
+    pub delete_epoch: u64,
 }
 
 /// 速记本页面详情 DTO（camelCase）。

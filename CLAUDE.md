@@ -49,7 +49,7 @@ AGENTS.md    → 根层开发指南（组件清单与跨目录陷阱）
 
 ### Prompt 同步（摘要）
 
-向量时钟 + 严格领先覆盖 / 并发 LWW；时间戳相等 device_id 字典序 tie-break。手动 `trigger_sync`。
+向量时钟 + 严格领先覆盖 / 并发 LWW；时间戳相等 device_id 字典序 tie-break。手动 `trigger_sync` 返回 per-device/domain 真值（仅全成功设备计入 `synced`/`succeeded_devices`）。
 
 ### 自动更新（摘要）
 

@@ -93,6 +93,18 @@ pub const CAPABILITY_TRANSFER_COMPLETE_V1: &str = "transfer.complete.v1";
 ///     `server_protocol_info()` 中宣告。
 pub const CAPABILITY_CC_HISTORY_PAGED_SYNC_V1: &str = "cc-history.paged-sync.v1";
 
+/// 能力 token：Prompt/SSH/Scratchpad 有界 manifest/items/push-batch v2
+/// （`POST /api/sync/prompts/*`、`/api/ssh-target/sync/*`、`/api/scratchpad/sync/*` 新路由）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     新客户端在走三域 v2 分页协议前必须确认对端已挂载路由 **且** 具备原子 idempotency ledger
+///     （`sync_request_ledger` + 事务 bulk upsert）。本 token 与三域 ledger 写路径**原子**上线：
+///     宣告即表示 push-batch 同 key 重放安全。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，与 `PeerProtocolInfo::supports()` 精确匹配；列入 `server_protocol_info()`。
+pub const CAPABILITY_SYNC_MANIFEST_V2: &str = "sync.manifest.v2";
+
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -134,7 +146,8 @@ impl PeerProtocolInfo {
 /// Business Logic（为什么需要这个函数）:
 ///     本机对外（health/对端探测）需要宣告自身支持的能力集合，且必须是当前 build 实际存在路由的子集。
 ///     本轮宣告 `attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、
-///     `orchestrator.runtime-snapshot.v1` 与 `transfer.complete.v1`；各自与对应路由原子上线。
+///     `orchestrator.runtime-snapshot.v1`、`sync.manifest.v2` 与 `transfer.complete.v1`；
+///     各自与对应路由/ledger 原子上线。
 ///
 /// Code Logic（这个函数做什么）:
 ///     构造 `protocol_version = 1`，capabilities 为已排序、去重的当前支持能力列表。
@@ -146,6 +159,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string(),
             CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string(),
+            CAPABILITY_SYNC_MANIFEST_V2.to_string(),
             CAPABILITY_TRANSFER_COMPLETE_V1.to_string(),
         ],
     }
@@ -278,12 +292,13 @@ mod tests {
     /// Business Logic（为什么需要这个测试）:
     ///     `server_protocol_info()` 是本机对外的能力宣告入口，本轮必须宣告 v1
     ///     且包含 `attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、
-    ///     `orchestrator.runtime-snapshot.v1` 与 `transfer.complete.v1`
-    ///     （分别与对应路由原子上线；paged-sync 与三条 CC History 分页路由同 build）。
+    ///     `orchestrator.runtime-snapshot.v1`、`sync.manifest.v2` 与 `transfer.complete.v1`
+    ///     （分别与对应路由/ledger 原子上线；paged-sync 与三条 CC History 分页路由同 build；
+    ///     sync.manifest.v2 与三域事务 bulk + ledger 同 build）。
     ///
     /// Code Logic（这个测试做什么）:
     ///     调用 `server_protocol_info()`，断言 protocol_version == 1 且 capabilities
-    ///     去重排序后正好等于五 token 字典序列表；并确认 supports(paged-sync) 为 true。
+    ///     去重排序后正好等于六 token 字典序列表；并确认 supports(paged-sync/v2) 为 true。
     #[test]
     fn server_protocol_info_advertises_v1_with_current_capabilities() {
         let info = server_protocol_info();
@@ -295,9 +310,46 @@ mod tests {
                 "cc-history.paged-sync.v1".to_string(),
                 "errors.envelope.v1".to_string(),
                 "orchestrator.runtime-snapshot.v1".to_string(),
+                "sync.manifest.v2".to_string(),
                 "transfer.complete.v1".to_string(),
             ]
         );
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
+        assert!(info.supports(CAPABILITY_SYNC_MANIFEST_V2));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧 peer（未挂 ledger）不得被误判为支持 v2 正文 batch；客户端必须走 legacy 或 typed 失败。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造不含 `sync.manifest.v2` 的 v1 能力列表，断言 supports 为 false。
+    #[test]
+    fn legacy_server_omits_sync_manifest_v2() {
+        let legacy = PeerProtocolInfo {
+            protocol_version: 1,
+            capabilities: vec![
+                CAPABILITY_ATTENTION_V1.to_string(),
+                CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string(),
+                CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
+                CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string(),
+                CAPABILITY_TRANSFER_COMPLETE_V1.to_string(),
+            ],
+        };
+        assert!(!legacy.supports(CAPABILITY_SYNC_MANIFEST_V2));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     三域事务 bulk + ledger 就绪后，fully wired server 必须宣告 `sync.manifest.v2`。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     直接调用 `server_protocol_info()` 断言 token 存在且 supports 为 true。
+    #[test]
+    fn fully_wired_server_advertises_sync_manifest_v2() {
+        let info = server_protocol_info();
+        assert!(info
+            .capabilities
+            .iter()
+            .any(|c| c == CAPABILITY_SYNC_MANIFEST_V2));
+        assert!(info.supports(CAPABILITY_SYNC_MANIFEST_V2));
     }
 }

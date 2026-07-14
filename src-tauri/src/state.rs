@@ -27,8 +27,9 @@ use crate::net::peer_client::PeerClient;
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
 use crate::storage::{
-    ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, TransferRepo,
-    WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
+    ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
+    TransferRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo,
+    WorkbenchWorktreeRepo,
 };
 use crate::transfer::registry::TransferRegistry;
 use crate::updater::UpdateRuntime;
@@ -49,6 +50,8 @@ pub struct AppState {
     /// SQLite 连接池（M3+ axum server 共享此 pool；M1 仅 prompt_repo 通过独立 clone 使用）
     #[allow(dead_code)]
     pub db: SqlitePool,
+    /// 全局 DB maintenance 写屏障（restore exclusive / ordinary shared；生产写事务唯一入口）
+    pub maintenance_gate: Arc<DatabaseMaintenanceGate>,
     /// Prompt 仓库
     pub prompt_repo: Arc<PromptRepo>,
     /// 传输历史仓库（M5）

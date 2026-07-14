@@ -115,7 +115,8 @@ async fn setup_scratchpad_db() -> FaultTestDb {
         "CREATE TABLE IF NOT EXISTS scratchpad (\
          id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '速记本', content TEXT NOT NULL, \
          created_at TEXT NOT NULL, updated_at TEXT NOT NULL, device_id TEXT NOT NULL, \
-         vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+         vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, \
+         delete_epoch INTEGER NOT NULL DEFAULT 0)",
     )
     .execute(&pool)
     .await
@@ -169,6 +170,7 @@ fn sample_scratchpad_row(id: &str, title: &str, content: &str) -> ScratchpadRow 
         device_id: "d".into(),
         vector_clock: vc,
         deleted: false,
+        delete_epoch: 0,
     }
 }
 

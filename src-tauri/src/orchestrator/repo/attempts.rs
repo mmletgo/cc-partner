@@ -26,9 +26,10 @@ use crate::orchestrator::models::{
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
 };
+use crate::storage::maintenance_gate::with_shared_write_lease;
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
-use sqlx::{Acquire, Row};
+use sqlx::Row;
 use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
@@ -67,22 +68,24 @@ impl OrchestratorRepo {
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO orchestrator_task_attempts \
-             (id, task_id, attempt, worktree_id, session_id, prompt, status, created_at, completed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(task_id.trim())
-        .bind(attempt)
-        .bind(worktree_id.trim())
-        .bind(session_id.trim())
-        .bind(prompt)
-        .bind(status.trim())
-        .bind(&now)
-        .bind(Option::<&str>::None)
-        .execute(&self.pool)
-        .await?;
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO orchestrator_task_attempts \
+                 (id, task_id, attempt, worktree_id, session_id, prompt, status, created_at, completed_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(task_id.trim())
+            .bind(attempt)
+            .bind(worktree_id.trim())
+            .bind(session_id.trim())
+            .bind(prompt)
+            .bind(status.trim())
+            .bind(&now)
+            .bind(Option::<&str>::None)
+            .execute(&self.pool)
+            .await
+        }).await?;
 
         Ok(OrchestratorTaskAttemptRow {
             id,
@@ -108,16 +111,19 @@ impl OrchestratorRepo {
         attempt: i64,
     ) -> Result<OrchestratorTaskAttemptRow, AppError> {
         let now = Utc::now().to_rfc3339();
-        let result = sqlx::query(
-            "UPDATE orchestrator_task_attempts SET status = ?, completed_at = ? \
-             WHERE task_id = ? AND attempt = ? AND status = ?",
-        )
-        .bind("completed")
-        .bind(&now)
-        .bind(task_id)
-        .bind(attempt)
-        .bind("running")
-        .execute(&self.pool)
+        let result = with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_task_attempts SET status = ?, completed_at = ? \
+                 WHERE task_id = ? AND attempt = ? AND status = ?",
+            )
+            .bind("completed")
+            .bind(&now)
+            .bind(task_id)
+            .bind(attempt)
+            .bind("running")
+            .execute(&self.pool)
+            .await
+        })
         .await?;
         if result.rows_affected() != 1 {
             return Err(AppError::not_found(format!(
@@ -181,35 +187,37 @@ impl OrchestratorRepo {
         }
         let now = Utc::now().to_rfc3339();
         let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Running);
-        sqlx::query(
-            "UPDATE orchestrator_tasks \
-             SET status = ?, workflow_state = ?, run_state = ?, runner_provider = ?, branch_name = ?, worktree_id = ?, session_id = ?, attempt = ?, \
-                 claude_session_id = ?, transcript_path = ?, runtime_started_at = ?, last_activity_at = ?, last_runtime_event = ?, last_runtime_message = ?, \
-                 blocked_reason = ?, prepare_claim_token = NULL, started_at = COALESCE(started_at, ?), updated_at = ? \
-             WHERE id = ? AND status = ? AND prepare_claim_token = ?",
-        )
-        .bind(OrchestratorTaskStatus::Running.as_str())
-        .bind(split_state.workflow_state.as_str())
-        .bind(split_state.run_state.as_str())
-        .bind("claudeCodeVisible")
-        .bind(branch_name)
-        .bind(worktree_id)
-        .bind(session_id)
-        .bind(attempt)
-        .bind(Option::<&str>::None)
-        .bind(Option::<&str>::None)
-        .bind(&now)
-        .bind(Option::<&str>::None)
-        .bind(Option::<&str>::None)
-        .bind(Option::<&str>::None)
-        .bind(Option::<&str>::None)
-        .bind(&now)
-        .bind(now.clone())
-        .bind(task_id)
-        .bind(OrchestratorTaskStatus::Preparing.as_str())
-        .bind(token)
-        .execute(&self.pool)
-        .await?;
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_tasks \
+                 SET status = ?, workflow_state = ?, run_state = ?, runner_provider = ?, branch_name = ?, worktree_id = ?, session_id = ?, attempt = ?, \
+                     claude_session_id = ?, transcript_path = ?, runtime_started_at = ?, last_activity_at = ?, last_runtime_event = ?, last_runtime_message = ?, \
+                     blocked_reason = ?, prepare_claim_token = NULL, started_at = COALESCE(started_at, ?), updated_at = ? \
+                 WHERE id = ? AND status = ? AND prepare_claim_token = ?",
+            )
+            .bind(OrchestratorTaskStatus::Running.as_str())
+            .bind(split_state.workflow_state.as_str())
+            .bind(split_state.run_state.as_str())
+            .bind("claudeCodeVisible")
+            .bind(branch_name)
+            .bind(worktree_id)
+            .bind(session_id)
+            .bind(attempt)
+            .bind(Option::<&str>::None)
+            .bind(Option::<&str>::None)
+            .bind(&now)
+            .bind(Option::<&str>::None)
+            .bind(Option::<&str>::None)
+            .bind(Option::<&str>::None)
+            .bind(Option::<&str>::None)
+            .bind(&now)
+            .bind(now.clone())
+            .bind(task_id)
+            .bind(OrchestratorTaskStatus::Preparing.as_str())
+            .bind(token)
+            .execute(&self.pool)
+            .await
+        }).await?;
         self.get_task(task_id).await
     }
 
@@ -231,17 +239,20 @@ impl OrchestratorRepo {
             return Err(AppError::generic("Preparing claim token 不能为空"));
         }
         let now = Utc::now().to_rfc3339();
-        let result = sqlx::query(
-            "UPDATE orchestrator_tasks \
-             SET attempt_phase = ?, updated_at = ? \
-             WHERE id = ? AND status = ? AND prepare_claim_token = ?",
-        )
-        .bind(phase.as_str())
-        .bind(now)
-        .bind(task_id)
-        .bind(OrchestratorTaskStatus::Preparing.as_str())
-        .bind(token)
-        .execute(&self.pool)
+        let result = with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_tasks \
+                 SET attempt_phase = ?, updated_at = ? \
+                 WHERE id = ? AND status = ? AND prepare_claim_token = ?",
+            )
+            .bind(phase.as_str())
+            .bind(now)
+            .bind(task_id)
+            .bind(OrchestratorTaskStatus::Preparing.as_str())
+            .bind(token)
+            .execute(&self.pool)
+            .await
+        })
         .await?;
         if result.rows_affected() == 1 {
             return self.get_task(task_id).await.map(Some);
@@ -271,18 +282,21 @@ impl OrchestratorRepo {
         }
 
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE orchestrator_tasks \
-             SET attempt_phase = ?, updated_at = ? \
-             WHERE id = ? AND status = ? AND attempt = ? AND session_id = ?",
-        )
-        .bind(phase.as_str())
-        .bind(now)
-        .bind(task_id)
-        .bind(OrchestratorTaskStatus::Running.as_str())
-        .bind(attempt)
-        .bind(session_id)
-        .execute(&self.pool)
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_tasks \
+                 SET attempt_phase = ?, updated_at = ? \
+                 WHERE id = ? AND status = ? AND attempt = ? AND session_id = ?",
+            )
+            .bind(phase.as_str())
+            .bind(now)
+            .bind(task_id)
+            .bind(OrchestratorTaskStatus::Running.as_str())
+            .bind(attempt)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+        })
         .await?;
         self.get_task(task_id).await
     }
@@ -309,23 +323,26 @@ impl OrchestratorRepo {
         }
 
         let now = Utc::now().to_rfc3339();
-        let result = sqlx::query(
-            "UPDATE orchestrator_tasks \
-             SET claude_session_id = ?, transcript_path = ?, last_activity_at = ?, \
-                 last_runtime_event = ?, last_runtime_message = ?, updated_at = ? \
-             WHERE id = ? AND status = ? AND attempt = ? AND session_id = ?",
-        )
-        .bind(summary.claude_session_id.as_deref())
-        .bind(summary.transcript_path.as_deref())
-        .bind(summary.last_activity_at.as_deref())
-        .bind(summary.last_runtime_event.as_deref())
-        .bind(summary.last_runtime_message.as_deref())
-        .bind(now)
-        .bind(task_id)
-        .bind(OrchestratorTaskStatus::Running.as_str())
-        .bind(attempt)
-        .bind(session_id)
-        .execute(&self.pool)
+        let result = with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_tasks \
+                 SET claude_session_id = ?, transcript_path = ?, last_activity_at = ?, \
+                     last_runtime_event = ?, last_runtime_message = ?, updated_at = ? \
+                 WHERE id = ? AND status = ? AND attempt = ? AND session_id = ?",
+            )
+            .bind(summary.claude_session_id.as_deref())
+            .bind(summary.transcript_path.as_deref())
+            .bind(summary.last_activity_at.as_deref())
+            .bind(summary.last_runtime_event.as_deref())
+            .bind(summary.last_runtime_message.as_deref())
+            .bind(now)
+            .bind(task_id)
+            .bind(OrchestratorTaskStatus::Running.as_str())
+            .bind(attempt)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+        })
         .await?;
         if result.rows_affected() == 1 {
             return self.get_task(task_id).await.map(Some);

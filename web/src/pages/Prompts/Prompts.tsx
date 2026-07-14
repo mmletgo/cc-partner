@@ -15,16 +15,30 @@
  *   - 点击删除时弹 confirm 二次确认
  *   - mutation 走 applyOptimistic / commit / rollback 纯函数；失败恢复草稿并展示错误横幅
  *   - 同一实体 pending 时禁用冲突编辑/删除；标签从 prompts 派生
+ *   - 版本历史 Drawer：查看摘要、恢复为新版本、复制内容；冲突用非阻塞 Pill 标识
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Card, Dialog, Input, Tag } from '@/components/primitives';
+import { Button, Card, Dialog, Input, Pill, Tag } from '@/components/primitives';
 import { TagInput } from '@/components/domain/TagInput';
+import {
+  resolveVersionCopyText,
+  VersionHistoryDrawer,
+} from '@/components/domain/VersionHistoryDrawer';
 import { promptsApi } from '@/api/prompts';
-import type { Prompt } from '@/lib/types';
-import { PlusIcon, SearchIcon, SyncIcon, TrashIcon, XIcon, CheckIcon, EditIcon } from '@/lib/icons';
+import type { ContentVersion, Prompt } from '@/lib/types';
+import {
+  PlusIcon,
+  SearchIcon,
+  SyncIcon,
+  TrashIcon,
+  XIcon,
+  CheckIcon,
+  EditIcon,
+  HistoryIcon,
+} from '@/lib/icons';
 import { debounce } from '@/lib/format';
 import styles from './Prompts.module.css';
 import {
@@ -116,6 +130,17 @@ export function Prompts() {
   const [syncError, setSyncError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
 
+  // ── 版本历史 ──
+  const [historyPromptId, setHistoryPromptId] = useState<string | null>(null);
+  const [versions, setVersions] = useState<ContentVersion[]>([]);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  const [versionsError, setVersionsError] = useState<string | null>(null);
+  const [restoringVersionId, setRestoringVersionId] = useState<string | null>(null);
+  const [conflictPromptIds, setConflictPromptIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const historyRequestSeqRef = useRef(0);
+
   /**
    * Business Logic（为什么需要这个函数）:
    *   标签 chips 必须以当前列表为真源，避免 tags API 与乐观列表分叉。
@@ -127,23 +152,55 @@ export function Prompts() {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   冲突 Pill 需要知道哪些 Prompt 近期存在 conflict 版本，且不得阻塞编辑。
+   *
+   * Code Logic（这个函数做什么）:
+   *   并行 listVersions；任一条 kind=conflict 则记入集合；失败视为无冲突。
+   */
+  const refreshConflictFlags = useCallback(async (items: Prompt[]) => {
+    if (items.length === 0) {
+      setConflictPromptIds(new Set());
+      return;
+    }
+    const entries = await Promise.all(
+      items.map(async (item) => {
+        try {
+          const list = await promptsApi.listVersions(item.id);
+          const hasConflict = Array.isArray(list) && list.some((v) => v.kind === 'conflict');
+          return [item.id, hasConflict] as const;
+        } catch {
+          return [item.id, false] as const;
+        }
+      }),
+    );
+    const next = new Set<string>();
+    for (const [id, hasConflict] of entries) {
+      if (hasConflict) next.add(id);
+    }
+    setConflictPromptIds(next);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   页面初次与同步后需要权威列表。
    *
    * Code Logic（这个函数做什么）:
-   *   拉取 list；成功写入 prompts；失败保留现有数据并设置错误状态。
+   *   拉取 list；成功写入 prompts 并刷新冲突标记；失败保留现有数据并设置错误状态。
    *   标签不再依赖 listTags，统一从 prompts 派生。
    */
   const loadPrompts = useCallback(async () => {
     try {
       const data = await promptsApi.list();
-      setPrompts(Array.isArray(data) ? data : []);
+      const list = Array.isArray(data) ? data : [];
+      setPrompts(list);
       setLoadState('success');
       setLoadError(null);
+      void refreshConflictFlags(list);
     } catch (err) {
       setLoadState('error');
       setLoadError(err instanceof Error ? err.message : t('prompts:loadFailedGeneric'));
     }
-  }, [t]);
+  }, [refreshConflictFlags, t]);
 
   /* eslint-disable react-hooks/set-state-in-effect -- 合法 fetch-in-effect，setState 在 await 后异步执行 */
   useEffect(() => {
@@ -480,6 +537,126 @@ export function Prompts() {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   打开版本历史时需要权威版本列表。
+   *
+   * Code Logic（这个函数做什么）:
+   *   设置 historyPromptId，按 request seq 拉取 listVersions，并同步 conflict 标记。
+   */
+  const openVersionHistory = useCallback(
+    async (promptId: string) => {
+      const seq = ++historyRequestSeqRef.current;
+      setHistoryPromptId(promptId);
+      setVersionsLoading(true);
+      setVersionsError(null);
+      try {
+        const list = await promptsApi.listVersions(promptId);
+        if (historyRequestSeqRef.current !== seq) return;
+        const safe = Array.isArray(list) ? list : [];
+        setVersions(safe);
+        setConflictPromptIds((prev) => {
+          const next = new Set(prev);
+          if (safe.some((v) => v.kind === 'conflict')) next.add(promptId);
+          else next.delete(promptId);
+          return next;
+        });
+      } catch (err) {
+        if (historyRequestSeqRef.current !== seq) return;
+        setVersions([]);
+        setVersionsError(
+          t('prompts:versionHistoryLoadFailed', {
+            error: errorMessage(err, t('prompts:versionHistoryLoadFailedGeneric')),
+          }),
+        );
+      } finally {
+        if (historyRequestSeqRef.current === seq) {
+          setVersionsLoading(false);
+        }
+      }
+    },
+    [t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   关闭历史抽屉后不应残留请求态与列表。
+   *
+   * Code Logic（这个函数做什么）:
+   *   使挂起请求 stale，清空 history 状态。
+   */
+  const closeVersionHistory = useCallback(() => {
+    historyRequestSeqRef.current += 1;
+    setHistoryPromptId(null);
+    setVersions([]);
+    setVersionsError(null);
+    setVersionsLoading(false);
+    setRestoringVersionId(null);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   恢复历史版本应成为新的 active 行，并刷新卡片与冲突标记。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 restoreVersion，成功后合并列表、刷新 flags 并重载版本列表。
+   */
+  const handleRestoreVersion = useCallback(
+    async (version: ContentVersion) => {
+      if (!historyPromptId || restoringVersionId) return;
+      setRestoringVersionId(version.id);
+      setVersionsError(null);
+      try {
+        const restored = await promptsApi.restoreVersion(historyPromptId, version.id);
+        setPrompts((prev) => {
+          const idx = prev.findIndex((p) => p.id === restored.id);
+          if (idx < 0) return [restored, ...prev];
+          const next = [...prev];
+          next[idx] = restored;
+          return next;
+        });
+        const list = await promptsApi.listVersions(historyPromptId);
+        const safe = Array.isArray(list) ? list : [];
+        setVersions(safe);
+        setConflictPromptIds((prev) => {
+          const next = new Set(prev);
+          if (safe.some((v) => v.kind === 'conflict')) next.add(historyPromptId);
+          else next.delete(historyPromptId);
+          return next;
+        });
+      } catch (err) {
+        setVersionsError(
+          t('prompts:versionRestoreFailed', {
+            error: errorMessage(err, t('prompts:versionRestoreFailedGeneric')),
+          }),
+        );
+      } finally {
+        setRestoringVersionId(null);
+      }
+    },
+    [historyPromptId, restoringVersionId, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户需要把冲突/历史正文复制到剪贴板。
+   *
+   * Code Logic（这个函数做什么）:
+   *   优先 content，否则 contentPreview，写入 clipboard。
+   */
+  const handleCopyVersion = useCallback(
+    async (version: ContentVersion) => {
+      const text = resolveVersionCopyText(version);
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (err) {
+        setVersionsError(errorMessage(err, t('prompts:versionCopyFailed')));
+      }
+    },
+    [t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   错误横幅需要区分 create/update/delete 文案。
    *
    * Code Logic（这个函数做什么）:
@@ -651,7 +828,11 @@ export function Prompts() {
                   <PromptCardView
                     prompt={p}
                     actionsDisabled={pendingEntityIds.has(p.id)}
+                    hasConflict={conflictPromptIds.has(p.id)}
                     onEdit={() => startEdit(p)}
+                    onHistory={() => {
+                      void openVersionHistory(p.id);
+                    }}
                     onDelete={() => {
                       if (pendingEntityIdsRef.current.has(p.id)) return;
                       setPendingDeleteId(p.id);
@@ -693,6 +874,22 @@ export function Prompts() {
           </div>
         </Card>
       </Dialog>
+
+      <VersionHistoryDrawer
+        open={Boolean(historyPromptId)}
+        onClose={closeVersionHistory}
+        versions={versions}
+        loading={versionsLoading}
+        error={versionsError}
+        restoringVersionId={restoringVersionId}
+        i18nNamespace="prompts"
+        onRestore={(version) => {
+          void handleRestoreVersion(version);
+        }}
+        onCopy={(version) => {
+          void handleCopyVersion(version);
+        }}
+      />
     </div>
   );
 }
@@ -734,20 +931,25 @@ function FilterChip({
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   展示态卡片提供编辑/删除入口；pending 时必须禁用冲突动作。
+ *   展示态卡片提供编辑/删除/历史入口；pending 时必须禁用冲突动作；
+ *   冲突用非阻塞 Pill 提示，不打断浏览与编辑。
  *
  * Code Logic（这个组件做什么）:
- *   渲染标题/内容/标签与动作按钮；actionsDisabled 时禁用 edit/delete。
+ *   渲染标题/内容/标签与动作按钮；hasConflict 时显示 warn Pill。
  */
 function PromptCardView({
   prompt,
   actionsDisabled,
+  hasConflict,
   onEdit,
+  onHistory,
   onDelete,
 }: {
   prompt: Prompt;
   actionsDisabled: boolean;
+  hasConflict: boolean;
   onEdit: () => void;
+  onHistory: () => void;
   onDelete: () => void;
 }) {
   const { t } = useTranslation(['prompts', 'common']);
@@ -758,8 +960,24 @@ function PromptCardView({
       data-testid={`prompt-card-${prompt.id}`}
     >
       <Card.Header className={styles.promptHeader}>
-        <h3 className={styles.promptTitle}>{prompt.title}</h3>
+        <div className={styles.promptTitleRow}>
+          <h3 className={styles.promptTitle}>{prompt.title}</h3>
+          {hasConflict ? (
+            <Pill tone="warn" dot data-testid={`prompt-conflict-pill-${prompt.id}`}>
+              {t('prompts:versionConflictPill')}
+            </Pill>
+          ) : null}
+        </div>
         <div className={styles.promptActions}>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<HistoryIcon />}
+            onClick={onHistory}
+            disabled={actionsDisabled}
+            aria-label={t('prompts:versionOpenHistory')}
+            title={t('prompts:versionOpenHistory')}
+          />
           <Button
             variant="ghost"
             size="sm"

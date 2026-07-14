@@ -14,7 +14,9 @@
 //!     SQL 层完成活跃/闲置计数，避免把全量明细拉进内存。
 
 use crate::error::AppError;
+use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use sqlx::{Row, SqlitePool};
+use std::sync::Arc;
 
 /// 单分钟活动采样行。
 #[derive(Debug, Clone)]
@@ -33,12 +35,25 @@ pub struct ActivityRecord {
 pub struct HealthRepo {
     /// SQLite 连接池（max_connections(1)，单连接语义，与其他 repo 共享同一池）。
     db: SqlitePool,
+    /// 维护屏障：写路径持 shared lease，restore exclusive 时阻塞。
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl HealthRepo {
-    /// 构造 HealthRepo，传入共享连接池。
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
+    ///
+    /// Business Logic: 单测无需共享 AppState.maintenance_gate。
+    /// Code Logic: 内部 `with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))`。
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: 全部 ordinary writer 与 restore 共用同一 gate。
+    /// Code Logic: 保存 pool + Arc gate。
+    pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { db, gate }
     }
 
     /// 写入一条分钟级活动记录。
@@ -46,20 +61,23 @@ impl HealthRepo {
     /// Business Logic: daemon 每分钟采样一次前台活动，落库供后续久坐/屏幕时长统计。
     ///     同一分钟若重采（例如系统挂起恢复后补采），用 INSERT OR REPLACE 覆盖，
     ///     保证每个分钟桶只有一行最新结果。
-    /// Code Logic: 绑定 (ts, is_active as i64, process_name, window_title) 执行
-    ///     INSERT OR REPLACE，is_active 布尔转 0/1 存储。
+    /// Code Logic: 持 shared write lease 后绑定 (ts, is_active as i64, process_name, window_title)
+    ///     执行 INSERT OR REPLACE，is_active 布尔转 0/1 存储。
     pub async fn insert_activity(&self, r: &ActivityRecord) -> Result<(), AppError> {
-        sqlx::query(
-            "INSERT OR REPLACE INTO activity_records (ts, is_active, process_name, window_title) \
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind(r.ts)
-        .bind(r.is_active as i64)
-        .bind(r.process_name.as_deref())
-        .bind(r.window_title.as_deref())
-        .execute(&self.db)
-        .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT OR REPLACE INTO activity_records (ts, is_active, process_name, window_title) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(r.ts)
+            .bind(r.is_active as i64)
+            .bind(r.process_name.as_deref())
+            .bind(r.window_title.as_deref())
+            .execute(&self.db)
+            .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// 取 [since_ts, +∞) 区间内的活动记录（按 ts 升序）。
@@ -176,26 +194,33 @@ impl HealthRepo {
     ///
     /// Business Logic: activity_records 会随时间无限增长，daemon 需定期清理超出
     ///     统计窗口（例如 24 小时）的旧数据以控制库体积。
-    /// Code Logic: DELETE FROM activity_records WHERE ts < ?，返回受影响行数。
+    /// Code Logic: 持 shared write lease 后 DELETE FROM activity_records WHERE ts < ?，返回受影响行数。
     pub async fn cleanup_older_than(&self, cutoff_ts: i64) -> Result<u64, AppError> {
-        let res = sqlx::query("DELETE FROM activity_records WHERE ts < ?")
-            .bind(cutoff_ts)
-            .execute(&self.db)
-            .await?;
-        Ok(res.rows_affected())
+        with_shared_write_lease(&self.gate, async {
+            let res = sqlx::query("DELETE FROM activity_records WHERE ts < ?")
+                .bind(cutoff_ts)
+                .execute(&self.db)
+                .await?;
+            Ok(res.rows_affected())
+        })
+        .await
     }
 
     /// 记录一次喝水打卡。
     ///
     /// Business Logic: 用户点击「+1 杯」按钮时记录该时刻，water_records 用于后续喝水频率统计。
     ///     自增 id 主键（不再是 ts 主键），同秒连点也能各自成行，避免主键冲突丢计数。
-    /// Code Logic: INSERT INTO water_records (ts) VALUES (?) RETURNING id，返回自增主键。
+    /// Code Logic: 持 shared write lease 后 INSERT ... RETURNING id，返回自增主键。
     pub async fn insert_water(&self, ts: i64) -> Result<i64, AppError> {
-        let row: (i64,) = sqlx::query_as("INSERT INTO water_records (ts) VALUES (?) RETURNING id")
-            .bind(ts)
-            .fetch_one(&self.db)
-            .await?;
-        Ok(row.0)
+        with_shared_write_lease(&self.gate, async {
+            let row: (i64,) =
+                sqlx::query_as("INSERT INTO water_records (ts) VALUES (?) RETURNING id")
+                    .bind(ts)
+                    .fetch_one(&self.db)
+                    .await?;
+            Ok(row.0)
+        })
+        .await
     }
 
     /// Business Logic: 用户想看"今日喝了多少杯水",需要按时间范围统计饮水次数。
@@ -236,23 +261,29 @@ impl HealthRepo {
     }
 
     /// Business Logic: 用户误点"+1 杯"后需要撤销,按自增 id 精准删除单条饮水记录。
-    /// Code Logic: DELETE FROM water_records WHERE id=?,返回 rows_affected > 0。
+    /// Code Logic: 持 shared write lease 后 DELETE FROM water_records WHERE id=?，返回 rows_affected > 0。
     pub async fn delete_water(&self, id: i64) -> Result<bool, AppError> {
-        let result = sqlx::query("DELETE FROM water_records WHERE id = ?")
-            .bind(id)
-            .execute(&self.db)
-            .await?;
-        Ok(result.rows_affected() > 0)
+        with_shared_write_lease(&self.gate, async {
+            let result = sqlx::query("DELETE FROM water_records WHERE id = ?")
+                .bind(id)
+                .execute(&self.db)
+                .await?;
+            Ok(result.rows_affected() > 0)
+        })
+        .await
     }
 
     /// Business Logic: 保留 N 天数据避免数据库无限增长,定期清理过期饮水记录。
-    /// Code Logic: DELETE FROM water_records WHERE ts < cutoff_ts,返回删除行数。
+    /// Code Logic: 持 shared write lease 后 DELETE FROM water_records WHERE ts < cutoff_ts，返回删除行数。
     pub async fn cleanup_water_older_than(&self, cutoff_ts: i64) -> Result<u64, AppError> {
-        let result = sqlx::query("DELETE FROM water_records WHERE ts < ?")
-            .bind(cutoff_ts)
-            .execute(&self.db)
-            .await?;
-        Ok(result.rows_affected())
+        with_shared_write_lease(&self.gate, async {
+            let result = sqlx::query("DELETE FROM water_records WHERE ts < ?")
+                .bind(cutoff_ts)
+                .execute(&self.db)
+                .await?;
+            Ok(result.rows_affected())
+        })
+        .await
     }
 
     /// Business Logic: 前端"距下次提醒"需要知道上次喝水时间,推算剩余等待时长。
@@ -266,23 +297,25 @@ impl HealthRepo {
 
     /// Business Logic: 久坐提醒触发或用户完成休息时,记录事件用于习惯统计。
     ///     kind 区分事件类型,reminder=提醒触发(用户可能跳过),rest=实际完成休息。
-    /// Code Logic: INSERT INTO rest_records (ts,kind,duration_seconds) VALUES(?,?,?)
-    ///     RETURNING id,返回自增主键。
+    /// Code Logic: 持 shared write lease 后 INSERT INTO rest_records ... RETURNING id，返回自增主键。
     pub async fn insert_rest_record(
         &self,
         ts: i64,
         kind: &str,
         duration_seconds: i64,
     ) -> Result<i64, AppError> {
-        let row: (i64,) = sqlx::query_as(
-            "INSERT INTO rest_records (ts, kind, duration_seconds) VALUES (?, ?, ?) RETURNING id",
-        )
-        .bind(ts)
-        .bind(kind)
-        .bind(duration_seconds)
-        .fetch_one(&self.db)
-        .await?;
-        Ok(row.0)
+        with_shared_write_lease(&self.gate, async {
+            let row: (i64,) = sqlx::query_as(
+                "INSERT INTO rest_records (ts, kind, duration_seconds) VALUES (?, ?, ?) RETURNING id",
+            )
+            .bind(ts)
+            .bind(kind)
+            .bind(duration_seconds)
+            .fetch_one(&self.db)
+            .await?;
+            Ok(row.0)
+        })
+        .await
     }
 
     /// Business Logic: 统计今日提醒触发次数 / 完成休息次数,按 kind 过滤。
@@ -340,25 +373,31 @@ impl HealthRepo {
     }
 
     /// Business Logic: 用户撤销误记的休息事件,按自增 id 精准删除。
-    /// Code Logic: DELETE FROM rest_records WHERE id=?,返回 rows_affected > 0。
+    /// Code Logic: 持 shared write lease 后 DELETE FROM rest_records WHERE id=?，返回 rows_affected > 0。
     /// NOTE: 暂无命令消费方(预留撤销误记的休息记录用),保留 dead_code 标注避免编译警告。
     #[allow(dead_code)]
     pub async fn delete_rest(&self, id: i64) -> Result<bool, AppError> {
-        let result = sqlx::query("DELETE FROM rest_records WHERE id = ?")
-            .bind(id)
-            .execute(&self.db)
-            .await?;
-        Ok(result.rows_affected() > 0)
+        with_shared_write_lease(&self.gate, async {
+            let result = sqlx::query("DELETE FROM rest_records WHERE id = ?")
+                .bind(id)
+                .execute(&self.db)
+                .await?;
+            Ok(result.rows_affected() > 0)
+        })
+        .await
     }
 
     /// Business Logic: 保留 N 天数据,定期清理过期休息记录。
-    /// Code Logic: DELETE FROM rest_records WHERE ts < cutoff_ts,返回删除行数。
+    /// Code Logic: 持 shared write lease 后 DELETE FROM rest_records WHERE ts < cutoff_ts，返回删除行数。
     pub async fn cleanup_rest_older_than(&self, cutoff_ts: i64) -> Result<u64, AppError> {
-        let result = sqlx::query("DELETE FROM rest_records WHERE ts < ?")
-            .bind(cutoff_ts)
-            .execute(&self.db)
-            .await?;
-        Ok(result.rows_affected())
+        with_shared_write_lease(&self.gate, async {
+            let result = sqlx::query("DELETE FROM rest_records WHERE ts < ?")
+                .bind(cutoff_ts)
+                .execute(&self.db)
+                .await?;
+            Ok(result.rows_affected())
+        })
+        .await
     }
 }
 

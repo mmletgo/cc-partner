@@ -4,14 +4,17 @@
 //!     用户添加过的本机项目需要在重启后保留，用于工作台最近项目列表。
 //!
 //! Code Logic（这个模块做什么）:
-//!     封装 workbench_projects 表 CRUD；使用运行期 sqlx::query，不依赖编译期 DATABASE_URL。
+//!     封装 workbench_projects 表 CRUD；写路径经 `with_shared_write_lease`；
+//!     使用运行期 sqlx::query，不依赖编译期 DATABASE_URL。
 
 #![allow(dead_code)]
 
 use crate::error::AppError;
+use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use crate::workbench::models::WorkbenchProjectRow;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
+use std::sync::Arc;
 
 /// 工作台项目仓库，封装所有 workbench_projects 表操作。
 ///
@@ -19,20 +22,32 @@ use sqlx::Row;
 ///     工作台命令层需要复用同一套项目持久化逻辑，避免直接散落 SQL。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有 SQLite pool，并提供 list/get/upsert/delete 四类 CRUD 方法。
+///     持有 SQLite pool + maintenance gate，并提供 list/get/upsert/delete 四类 CRUD 方法。
 #[derive(Clone)]
 pub struct WorkbenchProjectRepo {
     pool: SqlitePool,
+    /// 维护屏障：写路径持 shared lease，restore exclusive 时阻塞。
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl WorkbenchProjectRepo {
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
+    ///
     /// Business Logic（为什么需要这个函数）:
     ///     Tauri setup 需要用同一个 SQLite pool 构造项目仓库，供命令层共享。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     保存 SqlitePool clone；pool 内部是 Arc，clone 廉价。
+    ///     内部 `with_gate(pool, Arc::new(DatabaseMaintenanceGate::new()))`。
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self::with_gate(pool, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: 全部 ordinary writer 与 restore 共用同一 gate。
+    /// Code Logic: 保存 pool + Arc gate。
+    pub fn with_gate(pool: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { pool, gate }
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -70,38 +85,44 @@ impl WorkbenchProjectRepo {
     ///     用户添加项目或重新打开项目时，需要保存/覆盖项目记录。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     用 INSERT OR REPLACE 写入完整 row。
+    ///     持 shared write lease 后用 INSERT OR REPLACE 写入完整 row。
     pub async fn upsert(&self, row: &WorkbenchProjectRow) -> Result<(), AppError> {
-        sqlx::query(
-            "INSERT OR REPLACE INTO workbench_projects \
-             (id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&row.id)
-        .bind(&row.name)
-        .bind(&row.kind)
-        .bind(&row.device_id)
-        .bind(&row.device_name)
-        .bind(&row.path)
-        .bind(&row.last_opened_at)
-        .bind(&row.created_at)
-        .bind(&row.updated_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT OR REPLACE INTO workbench_projects \
+                 (id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&row.id)
+            .bind(&row.name)
+            .bind(&row.kind)
+            .bind(&row.device_id)
+            .bind(&row.device_name)
+            .bind(&row.path)
+            .bind(&row.last_opened_at)
+            .bind(&row.created_at)
+            .bind(&row.updated_at)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     用户可以从工作台最近项目列表移除项目；移除不删除磁盘文件。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     按 id 删除项目记录。
+    ///     持 shared write lease 后按 id 删除项目记录。
     pub async fn delete(&self, id: &str) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM workbench_projects WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query("DELETE FROM workbench_projects WHERE id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            Ok(())
+        })
+        .await
     }
 }
 

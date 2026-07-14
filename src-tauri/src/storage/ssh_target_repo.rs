@@ -11,27 +11,56 @@
 
 use crate::error::AppError;
 use crate::models::ssh_target::SshTargetRow;
+use crate::storage::maintenance_gate::{begin_shared_write, DatabaseMaintenanceGate};
+use crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo;
+use crate::storage::sync_request_ledger_repo::DOMAIN_SSH_TARGET;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// SSH 目标仓库，封装所有 ssh_targets 表操作。
 pub struct SshTargetRepo {
     /// SQLite 连接池（max_connections(1)，单连接语义）
     db: SqlitePool,
+    /// 与 restore exclusive 共享的写屏障。
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl SshTargetRepo {
-    /// 构造仓库。
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
+    ///
+    /// Business Logic: 单测与局部 fixture 不依赖 AppState 共享 gate。
+    /// Code Logic: 新建独立 DatabaseMaintenanceGate。
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: 所有生产 writer 与 restore exclusive 共享屏障。
+    /// Code Logic: 保存 pool + gate。
+    pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { db, gate }
+    }
+
+    /// 暴露共享 gate（供 apply_merge ledger 对齐屏障）。
+    ///
+    /// Business Logic: push-batch ledger 必须与域 repo 使用同一 gate。
+    /// Code Logic: clone Arc。
+    pub fn gate(&self) -> Arc<DatabaseMaintenanceGate> {
+        self.gate.clone()
     }
 
     /// 将数据库一行映射为 SshTargetRow（vector_clock JSON 反序列化、deleted int→bool）。
+    ///
+    /// Business Logic: 命令层与同步层都需要从 SQLite 行还原完整 SSH 目标实体。
+    /// Code Logic: vector_clock 反序列化；delete_epoch 缺列或读失败时默认 0。
     fn row_to_ssh_target(row: &SqliteRow) -> Result<SshTargetRow, AppError> {
         let vc_text: String = row.try_get("vector_clock")?;
         let deleted_int: i64 = row.try_get("deleted")?;
         let vector_clock: HashMap<String, u64> = serde_json::from_str(&vc_text)?;
+        let delete_epoch = row.try_get::<i64, _>("delete_epoch").unwrap_or(0).max(0) as u64;
         Ok(SshTargetRow {
             host: row.try_get("host")?,
             port: row.try_get("port")?,
@@ -42,13 +71,14 @@ impl SshTargetRepo {
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
             deleted: deleted_int != 0,
+            delete_epoch,
         })
     }
 
     /// 列出所有未删除的 SSH 目标，按 updated_at 降序。
     pub async fn list(&self) -> Result<Vec<SshTargetRow>, AppError> {
         let rows = sqlx::query(
-            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted \
+            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted, delete_epoch \
              FROM ssh_targets WHERE deleted = 0 ORDER BY updated_at DESC",
         )
         .fetch_all(&self.db)
@@ -59,7 +89,7 @@ impl SshTargetRepo {
     /// 按 host 主键查询单条（含已删除记录，供命令层判断存在性与软删除读取）。
     pub async fn get(&self, host: &str) -> Result<Option<SshTargetRow>, AppError> {
         let row = sqlx::query(
-            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted \
+            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted, delete_epoch \
              FROM ssh_targets WHERE host = ?",
         )
         .bind(host)
@@ -71,10 +101,35 @@ impl SshTargetRepo {
         }
     }
 
+    /// 在已开启事务内按 host 读取 SSH 目标（含 deleted）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     merge plan 必须在写事务内读 local，避免 pool 单连接与持有事务冲突，
+    ///     保证 plan/write 使用同一事务快照。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     与 `get` 相同 SELECT，经 `fetch_optional(&mut **tx)` 执行。
+    pub async fn get_on_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        host: &str,
+    ) -> Result<Option<SshTargetRow>, AppError> {
+        let row = sqlx::query(
+            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted, delete_epoch \
+             FROM ssh_targets WHERE host = ?",
+        )
+        .bind(host)
+        .fetch_optional(&mut **tx)
+        .await?;
+        match row {
+            Some(r) => Ok(Some(Self::row_to_ssh_target(&r)?)),
+            None => Ok(None),
+        }
+    }
+
     /// 返回全部目标（含 deleted 软删除记录），用于跨设备同步。
     pub async fn get_all_for_sync(&self) -> Result<Vec<SshTargetRow>, AppError> {
         let rows = sqlx::query(
-            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted \
+            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted, delete_epoch \
              FROM ssh_targets",
         )
         .fetch_all(&self.db)
@@ -83,16 +138,63 @@ impl SshTargetRepo {
     }
 
     /// 批量插入/更新（按 host 主键，INSERT OR REPLACE），用于同步 push 落库。
+    ///
+    /// Business Logic: 同步合并后批量落库；中途失败必须整批回滚，禁止半批次成功。
+    /// Code Logic: 委托事务性 `bulk_upsert_in_transaction`（无 inject）。
     pub async fn bulk_upsert(&self, items: &[SshTargetRow]) -> Result<(), AppError> {
+        self.bulk_upsert_in_transaction(items, None).await
+    }
+
+    /// 事务性 bulk_upsert；可选注入失败点，供模块/quality 回归验证整批回滚。
+    ///
+    /// Business Logic: 测试必须与生产共享同一事务边界。
+    /// Code Logic: `cfg(any(test, debug_assertions))` 下编译；release 剥离。
+    #[cfg(any(test, debug_assertions))]
+    pub async fn bulk_upsert_inject_fail_at(
+        &self,
+        items: &[SshTargetRow],
+        inject_fail_at: Option<usize>,
+    ) -> Result<(), AppError> {
+        self.bulk_upsert_in_transaction(items, inject_fail_at).await
+    }
+
+    /// 在自有事务中 bulk upsert。
+    ///
+    /// Business Logic: 生产与 inject 路径共享事务语义，并经 shared lease。
+    /// Code Logic: begin_shared_write → on_tx → commit。
+    async fn bulk_upsert_in_transaction(
+        &self,
+        items: &[SshTargetRow],
+        inject_fail_at: Option<usize>,
+    ) -> Result<(), AppError> {
         if items.is_empty() {
             return Ok(());
         }
-        for p in items {
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
+        Self::bulk_upsert_on_tx(&mut tx, items, inject_fail_at).await?;
+        tx.commit().await?;
+        drop(permit);
+        Ok(())
+    }
+
+    /// 在已开启事务上执行 bulk upsert 循环（供 push-batch ledger 同事务调用）。
+    ///
+    /// Business Logic: ledger claim 与领域写入必须同一事务。
+    /// Code Logic: 逐条 INSERT OR REPLACE；inject 命中返回 Err。
+    pub async fn bulk_upsert_on_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        items: &[SshTargetRow],
+        inject_fail_at: Option<usize>,
+    ) -> Result<(), AppError> {
+        for (idx, p) in items.iter().enumerate() {
+            if inject_fail_at == Some(idx) {
+                return Err(AppError::generic("injected ssh_target bulk_upsert failure"));
+            }
             let vc_text = serde_json::to_string(&p.vector_clock)?;
             sqlx::query(
                 "INSERT OR REPLACE INTO ssh_targets \
-                 (host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted, delete_epoch) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&p.host)
             .bind(p.port)
@@ -103,10 +205,19 @@ impl SshTargetRepo {
             .bind(&p.created_at)
             .bind(&p.updated_at)
             .bind(p.deleted as i64)
-            .execute(&self.db)
+            .bind(p.delete_epoch as i64)
+            .execute(&mut **tx)
             .await?;
         }
         Ok(())
+    }
+
+    /// 返回底层 pool（供 push-batch ledger 共享）。
+    ///
+    /// Business Logic: 路由层需要同一 pool 开事务。
+    /// Code Logic: clone SqlitePool。
+    pub fn pool(&self) -> SqlitePool {
+        self.db.clone()
     }
 
     /// 单条 upsert（命令层用，INSERT OR REPLACE）。
@@ -114,7 +225,13 @@ impl SshTargetRepo {
         self.bulk_upsert(std::slice::from_ref(row)).await
     }
 
-    /// 软删除：标记 deleted=1，更新 updated_at，并写入推进后的 vector_clock。
+    /// 软删除：同事务铸造 delete_epoch 并写入 tombstone 字段。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     CRDT 删除需推进 vector_clock；同时铸造单调 delete_epoch 供水位 ack 与 GC。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     begin_shared_write → mint_on_tx(DOMAIN_SSH_TARGET) → UPDATE deleted/updated_at/vector_clock/delete_epoch → commit。
     pub async fn soft_delete(
         &self,
         host: &str,
@@ -122,14 +239,19 @@ impl SshTargetRepo {
         vector_clock: &HashMap<String, u64>,
     ) -> Result<(), AppError> {
         let vc_text = serde_json::to_string(vector_clock)?;
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
+        let epoch = SyncDeleteSequenceRepo::mint_on_tx(&mut tx, DOMAIN_SSH_TARGET).await?;
         sqlx::query(
-            "UPDATE ssh_targets SET deleted = 1, updated_at = ?, vector_clock = ? WHERE host = ?",
+            "UPDATE ssh_targets SET deleted = 1, updated_at = ?, vector_clock = ?, delete_epoch = ? WHERE host = ?",
         )
         .bind(now)
         .bind(vc_text)
+        .bind(epoch as i64)
         .bind(host)
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
+        drop(permit);
         Ok(())
     }
 }
@@ -156,11 +278,12 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS ssh_targets (\
              host TEXT PRIMARY KEY, port INTEGER NOT NULL DEFAULT 22, username TEXT NOT NULL, label TEXT, \
              device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, created_at TEXT NOT NULL, \
-             updated_at TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+             updated_at TEXT NOT NULL, deleted INTEGER DEFAULT 0, delete_epoch INTEGER NOT NULL DEFAULT 0)",
         )
         .execute(&pool)
         .await
         .unwrap();
+        SyncDeleteSequenceRepo::ensure_schema(&pool).await.unwrap();
         SshTargetRepo::new(pool)
     }
 
@@ -178,6 +301,7 @@ mod tests {
             created_at: "2024-01-01T00:00:00+00:00".to_string(),
             updated_at: "2024-01-01T00:00:00+00:00".to_string(),
             deleted: false,
+            delete_epoch: 0,
         }
     }
 
@@ -226,6 +350,7 @@ mod tests {
         let got = repo.get("10.0.0.1").await.unwrap().unwrap();
         assert!(got.deleted);
         assert_eq!(got.vector_clock.get("d1"), Some(&2));
+        assert!(got.delete_epoch > 0);
     }
 
     #[tokio::test]
@@ -241,5 +366,21 @@ mod tests {
         let synced = repo.get_all_for_sync().await.unwrap();
         assert_eq!(synced.len(), 1);
         assert!(synced[0].deleted);
+    }
+
+    /// 中途注入失败时整批回滚，不得留下半批次。
+    #[tokio::test]
+    async fn bulk_failure_rolls_back() {
+        let repo = setup_repo().await;
+        repo.bulk_upsert_inject_fail_at(
+            &[
+                row("10.0.0.1", "alice", 22, 1),
+                row("10.0.0.2", "bob", 22, 1),
+            ],
+            Some(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(repo.get_all_for_sync().await.unwrap().is_empty());
     }
 }

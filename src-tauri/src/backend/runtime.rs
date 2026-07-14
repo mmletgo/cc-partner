@@ -18,8 +18,9 @@ use crate::net::{discovery, http_server, peer_client::PeerClient};
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
 use crate::storage::{
-    ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, SshTargetRepo, TransferRepo,
-    WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
+    ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
+    SshTargetRepo, TransferRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo,
+    WorkbenchWorktreeRepo,
 };
 use crate::transfer::registry::TransferRegistry;
 use serde::Deserialize;
@@ -315,6 +316,16 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     sqlx::query(SSH_TARGET_SCHEMA).execute(&pool).await?;
     sqlx::query(SCRATCHPAD_SCHEMA).execute(&pool).await?;
     ScratchpadRepo::new(pool.clone()).ensure_schema().await?;
+    // N2 sync push-batch 幂等 ledger（UNIQUE claimed_device_id+domain+client_request_id）
+    crate::storage::SyncRequestLedgerRepo::ensure_schema(&pool).await?;
+    // N2 conflict/history + delete epoch watermark/floor 表
+    crate::storage::ContentVersionRepo::ensure_schema(&pool).await?;
+    crate::storage::SyncWatermarkRepo::ensure_schema(&pool).await?;
+    crate::storage::SyncDeleteSequenceRepo::ensure_schema(&pool).await?;
+    crate::storage::DeletionFloorRepo::ensure_schema(&pool).await?;
+    crate::storage::ensure_domain_delete_epoch_columns(&pool).await?;
+    // N2 recovery_jobs 状态机（导出/恢复）
+    crate::storage::RecoveryJobRepo::ensure_schema(&pool).await?;
     sqlx::query(HEALTH_SCHEMA).execute(&pool).await?;
 
     let needs_recreate: bool = sqlx::query_scalar::<_, i64>(
@@ -400,33 +411,73 @@ pub async fn build_app_state_with_role(
         .db_path
         .clone();
     let pool = init_db(&db_path).await?;
+    // 全局写屏障：所有生产 SQLite writer 共享；restore 独占。
+    let maintenance_gate = Arc::new(DatabaseMaintenanceGate::new());
 
-    let prompt_repo = Arc::new(PromptRepo::new(pool.clone()));
-    let transfer_repo = Arc::new(TransferRepo::new(pool.clone()));
-    let cc_history_repo = Arc::new(ClaudeHistoryRepo::new(pool.clone()));
-    let claude_md_repo = Arc::new(ClaudeMdRepo::new(pool.clone()));
-    let ssh_target_repo = Arc::new(SshTargetRepo::new(pool.clone()));
-    let scratchpad_repo = Arc::new(ScratchpadRepo::new(pool.clone()));
-    let workbench_project_repo = Arc::new(WorkbenchProjectRepo::new(pool.clone()));
-    let workbench_session_repo = Arc::new(WorkbenchSessionRepo::new(pool.clone()));
-    let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::new(pool.clone()));
-    let workbench_browser_repo = Arc::new(WorkbenchBrowserRepo::new(pool.clone()));
+    // 生产 writer 一律 with_gate，共享 restore exclusive 屏障。
+    let prompt_repo = Arc::new(PromptRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let transfer_repo = Arc::new(TransferRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let cc_history_repo = Arc::new(ClaudeHistoryRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let claude_md_repo = Arc::new(ClaudeMdRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let ssh_target_repo = Arc::new(SshTargetRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let scratchpad_repo = Arc::new(ScratchpadRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let workbench_project_repo = Arc::new(WorkbenchProjectRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let workbench_session_repo = Arc::new(WorkbenchSessionRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let workbench_browser_repo = Arc::new(WorkbenchBrowserRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
     let workbench_browser_previews =
         Arc::new(crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new());
-    let orchestrator_repo = Arc::new(OrchestratorRepo::new(pool.clone()));
+    let orchestrator_repo = Arc::new(OrchestratorRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
     let workbench_sessions = Arc::new(crate::workbench::sessions::WorkbenchSessionRegistry::new());
     let (workbench_remote_events, _) = tokio::sync::broadcast::channel(1024);
     let workbench_remote_event_bridges =
         Arc::new(crate::workbench::remote_events::RemoteEventBridgeRegistry::new());
     let workbench_dependency =
         Arc::new(crate::workbench::dependencies::WorkbenchDependencyInstallRuntime::new());
-    let health_repo = Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone()));
+    let health_repo = Arc::new(crate::storage::health_repo::HealthRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
     let health = Arc::new(crate::health::HealthRuntime::new());
 
     Ok(AppState {
         config,
         config_runtime,
         db: pool,
+        maintenance_gate,
         prompt_repo,
         transfer_repo,
         claude_md_repo,
@@ -526,6 +577,42 @@ pub async fn start_gui_backend_services(state: &AppState) -> Result<BackendRunti
 pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
     match mode {
         BackendRuntimeMode::Headless => {
+            // 启动时诚实回收崩溃遗留的 recovery Applying 任务，禁止伪装成功。
+            {
+                let reclaim_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    let service = crate::backup::restore::BackupRestoreService::new(reclaim_state);
+                    match service.reclaim_on_startup().await {
+                        Ok(n) if n > 0 => {
+                            tracing::warn!("已回收 {n} 个卡住的 recovery Applying 任务为 Failed");
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("回收卡住 recovery jobs 失败: {e}");
+                        }
+                    }
+                });
+            }
+            // 周期性 tombstone → deletion floor GC（与同步结束后的 best-effort 互补）
+            {
+                let gc_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    // 启动后稍等再跑一次，避免与 recovery reclaim 抢写
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    loop {
+                        ticker.tick().await;
+                        match crate::sync::engine::run_tombstone_gc_best_effort(&gc_state).await {
+                            Ok(n) if n > 0 => {
+                                tracing::info!("后台 tombstone GC 压缩了 {n} 条");
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!("后台 tombstone GC 失败: {e}"),
+                        }
+                    }
+                });
+            }
             start_cancelled_task_once(&state.cc_collector_cancel, "CC 历史采集器", || {
                 crate::cc::collector::start(state.clone())
             });

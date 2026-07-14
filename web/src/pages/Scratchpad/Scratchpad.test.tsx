@@ -12,12 +12,12 @@
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 import type { ReactNode } from 'react';
 
 import i18n from '@/i18n';
-import type { ScratchpadPage, ScratchpadPageSummary } from '@/lib/types';
+import type { ContentVersion, ScratchpadPage, ScratchpadPageSummary } from '@/lib/types';
 import {
   createScratchpadAutosaveQueue,
   type ScratchpadAutosaveQueue,
@@ -34,6 +34,8 @@ const updatePageContent = vi.fn();
 const renamePage = vi.fn();
 const deletePage = vi.fn();
 const sync = vi.fn();
+const listVersions = vi.fn();
+const restoreVersion = vi.fn();
 const triggerCloudSync = vi.fn();
 
 vi.mock('@/api/scratchpad', () => ({
@@ -45,6 +47,8 @@ vi.mock('@/api/scratchpad', () => ({
     renamePage: (...args: unknown[]) => renamePage(...args),
     deletePage: (...args: unknown[]) => deletePage(...args),
     sync: (...args: unknown[]) => sync(...args),
+    listVersions: (...args: unknown[]) => listVersions(...args),
+    restoreVersion: (...args: unknown[]) => restoreVersion(...args),
   },
 }));
 
@@ -143,6 +147,27 @@ beforeAll(async () => {
   await i18n.changeLanguage('zh');
 });
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   版本历史契约需要稳定 ContentVersion 夹具。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回可覆盖字段的最小合法 ContentVersion。
+ */
+function buildVersion(overrides: Partial<ContentVersion> = {}): ContentVersion {
+  return {
+    id: 'sv-1',
+    sourceDevice: 'device-b',
+    contentHash: 'hash-s1',
+    createdAt: '2026-07-13T11:00:00.000Z',
+    kind: 'history',
+    title: '页面一',
+    contentPreview: 'older scratch preview',
+    content: 'older scratch full',
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   listPages.mockReset();
@@ -152,7 +177,16 @@ beforeEach(() => {
   renamePage.mockReset();
   deletePage.mockReset();
   sync.mockReset();
+  listVersions.mockReset();
+  restoreVersion.mockReset();
   triggerCloudSync.mockReset();
+  listVersions.mockResolvedValue([]);
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      writeText: vi.fn().mockResolvedValue(undefined),
+    },
+  });
 });
 
 afterEach(() => {
@@ -295,6 +329,74 @@ describe('Scratchpad autosave lifecycle', () => {
       expect(queue.getSnapshot().pages['page-1']?.error).toBeNull();
       expect(queue.getSnapshot().pages['page-1']?.savedVersion).toBe(
         queue.getSnapshot().pages['page-1']?.pendingVersion,
+      );
+    });
+  });
+
+  test('conflict pill is non-blocking and version history can restore/copy', async () => {
+    const page = buildPage({ content: 'current body' });
+    const conflictVersion = buildVersion({
+      id: 'sv-conflict',
+      kind: 'conflict',
+      contentPreview: 'scratch conflict preview',
+      content: 'scratch conflict full',
+      sourceDevice: 'device-remote',
+    });
+    listPages.mockResolvedValue([toSummary(page)]);
+    getPage.mockResolvedValue(page);
+    listVersions.mockResolvedValue([conflictVersion]);
+    restoreVersion.mockResolvedValue(
+      buildPage({
+        id: 'page-1',
+        title: '页面一',
+        content: 'scratch conflict full',
+        updatedAt: '2026-07-13T12:00:00.000Z',
+      }),
+    );
+
+    const save = vi.fn<ScratchpadAutosaveSaveFn>(async () => undefined);
+    const queue = createScratchpadAutosaveQueue(save, { delayMs: 500 });
+    renderScratchpad(queue);
+
+    await waitFor(() => {
+      expect((screen.getByLabelText('速记本内容') as HTMLTextAreaElement).disabled).toBe(false);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('scratchpad-conflict-pill')).toBeTruthy();
+    });
+
+    // 非阻塞：仍可编辑正文
+    const editor = screen.getByLabelText('速记本内容') as HTMLTextAreaElement;
+    expect(editor.disabled).toBe(false);
+    fireEvent.change(editor, { target: { value: 'still editable with conflict pill' } });
+    expect(editor.value).toBe('still editable with conflict pill');
+
+    fireEvent.click(screen.getByRole('button', { name: /历史|History/i }));
+
+    const historyPanel = await screen.findByTestId('scratchpad-version-history');
+    expect(within(historyPanel).getByText(/scratch conflict preview/)).toBeTruthy();
+
+    fireEvent.click(
+      within(screen.getByTestId('scratchpad-version-item-sv-conflict')).getByRole('button', {
+        name: /复制内容|Copy content/i,
+      }),
+    );
+    await waitFor(() => {
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith('scratch conflict full');
+    });
+
+    fireEvent.click(
+      within(screen.getByTestId('scratchpad-version-item-sv-conflict')).getByRole('button', {
+        name: /恢复为新版本|Restore as new version/i,
+      }),
+    );
+    fireEvent.click(screen.getByTestId('scratchpad-version-restore-confirm'));
+
+    await waitFor(() => {
+      expect(restoreVersion).toHaveBeenCalledWith('page-1', 'sv-conflict');
+      expect((screen.getByLabelText('速记本内容') as HTMLTextAreaElement).value).toBe(
+        'scratch conflict full',
       );
     });
   });

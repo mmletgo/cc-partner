@@ -57,6 +57,9 @@ struct ScratchpadCloudRow {
     vector_clock: std::collections::HashMap<String, u64>,
     #[serde(default)]
     deleted: bool,
+    /// 删除序号；旧云端 JSON 缺字段时为 0。
+    #[serde(default)]
+    delete_epoch: u64,
 }
 
 /// 旧速记本云端 JSON 缺 title 时使用的默认标题。
@@ -82,6 +85,7 @@ impl ScratchpadCloudRow {
             device_id: self.device_id,
             vector_clock: self.vector_clock,
             deleted: self.deleted,
+            delete_epoch: self.delete_epoch,
         }
     }
 }
@@ -636,7 +640,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS scratchpad (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '速记本', content TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+            "CREATE TABLE IF NOT EXISTS scratchpad (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '速记本', content TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, delete_epoch INTEGER NOT NULL DEFAULT 0)",
         )
         .execute(&pool)
         .await
@@ -657,6 +661,7 @@ mod tests {
             device_id: "device-remote".to_string(),
             vector_clock,
             deleted: false,
+            delete_epoch: 0,
         }
     }
 

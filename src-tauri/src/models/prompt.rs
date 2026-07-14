@@ -35,6 +35,9 @@ pub struct PromptRow {
     pub vector_clock: HashMap<String, u64>,
     /// 软删除标记（0/1）
     pub deleted: bool,
+    /// 本域删除序号（tombstone 水位/GC 用；未删除为 0；旧 JSON 缺省 0）
+    #[serde(default)]
+    pub delete_epoch: u64,
 }
 
 /// Prompt 前端 DTO（camelCase，对照前端 types.ts）。

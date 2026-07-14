@@ -83,6 +83,7 @@ pub async fn upsert_ssh_target(
         created_at,
         updated_at: now,
         deleted: false,
+        delete_epoch: 0,
     };
     state.ssh_target_repo.upsert(&row).await?;
     Ok(row.to_dto())

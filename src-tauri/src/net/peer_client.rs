@@ -496,23 +496,8 @@ impl PeerClient {
         base_url: &str,
         local_summary: Vec<serde_json::Value>,
     ) -> Vec<crate::models::prompt::PromptRow> {
-        let url = format!("{base_url}/api/sync/pull");
-        let body = serde_json::json!({ "summaries": local_summary });
-        match self.request_post::<SyncPullResp, _>(&url, &body).await {
-            Ok(data) => {
-                // 只记条数与结果，不记录 prompt 正文或请求 body
-                crate::backend::logging::OperationLog::new(
-                    "p2p",
-                    "sync_pull",
-                    crate::backend::logging::OperationResult::Ok,
-                )
-                .message(format!(
-                    "sync_pull 从对端获取 {} 条 prompt",
-                    data.prompts.len()
-                ))
-                .emit();
-                data.prompts
-            }
+        match self.sync_pull_result(base_url, local_summary).await {
+            Ok(v) => v,
             Err(e) => {
                 crate::backend::logging::OperationLog::new(
                     "p2p",
@@ -520,12 +505,37 @@ impl PeerClient {
                     crate::backend::logging::OperationResult::Error,
                 )
                 .level(tracing::Level::WARN)
-                .error_code("unavailable")
+                .error_code(e.code().unwrap_or("unavailable"))
                 .message(format!("sync_pull 失败: {e}"))
                 .emit();
                 Vec::new()
             }
         }
+    }
+
+    /// Prompt legacy pull（typed）：失败上抛，禁止折叠空集。
+    ///
+    /// Business Logic: N2 引擎 legacy 路径需要区分“成功空远端”与 transport 失败。
+    /// Code Logic: POST `/api/sync/pull`，成功返回 prompts；失败 `PeerCallError`。
+    pub async fn sync_pull_result(
+        &self,
+        base_url: &str,
+        local_summary: Vec<serde_json::Value>,
+    ) -> Result<Vec<crate::models::prompt::PromptRow>, PeerCallError> {
+        let url = format!("{base_url}/api/sync/pull");
+        let body = serde_json::json!({ "summaries": local_summary });
+        let data: SyncPullResp = self.request_post(&url, &body).await?;
+        crate::backend::logging::OperationLog::new(
+            "p2p",
+            "sync_pull",
+            crate::backend::logging::OperationResult::Ok,
+        )
+        .message(format!(
+            "sync_pull 从对端获取 {} 条 prompt",
+            data.prompts.len()
+        ))
+        .emit();
+        Ok(data.prompts)
     }
 
     /// 同步 push：将本端有但对端缺少的 prompt 推送给对端。
@@ -540,19 +550,8 @@ impl PeerClient {
         base_url: &str,
         prompts: &[crate::models::prompt::PromptRow],
     ) -> bool {
-        let url = format!("{base_url}/api/sync/push");
-        let body = serde_json::json!({ "prompts": prompts });
-        match self.request_post::<SyncPushResp, _>(&url, &body).await {
-            Ok(data) => {
-                crate::backend::logging::OperationLog::new(
-                    "p2p",
-                    "sync_push",
-                    crate::backend::logging::OperationResult::Ok,
-                )
-                .message(format!("sync_push 成功，对端接收 {} 条", data.accepted))
-                .emit();
-                true
-            }
+        match self.sync_push_result(base_url, prompts).await {
+            Ok(v) => v,
             Err(e) => {
                 crate::backend::logging::OperationLog::new(
                     "p2p",
@@ -560,12 +559,34 @@ impl PeerClient {
                     crate::backend::logging::OperationResult::Error,
                 )
                 .level(tracing::Level::WARN)
-                .error_code("unavailable")
+                .error_code(e.code().unwrap_or("unavailable"))
                 .message(format!("sync_push 失败: {e}"))
                 .emit();
                 false
             }
         }
+    }
+
+    /// Prompt legacy push（typed）：失败上抛。
+    ///
+    /// Business Logic: N2 引擎需要 push 失败时返回 typed Protocol/Unreachable，不得假成功。
+    /// Code Logic: POST `/api/sync/push`，2xx → Ok(true)；错误上抛 PeerCallError。
+    pub async fn sync_push_result(
+        &self,
+        base_url: &str,
+        prompts: &[crate::models::prompt::PromptRow],
+    ) -> Result<bool, PeerCallError> {
+        let url = format!("{base_url}/api/sync/push");
+        let body = serde_json::json!({ "prompts": prompts });
+        let data: SyncPushResp = self.request_post(&url, &body).await?;
+        crate::backend::logging::OperationLog::new(
+            "p2p",
+            "sync_push",
+            crate::backend::logging::OperationResult::Ok,
+        )
+        .message(format!("sync_push 成功，对端接收 {} 条", data.accepted))
+        .emit();
+        Ok(true)
     }
 
     /// CLAUDE.md 主动 push：将本端的 CLAUDE.md 版本推送给对端。
@@ -1412,6 +1433,338 @@ impl PeerClient {
             }
         }
     }
+
+    // ===== N2 typed content sync (Prompt / SSH / Scratchpad) =====
+    // 失败必须上抛 PeerCallError，禁止折叠为空页/false（见 invalid_json_is_failure_not_empty_remote）。
+
+    /// 校验 push-batch accepted 不得超过本批条数。
+    ///
+    /// Business Logic: 对端若宣称 accepted 大于发送条数，属于协议损坏，不得当成功。
+    /// Code Logic: accepted > sent → InvalidResponse。
+    #[allow(clippy::result_large_err)] // PeerCallError is the shared typed error surface
+    fn ensure_accepted_not_exceeds(
+        url: &str,
+        accepted: usize,
+        sent: usize,
+    ) -> Result<(), PeerCallError> {
+        if accepted > sent {
+            return Err(PeerCallError::InvalidResponse {
+                url: url.to_string(),
+                reason: format!("accepted {accepted} exceeds batch size {sent}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// SSH legacy pull（typed）。
+    ///
+    /// Business Logic: 引擎 legacy 路径区分空成功与传输失败。
+    /// Code Logic: POST `/api/ssh-target/sync/pull`，失败上抛。
+    pub async fn ssh_target_pull_result(
+        &self,
+        base_url: &str,
+        local_summary: Vec<serde_json::Value>,
+    ) -> Result<Vec<crate::models::ssh_target::SshTargetRow>, PeerCallError> {
+        let url = format!("{base_url}/api/ssh-target/sync/pull");
+        let body = serde_json::json!({ "summaries": local_summary });
+        let data: SshTargetPullResp = self.request_post(&url, &body).await?;
+        Ok(data.targets)
+    }
+
+    /// SSH legacy push（typed）。
+    ///
+    /// Business Logic: push 失败不得假成功。
+    /// Code Logic: POST `/api/ssh-target/sync/push`，2xx → Ok(true)。
+    pub async fn ssh_target_push_result(
+        &self,
+        base_url: &str,
+        targets: &[crate::models::ssh_target::SshTargetRow],
+    ) -> Result<bool, PeerCallError> {
+        let url = format!("{base_url}/api/ssh-target/sync/push");
+        let body = serde_json::json!({ "targets": targets });
+        let _data: SshTargetPushResp = self.request_post(&url, &body).await?;
+        Ok(true)
+    }
+
+    /// Scratchpad legacy pull（typed）。
+    ///
+    /// Business Logic: 引擎 legacy 路径区分空成功与传输失败。
+    /// Code Logic: POST `/api/scratchpad/sync/pull`，失败上抛。
+    pub async fn scratchpad_pull_result(
+        &self,
+        base_url: &str,
+        summaries: Vec<serde_json::Value>,
+    ) -> Result<Vec<crate::models::scratchpad::ScratchpadRow>, PeerCallError> {
+        let url = format!("{base_url}/api/scratchpad/sync/pull");
+        let body = serde_json::json!({ "summaries": summaries });
+        let data: ScratchpadPullResp = self.request_post(&url, &body).await?;
+        Ok(data.pages)
+    }
+
+    /// Scratchpad legacy push（typed）。
+    ///
+    /// Business Logic: push 失败不得假成功。
+    /// Code Logic: POST `/api/scratchpad/sync/push`，2xx → Ok(true)。
+    pub async fn scratchpad_push_result(
+        &self,
+        base_url: &str,
+        pages: &[crate::models::scratchpad::ScratchpadRow],
+    ) -> Result<bool, PeerCallError> {
+        let url = format!("{base_url}/api/scratchpad/sync/push");
+        let body = serde_json::json!({ "pages": pages });
+        let _data: ScratchpadPushResp = self.request_post(&url, &body).await?;
+        Ok(true)
+    }
+
+    /// Prompt v2：拉一页对端 manifest 摘要。
+    ///
+    /// Business Logic: 引擎流式拉完全部页后才能与本地完整 manifest 比较；失败不得空页伪装。
+    /// Code Logic: POST `/api/sync/prompts/manifest-page`，返回 `SyncManifestPage` 或 `PeerCallError`。
+    pub async fn list_prompt_manifest_page(
+        &self,
+        base_url: &str,
+        cursor: Option<&str>,
+    ) -> Result<crate::sync::protocol::SyncManifestPage<String>, PeerCallError> {
+        let url = format!("{base_url}/api/sync/prompts/manifest-page");
+        let body = serde_json::json!({ "cursor": cursor, "limit": null });
+        match self
+            .request_post::<crate::sync::protocol::SyncManifestPage<String>, _>(&url, &body)
+            .await
+        {
+            Ok(data) => Ok(data),
+            Err(e) => {
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "list_prompt_manifest_page",
+                    crate::backend::logging::OperationResult::Error,
+                )
+                .level(tracing::Level::WARN)
+                .error_code(e.code().unwrap_or("unavailable"))
+                .message(format!("list_prompt_manifest_page 失败: {e}"))
+                .emit();
+                Err(e)
+            }
+        }
+    }
+
+    /// Prompt v2：按 id 批取正文。
+    ///
+    /// Business Logic: 比较摘要后只拉需要的正文；错误上抛。
+    /// Code Logic: POST `/api/sync/prompts/items`。
+    pub async fn fetch_prompt_items(
+        &self,
+        base_url: &str,
+        ids: &[String],
+    ) -> Result<crate::net::routes::sync::PromptItemsResp, PeerCallError> {
+        let url = format!("{base_url}/api/sync/prompts/items");
+        let body = serde_json::json!({ "ids": ids });
+        self.request_post(&url, &body).await
+    }
+
+    /// Prompt v2：批量 push 正文。
+    ///
+    /// Business Logic: 有界 batch + client_request_id + claimed_device_id（ledger 命名空间，非认证）；
+    ///     仅在完整 manifest + 成功 apply 后可在末批携带 `acked_delete_epoch` 推进对端水位。
+    ///     无正文可推时不得发空 push；改走 `ack_prompt_delete_epoch`。
+    /// Code Logic: POST `/api/sync/prompts/push-batch`；`acked_delete_epoch=None` 序列化为 null。
+    pub async fn push_prompt_batch(
+        &self,
+        base_url: &str,
+        items: &[crate::models::prompt::PromptRow],
+        client_request_id: &str,
+        claimed_device_id: &str,
+        acked_delete_epoch: Option<u64>,
+    ) -> Result<crate::net::routes::sync::PromptPushBatchResp, PeerCallError> {
+        let url = format!("{base_url}/api/sync/prompts/push-batch");
+        let body = serde_json::json!({
+            "items": items,
+            "client_request_id": client_request_id,
+            "claimed_device_id": claimed_device_id,
+            "acked_delete_epoch": acked_delete_epoch,
+        });
+        let data: crate::net::routes::sync::PromptPushBatchResp =
+            self.request_post(&url, &body).await?;
+        Self::ensure_accepted_not_exceeds(&url, data.accepted, items.len())?;
+        Ok(data)
+    }
+
+    /// Prompt v2：仅推进对端 delete-epoch watermark（无正文、无 ledger）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     exact equality 或本轮无正文可推时，仍需把本端已完整看到的远端删除水位回传对端；
+    ///     禁止空 push-batch，避免 ledger 污染与零正文语义破坏。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/sync/prompts/ack-delete-epoch` body
+    ///     `{claimed_device_id,acked_delete_epoch}`；成功 JSON（含 `{ok:true}`）即返回 Ok。
+    pub async fn ack_prompt_delete_epoch(
+        &self,
+        base_url: &str,
+        claimed_device_id: &str,
+        acked_delete_epoch: u64,
+    ) -> Result<(), PeerCallError> {
+        let url = format!("{base_url}/api/sync/prompts/ack-delete-epoch");
+        let body = serde_json::json!({
+            "claimed_device_id": claimed_device_id,
+            "acked_delete_epoch": acked_delete_epoch,
+        });
+        let _: serde_json::Value = self.request_post(&url, &body).await?;
+        Ok(())
+    }
+
+    /// SSH v2：拉一页对端 manifest 摘要（id=host）。
+    ///
+    /// Business Logic: 与 Prompt 同构的 typed 分页；失败不得空页。
+    /// Code Logic: POST `/api/ssh-target/sync/manifest-page`。
+    pub async fn list_ssh_manifest_page(
+        &self,
+        base_url: &str,
+        cursor: Option<&str>,
+    ) -> Result<crate::sync::protocol::SyncManifestPage<String>, PeerCallError> {
+        let url = format!("{base_url}/api/ssh-target/sync/manifest-page");
+        let body = serde_json::json!({ "cursor": cursor, "limit": null });
+        self.request_post(&url, &body).await
+    }
+
+    /// SSH v2：按 host 批取正文。
+    ///
+    /// Business Logic: 只拉需要的目标配置；错误上抛。
+    /// Code Logic: POST `/api/ssh-target/sync/items`。
+    pub async fn fetch_ssh_items(
+        &self,
+        base_url: &str,
+        ids: &[String],
+    ) -> Result<crate::net::routes::ssh_target_sync::SshItemsResp, PeerCallError> {
+        let url = format!("{base_url}/api/ssh-target/sync/items");
+        let body = serde_json::json!({ "ids": ids });
+        self.request_post(&url, &body).await
+    }
+
+    /// SSH v2：批量 push。
+    ///
+    /// Business Logic: accepted 不得大于本批条数；末批可带 acked_delete_epoch 推进水位。
+    ///     无正文可推时不得发空 push；改走 `ack_ssh_delete_epoch`。
+    /// Code Logic: POST `/api/ssh-target/sync/push-batch`；携带 claimed_device_id。
+    pub async fn push_ssh_batch(
+        &self,
+        base_url: &str,
+        items: &[crate::models::ssh_target::SshTargetRow],
+        client_request_id: &str,
+        claimed_device_id: &str,
+        acked_delete_epoch: Option<u64>,
+    ) -> Result<crate::net::routes::ssh_target_sync::SshPushBatchResp, PeerCallError> {
+        let url = format!("{base_url}/api/ssh-target/sync/push-batch");
+        let body = serde_json::json!({
+            "items": items,
+            "client_request_id": client_request_id,
+            "claimed_device_id": claimed_device_id,
+            "acked_delete_epoch": acked_delete_epoch,
+        });
+        let data: crate::net::routes::ssh_target_sync::SshPushBatchResp =
+            self.request_post(&url, &body).await?;
+        Self::ensure_accepted_not_exceeds(&url, data.accepted, items.len())?;
+        Ok(data)
+    }
+
+    /// SSH v2：仅推进对端 delete-epoch watermark（无正文、无 ledger）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     exact equality 或本轮无正文可推时，仍需回传删除水位；禁止空 push-batch。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/ssh-target/sync/ack-delete-epoch` body
+    ///     `{claimed_device_id,acked_delete_epoch}`；成功 JSON 即 Ok。
+    pub async fn ack_ssh_delete_epoch(
+        &self,
+        base_url: &str,
+        claimed_device_id: &str,
+        acked_delete_epoch: u64,
+    ) -> Result<(), PeerCallError> {
+        let url = format!("{base_url}/api/ssh-target/sync/ack-delete-epoch");
+        let body = serde_json::json!({
+            "claimed_device_id": claimed_device_id,
+            "acked_delete_epoch": acked_delete_epoch,
+        });
+        let _: serde_json::Value = self.request_post(&url, &body).await?;
+        Ok(())
+    }
+
+    /// Scratchpad v2：拉一页对端 manifest 摘要。
+    ///
+    /// Business Logic: typed 分页，失败不得空页。
+    /// Code Logic: POST `/api/scratchpad/sync/manifest-page`。
+    pub async fn list_scratchpad_manifest_page(
+        &self,
+        base_url: &str,
+        cursor: Option<&str>,
+    ) -> Result<crate::sync::protocol::SyncManifestPage<String>, PeerCallError> {
+        let url = format!("{base_url}/api/scratchpad/sync/manifest-page");
+        let body = serde_json::json!({ "cursor": cursor, "limit": null });
+        self.request_post(&url, &body).await
+    }
+
+    /// Scratchpad v2：按 id 批取正文。
+    ///
+    /// Business Logic: 只拉需要的页面；错误上抛。
+    /// Code Logic: POST `/api/scratchpad/sync/items`。
+    pub async fn fetch_scratchpad_items(
+        &self,
+        base_url: &str,
+        ids: &[String],
+    ) -> Result<crate::net::routes::scratchpad_sync::ScratchpadItemsResp, PeerCallError> {
+        let url = format!("{base_url}/api/scratchpad/sync/items");
+        let body = serde_json::json!({ "ids": ids });
+        self.request_post(&url, &body).await
+    }
+
+    /// Scratchpad v2：批量 push。
+    ///
+    /// Business Logic: accepted 不得大于本批条数；末批可带 acked_delete_epoch 推进水位。
+    ///     无正文可推时不得发空 push；改走 `ack_scratchpad_delete_epoch`。
+    /// Code Logic: POST `/api/scratchpad/sync/push-batch`；携带 claimed_device_id。
+    pub async fn push_scratchpad_batch(
+        &self,
+        base_url: &str,
+        items: &[crate::models::scratchpad::ScratchpadRow],
+        client_request_id: &str,
+        claimed_device_id: &str,
+        acked_delete_epoch: Option<u64>,
+    ) -> Result<crate::net::routes::scratchpad_sync::ScratchpadPushBatchResp, PeerCallError> {
+        let url = format!("{base_url}/api/scratchpad/sync/push-batch");
+        let body = serde_json::json!({
+            "items": items,
+            "client_request_id": client_request_id,
+            "claimed_device_id": claimed_device_id,
+            "acked_delete_epoch": acked_delete_epoch,
+        });
+        let data: crate::net::routes::scratchpad_sync::ScratchpadPushBatchResp =
+            self.request_post(&url, &body).await?;
+        Self::ensure_accepted_not_exceeds(&url, data.accepted, items.len())?;
+        Ok(data)
+    }
+
+    /// Scratchpad v2：仅推进对端 delete-epoch watermark（无正文、无 ledger）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     exact equality 或本轮无正文可推时，仍需回传删除水位；禁止空 push-batch。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/scratchpad/sync/ack-delete-epoch` body
+    ///     `{claimed_device_id,acked_delete_epoch}`；成功 JSON 即 Ok。
+    pub async fn ack_scratchpad_delete_epoch(
+        &self,
+        base_url: &str,
+        claimed_device_id: &str,
+        acked_delete_epoch: u64,
+    ) -> Result<(), PeerCallError> {
+        let url = format!("{base_url}/api/scratchpad/sync/ack-delete-epoch");
+        let body = serde_json::json!({
+            "claimed_device_id": claimed_device_id,
+            "acked_delete_epoch": acked_delete_epoch,
+        });
+        let _: serde_json::Value = self.request_post(&url, &body).await?;
+        Ok(())
+    }
 }
 
 impl Default for PeerClient {
@@ -1867,6 +2220,155 @@ mod tests {
         assert!(
             err.contains("unavailable"),
             "transfer_init 失败文案应含 code: {err}"
+        );
+    }
+
+    // ===== N2 Task 2: typed content-sync transport truth =====
+
+    /// 启动可按路径返回固定 body/status 的假 peer，返回 base_url。
+    async fn spawn_fixed_body_peer(
+        path: &'static str,
+        status: axum::http::StatusCode,
+        body: &'static [u8],
+        content_type: &'static str,
+    ) -> String {
+        let body = body.to_vec();
+        let app = axum::Router::new().route(
+            path,
+            axum::routing::post(move || {
+                let body = body.clone();
+                async move {
+                    (
+                        status,
+                        [(axum::http::header::CONTENT_TYPE, content_type)],
+                        body,
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// Business Logic: 200 + 非 JSON 不得折叠为空 manifest（旧 bug）。
+    /// Code Logic: list_prompt_manifest_page → InvalidResponse。
+    #[tokio::test]
+    async fn invalid_json_is_failure_not_empty_remote() {
+        let base = spawn_fixed_body_peer(
+            "/api/sync/prompts/manifest-page",
+            axum::http::StatusCode::OK,
+            b"not-json",
+            "text/plain",
+        )
+        .await;
+        let client = PeerClient::new();
+        let result = client.list_prompt_manifest_page(&base, None).await;
+        assert!(
+            matches!(result, Err(PeerCallError::InvalidResponse { .. })),
+            "expected InvalidResponse, got {result:?}"
+        );
+    }
+
+    /// Business Logic: 500 信封必须是 Remote，不得空成功。
+    /// Code Logic: list_prompt_manifest_page 解析 v1 信封。
+    #[tokio::test]
+    async fn remote_500_envelope_is_remote_not_empty() {
+        let body = br#"{"error":"boom","code":"internal","request_id":"r1","retryable":false}"#;
+        let base = spawn_fixed_body_peer(
+            "/api/sync/prompts/manifest-page",
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            body,
+            "application/json",
+        )
+        .await;
+        let client = PeerClient::new();
+        let err = client
+            .list_prompt_manifest_page(&base, None)
+            .await
+            .expect_err("500 must fail");
+        match err {
+            PeerCallError::Remote { status, code, .. } => {
+                assert_eq!(status, 500);
+                assert_eq!(code, "internal");
+            }
+            other => panic!("expected Remote, got {other:?}"),
+        }
+    }
+
+    /// Business Logic: 连接断开是 Network，不得空页。
+    /// Code Logic: 绑定后立即 drop listener。
+    #[tokio::test]
+    async fn disconnect_is_network_failure() {
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let base = format!("http://{addr}");
+        let client = PeerClient::new();
+        let err = client
+            .list_prompt_manifest_page(&base, None)
+            .await
+            .expect_err("disconnect must fail");
+        assert!(
+            matches!(err, PeerCallError::Network { .. }),
+            "expected Network, got {err:?}"
+        );
+    }
+
+    /// Business Logic: 413 batch_too_large 必须 Remote 且可按 code 分支。
+    /// Code Logic: push_prompt_batch 收到 413 信封。
+    #[tokio::test]
+    async fn payload_too_large_413_is_remote() {
+        let body = br#"{"error":"too big","code":"prompts.batch_too_large","request_id":"r2","retryable":false}"#;
+        let base = spawn_fixed_body_peer(
+            "/api/sync/prompts/push-batch",
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            body,
+            "application/json",
+        )
+        .await;
+        let client = PeerClient::new();
+        let err = client
+            .push_prompt_batch(&base, &[], "req-413", "test-device", None)
+            .await
+            .expect_err("413 must fail");
+        match err {
+            PeerCallError::Remote { status, code, .. } => {
+                assert_eq!(status, 413);
+                assert_eq!(code, "prompts.batch_too_large");
+            }
+            other => panic!("expected Remote, got {other:?}"),
+        }
+    }
+
+    /// Business Logic: accepted 大于本批条数是协议损坏。
+    /// Code Logic: ensure_accepted_not_exceeds → InvalidResponse。
+    #[tokio::test]
+    async fn accepted_count_mismatch_is_invalid_response() {
+        let body = br#"{"accepted": 3}"#;
+        let base = spawn_fixed_body_peer(
+            "/api/sync/prompts/push-batch",
+            axum::http::StatusCode::OK,
+            body,
+            "application/json",
+        )
+        .await;
+        let client = PeerClient::new();
+        // 发送 0 条，对端却 accepted=3
+        let err = client
+            .push_prompt_batch(&base, &[], "req-mismatch", "test-device", None)
+            .await
+            .expect_err("accepted mismatch must fail");
+        assert!(
+            matches!(err, PeerCallError::InvalidResponse { .. }),
+            "expected InvalidResponse, got {err:?}"
         );
     }
 

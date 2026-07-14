@@ -4,13 +4,16 @@
 //!     用户为项目或 worktree 选择过 dev server 后，下次打开浏览器预览应优先使用同一目标。
 //!
 //! Code Logic（这个模块做什么）:
-//!     封装 `workbench_browser_targets` 表读写；使用运行期 sqlx::query，不使用 sqlx 宏。
+//!     封装 `workbench_browser_targets` 表读写；写路径经 `with_shared_write_lease`；
+//!     使用运行期 sqlx::query，不使用 sqlx 宏。
 
 #![allow(dead_code)]
 
 use crate::error::AppError;
+use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use sqlx::Row;
 use sqlx::SqlitePool;
+use std::sync::Arc;
 
 /// Workbench browser target 仓库。
 ///
@@ -18,22 +21,32 @@ use sqlx::SqlitePool;
 ///     浏览器预览发现逻辑需要读取和保存项目/worktree 最近一次成功使用的目标 URL。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有 SQLite pool，后续方法通过运行期 sqlx query 访问 `workbench_browser_targets`。
+///     持有 SQLite pool + maintenance gate，后续方法通过运行期 sqlx query 访问 `workbench_browser_targets`。
 #[derive(Clone)]
 pub struct WorkbenchBrowserRepo {
     pool: SqlitePool,
+    /// 维护屏障：写路径持 shared lease，restore exclusive 时阻塞。
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl WorkbenchBrowserRepo {
-    /// 创建 Workbench browser target 仓库。
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     用户为某个项目/worktree 选择过 dev server 后，下次打开预览应优先使用同一目标。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     保存 SQLite pool，后续方法通过运行期 sqlx query 读写 `workbench_browser_targets`。
+    ///     内部 `with_gate(pool, Arc::new(DatabaseMaintenanceGate::new()))`。
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self::with_gate(pool, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: 全部 ordinary writer 与 restore 共用同一 gate。
+    /// Code Logic: 保存 pool + Arc gate。
+    pub fn with_gate(pool: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { pool, gate }
     }
 
     /// 读取项目/worktree 最近一次预览目标。
@@ -66,26 +79,29 @@ impl WorkbenchBrowserRepo {
     ///     用户创建预览后，后续自动发现应把该目标作为可信候选。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     使用 project_id + coalesced worktree_id 唯一键 upsert，并刷新 updated_at。
+    ///     持 shared write lease 后用 project_id + coalesced worktree_id 唯一键 upsert。
     pub async fn upsert_target(
         &self,
         project_id: &str,
         worktree_id: Option<&str>,
         target_url: &str,
     ) -> Result<(), AppError> {
-        sqlx::query(
-            "INSERT INTO workbench_browser_targets
-             (project_id, worktree_id, target_url, updated_at)
-             VALUES (?1, ?2, ?3, strftime('%s','now'))
-             ON CONFLICT(project_id, worktree_key)
-             DO UPDATE SET target_url = excluded.target_url, updated_at = excluded.updated_at",
-        )
-        .bind(project_id)
-        .bind(worktree_id)
-        .bind(target_url)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO workbench_browser_targets
+                 (project_id, worktree_id, target_url, updated_at)
+                 VALUES (?1, ?2, ?3, strftime('%s','now'))
+                 ON CONFLICT(project_id, worktree_key)
+                 DO UPDATE SET target_url = excluded.target_url, updated_at = excluded.updated_at",
+            )
+            .bind(project_id)
+            .bind(worktree_id)
+            .bind(target_url)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
     }
 }
 

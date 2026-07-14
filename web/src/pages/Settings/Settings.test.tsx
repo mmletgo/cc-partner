@@ -128,6 +128,121 @@ vi.mock('@/api/githubTrending', () => ({
   },
 }));
 
+const {
+  triggerLanSync,
+  createBackup,
+  inspectBackup,
+  restoreBackup,
+  listJobs,
+  rollbackJob,
+  pickExport,
+  pickArchive,
+} = vi.hoisted(() => ({
+  triggerLanSync: vi.fn(async () => ({
+    accepted: true,
+    succeeded_devices: 0,
+    synced: 0,
+    note: 'partial',
+    devices: [
+      {
+        device_id: 'peer-1',
+        device_name: 'Peer One',
+        status: 'partial',
+        domains: [
+          {
+            domain: 'prompt',
+            outcome: { kind: 'succeeded', pulled: 1, pushed: 0, unchanged: 0 },
+          },
+          {
+            domain: 'ssh_target',
+            outcome: { kind: 'succeeded', pulled: 0, pushed: 0, unchanged: 1 },
+          },
+          {
+            domain: 'scratchpad',
+            outcome: { kind: 'unreachable', class: 'network' },
+          },
+        ],
+      },
+      {
+        device_id: 'peer-2',
+        device_name: 'Peer Two',
+        status: 'unreachable',
+        domains: [
+          {
+            domain: 'prompt',
+            outcome: { kind: 'unreachable', class: 'timeout' },
+          },
+          {
+            domain: 'ssh_target',
+            outcome: { kind: 'unreachable', class: 'timeout' },
+          },
+          {
+            domain: 'scratchpad',
+            outcome: { kind: 'unreachable', class: 'timeout' },
+          },
+        ],
+      },
+    ],
+  })),
+  createBackup: vi.fn(async () => ({ path: '/tmp/export.zip', formatVersion: 1 })),
+  inspectBackup: vi.fn(async () => ({
+    formatVersion: 1,
+    domainCounts: { prompts: 2, scratchpad: 1 },
+    warnings: [],
+    conflictsEstimate: 0,
+  })),
+  restoreBackup: vi.fn(async () => ({
+    jobId: 'job-1',
+    status: 'succeeded',
+    appliedDomains: ['prompts'],
+    preRestoreBackupPath: '/tmp/pre.zip',
+    errorSummary: null,
+  })),
+  listJobs: vi.fn(async () => [] as Array<{
+    id: string;
+    status: string;
+    archivePath?: string | null;
+    preRestoreBackupPath?: string | null;
+    selectedDomainsJson: string;
+    mode: string;
+    errorSummary?: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }>),
+  rollbackJob: vi.fn(async () => ({
+    jobId: 'job-1',
+    status: 'succeeded',
+    appliedDomains: ['prompts'],
+  })),
+  pickExport: vi.fn(async () => '/tmp/export.zip'),
+  pickArchive: vi.fn(async () => '/tmp/restore.zip'),
+}));
+
+vi.mock('@/api/sync', async () => {
+  const actual = await vi.importActual<typeof import('@/api/sync')>('@/api/sync');
+  return {
+    ...actual,
+    syncApi: {
+      trigger: () => triggerLanSync(),
+    },
+    backupApi: {
+      create: ((...args: Parameters<typeof createBackup>) =>
+        createBackup(...args)) as typeof createBackup,
+      inspect: ((...args: Parameters<typeof inspectBackup>) =>
+        inspectBackup(...args)) as typeof inspectBackup,
+      restore: ((...args: Parameters<typeof restoreBackup>) =>
+        restoreBackup(...args)) as typeof restoreBackup,
+      listJobs: ((...args: Parameters<typeof listJobs>) =>
+        listJobs(...args)) as typeof listJobs,
+      listBackups: vi.fn(async () => []),
+      rollback: ((...args: Parameters<typeof rollbackJob>) =>
+        rollbackJob(...args)) as typeof rollbackJob,
+    },
+    pickBackupExportPath: () => pickExport(),
+    pickBackupArchivePath: () => pickArchive(),
+  };
+});
+
 vi.mock('@/api/health', () => ({
   healthApi: {
     getConfig: () => getHealthConfig(),
@@ -382,5 +497,77 @@ describe('Settings partial resource loading', () => {
     expect(findForbiddenDiagnosticsKeys(written)).toEqual([]);
     expect(written).toContain('ownerInstanceId');
     expect(written).not.toMatch(/token|content|prompt|password/i);
+  });
+
+
+  test('partial and unreachable never display as success on sync tab', async () => {
+    searchParamsState.value = new URLSearchParams('tab=sync');
+    renderSettings();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('lan-sync-now')).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByTestId('lan-sync-now'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('lan-sync-result')).toBeTruthy();
+    });
+
+    const partialDevice = screen.getByTestId('lan-sync-device-peer-1');
+    const unreachableDevice = screen.getByTestId('lan-sync-device-peer-2');
+    expect(partialDevice.getAttribute('data-status')).toBe('partial');
+    expect(unreachableDevice.getAttribute('data-status')).toBe('unreachable');
+
+    // status pill text must not be the success label for partial/unreachable
+    const partialStatus = screen.getByTestId('lan-sync-device-status-peer-1');
+    const unreachableStatus = screen.getByTestId('lan-sync-device-status-peer-2');
+    expect(partialStatus.textContent).not.toMatch(/deviceStatus\.succeeded/);
+    expect(unreachableStatus.textContent).not.toMatch(/deviceStatus\.succeeded/);
+    expect(partialStatus.textContent).toMatch(/partial/);
+    expect(unreachableStatus.textContent).toMatch(/unreachable/);
+
+    const scratch = screen.getByTestId('lan-sync-domain-peer-1-scratchpad');
+    expect(scratch.getAttribute('data-kind')).toBe('unreachable');
+  });
+
+  test('backup export calls create with picked path and shows success', async () => {
+    searchParamsState.value = new URLSearchParams('tab=sync');
+    renderSettings();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('backup-export')).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByTestId('backup-export'));
+
+    await waitFor(() => {
+      expect(pickExport).toHaveBeenCalled();
+      expect(createBackup).toHaveBeenCalledWith('/tmp/export.zip');
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('backup-export-success')).toBeTruthy();
+    });
+  });
+
+  test('backup restore pick inspects archive and shows domain checkboxes', async () => {
+    searchParamsState.value = new URLSearchParams('tab=sync');
+    renderSettings();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('backup-restore-pick')).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByTestId('backup-restore-pick'));
+
+    await waitFor(() => {
+      expect(pickArchive).toHaveBeenCalled();
+      expect(inspectBackup).toHaveBeenCalledWith('/tmp/restore.zip');
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('backup-inspect-preview')).toBeTruthy();
+      expect(screen.getByTestId('backup-domain-prompts')).toBeTruthy();
+      expect(screen.getByTestId('backup-restore-confirm')).toBeTruthy();
+    });
   });
 });

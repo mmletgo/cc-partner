@@ -256,3 +256,76 @@ CREATE TABLE IF NOT EXISTS orchestrator_remote_task_create_requests (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- sync_request_ledger 表：Prompt/SSH/Scratchpad v2 push-batch 幂等 outcome ledger
+-- 键 UNIQUE(claimed_device_id, domain, client_request_id)；claimed_device_id 仅为收敛标签，非认证。
+-- 同 key/同 payload_hash 返回原 outcome 且不重复 apply；同 key/不同 hash 返回 conflict。
+-- 实际建表由 backend/runtime.rs::init_db → SyncRequestLedgerRepo::ensure_schema 执行。
+CREATE TABLE IF NOT EXISTS sync_request_ledger (
+    claimed_device_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    client_request_id TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    outcome_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(claimed_device_id, domain, client_request_id)
+);
+
+-- content_versions 表：并发 LWW 的 conflict 副本与有限历史（N2）
+-- 实际建表：ContentVersionRepo::ensure_schema
+CREATE TABLE IF NOT EXISTS content_versions (
+    id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    source_device TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    UNIQUE(domain, item_id, source_device, content_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_content_versions_item ON content_versions(domain, item_id, created_at);
+
+-- sync_peer_watermarks：peer/domain 已确认的 delete epoch 与 last_seen（N2 GC）
+-- 实际建表：SyncWatermarkRepo::ensure_schema
+CREATE TABLE IF NOT EXISTS sync_peer_watermarks (
+    peer_device_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    acked_delete_epoch INTEGER NOT NULL DEFAULT 0,
+    last_seen_at TEXT NOT NULL,
+    PRIMARY KEY (peer_device_id, domain)
+);
+
+-- sync_domain_delete_sequences：每 domain 单调 deleteEpoch 序列（N2）
+-- 实际建表：SyncDeleteSequenceRepo::ensure_schema
+CREATE TABLE IF NOT EXISTS sync_domain_delete_sequences (
+    domain TEXT PRIMARY KEY,
+    next_epoch INTEGER NOT NULL DEFAULT 1
+);
+
+-- sync_deletion_floors：tombstone 压缩后的 durable deletion floor（N2）
+-- 实际建表：DeletionFloorRepo::ensure_schema
+CREATE TABLE IF NOT EXISTS sync_deletion_floors (
+    domain TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    delete_vector_clock TEXT NOT NULL,
+    delete_epoch INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (domain, item_id)
+);
+
+-- recovery_jobs：备份恢复状态机（N2 Task6）
+-- 实际建表：RecoveryJobRepo::ensure_schema（runtime 幂等；非 sqlx::migrate!）
+CREATE TABLE IF NOT EXISTS recovery_jobs (
+    id TEXT PRIMARY KEY NOT NULL,
+    status TEXT NOT NULL,
+    archive_path TEXT,
+    pre_restore_backup_path TEXT,
+    selected_domains_json TEXT NOT NULL DEFAULT '[]',
+    mode TEXT NOT NULL DEFAULT 'merge',
+    error_summary TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_recovery_jobs_updated ON recovery_jobs(updated_at DESC);
