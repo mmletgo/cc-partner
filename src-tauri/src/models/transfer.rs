@@ -66,6 +66,8 @@ pub struct SourceFingerprint {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     same clientOperationId 必须绑定固定语义：kind + logical identity + peer + 预期 protocol id。
+///     **Retry 不得把每次调用新 mint 的随机 protocol id 折进 hash**，否则并发/超时重放会 Conflict。
+///     Retry 调用方应对 protocol 传入空串（占位）；Resume 传入稳定父 protocol id。
 ///
 /// Code Logic（这个函数做什么）:
 ///     固定 key 顺序的 JSON 字节做 SHA256 hex（不含 clientOperationId 本身）。
@@ -266,7 +268,9 @@ impl TransferPhase {
     ///     `parse_optional` 成功用自身；否则 `from_status(status)`。
     pub fn resolve(stored: Option<&str>, status: TransferStatus) -> Self {
         match stored {
-            Some(s) if !s.is_empty() => Self::parse_optional(s).unwrap_or_else(|| Self::from_status(status)),
+            Some(s) if !s.is_empty() => {
+                Self::parse_optional(s).unwrap_or_else(|| Self::from_status(status))
+            }
             _ => Self::from_status(status),
         }
     }
@@ -387,7 +391,11 @@ pub struct TransferFailure {
 ///     内部 tag `status` + camelCase：`{status,taskId?|code?}`。
 ///     OperationIdConflict 在 claim 边界返回，查询侧通常不需要。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum TransferOperationStatus {
     /// ledger 无此 clientOperationId
     NotFound,
@@ -768,15 +776,9 @@ mod tests {
         assert_eq!(v["status"], "succeeded");
         assert_eq!(v["taskId"], "t1");
         let p = TransferOperationStatus::Pending;
-        assert_eq!(
-            serde_json::to_value(&p).unwrap()["status"],
-            "pending"
-        );
+        assert_eq!(serde_json::to_value(&p).unwrap()["status"], "pending");
         let n = TransferOperationStatus::NotFound;
-        assert_eq!(
-            serde_json::to_value(&n).unwrap()["status"],
-            "notFound"
-        );
+        assert_eq!(serde_json::to_value(&n).unwrap()["status"], "notFound");
         let f = TransferOperationStatus::Failed {
             code: "finalize_rejected".into(),
         };

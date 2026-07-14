@@ -22,7 +22,7 @@ import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
 import { Button, Card, Pill } from '@/components/primitives';
 import { TransferItem } from '@/components/domain';
-import { devicesApi } from '@/api/devices';
+import { deviceSupportsTransferResume, devicesApi } from '@/api/devices';
 import { transferApi } from '@/api/transfer';
 import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import { classifyTransportFault, planFaultRecovery } from '@/lib/faultRecovery';
@@ -677,8 +677,12 @@ export function Transfer() {
     (task: TransferTask) => {
       const reconciling = reconcilingIds.has(task.id);
       const canCancel = task.status === 'pending' || task.status === 'transferring';
-      const canResume = !reconciling && isTransferResumable(task);
-      const canRetry = !reconciling && isTransferRetryable(task);
+      const peer = task.peerDeviceId
+        ? devices.find((d) => d.id === task.peerDeviceId)
+        : undefined;
+      const peerSupportsResume = deviceSupportsTransferResume(peer);
+      const canResume = !reconciling && isTransferResumable(task, peerSupportsResume);
+      const canRetry = !reconciling && isTransferRetryable(task, peerSupportsResume);
       const canOpenReveal = !reconciling && canOpenRevealTransfer(task);
       const actionError = taskActionErrors[task.id];
       return (
@@ -714,6 +718,7 @@ export function Transfer() {
     },
     [
       cancellingIds,
+      devices,
       handleCancelTask,
       handleOpenTask,
       handleRecovery,

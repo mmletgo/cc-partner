@@ -42,12 +42,18 @@ export function classifyTransferGroup(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   失败且仍有已确认字节/进度时优先续传，而不是全量重传。
+ *   失败且仍有已确认字节/进度时优先续传，而不是全量重传；
+ *   旧 peer 无 transfer.resume.v1 时必须回退「重新传输」，不得显示假续传。
  *
  * Code Logic（这个函数做什么）:
- *   仅 Send + failed + retryable（默认 true）且 transferredBytes>0 或 0<progress<1。
+ *   仅 Send + failed + retryable（默认 true）且 transferredBytes>0 或 0<progress<1，
+ *   且 `peerSupportsResume === true`（缺省 false，fail-closed）。
  */
-export function isTransferResumable(task: TransferTask): boolean {
+export function isTransferResumable(
+  task: TransferTask,
+  peerSupportsResume: boolean = false,
+): boolean {
+  if (!peerSupportsResume) return false;
   if (task.direction !== 'send') return false;
   if (task.status !== 'failed') return false;
   if (task.failure && !task.failure.retryable) return false;
@@ -58,17 +64,21 @@ export function isTransferResumable(task: TransferTask): boolean {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   无 resume metadata 的失败，或 cancelled，允许用户显式重新传输。
+ *   无 resume metadata 的失败、旧 peer 无 resume 能力、或 cancelled，允许用户显式重新传输。
  *
  * Code Logic（这个函数做什么）:
  *   Send 方向：failed 且 retryable 且非 resumable → true；cancelled → true。
+ *   `peerSupportsResume` 透传给 isTransferResumable。
  */
-export function isTransferRetryable(task: TransferTask): boolean {
+export function isTransferRetryable(
+  task: TransferTask,
+  peerSupportsResume: boolean = false,
+): boolean {
   if (task.direction !== 'send') return false;
   if (task.status === 'cancelled') return true;
   if (task.status !== 'failed') return false;
   if (task.failure && !task.failure.retryable) return false;
-  return !isTransferResumable(task);
+  return !isTransferResumable(task, peerSupportsResume);
 }
 
 /**

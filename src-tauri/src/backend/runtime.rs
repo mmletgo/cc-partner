@@ -615,11 +615,15 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
             {
                 let transfer_state = state.clone();
                 tauri::async_runtime::spawn(async move {
-                    match crate::transfer::sender::recover_pending_claimed_operations(&transfer_state)
-                        .await
+                    match crate::transfer::sender::recover_pending_claimed_operations(
+                        &transfer_state,
+                    )
+                    .await
                     {
                         Ok(n) if n > 0 => {
-                            tracing::info!("已恢复 {n} 个 transfer insert-before-spawn Queued 任务");
+                            tracing::info!(
+                                "已恢复 {n} 个 transfer insert-before-spawn Queued 任务"
+                            );
                         }
                         Ok(_) => {}
                         Err(e) => {

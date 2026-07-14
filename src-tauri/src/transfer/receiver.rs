@@ -225,8 +225,8 @@ pub async fn handle_init(state: &AppState, meta: InitMeta) -> Result<InitResp, A
         transferred_bytes: resume_offset,
         created_at: now_iso(),
         completed_at: None,
-            ..TransferTask::recovery_defaults(&transfer_id)
-        };
+        ..TransferTask::recovery_defaults(&transfer_id)
+    };
     state.transfers.add(task);
 
     tracing::info!(
@@ -4847,7 +4847,9 @@ mod tests {
         .execute(&state.db)
         .await
         .expect("recreate history");
-        TransferRepo::ensure_schema(&state.db).await.expect("ensure recovery schema");
+        TransferRepo::ensure_schema(&state.db)
+            .await
+            .expect("ensure recovery schema");
 
         let retry = handle_complete(&state, &transfer_id)
             .await
@@ -4949,7 +4951,9 @@ mod tests {
         .execute(&state.db)
         .await
         .expect("recreate history");
-        TransferRepo::ensure_schema(&state.db).await.expect("ensure recovery schema");
+        TransferRepo::ensure_schema(&state.db)
+            .await
+            .expect("ensure recovery schema");
 
         let init_err = handle_init(
             &state,
@@ -5085,7 +5089,9 @@ mod tests {
         .execute(&state.db)
         .await
         .expect("recreate history");
-        TransferRepo::ensure_schema(&state.db).await.expect("ensure recovery schema");
+        TransferRepo::ensure_schema(&state.db)
+            .await
+            .expect("ensure recovery schema");
 
         let init_err = handle_init(
             &state,
@@ -5735,7 +5741,9 @@ mod tests {
         .execute(&state.db)
         .await
         .expect("recreate history");
-        TransferRepo::ensure_schema(&state.db).await.expect("ensure recovery schema");
+        TransferRepo::ensure_schema(&state.db)
+            .await
+            .expect("ensure recovery schema");
 
         let retry = handle_chunk(&state, &transfer_id, 0, payload.to_vec())
             .await

@@ -101,6 +101,13 @@ export interface Device {
   port: number;
   status: 'online' | 'offline';
   lastSeen?: string;
+  /**
+   * 对端能力清单提示（mDNS 非权威；可能被 TXT 长度裁剪）。
+   * 用于 UI 预筛 resume 等动作；最终以后端 health/capability 校验为准。
+   */
+  capabilities?: string[];
+  /** 协议版本提示（mDNS 非权威）。 */
+  protoVersion?: number;
 }
 
 export type TransferDirection = 'send' | 'receive';

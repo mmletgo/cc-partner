@@ -47,16 +47,18 @@ describe('transferHistory helpers', () => {
     expect(classifyTransferGroup(task({ status: 'transferring' }), true)).toBe('needsAttention');
   });
 
-  test('resumable requires send+failed+progress', () => {
-    expect(
-      isTransferResumable(
-        task({
-          progress: 0.4,
-          transferredBytes: 40,
-          failure: { stage: 'transfer', code: 'x', retryable: true, message: 'x' },
-        }),
-      ),
-    ).toBe(true);
+  test('resumable requires send+failed+progress+peer resume capability', () => {
+    const progressFailed = task({
+      progress: 0.4,
+      transferredBytes: 40,
+      failure: { stage: 'transfer', code: 'x', retryable: true, message: 'x' },
+    });
+    // 无 peer 能力（默认 false）不得 resume
+    expect(isTransferResumable(progressFailed)).toBe(false);
+    expect(isTransferRetryable(progressFailed)).toBe(true);
+    // 有能力且有进度 → resume
+    expect(isTransferResumable(progressFailed, true)).toBe(true);
+    expect(isTransferRetryable(progressFailed, true)).toBe(false);
     expect(
       isTransferResumable(
         task({
@@ -64,6 +66,7 @@ describe('transferHistory helpers', () => {
           transferredBytes: 0,
           failure: { stage: 'connect', code: 'x', retryable: true, message: 'x' },
         }),
+        true,
       ),
     ).toBe(false);
     expect(
@@ -73,6 +76,7 @@ describe('transferHistory helpers', () => {
           transferredBytes: 0,
           failure: { stage: 'connect', code: 'x', retryable: true, message: 'x' },
         }),
+        true,
       ),
     ).toBe(true);
   });

@@ -108,8 +108,13 @@ impl TransferRepo {
         add_column_if_missing(pool, &names, "phase", "phase TEXT").await?;
         add_column_if_missing(pool, &names, "failure_stage", "failure_stage TEXT").await?;
         add_column_if_missing(pool, &names, "failure_code", "failure_code TEXT").await?;
-        add_column_if_missing(pool, &names, "failure_retryable", "failure_retryable INTEGER")
-            .await?;
+        add_column_if_missing(
+            pool,
+            &names,
+            "failure_retryable",
+            "failure_retryable INTEGER",
+        )
+        .await?;
         add_column_if_missing(pool, &names, "failure_message", "failure_message TEXT").await?;
         add_column_if_missing(
             pool,
@@ -118,8 +123,13 @@ impl TransferRepo {
             "attempt INTEGER NOT NULL DEFAULT 1",
         )
         .await?;
-        add_column_if_missing(pool, &names, "logical_transfer_id", "logical_transfer_id TEXT")
-            .await?;
+        add_column_if_missing(
+            pool,
+            &names,
+            "logical_transfer_id",
+            "logical_transfer_id TEXT",
+        )
+        .await?;
         add_column_if_missing(pool, &names, "attempt_id", "attempt_id TEXT").await?;
         add_column_if_missing(
             pool,
@@ -128,8 +138,13 @@ impl TransferRepo {
             "protocol_transfer_id TEXT",
         )
         .await?;
-        add_column_if_missing(pool, &names, "client_operation_id", "client_operation_id TEXT")
-            .await?;
+        add_column_if_missing(
+            pool,
+            &names,
+            "client_operation_id",
+            "client_operation_id TEXT",
+        )
+        .await?;
         add_column_if_missing(
             pool,
             &names,
@@ -176,12 +191,14 @@ impl TransferRepo {
             let retryable: Option<i64> = row.try_get("failure_retryable").ok().flatten();
             let message: Option<String> = row.try_get("failure_message").ok().flatten();
             match (stage, code, retryable, message) {
-                (Some(stage), Some(code), Some(retryable), Some(message)) => Some(TransferFailure {
-                    stage: TransferFailureStage::from_str_lossy(&stage),
-                    code,
-                    retryable: retryable != 0,
-                    message,
-                }),
+                (Some(stage), Some(code), Some(retryable), Some(message)) => {
+                    Some(TransferFailure {
+                        stage: TransferFailureStage::from_str_lossy(&stage),
+                        code,
+                        retryable: retryable != 0,
+                        message,
+                    })
+                }
                 _ => None,
             }
         };
@@ -239,7 +256,10 @@ impl TransferRepo {
         let phase_str = task.phase.map(TransferPhase::as_str);
         let failure_stage = task.failure.as_ref().map(|f| f.stage.as_str());
         let failure_code = task.failure.as_ref().map(|f| f.code.as_str());
-        let failure_retryable = task.failure.as_ref().map(|f| if f.retryable { 1_i64 } else { 0_i64 });
+        let failure_retryable = task
+            .failure
+            .as_ref()
+            .map(|f| if f.retryable { 1_i64 } else { 0_i64 });
         let failure_message = task.failure.as_ref().map(|f| f.message.as_str());
         let attempt = task.attempt.max(1) as i64;
         let logical_transfer_id = if task.logical_transfer_id.is_empty() {
@@ -344,13 +364,8 @@ impl TransferRepo {
     /// Code Logic（这个函数做什么）:
     ///     `SELECT ... WHERE id=?`，命中则映射为 `TransferTask`；无行返回 `Ok(None)`。
     pub async fn get_by_id(&self, id: &str) -> Result<Option<TransferTask>, AppError> {
-        let sql = format!(
-            "SELECT {TRANSFER_SELECT_COLUMNS} FROM transfer_history WHERE id = ?"
-        );
-        let row = sqlx::query(&sql)
-            .bind(id)
-            .fetch_optional(&self.db)
-            .await?;
+        let sql = format!("SELECT {TRANSFER_SELECT_COLUMNS} FROM transfer_history WHERE id = ?");
+        let row = sqlx::query(&sql).bind(id).fetch_optional(&self.db).await?;
         Ok(row.map(|r| Self::row_to_task(&r)))
     }
 
@@ -400,10 +415,7 @@ impl TransferRepo {
         let sql = format!(
             "SELECT {TRANSFER_SELECT_COLUMNS} FROM transfer_history WHERE client_operation_id = ?"
         );
-        let row = sqlx::query(&sql)
-            .bind(id)
-            .fetch_optional(&self.db)
-            .await?;
+        let row = sqlx::query(&sql).bind(id).fetch_optional(&self.db).await?;
         Ok(row.map(|r| Self::row_to_task(&r)))
     }
 
@@ -418,12 +430,11 @@ impl TransferRepo {
         &self,
         logical_transfer_id: &str,
     ) -> Result<u32, AppError> {
-        let row = sqlx::query(
-            "SELECT COUNT(*) AS c FROM transfer_history WHERE logical_transfer_id = ?",
-        )
-        .bind(logical_transfer_id)
-        .fetch_one(&self.db)
-        .await?;
+        let row =
+            sqlx::query("SELECT COUNT(*) AS c FROM transfer_history WHERE logical_transfer_id = ?")
+                .bind(logical_transfer_id)
+                .fetch_one(&self.db)
+                .await?;
         let c: i64 = row.try_get("c").unwrap_or(0);
         Ok(c.max(0) as u32)
     }
@@ -771,7 +782,10 @@ mod tests {
         .unwrap();
 
         let task = repo.get_by_id("p1").await.unwrap().unwrap();
-        assert!(task.phase.is_none(), "unknown phase must stay None, not Failed");
+        assert!(
+            task.phase.is_none(),
+            "unknown phase must stay None, not Failed"
+        );
         assert_eq!(task.status, TransferStatus::Transferring);
         assert_eq!(task.effective_phase(), TransferPhase::Transferring);
         assert_ne!(task.effective_phase(), TransferPhase::Failed);
@@ -832,7 +846,6 @@ mod tests {
         );
     }
 
-
     /// 同 client_operation_id + 同 payload → Replay，不同 payload → Conflict。
     #[tokio::test]
     async fn claim_same_id_same_payload_replays_different_conflicts() {
@@ -877,7 +890,10 @@ mod tests {
             .claim_sender_operation("op-claim-1", "hash-bbb", &task)
             .await
             .unwrap();
-        assert!(matches!(conflict, super::SenderClaimOutcome::Conflict { .. }));
+        assert!(matches!(
+            conflict,
+            super::SenderClaimOutcome::Conflict { .. }
+        ));
     }
 
     /// 并发同 id claim 仅一条 Fresh winner。
@@ -905,8 +921,16 @@ mod tests {
         let r1 = repo.clone();
         let r2 = repo.clone();
         let (a, b) = tokio::join!(
-            async move { r1.claim_sender_operation("op-concurrent", "hash-c", &make("id-a")).await.unwrap() },
-            async move { r2.claim_sender_operation("op-concurrent", "hash-c", &make("id-b")).await.unwrap() },
+            async move {
+                r1.claim_sender_operation("op-concurrent", "hash-c", &make("id-a"))
+                    .await
+                    .unwrap()
+            },
+            async move {
+                r2.claim_sender_operation("op-concurrent", "hash-c", &make("id-b"))
+                    .await
+                    .unwrap()
+            },
         );
         let fresh_count = [&a, &b]
             .iter()
@@ -949,7 +973,11 @@ mod tests {
         repo.claim_sender_operation("op-q", "hash-q", &task)
             .await
             .unwrap();
-        let by_op = repo.get_by_client_operation_id("op-q").await.unwrap().unwrap();
+        let by_op = repo
+            .get_by_client_operation_id("op-q")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(by_op.id, "attempt-q");
         let recoverable = repo.list_recoverable_queued_sends().await.unwrap();
         assert!(recoverable.iter().any(|t| t.id == "attempt-q"));

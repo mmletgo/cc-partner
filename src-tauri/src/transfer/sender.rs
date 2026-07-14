@@ -127,8 +127,8 @@ pub fn start_sending(
         transferred_bytes: 0,
         created_at: now_iso(),
         completed_at: None,
-            ..TransferTask::recovery_defaults(&transfer_id)
-        };
+        ..TransferTask::recovery_defaults(&transfer_id)
+    };
 
     // 注册任务（附带 CancellationToken），spawn 前先 add 以便 cancel 命令可立即生效
     state.transfers.add(task.clone());
@@ -238,11 +238,7 @@ pub async fn get_transfer_operation(
         return Ok(TransferOperationStatus::Pending);
     }
 
-    let Some(task) = state
-        .transfer_repo
-        .get_by_client_operation_id(id)
-        .await?
-    else {
+    let Some(task) = state.transfer_repo.get_by_client_operation_id(id).await? else {
         return Ok(TransferOperationStatus::NotFound);
     };
 
@@ -259,7 +255,10 @@ pub async fn get_transfer_operation(
 
 /// Business Logic: list 路径需要在活跃表命中同 op 的 attempt。
 /// Code Logic: 线性扫描 registry.list()，匹配 client_operation_id。
-fn find_active_by_client_operation_id(state: &AppState, client_operation_id: &str) -> Option<TransferTask> {
+fn find_active_by_client_operation_id(
+    state: &AppState,
+    client_operation_id: &str,
+) -> Option<TransferTask> {
     state.transfers.list().into_iter().find(|t| {
         t.client_operation_id
             .as_deref()
@@ -492,7 +491,11 @@ pub async fn recover_pending_claimed_operations(state: &AppState) -> Result<u32,
 /// claim + spawn 的共享恢复入口。
 ///
 /// Business Logic: retry/resume 共用校验与幂等 claim，只在 protocol id / capability 上分叉。
-/// Code Logic: 见各校验 helper；Fresh 才 spawn；Replay 直接返回既有 task；Conflict → AppError::Conflict。
+/// Code Logic:
+///     - Retry 的 payload hash **不含** 随机 protocol id（空串占位）；Fresh 后才用 attempt_id 作 wire protocol id。
+///     - Fresh → TOCTOU 重检 → spawn。
+///     - Replay 终态 → typed conflict（要求新 op id）；非终态且不在 registry → re-spawn；已在 registry → 回放。
+///     - Conflict → AppError::Conflict。
 async fn start_recovery_operation(
     state: AppState,
     task_id: String,
@@ -513,33 +516,39 @@ async fn start_recovery_operation(
     // 在 claim 前计算指纹（阻塞在 spawn_blocking），Queued 行在 claim 后可见。
     let parent_for_fp = parent.clone();
     let path_buf = path.to_path_buf();
-    let (file_size, sha256, _fp) = tokio::task::spawn_blocking(move || {
-        recheck_source_fingerprint(&path_buf, &parent_for_fp)
-    })
-    .await
-    .map_err(|e| AppError::generic(format!("计算源指纹任务失败: {e}")))??;
+    let (file_size, sha256, _fp) =
+        tokio::task::spawn_blocking(move || recheck_source_fingerprint(&path_buf, &parent_for_fp))
+            .await
+            .map_err(|e| AppError::generic(format!("计算源指纹任务失败: {e}")))??;
 
-    let protocol_transfer_id = match kind {
-        TransferRecoveryKind::Retry => Uuid::new_v4().to_string(),
+    // Resume 复用父 protocol；Retry 的 hash 用空 protocol 占位（避免 claim 前随机 UUID 破坏幂等）。
+    let resume_protocol_id = match kind {
+        TransferRecoveryKind::Retry => None,
         TransferRecoveryKind::Resume => {
             ensure_peer_resume_capability(&state, &parent.peer_device_id).await?;
-            if parent.protocol_transfer_id.is_empty() {
+            Some(if parent.protocol_transfer_id.is_empty() {
                 parent.id.clone()
             } else {
                 parent.protocol_transfer_id.clone()
-            }
+            })
         }
     };
 
+    let hash_protocol = resume_protocol_id.as_deref().unwrap_or("");
     let payload_hash = canonical_recovery_payload_hash(
         kind,
         &parent.logical_transfer_id,
         &parent.file_path,
         &parent.peer_device_id,
-        &protocol_transfer_id,
+        hash_protocol,
     );
 
     let attempt_id = Uuid::new_v4().to_string();
+    // Retry：wire protocol 与 attempt 绑定，仅 Fresh 赢家写入；Replay 忽略本 claim_task。
+    let claim_protocol_id = match kind {
+        TransferRecoveryKind::Retry => attempt_id.clone(),
+        TransferRecoveryKind::Resume => resume_protocol_id.expect("resume protocol set"),
+    };
     let next_attempt = parent.attempt.saturating_add(1).max(2);
     let claim_task = TransferTask {
         id: attempt_id.clone(),
@@ -563,7 +572,7 @@ async fn start_recovery_operation(
             parent.logical_transfer_id.clone()
         },
         attempt_id: attempt_id.clone(),
-        protocol_transfer_id: protocol_transfer_id.clone(),
+        protocol_transfer_id: claim_protocol_id,
         client_operation_id: Some(client_operation_id.clone()),
         operation_payload_hash: Some(payload_hash.clone()),
     };
@@ -595,11 +604,69 @@ async fn start_recovery_operation(
             spawn_claimed_send(state, task.clone(), size2, sha2);
             Ok(task)
         }
-        SenderClaimOutcome::Replay(task) => Ok(task),
+        SenderClaimOutcome::Replay(task) => ensure_replayed_attempt_running(state, task).await,
         SenderClaimOutcome::Conflict { .. } => Err(AppError::conflict(
             "operationIdConflict: clientOperationId 已绑定不同 payload",
         )),
     }
+}
+
+/// Replay 路径：终态诚实返回；非终态确保 send loop 在跑（必要时 re-spawn）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     同 hash Replay 不得把 Failed 伪装成“已接受的新 attempt”，也不得在 orphan Queued
+///     行上只返回 Ok 而不 spawn（进程内超时重放 / insert-before-spawn 未重启场景）。
+///
+/// Code Logic（这个函数做什么）:
+///     terminal → conflict `operation_terminal`；registry 命中 → Ok；否则源指纹通过则 re-spawn。
+async fn ensure_replayed_attempt_running(
+    state: AppState,
+    task: TransferTask,
+) -> Result<TransferTask, AppError> {
+    if is_terminal_status(task.status) {
+        let code = match task.status {
+            TransferStatus::Completed => "succeeded",
+            TransferStatus::Failed => task
+                .failure
+                .as_ref()
+                .map(|f| f.code.as_str())
+                .unwrap_or("failed"),
+            TransferStatus::Cancelled => "cancelled",
+            TransferStatus::Pending | TransferStatus::Transferring => "unknown",
+        };
+        return Err(AppError::conflict(format!(
+            "operation_terminal: clientOperationId 已有终态 {} ({code})，请使用新的 clientOperationId",
+            task.status.as_str()
+        )));
+    }
+
+    if state.transfers.get(&task.id).is_some() {
+        return Ok(task);
+    }
+
+    // Orphan Queued/非终态：单飞 re-spawn（与 recover_pending_claimed_operations 同语义）。
+    let path = Path::new(&task.file_path);
+    if !path.exists() {
+        let mut failed = task.clone();
+        failed.status = TransferStatus::Failed;
+        failed.phase = Some(TransferPhase::Failed);
+        failed.failure = Some(TransferFailure {
+            stage: TransferFailureStage::Source,
+            code: "source_missing".into(),
+            retryable: true,
+            message: "Replay re-spawn 时源文件不存在".into(),
+        });
+        failed.completed_at = Some(now_iso());
+        state.transfer_repo.record(&failed).await?;
+        return Err(AppError::not_found(format!(
+            "源文件不存在: {}",
+            task.file_path
+        )));
+    }
+
+    let (size, sha, _) = recheck_source_fingerprint(path, &task)?;
+    spawn_claimed_send(state, task.clone(), size, sha);
+    Ok(task)
 }
 
 /// 加载父任务：registry 优先，否则 history。
@@ -692,16 +759,18 @@ async fn ensure_peer_resume_capability(
             .get(peer_device_id)
             .map(|d| (d.host.clone(), d.port))
     };
-    let (host, port) = peer_addr.ok_or_else(|| {
-        AppError::not_found(format!("对端设备不存在或离线: {peer_device_id}"))
-    })?;
+    let (host, port) = peer_addr
+        .ok_or_else(|| AppError::not_found(format!("对端设备不存在或离线: {peer_device_id}")))?;
     let base_url = format!("http://{host}:{port}");
     let health = state
         .peer_client
         .health_info(&base_url)
         .await
         .map_err(|e| AppError::unavailable(format!("无法探测对端 resume 能力: {e}")))?;
-    if !health.protocol_info().supports(CAPABILITY_TRANSFER_RESUME_V1) {
+    if !health
+        .protocol_info()
+        .supports(CAPABILITY_TRANSFER_RESUME_V1)
+    {
         return Err(AppError::validation(
             "unsupported: 对端不支持 transfer.resume.v1，请使用 retry".to_string(),
         ));
@@ -720,13 +789,11 @@ fn recheck_source_fingerprint(
     let meta = std::fs::metadata(path)?;
     let size = meta.len();
     let mtime_ns = meta.modified().ok().and_then(|t| {
-        t.duration_since(SystemTime::UNIX_EPOCH)
-            .ok()
-            .and_then(|d| {
-                let secs = d.as_secs();
-                let nanos = d.subsec_nanos() as u64;
-                secs.checked_mul(1_000_000_000)?.checked_add(nanos)
-            })
+        t.duration_since(SystemTime::UNIX_EPOCH).ok().and_then(|d| {
+            let secs = d.as_secs();
+            let nanos = d.subsec_nanos() as u64;
+            secs.checked_mul(1_000_000_000)?.checked_add(nanos)
+        })
     });
     let sha256 = calculate_sha256(path)?;
     if !task.sha256.is_empty() && task.sha256 != sha256 {
@@ -751,7 +818,7 @@ fn recheck_source_fingerprint(
 
 /// 已 claim 的 attempt：registry.add + spawn run_send_loop。
 ///
-/// Business Logic: 仅 Fresh winner 调用；Replay 不 spawn。
+/// Business Logic: Fresh winner 与 Replay orphan re-spawn 共用；调用方保证不在 registry 中。
 /// Code Logic: add → cancel_token → tokio::spawn run_send_loop（protocol id = task.protocol_transfer_id）。
 fn spawn_claimed_send(state: AppState, task: TransferTask, file_size: u64, sha256: String) {
     let transfer_id = task.id.clone();
@@ -1106,10 +1173,7 @@ fn classify_complete_error(error: PeerCallError) -> FinalizeOutcome {
             // 响应损坏也可能已在对端提交；保守 uncertain，交给 status 对账。
             message,
         },
-        PeerCallError::Remote { code, .. } => FinalizeOutcome::DefinitiveFailure {
-            message,
-            code,
-        },
+        PeerCallError::Remote { code, .. } => FinalizeOutcome::DefinitiveFailure { message, code },
     }
 }
 
@@ -1157,7 +1221,11 @@ async fn park_uncertain_finalize(
         t.failure = None;
         t.completed_at = None;
         // registry 无全量 replace；用 update_progress 保 status + 再 set_phase
-        registry.update_progress(transfer_id, t.transferred_bytes, TransferStatus::Transferring);
+        registry.update_progress(
+            transfer_id,
+            t.transferred_bytes,
+            TransferStatus::Transferring,
+        );
         registry.set_phase(transfer_id, TransferPhase::Finalizing);
         if let Some(snap) = registry.get(transfer_id) {
             let _ = state.transfer_repo.record(&snap).await;
@@ -1356,8 +1424,8 @@ mod tests {
 
     use super::*;
     use crate::models::transfer::{
-        TransferDirection, TransferFailure, TransferFailureStage, TransferPhase, TransferStatus,
-        TransferTask, TransferRecoveryKind, canonical_recovery_payload_hash,
+        canonical_recovery_payload_hash, TransferDirection, TransferFailure, TransferFailureStage,
+        TransferPhase, TransferRecoveryKind, TransferStatus, TransferTask,
     };
     use crate::net::protocol::CAPABILITY_TRANSFER_RESUME_V1;
     use crate::storage::transfer_repo::{SenderClaimOutcome, TransferRepo};
@@ -1394,7 +1462,11 @@ mod tests {
             phase: Some(TransferPhase::Failed),
             failure: Some(TransferFailure {
                 stage: TransferFailureStage::Transfer,
-                code: if retryable { "chunk_failed".into() } else { "fatal".into() },
+                code: if retryable {
+                    "chunk_failed".into()
+                } else {
+                    "fatal".into()
+                },
                 retryable,
                 message: "x".into(),
             }),
@@ -1411,7 +1483,11 @@ mod tests {
     fn non_retryable_rejects() {
         let p = failed_parent("t1", false);
         let err = validate_parent_for_recovery(&p, TransferRecoveryKind::Retry).unwrap_err();
-        assert!(err.to_string().contains("non_retryable") || format!("{err:?}").contains("non_retryable") || err.to_string().contains("不可重试"));
+        assert!(
+            err.to_string().contains("non_retryable")
+                || format!("{err:?}").contains("non_retryable")
+                || err.to_string().contains("不可重试")
+        );
     }
 
     /// active phase 拒绝。
@@ -1447,7 +1523,10 @@ mod tests {
         task.size = 11;
         task.sha256 = "00".into(); // wrong
         let err = recheck_source_fingerprint(&path, &task).unwrap_err();
-        assert!(err.to_string().contains("source_changed") || format!("{err:?}").contains("source_changed"));
+        assert!(
+            err.to_string().contains("source_changed")
+                || format!("{err:?}").contains("source_changed")
+        );
     }
 
     /// 旧 peer 能力 token 稳定且 supports 语义正确。
@@ -1469,16 +1548,46 @@ mod tests {
         assert!(modern.supports(CAPABILITY_TRANSFER_RESUME_V1));
     }
 
+    /// Retry payload hash 对随机 protocol 占位必须稳定（空串），同 op 不会 Conflict。
+    #[test]
+    fn retry_payload_hash_ignores_random_protocol_placeholder() {
+        let a = canonical_recovery_payload_hash(
+            TransferRecoveryKind::Retry,
+            "logical-1",
+            "/tmp/a",
+            "peer",
+            "",
+        );
+        let b = canonical_recovery_payload_hash(
+            TransferRecoveryKind::Retry,
+            "logical-1",
+            "/tmp/a",
+            "peer",
+            "",
+        );
+        assert_eq!(a, b);
+        // 若误把随机 protocol 折进 hash 会破坏幂等——显式断言与非空不同。
+        let polluted = canonical_recovery_payload_hash(
+            TransferRecoveryKind::Retry,
+            "logical-1",
+            "/tmp/a",
+            "peer",
+            "uuid-random-1",
+        );
+        assert_ne!(a, polluted);
+    }
+
     /// 同 id 不同 kind（retry vs resume）payload hash 不同 → Conflict 路径。
     #[tokio::test]
     async fn same_id_different_kind_payload_conflicts() {
         let repo = memory_repo().await;
+        // Retry hash 使用空 protocol 占位（生产路径一致）
         let retry_hash = canonical_recovery_payload_hash(
             TransferRecoveryKind::Retry,
             "logical-1",
             "/tmp/a",
             "peer",
-            "proto-new",
+            "",
         );
         let resume_hash = canonical_recovery_payload_hash(
             TransferRecoveryKind::Resume,
@@ -1573,7 +1682,10 @@ mod tests {
         };
         assert_eq!(id_a, id_b);
         // parent + one claim attempt
-        assert_eq!(repo.count_attempts_for_logical("parent-1").await.unwrap(), 2);
+        assert_eq!(
+            repo.count_attempts_for_logical("parent-1").await.unwrap(),
+            2
+        );
     }
 
     /// insert-before-spawn：Queued 行可被 list_recoverable 发现。
@@ -1598,7 +1710,9 @@ mod tests {
             operation_payload_hash: Some("h".into()),
             ..TransferTask::recovery_defaults("A")
         };
-        repo.claim_sender_operation("op-rec", "h", &task).await.unwrap();
+        repo.claim_sender_operation("op-rec", "h", &task)
+            .await
+            .unwrap();
         let list = repo.list_recoverable_queued_sends().await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "A");

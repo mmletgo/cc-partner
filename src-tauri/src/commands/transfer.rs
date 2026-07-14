@@ -12,8 +12,8 @@
 //!     - `send_transfer`：调 `transfer::sender::start_sending`（内部 spawn 异步任务），
 //!       立即返回 `{accepted, deviceId, filePath}`。
 //!     - `cancel_transfer`：触发 CancellationToken，返回 `{ok, id}`。
-//!     - `retry_transfer` / `resume_transfer`：本机 owner 路径幂等 claim 后 spawn。
-//!     - `get_transfer_operation`：按发送端 clientOperationId 查询 ledger 真值。
+//!     - `retry_transfer` / `resume_transfer` / `send_transfer` / `cancel_transfer` /
+//!       `get_transfer_operation`：owner 本地执行；GuiClient 经 loopback control 代理（与 N1 sidecar sole owner 一致）。
 //!     - `prepare_transfer_open`：owner 校验 Receive+completed+path；GuiClient 经 control 代理。
 
 use crate::backend::authority::RuntimeRole;
@@ -63,6 +63,10 @@ pub async fn send_transfer(
     device_id: String,
     file_path: String,
 ) -> Result<serde_json::Value, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        return client.send_transfer(&device_id, &file_path).await;
+    }
     let transfer_id =
         sender::start_sending(state.inner().clone(), device_id.clone(), file_path.clone())?;
     tracing::info!("已发起传输任务 {transfer_id} → {device_id}");
@@ -77,12 +81,16 @@ pub async fn send_transfer(
 /// 取消传输任务：触发 CancellationToken。
 ///
 /// Business Logic: 前端传输项"取消"按钮调用。对照 Python `DELETE /api/transfer/tasks/{id}`。
-/// Code Logic: registry.cancel(id) 触发对应任务的取消令牌；发送循环在下一块前检查并停止。
+/// Code Logic: GuiClient → control `transfer/cancel`；owner → registry.cancel。
 #[tauri::command]
 pub async fn cancel_transfer(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        return client.cancel_transfer(&task_id).await;
+    }
     let ok = state.transfers.cancel(&task_id);
     if !ok {
         return Err(AppError::not_found(format!("传输任务不存在: {task_id}")));
@@ -96,19 +104,18 @@ pub async fn cancel_transfer(
 ///     失败且可重试的发送任务需要用户显式“重新传输”；同一 clientOperationId 不得重复 attempt。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 `sender::retry_transfer`；返回新/回放 attempt 的 DTO。
+///     GuiClient → control `transfer/retry`；owner → `sender::retry_transfer`。
 #[tauri::command]
 pub async fn retry_transfer(
     state: State<'_, AppState>,
     task_id: String,
     client_operation_id: String,
 ) -> Result<TransferTaskDto, AppError> {
-    let task = sender::retry_transfer(
-        state.inner().clone(),
-        task_id,
-        client_operation_id,
-    )
-    .await?;
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        return client.retry_transfer(&task_id, &client_operation_id).await;
+    }
+    let task = sender::retry_transfer(state.inner().clone(), task_id, client_operation_id).await?;
     Ok(task.to_dto(None))
 }
 
@@ -118,19 +125,18 @@ pub async fn retry_transfer(
 ///     有 resume metadata 且对端支持时从 checkpoint 继续；旧 peer 返回 unsupported。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 `sender::resume_transfer`；返回新/回放 attempt 的 DTO。
+///     GuiClient → control `transfer/resume`；owner → `sender::resume_transfer`。
 #[tauri::command]
 pub async fn resume_transfer(
     state: State<'_, AppState>,
     task_id: String,
     client_operation_id: String,
 ) -> Result<TransferTaskDto, AppError> {
-    let task = sender::resume_transfer(
-        state.inner().clone(),
-        task_id,
-        client_operation_id,
-    )
-    .await?;
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        return client.resume_transfer(&task_id, &client_operation_id).await;
+    }
+    let task = sender::resume_transfer(state.inner().clone(), task_id, client_operation_id).await?;
     Ok(task.to_dto(None))
 }
 
@@ -140,12 +146,16 @@ pub async fn resume_transfer(
 ///     transport timeout / lost final ACK 后 UI 必须先对账，禁止盲重试。
 ///
 /// Code Logic（这个命令做什么）:
-///     委托 `sender::get_transfer_operation`；返回 camelCase `TransferOperationStatus`。
+///     GuiClient → control `transfer/get-operation`；owner → `sender::get_transfer_operation`。
 #[tauri::command]
 pub async fn get_transfer_operation(
     state: State<'_, AppState>,
     client_operation_id: String,
 ) -> Result<TransferOperationStatus, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        return client.get_transfer_operation(&client_operation_id).await;
+    }
     sender::get_transfer_operation(state.inner(), &client_operation_id).await
 }
 
@@ -200,9 +210,7 @@ pub async fn prepare_transfer_open_for_state(
             .transfer_repo
             .get_by_id(task_id)
             .await?
-            .ok_or_else(|| {
-                AppError::not_found(format!("not_found: 传输任务不存在: {task_id}"))
-            })?
+            .ok_or_else(|| AppError::not_found(format!("not_found: 传输任务不存在: {task_id}")))?
     };
 
     if task.direction != TransferDirection::Receive {
@@ -231,13 +239,9 @@ pub async fn prepare_transfer_open_for_state(
 
     let meta = std::fs::symlink_metadata(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            AppError::not_found(format!(
-                "transfer_path_missing: 目标文件不存在: {path_raw}"
-            ))
+            AppError::not_found(format!("transfer_path_missing: 目标文件不存在: {path_raw}"))
         } else {
-            AppError::validation(format!(
-                "transfer_path_invalid: 无法读取目标路径: {e}"
-            ))
+            AppError::validation(format!("transfer_path_invalid: 无法读取目标路径: {e}"))
         }
     })?;
 
@@ -297,6 +301,7 @@ fn validate_open_path(path: &Path) -> Result<(), AppError> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     取 Display 首段 `:` 前 token；无则 `internal`。
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn prepare_error_code(err: &AppError) -> &str {
     // 注意：不能返回指向临时 String 的引用；从静态表匹配。
     let msg = err.to_string();
@@ -310,6 +315,7 @@ pub fn prepare_error_code(err: &AppError) -> &str {
 ///
 /// Code Logic（这个函数做什么）:
 ///     若 message 以已知 code + `:` 开头则返回该 code，否则 internal。
+#[cfg_attr(not(test), allow(dead_code))]
 fn extract_stable_code(message: &str) -> &'static str {
     const KNOWN: &[&str] = &[
         "transfer_not_completed",
@@ -334,9 +340,7 @@ mod tests {
     use crate::config::{
         AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
     };
-    use crate::models::transfer::{
-        TransferDirection, TransferPhase, TransferStatus, TransferTask,
-    };
+    use crate::models::transfer::{TransferDirection, TransferPhase, TransferStatus, TransferTask};
     use crate::net::peer_client::PeerClient;
     use crate::orchestrator::repo::OrchestratorRepo;
     use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
@@ -437,7 +441,9 @@ mod tests {
             workbench_browser_previews: Arc::new(
                 crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
             ),
-            workbench_sessions: Arc::new(crate::workbench::sessions::WorkbenchSessionRegistry::new()),
+            workbench_sessions: Arc::new(
+                crate::workbench::sessions::WorkbenchSessionRegistry::new(),
+            ),
             workbench_remote_events: {
                 let (tx, _) = tokio::sync::broadcast::channel(8);
                 tx
@@ -509,10 +515,8 @@ mod tests {
     }
 
     fn unique_temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "cc-partner-transfer-open-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cc-partner-transfer-open-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -538,13 +542,10 @@ mod tests {
         )
         .await;
 
-        let err = prepare_transfer_open_for_state(
-            &state,
-            "failed-task",
-            TransferOpenAction::Reveal,
-        )
-        .await
-        .expect_err("non-completed must fail");
+        let err =
+            prepare_transfer_open_for_state(&state, "failed-task", TransferOpenAction::Reveal)
+                .await
+                .expect_err("non-completed must fail");
         assert_eq!(prepare_error_code(&err), "transfer_not_completed");
     }
 
@@ -569,13 +570,10 @@ mod tests {
         )
         .await;
 
-        let err = prepare_transfer_open_for_state(
-            &state,
-            "completed-missing",
-            TransferOpenAction::Open,
-        )
-        .await
-        .expect_err("missing path must fail");
+        let err =
+            prepare_transfer_open_for_state(&state, "completed-missing", TransferOpenAction::Open)
+                .await
+                .expect_err("missing path must fail");
         assert_eq!(prepare_error_code(&err), "transfer_path_missing");
     }
 
@@ -601,13 +599,10 @@ mod tests {
         )
         .await;
 
-        let err = prepare_transfer_open_for_state(
-            &state,
-            "send-completed",
-            TransferOpenAction::Open,
-        )
-        .await
-        .expect_err("send direction unsupported");
+        let err =
+            prepare_transfer_open_for_state(&state, "send-completed", TransferOpenAction::Open)
+                .await
+                .expect_err("send direction unsupported");
         assert_eq!(prepare_error_code(&err), "unsupported");
     }
 
@@ -661,10 +656,9 @@ mod tests {
         )
         .await;
 
-        let target =
-            prepare_transfer_open_for_state(&state, "recv-ok", TransferOpenAction::Open)
-                .await
-                .expect("completed receive must succeed");
+        let target = prepare_transfer_open_for_state(&state, "recv-ok", TransferOpenAction::Open)
+            .await
+            .expect("completed receive must succeed");
         assert_eq!(target.task_id, "recv-ok");
         assert_eq!(target.action, TransferOpenAction::Open);
         assert_eq!(Path::new(&target.path), file.as_path());

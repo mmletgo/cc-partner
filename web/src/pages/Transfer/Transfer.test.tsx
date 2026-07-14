@@ -48,6 +48,11 @@ vi.mock('@/api/devices', () => ({
   devicesApi: {
     list: (...args: unknown[]) => listDevicesMock(...args),
   },
+  /** 与生产一致：capabilities 含 transfer.resume.v1 才允许 resume UI */
+  deviceSupportsTransferResume: (device?: { capabilities?: string[] } | null) =>
+    Array.isArray(device?.capabilities) &&
+    device.capabilities.includes('transfer.resume.v1'),
+  TRANSFER_RESUME_CAPABILITY_V1: 'transfer.resume.v1',
 }));
 
 vi.mock('@/api/transfer', () => ({
@@ -98,6 +103,7 @@ const deviceA: Device = {
   address: '192.168.1.10',
   port: 62116,
   status: 'online',
+  capabilities: ['transfer.resume.v1', 'transfer.complete.v1'],
 };
 
 /**
@@ -116,6 +122,7 @@ function buildTask(overrides: Partial<TransferTask> = {}): TransferTask {
     direction: 'send',
     status: 'transferring',
     progress: 0.5,
+    peerDeviceId: 'device-a',
     peerDeviceName: 'MacBook Pro',
     speed: 1024,
     startedAt: '2026-07-13T00:00:00.000Z',

@@ -14,8 +14,8 @@
 //!     5) lost final ACK：status 权威 completed → 本地 commit Succeeded，不二次 complete finalize
 
 use app_lib::{
-    canonical_recovery_payload_hash, operation_status_from_task, server_protocol_info, PeerCallError,
-    PeerClient, SenderClaimOutcome, TransferCompletePolicy, TransferDirection,
+    canonical_recovery_payload_hash, operation_status_from_task, server_protocol_info,
+    PeerCallError, PeerClient, SenderClaimOutcome, TransferCompletePolicy, TransferDirection,
     TransferOperationStatus, TransferPhase, TransferRecoveryKind, TransferRepo, TransferStatus,
     TransferTask, CAPABILITY_TRANSFER_RESUME_V1, PROTOCOL_VERSION_V1,
 };
@@ -106,8 +106,16 @@ async fn duplicate_resume_request_creates_one_attempt() {
     let hash1 = hash.clone();
     let hash2 = hash.clone();
     let (a, b) = tokio::join!(
-        async move { r1.claim_sender_operation("op-1", &hash1, &t1).await.unwrap() },
-        async move { r2.claim_sender_operation("op-1", &hash2, &t2).await.unwrap() },
+        async move {
+            r1.claim_sender_operation("op-1", &hash1, &t1)
+                .await
+                .unwrap()
+        },
+        async move {
+            r2.claim_sender_operation("op-1", &hash2, &t2)
+                .await
+                .unwrap()
+        },
     );
 
     let mut fresh = 0u32;
@@ -145,6 +153,46 @@ async fn duplicate_resume_request_creates_one_attempt() {
     assert_eq!(by_op.operation_payload_hash.as_deref(), Some(hash.as_str()));
 }
 
+/// Business Logic: 同 clientOperationId 的两次 retry（空 protocol 占位 hash）必须 Replay，不 Conflict。
+/// Code Logic: 顺序 claim 同一 retry hash → 1 Fresh + 1 Replay，attempt id 相同。
+#[tokio::test]
+async fn sequential_retry_same_op_id_replays_without_conflict() {
+    let db = setup_db().await;
+    let repo = TransferRepo::new(db.pool.clone());
+    let hash = canonical_recovery_payload_hash(
+        TransferRecoveryKind::Retry,
+        "logical-retry",
+        "/tmp/smoke.bin",
+        "peer-1",
+        "",
+    );
+    let make = |attempt_id: &str| {
+        let mut t = queued_send_task(attempt_id, "op-retry-1", &hash);
+        t.logical_transfer_id = "logical-retry".into();
+        t.protocol_transfer_id = attempt_id.into();
+        t.attempt_id = attempt_id.into();
+        t
+    };
+    let first = repo
+        .claim_sender_operation("op-retry-1", &hash, &make("attempt-r1"))
+        .await
+        .unwrap();
+    let second = repo
+        .claim_sender_operation("op-retry-1", &hash, &make("attempt-r2"))
+        .await
+        .unwrap();
+    let id1 = match first {
+        SenderClaimOutcome::Fresh(t) => t.id,
+        other => panic!("first must be Fresh, got {other:?}"),
+    };
+    let id2 = match second {
+        SenderClaimOutcome::Replay(t) => t.id,
+        other => panic!("second must be Replay, got {other:?}"),
+    };
+    assert_eq!(id1, id2);
+    assert_eq!(id1, "attempt-r1");
+}
+
 /// Business Logic: same id + different payload 必须 conflict。
 /// Code Logic: 先 Fresh resume hash，再 claim retry hash → Conflict。
 #[tokio::test]
@@ -158,12 +206,13 @@ async fn same_id_different_payload_is_operation_conflict() {
         "peer-1",
         "protocol-1",
     );
+    // Retry 生产路径用空 protocol 占位；与 resume hash 仍不同 → Conflict。
     let retry_hash = canonical_recovery_payload_hash(
         TransferRecoveryKind::Retry,
         "logical-1",
         "/tmp/smoke.bin",
         "peer-1",
-        "protocol-2",
+        "",
     );
     let task = queued_send_task("attempt-1", "op-mix", &resume_hash);
     let fresh = repo

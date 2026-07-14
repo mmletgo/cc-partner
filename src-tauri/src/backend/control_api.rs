@@ -7,7 +7,7 @@
 //! Code Logic（这个模块做什么）:
 //!     提供 status / get-config / update-config / events / orchestrator snapshot /
 //!     cloud-sync/{trigger,test,claude-md-push} / backup/{create,inspect,restore,list-jobs,list-backups,rollback} /
-//!     transfer/prepare-open
+//!     transfer/prepare-open + transfer/{send,retry,resume,get-operation,cancel}
 //!     handler 与路由挂载；请求体 ≤256 KiB，普通元数据响应 ≤1 MiB；
 //!     鉴权顺序：ConnectInfo loopback → token；cloud_sync_phase 映射真实 CloudSyncRuntime 相位；
 //!     从不记录 control token。
@@ -28,12 +28,15 @@ use crate::config_runtime::{
     RuntimeOwnerStatus,
 };
 use crate::error::AppError;
-use crate::models::transfer::{LocalTransferOpenTarget, TransferOpenAction};
+use crate::models::transfer::{
+    LocalTransferOpenTarget, TransferOpenAction, TransferOperationStatus, TransferTaskDto,
+};
 use crate::net::error_response::{P2pError, P2pErrorCode, P2pResult};
 use crate::net::lan_guard::require_loopback_peer;
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
 use crate::storage::RecoveryJobRow;
+use crate::transfer::sender;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::{header, StatusCode};
@@ -703,7 +706,7 @@ pub async fn control_backup_rollback(
     Ok(Json(result))
 }
 
-// ── transfer lifecycle control（N5 Open/Reveal prepare）────────────────
+// ── transfer lifecycle control（N5 Open/Reveal prepare + owner mutations）──
 
 /// transfer prepare-open 请求体。
 ///
@@ -744,6 +747,182 @@ pub async fn control_transfer_prepare_open(
         .map_err(|e| P2pError::from_app_error(e, &context, "control.transfer_prepare_open"))?;
     ensure_response_within_limit(&target, &context)?;
     Ok(Json(target))
+}
+
+/// transfer send 请求体。
+///
+/// Business Logic: GuiClient 不得在本进程 claim/spawn；必须代理到 owner registry。
+/// Code Logic: camelCase controlToken + deviceId + filePath。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlTransferSendRequest {
+    pub control_token: String,
+    pub device_id: String,
+    pub file_path: String,
+}
+
+/// transfer retry/resume 请求体。
+///
+/// Business Logic: recovery 幂等 claim 必须在 owner 单进程 registry 上执行。
+/// Code Logic: camelCase controlToken + taskId + clientOperationId。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlTransferRecoveryRequest {
+    pub control_token: String,
+    pub task_id: String,
+    pub client_operation_id: String,
+}
+
+/// transfer get-operation 请求体。
+///
+/// Business Logic: operation ledger 对账在 owner 上（registry + lost-ACK）。
+/// Code Logic: camelCase controlToken + clientOperationId。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlTransferGetOperationRequest {
+    pub control_token: String,
+    pub client_operation_id: String,
+}
+
+/// transfer cancel 请求体。
+///
+/// Business Logic: CancellationToken 只存在于 owner TransferRegistry。
+/// Code Logic: camelCase controlToken + taskId。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlTransferCancelRequest {
+    pub control_token: String,
+    pub task_id: String,
+}
+
+/// owner 路径：发起发送（spawn 后立即返回 accepted）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     sidecar 是唯一 runtime owner；GUI 代理 send 避免双 registry 双 drive。
+///
+/// Code Logic（这个函数做什么）:
+///     authorize → require_owner → sender::start_sending → `{accepted,deviceId,filePath,id}`。
+pub async fn control_transfer_send(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlTransferSendRequest>,
+) -> P2pResult<Json<serde_json::Value>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.transfer_send"))?;
+    let transfer_id = sender::start_sending(
+        state.clone(),
+        request.device_id.clone(),
+        request.file_path.clone(),
+    )
+    .map_err(|e| P2pError::from_app_error(e, &context, "control.transfer_send"))?;
+    let body = serde_json::json!({
+        "accepted": true,
+        "deviceId": request.device_id,
+        "filePath": request.file_path,
+        "id": transfer_id,
+    });
+    ensure_response_within_limit(&body, &context)?;
+    Ok(Json(body))
+}
+
+/// owner 路径：幂等 retry。
+///
+/// Business Logic: claim+spawn 必须在 owner 上，与 recover_pending 同进程。
+/// Code Logic: authorize → require_owner → sender::retry_transfer → TransferTaskDto。
+pub async fn control_transfer_retry(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlTransferRecoveryRequest>,
+) -> P2pResult<Json<TransferTaskDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.transfer_retry"))?;
+    let task = sender::retry_transfer(state.clone(), request.task_id, request.client_operation_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.transfer_retry"))?;
+    let dto = task.to_dto(None);
+    ensure_response_within_limit(&dto, &context)?;
+    Ok(Json(dto))
+}
+
+/// owner 路径：幂等 resume。
+///
+/// Business Logic: resume claim 与 peer capability 探测在 owner 执行。
+/// Code Logic: authorize → require_owner → sender::resume_transfer → TransferTaskDto。
+pub async fn control_transfer_resume(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlTransferRecoveryRequest>,
+) -> P2pResult<Json<TransferTaskDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.transfer_resume"))?;
+    let task = sender::resume_transfer(state.clone(), request.task_id, request.client_operation_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.transfer_resume"))?;
+    let dto = task.to_dto(None);
+    ensure_response_within_limit(&dto, &context)?;
+    Ok(Json(dto))
+}
+
+/// owner 路径：按 clientOperationId 查 operation 真值。
+///
+/// Business Logic: lost-ACK 对账与 registry 优先读取必须在 owner。
+/// Code Logic: authorize → require_owner → sender::get_transfer_operation。
+pub async fn control_transfer_get_operation(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlTransferGetOperationRequest>,
+) -> P2pResult<Json<TransferOperationStatus>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.transfer_get_operation"))?;
+    let status = sender::get_transfer_operation(&state, &request.client_operation_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.transfer_get_operation"))?;
+    ensure_response_within_limit(&status, &context)?;
+    Ok(Json(status))
+}
+
+/// owner 路径：取消活跃传输。
+///
+/// Business Logic: cancel token 只在 owner registry；GUI 不得 no-op 假取消。
+/// Code Logic: authorize → require_owner → transfers.cancel → `{ok,id}`。
+pub async fn control_transfer_cancel(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlTransferCancelRequest>,
+) -> P2pResult<Json<serde_json::Value>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.transfer_cancel"))?;
+    let ok = state.transfers.cancel(&request.task_id);
+    if !ok {
+        return Err(P2pError::from_app_error(
+            AppError::not_found(format!("传输任务不存在: {}", request.task_id)),
+            &context,
+            "control.transfer_cancel",
+        ));
+    }
+    let body = serde_json::json!({ "ok": true, "id": request.task_id });
+    ensure_response_within_limit(&body, &context)?;
+    Ok(Json(body))
 }
 
 /// 序列化后检查响应不超过 1 MiB。
