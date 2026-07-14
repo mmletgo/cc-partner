@@ -15,11 +15,13 @@ use crate::models::prompt::PromptRow;
 use crate::net::peer_client::PeerCallError;
 use crate::net::protocol::CAPABILITY_SYNC_MANIFEST_V2;
 use crate::state::AppState;
+use crate::sync::apply_merge::apply_prompt_pull_items;
 use crate::sync::merger::merge_prompt;
 use crate::sync::protocol::{
-    compute_sync_plan, content_sha256_hex, estimate_summary_wire_bytes, validate_manifest_page_bounds,
-    validate_page_not_truncated, ManifestStreamState, SyncDomainOutcome, SyncManifestPage,
-    SyncSummary, TransportClass, PUSH_BATCH_ITEMS,
+    compute_sync_plan, content_sha256_hex, decide_acked_delete_epoch, estimate_summary_wire_bytes,
+    max_delete_epoch_from_summaries, validate_manifest_page_bounds, validate_page_not_truncated,
+    ManifestStreamState, SyncDomainOutcome, SyncManifestPage, SyncSummary, TransportClass,
+    PUSH_BATCH_ITEMS,
 };
 use crate::sync::vector_clock::{compare, ClockOrder};
 use futures_util::{stream, StreamExt};
@@ -328,6 +330,7 @@ pub fn prompt_to_summary(row: &PromptRow) -> SyncSummary<String> {
         size: row.content.len() as u64,
         updated_at: row.updated_at.clone(),
         deleted: row.deleted,
+        delete_epoch: row.delete_epoch,
     }
 }
 
@@ -479,13 +482,15 @@ async fn prompt_sync_with_peer(
 
 /// Prompt v2：完整 manifest 比较 + items/push-batch。
 ///
-/// Business Logic: exact equality 零正文；batch 有界；失败 typed。
-/// Code Logic: 拉远端页 → 本地摘要排序 → compute_sync_plan → fetch/merge/push。
+/// Business Logic: exact equality 零正文；batch 有界；失败 typed；仅完整+成功后 ack delete 水位。
+/// Code Logic: 拉远端页 → 本地摘要排序 → compute_sync_plan → fetch/merge/push；
+///     末批 push 或空 push 携带 acked_delete_epoch。
 async fn prompt_sync_v2(
     state: &AppState,
     device: &crate::models::device::Device,
     base_url: &str,
 ) -> SyncDomainOutcome {
+    // fetch_complete_remote_manifest 仅在 next_cursor=None 完成时返回 Ok
     let remote = match fetch_complete_remote_manifest(|cursor| {
         let client = state.peer_client.clone();
         let base = base_url.to_string();
@@ -500,6 +505,7 @@ async fn prompt_sync_v2(
         Ok(v) => v,
         Err(o) => return o,
     };
+    let max_remote_epoch = max_delete_epoch_from_summaries(&remote);
 
     let local_all = match state.prompt_repo.get_all_for_sync().await {
         Ok(v) => v,
@@ -520,7 +526,7 @@ async fn prompt_sync_v2(
     let mut pulled: u32 = 0;
     let mut pushed: u32 = 0;
 
-    // fetch + merge
+    // fetch + merge（中途失败不得 ack）
     for chunk in plan.fetch_from_remote.chunks(PUSH_BATCH_ITEMS) {
         if chunk.is_empty() {
             continue;
@@ -530,36 +536,39 @@ async fn prompt_sync_v2(
             Ok(r) => r,
             Err(e) => return peer_error_to_domain_outcome(&e),
         };
-        let mut to_upsert: Vec<PromptRow> = Vec::new();
-        for remote_row in resp.items {
-            match local_by_id.get(&remote_row.id) {
-                None => to_upsert.push(remote_row),
-                Some(local_row) => {
-                    let merged = merge_prompt(local_row, &remote_row);
-                    if merged.vector_clock != local_row.vector_clock
-                        || merged.updated_at != local_row.updated_at
-                        || merged.content != local_row.content
-                        || merged.title != local_row.title
-                        || merged.deleted != local_row.deleted
-                    {
-                        to_upsert.push(merged);
+        if !resp.items.is_empty() {
+            match apply_prompt_pull_items(
+                &state.prompt_repo.pool(),
+                state.prompt_repo.as_ref(),
+                &resp.items,
+            )
+            .await
+            {
+                Ok(n) => {
+                    if n > 0 {
+                        pulled = pulled.saturating_add(n as u32);
+                        tracing::info!(
+                            "从 {} 拉取并更新了 {} 条 prompt (v2 apply_merge)",
+                            device.name,
+                            n
+                        );
                     }
+                }
+                Err(e) => {
+                    return SyncDomainOutcome::ProtocolError {
+                        code: format!("apply_merge_failed:{e}"),
+                    };
                 }
             }
         }
-        if !to_upsert.is_empty() {
-            let n = to_upsert.len() as u32;
-            if let Err(e) = state.prompt_repo.bulk_upsert(&to_upsert).await {
-                return SyncDomainOutcome::ProtocolError {
-                    code: format!("bulk_upsert_failed:{e}"),
-                };
-            }
-            pulled = pulled.saturating_add(n);
-            tracing::info!("从 {} 拉取并更新了 {} 条 prompt (v2)", device.name, n);
-        }
     }
 
-    // push batches
+    // 完整 manifest + apply 成功 → 允许在末批 ack
+    let ack_epoch = decide_acked_delete_epoch(true, true, max_remote_epoch);
+    let claimed = state.device_id.as_str();
+
+    // 收集非空 push 批次
+    let mut batches: Vec<Vec<PromptRow>> = Vec::new();
     for chunk in plan.push_to_remote.chunks(PUSH_BATCH_ITEMS) {
         if chunk.is_empty() {
             continue;
@@ -568,25 +577,42 @@ async fn prompt_sync_v2(
             .iter()
             .filter_map(|id| local_by_id.get(id).cloned())
             .collect();
-        if items.is_empty() {
-            continue;
+        if !items.is_empty() {
+            batches.push(items);
         }
+    }
+
+    if batches.is_empty() {
+        // 无正文可推：空 push-batch 仅推进对端 watermark
         let req_id = Uuid::new_v4().to_string();
-        match state
+        if let Err(e) = state
             .peer_client
-            .push_prompt_batch(base_url, &items, &req_id)
+            .push_prompt_batch(base_url, &[], &req_id, claimed, ack_epoch)
             .await
         {
-            Ok(resp) => {
-                pushed = pushed.saturating_add(resp.accepted as u32);
-                tracing::info!(
-                    "向 {} 推送了 {} 条 prompt (v2 accepted={})",
-                    device.name,
-                    items.len(),
-                    resp.accepted
-                );
+            return peer_error_to_domain_outcome(&e);
+        }
+    } else {
+        let last = batches.len() - 1;
+        for (i, items) in batches.into_iter().enumerate() {
+            let epoch = if i == last { ack_epoch } else { None };
+            let req_id = Uuid::new_v4().to_string();
+            match state
+                .peer_client
+                .push_prompt_batch(base_url, &items, &req_id, claimed, epoch)
+                .await
+            {
+                Ok(resp) => {
+                    pushed = pushed.saturating_add(resp.accepted as u32);
+                    tracing::info!(
+                        "向 {} 推送了 {} 条 prompt (v2 accepted={})",
+                        device.name,
+                        items.len(),
+                        resp.accepted
+                    );
+                }
+                Err(e) => return peer_error_to_domain_outcome(&e),
             }
-            Err(e) => return peer_error_to_domain_outcome(&e),
         }
     }
 

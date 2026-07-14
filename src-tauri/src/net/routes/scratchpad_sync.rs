@@ -13,10 +13,9 @@ use crate::models::scratchpad::ScratchpadRow;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
-use crate::storage::sync_request_ledger_repo::{
-    SyncBatchOutcome, SyncRequestLedgerRepo, DOMAIN_SCRATCHPAD,
-};
+use crate::storage::sync_request_ledger_repo::SyncRequestLedgerRepo;
 use crate::storage::ScratchpadRepo;
+use crate::sync::apply_merge::apply_scratchpad_merge_batch;
 use crate::sync::protocol::{
     content_sha256_hex, decode_keyset_cursor, encode_keyset_cursor, estimate_summary_wire_bytes,
     SyncManifestPage, SyncSummary, MANIFEST_PAGE_BYTES, MANIFEST_PAGE_ITEMS, PUSH_BATCH_BYTES,
@@ -112,6 +111,9 @@ pub struct ScratchpadPushBatchReq {
     /// 收敛标签（非认证）；缺省空串。
     #[serde(default)]
     pub claimed_device_id: String,
+    /// 完整 manifest + 成功 apply 后客户端回传的最高连续 ackedDeleteEpoch；缺省 None 不推进水位。
+    #[serde(default)]
+    pub acked_delete_epoch: Option<u64>,
 }
 
 /// push-batch 响应。
@@ -191,6 +193,7 @@ fn scratchpad_to_summary(row: &ScratchpadRow) -> SyncSummary<String> {
         size: row.content.len() as u64,
         updated_at: row.updated_at.clone(),
         deleted: row.deleted,
+        delete_epoch: row.delete_epoch,
     }
 }
 
@@ -563,49 +566,20 @@ async fn scratchpad_push_batch_impl(
 
     let payload_hash = scratchpad_batch_payload_hash(&req.items);
     let claimed_device_id = req.claimed_device_id.trim().to_string();
+    let acked_delete_epoch = req.acked_delete_epoch;
+    let items = req.items;
 
-    let mut to_upsert = Vec::new();
-    for remote in req.items {
-        match repo.get(&remote.id).await? {
-            None => to_upsert.push(remote),
-            Some(local) => {
-                let merged = merge_scratchpad(&local, &remote);
-                if scratchpad_changed(&merged, &local) {
-                    to_upsert.push(merged);
-                }
-            }
-        }
-    }
-
-    let ledger = SyncRequestLedgerRepo::new(repo.pool());
-    SyncRequestLedgerRepo::ensure_schema(ledger.pool())
-        .await
-        .map_err(RouteFail::from)?;
-
-    let outcome = {
-        use futures_util::FutureExt;
-        ledger
-            .apply_batch_idempotent(
-                &claimed_device_id,
-                DOMAIN_SCRATCHPAD,
-                &client_request_id,
-                &payload_hash,
-                |tx| {
-                    let rows = to_upsert.clone();
-                    async move {
-                        if !rows.is_empty() {
-                            ScratchpadRepo::bulk_upsert_on_tx(tx, &rows, None).await?;
-                        }
-                        Ok(SyncBatchOutcome {
-                            accepted: rows.len(),
-                        })
-                    }
-                    .boxed()
-                },
-            )
-            .await
-            .map_err(RouteFail::from)?
-    };
+    let outcome = apply_scratchpad_merge_batch(
+        &repo.pool(),
+        repo,
+        &claimed_device_id,
+        &client_request_id,
+        &payload_hash,
+        &items,
+        acked_delete_epoch,
+    )
+    .await
+    .map_err(RouteFail::from)?;
     Ok(outcome.accepted)
 }
 
@@ -632,12 +606,21 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS scratchpad (\
              id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '速记本', content TEXT NOT NULL, \
              created_at TEXT NOT NULL, updated_at TEXT NOT NULL, device_id TEXT NOT NULL, \
-             vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+             vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, delete_epoch INTEGER NOT NULL DEFAULT 0)",
         )
         .execute(&pool)
         .await
         .unwrap();
         SyncRequestLedgerRepo::ensure_schema(&pool).await.unwrap();
+        crate::storage::content_version_repo::ContentVersionRepo::ensure_schema(&pool).await.unwrap();
+        crate::storage::deletion_floor_repo::DeletionFloorRepo::ensure_schema(&pool).await.unwrap();
+        crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo::ensure_schema(&pool).await.unwrap();
+        crate::storage::sync_watermark_repo::SyncWatermarkRepo::ensure_schema(&pool).await.unwrap();
+        let _ = sqlx::query(
+            "ALTER TABLE scratchpad ADD COLUMN delete_epoch INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await;
         ScratchpadRepo::new(pool)
     }
 
@@ -653,6 +636,7 @@ mod tests {
             device_id: "d1".to_string(),
             vector_clock,
             deleted: false,
+            delete_epoch: 0,
         }
     }
 
@@ -692,6 +676,7 @@ mod tests {
                 items: vec![sample_row("p1", "hello", 1), sample_row("p2", "world", 1)],
                 client_request_id: "sp-1".into(),
                 claimed_device_id: "peer-1".into(),
+                acked_delete_epoch: None,
             },
         )
         .await
@@ -734,6 +719,7 @@ mod tests {
                 items,
                 client_request_id: "sp-2".into(),
                 claimed_device_id: "peer-1".into(),
+                acked_delete_epoch: None,
             },
         )
         .await

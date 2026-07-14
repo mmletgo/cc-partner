@@ -11,16 +11,21 @@
  *   - 正文经 AppShell 常驻 ScratchpadAutosaveQueue 做 500ms debounce 保存
  *   - 切页/删除/同步前 await flushPage；路由卸载与 pagehide best-effort flushAll
  *   - 订阅 queue 快照驱动 saving/error/retry UI
+ *   - 版本历史 Drawer：查看摘要、恢复为新版本、复制内容；冲突用非阻塞 Pill 标识
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import { configApi } from '@/api/config';
 import { scratchpadApi } from '@/api/scratchpad';
-import { Button, Card, Dialog, Input } from '@/components/primitives';
+import { Button, Card, Dialog, Input, Pill } from '@/components/primitives';
+import {
+  resolveVersionCopyText,
+  VersionHistoryDrawer,
+} from '@/components/domain/VersionHistoryDrawer';
 import { useScratchpadAutosave } from '@/hooks/scratchpadAutosaveContext';
-import { CopyIcon, PlusIcon, SyncIcon, TrashIcon, XIcon } from '@/lib/icons';
-import type { ScratchpadPage, ScratchpadPageSummary } from '@/lib/types';
+import { CopyIcon, HistoryIcon, PlusIcon, SyncIcon, TrashIcon, XIcon } from '@/lib/icons';
+import type { ContentVersion, ScratchpadPage, ScratchpadPageSummary } from '@/lib/types';
 import styles from './Scratchpad.module.css';
 
 /**
@@ -87,8 +92,16 @@ export function Scratchpad() {
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [versions, setVersions] = useState<ContentVersion[]>([]);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  const [versionsError, setVersionsError] = useState<string | null>(null);
+  const [restoringVersionId, setRestoringVersionId] = useState<string | null>(null);
+  const [hasConflictVersions, setHasConflictVersions] = useState(false);
   const textRef = useRef('');
   const currentPageIdRef = useRef<string | null>(null);
+  const historyRequestSeqRef = useRef(0);
+  const conflictRequestSeqRef = useRef(0);
 
   const autosaveSnapshot = useSyncExternalStore(
     queue.subscribe,
@@ -176,22 +189,49 @@ export function Scratchpad() {
 
   /**
    * Business Logic（为什么需要）:
+   *   冲突 Pill 需要知道当前页是否有 conflict 版本，且不得阻塞编辑。
+   *
+   * Code Logic（做什么）:
+   *   listVersions 后更新 hasConflictVersions；用 seq 丢弃过期结果。
+   */
+  const refreshConflictFlag = useCallback(async (pageId: string) => {
+    const seq = ++conflictRequestSeqRef.current;
+    try {
+      const list = await scratchpadApi.listVersions(pageId);
+      if (conflictRequestSeqRef.current !== seq || currentPageIdRef.current !== pageId) return;
+      const safe = Array.isArray(list) ? list : [];
+      setHasConflictVersions(safe.some((version) => version.kind === 'conflict'));
+    } catch {
+      if (conflictRequestSeqRef.current !== seq || currentPageIdRef.current !== pageId) return;
+      setHasConflictVersions(false);
+    }
+  }, []);
+
+  /**
+   * Business Logic（为什么需要）:
    *   页面切换或刷新列表后，编辑区必须展示指定页面的最新正文。
    *
    * Code Logic（做什么）:
-   *   读取页面详情并同步 currentPage/titleDraft/text/ref 状态。
+   *   读取页面详情并同步 currentPage/titleDraft/text/ref 状态；刷新冲突标记。
    */
-  const openPage = useCallback(async (pageId: string) => {
-    const page = await scratchpadApi.getPage(pageId);
-    currentPageIdRef.current = page.id;
-    textRef.current = page.content;
-    setCurrentPage(page);
-    setTitleDraft(page.title);
-    setText(page.content);
-    setPendingClear(false);
-    setPendingDelete(false);
-    return page;
-  }, []);
+  const openPage = useCallback(
+    async (pageId: string) => {
+      const page = await scratchpadApi.getPage(pageId);
+      currentPageIdRef.current = page.id;
+      textRef.current = page.content;
+      setCurrentPage(page);
+      setTitleDraft(page.title);
+      setText(page.content);
+      setPendingClear(false);
+      setPendingDelete(false);
+      setHistoryOpen(false);
+      setVersions([]);
+      setVersionsError(null);
+      void refreshConflictFlag(page.id);
+      return page;
+    },
+    [refreshConflictFlag],
+  );
 
   /**
    * Business Logic（为什么需要）:
@@ -211,8 +251,13 @@ export function Scratchpad() {
     setText(page.content);
     setPendingClear(false);
     setPendingDelete(false);
+    setHistoryOpen(false);
+    setVersions([]);
+    setVersionsError(null);
+    setHasConflictVersions(false);
+    void refreshConflictFlag(page.id);
     return page;
-  }, [t]);
+  }, [refreshConflictFlag, t]);
 
   /**
    * Business Logic（为什么需要）:
@@ -549,6 +594,121 @@ export function Scratchpad() {
     }
   }, [flushPendingSave, reloadPages, t]);
 
+  /**
+   * Business Logic（为什么需要）:
+   *   打开版本历史时需要权威版本列表。
+   *
+   * Code Logic（做什么）:
+   *   对当前页 listVersions，更新抽屉与冲突 Pill。
+   */
+  const openVersionHistory = useCallback(async () => {
+    const pageId = currentPageIdRef.current;
+    if (!pageId) return;
+    const seq = ++historyRequestSeqRef.current;
+    setHistoryOpen(true);
+    setVersionsLoading(true);
+    setVersionsError(null);
+    try {
+      const list = await scratchpadApi.listVersions(pageId);
+      if (historyRequestSeqRef.current !== seq) return;
+      const safe = Array.isArray(list) ? list : [];
+      setVersions(safe);
+      setHasConflictVersions(safe.some((version) => version.kind === 'conflict'));
+    } catch (err) {
+      if (historyRequestSeqRef.current !== seq) return;
+      setVersions([]);
+      setVersionsError(
+        t('scratchpad:versionHistoryLoadFailed', {
+          error: getErrorMessage(err, t('scratchpad:versionHistoryLoadFailedGeneric')),
+        }),
+      );
+    } finally {
+      if (historyRequestSeqRef.current === seq) {
+        setVersionsLoading(false);
+      }
+    }
+  }, [t]);
+
+  /**
+   * Business Logic（为什么需要）:
+   *   关闭历史抽屉后应清理请求态。
+   *
+   * Code Logic（做什么）:
+   *   递增 request seq 并重置 history 状态。
+   */
+  const closeVersionHistory = useCallback(() => {
+    historyRequestSeqRef.current += 1;
+    setHistoryOpen(false);
+    setVersions([]);
+    setVersionsError(null);
+    setVersionsLoading(false);
+    setRestoringVersionId(null);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要）:
+   *   恢复历史版本应成为新的 active 正文，并刷新列表与冲突标记。
+   *
+   * Code Logic（做什么）:
+   *   flush 当前页后 restoreVersion，回填编辑区并重载版本列表。
+   */
+  const handleRestoreVersion = useCallback(
+    async (version: ContentVersion) => {
+      const pageId = currentPageIdRef.current;
+      if (!pageId || restoringVersionId) return;
+      setRestoringVersionId(version.id);
+      setVersionsError(null);
+      try {
+        await flushPendingSave().catch(() => undefined);
+        const restored = await scratchpadApi.restoreVersion(pageId, version.id);
+        if (currentPageIdRef.current === restored.id) {
+          currentPageIdRef.current = restored.id;
+          textRef.current = restored.content;
+          setCurrentPage(restored);
+          setTitleDraft(restored.title);
+          setText(restored.content);
+        }
+        const latestPages = await scratchpadApi.listPages();
+        setPages(latestPages);
+        const list = await scratchpadApi.listVersions(pageId);
+        const safe = Array.isArray(list) ? list : [];
+        setVersions(safe);
+        setHasConflictVersions(safe.some((item) => item.kind === 'conflict'));
+        setStatus(t('scratchpad:savedAt', { time: new Date().toLocaleTimeString() }));
+      } catch (err) {
+        setVersionsError(
+          t('scratchpad:versionRestoreFailed', {
+            error: getErrorMessage(err, t('scratchpad:versionRestoreFailedGeneric')),
+          }),
+        );
+      } finally {
+        setRestoringVersionId(null);
+      }
+    },
+    [flushPendingSave, restoringVersionId, t],
+  );
+
+  /**
+   * Business Logic（为什么需要）:
+   *   用户需要复制冲突/历史正文。
+   *
+   * Code Logic（做什么）:
+   *   优先 content，否则 contentPreview，写入 clipboard。
+   */
+  const handleCopyVersion = useCallback(
+    async (version: ContentVersion) => {
+      const text = resolveVersionCopyText(version);
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        setStatus(t('scratchpad:versionCopied'));
+      } catch (err) {
+        setVersionsError(getErrorMessage(err, t('scratchpad:versionCopyFailed')));
+      }
+    },
+    [t],
+  );
+
   return (
     <div className={styles.page}>
       <header className={styles.pageHeader}>
@@ -616,17 +776,34 @@ export function Scratchpad() {
         <section className={styles.editorPane} aria-label={t('scratchpad:editorAriaLabel')}>
           <Card variant="outlined" padding="none" className={styles.editorCard}>
             <Card.Header className={styles.editorHeader}>
-              <Input
-                value={titleDraft}
-                onChange={(event) => setTitleDraft(event.target.value)}
-                onBlur={() => void commitTitle()}
-                onKeyDown={handleTitleKeyDown}
-                placeholder={t('scratchpad:titlePlaceholder')}
-                aria-label={t('scratchpad:titleAriaLabel')}
-                disabled={loading || !currentPage}
-                className={styles.titleInput}
-              />
+              <div className={styles.titleCluster}>
+                <Input
+                  value={titleDraft}
+                  onChange={(event) => setTitleDraft(event.target.value)}
+                  onBlur={() => void commitTitle()}
+                  onKeyDown={handleTitleKeyDown}
+                  placeholder={t('scratchpad:titlePlaceholder')}
+                  aria-label={t('scratchpad:titleAriaLabel')}
+                  disabled={loading || !currentPage}
+                  className={styles.titleInput}
+                />
+                {hasConflictVersions ? (
+                  <Pill tone="warn" dot data-testid="scratchpad-conflict-pill">
+                    {t('scratchpad:versionConflictPill')}
+                  </Pill>
+                ) : null}
+              </div>
               <div className={styles.actions}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<HistoryIcon />}
+                  onClick={() => void openVersionHistory()}
+                  disabled={!currentPage || loading}
+                  aria-label={t('scratchpad:versionOpenHistory')}
+                >
+                  {t('scratchpad:versionOpenHistory')}
+                </Button>
                 <Button variant="secondary" size="sm" icon={<CopyIcon />} onClick={handleCopyAll} disabled={!text}>
                   {t('scratchpad:copyAll')}
                 </Button>
@@ -706,6 +883,22 @@ export function Scratchpad() {
           </div>
         </Card>
       </Dialog>
+
+      <VersionHistoryDrawer
+        open={historyOpen}
+        onClose={closeVersionHistory}
+        versions={versions}
+        loading={versionsLoading}
+        error={versionsError}
+        restoringVersionId={restoringVersionId}
+        i18nNamespace="scratchpad"
+        onRestore={(version) => {
+          void handleRestoreVersion(version);
+        }}
+        onCopy={(version) => {
+          void handleCopyVersion(version);
+        }}
+      />
     </div>
   );
 }

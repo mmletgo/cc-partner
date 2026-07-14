@@ -5,8 +5,12 @@
 //!     需一套冲突解决策略保证最终一致，并在 N2 下返回 typed domain outcome。
 //!
 //! Code Logic（这个模块做什么）:
-//!     merge helpers + ssh_target_sync_with_peer（v2 plan / typed legacy）。
+//!     merge helpers（含 conflict draft）+ ssh_target_sync_with_peer（v2 plan / typed legacy）。
 use crate::models::ssh_target::SshTargetRow;
+use crate::storage::content_version_repo::KIND_CONFLICT;
+use crate::storage::sync_request_ledger_repo::DOMAIN_SSH_TARGET;
+use crate::sync::merger::{ContentVersionDraft, DomainMergeResult};
+use crate::sync::protocol::content_sha256_hex;
 use crate::sync::vector_clock::{compare, merge, ClockOrder};
 
 /// 判断是否应使用 remote 覆盖 local（SSH 目标版本）。
@@ -52,12 +56,81 @@ pub fn merge_ssh_target(local: &SshTargetRow, remote: &SshTargetRow) -> SshTarge
     }
 }
 
+/// 计算 SSH 目标正文指纹（host/port/username/label）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     并发 conflict 行需要稳定 content_hash，与 manifest 语义对齐，供幂等去重与 UI 对比。
+///
+/// Code Logic（这个函数做什么）:
+///     固定 `\0` 分隔 host/port/username/label 后 SHA-256 hex。
+pub fn ssh_text_content_hash(row: &SshTargetRow) -> String {
+    let label = row.label.as_deref().unwrap_or("");
+    let port = row.port.to_string();
+    content_sha256_hex(&[
+        row.host.as_bytes(),
+        b"\0",
+        port.as_bytes(),
+        b"\0",
+        row.username.as_bytes(),
+        b"\0",
+        label.as_bytes(),
+    ])
+}
+
+/// 判断两条 SSH 目标业务正文是否不同。
+///
+/// Business Logic: 仅 host/port/username/label 不同才写 conflict；纯时钟差异不保留副本。
+/// Code Logic: 逐字段比较。
+fn ssh_payload_differs(a: &SshTargetRow, b: &SshTargetRow) -> bool {
+    a.host != b.host
+        || a.port != b.port
+        || a.username != b.username
+        || a.label != b.label
+}
+
+/// 合并两条 SSH 目标，并在并发且正文不同时产出 conflict 副本草稿。
+///
+/// Business Logic（为什么需要这个函数）:
+///     N2 要求并发不同 payload 时保留 winner 并写 conflict copy，避免 LWW 静默覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     `merge_ssh_target` 得 winner；Concurrent 且 payload 不同时把 loser 做成 ContentVersionDraft；
+///     domain=`DOMAIN_SSH_TARGET`，item_id=host。
+pub fn merge_ssh_with_conflicts(
+    local: &SshTargetRow,
+    remote: &SshTargetRow,
+    now: &str,
+) -> DomainMergeResult<SshTargetRow> {
+    let winner = merge_ssh_target(local, remote);
+    let relation = compare(&remote.vector_clock, &local.vector_clock);
+    let mut conflict_versions = Vec::new();
+    if relation == ClockOrder::Concurrent && ssh_payload_differs(local, remote) {
+        let remote_wins = wins_concurrent_ssh(local, remote);
+        let loser = if remote_wins { local } else { remote };
+        conflict_versions.push(ContentVersionDraft {
+            domain: DOMAIN_SSH_TARGET.to_string(),
+            item_id: loser.host.clone(),
+            source_device: loser.device_id.clone(),
+            content_hash: ssh_text_content_hash(loser),
+            created_at: now.to_string(),
+            kind: KIND_CONFLICT.to_string(),
+            snapshot_json: serde_json::to_string(loser).unwrap_or_default(),
+        });
+    }
+    DomainMergeResult {
+        winner,
+        conflict_versions,
+    }
+}
+
 use crate::state::AppState;
+use crate::sync::apply_merge::apply_ssh_pull_items;
 use crate::sync::engine::{
     fetch_complete_remote_manifest, peer_error_to_domain_outcome,
 };
 use crate::sync::protocol::{
-    compute_sync_plan, content_sha256_hex, SyncDomainOutcome, SyncSummary, PUSH_BATCH_ITEMS,
+    compute_sync_plan, decide_acked_delete_epoch,
+    max_delete_epoch_from_summaries, SyncDomainOutcome, SyncSummary, PUSH_BATCH_ITEMS,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -85,6 +158,7 @@ pub fn ssh_to_summary(row: &SshTargetRow) -> SyncSummary<String> {
         size: (row.username.len() + row.label.as_ref().map(|s| s.len()).unwrap_or(0) + 8) as u64,
         updated_at: row.updated_at.clone(),
         deleted: row.deleted,
+        delete_epoch: row.delete_epoch,
     }
 }
 
@@ -125,6 +199,7 @@ async fn ssh_sync_v2(
         Ok(v) => v,
         Err(o) => return o,
     };
+    let max_remote_epoch = max_delete_epoch_from_summaries(&remote);
 
     let local_all = match state.ssh_target_repo.get_all_for_sync().await {
         Ok(v) => v,
@@ -154,36 +229,38 @@ async fn ssh_sync_v2(
             Ok(r) => r,
             Err(e) => return peer_error_to_domain_outcome(&e),
         };
-        let mut to_upsert: Vec<SshTargetRow> = Vec::new();
-        for remote_row in resp.items {
-            match local_by_id.get(&remote_row.host) {
-                None => to_upsert.push(remote_row),
-                Some(local_row) => {
-                    let merged = merge_ssh_target(local_row, &remote_row);
-                    if merged.vector_clock != local_row.vector_clock
-                        || merged.updated_at != local_row.updated_at
-                        || merged.username != local_row.username
-                        || merged.port != local_row.port
-                        || merged.label != local_row.label
-                        || merged.deleted != local_row.deleted
-                    {
-                        to_upsert.push(merged);
+        if !resp.items.is_empty() {
+            match apply_ssh_pull_items(
+                &state.ssh_target_repo.pool(),
+                state.ssh_target_repo.as_ref(),
+                &resp.items,
+            )
+            .await
+            {
+                Ok(n) => {
+                    if n > 0 {
+                        pulled = pulled.saturating_add(n as u32);
+                        tracing::info!(
+                            "从 {} 拉取并更新了 {} 条 SSH 目标 (v2 apply_merge)",
+                            device.name,
+                            n
+                        );
                     }
+                }
+                Err(e) => {
+                    return SyncDomainOutcome::ProtocolError {
+                        code: format!("apply_merge_failed:{e}"),
+                    };
                 }
             }
         }
-        if !to_upsert.is_empty() {
-            let n = to_upsert.len() as u32;
-            if let Err(e) = state.ssh_target_repo.bulk_upsert(&to_upsert).await {
-                return SyncDomainOutcome::ProtocolError {
-                    code: format!("bulk_upsert_failed:{e}"),
-                };
-            }
-            pulled = pulled.saturating_add(n);
-            tracing::info!("从 {} 拉取并更新了 {} 条 SSH 目标 (v2)", device.name, n);
-        }
     }
 
+    // 完整 manifest + apply 成功后，仅在末批/空 push 携带 acked_delete_epoch
+    let ack_epoch = decide_acked_delete_epoch(true, true, max_remote_epoch);
+    let claimed = state.device_id.as_str();
+
+    let mut batches: Vec<Vec<SshTargetRow>> = Vec::new();
     for chunk in plan.push_to_remote.chunks(PUSH_BATCH_ITEMS) {
         if chunk.is_empty() {
             continue;
@@ -192,25 +269,41 @@ async fn ssh_sync_v2(
             .iter()
             .filter_map(|id| local_by_id.get(id).cloned())
             .collect();
-        if items.is_empty() {
-            continue;
+        if !items.is_empty() {
+            batches.push(items);
         }
+    }
+
+    if batches.is_empty() {
         let req_id = Uuid::new_v4().to_string();
-        match state
+        if let Err(e) = state
             .peer_client
-            .push_ssh_batch(base_url, &items, &req_id)
+            .push_ssh_batch(base_url, &[], &req_id, claimed, ack_epoch)
             .await
         {
-            Ok(resp) => {
-                pushed = pushed.saturating_add(resp.accepted as u32);
-                tracing::info!(
-                    "向 {} 推送了 {} 条 SSH 目标 (v2 accepted={})",
-                    device.name,
-                    items.len(),
-                    resp.accepted
-                );
+            return peer_error_to_domain_outcome(&e);
+        }
+    } else {
+        let last = batches.len() - 1;
+        for (i, items) in batches.into_iter().enumerate() {
+            let epoch = if i == last { ack_epoch } else { None };
+            let req_id = Uuid::new_v4().to_string();
+            match state
+                .peer_client
+                .push_ssh_batch(base_url, &items, &req_id, claimed, epoch)
+                .await
+            {
+                Ok(resp) => {
+                    pushed = pushed.saturating_add(resp.accepted as u32);
+                    tracing::info!(
+                        "向 {} 推送了 {} 条 SSH 目标 (v2 accepted={})",
+                        device.name,
+                        items.len(),
+                        resp.accepted
+                    );
+                }
+                Err(e) => return peer_error_to_domain_outcome(&e),
             }
-            Err(e) => return peer_error_to_domain_outcome(&e),
         }
     }
 
@@ -379,6 +472,7 @@ mod tests {
             created_at: "2024-01-01T00:00:00+00:00".to_string(),
             updated_at: updated_at.to_string(),
             deleted,
+            delete_epoch: 0,
         }
     }
 

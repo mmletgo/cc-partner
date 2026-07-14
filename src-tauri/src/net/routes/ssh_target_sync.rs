@@ -13,10 +13,9 @@ use crate::models::ssh_target::SshTargetRow;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
-use crate::storage::sync_request_ledger_repo::{
-    SyncBatchOutcome, SyncRequestLedgerRepo, DOMAIN_SSH_TARGET,
-};
+use crate::storage::sync_request_ledger_repo::SyncRequestLedgerRepo;
 use crate::storage::SshTargetRepo;
+use crate::sync::apply_merge::apply_ssh_merge_batch;
 use crate::sync::protocol::{
     content_sha256_hex, decode_keyset_cursor, encode_keyset_cursor, estimate_summary_wire_bytes,
     SyncManifestPage, SyncSummary, MANIFEST_PAGE_BYTES, MANIFEST_PAGE_ITEMS, PUSH_BATCH_BYTES,
@@ -112,6 +111,9 @@ pub struct SshPushBatchReq {
     /// 收敛标签（非认证）；缺省空串。
     #[serde(default)]
     pub claimed_device_id: String,
+    /// 完整 manifest + 成功 apply 后客户端回传的最高连续 ackedDeleteEpoch；缺省 None 不推进水位。
+    #[serde(default)]
+    pub acked_delete_epoch: Option<u64>,
 }
 
 /// push-batch 响应。
@@ -199,6 +201,7 @@ fn ssh_to_summary(row: &SshTargetRow) -> SyncSummary<String> {
         size: (row.username.len() + row.label.as_ref().map(|s| s.len()).unwrap_or(0) + 8) as u64,
         updated_at: row.updated_at.clone(),
         deleted: row.deleted,
+        delete_epoch: row.delete_epoch,
     }
 }
 
@@ -576,55 +579,21 @@ async fn ssh_push_batch_impl(
 
     let payload_hash = ssh_batch_payload_hash(&req.items);
     let claimed_device_id = req.claimed_device_id.trim().to_string();
+    let acked_delete_epoch = req.acked_delete_epoch;
+    let items = req.items;
 
-    let mut to_upsert = Vec::new();
-    for remote in req.items {
-        match repo.get(&remote.host).await? {
-            None => to_upsert.push(remote),
-            Some(local_row) => {
-                let merged = merge_ssh_target(&local_row, &remote);
-                if merged.vector_clock != local_row.vector_clock
-                    || merged.updated_at != local_row.updated_at
-                    || merged.username != local_row.username
-                    || merged.port != local_row.port
-                    || merged.label != local_row.label
-                    || merged.deleted != local_row.deleted
-                {
-                    to_upsert.push(merged);
-                }
-            }
-        }
-    }
-
-    let ledger = SyncRequestLedgerRepo::new(repo.pool());
-    SyncRequestLedgerRepo::ensure_schema(ledger.pool())
-        .await
-        .map_err(RouteFail::from)?;
-
-    let outcome = {
-        use futures_util::FutureExt;
-        ledger
-            .apply_batch_idempotent(
-                &claimed_device_id,
-                DOMAIN_SSH_TARGET,
-                &client_request_id,
-                &payload_hash,
-                |tx| {
-                    let rows = to_upsert.clone();
-                    async move {
-                        if !rows.is_empty() {
-                            SshTargetRepo::bulk_upsert_on_tx(tx, &rows, None).await?;
-                        }
-                        Ok(SyncBatchOutcome {
-                            accepted: rows.len(),
-                        })
-                    }
-                    .boxed()
-                },
-            )
-            .await
-            .map_err(RouteFail::from)?
-    };
+    // N2: 单事务 apply_merge_batch（winner + conflict + delete_epoch + ledger + 可选 watermark ack）
+    let outcome = apply_ssh_merge_batch(
+        &repo.pool(),
+        repo,
+        &claimed_device_id,
+        &client_request_id,
+        &payload_hash,
+        &items,
+        acked_delete_epoch,
+    )
+    .await
+    .map_err(RouteFail::from)?;
     Ok(outcome.accepted)
 }
 
@@ -651,12 +620,22 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS ssh_targets (\
              host TEXT PRIMARY KEY, port INTEGER NOT NULL, username TEXT NOT NULL, \
              label TEXT, device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, \
-             created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted INTEGER DEFAULT 0, delete_epoch INTEGER NOT NULL DEFAULT 0)",
         )
         .execute(&pool)
         .await
         .unwrap();
         SyncRequestLedgerRepo::ensure_schema(&pool).await.unwrap();
+        crate::storage::content_version_repo::ContentVersionRepo::ensure_schema(&pool).await.unwrap();
+        crate::storage::deletion_floor_repo::DeletionFloorRepo::ensure_schema(&pool).await.unwrap();
+        crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo::ensure_schema(&pool).await.unwrap();
+        crate::storage::sync_watermark_repo::SyncWatermarkRepo::ensure_schema(&pool).await.unwrap();
+        // delete_epoch 列
+        let _ = sqlx::query(
+            "ALTER TABLE ssh_targets ADD COLUMN delete_epoch INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await;
         SshTargetRepo::new(pool)
     }
 
@@ -673,6 +652,7 @@ mod tests {
             created_at: "2026-07-14T00:00:00Z".to_string(),
             updated_at: "2026-07-14T00:00:00Z".to_string(),
             deleted: false,
+            delete_epoch: 0,
         }
     }
 
@@ -715,6 +695,7 @@ mod tests {
                 ],
                 client_request_id: "r1".into(),
                 claimed_device_id: "peer-1".into(),
+                acked_delete_epoch: None,
             },
         )
         .await
@@ -758,6 +739,7 @@ mod tests {
                 items,
                 client_request_id: "r2".into(),
                 claimed_device_id: "peer-1".into(),
+                acked_delete_epoch: None,
             },
         )
         .await

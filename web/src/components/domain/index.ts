@@ -31,6 +31,15 @@ export type { PermissionCardProps } from './PermissionCard';
 export { TagInput } from './TagInput';
 export type { TagInputProps } from './TagInput';
 
+export {
+  VersionHistoryDrawer,
+  resolveVersionCopyText,
+} from './VersionHistoryDrawer';
+export type {
+  VersionHistoryDrawerProps,
+  VersionHistoryNamespace,
+} from './VersionHistoryDrawer';
+
 export { PermissionStatusBadge } from './PermissionStatusBadge';
 
 export { CcHistoryCard } from './CcHistoryCard';

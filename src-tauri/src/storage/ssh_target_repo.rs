@@ -11,6 +11,8 @@
 
 use crate::error::AppError;
 use crate::models::ssh_target::SshTargetRow;
+use crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo;
+use crate::storage::sync_request_ledger_repo::DOMAIN_SSH_TARGET;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::{Row, Sqlite, Transaction};
 use std::collections::HashMap;
@@ -28,10 +30,17 @@ impl SshTargetRepo {
     }
 
     /// 将数据库一行映射为 SshTargetRow（vector_clock JSON 反序列化、deleted int→bool）。
+    ///
+    /// Business Logic: 命令层与同步层都需要从 SQLite 行还原完整 SSH 目标实体。
+    /// Code Logic: vector_clock 反序列化；delete_epoch 缺列或读失败时默认 0。
     fn row_to_ssh_target(row: &SqliteRow) -> Result<SshTargetRow, AppError> {
         let vc_text: String = row.try_get("vector_clock")?;
         let deleted_int: i64 = row.try_get("deleted")?;
         let vector_clock: HashMap<String, u64> = serde_json::from_str(&vc_text)?;
+        let delete_epoch = row
+            .try_get::<i64, _>("delete_epoch")
+            .unwrap_or(0)
+            .max(0) as u64;
         Ok(SshTargetRow {
             host: row.try_get("host")?,
             port: row.try_get("port")?,
@@ -42,13 +51,14 @@ impl SshTargetRepo {
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
             deleted: deleted_int != 0,
+            delete_epoch,
         })
     }
 
     /// 列出所有未删除的 SSH 目标，按 updated_at 降序。
     pub async fn list(&self) -> Result<Vec<SshTargetRow>, AppError> {
         let rows = sqlx::query(
-            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted \
+            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted, delete_epoch \
              FROM ssh_targets WHERE deleted = 0 ORDER BY updated_at DESC",
         )
         .fetch_all(&self.db)
@@ -59,7 +69,7 @@ impl SshTargetRepo {
     /// 按 host 主键查询单条（含已删除记录，供命令层判断存在性与软删除读取）。
     pub async fn get(&self, host: &str) -> Result<Option<SshTargetRow>, AppError> {
         let row = sqlx::query(
-            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted \
+            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted, delete_epoch \
              FROM ssh_targets WHERE host = ?",
         )
         .bind(host)
@@ -74,7 +84,7 @@ impl SshTargetRepo {
     /// 返回全部目标（含 deleted 软删除记录），用于跨设备同步。
     pub async fn get_all_for_sync(&self) -> Result<Vec<SshTargetRow>, AppError> {
         let rows = sqlx::query(
-            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted \
+            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted, delete_epoch \
              FROM ssh_targets",
         )
         .fetch_all(&self.db)
@@ -138,8 +148,8 @@ impl SshTargetRepo {
             let vc_text = serde_json::to_string(&p.vector_clock)?;
             sqlx::query(
                 "INSERT OR REPLACE INTO ssh_targets \
-                 (host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted, delete_epoch) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&p.host)
             .bind(p.port)
@@ -150,6 +160,7 @@ impl SshTargetRepo {
             .bind(&p.created_at)
             .bind(&p.updated_at)
             .bind(p.deleted as i64)
+            .bind(p.delete_epoch as i64)
             .execute(&mut **tx)
             .await?;
         }
@@ -169,7 +180,13 @@ impl SshTargetRepo {
         self.bulk_upsert(std::slice::from_ref(row)).await
     }
 
-    /// 软删除：标记 deleted=1，更新 updated_at，并写入推进后的 vector_clock。
+    /// 软删除：同事务铸造 delete_epoch 并写入 tombstone 字段。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     CRDT 删除需推进 vector_clock；同时铸造单调 delete_epoch 供水位 ack 与 GC。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     begin → mint_on_tx(DOMAIN_SSH_TARGET) → UPDATE deleted/updated_at/vector_clock/delete_epoch → commit。
     pub async fn soft_delete(
         &self,
         host: &str,
@@ -177,14 +194,18 @@ impl SshTargetRepo {
         vector_clock: &HashMap<String, u64>,
     ) -> Result<(), AppError> {
         let vc_text = serde_json::to_string(vector_clock)?;
+        let mut tx = self.db.begin().await?;
+        let epoch = SyncDeleteSequenceRepo::mint_on_tx(&mut tx, DOMAIN_SSH_TARGET).await?;
         sqlx::query(
-            "UPDATE ssh_targets SET deleted = 1, updated_at = ?, vector_clock = ? WHERE host = ?",
+            "UPDATE ssh_targets SET deleted = 1, updated_at = ?, vector_clock = ?, delete_epoch = ? WHERE host = ?",
         )
         .bind(now)
         .bind(vc_text)
+        .bind(epoch as i64)
         .bind(host)
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -211,11 +232,12 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS ssh_targets (\
              host TEXT PRIMARY KEY, port INTEGER NOT NULL DEFAULT 22, username TEXT NOT NULL, label TEXT, \
              device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, created_at TEXT NOT NULL, \
-             updated_at TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+             updated_at TEXT NOT NULL, deleted INTEGER DEFAULT 0, delete_epoch INTEGER NOT NULL DEFAULT 0)",
         )
         .execute(&pool)
         .await
         .unwrap();
+        SyncDeleteSequenceRepo::ensure_schema(&pool).await.unwrap();
         SshTargetRepo::new(pool)
     }
 
@@ -233,6 +255,7 @@ mod tests {
             created_at: "2024-01-01T00:00:00+00:00".to_string(),
             updated_at: "2024-01-01T00:00:00+00:00".to_string(),
             deleted: false,
+            delete_epoch: 0,
         }
     }
 
@@ -281,6 +304,7 @@ mod tests {
         let got = repo.get("10.0.0.1").await.unwrap().unwrap();
         assert!(got.deleted);
         assert_eq!(got.vector_clock.get("d1"), Some(&2));
+        assert!(got.delete_epoch > 0);
     }
 
     #[tokio::test]

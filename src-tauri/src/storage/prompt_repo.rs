@@ -14,6 +14,8 @@
 
 use crate::error::AppError;
 use crate::models::prompt::PromptRow;
+use crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo;
+use crate::storage::sync_request_ledger_repo::DOMAIN_PROMPTS;
 use sqlx::sqlite::SqlitePool;
 use sqlx::{Row, Sqlite, Transaction};
 use std::collections::HashMap;
@@ -31,12 +33,19 @@ impl PromptRepo {
     }
 
     /// 将数据库一行映射为 PromptRow（JSON 字段反序列化、deleted int→bool）。
+    ///
+    /// Business Logic: 同步与列表都需要从 SQLite 行还原完整 Prompt 实体。
+    /// Code Logic: tags/vector_clock 反序列化；delete_epoch 缺列或读失败时默认 0。
     fn row_to_prompt(row: &sqlx::sqlite::SqliteRow) -> Result<PromptRow, AppError> {
         let tags_text: String = row.try_get("tags")?;
         let vc_text: String = row.try_get("vector_clock")?;
         let deleted_int: i64 = row.try_get("deleted")?;
         let tags: Vec<String> = serde_json::from_str(&tags_text)?;
         let vector_clock: HashMap<String, u64> = serde_json::from_str(&vc_text)?;
+        let delete_epoch = row
+            .try_get::<i64, _>("delete_epoch")
+            .unwrap_or(0)
+            .max(0) as u64;
         Ok(PromptRow {
             id: row.try_get("id")?,
             title: row.try_get("title")?,
@@ -47,6 +56,7 @@ impl PromptRepo {
             device_id: row.try_get("device_id")?,
             vector_clock,
             deleted: deleted_int != 0,
+            delete_epoch,
         })
     }
 
@@ -64,7 +74,7 @@ impl PromptRepo {
             // search: title/content LIKE '%kw%'，排除已删除，updated_at DESC
             let pattern = format!("%{}%", kw);
             let rows = sqlx::query(
-                "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted \
+                "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
                  FROM prompts WHERE deleted = 0 AND (title LIKE ? OR content LIKE ?) ORDER BY updated_at DESC",
             )
             .bind(&pattern)
@@ -75,7 +85,7 @@ impl PromptRepo {
         } else if let Some(t) = tag {
             // tag: json_each 展开 tags，与给定标签交集匹配，DISTINCT 去重
             let rows = sqlx::query(
-                "SELECT DISTINCT p.id, p.title, p.content, p.tags, p.created_at, p.updated_at, p.device_id, p.vector_clock, p.deleted \
+                "SELECT DISTINCT p.id, p.title, p.content, p.tags, p.created_at, p.updated_at, p.device_id, p.vector_clock, p.deleted, p.delete_epoch \
                  FROM prompts p, json_each(p.tags) AS t \
                  WHERE p.deleted = 0 AND t.value = ? ORDER BY p.updated_at DESC",
             )
@@ -86,7 +96,7 @@ impl PromptRepo {
         } else {
             // 无参数：全部未删除，updated_at DESC
             let rows = sqlx::query(
-                "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted \
+                "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
                  FROM prompts WHERE deleted = 0 ORDER BY updated_at DESC",
             )
             .fetch_all(&self.db)
@@ -98,7 +108,7 @@ impl PromptRepo {
     /// 按主键查询单条 Prompt（含已删除记录，与 Python get_by_id 一致）。
     pub async fn get(&self, id: &str) -> Result<Option<PromptRow>, AppError> {
         let row = sqlx::query(
-            "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted \
+            "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
              FROM prompts WHERE id = ?",
         )
         .bind(id)
@@ -115,8 +125,8 @@ impl PromptRepo {
         let tags_text = serde_json::to_string(&p.tags)?;
         let vc_text = serde_json::to_string(&p.vector_clock)?;
         sqlx::query(
-            "INSERT INTO prompts (id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO prompts (id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&p.id)
         .bind(&p.title)
@@ -127,17 +137,18 @@ impl PromptRepo {
         .bind(&p.device_id)
         .bind(vc_text)
         .bind(p.deleted as i64)
+        .bind(p.delete_epoch as i64)
         .execute(&self.db)
         .await?;
         Ok(())
     }
 
-    /// 全字段更新一条 Prompt（含 vector_clock / deleted）。
+    /// 全字段更新一条 Prompt（含 vector_clock / deleted / delete_epoch）。
     pub async fn update(&self, p: &PromptRow) -> Result<(), AppError> {
         let tags_text = serde_json::to_string(&p.tags)?;
         let vc_text = serde_json::to_string(&p.vector_clock)?;
         sqlx::query(
-            "UPDATE prompts SET title = ?, content = ?, tags = ?, updated_at = ?, device_id = ?, vector_clock = ?, deleted = ? WHERE id = ?",
+            "UPDATE prompts SET title = ?, content = ?, tags = ?, updated_at = ?, device_id = ?, vector_clock = ?, deleted = ?, delete_epoch = ? WHERE id = ?",
         )
         .bind(&p.title)
         .bind(&p.content)
@@ -146,19 +157,21 @@ impl PromptRepo {
         .bind(&p.device_id)
         .bind(vc_text)
         .bind(p.deleted as i64)
+        .bind(p.delete_epoch as i64)
         .bind(&p.id)
         .execute(&self.db)
         .await?;
         Ok(())
     }
 
-    /// 软删除：标记 deleted=1，更新 updated_at，并写入推进后的 vector_clock。
+    /// 软删除：同事务铸造 delete_epoch 并写入 tombstone 字段。
     ///
-    /// Business Logic: CRDT 删除是一次写入，需推进本端 vector_clock 使对端感知。
-    ///     Python handler 自增了 clock 但只调 repo.delete(id)（未落库 clock），此处修正：
-    ///     接收已自增的 vector_clock 参数一并写回。
-    /// Code Logic: 对照 prompt_repo.py delete 的 deleted=1 + updated_at=now，
-    ///     额外 SET vector_clock = ?。
+    /// Business Logic（为什么需要这个函数）:
+    ///     CRDT 删除是一次写入，需推进本端 vector_clock 使对端感知；同时铸造单调
+    ///     delete_epoch，供 peer 水位 ack 与安全 GC。epoch 与 tombstone 必须同事务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     begin → mint_on_tx(DOMAIN_PROMPTS) → UPDATE deleted/updated_at/vector_clock/delete_epoch → commit。
     pub async fn soft_delete(
         &self,
         id: &str,
@@ -166,14 +179,18 @@ impl PromptRepo {
         vector_clock: &HashMap<String, u64>,
     ) -> Result<(), AppError> {
         let vc_text = serde_json::to_string(vector_clock)?;
+        let mut tx = self.db.begin().await?;
+        let epoch = SyncDeleteSequenceRepo::mint_on_tx(&mut tx, DOMAIN_PROMPTS).await?;
         sqlx::query(
-            "UPDATE prompts SET deleted = 1, updated_at = ?, vector_clock = ? WHERE id = ?",
+            "UPDATE prompts SET deleted = 1, updated_at = ?, vector_clock = ?, delete_epoch = ? WHERE id = ?",
         )
         .bind(now)
         .bind(vc_text)
+        .bind(epoch as i64)
         .bind(id)
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -186,7 +203,7 @@ impl PromptRepo {
     /// Code Logic: SELECT 全字段（无 deleted 过滤），不排序（同步用，顺序无关）。
     pub async fn get_all_for_sync(&self) -> Result<Vec<PromptRow>, AppError> {
         let rows = sqlx::query(
-            "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted \
+            "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
              FROM prompts",
         )
         .fetch_all(&self.db)
@@ -263,8 +280,8 @@ impl PromptRepo {
             let vc_text = serde_json::to_string(&p.vector_clock)?;
             sqlx::query(
                 "INSERT OR REPLACE INTO prompts \
-                 (id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&p.id)
             .bind(&p.title)
@@ -275,6 +292,7 @@ impl PromptRepo {
             .bind(&p.device_id)
             .bind(vc_text)
             .bind(p.deleted as i64)
+            .bind(p.delete_epoch as i64)
             .execute(&mut **tx)
             .await?;
         }
@@ -331,11 +349,13 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS prompts (\
              id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL, \
              tags TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, \
-             device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+             device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, \
+             delete_epoch INTEGER NOT NULL DEFAULT 0)",
         )
         .execute(&pool)
         .await
         .unwrap();
+        SyncDeleteSequenceRepo::ensure_schema(&pool).await.unwrap();
         PromptRepo::new(pool)
     }
 
@@ -353,7 +373,24 @@ mod tests {
             device_id: "d1".to_string(),
             vector_clock,
             deleted: false,
+            delete_epoch: 0,
         }
+    }
+
+    /// soft_delete 铸造 delete_epoch > 0。
+    #[tokio::test]
+    async fn soft_delete_mints_delete_epoch() {
+        let repo = setup_repo().await;
+        repo.create(&prompt("p1")).await.unwrap();
+        let mut vc = HashMap::new();
+        vc.insert("d1".to_string(), 2u64);
+        repo.soft_delete("p1", "2026-07-14T01:00:00Z", &vc)
+            .await
+            .unwrap();
+        let got = repo.get("p1").await.unwrap().unwrap();
+        assert!(got.deleted);
+        assert!(got.delete_epoch > 0);
+        assert_eq!(got.vector_clock.get("d1"), Some(&2));
     }
 
     /// 中途注入失败时整批回滚，不得留下半批次。

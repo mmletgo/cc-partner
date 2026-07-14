@@ -37,6 +37,9 @@ pub struct SshTargetRow {
     pub updated_at: String,
     /// 软删除标记
     pub deleted: bool,
+    /// 本域删除序号（tombstone 水位/GC 用；未删除为 0；旧 JSON 缺省 0）
+    #[serde(default)]
+    pub delete_epoch: u64,
 }
 
 /// SSH 目标 前端 DTO（camelCase，对照前端 types.ts）。

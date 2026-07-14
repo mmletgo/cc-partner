@@ -270,3 +270,47 @@ CREATE TABLE IF NOT EXISTS sync_request_ledger (
     created_at TEXT NOT NULL,
     UNIQUE(claimed_device_id, domain, client_request_id)
 );
+
+-- content_versions 表：并发 LWW 的 conflict 副本与有限历史（N2）
+-- 实际建表：ContentVersionRepo::ensure_schema
+CREATE TABLE IF NOT EXISTS content_versions (
+    id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    source_device TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    UNIQUE(domain, item_id, source_device, content_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_content_versions_item ON content_versions(domain, item_id, created_at);
+
+-- sync_peer_watermarks：peer/domain 已确认的 delete epoch 与 last_seen（N2 GC）
+-- 实际建表：SyncWatermarkRepo::ensure_schema
+CREATE TABLE IF NOT EXISTS sync_peer_watermarks (
+    peer_device_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    acked_delete_epoch INTEGER NOT NULL DEFAULT 0,
+    last_seen_at TEXT NOT NULL,
+    PRIMARY KEY (peer_device_id, domain)
+);
+
+-- sync_domain_delete_sequences：每 domain 单调 deleteEpoch 序列（N2）
+-- 实际建表：SyncDeleteSequenceRepo::ensure_schema
+CREATE TABLE IF NOT EXISTS sync_domain_delete_sequences (
+    domain TEXT PRIMARY KEY,
+    next_epoch INTEGER NOT NULL DEFAULT 1
+);
+
+-- sync_deletion_floors：tombstone 压缩后的 durable deletion floor（N2）
+-- 实际建表：DeletionFloorRepo::ensure_schema
+CREATE TABLE IF NOT EXISTS sync_deletion_floors (
+    domain TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    delete_vector_clock TEXT NOT NULL,
+    delete_epoch INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (domain, item_id)
+);

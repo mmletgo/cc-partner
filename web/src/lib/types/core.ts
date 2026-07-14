@@ -21,6 +21,38 @@ export interface Prompt {
 }
 
 /**
+ * 内容版本 kind：history 为普通历史，conflict 为同步冲突副本。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   Prompt/Scratchpad 版本历史 UI 需要区分冲突副本与普通历史，以展示非阻塞 Pill 与标签。
+ *
+ * Code Logic（这个类型做什么）:
+ *   对齐后端 content_versions.kind 的 camelCase 枚举。
+ */
+export type ContentVersionKind = 'history' | 'conflict';
+
+/**
+ * 内容版本摘要 DTO（对齐 list_prompt_versions / list_scratchpad_versions）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   用户需要查看版本摘要、恢复为新版本、复制冲突内容，前端不能只依赖 active 行。
+ *
+ * Code Logic（这个类型做什么）:
+ *   承载版本 id、来源设备、hash、时间、kind 与可选标题/预览/全文；content 可选，供复制时优先使用。
+ */
+export interface ContentVersion {
+  id: string;
+  sourceDevice: string;
+  contentHash: string;
+  createdAt: string;
+  kind: ContentVersionKind;
+  title?: string | null;
+  contentPreview?: string | null;
+  /** 可选全文；后端若只返回预览则前端复制预览 */
+  content?: string | null;
+}
+
+/**
  * 速记本页面完整内容（对齐 Rust ScratchpadPage）。
  */
 export interface ScratchpadPage {

@@ -1563,18 +1563,23 @@ impl PeerClient {
 
     /// Prompt v2：批量 push 正文。
     ///
-    /// Business Logic: 有界 batch + client_request_id；accepted 不得大于本批条数。
-    /// Code Logic: POST `/api/sync/prompts/push-batch`。
+    /// Business Logic: 有界 batch + client_request_id + claimed_device_id（ledger 命名空间，非认证）；
+    ///     仅在完整 manifest + 成功 apply 后可在末批携带 `acked_delete_epoch` 推进对端水位。
+    /// Code Logic: POST `/api/sync/prompts/push-batch`；`acked_delete_epoch=None` 序列化为 null。
     pub async fn push_prompt_batch(
         &self,
         base_url: &str,
         items: &[crate::models::prompt::PromptRow],
         client_request_id: &str,
+        claimed_device_id: &str,
+        acked_delete_epoch: Option<u64>,
     ) -> Result<crate::net::routes::sync::PromptPushBatchResp, PeerCallError> {
         let url = format!("{base_url}/api/sync/prompts/push-batch");
         let body = serde_json::json!({
             "items": items,
             "client_request_id": client_request_id,
+            "claimed_device_id": claimed_device_id,
+            "acked_delete_epoch": acked_delete_epoch,
         });
         let data: crate::net::routes::sync::PromptPushBatchResp =
             self.request_post(&url, &body).await?;
@@ -1612,18 +1617,22 @@ impl PeerClient {
 
     /// SSH v2：批量 push。
     ///
-    /// Business Logic: accepted 不得大于本批条数。
-    /// Code Logic: POST `/api/ssh-target/sync/push-batch`。
+    /// Business Logic: accepted 不得大于本批条数；末批可带 acked_delete_epoch 推进水位。
+    /// Code Logic: POST `/api/ssh-target/sync/push-batch`；携带 claimed_device_id。
     pub async fn push_ssh_batch(
         &self,
         base_url: &str,
         items: &[crate::models::ssh_target::SshTargetRow],
         client_request_id: &str,
+        claimed_device_id: &str,
+        acked_delete_epoch: Option<u64>,
     ) -> Result<crate::net::routes::ssh_target_sync::SshPushBatchResp, PeerCallError> {
         let url = format!("{base_url}/api/ssh-target/sync/push-batch");
         let body = serde_json::json!({
             "items": items,
             "client_request_id": client_request_id,
+            "claimed_device_id": claimed_device_id,
+            "acked_delete_epoch": acked_delete_epoch,
         });
         let data: crate::net::routes::ssh_target_sync::SshPushBatchResp =
             self.request_post(&url, &body).await?;
@@ -1661,18 +1670,22 @@ impl PeerClient {
 
     /// Scratchpad v2：批量 push。
     ///
-    /// Business Logic: accepted 不得大于本批条数。
-    /// Code Logic: POST `/api/scratchpad/sync/push-batch`。
+    /// Business Logic: accepted 不得大于本批条数；末批可带 acked_delete_epoch 推进水位。
+    /// Code Logic: POST `/api/scratchpad/sync/push-batch`；携带 claimed_device_id。
     pub async fn push_scratchpad_batch(
         &self,
         base_url: &str,
         items: &[crate::models::scratchpad::ScratchpadRow],
         client_request_id: &str,
+        claimed_device_id: &str,
+        acked_delete_epoch: Option<u64>,
     ) -> Result<crate::net::routes::scratchpad_sync::ScratchpadPushBatchResp, PeerCallError> {
         let url = format!("{base_url}/api/scratchpad/sync/push-batch");
         let body = serde_json::json!({
             "items": items,
             "client_request_id": client_request_id,
+            "claimed_device_id": claimed_device_id,
+            "acked_delete_epoch": acked_delete_epoch,
         });
         let data: crate::net::routes::scratchpad_sync::ScratchpadPushBatchResp =
             self.request_post(&url, &body).await?;
@@ -2250,7 +2263,7 @@ mod tests {
         .await;
         let client = PeerClient::new();
         let err = client
-            .push_prompt_batch(&base, &[], "req-413")
+            .push_prompt_batch(&base, &[], "req-413", "test-device", None)
             .await
             .expect_err("413 must fail");
         match err {
@@ -2277,7 +2290,7 @@ mod tests {
         let client = PeerClient::new();
         // 发送 0 条，对端却 accepted=3
         let err = client
-            .push_prompt_batch(&base, &[], "req-mismatch")
+            .push_prompt_batch(&base, &[], "req-mismatch", "test-device", None)
             .await
             .expect_err("accepted mismatch must fail");
         assert!(

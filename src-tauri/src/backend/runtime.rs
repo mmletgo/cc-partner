@@ -317,6 +317,12 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     ScratchpadRepo::new(pool.clone()).ensure_schema().await?;
     // N2 sync push-batch 幂等 ledger（UNIQUE claimed_device_id+domain+client_request_id）
     crate::storage::SyncRequestLedgerRepo::ensure_schema(&pool).await?;
+    // N2 conflict/history + delete epoch watermark/floor 表
+    crate::storage::ContentVersionRepo::ensure_schema(&pool).await?;
+    crate::storage::SyncWatermarkRepo::ensure_schema(&pool).await?;
+    crate::storage::SyncDeleteSequenceRepo::ensure_schema(&pool).await?;
+    crate::storage::DeletionFloorRepo::ensure_schema(&pool).await?;
+    crate::storage::ensure_domain_delete_epoch_columns(&pool).await?;
     sqlx::query(HEALTH_SCHEMA).execute(&pool).await?;
 
     let needs_recreate: bool = sqlx::query_scalar::<_, i64>(

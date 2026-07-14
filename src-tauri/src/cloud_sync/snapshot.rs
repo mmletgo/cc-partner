@@ -57,6 +57,9 @@ struct ScratchpadCloudRow {
     vector_clock: std::collections::HashMap<String, u64>,
     #[serde(default)]
     deleted: bool,
+    /// 删除序号；旧云端 JSON 缺字段时为 0。
+    #[serde(default)]
+    delete_epoch: u64,
 }
 
 /// 旧速记本云端 JSON 缺 title 时使用的默认标题。
@@ -82,6 +85,7 @@ impl ScratchpadCloudRow {
             device_id: self.device_id,
             vector_clock: self.vector_clock,
             deleted: self.deleted,
+            delete_epoch: self.delete_epoch,
         }
     }
 }
@@ -657,6 +661,7 @@ mod tests {
             device_id: "device-remote".to_string(),
             vector_clock,
             deleted: false,
+            delete_epoch: 0,
         }
     }
 

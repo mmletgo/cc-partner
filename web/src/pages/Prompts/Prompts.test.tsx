@@ -14,7 +14,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { I18nextProvider } from 'react-i18next';
 
 import i18n from '@/i18n';
-import type { Prompt } from '@/lib/types';
+import type { ContentVersion, Prompt } from '@/lib/types';
 import { promptsApi } from '@/api/prompts';
 import { Prompts } from './Prompts';
 
@@ -27,6 +27,8 @@ vi.mock('@/api/prompts', () => ({
     remove: vi.fn(),
     sync: vi.fn(),
     get: vi.fn(),
+    listVersions: vi.fn(),
+    restoreVersion: vi.fn(),
   },
 }));
 
@@ -72,6 +74,27 @@ beforeAll(async () => {
   await i18n.changeLanguage('zh');
 });
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   版本历史契约需要稳定 ContentVersion 夹具。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回可覆盖字段的最小合法 ContentVersion。
+ */
+function buildVersion(overrides: Partial<ContentVersion> = {}): ContentVersion {
+  return {
+    id: 'v-1',
+    sourceDevice: 'device-b',
+    contentHash: 'hash-1',
+    createdAt: '2026-07-13T11:00:00.000Z',
+    kind: 'history',
+    title: 'Alpha title',
+    contentPreview: 'older preview',
+    content: 'older full content',
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.mocked(promptsApi.list).mockResolvedValue(initialPrompts);
   vi.mocked(promptsApi.listTags).mockResolvedValue(['work', 'life']);
@@ -79,6 +102,16 @@ beforeEach(() => {
   vi.mocked(promptsApi.update).mockReset();
   vi.mocked(promptsApi.remove).mockReset();
   vi.mocked(promptsApi.sync).mockReset();
+  vi.mocked(promptsApi.listVersions).mockReset();
+  vi.mocked(promptsApi.restoreVersion).mockReset();
+  vi.mocked(promptsApi.listVersions).mockResolvedValue([]);
+  vi.stubGlobal('confirm', vi.fn(() => true));
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      writeText: vi.fn().mockResolvedValue(undefined),
+    },
+  });
 });
 
 afterEach(() => {
@@ -343,5 +376,79 @@ describe('Prompts mutation UI contracts', () => {
     expect(screen.getByText('Alpha title')).toBeTruthy();
     expect(screen.getByText('Beta title')).toBeTruthy();
     expect(screen.getByTestId('prompt-sync-error').textContent).toMatch(/sync-offline|同步/);
+  });
+
+  test('conflict pill is non-blocking and version history can restore/copy', async () => {
+    const conflictVersion = buildVersion({
+      id: 'v-conflict',
+      kind: 'conflict',
+      contentPreview: 'conflict preview body',
+      content: 'conflict full body',
+      sourceDevice: 'device-remote',
+    });
+    const historyVersion = buildVersion({
+      id: 'v-history',
+      kind: 'history',
+      contentPreview: 'history preview body',
+      content: 'history full body',
+    });
+    vi.mocked(promptsApi.listVersions).mockImplementation(async (id: string) => {
+      if (id === 'p-1') return [conflictVersion, historyVersion];
+      return [];
+    });
+    vi.mocked(promptsApi.restoreVersion).mockResolvedValueOnce(
+      buildPrompt({
+        id: 'p-1',
+        title: 'Alpha restored',
+        content: 'conflict full body',
+        tags: ['work'],
+      }),
+    );
+
+    renderPrompts();
+    await screen.findByText('Alpha title');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('prompt-conflict-pill-p-1')).toBeTruthy();
+    });
+
+    // 非阻塞：冲突 Pill 存在时仍可编辑
+    const alphaCardBeforeEdit = screen.getByTestId('prompt-card-p-1');
+    const editBtn = within(alphaCardBeforeEdit).getByRole('button', {
+      name: /编辑|Edit/i,
+    }) as HTMLButtonElement;
+    expect(editBtn.disabled).toBe(false);
+    fireEvent.click(editBtn);
+    expect(await screen.findByLabelText(/Prompt 标题|Prompt title/i)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /取消|Cancel/i }));
+
+    // 编辑卡片卸载后需重新查询，避免对 stale 节点 click 无响应
+    const alphaCard = await screen.findByTestId('prompt-card-p-1');
+    fireEvent.click(within(alphaCard).getByRole('button', { name: /历史|History/i }));
+
+    const historyPanel = await screen.findByTestId('prompts-version-history');
+    expect(within(historyPanel).getByText(/conflict preview body/)).toBeTruthy();
+    expect(within(historyPanel).getByText(/冲突|Conflict/)).toBeTruthy();
+
+    fireEvent.click(
+      within(screen.getByTestId('prompts-version-item-v-conflict')).getByRole('button', {
+        name: /复制内容|Copy content/i,
+      }),
+    );
+    await waitFor(() => {
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith('conflict full body');
+    });
+
+    fireEvent.click(
+      within(screen.getByTestId('prompts-version-item-v-conflict')).getByRole('button', {
+        name: /恢复为新版本|Restore as new version/i,
+      }),
+    );
+    fireEvent.click(screen.getByTestId('prompts-version-restore-confirm'));
+
+    await waitFor(() => {
+      expect(promptsApi.restoreVersion).toHaveBeenCalledWith('p-1', 'v-conflict');
+      expect(screen.getByText('Alpha restored')).toBeTruthy();
+    });
   });
 });

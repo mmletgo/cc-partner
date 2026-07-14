@@ -17,10 +17,9 @@ use crate::models::prompt::PromptRow;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
-use crate::storage::sync_request_ledger_repo::{
-    SyncBatchOutcome, SyncRequestLedgerRepo, DOMAIN_PROMPTS,
-};
+use crate::storage::sync_request_ledger_repo::SyncRequestLedgerRepo;
 use crate::storage::PromptRepo;
+use crate::sync::apply_merge::apply_prompt_merge_batch;
 use crate::sync::merger::merge_prompt;
 use crate::sync::protocol::{
     content_sha256_hex, decode_keyset_cursor, encode_keyset_cursor, estimate_summary_wire_bytes,
@@ -127,6 +126,9 @@ pub struct PromptPushBatchReq {
     /// 收敛标签（**非**认证身份）；缺省空串，与 client_request_id 共同命名空间 ledger。
     #[serde(default)]
     pub claimed_device_id: String,
+    /// 完整 manifest + 成功 apply 后客户端回传的最高连续 ackedDeleteEpoch；缺省 None 不推进水位。
+    #[serde(default)]
+    pub acked_delete_epoch: Option<u64>,
 }
 
 /// push-batch 响应：实际落库条数（**无** serde default，缺字段解析失败）。
@@ -220,6 +222,7 @@ fn prompt_to_summary(row: &PromptRow) -> SyncSummary<String> {
         size: row.content.len() as u64,
         updated_at: row.updated_at.clone(),
         deleted: row.deleted,
+        delete_epoch: row.delete_epoch,
     }
 }
 
@@ -667,55 +670,21 @@ async fn prompt_push_batch_impl(
 
     let payload_hash = prompt_batch_payload_hash(&req.items);
     let claimed_device_id = req.claimed_device_id.trim().to_string();
+    let acked_delete_epoch = req.acked_delete_epoch;
+    let items = req.items;
 
-    let mut to_upsert: Vec<PromptRow> = Vec::new();
-    for remote in req.items {
-        match repo.get(&remote.id).await? {
-            None => to_upsert.push(remote),
-            Some(local_row) => {
-                let merged = merge_prompt(&local_row, &remote);
-                if merged.vector_clock != local_row.vector_clock
-                    || merged.updated_at != local_row.updated_at
-                    || merged.content != local_row.content
-                    || merged.title != local_row.title
-                    || merged.deleted != local_row.deleted
-                {
-                    to_upsert.push(merged);
-                }
-            }
-        }
-    }
-
-    let ledger = SyncRequestLedgerRepo::new(repo.pool());
-    // ensure schema for in-memory tests that skip runtime init_db
-    SyncRequestLedgerRepo::ensure_schema(ledger.pool())
-        .await
-        .map_err(RouteFail::from)?;
-
-    let outcome = {
-        use futures_util::FutureExt;
-        ledger
-            .apply_batch_idempotent(
-                &claimed_device_id,
-                DOMAIN_PROMPTS,
-                &client_request_id,
-                &payload_hash,
-                |tx| {
-                    let rows = to_upsert.clone();
-                    async move {
-                        if !rows.is_empty() {
-                            PromptRepo::bulk_upsert_on_tx(tx, &rows, None).await?;
-                        }
-                        Ok(SyncBatchOutcome {
-                            accepted: rows.len(),
-                        })
-                    }
-                    .boxed()
-                },
-            )
-            .await
-            .map_err(RouteFail::from)?
-    };
+    // N2: 单事务 apply_merge_batch（winner + conflict + delete_epoch + ledger + 可选 watermark ack）
+    let outcome = apply_prompt_merge_batch(
+        &repo.pool(),
+        repo,
+        &claimed_device_id,
+        &client_request_id,
+        &payload_hash,
+        &items,
+        acked_delete_epoch,
+    )
+    .await
+    .map_err(RouteFail::from)?;
 
     tracing::info!(
         "sync/prompts/push-batch: client_request_id={} accepted={}",
@@ -738,6 +707,10 @@ mod tests {
 
     /// 构造内存 SQLite prompts 表 + ledger 表与仓库。
     async fn setup_repo() -> PromptRepo {
+        use crate::storage::content_version_repo::ContentVersionRepo;
+        use crate::storage::deletion_floor_repo::DeletionFloorRepo;
+        use crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo;
+        use crate::storage::sync_watermark_repo::SyncWatermarkRepo;
         let options = SqliteConnectOptions::from_str("sqlite::memory:")
             .unwrap()
             .create_if_missing(true);
@@ -750,12 +723,16 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS prompts (\
              id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL, \
              tags TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, \
-             device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+             device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, delete_epoch INTEGER NOT NULL DEFAULT 0)",
         )
         .execute(&pool)
         .await
         .unwrap();
         SyncRequestLedgerRepo::ensure_schema(&pool).await.unwrap();
+        ContentVersionRepo::ensure_schema(&pool).await.unwrap();
+        DeletionFloorRepo::ensure_schema(&pool).await.unwrap();
+        SyncDeleteSequenceRepo::ensure_schema(&pool).await.unwrap();
+        SyncWatermarkRepo::ensure_schema(&pool).await.unwrap();
         PromptRepo::new(pool)
     }
 
@@ -773,6 +750,7 @@ mod tests {
             device_id: "d1".to_string(),
             vector_clock,
             deleted: false,
+            delete_epoch: 0,
         }
     }
 
@@ -893,6 +871,7 @@ mod tests {
                 items: vec![sample_row("a", "x", 1)],
                 client_request_id: "  ".into(),
                 claimed_device_id: "peer-1".into(),
+                acked_delete_epoch: None,
             },
         )
         .await
@@ -905,6 +884,9 @@ mod tests {
 
     #[tokio::test]
     async fn push_batch_accepts_new_items() {
+        use crate::sync::apply_merge::{apply_fail_test_lock, clear_apply_merge_fail_point};
+        let _lock = apply_fail_test_lock();
+        clear_apply_merge_fail_point();
         let repo = setup_repo().await;
         let accepted = prompt_push_batch_impl(
             &repo,
@@ -912,6 +894,7 @@ mod tests {
                 items: vec![sample_row("a", "x", 1), sample_row("b", "y", 1)],
                 client_request_id: "req-1".into(),
                 claimed_device_id: "peer-1".into(),
+                acked_delete_epoch: None,
             },
         )
         .await
@@ -923,6 +906,9 @@ mod tests {
 
     #[tokio::test]
     async fn push_batch_rejects_too_many_items() {
+        use crate::sync::apply_merge::{apply_fail_test_lock, clear_apply_merge_fail_point};
+        let _lock = apply_fail_test_lock();
+        clear_apply_merge_fail_point();
         let repo = setup_repo().await;
         let items: Vec<PromptRow> = (0..=PUSH_BATCH_ITEMS)
             .map(|i| sample_row(&format!("id-{i}"), "c", 1))
@@ -933,6 +919,7 @@ mod tests {
                 items,
                 client_request_id: "req-2".into(),
                 claimed_device_id: "peer-1".into(),
+                acked_delete_epoch: None,
             },
         )
         .await
@@ -948,17 +935,22 @@ mod tests {
     /// 同 key/同 hash 重放返回原 outcome，且不重新 apply（删库后仍不回写）。
     #[tokio::test]
     async fn replayed_batch_returns_recorded_outcome() {
+        use crate::sync::apply_merge::{apply_fail_test_lock, clear_apply_merge_fail_point};
+        let _lock = apply_fail_test_lock();
+        clear_apply_merge_fail_point();
         let repo = setup_repo().await;
         let req = PromptPushBatchReq {
             items: vec![sample_row("a", "x", 1), sample_row("b", "y", 1)],
             client_request_id: "req-replay".into(),
             claimed_device_id: "peer-1".into(),
+            acked_delete_epoch: None,
         };
         let accepted1 = prompt_push_batch_impl(&repo, {
             PromptPushBatchReq {
                 items: req.items.clone(),
                 client_request_id: req.client_request_id.clone(),
                 claimed_device_id: req.claimed_device_id.clone(),
+                acked_delete_epoch: None,
             }
         })
         .await
@@ -984,6 +976,9 @@ mod tests {
     /// 同 key 不同 payload hash → conflict（409）。
     #[tokio::test]
     async fn same_key_different_hash_is_conflict() {
+        use crate::sync::apply_merge::{apply_fail_test_lock, clear_apply_merge_fail_point};
+        let _lock = apply_fail_test_lock();
+        clear_apply_merge_fail_point();
         let repo = setup_repo().await;
         prompt_push_batch_impl(
             &repo,
@@ -991,6 +986,7 @@ mod tests {
                 items: vec![sample_row("a", "x", 1)],
                 client_request_id: "req-conflict".into(),
                 claimed_device_id: "peer-1".into(),
+                acked_delete_epoch: None,
             },
         )
         .await
@@ -1002,11 +998,146 @@ mod tests {
                 items: vec![sample_row("a", "DIFFERENT", 2)],
                 client_request_id: "req-conflict".into(),
                 claimed_device_id: "peer-1".into(),
+                acked_delete_epoch: None,
             },
         )
         .await
         .unwrap_err();
         let p2p = err.into_p2p(&ctx(), "prompts.push_batch");
         assert_eq!(p2p.status(), StatusCode::CONFLICT);
+    }
+
+    /// active 写后注入失败 → active/conflict/ledger 全回滚。
+    #[tokio::test]
+    async fn push_batch_fail_after_active_rolls_back() {
+        use crate::storage::content_version_repo::ContentVersionRepo;
+        use crate::storage::sync_request_ledger_repo::DOMAIN_PROMPTS;
+        use crate::sync::apply_merge::{
+            apply_fail_test_lock, arm_apply_merge_fail_point, ApplyMergeFailPoint,
+        };
+        let _lock = apply_fail_test_lock();
+        let _fail = arm_apply_merge_fail_point(ApplyMergeFailPoint::AfterActiveRows);
+        let repo = setup_repo().await;
+        let err = prompt_push_batch_impl(
+            &repo,
+            PromptPushBatchReq {
+                items: vec![sample_row("a", "x", 1)],
+                client_request_id: "req-fail-active".into(),
+                claimed_device_id: "peer-1".into(),
+                acked_delete_epoch: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, RouteFail::App(_)));
+        assert!(repo.get("a").await.unwrap().is_none());
+        let versions = ContentVersionRepo::new(repo.pool())
+            .list_versions(DOMAIN_PROMPTS, "a")
+            .await
+            .unwrap();
+        assert!(versions.is_empty());
+        let mut tx = repo.pool().begin().await.unwrap();
+        let row = SyncRequestLedgerRepo::get_on_tx(
+            &mut tx,
+            "peer-1",
+            DOMAIN_PROMPTS,
+            "req-fail-active",
+        )
+        .await
+        .unwrap();
+        assert!(row.is_none());
+    }
+
+    /// conflict 写后注入失败 → active 与 conflict 全回滚。
+    #[tokio::test]
+    async fn push_batch_fail_after_conflict_rolls_back() {
+        use crate::storage::content_version_repo::ContentVersionRepo;
+        use crate::storage::sync_request_ledger_repo::DOMAIN_PROMPTS;
+        use crate::sync::apply_merge::{
+            apply_fail_test_lock, arm_apply_merge_fail_point, ApplyMergeFailPoint,
+        };
+        let _lock = apply_fail_test_lock();
+        let _fail = arm_apply_merge_fail_point(ApplyMergeFailPoint::AfterConflictOrMeta);
+        let repo = setup_repo().await;
+        let mut left = sample_row("a", "left-body", 1);
+        left.device_id = "left".into();
+        left.vector_clock = {
+            let mut m = HashMap::new();
+            m.insert("left".into(), 1);
+            m
+        };
+        repo.bulk_upsert(&[left]).await.unwrap();
+        let mut right = sample_row("a", "right-body", 1);
+        right.device_id = "right".into();
+        right.updated_at = "2026-07-15T00:00:00Z".into();
+        right.vector_clock = {
+            let mut m = HashMap::new();
+            m.insert("right".into(), 1);
+            m
+        };
+        let err = prompt_push_batch_impl(
+            &repo,
+            PromptPushBatchReq {
+                items: vec![right],
+                client_request_id: "req-fail-conflict".into(),
+                claimed_device_id: "peer-1".into(),
+                acked_delete_epoch: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, RouteFail::App(_)));
+        let got = repo.get("a").await.unwrap().unwrap();
+        assert_eq!(got.content, "left-body");
+        let versions = ContentVersionRepo::new(repo.pool())
+            .list_versions(DOMAIN_PROMPTS, "a")
+            .await
+            .unwrap();
+        assert!(versions.is_empty());
+    }
+
+    /// 并发 push 产出 content_versions conflict 行。
+    #[tokio::test]
+    async fn push_batch_concurrent_writes_conflict_row() {
+        use crate::storage::content_version_repo::ContentVersionRepo;
+        use crate::storage::sync_request_ledger_repo::DOMAIN_PROMPTS;
+        use crate::sync::apply_merge::{apply_fail_test_lock, clear_apply_merge_fail_point};
+        let _lock = apply_fail_test_lock();
+        clear_apply_merge_fail_point();
+        let repo = setup_repo().await;
+        let mut left = sample_row("a", "left-body", 1);
+        left.device_id = "left".into();
+        left.vector_clock = {
+            let mut m = HashMap::new();
+            m.insert("left".into(), 1);
+            m
+        };
+        repo.bulk_upsert(&[left]).await.unwrap();
+        let mut right = sample_row("a", "right-body", 1);
+        right.device_id = "right".into();
+        right.updated_at = "2026-07-15T00:00:00Z".into();
+        right.vector_clock = {
+            let mut m = HashMap::new();
+            m.insert("right".into(), 1);
+            m
+        };
+        let accepted = prompt_push_batch_impl(
+            &repo,
+            PromptPushBatchReq {
+                items: vec![right],
+                client_request_id: "req-conflict-ok".into(),
+                claimed_device_id: "peer-1".into(),
+                acked_delete_epoch: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted, 1);
+        let versions = ContentVersionRepo::new(repo.pool())
+            .list_versions(DOMAIN_PROMPTS, "a")
+            .await
+            .unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].kind, "conflict");
     }
 }

@@ -112,6 +112,9 @@ pub struct SyncSummary<K> {
     pub updated_at: String,
     /// 是否软删除 tombstone
     pub deleted: bool,
+    /// 删除/ floor 的 domain delete epoch（非删除项为 0；旧 wire 缺字段时 default 0）
+    #[serde(default)]
+    pub delete_epoch: u64,
 }
 
 /// 无状态 manifest 分页响应。
@@ -370,6 +373,38 @@ pub fn validate_page_not_truncated<K>(page: &SyncManifestPage<K>) -> Result<(), 
     Ok(())
 }
 
+/// 仅在 manifest 完整且 apply 成功后才允许推进 peer 的 delete watermark。
+///
+/// Business Logic（为什么需要这个函数）:
+///     未拉完远端 manifest 或中途 apply 失败时，客户端不得向对端 ack delete_epoch，
+///     否则对端可能把尚未传播到本机的 tombstone 当成“全网已收齐”而 GC 掉。
+///
+/// Code Logic（这个函数做什么）:
+///     `manifest_complete && apply_ok` → `Some(max_epoch)`（含 0，表示该域当前无删除/水位底）；
+///     任一条件失败 → `None`（本轮 push 不得携带 acked_delete_epoch）。
+pub fn decide_acked_delete_epoch(
+    manifest_complete: bool,
+    apply_ok: bool,
+    max_epoch: u64,
+) -> Option<u64> {
+    if manifest_complete && apply_ok {
+        Some(max_epoch)
+    } else {
+        None
+    }
+}
+
+/// 从完整远端 manifest 摘要中取最大 delete_epoch。
+///
+/// Business Logic（为什么需要这个函数）:
+///     客户端对远端水位 ack 的目标是“本轮所见远端删除序号上界”，用于对端安全 GC。
+///
+/// Code Logic（这个函数做什么）:
+///     遍历 `delete_epoch` 取 max；空 manifest 返回 0。
+pub fn max_delete_epoch_from_summaries<K>(items: &[SyncSummary<K>]) -> u64 {
+    items.iter().map(|s| s.delete_epoch).max().unwrap_or(0)
+}
+
 /// 估算单条摘要的序列化近似字节（用于 page 预算，非精确 JSON 长度）。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -509,6 +544,7 @@ mod tests {
             size: 10,
             updated_at: "2026-07-14T00:00:00Z".to_string(),
             deleted: false,
+            delete_epoch: 0,
         }
     }
 
@@ -725,5 +761,52 @@ mod tests {
         assert_eq!(MANIFEST_PAGE_BYTES, 1_048_576);
         assert_eq!(PUSH_BATCH_ITEMS, 100);
         assert_eq!(PUSH_BATCH_BYTES, 4 * 1_048_576);
+    }
+
+    /// Business Logic: incomplete manifest / failed apply 都不得推进 delete ack。
+    /// Code Logic: 表驱动断言 decide_acked_delete_epoch 的四组合；max_epoch=0 仍可 Some(0)。
+    #[test]
+    fn incomplete_manifest_must_not_advance_delete_ack() {
+        assert_eq!(decide_acked_delete_epoch(false, true, 9), None);
+        assert_eq!(decide_acked_delete_epoch(true, false, 9), None);
+        assert_eq!(decide_acked_delete_epoch(false, false, 9), None);
+        assert_eq!(decide_acked_delete_epoch(true, true, 9), Some(9));
+        // 0 是合法水位底（空域/尚无 tombstone），不是“不 ack”
+        assert_eq!(decide_acked_delete_epoch(true, true, 0), Some(0));
+    }
+
+    #[test]
+    fn max_delete_epoch_from_summaries_tracks_upper_bound() {
+        let items: Vec<SyncSummary<String>> = vec![
+            SyncSummary {
+                id: "a".to_string(),
+                vector_clock: clock(1),
+                content_hash: "h".to_string(),
+                size: 1,
+                updated_at: "t".to_string(),
+                deleted: true,
+                delete_epoch: 3,
+            },
+            SyncSummary {
+                id: "b".to_string(),
+                vector_clock: clock(1),
+                content_hash: "h".to_string(),
+                size: 1,
+                updated_at: "t".to_string(),
+                deleted: false,
+            delete_epoch: 0,
+        },
+            SyncSummary {
+                id: "c".to_string(),
+                vector_clock: clock(1),
+                content_hash: "h".to_string(),
+                size: 1,
+                updated_at: "t".to_string(),
+                deleted: true,
+                delete_epoch: 7,
+            },
+        ];
+        assert_eq!(max_delete_epoch_from_summaries(&items), 7);
+        assert_eq!(max_delete_epoch_from_summaries::<String>(&[]), 0);
     }
 }

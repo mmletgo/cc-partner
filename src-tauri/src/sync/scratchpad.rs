@@ -5,15 +5,20 @@
 //!     并在 N2 下返回 typed domain outcome。
 //!
 //! Code Logic（这个模块做什么）:
-//!     merge helpers + scratchpad_sync_with_peer（v2 plan / typed legacy）。
+//!     merge helpers（含 conflict draft）+ scratchpad_sync_with_peer（v2 plan / typed legacy）。
 
 use crate::models::scratchpad::ScratchpadRow;
 use crate::state::AppState;
+use crate::sync::apply_merge::apply_scratchpad_pull_items;
+use crate::storage::content_version_repo::KIND_CONFLICT;
+use crate::storage::sync_request_ledger_repo::DOMAIN_SCRATCHPAD;
 use crate::sync::engine::{
     fetch_complete_remote_manifest, peer_error_to_domain_outcome,
 };
+use crate::sync::merger::{ContentVersionDraft, DomainMergeResult};
 use crate::sync::protocol::{
-    compute_sync_plan, content_sha256_hex, SyncDomainOutcome, SyncSummary, PUSH_BATCH_ITEMS,
+    compute_sync_plan, content_sha256_hex, decide_acked_delete_epoch,
+    max_delete_epoch_from_summaries, SyncDomainOutcome, SyncSummary, PUSH_BATCH_ITEMS,
 };
 use crate::sync::vector_clock::{compare, merge, ClockOrder};
 use std::collections::HashMap;
@@ -22,7 +27,7 @@ use uuid::Uuid;
 /// 判断两条速记本行是否在同步相关字段上不同。
 ///
 /// Business Logic: 合并后只有真正改变本地内容/时钟/删除状态时才需要落库。
-/// Code Logic: 比较向量时钟、更新时间、内容、device_id、deleted。
+/// Code Logic: 比较向量时钟、更新时间、内容、device_id、deleted、delete_epoch。
 pub fn scratchpad_changed(merged: &ScratchpadRow, local: &ScratchpadRow) -> bool {
     merged.vector_clock != local.vector_clock
         || merged.updated_at != local.updated_at
@@ -30,6 +35,7 @@ pub fn scratchpad_changed(merged: &ScratchpadRow, local: &ScratchpadRow) -> bool
         || merged.content != local.content
         || merged.device_id != local.device_id
         || merged.deleted != local.deleted
+        || merged.delete_epoch != local.delete_epoch
 }
 
 /// 判断 remote 是否应覆盖 local。
@@ -74,6 +80,60 @@ pub fn merge_scratchpad(local: &ScratchpadRow, remote: &ScratchpadRow) -> Scratc
     }
 }
 
+/// 计算 Scratchpad 正文指纹（title/content）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     并发 conflict 行需要稳定 content_hash，与 manifest hash 对齐。
+///
+/// Code Logic（这个函数做什么）:
+///     title/content 固定分隔后 SHA-256 hex。
+pub fn scratchpad_text_content_hash(row: &ScratchpadRow) -> String {
+    content_sha256_hex(&[row.title.as_bytes(), b"\0", row.content.as_bytes()])
+}
+
+/// 判断两条速记本正文是否不同。
+///
+/// Business Logic: 仅 title/content 不同才写 conflict。
+/// Code Logic: 字段比较。
+fn scratchpad_payload_differs(a: &ScratchpadRow, b: &ScratchpadRow) -> bool {
+    a.title != b.title || a.content != b.content
+}
+
+/// 合并两条速记本，并在并发且正文不同时产出 conflict 副本草稿。
+///
+/// Business Logic（为什么需要这个函数）:
+///     N2 要求并发不同 payload 时保留 winner 并写 conflict copy。
+///
+/// Code Logic（这个函数做什么）:
+///     `merge_scratchpad` 得 winner；Concurrent 且 title/content 不同时把 loser 做成 draft；
+///     domain=`DOMAIN_SCRATCHPAD`。
+pub fn merge_scratchpad_with_conflicts(
+    local: &ScratchpadRow,
+    remote: &ScratchpadRow,
+    now: &str,
+) -> DomainMergeResult<ScratchpadRow> {
+    let winner = merge_scratchpad(local, remote);
+    let relation = compare(&remote.vector_clock, &local.vector_clock);
+    let mut conflict_versions = Vec::new();
+    if relation == ClockOrder::Concurrent && scratchpad_payload_differs(local, remote) {
+        let remote_wins = wins_concurrent_scratchpad(local, remote);
+        let loser = if remote_wins { local } else { remote };
+        conflict_versions.push(ContentVersionDraft {
+            domain: DOMAIN_SCRATCHPAD.to_string(),
+            item_id: loser.id.clone(),
+            source_device: loser.device_id.clone(),
+            content_hash: scratchpad_text_content_hash(loser),
+            created_at: now.to_string(),
+            kind: KIND_CONFLICT.to_string(),
+            snapshot_json: serde_json::to_string(loser).unwrap_or_default(),
+        });
+    }
+    DomainMergeResult {
+        winner,
+        conflict_versions,
+    }
+}
+
 /// Scratchpad 行 → SyncSummary。
 ///
 /// Business Logic: v2 planner 需要与服务端一致的 content_hash。
@@ -88,6 +148,7 @@ pub fn scratchpad_to_summary(row: &ScratchpadRow) -> SyncSummary<String> {
         size: row.content.len() as u64,
         updated_at: row.updated_at.clone(),
         deleted: row.deleted,
+        delete_epoch: row.delete_epoch,
     }
 }
 
@@ -108,6 +169,10 @@ pub async fn scratchpad_sync_with_peer(
     }
 }
 
+/// Scratchpad v2 plan 路径。
+///
+/// Business Logic: 完整 manifest + 成功 apply 后才在末批/空 push 携带 acked_delete_epoch。
+/// Code Logic: 与 prompt_sync_v2 同构。
 async fn scratchpad_sync_v2(
     state: &AppState,
     device: &crate::models::device::Device,
@@ -127,6 +192,7 @@ async fn scratchpad_sync_v2(
         Ok(v) => v,
         Err(o) => return o,
     };
+    let max_remote_epoch = max_delete_epoch_from_summaries(&remote);
 
     let local_all = match state.scratchpad_repo.get_all_for_sync().await {
         Ok(v) => v,
@@ -156,30 +222,38 @@ async fn scratchpad_sync_v2(
             Ok(r) => r,
             Err(e) => return peer_error_to_domain_outcome(&e),
         };
-        let mut to_upsert: Vec<ScratchpadRow> = Vec::new();
-        for remote_row in resp.items {
-            match local_by_id.get(&remote_row.id) {
-                None => to_upsert.push(remote_row),
-                Some(local_row) => {
-                    let merged = merge_scratchpad(local_row, &remote_row);
-                    if scratchpad_changed(&merged, local_row) {
-                        to_upsert.push(merged);
+        if !resp.items.is_empty() {
+            match apply_scratchpad_pull_items(
+                &state.scratchpad_repo.pool(),
+                state.scratchpad_repo.as_ref(),
+                &resp.items,
+            )
+            .await
+            {
+                Ok(n) => {
+                    if n > 0 {
+                        pulled = pulled.saturating_add(n as u32);
+                        tracing::info!(
+                            "从 {} 拉取并更新了 {} 个速记本页面 (v2 apply_merge)",
+                            device.name,
+                            n
+                        );
                     }
+                }
+                Err(e) => {
+                    return SyncDomainOutcome::ProtocolError {
+                        code: format!("apply_merge_failed:{e}"),
+                    };
                 }
             }
         }
-        if !to_upsert.is_empty() {
-            let n = to_upsert.len() as u32;
-            if let Err(e) = state.scratchpad_repo.bulk_upsert(&to_upsert).await {
-                return SyncDomainOutcome::ProtocolError {
-                    code: format!("bulk_upsert_failed:{e}"),
-                };
-            }
-            pulled = pulled.saturating_add(n);
-            tracing::info!("从 {} 拉取并更新了 {} 个速记本页面 (v2)", device.name, n);
-        }
     }
 
+    // 完整 manifest + apply 成功后，仅在末批/空 push 携带 acked_delete_epoch
+    let ack_epoch = decide_acked_delete_epoch(true, true, max_remote_epoch);
+    let claimed = state.device_id.as_str();
+
+    let mut batches: Vec<Vec<ScratchpadRow>> = Vec::new();
     for chunk in plan.push_to_remote.chunks(PUSH_BATCH_ITEMS) {
         if chunk.is_empty() {
             continue;
@@ -188,25 +262,41 @@ async fn scratchpad_sync_v2(
             .iter()
             .filter_map(|id| local_by_id.get(id).cloned())
             .collect();
-        if items.is_empty() {
-            continue;
+        if !items.is_empty() {
+            batches.push(items);
         }
+    }
+
+    if batches.is_empty() {
         let req_id = Uuid::new_v4().to_string();
-        match state
+        if let Err(e) = state
             .peer_client
-            .push_scratchpad_batch(base_url, &items, &req_id)
+            .push_scratchpad_batch(base_url, &[], &req_id, claimed, ack_epoch)
             .await
         {
-            Ok(resp) => {
-                pushed = pushed.saturating_add(resp.accepted as u32);
-                tracing::info!(
-                    "向 {} 推送了 {} 个速记本页面 (v2 accepted={})",
-                    device.name,
-                    items.len(),
-                    resp.accepted
-                );
+            return peer_error_to_domain_outcome(&e);
+        }
+    } else {
+        let last = batches.len() - 1;
+        for (i, items) in batches.into_iter().enumerate() {
+            let epoch = if i == last { ack_epoch } else { None };
+            let req_id = Uuid::new_v4().to_string();
+            match state
+                .peer_client
+                .push_scratchpad_batch(base_url, &items, &req_id, claimed, epoch)
+                .await
+            {
+                Ok(resp) => {
+                    pushed = pushed.saturating_add(resp.accepted as u32);
+                    tracing::info!(
+                        "向 {} 推送了 {} 个速记本页面 (v2 accepted={})",
+                        device.name,
+                        items.len(),
+                        resp.accepted
+                    );
+                }
+                Err(e) => return peer_error_to_domain_outcome(&e),
             }
-            Err(e) => return peer_error_to_domain_outcome(&e),
         }
     }
 
@@ -354,6 +444,7 @@ mod tests {
             device_id: device_id.to_string(),
             vector_clock,
             deleted: false,
+            delete_epoch: 0,
         }
     }
 

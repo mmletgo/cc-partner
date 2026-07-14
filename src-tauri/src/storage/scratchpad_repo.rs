@@ -10,6 +10,8 @@
 
 use crate::error::AppError;
 use crate::models::scratchpad::{ScratchpadRow, SCRATCHPAD_ID};
+use crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo;
+use crate::storage::sync_request_ledger_repo::DOMAIN_SCRATCHPAD;
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::{Row, Sqlite, Transaction};
@@ -76,11 +78,15 @@ impl ScratchpadRepo {
     /// 将数据库行映射为 ScratchpadRow。
     ///
     /// Business Logic: DB 中 vector_clock/deleted 以 TEXT/INTEGER 保存，业务层需要结构化数据。
-    /// Code Logic: JSON 反序列化 vector_clock；deleted 0/1 转 bool。
+    /// Code Logic: JSON 反序列化 vector_clock；deleted 0/1 转 bool；delete_epoch 缺列默认 0。
     fn row_to_scratchpad(row: &SqliteRow) -> Result<ScratchpadRow, AppError> {
         let vc_text: String = row.try_get("vector_clock")?;
         let deleted_int: i64 = row.try_get("deleted")?;
         let vector_clock: HashMap<String, u64> = serde_json::from_str(&vc_text)?;
+        let delete_epoch = row
+            .try_get::<i64, _>("delete_epoch")
+            .unwrap_or(0)
+            .max(0) as u64;
         Ok(ScratchpadRow {
             id: row.try_get("id")?,
             title: row.try_get("title")?,
@@ -90,6 +96,7 @@ impl ScratchpadRepo {
             device_id: row.try_get("device_id")?,
             vector_clock,
             deleted: deleted_int != 0,
+            delete_epoch,
         })
     }
 
@@ -99,7 +106,7 @@ impl ScratchpadRepo {
     /// Code Logic: 查询 deleted=0 的完整行；命令层再投影为 summary DTO。
     pub async fn list_pages(&self) -> Result<Vec<ScratchpadRow>, AppError> {
         let rows = sqlx::query(
-            "SELECT id, title, content, created_at, updated_at, device_id, vector_clock, deleted \
+            "SELECT id, title, content, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
              FROM scratchpad WHERE deleted = 0 ORDER BY updated_at DESC",
         )
         .fetch_all(&self.db)
@@ -113,7 +120,7 @@ impl ScratchpadRepo {
     /// Code Logic: id 作为主键查询，返回 Option 由调用方决定 not-found 行为。
     pub async fn get(&self, page_id: &str) -> Result<Option<ScratchpadRow>, AppError> {
         let row = sqlx::query(
-            "SELECT id, title, content, created_at, updated_at, device_id, vector_clock, deleted \
+            "SELECT id, title, content, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
              FROM scratchpad WHERE id = ?",
         )
         .bind(page_id)
@@ -147,6 +154,7 @@ impl ScratchpadRepo {
             device_id: device_id.to_string(),
             vector_clock: HashMap::new(),
             deleted: false,
+            delete_epoch: 0,
         };
         self.upsert(&row).await?;
         Ok(row)
@@ -177,6 +185,7 @@ impl ScratchpadRepo {
             device_id: device_id.to_string(),
             vector_clock,
             deleted: false,
+            delete_epoch: 0,
         };
         self.upsert(&row).await?;
         Ok(row)
@@ -185,7 +194,7 @@ impl ScratchpadRepo {
     /// 更新页面内容并推进本机向量时钟。
     ///
     /// Business Logic: 页面自动保存、清空都调用此方法；每次用户文本变更都必须被同步层感知。
-    /// Code Logic: 读取旧行，保留 title/created_at，content 改为 next，updated_at=now，
+    /// Code Logic: 读取旧行，保留 title/created_at/delete_epoch，content 改为 next，updated_at=now，
     ///     vector_clock[device_id]+=1，deleted=false，然后 upsert。
     pub async fn update_page_content(
         &self,
@@ -209,6 +218,7 @@ impl ScratchpadRepo {
             device_id: device_id.to_string(),
             vector_clock,
             deleted: false,
+            delete_epoch: existing.delete_epoch,
         };
         self.upsert(&row).await?;
         Ok(row)
@@ -240,15 +250,21 @@ impl ScratchpadRepo {
             device_id: device_id.to_string(),
             vector_clock,
             deleted: false,
+            delete_epoch: existing.delete_epoch,
         };
         self.upsert(&row).await?;
         Ok(row)
     }
 
-    /// 软删除页面并推进本机向量时钟。
+    /// 软删除页面：同事务铸造 delete_epoch 并写入 tombstone 字段。
     ///
-    /// Business Logic: 删除需要传播到其他设备和云端，因此不能物理删除。
-    /// Code Logic: 保留内容与标题，设置 deleted=true，更新时间与 device_id，vector_clock[device_id]+=1。
+    /// Business Logic（为什么需要这个函数）:
+    ///     删除需要传播到其他设备和云端，因此不能物理删除；同时铸造单调
+    ///     delete_epoch，供 peer 水位 ack 与安全 GC。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读取旧行推进 vector_clock；begin → mint_on_tx(DOMAIN_SCRATCHPAD) →
+    ///     UPDATE deleted/updated_at/device_id/vector_clock/delete_epoch → commit，返回完整 Row。
     pub async fn soft_delete_page(
         &self,
         page_id: &str,
@@ -261,24 +277,39 @@ impl ScratchpadRepo {
         let mut vector_clock = existing.vector_clock.clone();
         let counter = vector_clock.entry(device_id.to_string()).or_insert(0);
         *counter += 1;
-        let row = ScratchpadRow {
+        let updated_at = Self::now_iso();
+        let vc_text = serde_json::to_string(&vector_clock)?;
+        let mut tx = self.db.begin().await?;
+        let delete_epoch =
+            SyncDeleteSequenceRepo::mint_on_tx(&mut tx, DOMAIN_SCRATCHPAD).await?;
+        sqlx::query(
+            "UPDATE scratchpad SET deleted = 1, updated_at = ?, device_id = ?, vector_clock = ?, delete_epoch = ? WHERE id = ?",
+        )
+        .bind(&updated_at)
+        .bind(device_id)
+        .bind(vc_text)
+        .bind(delete_epoch as i64)
+        .bind(page_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(ScratchpadRow {
             id: existing.id,
             title: existing.title,
             content: existing.content,
             created_at: existing.created_at,
-            updated_at: Self::now_iso(),
+            updated_at,
             device_id: device_id.to_string(),
             vector_clock,
             deleted: true,
-        };
-        self.upsert(&row).await?;
-        Ok(row)
+            delete_epoch,
+        })
     }
 
     /// 返回全部页面（含 deleted 软删除记录），用于跨设备同步和云同步。
     pub async fn get_all_for_sync(&self) -> Result<Vec<ScratchpadRow>, AppError> {
         let rows = sqlx::query(
-            "SELECT id, title, content, created_at, updated_at, device_id, vector_clock, deleted \
+            "SELECT id, title, content, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
              FROM scratchpad",
         )
         .fetch_all(&self.db)
@@ -346,8 +377,8 @@ impl ScratchpadRepo {
             let vc_text = serde_json::to_string(&row.vector_clock)?;
             sqlx::query(
                 "INSERT OR REPLACE INTO scratchpad \
-                 (id, title, content, created_at, updated_at, device_id, vector_clock, deleted) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                 (id, title, content, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&row.id)
             .bind(&row.title)
@@ -357,6 +388,7 @@ impl ScratchpadRepo {
             .bind(&row.device_id)
             .bind(vc_text)
             .bind(row.deleted as i64)
+            .bind(row.delete_epoch as i64)
             .execute(&mut **tx)
             .await?;
         }
@@ -376,8 +408,8 @@ impl ScratchpadRepo {
         let vc_text = serde_json::to_string(&row.vector_clock)?;
         sqlx::query(
             "INSERT OR REPLACE INTO scratchpad \
-             (id, title, content, created_at, updated_at, device_id, vector_clock, deleted) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, title, content, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.title)
@@ -387,6 +419,7 @@ impl ScratchpadRepo {
         .bind(&row.device_id)
         .bind(vc_text)
         .bind(row.deleted as i64)
+        .bind(row.delete_epoch as i64)
         .execute(&self.db)
         .await?;
         Ok(())
@@ -410,6 +443,26 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(schema).execute(&pool).await.unwrap();
+        SyncDeleteSequenceRepo::ensure_schema(&pool).await.unwrap();
+        // 测试用：幂等补齐本表 delete_epoch（不调用全域 helper，避免缺表）
+        let cols = sqlx::query("PRAGMA table_info(scratchpad)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let has = cols.iter().any(|r| {
+            use sqlx::Row;
+            r.try_get::<String, _>("name")
+                .map(|n| n == "delete_epoch")
+                .unwrap_or(false)
+        });
+        if !has {
+            sqlx::query(
+                "ALTER TABLE scratchpad ADD COLUMN delete_epoch INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
         let repo = ScratchpadRepo::new(pool);
         repo.ensure_schema().await.unwrap();
         repo
@@ -421,7 +474,7 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS scratchpad (\
              id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '速记本', content TEXT NOT NULL, \
              created_at TEXT NOT NULL, updated_at TEXT NOT NULL, device_id TEXT NOT NULL, \
-             vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+             vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, delete_epoch INTEGER NOT NULL DEFAULT 0)",
         )
         .await
     }
@@ -446,6 +499,7 @@ mod tests {
             device_id: "device-a".to_string(),
             vector_clock: HashMap::new(),
             deleted: false,
+            delete_epoch: 0,
         };
         repo.upsert(&legacy).await.unwrap();
 
@@ -527,15 +581,17 @@ mod tests {
         assert_eq!(renamed.vector_clock.get("device-a"), Some(&1));
     }
 
-    /// 删除页面是软删除，且同步读取仍包含删除记录。
+    /// 删除页面是软删除，同步读取仍包含删除记录，且 delete_epoch > 0。
     #[tokio::test]
     async fn soft_delete_page_marks_deleted_and_get_all_for_sync_includes_it() {
         let repo = setup_repo().await;
         let initial = repo.get_or_create_default_page("device-a").await.unwrap();
 
-        repo.soft_delete_page(&initial.id, "device-a")
+        let deleted = repo
+            .soft_delete_page(&initial.id, "device-a")
             .await
             .unwrap();
+        assert!(deleted.delete_epoch > 0);
 
         let listed = repo.list_pages().await.unwrap();
         let synced = repo.get_all_for_sync().await.unwrap();
@@ -543,6 +599,7 @@ mod tests {
         assert_eq!(synced.len(), 1);
         assert!(synced[0].deleted);
         assert_eq!(synced[0].vector_clock.get("device-a"), Some(&1));
+        assert!(synced[0].delete_epoch > 0);
     }
 
     /// 同步读取返回全部页面行，便于 cloud/P2P 复用同一实体。
@@ -577,6 +634,7 @@ mod tests {
             device_id: "d1".to_string(),
             vector_clock: vc.clone(),
             deleted: false,
+            delete_epoch: 0,
         };
         let b = ScratchpadRow {
             id: "b".to_string(),
@@ -587,6 +645,7 @@ mod tests {
             device_id: "d1".to_string(),
             vector_clock: vc,
             deleted: false,
+            delete_epoch: 0,
         };
         repo.bulk_upsert_inject_fail_at(&[a, b], Some(1))
             .await
