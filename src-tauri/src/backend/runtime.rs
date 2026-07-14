@@ -577,6 +577,43 @@ pub async fn start_gui_backend_services(state: &AppState) -> Result<BackendRunti
 pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
     match mode {
         BackendRuntimeMode::Headless => {
+            // 启动时诚实回收崩溃遗留的 recovery Applying 任务，禁止伪装成功。
+            {
+                let reclaim_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    let service =
+                        crate::backup::restore::BackupRestoreService::new(reclaim_state);
+                    match service.reclaim_on_startup().await {
+                        Ok(n) if n > 0 => {
+                            tracing::warn!("已回收 {n} 个卡住的 recovery Applying 任务为 Failed");
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("回收卡住 recovery jobs 失败: {e}");
+                        }
+                    }
+                });
+            }
+            // 周期性 tombstone → deletion floor GC（与同步结束后的 best-effort 互补）
+            {
+                let gc_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    // 启动后稍等再跑一次，避免与 recovery reclaim 抢写
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    loop {
+                        ticker.tick().await;
+                        match crate::sync::engine::run_tombstone_gc_best_effort(&gc_state).await {
+                            Ok(n) if n > 0 => {
+                                tracing::info!("后台 tombstone GC 压缩了 {n} 条");
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!("后台 tombstone GC 失败: {e}"),
+                        }
+                    }
+                });
+            }
             start_cancelled_task_once(&state.cc_collector_cancel, "CC 历史采集器", || {
                 crate::cc::collector::start(state.clone())
             });

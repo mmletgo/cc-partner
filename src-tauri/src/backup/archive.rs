@@ -36,6 +36,8 @@ pub const DOMAIN_SCRATCHPAD: &str = "scratchpad";
 pub const DOMAIN_SSH_TARGETS: &str = "sshTargets";
 pub const DOMAIN_CLAUDE_MD: &str = "claudeMd";
 pub const DOMAIN_DELETION_FLOORS: &str = "deletionFloors";
+/// conflict/history 版本快照领域 token。
+pub const DOMAIN_CONTENT_VERSIONS: &str = "contentVersions";
 pub const DOMAIN_CONFIG_REPORT: &str = "configReport";
 
 /// 流式限制集合（测试可缩小）。
@@ -98,6 +100,7 @@ pub async fn create_export_archive(
     let ssh_targets = state.ssh_target_repo.get_all_for_sync().await?;
     let claude_md = state.claude_md_repo.get().await?;
     let floors = export_deletion_floors(&state.db).await?;
+    let content_versions = export_content_versions(&state.db).await?;
 
     let config_report = build_config_report(state);
 
@@ -127,6 +130,10 @@ pub async fn create_export_archive(
         serde_json::to_vec_pretty(&floors)?,
     );
     files_payload.insert(
+        format!("{DOMAIN_CONTENT_VERSIONS}/items.json"),
+        serde_json::to_vec_pretty(&content_versions)?,
+    );
+    files_payload.insert(
         format!("{DOMAIN_CONFIG_REPORT}/report.json"),
         serde_json::to_vec_pretty(&config_report)?,
     );
@@ -147,6 +154,7 @@ pub async fn create_export_archive(
             DOMAIN_SSH_TARGETS.into(),
             DOMAIN_CLAUDE_MD.into(),
             DOMAIN_DELETION_FLOORS.into(),
+            DOMAIN_CONTENT_VERSIONS.into(),
             DOMAIN_CONFIG_REPORT.into(),
         ],
         files: file_hashes.clone(),
@@ -208,6 +216,22 @@ async fn export_deletion_floors(
         out.extend(repo.list_for_domain(domain).await?);
     }
     Ok(out)
+}
+
+/// 导出全部 content_versions（conflict/history）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     并发 conflict 副本与 history 若不进备份，恢复后无法在 UI 找回 loser 正文。
+///
+/// Code Logic（这个函数做什么）:
+///     ensure_schema 后 `ContentVersionRepo::list_all`。
+async fn export_content_versions(
+    pool: &sqlx::sqlite::SqlitePool,
+) -> Result<Vec<crate::storage::content_version_repo::ContentVersion>, AppError> {
+    crate::storage::ContentVersionRepo::ensure_schema(pool).await?;
+    crate::storage::ContentVersionRepo::new(pool.clone())
+        .list_all()
+        .await
 }
 
 /// 配置只读 report（永不写回）。
@@ -399,6 +423,13 @@ pub fn inspect_archive_streaming(
         &mut domain_counts,
         &mut warnings,
     );
+    count_domain(
+        &computed_hashes,
+        DOMAIN_CONTENT_VERSIONS,
+        "contentVersions/items.json",
+        &mut domain_counts,
+        &mut warnings,
+    );
     if computed_hashes.contains_key("configReport/report.json") {
         domain_counts.insert(DOMAIN_CONFIG_REPORT.into(), 1);
         warnings.push("config report 仅供预览，恢复时不会写回".into());
@@ -461,6 +492,27 @@ pub fn read_entry_bytes(
         out.extend_from_slice(&buf[..n]);
     }
     Ok(out)
+}
+
+/// 读取 entry 并与 inspect manifest 中的 SHA-256 再比对一次。
+///
+/// Business Logic（为什么需要这个函数）:
+///     inspect 与 apply 之间文件可能被篡改；写库前必须对每个 entry 再验哈希，拒绝静默导入。
+///
+/// Code Logic（这个函数做什么）:
+///     `read_entry_bytes` → `sha256_hex` 与 `expected_hash` 比较；不匹配返回带 entry 名的错误。
+pub fn read_entry_bytes_verified(
+    path: &Path,
+    entry_name: &str,
+    expected_hash: &str,
+    limits: ArchiveLimits,
+) -> Result<Vec<u8>, AppError> {
+    let bytes = read_entry_bytes(path, entry_name, limits)?;
+    let actual = sha256_hex(&bytes);
+    if actual != expected_hash {
+        return Err(AppError::generic(format!("校验和不匹配: {entry_name}")));
+    }
+    Ok(bytes)
 }
 
 /// 拒绝 zip-slip / 绝对路径 / 父目录穿越。
@@ -647,5 +699,34 @@ mod tests {
     fn absolute_and_symlink_guards() {
         assert!(validate_entry_name("C:\\windows").is_err());
         // symlink 检测依赖 unix_mode；无 mode 时 false — 单独路径测试足够
+    }
+
+    #[test]
+    fn rehash_mismatch_rejects_verified_read() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ok.zip");
+        let mut files = BTreeMap::new();
+        files.insert("prompts/items.json".into(), b"[]".to_vec());
+        write_test_archive(&path, &sample_manifest(), &files).unwrap();
+        let wrong = sha256_hex(b"[1]");
+        let err = read_entry_bytes_verified(
+            &path,
+            "prompts/items.json",
+            &wrong,
+            ArchiveLimits::default(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("校验和") || format!("{err}").contains("不匹配"),
+            "{err}"
+        );
+        let ok = read_entry_bytes_verified(
+            &path,
+            "prompts/items.json",
+            &sha256_hex(b"[]"),
+            ArchiveLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(ok, b"[]");
     }
 }
