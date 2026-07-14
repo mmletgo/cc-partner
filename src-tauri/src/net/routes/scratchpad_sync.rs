@@ -13,7 +13,6 @@ use crate::models::scratchpad::ScratchpadRow;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
-use crate::storage::sync_request_ledger_repo::SyncRequestLedgerRepo;
 use crate::storage::ScratchpadRepo;
 use crate::sync::apply_merge::apply_scratchpad_merge_batch;
 use crate::sync::protocol::{
@@ -435,10 +434,7 @@ async fn scratchpad_manifest_page_impl(
         None
     };
 
-    Ok(SyncManifestPage {
-        items,
-        next_cursor,
-    })
+    Ok(SyncManifestPage { items, next_cursor })
 }
 
 /// POST /api/scratchpad/sync/items：按 id 批取正文。
@@ -590,6 +586,7 @@ async fn scratchpad_push_batch_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::sync_request_ledger_repo::SyncRequestLedgerRepo;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
 
@@ -612,10 +609,18 @@ mod tests {
         .await
         .unwrap();
         SyncRequestLedgerRepo::ensure_schema(&pool).await.unwrap();
-        crate::storage::content_version_repo::ContentVersionRepo::ensure_schema(&pool).await.unwrap();
-        crate::storage::deletion_floor_repo::DeletionFloorRepo::ensure_schema(&pool).await.unwrap();
-        crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo::ensure_schema(&pool).await.unwrap();
-        crate::storage::sync_watermark_repo::SyncWatermarkRepo::ensure_schema(&pool).await.unwrap();
+        crate::storage::content_version_repo::ContentVersionRepo::ensure_schema(&pool)
+            .await
+            .unwrap();
+        crate::storage::deletion_floor_repo::DeletionFloorRepo::ensure_schema(&pool)
+            .await
+            .unwrap();
+        crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo::ensure_schema(&pool)
+            .await
+            .unwrap();
+        crate::storage::sync_watermark_repo::SyncWatermarkRepo::ensure_schema(&pool)
+            .await
+            .unwrap();
         let _ = sqlx::query(
             "ALTER TABLE scratchpad ADD COLUMN delete_epoch INTEGER NOT NULL DEFAULT 0",
         )

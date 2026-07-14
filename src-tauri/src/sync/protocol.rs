@@ -249,6 +249,7 @@ impl ManifestStreamState {
     /// Business Logic: planner 仅允许在完整流结束后运行。
     ///
     /// Code Logic: 返回 `finished` 标志。
+    #[allow(dead_code)] // intentional public stream completeness probe
     pub fn is_complete(&self) -> bool {
         self.finished
     }
@@ -340,6 +341,7 @@ pub fn validate_manifest_page_bounds(
 ///
 /// Code Logic（这个函数做什么）:
 ///     item_count > PUSH_BATCH_ITEMS 或 estimated_bytes > PUSH_BATCH_BYTES → Err。
+#[allow(dead_code)] // intentional public bounds helper for clients/routes
 pub fn validate_push_batch_bounds(
     item_count: usize,
     estimated_bytes: usize,
@@ -413,11 +415,7 @@ pub fn max_delete_epoch_from_summaries<K>(items: &[SyncSummary<K>]) -> u64 {
 /// Code Logic（这个函数做什么）:
 ///     id 字节 + hash + updated_at + 每 clock 项 (key+8) + 固定 overhead。
 pub fn estimate_summary_wire_bytes<K: AsRef<str>>(summary: &SyncSummary<K>) -> usize {
-    let clock_bytes: usize = summary
-        .vector_clock
-        .iter()
-        .map(|(k, _)| k.len() + 8)
-        .sum();
+    let clock_bytes: usize = summary.vector_clock.keys().map(|k| k.len() + 8).sum();
     summary.id.as_ref().len()
         + summary.content_hash.len()
         + summary.updated_at.len()
@@ -438,10 +436,7 @@ pub fn estimate_summary_wire_bytes<K: AsRef<str>>(summary: &SyncSummary<K>) -> u
 ///     - 双方都有：Equal 且 hash/deleted 相同 → unchanged；
 ///       After → push；Before → fetch；Concurrent 或 Equal 但载荷不一致 → 双向。
 ///     调用方须已保证流完整结束且页校验通过；本函数不做网络/DB。
-pub fn compute_sync_plan<K>(
-    local: &[SyncSummary<K>],
-    remote: &[SyncSummary<K>],
-) -> SyncPlan<K>
+pub fn compute_sync_plan<K>(local: &[SyncSummary<K>], remote: &[SyncSummary<K>]) -> SyncPlan<K>
 where
     K: Clone + Ord,
 {
@@ -625,7 +620,10 @@ mod tests {
         let plan = compute_sync_plan(&local, &remote);
         assert_eq!(plan.unchanged, 1);
         assert_eq!(plan.push_to_remote, vec!["c".to_string(), "e".to_string()]);
-        assert_eq!(plan.fetch_from_remote, vec!["b".to_string(), "f".to_string()]);
+        assert_eq!(
+            plan.fetch_from_remote,
+            vec!["b".to_string(), "f".to_string()]
+        );
     }
 
     #[test]
@@ -705,8 +703,8 @@ mod tests {
 
     #[test]
     fn page_item_limit_is_resource_limit() {
-        let err = validate_manifest_page_bounds(MANIFEST_PAGE_ITEMS + 1, 1)
-            .expect_err("items over");
+        let err =
+            validate_manifest_page_bounds(MANIFEST_PAGE_ITEMS + 1, 1).expect_err("items over");
         assert_eq!(
             err,
             SyncDomainOutcome::ResourceLimit {
@@ -717,8 +715,8 @@ mod tests {
 
     #[test]
     fn page_byte_limit_is_resource_limit() {
-        let err = validate_manifest_page_bounds(1, MANIFEST_PAGE_BYTES + 1)
-            .expect_err("bytes over");
+        let err =
+            validate_manifest_page_bounds(1, MANIFEST_PAGE_BYTES + 1).expect_err("bytes over");
         assert_eq!(
             err,
             SyncDomainOutcome::ResourceLimit {
@@ -729,16 +727,14 @@ mod tests {
 
     #[test]
     fn push_batch_limits_are_resource_limit() {
-        let items_err =
-            validate_push_batch_bounds(PUSH_BATCH_ITEMS + 1, 1).expect_err("items");
+        let items_err = validate_push_batch_bounds(PUSH_BATCH_ITEMS + 1, 1).expect_err("items");
         assert_eq!(
             items_err,
             SyncDomainOutcome::ResourceLimit {
                 limit: "push_batch_items".to_string()
             }
         );
-        let bytes_err =
-            validate_push_batch_bounds(1, PUSH_BATCH_BYTES + 1).expect_err("bytes");
+        let bytes_err = validate_push_batch_bounds(1, PUSH_BATCH_BYTES + 1).expect_err("bytes");
         assert_eq!(
             bytes_err,
             SyncDomainOutcome::ResourceLimit {
@@ -794,8 +790,8 @@ mod tests {
                 size: 1,
                 updated_at: "t".to_string(),
                 deleted: false,
-            delete_epoch: 0,
-        },
+                delete_epoch: 0,
+            },
             SyncSummary {
                 id: "c".to_string(),
                 vector_clock: clock(1),

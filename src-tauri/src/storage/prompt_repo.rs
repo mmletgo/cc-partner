@@ -67,10 +67,7 @@ impl PromptRepo {
         let deleted_int: i64 = row.try_get("deleted")?;
         let tags: Vec<String> = serde_json::from_str(&tags_text)?;
         let vector_clock: HashMap<String, u64> = serde_json::from_str(&vc_text)?;
-        let delete_epoch = row
-            .try_get::<i64, _>("delete_epoch")
-            .unwrap_or(0)
-            .max(0) as u64;
+        let delete_epoch = row.try_get::<i64, _>("delete_epoch").unwrap_or(0).max(0) as u64;
         Ok(PromptRow {
             id: row.try_get("id")?,
             title: row.try_get("title")?,

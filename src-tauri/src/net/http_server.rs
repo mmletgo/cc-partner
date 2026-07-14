@@ -525,18 +525,21 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         // Prompt v2 有界同步（Task 2+3；capability sync.manifest.v2 已与 ledger 原子宣告）
         .route(
             "/api/sync/prompts/manifest-page",
-            post(sync::prompt_manifest_page)
-                .layer(DefaultBodyLimit::max(sync::PROMPT_SYNC_ROUTE_BODY_LIMIT_BYTES)),
+            post(sync::prompt_manifest_page).layer(DefaultBodyLimit::max(
+                sync::PROMPT_SYNC_ROUTE_BODY_LIMIT_BYTES,
+            )),
         )
         .route(
             "/api/sync/prompts/items",
-            post(sync::prompt_items)
-                .layer(DefaultBodyLimit::max(sync::PROMPT_SYNC_ROUTE_BODY_LIMIT_BYTES)),
+            post(sync::prompt_items).layer(DefaultBodyLimit::max(
+                sync::PROMPT_SYNC_ROUTE_BODY_LIMIT_BYTES,
+            )),
         )
         .route(
             "/api/sync/prompts/push-batch",
-            post(sync::prompt_push_batch)
-                .layer(DefaultBodyLimit::max(sync::PROMPT_SYNC_ROUTE_BODY_LIMIT_BYTES)),
+            post(sync::prompt_push_batch).layer(DefaultBodyLimit::max(
+                sync::PROMPT_SYNC_ROUTE_BODY_LIMIT_BYTES,
+            )),
         )
         // P2P CLAUDE.md 主动推送协议（单例 0/1 条；push 覆盖为发送方版本）
         .route(

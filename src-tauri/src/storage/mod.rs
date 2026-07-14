@@ -31,12 +31,11 @@ pub use content_version_repo::ContentVersionRepo;
 pub use deletion_floor_repo::DeletionFloorRepo;
 // health_repo 的 ActivityRecord / HealthRepo 通过全限定路径 `crate::storage::health_repo::...`
 // 引用（health 模块内部），不在此 re-export，避免 unused_imports 告警。
-pub use maintenance_gate::{
-    begin_shared_write, begin_write_with_permit, with_shared_write_lease, DatabaseMaintenanceGate,
-    DatabaseWritePermit, ExclusiveMaintenanceLease, SharedWriteLease,
-};
+// begin_shared_write / lease helpers 由调用方经 `maintenance_gate::` 全路径导入，
+// 避免 re-export 在 lib/lib-test 间出现 unused_imports。
+pub use maintenance_gate::DatabaseMaintenanceGate;
 pub use prompt_repo::PromptRepo;
-pub use recovery_job_repo::{RecoveryJobRepo, RecoveryJobRow, RecoveryJobStatus};
+pub use recovery_job_repo::{RecoveryJobRepo, RecoveryJobRow};
 pub use scratchpad_repo::ScratchpadRepo;
 pub use ssh_target_repo::SshTargetRepo;
 pub use sync_delete_sequence_repo::SyncDeleteSequenceRepo;

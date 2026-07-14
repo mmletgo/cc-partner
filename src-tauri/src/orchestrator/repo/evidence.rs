@@ -11,7 +11,6 @@
 
 use super::helpers::*;
 use super::OrchestratorRepo;
-use crate::storage::maintenance_gate::with_shared_write_lease;
 use crate::error::AppError;
 use crate::orchestrator::claim::{
     preflight_claim_candidates, ClaimCandidate, ClaimCasOutcome, ClaimScanCursor,
@@ -27,6 +26,7 @@ use crate::orchestrator::models::{
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
 };
+use crate::storage::maintenance_gate::with_shared_write_lease;
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
@@ -61,7 +61,8 @@ impl OrchestratorRepo {
             .bind(Utc::now().to_rfc3339())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         Ok(())
     }
 
@@ -93,7 +94,8 @@ impl OrchestratorRepo {
             .bind(Utc::now().to_rfc3339())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         Ok(())
     }
 

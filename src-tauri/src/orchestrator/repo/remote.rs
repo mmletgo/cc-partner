@@ -11,9 +11,6 @@
 
 use super::helpers::*;
 use super::{IdempotentCreateTaskOutcome, OrchestratorRepo};
-use crate::storage::maintenance_gate::{
-    begin_shared_write, with_shared_write_lease,
-};
 use crate::error::AppError;
 use crate::orchestrator::claim::{
     preflight_claim_candidates, ClaimCandidate, ClaimCasOutcome, ClaimScanCursor,
@@ -29,6 +26,7 @@ use crate::orchestrator::models::{
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
 };
+use crate::storage::maintenance_gate::{begin_shared_write, with_shared_write_lease};
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
@@ -338,7 +336,8 @@ impl OrchestratorRepo {
             .bind(cutoff)
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         Ok(result.rows_affected())
     }
 
@@ -389,7 +388,8 @@ impl OrchestratorRepo {
             .bind(RemoteOutboxStatus::Pending.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
 
         if result.rows_affected() != 1 {
             return Ok(None);
@@ -423,7 +423,8 @@ impl OrchestratorRepo {
             .bind(RemoteOutboxStatus::Sending.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         self.get_remote_outbox_item(item_id)
             .await?
             .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))
@@ -453,7 +454,8 @@ impl OrchestratorRepo {
             .bind(RemoteOutboxStatus::Sending.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         self.get_remote_outbox_item(item_id)
             .await?
             .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))
@@ -488,7 +490,8 @@ impl OrchestratorRepo {
             .bind(RemoteOutboxStatus::Failed.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
 
         if result.rows_affected() == 1 {
             return self
@@ -536,7 +539,8 @@ impl OrchestratorRepo {
             .bind(RemoteOutboxStatus::Failed.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
 
         if result.rows_affected() == 1 {
             return self
@@ -577,7 +581,8 @@ impl OrchestratorRepo {
             .bind(item_id)
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         self.get_remote_outbox_item(item_id)
             .await?
             .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))
@@ -608,7 +613,8 @@ impl OrchestratorRepo {
             .bind(RemoteOutboxStatus::Sending.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         if result.rows_affected() != 1 {
             return Ok(None);
         }
@@ -640,7 +646,8 @@ impl OrchestratorRepo {
             .bind(item_id)
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         self.get_remote_outbox_item(item_id)
             .await?
             .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))

@@ -19,6 +19,7 @@ use sqlx::{Row, Sqlite, Transaction};
 use std::sync::Arc;
 
 /// 默认活跃 peer 窗口（天）。
+#[allow(dead_code)] // intentional public API for GC active-window policy
 pub const DEFAULT_ACTIVE_PEER_WINDOW_DAYS: i64 = 90;
 
 /// 单个 peer 在某 domain 上的删除水位。
@@ -26,6 +27,7 @@ pub const DEFAULT_ACTIVE_PEER_WINDOW_DAYS: i64 = 90;
 /// Business Logic: GC 需要知道 peer 已确认到哪个 delete epoch，以及是否仍活跃。
 /// Code Logic: 对应 `sync_peer_watermarks` 主键 (peer_device_id, domain)。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // intentional public API for watermark GC
 pub struct SyncPeerWatermark {
     /// 对端设备 id（收敛标签，非认证）
     pub peer_device_id: String,
@@ -40,8 +42,10 @@ pub struct SyncPeerWatermark {
 /// Peer 水位仓库。
 pub struct SyncWatermarkRepo {
     /// SQLite 连接池
+    #[allow(dead_code)] // intentional API; advance_ack_on_tx is primary production path
     db: SqlitePool,
     /// 维护闸：写路径经 shared lease，避免 restore 中途被覆盖
+    #[allow(dead_code)] // intentional API; advance_ack_on_tx is primary production path
     gate: Arc<DatabaseMaintenanceGate>,
 }
 
@@ -50,6 +54,7 @@ impl SyncWatermarkRepo {
     ///
     /// Business Logic: 单测与未接线生产路径无需注入 AppState gate。
     /// Code Logic: 委托 `with_gate` + 新建独立 `DatabaseMaintenanceGate`。
+    #[allow(dead_code)] // intentional public API / tests
     pub fn new(db: SqlitePool) -> Self {
         Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
     }
@@ -58,6 +63,7 @@ impl SyncWatermarkRepo {
     ///
     /// Business Logic: 水位写与 backup restore 互斥，必须与其它 writer 共享同一 gate。
     /// Code Logic: 持有 pool clone + `Arc<DatabaseMaintenanceGate>`。
+    #[allow(dead_code)] // intentional public API for AppState wiring
     pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
         Self { db, gate }
     }
@@ -94,6 +100,7 @@ impl SyncWatermarkRepo {
     ///
     /// Business Logic: 健康检查/manifest 交互时更新活跃性，避免离线 peer 被误判仍活跃。
     /// Code Logic: UPSERT；已存在则只更新 last_seen_at，保留 acked_delete_epoch。
+    #[allow(dead_code)] // intentional public API for peer activity tracking
     pub async fn touch_seen(
         &self,
         peer_device_id: &str,
@@ -121,6 +128,7 @@ impl SyncWatermarkRepo {
     ///
     /// Business Logic: 只有完整 manifest + delete/floor + batch 成功后才可提升水位。
     /// Code Logic: 经 `begin_shared_write` 开事务后委托 `advance_ack_on_tx`。
+    #[allow(dead_code)] // intentional public API for non-tx ack path
     pub async fn advance_ack(
         &self,
         peer_device_id: &str,
@@ -129,14 +137,7 @@ impl SyncWatermarkRepo {
         now: &str,
     ) -> Result<(), AppError> {
         let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
-        Self::advance_ack_on_tx(
-            &mut tx,
-            peer_device_id,
-            domain,
-            acked_delete_epoch,
-            now,
-        )
-        .await?;
+        Self::advance_ack_on_tx(&mut tx, peer_device_id, domain, acked_delete_epoch, now).await?;
         tx.commit().await?;
         drop(permit);
         Ok(())
@@ -177,6 +178,7 @@ impl SyncWatermarkRepo {
     ///
     /// Business Logic: GC 决策与单测需要查看 peer 水位。
     /// Code Logic: SELECT by PK。
+    #[allow(dead_code)] // intentional public API for GC/debug
     pub async fn get(
         &self,
         peer_device_id: &str,
@@ -202,6 +204,7 @@ impl SyncWatermarkRepo {
     /// Business Logic: GC 只要求活跃 peer 的 ack；离线超过窗口的 peer 不阻塞压缩，
     ///     但其回归时靠 deletion floor 拒绝复活。
     /// Code Logic: last_seen_at >= now - window；默认 90 天。
+    #[allow(dead_code)] // intentional public API for GC
     pub async fn list_active_peers(
         &self,
         domain: &str,
@@ -228,6 +231,7 @@ impl SyncWatermarkRepo {
     ///
     /// Business Logic: 任一活跃 peer 的 ack < tombstone_epoch 则阻塞压缩。
     /// Code Logic: list_active_peers 后检查 min(acked) >= epoch；无活跃 peer 时视为可 GC。
+    #[allow(dead_code)] // intentional public API for GC eligibility
     pub async fn all_active_peers_acked(
         &self,
         domain: &str,
@@ -244,6 +248,7 @@ impl SyncWatermarkRepo {
     }
 
     /// SQLite 行映射。
+    #[allow(dead_code)] // used by retained get/list helpers
     fn row_from_sqlite(row: &SqliteRow) -> Result<SyncPeerWatermark, AppError> {
         let epoch: i64 = row.try_get("acked_delete_epoch")?;
         Ok(SyncPeerWatermark {
@@ -256,6 +261,7 @@ impl SyncWatermarkRepo {
 }
 
 /// 解析 RFC3339。
+#[allow(dead_code)] // used by retained list_active_peers helper
 fn parse_rfc3339(s: &str) -> Result<DateTime<Utc>, AppError> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
@@ -287,12 +293,8 @@ mod tests {
     async fn sync_watermark_advance_only_increases() {
         let repo = setup_repo().await;
         let now = "2024-06-01T00:00:00+00:00";
-        repo.advance_ack("peer-a", "prompts", 5, now)
-            .await
-            .unwrap();
-        repo.advance_ack("peer-a", "prompts", 3, now)
-            .await
-            .unwrap();
+        repo.advance_ack("peer-a", "prompts", 5, now).await.unwrap();
+        repo.advance_ack("peer-a", "prompts", 3, now).await.unwrap();
         let row = repo.get("peer-a", "prompts").await.unwrap().unwrap();
         assert_eq!(row.acked_delete_epoch, 5);
     }
@@ -327,10 +329,7 @@ mod tests {
             .all_active_peers_acked("prompts", 5, now, DEFAULT_ACTIVE_PEER_WINDOW_DAYS)
             .await
             .unwrap();
-        assert!(
-            !ok,
-            "acked=0 的活跃 peer 必须阻塞 epoch=5 的 tombstone GC"
-        );
+        assert!(!ok, "acked=0 的活跃 peer 必须阻塞 epoch=5 的 tombstone GC");
 
         // 推进后放行
         repo.advance_ack("peer-active", "prompts", 5, now)

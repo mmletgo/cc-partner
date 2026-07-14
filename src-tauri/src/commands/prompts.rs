@@ -14,9 +14,7 @@
 use crate::error::AppError;
 use crate::models::prompt::{PromptDto, PromptRow};
 use crate::state::AppState;
-use crate::storage::content_version_repo::{
-    ContentVersion, ContentVersionRepo, KIND_HISTORY,
-};
+use crate::storage::content_version_repo::{ContentVersion, ContentVersionRepo, KIND_HISTORY};
 use crate::storage::sync_request_ledger_repo::DOMAIN_PROMPTS;
 use crate::sync::merger::prompt_text_content_hash;
 use chrono::Utc;

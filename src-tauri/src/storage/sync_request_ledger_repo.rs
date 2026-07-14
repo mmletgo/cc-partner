@@ -62,6 +62,7 @@ impl SyncRequestLedgerRepo {
     ///
     /// Business Logic: routes/测试用同一 pool 打开 ledger，保证与 bulk upsert 同库。
     /// Code Logic: 委托 `with_gate` + 新建独立 gate。
+    #[allow(dead_code)] // intentional public API / tests
     pub fn new(db: SqlitePool) -> Self {
         Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
     }
@@ -78,6 +79,7 @@ impl SyncRequestLedgerRepo {
     ///
     /// Business Logic: 调用方需要把 ledger 与领域 repo 绑到同一 pool 的事务上。
     /// Code Logic: 返回 `&SqlitePool`。
+    #[allow(dead_code)] // intentional public API for tx assembly / tests
     pub fn pool(&self) -> &SqlitePool {
         &self.db
     }

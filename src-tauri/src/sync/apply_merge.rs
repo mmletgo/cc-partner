@@ -17,12 +17,12 @@ use crate::models::scratchpad::ScratchpadRow;
 use crate::models::ssh_target::SshTargetRow;
 use crate::storage::content_version_repo::{ContentVersionRepo, KIND_CONFLICT};
 use crate::storage::deletion_floor_repo::{DeletionFloorDecision, DeletionFloorRepo};
+use crate::storage::maintenance_gate::{begin_shared_write, DatabaseMaintenanceGate};
 use crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo;
 use crate::storage::sync_request_ledger_repo::{
     SyncBatchOutcome, SyncRequestLedgerRepo, DOMAIN_PROMPTS, DOMAIN_SCRATCHPAD, DOMAIN_SSH_TARGET,
 };
 use crate::storage::sync_watermark_repo::SyncWatermarkRepo;
-use crate::storage::maintenance_gate::{begin_shared_write, DatabaseMaintenanceGate};
 use crate::storage::{PromptRepo, ScratchpadRepo, SshTargetRepo};
 use crate::sync::merger::{
     merge_prompt_with_conflicts, prompt_text_content_hash, ContentVersionDraft,
@@ -35,7 +35,6 @@ use futures_util::FutureExt;
 use sqlx::sqlite::SqlitePool;
 use sqlx::{Sqlite, Transaction};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // Fail inject
@@ -62,8 +61,10 @@ static APPLY_FAIL: AtomicU8 = AtomicU8::new(0);
 /// 串行化 inject 测试，避免并行测试互相覆盖 static 注入点。
 #[cfg(test)]
 pub fn apply_fail_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// 设置 apply_merge 失败注入点。
@@ -71,6 +72,7 @@ pub fn apply_fail_test_lock() -> std::sync::MutexGuard<'static, ()> {
 /// Business Logic: 单测在调用 push-batch 前注入，验证全量回滚。
 /// Code Logic: 仅 `cfg(any(test, debug_assertions))` 生效。
 #[cfg(any(test, debug_assertions))]
+#[allow(dead_code)] // test/debug inject API
 pub fn set_apply_merge_fail_point(point: ApplyMergeFailPoint) {
     APPLY_FAIL.store(point as u8, Ordering::SeqCst);
 }
@@ -89,6 +91,7 @@ pub fn take_apply_merge_fail_point() -> ApplyMergeFailPoint {
 
 /// 清除 inject。
 #[cfg(any(test, debug_assertions))]
+#[allow(dead_code)] // test/debug inject API
 pub fn clear_apply_merge_fail_point() {
     APPLY_FAIL.store(0, Ordering::SeqCst);
 }
@@ -98,6 +101,7 @@ pub fn clear_apply_merge_fail_point() {
 /// Business Logic: 并行 lib 测试共享 static inject；panic 路径也必须恢复。
 /// Code Logic: Drop 调 clear_apply_merge_fail_point。
 #[cfg(any(test, debug_assertions))]
+#[allow(dead_code)] // test/debug inject API
 pub struct ApplyMergeFailGuard;
 
 #[cfg(any(test, debug_assertions))]
@@ -112,6 +116,7 @@ impl Drop for ApplyMergeFailGuard {
 /// Business Logic: 保证无论成功/失败/panic 都清 inject。
 /// Code Logic: set + 返回 ApplyMergeFailGuard。
 #[cfg(any(test, debug_assertions))]
+#[allow(dead_code)] // test/debug inject API
 pub fn arm_apply_merge_fail_point(point: ApplyMergeFailPoint) -> ApplyMergeFailGuard {
     set_apply_merge_fail_point(point);
     ApplyMergeFailGuard
@@ -128,9 +133,7 @@ fn check_fail_point(point: ApplyMergeFailPoint) -> Result<(), AppError> {
     let current = APPLY_FAIL.load(Ordering::SeqCst);
     if current == point as u8 {
         let msg = match point {
-            ApplyMergeFailPoint::AfterActiveRows => {
-                "injected apply_merge fail after active rows"
-            }
+            ApplyMergeFailPoint::AfterActiveRows => "injected apply_merge fail after active rows",
             ApplyMergeFailPoint::AfterConflictOrMeta => {
                 "injected apply_merge fail after conflict/meta write"
             }
@@ -258,10 +261,8 @@ pub async fn plan_prompt_item(
                     }
                     let mut tomb = remote.clone();
                     tomb.deleted = true;
-                    tomb.vector_clock = vector_clock::merge(
-                        &floor.delete_vector_clock,
-                        &remote.vector_clock,
-                    );
+                    tomb.vector_clock =
+                        vector_clock::merge(&floor.delete_vector_clock, &remote.vector_clock);
                     return Ok((Some(tomb), conflicts));
                 }
                 DeletionFloorDecision::AcceptLive => {}
@@ -282,11 +283,7 @@ pub async fn plan_prompt_item(
                 || result.winner.delete_epoch != local_row.delete_epoch;
             if changed || !result.conflict_versions.is_empty() {
                 Ok((
-                    if changed {
-                        Some(result.winner)
-                    } else {
-                        None
-                    },
+                    if changed { Some(result.winner) } else { None },
                     result.conflict_versions,
                 ))
             } else {
@@ -507,10 +504,8 @@ pub async fn plan_ssh_item(
                     }
                     let mut tomb = remote.clone();
                     tomb.deleted = true;
-                    tomb.vector_clock = vector_clock::merge(
-                        &floor.delete_vector_clock,
-                        &remote.vector_clock,
-                    );
+                    tomb.vector_clock =
+                        vector_clock::merge(&floor.delete_vector_clock, &remote.vector_clock);
                     return Ok((Some(tomb), conflicts));
                 }
                 DeletionFloorDecision::AcceptLive => {}
@@ -531,11 +526,7 @@ pub async fn plan_ssh_item(
                 || result.winner.delete_epoch != local_row.delete_epoch;
             if changed || !result.conflict_versions.is_empty() {
                 Ok((
-                    if changed {
-                        Some(result.winner)
-                    } else {
-                        None
-                    },
+                    if changed { Some(result.winner) } else { None },
                     result.conflict_versions,
                 ))
             } else {
@@ -650,7 +641,6 @@ pub async fn apply_ssh_merge_batch(
         .await
 }
 
-
 /// 本地 pull 应用 remote SSH（无 ledger，单事务 winner/conflict/epoch）。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -699,8 +689,7 @@ pub async fn plan_scratchpad_item(
                         if local_row.deleted {
                             let mut forced = remote.clone();
                             forced.deleted = true;
-                            let merged =
-                                merge_scratchpad_with_conflicts(local_row, &forced, now);
+                            let merged = merge_scratchpad_with_conflicts(local_row, &forced, now);
                             let mut winner = merged.winner;
                             winner.deleted = true;
                             return Ok((Some(winner), merged.conflict_versions));
@@ -752,10 +741,8 @@ pub async fn plan_scratchpad_item(
                     }
                     let mut tomb = remote.clone();
                     tomb.deleted = true;
-                    tomb.vector_clock = vector_clock::merge(
-                        &floor.delete_vector_clock,
-                        &remote.vector_clock,
-                    );
+                    tomb.vector_clock =
+                        vector_clock::merge(&floor.delete_vector_clock, &remote.vector_clock);
                     return Ok((Some(tomb), conflicts));
                 }
                 DeletionFloorDecision::AcceptLive => {}
@@ -775,11 +762,7 @@ pub async fn plan_scratchpad_item(
                 || result.winner.delete_epoch != local_row.delete_epoch;
             if changed || !result.conflict_versions.is_empty() {
                 Ok((
-                    if changed {
-                        Some(result.winner)
-                    } else {
-                        None
-                    },
+                    if changed { Some(result.winner) } else { None },
                     result.conflict_versions,
                 ))
             } else {
@@ -916,7 +899,6 @@ async fn ensure_sync_schemas(pool: &SqlitePool) -> Result<(), AppError> {
 // Tests
 // ---------------------------------------------------------------------------
 
-
 /// 本地 pull 应用 remote Scratchpad（无 ledger，单事务 winner/conflict/epoch）。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -994,6 +976,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional serial inject lock across await
     async fn apply_merge_fail_after_active_rolls_back_all() {
         let _lock = apply_fail_test_lock();
         let _fail = arm_apply_merge_fail_point(ApplyMergeFailPoint::AfterActiveRows);
@@ -1027,12 +1010,15 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional serial inject lock across await
     async fn apply_merge_fail_after_conflict_rolls_back_all() {
         let _lock = apply_fail_test_lock();
         let _fail = arm_apply_merge_fail_point(ApplyMergeFailPoint::AfterConflictOrMeta);
         let (pool, repo) = setup().await;
         let local = prompt("p1", "left", "left-body", 1, false);
-        repo.bulk_upsert(&[local.clone()]).await.unwrap();
+        repo.bulk_upsert(std::slice::from_ref(&local))
+            .await
+            .unwrap();
         let mut remote = prompt("p1", "right", "right-body", 1, false);
         remote.updated_at = "2024-01-03T00:00:00+00:00".to_string();
         let err = apply_prompt_merge_batch(
@@ -1057,6 +1043,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional serial inject lock across await
     async fn apply_merge_writes_conflict_and_accepts() {
         let _lock = apply_fail_test_lock();
         clear_apply_merge_fail_point();

@@ -213,10 +213,13 @@ mod tests {
 
         let exclusive = gate.acquire_exclusive().await;
         let permit = DatabaseMaintenanceGate::exclusive_permit(&exclusive);
-        let mut tx = timeout(Duration::from_secs(2), begin_write_with_permit(&pool, &permit))
-            .await
-            .expect("must not deadlock waiting for shared")
-            .expect("begin ok");
+        let mut tx = timeout(
+            Duration::from_secs(2),
+            begin_write_with_permit(&pool, &permit),
+        )
+        .await
+        .expect("must not deadlock waiting for shared")
+        .expect("begin ok");
         sqlx::query("INSERT INTO t (id) VALUES (1)")
             .execute(&mut *tx)
             .await

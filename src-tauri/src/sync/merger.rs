@@ -216,11 +216,7 @@ fn prompt_snapshot_json(row: &PromptRow) -> String {
 ///
 /// Business Logic: 并发且正文不同时 loser 进入 content_versions(kind=conflict)。
 /// Code Logic: domain/item/source/hash/now + snapshot。
-fn conflict_draft_from_loser(
-    loser: &PromptRow,
-    domain: &str,
-    now: &str,
-) -> ContentVersionDraft {
+fn conflict_draft_from_loser(loser: &PromptRow, domain: &str, now: &str) -> ContentVersionDraft {
     ContentVersionDraft {
         domain: domain.to_string(),
         item_id: loser.id.clone(),
@@ -264,6 +260,7 @@ pub fn merge_prompt_with_conflicts(
 ///
 /// Business Logic: 明确“左右并发编辑”语义的薄包装，domain 固定 prompts。
 /// Code Logic: 委托 `merge_prompt_with_conflicts`；async 仅为对齐测试签名。
+#[allow(dead_code)] // intentional public concurrent-merge entry
 pub async fn merge_concurrent_text(
     local: PromptRow,
     remote: PromptRow,
@@ -286,7 +283,7 @@ mod tests {
         updated_at: &str,
         vc: &[(&str, u64)],
         deleted: bool,
-) -> PromptRow {
+    ) -> PromptRow {
         let vector_clock: HashMap<String, u64> =
             vc.iter().map(|(k, v)| (k.to_string(), *v)).collect();
         PromptRow {
@@ -410,7 +407,13 @@ mod tests {
     /// 并发且正文不同 → 保留 1 条 conflict 副本（loser）。
     #[tokio::test]
     async fn concurrent_text_keeps_conflict_copy() {
-        let local = row("p1", "left", "2024-01-01T00:00:00+00:00", &[("left", 1)], false);
+        let local = row(
+            "p1",
+            "left",
+            "2024-01-01T00:00:00+00:00",
+            &[("left", 1)],
+            false,
+        );
         let remote = row(
             "p1",
             "right",
@@ -435,7 +438,8 @@ mod tests {
         // 非并发：无 conflict
         let local2 = row("p1", "d1", "2024-01-01T00:00:00+00:00", &[("d1", 1)], false);
         let remote2 = row("p1", "d2", "2024-01-02T00:00:00+00:00", &[("d1", 2)], false);
-        let result2 = merge_prompt_with_conflicts(&local2, &remote2, "prompts", "2024-01-02T00:00:00+00:00");
+        let result2 =
+            merge_prompt_with_conflicts(&local2, &remote2, "prompts", "2024-01-02T00:00:00+00:00");
         assert!(result2.conflict_versions.is_empty());
     }
 }

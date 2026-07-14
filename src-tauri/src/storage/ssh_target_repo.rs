@@ -60,10 +60,7 @@ impl SshTargetRepo {
         let vc_text: String = row.try_get("vector_clock")?;
         let deleted_int: i64 = row.try_get("deleted")?;
         let vector_clock: HashMap<String, u64> = serde_json::from_str(&vc_text)?;
-        let delete_epoch = row
-            .try_get::<i64, _>("delete_epoch")
-            .unwrap_or(0)
-            .max(0) as u64;
+        let delete_epoch = row.try_get::<i64, _>("delete_epoch").unwrap_or(0).max(0) as u64;
         Ok(SshTargetRow {
             host: row.try_get("host")?,
             port: row.try_get("port")?,
@@ -133,8 +130,7 @@ impl SshTargetRepo {
         items: &[SshTargetRow],
         inject_fail_at: Option<usize>,
     ) -> Result<(), AppError> {
-        self.bulk_upsert_in_transaction(items, inject_fail_at)
-            .await
+        self.bulk_upsert_in_transaction(items, inject_fail_at).await
     }
 
     /// 在自有事务中 bulk upsert。

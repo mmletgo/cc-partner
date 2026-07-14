@@ -430,16 +430,16 @@ mod tests {
         repo.insert_idempotent(&conflict).await.unwrap();
 
         let deleted = repo.prune_retention("prompts", "p1", now).await.unwrap();
-        assert!(deleted >= 5, "应裁掉超出 20 条的 history，deleted={deleted}");
+        assert!(
+            deleted >= 5,
+            "应裁掉超出 20 条的 history，deleted={deleted}"
+        );
         let remaining = repo.list_versions("prompts", "p1").await.unwrap();
         assert!(
             remaining.iter().any(|v| v.id == "c-young"),
             "年轻 conflict 即使超出条数也必须保留"
         );
-        let history_count = remaining
-            .iter()
-            .filter(|v| v.kind == KIND_HISTORY)
-            .count();
+        let history_count = remaining.iter().filter(|v| v.kind == KIND_HISTORY).count();
         assert!(
             history_count <= RETENTION_MAX_VERSIONS,
             "history 不得超过 20，got {history_count}"
@@ -469,6 +469,9 @@ mod tests {
         let a = ContentVersionRepo::deterministic_id("prompts", "id-1", "d1", "abc");
         let b = ContentVersionRepo::deterministic_id("prompts", "id-1", "d1", "abc");
         assert_eq!(a, b);
-        assert_eq!(a, SyncRequestLedgerRepo::conflict_row_id("prompts", "id-1", "d1", "abc"));
+        assert_eq!(
+            a,
+            SyncRequestLedgerRepo::conflict_row_id("prompts", "id-1", "d1", "abc")
+        );
     }
 }

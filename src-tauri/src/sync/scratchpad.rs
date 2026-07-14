@@ -9,12 +9,10 @@
 
 use crate::models::scratchpad::ScratchpadRow;
 use crate::state::AppState;
-use crate::sync::apply_merge::apply_scratchpad_pull_items;
 use crate::storage::content_version_repo::KIND_CONFLICT;
 use crate::storage::sync_request_ledger_repo::DOMAIN_SCRATCHPAD;
-use crate::sync::engine::{
-    fetch_complete_remote_manifest, peer_error_to_domain_outcome,
-};
+use crate::sync::apply_merge::apply_scratchpad_pull_items;
+use crate::sync::engine::{fetch_complete_remote_manifest, peer_error_to_domain_outcome};
 use crate::sync::merger::{ContentVersionDraft, DomainMergeResult};
 use crate::sync::protocol::{
     compute_sync_plan, content_sha256_hex, decide_acked_delete_epoch,
@@ -139,8 +137,7 @@ pub fn merge_scratchpad_with_conflicts(
 /// Business Logic: v2 planner 需要与服务端一致的 content_hash。
 /// Code Logic: title/content 固定分隔后 SHA-256。
 pub fn scratchpad_to_summary(row: &ScratchpadRow) -> SyncSummary<String> {
-    let content_hash =
-        content_sha256_hex(&[row.title.as_bytes(), b"\0", row.content.as_bytes()]);
+    let content_hash = content_sha256_hex(&[row.title.as_bytes(), b"\0", row.content.as_bytes()]);
     SyncSummary {
         id: row.id.clone(),
         vector_clock: row.vector_clock.clone(),
@@ -218,7 +215,11 @@ async fn scratchpad_sync_v2(
             continue;
         }
         let ids: Vec<String> = chunk.to_vec();
-        let resp = match state.peer_client.fetch_scratchpad_items(base_url, &ids).await {
+        let resp = match state
+            .peer_client
+            .fetch_scratchpad_items(base_url, &ids)
+            .await
+        {
             Ok(r) => r,
             Err(e) => return peer_error_to_domain_outcome(&e),
         };
@@ -365,7 +366,11 @@ async fn scratchpad_sync_legacy_typed(
             };
         }
         pulled = n;
-        tracing::info!("从 {} 拉取并更新了 {} 个速记本页面 (legacy)", device.name, n);
+        tracing::info!(
+            "从 {} 拉取并更新了 {} 个速记本页面 (legacy)",
+            device.name,
+            n
+        );
     }
 
     let remote_clock_map: HashMap<String, &HashMap<String, u64>> = remote_pages

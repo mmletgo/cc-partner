@@ -84,9 +84,7 @@ pub async fn restore_backup(
 ) -> Result<RestoreResult, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
         let client = BackendControlClient::from_control_file()?;
-        return client
-            .restore_backup(&archive_path, mode, domains)
-            .await;
+        return client.restore_backup(&archive_path, mode, domains).await;
     }
     let service = BackupRestoreService::new(state.inner().clone());
     service

@@ -115,6 +115,7 @@ pub struct SyncResult {
 ///
 /// Business Logic: 只有 Succeeded 可计入设备成功。
 /// Code Logic: match Succeeded 变体。
+#[allow(dead_code)] // intentional public helper for outcome aggregation
 pub fn domain_outcome_is_success(outcome: &SyncDomainOutcome) -> bool {
     matches!(outcome, SyncDomainOutcome::Succeeded { .. })
 }
@@ -166,12 +167,11 @@ pub fn aggregate_device_status(domains: &[DomainSyncReport]) -> DeviceSyncStatus
         // 全部同一失败类
         return first_fail;
     }
-    if classes.iter().all(|c| {
-        *c == DeviceSyncStatus::Unreachable || *c == DeviceSyncStatus::Succeeded
-    }) && classes
+    if classes
         .iter()
-        .any(|c| *c == DeviceSyncStatus::Unreachable)
-        && !classes.iter().any(|c| *c == DeviceSyncStatus::Succeeded)
+        .all(|c| *c == DeviceSyncStatus::Unreachable || *c == DeviceSyncStatus::Succeeded)
+        && classes.contains(&DeviceSyncStatus::Unreachable)
+        && !classes.contains(&DeviceSyncStatus::Succeeded)
     {
         return DeviceSyncStatus::Unreachable;
     }
@@ -197,22 +197,15 @@ pub fn count_succeeded_devices(devices: &[DeviceSyncReport]) -> u64 {
 pub fn peer_error_to_domain_outcome(error: &PeerCallError) -> SyncDomainOutcome {
     match error {
         PeerCallError::Network { source, .. } => {
-            let class = if source.is_timeout() || source.is_connect() && source.is_timeout() {
-                TransportClass::Timeout
-            } else if source.is_timeout() {
-                TransportClass::Timeout
-            } else {
-                // reqwest: is_timeout 覆盖 connect/read timeout
-                if format!("{source}").to_ascii_lowercase().contains("timed out") {
-                    TransportClass::Timeout
-                } else {
-                    TransportClass::Network
-                }
-            };
-            let class = if source.is_timeout() {
+            // reqwest: is_timeout 覆盖 connect/read timeout；文案兜底 timed out
+            let class = if source.is_timeout()
+                || format!("{source}")
+                    .to_ascii_lowercase()
+                    .contains("timed out")
+            {
                 TransportClass::Timeout
             } else {
-                class
+                TransportClass::Network
             };
             SyncDomainOutcome::Unreachable { class }
         }
@@ -385,7 +378,7 @@ pub async fn trigger_sync(state: &AppState) -> SyncRunResult {
 
     tracing::info!("开始与 {} 个设备同步（并发上限 4）", devices.len());
 
-    let reports: Vec<DeviceSyncReport> = stream::iter(devices.into_iter())
+    let reports: Vec<DeviceSyncReport> = stream::iter(devices)
         .map(|device| {
             let state = state.clone();
             async move { sync_device_with_domains(&state, device).await }
@@ -428,8 +421,7 @@ async fn sync_device_with_domains(
 
     let supports_v2 = health.protocol_info().supports(CAPABILITY_SYNC_MANIFEST_V2);
     // 一次 health 复用：capability 布尔传入各领域，领域内不再重复 health。
-    let prompt_outcome =
-        prompt_sync_with_peer(state, &device, &base_url, supports_v2).await;
+    let prompt_outcome = prompt_sync_with_peer(state, &device, &base_url, supports_v2).await;
     let ssh_outcome =
         crate::sync::ssh_target::ssh_target_sync_with_peer(state, &device, &base_url, supports_v2)
             .await;
@@ -455,11 +447,7 @@ async fn sync_device_with_domains(
         },
     ];
     let report = device_report_from_domains(&device.id, &device.name, domains);
-    tracing::info!(
-        "与设备 {} 同步结束 status={:?}",
-        device.name,
-        report.status
-    );
+    tracing::info!("与设备 {} 同步结束 status={:?}", device.name, report.status);
     report
 }
 

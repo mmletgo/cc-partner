@@ -13,7 +13,6 @@ use crate::models::ssh_target::SshTargetRow;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
-use crate::storage::sync_request_ledger_repo::SyncRequestLedgerRepo;
 use crate::storage::SshTargetRepo;
 use crate::sync::apply_merge::apply_ssh_merge_batch;
 use crate::sync::protocol::{
@@ -453,10 +452,7 @@ async fn ssh_manifest_page_impl(
         has_more
     );
 
-    Ok(SyncManifestPage {
-        items,
-        next_cursor,
-    })
+    Ok(SyncManifestPage { items, next_cursor })
 }
 
 /// POST /api/ssh-target/sync/items：按 host 批取正文。
@@ -604,6 +600,7 @@ async fn ssh_push_batch_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::sync_request_ledger_repo::SyncRequestLedgerRepo;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
 
@@ -626,10 +623,18 @@ mod tests {
         .await
         .unwrap();
         SyncRequestLedgerRepo::ensure_schema(&pool).await.unwrap();
-        crate::storage::content_version_repo::ContentVersionRepo::ensure_schema(&pool).await.unwrap();
-        crate::storage::deletion_floor_repo::DeletionFloorRepo::ensure_schema(&pool).await.unwrap();
-        crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo::ensure_schema(&pool).await.unwrap();
-        crate::storage::sync_watermark_repo::SyncWatermarkRepo::ensure_schema(&pool).await.unwrap();
+        crate::storage::content_version_repo::ContentVersionRepo::ensure_schema(&pool)
+            .await
+            .unwrap();
+        crate::storage::deletion_floor_repo::DeletionFloorRepo::ensure_schema(&pool)
+            .await
+            .unwrap();
+        crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo::ensure_schema(&pool)
+            .await
+            .unwrap();
+        crate::storage::sync_watermark_repo::SyncWatermarkRepo::ensure_schema(&pool)
+            .await
+            .unwrap();
         // delete_epoch 列
         let _ = sqlx::query(
             "ALTER TABLE ssh_targets ADD COLUMN delete_epoch INTEGER NOT NULL DEFAULT 0",

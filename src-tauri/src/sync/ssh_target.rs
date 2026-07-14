@@ -82,10 +82,7 @@ pub fn ssh_text_content_hash(row: &SshTargetRow) -> String {
 /// Business Logic: 仅 host/port/username/label 不同才写 conflict；纯时钟差异不保留副本。
 /// Code Logic: 逐字段比较。
 fn ssh_payload_differs(a: &SshTargetRow, b: &SshTargetRow) -> bool {
-    a.host != b.host
-        || a.port != b.port
-        || a.username != b.username
-        || a.label != b.label
+    a.host != b.host || a.port != b.port || a.username != b.username || a.label != b.label
 }
 
 /// 合并两条 SSH 目标，并在并发且正文不同时产出 conflict 副本草稿。
@@ -125,12 +122,10 @@ pub fn merge_ssh_with_conflicts(
 
 use crate::state::AppState;
 use crate::sync::apply_merge::apply_ssh_pull_items;
-use crate::sync::engine::{
-    fetch_complete_remote_manifest, peer_error_to_domain_outcome,
-};
+use crate::sync::engine::{fetch_complete_remote_manifest, peer_error_to_domain_outcome};
 use crate::sync::protocol::{
-    compute_sync_plan, decide_acked_delete_epoch,
-    max_delete_epoch_from_summaries, SyncDomainOutcome, SyncSummary, PUSH_BATCH_ITEMS,
+    compute_sync_plan, decide_acked_delete_epoch, max_delete_epoch_from_summaries,
+    SyncDomainOutcome, SyncSummary, PUSH_BATCH_ITEMS,
 };
 use std::collections::HashMap;
 use uuid::Uuid;

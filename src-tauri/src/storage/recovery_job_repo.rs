@@ -50,7 +50,9 @@ impl RecoveryJobStatus {
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
             "rolledBack" | "rolled_back" => Ok(Self::RolledBack),
-            other => Err(AppError::generic(format!("未知 recovery job 状态: {other}"))),
+            other => Err(AppError::generic(format!(
+                "未知 recovery job 状态: {other}"
+            ))),
         }
     }
 }
@@ -235,7 +237,7 @@ impl RecoveryJobRepo {
             "SELECT id, status, archive_path, pre_restore_backup_path, selected_domains_json, mode, error_summary, created_at, updated_at
              FROM recovery_jobs ORDER BY updated_at DESC LIMIT ?",
         )
-        .bind(limit.max(1).min(200))
+        .bind(limit.clamp(1, 200))
         .fetch_all(&self.db)
         .await?;
         rows.iter().map(Self::row_to_job).collect()

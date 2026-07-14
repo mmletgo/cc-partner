@@ -1441,6 +1441,7 @@ impl PeerClient {
     ///
     /// Business Logic: 对端若宣称 accepted 大于发送条数，属于协议损坏，不得当成功。
     /// Code Logic: accepted > sent → InvalidResponse。
+    #[allow(clippy::result_large_err)] // PeerCallError is the shared typed error surface
     fn ensure_accepted_not_exceeds(
         url: &str,
         accepted: usize,
@@ -1454,7 +1455,6 @@ impl PeerClient {
         }
         Ok(())
     }
-
 
     /// SSH legacy pull（typed）。
     ///

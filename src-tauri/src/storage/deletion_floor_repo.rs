@@ -12,9 +12,7 @@
 
 use crate::error::AppError;
 use crate::storage::maintenance_gate::{begin_shared_write, DatabaseMaintenanceGate};
-use crate::storage::sync_watermark_repo::{
-    SyncWatermarkRepo, DEFAULT_ACTIVE_PEER_WINDOW_DAYS,
-};
+use crate::storage::sync_watermark_repo::{SyncWatermarkRepo, DEFAULT_ACTIVE_PEER_WINDOW_DAYS};
 use crate::sync::vector_clock::{compare, ClockOrder};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -24,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Tombstone 可压缩的最小年龄（天）。
+#[allow(dead_code)] // intentional public API for tombstone GC
 pub const TOMBSTONE_GC_MIN_AGE_DAYS: i64 = 30;
 
 /// 删除 floor 一行。
@@ -63,6 +62,7 @@ pub enum DeletionFloorDecision {
 ///
 /// Business Logic: compact 前需要 age 与 epoch；不绑定具体领域表列名以外的逻辑。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // intentional public API for tombstone GC
 pub struct TombstoneGcCandidate {
     /// 领域
     pub domain: String,
@@ -82,6 +82,7 @@ pub struct TombstoneGcCandidate {
 ///
 /// Business Logic: 单测断言压缩条数，不依赖真实 prompts 表。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(dead_code)] // intentional public API for tombstone GC
 pub struct TombstoneGcResult {
     /// 成功压缩为 floor 的条数
     pub deleted: usize,
@@ -94,6 +95,7 @@ pub struct DeletionFloorRepo {
     /// SQLite 连接池
     db: SqlitePool,
     /// 维护闸：独立 upsert 事务经 shared lease
+    #[allow(dead_code)] // intentional public API for GC writers
     gate: Arc<DatabaseMaintenanceGate>,
 }
 
@@ -148,6 +150,7 @@ impl DeletionFloorRepo {
     ///
     /// Business Logic: GC 在删除完整 tombstone 的同一事务写入 floor。
     /// Code Logic: INSERT OR REPLACE。
+    #[allow(dead_code)] // intentional public API for GC same-tx write
     pub async fn upsert_on_tx(
         tx: &mut Transaction<'_, Sqlite>,
         floor: &DeletionFloor,
@@ -173,6 +176,7 @@ impl DeletionFloorRepo {
     ///
     /// Business Logic: 单测与不需与 tombstone 删除同事务时使用。
     /// Code Logic: `begin_shared_write` → upsert_on_tx → commit。
+    #[allow(dead_code)] // intentional public API for GC/single-write path
     pub async fn upsert(&self, floor: &DeletionFloor) -> Result<(), AppError> {
         let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         Self::upsert_on_tx(&mut tx, floor).await?;
@@ -245,6 +249,7 @@ impl DeletionFloorRepo {
     ///
     /// Business Logic: GC 第一门槛是年龄，避免过早压缩仍在传播的删除。
     /// Code Logic: now - updated_at >= 30 days。
+    #[allow(dead_code)] // intentional public API for GC eligibility
     pub fn tombstone_age_eligible(updated_at: &str, now: &str) -> Result<bool, AppError> {
         let updated = parse_rfc3339(updated_at)?;
         let now_dt = parse_rfc3339(now)?;
@@ -256,6 +261,7 @@ impl DeletionFloorRepo {
     ///
     /// Business Logic: 两条件同时满足才可在同一事务中用 floor 替换完整 tombstone。
     /// Code Logic: age 检查 + SyncWatermarkRepo::all_active_peers_acked。
+    #[allow(dead_code)] // intentional public API for GC eligibility
     pub async fn tombstone_gc_eligible(
         &self,
         watermarks: &SyncWatermarkRepo,
@@ -285,6 +291,7 @@ impl DeletionFloorRepo {
     /// Code Logic（这个函数做什么）:
     ///     对每个 candidate 检查 eligible；合格则 upsert floor 并计入 deleted；
     ///     不合格 skipped。不直接改领域表（tombstone 行由调用方删除）。
+    #[allow(dead_code)] // intentional public API for tombstone compaction
     pub async fn compact_tombstones_to_floors(
         &self,
         watermarks: &SyncWatermarkRepo,
@@ -294,12 +301,7 @@ impl DeletionFloorRepo {
         let mut result = TombstoneGcResult::default();
         for candidate in candidates {
             let eligible = self
-                .tombstone_gc_eligible(
-                    watermarks,
-                    candidate,
-                    now,
-                    DEFAULT_ACTIVE_PEER_WINDOW_DAYS,
-                )
+                .tombstone_gc_eligible(watermarks, candidate, now, DEFAULT_ACTIVE_PEER_WINDOW_DAYS)
                 .await?;
             if !eligible {
                 result.skipped += 1;
@@ -336,6 +338,7 @@ impl DeletionFloorRepo {
 }
 
 /// 解析 RFC3339。
+#[allow(dead_code)] // used by GC age helpers retained for later wiring
 fn parse_rfc3339(s: &str) -> Result<DateTime<Utc>, AppError> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))

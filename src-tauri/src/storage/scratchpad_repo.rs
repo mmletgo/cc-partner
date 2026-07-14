@@ -105,10 +105,7 @@ impl ScratchpadRepo {
         let vc_text: String = row.try_get("vector_clock")?;
         let deleted_int: i64 = row.try_get("deleted")?;
         let vector_clock: HashMap<String, u64> = serde_json::from_str(&vc_text)?;
-        let delete_epoch = row
-            .try_get::<i64, _>("delete_epoch")
-            .unwrap_or(0)
-            .max(0) as u64;
+        let delete_epoch = row.try_get::<i64, _>("delete_epoch").unwrap_or(0).max(0) as u64;
         Ok(ScratchpadRow {
             id: row.try_get("id")?,
             title: row.try_get("title")?,
@@ -302,8 +299,7 @@ impl ScratchpadRepo {
         let updated_at = Self::now_iso();
         let vc_text = serde_json::to_string(&vector_clock)?;
         let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
-        let delete_epoch =
-            SyncDeleteSequenceRepo::mint_on_tx(&mut tx, DOMAIN_SCRATCHPAD).await?;
+        let delete_epoch = SyncDeleteSequenceRepo::mint_on_tx(&mut tx, DOMAIN_SCRATCHPAD).await?;
         sqlx::query(
             "UPDATE scratchpad SET deleted = 1, updated_at = ?, device_id = ?, vector_clock = ?, delete_epoch = ? WHERE id = ?",
         )

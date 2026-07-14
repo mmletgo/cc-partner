@@ -155,12 +155,9 @@ pub async fn create_export_archive(
     file_hashes.insert("manifest.json".into(), sha256_hex(&manifest_bytes));
 
     // 最终 manifest 含自身哈希列表（files 不含 manifest 自身，避免循环）
+    // files 已是领域文件哈希
     let final_manifest = ArchiveManifest {
-        files: {
-            let mut f = manifest.files.clone();
-            // files 已是领域文件哈希
-            f
-        },
+        files: manifest.files.clone(),
         ..manifest
     };
     let final_manifest_bytes = serde_json::to_vec_pretty(&final_manifest)?;
@@ -350,13 +347,11 @@ pub fn inspect_archive_streaming(
 
     // 校验每个 manifest 声明文件的哈希
     for (name, expected) in &manifest.files {
-        let actual = computed_hashes.get(name).ok_or_else(|| {
-            AppError::generic(format!("manifest 声明文件缺失: {name}"))
-        })?;
+        let actual = computed_hashes
+            .get(name)
+            .ok_or_else(|| AppError::generic(format!("manifest 声明文件缺失: {name}")))?;
         if actual != expected {
-            return Err(AppError::generic(format!(
-                "校验和不匹配: {name}"
-            )));
+            return Err(AppError::generic(format!("校验和不匹配: {name}")));
         }
     }
 
@@ -433,7 +428,11 @@ fn count_domain(
 }
 
 /// 从已校验 archive 读取指定 entry 原始字节（再次打开，调用方已 inspect）。
-pub fn read_entry_bytes(path: &Path, entry_name: &str, limits: ArchiveLimits) -> Result<Vec<u8>, AppError> {
+pub fn read_entry_bytes(
+    path: &Path,
+    entry_name: &str,
+    limits: ArchiveLimits,
+) -> Result<Vec<u8>, AppError> {
     let file = File::open(path)?;
     let mut archive =
         ZipArchive::new(file).map_err(|e| AppError::generic(format!("无法打开 ZIP: {e}")))?;
@@ -521,7 +520,7 @@ pub fn write_test_archive(
     manifest: &ArchiveManifest,
     extra_files: &BTreeMap<String, Vec<u8>>,
 ) -> Result<(), AppError> {
-    let mut files = extra_files.clone();
+    let files = extra_files.clone();
     let mut hashes = BTreeMap::new();
     for (k, v) in &files {
         hashes.insert(k.clone(), sha256_hex(v));

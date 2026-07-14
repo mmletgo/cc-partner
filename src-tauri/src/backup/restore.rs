@@ -14,7 +14,9 @@ use crate::backup::archive::{
     DOMAIN_CLAUDE_MD, DOMAIN_CONFIG_REPORT, DOMAIN_DELETION_FLOORS, DOMAIN_PROMPTS,
     DOMAIN_SCRATCHPAD, DOMAIN_SSH_TARGETS,
 };
+use crate::cc::models::ClaudeHistoryRow;
 use crate::error::AppError;
+use crate::models::claude_md::ClaudeMdRow;
 use crate::models::prompt::PromptRow;
 use crate::models::scratchpad::ScratchpadRow;
 use crate::models::ssh_target::SshTargetRow;
@@ -24,14 +26,10 @@ use crate::storage::maintenance_gate::{
     begin_write_with_permit, DatabaseMaintenanceGate, DatabaseWritePermit,
 };
 use crate::storage::recovery_job_repo::{RecoveryJobRepo, RecoveryJobRow, RecoveryJobStatus};
-use crate::cc::models::ClaudeHistoryRow;
-use crate::models::claude_md::ClaudeMdRow;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// pre-restore 备份最长保留 7 天。
@@ -153,9 +151,7 @@ pub struct BackupRestoreService {
 impl BackupRestoreService {
     /// 构造。
     pub fn new(state: AppState) -> Self {
-        let gate = state
-            .maintenance_gate
-            .clone();
+        let gate = state.maintenance_gate.clone();
         let job_repo = RecoveryJobRepo::new(state.db.clone(), gate);
         Self {
             state,
@@ -171,7 +167,7 @@ impl BackupRestoreService {
     pub fn inspect(&self, archive_path: &Path) -> Result<InspectPreview, AppError> {
         let inspected = inspect_archive_streaming(archive_path, self.limits)?;
         let mut domain_counts = BTreeMap::new();
-        for (domain, _) in &inspected.domain_counts {
+        for domain in inspected.domain_counts.keys() {
             if domain == DOMAIN_CONFIG_REPORT {
                 continue;
             }
@@ -327,8 +323,7 @@ impl BackupRestoreService {
         for d in domains {
             match d.as_str() {
                 DOMAIN_PROMPTS => {
-                    let bytes =
-                        read_entry_bytes(archive_path, "prompts/items.json", self.limits)?;
+                    let bytes = read_entry_bytes(archive_path, "prompts/items.json", self.limits)?;
                     prompts = Some(serde_json::from_slice(&bytes)?);
                 }
                 DOMAIN_CC_HISTORY => {
@@ -347,8 +342,7 @@ impl BackupRestoreService {
                     ssh = Some(serde_json::from_slice(&bytes)?);
                 }
                 DOMAIN_CLAUDE_MD => {
-                    let bytes =
-                        read_entry_bytes(archive_path, "claudeMd/item.json", self.limits)?;
+                    let bytes = read_entry_bytes(archive_path, "claudeMd/item.json", self.limits)?;
                     claude_md = Some(serde_json::from_slice(&bytes)?);
                 }
                 DOMAIN_DELETION_FLOORS => {
@@ -369,9 +363,7 @@ impl BackupRestoreService {
 
         if matches!(mode, RestoreMode::ReplaceDomain) {
             if prompts.is_some() {
-                sqlx::query("DELETE FROM prompts")
-                    .execute(&mut *tx)
-                    .await?;
+                sqlx::query("DELETE FROM prompts").execute(&mut *tx).await?;
             }
             if cc_history.is_some() {
                 sqlx::query("DELETE FROM claude_history")
@@ -555,10 +547,7 @@ pub fn pre_restore_dir() -> Result<PathBuf, AppError> {
 ///
 /// Business Logic: 恢复前自动备份，完整落盘后才进入可回退列表。
 /// Code Logic: create_export_archive 到带时间戳文件名。
-pub async fn create_pre_restore_backup(
-    state: &AppState,
-    dir: &Path,
-) -> Result<PathBuf, AppError> {
+pub async fn create_pre_restore_backup(state: &AppState, dir: &Path) -> Result<PathBuf, AppError> {
     let name = format!(
         "pre-restore-{}.zip",
         chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
@@ -647,9 +636,12 @@ pub async fn rollback_from_pre_restore_backup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backup::archive::{write_test_archive, ArchiveManifest, FORMAT_VERSION};
+    use crate::backup::archive::{ArchiveManifest, FORMAT_VERSION};
     use crate::storage::maintenance_gate::DatabaseMaintenanceGate;
     use std::collections::BTreeMap;
+    use std::fs::File;
+    use std::io::Write;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     #[test]
@@ -678,13 +670,15 @@ mod tests {
             domains: vec![DOMAIN_PROMPTS.into()],
             files: BTreeMap::new(),
         };
-        m.files
-            .insert("prompts/items.json".into(), crate::backup::archive::sha256_hex(b"[]"));
+        m.files.insert(
+            "prompts/items.json".into(),
+            crate::backup::archive::sha256_hex(b"[]"),
+        );
         {
             let f = File::create(&path).unwrap();
             let mut zip = zip::ZipWriter::new(f);
-            let options =
-                zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            let options = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
             let mbytes = serde_json::to_vec_pretty(&m).unwrap();
             zip.start_file("manifest.json", options).unwrap();
             zip.write_all(&mbytes).unwrap();

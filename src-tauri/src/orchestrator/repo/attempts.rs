@@ -11,7 +11,6 @@
 
 use super::helpers::*;
 use super::OrchestratorRepo;
-use crate::storage::maintenance_gate::with_shared_write_lease;
 use crate::error::AppError;
 use crate::orchestrator::claim::{
     preflight_claim_candidates, ClaimCandidate, ClaimCasOutcome, ClaimScanCursor,
@@ -27,6 +26,7 @@ use crate::orchestrator::models::{
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
 };
+use crate::storage::maintenance_gate::with_shared_write_lease;
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
@@ -123,7 +123,8 @@ impl OrchestratorRepo {
             .bind("running")
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         if result.rows_affected() != 1 {
             return Err(AppError::not_found(format!(
                 "Orchestrator 运行中任务尝试不存在: {task_id}#{attempt}"
@@ -251,7 +252,8 @@ impl OrchestratorRepo {
             .bind(token)
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         if result.rows_affected() == 1 {
             return self.get_task(task_id).await.map(Some);
         }
@@ -294,7 +296,8 @@ impl OrchestratorRepo {
             .bind(session_id)
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         self.get_task(task_id).await
     }
 
@@ -339,7 +342,8 @@ impl OrchestratorRepo {
             .bind(session_id)
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         if result.rows_affected() == 1 {
             return self.get_task(task_id).await.map(Some);
         }

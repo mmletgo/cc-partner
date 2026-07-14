@@ -17,8 +17,10 @@ use std::sync::Arc;
 /// Domain 删除序号仓库。
 pub struct SyncDeleteSequenceRepo {
     /// SQLite 连接池
+    #[allow(dead_code)] // intentional API; mint_on_tx is primary production path
     db: SqlitePool,
     /// 维护闸：独立 mint 事务经 shared lease
+    #[allow(dead_code)] // intentional API for independent mint()
     gate: Arc<DatabaseMaintenanceGate>,
 }
 
@@ -27,6 +29,7 @@ impl SyncDeleteSequenceRepo {
     ///
     /// Business Logic: soft_delete / merge adopt-delete 路径需要铸造 epoch。
     /// Code Logic: 委托 `with_gate` + 新建独立 gate。
+    #[allow(dead_code)] // intentional public API / tests
     pub fn new(db: SqlitePool) -> Self {
         Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
     }
@@ -35,6 +38,7 @@ impl SyncDeleteSequenceRepo {
     ///
     /// Business Logic: epoch mint 写必须与 restore 互斥，与其它 writer 共享 gate。
     /// Code Logic: 持有 pool clone + `Arc<DatabaseMaintenanceGate>`。
+    #[allow(dead_code)] // intentional public API for AppState wiring
     pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
         Self { db, gate }
     }
@@ -43,6 +47,7 @@ impl SyncDeleteSequenceRepo {
     ///
     /// Business Logic: 测试与事务组装。
     /// Code Logic: `&SqlitePool`。
+    #[allow(dead_code)] // intentional public API for tx assembly / tests
     pub fn pool(&self) -> &SqlitePool {
         &self.db
     }
@@ -111,6 +116,7 @@ impl SyncDeleteSequenceRepo {
     ///
     /// Business Logic: 单测与不需与其它写操作同事务时使用。
     /// Code Logic: `begin_shared_write` → mint_on_tx → commit。
+    #[allow(dead_code)] // intentional public API for non-tx mint path
     pub async fn mint(&self, domain: &str) -> Result<u64, AppError> {
         let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         let epoch = Self::mint_on_tx(&mut tx, domain).await?;
@@ -166,9 +172,7 @@ mod tests {
     #[tokio::test]
     async fn sync_delete_sequence_sequential_in_one_tx() {
         let repo = setup_repo().await;
-        let (permit, mut tx) = begin_shared_write(repo.pool(), &repo.gate)
-            .await
-            .unwrap();
+        let (permit, mut tx) = begin_shared_write(repo.pool(), &repo.gate).await.unwrap();
         let e1 = SyncDeleteSequenceRepo::mint_on_tx(&mut tx, "prompts")
             .await
             .unwrap();

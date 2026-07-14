@@ -346,7 +346,10 @@ mod tests {
     #[test]
     fn fully_wired_server_advertises_sync_manifest_v2() {
         let info = server_protocol_info();
-        assert!(info.capabilities.iter().any(|c| c == CAPABILITY_SYNC_MANIFEST_V2));
+        assert!(info
+            .capabilities
+            .iter()
+            .any(|c| c == CAPABILITY_SYNC_MANIFEST_V2));
         assert!(info.supports(CAPABILITY_SYNC_MANIFEST_V2));
     }
 }

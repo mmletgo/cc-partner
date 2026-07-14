@@ -9,7 +9,7 @@
 //!     (b) 手工合法 ZIP（manifest 哈希与内容一致）→ inspect 成功且 format_version 对齐。
 
 use app_lib::backup::{
-    inspect_archive_streaming, ArchiveLimits, ArchiveManifest, FORMAT_VERSION, DOMAIN_PROMPTS,
+    inspect_archive_streaming, ArchiveLimits, ArchiveManifest, DOMAIN_PROMPTS, FORMAT_VERSION,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -29,12 +29,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// 写入最小 ZIP：manifest.json + 若干 entry 原始字节。
-fn write_zip(path: &std::path::Path, manifest: &ArchiveManifest, files: &BTreeMap<String, Vec<u8>>) {
+fn write_zip(
+    path: &std::path::Path,
+    manifest: &ArchiveManifest,
+    files: &BTreeMap<String, Vec<u8>>,
+) {
     let file = File::create(path).expect("create zip");
     let mut zip = ZipWriter::new(file);
     let options = FileOptions::default().compression_method(CompressionMethod::Stored);
     let mbytes = serde_json::to_vec_pretty(manifest).expect("manifest json");
-    zip.start_file("manifest.json", options).expect("manifest entry");
+    zip.start_file("manifest.json", options)
+        .expect("manifest entry");
     zip.write_all(&mbytes).expect("write manifest");
     for (name, bytes) in files {
         zip.start_file(name.as_str(), options).expect("file entry");
@@ -69,7 +74,10 @@ fn bad_zip_inspect_rejects() {
         .expect_err("checksum mismatch must fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("校验") || msg.contains("checksum") || msg.contains("hash") || msg.contains("不匹配"),
+        msg.contains("校验")
+            || msg.contains("checksum")
+            || msg.contains("hash")
+            || msg.contains("不匹配"),
         "unexpected error: {msg}"
     );
 }

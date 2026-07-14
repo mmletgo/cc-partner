@@ -759,10 +759,7 @@ impl BackendControlClient {
                     Ok(v) => v,
                     Err(e) => return Err(e),
                 };
-                match new_client
-                    .send_once(path, &retry_body, QUERY_TIMEOUT)
-                    .await
-                {
+                match new_client.send_once(path, &retry_body, QUERY_TIMEOUT).await {
                     ControlCallOutcome::Ok(v) => Ok(v),
                     ControlCallOutcome::Failed(e) | ControlCallOutcome::Uncertain(e) => Err(e),
                 }

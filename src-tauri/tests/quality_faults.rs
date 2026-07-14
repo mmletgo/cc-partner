@@ -169,6 +169,7 @@ fn sample_scratchpad_row(id: &str, title: &str, content: &str) -> ScratchpadRow 
         device_id: "d".into(),
         vector_clock: vc,
         deleted: false,
+        delete_epoch: 0,
     }
 }
 

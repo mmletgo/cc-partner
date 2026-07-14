@@ -17,7 +17,6 @@ use crate::models::prompt::PromptRow;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
-use crate::storage::sync_request_ledger_repo::SyncRequestLedgerRepo;
 use crate::storage::PromptRepo;
 use crate::sync::apply_merge::apply_prompt_merge_batch;
 use crate::sync::merger::merge_prompt;
@@ -519,10 +518,7 @@ async fn prompt_manifest_page_impl(
         has_more
     );
 
-    Ok(SyncManifestPage {
-        items,
-        next_cursor,
-    })
+    Ok(SyncManifestPage { items, next_cursor })
 }
 
 /// POST /api/sync/prompts/items：按请求 ID 顺序返回完整行与 missing_ids。
@@ -702,6 +698,7 @@ async fn prompt_push_batch_impl(
 mod tests {
     use super::*;
     use crate::net::request_context::P2pRequestContext;
+    use crate::storage::sync_request_ledger_repo::SyncRequestLedgerRepo;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
 
@@ -829,9 +826,7 @@ mod tests {
     #[tokio::test]
     async fn items_rejects_over_batch_limit() {
         let repo = setup_repo().await;
-        let ids: Vec<String> = (0..=PUSH_BATCH_ITEMS)
-            .map(|i| format!("id-{i}"))
-            .collect();
+        let ids: Vec<String> = (0..=PUSH_BATCH_ITEMS).map(|i| format!("id-{i}")).collect();
         let err = prompt_items_impl(&repo, PromptItemsReq { ids })
             .await
             .unwrap_err();
@@ -883,6 +878,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional serial inject lock across await
     async fn push_batch_accepts_new_items() {
         use crate::sync::apply_merge::{apply_fail_test_lock, clear_apply_merge_fail_point};
         let _lock = apply_fail_test_lock();
@@ -905,6 +901,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional serial inject lock across await
     async fn push_batch_rejects_too_many_items() {
         use crate::sync::apply_merge::{apply_fail_test_lock, clear_apply_merge_fail_point};
         let _lock = apply_fail_test_lock();
@@ -934,6 +931,7 @@ mod tests {
 
     /// 同 key/同 hash 重放返回原 outcome，且不重新 apply（删库后仍不回写）。
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional serial inject lock across await
     async fn replayed_batch_returns_recorded_outcome() {
         use crate::sync::apply_merge::{apply_fail_test_lock, clear_apply_merge_fail_point};
         let _lock = apply_fail_test_lock();
@@ -975,6 +973,7 @@ mod tests {
 
     /// 同 key 不同 payload hash → conflict（409）。
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional serial inject lock across await
     async fn same_key_different_hash_is_conflict() {
         use crate::sync::apply_merge::{apply_fail_test_lock, clear_apply_merge_fail_point};
         let _lock = apply_fail_test_lock();
@@ -1009,6 +1008,7 @@ mod tests {
 
     /// active 写后注入失败 → active/conflict/ledger 全回滚。
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional serial inject lock across await
     async fn push_batch_fail_after_active_rolls_back() {
         use crate::storage::content_version_repo::ContentVersionRepo;
         use crate::storage::sync_request_ledger_repo::DOMAIN_PROMPTS;
@@ -1038,22 +1038,19 @@ mod tests {
         assert!(versions.is_empty());
         let gate = std::sync::Arc::new(crate::storage::DatabaseMaintenanceGate::new());
         let pool = repo.pool();
-        let (_permit, mut tx) = crate::storage::begin_shared_write(&pool, &gate)
+        let (_permit, mut tx) = crate::storage::maintenance_gate::begin_shared_write(&pool, &gate)
             .await
             .unwrap();
-        let row = SyncRequestLedgerRepo::get_on_tx(
-            &mut tx,
-            "peer-1",
-            DOMAIN_PROMPTS,
-            "req-fail-active",
-        )
-        .await
-        .unwrap();
+        let row =
+            SyncRequestLedgerRepo::get_on_tx(&mut tx, "peer-1", DOMAIN_PROMPTS, "req-fail-active")
+                .await
+                .unwrap();
         assert!(row.is_none());
     }
 
     /// conflict 写后注入失败 → active 与 conflict 全回滚。
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional serial inject lock across await
     async fn push_batch_fail_after_conflict_rolls_back() {
         use crate::storage::content_version_repo::ContentVersionRepo;
         use crate::storage::sync_request_ledger_repo::DOMAIN_PROMPTS;
@@ -1102,6 +1099,7 @@ mod tests {
 
     /// 并发 push 产出 content_versions conflict 行。
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional serial inject lock across await
     async fn push_batch_concurrent_writes_conflict_row() {
         use crate::storage::content_version_repo::ContentVersionRepo;
         use crate::storage::sync_request_ledger_repo::DOMAIN_PROMPTS;

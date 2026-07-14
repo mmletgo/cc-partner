@@ -11,9 +11,6 @@
 
 use super::helpers::*;
 use super::OrchestratorRepo;
-use crate::storage::maintenance_gate::{
-    begin_shared_write, with_shared_write_lease,
-};
 use crate::error::AppError;
 use crate::orchestrator::claim::{
     preflight_claim_candidates, ClaimCandidate, ClaimCasOutcome, ClaimScanCursor,
@@ -29,6 +26,7 @@ use crate::orchestrator::models::{
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
 };
+use crate::storage::maintenance_gate::{begin_shared_write, with_shared_write_lease};
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
@@ -768,7 +766,8 @@ impl OrchestratorRepo {
             .bind(token)
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         Ok(result.rows_affected() == 1)
     }
 
@@ -969,7 +968,8 @@ impl OrchestratorRepo {
             .bind(expected_status.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
 
         if result.rows_affected() == 1 {
             return self.get_task(task_id).await.map(Some);
@@ -1010,7 +1010,8 @@ impl OrchestratorRepo {
             .bind(OrchestratorTaskStatus::Verifying.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
 
         if result.rows_affected() == 1 {
             return self.get_task(task_id).await.map(Some);
@@ -1190,7 +1191,8 @@ impl OrchestratorRepo {
             .bind(current.run_state.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
 
         if result.rows_affected() == 1 {
             return self.get_task(&current.id).await;
@@ -1248,7 +1250,8 @@ impl OrchestratorRepo {
             .bind(OrchestratorRunState::Idle.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
 
         if result.rows_affected() != 1 {
             self.get_task(&current.id).await?;
@@ -1310,7 +1313,8 @@ impl OrchestratorRepo {
             .bind(OrchestratorRunState::Idle.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
 
         if result.rows_affected() == 1 {
             return self.get_task(&current.id).await;
@@ -1344,7 +1348,8 @@ impl OrchestratorRepo {
             .bind(task_id)
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
 
         if result.rows_affected() == 1 {
             return self.get_task(task_id).await;
@@ -1402,7 +1407,8 @@ impl OrchestratorRepo {
             .bind(current.run_state.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
 
         if result.rows_affected() != 1 {
             let latest = self.get_task(&current.id).await?;
