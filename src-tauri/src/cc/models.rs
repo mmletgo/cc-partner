@@ -1,16 +1,18 @@
 //! cc/models.rs — Claude Code 历史数据模型
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     采集到的 Claude Code 用户输入 prompt 需要一个结构承载，同时服务三个场景：
+//!     采集到的 Claude Code 用户输入 prompt 需要一个结构承载，同时服务四个场景：
 //!     1) 数据库读写与 P2P 同步（snake_case，与对端 Rust 版互通）；
 //!     2) 前端 IPC 返回（camelCase，对齐前端 types.ts）；
-//!     3) 按项目归类的列表聚合（CcProjectDto，前端项目侧边栏用）。
+//!     3) 按项目归类的列表聚合（CcProjectDto，前端项目侧边栏用）；
+//!     4) 分页同步摘要（CcSyncSummary：仅 id + vector_clock，避免正文内存峰值）。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `ClaudeHistoryRow`：snake_case，直接映射 claude_history 表一行，
 //!       vector_clock 为 HashMap<String,u64>，datetime 用 String 透传。
 //!     - `ClaudeHistoryDto`：camelCase，给前端单条详情/列表用。
 //!     - `CcProjectDto`：camelCase，按 project_path 聚合的 count + lastOccurredAt。
+//!     - `CcSyncSummary`：snake_case，同步 manifest 页摘要 `{id, vector_clock}`。
 //!     - 提供 Row→Dto 转换，字段对照前端类型定义。
 
 use std::collections::HashMap;
@@ -84,6 +86,23 @@ pub struct CcProjectDto {
     pub count: u64,
     /// 该项目下最近一条 prompt 的 occurred_at
     pub last_occurred_at: String,
+}
+
+/// Claude Code 历史同步摘要（snake_case，P2P manifest 页用）。
+///
+/// Business Logic（为什么需要这个类型）:
+///     分页同步协议先交换摘要再按需拉正文，避免把全部 content 载入内存。
+///     摘要只含主键与向量时钟，供客户端比较因果领先关系并决定 items/push 批次。
+///
+/// Code Logic（这个结构做什么）:
+///     snake_case 字段 `{id, vector_clock}`，与 ClaudeHistoryRow 同步字段对齐；
+///     由 `list_sync_manifest_page` 从 DB 直接投影，不读 content。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CcSyncSummary {
+    /// 历史行主键（`{session_id}:{message_uuid}`）
+    pub id: String,
+    /// 向量时钟 {device_id: counter}，用于比较领先/并发
+    pub vector_clock: HashMap<String, u64>,
 }
 
 impl ClaudeHistoryRow {
