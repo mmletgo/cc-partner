@@ -2,7 +2,7 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     前端传输面板通过 invoke 调用：列出传输任务（活跃+历史）、发起发送、取消任务、
-//!     幂等 retry/resume（clientOperationId）。
+//!     幂等 retry/resume（clientOperationId）、uncertain operation 对账查询。
 //!     对照 Python `/api/transfer/tasks`、`/api/transfer/send`、`DELETE /api/transfer/tasks/{id}`。
 //!
 //! Code Logic（这个模块做什么）:
@@ -12,9 +12,10 @@
 //!       立即返回 `{accepted, deviceId, filePath}`。
 //!     - `cancel_transfer`：触发 CancellationToken，返回 `{ok, id}`。
 //!     - `retry_transfer` / `resume_transfer`：本机 owner 路径幂等 claim 后 spawn。
+//!     - `get_transfer_operation`：按发送端 clientOperationId 查询 ledger 真值。
 
 use crate::error::AppError;
-use crate::models::transfer::TransferTaskDto;
+use crate::models::transfer::{TransferOperationStatus, TransferTaskDto};
 use crate::state::AppState;
 use crate::transfer::sender;
 use tauri::State;
@@ -123,4 +124,19 @@ pub async fn resume_transfer(
     )
     .await?;
     Ok(task.to_dto(None))
+}
+
+/// 查询发送端 clientOperationId 的 operation 真值。
+///
+/// Business Logic（为什么需要这个命令）:
+///     transport timeout / lost final ACK 后 UI 必须先对账，禁止盲重试。
+///
+/// Code Logic（这个命令做什么）:
+///     委托 `sender::get_transfer_operation`；返回 camelCase `TransferOperationStatus`。
+#[tauri::command]
+pub async fn get_transfer_operation(
+    state: State<'_, AppState>,
+    client_operation_id: String,
+) -> Result<TransferOperationStatus, AppError> {
+    sender::get_transfer_operation(state.inner(), &client_operation_id).await
 }

@@ -377,6 +377,34 @@ pub struct TransferFailure {
     pub message: String,
 }
 
+/// 发送端 clientOperationId 对账结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     mutation timeout/断线后 UI 不得盲重试；必须先按全局 clientOperationId 查询发送端
+///     ledger 真值（notFound/pending/succeeded/failed），再决定后续动作。
+///
+/// Code Logic（这个枚举做什么）:
+///     内部 tag `status` + camelCase：`{status,taskId?|code?}`。
+///     OperationIdConflict 在 claim 边界返回，查询侧通常不需要。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum TransferOperationStatus {
+    /// ledger 无此 clientOperationId
+    NotFound,
+    /// 已 claim 或仍在飞行中（含 lost-ACK 后的 uncertain Finalizing）
+    Pending,
+    /// 发送端已提交成功 outcome
+    Succeeded {
+        /// 绑定的本地 attempt task id
+        task_id: String,
+    },
+    /// 已提交 definitive 失败 outcome
+    Failed {
+        /// 稳定失败码（failure.code 或 cancelled/failed）
+        code: String,
+    },
+}
+
 /// 传输任务实体（内部用，snake_case）。
 ///
 /// Business Logic: registry 活跃任务表与 transfer_history 表共享同一字段集。
@@ -677,5 +705,32 @@ mod tests {
             Some(TransferFailureStage::Transfer)
         );
         assert_eq!(dto.error_message.as_deref(), Some("超时"));
+    }
+
+    /// TransferOperationStatus 序列化为 camelCase tag 合同。
+    #[test]
+    fn operation_status_serde_camel_case_tag() {
+        let s = TransferOperationStatus::Succeeded {
+            task_id: "t1".into(),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["status"], "succeeded");
+        assert_eq!(v["taskId"], "t1");
+        let p = TransferOperationStatus::Pending;
+        assert_eq!(
+            serde_json::to_value(&p).unwrap()["status"],
+            "pending"
+        );
+        let n = TransferOperationStatus::NotFound;
+        assert_eq!(
+            serde_json::to_value(&n).unwrap()["status"],
+            "notFound"
+        );
+        let f = TransferOperationStatus::Failed {
+            code: "finalize_rejected".into(),
+        };
+        let fv = serde_json::to_value(&f).unwrap();
+        assert_eq!(fv["status"], "failed");
+        assert_eq!(fv["code"], "finalize_rejected");
     }
 }

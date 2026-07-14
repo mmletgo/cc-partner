@@ -6,12 +6,16 @@
 //!     emit 进度/完成/失败/取消事件 → 写 transfer_history。对照 Python `transfer/sender.py`。
 //!     N5 起增加幂等 `retry_transfer` / `resume_transfer`：全局 clientOperationId claim 后才 spawn，
 //!     resume 复用稳定 protocol_transfer_id，retry 可 mint 新 id；旧 peer 无 resume 能力时拒绝 resume。
+//!     T3：`get_transfer_operation` 按发送端 ledger 对账；lost final ACK 经 receiver status 权威
+//!     成功后本地单事务提交 completed，uncertain 保持 pending 不提供 retry。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `start_sending(state, device_id, file_path)`：在调用方线程内 spawn 异步任务，
 //!       立即返回 transfer_id（命令层 send_transfer 用）。
 //!     - `retry_transfer` / `resume_transfer`：校验父任务状态/指纹/能力 → claim → registry.add → spawn。
 //!     - `recover_pending_claimed_operations`：owner 启动时恢复 insert-before-spawn 的 Queued 行。
+//!     - `get_transfer_operation`：按 clientOperationId 查发送端 ledger；Finalizing uncertain 时
+//!       可按 protocol id 查对端 status 并对账提交。
 //!     - spawn 内：查 devices → transfer_init 拿 resume_offset → 分块 → complete 门控。
 //!
 //! 协议：init/chunk/complete JSON 字段、X-Chunk-Offset header、960KB chunk_size、resume_offset 语义
@@ -20,7 +24,8 @@
 use crate::error::AppError;
 use crate::models::transfer::{
     canonical_recovery_payload_hash, SourceFingerprint, TransferDirection, TransferFailure,
-    TransferFailureStage, TransferPhase, TransferRecoveryKind, TransferStatus, TransferTask,
+    TransferFailureStage, TransferOperationStatus, TransferPhase, TransferRecoveryKind,
+    TransferStatus, TransferTask,
 };
 use crate::net::peer_error::PeerCallError;
 use crate::net::protocol::{CAPABILITY_TRANSFER_COMPLETE_V1, CAPABILITY_TRANSFER_RESUME_V1};
@@ -199,6 +204,236 @@ pub async fn resume_transfer(
         TransferRecoveryKind::Resume,
     )
     .await
+}
+
+/// 按发送端全局 clientOperationId 查询 operation 真值。
+///
+/// Business Logic（为什么需要这个函数）:
+///     transport timeout / lost final ACK 后调用方不得盲重试；必须先查询发送端 ledger。
+///     receiver 不持有 clientOperationId；对账键仅在本机发送端。
+///
+/// Code Logic（这个函数做什么）:
+///     1) 读 transfer_history by client_operation_id（无行 → NotFound）；
+///     2) 终态直接映射 Succeeded/Failed；
+///     3) 非终态（含 Finalizing uncertain）尝试 `reconcile_lost_final_ack`：
+///        按 protocol id 查对端 status，receiver completed 时本地单事务提交 completed；
+///     4) 仍未收敛则 Pending。
+pub async fn get_transfer_operation(
+    state: &AppState,
+    client_operation_id: &str,
+) -> Result<TransferOperationStatus, AppError> {
+    let id = client_operation_id.trim();
+    if id.is_empty() {
+        return Ok(TransferOperationStatus::NotFound);
+    }
+
+    // registry 优先：活跃 attempt 可能尚未把中间态刷回 history（除 claim 行外）。
+    if let Some(active) = find_active_by_client_operation_id(state, id) {
+        if is_terminal_status(active.status) {
+            return Ok(map_task_to_operation_status(&active));
+        }
+        if let Some(updated) = reconcile_lost_final_ack(state, &active).await? {
+            return Ok(map_task_to_operation_status(&updated));
+        }
+        return Ok(TransferOperationStatus::Pending);
+    }
+
+    let Some(task) = state
+        .transfer_repo
+        .get_by_client_operation_id(id)
+        .await?
+    else {
+        return Ok(TransferOperationStatus::NotFound);
+    };
+
+    if is_terminal_status(task.status) {
+        return Ok(map_task_to_operation_status(&task));
+    }
+
+    if let Some(updated) = reconcile_lost_final_ack(state, &task).await? {
+        return Ok(map_task_to_operation_status(&updated));
+    }
+
+    Ok(TransferOperationStatus::Pending)
+}
+
+/// Business Logic: list 路径需要在活跃表命中同 op 的 attempt。
+/// Code Logic: 线性扫描 registry.list()，匹配 client_operation_id。
+fn find_active_by_client_operation_id(state: &AppState, client_operation_id: &str) -> Option<TransferTask> {
+    state.transfers.list().into_iter().find(|t| {
+        t.client_operation_id
+            .as_deref()
+            .is_some_and(|op| op == client_operation_id)
+    })
+}
+
+/// Business Logic: completed/failed/cancelled 是 definitive outcome，不再对账。
+/// Code Logic: 匹配 coarse TransferStatus 终态。
+fn is_terminal_status(status: TransferStatus) -> bool {
+    matches!(
+        status,
+        TransferStatus::Completed | TransferStatus::Failed | TransferStatus::Cancelled
+    )
+}
+
+/// Business Logic: ledger 行 → 调用方可见 operation status（smoke/对账共用）。
+/// Code Logic: Completed→Succeeded；Failed/Cancelled→Failed{code}；其余→Pending；None→NotFound。
+pub fn operation_status_from_task(task: Option<&TransferTask>) -> TransferOperationStatus {
+    match task {
+        None => TransferOperationStatus::NotFound,
+        Some(t) => map_task_to_operation_status(t),
+    }
+}
+
+/// Business Logic: ledger 行 → 调用方可见 operation status。
+/// Code Logic: Completed→Succeeded；Failed/Cancelled→Failed{code}；其余→Pending。
+fn map_task_to_operation_status(task: &TransferTask) -> TransferOperationStatus {
+    match task.status {
+        TransferStatus::Completed => TransferOperationStatus::Succeeded {
+            task_id: task.id.clone(),
+        },
+        TransferStatus::Failed => TransferOperationStatus::Failed {
+            code: task
+                .failure
+                .as_ref()
+                .map(|f| f.code.clone())
+                .unwrap_or_else(|| "failed".to_string()),
+        },
+        TransferStatus::Cancelled => TransferOperationStatus::Failed {
+            code: "cancelled".to_string(),
+        },
+        TransferStatus::Pending | TransferStatus::Transferring => TransferOperationStatus::Pending,
+    }
+}
+
+/// lost final ACK 对账：receiver 权威 success 后本地提交 completed。
+///
+/// Business Logic（为什么需要这个函数）:
+///     complete 响应丢失时 receiver 可能已 durable success；发送端不得二次破坏性 finalize，
+///     只能按 protocolTransferId 查 status，确认后本地单事务写 completed outcome。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 peer base_url → transfer_status_typed(protocol_id)；
+///     status=completed → commit_sender_completed_outcome（registry+repo）；
+///     pending/unreachable → Ok(None) 保持 pending；不发起 retry。
+pub async fn reconcile_lost_final_ack(
+    state: &AppState,
+    task: &TransferTask,
+) -> Result<Option<TransferTask>, AppError> {
+    if task.direction != TransferDirection::Send {
+        return Ok(None);
+    }
+    if is_terminal_status(task.status) {
+        return Ok(None);
+    }
+
+    let protocol_id = if task.protocol_transfer_id.is_empty() {
+        task.id.as_str()
+    } else {
+        task.protocol_transfer_id.as_str()
+    };
+
+    let Some(base_url) = resolve_peer_base_url(state, &task.peer_device_id) else {
+        return Ok(None);
+    };
+
+    let status = match state
+        .peer_client
+        .transfer_status_typed(&base_url, protocol_id)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(
+                "lost-ACK 对账 status 不可达 op={:?} protocol={protocol_id}: {e}",
+                task.client_operation_id
+            );
+            return Ok(None);
+        }
+    };
+
+    if !peer_status_is_completed(&status) {
+        return Ok(None);
+    }
+
+    let updated = commit_sender_completed_outcome(state, task).await?;
+    tracing::info!(
+        "lost final ACK 对账成功：protocol={protocol_id} task={} → completed",
+        updated.id
+    );
+    Ok(Some(updated))
+}
+
+/// Business Logic: devices 表解析对端 host:port。
+/// Code Logic: 读锁取 Device → http://host:port。
+fn resolve_peer_base_url(state: &AppState, peer_device_id: &str) -> Option<String> {
+    let devices = state.devices.read().expect("devices 读锁中毒");
+    devices.get(peer_device_id).map(|d| d.base_url())
+}
+
+/// Business Logic: 与 peer_client 一致，status 字段 completed 即权威成功。
+/// Code Logic: JSON `status == "completed"`。
+fn peer_status_is_completed(status: &serde_json::Value) -> bool {
+    status
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "completed")
+}
+
+/// 本地单事务提交发送端 completed + operation outcome。
+///
+/// Business Logic（为什么需要这个函数）:
+///     receiver 权威 success 后，发送端必须把 task completed 与 clientOperationId outcome
+///     一并落库，供后续 get_transfer_operation 回放 Succeeded。
+///
+/// Code Logic（这个函数做什么）:
+///     mark_completed（若仍在 registry）→ 构造 completed 快照 → transfer_repo.record
+///     （同一 id upsert，保留 client_operation_id）→ remove registry → emit completed。
+async fn commit_sender_completed_outcome(
+    state: &AppState,
+    task: &TransferTask,
+) -> Result<TransferTask, AppError> {
+    let completed_at = now_iso();
+    if state.transfers.get(&task.id).is_some() {
+        state
+            .transfers
+            .mark_completed(&task.id, completed_at.clone(), None);
+    }
+
+    let mut snapshot = state
+        .transfers
+        .get(&task.id)
+        .unwrap_or_else(|| task.clone());
+    snapshot.status = TransferStatus::Completed;
+    snapshot.phase = Some(TransferPhase::Completed);
+    snapshot.failure = None;
+    snapshot.completed_at = Some(completed_at);
+    snapshot.transferred_bytes = snapshot.size;
+    // 保留 client_operation_id / protocol ids
+    if snapshot.client_operation_id.is_none() {
+        snapshot.client_operation_id = task.client_operation_id.clone();
+    }
+    if snapshot.operation_payload_hash.is_none() {
+        snapshot.operation_payload_hash = task.operation_payload_hash.clone();
+    }
+    if snapshot.protocol_transfer_id.is_empty() {
+        snapshot.protocol_transfer_id = task.protocol_transfer_id.clone();
+    }
+    if snapshot.logical_transfer_id.is_empty() {
+        snapshot.logical_transfer_id = task.logical_transfer_id.clone();
+    }
+
+    state.transfer_repo.record(&snapshot).await?;
+    state.transfers.remove(&task.id);
+    state.emit_event(
+        "transfer:completed",
+        StatusPayload {
+            id: snapshot.id.clone(),
+            status: "completed".to_string(),
+            error_message: None,
+        },
+    );
+    Ok(snapshot)
 }
 
 /// 启动时恢复 insert-before-spawn 的 Queued 发送行。
@@ -705,37 +940,36 @@ async fn run_send_loop(
             }
 
             registry.set_phase(&transfer_id, TransferPhase::Finalizing);
+            // Finalizing 中间态刷入 ledger，便于 timeout 后 get_transfer_operation 命中 Pending。
+            if let Some(t) = registry.get(&transfer_id) {
+                let _ = state.transfer_repo.record(&t).await;
+            }
             match finalize_send_with_peer(&state, &base_url, &wire_id, file_size, resume_offset)
                 .await
             {
-                Ok(()) => {
-                    let completed_at = now_iso();
-                    registry.mark_completed(&transfer_id, completed_at.clone(), None);
-                    let task = registry.get(&transfer_id);
-                    if let Some(t) = task {
-                        let _ = state.transfer_repo.record(&t).await;
+                FinalizeOutcome::Succeeded => {
+                    if let Some(t) = registry.get(&transfer_id) {
+                        let _ = commit_sender_completed_outcome(&state, &t).await;
+                    } else {
+                        // registry 已空时仍尽量按历史行提交（防御）。
+                        tracing::warn!("finalize 成功但 registry 已无任务: {transfer_id}");
                     }
-                    registry.remove(&transfer_id);
-                    state.emit_event(
-                        "transfer:completed",
-                        StatusPayload {
-                            id: transfer_id,
-                            status: "completed".to_string(),
-                            error_message: None,
-                        },
-                    );
                 }
-                Err(msg) => {
+                FinalizeOutcome::DefinitiveFailure { message, code } => {
                     fail_transfer(
                         &state,
                         &registry,
                         &transfer_id,
-                        msg,
+                        message,
                         TransferFailureStage::Finalize,
-                        "finalize_failed",
+                        &code,
                         true,
                     )
                     .await;
+                }
+                FinalizeOutcome::Uncertain { message } => {
+                    // lost-ACK / peer pending：保持 Finalizing pending，不提供 retry。
+                    park_uncertain_finalize(&state, &registry, &transfer_id, &message).await;
                 }
             }
         }
@@ -770,35 +1004,56 @@ async fn run_send_loop(
     }
 }
 
+/// complete/finalize 握手结果（区分 definitive 失败与 uncertain）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     lost ACK / transport timeout 后不得把 operation 标 Failed 并提供 retry；
+///     必须保持 pending 供 get_transfer_operation 对账。
+///
+/// Code Logic（这个枚举做什么）:
+///     Succeeded / DefinitiveFailure / Uncertain 三态驱动发送循环终态写入。
+#[derive(Debug)]
+enum FinalizeOutcome {
+    /// 对端已确认成功（含 status 收敛）
+    Succeeded,
+    /// 明确业务失败，可写 Failed + retryable
+    DefinitiveFailure { message: String, code: String },
+    /// 网络/timeout/对端仍 pending：保持 Finalizing pending
+    Uncertain { message: String },
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     发送端在分块结束后必须确认对端已落地，但 complete 路由是新能力；对旧对端无条件
 ///     调用会产生 404 假失败与重试重复副本。需要按 health 权威 capability 门控。
+///     lost final ACK 时 transfer_complete 内 status_fallback 收敛为 Succeeded；
+///     仍不可达则 Uncertain。
 ///
 /// Code Logic（这个函数做什么）:
 ///     1. health_info 探测对端是否 supports(`transfer.complete.v1`)；
-///     2. 有能力 → transfer_complete（含有界重试 + status 收敛），success=true 才 Ok；
-///     3. 无能力且 file_size>0 且 resume_offset < file_size（确实发过 chunk）→ Ok（legacy）；
-///     4. 无能力且 size=0 或 full-tmp（resume_offset==size）→ Err(unsupported 文案)；
-///     5. health 网络失败原样映射为失败（不误报 unsupported）。
+///     2. 有能力 → transfer_complete（有界重试 + status 收敛）→ Succeeded / Uncertain / Definitive；
+///     3. 无能力且 file_size>0 且 resume_offset < file_size（确实发过 chunk）→ Succeeded（legacy）；
+///     4. 无能力且 size=0 或 full-tmp → DefinitiveFailure(unsupported)；
+///     5. health 在需要 complete 时失败 → Uncertain（不得假成功/假失败）。
 async fn finalize_send_with_peer(
     state: &AppState,
     base_url: &str,
     transfer_id: &str,
     file_size: u64,
     resume_offset: u64,
-) -> Result<(), String> {
+) -> FinalizeOutcome {
     let supports_complete = match state.peer_client.health_info(base_url).await {
         Ok(health) => health
             .protocol_info()
             .supports(CAPABILITY_TRANSFER_COMPLETE_V1),
         Err(e) => {
-            // health 失败时：若本应走 complete（size=0 / full-tmp），无法确认 → 失败；
-            // 普通非空且发过块时，仍可按 legacy chunk 路径成功，避免把瞬时 health 抖动
-            // 变成整次传输失败（chunk 已成功）。
+            // health 失败时：若本应走 complete（size=0 / full-tmp），无法确认 → uncertain；
+            // 普通非空且发过块时，仍可按 legacy chunk 路径成功。
             if file_size == 0 || resume_offset >= file_size {
-                return Err(format!(
-                    "无法探测对端 transfer.complete.v1 能力且本次需要 complete 握手: {e}"
-                ));
+                return FinalizeOutcome::Uncertain {
+                    message: format!(
+                        "无法探测对端 transfer.complete.v1 能力且本次需要 complete 握手: {e}"
+                    ),
+                };
             }
             tracing::warn!("探测 transfer.complete.v1 失败，按 legacy 最后一块路径收敛: {e}");
             false
@@ -811,20 +1066,50 @@ async fn finalize_send_with_peer(
             .transfer_complete(base_url, transfer_id)
             .await
         {
-            Ok(true) => Ok(()),
-            Ok(false) => Err("对端 finalize 未成功（complete 握手返回 success=false）".to_string()),
-            Err(e) => Err(format_complete_error(e)),
+            Ok(true) => FinalizeOutcome::Succeeded,
+            Ok(false) => FinalizeOutcome::DefinitiveFailure {
+                message: "对端 finalize 未成功（complete 握手返回 success=false）".to_string(),
+                code: "finalize_rejected".to_string(),
+            },
+            Err(e) => classify_complete_error(e),
         }
     } else {
         // legacy：只有“确实发送过至少一块”的非空传输才可依赖 chunk finalize。
         if file_size > 0 && resume_offset < file_size {
-            Ok(())
+            FinalizeOutcome::Succeeded
         } else {
-            Err(
-                "对端不支持 transfer.complete.v1，无法完成空文件或 full-tmp 续传 finalize"
+            FinalizeOutcome::DefinitiveFailure {
+                message: "对端不支持 transfer.complete.v1，无法完成空文件或 full-tmp 续传 finalize"
                     .to_string(),
-            )
+                code: "complete_unsupported".to_string(),
+            }
         }
+    }
+}
+
+/// Business Logic: complete 错误分 uncertain（可对账）与 definitive。
+/// Code Logic: Network/Timeout/retryable Remote → Uncertain；其余 DefinitiveFailure。
+fn classify_complete_error(error: PeerCallError) -> FinalizeOutcome {
+    let message = format_complete_error_ref(&error);
+    match error {
+        PeerCallError::Network { .. } => FinalizeOutcome::Uncertain { message },
+        PeerCallError::Remote {
+            code, retryable, ..
+        } if retryable || code == "timeout" || code == "unavailable" => {
+            FinalizeOutcome::Uncertain { message }
+        }
+        PeerCallError::Unsupported { .. } => FinalizeOutcome::DefinitiveFailure {
+            message,
+            code: "complete_unsupported".to_string(),
+        },
+        PeerCallError::InvalidResponse { .. } => FinalizeOutcome::Uncertain {
+            // 响应损坏也可能已在对端提交；保守 uncertain，交给 status 对账。
+            message,
+        },
+        PeerCallError::Remote { code, .. } => FinalizeOutcome::DefinitiveFailure {
+            message,
+            code,
+        },
     }
 }
 
@@ -832,8 +1117,8 @@ async fn finalize_send_with_peer(
 ///     complete 失败需把结构化 PeerCallError 折叠为任务 errorMessage，保留 code/status。
 ///
 /// Code Logic（这个函数做什么）:
-///     按 PeerCallError 变体生成可读中文错误串。
-fn format_complete_error(error: PeerCallError) -> String {
+///     按 PeerCallError 变体生成可读中文错误串（只读借用，便于分类后 move error）。
+fn format_complete_error_ref(error: &PeerCallError) -> String {
     match error {
         PeerCallError::Remote { status, code, .. } => {
             format!("对端 complete 握手失败: HTTP {status} [{code}]")
@@ -846,6 +1131,36 @@ fn format_complete_error(error: PeerCallError) -> String {
         }
         PeerCallError::InvalidResponse { reason, .. } => {
             format!("对端 complete 响应无法解析: {reason}")
+        }
+    }
+}
+
+/// 将发送任务停在 Finalizing uncertain，供后续 get_transfer_operation 对账。
+///
+/// Business Logic（为什么需要这个函数）:
+///     lost ACK / peer pending 时不得 Failed+retry；必须保留 pending 真值。
+///
+/// Code Logic（这个函数做什么）:
+///     set_phase(Finalizing) + status 保持 Transferring → record history → 不 remove、不 emit failed。
+async fn park_uncertain_finalize(
+    state: &AppState,
+    registry: &TransferRegistry,
+    transfer_id: &str,
+    message: &str,
+) {
+    tracing::warn!("transfer finalize uncertain，保持 pending 等待对账: {transfer_id}: {message}");
+    registry.set_phase(transfer_id, TransferPhase::Finalizing);
+    // 确保 coarse status 不是 Failed
+    if let Some(mut t) = registry.get(transfer_id) {
+        t.status = TransferStatus::Transferring;
+        t.phase = Some(TransferPhase::Finalizing);
+        t.failure = None;
+        t.completed_at = None;
+        // registry 无全量 replace；用 update_progress 保 status + 再 set_phase
+        registry.update_progress(transfer_id, t.transferred_bytes, TransferStatus::Transferring);
+        registry.set_phase(transfer_id, TransferPhase::Finalizing);
+        if let Some(snap) = registry.get(transfer_id) {
+            let _ = state.transfer_repo.record(&snap).await;
         }
     }
 }
