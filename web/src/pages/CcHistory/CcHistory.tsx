@@ -15,7 +15,9 @@
  *   - 使用独立 projectGuard / promptGuard（createLatestRequestGuard）在 success/catch/finally
  *     写状态前校验 token+context；selectedProject 变为 null 时 invalidate promptGuard
  *   - 复制/转存：成功后顶部 toast 提示；刷新/同步失败同样 toast（非阻塞）
- *   - 删除：弹 confirm 二次确认，确认后乐观移除
+ *   - 转存失败：role=alert + 可重试（保留条目快照）；Task 8 再迁 StatusMessage
+ *   - 删除：弹 confirm 二次确认，确认后乐观移除；失败回滚列表项 + 可重试；
+ *     成功删除不暴露假 Undo（无后端 restore 合同）
  *   - hooks 全部声明在顶部、用条件渲染（三元）而非 early return（项目铁律）
  */
 
@@ -70,6 +72,15 @@ export function CcHistory() {
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * 动作失败态（转存 / 删除）。
+   * 保存条目快照以便重试；成功删除不写入此类态（无后端 restore 合同，不暴露假 Undo）。
+   */
+  const [actionError, setActionError] = useState<{
+    kind: 'saveAsPrompt' | 'delete';
+    message: string;
+    item: CcHistoryItem;
+  } | null>(null);
 
   // ── 独立 latest-request 守卫（项目列表 / prompt 列表）──
   const projectGuardRef = useRef(createLatestRequestGuard<null>());
@@ -256,19 +267,27 @@ export function CcHistory() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户希望把历史 prompt 一键转存到 Prompt 库。
+   *   用户希望把历史 prompt 一键转存到 Prompt 库；失败必须可见并可重试，不得静默。
    *
    * Code Logic（这个函数做什么）:
-   *   用 content 前 40 字做 title 调 promptsApi.create；成功 toast。
+   *   用 content 前 40 字做 title 调 promptsApi.create；成功 toast 并清 actionError；
+   *   失败写入 role=alert 表面与可重试快照（Task 8 再迁 StatusMessage）。
    */
   const handleSaveAsPrompt = useCallback(
     async (item: CcHistoryItem) => {
       try {
         const title = item.content.slice(0, 40).trim() || item.content.slice(0, 40);
         await promptsApi.create({ title, content: item.content, tags: [] });
+        setActionError(null);
         showToast(t('ccHistory:savedAsPrompt'));
-      } catch {
-        // 静默失败（转存非本任务范围）
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : t('ccHistory:saveAsPromptFailedGeneric');
+        setActionError({
+          kind: 'saveAsPrompt',
+          message: t('ccHistory:saveAsPromptFailed', { error: message }),
+          item,
+        });
       }
     },
     [showToast, t],
@@ -285,7 +304,7 @@ export function CcHistory() {
     setPendingDeleteId(item.id);
   }, []);
 
-  // ── 确认删除：乐观移除 ──
+  // ── 确认删除：乐观移除 + 失败回滚 ──
   const pendingItem = useMemo(
     () => prompts.find((p) => p.id === pendingDeleteId) ?? null,
     [prompts, pendingDeleteId],
@@ -293,29 +312,90 @@ export function CcHistory() {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   乐观删除后若后端失败，必须把条目与项目计数回滚，并允许原地重试；
+   *   成功删除不暴露假 Undo（当前无 restore/vector-clock 合同）。
+   *
+   * Code Logic（这个函数做什么）:
+   *   先快照条目，乐观从 prompts/projects 计数移除；remove 成功清 actionError；
+   *   失败则把快照插回列表并恢复 count，写入可重试 actionError。
+   */
+  const performDelete = useCallback(
+    async (item: CcHistoryItem) => {
+      const id = item.id;
+      const projectPath = item.projectPath;
+
+      setPrompts((prev) => prev.filter((p) => p.id !== id));
+      setProjects((prev) =>
+        prev.map((p) =>
+          p.projectPath === projectPath
+            ? { ...p, count: Math.max(0, p.count - 1) }
+            : p,
+        ),
+      );
+
+      try {
+        await ccHistoryApi.remove(id);
+        setActionError(null);
+        // 成功：不写入 Undo 态（无后端 restore 合同）
+      } catch (err) {
+        // 回滚列表项
+        setPrompts((prev) => {
+          if (prev.some((p) => p.id === id)) return prev;
+          return [...prev, item].sort((a, b) =>
+            a.occurredAt < b.occurredAt ? 1 : a.occurredAt > b.occurredAt ? -1 : 0,
+          );
+        });
+        setProjects((prev) =>
+          prev.map((p) =>
+            p.projectPath === projectPath ? { ...p, count: p.count + 1 } : p,
+          ),
+        );
+        const message =
+          err instanceof Error ? err.message : t('ccHistory:deleteFailedGeneric');
+        setActionError({
+          kind: 'delete',
+          message: t('ccHistory:deleteFailed', { error: message }),
+          item,
+        });
+      }
+    },
+    [t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   用户确认后应从时间线移除该历史 prompt。
    *
    * Code Logic（这个函数做什么）:
-   *   乐观从 prompts/projects 计数移除，再调 remove；失败静默（非本任务范围）。
+   *   从 prompts 取快照后关闭弹层，再走 performDelete（乐观 + 回滚）。
    */
   const confirmDelete = useCallback(async () => {
     if (!pendingDeleteId) return;
-    const id = pendingDeleteId;
-    setPrompts((prev) => prev.filter((p) => p.id !== id));
-    setProjects((prev) =>
-      prev.map((p) =>
-        p.projectPath === selectedProjectPath
-          ? { ...p, count: Math.max(0, p.count - 1) }
-          : p,
-      ),
-    );
+    const snapshot =
+      prompts.find((p) => p.id === pendingDeleteId) ??
+      (actionError?.kind === 'delete' && actionError.item.id === pendingDeleteId
+        ? actionError.item
+        : null);
     setPendingDeleteId(null);
-    try {
-      await ccHistoryApi.remove(id);
-    } catch {
-      // 静默失败
+    if (!snapshot) return;
+    await performDelete(snapshot);
+  }, [pendingDeleteId, prompts, actionError, performDelete]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   转存/删除失败后用户需要一键重试，并复用失败快照 payload。
+   *
+   * Code Logic（这个函数做什么）:
+   *   按 actionError.kind 分派 handleSaveAsPrompt 或 performDelete。
+   */
+  const handleRetryAction = useCallback(async () => {
+    if (!actionError) return;
+    if (actionError.kind === 'saveAsPrompt') {
+      await handleSaveAsPrompt(actionError.item);
+      return;
     }
-  }, [pendingDeleteId, selectedProjectPath]);
+    await performDelete(actionError.item);
+  }, [actionError, handleSaveAsPrompt, performDelete]);
 
   // ── 选中项目对象（用于右栏标题等）──
   const selectedProject = useMemo(
@@ -374,6 +454,16 @@ export function CcHistory() {
             ? t('ccHistory:loadFailed', { error: projectsError })
             : t('ccHistory:loadFailedGeneric')}
         </p>
+      ) : null}
+
+      {/* 动作失败（转存/删除）：accessible alert + 重试；Task 8 再迁 StatusMessage */}
+      {actionError ? (
+        <div className={styles.actionError} role="alert">
+          <span>{actionError.message}</span>
+          <Button variant="secondary" size="sm" onClick={() => void handleRetryAction()}>
+            {t('common:action.retry')}
+          </Button>
+        </div>
       ) : null}
 
       {/* 主体双栏 */}
