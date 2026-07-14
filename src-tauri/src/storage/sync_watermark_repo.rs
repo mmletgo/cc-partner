@@ -10,9 +10,13 @@
 //!     list_active_peers 过滤最近 active_window_days（默认 90）内见过的 peer。
 
 use crate::error::AppError;
+use crate::storage::maintenance_gate::{
+    begin_shared_write, with_shared_write_lease, DatabaseMaintenanceGate,
+};
 use chrono::{DateTime, Duration, Utc};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::{Row, Sqlite, Transaction};
+use std::sync::Arc;
 
 /// 默认活跃 peer 窗口（天）。
 pub const DEFAULT_ACTIVE_PEER_WINDOW_DAYS: i64 = 90;
@@ -37,15 +41,25 @@ pub struct SyncPeerWatermark {
 pub struct SyncWatermarkRepo {
     /// SQLite 连接池
     db: SqlitePool,
+    /// 维护闸：写路径经 shared lease，避免 restore 中途被覆盖
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl SyncWatermarkRepo {
-    /// 构造仓库。
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
     ///
-    /// Business Logic: GC 与 manifest ack 路径共用。
-    /// Code Logic: 持有 pool clone。
+    /// Business Logic: 单测与未接线生产路径无需注入 AppState gate。
+    /// Code Logic: 委托 `with_gate` + 新建独立 `DatabaseMaintenanceGate`。
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: 水位写与 backup restore 互斥，必须与其它 writer 共享同一 gate。
+    /// Code Logic: 持有 pool clone + `Arc<DatabaseMaintenanceGate>`。
+    pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { db, gate }
     }
 
     /// 返回内部 pool。
@@ -86,24 +100,27 @@ impl SyncWatermarkRepo {
         domain: &str,
         now: &str,
     ) -> Result<(), AppError> {
-        sqlx::query(
-            "INSERT INTO sync_peer_watermarks (peer_device_id, domain, acked_delete_epoch, last_seen_at)
-             VALUES (?, ?, 0, ?)
-             ON CONFLICT(peer_device_id, domain) DO UPDATE SET
-               last_seen_at = excluded.last_seen_at",
-        )
-        .bind(peer_device_id)
-        .bind(domain)
-        .bind(now)
-        .execute(&self.db)
-        .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO sync_peer_watermarks (peer_device_id, domain, acked_delete_epoch, last_seen_at)
+                 VALUES (?, ?, 0, ?)
+                 ON CONFLICT(peer_device_id, domain) DO UPDATE SET
+                   last_seen_at = excluded.last_seen_at",
+            )
+            .bind(peer_device_id)
+            .bind(domain)
+            .bind(now)
+            .execute(&self.db)
+            .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// 推进 peer 的 acked_delete_epoch（只升不降）并刷新 last_seen。
     ///
     /// Business Logic: 只有完整 manifest + delete/floor + batch 成功后才可提升水位。
-    /// Code Logic: 委托 `advance_ack_on_tx` 在独立事务中执行。
+    /// Code Logic: 经 `begin_shared_write` 开事务后委托 `advance_ack_on_tx`。
     pub async fn advance_ack(
         &self,
         peer_device_id: &str,
@@ -111,7 +128,7 @@ impl SyncWatermarkRepo {
         acked_delete_epoch: u64,
         now: &str,
     ) -> Result<(), AppError> {
-        let mut tx = self.db.begin().await?;
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         Self::advance_ack_on_tx(
             &mut tx,
             peer_device_id,
@@ -121,6 +138,7 @@ impl SyncWatermarkRepo {
         )
         .await?;
         tx.commit().await?;
+        drop(permit);
         Ok(())
     }
 

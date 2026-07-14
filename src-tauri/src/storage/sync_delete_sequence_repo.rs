@@ -9,22 +9,34 @@
 //!     `mint_on_tx` 在事务内读取 next_epoch、写回 +1、返回刚铸造的 epoch。
 
 use crate::error::AppError;
+use crate::storage::maintenance_gate::{begin_shared_write, DatabaseMaintenanceGate};
 use sqlx::sqlite::SqlitePool;
 use sqlx::{Sqlite, Transaction};
+use std::sync::Arc;
 
 /// Domain 删除序号仓库。
 pub struct SyncDeleteSequenceRepo {
     /// SQLite 连接池
     db: SqlitePool,
+    /// 维护闸：独立 mint 事务经 shared lease
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl SyncDeleteSequenceRepo {
-    /// 构造仓库。
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
     ///
     /// Business Logic: soft_delete / merge adopt-delete 路径需要铸造 epoch。
-    /// Code Logic: 持有 pool clone。
+    /// Code Logic: 委托 `with_gate` + 新建独立 gate。
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: epoch mint 写必须与 restore 互斥，与其它 writer 共享 gate。
+    /// Code Logic: 持有 pool clone + `Arc<DatabaseMaintenanceGate>`。
+    pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { db, gate }
     }
 
     /// 返回内部 pool。
@@ -98,11 +110,12 @@ impl SyncDeleteSequenceRepo {
     /// 便捷：在独立事务中铸造（测试/非合并路径）。
     ///
     /// Business Logic: 单测与不需与其它写操作同事务时使用。
-    /// Code Logic: begin → mint_on_tx → commit。
+    /// Code Logic: `begin_shared_write` → mint_on_tx → commit。
     pub async fn mint(&self, domain: &str) -> Result<u64, AppError> {
-        let mut tx = self.db.begin().await?;
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         let epoch = Self::mint_on_tx(&mut tx, domain).await?;
         tx.commit().await?;
+        drop(permit);
         Ok(epoch)
     }
 }
@@ -153,7 +166,9 @@ mod tests {
     #[tokio::test]
     async fn sync_delete_sequence_sequential_in_one_tx() {
         let repo = setup_repo().await;
-        let mut tx = repo.pool().begin().await.unwrap();
+        let (permit, mut tx) = begin_shared_write(repo.pool(), &repo.gate)
+            .await
+            .unwrap();
         let e1 = SyncDeleteSequenceRepo::mint_on_tx(&mut tx, "prompts")
             .await
             .unwrap();
@@ -164,6 +179,7 @@ mod tests {
             .await
             .unwrap();
         tx.commit().await.unwrap();
+        drop(permit);
         assert_eq!((e1, e2, e3), (1, 2, 3));
     }
 }

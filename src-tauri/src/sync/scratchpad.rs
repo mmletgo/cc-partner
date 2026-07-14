@@ -225,6 +225,7 @@ async fn scratchpad_sync_v2(
         if !resp.items.is_empty() {
             match apply_scratchpad_pull_items(
                 &state.scratchpad_repo.pool(),
+                state.maintenance_gate.as_ref(),
                 state.scratchpad_repo.as_ref(),
                 &resp.items,
             )

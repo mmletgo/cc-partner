@@ -11,6 +11,9 @@
 
 use super::helpers::*;
 use super::{IdempotentCreateTaskOutcome, OrchestratorRepo};
+use crate::storage::maintenance_gate::{
+    begin_shared_write, with_shared_write_lease,
+};
 use crate::error::AppError;
 use crate::orchestrator::claim::{
     preflight_claim_candidates, ClaimCandidate, ClaimCasOutcome, ClaimScanCursor,
@@ -28,7 +31,7 @@ use crate::orchestrator::outbox::{
 };
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
-use sqlx::{Acquire, Row};
+use sqlx::Row;
 use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
@@ -59,7 +62,7 @@ impl OrchestratorRepo {
         let external_labels_json = serialize_external_labels(&row_to_insert.external_labels)?;
         let request_fingerprint =
             create_request_fingerprint(&row_to_insert, create_action, &external_labels_json)?;
-        let mut tx = self.pool.begin().await?;
+        let (_permit, mut tx) = begin_shared_write(&self.pool, &self.gate).await?;
 
         if let Some(request_id) = client_request_id {
             if let Some(existing) = sqlx::query(
@@ -229,26 +232,28 @@ impl OrchestratorRepo {
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO orchestrator_remote_outbox \
-             (id, device_id, device_name, remote_project_path, remote_project_id, request_json, \
-              status, remote_task_id, last_error, created_at, updated_at, sent_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(device_id)
-        .bind(device_name)
-        .bind(remote_project_path)
-        .bind(remote_project_id)
-        .bind(request_json)
-        .bind(RemoteOutboxStatus::Pending.as_str())
-        .bind(Option::<&str>::None)
-        .bind(Option::<&str>::None)
-        .bind(&now)
-        .bind(&now)
-        .bind(Option::<&str>::None)
-        .execute(&self.pool)
-        .await?;
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO orchestrator_remote_outbox \
+                 (id, device_id, device_name, remote_project_path, remote_project_id, request_json, \
+                  status, remote_task_id, last_error, created_at, updated_at, sent_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(device_id)
+            .bind(device_name)
+            .bind(remote_project_path)
+            .bind(remote_project_id)
+            .bind(request_json)
+            .bind(RemoteOutboxStatus::Pending.as_str())
+            .bind(Option::<&str>::None)
+            .bind(Option::<&str>::None)
+            .bind(&now)
+            .bind(&now)
+            .bind(Option::<&str>::None)
+            .execute(&self.pool)
+            .await
+        }).await?;
 
         Ok(OrchestratorRemoteOutboxRow {
             id,
@@ -320,18 +325,20 @@ impl OrchestratorRepo {
             .map_err(|err| AppError::generic(format!("远端 outbox lease 无效: {err}")))?;
         let cutoff = (Utc::now() - lease).to_rfc3339();
         let now = Utc::now().to_rfc3339();
-        let result = sqlx::query(
-            "UPDATE orchestrator_remote_outbox \
-             SET status = ?, last_error = ?, updated_at = ? \
-             WHERE status = ? AND updated_at < ?",
-        )
-        .bind(RemoteOutboxStatus::Pending.as_str())
-        .bind("sending lease expired; recovered for retry")
-        .bind(now)
-        .bind(RemoteOutboxStatus::Sending.as_str())
-        .bind(cutoff)
-        .execute(&self.pool)
-        .await?;
+        let result = with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_remote_outbox \
+                 SET status = ?, last_error = ?, updated_at = ? \
+                 WHERE status = ? AND updated_at < ?",
+            )
+            .bind(RemoteOutboxStatus::Pending.as_str())
+            .bind("sending lease expired; recovered for retry")
+            .bind(now)
+            .bind(RemoteOutboxStatus::Sending.as_str())
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await
+        }).await?;
         Ok(result.rows_affected())
     }
 
@@ -370,17 +377,19 @@ impl OrchestratorRepo {
         item_id: &str,
     ) -> Result<Option<OrchestratorRemoteOutboxRow>, AppError> {
         let now = Utc::now().to_rfc3339();
-        let result = sqlx::query(
-            "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ?, updated_at = ? \
-             WHERE id = ? AND status = ?",
-        )
-        .bind(RemoteOutboxStatus::Sending.as_str())
-        .bind(Option::<&str>::None)
-        .bind(&now)
-        .bind(item_id)
-        .bind(RemoteOutboxStatus::Pending.as_str())
-        .execute(&self.pool)
-        .await?;
+        let result = with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ?, updated_at = ? \
+                 WHERE id = ? AND status = ?",
+            )
+            .bind(RemoteOutboxStatus::Sending.as_str())
+            .bind(Option::<&str>::None)
+            .bind(&now)
+            .bind(item_id)
+            .bind(RemoteOutboxStatus::Pending.as_str())
+            .execute(&self.pool)
+            .await
+        }).await?;
 
         if result.rows_affected() != 1 {
             return Ok(None);
@@ -402,17 +411,19 @@ impl OrchestratorRepo {
         last_error: &str,
     ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ?, updated_at = ? \
-             WHERE id = ? AND status = ?",
-        )
-        .bind(RemoteOutboxStatus::Pending.as_str())
-        .bind(last_error)
-        .bind(now)
-        .bind(item_id)
-        .bind(RemoteOutboxStatus::Sending.as_str())
-        .execute(&self.pool)
-        .await?;
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ?, updated_at = ? \
+                 WHERE id = ? AND status = ?",
+            )
+            .bind(RemoteOutboxStatus::Pending.as_str())
+            .bind(last_error)
+            .bind(now)
+            .bind(item_id)
+            .bind(RemoteOutboxStatus::Sending.as_str())
+            .execute(&self.pool)
+            .await
+        }).await?;
         self.get_remote_outbox_item(item_id)
             .await?
             .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))
@@ -430,17 +441,19 @@ impl OrchestratorRepo {
         last_error: &str,
     ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ?, updated_at = ? \
-             WHERE id = ? AND status = ?",
-        )
-        .bind(RemoteOutboxStatus::Failed.as_str())
-        .bind(last_error)
-        .bind(now)
-        .bind(item_id)
-        .bind(RemoteOutboxStatus::Sending.as_str())
-        .execute(&self.pool)
-        .await?;
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ?, updated_at = ? \
+                 WHERE id = ? AND status = ?",
+            )
+            .bind(RemoteOutboxStatus::Failed.as_str())
+            .bind(last_error)
+            .bind(now)
+            .bind(item_id)
+            .bind(RemoteOutboxStatus::Sending.as_str())
+            .execute(&self.pool)
+            .await
+        }).await?;
         self.get_remote_outbox_item(item_id)
             .await?
             .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))
@@ -462,18 +475,20 @@ impl OrchestratorRepo {
             return Err(AppError::validation("远端 outbox ID 不能为空"));
         }
         let now = Utc::now().to_rfc3339();
-        let result = sqlx::query(
-            "UPDATE orchestrator_remote_outbox \
-             SET status = ?, last_error = ?, updated_at = ? \
-             WHERE id = ? AND status = ?",
-        )
-        .bind(RemoteOutboxStatus::Pending.as_str())
-        .bind(Option::<&str>::None)
-        .bind(&now)
-        .bind(item_id)
-        .bind(RemoteOutboxStatus::Failed.as_str())
-        .execute(&self.pool)
-        .await?;
+        let result = with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_remote_outbox \
+                 SET status = ?, last_error = ?, updated_at = ? \
+                 WHERE id = ? AND status = ?",
+            )
+            .bind(RemoteOutboxStatus::Pending.as_str())
+            .bind(Option::<&str>::None)
+            .bind(&now)
+            .bind(item_id)
+            .bind(RemoteOutboxStatus::Failed.as_str())
+            .execute(&self.pool)
+            .await
+        }).await?;
 
         if result.rows_affected() == 1 {
             return self
@@ -509,17 +524,19 @@ impl OrchestratorRepo {
             return Err(AppError::validation("远端 outbox ID 不能为空"));
         }
         let now = Utc::now().to_rfc3339();
-        let result = sqlx::query(
-            "UPDATE orchestrator_remote_outbox \
-             SET status = ?, updated_at = ? \
-             WHERE id = ? AND status = ?",
-        )
-        .bind(RemoteOutboxStatus::Discarded.as_str())
-        .bind(&now)
-        .bind(item_id)
-        .bind(RemoteOutboxStatus::Failed.as_str())
-        .execute(&self.pool)
-        .await?;
+        let result = with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_remote_outbox \
+                 SET status = ?, updated_at = ? \
+                 WHERE id = ? AND status = ?",
+            )
+            .bind(RemoteOutboxStatus::Discarded.as_str())
+            .bind(&now)
+            .bind(item_id)
+            .bind(RemoteOutboxStatus::Failed.as_str())
+            .execute(&self.pool)
+            .await
+        }).await?;
 
         if result.rows_affected() == 1 {
             return self
@@ -550,15 +567,17 @@ impl OrchestratorRepo {
         remote_project_id: &str,
     ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE orchestrator_remote_outbox SET remote_project_id = ?, updated_at = ? \
-             WHERE id = ?",
-        )
-        .bind(remote_project_id)
-        .bind(now)
-        .bind(item_id)
-        .execute(&self.pool)
-        .await?;
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_remote_outbox SET remote_project_id = ?, updated_at = ? \
+                 WHERE id = ?",
+            )
+            .bind(remote_project_id)
+            .bind(now)
+            .bind(item_id)
+            .execute(&self.pool)
+            .await
+        }).await?;
         self.get_remote_outbox_item(item_id)
             .await?
             .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))
@@ -578,16 +597,18 @@ impl OrchestratorRepo {
             return Err(AppError::generic("远端 outbox 请求不能为空"));
         }
         let now = Utc::now().to_rfc3339();
-        let result = sqlx::query(
-            "UPDATE orchestrator_remote_outbox SET request_json = ?, updated_at = ? \
-             WHERE id = ? AND status = ?",
-        )
-        .bind(request_json)
-        .bind(now)
-        .bind(item_id)
-        .bind(RemoteOutboxStatus::Sending.as_str())
-        .execute(&self.pool)
-        .await?;
+        let result = with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_remote_outbox SET request_json = ?, updated_at = ? \
+                 WHERE id = ? AND status = ?",
+            )
+            .bind(request_json)
+            .bind(now)
+            .bind(item_id)
+            .bind(RemoteOutboxStatus::Sending.as_str())
+            .execute(&self.pool)
+            .await
+        }).await?;
         if result.rows_affected() != 1 {
             return Ok(None);
         }
@@ -605,19 +626,21 @@ impl OrchestratorRepo {
         remote_task_id: &str,
     ) -> Result<OrchestratorRemoteOutboxRow, AppError> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE orchestrator_remote_outbox \
-             SET status = ?, remote_task_id = ?, last_error = ?, updated_at = ?, sent_at = ? \
-             WHERE id = ?",
-        )
-        .bind(RemoteOutboxStatus::Mirrored.as_str())
-        .bind(remote_task_id)
-        .bind(Option::<&str>::None)
-        .bind(&now)
-        .bind(&now)
-        .bind(item_id)
-        .execute(&self.pool)
-        .await?;
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_remote_outbox \
+                 SET status = ?, remote_task_id = ?, last_error = ?, updated_at = ?, sent_at = ? \
+                 WHERE id = ?",
+            )
+            .bind(RemoteOutboxStatus::Mirrored.as_str())
+            .bind(remote_task_id)
+            .bind(Option::<&str>::None)
+            .bind(&now)
+            .bind(&now)
+            .bind(item_id)
+            .execute(&self.pool)
+            .await
+        }).await?;
         self.get_remote_outbox_item(item_id)
             .await?
             .ok_or_else(|| AppError::not_found(format!("远端 outbox 不存在: {item_id}")))
@@ -669,7 +692,7 @@ impl OrchestratorRepo {
             return Err(AppError::generic("远端任务镜像 payload 不能为空"));
         }
 
-        let mut tx = self.pool.begin().await?;
+        let (_permit, mut tx) = begin_shared_write(&self.pool, &self.gate).await?;
         let now = Utc::now().to_rfc3339();
         let updated = sqlx::query(
             "UPDATE orchestrator_remote_outbox \
@@ -767,28 +790,30 @@ impl OrchestratorRepo {
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO orchestrator_remote_task_mirrors \
-             (id, device_id, device_name, remote_project_id, remote_project_path, remote_task_id, \
-              payload_json, last_synced_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(device_id, remote_task_id) DO UPDATE SET \
-               device_name = excluded.device_name, \
-               remote_project_id = excluded.remote_project_id, \
-               remote_project_path = excluded.remote_project_path, \
-               payload_json = excluded.payload_json, \
-               last_synced_at = excluded.last_synced_at",
-        )
-        .bind(&id)
-        .bind(device_id)
-        .bind(device_name)
-        .bind(remote_project_id)
-        .bind(remote_project_path)
-        .bind(remote_task_id)
-        .bind(payload_json)
-        .bind(&now)
-        .execute(&self.pool)
-        .await?;
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO orchestrator_remote_task_mirrors \
+                 (id, device_id, device_name, remote_project_id, remote_project_path, remote_task_id, \
+                  payload_json, last_synced_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(device_id, remote_task_id) DO UPDATE SET \
+                   device_name = excluded.device_name, \
+                   remote_project_id = excluded.remote_project_id, \
+                   remote_project_path = excluded.remote_project_path, \
+                   payload_json = excluded.payload_json, \
+                   last_synced_at = excluded.last_synced_at",
+            )
+            .bind(&id)
+            .bind(device_id)
+            .bind(device_name)
+            .bind(remote_project_id)
+            .bind(remote_project_path)
+            .bind(remote_task_id)
+            .bind(payload_json)
+            .bind(&now)
+            .execute(&self.pool)
+            .await
+        }).await?;
         self.get_remote_task_mirror(device_id, remote_task_id)
             .await?
             .ok_or_else(|| AppError::not_found("远端任务镜像不存在"))

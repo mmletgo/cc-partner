@@ -314,3 +314,18 @@ CREATE TABLE IF NOT EXISTS sync_deletion_floors (
     created_at TEXT NOT NULL,
     PRIMARY KEY (domain, item_id)
 );
+
+-- recovery_jobs：备份恢复状态机（N2 Task6）
+-- 实际建表：RecoveryJobRepo::ensure_schema（runtime 幂等；非 sqlx::migrate!）
+CREATE TABLE IF NOT EXISTS recovery_jobs (
+    id TEXT PRIMARY KEY NOT NULL,
+    status TEXT NOT NULL,
+    archive_path TEXT,
+    pre_restore_backup_path TEXT,
+    selected_domains_json TEXT NOT NULL DEFAULT '[]',
+    mode TEXT NOT NULL DEFAULT 'merge',
+    error_summary TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_recovery_jobs_updated ON recovery_jobs(updated_at DESC);

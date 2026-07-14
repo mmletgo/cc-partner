@@ -12,12 +12,14 @@
 //!     - 提供 deterministic conflict row id helper（供未来 content_versions 使用）。
 
 use crate::error::AppError;
+use crate::storage::maintenance_gate::{begin_shared_write, DatabaseMaintenanceGate};
 use crate::sync::protocol::content_sha256_hex;
 use chrono::Utc;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::{Row, Sqlite, Transaction};
+use std::sync::Arc;
 
 /// 领域 token：Prompt 同步。
 pub const DOMAIN_PROMPTS: &str = "prompts";
@@ -51,15 +53,25 @@ pub struct SyncRequestLedgerRow {
 pub struct SyncRequestLedgerRepo {
     /// SQLite 连接池（max_connections(1)，与其它 writer 共享单连接语义）
     db: SqlitePool,
+    /// 维护闸：apply_batch 写事务经 shared lease
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl SyncRequestLedgerRepo {
-    /// 构造仓库。
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
     ///
     /// Business Logic: routes/测试用同一 pool 打开 ledger，保证与 bulk upsert 同库。
-    /// Code Logic: 持有 pool clone；不在此建表（由 ensure_schema/init_db 负责）。
+    /// Code Logic: 委托 `with_gate` + 新建独立 gate。
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: push-batch ledger 写必须与 restore 互斥，与其它 writer 共享 gate。
+    /// Code Logic: 持有 pool clone + `Arc<DatabaseMaintenanceGate>`。
+    pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { db, gate }
     }
 
     /// 返回内部 pool 引用（测试/路由组装用）。
@@ -178,7 +190,7 @@ impl SyncRequestLedgerRepo {
     ///     3) apply 中途失败整事务回滚（含未写入的 ledger）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     begin → get_on_tx；命中同 hash 则 commit 前直接返回 outcome（无 apply）；
+    ///     `begin_shared_write` → get_on_tx；命中同 hash 则 commit 前直接返回 outcome（无 apply）；
     ///     命中不同 hash → conflict；未命中则调用 apply 闭包（`for<'a> → BoxFuture<'a>`），
     ///     insert_on_tx 后 commit。使用 `BoxFuture` 绑定 tx 与 future 生命周期，避免
     ///     普通 `async move` 闭包无法表达的 HRTB 约束。
@@ -195,7 +207,7 @@ impl SyncRequestLedgerRepo {
             &'a mut Transaction<'_, Sqlite>,
         ) -> BoxFuture<'a, Result<SyncBatchOutcome, AppError>>,
     {
-        let mut tx = self.db.begin().await?;
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         if let Some(existing) =
             Self::get_on_tx(&mut tx, claimed_device_id, domain, client_request_id).await?
         {
@@ -207,6 +219,7 @@ impl SyncRequestLedgerRepo {
             // 同 key/同 hash：直接返回记录的 outcome，不 re-apply。
             // 事务无写操作，commit 仅为释放连接（SQLite 只读事务也可 commit）。
             tx.commit().await?;
+            drop(permit);
             return Ok(existing.outcome);
         }
 
@@ -221,6 +234,7 @@ impl SyncRequestLedgerRepo {
         )
         .await?;
         tx.commit().await?;
+        drop(permit);
         Ok(outcome)
     }
 

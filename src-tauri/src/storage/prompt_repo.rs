@@ -14,22 +14,47 @@
 
 use crate::error::AppError;
 use crate::models::prompt::PromptRow;
+use crate::storage::maintenance_gate::{
+    begin_shared_write, with_shared_write_lease, DatabaseMaintenanceGate,
+};
 use crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo;
 use crate::storage::sync_request_ledger_repo::DOMAIN_PROMPTS;
 use sqlx::sqlite::SqlitePool;
 use sqlx::{Row, Sqlite, Transaction};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Prompt 仓库，封装所有 prompts 表的数据库操作。
 pub struct PromptRepo {
     /// SQLite 连接池（max_connections(1)，单连接语义）
     db: SqlitePool,
+    /// 与 restore exclusive 共享的写屏障。
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl PromptRepo {
-    /// 构造仓库。
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
+    ///
+    /// Business Logic: 单测与局部 fixture 不依赖 AppState 共享 gate。
+    /// Code Logic: 新建独立 DatabaseMaintenanceGate。
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: 所有生产 writer 与 restore exclusive 共享屏障。
+    /// Code Logic: 保存 pool + gate。
+    pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { db, gate }
+    }
+
+    /// 暴露共享 gate（供 apply_merge 等同路径 ledger 对齐屏障）。
+    ///
+    /// Business Logic: push-batch ledger 必须与域 repo 使用同一 gate，否则 restore 独占可被旁路。
+    /// Code Logic: clone Arc。
+    pub fn gate(&self) -> Arc<DatabaseMaintenanceGate> {
+        self.gate.clone()
     }
 
     /// 将数据库一行映射为 PromptRow（JSON 字段反序列化、deleted int→bool）。
@@ -121,47 +146,59 @@ impl PromptRepo {
     }
 
     /// 插入新 Prompt（tags/vector_clock 序列化为 JSON）。
+    ///
+    /// Business Logic: 新建 Prompt 必须在 maintenance shared lease 下写入，避免 restore 中途被覆盖。
+    /// Code Logic: 序列化 JSON 后经 `with_shared_write_lease` 执行 INSERT。
     pub async fn create(&self, p: &PromptRow) -> Result<(), AppError> {
         let tags_text = serde_json::to_string(&p.tags)?;
         let vc_text = serde_json::to_string(&p.vector_clock)?;
-        sqlx::query(
-            "INSERT INTO prompts (id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&p.id)
-        .bind(&p.title)
-        .bind(&p.content)
-        .bind(tags_text)
-        .bind(&p.created_at)
-        .bind(&p.updated_at)
-        .bind(&p.device_id)
-        .bind(vc_text)
-        .bind(p.deleted as i64)
-        .bind(p.delete_epoch as i64)
-        .execute(&self.db)
-        .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO prompts (id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&p.id)
+            .bind(&p.title)
+            .bind(&p.content)
+            .bind(tags_text)
+            .bind(&p.created_at)
+            .bind(&p.updated_at)
+            .bind(&p.device_id)
+            .bind(vc_text)
+            .bind(p.deleted as i64)
+            .bind(p.delete_epoch as i64)
+            .execute(&self.db)
+            .await?;
+            Ok::<(), AppError>(())
+        })
+        .await
     }
 
     /// 全字段更新一条 Prompt（含 vector_clock / deleted / delete_epoch）。
+    ///
+    /// Business Logic: 更新必须经 shared lease，与 restore exclusive 互斥。
+    /// Code Logic: 序列化 JSON 后经 `with_shared_write_lease` 执行 UPDATE。
     pub async fn update(&self, p: &PromptRow) -> Result<(), AppError> {
         let tags_text = serde_json::to_string(&p.tags)?;
         let vc_text = serde_json::to_string(&p.vector_clock)?;
-        sqlx::query(
-            "UPDATE prompts SET title = ?, content = ?, tags = ?, updated_at = ?, device_id = ?, vector_clock = ?, deleted = ?, delete_epoch = ? WHERE id = ?",
-        )
-        .bind(&p.title)
-        .bind(&p.content)
-        .bind(tags_text)
-        .bind(&p.updated_at)
-        .bind(&p.device_id)
-        .bind(vc_text)
-        .bind(p.deleted as i64)
-        .bind(p.delete_epoch as i64)
-        .bind(&p.id)
-        .execute(&self.db)
-        .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE prompts SET title = ?, content = ?, tags = ?, updated_at = ?, device_id = ?, vector_clock = ?, deleted = ?, delete_epoch = ? WHERE id = ?",
+            )
+            .bind(&p.title)
+            .bind(&p.content)
+            .bind(tags_text)
+            .bind(&p.updated_at)
+            .bind(&p.device_id)
+            .bind(vc_text)
+            .bind(p.deleted as i64)
+            .bind(p.delete_epoch as i64)
+            .bind(&p.id)
+            .execute(&self.db)
+            .await?;
+            Ok::<(), AppError>(())
+        })
+        .await
     }
 
     /// 软删除：同事务铸造 delete_epoch 并写入 tombstone 字段。
@@ -171,7 +208,7 @@ impl PromptRepo {
     ///     delete_epoch，供 peer 水位 ack 与安全 GC。epoch 与 tombstone 必须同事务。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     begin → mint_on_tx(DOMAIN_PROMPTS) → UPDATE deleted/updated_at/vector_clock/delete_epoch → commit。
+    ///     begin_shared_write → mint_on_tx(DOMAIN_PROMPTS) → UPDATE deleted/updated_at/vector_clock/delete_epoch → commit。
     pub async fn soft_delete(
         &self,
         id: &str,
@@ -179,7 +216,7 @@ impl PromptRepo {
         vector_clock: &HashMap<String, u64>,
     ) -> Result<(), AppError> {
         let vc_text = serde_json::to_string(vector_clock)?;
-        let mut tx = self.db.begin().await?;
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         let epoch = SyncDeleteSequenceRepo::mint_on_tx(&mut tx, DOMAIN_PROMPTS).await?;
         sqlx::query(
             "UPDATE prompts SET deleted = 1, updated_at = ?, vector_clock = ?, delete_epoch = ? WHERE id = ?",
@@ -191,6 +228,7 @@ impl PromptRepo {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        drop(permit);
         Ok(())
     }
 
@@ -243,8 +281,8 @@ impl PromptRepo {
 
     /// 在自有事务中 bulk upsert（生产与 inject seam 共享）。
     ///
-    /// Business Logic: 保证生产 `bulk_upsert` 与测试 inject 路径同一事务语义。
-    /// Code Logic: begin → `bulk_upsert_on_tx` → commit。
+    /// Business Logic: 保证生产 `bulk_upsert` 与测试 inject 路径同一事务语义，并经 shared lease。
+    /// Code Logic: begin_shared_write → `bulk_upsert_on_tx` → commit。
     async fn bulk_upsert_in_transaction(
         &self,
         prompts: &[PromptRow],
@@ -253,9 +291,10 @@ impl PromptRepo {
         if prompts.is_empty() {
             return Ok(());
         }
-        let mut tx = self.db.begin().await?;
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         Self::bulk_upsert_on_tx(&mut tx, prompts, inject_fail_at).await?;
         tx.commit().await?;
+        drop(permit);
         Ok(())
     }
 

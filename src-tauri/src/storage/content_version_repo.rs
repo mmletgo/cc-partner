@@ -12,10 +12,12 @@
 //!       conflict 在 30 天内即使超出条数也保留。
 
 use crate::error::AppError;
+use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use crate::storage::sync_request_ledger_repo::SyncRequestLedgerRepo;
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::{Row, Sqlite, Transaction};
+use std::sync::Arc;
 
 /// 版本 kind：冲突副本。
 pub const KIND_CONFLICT: &str = "conflict";
@@ -54,19 +56,29 @@ pub struct ContentVersion {
 /// 内容版本仓库。
 ///
 /// Business Logic: 同步 merge 与 UI 历史面板共用同一持久化，避免两套冲突副本逻辑。
-/// Code Logic: 持有 SqlitePool；建表由 ensure_schema 负责。
+/// Code Logic: 持有 SqlitePool + maintenance gate；建表由 ensure_schema 负责。
 pub struct ContentVersionRepo {
     /// SQLite 连接池
     db: SqlitePool,
+    /// 维护闸：非事务写路径经 shared lease
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl ContentVersionRepo {
-    /// 构造仓库。
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
     ///
     /// Business Logic: routes/测试与其它 writer 共享同一 pool，保证单连接语义。
-    /// Code Logic: 仅持有 pool clone。
+    /// Code Logic: 委托 `with_gate` + 新建独立 gate。
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: conflict/history 写必须与 restore 互斥，与其它 writer 共享 gate。
+    /// Code Logic: 持有 pool clone + `Arc<DatabaseMaintenanceGate>`。
+    pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { db, gate }
     }
 
     /// 返回内部 pool 引用。
@@ -137,24 +149,27 @@ impl ContentVersionRepo {
     /// 幂等插入：UNIQUE 冲突时视为成功 no-op。
     ///
     /// Business Logic: 同批重放/重试不得因 conflict 行已存在而失败。
-    /// Code Logic: INSERT OR IGNORE；返回是否新插入。
+    /// Code Logic: 经 `with_shared_write_lease` 执行 INSERT OR IGNORE；返回是否新插入。
     pub async fn insert_idempotent(&self, version: &ContentVersion) -> Result<bool, AppError> {
-        let result = sqlx::query(
-            "INSERT OR IGNORE INTO content_versions \
-             (id, domain, item_id, source_device, content_hash, created_at, kind, snapshot_json) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&version.id)
-        .bind(&version.domain)
-        .bind(&version.item_id)
-        .bind(&version.source_device)
-        .bind(&version.content_hash)
-        .bind(&version.created_at)
-        .bind(&version.kind)
-        .bind(&version.snapshot_json)
-        .execute(&self.db)
-        .await?;
-        Ok(result.rows_affected() > 0)
+        with_shared_write_lease(&self.gate, async {
+            let result = sqlx::query(
+                "INSERT OR IGNORE INTO content_versions \
+                 (id, domain, item_id, source_device, content_hash, created_at, kind, snapshot_json) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&version.id)
+            .bind(&version.domain)
+            .bind(&version.item_id)
+            .bind(&version.source_device)
+            .bind(&version.content_hash)
+            .bind(&version.created_at)
+            .bind(&version.kind)
+            .bind(&version.snapshot_json)
+            .execute(&self.db)
+            .await?;
+            Ok(result.rows_affected() > 0)
+        })
+        .await
     }
 
     /// 在事务上幂等插入。
@@ -244,7 +259,7 @@ impl ContentVersionRepo {
     ) -> Result<usize, AppError> {
         let now_dt = parse_rfc3339(now)?;
         let versions = self.list_versions(domain, item_id).await?;
-        let mut deleted = 0usize;
+        let mut to_delete: Vec<String> = Vec::new();
         for (index, version) in versions.iter().enumerate() {
             let created = parse_rfc3339(&version.created_at)?;
             let age = now_dt.signed_duration_since(created);
@@ -255,14 +270,21 @@ impl ContentVersionRepo {
                 index < RETENTION_MAX_VERSIONS && age_days < RETENTION_MAX_DAYS as f64
             };
             if !keep {
+                to_delete.push(version.id.clone());
+            }
+        }
+        with_shared_write_lease(&self.gate, async {
+            let mut deleted = 0usize;
+            for id in &to_delete {
                 let result = sqlx::query("DELETE FROM content_versions WHERE id = ?")
-                    .bind(&version.id)
+                    .bind(id)
                     .execute(&self.db)
                     .await?;
                 deleted += result.rows_affected() as usize;
             }
-        }
-        Ok(deleted)
+            Ok(deleted)
+        })
+        .await
     }
 
     /// 从 domain/item/source/hash 构造确定性版本 id。

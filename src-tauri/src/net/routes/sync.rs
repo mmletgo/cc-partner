@@ -1036,7 +1036,11 @@ mod tests {
             .await
             .unwrap();
         assert!(versions.is_empty());
-        let mut tx = repo.pool().begin().await.unwrap();
+        let gate = std::sync::Arc::new(crate::storage::DatabaseMaintenanceGate::new());
+        let (_permit, mut tx) =
+            crate::storage::begin_shared_write(repo.pool(), &gate)
+                .await
+                .unwrap();
         let row = SyncRequestLedgerRepo::get_on_tx(
             &mut tx,
             "peer-1",

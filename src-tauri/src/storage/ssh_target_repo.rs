@@ -11,22 +11,45 @@
 
 use crate::error::AppError;
 use crate::models::ssh_target::SshTargetRow;
+use crate::storage::maintenance_gate::{begin_shared_write, DatabaseMaintenanceGate};
 use crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo;
 use crate::storage::sync_request_ledger_repo::DOMAIN_SSH_TARGET;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::{Row, Sqlite, Transaction};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// SSH 目标仓库，封装所有 ssh_targets 表操作。
 pub struct SshTargetRepo {
     /// SQLite 连接池（max_connections(1)，单连接语义）
     db: SqlitePool,
+    /// 与 restore exclusive 共享的写屏障。
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl SshTargetRepo {
-    /// 构造仓库。
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
+    ///
+    /// Business Logic: 单测与局部 fixture 不依赖 AppState 共享 gate。
+    /// Code Logic: 新建独立 DatabaseMaintenanceGate。
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: 所有生产 writer 与 restore exclusive 共享屏障。
+    /// Code Logic: 保存 pool + gate。
+    pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { db, gate }
+    }
+
+    /// 暴露共享 gate（供 apply_merge ledger 对齐屏障）。
+    ///
+    /// Business Logic: push-batch ledger 必须与域 repo 使用同一 gate。
+    /// Code Logic: clone Arc。
+    pub fn gate(&self) -> Arc<DatabaseMaintenanceGate> {
+        self.gate.clone()
     }
 
     /// 将数据库一行映射为 SshTargetRow（vector_clock JSON 反序列化、deleted int→bool）。
@@ -116,8 +139,8 @@ impl SshTargetRepo {
 
     /// 在自有事务中 bulk upsert。
     ///
-    /// Business Logic: 生产与 inject 路径共享事务语义。
-    /// Code Logic: begin → on_tx → commit。
+    /// Business Logic: 生产与 inject 路径共享事务语义，并经 shared lease。
+    /// Code Logic: begin_shared_write → on_tx → commit。
     async fn bulk_upsert_in_transaction(
         &self,
         items: &[SshTargetRow],
@@ -126,9 +149,10 @@ impl SshTargetRepo {
         if items.is_empty() {
             return Ok(());
         }
-        let mut tx = self.db.begin().await?;
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         Self::bulk_upsert_on_tx(&mut tx, items, inject_fail_at).await?;
         tx.commit().await?;
+        drop(permit);
         Ok(())
     }
 
@@ -186,7 +210,7 @@ impl SshTargetRepo {
     ///     CRDT 删除需推进 vector_clock；同时铸造单调 delete_epoch 供水位 ack 与 GC。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     begin → mint_on_tx(DOMAIN_SSH_TARGET) → UPDATE deleted/updated_at/vector_clock/delete_epoch → commit。
+    ///     begin_shared_write → mint_on_tx(DOMAIN_SSH_TARGET) → UPDATE deleted/updated_at/vector_clock/delete_epoch → commit。
     pub async fn soft_delete(
         &self,
         host: &str,
@@ -194,7 +218,7 @@ impl SshTargetRepo {
         vector_clock: &HashMap<String, u64>,
     ) -> Result<(), AppError> {
         let vc_text = serde_json::to_string(vector_clock)?;
-        let mut tx = self.db.begin().await?;
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         let epoch = SyncDeleteSequenceRepo::mint_on_tx(&mut tx, DOMAIN_SSH_TARGET).await?;
         sqlx::query(
             "UPDATE ssh_targets SET deleted = 1, updated_at = ?, vector_clock = ?, delete_epoch = ? WHERE host = ?",
@@ -206,6 +230,7 @@ impl SshTargetRepo {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        drop(permit);
         Ok(())
     }
 }

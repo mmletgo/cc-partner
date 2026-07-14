@@ -17,13 +17,17 @@
 //!     scan_state 表记录每个 jsonl 文件的 (mtime_sec, size)，采集器据此增量跳过未变文件。
 //!     `list_sync_manifest_page` 用 `WHERE id > ? ORDER BY id ASC LIMIT ?`（limit 1..=512）；
 //!     `get_many_for_sync` 动态 IN（非空且 ≤128）；`upsert_merged_batch`/`bulk_ingest`
-//!     显式 begin/commit，任一行失败整批 rollback。
+//!     经 `begin_shared_write` 显式 commit，任一行失败整批 rollback。
 
 use crate::cc::models::{CcProjectDto, CcSyncSummary, ClaudeHistoryRow};
 use crate::error::AppError;
+use crate::storage::maintenance_gate::{
+    begin_shared_write, with_shared_write_lease, DatabaseMaintenanceGate,
+};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 同步 manifest 分页 limit 上限（与协议 `CC_MANIFEST_PAGE_LIMIT_MAX` 对齐）。
 const CC_MANIFEST_PAGE_LIMIT_MAX: u32 = 512;
@@ -34,12 +38,25 @@ const CC_ITEM_BATCH_LIMIT: usize = 128;
 pub struct ClaudeHistoryRepo {
     /// SQLite 连接池（max_connections(1)，单连接语义）
     db: SqlitePool,
+    /// 与 restore exclusive 共享的写屏障。
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl ClaudeHistoryRepo {
-    /// 构造仓库。
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
+    ///
+    /// Business Logic: 单测与局部 fixture 不依赖 AppState 共享 gate。
+    /// Code Logic: 新建独立 DatabaseMaintenanceGate。
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: 所有生产 writer 与 restore exclusive 共享屏障。
+    /// Code Logic: 保存 pool + gate。
+    pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { db, gate }
     }
 
     /// 将数据库一行映射为 ClaudeHistoryRow（vector_clock JSON 反序列化、deleted int→bool）。
@@ -159,36 +176,39 @@ impl ClaudeHistoryRepo {
     ///
     /// Business Logic: 同步引擎从对端拉取并合并后的历史需批量写入本地，已存在则覆盖
     ///     （合并决策已由 merger 在调用前完成，此处直接 REPLACE）。
-    /// Code Logic: 空切片直接返回；否则逐条 INSERT OR REPLACE。
+    /// Code Logic: 空切片直接返回；否则在 shared lease 下逐条 INSERT OR REPLACE。
     pub async fn bulk_upsert(&self, items: &[ClaudeHistoryRow]) -> Result<(), AppError> {
         if items.is_empty() {
             return Ok(());
         }
-        for p in items {
-            let vc_text = serde_json::to_string(&p.vector_clock)?;
-            sqlx::query(
-                "INSERT OR REPLACE INTO claude_history \
-                 (id, project_path, project_name, session_id, content, git_branch, cc_version, \
-                  occurred_at, device_id, vector_clock, created_at, updated_at, deleted) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(&p.id)
-            .bind(&p.project_path)
-            .bind(&p.project_name)
-            .bind(&p.session_id)
-            .bind(&p.content)
-            .bind(&p.git_branch)
-            .bind(&p.cc_version)
-            .bind(&p.occurred_at)
-            .bind(&p.device_id)
-            .bind(vc_text)
-            .bind(&p.created_at)
-            .bind(&p.updated_at)
-            .bind(p.deleted as i64)
-            .execute(&self.db)
-            .await?;
-        }
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            for p in items {
+                let vc_text = serde_json::to_string(&p.vector_clock)?;
+                sqlx::query(
+                    "INSERT OR REPLACE INTO claude_history \
+                     (id, project_path, project_name, session_id, content, git_branch, cc_version, \
+                      occurred_at, device_id, vector_clock, created_at, updated_at, deleted) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(&p.id)
+                .bind(&p.project_path)
+                .bind(&p.project_name)
+                .bind(&p.session_id)
+                .bind(&p.content)
+                .bind(&p.git_branch)
+                .bind(&p.cc_version)
+                .bind(&p.occurred_at)
+                .bind(&p.device_id)
+                .bind(vc_text)
+                .bind(&p.created_at)
+                .bind(&p.updated_at)
+                .bind(p.deleted as i64)
+                .execute(&self.db)
+                .await?;
+            }
+            Ok::<(), AppError>(())
+        })
+        .await
     }
 
     /// 批量采集入库（INSERT OR IGNORE），返回本次实际新插入条数。
@@ -200,7 +220,7 @@ impl ClaudeHistoryRepo {
     ///     整批包在同一显式事务中，避免半完成写入，但语义仍是 IGNORE 而非 REPLACE。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     空切片直接返回 0；否则 `begin` 事务，逐条跳过 content>1MiB 的毒丸后
+    ///     空切片直接返回 0；否则 `begin_shared_write`，逐条跳过 content>1MiB 的毒丸后
     ///     INSERT OR IGNORE 累加 rows_affected，全部成功后 `commit`；任一行失败则事务 drop 回滚。
     pub async fn bulk_ingest(&self, items: &[ClaudeHistoryRow]) -> Result<usize, AppError> {
         if items.is_empty() {
@@ -208,7 +228,7 @@ impl ClaudeHistoryRepo {
         }
         // 与 paged 协议 content 上限对齐，阻止采集路径写入毒丸（避免 peer items 整批 422）。
         const CONTENT_MAX_BYTES: usize = 1024 * 1024;
-        let mut tx = self.db.begin().await?;
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         let mut inserted: usize = 0;
         for p in items {
             if p.content.len() > CONTENT_MAX_BYTES {
@@ -244,6 +264,7 @@ impl ClaudeHistoryRepo {
             inserted += res.rows_affected() as usize;
         }
         tx.commit().await?;
+        drop(permit);
         Ok(inserted)
     }
 
@@ -378,7 +399,7 @@ impl ClaudeHistoryRepo {
     ///     就是真实 `upsert_merged_batch` 的语义，而不是另一套写路径。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     begin → 逐条序列化 vector_clock + INSERT OR REPLACE；
+    ///     begin_shared_write → 逐条序列化 vector_clock + INSERT OR REPLACE；
     ///     当 `inject_fail_at == Some(idx)` 且 idx 命中时返回错误（模拟序列化/写入失败），
     ///     不 commit，tx drop 回滚；否则 commit 并返回写入条数。
     async fn upsert_merged_batch_inner(
@@ -389,7 +410,7 @@ impl ClaudeHistoryRepo {
         if items.is_empty() {
             return Ok(0);
         }
-        let mut tx = self.db.begin().await?;
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         let mut written: usize = 0;
         for (idx, p) in items.iter().enumerate() {
             if inject_fail_at == Some(idx) {
@@ -423,13 +444,14 @@ impl ClaudeHistoryRepo {
             written += 1;
         }
         tx.commit().await?;
+        drop(permit);
         Ok(written)
     }
 
     /// 软删除：标记 deleted=1，更新 updated_at，并写入推进后的 vector_clock。
     ///
     /// Business Logic: 用户在前端删除某条历史是一次写入，需推进本端 vector_clock 使对端感知。
-    /// Code Logic: UPDATE deleted=1, updated_at=?, vector_clock=? WHERE id=?。
+    /// Code Logic: shared lease 下 UPDATE deleted=1, updated_at=?, vector_clock=? WHERE id=?。
     pub async fn soft_delete(
         &self,
         id: &str,
@@ -437,21 +459,24 @@ impl ClaudeHistoryRepo {
         vector_clock: &HashMap<String, u64>,
     ) -> Result<(), AppError> {
         let vc_text = serde_json::to_string(vector_clock)?;
-        sqlx::query(
-            "UPDATE claude_history SET deleted = 1, updated_at = ?, vector_clock = ? WHERE id = ?",
-        )
-        .bind(now)
-        .bind(vc_text)
-        .bind(id)
-        .execute(&self.db)
-        .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE claude_history SET deleted = 1, updated_at = ?, vector_clock = ? WHERE id = ?",
+            )
+            .bind(now)
+            .bind(vc_text)
+            .bind(id)
+            .execute(&self.db)
+            .await?;
+            Ok::<(), AppError>(())
+        })
+        .await
     }
 
     /// 更新某 jsonl 文件的扫描状态（mtime/size/scanned_at），用于增量去重。
     ///
     /// Business Logic: 采集器每扫完一个文件记录其 (mtime, size)，下次扫描比对，未变则跳过。
-    /// Code Logic: INSERT OR REPLACE（file_path 主键）。
+    /// Code Logic: shared lease 下 INSERT OR REPLACE（file_path 主键）。
     pub async fn update_scan_state(
         &self,
         file_path: &str,
@@ -459,17 +484,20 @@ impl ClaudeHistoryRepo {
         size: i64,
         scanned_at: &str,
     ) -> Result<(), AppError> {
-        sqlx::query(
-            "INSERT OR REPLACE INTO claude_history_scan_state \
-             (file_path, mtime_sec, size, scanned_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind(file_path)
-        .bind(mtime_sec)
-        .bind(size)
-        .bind(scanned_at)
-        .execute(&self.db)
-        .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT OR REPLACE INTO claude_history_scan_state \
+                 (file_path, mtime_sec, size, scanned_at) VALUES (?, ?, ?, ?)",
+            )
+            .bind(file_path)
+            .bind(mtime_sec)
+            .bind(size)
+            .bind(scanned_at)
+            .execute(&self.db)
+            .await?;
+            Ok::<(), AppError>(())
+        })
+        .await
     }
 
     /// 读取全部扫描状态，返回 {file_path: (mtime_sec, size)}，供采集器增量比对。

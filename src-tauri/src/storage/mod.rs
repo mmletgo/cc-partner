@@ -11,7 +11,9 @@ pub mod claude_md_repo;
 pub mod content_version_repo;
 pub mod deletion_floor_repo;
 pub mod health_repo;
+pub mod maintenance_gate;
 pub mod prompt_repo;
+pub mod recovery_job_repo;
 pub mod scratchpad_repo;
 pub mod ssh_target_repo;
 pub mod sync_delete_sequence_repo;
@@ -29,7 +31,12 @@ pub use content_version_repo::ContentVersionRepo;
 pub use deletion_floor_repo::DeletionFloorRepo;
 // health_repo 的 ActivityRecord / HealthRepo 通过全限定路径 `crate::storage::health_repo::...`
 // 引用（health 模块内部），不在此 re-export，避免 unused_imports 告警。
+pub use maintenance_gate::{
+    begin_shared_write, begin_write_with_permit, with_shared_write_lease, DatabaseMaintenanceGate,
+    DatabaseWritePermit, ExclusiveMaintenanceLease, SharedWriteLease,
+};
 pub use prompt_repo::PromptRepo;
+pub use recovery_job_repo::{RecoveryJobRepo, RecoveryJobRow, RecoveryJobStatus};
 pub use scratchpad_repo::ScratchpadRepo;
 pub use ssh_target_repo::SshTargetRepo;
 pub use sync_delete_sequence_repo::SyncDeleteSequenceRepo;

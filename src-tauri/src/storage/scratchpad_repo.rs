@@ -10,27 +10,49 @@
 
 use crate::error::AppError;
 use crate::models::scratchpad::{ScratchpadRow, SCRATCHPAD_ID};
+use crate::storage::maintenance_gate::{
+    begin_shared_write, with_shared_write_lease, DatabaseMaintenanceGate,
+};
 use crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo;
 use crate::storage::sync_request_ledger_repo::DOMAIN_SCRATCHPAD;
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::{Row, Sqlite, Transaction};
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// 速记本仓库，封装 scratchpad 表的所有数据库操作。
 pub struct ScratchpadRepo {
     /// SQLite 连接池（max_connections(1)，单连接语义）
     db: SqlitePool,
+    /// 与 restore exclusive 共享的写屏障。
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl ScratchpadRepo {
-    /// 构造仓库。
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
     ///
-    /// Business Logic: AppState 初始化时注入共享 pool，命令层和同步层复用同一仓库实例。
-    /// Code Logic: 保存 SqlitePool clone；SqlitePool 内部已是共享句柄。
+    /// Business Logic: 单测与局部 fixture 不依赖 AppState 共享 gate。
+    /// Code Logic: 新建独立 DatabaseMaintenanceGate。
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: 所有生产 writer 与 restore exclusive 共享屏障。
+    /// Code Logic: 保存 pool + gate。
+    pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { db, gate }
+    }
+
+    /// 暴露共享 gate（供 apply_merge ledger 对齐屏障）。
+    ///
+    /// Business Logic: push-batch ledger 必须与域 repo 使用同一 gate。
+    /// Code Logic: clone Arc。
+    pub fn gate(&self) -> Arc<DatabaseMaintenanceGate> {
+        self.gate.clone()
     }
 
     /// 当前时间的 RFC3339 字符串。
@@ -263,7 +285,7 @@ impl ScratchpadRepo {
     ///     delete_epoch，供 peer 水位 ack 与安全 GC。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     读取旧行推进 vector_clock；begin → mint_on_tx(DOMAIN_SCRATCHPAD) →
+    ///     读取旧行推进 vector_clock；begin_shared_write → mint_on_tx(DOMAIN_SCRATCHPAD) →
     ///     UPDATE deleted/updated_at/device_id/vector_clock/delete_epoch → commit，返回完整 Row。
     pub async fn soft_delete_page(
         &self,
@@ -279,7 +301,7 @@ impl ScratchpadRepo {
         *counter += 1;
         let updated_at = Self::now_iso();
         let vc_text = serde_json::to_string(&vector_clock)?;
-        let mut tx = self.db.begin().await?;
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         let delete_epoch =
             SyncDeleteSequenceRepo::mint_on_tx(&mut tx, DOMAIN_SCRATCHPAD).await?;
         sqlx::query(
@@ -293,6 +315,7 @@ impl ScratchpadRepo {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        drop(permit);
         Ok(ScratchpadRow {
             id: existing.id,
             title: existing.title,
@@ -345,8 +368,8 @@ impl ScratchpadRepo {
 
     /// 在自有事务中 bulk upsert。
     ///
-    /// Business Logic: 生产与 inject 路径共享事务语义。
-    /// Code Logic: begin → on_tx → commit。
+    /// Business Logic: 生产与 inject 路径共享事务语义，并经 shared lease。
+    /// Code Logic: begin_shared_write → on_tx → commit。
     async fn bulk_upsert_in_transaction(
         &self,
         rows: &[ScratchpadRow],
@@ -355,9 +378,10 @@ impl ScratchpadRepo {
         if rows.is_empty() {
             return Ok(());
         }
-        let mut tx = self.db.begin().await?;
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         Self::bulk_upsert_on_tx(&mut tx, rows, inject_fail_at).await?;
         tx.commit().await?;
+        drop(permit);
         Ok(())
     }
 
@@ -404,25 +428,31 @@ impl ScratchpadRepo {
     }
 
     /// 插入/替换单页。
+    ///
+    /// Business Logic: 单页写入必须经 shared lease，与 restore exclusive 互斥。
+    /// Code Logic: 序列化 vector_clock 后经 `with_shared_write_lease` 执行 INSERT OR REPLACE。
     pub async fn upsert(&self, row: &ScratchpadRow) -> Result<(), AppError> {
         let vc_text = serde_json::to_string(&row.vector_clock)?;
-        sqlx::query(
-            "INSERT OR REPLACE INTO scratchpad \
-             (id, title, content, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&row.id)
-        .bind(&row.title)
-        .bind(&row.content)
-        .bind(&row.created_at)
-        .bind(&row.updated_at)
-        .bind(&row.device_id)
-        .bind(vc_text)
-        .bind(row.deleted as i64)
-        .bind(row.delete_epoch as i64)
-        .execute(&self.db)
-        .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT OR REPLACE INTO scratchpad \
+                 (id, title, content, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&row.id)
+            .bind(&row.title)
+            .bind(&row.content)
+            .bind(&row.created_at)
+            .bind(&row.updated_at)
+            .bind(&row.device_id)
+            .bind(vc_text)
+            .bind(row.deleted as i64)
+            .bind(row.delete_epoch as i64)
+            .execute(&self.db)
+            .await?;
+            Ok::<(), AppError>(())
+        })
+        .await
     }
 }
 

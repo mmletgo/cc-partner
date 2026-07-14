@@ -18,8 +18,9 @@ use crate::net::{discovery, http_server, peer_client::PeerClient};
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
 use crate::storage::{
-    ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, SshTargetRepo, TransferRepo,
-    WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
+    ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
+    SshTargetRepo, TransferRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo,
+    WorkbenchWorktreeRepo,
 };
 use crate::transfer::registry::TransferRegistry;
 use serde::Deserialize;
@@ -323,6 +324,8 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     crate::storage::SyncDeleteSequenceRepo::ensure_schema(&pool).await?;
     crate::storage::DeletionFloorRepo::ensure_schema(&pool).await?;
     crate::storage::ensure_domain_delete_epoch_columns(&pool).await?;
+    // N2 recovery_jobs 状态机（导出/恢复）
+    crate::storage::RecoveryJobRepo::ensure_schema(&pool).await?;
     sqlx::query(HEALTH_SCHEMA).execute(&pool).await?;
 
     let needs_recreate: bool = sqlx::query_scalar::<_, i64>(
@@ -408,33 +411,73 @@ pub async fn build_app_state_with_role(
         .db_path
         .clone();
     let pool = init_db(&db_path).await?;
+    // 全局写屏障：所有生产 SQLite writer 共享；restore 独占。
+    let maintenance_gate = Arc::new(DatabaseMaintenanceGate::new());
 
-    let prompt_repo = Arc::new(PromptRepo::new(pool.clone()));
-    let transfer_repo = Arc::new(TransferRepo::new(pool.clone()));
-    let cc_history_repo = Arc::new(ClaudeHistoryRepo::new(pool.clone()));
-    let claude_md_repo = Arc::new(ClaudeMdRepo::new(pool.clone()));
-    let ssh_target_repo = Arc::new(SshTargetRepo::new(pool.clone()));
-    let scratchpad_repo = Arc::new(ScratchpadRepo::new(pool.clone()));
-    let workbench_project_repo = Arc::new(WorkbenchProjectRepo::new(pool.clone()));
-    let workbench_session_repo = Arc::new(WorkbenchSessionRepo::new(pool.clone()));
-    let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::new(pool.clone()));
-    let workbench_browser_repo = Arc::new(WorkbenchBrowserRepo::new(pool.clone()));
+    // 生产 writer 一律 with_gate，共享 restore exclusive 屏障。
+    let prompt_repo = Arc::new(PromptRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let transfer_repo = Arc::new(TransferRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let cc_history_repo = Arc::new(ClaudeHistoryRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let claude_md_repo = Arc::new(ClaudeMdRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let ssh_target_repo = Arc::new(SshTargetRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let scratchpad_repo = Arc::new(ScratchpadRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let workbench_project_repo = Arc::new(WorkbenchProjectRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let workbench_session_repo = Arc::new(WorkbenchSessionRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let workbench_browser_repo = Arc::new(WorkbenchBrowserRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
     let workbench_browser_previews =
         Arc::new(crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new());
-    let orchestrator_repo = Arc::new(OrchestratorRepo::new(pool.clone()));
+    let orchestrator_repo = Arc::new(OrchestratorRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
     let workbench_sessions = Arc::new(crate::workbench::sessions::WorkbenchSessionRegistry::new());
     let (workbench_remote_events, _) = tokio::sync::broadcast::channel(1024);
     let workbench_remote_event_bridges =
         Arc::new(crate::workbench::remote_events::RemoteEventBridgeRegistry::new());
     let workbench_dependency =
         Arc::new(crate::workbench::dependencies::WorkbenchDependencyInstallRuntime::new());
-    let health_repo = Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone()));
+    let health_repo = Arc::new(crate::storage::health_repo::HealthRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
     let health = Arc::new(crate::health::HealthRuntime::new());
 
     Ok(AppState {
         config,
         config_runtime,
         db: pool,
+        maintenance_gate,
         prompt_repo,
         transfer_repo,
         claude_md_repo,

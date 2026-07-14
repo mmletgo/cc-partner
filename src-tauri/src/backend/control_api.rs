@@ -6,12 +6,18 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     提供 status / get-config / update-config / events / orchestrator snapshot /
-//!     cloud-sync/{trigger,test,claude-md-push} handler 与路由挂载；
-//!     请求体 ≤256 KiB，普通元数据响应 ≤1 MiB；鉴权顺序：ConnectInfo loopback → token；
-//!     cloud_sync_phase 映射真实 CloudSyncRuntime 相位；从不记录 control token。
+//!     cloud-sync/{trigger,test,claude-md-push} / backup/{create,inspect,restore,list-jobs,list-backups,rollback}
+//!     handler 与路由挂载；请求体 ≤256 KiB，普通元数据响应 ≤1 MiB；
+//!     鉴权顺序：ConnectInfo loopback → token；cloud_sync_phase 映射真实 CloudSyncRuntime 相位；
+//!     从不记录 control token。
 
 use crate::backend::control::{self, BackendControlFile};
 use crate::backend::event_bus::{BackendRuntimeCursor, RuntimeRelayMessage};
+use crate::backup::{
+    create_export_archive, list_pre_restore_backups, pre_restore_dir, pre_restore_infos_from_paths,
+    BackupRestoreService, CreateBackupResult, InspectPreview, PreRestoreBackupInfo, RestoreMode,
+    RestoreRequest, RestoreResult, FORMAT_VERSION,
+};
 use crate::commands::orchestrator::{
     get_orchestrator_runtime_snapshot_for_state_with_request_id, OrchestratorRuntimeSnapshotDto,
 };
@@ -24,6 +30,7 @@ use crate::net::error_response::{P2pError, P2pErrorCode, P2pResult};
 use crate::net::lan_guard::require_loopback_peer;
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
+use crate::storage::RecoveryJobRow;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::{header, StatusCode};
@@ -33,6 +40,7 @@ use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// control API 请求体上限（256 KiB）。
@@ -470,6 +478,226 @@ pub async fn control_cloud_sync_claude_md_push(
     let dto = crate::cloud_sync::engine::CloudClaudeMdPushResultDto::from(result);
     ensure_response_within_limit(&dto, &context)?;
     Ok(Json(dto))
+}
+
+// ── backup control（N2 可验证导出/恢复）────────────────────────────────
+
+/// backup/create 请求。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GUI 选择目标路径后由 owner 写出可校验 ZIP。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + destPath。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlBackupCreateRequest {
+    pub control_token: String,
+    pub dest_path: String,
+}
+
+/// backup/inspect 请求。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlBackupInspectRequest {
+    pub control_token: String,
+    pub archive_path: String,
+}
+
+/// backup/restore 请求。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlBackupRestoreRequest {
+    pub control_token: String,
+    pub archive_path: String,
+    pub mode: RestoreMode,
+    pub domains: Vec<String>,
+}
+
+/// backup/list-jobs 请求。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlBackupListJobsRequest {
+    pub control_token: String,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// backup/rollback 请求。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlBackupRollbackRequest {
+    pub control_token: String,
+    pub job_id: String,
+}
+
+/// owner 侧创建导出备份。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Settings 导出必须在 sidecar 读权威 DB 并写出 ZIP；GUI 只代理路径。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → create_export_archive → {path,formatVersion}。
+pub async fn control_backup_create(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlBackupCreateRequest>,
+) -> P2pResult<Json<CreateBackupResult>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.backup_create"))?;
+    let dest = PathBuf::from(&request.dest_path);
+    create_export_archive(&state, &dest)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.backup_create"))?;
+    let result = CreateBackupResult {
+        path: dest.display().to_string(),
+        format_version: FORMAT_VERSION,
+    };
+    ensure_response_within_limit(&result, &context)?;
+    Ok(Json(result))
+}
+
+/// owner 侧只读 inspect 备份包。
+///
+/// Business Logic（为什么需要这个函数）:
+///     恢复确认前预览领域计数/警告；确认前零写入。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → BackupRestoreService::inspect。
+pub async fn control_backup_inspect(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlBackupInspectRequest>,
+) -> P2pResult<Json<InspectPreview>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.backup_inspect"))?;
+    let service = BackupRestoreService::new(state);
+    let preview = service
+        .inspect(PathBuf::from(&request.archive_path).as_path())
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.backup_inspect"))?;
+    ensure_response_within_limit(&preview, &context)?;
+    Ok(Json(preview))
+}
+
+/// owner 侧事务恢复。
+///
+/// Business Logic（为什么需要这个函数）:
+///     merge/replace-domain 恢复必须持 exclusive maintenance_gate，仅 owner 可写。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → service.restore(RestoreRequest)。
+pub async fn control_backup_restore(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlBackupRestoreRequest>,
+) -> P2pResult<Json<RestoreResult>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.backup_restore"))?;
+    let service = BackupRestoreService::new(state);
+    let result = service
+        .restore(RestoreRequest {
+            archive_path: request.archive_path,
+            mode: request.mode,
+            domains: request.domains,
+        })
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.backup_restore"))?;
+    ensure_response_within_limit(&result, &context)?;
+    Ok(Json(result))
+}
+
+/// owner 侧列出 recovery jobs。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Settings 展示最近恢复历史；读路径仍要求 owner（job 表在 sidecar DB）。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → list_jobs(limit default 50)。
+pub async fn control_backup_list_jobs(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlBackupListJobsRequest>,
+) -> P2pResult<Json<Vec<RecoveryJobRow>>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.backup_list_jobs"))?;
+    let limit = request.limit.unwrap_or(50);
+    let service = BackupRestoreService::new(state);
+    let jobs = service
+        .list_jobs(limit)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.backup_list_jobs"))?;
+    ensure_response_within_limit(&jobs, &context)?;
+    Ok(Json(jobs))
+}
+
+/// owner 侧列出 pre-restore 备份文件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户查看恢复前自动备份路径与时间戳。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → list_pre_restore_backups → PreRestoreBackupInfo[]。
+pub async fn control_backup_list_backups(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlAuthRequest>,
+) -> P2pResult<Json<Vec<PreRestoreBackupInfo>>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.backup_list_backups"))?;
+    let dir = pre_restore_dir()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.backup_list_backups"))?;
+    let paths = list_pre_restore_backups(&dir)
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.backup_list_backups"))?;
+    let infos = pre_restore_infos_from_paths(&paths);
+    ensure_response_within_limit(&infos, &context)?;
+    Ok(Json(infos))
+}
+
+/// owner 侧按 job 回退。
+///
+/// Business Logic（为什么需要这个函数）:
+///     恢复失败/误操作时用 pre-restore 备份 replace-domain 回灌。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → rollback_job。
+pub async fn control_backup_rollback(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlBackupRollbackRequest>,
+) -> P2pResult<Json<RestoreResult>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.backup_rollback"))?;
+    let service = BackupRestoreService::new(state);
+    let result = service
+        .rollback_job(&request.job_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.backup_rollback"))?;
+    ensure_response_within_limit(&result, &context)?;
+    Ok(Json(result))
 }
 
 /// 序列化后检查响应不超过 1 MiB。

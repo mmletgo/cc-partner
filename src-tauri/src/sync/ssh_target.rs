@@ -232,6 +232,7 @@ async fn ssh_sync_v2(
         if !resp.items.is_empty() {
             match apply_ssh_pull_items(
                 &state.ssh_target_repo.pool(),
+                state.maintenance_gate.as_ref(),
                 state.ssh_target_repo.as_ref(),
                 &resp.items,
             )

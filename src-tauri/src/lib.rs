@@ -13,6 +13,7 @@
 
 mod attention;
 pub mod backend;
+pub mod backup;
 mod cc;
 // 集成 smoke（tests/lan_trust_boundary_smoke.rs）经 app_lib 调用固定 LAN 边界矩阵。
 pub use net::lan_trust_boundary_harness;
@@ -59,10 +60,10 @@ use crate::backend::runtime::{
 };
 use crate::backend::ui::{BackendUi, TauriBackendUi};
 use crate::commands::{
-    attention as attention_cmd, backend as backend_cmd, cc_history as cc_history_cmd,
-    claude_code_assets as claude_code_assets_cmd, claude_md as claude_md_cmd,
-    cloud_sync as cloud_sync_cmd, config as config_cmd, devices as device_cmd,
-    github_trending as github_trending_cmd, health as health_cmd,
+    attention as attention_cmd, backend as backend_cmd, backup as backup_cmd,
+    cc_history as cc_history_cmd, claude_code_assets as claude_code_assets_cmd,
+    claude_md as claude_md_cmd, cloud_sync as cloud_sync_cmd, config as config_cmd,
+    devices as device_cmd, github_trending as github_trending_cmd, health as health_cmd,
     lan_firewall_dependency as lan_firewall_dependency_cmd, mobile as mobile_cmd,
     orchestrator as orchestrator_cmd, orchestrator_config as orchestrator_config_cmd,
     permissions as permissions_cmd, prompt_optimizer as prompt_optimizer_cmd,
@@ -307,6 +308,13 @@ pub fn run() {
             cloud_sync_cmd::update_cloud_sync_config,
             cloud_sync_cmd::trigger_cloud_sync_cmd,
             cloud_sync_cmd::test_cloud_sync,
+            // 可验证导出/恢复（N2）：create/inspect/restore/list jobs/list backups/rollback
+            backup_cmd::create_backup,
+            backup_cmd::inspect_backup,
+            backup_cmd::restore_backup,
+            backup_cmd::list_recovery_jobs,
+            backup_cmd::list_pre_restore_backups,
+            backup_cmd::rollback_recovery_job,
             // GitHub Trending 首页（榜单缓存 + Claude CLI 双语解说）
             github_trending_cmd::list_github_trending_repos,
             github_trending_cmd::get_github_trending_config,

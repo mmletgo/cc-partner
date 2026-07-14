@@ -4,12 +4,15 @@
 //!     用户创建的 Git worktree 需要在应用重启后继续出现在 Workbench 的 worktree 管理层。
 //!
 //! Code Logic（这个模块做什么）:
-//!     封装 `workbench_worktrees` 表 CRUD；运行期 git 状态由 workbench/git.rs 动态查询。
+//!     封装 `workbench_worktrees` 表 CRUD；写路径经 `with_shared_write_lease`；
+//!     运行期 git 状态由 workbench/git.rs 动态查询。
 
 use crate::error::AppError;
+use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use crate::workbench::models::WorkbenchWorktreeRow;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
+use std::sync::Arc;
 
 /// 工作台 Git worktree 仓库，封装 workbench_worktrees 表操作。
 ///
@@ -17,27 +20,39 @@ use sqlx::Row;
 ///     Workbench 需要把用户创建的 worktree 作为项目下的工作区长期保存，供重启后恢复。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有 SQLite pool，并提供 list/get/upsert/delete/delete_by_project 方法。
+///     持有 SQLite pool + maintenance gate，并提供 list/get/upsert/delete/delete_by_project 方法。
 #[derive(Clone)]
 pub struct WorkbenchWorktreeRepo {
     pool: SqlitePool,
+    /// 维护屏障：写路径持 shared lease，restore exclusive 时阻塞。
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl WorkbenchWorktreeRepo {
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
+    ///
     /// Business Logic（为什么需要这个函数）:
     ///     Tauri setup 需要用同一 SQLite pool 构造 worktree 仓库，供命令层共享。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     保存 SqlitePool clone；pool 内部是 Arc，clone 成本低。
+    ///     内部 `with_gate(pool, Arc::new(DatabaseMaintenanceGate::new()))`。
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self::with_gate(pool, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: 全部 ordinary writer 与 restore 共用同一 gate。
+    /// Code Logic: 保存 pool + Arc gate。
+    pub fn with_gate(pool: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { pool, gate }
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     旧版本应用没有 workbench_worktrees 表，升级后必须自动补建而不影响用户现有项目。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     执行 CREATE TABLE IF NOT EXISTS，保持幂等。
+    ///     执行 CREATE TABLE IF NOT EXISTS，保持幂等；schema bootstrap 不经 write lease。
     pub async fn ensure_schema(&self) -> Result<(), AppError> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS workbench_worktrees (\
@@ -90,51 +105,60 @@ impl WorkbenchWorktreeRepo {
     ///     新建 worktree、刷新主工作区或 Git 操作后，需要把最新元数据保存到 SQLite。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     用 INSERT OR REPLACE 写入完整 row。
+    ///     持 shared write lease 后用 INSERT OR REPLACE 写入完整 row。
     pub async fn upsert(&self, row: &WorkbenchWorktreeRow) -> Result<(), AppError> {
-        sqlx::query(
-            "INSERT OR REPLACE INTO workbench_worktrees \
-             (id, project_id, name, branch, base_branch, path, is_main, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&row.id)
-        .bind(&row.project_id)
-        .bind(&row.name)
-        .bind(&row.branch)
-        .bind(&row.base_branch)
-        .bind(&row.path)
-        .bind(if row.is_main { 1_i64 } else { 0_i64 })
-        .bind(&row.created_at)
-        .bind(&row.updated_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT OR REPLACE INTO workbench_worktrees \
+                 (id, project_id, name, branch, base_branch, path, is_main, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&row.id)
+            .bind(&row.project_id)
+            .bind(&row.name)
+            .bind(&row.branch)
+            .bind(&row.base_branch)
+            .bind(&row.path)
+            .bind(if row.is_main { 1_i64 } else { 0_i64 })
+            .bind(&row.created_at)
+            .bind(&row.updated_at)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     用户删除已合并或废弃的 worktree 后，管理层不应继续展示该记录。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     按 id 删除 worktree 记录。
+    ///     持 shared write lease 后按 id 删除 worktree 记录。
     pub async fn delete(&self, id: &str) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM workbench_worktrees WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query("DELETE FROM workbench_worktrees WHERE id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     移除工作台项目时，项目下的 worktree 元数据也应一起清理，避免孤儿记录。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     按 project_id 删除全部 worktree 记录；磁盘真实 worktree 不在此函数中删除。
+    ///     持 shared write lease 后按 project_id 删除全部 worktree 记录；磁盘真实 worktree 不在此删除。
     pub async fn delete_by_project(&self, project_id: &str) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM workbench_worktrees WHERE project_id = ?")
-            .bind(project_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query("DELETE FROM workbench_worktrees WHERE project_id = ?")
+                .bind(project_id)
+                .execute(&self.pool)
+                .await?;
+            Ok(())
+        })
+        .await
     }
 }
 

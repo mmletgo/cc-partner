@@ -22,6 +22,7 @@ use crate::storage::sync_request_ledger_repo::{
     SyncBatchOutcome, SyncRequestLedgerRepo, DOMAIN_PROMPTS, DOMAIN_SCRATCHPAD, DOMAIN_SSH_TARGET,
 };
 use crate::storage::sync_watermark_repo::SyncWatermarkRepo;
+use crate::storage::maintenance_gate::{begin_shared_write, DatabaseMaintenanceGate};
 use crate::storage::{PromptRepo, ScratchpadRepo, SshTargetRepo};
 use crate::sync::merger::{
     merge_prompt_with_conflicts, prompt_text_content_hash, ContentVersionDraft,
@@ -369,7 +370,8 @@ pub async fn apply_prompt_merge_batch(
 
     let now = Utc::now().to_rfc3339();
     let plan = build_prompt_merge_plan(pool, repo, remotes, &now).await?;
-    let ledger = SyncRequestLedgerRepo::new(pool.clone());
+    // ledger 必须与域 repo 共享同一 maintenance gate，避免 restore exclusive 被旁路。
+    let ledger = SyncRequestLedgerRepo::with_gate(pool.clone(), repo.gate());
     let claimed = claimed_device_id.to_string();
     let now_for_tx = now.clone();
 
@@ -411,16 +413,17 @@ pub async fn apply_prompt_merge_batch(
 ///     引擎从对端拉取正文后也需与 push-batch 同形状落库，避免静默丢 conflict。
 ///
 /// Code Logic（这个函数做什么）:
-///     build plan → begin → write_prompt_merge_on_tx → commit；返回 accepted。
+///     build plan → begin_shared_write → write_prompt_merge_on_tx → commit；返回 accepted。
 pub async fn apply_prompt_pull_items(
     pool: &SqlitePool,
+    gate: &DatabaseMaintenanceGate,
     repo: &PromptRepo,
     remotes: &[PromptRow],
 ) -> Result<usize, AppError> {
     ensure_sync_schemas(pool).await?;
     let now = Utc::now().to_rfc3339();
     let plan = build_prompt_merge_plan(pool, repo, remotes, &now).await?;
-    let mut tx = pool.begin().await?;
+    let (_permit, mut tx) = begin_shared_write(pool, gate).await?;
     let accepted = write_prompt_merge_on_tx(&mut tx, &plan).await?;
     tx.commit().await?;
     Ok(accepted)
@@ -610,7 +613,8 @@ pub async fn apply_ssh_merge_batch(
     ensure_sync_schemas(pool).await?;
     let now = Utc::now().to_rfc3339();
     let plan = build_ssh_merge_plan(pool, repo, remotes, &now).await?;
-    let ledger = SyncRequestLedgerRepo::new(pool.clone());
+    // ledger 必须与域 repo 共享同一 maintenance gate，避免 restore exclusive 被旁路。
+    let ledger = SyncRequestLedgerRepo::with_gate(pool.clone(), repo.gate());
     let claimed = claimed_device_id.to_string();
     let now_for_tx = now.clone();
 
@@ -653,16 +657,17 @@ pub async fn apply_ssh_merge_batch(
 ///     引擎拉取 SSH 正文后需与 push-batch 同形状落库，避免静默丢 conflict。
 ///
 /// Code Logic（这个函数做什么）:
-///     build plan → begin → write_ssh_merge_on_tx → commit。
+///     build plan → begin_shared_write → write_ssh_merge_on_tx → commit。
 pub async fn apply_ssh_pull_items(
     pool: &SqlitePool,
+    gate: &DatabaseMaintenanceGate,
     repo: &SshTargetRepo,
     remotes: &[SshTargetRow],
 ) -> Result<usize, AppError> {
     ensure_sync_schemas(pool).await?;
     let now = Utc::now().to_rfc3339();
     let plan = build_ssh_merge_plan(pool, repo, remotes, &now).await?;
-    let mut tx = pool.begin().await?;
+    let (_permit, mut tx) = begin_shared_write(pool, gate).await?;
     let accepted = write_ssh_merge_on_tx(&mut tx, &plan).await?;
     tx.commit().await?;
     Ok(accepted)
@@ -852,7 +857,8 @@ pub async fn apply_scratchpad_merge_batch(
     ensure_sync_schemas(pool).await?;
     let now = Utc::now().to_rfc3339();
     let plan = build_scratchpad_merge_plan(pool, repo, remotes, &now).await?;
-    let ledger = SyncRequestLedgerRepo::new(pool.clone());
+    // ledger 必须与域 repo 共享同一 maintenance gate，避免 restore exclusive 被旁路。
+    let ledger = SyncRequestLedgerRepo::with_gate(pool.clone(), repo.gate());
     let claimed = claimed_device_id.to_string();
     let now_for_tx = now.clone();
 
@@ -917,16 +923,17 @@ async fn ensure_sync_schemas(pool: &SqlitePool) -> Result<(), AppError> {
 ///     引擎拉取速记本正文后需与 push-batch 同形状落库。
 ///
 /// Code Logic（这个函数做什么）:
-///     build plan → begin → write_scratchpad_merge_on_tx → commit。
+///     build plan → begin_shared_write → write_scratchpad_merge_on_tx → commit。
 pub async fn apply_scratchpad_pull_items(
     pool: &SqlitePool,
+    gate: &DatabaseMaintenanceGate,
     repo: &ScratchpadRepo,
     remotes: &[ScratchpadRow],
 ) -> Result<usize, AppError> {
     ensure_sync_schemas(pool).await?;
     let now = Utc::now().to_rfc3339();
     let plan = build_scratchpad_merge_plan(pool, repo, remotes, &now).await?;
-    let mut tx = pool.begin().await?;
+    let (_permit, mut tx) = begin_shared_write(pool, gate).await?;
     let accepted = write_scratchpad_merge_on_tx(&mut tx, &plan).await?;
     tx.commit().await?;
     Ok(accepted)
@@ -1010,7 +1017,8 @@ mod tests {
             .await
             .unwrap();
         assert!(versions.is_empty());
-        let mut tx = pool.begin().await.unwrap();
+        let gate = DatabaseMaintenanceGate::new();
+        let (_permit, mut tx) = begin_shared_write(&pool, &gate).await.unwrap();
         let row =
             SyncRequestLedgerRepo::get_on_tx(&mut tx, "peer-1", DOMAIN_PROMPTS, "req-fail-active")
                 .await

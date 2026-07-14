@@ -539,6 +539,7 @@ async fn prompt_sync_v2(
         if !resp.items.is_empty() {
             match apply_prompt_pull_items(
                 &state.prompt_repo.pool(),
+                state.maintenance_gate.as_ref(),
                 state.prompt_repo.as_ref(),
                 &resp.items,
             )

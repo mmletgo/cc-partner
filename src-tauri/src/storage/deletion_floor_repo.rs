@@ -11,6 +11,7 @@
 //!     - `tombstone_gc_eligible` / `compact_tombstones_to_floors` 纯结构 + 水位辅助。
 
 use crate::error::AppError;
+use crate::storage::maintenance_gate::{begin_shared_write, DatabaseMaintenanceGate};
 use crate::storage::sync_watermark_repo::{
     SyncWatermarkRepo, DEFAULT_ACTIVE_PEER_WINDOW_DAYS,
 };
@@ -20,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::{Row, Sqlite, Transaction};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Tombstone 可压缩的最小年龄（天）。
 pub const TOMBSTONE_GC_MIN_AGE_DAYS: i64 = 30;
@@ -91,15 +93,25 @@ pub struct TombstoneGcResult {
 pub struct DeletionFloorRepo {
     /// SQLite 连接池
     db: SqlitePool,
+    /// 维护闸：独立 upsert 事务经 shared lease
+    gate: Arc<DatabaseMaintenanceGate>,
 }
 
 impl DeletionFloorRepo {
-    /// 构造仓库。
+    /// 兼容构造：测试/局部 fixture 用独立 gate。
     ///
     /// Business Logic: merge / GC / 导出恢复共用 floor 读写。
-    /// Code Logic: 持有 pool clone。
+    /// Code Logic: 委托 `with_gate` + 新建独立 gate。
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self::with_gate(db, Arc::new(DatabaseMaintenanceGate::new()))
+    }
+
+    /// 生产构造：共享 AppState.maintenance_gate。
+    ///
+    /// Business Logic: floor 写必须与 restore 互斥，与其它 writer 共享 gate。
+    /// Code Logic: 持有 pool clone + `Arc<DatabaseMaintenanceGate>`。
+    pub fn with_gate(db: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
+        Self { db, gate }
     }
 
     /// 返回内部 pool。
@@ -160,11 +172,12 @@ impl DeletionFloorRepo {
     /// 非事务 upsert（测试/单写路径）。
     ///
     /// Business Logic: 单测与不需与 tombstone 删除同事务时使用。
-    /// Code Logic: begin → upsert_on_tx → commit。
+    /// Code Logic: `begin_shared_write` → upsert_on_tx → commit。
     pub async fn upsert(&self, floor: &DeletionFloor) -> Result<(), AppError> {
-        let mut tx = self.db.begin().await?;
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
         Self::upsert_on_tx(&mut tx, floor).await?;
         tx.commit().await?;
+        drop(permit);
         Ok(())
     }
 
