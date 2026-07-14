@@ -244,20 +244,24 @@ export function Devices() {
    * 保存 SSH 连接目标。
    *
    * Business Logic（为什么需要）:
-   *   用户在设备页编辑用户名/端口后，配置要立刻落库并参与跨设备同步。
+   *   用户在设备页编辑用户名/端口后，配置要立刻落库并参与跨设备同步；
+   *   调用方必须知道成功/失败，才能决定是否清除可编辑 draft。
    *
    * Code Logic（做什么）:
-   *   调 upsert_ssh_target 保存，然后刷新 targets，保持列表与后端一致。
+   *   调 upsert_ssh_target 保存，成功后刷新 targets 并返回 true；
+   *   失败写入 sshError 并返回 false，不抛出（由调用方保留 draft）。
    */
   const saveTarget = useCallback(
-    async (host: string, username: string, port: number, label?: string) => {
+    async (host: string, username: string, port: number, label?: string): Promise<boolean> => {
       try {
         await sshApi.upsert(host, username, port, label);
         const nextTargets = await sshApi.list();
         setTargets(nextTargets);
         setSshError(null);
+        return true;
       } catch (err) {
         setSshError(err instanceof Error ? err.message : t('ssh:fetchFailed'));
+        return false;
       }
     },
     [t],
@@ -284,21 +288,27 @@ export function Devices() {
    * 提交某个 SSH 目标的行内编辑。
    *
    * Business Logic（为什么需要）:
-   *   用户编辑 username/port 后在失焦或回车时自动保存，避免额外确认按钮增加操作成本。
+   *   用户编辑 username/port 后在失焦或回车时自动保存，避免额外确认按钮增加操作成本；
+   *   保存失败时必须保留可编辑 draft，并展示重试入口。
    *
    * Code Logic（做什么）:
-   *   从 edits 取缓存，保留原 label，端口非法时回落 22，提交后删除该行编辑缓存。
+   *   从 edits 取缓存，保留原 label，端口非法时回落 22；
+   *   仅当 saveTarget 返回 true 时才清除该行编辑缓存。
    */
   const commitSshEdit = (host: string) => {
     const edit = edits[host];
     if (!edit) return;
     const cfg = targetByHost.get(host);
-    void saveTarget(host, edit.username, Number(edit.port) || 22, cfg?.label);
-    setEdits((prev) => {
-      const next = { ...prev };
-      delete next[host];
-      return next;
-    });
+    void (async () => {
+      const ok = await saveTarget(host, edit.username, Number(edit.port) || 22, cfg?.label);
+      if (!ok) return;
+      setEdits((prev) => {
+        if (!prev[host]) return prev;
+        const next = { ...prev };
+        delete next[host];
+        return next;
+      });
+    })();
   };
 
   /**
@@ -344,20 +354,22 @@ export function Devices() {
    * 手动添加 SSH 目标。
    *
    * Business Logic（为什么需要）:
-   *   mDNS 发现不到的机器仍可通过 IP/hostname 加入连接目标列表。
+   *   mDNS 发现不到的机器仍可通过 IP/hostname 加入连接目标列表；
+   *   失败时保留用户已填表单，避免弱网下反复输入。
    *
    * Code Logic（做什么）:
-   *   host 去空后 upsert；成功后清空表单，失败由 saveTarget 写入 sshError。
+   *   host 去空后 upsert；仅 success=true 清空表单，失败由 saveTarget 写 sshError。
    */
   const handleAddSshTarget = async () => {
     const host = manualHost.trim();
     if (!host) return;
-    await saveTarget(
+    const ok = await saveTarget(
       host,
       manualUser.trim(),
       Number(manualPort) || 22,
       manualLabel.trim() || undefined,
     );
+    if (!ok) return;
     setManualHost('');
     setManualUser('');
     setManualPort('22');
