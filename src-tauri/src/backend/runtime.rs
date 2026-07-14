@@ -8,6 +8,7 @@
 //!     提供数据库初始化、AppState 构造、HTTP/mDNS 服务启动、后台任务启动与退出清理函数。
 
 use crate::backend::control;
+use crate::backend::runtime_metrics::RuntimeMetrics;
 use crate::backend::ui::BackendUi;
 use crate::config::AppConfig;
 use crate::error::AppError;
@@ -355,11 +356,12 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
 /// 构造共享 AppState。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     GUI 与 headless 后端都需要相同的配置、数据库仓储、Workbench registry、健康运行时和 Orchestrator telemetry。
+///     GUI 与 headless 后端都需要相同的配置、数据库仓储、Workbench registry、健康运行时、
+///     Orchestrator telemetry 与进程内有界 runtime metrics。
 ///
 /// Code Logic（这个函数做什么）:
-///     加载 `AppConfig`，调用 `init_db`，为每个仓储/registry 创建 Arc，并把调用方提供的 `BackendUi`
-///     注入 AppState 作为 GUI/headless 的 UI 边界。
+///     加载 `AppConfig`，调用 `init_db`，为每个仓储/registry 创建 Arc，注入一份
+///     `RuntimeMetrics`，并把调用方提供的 `BackendUi` 注入 AppState 作为 GUI/headless 的 UI 边界。
 pub async fn build_app_state(ui: Arc<dyn BackendUi>) -> Result<AppState, AppError> {
     let config = AppConfig::load()?;
     let pool = init_db(&config.db_path).await?;
@@ -431,6 +433,7 @@ pub async fn build_app_state(ui: Arc<dyn BackendUi>) -> Result<AppState, AppErro
         orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
         workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
         workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        runtime_metrics: Arc::new(RuntimeMetrics::new()),
     })
 }
 

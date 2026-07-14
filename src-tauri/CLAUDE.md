@@ -18,7 +18,8 @@ cc-partner 的桌面宿主与全部后端逻辑，从 PyQt6 + Python 迁移而�
 ```
 src/
 ├── main.rs / lib.rs   — Tauri Builder + 命令注册 + GUI 专属 health/tray/hotkey 接线
-├── backend/runtime.rs — GUI/headless 共享运行时：load config → init_db → AppState、sidecar 验证、HTTP/mDNS 服务、headless 后台任务、退出清理
+├── backend/runtime.rs — GUI/headless 共享运行时：load config → init_db → AppState（含 `runtime_metrics: Arc<RuntimeMetrics>`）、sidecar 验证、HTTP/mDNS 服务、headless 后台任务、退出清理
+├── backend/runtime_metrics.rs — 进程内有界本地性能指标：`RuntimeMetrics::{record_duration,record_count,snapshot,warn_metric}`；`Mutex<BTreeMap<&'static str, MetricAccumulator>>` 最多 64 项、EWMA α=0.2；仅接受固定 `&'static str` 名且拒绝 `/`/空白/非 `[A-Za-z0-9._-]`；warning 只输出 metric/count/last_ms/max_ms；无遥测上传、不记正文/路径/凭据/SQL；生产池仍 `max_connections(1)` 不在此改 [已实现 S5 Task1]
 ├── backend/logging.rs — 后端受限文件日志：`BackendLogConfig`（data_dir/logs）、精确 size 轮转 writer（5 MiB / 3 历史，`.1` 最新；轮转 rename/remove 失败时 best-effort reopen current 恢复 `current_len`；**每次 write/flush 发现 `file=None` 仍有界 reopen**，环境恢复后后续写入成功，flush 在句柄不可用时返回错误而非假装成功；**recover 失败禁止 `tracing::*` 回写同一 non-blocking 文件 layer**，改用限频带外 stderr + 重入保护，避免 file=None 自反馈循环）、Unix 目录 0700/文件 0600、`tracing_appender::non_blocking` 守卫；`sanitize_diagnostic_text` + 白名单 JSON formatter + 脱敏文本 stderr formatter；`init_backend_tracing`/`open_backend_logging` 双 layer 入口 + `init_doctor_tracing`（仅 stderr，不写文件）；`log_operation_completion` 生产路径 helper；未知字段丢弃、密钥/body/home 脱敏 [已实现 Task1+Task2+Task3+Task6]
 ├── backend/doctor.rs — Doctor 快照 schema（`DoctorSnapshot` camelCase schemaVersion=1）、check 严重度、overall 状态聚合（healthy/degraded/unhealthy → exit 0/1/2）、home/`<HOME>` 隐私归一化与敏感摘要清洗、有界 control/health/path/mDNS/deps/recent-errors probe（`ProbeRuntimeGuard` 共享 cancel + 登记 pid/pgid；硬超时 `cancel_and_reap` 杀依赖探测进程树；deps 走 `*_with_budget(overall_deadline, guard)`）；CLI `doctor`/`doctor --json` 输出与退出码在 `backend/cli.rs` [已实现 Task4+Task5+Task6]
 ├── state.rs           — AppState（config: RwLock + db pool + prompt_repo + device_id）[已实现]
