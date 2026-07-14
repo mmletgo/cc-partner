@@ -10,6 +10,7 @@
  *   - 根据 i18n 当前语言把 repo explanation 切换为中文/英文
  *   - loading/error/empty/stale/AI failed 状态分别渲染
  *   - 使用 tauri-plugin-opener 把仓库 URL 交给系统浏览器打开
+ *   - 列表区用带 aria-label 的 section（AppShell 已是唯一 main landmark，禁止嵌套 main）
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -213,7 +214,8 @@ export function Home() {
           </div>
         ) : null}
 
-        <main className={styles.list} aria-label={t('home:listAria')}>
+        {/* AppShell 已提供唯一 <main> landmark；列表用 section 保留 aria-label，避免嵌套 main */}
+        <section className={styles.list} aria-label={t('home:listAria')}>
           {state === 'loading' ? (
             <div className={styles.masonryList}>
               {Array.from({ length: SKELETON_COUNT }).map((_, index) => (
@@ -245,7 +247,7 @@ export function Home() {
               ))}
             </div>
           )}
-        </main>
+        </section>
       </div>
     </div>
   );
