@@ -12,7 +12,70 @@
 
 use std::collections::{HashMap, HashSet};
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
 use super::vector_clock::{compare, ClockOrder};
+
+/// opaque keyset cursor v1 载荷（编码前 JSON）。
+///
+/// Business Logic: 客户端不得解析/发明 cursor；服务端用 last_id 做稳定 keyset 翻页。
+/// Code Logic: `{v:1,last_id}` 经 base64url(NO_PAD) 编码为 opaque 字符串。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KeysetCursorV1 {
+    v: u32,
+    last_id: String,
+}
+
+/// 编码 opaque keyset cursor。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Prompt/SSH/Scratchpad v2 manifest-page 与 CC History 同构，需统一 opaque cursor，
+///     避免各领域自造可解析游标被客户端误用。
+///
+/// Code Logic（这个函数做什么）:
+///     序列化 `{v:1,last_id}` 为 JSON 字节，再 URL_SAFE_NO_PAD base64 编码。
+pub fn encode_keyset_cursor(last_id: &str) -> String {
+    let payload = KeysetCursorV1 {
+        v: 1,
+        last_id: last_id.to_string(),
+    };
+    let json = serde_json::to_vec(&payload).unwrap_or_default();
+    URL_SAFE_NO_PAD.encode(json)
+}
+
+/// 解码 opaque keyset cursor，成功返回 last_id。
+///
+/// Business Logic（为什么需要这个函数）:
+///     非法/损坏/错误版本 cursor 必须在访问 DB 前拒绝，映射为 stable invalid_cursor。
+///
+/// Code Logic（这个函数做什么）:
+///     base64url 解码 → JSON 解析 → 要求 v==1 且 last_id 非空。
+pub fn decode_keyset_cursor(cursor: &str) -> Result<String, ()> {
+    let bytes = URL_SAFE_NO_PAD.decode(cursor.as_bytes()).map_err(|_| ())?;
+    let payload: KeysetCursorV1 = serde_json::from_slice(&bytes).map_err(|_| ())?;
+    if payload.v != 1 || payload.last_id.is_empty() {
+        return Err(());
+    }
+    Ok(payload.last_id)
+}
+
+/// 计算多段载荷的 SHA-256 十六进制 content_hash。
+///
+/// Business Logic（为什么需要这个函数）:
+///     manifest 摘要需要稳定 content hash 做 exact equality，避免无谓正文交换。
+///
+/// Code Logic（这个函数做什么）:
+///     按顺序 update 各字节段（调用方自行加分隔符），返回小写 hex。
+pub fn content_sha256_hex(parts: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    format!("{:x}", hasher.finalize())
+}
 
 /// Manifest 单页最大 item 数（先达到 item/字节预算者为准）。
 pub const MANIFEST_PAGE_ITEMS: usize = 500;

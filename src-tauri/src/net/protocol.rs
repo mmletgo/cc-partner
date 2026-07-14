@@ -93,6 +93,19 @@ pub const CAPABILITY_TRANSFER_COMPLETE_V1: &str = "transfer.complete.v1";
 ///     `server_protocol_info()` 中宣告。
 pub const CAPABILITY_CC_HISTORY_PAGED_SYNC_V1: &str = "cc-history.paged-sync.v1";
 
+/// 能力 token：Prompt/SSH/Scratchpad 有界 manifest/items/push-batch v2
+/// （`POST /api/sync/prompts/*`、`/api/ssh-target/sync/*`、`/api/scratchpad/sync/*` 新路由）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     新客户端在走三域 v2 分页协议前必须确认对端已挂载路由 **且** 具备原子 idempotency ledger。
+///     Task 2 仅落地路由与 typed peer 调用；**不得**在 `server_protocol_info()` 中宣告本 token，
+///     待 Task 3 事务 ledger 与三域写路径就绪后原子上线。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量预留给 Task 3/引擎 capability gate；当前 build 的 `server_protocol_info()` 不含它。
+#[allow(dead_code)]
+pub const CAPABILITY_SYNC_MANIFEST_V2: &str = "sync.manifest.v2";
+
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
 /// Business Logic（为什么需要这个结构）:

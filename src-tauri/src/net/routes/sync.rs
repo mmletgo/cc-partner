@@ -1,29 +1,57 @@
-//! net/routes/sync.rs — /api/sync/{pull,push} handler（供对端 P2P 同步调用）
+//! net/routes/sync.rs — Prompt 同步路由（legacy pull/push + v2 manifest/items/push-batch）
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     对端设备发起同步时调用这两个端点：pull 让对端告知本端需要回传哪些 prompt；
-//!     push 让对端把本端缺少/过时的 prompt 推过来。对照 Python `protocol.py` 的
-//!     `handle_sync_pull` / `handle_sync_push`。字段命名与 Python 逐字一致
-//!     （summaries / prompts / vector_clock / accepted），保证迁移期 Rust↔Python 互通。
+//!     对端设备发起 Prompt 同步时调用这些端点。legacy pull/push 保留一代兼容；
+//!     v2 无状态 manifest-page/items/push-batch 供 typed peer 流式比较完整排序 manifest，
+//!     网络/JSON/413 不得折叠为空成功。`sync.manifest.v2` capability 由 Task 3 原子宣告。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - POST /api/sync/pull：body `{summaries: [{id, vector_clock}]}`，比对后返回本端需要
-//!       下发给对端的完整 PromptRow（本端有而对端没有 / 本端领先 / 并发的），返回 `{prompts: [...]}`。
-//!     - POST /api/sync/push：body `{prompts: [PromptRow]}`，逐条用 merger 决策后 bulk_upsert，
-//!       返回 `{accepted: <count>}`（accepted = 实际落库条数）。
-//!     序列化用 snake_case（PromptRow 默认），与 Python `Prompt.to_dict()` 互通，非 camelCase。
+//!     - POST /api/sync/pull|push：legacy 摘要比对/合并路径（保持行为）。
+//!     - POST /api/sync/prompts/manifest-page：按 id 升序 keyset 分页摘要。
+//!     - POST /api/sync/prompts/items：按 id 批取正文。
+//!     - POST /api/sync/prompts/push-batch：有界 batch 合并后 bulk_upsert + accepted。
+//!     - 预算：page ≤500/1MiB；batch ≤100/4MiB（`sync::protocol` 常量）。
 
 use crate::error::AppError;
 use crate::models::prompt::PromptRow;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
+use crate::storage::PromptRepo;
 use crate::sync::merger::merge_prompt;
+use crate::sync::protocol::{
+    content_sha256_hex, decode_keyset_cursor, encode_keyset_cursor, estimate_summary_wire_bytes,
+    SyncManifestPage, SyncSummary, MANIFEST_PAGE_BYTES, MANIFEST_PAGE_ITEMS, PUSH_BATCH_BYTES,
+    PUSH_BATCH_ITEMS,
+};
 use crate::sync::vector_clock::compare;
 use axum::extract::{Extension, State};
+use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+// ---------------------------------------------------------------------------
+// 常量与错误码
+// ---------------------------------------------------------------------------
+
+/// Prompt v2 路由 body 上限（与 push-batch 4MiB 对齐，略留 JSON 开销）。
+pub const PROMPT_SYNC_ROUTE_BODY_LIMIT_BYTES: usize = PUSH_BATCH_BYTES;
+
+/// 稳定错误码：批过大（HTTP 413，retryable=false）。
+pub const CODE_BATCH_TOO_LARGE: &str = "prompts.batch_too_large";
+/// 稳定错误码：单条过大（HTTP 422）。
+pub const CODE_ITEM_TOO_LARGE: &str = "prompts.item_too_large";
+/// 稳定错误码：非法 cursor（HTTP 400）。
+pub const CODE_INVALID_CURSOR: &str = "prompts.invalid_cursor";
+/// 单条 id UTF-8 字节上限。
+const ID_MAX_BYTES: usize = 256;
+/// 单条 content UTF-8 字节上限（1 MiB）。
+const CONTENT_MAX_BYTES: usize = 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// Legacy DTOs
+// ---------------------------------------------------------------------------
 
 /// sync/pull 请求体：对端发来的 prompt 摘要列表（字段对照 Python handler）。
 #[derive(Debug, Deserialize)]
@@ -58,6 +86,216 @@ pub struct SyncPushReq {
 pub struct SyncPushResp {
     pub accepted: usize,
 }
+
+// ---------------------------------------------------------------------------
+// V2 DTOs
+// ---------------------------------------------------------------------------
+
+/// manifest-page 请求：可选 cursor + limit。
+#[derive(Debug, Deserialize)]
+pub struct PromptManifestPageReq {
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// items 请求：按 ID 批量取正文。
+#[derive(Debug, Deserialize)]
+pub struct PromptItemsReq {
+    #[serde(default)]
+    pub ids: Vec<String>,
+}
+
+/// items 响应：保序存在行 + 缺失 ID。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptItemsResp {
+    pub items: Vec<PromptRow>,
+    pub missing_ids: Vec<String>,
+}
+
+/// push-batch 请求：正文 + 稳定 client_request_id（Task 3 ledger 将用）。
+#[derive(Debug, Deserialize)]
+pub struct PromptPushBatchReq {
+    #[serde(default)]
+    pub items: Vec<PromptRow>,
+    /// 客户端批请求幂等键（收敛标签，非认证）；Task 2 仅校验非空。
+    pub client_request_id: String,
+}
+
+/// push-batch 响应：实际落库条数（**无** serde default，缺字段解析失败）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptPushBatchResp {
+    pub accepted: usize,
+}
+
+// ---------------------------------------------------------------------------
+// RouteFail
+// ---------------------------------------------------------------------------
+
+/// 路由层失败分类，映射到稳定 code/status。
+#[derive(Debug)]
+enum RouteFail {
+    InvalidCursor,
+    BatchTooLarge(String),
+    ItemTooLarge(String),
+    Validation(String),
+    App(AppError),
+}
+
+impl RouteFail {
+    /// 转为边界 P2pError（精确 status/code/retryable）。
+    ///
+    /// Business Logic: 客户端依赖稳定 code 做拆批/终止；413/422 必须 retryable=false。
+    /// Code Logic: InvalidCursor→400；BatchTooLarge→413；ItemTooLarge→422；Validation→400；App→from_app_error。
+    fn into_p2p(self, ctx: &P2pRequestContext, domain: &str) -> P2pError {
+        match self {
+            RouteFail::InvalidCursor => P2pError::stable(
+                "非法或损坏的 manifest cursor",
+                CODE_INVALID_CURSOR,
+                StatusCode::BAD_REQUEST,
+                ctx,
+                false,
+            ),
+            RouteFail::BatchTooLarge(msg) => P2pError::stable(
+                msg,
+                CODE_BATCH_TOO_LARGE,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                ctx,
+                false,
+            ),
+            RouteFail::ItemTooLarge(msg) => P2pError::stable(
+                msg,
+                CODE_ITEM_TOO_LARGE,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ctx,
+                false,
+            ),
+            RouteFail::Validation(msg) => P2pError::validation(msg, ctx),
+            RouteFail::App(e) => P2pError::from_app_error(e, ctx, domain),
+        }
+    }
+}
+
+impl From<AppError> for RouteFail {
+    fn from(value: AppError) -> Self {
+        RouteFail::App(value)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// 计算 Prompt 正文指纹（title/content/tags）。
+///
+/// Business Logic: manifest exact equality 用 hash 判断是否需要交换正文。
+/// Code Logic: 固定分隔符拼接字段后 SHA-256 hex。
+fn prompt_content_hash(row: &PromptRow) -> String {
+    let tags_json = serde_json::to_string(&row.tags).unwrap_or_else(|_| "[]".to_string());
+    content_sha256_hex(&[
+        row.title.as_bytes(),
+        b"\0",
+        row.content.as_bytes(),
+        b"\0",
+        tags_json.as_bytes(),
+    ])
+}
+
+/// 从 PromptRow 构造 SyncSummary。
+///
+/// Business Logic: 摘要仅含元数据，供 client 完整流比较。
+/// Code Logic: id/vector_clock/hash/size/updated_at/deleted。
+fn prompt_to_summary(row: &PromptRow) -> SyncSummary<String> {
+    SyncSummary {
+        id: row.id.clone(),
+        vector_clock: row.vector_clock.clone(),
+        content_hash: prompt_content_hash(row),
+        size: row.content.len() as u64,
+        updated_at: row.updated_at.clone(),
+        deleted: row.deleted,
+    }
+}
+
+/// 估算完整 Prompt 行 wire 字节（batch 预算）。
+///
+/// Business Logic: 在序列化前拒绝超 4MiB 批。
+/// Code Logic: 各字符串字段 + tags/vector_clock JSON 长度。
+fn estimate_prompt_row_bytes(row: &PromptRow) -> usize {
+    let tags_len = serde_json::to_string(&row.tags)
+        .map(|s| s.len())
+        .unwrap_or(2);
+    let vc_len = serde_json::to_string(&row.vector_clock)
+        .map(|s| s.len())
+        .unwrap_or(2);
+    row.id.len()
+        + row.title.len()
+        + row.content.len()
+        + tags_len
+        + row.created_at.len()
+        + row.updated_at.len()
+        + row.device_id.len()
+        + vc_len
+        + 64
+}
+
+/// 校验单个同步 ID。
+fn validate_sync_id(id: &str) -> Result<(), String> {
+    if id.trim().is_empty() {
+        return Err("id 不能为空或空白".to_string());
+    }
+    if id.len() > ID_MAX_BYTES {
+        return Err(format!(
+            "id 超过 {ID_MAX_BYTES} UTF-8 字节上限（收到 {} 字节）",
+            id.len()
+        ));
+    }
+    Ok(())
+}
+
+/// 校验 ID 列表条数/空白/重复。
+fn validate_id_list(ids: &[String]) -> Result<(), RouteFail> {
+    if ids.len() > PUSH_BATCH_ITEMS {
+        return Err(RouteFail::BatchTooLarge(format!(
+            "单批最多 {PUSH_BATCH_ITEMS} 个 id，收到 {}",
+            ids.len()
+        )));
+    }
+    let mut seen = HashSet::with_capacity(ids.len());
+    for id in ids {
+        if let Err(msg) = validate_sync_id(id) {
+            return Err(RouteFail::Validation(msg));
+        }
+        if !seen.insert(id.as_str()) {
+            return Err(RouteFail::Validation("ids 含重复 id".to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// 校验完整 Prompt 行（id/content/估算）。
+fn validate_prompt_row(row: &PromptRow) -> Result<(), RouteFail> {
+    if let Err(msg) = validate_sync_id(&row.id) {
+        return Err(RouteFail::Validation(msg));
+    }
+    if row.content.len() > CONTENT_MAX_BYTES {
+        return Err(RouteFail::ItemTooLarge(format!(
+            "content 超过 {CONTENT_MAX_BYTES} 字节上限（收到 {} 字节）",
+            row.content.len()
+        )));
+    }
+    let est = estimate_prompt_row_bytes(row);
+    if est > PUSH_BATCH_BYTES {
+        return Err(RouteFail::ItemTooLarge(format!(
+            "单条估算 {est} 字节超过批上限 {PUSH_BATCH_BYTES}"
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Legacy handlers
+// ---------------------------------------------------------------------------
 
 /// POST /api/sync/pull：接收对端摘要，返回本端需要下发的 prompt。
 ///
@@ -180,4 +418,458 @@ async fn sync_push_impl(state: &AppState, req: SyncPushReq) -> Result<usize, App
 
     tracing::info!("sync/push: 接收并落库 {} 条 prompt", accepted);
     Ok(accepted)
+}
+
+// ---------------------------------------------------------------------------
+// V2 handlers
+// ---------------------------------------------------------------------------
+
+/// POST /api/sync/prompts/manifest-page：无状态分页返回 Prompt 摘要。
+///
+/// Business Logic（为什么需要这个函数）:
+///     client 流式拉完全部排序页后与本地完整 manifest 比较；server 不根据 caller 单页推断缺失。
+///
+/// Code Logic（这个函数做什么）:
+///     解码 cursor → get_all_for_sync → 按 id 升序 keyset 切片 → 校验 page 预算 → SyncManifestPage。
+pub async fn prompt_manifest_page(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<PromptManifestPageReq>,
+) -> P2pResult<Json<SyncManifestPage<String>>> {
+    let page = prompt_manifest_page_impl(state.prompt_repo.as_ref(), req)
+        .await
+        .map_err(|e| e.into_p2p(&ctx, "prompts.manifest_page"))?;
+    Ok(Json(page))
+}
+
+/// manifest-page 业务实现（可单测，不依赖 AppState）。
+///
+/// Business Logic: 把分页与 cursor 编解码从 axum 边界剥离。
+/// Code Logic: limit 默认 MANIFEST_PAGE_ITEMS；按 id 过滤 after_id 后取 limit 条。
+async fn prompt_manifest_page_impl(
+    repo: &PromptRepo,
+    req: PromptManifestPageReq,
+) -> Result<SyncManifestPage<String>, RouteFail> {
+    let limit = match req.limit {
+        None => MANIFEST_PAGE_ITEMS as u32,
+        Some(0) => {
+            return Err(RouteFail::Validation(format!(
+                "manifest limit 必须在 1..={MANIFEST_PAGE_ITEMS}"
+            )));
+        }
+        Some(n) if n as usize > MANIFEST_PAGE_ITEMS => {
+            return Err(RouteFail::Validation(format!(
+                "manifest limit 最大 {MANIFEST_PAGE_ITEMS}，收到 {n}"
+            )));
+        }
+        Some(n) => n,
+    };
+
+    let after_id = match req.cursor.as_deref() {
+        None | Some("") => None,
+        Some(c) => Some(decode_keyset_cursor(c).map_err(|_| RouteFail::InvalidCursor)?),
+    };
+
+    let mut local_all = repo.get_all_for_sync().await?;
+    local_all.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let start = match after_id.as_deref() {
+        None => 0,
+        Some(after) => local_all
+            .iter()
+            .position(|r| r.id.as_str() > after)
+            .unwrap_or(local_all.len()),
+    };
+    let end = (start + limit as usize).min(local_all.len());
+    let page_rows = &local_all[start..end];
+    let has_more = end < local_all.len();
+
+    let mut items: Vec<SyncSummary<String>> = Vec::with_capacity(page_rows.len());
+    let mut estimated = 0usize;
+    for row in page_rows {
+        let summary = prompt_to_summary(row);
+        estimated = estimated.saturating_add(estimate_summary_wire_bytes(&summary));
+        if items.len() + 1 > MANIFEST_PAGE_ITEMS || estimated > MANIFEST_PAGE_BYTES {
+            return Err(RouteFail::BatchTooLarge(format!(
+                "manifest page 超过预算 items≤{MANIFEST_PAGE_ITEMS} bytes≤{MANIFEST_PAGE_BYTES}"
+            )));
+        }
+        items.push(summary);
+    }
+
+    let next_cursor = if has_more {
+        items.last().map(|s| encode_keyset_cursor(&s.id))
+    } else {
+        None
+    };
+
+    tracing::info!(
+        "sync/prompts/manifest-page: limit={} page={} has_more={}",
+        limit,
+        items.len(),
+        has_more
+    );
+
+    Ok(SyncManifestPage {
+        items,
+        next_cursor,
+    })
+}
+
+/// POST /api/sync/prompts/items：按请求 ID 顺序返回完整行与 missing_ids。
+///
+/// Business Logic: 客户端比较 manifest 后只拉需要的正文。
+/// Code Logic: 校验 ids → 逐个 get → 保序组装 + 估算响应字节。
+pub async fn prompt_items(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<PromptItemsReq>,
+) -> P2pResult<Json<PromptItemsResp>> {
+    let resp = prompt_items_impl(state.prompt_repo.as_ref(), req)
+        .await
+        .map_err(|e| e.into_p2p(&ctx, "prompts.items"))?;
+    Ok(Json(resp))
+}
+
+/// items 业务实现。
+async fn prompt_items_impl(
+    repo: &PromptRepo,
+    req: PromptItemsReq,
+) -> Result<PromptItemsResp, RouteFail> {
+    validate_id_list(&req.ids)?;
+
+    let mut items = Vec::new();
+    let mut missing_ids = Vec::new();
+    let mut estimated: usize = 0;
+
+    for id in &req.ids {
+        match repo.get(id).await? {
+            Some(row) => {
+                if row.content.len() > CONTENT_MAX_BYTES {
+                    return Err(RouteFail::ItemTooLarge(format!(
+                        "本地条目 content 超过 {CONTENT_MAX_BYTES} 字节"
+                    )));
+                }
+                let est = estimate_prompt_row_bytes(&row);
+                if est > PUSH_BATCH_BYTES {
+                    return Err(RouteFail::ItemTooLarge(
+                        "本地单条估算超过 4MiB 批上限".to_string(),
+                    ));
+                }
+                estimated = estimated.saturating_add(est);
+                if estimated > PUSH_BATCH_BYTES {
+                    return Err(RouteFail::BatchTooLarge(format!(
+                        "items 响应估算超过 {PUSH_BATCH_BYTES} 字节"
+                    )));
+                }
+                items.push(row);
+            }
+            None => missing_ids.push(id.clone()),
+        }
+    }
+
+    tracing::info!(
+        "sync/prompts/items: requested={} found={} missing={}",
+        req.ids.len(),
+        items.len(),
+        missing_ids.len()
+    );
+
+    Ok(PromptItemsResp { items, missing_ids })
+}
+
+/// POST /api/sync/prompts/push-batch：批量 merge + bulk_upsert。
+///
+/// Business Logic: 对端把本地领先/并发/远端缺失的 rows 分批推送；Task 2 仍走现有 bulk_upsert，
+///     Task 3 再换事务 ledger。client_request_id 本轮仅校验非空。
+///
+/// Code Logic: 校验 batch/id/content → merge → bulk_upsert → accepted。
+pub async fn prompt_push_batch(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<PromptPushBatchReq>,
+) -> P2pResult<Json<PromptPushBatchResp>> {
+    let accepted = prompt_push_batch_impl(state.prompt_repo.as_ref(), req)
+        .await
+        .map_err(|e| e.into_p2p(&ctx, "prompts.push_batch"))?;
+    Ok(Json(PromptPushBatchResp { accepted }))
+}
+
+/// push-batch 业务实现。
+async fn prompt_push_batch_impl(
+    repo: &PromptRepo,
+    req: PromptPushBatchReq,
+) -> Result<usize, RouteFail> {
+    if req.client_request_id.trim().is_empty() {
+        return Err(RouteFail::Validation(
+            "client_request_id 不能为空".to_string(),
+        ));
+    }
+    if req.items.len() > PUSH_BATCH_ITEMS {
+        return Err(RouteFail::BatchTooLarge(format!(
+            "push-batch 最多 {PUSH_BATCH_ITEMS} 条，收到 {}",
+            req.items.len()
+        )));
+    }
+
+    let mut estimated: usize = 0;
+    let mut seen = HashSet::with_capacity(req.items.len());
+    for item in &req.items {
+        validate_prompt_row(item)?;
+        if !seen.insert(item.id.as_str()) {
+            return Err(RouteFail::Validation("items 含重复 id".to_string()));
+        }
+        estimated = estimated.saturating_add(estimate_prompt_row_bytes(item));
+        if estimated > PUSH_BATCH_BYTES {
+            return Err(RouteFail::BatchTooLarge(format!(
+                "push-batch 估算超过 {PUSH_BATCH_BYTES} 字节"
+            )));
+        }
+    }
+
+    let mut to_upsert: Vec<PromptRow> = Vec::new();
+    for remote in req.items {
+        match repo.get(&remote.id).await? {
+            None => to_upsert.push(remote),
+            Some(local_row) => {
+                let merged = merge_prompt(&local_row, &remote);
+                if merged.vector_clock != local_row.vector_clock
+                    || merged.updated_at != local_row.updated_at
+                    || merged.content != local_row.content
+                    || merged.title != local_row.title
+                    || merged.deleted != local_row.deleted
+                {
+                    to_upsert.push(merged);
+                }
+            }
+        }
+    }
+
+    let accepted = to_upsert.len();
+    if !to_upsert.is_empty() {
+        repo.bulk_upsert(&to_upsert).await?;
+    }
+
+    tracing::info!(
+        "sync/prompts/push-batch: client_request_id 已收, accepted={}",
+        accepted
+    );
+    Ok(accepted)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::request_context::P2pRequestContext;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+
+    /// 构造内存 SQLite prompts 表与仓库。
+    async fn setup_repo() -> PromptRepo {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS prompts (\
+             id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL, \
+             tags TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, \
+             device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        PromptRepo::new(pool)
+    }
+
+    /// 构造测试 PromptRow。
+    fn sample_row(id: &str, content: &str, vc: u64) -> PromptRow {
+        let mut vector_clock = HashMap::new();
+        vector_clock.insert("d1".to_string(), vc);
+        PromptRow {
+            id: id.to_string(),
+            title: format!("t-{id}"),
+            content: content.to_string(),
+            tags: vec![],
+            created_at: "2026-07-14T00:00:00Z".to_string(),
+            updated_at: "2026-07-14T00:00:00Z".to_string(),
+            device_id: "d1".to_string(),
+            vector_clock,
+            deleted: false,
+        }
+    }
+
+    fn ctx() -> P2pRequestContext {
+        P2pRequestContext {
+            request_id: "req-prompt-test".to_string(),
+        }
+    }
+
+    fn assert_fail(fail: RouteFail, status: StatusCode, code: &str, retryable: bool) {
+        let p2p = fail.into_p2p(&ctx(), "prompts.test");
+        assert_eq!(p2p.status(), status);
+        assert_eq!(p2p.envelope().code, code);
+        assert_eq!(p2p.envelope().retryable, retryable);
+    }
+
+    #[test]
+    fn cursor_roundtrip() {
+        let encoded = encode_keyset_cursor("prompt-1");
+        assert_eq!(decode_keyset_cursor(&encoded).unwrap(), "prompt-1");
+        assert!(decode_keyset_cursor("!!!").is_err());
+    }
+
+    #[tokio::test]
+    async fn manifest_rejects_invalid_cursor() {
+        let repo = setup_repo().await;
+        let err = prompt_manifest_page_impl(
+            &repo,
+            PromptManifestPageReq {
+                cursor: Some("not-a-cursor".into()),
+                limit: Some(10),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_fail(err, StatusCode::BAD_REQUEST, CODE_INVALID_CURSOR, false);
+    }
+
+    #[tokio::test]
+    async fn manifest_pages_by_id_order_and_budget() {
+        let repo = setup_repo().await;
+        let mut batch = Vec::new();
+        for i in 0..3 {
+            batch.push(sample_row(&format!("id-{i:02}"), "c", 1));
+        }
+        repo.bulk_upsert(&batch).await.unwrap();
+
+        let page1 = prompt_manifest_page_impl(
+            &repo,
+            PromptManifestPageReq {
+                cursor: None,
+                limit: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(page1.items.len(), 2);
+        assert_eq!(page1.items[0].id, "id-00");
+        assert_eq!(page1.items[1].id, "id-01");
+        assert!(page1.next_cursor.is_some());
+
+        let page2 = prompt_manifest_page_impl(
+            &repo,
+            PromptManifestPageReq {
+                cursor: page1.next_cursor,
+                limit: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(page2.items.len(), 1);
+        assert_eq!(page2.items[0].id, "id-02");
+        assert!(page2.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn items_rejects_over_batch_limit() {
+        let repo = setup_repo().await;
+        let ids: Vec<String> = (0..=PUSH_BATCH_ITEMS)
+            .map(|i| format!("id-{i}"))
+            .collect();
+        let err = prompt_items_impl(&repo, PromptItemsReq { ids })
+            .await
+            .unwrap_err();
+        assert_fail(
+            err,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            CODE_BATCH_TOO_LARGE,
+            false,
+        );
+    }
+
+    #[tokio::test]
+    async fn items_returns_missing_and_found() {
+        let repo = setup_repo().await;
+        repo.bulk_upsert(&[sample_row("a", "body", 1)])
+            .await
+            .unwrap();
+        let resp = prompt_items_impl(
+            &repo,
+            PromptItemsReq {
+                ids: vec!["a".into(), "missing".into()],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].id, "a");
+        assert_eq!(resp.missing_ids, vec!["missing".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn push_batch_rejects_empty_client_request_id() {
+        let repo = setup_repo().await;
+        let err = prompt_push_batch_impl(
+            &repo,
+            PromptPushBatchReq {
+                items: vec![sample_row("a", "x", 1)],
+                client_request_id: "  ".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        match err {
+            RouteFail::Validation(m) => assert!(m.contains("client_request_id")),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn push_batch_accepts_new_items() {
+        let repo = setup_repo().await;
+        let accepted = prompt_push_batch_impl(
+            &repo,
+            PromptPushBatchReq {
+                items: vec![sample_row("a", "x", 1), sample_row("b", "y", 1)],
+                client_request_id: "req-1".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted, 2);
+        assert!(repo.get("a").await.unwrap().is_some());
+        assert!(repo.get("b").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn push_batch_rejects_too_many_items() {
+        let repo = setup_repo().await;
+        let items: Vec<PromptRow> = (0..=PUSH_BATCH_ITEMS)
+            .map(|i| sample_row(&format!("id-{i}"), "c", 1))
+            .collect();
+        let err = prompt_push_batch_impl(
+            &repo,
+            PromptPushBatchReq {
+                items,
+                client_request_id: "req-2".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_fail(
+            err,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            CODE_BATCH_TOO_LARGE,
+            false,
+        );
+    }
 }

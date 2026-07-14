@@ -472,6 +472,22 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         // P2P 同步协议（M4）：对端调 pull/push，字段对照 Python protocol.py
         .route("/api/sync/pull", post(sync::sync_pull))
         .route("/api/sync/push", post(sync::sync_push))
+        // Prompt v2 有界同步（Task 2；capability sync.manifest.v2 待 Task 3 原子宣告）
+        .route(
+            "/api/sync/prompts/manifest-page",
+            post(sync::prompt_manifest_page)
+                .layer(DefaultBodyLimit::max(sync::PROMPT_SYNC_ROUTE_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/api/sync/prompts/items",
+            post(sync::prompt_items)
+                .layer(DefaultBodyLimit::max(sync::PROMPT_SYNC_ROUTE_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/api/sync/prompts/push-batch",
+            post(sync::prompt_push_batch)
+                .layer(DefaultBodyLimit::max(sync::PROMPT_SYNC_ROUTE_BODY_LIMIT_BYTES)),
+        )
         // P2P CLAUDE.md 主动推送协议（单例 0/1 条；push 覆盖为发送方版本）
         .route(
             "/api/sync/claude_md/pull",
@@ -522,7 +538,26 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/ssh-target/sync/push",
             post(ssh_target_sync::ssh_target_sync_push),
         )
-        // 速记本同步协议（单例文本）：scratchpad/sync/{pull,push}
+        // SSH v2 有界同步（Task 2；capability sync.manifest.v2 待 Task 3）
+        .route(
+            "/api/ssh-target/sync/manifest-page",
+            post(ssh_target_sync::ssh_manifest_page).layer(DefaultBodyLimit::max(
+                ssh_target_sync::SSH_SYNC_ROUTE_BODY_LIMIT_BYTES,
+            )),
+        )
+        .route(
+            "/api/ssh-target/sync/items",
+            post(ssh_target_sync::ssh_items).layer(DefaultBodyLimit::max(
+                ssh_target_sync::SSH_SYNC_ROUTE_BODY_LIMIT_BYTES,
+            )),
+        )
+        .route(
+            "/api/ssh-target/sync/push-batch",
+            post(ssh_target_sync::ssh_push_batch).layer(DefaultBodyLimit::max(
+                ssh_target_sync::SSH_SYNC_ROUTE_BODY_LIMIT_BYTES,
+            )),
+        )
+        // 速记本同步协议：scratchpad/sync/{pull,push}
         .route(
             "/api/scratchpad/sync/pull",
             post(scratchpad_sync::scratchpad_pull),
@@ -530,6 +565,25 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/scratchpad/sync/push",
             post(scratchpad_sync::scratchpad_push),
+        )
+        // Scratchpad v2 有界同步（Task 2；capability sync.manifest.v2 待 Task 3）
+        .route(
+            "/api/scratchpad/sync/manifest-page",
+            post(scratchpad_sync::scratchpad_manifest_page).layer(DefaultBodyLimit::max(
+                scratchpad_sync::SCRATCHPAD_SYNC_ROUTE_BODY_LIMIT_BYTES,
+            )),
+        )
+        .route(
+            "/api/scratchpad/sync/items",
+            post(scratchpad_sync::scratchpad_items).layer(DefaultBodyLimit::max(
+                scratchpad_sync::SCRATCHPAD_SYNC_ROUTE_BODY_LIMIT_BYTES,
+            )),
+        )
+        .route(
+            "/api/scratchpad/sync/push-batch",
+            post(scratchpad_sync::scratchpad_push_batch).layer(DefaultBodyLimit::max(
+                scratchpad_sync::SCRATCHPAD_SYNC_ROUTE_BODY_LIMIT_BYTES,
+            )),
         )
         // Claude Code assets 选择性拉取：inventory + 按 selectors 生成 zip bundle
         .route(
