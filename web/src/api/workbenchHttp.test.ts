@@ -1,5 +1,13 @@
-import { describe, test } from 'vitest';
-import { createHttpOrchestratorClientRequestId, httpOrchestratorTransport, httpWorkbenchTransport } from './workbenchHttp';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import {
+  createHttpOrchestratorClientRequestId,
+  getJson,
+  httpOrchestratorTransport,
+  httpWorkbenchTransport,
+  postJson,
+  workbenchHttp,
+} from './workbenchHttp';
+import { OrchestratorRuntimeTransportError } from './orchestratorRuntimeTransportError';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -489,5 +497,187 @@ describe('workbenchHttp createView idempotency', () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+describe('workbenchHttp request policy transport', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   mutation 超时只能 unknown 且禁止自动重放，否则会重复 commit/push。
+   *
+   * Code Logic（这个测试做什么）:
+   *   hang 的 fetch + 短 timeoutMs；断言 unknown envelope 且 fetch 只调用 1 次。
+   */
+  test('mutation wrapper maps timeout to typed unknown and does not replay', async () => {
+    const mockFetch = vi.fn(() => new Promise<Response>(() => undefined));
+    vi.stubGlobal('fetch', mockFetch);
+
+    await expect(
+      workbenchHttp.git.commit({
+        worktreeId: 'wt-1',
+        message: null,
+        clientOperationId: 'op-1',
+        policy: { kind: 'mutation', timeoutMs: 40 },
+      }),
+    ).resolves.toMatchObject({
+      kind: 'unknown',
+      clientOperationId: 'op-1',
+      transportClass: 'timeout',
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   query overall 预算必须覆盖 body decode，否则慢 JSON 会永久挂起。
+   *
+   * Code Logic（这个测试做什么）:
+   *   fetch 立即返回 ok，但 json() 永不 resolve；短 timeout 断言 timeout kind。
+   */
+  test('query overall timeout covers body decode', async () => {
+    const mockFetch = vi.fn(async () => {
+      return {
+        ok: true,
+        json: () => new Promise(() => undefined),
+      } as Response;
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await expect(
+      getJson('/api/health', { policy: { kind: 'query', timeoutMs: 40 } }),
+    ).rejects.toMatchObject({
+      kind: 'timeout',
+    });
+    // query 对 timeout 可有限重试（最多 1+2），但每次 attempt 的 overall 预算都覆盖 decode。
+    expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(mockFetch.mock.calls.length).toBeLessThanOrEqual(3);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   调用方 abort 必须立刻停止且不得进入 query 重试。
+   *
+   * Code Logic（这个测试做什么）:
+   *   外部 AbortController abort 后 hang fetch；断言 callerAbort 且只 1 次 fetch。
+   */
+  test('caller abort does not retry query', async () => {
+    const controller = new AbortController();
+    const mockFetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted.', 'AbortError'));
+        });
+      });
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const pending = postJson(
+      '/api/orchestrator/tasks/list',
+      { projectId: 'p1' },
+      { policy: { kind: 'query', signal: controller.signal } },
+    );
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ kind: 'callerAbort' });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   只读 query 在可见页面可有限重试；mutation 不得自动重试。
+   *
+   * Code Logic（这个测试做什么）:
+   *   network 失败两次后成功；fake timer 推进退避；mutation 一次 network 失败即 unknown。
+   */
+  test('query retries network failures while visible; mutation does not', async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(globalThis, 'document', {
+      configurable: true,
+      value: { visibilityState: 'visible' },
+    });
+
+    let queryAttempts = 0;
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/tasks/list')) {
+        queryAttempts += 1;
+        if (queryAttempts < 3) {
+          throw new TypeError('Failed to fetch');
+        }
+        return {
+          ok: true,
+          json: async () => ({ tasks: [] }),
+        } as Response;
+      }
+      // mutation hang path not used here
+      throw new TypeError('Failed to fetch');
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const listPromise = postJson(
+      '/api/orchestrator/tasks/list',
+      { projectId: 'p1' },
+      { policy: { kind: 'query' } },
+    );
+    await vi.runAllTimersAsync();
+    await expect(listPromise).resolves.toEqual({ tasks: [] });
+    expect(queryAttempts).toBe(3);
+
+    const mut = workbenchHttp.git.push({
+      worktreeId: 'wt-1',
+      clientOperationId: 'op-push',
+    });
+    await expect(mut).resolves.toMatchObject({
+      kind: 'unknown',
+      clientOperationId: 'op-push',
+      transportClass: 'network',
+    });
+    // list 3 + push 1
+    expect(mockFetch.mock.calls.filter((c) => String(c[0]).includes('/push')).length).toBe(1);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   protocol/decode 是确定性失败，不得伪装 unknown envelope。
+   *
+   * Code Logic（这个测试做什么）:
+   *   非 2xx 与非法 envelope 分别抛 protocol/decode。
+   */
+  test('protocol and decode errors remain errors for mutations', async () => {
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/commit')) {
+        return {
+          ok: false,
+          status: 409,
+          statusText: 'Conflict',
+          text: async () => JSON.stringify({ error: '冲突' }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({ kind: 'nope' }),
+      } as Response;
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await expect(
+      workbenchHttp.git.commit({
+        worktreeId: 'wt',
+        clientOperationId: 'op-c',
+      }),
+    ).rejects.toBeInstanceOf(OrchestratorRuntimeTransportError);
+
+    await expect(
+      workbenchHttp.git.remove({
+        worktreeId: 'wt',
+        clientOperationId: 'op-r',
+      }),
+    ).rejects.toMatchObject({ kind: 'decode' });
   });
 });

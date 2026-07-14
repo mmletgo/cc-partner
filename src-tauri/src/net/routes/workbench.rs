@@ -75,9 +75,14 @@ use axum::http::header;
 use axum::http::Request;
 use axum::response::Response;
 use axum::Json;
+use chrono::Utc;
+use futures_util::stream;
 use serde_json::Value;
 use std::convert::Infallible;
 use std::path::Path;
+use std::time::Duration;
+use tokio::time::interval;
+use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
@@ -874,16 +879,31 @@ pub async fn delete_workbench_path(
     Ok(Json(result))
 }
 
+/// Workbench 事件流 heartbeat 间隔（秒）。
+const WORKBENCH_EVENT_HEARTBEAT_INTERVAL_SECS: u64 = 15;
+
+/// 构造 typed heartbeat NDJSON 行。
+///
+/// Business Logic（为什么需要这个函数）:
+///     移动端半开连接需要周期性 heartbeat 重置 client watchdog；格式必须稳定可测。
+///
+/// Code Logic（这个函数做什么）:
+///     输出 `{"type":"heartbeat","sentAt":"<RFC3339>"}\n`，sentAt 为传入时间戳。
+pub fn workbench_event_heartbeat_line(sent_at: &str) -> String {
+    format!(r#"{{"type":"heartbeat","sentAt":"{sent_at}"}}"#) + "\n"
+}
+
 /// 订阅本机 Workbench 远端事件流。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     其他局域网设备需要持续接收本机 terminal 输出、终端状态和 merge 进度，用于 remote shortcut UI。
+///     其他局域网设备需要持续接收本机 terminal 输出、终端状态和 merge 进度，用于 remote shortcut UI；
+///     同时每 15 秒发送 typed heartbeat，防止半开连接卡死。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 AppState broadcast channel 订阅事件，序列化为 NDJSON，通过 axum streaming body 输出。
+///     从 AppState broadcast channel 订阅事件，与 interval heartbeat 合并为 NDJSON stream。
 pub async fn workbench_events(State(state): State<AppState>) -> Response<Body> {
     let receiver = state.workbench_remote_events.subscribe();
-    let stream = BroadcastStream::new(receiver).filter_map(|event| match event {
+    let event_stream = BroadcastStream::new(receiver).filter_map(|event| match event {
         Ok(event) => serde_json::to_string(&event)
             .ok()
             .map(|line| Ok::<String, Infallible>(format!("{line}\n"))),
@@ -892,7 +912,17 @@ pub async fn workbench_events(State(state): State<AppState>) -> Response<Body> {
             None
         }
     });
-    let mut response = Response::new(Body::from_stream(stream));
+
+    // 首个 tick 在 interval 后触发，避免连接瞬间立刻发 heartbeat 掩盖业务帧。
+    let mut ticker = interval(Duration::from_secs(WORKBENCH_EVENT_HEARTBEAT_INTERVAL_SECS));
+    ticker.tick().await;
+    let heartbeat_stream = IntervalStream::new(ticker).map(|_| {
+        let sent_at = Utc::now().to_rfc3339();
+        Ok::<String, Infallible>(workbench_event_heartbeat_line(&sent_at))
+    });
+
+    let merged = stream::select(event_stream, heartbeat_stream);
+    let mut response = Response::new(Body::from_stream(merged));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("application/x-ndjson"),
@@ -1919,6 +1949,23 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Mobile 半开连接依赖 typed heartbeat；wire 形状漂移会导致 client watchdog 永不重置。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 heartbeat 行，断言是以换行结尾的 NDJSON，且 JSON type/sentAt 字段正确。
+    #[test]
+    fn workbench_event_heartbeat_line_is_typed_ndjson() {
+        let sent_at = "2026-07-15T00:00:00+00:00";
+        let line = workbench_event_heartbeat_line(sent_at);
+        assert!(line.ends_with('\n'), "heartbeat must be NDJSON line");
+        let value: serde_json::Value =
+            serde_json::from_str(line.trim()).expect("heartbeat line must be valid JSON");
+        assert_eq!(value["type"], "heartbeat");
+        assert_eq!(value["sentAt"], sent_at);
+        assert!(value.get("payload").is_none(), "heartbeat has no payload wrapper");
     }
 
     /// Business Logic（为什么需要这个测试）:
