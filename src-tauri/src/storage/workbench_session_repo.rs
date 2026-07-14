@@ -84,6 +84,27 @@ impl WorkbenchSessionRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     Workbench 启动摘要需要全局最近活跃终端，且不能按项目循环 N+1 查询。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     单 SQL：`status = 'running' ORDER BY started_at DESC LIMIT ?`；limit 裁剪到 0..=5。
+    pub async fn list_recent_active(&self, limit: i64) -> Result<Vec<WorkbenchSessionRow>, AppError> {
+        let limit = limit.clamp(0, 5);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT id, project_id, worktree_id, name, command, cwd, status, cols, rows, started_at, exited_at, \
+             exit_code, backend, backend_id, backend_window_id, created_at, updated_at \
+             FROM workbench_sessions WHERE status = 'running' ORDER BY started_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_session).collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     Workbench 页面进入项目时，需要列出该项目所有未关闭的历史终端 tab。
     ///
     /// Code Logic（这个函数做什么）:
@@ -477,5 +498,29 @@ mod tests {
 
         assert!(repo.get("s1").await.unwrap().is_none());
         assert!(repo.get("s2").await.unwrap().is_some());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     workbench_launch_summary 需要有界活跃会话，禁止全表扫描后客户端截断。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 >5 条 running 与 1 条 exited，断言 list_recent_active(5) 仅返回 5 条最近 running。
+    #[tokio::test]
+    async fn workbench_launch_summary_list_recent_active_is_bounded() {
+        let repo = setup_repo().await;
+        for i in 0..7 {
+            let mut r = row(&format!("s{i}"), "p1", &format!("2026-06-24T00:0{i}:00Z"));
+            r.status = "running".to_string();
+            repo.upsert(&r).await.unwrap();
+        }
+        let mut exited = row("sx", "p1", "2026-06-24T00:09:00Z");
+        exited.status = "exited".to_string();
+        repo.upsert(&exited).await.unwrap();
+
+        let listed = repo.list_recent_active(5).await.unwrap();
+        assert_eq!(listed.len(), 5);
+        assert!(listed.iter().all(|s| s.status == "running"));
+        assert_eq!(listed[0].id, "s6");
+        assert!(!listed.iter().any(|s| s.id == "sx"));
     }
 }

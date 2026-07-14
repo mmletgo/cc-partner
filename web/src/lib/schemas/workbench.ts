@@ -5,7 +5,8 @@
  *   工作台关键 DTO 损坏不得覆盖 active project/worktree 状态或文件保存基线。
  *
  * Code Logic（这个模块做什么）:
- *   解码 Project/Worktree/Session/PathInfo/SaveTextResult/FileNode/OpenFile 关键结构。
+ *   解码 Project/Worktree/Session/PathInfo/SaveTextResult/FileNode/OpenFile 关键结构，
+ *   以及「继续工作」启动摘要 WorkbenchLaunchSummary 的 fail-closed decoder。
  */
 
 import type {
@@ -30,6 +31,15 @@ import type {
   WorkbenchSqlitePreview,
   WorkbenchTextContent,
   WorkbenchWorktree,
+} from '../types/workbench';
+import type {
+  WorkbenchLaunchDevice,
+  WorkbenchLaunchProject,
+  WorkbenchLaunchSession,
+  WorkbenchLaunchSummaryWire,
+  WorkbenchLaunchTask,
+  WorkbenchLaunchTransfer,
+  WorkbenchLaunchSectionWire,
 } from '../types/workbench';
 import {
   arrayDecoder,
@@ -433,5 +443,128 @@ export const workbenchOpenFileDecoder: Decoder<WorkbenchOpenFile> = objectDecode
     sqlite: nullableDecoder(workbenchSqlitePreviewDecoder),
     truncated: booleanDecoder,
     notice: nullableDecoder(stringDecoder),
+  },
+);
+
+/* ---------------------------------------------------------------------------
+ * Workbench launch summary（继续工作启动摘要）
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   启动摘要 section 是 ready|error 联合；损坏 payload 不得进入 launch surface。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   tag=kind 联合；ready 用 itemDecoder 解 value 数组；error 仅 message。
+ */
+export function workbenchLaunchSectionDecoder<T>(
+  name: string,
+  itemDecoder: Decoder<T>,
+): Decoder<WorkbenchLaunchSectionWire<T>> {
+  return unionDecoder<WorkbenchLaunchSectionWire<T>>(name, [
+    objectDecoder(`${name}Ready`, {
+      kind: literalDecoder('ready'),
+      value: arrayDecoder(itemDecoder),
+    }),
+    objectDecoder(`${name}Error`, {
+      kind: literalDecoder('error'),
+      message: stringDecoder,
+    }),
+  ]);
+}
+
+const workbenchLaunchProjectItemDecoder: Decoder<WorkbenchLaunchProject> = objectDecoder(
+  'WorkbenchLaunchProject',
+  {
+    id: stringDecoder,
+    name: stringDecoder,
+    kind: stringDecoder,
+    deviceId: stringDecoder,
+    deviceName: stringDecoder,
+    path: stringDecoder,
+    lastOpenedAt: stringDecoder,
+  },
+);
+
+const workbenchLaunchSessionItemDecoder: Decoder<WorkbenchLaunchSession> = objectDecoder(
+  'WorkbenchLaunchSession',
+  {
+    id: stringDecoder,
+    projectId: stringDecoder,
+    projectName: stringDecoder,
+    worktreeId: optionalDecoder(nullableDecoder(stringDecoder)),
+    name: stringDecoder,
+    status: stringDecoder,
+    startedAt: stringDecoder,
+  },
+);
+
+const workbenchLaunchTaskItemDecoder: Decoder<WorkbenchLaunchTask> = objectDecoder(
+  'WorkbenchLaunchTask',
+  {
+    id: stringDecoder,
+    projectId: stringDecoder,
+    projectName: optionalDecoder(nullableDecoder(stringDecoder)),
+    title: stringDecoder,
+    status: stringDecoder,
+    workflowState: stringDecoder,
+    runState: stringDecoder,
+    updatedAt: stringDecoder,
+  },
+);
+
+const workbenchLaunchTransferItemDecoder: Decoder<WorkbenchLaunchTransfer> = objectDecoder(
+  'WorkbenchLaunchTransfer',
+  {
+    id: stringDecoder,
+    filename: stringDecoder,
+    status: stringDecoder,
+    direction: stringDecoder,
+    progress: optionalDecoder(nullableDecoder(numberDecoder)),
+    size: optionalDecoder(nullableDecoder(numberDecoder)),
+    updatedAt: optionalDecoder(nullableDecoder(stringDecoder)),
+    createdAt: optionalDecoder(nullableDecoder(stringDecoder)),
+  },
+);
+
+const workbenchLaunchDeviceItemDecoder: Decoder<WorkbenchLaunchDevice> = objectDecoder(
+  'WorkbenchLaunchDevice',
+  {
+    id: stringDecoder,
+    name: stringDecoder,
+    online: booleanDecoder,
+    lastSeen: optionalDecoder(nullableDecoder(stringDecoder)),
+    address: optionalDecoder(nullableDecoder(stringDecoder)),
+  },
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   get_workbench_launch_summary 是启动页唯一权威只读源；fail-closed 防止假指标。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码五 section wire + generatedAt。
+ */
+export const workbenchLaunchSummaryDecoder: Decoder<WorkbenchLaunchSummaryWire> = objectDecoder(
+  'WorkbenchLaunchSummary',
+  {
+    projects: workbenchLaunchSectionDecoder(
+      'WorkbenchLaunchProjects',
+      workbenchLaunchProjectItemDecoder,
+    ),
+    sessions: workbenchLaunchSectionDecoder(
+      'WorkbenchLaunchSessions',
+      workbenchLaunchSessionItemDecoder,
+    ),
+    tasks: workbenchLaunchSectionDecoder('WorkbenchLaunchTasks', workbenchLaunchTaskItemDecoder),
+    transfers: workbenchLaunchSectionDecoder(
+      'WorkbenchLaunchTransfers',
+      workbenchLaunchTransferItemDecoder,
+    ),
+    devices: workbenchLaunchSectionDecoder(
+      'WorkbenchLaunchDevices',
+      workbenchLaunchDeviceItemDecoder,
+    ),
+    generatedAt: stringDecoder,
   },
 );

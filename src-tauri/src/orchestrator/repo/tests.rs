@@ -1858,6 +1858,47 @@ async fn list_tasks_none_returns_global_list() {
     assert!(listed.iter().any(|task| task.id == second.id));
 }
 
+/// Business Logic（为什么需要这个测试）:
+///     workbench_launch_summary 任务区需要有界全局查询，且不得循环按项目拉任务。
+///
+/// Code Logic（这个测试做什么）:
+///     插入 draft/queued/running/blocked/humanReview 与多余 running；list_launch_tasks(5)
+///     只返回 interesting 且最多 5 条。
+#[tokio::test]
+async fn workbench_launch_summary_list_launch_tasks_bounded_no_n_plus_one() {
+    let (_pool, repo) = setup_repo().await;
+    let mut draft = task_row("t-draft", "p1", OrchestratorTaskStatus::Draft);
+    draft.updated_at = "2026-07-05T00:00:00Z".into();
+    let mut queued = task_row("t-queued", "p1", OrchestratorTaskStatus::Queued);
+    queued.updated_at = "2026-07-05T00:01:00Z".into();
+    let mut running = task_row("t-run", "p1", OrchestratorTaskStatus::Running);
+    running.updated_at = "2026-07-05T00:05:00Z".into();
+    let mut blocked = task_row("t-block", "p2", OrchestratorTaskStatus::Blocked);
+    blocked.updated_at = "2026-07-05T00:04:00Z".into();
+    let mut human = task_row("t-human", "p2", OrchestratorTaskStatus::Done);
+    human.workflow_state = OrchestratorWorkflowState::HumanReview;
+    human.updated_at = "2026-07-05T00:03:00Z".into();
+    for i in 0..5 {
+        let mut extra = task_row(
+            &format!("t-extra-{i}"),
+            "p3",
+            OrchestratorTaskStatus::Running,
+        );
+        extra.updated_at = format!("2026-07-05T00:1{i}:00Z");
+        repo.create_task(&extra).await.unwrap();
+    }
+    repo.create_task(&draft).await.unwrap();
+    repo.create_task(&queued).await.unwrap();
+    repo.create_task(&running).await.unwrap();
+    repo.create_task(&blocked).await.unwrap();
+    repo.create_task(&human).await.unwrap();
+
+    let listed = repo.list_launch_tasks(5).await.unwrap();
+    assert_eq!(listed.len(), 5);
+    assert!(!listed.iter().any(|t| t.id == "t-draft" || t.id == "t-queued"));
+    assert!(listed.iter().any(|t| t.id == "t-extra-4"));
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     命令层读取不存在任务时应得到项目统一 not-found 错误，而不是空 Row 或 panic。
 ///

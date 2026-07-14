@@ -7,10 +7,12 @@
 //! Code Logic（这个模块做什么）:
 //!     提供 `BackendControlClient`：安全查询允许在连接失败时一次性刷新 control file；
 //!     mutation 经 `send_once` 只发送一次，响应不确定时绝不自动重放。
+//!     查询含 status / get-config / workbench-launch-summary / orchestrator snapshot / events / backup list；
 //!     截图快捷键走两阶段补偿（CAS 预检 → OS replace → owner durable commit → 响应丢失对账）。
 
 use crate::backend::authority::{classify_control_descriptor, CONTROL_SCHEMA_VERSION};
 use crate::backend::control::{self, BackendControlFile};
+use crate::backend::control_api::WorkbenchLaunchSummaryDto;
 use crate::backend::event_bus::{BackendRuntimeCursor, RuntimeRelayMessage};
 use crate::commands::orchestrator::OrchestratorRuntimeSnapshotDto;
 use crate::config_runtime::{
@@ -385,6 +387,23 @@ impl BackendControlClient {
     pub async fn status(&self) -> Result<RuntimeOwnerStatus, AppError> {
         self.query_with_optional_refresh(
             "status",
+            &ControlAuthBody {
+                control_token: self.control_token.clone(),
+            },
+        )
+        .await
+    }
+
+    /// 查询 Workbench 启动摘要（五段独立 section outcomes）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GUI Continue Working 表面必须读 sidecar 权威摘要，不得扫本机空库。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `workbench-launch-summary`；查询路径允许一次 control-file 刷新后重试。
+    pub async fn workbench_launch_summary(&self) -> Result<WorkbenchLaunchSummaryDto, AppError> {
+        self.query_with_optional_refresh(
+            "workbench-launch-summary",
             &ControlAuthBody {
                 control_token: self.control_token.clone(),
             },

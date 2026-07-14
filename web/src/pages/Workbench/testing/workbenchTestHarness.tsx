@@ -595,6 +595,15 @@ export function buildDefaultInvokeHandler(data: {
 
   return (call) => {
     switch (call.cmd) {
+      case 'get_workbench_launch_summary':
+        return {
+          projects: { kind: 'ready', value: [] },
+          sessions: { kind: 'ready', value: [] },
+          tasks: { kind: 'ready', value: [] },
+          transfers: { kind: 'ready', value: [] },
+          devices: { kind: 'ready', value: [] },
+          generatedAt: '2026-07-14T00:00:00.000Z',
+        };
       case 'list_workbench_projects':
         return projects;
       case 'list_workbench_worktrees':
@@ -740,7 +749,9 @@ export function buildProjectsContextValue(
   overrides: Partial<WorkbenchProjectsContextValue> = {},
 ): WorkbenchProjectsContextValue {
   const projects = data.projects ?? [];
-  const activeProjectId = data.activeProjectId ?? projects[0]?.id ?? null;
+  // 显式传 null 表示「有项目但未选中」启动表面，不能用 ?? 回落到 projects[0]。
+  const activeProjectId =
+    data.activeProjectId !== undefined ? data.activeProjectId : projects[0]?.id ?? null;
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
   return {
     projects,

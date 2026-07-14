@@ -51,19 +51,20 @@ pub use git::{
 };
 
 pub use projects::{
-    __cmd__add_workbench_project, __cmd__get_workbench_remote_path_info,
-    __cmd__list_workbench_projects, __cmd__list_workbench_remote_dir,
-    __cmd__list_workbench_remote_roots, __cmd__open_workbench_remote_project,
-    __cmd__remove_workbench_project, __cmd__touch_workbench_project,
-    __tauri_command_name_add_workbench_project,
+    __cmd__add_workbench_project, __cmd__get_workbench_launch_summary,
+    __cmd__get_workbench_remote_path_info, __cmd__list_workbench_projects,
+    __cmd__list_workbench_remote_dir, __cmd__list_workbench_remote_roots,
+    __cmd__open_workbench_remote_project, __cmd__remove_workbench_project,
+    __cmd__touch_workbench_project, __tauri_command_name_add_workbench_project,
+    __tauri_command_name_get_workbench_launch_summary,
     __tauri_command_name_get_workbench_remote_path_info,
     __tauri_command_name_list_workbench_projects, __tauri_command_name_list_workbench_remote_dir,
     __tauri_command_name_list_workbench_remote_roots,
     __tauri_command_name_open_workbench_remote_project,
     __tauri_command_name_remove_workbench_project, __tauri_command_name_touch_workbench_project,
-    add_workbench_project, get_workbench_remote_path_info, list_workbench_projects,
-    list_workbench_remote_dir, list_workbench_remote_roots, open_workbench_remote_project,
-    remove_workbench_project, touch_workbench_project,
+    add_workbench_project, get_workbench_launch_summary, get_workbench_remote_path_info,
+    list_workbench_projects, list_workbench_remote_dir, list_workbench_remote_roots,
+    open_workbench_remote_project, remove_workbench_project, touch_workbench_project,
 };
 
 pub use sessions::{

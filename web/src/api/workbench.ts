@@ -14,6 +14,7 @@ import { invoke, invokeDecoded } from './client';
 import { nullableDecoder } from '@/lib/runtimeSchema';
 import {
   workbenchFileNodesDecoder,
+  workbenchLaunchSummaryDecoder,
   workbenchMergeResultDecoder,
   workbenchMutationEnvelopeDecoder,
   workbenchMutationOperationDecoder,
@@ -47,6 +48,7 @@ import type {
   WorkbenchSqlitePreview,
   WorkbenchWorktree,
 } from '@/lib/types';
+import type { WorkbenchLaunchSummaryWire } from '@/lib/types';
 
 interface WorkbenchTerminalSize {
   cols: number;
@@ -73,6 +75,16 @@ export const workbenchApi = {
     touch: (projectId: string) =>
       invokeDecoded('touch_workbench_project', { projectId }, workbenchProjectDecoder),
   },
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   「继续工作」启动页需要有界只读摘要；section 失败彼此隔离，不得触发 mutation。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded get_workbench_launch_summary → WorkbenchLaunchSummaryWire。
+   */
+  getLaunchSummary: (): Promise<WorkbenchLaunchSummaryWire> =>
+    invokeDecoded('get_workbench_launch_summary', undefined, workbenchLaunchSummaryDecoder),
 
   remote: {
     /** 列出指定局域网设备允许浏览的 Workbench 根目录。 */

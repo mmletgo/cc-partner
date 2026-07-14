@@ -1,12 +1,14 @@
 /**
- * Workbench 项目域 controller —— 远端离线状态机 + 跨项目请求序列守卫 + 项目级 deep link 选择。
+ * Workbench 项目域 controller —— 远端离线状态机 + 跨项目请求序列守卫 + 项目级 deep link 选择
+ * + 「继续工作」启动摘要（有项目未选中时）。
  *
  * Business Logic（为什么需要这个 controller）:
  *   Workbench 在加载 worktrees / sessions / files / git history 时，会发起多个针对当前 active project 的
  *   异步请求。后端可能返回“远端设备不在线”业务错误，此时页面必须进入只读态阻止用户继续点击必然失败的
  *   远端写操作；远端恢复后下一次成功读请求要清除只读态。同时项目切换瞬间旧响应不能再回写——必须以最新
- *   active project 为准。这个 controller 把这些跨多个加载函数共享的“当前项目守卫 + 离线状态”集中持有，
- *   让 Workbench.tsx 只负责调度，不再自管这些细粒度状态。
+ *   active project 为准。
+ *   另外当 projects 已有但未选中 active 时，需要拉取有界 launch summary；零项目与已选中项目不得请求。
+ *   该状态并入本 controller，避免引入第八个页面 controller。
  *
  * Code Logic（这个 controller 做什么）:
  *   - 持有 `remoteOfflineProjectId` 单一权威状态；对外暴露 `remoteProjectOffline` / `remoteWriteDisabled`。
@@ -15,16 +17,29 @@
  *   - `markRequestSuccess(id)`：仅当 id 等于当前记录的 offline projectId 时清除（避免误清其他项目）。
  *   - `selectProjectFromDeepLink(id)`：从 projects 中找到目标项目并触发 selectProject；返回是否命中。
  *   - 在 activeProjectId 变化时通过 queueMicrotask 重置 offline state，保持与原 Workbench 重置顺序一致。
+ *   - 持有 `launchSummary` 五 section 资源态；仅 `projects.length > 0 && !activeProjectId` 时 fetch，
+ *     可见时 ≤15s 轮询；unmount/上下文切换用 sequence + AbortController 语义丢弃；整次失败 mark stale。
  *
  * 不复制邻接 controller 状态：worktree / session / file / application 状态仍归 Workbench.tsx 各自所有。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { workbenchApi } from '@/api/workbench';
+import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import {
   isRemoteWorkbenchOfflineError,
   isRemoteWorkbenchProjectOffline,
 } from '@/lib/workbenchRemoteProjects';
 import type { WorkbenchProject } from '@/lib/types';
+import {
+  createInitialLaunchSummaryState,
+  markLaunchSummaryStaleOnFailure,
+  reduceWorkbenchLaunchResults,
+  type WorkbenchLaunchSummaryState,
+} from '../workbenchLaunchState';
+
+/** launch summary 可见轮询上限（ms），≤15s。 */
+export const WORKBENCH_LAUNCH_SUMMARY_POLL_MS = 15_000;
 
 /**
  * controller 输入：窄 API + 回调，避免吞并 Projects context。
@@ -51,6 +66,8 @@ export interface UseWorkbenchProjectControllerParams {
  *   - markRequestFailure(id, error)：远端读请求失败时调用，按需把当前项目置为离线。
  *   - markRequestSuccess(id)：远端读请求成功时调用，按需清除离线状态。
  *   - selectProjectFromDeepLink(id)：从 deep link 选项目，返回是否命中；命中且未激活时触发 selectProject。
+ *   - launchSummary：五 section 独立资源态 + generatedAt；仅 launch 模式有意义。
+ *   - refreshLaunchSummary：手动刷新启动摘要（失败保留 stale）。
  */
 export interface WorkbenchProjectControllerResult {
   remoteProjectOffline: boolean;
@@ -59,6 +76,21 @@ export interface WorkbenchProjectControllerResult {
   markRequestFailure: (projectId: string, error: unknown) => void;
   markRequestSuccess: (projectId: string) => void;
   selectProjectFromDeepLink: (projectId: string) => Promise<boolean>;
+  launchSummary: WorkbenchLaunchSummaryState;
+  refreshLaunchSummary: () => Promise<void>;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   invoke 失败时需要人类可读 message 写入 error/stale 态。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从 unknown 提取 Error.message / string，否则 fallback。
+ */
+function launchErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === 'string' && error) return error;
+  return fallback;
 }
 
 /**
@@ -69,7 +101,8 @@ export interface WorkbenchProjectControllerResult {
  *   1. 持有 remoteOfflineProjectId state；
  *   2. 用 ref 跟踪 activeProjectId，让异步回调读到最新值；
  *   3. 注册 activeProjectId 变化的 queueMicrotask 重置副作用（与 Workbench 原重置顺序一致）；
- *   4. 暴露稳定的操作函数（useCallback + ref 输入），便于 Workbench 在多个 load 函数里复用。
+ *   4. 在有项目未选中时拉取/轮询 launch summary，失败 mark stale；
+ *   5. 暴露稳定的操作函数（useCallback + ref 输入），便于 Workbench 在多个 load 函数里复用。
  */
 export function useWorkbenchProjectController(
   params: UseWorkbenchProjectControllerParams,
@@ -77,6 +110,9 @@ export function useWorkbenchProjectController(
   const { activeProject, activeProjectId, projects, selectProject } = params;
 
   const [remoteOfflineProjectId, setRemoteOfflineProjectId] = useState<string | null>(null);
+  const [launchSummary, setLaunchSummary] = useState<WorkbenchLaunchSummaryState>(
+    createInitialLaunchSummaryState,
+  );
 
   // Business Logic: 异步加载回调返回时，active project 可能已经切换；用 ref 读取最新 id 做 stale guard。
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
@@ -152,6 +188,86 @@ export function useWorkbenchProjectController(
     [projects, selectProject],
   );
 
+  // ---- launch summary -------------------------------------------------------
+
+  const projectsCount = projects.length;
+  const launchFetchEnabled = projectsCount > 0 && !activeProjectId;
+
+  // 用 sequence 代替 AbortController 取消 IPC；signal 仍用于文档可见语义与测试断言入口。
+  const launchFetchSeqRef = useRef(0);
+  const launchAbortRef = useRef<AbortController | null>(null);
+  const launchFetchEnabledRef = useRef(launchFetchEnabled);
+  useEffect(() => {
+    launchFetchEnabledRef.current = launchFetchEnabled;
+  }, [launchFetchEnabled]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   启动摘要只在「有项目未选中」时拉取；成功按 section 归约，整次失败 mark stale 保留缓存。
+   *
+   * Code Logic（这个函数做什么）:
+   *   递增 sequence；调用 workbenchApi.getLaunchSummary；过期/abort 丢弃结果。
+   */
+  const fetchLaunchSummary = useCallback(async (): Promise<void> => {
+    if (!launchFetchEnabledRef.current) return;
+
+    const seq = launchFetchSeqRef.current + 1;
+    launchFetchSeqRef.current = seq;
+    const abort = new AbortController();
+    launchAbortRef.current?.abort();
+    launchAbortRef.current = abort;
+
+    try {
+      const wire = await workbenchApi.getLaunchSummary();
+      if (abort.signal.aborted || launchFetchSeqRef.current !== seq) return;
+      if (!launchFetchEnabledRef.current) return;
+      setLaunchSummary((previous) => reduceWorkbenchLaunchResults(previous, wire));
+    } catch (error) {
+      if (abort.signal.aborted || launchFetchSeqRef.current !== seq) return;
+      if (!launchFetchEnabledRef.current) return;
+      const message = launchErrorMessage(error, 'launch summary failed');
+      setLaunchSummary((previous) => markLaunchSummaryStaleOnFailure(previous, message));
+    }
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户手动刷新启动摘要，与轮询共享同一失败/stale 语义。
+   *
+   * Code Logic（这个函数做什么）:
+   *   委托 fetchLaunchSummary。
+   */
+  const refreshLaunchSummary = useCallback(async (): Promise<void> => {
+    await fetchLaunchSummary();
+  }, [fetchLaunchSummary]);
+
+  // 进入 launch 模式：重置 loading 并立即拉取；离开时 abort + 作废 sequence。
+  useEffect(() => {
+    if (!launchFetchEnabled) {
+      launchFetchSeqRef.current += 1;
+      launchAbortRef.current?.abort();
+      launchAbortRef.current = null;
+      return;
+    }
+
+    setLaunchSummary(createInitialLaunchSummaryState());
+    void fetchLaunchSummary();
+
+    return () => {
+      launchFetchSeqRef.current += 1;
+      launchAbortRef.current?.abort();
+      launchAbortRef.current = null;
+    };
+  }, [launchFetchEnabled, fetchLaunchSummary]);
+
+  // 可见时 ≤15s 轮询；hidden 暂停；不立即再跑（进入模式 effect 已跑）。
+  useVisibilityPolling(fetchLaunchSummary, {
+    intervalMs: WORKBENCH_LAUNCH_SUMMARY_POLL_MS,
+    enabled: launchFetchEnabled,
+    runImmediately: false,
+    refreshOnVisible: true,
+  });
+
   const remoteProjectOffline = isRemoteWorkbenchProjectOffline(
     activeProject,
     remoteOfflineProjectId,
@@ -165,5 +281,7 @@ export function useWorkbenchProjectController(
     markRequestFailure,
     markRequestSuccess,
     selectProjectFromDeepLink,
+    launchSummary,
+    refreshLaunchSummary,
   };
 }

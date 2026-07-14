@@ -440,6 +440,7 @@ pub fn run() {
             health_cmd::get_habit_stats,
             // 工作台（本机项目 + Claude Code PTY 终端 + 项目文件树）
             workbench_cmd::list_workbench_projects,
+            workbench_cmd::get_workbench_launch_summary,
             workbench_cmd::add_workbench_project,
             workbench_cmd::list_workbench_remote_roots,
             workbench_cmd::list_workbench_remote_dir,

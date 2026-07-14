@@ -93,6 +93,34 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     Workbench 启动摘要需要全局最近“值得关注”的编排任务，且禁止按项目 N+1 查询。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     单 SQL：status ∈ running/preparing/verifying/delivering/blocked 或
+    ///     workflow_state=humanReview，按 updated_at DESC LIMIT；limit 裁剪到 0..=5。
+    pub async fn list_launch_tasks(&self, limit: i64) -> Result<Vec<OrchestratorTaskRow>, AppError> {
+        let limit = limit.clamp(0, 5);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(&format!(
+            "SELECT {TASK_COLUMNS} FROM orchestrator_tasks \
+             WHERE status IN (?, ?, ?, ?, ?) OR workflow_state = ? \
+             ORDER BY updated_at DESC, id ASC LIMIT ?"
+        ))
+        .bind(OrchestratorTaskStatus::Running.as_str())
+        .bind(OrchestratorTaskStatus::Preparing.as_str())
+        .bind(OrchestratorTaskStatus::Verifying.as_str())
+        .bind(OrchestratorTaskStatus::Delivering.as_str())
+        .bind(OrchestratorTaskStatus::Blocked.as_str())
+        .bind(OrchestratorWorkflowState::HumanReview.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_task).collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     任务列表需要支持按项目筛选或返回全局任务，并按调度优先级排序。
     ///
     /// Code Logic（这个函数做什么）:

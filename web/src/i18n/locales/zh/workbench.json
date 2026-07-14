@@ -656,5 +656,43 @@
     "deletePath": "删除失败",
     "mutationUnknown": "操作结果未知，请刷新后人工核对",
     "mutationFailed": "操作失败，可以重新发起。"
+  },
+  "launch": {
+    "title": "继续工作",
+    "emptyTitle": "开始使用工作台",
+    "emptyExplanation": "项目添加后可管理终端、文件、Git 与自动化",
+    "addLocal": "添加本机项目",
+    "connectRemote": "连接远端项目",
+    "checkTmux": "检查 tmux 依赖",
+    "refresh": "刷新摘要",
+    "loading": "加载中…",
+    "error": "加载失败：{{message}}",
+    "stale": "数据可能已过期",
+    "attentionSummary": "待处理 {{total}} 项（决策 {{decision}} · 受阻 {{blocked}} · 环境 {{environment}}）",
+    "attentionOpen": "打开待处理",
+    "attentionEmpty": "当前没有待处理事项",
+    "sections": {
+      "projects": "最近项目",
+      "sessions": "活跃会话",
+      "tasks": "Orchestrator 任务",
+      "transfers": "传输",
+      "devices": "设备"
+    },
+    "empty": {
+      "projects": "还没有最近项目",
+      "sessions": "没有活跃终端会话",
+      "tasks": "没有进行中的任务",
+      "transfers": "没有活跃或失败的传输",
+      "devices": "暂无在线或最近同步的设备"
+    },
+    "openTransfer": "打开文件传输",
+    "openDevices": "打开设备",
+    "openSettingsDependencies": "打开依赖设置",
+    "item": {
+      "remote": "远端",
+      "local": "本机",
+      "online": "在线",
+      "offline": "离线"
+    }
   }
 }

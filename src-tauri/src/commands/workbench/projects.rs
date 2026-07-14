@@ -6,6 +6,11 @@
 //! Code Logic（这个模块做什么）:
 //!     命令与 pub(crate) helper。
 
+use crate::backend::authority::RuntimeRole;
+use crate::backend::control_api::{
+    build_workbench_launch_summary_for_state, WorkbenchLaunchSummaryDto,
+};
+use crate::backend::control_client::BackendControlClient;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::workbench::browser::discover_workbench_browser_targets as discover_local_workbench_browser_targets;
@@ -41,6 +46,25 @@ pub async fn list_workbench_projects(
     }
     let rows = state.workbench_project_repo.list().await?;
     Ok(rows.iter().map(WorkbenchProjectRow::to_dto).collect())
+}
+
+/// 获取 Workbench Continue Working 启动摘要。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面入口需要一次读出有界项目/会话/任务/传输/设备摘要；GUI 必须走 sidecar control。
+///
+/// Code Logic（这个函数做什么）:
+///     GuiClient → `BackendControlClient::workbench_launch_summary`；
+///     HeadlessOwner → 本地 `build_workbench_launch_summary_for_state`。
+#[tauri::command]
+pub async fn get_workbench_launch_summary(
+    state: State<'_, AppState>,
+) -> Result<WorkbenchLaunchSummaryDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        return client.workbench_launch_summary().await;
+    }
+    Ok(build_workbench_launch_summary_for_state(state.inner()).await)
 }
 
 /// 发现 Workbench 浏览器预览目标。

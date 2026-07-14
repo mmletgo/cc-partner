@@ -33,6 +33,101 @@ async function settle(): Promise<void> {
 }
 
 describe('Workbench project domain (characterization)', () => {
+  test('existing projects with no selection render continue-working launch surface', async () => {
+    const project = buildLocalProject({ name: 'demo-project' });
+    setInvokeHandler((call) => {
+      switch (call.cmd) {
+        case 'get_workbench_launch_summary':
+          return {
+            projects: {
+              kind: 'ready',
+              value: [
+                {
+                  id: project.id,
+                  name: project.name,
+                  kind: project.kind,
+                  deviceId: project.deviceId,
+                  deviceName: project.deviceName,
+                  path: project.path,
+                  lastOpenedAt: project.lastOpenedAt,
+                },
+              ],
+            },
+            sessions: { kind: 'ready', value: [] },
+            tasks: { kind: 'ready', value: [] },
+            transfers: { kind: 'ready', value: [] },
+            devices: { kind: 'ready', value: [] },
+            generatedAt: '2026-07-14T12:00:00.000Z',
+          };
+        default:
+          return { ok: true };
+      }
+    });
+
+    renderWorkbench(
+      buildProjectsContextValue({ projects: [project], activeProjectId: null }),
+      buildDependencyContextValue(),
+    );
+    await settle();
+
+    expect(screen.getByTestId('workbench-launch-continue')).toBeTruthy();
+    expect(screen.getByText('继续工作')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Worktree 管理' })).toBeNull();
+    expect(invokeCallsFor('get_workbench_launch_summary').length).toBeGreaterThan(0);
+  });
+
+  test('zero projects render only three focused empty actions', async () => {
+    setInvokeHandler(() => ({ ok: true }));
+    renderWorkbench(
+      buildProjectsContextValue({ projects: [], activeProjectId: null }),
+      buildDependencyContextValue(),
+    );
+    await settle();
+
+    expect(screen.getByTestId('workbench-launch-empty')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '添加本机项目' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '连接远端项目' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '检查 tmux 依赖' })).toBeTruthy();
+    expect(screen.queryByTestId('workbench-launch-continue')).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Worktree 管理' })).toBeNull();
+    expect(invokeCallsFor('get_workbench_launch_summary')).toHaveLength(0);
+  });
+
+  test('active project still renders normal Workbench chrome', async () => {
+    const project = buildLocalProject({ name: 'demo-project' });
+    const worktree = buildWorktree({ id: 'wt-main', name: 'main', branch: 'main' });
+    const session = buildSession({ id: 's1', name: 'main shell' });
+    setInvokeHandler((call) => {
+      switch (call.cmd) {
+        case 'list_workbench_projects':
+          return [project];
+        case 'list_workbench_worktrees':
+          return [worktree];
+        case 'list_workbench_sessions':
+          return [session];
+        case 'list_workbench_git_commits':
+          return [];
+        case 'list_workbench_dir':
+          return [];
+        case 'get_workbench_launch_summary':
+          throw new Error('launch should not be fetched for active project');
+        default:
+          return { ok: true };
+      }
+    });
+
+    renderWorkbench(
+      buildProjectsContextValue({ projects: [project], activeProjectId: project.id }),
+      buildDependencyContextValue(),
+    );
+    await settle();
+
+    expect(screen.queryByTestId('workbench-launch-continue')).toBeNull();
+    expect(screen.queryByTestId('workbench-launch-empty')).toBeNull();
+    expect(screen.getByText(`${project.deviceName} · ${project.path}`)).toBeTruthy();
+    expect(invokeCallsFor('get_workbench_launch_summary')).toHaveLength(0);
+  });
+
   test('loads worktrees and sessions for the active project on mount', async () => {
     const project = buildLocalProject({ name: 'demo-project' });
     const worktree = buildWorktree({ id: 'wt-main', name: 'main', branch: 'main' });
