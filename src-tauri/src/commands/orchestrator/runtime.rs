@@ -6,46 +6,20 @@
 //! Code Logic（这个模块做什么）:
 //!     命令与 pub(crate) helpers。
 
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
-use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
-use crate::orchestrator::config::OrchestratorAutomationConfigDto;
-use crate::orchestrator::models::{
-    OrchestratorAttemptPhase, OrchestratorCreateAction, OrchestratorEvidenceDto,
-    OrchestratorProjectConfigDto, OrchestratorRunState, OrchestratorTaskAttemptRow,
-    OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus, OrchestratorWorkflowState,
-    SplitTaskState, EVIDENCE_KIND_DELIVERY, EVIDENCE_KIND_REPAIR_PROMPT,
-    EVIDENCE_KIND_VERIFICATION_OUTPUT, EVIDENCE_KIND_VERIFICATION_REVIEW,
-};
-use crate::orchestrator::outbox::{
-    create_pending_remote_task, is_remote_network_error, mirror_payload_from_task,
-    open_remote_project_for_shortcut, sync_remote_task_mirror_for_project,
-    OrchestratorRemoteOutboxDto, RemoteMirrorTask,
-};
-use crate::orchestrator::prompt::RepairPromptContext;
-use crate::orchestrator::remote_client::RemoteOrchestratorClient;
+use crate::orchestrator::models::OrchestratorTaskStatus;
+use crate::orchestrator::outbox::{create_pending_remote_task, is_remote_network_error};
 use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
-use crate::orchestrator::repo::{OrchestratorRecentEventRow, OrchestratorRepo};
-use crate::orchestrator::runner::prepare_repair_runner;
-use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetrySnapshot;
-use crate::orchestrator::verifier::{self, VerifierReview};
-use crate::orchestrator::workflow::{resolve_project_workflow, WorkflowSource};
 use crate::state::AppState;
-use crate::workbench::models::WorkbenchProjectRow;
-use crate::workbench::remote_ids::{parse_remote_entity_id, remote_entity_id};
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use tauri::State;
-use uuid::Uuid;
 
-use super::actions::*;
-use super::common::*;
-use super::evidence::*;
-use super::remote::*;
-use super::tasks::*;
+use super::common::{
+    abort_orchestrator_task_target_status, create_local_task_for_client_request,
+    create_remote_orchestrator_task_online, get_orchestrator_workbench_project, local_task_view,
+    update_remote_orchestrator_task_status, CreateOrchestratorTaskRequest,
+    OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
+};
+use super::tasks::get_orchestrator_runtime_snapshot_for_state;
 
 /// 获取 Orchestrator 项目运行时快照。
 ///
