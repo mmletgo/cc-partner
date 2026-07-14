@@ -1099,6 +1099,32 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/mobile/orchestrator/tasks/review-diff",
             post(orchestrator::mobile_get_review_diff),
         )
+        // Orchestrator WORKFLOW document：capability orchestrator.workflow-document.v1；仅本机 local 项目。
+        .route(
+            "/api/orchestrator/workflow-document/get",
+            post(orchestrator::get_workflow_document_route),
+        )
+        .route(
+            "/api/orchestrator/workflow-document/validate",
+            post(orchestrator::validate_workflow_document_route),
+        )
+        .route(
+            "/api/orchestrator/workflow-document/save",
+            post(orchestrator::save_workflow_document_route),
+        )
+        // Mobile remote-aware WORKFLOW document wrappers。
+        .route(
+            "/api/mobile/orchestrator/workflow-document/get",
+            post(orchestrator::mobile_get_workflow_document),
+        )
+        .route(
+            "/api/mobile/orchestrator/workflow-document/validate",
+            post(orchestrator::mobile_validate_workflow_document),
+        )
+        .route(
+            "/api/mobile/orchestrator/workflow-document/save",
+            post(orchestrator::mobile_save_workflow_document),
+        )
         .route("/api/orchestrator/config", get(orchestrator::get_config))
         // 移动端 SPA fallback：只服务 /mobile 命名空间；其它未知路径保持 404。
         .fallback_service(service_fn(move |req| {

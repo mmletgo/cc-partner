@@ -14,10 +14,23 @@ use crate::orchestrator::models::OrchestratorWorkflowState;
 use crate::orchestrator::prompt::{
     contains_standalone_dev_done_sentinel, render_user_block, DEV_DONE_SENTINEL,
 };
-use serde::Deserialize;
-use std::path::Path;
+use crate::workbench::file_content::{save_text_file_atomic, sha256_file_hex};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 const MAX_STALL_TIMEOUT_MS: i64 = 30 * 60 * 1000;
+
+/// 文件相对审阅快照发生漂移时的稳定 Conflict code。
+///
+/// Business Logic（为什么需要这个常量）:
+///     前端 WORKFLOW 向导在 CAS 保存失败时需要稳定 token 提示用户重新加载，不能依赖本地化文案匹配。
+///
+/// Code Logic（这个常量做什么）:
+///     作为 `AppError::conflict` 的消息体 / domain 稳定 code 使用。
+pub const WORKFLOW_DOCUMENT_CHANGED_CODE: &str = "workflow_document_changed";
 
 /// 项目级 workflow 配置文件名。
 ///
@@ -240,21 +253,103 @@ impl ResolvedWorkflow {
     }
 }
 
+/// WORKFLOW.md 文档检测状态。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     向导需要区分缺失、合法、非法与读失败四种状态，以决定创建模板、打开编辑或提示重试。
+///
+/// Code Logic（这个枚举做什么）:
+///     camelCase 序列化为 `missing|valid|invalid|readError`，供 Tauri/P2P/前端共享。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkflowDocumentStatus {
+    Missing,
+    Valid,
+    Invalid,
+    ReadError,
+}
+
+/// 单条 WORKFLOW 诊断信息。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     权威 validator 必须返回可定位的诊断，供向导高亮 front matter / 模板错误。
+///
+/// Code Logic（这个结构体做什么）:
+///     序列化 path/line/column/code/message；未知位置时 line/column 为 null。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowDiagnostic {
+    pub path: String,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+    pub code: String,
+    pub message: String,
+}
+
+/// 权威 WORKFLOW 文档快照 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     get/validate/save 共享同一文档视图：状态、正文、CAS hash、诊断与规范化 preview。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase 序列化；missing 时 content/content_hash 为空，preview 可携带默认模板建议。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowDocument {
+    pub status: WorkflowDocumentStatus,
+    pub content: Option<String>,
+    pub content_hash: Option<String>,
+    pub diagnostics: Vec<WorkflowDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
 /// Business Logic（为什么需要这个函数）:
-///     Orchestrator 需要按项目根目录解析 workflow 策略，让没有配置的项目使用内置默认值，有配置的项目可覆盖安全范围内的行为。
+///     缺失 WORKFLOW.md 时向导需要一份与内置策略一致的可保存模板，避免用户手写 front matter。
 ///
 /// Code Logic（这个函数做什么）:
-///     查找 WORKFLOW.md；不存在返回 built_in_default；存在则解析可选 YAML front matter 和正文模板，
-///     合并覆盖项并把 source 标记为 ProjectOverride。
-pub fn resolve_project_workflow(project_path: &Path) -> Result<ResolvedWorkflow, AppError> {
-    let workflow_path = project_path.join(WORKFLOW_FILE_NAME);
-    if !workflow_path.exists() {
-        return Ok(ResolvedWorkflow::built_in_default());
-    }
+///     生成含固定 workflow/runner/validation section 与 DEFAULT_PROMPT_TEMPLATE 正文的 YAML front matter 文档。
+pub fn default_workflow_template() -> String {
+    format!(
+        "---\n\
+workflow:\n\
+  default_create_state: backlog\n\
+  active_states:\n\
+    - todo\n\
+    - rework\n\
+  review_state: humanReview\n\
+  terminal_states:\n\
+    - done\n\
+    - canceled\n\
+runner:\n\
+  provider: claudeCodeVisible\n\
+  max_turns: 1\n\
+  stall_timeout_ms: 300000\n\
+validation:\n\
+  commands: []\n\
+---\n\
+{DEFAULT_PROMPT_TEMPLATE}"
+    )
+}
 
-    let content = std::fs::read_to_string(&workflow_path)
-        .map_err(|error| AppError::generic(format!("读取 {WORKFLOW_FILE_NAME} 失败: {error}")))?;
-    let (front_matter, body) = split_workflow_document(&content)?;
+/// Business Logic（为什么需要这个函数）:
+///     CAS 保存与前端乐观锁需要稳定的内容哈希，且 validate 响应也要返回与磁盘一致的算法。
+///
+/// Code Logic（这个函数做什么）:
+///     对 UTF-8 正文字节计算 SHA-256，返回小写十六进制字符串。
+pub fn content_sha256_hex(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     权威 validator 与默认模板 round-trip 需要在不读盘的情况下解析 WORKFLOW.md 正文。
+///
+/// Code Logic（这个函数做什么）:
+///     拆分 front matter/正文，合并到 built_in_default 覆盖项，source 固定 ProjectOverride。
+pub fn parse_project_workflow(content: &str) -> Result<ResolvedWorkflow, AppError> {
+    let (front_matter, body) = split_workflow_document(content)?;
     let mut workflow = ResolvedWorkflow::built_in_default();
     workflow.source = WorkflowSource::ProjectOverride;
 
@@ -277,6 +372,312 @@ pub fn resolve_project_workflow(project_path: &Path) -> Result<ResolvedWorkflow,
     }
 
     Ok(workflow)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Orchestrator 需要按项目根目录解析 workflow 策略，让没有配置的项目使用内置默认值，有配置的项目可覆盖安全范围内的行为。
+///
+/// Code Logic（这个函数做什么）:
+///     查找 WORKFLOW.md；不存在返回 built_in_default；存在则读文件并委托 `parse_project_workflow`。
+pub fn resolve_project_workflow(project_path: &Path) -> Result<ResolvedWorkflow, AppError> {
+    let workflow_path = project_path.join(WORKFLOW_FILE_NAME);
+    if !workflow_path.exists() {
+        return Ok(ResolvedWorkflow::built_in_default());
+    }
+
+    let content = fs::read_to_string(&workflow_path)
+        .map_err(|error| AppError::generic(format!("读取 {WORKFLOW_FILE_NAME} 失败: {error}")))?;
+    parse_project_workflow(&content)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     向导打开时需要检测项目 WORKFLOW.md 的 missing/valid/invalid/readError 状态与 CAS hash。
+///
+/// Code Logic（这个函数做什么）:
+///     解析项目根下固定文件名；拒绝 symlink；读失败→readError；解析失败→invalid+diagnostics；成功→valid。
+pub fn load_workflow_document(project_path: &Path) -> WorkflowDocument {
+    let workflow_path = match resolve_workflow_document_path(project_path) {
+        Ok(path) => path,
+        Err(error) => {
+            return WorkflowDocument {
+                status: WorkflowDocumentStatus::ReadError,
+                content: None,
+                content_hash: None,
+                diagnostics: vec![diagnostic_from_message("workflow_path_error", &error.to_string())],
+                preview: None,
+            };
+        }
+    };
+
+    match fs::symlink_metadata(&workflow_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return WorkflowDocument {
+                status: WorkflowDocumentStatus::Missing,
+                content: None,
+                content_hash: None,
+                diagnostics: Vec::new(),
+                preview: Some(default_workflow_template()),
+            };
+        }
+        Err(error) => {
+            return WorkflowDocument {
+                status: WorkflowDocumentStatus::ReadError,
+                content: None,
+                content_hash: None,
+                diagnostics: vec![diagnostic_from_message(
+                    "workflow_read_error",
+                    &format!("读取 {WORKFLOW_FILE_NAME} 元数据失败: {error}"),
+                )],
+                preview: None,
+            };
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return WorkflowDocument {
+                status: WorkflowDocumentStatus::ReadError,
+                content: None,
+                content_hash: None,
+                diagnostics: vec![diagnostic_from_message(
+                    "workflow_symlink_rejected",
+                    &format!("{WORKFLOW_FILE_NAME} 不能是符号链接"),
+                )],
+                preview: None,
+            };
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return WorkflowDocument {
+                status: WorkflowDocumentStatus::ReadError,
+                content: None,
+                content_hash: None,
+                diagnostics: vec![diagnostic_from_message(
+                    "workflow_not_file",
+                    &format!("{WORKFLOW_FILE_NAME} 必须是普通文件"),
+                )],
+                preview: None,
+            };
+        }
+        Ok(_) => {}
+    }
+
+    match fs::read_to_string(&workflow_path) {
+        Ok(content) => validate_workflow_content(&content),
+        Err(error) => WorkflowDocument {
+            status: WorkflowDocumentStatus::ReadError,
+            content: None,
+            content_hash: None,
+            diagnostics: vec![diagnostic_from_message(
+                "workflow_read_error",
+                &format!("读取 {WORKFLOW_FILE_NAME} 失败: {error}"),
+            )],
+            preview: None,
+        },
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     保存前与编辑中的实时校验必须走后端权威 parser，前端 YAML 提示不能作为最终判定。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 content；成功返回 valid + preview=规范化 content；失败返回 invalid + 带位置的 diagnostics。
+pub fn validate_workflow_content(content: &str) -> WorkflowDocument {
+    let content_hash = content_sha256_hex(content);
+    match parse_project_workflow(content) {
+        Ok(_parsed) => WorkflowDocument {
+            status: WorkflowDocumentStatus::Valid,
+            content: Some(content.to_string()),
+            content_hash: Some(content_hash),
+            diagnostics: Vec::new(),
+            preview: Some(content.to_string()),
+        },
+        Err(error) => WorkflowDocument {
+            status: WorkflowDocumentStatus::Invalid,
+            content: Some(content.to_string()),
+            content_hash: Some(content_hash),
+            diagnostics: vec![diagnostic_from_app_error(&error)],
+            preview: None,
+        },
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     向导保存必须 CAS 拒绝并发覆盖，原子落盘，且不得 dispatch 或改动 delivery 配置。
+///
+/// Code Logic（这个函数做什么）:
+///     1) 权威校验 content；2) 解析项目根固定 WORKFLOW.md 路径并拒绝 symlink/越界；
+///     3) missing 仅允许 expected_hash 为空串创建；已有文件比对 SHA-256 后 atomic rename；
+///     4) 返回保存后的文档快照。本函数不触发 scheduler。
+pub fn save_workflow_document_at_project_root(
+    project_path: &Path,
+    expected_hash: &str,
+    content: &str,
+) -> Result<WorkflowDocument, AppError> {
+    let validated = validate_workflow_content(content);
+    if validated.status != WorkflowDocumentStatus::Valid {
+        let message = validated
+            .diagnostics
+            .first()
+            .map(|item| item.message.clone())
+            .unwrap_or_else(|| format!("{WORKFLOW_FILE_NAME} 内容无效，拒绝保存"));
+        return Err(AppError::validation(message));
+    }
+
+    let workflow_path = resolve_workflow_document_path(project_path)?;
+    ensure_workflow_path_is_safe(&workflow_path)?;
+
+    let expected_hash = expected_hash.trim();
+    match fs::symlink_metadata(&workflow_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if !expected_hash.is_empty() {
+                return Err(AppError::conflict(WORKFLOW_DOCUMENT_CHANGED_CODE));
+            }
+            write_new_workflow_file_atomic(&workflow_path, content)?;
+        }
+        Err(error) => {
+            return Err(AppError::generic(format!(
+                "读取 {WORKFLOW_FILE_NAME} 元数据失败: {error}"
+            )));
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(AppError::validation(format!(
+                "{WORKFLOW_FILE_NAME} 不能是符号链接"
+            )));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(AppError::validation(format!(
+                "{WORKFLOW_FILE_NAME} 必须是普通文件"
+            )));
+        }
+        Ok(_) => {
+            if expected_hash.is_empty() {
+                return Err(AppError::conflict(WORKFLOW_DOCUMENT_CHANGED_CODE));
+            }
+            save_text_file_atomic(&workflow_path, content, expected_hash).map_err(|error| {
+                if error.to_string().contains("文件已被修改") {
+                    AppError::conflict(WORKFLOW_DOCUMENT_CHANGED_CODE)
+                } else {
+                    error
+                }
+            })?;
+        }
+    }
+
+    Ok(load_workflow_document(project_path))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     所有文档 API 只能操作项目根下固定的 WORKFLOW.md，禁止任意路径入参导致路径逃逸。
+///
+/// Code Logic（这个函数做什么）:
+///     canonicalize 项目根目录后 join 固定文件名；不接受用户相对路径组件。
+fn resolve_workflow_document_path(project_path: &Path) -> Result<PathBuf, AppError> {
+    let project_root = fs::canonicalize(project_path).map_err(|error| {
+        AppError::validation(format!("项目路径无效，无法解析 WORKFLOW.md: {error}"))
+    })?;
+    if !project_root.is_dir() {
+        return Err(AppError::validation("项目路径必须是目录"));
+    }
+    Ok(project_root.join(WORKFLOW_FILE_NAME))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     即便固定文件名，也要拒绝把 WORKFLOW.md 做成指向项目外的 symlink 后被读取/覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     若路径存在且是 symlink，返回 validation 错误；否则 Ok。
+fn ensure_workflow_path_is_safe(workflow_path: &Path) -> Result<(), AppError> {
+    match fs::symlink_metadata(workflow_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(AppError::validation(format!(
+            "{WORKFLOW_FILE_NAME} 不能是符号链接"
+        ))),
+        Ok(_) | Err(_) => Ok(()),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     首次创建 WORKFLOW.md 也要原子写入，避免半截文件被 scheduler 读到。
+///
+/// Code Logic（这个函数做什么）:
+///     在同目录写唯一临时文件后 rename 到 WORKFLOW.md；失败清理临时文件。
+fn write_new_workflow_file_atomic(path: &Path, content: &str) -> Result<(), AppError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::generic("WORKFLOW.md 路径缺少父目录"))?;
+    let temporary_path = parent.join(format!(
+        ".{}.{}.tmp",
+        WORKFLOW_FILE_NAME,
+        uuid::Uuid::new_v4()
+    ));
+    let write_result = (|| -> Result<(), AppError> {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary_path)?;
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temporary_path, path) {
+        let _ = fs::remove_file(&temporary_path);
+        // 并发创建：目标已存在时转为 CAS 冲突。
+        if path.exists() {
+            return Err(AppError::conflict(WORKFLOW_DOCUMENT_CHANGED_CODE));
+        }
+        return Err(AppError::from(error));
+    }
+    let _ = sha256_file_hex(path)?;
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     诊断数组需要统一的 path=WORKFLOW.md 与稳定 code，便于前端 i18n 与定位。
+///
+/// Code Logic（这个函数做什么）:
+///     构造无行列号的 diagnostic。
+fn diagnostic_from_message(code: &str, message: &str) -> WorkflowDiagnostic {
+    WorkflowDiagnostic {
+        path: WORKFLOW_FILE_NAME.to_string(),
+        line: None,
+        column: None,
+        code: code.to_string(),
+        message: message.to_string(),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     parser 错误需要尽量带上行号，帮助用户定位 front matter 问题。
+///
+/// Code Logic（这个函数做什么）:
+///     从错误文案推断 code；YAML 位置信息当前依赖消息文本，line/column 尽力提取。
+fn diagnostic_from_app_error(error: &AppError) -> WorkflowDiagnostic {
+    let message = error.to_string();
+    let code = if message.contains("front matter 解析失败") {
+        "workflow_yaml_parse_error"
+    } else if message.contains("结束分隔符") {
+        "workflow_front_matter_unclosed"
+    } else if message.contains("未知工作流状态") {
+        "workflow_unknown_state"
+    } else if message.contains("runner.provider") {
+        "workflow_runner_provider"
+    } else if message.contains("runner.max_turns") {
+        "workflow_runner_max_turns"
+    } else if message.contains("runner.stall_timeout_ms") {
+        "workflow_runner_stall_timeout"
+    } else if message.contains("validation.commands") {
+        "workflow_validation_commands"
+    } else {
+        "workflow_invalid"
+    };
+    WorkflowDiagnostic {
+        path: WORKFLOW_FILE_NAME.to_string(),
+        line: None,
+        column: None,
+        code: code.to_string(),
+        message,
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -834,5 +1235,103 @@ mod tests {
         let error = resolve_project_workflow(dir.path()).expect_err("超大 timeout 必须报错");
 
         assert!(error.to_string().contains("1800001"));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     内置默认模板必须可被权威 parser round-trip，否则向导“从模板创建”会生成不可调度策略。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     解析 default_workflow_template，断言 active_states 为 Todo/Rework。
+    #[test]
+    fn generated_template_round_trips_through_authoritative_parser() {
+        let template = default_workflow_template();
+        let parsed = parse_project_workflow(&template).expect("默认模板必须可解析");
+        assert_eq!(
+            parsed.active_states,
+            vec![
+                OrchestratorWorkflowState::Todo,
+                OrchestratorWorkflowState::Rework
+            ]
+        );
+        assert_eq!(parsed.source, WorkflowSource::ProjectOverride);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     get 文档 API 必须把缺失、合法、非法三种状态报告给向导。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     空目录→missing；合法文件→valid；非法 yaml→invalid。
+    #[test]
+    fn load_workflow_document_reports_missing_valid_and_invalid() {
+        let dir = tempdir().expect("创建临时目录成功");
+        let missing = load_workflow_document(dir.path());
+        assert_eq!(missing.status, WorkflowDocumentStatus::Missing);
+        assert!(missing.preview.is_some());
+
+        fs::write(dir.path().join("WORKFLOW.md"), default_workflow_template())
+            .expect("写入合法 WORKFLOW.md");
+        let valid = load_workflow_document(dir.path());
+        assert_eq!(valid.status, WorkflowDocumentStatus::Valid);
+        assert!(valid.content_hash.is_some());
+        assert!(valid.diagnostics.is_empty());
+
+        fs::write(dir.path().join("WORKFLOW.md"), "---\n[\n---\nBody").expect("写入非法");
+        let invalid = load_workflow_document(dir.path());
+        assert_eq!(invalid.status, WorkflowDocumentStatus::Invalid);
+        assert!(!invalid.diagnostics.is_empty());
+        assert_eq!(invalid.diagnostics[0].path, "WORKFLOW.md");
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     CAS 保存必须拒绝 expected hash 漂移，防止向导覆盖外部编辑。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先用空 hash 创建，再用错误 hash 保存，断言 conflict code。
+    #[test]
+    fn save_workflow_document_rejects_hash_conflict() {
+        let dir = tempdir().expect("创建临时目录成功");
+        let template = default_workflow_template();
+        save_workflow_document_at_project_root(dir.path(), "", &template).expect("首次创建");
+
+        let err = save_workflow_document_at_project_root(dir.path(), "deadbeef", &template)
+            .expect_err("错误 hash 必须冲突");
+        assert_eq!(err.to_string(), WORKFLOW_DOCUMENT_CHANGED_CODE);
+
+        let current = load_workflow_document(dir.path());
+        let hash = current.content_hash.expect("hash");
+        let updated = template.replace("300000", "120000");
+        let saved = save_workflow_document_at_project_root(dir.path(), &hash, &updated)
+            .expect("正确 hash 应保存");
+        assert_eq!(saved.status, WorkflowDocumentStatus::Valid);
+        assert_ne!(saved.content_hash.as_deref(), Some(hash.as_str()));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     WORKFLOW.md 若为 symlink 必须拒绝读写，避免路径逃逸到项目外。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建指向外部文件的 symlink WORKFLOW.md，断言 load 为 readError、save 失败。
+    #[test]
+    fn workflow_document_rejects_symlink() {
+        let dir = tempdir().expect("创建临时目录成功");
+        let outside = tempdir().expect("外部目录");
+        let target = outside.path().join("external.md");
+        fs::write(&target, default_workflow_template()).expect("写外部文件");
+        let link = dir.path().join("WORKFLOW.md");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).expect("创建 symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).expect("创建 symlink");
+
+        let loaded = load_workflow_document(dir.path());
+        assert_eq!(loaded.status, WorkflowDocumentStatus::ReadError);
+        assert!(loaded
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "workflow_symlink_rejected"));
+
+        let err = save_workflow_document_at_project_root(dir.path(), "", &default_workflow_template())
+            .expect_err("symlink 必须拒绝保存");
+        assert!(err.to_string().contains("符号链接"));
     }
 }

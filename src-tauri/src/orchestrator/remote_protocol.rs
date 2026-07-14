@@ -11,6 +11,7 @@ use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
     OrchestratorCreateAction, OrchestratorEvidenceDto, OrchestratorReviewDiff, OrchestratorTaskDto,
 };
+use crate::orchestrator::workflow::WorkflowDocument;
 use serde::{Deserialize, Serialize};
 
 /// 远端创建 Orchestrator 任务请求体。
@@ -198,6 +199,91 @@ pub struct RemoteOrchestratorReviewDiffResp {
 pub struct MobileReviewDiffReq {
     pub project_id: String,
     pub task_id: String,
+}
+
+/// 远端 WORKFLOW 文档 get 请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     owning device 需要按本机 projectId 定位 WORKFLOW.md。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase `{projectId}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkflowDocumentGetReq {
+    pub project_id: String,
+}
+
+/// 远端 WORKFLOW 文档 validate 请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     remote 向导保存前要把编辑中的 content 交给 owning device 权威校验。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase `{projectId, content}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkflowDocumentValidateReq {
+    pub project_id: String,
+    pub content: String,
+}
+
+/// 远端 WORKFLOW 文档 save 请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     CAS 保存需要 expectedHash 与 content；owning device 比较后原子写盘。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase `{projectId, expectedHash, content}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkflowDocumentSaveReq {
+    pub project_id: String,
+    pub expected_hash: String,
+    pub content: String,
+}
+
+/// 远端 WORKFLOW 文档响应。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     get/validate/save 共用同一文档快照响应形状。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase `{document}` 包装 `WorkflowDocument`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkflowDocumentResp {
+    pub document: WorkflowDocument,
+}
+
+/// Mobile remote-aware WORKFLOW 文档 get 请求。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     手机用本机 shortcut projectId 读取 workflow 文档，不得暴露 owner base URL。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase `{projectId}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileWorkflowDocumentGetReq {
+    pub project_id: String,
+}
+
+/// Mobile remote-aware WORKFLOW 文档 validate 请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileWorkflowDocumentValidateReq {
+    pub project_id: String,
+    pub content: String,
+}
+
+/// Mobile remote-aware WORKFLOW 文档 save 请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileWorkflowDocumentSaveReq {
+    pub project_id: String,
+    pub expected_hash: String,
+    pub content: String,
 }
 
 /// 远端 Orchestrator 全局配置响应。

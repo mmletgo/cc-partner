@@ -64,6 +64,17 @@ pub const CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1: &str = "orchestrator.runt
 ///     字符串常量，与 `PeerProtocolInfo::supports()` 精确匹配；列入 `server_protocol_info()`。
 pub const CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1: &str = "orchestrator.review-diff.v1";
 
+/// 能力 token：v1 Orchestrator WORKFLOW 文档 API
+/// （`POST /api/orchestrator/workflow-document/{get,validate,save}`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     remote shortcut 在读写 owning device 的 WORKFLOW.md 前必须确认对端已实现权威文档路由；
+///     旧 peer 缺失时客户端应 Unsupported，不得猜测文件路径或旧接口。本 token 与三条路由原子上线。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；client `supports` 门控。
+pub const CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1: &str = "orchestrator.workflow-document.v1";
+
 /// 能力 token：v1 全局 Attention/Inbox 快照路由（`GET /api/mobile/attention`）。
 ///
 /// Business Logic（为什么需要这个 token）:
@@ -181,7 +192,8 @@ impl PeerProtocolInfo {
 /// Business Logic（为什么需要这个函数）:
 ///     本机对外（health/对端探测）需要宣告自身支持的能力集合，且必须是当前 build 实际存在路由的子集。
 ///     本轮宣告 `attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、
-///     `orchestrator.review-diff.v1`、`orchestrator.runtime-snapshot.v1`、`sync.manifest.v2`、
+///     `orchestrator.review-diff.v1`、`orchestrator.runtime-snapshot.v1`、
+///     `orchestrator.workflow-document.v1`、`sync.manifest.v2`、
 ///     `transfer.complete.v1`、`transfer.resume.v1` 与 `workbench.mutation-outcome.v1`；
 ///     各自与对应路由/ledger/契约原子上线。
 ///
@@ -196,6 +208,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string(),
+            CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1.to_string(),
             CAPABILITY_SYNC_MANIFEST_V2.to_string(),
             CAPABILITY_TRANSFER_COMPLETE_V1.to_string(),
             CAPABILITY_TRANSFER_RESUME_V1.to_string(),
@@ -354,6 +367,7 @@ mod tests {
                 "errors.envelope.v1".to_string(),
                 "orchestrator.review-diff.v1".to_string(),
                 "orchestrator.runtime-snapshot.v1".to_string(),
+                "orchestrator.workflow-document.v1".to_string(),
                 "sync.manifest.v2".to_string(),
                 "transfer.complete.v1".to_string(),
                 "transfer.resume.v1".to_string(),
@@ -362,6 +376,7 @@ mod tests {
         );
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
         assert!(info.supports(CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1));
+        assert!(info.supports(CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1));
         assert!(info.supports(CAPABILITY_SYNC_MANIFEST_V2));
         assert!(info.supports(CAPABILITY_TRANSFER_RESUME_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1));

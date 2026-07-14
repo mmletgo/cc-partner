@@ -12,11 +12,13 @@ use crate::commands::orchestrator::{
     build_orchestrator_task_row, create_orchestrator_task_view_for_http_with_request_id,
     discard_orchestrator_remote_outbox_for_repos, dispatch_orchestrator_best_effort,
     enforce_deliver_review_digest, ensure_reviewed_delivery_allowed,
-    get_local_owner_orchestrator_review_diff, get_orchestrator_review_diff_for_state,
-    get_orchestrator_runtime_snapshot_for_project,
-    get_orchestrator_runtime_snapshot_for_state_with_request_id,
+    get_local_owner_orchestrator_review_diff, get_local_owner_workflow_document,
+    get_orchestrator_review_diff_for_state, get_orchestrator_runtime_snapshot_for_project,
+    get_orchestrator_runtime_snapshot_for_state_with_request_id, get_workflow_document_for_state,
     list_orchestrator_task_views_for_state_with_request_id,
     retry_orchestrator_remote_outbox_for_repos, run_delivery_for_task,
+    save_local_owner_workflow_document, save_workflow_document_for_state,
+    validate_local_owner_workflow_document, validate_workflow_document_for_state,
     CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
 };
 use crate::commands::prompt_optimizer::{
@@ -34,11 +36,14 @@ use crate::orchestrator::outbox::open_remote_project_for_shortcut;
 use crate::orchestrator::outbox::OrchestratorRemoteOutboxDto;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::{
-    MobileReviewDiffReq, MobileRuntimeSnapshotReq, RemoteCompleteOrchestratorTaskPromptReq,
-    RemoteCreateOrchestratorTaskReq, RemoteDeliverReviewedReq, RemoteListTasksReq,
-    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp,
-    RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorReviewDiffResp,
-    RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq, RemoteTaskReq, RemoteTaskReworkReq,
+    MobileReviewDiffReq, MobileRuntimeSnapshotReq, MobileWorkflowDocumentGetReq,
+    MobileWorkflowDocumentSaveReq, MobileWorkflowDocumentValidateReq,
+    RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq,
+    RemoteDeliverReviewedReq, RemoteListTasksReq, RemoteOrchestratorConfigResp,
+    RemoteOrchestratorEvidenceResp, RemoteOrchestratorProjectRefreshResp,
+    RemoteOrchestratorReviewDiffResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
+    RemoteTaskReq, RemoteTaskReworkReq, RemoteWorkflowDocumentGetReq, RemoteWorkflowDocumentResp,
+    RemoteWorkflowDocumentSaveReq, RemoteWorkflowDocumentValidateReq,
 };
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetrySnapshot;
@@ -681,6 +686,142 @@ pub async fn mobile_get_review_diff(
             P2pError::from_app_error(e, &ctx, "orchestrator.mobile.tasks.review_diff")
         })?;
     Ok(Json(RemoteOrchestratorReviewDiffResp { diff }))
+}
+
+/// owning-device WORKFLOW 文档 get handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 需要读取 owning device 上的 WORKFLOW.md 状态/正文/hash。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 `{projectId}`，确认 local 项目后 `get_local_owner_workflow_document`。
+pub async fn get_workflow_document_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteWorkflowDocumentGetReq>,
+) -> P2pResult<Json<RemoteWorkflowDocumentResp>> {
+    let project_id = req.project_id.trim();
+    if project_id.is_empty() {
+        return Err(P2pError::validation("projectId 不能为空", &ctx));
+    }
+    let project = state
+        .workbench_project_repo
+        .get(project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.workflow_document.get"))?
+        .ok_or_else(|| P2pError::not_found("工作台项目不存在", &ctx))?;
+    let document = get_local_owner_workflow_document(&project)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.workflow_document.get"))?;
+    Ok(Json(RemoteWorkflowDocumentResp { document }))
+}
+
+/// owning-device WORKFLOW 文档 validate handler。
+pub async fn validate_workflow_document_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteWorkflowDocumentValidateReq>,
+) -> P2pResult<Json<RemoteWorkflowDocumentResp>> {
+    let project_id = req.project_id.trim();
+    if project_id.is_empty() {
+        return Err(P2pError::validation("projectId 不能为空", &ctx));
+    }
+    let project = state
+        .workbench_project_repo
+        .get(project_id)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "orchestrator.workflow_document.validate")
+        })?
+        .ok_or_else(|| P2pError::not_found("工作台项目不存在", &ctx))?;
+    let document = validate_local_owner_workflow_document(&project, &req.content)
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "orchestrator.workflow_document.validate")
+        })?;
+    Ok(Json(RemoteWorkflowDocumentResp { document }))
+}
+
+/// owning-device WORKFLOW 文档 CAS save handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote 保存必须在 owner 做 CAS 与原子写；不得 dispatch。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 local 项目后 `save_local_owner_workflow_document`。
+pub async fn save_workflow_document_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteWorkflowDocumentSaveReq>,
+) -> P2pResult<Json<RemoteWorkflowDocumentResp>> {
+    let project_id = req.project_id.trim();
+    if project_id.is_empty() {
+        return Err(P2pError::validation("projectId 不能为空", &ctx));
+    }
+    let project = state
+        .workbench_project_repo
+        .get(project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.workflow_document.save"))?
+        .ok_or_else(|| P2pError::not_found("工作台项目不存在", &ctx))?;
+    let document =
+        save_local_owner_workflow_document(&project, &req.expected_hash, &req.content).map_err(
+            |e| P2pError::from_app_error(e, &ctx, "orchestrator.workflow_document.save"),
+        )?;
+    Ok(Json(RemoteWorkflowDocumentResp { document }))
+}
+
+/// Mobile remote-aware WORKFLOW get。
+pub async fn mobile_get_workflow_document(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<MobileWorkflowDocumentGetReq>,
+) -> P2pResult<Json<RemoteWorkflowDocumentResp>> {
+    let project_id = req.project_id.trim();
+    if project_id.is_empty() {
+        return Err(P2pError::validation("projectId 不能为空", &ctx));
+    }
+    let document = get_workflow_document_for_state(&state, project_id)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "orchestrator.mobile.workflow_document.get")
+        })?;
+    Ok(Json(RemoteWorkflowDocumentResp { document }))
+}
+
+/// Mobile remote-aware WORKFLOW validate。
+pub async fn mobile_validate_workflow_document(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<MobileWorkflowDocumentValidateReq>,
+) -> P2pResult<Json<RemoteWorkflowDocumentResp>> {
+    let project_id = req.project_id.trim();
+    if project_id.is_empty() {
+        return Err(P2pError::validation("projectId 不能为空", &ctx));
+    }
+    let document = validate_workflow_document_for_state(&state, project_id, &req.content)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "orchestrator.mobile.workflow_document.validate")
+        })?;
+    Ok(Json(RemoteWorkflowDocumentResp { document }))
+}
+
+/// Mobile remote-aware WORKFLOW save。
+pub async fn mobile_save_workflow_document(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<MobileWorkflowDocumentSaveReq>,
+) -> P2pResult<Json<RemoteWorkflowDocumentResp>> {
+    let project_id = req.project_id.trim();
+    if project_id.is_empty() {
+        return Err(P2pError::validation("projectId 不能为空", &ctx));
+    }
+    let document =
+        save_workflow_document_for_state(&state, project_id, &req.expected_hash, &req.content)
+            .await
+            .map_err(|e| {
+                P2pError::from_app_error(e, &ctx, "orchestrator.mobile.workflow_document.save")
+            })?;
+    Ok(Json(RemoteWorkflowDocumentResp { document }))
 }
 
 /// 将任务入队 HTTP handler。
@@ -1862,6 +2003,87 @@ mod tests {
             ) -> _;
         assert_ne!(owner_handler as usize, 0);
         assert_ne!(mobile_handler as usize, 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     能力 token `orchestrator.workflow-document.v1` 与 get/validate/save 路由必须原子上线。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 server_protocol_info 宣告 token，并引用三条 owner handler + 三条 mobile handler 指针。
+    #[test]
+    fn workflow_document_capability_and_route_ship_together() {
+        use crate::net::protocol::{
+            server_protocol_info, CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1,
+        };
+
+        let info = server_protocol_info();
+        assert!(
+            info.supports(CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1),
+            "server_protocol_info 必须宣告 orchestrator.workflow-document.v1，实际: {:?}",
+            info.capabilities
+        );
+        let get_h = get_workflow_document_route
+            as fn(
+                State<AppState>,
+                Extension<P2pRequestContext>,
+                Json<RemoteWorkflowDocumentGetReq>,
+            ) -> _;
+        let validate_h = validate_workflow_document_route
+            as fn(
+                State<AppState>,
+                Extension<P2pRequestContext>,
+                Json<RemoteWorkflowDocumentValidateReq>,
+            ) -> _;
+        let save_h = save_workflow_document_route
+            as fn(
+                State<AppState>,
+                Extension<P2pRequestContext>,
+                Json<RemoteWorkflowDocumentSaveReq>,
+            ) -> _;
+        let mobile_get_h = mobile_get_workflow_document
+            as fn(
+                State<AppState>,
+                Extension<P2pRequestContext>,
+                Json<MobileWorkflowDocumentGetReq>,
+            ) -> _;
+        let mobile_validate_h = mobile_validate_workflow_document
+            as fn(
+                State<AppState>,
+                Extension<P2pRequestContext>,
+                Json<MobileWorkflowDocumentValidateReq>,
+            ) -> _;
+        let mobile_save_h = mobile_save_workflow_document
+            as fn(
+                State<AppState>,
+                Extension<P2pRequestContext>,
+                Json<MobileWorkflowDocumentSaveReq>,
+            ) -> _;
+        assert_ne!(get_h as usize, 0);
+        assert_ne!(validate_h as usize, 0);
+        assert_ne!(save_h as usize, 0);
+        assert_ne!(mobile_get_h as usize, 0);
+        assert_ne!(mobile_validate_h as usize, 0);
+        assert_ne!(mobile_save_h as usize, 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     owning-device workflow-document 路由必须拒绝 remote shortcut 项目。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 remote kind 项目，调用 get_local_owner_workflow_document，断言 validation。
+    #[tokio::test]
+    async fn workflow_document_route_rejects_remote_shortcut_project() {
+        let state = test_state().await;
+        insert_project(&state, "remote-project", "remote").await;
+        let project = state
+            .workbench_project_repo
+            .get("remote-project")
+            .await
+            .expect("get")
+            .expect("project");
+        let err = get_local_owner_workflow_document(&project)
+            .expect_err("remote shortcut must be rejected");
+        assert_eq!(err.to_string(), "远端 Orchestrator 只接受对端本机项目");
     }
 
     /// Business Logic（为什么需要这个测试）:

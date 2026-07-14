@@ -17,6 +17,7 @@ use crate::net::peer_client::PeerClient;
 use crate::net::peer_error::{parse_peer_response, PeerCallError};
 use crate::net::protocol::{
     CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1,
+    CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1,
 };
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
@@ -27,8 +28,10 @@ use crate::orchestrator::remote_protocol::{
     RemoteDeliverReviewedReq, RemoteListTasksReq, RemoteOrchestratorConfigResp,
     RemoteOrchestratorEvidenceResp, RemoteOrchestratorReviewDiffResp,
     RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
-    RemoteTaskReq, RemoteTaskReworkReq,
+    RemoteTaskReq, RemoteTaskReworkReq, RemoteWorkflowDocumentGetReq,
+    RemoteWorkflowDocumentResp, RemoteWorkflowDocumentSaveReq, RemoteWorkflowDocumentValidateReq,
 };
+use crate::orchestrator::workflow::WorkflowDocument;
 use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 
@@ -237,6 +240,134 @@ impl RemoteOrchestratorClient {
             })?;
         let resp = parse_peer_response::<RemoteOrchestratorReviewDiffResp>(response, &url).await?;
         Ok(resp.diff)
+    }
+
+    /// 读取 owning-device WORKFLOW 文档（capability-gated）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote 向导检测状态必须由 owning device 权威返回；旧 peer 缺失能力时 Unsupported。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     require `orchestrator.workflow-document.v1` 后 POST get 路由，解析 `{document}`。
+    pub async fn get_workflow_document(
+        &self,
+        base_url: &str,
+        project_id: &str,
+    ) -> Result<WorkflowDocument, PeerCallError> {
+        self.require_workflow_document_capability(base_url).await?;
+        let url = endpoint_url(base_url, "/api/orchestrator/workflow-document/get");
+        let body = RemoteWorkflowDocumentGetReq {
+            project_id: project_id.to_string(),
+        };
+        let resp: RemoteWorkflowDocumentResp = self
+            .post_json_peer(&url, &body, RemoteRequestTimeoutKind::Short)
+            .await?;
+        Ok(resp.document)
+    }
+
+    /// 在 owning-device 上权威校验 WORKFLOW content。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote 编辑器保存前必须用 owner parser，不能信前端 YAML 提示。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     capability gate 后 POST validate，解析 `{document}`。
+    pub async fn validate_workflow_document(
+        &self,
+        base_url: &str,
+        project_id: &str,
+        content: &str,
+    ) -> Result<WorkflowDocument, PeerCallError> {
+        self.require_workflow_document_capability(base_url).await?;
+        let url = endpoint_url(base_url, "/api/orchestrator/workflow-document/validate");
+        let body = RemoteWorkflowDocumentValidateReq {
+            project_id: project_id.to_string(),
+            content: content.to_string(),
+        };
+        let resp: RemoteWorkflowDocumentResp = self
+            .post_json_peer(&url, &body, RemoteRequestTimeoutKind::Short)
+            .await?;
+        Ok(resp.document)
+    }
+
+    /// CAS 保存 owning-device WORKFLOW 文档。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote 向导保存必须在文件所在设备做 expectedHash 比对与原子写；不 dispatch。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     capability gate 后 POST save，解析 `{document}`。
+    pub async fn save_workflow_document(
+        &self,
+        base_url: &str,
+        project_id: &str,
+        expected_hash: &str,
+        content: &str,
+    ) -> Result<WorkflowDocument, PeerCallError> {
+        self.require_workflow_document_capability(base_url).await?;
+        let url = endpoint_url(base_url, "/api/orchestrator/workflow-document/save");
+        let body = RemoteWorkflowDocumentSaveReq {
+            project_id: project_id.to_string(),
+            expected_hash: expected_hash.to_string(),
+            content: content.to_string(),
+        };
+        let resp: RemoteWorkflowDocumentResp = self
+            .post_json_peer(&url, &body, RemoteRequestTimeoutKind::Long)
+            .await?;
+        Ok(resp.document)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     三条 workflow-document 路由共享同一能力 token，client 必须先 gate 再发请求。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 PeerClient::require_capability。
+    async fn require_workflow_document_capability(
+        &self,
+        base_url: &str,
+    ) -> Result<(), PeerCallError> {
+        PeerClient::new()
+            .require_capability(base_url, CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1)
+            .await
+            .map(|_| ())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     workflow-document client 方法复用统一的 request-id/timeout/解析路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST JSON body，解析 PeerCallError。
+    async fn post_json_peer<T, B>(
+        &self,
+        url: &str,
+        body: &B,
+        timeout_kind: RemoteRequestTimeoutKind,
+    ) -> Result<T, PeerCallError>
+    where
+        T: DeserializeOwned,
+        B: Serialize,
+    {
+        let outbound_request_id = self
+            .forwarded_request_id
+            .clone()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(crate::net::request_context::new_request_id);
+        let response = self
+            .client
+            .post(url)
+            .json(body)
+            .header(
+                crate::net::request_context::REQUEST_ID_HEADER,
+                outbound_request_id,
+            )
+            .timeout(remote_request_timeout(timeout_kind))
+            .send()
+            .await
+            .map_err(|error| PeerCallError::Network {
+                url: url.to_string(),
+                source: error,
+            })?;
+        parse_peer_response::<T>(response, url).await
     }
 
     /// 将远端草稿任务入队。
@@ -1493,6 +1624,68 @@ mod tests {
         assert!(
             matches!(err, PeerCallError::Unsupported { capability, .. } if capability == CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1),
             "expected Unsupported for review-diff capability, got {err:?}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "capability gate 不得调用目标路由");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     workflow-document client 必须 capability-gate；缺失 token 时 Unsupported 且不打目标路由。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     health 无 token + get 路由计数器，调用 get_workflow_document 断言 Unsupported 且 hit=0。
+    #[tokio::test]
+    async fn workflow_document_returns_unsupported_when_capability_absent() {
+        use crate::net::peer_error::PeerCallError;
+        use crate::net::protocol::CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1;
+        use crate::net::routes::health::HealthResponse;
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_route = hits.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "owning-device".to_string(),
+                        device_name: "Owning Device".to_string(),
+                        http_port: 8765,
+                        ts: 1_700_000_000,
+                        protocol_version: 1,
+                        capabilities: vec![],
+                    })
+                }),
+            )
+            .route(
+                "/api/orchestrator/workflow-document/get",
+                post(move |Json(_body): Json<serde_json::Value>| {
+                    let hits = hits_route.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({
+                            "document": {
+                                "status": "missing",
+                                "content": null,
+                                "contentHash": null,
+                                "diagnostics": []
+                            }
+                        }))
+                    }
+                }),
+            );
+        let base_url = spawn_orchestrator_server(app).await;
+
+        let err = RemoteOrchestratorClient::new()
+            .get_workflow_document(&base_url, "project-1")
+            .await
+            .expect_err("无能力 token 应被 capability gate 拦截");
+        assert!(
+            matches!(err, PeerCallError::Unsupported { capability, .. } if capability == CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1),
+            "expected Unsupported for workflow-document capability, got {err:?}"
         );
         assert_eq!(hits.load(Ordering::SeqCst), 0, "capability gate 不得调用目标路由");
     }

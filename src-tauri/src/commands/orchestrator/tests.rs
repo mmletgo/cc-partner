@@ -2331,3 +2331,83 @@ async fn review_diff_changed_leaves_task_in_human_review_without_delivery_side_e
         "digest 冲突后不得写入 delivery evidence"
     );
 }
+
+/// Business Logic（为什么需要这个测试）:
+///     generate_handler! 必须注册三个 workflow document 命令，否则桌面向导 invoke 失败。
+///
+/// Code Logic（这个测试做什么）:
+///     断言命令名常量与 lib.rs 字面量包含 get/validate/save_workflow_document。
+#[test]
+fn workflow_document_commands_command_registration() {
+    assert_eq!(
+        crate::commands::orchestrator::__tauri_command_name_get_workflow_document!(),
+        "get_workflow_document"
+    );
+    assert_eq!(
+        crate::commands::orchestrator::__tauri_command_name_validate_workflow_document!(),
+        "validate_workflow_document"
+    );
+    assert_eq!(
+        crate::commands::orchestrator::__tauri_command_name_save_workflow_document!(),
+        "save_workflow_document"
+    );
+    let lib_src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
+    for name in [
+        "get_workflow_document",
+        "validate_workflow_document",
+        "save_workflow_document",
+    ] {
+        assert!(
+            lib_src.contains(name),
+            "lib.rs generate_handler 必须包含 {name}"
+        );
+    }
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     本地 owner helper 必须能从真实项目路径 load/validate/save，且 save 不隐式 dispatch。
+///
+/// Code Logic（这个测试做什么）:
+///     用临时目录构造 local project row，跑 get/validate/save CAS 一轮。
+#[test]
+fn local_owner_workflow_document_helpers_round_trip_without_dispatch() {
+    use crate::orchestrator::workflow::{
+        default_workflow_template, WorkflowDocumentStatus, WORKFLOW_DOCUMENT_CHANGED_CODE,
+    };
+    use crate::workbench::models::WorkbenchProjectRow;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = WorkbenchProjectRow {
+        id: "proj-wf".to_string(),
+        name: "wf".to_string(),
+        kind: "local".to_string(),
+        device_id: "dev".to_string(),
+        device_name: "dev".to_string(),
+        path: dir.path().to_string_lossy().to_string(),
+        last_opened_at: "t".to_string(),
+        created_at: "t".to_string(),
+        updated_at: "t".to_string(),
+    };
+
+    let missing = get_local_owner_workflow_document(&project).expect("get missing");
+    assert_eq!(missing.status, WorkflowDocumentStatus::Missing);
+
+    let template = default_workflow_template();
+    let validated = validate_local_owner_workflow_document(&project, &template).expect("validate");
+    assert_eq!(validated.status, WorkflowDocumentStatus::Valid);
+
+    let saved =
+        save_local_owner_workflow_document(&project, "", &template).expect("create save");
+    assert_eq!(saved.status, WorkflowDocumentStatus::Valid);
+    let hash = saved.content_hash.clone().expect("hash");
+
+    let conflict = save_local_owner_workflow_document(&project, "bad", &template)
+        .expect_err("hash conflict");
+    assert_eq!(conflict.code(), WORKFLOW_DOCUMENT_CHANGED_CODE);
+
+    let updated = template.replace("300000", "120000");
+    let saved2 =
+        save_local_owner_workflow_document(&project, &hash, &updated).expect("update save");
+    assert_eq!(saved2.status, WorkflowDocumentStatus::Valid);
+    assert_ne!(saved2.content_hash.as_deref(), Some(hash.as_str()));
+}

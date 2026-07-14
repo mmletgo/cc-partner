@@ -15,7 +15,13 @@ use crate::orchestrator::outbox::{
     sync_remote_task_mirror_for_project,
 };
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
+use crate::orchestrator::workflow::{
+    load_workflow_document, save_workflow_document_at_project_root, validate_workflow_content,
+    WorkflowDocument,
+};
 use crate::state::AppState;
+use crate::workbench::models::WorkbenchProjectRow;
+use std::path::Path;
 use tauri::State;
 
 use super::common::*;
@@ -373,6 +379,264 @@ pub async fn move_orchestrator_task_workflow_state(
         state.orchestrator_repo.as_ref(),
         &project,
         request,
+    )
+    .await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     向导需要 remote-aware 读取 WORKFLOW.md 状态；local 直接读盘，remote 由 owning device 权威返回。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 Workbench 项目；local 在 project.path 上 `load_workflow_document`；
+///     remote open owning device 后 capability-gated 调用 get_workflow_document。
+pub(crate) async fn get_workflow_document_for_state(
+    state: &AppState,
+    project_id: &str,
+) -> Result<WorkflowDocument, AppError> {
+    let project = get_orchestrator_workbench_project(state, project_id).await?;
+    if project.kind == "remote" {
+        return get_remote_workflow_document(state, &project, WorkflowDocumentRemoteOp::Get {
+            content: None,
+            expected_hash: None,
+        })
+        .await;
+    }
+    get_local_owner_workflow_document(&project)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     保存前权威校验可在 local 或 remote owner 上执行，前端不得把前端 YAML 提示当最终结果。
+///
+/// Code Logic（这个函数做什么）:
+///     local 直接 `validate_workflow_content`；remote 转发 content 到 owning device validate 路由。
+pub(crate) async fn validate_workflow_document_for_state(
+    state: &AppState,
+    project_id: &str,
+    content: &str,
+) -> Result<WorkflowDocument, AppError> {
+    let project = get_orchestrator_workbench_project(state, project_id).await?;
+    if project.kind == "remote" {
+        return get_remote_workflow_document(
+            state,
+            &project,
+            WorkflowDocumentRemoteOp::Validate {
+                content: Some(content.to_string()),
+                expected_hash: None,
+            },
+        )
+        .await;
+    }
+    // validate 不读盘，但要求 project 存在且为 local，避免对已删除项目误报。
+    let _ = require_local_project_path(&project)?;
+    Ok(validate_workflow_content(content))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     CAS 保存必须在文件所在设备执行；成功后不 dispatch、不改变 delivery。
+///
+/// Code Logic（这个函数做什么）:
+///     local 调 `save_workflow_document_at_project_root`；remote capability-gated 转发 save。
+pub(crate) async fn save_workflow_document_for_state(
+    state: &AppState,
+    project_id: &str,
+    expected_hash: &str,
+    content: &str,
+) -> Result<WorkflowDocument, AppError> {
+    let project = get_orchestrator_workbench_project(state, project_id).await?;
+    if project.kind == "remote" {
+        return get_remote_workflow_document(
+            state,
+            &project,
+            WorkflowDocumentRemoteOp::Save {
+                content: Some(content.to_string()),
+                expected_hash: Some(expected_hash.to_string()),
+            },
+        )
+        .await;
+    }
+    let project_path = require_local_project_path(&project)?;
+    // spawn_blocking 避免阻塞 async runtime 的磁盘 IO。
+    let expected_hash = expected_hash.to_string();
+    let content = content.to_string();
+    tokio::task::spawn_blocking(move || {
+        save_workflow_document_at_project_root(&project_path, &expected_hash, &content)
+    })
+    .await
+    .map_err(|error| AppError::generic(format!("保存 WORKFLOW.md join 失败: {error}")))?
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     owning-device P2P 路由只接受 local 项目，需要在确认 kind 后复用磁盘文档 helper。
+///
+/// Code Logic（这个函数做什么）:
+///     要求 project.kind=local，在 project.path 上 load。
+pub(crate) fn get_local_owner_workflow_document(
+    project: &WorkbenchProjectRow,
+) -> Result<WorkflowDocument, AppError> {
+    let project_path = require_local_project_path(project)?;
+    Ok(load_workflow_document(&project_path))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     owning-device save 必须确认 local 项目后 CAS 写盘，且不触发 dispatch。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 local path 后调用 `save_workflow_document_at_project_root`。
+pub(crate) fn save_local_owner_workflow_document(
+    project: &WorkbenchProjectRow,
+    expected_hash: &str,
+    content: &str,
+) -> Result<WorkflowDocument, AppError> {
+    let project_path = require_local_project_path(project)?;
+    save_workflow_document_at_project_root(&project_path, expected_hash, content)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     owning-device validate 只需确认 local 项目身份后对 content 跑权威 parser。
+///
+/// Code Logic（这个函数做什么）:
+///     require local 后返回 `validate_workflow_content(content)`。
+pub(crate) fn validate_local_owner_workflow_document(
+    project: &WorkbenchProjectRow,
+    content: &str,
+) -> Result<WorkflowDocument, AppError> {
+    let _ = require_local_project_path(project)?;
+    Ok(validate_workflow_content(content))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     所有文档 API 只能作用在本机 local 项目路径，remote shortcut 必须走 P2P。
+///
+/// Code Logic（这个函数做什么）:
+///     kind!=local → validation；否则返回 PathBuf(project.path)。
+fn require_local_project_path(project: &WorkbenchProjectRow) -> Result<std::path::PathBuf, AppError> {
+    if project.kind != "local" {
+        return Err(AppError::validation(
+            "远端 Orchestrator 只接受对端本机项目",
+        ));
+    }
+    let path = Path::new(&project.path);
+    if project.path.trim().is_empty() {
+        return Err(AppError::validation("项目路径不能为空"));
+    }
+    Ok(path.to_path_buf())
+}
+
+/// remote workflow document 操作类型。
+enum WorkflowDocumentRemoteOp {
+    Get {
+        content: Option<String>,
+        expected_hash: Option<String>,
+    },
+    Validate {
+        content: Option<String>,
+        expected_hash: Option<String>,
+    },
+    Save {
+        content: Option<String>,
+        expected_hash: Option<String>,
+    },
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的 WORKFLOW 向导必须读写 owning device 上的权威文件。
+///
+/// Code Logic（这个函数做什么）:
+///     open remote project → capability-gated client 方法 → 返回 WorkflowDocument。
+async fn get_remote_workflow_document(
+    state: &AppState,
+    remote_shortcut: &WorkbenchProjectRow,
+    op: WorkflowDocumentRemoteOp,
+) -> Result<WorkflowDocument, AppError> {
+    let context = open_remote_project_for_shortcut(state, remote_shortcut, None).await?;
+    let client = RemoteOrchestratorClient::new();
+    let result = match op {
+        WorkflowDocumentRemoteOp::Get { .. } => {
+            client
+                .get_workflow_document(&context.base_url, &context.remote_project_id)
+                .await
+        }
+        WorkflowDocumentRemoteOp::Validate { content, .. } => {
+            let content = content.unwrap_or_default();
+            client
+                .validate_workflow_document(
+                    &context.base_url,
+                    &context.remote_project_id,
+                    &content,
+                )
+                .await
+        }
+        WorkflowDocumentRemoteOp::Save {
+            content,
+            expected_hash,
+        } => {
+            let content = content.unwrap_or_default();
+            let expected_hash = expected_hash.unwrap_or_default();
+            client
+                .save_workflow_document(
+                    &context.base_url,
+                    &context.remote_project_id,
+                    &expected_hash,
+                    &content,
+                )
+                .await
+        }
+    };
+    result.map_err(|error| {
+        crate::net::peer_error::peer_call_error_to_app_error(error, "远端 Orchestrator")
+    })
+}
+
+/// 读取 remote-aware WORKFLOW 文档状态。
+///
+/// Business Logic（为什么需要这个函数）:
+///     向导检测步骤需要 missing/valid/invalid/readError 与 contentHash。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `get_workflow_document_for_state`。
+#[tauri::command]
+pub async fn get_workflow_document(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<WorkflowDocument, AppError> {
+    get_workflow_document_for_state(state.inner(), project_id.trim()).await
+}
+
+/// 权威校验 WORKFLOW 文档内容。
+///
+/// Business Logic（为什么需要这个函数）:
+///     保存前必须调用后端 parser；返回 diagnostics 与规范化 preview。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `validate_workflow_document_for_state`。
+#[tauri::command]
+pub async fn validate_workflow_document(
+    state: State<'_, AppState>,
+    project_id: String,
+    content: String,
+) -> Result<WorkflowDocument, AppError> {
+    validate_workflow_document_for_state(state.inner(), project_id.trim(), &content).await
+}
+
+/// CAS 保存 WORKFLOW 文档。
+///
+/// Business Logic（为什么需要这个函数）:
+///     向导保存使用 expectedHash；冲突要求重新加载；成功后不自动 dispatch。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `save_workflow_document_for_state`；不调用 scheduler。
+#[tauri::command]
+pub async fn save_workflow_document(
+    state: State<'_, AppState>,
+    project_id: String,
+    expected_hash: String,
+    content: String,
+) -> Result<WorkflowDocument, AppError> {
+    save_workflow_document_for_state(
+        state.inner(),
+        project_id.trim(),
+        &expected_hash,
+        &content,
     )
     .await
 }

@@ -92,6 +92,7 @@ advertised capabilities are:
 - `errors.envelope.v1` — standard error envelope wire format
 - `orchestrator.review-diff.v1` — owning-device bounded Human Review / Rework diff (`POST /api/orchestrator/tasks/review-diff`); token and route ship atomically; mobile remote-aware wrapper at `/api/mobile/orchestrator/tasks/review-diff`
 - `orchestrator.runtime-snapshot.v1` — owning-device runtime snapshot route
+- `orchestrator.workflow-document.v1` — owning-device WORKFLOW.md document get/validate/save (`POST /api/orchestrator/workflow-document/{get,validate,save}`); token and routes ship atomically; mobile remote-aware wrappers under `/api/mobile/orchestrator/workflow-document/*`
 - `sync.manifest.v2` — bounded Prompt / SSH target / Scratchpad content sync (`POST /api/sync/prompts/{manifest-page,items,push-batch,ack-delete-epoch}`, `/api/ssh-target/sync/{...}`, `/api/scratchpad/sync/{...}`); token ships with transactional bulk upsert + request ledger + apply_merge_batch + dedicated watermark ack
 - `transfer.complete.v1` — explicit transfer finalize handshake (`POST /api/transfer/complete/:id`)
 - `transfer.resume.v1` — sender-side resume recovery (stable `protocolTransferId` + source fingerprint + peer checkpoint). Token ships with `resume_transfer` / operation ledger claim; **no new LAN route** — wire still uses init/chunk/complete/status keyed by the stable protocol id
@@ -113,9 +114,9 @@ route access or route existence. Concretely:
   "new routes are available".
 - Route-specific capabilities (`attention.v1`, `cc-history.paged-sync.v1`,
   `orchestrator.review-diff.v1`, `orchestrator.runtime-snapshot.v1`,
-  `sync.manifest.v2`, `transfer.complete.v1`, `transfer.resume.v1`, …) ship as
-  **independent** tokens alongside their own contracts and must not reuse
-  `errors.envelope.v1` to mean "new routes supported".
+  `orchestrator.workflow-document.v1`, `sync.manifest.v2`, `transfer.complete.v1`,
+  `transfer.resume.v1`, …) ship as **independent** tokens alongside their own
+  contracts and must not reuse `errors.envelope.v1` to mean "new routes supported".
 
 The existing capability gate (`peer_client::require_capability`) is therefore a
 **format** gate when used with `errors.envelope.v1`, and a **route** gate when
@@ -275,6 +276,12 @@ the router so the inventory check matches exactly.
 | POST | `/api/orchestrator/tasks/evidence` | `routes/orchestrator.rs` | none; reads evidence list | read-only | — |
 | POST | `/api/orchestrator/tasks/review-diff` | `routes/orchestrator.rs` | none; reads bounded Human Review / Rework diff snapshot | read-only | capability-gated by `orchestrator.review-diff.v1`; body camelCase `{taskId}` only; base/head from task/worktree; rejects remote shortcuts; outside Human Review/Rework → conflict `review_diff_unavailable` |
 | POST | `/api/mobile/orchestrator/tasks/review-diff` | `routes/orchestrator.rs` | none; remote-aware review diff for mobile browser | read-only | body camelCase `{projectId,taskId}`; reuses Tauri remote-aware helper; never exposes owner P2P base URL |
+| POST | `/api/orchestrator/workflow-document/get` | `routes/orchestrator.rs` | none; reads WORKFLOW.md status/content/hash | read-only | capability-gated by `orchestrator.workflow-document.v1`; body camelCase `{projectId}`; rejects remote shortcuts; rejects symlink |
+| POST | `/api/orchestrator/workflow-document/validate` | `routes/orchestrator.rs` | none; authoritative parse diagnostics | read-only | capability-gated by `orchestrator.workflow-document.v1`; body camelCase `{projectId,content}`; rejects remote shortcuts |
+| POST | `/api/orchestrator/workflow-document/save` | `routes/orchestrator.rs` | CAS atomic write of WORKFLOW.md | no-transport-retry | capability-gated by `orchestrator.workflow-document.v1`; body camelCase `{projectId,expectedHash,content}`; expectedHash empty creates missing file only; drift → conflict `workflow_document_changed`; does not dispatch or change delivery |
+| POST | `/api/mobile/orchestrator/workflow-document/get` | `routes/orchestrator.rs` | none; remote-aware WORKFLOW document read | read-only | body camelCase `{projectId}`; reuses Tauri remote-aware helper; never exposes owner P2P base URL |
+| POST | `/api/mobile/orchestrator/workflow-document/validate` | `routes/orchestrator.rs` | none; remote-aware WORKFLOW validate | read-only | body camelCase `{projectId,content}`; reuses Tauri remote-aware helper |
+| POST | `/api/mobile/orchestrator/workflow-document/save` | `routes/orchestrator.rs` | CAS save via remote-aware helper | no-transport-retry | body camelCase `{projectId,expectedHash,content}`; reuses Tauri helper; does not dispatch |
 | POST | `/api/orchestrator/tasks/queue` | `routes/orchestrator.rs` | atomic Draft→Queued transition | no-transport-retry | Orchestrator lifecycle action; replay after timeout races the scheduler claim |
 | POST | `/api/orchestrator/tasks/start` | `routes/orchestrator.rs` | moves task into scheduler path + best-effort dispatch | no-transport-retry | Orchestrator lifecycle action |
 | POST | `/api/orchestrator/tasks/retry` | `routes/orchestrator.rs` | atomic Blocked→Queued transition | no-transport-retry | Orchestrator lifecycle action |

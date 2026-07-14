@@ -58,23 +58,26 @@ pub use runtime::{
 pub use tasks::{
     __cmd__cancel_orchestrator_task_view, __cmd__create_orchestrator_task,
     __cmd__create_orchestrator_task_view, __cmd__deliver_reviewed_orchestrator_task_view,
-    __cmd__list_orchestrator_task_views, __cmd__list_orchestrator_tasks,
-    __cmd__move_orchestrator_task_workflow_state, __cmd__refresh_orchestrator_project,
-    __cmd__request_orchestrator_task_rework_view, __cmd__start_orchestrator_task_view,
-    __tauri_command_name_cancel_orchestrator_task_view,
+    __cmd__get_workflow_document, __cmd__list_orchestrator_task_views,
+    __cmd__list_orchestrator_tasks, __cmd__move_orchestrator_task_workflow_state,
+    __cmd__refresh_orchestrator_project, __cmd__request_orchestrator_task_rework_view,
+    __cmd__save_workflow_document, __cmd__start_orchestrator_task_view,
+    __cmd__validate_workflow_document, __tauri_command_name_cancel_orchestrator_task_view,
     __tauri_command_name_create_orchestrator_task,
     __tauri_command_name_create_orchestrator_task_view,
     __tauri_command_name_deliver_reviewed_orchestrator_task_view,
-    __tauri_command_name_list_orchestrator_task_views,
+    __tauri_command_name_get_workflow_document, __tauri_command_name_list_orchestrator_task_views,
     __tauri_command_name_list_orchestrator_tasks,
     __tauri_command_name_move_orchestrator_task_workflow_state,
     __tauri_command_name_refresh_orchestrator_project,
     __tauri_command_name_request_orchestrator_task_rework_view,
-    __tauri_command_name_start_orchestrator_task_view, cancel_orchestrator_task_view,
+    __tauri_command_name_save_workflow_document, __tauri_command_name_start_orchestrator_task_view,
+    __tauri_command_name_validate_workflow_document, cancel_orchestrator_task_view,
     create_orchestrator_task, create_orchestrator_task_view,
-    deliver_reviewed_orchestrator_task_view, list_orchestrator_task_views, list_orchestrator_tasks,
-    move_orchestrator_task_workflow_state, refresh_orchestrator_project,
-    request_orchestrator_task_rework_view, start_orchestrator_task_view,
+    deliver_reviewed_orchestrator_task_view, get_workflow_document, list_orchestrator_task_views,
+    list_orchestrator_tasks, move_orchestrator_task_workflow_state, refresh_orchestrator_project,
+    request_orchestrator_task_rework_view, save_workflow_document, start_orchestrator_task_view,
+    validate_workflow_document,
 };
 
 // 外部 crate 内模块（routes / completion / remote_client / tests）需要的 helper
@@ -98,6 +101,8 @@ pub use common::{
 };
 pub(crate) use runtime::create_orchestrator_task_view_for_http_with_request_id;
 pub(crate) use tasks::{
-    get_orchestrator_runtime_snapshot_for_state_with_request_id,
-    list_orchestrator_task_views_for_state_with_request_id,
+    get_local_owner_workflow_document, get_orchestrator_runtime_snapshot_for_state_with_request_id,
+    get_workflow_document_for_state, list_orchestrator_task_views_for_state_with_request_id,
+    save_local_owner_workflow_document, save_workflow_document_for_state,
+    validate_local_owner_workflow_document, validate_workflow_document_for_state,
 };
