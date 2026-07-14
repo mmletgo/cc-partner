@@ -404,6 +404,22 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         // Claude Code 历史同步协议（独立链路）：cc-history/sync/{pull,push}，snake_case 互通
         .route("/api/cc-history/sync/pull", post(cc_history::cc_sync_pull))
         .route("/api/cc-history/sync/push", post(cc_history::cc_sync_push))
+        // 分页 CC History 同步（capability cc-history.paged-sync.v1）：route body 上限 8 MiB
+        .route(
+            "/api/cc-history/sync/manifest-page",
+            post(cc_history::cc_sync_manifest_page)
+                .layer(DefaultBodyLimit::max(cc_history::CC_ROUTE_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/api/cc-history/sync/items",
+            post(cc_history::cc_sync_items)
+                .layer(DefaultBodyLimit::max(cc_history::CC_ROUTE_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/api/cc-history/sync/push-batch",
+            post(cc_history::cc_sync_push_batch)
+                .layer(DefaultBodyLimit::max(cc_history::CC_ROUTE_BODY_LIMIT_BYTES)),
+        )
         // SSH 目标同步协议（独立链路）：ssh-target/sync/{pull,push}，snake_case 互通
         .route(
             "/api/ssh-target/sync/pull",

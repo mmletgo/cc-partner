@@ -429,6 +429,35 @@ impl P2pError {
         Self::from_code(message, P2pErrorCode::Internal, context)
     }
 
+    /// 领域稳定错误码构造：自由 `code` 字符串 + 精确 HTTP 状态 + retryable。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     CC History 分页同步等协议需要对外稳定的领域 code
+    ///     （如 `cc_history.batch_too_large` / `cc_history.item_too_large` /
+    ///     `cc_history.invalid_cursor`），客户端据此做拆批/终止，而不是读本地化文案。
+    ///     这些 code 不是通用分类 token，不能复用 `from_code(P2pErrorCode)` 的固定映射
+    ///     （例如 422 与 413 必须保持精确状态，且 retryable 常为 false）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     直接写入 envelope.code 字符串与给定 status/retryable，request_id 取自 context；
+    ///     details 默认 `{}`。调用方负责保证 code 与 status 的协议契约一致。
+    pub fn stable(
+        message: impl Into<String>,
+        code: &str,
+        status: StatusCode,
+        context: &P2pRequestContext,
+        retryable: bool,
+    ) -> Self {
+        let envelope = P2pErrorEnvelope {
+            error: message.into(),
+            code: code.to_string(),
+            request_id: context.request_id.clone(),
+            retryable,
+            details: default_details(),
+        };
+        Self { envelope, status }
+    }
+
     /// 把任意裸响应（无信封 body）包成信封（Finding 1 fallback handler 使用）。
     ///
     /// Business Logic（为什么需要这个函数 / Finding 1）:
