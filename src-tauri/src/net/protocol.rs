@@ -277,12 +277,13 @@ mod tests {
 
     /// Business Logic（为什么需要这个测试）:
     ///     `server_protocol_info()` 是本机对外的能力宣告入口，本轮必须宣告 v1
-    ///     且包含 `attention.v1`、`errors.envelope.v1`、`orchestrator.runtime-snapshot.v1`
-    ///     与 `transfer.complete.v1`（分别与对应路由原子上线）。
+    ///     且包含 `attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、
+    ///     `orchestrator.runtime-snapshot.v1` 与 `transfer.complete.v1`
+    ///     （分别与对应路由原子上线；paged-sync 与三条 CC History 分页路由同 build）。
     ///
     /// Code Logic（这个测试做什么）:
     ///     调用 `server_protocol_info()`，断言 protocol_version == 1 且 capabilities
-    ///     去重排序后正好等于四 token 字典序列表。
+    ///     去重排序后正好等于五 token 字典序列表；并确认 supports(paged-sync) 为 true。
     #[test]
     fn server_protocol_info_advertises_v1_with_current_capabilities() {
         let info = server_protocol_info();
@@ -297,5 +298,6 @@ mod tests {
                 "transfer.complete.v1".to_string(),
             ]
         );
+        assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
     }
 }

@@ -123,7 +123,34 @@ cargo test --locked net::lan_guard --lib
 cargo test --locked net::http_server --lib
 ```
 
+## Backend scale & observability (S5)
+
+Local correctness and protocol inventory for bounded Orchestrator claim + paged CC History:
+
+```bash
+# Protocol inventory + docs facts (route count +3 for manifest-page/items/push-batch)
+node scripts/check-p2p-route-inventory.mjs
+node scripts/check-docs.mjs
+node scripts/check-docs.mjs --self-test
+
+cd src-tauri
+cargo test --locked net::protocol --lib
+cargo test --locked net::routes::cc_history --lib
+cargo test --locked --test backend_scale -- --nocapture --test-threads=1
+# Optional load gate (ignored; prints desensitized JSON only — no IDs/content/path)
+# cargo test --release --locked --test backend_scale backend_scale_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+| Surface | Status |
+| --- | --- |
+| Paged routes + capability `cc-history.paged-sync.v1` atomic | Verified by inventory + protocol unit tests |
+| Mixed-version new↔new / new↔legacy / legacy↔new | Verified (`backend_scale` + mixed_version_harness) |
+| Claim IO outside SQLite transaction / CAS no duplicate | Verified (`backend_scale` orchestrator_claim_*) |
+| Production SQLite pool expansion to 2 | **NOT VERIFIED / keep `max_connections(1)`** until Task 8 five-gate evidence authorizes a separate commit |
+| Metrics telemetry upload | **Out of product scope** — process-local + sanitized tracing only |
+
 ## Hosted smoke: NOT VERIFIED
+
 
 Do not claim Cross-Platform Smoke (or “CI smoke”) already proves:
 
