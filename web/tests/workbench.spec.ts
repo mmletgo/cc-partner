@@ -434,7 +434,6 @@ test.describe('E2E-WORKBENCH-001 Workbench critical journey', () => {
     }
 
     // 远端离线：切 remote，所有读 reject → 禁写；再成功恢复
-    let offline = true;
     backendHarness.command('list_workbench_worktrees', {
       kind: 'reject',
       error: new Error(REMOTE_OFFLINE_ERROR),

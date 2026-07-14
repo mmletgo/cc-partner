@@ -190,7 +190,7 @@ export function SettingsGeneralPanel({
   <div className={styles.footerLeft}>
     {saveError ? (
       <span className={styles.updateError} role="alert">
-        {t('settings:status.saveFailed')}: {saveError}
+        {t('settings:error.saveFailed')}: {saveError}
       </span>
     ) : null}
     {isDirty ? (

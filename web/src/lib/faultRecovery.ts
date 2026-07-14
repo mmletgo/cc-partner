@@ -385,24 +385,10 @@ export function planFaultRecovery(input: PlanFaultRecoveryInput): FaultRecoveryP
   const { classification, hasCache, optimisticApplied } = input;
   const policy = classification.cachePolicy;
 
-  let keepCache = false;
-  let markStale = false;
-  let clearCache = false;
-
-  if (policy === 'keepStale') {
-    keepCache = hasCache;
-    markStale = hasCache;
-    clearCache = false;
-  } else if (policy === 'clear') {
-    keepCache = false;
-    markStale = false;
-    clearCache = true;
-  } else {
-    // none：不写新 cache，也不强制 clear；不把现有数据标 stale 作“权威恢复”
-    keepCache = hasCache;
-    markStale = false;
-    clearCache = false;
-  }
+  // none：不写新 cache，也不强制 clear；不把现有数据标 stale 作“权威恢复”
+  const keepCache = policy === 'clear' ? false : hasCache;
+  const markStale = policy === 'keepStale' ? hasCache : false;
+  const clearCache = policy === 'clear';
 
   return {
     keepCache,
@@ -501,7 +487,8 @@ export function createTerminalFaultBridge(): TerminalFaultBridge {
       connected = true;
       // 不自动重放输入；seenInputKeys 保留以保证 replay 幂等
     },
-    acceptInput(key: string, _payload?: string): boolean {
+    acceptInput(key: string, payload?: string): boolean {
+      void payload;
       if (!connected) {
         return false;
       }
