@@ -225,6 +225,23 @@ export function Settings(): ReactElement {
               lanSyncResult={ctrl.lanSyncResult}
               lanSyncing={ctrl.lanSyncing}
               lanSyncError={ctrl.lanSyncError}
+              backupExporting={ctrl.backupExporting}
+              backupExportPath={ctrl.backupExportPath}
+              backupExportError={ctrl.backupExportError}
+              backupRestoring={ctrl.backupRestoring}
+              backupInspect={ctrl.backupInspect}
+              backupArchivePath={ctrl.backupArchivePath}
+              backupSelectedDomains={ctrl.backupSelectedDomains}
+              backupMode={ctrl.backupMode}
+              backupRestoreDialogOpen={ctrl.backupRestoreDialogOpen}
+              backupRestoreResult={ctrl.backupRestoreResult}
+              backupRestoreError={ctrl.backupRestoreError}
+              backupJobs={ctrl.backupJobs}
+              backupJobsLoading={ctrl.backupJobsLoading}
+              backupJobsError={ctrl.backupJobsError}
+              backupRollbackJobId={ctrl.backupRollbackJobId}
+              backupRollbackDialogOpen={ctrl.backupRollbackDialogOpen}
+              backupRollingBack={ctrl.backupRollingBack}
               onPatch={ctrl.patchCloudSyncForm}
               onResetDefaults={ctrl.handleResetCloudSyncDefaults}
               onTest={() => void ctrl.handleTestCloudSync()}
@@ -232,6 +249,17 @@ export function Settings(): ReactElement {
               onSyncNow={() => void ctrl.handleSyncNow()}
               onLanSyncNow={() => void ctrl.handleLanSyncNow()}
               onRetryLoad={() => void ctrl.handleRetryResourceGroup('cloudSync')}
+              onBackupExport={() => void ctrl.handleBackupExport()}
+              onBackupPickRestore={() => void ctrl.handleBackupPickRestore()}
+              onBackupToggleDomain={ctrl.handleBackupToggleDomain}
+              onBackupSetMode={ctrl.handleBackupSetMode}
+              onBackupOpenRestoreDialog={ctrl.handleBackupOpenRestoreDialog}
+              onBackupRestoreConfirm={() => void ctrl.handleBackupRestoreConfirm()}
+              onCloseRestoreDialog={ctrl.handleCloseRestoreDialog}
+              onRefreshRecoveryJobs={() => void ctrl.handleRefreshRecoveryJobs()}
+              onOpenRollback={ctrl.handleOpenRollback}
+              onConfirmRollback={() => void ctrl.handleConfirmRollback()}
+              onCloseRollbackDialog={ctrl.handleCloseRollbackDialog}
             />
           </div>
         ) : null}

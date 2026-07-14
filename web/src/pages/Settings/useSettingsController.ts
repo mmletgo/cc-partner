@@ -18,7 +18,19 @@ import { configApi } from '@/api/config';
 import { healthApi } from '@/api/health';
 import { orchestratorConfigApi } from '@/api/orchestratorConfig';
 import { githubTrendingApi } from '@/api/githubTrending';
-import { syncApi, type SyncRunResult } from '@/api/sync';
+import {
+  backupApi,
+  pickBackupArchivePath,
+  pickBackupExportPath,
+  BACKUP_RESTORE_DOMAINS,
+  type BackupInspectPreview,
+  type BackupRestoreResult,
+  type BackupRestoreDomain,
+  type RecoveryJobRow,
+  type RestoreMode,
+  type SyncRunResult,
+  syncApi,
+} from '@/api/sync';
 import { usePermissions } from '@/hooks/usePermissions';
 import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import {
@@ -250,6 +262,40 @@ export interface UseSettingsControllerResult {
   lanSyncing: boolean;
   /** 局域网同步错误文案 */
   lanSyncError: string | null;
+  /** 备份导出进行中 */
+  backupExporting: boolean;
+  /** 最近一次导出成功路径 */
+  backupExportPath: string | null;
+  /** 导出错误文案 */
+  backupExportError: string | null;
+  /** 恢复/inspect 进行中 */
+  backupRestoring: boolean;
+  /** inspect 预览 */
+  backupInspect: BackupInspectPreview | null;
+  /** 待恢复归档路径 */
+  backupArchivePath: string | null;
+  /** 勾选的恢复领域 */
+  backupSelectedDomains: BackupRestoreDomain[];
+  /** 恢复模式 */
+  backupMode: RestoreMode;
+  /** 恢复确认 Dialog 是否打开 */
+  backupRestoreDialogOpen: boolean;
+  /** 最近一次恢复结果 */
+  backupRestoreResult: BackupRestoreResult | null;
+  /** 恢复/inspect 错误文案 */
+  backupRestoreError: string | null;
+  /** 恢复任务列表 */
+  backupJobs: RecoveryJobRow[];
+  /** 任务列表加载中 */
+  backupJobsLoading: boolean;
+  /** 任务列表错误 */
+  backupJobsError: string | null;
+  /** 待回滚 job id */
+  backupRollbackJobId: string | null;
+  /** 回滚确认 Dialog */
+  backupRollbackDialogOpen: boolean;
+  /** 回滚进行中 */
+  backupRollingBack: boolean;
   patchCloudSyncForm: (partial: Partial<CloudSyncForm>) => void;
   handleResetCloudSyncDefaults: () => void;
   handleTestCloudSync: () => Promise<void>;
@@ -257,6 +303,28 @@ export interface UseSettingsControllerResult {
   handleSyncNow: () => Promise<void>;
   /** 触发局域网 trigger_sync */
   handleLanSyncNow: () => Promise<void>;
+  /** 导出可验证备份 */
+  handleBackupExport: () => Promise<void>;
+  /** 选择备份并 inspect 预览 */
+  handleBackupPickRestore: () => Promise<void>;
+  /** 切换恢复领域勾选 */
+  handleBackupToggleDomain: (domain: BackupRestoreDomain) => void;
+  /** 设置恢复模式 */
+  handleBackupSetMode: (mode: RestoreMode) => void;
+  /** 打开恢复确认 Dialog */
+  handleBackupOpenRestoreDialog: () => void;
+  /** 确认执行 restore */
+  handleBackupRestoreConfirm: () => Promise<void>;
+  /** 关闭恢复确认 Dialog */
+  handleCloseRestoreDialog: () => void;
+  /** 刷新恢复任务列表 */
+  handleRefreshRecoveryJobs: () => Promise<void>;
+  /** 打开回滚确认 */
+  handleOpenRollback: (jobId: string) => void;
+  /** 确认回滚 */
+  handleConfirmRollback: () => Promise<void>;
+  /** 关闭回滚确认 */
+  handleCloseRollbackDialog: () => void;
 
   // ai / github trending
   githubTrendingForm: GithubTrendingForm;
@@ -389,6 +457,27 @@ export function useSettingsController(): UseSettingsControllerResult {
   const [lanSyncResult, setLanSyncResult] = useState<SyncRunResult | null>(null);
   const [lanSyncing, setLanSyncing] = useState(false);
   const [lanSyncError, setLanSyncError] = useState<string | null>(null);
+  const [backupExporting, setBackupExporting] = useState(false);
+  const [backupExportPath, setBackupExportPath] = useState<string | null>(null);
+  const [backupExportError, setBackupExportError] = useState<string | null>(null);
+  const [backupRestoring, setBackupRestoring] = useState(false);
+  const [backupInspect, setBackupInspect] = useState<BackupInspectPreview | null>(null);
+  const [backupArchivePath, setBackupArchivePath] = useState<string | null>(null);
+  const [backupSelectedDomains, setBackupSelectedDomains] = useState<BackupRestoreDomain[]>([
+    ...BACKUP_RESTORE_DOMAINS,
+  ]);
+  const [backupMode, setBackupMode] = useState<RestoreMode>('merge');
+  const [backupRestoreDialogOpen, setBackupRestoreDialogOpen] = useState(false);
+  const [backupRestoreResult, setBackupRestoreResult] = useState<BackupRestoreResult | null>(
+    null,
+  );
+  const [backupRestoreError, setBackupRestoreError] = useState<string | null>(null);
+  const [backupJobs, setBackupJobs] = useState<RecoveryJobRow[]>([]);
+  const [backupJobsLoading, setBackupJobsLoading] = useState(false);
+  const [backupJobsError, setBackupJobsError] = useState<string | null>(null);
+  const [backupRollbackJobId, setBackupRollbackJobId] = useState<string | null>(null);
+  const [backupRollbackDialogOpen, setBackupRollbackDialogOpen] = useState(false);
+  const [backupRollingBack, setBackupRollingBack] = useState(false);
   const [testResult, setTestResult] = useState<TestCloudSyncResult | null>(null);
   const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
@@ -1310,6 +1399,253 @@ export function useSettingsController(): UseSettingsControllerResult {
   };
 
   /**
+   * 刷新恢复任务列表。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   导出/恢复/回滚后需要展示最新 recovery jobs，供用户回滚。
+   *
+   * Code Logic（这个函数做什么）:
+   *   backupApi.listJobs() → setBackupJobs；失败写 backupJobsError。
+   */
+  const handleRefreshRecoveryJobs = useCallback(async () => {
+    setBackupJobsLoading(true);
+    setBackupJobsError(null);
+    try {
+      const jobs = await backupApi.listJobs(50);
+      setBackupJobs(jobs);
+    } catch (err) {
+      setBackupJobsError(
+        err instanceof Error ? err.message : t('settings:backup.restoreFailed'),
+      );
+    } finally {
+      setBackupJobsLoading(false);
+    }
+  }, [t]);
+
+  useEffect(() => {
+    void handleRefreshRecoveryJobs();
+  }, [handleRefreshRecoveryJobs]);
+
+  /**
+   * 导出可验证备份包。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   用户在同步 tab 一键导出 zip 备份。
+   *
+   * Code Logic（这个函数做什么）:
+   *   pickBackupExportPath → backupApi.create；写 success path 或 error。
+   */
+  const handleBackupExport = async () => {
+    setBackupExportError(null);
+    setBackupExportPath(null);
+    const destPath = await pickBackupExportPath();
+    // 用户取消对话框：静默返回，不记错误
+    if (!destPath) {
+      return;
+    }
+    setBackupExporting(true);
+    try {
+      const result = await backupApi.create(destPath);
+      setBackupExportPath(result.path);
+      await handleRefreshRecoveryJobs();
+    } catch (err) {
+      setBackupExportError(
+        err instanceof Error ? err.message : t('settings:backup.exportFailed'),
+      );
+    } finally {
+      setBackupExporting(false);
+    }
+  };
+
+  /**
+   * 选择备份文件并 inspect 预览。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   恢复前必须预览领域计数/警告，默认全选可恢复领域。
+   *
+   * Code Logic（这个函数做什么）:
+   *   pickBackupArchivePath → backupApi.inspect；重置 domains/mode。
+   */
+  const handleBackupPickRestore = async () => {
+    setBackupRestoreError(null);
+    setBackupRestoreResult(null);
+    setBackupInspect(null);
+    setBackupArchivePath(null);
+    const archivePath = await pickBackupArchivePath();
+    // 用户取消对话框：静默返回，不记错误
+    if (!archivePath) {
+      return;
+    }
+    setBackupRestoring(true);
+    try {
+      const preview = await backupApi.inspect(archivePath);
+      setBackupArchivePath(archivePath);
+      setBackupInspect(preview);
+      setBackupSelectedDomains([...BACKUP_RESTORE_DOMAINS]);
+      setBackupMode('merge');
+      await handleRefreshRecoveryJobs();
+    } catch (err) {
+      setBackupRestoreError(
+        err instanceof Error ? err.message : t('settings:backup.restoreFailed'),
+      );
+    } finally {
+      setBackupRestoring(false);
+    }
+  };
+
+  /**
+   * 切换恢复领域勾选。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   用户可只恢复部分领域。
+   *
+   * Code Logic（这个函数做什么）:
+   *   若已选则移除，否则追加。
+   */
+  const handleBackupToggleDomain = useCallback((domain: BackupRestoreDomain) => {
+    setBackupSelectedDomains((prev) =>
+      prev.includes(domain) ? prev.filter((d) => d !== domain) : [...prev, domain],
+    );
+  }, []);
+
+  /**
+   * 设置恢复模式 merge / replaceDomain。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   合并与替换领域语义不同，需显式选择。
+   *
+   * Code Logic（这个函数做什么）:
+   *   setBackupMode(mode)。
+   */
+  const handleBackupSetMode = useCallback((mode: RestoreMode) => {
+    setBackupMode(mode);
+  }, []);
+
+  /**
+   * 打开恢复确认 Dialog（需已 inspect 且至少勾选一个领域）。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   写入前二次确认。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验 domains；通过则 open dialog。
+   */
+  const handleBackupOpenRestoreDialog = useCallback(() => {
+    if (!backupArchivePath || !backupInspect) return;
+    if (backupSelectedDomains.length === 0) {
+      setBackupRestoreError(t('settings:backup.noDomainsSelected'));
+      return;
+    }
+    setBackupRestoreError(null);
+    setBackupRestoreDialogOpen(true);
+  }, [backupArchivePath, backupInspect, backupSelectedDomains.length, t]);
+
+  /**
+   * 确认执行 restore_backup。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   用户确认后写入本地数据并刷新 jobs。
+   *
+   * Code Logic（这个函数做什么）:
+   *   backupApi.restore；busy 期间 dialog 不关闭；成功关闭 dialog。
+   */
+  const handleBackupRestoreConfirm = async () => {
+    if (!backupArchivePath || backupSelectedDomains.length === 0) {
+      setBackupRestoreError(t('settings:backup.noDomainsSelected'));
+      return;
+    }
+    setBackupRestoring(true);
+    setBackupRestoreError(null);
+    try {
+      const result = await backupApi.restore(
+        backupArchivePath,
+        backupMode,
+        [...backupSelectedDomains],
+      );
+      setBackupRestoreResult(result);
+      setBackupRestoreDialogOpen(false);
+      await handleRefreshRecoveryJobs();
+    } catch (err) {
+      setBackupRestoreError(
+        err instanceof Error ? err.message : t('settings:backup.restoreFailed'),
+      );
+    } finally {
+      setBackupRestoring(false);
+    }
+  };
+
+  /**
+   * 关闭恢复确认 Dialog。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   busy 时禁止关闭，避免半程打断。
+   *
+   * Code Logic（这个函数做什么）:
+   *   backupRestoring 时 early return，否则 set open false。
+   */
+  const handleCloseRestoreDialog = useCallback(() => {
+    if (backupRestoring) return;
+    setBackupRestoreDialogOpen(false);
+  }, [backupRestoring]);
+
+  /**
+   * 打开指定 job 的回滚确认。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   仅有 pre-restore 的任务可回滚，需二次确认。
+   *
+   * Code Logic（这个函数做什么）:
+   *   setRollbackJobId + open dialog。
+   */
+  const handleOpenRollback = useCallback((jobId: string) => {
+    setBackupRollbackJobId(jobId);
+    setBackupRollbackDialogOpen(true);
+  }, []);
+
+  /**
+   * 关闭回滚确认 Dialog。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   busy 时禁止关闭。
+   *
+   * Code Logic（这个函数做什么）:
+   *   rollingBack early return，否则清空 jobId 并关闭。
+   */
+  const handleCloseRollbackDialog = useCallback(() => {
+    if (backupRollingBack) return;
+    setBackupRollbackDialogOpen(false);
+    setBackupRollbackJobId(null);
+  }, [backupRollingBack]);
+
+  /**
+   * 确认回滚 recovery job。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   用 pre-restore 备份恢复到 restore 前状态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   backupApi.rollback(jobId)；刷新 jobs 并展示结果。
+   */
+  const handleConfirmRollback = async () => {
+    if (!backupRollbackJobId) return;
+    setBackupRollingBack(true);
+    setBackupRestoreError(null);
+    try {
+      const result = await backupApi.rollback(backupRollbackJobId);
+      setBackupRestoreResult(result);
+      setBackupRollbackDialogOpen(false);
+      setBackupRollbackJobId(null);
+      await handleRefreshRecoveryJobs();
+    } catch (err) {
+      setBackupRestoreError(
+        err instanceof Error ? err.message : t('settings:backup.restoreFailed'),
+      );
+    } finally {
+      setBackupRollingBack(false);
+    }
+  };
+
+  /**
    * 更新 Claude CLI / AI 表单字段
    */
   const patchGithubTrendingForm = useCallback((partial: Partial<GithubTrendingForm>) => {
@@ -1584,6 +1920,34 @@ export function useSettingsController(): UseSettingsControllerResult {
     lanSyncing,
     lanSyncError,
     handleLanSyncNow,
+    backupExporting,
+    backupExportPath,
+    backupExportError,
+    backupRestoring,
+    backupInspect,
+    backupArchivePath,
+    backupSelectedDomains,
+    backupMode,
+    backupRestoreDialogOpen,
+    backupRestoreResult,
+    backupRestoreError,
+    backupJobs,
+    backupJobsLoading,
+    backupJobsError,
+    backupRollbackJobId,
+    backupRollbackDialogOpen,
+    backupRollingBack,
+    handleBackupExport,
+    handleBackupPickRestore,
+    handleBackupToggleDomain,
+    handleBackupSetMode,
+    handleBackupOpenRestoreDialog,
+    handleBackupRestoreConfirm,
+    handleCloseRestoreDialog,
+    handleRefreshRecoveryJobs,
+    handleOpenRollback,
+    handleConfirmRollback,
+    handleCloseRollbackDialog,
 
     githubTrendingForm,
     githubTrendingConfig,

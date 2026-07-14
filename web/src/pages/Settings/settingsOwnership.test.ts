@@ -46,7 +46,26 @@ const PANEL_SOURCES: Array<{ name: string; source: string }> = [
 ];
 
 describe('Settings panel ownership (no transport)', () => {
-  test.each(PANEL_SOURCES)('$name must not import or call transport APIs', ({ source }) => {
+  test.each(PANEL_SOURCES)('$name must not import or call transport APIs', ({ name, source }) => {
+    // SettingsSyncPanel 允许从 @/api/sync 导入类型与 pure helpers（isDeviceSucceeded 等），
+    // 但禁止调用 syncApi / backupApi / invoke / 其它 transport 客户端。
+    if (name === 'SettingsSyncPanel.tsx') {
+      expect(source).not.toMatch(/\binvoke\s*\(/);
+      expect(source).not.toContain('configApi');
+      expect(source).not.toContain('healthApi');
+      expect(source).not.toContain('githubTrendingApi');
+      expect(source).not.toContain('orchestratorConfigApi');
+      // 禁止调用面（允许注释提到名称）
+      expect(source).not.toMatch(/\bsyncApi\s*\./);
+      expect(source).not.toMatch(/\bbackupApi\s*\./);
+      expect(source).not.toMatch(/\bpickBackupExportPath\s*\(/);
+      expect(source).not.toMatch(/\bpickBackupArchivePath\s*\(/);
+      // 允许的唯一 @/api 导入面：sync 类型与 helpers
+      const apiImports = source.match(/from\s+'@\/api\/[^']+'/g) ?? [];
+      expect(apiImports.every((line) => line.includes('@/api/sync'))).toBe(true);
+      return;
+    }
+
     expect(source).not.toContain('@/api/');
     expect(source).not.toContain('Api.');
     expect(source).not.toMatch(/\binvoke\s*\(/);

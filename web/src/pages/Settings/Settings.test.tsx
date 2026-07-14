@@ -128,7 +128,16 @@ vi.mock('@/api/githubTrending', () => ({
   },
 }));
 
-const { triggerLanSync } = vi.hoisted(() => ({
+const {
+  triggerLanSync,
+  createBackup,
+  inspectBackup,
+  restoreBackup,
+  listJobs,
+  rollbackJob,
+  pickExport,
+  pickArchive,
+} = vi.hoisted(() => ({
   triggerLanSync: vi.fn(async () => ({
     accepted: true,
     succeeded_devices: 0,
@@ -175,6 +184,38 @@ const { triggerLanSync } = vi.hoisted(() => ({
       },
     ],
   })),
+  createBackup: vi.fn(async () => ({ path: '/tmp/export.zip', formatVersion: 1 })),
+  inspectBackup: vi.fn(async () => ({
+    formatVersion: 1,
+    domainCounts: { prompts: 2, scratchpad: 1 },
+    warnings: [],
+    conflictsEstimate: 0,
+  })),
+  restoreBackup: vi.fn(async () => ({
+    jobId: 'job-1',
+    status: 'succeeded',
+    appliedDomains: ['prompts'],
+    preRestoreBackupPath: '/tmp/pre.zip',
+    errorSummary: null,
+  })),
+  listJobs: vi.fn(async () => [] as Array<{
+    id: string;
+    status: string;
+    archivePath?: string | null;
+    preRestoreBackupPath?: string | null;
+    selectedDomainsJson: string;
+    mode: string;
+    errorSummary?: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }>),
+  rollbackJob: vi.fn(async () => ({
+    jobId: 'job-1',
+    status: 'succeeded',
+    appliedDomains: ['prompts'],
+  })),
+  pickExport: vi.fn(async () => '/tmp/export.zip'),
+  pickArchive: vi.fn(async () => '/tmp/restore.zip'),
 }));
 
 vi.mock('@/api/sync', async () => {
@@ -184,6 +225,16 @@ vi.mock('@/api/sync', async () => {
     syncApi: {
       trigger: () => triggerLanSync(),
     },
+    backupApi: {
+      create: (...args: unknown[]) => createBackup(...args),
+      inspect: (...args: unknown[]) => inspectBackup(...args),
+      restore: (...args: unknown[]) => restoreBackup(...args),
+      listJobs: (...args: unknown[]) => listJobs(...args),
+      listBackups: vi.fn(async () => []),
+      rollback: (...args: unknown[]) => rollbackJob(...args),
+    },
+    pickBackupExportPath: () => pickExport(),
+    pickBackupArchivePath: () => pickArchive(),
   };
 });
 
@@ -473,5 +524,45 @@ describe('Settings partial resource loading', () => {
 
     const scratch = screen.getByTestId('lan-sync-domain-peer-1-scratchpad');
     expect(scratch.getAttribute('data-kind')).toBe('unreachable');
+  });
+
+  test('backup export calls create with picked path and shows success', async () => {
+    searchParamsState.value = new URLSearchParams('tab=sync');
+    renderSettings();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('backup-export')).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByTestId('backup-export'));
+
+    await waitFor(() => {
+      expect(pickExport).toHaveBeenCalled();
+      expect(createBackup).toHaveBeenCalledWith('/tmp/export.zip');
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('backup-export-success')).toBeTruthy();
+    });
+  });
+
+  test('backup restore pick inspects archive and shows domain checkboxes', async () => {
+    searchParamsState.value = new URLSearchParams('tab=sync');
+    renderSettings();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('backup-restore-pick')).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByTestId('backup-restore-pick'));
+
+    await waitFor(() => {
+      expect(pickArchive).toHaveBeenCalled();
+      expect(inspectBackup).toHaveBeenCalledWith('/tmp/restore.zip');
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('backup-inspect-preview')).toBeTruthy();
+      expect(screen.getByTestId('backup-domain-prompts')).toBeTruthy();
+      expect(screen.getByTestId('backup-restore-confirm')).toBeTruthy();
+    });
   });
 });

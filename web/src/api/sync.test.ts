@@ -1,15 +1,16 @@
 /**
- * syncApi 契约单元测试
+ * syncApi / backupApi 契约单元测试
  *
  * Business Logic（为什么需要这个测试）:
- *   trigger_sync 必须返回 SyncRunResult；partial/unreachable 不得被 helper 判为成功。
+ *   trigger_sync 必须返回 SyncRunResult；partial/unreachable 不得被 helper 判为成功；
+ *   备份 create/inspect/restore/listJobs/rollback 必须按 camelCase 参数调 invoke。
  *
  * Code Logic（这个测试做什么）:
- *   mock invoke，断言命令名与 isDeviceSucceeded/isDomainSucceeded 语义。
+ *   mock invoke，断言命令名、参数与 isDeviceSucceeded/isDomainSucceeded 语义。
  */
 
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import type { SyncRunResult } from './sync';
+import type { BackupInspectPreview, BackupRestoreResult, SyncRunResult } from './sync';
 
 const mockInvoke = vi.fn();
 
@@ -18,6 +19,7 @@ vi.mock('./client', () => ({
 }));
 
 import {
+  backupApi,
   isDeviceSucceeded,
   isDomainSucceeded,
   succeededCounts,
@@ -83,5 +85,72 @@ describe('syncApi', () => {
     expect(
       succeededCounts({ kind: 'succeeded', pulled: 2, pushed: 1, unchanged: 3 }),
     ).toEqual({ pulled: 2, pushed: 1, unchanged: 3 });
+  });
+});
+
+describe('backupApi', () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+  });
+
+  test('create invokes create_backup with destPath', async () => {
+    mockInvoke.mockResolvedValueOnce({ path: '/tmp/out.zip', formatVersion: 1 });
+    const result = await backupApi.create('/tmp/out.zip');
+    expect(mockInvoke).toHaveBeenCalledWith('create_backup', { destPath: '/tmp/out.zip' });
+    expect(result.path).toBe('/tmp/out.zip');
+    expect(result.formatVersion).toBe(1);
+  });
+
+  test('inspect invokes inspect_backup with archivePath', async () => {
+    const preview: BackupInspectPreview = {
+      formatVersion: 1,
+      domainCounts: { prompts: 2 },
+      warnings: ['w1'],
+      conflictsEstimate: 0,
+    };
+    mockInvoke.mockResolvedValueOnce(preview);
+    const result = await backupApi.inspect('/tmp/in.zip');
+    expect(mockInvoke).toHaveBeenCalledWith('inspect_backup', {
+      archivePath: '/tmp/in.zip',
+    });
+    expect(result.domainCounts.prompts).toBe(2);
+    expect(result.warnings).toEqual(['w1']);
+  });
+
+  test('restore invokes restore_backup with mode and domains', async () => {
+    const payload: BackupRestoreResult = {
+      jobId: 'job-1',
+      status: 'succeeded',
+      appliedDomains: ['prompts'],
+      preRestoreBackupPath: '/tmp/pre.zip',
+      errorSummary: null,
+    };
+    mockInvoke.mockResolvedValueOnce(payload);
+    const result = await backupApi.restore('/tmp/in.zip', 'merge', ['prompts']);
+    expect(mockInvoke).toHaveBeenCalledWith('restore_backup', {
+      archivePath: '/tmp/in.zip',
+      mode: 'merge',
+      domains: ['prompts'],
+    });
+    expect(result.jobId).toBe('job-1');
+    expect(result.appliedDomains).toEqual(['prompts']);
+  });
+
+  test('listJobs invokes list_recovery_jobs with optional limit', async () => {
+    mockInvoke.mockResolvedValueOnce([]);
+    await backupApi.listJobs(10);
+    expect(mockInvoke).toHaveBeenCalledWith('list_recovery_jobs', { limit: 10 });
+  });
+
+  test('rollback invokes rollback_recovery_job with jobId', async () => {
+    const payload: BackupRestoreResult = {
+      jobId: 'job-2',
+      status: 'succeeded',
+      appliedDomains: ['prompts'],
+    };
+    mockInvoke.mockResolvedValueOnce(payload);
+    const result = await backupApi.rollback('job-2');
+    expect(mockInvoke).toHaveBeenCalledWith('rollback_recovery_job', { jobId: 'job-2' });
+    expect(result.jobId).toBe('job-2');
   });
 });
