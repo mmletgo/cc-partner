@@ -93,6 +93,27 @@ describe('Workbench project domain (characterization)', () => {
     expect(invokeCallsFor('get_workbench_launch_summary')).toHaveLength(0);
   });
 
+  test('projectsLoading does not render empty or continue launch surface', async () => {
+    // M1: load 中 projects=[] 不得假零项目 CTA，也不得误入 continue。
+    setInvokeHandler(() => ({ ok: true }));
+    renderWorkbench(
+      buildProjectsContextValue(
+        { projects: [], activeProjectId: 'stored-project-id' },
+        { projectsLoading: true },
+      ),
+      buildDependencyContextValue(),
+    );
+    await settle();
+
+    expect(screen.getByTestId('workbench-projects-loading')).toBeTruthy();
+    expect(screen.getByText('加载中')).toBeTruthy();
+    expect(screen.queryByTestId('workbench-launch-empty')).toBeNull();
+    expect(screen.queryByTestId('workbench-launch-continue')).toBeNull();
+    expect(screen.queryByRole('button', { name: '添加本机项目' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Worktree 管理' })).toBeNull();
+    expect(invokeCallsFor('get_workbench_launch_summary')).toHaveLength(0);
+  });
+
   test('no project shows focused actions without terminal chrome', async () => {
     setInvokeHandler(() => ({ ok: true }));
     renderWorkbench(

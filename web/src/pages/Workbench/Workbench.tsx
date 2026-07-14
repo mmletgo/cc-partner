@@ -73,7 +73,7 @@ import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
  *
  * Code Logic（这个组件做什么）:
  *   聚合项目、会话、终端输出 buffer、文件树与文件操作状态，并组合三栏布局；
- *   零项目 / 未选中项目时 early return 到 WorkbenchLaunchSurface。
+ *   projectsLoading 时中性 loading；列表就绪后零项目 / 未选中项目 early return 到 LaunchSurface。
  */
 export function Workbench() {
   const { t } = useTranslation(['workbench', 'common', 'promptOptimizer', 'attention']);
@@ -84,6 +84,7 @@ export function Workbench() {
     projects,
     activeProjectId,
     activeProject,
+    projectsLoading,
     selectProject,
     refreshProjectSessionStats,
     chooseAndAddProject,
@@ -658,8 +659,19 @@ export function Workbench() {
     navigate('/settings?tab=dependencies');
   }, [checkDependency, navigate]);
 
-  // 三模式：零项目聚焦 CTA / 有项目未选中「继续工作」/ active 项目完整 chrome。
+  // 三模式 + loading：项目列表未就绪时中性 loading，禁止把 projects=[] 当成真·零项目。
+  // empty 仅 !projectsLoading && length===0；continue 仅 !projectsLoading && length>0 && !active。
   // 全部 hooks 已在上方无条件调用，early return 不破坏 hooks 顺序。
+  if (projectsLoading) {
+    return (
+      <div className={styles.launchPage} data-testid="workbench-projects-loading">
+        <main className={styles.launchEmptyMain}>
+          <p className={styles.launchMuted}>{t('workbench:loading')}</p>
+        </main>
+      </div>
+    );
+  }
+
   if (projects.length === 0) {
     return (
       <WorkbenchLaunchSurface
