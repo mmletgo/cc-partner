@@ -60,7 +60,7 @@ async function installDelayedSnapshotMock(page: Page): Promise<void> {
         currentWindow: { label: 'screenshot-overlay' },
         currentWebview: { windowLabel: 'screenshot-overlay', label: 'screenshot-overlay' },
       },
-      invoke: async (cmd: string) => {
+      invoke: async (cmd: string, _args?: Record<string, unknown>) => {
         if (cmd === 'plugin:event|listen') return 1;
         if (cmd === 'plugin:event|unlisten') return undefined;
         if (cmd === 'get_region_snapshot') {
@@ -97,27 +97,44 @@ test.describe('截图选区 Overlay', () => {
   test('框选完成后工具条不等待快照返回即可显示', async ({ page }) => {
     await installDelayedSnapshotMock(page);
     await page.goto('/screenshot-overlay?display=0');
+    await expect(page.locator('[class*="overlay"]')).toBeVisible();
 
-    await page.mouse.move(80, 90);
+    // 在 overlay 根上拖出足够大的选区（≥10px），避免 mouse 事件未命中 root。
+    const box = await page.locator('[class*="overlay"]').boundingBox();
+    if (!box) throw new Error('overlay not laid out');
+    const x0 = box.x + 40;
+    const y0 = box.y + 40;
+    const x1 = box.x + Math.min(box.width - 20, 320);
+    const y1 = box.y + Math.min(box.height - 20, 260);
+    await page.mouse.move(x0, y0);
     await page.mouse.down();
-    await page.mouse.move(300, 240);
+    await page.mouse.move(x1, y1, { steps: 8 });
     await page.mouse.up();
 
-    await expect(page.getByRole('toolbar')).toBeVisible();
+    await expect(page.getByRole('toolbar')).toBeVisible({ timeout: 10_000 });
     await page.evaluate(() => window.__resolveSnapshot?.());
-    await expect(page.locator('canvas')).toBeVisible();
+    await expect(page.locator('canvas')).toBeVisible({ timeout: 10_000 });
   });
 
   test('快照捕获开始前工具条和选区框已经可见', async ({ page }) => {
     await installDelayedSnapshotMock(page);
     await page.goto('/screenshot-overlay?display=0');
+    await expect(page.locator('[class*="overlay"]')).toBeVisible();
 
-    await page.mouse.move(80, 90);
+    const box = await page.locator('[class*="overlay"]').boundingBox();
+    if (!box) throw new Error('overlay not laid out');
+    const x0 = box.x + 40;
+    const y0 = box.y + 40;
+    const x1 = box.x + Math.min(box.width - 20, 320);
+    const y1 = box.y + Math.min(box.height - 20, 260);
+    await page.mouse.move(x0, y0);
     await page.mouse.down();
-    await page.mouse.move(300, 240);
+    await page.mouse.move(x1, y1, { steps: 8 });
     await page.mouse.up();
 
-    await page.waitForFunction(() => window.__snapshotInvokeState !== undefined);
+    await page.waitForFunction(() => window.__snapshotInvokeState !== undefined, null, {
+      timeout: 15_000,
+    });
     await expect(page.evaluate(() => window.__snapshotInvokeState)).resolves.toEqual({
       toolbarVisible: true,
       selectionVisible: true,

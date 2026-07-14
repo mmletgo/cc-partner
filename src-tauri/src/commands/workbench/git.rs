@@ -15,7 +15,8 @@ use crate::workbench::models::{
 };
 use crate::workbench::sessions::kill_persisted_backend;
 use crate::workbench::{
-    file_content, file_preview, git as workbench_git, remote_client::RemoteWorkbenchClient,
+    file_content, file_preview, git as workbench_git,
+    remote_client::RemoteWorkbenchClient,
     remote_events::{
         publish_workbench_remote_event_from_state, WorkbenchMergeProgressPayload,
         WorkbenchRemoteEvent,

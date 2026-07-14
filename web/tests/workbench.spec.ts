@@ -460,8 +460,6 @@ test.describe('E2E-WORKBENCH-001 Workbench critical journey', () => {
     await expect(page.getByRole('button', { name: '新建 worktree' })).toBeDisabled();
 
     // 恢复：重绑成功响应并点 Git 历史触发刷新
-    offline = false;
-    void offline;
     backendHarness.command('list_workbench_worktrees', {
       kind: 'resolve',
       value: [wtRemote],

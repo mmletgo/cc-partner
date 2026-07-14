@@ -13,7 +13,8 @@ use crate::workbench::models::{
     WorkbenchSqlitePreview,
 };
 use crate::workbench::{
-    file_content, fs as workbench_fs, html_assets, remote_client::RemoteWorkbenchClient,
+    file_content, fs as workbench_fs, html_assets,
+    remote_client::RemoteWorkbenchClient,
     remote_protocol::{RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteSaveTextReq},
     sqlite_preview,
 };

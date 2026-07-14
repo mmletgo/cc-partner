@@ -95,7 +95,7 @@ test.describe('E2E-TRANSFER-001 Transfer critical journey', () => {
     await expect(page.getByRole('heading', { name: 'File Transfer' })).toBeVisible({
       timeout: 15_000,
     });
-    await expect(page.getByText('Transfer tasks')).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Transfer tasks/ })).toBeVisible();
     await expect(
       page.getByRole('button', { name: 'Drop a file here or click to select' }),
     ).toBeVisible();

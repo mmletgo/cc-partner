@@ -930,8 +930,8 @@ fn validate_orchestrator_config_fields(
 // 注意：该 crate 需加入 Cargo.toml
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod data_dir_env_test {
+    use super::DATA_DIR_ENV;
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -954,7 +954,7 @@ mod tests {
     ///
     /// Code Logic（这个结构做什么）:
     ///     持有全局锁与原始 env 值；Drop 时按原值恢复或移除变量。
-    struct DataDirEnvGuard {
+    pub struct DataDirEnvGuard {
         _lock: MutexGuard<'static, ()>,
         previous: Option<OsString>,
     }
@@ -979,10 +979,11 @@ mod tests {
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     测试需要可控地模拟“有/无 override”和非法值，而不污染开发者真实环境。
+    ///     config_runtime 等跨模块测试也需在持锁期间清空 override，避免并行用例污染 validate。
     ///
     /// Code Logic（这个函数做什么）:
     ///     加锁后保存原值；`Some(path)` 时 set_var，`None` 时 remove_var。
-    fn install_data_dir_env(value: Option<&str>) -> DataDirEnvGuard {
+    pub fn install_data_dir_env(value: Option<&str>) -> DataDirEnvGuard {
         let lock = data_dir_env_lock()
             .lock()
             .expect("CC_PARTNER_DATA_DIR 测试锁中毒");
@@ -996,6 +997,15 @@ mod tests {
             previous,
         }
     }
+}
+
+#[cfg(test)]
+pub use data_dir_env_test::install_data_dir_env;
+
+#[cfg(test)]
+mod tests {
+    use super::data_dir_env_test::install_data_dir_env;
+    use super::*;
 
     /// 验证合法绝对路径 override 会改写 config/control/database/log 派生路径。
     ///

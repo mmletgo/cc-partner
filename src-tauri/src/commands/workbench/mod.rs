@@ -22,7 +22,7 @@ pub use browser::{
     __cmd__create_workbench_browser_preview, __cmd__discover_workbench_browser_targets,
     __tauri_command_name_create_workbench_browser_preview,
     __tauri_command_name_discover_workbench_browser_targets, create_workbench_browser_preview,
-    discover_workbench_browser_targets
+    discover_workbench_browser_targets,
 };
 
 pub use files::{
@@ -32,7 +32,7 @@ pub use files::{
     __tauri_command_name_open_workbench_file, __tauri_command_name_preview_workbench_html_asset,
     __tauri_command_name_preview_workbench_sqlite, __tauri_command_name_save_workbench_text_file,
     format_workbench_structured_content, open_workbench_file, preview_workbench_html_asset,
-    preview_workbench_sqlite, save_workbench_text_file
+    preview_workbench_sqlite, save_workbench_text_file,
 };
 
 pub use git::{
@@ -45,7 +45,7 @@ pub use git::{
     __tauri_command_name_merge_workbench_worktree, __tauri_command_name_push_workbench_worktree,
     __tauri_command_name_remove_workbench_worktree, commit_workbench_worktree,
     create_workbench_worktree, list_workbench_git_commits, list_workbench_worktrees,
-    merge_workbench_worktree, push_workbench_worktree, remove_workbench_worktree
+    merge_workbench_worktree, push_workbench_worktree, remove_workbench_worktree,
 };
 
 pub use projects::{
@@ -61,7 +61,7 @@ pub use projects::{
     __tauri_command_name_remove_workbench_project, __tauri_command_name_touch_workbench_project,
     add_workbench_project, get_workbench_remote_path_info, list_workbench_projects,
     list_workbench_remote_dir, list_workbench_remote_roots, open_workbench_remote_project,
-    remove_workbench_project, touch_workbench_project
+    remove_workbench_project, touch_workbench_project,
 };
 
 pub use sessions::{
@@ -89,7 +89,7 @@ pub use sessions::{
     get_claude_session_preview, get_focused_workbench_session, get_workbench_path_info,
     list_workbench_dir, list_workbench_sessions, rename_workbench_path, rename_workbench_session,
     resize_workbench_session, resume_claude_session, search_claude_sessions, split_workbench_pane,
-    switch_workbench_pane, write_workbench_session_input, zoom_workbench_pane
+    switch_workbench_pane, write_workbench_session_input, zoom_workbench_pane,
 };
 
 pub use projects::add_local_workbench_project_from_path;
@@ -109,10 +109,11 @@ pub(crate) use files::{
 pub(crate) use git::{
     commit_workbench_worktree_for_state, create_workbench_worktree_for_state,
     list_workbench_git_commits_for_state, local_commit_workbench_worktree,
-    local_create_workbench_worktree, local_list_workbench_git_commits, local_merge_workbench_worktree,
-    local_open_workbench_file, local_push_workbench_worktree, local_remove_workbench_worktree,
-    merge_workbench_worktree_for_state, open_workbench_file_for_state,
-    push_workbench_worktree_for_state, remove_workbench_worktree_for_state,
+    local_create_workbench_worktree, local_list_workbench_git_commits,
+    local_merge_workbench_worktree, local_open_workbench_file, local_push_workbench_worktree,
+    local_remove_workbench_worktree, merge_workbench_worktree_for_state,
+    open_workbench_file_for_state, push_workbench_worktree_for_state,
+    remove_workbench_worktree_for_state,
 };
 
 pub(crate) use projects::{
@@ -131,7 +132,7 @@ pub(crate) use sessions::{
     local_rename_workbench_session, local_resize_workbench_session, local_split_workbench_pane,
     local_switch_workbench_pane, local_write_workbench_session_input, local_zoom_workbench_pane,
     replay_workbench_session_for_state, resize_workbench_session_for_state,
-    resume_claude_session_for_state, search_claude_sessions_for_state, split_workbench_pane_for_state,
-    switch_workbench_pane_for_state, write_workbench_session_input_for_state,
-    zoom_workbench_pane_for_state,
+    resume_claude_session_for_state, search_claude_sessions_for_state,
+    split_workbench_pane_for_state, switch_workbench_pane_for_state,
+    write_workbench_session_input_for_state, zoom_workbench_pane_for_state,
 };

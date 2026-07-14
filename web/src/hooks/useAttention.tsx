@@ -200,6 +200,8 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
         if (mountedRef.current && isCurrentAttentionRequest(requestId, requestIdRef.current)) {
           const error = reason instanceof Error ? reason : new Error(String(reason));
           // 用 typed 故障分类决定 keepStale vs clear，避免依赖中文文案匹配。
+          // Attention 刷新失败：已有快照时除 malformedJson 外一律 keepStale（unknown 默认 clear
+          // 不得抹掉 Inbox 列表）；初次加载无缓存时仍可 clear。
           const classification = classifyTransportFault(reason);
           setState((current) => {
             const hasCache = current.snapshot !== null || hasSnapshot;
@@ -208,11 +210,12 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
               hasCache,
               optimisticApplied: false,
             });
-            // loadFailed 仅有 hasSnapshot 语义：keepCache → 保留列表 + stale；clear → 清空快照。
+            const keepSnapshot =
+              hasCache && classification.kind !== 'malformedJson' ? true : plan.keepCache;
             return attentionReducer(current, {
               type: 'loadFailed',
               error,
-              hasSnapshot: plan.keepCache,
+              hasSnapshot: keepSnapshot,
             });
           });
         }

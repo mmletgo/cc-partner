@@ -16,7 +16,8 @@ use crate::workbench::models::{
 use crate::workbench::sessions::pane_count_for_row;
 use crate::workbench::{
     file_content, file_preview, fs as workbench_fs, git as workbench_git, projects,
-    remote_client::RemoteWorkbenchClient, remote_events::RemoteEventBridgeProjectMapping,
+    remote_client::RemoteWorkbenchClient,
+    remote_events::RemoteEventBridgeProjectMapping,
     remote_ids::{parse_remote_entity_id, remote_entity_id, remote_project_id},
 };
 use chrono::Utc;

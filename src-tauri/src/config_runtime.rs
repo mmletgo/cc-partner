@@ -219,6 +219,8 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_writers_preserve_non_conflicting_patches() {
+        // 持有 CC_PARTNER_DATA_DIR 测试锁并清空 override：并行 config 测试不得让 sample 的 /tmp/db.db 触发隔离校验。
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let initial = sample_config();
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         let runtime = Arc::new(ConfigRuntime::new(initial, store));

@@ -320,9 +320,7 @@ impl ScratchpadRepo {
         let mut tx = self.db.begin().await?;
         for (idx, row) in rows.iter().enumerate() {
             if inject_fail_at == Some(idx) {
-                return Err(AppError::generic(
-                    "injected scratchpad bulk_upsert failure",
-                ));
+                return Err(AppError::generic("injected scratchpad bulk_upsert failure"));
             }
             let vc_text = serde_json::to_string(&row.vector_clock)?;
             sqlx::query(

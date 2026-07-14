@@ -250,12 +250,13 @@ describe('Workbench worktree / Git domain (characterization)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '合并' }));
     await waitForInvoke('merge_workbench_worktree');
-    await waitForInvoke('list_workbench_worktrees', 2);
-    await waitForInvoke('list_workbench_sessions', 2);
-
-    // merge 后 worktree 列表只剩 main（feature 已合并移除）。
-    const bar = screen.getByRole('region', { name: 'Worktree 管理' });
-    expect(bar.textContent).not.toContain('feature/feat');
+    // mount + 切 worktree/Git 可能已触发额外 list；merge 后再等 UI 收敛，避免只等到 merge 前的第 2 次 list。
+    await waitFor(() => {
+      const bar = screen.getByRole('region', { name: 'Worktree 管理' });
+      if (bar.textContent?.includes('feature/feat')) {
+        throw new Error('feature worktree still visible after merge');
+      }
+    });
     restore();
   });
 

@@ -698,7 +698,11 @@ async fn scratchpad_inject_fail_rolls_back_batch() {
         after_fail, 1,
         "partial batch rows must roll back; prior row stays"
     );
-    let kept = repo.get("prior-page").await.expect("get prior").expect("exists");
+    let kept = repo
+        .get("prior-page")
+        .await
+        .expect("get prior")
+        .expect("exists");
     assert_eq!(kept.content, "keep-me");
     assert!(repo.get("sp-0").await.expect("get sp-0").is_none());
     assert!(repo.get("sp-1").await.expect("get sp-1").is_none());
@@ -753,7 +757,10 @@ async fn settings_partial_command_failure_isolates_fields() {
     .await
     .expect_err("rename inject must fail closed");
     assert!(
-        err.to_string().contains("注入") || err.to_string().contains("故障") || err.to_string().contains("Rename") || err.to_string().contains("rename"),
+        err.to_string().contains("注入")
+            || err.to_string().contains("故障")
+            || err.to_string().contains("Rename")
+            || err.to_string().contains("rename"),
         "expected inject/rename failure surface: {err}"
     );
 
@@ -766,8 +773,10 @@ async fn settings_partial_command_failure_isolates_fields() {
     assert_eq!(disk.receive_dir, old_receive);
 
     // 成功命令 A：只改 device_name。
-    let ok_store: Arc<dyn ConfigStore> =
-        Arc::new(FsConfigStore::new(config_path.clone(), Arc::new(StdConfigIo)));
+    let ok_store: Arc<dyn ConfigStore> = Arc::new(FsConfigStore::new(
+        config_path.clone(),
+        Arc::new(StdConfigIo),
+    ));
     let runtime_ok = ConfigRuntime::new(initial.clone(), ok_store);
     let (committed, _) = update_config_transactionally(&runtime_ok, |cfg| {
         cfg.device_name = "settings-a-ok".into();
@@ -776,10 +785,7 @@ async fn settings_partial_command_failure_isolates_fields() {
     .await
     .expect("healthy update of device_name");
     assert_eq!(committed.device_name, "settings-a-ok");
-    assert_eq!(
-        runtime_ok.snapshot().unwrap().device_name,
-        "settings-a-ok"
-    );
+    assert_eq!(runtime_ok.snapshot().unwrap().device_name, "settings-a-ok");
 
     // 失败命令 B：改 receive_dir，Rename 注入失败，不得污染 A 已提交的 device_name。
     let fail_io_b = Arc::new(FaultInjectingConfigIo::fail_once(

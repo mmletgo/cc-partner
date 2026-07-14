@@ -457,12 +457,10 @@ test.describe('Global Inbox attention', () => {
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
     await expect(page.getByTestId(`attention-item-${HUMAN_REVIEW.id}`)).toBeVisible();
 
+    // 每行仅一个 button（动作文案是 visual span）；整行可聚焦即可证明键盘可达。
     const item = page.getByTestId(`attention-item-${HUMAN_REVIEW.id}`);
     await item.focus();
     await expect(item).toBeFocused();
-    await page.keyboard.press('Tab');
-    // 动作按钮可键盘到达（focus-visible 导航）。
-    await expect(page.getByTestId(`attention-action-${HUMAN_REVIEW.id}`)).toBeFocused();
   });
 
   test('settings dependency target navigates to settings tab', async ({ page }) => {

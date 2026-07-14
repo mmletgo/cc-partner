@@ -20,7 +20,8 @@ use crate::workbench::sessions::{
     kill_persisted_backend, PaneCloseOutcome, PaneSplitDirection, WorkbenchSessionReplayDto,
 };
 use crate::workbench::{
-    fs as workbench_fs, remote_client::RemoteWorkbenchClient,
+    fs as workbench_fs,
+    remote_client::RemoteWorkbenchClient,
     remote_ids::{parse_remote_entity_id, remote_entity_id},
     remote_protocol::{
         RemoteClaudeSessionReq, RemoteCreatePathReq, RemoteCreateSessionReq, RemoteDeletePathReq,
