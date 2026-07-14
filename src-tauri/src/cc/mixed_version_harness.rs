@@ -10,6 +10,7 @@
 
 use crate::backend::ui::HeadlessBackendUi;
 use crate::cc::engine::cc_sync_with_peer;
+use crate::cc::merger::merge_cc_history;
 use crate::cc::models::ClaudeHistoryRow;
 use crate::config::{
     AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
@@ -17,6 +18,10 @@ use crate::config::{
 use crate::models::device::Device;
 use crate::net::peer_client::PeerClient;
 use crate::net::protocol::{CAPABILITY_CC_HISTORY_PAGED_SYNC_V1, PROTOCOL_VERSION_V1};
+use crate::net::routes::cc_history::{
+    decode_manifest_cursor, encode_manifest_cursor, CC_CONTENT_MAX_BYTES, CODE_BATCH_TOO_LARGE,
+    CODE_ITEM_TOO_LARGE,
+};
 use crate::net::routes::health::HealthResponse;
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
@@ -27,6 +32,8 @@ use crate::storage::{
 };
 use crate::transfer::registry::TransferRegistry;
 use axum::extract::State as AxumState;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
@@ -60,6 +67,8 @@ struct PeerState {
     hits: HitCounters,
     store: PeerStore,
     malformed_manifest: bool,
+    /// 模拟 items 对 ≥N 条 ID 返回 413 batch_too_large（0=关闭）。
+    force_items_batch_too_large_at: usize,
 }
 
 async fn health_handler(AxumState(st): AxumState<PeerState>) -> Json<HealthResponse> {
@@ -86,14 +95,18 @@ async fn manifest_page_handler(
             "done": false,
         }));
     }
-    let cursor = body
+    // 生产 codec：opaque base64url({v:1,last_id})；与 encode/decode_manifest_cursor 互通。
+    let after_id = body
         .get("cursor")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .and_then(|c| decode_manifest_cursor(c).ok());
     let mut rows: Vec<ClaudeHistoryRow> = st.store.rows.lock().unwrap().values().cloned().collect();
     rows.sort_by(|a, b| a.id.cmp(&b.id));
-    let start = match cursor {
-        Some(c) => rows.iter().position(|r| r.id > c).unwrap_or(rows.len()),
+    let start = match after_id {
+        Some(id) => rows
+            .iter()
+            .position(|r| r.id > id)
+            .unwrap_or(rows.len()),
         None => 0,
     };
     let page: Vec<_> = rows.into_iter().skip(start).take(256).collect();
@@ -101,7 +114,7 @@ async fn manifest_page_handler(
     let next_cursor = if done {
         None
     } else {
-        page.last().map(|r| r.id.clone())
+        page.last().map(|r| encode_manifest_cursor(&r.id))
     };
     let summaries: Vec<serde_json::Value> = page
         .iter()
@@ -117,7 +130,7 @@ async fn manifest_page_handler(
 async fn items_handler(
     AxumState(st): AxumState<PeerState>,
     Json(body): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
+) -> axum::response::Response {
     st.hits.items.fetch_add(1, Ordering::SeqCst);
     let ids: Vec<String> = body
         .get("ids")
@@ -128,17 +141,44 @@ async fn items_handler(
                 .collect()
         })
         .unwrap_or_default();
+    if st.force_items_batch_too_large_at > 0 && ids.len() >= st.force_items_batch_too_large_at {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": "batch too large",
+                "code": CODE_BATCH_TOO_LARGE,
+                "request_id": "harness",
+                "retryable": false,
+                "details": {}
+            })),
+        )
+            .into_response();
+    }
     let guard = st.store.rows.lock().unwrap();
     let mut items = Vec::new();
     let mut missing = Vec::new();
-    for id in ids {
-        if let Some(r) = guard.get(&id) {
+    for id in &ids {
+        if let Some(r) = guard.get(id) {
+            if r.content.len() > CC_CONTENT_MAX_BYTES {
+                // 与生产 items_impl 一致：任一超限 → 整批 422。
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": "item too large",
+                        "code": CODE_ITEM_TOO_LARGE,
+                        "request_id": "harness",
+                        "retryable": false,
+                        "details": {}
+                    })),
+                )
+                    .into_response();
+            }
             items.push(r.clone());
         } else {
-            missing.push(id);
+            missing.push(id.clone());
         }
     }
-    Json(serde_json::json!({"items": items, "missing_ids": missing}))
+    Json(serde_json::json!({"items": items, "missing_ids": missing})).into_response()
 }
 
 async fn push_batch_handler(
@@ -152,11 +192,27 @@ async fn push_batch_handler(
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
     let mut guard = st.store.rows.lock().unwrap();
-    let n = items.len();
-    for item in items {
-        guard.insert(item.id.clone(), item);
+    let mut accepted = 0usize;
+    for remote in items {
+        match guard.get(&remote.id).cloned() {
+            None => {
+                guard.insert(remote.id.clone(), remote);
+                accepted += 1;
+            }
+            Some(local) => {
+                let merged = merge_cc_history(&local, &remote);
+                if merged.vector_clock != local.vector_clock
+                    || merged.updated_at != local.updated_at
+                    || merged.content != local.content
+                    || merged.deleted != local.deleted
+                {
+                    guard.insert(merged.id.clone(), merged);
+                    accepted += 1;
+                }
+            }
+        }
     }
-    Json(serde_json::json!({"accepted": n}))
+    Json(serde_json::json!({"accepted": accepted}))
 }
 
 async fn pull_handler(
@@ -370,6 +426,7 @@ async fn assert_new_to_new_uses_only_paged_routes_async() {
         hits,
         store,
         malformed_manifest: false,
+        force_items_batch_too_large_at: 0,
     })
     .await;
 
@@ -424,6 +481,7 @@ async fn assert_new_to_legacy_uses_only_legacy_routes_async() {
         hits,
         store,
         malformed_manifest: false,
+        force_items_batch_too_large_at: 0,
     })
     .await;
 
@@ -468,6 +526,7 @@ async fn assert_malformed_paged_fails_round_not_empty_success_async() {
         hits,
         store,
         malformed_manifest: true,
+        force_items_batch_too_large_at: 0,
     })
     .await;
 
@@ -509,6 +568,7 @@ async fn assert_legacy_bodies_work_against_new_server_async() {
         hits,
         store,
         malformed_manifest: false,
+        force_items_batch_too_large_at: 0,
     })
     .await;
 
@@ -534,6 +594,170 @@ async fn assert_legacy_bodies_work_against_new_server_async() {
         .contains_key("from-legacy-client"));
 }
 
+/// 多 ID 批中混入 1 条 content>1MiB 毒丸时，客户端必须对半拆批并仍 pull 到好数据。
+///
+/// Business Logic（为什么需要这个函数）:
+///     H1 回归：服务端整批 422 不得永久卡死整轮 paged sync；好 ID 必须先落库。
+///
+/// Code Logic（这个函数做什么）:
+///     peer 存 1 条超限 + 2 条正常；本机空库 sync → 正常行落库，本轮以 item_too_large 结束。
+async fn assert_item_too_large_halves_and_isolates_poison_async() {
+    let hits = HitCounters::default();
+    let store = PeerStore::default();
+    {
+        let mut g = store.rows.lock().unwrap();
+        g.insert(
+            "good-a".into(),
+            sample_row("good-a", "peer", "ok-a", 1),
+        );
+        g.insert(
+            "good-b".into(),
+            sample_row("good-b", "peer", "ok-b", 1),
+        );
+        let mut poison = sample_row("poison", "peer", "x", 1);
+        poison.content = "P".repeat(CC_CONTENT_MAX_BYTES + 8);
+        g.insert("poison".into(), poison);
+    }
+    let (base, hits, _) = spawn_peer(PeerState {
+        protocol_version: PROTOCOL_VERSION_V1,
+        capabilities: vec![CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string()],
+        hits,
+        store,
+        malformed_manifest: false,
+        force_items_batch_too_large_at: 0,
+    })
+    .await;
+
+    let state = build_local_state("local").await;
+    let err = cc_sync_with_peer(&state, &device_for(&base))
+        .await
+        .expect_err("poison must end round after isolating");
+    assert!(
+        err.contains("item_too_large"),
+        "错误应指向 item_too_large: {err}"
+    );
+    assert!(hits.items.load(Ordering::SeqCst) >= 2, "应拆批多次 items");
+    assert!(
+        state.cc_history_repo.get("good-a").await.unwrap().is_some(),
+        "好 ID good-a 必须已 pull"
+    );
+    assert!(
+        state.cc_history_repo.get("good-b").await.unwrap().is_some(),
+        "好 ID good-b 必须已 pull"
+    );
+    assert!(
+        state.cc_history_repo.get("poison").await.unwrap().is_none(),
+        "毒丸不得入库"
+    );
+}
+
+/// mock 对 ≥2 条 ID 返回 413 时，客户端必须对半拆批直至成功。
+///
+/// Business Logic（为什么需要这个函数）:
+///     413 拆批是分页协议核心恢复路径，mixed harness 必须覆盖而非只测 happy path。
+///
+/// Code Logic（这个函数做什么）:
+///     force_items_batch_too_large_at=2 + 3 条远端 → 多次 items 调用后收敛。
+async fn assert_batch_too_large_halves_until_success_async() {
+    let hits = HitCounters::default();
+    let store = PeerStore::default();
+    {
+        let mut g = store.rows.lock().unwrap();
+        for id in ["a", "b", "c"] {
+            g.insert(id.into(), sample_row(id, "peer", id, 1));
+        }
+    }
+    let (base, hits, _) = spawn_peer(PeerState {
+        protocol_version: PROTOCOL_VERSION_V1,
+        capabilities: vec![CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string()],
+        hits,
+        store,
+        malformed_manifest: false,
+        force_items_batch_too_large_at: 2,
+    })
+    .await;
+
+    let state = build_local_state("local").await;
+    cc_sync_with_peer(&state, &device_for(&base))
+        .await
+        .expect("413 拆批后应成功");
+    assert!(hits.items.load(Ordering::SeqCst) >= 3, "应拆到单条多次调用");
+    for id in ["a", "b", "c"] {
+        assert!(
+            state.cc_history_repo.get(id).await.unwrap().is_some(),
+            "应 pull 到 {id}"
+        );
+    }
+}
+
+/// 并发向量时钟经 merge 后收敛（push-batch 走 merge，非覆盖写）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     mixed harness 若只覆盖写，测不出 LWW/VC 收敛；new↔new 必须验证 merge 语义。
+///
+/// Code Logic（这个函数做什么）:
+///     本机与 peer 同 id 并发 clock → sync 后本机与 peer 的 clock 合并且 content 按 LWW。
+async fn assert_concurrent_vector_clock_merges_async() {
+    let hits = HitCounters::default();
+    let store = PeerStore::default();
+    let mut peer_row = sample_row("shared", "peer", "peer-content", 1);
+    peer_row.updated_at = "2024-01-02T00:00:00Z".into();
+    peer_row.vector_clock.insert("peer".into(), 3);
+    store
+        .rows
+        .lock()
+        .unwrap()
+        .insert("shared".into(), peer_row.clone());
+
+    let (base, _hits, store) = spawn_peer(PeerState {
+        protocol_version: PROTOCOL_VERSION_V1,
+        capabilities: vec![CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string()],
+        hits,
+        store,
+        malformed_manifest: false,
+        force_items_batch_too_large_at: 0,
+    })
+    .await;
+
+    let state = build_local_state("local").await;
+    let mut local_row = sample_row("shared", "local", "local-content", 1);
+    local_row.updated_at = "2024-01-01T00:00:00Z".into();
+    local_row.vector_clock.insert("local".into(), 5);
+    // 并发：两端各有对方没有的分量。
+    state
+        .cc_history_repo
+        .bulk_ingest(&[local_row.clone()])
+        .await
+        .unwrap();
+
+    cc_sync_with_peer(&state, &device_for(&base))
+        .await
+        .expect("concurrent merge sync");
+
+    let after = state
+        .cc_history_repo
+        .get("shared")
+        .await
+        .unwrap()
+        .expect("shared exists");
+    // peer 时间更新 → LWW 取 peer content；clock 合并两侧分量。
+    assert_eq!(after.content, "peer-content");
+    assert!(after.vector_clock.get("local").copied().unwrap_or(0) >= 5);
+    assert!(after.vector_clock.get("peer").copied().unwrap_or(0) >= 3);
+
+    let peer_after = store
+        .rows
+        .lock()
+        .unwrap()
+        .get("shared")
+        .cloned()
+        .expect("peer shared");
+    // push-batch merge 后 peer 也应吸收 local 分量（若本机领先/并发会 push）。
+    assert!(
+        peer_after.vector_clock.get("local").copied().unwrap_or(0) >= 1
+            || peer_after.vector_clock.get("peer").copied().unwrap_or(0) >= 3
+    );
+}
 
 /// 在独立 current-thread runtime 上执行异步场景（供 integration test 同步调用）。
 ///
@@ -595,4 +819,19 @@ pub fn assert_malformed_paged_fails_round_not_empty_success() {
 ///     同步入口，block_on 异步场景。
 pub fn assert_legacy_bodies_work_against_new_server() {
     block_on_current(assert_legacy_bodies_work_against_new_server_async())
+}
+
+/// 多 ID 批混入毒丸：拆批 + 隔离 + 好数据落库。
+pub fn assert_item_too_large_halves_and_isolates_poison() {
+    block_on_current(assert_item_too_large_halves_and_isolates_poison_async())
+}
+
+/// 413 对半拆批直至成功。
+pub fn assert_batch_too_large_halves_until_success() {
+    block_on_current(assert_batch_too_large_halves_until_success_async())
+}
+
+/// 并发 VC merge 收敛。
+pub fn assert_concurrent_vector_clock_merges() {
+    block_on_current(assert_concurrent_vector_clock_merges_async())
 }

@@ -19,6 +19,18 @@ const MAX_METRICS: usize = 64;
 /// EWMA 平滑系数 α。
 const EWMA_ALPHA: f64 = 0.2;
 
+/// 生产路径连接获取等待指标名（与 design §6 / 扩池门槛对齐）。
+pub const METRIC_DB_ACQUIRE_WAIT_MS: &str = "db.acquire_wait_ms";
+
+/// 生产路径事务耗时指标名（begin→commit）。
+pub const METRIC_DB_TRANSACTION_MS: &str = "db.transaction_ms";
+
+/// 连接等待 warning 阈值（毫秒）；仅触发固定字段 warn，不附加 SQL/路径。
+const DB_ACQUIRE_WARN_MS: u64 = 50;
+
+/// 事务耗时 warning 阈值（毫秒）。
+const DB_TRANSACTION_WARN_MS: u64 = 200;
+
 /// 单指标快照：调用次数与最近/最大/指数滑动均值。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -207,6 +219,36 @@ impl RuntimeMetrics {
         if let Some(acc) = guard.get(name) {
             let snap = acc.to_snapshot();
             warn_metric_fields(name, snap.count, snap.last_ms, snap.max_ms);
+        }
+    }
+
+    /// 记录一次 SQLite 连接获取等待耗时（固定名 `db.acquire_wait_ms`）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     扩池门槛依赖连接等待 p95；生产路径必须把 `pool.acquire` 等待写入同一指标面，
+    ///     而不能只在 ignore 压测里自测。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `record_duration(METRIC_DB_ACQUIRE_WAIT_MS, duration)`；超过阈值时 `warn_metric`
+    ///     （仅固定四字段，无 SQL/路径）。
+    pub fn measure_db_acquire(&self, duration: Duration) {
+        self.record_duration(METRIC_DB_ACQUIRE_WAIT_MS, duration);
+        if duration.as_millis() as u64 >= DB_ACQUIRE_WARN_MS {
+            self.warn_metric(METRIC_DB_ACQUIRE_WAIT_MS);
+        }
+    }
+
+    /// 记录一次短事务（begin→commit）耗时（固定名 `db.transaction_ms`）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     claim CAS 与 cc upsert 等热路径事务耗时是扩池与卡顿诊断的核心证据。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `record_duration(METRIC_DB_TRANSACTION_MS, duration)`；超阈值时 `warn_metric`。
+    pub fn measure_db_transaction(&self, duration: Duration) {
+        self.record_duration(METRIC_DB_TRANSACTION_MS, duration);
+        if duration.as_millis() as u64 >= DB_TRANSACTION_WARN_MS {
+            self.warn_metric(METRIC_DB_TRANSACTION_MS);
         }
     }
 

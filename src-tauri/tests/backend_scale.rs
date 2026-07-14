@@ -315,11 +315,11 @@ async fn orchestrator_claim_concurrent_cas_no_duplicate() {
 }
 
 /// Business Logic（为什么需要这个测试）:
-///     前 256 个无效 workflow 项目不得永久饿死后继合法任务；cursor 满窗推进，触尾回绕。
+///     前 256 个无效 workflow 项目不得永久饿死后继合法任务；满窗/project-cap 旋转推进 cursor。
 ///
 /// Code Logic（这个测试做什么）:
-///     256 个无效项目各 1 任务 + 1 个合法项目任务；第一页 preflight eligible 为空且 exhausted；
-///     用 next_cursor 再 list+preflight 必须拿到合法任务；再翻一页为空后 cursor 应回绕语义由调用方置 None。
+///     256 个无效项目各 1 任务 + 1 个合法项目任务；反复 list+preflight 按 advance_cursor 推进，
+///     最终必须命中 good-task 并可 CAS claim。
 #[tokio::test]
 async fn orchestrator_claim_cursor_skips_invalid_window_then_wraps() {
     let db = setup_repo().await;
@@ -351,34 +351,37 @@ async fn orchestrator_claim_cursor_skips_invalid_window_then_wraps() {
         .unwrap();
     set_todo_idle(pool, "good-task").await;
 
-    let page1 = repo
-        .list_local_queued_claim_candidates(None, CLAIM_CANDIDATE_LIMIT)
-        .await
-        .unwrap();
-    assert_eq!(page1.len(), CLAIM_CANDIDATE_LIMIT as usize);
-    let preflight1 = preflight_claim_candidates(page1).await.unwrap();
-    assert!(
-        preflight1.eligible.is_empty(),
-        "first window is all invalid projects"
-    );
-    assert!(preflight1.exhausted);
-    let cursor = preflight1
-        .next_cursor
-        .expect("exhausted window must produce next_cursor");
-
-    let page2 = repo
-        .list_local_queued_claim_candidates(Some(&cursor), CLAIM_CANDIDATE_LIMIT)
-        .await
-        .unwrap();
-    assert_eq!(page2.len(), 1);
-    assert_eq!(page2[0].task.id, "good-task");
-    let preflight2 = preflight_claim_candidates(page2).await.unwrap();
-    assert_eq!(preflight2.eligible.len(), 1);
-    assert_eq!(preflight2.eligible[0].task.id, "good-task");
-    assert!(!preflight2.exhausted);
+    let mut cursor: Option<ClaimScanCursor> = None;
+    let mut good_eligible: Option<Vec<ClaimCandidate>> = None;
+    // project-cap=64 时最多约 ceil(256/64)=4 次旋转 + 1 次触尾即可扫到 good。
+    for _ in 0..16 {
+        let page = repo
+            .list_local_queued_claim_candidates(cursor.as_ref(), CLAIM_CANDIDATE_LIMIT)
+            .await
+            .unwrap();
+        if page.is_empty() {
+            cursor = None;
+            continue;
+        }
+        let preflight = preflight_claim_candidates(page).await.unwrap();
+        if let Some(c) = preflight
+            .eligible
+            .iter()
+            .find(|c| c.task.id == "good-task")
+        {
+            good_eligible = Some(vec![c.clone()]);
+            break;
+        }
+        if preflight.advance_cursor {
+            cursor = preflight.next_cursor;
+        } else {
+            cursor = None;
+        }
+    }
+    let eligible = good_eligible.expect("good-task must appear after cursor rotation");
 
     let claimed = repo
-        .claim_preflighted_candidates_with_global_capacity(1, &preflight2.eligible)
+        .claim_preflighted_candidates_with_global_capacity(1, &eligible)
         .await
         .unwrap()
         .claimed;
@@ -386,16 +389,16 @@ async fn orchestrator_claim_cursor_skips_invalid_window_then_wraps() {
     assert_eq!(claimed[0].id, "good-task");
     assert_eq!(claimed[0].status, OrchestratorTaskStatus::Preparing);
 
-    // 触尾后再翻应为空（调用方应把 cursor 置 None 回绕）。
-    let after = ClaimScanCursor::from_task(&claimed[0]);
-    // claimed row is Preparing; list only Queued — use preflight2 cursor from good-task candidate.
-    let tail_cursor = preflight2.next_cursor.expect("good page cursor");
-    let page3 = repo
+    // 从 good-task 的 keyset 继续翻页应为空（触尾；调用方置 None 回绕）。
+    let tail_cursor = ClaimScanCursor::from_task(&claimed[0]);
+    let page_tail = repo
         .list_local_queued_claim_candidates(Some(&tail_cursor), CLAIM_CANDIDATE_LIMIT)
         .await
         .unwrap();
-    assert!(page3.is_empty(), "after tail page must be empty for wrap");
-    let _ = after; // silence if unused across refactors
+    assert!(
+        page_tail.is_empty(),
+        "after good-task keyset must be empty for wrap"
+    );
 }
 
 /// Business Logic（为什么需要这个测试）:
@@ -449,6 +452,80 @@ fn cc_history_mixed_version_malformed_paged_fails_round_not_empty_success() {
 #[test]
 fn cc_history_mixed_version_legacy_bodies_work_against_new_server() {
     app_lib::mixed_version_harness::assert_legacy_bodies_work_against_new_server();
+}
+
+/// H1：多 ID 批混入 item_too_large 毒丸时拆批并仍 pull 好数据。
+#[test]
+fn cc_history_mixed_version_item_too_large_halves_and_isolates_poison() {
+    app_lib::mixed_version_harness::assert_item_too_large_halves_and_isolates_poison();
+}
+
+/// 413 batch_too_large 对半拆批直至成功。
+#[test]
+fn cc_history_mixed_version_batch_too_large_halves_until_success() {
+    app_lib::mixed_version_harness::assert_batch_too_large_halves_until_success();
+}
+
+/// 并发 VC merge 收敛（mock push 走 merge）。
+#[test]
+fn cc_history_mixed_version_concurrent_vector_clock_merges() {
+    app_lib::mixed_version_harness::assert_concurrent_vector_clock_merges();
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     生产池 max_connections=1 时并发 claim 仍不得重复领取（排队串行化后 CAS 语义仍成立）。
+///
+/// Code Logic（这个测试做什么）:
+///     与 pool=2 竞态用例相同的双 task 并发 claim，但 fixture 用 pool=1。
+#[tokio::test]
+async fn orchestrator_claim_concurrent_cas_no_duplicate_pool1() {
+    let db = setup_repo_with_pool(1).await;
+    let pool = &db.pool;
+    let repo = &db.repo;
+    create_workbench_projects_table(pool).await;
+    let dir = TempDir::new().unwrap();
+    insert_workbench_project(pool, "local-a", "local", dir.path()).await;
+
+    for (id, created_at) in [
+        ("task-a", "2026-07-05T00:00:01Z"),
+        ("task-b", "2026-07-05T00:00:02Z"),
+    ] {
+        repo.create_task(&queued_task(id, "local-a", 10, created_at))
+            .await
+            .unwrap();
+        set_todo_idle(pool, id).await;
+    }
+
+    let candidates = repo
+        .list_local_queued_claim_candidates(None, CLAIM_CANDIDATE_LIMIT)
+        .await
+        .unwrap();
+    let preflight = preflight_claim_candidates(candidates).await.unwrap();
+    assert_eq!(preflight.eligible.len(), 2);
+
+    let repo_a = OrchestratorRepo::new(db.pool.clone());
+    let repo_b = OrchestratorRepo::new(db.pool.clone());
+    let eligible_a = preflight.eligible.clone();
+    let eligible_b = preflight.eligible.clone();
+
+    let (out_a, out_b) = tokio::join!(
+        claim_with_busy_retry(&repo_a, 2, &eligible_a),
+        claim_with_busy_retry(&repo_b, 2, &eligible_b),
+    );
+    let mut ids: Vec<String> = out_a
+        .claimed
+        .iter()
+        .chain(out_b.claimed.iter())
+        .map(|t| t.id.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(
+        ids,
+        vec!["task-a".to_string(), "task-b".to_string()],
+        "pool=1 concurrent CAS must still unique-claim"
+    );
+    assert_eq!(out_a.claimed.len() + out_b.claimed.len(), 2);
 }
 
 // --- S5 Task 8: safety gates + ignored load benchmark ---
@@ -1182,49 +1259,57 @@ async fn scale_safety_no_duplicate_claims() {
 }
 
 /// Business Logic（为什么需要这个测试）:
-///     push-batch 类写路径在中途失败时必须整批回滚，禁止 partial accepted。
+///     push-batch 类写路径在中途失败时必须整批回滚，禁止 partial accepted；
+///     必须走产品 `upsert_merged_batch` 事务边界，而不是手写 begin+INSERT。
 ///
 /// Code Logic（这个测试做什么）:
-///     开启事务插入 3 行 history 后主动返回错误并 drop tx；断言表行数为 0。
+///     构造 3 行 ClaudeHistoryRow，调用 `upsert_merged_batch_inject_fail_at(..., Some(1))`，
+///     断言 Err 且表行数仍为 0（整批 rollback）。
 #[tokio::test]
 async fn scale_safety_no_partial_batch_after_injected_failure() {
     let db = setup_repo_with_pool(1).await;
     ensure_scale_aux_tables(&db.pool).await;
+    let repo = app_lib::ClaudeHistoryRepo::new(db.pool.clone());
     let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM claude_history")
         .fetch_one(&db.pool)
         .await
         .unwrap();
     assert_eq!(before, 0);
 
-    let inject_fail = async {
-        let mut tx = db.pool.begin().await.unwrap();
-        for i in 0..3 {
-            sqlx::query(
-                "INSERT INTO claude_history \
-                 (id, project_path, project_name, session_id, content, git_branch, cc_version, \
-                  occurred_at, device_id, vector_clock, created_at, updated_at, deleted) \
-                 VALUES (?, '/p', 'p', 's', 'c', NULL, NULL, 't', 'd', '{}', 't', 't', 0)",
-            )
-            .bind(format!("partial-{i}"))
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-            if i == 1 {
-                // 注入失败：不 commit，依赖 drop 回滚。
-                return Err::<(), &'static str>("injected");
-            }
-        }
-        tx.commit().await.unwrap();
-        Ok(())
+    let mut batch = Vec::new();
+    for i in 0..3 {
+        let mut vc = std::collections::HashMap::new();
+        vc.insert("d".to_string(), 1);
+        batch.push(app_lib::ClaudeHistoryRow {
+            id: format!("partial-{i}"),
+            project_path: "/p".into(),
+            project_name: "p".into(),
+            session_id: "s".into(),
+            content: format!("c{i}"),
+            git_branch: None,
+            cc_version: None,
+            occurred_at: "t".into(),
+            device_id: "d".into(),
+            vector_clock: vc,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            deleted: false,
+        });
     }
-    .await;
-    assert!(inject_fail.is_err());
+    let err = repo
+        .upsert_merged_batch_inject_fail_at(&batch, Some(1))
+        .await
+        .expect_err("inject fail must surface");
+    assert!(
+        err.to_string().contains("injected") || err.to_string().contains("vector_clock"),
+        "error should mention injection: {err}"
+    );
 
     let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM claude_history")
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(after, 0, "partial batch must roll back completely");
+    assert_eq!(after, 0, "product upsert path must roll back completely");
 }
 
 /// Business Logic（为什么需要这个测试）:

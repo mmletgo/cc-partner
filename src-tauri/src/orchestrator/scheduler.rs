@@ -369,20 +369,20 @@ async fn claim_tasks_for_dispatch(
 
     let preflight = preflight_claim_candidates(candidates).await?;
 
-    // 成功有界扫描后才推进：满窗继续 next_cursor，未满窗视为触尾回绕。
-    if preflight.exhausted {
+    // 成功有界扫描后才推进：满窗或 project-cap 旋转写回 next_cursor；否则触尾回绕。
+    if preflight.advance_cursor {
         *cursor = preflight.next_cursor.clone();
     } else {
         *cursor = None;
     }
 
     let outcome = repo
-        .claim_preflighted_candidates_with_global_capacity(
+        .claim_preflighted_candidates_with_global_capacity_metrics(
             config.max_concurrent_tasks,
             &preflight.eligible,
+            metrics,
         )
         .await?;
-
     if let Some(metrics) = metrics {
         metrics.record_count(METRIC_CLAIM_CANDIDATES, candidate_count);
         metrics.record_count(METRIC_CLAIM_PROJECTS, project_count);

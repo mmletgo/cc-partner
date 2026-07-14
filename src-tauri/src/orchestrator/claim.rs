@@ -96,16 +96,20 @@ impl ClaimCandidate {
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     scheduler 需要知道本窗哪些任务可 claim、下一页从哪开始、窗口是否触达硬上限，
-///     才能在不持有 DB 事务的情况下安全推进扫描与领取。
+///     才能在不持有 DB 事务的情况下安全推进扫描与领取；project cap 命中时还需旋转
+///     cursor 避免第 65+ 项目跨 tick 永久饥饿。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     `eligible` 为 active_states 过滤后的候选（保持原优先级顺序）；
-///     `next_cursor` 为本窗最后一条（空窗为 None）；`exhausted` 表示输入达到 256 上限。
+///     `next_cursor` 为下一 tick 扫描起点；`exhausted` 表示输入达到 256 上限；
+///     `advance_cursor` 为 true 时 scheduler 写回 next_cursor（满窗或 project-cap 旋转）。
 #[derive(Debug, Clone)]
 pub struct ClaimPreflight {
     pub eligible: Vec<ClaimCandidate>,
     pub next_cursor: Option<ClaimScanCursor>,
     pub exhausted: bool,
+    /// 是否推进进程内扫描 cursor（满窗 exhausted 或 project cap 旋转）。
+    pub advance_cursor: bool,
 }
 
 /// 阶段 C CAS 结果（领取行 + 未命中计数）。
@@ -128,7 +132,8 @@ pub struct ClaimCasOutcome {
 /// Code Logic（这个函数做什么）:
 ///     按候选顺序对 project_id 去重，最多解析 64 个项目；每个项目 `spawn_blocking` 一次
 ///     `resolve_project_workflow`；解析失败跳过该项目（不改任务状态）；按 active_states 过滤。
-///     `next_cursor` 取输入窗最后一条；`exhausted` 当输入长度 >= 256。
+///     满窗时 `next_cursor` 取窗末；若 project 数超过 64，旋转 cursor 到首个未解析项目之前，
+///     避免第 65+ 项目被推进越过而跨 tick 饥饿。
 pub async fn preflight_claim_candidates(
     candidates: Vec<ClaimCandidate>,
 ) -> Result<ClaimPreflight, AppError> {
@@ -144,20 +149,20 @@ pub async fn preflight_claim_candidates(
 ///     生产路径继续走真实 `resolve_project_workflow`。
 ///
 /// Code Logic（这个函数做什么）:
-///     与 `preflight_claim_candidates` 相同的分组/上限/过滤逻辑，但 workflow 解析委托给
-///     传入的 `resolver`（在 spawn_blocking 中调用）。
+///     与 `preflight_claim_candidates` 相同的分组/上限/过滤/project-cap 旋转逻辑，
+///     但 workflow 解析委托给传入的 `resolver`（在 spawn_blocking 中调用）。
 pub async fn preflight_claim_candidates_with_resolver(
     candidates: Vec<ClaimCandidate>,
     resolver: Arc<WorkflowResolverFn>,
 ) -> Result<ClaimPreflight, AppError> {
     let exhausted = (candidates.len() as u32) >= CLAIM_CANDIDATE_LIMIT;
-    let next_cursor = candidates.last().map(ClaimCandidate::to_scan_cursor);
 
     if candidates.is_empty() {
         return Ok(ClaimPreflight {
             eligible: Vec::new(),
             next_cursor: None,
             exhausted: false,
+            advance_cursor: false,
         });
     }
 
@@ -176,10 +181,14 @@ pub async fn preflight_claim_candidates_with_resolver(
         }
     }
 
+    let project_cap_hit = project_order.len() > CLAIM_PROJECT_LIMIT;
     let projects_to_resolve: Vec<String> = project_order
-        .into_iter()
+        .iter()
         .take(CLAIM_PROJECT_LIMIT)
+        .cloned()
         .collect();
+    let resolved_set: std::collections::HashSet<String> =
+        projects_to_resolve.iter().cloned().collect();
 
     // project_id -> Some(workflow) 成功；None 表示无效/跳过。
     let mut workflows: HashMap<String, Option<ResolvedWorkflow>> =
@@ -210,7 +219,7 @@ pub async fn preflight_claim_candidates_with_resolver(
     }
 
     let mut eligible = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
+    for candidate in &candidates {
         let Some(Some(workflow)) = workflows.get(&candidate.task.project_id) else {
             continue;
         };
@@ -218,14 +227,35 @@ pub async fn preflight_claim_candidates_with_resolver(
             .active_states
             .contains(&candidate.task.workflow_state)
         {
-            eligible.push(candidate);
+            eligible.push(candidate.clone());
         }
     }
+
+    // project cap 旋转：cursor 取「首个未解析项目」前一条，使下一 tick 从尾部项目继续，
+    // 而不是推进到窗末把 65+ 项目整体跳过。无 cap 时仍用窗末（满窗）或 None。
+    let (next_cursor, advance_cursor) = if project_cap_hit {
+        let mut prev: Option<ClaimScanCursor> = None;
+        for c in &candidates {
+            if !resolved_set.contains(&c.task.project_id) {
+                break;
+            }
+            prev = Some(c.to_scan_cursor());
+        }
+        (prev, true)
+    } else if exhausted {
+        (
+            candidates.last().map(ClaimCandidate::to_scan_cursor),
+            true,
+        )
+    } else {
+        (candidates.last().map(ClaimCandidate::to_scan_cursor), false)
+    };
 
     Ok(ClaimPreflight {
         eligible,
         next_cursor,
         exhausted,
+        advance_cursor,
     })
 }
 

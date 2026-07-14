@@ -200,15 +200,25 @@ impl ClaudeHistoryRepo {
     ///     整批包在同一显式事务中，避免半完成写入，但语义仍是 IGNORE 而非 REPLACE。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     空切片直接返回 0；否则 `begin` 事务，逐条 INSERT OR IGNORE 累加 rows_affected，
-    ///     全部成功后 `commit`；任一行失败则事务 drop 回滚。
+    ///     空切片直接返回 0；否则 `begin` 事务，逐条跳过 content>1MiB 的毒丸后
+    ///     INSERT OR IGNORE 累加 rows_affected，全部成功后 `commit`；任一行失败则事务 drop 回滚。
     pub async fn bulk_ingest(&self, items: &[ClaudeHistoryRow]) -> Result<usize, AppError> {
         if items.is_empty() {
             return Ok(0);
         }
+        // 与 paged 协议 content 上限对齐，阻止采集路径写入毒丸（避免 peer items 整批 422）。
+        const CONTENT_MAX_BYTES: usize = 1024 * 1024;
         let mut tx = self.db.begin().await?;
         let mut inserted: usize = 0;
         for p in items {
+            if p.content.len() > CONTENT_MAX_BYTES {
+                // 不写 id/正文；仅记字节数便于本地诊断。
+                tracing::warn!(
+                    content_bytes = p.content.len(),
+                    "bulk_ingest 跳过超限 content（>1MiB）"
+                );
+                continue;
+            }
             let vc_text = serde_json::to_string(&p.vector_clock)?;
             let res = sqlx::query(
                 "INSERT OR IGNORE INTO claude_history \
@@ -345,6 +355,22 @@ impl ClaudeHistoryRepo {
         items: &[ClaudeHistoryRow],
     ) -> Result<usize, AppError> {
         self.upsert_merged_batch_inner(items, None).await
+    }
+
+    /// 事务性 REPLACE；可选注入失败点，供 scale_safety 等产品路径 rollback 回归。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     集成测试必须调用与生产相同的 `upsert_merged_batch` 事务边界，
+    ///     而不能手写 begin+INSERT 假装覆盖了产品写路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `upsert_merged_batch_inner(items, inject_fail_at)`。
+    pub async fn upsert_merged_batch_inject_fail_at(
+        &self,
+        items: &[ClaudeHistoryRow],
+        inject_fail_at: Option<usize>,
+    ) -> Result<usize, AppError> {
+        self.upsert_merged_batch_inner(items, inject_fail_at).await
     }
 
     /// 事务性 REPLACE 实现；`inject_fail_at` 仅测试用于模拟中途失败。

@@ -19,7 +19,7 @@ use crate::orchestrator::outbox::{
 };
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
-use sqlx::Row;
+use sqlx::{Acquire, Row};
 use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
@@ -305,6 +305,15 @@ impl OrchestratorRepo {
     ///     保存 SqlitePool clone；pool 内部是 Arc，clone 廉价。
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     生产路径 `db.acquire_wait_ms` 埋点与测试需要访问同一 SqlitePool 采样连接等待。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回内部 pool 引用（clone 廉价，调用方可 `acquire`）。
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -999,9 +1008,35 @@ impl OrchestratorRepo {
         limit: i64,
         eligible: &[ClaimCandidate],
     ) -> Result<ClaimCasOutcome, AppError> {
-        let mut tx = self.pool.begin().await?;
+        self.claim_preflighted_candidates_with_global_capacity_metrics(limit, eligible, None)
+            .await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     生产 scheduler 需要在 claim 短事务路径上记录 `db.acquire_wait_ms` /
+    ///     `db.transaction_ms`，供扩池门槛与本地诊断复用同一指标面。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     显式 `pool.acquire` 计时后 `conn.begin` 进入 CAS 短事务；commit 后记录
+    ///     transaction 耗时；`metrics=None` 时行为与无埋点路径一致。
+    pub async fn claim_preflighted_candidates_with_global_capacity_metrics(
+        &self,
+        limit: i64,
+        eligible: &[ClaimCandidate],
+        metrics: Option<&crate::backend::runtime_metrics::RuntimeMetrics>,
+    ) -> Result<ClaimCasOutcome, AppError> {
+        let acq_start = std::time::Instant::now();
+        let mut conn = self.pool.acquire().await?;
+        if let Some(m) = metrics {
+            m.measure_db_acquire(acq_start.elapsed());
+        }
+        let tx_start = std::time::Instant::now();
+        let mut tx = conn.begin().await?;
         if limit <= 0 || eligible.is_empty() {
             tx.commit().await?;
+            if let Some(m) = metrics {
+                m.measure_db_transaction(tx_start.elapsed());
+            }
             return Ok(ClaimCasOutcome {
                 claimed: Vec::new(),
                 cas_miss: 0,
@@ -1023,6 +1058,9 @@ impl OrchestratorRepo {
         let remaining = limit - active;
         if remaining <= 0 {
             tx.commit().await?;
+            if let Some(m) = metrics {
+                m.measure_db_transaction(tx_start.elapsed());
+            }
             return Ok(ClaimCasOutcome {
                 claimed: Vec::new(),
                 cas_miss: 0,
@@ -1082,6 +1120,9 @@ impl OrchestratorRepo {
         }
 
         tx.commit().await?;
+        if let Some(m) = metrics {
+            m.measure_db_transaction(tx_start.elapsed());
+        }
         Ok(ClaimCasOutcome { claimed, cas_miss })
     }
 

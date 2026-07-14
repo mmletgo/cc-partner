@@ -34,6 +34,8 @@ const METRIC_SYNC_BATCH_BYTES: &str = "cc_history.sync_batch.estimated_bytes";
 const METRIC_SYNC_BATCH_MS: &str = "cc_history.sync_batch.ms";
 /// 同步整轮耗时指标名。
 const METRIC_SYNC_ROUND_MS: &str = "cc_history.sync_round_ms";
+/// 本轮因单条 item_too_large 隔离毒丸的次数（脱敏计数，不含 id/正文）。
+const METRIC_ITEM_TOO_LARGE_ISOLATED: &str = "cc_history.item_too_large_isolated";
 
 /// 与单个对端执行 Claude Code 历史的双向同步。
 ///
@@ -50,19 +52,20 @@ pub async fn cc_sync_with_peer(
     device: &crate::models::device::Device,
 ) -> Result<(), String> {
     let base_url = device.base_url();
-    tracing::info!("开始与设备 {} 同步 CC 历史 ({})", device.name, base_url);
+    // paged 可观测面不写 device_name；legacy 仍可诊断对端名（一代兼容路径）。
+    tracing::info!("开始 CC 历史同步");
     let round_start = Instant::now();
 
     let health = match state.peer_client.health_info(&base_url).await {
         Ok(h) => h,
         Err(e) => {
-            tracing::warn!("设备 {} 不可达，跳过 CC 历史同步: {e}", device.name);
+            tracing::warn!("对端不可达，跳过 CC 历史同步: {e}");
             return Ok(());
         }
     };
     let protocol = health.protocol_info();
     let result = if protocol.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1) {
-        cc_sync_paged_with_peer(state, &base_url, &device.name).await
+        cc_sync_paged_with_peer(state, &base_url).await
     } else {
         cc_sync_legacy_with_peer(state, &base_url, &device.name).await
     };
@@ -72,8 +75,8 @@ pub async fn cc_sync_with_peer(
         .record_duration(METRIC_SYNC_ROUND_MS, round_start.elapsed());
 
     match &result {
-        Ok(()) => tracing::info!("与设备 {} CC 历史同步完成", device.name),
-        Err(e) => tracing::warn!("与设备 {} CC 历史同步失败: {e}", device.name),
+        Ok(()) => tracing::info!("CC 历史同步完成"),
+        Err(e) => tracing::warn!("CC 历史同步失败: {e}"),
     }
     result
 }
@@ -186,15 +189,12 @@ async fn cc_sync_legacy_with_peer(
 /// Code Logic（这个函数做什么）:
 ///     1. 分页拉 remote manifest 至 done，拒绝不前进 cursor；
 ///     2. 按批 get 本地行比较 vector clock，收集 need_pull / need_push；
-///     3. items 批拉（≤128，遇 batch_too_large 对半拆到 1；单条 item_too_large 结束本轮）；
+///     3. items 批拉（≤128，遇 batch_too_large **或** 多 ID item_too_large 对半拆到 1；
+///        隔离到单条 item_too_large 时记录毒丸后继续完成本批好数据，再结束本轮）；
 ///     4. merge 后 `upsert_merged_batch`；
 ///     5. 分页本端 manifest，对 need_push 批取正文并 push-batch（同样拆批语义）；
-///     6. 每批记录 items/estimated_bytes/duration 固定名指标。
-async fn cc_sync_paged_with_peer(
-    state: &AppState,
-    base_url: &str,
-    device_name: &str,
-) -> Result<(), String> {
+///     6. 每批记录 items/estimated_bytes/duration 固定名指标（无设备名/正文）。
+async fn cc_sync_paged_with_peer(state: &AppState, base_url: &str) -> Result<(), String> {
     let remote_manifest = fetch_all_remote_manifest_pages(state, base_url).await?;
     let remote_clocks: HashMap<String, HashMap<String, u64>> = remote_manifest
         .iter()
@@ -259,50 +259,65 @@ async fn cc_sync_paged_with_peer(
     }
 
     let mut pulled = 0usize;
+    let mut isolated_poison = false;
     for chunk in need_pull.chunks(CC_ITEM_BATCH_LIMIT) {
         let ids = chunk.to_vec();
-        let items = fetch_items_with_halving(state, base_url, ids).await?;
-        if items.is_empty() {
-            continue;
-        }
-        let batch_start = Instant::now();
-        let est: usize = items.iter().map(estimate_row_bytes).sum();
-        let n = items.len();
+        let (items, poison) = fetch_items_with_halving(state, base_url, ids).await?;
+        if !items.is_empty() {
+            let batch_start = Instant::now();
+            let est: usize = items.iter().map(estimate_row_bytes).sum();
+            let n = items.len();
 
-        let mut to_upsert: Vec<ClaudeHistoryRow> = Vec::new();
-        let item_ids: Vec<String> = items.iter().map(|r| r.id.clone()).collect();
-        let local_map = state
-            .cc_history_repo
-            .get_many_for_sync(&item_ids)
-            .await
-            .map_err(|e| format!("pull 后批量读本地失败: {e}"))?;
-        for remote in &items {
-            match local_map.get(&remote.id) {
-                None => to_upsert.push(remote.clone()),
-                Some(local_row) => {
-                    let merged = merge_cc_history(local_row, remote);
-                    if merged.vector_clock != local_row.vector_clock
-                        || merged.updated_at != local_row.updated_at
-                        || merged.content != local_row.content
-                        || merged.deleted != local_row.deleted
-                    {
-                        to_upsert.push(merged);
+            let mut to_upsert: Vec<ClaudeHistoryRow> = Vec::new();
+            let item_ids: Vec<String> = items.iter().map(|r| r.id.clone()).collect();
+            let local_map = state
+                .cc_history_repo
+                .get_many_for_sync(&item_ids)
+                .await
+                .map_err(|e| format!("pull 后批量读本地失败: {e}"))?;
+            for remote in &items {
+                match local_map.get(&remote.id) {
+                    None => to_upsert.push(remote.clone()),
+                    Some(local_row) => {
+                        let merged = merge_cc_history(local_row, remote);
+                        if merged.vector_clock != local_row.vector_clock
+                            || merged.updated_at != local_row.updated_at
+                            || merged.content != local_row.content
+                            || merged.deleted != local_row.deleted
+                        {
+                            to_upsert.push(merged);
+                        }
                     }
                 }
             }
+            if !to_upsert.is_empty() {
+                let tx_start = Instant::now();
+                let written = state
+                    .cc_history_repo
+                    .upsert_merged_batch(&to_upsert)
+                    .await
+                    .map_err(|e| format!("CC 历史 upsert_merged_batch 失败: {e}"))?;
+                state
+                    .runtime_metrics
+                    .measure_db_transaction(tx_start.elapsed());
+                pulled += written;
+            }
+            record_batch_metrics(state, n as u64, est as u64, batch_start.elapsed());
         }
-        if !to_upsert.is_empty() {
-            let written = state
-                .cc_history_repo
-                .upsert_merged_batch(&to_upsert)
-                .await
-                .map_err(|e| format!("CC 历史 upsert_merged_batch 失败: {e}"))?;
-            pulled += written;
+        if poison {
+            // 好数据已落库；结束本轮，禁止把毒丸伪装成空成功继续扫后续批。
+            isolated_poison = true;
+            break;
         }
-        record_batch_metrics(state, n as u64, est as u64, batch_start.elapsed());
     }
     if pulled > 0 {
-        tracing::info!("从 {device_name} 分页拉取并更新了 {pulled} 条 CC 历史");
+        tracing::info!("分页拉取并更新了 {pulled} 条 CC 历史");
+    }
+    if isolated_poison {
+        state
+            .runtime_metrics
+            .record_count(METRIC_ITEM_TOO_LARGE_ISOLATED, 1);
+        return Err("单条 item_too_large，已隔离毒丸并结束本轮".to_string());
     }
 
     let push_id_list: Vec<String> = need_push_ids.into_iter().collect();
@@ -323,12 +338,21 @@ async fn cc_sync_paged_with_peer(
         }
         while !rows.is_empty() {
             let batch = take_push_batch(&mut rows);
-            let accepted = push_batch_with_halving(state, base_url, batch).await?;
+            let (accepted, poison) = push_batch_with_halving(state, base_url, batch).await?;
             pushed += accepted;
+            if poison {
+                if pushed > 0 {
+                    tracing::info!("分页推送了 {pushed} 条 CC 历史");
+                }
+                state
+                    .runtime_metrics
+                    .record_count(METRIC_ITEM_TOO_LARGE_ISOLATED, 1);
+                return Err("push 单条 item_too_large，已隔离毒丸并结束本轮".to_string());
+            }
         }
     }
     if pushed > 0 {
-        tracing::info!("向 {device_name} 分页推送了 {pushed} 条 CC 历史");
+        tracing::info!("分页推送了 {pushed} 条 CC 历史");
     }
     Ok(())
 }
@@ -383,22 +407,26 @@ async fn fetch_all_remote_manifest_pages(
     Ok(all)
 }
 
-/// 拉取 items；遇 `batch_too_large` 对半拆分直至 1。
+/// 拉取 items；遇 `batch_too_large` **或** 多 ID `item_too_large` 对半拆分直至 1。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     对端以 8MiB 估算拒绝大包时，客户端必须缩小批次继续，不得跳过数据；
-///     单条仍 `item_too_large` 则结束本轮。
+///     对端以 8MiB 估算拒绝大包时，客户端必须缩小批次继续；多 ID 批中只要混入一条
+///     content>1MiB 的毒丸，服务端会整批 422——若不拆批，好 ID 永远无法同步。
+///     拆到单条仍 422 时隔离毒丸（记脱敏计数），继续完成本批其余 ID，再由调用方结束本轮。
 ///
 /// Code Logic（这个函数做什么）:
-///     递归/栈式拆分 ids；成功合并 items；`item_too_large` 且 len==1 → Err；其它错误上抛。
+///     栈式拆分 ids；成功合并 items；`batch_too_large|item_too_large && len>1` → 对半入栈；
+///     `item_too_large && len==1` → 丢弃该 id、记 isolated=true、不写 content/id；
+///     返回 `(items, isolated_poison)`。
 async fn fetch_items_with_halving(
     state: &AppState,
     base_url: &str,
     ids: Vec<String>,
-) -> Result<Vec<ClaudeHistoryRow>, String> {
+) -> Result<(Vec<ClaudeHistoryRow>, bool), String> {
     // 迭代拆批：async 递归需 Box::pin，这里用栈避免无限尺寸 future。
     let mut stack: Vec<Vec<String>> = vec![ids];
     let mut out = Vec::new();
+    let mut isolated_poison = false;
     while let Some(chunk) = stack.pop() {
         if chunk.is_empty() {
             continue;
@@ -415,37 +443,43 @@ async fn fetch_items_with_halving(
                 );
                 out.extend(resp.items);
             }
-            Err(e) if is_batch_too_large(&e) && chunk.len() > 1 => {
+            Err(e)
+                if (is_batch_too_large(&e) || is_item_too_large(&e)) && chunk.len() > 1 =>
+            {
                 let mid = chunk.len() / 2;
                 stack.push(chunk[mid..].to_vec());
                 stack.push(chunk[..mid].to_vec());
             }
             Err(e) if is_item_too_large(&e) && chunk.len() == 1 => {
-                return Err(format!("单条 item_too_large，结束本轮: id={}", chunk[0]));
+                // 隔离毒丸：不把 id/content 写入日志或指标；继续处理栈内其余好 ID。
+                isolated_poison = true;
+                tracing::warn!("items 遇到单条 item_too_large，已隔离毒丸");
             }
             Err(e) if is_batch_too_large(&e) && chunk.len() == 1 => {
-                return Err(format!("单条 batch_too_large，结束本轮: id={}", chunk[0]));
+                return Err("单条 batch_too_large，结束本轮".to_string());
             }
             Err(e) => return Err(format!("items 失败: {e}")),
         }
     }
-    Ok(out)
+    Ok((out, isolated_poison))
 }
 
-/// push-batch；遇 `batch_too_large` 对半拆分直至 1。
+/// push-batch；遇 `batch_too_large` **或** 多 ID `item_too_large` 对半拆分直至 1。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     与 items 对称：合法 413 拆批继续；单条超限结束本轮，禁止静默跳过。
+///     与 items 对称：合法 413/422 多 ID 拆批继续；单条超限隔离毒丸后结束本轮，禁止静默跳过。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用 `cc_sync_push_batch`；成功返回 accepted；过大则拆分递归；单条过大 → Err。
+///     调用 `cc_sync_push_batch`；过大则拆分；单条 item_too_large → isolated 标志；
+///     返回 `(accepted, isolated_poison)`。
 async fn push_batch_with_halving(
     state: &AppState,
     base_url: &str,
     items: Vec<ClaudeHistoryRow>,
-) -> Result<usize, String> {
+) -> Result<(usize, bool), String> {
     let mut stack: Vec<Vec<ClaudeHistoryRow>> = vec![items];
     let mut accepted_total = 0usize;
+    let mut isolated_poison = false;
     while let Some(chunk) = stack.pop() {
         if chunk.is_empty() {
             continue;
@@ -458,27 +492,24 @@ async fn push_batch_with_halving(
                 record_batch_metrics(state, n as u64, est as u64, batch_start.elapsed());
                 accepted_total += resp.accepted;
             }
-            Err(e) if is_batch_too_large(&e) && chunk.len() > 1 => {
+            Err(e)
+                if (is_batch_too_large(&e) || is_item_too_large(&e)) && chunk.len() > 1 =>
+            {
                 let mid = chunk.len() / 2;
                 stack.push(chunk[mid..].to_vec());
                 stack.push(chunk[..mid].to_vec());
             }
             Err(e) if is_item_too_large(&e) && chunk.len() == 1 => {
-                return Err(format!(
-                    "push 单条 item_too_large，结束本轮: id={}",
-                    chunk[0].id
-                ));
+                isolated_poison = true;
+                tracing::warn!("push-batch 遇到单条 item_too_large，已隔离毒丸");
             }
             Err(e) if is_batch_too_large(&e) && chunk.len() == 1 => {
-                return Err(format!(
-                    "push 单条 batch_too_large，结束本轮: id={}",
-                    chunk[0].id
-                ));
+                return Err("push 单条 batch_too_large，结束本轮".to_string());
             }
             Err(e) => return Err(format!("push-batch 失败: {e}")),
         }
     }
-    Ok(accepted_total)
+    Ok((accepted_total, isolated_poison))
 }
 
 /// 从待 push 队列取出不超过 128 条且估算 ≤8MiB 的一批。
@@ -553,6 +584,21 @@ mod tests {
     #[test]
     fn cc_history_mixed_version_malformed_paged_fails_round_not_empty_success() {
         crate::cc::mixed_version_harness::assert_malformed_paged_fails_round_not_empty_success();
+    }
+
+    #[test]
+    fn cc_history_mixed_version_item_too_large_halves_and_isolates_poison() {
+        crate::cc::mixed_version_harness::assert_item_too_large_halves_and_isolates_poison();
+    }
+
+    #[test]
+    fn cc_history_mixed_version_batch_too_large_halves_until_success() {
+        crate::cc::mixed_version_harness::assert_batch_too_large_halves_until_success();
+    }
+
+    #[test]
+    fn cc_history_mixed_version_concurrent_vector_clock_merges() {
+        crate::cc::mixed_version_harness::assert_concurrent_vector_clock_merges();
     }
 
     #[test]
