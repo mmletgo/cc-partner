@@ -15,7 +15,7 @@
 use crate::error::AppError;
 use crate::models::prompt::PromptRow;
 use sqlx::sqlite::SqlitePool;
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 use std::collections::HashMap;
 
 /// Prompt 仓库，封装所有 prompts 表的数据库操作。
@@ -198,15 +198,67 @@ impl PromptRepo {
     ///
     /// Business Logic: 同步引擎从对端拉取多条 Prompt 后需批量写入本地，已存在则覆盖。
     ///     对照 Python `bulk_upsert`。upsert 前不做合并决策（合并由 engine/merger 在调用前
-    ///     决定），此处直接 INSERT OR REPLACE。
+    ///     决定），此处直接 INSERT OR REPLACE。整批必须原子：中途失败不得留下半批次。
     ///
-    /// Code Logic: 空切片直接返回；否则逐条 INSERT OR REPLACE（sqlx 无 executemany 的批量
-    ///     原子语义，逐条执行；max_connections(1) 单连接语义下天然串行）。
+    /// Code Logic: 空切片直接返回；否则显式 begin 事务后逐条 INSERT OR REPLACE，
+    ///     全部成功 commit；任一行失败则 tx drop 回滚。
     pub async fn bulk_upsert(&self, prompts: &[PromptRow]) -> Result<(), AppError> {
+        self.bulk_upsert_in_transaction(prompts, None).await
+    }
+
+    /// 事务性 bulk_upsert；可选注入失败点，供模块/quality 回归验证整批回滚。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试必须走与生产相同的事务边界验证 rollback，而不是另一套写路径。
+    ///     本 seam 仅 debug/test-only：`cfg(test)` 或 `debug_assertions` 下编译，release 剥离。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `bulk_upsert_in_transaction(prompts, inject_fail_at)`。
+    #[cfg(any(test, debug_assertions))]
+    pub async fn bulk_upsert_inject_fail_at(
+        &self,
+        prompts: &[PromptRow],
+        inject_fail_at: Option<usize>,
+    ) -> Result<(), AppError> {
+        self.bulk_upsert_in_transaction(prompts, inject_fail_at)
+            .await
+    }
+
+    /// 在自有事务中 bulk upsert（生产与 inject seam 共享）。
+    ///
+    /// Business Logic: 保证生产 `bulk_upsert` 与测试 inject 路径同一事务语义。
+    /// Code Logic: begin → `bulk_upsert_on_tx` → commit。
+    async fn bulk_upsert_in_transaction(
+        &self,
+        prompts: &[PromptRow],
+        inject_fail_at: Option<usize>,
+    ) -> Result<(), AppError> {
         if prompts.is_empty() {
             return Ok(());
         }
-        for p in prompts {
+        let mut tx = self.db.begin().await?;
+        Self::bulk_upsert_on_tx(&mut tx, prompts, inject_fail_at).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 在已开启事务上执行 bulk upsert 循环（供 push-batch ledger 同事务调用）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     v2 push-batch 要求 ledger claim 与领域写入同一事务；路由层持有 tx 时调用本方法，
+    ///     不得再 begin 嵌套事务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     逐条 INSERT OR REPLACE；当 `inject_fail_at == Some(idx)` 命中时返回 Err（不 commit）。
+    pub async fn bulk_upsert_on_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        prompts: &[PromptRow],
+        inject_fail_at: Option<usize>,
+    ) -> Result<(), AppError> {
+        for (idx, p) in prompts.iter().enumerate() {
+            if inject_fail_at == Some(idx) {
+                return Err(AppError::generic("injected prompt bulk_upsert failure"));
+            }
             let tags_text = serde_json::to_string(&p.tags)?;
             let vc_text = serde_json::to_string(&p.vector_clock)?;
             sqlx::query(
@@ -223,10 +275,18 @@ impl PromptRepo {
             .bind(&p.device_id)
             .bind(vc_text)
             .bind(p.deleted as i64)
-            .execute(&self.db)
+            .execute(&mut **tx)
             .await?;
         }
         Ok(())
+    }
+
+    /// 返回底层 pool（供 push-batch ledger 与本仓库共享同一连接池）。
+    ///
+    /// Business Logic: 路由层需要同一 pool 开事务，把 ledger 与 bulk upsert 绑在一起。
+    /// Code Logic: 返回 `SqlitePool` clone。
+    pub fn pool(&self) -> SqlitePool {
+        self.db.clone()
     }
 
     /// 列出所有未删除 Prompt 用过的去重标签（升序）。
@@ -246,5 +306,72 @@ impl PromptRepo {
             tags.push(tag);
         }
         Ok(tags)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! prompt_repo 单测：事务 bulk_upsert 中途失败必须整批回滚。
+
+    use super::*;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+
+    /// 构造内存 SQLite 并建好 prompts 表，返回仓库。
+    async fn setup_repo() -> PromptRepo {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS prompts (\
+             id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL, \
+             tags TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, \
+             device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        PromptRepo::new(pool)
+    }
+
+    /// 构造测试 PromptRow。
+    fn prompt(id: &str) -> PromptRow {
+        let mut vector_clock = HashMap::new();
+        vector_clock.insert("d1".to_string(), 1u64);
+        PromptRow {
+            id: id.to_string(),
+            title: format!("t-{id}"),
+            content: format!("c-{id}"),
+            tags: vec![],
+            created_at: "2026-07-14T00:00:00Z".to_string(),
+            updated_at: "2026-07-14T00:00:00Z".to_string(),
+            device_id: "d1".to_string(),
+            vector_clock,
+            deleted: false,
+        }
+    }
+
+    /// 中途注入失败时整批回滚，不得留下半批次。
+    #[tokio::test]
+    async fn bulk_failure_rolls_back() {
+        let repo = setup_repo().await;
+        repo.bulk_upsert_inject_fail_at(&[prompt("a"), prompt("b")], Some(1))
+            .await
+            .unwrap_err();
+        assert!(repo.get_all_for_sync().await.unwrap().is_empty());
+    }
+
+    /// 生产 bulk_upsert 成功路径写入全部条目。
+    #[tokio::test]
+    async fn bulk_upsert_commits_all_items() {
+        let repo = setup_repo().await;
+        repo.bulk_upsert(&[prompt("a"), prompt("b")]).await.unwrap();
+        let all = repo.get_all_for_sync().await.unwrap();
+        assert_eq!(all.len(), 2);
     }
 }

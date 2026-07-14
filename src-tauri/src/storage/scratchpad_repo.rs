@@ -12,7 +12,7 @@ use crate::error::AppError;
 use crate::models::scratchpad::{ScratchpadRow, SCRATCHPAD_ID};
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -289,27 +289,34 @@ impl ScratchpadRepo {
     /// 批量插入/替换页面。
     ///
     /// Business Logic: 同步合并后需要批量落库胜出版本；每页以 id 为主键。
-    /// Code Logic: 逐条 INSERT OR REPLACE，vector_clock 序列化为紧凑 JSON，deleted bool 转 0/1。
-    ///     生产路径保持无事务循环语义（与历史 bulk_upsert 一致），不因测试 seam 改变。
+    ///     整批必须原子：中途失败不得留下半批次。
+    /// Code Logic: 委托事务性 `bulk_upsert_in_transaction`（无 inject）。
     pub async fn bulk_upsert(&self, rows: &[ScratchpadRow]) -> Result<(), AppError> {
-        for row in rows {
-            self.upsert(row).await?;
-        }
-        Ok(())
+        self.bulk_upsert_in_transaction(rows, None).await
     }
 
-    /// 事务性 bulk_upsert，可选注入失败点，供 quality_faults L2 验证 rollback。
+    /// 事务性 bulk_upsert，可选注入失败点，供 quality_faults L2 / 模块测试验证 rollback。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     生产 `bulk_upsert` 是无事务循环，失败可能 partial；L2 需要证明「若走事务边界，
-    ///     中途失败可整批回滚」。本 seam 仅 debug/test-only（`cfg(test)` 或 `debug_assertions`），
-    ///     release 剥离；不改变生产 `bulk_upsert` 成功路径语义。
+    ///     测试必须调用与生产相同的 `bulk_upsert` 事务边界。本 seam 仅 debug/test-only
+    ///     （`cfg(test)` 或 `debug_assertions`），release 剥离。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     begin 事务 → 逐行：命中 `inject_fail_at` 则返回 Err（不 commit，tx drop 回滚）；
-    ///     否则同一 SQL 的 INSERT OR REPLACE；全部成功后 commit。
+    ///     委托 `bulk_upsert_in_transaction(rows, inject_fail_at)`。
     #[cfg(any(test, debug_assertions))]
     pub async fn bulk_upsert_inject_fail_at(
+        &self,
+        rows: &[ScratchpadRow],
+        inject_fail_at: Option<usize>,
+    ) -> Result<(), AppError> {
+        self.bulk_upsert_in_transaction(rows, inject_fail_at).await
+    }
+
+    /// 在自有事务中 bulk upsert。
+    ///
+    /// Business Logic: 生产与 inject 路径共享事务语义。
+    /// Code Logic: begin → on_tx → commit。
+    async fn bulk_upsert_in_transaction(
         &self,
         rows: &[ScratchpadRow],
         inject_fail_at: Option<usize>,
@@ -318,6 +325,20 @@ impl ScratchpadRepo {
             return Ok(());
         }
         let mut tx = self.db.begin().await?;
+        Self::bulk_upsert_on_tx(&mut tx, rows, inject_fail_at).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 在已开启事务上执行 bulk upsert 循环（供 push-batch ledger 同事务调用）。
+    ///
+    /// Business Logic: ledger claim 与领域写入必须同一事务。
+    /// Code Logic: 逐条 INSERT OR REPLACE；inject 命中返回 Err。
+    pub async fn bulk_upsert_on_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        rows: &[ScratchpadRow],
+        inject_fail_at: Option<usize>,
+    ) -> Result<(), AppError> {
         for (idx, row) in rows.iter().enumerate() {
             if inject_fail_at == Some(idx) {
                 return Err(AppError::generic("injected scratchpad bulk_upsert failure"));
@@ -336,11 +357,18 @@ impl ScratchpadRepo {
             .bind(&row.device_id)
             .bind(vc_text)
             .bind(row.deleted as i64)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
-        tx.commit().await?;
         Ok(())
+    }
+
+    /// 返回底层 pool（供 push-batch ledger 共享）。
+    ///
+    /// Business Logic: 路由层需要同一 pool 开事务。
+    /// Code Logic: clone SqlitePool。
+    pub fn pool(&self) -> SqlitePool {
+        self.db.clone()
     }
 
     /// 插入/替换单页。
@@ -531,5 +559,38 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().any(|row| row.id == "scratchpad"));
         assert!(rows.iter().any(|row| row.title == "second"));
+    }
+
+    /// 中途注入失败时整批回滚，不得留下半批次。
+    #[tokio::test]
+    async fn bulk_failure_rolls_back() {
+        let repo = setup_repo().await;
+        let now = "2026-07-14T00:00:00Z".to_string();
+        let mut vc = HashMap::new();
+        vc.insert("d1".to_string(), 1u64);
+        let a = ScratchpadRow {
+            id: "a".to_string(),
+            title: "A".to_string(),
+            content: "ca".to_string(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            device_id: "d1".to_string(),
+            vector_clock: vc.clone(),
+            deleted: false,
+        };
+        let b = ScratchpadRow {
+            id: "b".to_string(),
+            title: "B".to_string(),
+            content: "cb".to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+            device_id: "d1".to_string(),
+            vector_clock: vc,
+            deleted: false,
+        };
+        repo.bulk_upsert_inject_fail_at(&[a, b], Some(1))
+            .await
+            .unwrap_err();
+        assert!(repo.get_all_for_sync().await.unwrap().is_empty());
     }
 }

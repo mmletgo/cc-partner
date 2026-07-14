@@ -12,7 +12,7 @@
 use crate::error::AppError;
 use crate::models::ssh_target::SshTargetRow;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 use std::collections::HashMap;
 
 /// SSH 目标仓库，封装所有 ssh_targets 表操作。
@@ -83,11 +83,58 @@ impl SshTargetRepo {
     }
 
     /// 批量插入/更新（按 host 主键，INSERT OR REPLACE），用于同步 push 落库。
+    ///
+    /// Business Logic: 同步合并后批量落库；中途失败必须整批回滚，禁止半批次成功。
+    /// Code Logic: 委托事务性 `bulk_upsert_in_transaction`（无 inject）。
     pub async fn bulk_upsert(&self, items: &[SshTargetRow]) -> Result<(), AppError> {
+        self.bulk_upsert_in_transaction(items, None).await
+    }
+
+    /// 事务性 bulk_upsert；可选注入失败点，供模块/quality 回归验证整批回滚。
+    ///
+    /// Business Logic: 测试必须与生产共享同一事务边界。
+    /// Code Logic: `cfg(any(test, debug_assertions))` 下编译；release 剥离。
+    #[cfg(any(test, debug_assertions))]
+    pub async fn bulk_upsert_inject_fail_at(
+        &self,
+        items: &[SshTargetRow],
+        inject_fail_at: Option<usize>,
+    ) -> Result<(), AppError> {
+        self.bulk_upsert_in_transaction(items, inject_fail_at)
+            .await
+    }
+
+    /// 在自有事务中 bulk upsert。
+    ///
+    /// Business Logic: 生产与 inject 路径共享事务语义。
+    /// Code Logic: begin → on_tx → commit。
+    async fn bulk_upsert_in_transaction(
+        &self,
+        items: &[SshTargetRow],
+        inject_fail_at: Option<usize>,
+    ) -> Result<(), AppError> {
         if items.is_empty() {
             return Ok(());
         }
-        for p in items {
+        let mut tx = self.db.begin().await?;
+        Self::bulk_upsert_on_tx(&mut tx, items, inject_fail_at).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 在已开启事务上执行 bulk upsert 循环（供 push-batch ledger 同事务调用）。
+    ///
+    /// Business Logic: ledger claim 与领域写入必须同一事务。
+    /// Code Logic: 逐条 INSERT OR REPLACE；inject 命中返回 Err。
+    pub async fn bulk_upsert_on_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        items: &[SshTargetRow],
+        inject_fail_at: Option<usize>,
+    ) -> Result<(), AppError> {
+        for (idx, p) in items.iter().enumerate() {
+            if inject_fail_at == Some(idx) {
+                return Err(AppError::generic("injected ssh_target bulk_upsert failure"));
+            }
             let vc_text = serde_json::to_string(&p.vector_clock)?;
             sqlx::query(
                 "INSERT OR REPLACE INTO ssh_targets \
@@ -103,10 +150,18 @@ impl SshTargetRepo {
             .bind(&p.created_at)
             .bind(&p.updated_at)
             .bind(p.deleted as i64)
-            .execute(&self.db)
+            .execute(&mut **tx)
             .await?;
         }
         Ok(())
+    }
+
+    /// 返回底层 pool（供 push-batch ledger 共享）。
+    ///
+    /// Business Logic: 路由层需要同一 pool 开事务。
+    /// Code Logic: clone SqlitePool。
+    pub fn pool(&self) -> SqlitePool {
+        self.db.clone()
     }
 
     /// 单条 upsert（命令层用，INSERT OR REPLACE）。
@@ -241,5 +296,21 @@ mod tests {
         let synced = repo.get_all_for_sync().await.unwrap();
         assert_eq!(synced.len(), 1);
         assert!(synced[0].deleted);
+    }
+
+    /// 中途注入失败时整批回滚，不得留下半批次。
+    #[tokio::test]
+    async fn bulk_failure_rolls_back() {
+        let repo = setup_repo().await;
+        repo.bulk_upsert_inject_fail_at(
+            &[
+                row("10.0.0.1", "alice", 22, 1),
+                row("10.0.0.2", "bob", 22, 1),
+            ],
+            Some(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(repo.get_all_for_sync().await.unwrap().is_empty());
     }
 }

@@ -10,7 +10,7 @@ cc-partner 的桌面宿主与全部后端逻辑，从 PyQt6 + Python 迁移而�
 
 - **本地前端 ↔ Rust**：Tauri `invoke()` IPC（`#[tauri::command]`）。**无本地 HTTP API 端口给桌面前端**、无 CORS、无启动端口竞态。前端 `web/src/api/` 底层走 `@tauri-apps/api/core` 的 `invoke`。
 - **跨设备 P2P / mobile**：axum HTTP server + reqwest peer client + mdns-sd。**首选 TCP 端口 `DEFAULT_HTTP_PORT=62116`**（`net/http_server.rs`）；`config.http_port` 为 0/非法时回落 62116（表示“用首选”，**不是** OS `port=0` 临时端口绑定）；合法 1..=65535 作为首选；`bind_preferred_http_listener` 在 `AddrInUse` 时 **端口 +1 递增** 直至成功，写入 `AppState.actual_http_port`。mDNS UDP **5353**。防火墙必须以 **实际** 端口为准。
-- **Health 权威元数据**：`GET /api/health` 返回 snake_case，`http_port` 为**实际**监听端口，并原样填入 `server_protocol_info()` 的 `protocol_version` + `capabilities`（当前字典序：`attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、`orchestrator.runtime-snapshot.v1`、`transfer.complete.v1`）。
+- **Health 权威元数据**：`GET /api/health` 返回 snake_case，`http_port` 为**实际**监听端口，并原样填入 `server_protocol_info()` 的 `protocol_version` + `capabilities`（当前字典序：`attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、`orchestrator.runtime-snapshot.v1`、`sync.manifest.v2`、`transfer.complete.v1`）。
 - 两条通道共享同一份 `AppState`（`Arc<RwLock<...>>`），由 `app.manage()` 注入命令层、`with_state()` 注入 axum。
 
 ## 目录结构（随 M1–M9 里程碑逐步落地）
@@ -39,8 +39,10 @@ src/
 ├── commands/          — #[tauri::command]：backend lifecycle + prompts + prompt_optimizer + scratchpad + cc_history + cloud_sync + github_trending + config + devices + sync + transfer + screenshot + permissions + updater + ssh_target + health + workbench [已实现]
 ├── models/prompt.rs   — PromptRow（snake_case，DB/同步）+ PromptDto（camelCase，前端） [已实现]
 ├── models/scratchpad.rs — ScratchpadRow（多页面，DB/同步）+ ScratchpadPageDto/SummaryDto（camelCase，前端） [已实现]
-├── storage/prompt_repo.rs — sqlx 运行期 query（非宏），list/get/create/update/soft_delete/list_tags [已实现]
-├── storage/scratchpad_repo.rs — scratchpad 多页面 CRUD、旧表 title 迁移、同步 upsert；生产 `bulk_upsert` 保持无事务循环；`bulk_upsert_inject_fail_at` 为 debug_assertions/test-only 事务 inject seam（release 剥离）[已实现]
+├── storage/prompt_repo.rs — sqlx 运行期 query（非宏），list/get/create/update/soft_delete/list_tags；生产 `bulk_upsert` 为单事务循环；`bulk_upsert_on_tx` 供 push-batch ledger 同事务写入；`bulk_upsert_inject_fail_at` 为 debug_assertions/test-only inject seam [已实现 N2 T3]
+├── storage/ssh_target_repo.rs — SSH 目标 CRUD + 事务 `bulk_upsert`/`bulk_upsert_on_tx` + inject seam [已实现 N2 T3]
+├── storage/scratchpad_repo.rs — scratchpad 多页面 CRUD、旧表 title 迁移；生产 `bulk_upsert` 为单事务循环；`bulk_upsert_on_tx` + inject seam [已实现 N2 T3]
+├── storage/sync_request_ledger_repo.rs — push-batch 幂等 ledger：UNIQUE(claimed_device_id,domain,client_request_id)+payload_hash+outcome；同 key/hash 重放、不同 hash conflict；claimed_device_id 非认证 [已实现 N2 T3]
 ├── storage/cc_history_repo.rs — claude_history 表 CRUD + bulk_ingest(IGNORE)/bulk_upsert(REPLACE) + scan_state；`upsert_merged_batch_inject_fail_at` 为 debug_assertions/test-only 事务中途失败 seam（`#[cfg(any(test, debug_assertions))]`，release 剥离；生产 `upsert_merged_batch` 始终无注入）[已实现]
 ├── storage/health_repo.rs — activity_records/water_records(自增 id)/rest_records 读写 + aggregate_minutes/daily 聚合统计 [已实现]
 ├── sync/              — 向量时钟 + LWW 合并 + engine              [M4]
@@ -191,9 +193,9 @@ migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，�
 - **同步流程（sync/engine.rs）**：`trigger_sync(state) -> SyncResult{accepted,synced,note}`，遍历 `devices` 全部在线对端，逐个 `sync_with_peer`（失败不阻断其他对端）。单对端：health 检查 → 本端 summaries（含 deleted）→ sync_pull 拿回对端需给的 prompts，逐条 merge_prompt 后 bulk_upsert（仅变化才写）→ sync_push 本端独有/领先而对端没有的 prompts。引擎仍走 legacy 折叠式 peer 方法；N2 Task 4+ 将切换到 typed v2 路径。
 - **sync 路由（net/routes/sync.rs + ssh_target_sync.rs + scratchpad_sync.rs，N2 Task2）**：
   - **legacy**（保留）：`POST /api/sync/{pull,push}`、`/api/ssh-target/sync/{pull,push}`、`/api/scratchpad/sync/{pull,push}` — 字段 snake_case，行为不变。
-  - **v2 无状态**（已挂载，**不**宣告 `sync.manifest.v2` 直至 Task 3 ledger）：三域各 `manifest-page`（keyset 分页 `SyncSummary`，≤500/1MiB，opaque cursor）、`items`（≤100/4MiB，保序 + missing_ids）、`push-batch`（≤100/4MiB + 非空 `client_request_id`，merge 后 bulk_upsert 返回 `{accepted}`；ledger 幂等延后 Task 3）。错误：400 invalid_cursor / 413 batch_too_large / 422 item_too_large。
+  - **v2 无状态**（已挂载并宣告 `sync.manifest.v2`）：三域各 `manifest-page`（keyset 分页 `SyncSummary`，≤500/1MiB，opaque cursor）、`items`（≤100/4MiB，保序 + missing_ids）、`push-batch`（≤100/4MiB + 非空 `client_request_id` + 可选 `claimed_device_id`；merge 后**单事务** ledger claim + 生产 bulk 循环 + 记录 `{accepted}` outcome；同 key/同 payload hash 重放返回原 outcome 不 re-apply；同 key/不同 hash → conflict 409）。错误：400 invalid_cursor / 413 batch_too_large / 422 item_too_large / 409 conflict。
   - **typed peer client**（`PeerClient::list_*_manifest_page` / `fetch_*_items` / `push_*_batch`）：失败上抛 `PeerCallError`（InvalidResponse/Remote/Network），禁止折叠空页；push 校验 accepted ≤ 本批条数。验证：`cargo test --locked --lib net::peer_client::tests` + `net::routes::{sync,ssh_target_sync,scratchpad_sync}::tests` + `node scripts/check-p2p-route-inventory.mjs`。
-- **PromptRepo 同步方法**：`get_all_for_sync()`（含 deleted 全量）、`bulk_upsert(&[PromptRow])`（INSERT OR REPLACE，upsert 前不做合并决策）。
+- **PromptRepo 同步方法**：`get_all_for_sync()`（含 deleted 全量）、`bulk_upsert(&[PromptRow])`（单事务 INSERT OR REPLACE，upsert 前不做合并决策）、`bulk_upsert_on_tx`（供 push-batch ledger 同事务写入）。
 - **trigger_sync 命令（commands/sync.rs）**：前端 `invoke('trigger_sync')` → 返回 `{accepted,synced,note}`，前端 `promptsApi.sync()` 取 `synced`。在 `lib.rs` invoke_handler 注册。
 - **速记本挂载**：`trigger_sync` 的单对端流程末尾追加 `scratchpad_sync_with_peer`，失败仅 warn，不影响 prompts 的 `synced` 计数。
 - **错误处理**：`AppError` 新增 `axum::IntoResponse` 实现（500 + `{"error":"..."}`），使 sync handler 的 `Result<Json<_>, AppError>` 可作 axum handler 返回；与 Python handler error 响应一致。
@@ -203,7 +205,7 @@ migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，�
 ## P2P 协议变更与幂等性清单（docs/p2p-protocol.md + scripts/check-p2p-route-inventory.mjs）
 
 - **权威清单**：`docs/p2p-protocol.md` 是所有 `/api/*` 路由的兼容性、能力宣告与重试/幂等性权威清单。每条路由必须正好归类为 `read-only`、`naturally-idempotent`、`requires-idempotency-key` 或 `no-transport-retry` 之一，并在「Key / guard」列引用保证该判定的代码（函数名、机制或幂等键）。新增/重命名/删除路由必须在同一改动里同步更新清单表格，随后运行 `node scripts/check-p2p-route-inventory.mjs` 校验——脚本提取 `http_server.rs` 内 `.route("/api/...")` 字面路径与 `docs/p2p-protocol.md` 表格中的 path 列双向 diff，发现 drift 立即 exit 1。动态段（`:id`、`:previewId`、`*path`）按 router 内字面写法原样登记。脚本只用 Node 内置模块，无依赖。
-- **能力宣告**：`net/protocol.rs::server_protocol_info()` 是本机对外宣告能力的唯一入口。**当前宣告**（字典序）：`attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、`orchestrator.runtime-snapshot.v1`、`transfer.complete.v1`。新增依赖新 wire 格式或新行为的路由必须先加 `CAPABILITY_*_V1` 常量、加入 `server_protocol_info()` 宣告、并在客户端用 `PeerProtocolInfo::supports(...)` gate（每个能力定义自己的 token，**不复用** `errors.envelope.v1` 表达“支持新路由”——后者只描述错误信封 wire 格式）。一代兼容：对端缺失字段安全回落 v0/空能力；v0 对端仍可调用 v1 之前已存在的路由。
+- **能力宣告**：`net/protocol.rs::server_protocol_info()` 是本机对外宣告能力的唯一入口。**当前宣告**（字典序）：`attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、`orchestrator.runtime-snapshot.v1`、`sync.manifest.v2`、`transfer.complete.v1`。新增依赖新 wire 格式或新行为的路由必须先加 `CAPABILITY_*_V1` 常量、加入 `server_protocol_info()` 宣告、并在客户端用 `PeerProtocolInfo::supports(...)` gate（每个能力定义自己的 token，**不复用** `errors.envelope.v1` 表达“支持新路由”——后者只描述错误信封 wire 格式）。一代兼容：对端缺失字段安全回落 v0/空能力；v0 对端仍可调用 v1 之前已存在的路由。
 - **请求 ID**：全局 `request_id_middleware` 已对所有 `/api/*` 与 `/mobile` fallback 注入 `X-CC-Request-Id`（客户端带入或服务端生成 UUID）；新 handler 必须从 `Extension<P2pRequestContext>` 接住并在日志与错误信封里传播该 ID，便于 A→B→C 调用链对齐。
 - **错误信封**：所有 P2P handler 失败必须经 `P2pError::from_app_error(err, &ctx, "<domain>.<action>")` 走统一错误信封，返回稳定的 `<domain>.<action>` 错误码，客户端据此分类型分支处理，不要裸返回 `axum::StatusCode` 或自由格式 `{error}`。
 - **新增路由 7 步清单**（任何新增 `POST/PUT/DELETE/PATCH` 路由，或引入 wire 格式变化的 `GET` 路由都必须在同一改动里完成）：1) 视情况在 `net/protocol.rs` 加 `CAPABILITY_*_V1` 常量；2) 确认 `/api/health` 已宣告该能力；3) 保留旧版契约测试（未知字段忽略、缺失字段安全回落、客户端 `supports(...)` 为 false 时优雅降级）；4) 用 `P2pError` 信封返回稳定错误码；5) handler 接住并传播 `P2pRequestContext` 的 request id；6) 在 `docs/p2p-protocol.md` 表格补 method/owner/side effect/retry class/key-guard 一行；7) 明确选择唯一 retry class 并在「Key / guard」列解释——新 mutating 副作用默认 `no-transport-retry`，除非实现可证明 replay-safe（引用函数）或同一改动里加了幂等键。
@@ -384,7 +386,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 
 - **功能定位**：Scratchpad 是多页面自动保存文本集合。内容权威源为 SQLite `scratchpad` 表；前端页面不再读写 localStorage。清空是当前页 `content=""` 的普通更新，删除页面才走软删除。
 - **数据模型（多页面）**：`scratchpad` 表每行一个页面，字段 `id`/`title`/`content`/`created_at`/`updated_at`/`device_id`/`vector_clock`/`deleted`。旧库缺 `title` 时 `init_db`/repo schema 检查补 `title TEXT NOT NULL DEFAULT '速记本'`，旧单页内容保留为标题“速记本”的页面。`ScratchpadRow`（snake_case，DB/P2P/cloud JSON）+ `ScratchpadPageDto`/`ScratchpadPageSummaryDto`（camelCase，前端）+ `to_dto`/`to_summary_dto`。
-- **仓库（storage/scratchpad_repo.rs）**：`get_or_create_default_page`（无页面时创建默认页）/`list_pages`（排除 deleted，按 updated_at desc）/`get`/`create_page`/`update_page_content`/`rename_page`/`soft_delete_page`/`get_all_for_sync`（含 deleted）/`bulk_upsert`/`upsert`。创建/更新/重命名/删除都会推进本机 vector_clock；空标题归一为“未命名”。
+- **仓库（storage/scratchpad_repo.rs）**：`get_or_create_default_page`（无页面时创建默认页）/`list_pages`（排除 deleted，按 updated_at desc）/`get`/`create_page`/`update_page_content`/`rename_page`/`soft_delete_page`/`get_all_for_sync`（含 deleted）/`bulk_upsert`（单事务 INSERT OR REPLACE）/`bulk_upsert_on_tx`（ledger 同事务）/`upsert`。创建/更新/重命名/删除都会推进本机 vector_clock；空标题归一为“未命名”。
 - **合并（sync/scratchpad.rs）**：复用 `sync::vector_clock::{compare,merge}`；逐页面合并，策略与 Prompt/SSH 一致：严格领先覆盖、并发 LWW、时间戳相等按 device_id 字典序 tie-break，胜出方 title/content/deleted/device_id/updated_at + 合并后的 vector_clock。title/content/deleted 均参与变化判断。
 - **P2P 端点（net/routes/scratchpad_sync.rs，snake_case 互通）**：`POST /api/scratchpad/sync/pull`（body `{summaries:[{id,vector_clock}]}`，返回 `{pages:[ScratchpadRow]}`）+ `POST /api/scratchpad/sync/push`（body `{pages:[ScratchpadRow]}`，接收端逐页 merge 后按需 upsert，返回 `{accepted}`）。`peer_client` 加多页面 `scratchpad_pull`/`scratchpad_push`，旧对端无路由时返回空 Vec/false 并仅 debug。
 - **同步挂载（sync/engine.rs::sync_with_peer）**：Prompt / CC 历史 / SSH 目标之后追加 `scratchpad_sync_with_peer`，失败 warn 不阻断，且不计入 `synced` 计数。页面 `sync_scratchpad` 命令复用全局 `trigger_sync`。
@@ -401,7 +403,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 - **同步挂载（`sync/engine.rs::sync_with_peer`）**：末尾追加 `ssh_target_sync_with_peer`（与 `cc_sync_with_peer` 并列调用），失败 warn 不阻断，**不计入 synced 计数**（计数语义保持「prompts 同步成功」）。单对端流程：health → summaries（含 deleted）→ pull 逐条 merge（仅变化才收集）→ bulk_upsert → 重读全量算补集 push。
 - **命令层（`commands/ssh_target.rs`，lib.rs invoke_handler 注册 4 个）**：`list_ssh_targets`（list → DTO）、`upsert_ssh_target(host,username,port?,label?)`（读旧记录推进 vc：新建 `{device_id:1}`/更新 increment；port 缺省 22；保留 created_at；upsert 落库）、`delete_ssh_target(host)`（软删除 + increment vc）、`get_os_info`（`std::env::consts::OS` 归一化 macos→mac / windows→windows / linux→ubuntu，返回 `{platform, raw}`，供前端按系统渲染配置指南）。
 - **建表（backend/runtime.rs）**：常量 `SSH_TARGET_SCHEMA`（host PK + port + username + label + device_id + vector_clock + created_at + updated_at + deleted），`init_db` 内 `CLAUDE_MD_SCHEMA` 之后执行。AppState 扩展 `ssh_target_repo: Arc<SshTargetRepo>`。
-- **仓库（storage/ssh_target_repo.rs）**：`list`（deleted=0）/`get(host)`/`get_all_for_sync`（含 deleted）/`bulk_upsert`（INSERT OR REPLACE）/`upsert`（单条）/`soft_delete`。配 4 单测。运行期 sqlx::query（非宏），vector_clock serde_json 紧凑 JSON，datetime String 透传。
+- **仓库（storage/ssh_target_repo.rs）**：`list`（deleted=0）/`get(host)`/`get_all_for_sync`（含 deleted）/`bulk_upsert`（单事务 INSERT OR REPLACE）/`bulk_upsert_on_tx`/`upsert`（单条）/`soft_delete`。配 rollback 单测。运行期 sqlx::query（非宏），vector_clock serde_json 紧凑 JSON，datetime String 透传。
 
 ## 云端同步（GitHub 私有仓库）已落地行为约定（cloud_sync/ + commands/cloud_sync.rs + config.rs 字段）
 

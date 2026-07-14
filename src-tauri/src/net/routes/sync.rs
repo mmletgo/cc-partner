@@ -17,6 +17,9 @@ use crate::models::prompt::PromptRow;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
+use crate::storage::sync_request_ledger_repo::{
+    SyncBatchOutcome, SyncRequestLedgerRepo, DOMAIN_PROMPTS,
+};
 use crate::storage::PromptRepo;
 use crate::sync::merger::merge_prompt;
 use crate::sync::protocol::{
@@ -114,13 +117,16 @@ pub struct PromptItemsResp {
     pub missing_ids: Vec<String>,
 }
 
-/// push-batch 请求：正文 + 稳定 client_request_id（Task 3 ledger 将用）。
+/// push-batch 请求：正文 + 稳定 client_request_id + claimed_device_id（ledger 键）。
 #[derive(Debug, Deserialize)]
 pub struct PromptPushBatchReq {
     #[serde(default)]
     pub items: Vec<PromptRow>,
-    /// 客户端批请求幂等键（收敛标签，非认证）；Task 2 仅校验非空。
+    /// 客户端批请求幂等键（与 claimed_device_id/domain 组成 UNIQUE）。
     pub client_request_id: String,
+    /// 收敛标签（**非**认证身份）；缺省空串，与 client_request_id 共同命名空间 ledger。
+    #[serde(default)]
+    pub claimed_device_id: String,
 }
 
 /// push-batch 响应：实际落库条数（**无** serde default，缺字段解析失败）。
@@ -578,12 +584,13 @@ async fn prompt_items_impl(
     Ok(PromptItemsResp { items, missing_ids })
 }
 
-/// POST /api/sync/prompts/push-batch：批量 merge + bulk_upsert。
+/// POST /api/sync/prompts/push-batch：批量 merge + 事务 bulk + ledger 幂等。
 ///
-/// Business Logic: 对端把本地领先/并发/远端缺失的 rows 分批推送；Task 2 仍走现有 bulk_upsert，
-///     Task 3 再换事务 ledger。client_request_id 本轮仅校验非空。
+/// Business Logic: 对端把本地领先/并发/远端缺失的 rows 分批推送；服务端在同一事务中
+///     claim ledger、执行生产 bulk 循环、记录 exact accepted outcome。同 key/同 hash 重放
+///     返回原 outcome 且不重复写入；同 key/不同 hash 返回 conflict。
 ///
-/// Code Logic: 校验 batch/id/content → merge → bulk_upsert → accepted。
+/// Code Logic: 校验 → merge（读路径）→ payload hash → ledger.apply_batch_idempotent → accepted。
 pub async fn prompt_push_batch(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
@@ -595,12 +602,43 @@ pub async fn prompt_push_batch(
     Ok(Json(PromptPushBatchResp { accepted }))
 }
 
+/// 计算 Prompt push-batch 载荷指纹（稳定、与顺序无关）。
+///
+/// Business Logic: ledger 用 payload hash 区分同 request_id 的不同正文，防止错误重放覆盖。
+/// Code Logic: 按 id 排序后逐条 hash id/title/content/tags/vc/deleted/updated_at。
+fn prompt_batch_payload_hash(items: &[PromptRow]) -> String {
+    let mut sorted: Vec<&PromptRow> = items.iter().collect();
+    sorted.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    for p in sorted {
+        let tags = serde_json::to_string(&p.tags).unwrap_or_else(|_| "[]".to_string());
+        let vc = serde_json::to_string(&p.vector_clock).unwrap_or_else(|_| "{}".to_string());
+        parts.push(p.id.as_bytes().to_vec());
+        parts.push(b"\0".to_vec());
+        parts.push(p.title.as_bytes().to_vec());
+        parts.push(b"\0".to_vec());
+        parts.push(p.content.as_bytes().to_vec());
+        parts.push(b"\0".to_vec());
+        parts.push(tags.into_bytes());
+        parts.push(b"\0".to_vec());
+        parts.push(vc.into_bytes());
+        parts.push(b"\0".to_vec());
+        parts.push(p.updated_at.as_bytes().to_vec());
+        parts.push(b"\0".to_vec());
+        parts.push(if p.deleted { b"1" } else { b"0" }.to_vec());
+        parts.push(b"\n".to_vec());
+    }
+    let refs: Vec<&[u8]> = parts.iter().map(|p| p.as_slice()).collect();
+    content_sha256_hex(&refs)
+}
+
 /// push-batch 业务实现。
 async fn prompt_push_batch_impl(
     repo: &PromptRepo,
     req: PromptPushBatchReq,
 ) -> Result<usize, RouteFail> {
-    if req.client_request_id.trim().is_empty() {
+    let client_request_id = req.client_request_id.trim().to_string();
+    if client_request_id.is_empty() {
         return Err(RouteFail::Validation(
             "client_request_id 不能为空".to_string(),
         ));
@@ -627,6 +665,9 @@ async fn prompt_push_batch_impl(
         }
     }
 
+    let payload_hash = prompt_batch_payload_hash(&req.items);
+    let claimed_device_id = req.claimed_device_id.trim().to_string();
+
     let mut to_upsert: Vec<PromptRow> = Vec::new();
     for remote in req.items {
         match repo.get(&remote.id).await? {
@@ -645,16 +686,43 @@ async fn prompt_push_batch_impl(
         }
     }
 
-    let accepted = to_upsert.len();
-    if !to_upsert.is_empty() {
-        repo.bulk_upsert(&to_upsert).await?;
-    }
+    let ledger = SyncRequestLedgerRepo::new(repo.pool());
+    // ensure schema for in-memory tests that skip runtime init_db
+    SyncRequestLedgerRepo::ensure_schema(ledger.pool())
+        .await
+        .map_err(RouteFail::from)?;
+
+    let outcome = {
+        use futures_util::FutureExt;
+        ledger
+            .apply_batch_idempotent(
+                &claimed_device_id,
+                DOMAIN_PROMPTS,
+                &client_request_id,
+                &payload_hash,
+                |tx| {
+                    let rows = to_upsert.clone();
+                    async move {
+                        if !rows.is_empty() {
+                            PromptRepo::bulk_upsert_on_tx(tx, &rows, None).await?;
+                        }
+                        Ok(SyncBatchOutcome {
+                            accepted: rows.len(),
+                        })
+                    }
+                    .boxed()
+                },
+            )
+            .await
+            .map_err(RouteFail::from)?
+    };
 
     tracing::info!(
-        "sync/prompts/push-batch: client_request_id 已收, accepted={}",
-        accepted
+        "sync/prompts/push-batch: client_request_id={} accepted={}",
+        client_request_id,
+        outcome.accepted
     );
-    Ok(accepted)
+    Ok(outcome.accepted)
 }
 
 // ---------------------------------------------------------------------------
@@ -668,7 +736,7 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
 
-    /// 构造内存 SQLite prompts 表与仓库。
+    /// 构造内存 SQLite prompts 表 + ledger 表与仓库。
     async fn setup_repo() -> PromptRepo {
         let options = SqliteConnectOptions::from_str("sqlite::memory:")
             .unwrap()
@@ -687,6 +755,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        SyncRequestLedgerRepo::ensure_schema(&pool).await.unwrap();
         PromptRepo::new(pool)
     }
 
@@ -823,6 +892,7 @@ mod tests {
             PromptPushBatchReq {
                 items: vec![sample_row("a", "x", 1)],
                 client_request_id: "  ".into(),
+                claimed_device_id: "peer-1".into(),
             },
         )
         .await
@@ -841,6 +911,7 @@ mod tests {
             PromptPushBatchReq {
                 items: vec![sample_row("a", "x", 1), sample_row("b", "y", 1)],
                 client_request_id: "req-1".into(),
+                claimed_device_id: "peer-1".into(),
             },
         )
         .await
@@ -861,6 +932,7 @@ mod tests {
             PromptPushBatchReq {
                 items,
                 client_request_id: "req-2".into(),
+                claimed_device_id: "peer-1".into(),
             },
         )
         .await
@@ -871,5 +943,70 @@ mod tests {
             CODE_BATCH_TOO_LARGE,
             false,
         );
+    }
+
+    /// 同 key/同 hash 重放返回原 outcome，且不重新 apply（删库后仍不回写）。
+    #[tokio::test]
+    async fn replayed_batch_returns_recorded_outcome() {
+        let repo = setup_repo().await;
+        let req = PromptPushBatchReq {
+            items: vec![sample_row("a", "x", 1), sample_row("b", "y", 1)],
+            client_request_id: "req-replay".into(),
+            claimed_device_id: "peer-1".into(),
+        };
+        let accepted1 = prompt_push_batch_impl(&repo, {
+            PromptPushBatchReq {
+                items: req.items.clone(),
+                client_request_id: req.client_request_id.clone(),
+                claimed_device_id: req.claimed_device_id.clone(),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(accepted1, 2);
+
+        // 人为删除已写入行，模拟“若重放会 re-apply 则会再出现”
+        sqlx::query("DELETE FROM prompts")
+            .execute(&repo.pool())
+            .await
+            .unwrap();
+        assert!(repo.get_all_for_sync().await.unwrap().is_empty());
+
+        let accepted2 = prompt_push_batch_impl(&repo, req).await.unwrap();
+        assert_eq!(accepted2, accepted1);
+        // 重放不得重新 apply：表仍为空
+        assert!(
+            repo.get_all_for_sync().await.unwrap().is_empty(),
+            "replay must not re-apply bulk upsert"
+        );
+    }
+
+    /// 同 key 不同 payload hash → conflict（409）。
+    #[tokio::test]
+    async fn same_key_different_hash_is_conflict() {
+        let repo = setup_repo().await;
+        prompt_push_batch_impl(
+            &repo,
+            PromptPushBatchReq {
+                items: vec![sample_row("a", "x", 1)],
+                client_request_id: "req-conflict".into(),
+                claimed_device_id: "peer-1".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = prompt_push_batch_impl(
+            &repo,
+            PromptPushBatchReq {
+                items: vec![sample_row("a", "DIFFERENT", 2)],
+                client_request_id: "req-conflict".into(),
+                claimed_device_id: "peer-1".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        let p2p = err.into_p2p(&ctx(), "prompts.push_batch");
+        assert_eq!(p2p.status(), StatusCode::CONFLICT);
     }
 }

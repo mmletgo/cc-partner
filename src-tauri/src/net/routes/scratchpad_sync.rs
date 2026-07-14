@@ -13,6 +13,9 @@ use crate::models::scratchpad::ScratchpadRow;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
+use crate::storage::sync_request_ledger_repo::{
+    SyncBatchOutcome, SyncRequestLedgerRepo, DOMAIN_SCRATCHPAD,
+};
 use crate::storage::ScratchpadRepo;
 use crate::sync::protocol::{
     content_sha256_hex, decode_keyset_cursor, encode_keyset_cursor, estimate_summary_wire_bytes,
@@ -106,6 +109,9 @@ pub struct ScratchpadPushBatchReq {
     #[serde(default)]
     pub items: Vec<ScratchpadRow>,
     pub client_request_id: String,
+    /// 收敛标签（非认证）；缺省空串。
+    #[serde(default)]
+    pub claimed_device_id: String,
 }
 
 /// push-batch 响应。
@@ -481,7 +487,37 @@ async fn scratchpad_items_impl(
     Ok(ScratchpadItemsResp { items, missing_ids })
 }
 
-/// POST /api/scratchpad/sync/push-batch：批量 merge + bulk_upsert。
+/// 计算 Scratchpad push-batch 载荷指纹。
+///
+/// Business Logic: ledger 用稳定 payload hash 区分同 request_id 的不同正文。
+/// Code Logic: 按 id 排序后拼接关键字段并 SHA-256。
+fn scratchpad_batch_payload_hash(items: &[ScratchpadRow]) -> String {
+    let mut sorted: Vec<&ScratchpadRow> = items.iter().collect();
+    sorted.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    for p in sorted {
+        let vc = serde_json::to_string(&p.vector_clock).unwrap_or_else(|_| "{}".to_string());
+        parts.push(p.id.as_bytes().to_vec());
+        parts.push(b"\0".to_vec());
+        parts.push(p.title.as_bytes().to_vec());
+        parts.push(b"\0".to_vec());
+        parts.push(p.content.as_bytes().to_vec());
+        parts.push(b"\0".to_vec());
+        parts.push(vc.into_bytes());
+        parts.push(b"\0".to_vec());
+        parts.push(p.updated_at.as_bytes().to_vec());
+        parts.push(b"\0".to_vec());
+        parts.push(if p.deleted { b"1" } else { b"0" }.to_vec());
+        parts.push(b"\n".to_vec());
+    }
+    let refs: Vec<&[u8]> = parts.iter().map(|p| p.as_slice()).collect();
+    content_sha256_hex(&refs)
+}
+
+/// POST /api/scratchpad/sync/push-batch：批量 merge + 事务 bulk + ledger 幂等。
+///
+/// Business Logic: 同 Prompt push-batch——单事务 claim ledger、生产 bulk、记录 accepted。
+/// Code Logic: 校验 → merge → apply_batch_idempotent(bulk_upsert_on_tx)。
 pub async fn scratchpad_push_batch(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
@@ -498,7 +534,8 @@ async fn scratchpad_push_batch_impl(
     repo: &ScratchpadRepo,
     req: ScratchpadPushBatchReq,
 ) -> Result<usize, RouteFail> {
-    if req.client_request_id.trim().is_empty() {
+    let client_request_id = req.client_request_id.trim().to_string();
+    if client_request_id.is_empty() {
         return Err(RouteFail::Validation(
             "client_request_id 不能为空".to_string(),
         ));
@@ -524,6 +561,9 @@ async fn scratchpad_push_batch_impl(
         }
     }
 
+    let payload_hash = scratchpad_batch_payload_hash(&req.items);
+    let claimed_device_id = req.claimed_device_id.trim().to_string();
+
     let mut to_upsert = Vec::new();
     for remote in req.items {
         match repo.get(&remote.id).await? {
@@ -536,11 +576,37 @@ async fn scratchpad_push_batch_impl(
             }
         }
     }
-    let accepted = to_upsert.len();
-    if !to_upsert.is_empty() {
-        repo.bulk_upsert(&to_upsert).await?;
-    }
-    Ok(accepted)
+
+    let ledger = SyncRequestLedgerRepo::new(repo.pool());
+    SyncRequestLedgerRepo::ensure_schema(ledger.pool())
+        .await
+        .map_err(RouteFail::from)?;
+
+    let outcome = {
+        use futures_util::FutureExt;
+        ledger
+            .apply_batch_idempotent(
+                &claimed_device_id,
+                DOMAIN_SCRATCHPAD,
+                &client_request_id,
+                &payload_hash,
+                |tx| {
+                    let rows = to_upsert.clone();
+                    async move {
+                        if !rows.is_empty() {
+                            ScratchpadRepo::bulk_upsert_on_tx(tx, &rows, None).await?;
+                        }
+                        Ok(SyncBatchOutcome {
+                            accepted: rows.len(),
+                        })
+                    }
+                    .boxed()
+                },
+            )
+            .await
+            .map_err(RouteFail::from)?
+    };
+    Ok(outcome.accepted)
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +637,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        SyncRequestLedgerRepo::ensure_schema(&pool).await.unwrap();
         ScratchpadRepo::new(pool)
     }
 
@@ -624,6 +691,7 @@ mod tests {
             ScratchpadPushBatchReq {
                 items: vec![sample_row("p1", "hello", 1), sample_row("p2", "world", 1)],
                 client_request_id: "sp-1".into(),
+                claimed_device_id: "peer-1".into(),
             },
         )
         .await
@@ -665,6 +733,7 @@ mod tests {
             ScratchpadPushBatchReq {
                 items,
                 client_request_id: "sp-2".into(),
+                claimed_device_id: "peer-1".into(),
             },
         )
         .await

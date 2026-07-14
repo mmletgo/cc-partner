@@ -315,6 +315,8 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     sqlx::query(SSH_TARGET_SCHEMA).execute(&pool).await?;
     sqlx::query(SCRATCHPAD_SCHEMA).execute(&pool).await?;
     ScratchpadRepo::new(pool.clone()).ensure_schema().await?;
+    // N2 sync push-batch 幂等 ledger（UNIQUE claimed_device_id+domain+client_request_id）
+    crate::storage::SyncRequestLedgerRepo::ensure_schema(&pool).await?;
     sqlx::query(HEALTH_SCHEMA).execute(&pool).await?;
 
     let needs_recreate: bool = sqlx::query_scalar::<_, i64>(

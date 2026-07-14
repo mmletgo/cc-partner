@@ -256,3 +256,17 @@ CREATE TABLE IF NOT EXISTS orchestrator_remote_task_create_requests (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- sync_request_ledger 表：Prompt/SSH/Scratchpad v2 push-batch 幂等 outcome ledger
+-- 键 UNIQUE(claimed_device_id, domain, client_request_id)；claimed_device_id 仅为收敛标签，非认证。
+-- 同 key/同 payload_hash 返回原 outcome 且不重复 apply；同 key/不同 hash 返回 conflict。
+-- 实际建表由 backend/runtime.rs::init_db → SyncRequestLedgerRepo::ensure_schema 执行。
+CREATE TABLE IF NOT EXISTS sync_request_ledger (
+    claimed_device_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    client_request_id TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    outcome_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(claimed_device_id, domain, client_request_id)
+);
