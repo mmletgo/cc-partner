@@ -6,15 +6,22 @@
 //! Code Logic（这个模块做什么）:
 //!     提供后台 scheduler runtime、单次 dispatch 入口和并发容量相关纯 helper。
 
+use crate::backend::runtime_metrics::RuntimeMetrics;
 use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
+use crate::orchestrator::claim::{
+    preflight_claim_candidates, ClaimScanCursor, CLAIM_CANDIDATE_LIMIT, METRIC_CLAIM_CANDIDATES,
+    METRIC_CLAIM_CAS_MISS, METRIC_CLAIM_CLAIMED, METRIC_CLAIM_PROJECTS,
+    METRIC_CLAIM_WINDOW_EXHAUSTED, METRIC_SCHEDULER_TICK_DELAY_MS,
+};
 use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::orchestrator::runner::prepare_visible_runner;
 use crate::state::AppState;
 use chrono::Utc;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 const SCHEDULER_TICK_SECS: u64 = 10;
@@ -56,18 +63,22 @@ struct OrchestratorSchedulerTelemetryState {
     last_dispatch_at: Option<String>,
     last_dispatched_count: usize,
     latest_error: Option<String>,
+    /// 上次 tick 实际开始时刻，用于计算下一 tick 相对期望截止的延迟。
+    last_tick_started_at: Option<Instant>,
 }
 
 /// Orchestrator scheduler 运行时可观测状态。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     scheduler 在后台运行，不一定有任务事件可写；状态条仍需要知道最近一次 dispatch_once 的时间和结果。
+///     进程内 claim 扫描游标也由 scheduler 拥有，避免无效 workflow 窗口饿死后合法任务。
 ///
 /// Code Logic（这个结构体做什么）:
-///     用 Arc<RwLock> 保存最近一次调度结果；Clone 只复制 Arc，适合放入 AppState。
+///     用 Arc<RwLock> 保存最近一次调度结果；用 Arc<Mutex> 保存 claim keyset 游标；Clone 只复制 Arc。
 #[derive(Debug, Clone, Default)]
 pub struct OrchestratorSchedulerTelemetry {
     inner: Arc<RwLock<OrchestratorSchedulerTelemetryState>>,
+    claim_scan_cursor: Arc<Mutex<Option<ClaimScanCursor>>>,
 }
 
 impl OrchestratorSchedulerTelemetry {
@@ -114,6 +125,49 @@ impl OrchestratorSchedulerTelemetry {
             last_dispatched_count: state.last_dispatched_count,
             latest_error: state.latest_error.clone(),
         }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     每次 tick 开始时需要知道相对“上次开始 + 10s”的延迟，用于本地性能指标。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读取上次 tick Instant；若存在且 now 晚于期望截止，返回延迟 Duration，否则 0；
+    ///     随后把 last_tick_started_at 更新为 now。
+    pub fn mark_tick_start_and_delay(&self, now: Instant) -> Duration {
+        let mut state = self.inner.write().expect("orchestrator telemetry 写锁中毒");
+        let delay = state
+            .last_tick_started_at
+            .map(|prev| {
+                let expected = prev + Duration::from_secs(SCHEDULER_TICK_SECS);
+                now.saturating_duration_since(expected)
+            })
+            .unwrap_or(Duration::ZERO);
+        state.last_tick_started_at = Some(now);
+        delay
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     三阶段 claim 扫描游标由 scheduler 进程内持有，tick 之间需要读写同一份边界。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     加锁取出当前 `Option<ClaimScanCursor>` 克隆。
+    pub fn claim_scan_cursor(&self) -> Option<ClaimScanCursor> {
+        self.claim_scan_cursor
+            .lock()
+            .expect("claim scan cursor 锁中毒")
+            .clone()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     有界扫描成功后推进或回绕游标；DB 错误路径不得调用本方法，避免跳过未扫描区。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用传入值覆盖进程内游标（None 表示从头部重新扫描）。
+    pub fn set_claim_scan_cursor(&self, cursor: Option<ClaimScanCursor>) {
+        *self
+            .claim_scan_cursor
+            .lock()
+            .expect("claim scan cursor 锁中毒") = cursor;
     }
 }
 
@@ -194,15 +248,40 @@ pub async fn dispatch_once(state: &AppState) -> Result<usize, AppError> {
 ///     dispatch_once 需要在外层统一记录可观测 tick，同时保留原调度流程的错误传播。
 ///
 /// Code Logic（这个函数做什么）:
-///     先回收过期 Preparing 释放容量，再 claim 并逐任务启动 runner；runner 失败写 Blocked 补偿，返回成功派发数量。
+///     记录 tick 延迟指标；回收过期 Preparing；三阶段 claim（cursor + metrics）；
+///     再逐任务启动 runner；runner 失败写 Blocked 补偿，返回成功派发数量。
 async fn dispatch_once_inner(state: &AppState) -> Result<usize, AppError> {
+    let tick_delay = state
+        .orchestrator_scheduler_telemetry
+        .mark_tick_start_and_delay(Instant::now());
+    state
+        .runtime_metrics
+        .record_duration(METRIC_SCHEDULER_TICK_DELAY_MS, tick_delay);
+    if tick_delay > Duration::from_secs(SCHEDULER_TICK_SECS.saturating_mul(2)) {
+        state
+            .runtime_metrics
+            .warn_metric(METRIC_SCHEDULER_TICK_DELAY_MS);
+    }
+
     let config = state
         .config
         .read()
         .expect("config 读锁中毒")
         .orchestrator
         .clone();
-    let tasks = claim_tasks_for_dispatch(state.orchestrator_repo.as_ref(), &config).await?;
+    let mut cursor = state.orchestrator_scheduler_telemetry.claim_scan_cursor();
+    let tasks = claim_tasks_for_dispatch(
+        state.orchestrator_repo.as_ref(),
+        &config,
+        &mut cursor,
+        Some(state.runtime_metrics.as_ref()),
+    )
+    .await?;
+    // 仅在 claim 路径成功返回后写回游标（DB 错误不会走到这里）。
+    state
+        .orchestrator_scheduler_telemetry
+        .set_claim_scan_cursor(cursor);
+
     let mut dispatched = 0usize;
     for task in tasks {
         match prepare_visible_runner(state, &task).await {
@@ -228,13 +307,17 @@ async fn dispatch_once_inner(state: &AppState) -> Result<usize, AppError> {
 
 /// Business Logic（为什么需要这个函数）:
 ///     后台 scheduler 和手动 dispatch 应共享全局开关与容量解释，测试也需要在不构造 GUI 句柄的情况下验证领取语义。
+///     无效 workflow 占满 256 窗时，必须用进程内 cursor 继续扫描，避免合法任务永久饥饿。
 ///
 /// Code Logic（这个函数做什么）:
-///     enabled=false 时仍回收过期 Preparing（释放卡死容量）后返回空；enabled=true 时先回收再委托 repo
-///     按全局本机容量领取 **Queued+Idle** 且 workflow 允许的 local 任务。
+///     先回收过期 Preparing；enabled=false 返回空。enabled=true 时：有界 list 候选 → 事务外
+///     preflight → 短 CAS 写事务；仅在 list/preflight 成功后推进/回绕 cursor（DB 错误不推进）。
+///     写入候选/项目/领取/exhausted/CAS miss 固定名指标。
 async fn claim_tasks_for_dispatch(
     repo: &OrchestratorRepo,
     config: &OrchestratorAutomationConfig,
+    cursor: &mut Option<ClaimScanCursor>,
+    metrics: Option<&RuntimeMetrics>,
 ) -> Result<Vec<OrchestratorTaskRow>, AppError> {
     let recovered = repo
         .recover_stale_local_preparing_tasks(Duration::from_secs(PREPARING_STALE_LEASE_SECS))
@@ -245,8 +328,64 @@ async fn claim_tasks_for_dispatch(
     if !config.enabled {
         return Ok(Vec::new());
     }
-    repo.claim_next_local_queued_tasks_with_global_capacity(config.max_concurrent_tasks)
-        .await
+
+    let candidates = repo
+        .list_local_queued_claim_candidates(cursor.as_ref(), CLAIM_CANDIDATE_LIMIT)
+        .await?;
+
+    if candidates.is_empty() {
+        // 扫到尾部：回绕到头部，下一 tick 从 None 开始。
+        *cursor = None;
+        if let Some(metrics) = metrics {
+            metrics.record_count(METRIC_CLAIM_CANDIDATES, 0);
+            metrics.record_count(METRIC_CLAIM_PROJECTS, 0);
+            metrics.record_count(METRIC_CLAIM_CLAIMED, 0);
+            metrics.record_count(METRIC_CLAIM_WINDOW_EXHAUSTED, 0);
+            metrics.record_count(METRIC_CLAIM_CAS_MISS, 0);
+        }
+        return Ok(Vec::new());
+    }
+
+    let candidate_count = candidates.len() as u64;
+    let project_count = {
+        let mut seen = HashSet::new();
+        for candidate in &candidates {
+            seen.insert(candidate.task.project_id.clone());
+        }
+        seen.len().min(crate::orchestrator::claim::CLAIM_PROJECT_LIMIT) as u64
+    };
+
+    let preflight = preflight_claim_candidates(candidates).await?;
+
+    // 成功有界扫描后才推进：满窗继续 next_cursor，未满窗视为触尾回绕。
+    if preflight.exhausted {
+        *cursor = preflight.next_cursor.clone();
+    } else {
+        *cursor = None;
+    }
+
+    let outcome = repo
+        .claim_preflighted_candidates_with_global_capacity(
+            config.max_concurrent_tasks,
+            &preflight.eligible,
+        )
+        .await?;
+
+    if let Some(metrics) = metrics {
+        metrics.record_count(METRIC_CLAIM_CANDIDATES, candidate_count);
+        metrics.record_count(METRIC_CLAIM_PROJECTS, project_count);
+        metrics.record_count(METRIC_CLAIM_CLAIMED, outcome.claimed.len() as u64);
+        metrics.record_count(
+            METRIC_CLAIM_WINDOW_EXHAUSTED,
+            if preflight.exhausted { 1 } else { 0 },
+        );
+        metrics.record_count(METRIC_CLAIM_CAS_MISS, outcome.cas_miss);
+        if preflight.exhausted {
+            metrics.warn_metric(METRIC_CLAIM_WINDOW_EXHAUSTED);
+        }
+    }
+
+    Ok(outcome.claimed)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -505,8 +644,14 @@ mod tests {
             .await
             .unwrap();
 
-        let claimed = claim_tasks_for_dispatch(&repo, &global_config(false, 4))
-            .await
+        let mut cursor = None;
+        let claimed = claim_tasks_for_dispatch(
+            &repo,
+            &global_config(false, 4),
+            &mut cursor,
+            None,
+        )
+        .await
             .unwrap();
         let persisted = repo.get_task("task-queued").await.unwrap();
 
@@ -560,8 +705,14 @@ mod tests {
             .await;
         }
 
-        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 3))
-            .await
+        let mut cursor = None;
+        let claimed = claim_tasks_for_dispatch(
+            &repo,
+            &global_config(true, 3),
+            &mut cursor,
+            None,
+        )
+        .await
             .unwrap();
 
         assert_eq!(
@@ -637,8 +788,14 @@ mod tests {
         )
         .await;
 
-        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 3))
-            .await
+        let mut cursor = None;
+        let claimed = claim_tasks_for_dispatch(
+            &repo,
+            &global_config(true, 3),
+            &mut cursor,
+            None,
+        )
+        .await
             .unwrap();
         let backlog = repo.get_task("backlog-idle").await.unwrap();
         let rework_blocked = repo.get_task("rework-blocked").await.unwrap();
@@ -684,8 +841,14 @@ mod tests {
         assert_eq!(moved.workflow_state, OrchestratorWorkflowState::Todo);
         assert_eq!(moved.run_state, OrchestratorRunState::Idle);
 
-        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 3))
-            .await
+        let mut cursor = None;
+        let claimed = claim_tasks_for_dispatch(
+            &repo,
+            &global_config(true, 3),
+            &mut cursor,
+            None,
+        )
+        .await
             .unwrap();
         let persisted = repo.get_task(&created.id).await.unwrap();
 
@@ -745,8 +908,14 @@ mod tests {
         .await;
 
         // max=1：若不回收 stale Preparing，queued-next 永远无法领取。
-        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 1))
-            .await
+        let mut cursor = None;
+        let claimed = claim_tasks_for_dispatch(
+            &repo,
+            &global_config(true, 1),
+            &mut cursor,
+            None,
+        )
+        .await
             .unwrap();
         let stale = repo.get_task("stale-prep").await.unwrap();
 
@@ -793,8 +962,14 @@ mod tests {
         )
         .await;
 
-        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 1))
-            .await
+        let mut cursor = None;
+        let claimed = claim_tasks_for_dispatch(
+            &repo,
+            &global_config(true, 1),
+            &mut cursor,
+            None,
+        )
+        .await
             .unwrap();
         let persisted = repo.get_task("todo-invalid-workflow").await.unwrap();
 
@@ -834,8 +1009,14 @@ mod tests {
             set_task_split_state(&pool, id, workflow_state, OrchestratorRunState::Idle, None).await;
         }
 
-        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 2))
-            .await
+        let mut cursor = None;
+        let claimed = claim_tasks_for_dispatch(
+            &repo,
+            &global_config(true, 2),
+            &mut cursor,
+            None,
+        )
+        .await
             .unwrap();
 
         assert_eq!(
@@ -878,8 +1059,14 @@ mod tests {
         )
         .await;
 
-        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 1))
-            .await
+        let mut cursor = None;
+        let claimed = claim_tasks_for_dispatch(
+            &repo,
+            &global_config(true, 1),
+            &mut cursor,
+            None,
+        )
+        .await
             .unwrap();
 
         assert_eq!(claimed.len(), 1);
@@ -933,8 +1120,14 @@ mod tests {
             .await
             .unwrap();
 
-        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 5))
-            .await
+        let mut cursor = None;
+        let claimed = claim_tasks_for_dispatch(
+            &repo,
+            &global_config(true, 5),
+            &mut cursor,
+            None,
+        )
+        .await
             .unwrap();
 
         assert_eq!(claimed.len(), 1);
@@ -977,8 +1170,14 @@ mod tests {
         )
         .await;
 
-        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 1))
-            .await
+        let mut cursor = None;
+        let claimed = claim_tasks_for_dispatch(
+            &repo,
+            &global_config(true, 1),
+            &mut cursor,
+            None,
+        )
+        .await
             .unwrap();
 
         assert_eq!(claimed.len(), 1);
