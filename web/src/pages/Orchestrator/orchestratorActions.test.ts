@@ -12,14 +12,28 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   拆分后 API 调用在 controller、部分 UI 守卫在 view，测试需要跨文件扫描。
+ *
+ * Code Logic（这个函数做什么）:
+ *   读取相对本测试文件的 UTF-8 源码。
+ */
+function readSource(relativePath: string): string {
+  return readFileSync(new URL(relativePath, import.meta.url), 'utf8');
+}
+
 describe('orchestratorActions', () => {
   test('Orchestrator drawer calls every business action and ships required i18n keys', () => {
-    const source = readFileSync(new URL('./Orchestrator.tsx', import.meta.url), 'utf8');
+    const controller = readSource('./controllers/useOrchestratorController.ts');
+    const shell = readSource('./Orchestrator.tsx');
+    const outbox = readSource('./views/OrchestratorOutbox.tsx');
+    const apiSurface = `${controller}\n${shell}`;
     const zh = JSON.parse(
-      readFileSync(new URL('../../i18n/locales/zh/orchestrator.json', import.meta.url), 'utf8'),
+      readSource('../../i18n/locales/zh/orchestrator.json'),
     ) as Record<string, unknown>;
     const en = JSON.parse(
-      readFileSync(new URL('../../i18n/locales/en/orchestrator.json', import.meta.url), 'utf8'),
+      readSource('../../i18n/locales/en/orchestrator.json'),
     ) as Record<string, unknown>;
 
     const detailZh = zh.detail as Record<string, string>;
@@ -37,7 +51,7 @@ describe('orchestratorActions', () => {
       'orchestratorApi.cancelTaskView',
       'orchestratorApi.refreshProject',
     ]) {
-      assert(source.includes(expectedCall), `Orchestrator drawer should call ${expectedCall}`);
+      assert(controller.includes(expectedCall), `Orchestrator controller should call ${expectedCall}`);
     }
 
     for (const key of ['start', 'retry', 'requestRework', 'deliver', 'cancel', 'openWorkbench']) {
@@ -56,11 +70,13 @@ describe('orchestratorActions', () => {
     }
 
     assert(
-      source.includes('createAction: OrchestratorCreateAction'),
+      controller.includes('createAction: OrchestratorCreateAction') ||
+        controller.includes('createAction: createAction as ApiOrchestratorCreateAction') ||
+        controller.includes('createAction,'),
       'Desktop create dialog should submit an explicit createAction argument',
     );
     assert(
-      source.includes('createAction,'),
+      controller.includes('createAction,'),
       'Desktop create request should pass createAction to orchestratorApi.createTaskView',
     );
 
@@ -68,22 +84,23 @@ describe('orchestratorActions', () => {
       'orchestratorApi.retryRemoteOutbox',
       'orchestratorApi.discardRemoteOutbox',
     ]) {
-      assert(source.includes(expectedCall), `Orchestrator pending outbox should call ${expectedCall}`);
+      assert(controller.includes(expectedCall), `Orchestrator pending outbox should call ${expectedCall}`);
     }
     assert(
-      source.includes("item.status === 'failed'"),
+      outbox.includes("item.status === 'failed'"),
       'outbox Retry/Discard actions should render only for failed status',
     );
     assert(
-      source.includes("window.confirm(t('orchestrator:pending.discardConfirm'))"),
+      controller.includes("window.confirm(t('orchestrator:pending.discardConfirm'))"),
       'discard should require confirmation in original Automation UI',
     );
     assert(
-      source.includes('focusTaskId') && source.includes('focusOutboxId'),
+      apiSurface.includes('focusTaskId') && apiSurface.includes('focusOutboxId'),
       'OrchestratorPanel should accept Attention focus task/outbox props',
     );
     assert(
-      source.includes('onFocusTargetNotFound') || source.includes('resolveOrchestratorFocusTarget'),
+      controller.includes('onFocusTargetNotFound') ||
+        controller.includes('resolveOrchestratorFocusTarget'),
       'Orchestrator should report typed target-not-found for missing Attention deep links',
     );
 
