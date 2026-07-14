@@ -168,7 +168,7 @@
   height: 20px;
   padding: 0 var(--space-2);
   border-radius: var(--radius-full);
-  background: var(--bg-soft, var(--surface-warm));
+  background: var(--surface-warm);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--muted);

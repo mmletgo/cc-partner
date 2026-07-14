@@ -20,7 +20,7 @@
 }
 
 .badge:hover {
-  background: var(--surface-hover, var(--surface));
+  background: var(--surface-warm);
   filter: brightness(0.97);
 }
 

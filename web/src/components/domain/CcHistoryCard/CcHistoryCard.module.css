@@ -99,6 +99,6 @@
 }
 
 .expandBtn:hover {
-  color: var(--accent-strong, var(--accent));
+  color: var(--accent);
   text-decoration: underline;
 }

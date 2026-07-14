@@ -12,7 +12,7 @@
   gap: var(--space-3);
   width: 300px;
   padding: var(--space-4) var(--space-5);
-  background: var(--bg-elevated, var(--bg));
+  background: var(--surface);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);

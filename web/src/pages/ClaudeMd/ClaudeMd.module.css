@@ -16,7 +16,7 @@
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--fg-muted);
+  color: var(--muted);
   margin-bottom: var(--space-1);
 }
 
@@ -29,7 +29,7 @@
 
 .lead {
   font-size: var(--text-sm);
-  color: var(--fg-muted);
+  color: var(--muted);
   margin: var(--space-1) 0 0;
 }
 
@@ -44,14 +44,14 @@
 
 .unsaved {
   font-size: var(--text-sm);
-  color: var(--accent, var(--fg-muted));
+  color: var(--accent, var(--muted));
   margin-left: var(--space-2);
 }
 
 .charCount {
   font-size: var(--text-sm);
   font-family: var(--font-mono);
-  color: var(--fg-muted);
+  color: var(--muted);
   margin-left: auto;
 }
 
@@ -65,7 +65,7 @@
   font-size: var(--text-md);
   line-height: 1.6;
   color: var(--fg);
-  background: var(--bg-primary);
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   resize: vertical;
@@ -78,12 +78,12 @@
 }
 
 .editor::placeholder {
-  color: var(--fg-muted);
+  color: var(--muted);
 }
 
 /* ── 操作反馈提示 ── */
 .toast {
   margin-top: var(--space-3);
   font-size: var(--text-sm);
-  color: var(--fg-muted);
+  color: var(--muted);
 }

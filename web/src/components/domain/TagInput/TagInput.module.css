@@ -11,7 +11,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   min-height: 32px;
-  background: var(--bg-primary);
+  background: var(--bg);
   transition: border-color 0.15s;
 }
 
@@ -31,5 +31,5 @@
 }
 
 .input::placeholder {
-  color: var(--fg-muted);
+  color: var(--muted);
 }

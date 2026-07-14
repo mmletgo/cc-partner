@@ -148,9 +148,10 @@ export function usePermissions(
       setError(toErrorMessage(err));
       // 已有状态时不覆盖 status，保留 stale 投影
     } finally {
-      if (!mountedRef.current) return;
-      setLoading(false);
-      setRefreshing(false);
+      if (mountedRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, []);
 

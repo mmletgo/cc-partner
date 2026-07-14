@@ -11,6 +11,7 @@
 - `npm run dev` — 启动 Vite 开发服务器（端口 5173）
 - `npm run build` — 打包到 dist/（`tsc -b` 类型检查 + vite 构建；类型检查入口，**不要**用浮动 `npx tsc`）
 - `npm run lint` — ESLint 检查
+- `npm run check:css-tokens` — design token 合同（`scripts/check-css-tokens.mjs`）：扫描 `src/**/*.css` 的 `var(--name)`，语义 token 必须在 `styles/tokens.css` 的 `:root` 定义；颜色/阴影类 token 必须浅/深双份；仅 allowlist 运行时结构变量 `--prompt-panel-left` / `--prompt-panel-top` / `--git-graph-color`；通过打印 `CSS token contract passed`（exit 0），失败打印 `file:line --token`（exit 1）。CI quality 在 build 前执行。fixture 测试：`node --test scripts/check-css-tokens.test.mjs`
 - `npm test`（`vitest run`）— 单次跑全部单元测试；Vitest 按 `vitest.config.ts` 的 `include: ['src/**/*.test.{ts,tsx}']` 自动收集。按路径过滤：`npm test -- src/pages/Workbench` 或 `npm test -- attention`
 - `npm run test:unit:watch`（`vitest`）— 单元测试 watch 模式
 - `npm run test:e2e`（`playwright test`）— 前端 E2E；配置在 `playwright.config.ts`（`outputDir: test-results`，失败保留 screenshot/trace/video，CI `retries: 1`）。用例从 `tests/fixtures.ts` 导入 `test`/`expect`：auto fixture 监听 `console.error` 与 `pageerror`，意外浏览器错误即失败。核心产品完整性旅程：`npm run test:e2e -- core-integrity.spec.ts`（Transfer send/cancel、Prompt reject rollback、Welcome 权限失败重试；精确 mock `list_devices`/`list_transfers`/`send_transfer`/`cancel_transfer`/Prompt/permission 命令与 `plugin:dialog|open`，无生产 bypass）
@@ -26,7 +27,7 @@
 
 ### 前端约束摘要（本目录必守）
 
-- **组件 / token / i18n**：颜色间距圆角阴影 100% `tokens.css`；用户可见文案走 `src/i18n`；详见根 `AGENTS.md` §3–§5 与本文 i18n 节
+- **组件 / token / i18n**：颜色间距圆角阴影 100% `tokens.css`；禁止未定义语义 token 或为错误名加 alias（如 `--bg-2`→`--bg`、`--fg-muted`→`--muted`/`--meta`、`--warning`→`--warn`）；`globals.css` 含 `prefers-reduced-motion: reduce` 全局归零 animation/transition；用户可见文案走 `src/i18n`；详见根 `AGENTS.md` §3–§5 与本文 i18n 节
 - **Hooks 顺序**：所有 hooks 与 Workbench controllers 必须在 early return 之前（根规则 + `AGENTS.md` §5.8）
 - **Workbench 页面合同**：`Workbench.tsx` ≤ **1200 行**；域逻辑在 `controllers/` 七个 hook；禁止页面直接 `workbenchApi.(sessions|files|worktrees|git)` 或 `listen('workbench:terminal-status|merge-progress')`
 - **Attention**：Provider 共享 snapshot；成功业务动作立即 invalidation；10s 可见轮询兜底；列表只导航不动作
