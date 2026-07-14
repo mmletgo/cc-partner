@@ -6,45 +6,91 @@
 //!     解耦——cc 同步失败不影响 prompts 同步计数。由 `sync/engine.rs::sync_with_peer` 末尾调用。
 //!
 //! Code Logic（这个模块做什么）:
-//! cc_sync_with_peer(state, device) 与 sync/engine.rs::sync_with_peer 同构：
-//! 1. health 检查，不可达跳过；
-//! 2. 本端全部 cc 历史（含 deleted），投影为 summaries {id, vector_clock}；
-//! 3. Pull：cc_sync_pull 拿回对端需给的，逐条本地 get + merge_cc_history（仅变化才收集）→ bulk_upsert；
-//! 4. Push：重新取全量算补集（本端有而对端 pull 未返回的 / 本端领先并发的）→ cc_sync_push。
-//!
-//! 全程失败仅 tracing::warn 不阻断。
+//!     `cc_sync_with_peer(state, device)`：
+//!     1. health_info 取对端 `PeerProtocolInfo`；不可达则跳过；
+//!     2. 若 `supports(cc-history.paged-sync.v1)` → 有界分页路径（manifest-page/items/push-batch）；
+//!     3. 否则 → legacy pull/push 路径（兼容旧对端）；
+//!     4. 分页路径错误/取消结束本轮并上抛；下轮从零开始（不持久化 remote cursor）。
+//!     全程对 legacy 路径失败仅 tracing::warn 不阻断（保持旧行为）。
 
 use crate::cc::merger::merge_cc_history;
-use crate::cc::models::ClaudeHistoryRow;
+use crate::cc::models::{CcSyncSummary, ClaudeHistoryRow};
+use crate::net::peer_client::PeerCallError;
+use crate::net::protocol::CAPABILITY_CC_HISTORY_PAGED_SYNC_V1;
+use crate::net::routes::cc_history::{
+    estimate_row_bytes, CC_BATCH_MAX_ESTIMATED_BYTES, CC_ITEM_BATCH_LIMIT,
+    CC_MANIFEST_PAGE_LIMIT_DEFAULT, CODE_BATCH_TOO_LARGE, CODE_ITEM_TOO_LARGE,
+};
 use crate::state::AppState;
 use crate::sync::vector_clock::{compare, ClockOrder};
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+/// 同步批次条数指标名（固定标签，不含用户/路径数据）。
+const METRIC_SYNC_BATCH_ITEMS: &str = "cc_history.sync_batch.items";
+/// 同步批次估算字节指标名。
+const METRIC_SYNC_BATCH_BYTES: &str = "cc_history.sync_batch.estimated_bytes";
+/// 同步批次耗时指标名。
+const METRIC_SYNC_BATCH_MS: &str = "cc_history.sync_batch.ms";
+/// 同步整轮耗时指标名。
+const METRIC_SYNC_ROUND_MS: &str = "cc_history.sync_round_ms";
 
 /// 与单个对端执行 Claude Code 历史的双向同步。
 ///
-/// Business Logic: 确保双方 cc 历史一致。失败仅 warn 不阻断（调用方 sync_with_peer
-///     在 prompts 同步后追加调用本方法，cc 失败不影响 prompts 计数）。
+/// Business Logic: 确保双方 cc 历史一致。对端声明 `cc-history.paged-sync.v1` 时走有界分页协议，
+///     否则回退 legacy pull/push。分页路径上的协议/业务错误结束本轮并返回 Err（禁止伪装成
+///     成功的零条同步）；legacy 路径失败仍仅 warn 不阻断，保持一代兼容行为。
 ///
 /// Code Logic:
-///     1. health 检查，不可达跳过；
-///     2. 本端 summaries（全部 cc 历史含 deleted 的 {id, vector_clock}）；
-///     3. Pull：cc_sync_pull 拿回对端需要给的；逐条查本地，本地无则直接接收，本地有则
-///        merge_cc_history，仅当合并结果与本地有差异时收集；bulk_upsert；
-///     4. Push：重新取本端全量，算补集（对端没有的 / 本端领先或并发的）→ cc_sync_push。
+///     1. health_info；网络失败 → warn 并 Ok 跳过；
+///     2. protocol supports paged → `cc_sync_paged_with_peer`，否则 `cc_sync_legacy_with_peer`；
+///     3. 记录 `cc_history.sync_round_ms`。
 pub async fn cc_sync_with_peer(
     state: &AppState,
     device: &crate::models::device::Device,
 ) -> Result<(), String> {
     let base_url = device.base_url();
     tracing::info!("开始与设备 {} 同步 CC 历史 ({})", device.name, base_url);
+    let round_start = Instant::now();
 
-    // 1. 健康检查
-    if !state.peer_client.health(&device.host, device.port).await {
-        tracing::warn!("设备 {} 不可达，跳过 CC 历史同步", device.name);
-        return Ok(());
+    let health = match state.peer_client.health_info(&base_url).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!("设备 {} 不可达，跳过 CC 历史同步: {e}", device.name);
+            return Ok(());
+        }
+    };
+    let protocol = health.protocol_info();
+    let result = if protocol.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1) {
+        cc_sync_paged_with_peer(state, &base_url, &device.name).await
+    } else {
+        cc_sync_legacy_with_peer(state, &base_url, &device.name).await
+    };
+
+    state
+        .runtime_metrics
+        .record_duration(METRIC_SYNC_ROUND_MS, round_start.elapsed());
+
+    match &result {
+        Ok(()) => tracing::info!("与设备 {} CC 历史同步完成", device.name),
+        Err(e) => tracing::warn!("与设备 {} CC 历史同步失败: {e}", device.name),
     }
+    result
+}
 
-    // 2. 本端全部 cc 历史（含 deleted），投影为 summaries {id, vector_clock}
+/// legacy 全量 pull/push 路径（仅当对端无 paged capability）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧版本对端只挂载 `/pull|/push`；新客户端必须无 capability 时回退，行为与升级前一致。
+///
+/// Code Logic（这个函数做什么）:
+///     取本地全量摘要 → `cc_sync_pull`（失败折叠为空）→ 逐条 merge + bulk_upsert →
+///     算补集 → `cc_sync_push`（bool）。失败仅 warn。
+async fn cc_sync_legacy_with_peer(
+    state: &AppState,
+    base_url: &str,
+    device_name: &str,
+) -> Result<(), String> {
     let local_all = state
         .cc_history_repo
         .get_all_for_sync()
@@ -55,10 +101,9 @@ pub async fn cc_sync_with_peer(
         .map(|p| serde_json::json!({ "id": p.id, "vector_clock": p.vector_clock }))
         .collect();
 
-    // 3. Pull：发本端 summaries，拿回对端认为本端需要的 cc 历史
     let remote_items: Vec<ClaudeHistoryRow> = state
         .peer_client
-        .cc_sync_pull(&base_url, summary_values)
+        .cc_sync_pull(base_url, summary_values)
         .await;
 
     let mut to_upsert: Vec<ClaudeHistoryRow> = Vec::new();
@@ -69,14 +114,9 @@ pub async fn cc_sync_with_peer(
             .await
             .map_err(|e| format!("查询本地 CC 历史 {} 失败: {e}", remote.id))?;
         match local_row {
-            None => {
-                // 本地没有 → 直接接收
-                to_upsert.push(remote.clone());
-            }
+            None => to_upsert.push(remote.clone()),
             Some(local_row) => {
-                // 本地有 → 合并决策
                 let merged = merge_cc_history(&local_row, remote);
-                // 仅当合并结果与本地有差异时才落库
                 if merged.vector_clock != local_row.vector_clock
                     || merged.updated_at != local_row.updated_at
                     || merged.content != local_row.content
@@ -95,17 +135,15 @@ pub async fn cc_sync_with_peer(
             .bulk_upsert(&to_upsert)
             .await
             .map_err(|e| format!("CC 历史 bulk_upsert 失败: {e}"))?;
-        tracing::info!("从 {} 拉取并更新了 {} 条 CC 历史", device.name, n);
+        tracing::info!("从 {device_name} 拉取并更新了 {n} 条 CC 历史 (legacy)");
     }
 
-    // 4. Push：本端有而对端 pull 未返回的（即对端可能没有 / 对端落后），推送给对端
     let remote_ids: HashSet<String> = remote_items.iter().map(|p| p.id.clone()).collect();
     let remote_clock_map: HashMap<String, &HashMap<String, u64>> = remote_items
         .iter()
         .map(|p| (p.id.clone(), &p.vector_clock))
         .collect();
 
-    // 重新取本端最新全量（pull 阶段可能已落库更新）
     let local_all_after = state
         .cc_history_repo
         .get_all_for_sync()
@@ -115,20 +153,13 @@ pub async fn cc_sync_with_peer(
     let mut push_items: Vec<ClaudeHistoryRow> = Vec::new();
     for p in &local_all_after {
         match remote_clock_map.get(&p.id) {
-            None => {
-                // 对端没有 → 推送
-                push_items.push(p.clone());
-            }
+            None => push_items.push(p.clone()),
             Some(remote_clock) => {
-                // 本端 vs 对端：本端领先或并发 → 推送（对端会做 LWW 合并）
                 let relation = compare(&p.vector_clock, remote_clock);
-                if matches!(relation, ClockOrder::After)
-                    || matches!(relation, ClockOrder::Concurrent)
+                if matches!(relation, ClockOrder::After | ClockOrder::Concurrent)
+                    && !remote_ids.contains(&p.id)
                 {
-                    // 仅当不在 remote_ids（避免重复推送 pull 已带走的）时推送
-                    if !remote_ids.contains(&p.id) {
-                        push_items.push(p.clone());
-                    }
+                    push_items.push(p.clone());
                 }
             }
         }
@@ -136,14 +167,396 @@ pub async fn cc_sync_with_peer(
 
     if !push_items.is_empty() {
         let n = push_items.len();
-        let success = state.peer_client.cc_sync_push(&base_url, &push_items).await;
+        let success = state.peer_client.cc_sync_push(base_url, &push_items).await;
         if success {
-            tracing::info!("向 {} 推送了 {} 条 CC 历史", device.name, n);
+            tracing::info!("向 {device_name} 推送了 {n} 条 CC 历史 (legacy)");
         } else {
-            tracing::warn!("向 {} 推送 CC 历史失败", device.name);
+            tracing::warn!("向 {device_name} 推送 CC 历史失败 (legacy)");
+        }
+    }
+    Ok(())
+}
+
+/// 有界分页双向同步路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     10k+ 行时 legacy 全量 body 会撑爆内存与请求；分页协议只保留摘要映射与 ≤128 正文批，
+///     并用事务 upsert，错误不留下半完成批次。
+///
+/// Code Logic（这个函数做什么）:
+///     1. 分页拉 remote manifest 至 done，拒绝不前进 cursor；
+///     2. 按批 get 本地行比较 vector clock，收集 need_pull / need_push；
+///     3. items 批拉（≤128，遇 batch_too_large 对半拆到 1；单条 item_too_large 结束本轮）；
+///     4. merge 后 `upsert_merged_batch`；
+///     5. 分页本端 manifest，对 need_push 批取正文并 push-batch（同样拆批语义）；
+///     6. 每批记录 items/estimated_bytes/duration 固定名指标。
+async fn cc_sync_paged_with_peer(
+    state: &AppState,
+    base_url: &str,
+    device_name: &str,
+) -> Result<(), String> {
+    let remote_manifest = fetch_all_remote_manifest_pages(state, base_url).await?;
+    let remote_clocks: HashMap<String, HashMap<String, u64>> = remote_manifest
+        .iter()
+        .map(|s| (s.id.clone(), s.vector_clock.clone()))
+        .collect();
+
+    let mut need_pull: Vec<String> = Vec::new();
+    let mut need_push_ids: HashSet<String> = HashSet::new();
+
+    let remote_ids: Vec<String> = remote_manifest.iter().map(|s| s.id.clone()).collect();
+    for chunk in remote_ids.chunks(CC_ITEM_BATCH_LIMIT) {
+        let ids: Vec<String> = chunk.to_vec();
+        let local_map = state
+            .cc_history_repo
+            .get_many_for_sync(&ids)
+            .await
+            .map_err(|e| format!("批量读本地 CC 历史失败: {e}"))?;
+        for id in &ids {
+            let remote_vc = remote_clocks.get(id).expect("remote id from same list");
+            match local_map.get(id) {
+                None => need_pull.push(id.clone()),
+                Some(local) => {
+                    let rel = compare(remote_vc, &local.vector_clock);
+                    match rel {
+                        ClockOrder::After | ClockOrder::Concurrent => need_pull.push(id.clone()),
+                        ClockOrder::Before => {
+                            need_push_ids.insert(id.clone());
+                        }
+                        ClockOrder::Equal => {}
+                    }
+                    if matches!(rel, ClockOrder::Concurrent) {
+                        need_push_ids.insert(id.clone());
+                    }
+                }
+            }
         }
     }
 
-    tracing::info!("与设备 {} CC 历史同步完成", device.name);
+    let mut local_cursor: Option<String> = None;
+    loop {
+        let page = state
+            .cc_history_repo
+            .list_sync_manifest_page(local_cursor.as_deref(), CC_MANIFEST_PAGE_LIMIT_DEFAULT)
+            .await
+            .map_err(|e| format!("分页读本地 manifest 失败: {e}"))?;
+        if page.is_empty() {
+            break;
+        }
+        for s in &page {
+            if !remote_clocks.contains_key(&s.id) {
+                need_push_ids.insert(s.id.clone());
+            }
+        }
+        let last_id = page.last().map(|s| s.id.clone());
+        if page.len() < CC_MANIFEST_PAGE_LIMIT_DEFAULT as usize {
+            break;
+        }
+        if last_id == local_cursor {
+            return Err("本地 manifest 分页 cursor 未前进".to_string());
+        }
+        local_cursor = last_id;
+    }
+
+    let mut pulled = 0usize;
+    for chunk in need_pull.chunks(CC_ITEM_BATCH_LIMIT) {
+        let ids = chunk.to_vec();
+        let items = fetch_items_with_halving(state, base_url, ids).await?;
+        if items.is_empty() {
+            continue;
+        }
+        let batch_start = Instant::now();
+        let est: usize = items.iter().map(estimate_row_bytes).sum();
+        let n = items.len();
+
+        let mut to_upsert: Vec<ClaudeHistoryRow> = Vec::new();
+        let item_ids: Vec<String> = items.iter().map(|r| r.id.clone()).collect();
+        let local_map = state
+            .cc_history_repo
+            .get_many_for_sync(&item_ids)
+            .await
+            .map_err(|e| format!("pull 后批量读本地失败: {e}"))?;
+        for remote in &items {
+            match local_map.get(&remote.id) {
+                None => to_upsert.push(remote.clone()),
+                Some(local_row) => {
+                    let merged = merge_cc_history(local_row, remote);
+                    if merged.vector_clock != local_row.vector_clock
+                        || merged.updated_at != local_row.updated_at
+                        || merged.content != local_row.content
+                        || merged.deleted != local_row.deleted
+                    {
+                        to_upsert.push(merged);
+                    }
+                }
+            }
+        }
+        if !to_upsert.is_empty() {
+            let written = state
+                .cc_history_repo
+                .upsert_merged_batch(&to_upsert)
+                .await
+                .map_err(|e| format!("CC 历史 upsert_merged_batch 失败: {e}"))?;
+            pulled += written;
+        }
+        record_batch_metrics(state, n as u64, est as u64, batch_start.elapsed());
+    }
+    if pulled > 0 {
+        tracing::info!("从 {device_name} 分页拉取并更新了 {pulled} 条 CC 历史");
+    }
+
+    let push_id_list: Vec<String> = need_push_ids.into_iter().collect();
+    let mut pushed = 0usize;
+    for chunk in push_id_list.chunks(CC_ITEM_BATCH_LIMIT) {
+        let ids = chunk.to_vec();
+        let local_map = state
+            .cc_history_repo
+            .get_many_for_sync(&ids)
+            .await
+            .map_err(|e| format!("push 前批量读本地失败: {e}"))?;
+        let mut rows: Vec<ClaudeHistoryRow> = ids
+            .iter()
+            .filter_map(|id| local_map.get(id).cloned())
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        while !rows.is_empty() {
+            let batch = take_push_batch(&mut rows);
+            let accepted = push_batch_with_halving(state, base_url, batch).await?;
+            pushed += accepted;
+        }
+    }
+    if pushed > 0 {
+        tracing::info!("向 {device_name} 分页推送了 {pushed} 条 CC 历史");
+    }
     Ok(())
+}
+
+/// 分页拉取对端全部 manifest 摘要。
+///
+/// Business Logic（为什么需要这个函数）:
+///     客户端必须先掌握对端完整摘要再决定 items/push；cursor 不前进视为协议故障。
+///
+/// Code Logic（这个函数做什么）:
+///     循环 `cc_sync_manifest_page` 直至 done；比较 next_cursor 与上一 cursor，相同则 Err。
+async fn fetch_all_remote_manifest_pages(
+    state: &AppState,
+    base_url: &str,
+) -> Result<Vec<CcSyncSummary>, String> {
+    let mut all = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut prev_cursor: Option<String> = None;
+    loop {
+        let batch_start = Instant::now();
+        let page = state
+            .peer_client
+            .cc_sync_manifest_page(
+                base_url,
+                cursor.as_deref(),
+                Some(CC_MANIFEST_PAGE_LIMIT_DEFAULT),
+            )
+            .await
+            .map_err(|e| format!("manifest-page 失败: {e}"))?;
+        let n = page.summaries.len();
+        let est = page
+            .summaries
+            .iter()
+            .map(|s| s.id.len() + s.vector_clock.len() * 8)
+            .sum::<usize>();
+        record_batch_metrics(state, n as u64, est as u64, batch_start.elapsed());
+        all.extend(page.summaries);
+
+        if page.done {
+            break;
+        }
+        let next = page.next_cursor.clone();
+        if next.is_none() {
+            return Err("manifest-page done=false 但 next_cursor 为空".to_string());
+        }
+        if next == prev_cursor || next == cursor {
+            return Err("manifest-page cursor 未前进".to_string());
+        }
+        prev_cursor = cursor;
+        cursor = next;
+    }
+    Ok(all)
+}
+
+/// 拉取 items；遇 `batch_too_large` 对半拆分直至 1。
+///
+/// Business Logic（为什么需要这个函数）:
+///     对端以 8MiB 估算拒绝大包时，客户端必须缩小批次继续，不得跳过数据；
+///     单条仍 `item_too_large` 则结束本轮。
+///
+/// Code Logic（这个函数做什么）:
+///     递归/栈式拆分 ids；成功合并 items；`item_too_large` 且 len==1 → Err；其它错误上抛。
+async fn fetch_items_with_halving(
+    state: &AppState,
+    base_url: &str,
+    ids: Vec<String>,
+) -> Result<Vec<ClaudeHistoryRow>, String> {
+    // 迭代拆批：async 递归需 Box::pin，这里用栈避免无限尺寸 future。
+    let mut stack: Vec<Vec<String>> = vec![ids];
+    let mut out = Vec::new();
+    while let Some(chunk) = stack.pop() {
+        if chunk.is_empty() {
+            continue;
+        }
+        let batch_start = Instant::now();
+        match state.peer_client.cc_sync_items(base_url, &chunk).await {
+            Ok(resp) => {
+                let est: usize = resp.items.iter().map(estimate_row_bytes).sum();
+                record_batch_metrics(
+                    state,
+                    resp.items.len() as u64,
+                    est as u64,
+                    batch_start.elapsed(),
+                );
+                out.extend(resp.items);
+            }
+            Err(e) if is_batch_too_large(&e) && chunk.len() > 1 => {
+                let mid = chunk.len() / 2;
+                stack.push(chunk[mid..].to_vec());
+                stack.push(chunk[..mid].to_vec());
+            }
+            Err(e) if is_item_too_large(&e) && chunk.len() == 1 => {
+                return Err(format!("单条 item_too_large，结束本轮: id={}", chunk[0]));
+            }
+            Err(e) if is_batch_too_large(&e) && chunk.len() == 1 => {
+                return Err(format!("单条 batch_too_large，结束本轮: id={}", chunk[0]));
+            }
+            Err(e) => return Err(format!("items 失败: {e}")),
+        }
+    }
+    Ok(out)
+}
+
+/// push-batch；遇 `batch_too_large` 对半拆分直至 1。
+///
+/// Business Logic（为什么需要这个函数）:
+///     与 items 对称：合法 413 拆批继续；单条超限结束本轮，禁止静默跳过。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 `cc_sync_push_batch`；成功返回 accepted；过大则拆分递归；单条过大 → Err。
+async fn push_batch_with_halving(
+    state: &AppState,
+    base_url: &str,
+    items: Vec<ClaudeHistoryRow>,
+) -> Result<usize, String> {
+    let mut stack: Vec<Vec<ClaudeHistoryRow>> = vec![items];
+    let mut accepted_total = 0usize;
+    while let Some(chunk) = stack.pop() {
+        if chunk.is_empty() {
+            continue;
+        }
+        let batch_start = Instant::now();
+        let n = chunk.len();
+        let est: usize = chunk.iter().map(estimate_row_bytes).sum();
+        match state.peer_client.cc_sync_push_batch(base_url, &chunk).await {
+            Ok(resp) => {
+                record_batch_metrics(state, n as u64, est as u64, batch_start.elapsed());
+                accepted_total += resp.accepted;
+            }
+            Err(e) if is_batch_too_large(&e) && chunk.len() > 1 => {
+                let mid = chunk.len() / 2;
+                stack.push(chunk[mid..].to_vec());
+                stack.push(chunk[..mid].to_vec());
+            }
+            Err(e) if is_item_too_large(&e) && chunk.len() == 1 => {
+                return Err(format!(
+                    "push 单条 item_too_large，结束本轮: id={}",
+                    chunk[0].id
+                ));
+            }
+            Err(e) if is_batch_too_large(&e) && chunk.len() == 1 => {
+                return Err(format!(
+                    "push 单条 batch_too_large，结束本轮: id={}",
+                    chunk[0].id
+                ));
+            }
+            Err(e) => return Err(format!("push-batch 失败: {e}")),
+        }
+    }
+    Ok(accepted_total)
+}
+
+/// 从待 push 队列取出不超过 128 条且估算 ≤8MiB 的一批。
+///
+/// Business Logic（为什么需要这个函数）:
+///     主动控制批大小，减少对端 413 往返。
+///
+/// Code Logic（这个函数做什么）:
+///     从 `rows` 前端弹出，累计 estimate_row_bytes，触顶则把最后一条放回并停止。
+fn take_push_batch(rows: &mut Vec<ClaudeHistoryRow>) -> Vec<ClaudeHistoryRow> {
+    let mut batch = Vec::new();
+    let mut est = 0usize;
+    while !rows.is_empty() && batch.len() < CC_ITEM_BATCH_LIMIT {
+        let next_est = estimate_row_bytes(&rows[0]);
+        if !batch.is_empty() && est.saturating_add(next_est) > CC_BATCH_MAX_ESTIMATED_BYTES {
+            break;
+        }
+        let row = rows.remove(0);
+        est = est.saturating_add(next_est);
+        batch.push(row);
+    }
+    batch
+}
+
+/// 记录同步批次固定名指标。
+///
+/// Business Logic（为什么需要这个函数）:
+///     本地诊断需要 items/估算字节/耗时，且不得写入正文、路径或设备名。
+///
+/// Code Logic（这个函数做什么）:
+///     `record_count` items 与 estimated_bytes；`record_duration` batch ms。
+fn record_batch_metrics(
+    state: &AppState,
+    items: u64,
+    estimated_bytes: u64,
+    duration: std::time::Duration,
+) {
+    state
+        .runtime_metrics
+        .record_count(METRIC_SYNC_BATCH_ITEMS, items);
+    state
+        .runtime_metrics
+        .record_count(METRIC_SYNC_BATCH_BYTES, estimated_bytes);
+    state
+        .runtime_metrics
+        .record_duration(METRIC_SYNC_BATCH_MS, duration);
+}
+
+/// 判定是否 `cc_history.batch_too_large`。
+fn is_batch_too_large(err: &PeerCallError) -> bool {
+    err.code() == Some(CODE_BATCH_TOO_LARGE)
+}
+
+/// 判定是否 `cc_history.item_too_large`。
+fn is_item_too_large(err: &PeerCallError) -> bool {
+    err.code() == Some(CODE_ITEM_TOO_LARGE)
+}
+
+#[cfg(test)]
+mod tests {
+    /// 委托 mixed_version_harness，避免与 integration test 场景漂移。
+    #[test]
+    fn cc_history_mixed_version_new_to_new_uses_only_paged_routes() {
+        crate::cc::mixed_version_harness::assert_new_to_new_uses_only_paged_routes();
+    }
+
+    #[test]
+    fn cc_history_mixed_version_new_to_legacy_uses_only_legacy_routes() {
+        crate::cc::mixed_version_harness::assert_new_to_legacy_uses_only_legacy_routes();
+    }
+
+    #[test]
+    fn cc_history_mixed_version_malformed_paged_fails_round_not_empty_success() {
+        crate::cc::mixed_version_harness::assert_malformed_paged_fails_round_not_empty_success();
+    }
+
+    #[test]
+    fn cc_history_mixed_version_legacy_bodies_work_against_new_server() {
+        crate::cc::mixed_version_harness::assert_legacy_bodies_work_against_new_server();
+    }
 }

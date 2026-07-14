@@ -1109,6 +1109,7 @@ impl PeerClient {
     /// Claude Code 历史同步 push：将本端有而对端缺少的 cc 历史推送给对端。
     ///
     /// Business Logic: CC 历史同步第二步——把本端独有或领先的 cc 历史推过去。
+    ///     **仅** legacy 回退路径使用；paged 能力对端走 `cc_sync_push_batch`。
     ///
     /// Code Logic（Finding 2 起）: POST `{base_url}/api/cc-history/sync/push`，经共享 `request_post`
     ///     helper 注入 X-CC-Request-Id 并用 `parse_peer_response` 统一解析；HTTP 2xx 即视为成功。
@@ -1141,6 +1142,153 @@ impl PeerClient {
                 .message(format!("cc_sync_push 失败: {e}"))
                 .emit();
                 false
+            }
+        }
+    }
+
+    /// 分页同步：拉一页对端 CC 历史摘要。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     有界分页协议先交换摘要再按需拉正文；必须返回结构化错误，绝不能把失败折叠成空页，
+    ///     否则引擎会误判「对端无数据」并当成成功零同步。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/cc-history/sync/manifest-page` body `{cursor, limit}`，
+    ///     成功返回 `CcManifestPageResp`；任何网络/业务/解析失败原样上抛 `PeerCallError`。
+    pub async fn cc_sync_manifest_page(
+        &self,
+        base_url: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<crate::net::routes::cc_history::CcManifestPageResp, PeerCallError> {
+        let url = format!("{base_url}/api/cc-history/sync/manifest-page");
+        let body = serde_json::json!({
+            "cursor": cursor,
+            "limit": limit,
+        });
+        match self
+            .request_post::<crate::net::routes::cc_history::CcManifestPageResp, _>(&url, &body)
+            .await
+        {
+            Ok(data) => {
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "cc_sync_manifest_page",
+                    crate::backend::logging::OperationResult::Ok,
+                )
+                .message(format!(
+                    "cc_sync_manifest_page 获取 {} 条摘要 done={}",
+                    data.summaries.len(),
+                    data.done
+                ))
+                .emit();
+                Ok(data)
+            }
+            Err(e) => {
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "cc_sync_manifest_page",
+                    crate::backend::logging::OperationResult::Error,
+                )
+                .level(tracing::Level::WARN)
+                .error_code(e.code().unwrap_or("unavailable"))
+                .message(format!("cc_sync_manifest_page 失败: {e}"))
+                .emit();
+                Err(e)
+            }
+        }
+    }
+
+    /// 分页同步：按 ID 批取对端完整 CC 历史正文。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     比较摘要后只拉取本端缺失/落后的正文；错误必须上抛以便引擎拆批或终止本轮，
+    ///     禁止折叠成空 Vec 伪装成功。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/cc-history/sync/items` body `{ids}`，返回 `CcItemsResp` 或 `PeerCallError`
+    ///     （含 `cc_history.batch_too_large` / `cc_history.item_too_large`）。
+    pub async fn cc_sync_items(
+        &self,
+        base_url: &str,
+        ids: &[String],
+    ) -> Result<crate::net::routes::cc_history::CcItemsResp, PeerCallError> {
+        let url = format!("{base_url}/api/cc-history/sync/items");
+        let body = serde_json::json!({ "ids": ids });
+        match self
+            .request_post::<crate::net::routes::cc_history::CcItemsResp, _>(&url, &body)
+            .await
+        {
+            Ok(data) => {
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "cc_sync_items",
+                    crate::backend::logging::OperationResult::Ok,
+                )
+                .message(format!(
+                    "cc_sync_items 获取 {} 条 missing={}",
+                    data.items.len(),
+                    data.missing_ids.len()
+                ))
+                .emit();
+                Ok(data)
+            }
+            Err(e) => {
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "cc_sync_items",
+                    crate::backend::logging::OperationResult::Error,
+                )
+                .level(tracing::Level::WARN)
+                .error_code(e.code().unwrap_or("unavailable"))
+                .message(format!("cc_sync_items 失败: {e}"))
+                .emit();
+                Err(e)
+            }
+        }
+    }
+
+    /// 分页同步：批量 push 本端领先/独有的 CC 历史。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     对端有 paged 能力时用事务性 push-batch 代替 legacy 全量 push；失败必须上抛，
+    ///     引擎据此拆批或结束本轮，禁止折叠成 `false` 后静默当成功。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/cc-history/sync/push-batch` body `{items}`，返回 `CcPushBatchResp`
+    ///     或 `PeerCallError`（含 batch/item too large）。
+    pub async fn cc_sync_push_batch(
+        &self,
+        base_url: &str,
+        items: &[crate::cc::models::ClaudeHistoryRow],
+    ) -> Result<crate::net::routes::cc_history::CcPushBatchResp, PeerCallError> {
+        let url = format!("{base_url}/api/cc-history/sync/push-batch");
+        let body = serde_json::json!({ "items": items });
+        match self
+            .request_post::<crate::net::routes::cc_history::CcPushBatchResp, _>(&url, &body)
+            .await
+        {
+            Ok(data) => {
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "cc_sync_push_batch",
+                    crate::backend::logging::OperationResult::Ok,
+                )
+                .message(format!("cc_sync_push_batch 对端接受 {} 条", data.accepted))
+                .emit();
+                Ok(data)
+            }
+            Err(e) => {
+                crate::backend::logging::OperationLog::new(
+                    "p2p",
+                    "cc_sync_push_batch",
+                    crate::backend::logging::OperationResult::Error,
+                )
+                .level(tracing::Level::WARN)
+                .error_code(e.code().unwrap_or("unavailable"))
+                .message(format!("cc_sync_push_batch 失败: {e}"))
+                .emit();
+                Err(e)
             }
         }
     }
