@@ -405,6 +405,57 @@ pub enum TransferOperationStatus {
     },
 }
 
+/// same-device GUI Open / Reveal 动作。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     已完成接收任务可「打开文件」或「在文件管理器中显示」；两者都只允许本机桌面 GUI。
+///
+/// Code Logic（这个枚举做什么）:
+///     camelCase `open` / `reveal`；sidecar 只校验并返回 local path，真正 opener 在 GUI。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferOpenAction {
+    /// 用系统默认应用打开文件
+    Open,
+    /// 在文件管理器中定位并显示该文件
+    Reveal,
+}
+
+impl TransferOpenAction {
+    /// 稳定小写 token。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     日志与错误文案需要稳定动作名。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 `open` / `reveal`。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Reveal => "reveal",
+        }
+    }
+}
+
+/// same-device GUI Open/Reveal 准备结果（仅含本机路径）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     sidecar 验证 Receive+completed+path exists 后，把 local target 经 lifecycle control
+///     交给 GUI；GUI 再调 Tauri opener。路径不得经 P2P/mobile 暴露。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase：`taskId` / `action` / `path`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalTransferOpenTarget {
+    /// 任务 id
+    pub task_id: String,
+    /// Open 或 Reveal
+    pub action: TransferOpenAction,
+    /// 本机绝对路径（接收完成最终文件）
+    pub path: String,
+}
+
 /// 传输任务实体（内部用，snake_case）。
 ///
 /// Business Logic: registry 活跃任务表与 transfer_history 表共享同一字段集。

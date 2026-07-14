@@ -515,6 +515,16 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 ),
             ),
         )
+        // N5: same-device transfer Open/Reveal prepare（仅 loopback control，不进 LAN/P2P）
+        // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
+        .route(
+            "/api/backend/control/transfer/prepare-open",
+            post(crate::backend::control_api::control_transfer_prepare_open).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
         // 移动端访问入口：返回手机可访问的局域网 /mobile URL（过滤 localhost/loopback）
         .route("/api/mobile/access-info", get(mobile::access_info))
         // Mobile Attention 快照：与 Tauri list_attention_items 共享聚合 helper；能力 token attention.v1

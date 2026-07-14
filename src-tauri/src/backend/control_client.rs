@@ -21,6 +21,7 @@ use crate::error::AppError;
 use crate::hotkey::{
     compensate_screenshot_hotkey_os, replace_screenshot_hotkey_os, GlobalShortcutBackend,
 };
+use crate::models::transfer::{LocalTransferOpenTarget, TransferOpenAction};
 use crate::workbench::operation_ledger::MutationTransportClass;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,15 @@ struct ControlConfigResponseBody {
 #[serde(rename_all = "camelCase")]
 struct ControlAuthBody {
     control_token: String,
+}
+
+/// transfer prepare-open control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlTransferPrepareOpenBody {
+    control_token: String,
+    task_id: String,
+    action: TransferOpenAction,
 }
 
 /// Workbench control 请求 body（token + op + payload）。
@@ -909,6 +919,36 @@ impl BackendControlClient {
                 &body,
                 CLOUD_SYNC_MUTATE_TIMEOUT,
             )
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧准备 Open/Reveal local target。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 不得自读本地空/过期 history 猜路径；必须向 sidecar 校验
+    ///     Receive+completed+path exists 后拿 local target，再在 GUI 调 opener。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `transfer/prepare-open` body={controlToken,taskId,action}；mutation 不自动重试。
+    pub async fn prepare_transfer_open(
+        &self,
+        task_id: &str,
+        action: TransferOpenAction,
+    ) -> Result<LocalTransferOpenTarget, AppError> {
+        let body = ControlTransferPrepareOpenBody {
+            control_token: self.control_token.clone(),
+            task_id: task_id.to_string(),
+            action,
+        };
+        match self
+            .send_once("transfer/prepare-open", &body, MUTATE_TIMEOUT)
             .await
         {
             ControlCallOutcome::Ok(v) => Ok(v),

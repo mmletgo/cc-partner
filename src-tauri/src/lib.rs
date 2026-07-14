@@ -30,8 +30,9 @@ pub use net::peer_client::{PeerClient, TransferCompletePolicy};
 pub use net::peer_error::PeerCallError;
 // N5 transfer recovery smoke：claim / capability / operation 对账黑盒验证。
 pub use models::transfer::{
-    canonical_recovery_payload_hash, TransferDirection, TransferFailure, TransferFailureStage,
-    TransferOperationStatus, TransferPhase, TransferRecoveryKind, TransferStatus, TransferTask,
+    canonical_recovery_payload_hash, LocalTransferOpenTarget, TransferDirection, TransferFailure,
+    TransferFailureStage, TransferOpenAction, TransferOperationStatus, TransferPhase,
+    TransferRecoveryKind, TransferStatus, TransferTask,
 };
 pub use net::protocol::{
     server_protocol_info, CAPABILITY_TRANSFER_RESUME_V1, PROTOCOL_VERSION_V1,
@@ -289,6 +290,7 @@ pub fn run() {
             transfer_cmd::retry_transfer,
             transfer_cmd::resume_transfer,
             transfer_cmd::get_transfer_operation,
+            transfer_cmd::prepare_transfer_open,
             screenshot_cmd::start_region_capture,
             screenshot_cmd::get_region_snapshot,
             screenshot_cmd::save_clipboard_image,

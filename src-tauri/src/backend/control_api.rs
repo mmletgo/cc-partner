@@ -6,7 +6,8 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     提供 status / get-config / update-config / events / orchestrator snapshot /
-//!     cloud-sync/{trigger,test,claude-md-push} / backup/{create,inspect,restore,list-jobs,list-backups,rollback}
+//!     cloud-sync/{trigger,test,claude-md-push} / backup/{create,inspect,restore,list-jobs,list-backups,rollback} /
+//!     transfer/prepare-open
 //!     handler 与路由挂载；请求体 ≤256 KiB，普通元数据响应 ≤1 MiB；
 //!     鉴权顺序：ConnectInfo loopback → token；cloud_sync_phase 映射真实 CloudSyncRuntime 相位；
 //!     从不记录 control token。
@@ -21,11 +22,13 @@ use crate::backup::{
 use crate::commands::orchestrator::{
     get_orchestrator_runtime_snapshot_for_state_with_request_id, OrchestratorRuntimeSnapshotDto,
 };
+use crate::commands::transfer::prepare_transfer_open_for_state;
 use crate::config_runtime::{
     ConfigSnapshot, ConfigUpdateResponse, OrchestratorRuntimeSummary, RuntimeConfigPatch,
     RuntimeOwnerStatus,
 };
 use crate::error::AppError;
+use crate::models::transfer::{LocalTransferOpenTarget, TransferOpenAction};
 use crate::net::error_response::{P2pError, P2pErrorCode, P2pResult};
 use crate::net::lan_guard::require_loopback_peer;
 use crate::net::request_context::P2pRequestContext;
@@ -700,6 +703,49 @@ pub async fn control_backup_rollback(
     Ok(Json(result))
 }
 
+// ── transfer lifecycle control（N5 Open/Reveal prepare）────────────────
+
+/// transfer prepare-open 请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     GuiClient 经 loopback control 向 sidecar 索取 completed Receive 的 local path；
+///     不得经 P2P/mobile 暴露路径。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase：controlToken + taskId + action(open|reveal)。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlTransferPrepareOpenRequest {
+    pub control_token: String,
+    pub task_id: String,
+    pub action: TransferOpenAction,
+}
+
+/// 为 same-device GUI 准备 Open/Reveal local target。
+///
+/// Business Logic（为什么需要这个函数）:
+///     sidecar 是 transfer_history 与最终落盘路径的权威；GUI 只拿 local target 再调 opener。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → prepare_transfer_open_for_state → LocalTransferOpenTarget。
+pub async fn control_transfer_prepare_open(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlTransferPrepareOpenRequest>,
+) -> P2pResult<Json<LocalTransferOpenTarget>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.transfer_prepare_open"))?;
+    let target = prepare_transfer_open_for_state(&state, &request.task_id, request.action)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.transfer_prepare_open"))?;
+    ensure_response_within_limit(&target, &context)?;
+    Ok(Json(target))
+}
+
 /// 序列化后检查响应不超过 1 MiB。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -837,6 +883,23 @@ mod tests {
         let control = control_file("expected-token");
         authorize_control_for_test(loopback_peer(), &ctx, "expected-token", Some(&control))
             .expect("should accept");
+    }
+
+    /// prepare-open 请求体 camelCase 反序列化。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GuiClient 与 sidecar 共享 control contract：taskId + action。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     JSON `{controlToken,taskId,action:"reveal"}` → 字段对齐。
+    #[test]
+    fn transfer_prepare_open_request_deserializes_camel_case() {
+        let raw = r#"{"controlToken":"tok","taskId":"t-1","action":"reveal"}"#;
+        let req: ControlTransferPrepareOpenRequest =
+            serde_json::from_str(raw).expect("deserialize prepare-open body");
+        assert_eq!(req.control_token, "tok");
+        assert_eq!(req.task_id, "t-1");
+        assert_eq!(req.action, TransferOpenAction::Reveal);
     }
 
     /// CAS 经 control 路径：正确 generation 成功，旧 generation 冲突。
