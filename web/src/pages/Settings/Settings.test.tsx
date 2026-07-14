@@ -9,7 +9,7 @@
  *   mock 各 API 与 router/i18n，渲染 Settings，断言局部错误与重试入口。
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { AppConfig, CloudSyncConfig, GithubTrendingConfig, HealthConfig, VersionInfo } from '@/lib/types';
 import type { OrchestratorAutomationConfig } from '@/api/orchestratorConfig';
 import {
@@ -620,7 +620,7 @@ describe('Settings partial resource loading', () => {
 describe('Settings safe save preserves concurrent edits', () => {
   test('keeps edits typed while general settings save is pending', async () => {
     const save = deferred<AppConfig>();
-    updateConfig.mockReturnValue(save.promise);
+    updateConfig.mockImplementation(() => save.promise);
     renderSettings();
 
     const deviceName = (await screen.findByLabelText(
@@ -629,21 +629,15 @@ describe('Settings safe save preserves concurrent edits', () => {
     fireEvent.change(deviceName, { target: { value: 'A' } });
     fireEvent.click(screen.getByRole('button', { name: 'settings:action.apply' }));
 
-    await waitFor(() => {
-      expect(updateConfig).toHaveBeenCalledTimes(1);
-    });
+    expect(updateConfig).toHaveBeenCalledTimes(1);
 
     fireEvent.change(deviceName, { target: { value: 'AB' } });
     expect(deviceName.value).toBe('AB');
 
-    await act(async () => {
-      save.resolve(appConfig({ deviceName: 'A' }));
-      await save.promise;
-    });
+    save.resolve(appConfig({ deviceName: 'A' }));
+    await new Promise((r) => setTimeout(r, 10));
 
-    await waitFor(() => {
-      expect(updateConfig).toHaveBeenCalledTimes(1);
-    });
+    expect(updateConfig).toHaveBeenCalledTimes(1);
     expect(deviceName.value).toBe('AB');
     expect(screen.getByText('settings:status.dirtyHint')).toBeTruthy();
   });
@@ -668,7 +662,7 @@ describe('Settings safe save preserves concurrent edits', () => {
 
   test('keeps edits typed while cloud sync save is pending', async () => {
     const save = deferred<CloudSyncConfig>();
-    updateCloudSyncConfig.mockReturnValue(save.promise);
+    updateCloudSyncConfig.mockImplementation(() => save.promise);
     searchParamsState.value = new URLSearchParams('tab=sync');
     renderSettings();
 
@@ -678,23 +672,19 @@ describe('Settings safe save preserves concurrent edits', () => {
     fireEvent.change(repoUrl, { target: { value: 'git@github.com:u/new.git' } });
     fireEvent.click(screen.getByRole('button', { name: 'settings:cloudSync.apply' }));
 
-    await waitFor(() => {
-      expect(updateCloudSyncConfig).toHaveBeenCalledTimes(1);
-    });
+    expect(updateCloudSyncConfig).toHaveBeenCalledTimes(1);
 
     fireEvent.change(repoUrl, { target: { value: 'git@github.com:u/new-edit.git' } });
 
-    await act(async () => {
-      save.resolve(cloudSync({ repoUrl: 'git@github.com:u/new.git' }));
-      await save.promise;
-    });
+    save.resolve(cloudSync({ repoUrl: 'git@github.com:u/new.git' }));
+    await new Promise((r) => setTimeout(r, 10));
 
     expect(repoUrl.value).toBe('git@github.com:u/new-edit.git');
   });
 
   test('keeps edits typed while github AI save is pending', async () => {
     const save = deferred<GithubTrendingConfig>();
-    updateGithubTrendingConfig.mockReturnValue(save.promise);
+    updateGithubTrendingConfig.mockImplementation(() => save.promise);
     searchParamsState.value = new URLSearchParams('tab=ai');
     renderSettings();
 
@@ -704,23 +694,19 @@ describe('Settings safe save preserves concurrent edits', () => {
     fireEvent.change(model, { target: { value: 'opus' } });
     fireEvent.click(screen.getByRole('button', { name: 'settings:githubTrending.apply' }));
 
-    await waitFor(() => {
-      expect(updateGithubTrendingConfig).toHaveBeenCalledTimes(1);
-    });
+    expect(updateGithubTrendingConfig).toHaveBeenCalledTimes(1);
 
     fireEvent.change(model, { target: { value: 'opus-edit' } });
 
-    await act(async () => {
-      save.resolve(githubTrending({ claudeModel: 'opus' }));
-      await save.promise;
-    });
+    save.resolve(githubTrending({ claudeModel: 'opus' }));
+    await new Promise((r) => setTimeout(r, 10));
 
     expect(model.value).toBe('opus-edit');
   });
 
   test('keeps fill language selection while prompt optimizer save is pending', async () => {
     const save = deferred<AppConfig>();
-    updateConfig.mockReturnValue(save.promise);
+    updateConfig.mockImplementation(() => save.promise);
     searchParamsState.value = new URLSearchParams('tab=ai');
     renderSettings();
 
@@ -732,19 +718,15 @@ describe('Settings safe save preserves concurrent edits', () => {
       screen.getByRole('button', { name: 'settings:promptOptimizerSettings.apply' }),
     );
 
-    await waitFor(() => {
-      expect(updateConfig).toHaveBeenCalledTimes(1);
-    });
+    expect(updateConfig).toHaveBeenCalledTimes(1);
 
     const zhOption = screen.getByRole('radio', {
       name: 'settings:promptOptimizerSettings.fillLanguage.zh',
     });
     fireEvent.click(zhOption);
 
-    await act(async () => {
-      save.resolve(appConfig({ promptOptimizerFillLanguage: 'en' }));
-      await save.promise;
-    });
+    save.resolve(appConfig({ promptOptimizerFillLanguage: 'en' }));
+    await new Promise((r) => setTimeout(r, 10));
 
     // 保存期间改回 zh，成功响应不得回填 en
     expect(zhOption.getAttribute('aria-checked')).toBe('true');
@@ -752,7 +734,7 @@ describe('Settings safe save preserves concurrent edits', () => {
 
   test('keeps edits typed while health save is pending', async () => {
     const save = deferred<HealthConfig>();
-    updateHealthConfig.mockReturnValue(save.promise);
+    updateHealthConfig.mockImplementation(() => save.promise);
     searchParamsState.value = new URLSearchParams('tab=health');
     renderSettings();
 
@@ -766,23 +748,19 @@ describe('Settings safe save preserves concurrent edits', () => {
     fireEvent.change(workWindow, { target: { value: '20' } });
     fireEvent.click(screen.getByRole('button', { name: 'settings:action.apply' }));
 
-    await waitFor(() => {
-      expect(updateHealthConfig).toHaveBeenCalledTimes(1);
-    });
+    expect(updateHealthConfig).toHaveBeenCalledTimes(1);
 
     fireEvent.change(workWindow, { target: { value: '25' } });
 
-    await act(async () => {
-      save.resolve(health({ workWindowSeconds: 20 * 60 }));
-      await save.promise;
-    });
+    save.resolve(health({ workWindowSeconds: 20 * 60 }));
+    await new Promise((r) => setTimeout(r, 10));
 
     expect(workWindow.value).toBe('25');
   });
 
   test('keeps edits typed while automation save is pending', async () => {
     const save = deferred<OrchestratorAutomationConfig>();
-    updateAutomationConfig.mockReturnValue(save.promise);
+    updateAutomationConfig.mockImplementation(() => save.promise);
     searchParamsState.value = new URLSearchParams('tab=automation');
     renderSettings();
 
@@ -792,16 +770,12 @@ describe('Settings safe save preserves concurrent edits', () => {
     fireEvent.change(commands, { target: { value: 'npm test\nnpm run lint' } });
     fireEvent.click(screen.getByRole('button', { name: 'settings:action.apply' }));
 
-    await waitFor(() => {
-      expect(updateAutomationConfig).toHaveBeenCalledTimes(1);
-    });
+    expect(updateAutomationConfig).toHaveBeenCalledTimes(1);
 
     fireEvent.change(commands, { target: { value: 'npm test\nnpm run lint\nnpm run build' } });
 
-    await act(async () => {
-      save.resolve(automation({ verificationCommands: ['npm test', 'npm run lint'] }));
-      await save.promise;
-    });
+    save.resolve(automation({ verificationCommands: ['npm test', 'npm run lint'] }));
+    await new Promise((r) => setTimeout(r, 10));
 
     expect(commands.value).toBe('npm test\nnpm run lint\nnpm run build');
   });

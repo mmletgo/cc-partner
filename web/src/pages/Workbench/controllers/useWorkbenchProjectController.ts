@@ -250,6 +250,8 @@ export function useWorkbenchProjectController(
       return;
     }
 
+    // 进入 continue-working 模式时重置 section 状态并立即拉取
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional mode-enter bootstrap
     setLaunchSummary(createInitialLaunchSummaryState());
     void fetchLaunchSummary();
 

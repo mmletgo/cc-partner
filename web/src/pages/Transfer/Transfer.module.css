@@ -69,7 +69,7 @@
   font-size: var(--text-xs);
   letter-spacing: var(--tracking-widest);
   text-transform: uppercase;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .selectWrap {
@@ -182,7 +182,7 @@
   margin: 0;
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   letter-spacing: var(--tracking-wide);
 }
 
@@ -248,7 +248,7 @@
   font-family: var(--font-mono);
   font-size: var(--text-base);
   font-weight: var(--weight-regular);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   margin-left: var(--space-2);
 }
 
@@ -288,7 +288,7 @@
 
 .emptyHint {
   font-size: var(--text-sm);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 /* ── 骨架屏 ── */

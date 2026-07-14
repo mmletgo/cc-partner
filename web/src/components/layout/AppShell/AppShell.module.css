@@ -65,7 +65,7 @@
   font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
   line-height: var(--leading-normal);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   letter-spacing: var(--tracking-wide);
   user-select: none;
   pointer-events: none;
@@ -77,7 +77,7 @@
   flex-direction: column;
   gap: var(--space-2);
   font-size: var(--text-sm);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .footerVersion {

@@ -311,7 +311,7 @@
 }
 
 .panelKicker {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
   line-height: var(--leading-tight);
@@ -469,7 +469,7 @@
 }
 
 .mobileListMeta {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .mobileListNotice {
@@ -1219,7 +1219,7 @@
 
 .quickSwitchTitle p {
   margin: 0;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
   line-height: var(--leading-tight);
@@ -1377,7 +1377,7 @@
 }
 
 .quickSwitchPath {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .quickSwitchStatusClean {

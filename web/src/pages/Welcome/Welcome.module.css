@@ -87,7 +87,7 @@
 .hint {
   font-family: var(--font-mono);
   font-size: var(--text-sm);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   letter-spacing: var(--tracking-wide);
 }
 

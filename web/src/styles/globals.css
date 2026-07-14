@@ -21,7 +21,7 @@
   font-weight: var(--weight-medium);
   letter-spacing: var(--tracking-widest);
   text-transform: uppercase;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 /* prefers-reduced-motion: 保留状态变化，取消位移/闪烁/shimmer 动效 */

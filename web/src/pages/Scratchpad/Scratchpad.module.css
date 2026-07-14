@@ -21,7 +21,7 @@
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-widest);
   text-transform: uppercase;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   margin-bottom: var(--space-1);
 }
 
@@ -88,7 +88,7 @@
 
 .pageCount {
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .pageList {
@@ -143,7 +143,7 @@
 .pageItemMeta {
   font-size: var(--text-xs);
   line-height: var(--leading-normal);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -249,7 +249,7 @@
   justify-content: space-between;
   gap: var(--space-3);
   border-top: 1px solid var(--border);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
 }
 

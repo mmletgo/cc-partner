@@ -6,11 +6,14 @@ cc-partner 以 **Workbench** 为核心：本机与远端项目、worktree、终�
 
 **固定局域网语义（无调用者身份校验）**：业务 API 不对 peer 做账号/配对/token 鉴权；合法 loopback/LAN 地址范围内的任何可达设备均可读取、写入和执行。系统不验证调用者身份。产品只有这一种局域网行为，不提供可切换的暴露/只读模式或逐设备权限。
 
+**核心体验入口**：`/` 仍是 GitHub Trending（探索）；“继续工作”进 `/workbench`。GUI 首次启动 LAN listener 前会展示本机地址候选、首选端口 62116（占用递增）、mDNS UDP 5353 与无身份校验风险并要求确认。侧栏按 Explore/Work/Knowledge/Connect/System 分组；普通小字对比度 ≥4.5:1（`--fg-muted-readable`）。
+
 ## 功能一览
 
 ### 1. Local-first 多设备 Workbench
 
 - 本机与局域网远端项目共用同一套 Workbench：项目、worktree、终端 session、文件树与 Git
+- 无项目时只展示聚焦空态 CTA；有项目未选中时提供“继续工作”启动摘要
 - 数据默认落在本机 `~/.cc-partner/`（可用 `CC_PARTNER_DATA_DIR` 绝对路径隔离）
 - 桌面端通过 Tauri 本地 IPC 驱动；跨设备能力走局域网 P2P，不依赖公网中转
 
@@ -18,7 +21,7 @@ cc-partner 以 **Workbench** 为核心：本机与远端项目、worktree、终�
 
 - 桌面/后端 HTTP 服务提供 `/mobile` 浏览器入口（合法 LAN peer 无访问 token；同一可达网络任意设备可读写执行）
 - 全局侧栏手机按钮展示可复制访问链接与二维码，并固定展示无身份校验风险提示
-- 可进入 worktree、terminal、files、git、prompt 与自动化面板；远端项目经本机代理到 owning device
+- 导航按 Projects / Attention / Work / Automation / More 分组；可进入 worktree、terminal、files、git、prompt 与自动化面板；远端项目经本机代理到 owning device
 
 ### 3. Orchestrator 自动编排与可见执行
 

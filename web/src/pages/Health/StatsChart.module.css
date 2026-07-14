@@ -43,7 +43,7 @@
   margin: 0;
   display: grid;
   place-items: center;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   border: 1px dashed var(--border-soft);
   border-radius: var(--radius-md);
   background: color-mix(in oklab, var(--surface) 78%, transparent);

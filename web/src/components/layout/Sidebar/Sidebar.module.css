@@ -38,5 +38,5 @@
   flex-direction: column;
   gap: var(--space-2);
   font-size: var(--text-sm);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }

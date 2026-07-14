@@ -106,7 +106,7 @@
 .projectSearchMeta {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .projectList {
@@ -162,7 +162,7 @@
 .projectPath {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -197,7 +197,7 @@
 .projectTime {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 /* ── 右栏：prompt 时间线 ── */
@@ -223,7 +223,7 @@
   flex: 0 0 auto;
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   letter-spacing: var(--tracking-wide);
   text-transform: uppercase;
 }
@@ -257,7 +257,7 @@
 
 .emptyHint {
   font-size: var(--text-sm);
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 /* ── toast ── */

@@ -69,6 +69,8 @@ export function useLanDisclosureStartup(): UseLanDisclosureStartupResult {
   }, []);
 
   useEffect(() => {
+    // mount bootstrap：主动拉取 disclosure 状态（fail-closed loading→required|pass|error）
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional mount load
     void loadStatus();
   }, [loadStatus]);
 

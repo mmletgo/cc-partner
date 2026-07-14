@@ -425,7 +425,7 @@
 
 .worktreeMeta,
 .worktreeEmpty {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
   white-space: nowrap;
 }
@@ -830,7 +830,7 @@
 
 .statusGrid dt,
 .pathInfoGrid dt {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
 }
 
@@ -892,7 +892,7 @@
 .gitActionBranch {
   min-width: 0;
   overflow: hidden;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   text-overflow: ellipsis;
@@ -966,7 +966,7 @@
 .mergeStageMessage {
   min-width: 0;
   overflow: hidden;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1049,14 +1049,14 @@
 
 .commitHash {
   min-width: 0;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
 }
 
 .commitTime,
 .commitMeta {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
   white-space: nowrap;
 }
@@ -1180,7 +1180,7 @@
 }
 
 .treeLoading {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .pathInfo {

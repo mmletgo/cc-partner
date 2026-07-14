@@ -242,12 +242,35 @@ async function installFoundationMocks(
         if (cmd === 'check_lan_firewall_dependency') {
           return {
             platform: 'macos',
+            platformLabel: 'macOS',
+            lanIp: '192.168.1.10',
             httpPort: 62116,
             mdnsPort: 5353,
-            lanIps: ['127.0.0.1'],
-            httpOpen: true,
-            mdnsOpen: true,
-            openMethods: [],
+            appPath: null,
+            checks: [
+              { id: 'httpListener', ok: true, detail: 'TCP 62116' },
+              { id: 'lanIp', ok: true, detail: '192.168.1.10' },
+              { id: 'tcpFirewall', ok: true, detail: 'TCP 62116' },
+              { id: 'mdnsFirewall', ok: true, detail: 'UDP 5353' },
+            ],
+            guidance: {
+              summaryKey: 'settings:lanFirewall.guidance.macos.summary',
+              steps: [],
+              commands: [],
+            },
+          };
+        }
+        if (cmd === 'get_runtime_diagnostics') {
+          return {
+            ownerInstanceId: 'owner-test',
+            generation: 1,
+            startedAt: '2026-07-14T00:00:00Z',
+            configFingerprint: 'fp-test',
+            cloudSyncPhase: 'idle',
+            terminalSessionCount: 0,
+            bridgeCount: 0,
+            bridges: [],
+            orchestrator: { latestTickAt: null, latestErrorClass: null },
           };
         }
         return undefined;
@@ -710,5 +733,72 @@ test.describe('frontend foundation smoke', () => {
     expect(layout!.footerTop).toBeGreaterThanOrEqual(layout!.contentBottom - 1);
     expect(['auto', 'scroll']).toContain(layout!.contentOverflowY);
     expect(layout!.contentMinHeight === '0px' || layout!.contentMinHeight === '0').toBe(true);
+  });
+
+  for (const viewport of [
+    { width: 1024, height: 768, name: '1024x768' },
+    { width: 1280, height: 720, name: '1280x720' },
+  ] as const) {
+    test(`home layout has no horizontal overflow at ${viewport.name}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await installFoundationMocks(page);
+      await page.goto('/');
+
+      const nav = page.getByRole('navigation', { name: '主导航' });
+      await expect(nav).toBeVisible({ timeout: 15_000 });
+
+      // 主导航与「继续工作」入口可键盘到达
+      await expect(nav.locator('a[href="/workbench"]').first()).toBeVisible();
+      const workbenchTabIndex = await nav
+        .locator('a[href="/workbench"]')
+        .first()
+        .evaluate((el) => (el as HTMLElement).tabIndex);
+      expect(workbenchTabIndex).toBeGreaterThanOrEqual(0);
+
+      const metrics = await page.evaluate(() => {
+        const doc = document.documentElement;
+        const body = document.body;
+        return {
+          scrollWidth: Math.max(doc.scrollWidth, body.scrollWidth),
+          clientWidth: doc.clientWidth,
+        };
+      });
+      expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth + 1);
+
+      const shotPath = testInfo.outputPath(`layout-home-${viewport.name}.png`);
+      await page.screenshot({ path: shotPath, fullPage: true });
+      await testInfo.attach(`layout-home-${viewport.name}`, {
+        path: shotPath,
+        contentType: 'image/png',
+      });
+    });
+  }
+
+  test('settings deep-linked tab scrolls inside tablist at 680px', async ({ page }) => {
+    await page.setViewportSize({ width: 680, height: 900 });
+    await installFoundationMocks(page);
+    await page.goto('/settings?tab=dependencies');
+
+    const tablist = page.getByRole('tablist');
+    await expect(tablist).toBeVisible({ timeout: 15_000 });
+    const active = tablist.getByRole('tab', { selected: true });
+    await expect(active).toBeVisible();
+    await expect(active).toHaveAttribute('id', /dependencies|settings-tab-dependencies/);
+
+    // shell 在 rAF + smooth scroll 后把深链 tab 滚进 tablist 视口
+    await expect
+      .poll(
+        async () =>
+          active.evaluate((el) => {
+            const tab = el as HTMLElement;
+            const list = tab.closest('[role="tablist"]') as HTMLElement | null;
+            if (!list) return false;
+            const tabBox = tab.getBoundingClientRect();
+            const listBox = list.getBoundingClientRect();
+            return tabBox.left >= listBox.left - 2 && tabBox.right <= listBox.right + 2;
+          }),
+        { timeout: 5_000 },
+      )
+      .toBe(true);
   });
 });

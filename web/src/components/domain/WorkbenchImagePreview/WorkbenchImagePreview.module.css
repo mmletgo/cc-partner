@@ -28,7 +28,7 @@
 }
 
 .metaItem dt {
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-weight: var(--weight-medium);
 }
 

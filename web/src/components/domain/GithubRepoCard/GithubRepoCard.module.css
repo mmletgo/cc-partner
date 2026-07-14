@@ -62,7 +62,7 @@
 
 .owner {
   margin: 0;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
