@@ -1,12 +1,14 @@
-//! net/routes/ssh_target_sync.rs — SSH 目标同步（legacy pull/push + v2 manifest/items/push-batch）
+//! net/routes/ssh_target_sync.rs — SSH 目标同步（legacy pull/push + v2 manifest/items/push-batch/ack-delete-epoch）
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     对端设备发起 SSH 目标同步时调用这些端点。legacy 路径保留；v2 无状态分页与 Prompt 同构，
-//!     主键为 host。`sync.manifest.v2` 由 Task 3 原子宣告。
+//!     主键为 host。exact equality 时无正文可推，改走 ack-delete-epoch 推进 watermark。
+//!     `sync.manifest.v2` 由 Task 3 原子宣告。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - POST /api/ssh-target/sync/pull|push：legacy。
 //!     - POST /api/ssh-target/sync/manifest-page|items|push-batch：有界 typed 协议。
+//!     - POST /api/ssh-target/sync/ack-delete-epoch：仅推进 peer watermark，无内容 upsert/ledger。
 
 use crate::error::AppError;
 use crate::models::ssh_target::SshTargetRow;
@@ -14,13 +16,12 @@ use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
 use crate::storage::SshTargetRepo;
-use crate::sync::apply_merge::apply_ssh_merge_batch;
+use crate::sync::apply_merge::{apply_ssh_merge_batch, apply_ssh_pull_items};
 use crate::sync::protocol::{
     content_sha256_hex, decode_keyset_cursor, encode_keyset_cursor, estimate_summary_wire_bytes,
     SyncManifestPage, SyncSummary, MANIFEST_PAGE_BYTES, MANIFEST_PAGE_ITEMS, PUSH_BATCH_BYTES,
     PUSH_BATCH_ITEMS,
 };
-use crate::sync::ssh_target::merge_ssh_target;
 use crate::sync::vector_clock::{compare, ClockOrder};
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
@@ -119,6 +120,21 @@ pub struct SshPushBatchReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshPushBatchResp {
     pub accepted: usize,
+}
+
+/// ack-delete-epoch 请求：仅携带 claimed 标签与待推进水位。
+#[derive(Debug, Deserialize)]
+pub struct SshAckDeleteEpochReq {
+    /// 收敛标签（**非**认证身份）；trim 后必须非空。
+    pub claimed_device_id: String,
+    /// 完整 manifest + 成功 apply 后客户端回传的最高连续 ackedDeleteEpoch。
+    pub acked_delete_epoch: u64,
+}
+
+/// ack-delete-epoch 响应：固定 `{ok:true}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshAckDeleteEpochResp {
+    pub ok: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -331,40 +347,28 @@ pub async fn ssh_target_sync_push(
     Ok(Json(SshSyncPushResp { accepted }))
 }
 
-/// ssh_target_sync_push 业务实现：逐条合并后落库，返回实际落库条数。
+/// ssh_target_sync_push 业务实现：经 apply_ssh_pull_items 落库，保留 conflict。
+///
+/// Business Logic: legacy push 不得 merge+bulk_upsert 静默丢并发 loser。
+/// Code Logic: remotes → apply_ssh_pull_items → accepted。
 async fn ssh_target_sync_push_impl(
     state: &AppState,
     req: SshSyncPushReq,
 ) -> Result<usize, AppError> {
-    let mut to_upsert: Vec<SshTargetRow> = Vec::new();
-
-    for remote in req.targets {
-        let local = state.ssh_target_repo.get(&remote.host).await?;
-        match local {
-            None => {
-                to_upsert.push(remote);
-            }
-            Some(local_row) => {
-                let merged = merge_ssh_target(&local_row, &remote);
-                if merged.vector_clock != local_row.vector_clock
-                    || merged.updated_at != local_row.updated_at
-                    || merged.username != local_row.username
-                    || merged.port != local_row.port
-                    || merged.label != local_row.label
-                    || merged.deleted != local_row.deleted
-                {
-                    to_upsert.push(merged);
-                }
-            }
-        }
+    if req.targets.is_empty() {
+        return Ok(0);
     }
-
-    let accepted = to_upsert.len();
-    if !to_upsert.is_empty() {
-        state.ssh_target_repo.bulk_upsert(&to_upsert).await?;
-    }
-
-    tracing::info!("ssh-target/sync/push: 接收并落库 {} 条 SSH 目标", accepted);
+    let accepted = apply_ssh_pull_items(
+        &state.ssh_target_repo.pool(),
+        state.maintenance_gate.as_ref(),
+        state.ssh_target_repo.as_ref(),
+        &req.targets,
+    )
+    .await?;
+    tracing::info!(
+        "ssh-target/sync/push: 接收并落库 {} 条 SSH 目标 (apply_merge)",
+        accepted
+    );
     Ok(accepted)
 }
 
@@ -591,6 +595,60 @@ async fn ssh_push_batch_impl(
     .await
     .map_err(RouteFail::from)?;
     Ok(outcome.accepted)
+}
+
+/// POST /api/ssh-target/sync/ack-delete-epoch：仅推进 watermark，不写内容。
+///
+/// Business Logic（为什么需要这个函数）:
+///     exact equality 或本轮无正文可推时，客户端仍需告知对端“已完整看到远端删除 epoch”，
+///     以便对端安全 GC tombstone；禁止再发空 push-batch。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 claimed_device_id 非空 → ensure watermark schema → 用 repo pool/gate 构造
+///     SyncWatermarkRepo → advance_ack(DOMAIN_SSH_TARGET)；无 items upsert / 无 content ledger claim。
+pub async fn ssh_ack_delete_epoch(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<SshAckDeleteEpochReq>,
+) -> P2pResult<Json<SshAckDeleteEpochResp>> {
+    ssh_ack_delete_epoch_impl(state.ssh_target_repo.as_ref(), req)
+        .await
+        .map_err(|e| e.into_p2p(&ctx, "ssh_target.ack_delete_epoch"))?;
+    Ok(Json(SshAckDeleteEpochResp { ok: true }))
+}
+
+/// SSH ack-delete-epoch 业务实现（可单测）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     把校验与 watermark 推进从 axum handler 抽出，便于无 HTTP 的 unit test 直接覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     trim claimed_device_id；空 → Validation；否则 ensure_schema + with_gate + advance_ack。
+async fn ssh_ack_delete_epoch_impl(
+    repo: &SshTargetRepo,
+    req: SshAckDeleteEpochReq,
+) -> Result<(), RouteFail> {
+    let claimed = req.claimed_device_id.trim().to_string();
+    if claimed.is_empty() {
+        return Err(RouteFail::Validation(
+            "claimed_device_id 不能为空".to_string(),
+        ));
+    }
+    let pool = repo.pool();
+    crate::storage::sync_watermark_repo::SyncWatermarkRepo::ensure_schema(&pool)
+        .await
+        .map_err(RouteFail::from)?;
+    let wm = crate::storage::sync_watermark_repo::SyncWatermarkRepo::with_gate(pool, repo.gate());
+    let now = chrono::Utc::now().to_rfc3339();
+    wm.advance_ack(
+        &claimed,
+        crate::storage::sync_request_ledger_repo::DOMAIN_SSH_TARGET,
+        req.acked_delete_epoch,
+        &now,
+    )
+    .await
+    .map_err(RouteFail::from)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

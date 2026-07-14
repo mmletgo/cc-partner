@@ -10,18 +10,18 @@
 //!     3. 对端支持 `sync.manifest.v2` 时走 plan 路径，否则 legacy 仍返回 typed 失败；
 //!     4. 仅全领域 Succeeded 的设备计入 `succeeded_devices`/`synced`。
 
+use crate::error::AppError;
 use crate::models::claude_md::ClaudeMdRow;
 use crate::models::prompt::PromptRow;
 use crate::net::peer_client::PeerCallError;
 use crate::net::protocol::CAPABILITY_SYNC_MANIFEST_V2;
 use crate::state::AppState;
 use crate::sync::apply_merge::apply_prompt_pull_items;
-use crate::sync::merger::merge_prompt;
 use crate::sync::protocol::{
     compute_sync_plan, content_sha256_hex, decide_acked_delete_epoch, estimate_summary_wire_bytes,
     max_delete_epoch_from_summaries, validate_manifest_page_bounds, validate_page_not_truncated,
-    ManifestStreamState, SyncDomainOutcome, SyncManifestPage, SyncSummary, TransportClass,
-    PUSH_BATCH_ITEMS,
+    ManifestStreamState, SyncDomainOutcome, SyncItemFailure, SyncManifestPage, SyncSummary,
+    TransportClass, PUSH_BATCH_ITEMS,
 };
 use crate::sync::vector_clock::{compare, ClockOrder};
 use futures_util::{stream, StreamExt};
@@ -393,7 +393,40 @@ pub async fn trigger_sync(state: &AppState) -> SyncRunResult {
         result.succeeded_devices,
         result.devices.len()
     );
+    // 水位可能在本轮 ack 推进；best-effort 跑 tombstone GC（失败仅 warn）
+    if let Err(e) = run_tombstone_gc_best_effort(state).await {
+        tracing::warn!("同步后 tombstone GC 失败: {e}");
+    }
     result
+}
+
+/// 收集三域 deleted tombstone 并运行生产 GC。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Spec §4.4 要求 age≥30d + 活跃 peer ack 后把完整 tombstone 压成 deletion floor；
+///     同步结束与后台 tick 必须调用，禁止只在单测中 compact。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `DeletionFloorRepo::run_production_tombstone_gc`（内部收集候选 +
+///     age/ack 门闸 + 同事务 floor upsert 与 DELETE tombstone）。
+pub async fn run_tombstone_gc_best_effort(state: &AppState) -> Result<usize, AppError> {
+    use crate::storage::deletion_floor_repo::DeletionFloorRepo;
+    use crate::storage::sync_watermark_repo::SyncWatermarkRepo;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let floors =
+        DeletionFloorRepo::with_gate(state.db.clone(), state.maintenance_gate.clone());
+    let watermarks =
+        SyncWatermarkRepo::with_gate(state.db.clone(), state.maintenance_gate.clone());
+    let result = floors.run_production_tombstone_gc(&watermarks, &now).await?;
+    if result.deleted > 0 {
+        tracing::info!(
+            "tombstone GC: compacted={} skipped={}",
+            result.deleted,
+            result.skipped
+        );
+    }
+    Ok(result.deleted)
 }
 
 /// 与单设备同步三个领域，并附加 CC 历史（不计 domain 报告）。
@@ -472,7 +505,7 @@ async fn prompt_sync_with_peer(
 ///
 /// Business Logic: exact equality 零正文；batch 有界；失败 typed；仅完整+成功后 ack delete 水位。
 /// Code Logic: 拉远端页 → 本地摘要排序 → compute_sync_plan → fetch/merge/push；
-///     末批 push 或空 push 携带 acked_delete_epoch。
+///     有正文时末批 push 可携带 acked_delete_epoch；无正文时改走专用 ack-delete-epoch 路由。
 async fn prompt_sync_v2(
     state: &AppState,
     device: &crate::models::device::Device,
@@ -514,7 +547,7 @@ async fn prompt_sync_v2(
     let mut pulled: u32 = 0;
     let mut pushed: u32 = 0;
 
-    // fetch + merge（中途失败不得 ack）
+    // fetch + merge（中途失败：已 applied>0 报 Partial，不得 ack）
     for chunk in plan.fetch_from_remote.chunks(PUSH_BATCH_ITEMS) {
         if chunk.is_empty() {
             continue;
@@ -522,7 +555,13 @@ async fn prompt_sync_v2(
         let ids: Vec<String> = chunk.to_vec();
         let resp = match state.peer_client.fetch_prompt_items(base_url, &ids).await {
             Ok(r) => r,
-            Err(e) => return peer_error_to_domain_outcome(&e),
+            Err(e) => {
+                let applied = pulled.saturating_add(pushed);
+                if applied > 0 {
+                    return mid_batch_fail_outcome(applied, format!("fetch_failed:{e}"));
+                }
+                return peer_error_to_domain_outcome(&e);
+            }
         };
         if !resp.items.is_empty() {
             match apply_prompt_pull_items(
@@ -544,9 +583,10 @@ async fn prompt_sync_v2(
                     }
                 }
                 Err(e) => {
-                    return SyncDomainOutcome::ProtocolError {
-                        code: format!("apply_merge_failed:{e}"),
-                    };
+                    return mid_batch_fail_outcome(
+                        pulled.saturating_add(pushed),
+                        format!("apply_merge_failed:{e}"),
+                    );
                 }
             }
         }
@@ -572,14 +612,19 @@ async fn prompt_sync_v2(
     }
 
     if batches.is_empty() {
-        // 无正文可推：空 push-batch 仅推进对端 watermark
-        let req_id = Uuid::new_v4().to_string();
-        if let Err(e) = state
-            .peer_client
-            .push_prompt_batch(base_url, &[], &req_id, claimed, ack_epoch)
-            .await
-        {
-            return peer_error_to_domain_outcome(&e);
+        // 无正文可推：专用 ack-delete-epoch（禁止空 push-batch）
+        if let Some(epoch) = ack_epoch {
+            if let Err(e) = state
+                .peer_client
+                .ack_prompt_delete_epoch(base_url, claimed, epoch)
+                .await
+            {
+                let applied = pulled.saturating_add(pushed);
+                if applied > 0 {
+                    return mid_batch_fail_outcome(applied, format!("ack_failed:{e}"));
+                }
+                return peer_error_to_domain_outcome(&e);
+            }
         }
     } else {
         let last = batches.len() - 1;
@@ -600,7 +645,13 @@ async fn prompt_sync_v2(
                         resp.accepted
                     );
                 }
-                Err(e) => return peer_error_to_domain_outcome(&e),
+                Err(e) => {
+                    let applied = pulled.saturating_add(pushed);
+                    if applied > 0 {
+                        return mid_batch_fail_outcome(applied, format!("push_failed:{e}"));
+                    }
+                    return peer_error_to_domain_outcome(&e);
+                }
             }
         }
     }
@@ -614,8 +665,9 @@ async fn prompt_sync_v2(
 
 /// Prompt legacy 路径（typed）：使用 Result 语义，push 失败不计成功。
 ///
-/// Business Logic: 旧对端无 v2 时仍可同步，但 transport 失败不得空成功。
-/// Code Logic: sync_pull_result / sync_push_result；失败映射 SyncDomainOutcome。
+/// Business Logic: 旧对端无 v2 时仍可同步，但 transport 失败不得空成功；
+///     本地 apply 必须保留 conflict 副本，禁止 merge+bulk_upsert 静默丢 loser。
+/// Code Logic: sync_pull_result → apply_prompt_pull_items；再 push_result。
 async fn prompt_sync_legacy_typed(
     state: &AppState,
     device: &crate::models::device::Device,
@@ -643,42 +695,32 @@ async fn prompt_sync_legacy_typed(
         Err(e) => return peer_error_to_domain_outcome(&e),
     };
 
-    let mut prompts_to_upsert: Vec<PromptRow> = Vec::new();
-    for remote in &remote_prompts {
-        let local_row = match state.prompt_repo.get(&remote.id).await {
-            Ok(v) => v,
-            Err(e) => {
-                return SyncDomainOutcome::ProtocolError {
-                    code: format!("local_get_failed:{e}"),
-                };
-            }
-        };
-        match local_row {
-            None => prompts_to_upsert.push(remote.clone()),
-            Some(local_row) => {
-                let merged = merge_prompt(&local_row, remote);
-                if merged.vector_clock != local_row.vector_clock
-                    || merged.updated_at != local_row.updated_at
-                    || merged.content != local_row.content
-                    || merged.title != local_row.title
-                    || merged.deleted != local_row.deleted
-                {
-                    prompts_to_upsert.push(merged);
+    let mut pulled: u32 = 0;
+    if !remote_prompts.is_empty() {
+        match apply_prompt_pull_items(
+            &state.prompt_repo.pool(),
+            state.maintenance_gate.as_ref(),
+            state.prompt_repo.as_ref(),
+            &remote_prompts,
+        )
+        .await
+        {
+            Ok(n) => {
+                pulled = n as u32;
+                if n > 0 {
+                    tracing::info!(
+                        "从 {} 拉取并更新了 {} 条 prompt (legacy apply_merge)",
+                        device.name,
+                        n
+                    );
                 }
             }
+            Err(e) => {
+                return SyncDomainOutcome::ProtocolError {
+                    code: format!("apply_merge_failed:{e}"),
+                };
+            }
         }
-    }
-
-    let mut pulled: u32 = 0;
-    if !prompts_to_upsert.is_empty() {
-        let n = prompts_to_upsert.len() as u32;
-        if let Err(e) = state.prompt_repo.bulk_upsert(&prompts_to_upsert).await {
-            return SyncDomainOutcome::ProtocolError {
-                code: format!("bulk_upsert_failed:{e}"),
-            };
-        }
-        pulled = n;
-        tracing::info!("从 {} 拉取并更新了 {} 条 prompt (legacy)", device.name, n);
     }
 
     let remote_ids: std::collections::HashSet<String> =
@@ -746,6 +788,29 @@ async fn prompt_sync_legacy_typed(
     }
 }
 
+/// 多批中途失败时：已应用 >0 则 Partial，否则 ProtocolError。
+///
+/// Business Logic（为什么需要这个函数）:
+///     v2 多批 fetch/push 若前批已成功写入/对端已 accepted，后批失败不得伪装全失败或全成功。
+///
+/// Code Logic（这个函数做什么）:
+///     applied>0 → Partial{applied, failed:[mid_batch_fail]}；否则 ProtocolError{code}。
+pub fn mid_batch_fail_outcome(applied: u32, code: impl Into<String>) -> SyncDomainOutcome {
+    let code = code.into();
+    if applied > 0 {
+        SyncDomainOutcome::Partial {
+            applied,
+            failed: vec![SyncItemFailure {
+                id: "*".to_string(),
+                code: code.clone(),
+                message: code,
+            }],
+        }
+    } else {
+        SyncDomainOutcome::ProtocolError { code }
+    }
+}
+
 /// 将本机 CLAUDE.md 版本推送给所有在线对端，不执行远端 pull。
 ///
 /// Business Logic: CLAUDE.md 页手动推送，不先 pull 覆盖本机。
@@ -802,6 +867,30 @@ mod tests {
     //! engine 聚合与真值计数测试（无网络）。
 
     use super::*;
+
+    #[test]
+    fn mid_batch_fail_emits_partial_when_applied_positive() {
+        let o = mid_batch_fail_outcome(3, "push_failed:timeout");
+        match o {
+            SyncDomainOutcome::Partial { applied, failed } => {
+                assert_eq!(applied, 3);
+                assert_eq!(failed.len(), 1);
+                assert_eq!(failed[0].code, "push_failed:timeout");
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mid_batch_fail_emits_protocol_error_when_applied_zero() {
+        let o = mid_batch_fail_outcome(0, "fetch_failed:net");
+        match o {
+            SyncDomainOutcome::ProtocolError { code } => {
+                assert_eq!(code, "fetch_failed:net");
+            }
+            other => panic!("expected ProtocolError, got {other:?}"),
+        }
+    }
 
     /// 构造 Succeeded 领域报告。
     fn ok_domain(domain: &str) -> DomainSyncReport {
@@ -990,5 +1079,25 @@ mod tests {
         assert_eq!(device.domains[1].domain, DOMAIN_SSH_TARGET);
         assert_eq!(device.domains[2].domain, DOMAIN_SCRATCHPAD);
         assert_eq!(device.status, DeviceSyncStatus::Succeeded);
+    }
+
+    /// mixed-version：v2 客户端对 legacy 对端只走 legacy Prompt 路由。
+    #[tokio::test]
+    async fn content_sync_mixed_version_v2_to_legacy_only_legacy() {
+        crate::sync::mixed_version_harness::assert_v2_client_to_legacy_peer_uses_only_legacy_routes()
+            .await;
+    }
+
+    /// mixed-version：legacy pull 失败必须 typed，不得空成功。
+    #[tokio::test]
+    async fn content_sync_mixed_version_legacy_failure_typed() {
+        crate::sync::mixed_version_harness::assert_legacy_peer_network_failure_is_typed_not_empty_success()
+            .await;
+    }
+
+    /// mixed-version：v2 对端走 manifest 路径。
+    #[tokio::test]
+    async fn content_sync_mixed_version_v2_peer_uses_manifest() {
+        crate::sync::mixed_version_harness::assert_v2_peer_uses_manifest_routes().await;
     }
 }

@@ -16,7 +16,9 @@ use crate::models::prompt::PromptRow;
 use crate::models::scratchpad::ScratchpadRow;
 use crate::models::ssh_target::SshTargetRow;
 use crate::storage::content_version_repo::{ContentVersionRepo, KIND_CONFLICT};
-use crate::storage::deletion_floor_repo::{DeletionFloorDecision, DeletionFloorRepo};
+use crate::storage::deletion_floor_repo::{
+    DeletionFloor, DeletionFloorDecision, DeletionFloorRepo,
+};
 use crate::storage::maintenance_gate::{begin_shared_write, DatabaseMaintenanceGate};
 use crate::storage::sync_delete_sequence_repo::SyncDeleteSequenceRepo;
 use crate::storage::sync_request_ledger_repo::{
@@ -188,17 +190,16 @@ pub struct ScratchpadMergePlan {
 ///     离线 peer 带旧 live 不得复活已压缩删除；并发 floor 时 active 仍 delete-wins 但保留 history。
 ///
 /// Code Logic（这个函数做什么）:
-///     查 floor → 决策 → 无 local 则 remote 为 winner；有 local 则 merge_prompt_with_conflicts。
-pub async fn plan_prompt_item(
-    pool: &SqlitePool,
+///     纯决策：调用方已在写事务内读出 local + floor，本函数无 pool I/O。
+pub fn plan_prompt_item(
     local: Option<&PromptRow>,
     remote: &PromptRow,
+    floor: Option<&DeletionFloor>,
     now: &str,
 ) -> Result<(Option<PromptRow>, Vec<ContentVersionDraft>), AppError> {
-    let floors = DeletionFloorRepo::new(pool.clone());
     if !remote.deleted {
-        if let Some(floor) = floors.get(DOMAIN_PROMPTS, &remote.id).await? {
-            match DeletionFloorRepo::apply_deletion_floor(&floor, &remote.vector_clock) {
+        if let Some(floor) = floor {
+            match DeletionFloorRepo::apply_deletion_floor(floor, &remote.vector_clock) {
                 DeletionFloorDecision::DeleteWins => {
                     if let Some(local_row) = local {
                         if local_row.deleted {
@@ -293,21 +294,28 @@ pub async fn plan_prompt_item(
     }
 }
 
-/// 构建一批 remote Prompt 的 merge 计划。
+/// 在写事务内构建一批 remote Prompt 的 merge 计划。
 ///
-/// Business Logic: push-batch 在进事务前完成所有读侧 floor/local 决策。
-/// Code Logic: 逐条 plan_prompt_item 聚合 winners/conflicts。
-pub async fn build_prompt_merge_plan(
-    pool: &SqlitePool,
-    repo: &PromptRepo,
+/// Business Logic（为什么需要这个函数）:
+///     plan 与 write 必须共用同一事务快照；禁止事务外 pool 读 local/floor。
+///
+/// Code Logic（这个函数做什么）:
+///     逐条 `get_on_tx` local；live remote 再 `DeletionFloorRepo::get_on_tx`；调用 plan_prompt_item。
+pub async fn build_prompt_merge_plan_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
     remotes: &[PromptRow],
     now: &str,
 ) -> Result<PromptMergePlan, AppError> {
     let mut winners = Vec::new();
     let mut conflicts = Vec::new();
     for remote in remotes {
-        let local = repo.get(&remote.id).await?;
-        let (winner, cfs) = plan_prompt_item(pool, local.as_ref(), remote, now).await?;
+        let local = PromptRepo::get_on_tx(tx, &remote.id).await?;
+        let floor = if !remote.deleted {
+            DeletionFloorRepo::get_on_tx(tx, DOMAIN_PROMPTS, &remote.id).await?
+        } else {
+            None
+        };
+        let (winner, cfs) = plan_prompt_item(local.as_ref(), remote, floor.as_ref(), now)?;
         if let Some(w) = winner {
             winners.push(w);
         }
@@ -353,7 +361,8 @@ pub async fn write_prompt_merge_on_tx(
 ///     HTTP push-batch 与测试共用同一事务边界：active/conflict/epoch/ledger/ack 全有或全无。
 ///
 /// Code Logic（这个函数做什么）:
-///     ensure schemas → build plan → apply_batch_idempotent 内 write + optional advance_ack_on_tx。
+///     ensure schemas → apply_batch_idempotent 内 plan_on_tx + write + optional advance_ack_on_tx。
+///     禁止事务外 plan（max_connections(1) 与持有 tx 冲突）。
 pub async fn apply_prompt_merge_batch(
     pool: &SqlitePool,
     repo: &PromptRepo,
@@ -366,11 +375,11 @@ pub async fn apply_prompt_merge_batch(
     ensure_sync_schemas(pool).await?;
 
     let now = Utc::now().to_rfc3339();
-    let plan = build_prompt_merge_plan(pool, repo, remotes, &now).await?;
     // ledger 必须与域 repo 共享同一 maintenance gate，避免 restore exclusive 被旁路。
     let ledger = SyncRequestLedgerRepo::with_gate(pool.clone(), repo.gate());
     let claimed = claimed_device_id.to_string();
     let now_for_tx = now.clone();
+    let remotes = remotes.to_vec();
 
     ledger
         .apply_batch_idempotent(
@@ -379,10 +388,11 @@ pub async fn apply_prompt_merge_batch(
             client_request_id,
             payload_hash,
             |tx| {
-                let plan = plan.clone();
+                let remotes = remotes.clone();
                 let claimed = claimed.clone();
                 let now_for_tx = now_for_tx.clone();
                 async move {
+                    let plan = build_prompt_merge_plan_on_tx(tx, &remotes, &now_for_tx).await?;
                     let accepted = write_prompt_merge_on_tx(tx, &plan).await?;
                     if let Some(epoch) = acked_delete_epoch {
                         if !claimed.is_empty() {
@@ -410,17 +420,17 @@ pub async fn apply_prompt_merge_batch(
 ///     引擎从对端拉取正文后也需与 push-batch 同形状落库，避免静默丢 conflict。
 ///
 /// Code Logic（这个函数做什么）:
-///     build plan → begin_shared_write → write_prompt_merge_on_tx → commit；返回 accepted。
+///     begin_shared_write 先 → plan_on_tx → write → commit；禁止事务外 plan。
 pub async fn apply_prompt_pull_items(
     pool: &SqlitePool,
     gate: &DatabaseMaintenanceGate,
-    repo: &PromptRepo,
+    _repo: &PromptRepo,
     remotes: &[PromptRow],
 ) -> Result<usize, AppError> {
     ensure_sync_schemas(pool).await?;
     let now = Utc::now().to_rfc3339();
-    let plan = build_prompt_merge_plan(pool, repo, remotes, &now).await?;
     let (_permit, mut tx) = begin_shared_write(pool, gate).await?;
+    let plan = build_prompt_merge_plan_on_tx(&mut tx, remotes, &now).await?;
     let accepted = write_prompt_merge_on_tx(&mut tx, &plan).await?;
     tx.commit().await?;
     Ok(accepted)
@@ -436,17 +446,16 @@ pub async fn apply_prompt_pull_items(
 ///     与 Prompt 同语义：floor 拒绝旧 live 复活；并发保留 conflict。
 ///
 /// Code Logic（这个函数做什么）:
-///     floor 决策 + merge_ssh_with_conflicts；item_id=host。
-pub async fn plan_ssh_item(
-    pool: &SqlitePool,
+///     纯决策：调用方已在写事务内读出 local + floor；item_id=host。
+pub fn plan_ssh_item(
     local: Option<&SshTargetRow>,
     remote: &SshTargetRow,
+    floor: Option<&DeletionFloor>,
     now: &str,
 ) -> Result<(Option<SshTargetRow>, Vec<ContentVersionDraft>), AppError> {
-    let floors = DeletionFloorRepo::new(pool.clone());
     if !remote.deleted {
-        if let Some(floor) = floors.get(DOMAIN_SSH_TARGET, &remote.host).await? {
-            match DeletionFloorRepo::apply_deletion_floor(&floor, &remote.vector_clock) {
+        if let Some(floor) = floor {
+            match DeletionFloorRepo::apply_deletion_floor(floor, &remote.vector_clock) {
                 DeletionFloorDecision::DeleteWins => {
                     if let Some(local_row) = local {
                         if local_row.deleted {
@@ -536,21 +545,28 @@ pub async fn plan_ssh_item(
     }
 }
 
-/// 构建一批 remote SSH 的 merge 计划。
+/// 在写事务内构建一批 remote SSH 的 merge 计划。
 ///
-/// Business Logic: push-batch 读侧决策与 Prompt 同构。
-/// Code Logic: 逐条 plan_ssh_item。
-pub async fn build_ssh_merge_plan(
-    pool: &SqlitePool,
-    repo: &SshTargetRepo,
+/// Business Logic（为什么需要这个函数）:
+///     plan 与 write 共用同一事务快照，禁止事务外 pool 读。
+///
+/// Code Logic（这个函数做什么）:
+///     逐条 get_on_tx local；live remote 再 floor get_on_tx；plan_ssh_item。
+pub async fn build_ssh_merge_plan_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
     remotes: &[SshTargetRow],
     now: &str,
 ) -> Result<SshMergePlan, AppError> {
     let mut winners = Vec::new();
     let mut conflicts = Vec::new();
     for remote in remotes {
-        let local = repo.get(&remote.host).await?;
-        let (winner, cfs) = plan_ssh_item(pool, local.as_ref(), remote, now).await?;
+        let local = SshTargetRepo::get_on_tx(tx, &remote.host).await?;
+        let floor = if !remote.deleted {
+            DeletionFloorRepo::get_on_tx(tx, DOMAIN_SSH_TARGET, &remote.host).await?
+        } else {
+            None
+        };
+        let (winner, cfs) = plan_ssh_item(local.as_ref(), remote, floor.as_ref(), now)?;
         if let Some(w) = winner {
             winners.push(w);
         }
@@ -591,7 +607,7 @@ pub async fn write_ssh_merge_on_tx(
 ///     SSH push-batch 与 Prompt 同事务语义。
 ///
 /// Code Logic（这个函数做什么）:
-///     ensure → plan → ledger 内 write + optional advance_ack_on_tx。
+///     ensure → ledger 内 plan_on_tx + write + optional advance_ack_on_tx。
 pub async fn apply_ssh_merge_batch(
     pool: &SqlitePool,
     repo: &SshTargetRepo,
@@ -603,11 +619,11 @@ pub async fn apply_ssh_merge_batch(
 ) -> Result<SyncBatchOutcome, AppError> {
     ensure_sync_schemas(pool).await?;
     let now = Utc::now().to_rfc3339();
-    let plan = build_ssh_merge_plan(pool, repo, remotes, &now).await?;
     // ledger 必须与域 repo 共享同一 maintenance gate，避免 restore exclusive 被旁路。
     let ledger = SyncRequestLedgerRepo::with_gate(pool.clone(), repo.gate());
     let claimed = claimed_device_id.to_string();
     let now_for_tx = now.clone();
+    let remotes = remotes.to_vec();
 
     ledger
         .apply_batch_idempotent(
@@ -616,10 +632,11 @@ pub async fn apply_ssh_merge_batch(
             client_request_id,
             payload_hash,
             |tx| {
-                let plan = plan.clone();
+                let remotes = remotes.clone();
                 let claimed = claimed.clone();
                 let now_for_tx = now_for_tx.clone();
                 async move {
+                    let plan = build_ssh_merge_plan_on_tx(tx, &remotes, &now_for_tx).await?;
                     let accepted = write_ssh_merge_on_tx(tx, &plan).await?;
                     if let Some(epoch) = acked_delete_epoch {
                         if !claimed.is_empty() {
@@ -647,17 +664,17 @@ pub async fn apply_ssh_merge_batch(
 ///     引擎拉取 SSH 正文后需与 push-batch 同形状落库，避免静默丢 conflict。
 ///
 /// Code Logic（这个函数做什么）:
-///     build plan → begin_shared_write → write_ssh_merge_on_tx → commit。
+///     begin_shared_write 先 → plan_on_tx → write → commit。
 pub async fn apply_ssh_pull_items(
     pool: &SqlitePool,
     gate: &DatabaseMaintenanceGate,
-    repo: &SshTargetRepo,
+    _repo: &SshTargetRepo,
     remotes: &[SshTargetRow],
 ) -> Result<usize, AppError> {
     ensure_sync_schemas(pool).await?;
     let now = Utc::now().to_rfc3339();
-    let plan = build_ssh_merge_plan(pool, repo, remotes, &now).await?;
     let (_permit, mut tx) = begin_shared_write(pool, gate).await?;
+    let plan = build_ssh_merge_plan_on_tx(&mut tx, remotes, &now).await?;
     let accepted = write_ssh_merge_on_tx(&mut tx, &plan).await?;
     tx.commit().await?;
     Ok(accepted)
@@ -673,17 +690,16 @@ pub async fn apply_ssh_pull_items(
 ///     与 Prompt/SSH 同语义的删除 floor 与 conflict 保留。
 ///
 /// Code Logic（这个函数做什么）:
-///     floor 决策 + merge_scratchpad_with_conflicts。
-pub async fn plan_scratchpad_item(
-    pool: &SqlitePool,
+///     纯决策：调用方已在写事务内读出 local + floor。
+pub fn plan_scratchpad_item(
     local: Option<&ScratchpadRow>,
     remote: &ScratchpadRow,
+    floor: Option<&DeletionFloor>,
     now: &str,
 ) -> Result<(Option<ScratchpadRow>, Vec<ContentVersionDraft>), AppError> {
-    let floors = DeletionFloorRepo::new(pool.clone());
     if !remote.deleted {
-        if let Some(floor) = floors.get(DOMAIN_SCRATCHPAD, &remote.id).await? {
-            match DeletionFloorRepo::apply_deletion_floor(&floor, &remote.vector_clock) {
+        if let Some(floor) = floor {
+            match DeletionFloorRepo::apply_deletion_floor(floor, &remote.vector_clock) {
                 DeletionFloorDecision::DeleteWins => {
                     if let Some(local_row) = local {
                         if local_row.deleted {
@@ -772,21 +788,28 @@ pub async fn plan_scratchpad_item(
     }
 }
 
-/// 构建一批 remote Scratchpad 的 merge 计划。
+/// 在写事务内构建一批 remote Scratchpad 的 merge 计划。
 ///
-/// Business Logic: push-batch 读侧决策与 Prompt 同构。
-/// Code Logic: 逐条 plan_scratchpad_item。
-pub async fn build_scratchpad_merge_plan(
-    pool: &SqlitePool,
-    repo: &ScratchpadRepo,
+/// Business Logic（为什么需要这个函数）:
+///     plan 与 write 共用同一事务快照，禁止事务外 pool 读。
+///
+/// Code Logic（这个函数做什么）:
+///     逐条 get_on_tx local；live remote 再 floor get_on_tx；plan_scratchpad_item。
+pub async fn build_scratchpad_merge_plan_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
     remotes: &[ScratchpadRow],
     now: &str,
 ) -> Result<ScratchpadMergePlan, AppError> {
     let mut winners = Vec::new();
     let mut conflicts = Vec::new();
     for remote in remotes {
-        let local = repo.get(&remote.id).await?;
-        let (winner, cfs) = plan_scratchpad_item(pool, local.as_ref(), remote, now).await?;
+        let local = ScratchpadRepo::get_on_tx(tx, &remote.id).await?;
+        let floor = if !remote.deleted {
+            DeletionFloorRepo::get_on_tx(tx, DOMAIN_SCRATCHPAD, &remote.id).await?
+        } else {
+            None
+        };
+        let (winner, cfs) = plan_scratchpad_item(local.as_ref(), remote, floor.as_ref(), now)?;
         if let Some(w) = winner {
             winners.push(w);
         }
@@ -827,7 +850,7 @@ pub async fn write_scratchpad_merge_on_tx(
 ///     Scratchpad push-batch 与 Prompt 同事务语义。
 ///
 /// Code Logic（这个函数做什么）:
-///     ensure → plan → ledger 内 write + optional advance_ack_on_tx。
+///     ensure → ledger 内 plan_on_tx + write + optional advance_ack_on_tx。
 pub async fn apply_scratchpad_merge_batch(
     pool: &SqlitePool,
     repo: &ScratchpadRepo,
@@ -839,11 +862,11 @@ pub async fn apply_scratchpad_merge_batch(
 ) -> Result<SyncBatchOutcome, AppError> {
     ensure_sync_schemas(pool).await?;
     let now = Utc::now().to_rfc3339();
-    let plan = build_scratchpad_merge_plan(pool, repo, remotes, &now).await?;
     // ledger 必须与域 repo 共享同一 maintenance gate，避免 restore exclusive 被旁路。
     let ledger = SyncRequestLedgerRepo::with_gate(pool.clone(), repo.gate());
     let claimed = claimed_device_id.to_string();
     let now_for_tx = now.clone();
+    let remotes = remotes.to_vec();
 
     ledger
         .apply_batch_idempotent(
@@ -852,10 +875,11 @@ pub async fn apply_scratchpad_merge_batch(
             client_request_id,
             payload_hash,
             |tx| {
-                let plan = plan.clone();
+                let remotes = remotes.clone();
                 let claimed = claimed.clone();
                 let now_for_tx = now_for_tx.clone();
                 async move {
+                    let plan = build_scratchpad_merge_plan_on_tx(tx, &remotes, &now_for_tx).await?;
                     let accepted = write_scratchpad_merge_on_tx(tx, &plan).await?;
                     if let Some(epoch) = acked_delete_epoch {
                         if !claimed.is_empty() {
@@ -905,17 +929,17 @@ async fn ensure_sync_schemas(pool: &SqlitePool) -> Result<(), AppError> {
 ///     引擎拉取速记本正文后需与 push-batch 同形状落库。
 ///
 /// Code Logic（这个函数做什么）:
-///     build plan → begin_shared_write → write_scratchpad_merge_on_tx → commit。
+///     begin_shared_write 先 → plan_on_tx → write → commit。
 pub async fn apply_scratchpad_pull_items(
     pool: &SqlitePool,
     gate: &DatabaseMaintenanceGate,
-    repo: &ScratchpadRepo,
+    _repo: &ScratchpadRepo,
     remotes: &[ScratchpadRow],
 ) -> Result<usize, AppError> {
     ensure_sync_schemas(pool).await?;
     let now = Utc::now().to_rfc3339();
-    let plan = build_scratchpad_merge_plan(pool, repo, remotes, &now).await?;
     let (_permit, mut tx) = begin_shared_write(pool, gate).await?;
+    let plan = build_scratchpad_merge_plan_on_tx(&mut tx, remotes, &now).await?;
     let accepted = write_scratchpad_merge_on_tx(&mut tx, &plan).await?;
     tx.commit().await?;
     Ok(accepted)
@@ -1078,5 +1102,52 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(wm.acked_delete_epoch, 3);
+    }
+
+    /// plan_on_tx 必须看到同事务内先前写入的 local。
+    #[tokio::test]
+    async fn plan_on_tx_sees_local_written_earlier_in_same_tx() {
+        let (pool, repo) = setup().await;
+        let gate = repo.gate();
+        let (_permit, mut tx) = begin_shared_write(&pool, &gate).await.unwrap();
+        let local = prompt("p-plan", "left", "left-body", 1, false);
+        PromptRepo::bulk_upsert_on_tx(&mut tx, std::slice::from_ref(&local), None)
+            .await
+            .unwrap();
+        let mut remote = prompt("p-plan", "right", "right-body", 1, false);
+        remote.updated_at = "2024-01-03T00:00:00+00:00".to_string();
+        let plan = build_prompt_merge_plan_on_tx(&mut tx, &[remote], "2024-01-04T00:00:00+00:00")
+            .await
+            .unwrap();
+        assert_eq!(plan.winners.len(), 1);
+        assert_eq!(plan.winners[0].content, "right-body");
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].kind, KIND_CONFLICT);
+        // 不 commit：仅验证 plan 读到同 tx 行
+        drop(tx);
+    }
+
+    /// pull_items 对并发左右正文必须保留 conflict 副本。
+    #[tokio::test]
+    async fn apply_prompt_pull_items_keeps_conflict_copy() {
+        let (pool, repo) = setup().await;
+        let local = prompt("p-pull", "left", "left-body", 1, false);
+        repo.bulk_upsert(std::slice::from_ref(&local))
+            .await
+            .unwrap();
+        let mut remote = prompt("p-pull", "right", "right-body", 1, false);
+        remote.updated_at = "2024-01-03T00:00:00+00:00".to_string();
+        let accepted = apply_prompt_pull_items(&pool, &repo.gate(), &repo, &[remote])
+            .await
+            .unwrap();
+        assert_eq!(accepted, 1);
+        let got = repo.get("p-pull").await.unwrap().unwrap();
+        assert_eq!(got.content, "right-body");
+        let versions = ContentVersionRepo::new(pool)
+            .list_versions(DOMAIN_PROMPTS, "p-pull")
+            .await
+            .unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].kind, "conflict");
     }
 }

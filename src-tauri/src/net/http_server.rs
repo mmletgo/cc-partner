@@ -541,6 +541,12 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 sync::PROMPT_SYNC_ROUTE_BODY_LIMIT_BYTES,
             )),
         )
+        .route(
+            "/api/sync/prompts/ack-delete-epoch",
+            post(sync::prompt_ack_delete_epoch).layer(DefaultBodyLimit::max(
+                sync::PROMPT_SYNC_ROUTE_BODY_LIMIT_BYTES,
+            )),
+        )
         // P2P CLAUDE.md 主动推送协议（单例 0/1 条；push 覆盖为发送方版本）
         .route(
             "/api/sync/claude_md/pull",
@@ -610,6 +616,12 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 ssh_target_sync::SSH_SYNC_ROUTE_BODY_LIMIT_BYTES,
             )),
         )
+        .route(
+            "/api/ssh-target/sync/ack-delete-epoch",
+            post(ssh_target_sync::ssh_ack_delete_epoch).layer(DefaultBodyLimit::max(
+                ssh_target_sync::SSH_SYNC_ROUTE_BODY_LIMIT_BYTES,
+            )),
+        )
         // 速记本同步协议：scratchpad/sync/{pull,push}
         .route(
             "/api/scratchpad/sync/pull",
@@ -635,6 +647,12 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/scratchpad/sync/push-batch",
             post(scratchpad_sync::scratchpad_push_batch).layer(DefaultBodyLimit::max(
+                scratchpad_sync::SCRATCHPAD_SYNC_ROUTE_BODY_LIMIT_BYTES,
+            )),
+        )
+        .route(
+            "/api/scratchpad/sync/ack-delete-epoch",
+            post(scratchpad_sync::scratchpad_ack_delete_epoch).layer(DefaultBodyLimit::max(
                 scratchpad_sync::SCRATCHPAD_SYNC_ROUTE_BODY_LIMIT_BYTES,
             )),
         )

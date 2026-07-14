@@ -12,7 +12,9 @@ use crate::state::AppState;
 use crate::storage::content_version_repo::KIND_CONFLICT;
 use crate::storage::sync_request_ledger_repo::DOMAIN_SCRATCHPAD;
 use crate::sync::apply_merge::apply_scratchpad_pull_items;
-use crate::sync::engine::{fetch_complete_remote_manifest, peer_error_to_domain_outcome};
+use crate::sync::engine::{
+    fetch_complete_remote_manifest, mid_batch_fail_outcome, peer_error_to_domain_outcome,
+};
 use crate::sync::merger::{ContentVersionDraft, DomainMergeResult};
 use crate::sync::protocol::{
     compute_sync_plan, content_sha256_hex, decide_acked_delete_epoch,
@@ -168,7 +170,7 @@ pub async fn scratchpad_sync_with_peer(
 
 /// Scratchpad v2 plan 路径。
 ///
-/// Business Logic: 完整 manifest + 成功 apply 后才在末批/空 push 携带 acked_delete_epoch。
+/// Business Logic: 完整 manifest + 成功 apply 后才 ack；有正文末批携带 epoch，无正文走 ack-delete-epoch。
 /// Code Logic: 与 prompt_sync_v2 同构。
 async fn scratchpad_sync_v2(
     state: &AppState,
@@ -221,7 +223,13 @@ async fn scratchpad_sync_v2(
             .await
         {
             Ok(r) => r,
-            Err(e) => return peer_error_to_domain_outcome(&e),
+            Err(e) => {
+                let applied = pulled.saturating_add(pushed);
+                if applied > 0 {
+                    return mid_batch_fail_outcome(applied, format!("fetch_failed:{e}"));
+                }
+                return peer_error_to_domain_outcome(&e);
+            }
         };
         if !resp.items.is_empty() {
             match apply_scratchpad_pull_items(
@@ -243,15 +251,16 @@ async fn scratchpad_sync_v2(
                     }
                 }
                 Err(e) => {
-                    return SyncDomainOutcome::ProtocolError {
-                        code: format!("apply_merge_failed:{e}"),
-                    };
+                    return mid_batch_fail_outcome(
+                        pulled.saturating_add(pushed),
+                        format!("apply_merge_failed:{e}"),
+                    );
                 }
             }
         }
     }
 
-    // 完整 manifest + apply 成功后，仅在末批/空 push 携带 acked_delete_epoch
+    // 完整 manifest + apply 成功后：有正文末批携带 ack；无正文走专用 ack-delete-epoch
     let ack_epoch = decide_acked_delete_epoch(true, true, max_remote_epoch);
     let claimed = state.device_id.as_str();
 
@@ -270,13 +279,19 @@ async fn scratchpad_sync_v2(
     }
 
     if batches.is_empty() {
-        let req_id = Uuid::new_v4().to_string();
-        if let Err(e) = state
-            .peer_client
-            .push_scratchpad_batch(base_url, &[], &req_id, claimed, ack_epoch)
-            .await
-        {
-            return peer_error_to_domain_outcome(&e);
+        // 无正文可推：专用 ack-delete-epoch（禁止空 push-batch）
+        if let Some(epoch) = ack_epoch {
+            if let Err(e) = state
+                .peer_client
+                .ack_scratchpad_delete_epoch(base_url, claimed, epoch)
+                .await
+            {
+                let applied = pulled.saturating_add(pushed);
+                if applied > 0 {
+                    return mid_batch_fail_outcome(applied, format!("ack_failed:{e}"));
+                }
+                return peer_error_to_domain_outcome(&e);
+            }
         }
     } else {
         let last = batches.len() - 1;
@@ -297,7 +312,13 @@ async fn scratchpad_sync_v2(
                         resp.accepted
                     );
                 }
-                Err(e) => return peer_error_to_domain_outcome(&e),
+                Err(e) => {
+                    let applied = pulled.saturating_add(pushed);
+                    if applied > 0 {
+                        return mid_batch_fail_outcome(applied, format!("push_failed:{e}"));
+                    }
+                    return peer_error_to_domain_outcome(&e);
+                }
             }
         }
     }
@@ -309,6 +330,10 @@ async fn scratchpad_sync_v2(
     }
 }
 
+/// Scratchpad typed legacy 路径。
+///
+/// Business Logic: 旧对端无 v2 时仍可同步；本地 apply 必须保留 conflict 副本。
+/// Code Logic: pull_result → apply_scratchpad_pull_items → push_result。
 async fn scratchpad_sync_legacy_typed(
     state: &AppState,
     device: &crate::models::device::Device,
@@ -336,41 +361,32 @@ async fn scratchpad_sync_legacy_typed(
         Err(e) => return peer_error_to_domain_outcome(&e),
     };
 
-    let mut to_upsert: Vec<ScratchpadRow> = Vec::new();
-    for remote in &remote_pages {
-        let local = match state.scratchpad_repo.get(&remote.id).await {
-            Ok(v) => v,
-            Err(e) => {
-                return SyncDomainOutcome::ProtocolError {
-                    code: format!("local_get_failed:{e}"),
-                };
-            }
-        };
-        match local {
-            None => to_upsert.push(remote.clone()),
-            Some(local_row) => {
-                let merged = merge_scratchpad(&local_row, remote);
-                if scratchpad_changed(&merged, &local_row) {
-                    to_upsert.push(merged);
+    let mut pulled: u32 = 0;
+    if !remote_pages.is_empty() {
+        match apply_scratchpad_pull_items(
+            &state.scratchpad_repo.pool(),
+            state.maintenance_gate.as_ref(),
+            state.scratchpad_repo.as_ref(),
+            &remote_pages,
+        )
+        .await
+        {
+            Ok(n) => {
+                pulled = n as u32;
+                if n > 0 {
+                    tracing::info!(
+                        "从 {} 拉取并更新了 {} 个速记本页面 (legacy apply_merge)",
+                        device.name,
+                        n
+                    );
                 }
             }
+            Err(e) => {
+                return SyncDomainOutcome::ProtocolError {
+                    code: format!("apply_merge_failed:{e}"),
+                };
+            }
         }
-    }
-
-    let mut pulled: u32 = 0;
-    if !to_upsert.is_empty() {
-        let n = to_upsert.len() as u32;
-        if let Err(e) = state.scratchpad_repo.bulk_upsert(&to_upsert).await {
-            return SyncDomainOutcome::ProtocolError {
-                code: format!("bulk_upsert_failed:{e}"),
-            };
-        }
-        pulled = n;
-        tracing::info!(
-            "从 {} 拉取并更新了 {} 个速记本页面 (legacy)",
-            device.name,
-            n
-        );
     }
 
     let remote_clock_map: HashMap<String, &HashMap<String, u64>> = remote_pages

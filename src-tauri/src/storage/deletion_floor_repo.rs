@@ -12,7 +12,11 @@
 
 use crate::error::AppError;
 use crate::storage::maintenance_gate::{begin_shared_write, DatabaseMaintenanceGate};
+use crate::storage::sync_request_ledger_repo::{
+    DOMAIN_PROMPTS, DOMAIN_SCRATCHPAD, DOMAIN_SSH_TARGET,
+};
 use crate::storage::sync_watermark_repo::{SyncWatermarkRepo, DEFAULT_ACTIVE_PEER_WINDOW_DAYS};
+use crate::sync::protocol::content_sha256_hex;
 use crate::sync::vector_clock::{compare, ClockOrder};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -94,8 +98,7 @@ pub struct TombstoneGcResult {
 pub struct DeletionFloorRepo {
     /// SQLite 连接池
     db: SqlitePool,
-    /// 维护闸：独立 upsert 事务经 shared lease
-    #[allow(dead_code)] // intentional public API for GC writers
+    /// 维护闸：独立 upsert / production GC 事务经 shared lease
     gate: Arc<DatabaseMaintenanceGate>,
 }
 
@@ -208,6 +211,33 @@ impl DeletionFloorRepo {
         }
     }
 
+    /// 在已开启事务内按 domain+item 读取 floor。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     plan-under-tx 必须在持有写事务时读 floor，禁止事务外 pool.get 与
+    ///     max_connections(1) 冲突，并与 local/write 共用同一快照。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     与 `get` 相同 SELECT，经 `fetch_optional(&mut **tx)` 执行。
+    pub async fn get_on_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        domain: &str,
+        item_id: &str,
+    ) -> Result<Option<DeletionFloor>, AppError> {
+        let row = sqlx::query(
+            "SELECT domain, item_id, delete_vector_clock, delete_epoch, content_hash, created_at \
+             FROM sync_deletion_floors WHERE domain = ? AND item_id = ?",
+        )
+        .bind(domain)
+        .bind(item_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        match row {
+            Some(r) => Ok(Some(Self::row_from_sqlite(&r)?)),
+            None => Ok(None),
+        }
+    }
+
     /// 列出 domain 下全部 floor。
     ///
     /// Business Logic: 完整 manifest 对账与导出需要全量 floor。
@@ -286,12 +316,11 @@ impl DeletionFloorRepo {
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     GC 必须在单事务中：写 floor → 调用方删除完整 tombstone；本 helper 负责
-    ///     资格判断与 floor upsert，供单测与未来引擎共用。
+    ///     资格判断与 floor upsert，供单测与生产路径共用。
     ///
     /// Code Logic（这个函数做什么）:
     ///     对每个 candidate 检查 eligible；合格则 upsert floor 并计入 deleted；
-    ///     不合格 skipped。不直接改领域表（tombstone 行由调用方删除）。
-    #[allow(dead_code)] // intentional public API for tombstone compaction
+    ///     不合格 skipped。不直接改领域表（tombstone 行由调用方或 `run_production_tombstone_gc` 删除）。
     pub async fn compact_tombstones_to_floors(
         &self,
         watermarks: &SyncWatermarkRepo,
@@ -319,6 +348,195 @@ impl DeletionFloorRepo {
             result.deleted += 1;
         }
         Ok(result)
+    }
+
+    /// 从三域表收集 deleted=1 的 tombstone GC 候选。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     生产 GC 必须扫描 prompts / ssh_targets / scratchpad 的软删除行，才能真正压 floor。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT deleted=1 行；content_hash 用正文字段 content_sha256_hex；domain token 与 ledger 一致。
+    pub async fn collect_tombstone_gc_candidates(
+        pool: &SqlitePool,
+    ) -> Result<Vec<TombstoneGcCandidate>, AppError> {
+        let mut out = Vec::new();
+
+        let prompt_rows = sqlx::query(
+            "SELECT id, content, title, vector_clock, delete_epoch, updated_at \
+             FROM prompts WHERE deleted = 1",
+        )
+        .fetch_all(pool)
+        .await?;
+        for row in prompt_rows {
+            let id: String = row.try_get("id")?;
+            let title: String = row.try_get("title")?;
+            let content: String = row.try_get("content")?;
+            let vc_text: String = row.try_get("vector_clock")?;
+            let delete_vector_clock: HashMap<String, u64> = serde_json::from_str(&vc_text)?;
+            let epoch: i64 = row.try_get("delete_epoch").unwrap_or(0);
+            let updated_at: String = row.try_get("updated_at")?;
+            out.push(TombstoneGcCandidate {
+                domain: DOMAIN_PROMPTS.to_string(),
+                item_id: id,
+                delete_vector_clock,
+                delete_epoch: epoch.max(0) as u64,
+                content_hash: content_sha256_hex(&[title.as_bytes(), b"\n", content.as_bytes()]),
+                updated_at,
+            });
+        }
+
+        let ssh_rows = sqlx::query(
+            "SELECT host, username, port, label, vector_clock, delete_epoch, updated_at \
+             FROM ssh_targets WHERE deleted = 1",
+        )
+        .fetch_all(pool)
+        .await?;
+        for row in ssh_rows {
+            let host: String = row.try_get("host")?;
+            let username: String = row.try_get("username")?;
+            let port: i64 = row.try_get("port")?;
+            let label: String = row.try_get("label").unwrap_or_default();
+            let vc_text: String = row.try_get("vector_clock")?;
+            let delete_vector_clock: HashMap<String, u64> = serde_json::from_str(&vc_text)?;
+            let epoch: i64 = row.try_get("delete_epoch").unwrap_or(0);
+            let updated_at: String = row.try_get("updated_at")?;
+            let port_s = port.to_string();
+            out.push(TombstoneGcCandidate {
+                domain: DOMAIN_SSH_TARGET.to_string(),
+                item_id: host,
+                delete_vector_clock,
+                delete_epoch: epoch.max(0) as u64,
+                content_hash: content_sha256_hex(&[
+                    username.as_bytes(),
+                    b":",
+                    port_s.as_bytes(),
+                    b":",
+                    label.as_bytes(),
+                ]),
+                updated_at,
+            });
+        }
+
+        let pad_rows = sqlx::query(
+            "SELECT id, title, content, vector_clock, delete_epoch, updated_at \
+             FROM scratchpad WHERE deleted = 1",
+        )
+        .fetch_all(pool)
+        .await?;
+        for row in pad_rows {
+            let id: String = row.try_get("id")?;
+            let title: String = row.try_get("title")?;
+            let content: String = row.try_get("content")?;
+            let vc_text: String = row.try_get("vector_clock")?;
+            let delete_vector_clock: HashMap<String, u64> = serde_json::from_str(&vc_text)?;
+            let epoch: i64 = row.try_get("delete_epoch").unwrap_or(0);
+            let updated_at: String = row.try_get("updated_at")?;
+            out.push(TombstoneGcCandidate {
+                domain: DOMAIN_SCRATCHPAD.to_string(),
+                item_id: id,
+                delete_vector_clock,
+                delete_epoch: epoch.max(0) as u64,
+                content_hash: content_sha256_hex(&[title.as_bytes(), b"\n", content.as_bytes()]),
+                updated_at,
+            });
+        }
+
+        Ok(out)
+    }
+
+    /// 生产路径：收集候选 → 过滤 eligible → 单事务 floor upsert + DELETE 领域 tombstone。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Spec §4.4 要求 age≥30d 且活跃 peer 全部 ack 后，才能用 durable floor 取代完整
+    ///     tombstone；引擎同步结束与后台 tick 必须真正调用本路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     collect candidates → eligible 过滤 → 一次 begin_shared_write 内对全部合格项
+    ///     upsert_on_tx + DELETE domain deleted 行 → commit；无合格项直接返回 skipped。
+    pub async fn run_production_tombstone_gc(
+        &self,
+        watermarks: &SyncWatermarkRepo,
+        now: &str,
+    ) -> Result<TombstoneGcResult, AppError> {
+        let candidates = Self::collect_tombstone_gc_candidates(&self.db).await?;
+        self.run_production_tombstone_gc_with_candidates(watermarks, &candidates, now)
+            .await
+    }
+
+    /// 生产 GC 核心：对给定候选做 eligibility 与单事务 floor+DELETE。
+    ///
+    /// Business Logic: 测试可注入候选；生产经 `run_production_tombstone_gc` 自动收集。
+    /// Code Logic: eligible 列表在事务外计算；合格项在同一 shared write 事务写 floor 并删行。
+    pub async fn run_production_tombstone_gc_with_candidates(
+        &self,
+        watermarks: &SyncWatermarkRepo,
+        candidates: &[TombstoneGcCandidate],
+        now: &str,
+    ) -> Result<TombstoneGcResult, AppError> {
+        let mut skipped = 0usize;
+        let mut eligible: Vec<&TombstoneGcCandidate> = Vec::new();
+        for candidate in candidates {
+            if self
+                .tombstone_gc_eligible(watermarks, candidate, now, DEFAULT_ACTIVE_PEER_WINDOW_DAYS)
+                .await?
+            {
+                eligible.push(candidate);
+            } else {
+                skipped += 1;
+            }
+        }
+
+        if eligible.is_empty() {
+            return Ok(TombstoneGcResult {
+                deleted: 0,
+                skipped,
+            });
+        }
+
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
+        let mut deleted = 0usize;
+        for candidate in eligible {
+            let floor = DeletionFloor {
+                domain: candidate.domain.clone(),
+                item_id: candidate.item_id.clone(),
+                delete_vector_clock: candidate.delete_vector_clock.clone(),
+                delete_epoch: candidate.delete_epoch,
+                content_hash: candidate.content_hash.clone(),
+                created_at: now.to_string(),
+            };
+            Self::upsert_on_tx(&mut tx, &floor).await?;
+            match candidate.domain.as_str() {
+                DOMAIN_PROMPTS => {
+                    sqlx::query("DELETE FROM prompts WHERE id = ? AND deleted = 1")
+                        .bind(&candidate.item_id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                DOMAIN_SSH_TARGET => {
+                    sqlx::query("DELETE FROM ssh_targets WHERE host = ? AND deleted = 1")
+                        .bind(&candidate.item_id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                DOMAIN_SCRATCHPAD => {
+                    sqlx::query("DELETE FROM scratchpad WHERE id = ? AND deleted = 1")
+                        .bind(&candidate.item_id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                other => {
+                    drop(permit);
+                    return Err(AppError::generic(format!(
+                        "tombstone GC 未知 domain: {other}"
+                    )));
+                }
+            }
+            deleted += 1;
+        }
+        tx.commit().await?;
+        drop(permit);
+        Ok(TombstoneGcResult { deleted, skipped })
     }
 
     /// SQLite 行 → DeletionFloor。
@@ -365,6 +583,58 @@ mod tests {
         DeletionFloorRepo::ensure_schema(&pool).await.unwrap();
         SyncWatermarkRepo::ensure_schema(&pool).await.unwrap();
         (
+            DeletionFloorRepo::new(pool.clone()),
+            SyncWatermarkRepo::new(pool),
+        )
+    }
+
+    async fn setup_with_prompt_table() -> (SqlitePool, DeletionFloorRepo, SyncWatermarkRepo) {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        // collect_tombstone_gc_candidates 扫描三域表，测试夹具必须三表齐全。
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS prompts (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL,
+                tags TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0,
+                delete_epoch INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS ssh_targets (
+                host TEXT PRIMARY KEY, port INTEGER NOT NULL, username TEXT NOT NULL,
+                label TEXT, device_id TEXT NOT NULL, vector_clock TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted INTEGER DEFAULT 0,
+                delete_epoch INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS scratchpad (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, device_id TEXT NOT NULL,
+                vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0,
+                delete_epoch INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        DeletionFloorRepo::ensure_schema(&pool).await.unwrap();
+        SyncWatermarkRepo::ensure_schema(&pool).await.unwrap();
+        (
+            pool.clone(),
             DeletionFloorRepo::new(pool.clone()),
             SyncWatermarkRepo::new(pool),
         )
@@ -483,5 +753,69 @@ mod tests {
         )
         .unwrap();
         assert!(ok2);
+    }
+
+    /// 生产 GC：活跃 peer 无 watermark 时不删领域 tombstone 行。
+    #[tokio::test]
+    async fn production_gc_blocked_without_acks_keeps_domain_row() {
+        let (pool, floors, watermarks) = setup_with_prompt_table().await;
+        let now = "2024-06-01T00:00:00+00:00";
+        watermarks
+            .touch_seen("peer-active", DOMAIN_PROMPTS, now)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO prompts (id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch)
+             VALUES ('p-block', 't', 'c', '[]', '2024-01-01T00:00:00+00:00', '2024-04-01T00:00:00+00:00', 'd1', '{\"d1\":2}', 1, 5)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let result = floors
+            .run_production_tombstone_gc(&watermarks, now)
+            .await
+            .unwrap();
+        assert_eq!(result.deleted, 0);
+        assert!(result.skipped >= 1);
+        let still = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM prompts WHERE id = 'p-block' AND deleted = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(still, 1);
+        assert!(floors.get(DOMAIN_PROMPTS, "p-block").await.unwrap().is_none());
+    }
+
+    /// 生产 GC：age+ack 满足时写 floor 并删除领域 tombstone 行。
+    #[tokio::test]
+    async fn production_gc_happy_path_deletes_domain_tombstone() {
+        let (pool, floors, watermarks) = setup_with_prompt_table().await;
+        let now = "2024-06-01T00:00:00+00:00";
+        watermarks
+            .advance_ack("peer-a", DOMAIN_PROMPTS, 5, now)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO prompts (id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch)
+             VALUES ('p-ok', 't', 'c', '[]', '2024-01-01T00:00:00+00:00', '2024-04-01T00:00:00+00:00', 'd1', '{\"d1\":2}', 1, 5)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let result = floors
+            .run_production_tombstone_gc(&watermarks, now)
+            .await
+            .unwrap();
+        assert_eq!(result.deleted, 1);
+        let gone = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM prompts WHERE id = 'p-ok'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(gone, 0);
+        let floor = floors.get(DOMAIN_PROMPTS, "p-ok").await.unwrap().unwrap();
+        assert_eq!(floor.delete_epoch, 5);
     }
 }

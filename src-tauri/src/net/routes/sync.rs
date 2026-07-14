@@ -1,15 +1,17 @@
-//! net/routes/sync.rs — Prompt 同步路由（legacy pull/push + v2 manifest/items/push-batch）
+//! net/routes/sync.rs — Prompt 同步路由（legacy pull/push + v2 manifest/items/push-batch/ack-delete-epoch）
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     对端设备发起 Prompt 同步时调用这些端点。legacy pull/push 保留一代兼容；
 //!     v2 无状态 manifest-page/items/push-batch 供 typed peer 流式比较完整排序 manifest，
-//!     网络/JSON/413 不得折叠为空成功。`sync.manifest.v2` capability 由 Task 3 原子宣告。
+//!     网络/JSON/413 不得折叠为空成功。exact equality 时无正文可推，改走 ack-delete-epoch
+//!     推进 watermark，禁止空 push-batch。`sync.manifest.v2` capability 由 Task 3 原子宣告。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - POST /api/sync/pull|push：legacy 摘要比对/合并路径（保持行为）。
 //!     - POST /api/sync/prompts/manifest-page：按 id 升序 keyset 分页摘要。
 //!     - POST /api/sync/prompts/items：按 id 批取正文。
 //!     - POST /api/sync/prompts/push-batch：有界 batch 合并后 bulk_upsert + accepted。
+//!     - POST /api/sync/prompts/ack-delete-epoch：仅推进 peer watermark，无内容 upsert/ledger。
 //!     - 预算：page ≤500/1MiB；batch ≤100/4MiB（`sync::protocol` 常量）。
 
 use crate::error::AppError;
@@ -18,8 +20,7 @@ use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
 use crate::storage::PromptRepo;
-use crate::sync::apply_merge::apply_prompt_merge_batch;
-use crate::sync::merger::merge_prompt;
+use crate::sync::apply_merge::{apply_prompt_merge_batch, apply_prompt_pull_items};
 use crate::sync::protocol::{
     content_sha256_hex, decode_keyset_cursor, encode_keyset_cursor, estimate_summary_wire_bytes,
     SyncManifestPage, SyncSummary, MANIFEST_PAGE_BYTES, MANIFEST_PAGE_ITEMS, PUSH_BATCH_BYTES,
@@ -134,6 +135,21 @@ pub struct PromptPushBatchReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptPushBatchResp {
     pub accepted: usize,
+}
+
+/// ack-delete-epoch 请求：仅携带 claimed 标签与待推进水位。
+#[derive(Debug, Deserialize)]
+pub struct PromptAckDeleteEpochReq {
+    /// 收敛标签（**非**认证身份）；trim 后必须非空。
+    pub claimed_device_id: String,
+    /// 完整 manifest + 成功 apply 后客户端回传的最高连续 ackedDeleteEpoch。
+    pub acked_delete_epoch: u64,
+}
+
+/// ack-delete-epoch 响应：固定 `{ok:true}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptAckDeleteEpochResp {
+    pub ok: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -392,39 +408,22 @@ pub async fn sync_push(
     Ok(Json(SyncPushResp { accepted }))
 }
 
-/// sync_push 业务实现：逐条合并后落库，返回实际落库条数（命令层错误保持 AppError 形态）。
+/// sync_push 业务实现：经 apply_prompt_pull_items 落库，保留 conflict 副本。
+///
+/// Business Logic: legacy push 不得再 merge+bulk_upsert 静默丢并发 loser。
+/// Code Logic: 整批 remotes → apply_prompt_pull_items（无 ledger）→ 返回 accepted。
 async fn sync_push_impl(state: &AppState, req: SyncPushReq) -> Result<usize, AppError> {
-    let mut to_upsert: Vec<PromptRow> = Vec::new();
-
-    for remote in req.prompts {
-        let local = state.prompt_repo.get(&remote.id).await?;
-        match local {
-            None => {
-                // 本地没有 → 直接接收 remote
-                to_upsert.push(remote);
-            }
-            Some(local_row) => {
-                // 本地有 → 合并决策（merger 内部按向量时钟/LWW 判定胜出方并合并时钟）
-                let merged = merge_prompt(&local_row, &remote);
-                // 仅当合并结果与本地有差异时才落库（内容/时钟/deleted 任一变化）
-                if merged.vector_clock != local_row.vector_clock
-                    || merged.updated_at != local_row.updated_at
-                    || merged.content != local_row.content
-                    || merged.title != local_row.title
-                    || merged.deleted != local_row.deleted
-                {
-                    to_upsert.push(merged);
-                }
-            }
-        }
+    if req.prompts.is_empty() {
+        return Ok(0);
     }
-
-    let accepted = to_upsert.len();
-    if !to_upsert.is_empty() {
-        state.prompt_repo.bulk_upsert(&to_upsert).await?;
-    }
-
-    tracing::info!("sync/push: 接收并落库 {} 条 prompt", accepted);
+    let accepted = apply_prompt_pull_items(
+        &state.prompt_repo.pool(),
+        state.maintenance_gate.as_ref(),
+        state.prompt_repo.as_ref(),
+        &req.prompts,
+    )
+    .await?;
+    tracing::info!("sync/push: 接收并落库 {} 条 prompt (apply_merge)", accepted);
     Ok(accepted)
 }
 
@@ -688,6 +687,60 @@ async fn prompt_push_batch_impl(
         outcome.accepted
     );
     Ok(outcome.accepted)
+}
+
+/// POST /api/sync/prompts/ack-delete-epoch：仅推进 watermark，不写内容。
+///
+/// Business Logic（为什么需要这个函数）:
+///     exact equality 或本轮无正文可推时，客户端仍需告知对端“已完整看到远端删除 epoch”，
+///     以便对端安全 GC tombstone；禁止再发空 push-batch（会污染 ledger、违背零正文语义）。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 claimed_device_id 非空 → ensure watermark schema → 用 repo pool/gate 构造
+///     SyncWatermarkRepo → advance_ack(DOMAIN_PROMPTS)；无 items upsert / 无 content ledger claim。
+pub async fn prompt_ack_delete_epoch(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<PromptAckDeleteEpochReq>,
+) -> P2pResult<Json<PromptAckDeleteEpochResp>> {
+    prompt_ack_delete_epoch_impl(state.prompt_repo.as_ref(), req)
+        .await
+        .map_err(|e| e.into_p2p(&ctx, "prompts.ack_delete_epoch"))?;
+    Ok(Json(PromptAckDeleteEpochResp { ok: true }))
+}
+
+/// Prompt ack-delete-epoch 业务实现（可单测）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     把校验与 watermark 推进从 axum handler 抽出，便于无 HTTP 的 unit test 直接覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     trim claimed_device_id；空 → Validation；否则 ensure_schema + with_gate + advance_ack。
+async fn prompt_ack_delete_epoch_impl(
+    repo: &PromptRepo,
+    req: PromptAckDeleteEpochReq,
+) -> Result<(), RouteFail> {
+    let claimed = req.claimed_device_id.trim().to_string();
+    if claimed.is_empty() {
+        return Err(RouteFail::Validation(
+            "claimed_device_id 不能为空".to_string(),
+        ));
+    }
+    let pool = repo.pool();
+    crate::storage::sync_watermark_repo::SyncWatermarkRepo::ensure_schema(&pool)
+        .await
+        .map_err(RouteFail::from)?;
+    let wm = crate::storage::sync_watermark_repo::SyncWatermarkRepo::with_gate(pool, repo.gate());
+    let now = chrono::Utc::now().to_rfc3339();
+    wm.advance_ack(
+        &claimed,
+        crate::storage::sync_request_ledger_repo::DOMAIN_PROMPTS,
+        req.acked_delete_epoch,
+        &now,
+    )
+    .await
+    .map_err(RouteFail::from)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,5 +1194,65 @@ mod tests {
             .unwrap();
         assert_eq!(versions.len(), 1);
         assert_eq!(versions[0].kind, "conflict");
+    }
+
+    /// 空 claimed_device_id 必须 400 Validation，不写 watermark。
+    #[tokio::test]
+    async fn ack_delete_epoch_rejects_empty_claimed_device_id() {
+        use crate::storage::sync_request_ledger_repo::DOMAIN_PROMPTS;
+        use crate::storage::sync_watermark_repo::SyncWatermarkRepo;
+        let repo = setup_repo().await;
+        let err = prompt_ack_delete_epoch_impl(
+            &repo,
+            PromptAckDeleteEpochReq {
+                claimed_device_id: "   ".into(),
+                acked_delete_epoch: 7,
+            },
+        )
+        .await
+        .unwrap_err();
+        match err {
+            RouteFail::Validation(msg) => assert!(msg.contains("claimed_device_id")),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+        let wm = SyncWatermarkRepo::new(repo.pool());
+        assert!(wm.get("peer-1", DOMAIN_PROMPTS).await.unwrap().is_none());
+    }
+
+    /// 合法 ack 推进 watermark（MAX-only），且无内容 ledger 写入。
+    #[tokio::test]
+    async fn ack_delete_epoch_advances_watermark() {
+        use crate::storage::sync_request_ledger_repo::DOMAIN_PROMPTS;
+        use crate::storage::sync_watermark_repo::SyncWatermarkRepo;
+        let repo = setup_repo().await;
+        prompt_ack_delete_epoch_impl(
+            &repo,
+            PromptAckDeleteEpochReq {
+                claimed_device_id: " peer-ack ".into(),
+                acked_delete_epoch: 9,
+            },
+        )
+        .await
+        .unwrap();
+        let wm = SyncWatermarkRepo::new(repo.pool());
+        let row = wm
+            .get("peer-ack", DOMAIN_PROMPTS)
+            .await
+            .unwrap()
+            .expect("watermark row");
+        assert_eq!(row.acked_delete_epoch, 9);
+
+        // 重放更低 epoch 不回退
+        prompt_ack_delete_epoch_impl(
+            &repo,
+            PromptAckDeleteEpochReq {
+                claimed_device_id: "peer-ack".into(),
+                acked_delete_epoch: 3,
+            },
+        )
+        .await
+        .unwrap();
+        let row2 = wm.get("peer-ack", DOMAIN_PROMPTS).await.unwrap().unwrap();
+        assert_eq!(row2.acked_delete_epoch, 9);
     }
 }

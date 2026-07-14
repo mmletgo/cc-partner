@@ -1565,6 +1565,7 @@ impl PeerClient {
     ///
     /// Business Logic: 有界 batch + client_request_id + claimed_device_id（ledger 命名空间，非认证）；
     ///     仅在完整 manifest + 成功 apply 后可在末批携带 `acked_delete_epoch` 推进对端水位。
+    ///     无正文可推时不得发空 push；改走 `ack_prompt_delete_epoch`。
     /// Code Logic: POST `/api/sync/prompts/push-batch`；`acked_delete_epoch=None` 序列化为 null。
     pub async fn push_prompt_batch(
         &self,
@@ -1585,6 +1586,30 @@ impl PeerClient {
             self.request_post(&url, &body).await?;
         Self::ensure_accepted_not_exceeds(&url, data.accepted, items.len())?;
         Ok(data)
+    }
+
+    /// Prompt v2：仅推进对端 delete-epoch watermark（无正文、无 ledger）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     exact equality 或本轮无正文可推时，仍需把本端已完整看到的远端删除水位回传对端；
+    ///     禁止空 push-batch，避免 ledger 污染与零正文语义破坏。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/sync/prompts/ack-delete-epoch` body
+    ///     `{claimed_device_id,acked_delete_epoch}`；成功 JSON（含 `{ok:true}`）即返回 Ok。
+    pub async fn ack_prompt_delete_epoch(
+        &self,
+        base_url: &str,
+        claimed_device_id: &str,
+        acked_delete_epoch: u64,
+    ) -> Result<(), PeerCallError> {
+        let url = format!("{base_url}/api/sync/prompts/ack-delete-epoch");
+        let body = serde_json::json!({
+            "claimed_device_id": claimed_device_id,
+            "acked_delete_epoch": acked_delete_epoch,
+        });
+        let _: serde_json::Value = self.request_post(&url, &body).await?;
+        Ok(())
     }
 
     /// SSH v2：拉一页对端 manifest 摘要（id=host）。
@@ -1618,6 +1643,7 @@ impl PeerClient {
     /// SSH v2：批量 push。
     ///
     /// Business Logic: accepted 不得大于本批条数；末批可带 acked_delete_epoch 推进水位。
+    ///     无正文可推时不得发空 push；改走 `ack_ssh_delete_epoch`。
     /// Code Logic: POST `/api/ssh-target/sync/push-batch`；携带 claimed_device_id。
     pub async fn push_ssh_batch(
         &self,
@@ -1638,6 +1664,29 @@ impl PeerClient {
             self.request_post(&url, &body).await?;
         Self::ensure_accepted_not_exceeds(&url, data.accepted, items.len())?;
         Ok(data)
+    }
+
+    /// SSH v2：仅推进对端 delete-epoch watermark（无正文、无 ledger）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     exact equality 或本轮无正文可推时，仍需回传删除水位；禁止空 push-batch。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/ssh-target/sync/ack-delete-epoch` body
+    ///     `{claimed_device_id,acked_delete_epoch}`；成功 JSON 即 Ok。
+    pub async fn ack_ssh_delete_epoch(
+        &self,
+        base_url: &str,
+        claimed_device_id: &str,
+        acked_delete_epoch: u64,
+    ) -> Result<(), PeerCallError> {
+        let url = format!("{base_url}/api/ssh-target/sync/ack-delete-epoch");
+        let body = serde_json::json!({
+            "claimed_device_id": claimed_device_id,
+            "acked_delete_epoch": acked_delete_epoch,
+        });
+        let _: serde_json::Value = self.request_post(&url, &body).await?;
+        Ok(())
     }
 
     /// Scratchpad v2：拉一页对端 manifest 摘要。
@@ -1671,6 +1720,7 @@ impl PeerClient {
     /// Scratchpad v2：批量 push。
     ///
     /// Business Logic: accepted 不得大于本批条数；末批可带 acked_delete_epoch 推进水位。
+    ///     无正文可推时不得发空 push；改走 `ack_scratchpad_delete_epoch`。
     /// Code Logic: POST `/api/scratchpad/sync/push-batch`；携带 claimed_device_id。
     pub async fn push_scratchpad_batch(
         &self,
@@ -1691,6 +1741,29 @@ impl PeerClient {
             self.request_post(&url, &body).await?;
         Self::ensure_accepted_not_exceeds(&url, data.accepted, items.len())?;
         Ok(data)
+    }
+
+    /// Scratchpad v2：仅推进对端 delete-epoch watermark（无正文、无 ledger）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     exact equality 或本轮无正文可推时，仍需回传删除水位；禁止空 push-batch。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/scratchpad/sync/ack-delete-epoch` body
+    ///     `{claimed_device_id,acked_delete_epoch}`；成功 JSON 即 Ok。
+    pub async fn ack_scratchpad_delete_epoch(
+        &self,
+        base_url: &str,
+        claimed_device_id: &str,
+        acked_delete_epoch: u64,
+    ) -> Result<(), PeerCallError> {
+        let url = format!("{base_url}/api/scratchpad/sync/ack-delete-epoch");
+        let body = serde_json::json!({
+            "claimed_device_id": claimed_device_id,
+            "acked_delete_epoch": acked_delete_epoch,
+        });
+        let _: serde_json::Value = self.request_post(&url, &body).await?;
+        Ok(())
     }
 }
 

@@ -151,6 +151,31 @@ impl ScratchpadRepo {
         }
     }
 
+    /// 在已开启事务内按页面 id 读取 scratchpad（含 deleted）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     merge plan 必须在写事务内读 local，避免 max_connections(1) 下事务外 pool.get
+    ///     与 begin_shared_write 死锁，并保证 plan/write 同一快照。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     与 `get` 相同 SELECT，经 `fetch_optional(&mut **tx)` 执行。
+    pub async fn get_on_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        page_id: &str,
+    ) -> Result<Option<ScratchpadRow>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, title, content, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
+             FROM scratchpad WHERE id = ?",
+        )
+        .bind(page_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        match row {
+            Some(r) => Ok(Some(Self::row_to_scratchpad(&r)?)),
+            None => Ok(None),
+        }
+    }
+
     /// 获取默认页；若不存在则创建空白默认页。
     ///
     /// Business Logic: 旧速记本入口需要稳定落到默认页，首次启动也应有可自动保存页面。

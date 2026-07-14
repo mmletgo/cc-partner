@@ -142,6 +142,31 @@ impl PromptRepo {
         }
     }
 
+    /// 在已开启事务内按主键读取 Prompt（含 deleted）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     merge plan 必须在持有写事务时读取 local，避免 max_connections(1) 下
+    ///     事务外 pool.get 与 begin_shared_write 死锁，并保证 plan/write 看到同一快照。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     与 `get` 相同 SELECT，经 `fetch_optional(&mut **tx)` 绑定事务执行器。
+    pub async fn get_on_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        id: &str,
+    ) -> Result<Option<PromptRow>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
+             FROM prompts WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        match row {
+            Some(r) => Ok(Some(Self::row_to_prompt(&r)?)),
+            None => Ok(None),
+        }
+    }
+
     /// 插入新 Prompt（tags/vector_clock 序列化为 JSON）。
     ///
     /// Business Logic: 新建 Prompt 必须在 maintenance shared lease 下写入，避免 restore 中途被覆盖。

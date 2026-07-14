@@ -1,12 +1,14 @@
-//! net/routes/scratchpad_sync.rs — 速记本同步（legacy pull/push + v2 manifest/items/push-batch）
+//! net/routes/scratchpad_sync.rs — 速记本同步（legacy pull/push + v2 manifest/items/push-batch/ack-delete-epoch）
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     局域网设备间同步多个速记本页面。legacy 路径保留；v2 无状态分页与 Prompt 同构。
+//!     exact equality 时无正文可推，改走 ack-delete-epoch 推进 watermark。
 //!     `sync.manifest.v2` 由 Task 3 原子宣告。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - POST /api/scratchpad/sync/pull|push：legacy。
 //!     - POST /api/scratchpad/sync/manifest-page|items|push-batch：有界 typed 协议。
+//!     - POST /api/scratchpad/sync/ack-delete-epoch：仅推进 peer watermark，无内容 upsert/ledger。
 
 use crate::error::AppError;
 use crate::models::scratchpad::ScratchpadRow;
@@ -14,13 +16,12 @@ use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
 use crate::storage::ScratchpadRepo;
-use crate::sync::apply_merge::apply_scratchpad_merge_batch;
+use crate::sync::apply_merge::{apply_scratchpad_merge_batch, apply_scratchpad_pull_items};
 use crate::sync::protocol::{
     content_sha256_hex, decode_keyset_cursor, encode_keyset_cursor, estimate_summary_wire_bytes,
     SyncManifestPage, SyncSummary, MANIFEST_PAGE_BYTES, MANIFEST_PAGE_ITEMS, PUSH_BATCH_BYTES,
     PUSH_BATCH_ITEMS,
 };
-use crate::sync::scratchpad::{merge_scratchpad, scratchpad_changed};
 use crate::sync::vector_clock::{compare, ClockOrder};
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
@@ -119,6 +120,21 @@ pub struct ScratchpadPushBatchReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScratchpadPushBatchResp {
     pub accepted: usize,
+}
+
+/// ack-delete-epoch 请求：仅携带 claimed 标签与待推进水位。
+#[derive(Debug, Deserialize)]
+pub struct ScratchpadAckDeleteEpochReq {
+    /// 收敛标签（**非**认证身份）；trim 后必须非空。
+    pub claimed_device_id: String,
+    /// 完整 manifest + 成功 apply 后客户端回传的最高连续 ackedDeleteEpoch。
+    pub acked_delete_epoch: u64,
+}
+
+/// ack-delete-epoch 响应：固定 `{ok:true}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScratchpadAckDeleteEpochResp {
+    pub ok: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -332,28 +348,25 @@ pub async fn scratchpad_push(
     Ok(Json(ScratchpadPushResp { accepted }))
 }
 
-/// scratchpad_push 业务实现：逐条合并后按需落库，返回实际落库条数。
+/// scratchpad_push 业务实现：经 apply_scratchpad_pull_items 落库，保留 conflict。
+///
+/// Business Logic: legacy push 不得 merge+bulk_upsert 静默丢并发 loser。
+/// Code Logic: remotes → apply_scratchpad_pull_items → accepted。
 async fn scratchpad_push_impl(state: &AppState, req: ScratchpadPushReq) -> Result<usize, AppError> {
-    let mut to_upsert: Vec<ScratchpadRow> = Vec::new();
-
-    for remote in req.pages {
-        match state.scratchpad_repo.get(&remote.id).await? {
-            None => to_upsert.push(remote),
-            Some(local) => {
-                let merged = merge_scratchpad(&local, &remote);
-                if scratchpad_changed(&merged, &local) {
-                    to_upsert.push(merged);
-                }
-            }
-        }
+    if req.pages.is_empty() {
+        return Ok(0);
     }
-
-    let accepted = to_upsert.len();
-    if !to_upsert.is_empty() {
-        state.scratchpad_repo.bulk_upsert(&to_upsert).await?;
-    }
-
-    tracing::info!("scratchpad/sync/push: 接收并落库 {} 个页面", accepted);
+    let accepted = apply_scratchpad_pull_items(
+        &state.scratchpad_repo.pool(),
+        state.maintenance_gate.as_ref(),
+        state.scratchpad_repo.as_ref(),
+        &req.pages,
+    )
+    .await?;
+    tracing::info!(
+        "scratchpad/sync/push: 接收并落库 {} 个页面 (apply_merge)",
+        accepted
+    );
     Ok(accepted)
 }
 
@@ -577,6 +590,60 @@ async fn scratchpad_push_batch_impl(
     .await
     .map_err(RouteFail::from)?;
     Ok(outcome.accepted)
+}
+
+/// POST /api/scratchpad/sync/ack-delete-epoch：仅推进 watermark，不写内容。
+///
+/// Business Logic（为什么需要这个函数）:
+///     exact equality 或本轮无正文可推时，客户端仍需告知对端“已完整看到远端删除 epoch”，
+///     以便对端安全 GC tombstone；禁止再发空 push-batch。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 claimed_device_id 非空 → ensure watermark schema → 用 repo pool/gate 构造
+///     SyncWatermarkRepo → advance_ack(DOMAIN_SCRATCHPAD)；无 items upsert / 无 content ledger claim。
+pub async fn scratchpad_ack_delete_epoch(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<ScratchpadAckDeleteEpochReq>,
+) -> P2pResult<Json<ScratchpadAckDeleteEpochResp>> {
+    scratchpad_ack_delete_epoch_impl(state.scratchpad_repo.as_ref(), req)
+        .await
+        .map_err(|e| e.into_p2p(&ctx, "scratchpad.ack_delete_epoch"))?;
+    Ok(Json(ScratchpadAckDeleteEpochResp { ok: true }))
+}
+
+/// Scratchpad ack-delete-epoch 业务实现（可单测）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     把校验与 watermark 推进从 axum handler 抽出，便于无 HTTP 的 unit test 直接覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     trim claimed_device_id；空 → Validation；否则 ensure_schema + with_gate + advance_ack。
+async fn scratchpad_ack_delete_epoch_impl(
+    repo: &ScratchpadRepo,
+    req: ScratchpadAckDeleteEpochReq,
+) -> Result<(), RouteFail> {
+    let claimed = req.claimed_device_id.trim().to_string();
+    if claimed.is_empty() {
+        return Err(RouteFail::Validation(
+            "claimed_device_id 不能为空".to_string(),
+        ));
+    }
+    let pool = repo.pool();
+    crate::storage::sync_watermark_repo::SyncWatermarkRepo::ensure_schema(&pool)
+        .await
+        .map_err(RouteFail::from)?;
+    let wm = crate::storage::sync_watermark_repo::SyncWatermarkRepo::with_gate(pool, repo.gate());
+    let now = chrono::Utc::now().to_rfc3339();
+    wm.advance_ack(
+        &claimed,
+        crate::storage::sync_request_ledger_repo::DOMAIN_SCRATCHPAD,
+        req.acked_delete_epoch,
+        &now,
+    )
+    .await
+    .map_err(RouteFail::from)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -33,7 +33,9 @@ pub const RETENTION_MAX_DAYS: i64 = 30;
 ///
 /// Business Logic: UI 与恢复流程需要 domain/item/source/hash/时间/快照，以便还原 loser 正文。
 /// Code Logic: 与表列一一对应；id 通常由 `SyncRequestLedgerRepo::conflict_row_id` 确定性生成。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///     camelCase 序列化供备份 ZIP `contentVersions/items.json` 往返。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContentVersion {
     /// 主键（确定性 conflict id 或 UUID）
     pub id: String,
@@ -216,6 +218,24 @@ impl ContentVersionRepo {
         )
         .bind(domain)
         .bind(item_id)
+        .fetch_all(&self.db)
+        .await?;
+        rows.iter().map(Self::row_from_sqlite).collect()
+    }
+
+    /// 导出全部 content_versions（备份/恢复往返）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     备份若不携带 conflict/history 副本，恢复后 UI 与合并证据会静默丢失。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT 全表按 created_at ASC, id ASC 稳定排序，供 `contentVersions/items.json`。
+    pub async fn list_all(&self) -> Result<Vec<ContentVersion>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, domain, item_id, source_device, content_hash, created_at, kind, snapshot_json \
+             FROM content_versions \
+             ORDER BY created_at ASC, id ASC",
+        )
         .fetch_all(&self.db)
         .await?;
         rows.iter().map(Self::row_from_sqlite).collect()

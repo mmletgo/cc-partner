@@ -101,6 +101,31 @@ impl SshTargetRepo {
         }
     }
 
+    /// 在已开启事务内按 host 读取 SSH 目标（含 deleted）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     merge plan 必须在写事务内读 local，避免 pool 单连接与持有事务冲突，
+    ///     保证 plan/write 使用同一事务快照。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     与 `get` 相同 SELECT，经 `fetch_optional(&mut **tx)` 执行。
+    pub async fn get_on_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        host: &str,
+    ) -> Result<Option<SshTargetRow>, AppError> {
+        let row = sqlx::query(
+            "SELECT host, port, username, label, device_id, vector_clock, created_at, updated_at, deleted, delete_epoch \
+             FROM ssh_targets WHERE host = ?",
+        )
+        .bind(host)
+        .fetch_optional(&mut **tx)
+        .await?;
+        match row {
+            Some(r) => Ok(Some(Self::row_to_ssh_target(&r)?)),
+            None => Ok(None),
+        }
+    }
+
     /// 返回全部目标（含 deleted 软删除记录），用于跨设备同步。
     pub async fn get_all_for_sync(&self) -> Result<Vec<SshTargetRow>, AppError> {
         let rows = sqlx::query(
