@@ -102,24 +102,9 @@
   gap: var(--space-5);
 }
 
-.taskDrawerOverlay {
-  position: fixed;
-  inset: 0;
-  z-index: calc(var(--z-modal) + 1);
-  display: flex;
-  justify-content: flex-end;
-  background: color-mix(in oklab, var(--bg) 42%, transparent);
-  backdrop-filter: blur(3px);
-}
-
+/* Drawer surface 已提供宽度/高度/边框/背景/阴影；此处只补内部布局 */
 .taskDrawer {
-  width: min(620px, calc(100vw - var(--space-8)));
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  border-left: 1px solid var(--border);
-  background: var(--bg);
-  box-shadow: var(--shadow-window);
+  overflow: hidden;
 }
 
 .taskDrawerHeader {
@@ -816,23 +801,9 @@
   opacity: 0.65;
 }
 
-.createDialogOverlay {
-  position: fixed;
-  inset: 0;
-  z-index: calc(var(--z-modal) + 1);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-5);
-  background: color-mix(in oklab, var(--bg) 72%, transparent);
-  backdrop-filter: blur(8px);
-}
-
+/* Dialog surface 已提供宽度/最大高度/阴影；此处只保留内部滚动边界 */
 .createDialog {
-  width: min(720px, 100%);
-  max-height: min(760px, calc(100vh - var(--space-10)));
   overflow: hidden;
-  box-shadow: var(--shadow-window);
 }
 
 .dialogHeader {
@@ -934,22 +905,9 @@
     flex-direction: column;
   }
 
-  .taskDrawer {
-    width: 100%;
-  }
-
   .taskDrawerHeader,
   .taskDrawerContent {
     padding: var(--space-3);
-  }
-
-  .createDialogOverlay {
-    align-items: stretch;
-    padding: var(--space-3);
-  }
-
-  .createDialog {
-    max-height: calc(100vh - var(--space-6));
   }
 
   .dialogBody {

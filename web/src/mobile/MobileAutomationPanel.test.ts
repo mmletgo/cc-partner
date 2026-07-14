@@ -52,7 +52,43 @@ describe('MobileAutomationPanel', () => {
       'const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);',
       'mobile automation task creation should use dialog open state',
     );
-    assertContains(panelSource, 'role="dialog"', 'mobile automation task creation should render a dialog');
+    assertContains(panelSource, '<Dialog', 'mobile automation task creation should render shared Dialog');
+    assertContains(
+      panelSource,
+      "from '@/components/primitives'",
+      'mobile automation should import Dialog from primitives',
+    );
+    assertContains(panelSource, 'titleId={dialogTitleId}', 'mobile automation Dialog should wire titleId');
+    assertContains(
+      panelSource,
+      'closeOnEscape={!(creating || completingPrompt)}',
+      'mobile automation Dialog should block Escape while creating/completing',
+    );
+    assertContains(
+      panelSource,
+      'closeOnBackdrop={!(creating || completingPrompt)}',
+      'mobile automation Dialog should block backdrop close while creating/completing',
+    );
+    assertContains(
+      panelSource,
+      'initialFocusRef={promptDraftRef}',
+      'mobile automation Dialog should focus short prompt on open',
+    );
+    assertNotContains(
+      panelSource,
+      'role="dialog"',
+      'mobile automation should not hand-write dialog role',
+    );
+    assertNotContains(
+      panelSource,
+      'aria-modal="true"',
+      'mobile automation should not hand-write aria-modal',
+    );
+    assertNotContains(
+      panelSource,
+      "window.addEventListener('keydown'",
+      'mobile automation Escape should be owned by Dialog, not local listener',
+    )
     assertContains(
       panelSource,
       'httpOrchestratorTransport.tasks.completePrompt',

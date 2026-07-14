@@ -324,25 +324,23 @@
   color: var(--meta);
 }
 
-/* ── 模态确认 ── */
-.modalMask {
-  position: fixed;
-  inset: 0;
-  background: color-mix(in oklab, var(--fg) 30%, transparent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: var(--z-modal);
-  padding: var(--space-6);
+/* ── 模态确认（Dialog surface + 内部 Card） ── */
+.modal {
+  width: min(100%, 380px);
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
 }
 
-.modal {
+.modalCard {
   width: 100%;
-  max-width: 380px;
   padding: var(--space-6);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  box-shadow: var(--shadow-window);
 }
 
 .modalTitle {

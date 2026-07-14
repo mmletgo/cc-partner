@@ -6,12 +6,13 @@
  *
  * Code Logic（这个组件做什么）:
  *   渲染设置菜单项下方的项目列表、window/pane 统计、本机/远端添加入口和项目移除操作；点击项目后选择项目并跳转 `/workbench`。
+ *   来源选择与远端项目选择统一走共享 Dialog（portal / focus trap / Escape / backdrop）。
  */
 
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Button } from '@/components/primitives';
+import { Button, Dialog } from '@/components/primitives';
 import { DevicesIcon, FolderIcon, PlusIcon, SyncIcon, XIcon } from '@/lib/icons';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import { EMPTY_PROJECT_SESSION_STATS } from '@/lib/workbenchProjectStats';
@@ -29,10 +30,6 @@ export function WorkbenchProjectRail() {
   const { t } = useTranslation(['workbench']);
   const navigate = useNavigate();
   const addProjectButtonRef = useRef<HTMLButtonElement>(null);
-  const sourcePopoverRef = useRef<HTMLDivElement>(null);
-  const remoteDialogRef = useRef<HTMLDivElement>(null);
-  const sourcePopoverId = useId();
-  const remoteDialogId = useId();
   const [sourcePickerOpen, setSourcePickerOpen] = useState<boolean>(false);
   const [remotePickerOpen, setRemotePickerOpen] = useState<boolean>(false);
   const [remoteOpenBusy, setRemoteOpenBusy] = useState<boolean>(false);
@@ -50,6 +47,15 @@ export function WorkbenchProjectRail() {
     removeProject,
   } = useWorkbenchProjects();
 
+  /**
+   * 关闭远端项目选择 Dialog。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   打开远端项目进行中时不应被 Esc/遮罩打断；完成后或强制关闭时回到添加按钮。
+   *
+   * Code Logic（这个函数做什么）:
+   *   busy 且非 force 时 no-op；否则关闭并清理 busy，并聚焦添加按钮。
+   */
   const closeRemotePicker = useCallback((options?: { force?: boolean }) => {
     if (remoteOpenBusy && !options?.force) return;
     setRemotePickerOpen(false);
@@ -57,50 +63,19 @@ export function WorkbenchProjectRail() {
     window.setTimeout(() => addProjectButtonRef.current?.focus(), 0);
   }, [remoteOpenBusy]);
 
-  useEffect(() => {
-    if (!sourcePickerOpen) return;
-
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (
-        sourcePopoverRef.current?.contains(target) ||
-        addProjectButtonRef.current?.contains(target)
-      ) {
-        return;
-      }
-      setSourcePickerOpen(false);
-    };
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setSourcePickerOpen(false);
-        addProjectButtonRef.current?.focus();
-      }
-    };
-
-    document.addEventListener('pointerdown', handlePointerDown, true);
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('pointerdown', handlePointerDown, true);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [sourcePickerOpen]);
-
-  useEffect(() => {
-    if (!remotePickerOpen) return;
-
-    const focusTimer = window.setTimeout(() => remoteDialogRef.current?.focus(), 0);
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeRemotePicker();
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.clearTimeout(focusTimer);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [closeRemotePicker, remotePickerOpen]);
+  /**
+   * 关闭来源选择 Dialog，并尝试把焦点还回添加按钮。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   用户取消选择本机/远端来源后应回到触发入口，便于继续操作。
+   *
+   * Code Logic（这个函数做什么）:
+   *   setSourcePickerOpen(false)；下一帧 focus 添加按钮。
+   */
+  const closeSourcePicker = useCallback(() => {
+    setSourcePickerOpen(false);
+    window.setTimeout(() => addProjectButtonRef.current?.focus(), 0);
+  }, []);
 
   return (
     <section className={styles.rail} aria-label={t('workbench:projectFolders')}>
@@ -122,53 +97,9 @@ export function WorkbenchProjectRail() {
             aria-label={t('workbench:addProject')}
             aria-haspopup="dialog"
             aria-expanded={sourcePickerOpen || remotePickerOpen}
-            aria-controls={
-              sourcePickerOpen ? sourcePopoverId : remotePickerOpen ? remoteDialogId : undefined
-            }
             loading={projectBusy}
             onClick={() => setSourcePickerOpen((open) => !open)}
           />
-          {sourcePickerOpen ? (
-            <div
-              ref={sourcePopoverRef}
-              id={sourcePopoverId}
-              className={styles.sourcePopover}
-              role="dialog"
-              aria-label={t('workbench:addProject')}
-            >
-              <button
-                type="button"
-                className={styles.sourceOption}
-                onClick={() => {
-                  setSourcePickerOpen(false);
-                  void chooseAndAddProject().then((project) => {
-                    if (project) navigate('/workbench');
-                  });
-                }}
-              >
-                <FolderIcon />
-                <span>
-                  <span>{t('workbench:projectSources.local')}</span>
-                  <span>{t('workbench:projectSources.localDescription')}</span>
-                </span>
-              </button>
-              <button
-                type="button"
-                className={styles.sourceOption}
-                onClick={() => {
-                  setSourcePickerOpen(false);
-                  setRemoteOpenBusy(false);
-                  setRemotePickerOpen(true);
-                }}
-              >
-                <DevicesIcon />
-                <span>
-                  <span>{t('workbench:projectSources.remote')}</span>
-                  <span>{t('workbench:projectSources.remoteDescription')}</span>
-                </span>
-              </button>
-            </div>
-          ) : null}
         </div>
       </div>
 
@@ -242,29 +173,71 @@ export function WorkbenchProjectRail() {
         })}
       </div>
 
-      {remotePickerOpen ? (
-        <div className={styles.modalBackdrop} role="presentation">
-          <div
-            id={remoteDialogId}
-            ref={remoteDialogRef}
-            className={styles.modalDialog}
-            role="dialog"
-            aria-modal="true"
-            aria-label={t('workbench:remoteProjectPicker.title')}
-            tabIndex={-1}
-          >
-            <WorkbenchRemoteProjectPicker
-              openProject={openRemoteProject}
-              onCancel={closeRemotePicker}
-              onOpenBusyChange={setRemoteOpenBusy}
-              onProjectOpened={() => {
-                closeRemotePicker({ force: true });
-                navigate('/workbench');
-              }}
-            />
-          </div>
-        </div>
-      ) : null}
+      <Dialog
+        open={sourcePickerOpen}
+        titleId="workbench-source-picker-title"
+        onClose={closeSourcePicker}
+        className={styles.sourcePopover}
+      >
+        <h2 id="workbench-source-picker-title" className="sr-only">
+          {t('workbench:addProject')}
+        </h2>
+        <button
+          type="button"
+          className={styles.sourceOption}
+          onClick={() => {
+            setSourcePickerOpen(false);
+            void chooseAndAddProject().then((project) => {
+              if (project) navigate('/workbench');
+            });
+          }}
+        >
+          <FolderIcon />
+          <span>
+            <span>{t('workbench:projectSources.local')}</span>
+            <span>{t('workbench:projectSources.localDescription')}</span>
+          </span>
+        </button>
+        <button
+          type="button"
+          className={styles.sourceOption}
+          onClick={() => {
+            setSourcePickerOpen(false);
+            setRemoteOpenBusy(false);
+            setRemotePickerOpen(true);
+          }}
+        >
+          <DevicesIcon />
+          <span>
+            <span>{t('workbench:projectSources.remote')}</span>
+            <span>{t('workbench:projectSources.remoteDescription')}</span>
+          </span>
+        </button>
+      </Dialog>
+
+      <Dialog
+        open={remotePickerOpen}
+        titleId="workbench-remote-picker-title"
+        onClose={() => {
+          closeRemotePicker();
+        }}
+        closeOnEscape={!remoteOpenBusy}
+        closeOnBackdrop={!remoteOpenBusy}
+        className={styles.modalDialog}
+      >
+        <h2 id="workbench-remote-picker-title" className="sr-only">
+          {t('workbench:remoteProjectPicker.title')}
+        </h2>
+        <WorkbenchRemoteProjectPicker
+          openProject={openRemoteProject}
+          onCancel={closeRemotePicker}
+          onOpenBusyChange={setRemoteOpenBusy}
+          onProjectOpened={() => {
+            closeRemotePicker({ force: true });
+            navigate('/workbench');
+          }}
+        />
+      </Dialog>
     </section>
   );
 }

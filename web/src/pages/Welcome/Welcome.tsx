@@ -8,7 +8,7 @@
  *   首轮检查失败必须显示错误与重试，不得永久「检查中」。
  *
  * Code Logic（这个页面做什么）:
- *   - 全屏深色背景模拟 macOS 权限弹窗，居中 Window 容器展示 logo/标题/权限卡/CTA
+ *   - 全屏深色背景 + 居中主内容壳（`<main>`，非 modal/dialog）展示 logo/标题/权限卡/CTA
  *   - 权限卡由 mapPermissions 渲染；每张卡 onRequest={() => request(entry.type)}
  *   - usePermissions({ stopWhenGranted: true }) 基于可见性轮询；required 全授权后停轮询
  *   - 首轮 loading 仅短暂显示 checking；失败展示 error + 重新检查；有状态时刷新失败保留卡片
@@ -81,11 +81,11 @@ export function Welcome() {
   if (loading) {
     return (
       <div className={styles.backdrop}>
-        <div className={styles.window} role="dialog" aria-label={t('welcome:title')}>
+        <main className={styles.window} aria-label={t('welcome:title')}>
           <img className={styles.brand} src={appIconUrl} alt="" aria-hidden="true" />
           <h1 className={styles.title}>{t('welcome:title')}</h1>
           <p className={styles.subtitle}>{t('welcome:checkingPermission')}</p>
-        </div>
+        </main>
       </div>
     );
   }
@@ -93,7 +93,7 @@ export function Welcome() {
   if (!status) {
     return (
       <div className={styles.backdrop}>
-        <div className={styles.window} role="dialog" aria-label={t('welcome:title')}>
+        <main className={styles.window} aria-label={t('welcome:title')}>
           <img className={styles.brand} src={appIconUrl} alt="" aria-hidden="true" />
           <h1 className={styles.title}>{t('welcome:title')}</h1>
           <p className={styles.subtitle} role="alert">
@@ -117,7 +117,7 @@ export function Welcome() {
               </Button>
             </div>
           </footer>
-        </div>
+        </main>
       </div>
     );
   }
@@ -126,7 +126,7 @@ export function Welcome() {
 
   return (
     <div className={styles.backdrop}>
-      <div className={styles.window} role="dialog" aria-label={t('welcome:title')}>
+      <main className={styles.window} aria-label={t('welcome:title')}>
         <img className={styles.brand} src={appIconUrl} alt="" aria-hidden="true" />
 
         <h1 className={styles.title}>{t('welcome:title')}</h1>
@@ -180,7 +180,7 @@ export function Welcome() {
             </Button>
           </div>
         </footer>
-      </div>
+      </main>
     </div>
   );
 }

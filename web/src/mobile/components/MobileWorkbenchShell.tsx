@@ -1,6 +1,7 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import type { ComponentType, ReactElement, ReactNode, SVGProps } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Drawer } from '@/components/primitives';
 import { formatAttentionBadgeCount } from '@/lib/attention';
 import {
   BellIcon,
@@ -26,6 +27,9 @@ import {
   type MobileWorkbenchPanel,
 } from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
+
+/** 窄屏导航 Drawer 的 aria-labelledby 目标 id（稳定字符串，避免 useId SSR 漂移）。 */
+const MOBILE_NAV_DRAWER_TITLE_ID = 'mobile-nav-drawer-title';
 
 type MobileNavIcon = ComponentType<SVGProps<SVGSVGElement> & { size?: number }>;
 
@@ -144,8 +148,9 @@ function MobilePanelNav({
  *   顶部状态行还需要把当前 worktree 暴露为可选的 quick switch 入口。
  *
  * Code Logic（这个组件做什么）:
- *   管理移动抽屉 open state，使用 mobileWorkbenchState helper 切换面板/开关抽屉，并渲染 topbar、drawer、rail 与内容区。
- *   当父组件提供 onWorktreeStatusClick 时，将 worktree pill 渲染为带展开状态的 dialog 触发按钮，否则保持静态状态文本。
+ *   管理移动抽屉 open state，使用 mobileWorkbenchState helper 切换面板/开关抽屉；
+ *   窄屏导航走共享 Drawer（side=left）原语，宽屏固定 rail 仍在 Drawer 外常驻；
+ *   当父组件提供 onWorktreeStatusClick 时，将 worktree pill 渲染为 dialog 触发按钮，否则保持静态状态文本。
  */
 export function MobileWorkbenchShell({
   panel,
@@ -160,6 +165,7 @@ export function MobileWorkbenchShell({
   children,
 }: MobileWorkbenchShellProps): ReactElement {
   const [isNavOpen, setIsNavOpen] = useState<boolean>(() => getInitialMobileNavOpen());
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const { t } = useTranslation(['workbench']);
   const worktreeStatusLabel = worktree ?? t('workbench:mobile.status.worktree');
   const attentionBadge =
@@ -220,37 +226,37 @@ export function MobileWorkbenchShell({
         </div>
       </header>
 
-      {isNavOpen ? (
-        <>
+      <Drawer
+        open={isNavOpen}
+        titleId={MOBILE_NAV_DRAWER_TITLE_ID}
+        side="left"
+        onClose={handleCloseNav}
+        initialFocusRef={closeButtonRef}
+        className={styles.drawer}
+      >
+        <div className={styles.drawerHeader}>
+          <div className={styles.titleBlock}>
+            <h2 id={MOBILE_NAV_DRAWER_TITLE_ID} className={styles.topTitle}>
+              {t('workbench:mobile.topTitle')}
+            </h2>
+            <p className={styles.topMeta}>{project ?? t('workbench:mobile.projectFallback')}</p>
+          </div>
           <button
+            ref={closeButtonRef}
             type="button"
-            className={styles.backdrop}
+            className={styles.closeButton}
             aria-label={t('workbench:mobile.closeNavigation')}
             onClick={handleCloseNav}
-          />
-          <aside className={styles.drawer} aria-label={t('workbench:mobile.drawerAriaLabel')}>
-            <div className={styles.drawerHeader}>
-              <div className={styles.titleBlock}>
-                <p className={styles.topTitle}>{t('workbench:mobile.topTitle')}</p>
-                <p className={styles.topMeta}>{project ?? t('workbench:mobile.projectFallback')}</p>
-              </div>
-              <button
-                type="button"
-                className={styles.closeButton}
-                aria-label={t('workbench:mobile.closeNavigation')}
-                onClick={handleCloseNav}
-              >
-                <XIcon size={16} aria-hidden="true" />
-              </button>
-            </div>
-            <MobilePanelNav
-              activePanel={panel}
-              onSelect={handleSelectPanel}
-              attentionBadge={attentionBadge}
-            />
-          </aside>
-        </>
-      ) : null}
+          >
+            <XIcon size={16} aria-hidden="true" />
+          </button>
+        </div>
+        <MobilePanelNav
+          activePanel={panel}
+          onSelect={handleSelectPanel}
+          attentionBadge={attentionBadge}
+        />
+      </Drawer>
 
       <aside className={styles.rail} aria-label={t('workbench:mobile.railAriaLabel')}>
         <div className={styles.railHeader}>

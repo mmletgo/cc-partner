@@ -22,7 +22,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Card, Input } from '@/components/primitives';
+import { Button, Card, Dialog, Input } from '@/components/primitives';
 import { CcHistoryCard } from '@/components/domain';
 import { ccHistoryApi } from '@/api/ccHistory';
 import { promptsApi } from '@/api/prompts';
@@ -516,33 +516,31 @@ export function CcHistory() {
         </div>
       ) : null}
 
-      {/* 删除确认弹层 */}
-      {pendingDeleteId ? (
-        <div
-          className={styles.modalMask}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="cc-confirm-title"
-        >
-          <Card variant="elevated" className={styles.modal}>
-            <h3 id="cc-confirm-title" className={styles.modalTitle}>
-              {t('ccHistory:deleteTitle')}
-            </h3>
-            <p className={styles.modalText}>{t('ccHistory:confirmDeleteText')}</p>
-            {pendingItem ? (
-              <p className={styles.modalPreview}>{pendingItem.content.slice(0, 120)}</p>
-            ) : null}
-            <div className={styles.modalActions}>
-              <Button variant="secondary" size="sm" onClick={() => setPendingDeleteId(null)}>
-                {t('common:action.cancel')}
-              </Button>
-              <Button variant="danger" size="sm" icon={<TrashIcon />} onClick={confirmDelete}>
-                {t('common:action.delete')}
-              </Button>
-            </div>
-          </Card>
-        </div>
-      ) : null}
+      {/* 删除确认弹层：共享 Dialog（portal / Escape / focus trap） */}
+      <Dialog
+        open={Boolean(pendingDeleteId)}
+        titleId="cc-confirm-title"
+        onClose={() => setPendingDeleteId(null)}
+        className={styles.modal}
+      >
+        <Card variant="elevated" className={styles.modalCard}>
+          <h3 id="cc-confirm-title" className={styles.modalTitle}>
+            {t('ccHistory:deleteTitle')}
+          </h3>
+          <p className={styles.modalText}>{t('ccHistory:confirmDeleteText')}</p>
+          {pendingItem ? (
+            <p className={styles.modalPreview}>{pendingItem.content.slice(0, 120)}</p>
+          ) : null}
+          <div className={styles.modalActions}>
+            <Button variant="secondary" size="sm" onClick={() => setPendingDeleteId(null)}>
+              {t('common:action.cancel')}
+            </Button>
+            <Button variant="danger" size="sm" icon={<TrashIcon />} onClick={confirmDelete}>
+              {t('common:action.delete')}
+            </Button>
+          </div>
+        </Card>
+      </Dialog>
     </div>
   );
 }
